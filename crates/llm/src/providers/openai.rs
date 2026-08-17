@@ -35,6 +35,9 @@ pub struct OpenAiProvider {
     /// GPT-5 系 / o シリーズに付与する reasoning_effort（"minimal"|"low"|"medium"
     /// |"high"）。空/未設定なら送らない（サーバ既定 = medium）。
     reasoning_effort: Option<String>,
+    /// テレメトリ用の表示名。ルーティングキーは router 登録時に別途決まるため、
+    /// これは接続先を人間に見せるためのラベルにすぎない（既定は形式名 "openai"）。
+    name: String,
 }
 
 impl OpenAiProvider {
@@ -45,7 +48,14 @@ impl OpenAiProvider {
             base_url: "https://api.openai.com/v1".to_string(),
             org_id: None,
             reasoning_effort: None,
+            name: "openai".to_string(),
         }
+    }
+
+    /// 表示名を上書きする（同じ形式の接続先を別名で登録するとき）。
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
     }
 
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
@@ -164,7 +174,7 @@ impl OpenAiProvider {
 #[async_trait]
 impl LlmProvider for OpenAiProvider {
     fn name(&self) -> &str {
-        "openai"
+        &self.name
     }
 
     async fn available_models(&self) -> Result<Vec<ModelInfo>> {

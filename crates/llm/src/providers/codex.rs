@@ -38,6 +38,9 @@ pub struct CodexProvider {
     /// `-c model_reasoning_effort=<low|medium|high|xhigh>` の上書き。
     /// 空/未設定なら送らずモデル既定に従う。gpt-5.6-sol は既定 high。
     reasoning_effort: Option<String>,
+    /// テレメトリ用の表示名（既定は形式名 "codex"）。ルーティングキーは
+    /// router 登録時に別途決まる。
+    name: String,
 }
 
 impl CodexProvider {
@@ -50,7 +53,14 @@ impl CodexProvider {
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             extra_models: Vec::new(),
             reasoning_effort: None,
+            name: "codex".to_string(),
         }
+    }
+
+    /// 表示名を上書きする（同じ形式の接続先を別名で登録するとき）。
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
     }
 
     pub fn with_codex_path(mut self, path: impl Into<String>) -> Self {
@@ -150,7 +160,7 @@ impl Default for CodexProvider {
 #[async_trait]
 impl LlmProvider for CodexProvider {
     fn name(&self) -> &str {
-        "codex"
+        &self.name
     }
 
     async fn available_models(&self) -> Result<Vec<ModelInfo>> {

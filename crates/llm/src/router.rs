@@ -42,11 +42,29 @@ impl LlmRouter {
         }
     }
 
-    /// Register a provider under its name.
-    pub fn add_provider(&mut self, provider: Arc<dyn LlmProvider>) {
-        let name = provider.name().to_string();
+    /// Register a provider under an explicit routing name.
+    ///
+    /// The `name` given here — **not** `provider.name()` — is the key that
+    /// `provider:model` specs resolve against. Keeping the routing key at this
+    /// single caller-supplied assignment point is what stops it from silently
+    /// diverging from the config section key: the router never reads
+    /// `provider.name()` to decide routing, so the name a caller registers under
+    /// and the name a spec resolves to are the same string by construction.
+    /// `provider.name()` is only a display label for telemetry.
+    pub fn register_provider(&mut self, name: impl Into<String>, provider: Arc<dyn LlmProvider>) {
+        let name = name.into();
         info!(provider = %name, "Registered LLM provider");
         self.providers.insert(name, provider);
+    }
+
+    /// Register a provider under its own reported [`LlmProvider::name`].
+    ///
+    /// Convenience for callers (mostly tests) that want the provider's
+    /// self-reported name as the routing key. Production wiring uses
+    /// [`Self::register_provider`] with the config section key instead.
+    pub fn add_provider(&mut self, provider: Arc<dyn LlmProvider>) {
+        let name = provider.name().to_string();
+        self.register_provider(name, provider);
     }
 
     /// Set the default provider name.

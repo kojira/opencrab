@@ -873,6 +873,12 @@ fn default_model() -> String {
 
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct ProviderConfig {
+    /// API 形式（どのクライアント実装で喋るか）。セクションキーが「名乗り名」
+    /// （接続先の実体）であるのに対し、これは「形式」を表す。省略時はセクション
+    /// キーと同値とみなす（`build_llm_router` の解決規則）。同じ形式の接続先を
+    /// 別名で 2 つ以上持てるようにするための分離。
+    #[serde(default, rename = "type")]
+    pub provider_type: String,
     #[serde(default)]
     pub api_key: String,
     #[serde(default)]
@@ -1150,12 +1156,23 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
     let mut router = LlmRouter::new();
 
     for (name, pconfig) in &config.providers {
-        let provider: Option<Arc<dyn LlmProvider>> = match name.as_str() {
+        // 形式（type）でクライアント実装を選ぶ。セクションキー `name` は「名乗り名」
+        // （接続先の実体・ルーティングキー）で、`type` は「形式」。`type` 省略時は
+        // セクションキーをそのまま形式名として使う解決規則なので、既存セクションは
+        // 無編集で従来どおり動き、編集が要るのは形式名と異なる名前を付けたいとき
+        // （例: hermit を openai 形式で喋らせる）だけ。
+        let provider_type = if pconfig.provider_type.is_empty() {
+            name.as_str()
+        } else {
+            pconfig.provider_type.as_str()
+        };
+
+        let provider: Option<Arc<dyn LlmProvider>> = match provider_type {
             "openai" => {
                 if pconfig.api_key.is_empty() {
                     None
                 } else {
-                    let mut p = OpenAiProvider::new(&pconfig.api_key);
+                    let mut p = OpenAiProvider::new(&pconfig.api_key).with_name(name.as_str());
                     if !pconfig.base_url.is_empty() {
                         p = p.with_base_url(&pconfig.base_url);
                     }
@@ -1173,7 +1190,7 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
                 if pconfig.api_key.is_empty() {
                     None
                 } else {
-                    let mut p = AnthropicProvider::new(&pconfig.api_key);
+                    let mut p = AnthropicProvider::new(&pconfig.api_key).with_name(name.as_str());
                     if !pconfig.base_url.is_empty() {
                         p = p.with_base_url(&pconfig.base_url);
                     }
@@ -1184,7 +1201,7 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
                 if pconfig.api_key.is_empty() {
                     None
                 } else {
-                    let mut p = GoogleProvider::new(&pconfig.api_key);
+                    let mut p = GoogleProvider::new(&pconfig.api_key).with_name(name.as_str());
                     if !pconfig.base_url.is_empty() {
                         p = p.with_base_url(&pconfig.base_url);
                     }
@@ -1195,7 +1212,7 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
                 if pconfig.api_key.is_empty() {
                     None
                 } else {
-                    let mut p = OpenRouterProvider::new(&pconfig.api_key);
+                    let mut p = OpenRouterProvider::new(&pconfig.api_key).with_name(name.as_str());
                     if !pconfig.base_url.is_empty() {
                         p = p.with_base_url(&pconfig.base_url);
                     }
@@ -1209,21 +1226,21 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
                 }
             }
             "ollama" => {
-                let mut p = OllamaProvider::new();
+                let mut p = OllamaProvider::new().with_name(name.as_str());
                 if !pconfig.base_url.is_empty() {
                     p = p.with_base_url(&pconfig.base_url);
                 }
                 Some(Arc::new(p))
             }
             "llamacpp" => {
-                let mut p = LlamaCppProvider::new();
+                let mut p = LlamaCppProvider::new().with_name(name.as_str());
                 if !pconfig.base_url.is_empty() {
                     p = p.with_base_url(&pconfig.base_url);
                 }
                 Some(Arc::new(p))
             }
             "codex" => {
-                let mut p = opencrab_llm::CodexProvider::new();
+                let mut p = opencrab_llm::CodexProvider::new().with_name(name.as_str());
                 if !pconfig.default_model.is_empty() {
                     p = p.with_default_model(&pconfig.default_model);
                 }
@@ -1254,7 +1271,7 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
                 Some(Arc::new(p))
             }
             "cursor" => {
-                let mut p = opencrab_llm::CursorProvider::new();
+                let mut p = opencrab_llm::CursorProvider::new().with_name(name.as_str());
                 if !pconfig.default_model.is_empty() {
                     p = p.with_default_model(&pconfig.default_model);
                 }
@@ -1285,7 +1302,7 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
             "acp" => {
                 // ACP（Agent Client Protocol）エージェントを JSON-RPC/stdio で駆動する。
                 // 起動コマンド/引数はエージェント毎に異なるため binary_path + args で指定。
-                let mut p = opencrab_llm::AcpProvider::new();
+                let mut p = opencrab_llm::AcpProvider::new().with_name(name.as_str());
                 if !pconfig.default_model.is_empty() {
                     p = p.with_default_model(&pconfig.default_model);
                 }
@@ -1312,7 +1329,7 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
                 Some(Arc::new(p))
             }
             "chatgpt" => {
-                let mut p = ChatGptProvider::new();
+                let mut p = ChatGptProvider::new().with_name(name.as_str());
                 if !pconfig.auth_file.is_empty() {
                     p = p.with_auth_file(&pconfig.auth_file);
                 }
@@ -1333,46 +1350,63 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
                 p = p.with_include_encrypted_content(pconfig.include_reasoning_encrypted_content);
                 Some(Arc::new(p))
             }
-            "bonsai" => {
-                let mut p = LlamaCppProvider::new().with_name("bonsai");
-                if !pconfig.base_url.is_empty() {
-                    p = p.with_base_url(&pconfig.base_url);
-                }
-                Some(Arc::new(p))
-            }
             other => {
-                info!(provider = %other, "Unknown provider in config, skipping");
-                None
+                // 未知の形式は起動を止める（黙って落とさない）。旧実装はここで
+                // `None` を返してスキップしていたが、形式名の typo や rename の
+                // 取りこぼしは設定バグであり、黙って provider を落とすと agents が
+                // 実行時に遠く離れた場所で失敗する。fail loudly。
+                anyhow::bail!(
+                    "provider '{name}' has unknown type '{other}'. Known types: \
+                     openai, anthropic, google, openrouter, ollama, llamacpp, \
+                     codex, cursor, acp, chatgpt. Set `type = \"<one of these>\"` \
+                     in [llm.providers.{name}] (bonsai 等の別名は形式名と別に付ける)."
+                );
             }
         };
 
         if let Some(p) = provider {
-            router.add_provider(p);
+            // ルーティングキーはセクションキー（名乗り名）を単一の代入点として渡す。
+            // router は provider.name() を読まないので、キーと名乗り名は構造的に
+            // 乖離しえない（二重命名を規約でなく構造で解消）。
+            router.register_provider(name.clone(), p);
         }
     }
 
     // Set default provider
     router.set_default_provider(&config.default_provider);
 
-    // Set fallback chain (only include registered providers)
-    let registered: Vec<String> = router
-        .provider_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    let chain: Vec<String> = config
-        .fallback
-        .chain
-        .iter()
-        .filter(|name| registered.contains(name))
-        .cloned()
-        .collect();
-    if !chain.is_empty() {
-        router.set_fallback_chain(chain);
+    // fallback.chain / aliases が「定義されていない provider」を指していたら起動を
+    // 止める。旧実装は chain を黙って filter し、alias は無検証で登録していたが、
+    // これは未知 type の無言スキップと同じ欠陥クラス（rename の取りこぼしや typo が
+    // 黙って無効化され、実行時に誤ルーティングとして遠くで顕在化する）。
+    //
+    // 判定は「セクションが定義されているか（config.providers に居るか）」で行う。
+    // ルーティング登録済みかで判定しないのは、認証キー未設定でスキップされただけの
+    // provider（例: 環境変数未設定の anthropic）を chain に書いた構成を壊さないため。
+    // そうした provider は定義済みとして通し、実行時は router 側が get で拾えなければ
+    // 次の候補へ graceful に進む。捕まえたいのは「どのセクションにも無い名前」。
+    for provider_name in &config.fallback.chain {
+        if !config.providers.contains_key(provider_name) {
+            anyhow::bail!(
+                "fallback.chain references undefined provider '{provider_name}'. \
+                 Add a [llm.providers.{provider_name}] section or remove it from \
+                 the chain."
+            );
+        }
+    }
+    if !config.fallback.chain.is_empty() {
+        router.set_fallback_chain(config.fallback.chain.clone());
     }
 
     // Set model aliases
     for (alias, acfg) in &config.aliases {
+        if !config.providers.contains_key(&acfg.provider) {
+            anyhow::bail!(
+                "alias '{alias}' targets undefined provider '{provider}'. \
+                 Add a [llm.providers.{provider}] section or fix the alias.",
+                provider = acfg.provider,
+            );
+        }
         let target = format!("{}:{}", acfg.provider, acfg.model);
         router.add_model_mapping(alias, target);
     }
@@ -1970,6 +2004,195 @@ default_webhook = { url = "" }
         };
         let router = build_llm_router(&config).unwrap();
         assert!(router.provider_names().contains(&"openrouter"));
+    }
+
+    /// #660 罠1（片方だけ改名）: ルーティングキーは **セクションキー（名乗り名）** で
+    /// 決まる。`type` が形式を選び、名乗り名は別。`hermit`（type=openai）は "hermit" で
+    /// 登録され、形式名 "openai" では引けない。
+    #[test]
+    fn provider_registers_under_section_key_not_type() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "hermit".to_string(),
+            ProviderConfig {
+                provider_type: "openai".to_string(),
+                api_key: "dummy".to_string(),
+                base_url: "http://localhost:8765/v1".to_string(),
+                ..Default::default()
+            },
+        );
+        let config = LlmConfig {
+            providers,
+            default_provider: "hermit".to_string(),
+            ..Default::default()
+        };
+        let router = build_llm_router(&config).unwrap();
+        assert!(
+            router.provider_names().contains(&"hermit"),
+            "セクションキー hermit で登録されるべき"
+        );
+        assert!(
+            !router.provider_names().contains(&"openai"),
+            "形式名 openai では登録されないべき（二重命名を作らない）"
+        );
+    }
+
+    /// #660 罠1: `type` 省略時はセクションキーを形式名として使う。既存の
+    /// `[llm.providers.openai]`（type 無し）は無編集で従来どおり openai 形式・openai 名で動く。
+    #[test]
+    fn omitted_type_defaults_to_section_key() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "openai".to_string(),
+            ProviderConfig {
+                api_key: "dummy".to_string(),
+                ..Default::default()
+            },
+        );
+        let config = LlmConfig {
+            providers,
+            default_provider: "openai".to_string(),
+            ..Default::default()
+        };
+        let router = build_llm_router(&config).unwrap();
+        assert!(router.provider_names().contains(&"openai"));
+    }
+
+    /// #660 罠1（無言スキップの再発防止）: 未知の `type` は起動を止める（hard error）。
+    /// 旧実装のように `None` で黙ってスキップしたらこのテストが赤くなる。
+    #[test]
+    fn unknown_provider_type_is_hard_error() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "weird".to_string(),
+            ProviderConfig {
+                provider_type: "nonexistent".to_string(),
+                api_key: "x".to_string(),
+                ..Default::default()
+            },
+        );
+        let config = LlmConfig {
+            providers,
+            default_provider: "weird".to_string(),
+            ..Default::default()
+        };
+        assert!(
+            build_llm_router(&config).is_err(),
+            "未知 type は起動失敗にすべき（無言スキップは欠陥）"
+        );
+    }
+
+    /// #660 bonsai 回帰: bonsai 専用アームを消し `type="llamacpp"` の一般機構へ寄せた。
+    /// 名乗り名 "bonsai" で登録され、形式名 "llamacpp" では引けないこと（起動不能にしない）。
+    #[test]
+    fn bonsai_type_llamacpp_registers_under_bonsai() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "bonsai".to_string(),
+            ProviderConfig {
+                provider_type: "llamacpp".to_string(),
+                base_url: "http://localhost:8081".to_string(),
+                ..Default::default()
+            },
+        );
+        let config = LlmConfig {
+            providers,
+            default_provider: "bonsai".to_string(),
+            ..Default::default()
+        };
+        let router = build_llm_router(&config).unwrap();
+        assert!(
+            router.provider_names().contains(&"bonsai"),
+            "bonsai は名乗り名 bonsai で登録されるべき"
+        );
+        assert!(
+            !router.provider_names().contains(&"llamacpp"),
+            "形式名 llamacpp では登録されないべき"
+        );
+    }
+
+    /// #660: fallback.chain が定義されていない provider を指したら起動を止める。
+    #[test]
+    fn fallback_chain_undefined_provider_is_hard_error() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "hermit".to_string(),
+            ProviderConfig {
+                provider_type: "openai".to_string(),
+                api_key: "dummy".to_string(),
+                ..Default::default()
+            },
+        );
+        let config = LlmConfig {
+            providers,
+            default_provider: "hermit".to_string(),
+            fallback: FallbackConfig {
+                chain: vec!["ghost".to_string()],
+            },
+            ..Default::default()
+        };
+        assert!(
+            build_llm_router(&config).is_err(),
+            "chain の未定義 provider は起動失敗にすべき"
+        );
+    }
+
+    /// #660: alias が定義されていない provider を指したら起動を止める
+    /// （rename の取りこぼしを黙って通さない）。
+    #[test]
+    fn alias_undefined_provider_is_hard_error() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "hermit".to_string(),
+            ProviderConfig {
+                provider_type: "openai".to_string(),
+                api_key: "dummy".to_string(),
+                ..Default::default()
+            },
+        );
+        let mut aliases = HashMap::new();
+        aliases.insert(
+            "smart".to_string(),
+            AliasConfig {
+                provider: "openai".to_string(), // 改名し忘れ（hermit にすべき）を模す
+                model: "claude-sonnet-4-6".to_string(),
+            },
+        );
+        let config = LlmConfig {
+            providers,
+            aliases,
+            default_provider: "hermit".to_string(),
+            ..Default::default()
+        };
+        assert!(
+            build_llm_router(&config).is_err(),
+            "alias の未定義 provider（改名取りこぼし）は起動失敗にすべき"
+        );
+    }
+
+    /// #660: 配布する `config/default.toml` が実際に router を組めること。
+    /// hermit / bonsai が名乗り名で登録され、openai 名は消えていること。type / aliases /
+    /// fallback.chain の整合まで含めて配布物を end-to-end で固定する。
+    #[test]
+    fn shipped_default_toml_builds_router_with_hermit() {
+        let _guard = env_lock();
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/default.toml");
+        let config = load_config(path).expect("shipped default.toml must load");
+        let router =
+            build_llm_router(&config.llm).expect("shipped default.toml must build a router");
+        let names = router.provider_names();
+        assert!(
+            names.contains(&"hermit"),
+            "hermit が登録されていない: {names:?}"
+        );
+        assert!(
+            names.contains(&"bonsai"),
+            "bonsai が登録されていない: {names:?}"
+        );
+        assert!(
+            !names.contains(&"openai"),
+            "openai 名は消えているべき: {names:?}"
+        );
     }
 
     /// #457: 凝縮ラン（記憶の 3 段目）の**出荷時既定は ON**。

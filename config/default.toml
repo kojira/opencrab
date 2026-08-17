@@ -44,12 +44,12 @@ default_model = "gpt-5.6"
 
 # 用途別モデル設定（オプション）
 [llm.models]
-thinking = { provider = "openai", model = "claude-sonnet-4-6" }
-conversation = { provider = "openai", model = "claude-sonnet-4-6" }
-analysis = { provider = "openai", model = "claude-haiku" }
-tool_calling = { provider = "openai", model = "claude-sonnet-4-6" }
-creative = { provider = "openai", model = "claude-sonnet-4-6" }
-embedding = { provider = "openai", model = "text-embedding-3-large" }
+thinking = { provider = "hermit", model = "claude-sonnet-4-6" }
+conversation = { provider = "hermit", model = "claude-sonnet-4-6" }
+analysis = { provider = "hermit", model = "claude-haiku" }
+tool_calling = { provider = "hermit", model = "claude-sonnet-4-6" }
+creative = { provider = "hermit", model = "claude-sonnet-4-6" }
+embedding = { provider = "hermit", model = "text-embedding-3-large" }
 
 # エージェント自身によるLLM選択
 [llm.self_selection]
@@ -60,12 +60,20 @@ allowed_aliases = ["fast", "smart", "reasoning", "creative", "local", "cheap", "
 [llm.fallback]
 chain = ["anthropic", "ollama"]
 
-# hermit-shell経由でAnthropicを使う（OpenAI互換プロキシ）
-# 本物の OpenAI API を使う場合は base_url を空にし、api_key に実キーを入れる。
-# GPT-5.6 系（gpt-5.6 / gpt-5.6-sol / gpt-5.6-terra / gpt-5.6-luna）と o シリーズは
+# hermit-shell 経由で Anthropic を使う（OpenAI 互換プロキシ、ポート 8765）。
+#
+# セクション名 = プロバイダの「名乗り名」（接続先の実体）。ここは本物の OpenAI では
+# なくローカルの hermit-shell プロキシなので `hermit` と名乗る。`type` は「API 形式」で、
+# hermit-shell は OpenAI 互換なので `type = "openai"`。名前と形式を分けたので、同じ
+# OpenAI 互換の接続先を別名でもう 1 つ足すこともできる（別セクション + type="openai"）。
+#
+# 本物の OpenAI API を使いたいなら、別セクション（例 `[llm.providers.openai]`。type 省略で
+# セクション名がそのまま形式名 openai になる）を作り、base_url を空にして api_key に実キーを
+# 入れる。GPT-5.6 系（gpt-5.6 / gpt-5.6-sol / gpt-5.6-terra / gpt-5.6-luna）と o シリーズは
 # 推論モデルとして自動判定され、temperature は送らず max_completion_tokens を使う。
 # reasoning_effort（minimal|low|medium|high）を指定すると各リクエストに付与される。
-[llm.providers.openai]
+[llm.providers.hermit]
+type = "openai"
 api_key = "dummy"
 base_url = "http://localhost:8765/v1"
 organization = ""
@@ -150,18 +158,22 @@ max_output_tokens = 25000
 timeout_secs = 300
 
 # Bonsai 8B (1-bit LLM, PrismML)
+# bonsai は「名乗り名」。API 形式は llama.cpp サーバなので type = "llamacpp"。
+# （以前は build_llm_router に bonsai 専用の分岐があったが、名前と形式の分離で
+#  一般機構に吸収した。type を書かないと形式名 "bonsai" は未知として起動失敗する。）
 [llm.providers.bonsai]
+type = "llamacpp"
 base_url = "http://localhost:8081"
 
 # モデルエイリアス
 [llm.aliases]
-fast = { provider = "openai", model = "claude-haiku" }
-smart = { provider = "openai", model = "claude-sonnet-4-6" }
-reasoning = { provider = "openai", model = "claude-sonnet-4-6" }
-creative = { provider = "openai", model = "claude-sonnet-4-6" }
+fast = { provider = "hermit", model = "claude-haiku" }
+smart = { provider = "hermit", model = "claude-sonnet-4-6" }
+reasoning = { provider = "hermit", model = "claude-sonnet-4-6" }
+creative = { provider = "hermit", model = "claude-sonnet-4-6" }
 local = { provider = "ollama", model = "llama3.1:8b" }
 bonsai = { provider = "bonsai", model = "Bonsai-8B.gguf" }
-cheap = { provider = "openai", model = "claude-haiku" }
+cheap = { provider = "hermit", model = "claude-haiku" }
 
 [gateway.rest]
 enabled = true
