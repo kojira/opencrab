@@ -1883,10 +1883,17 @@ impl SystemGatewayActions {
                 let existing = opencrab_db::queries::get_agent(&conn, &agent_id)
                     .ok()
                     .flatten();
+                // #676（案Y）: 送るプロバイダの spec へ切り替えるときだけ max_output_tokens を要求。
+                let sends_max = self
+                    .state
+                    .llm_router
+                    .get()
+                    .sends_max_output_tokens(new_model);
                 if let Err(e) = crate::process::check_agent_model_change(
                     &conn,
                     existing.as_ref(),
                     Some(new_model),
+                    sends_max,
                 ) {
                     return err(e);
                 }

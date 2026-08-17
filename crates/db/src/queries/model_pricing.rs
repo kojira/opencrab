@@ -17,16 +17,20 @@ pub struct ModelPricingRow {
     pub input_price_per_1m: f64,
     pub output_price_per_1m: f64,
     pub context_window: Option<i32>,
+    /// #676: そのモデルの出力トークン上限（実能力値）。エンジンが各リクエストの
+    /// max_tokens に使う。NULL / 0 以下は「未登録」扱いで、使用時に fail loud で止まる。
+    pub max_output_tokens: Option<i32>,
 }
 
 pub fn upsert_model_pricing(conn: &Connection, pricing: &ModelPricingRow) -> Result<()> {
     conn.execute(
-        "INSERT INTO model_pricing (provider, model, input_price_per_1m, output_price_per_1m, context_window, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        "INSERT INTO model_pricing (provider, model, input_price_per_1m, output_price_per_1m, context_window, max_output_tokens, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(provider, model) DO UPDATE SET
             input_price_per_1m = excluded.input_price_per_1m,
             output_price_per_1m = excluded.output_price_per_1m,
             context_window = excluded.context_window,
+            max_output_tokens = excluded.max_output_tokens,
             updated_at = excluded.updated_at",
         params![
             pricing.provider,
@@ -34,6 +38,7 @@ pub fn upsert_model_pricing(conn: &Connection, pricing: &ModelPricingRow) -> Res
             pricing.input_price_per_1m,
             pricing.output_price_per_1m,
             pricing.context_window,
+            pricing.max_output_tokens,
             Utc::now().to_rfc3339(),
         ],
     )?;
@@ -42,7 +47,7 @@ pub fn upsert_model_pricing(conn: &Connection, pricing: &ModelPricingRow) -> Res
 
 pub fn list_model_pricing(conn: &Connection) -> Result<Vec<ModelPricingRow>> {
     let mut stmt = conn.prepare(
-        "SELECT provider, model, input_price_per_1m, output_price_per_1m, context_window
+        "SELECT provider, model, input_price_per_1m, output_price_per_1m, context_window, max_output_tokens
          FROM model_pricing ORDER BY provider, model",
     )?;
     let rows = stmt
@@ -53,6 +58,7 @@ pub fn list_model_pricing(conn: &Connection) -> Result<Vec<ModelPricingRow>> {
                 input_price_per_1m: row.get(2)?,
                 output_price_per_1m: row.get(3)?,
                 context_window: row.get(4)?,
+                max_output_tokens: row.get(5)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -65,7 +71,7 @@ pub fn get_model_pricing(
     model: &str,
 ) -> Result<Option<ModelPricingRow>> {
     let result = conn.query_row(
-        "SELECT provider, model, input_price_per_1m, output_price_per_1m, context_window
+        "SELECT provider, model, input_price_per_1m, output_price_per_1m, context_window, max_output_tokens
          FROM model_pricing WHERE provider = ?1 AND model = ?2",
         params![provider, model],
         |row| {
@@ -75,6 +81,7 @@ pub fn get_model_pricing(
                 input_price_per_1m: row.get(2)?,
                 output_price_per_1m: row.get(3)?,
                 context_window: row.get(4)?,
+                max_output_tokens: row.get(5)?,
             })
         },
     );

@@ -32,13 +32,15 @@ describe('ModelPricingForm', () => {
     await waitFor(() => {
       expect(mockedPut).toHaveBeenCalledTimes(1);
     });
-    // context_window は数値に、単価も数値に変換して送る
+    // context_window は数値に、単価も数値に変換して送る。max_output_tokens は
+    // 空欄なので null（#676: 送らないプロバイダのモデルは空欄で良い）。
     expect(mockedPut).toHaveBeenCalledWith({
       provider: 'chatgpt',
       model: 'gpt-5.6-terra',
       input_price_per_1m: 2,
       output_price_per_1m: 12,
       context_window: 1050000,
+      max_output_tokens: null,
     });
     await waitFor(() => {
       expect(onSaved).toHaveBeenCalledWith(

@@ -808,6 +808,56 @@ fn provider_rename_openai_to_hermit_migration_v41() {
     );
 }
 
+/// v42（#676）: model_pricing に max_output_tokens 列を足し、claude-opus-5 だけ 128000 に
+/// バックフィルする。既存の context_window / 単価は壊さない。値を持つ行と gpt-5.6 系（NULL
+/// のまま）が同居することを見る。冪等でもある。
+#[test]
+fn model_pricing_max_output_tokens_backfill_migration_v42() {
+    let conn = crate::init_memory().expect("init");
+    // v41 相当の既存 DB を模す: 列を落として version を 41 へ戻し、既存行を入れる。
+    // （新規 init は既に v42 まで済み・列ありなので、明示的に前状態を作る。）
+    conn.execute_batch("ALTER TABLE model_pricing DROP COLUMN max_output_tokens;")
+        .unwrap();
+    conn.execute_batch("PRAGMA user_version = 41;").unwrap();
+    conn.execute_batch(
+        "INSERT INTO model_pricing \
+            (provider, model, input_price_per_1m, output_price_per_1m, context_window, updated_at) VALUES \
+            ('hermit',  'claude-opus-5', 5.0, 25.0, 200000, '2026-01-01'), \
+            ('chatgpt', 'gpt-5.6-sol',   5.0, 30.0, 350000, '2026-01-01');",
+    )
+    .unwrap();
+
+    // 起動経路で v42 が届く。
+    run_migrations(&conn, MIGRATIONS).expect("v42 migration");
+    assert_eq!(schema_version(&conn).unwrap(), latest_version());
+
+    // 列が足され、claude-opus-5 だけ 128000 にバックフィルされる。
+    assert!(column_exists(&conn, "model_pricing", "max_output_tokens").unwrap());
+    let opus = crate::queries::get_model_pricing(&conn, "hermit", "claude-opus-5")
+        .unwrap()
+        .expect("claude-opus-5 の行");
+    assert_eq!(opus.max_output_tokens, Some(128000));
+    // 既存の context_window / 単価は不変。
+    assert_eq!(opus.context_window, Some(200000));
+
+    // gpt-5.6 系は公式値未確定のため触らない（NULL のまま）。
+    let sol = crate::queries::get_model_pricing(&conn, "chatgpt", "gpt-5.6-sol")
+        .unwrap()
+        .expect("gpt-5.6-sol の行");
+    assert_eq!(sol.max_output_tokens, None);
+
+    // 冪等性: 再実行しても値は変わらない（ALTER は列存在で no-op、backfill は IS NULL で自然 no-op）。
+    conn.execute_batch("PRAGMA user_version = 41;").unwrap();
+    run_migrations(&conn, MIGRATIONS).expect("v42 rerun no-op");
+    assert_eq!(
+        crate::queries::get_model_pricing(&conn, "hermit", "claude-opus-5")
+            .unwrap()
+            .unwrap()
+            .max_output_tokens,
+        Some(128000)
+    );
+}
+
 /// v19: Nostr 受信転記先の表が増えるだけで、既存の Nostr 設定
 /// （`agent_nostr_config`）の行は 1 つも動かない（#252 段階 A）。冪等でもある。
 #[test]
@@ -3367,11 +3417,11 @@ fn v37_backfill_preserves_firing_and_normalizes() {
 
     initialize(&conn).expect("apply v37");
     assert_eq!(schema_version(&conn).unwrap(), latest_version());
-    // v41（#660 の provider rename openai→hermit）が最新。v38/v39/v40/v41 とも
+    // v42（#676 の model_pricing.max_output_tokens 追加）が最新。v38..v42 とも
     // session_heartbeat_config を触らないので、下の v37 backfill 検証（発火集合・正規化）は
     // そのまま成立する。新しい migration が session_heartbeat_config を触ったらこの guard を
     // 更新し、下の期待値を見直すこと。
-    assert_eq!(latest_version(), 41, "v41 が最新版であること");
+    assert_eq!(latest_version(), 42, "v42 が最新版であること");
 
     // 期待: 9 行 = step1(nostr-A) 1 + step2(A/201=0, C/202=1, D/222=1) 3 +
     //             step3(A,B,C,D,E の ch205 展開・全 enabled=0) 5。

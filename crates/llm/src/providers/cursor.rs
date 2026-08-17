@@ -244,6 +244,11 @@ impl LlmProvider for CursorProvider {
         &self.name
     }
 
+    // #676: cursor-agent CLI 経由で max_tokens を送る口が無いため出力上限の登録は不要（opt-out）。
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+
     async fn available_models(&self) -> Result<Vec<ModelInfo>> {
         let mut models: Vec<ModelInfo> = DEFAULT_MODELS
             .iter()

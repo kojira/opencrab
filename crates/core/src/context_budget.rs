@@ -148,6 +148,55 @@ pub fn ensure_model_context_window_registered(
     }
 }
 
+/// #676: モデルの `max_output_tokens` 未登録メッセージ。登録先を案内する。
+pub fn model_max_output_tokens_missing_message(spec: &str) -> String {
+    format!(
+        "model \"{spec}\" has no max_output_tokens registered in model_pricing. \
+         Register it first: PUT /api/llm/model-pricing with body \
+         {{\"provider\": \"...\", \"model\": \"...\", \"context_window\": <max tokens>, \
+         \"max_output_tokens\": <model's output cap>}}. \
+         Current registrations: GET /api/llm/model-pricing."
+    )
+}
+
+/// 使える `max_output_tokens` か（#676）。`None` / 0 以下は「未登録」扱い。
+/// context_window と同じ流儀（[`usable_context_window`]）。
+fn usable_max_output_tokens(row: &opencrab_db::queries::ModelPricingRow) -> Option<u32> {
+    row.max_output_tokens.filter(|w| *w > 0).map(|w| w as u32)
+}
+
+/// #676: 使用モデルの `max_output_tokens`（実能力値）を `model_pricing` から解決する。
+///
+/// エンジンは各リクエストの max_tokens にこの値を使う。グローバルな任意定数を既定に
+/// 置かない方針のため、行が無い / NULL / 0 以下は **fail loud で `Err`**（フォールバック
+/// 値を使わない）。DB 参照失敗も `Err`（fail-closed）。context_window の
+/// [`ensure_model_context_window_registered`] と同型。
+///
+/// 呼び出し側（process.rs）はこの `Err` をターン失敗へ写す。
+pub fn resolve_model_max_output_tokens(
+    conn: &rusqlite::Connection,
+    spec: &str,
+) -> Result<u32, String> {
+    let (provider, model) = split_llm_model_spec(spec);
+    let (provider, model) = model_pricing_key(provider, model);
+    match opencrab_db::queries::get_model_pricing(conn, &provider, &model) {
+        Ok(Some(p)) => usable_max_output_tokens(&p)
+            .ok_or_else(|| model_max_output_tokens_missing_message(spec)),
+        Ok(None) => Err(model_max_output_tokens_missing_message(spec)),
+        Err(e) => Err(format!(
+            "failed to look up model_pricing for \"{spec}\": {e}"
+        )),
+    }
+}
+
+/// #676: `max_output_tokens` を持つ行があるか検証する（context_window と同型のゲート）。
+pub fn ensure_model_max_output_tokens_registered(
+    conn: &rusqlite::Connection,
+    spec: &str,
+) -> Result<(), String> {
+    resolve_model_max_output_tokens(conn, spec).map(|_| ())
+}
+
 /// エージェントのモデルを**新しく設定するとき**だけ、`model_pricing` の登録を
 /// 要求する（#412）。
 ///
@@ -162,10 +211,14 @@ pub fn ensure_model_context_window_registered(
 ///
 /// `agents.model` を書き換える経路（`PUT`/`PATCH /api/agents/{id}` と
 /// `configure_self` ツール）はすべてここを通す。
+/// `provider_sends_max_output_tokens` は、この `new_model` を捌くプロバイダが `max_tokens`
+/// を backend へ送るか（#676・案Y・条件2）。呼び出し側が router の
+/// `sends_max_output_tokens` から算出して渡す。core 側で provider 名を突き合わせない（条件1）。
 pub fn check_agent_model_change(
     conn: &rusqlite::Connection,
     existing: Option<&opencrab_db::queries::AgentRow>,
     new_model: Option<&str>,
+    provider_sends_max_output_tokens: bool,
 ) -> Result<(), String> {
     let Some(new_model) = new_model.filter(|m| !m.is_empty()) else {
         return Ok(());
@@ -173,7 +226,15 @@ pub fn check_agent_model_change(
     if existing.and_then(|a| a.model.as_deref()) == Some(new_model) {
         return Ok(());
     }
-    ensure_model_context_window_registered(conn, new_model)
+    // context_window は予算計算に必須なので常に要求する（#412）。
+    ensure_model_context_window_registered(conn, new_model)?;
+    // #676（案Y・条件2）: max_output_tokens は「送るプロバイダの spec」へ切り替えるときだけ
+    // 登録の瞬間に要求する。送らないプロバイダ（chatgpt/codex/cursor/acp）は登録不要。
+    // これで「登録フォームは通ったのに次ターンで fail loud」の導線ギャップを実施点で閉じる。
+    if provider_sends_max_output_tokens {
+        ensure_model_max_output_tokens_registered(conn, new_model)?;
+    }
+    Ok(())
 }
 
 /// 同じ (provider, model) の WARN を 1 度だけに絞る（#412）。
@@ -272,6 +333,16 @@ mod model_context_window_gate_tests {
     use super::{compute_context_budget, ensure_model_context_window_registered};
 
     fn register(conn: &rusqlite::Connection, provider: &str, model: &str, window: Option<i32>) {
+        register_full(conn, provider, model, window, None);
+    }
+
+    fn register_full(
+        conn: &rusqlite::Connection,
+        provider: &str,
+        model: &str,
+        window: Option<i32>,
+        max_output: Option<i32>,
+    ) {
         opencrab_db::queries::upsert_model_pricing(
             conn,
             &opencrab_db::queries::ModelPricingRow {
@@ -280,6 +351,7 @@ mod model_context_window_gate_tests {
                 input_price_per_1m: 0.0,
                 output_price_per_1m: 0.0,
                 context_window: window,
+                max_output_tokens: max_output,
             },
         )
         .unwrap();
@@ -517,6 +589,103 @@ mod model_context_window_gate_tests {
             worst_case_real_tokens <= BACKEND_INPUT_LIMIT,
             "天井 {ceiling} は最悪ケースの実トークン {worst_case_real_tokens:.0} が実上限 \
              {BACKEND_INPUT_LIMIT} を超える（天井を下げるか実測値を更新すること）"
+        );
+    }
+
+    // ---- #676: max_output_tokens の解決とゲート ----
+
+    /// 登録済み（正の値）は解決できる。
+    #[test]
+    fn resolve_max_output_returns_registered_value() {
+        let conn = opencrab_db::init_memory().unwrap();
+        register_full(
+            &conn,
+            "hermit",
+            "claude-opus-5",
+            Some(1_000_000),
+            Some(128_000),
+        );
+        assert_eq!(
+            super::resolve_model_max_output_tokens(&conn, "hermit:claude-opus-5"),
+            Ok(128_000)
+        );
+    }
+
+    /// 行なし / NULL は fail loud（Err）で、登録先を案内する。
+    #[test]
+    fn resolve_max_output_missing_is_err_with_registration_hint() {
+        let conn = opencrab_db::init_memory().unwrap();
+        // 行そのものが無い。
+        let err = super::resolve_model_max_output_tokens(&conn, "p1:m1").unwrap_err();
+        assert!(err.contains("max_output_tokens"), "{err}");
+        assert!(err.contains("/api/llm/model-pricing"), "{err}");
+        // 行はあるが max_output_tokens が NULL（context_window だけ入っている）。
+        register_full(&conn, "p1", "m1", Some(200_000), None);
+        assert!(super::resolve_model_max_output_tokens(&conn, "p1:m1").is_err());
+    }
+
+    /// 0 以下は未登録扱い（context_window と同じ流儀）。
+    #[test]
+    fn resolve_max_output_non_positive_is_unregistered() {
+        for bad in [0, -1, -128_000] {
+            let conn = opencrab_db::init_memory().unwrap();
+            register_full(&conn, "p1", "m1", Some(200_000), Some(bad));
+            assert!(
+                super::resolve_model_max_output_tokens(&conn, "p1:m1").is_err(),
+                "max_output_tokens={bad} は未登録扱いのはず"
+            );
+        }
+    }
+
+    /// 案Y・条件2: 送るプロバイダの spec へ切り替えるとき、max_output_tokens 未登録なら
+    /// 切替時点で弾く（context_window は登録済みでも max_output_tokens が無ければ Err）。
+    #[test]
+    fn model_change_gate_requires_max_output_when_provider_sends() {
+        let conn = opencrab_db::init_memory().unwrap();
+        // context_window は登録・max_output_tokens は未登録。
+        register_full(&conn, "hermit", "claude-opus-5", Some(1_000_000), None);
+        let err = super::check_agent_model_change(
+            &conn,
+            None,
+            Some("hermit:claude-opus-5"),
+            true, // 送るプロバイダ
+        )
+        .unwrap_err();
+        assert!(err.contains("max_output_tokens"), "{err}");
+
+        // 両方登録すれば通る。
+        register_full(
+            &conn,
+            "hermit",
+            "claude-opus-5",
+            Some(1_000_000),
+            Some(128_000),
+        );
+        assert!(
+            super::check_agent_model_change(&conn, None, Some("hermit:claude-opus-5"), true)
+                .is_ok()
+        );
+    }
+
+    /// 案Y: 送らないプロバイダは max_output_tokens を要求しない（context_window だけで通る）。
+    #[test]
+    fn model_change_gate_skips_max_output_when_provider_does_not_send() {
+        let conn = opencrab_db::init_memory().unwrap();
+        // context_window だけ登録・max_output_tokens は未登録。
+        register_full(&conn, "chatgpt", "gpt-5.6-sol", Some(350_000), None);
+        assert!(
+            super::check_agent_model_change(
+                &conn,
+                None,
+                Some("chatgpt:gpt-5.6-sol"),
+                false, // 送らないプロバイダ
+            )
+            .is_ok(),
+            "送らないプロバイダは max_output_tokens 未登録でも切替を通す"
+        );
+        // ただし context_window は常に必須（未登録なら送るか否かに関わらず Err）。
+        assert!(
+            super::check_agent_model_change(&conn, None, Some("chatgpt:unknown"), false).is_err()
         );
     }
 }

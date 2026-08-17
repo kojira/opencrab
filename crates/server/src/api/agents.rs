@@ -129,9 +129,19 @@ pub async fn put_agent(
     let existing_effort = existing.as_ref().and_then(|a| a.reasoning_effort.clone());
     let existing_web_search = existing.as_ref().and_then(|a| a.web_search);
     // #412: model を新しい値へ変えるときだけ登録を要求する（既存値の送り直しは素通し）。
-    if let Err(e) =
-        crate::process::check_agent_model_change(&conn, existing.as_ref(), body.model.as_deref())
-    {
+    // #676（案Y）: max_output_tokens の要求は「送るプロバイダの spec」へ切り替えるときだけ。
+    // 送るか否かはプロバイダの能力宣言（router 経由）で決める（core で名前突き合わせしない）。
+    let sends_max = body
+        .model
+        .as_deref()
+        .map(|m| state.llm_router.get().sends_max_output_tokens(m))
+        .unwrap_or(true);
+    if let Err(e) = crate::process::check_agent_model_change(
+        &conn,
+        existing.as_ref(),
+        body.model.as_deref(),
+        sends_max,
+    ) {
         return Json(serde_json::json!({"updated": false, "error": e}));
     }
     let row = opencrab_db::queries::AgentRow {
@@ -165,9 +175,14 @@ pub async fn patch_agent(
     // 空文字は `check_agent_model_change` 側で対象外になる。
     if let Some(Some(new_model)) = patch.model.as_ref() {
         let existing = opencrab_db::queries::get_agent(&conn, &id).ok().flatten();
-        if let Err(e) =
-            crate::process::check_agent_model_change(&conn, existing.as_ref(), Some(new_model))
-        {
+        // #676（案Y）: 送るプロバイダの spec へ切り替えるときだけ max_output_tokens を要求。
+        let sends_max = state.llm_router.get().sends_max_output_tokens(new_model);
+        if let Err(e) = crate::process::check_agent_model_change(
+            &conn,
+            existing.as_ref(),
+            Some(new_model),
+            sends_max,
+        ) {
             return Json(serde_json::json!({"updated": false, "error": e}));
         }
     }

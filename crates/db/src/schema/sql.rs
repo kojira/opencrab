@@ -427,6 +427,10 @@ CREATE TABLE IF NOT EXISTS model_pricing (
     input_price_per_1m REAL NOT NULL,
     output_price_per_1m REAL NOT NULL,
     context_window INTEGER,
+    -- #676: そのモデルの出力トークン上限（実能力値）。エンジンが各リクエストの
+    -- max_tokens に使い、未登録（NULL / 0 以下）だと使用時に fail loud で止まる。
+    -- 番号付きマイグレーション v42 で既存 DB にも追加する。
+    max_output_tokens INTEGER,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (provider, model)
 );

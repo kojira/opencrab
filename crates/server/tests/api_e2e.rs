@@ -166,6 +166,7 @@ async fn test_model_pricing_list_exposes_compaction_ratio() {
                 input_price_per_1m: 0.0,
                 output_price_per_1m: 0.0,
                 context_window: Some(400_000),
+                max_output_tokens: None,
             },
         )
         .unwrap();
@@ -1025,6 +1026,13 @@ impl MockLlmProvider {
 impl LlmProvider for MockLlmProvider {
     fn name(&self) -> &str {
         "mock"
+    }
+
+    // #676: このモックは max_tokens を無視するので「送らない」を宣言し、run 経路の
+    // 出力上限モデル登録（fail loud）の対象外にする。上限の解決/ゲートは context_budget /
+    // skill_engine の専用テスト、および明示 register する API ゲートテストで担保する。
+    fn sends_max_output_tokens(&self) -> bool {
+        false
     }
 
     async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
@@ -3619,12 +3627,16 @@ async fn test_model_pricing_rejects_non_positive_context_window() {
 }
 
 async fn register_model(app: Router, provider: &str, model: &str, window: i64) {
+    // #676: テストの router は空でプロバイダ能力が既定（送る＝登録必須）に倒れるため、
+    // 「完全登録」を表すには max_output_tokens も入れる（context_window だけではモデル変更
+    // ゲートを通らない）。ゲートの案Y 条件分岐は core の単体テストで担保する。
     let (status, _) = send_request(
         app,
         "PUT",
         "/api/llm/model-pricing",
         Some(serde_json::json!({
-            "provider": provider, "model": model, "context_window": window
+            "provider": provider, "model": model,
+            "context_window": window, "max_output_tokens": 8192
         })),
     )
     .await;
@@ -3799,13 +3811,15 @@ async fn test_model_pricing_trim_is_consistent_between_put_and_gate() {
         "PUT",
         "/api/llm/model-pricing",
         Some(serde_json::json!({
-            "provider": "  testprov  ", "model": "  testmodel  ", "context_window": 200000
+            "provider": "  testprov  ", "model": "  testmodel  ",
+            "context_window": 200000, "max_output_tokens": 8192
         })),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    // 空白なしの spec で通る（保存側が trim されている）。
+    // 空白なしの spec で通る（保存側が trim されている）。testprov は空 router で「送る」
+    // 既定に倒れるため、モデル変更ゲートは max_output_tokens も要求する（#676 案Y）。上で登録済み。
     let (_, resp) = send_request(
         app.clone(),
         "PATCH",
