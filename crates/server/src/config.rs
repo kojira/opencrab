@@ -1150,6 +1150,23 @@ pub fn apply_llm_overrides(
 
 // ---------- LLM Router builder ----------
 
+/// 既知の provider 形式（`type`）の一覧。**単一の出所**にして、`build_llm_router` の
+/// match アームと未知 type エラーの文言がずれないようにする（11 個目の形式を足すときの
+/// drift 防止）。ここへ 1 語足したら `build_llm_router` に同名の match アームを足すこと。
+/// この対応は `every_known_provider_type_dispatches` テストで機械的に固定している。
+const KNOWN_PROVIDER_TYPES: &[&str] = &[
+    "openai",
+    "anthropic",
+    "google",
+    "openrouter",
+    "ollama",
+    "llamacpp",
+    "codex",
+    "cursor",
+    "acp",
+    "chatgpt",
+];
+
 /// Build an LlmRouter from the LLM config section.
 /// Only providers with non-empty API keys (or local providers) are registered.
 pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
@@ -1356,10 +1373,10 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
                 // 取りこぼしは設定バグであり、黙って provider を落とすと agents が
                 // 実行時に遠く離れた場所で失敗する。fail loudly。
                 anyhow::bail!(
-                    "provider '{name}' has unknown type '{other}'. Known types: \
-                     openai, anthropic, google, openrouter, ollama, llamacpp, \
-                     codex, cursor, acp, chatgpt. Set `type = \"<one of these>\"` \
-                     in [llm.providers.{name}] (bonsai 等の別名は形式名と別に付ける)."
+                    "provider '{name}' has unknown type '{other}'. Known types: {}. \
+                     Set `type = \"<one of these>\"` in [llm.providers.{name}] \
+                     (bonsai 等の別名は形式名と別に付ける).",
+                    KNOWN_PROVIDER_TYPES.join(", ")
                 );
             }
         };
@@ -1372,6 +1389,33 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
         }
     }
 
+    // default_provider が定義されていなければ起動を止める（chain / alias と対称）。
+    // これは bare model（`provider:` を含まない model 名）の解決先という LIVE な参照で、
+    // rename を取りこぼすと「起動は通るが実効モデルが宙に浮き、fallback chain へ黙って
+    // 誤ルートする」——本 PR が塞いだ欠陥クラスの生き残りになる。定義済みセクションかで
+    // 判定する（chain / alias と同じ理由: 認証キー未設定でスキップされただけの provider を
+    // 既定に据えた構成は壊さない）。
+    //
+    // ただし次の 2 つは「未設定」として通す（ここで弾かない）:
+    //   - default_provider が空文字＝**既定を明示的に置かない**構成。bare model を許さず
+    //     全モデルを `provider:model` で指定する運用で、空文字を providers と照合すると常に
+    //     外れて誤って弾く。
+    //   - provider を 1 つも定義していない構成。空の LlmConfig（テストのスタブ）や、DB
+    //     オーバーライドで全 provider を enabled=false にした実効設定（`apply_llm_overrides`
+    //     が providers を空にする・`reload_router` 経路）は、空の router を返すのが正で、
+    //     既定名が宙に浮くのは「そもそも何も設定されていない」ことの帰結にすぎない。
+    // 捕まえたいのは「provider は在るのに既定名だけがどのセクションにも無い」＝ rename 取りこぼし。
+    if !config.default_provider.is_empty()
+        && !config.providers.is_empty()
+        && !config.providers.contains_key(&config.default_provider)
+    {
+        anyhow::bail!(
+            "default_provider '{}' is not defined. \
+             Add a [llm.providers.{}] section or fix default_provider.",
+            config.default_provider,
+            config.default_provider,
+        );
+    }
     // Set default provider
     router.set_default_provider(&config.default_provider);
 
@@ -2193,6 +2237,61 @@ default_webhook = { url = "" }
             !names.contains(&"openai"),
             "openai 名は消えているべき: {names:?}"
         );
+    }
+
+    /// #660: default_provider が定義されていなければ起動を止める（chain / alias と対称）。
+    /// bare model の解決先という LIVE な参照で、rename 取りこぼしを黙って通さない。
+    #[test]
+    fn default_provider_undefined_is_hard_error() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "hermit".to_string(),
+            ProviderConfig {
+                provider_type: "openai".to_string(),
+                api_key: "dummy".to_string(),
+                ..Default::default()
+            },
+        );
+        let config = LlmConfig {
+            providers,
+            default_provider: "openai".to_string(), // 改名し忘れ（hermit にすべき）を模す
+            ..Default::default()
+        };
+        assert!(
+            build_llm_router(&config).is_err(),
+            "定義されていない default_provider は起動失敗にすべき"
+        );
+    }
+
+    /// #660: `KNOWN_PROVIDER_TYPES` の全 type が実際に match アームへ振り分く（＝ dispatch
+    /// できる）こと。const に足したのに build_llm_router へアームを足し忘れたら、その type は
+    /// 未知として bail し、このテストが赤くなる（const とアームの drift 防止）。
+    #[test]
+    fn every_known_provider_type_dispatches() {
+        for &ty in KNOWN_PROVIDER_TYPES {
+            let mut providers = HashMap::new();
+            providers.insert(
+                "p".to_string(),
+                ProviderConfig {
+                    provider_type: ty.to_string(),
+                    // api_key が要る形式（openai/anthropic/google/openrouter）でも登録される
+                    // よう埋める。要らない形式は無視するだけ。
+                    api_key: "x".to_string(),
+                    ..Default::default()
+                },
+            );
+            let config = LlmConfig {
+                providers,
+                default_provider: "p".to_string(),
+                ..Default::default()
+            };
+            let router = build_llm_router(&config)
+                .unwrap_or_else(|e| panic!("type '{ty}' が dispatch できない: {e}"));
+            assert!(
+                router.provider_names().contains(&"p"),
+                "type '{ty}' はセクションキー p で登録されるべき"
+            );
+        }
     }
 
     /// #457: 凝縮ラン（記憶の 3 段目）の**出荷時既定は ON**。
