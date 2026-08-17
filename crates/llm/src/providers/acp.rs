@@ -52,6 +52,9 @@ pub struct AcpProvider {
     working_dir: Option<String>,
     timeout: Duration,
     extra_models: Vec<(String, u32)>,
+    /// テレメトリ用の表示名（既定は形式名 "acp"）。ルーティングキーは
+    /// router 登録時に別途決まる。
+    name: String,
 }
 
 impl Default for AcpProvider {
@@ -69,7 +72,14 @@ impl AcpProvider {
             working_dir: None,
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             extra_models: Vec::new(),
+            name: "acp".to_string(),
         }
+    }
+
+    /// 表示名を上書きする（同じ形式の接続先を別名で登録するとき）。
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
     }
 
     pub fn with_binary_path(mut self, path: impl Into<String>) -> Self {
@@ -132,7 +142,7 @@ impl AcpProvider {
 #[async_trait]
 impl LlmProvider for AcpProvider {
     fn name(&self) -> &str {
-        "acp"
+        &self.name
     }
 
     async fn available_models(&self) -> Result<Vec<ModelInfo>> {

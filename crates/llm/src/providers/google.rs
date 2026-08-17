@@ -17,6 +17,9 @@ pub struct GoogleProvider {
     client: Client,
     api_key: String,
     base_url: String,
+    /// テレメトリ用の表示名（既定は形式名 "google"）。ルーティングキーは
+    /// router 登録時に別途決まる。
+    name: String,
 }
 
 impl GoogleProvider {
@@ -25,7 +28,14 @@ impl GoogleProvider {
             client: Client::new(),
             api_key: api_key.into(),
             base_url: GEMINI_API_URL.to_string(),
+            name: "google".to_string(),
         }
+    }
+
+    /// 表示名を上書きする（同じ形式の接続先を別名で登録するとき）。
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
     }
 
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
@@ -281,7 +291,7 @@ impl GoogleProvider {
 #[async_trait]
 impl LlmProvider for GoogleProvider {
     fn name(&self) -> &str {
-        "google"
+        &self.name
     }
 
     async fn available_models(&self) -> Result<Vec<ModelInfo>> {

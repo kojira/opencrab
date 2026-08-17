@@ -891,6 +891,9 @@ mod tests {
                 ..Default::default()
             },
         );
+        // default_provider は定義済みセクションを指す必要がある（#660）。
+        // このテストの主題は override による登録/除外なので、既定を唯一の provider に合わせる。
+        cfg.default_provider = "acp".to_string();
         // enabled 無指定 → acp は登録される（build は I/O せず成功）。
         let router = build_llm_router(&cfg).unwrap();
         assert!(router.get_provider("acp").is_some());

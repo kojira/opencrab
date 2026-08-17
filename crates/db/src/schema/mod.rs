@@ -1699,6 +1699,69 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 41,
+        description:
+            "provider rename: openai → hermit（agents.model 前置換 + model_pricing / model_experience_notes / llm_provider_overrides の provider 追従 / #660）",
+        // **#660: プロバイダの「名乗り名」と「API 形式」を分離した。**
+        //
+        // `[llm.providers.openai]` は本物の OpenAI ではなくローカルの OpenAI 互換プロキシ
+        // （hermit-shell）を指していた。名乗り名を実体に合わせて `hermit` に改め、`type="openai"`
+        // で「形式は OpenAI 互換」を表すようにした（config 側）。これに伴い、保存済みの
+        // `provider:model` 値（互換エイリアス・フォールバックは入れない方針）を DB でも追従させる。
+        //
+        // ## なぜ agents.model と model_pricing を同一マイグレーション（＝同一トランザクション）で
+        // `run_migrations` は各 Migration を 1 トランザクションで実行するため、ここの 4 本の UPDATE
+        // は不可分に適用される。`agents.model` を `hermit:` にしたのに `model_pricing.provider` が
+        // `openai` のままだと、context_window ゲート（`context_budget`）が (provider, model) 照合を
+        // 外して「未登録」エラーを出し、エージェントが起動時に止まる。**片方だけ動かさない**ことが
+        // この 1 トランザクションの主眼。
+        //
+        // ## 置換規則
+        //   - `agents.model`: **先頭アンカー** `LIKE 'openai:%'` のものだけ、`openai:` を `hermit:`
+        //     へ。`substr(model, 8)` は "openai:"（7 文字）の次＝コロン後の model 部分（SQLite の
+        //     substr は 1-indexed）。部分一致（`openrouter:...` 等）や別名前空間を巻き込まない。
+        //   - `model_pricing` / `model_experience_notes` / `llm_provider_overrides`: provider 列が
+        //     ちょうど `openai` の行だけ `hermit` へ。`hermit` は本改修で初めて導入する名前なので
+        //     既存行と衝突しない（PK 競合なし）。
+        //
+        // ## 触らないもの
+        //   - `llm_logs` / `llm_usage_metrics` の過去行は履歴。遡って書き換えると「当時 openai
+        //     だった」記録を失うため保存。新規行は resolve 後の実効名（hermit）が自然に入る。
+        //   - voice など別名前空間の "openai"（`[voice] provider="openai"` 等）は LLM の provider
+        //     とは無関係。ここは llm 系テーブルの provider 列と agents.model だけを対象にする。
+        //
+        // ## 前提テーブルの存在
+        //   - `llm_provider_overrides` は番号付き migration（PROVIDER_SETTINGS_SQL）で既存 DB にも
+        //     作成済み。
+        //   - `model_pricing` / `model_experience_notes` は SCHEMA_SQL 由来。現行バイナリが起動時に
+        //     `upsert_model_pricing`（hot_reload / context_budget）等でこれらを触るため、本番 DB に
+        //     存在することは経験的に保証される（無ければ現行バイナリが既に起動不能）。**デプロイ前に
+        //     本番コピーで migrate を実測すること**（CI は毎回新規 DB で既存データ経路を踏まない）。
+        //
+        // ## 冪等性
+        // 番号付き migration は `user_version` で 1 回だけ走る。SQL 自体も、2 度目は WHERE が
+        // `openai` 行を 1 つも拾わないため自然に no-op。
+        //
+        // ## 切り戻し（古いバイナリへ戻すとき）
+        //   BEGIN;
+        //   UPDATE agents SET model = 'openai:' || substr(model, 8) WHERE model LIKE 'hermit:%';
+        //   UPDATE model_pricing SET provider = 'openai' WHERE provider = 'hermit';
+        //   UPDATE model_experience_notes SET provider = 'openai' WHERE provider = 'hermit';
+        //   UPDATE llm_provider_overrides SET provider = 'openai' WHERE provider = 'hermit';
+        //   PRAGMA user_version = 40;
+        //   COMMIT;
+        // （config も openai 名へ戻すこと。戻さないと次回起動で hermit 参照が未定義になる。）
+        up: |conn| {
+            conn.execute_batch(
+                "UPDATE agents SET model = 'hermit:' || substr(model, 8) \
+                     WHERE model LIKE 'openai:%'; \
+                 UPDATE model_pricing SET provider = 'hermit' WHERE provider = 'openai'; \
+                 UPDATE model_experience_notes SET provider = 'hermit' WHERE provider = 'openai'; \
+                 UPDATE llm_provider_overrides SET provider = 'hermit' WHERE provider = 'openai';",
+            )
+        },
+    },
 ];
 
 /// このバイナリが知る最新スキーマバージョン。

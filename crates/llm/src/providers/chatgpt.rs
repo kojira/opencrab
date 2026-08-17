@@ -241,6 +241,9 @@ pub struct ChatGptProvider {
     include_encrypted_content: bool,
     /// `client` に設定済みの read timeout（秒）。`Client` からは読み出せないので保持する。
     timeout_secs: u64,
+    /// テレメトリ用の表示名（既定は形式名 "chatgpt"）。ルーティングキーは
+    /// router 登録時に別途決まる。
+    name: String,
 }
 
 impl Default for ChatGptProvider {
@@ -261,7 +264,14 @@ impl ChatGptProvider {
             reasoning_effort: Some("low".to_string()),
             include_encrypted_content: false,
             timeout_secs: DEFAULT_TIMEOUT_SECS,
+            name: "chatgpt".to_string(),
         }
+    }
+
+    /// 表示名を上書きする（同じ形式の接続先を別名で登録するとき）。
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
     }
 
     /// チャット補完リクエストの read timeout を秒で上書きする（#433）。
@@ -981,7 +991,7 @@ impl ChatGptProvider {
 #[async_trait]
 impl LlmProvider for ChatGptProvider {
     fn name(&self) -> &str {
-        "chatgpt"
+        &self.name
     }
 
     async fn available_models(&self) -> Result<Vec<ModelInfo>> {

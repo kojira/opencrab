@@ -51,6 +51,9 @@ pub struct CursorProvider {
     /// 設定時に `CURSOR_API_KEY` として subprocess に渡す。None なら
     /// `cursor-agent login` 済みのアンビエント認証に任せる。
     api_key: Option<String>,
+    /// テレメトリ用の表示名（既定は形式名 "cursor"）。ルーティングキーは
+    /// router 登録時に別途決まる。
+    name: String,
 }
 
 impl CursorProvider {
@@ -62,7 +65,14 @@ impl CursorProvider {
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             extra_models: Vec::new(),
             api_key: None,
+            name: "cursor".to_string(),
         }
+    }
+
+    /// 表示名を上書きする（同じ形式の接続先を別名で登録するとき）。
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
     }
 
     pub fn with_binary_path(mut self, path: impl Into<String>) -> Self {
@@ -160,7 +170,7 @@ impl Default for CursorProvider {
 #[async_trait]
 impl LlmProvider for CursorProvider {
     fn name(&self) -> &str {
-        "cursor"
+        &self.name
     }
 
     async fn available_models(&self) -> Result<Vec<ModelInfo>> {

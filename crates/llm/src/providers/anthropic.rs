@@ -18,6 +18,9 @@ pub struct AnthropicProvider {
     client: Client,
     api_key: String,
     base_url: String,
+    /// テレメトリ用の表示名（既定は形式名 "anthropic"）。ルーティングキーは
+    /// router 登録時に別途決まる。
+    name: String,
 }
 
 impl AnthropicProvider {
@@ -26,7 +29,14 @@ impl AnthropicProvider {
             client: Client::new(),
             api_key: api_key.into(),
             base_url: ANTHROPIC_API_URL.to_string(),
+            name: "anthropic".to_string(),
         }
+    }
+
+    /// 表示名を上書きする（同じ形式の接続先を別名で登録するとき）。
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
     }
 
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
@@ -361,7 +371,7 @@ impl AnthropicProvider {
 #[async_trait]
 impl LlmProvider for AnthropicProvider {
     fn name(&self) -> &str {
-        "anthropic"
+        &self.name
     }
 
     async fn available_models(&self) -> Result<Vec<ModelInfo>> {

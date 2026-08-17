@@ -679,6 +679,135 @@ fn migrations_versions_are_strictly_increasing() {
     }
 }
 
+/// v41（#660）: provider rename `openai` → `hermit`。
+///
+/// **本番形フィクスチャ**で「片方だけ改名」「pricing 未同期」の 2 罠を固定する。
+/// CI は毎回新規 DB（v41 適用済みで openai 行が無い）なので、既存 DB（v40）を模して
+/// openai 行を実際に置いてからマイグレーションを走らせる。
+#[test]
+fn provider_rename_openai_to_hermit_migration_v41() {
+    let conn = crate::init_memory().expect("init");
+
+    // v40 相当の既存 DB を模す: version を 40 へ戻し、openai を指す行と、
+    // **変わってはいけない** 対照行（別 provider / 先頭アンカーに引っかからない
+    // 部分一致 / NULL）を置く。
+    conn.execute_batch("PRAGMA user_version = 40;").unwrap();
+    conn.execute_batch(
+        "INSERT INTO agents (agent_id, name, persona_name, model) VALUES \
+            ('a-openai',     'n', 'p', 'openai:claude-sonnet-4-6'), \
+            ('a-openrouter', 'n', 'p', 'openrouter:openai/gpt-4o'), \
+            ('a-codex',      'n', 'p', 'codex:gpt-5.6'), \
+            ('a-null',       'n', 'p', NULL); \
+         INSERT INTO model_pricing \
+            (provider, model, input_price_per_1m, output_price_per_1m, context_window, updated_at) VALUES \
+            ('openai',     'claude-sonnet-4-6', 3.0, 15.0, 200000, '2026-01-01'), \
+            ('chatgpt',    'gpt-5.6',           5.0, 30.0, 305000, '2026-01-01'), \
+            ('openrouter', 'openai/gpt-4o',     2.5, 10.0, 128000, '2026-01-01'); \
+         INSERT INTO model_experience_notes \
+            (id, agent_id, provider, model, situation, observation, created_at) VALUES \
+            ('e-openai',    'a1', 'openai',    'claude-sonnet-4-6', 's', 'o', '2026-01-01'), \
+            ('e-anthropic', 'a1', 'anthropic', 'claude-sonnet-4-6', 's', 'o', '2026-01-01'); \
+         INSERT INTO llm_provider_overrides (provider, enabled, updated_at) VALUES \
+            ('openai', 1, '2026-01-01'), \
+            ('ollama', 1, '2026-01-01');",
+    )
+    .unwrap();
+
+    // 起動経路（run_migrations）で v41 が届く。
+    run_migrations(&conn, MIGRATIONS).expect("v41 migration");
+    assert_eq!(schema_version(&conn).unwrap(), latest_version());
+
+    let model_of = |id: &str| -> Option<String> {
+        conn.query_row("SELECT model FROM agents WHERE agent_id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    };
+    // 罠1（片方だけ改名）の一方: agents.model の先頭 openai: が hermit: へ。
+    assert_eq!(
+        model_of("a-openai").as_deref(),
+        Some("hermit:claude-sonnet-4-6")
+    );
+    // 先頭アンカー: openrouter:openai/... は巻き込まれない（部分一致で壊さない）。
+    assert_eq!(
+        model_of("a-openrouter").as_deref(),
+        Some("openrouter:openai/gpt-4o")
+    );
+    // 別 provider・NULL は不変。
+    assert_eq!(model_of("a-codex").as_deref(), Some("codex:gpt-5.6"));
+    assert_eq!(model_of("a-null"), None);
+
+    // 罠2（pricing 未同期）: model_pricing の provider も同一マイグレーションで hermit へ。
+    assert!(
+        crate::queries::get_model_pricing(&conn, "openai", "claude-sonnet-4-6")
+            .unwrap()
+            .is_none(),
+        "openai の pricing 行は残ってはならない"
+    );
+    let hermit_price = crate::queries::get_model_pricing(&conn, "hermit", "claude-sonnet-4-6")
+        .unwrap()
+        .expect("hermit の pricing 行が無い（context_window ゲートが未登録エラーを出す）");
+    // context_window ゲートが読む値が引けること（未登録扱いにならない）。
+    assert_eq!(hermit_price.context_window, Some(200000));
+    // provider が「ちょうど openai」の行だけ対象。substring（openrouter）や別名（chatgpt）は不変。
+    assert!(
+        crate::queries::get_model_pricing(&conn, "chatgpt", "gpt-5.6")
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        crate::queries::get_model_pricing(&conn, "openrouter", "openai/gpt-4o")
+            .unwrap()
+            .is_some(),
+        "provider='openrouter' は provider='openai' の部分一致で壊れてはならない"
+    );
+
+    // model_experience_notes: openai→hermit、別 provider は不変。
+    let exp_provider = |id: &str| -> Option<String> {
+        conn.query_row(
+            "SELECT provider FROM model_experience_notes WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(exp_provider("e-openai").as_deref(), Some("hermit"));
+    assert_eq!(exp_provider("e-anthropic").as_deref(), Some("anthropic"));
+
+    // llm_provider_overrides: openai→hermit、別 provider は不変。
+    let override_exists = |provider: &str| -> bool {
+        conn.query_row(
+            "SELECT COUNT(*) FROM llm_provider_overrides WHERE provider = ?1",
+            [provider],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+            > 0
+    };
+    assert!(
+        override_exists("hermit"),
+        "override が hermit へ移っていない"
+    );
+    assert!(
+        !override_exists("openai"),
+        "override に openai が残っている"
+    );
+    assert!(override_exists("ollama"), "無関係な override が消えた");
+
+    // 冪等性: 再実行しても openai 行はもう無く、hermit の値は変わらない（自然 no-op）。
+    conn.execute_batch("PRAGMA user_version = 40;").unwrap();
+    run_migrations(&conn, MIGRATIONS).expect("v41 rerun no-op");
+    assert_eq!(
+        model_of("a-openai").as_deref(),
+        Some("hermit:claude-sonnet-4-6")
+    );
+    assert!(
+        crate::queries::get_model_pricing(&conn, "hermit", "claude-sonnet-4-6")
+            .unwrap()
+            .is_some()
+    );
+}
+
 /// v19: Nostr 受信転記先の表が増えるだけで、既存の Nostr 設定
 /// （`agent_nostr_config`）の行は 1 つも動かない（#252 段階 A）。冪等でもある。
 #[test]
@@ -3238,11 +3367,11 @@ fn v37_backfill_preserves_firing_and_normalizes() {
 
     initialize(&conn).expect("apply v37");
     assert_eq!(schema_version(&conn).unwrap(), latest_version());
-    // v40（#489 の co_agent 逆引き列）が最新。v38/v39/v40 とも
+    // v41（#660 の provider rename openai→hermit）が最新。v38/v39/v40/v41 とも
     // session_heartbeat_config を触らないので、下の v37 backfill 検証（発火集合・正規化）は
     // そのまま成立する。新しい migration が session_heartbeat_config を触ったらこの guard を
     // 更新し、下の期待値を見直すこと。
-    assert_eq!(latest_version(), 40, "v40 が最新版であること");
+    assert_eq!(latest_version(), 41, "v41 が最新版であること");
 
     // 期待: 9 行 = step1(nostr-A) 1 + step2(A/201=0, C/202=1, D/222=1) 3 +
     //             step3(A,B,C,D,E の ch205 展開・全 enabled=0) 5。
