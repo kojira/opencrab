@@ -1410,10 +1410,13 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
         && !config.providers.contains_key(&config.default_provider)
     {
         anyhow::bail!(
-            "default_provider '{}' is not defined. \
-             Add a [llm.providers.{}] section or fix default_provider.",
-            config.default_provider,
-            config.default_provider,
+            "default_provider '{p}' has no [llm.providers.{p}] section. It is the \
+             fallback for bare model names, so it must point to a defined provider. \
+             If you are disabling '{p}' (e.g. from the dashboard), change \
+             `default_provider` in the config TOML to another defined provider first, \
+             then restart — default_provider lives in the TOML only and cannot be \
+             changed at runtime, so the dashboard cannot repoint or override it.",
+            p = config.default_provider,
         );
     }
     // Set default provider
@@ -2292,6 +2295,50 @@ default_webhook = { url = "" }
                 "type '{ty}' はセクションキー p で登録されるべき"
             );
         }
+    }
+
+    /// #660: dashboard から **既定 provider を enabled=false** にする操作は reload で
+    /// hard error になる（意図した挙動変化）。他 provider が残るのに既定名だけが消えると、
+    /// bare model 要求が黙って fallback へ流れる——本 PR が塞いだ状態の実行時再構成なので、
+    /// 500 + ロールバックで止める。既存の e2e（唯一 provider の無効化で providers が空になり
+    /// 「未設定」側へ落ちるケース）は踏めていない経路なので、ここで固定する。
+    #[test]
+    fn disabling_the_default_provider_via_override_is_hard_error() {
+        use opencrab_db::queries::LlmProviderOverrideRow;
+        let mut providers = HashMap::new();
+        providers.insert(
+            "hermit".to_string(),
+            ProviderConfig {
+                provider_type: "openai".to_string(),
+                api_key: "dummy".to_string(),
+                ..Default::default()
+            },
+        );
+        // 既定以外に残る provider（ローカルなので常に登録される）。
+        providers.insert("ollama".to_string(), ProviderConfig::default());
+        let base = LlmConfig {
+            providers,
+            default_provider: "hermit".to_string(),
+            ..Default::default()
+        };
+        // base は default=hermit が定義済みなので通る。
+        assert!(build_llm_router(&base).is_ok());
+
+        // hermit を無効化 → 実効設定から hermit セクションが消え、ollama は残る。
+        let overrides = vec![LlmProviderOverrideRow {
+            provider: "hermit".to_string(),
+            enabled: Some(false),
+            ..Default::default()
+        }];
+        let merged = apply_llm_overrides(&base, &overrides);
+        assert!(!merged.providers.contains_key("hermit"));
+        assert!(merged.providers.contains_key("ollama"));
+
+        // default=hermit が宙に浮くので reload（build_llm_router）は Err。
+        assert!(
+            build_llm_router(&merged).is_err(),
+            "既定 provider の無効化は reload で hard error にすべき"
+        );
     }
 
     /// #457: 凝縮ラン（記憶の 3 段目）の**出荷時既定は ON**。
