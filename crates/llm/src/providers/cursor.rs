@@ -550,6 +550,11 @@ mod tests {
             .position(|a| a == "--sandbox")
             .expect("--sandbox");
         assert_eq!(args.get(sb + 1).map(String::as_str), Some("disabled"));
+        // 不変条件: サンドボックスを最弱（disabled）にしても読取専用（--plan）は残る。
+        assert!(
+            args.iter().any(|a| a == "--plan"),
+            "sandbox=disabled でも --plan は残らねばならない: {args:?}"
+        );
     }
 
     /// env 最小化: 許可キー（PATH/HOME/CURSOR_API_KEY）以外を渡さない。
