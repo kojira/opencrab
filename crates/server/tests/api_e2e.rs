@@ -2213,6 +2213,7 @@ fn insert_running_subtask(
             reply_target: None,
             caller: opencrab_actions::CallerIdentity::Agent,
             lifecycle: opencrab_actions::SubtaskLifecycle::new(),
+            steerable: false,
         },
     );
     handle

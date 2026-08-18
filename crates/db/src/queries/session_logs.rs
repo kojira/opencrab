@@ -444,6 +444,45 @@ pub fn list_user_speech_logs_after(
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
+/// 走行中サブタスクへ届いた steer（追加指示）ログを、`after_id` より後だけ古い順に返す（#647）。
+///
+/// `list_user_speech_logs_after` の steer 版。サブタスクは `run_agent_response` を depth+1 で
+/// 再入し親と同じ engine ループを通るため、走行中注入（`LiveInboundSource`）を steer に流用
+/// する。走行中サブの sub-session（`subtask-{id}`）に `log_type='steer'` で積まれた行だけを
+/// 対象にし、通常発話や system ログは拾わない（steer は履歴上でも区別される / #647 記録要件）。
+///
+/// 呼び出し側（`SubtaskSteerInbound`）は前回取得の最大 id を `after_id` に渡す。単調増加の id
+/// で同じ steer を二度注入しないことを保証する。`limit` は暴走時の安全弁で、超過分は次の
+/// 呼び出しで拾われる。
+pub fn list_steer_logs_after(
+    conn: &Connection,
+    session_id: &str,
+    after_id: i64,
+    limit: usize,
+) -> Result<Vec<SessionLogRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json, created_at
+         FROM memory_sessions
+         WHERE session_id = ?1 AND log_type = 'steer'
+           AND id > ?2
+         ORDER BY id ASC LIMIT ?3",
+    )?;
+    let rows = stmt.query_map(params![session_id, after_id, limit as i64], |row| {
+        Ok(SessionLogRow {
+            id: row.get(0)?,
+            agent_id: row.get(1)?,
+            session_id: row.get(2)?,
+            log_type: row.get(3)?,
+            content: row.get(4)?,
+            speaker_id: row.get(5)?,
+            turn_number: row.get(6)?,
+            metadata_json: row.get(7)?,
+            created_at: row.get(8)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 /// Get topic nodes for a specific session, ordered by start_log_id ASC.
 pub fn get_topic_nodes_for_session(
     conn: &Connection,

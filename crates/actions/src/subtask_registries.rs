@@ -123,6 +123,7 @@ mod tests {
             reply_target: None,
             caller: crate::traits::CallerIdentity::Agent,
             lifecycle: crate::subtask::SubtaskLifecycle::new(),
+            steerable: false,
         }
     }
 }

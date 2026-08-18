@@ -15,8 +15,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use opencrab_actions::{
-    cancel_subtask as neutral_cancel_subtask, CancelOutcome, SettleKind, SubtaskCompletionSink,
-    SubtaskRegistry, SubtaskSettled, REJECTION_CODE_PREFIX,
+    cancel_subtask as neutral_cancel_subtask, steer_subtask as neutral_steer_subtask,
+    CancelOutcome, SettleKind, SteerOutcome, SubtaskCompletionSink, SubtaskRegistry,
+    SubtaskSettled, REJECTION_CODE_PREFIX,
 };
 use opencrab_gateway::{GatewayActionDef, GatewayActionResult, GatewayActions, GatewayCallContext};
 use opencrab_mcp::is_valid_server_name;
@@ -507,6 +508,25 @@ impl SystemGatewayActions {
                         }
                     },
                     "required": ["subtask_id"]
+                }),
+            },
+            GatewayActionDef {
+                name: "steer_subtask".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
+                description: "走行中のサブタスクを止めずに追加の指示（steer）を送ります。指示はサブタスクの次の反復の合間に読まれ、以後の判断へ反映されます。送れるのは自分のセッションが親のサブタスクのみ（owner は制限なし）。明示的な spawn_subtask のサブにのみ有効で、auto-dispatch のサブや既に完了/停止したサブへ送った場合はその旨が返ります。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "subtask_id": {
+                            "type": "string",
+                            "description": "追加指示を送るサブタスクのID（subtask_spawnedイベントから取得）"
+                        },
+                        "message": {
+                            "type": "string",
+                            "description": "サブタスクへ送る追加指示（方向転換・条件追加・見落としの伝達など）"
+                        }
+                    },
+                    "required": ["subtask_id", "message"]
                 }),
             },
             // 記憶インデックスの全再構築（#175 S4）。Discord gateway 実装だけにあった
@@ -1373,6 +1393,60 @@ impl SystemGatewayActions {
             }
             CancelOutcome::Unauthorized => err(format!(
                 "{REJECTION_CODE_PREFIX}cancel_subtask: subtask '{subtask_id}' をこのセッションからキャンセルする権限がありません（親セッションまたは owner のみ）"
+            )),
+        }
+    }
+
+    /// 走行中 subtask への追加指示（steer / #647）。共有 `SubtaskRegistry` を引き、認可
+    /// （cancel と同じ `caller_can_manage_subtask`）・steer 記録・不達判定を server-neutral の
+    /// `steer_subtask` に委ねる。**これが唯一の実装**で、transport 固有の steer 実装は無い。
+    /// registry 未配線（`None`）や不在は not found を返す。既に決着/停止したサブや
+    /// auto-dispatch のサブへ送った場合は、**黙って捨てず**その旨をエラーで返す（#647
+    /// 受け入れ条件 3・4）。権限なしは `REJECTION_CODE_PREFIX` を付けて拒否として通知する。
+    fn steer_subtask(&self, args: &Value, ctx: &GatewayCallContext) -> GatewayActionResult {
+        let Some(subtask_id) = args.get("subtask_id").and_then(|v| v.as_str()) else {
+            return err("steer_subtask: 'subtask_id' is required".to_string());
+        };
+        let Some(message) = args.get("message").and_then(|v| v.as_str()) else {
+            return err("steer_subtask: 'message' is required".to_string());
+        };
+        if message.trim().is_empty() {
+            return err("steer_subtask: 'message' は空にできません".to_string());
+        }
+        let Some(registry) = self.subtask_registry.as_ref() else {
+            // dispatch 未配線（走行中 subtask を追跡していない）→ 不在扱い。
+            return err(format!("steer_subtask: subtask '{subtask_id}' not found"));
+        };
+        // 認可は cancel と同じ caller ベース（#331 / #647）。
+        let caller: opencrab_actions::CallerIdentity = (&ctx.caller).into();
+        match neutral_steer_subtask(
+            registry,
+            &self.state.db,
+            subtask_id,
+            message,
+            caller,
+            ctx.session_id.as_deref(),
+        ) {
+            SteerOutcome::Accepted => GatewayActionResult {
+                success: true,
+                data: Some(json!({
+                    "steered": true,
+                    "subtask_id": subtask_id,
+                    "note": "追加指示を記録しました。サブタスクは次の反復の合間にこれを読み、受領/反映を親へ返します。",
+                })),
+                error: None,
+            },
+            SteerOutcome::NotFound => {
+                err(format!("steer_subtask: subtask '{subtask_id}' not found"))
+            }
+            SteerOutcome::AlreadySettled => err(format!(
+                "steer_subtask: subtask '{subtask_id}' は既に完了または停止しているため追加指示を届けられません"
+            )),
+            SteerOutcome::NotSteerable => err(format!(
+                "steer_subtask: subtask '{subtask_id}' は auto-dispatch（LLM ループを持たない）ため追加指示を読む主体がありません。止めるには cancel_subtask を使ってください"
+            )),
+            SteerOutcome::Unauthorized => err(format!(
+                "{REJECTION_CODE_PREFIX}steer_subtask: subtask '{subtask_id}' へこのセッションから追加指示を送る権限がありません（親セッションまたは owner のみ）"
             )),
         }
     }
@@ -2323,6 +2397,8 @@ impl GatewayActions for SystemGatewayActions {
             // Discord が誤って `cancel_subtask` を再定義したときに own の実装（lifecycle
             // 通知 + 部分結果ログ + sink 通知）が黙ってバイパスされる。
             "cancel_subtask" => self.cancel_subtask(args, ctx),
+            // 走行中 subtask への追加指示（steer / #647）。cancel と同じく neutral 実装へ委ねる。
+            "steer_subtask" => self.steer_subtask(args, ctx),
             // subtask 進捗報告（#175 S1）。**唯一残る委譲パターン**（cancel_subtask は
             // #157 S2 で委譲を撤去した）。
             // transport 固有 gateway（Discord）が report_progress を実装しているなら、

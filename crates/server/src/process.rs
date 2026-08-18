@@ -548,6 +548,104 @@ fn format_live_inbound(log: &opencrab_db::queries::SessionLogRow) -> String {
     )
 }
 
+/// 走行中サブタスクへ届いた steer（追加指示）を反復の合間に注入する実体（#647）。
+///
+/// サブタスクは `run_agent_response` を depth+1 で再入し、親ターンと同じ engine ループ
+/// （毎イテレーション `LiveInboundSource::poll_new_messages` を引く / #289）を通る。steer は
+/// この既存機構をそのままサブへ通したもので、`SessionLiveInbound`（ユーザー発話版）の
+/// steer 版にあたる。sub-session（`subtask-{id}`）に `steer_subtask` が積んだ
+/// `log_type='steer'` の行だけを watermark 差分で読み、次の LLM 呼び出しへ user メッセージ
+/// として足す。
+///
+/// 差分（`SessionLiveInbound` との違い）:
+/// - 対象 `log_type` は `speech` ではなく `steer`（`STEER_LOG_TYPE`）。発話者フィルタは無い
+///   （steer は親/オーナーの明示指示であり、送り主は認可済み）。
+/// - depth>0（サブタスク）で配線する。親ターン（depth==0）は従来どおり `SessionLiveInbound`。
+///
+/// 重複注入防止は `watermark`（取得済み最大 log id）。初期値は engine 起動時点の最新 id
+/// なので、以後に届いた steer だけが注入される。
+struct SubtaskSteerInbound {
+    db: opencrab_db::Db,
+    /// サブタスク自身のセッション ID（`subtask-{id}`）。steer はここへ積まれる。
+    sub_session_id: String,
+    /// 取得済みの最大 log id。これより後の steer 行だけを次回返す。
+    watermark: std::sync::atomic::AtomicI64,
+}
+
+impl SubtaskSteerInbound {
+    /// 現在の最新 log id を watermark 初期値として組み立てる。
+    ///
+    /// 取得に失敗した場合は `i64::MAX` を置く（＝何も注入しない）。steer 注入はあくまで
+    /// 改善であって、失敗してもサブタスクの実行を壊さないことを優先する。
+    fn new(db: opencrab_db::Db, sub_session_id: &str) -> Self {
+        let latest = match db.lock() {
+            Ok(conn) => opencrab_db::queries::list_recent_session_logs(&conn, sub_session_id, 1)
+                .ok()
+                .and_then(|rows| rows.first().and_then(|l| l.id))
+                .unwrap_or(0),
+            Err(e) => {
+                tracing::warn!(session_id = %sub_session_id, "steer inbound watermark unavailable: {e}");
+                i64::MAX
+            }
+        };
+        Self {
+            db,
+            sub_session_id: sub_session_id.to_string(),
+            watermark: std::sync::atomic::AtomicI64::new(latest),
+        }
+    }
+}
+
+impl opencrab_core::LiveInboundSource for SubtaskSteerInbound {
+    fn poll_new_messages(&self) -> Vec<String> {
+        use std::sync::atomic::Ordering;
+
+        let after_id = self.watermark.load(Ordering::Relaxed);
+        let conn = match self.db.lock() {
+            Ok(conn) => conn,
+            // ロックが取れないだけで反復を落とさない（次のイテレーションで拾える）。
+            Err(_) => return Vec::new(),
+        };
+        let rows = match opencrab_db::queries::list_steer_logs_after(
+            &conn,
+            &self.sub_session_id,
+            after_id,
+            LIVE_INBOUND_POLL_LIMIT,
+        ) {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!(session_id = %self.sub_session_id, "steer inbound poll failed: {e}");
+                return Vec::new();
+            }
+        };
+        drop(conn);
+
+        if rows.is_empty() {
+            return Vec::new();
+        }
+        // 返した行まで watermark を進める（＝同じ steer を二度注入しない）。
+        if let Some(max_id) = rows.iter().filter_map(|r| r.id).max() {
+            self.watermark.store(max_id, Ordering::Relaxed);
+        }
+        rows.iter()
+            .map(|r| format_steer_inbound(&r.content))
+            .collect()
+    }
+}
+
+/// 走行中サブへ届いた steer を LLM へ見せる形に整える（#647）。
+///
+/// 親/オーナーからの**明示の追加指示**であることを明記し、受領/反映を親へ返すよう促す。
+/// ただし tool 呼び出しを system レベルで強制はしない（`SessionLiveInbound` と同じ「足すだけ・
+/// 応答は判断に委ねる」方針 / #288。steer は指示の性質が強いので促し文言を添える点だけが差）。
+fn format_steer_inbound(message: &str) -> String {
+    format!(
+        "[追加指示 (steer): 親/オーナーからの指示が、あなたがこのタスクを実行している間に届きました]\n\
+         {message}\n\
+         （この指示を踏まえて以後の方針を調整し、受領した旨と反映内容を report_progress で親へ返してください。）"
+    )
+}
+
 /// 変動コンテキストを最後のuserメッセージに前置するヘルパー（実体は
 /// [`opencrab_core::runtime_context`] / #190 S2）。
 ///
@@ -1335,6 +1433,16 @@ pub async fn run_agent_response(
             SessionLiveInbound::new(state.db.clone(), session_id, agent_id)
                 .with_scope(req.live_inbound_scope.clone()),
         ));
+    } else {
+        // #647: サブタスク（depth>0）は走行中ユーザー発話の当事者ではないが、親/オーナーからの
+        // steer（追加指示）は反復の合間に読む。ユーザー発話版と同じ `LiveInboundSource` 機構を
+        // steer 専用ソースで通す。sub-session（`subtask-{id}` = ここでの `session_id`）に積まれた
+        // `log_type='steer'` の行だけを差分注入する。auto-dispatch はこの経路（`run_agent_response`）
+        // を通らないので steer 注入口も持たない＝`steer_subtask` 側が `NotSteerable` を返す。
+        engine.set_live_inbound(std::sync::Arc::new(SubtaskSteerInbound::new(
+            state.db.clone(),
+            session_id,
+        )));
     }
 
     // 自動 dispatch（非ブロック）フックの注入。depth0 かつ完了再注入 sink が配線
@@ -2641,5 +2749,63 @@ mod past_summary_notice_contract_tests {
                 "retrieve_memory_nodes に {forbidden} を渡すよう読める: {notice}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod steer_inbound_tests {
+    use super::SubtaskSteerInbound;
+    use opencrab_core::LiveInboundSource;
+
+    fn insert_log(db: &opencrab_db::Db, session_id: &str, log_type: &str, content: &str) {
+        let conn = db.lock().unwrap();
+        let log = opencrab_db::queries::SessionLogRow {
+            id: None,
+            agent_id: String::new(),
+            session_id: session_id.to_string(),
+            log_type: log_type.to_string(),
+            content: content.to_string(),
+            speaker_id: None,
+            turn_number: None,
+            metadata_json: None,
+            created_at: None,
+        };
+        opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
+    }
+
+    /// #647: steer ログだけを差分注入し、同じ steer を二度返さない（watermark）。通常発話や
+    /// system ログは拾わない。
+    #[test]
+    fn polls_only_new_steer_logs_and_dedups() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let sub = "subtask-abc";
+
+        // watermark を張る前に積まれた行は注入対象外（＝履歴側で見えている想定）。
+        insert_log(&db, sub, "steer", "古い steer（対象外）");
+        let src = SubtaskSteerInbound::new(db.clone(), sub);
+
+        // 起動後に steer が 1 本届く。
+        insert_log(&db, sub, opencrab_actions::STEER_LOG_TYPE, "JSON で出して");
+        // 別 log_type は拾わない。
+        insert_log(&db, sub, "speech", "これは発話（対象外）");
+        insert_log(&db, sub, "system", "これは system（対象外）");
+
+        let first = src.poll_new_messages();
+        assert_eq!(first.len(), 1, "新着 steer 1 本だけを返す");
+        assert!(first[0].contains("JSON で出して"), "本文が載る");
+        assert!(first[0].contains("追加指示"), "steer と分かる整形が付く");
+
+        // 2 回目は新着なし（watermark が進んでいる）。
+        assert!(
+            src.poll_new_messages().is_empty(),
+            "同じ steer を二度注入しない"
+        );
+
+        // さらに届いた steer は次の poll で拾う。
+        insert_log(&db, sub, opencrab_actions::STEER_LOG_TYPE, "2 通目");
+        let third = src.poll_new_messages();
+        assert_eq!(third.len(), 1);
+        assert!(third[0].contains("2 通目"));
     }
 }

@@ -1172,6 +1172,7 @@ mod tests {
                 reply_target: Some("note1target".to_string()),
                 caller: opencrab_actions::CallerIdentity::Agent,
                 lifecycle: opencrab_actions::SubtaskLifecycle::new(),
+                steerable: false,
             },
         );
         assert!(r.runtime().has_running(&sid));

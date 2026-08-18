@@ -394,6 +394,9 @@ pub async fn spawn_subtask(
             // 決着の瞬間に Agent へ降格する。
             caller: parent_caller.clone(),
             lifecycle,
+            // 明示 `spawn_subtask` は自前の LLM ループ（`run_agent_response` 再入）を持ち、
+            // 反復の合間に steer ログを読める。steer 可（#647）。
+            steerable: true,
         },
     );
     // 通知口は登録簿と対の随伴マップへ分離する（RFC §1.5）。cancel / report_progress は

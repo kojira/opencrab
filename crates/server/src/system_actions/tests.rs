@@ -686,6 +686,7 @@ fn registry_with_caller(
             reply_target: None,
             caller,
             lifecycle: opencrab_actions::SubtaskLifecycle::new(),
+            steerable: false,
         },
     );
     registry
@@ -2769,6 +2770,7 @@ fn registry_with_labeled(
             reply_target: None,
             caller: opencrab_actions::CallerIdentity::Agent,
             lifecycle: opencrab_actions::SubtaskLifecycle::new(),
+            steerable: false,
         },
     );
     registry
