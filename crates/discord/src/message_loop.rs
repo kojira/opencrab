@@ -1220,7 +1220,23 @@ async fn handle_agent_response<T: AgentRunner, G: ReactionAdder>(
         Ok(_) => debug!(agent_id = %agent_id, "Agent produced empty response"),
         // {:#} で anyhow のコンテキストチェーン全体を出す（プロバイダの生エラーを
         // 握りつぶさない）。Display（%e）だと最外側の要約しか出ない。
-        Err(e) => error!(agent_id = %agent_id, error = format!("{e:#}"), "SkillEngine failed"),
+        Err(e) => {
+            error!(agent_id = %agent_id, error = format!("{e:#}"), "SkillEngine failed");
+            // #668: ターンが失敗したことを、トリガー投稿への ❌ リアクションだけで可視化する。
+            // **エラー本文はチャンネルへ出さない**（複数エージェントが居るチャンネルで互いの
+            // エラー文に反応し合う無限ループを防ぐ。詳細はログ＝#665 の計装と llm_logs が持つ）。
+            // ここに来るのはターンにつき 1 回・最終 Result の Err なので、エンジン内リトライ
+            // （#667）が決着した後の**最終失敗時のみ**付く（途中のリトライには付かない）。
+            // 付与失敗自体は add_reaction_non_fatal が warn ログで握る（それ以上連鎖しない）。
+            add_reaction_non_fatal(
+                gateway,
+                channel_id,
+                channel_id_str,
+                message_id,
+                FAILED_EMOJI,
+            )
+            .await;
+        }
     }
 }
 
@@ -2106,6 +2122,14 @@ const NO_REPLY_EMOJI: &str = "🤐";
 /// 既存の 2 種と同様ハードコード（設定項目は増やさない / #431 の判断）。
 const SPOKE_EMOJI: &str = "🏁";
 
+/// ターンがエラーで失敗したことを示す印（#668）。
+///
+/// 上流プロバイダ障害等でターンが落ちたとき、**エラー本文をチャンネルへ出す代わりに**
+/// トリガー投稿へこれを付け「失敗した」ことだけを可視化する（本文投稿は複数エージェント間で
+/// エラー文に反応し合う無限ループを誘発するため出さない）。付与対象は受信したユーザー投稿
+/// （👀/🤐 と同じ側）だが、意味が衝突しない絵文字にする。既存の 3 種と同様ハードコード。
+const FAILED_EMOJI: &str = "❌";
+
 /// ターンが「発言終わり」リアクションの対象になるか（#431）。
 ///
 /// `true` を返すのは、ターンが**自然に**（次の行動を選ばず）終わり、かつそのターンで
@@ -2238,7 +2262,7 @@ mod tests {
     use super::{
         discord_context_line, end_of_speech_qualifies, end_of_speech_qualifies_ok,
         parse_discord_session, parse_reaction_message_id, recv_retry_backoff,
-        should_alert_inbound_stalled, should_emit_drop_log, NO_REPLY_EMOJI,
+        should_alert_inbound_stalled, should_emit_drop_log, FAILED_EMOJI, NO_REPLY_EMOJI,
         RECV_FAILURES_BEFORE_ALERT, RECV_RETRY_BASE, RECV_RETRY_MAX, SEEN_EMOJI, SPOKE_EMOJI,
     };
     use std::collections::HashMap;
@@ -2263,6 +2287,16 @@ mod tests {
         assert_ne!(SPOKE_EMOJI, SEEN_EMOJI);
         assert_ne!(SPOKE_EMOJI, NO_REPLY_EMOJI);
         assert!(!SPOKE_EMOJI.is_empty());
+    }
+
+    /// #668: 「失敗」の絵文字は他の 3 種すべてと衝突しない。受信（👀）や NO_REPLY（🤐）と
+    /// 同じだと「失敗した」のか「受け取った／黙った」のか区別できず可視化の意味が消える。
+    #[test]
+    fn failed_emoji_is_distinct_from_existing_reactions() {
+        assert_ne!(FAILED_EMOJI, SEEN_EMOJI);
+        assert_ne!(FAILED_EMOJI, NO_REPLY_EMOJI);
+        assert_ne!(FAILED_EMOJI, SPOKE_EMOJI);
+        assert!(!FAILED_EMOJI.is_empty());
     }
 
     /// #431: 自然終了かつ発話成立のターンだけが対象。
