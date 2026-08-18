@@ -464,6 +464,7 @@ mod tests {
                 reply_target: None,
                 caller: opencrab_actions::CallerIdentity::Agent,
                 lifecycle: SubtaskLifecycle::new(),
+                steerable: false,
             },
         );
         let sink = RestCompletionSink {

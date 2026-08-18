@@ -1764,6 +1764,7 @@ mod tests {
                 reply_target: None,
                 caller: CallerIdentity::Owner,
                 lifecycle: SubtaskLifecycle::new(),
+                steerable: false,
             },
         );
 

@@ -299,6 +299,17 @@ pub struct SpawnedSubtask {
     /// 走行タスク側の `settle_completed` が `claim_settle` を主張し、先に主張した
     /// 一方だけが有効になる（cancel 後の完了 sink 発火を防ぐ）。
     pub lifecycle: SubtaskLifecycle,
+    /// **走行中に追加指示（steer）を受け取れるか**（#647）。
+    ///
+    /// `true` は明示的な `spawn_subtask`（自前の LLM ループを持ち、反復の合間に
+    /// steer ログを読む主体がいる）。`false` は auto-dispatch（ツールを順に実行
+    /// するだけで LLM ループが無く、`run_agent_response` を通らないため sub-session
+    /// 行も作らない）。後者へ steer しても読む主体がいないので、`steer_subtask` は
+    /// `SteerOutcome::NotSteerable` を返して**黙って捨てない**（#647 受け入れ条件 4）。
+    ///
+    /// 種別で分岐せず能力を明示のフィールドに持つのは、将来の新しい subtask 種別が
+    /// この判断を素通りしないようにするため（構築点ごとに steer 可否を宣言させる）。
+    pub steerable: bool,
 }
 
 /// アクティブな subtask を subtask_id で引く registry（gateway 非依存版）。
@@ -446,6 +457,30 @@ pub fn settle_completed(
     });
 }
 
+/// 走行中 subtask に対する管理操作（cancel / steer）の共有認可述語（#331 / #647）。
+///
+/// `caller` が owner 等価なら常に許可。そうでなければ「呼び出し元セッションが親
+/// （`parent_session_id == caller_session_id`）」**かつ**「呼び出し元の信頼度が
+/// subtask を spawn した親ターンの呼び出し元（`s.caller`）以上」を要する。後者が無いと、
+/// セッション 1 本化（#323）で「セッション一致」だけでは素の Agent ターンから Owner 由来の
+/// subtask を操作できてしまう（#331）。
+///
+/// cancel と steer は「走行中サブへ外から手を出す」点で同じ権限境界を持つため、判定を
+/// **1 つの関数に集約**する（steer 用に別の認可を発明しない / #647 裁定）。呼び出し側は
+/// shard ロック下（`remove_if` の述語内）や `get` 参照下でこれを評価する。所有権フィールド
+/// （`parent_session_id` / `caller`）は insert 後不変なので TOCTOU は無い。
+pub(crate) fn caller_can_manage_subtask(
+    caller: &CallerIdentity,
+    caller_session_id: Option<&str>,
+    s: &SpawnedSubtask,
+) -> bool {
+    if caller.is_owner_equivalent() {
+        return true;
+    }
+    matches!(caller_session_id, Some(cs) if !cs.is_empty() && s.parent_session_id == cs)
+        && caller.can_manage_subtask_of(&s.caller)
+}
+
 /// `cancel_subtask` の結果種別（gateway 非依存 / #161）。
 ///
 /// gateway 別の戻り値整形（`GatewayActionResult` の success/error）は呼び出し側が
@@ -521,24 +556,12 @@ pub fn cancel_subtask(
     // #485: co_agent は owner 等価。owner（等価）はセッションをまたいで subtask を停止できる
     // （唯一の源は is_owner_equivalent）。co_agent が owner 由来の subtask を管理できないと協働
     // にならない。非 owner 等価（trusted_user / agent）は従来どおりセッション一致 + trust 序列。
-    let is_owner = caller.is_owner_equivalent();
-    let authorized = |s: &SpawnedSubtask| -> bool {
-        if is_owner {
-            return true;
-        }
-        // 非オーナー: 「親セッション一致」に加えて、この subtask を spawn したターンの
-        // 呼び出し元（`s.caller`）を自分の権限で管理できることを要する（#331）。セッションを
-        // agent 単位で 1 本にした（#323）ため、セッション一致だけだと見知らぬ相手
-        // （caller=Agent）のターンから Owner 由来の subtask を停止できてしまう。旧 per-相手
-        // セッションでは別セッションで構造的に不可能だった性質の復元。
-        matches!(caller_session_id, Some(cs) if !cs.is_empty() && s.parent_session_id == cs)
-            && caller.can_manage_subtask_of(&s.caller)
-    };
+    // 認可は cancel / steer 共有の `caller_can_manage_subtask` に委ねる（#647）。
 
     // 述語は shard ロック下で評価される。認可 → 停止の主張（CAS）→ 除去を 1 操作に
     // まとめるため、認可も claim も述語内で行う（claim に失敗＝決着済みなら除去しない）。
     match registry.remove_if(subtask_id, |_, s| {
-        authorized(s) && s.lifecycle.claim_cancel()
+        caller_can_manage_subtask(&caller, caller_session_id, s) && s.lifecycle.claim_cancel()
     }) {
         Some((_, subtask)) => {
             subtask.abort_handle.abort();
@@ -656,6 +679,174 @@ pub fn cancel_subtask(
     }
 }
 
+/// steer 指示を sub-session へ記録するときの `log_type`（#647）。
+///
+/// 通常発話（`speech`）とも system（`system`）とも別の値にすることで、後から
+/// 「途中で親/オーナーが方向を変えた」と履歴上で判別できる（#647 受け入れ・記録要件）。
+/// 走行中注入の `SubtaskSteerInbound`（server 側）もこの値だけを watermark 差分読みする。
+pub const STEER_LOG_TYPE: &str = "steer";
+
+/// `steer_subtask` の結果種別（gateway 非依存 / #647）。
+///
+/// gateway 別の戻り値整形は呼び出し側が行う。ここは「届いた / 権限なし / steer 不可 /
+/// 既に決着済み / 不在」を型で返し、**黙って捨てない**（#647 受け入れ条件 3・4）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SteerOutcome {
+    /// sub-session へ steer を記録した。走行中サブが次の反復の合間に読む。
+    Accepted,
+    /// 存在するが呼び出し元に権限が無い（親セッション/owner 以外）。
+    Unauthorized,
+    /// 存在するが steer を読む主体がいない（auto-dispatch = LLM ループ無し）。
+    NotSteerable,
+    /// 既に決着（完了）または停止していた。読む主体がもういない。
+    AlreadySettled,
+    /// 対象 `subtask_id` が存在しない（registry にも DB のサブセッションにも無い）。
+    NotFound,
+    /// 対象は正当だが、steer ログ（＝記録かつ配送の唯一のアーティファクト）の書き込みに
+    /// 失敗した。記録できなければ配送もされないので、Accepted を返さず失敗を呼び出し側へ
+    /// 見せる（fail loud）。
+    RecordFailed,
+}
+
+/// 走行中 subtask へ追加指示（steer）を届ける中核処理（gateway 非依存 / #647）。
+///
+/// **設計の核**: サブタスクは独自 engine を組まず `run_agent_response` を depth+1 で
+/// 再入し、親ターンと同じ engine ループ（`LiveInboundSource` で反復の合間に新着を
+/// 注入する仕組み / #289）を通る。steer はこの既存機構を**そのままサブへ通す**:
+/// ここでは sub-session（`subtask-{subtask_id}`）へ `log_type=STEER_LOG_TYPE` の
+/// session_log を **1 本書くだけ**。走行中サブの engine に配線された
+/// `SubtaskSteerInbound`（server 側）がその行を watermark 差分で読み、次の反復の
+/// user メッセージへ足す。
+///
+/// この 1 本のログが**記録と配送を兼ねる唯一のアーティファクト**である（記録用の
+/// 書き込みと配送用のキューを別に持たない = 並行実装を作らない）。RUNNING のまま
+/// 受け取り、新しい状態は設けない（溜まった steer は log_type=steer の未読行として
+/// あるだけで、lifecycle 状態機械は不変）。
+///
+/// 認可は cancel と同じ `caller_can_manage_subtask`（owner 等価 or 親セッション一致
+/// + trust 序列）。steer 用に別の判定は発明しない（#647 裁定）。
+///
+/// 戻り値で「届いた / 権限なし / steer 不可 / 既に決着 / 不在」を区別し、決着済みや
+/// auto-dispatch へは**黙って捨てず**その旨を返す（#647 受け入れ条件 3・4）:
+/// - registry に在り steerable かつ未決着 → 記録して `Accepted`
+/// - registry に在るが権限なし → `Unauthorized`
+/// - registry に在るが auto-dispatch（`steerable=false`）→ `NotSteerable`
+/// - registry に在るが既に settle/cancel を主張済み → `AlreadySettled`
+/// - registry に無い → sub-session（`subtask-{id}`）の `status` を引き、
+///   completed/cancelled なら `AlreadySettled`、行が無ければ `NotFound`
+///
+/// registry 参照は `get`（shard 読みロック）で行い、認可・steerable・lifecycle 判定を
+/// その参照下で評価してから記録する。参照解放後に settle が入る競合はあり得るが、その
+/// 場合 steer ログは書かれても engine が読む前にサブが終わるだけで、無害（決着と同時刻の
+/// steer は届かないが、対象はもう居ない）。
+pub fn steer_subtask(
+    registry: &SubtaskRegistry,
+    db: &opencrab_db::Db,
+    subtask_id: &str,
+    message: &str,
+    caller: CallerIdentity,
+    caller_session_id: Option<&str>,
+) -> SteerOutcome {
+    // registry を read ロックで引く。所有権フィールドは insert 後不変なので、参照下で
+    // 認可・steerable・lifecycle を評価してよい（cancel の remove_if 述語と同じ不変条件）。
+    if let Some(entry) = registry.get(subtask_id) {
+        if !caller_can_manage_subtask(&caller, caller_session_id, &entry) {
+            return SteerOutcome::Unauthorized;
+        }
+        // 決着/停止を主張済み（登録簿からの除去が未反映の窓）なら読む主体がもういない。
+        if entry.lifecycle.is_settling() || entry.lifecycle.is_cancelled() {
+            return SteerOutcome::AlreadySettled;
+        }
+        // auto-dispatch は LLM ループが無く sub-session 行も作らないので読む主体がいない。
+        if !entry.steerable {
+            return SteerOutcome::NotSteerable;
+        }
+        let sub_session_id = entry.session_id.clone();
+        let sub_agent_id = entry.agent_id.clone();
+        // 参照（shard ロック）を持ったまま DB ロックを取ると deadlock の温床になるため、
+        // 記録に必要な値を取り出してから参照を落とす。
+        drop(entry);
+        // 記録＝配送。書けなければ届かないので Accepted を返さず RecordFailed で失敗を見せる。
+        return if record_steer(
+            db,
+            &sub_session_id,
+            &sub_agent_id,
+            subtask_id,
+            message,
+            caller_session_id,
+        ) {
+            SteerOutcome::Accepted
+        } else {
+            SteerOutcome::RecordFailed
+        };
+    }
+
+    // registry に無い: 既に決着/停止して除去されたか、そもそも存在しないか。
+    // sub-session id は `subtask-{id}` に固定なので DB の `status` で区別できる（#553 で
+    // settle/cancel が status を永続化する）。区別できない場合は fail-closed で NotFound。
+    let sub_session_id = format!("subtask-{subtask_id}");
+    match db.lock() {
+        Ok(conn) => match opencrab_db::queries::get_session(&conn, &sub_session_id) {
+            Ok(Some(session)) if matches!(session.status.as_str(), "completed" | "cancelled") => {
+                SteerOutcome::AlreadySettled
+            }
+            // active のまま registry に無いのは通常起きない（走行中は必ず登録簿に居る）。
+            // 起きたら「読む主体がいない」＝これ以上追えないので NotFound に倒す。
+            _ => SteerOutcome::NotFound,
+        },
+        Err(_) => SteerOutcome::NotFound,
+    }
+}
+
+/// steer をサブセッションの履歴へ 1 本記録する（#647）。書けたら `true`。
+///
+/// `log_type=STEER_LOG_TYPE` で通常発話と区別し、送り主を metadata に残す。**記録＝配送**の
+/// 唯一のアーティファクトなので best-effort にはしない: DB ロック失敗も INSERT 失敗も
+/// `false` を返し、呼び出し側が `RecordFailed`（fail loud）へ倒せるようにする。
+fn record_steer(
+    db: &opencrab_db::Db,
+    sub_session_id: &str,
+    sub_agent_id: &str,
+    subtask_id: &str,
+    message: &str,
+    from_session: Option<&str>,
+) -> bool {
+    let Ok(conn) = db.lock() else {
+        tracing::warn!(
+            subtask_id = %subtask_id,
+            "steer_subtask: db lock 取得失敗のため記録できず（steer は届かない）"
+        );
+        return false;
+    };
+    let log = opencrab_db::queries::SessionLogRow {
+        id: None,
+        agent_id: sub_agent_id.to_string(),
+        session_id: sub_session_id.to_string(),
+        log_type: STEER_LOG_TYPE.to_string(),
+        content: message.to_string(),
+        speaker_id: None,
+        turn_number: None,
+        metadata_json: Some(
+            serde_json::json!({
+                "subtask_id": subtask_id,
+                "from_session": from_session,
+            })
+            .to_string(),
+        ),
+        created_at: None,
+    };
+    match opencrab_db::queries::insert_session_log(&conn, &log) {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!(
+                subtask_id = %subtask_id,
+                "steer_subtask: steer ログの INSERT 失敗（steer は届かない）: {e}"
+            );
+            false
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // S3a: ツール呼び出しバッチを subtask として実行する dispatcher（非ブロック / 全ツール自動化）
 // ---------------------------------------------------------------------------
@@ -702,8 +893,9 @@ impl ActionExecutor for SharedExecutor {
 ///
 /// # 分類基準（この 6 つのどれかに当てはまるツールは inline に残す）
 ///
-/// 1. **制御系**（`spawn_subtask` / `cancel_subtask` / `report_progress`）: それ自体が
-///    subtask ライフサイクルを操作するため background 化しない。
+/// 1. **制御系**（`spawn_subtask` / `cancel_subtask` / `report_progress` / `steer_subtask`）:
+///    それ自体が subtask ライフサイクルを操作する（`steer_subtask` は走行中サブへ追加指示を
+///    差し込む / #647）ため background 化しない。
 /// 2. **配送系**（Discord 送信・A2UI 送信・VC 参加/退出・peer review 依頼・Nostr 送信）:
 ///    「送る」こと自体が応答であり、background 化して完了で再注入する意味がない。加えて
 ///    gateway が「明示送信したか」を親ターンの終わりに見て暗黙返信を抑制する場合
@@ -756,10 +948,15 @@ impl ActionExecutor for SharedExecutor {
 /// 呼び出し側は `SubtaskToolDispatcher::with_non_dispatch` で上書き/追加できる。
 /// 運用者向けの**分類基準**は `docs/DESIGN.md`「非ブロックツール実行」節。
 pub fn default_non_dispatch_tools() -> HashSet<String> {
-    let mut set: HashSet<String> = ["spawn_subtask", "cancel_subtask", "report_progress"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let mut set: HashSet<String> = [
+        "spawn_subtask",
+        "cancel_subtask",
+        "report_progress",
+        "steer_subtask",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
     // core アクション（`ActionDispatcher::new()`）の inline 集合。以前はここが空で、
     // core 32 個が分類ガードの外＝全 dispatch だった（記憶想起が 4 通に割れる等）。
     for name in crate::bridge::CORE_INLINE_ACTIONS {
@@ -1204,6 +1401,9 @@ impl ToolDispatcher for SubtaskToolDispatcher {
                 // 親ターンの呼び出し元をそのまま引き継ぐ（#298）。
                 caller: self.caller.clone(),
                 lifecycle,
+                // auto-dispatch はツールを順に実行するだけで LLM ループが無く、
+                // `run_agent_response` を通らないため steer を読む主体がいない。steer 不可（#647）。
+                steerable: false,
             },
         );
         // #431: 登録が成立した = このターンは「次の行動」を起こした。明示
@@ -1321,6 +1521,7 @@ mod tests {
                 reply_target: None,
                 caller: CallerIdentity::Agent,
                 lifecycle: SubtaskLifecycle::new(),
+                steerable: false,
             },
         );
 
@@ -1408,6 +1609,7 @@ mod tests {
                 reply_target: None,
                 caller: CallerIdentity::Agent,
                 lifecycle: SubtaskLifecycle::new(),
+                steerable: false,
             },
         );
 
@@ -1486,6 +1688,7 @@ mod tests {
                 reply_target: reply_target.map(|s| s.to_string()),
                 caller,
                 lifecycle: SubtaskLifecycle::new(),
+                steerable: false,
             },
         );
 
@@ -2134,9 +2337,204 @@ mod tests {
                 reply_target: None,
                 caller: CallerIdentity::Agent,
                 lifecycle: SubtaskLifecycle::new(),
+                steerable: false,
             },
         );
         handle
+    }
+
+    /// steer テスト用: `steerable` と `caller` を指定できる fake subtask を登録する（#647）。
+    fn insert_fake_subtask_ex(
+        registry: &SubtaskRegistry,
+        subtask_id: &str,
+        parent_session_id: &str,
+        caller: CallerIdentity,
+        steerable: bool,
+    ) -> tokio::task::JoinHandle<()> {
+        let handle = tokio::spawn(std::future::pending::<()>());
+        registry.insert(
+            subtask_id.to_string(),
+            SpawnedSubtask {
+                abort_handle: handle.abort_handle(),
+                session_id: format!("subtask-{subtask_id}"),
+                parent_session_id: parent_session_id.to_string(),
+                agent_id: "agent-a".to_string(),
+                label: "long job".to_string(),
+                tool_name: "spawn_subtask".to_string(),
+                started_at: std::time::Instant::now(),
+                reply_target: None,
+                caller,
+                lifecycle: SubtaskLifecycle::new(),
+                steerable,
+            },
+        );
+        handle
+    }
+
+    /// #647: 親セッションからの steer は steerable なサブへ届き、sub-session の履歴へ
+    /// `log_type=steer` で記録される（通常発話と区別）。RUNNING のまま・除去しない。
+    #[tokio::test]
+    async fn steer_subtask_records_and_keeps_running() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let parent = "web-agent-a-conv1";
+        let _handle =
+            insert_fake_subtask_ex(&registry, "st-1", parent, CallerIdentity::Agent, true);
+
+        let outcome = steer_subtask(
+            &registry,
+            &db,
+            "st-1",
+            "条件を1つ足して: 出力は JSON で",
+            CallerIdentity::Agent,
+            Some(parent),
+        );
+        assert_eq!(outcome, SteerOutcome::Accepted);
+        // 状態機械は不変: RUNNING のまま registry に残る（cancel と違い除去しない）。
+        assert!(registry.contains_key("st-1"), "steer 後も registry に残る");
+        // sub-session の履歴に log_type=steer が 1 本落ちる。
+        let conn = db.lock().unwrap();
+        let logs =
+            opencrab_db::queries::list_recent_session_logs(&conn, "subtask-st-1", 10).unwrap();
+        let steer_logs: Vec<_> = logs
+            .iter()
+            .filter(|l| l.log_type == STEER_LOG_TYPE)
+            .collect();
+        assert_eq!(steer_logs.len(), 1, "steer が 1 本記録される");
+        assert!(steer_logs[0].content.contains("JSON"), "本文が記録される");
+    }
+
+    /// #647 受け入れ条件 4: auto-dispatch（`steerable=false`）へは NotSteerable を返し、
+    /// **黙って捨てない**。steer ログも書かない（読む主体がいないため）。
+    #[tokio::test]
+    async fn steer_subtask_auto_dispatch_is_not_steerable() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let parent = "web-agent-a-conv1";
+        let _handle =
+            insert_fake_subtask_ex(&registry, "st-ad", parent, CallerIdentity::Agent, false);
+
+        let outcome = steer_subtask(
+            &registry,
+            &db,
+            "st-ad",
+            "方向を変えて",
+            CallerIdentity::Agent,
+            Some(parent),
+        );
+        assert_eq!(outcome, SteerOutcome::NotSteerable);
+        let conn = db.lock().unwrap();
+        let logs =
+            opencrab_db::queries::list_recent_session_logs(&conn, "subtask-st-ad", 10).unwrap();
+        assert!(
+            !logs.iter().any(|l| l.log_type == STEER_LOG_TYPE),
+            "NotSteerable のとき steer ログを書かない"
+        );
+    }
+
+    /// #647: 認可は cancel と同じ。他セッションの Agent からは Unauthorized。
+    #[tokio::test]
+    async fn steer_subtask_foreign_session_unauthorized() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let _handle = insert_fake_subtask_ex(
+            &registry,
+            "st-f",
+            "web-other-c9",
+            CallerIdentity::Agent,
+            true,
+        );
+
+        let outcome = steer_subtask(
+            &registry,
+            &db,
+            "st-f",
+            "x",
+            CallerIdentity::Agent,
+            Some("web-agent-a-conv1"),
+        );
+        assert_eq!(outcome, SteerOutcome::Unauthorized);
+    }
+
+    /// #647: owner はセッションをまたいで steer できる（cancel と同じ owner 等価規則）。
+    #[tokio::test]
+    async fn steer_subtask_owner_allowed_cross_session() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let _handle = insert_fake_subtask_ex(
+            &registry,
+            "st-o",
+            "web-other-c9",
+            CallerIdentity::Agent,
+            true,
+        );
+
+        let outcome = steer_subtask(
+            &registry,
+            &db,
+            "st-o",
+            "追加指示",
+            CallerIdentity::Owner,
+            Some("some-other-session"),
+        );
+        assert_eq!(outcome, SteerOutcome::Accepted);
+    }
+
+    /// #647 受け入れ条件 3: registry に無く、sub-session が completed/cancelled のときは
+    /// AlreadySettled を返す（決着済みへ送ったことが呼び出し側に分かる）。
+    #[tokio::test]
+    async fn steer_subtask_settled_session_is_already_settled() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        // registry には入れず、決着済みの sub-session 行だけを用意する。
+        {
+            let conn = db.lock().unwrap();
+            let session = opencrab_db::queries::SessionRow {
+                id: "subtask-st-done".to_string(),
+                mode: "subtask".to_string(),
+                theme: "Subtask: done".to_string(),
+                phase: "active".to_string(),
+                turn_number: 0,
+                status: "completed".to_string(),
+                participant_ids_json: "[\"agent-a\"]".to_string(),
+                facilitator_id: None,
+                done_count: 0,
+                max_turns: None,
+                metadata_json: None,
+            };
+            opencrab_db::queries::insert_session(&conn, &session).unwrap();
+        }
+        let outcome = steer_subtask(
+            &registry,
+            &db,
+            "st-done",
+            "遅れて届いた指示",
+            CallerIdentity::Owner,
+            Some("web-agent-a-conv1"),
+        );
+        assert_eq!(outcome, SteerOutcome::AlreadySettled);
+    }
+
+    /// #647: registry にも DB にも無い ID は NotFound。
+    #[tokio::test]
+    async fn steer_subtask_missing_is_not_found() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let outcome = steer_subtask(
+            &registry,
+            &db,
+            "nope",
+            "x",
+            CallerIdentity::Owner,
+            Some("web-agent-a-conv1"),
+        );
+        assert_eq!(outcome, SteerOutcome::NotFound);
     }
 
     /// #161: 親セッションからの cancel_subtask は abort + 除去し、親ログへ
@@ -2390,6 +2788,7 @@ mod tests {
             reply_target: Some("channel:456".to_string()),
             caller: CallerIdentity::Agent,
             lifecycle: SubtaskLifecycle::new(),
+            steerable: false,
         };
         registry.insert("sub-1".to_string(), entry);
 

@@ -43,9 +43,10 @@ pub use dispatcher::ActionDispatcher;
 pub use run_request::{LiveInboundScope, RunRequest};
 pub use session_runtime::{SessionLocks, SessionRuntime};
 pub use subtask::{
-    cancel_subtask, default_non_dispatch_tools, CancelOutcome, NoopCompletionSink, SettleKind,
-    SharedExecutor, SpawnedSubtask, SubtaskCompletionSink, SubtaskLifecycle, SubtaskRegistry,
-    SubtaskSettled, SubtaskToolDispatcher, DEFAULT_DISPATCH_TIMEOUT_SECS,
+    cancel_subtask, default_non_dispatch_tools, steer_subtask, CancelOutcome, NoopCompletionSink,
+    SettleKind, SharedExecutor, SpawnedSubtask, SteerOutcome, SubtaskCompletionSink,
+    SubtaskLifecycle, SubtaskRegistry, SubtaskSettled, SubtaskToolDispatcher,
+    DEFAULT_DISPATCH_TIMEOUT_SECS, STEER_LOG_TYPE,
 };
 pub use subtask_notify::{
     NoopLifecycleNotifier, NoopRunNotifier, NotifyTarget, NotifyTargetError,
