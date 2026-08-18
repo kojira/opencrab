@@ -27,7 +27,9 @@ fn build_client(timeout_secs: u64) -> Client {
         .timeout(Duration::from_secs(timeout_secs))
         .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
         .build()
-        .unwrap_or_default()
+        // 起動時 1 回の構築。ここで失敗した client へ無言退化すると timeout 無しに戻り
+        // 本 PR の主旨（無応答を有限で切る）を裏切るため fail loud に落とす（#667）。
+        .expect("failed to build HTTP client with timeout")
 }
 
 /// Anthropic Claude API provider.
