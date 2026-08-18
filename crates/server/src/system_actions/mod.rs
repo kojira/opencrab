@@ -1448,6 +1448,9 @@ impl SystemGatewayActions {
             SteerOutcome::Unauthorized => err(format!(
                 "{REJECTION_CODE_PREFIX}steer_subtask: subtask '{subtask_id}' へこのセッションから追加指示を送る権限がありません（親セッションまたは owner のみ）"
             )),
+            SteerOutcome::RecordFailed => err(format!(
+                "steer_subtask: subtask '{subtask_id}' への追加指示の記録に失敗しました（届いていません。時間をおいて再試行してください）"
+            )),
         }
     }
 

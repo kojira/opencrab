@@ -702,6 +702,10 @@ pub enum SteerOutcome {
     AlreadySettled,
     /// 対象 `subtask_id` が存在しない（registry にも DB のサブセッションにも無い）。
     NotFound,
+    /// 対象は正当だが、steer ログ（＝記録かつ配送の唯一のアーティファクト）の書き込みに
+    /// 失敗した。記録できなければ配送もされないので、Accepted を返さず失敗を呼び出し側へ
+    /// 見せる（fail loud）。
+    RecordFailed,
 }
 
 /// 走行中 subtask へ追加指示（steer）を届ける中核処理（gateway 非依存 / #647）。
@@ -762,15 +766,19 @@ pub fn steer_subtask(
         // 参照（shard ロック）を持ったまま DB ロックを取ると deadlock の温床になるため、
         // 記録に必要な値を取り出してから参照を落とす。
         drop(entry);
-        record_steer(
+        // 記録＝配送。書けなければ届かないので Accepted を返さず RecordFailed で失敗を見せる。
+        return if record_steer(
             db,
             &sub_session_id,
             &sub_agent_id,
             subtask_id,
             message,
             caller_session_id,
-        );
-        return SteerOutcome::Accepted;
+        ) {
+            SteerOutcome::Accepted
+        } else {
+            SteerOutcome::RecordFailed
+        };
     }
 
     // registry に無い: 既に決着/停止して除去されたか、そもそも存在しないか。
@@ -790,12 +798,11 @@ pub fn steer_subtask(
     }
 }
 
-/// steer をサブセッションの履歴へ 1 本記録する（#647）。
+/// steer をサブセッションの履歴へ 1 本記録する（#647）。書けたら `true`。
 ///
-/// `log_type=STEER_LOG_TYPE` で通常発話と区別し、送り主を metadata に残す。best-effort:
-/// 記録に失敗しても呼び出し側は Accepted を返す方針にはせず、失敗時はここで warn する
-/// （記録＝配送なので、失敗は「届かない」に等しい。ただし DB 一時ロック失敗まで
-/// エラーへ昇格させると steer 全体が脆くなるため、既存の best-effort ログと同じ扱い）。
+/// `log_type=STEER_LOG_TYPE` で通常発話と区別し、送り主を metadata に残す。**記録＝配送**の
+/// 唯一のアーティファクトなので best-effort にはしない: DB ロック失敗も INSERT 失敗も
+/// `false` を返し、呼び出し側が `RecordFailed`（fail loud）へ倒せるようにする。
 fn record_steer(
     db: &opencrab_db::Db,
     sub_session_id: &str,
@@ -803,13 +810,13 @@ fn record_steer(
     subtask_id: &str,
     message: &str,
     from_session: Option<&str>,
-) {
+) -> bool {
     let Ok(conn) = db.lock() else {
         tracing::warn!(
             subtask_id = %subtask_id,
             "steer_subtask: db lock 取得失敗のため記録できず（steer は届かない）"
         );
-        return;
+        return false;
     };
     let log = opencrab_db::queries::SessionLogRow {
         id: None,
@@ -828,7 +835,16 @@ fn record_steer(
         ),
         created_at: None,
     };
-    opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
+    match opencrab_db::queries::insert_session_log(&conn, &log) {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!(
+                subtask_id = %subtask_id,
+                "steer_subtask: steer ログの INSERT 失敗（steer は届かない）: {e}"
+            );
+            false
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

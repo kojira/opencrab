@@ -573,25 +573,21 @@ struct SubtaskSteerInbound {
 }
 
 impl SubtaskSteerInbound {
-    /// 現在の最新 log id を watermark 初期値として組み立てる。
+    /// watermark 初期値を **0（セッション先頭）** にして組み立てる。
     ///
-    /// 取得に失敗した場合は `i64::MAX` を置く（＝何も注入しない）。steer 注入はあくまで
-    /// 改善であって、失敗してもサブタスクの実行を壊さないことを優先する。
+    /// `SessionLiveInbound`（親ターン用）は「起動時点の最新 id」で初期化する。あちらは
+    /// 会話履歴をターン開始時に 1 度組んでおり、既に履歴へ載った過去発言を二重注入しない
+    /// ためにその値が要る。だが steer の宛先は **spawn したばかりの新規 sub-session**で、
+    /// engine が動き出す前に steer が積まれることは無い（過去の steer が存在しない）。
+    /// にもかかわらず「最新 id」で初期化すると、spawn 直後〜この `new()` までの窓に届いた
+    /// steer を取りこぼす（`steer_subtask` は Accepted を返したのに読まれない）。リプレイの
+    /// 心配が無い場所なので 0 から読む方が正しく、「Accepted なのに読まれない」を settle
+    /// race（doc 明記済みの許容窓）だけに絞れる。
     fn new(db: opencrab_db::Db, sub_session_id: &str) -> Self {
-        let latest = match db.lock() {
-            Ok(conn) => opencrab_db::queries::list_recent_session_logs(&conn, sub_session_id, 1)
-                .ok()
-                .and_then(|rows| rows.first().and_then(|l| l.id))
-                .unwrap_or(0),
-            Err(e) => {
-                tracing::warn!(session_id = %sub_session_id, "steer inbound watermark unavailable: {e}");
-                i64::MAX
-            }
-        };
         Self {
             db,
             sub_session_id: sub_session_id.to_string(),
-            watermark: std::sync::atomic::AtomicI64::new(latest),
+            watermark: std::sync::atomic::AtomicI64::new(0),
         }
     }
 }
@@ -2774,26 +2770,32 @@ mod steer_inbound_tests {
     }
 
     /// #647: steer ログだけを差分注入し、同じ steer を二度返さない（watermark）。通常発話や
-    /// system ログは拾わない。
+    /// system ログは拾わない。watermark 初期値は 0（セッション先頭）なので、source 構築の
+    /// 直前に届いた steer も取りこぼさない（「Accepted なのに読まれない」窓を閉じる）。
     #[test]
     fn polls_only_new_steer_logs_and_dedups() {
         let conn = opencrab_db::init_memory().unwrap();
         let db = opencrab_db::Db::from_connection(conn);
         let sub = "subtask-abc";
 
-        // watermark を張る前に積まれた行は注入対象外（＝履歴側で見えている想定）。
-        insert_log(&db, sub, "steer", "古い steer（対象外）");
+        // source 構築の**前**に届いた steer も、watermark=0 なので初回 poll で拾える
+        // （spawn 直後〜engine 準備完了の窓での消失を防ぐ / レビュー指摘 1）。
+        insert_log(&db, sub, opencrab_actions::STEER_LOG_TYPE, "早い steer");
         let src = SubtaskSteerInbound::new(db.clone(), sub);
 
-        // 起動後に steer が 1 本届く。
+        // 構築後にもう 1 本届く。
         insert_log(&db, sub, opencrab_actions::STEER_LOG_TYPE, "JSON で出して");
         // 別 log_type は拾わない。
         insert_log(&db, sub, "speech", "これは発話（対象外）");
         insert_log(&db, sub, "system", "これは system（対象外）");
 
         let first = src.poll_new_messages();
-        assert_eq!(first.len(), 1, "新着 steer 1 本だけを返す");
-        assert!(first[0].contains("JSON で出して"), "本文が載る");
+        assert_eq!(first.len(), 2, "構築前後の steer を両方拾う");
+        assert!(
+            first[0].contains("早い steer"),
+            "構築前の steer も取りこぼさない"
+        );
+        assert!(first[1].contains("JSON で出して"), "本文が載る");
         assert!(first[0].contains("追加指示"), "steer と分かる整形が付く");
 
         // 2 回目は新着なし（watermark が進んでいる）。

@@ -692,10 +692,191 @@ fn registry_with_caller(
     registry
 }
 
+/// steer テスト用: `steerable=true` の subtask を 1 件登録した registry（#647）。
+fn registry_with_steerable(
+    subtask_id: &str,
+    session_id: &str,
+    parent_session_id: &str,
+    caller: opencrab_actions::CallerIdentity,
+) -> SubtaskRegistry {
+    let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
+    registry.insert(
+        subtask_id.to_string(),
+        opencrab_actions::SpawnedSubtask {
+            abort_handle: tokio::spawn(std::future::pending::<()>()).abort_handle(),
+            session_id: session_id.to_string(),
+            parent_session_id: parent_session_id.to_string(),
+            agent_id: "agent-x".to_string(),
+            label: "job".to_string(),
+            tool_name: "spawn_subtask".to_string(),
+            started_at: std::time::Instant::now(),
+            reply_target: None,
+            caller,
+            lifecycle: opencrab_actions::SubtaskLifecycle::new(),
+            steerable: true,
+        },
+    );
+    registry
+}
+
 fn sub_ctx(session_id: &str) -> GatewayCallContext {
     GatewayCallContext::new(GatewayCaller::Agent, "agent-x")
         .with_session_id(session_id)
         .with_depth(1)
+}
+
+/// #647 gateway: 親セッションからの steer は success を返し、data.steered=true と note を載せる。
+#[tokio::test]
+async fn steer_subtask_gateway_accepted_maps_to_success() {
+    let state = crate::test_app_state();
+    let registry = registry_with_steerable(
+        "st-1",
+        "subtask-st-1",
+        "nostr-agent-a",
+        opencrab_actions::CallerIdentity::Agent,
+    );
+    let actions = SystemGatewayActions::new(state.clone(), None, Some(registry), None);
+    let ctx =
+        GatewayCallContext::new(GatewayCaller::Agent, "agent-x").with_session_id("nostr-agent-a");
+    let r = actions
+        .execute(
+            "steer_subtask",
+            &json!({ "subtask_id": "st-1", "message": "出力は JSON で" }),
+            &ctx,
+        )
+        .await;
+    assert!(r.success, "親からの steer は通る: {:?}", r.error);
+    let data = r.data.expect("data");
+    assert_eq!(data["steered"], json!(true));
+    // sub-session の履歴に steer が 1 本落ちる。
+    let conn = state.db.lock().unwrap();
+    let logs = opencrab_db::queries::list_session_logs_by_session(&conn, "subtask-st-1").unwrap();
+    assert_eq!(
+        logs.iter()
+            .filter(|l| l.log_type == opencrab_actions::STEER_LOG_TYPE)
+            .count(),
+        1
+    );
+}
+
+/// #647 gateway: 空 message は fail-closed で弾く（registry を引くより前）。
+#[tokio::test]
+async fn steer_subtask_gateway_empty_message_is_rejected() {
+    let state = crate::test_app_state();
+    let registry = registry_with_steerable(
+        "st-1",
+        "subtask-st-1",
+        "nostr-agent-a",
+        opencrab_actions::CallerIdentity::Agent,
+    );
+    let actions = SystemGatewayActions::new(state.clone(), None, Some(registry), None);
+    let ctx =
+        GatewayCallContext::new(GatewayCaller::Agent, "agent-x").with_session_id("nostr-agent-a");
+    // 空白のみ。
+    let r = actions
+        .execute(
+            "steer_subtask",
+            &json!({ "subtask_id": "st-1", "message": "   " }),
+            &ctx,
+        )
+        .await;
+    assert!(!r.success, "空 message は弾く");
+    assert!(r.error.unwrap().contains("message"));
+    // message キーそのものが無い場合も弾く。
+    let r2 = actions
+        .execute("steer_subtask", &json!({ "subtask_id": "st-1" }), &ctx)
+        .await;
+    assert!(!r2.success, "message 欠落は弾く");
+}
+
+/// #647 gateway: registry 未配線（dispatch を追跡していない）は not found。
+#[tokio::test]
+async fn steer_subtask_gateway_no_registry_is_not_found() {
+    let state = crate::test_app_state();
+    let actions = SystemGatewayActions::new(state, None, None, None);
+    let ctx =
+        GatewayCallContext::new(GatewayCaller::Agent, "agent-x").with_session_id("nostr-agent-a");
+    let r = actions
+        .execute(
+            "steer_subtask",
+            &json!({ "subtask_id": "st-1", "message": "x" }),
+            &ctx,
+        )
+        .await;
+    assert!(!r.success);
+    assert!(r.error.unwrap().contains("not found"));
+}
+
+/// #647 gateway: auto-dispatch（steerable=false）は NotSteerable をエラーで返す（黙って無視しない）。
+#[tokio::test]
+async fn steer_subtask_gateway_auto_dispatch_maps_to_error() {
+    let state = crate::test_app_state();
+    let registry = registry_with_caller(
+        "st-ad",
+        "subtask-st-ad",
+        "nostr-agent-a",
+        opencrab_actions::CallerIdentity::Agent,
+    ); // steerable=false
+    let actions = SystemGatewayActions::new(state, None, Some(registry), None);
+    let ctx =
+        GatewayCallContext::new(GatewayCaller::Agent, "agent-x").with_session_id("nostr-agent-a");
+    let r = actions
+        .execute(
+            "steer_subtask",
+            &json!({ "subtask_id": "st-ad", "message": "x" }),
+            &ctx,
+        )
+        .await;
+    assert!(!r.success);
+    assert!(r.error.unwrap().contains("auto-dispatch"));
+}
+
+/// #647 gateway: 他セッションの Agent からは Unauthorized（拒否コード付き）。
+#[tokio::test]
+async fn steer_subtask_gateway_foreign_session_maps_to_unauthorized() {
+    let state = crate::test_app_state();
+    let registry = registry_with_steerable(
+        "st-f",
+        "subtask-st-f",
+        "web-other-c9",
+        opencrab_actions::CallerIdentity::Agent,
+    );
+    let actions = SystemGatewayActions::new(state, None, Some(registry), None);
+    let ctx =
+        GatewayCallContext::new(GatewayCaller::Agent, "agent-x").with_session_id("nostr-agent-a");
+    let r = actions
+        .execute(
+            "steer_subtask",
+            &json!({ "subtask_id": "st-f", "message": "x" }),
+            &ctx,
+        )
+        .await;
+    assert!(!r.success);
+    assert!(r.error.unwrap().starts_with(REJECTION_CODE_PREFIX));
+}
+
+/// #647 gateway: registry にも DB にも無い id は not found（present registry + 別 id）。
+#[tokio::test]
+async fn steer_subtask_gateway_unknown_id_is_not_found() {
+    let state = crate::test_app_state();
+    let registry = registry_with_steerable(
+        "st-1",
+        "subtask-st-1",
+        "nostr-agent-a",
+        opencrab_actions::CallerIdentity::Agent,
+    );
+    let actions = SystemGatewayActions::new(state, None, Some(registry), None);
+    let ctx =
+        GatewayCallContext::new(GatewayCaller::Agent, "agent-x").with_session_id("nostr-agent-a");
+    let r = actions
+        .execute(
+            "steer_subtask",
+            &json!({ "subtask_id": "does-not-exist", "message": "x" }),
+            &ctx,
+        )
+        .await;
+    assert!(!r.success);
+    assert!(r.error.unwrap().contains("not found"));
 }
 
 /// 親セッションログに記録された subtask_progress のメッセージ一覧。
