@@ -4,6 +4,7 @@ use futures::stream::BoxStream;
 use futures::StreamExt;
 use reqwest::Client;
 use serde_json::Value;
+use std::time::Duration;
 use tracing::debug;
 
 use crate::message::*;
@@ -11,6 +12,25 @@ use crate::traits::{LlmProvider, ModelInfo};
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1";
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
+
+/// チャット補完リクエスト全体の上限時間（秒）。超過で reqwest が timeout エラーを
+/// 返し、ターンが fail loud に落ちる（#667）。値の根拠は openai.rs の同名定数と同じ
+/// （非ストリーミング単発 POST で上流無応答を有限で切る。実測 79 tok/s・128K 上限でも
+/// 実運用の生成は数分で完了する）。タイムアウトは 4xx でないため router のリトライ対象。
+const CHAT_TIMEOUT_SECS: u64 = 600;
+/// 接続確立の timeout（秒）。生成の長さとは無関係。接続すら張れない状態を即検知する。
+const CONNECT_TIMEOUT_SECS: u64 = 10;
+
+/// チャット補完用の HTTP クライアントを組む（総時間 timeout 付き・#667）。
+fn build_client(timeout_secs: u64) -> Client {
+    Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+        .build()
+        // 起動時 1 回の構築。ここで失敗した client へ無言退化すると timeout 無しに戻り
+        // 本 PR の主旨（無応答を有限で切る）を裏切るため fail loud に落とす（#667）。
+        .expect("failed to build HTTP client with timeout")
+}
 
 /// Anthropic Claude API provider.
 #[derive(Debug, Clone)]
@@ -26,7 +46,7 @@ pub struct AnthropicProvider {
 impl AnthropicProvider {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: build_client(CHAT_TIMEOUT_SECS),
             api_key: api_key.into(),
             base_url: ANTHROPIC_API_URL.to_string(),
             name: "anthropic".to_string(),
@@ -648,5 +668,41 @@ mod tests {
         let system = body["system"].as_array().unwrap();
         assert_eq!(system.len(), 1);
         assert_eq!(system[0]["text"], "sys prompt\n\nsecond sys");
+    }
+
+    /// リクエストを受けてから `delay` 待って 200 を返すモック（timeout 検証用）。
+    async fn spawn_slow_mock(delay: Duration) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let _ = sock.read(&mut buf).await;
+                    tokio::time::sleep(delay).await;
+                    let resp =
+                        "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}";
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}/slow")
+    }
+
+    /// #667: 総時間 timeout が実際に client へ効いていることを確認する。無応答の上流を
+    /// 有限で切る（fail loud）ための肝なので、定数の保持ではなく client の挙動で見る。
+    #[tokio::test]
+    async fn test_chat_timeout_is_applied_to_the_http_client() {
+        let url = spawn_slow_mock(Duration::from_millis(1500)).await;
+
+        let short = build_client(1);
+        let err = short.get(&url).send().await.unwrap_err();
+        assert!(err.is_timeout(), "1 秒なら timeout するはず: {err}");
+
+        let long = build_client(10);
+        let resp = long.get(&url).send().await.expect("10 秒なら読み切れる");
+        assert!(resp.status().is_success());
     }
 }
