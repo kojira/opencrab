@@ -982,6 +982,75 @@ async fn a_normal_reply_gets_no_no_reply_reaction() {
     );
 }
 
+// ---- ターン失敗の可視化（#668） ----
+
+/// `Err` を渡したときの handle_agent_response のリアクション付与を観測する。
+async fn failure_reaction_calls(message_id: &str) -> Vec<(u64, u64, String)> {
+    let state = FakeRunner::new();
+    let gateway = FakeReactionGateway::default();
+
+    super::handle_agent_response(
+        Err(anyhow::anyhow!("upstream provider exploded")),
+        "crab",
+        "discord-crab-111-222",
+        222,
+        "222",
+        &state,
+        &gateway,
+        message_id,
+    )
+    .await;
+
+    let calls = gateway.calls.lock().unwrap();
+    calls.clone()
+}
+
+/// **ターンがエラーで失敗したら、トリガー投稿に ❌ が付く（本文投稿はしない）。**
+///
+/// エラー本文をチャンネルへ流すと複数エージェント間で反応し合う無限ループになるため、
+/// 「失敗した」ことだけをリアクションで可視化する（#668）。宛先（チャンネル・メッセージ）と
+/// 絵文字まで固定する — 取り違えると無関係な投稿に ❌ が付く。
+#[tokio::test]
+async fn a_failed_turn_marks_the_trigger_message_with_a_cross() {
+    let calls = failure_reaction_calls("1234567890123456789").await;
+    assert_eq!(
+        calls.len(),
+        1,
+        "失敗ターンなのに ❌ が付いていない（失敗が誰にも見えない）"
+    );
+    assert_eq!(calls[0].0, 222, "リアクション先のチャンネルが違う");
+    assert_eq!(
+        calls[0].1, 1234567890123456789,
+        "リアクション先のメッセージが違う"
+    );
+    assert_eq!(calls[0].2, "❌", "失敗の絵文字が変わっている");
+    assert_ne!(calls[0].2, "👀", "受信済みマークと同じ絵文字になっている");
+    assert_ne!(calls[0].2, "🤐", "NO_REPLY マークと同じ絵文字になっている");
+}
+
+/// **成功したターンには ❌ を付けない。**
+///
+/// 成功したのに失敗マークが付くと意味が反転する（他エージェントが不要に反応しうる）。
+#[tokio::test]
+async fn a_successful_turn_gets_no_failure_reaction() {
+    let calls = no_reply_reaction_calls("ふつうの返事", "1234567890123456789").await;
+    assert!(
+        !calls.iter().any(|c| c.2 == "❌"),
+        "成功ターンに失敗リアクション（❌）が付いている"
+    );
+}
+
+/// **`NO_REPLY`（黙ると決めた）は失敗ではないので ❌ ではなく 🤐 が付く。**
+///
+/// 「読んで黙った」と「落ちて返せなかった」を絵文字で区別するのが #317/#668 の要点。
+#[tokio::test]
+async fn no_reply_is_distinct_from_failure() {
+    let calls = no_reply_reaction_calls("NO_REPLY", "1234567890123456789").await;
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].2, "🤐", "NO_REPLY が失敗（❌）と混同されている");
+    assert_ne!(calls[0].2, "❌", "黙ったターンに失敗マークが付いている");
+}
+
 /// **どんな送信者の投稿にも 👀 が付く**（#317: bot を特別扱いしない）。
 ///
 /// 以前は `reaction_added` を「送信者が bot か」で初期化していたため、
