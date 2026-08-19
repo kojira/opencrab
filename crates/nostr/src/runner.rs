@@ -55,10 +55,14 @@ pub trait NostrAgentRunner: AgentRuntime {
     ///
     /// 契約:
     /// - 照合するのは **Nostr 経路の行だけ**（trusted_users は `platform='nostr'` で絞る）。
-    /// - DB を引けない等は**空**（fail-closed。owner/co_agent/trusted を空にしても、フォロイー ∪
-    ///   owner はフォローリスト側で担保され、未登録者は従来どおり落ちる。allow-all へは倒さない）。
+    /// - **未登録は `Ok(空)`**（owner 未設定・trusted/co_agent 無し）。フォロイー ∪ owner は
+    ///   フォローリスト側で担保され、空でも allow-all へは倒れない。
+    /// - **DB の失敗（lock poison / query Err）は `Err` で伝播させる**（黙って `Ok(空)` に
+    ///   化けさせない）。呼び出し側（[`crate::manager`] の更新経路）はこれを fetch_following の
+    ///   Err と同じ「前回値保持＋warn」に合流させ、owner/trusted がキャッシュから無音で消える
+    ///   のを防ぐ。「登録が無いから空」と「DB が壊れて読めない」を取り違えないための区別。
     /// - 表記（hex / npub）は問わない（受け手が正規化する）。
-    fn nostr_gate_allow_keys(&self, agent_id: &str) -> NostrGateAllowKeys;
+    fn nostr_gate_allow_keys(&self, agent_id: &str) -> Result<NostrGateAllowKeys>;
 
     // 転記（受信イベント / エージェント返信）は [`AgentRuntime`] が持つ（#158 S3）。
     // `record_inbound_message` / `record_outbound_reply` を

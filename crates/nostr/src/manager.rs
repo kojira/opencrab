@@ -744,10 +744,12 @@ async fn run_nostr_loop<R: NostrAgentRunner + Clone>(
 /// co_agent / trusted_users（DB 由来 / `nostr_gate_allow_keys`）を [`follow_key`] で正規化して
 /// 1 つの [`AllowSources`] に合成する。
 ///
-/// **フォローリスト取得の失敗は `Err`**（呼び出し側が起動中止 or 前回値保持で fail-loud に扱う）。
-/// DB 由来のキーは**単一源**（判定は resolve_nostr_caller と同じ DB 表を材料にする）で、DB を
-/// 引けなければ空（fail-closed。allow-all へは倒さない）。正規化はここ 1 箇所に閉じる
-/// （author_key と同じ `follow_key`。書き手と読み手のキーずれ事故を防ぐ）。
+/// **取得の失敗はすべて `Err`**（呼び出し側が起動中止 or 前回値保持で fail-loud に扱う）:
+/// フォローリスト（relay）取得の失敗も、DB 由来キーの取得失敗（lock poison / query Err）も、
+/// どちらもここで `?` により `Err` になる。DB 側を `Ok(空)` に握り潰さないことで、owner/trusted が
+/// DB エラーで無音でキャッシュから消えるのを防ぐ（「未登録＝空」と「DB 故障＝読めない」を区別）。
+/// DB 由来のキーは**単一源**（判定は resolve_nostr_caller と同じ DB 表を材料にする）。正規化は
+/// ここ 1 箇所に閉じる（author_key と同じ `follow_key`。書き手と読み手のキーずれ事故を防ぐ）。
 async fn build_allow_sources<R: NostrAgentRunner>(
     runner: &R,
     cli: &NostaroCli,
@@ -760,8 +762,8 @@ async fn build_allow_sources<R: NostrAgentRunner>(
         .iter()
         .map(|k| crate::pubkey::follow_key(k))
         .collect();
-    // DB 由来（owner / co_agent / trusted_users）。fail-closed（空でも allow-all へは倒れない）。
-    let db = runner.nostr_gate_allow_keys(agent_id);
+    // DB 由来（owner / co_agent / trusted_users）。DB 故障は `?` で伝播（Ok(空) に化けさせない）。
+    let db = runner.nostr_gate_allow_keys(agent_id)?;
     let to_set = |v: &[String]| -> HashSet<String> {
         v.iter().map(|s| crate::pubkey::follow_key(s)).collect()
     };
@@ -773,12 +775,41 @@ async fn build_allow_sources<R: NostrAgentRunner>(
     })
 }
 
+/// #698: 許可集合を 1 回引き直して `allow` セルへ反映する。
+///
+/// 成功なら差し替え、**失敗なら前回値を保持**して warn（全通しへは倒さない = fail-loud だが
+/// 権威データは保つ）。fetch_following（relay）の失敗も nostr_gate_allow_keys（DB）の失敗も
+/// [`build_allow_sources`] が `Err` にまとめるので、**どちらも同じ「前回値保持」に合流**する
+/// （owner/trusted が DB エラーで無音で消えない）。
+async fn refresh_allow_once<R: NostrAgentRunner>(
+    runner: &R,
+    cli: &NostaroCli,
+    agent_id: &str,
+    allow: &AllowGate,
+) {
+    match build_allow_sources(runner, cli, agent_id).await {
+        Ok(next) => {
+            let (f, o, c, t) = (
+                next.followees.len(),
+                next.owner.len(),
+                next.co_agents.len(),
+                next.trusted_users.len(),
+            );
+            *allow.write().unwrap() = next;
+            debug!(agent_id = %agent_id, followees = f, owner = o, co_agents = c, trusted_users = t, "nostr: 元栓の許可集合を更新（#698）");
+        }
+        Err(e) => {
+            warn!(agent_id = %agent_id, error = %format!("{e:#}"), "nostr: 許可集合の更新に失敗。前回値を保持（relay/DB いずれの失敗も全通しへは倒さない / #698）");
+        }
+    }
+}
+
 /// #698: 許可集合を引き直して `allow` セルを差し替える detached task を回す。
 ///
 /// `fetch_following` は relay 往復で最大 nostaro timeout（60s）ぶんかかるので、受信ループを
-/// 塞がないように spawn する（更新中も新着は既存 `allow` で判定され続ける）。取得失敗時は
-/// **前回値を保持**して警告のみ（全通しへは倒さない = fail-loud だが権威データは保つ / #698）。
-/// timeout があるので tick ごとにハングが堆積しない（間隔 300s ≫ 60s）。
+/// 塞がないように spawn する（更新中も新着は既存 `allow` で判定され続ける）。反映と失敗時の
+/// 前回値保持は [`refresh_allow_once`] が担う。timeout があるので tick ごとにハングが堆積しない
+/// （間隔 300s ≫ 60s）。
 fn spawn_allow_refresh<R: NostrAgentRunner + Clone>(
     runner: R,
     cli: NostaroCli,
@@ -786,21 +817,7 @@ fn spawn_allow_refresh<R: NostrAgentRunner + Clone>(
     allow: AllowGate,
 ) {
     tokio::spawn(async move {
-        match build_allow_sources(&runner, &cli, &agent_id).await {
-            Ok(next) => {
-                let (f, o, c, t) = (
-                    next.followees.len(),
-                    next.owner.len(),
-                    next.co_agents.len(),
-                    next.trusted_users.len(),
-                );
-                *allow.write().unwrap() = next;
-                debug!(agent_id = %agent_id, followees = f, owner = o, co_agents = c, trusted_users = t, "nostr: 元栓の許可集合を更新（#698）");
-            }
-            Err(e) => {
-                warn!(agent_id = %agent_id, error = %format!("{e:#}"), "nostr: 許可集合の更新に失敗。前回値を保持（全通しへは倒さない / #698）");
-            }
-        }
+        refresh_allow_once(&runner, &cli, &agent_id, &allow).await;
     });
 }
 
@@ -1507,6 +1524,8 @@ mod tests {
         trusted_pubkeys: Vec<String>,
         /// #698: `nostr_gate_allow_keys` が返す co_agent の pubkey（元栓の許可源検証）。
         co_agent_pubkeys: Vec<String>,
+        /// #698: true なら `nostr_gate_allow_keys` が `Err`（DB 故障を模す。前回値保持の検証）。
+        allow_keys_error: bool,
         /// `resolve_nostr_caller` に渡された pubkey（発言者を見ているかの検証 / #319）。
         caller_queries: Arc<Mutex<Vec<String>>>,
         /// 応答生成へ渡った呼び出し元（#319）。
@@ -1541,6 +1560,7 @@ mod tests {
                 owner_pubkey: None,
                 trusted_pubkeys: Vec::new(),
                 co_agent_pubkeys: Vec::new(),
+                allow_keys_error: false,
                 caller_queries: Arc::new(Mutex::new(Vec::new())),
                 callers: Arc::new(Mutex::new(Vec::new())),
                 workspace_root: None,
@@ -1569,6 +1589,12 @@ mod tests {
         /// #698: この pubkey を co_agent（owner 等価）として許可源に載せる。
         fn with_co_agent_pubkey(mut self, pubkey: &str) -> Self {
             self.co_agent_pubkeys.push(pubkey.to_string());
+            self
+        }
+
+        /// #698: `nostr_gate_allow_keys` を `Err` にする（DB 故障の模擬。前回値保持の検証用）。
+        fn with_allow_keys_error(mut self) -> Self {
+            self.allow_keys_error = true;
             self
         }
 
@@ -1741,12 +1767,19 @@ mod tests {
         }
 
         /// #698: DB 由来の許可源を模す。owner / trusted / co_agent を仕込んだぶんだけ返す。
-        fn nostr_gate_allow_keys(&self, _agent_id: &str) -> crate::NostrGateAllowKeys {
-            crate::NostrGateAllowKeys {
+        /// `allow_keys_error` が立っていれば `Err`（DB 故障を模す）。
+        fn nostr_gate_allow_keys(
+            &self,
+            _agent_id: &str,
+        ) -> anyhow::Result<crate::NostrGateAllowKeys> {
+            if self.allow_keys_error {
+                anyhow::bail!("テスト: DB 故障を模した許可源の読み出し失敗");
+            }
+            Ok(crate::NostrGateAllowKeys {
                 owner: self.owner_pubkey.clone().into_iter().collect(),
                 co_agents: self.co_agent_pubkeys.clone(),
                 trusted_users: self.trusted_pubkeys.clone(),
-            }
+            })
         }
 
         fn list_enabled_nostr_configs(&self) -> Vec<AgentNostrConfigRow> {
@@ -1849,7 +1882,9 @@ mod tests {
         ) -> Self {
             // 本番の build_allow_sources と同じく、DB 由来キー（owner/co_agent/trusted）を
             // follow_key で寄せて許可集合に載せる。followees は feed 時に足す。
-            let db = runner.nostr_gate_allow_keys(agent_id);
+            let db = runner.nostr_gate_allow_keys(agent_id).expect(
+                "テスト: 許可源の取得（allow_keys_error を立てた runner は Harness に使わない）",
+            );
             let to_set = |v: &[String]| -> HashSet<String> {
                 v.iter().map(|s| crate::pubkey::follow_key(s)).collect()
             };
@@ -2136,6 +2171,38 @@ mod tests {
         );
         assert_eq!(h.runner.recorded.lock().unwrap().len(), 1);
         assert_eq!(h.dropped(), 0, "co_agent を捨てた");
+    }
+
+    /// **本丸（3巡目レビュー）**: 更新時に DB 由来の許可源が読めない（DB 故障）とき、
+    /// `build_allow_sources` が `Err` になり **前回の allow セルが保持される**（owner/trusted が
+    /// 無音でキャッシュから消えない）。fetch_following（relay）側は fake で空リスト成功させ、
+    /// **DB 側だけ**失敗させて「DB 部分失敗が `Ok(空)` に化けない」ことを固定する。
+    ///
+    /// **変異確認**: `nostr_gate_allow_keys` の `?` を `.unwrap_or_default()` に戻すと、DB エラーが
+    /// `Ok(空)` になって owner が消え、このテストが赤くなる。
+    #[tokio::test]
+    async fn allow_refresh_keeps_previous_on_db_error() {
+        // fetch_following は fake nostaro で空の following（成功）。DB 由来の許可源だけ Err。
+        let agent = "agent-allow-db-error";
+        let (_fake, cli) = fake_nostaro("selfpubkeyhex");
+        let runner = SlowRunner::new(Duration::from_millis(0)).with_allow_keys_error();
+        // 前回の許可集合（owner を持っている状態）を用意。
+        let mut prev = AllowSources::default();
+        prev.owner.insert(crate::pubkey::follow_key(OWNER_PK));
+        let allow: AllowGate = Arc::new(RwLock::new(prev));
+
+        refresh_allow_once(&runner, &cli, agent, &allow).await;
+
+        // DB エラーで build_allow_sources が Err → セルは前回のまま（owner が消えていない）。
+        assert!(
+            allow
+                .read()
+                .unwrap()
+                .owner
+                .contains(&crate::pubkey::follow_key(OWNER_PK)),
+            "DB エラーで前回の許可集合（owner）が消えた（DB 部分失敗が Ok(空) に化けている）"
+        );
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
     }
 
     /// [P1 回帰 / #168] 同一セッション（同一相手）の連投は**投入順どおり**に処理される。
