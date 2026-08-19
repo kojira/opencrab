@@ -174,6 +174,20 @@ pub fn normalize_pubkey(raw: &str) -> Option<String> {
     Some(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// フォロー元栓（#698）の照合キー。**follow set の構築とゲート判定で同じこの関数を通す**
+/// （書き手と読み手でキーの作り方がズレると、黙って落ちる／黙って通る事故になる）。
+///
+/// 正しい pubkey（npub / 64hex）は [`normalize_pubkey`] で 64 桁小文字 hex に寄せる。
+/// 正規化できない文字列はトリムして小文字化した生文字列をそのままキーにする。本番の受信
+/// pubkey は必ず 64hex なのでこのフォールバックには入らない（＝実データは常に正規化 hex で
+/// 照合される）。フォールバックが効くのはテスト等の非 pubkey 文字列だけで、それらは follow
+/// set にも同じ生キーで入るので一貫して一致する。**これは「照合キーの表記ゆれ吸収」であって
+/// 「未信頼を通す抜け道」ではない**: 実在しない鍵表現は follow set の実 hex と一致しないので、
+/// 未登録なら従来どおり落ちる。
+pub(crate) fn follow_key(raw: &str) -> String {
+    normalize_pubkey(raw).unwrap_or_else(|| raw.trim().to_ascii_lowercase())
+}
+
 /// Nostr 公開鍵を `npub1...` 表現にする（受け付ける入力は [`normalize_pubkey`] と同じ）。
 ///
 /// 表記ゆれで登録された行（npub で入っている `trusted_users` 行など）も引けるよう、
