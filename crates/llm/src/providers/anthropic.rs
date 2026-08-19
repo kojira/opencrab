@@ -75,7 +75,7 @@ impl AnthropicProvider {
 
     /// Convert unified messages to Anthropic Messages API format.
     /// Anthropic separates the system message from the messages array.
-    fn build_request_body(&self, request: &ChatRequest) -> Value {
+    fn build_request_body(&self, request: &ChatRequest) -> Result<Value> {
         let mut system_prompt: Option<String> = None;
         let mut messages: Vec<Value> = Vec::new();
 
@@ -217,7 +217,15 @@ impl AnthropicProvider {
             }
         }
 
-        let max_tokens = request.max_tokens.unwrap_or(4096);
+        // Anthropic の messages API は max_tokens を必須フィールドとして要求する。
+        // #676 で「出力上限はモデル毎の実能力値・未登録は fail loud」に整理した通り、
+        // None のとき任意定数へ黙って落とさず、うるさく失敗させる（#681）。
+        let max_tokens = request.max_tokens.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Anthropic requires max_tokens but the request supplied none; \
+                 register this model's max_output_tokens (#676). No implicit default is applied."
+            )
+        })?;
 
         let mut body = serde_json::json!({
             "model": request.model,
@@ -261,7 +269,7 @@ impl AnthropicProvider {
             body["tools"] = serde_json::json!(tools);
         }
 
-        body
+        Ok(body)
     }
 
     fn convert_content_to_anthropic(&self, msg: &Message) -> Value {
@@ -431,7 +439,7 @@ impl LlmProvider for AnthropicProvider {
     async fn chat_completion(&self, request: ChatRequest) -> Result<ChatResponse> {
         debug!(model = %request.model, "Anthropic chat completion");
 
-        let body = self.build_request_body(&request);
+        let body = self.build_request_body(&request)?;
         let resp = self
             .request_builder("messages")
             .json(&body)
@@ -461,7 +469,7 @@ impl LlmProvider for AnthropicProvider {
     ) -> Result<BoxStream<'static, Result<ChatStreamDelta>>> {
         debug!(model = %request.model, "Anthropic streaming chat completion");
 
-        let mut body = self.build_request_body(&request);
+        let mut body = self.build_request_body(&request)?;
         body["stream"] = serde_json::json!(true);
 
         let resp = self
@@ -607,7 +615,9 @@ mod tests {
     #[test]
     fn cache_policy_applied_by_provider() {
         let provider = AnthropicProvider::new("k");
-        let body = provider.build_request_body(&base_request());
+        let body = provider
+            .build_request_body(&base_request())
+            .expect("valid request builds a body");
 
         let system = body["system"].as_array().expect("system must be blocks");
         assert_eq!(system.len(), 1);
@@ -649,7 +659,9 @@ mod tests {
         let provider = AnthropicProvider::new("k");
         let mut req = base_request();
         req.functions = None;
-        let body = provider.build_request_body(&req);
+        let body = provider
+            .build_request_body(&req)
+            .expect("valid request builds a body");
         let messages = body["messages"].as_array().unwrap();
         let last = messages.last().unwrap();
         assert!(
@@ -664,10 +676,28 @@ mod tests {
         let mut req = base_request();
         req.messages.insert(1, Message::system("second sys"));
         let provider = AnthropicProvider::new("k");
-        let body = provider.build_request_body(&req);
+        let body = provider
+            .build_request_body(&req)
+            .expect("valid request builds a body");
         let system = body["system"].as_array().unwrap();
         assert_eq!(system.len(), 1);
         assert_eq!(system[0]["text"], "sys prompt\n\nsecond sys");
+    }
+
+    /// max_tokens が None のときは任意定数へ黙って落とさず fail loud する（#681）。
+    /// Anthropic の messages API は max_tokens を必須で要求するため省略もできない。
+    #[test]
+    fn missing_max_tokens_fails_loud() {
+        let mut req = base_request();
+        req.max_tokens = None;
+        let provider = AnthropicProvider::new("k");
+        let err = provider
+            .build_request_body(&req)
+            .expect_err("None max_tokens must be a loud error, not a silent default");
+        assert!(
+            err.to_string().contains("max_tokens"),
+            "error should name the missing field: {err}"
+        );
     }
 
     /// リクエストを受けてから `delay` 待って 200 を返すモック（timeout 検証用）。
