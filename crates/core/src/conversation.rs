@@ -23,6 +23,20 @@ const RECENT_MIN_LOGS: usize = 10;
 /// 拾って元の指示を落とす。5 件なら一連の連投をまたいで意図が読める。
 pub const RECENT_MIN_USER_SPEECHES: usize = 5;
 
+/// 会話履歴が空のときに `build_conversation_inner` が返すマーカー（#691 の判定にも使う）。
+const NO_MESSAGES_MARKER: &str = "No messages yet.";
+
+/// 応答直前に会話履歴の末尾へ置く出力指示（#691）。
+///
+/// opus-5 は 1:1 の長い会話で「次のユーザー発言」を続きとして**捏造**する傾向がある
+/// （モデル固有の挙動・オーナー観測）。会話履歴は `[ID] [時刻]:` 形式で 1 行 1 発話に
+/// 連結されるため、生成モデルが最も自然な予測として「次の話者行」を書き足してしまう。
+/// 生成点に最も近い指示が最も効く（オーナー裁定・opencrab2 実測）ので、履歴の**直後**
+/// （＝生成点の直前）にこの 1 行だけを置く。ロール分離・履歴形式の変更・出力の
+/// フィルタはしない（オーナー裁定で対策から除外）。履歴が空（`NO_MESSAGES_MARKER`）の
+/// ときは真似る対象が無いので付けない。
+pub const RESPONSE_ONLY_DIRECTIVE: &str = "ここから先はあなた自身の本文のみを書く。`[ID] [時刻]:` 形式の行（他の話者の発言の再現・引用・続き）を出力してはならない。";
+
 /// セッションログから会話文字列を構築する（トークン予算ベースのコンパクション対応）。
 ///
 /// `context_budget_tokens` はこの会話セクションに使えるトークン予算。
@@ -44,11 +58,26 @@ pub fn build_conversation_string(
     // #536: 最後の `parts.join("\n\n")` の区切りも出力へ含まれるので計上する。
     // prefix N 個 + inner の N+1 パートで区切りは N 本（prefix が空なら 0 本）。
     inner_budget = inner_budget.saturating_sub(prefix_sections.len() * estimate_tokens("\n\n"));
+    // #691: 履歴の直後に置く出力指示のぶんを会話予算から先に引く。prepend 前の返り値が
+    // `context_budget_tokens` を超えないという契約（下の budget テスト群）を保つため、
+    // #536 の区切り計上と同じ流儀で組み込み前に確保する。履歴が空で指示を付けない場合は
+    // 数十トークン過剰に確保するだけで実害はない（空履歴は "No messages yet." のみ）。
+    let directive_cost = estimate_tokens(RESPONSE_ONLY_DIRECTIVE) + estimate_tokens("\n\n");
+    inner_budget = inner_budget.saturating_sub(directive_cost);
     let inner = build_conversation_inner(conn, session_id, agent_id, inner_budget)?;
+
+    // #691: 履歴が空（真似る対象が無い）ときは出力指示を付けない。
+    let history_is_empty = inner == NO_MESSAGES_MARKER;
 
     let mut parts = prefix_sections;
     parts.push(inner);
-    Ok(parts.join("\n\n"))
+    let mut out = parts.join("\n\n");
+    if !history_is_empty {
+        // 応答直前の出力指示を履歴の**直後**（＝生成点の直前）へ 1 行だけ置く（#691）。
+        out.push_str("\n\n");
+        out.push_str(RESPONSE_ONLY_DIRECTIVE);
+    }
+    Ok(out)
 }
 
 /// 会話本文の前に置く固定セクション（台帳 / [Memory Index] / [Impressions]）を組む。
@@ -2137,5 +2166,54 @@ mod impression_section_injection_tests {
         let out = build_conversation_string(&conn, "s1", AGENT, 100_000).unwrap();
         assert!(!out.contains("[Impressions]"), "{out}");
         assert!(out.contains("こんにちは"), "{out}");
+    }
+}
+
+/// #691: 応答直前の出力指示（`RESPONSE_ONLY_DIRECTIVE`）が履歴の直後に付くこと、
+/// および履歴が空のときは付かないことを固定する。
+#[cfg(test)]
+mod response_only_directive_tests {
+    use super::{build_conversation_string, NO_MESSAGES_MARKER, RESPONSE_ONLY_DIRECTIVE};
+
+    fn seed_speech(conn: &rusqlite::Connection, speaker: &str, content: &str) {
+        opencrab_db::queries::insert_session_log(
+            conn,
+            &opencrab_db::queries::SessionLogRow {
+                id: None,
+                agent_id: "a1".to_string(),
+                session_id: "s1".to_string(),
+                log_type: "speech".to_string(),
+                content: content.to_string(),
+                speaker_id: Some(speaker.to_string()),
+                turn_number: None,
+                metadata_json: None,
+                created_at: None,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn directive_is_appended_after_history() {
+        let conn = opencrab_db::init_memory().unwrap();
+        seed_speech(&conn, "owner", "こんばんは");
+        let out = build_conversation_string(&conn, "s1", "a1", 100_000).unwrap();
+        // 生成点に最も近い＝出力の末尾に置く。
+        assert!(out.trim_end().ends_with(RESPONSE_ONLY_DIRECTIVE), "{out}");
+        // 1 回だけ。
+        assert_eq!(out.matches(RESPONSE_ONLY_DIRECTIVE).count(), 1);
+        // 履歴（発話）は指示より前にある。
+        let hist_pos = out.find("こんばんは").unwrap();
+        let dir_pos = out.find(RESPONSE_ONLY_DIRECTIVE).unwrap();
+        assert!(hist_pos < dir_pos, "{out}");
+    }
+
+    #[test]
+    fn directive_is_omitted_when_history_is_empty() {
+        let conn = opencrab_db::init_memory().unwrap();
+        // ログを 1 件も積まない。
+        let out = build_conversation_string(&conn, "s1", "a1", 100_000).unwrap();
+        assert_eq!(out, NO_MESSAGES_MARKER);
+        assert!(!out.contains(RESPONSE_ONLY_DIRECTIVE), "{out}");
     }
 }
