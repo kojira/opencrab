@@ -13,6 +13,24 @@ use anyhow::Result;
 use opencrab_actions::{AgentRuntime, CallerIdentity};
 use opencrab_db::queries::AgentNostrConfigRow;
 
+/// 元栓（#698）の許可源のうち **DB 由来**の生 pubkey 文字列（hex / npub どちらの表記でも可）。
+///
+/// フォロイー（kind:3）は relay 由来なので別（[`crate::NostaroCli::fetch_following`]）。ここは
+/// owner / co_agent / trusted_users(platform=nostr) を「メモリ集合＋定期更新」パターンに載せる
+/// ための材料で、**更新経路だけがこれを呼んで DB を読む**（ドロップ判定は
+/// `resolve_nostr_caller` の DB 往復を通らず、メモリ照合だけで済む）。正規化（64 桁小文字 hex へ
+/// 寄せる）は受け手（manager）が follow_key で一括して行うので、ここは生の文字列を返す。
+#[derive(Debug, Default, Clone)]
+pub struct NostrGateAllowKeys {
+    /// `agent_nostr_config.owner_pubkey`（0 / 1 個。未設定なら空）。
+    pub owner: Vec<String>,
+    /// owner 等価の co_agent の self_pubkey（`trusted_co_agents` の UUID を
+    /// `agent_nostr_config.self_pubkey` で引いたもの / #485 #489）。
+    pub co_agents: Vec<String>,
+    /// `platform='nostr'` の `trusted_users` の識別子（permission を問わず、登録されていれば許可）。
+    pub trusted_users: Vec<String>,
+}
+
 pub trait NostrAgentRunner: AgentRuntime {
     /// 受信イベントの発言者から呼び出し元の権限を決める（#319）。
     ///
@@ -27,6 +45,24 @@ pub trait NostrAgentRunner: AgentRuntime {
     /// - 照合するのは **Nostr 経路の行だけ**（Discord の識別子空間と混ぜない）。
     /// - 「発言者がオーナー」以外の昇格経路を作らない。
     fn resolve_nostr_caller(&self, agent_id: &str, author_pubkey: &str) -> CallerIdentity;
+
+    /// 元栓（#698）の許可源のうち **DB 由来**（owner / co_agent / trusted_users(platform=nostr)）の
+    /// 生 pubkey をまとめて返す。
+    ///
+    /// ホットパス（未許可イベントのドロップ）をメモリ照合に保つため、**更新経路だけ**がこれを
+    /// 呼んで DB を読む。ゲート判定は返り値を正規化してメモリ集合に載せた後、その集合の照合だけで
+    /// 行う（`resolve_nostr_caller` の DB 往復はドロップ前に走らない）。
+    ///
+    /// 契約:
+    /// - 照合するのは **Nostr 経路の行だけ**（trusted_users は `platform='nostr'` で絞る）。
+    /// - **未登録は `Ok(空)`**（owner 未設定・trusted/co_agent 無し）。フォロイー ∪ owner は
+    ///   フォローリスト側で担保され、空でも allow-all へは倒れない。
+    /// - **DB の失敗（lock poison / query Err）は `Err` で伝播させる**（黙って `Ok(空)` に
+    ///   化けさせない）。呼び出し側（[`crate::manager`] の更新経路）はこれを fetch_following の
+    ///   Err と同じ「前回値保持＋warn」に合流させ、owner/trusted がキャッシュから無音で消える
+    ///   のを防ぐ。「登録が無いから空」と「DB が壊れて読めない」を取り違えないための区別。
+    /// - 表記（hex / npub）は問わない（受け手が正規化する）。
+    fn nostr_gate_allow_keys(&self, agent_id: &str) -> Result<NostrGateAllowKeys>;
 
     // 転記（受信イベント / エージェント返信）は [`AgentRuntime`] が持つ（#158 S3）。
     // `record_inbound_message` / `record_outbound_reply` を

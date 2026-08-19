@@ -49,6 +49,6 @@ pub use key_provisioning::NostrKeyProvisioning;
 pub use manager::NostrGatewayManager;
 pub use passthrough::NostrPassthrough;
 pub use pubkey::{normalize_pubkey, to_npub};
-pub use runner::NostrAgentRunner;
+pub use runner::{NostrAgentRunner, NostrGateAllowKeys};
 pub use session::{nostr_session_id, NostrSessionRuntime, NOSTR_SESSION_PREFIX};
 pub use sink::NostrResponder;

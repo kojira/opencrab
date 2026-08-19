@@ -606,6 +606,14 @@ mod tests {
             unreachable!("応答生成経路は呼び出し元を導出しない（引数で受け取る / #319）")
         }
 
+        fn nostr_gate_allow_keys(
+            &self,
+            _agent_id: &str,
+        ) -> anyhow::Result<crate::NostrGateAllowKeys> {
+            // 応答生成 sink は元栓ゲート（受信ループ側）を通らないので使わない。
+            unreachable!("応答生成経路は元栓の許可源を導出しない（#698 は受信ループ側）")
+        }
+
         fn list_enabled_nostr_configs(&self) -> Vec<AgentNostrConfigRow> {
             Vec::new()
         }

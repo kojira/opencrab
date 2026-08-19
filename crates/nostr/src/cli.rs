@@ -666,6 +666,57 @@ impl NostaroCli {
         self.run(cmd).await
     }
 
+    /// このエージェント自身の**フォローリスト（kind:3）**を取得し、照合キーの集合で返す（#698）。
+    ///
+    /// 未信頼作者の元栓（[`crate::manager`] のゲート）は「フォロイー ∪ owner 以外はターンを
+    /// 着火させず store にも入れない」を実現する。その**フォロイー集合の権威データ**がこれ。
+    ///
+    /// `nostaro following --out <file> --out-format json`（npub 引数なし＝自分自身）で取得する。
+    /// `following` は JSON をファイルにしか吐かない（stdout はサマリのみ）ので、per-agent の
+    /// nostr ディレクトリ（config.toml と同じ場所）へ書かせて読み返す。返すのは
+    /// [`crate::pubkey::follow_key`] で寄せた照合キーの集合で、ゲート側も同じ関数でキーを作る。
+    ///
+    /// **フォールバックを持たない**（#698 の要求）: 取得できなければ `Err` を返す。呼び出し側は
+    /// これを「黙って全通しへ倒す」のではなく、起動中止（[`spawn_agent_gateway`]）または前回値
+    /// 保持（定期更新）で **うるさく失敗**させる。空のフォローリスト（0 フォロー）は正当な
+    /// 成功（空集合）で、エラーではない。
+    pub async fn fetch_following(
+        &self,
+        agent_id: &str,
+    ) -> Result<std::collections::HashSet<String>> {
+        // nostaro は cwd=workspace で走る（#299）ので、`--config` と同じく `--out` も**絶対化**して
+        // 「child が書く場所」と「ここで読む場所」を一致させる。current_dir が取れない degrade 時は
+        // child も process cwd を継承するので、相対のままで両者一致する（plan_cwd_and_config と同じ筋）。
+        let out_rel = Self::agent_nostr_dir(agent_id)?.join("following.json");
+        let out_path = match std::env::current_dir() {
+            Ok(cwd) => absolutize_with(&out_rel, &cwd),
+            Err(_) => out_rel,
+        };
+        // 親ディレクトリを用意（base_command も config 親を作るが、out を絶対化した経路でも確実に）。
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        // 前回の残骸を読み違えないよう、実行前に消す（following がファイルを上書きするが、
+        // 取得が途中失敗したときに古い内容を「成功」と誤読しないための保険）。
+        let _ = std::fs::remove_file(&out_path);
+        let mut cmd = self.base_command(agent_id)?;
+        cmd.arg("following")
+            .arg(format!("--out={}", out_path.display()))
+            .arg("--out-format=json");
+        // stdout はサマリのみ（本体は out ファイル）。失敗時は run が stderr を mask する。
+        self.run(cmd).await.context(
+            "nostaro following の実行に失敗しました（フォローリスト取得。#698 の元栓は \
+             フォローリストを権威データにするため、取得不能のまま全通しへは倒しません）",
+        )?;
+        let raw = std::fs::read_to_string(&out_path).with_context(|| {
+            format!(
+                "following の JSON 出力を読めませんでした: {}",
+                out_path.display()
+            )
+        })?;
+        parse_following_json(&raw)
+    }
+
     /// `nostaro vanity --json [--prefix=<p>]` — 新規鍵を生成して返す。
     ///
     /// prefix は npub の `npub1` 以降に前置される bech32 文字列。空なら通常のランダム鍵。
@@ -978,6 +1029,35 @@ fn parse_generated_key(stdout: &str) -> Result<GeneratedKey> {
         npub: get("npub"),
         pubkey: get("pubkey"),
     })
+}
+
+/// `nostaro following --out-format json` の JSON（`{"count":N,"users":[{"hex","npub"}]}`）を
+/// 照合キーの集合へ変換する（#698）。
+///
+/// 各 user の `hex`（無ければ `npub`）を [`crate::pubkey::follow_key`] で寄せて集める。
+/// **フォールバックを持たない**: JSON 全体が壊れていれば `Err`（呼び出し側が fail-loud）。
+/// ただし個々のエントリで hex/npub が両方欠けている行は**その 1 件だけ**飛ばす（壊れた 1 行
+/// で全フォロイーを落として全通しへ倒すより安全側 / 空も 0 件の正当な成功と同じ扱い）。
+fn parse_following_json(raw: &str) -> Result<std::collections::HashSet<String>> {
+    let v: serde_json::Value = serde_json::from_str(raw)
+        .context("nostaro following: JSON を解釈できません（#698 フォローリスト取得）")?;
+    let users = v
+        .get("users")
+        .and_then(|u| u.as_array())
+        .ok_or_else(|| anyhow::anyhow!("nostaro following: JSON に users 配列がありません"))?;
+    let mut set = std::collections::HashSet::with_capacity(users.len());
+    for u in users {
+        let raw_key = u
+            .get("hex")
+            .and_then(|x| x.as_str())
+            .or_else(|| u.get("npub").and_then(|x| x.as_str()))
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if let Some(k) = raw_key {
+            set.insert(crate::pubkey::follow_key(k));
+        }
+    }
+    Ok(set)
 }
 
 #[cfg(test)]
@@ -2006,5 +2086,39 @@ mod tests {
             "エラー出力に nsec が漏れている: {msg}"
         );
         let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+    }
+
+    /// [#698] `following --out-format json` の実出力形（`{count, users:[{hex,npub}]}`）を
+    /// 照合キー集合へ落とせる。hex は小文字化のみ（follow_key）で一致し、count は無視する。
+    #[test]
+    fn parse_following_json_extracts_hex_keys() {
+        let raw = r#"{
+          "count": 2,
+          "users": [
+            {"hex":"AA00000000000000000000000000000000000000000000000000000000000001","npub":"npub1x"},
+            {"hex":"bb00000000000000000000000000000000000000000000000000000000000002","npub":"npub1y"}
+          ]
+        }"#;
+        let set = parse_following_json(raw).unwrap();
+        assert_eq!(set.len(), 2);
+        // hex は 64 桁なので normalize され小文字化される。
+        assert!(set.contains("aa00000000000000000000000000000000000000000000000000000000000001"));
+        assert!(set.contains("bb00000000000000000000000000000000000000000000000000000000000002"));
+    }
+
+    /// [#698] 0 フォロー（空の users）は**正当な成功**＝空集合（エラーにしない）。
+    #[test]
+    fn parse_following_json_empty_is_ok_empty_set() {
+        let set = parse_following_json(r#"{"count":0,"users":[]}"#).unwrap();
+        assert!(set.is_empty());
+    }
+
+    /// [#698] JSON 全体が壊れていれば Err（呼び出し側が fail-loud にできる。全通しへ倒す
+    /// 空集合を黙って返さない）。
+    #[test]
+    fn parse_following_json_broken_is_err() {
+        assert!(parse_following_json("not json").is_err());
+        // users 配列が無い形も Err。
+        assert!(parse_following_json(r#"{"count":0}"#).is_err());
     }
 }
