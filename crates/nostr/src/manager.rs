@@ -51,19 +51,49 @@ use crate::sink::NostrResponder;
 /// watch ループが握る self_pubkey の共有セル（identity 切替で更新可能）。
 type SelfPubkey = Arc<RwLock<String>>;
 
-/// フォロー元栓（#698）の照合キー集合の共有セル。
+/// 元栓（#698）の**許可源をまとめたメモリ集合**。名前付きの源から許可集合を合成する。
 ///
-/// 中身は [`crate::pubkey::follow_key`] で寄せたフォロイーの pubkey キー。`self_pubkey` と
-/// 同じく watch ループが握り、kind:3 差し替えへ追従するため**定期更新でこのセルを差し替える**
-/// （[`run_watch_once`] の更新経路）。ゲート判定（[`handle_event`]）はこのセルを読むだけ。
-type FollowSet = Arc<RwLock<HashSet<String>>>;
+/// ゲート（[`handle_event`]）は [`Self::is_allowed`] を呼ぶだけで、**DB も relay も触らない**
+/// （ホットパスはパース＋メモリ照合のみ）。各集合は [`crate::pubkey::follow_key`] で 64 桁小文字
+/// hex へ寄せた照合キー。中身の更新（DB / relay 読み）は**更新経路だけ**が行う
+/// （[`build_allow_sources`] → [`AllowGate`] の差し替え）。
+///
+/// **源を増やしてもここへ 1 つ足すだけ**（2 つ目以降の源が来ても耐える形）。判定の権威は
+/// この core 側にあり、購読フィルタ等の線より前の絞り込みは多層防御に過ぎない。
+#[derive(Debug, Default, Clone)]
+struct AllowSources {
+    /// フォロイー（自分の kind:3 フォローリスト / relay 由来）。
+    followees: HashSet<String>,
+    /// owner（`agent_nostr_config.owner_pubkey` / DB 由来）。
+    owner: HashSet<String>,
+    /// owner 等価の co_agent（self_pubkey / DB 由来 / #485 #489）。
+    co_agents: HashSet<String>,
+    /// `platform='nostr'` の trusted_users（owner が明示登録した信頼 / DB 由来）。
+    trusted_users: HashSet<String>,
+}
 
-/// フォローリスト（kind:3）を引き直す間隔（#698）。差し替えへの追従はこの粒度。
+impl AllowSources {
+    /// `author_key`（follow_key 済み）が**いずれかの許可源**に属せば通す。源を足すときは
+    /// ここへ 1 行 OR を追加するだけ（ハードコードの boolean を散らさない・単一の判定点）。
+    fn is_allowed(&self, author_key: &str) -> bool {
+        self.followees.contains(author_key)
+            || self.owner.contains(author_key)
+            || self.co_agents.contains(author_key)
+            || self.trusted_users.contains(author_key)
+    }
+}
+
+/// 元栓の許可集合の共有セル。`self_pubkey` と同じく watch ループが握り、kind:3 差し替えや
+/// trusted_users / owner / co_agent の更新へ追従するため**定期更新でこのセルを差し替える**
+/// （[`run_watch_once`] の更新経路）。ゲート判定はこのセルを読むだけ。
+type AllowGate = Arc<RwLock<AllowSources>>;
+
+/// 許可源（フォローリスト + DB 由来）を引き直す間隔（#698）。差し替えへの追従はこの粒度。
 ///
-/// 洪水対策の元栓自体は**取得済みの follow set で即座に効く**ので、更新は「新しくフォローした
+/// 洪水対策の元栓自体は**取得済みの許可集合で即座に効く**ので、更新は「新しくフォロー／登録した
 /// 相手が通り始めるまでの遅延」を決めるだけ。短くしすぎると relay へ `following` を叩く頻度が
 /// 上がるので、分オーダーにする。
-const FOLLOW_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
+const ALLOW_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
 
 /// watch が落ちたときの再接続バックオフ。
 const WATCH_RESTART_DELAY: Duration = Duration::from_secs(5);
@@ -650,8 +680,9 @@ async fn run_nostr_loop<R: NostrAgentRunner + Clone>(
     agent_id: String,
     config: NostrConfig,
     self_pubkey: SelfPubkey,
-    // #698 元栓: フォロイー（kind:3）の照合キー集合。ゲートが読み、watch ループが差し替えへ追従する。
-    follow_set: FollowSet,
+    // #698 元栓: 許可集合（フォロイー ∪ owner ∪ co_agent ∪ trusted_users）。ゲートが読み、
+    // watch ループが定期更新でこのセルを差し替える。
+    allow: AllowGate,
     admin: Arc<dyn NostrIdentityAdmin>,
     runtime: Arc<NostrSessionRuntime>,
     // #588 TimedFire / #603: 時刻発火の受け口を登録する登録簿（**必須**）。
@@ -692,7 +723,7 @@ async fn run_nostr_loop<R: NostrAgentRunner + Clone>(
             &agent_id,
             &config,
             &self_pubkey,
-            &follow_set,
+            &allow,
             &dropped,
             &admin,
             &runtime,
@@ -709,21 +740,65 @@ async fn run_nostr_loop<R: NostrAgentRunner + Clone>(
     }
 }
 
-/// #698: フォローリスト（kind:3）を引き直して `follow_set` セルを差し替える detached task を回す。
+/// #698: 元栓の許可集合を構築する。フォロイー（relay 由来 / `fetch_following`）＋ owner /
+/// co_agent / trusted_users（DB 由来 / `nostr_gate_allow_keys`）を [`follow_key`] で正規化して
+/// 1 つの [`AllowSources`] に合成する。
 ///
-/// `fetch_following` は relay 往復で最大 nostaro timeout ぶんかかるので、受信ループを塞がない
-/// ように spawn する（更新中も新着は既存 `follow_set` で判定され続ける）。取得失敗時は
+/// **フォローリスト取得の失敗は `Err`**（呼び出し側が起動中止 or 前回値保持で fail-loud に扱う）。
+/// DB 由来のキーは**単一源**（判定は resolve_nostr_caller と同じ DB 表を材料にする）で、DB を
+/// 引けなければ空（fail-closed。allow-all へは倒さない）。正規化はここ 1 箇所に閉じる
+/// （author_key と同じ `follow_key`。書き手と読み手のキーずれ事故を防ぐ）。
+async fn build_allow_sources<R: NostrAgentRunner>(
+    runner: &R,
+    cli: &NostaroCli,
+    agent_id: &str,
+) -> anyhow::Result<AllowSources> {
+    // relay 由来（fail-loud）。
+    let followees: HashSet<String> = cli
+        .fetch_following(agent_id)
+        .await?
+        .iter()
+        .map(|k| crate::pubkey::follow_key(k))
+        .collect();
+    // DB 由来（owner / co_agent / trusted_users）。fail-closed（空でも allow-all へは倒れない）。
+    let db = runner.nostr_gate_allow_keys(agent_id);
+    let to_set = |v: &[String]| -> HashSet<String> {
+        v.iter().map(|s| crate::pubkey::follow_key(s)).collect()
+    };
+    Ok(AllowSources {
+        followees,
+        owner: to_set(&db.owner),
+        co_agents: to_set(&db.co_agents),
+        trusted_users: to_set(&db.trusted_users),
+    })
+}
+
+/// #698: 許可集合を引き直して `allow` セルを差し替える detached task を回す。
+///
+/// `fetch_following` は relay 往復で最大 nostaro timeout（60s）ぶんかかるので、受信ループを
+/// 塞がないように spawn する（更新中も新着は既存 `allow` で判定され続ける）。取得失敗時は
 /// **前回値を保持**して警告のみ（全通しへは倒さない = fail-loud だが権威データは保つ / #698）。
-fn spawn_follow_refresh(cli: NostaroCli, agent_id: String, follow_set: FollowSet) {
+/// timeout があるので tick ごとにハングが堆積しない（間隔 300s ≫ 60s）。
+fn spawn_allow_refresh<R: NostrAgentRunner + Clone>(
+    runner: R,
+    cli: NostaroCli,
+    agent_id: String,
+    allow: AllowGate,
+) {
     tokio::spawn(async move {
-        match cli.fetch_following(&agent_id).await {
+        match build_allow_sources(&runner, &cli, &agent_id).await {
             Ok(next) => {
-                let n = next.len();
-                *follow_set.write().unwrap() = next;
-                debug!(agent_id = %agent_id, followees = n, "nostr: フォローリスト（kind:3）を更新（#698）");
+                let (f, o, c, t) = (
+                    next.followees.len(),
+                    next.owner.len(),
+                    next.co_agents.len(),
+                    next.trusted_users.len(),
+                );
+                *allow.write().unwrap() = next;
+                debug!(agent_id = %agent_id, followees = f, owner = o, co_agents = c, trusted_users = t, "nostr: 元栓の許可集合を更新（#698）");
             }
             Err(e) => {
-                warn!(agent_id = %agent_id, error = %format!("{e:#}"), "nostr: フォローリスト更新に失敗。前回値を保持（全通しへは倒さない / #698）");
+                warn!(agent_id = %agent_id, error = %format!("{e:#}"), "nostr: 許可集合の更新に失敗。前回値を保持（全通しへは倒さない / #698）");
             }
         }
     });
@@ -731,14 +806,14 @@ fn spawn_follow_refresh(cli: NostaroCli, agent_id: String, follow_set: FollowSet
 
 /// 1 回分の watch 購読（プロセス寿命ぶん）。
 #[allow(clippy::too_many_arguments)]
-async fn run_watch_once<R: NostrAgentRunner>(
+async fn run_watch_once<R: NostrAgentRunner + Clone>(
     runner: &R,
     cli: &NostaroCli,
     agent_id: &str,
     config: &NostrConfig,
     self_pubkey: &SelfPubkey,
-    // #698 元栓: フォロイー集合セルと、捨てた件数の揮発カウンタ。
-    follow_set: &FollowSet,
+    // #698 元栓: 許可集合セルと、捨てた件数の揮発カウンタ。
+    allow: &AllowGate,
     dropped: &Arc<AtomicU64>,
     admin: &Arc<dyn NostrIdentityAdmin>,
     runtime: &Arc<NostrSessionRuntime>,
@@ -756,13 +831,14 @@ async fn run_watch_once<R: NostrAgentRunner>(
         .ok_or_else(|| anyhow::anyhow!("nostaro watch produced no stdout handle"))?;
     let mut lines = BufReader::new(stdout).lines();
 
-    // #698 kind:3 追従: この subscription の寿命中、定期的にフォローリストを引き直す。起動時に
-    // 取得済みなので初回 tick は INTERVAL 後（`interval_at`）。tick は event 処理より優先しない
-    // （`biased` で受信を先に捌く / #178 の「受信ループを塞がない」に揃える。洪水中は更新が後回し
-    // になるだけで、既存 follow_set で元栓は効き続ける）。
+    // #698 許可集合の追従: この subscription の寿命中、定期的に許可集合（フォロイー ∪ owner ∪
+    // co_agent ∪ trusted_users）を引き直す。起動時に構築済みなので初回 tick は INTERVAL 後
+    // （`interval_at`）。tick は event 処理より優先しない（`biased` で受信を先に捌く / #178 の
+    // 「受信ループを塞がない」に揃える。洪水中は更新が後回しになるだけで、既存 allow で元栓は
+    // 効き続ける）。
     let mut refresh = tokio::time::interval_at(
-        tokio::time::Instant::now() + FOLLOW_REFRESH_INTERVAL,
-        FOLLOW_REFRESH_INTERVAL,
+        tokio::time::Instant::now() + ALLOW_REFRESH_INTERVAL,
+        ALLOW_REFRESH_INTERVAL,
     );
     refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -772,11 +848,11 @@ async fn run_watch_once<R: NostrAgentRunner>(
             biased;
             line = lines.next_line() => line?,
             _ = refresh.tick() => {
-                spawn_follow_refresh(cli.clone(), agent_id.to_string(), follow_set.clone());
+                spawn_allow_refresh(runner.clone(), cli.clone(), agent_id.to_string(), allow.clone());
                 // 揮発カウンタの累計を節目で 1 行だけ可視化（毎行は出さない / #698）。
                 let total = dropped.load(AtomicOrdering::Relaxed);
                 if total > 0 {
-                    debug!(agent_id, dropped = total, "nostr: 未信頼作者の元栓で捨てた累計（#698・揮発）");
+                    debug!(agent_id, dropped = total, "nostr: 未許可作者の元栓で捨てた累計（#698・揮発）");
                 }
                 continue;
             }
@@ -798,7 +874,7 @@ async fn run_watch_once<R: NostrAgentRunner>(
         }
         // 同期呼び出し（await 無し）。応答生成は session キューの consumer が引き取る。
         handle_event(
-            runner, cli, agent_id, follow_set, dropped, admin, runtime, permits, queues, event,
+            runner, cli, agent_id, allow, dropped, admin, runtime, permits, queues, event,
         )
         .await;
     }
@@ -829,8 +905,8 @@ async fn handle_event<R: NostrAgentRunner>(
     runner: &R,
     cli: &NostaroCli,
     agent_id: &str,
-    // #698 元栓: フォロイー集合セルと、捨てた件数の揮発カウンタ。
-    follow_set: &FollowSet,
+    // #698 元栓: 許可集合セルと、捨てた件数の揮発カウンタ。
+    allow: &AllowGate,
     dropped: &Arc<AtomicU64>,
     admin: &Arc<dyn NostrIdentityAdmin>,
     runtime: &Arc<NostrSessionRuntime>,
@@ -859,34 +935,36 @@ async fn handle_event<R: NostrAgentRunner>(
         return;
     }
 
-    // 呼び出し元は**発言者**から決める（#319）。`event.pubkey` を持っているここで解決する
-    // （同期 DB 読みのみ / await しない）。以前は応答生成側で解決していたが、#698 の元栓が
-    // owner 判定を必要とするので手前に上げた（下の応答 job でも同じ値を再利用する）。
-    let caller = runner.resolve_nostr_caller(agent_id, &event.pubkey);
-
-    // #698 元栓: **フォロイー（自分の kind:3）∪ owner 以外の作者のイベントは、着火も記録も
-    // させずここで捨てる**（store 書き込みの前）。オーナー裁定（2026-08-19）:「未信頼の作者の
-    // 出来事ではターンを着火させない」。反復・ターン数の予算方式は「着火した時点で負け」なので
-    // 採らず、この元栓で入り口を閉じる。
+    // #698 元栓: **許可集合（フォロイー ∪ owner ∪ co_agent ∪ trusted_users）以外の作者の
+    // イベントは、着火も記録もさせずここで捨てる**（store 書き込みの前）。オーナー裁定
+    // （2026-08-19）:「未信頼の作者の出来事ではターンを着火させない」。反復・ターン数の予算方式は
+    // 「着火した時点で負け」なので採らず、この元栓で入り口を閉じる。
     //
     // - 捨てるのは **record より前**（会話履歴にも転記にも応答生成にも一切入らない）。
     // - 毎行ログはフラッド時に費用になるので残さない。捨てた数は揮発カウンタ（`dropped`）まで。
     // - 判定の**権威はこの core 側**にある（購読フィルタで線より前に落とせても、最終判定はここ）。
+    // - **ホットパスは純メモリ**: 未許可 1 件あたりの費用はパース＋メモリ集合の照合だけ
+    //   （`AllowSources::is_allowed`）。owner / co_agent / trusted_users の照合材料も follow_set と
+    //   同じ「メモリ集合＋定期更新」に載っており（[`build_allow_sources`]）、`resolve_nostr_caller`
+    //   の DB 往復は**ドロップ前に走らない**。DB を引くのは更新経路と、通過した相手の精密な権限
+    //   解決（下）だけ。
     //
-    // 許可集合は「フォロイー ∪ owner」:
-    // - **owner** は `resolve_nostr_caller` が持つ**唯一の owner ゲート源**
-    //   （`CallerIdentity::is_owner_equivalent` = owner / co_agent）に委ねる。owner を別実装で
-    //   再判定して 2 箇所に分けない。co_agent（owner 等価な協働エージェント）を黙って落として
-    //   エージェント間協働を壊さないためにも、この述語をそのまま使う。
-    // - **フォロイー**は起動時取得＋定期更新の `follow_set`（kind:3）。`follow_key` で寄せた
-    //   キーで照合する（集合構築と同じ関数）。取得できないときに全通しへ倒すフォールバックは
-    //   持たない（起動中止／前回値保持で fail-loud）。
+    // 許可源（`is_allowed` が OR で合成する名前付きの源。源を足すときは `AllowSources` へ 1 つ）:
+    // - **フォロイー**（自分の kind:3）／ **owner**（`agent_nostr_config.owner_pubkey`）／
+    //   **co_agent**（owner 等価。self_pubkey 逆引き）／ **trusted_users**（owner が明示登録した信頼・
+    //   platform=nostr）。取得できないときに全通しへ倒すフォールバックは持たない（起動中止／
+    //   前回値保持で fail-loud）。
     let author_key = crate::pubkey::follow_key(&event.pubkey);
-    let is_followee = follow_set.read().unwrap().contains(&author_key);
-    if !is_followee && !caller.is_owner_equivalent() {
+    if !allow.read().unwrap().is_allowed(&author_key) {
         dropped.fetch_add(1, AtomicOrdering::Relaxed);
         return;
     }
+
+    // ここへ来た＝許可された作者（フラッドではない）。**通過した相手だけ**、精密な呼び出し元を
+    // 解決する（#319。同期 DB 読み / await しない）。owner/co_agent/trusted_user/agent の区別は
+    // 下の応答 job の権限判定に使う。ドロップは上のメモリ照合で済んでいるので、この DB 往復は
+    // ホットパスに乗らない。
+    let caller = runner.resolve_nostr_caller(agent_id, &event.pubkey);
 
     // agent 単位のセッション（**1 エージェント = 1 会話** / #323）。誰から来た受信も
     // ここへ落ちるので、エージェントは自分の発言も含めて 1 本の履歴として読める。
@@ -1001,7 +1079,7 @@ async fn handle_event<R: NostrAgentRunner>(
     // させない（旧 per-相手 セッションの性質の復元）。
     let speaker_pubkey = event.pubkey.clone();
     let job_session_id = session_id.clone();
-    // `caller` は関数冒頭（元栓ゲート）で `event.pubkey` から解決済み（#319 の解決点はここ）。
+    // `caller` は元栓ゲートを通過した後に `event.pubkey` から解決済み（#319 の解決点はここ）。
     // 応答生成側で session_id から逆算すると、セッション規約を変えた瞬間に権限判定が壊れる。
     // オーナー未設定・未登録なら `Agent`（fail-closed）。ここで job へ move する。
     // 流量制限（permit）は **consumer タスクの内側**で取る（`run_consumer` 参照）。
@@ -1179,24 +1257,29 @@ async fn spawn_agent_gateway<R: NostrAgentRunner>(
             )
         })?;
 
-    // #698 元栓: フォローリスト（kind:3）を**起動時に取得**する。未信頼作者のイベントを
-    // 着火も記録もさせず捨てるゲート（[`handle_event`]）の権威データ。取得できなければ
-    // **起動しない**（fail-closed かつ fail-loud）: ここで空集合や全通しへ黙って倒すと、
-    // オーナー裁定（未信頼作者でターンを起こさせない）の元栓が外れたまま無防備に走る。
-    // `self_pubkey` 取得失敗で起動中止するのと同じ「必須リソースが揃わなければ載せない」流儀。
-    // 0 フォロー（空集合）は正当な成功で、その場合ゲートは owner のみ通す。
-    let followees = cli.fetch_following(agent_id).await.map_err(|e| {
-        anyhow::anyhow!(
-            "フォローリスト（kind:3）を取得できませんでした: {e:#}。#698 の元栓は\
-             フォローリストを権威データにするため、取得できないまま全通しへ倒さず起動を中止します"
-        )
-    })?;
+    // #698 元栓: 許可集合（フォロイー ∪ owner ∪ co_agent ∪ trusted_users）を**起動時に構築**する。
+    // 未信頼作者のイベントを着火も記録もさせず捨てるゲート（[`handle_event`]）の権威データ。
+    // フォローリスト（relay）取得に失敗したら **起動しない**（fail-closed かつ fail-loud）:
+    // ここで空集合や全通しへ黙って倒すと、オーナー裁定（未信頼作者でターンを起こさせない）の
+    // 元栓が外れたまま無防備に走る。`self_pubkey` 取得失敗で起動中止するのと同じ流儀。0 フォロー
+    // （空集合）は正当な成功で、その場合ゲートは owner / co_agent / trusted_users のみ通す。
+    let allow_sources = build_allow_sources(runner, cli, agent_id)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "許可集合（フォローリスト kind:3 ほか）を構築できませんでした: {e:#}。#698 の元栓は\
+                 許可集合を権威データにするため、取得できないまま全通しへ倒さず起動を中止します"
+            )
+        })?;
     info!(
         agent_id,
-        followees = followees.len(),
-        "nostr: フォローリスト（kind:3）を取得。未信頼作者の元栓を張る（#698）"
+        followees = allow_sources.followees.len(),
+        owner = allow_sources.owner.len(),
+        co_agents = allow_sources.co_agents.len(),
+        trusted_users = allow_sources.trusted_users.len(),
+        "nostr: 元栓の許可集合を構築（フォロイー ∪ owner ∪ co_agent ∪ trusted_users / #698）"
     );
-    let follow_set: FollowSet = Arc::new(RwLock::new(followees));
+    let allow: AllowGate = Arc::new(RwLock::new(allow_sources));
 
     // #489: 自 pubkey を co_agent 逆引き表（`agent_nostr_config.self_pubkey`）へ書き戻す。
     // 出所は自 secret_key から導出した自分の pubkey（受信著者ではない）＝信頼できる出所。
@@ -1242,7 +1325,7 @@ async fn spawn_agent_gateway<R: NostrAgentRunner>(
             agent,
             config,
             self_pubkey_cell,
-            follow_set,
+            allow,
             admin,
             runtime_c,
             timed_fire_router,
@@ -1420,6 +1503,10 @@ mod tests {
         preset_config: Option<AgentNostrConfigRow>,
         /// `resolve_nostr_caller` が Owner と答える相手の pubkey（#319）。
         owner_pubkey: Option<String>,
+        /// #698: `nostr_gate_allow_keys` が返す trusted_users の pubkey（元栓の許可源検証）。
+        trusted_pubkeys: Vec<String>,
+        /// #698: `nostr_gate_allow_keys` が返す co_agent の pubkey（元栓の許可源検証）。
+        co_agent_pubkeys: Vec<String>,
         /// `resolve_nostr_caller` に渡された pubkey（発言者を見ているかの検証 / #319）。
         caller_queries: Arc<Mutex<Vec<String>>>,
         /// 応答生成へ渡った呼び出し元（#319）。
@@ -1452,6 +1539,8 @@ mod tests {
                 self_pubkey_sets: Arc::new(Mutex::new(Vec::new())),
                 preset_config: None,
                 owner_pubkey: None,
+                trusted_pubkeys: Vec::new(),
+                co_agent_pubkeys: Vec::new(),
                 caller_queries: Arc::new(Mutex::new(Vec::new())),
                 callers: Arc::new(Mutex::new(Vec::new())),
                 workspace_root: None,
@@ -1468,6 +1557,18 @@ mod tests {
         /// 「この pubkey がオーナー」という解決結果を仕込む（#319）。
         fn with_owner_pubkey(mut self, pubkey: &str) -> Self {
             self.owner_pubkey = Some(pubkey.to_string());
+            self
+        }
+
+        /// #698: この pubkey を trusted_user（platform=nostr）として許可源に載せる。
+        fn with_trusted_pubkey(mut self, pubkey: &str) -> Self {
+            self.trusted_pubkeys.push(pubkey.to_string());
+            self
+        }
+
+        /// #698: この pubkey を co_agent（owner 等価）として許可源に載せる。
+        fn with_co_agent_pubkey(mut self, pubkey: &str) -> Self {
+            self.co_agent_pubkeys.push(pubkey.to_string());
             self
         }
 
@@ -1639,6 +1740,15 @@ mod tests {
             }
         }
 
+        /// #698: DB 由来の許可源を模す。owner / trusted / co_agent を仕込んだぶんだけ返す。
+        fn nostr_gate_allow_keys(&self, _agent_id: &str) -> crate::NostrGateAllowKeys {
+            crate::NostrGateAllowKeys {
+                owner: self.owner_pubkey.clone().into_iter().collect(),
+                co_agents: self.co_agent_pubkeys.clone(),
+                trusted_users: self.trusted_pubkeys.clone(),
+            }
+        }
+
         fn list_enabled_nostr_configs(&self) -> Vec<AgentNostrConfigRow> {
             Vec::new()
         }
@@ -1717,10 +1827,11 @@ mod tests {
         queues: Arc<SessionQueues>,
         cli: NostaroCli,
         agent_id: String,
-        /// #698 元栓のフォロイー集合。`feed*` は流す前に発言者をここへ入れる（既存テストは
-        /// フォロー元栓を検証対象にしていないので、素通しを保つ）。ゲート自体の検証は
-        /// [`Self::feed_unfollowed_event`]（投入しない経路）で行う。
-        follow_set: FollowSet,
+        /// #698 元栓の許可集合。owner / co_agent / trusted_users は構築時に runner の
+        /// `nostr_gate_allow_keys` から載せる。`feed*` は流す前に発言者を followees へ入れる
+        /// （既存テストはフォロー元栓を検証対象にしていないので素通しを保つ）。ゲート自体の
+        /// 検証は [`Self::feed_unfollowed_event`]（followees に入れない経路）で行う。
+        allow: AllowGate,
         /// #698 元栓で捨てた件数（揮発カウンタ）。
         dropped: Arc<AtomicU64>,
     }
@@ -1736,6 +1847,18 @@ mod tests {
             permits: usize,
             capacity: usize,
         ) -> Self {
+            // 本番の build_allow_sources と同じく、DB 由来キー（owner/co_agent/trusted）を
+            // follow_key で寄せて許可集合に載せる。followees は feed 時に足す。
+            let db = runner.nostr_gate_allow_keys(agent_id);
+            let to_set = |v: &[String]| -> HashSet<String> {
+                v.iter().map(|s| crate::pubkey::follow_key(s)).collect()
+            };
+            let allow = Arc::new(RwLock::new(AllowSources {
+                followees: HashSet::new(),
+                owner: to_set(&db.owner),
+                co_agents: to_set(&db.co_agents),
+                trusted_users: to_set(&db.trusted_users),
+            }));
             Self {
                 runner,
                 admin: Arc::new(NoopAdmin),
@@ -1744,7 +1867,7 @@ mod tests {
                 queues: Arc::new(SessionQueues::new(capacity)),
                 cli: NostaroCli::new(),
                 agent_id: agent_id.to_string(),
-                follow_set: Arc::new(RwLock::new(HashSet::new())),
+                allow,
                 dropped: Arc::new(AtomicU64::new(0)),
             }
         }
@@ -1766,29 +1889,30 @@ mod tests {
         /// 作られるが（[`run_nostr_loop`]）、ここで見たいのは [`SessionQueues`] が
         /// 複数 session を持ったときの挙動なので、意図的に 1 束を共有して流す。
         ///
-        /// #698: 発言者を follow_set へ入れてから流す（＝フォロイー扱い）。フォロー元栓を
+        /// #698: 発言者を followees へ入れてから流す（＝フォロイー扱い）。フォロー元栓を
         /// 検証しない既存テストの素通しを保つため。ゲートの検証は [`Self::feed_unfollowed_event`]。
         async fn feed_event_as(&self, agent_id: &str, ev: NostrEvent) {
-            self.follow_set
+            self.allow
                 .write()
                 .unwrap()
+                .followees
                 .insert(crate::pubkey::follow_key(&ev.pubkey));
             self.dispatch(agent_id, ev).await;
         }
 
-        /// follow_set へ入れずに1件流す（フォロー元栓の検証用 / #698）。発言者がフォロイー
-        /// でも owner でもなければ、ゲートで捨てられる。
+        /// 許可集合へ入れずに1件流す（元栓の検証用 / #698）。発言者がフォロイー・owner・
+        /// co_agent・trusted_user のいずれでもなければ、ゲートで捨てられる。
         async fn feed_unfollowed_event(&self, ev: NostrEvent) {
             self.dispatch(&self.agent_id, ev).await;
         }
 
-        /// `handle_event` を現在の follow_set / dropped で呼ぶ共通経路。
+        /// `handle_event` を現在の allow / dropped で呼ぶ共通経路。
         async fn dispatch(&self, agent_id: &str, ev: NostrEvent) {
             handle_event(
                 &self.runner,
                 &self.cli,
                 agent_id,
-                &self.follow_set,
+                &self.allow,
                 &self.dropped,
                 &self.admin,
                 &self.runtime,
@@ -1857,10 +1981,10 @@ mod tests {
 
     /// **本丸**: owner でない発言者から届いたターンは `Agent` のまま（昇格しない）。
     ///
-    /// #698 以降、入り口に立てる（＝ターンを起こせる）のはフォロイー ∪ owner だけなので、
-    /// ここでの「他人」は**フォロイーだが owner ではない**相手（`feed` が follow_set へ入れる）。
-    /// フォロー元栓の外にいる完全な他人は [`unfollowed_non_owner_event_is_dropped_before_store`]
-    /// が別に見る。
+    /// #698 以降、入り口に立てる（＝ターンを起こせる）のは許可源（フォロイー ∪ owner ∪
+    /// co_agent ∪ trusted_users）だけなので、ここでの「他人」は**フォロイーだが owner では
+    /// ない**相手（`feed` が followees へ入れる）。許可源の外にいる完全な他人は
+    /// [`unallowed_author_event_is_dropped_before_store`] が別に見る。
     #[tokio::test]
     async fn inbound_from_stranger_stays_agent() {
         let h = Harness::with_runner(
@@ -1893,18 +2017,19 @@ mod tests {
         );
     }
 
-    // ---- #698: フォロイー ∪ owner 以外は着火も記録もさせない元栓 ----
+    // ---- #698: フォロイー ∪ owner ∪ co_agent ∪ trusted_users 以外は着火も記録もさせない元栓 ----
 
-    /// **本丸**: フォロイーでも owner でもない作者のイベントは、**record より前に**捨てる。
+    /// **本丸**: どの許可源にも属さない作者のイベントは、**record より前に**捨てる。
     ///
     /// 会話履歴に 1 件も入らず（`recorded` が空）、応答生成も走らない（`finished` が 0）。
-    /// 捨てた数は揮発カウンタに乗る（`dropped == 1`）。
+    /// 捨てた数は揮発カウンタに乗る（`dropped == 1`）。さらに **`resolve_nostr_caller` が
+    /// 呼ばれない**（ドロップは純メモリで、DB 往復がホットパスに乗らない / #698 req3）。
     ///
-    /// **変異確認**: `handle_event` の元栓 `if !is_followee && !caller.is_owner_equivalent()
-    /// { return; }` を外すと、未信頼作者が記録され応答生成まで走る（このテストが赤くなる）。
+    /// **変異確認**: `handle_event` の元栓 `if !allow.is_allowed(&author_key) { return; }` を
+    /// 外すと、未許可作者が記録され応答生成まで走る（このテストが赤くなる）。
     #[tokio::test]
-    async fn unfollowed_non_owner_event_is_dropped_before_store() {
-        // owner 未設定・follow_set 空。feed_unfollowed_event は follow_set へ入れない。
+    async fn unallowed_author_event_is_dropped_before_store() {
+        // owner 未設定・許可集合空。feed_unfollowed_event は followees へ入れない。
         let h = Harness::new("agent-gate", Duration::from_millis(0), 4, 8);
         h.feed_unfollowed_event(event("evt-x", STRANGER_PK, "無視されるはず"))
             .await;
@@ -1912,21 +2037,26 @@ mod tests {
         // record より前で捨てているので、少し待っても何も起きない。
         assert!(
             !h.wait_finished(1, Duration::from_millis(200)).await,
-            "未信頼作者のイベントで応答生成が走った（元栓が効いていない）"
+            "未許可作者のイベントで応答生成が走った（元栓が効いていない）"
         );
         assert!(
             h.runner.recorded.lock().unwrap().is_empty(),
-            "未信頼作者のイベントが会話履歴に記録された（store 前で捨てていない）"
+            "未許可作者のイベントが会話履歴に記録された（store 前で捨てていない）"
         );
         assert_eq!(h.dropped(), 1, "揮発カウンタが増えていない");
+        // ホットパスは純メモリ: ドロップ前に resolve_nostr_caller（DB 往復）を呼ばない。
+        assert!(
+            h.runner.caller_queries.lock().unwrap().is_empty(),
+            "ドロップ判定の前に resolve_nostr_caller が呼ばれた（ホットパスに DB 往復が乗っている）"
+        );
     }
 
     /// フォロイー（kind:3）の作者は通す（記録され応答生成が走る）。owner でなくても入り口に
-    /// 立てる（#698 の許可集合はフォロイー ∪ owner）。
+    /// 立てる（#698 の許可集合はフォロイー ∪ owner ∪ co_agent ∪ trusted_users）。
     #[tokio::test]
     async fn followee_event_passes_the_gate() {
         let h = Harness::new("agent-gate", Duration::from_millis(0), 4, 8);
-        // feed は発言者を follow_set へ入れてから流す＝フォロイー扱い。
+        // feed は発言者を followees へ入れてから流す＝フォロイー扱い。
         h.feed("evt-f", STRANGER_PK, "フォローしている相手").await;
         assert!(h.wait_finished(1, Duration::from_secs(2)).await);
         assert_eq!(
@@ -1937,14 +2067,13 @@ mod tests {
         assert_eq!(h.dropped(), 0, "フォロイーを誤って捨てた");
     }
 
-    /// **本丸**: owner の作者はフォロイーでなくても通す（元栓を素通り）。owner 判定は
-    /// `CallerIdentity::is_owner_equivalent`（owner ゲートの唯一源）に委ねる。
+    /// **本丸**: owner の作者はフォロイーでなくても通す（元栓を素通り）。owner は許可源
+    /// `AllowSources::owner`（`nostr_gate_allow_keys` 由来）に載る。
     ///
-    /// **変異確認**: 元栓の許可条件から `!caller.is_owner_equivalent()` を落とすと、
-    /// フォローしていない owner が捨てられる（このテストが赤くなる）。
+    /// **変異確認**: 許可源から owner を落とすと、フォローしていない owner が捨てられる。
     #[tokio::test]
-    async fn owner_event_bypasses_follow_gate_even_when_not_followed() {
-        // owner を仕込むが follow_set へは入れない（feed_unfollowed_event を使う）。
+    async fn owner_event_bypasses_gate_even_when_not_followed() {
+        // owner を仕込むが followees へは入れない（feed_unfollowed_event を使う）。
         let h = Harness::with_runner(
             "agent-gate",
             SlowRunner::new(Duration::from_millis(0)).with_owner_pubkey(OWNER_PK),
@@ -1964,6 +2093,49 @@ mod tests {
             [CallerIdentity::Owner],
             "owner 発のターンが Owner で走っていない"
         );
+    }
+
+    /// **裁定**: owner が明示登録した trusted_user（platform=nostr）はフォロイーでなくても
+    /// 通す（締め出さない / #698 レビュー裁定）。
+    ///
+    /// **変異確認**: 許可源から trusted_users を落とすと、このテストが赤くなる。
+    #[tokio::test]
+    async fn trusted_user_event_passes_the_gate() {
+        let h = Harness::with_runner(
+            "agent-gate",
+            SlowRunner::new(Duration::from_millis(0)).with_trusted_pubkey(STRANGER_PK),
+            4,
+            8,
+        );
+        h.feed_unfollowed_event(event("evt-t", STRANGER_PK, "信頼済みユーザー"))
+            .await;
+        assert!(
+            h.wait_finished(1, Duration::from_secs(2)).await,
+            "trusted_user のイベントが元栓で捨てられた"
+        );
+        assert_eq!(h.runner.recorded.lock().unwrap().len(), 1);
+        assert_eq!(h.dropped(), 0, "trusted_user を捨てた");
+    }
+
+    /// co_agent（owner 等価）はフォロイーでなくても通す（エージェント間協働を壊さない / #485）。
+    ///
+    /// **変異確認**: 許可源から co_agents を落とすと、このテストが赤くなる。
+    #[tokio::test]
+    async fn co_agent_event_passes_the_gate() {
+        let h = Harness::with_runner(
+            "agent-gate",
+            SlowRunner::new(Duration::from_millis(0)).with_co_agent_pubkey(STRANGER_PK),
+            4,
+            8,
+        );
+        h.feed_unfollowed_event(event("evt-c", STRANGER_PK, "協働エージェント"))
+            .await;
+        assert!(
+            h.wait_finished(1, Duration::from_secs(2)).await,
+            "co_agent のイベントが元栓で捨てられた"
+        );
+        assert_eq!(h.runner.recorded.lock().unwrap().len(), 1);
+        assert_eq!(h.dropped(), 0, "co_agent を捨てた");
     }
 
     /// [P1 回帰 / #168] 同一セッション（同一相手）の連投は**投入順どおり**に処理される。

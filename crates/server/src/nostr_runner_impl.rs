@@ -79,6 +79,51 @@ pub(crate) fn resolve_nostr_caller_identity(
     )
 }
 
+/// #698 元栓の許可源のうち **DB 由来**（owner / co_agent / trusted_users(platform=nostr)）の
+/// 生 pubkey をまとめて読む（DB 接続だけに依存する本体。`AppState` を組まずに実 DB で検証できる）。
+///
+/// ホットパス（未許可イベントのドロップ）をメモリ照合に保つため、**更新経路だけ**がこれを呼ぶ。
+/// 材料は [`resolve_nostr_caller_identity`] と**同じ DB 表**（owner_pubkey / trusted_users /
+/// trusted_co_agents）で、判定の単一源をずらさない。正規化は受け手（nostr crate の
+/// `build_allow_sources`）が follow_key で一括して行うので、ここは生の文字列を返す。
+pub(crate) fn nostr_gate_allow_keys_from_db(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+) -> opencrab_nostr::NostrGateAllowKeys {
+    // owner: `agent_nostr_config.owner_pubkey`（未設定なら空 = 誰も owner にならない fail-closed）。
+    let owner: Vec<String> = opencrab_db::queries::get_agent_nostr_owner_pubkey(conn, agent_id)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .into_iter()
+        .collect();
+    // trusted_users: **platform='nostr' の行だけ**（Discord の識別子空間と混ぜない）。permission は
+    // 問わない（登録されていれば信頼＝許可。精密な権限は resolve_nostr_caller が別に決める）。
+    let trusted_users: Vec<String> = opencrab_db::queries::list_trusted_users(conn, agent_id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|u| u.platform == opencrab_db::queries::TRUSTED_PLATFORM_NOSTR)
+        .map(|u| u.user_id)
+        .collect();
+    // co_agent（owner 等価 / #485 #489）: `trusted_co_agents`（agent UUID 対）の相手の
+    // `agent_nostr_config.self_pubkey`。self_pubkey は各 agent 自身の接続からしか書かれない
+    // （鍵所有で本人性担保）ので、UUID→self_pubkey の向きでも安全。未接続で self_pubkey が
+    // 空の co_agent は載らない（fail-closed。その相手が Nostr で話してくれば resolve 側も届かない）。
+    let co_agents: Vec<String> = opencrab_db::queries::list_trusted_co_agents(conn, agent_id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|row| {
+            opencrab_db::queries::get_agent_nostr_self_pubkey(conn, &row.co_agent_id)
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })
+        .collect();
+    opencrab_nostr::NostrGateAllowKeys {
+        owner,
+        co_agents,
+        trusted_users,
+    }
+}
+
 impl opencrab_nostr::NostrAgentRunner for AppState {
     /// 受信イベントの発言者から呼び出し元の権限を決める（#319）。
     ///
@@ -106,6 +151,16 @@ impl opencrab_nostr::NostrAgentRunner for AppState {
             return opencrab_actions::CallerIdentity::Agent;
         };
         resolve_nostr_caller_identity(&conn, agent_id, author_pubkey)
+    }
+
+    /// #698 元栓の DB 由来の許可源（owner / co_agent / trusted_users(platform=nostr)）を読む。
+    /// 更新経路だけがこれを呼び、ホットパスはメモリ照合に保つ。DB を引けなければ空（fail-closed。
+    /// フォロイー ∪ owner はフォローリスト側で担保され、allow-all へは倒れない）。
+    fn nostr_gate_allow_keys(&self, agent_id: &str) -> opencrab_nostr::NostrGateAllowKeys {
+        let Ok(conn) = self.db.lock() else {
+            return opencrab_nostr::NostrGateAllowKeys::default();
+        };
+        nostr_gate_allow_keys_from_db(&conn, agent_id)
     }
 
     fn list_enabled_nostr_configs(&self) -> Vec<opencrab_db::queries::AgentNostrConfigRow> {
@@ -599,6 +654,61 @@ mod caller_tests {
             CallerIdentity::Agent,
             "未登録の UUID が co_agent になった（誤許可）"
         );
+    }
+
+    // ---- #698: 元栓の DB 由来許可源の材料化 ----
+
+    /// **本丸（#698）**: `nostr_gate_allow_keys_from_db` が owner / co_agent /
+    /// trusted_users(platform=nostr) を材料化する。**discord 経路の trusted_user は混ぜない**。
+    #[test]
+    fn gate_allow_keys_materializes_owner_coagent_and_nostr_trusted_only() {
+        let conn = db_with_nostr_row();
+        set_owner(&conn, OWNER_HEX);
+        // nostr の trusted_user（許可源に載る）。
+        register(
+            &conn,
+            TRUSTED_PLATFORM_NOSTR,
+            STRANGER_HEX,
+            TrustedUserPermission::User,
+        );
+        // discord の trusted_user（経路が違うので**載らない**）。
+        register(
+            &conn,
+            TRUSTED_PLATFORM_DISCORD,
+            FRIEND_HEX,
+            TrustedUserPermission::User,
+        );
+        // co_agent（UUID 対 → 相手の self_pubkey が FRIEND_HEX）。
+        set_self_pubkey(&conn, FRIEND_AGENT_UUID, FRIEND_HEX);
+        trust_co_agent(&conn, AGENT, FRIEND_AGENT_UUID);
+
+        let keys = super::nostr_gate_allow_keys_from_db(&conn, AGENT);
+        assert_eq!(
+            keys.owner,
+            vec![OWNER_HEX.to_string()],
+            "owner が材料化されない"
+        );
+        assert_eq!(
+            keys.co_agents,
+            vec![FRIEND_HEX.to_string()],
+            "co_agent の self_pubkey が材料化されない"
+        );
+        assert_eq!(
+            keys.trusted_users,
+            vec![STRANGER_HEX.to_string()],
+            "nostr の trusted_user だけを材料化していない（discord が混ざる / 抜ける）"
+        );
+    }
+
+    /// fail-closed（#698）: owner 未設定・trusted/co_agent 無しなら全部空
+    /// （フォロイー ∪ owner はフォローリスト側で担保され、ここが空でも allow-all にならない）。
+    #[test]
+    fn gate_allow_keys_empty_when_nothing_registered() {
+        let conn = db_with_nostr_row();
+        let keys = super::nostr_gate_allow_keys_from_db(&conn, AGENT);
+        assert!(keys.owner.is_empty());
+        assert!(keys.co_agents.is_empty());
+        assert!(keys.trusted_users.is_empty());
     }
 }
 
