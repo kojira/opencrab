@@ -5381,10 +5381,9 @@ async fn nostr_run_delegates_to_capability() {
     let actions = SystemGatewayActions::new(state, None, None, None);
     let ctx = GatewayCallContext::new(GatewayCaller::Agent, "agent-268");
 
-    // 委譲プラミングの検証（agent_id 固定・args そのまま渡る）。subcommand は実 deny を
-    // 通る読み取り系（timeline）にする — `event` は #514 で deny なので happy-path の例に
-    // 使うと「event が通る」と誤読される（実 deny は NostaroCli::run_passthrough 側で、
-    // ここは fake capability なので deny を経由しない）。
+    // 委譲プラミングの検証（agent_id 固定・args そのまま渡る）。subcommand は読み取り系
+    // （timeline）にする（実 deny は NostaroCli::run_passthrough 側で、ここは fake
+    // capability なので deny を経由しない。`event` は #699 で許可済み）。
     let r = actions
         .execute(
             "nostr_run",
@@ -5459,7 +5458,7 @@ async fn nostr_run_validates_args() {
     assert!(rec.calls.lock().unwrap().is_empty());
 }
 
-/// capability のエラー（未 materialize / init/watch/relay/dm/event 拒否 / nostaro 失敗）はそのまま
+/// capability のエラー（未 materialize / init/watch/relay/dm 拒否 / nostaro 失敗）はそのまま
 /// `nostr_run 失敗:` として伝播する（マスク済みメッセージ）。
 // #654: nostr_run は nostr feature 依存（#651）。off ではツールが無いので同じ cfg で囲む。
 #[cfg(feature = "nostr")]

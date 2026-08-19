@@ -401,7 +401,8 @@ impl SystemGatewayActions {
             // 「鍵のエージェント間混同防止（config は ctx.agent_id 固定）」と「nsec 隠蔽」の
             // 2 点だけで、Nostr 仕様の判断は nostaro に委ねる（非劣化）。`init`（鍵作成/上書き）・
             // `watch`（無制限受信）・`relay`（config.toml⇔DB desync で揮発）に加え、#514 で
-            // `dm`（DM 送信）・`event`（任意 kind publish で DM を迂回できる）も拒否する。
+            // `dm`（DM 送信）を拒否する。`event`（任意 kind publish）は #699 のオーナー裁定で
+            // 許可（暗号化を自前で組まない限り DM としては機能しない＝実用迂回にならない）。
             #[cfg(feature = "nostr")]
             GatewayActionDef {
                 name: "nostr_run".to_string(),
@@ -418,8 +419,10 @@ impl SystemGatewayActions {
                               nostr_switch_identity を使うこと（init は不可）。受信の常時監視（watch）は\
                               ここからは起動できない。リレー設定は opencrab 側（configure_nostr / \
                               ダッシュボード）で管理するため relay サブコマンドは不可。\
-                              **dm と event は不可**（#514: DM は扱わない。event は任意 kind を投げられ \
-                              DM を迂回できるため。private な話は Discord の DM か指定チャンネルで）。\
+                              **dm は不可**（#514: DM は扱わない。private な話は Discord の DM か\
+                              指定チャンネルで）。event は任意 kind の publish に使える（例: \
+                              subcommand=\"event\", args=[\"-k\",\"40\",\"-c\",\"…\"] で\
+                              パブリックチャット作成）。\
                               まだ鍵を採用して\
                               いない場合は先に nostr_switch_identity で採用すること。\
                               `timeline` は**フォロー基準**（自分とフォロー中の相手のノートが対象で、\
@@ -436,7 +439,7 @@ impl SystemGatewayActions {
                     "properties": {
                         "subcommand": {
                             "type": "string",
-                            "description": "nostaro のサブコマンド（init/watch/relay/dm/event は不可）。"
+                            "description": "nostaro のサブコマンド（init/watch/relay/dm は不可）。"
                         },
                         "args": {
                             "type": "array",
