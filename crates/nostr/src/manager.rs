@@ -800,15 +800,6 @@ async fn handle_event<R: NostrAgentRunner>(
     // 載る）を解消する。
     let inbound_text = event.inbound_text();
 
-    // #693: ノート本文中の画像 URL を拾って `image_urls` として記録する。何を画像と
-    // 見なすかの判断は core（[`opencrab_core::llm_text::extract_image_urls`]）に持たせ、
-    // ここ（ゲート）は生の本文を渡して結果を配送するだけ（gateways-deliver-core-decides）。
-    // 抽出は**生の `event.content`** に対して行う（下の `recorded_text` は退避・マスクで
-    // 本文が置き換わりうるため、URL が消える前の原文から拾う）。記録した image_urls は
-    // 直近ユーザーログの metadata に載り、応答生成時に `merge_image_urls` が拾って
-    // engine が vision マルチパートを組む（Discord と同一経路）。
-    let inbound_image_urls = opencrab_core::llm_text::extract_image_urls(&event.content);
-
     runner.ensure_session(&session_id, &[agent_id.to_string()], "Nostr", "{}", "nostr");
 
     // #570: 会話履歴へ残す本文だけ、tool_result と同じ退避
@@ -847,7 +838,7 @@ async fn handle_event<R: NostrAgentRunner>(
             channel_id: None,
             pubkey: Some(&event.pubkey),
             text: &recorded_text,
-            image_urls: &inbound_image_urls,
+            image_urls: &[],
         },
     );
     if !recorded {
@@ -1290,8 +1281,6 @@ mod tests {
         recorded_sessions: Arc<Mutex<Vec<String>>>,
         /// 受信の発言者 id（1 セッションに混ざっても誰の発言か分かることの検証用 / #323）。
         recorded_speakers: Arc<Mutex<Vec<String>>>,
-        /// 受信ごとに記録された画像 URL（本文からの画像抽出の検証用 / #693）。
-        recorded_image_urls: Arc<Mutex<Vec<Vec<String>>>>,
         /// 応答生成へ渡った session_id（#323）。
         run_sessions: Arc<Mutex<Vec<String>>>,
         /// 応答生成を**開始**した順（reply_target）。
@@ -1336,7 +1325,6 @@ mod tests {
                 recorded: Arc::new(Mutex::new(Vec::new())),
                 recorded_sessions: Arc::new(Mutex::new(Vec::new())),
                 recorded_speakers: Arc::new(Mutex::new(Vec::new())),
-                recorded_image_urls: Arc::new(Mutex::new(Vec::new())),
                 run_sessions: Arc::new(Mutex::new(Vec::new())),
                 started: Arc::new(Mutex::new(Vec::new())),
                 finished: Arc::new(Mutex::new(Vec::new())),
@@ -1471,10 +1459,6 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(record.sender_id.to_string());
-            self.recorded_image_urls
-                .lock()
-                .unwrap()
-                .push(record.image_urls.to_vec());
             true
         }
 
@@ -1740,46 +1724,6 @@ mod tests {
             h.runner.callers.lock().unwrap().as_slice(),
             [CallerIdentity::Agent],
             "他人の pubkey が昇格した"
-        );
-    }
-
-    /// #693: 本文中の画像 URL が受信記録の `image_urls` に載る（vision 配線）。
-    ///
-    /// 記録された image_urls は直近ユーザーログ metadata に入り、応答生成時に
-    /// `merge_image_urls` が拾って engine が vision マルチパートを組む（Discord と同一経路）。
-    /// ここでは配線点＝受信記録まで（ゲートが core の抽出結果を配送していること）を検証する。
-    #[tokio::test]
-    async fn inbound_image_url_in_body_is_recorded() {
-        let h = Harness::new("agent-image", Duration::from_millis(0), 4, 8);
-        h.feed(
-            "evt-img",
-            STRANGER_PK,
-            "これ見て https://cdn.example/photo.jpg よろしく",
-        )
-        .await;
-
-        assert_eq!(
-            h.runner.recorded_image_urls.lock().unwrap().as_slice(),
-            [vec!["https://cdn.example/photo.jpg".to_string()]],
-            "本文の画像 URL が受信記録の image_urls に載っていない"
-        );
-    }
-
-    /// #693: 画像 URL の無い本文では image_urls は空（推測で拾わない）。
-    #[tokio::test]
-    async fn inbound_without_image_url_records_empty() {
-        let h = Harness::new("agent-noimg", Duration::from_millis(0), 4, 8);
-        h.feed(
-            "evt-noimg",
-            STRANGER_PK,
-            "ただのテキスト https://example.com/page",
-        )
-        .await;
-
-        assert_eq!(
-            h.runner.recorded_image_urls.lock().unwrap().as_slice(),
-            [Vec::<String>::new()],
-            "画像でない URL を拾ってしまった"
         );
     }
 
