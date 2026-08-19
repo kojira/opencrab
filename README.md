@@ -322,22 +322,23 @@ is what keeps an inbound Nostr note from talking the agent into swapping its own
 `nostr_switch_identity` is unreachable from a `caller=Agent` turn, and the passthrough refuses
 `init`, so neither adopting nor minting-over a key is possible from inbound. It does **not** bound
 what an inbound turn can send or spend, and it is not meant to: `nostr_run` carries no caller gate
-(#303) and the passthrough denies `init`, `watch`, `relay` and — since #514 — `dm` and `event`,
+(#303) and the passthrough denies `init`, `watch`, `relay` and — since #514 — `dm`,
 so `nostr_run zap` still goes through while `nostr_run dm` is refused. Gating the
 inner `nostr_zap` / `nostr_dm` only changed which tool names got listed, so #306 dropped that
 gate rather than adding a matching one to the passthrough — the consistency is taken in the
 direction of fewer constraints, and whether to send a zap is the agent's own call.
-**DM is the exception (#514):** `nostr_dm` was removed as a tool, and both `nostr_run dm` and
-`nostr_run event` are denied in the passthrough, so DM sending has no path at all. `event` is
-denied wholesale because `nostaro event` publishes an *arbitrary* kind (`-k 4`, `--kind=1059`,
-or a `--file` JSON with `{"kind":4,…}`) — a `dm` deny alone would leave `nostr_run event -k 4`
-as a DM bypass, and denying "only when `--kind` is a DM kind" would hinge on parsing every
-argument spelling, so the security boundary is drawn at the subcommand name, not the arguments.
-(NIP-28 `channel` is *public* kind:40/41/42 with no encryption option, so it is not a private
-path and stays open.) An encrypted DM feels safe now, but the day the secret key leaks, every
-past DM becomes readable — that false sense of "it's fine to put something private here" is
-removed at the root, not merely restricted to owners (a key leak defeats owner-only too).
-Private conversations belong on Discord DMs or a dedicated channel, not on Nostr.
+**DM is the exception (#514):** `nostr_dm` was removed as a tool and `nostr_run dm` is denied
+in the passthrough, so the convenient encrypted-DM path is closed. An encrypted DM feels safe
+now, but the day the secret key leaks, every past DM becomes readable — that false sense of
+"it's fine to put something private here" is removed at the root, not merely restricted to
+owners (a key leak defeats owner-only too). Private conversations belong on Discord DMs or a
+dedicated channel, not on Nostr.
+**`nostr_run event` is allowed (#699, owner ruling 2026-08-19):** arbitrary-kind publishing has
+legitimate uses (NIP-28 public chat creation kind:40, channel posts kind:42, custom kinds), and
+the inconvenience of the blanket deny outweighed its benefit. A theoretical DM bypass remains —
+`event -k 4` can publish a DM-kind event — but making it *function* as a DM requires hand-rolling
+the encryption into the event, which is impractical; the ruling accepts that residual and keeps
+the deny on `dm`, the path that actually does the encryption for you.
 `nostr_generate_key` is deliberately *not* gated: it only mints a key that nobody has
 adopted yet, and adopting one is what `nostr_switch_identity` gates. The single table is
 `crates/actions/src/bridge.rs` (`OWNER_ONLY_ACTIONS` / `TRUSTED_ONLY_ACTIONS`), consulted by both

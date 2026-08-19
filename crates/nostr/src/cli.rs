@@ -1781,8 +1781,8 @@ mod tests {
         NostaroCli::materialize_config(agent, &["wss://relay.test".to_string()], None).unwrap();
     }
 
-    /// `init` / `watch` / `relay` / `dm` / `event` は materialize の有無に関わらず**拒否**
-    /// （鍵管理・受信・リレー設定・DM 送信・任意 kind publish は passthrough の外）。deny
+    /// `init` / `watch` / `relay` / `dm` は materialize の有無に関わらず**拒否**
+    /// （鍵管理・受信・リレー設定・DM 送信は passthrough の外）。deny
     /// チェックは config 存在チェックより手前なので nostaro を spawn しない。`relay` は
     /// config.toml だけ書き換わって DB と desync し次の gateway start / switch_identity で
     /// 揮発するため塞ぐ（configure_nostr / ダッシュボードの DB 経路に閉じる）。`dm`（#514）は
