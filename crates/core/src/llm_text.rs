@@ -16,9 +16,11 @@ pub fn strip_code_fences(text: &str) -> &str {
 /// 「この URL は画像か」という**判断**をここ（core）に集約する。ゲートウェイ
 /// （Nostr / Discord 等）は本文からこの関数で URL を拾って `image_urls` に載せるだけで、
 /// 何を画像と見なすかの基準を各ゲートに持たせない（gateways-deliver-core-decides）。
-const IMAGE_URL_EXTENSIONS: &[&str] = &[
-    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".avif", ".heic", ".heif",
-];
+///
+/// 下流（Claude vision）が URL パススルーで**受理する形式**に絞る。svg/bmp/avif/heic/heif は
+/// 受理されず、hermit（openai 形式）の image_url パススルーではリクエストごと失敗しうるため
+/// 載せない。対応形式が増えたらここに足す（下流の実能力に合わせる）。
+const IMAGE_URL_EXTENSIONS: &[&str] = &[".jpg", ".jpeg", ".png", ".gif", ".webp"];
 
 /// テキスト本文から画像 URL を抽出する（出現順・重複除去）。
 ///
@@ -42,7 +44,10 @@ pub fn extract_image_urls(text: &str) -> Vec<String> {
     // 「URL に使える文字か」で見極める。RFC 3986 で URL に使える文字は ASCII のごく一部だけで、
     // 日本語などの非 ASCII 文字はそのままでは URL に現れない（現れるなら percent-encode 済み）。
     // よって URL 使用可能文字が続く限り取り、最初にそうでない文字（空白・全角句読点・本文）で切る。
-    while let Some(rel) = rest.find("https://").or_else(|| rest.find("http://")) {
+    //
+    // http:// と https:// の**早い方**から取る。`or_else` で https を優先すると、手前に
+    // http:// の画像 URL があっても後ろの https:// へ飛んで手前を黙って取りこぼす。
+    while let Some(rel) = earliest_scheme(rest) {
         let after = &rest[rel..];
         // URL に使える文字が続く範囲を切り出す。
         let end = after.find(|c: char| !is_url_char(c)).unwrap_or(after.len());
@@ -75,6 +80,14 @@ pub fn extract_image_urls(text: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// `http://` / `https://` のうち**先に現れる方**のバイト位置。両方無ければ `None`。
+fn earliest_scheme(s: &str) -> Option<usize> {
+    match (s.find("http://"), s.find("https://")) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
 }
 
 /// RFC 3986 が URL に許す ASCII 文字か（scheme 以降の 1 文字を想定）。
@@ -167,6 +180,28 @@ mod tests {
         assert!(extract_image_urls("https://blossom.example/deadbeefcafe").is_empty());
         assert!(extract_image_urls("https://host/doc.pdf 文章").is_empty());
         assert!(extract_image_urls("画像なしの本文").is_empty());
+    }
+
+    #[test]
+    fn extract_image_urls_excludes_unsupported_formats() {
+        // 下流（Claude vision）が受理しない形式は載せない（svg/bmp/avif/heic/heif）。
+        assert!(extract_image_urls("https://host/a.svg").is_empty());
+        assert!(extract_image_urls("https://host/a.bmp").is_empty());
+        assert!(extract_image_urls("https://host/a.avif").is_empty());
+        assert!(extract_image_urls("https://host/a.heic").is_empty());
+    }
+
+    #[test]
+    fn extract_image_urls_mixed_http_and_https_no_drop() {
+        // http:// が手前・https:// が後続でも、手前の http:// を取りこぼさない
+        // （早い方から順に取る）。
+        assert_eq!(
+            extract_image_urls("http://a.example/1.png と https://b.example/2.jpg"),
+            vec![
+                "http://a.example/1.png".to_string(),
+                "https://b.example/2.jpg".to_string()
+            ]
+        );
     }
 
     #[test]
