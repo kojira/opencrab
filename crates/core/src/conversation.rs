@@ -377,6 +377,52 @@ fn is_excluded_from_conversation(log: &opencrab_db::queries::SessionLogRow) -> b
     log.log_type == "evaluation"
 }
 
+/// 結果の本文を次のターンへ持ち越さない**読み**のツールか（#707）。
+///
+/// 軸は「**もう一度呼べば同じものが得られるか**」。ファイルの読みは副作用が無く読み直せる——
+/// だから会話に焼き付ける価値が無い。コマンド実行のように「そのとき限りの結果」は落とすと
+/// 失われるので従来どおり本文を残す。
+pub(crate) fn is_read_tool(tool_name: &str) -> bool {
+    matches!(tool_name, "ws_read" | "ws_list")
+}
+
+/// 読みの結果から、会話へ残す**参照**を組む（#707）。本文は載せない。
+///
+/// 「読んだ事実」と「もう一度読む方法」が分かる形にする——落としたことを隠すとエージェントは
+/// 自分が何を読んだのか分からなくなる。参照は**元のファイル名がそのまま**使える（退避ファイル
+/// 名を作る必要が無い）。
+pub(crate) fn read_reference(result_json: &str) -> String {
+    let v: serde_json::Value = match serde_json::from_str(result_json) {
+        Ok(v) => v,
+        // 判断材料が無いので推測で捨てず、そのまま残す。
+        Err(_) => return result_json.to_string(),
+    };
+    let null = serde_json::Value::Null;
+    let d = v.get("data").unwrap_or(&null);
+    let path = d.get("path").and_then(|x| x.as_str()).unwrap_or("?");
+    let start = d.get("start_line").and_then(|x| x.as_u64());
+    let lines = d
+        .get("content")
+        .and_then(|x| x.as_str())
+        .map(|c| c.lines().count());
+    let tokens = d.get("estimated_tokens").and_then(|x| x.as_u64());
+    let has_more = d.get("has_more").and_then(|x| x.as_bool()).unwrap_or(false);
+
+    let range = match (start, lines) {
+        (Some(s), Some(n)) if n > 0 => format!("{s}〜{} 行目", s as usize + n - 1),
+        (Some(s), _) => format!("{s} 行目から"),
+        (None, Some(n)) => format!("{n} 行"),
+        _ => "全体".to_string(),
+    };
+    let size = tokens
+        .map(|t| format!("・約 {t} トークン"))
+        .unwrap_or_default();
+    let more = if has_more { "・続きあり" } else { "" };
+    format!(
+        "{path} の {range} を読んだ{size}{more}（本文は会話に残していない。必要ならもう一度 ws_read で読む）"
+    )
+}
+
 /// heartbeat セッションで過去に積まれた指示文（プロンプト scaffolding）か（#501）。
 ///
 /// 以前は `scheduler.rs::run_one_heartbeat` が発火のたびに `log_type='system'` かつ
@@ -726,10 +772,30 @@ pub fn format_single_log(log: &opencrab_db::queries::SessionLogRow) -> String {
                 .as_ref()
                 .and_then(|value| value.get("tool_name").and_then(|v| v.as_str()))
                 .unwrap_or("unknown");
-            format!(
-                "[tool_result]{}:\n[id={}]: {} → {}",
-                ts, tool_call_id, tool_name, log.content
-            )
+            // #707: **読みの本文は次のターンへ持ち越さない**。
+            //
+            // 以前はツール結果の JSON を丸ごと会話へ再生していた。実測（直近 100 件）では
+            // tool_result 37 件 22KB に対し人と自分の発言は 13 件 2KB——**会話の 9 割が作業の
+            // 残骸で、人の言葉は 5%**。この状態でコンパクションが走れば押し出されるのは古い
+            // 人の発言になる（#284「ユーザー発言が 1 件も残らない」／#692 の捏造の下地）。
+            //
+            // 読みは**もう一度呼べば同じものが得られる**ので、会話には参照だけを残す。落とす
+            // のは次のターン以降への持ち越しだけで、そのターンの中では従来どおり本文がモデル
+            // へ渡る（ツール往復は会話再構成を通らない）。記録（DB）も完全なまま残す。
+            if is_read_tool(tool_name) {
+                format!(
+                    "[tool_result]{}:\n[id={}]: {} → {}",
+                    ts,
+                    tool_call_id,
+                    tool_name,
+                    read_reference(&log.content)
+                )
+            } else {
+                format!(
+                    "[tool_result]{}:\n[id={}]: {} → {}",
+                    ts, tool_call_id, tool_name, log.content
+                )
+            }
         }
         "tool_cancelled" => {
             let meta = log
@@ -2215,5 +2281,57 @@ mod response_only_directive_tests {
         let out = build_conversation_string(&conn, "s1", "a1", 100_000).unwrap();
         assert_eq!(out, NO_MESSAGES_MARKER);
         assert!(!out.contains(RESPONSE_ONLY_DIRECTIVE), "{out}");
+    }
+}
+
+/// #707: **読みの本文を次のターンへ持ち越さない**ことの回帰ガード。
+#[cfg(test)]
+mod read_reference_tests {
+    use super::{is_read_tool, read_reference};
+
+    #[test]
+    fn read_results_leave_only_a_reference() {
+        let body = "秘密の設計メモ本文".repeat(50);
+        let result = serde_json::json!({
+            "success": true,
+            "data": {
+                "path": "docs/design.md",
+                "content": body,
+                "start_line": 1,
+                "estimated_tokens": 18_000,
+                "has_more": true,
+            }
+        })
+        .to_string();
+
+        let rendered = read_reference(&result);
+        assert!(
+            !rendered.contains("秘密の設計メモ本文"),
+            "読みの本文が会話へ載っている（次のターンへ持ち越される）: {rendered}"
+        );
+        assert!(
+            rendered.contains("docs/design.md"),
+            "どのファイルを読んだか分からない: {rendered}"
+        );
+        assert!(rendered.contains("18000"), "規模が分からない: {rendered}");
+        assert!(
+            rendered.contains("続きあり"),
+            "続きの有無が分からない: {rendered}"
+        );
+        assert!(
+            rendered.contains("ws_read"),
+            "読み直す方法が分からない: {rendered}"
+        );
+    }
+
+    #[test]
+    fn non_read_tools_keep_their_body() {
+        assert!(is_read_tool("ws_read"));
+        assert!(is_read_tool("ws_list"));
+        assert!(
+            !is_read_tool("execute_shell"),
+            "実行結果は読み直せないので落とさない"
+        );
+        assert!(!is_read_tool("search_my_history"));
     }
 }
