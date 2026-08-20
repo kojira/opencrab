@@ -200,9 +200,39 @@ pub struct SubtaskSettled {
 /// 「resume ＋ その gateway の配送口」を担う（Discord=`send_to_channel` /
 /// Nostr=`reply` / REST=保存して取得 / heartbeat=次 tick 拾い or 保存）。
 pub trait SubtaskCompletionSink: Send + Sync {
-    /// 親セッションのエージェントを resume して subtask 結果を会話へ再注入する
-    /// トリガ。本文は DB 永続化済みのため運搬しない（RFC §1.3）。
-    fn on_subtask_settled(&self, ev: SubtaskSettled);
+    /// この transport が持つ**親セッション ID の接頭辞**（例 `discord-` / `web-` / `agent-msg-`）。
+    ///
+    /// 継続を起こすかの判断（[`dispatch_settled`]）が使う。sink は spawn 時に transport ごとへ
+    /// 選ばれるが、ネストした subtask（`subtask-*`）や heartbeat（`heartbeat-*`）の決着が同じ
+    /// sink を通ることがあるため、**自分の親セッションかどうか**は判断側で確かめる。
+    ///
+    /// **既定実装を与えない**（#638）。新しい transport を足したとき、コンパイラがここで止める。
+    ///
+    /// **接頭辞は transport 間で互いに素であること**（現状 `discord-` / `web-` / `nostr-` /
+    /// `agent-msg-` / `heartbeat-` / `subtask-` は重ならない）。重なると、判断
+    /// （[`dispatch_settled`]）が親セッションを取り違えて継続を誤配送する——コンパイラは
+    /// ここを強制できないので、transport を足すときに既存の接頭辞と衝突しないことを確かめる。
+    fn session_prefix(&self) -> &'static str;
+
+    /// **進捗（[`SettleKind::Progress`]）も継続として配送するか**（Discord だけ `true`）。
+    ///
+    /// `report_progress` のデバウンス発火が「進捗実況」としてメインエンジンを呼び直す Discord
+    /// 固有の機能。web / Nostr / REST は完了だけを配送する（進捗で resume すると、まだ走って
+    /// いる run の途中で二重に応答してしまう）。**transport ごとに違うのはここだけ**なので、
+    /// 判断ではなく**性質**として名乗らせる（#638）。
+    ///
+    /// **既定実装を与えない**（#638）。
+    fn forwards_progress(&self) -> bool;
+
+    /// 継続ターンを**配送する**（transport の「違うところ」）。
+    ///
+    /// ここへ来た時点で「継続を起こす」判断は [`dispatch_settled`] が済ませている——kind の
+    /// 検査も、親セッションが自分のものかの検査も、**実装側でやり直さない**。実装がするのは
+    /// 「自分の口で継続ターンを回して結果を届ける」ことだけ（Discord=イベントループへ /
+    /// web=SSE / Nostr=セッションへ転記 / REST=セッションログへ永続化）。
+    ///
+    /// **既定実装を与えない**（#638）。継続を実装し忘れた transport はコンパイルが通らない。
+    fn deliver_continuation(&self, ev: SubtaskSettled);
 
     /// `cancel_subtask` で subtask が停止したときの通知（`kind = Cancelled`）。
     ///
@@ -224,6 +254,62 @@ pub trait SubtaskCompletionSink: Send + Sync {
     }
 }
 
+/// **継続ターンを起こすかどうかの判断（#638・唯一の実装）**。
+///
+/// 以前は transport ごとの sink が同じ判断をそれぞれ書いていた（Discord / web / Nostr の 3 本）。
+/// 同型実装が 3 つあると「3 箇所とも直さないと直らない」うえ、実際に不一致が生まれていた——
+/// **REST には継続そのものが無く**（`POST /api/agents/{id}/messages` で subtask を投げると、
+/// 完了が届いても続きが走らない / #631 の実測）、web / Nostr は完了 1 本ごとに継続するのに
+/// REST だけ「未完がゼロのとき」というゲートを持っていた。判断をここへ集約し、transport は
+/// [`SubtaskCompletionSink::deliver_continuation`]（配送）と
+/// [`SubtaskCompletionSink::forwards_progress`]（性質）だけを答える。
+///
+/// 判断は 3 つだけ:
+/// 1. **kind**: `Completed` は常に継続する。`Progress` は `forwards_progress()` が `true` の
+///    transport にだけ配送する（Discord の進捗実況）。それ以外（`Cancelled` 等）は配送しない
+///    ——停止は [`SubtaskCompletionSink::on_subtask_cancelled`] の役目で、ここへ流すと
+///    「止めたのに返信する」ことになる。
+/// 2. **親セッションが自分のものか**: `session_prefix()` で確かめる。ネストした subtask や
+///    heartbeat の決着が同じ sink を通り得るため（正常系なので debug に留める）。
+/// 3. 上を通ったら配送へ渡す。**「他に走行中の subtask があるか」は見ない**——複数 subtask の
+///    ドリブルは実測で再現せず（3 本を順に走らせた結果、継続が全部拾って最後にまとめて答えた）、
+///    未完ゼロを待つと「最後の 1 本が終わるまで何も返さない」ことになる（#638 の裁定）。
+///
+/// `settle_completed`（完了）と `report_progress` のデバウンス発火（進捗）は、sink のメソッドを
+/// 直接呼ばず**必ずここを通る**。これで判断が 1 箇所に閉じ、transport 側にコピーが生まれない。
+pub fn dispatch_settled(sink: &dyn SubtaskCompletionSink, ev: SubtaskSettled) {
+    match ev.kind {
+        SettleKind::Completed => {}
+        SettleKind::Progress => {
+            if !sink.forwards_progress() {
+                tracing::debug!(
+                    session_id = %ev.session_id,
+                    "subtask progress: transport does not forward progress, skipping continuation"
+                );
+                return;
+            }
+        }
+        other => {
+            tracing::debug!(
+                session_id = %ev.session_id,
+                kind = ?other,
+                "subtask settled: not a continuation trigger, skipping"
+            );
+            return;
+        }
+    }
+    if !ev.session_id.starts_with(sink.session_prefix()) {
+        // ネストした subtask（`subtask-*`）や heartbeat（`heartbeat-*`）の決着。正常系。
+        tracing::debug!(
+            session_id = %ev.session_id,
+            prefix = sink.session_prefix(),
+            "subtask settled: parent session belongs to another transport, skipping continuation"
+        );
+        return;
+    }
+    sink.deliver_continuation(ev);
+}
+
 /// 何もしない `SubtaskCompletionSink`（debug ログのみ / #167）。
 ///
 /// `RunRequest::with_dispatch` は sink を必須とするため（`Some(sink)` のときだけ
@@ -240,7 +326,16 @@ pub trait SubtaskCompletionSink: Send + Sync {
 pub struct NoopCompletionSink;
 
 impl SubtaskCompletionSink for NoopCompletionSink {
-    fn on_subtask_settled(&self, ev: SubtaskSettled) {
+    /// どの親セッションにも属さない（配送しないので接頭辞は空＝全ての session に一致する）。
+    /// 一致しても [`Self::deliver_continuation`] が debug ログだけで終わる。
+    fn session_prefix(&self) -> &'static str {
+        ""
+    }
+    /// 何も配送しないので進捗も転送しない。
+    fn forwards_progress(&self) -> bool {
+        false
+    }
+    fn deliver_continuation(&self, ev: SubtaskSettled) {
         tracing::debug!(
             session_id = %ev.session_id,
             agent_id = %ev.agent_id,
@@ -445,16 +540,20 @@ pub fn settle_completed(
         }
     };
 
-    // 3. sink を発火する（本文は運ばない = DB 永続化済み）。
-    sink.on_subtask_settled(SubtaskSettled {
-        session_id: ctx.parent_session_id,
-        agent_id: ctx.agent_id,
-        subtask_id: ctx.subtask_id,
-        exit_reason: ctx.exit_reason,
-        kind: SettleKind::Completed,
-        reply_target,
-        caller,
-    });
+    // 3. sink を発火する（本文は運ばない = DB 永続化済み）。継続を起こすかの判断は
+    //    `dispatch_settled`（#638・唯一の実装）が持つ——sink のメソッドを直接呼ばない。
+    dispatch_settled(
+        &*sink,
+        SubtaskSettled {
+            session_id: ctx.parent_session_id,
+            agent_id: ctx.agent_id,
+            subtask_id: ctx.subtask_id,
+            exit_reason: ctx.exit_reason,
+            kind: SettleKind::Completed,
+            reply_target,
+            caller,
+        },
+    );
 }
 
 /// 走行中 subtask に対する管理操作（cancel / steer）の共有認可述語（#331 / #647）。
@@ -1442,8 +1541,115 @@ mod tests {
         cancelled: Mutex<Vec<SubtaskSettled>>,
     }
 
+    // ---- #638: 継続の判断が transport 非依存であること（core 側の 1 本） ----
+
+    /// 継続の判断に使う最小の sink。`prefix` / `progress` を差し替えて、
+    /// **transport の性質だけで**判断が決まることを見る。
+    #[derive(Clone)]
+    struct ProbeSink {
+        prefix: &'static str,
+        progress: bool,
+        delivered: Arc<Mutex<Vec<SettleKind>>>,
+    }
+
+    impl ProbeSink {
+        fn new(prefix: &'static str, progress: bool) -> ProbeSink {
+            ProbeSink {
+                prefix,
+                progress,
+                delivered: Arc::new(Mutex::new(vec![])),
+            }
+        }
+        fn kinds(&self) -> Vec<SettleKind> {
+            self.delivered.lock().unwrap().clone()
+        }
+    }
+
+    impl SubtaskCompletionSink for ProbeSink {
+        fn session_prefix(&self) -> &'static str {
+            self.prefix
+        }
+        fn forwards_progress(&self) -> bool {
+            self.progress
+        }
+        fn deliver_continuation(&self, ev: SubtaskSettled) {
+            self.delivered.lock().unwrap().push(ev.kind);
+        }
+    }
+
+    fn probe_ev(session_id: &str, kind: SettleKind) -> SubtaskSettled {
+        SubtaskSettled {
+            session_id: session_id.to_string(),
+            agent_id: "a".to_string(),
+            subtask_id: "st-1".to_string(),
+            exit_reason: "completed".to_string(),
+            kind,
+            reply_target: None,
+            caller: crate::traits::CallerIdentity::Owner,
+        }
+    }
+
+    /// **完了は transport に関わらず継続する**（#638 の中心）。接頭辞だけ違う 4 つの
+    /// transport（discord / web / nostr / agent-msg）で、同じ判断が同じ結果になる。
+    /// 以前は sink ごとに判断が書かれていて **REST にだけ継続が無かった**（#631 の実測）。
+    #[test]
+    fn completion_continues_on_every_transport() {
+        for prefix in ["discord-", "web-", "nostr-", "agent-msg-"] {
+            let sink = ProbeSink::new(prefix, false);
+            let sid = format!("{prefix}agent-x");
+            dispatch_settled(&sink, probe_ev(&sid, SettleKind::Completed));
+            assert_eq!(
+                sink.kinds(),
+                vec![SettleKind::Completed],
+                "{prefix} で完了の継続が起きていない（transport 非依存であること）"
+            );
+        }
+    }
+
+    /// **進捗は `forwards_progress()` が true の transport にだけ**配送される
+    /// （Discord の進捗実況。web / Nostr / REST は完了だけ）。判断は 1 箇所で、
+    /// transport は性質を名乗るだけ。
+    #[test]
+    fn progress_follows_the_transport_property_only() {
+        let forwards = ProbeSink::new("discord-", true);
+        dispatch_settled(&forwards, probe_ev("discord-a", SettleKind::Progress));
+        assert_eq!(forwards.kinds(), vec![SettleKind::Progress]);
+
+        let quiet = ProbeSink::new("web-", false);
+        dispatch_settled(&quiet, probe_ev("web-a", SettleKind::Progress));
+        assert!(
+            quiet.kinds().is_empty(),
+            "進捗を転送しない transport へ配送された"
+        );
+    }
+
+    /// **停止（Cancelled）では継続しない**。停止は `on_subtask_cancelled` の役目で、
+    /// ここへ流すと「止めたのに返信する」ことになる（既存の意図を集約後も保つ）。
+    #[test]
+    fn cancelled_never_continues() {
+        let sink = ProbeSink::new("web-", true);
+        dispatch_settled(&sink, probe_ev("web-a", SettleKind::Cancelled));
+        assert!(sink.kinds().is_empty(), "停止で継続が起きた");
+    }
+
+    /// **他の transport の親セッションは配送しない**（ネストした subtask や heartbeat の
+    /// 決着が同じ sink を通り得る）。
+    #[test]
+    fn foreign_parent_session_is_skipped() {
+        let sink = ProbeSink::new("web-", false);
+        dispatch_settled(&sink, probe_ev("heartbeat-a", SettleKind::Completed));
+        dispatch_settled(&sink, probe_ev("subtask-a", SettleKind::Completed));
+        assert!(sink.kinds().is_empty(), "他 transport の決着で継続が起きた");
+    }
+
     impl SubtaskCompletionSink for RecordingSink {
-        fn on_subtask_settled(&self, ev: SubtaskSettled) {
+        fn session_prefix(&self) -> &'static str {
+            ""
+        }
+        fn forwards_progress(&self) -> bool {
+            true
+        }
+        fn deliver_continuation(&self, ev: SubtaskSettled) {
             self.events.lock().unwrap().push(ev);
         }
         fn on_subtask_cancelled(&self, ev: SubtaskSettled) {
@@ -1469,27 +1675,33 @@ mod tests {
     #[test]
     fn sink_receives_settled_event() {
         let sink: Arc<dyn SubtaskCompletionSink> = Arc::new(RecordingSink::default());
-        sink.on_subtask_settled(SubtaskSettled {
-            session_id: "discord-123".to_string(),
-            agent_id: "agent-a".to_string(),
-            subtask_id: "sub-1".to_string(),
-            exit_reason: "completed".to_string(),
-            kind: SettleKind::Completed,
-            reply_target: None,
-            caller: CallerIdentity::Agent,
-        });
+        dispatch_settled(
+            &*sink,
+            SubtaskSettled {
+                session_id: "discord-123".to_string(),
+                agent_id: "agent-a".to_string(),
+                subtask_id: "sub-1".to_string(),
+                exit_reason: "completed".to_string(),
+                kind: SettleKind::Completed,
+                reply_target: None,
+                caller: CallerIdentity::Agent,
+            },
+        );
 
         // downcast せずに検証するため、具象型で1つ生成しても振る舞いを確認できる。
         let recording = RecordingSink::default();
-        recording.on_subtask_settled(SubtaskSettled {
-            session_id: "nostr-abc".to_string(),
-            agent_id: "agent-b".to_string(),
-            subtask_id: "sub-2".to_string(),
-            exit_reason: "progress".to_string(),
-            kind: SettleKind::Progress,
-            reply_target: None,
-            caller: CallerIdentity::Agent,
-        });
+        dispatch_settled(
+            &recording,
+            SubtaskSettled {
+                session_id: "nostr-abc".to_string(),
+                agent_id: "agent-b".to_string(),
+                subtask_id: "sub-2".to_string(),
+                exit_reason: "progress".to_string(),
+                kind: SettleKind::Progress,
+                reply_target: None,
+                caller: CallerIdentity::Agent,
+            },
+        );
         let events = recording.events.lock().unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].subtask_id, "sub-2");
@@ -1532,7 +1744,13 @@ mod tests {
             logs_at_fire: AtomicI64,
         }
         impl SubtaskCompletionSink for OrderingSink {
-            fn on_subtask_settled(&self, _ev: SubtaskSettled) {
+            fn session_prefix(&self) -> &'static str {
+                ""
+            }
+            fn forwards_progress(&self) -> bool {
+                true
+            }
+            fn deliver_continuation(&self, _ev: SubtaskSettled) {
                 let conn = self.db.lock().unwrap();
                 let n: i64 = conn
                     .query_row(
@@ -1615,7 +1833,13 @@ mod tests {
 
         struct NoopSink;
         impl SubtaskCompletionSink for NoopSink {
-            fn on_subtask_settled(&self, _ev: SubtaskSettled) {}
+            fn session_prefix(&self) -> &'static str {
+                ""
+            }
+            fn forwards_progress(&self) -> bool {
+                true
+            }
+            fn deliver_continuation(&self, _ev: SubtaskSettled) {}
         }
 
         settle_completed(
@@ -1702,7 +1926,13 @@ mod tests {
             still_registered: std::sync::atomic::AtomicBool,
         }
         impl SubtaskCompletionSink for CapturingSink {
-            fn on_subtask_settled(&self, ev: SubtaskSettled) {
+            fn session_prefix(&self) -> &'static str {
+                ""
+            }
+            fn forwards_progress(&self) -> bool {
+                true
+            }
+            fn deliver_continuation(&self, ev: SubtaskSettled) {
                 let n: i64 = {
                     let conn = self.db.lock().unwrap();
                     conn.query_row(

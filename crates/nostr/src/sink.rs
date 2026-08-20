@@ -291,26 +291,16 @@ fn resume_prompt_suffix(reply_target: &str, subtask_id: &str, exit_reason: &str)
 }
 
 impl<R: NostrAgentRunner> SubtaskCompletionSink for NostrResponder<R> {
-    fn on_subtask_settled(&self, ev: SubtaskSettled) {
-        // 決着（Completed）以外（進捗通知など）で resume すると、まだ走っている run の
-        // 途中で二重に応答してしまう。型の意図をここで実際に守る。
-        if ev.kind != SettleKind::Completed {
-            debug!(
-                session_id = %ev.session_id,
-                kind = ?ev.kind,
-                "nostr sink: not a completion, skipping resume"
-            );
-            return;
-        }
-        // 非 Nostr の親セッション（heartbeat-* / web-* / ネストした subtask-* 等）は
-        // 正常系としてスキップする（Discord / web の sink も同様に前置きで弾く）。
-        if !ev.session_id.starts_with(NOSTR_SESSION_PREFIX) {
-            debug!(
-                session_id = %ev.session_id,
-                "nostr sink: parent session is not a nostr session, skipping resume"
-            );
-            return;
-        }
+    fn session_prefix(&self) -> &'static str {
+        NOSTR_SESSION_PREFIX
+    }
+    /// 進捗では継続しない（まだ走っている run の途中で二重に応答してしまう）。転送するのは
+    /// Discord だけ（#638）。
+    fn forwards_progress(&self) -> bool {
+        false
+    }
+    fn deliver_continuation(&self, ev: SubtaskSettled) {
+        // kind の検査も親セッションの検査も `dispatch_settled`（#638）が済ませている。
         // 継続は **session_id の一致だけ**で起こす（#588 / #440）。返信先の有無で決めない。
         //
         // 継続は「自分が投げた subtask の結果を受けて続きを話す」ことなので、セッションが一致すれば
@@ -744,7 +734,7 @@ mod tests {
         let r = responder(runner.clone(), fake.cli());
         let sid = nostr_session_id("agent-sink-test");
 
-        r.on_subtask_settled(settled(&sid, Some("note1target")));
+        opencrab_actions::dispatch_settled(&r, settled(&sid, Some("note1target")));
 
         assert!(
             runner.wait_for_reply("note1target").await,
@@ -861,11 +851,10 @@ mod tests {
         let r = responder(runner.clone(), fake.cli());
         let sid = nostr_session_id("agent-sink-test");
 
-        r.on_subtask_settled(settled_with_caller(
-            &sid,
-            Some("note1target"),
-            CallerIdentity::Owner,
-        ));
+        opencrab_actions::dispatch_settled(
+            &r,
+            settled_with_caller(&sid, Some("note1target"), CallerIdentity::Owner),
+        );
         assert!(
             runner.wait_for_reply("note1target").await,
             "resume が走ること"
@@ -888,11 +877,10 @@ mod tests {
         let r = responder(runner.clone(), fake.cli());
         let sid = nostr_session_id("agent-sink-test");
 
-        r.on_subtask_settled(settled_with_caller(
-            &sid,
-            Some("note1target"),
-            CallerIdentity::Agent,
-        ));
+        opencrab_actions::dispatch_settled(
+            &r,
+            settled_with_caller(&sid, Some("note1target"), CallerIdentity::Agent),
+        );
         assert!(runner.wait_for_reply("note1target").await);
 
         assert_eq!(
@@ -913,9 +901,9 @@ mod tests {
         let r = responder(runner.clone(), fake.cli());
         let sid = nostr_session_id("agent-sink-test");
 
-        r.on_subtask_settled(settled(&sid, None));
+        opencrab_actions::dispatch_settled(&r, settled(&sid, None));
         // 空白のみも「返信先なし」扱い（正規化される）。
-        r.on_subtask_settled(settled(&sid, Some("   ")));
+        opencrab_actions::dispatch_settled(&r, settled(&sid, Some("   ")));
 
         assert!(
             runner.wait_for_reply("ブロードキャストの続き").await,
@@ -941,8 +929,8 @@ mod tests {
         let runner = FakeRunner::new("x");
         let r = responder(runner.clone(), fake.cli());
 
-        r.on_subtask_settled(settled("web-agent-x-conv1", Some("note1target")));
-        r.on_subtask_settled(settled("heartbeat-agent-x", Some("note1target")));
+        opencrab_actions::dispatch_settled(&r, settled("web-agent-x-conv1", Some("note1target")));
+        opencrab_actions::dispatch_settled(&r, settled("heartbeat-agent-x", Some("note1target")));
 
         tokio::time::sleep(Duration::from_millis(150)).await;
         assert!(fake.sent().is_empty());
@@ -1079,7 +1067,7 @@ mod tests {
             .await;
         });
         tokio::time::sleep(Duration::from_millis(20)).await;
-        r.on_subtask_settled(settled(&sid, Some("note1resume")));
+        opencrab_actions::dispatch_settled(&r, settled(&sid, Some("note1resume")));
 
         inbound.await.unwrap();
         assert!(
@@ -1102,8 +1090,14 @@ mod tests {
         let runner = FakeRunner::new("ok").with_delay(Duration::from_millis(150));
         let r = responder(runner.clone(), fake.cli());
 
-        r.on_subtask_settled(settled(&nostr_session_id("agent-sink-a"), Some("note1a")));
-        r.on_subtask_settled(settled(&nostr_session_id("agent-sink-b"), Some("note1b")));
+        opencrab_actions::dispatch_settled(
+            &r,
+            settled(&nostr_session_id("agent-sink-a"), Some("note1a")),
+        );
+        opencrab_actions::dispatch_settled(
+            &r,
+            settled(&nostr_session_id("agent-sink-b"), Some("note1b")),
+        );
 
         assert!(runner.wait_for_reply("note1a").await);
         assert!(runner.wait_for_reply("note1b").await);
@@ -1144,7 +1138,7 @@ mod tests {
             opencrab_actions::LiveInboundScope::AllOthers,
         )
         .await;
-        r.on_subtask_settled(settled(&sid, Some("note1resume")));
+        opencrab_actions::dispatch_settled(&r, settled(&sid, Some("note1resume")));
         assert!(
             runner.wait_for_reply("note1resume").await,
             "resume が走ること"

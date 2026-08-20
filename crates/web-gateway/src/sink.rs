@@ -45,24 +45,16 @@ fn resume_prompt_suffix(subtask_id: &str, exit_reason: &str) -> String {
 }
 
 impl<R: WebAgentRunner> SubtaskCompletionSink for WebCompletionSink<R> {
-    fn on_subtask_settled(&self, ev: SubtaskSettled) {
-        // 決着（Completed）以外（進捗通知など）で resume すると、まだ走っている run の
-        // 途中で二重に応答してしまう。型の意図をここで実際に守る。
-        if ev.kind != SettleKind::Completed {
-            tracing::debug!(
-                session_id = %ev.session_id,
-                kind = ?ev.kind,
-                "web sink: not a completion, skipping resume"
-            );
-            return;
-        }
-        if !ev.session_id.starts_with(WEB_SESSION_PREFIX) {
-            tracing::debug!(
-                session_id = %ev.session_id,
-                "web sink: parent session is not a web session, skipping resume"
-            );
-            return;
-        }
+    fn session_prefix(&self) -> &'static str {
+        WEB_SESSION_PREFIX
+    }
+    /// 進捗では継続しない（まだ走っている run の途中で二重に応答してしまう）。転送するのは
+    /// Discord だけ（#638）。
+    fn forwards_progress(&self) -> bool {
+        false
+    }
+    fn deliver_continuation(&self, ev: SubtaskSettled) {
+        // kind の検査も親セッションの検査も `dispatch_settled`（#638）が済ませている。
         let runner = self.runner.clone();
         // sink は同期関数。resume は非同期のため spawn する（Discord が LoopEvent を
         // mpsc へ送るのと役割は同じ。web はループが無いので直接 spawn する）。
@@ -117,8 +109,10 @@ mod tests {
         let sid = web_session_id("a", "resume");
         let mut rx = runner.web_gateway().subscribe(&sid);
 
-        WebCompletionSink::new(runner.clone())
-            .on_subtask_settled(settled(&sid, SettleKind::Completed));
+        opencrab_actions::dispatch_settled(
+            &WebCompletionSink::new(runner.clone()),
+            settled(&sid, SettleKind::Completed),
+        );
 
         let payload = tokio::time::timeout(Duration::from_secs(2), rx.recv())
             .await
@@ -147,11 +141,10 @@ mod tests {
         ] {
             let runner = FakeRunner::new("ok");
             let sid = web_session_id("a", "caller");
-            WebCompletionSink::new(runner.clone()).on_subtask_settled(settled_as(
-                &sid,
-                SettleKind::Completed,
-                caller.clone(),
-            ));
+            opencrab_actions::dispatch_settled(
+                &WebCompletionSink::new(runner.clone()),
+                settled_as(&sid, SettleKind::Completed, caller.clone()),
+            );
 
             for _ in 0..100 {
                 if !runner.runs().is_empty() {
@@ -175,8 +168,10 @@ mod tests {
         let sid = web_session_id("a", "progress");
         let mut rx = runner.web_gateway().subscribe(&sid);
 
-        WebCompletionSink::new(runner.clone())
-            .on_subtask_settled(settled(&sid, SettleKind::Progress));
+        opencrab_actions::dispatch_settled(
+            &WebCompletionSink::new(runner.clone()),
+            settled(&sid, SettleKind::Progress),
+        );
 
         assert!(
             tokio::time::timeout(Duration::from_millis(300), rx.recv())
@@ -192,8 +187,8 @@ mod tests {
     async fn non_web_sessions_are_ignored() {
         let runner = FakeRunner::new("x");
         let sink = WebCompletionSink::new(runner.clone());
-        sink.on_subtask_settled(settled("nostr-a-pk", SettleKind::Completed));
-        sink.on_subtask_settled(settled("heartbeat-a", SettleKind::Completed));
+        opencrab_actions::dispatch_settled(&sink, settled("nostr-a-pk", SettleKind::Completed));
+        opencrab_actions::dispatch_settled(&sink, settled("heartbeat-a", SettleKind::Completed));
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(runner.runs().is_empty());
     }
@@ -220,8 +215,10 @@ mod tests {
             })
         };
         tokio::time::sleep(Duration::from_millis(20)).await;
-        WebCompletionSink::new(runner.clone())
-            .on_subtask_settled(settled(&sid, SettleKind::Completed));
+        opencrab_actions::dispatch_settled(
+            &WebCompletionSink::new(runner.clone()),
+            settled(&sid, SettleKind::Completed),
+        );
 
         inbound.await.unwrap();
         // resume 側の完走を待つ。

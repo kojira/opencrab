@@ -691,7 +691,13 @@ mod tests {
     }
 
     impl SubtaskCompletionSink for OrderCheckingSink {
-        fn on_subtask_settled(&self, ev: SubtaskSettled) {
+        fn session_prefix(&self) -> &'static str {
+            ""
+        }
+        fn forwards_progress(&self) -> bool {
+            true
+        }
+        fn deliver_continuation(&self, ev: SubtaskSettled) {
             let persisted = has_log_of_type(&self.db, &ev.session_id, "subtask_completed");
             self.seen
                 .lock()

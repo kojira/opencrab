@@ -1628,18 +1628,23 @@ impl SystemGatewayActions {
             if !debounce.claim_latest(&parent_session_clone, my_generation) {
                 return;
             }
-            sink.on_subtask_settled(SubtaskSettled {
-                session_id: parent_session_clone,
-                agent_id: agent_id_clone,
-                subtask_id: subtask_id_clone,
-                exit_reason: "progress".to_string(),
-                kind: SettleKind::Progress,
-                // 進捗の宛先は親セッション。返信先の復元は sink 側の責務（#167）。
-                reply_target: None,
-                // 親ターンの呼び出し元を引き継ぐ（#298）。ここを Agent 固定にすると
-                // 「進捗を報告すると自分の権限が落ちる」自爆的な挙動になる。
-                caller: resume_caller,
-            });
+            // 継続を起こすかの判断は `dispatch_settled`（#638・唯一の実装）。進捗を配送するのは
+            // `forwards_progress()` が true の transport（Discord）だけ——ここで分岐しない。
+            opencrab_actions::dispatch_settled(
+                &*sink,
+                SubtaskSettled {
+                    session_id: parent_session_clone,
+                    agent_id: agent_id_clone,
+                    subtask_id: subtask_id_clone,
+                    exit_reason: "progress".to_string(),
+                    kind: SettleKind::Progress,
+                    // 進捗の宛先は親セッション。返信先の復元は sink 側の責務（#167）。
+                    reply_target: None,
+                    // 親ターンの呼び出し元を引き継ぐ（#298）。ここを Agent 固定にすると
+                    // 「進捗を報告すると自分の権限が落ちる」自爆的な挙動になる。
+                    caller: resume_caller,
+                },
+            );
         });
 
         GatewayActionResult {

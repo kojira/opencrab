@@ -39,7 +39,18 @@ pub(crate) struct DiscordCompletionSink {
 }
 
 impl SubtaskCompletionSink for DiscordCompletionSink {
-    fn on_subtask_settled(&self, ev: SubtaskSettled) {
+    /// Discord の親セッションは `discord-{agent}-{guild}-{channel}`。
+    fn session_prefix(&self) -> &'static str {
+        "discord-"
+    }
+    /// **Discord だけ `true`**（#638）。`report_progress` のデバウンス発火でメインエンジンを
+    /// 呼び直す「進捗実況」が Discord 固有の機能で、main の
+    /// `send_subtask_completed_event(..., "progress")` から続く既存挙動。ここを `false` に
+    /// すると機能が黙って消える（`discord_sink_forwards_progress_unlike_web_and_nostr` が固定）。
+    fn forwards_progress(&self) -> bool {
+        true
+    }
+    fn deliver_continuation(&self, ev: SubtaskSettled) {
         let Some(tx) = &self.event_tx else {
             tracing::debug!(
                 session_id = %ev.session_id,
@@ -486,11 +497,14 @@ mod tests {
     #[test]
     fn discord_sink_emits_loop_event_on_completion() {
         let (sink, mut rx) = sink_with_channel();
-        sink.on_subtask_settled(settled(
-            "discord-agent-x-111222333-444555666",
-            SettleKind::Completed,
-            "completed",
-        ));
+        opencrab_actions::dispatch_settled(
+            &sink,
+            settled(
+                "discord-agent-x-111222333-444555666",
+                SettleKind::Completed,
+                "completed",
+            ),
+        );
 
         match rx.try_recv().expect("完了は LoopEvent を 1 本送る") {
             LoopEvent::SubtaskCompleted {
@@ -534,12 +548,15 @@ mod tests {
             opencrab_actions::CallerIdentity::Agent,
         ] {
             let (sink, mut rx) = sink_with_channel();
-            sink.on_subtask_settled(settled_as(
-                "discord-agent-x-111222333-444555666",
-                SettleKind::Completed,
-                "progress",
-                caller.clone(),
-            ));
+            opencrab_actions::dispatch_settled(
+                &sink,
+                settled_as(
+                    "discord-agent-x-111222333-444555666",
+                    SettleKind::Completed,
+                    "progress",
+                    caller.clone(),
+                ),
+            );
             match rx.try_recv().expect("完了は LoopEvent を 1 本送る") {
                 LoopEvent::SubtaskCompleted {
                     caller: forwarded, ..
@@ -556,11 +573,14 @@ mod tests {
     #[test]
     fn discord_sink_restores_dm_routing() {
         let (sink, mut rx) = sink_with_channel();
-        sink.on_subtask_settled(settled(
-            "discord-agent-x--444555666",
-            SettleKind::Completed,
-            "timeout",
-        ));
+        opencrab_actions::dispatch_settled(
+            &sink,
+            settled(
+                "discord-agent-x--444555666",
+                SettleKind::Completed,
+                "timeout",
+            ),
+        );
 
         match rx.try_recv().expect("DM でも LoopEvent を送る") {
             LoopEvent::SubtaskCompleted {
@@ -594,7 +614,10 @@ mod tests {
             "",
         ] {
             let (sink, mut rx) = sink_with_channel();
-            sink.on_subtask_settled(settled(session_id, SettleKind::Completed, "completed"));
+            opencrab_actions::dispatch_settled(
+                &sink,
+                settled(session_id, SettleKind::Completed, "completed"),
+            );
             assert!(
                 rx.try_recv().is_err(),
                 "非 Discord セッション '{session_id}' で LoopEvent を送ってはならない"
@@ -612,7 +635,10 @@ mod tests {
             "discord-agent-x",
         ] {
             let (sink, mut rx) = sink_with_channel();
-            sink.on_subtask_settled(settled(session_id, SettleKind::Completed, "completed"));
+            opencrab_actions::dispatch_settled(
+                &sink,
+                settled(session_id, SettleKind::Completed, "completed"),
+            );
             assert!(
                 rx.try_recv().is_err(),
                 "壊れた session_id '{session_id}' で LoopEvent を送ってはならない"
@@ -631,11 +657,14 @@ mod tests {
     #[test]
     fn discord_sink_forwards_progress_unlike_web_and_nostr() {
         let (sink, mut rx) = sink_with_channel();
-        sink.on_subtask_settled(settled(
-            "discord-agent-x-111222333-444555666",
-            SettleKind::Progress,
-            "progress",
-        ));
+        opencrab_actions::dispatch_settled(
+            &sink,
+            settled(
+                "discord-agent-x-111222333-444555666",
+                SettleKind::Progress,
+                "progress",
+            ),
+        );
 
         match rx.try_recv().expect("進捗もメインエンジンへ再注入する") {
             LoopEvent::SubtaskCompleted { exit_reason, .. } => {
@@ -665,11 +694,14 @@ mod tests {
     #[test]
     fn discord_sink_without_event_tx_is_noop() {
         let sink = DiscordCompletionSink { event_tx: None };
-        sink.on_subtask_settled(settled(
-            "discord-agent-x-111222333-444555666",
-            SettleKind::Completed,
-            "completed",
-        ));
+        opencrab_actions::dispatch_settled(
+            &sink,
+            settled(
+                "discord-agent-x-111222333-444555666",
+                SettleKind::Completed,
+                "completed",
+            ),
+        );
     }
 
     fn insert_activity(conn: &rusqlite::Connection) {
