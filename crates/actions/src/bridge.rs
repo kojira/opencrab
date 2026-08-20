@@ -1742,7 +1742,13 @@ mod tests {
         #[derive(Default)]
         struct CaptureSink(std::sync::Mutex<Option<SubtaskSettled>>);
         impl SubtaskCompletionSink for CaptureSink {
-            fn on_subtask_settled(&self, ev: SubtaskSettled) {
+            fn session_prefix(&self) -> &'static str {
+                ""
+            }
+            fn forwards_progress(&self) -> bool {
+                true
+            }
+            fn deliver_continuation(&self, ev: SubtaskSettled) {
                 *self.0.lock().unwrap() = Some(ev);
             }
         }

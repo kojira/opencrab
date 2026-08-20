@@ -650,7 +650,13 @@ impl RecordingSink {
 }
 
 impl SubtaskCompletionSink for RecordingSink {
-    fn on_subtask_settled(&self, ev: SubtaskSettled) {
+    fn session_prefix(&self) -> &'static str {
+        ""
+    }
+    fn forwards_progress(&self) -> bool {
+        true
+    }
+    fn deliver_continuation(&self, ev: SubtaskSettled) {
         self.settled.lock().unwrap().push(ev);
     }
 }
@@ -3204,7 +3210,13 @@ async fn cancel_subtask_notifies_the_completion_sink() {
     #[derive(Default)]
     struct Recorder(std::sync::Mutex<Vec<String>>);
     impl SubtaskCompletionSink for Recorder {
-        fn on_subtask_settled(&self, _ev: SubtaskSettled) {
+        fn session_prefix(&self) -> &'static str {
+            ""
+        }
+        fn forwards_progress(&self) -> bool {
+            true
+        }
+        fn deliver_continuation(&self, _ev: SubtaskSettled) {
             self.0.lock().unwrap().push("settled".to_string());
         }
         fn on_subtask_cancelled(&self, ev: SubtaskSettled) {

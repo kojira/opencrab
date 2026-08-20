@@ -45,39 +45,143 @@ pub struct RestCompletionSink {
     pub db: opencrab_db::Db,
     /// この REST セッションの共有 registry（他に走行中 subtask が無いかの判定用）。
     pub registry: SubtaskRegistry,
+    /// 継続ターンを回す実行環境（#638）。`run_agent_response` と共有ロックを引く。
+    pub state: AppState,
+    /// 継続ターンの `RunRequest` に載せるエージェント名。
+    pub agent_name: String,
+}
+
+/// REST の継続ターンを 1 本走らせ、結果をセッションログへ残す（#638）。
+///
+/// 同期 POST は既に応答を返しているので live push する口は無い。結果は
+/// `record_rest_agent_reply` でセッションログへ永続化し、`GET /api/sessions/{id}/logs` と
+/// 次の POST の `build_conversation_string` から見えるようにする。
+///
+/// **共有ロック（`SessionLocks::run_serialized`）を通す**（#640 / PR #658）。同一セッションへの
+/// 並行 POST・別の subtask の継続と直列化され、二重応答は起きない。web / Nostr / Discord と
+/// 同じ 1 本のロックで、REST 専用の仕組みは足さない。
+async fn run_rest_continuation(
+    state: AppState,
+    registry: SubtaskRegistry,
+    agent_name: String,
+    ev: SubtaskSettled,
+) {
+    let session_id = ev.session_id.clone();
+    let agent_id = ev.agent_id.clone();
+
+    // 文脈は DB から組み直す（完了本文は `settle_completed` が永続化済み・RFC §1.3）。
+    let (system_prompt, conversation) = {
+        let conn = match state.db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(session_id = %session_id, error = %e, "rest continuation: db lock poisoned");
+                return;
+            }
+        };
+        let (sp, _name) = process::build_agent_context(&conn, &agent_id, &ev.caller);
+        let eff =
+            opencrab_db::queries::effective_model_for_agent(&conn, &agent_id, &state.default_model)
+                .unwrap_or_else(|_| state.default_model.clone());
+        let (prov, mdl) = process::split_llm_model_spec(&eff);
+        let budget = process::compute_context_budget(&conn, prov, mdl, state.compaction_ratio);
+        let raw = match process::build_conversation_string(&conn, &session_id, &agent_id, budget) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(session_id = %session_id, error = %e, "rest continuation: failed to build conversation");
+                return;
+            }
+        };
+        (sp, process::prepend_runtime_context(&raw, "direct_message"))
+    };
+
+    // 継続であることを生成点で伝える（web / Nostr の `resume_prompt_suffix` と同じ型）。
+    let conversation = format!(
+        "{conversation}\n[subtask_completed: subtask_id={}, exit_reason={}]",
+        ev.subtask_id, ev.exit_reason
+    );
+
+    let run_req = opencrab_actions::RunRequest::new(
+        &agent_id,
+        &agent_name,
+        &session_id,
+        &system_prompt,
+        &conversation,
+        "rest",
+        // 元のターンの呼び出し元を継承する（#298 / #333）。ここを落とすと継続の瞬間に
+        // owner/trusted のツールが消える。
+        ev.caller.clone(),
+    )
+    // 継続ターンからも subtask を投げられるようにする（多段のシェル作業が 1 ターンで
+    // 終わらないのが #631 の実情）。sink は同じ形で組み直す。
+    .with_dispatch(
+        Some(registry.clone()),
+        Arc::new(RestCompletionSink {
+            db: state.db.clone(),
+            registry: registry.clone(),
+            state: state.clone(),
+            agent_name: agent_name.clone(),
+        }) as Arc<dyn SubtaskCompletionSink>,
+    );
+
+    let result = state
+        .session_locks
+        .run_serialized(&session_id, process::run_agent_response(&state, run_req))
+        .await;
+
+    match result {
+        Ok(engine_result) => {
+            if let Ok(conn) = state.db.lock() {
+                crate::transcript::record_rest_agent_reply(
+                    &conn,
+                    &agent_id,
+                    &session_id,
+                    &engine_result.response,
+                    engine_result.iterations,
+                    engine_result.tool_calls_made,
+                );
+            }
+        }
+        Err(e) => {
+            // 黙って落とさない（no-silent-fallback）。継続が失敗したことは記録に残す。
+            tracing::warn!(
+                session_id = %session_id,
+                agent_id = %agent_id,
+                error = %e,
+                "rest continuation: run failed"
+            );
+        }
+    }
+
+    // 走行中 subtask が無くなったらセッションを完了にする（継続ターンが新たな subtask を
+    // 投げていれば、その決着時にまたここへ来る）。
+    complete_session_if_idle(&state.db, &session_id, &registry);
 }
 
 impl SubtaskCompletionSink for RestCompletionSink {
-    fn on_subtask_settled(&self, ev: SubtaskSettled) {
-        // 決着（Completed）以外（進捗通知など）でセッションを完了扱いにしてはならない。
-        // 進捗はまだ run が回っている最中に飛ぶので、ここで completed にすると
-        // 「応答が返る前に completed」を観測させてしまう。web / Nostr の受け口と同じガード。
-        if ev.kind != SettleKind::Completed {
-            tracing::debug!(
-                session_id = %ev.session_id,
-                kind = ?ev.kind,
-                "rest sink: not a completion, nothing to reconcile"
-            );
-            return;
-        }
-        if !ev.session_id.starts_with(REST_SESSION_PREFIX) {
-            tracing::debug!(
-                session_id = %ev.session_id,
-                "rest sink: parent session is not a REST session, nothing to reconcile"
-            );
-            return;
-        }
-        // `settle_completed` は sink 発火より前に当該 subtask を registry から除去する。
-        // 空でなければ他の subtask がまだ走行中 = セッションは完了ではない。
-        if !self.registry.is_empty() {
-            tracing::debug!(
-                session_id = %ev.session_id,
-                running = self.registry.len(),
-                "rest sink: subtask settled but others are still running"
-            );
-            return;
-        }
-        mark_session_completed(&self.db, &ev.session_id);
+    fn session_prefix(&self) -> &'static str {
+        REST_SESSION_PREFIX
+    }
+    /// 進捗では継続しない（まだ走っている run の途中で二重に応答してしまう）。転送するのは
+    /// Discord だけ（#638）。
+    fn forwards_progress(&self) -> bool {
+        false
+    }
+    fn deliver_continuation(&self, ev: SubtaskSettled) {
+        // kind の検査も親セッションの検査も `dispatch_settled`（#638）が済ませている。
+        //
+        // **「他に走行中の subtask があるか」は継続の条件にしない**（#638 の裁定）。以前ここに
+        // あった `registry.is_empty()` ゲートは「継続しない」設計に付随した status 整合用で、
+        // 継続を入れるなら「最後の 1 本が終わるまで何も返さない」ことになる。web / Nostr と
+        // 同じく完了 1 本ごとに継続する（ドリブルは実測で再現していない）。status の整合は
+        // 継続ターンが終わってから、走行中がゼロのときだけ行う。
+        let state = self.state.clone();
+        let registry = self.registry.clone();
+        let agent_name = self.agent_name.clone();
+        // sink は同期関数。継続は非同期なので spawn する（web / Nostr と同じ。ここで待つと
+        // dispatch した subtask の完了処理を塞ぐ）。
+        tokio::spawn(async move {
+            run_rest_continuation(state, registry, agent_name, ev).await;
+        });
     }
 
     /// 停止（`cancel_subtask`）でも `sessions.status` の整合を取る。
@@ -284,6 +388,9 @@ pub async fn send_agent_message(
     let sink: Arc<dyn SubtaskCompletionSink> = Arc::new(RestCompletionSink {
         db: state.db.clone(),
         registry: subtask_registry.clone(),
+        // 継続ターン（#638）を回すための実行環境（内部が Arc なので clone は安い）。
+        state: state.clone(),
+        agent_name: agent_name.clone(),
     });
     let mut run_req = opencrab_actions::RunRequest::new(
         &id,
@@ -413,9 +520,13 @@ mod tests {
         let session_id = "agent-msg-agent-a-u1";
         let db = db_with_session(session_id);
         let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
+        let mut state = crate::test_app_state();
+        state.db = db.clone();
         let sink = RestCompletionSink {
             db: db.clone(),
             registry: registry.clone(),
+            state,
+            agent_name: "TestAgent".to_string(),
         };
 
         assert_eq!(status_of(&db, session_id), "active");
@@ -439,22 +550,40 @@ mod tests {
         let session_id = "agent-msg-agent-a-u1";
         let db = db_with_session(session_id);
         let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
+        let mut state = crate::test_app_state();
+        state.db = db.clone();
         let sink = RestCompletionSink {
             db: db.clone(),
             registry: registry.clone(),
+            state,
+            agent_name: "TestAgent".to_string(),
         };
 
         assert_eq!(status_of(&db, session_id), "active");
-        sink.on_subtask_settled(settled(session_id, SettleKind::Progress));
+        opencrab_actions::dispatch_settled(&sink, settled(session_id, SettleKind::Progress));
         assert_eq!(
             status_of(&db, session_id),
             "active",
             "進捗通知でセッションが完了扱いにされている（run はまだ回っている）"
         );
 
-        // 決着（Completed）なら従来どおり完了にする（ガードが効きすぎていないこと）。
-        sink.on_subtask_settled(settled(session_id, SettleKind::Completed));
-        assert_eq!(status_of(&db, session_id), "completed");
+        // 決着（Completed）は**継続ターン**を起こす（#638）。status の整合は継続ターンが
+        // 終わってから（走行中がゼロのとき）行われるので、**同期には完了しない**——これが
+        // #638 での挙動変更点。ここでは LLM プロバイダが無いので継続は即座に失敗し、その後
+        // `complete_session_if_idle` が走る。spawn された継続を待つため短く poll する。
+        opencrab_actions::dispatch_settled(&sink, settled(session_id, SettleKind::Completed));
+        let mut settled_status = String::new();
+        for _ in 0..40 {
+            settled_status = status_of(&db, session_id);
+            if settled_status == "completed" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(
+            settled_status, "completed",
+            "継続ターンの後にセッションが完了へ整合されていない"
+        );
     }
 
     /// 他に走行中 subtask が残っているあいだは停止でも完了にしない。
@@ -480,9 +609,13 @@ mod tests {
                 steerable: false,
             },
         );
+        let mut state = crate::test_app_state();
+        state.db = db.clone();
         let sink = RestCompletionSink {
             db: db.clone(),
             registry: registry.clone(),
+            state,
+            agent_name: "TestAgent".to_string(),
         };
 
         sink.on_subtask_cancelled(settled(session_id, SettleKind::Cancelled));
@@ -496,9 +629,13 @@ mod tests {
         let session_id = "web-agent-a-conv1";
         let db = db_with_session(session_id);
         let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
+        let mut state = crate::test_app_state();
+        state.db = db.clone();
         let sink = RestCompletionSink {
             db: db.clone(),
             registry,
+            state,
+            agent_name: "TestAgent".to_string(),
         };
         sink.on_subtask_cancelled(settled(session_id, SettleKind::Cancelled));
         assert_eq!(status_of(&db, session_id), "active");

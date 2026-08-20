@@ -2300,7 +2300,13 @@ async fn test_dispatched_subtask_carries_the_run_caller_to_settlement() {
     #[derive(Default)]
     struct CaptureSink(Mutex<Vec<opencrab_actions::SubtaskSettled>>);
     impl opencrab_actions::SubtaskCompletionSink for CaptureSink {
-        fn on_subtask_settled(&self, ev: opencrab_actions::SubtaskSettled) {
+        fn session_prefix(&self) -> &'static str {
+            ""
+        }
+        fn forwards_progress(&self) -> bool {
+            true
+        }
+        fn deliver_continuation(&self, ev: opencrab_actions::SubtaskSettled) {
             self.0.lock().unwrap().push(ev);
         }
     }
@@ -2391,7 +2397,13 @@ async fn test_run_counts_subtask_starts_from_both_launch_paths() {
     /// 決着通知を捨てるだけの sink（ここで見たいのは起動の計上だけ）。
     struct NoopSink;
     impl opencrab_actions::SubtaskCompletionSink for NoopSink {
-        fn on_subtask_settled(&self, _ev: opencrab_actions::SubtaskSettled) {}
+        fn session_prefix(&self) -> &'static str {
+            ""
+        }
+        fn forwards_progress(&self) -> bool {
+            true
+        }
+        fn deliver_continuation(&self, _ev: opencrab_actions::SubtaskSettled) {}
     }
 
     // (ツール名, 引数) — 左が auto-dispatch 経路、右が明示 spawn_subtask 経路。
@@ -3103,7 +3115,7 @@ async fn test_web_progress_settlement_does_not_resume() {
     // 進捗通知: resume しない = LLM を一度も呼ばない / SSE へ何も流れない。
     // （応答生成が走ると、LLM のキューが空でも `kind:"error"` が SSE へ流れるので、
     //   「特定 kind が来ない」ではなく「何も来ない」を要求する。）
-    sink.on_subtask_settled(settled(SettleKind::Progress));
+    opencrab_actions::dispatch_settled(&sink, settled(SettleKind::Progress));
     let stray = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await;
     assert!(
         stray.is_err(),
@@ -3117,7 +3129,7 @@ async fn test_web_progress_settlement_does_not_resume() {
 
     // 対比: 完了通知なら resume が走る（このガードが「効きすぎ」でないことの確認）。
     mock.push_text_response("完了しました");
-    sink.on_subtask_settled(settled(SettleKind::Completed));
+    opencrab_actions::dispatch_settled(&sink, settled(SettleKind::Completed));
     assert!(
         recv_web_event_of_kind(&mut rx, "subtask_resume", std::time::Duration::from_secs(5))
             .await
@@ -3254,6 +3266,8 @@ async fn cancel_last_subtask_in_rest_run_with_inner(
         Arc::new(opencrab_server::api::agents_messages::RestCompletionSink {
             db: db.clone(),
             registry: registry.clone(),
+            state: state.clone(),
+            agent_name: "DiscordWired".to_string(),
         });
     let run_req = opencrab_actions::RunRequest::new(
         &agent_id,
@@ -3492,6 +3506,10 @@ async fn test_rest_sink_completes_session_after_last_subtask_settles() {
         },
     }]);
     mock.push_text_response("開始しました");
+    // #638: subtask の決着が**継続ターン**を起こすようになったので、その 1 本分の応答も要る
+    // （以前は REST だけ継続しなかったため 2 本で足りていた）。継続ターンが終わってから
+    // `sessions.status` の整合が行われる。
+    mock.push_text_response("終わりました");
 
     let (status, resp) = send_request(
         app.clone(),
