@@ -2682,6 +2682,160 @@ async fn test_session_messages_unknown_participant_is_rejected_without_running()
     );
 }
 
+// ==================== #640: REST ターンの直列化 ====================
+
+/// `chat_completion` の中に同時に何本の run が居たかを観測する LLM プロバイダ。
+///
+/// `hold` の間 sleep して重なりの窓を作る。REST の `run_agent_response` が共有ロック
+/// （`state.session_locks.run_serialized`）を通っていれば、同一セッションの run は重ならず
+/// `max_in_flight` は 1 を超えない。別セッションは重なり 2 以上になりうる。web の
+/// `same_session_serializes` / `different_sessions_run_concurrently` と同型の観測。
+struct SerializationProbe {
+    in_flight: std::sync::atomic::AtomicUsize,
+    max_in_flight: std::sync::atomic::AtomicUsize,
+    hold: std::time::Duration,
+}
+
+impl SerializationProbe {
+    fn new(hold: std::time::Duration) -> Self {
+        Self {
+            in_flight: std::sync::atomic::AtomicUsize::new(0),
+            max_in_flight: std::sync::atomic::AtomicUsize::new(0),
+            hold,
+        }
+    }
+
+    fn max(&self) -> usize {
+        self.max_in_flight.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for SerializationProbe {
+    fn name(&self) -> &str {
+        "mock"
+    }
+
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+
+    async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        use std::sync::atomic::Ordering;
+        let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_in_flight.fetch_max(now, Ordering::SeqCst);
+        tokio::time::sleep(self.hold).await;
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        Ok(ChatResponse {
+            id: uuid::Uuid::new_v4().to_string(),
+            model: "mock-model".to_string(),
+            choices: vec![Choice {
+                index: 0,
+                message: Message::assistant("ok"),
+                finish_reason: Some(FinishReason::Stop),
+            }],
+            usage: Usage::default(),
+            created: 0,
+        })
+    }
+}
+
+/// `SerializationProbe` を既定プロバイダに仕込んだ app を作る。既定モデル `mock:test` が
+/// probe（`name()=="mock"`）へ解決する。
+fn create_probe_app(
+    hold: std::time::Duration,
+) -> (Router, opencrab_db::Db, Arc<SerializationProbe>) {
+    let (mut state, db) = create_test_state(0.5);
+    let probe = Arc::new(SerializationProbe::new(hold));
+    let mut router = LlmRouter::new();
+    router.add_provider(probe.clone() as Arc<dyn LlmProvider>);
+    router.set_default_provider("mock");
+    state.llm_router = opencrab_server::SharedLlmRouter::new(router);
+    (opencrab_server::create_router(state), db, probe)
+}
+
+/// #640: 同一セッション（同じ agent_id + user_id）への並行 2 POST は直列に走る
+/// （`run_agent_response` の中で同時に走っている run が 1 を超えない）。
+#[tokio::test]
+async fn test_rest_agent_messages_serialize_same_session() {
+    let (app, _db, probe) = create_probe_app(std::time::Duration::from_millis(150));
+    let (agent_id, app) = create_test_agent_named(app, "SerialRest", "TestPersona").await;
+
+    let a1 = app.clone();
+    let id1 = agent_id.clone();
+    let h1 = tokio::spawn(async move {
+        send_request(
+            a1,
+            "POST",
+            &format!("/api/agents/{id1}/messages"),
+            Some(serde_json::json!({"content": "m1", "user_id": "u1"})),
+        )
+        .await
+    });
+    let a2 = app.clone();
+    let id2 = agent_id.clone();
+    let h2 = tokio::spawn(async move {
+        send_request(
+            a2,
+            "POST",
+            &format!("/api/agents/{id2}/messages"),
+            Some(serde_json::json!({"content": "m2", "user_id": "u1"})),
+        )
+        .await
+    });
+
+    let (s1, _) = h1.await.unwrap();
+    let (s2, _) = h2.await.unwrap();
+    assert_eq!(s1, StatusCode::OK);
+    assert_eq!(s2, StatusCode::OK);
+    assert_eq!(
+        probe.max(),
+        1,
+        "同一セッションへの並行 POST の run が重なった（直列化が効いていない）"
+    );
+}
+
+/// #640: 別セッション（別 user_id）への並行 POST は従来どおり並行に走る
+/// （ロックの粒度は session_id 単位。無関係なセッションを詰まらせない）。
+#[tokio::test]
+async fn test_rest_agent_messages_run_concurrently_across_sessions() {
+    let (app, _db, probe) = create_probe_app(std::time::Duration::from_millis(300));
+    let (agent_id, app) = create_test_agent_named(app, "ConcurrentRest", "TestPersona").await;
+
+    let a1 = app.clone();
+    let id1 = agent_id.clone();
+    let h1 = tokio::spawn(async move {
+        send_request(
+            a1,
+            "POST",
+            &format!("/api/agents/{id1}/messages"),
+            Some(serde_json::json!({"content": "m1", "user_id": "userA"})),
+        )
+        .await
+    });
+    let a2 = app.clone();
+    let id2 = agent_id.clone();
+    let h2 = tokio::spawn(async move {
+        send_request(
+            a2,
+            "POST",
+            &format!("/api/agents/{id2}/messages"),
+            Some(serde_json::json!({"content": "m2", "user_id": "userB"})),
+        )
+        .await
+    });
+
+    let (s1, _) = h1.await.unwrap();
+    let (s2, _) = h2.await.unwrap();
+    assert_eq!(s1, StatusCode::OK);
+    assert_eq!(s2, StatusCode::OK);
+    assert_eq!(
+        probe.max(),
+        2,
+        "別セッションへの並行 POST が直列化された（粒度が session ではなく global になっている）"
+    );
+}
+
 /// GET を 1 本流し、**body を読まずに** `(status, content-type)` を返す。
 ///
 /// `send_request` は body を読み切るので、終端しない SSE レスポンス（`web/stream`）には

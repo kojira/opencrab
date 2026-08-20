@@ -222,19 +222,31 @@ pub async fn send_message(
         };
 
         // Run agent through the shared pipeline.
-        let result = process::run_agent_response(
-            &state,
-            opencrab_actions::RunRequest::new(
-                agent_id,
-                &agent_name,
+        //
+        // 同一セッションへの並行 POST を直列化する（#640）。`send_agent_message` と同じ共有
+        // ロック（`state.session_locks`）を、ここでも session（= path の `id`）単位で被せる。
+        // これは判断ではなく配線漏れの解消で、この経路も `run_agent_response` を直呼びしていた。
+        //
+        // 粒度は **session_id 単位であって global ではない**。同一セッションの run だけが直列化
+        // され、別セッションへの POST は従来どおり並行に走る。粒度を広げないこと。
+        let result = state
+            .session_locks
+            .run_serialized(
                 &id,
-                &system_prompt,
-                &conversation,
-                "rest",
-                opencrab_actions::CallerIdentity::Owner,
-            ),
-        )
-        .await;
+                process::run_agent_response(
+                    &state,
+                    opencrab_actions::RunRequest::new(
+                        agent_id,
+                        &agent_name,
+                        &id,
+                        &system_prompt,
+                        &conversation,
+                        "rest",
+                        opencrab_actions::CallerIdentity::Owner,
+                    ),
+                ),
+            )
+            .await;
 
         match result {
             Ok(engine_result) => {
