@@ -3508,8 +3508,10 @@ async fn test_rest_sink_completes_session_after_last_subtask_settles() {
     mock.push_text_response("開始しました");
     // #638: subtask の決着が**継続ターン**を起こすようになったので、その 1 本分の応答も要る
     // （以前は REST だけ継続しなかったため 2 本で足りていた）。継続ターンが終わってから
-    // `sessions.status` の整合が行われる。
-    mock.push_text_response("終わりました");
+    // `sessions.status` の整合が行われる。本文は #631 の最小再現（`HELLO_631` を返させる）に
+    // 合わせ、**継続ターンの応答だと一意に分かる文言**にする——下でセッションログに
+    // この本文が残ることを assert し、「継続が走った」だけでなく「結果が読める」ことまで留める。
+    mock.push_text_response("HELLO_631 を確認しました");
 
     let (status, resp) = send_request(
         app.clone(),
@@ -3534,6 +3536,22 @@ async fn test_rest_sink_completes_session_after_last_subtask_settles() {
         "全 subtask 決着後も session が completed にならない"
     );
     assert!(!state.subtask_registries.has_running(&session_id));
+
+    // #638/#631 の実症状の錠前: 継続ターンの**本文がセッションログに残る**こと。
+    //
+    // status が completed になるだけでは「継続が走った」までしか言えない。#631 で利用者が
+    // 困っていたのは「subtask の結果を受けた続きの発話が返ってこない」ことなので、その発話が
+    // `GET /api/sessions/{id}/logs` の源（memory_sessions）へ永続化されるところまで留める。
+    // 継続を削るとこの assert が落ちる（`mock` の 3 本目が消費されないため文言も現れない）。
+    let logs = {
+        let conn = db.lock().unwrap();
+        opencrab_db::queries::list_session_logs_by_session(&conn, &session_id).unwrap()
+    };
+    assert!(
+        logs.iter().any(|l| l.content.contains("HELLO_631")),
+        "継続ターンの応答がセッションログに残っていない（#631: 結果を受けた続きが読めない）: {:?}",
+        logs.iter().map(|l| l.content.as_str()).collect::<Vec<_>>()
+    );
 }
 
 /// **nsec（Nostr 秘密鍵）は設定取得 API の応答に平文で現れない**（#203 の一括点検）。

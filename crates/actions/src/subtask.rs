@@ -207,6 +207,11 @@ pub trait SubtaskCompletionSink: Send + Sync {
     /// sink を通ることがあるため、**自分の親セッションかどうか**は判断側で確かめる。
     ///
     /// **既定実装を与えない**（#638）。新しい transport を足したとき、コンパイラがここで止める。
+    ///
+    /// **接頭辞は transport 間で互いに素であること**（現状 `discord-` / `web-` / `nostr-` /
+    /// `agent-msg-` / `heartbeat-` / `subtask-` は重ならない）。重なると、判断
+    /// （[`dispatch_settled`]）が親セッションを取り違えて継続を誤配送する——コンパイラは
+    /// ここを強制できないので、transport を足すときに既存の接頭辞と衝突しないことを確かめる。
     fn session_prefix(&self) -> &'static str;
 
     /// **進捗（[`SettleKind::Progress`]）も継続として配送するか**（Discord だけ `true`）。
