@@ -2751,6 +2751,25 @@ fn create_probe_app(
     router.add_provider(probe.clone() as Arc<dyn LlmProvider>);
     router.set_default_provider("mock");
     state.llm_router = opencrab_server::SharedLlmRouter::new(router);
+    // #703: 既定モデル `mock:test` を `model_pricing` に登録する。#676 で「出力上限が未登録の
+    // モデルは fail loud」になったため、登録が無いと run が LLM へ届く前に止まり、probe が
+    // 1 度も呼ばれない（HTTP は 200 のままで、本文にエラー文字列が入るだけなので気づけない）。
+    // このヘルパを使うテストは**直列化**を見るものなので、モデル解決で落ちてはいけない。
+    {
+        let conn = db.lock().unwrap();
+        opencrab_db::queries::upsert_model_pricing(
+            &conn,
+            &opencrab_db::queries::ModelPricingRow {
+                provider: "mock".to_string(),
+                model: "test".to_string(),
+                input_price_per_1m: 0.0,
+                output_price_per_1m: 0.0,
+                context_window: Some(200_000),
+                max_output_tokens: Some(4_096),
+            },
+        )
+        .expect("probe 用モデルの登録");
+    }
     (opencrab_server::create_router(state), db, probe)
 }
 
