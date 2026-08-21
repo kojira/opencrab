@@ -229,6 +229,36 @@ impl ChatRequest {
         self.max_tokens = Some(max_tokens);
         self
     }
+
+    /// opencrab がこのリクエストで送ったメッセージ本文の合計文字数（Unicode スカラー数）。
+    ///
+    /// **provider の `usage.prompt_tokens` とは別物。** #706 の実バグでは provider が
+    /// `prompt_tokens: 0` を返してきたので、空応答の原因（プロンプト長）を後から当てるには
+    /// opencrab が自分で測ったこの値を使う。閾値判定はしない——事実（送った本文長）だけを残し、
+    /// 「長さが原因か」の判断は読む人に委ねる。tool 定義や画像は数えず、人が長さを見積もれる
+    /// 本文（text）の文字数だけを合算する。
+    pub fn message_content_chars(&self) -> usize {
+        self.messages
+            .iter()
+            .map(|m| message_content_char_len(&m.content))
+            .sum()
+    }
+}
+
+/// メッセージ本文（text）の文字数。画像パートは 0（長さの見積もりに寄与しない）。
+fn message_content_char_len(content: &Option<MessageContent>) -> usize {
+    match content {
+        Some(MessageContent::Text(s)) => s.chars().count(),
+        Some(MessageContent::Multi(parts)) => parts
+            .iter()
+            .map(|p| match p {
+                ContentPart::Text { text } => text.chars().count(),
+                ContentPart::ImageUrl { .. } => 0,
+            })
+            .sum(),
+        Some(MessageContent::Image { .. }) => 0,
+        None => 0,
+    }
 }
 
 /// Token usage information.
@@ -618,6 +648,45 @@ mod tests {
             Some(""),
             Some(vec![a_tool_call()])
         )));
+    }
+
+    #[test]
+    fn message_content_chars_counts_text_and_ignores_images() {
+        // Unicode スカラー数で数える（マルチバイトも 1 文字 = 1）。
+        let req = ChatRequest::new(
+            "m",
+            vec![
+                Message::system("あいう"), // 3
+                Message::user("hello"),    // 5
+                Message {
+                    role: Role::User,
+                    content: Some(MessageContent::Multi(vec![
+                        ContentPart::Text {
+                            text: "xy".to_string(),
+                        }, // 2
+                        ContentPart::ImageUrl {
+                            image_url: ImageUrl {
+                                url: "data:...".to_string(),
+                                detail: None,
+                            },
+                        }, // 0
+                    ])),
+                    name: None,
+                    function_call: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: None, // 0（フィールド欠落）
+                    name: None,
+                    function_call: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+            ],
+        );
+        assert_eq!(req.message_content_chars(), 3 + 5 + 2);
     }
 
     #[test]
