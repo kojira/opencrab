@@ -76,6 +76,50 @@ use std::path::Path;
 /// cap に採る producer を足さないこと。
 pub const TOOL_RESULT_TOKEN_LIMIT: usize = 2_500;
 
+/// **読み**（`ws_read` 等）の結果に使う inline 上限（#707）。
+///
+/// [`TOOL_RESULT_TOKEN_LIMIT`]（2,500）は「量が事前に分からない出力」——shell の stdout——が
+/// 会話予算を食い潰す事故（#284）への cap で、旧 10,000 **バイト**上限のトークン換算（#294）。
+/// 暴走への cap としては正しいが、**読みに当てると往復が増えるだけ**だった:
+///
+/// - 本番実測（2026-08-20）: 700 行の設計文書で 180 行を要求して **46 行**しか返らず、9 往復
+///   しても読み終わらない。1 往復ごとにモデルの推論（実測 100〜130 秒）が挟まるので、読解
+///   だけで 25〜30 分。サブタスクが 1,700 秒の制限に達して **commit ゼロ**で終わった
+/// - 刻んでも**文脈は節約できない**。15 回に分けても 15 件すべてが履歴に積まれ合計は同じ
+///
+/// 値 30,000 の根拠: 2,000 行の典型的なソースが 1 回で入ること（実測 700 行 = 18,000 →
+/// 2,000 行 ≒ 25,000）。会話予算は `context_window` の誤登録修正（80,000 → 1,000,000）で
+/// 500,000 になったので、1 件 30,000 は **6%**。加えて読みの本文は会話へ持ち越さない
+/// （`conversation.rs` の参照化）ので、積み上がらない。
+pub const READ_TOOL_RESULT_TOKEN_LIMIT: usize = 30_000;
+
+/// このツール結果に適用する inline 上限（#707）。
+///
+/// 分ける軸は「出力量を**誰が決めたか**」。エージェントが行範囲を指定した読みは自分で量を
+/// 決めているので、上限は「会話に収まるか」だけ見ればよい。コマンドの stdout は量が事前に
+/// 分からないので低い cap で退避へ倒す（#284 の防御）。
+pub fn inline_limit_for_tool(tool_name: &str) -> usize {
+    if is_read_tool(tool_name) {
+        READ_TOOL_RESULT_TOKEN_LIMIT
+    } else {
+        TOOL_RESULT_TOKEN_LIMIT
+    }
+}
+
+/// **「読み」の唯一の定義**（#707）。もう一度呼べば同じものが得られ、副作用が無いツール。
+///
+/// この 1 つの述語を、性質の違う 2 つの判断が**両方**参照する:
+/// - [`inline_limit_for_tool`]（この結果を退避するか＝1 回で運べる量）
+/// - `conversation::is_read_tool` 経由の参照化（この本文を次のターンへ持ち越すか）
+///
+/// **2 箇所で別々に列挙してはいけない**（レビュー指摘）。片方にだけ 3 つ目を足すと、本 #707 が
+/// 直した 2 つのバグが片肺で再発する——上限側だけなら本文が毎ターン焼き付き（#284 の再来）、
+/// 参照化側だけなら 2,500 で切られて退避ファイルが増える（#707 の再来）。**読みを増やすときは
+/// ここだけを直す。**
+pub fn is_read_tool(tool_name: &str) -> bool {
+    matches!(tool_name, "ws_read" | "ws_list")
+}
+
 /// 退避ファイル名 1 コンポーネント（session_id / tool_call_id）の上限バイト数。
 ///
 /// 2 つの理由で必要:
@@ -99,11 +143,11 @@ const OFFLOAD_COMPONENT_LIMIT: usize = 64;
 ///    入力」で頭打ちになり、巨大入力（486MB）や長い単一文字ランを一括トークナイズする
 ///    O(n²) の入口を塞ぐ（#576）。判定はトークン基準のまま＝ producer の「上限内なら
 ///    退避されない」保証は変わらない。
-fn exceeds_limit(s: &str) -> bool {
-    if s.len() < TOOL_RESULT_TOKEN_LIMIT {
+fn exceeds_limit(s: &str, limit: usize) -> bool {
+    if s.len() < limit {
         return false;
     }
-    crate::tokens::tokens_reach_limit(s, TOOL_RESULT_TOKEN_LIMIT)
+    crate::tokens::tokens_reach_limit(s, limit)
 }
 
 // #620: 「秘密として扱う JSON フィールド名の集合」（`SECRET_KEYS`）と、それを使う
@@ -462,10 +506,12 @@ fn sanitize_tool_result(
     tool_call_id: &str,
     workspace_root: Option<&Path>,
 ) -> String {
-    let _ = tool_name;
+    // #707: 上限は**ツールで分ける**（`tool_name` は「将来の per-tool 方針のために残す」と
+    // 書かれたまま捨てられていた引数。ここで初めて使う）。
+    let limit = inline_limit_for_tool(tool_name);
     // #620: 旧来の nsec キー名マスク（`redact_secrets_in_result`）は撤去した（守るものが
     // 無い / 鍵は at-rest 暗号化と env 注入で扱う）。ここはサイズ上限と退避だけを行う。
-    if !exceeds_limit(result_json) {
+    if !exceeds_limit(result_json, limit) {
         return result_json.to_string();
     }
 
@@ -554,6 +600,19 @@ mod tests {
     use super::*;
 
     /// 秘密を含まない結果は**改変されない**（byte 一致）。前フィルタで parse すらしない。
+    #[test]
+    fn read_predicate_is_the_single_source_for_both_decisions() {
+        // 「読み」の定義は 1 つ。上限（退避するか）と参照化（持ち越すか）が同じ集合を指す。
+        for t in ["ws_read", "ws_list"] {
+            assert!(is_read_tool(t));
+            assert_eq!(inline_limit_for_tool(t), READ_TOOL_RESULT_TOKEN_LIMIT);
+        }
+        for t in ["execute_shell", "search_my_history", "ws_write"] {
+            assert!(!is_read_tool(t));
+            assert_eq!(inline_limit_for_tool(t), TOOL_RESULT_TOKEN_LIMIT);
+        }
+    }
+
     #[test]
     fn sanitize_leaves_secretless_result_byte_identical() {
         let json = r#"{"success":true,"data":{"npub":"npub1ok","note":"hello"},"error":null}"#;
@@ -1006,7 +1065,7 @@ mod tests {
         for s in &samples {
             let exact = crate::tokens::estimate_tokens(s);
             assert_eq!(
-                exceeds_limit(s),
+                exceeds_limit(s, TOOL_RESULT_TOKEN_LIMIT),
                 exact >= TOOL_RESULT_TOKEN_LIMIT,
                 "len={}, exact={exact}",
                 s.len(),
@@ -1059,7 +1118,7 @@ mod tests {
             Some(dir.path()),
         );
         assert!(
-            !exceeds_limit(&out),
+            !exceeds_limit(&out, TOOL_RESULT_TOKEN_LIMIT),
             "案内文が枠を食い破っている: {} bytes",
             out.len()
         );
@@ -1254,7 +1313,7 @@ mod tests {
         })
         .to_string();
         // エンベロープは上限を超える。
-        assert!(exceeds_limit(&env), "前提: 上限超");
+        assert!(exceeds_limit(&env, TOOL_RESULT_TOKEN_LIMIT), "前提: 上限超");
 
         let out = sanitize_tool_result_for_llm("execute_shell", &env, "sX", "tX", Some(dir.path()));
 

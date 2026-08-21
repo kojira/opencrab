@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use opencrab_core::tool_result_log::TOOL_RESULT_TOKEN_LIMIT;
+use opencrab_core::tool_result_log::READ_TOOL_RESULT_TOKEN_LIMIT;
 use serde_json::json;
 
 use crate::traits::{Action, ActionContext, ActionResult, SideEffect};
@@ -13,13 +13,11 @@ impl Action for WsReadAction {
     }
 
     fn description(&self) -> &str {
-        "ワークスペース内のファイルを読み取る。全文が inline 上限を超えると結果は退避される\
-         （#284/#294）ので、大きなファイルは start_line / line_count で行範囲を指定して読む。\
-         grep が返す行番号をそのまま start_line に渡せる。範囲を指定すれば退避されずに読め、\
-         has_more なら next_line を start_line に入れて続きを辿れる。1 行が長すぎると切られ\
-         末尾に ` …⟨+M文字⟩` が付く。継続は行単位なので、切られた行の続き（行内の残り）は\
-         再取得できない（標識がそれを示す）。1 行しか無いファイルは常に同じ先頭 512 文字＋標識が\
-         返り has_more=false になる。"
+        "ワークスペース内のファイルを読み取る。既定で先頭から 2,000 行を返す（省略時も 1 ページ目）。\
+         start_line で読み始める行、line_count で行数を指定できる。grep が返す行番号をそのまま \
+         start_line に渡せる。続きがあれば has_more=true と next_line が付くので、next_line を \
+         start_line に入れて辿る。1 行は最大 2,000 文字で切られ、切られた行の末尾には \
+         ` …⟨+M文字⟩`（M は切り捨てた文字数）が付く（その行の残りは再取得できない）。"
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -51,17 +49,23 @@ impl Action for WsReadAction {
         };
         // start_line / line_count のどちらかが与えられたら行範囲読み。無ければ従来どおり全文
         // （後方互換）。旧 offset / limit（バイト）は未知キーとして無視され、全文読みへ落ちる。
-        let has_range = !args["start_line"].is_null() || !args["line_count"].is_null();
         let start_line = args["start_line"].as_u64().unwrap_or(1).max(1) as usize;
         // 0 行要求は無意味。1 に丸めて、next_line が start_line から進まない暴走ページングを防ぐ。
-        let line_count = args["line_count"].as_u64().map(|n| (n as usize).max(1));
+        // #707: 既定 2,000 行（Claude Code の Read と同じ）。省略時に全文を返して退避する形を
+        // やめ、範囲指定の有無に関わらず「1 ページ目」を返す。続きは has_more / next_line。
+        let line_count = Some(
+            args["line_count"]
+                .as_u64()
+                .map(|n| (n as usize).max(1))
+                .unwrap_or(WS_READ_DEFAULT_LINES),
+        );
 
         // 読み取り・計数・組み上げ・トークナイズを **すべて `spawn_blocking` の中** で行う
         // （マルチエージェントの async executor を同期 CPU で塞がない / #567）。返すのは有界な
         // 結果 JSON だけで、巨大な全文（実測 509MB）を executor 側へ持ち帰らない。
         let ws = ctx.workspace.clone();
         match tokio::task::spawn_blocking(move || {
-            compute_ws_read(&ws, &path, has_range, start_line, line_count)
+            compute_ws_read(&ws, &path, start_line, line_count)
         })
         .await
         {
@@ -86,36 +90,9 @@ impl Action for WsReadAction {
 fn compute_ws_read(
     ws: &opencrab_core::workspace::Workspace,
     path: &str,
-    has_range: bool,
     start_line: usize,
     line_count: Option<usize>,
 ) -> anyhow::Result<serde_json::Value> {
-    if !has_range {
-        // 従来どおり全文（後方互換）。全文を読むのはこの経路だけ。巨大な全文はサンプルから
-        // トークン近似（固まらないように）。
-        let content = ws.read_file(path)?;
-        let total_bytes = content.len();
-        let estimated_tokens = opencrab_core::tokens::estimate_tokens_bounded(&content);
-        let mut out = json!({
-            "path": path,
-            "content": content,
-            "total_bytes": total_bytes,
-            "has_more": false,
-            "estimated_tokens": estimated_tokens,
-            "inline_limit_tokens": TOOL_RESULT_TOKEN_LIMIT,
-        });
-        // 全文が inline 上限を超えるなら、退避される旨と行範囲読みの導線を添える。
-        if estimated_tokens > TOOL_RESULT_TOKEN_LIMIT {
-            out["hint"] = json!(format!(
-                "全文（約 {estimated_tokens} トークン）は inline 上限 {TOOL_RESULT_TOKEN_LIMIT} を\
-                 超えるため、この結果は退避されます。start_line（と任意で line_count）で行範囲を\
-                 指定すれば退避されずに読め、has_more なら next_line を start_line に入れて続きを\
-                 辿れます。"
-            ));
-        }
-        return Ok(out);
-    }
-
     // 行範囲読み: 単一 open の逐次読みで `start_line` から 1 行ずつページに積む。各行は
     // WS_READ_MAX_LINE_CHARS 文字で切り（超過は ` …⟨+M文字⟩` の標識を付ける）、標識込みの累計
     // がトークン上限に達する直前で止める。二分探索もバイト境界補正も無い（#617）。
@@ -173,7 +150,7 @@ fn compute_ws_read(
         "start_line": first_line.unwrap_or(start_line),
         "has_more": next_line.is_some(),
         "estimated_tokens": estimated_tokens,
-        "inline_limit_tokens": TOOL_RESULT_TOKEN_LIMIT,
+        "inline_limit_tokens": READ_TOOL_RESULT_TOKEN_LIMIT,
     });
     if let Some(n) = next_line {
         out["next_line"] = json!(n);
@@ -185,15 +162,25 @@ fn compute_ws_read(
 /// [`TOOL_RESULT_TOKEN_LIMIT`] を超えて再退避される（#564 の自己ループ）ことを構造的に防ぐため、
 /// 封筒ぶんの余白を引いた保守値にする。封筒は keys＋数値＋`path`＋標識で実測数百トークン以内
 /// なので、余裕を持って 400 引く。
-const RANGE_CONTENT_TOKEN_CEILING: usize = TOOL_RESULT_TOKEN_LIMIT - 400;
+const RANGE_CONTENT_TOKEN_CEILING: usize = READ_TOOL_RESULT_TOKEN_LIMIT - 400;
 
 /// 行範囲読みで 1 行あたりに返す最大文字数（`char` 数）。超える行は切って ` …⟨+M文字⟩` を付ける。
 ///
-/// 単位は**文字数**。テキストを扱うので文字で切れば境界補正が要らない（`chars().take(n)` で
-/// 済む）。値は 512。o200k はバイト単位 BPE なので 4 バイト文字は最悪 1 文字 ≒ 4 トークンまで
-/// 割れるが、512 × 4 = 2,048 < 2,100（[`RANGE_CONTENT_TOKEN_CEILING`]）なので、最悪密度でも単一
-/// 行がページ天井に収まる（最低 1 行保証で必ず 1 行返せる）。
-const WS_READ_MAX_LINE_CHARS: usize = 512;
+/// 単位は**文字数**。テキストを扱うので文字で切れば境界補正が要らない（`chars().take(n)` で済む）。
+///
+/// 値 2,000（#707）は **Claude Code の Read ツールと同じ基準**。同じ仕事をする道具の刻み方が
+/// 桁で違う理由が無い（オーナー指摘）。旧値 512 は当時のページ天井 2,100 トークンに単一行を
+/// 収めるための逆算値で、天井が上がったので外れる（2,000 × 4 = 8,000 < 29,600 なので、最悪
+/// 密度でも単一行が天井に収まる性質は保つ＝最低 1 行保証）。
+const WS_READ_MAX_LINE_CHARS: usize = 2_000;
+
+/// `line_count` 省略時に返す行数（#707）。**Claude Code の Read と同じ 2,000 行**。
+///
+/// 以前は省略時に**全文**を返していた。全文が上限を超えると `sanitize_tool_result` が中身を
+/// 別ファイルへ複製して退避するため、読むたびに `workspace/tmp` が増えていた（本番実測:
+/// 4,255 ファイル・270MB）。**元がファイルなのだから複製に意味が無い**（オーナー指摘）。
+/// 省略時も 1 ページ目として返せば退避は起きず、参照は**元のファイル名がそのまま**使える。
+const WS_READ_DEFAULT_LINES: usize = 2_000;
 
 pub struct WsWriteAction;
 
@@ -647,8 +634,9 @@ mod tests {
     #[tokio::test]
     async fn test_ws_read_overlong_line_truncates_and_advances() {
         let (_dir, ctx) = test_context();
-        // 1 行 2,000 文字（改行なし）を単独ファイルに。
-        let huge = "a".repeat(2_000);
+        // 1 行 5,000 文字（改行なし）を単独ファイルに。#707 で 1 行の上限が 2,000 文字に
+        // なったので、「切られて標識が付く」ことを見るには素材もそれを超える必要がある。
+        let huge = "a".repeat(5_000);
         WsWriteAction
             .execute(&json!({"path": "one.txt", "content": huge}), &ctx)
             .await;
@@ -659,17 +647,17 @@ mod tests {
         assert!(r.success);
         let d = r.data.unwrap();
         let content = d["content"].as_str().unwrap();
-        // 512 文字で切られ、標識が付く。切った文字数 M = 2000 - 512 = 1488。
-        assert!(content.starts_with(&"a".repeat(512)));
+        // 2,000 文字で切られ、標識が付く。切った文字数 M = 5,000 - 2,000 = 3,000。
+        assert!(content.starts_with(&"a".repeat(2_000)));
         assert!(
-            content.contains("…⟨+1488文字⟩"),
+            content.contains("…⟨+3000文字⟩"),
             "切った行に標識が付く: {content}"
         );
         // 単一行なので続きは無い。標識自体が「切られた」ことを伝える。
         assert_eq!(d["has_more"].as_bool(), Some(false));
 
         // 長い行のあとに別の行がある場合、その行は次ページへ回り next_line が前進する。
-        let two = format!("{}\nsecond", "b".repeat(2_000));
+        let two = format!("{}\nsecond", "b".repeat(5_000));
         WsWriteAction
             .execute(&json!({"path": "two.txt", "content": two}), &ctx)
             .await;
@@ -680,7 +668,7 @@ mod tests {
             )
             .await;
         let d2 = r2.data.unwrap();
-        assert!(d2["content"].as_str().unwrap().contains("…⟨+1488文字⟩"));
+        assert!(d2["content"].as_str().unwrap().contains("…⟨+3000文字⟩"));
         assert_eq!(d2["has_more"].as_bool(), Some(true));
         assert_eq!(
             d2["next_line"].as_u64(),
@@ -691,11 +679,52 @@ mod tests {
 
     /// テスト 7: 512 文字 1 行の**最悪密度**（4 バイト文字連続）でも、推定トークンは 2,048 以下に
     /// 収まる（o200k はバイト BPE で 4 バイト文字は最悪 4 トークンまで割れるが 512×4=2048<2100）。
+    /// #707 の直接の検証: **2,000 行のファイルが 1 回で読める**。
+    ///
+    /// 修正前は 1 往復 2,000 トークン（上限 2,500）しか運べず、700 行の設計文書で 9 往復して
+    /// も読み終わらなかった。1 往復ごとにモデルの推論（本番実測 100〜130 秒）が挟まるため、
+    /// サブタスクが読解だけで 1,700 秒の制限に達し commit ゼロで終わった。
+    ///
+    /// 変異確認: 読みの上限を `TOOL_RESULT_TOKEN_LIMIT`（2,500）に戻すとこのテストは赤くなる。
+    #[tokio::test]
+    async fn test_ws_read_2000_lines_in_one_call() {
+        let (_dir, ctx) = test_context();
+        // 典型的なソース相当（1 行 40 文字 × 2,000 行 ≒ 20,000 トークン）。
+        let line = "    let value = compute(argument);   // note";
+        let src: String = std::iter::repeat_n(line, 2_000)
+            .collect::<Vec<_>>()
+            .join("\n");
+        WsWriteAction
+            .execute(&json!({"path": "src.rs", "content": src}), &ctx)
+            .await;
+
+        // 範囲を指定しない＝エージェントが普通に読む形。
+        let r = WsReadAction.execute(&json!({"path": "src.rs"}), &ctx).await;
+        assert!(r.success);
+        let d = r.data.unwrap();
+        assert_eq!(
+            d["content"].as_str().unwrap().lines().count(),
+            2_000,
+            "2,000 行が 1 回で返らない（往復が増える＝#707 の状態）"
+        );
+        assert_eq!(
+            d["has_more"].as_bool(),
+            Some(false),
+            "1 回で読み切れているなら続きは無い"
+        );
+        assert!(
+            d["estimated_tokens"].as_u64().unwrap() <= READ_TOOL_RESULT_TOKEN_LIMIT as u64,
+            "上限内＝退避されない（元がファイルなのに複製を作らない）: {}",
+            d["estimated_tokens"]
+        );
+    }
+
     #[tokio::test]
     async fn test_ws_read_worst_density_line_under_token_ceiling() {
         let (_dir, ctx) = test_context();
-        // U+20000（4 バイト）を 512 文字ちょうど＝最悪密度の 1 行。overflow は出ない。
-        let dense = "𠀀".repeat(512);
+        // U+20000（4 バイト）を 2,000 文字ちょうど＝最悪密度の 1 行（#707 で 1 行上限が
+        // 2,000 文字になったので、その境界を突く）。overflow は出ない。
+        let dense = "𠀀".repeat(2_000);
         WsWriteAction
             .execute(&json!({"path": "dense.txt", "content": dense}), &ctx)
             .await;
@@ -704,14 +733,14 @@ mod tests {
             .execute(&json!({"path": "dense.txt", "start_line": 1}), &ctx)
             .await;
         let d = r.data.unwrap();
-        assert_eq!(d["content"].as_str().unwrap().chars().count(), 512);
+        assert_eq!(d["content"].as_str().unwrap().chars().count(), 2_000);
         assert!(
-            d["estimated_tokens"].as_u64().unwrap() <= 2048,
-            "最悪密度でも 512 文字は 2,048 トークン以下: {}",
+            d["estimated_tokens"].as_u64().unwrap() <= 8_192,
+            "最悪密度でも 2,000 文字は 8,192 トークン以下: {}",
             d["estimated_tokens"]
         );
         // ページ天井（2,100）未満＝再退避されない。
-        assert!(d["estimated_tokens"].as_u64().unwrap() < TOOL_RESULT_TOKEN_LIMIT as u64);
+        assert!(d["estimated_tokens"].as_u64().unwrap() < READ_TOOL_RESULT_TOKEN_LIMIT as u64);
     }
 
     /// テスト 6: 旧 offset / limit（バイト）は未知キーとして無視され、全文読みへ落ちる。
@@ -726,11 +755,14 @@ mod tests {
             .execute(&json!({"path": "f.txt", "offset": 3, "limit": 4}), &ctx)
             .await;
         let d = r.data.unwrap();
-        // 範囲指定と解釈されず、全文が返る（行フィールドも付かない）。
+        // 未知キーは無視される。#707 で経路が 1 本になったので、3 行のファイルは
+        // 1 ページ目に全部入り、続きは無い（行メタは付く＝ページとして返るため）。
         assert_eq!(d["content"].as_str(), Some("l1\nl2\nl3"));
         assert_eq!(d["has_more"].as_bool(), Some(false));
-        assert!(d.get("start_line").is_none(), "全文読みは行メタを付けない");
-        assert!(d.get("next_line").is_none());
+        assert!(
+            d.get("next_line").is_none(),
+            "続きが無ければ next_line も無い"
+        );
     }
 
     /// 512 文字切り＋**標識付き**（overflow > 0）でも、返りページの推定トークンは
@@ -739,8 +771,9 @@ mod tests {
     #[tokio::test]
     async fn test_ws_read_truncated_marked_line_under_ceiling() {
         let (_dir, ctx) = test_context();
-        // 4 バイト文字を 1,000 文字。512 で切られ overflow=488 の標識が付く＝最悪密度＋標識。
-        let dense = "𠀀".repeat(1_000);
+        // 4 バイト文字を 2,500 文字。2,000 で切られ overflow=500 の標識が付く＝最悪密度＋標識
+        // （#707 で 1 行上限が 2,000 文字になったので、素材もそれを超える必要がある）。
+        let dense = "𠀀".repeat(2_500);
         WsWriteAction
             .execute(&json!({"path": "d.txt", "content": dense}), &ctx)
             .await;
@@ -751,12 +784,12 @@ mod tests {
         let d = r.data.unwrap();
         let content = d["content"].as_str().unwrap();
         assert!(
-            content.contains("…⟨+488文字⟩"),
+            content.contains("…⟨+500文字⟩"),
             "切られた標識が付く: {content:.64}"
         );
         assert!(
             d["estimated_tokens"].as_u64().unwrap() < RANGE_CONTENT_TOKEN_CEILING as u64,
-            "標識込みでもページ天井(2100)未満: {}",
+            "標識込みでもページ天井（読み上限−400）未満: {}",
             d["estimated_tokens"]
         );
     }
@@ -766,7 +799,7 @@ mod tests {
     #[tokio::test]
     async fn test_ws_read_line_range_stays_under_inline_limit() {
         let (_dir, ctx) = test_context();
-        // inline 上限（2,500 tok）を確実に超える大きさ。1 行 80 文字 × 5,000 行。
+        // 読みの上限（30,000 tok / #707）を確実に超える大きさ。1 行 80 文字 × 5,000 行 ≒ 10 万トークン。
         let line = "x".repeat(80);
         let big: String = std::iter::repeat_n(line.as_str(), 5_000)
             .collect::<Vec<_>>()
@@ -775,13 +808,21 @@ mod tests {
             .execute(&json!({"path": "big.txt", "content": big}), &ctx)
             .await;
 
-        // 範囲指定なし: 全文が返り、上限超過のヒントが付く。
+        // #707: 範囲指定なしも 1 ページ目として返す（全文を返して退避する経路は廃止）。
         let full = WsReadAction
             .execute(&json!({"path": "big.txt"}), &ctx)
             .await;
         let fd = full.data.unwrap();
-        assert!(fd["estimated_tokens"].as_u64().unwrap() > TOOL_RESULT_TOKEN_LIMIT as u64);
-        assert!(fd.get("hint").is_some(), "全文が上限超過ならヒントを出す");
+        assert!(
+            fd["estimated_tokens"].as_u64().unwrap() <= READ_TOOL_RESULT_TOKEN_LIMIT as u64,
+            "範囲指定なしでも上限内（＝退避されない）: {}",
+            fd["estimated_tokens"]
+        );
+        assert_eq!(
+            fd["has_more"].as_bool(),
+            Some(true),
+            "10 万トークンのファイルは 1 ページに収まらないので続きがある"
+        );
 
         // 行範囲指定あり: 返す本文は上限未満（＝退避されない＝自己ループが起きない）。
         let ranged = WsReadAction
@@ -789,7 +830,7 @@ mod tests {
             .await;
         let rd = ranged.data.unwrap();
         assert!(
-            rd["estimated_tokens"].as_u64().unwrap() <= TOOL_RESULT_TOKEN_LIMIT as u64,
+            rd["estimated_tokens"].as_u64().unwrap() <= READ_TOOL_RESULT_TOKEN_LIMIT as u64,
             "行範囲読みの本文は inline 上限を超えない"
         );
         assert_eq!(
@@ -806,9 +847,11 @@ mod tests {
     #[tokio::test]
     async fn test_ws_read_page_ceiling_binds_on_dense_text() {
         let (_dir, ctx) = test_context();
-        // 1 行 100 文字の日本語 × 100 行（総計 ~10,000 トークン ≫ ページ天井）。
+        // 1 行 100 文字の日本語 × 400 行（総計 ~40,000 トークン ≫ ページ天井 29,600）。
+        // #707 で天井が上がったので、天井が効くことを見るには素材もそれを超える必要がある
+        // （100 行 ≒ 1 万トークンは今や 1 回で読める＝それがこの修正の狙い）。
         let line = "あ".repeat(100);
-        let big: String = std::iter::repeat_n(line.as_str(), 100)
+        let big: String = std::iter::repeat_n(line.as_str(), 400)
             .collect::<Vec<_>>()
             .join("\n");
         WsWriteAction
@@ -820,14 +863,14 @@ mod tests {
             .await;
         let d = r.data.unwrap();
         assert!(
-            d["estimated_tokens"].as_u64().unwrap() <= TOOL_RESULT_TOKEN_LIMIT as u64,
+            d["estimated_tokens"].as_u64().unwrap() <= READ_TOOL_RESULT_TOKEN_LIMIT as u64,
             "日本語でもページ本文は inline 上限を超えない（自己ループ防止）"
         );
-        // 100 行すべては載らず、天井で切られて続きの導線が付く。
+        // 400 行すべては載らず、天井で切られて続きの導線が付く。
         assert_eq!(d["has_more"].as_bool(), Some(true));
         let next = d["next_line"].as_u64().unwrap();
         assert!(
-            next > 1 && next <= 100,
+            next > 1 && next <= 400,
             "next_line が範囲内で前進する: {next}"
         );
     }
