@@ -119,6 +119,8 @@ pub struct OffloadCleanupConfig {
     pub enabled: bool,
     /// 保持日数。mtime がこれより古い退避ファイルを消す。既定 7 日。
     /// オーナーが 7 日超を手動削除して破綻報告なし = 実測の安全な上界を採用（発明しない）。
+    /// `0` や負値は「今書いたファイルまで消す」危険側なので `offload_cleanup` 側で下限 1 へ
+    /// 丸めて warn を出す（掃除を止めたいなら `enabled = false`）。
     #[serde(default = "default_offload_cleanup_retention_days")]
     pub retention_days: i64,
     /// 掃除 tick の間隔（秒）。既定 86400（日次）。最低 3600 秒に丸める。

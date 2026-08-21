@@ -34,6 +34,13 @@
 //! 列挙〜削除の間に消えていた（`NotFound`）ケースも握り潰さず `vanished` として数える。
 //! ただし `tmp/` ディレクトリ自体が存在しない（退避実績が無いエージェント）のは失敗では
 //! なく「掃除対象ゼロ」なので、それは静かにスキップする（失敗の握り潰しではない）。
+//!
+//! # 掃除対象は DB に現存するエージェントだけ（残骸は減らない）
+//!
+//! 列挙は `agents` テーブルの id だけ（`cleanup_all` 参照）。未展開のリテラル
+//! `{agent_id}/workspace/tmp` や DB から削除済みエージェントの残り `tmp/` は**対象外**。
+//! これらは新規ファイルを産まないのでゴール（無限に増えない）は満たすが、**既にある残骸は
+//! 減らない**（誤削除リスクを避けて本 PR では触れない）。詳細は `cleanup_all` の doc。
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -58,12 +65,6 @@ pub struct CleanupReport {
     pub errors: Vec<String>,
 }
 
-impl CleanupReport {
-    pub fn did_anything(&self) -> bool {
-        self.deleted > 0 || self.vanished > 0 || !self.errors.is_empty()
-    }
-}
-
 /// 前回 tick を成功させた時刻を残すマーカー名（`marker_dir` 直下）。
 ///
 /// **なぜ永続化するか**: 素朴に `loop { sleep(interval); … }` にするとタイマの起点が
@@ -73,30 +74,85 @@ impl CleanupReport {
 /// 経過 / 一度も走っていない」なら発火する（`llm_log_archive` と同型）。
 const LAST_RUN_MARKER: &str = ".offload_cleanup_last_run";
 
-/// 起動直後のブートストームを避けるための初回判定までの待ち。判定自体は経過時間ベース
-/// なので、この待ちの後すぐ（マーカーが無い / 古ければ）初回 tick が走る。
-const STARTUP_DELAY: Duration = Duration::from_secs(180);
+/// ブート直後に他の初期化と I/O を奪い合わないための**短い** settle。
+///
+/// **マーカーの狙いを潰さないよう短くする**（#715 レビュー）: これが再起動間隔より長いと、
+/// 再起動が settle より高頻度なとき初回 `is_due` 判定に一度も到達せず掃除が走らない。以前は
+/// `llm_log_archive` に倣って 180 秒だったが、この環境は再起動が頻繁で、その間隔が 180 秒を
+/// 下回ると掃除が恒久的に走らなくなる（＝マーカー導入の目的そのものが打ち消される）。判定は
+/// 経過時間ベースなので、この短い settle の後すぐ（マーカーが無い / 古ければ）初回 tick が走る。
+const STARTUP_SETTLE: Duration = Duration::from_secs(5);
 
 /// 「まだ発火時刻でない」ときの再判定間隔の上限。再起動直後にマーカー起点で速やかに
 /// 発火できるよう、長くても 1 時間で一度は判定に戻る。
 const POLL_CAP: Duration = Duration::from_secs(3600);
 
+/// `retention_days` の安全上限（**policy ではなくパニック回避**）。`chrono::Duration::days`
+/// は範囲外でパニックするため、`i64::MAX` 等の極端値をここで頭打ちにする。約 1 万年で、
+/// これ以上古い退避ファイルは実在しない（= 実効的に「何も消さない」に等しい）。
+const MAX_RETENTION_DAYS: i64 = 3_650_000;
+
+/// 設定の `retention_days` を安全な範囲 `[1, MAX_RETENTION_DAYS]` へ丸める。
+///
+/// **下限 1 を強制する理由**（#715 重大指摘）: `interval_secs` は `.max(3600)` で守られて
+/// いるのに `retention_days` は素通しだった。`0` なら `cutoff = now` で `tmp/` の全ファイルが
+/// 対象になり、**数秒前に書かれた（今まさに会話窓に載っている）退避ファイルまで消える**。
+/// 負値なら `cutoff` が未来へ動き、さらに新しいファイルまで巻き込む。掃除を止めたいなら
+/// `enabled = false` があるので、小さすぎる値を許す理由がない。丸めた場合は呼び出し側が warn を
+/// 出す（黙って別の値で動かない）。
+fn effective_retention_days(configured: i64) -> i64 {
+    configured.clamp(1, MAX_RETENTION_DAYS)
+}
+
 fn last_run_path(marker_dir: &Path) -> PathBuf {
     marker_dir.join(LAST_RUN_MARKER)
 }
 
-/// マーカーから前回実行時刻を読む。無い / 壊れていれば `None`（= 一度も走っていない扱い）。
+/// マーカーから前回実行時刻を読む。いずれの失敗でも「一度も走っていない扱い」として `None`
+/// を返す（= すぐ回す。破壊的ではない）が、**「無い（初回・正常）」と「読めない/壊れている
+/// （異常）」を区別する**: 前者は静かに `None`、後者は warn を出す。no-fallback の規律に従い、
+/// マーカーが恒久的に読めない（= 毎回走り続ける）状態を握り潰さず可視化する。
 fn read_last_run(path: &Path) -> Option<DateTime<Utc>> {
-    let s = std::fs::read_to_string(path).ok()?;
-    DateTime::parse_from_rfc3339(s.trim())
-        .ok()
-        .map(|dt| dt.with_timezone(&Utc))
+    let s = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        // 初回（マーカー未作成）は正常。静かに未実行扱い。
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        // 権限 / I/O エラーは異常。未実行扱いで続行するが必ず可視化する。
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "offload cleanup: マーカーを読めない（未実行扱いで続行。恒久的なら毎 tick 走り続ける）"
+            );
+            return None;
+        }
+    };
+    match DateTime::parse_from_rfc3339(s.trim()) {
+        Ok(dt) => Some(dt.with_timezone(&Utc)),
+        // 内容破損も握り潰さない。
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "offload cleanup: マーカーが壊れている（未実行扱いで続行）"
+            );
+            None
+        }
+    }
 }
 
 /// 前回実行時刻を書き込む（原子性は不要: 次回はここを読むだけ、壊れていれば None 扱い）。
 fn write_last_run(path: &Path, when: DateTime<Utc>) -> Result<()> {
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        // 失敗を握り潰さない。この後の write も失敗して Err を返す（マーカー未更新 = 次回再試行）
+        // が、原因を可視化しておく。
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::warn!(
+                path = %parent.display(),
+                error = %e,
+                "offload cleanup: マーカーの親ディレクトリを作れない（続行）"
+            );
+        }
     }
     std::fs::write(path, when.to_rfc3339())
         .with_context(|| format!("write last-run marker: {}", path.display()))?;
@@ -158,8 +214,9 @@ pub fn spawn_offload_cleanup_loop(
             marker_dir = %marker_dir.display(),
             "offload cleanup loop started"
         );
-        // 起動直後の集中 I/O を避けるため少しだけ待ってから初回判定に入る。
-        tokio::time::sleep(STARTUP_DELAY).await;
+        // 起動直後の集中 I/O を避けるため**短く**待ってから初回判定に入る。ここを長くすると
+        // 高頻度再起動で初回 is_due に到達せず掃除が走らない（STARTUP_SETTLE のコメント参照）。
+        tokio::time::sleep(STARTUP_SETTLE).await;
         loop {
             let db = db.clone();
             let template = workspace_template.clone();
@@ -211,12 +268,47 @@ pub fn spawn_offload_cleanup_loop(
 ///
 /// DB ロック失敗（= エージェント一覧が引けない）だけは `Err`（この tick 全体を再試行）。
 /// 個々のエージェント / ファイルの失敗は `report.errors` に積んで先へ進む。
+///
+/// # 対象は「DB に現存するエージェントの `tmp/`」だけ（残骸は掃除しない）
+///
+/// 列挙は `list_agent_ids`（`SELECT agent_id FROM agents`）で、各 id を
+/// `resolve_agent_workspace` で展開した `tmp/` のみを掃除する。したがって次は**対象外**で、
+/// 意図的に触れない:
+/// - **未展開のリテラル `{agent_id}/workspace/tmp`**（`workspace.rs` の「置換忘れ経路」が
+///   生む残骸）。`agents` に `{agent_id}` 行は無く、仮に id として渡しても `validate_agent_id`
+///   が弾く。
+/// - **DB から削除済みだがディスクに残るエージェントの `tmp/`**。
+///
+/// これらは**新規ファイルを産まない**ので、ゴール「退避ファイルが無限に増えないこと」は満たす
+/// （増分 +44/日 は現存エージェントの経路から出る）。一方で**既にある残骸は減らない**ので、
+/// 「これで漏れなく減る」わけではない点に注意（残骸の削除は DB とディスクの突合が要り、誤削除の
+/// リスクが上がるため本 PR のスコープ外）。
+///
+/// # 多重実行しても安全（ロック不要）
+///
+/// 同一 data dir を見る 2 プロセスや再起動オーバーラップで同じ `tmp/` を同時掃除しても、
+/// 列挙〜削除のレースは `NotFound → vanished`（`errors` ではない）で吸収され、変更は
+/// `remove_file` のみ。マーカー書き込みは last-writer-wins で、壊れても `None`（未実行）扱いに
+/// なり無害な余分 1 回で済む。将来ここへロックを足す/外す判断がぶれないよう明記しておく。
 pub fn cleanup_all(
     db: &Db,
     workspace_template: &str,
     retention_days: i64,
     now: DateTime<Utc>,
 ) -> Result<CleanupReport> {
+    // 危険な設定値を安全側へ丸め、丸めたら必ず可視化する（黙って別の値で動かさない）。
+    let retention_days = {
+        let effective = effective_retention_days(retention_days);
+        if effective != retention_days {
+            tracing::warn!(
+                configured = retention_days,
+                effective,
+                "offload cleanup: retention_days を安全な範囲 [1, {MAX_RETENTION_DAYS}] へ丸めた"
+            );
+        }
+        effective
+    };
+
     let agent_ids: Vec<String> = {
         let conn = db
             .lock()
@@ -249,6 +341,9 @@ pub fn cleanup_all(
 ///
 /// Stage 1 で `mtime <= cutoff` の**通常ファイル**の実パスだけを列挙し、Stage 2 でその
 /// 各パスに `remove_file` を 1 回ずつ掛ける。結果は `report` に加算する。
+///
+/// `retention_days` は `cleanup_all` で `[1, MAX_RETENTION_DAYS]` に丸め済みの前提
+/// （`chrono::Duration::days` のオーバーフロー = パニックをこの範囲で避ける）。
 fn cleanup_tmp_dir(
     dir: &Path,
     retention_days: i64,
@@ -314,7 +409,6 @@ fn cleanup_tmp_dir(
             }
         };
         let mtime: DateTime<Utc> = modified.into();
-        // 生成から retention_days 経過（mtime <= cutoff）したものだけを候補にする。
         // 生成から retention_days 経過（mtime <= cutoff）したものだけを候補にする。
         if mtime <= cutoff {
             victims.push((path, md.len()));
@@ -466,8 +560,8 @@ mod tests {
         let mut report = CleanupReport::default();
         cleanup_tmp_dir(&missing, 7, now(), &mut report);
         assert_eq!(report.deleted, 0);
+        assert_eq!(report.vanished, 0);
         assert!(report.errors.is_empty(), "存在しない tmp はエラーにしない");
-        assert!(!report.did_anything());
     }
 
     // fail-loudly: remove_file が失敗したら握り潰さず errors に積む（成功扱いにしない）。
@@ -593,5 +687,105 @@ mod tests {
         )
         .unwrap();
         assert!(r3.is_some(), "interval 経過後は再起動をまたいで発火");
+    }
+
+    // 下限クランプの値を単体で固定（0/負は 1 へ、極端値は上限へ、正常値は素通し）。
+    #[test]
+    fn effective_retention_days_clamps_dangerous_values() {
+        assert_eq!(effective_retention_days(0), 1, "0 は下限 1 へ");
+        assert_eq!(effective_retention_days(-5), 1, "負値も下限 1 へ");
+        assert_eq!(effective_retention_days(i64::MIN), 1);
+        assert_eq!(effective_retention_days(7), 7, "正常値は素通し");
+        assert_eq!(
+            effective_retention_days(i64::MAX),
+            MAX_RETENTION_DAYS,
+            "極端値はパニック回避の上限へ"
+        );
+    }
+
+    // 変異確認の主対象: retention_days = 0 を渡しても、クランプ（下限 1）のおかげで
+    // 「今書いたファイル」を消さない。クランプを外すと cutoff = now になり fresh が消えて落ちる。
+    #[test]
+    fn cleanup_all_clamps_zero_retention_and_keeps_fresh() {
+        let conn = opencrab_db::init_memory().unwrap();
+        conn.execute(
+            "INSERT INTO agents (agent_id, name, persona_name) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["agent-a", "agent-a", "agent-a"],
+        )
+        .unwrap();
+        let db = Db::from_connection(conn);
+
+        let base = tempfile::tempdir().unwrap();
+        let template = format!("{}/{{agent_id}}/workspace", base.path().to_string_lossy());
+        let tmp = base.path().join("agent-a").join("workspace").join("tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        // mtime = now ちょうど（= 今まさに書かれた退避ファイル相当）。
+        let fresh = tmp.join("just-written.txt");
+        write_file_with_mtime(&fresh, b"still needed", now());
+
+        // retention_days = 0（危険値）。クランプが効けば cutoff = now - 1日 で fresh は残る。
+        let report = cleanup_all(&db, &template, 0, now()).unwrap();
+
+        assert_eq!(
+            report.deleted, 0,
+            "0 はクランプされ今書いたファイルを消さない"
+        );
+        assert!(fresh.exists(), "会話窓に載っている退避ファイルが残る");
+    }
+
+    // 意図の固定（残骸は触らない）: DB に無いディレクトリ配下の tmp/ は掃除対象外。
+    // 列挙をファイルシステム走査へ変えるとこのテストが落ちる（残骸を消してしまう）。
+    #[test]
+    fn cleanup_all_leaves_orphan_tmp_untouched() {
+        let conn = opencrab_db::init_memory().unwrap();
+        // DB には agent-a だけ登録。orphan-agent は登録しない（= 削除済み/未展開の残骸相当）。
+        conn.execute(
+            "INSERT INTO agents (agent_id, name, persona_name) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["agent-a", "agent-a", "agent-a"],
+        )
+        .unwrap();
+        let db = Db::from_connection(conn);
+
+        let base = tempfile::tempdir().unwrap();
+        let template = format!("{}/{{agent_id}}/workspace", base.path().to_string_lossy());
+
+        // DB 現存エージェントの古いファイル（消える）。
+        let live_tmp = base.path().join("agent-a").join("workspace").join("tmp");
+        std::fs::create_dir_all(&live_tmp).unwrap();
+        write_file_with_mtime(&live_tmp.join("old.txt"), b"x", days_ago(30));
+
+        // DB に無い残骸の古いファイル（消えない）。
+        let orphan_tmp = base
+            .path()
+            .join("orphan-agent")
+            .join("workspace")
+            .join("tmp");
+        std::fs::create_dir_all(&orphan_tmp).unwrap();
+        let orphan_file = orphan_tmp.join("old.txt");
+        write_file_with_mtime(&orphan_file, b"x", days_ago(30));
+
+        let report = cleanup_all(&db, &template, 7, now()).unwrap();
+
+        assert_eq!(report.deleted, 1, "DB 現存エージェントのぶんだけ消える");
+        assert!(!live_tmp.join("old.txt").exists());
+        assert!(
+            orphan_file.exists(),
+            "DB に無い残骸 tmp/ は列挙されず触られない"
+        );
+    }
+
+    // read_last_run: 無い（初回）と壊れている（異常）はどちらも None だが、後者でも
+    // クラッシュしない（warn は出すが値としては未実行扱い）。
+    #[test]
+    fn read_last_run_missing_and_corrupt_are_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = last_run_path(dir.path());
+        assert!(read_last_run(&path).is_none(), "無い = 初回 = None");
+
+        std::fs::write(&path, "not-a-timestamp").unwrap();
+        assert!(
+            read_last_run(&path).is_none(),
+            "壊れていても None（未実行扱い）"
+        );
     }
 }
