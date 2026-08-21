@@ -390,8 +390,15 @@ fn is_excluded_from_conversation(log: &opencrab_db::queries::SessionLogRow) -> b
 /// **ターン内の挙動は変わらない**（ツール往復は会話再構成を通らない）。落とすのは次のターン
 /// 以降への持ち越しだけで、往復は増えない。
 ///
-/// **失敗した結果は本文を残す**（#707 レビュー指摘）。参照へ潰すとエラー理由が消え、成功した
-/// ように読める文字列に化ける——握り潰しであり #692 / #284 の理念に反する。
+/// **失敗した結果は本文を残す**（#707 / #709 レビュー指摘）。参照へ潰すとエラー理由が消え、
+/// 成功したように読める文字列に化ける——握り潰しであり #692 / #284 の理念に反する。ツール層の
+/// 失敗（`success: false`）だけでなく、**コマンドの非ゼロ終了**も対象（`execute_shell` は非ゼロ
+/// でも `success: true` を返すため、それだけでは捕まらない）。
+///
+/// 成功した結果の本文は記録（`memory_sessions`）に残る。退避しきい値を超えた大きい結果は
+/// `workspace/tmp` にも残り、平文の退避 notice（非 JSON）はここを素通しするので読み方の案内が
+/// 壊れない。**しきい値未満の結果はエージェントからは読み直せない**ので、再取得を案内するのは
+/// 同じものが返ると保証できるとき（読み・一覧）だけにする。
 pub(crate) fn result_reference(tool_name: &str, result_json: &str) -> String {
     let v: serde_json::Value = match serde_json::from_str(result_json) {
         Ok(v) => v,
@@ -443,12 +450,28 @@ pub(crate) fn result_reference(tool_name: &str, result_json: &str) -> String {
         }
     }
 
-    // コマンド実行: 終了コードと規模。本文は記録（と、大きければ退避ファイル）に残っている。
+    // コマンド実行: 終了コードと規模。
+    //
+    // **失敗したコマンドは stderr を本文で残す**（#709 レビュー指摘）。`execute_shell` は非ゼロ
+    // 終了でもツール層では `success: true` を返すので、上の `success != true` 判定では捕まらない。
+    // ここを塞がないと**コンパイルエラーやテスト失敗の理由がターンをまたぐと消える**——エージェント
+    // が最も頻繁に読むものであり、握り潰しになる（#692 / #284 の理念に反する）。
     if let Some(code) = d.get("exit_code").and_then(|x| x.as_i64()) {
         let out = d.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
         let err = d.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
+        if code != 0 {
+            return format!(
+                "終了コード {code}（失敗）・出力 {} 文字\n{}",
+                out.chars().count(),
+                if err.is_empty() {
+                    "（stderr は空）".to_string()
+                } else {
+                    err.to_string()
+                }
+            );
+        }
         return format!(
-            "終了コード {code}・出力 {} 文字{}（本文は会話に残していない）",
+            "終了コード 0・出力 {} 文字{}（本文は会話に残していない）",
             out.chars().count(),
             if err.is_empty() {
                 String::new()
@@ -459,10 +482,15 @@ pub(crate) fn result_reference(tool_name: &str, result_json: &str) -> String {
     }
 
     // それ以外（記憶・検索・内なる声など）: 規模だけ残す。何を呼んだかは tool_name が示す。
+    //
+    // **「もう一度呼ぶ」とは言わない**（#709 レビュー指摘）。ここへ落ちるツールには非冪等なものが
+    // 混じる——`generate_inner_voice` を呼び直すと**別の思考**が生成され、過去のそれは回収できない。
+    // 回収できないものを回収できることにする誘導は、失敗を成功に見せるのと同じ質の嘘になる。
+    // 再取得を案内するのは、同じものが返ると保証できるとき（読み・一覧）だけにする。
     let size = serde_json::to_string(d)
         .map(|t| t.chars().count())
         .unwrap_or(0);
-    format!("結果 {size} 文字（本文は会話に残していない。必要ならもう一度 {tool_name} を呼ぶ）")
+    format!("結果 {size} 文字（本文は会話に残していない）")
 }
 
 /// heartbeat セッションで過去に積まれた指示文（プロンプト scaffolding）か（#501）。
@@ -2373,6 +2401,53 @@ mod result_reference_tests {
         assert!(r.contains("50000"), "出力の規模が無い: {r}");
     }
 
+    /// #709 レビュー指摘: **コマンドの非ゼロ終了は stderr を本文で残す**。
+    ///
+    /// `execute_shell` は非ゼロ終了でもツール層では `success: true` を返すので、`success` 判定
+    /// では捕まらない。ここを塞がないとコンパイルエラーやテスト失敗の理由がターンをまたぐと
+    /// 消える——エージェントが最も頻繁に読むものであり、握り潰しになる。
+    #[test]
+    fn failed_commands_keep_their_stderr() {
+        let result = serde_json::json!({
+            "success": true,
+            "data": {
+                "exit_code": 1,
+                "stdout": "",
+                "stderr": "error[E0308]: mismatched types\n  --> src/main.rs:42:9"
+            }
+        })
+        .to_string();
+
+        let r = result_reference("execute_shell", &result);
+        assert!(
+            r.contains("E0308") && r.contains("src/main.rs:42"),
+            "失敗の理由（stderr）が消えている: {r}"
+        );
+        assert!(r.contains("失敗"), "失敗だと分からない: {r}");
+    }
+
+    /// #709 レビュー指摘: 非冪等なツールに「もう一度呼ぶ」と言わない。
+    ///
+    /// `generate_inner_voice` を呼び直すと**別の思考**が生成され、過去のそれは回収できない。
+    /// 回収できないものを回収できることにする誘導は、失敗を成功に見せるのと同じ質の嘘になる。
+    #[test]
+    fn non_idempotent_tools_do_not_promise_recovery() {
+        let result = serde_json::json!({
+            "success": true, "data": {"voice": "思考の断片".repeat(200)}
+        })
+        .to_string();
+
+        let r = result_reference("generate_inner_voice", &result);
+        assert!(
+            !r.contains("思考の断片思考の断片"),
+            "本文が載っている: {r:.80}"
+        );
+        assert!(
+            !r.contains("もう一度"),
+            "回収できないのに再取得を約束している: {r}"
+        );
+    }
+
     /// 失敗した結果は本文を残す（参照へ潰すと「成功した」ことに化ける）。
     #[test]
     fn failed_results_keep_their_error() {
@@ -2412,6 +2487,6 @@ mod result_reference_tests {
             !r.contains("長い検索結果長い検索結果"),
             "本文が載っている: {r:.80}"
         );
-        assert!(r.contains("search_my_history"), "呼び直す方法が無い: {r}");
+        assert!(r.contains("文字"), "規模が分からない: {r}");
     }
 }
