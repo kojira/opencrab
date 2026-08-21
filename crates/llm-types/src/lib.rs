@@ -402,6 +402,98 @@ impl std::fmt::Display for LlmError {
 
 impl std::error::Error for LlmError {}
 
+/// `llm_logs.error_code` に入れる、context ウィンドウ超過を表す専用コード（#539）。
+///
+/// 従来は全エラーが総称 `"error"` で、context 超過（本番で 07-25〜08-10 に 54 件）を
+/// ダッシュボードやアラートから判別できず、`error_body` の文字列一致に頼るしかなかった。
+/// この定数を唯一の識別子として使う（読み手はこの値で分岐してよい）。
+pub const CONTEXT_WINDOW_EXCEEDED_ERROR_CODE: &str = "context_window_exceeded";
+
+/// context ウィンドウ超過（入力がモデル/経路の上限を超えて拒否された）エラーか（#539）。
+///
+/// **プロバイダ固有の拒否文言の一致はここ 1 箇所に集約する。** 他所（error_code の付与・
+/// アラート・リトライ判定など）でこの判定を再実装しない。判定材料は provider がそのまま
+/// 返す message（router が「All providers failed … [provider] <message>」へ集約した後の
+/// 文字列でも部分一致で拾える）。HTTP 400 は他の bad request とも共有で status だけでは
+/// 特定できないため、文言一致が実用上の唯一の軸。
+///
+/// マーカーは小文字で保持し、message も小文字化して部分一致で照合する。
+/// - `"exceeds the context window"`: chatgpt（Codex OAuth 経路）。**本番 54 件で検証済み**。
+/// - 残りは各社の既知文言だが**本番データには出現しておらず未検証**。誤検出を避けるため、
+///   token/context 超過に十分固有な文言だけを保守的に並べる（超過でないものを超過と
+///   誤判定する方が害が大きい: 気付けるはずのものが別名で埋もれる）。
+///
+/// **重複メモ（#539）**: context 関連の文字列リストは現在 2 箇所ある — ここ（超過の特定）と
+/// `opencrab_core::memory::daily_log_indexer` の `NON_RETRYABLE_PATTERNS`（リトライ可否の
+/// 判定）。**読み手（目的）が別なので今は統合しない。** 2 つまでは許容、**3 つ目が現れたら
+/// 統合のサイン**。
+pub fn is_context_window_error(message: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "exceeds the context window", // chatgpt / OpenAI Responses（本番検証済み）
+        "maximum context length",     // OpenAI classic ("maximum context length is N tokens")
+        "context length exceeded",    // OpenAI 互換の一部
+        "reduce the length of the messages", // 上記 OpenAI 文言の後段
+        "prompt is too long",         // Anthropic ("prompt is too long: N tokens > M maximum")
+        "exceeds the maximum number of tokens", // Google Gemini 系
+    ];
+    let lower = message.to_ascii_lowercase();
+    MARKERS.iter().any(|m| lower.contains(m))
+}
+
+/// `llm_logs.error_code` に入れる、意味的に空の応答を表す専用コード（#706）。
+///
+/// provider が HTTP 200・`finish_reason:"stop"` を名乗りながら本文（content）も
+/// tool_call も返さなかったターンをこの値で判別できるようにする。従来はこの種の応答が
+/// error 欄空の「成功行」として llm_logs に残り、なぜ黙ったかの切り分けに server.log との
+/// 突き合わせが要った。読み手はこの値で分岐してよい（#539 の context 超過コードと同じ扱い）。
+pub const EMPTY_RESPONSE_ERROR_CODE: &str = "empty_response";
+
+/// `llm_logs.error_code` に入れる、出力トークン上限で切り捨てられた応答を表す専用コード（#676）。
+///
+/// 空応答（[`EMPTY_RESPONSE_ERROR_CODE`]）と同じく「意味的に使えないターン」だが、原因が
+/// 出力上限だと分かる方が運用者の初動が早いので別コードにする。判定材料は
+/// `finish_reason == Length` だが、コードの付与はエンジン（core）で一元化し、読み手はこの
+/// 値で分岐してよい。
+pub const OUTPUT_TRUNCATED_ERROR_CODE: &str = "output_truncated";
+
+/// 応答が「意味的に空」か（#706）。
+///
+/// **判定は中身の形だけで行う。** `finish_reason` や HTTP ステータスは条件に足さない——
+/// 実バグ（cursor:grok）は `finish_reason:"stop"` を名乗りつつ content フィールドごと
+/// 欠落していたので、それらを条件に足すと同じ形の別 provider を取りこぼす。
+///
+/// 「空」の定義（3 形すべてを対象）:
+/// - content フィールドが **欠落**（`None`）
+/// - content が **空文字**
+/// - content が **空白のみ**（trim して空）
+///
+/// かつ **tool_call が無い**こと（tool_call があればツール往復の一手なので空ではない）。
+///
+/// content 抽出はエンジンの最終応答抽出（`ChatResponse::first_text` → `Message::text_content`）
+/// と同じ経路に揃える。Text 以外（画像のみ等）はエンジン側でも本文 0 として扱われるため、
+/// ここでも空とみなす（両者が食い違うと「空なのに成功として通る」穴が戻る）。判定は全
+/// provider の正規化後 `ChatResponse` に対して行うので、provider ごとに検知を分けない。
+pub fn is_empty_response(response: &ChatResponse) -> bool {
+    let message = match response.first_message() {
+        Some(m) => m,
+        // choices 自体が無い＝使える応答が無い。
+        None => return true,
+    };
+    // tool_call があれば空ではない。
+    if message
+        .tool_calls
+        .as_ref()
+        .is_some_and(|calls| !calls.is_empty())
+    {
+        return false;
+    }
+    // content: 欠落／空文字／空白のみ をすべて空とみなす。
+    match message.text_content() {
+        Some(text) => text.trim().is_empty(),
+        None => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,9 +521,116 @@ mod tests {
     }
 
     #[test]
+    fn context_window_error_matches_real_chatgpt_body() {
+        // 本番 `llm_logs.error_body` の実形（router が集約した文字列）。
+        let real = "All providers failed for model 'gpt-5.6-sol' (1 tried):\n  \
+                    [chatgpt] ChatGPT API error: Your input exceeds the context window of this model.";
+        assert!(is_context_window_error(real));
+        // 大小無視。
+        assert!(is_context_window_error(
+            "PROMPT IS TOO LONG: 210000 tokens > 200000 maximum"
+        ));
+    }
+
+    #[test]
+    fn context_window_error_does_not_match_unrelated_failures() {
+        // fallback 枯渇（本番の非超過エラーの典型）を context 超過と誤判定しない。
+        assert!(!is_context_window_error(
+            "All providers failed for model 'gpt-5.5'. Tried: chatgpt + fallback chain [\"ollama\"]"
+        ));
+        assert!(!is_context_window_error(
+            "ChatGPT API error: rate limit exceeded"
+        ));
+        assert!(!is_context_window_error("request timed out"));
+        assert!(!is_context_window_error(""));
+    }
+
+    #[test]
     fn test_first_text() {
         let response = ChatResponse::text("the answer");
         assert_eq!(response.first_text(), Some("the answer"));
+    }
+
+    /// choices[0].message を content / tool_calls 指定で組んだ 1 択応答。
+    fn empty_test_response(
+        content: Option<&str>,
+        tool_calls: Option<Vec<ToolCall>>,
+    ) -> ChatResponse {
+        ChatResponse {
+            id: String::new(),
+            model: String::new(),
+            choices: vec![Choice {
+                index: 0,
+                message: Message {
+                    role: Role::Assistant,
+                    content: content.map(|s| MessageContent::Text(s.to_string())),
+                    name: None,
+                    function_call: None,
+                    tool_calls,
+                    tool_call_id: None,
+                },
+                // #706: finish_reason は判定に混ぜない。実バグは "stop" を名乗っていた。
+                finish_reason: Some(FinishReason::Stop),
+            }],
+            usage: Usage::default(),
+            created: 0,
+        }
+    }
+
+    fn a_tool_call() -> ToolCall {
+        ToolCall {
+            id: "c1".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "test".to_string(),
+                arguments: "{}".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn is_empty_response_matches_the_three_empty_shapes() {
+        // #706: content 欠落／空文字／空白のみ、いずれも tool_call 無しなら空。
+        assert!(
+            is_empty_response(&empty_test_response(None, None)),
+            "content フィールド欠落は空"
+        );
+        assert!(
+            is_empty_response(&empty_test_response(Some(""), None)),
+            "空文字は空"
+        );
+        assert!(
+            is_empty_response(&empty_test_response(Some("   \n\t "), None)),
+            "空白のみは空"
+        );
+    }
+
+    #[test]
+    fn is_empty_response_is_false_when_there_is_usable_output() {
+        // 本文がある。
+        assert!(!is_empty_response(&empty_test_response(Some("hi"), None)));
+        // 空 content でも tool_call があればツール往復の一手＝空ではない。
+        assert!(!is_empty_response(&empty_test_response(
+            None,
+            Some(vec![a_tool_call()])
+        )));
+        assert!(!is_empty_response(&empty_test_response(
+            Some(""),
+            Some(vec![a_tool_call()])
+        )));
+    }
+
+    #[test]
+    fn is_empty_response_true_when_no_choices() {
+        // choices 自体が無い＝使える応答が無い。
+        let resp = ChatResponse {
+            id: String::new(),
+            model: String::new(),
+            choices: vec![],
+            usage: Usage::default(),
+            created: 0,
+        };
+        assert!(is_empty_response(&resp));
     }
 
     #[test]

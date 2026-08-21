@@ -205,17 +205,16 @@ impl DiscordGatewayActions {
             }
         };
 
-        let whitelisted = args
-            .get("whitelisted")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        // #421: whitelisted / heartbeat_enabled は省略可。full-replace で既定値へ落とすと
+        // 「読み書きだけ変えたい」操作が既存の whitelist / heartbeat 設定を黙って壊す
+        // （whitelisted=1 が省略で 0 に、無効化していた heartbeat が省略で true に戻る）。
+        // 省略時は既存行の値（行が無ければ現在の実効値）を保持する patch 意味論にする。
+        // 明示指定された値はそのまま書く（意図した設定操作であることは変えない）。
+        let whitelisted_arg = args.get("whitelisted").and_then(|v| v.as_bool());
+        let heartbeat_enabled_arg = args.get("heartbeat_enabled").and_then(|v| v.as_bool());
 
-        let heartbeat_enabled = args
-            .get("heartbeat_enabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-
-        let result = {
+        // 応答表示にも使うため、実際に書いた whitelisted を block の外へ返す。
+        let (result, whitelisted) = {
             let conn = self.db.lock().unwrap();
             // 既存のハートビート上書き・intervalを保持する（読み書き設定の更新で消さない）。
             let existing = opencrab_db::queries::get_channel_config_for_agent(
@@ -225,6 +224,18 @@ impl DiscordGatewayActions {
             )
             .ok()
             .flatten();
+            // 省略時は現在の実効 whitelist（エージェント行優先→グローバル→false）を保持。
+            let whitelisted = whitelisted_arg.unwrap_or_else(|| {
+                opencrab_db::queries::is_channel_whitelisted_for_agent(
+                    &conn,
+                    channel_id,
+                    &ctx.agent_id,
+                )
+            });
+            // 省略時は既存行の heartbeat_enabled を保持（行が無ければ既定 true）。
+            let heartbeat_enabled = heartbeat_enabled_arg
+                .or_else(|| existing.as_ref().map(|c| c.heartbeat_enabled))
+                .unwrap_or(true);
             let cfg = opencrab_db::queries::ChannelConfigRow {
                 channel_id: channel_id.to_string(),
                 agent_id: ctx.agent_id.clone(),
@@ -239,7 +250,10 @@ impl DiscordGatewayActions {
                     .map(|c| c.heartbeat_instructions)
                     .unwrap_or_default(),
             };
-            opencrab_db::queries::upsert_channel_config(&conn, &cfg)
+            (
+                opencrab_db::queries::upsert_channel_config(&conn, &cfg),
+                whitelisted,
+            )
         };
 
         match result {

@@ -654,7 +654,7 @@ fn test_excluded_patterns() { ... }
 soul, identity, memory_curated, memory_sessions,
 skills, sessions, agent_sessions,
 agent_discord_config, discord_channel_config,
-agent_allowed_commands, trusted_co_agents, trusted_discord_users,
+agent_allowed_commands, trusted_co_agents, trusted_users,
 llm_logs, llm_usage_metrics, model_pricing, model_experience_notes,
 impressions, heartbeat_log
 ```

@@ -437,6 +437,11 @@ fn apply_decisions(
                         is_active: true,
                         permission: "\"agent\"".to_string(),
                         archived: false,
+                        // #335: スリープ棚卸しは caller=Owner のターンで走る。None = legacy
+                        // grandfather（Owner 相当）。
+                        created_caller: None,
+                        // #352: Agent 露出は既定 false（オーナーが REST で切り替える）。
+                        agent_visible: false,
                     };
                     if opencrab_db::queries::insert_skill(&conn, &row).is_ok() {
                         effective = "created";

@@ -5,9 +5,12 @@
 //! 分割前と変わらない。新しいドメインを足すときは新しいサブモジュールに。
 
 mod agent_discord_config;
+mod agent_inbox;
 mod agent_logs;
 mod agent_mcp_config;
 mod agent_nostr_config;
+mod agent_nostr_relay_config;
+mod agent_schedules;
 mod agents;
 mod allowed_commands;
 mod channel_config;
@@ -20,6 +23,7 @@ mod memory_index;
 mod model_pricing;
 mod pending_interactions;
 mod provider_settings;
+mod session_heartbeat;
 mod session_logs;
 mod sessions;
 mod skills;
@@ -29,9 +33,12 @@ mod trusted_users;
 mod webhook_config;
 
 pub use agent_discord_config::*;
+pub use agent_inbox::*;
 pub use agent_logs::*;
 pub use agent_mcp_config::*;
 pub use agent_nostr_config::*;
+pub use agent_nostr_relay_config::*;
+pub use agent_schedules::*;
 pub use agents::*;
 pub use allowed_commands::*;
 pub use channel_config::*;
@@ -44,6 +51,7 @@ pub use memory_index::*;
 pub use model_pricing::*;
 pub use pending_interactions::*;
 pub use provider_settings::*;
+pub use session_heartbeat::*;
 pub use session_logs::*;
 pub use sessions::*;
 pub use skills::*;

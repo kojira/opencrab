@@ -44,14 +44,13 @@ pub enum SideEffect {
     LlmSwitched { purpose: String, model: String },
 }
 
-/// 呼び出し元の識別子
-#[derive(Debug, Clone, PartialEq)]
-pub enum CallerIdentity {
-    Owner,
-    Agent,
-    CoAgent { agent_id: String },
-    TrustedUser,
-}
+/// 呼び出し元の識別子。
+///
+/// 実体は [`opencrab_core::caller::CallerIdentity`]。A2UI の保留状態
+/// （`opencrab_core::a2ui::PendingInteraction`）が「その UI を描いた run の
+/// 呼び出し元」を持つため core 側に置いてある（core は actions に依存できない）。
+/// `opencrab_actions::CallerIdentity` の参照パスは従来どおり。
+pub use opencrab_core::caller::CallerIdentity;
 
 /// アクション実行コンテキスト
 pub struct ActionContext {

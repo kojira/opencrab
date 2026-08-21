@@ -4,6 +4,14 @@
 
 バージョン: v1（2026-06-02）
 
+> **更新（#439 / #456 / #455）**: ハートビートは**セッション単位**の設定
+> （`session_heartbeat_config`）へ一本化され（旧 agent/channel スコープは廃止）、発火は
+> **中央スケジューラ**が握る（永続アンカー・設定時起点・即時反映・`next_fire_at` 照会・
+> 再起動をまたぐ位相保存）。`set_my_heartbeat`/`get_my_heartbeat` は**現在のセッション**に
+> 対して設定・照会し、`scope` 引数は廃止された。**per-agent 定時実行（#455・cron/@every）は
+> 同じ中央スケジューラの時刻源に載る**（別ループを作らない）。詳細は
+> [[design-agent-schedules]] と `config-precedence.md`。
+
 関連:
 - [[design-agent-instructions]] — `agents.instructions` の設計とOwner限定の `update_instructions` アクション。本設計はこれを強く踏襲する。
 - [[design-async-instructions]] — システムプロンプトへの英語ブロック注入パターン。
@@ -173,6 +181,15 @@ fn resolve_heartbeat_instructions(
   → **出力形式の規約（SPEAK/LEARN/IDLE）はランタイムが固定**し、指示部分（方針・頻度・トーン・話題）だけを設定可能にする。これによりパーサ（§1.1の `contains("SPEAK:")`）を壊さない。
 - `agents.heartbeat_instructions` を**システムプロンプト側**にも `## Heartbeat Behavior` セクションとして出すかは選択肢。ただし通常会話のtickでこのセクションが出ると混乱するため、**v1ではハートビートtickのときだけ**（`build_agent_context()` に`is_heartbeat: bool` を渡す、または注入はセッションログ側のみに留める）に限定する。シンプルさ優先で**セッションログ側への注入のみ**を推奨。
 - [[design-async-instructions]] の知見に従い、出力形式の規約文は英語でも可だが、既存文言が日本語かつエージェントが日本語ペルソナのため、規約は日本語のまま、指示本文はオーナーが書いた言語をそのまま使う。
+- **更新（#501）**: 上記の「セッションログ側への注入のみ」は撤回した。指示文はこのテンプレートで整形（`scheduler::format_heartbeat_prompt`）し、**その tick のシステムプロンプトへ注入する**（会話ログには積まない）。理由と実測は §14 を参照。
+- **更新（#515・記録側）**: 出力規約に **IDLE の短い理由**を足した（`IDLE: <理由>`）。エージェントの応答は毎ターン HB 専用セッションへ `speech`（`speaker_id=agent_id`）として残っており（`heartbeat_turn::turn` が `result.response` を書く）、これが「自分が何をした/しなかったか」の記録になる。以前は `IDLE` の 1 語しか返させていなかったため記録が空同然（本番実測: `speech` 平均 14 バイト）で、見送りの理由が一切残らなかった。規約で理由を求めることで、記録に判断が載る。
+  - **理由は機構が生成しない**（#501 の再来防止）: `format_heartbeat_prompt` は「自分の言葉で」「定型文の繰り返しは避けて」と**促すだけ**で、理由の文面は毎ターン LLM が文脈から書く。定型文をこちらで注入すると同じ文面が何百件も並んで判断を歪めるため（#501 の再現形）、記録は文脈依存に変わり続ける形にして構造的に反復を防ぐ。新しい保存先は作らない（既存の `speech` 行を使う）。
+  - **パーサの追従**: 理由が自由文になり、決定行の中に別の決定語が現れる余地が生まれたので、`parse_heartbeat_decision` の判定を**決定行の先頭語**へ寄せた。
+    - **LEARN**: 「応答全体に LEARN を含むか」から先頭語判定へ絞った。`IDLE: 直前に LEARN した` で内省メモ書き込みが誤発火するのを防ぐ。
+    - **SPEAK**: `SPEAK:` を含む最初の行を拾う緩さ（**思考行を前置しても拾う**既存の意図）は保つが、**IDLE / LEARN の決定行の内側にある `SPEAK:` は拾わない**（`leads_with_idle_or_learn` で除外）。`IDLE: 今は SPEAK: するほどの話題がない` の右側が発話として**外部チャンネルへ配送**されるのを防ぐ。LEARN の誤発火（内部メモ）より結果が重い（取り消せない外部投稿）ため、記録側の変更で開いたこの露出を同じ PR で塞ぐ。
+    - 理由が無い素の `IDLE`（規約非遵守）でも決定は Idle・記録は「IDLE」1 語が残り壊れない。
+    - **既知の軽微な穴**: 先頭語判定は行頭のリスト記号・番号（`- LEARN:` / `1. LEARN`）を先頭語として取りこぼし Idle 化し得る。規約は `IDLE:`/`LEARN:` を素で書かせるので実害は軽微とし、記号剥がしは入れていない（パーサを単純に保つ）。
+  - **長さ**: 別途の切り詰めは入れない。会話再構成（`build_heartbeat_conversation_string`）が読み出し側で budget により上限を掛けるため、記録を短く切っても文脈予算は守られる一方、切ると「エージェント自身の言葉」を欠く。規約で「1〜2 行で簡潔に」と促すに留める。
 
 ### 5.3 キャッシュ/性能
 
@@ -193,6 +210,10 @@ fn resolve_heartbeat_instructions(
 ## 7. ツール／アクション設計
 
 `crates/actions`（および `crates/discord/src/gateway_actions/discord_ops.rs` のパターン）に倣い、`GatewayActionResult` を返すアクションを追加する。
+
+> **実装場所（#157 S3 で更新）**: 両ツールは gateway 非依存層 — `crates/server/src/heartbeat_instructions.rs`（定義は `crates/server/src/system_actions.rs` の `own_definitions()`）にある。Discord ゲートウェイには実装が無い。したがって web / Nostr / REST / heartbeat のターンでも使える。
+>
+> ただし **`scope="channel"` / `scope="effective"` は非対称**である。`scope="agent"` が触るのは `agents` 行なので全経路で機能するが、チャンネル上書きの行を作るのは Discord のチャンネル運用だけなので、非 Discord 経路では通常「行が無い」応答（`channel` は空文字列、`effective` はエージェント/既定へのフォールバック）になる。テーブル名・カラム名の Discord 依存を解消する改名は #159 の担当。
 
 ### 7.1 `update_heartbeat_instructions`（Owner限定・書き込み）
 
@@ -339,7 +360,9 @@ fn resolve_heartbeat_instructions(
 ## 14. 未解決事項とリスク
 
 - **連結 vs 置換**: チャンネル上書きを「エージェント指示に追記」とするか「完全置換」とするか。v1は連結。置換モードのフラグ（`channel_override_mode`）は将来課題。
-- **システムプロンプト注入の是非**: ハートビート指示をシステムプロンプト側にも出すと、通常会話tickに漏れるリスク。v1はセッションログ注入のみで回避するが、長期記憶への影響は要観察。
+- **システムプロンプト注入（#501 で確定）**: v1 は指示文を**セッションログ（`system`/`speaker_id='heartbeat'`）へ挿入し会話経由で渡していた**が、毎 tick 同一文面が積まれ、履歴には「同じ指示 → IDLE」の対が何十回も並んでいた（本番の heartbeat セッションで指示文 192 件）。エージェントから見ると「同じ指示が何十回も書かれ、どれが今回か分からない」状態で、容量ではなく**挙動を歪めていた**（オーナー裁定 2026-08）。#501 で方針を変更し、**指示文はその tick のシステムプロンプトへ 1 度だけ注入する**（`scheduler::format_heartbeat_prompt` で整形 → `HeartbeatTarget::instructions_prompt` に載せ → `heartbeat_turn::build_context` が system プロンプトへ）。継続ターン（#440）にも sink 経由で同じ指示が伝わり、`[subtask_completed:…]` マーカーと併せて載る（出力形式の規約行は指示文側に一本化）。
+  - **会話には積まない**: 書き込み側（`scheduler.rs`）はセッションログ挿入をやめた。既存 DB に積まれた分は **DB を書き換えず**、会話再構成（`process.rs::retain_conversation_logs`）で `speaker_id='heartbeat'` の `system` 行を**全件除外**する。subtask 完了本文（`system` かつ `speaker_id=None`, #404/#405）は `speaker_id` で区別して残す。
+  - **効果（本番コピー・full 経路の実測）**: 会話組み立て 421,990 → 315,137 トークン（−106,853 / 約 25%）。system プロンプトは指示文 1 件ぶん +452 トークン。差し引き約 −106,401 トークン/ターン。
 - **完全なバージョン管理**: 監査テーブルで履歴再構成は可能だが、ロールバックUIやdiff表示は未設計。
 - **export時の競合**: `HEARTBEAT.md` をexportした後、人間がファイル編集してもDBには反映されない（DBが正）。再importしない限り無視されることを明示する必要がある。
 - **出力契約の拡張**: 将来 `ManageSkills` やDreamモード（[[design-memory-rollup-v2]]）をハートビート決定に加える場合、出力形式規約とパーサを拡張する必要があり、指示本文との責務分離を再設計する。

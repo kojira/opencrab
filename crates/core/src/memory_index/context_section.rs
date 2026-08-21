@@ -1,9 +1,13 @@
 //! 会話コンテキストへ常時注入する `[Memory Index]` セクションのビルダ。
 //!
 //! 時間解像度のグラデーションで長期記憶を見せる: 過去の月は月次要約 1 行
-//! （rollup_stale_period が生成した period.summary）、現在月は topic 粒度。
+//! （rollup_stale_period が生成した period.summary）、その下に本人が宣言した
+//! 記憶の単位（`node_type='unit'` / #403）、宣言が届いていない直近は topic 粒度。
 //! 全行に short_id が付き、`retrieve_memory_nodes` で原文へ、
 //! `search_memory_index` でキーワード逆引きへ接続する。
+//!
+//! topic は機械の切り方、unit は本人の切り方なので、**同じ期間を二重に見せない**:
+//! 生ログ id 範囲が unit と重なる topic は topic 行から落とす（#403）。
 //!
 //! 台帳（task_ledger）と同じく「動的な状態は system prompt ではなく会話側」
 //! （system は 1h キャッシュされるため）。レンダリングは決定的で、現在時刻等の
@@ -15,18 +19,49 @@ use rusqlite::Connection;
 
 use crate::llm_text::truncate_chars;
 
-/// セクション全体の文字数上限。ブロック別予算の合計 + ヘッダでこの値を超えない。
-/// 注意: 日本語はおよそ 0.7 tokens/char なので、フルサイズで **最大 ~2.5k tokens**
-/// になる（英語なら ~1k）。小さいコンテキスト予算での圧迫は注入側
-/// （build_conversation_string）が予算比ガードで防ぐ。
-pub const MEMORY_INDEX_MAX_CHARS: usize = 3600;
+/// セクション全体の文字数上限を**記述した**定数。ブロック別予算の合計
+/// （2750 + 1500 + 600 = 4850）+ ヘッダ・畳み行の最大 308 chars を上回る値。
+///
+/// **この定数はランタイムでは読まれない**（切り詰めに使っていない）。実際に長さを
+/// 決めているのはブロック別予算（[`UNIT_BLOCK_MAX_CHARS`] 等）で、この値は
+/// 「その合計がここを超えない」ことをテストで確認するための上限表明。ブロック別
+/// 予算を増やすときは、この値も併せて更新する（テストが検知する）。
+///
+/// 注意: 日本語はおよそ 0.7 tokens/char なので、フルサイズで **最大 ~3.6k tokens**
+/// になる（英語なら ~1.3k）。小さいコンテキスト予算での圧迫は注入側
+/// （build_conversation_string）が予算比ガードで防ぐ — ガードはセクションが
+/// 予算の 1/4 を超えると**セクションごと落とす**ので、ブロック別予算を増やすときは
+/// 「フルサイズ × 4 < 想定予算」を確認する（既定予算 50k tokens に対し
+/// 3.6k × 4 = 14.4k で通る。`context_window` が ~29k 未満のモデルを
+/// `model_pricing` に入れた構成では、フルサイズ時にセクションごと落ちる）。
+pub const MEMORY_INDEX_MAX_CHARS: usize = 5200;
 /// 月行ブロックの文字数予算。月次要約がこのセクションの中心なので大半を割く。
 /// 超過時は古い月から落とし、`…and N older months` の 1 行に畳む。
 const MONTH_BLOCK_MAX_CHARS: usize = 2750;
+/// 宣言ユニット行ブロックの文字数予算（古いユニットから落とす）。
+/// タイトル長は本番実測で p50=32 / p90=42 / max=63 chars、行頭 `- [uNN] MM-DD ` が
+/// 15 chars なので p50 行 ≒ 47 chars。[`MEMORY_INDEX_MAX_UNITS`] = 30 行で 1400〜1600
+/// になり、**件数上限と文字予算のどちらが先に効くかはエージェントによる**
+/// （本番 3 体の実測で 1390 / 1294 / 1598 chars = 1 体はこの予算が先に効く）。
+const UNIT_BLOCK_MAX_CHARS: usize = 1500;
+/// unit 行に描画するタイトルの上限（超過分は `…` で切る）。
+/// `record_memory_unit` も宣言アクションも title の長さを制限しないので、上限は
+/// **描画側でしか保証できない**。これにより unit 行 1 本は
+/// `"- [" + short_id(≤29: `unit-`+16hex+8hex) + "] " + "MM-DD " + title(≤121)` =
+/// **最大 161 chars** に収まり、[`UNIT_BLOCK_MAX_CHARS`] = 1500 を 1 行で使い切る
+/// ことがない（= ユニットがあるのに unit ブロックが畳み行ごと消える、が起きない）。
+/// 本番実測の max は 63 chars なので、実データが切られることは当面ない。
+const UNIT_TITLE_MAX_CHARS: usize = 120;
 /// 現在月 topic ブロックの文字数予算（古い topic から落とす）。
 const TOPIC_BLOCK_MAX_CHARS: usize = 600;
 /// 表示する月数の上限（それより古い月は件数のみ表示）。
 pub const MEMORY_INDEX_MAX_MONTHS: usize = 12;
+/// 宣言ユニット行の上限。本番実測でユニットは agent ごとに 57 / 69 / 208 件あり
+/// 全件は載らない。30 件は、宣言の粒度が実測でおよそ 3 日 = 1 ユニットなので
+/// **直近 3 か月ぶん**にあたり、月行（過去 12 か月の月次要約）と現在月 topic の
+/// 間を埋める。これより古いユニットは畳み行で件数だけ知らせ、`browse_memory_index`
+/// / `search_memory_index` から引ける（FTS には全件載っている）。
+pub const MEMORY_INDEX_MAX_UNITS: usize = 30;
 /// 現在月の topic 行の上限。
 pub const MEMORY_INDEX_MAX_TOPICS: usize = 15;
 /// 月次要約の描画上限（chars）。
@@ -52,18 +87,29 @@ fn take_within_budget(lines: Vec<String>, budget_chars: usize) -> Vec<String> {
 /// - 月行: 現在月**以外**の全 period（新しい順、`MEMORY_INDEX_MAX_MONTHS` 件まで）。
 ///   未ロールアップの月は `(summary pending)` として行は出す（初日から形が安定し、
 ///   ロールアップが進むほど中身が濃くなる）。
-/// - topic 行: 現在月の topic（新しい順、`MEMORY_INDEX_MAX_TOPICS` 件まで）。
-///   現セッション由来は除外 — 現セッションの topic はコンパクション時の
-///   [Past context summary] が担当し、short_id を二重に出さない。
+/// - unit 行: 本人が宣言した記憶の単位（新しい順、`MEMORY_INDEX_MAX_UNITS` 件まで /
+///   #403）。エージェント単位（セッション横断・生涯スコープ）で、月をまたぐ。
+///   溢れたぶんは畳み行で件数だけ知らせる。
+/// - topic 行: 現在月の topic のうち **unit が覆っていないもの**（新しい順、
+///   `MEMORY_INDEX_MAX_TOPICS` 件まで）。現セッション由来は除外 — 現セッションの
+///   topic はコンパクション時の [Past context summary] が担当し、short_id を
+///   二重に出さない。
 /// - `source_type='daily_log'` のノードはこのセクションには出さない
 ///   （search_memory_index からは引ける）。
+///
+/// 宣言ユニットが 0 件のエージェントでは unit ブロックが丸ごと出ず、topic の
+/// 除外も効かないため、出力は #403 以前とバイト単位で同一になる。
 pub fn build_memory_index_section(
     conn: &Connection,
     agent_id: &str,
     current_session_id: &str,
 ) -> Result<Option<String>> {
     let periods = opencrab_db::queries::list_period_nodes(conn, agent_id)?;
-    if periods.is_empty() {
+    // 宣言ユニットは period ツリーとは独立（parent は declared root）なので、
+    // period が無くてもユニットだけで記憶を見せられる。
+    let units =
+        opencrab_db::queries::list_recent_memory_units(conn, agent_id, MEMORY_INDEX_MAX_UNITS)?;
+    if periods.is_empty() && units.is_empty() {
         return Ok(None);
     }
     // 「現在月」はノード側の最新月とする（クロック非依存でレンダリングが決定的。
@@ -76,8 +122,11 @@ pub fn build_memory_index_section(
         .filter(|p| p.summary_refreshed_at.is_none())
         .map(|p| p.title.clone());
 
+    // unit が覆う範囲（生ログ id）の topic は出さない: topic は機械の切り方、
+    // unit は本人の切り方で、同じ期間を二重に見せないため。覆っていない範囲
+    // （宣言が届いていない直近 / 読んだが宣言しなかった飛び）は従来どおり出る。
     let topics = match &current_month {
-        Some(month) => opencrab_db::queries::list_topic_nodes_for_month(
+        Some(month) => opencrab_db::queries::list_undeclared_topic_nodes_for_month(
             conn,
             agent_id,
             month,
@@ -90,9 +139,16 @@ pub fn build_memory_index_section(
         .iter()
         .filter(|p| Some(&p.title) != current_month.as_ref())
         .collect();
-    if past_periods.is_empty() && topics.is_empty() {
+    if past_periods.is_empty() && topics.is_empty() && units.is_empty() {
         return Ok(None);
     }
+    // 総数は畳み行のためだけに要る。上限に届いていなければ取得済みの件数が総数なので
+    // COUNT を打たない（会話のたびに走るビルダなのでクエリを増やさない）。
+    let unit_total = if units.len() < MEMORY_INDEX_MAX_UNITS {
+        units.len()
+    } else {
+        opencrab_db::queries::count_memory_units(conn, agent_id)?
+    };
     let topic_counts = opencrab_db::queries::count_topics_per_period(conn, agent_id)?;
 
     let mut month_lines: Vec<String> = Vec::new();
@@ -119,6 +175,26 @@ pub fn build_memory_index_section(
     // キャッシュのプレフィックスが安定する（畳み行が出る >12 か月の定常状態では
     // 畳み行の件数が先頭側で更新されるため、この恩恵は月替わり時のみ弱まる）。
     month_lines.reverse();
+
+    // unit 行。リストは新しい順（生ログ位置の降順）なので、予算超過で落ちるのは
+    // 古い側 = **新しい記憶が残る**。畳み行の件数は「表示できなかった総数」。
+    let mut unit_lines: Vec<String> = Vec::new();
+    for u in &units {
+        let sid = u.short_id.as_deref().unwrap_or(&u.id);
+        let date = u
+            .date_from
+            .as_deref()
+            .and_then(|d| d.get(5..10))
+            .unwrap_or("");
+        // タイトルは宣言側で長さ制限が無いので描画側で切る（1 行が予算を
+        // 使い切ると unit ブロックが畳み行ごと消えてしまう）。
+        let title = truncate_chars(&u.title, UNIT_TITLE_MAX_CHARS);
+        unit_lines.push(format!("- [{sid}] {date} {title}"));
+    }
+    let mut unit_lines = take_within_budget(unit_lines, UNIT_BLOCK_MAX_CHARS);
+    let hidden_units = unit_total.saturating_sub(unit_lines.len());
+    // 表示は月行・topic 行と同じく時系列（古い→新しい）。
+    unit_lines.reverse();
 
     let mut topic_lines: Vec<String> = Vec::new();
     for t in &topics {
@@ -148,6 +224,22 @@ pub fn build_memory_index_section(
             ));
         }
         for l in &month_lines {
+            out.push_str(l);
+            out.push('\n');
+        }
+    }
+    if !unit_lines.is_empty() {
+        out.push_str("Declared memories (your own cuts):\n");
+        // 畳んだユニットは最も古い側 = 先頭に置く（月行と同じ並べ方）。
+        // （unit 行 1 本は最大 161 chars < 予算 1500 なので、units が非空なら
+        // unit_lines も必ず非空 — 「畳み行だけ」も「ブロックごと消える」も起きない。
+        // 上限は UNIT_TITLE_MAX_CHARS が担保する）
+        if hidden_units > 0 {
+            out.push_str(&format!(
+                "  …and {hidden_units} older declared memories (browse_memory_index)\n"
+            ));
+        }
+        for l in &unit_lines {
             out.push_str(l);
             out.push('\n');
         }
@@ -386,5 +478,252 @@ mod tests {
         let pos_t5 = section.find("[t5]").unwrap();
         let pos_t9 = section.find("[t9]").unwrap();
         assert!(pos_t5 < pos_t9, "topics must render oldest-first");
+    }
+
+    // ---- #403: 宣言ユニットの注入 ----
+
+    /// 生ログ id 範囲を持つ現在月 topic を 1 本足す。
+    fn seed_topic_with_range(conn: &Connection, id: &str, day: &str, from: i64, to: i64) {
+        let mut t = mk_node(
+            id,
+            "topic",
+            Some("s1"),
+            &format!("機械の切り方 {id}"),
+            Some("other-session"),
+            Some(&format!("2026-06-{day}")),
+        );
+        t.start_log_id = Some(from);
+        t.end_log_id = Some(to);
+        opencrab_db::queries::insert_index_node(conn, &t).unwrap();
+    }
+
+    fn declare(conn: &Connection, title: &str, from: i64, to: i64, day: &str) {
+        opencrab_db::queries::record_memory_unit(
+            conn,
+            "a1",
+            title,
+            "",
+            from,
+            to,
+            Some(&format!("2026-06-{day}T00:00:00Z")),
+            Some(&format!("2026-06-{day}T00:00:00Z")),
+            "2026-06-30T00:00:00Z",
+        )
+        .unwrap();
+    }
+
+    /// 宣言ユニットが 0 件なら出力は #403 以前とバイト単位で同一。
+    /// （この期待値は origin/main（06db727）の実行結果をそのまま貼ったもの）
+    #[test]
+    fn without_units_output_is_byte_identical_to_pre_403() {
+        let conn = opencrab_db::init_memory().unwrap();
+        seed(&conn);
+        let section = build_memory_index_section(&conn, "a1", "current-session")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            section,
+            "[Memory Index] (your long-term memory; retrieve_memory_nodes(short_id) for full logs, search_memory_index(query) to search)\n\
+             Months:\n\
+             - [p1] 2026-04 (0 topics): 4月はDiscord連携に集中した。\n\
+             - [p2] 2026-05 (0 topics): (summary pending)\n\
+             This month's topics (other sessions):\n\
+             - [t1] 06-10 他セッションの話"
+        );
+        assert!(!section.contains("Declared memories"));
+    }
+
+    /// unit は出る / unit が覆う範囲の topic は出ない / 覆っていない範囲は出る。
+    #[test]
+    fn units_render_and_suppress_only_the_topics_they_cover() {
+        let conn = opencrab_db::init_memory().unwrap();
+        seed(&conn);
+        // 現在月の topic 3 本: 覆われる / 覆われない / id 範囲を持たない
+        seed_topic_with_range(&conn, "tc", "13", 100, 199);
+        seed_topic_with_range(&conn, "tu", "14", 300, 399);
+        // t1（seed 産）は start/end とも NULL
+        declare(&conn, "本人の切り方: 覆う", 100, 250, "13");
+
+        let section = build_memory_index_section(&conn, "a1", "current-session")
+            .unwrap()
+            .unwrap();
+        // unit が short_id 付きで出る
+        assert!(
+            section.contains("Declared memories (your own cuts):"),
+            "{section}"
+        );
+        assert!(
+            section.contains("[u1] 06-13 本人の切り方: 覆う"),
+            "{section}"
+        );
+        // 覆われた topic は二重に出さない
+        assert!(!section.contains("[tc]"), "covered topic must be dropped");
+        // 覆っていない範囲の topic は従来どおり出る
+        assert!(section.contains("[tu]"), "uncovered topic must remain");
+        // id 範囲を持たない topic は判定不能 = 落とさない（材料を失わない側に倒す）
+        assert!(
+            section.contains("[t1]"),
+            "topic without log ids must remain"
+        );
+        // 位置: 月行 → unit 行 → topic 行
+        let pos_month = section.find("Months:").unwrap();
+        let pos_unit = section.find("Declared memories").unwrap();
+        let pos_topic = section.find("This month's topics").unwrap();
+        assert!(pos_month < pos_unit && pos_unit < pos_topic, "{section}");
+    }
+
+    /// 宣言に飛びがある（読んだが宣言しなかった範囲）場合、その範囲の topic は残る。
+    #[test]
+    fn gap_between_units_keeps_its_topic() {
+        let conn = opencrab_db::init_memory().unwrap();
+        seed(&conn);
+        seed_topic_with_range(&conn, "tgap", "15", 200, 299);
+        declare(&conn, "前半", 100, 199, "13");
+        declare(&conn, "後半", 300, 399, "16");
+
+        let section = build_memory_index_section(&conn, "a1", "current-session")
+            .unwrap()
+            .unwrap();
+        assert!(
+            section.contains("[tgap]"),
+            "topic in an undeclared gap must remain: {section}"
+        );
+    }
+
+    /// 件数上限: 新しい方が残り、古い方が畳まれる。表示は古い→新しい。
+    /// **この向きが逆になったら落ちる**テスト（切り詰めの向きの固定）。
+    #[test]
+    fn unit_cap_keeps_newest_and_renders_oldest_first() {
+        let conn = opencrab_db::init_memory().unwrap();
+        seed(&conn);
+        let n = MEMORY_INDEX_MAX_UNITS + 5;
+        for i in 1..=n {
+            // start_log_id が大きいほど新しい。i=1 が最古、i=n が最新。
+            declare(
+                &conn,
+                &format!("宣言{i}"),
+                i as i64 * 10,
+                i as i64 * 10 + 5,
+                "13",
+            );
+        }
+
+        let section = build_memory_index_section(&conn, "a1", "current-session")
+            .unwrap()
+            .unwrap();
+        // 最新 MEMORY_INDEX_MAX_UNITS 件だけが残る（新しい方が生き残る）
+        assert!(
+            section.contains(&format!("宣言{n}")),
+            "newest unit must survive: {section}"
+        );
+        // 最古 = short_id u1。`[u10]` 等は `]` のおかげで前方一致しない
+        // （タイトル `宣言1` での照合は行末が改行なので恒真になる）。
+        assert!(
+            !section.contains("[u1]"),
+            "oldest unit must be dropped: {section}"
+        );
+        let rendered = section.lines().filter(|l| l.starts_with("- [u")).count();
+        assert_eq!(rendered, MEMORY_INDEX_MAX_UNITS);
+        // 溢れたぶんは件数だけ知らせる
+        assert!(
+            section.contains("…and 5 older declared memories (browse_memory_index)"),
+            "{section}"
+        );
+        // 表示は古い→新しい（月行・topic 行と同じ）
+        let pos_old = section
+            .find(&format!("宣言{}", n - MEMORY_INDEX_MAX_UNITS + 1))
+            .unwrap();
+        let pos_new = section.find(&format!("宣言{n}")).unwrap();
+        assert!(
+            pos_old < pos_new,
+            "units must render oldest-first: {section}"
+        );
+        // 畳み行は最も古い側 = ブロック先頭
+        let pos_fold = section.find("older declared memories").unwrap();
+        assert!(pos_fold < pos_old, "{section}");
+    }
+
+    /// 長すぎるタイトルが続いても文字予算でセクション全体の上限を超えない。
+    #[test]
+    fn unit_block_respects_char_budget() {
+        let conn = opencrab_db::init_memory().unwrap();
+        seed(&conn);
+        for i in 1..=MEMORY_INDEX_MAX_UNITS {
+            declare(
+                &conn,
+                &format!("宣言{i}-{}", "長".repeat(200)),
+                i as i64 * 10,
+                i as i64 * 10 + 5,
+                "13",
+            );
+        }
+        let section = build_memory_index_section(&conn, "a1", "current-session")
+            .unwrap()
+            .unwrap();
+        assert!(section.chars().count() <= MEMORY_INDEX_MAX_CHARS);
+        let rendered = section.lines().filter(|l| l.starts_with("- [u")).count();
+        assert!(
+            rendered < MEMORY_INDEX_MAX_UNITS,
+            "char budget must bind before the count cap here"
+        );
+        // 落ちるのは古い側
+        assert!(section.contains(&format!("宣言{MEMORY_INDEX_MAX_UNITS}-")));
+        assert!(!section.contains("宣言1-"));
+    }
+
+    /// 宣言側に title の長さ制限が無いので、1 行が文字予算を使い切って
+    /// **unit ブロックが畳み行ごと消える**縁がある。描画側の切り詰めで塞ぐ。
+    #[test]
+    fn absurdly_long_title_is_truncated_and_block_survives() {
+        let conn = opencrab_db::init_memory().unwrap();
+        seed(&conn);
+        // 溢れさせるだけの件数 + 最新の 1 件が予算 1500 を単独で超える長さ
+        for i in 1..=MEMORY_INDEX_MAX_UNITS {
+            declare(
+                &conn,
+                &format!("宣言{i}"),
+                i as i64 * 10,
+                i as i64 * 10 + 5,
+                "13",
+            );
+        }
+        let huge = format!("巨大{}", "長".repeat(5000));
+        declare(&conn, &huge, 100_000, 100_001, "14");
+
+        let section = build_memory_index_section(&conn, "a1", "current-session")
+            .unwrap()
+            .unwrap();
+        // ブロックも畳み行も消えない
+        assert!(
+            section.contains("Declared memories (your own cuts):"),
+            "unit block must not vanish: {section}"
+        );
+        assert!(
+            section.contains("older declared memories (browse_memory_index)"),
+            "fold line must survive: {section}"
+        );
+        // 長いタイトルは切られて出る（丸ごと落ちるのでも原文のままでもない）
+        assert!(section.contains("巨大長"), "{section}");
+        assert!(!section.contains(&huge), "title must be truncated");
+        let longest = section
+            .lines()
+            .filter(|l| l.starts_with("- [u"))
+            .map(|l| l.chars().count())
+            .max()
+            .unwrap();
+        assert!(longest <= 161, "unit line must stay bounded: {longest}");
+        assert!(section.chars().count() <= MEMORY_INDEX_MAX_CHARS);
+    }
+
+    /// period が 1 つも無くてもユニットだけで記憶を見せる。
+    #[test]
+    fn units_alone_render_without_periods() {
+        let conn = opencrab_db::init_memory().unwrap();
+        declare(&conn, "ユニットだけ", 1, 2, "13");
+        let section = build_memory_index_section(&conn, "a1", "s")
+            .unwrap()
+            .unwrap();
+        assert!(section.contains("[u1] 06-13 ユニットだけ"), "{section}");
+        assert!(!section.contains("Months:"));
     }
 }

@@ -1,1015 +1,90 @@
-//! サブタスクエンジン操作 (spawn_subtask, cancel_subtask, report_progress)
+//! サブタスクエンジン操作（Discord に残る分: 完了 sink と activity sink）。
+//!
+//! `spawn_subtask` / `report_progress` は gateway 非依存層へ移設済み（#175 S4:
+//! `crates/server/src/subtask_spawn.rs` と `crates/server/src/system_actions.rs`）。
+//! `cancel_subtask` も #157 S2 / #184 で移設済み（`opencrab_actions::cancel_subtask` が
+//! 唯一の実装。sub-session theme からの説明文解決と lifecycle 通知もそちらへ移した）。
+//! ここに残るのは Discord 固有の 2 つだけ:
+//! - `DiscordCompletionSink`（決着を Discord のイベントループへ再注入する）
+//! - activity webhook 向けの `ToolEventSink` とその factory
 
 use std::sync::Arc;
 
-use chrono::Utc;
-use opencrab_gateway::{GatewayActionResult, GatewayCallContext};
-use serde_json::json;
-use uuid::Uuid;
-
-use super::subtask_webhook::reject;
-use super::webhook::{
-    self, DeliveryBatch, LifecycleMeta, WebhookConfig, WebhookResolution, WebhookSource,
-};
-use super::{ArcLlmClient, DiscordGatewayActions, SpawnedSubtask};
+use super::webhook::{self, DeliveryBatch, WebhookResolution};
 use crate::message_loop::{parse_discord_session, LoopEvent};
+use opencrab_actions::subtask::{SubtaskCompletionSink, SubtaskSettled};
 
-/// sub-engine に許可する gateway アクションの許可リスト（#63）。
+/// `SubtaskCompletionSink` の Discord 実装（RFC #152 S1）。
 ///
-/// bridge の DISCORD_ACTIONS depth ゲートは 28 アクション中 5 つしかブロックしないため、
-/// 素の DiscordGatewayActions を接続すると、ハンドラ側ゲートの無いアクション
-/// （send_ui / discord_channel_config / discord_create_channel / update_memory_index_config
-/// 等）が depth>=1 に開放されてしまう。deny-list に頼らず、ここで明示的に許可した
-/// アクションだけを sub-engine から到達可能にする。
+/// 旧 `send_subtask_completed_event`（LoopEvent 直依存）を置換する。runtime
+/// （actions 側 `settle_completed` / progress debounce）は `Arc<dyn
+/// SubtaskCompletionSink>` としてこれを呼ぶだけで、`LoopEvent` を知らない。
+/// `parse_discord_session` / `LoopEvent` は Discord に閉じたままここに残す。
 ///
-/// spawn_subtask は意図的に含めない: ネスト spawn は従来も（gateway 未接続のため）
-/// 不可能だった現状維持。ネストを有効化する場合は bridge の MAX_DEPTH ゲートではなく
-/// この許可リストが実効ゲートである点に注意。
-const SUB_ENGINE_ALLOWED_ACTIONS: &[&str] = &["report_progress"];
-
-/// sub-engine 専用の最小権限 gateway。許可リストのアクションだけを親実装へ委譲する。
+/// parent_session_id から routing 情報を復元して `LoopEvent::SubtaskCompleted` を送る
+/// （#39）。session_id（`discord-{agent}-{guild}-{channel}`）から導出できるため、
+/// クロージャの登録は不要。event_tx 未設定（イベントループの無い構築、例: 一発呼びの
+/// API 経路）や Discord 形式でない session は、旧実装で未登録だった場合と同様に発火
+/// しない（debug のみ）。
 ///
-/// `inner` は DiscordGatewayActions の共有クローン（subtask_registry / progress_debounce /
-/// event_tx / db を親と共有）なので、report_progress の registry 照合・デバウンス・
-/// 完了イベント送信は親経由の呼び出しと同一に動く。
-pub(crate) struct SubEngineGatewayActions {
-    inner: DiscordGatewayActions,
+/// **web / Nostr sink との意図的な差分**: あちらは `kind != SettleKind::Completed` を
+/// 捨てるが、Discord は `Progress` も送る。`report_progress` のデバウンス発火が
+/// この sink を通ってメインエンジンを呼び直す「進捗実況」機能で、main の
+/// `send_subtask_completed_event(..., "progress")` から続く既存挙動だから
+/// （ガードを足すと機能が黙って消える）。`Cancelled` は別メソッド
+/// （`on_subtask_cancelled` の既定実装 = 何もしない）なのでここには来ない。
+/// この差分は `discord_sink_forwards_progress_unlike_web_and_nostr` で固定している。
+pub(crate) struct DiscordCompletionSink {
+    pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<LoopEvent>>,
 }
 
-impl SubEngineGatewayActions {
-    pub(crate) fn new(inner: DiscordGatewayActions) -> Self {
-        Self { inner }
+impl SubtaskCompletionSink for DiscordCompletionSink {
+    /// Discord の親セッションは `discord-{agent}-{guild}-{channel}`。
+    fn session_prefix(&self) -> &'static str {
+        "discord-"
     }
-}
-
-#[async_trait::async_trait]
-impl opencrab_gateway::GatewayActions for SubEngineGatewayActions {
-    fn definitions(&self) -> Vec<opencrab_gateway::GatewayActionDef> {
-        self.inner
-            .definitions()
-            .into_iter()
-            .filter(|d| SUB_ENGINE_ALLOWED_ACTIONS.contains(&d.name.as_str()))
-            .collect()
+    /// **Discord だけ `true`**（#638）。`report_progress` のデバウンス発火でメインエンジンを
+    /// 呼び直す「進捗実況」が Discord 固有の機能で、main の
+    /// `send_subtask_completed_event(..., "progress")` から続く既存挙動。ここを `false` に
+    /// すると機能が黙って消える（`discord_sink_forwards_progress_unlike_web_and_nostr` が固定）。
+    fn forwards_progress(&self) -> bool {
+        true
     }
-
-    async fn execute(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-        ctx: &GatewayCallContext,
-    ) -> GatewayActionResult {
-        if SUB_ENGINE_ALLOWED_ACTIONS.contains(&name) {
-            return self.inner.execute(name, args, ctx).await;
-        }
-        // 実在するが許可外 → 権限拒否（rejected: マーカー）。
-        // 未知の名前 → 通常の失敗（幻覚ツール名を Rejected に誤分類させない）。
-        if self.inner.definitions().iter().any(|d| d.name == name) {
-            reject(format!("action '{name}' is not available in sub-engines"))
-        } else {
-            GatewayActionResult {
-                success: false,
-                data: None,
-                error: Some(format!("Unknown gateway action: {name}")),
-            }
-        }
-    }
-}
-
-/// parent_session_id から routing 情報を復元して SubtaskCompleted イベントを送る（#39）。
-///
-/// 旧 completion_registry はメッセージごとに完了クロージャを登録していたが、
-/// クロージャのキャプチャ値は全て session_id（`discord-{agent}-{guild}-{channel}`）から
-/// 導出可能だったため、パーサ + イベントループへの直接送信に置き換えた。
-/// event_tx 未設定（イベントループの無い構築、例: 一発呼びの API 経路）や
-/// Discord 形式でない session は、旧実装でレジストリ未登録だった場合と同様に
-/// 発火しない（warn のみ）。
-fn send_subtask_completed_event(
-    event_tx: Option<&tokio::sync::mpsc::UnboundedSender<LoopEvent>>,
-    parent_session_id: &str,
-    agent_id: &str,
-    subtask_id: String,
-    result: String,
-    exit_reason: String,
-) {
-    let Some(tx) = event_tx else {
-        tracing::debug!(
-            session_id = %parent_session_id,
-            "subtask completion: event_tx not configured, skipping main-engine notification"
-        );
-        return;
-    };
-    let Some((guild_id, channel_id)) = parse_discord_session(parent_session_id) else {
-        // 非 Discord の親セッション（heartbeat-* / subtask-* のネスト等）は正常系。
-        // 旧レジストリ実装でも未登録で発火しなかったため、debug に留める。
-        tracing::debug!(
-            session_id = %parent_session_id,
-            "subtask completion: parent session is not a discord session, skipping main-engine notification"
-        );
-        return;
-    };
-    let is_dm = guild_id.is_empty();
-    let _ = tx.send(LoopEvent::SubtaskCompleted {
-        session_id: parent_session_id.to_string(),
-        agent_id: agent_id.to_string(),
-        subtask_id,
-        result,
-        exit_reason,
-        channel_id,
-        channel_id_str: channel_id.to_string(),
-        guild_id,
-        is_dm,
-    });
-}
-
-impl DiscordGatewayActions {
-    pub(crate) async fn execute_spawn_subtask(
-        &self,
-        args: &serde_json::Value,
-        ctx: &GatewayCallContext,
-    ) -> GatewayActionResult {
-        let task = match args["task"].as_str() {
-            Some(t) => t.to_string(),
-            None => {
-                return GatewayActionResult {
-                    success: false,
-                    data: None,
-                    error: Some("spawn_subtask: 'task' argument is required".to_string()),
-                };
-            }
-        };
-        let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(1800) as u64;
-        // セッション必須（fail-closed）: 完了通知・親ログの宛先が session_id に
-        // 依存するため、不明なまま "" で進まず明示エラーにする（#36）。
-        let parent_session_id = match ctx.session_id.as_deref() {
-            Some(s) if !s.is_empty() => s.to_string(),
-            _ => {
-                return GatewayActionResult {
-                    success: false,
-                    data: None,
-                    error: Some(
-                        "spawn_subtask はセッション文脈でのみ実行できます（session_id 不明）"
-                            .to_string(),
-                    ),
-                };
-            }
-        };
-        let parent_depth = ctx.depth;
-        let agent_id = ctx.agent_id.clone();
-
-        let subtask_id = Uuid::new_v4().to_string();
-        let sub_session_id = format!("subtask-{}", subtask_id);
-        let spawned_at = Utc::now().to_rfc3339();
-        let started_instant = std::time::Instant::now();
-        let depth = parent_depth + 1;
-
-        // Subtask lifecycle webhook を固定順序で解決する（explicit > tool > agent > global > env）。
-        // db lock は解決の間だけ握り、await をまたがない。
-        let resolution = {
-            let conn = self.db.lock().unwrap();
-            webhook::resolve_subtask_webhook(
-                &conn,
-                &agent_id,
-                "spawn_subtask",
-                args,
-                self.default_subtask_webhook.as_ref(),
-            )
-        };
-
-        // 解決結果を webhook 設定 + 可視性メタへ写像する。
-        let (webhook, webhook_source, webhook_status): (
-            Option<WebhookConfig>,
-            Option<WebhookSource>,
-            &'static str,
-        ) = match resolution {
-            WebhookResolution::Error {
-                code,
-                message,
-                source,
-            } => {
-                emit_activity_diagnostic(
-                    self.db.clone(),
-                    self.webhook_client.clone(),
-                    &agent_id,
-                    "spawn_subtask",
-                    "webhook_resolution_error",
-                    &format!(
-                        "spawn_subtask webhook resolution failed before execution: {code}: {message} (source: {})",
-                        source.as_str()
-                    ),
-                    args,
-                    None,
-                );
-                // 検証失敗 → spawn しない。raw url はどこにも出さない。
-                return GatewayActionResult {
-                    success: false,
-                    error: Some(format!("{code}: {message}")),
-                    data: Some(json!({
-                        "webhook_source": source.as_str(),
-                        "webhook_status": "error",
-                        "webhook_error": message,
-                    })),
-                };
-            }
-            WebhookResolution::Use { config, source } => (Some(config), Some(source), "ok"),
-            WebhookResolution::Disabled { source } => (None, Some(source), "disabled"),
-            WebhookResolution::None => (None, None, "none"),
-        };
-        let webhook_redacted_url = webhook
-            .as_ref()
-            .map(|cfg| webhook::redact_webhook_url(&cfg.url));
-        let webhook_source_str: Option<&'static str> = webhook_source.map(|s| s.as_str());
-
-        let label = args["label"]
-            .as_str()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| task.chars().take(50).collect::<String>());
-
-        // give-up 時に親セッションログへ 1 件記録する sink を構築する。
-        let giveup_sink: Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>> =
-            if webhook.is_some() && !parent_session_id.is_empty() {
-                let db_sink = self.db.clone();
-                let agent_sink = agent_id.clone();
-                let parent_sink = parent_session_id.clone();
-                let subtask_sink = subtask_id.clone();
-                let sub_session_sink = sub_session_id.clone();
-                let redacted_sink = webhook_redacted_url.clone().unwrap_or_default();
-                Some(std::sync::Arc::new(move |error: &str| {
-                    if let Ok(conn) = db_sink.lock() {
-                        webhook::record_webhook_delivery_failure(
-                            &conn,
-                            &agent_sink,
-                            &parent_sink,
-                            &subtask_sink,
-                            &sub_session_sink,
-                            &redacted_sink,
-                            error,
-                        );
-                    }
-                }))
-            } else {
-                None
-            };
-
-        // 一般ツール/コマンド活動（activity family）のデフォルト webhook があるか。
-        // 判定は webhook::has_activity_default に集約（resolve_activity_webhook と同じ
-        // scope 集合: tool/agent/global の enabled な activity 行。env/config fallback なし）。
-        let has_activity = {
-            let conn = self.db.lock().unwrap();
-            webhook::has_activity_default(&conn, &agent_id)
-        };
-
-        // 同一 run の配送を直列化する worker を 1 つだけ起動する。lifecycle（started/
-        // completed/...）と tool_call_*（activity）を同じ tx に流すことで、両系統の
-        // 送出順序を 1 本の worker で保証する（別 worker を立てて順序が崩れるのを防ぐ）。
-        let webhook_tx: Option<tokio::sync::mpsc::UnboundedSender<DeliveryBatch>> =
-            if webhook.is_some() || has_activity {
-                Some(webhook::spawn_run_worker_with_sink(
-                    self.webhook_client.clone(),
-                    giveup_sink,
-                ))
-            } else {
-                None
-            };
-
-        if webhook_status != "ok" {
-            emit_activity_diagnostic(
-                self.db.clone(),
-                self.webhook_client.clone(),
-                &agent_id,
-                "spawn_subtask",
-                "webhook_resolution_diagnostic",
-                &format!(
-                    "spawn_subtask lifecycle webhook status is {webhook_status}; source={}",
-                    webhook_source_str.unwrap_or("none")
-                ),
-                args,
-                webhook_tx.as_ref(),
+    fn deliver_continuation(&self, ev: SubtaskSettled) {
+        let Some(tx) = &self.event_tx else {
+            tracing::debug!(
+                session_id = %ev.session_id,
+                "subtask completion: event_tx not configured, skipping main-engine notification"
             );
-        }
-
-        // lifecycle の started を送る（同じ共有 worker 経由）。
-        if let (Some(cfg), Some(tx)) = (&webhook, &webhook_tx) {
-            if cfg.wants("started") {
-                let meta = LifecycleMeta {
-                    label: label.clone(),
-                    run_id: subtask_id.clone(),
-                    session_key: sub_session_id.clone(),
-                };
-                let messages =
-                    webhook::build_started_messages(&meta, &task, webhook::DISCORD_CHUNK_LIMIT);
-                let _ = tx.send(DeliveryBatch {
-                    url: cfg.url.clone(),
-                    messages,
-                });
-            }
-        }
-
-        // activity webhook があれば、sub-engine の executor に ToolEventSink を挿し
-        // tool_call_* を共有 worker 経由で配送する。
-        let tool_event_sink: Option<Arc<dyn opencrab_actions::ToolEventSink>> =
-            match (has_activity, &webhook_tx) {
-                (true, Some(tx)) => Some(Arc::new(WebhookToolEventSink {
-                    db: self.db.clone(),
-                    agent_id: agent_id.clone(),
-                    tx: tx.clone(),
-                    max_chars: 1500,
-                    counter: std::sync::atomic::AtomicUsize::new(0),
-                    cap: 200,
-                })),
-                _ => None,
-            };
-
-        // Create the sub-session in the DB.
-        {
-            let conn = self.db.lock().unwrap();
-            let meta = serde_json::json!({
-                "parent_session_id": parent_session_id,
-                "depth": depth,
-                "subtask_id": subtask_id,
-            });
-            let session = opencrab_db::queries::SessionRow {
-                id: sub_session_id.clone(),
-                mode: "subtask".to_string(),
-                theme: format!("Subtask: {}", &task.chars().take(50).collect::<String>()),
-                phase: "active".to_string(),
-                turn_number: 0,
-                status: "active".to_string(),
-                participant_ids_json: serde_json::json!([&agent_id]).to_string(),
-                facilitator_id: None,
-                done_count: 0,
-                max_turns: None,
-                metadata_json: Some(meta.to_string()),
-            };
-            opencrab_db::queries::insert_session(&conn, &session).ok();
-
-            // Write subtask_spawned to parent session log.
-            if !parent_session_id.is_empty() {
-                let log = opencrab_db::queries::SessionLogRow {
-                    id: None,
-                    agent_id: agent_id.clone(),
-                    session_id: parent_session_id.clone(),
-                    log_type: "system".to_string(),
-                    content: serde_json::json!({
-                        "type": "subtask_spawned",
-                        "subtask_id": subtask_id,
-                        "session_id": sub_session_id,
-                        "spawned_at": spawned_at,
-                        "webhook_source": webhook_source_str,
-                        "webhook_status": webhook_status,
-                        "webhook_redacted_url": webhook_redacted_url,
-                    })
-                    .to_string(),
-                    speaker_id: None,
-                    turn_number: None,
-                    metadata_json: None,
-                    created_at: None,
-                };
-                opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
-            }
-        }
-
-        // Build sub-engine context.
-        let llm_client = match self.llm_client.clone() {
-            Some(c) => c,
-            None => {
-                return GatewayActionResult {
-                    success: false,
-                    data: None,
-                    error: Some("spawn_subtask: no LLM client available".to_string()),
-                };
-            }
+            return;
         };
-
-        // 実効モデルは1回だけ解決する（runtime_info と run_with_model_override で
-        // 同じ値を使う — 呼び出し間に設定が変わっても不整合にしない）。
-        let effective_model = self.effective_model(&agent_id);
-        let ws_path = match self.agent_workspace_root(&agent_id) {
-            Ok(root) => root.join(&agent_id),
-            Err(e) => {
-                return GatewayActionResult {
-                    success: false,
-                    data: None,
-                    error: Some(format!("spawn_subtask: workspace error: {e}")),
-                };
-            }
-        };
-        std::fs::create_dir_all(&ws_path).ok();
-        let workspace = match opencrab_core::workspace::Workspace::from_root(&ws_path) {
-            Ok(w) => w,
-            Err(e) => {
-                return GatewayActionResult {
-                    success: false,
-                    data: None,
-                    error: Some(format!("spawn_subtask: workspace error: {e}")),
-                };
-            }
-        };
-
-        let sub_ctx = opencrab_actions::ActionContext {
-            caller: opencrab_actions::CallerIdentity::Agent,
-            agent_id: agent_id.clone(),
-            agent_name: agent_id.clone(),
-            session_id: Some(sub_session_id.clone()),
-            db: self.db.clone(),
-            workspace: Arc::new(workspace),
-            last_metrics_id: Arc::new(std::sync::Mutex::new(None)),
-            model_override: Arc::new(std::sync::Mutex::new(None)),
-            current_purpose: Arc::new(std::sync::Mutex::new("subtask".to_string())),
-            runtime_info: Arc::new(std::sync::Mutex::new(opencrab_actions::RuntimeInfo {
-                default_model: effective_model.clone(),
-                active_model: None,
-                available_providers: vec![],
-                gateway: "subtask".to_string(),
-            })),
-        };
-
-        let mut sub_dispatcher = opencrab_actions::ActionDispatcher::new();
-        let mut tools_cfg = self.tools_config.read().unwrap().clone();
-        // このエージェント専用の許可コマンド（DB管理）をローカルコピーにのみマージする
-        // （グローバル config に足すと他エージェントへ漏れる）。
-        if let Ok(conn) = self.db.lock() {
-            if let Ok(agent_cmds) =
-                opencrab_db::queries::list_agent_allowed_commands(&conn, &agent_id)
-            {
-                if !agent_cmds.is_empty() {
-                    let shell = tools_cfg
-                        .shell
-                        .get_or_insert_with(opencrab_actions::tools::ShellToolConfig::default);
-                    for cmd in agent_cmds {
-                        if !shell.allowed_commands.contains(&cmd) {
-                            shell.allowed_commands.push(cmd);
-                        }
-                    }
-                }
-            }
-        }
-        opencrab_actions::register_tools_from_config(&tools_cfg, &mut sub_dispatcher);
-        let sub_executor = {
-            // 許可リストラッパ経由で gateway を接続する（#63）。これが無いと
-            // system prompt が指示する report_progress が "Unknown action" で失敗する。
-            let sub_gateway: Arc<dyn opencrab_gateway::GatewayActions> =
-                Arc::new(SubEngineGatewayActions::new(self.clone()));
-            let exec = opencrab_actions::BridgedExecutor::new(sub_dispatcher, sub_ctx)
-                .with_depth(depth)
-                .with_gateway_actions(sub_gateway);
-            match tool_event_sink {
-                Some(sink) => exec.with_tool_event_sink(sink),
-                None => exec,
-            }
-        };
-
-        let mut sub_engine = opencrab_core::SkillEngine::new(
-            Box::new(ArcLlmClient(llm_client)),
-            Box::new(sub_executor),
-            usize::MAX,
-        );
-
-        if let (Some(cfg), Some(tx)) = (&webhook, &webhook_tx) {
-            if cfg.wants("progress") {
-                let progress_url = cfg.url.clone();
-                let progress_tx = tx.clone();
-                let progress_subtask_id = subtask_id.clone();
-                let progress_session_id = sub_session_id.clone();
-                sub_engine.set_on_tool_call(move |assistant_content, tool_calls_json| {
-                    let detail = summarize_tool_calls(&assistant_content, &tool_calls_json);
-                    let msg = webhook::build_progress_message(
-                        &progress_subtask_id,
-                        &progress_session_id,
-                        &detail,
-                    );
-                    let _ = progress_tx.send(DeliveryBatch {
-                        url: progress_url.clone(),
-                        messages: vec![msg],
-                    });
-                });
-
-                let progress_url = cfg.url.clone();
-                let progress_tx = tx.clone();
-                let progress_subtask_id = subtask_id.clone();
-                let progress_session_id = sub_session_id.clone();
-                sub_engine.set_on_tool_result(
-                    move |_tool_call_id, tool_name, result_json, is_error| {
-                        let status = if is_error { "failed" } else { "completed" };
-                        let preview: String = result_json.chars().take(500).collect();
-                        let detail = format!("tool `{tool_name}` {status}\n{preview}");
-                        let msg = webhook::build_progress_message(
-                            &progress_subtask_id,
-                            &progress_session_id,
-                            &detail,
-                        );
-                        let _ = progress_tx.send(DeliveryBatch {
-                            url: progress_url.clone(),
-                            messages: vec![msg],
-                        });
-                    },
-                );
-            }
-        }
-
-        // エージェントの personality と instructions を DB から取得
-        let (agent_personality, agent_instructions) = {
-            let conn = self.db.lock().unwrap();
-            opencrab_db::queries::get_agent(&conn, &agent_id)
-                .ok()
-                .flatten()
-                .map(|a| (a.personality.unwrap_or_default(), a.instructions))
-                .unwrap_or_default()
-        };
-
-        // System prompt for the sub-engine.
-        let personality_section = if !agent_personality.is_empty() {
-            format!("{}\n\n", agent_personality)
-        } else {
-            String::new()
-        };
-        let instructions_section = if !agent_instructions.is_empty() {
-            format!("\n\n## Instructions\n{}", agent_instructions)
-        } else {
-            String::new()
-        };
-        let sub_system_prompt = format!(
-            "{personality_section}\
-             あなたはサブエンジンとして起動されています。\n\
-             - subtask_id: {subtask_id}\n\
-             - depth: {depth}\n\
-             - Discordへの直接送信は禁止されています\n\
-             - 進捗報告は report_progress を使ってください（subtask_id 引数は省略可。省略時はこのサブタスクとして報告されます）\n\
-             - タスク完了時はテキストで結果を返してください（Discord送信はメインエンジンが行います）\n\n\
-             You are a sub-engine executing a delegated task.\
-             {instructions_section}"
-        );
-
-        // Clone for the spawned task.
-        let db_clone = self.db.clone();
-        let parent_session_clone = parent_session_id.clone();
-        let subtask_id_clone = subtask_id.clone();
-        let sub_session_id_clone = sub_session_id.clone();
-        let agent_id_clone = agent_id.clone();
-        let event_tx_clone = self.event_tx.clone();
-        let subtask_registry_clone = self.subtask_registry.clone();
-        let progress_debounce_clone = self.progress_debounce.clone();
-        let default_model_clone = effective_model.clone();
-        let webhook_clone = webhook.clone();
-        let webhook_tx_clone = webhook_tx.clone();
-
-        // 開始ゲート: 親がレジストリへ insert し終えるまでタスク本体を走らせない。
-        // これが無いと、即座に失敗するサブタスクが親の insert より先に remove を実行し、
-        // その後 insert が着地して「running のまま」のエントリがリークする。
-        let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
-
-        let join_handle = tokio::spawn(async move {
-            // insert 完了を待つ（送信側が drop された場合も先へ進む）。
-            let _ = start_rx.await;
-
-            let result = tokio::time::timeout(
-                std::time::Duration::from_secs(timeout_secs),
-                sub_engine.run_with_model_override(
-                    &sub_system_prompt,
-                    &task,
-                    &default_model_clone,
-                    None,
-                    &[],
-                ),
-            )
-            .await;
-
-            let (exit_reason, result_text) = match result {
-                Ok(Ok(engine_result)) => {
-                    // harness 剪定メトリクス: sub-engine の run も XML フォールバック発火を
-                    // agent_logs に記録する（server 側と同じ context キー。subtask だけ
-                    // 計測から漏れると消し時の判断を誤る — docs/harness-inventory.md 参照）。
-                    if engine_result.xml_fallback_parses > 0 {
-                        if let Ok(conn) = db_clone.lock() {
-                            let _ = opencrab_db::queries::insert_agent_log(
-                                &conn,
-                                &opencrab_db::queries::AgentLogRow {
-                                    id: uuid::Uuid::new_v4().to_string(),
-                                    agent_id: Some(agent_id_clone.clone()),
-                                    level: "info".to_string(),
-                                    context: "harness.xml_fallback".to_string(),
-                                    message: format!(
-                                        "XML <function_calls> fallback fired {} time(s) (model: {default_model_clone}, subtask: {subtask_id_clone})",
-                                        engine_result.xml_fallback_parses
-                                    ),
-                                    created_at: Some(chrono::Utc::now().to_rfc3339()),
-                                },
-                            );
-                        }
-                    }
-                    let exit_reason = if engine_result.stopped_by_limit {
-                        "stopped_by_limit"
-                    } else {
-                        "completed"
-                    };
-                    (exit_reason.to_string(), engine_result.response)
-                }
-                Ok(Err(e)) => ("error".to_string(), format!("Error: {e}")),
-                Err(_) => ("timeout".to_string(), "Subtask timed out.".to_string()),
-            };
-
-            // Write subtask_completed to parent session log.
-            if !parent_session_clone.is_empty() {
-                if let Ok(conn) = db_clone.lock() {
-                    let log = opencrab_db::queries::SessionLogRow {
-                        id: None,
-                        agent_id: agent_id_clone.clone(),
-                        session_id: parent_session_clone.clone(),
-                        log_type: "system".to_string(),
-                        content: serde_json::json!({
-                            "type": "subtask_completed",
-                            "subtask_id": subtask_id_clone,
-                            "session_id": sub_session_id_clone,
-                            "exit_reason": exit_reason,
-                            "result": result_text,
-                        })
-                        .to_string(),
-                        speaker_id: None,
-                        turn_number: None,
-                        metadata_json: None,
-                        created_at: None,
-                    };
-                    opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
-                }
-            }
-
-            // Emit terminal lifecycle webhook (completed / failed / timed_out).
-            if let (Some(cfg), Some(tx)) = (&webhook_clone, &webhook_tx_clone) {
-                let status = webhook::exit_reason_to_status(&exit_reason);
-                if cfg.wants(status) {
-                    let duration_ms = started_instant.elapsed().as_millis() as u64;
-                    let msg = webhook::build_terminal_message(
-                        status,
-                        &subtask_id_clone,
-                        &sub_session_id_clone,
-                        Some(duration_ms),
-                        &result_text,
-                    );
-                    let _ = tx.send(DeliveryBatch {
-                        url: cfg.url.clone(),
-                        messages: vec![msg],
-                    });
-                }
-            }
-
-            // Remove from registry.
-            subtask_registry_clone.remove(&subtask_id_clone);
-
-            // 保留中の progress デバウンスを無効化する。エントリが消えると、まだ
-            // sleep 中のデバウンスタスクは is_latest=false 扱いになり発火しない。
-            // これが無いと、終了イベントの後に遅延 progress（0〜3秒窓）が届いて
-            // 完了返信の直後に余計な推論・重複返信が走ることがある（#86 レビュー指摘。
-            // 同一親セッションの兄弟サブタスクの保留 progress も巻き添えで消えるが、
-            // progress は advisory であり次の report_progress で再アームされる）。
-            progress_debounce_clone.remove(&parent_session_clone);
-
-            // メインエンジンへの完了通知（イベントループへ直接送信）。
-            send_subtask_completed_event(
-                event_tx_clone.as_ref(),
-                &parent_session_clone,
-                &agent_id_clone,
-                subtask_id_clone,
-                result_text,
-                exit_reason,
+        let Some((guild_id, channel_id)) = parse_discord_session(&ev.session_id) else {
+            // 非 Discord の親セッション（heartbeat-* / subtask-* のネスト等）は正常系。
+            // 旧レジストリ実装でも未登録で発火しなかったため、debug に留める。
+            tracing::debug!(
+                session_id = %ev.session_id,
+                "subtask completion: parent session is not a discord session, skipping main-engine notification"
             );
+            return;
+        };
+        let is_dm = guild_id.is_empty();
+        let _ = tx.send(LoopEvent::SubtaskCompleted {
+            session_id: ev.session_id,
+            agent_id: ev.agent_id,
+            subtask_id: ev.subtask_id,
+            // 本文は運ばない。完了本文は DB（session_logs）へ永続化済みで、再注入は
+            // `build_conversation_string` が DB から読み直す（`process_subtask_completed`
+            // の引数は `_result` = 未使用。RFC §1.3）。
+            result: String::new(),
+            exit_reason: ev.exit_reason,
+            channel_id,
+            channel_id_str: channel_id.to_string(),
+            guild_id,
+            is_dm,
+            // 元のターンの呼び出し元を resume まで運ぶ（#298）。ここで落とすと
+            // `process_subtask_completed` が最小権限で再開してしまう。
+            caller: ev.caller,
         });
-
-        let abort_handle = join_handle.abort_handle();
-        self.subtask_registry.insert(
-            subtask_id.clone(),
-            SpawnedSubtask {
-                abort_handle,
-                session_id: sub_session_id.clone(),
-                parent_session_id: parent_session_id.clone(),
-                spawned_at: spawned_at.clone(),
-                agent_id: agent_id.clone(),
-                webhook: webhook.clone(),
-                webhook_tx: webhook_tx.clone(),
-                started_instant,
-            },
-        );
-
-        // insert が完了したのでタスク本体の実行を許可する。
-        let _ = start_tx.send(());
-
-        GatewayActionResult {
-            success: true,
-            data: Some(json!({
-                "status": "spawned",
-                "subtask_id": subtask_id,
-                "session_id": sub_session_id,
-                "spawned_at": spawned_at,
-                "webhook_source": webhook_source_str,
-                "webhook_redacted_url": webhook_redacted_url,
-                "webhook_status": webhook_status,
-                "webhook_error": serde_json::Value::Null,
-            })),
-            error: None,
-        }
-    }
-
-    pub(crate) fn execute_cancel_subtask(
-        &self,
-        args: &serde_json::Value,
-        ctx: &GatewayCallContext,
-    ) -> GatewayActionResult {
-        let subtask_id = match args["subtask_id"].as_str() {
-            Some(id) => id.to_string(),
-            None => {
-                return GatewayActionResult {
-                    success: false,
-                    data: None,
-                    error: Some("cancel_subtask: 'subtask_id' is required".to_string()),
-                };
-            }
-        };
-
-        // 認可（#64）: owner は常に許可。それ以外は「呼び出し元セッションが親」の
-        // サブタスクのみキャンセルできる（自己/兄弟/他セッションのものは不可）。
-        let authorized = |subtask: &SpawnedSubtask| -> bool {
-            if ctx.caller == opencrab_gateway::GatewayCaller::Owner {
-                return true;
-            }
-            matches!(ctx.session_id.as_deref(),
-                Some(s) if !s.is_empty() && subtask.parent_session_id == s)
-        };
-
-        // remove_if は shard ロック下で述語を評価するため、「認可確認→削除」の間に
-        // エントリが差し替わる TOCTOU が無い（所有権フィールドは insert 後不変）。
-        match self
-            .subtask_registry
-            .remove_if(&subtask_id, |_, subtask| authorized(subtask))
-        {
-            Some((_, subtask)) => {
-                subtask.abort_handle.abort();
-
-                // Emit aborted lifecycle webhook. アボートで spawned closure は
-                // 中断されるため terminal completed/failed は来ない → ここが唯一の終端。
-                if let (Some(cfg), Some(tx)) = (&subtask.webhook, &subtask.webhook_tx) {
-                    if cfg.wants("aborted") {
-                        let duration_ms = subtask.started_instant.elapsed().as_millis() as u64;
-                        let msg = webhook::build_terminal_message(
-                            "aborted",
-                            &subtask_id,
-                            &subtask.session_id,
-                            Some(duration_ms),
-                            "cancelled by request",
-                        );
-                        let _ = tx.send(DeliveryBatch {
-                            url: cfg.url.clone(),
-                            messages: vec![msg],
-                        });
-                    }
-                }
-
-                // Write subtask_cancelled to parent session log.
-                let parent_session_id = subtask.parent_session_id.clone();
-                if !parent_session_id.is_empty() {
-                    if let Ok(conn) = self.db.lock() {
-                        let task_description =
-                            opencrab_db::queries::get_session(&conn, &subtask.session_id)
-                                .ok()
-                                .flatten()
-                                .map(|session| {
-                                    session
-                                        .theme
-                                        .strip_prefix("Subtask: ")
-                                        .unwrap_or(&session.theme)
-                                        .to_string()
-                                })
-                                .unwrap_or_default();
-                        let log = opencrab_db::queries::SessionLogRow {
-                            id: None,
-                            agent_id: subtask.agent_id.clone(),
-                            session_id: parent_session_id.clone(),
-                            log_type: "tool_cancelled".to_string(),
-                            content: format!("subtask '{}' was cancelled", task_description),
-                            speaker_id: None,
-                            turn_number: None,
-                            metadata_json: Some(
-                                serde_json::json!({
-                                    "tool_call_id": subtask_id,
-                                    "tool_name": "spawn_subtask",
-                                    "task": task_description,
-                                })
-                                .to_string(),
-                            ),
-                            created_at: None,
-                        };
-                        opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
-                    }
-                }
-
-                GatewayActionResult {
-                    success: true,
-                    data: Some(json!({"cancelled": true, "subtask_id": subtask_id})),
-                    error: None,
-                }
-            }
-            None => {
-                // remove_if の None は「不在」と「権限なし」の両方。エントリの所有権
-                // フィールドは不変なので contains_key で区別できる。
-                if self.subtask_registry.contains_key(&subtask_id) {
-                    reject(format!(
-                        "cancel_subtask: subtask '{subtask_id}' をこのセッションからキャンセルする権限がありません（親セッションまたは owner のみ）"
-                    ))
-                } else {
-                    GatewayActionResult {
-                        success: false,
-                        data: None,
-                        error: Some(format!(
-                            "cancel_subtask: subtask '{}' not found",
-                            subtask_id
-                        )),
-                    }
-                }
-            }
-        }
-    }
-
-    pub(crate) async fn execute_report_progress(
-        &self,
-        args: &serde_json::Value,
-        ctx: &GatewayCallContext,
-    ) -> GatewayActionResult {
-        let message = match args["message"].as_str() {
-            Some(m) => m.to_string(),
-            None => {
-                return GatewayActionResult {
-                    success: false,
-                    data: None,
-                    error: Some("report_progress: 'message' is required".to_string()),
-                };
-            }
-        };
-        // セッション必須（fail-closed）: 親セッションの解決が session_id に依存する（#36）。
-        let current_session_id = match ctx.session_id.as_deref() {
-            Some(s) if !s.is_empty() => s.to_string(),
-            _ => {
-                return GatewayActionResult {
-                    success: false,
-                    data: None,
-                    error: Some(
-                        "report_progress はセッション文脈でのみ実行できます（session_id 不明）"
-                            .to_string(),
-                    ),
-                };
-            }
-        };
-        let subtask_id_arg = args
-            .get("subtask_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let agent_id = ctx.agent_id.clone();
-
-        let subtask_entry = if !subtask_id_arg.is_empty() {
-            self.subtask_registry
-                .get(&subtask_id_arg)
-                .map(|entry| (subtask_id_arg.clone(), entry.clone()))
-        } else {
-            self.subtask_registry
-                .iter()
-                .find(|entry| entry.session_id == current_session_id)
-                .map(|entry| (entry.key().clone(), entry.value().clone()))
-        };
-
-        // 所有権ゲート（#64）: subtask_id は LLM 由来の引数なので、呼び出し元セッションの
-        // サブタスク（自分自身 = entry.session_id 一致、または自分の子 =
-        // entry.parent_session_id 一致）以外は拒否する。無検証だと他セッションへの
-        // 進捗ログ書き込み・webhook 配送・メインエンジン再呼び出しを誘発できてしまう。
-        if let Some((id, entry)) = &subtask_entry {
-            if entry.session_id != current_session_id
-                && entry.parent_session_id != current_session_id
-            {
-                return reject(format!(
-                    "report_progress: subtask '{id}' は呼び出し元セッションのサブタスクではありません"
-                ));
-            }
-        }
-
-        let subtask_id = subtask_entry
-            .as_ref()
-            .map(|(id, _)| id.clone())
-            .unwrap_or(subtask_id_arg);
-        let parent_session_id = subtask_entry
-            .as_ref()
-            .map(|(_, subtask)| subtask.parent_session_id.clone())
-            .unwrap_or_else(|| current_session_id.clone());
-
-        // Write progress to parent session log.
-        if !parent_session_id.is_empty() {
-            if let Ok(conn) = self.db.lock() {
-                let log = opencrab_db::queries::SessionLogRow {
-                    id: None,
-                    agent_id: agent_id.clone(),
-                    session_id: parent_session_id.clone(),
-                    log_type: "system".to_string(),
-                    content: serde_json::json!({
-                        "type": "subtask_progress",
-                        "subtask_id": subtask_id,
-                        "message": message,
-                        "timestamp": Utc::now().to_rfc3339(),
-                    })
-                    .to_string(),
-                    speaker_id: None,
-                    turn_number: None,
-                    metadata_json: None,
-                    created_at: None,
-                };
-                opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
-            }
-        }
-
-        if let Some((resolved_subtask_id, subtask)) = &subtask_entry {
-            if let (Some(cfg), Some(tx)) = (&subtask.webhook, &subtask.webhook_tx) {
-                if cfg.wants("progress") {
-                    let msg = webhook::build_progress_message(
-                        resolved_subtask_id,
-                        &subtask.session_id,
-                        &message,
-                    );
-                    let _ = tx.send(DeliveryBatch {
-                        url: cfg.url.clone(),
-                        messages: vec![msg],
-                    });
-                }
-            }
-        }
-
-        // Debounce: 3秒待ってからメインエンジン再呼び出しを1回だけ発火する。
-        // 世代カウンタで「最後の report_progress」だけが発火するようにし、バースト時に
-        // 同数のLLM再呼び出し（コスト増・チャンネルスパム・イベントループ長時間ブロック）が
-        // 起きるのを防ぐ。
-        let my_generation = {
-            let mut gen = self
-                .progress_debounce
-                .entry(parent_session_id.clone())
-                .or_insert(0);
-            *gen += 1;
-            *gen
-        };
-        let event_tx_clone = self.event_tx.clone();
-        let progress_debounce_clone = self.progress_debounce.clone();
-        let parent_session_clone = parent_session_id.clone();
-        let subtask_id_clone = subtask_id.clone();
-        let agent_id_clone = agent_id.clone();
-        let message_clone = message.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            // 自分より後に report_progress が来ていたら（世代が進んでいたら）発火しない。
-            let is_latest = progress_debounce_clone
-                .get(&parent_session_clone)
-                .map(|g| *g == my_generation)
-                .unwrap_or(false);
-            if !is_latest {
-                return;
-            }
-            progress_debounce_clone.remove(&parent_session_clone);
-            send_subtask_completed_event(
-                event_tx_clone.as_ref(),
-                &parent_session_clone,
-                &agent_id_clone,
-                subtask_id_clone,
-                message_clone,
-                "progress".to_string(),
-            );
-        });
-
-        GatewayActionResult {
-            success: true,
-            data: Some(json!({"reported": true, "message": message})),
-            error: None,
-        }
-    }
-}
-
-fn summarize_tool_calls(assistant_content: &str, tool_calls_json: &str) -> String {
-    let mut names = Vec::new();
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(tool_calls_json) {
-        if let Some(calls) = value.as_array() {
-            for call in calls {
-                // 正準形状 {function:{name}} と旧形状 {name} の両方に対応する。
-                let name = call
-                    .get("function")
-                    .and_then(|f| f.get("name"))
-                    .and_then(|v| v.as_str())
-                    .or_else(|| call.get("name").and_then(|v| v.as_str()));
-                if let Some(name) = name {
-                    names.push(format!("`{name}`"));
-                }
-            }
-        }
-    }
-    let tools = if names.is_empty() {
-        "tool call".to_string()
-    } else {
-        names.join(", ")
-    };
-    let preview: String = assistant_content.trim().chars().take(500).collect();
-    if preview.is_empty() {
-        format!("calling {tools}")
-    } else {
-        format!("calling {tools}\n{preview}")
     }
 }
 
@@ -1049,7 +124,10 @@ pub fn spawn_activity_tool_event_sink(
     }))
 }
 
-fn emit_activity_diagnostic(
+// 診断イベント送出に要る独立した材料（DB / HTTP client / 宛先解決の各値 / 既存 tx）を
+// 受け取るだけの関数。まとめる自然な単位が無いため許容する。
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_activity_diagnostic(
     db: opencrab_db::Db,
     client: reqwest::Client,
     agent_id: &str,
@@ -1162,13 +240,32 @@ fn build_activity_diagnostic_batch(
 /// イベントごとに resolve_activity_webhook で宛先を解決（tool > agent > global）し、
 /// build_tool_event_message で整形（covered 経路ゆえ unredacted、上限超過のみロスレス
 /// chunk）してから送る。
-struct WebhookToolEventSink {
+pub(super) struct WebhookToolEventSink {
     db: opencrab_db::Db,
     agent_id: String,
     tx: tokio::sync::mpsc::UnboundedSender<DeliveryBatch>,
     max_chars: usize,
     counter: AtomicUsize,
     cap: usize,
+}
+
+impl WebhookToolEventSink {
+    pub(super) fn new(
+        db: opencrab_db::Db,
+        agent_id: String,
+        tx: tokio::sync::mpsc::UnboundedSender<DeliveryBatch>,
+        max_chars: usize,
+        cap: usize,
+    ) -> Self {
+        Self {
+            db,
+            agent_id,
+            tx,
+            max_chars,
+            counter: AtomicUsize::new(0),
+            cap,
+        }
+    }
 }
 
 impl opencrab_actions::ToolEventSink for WebhookToolEventSink {
@@ -1250,7 +347,8 @@ impl opencrab_actions::ToolEventSink for WebhookToolEventSink {
                 messages: vec![format!(
                     "(+ further tool events suppressed after {} this run)",
                     self.cap
-                )],
+                )
+                .into()],
             });
             return;
         }
@@ -1343,7 +441,271 @@ fn short_json_preview(data: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// 1 バッチ分の「実際に届く全文」を連結する（添付があれば添付本体）。
+    fn join_delivered(msgs: &[webhook::WebhookMessage]) -> String {
+        msgs.iter()
+            .map(|m| m.delivered_text())
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
     use super::*;
+    use opencrab_actions::subtask::SettleKind;
+
+    // ---- RFC #152 S1: DiscordCompletionSink（完了の再注入経路） ----
+    //
+    // この sink は「dispatch した全ツールの結果を親会話へ戻す」唯一の口なので、
+    // 空実装にしても他テストが緑のままだと退行を検知できない（#165 レビュー P1。
+    // web sink に対する同種の指摘と同じ）。実 mpsc を張って、送出の有無と
+    // routing 復元内容をここで直接固定する。
+
+    /// テスト用: 実チャネルを張った sink と受信側を作る。
+    fn sink_with_channel() -> (
+        DiscordCompletionSink,
+        tokio::sync::mpsc::UnboundedReceiver<LoopEvent>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        (DiscordCompletionSink { event_tx: Some(tx) }, rx)
+    }
+
+    fn settled(session_id: &str, kind: SettleKind, exit_reason: &str) -> SubtaskSettled {
+        settled_as(
+            session_id,
+            kind,
+            exit_reason,
+            opencrab_actions::CallerIdentity::Agent,
+        )
+    }
+
+    /// 親ターンの呼び出し元を明示した決着イベント（#298）。
+    fn settled_as(
+        session_id: &str,
+        kind: SettleKind,
+        exit_reason: &str,
+        caller: opencrab_actions::CallerIdentity,
+    ) -> SubtaskSettled {
+        SubtaskSettled {
+            session_id: session_id.to_string(),
+            agent_id: "agent-x".to_string(),
+            subtask_id: "st-1".to_string(),
+            exit_reason: exit_reason.to_string(),
+            kind,
+            reply_target: None,
+            caller,
+        }
+    }
+
+    /// 完了 → `LoopEvent::SubtaskCompleted` がちょうど 1 本流れ、guild/channel が
+    /// parent_session_id から復元される（本文は運ばない = `result` は空）。
+    #[test]
+    fn discord_sink_emits_loop_event_on_completion() {
+        let (sink, mut rx) = sink_with_channel();
+        opencrab_actions::dispatch_settled(
+            &sink,
+            settled(
+                "discord-agent-x-111222333-444555666",
+                SettleKind::Completed,
+                "completed",
+            ),
+        );
+
+        match rx.try_recv().expect("完了は LoopEvent を 1 本送る") {
+            LoopEvent::SubtaskCompleted {
+                session_id,
+                agent_id,
+                subtask_id,
+                result,
+                exit_reason,
+                channel_id,
+                channel_id_str,
+                guild_id,
+                is_dm,
+                caller,
+            } => {
+                assert_eq!(session_id, "discord-agent-x-111222333-444555666");
+                assert_eq!(caller, opencrab_actions::CallerIdentity::Agent);
+                assert_eq!(agent_id, "agent-x");
+                assert_eq!(subtask_id, "st-1");
+                // 本文は DB（session_logs）から読み直す契約（RFC §1.3）。
+                assert_eq!(result, "");
+                assert_eq!(exit_reason, "completed");
+                assert_eq!(channel_id, 444_555_666);
+                assert_eq!(channel_id_str, "444555666");
+                assert_eq!(guild_id, "111222333");
+                assert!(!is_dm);
+            }
+            _ => panic!("SubtaskCompleted 以外のイベントが流れた"),
+        }
+        assert!(rx.try_recv().is_err(), "余分なイベントを送ってはならない");
+    }
+
+    /// #298: 決着通知の呼び出し元をそのまま `LoopEvent` へ載せる。
+    ///
+    /// resume は `process_subtask_completed` が受けて `RunRequest` を組むので、
+    /// ここで落とすと元ターンが最小権限へ降格し、owner/trusted のツールが消える。
+    #[test]
+    fn discord_sink_forwards_the_original_caller() {
+        for caller in [
+            opencrab_actions::CallerIdentity::Owner,
+            opencrab_actions::CallerIdentity::TrustedUser,
+            opencrab_actions::CallerIdentity::Agent,
+        ] {
+            let (sink, mut rx) = sink_with_channel();
+            opencrab_actions::dispatch_settled(
+                &sink,
+                settled_as(
+                    "discord-agent-x-111222333-444555666",
+                    SettleKind::Completed,
+                    "progress",
+                    caller.clone(),
+                ),
+            );
+            match rx.try_recv().expect("完了は LoopEvent を 1 本送る") {
+                LoopEvent::SubtaskCompleted {
+                    caller: forwarded, ..
+                } => assert_eq!(
+                    forwarded, caller,
+                    "決着通知の呼び出し元が resume まで運ばれていない"
+                ),
+                _ => panic!("SubtaskCompleted 以外のイベントが流れた"),
+            }
+        }
+    }
+
+    /// DM（guild_id 空）の親セッションでも復元でき、`is_dm` が立つ。
+    #[test]
+    fn discord_sink_restores_dm_routing() {
+        let (sink, mut rx) = sink_with_channel();
+        opencrab_actions::dispatch_settled(
+            &sink,
+            settled(
+                "discord-agent-x--444555666",
+                SettleKind::Completed,
+                "timeout",
+            ),
+        );
+
+        match rx.try_recv().expect("DM でも LoopEvent を送る") {
+            LoopEvent::SubtaskCompleted {
+                guild_id,
+                channel_id,
+                is_dm,
+                exit_reason,
+                ..
+            } => {
+                assert_eq!(guild_id, "");
+                assert_eq!(channel_id, 444_555_666);
+                assert!(is_dm, "guild_id が空なら DM 扱い");
+                // exit_reason は完了理由をそのまま運ぶ（completed 以外も再注入する）。
+                assert_eq!(exit_reason, "timeout");
+            }
+            _ => panic!("SubtaskCompleted 以外のイベントが流れた"),
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// 非 Discord の親セッション（web / heartbeat / nostr / ネストした subtask）は
+    /// 正常系としてスキップする。各 gateway の sink が自分のセッションだけを拾う。
+    #[test]
+    fn discord_sink_skips_non_discord_sessions() {
+        for session_id in [
+            "web-agent-x-conv-1",
+            "heartbeat-agent-x",
+            "nostr-agent-x-npub1abc",
+            "subtask-11111111-2222-3333-4444-555555555555",
+            "agent-msg-agent-x-user-1",
+            "",
+        ] {
+            let (sink, mut rx) = sink_with_channel();
+            opencrab_actions::dispatch_settled(
+                &sink,
+                settled(session_id, SettleKind::Completed, "completed"),
+            );
+            assert!(
+                rx.try_recv().is_err(),
+                "非 Discord セッション '{session_id}' で LoopEvent を送ってはならない"
+            );
+        }
+    }
+
+    /// Discord 形式に見えて壊れている session_id（channel が数値でない等）も送らない。
+    #[test]
+    fn discord_sink_skips_malformed_discord_sessions() {
+        for session_id in [
+            "discord-agent-x-111-notanumber",
+            "discord-agent-x-notanumber-444",
+            "discord--111-444",
+            "discord-agent-x",
+        ] {
+            let (sink, mut rx) = sink_with_channel();
+            opencrab_actions::dispatch_settled(
+                &sink,
+                settled(session_id, SettleKind::Completed, "completed"),
+            );
+            assert!(
+                rx.try_recv().is_err(),
+                "壊れた session_id '{session_id}' で LoopEvent を送ってはならない"
+            );
+        }
+    }
+
+    /// **意図的な差分**: Discord は `SettleKind::Progress` でも LoopEvent を送る
+    /// （web / Nostr の sink は Completed 以外を捨てる）。
+    ///
+    /// `report_progress` のデバウンス発火はこの sink を通ってメインエンジンを
+    /// 呼び直す実況機能で、main の `send_subtask_completed_event(..., "progress")`
+    /// から続く既存挙動。ここで捨てると進捗実況が黙って消えるため、
+    /// web / Nostr と同じ `kind != Completed` ガードは**入れない**。
+    /// 差分を退行ではなく仕様として固定するためのテスト。
+    #[test]
+    fn discord_sink_forwards_progress_unlike_web_and_nostr() {
+        let (sink, mut rx) = sink_with_channel();
+        opencrab_actions::dispatch_settled(
+            &sink,
+            settled(
+                "discord-agent-x-111222333-444555666",
+                SettleKind::Progress,
+                "progress",
+            ),
+        );
+
+        match rx.try_recv().expect("進捗もメインエンジンへ再注入する") {
+            LoopEvent::SubtaskCompleted { exit_reason, .. } => {
+                assert_eq!(exit_reason, "progress");
+            }
+            _ => panic!("SubtaskCompleted 以外のイベントが流れた"),
+        }
+    }
+
+    /// `on_subtask_cancelled` は既定実装（debug ログのみ）のまま = 停止では
+    /// 再注入しない（止めたのに返信が届くのを防ぐ）。
+    #[test]
+    fn discord_sink_does_not_reinject_on_cancel() {
+        let (sink, mut rx) = sink_with_channel();
+        sink.on_subtask_cancelled(settled(
+            "discord-agent-x-111222333-444555666",
+            SettleKind::Cancelled,
+            "cancelled",
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "cancel で LoopEvent を送ってはならない"
+        );
+    }
+
+    /// event_tx 未設定（イベントループの無い構築）は no-op で panic しない。
+    #[test]
+    fn discord_sink_without_event_tx_is_noop() {
+        let sink = DiscordCompletionSink { event_tx: None };
+        opencrab_actions::dispatch_settled(
+            &sink,
+            settled(
+                "discord-agent-x-111222333-444555666",
+                SettleKind::Completed,
+                "completed",
+            ),
+        );
+    }
 
     fn insert_activity(conn: &rusqlite::Connection) {
         let row = opencrab_db::queries::AgentWebhookConfigRow {
@@ -1398,7 +760,7 @@ mod tests {
         };
         opencrab_actions::ToolEventSink::on_event(&sink, &ev);
         let batch = rx.try_recv().expect("a batch should be sent");
-        let msg = batch.messages.join("");
+        let msg = join_delivered(&batch.messages);
         assert!(msg.contains("tool_call_completed"));
         assert!(msg.contains("exit_code"));
         // covered 経路: stdout の secret はそのまま届く（masking しない）。
@@ -1452,7 +814,7 @@ mod tests {
         opencrab_actions::ToolEventSink::on_event(&sink, &rejected);
 
         let failed_batch = rx.try_recv().expect("failed batch");
-        let failed_msg = failed_batch.messages.join("");
+        let failed_msg = join_delivered(&failed_batch.messages);
         assert!(failed_msg.contains("tool_call_failed"));
         assert!(failed_msg.contains("exit_code"));
         // covered 経路: stderr の secret はそのまま届く（masking しない）。
@@ -1465,7 +827,7 @@ mod tests {
             "masking marker present: {failed_msg}"
         );
         let rejected_batch = rx.try_recv().expect("rejected batch");
-        let rejected_msg = &rejected_batch.messages[0];
+        let rejected_msg = &rejected_batch.messages[0].content;
         assert!(rejected_msg.contains("tool_call_rejected"));
         assert!(rejected_msg.contains("permission denied"));
     }
@@ -1575,7 +937,7 @@ mod tests {
         };
         opencrab_actions::ToolEventSink::on_event(&sink, &ev);
         let batch = rx.try_recv().expect("started batch should be sent");
-        let msg = &batch.messages[0];
+        let msg = &batch.messages[0].content;
         assert!(msg.contains("tool_call_started"), "msg: {msg}");
         assert!(msg.contains("args:"), "args line missing: {msg}");
         assert!(msg.contains("git status --short"), "command missing: {msg}");
@@ -1609,7 +971,7 @@ mod tests {
         };
         opencrab_actions::ToolEventSink::on_event(&sink, &ev);
         let batch = rx.try_recv().expect("started batch should be sent");
-        let msg = &batch.messages[0];
+        let msg = &batch.messages[0].content;
         assert!(msg.contains("tool_call_started"), "msg: {msg}");
         assert!(msg.contains("echo"), "command missing: {msg}");
         assert!(msg.contains("hello"), "first arg missing: {msg}");
@@ -1643,7 +1005,7 @@ mod tests {
         };
         opencrab_actions::ToolEventSink::on_event(&sink, &ev);
         let batch = rx.try_recv().expect("started batch should be sent");
-        let msg = &batch.messages[0];
+        let msg = &batch.messages[0].content;
         assert!(msg.contains("tool_call_started"), "msg: {msg}");
         assert!(msg.contains("notes/todo.md"), "args missing: {msg}");
     }
@@ -1675,7 +1037,7 @@ mod tests {
         };
         opencrab_actions::ToolEventSink::on_event(&sink, &ev);
         let batch = rx.try_recv().expect("started batch should be sent");
-        let msg = batch.messages.join("");
+        let msg = join_delivered(&batch.messages);
         assert!(msg.contains("tool_call_started"), "msg: {msg}");
         // every secret-like token survives unmodified, and no masking markers appear.
         assert!(
@@ -1701,8 +1063,9 @@ mod tests {
     }
 
     #[test]
-    fn test_webhook_tool_event_sink_long_args_chunked_losslessly() {
-        // 長大な引数はクランプ（…）せず、Discord 上限内の part X/N へロスレス分割する。
+    fn test_webhook_tool_event_sink_long_args_go_out_as_one_attachment() {
+        // #293: 長大な引数はクランプ（…）も part X/N 連投もせず、**1 通**の
+        // 「プレビュー + 全文添付」で出る。全文は添付側にロスなく入る。
         let conn = opencrab_db::init_memory().unwrap();
         insert_activity_row(&conn, "https://discord.com/api/webhooks/1/tok", true);
         let db = opencrab_db::Db::from_connection(conn);
@@ -1725,27 +1088,26 @@ mod tests {
         };
         opencrab_actions::ToolEventSink::on_event(&sink, &ev);
         let batch = rx.try_recv().expect("started batch should be sent");
-        assert!(batch.messages.len() > 1, "long args must split into parts");
-        // each part within Discord hard limit, labelled in order.
-        for (i, m) in batch.messages.iter().enumerate() {
-            assert!(
-                m.chars().count() <= 2000,
-                "part exceeds limit: {}",
-                m.chars().count()
-            );
-            assert!(
-                m.starts_with(&format!("part {}/{}\n", i + 1, batch.messages.len())),
-                "part marker/order wrong: {m}"
-            );
-        }
-        // reconstruct -> all 2000 'word' tokens present, no ellipsis loss.
-        let reconstructed: String = batch
-            .messages
-            .iter()
-            .map(|m| m.splitn(2, '\n').nth(1).unwrap_or("").to_string())
-            .collect();
-        assert!(!reconstructed.contains('…'), "clamp ellipsis introduced");
-        assert_eq!(reconstructed.matches("word").count(), 2_000, "lost args");
+        assert_eq!(batch.messages.len(), 1, "長文でも連投せず 1 通のはず");
+        let m = &batch.messages[0];
+        assert!(m.has_attachment(), "全文は添付になるはず");
+        assert!(
+            m.content.chars().count() <= 2000,
+            "preview exceeds Discord limit: {}",
+            m.content.chars().count()
+        );
+        assert!(
+            !m.content.starts_with("part 1/"),
+            "part framing must be gone: {}",
+            m.content
+        );
+        // 添付本体 -> 2000 個の 'word' が欠けずに入っている。
+        let full = m.delivered_text();
+        assert_eq!(full.matches("word").count(), 2_000, "lost args");
+        let att = m.attachment.as_ref().unwrap();
+        assert_eq!(att.filename, "tool_call_started-execute_shell.txt");
+        assert_eq!(att.content_type, "text/plain; charset=utf-8");
+        assert!(!att.truncated);
     }
 
     // ---- summarize_tool_args: unredacted, lossless ----
@@ -1866,7 +1228,7 @@ mod tests {
         // lifecycle 相当の batch を共有 tx へ先に送る。
         tx.send(DeliveryBatch {
             url: "https://discord.com/api/webhooks/1/tok".to_string(),
-            messages: vec!["lifecycle: started".to_string()],
+            messages: vec!["lifecycle: started".into()],
         })
         .unwrap();
 
@@ -1891,9 +1253,9 @@ mod tests {
 
         // 受信順: lifecycle が先、tool_call が後。
         let first = rx.try_recv().expect("lifecycle batch");
-        assert!(first.messages[0].contains("lifecycle: started"));
+        assert!(first.messages[0].content.contains("lifecycle: started"));
         let second = rx.try_recv().expect("tool_call batch");
-        assert!(second.messages[0].contains("tool_call_completed"));
+        assert!(second.messages[0].content.contains("tool_call_completed"));
     }
 
     #[test]
@@ -1918,7 +1280,7 @@ mod tests {
         )
         .expect("diagnostic should route to activity default");
         assert_eq!(batch.url, "https://discord.com/api/webhooks/1/tok");
-        let msg = &batch.messages[0];
+        let msg = &batch.messages[0].content;
         assert!(msg.contains("webhook_resolution_error"));
         assert!(msg.contains("invalid_webhook_url"));
         assert!(msg.contains("source: explicit"));

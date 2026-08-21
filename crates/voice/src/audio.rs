@@ -11,7 +11,9 @@
 pub fn downmix_48k_stereo_to_16k_mono(pcm: &[i16]) -> Vec<i16> {
     // インターリーブ [L R L R ...] → モノラル
     let mono: Vec<i32> = pcm
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|lr| (lr[0] as i32 + lr[1] as i32) / 2)
         .collect();
     mono.chunks(3)

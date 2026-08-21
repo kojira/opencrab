@@ -20,7 +20,6 @@ export default function AgentCoAgents() {
   // Add modal state
   const [showAddModal, setShowAddModal] = useState(false);
   const [newCoAgentId, setNewCoAgentId] = useState("");
-  const [newAllowedActions, setNewAllowedActions] = useState("");
   const [adding, setAdding] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
 
@@ -50,23 +49,14 @@ export default function AgentCoAgents() {
       setAddError(t("coAgents.idRequired"));
       return;
     }
-    const allowed =
-      newAllowedActions.trim() === ""
-        ? null
-        : newAllowedActions
-            .split(",")
-            .map((s) => s.trim())
-            .filter((s) => s.length > 0);
     setAdding(true);
     setAddError(null);
     try {
       await addCoAgent(agentId, {
         co_agent_id: cid,
-        allowed_actions: allowed,
       });
       setShowAddModal(false);
       setNewCoAgentId("");
-      setNewAllowedActions("");
       loadCoAgents();
     } catch (e: unknown) {
       setAddError(String(e));
@@ -98,7 +88,6 @@ export default function AgentCoAgents() {
             setShowAddModal(true);
             setAddError(null);
             setNewCoAgentId("");
-            setNewAllowedActions("");
           }}
         >
           <span className="material-symbols-outlined text-xl">add</span>
@@ -144,9 +133,6 @@ export default function AgentCoAgents() {
                   {t("coAgents.tableId")}
                 </th>
                 <th className="text-left text-label-lg text-on-surface-variant px-4 py-3">
-                  {t("coAgents.tableActions")}
-                </th>
-                <th className="text-left text-label-lg text-on-surface-variant px-4 py-3">
                   {t("coAgents.tableAddedBy")}
                 </th>
                 <th className="text-left text-label-lg text-on-surface-variant px-4 py-3">
@@ -163,11 +149,6 @@ export default function AgentCoAgents() {
                 >
                   <td className="px-4 py-3 text-body-lg text-on-surface font-mono">
                     {ca.co_agent_id}
-                  </td>
-                  <td className="px-4 py-3 text-body-md text-on-surface-variant">
-                    {!ca.allowed_actions || ca.allowed_actions.length === 0
-                      ? t("coAgents.allActions")
-                      : ca.allowed_actions.join(", ")}
                   </td>
                   <td className="px-4 py-3 text-body-sm text-on-surface-variant">
                     {ca.created_by}
@@ -211,18 +192,6 @@ export default function AgentCoAgents() {
                   placeholder="e.g. helper-agent-1"
                   value={newCoAgentId}
                   onChange={(e) => setNewCoAgentId(e.target.value)}
-                />
-              </div>
-              <div>
-                <label className="block text-label-lg text-on-surface mb-2">
-                  {t("coAgents.actionsLabel")}
-                </label>
-                <input
-                  type="text"
-                  className="input-outlined"
-                  placeholder="e.g. execute_shell, ws_read"
-                  value={newAllowedActions}
-                  onChange={(e) => setNewAllowedActions(e.target.value)}
                 />
               </div>
               {addError && (

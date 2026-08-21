@@ -22,6 +22,26 @@ max_workspace_size_mb = 100
 # 既定は hermit-shell（localhost:8765 の OpenAI 互換 Anthropic プロキシ、macOS 向け）。
 # それ以外を使う場合は、ダッシュボードの `/setup` または「システム設定」から
 # プロバイダーを有効化して API キーを設定してください（TOML 編集は不要）。
+
+[subtask]
+# ツール呼び出しをバックグラウンド実行に回すか（既定 true）。
+#
+# false にすると全ツールが同期実行に戻る（この機能の導入前と同じ挙動）。
+# 環境変数 OPENCRAB_SUBTASK_AUTO_DISPATCH（0/false/off/no）が
+# この値より優先されるので、.env だけで切り戻せる。
+# 詳しくは docs/DESIGN.md の「非ブロックツール実行」を参照。
+auto_dispatch = true
+
+# 通知先（webhook）の設定ファイル由来フォールバック。
+#
+# 通知先は「呼び出しで明示 → DB の scope 別既定（tool>agent>global）→ ここ」の順で
+# 解決され、DB に設定が 1 つも無いときだけこの値が使われる。
+# 特定の transport（Discord 等）に依存しない設定なので [subtask] に置く。
+#
+# 旧キー [gateway.discord] default_subtask_webhook も引き続き読まれる（後方互換）。
+# 両方書いた場合はこちらが優先。url = "" または未指定なら無効。
+# default_webhook = { url = "${SUBTASK_WEBHOOK_URL}", events = ["started", "progress", "completed", "failed", "timed_out", "aborted"] }
+
 [llm]
 default_provider = "openai"
 default_model = "claude-sonnet-4-6"
@@ -64,18 +84,21 @@ base_url = "http://localhost:8080"
 # Codex CLI（ローカル。codex サブスク利用時）。binary_path 省略時は PATH から検索。
 [llm.providers.codex]
 default_model = "o4-mini"
-sandbox = "danger-full-access"
+sandbox = "read-only"
 timeout_secs = 300
 models = ["gpt-5.6", "gpt-5.5", "o4-mini", "o3", "codex-mini"]
 # reasoning_effort = "medium"
 # binary_path = "/usr/local/bin/codex"
 
-# Cursor CLI（ローカル。headless agent）。コマンド名はインストールでゆれる
-# （cursor-agent / agent / cursor）ため binary_path で設定可能。既定 cursor-agent。
+# Cursor CLI（ローカル。headless agent）。「推論専用の頭」として使う（#674）:
+# 読取専用モード（--plan）を常時付与し cursor-agent 自身の write/shell を封じる。
+# コマンド名はインストールでゆれる（cursor-agent / agent / cursor）ため binary_path で
+# 設定可能。既定 cursor-agent。
 [llm.providers.cursor]
-default_model = "gpt-5"
+default_model = "auto"                   # account 非依存。旧既定 gpt-5 は現行 CLI で無効
 timeout_secs = 300
-models = ["gpt-5", "sonnet-4.5", "opus-4.1", "auto"]
+models = ["auto", "gpt-5.2", "claude-opus-5", "claude-sonnet-5"]
+# sandbox = "enabled"                    # "enabled" | "disabled"。省略時 enabled（最安全）
 # binary_path = "cursor-agent"
 # 認証は CURSOR_API_KEY か `cursor-agent login` 済みのアンビエント認証。
 # api_key = "${CURSOR_API_KEY}"
@@ -123,10 +146,10 @@ owner_discord_id = "${OWNER_DISCORD_ID}"
 # spawn_subtask.webhook を明示しない時に使う lifecycle 通知先。
 # 実 URL は `.env` の DISCORD_SUBTASK_WEBHOOK_URL から渡す。
 # url = "" または行ごと未指定なら無効。
+#
+# 【旧キー】transport 非依存の [subtask] default_webhook へ移動した。ここも
+# 引き続き読まれる（後方互換）が、新規に書くなら [subtask] 側を使うこと。
 # default_subtask_webhook = { url = "${DISCORD_SUBTASK_WEBHOOK_URL}", events = ["started", "progress", "completed", "failed", "timed_out", "aborted"] }
-
-[gateway.cli]
-enabled = true
 
 [dashboard]
 enabled = true
@@ -163,7 +186,9 @@ permission = "agent"
 name = "cat"
 permission = "agent"
 
-# verify 段（evaluator）: 契約付き active タスクの run 終了時に独立 context で評価。
+# evaluator: 契約付きタスクを独立 context で rubric 評価する設定。
+# #291 で対話ターン中の採点は撤去済み（評価はスリープ中へ寄せる。配線は別 issue）。
+# 現在この設定は読まれない。
 [evaluator]
 enabled = true
 threshold = 0.7
@@ -177,6 +202,23 @@ trigger_new_sessions = 10 # この件数の新規セッションが溜まった�
 time_cap_hours = 24       # あるいは前回からこの時間経過で発火（活動が1件以上ある時）
 min_interval_secs = 3600  # 最短間隔
 include_archived_in_review = 3  # 棚卸し時に再検討する引退済みスキル数
+
+# 記憶カテゴリ層（#313/#344）の sleep 中自動割当。エージェントがアイドル時に未分類 topic を
+# LLM でカテゴリへ割り当てる。#313 の方針が「エージェント自身に整理させる（一期一会）」へ
+# 変わり作り直しになるため、既定は無効（opt-in / #345）。有効化すると従来どおり動く。
+[category_maintenance]
+enabled = false           # 有効化で opt-in
+
+# スリープ整理ラン（#313 段階3 / #361）。エージェント本人が別セッションの新規 context で、
+# 自分の記憶（topic）に自分の人格でタグを付けて整理する（一期一会）。呼び出し元は sleep の
+# memory maintenance ループのみ（対話ターンでは走らせない）。LLM を消費する自律ランなので
+# 既定は無効（opt-in）。N・下限・間隔は実測してから確定するため config 可変にしている。
+[memory_organize]
+enabled = false           # 有効化で opt-in（既定オフ = 1 コールも呼ばない）
+max_topics = 50           # 1 回の worklist に載せる新規 topic の上限 N
+min_new_topics = 20       # この件数以上の新規 topic が溜まったら発火（下限ゲート）
+min_interval_minutes = 1440  # 前回からこの分数以上経つまで発火しない（既定 1440 = 24 時間）
+timeout_secs = 600        # 整理ラン 1 回のタイムアウト（超過は partial 扱いで前進しない）
 
 # VC（ボイスチャンネル）対話。使う場合はコメントを外して設定する。
 # [voice]

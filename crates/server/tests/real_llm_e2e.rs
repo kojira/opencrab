@@ -46,9 +46,12 @@ fn create_real_llm_app() -> (Router, opencrab_db::Db) {
         db: db.clone(),
         llm_router: opencrab_server::SharedLlmRouter::new(router),
         llm_config: Arc::new(toml::from_str("").unwrap()),
+        subtask_auto_dispatch: true,
         voice_config: Arc::new(Default::default()),
         voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base,
+        #[cfg(feature = "nostr")]
+        nostr_master_key: None,
         default_model: "openrouter:openai/gpt-4o".to_string(),
         tools_config: Arc::new(std::sync::RwLock::new(
             opencrab_actions::tools::ToolsConfig::default(),
@@ -56,12 +59,32 @@ fn create_real_llm_app() -> (Router, opencrab_db::Db) {
         compaction_ratio: 0.5,
         evaluator: opencrab_server::config::EvaluatorConfig::default(),
         skill_consolidation: opencrab_server::config::SkillConsolidationConfig::default(),
+        category_maintenance: opencrab_server::config::CategoryMaintenanceConfig::default(),
+        memory_organize: opencrab_server::config::MemoryOrganizeConfig::default(),
+        memory_declare: opencrab_server::config::MemoryDeclareConfig::default(),
+        memory_condense: opencrab_server::config::MemoryCondenseConfig::default(),
         loop_restart_enabled: false,
         index_build_inflight: std::sync::Arc::new(dashmap::DashMap::new()),
-        #[cfg(feature = "discord")]
-        discord_manager: None,
-        nostr_manager: None,
+        intake: std::sync::Arc::new(Default::default()),
+        intake_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
         mcp_manager: None,
+        gateways: std::sync::Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
+        #[cfg(feature = "web")]
+        web_gateway: std::sync::Arc::new(opencrab_web_gateway::WebGateway::new()),
+        subtask_registries: std::sync::Arc::new(
+            opencrab_server::subtask_registries::SubtaskRegistries::new(),
+        ),
+        session_locks: std::sync::Arc::new(opencrab_actions::SessionLocks::new()),
+        subtask_notifiers: std::sync::Arc::new(dashmap::DashMap::new()),
+        subtask_lifecycle_notifier: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        default_subtask_webhook: None,
+        heartbeat_limits: Default::default(),
+        scheduler_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
+        heartbeat_config_rx: opencrab_server::disconnected_heartbeat_config_rx(Default::default()),
+        timed_fire_router: std::sync::Arc::new(opencrab_actions::TimedFireRouter::new()),
+        progress_debounce: std::sync::Arc::new(
+            opencrab_server::subtask_registries::ProgressDebounce::new(),
+        ),
     };
     let app = create_router(state);
     (app, db)

@@ -38,6 +38,22 @@ const MIN_SEGMENT_RMS: f64 = 250.0;
 /// TTS に渡すテキストの最大文字数（長広舌の読み上げ防止）。
 const MAX_TTS_CHARS: usize = 400;
 
+/// その話者の声を文字起こしするか。
+///
+/// 外すのは**自分自身の声だけ**。自分の TTS を自分で拾うと「聞く → 返す → 読み上げる →
+/// また聞く」の無限ループになる。他エージェント（bot）の声は拾う — それが会話であり、
+/// 以前は bot を一律に外していたため VC で他エージェントの発言が一切文字起こしされて
+/// いなかった。
+///
+/// 自分の id がまだ取れていない（`None`）ときは**拾わない**。取れない状態で拾うと
+/// 上のループを止める手段が無くなる（id はリトライで取り直せるが、ループは止まらない）。
+fn should_transcribe(self_user_id: Option<u64>, speaker_user_id: u64) -> bool {
+    match self_user_id {
+        Some(self_id) => self_id != speaker_user_id,
+        None => false,
+    }
+}
+
 /// アクティブな VC セッション。
 #[derive(Clone)]
 struct ActiveSession {
@@ -67,8 +83,11 @@ pub struct VoiceSessionManager {
     http: Arc<serenity::http::Http>,
     /// guild_id → セッション。1 ギルドにつき同時 1 VC。
     sessions: dashmap::DashMap<u64, ActiveSession>,
-    /// user_id → (表示名, is_bot) キャッシュ。
-    user_cache: dashmap::DashMap<u64, (String, bool)>,
+    /// user_id → 表示名キャッシュ。
+    user_cache: dashmap::DashMap<u64, String>,
+    /// 自分自身の Discord user id（`GET /users/@me`）。文字起こしから外す唯一の相手。
+    /// 一度取れれば以後は使い回す。
+    self_user_id: tokio::sync::OnceCell<u64>,
 }
 
 impl VoiceSessionManager {
@@ -93,6 +112,7 @@ impl VoiceSessionManager {
             http,
             sessions: dashmap::DashMap::new(),
             user_cache: dashmap::DashMap::new(),
+            self_user_id: tokio::sync::OnceCell::new(),
         })
     }
 
@@ -209,8 +229,11 @@ impl VoiceSessionManager {
         Ok(())
     }
 
-    /// ユーザーの表示名と bot フラグを解決する（キャッシュ付き）。
-    async fn resolve_user(&self, user_id: u64) -> (String, bool) {
+    /// ユーザーの表示名を解決する（キャッシュ付き）。
+    ///
+    /// 話者が bot かどうかは**見ない**。他エージェントの声を拾うのが会話であり、
+    /// 外すのは自分自身の声だけ（[`should_transcribe`]）。
+    async fn resolve_user_name(&self, user_id: u64) -> String {
         if let Some(hit) = self.user_cache.get(&user_id) {
             return hit.clone();
         }
@@ -218,17 +241,31 @@ impl VoiceSessionManager {
             .to_user(&self.http)
             .await
         {
-            Ok(u) => (
-                u.global_name.clone().unwrap_or_else(|| u.name.clone()),
-                u.bot,
-            ),
+            Ok(u) => u.global_name.clone().unwrap_or_else(|| u.name.clone()),
             Err(e) => {
                 warn!(user_id, error = %e, "failed to resolve VC user; using id");
-                (user_id.to_string(), false)
+                user_id.to_string()
             }
         };
         self.user_cache.insert(user_id, resolved.clone());
         resolved
+    }
+
+    /// 自分自身の Discord user id。取得できるまで毎回問い合わせ、取れたら以後は使い回す。
+    async fn self_user_id(&self) -> Option<u64> {
+        self.self_user_id
+            .get_or_try_init(|| async {
+                self.http
+                    .get_current_user()
+                    .await
+                    .map(|u| u.id.get())
+                    .inspect_err(|e| {
+                        warn!(error = %e, "failed to resolve own Discord user id for VC");
+                    })
+            })
+            .await
+            .ok()
+            .copied()
     }
 
     /// 確定した発話セグメントを STT → メッセージループへ注入する。
@@ -238,12 +275,10 @@ impl VoiceSessionManager {
         user_id: u64,
         pcm_48k_stereo: Vec<i16>,
     ) {
-        let (user_name, is_bot) = self.resolve_user(user_id).await;
-        if is_bot {
-            // Bot（自分自身・他エージェント）の音声は文字起こししない。
-            // エージェント同士の TTS を相互に拾い合う無限ループを防ぐ。
+        if !should_transcribe(self.self_user_id().await, user_id) {
             return;
         }
+        let user_name = self.resolve_user_name(user_id).await;
         let mono = downmix_48k_stereo_to_16k_mono(&pcm_48k_stereo);
         if rms(&mono) < MIN_SEGMENT_RMS {
             debug!(user_id, "segment below RMS threshold; skipping STT");
@@ -276,7 +311,6 @@ impl VoiceSessionManager {
             opencrab_gateway::Sender {
                 id: user_id.to_string(),
                 name: user_name,
-                is_bot: false,
                 avatar_url: None,
             },
         );
@@ -503,5 +537,27 @@ mod tests {
             clean_for_tts("こんにちは。元気です。"),
             "こんにちは。元気です。"
         );
+    }
+
+    /// **VC で外すのは自分の声だけ。他エージェントの声は拾う。**
+    ///
+    /// 以前は「話者が bot なら文字起こししない」だったため、同じ VC に居る他エージェント
+    /// の発言が一切テキスト化されず、VC でエージェント同士が会話できなかった（#317）。
+    #[test]
+    fn only_my_own_voice_is_excluded_from_transcription() {
+        assert!(
+            !should_transcribe(Some(100), 100),
+            "自分の声を文字起こししている（自分の TTS を自分で拾う無限ループ）"
+        );
+        assert!(
+            should_transcribe(Some(100), 200),
+            "他エージェント／他ユーザーの声を捨てている（VC で会話が成立しない）"
+        );
+    }
+
+    /// 自分の id が取れていない間は拾わない（ループを止める手段が無いため）。
+    #[test]
+    fn unknown_self_id_means_no_transcription() {
+        assert!(!should_transcribe(None, 200));
     }
 }

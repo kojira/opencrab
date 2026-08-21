@@ -16,6 +16,9 @@ const OLLAMA_DEFAULT_URL: &str = "http://localhost:11434";
 pub struct OllamaProvider {
     client: Client,
     base_url: String,
+    /// テレメトリ用の表示名（既定は形式名 "ollama"）。ルーティングキーは
+    /// router 登録時に別途決まる。
+    name: String,
 }
 
 impl OllamaProvider {
@@ -23,7 +26,14 @@ impl OllamaProvider {
         Self {
             client: Client::new(),
             base_url: OLLAMA_DEFAULT_URL.to_string(),
+            name: "ollama".to_string(),
         }
+    }
+
+    /// 表示名を上書きする（同じ形式の接続先を別名で登録するとき）。
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
     }
 
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
@@ -78,7 +88,7 @@ impl OllamaProvider {
         if let Some(ref stop) = request.stop {
             options["stop"] = serde_json::json!(stop);
         }
-        if options.as_object().map_or(false, |o| !o.is_empty()) {
+        if options.as_object().is_some_and(|o| !o.is_empty()) {
             body["options"] = options;
         }
 
@@ -209,7 +219,7 @@ impl Default for OllamaProvider {
 #[async_trait]
 impl LlmProvider for OllamaProvider {
     fn name(&self) -> &str {
-        "ollama"
+        &self.name
     }
 
     async fn available_models(&self) -> Result<Vec<ModelInfo>> {

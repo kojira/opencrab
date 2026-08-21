@@ -1,8 +1,39 @@
 [agent]
+# ハートビートの間隔（秒）。#588 Stage 3 以降、tick は**通常のターンを 1 回開始するだけ**:
+# 発火時点のセッションの会話が通常どおり注入され、実作業は spawn_subtask で起動する。いま動く
+# 必要が無ければ通常ターンと同じ `NO_REPLY` を返す（沈黙＝無配送・無記録）。応答本文の自動配送は
+# **Discord チャンネルの発火だけ**（ブロードキャスト/Nostr はエージェントが nostr_post 等のツールで
+# 自分で投稿する＝通常の Nostr の動き。二重投稿を避けるため本文は自動配送しない）。専用の語彙
+# （旧 SPEAK/LEARN/IDLE）・専用の会話組み立て・毎回記録は撤去した。
 heartbeat_interval_secs = 1800
+# ハートビートのマスタスイッチ（#439 の中央スケジューラで発火時に live 参照する）。
+# false にすると `discord-` セッションのハートビートは止まる（`nostr-` は G 非依存）。
+# **注意**: これは *ハートビート* のマスタスイッチであり、`agent_schedules` の定時実行
+# （#455・cron/@every）は**止まらない**。定時実行を止めるには各スケジュールの
+# `enabled` を false にする（`PATCH /api/schedules/{id}`）。運用者が G を切っても
+# 定時実行が動き続けるのは意図した挙動（heartbeat と schedule は別概念）。
 heartbeat_enabled = true
+# エージェントが自分で設定できるハートビート間隔の下限（秒 / #247）。
+#
+# エージェントは `set_my_heartbeat` で自分の間隔を変えられる。極端に短い値を
+# 設定されると費用と負荷が跳ねるので、床はここで運用者が決める。下限より短い
+# 要求はツール側で**拒否**される（黙って丸めない）。
+#
+# 既定 300 秒（5 分）: tick は「LLM の 1 ターン + ツール実行」なので、これより
+# 短くすると前の tick が終わる前に次が来る領域に入り、費用だけが増える。
+# 上限は 24 時間（コード側の固定値）。それより疎な自律実行はハートビートの仕事ではない。
+heartbeat_min_interval_secs = 300
 workspace_path = "data/agents/{agent_id}/workspace"
 max_workspace_size_mb = 100
+
+[subtask]
+# ツール呼び出しをバックグラウンド実行に回すか（既定 true）。
+#
+# false にすると全ツールが同期実行に戻る（この機能の導入前と同じ挙動）。
+# 環境変数 OPENCRAB_SUBTASK_AUTO_DISPATCH（0/false/off/no）が
+# この値より優先されるので、.env だけで切り戻せる。
+# 詳しくは docs/DESIGN.md の「非ブロックツール実行」を参照。
+auto_dispatch = true
 
 # デフォルトLLM設定
 [llm]
@@ -13,12 +44,12 @@ default_model = "gpt-5.6"
 
 # 用途別モデル設定（オプション）
 [llm.models]
-thinking = { provider = "openai", model = "claude-sonnet-4-6" }
-conversation = { provider = "openai", model = "claude-sonnet-4-6" }
-analysis = { provider = "openai", model = "claude-haiku" }
-tool_calling = { provider = "openai", model = "claude-sonnet-4-6" }
-creative = { provider = "openai", model = "claude-sonnet-4-6" }
-embedding = { provider = "openai", model = "text-embedding-3-large" }
+thinking = { provider = "hermit", model = "claude-sonnet-4-6" }
+conversation = { provider = "hermit", model = "claude-sonnet-4-6" }
+analysis = { provider = "hermit", model = "claude-haiku" }
+tool_calling = { provider = "hermit", model = "claude-sonnet-4-6" }
+creative = { provider = "hermit", model = "claude-sonnet-4-6" }
+embedding = { provider = "hermit", model = "text-embedding-3-large" }
 
 # エージェント自身によるLLM選択
 [llm.self_selection]
@@ -29,12 +60,20 @@ allowed_aliases = ["fast", "smart", "reasoning", "creative", "local", "cheap", "
 [llm.fallback]
 chain = ["anthropic", "ollama"]
 
-# hermit-shell経由でAnthropicを使う（OpenAI互換プロキシ）
-# 本物の OpenAI API を使う場合は base_url を空にし、api_key に実キーを入れる。
-# GPT-5.6 系（gpt-5.6 / gpt-5.6-sol / gpt-5.6-terra / gpt-5.6-luna）と o シリーズは
+# hermit-shell 経由で Anthropic を使う（OpenAI 互換プロキシ、ポート 8765）。
+#
+# セクション名 = プロバイダの「名乗り名」（接続先の実体）。ここは本物の OpenAI では
+# なくローカルの hermit-shell プロキシなので `hermit` と名乗る。`type` は「API 形式」で、
+# hermit-shell は OpenAI 互換なので `type = "openai"`。名前と形式を分けたので、同じ
+# OpenAI 互換の接続先を別名でもう 1 つ足すこともできる（別セクション + type="openai"）。
+#
+# 本物の OpenAI API を使いたいなら、別セクション（例 `[llm.providers.openai]`。type 省略で
+# セクション名がそのまま形式名 openai になる）を作り、base_url を空にして api_key に実キーを
+# 入れる。GPT-5.6 系（gpt-5.6 / gpt-5.6-sol / gpt-5.6-terra / gpt-5.6-luna）と o シリーズは
 # 推論モデルとして自動判定され、temperature は送らず max_completion_tokens を使う。
 # reasoning_effort（minimal|low|medium|high）を指定すると各リクエストに付与される。
-[llm.providers.openai]
+[llm.providers.hermit]
+type = "openai"
 api_key = "dummy"
 base_url = "http://localhost:8765/v1"
 organization = ""
@@ -70,7 +109,7 @@ base_url = "http://localhost:8080"
 # Codex CLI設定（ローカル）
 [llm.providers.codex]
 default_model = "o4-mini"
-sandbox = "danger-full-access"
+sandbox = "read-only"
 timeout_secs = 300
 # 推論（thinking）強度の上書き（low|medium|high|xhigh）。空/未指定はモデル既定。
 # gpt-5.6-sol は既定 high で遅い/高コスト。ダッシュボード（システム設定）からも変更可。
@@ -81,14 +120,29 @@ models = ["gpt-5.6", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "o4-mini", "o3"
 # working_dir = ""                        # Codex の作業ディレクトリ
 
 # Cursor CLI設定（headless agent, ローカル）
+# cursor-agent は「推論専用の頭」として使う（#674 / #682）。cursor-agent 自身の write/shell を
+# 封じ、read を注入済み XML <function_calls> へ誘導して、実行は opencrab 側の権限ゲート込み
+# ツールループに乗せる。効く防御:
+#   1. deny cli.json（#682）: 毎回生成する空の一時 cwd に .cursor/cli.json を置き
+#      Read/Write/Shell/WebFetch/WebSearch/Mcp を deny（これらは実測でゲートされる）。
+#   2. 空の専用 cwd（#682）: 実 workspace を cwd として露出させない＋cli.json の置き場。
+# 加えて --plan（読取専用）・--sandbox・--trust を重ねる。
+# 【塞げていない穴・#682 でオーナー裁定により受容】native grep/glob は node プロセス内で
+# 同梱 rg を直接実行するため cli.json/--sandbox の管轄外で、絶対パスを与えれば cwd の外の
+# 任意ファイル内容を読める（空 cwd はこれを塞がない・実測 #682）。機構で塞げるのは OS
+# sandbox のみだが複雑さを避け不採用。任意パス読取リスクは受容しモデルの判断に委ねる。
+# ツール駆動は grok 系のみ想定（GPT 系は cursor 経由では使わない方針）。
 [llm.providers.cursor]
-default_model = "gpt-5"
+default_model = "auto"                    # account 非依存。旧既定 gpt-5 は現行 CLI で無効
 timeout_secs = 300
-# ダッシュボードに表示するモデル一覧（Cursor で利用可能なもの）
-models = ["gpt-5", "sonnet-4.5", "opus-4.1", "auto"]
+# ダッシュボードに表示するモデル一覧（account・CLI バージョンで変わる。models で上書き）
+models = ["auto", "gpt-5.2", "claude-opus-5", "claude-sonnet-5"]
+# サンドボックス（"enabled" | "disabled"）。省略時は最安全側 enabled。読取専用モードとは
+# 直交する多層防御層。
+# sandbox = "enabled"
 # コマンド名はインストールでゆれる（cursor-agent / agent / cursor）。既定は cursor-agent。
 # binary_path = "cursor-agent"
-# working_dir = ""                        # Cursor の作業ディレクトリ
+# working_dir はサポートしない（#682）。cwd は毎回空の一時ディレクトリを内部生成する。
 # 認証は CURSOR_API_KEY か `cursor-agent login` 済みのアンビエント認証。
 # api_key = "${CURSOR_API_KEY}"
 
@@ -113,20 +167,28 @@ default_model = "gpt-5.5"
 reasoning_effort = "low"
 include_reasoning_encrypted_content = false
 max_output_tokens = 25000
+# チャット補完の read timeout（秒）。reasoning_effort の高い体は 1 ターンの生成が
+# 長くなり、短すぎると timeout → router のリトライを繰り返して 1 ターンが error に
+# 落ちる（#433）。省略時も 300（ProviderConfig の既定）。
+timeout_secs = 300
 
 # Bonsai 8B (1-bit LLM, PrismML)
+# bonsai は「名乗り名」。API 形式は llama.cpp サーバなので type = "llamacpp"。
+# （以前は build_llm_router に bonsai 専用の分岐があったが、名前と形式の分離で
+#  一般機構に吸収した。type を書かないと形式名 "bonsai" は未知として起動失敗する。）
 [llm.providers.bonsai]
+type = "llamacpp"
 base_url = "http://localhost:8081"
 
 # モデルエイリアス
 [llm.aliases]
-fast = { provider = "openai", model = "claude-haiku" }
-smart = { provider = "openai", model = "claude-sonnet-4-6" }
-reasoning = { provider = "openai", model = "claude-sonnet-4-6" }
-creative = { provider = "openai", model = "claude-sonnet-4-6" }
+fast = { provider = "hermit", model = "claude-haiku" }
+smart = { provider = "hermit", model = "claude-sonnet-4-6" }
+reasoning = { provider = "hermit", model = "claude-sonnet-4-6" }
+creative = { provider = "hermit", model = "claude-sonnet-4-6" }
 local = { provider = "ollama", model = "llama3.1:8b" }
 bonsai = { provider = "bonsai", model = "Bonsai-8B.gguf" }
-cheap = { provider = "openai", model = "claude-haiku" }
+cheap = { provider = "hermit", model = "claude-haiku" }
 
 [gateway.rest]
 enabled = true
@@ -140,13 +202,11 @@ agent_ids = ["crab", "54fab4ec-fad2-45d9-92dd-e62e50e2b36b", "6b79ac3a-7f17-4618
 # DMに応答するオーナーのDiscord User ID。環境ごとに変わるので `.env` の
 # OWNER_DISCORD_ID から渡す（未設定なら空 = オーナー無しとして扱われる）。
 owner_discord_id = "${OWNER_DISCORD_ID}"
-heartbeat_channel_id = 1470698801395273861
+# ハートビートを流すチャンネルは DB（discord_channel_config.heartbeat_enabled）で
+# 管理する。かつての `heartbeat_channel_id` はどこからも読まれていなかったので削除した（#215）。
 # spawn_subtask.webhook を明示しない時に使う lifecycle webhook。
 # url = "" または未指定なら無効。実URLは環境変数で渡す。
 default_subtask_webhook = { url = "${DISCORD_SUBTASK_WEBHOOK_URL}", events = ["started", "progress", "completed", "failed", "timed_out", "aborted"] }
-
-[gateway.cli]
-enabled = true
 
 [dashboard]
 enabled = true
@@ -154,6 +214,48 @@ port = 3000
 
 [database]
 path = "data/opencrab.db"
+
+# 古い LLM ログの zip アーカイブ（#337）
+#
+# llm_logs は 1 行にプロンプト全文＋応答を丸ごと保存するため肥大しやすく（実測で DB の
+# 97%）、バックアップを重くする。デバッグに使う直近は残し、保持期間より古い「月」を
+# 丸ごと JSONL に書き出して zip 圧縮し、DB からその行を外す。**書き出して読み直して
+# 検証してから削除する**（失敗したら消さない）。会話ログ（memory_sessions）には触らない。
+#
+# 注意: 行を消しても SQLite のファイルは縮まない（空き領域として再利用される）。空き回収
+# は稼働中に走らせるべきでない VACUUM が必要で、これは自動化せず手動コマンドに分けてある
+# （サーバ停止中に `cargo run --bin opencrab-vacuum`）。
+[llm_log_archive]
+# アーカイブループの on/off。自動削除を止めたいときは false（再ビルド不要）。
+enabled = true
+# 保持日数。これより古い「月」（月末がカットオフより前）だけをアーカイブする。
+# 境界の月は丸ごと残すので、実際の保持は最大 1 か月ぶん長くなりうる。
+retention_days = 30
+# アーカイブ tick の間隔（秒）。日次で十分。最低 3600 秒に丸められる。
+interval_secs = 86400
+# 出力先。空なら DB ファイルの親 + "archive"（例: data/archive）へ導出する。
+# 内蔵ディスクに置かない方針のため、既定は DB と同じボリューム。
+dir = ""
+
+# 退避ファイル（workspace/tmp）の掃除（#711）。ツール結果が inline 上限を超えると本文が
+# data/agents/{agent_id}/workspace/tmp/ へ退避されるが、消す経路がコードに無く無限に増える
+# （実測 206MB / 2,636 個・+44/日）。mtime がこれより古い退避ファイルを日次で消す。対象は
+# tmp/ 直下の通常ファイルのみで、ディレクトリ・サブディレクトリ・マーカー/隠しファイル・DB
+# には触れない（削除はグロブ展開せず 1 パスずつ remove_file）。
+# 掃除対象は DB に現存するエージェントの tmp/ だけ。未展開の {agent_id} ディレクトリや削除済み
+# エージェントの残骸 tmp/ は対象外（新規ファイルは産まないのでゴール「無限に増えない」は満たすが、
+# 既存の残骸は減らない。誤削除を避けて触れない）。
+[offload_cleanup]
+# 掃除ループの on/off。止めたいときは false（再ビルド不要）。
+enabled = true
+# 保持日数。mtime がこれより古い退避ファイルを消す。オーナーが 7 日超を手動削除して破綻なし
+# = 実測の安全な上界を採用（発明しない）。#710 稼働後に実際の会話窓寿命を観測してから
+# 2〜3 日へ詰められる（最終値はオーナー判断）。
+# 0 や負値は「今書いたファイルまで消す」危険側なので、コードが下限 1 へ丸めて warn を出す
+# （黙って別の値で動かさない）。掃除を止めたいなら enabled = false を使う。
+retention_days = 7
+# 掃除 tick の間隔（秒）。日次で十分。最低 3600 秒に丸められる。
+interval_secs = 86400
 
 # ===== ツール設定 =====
 [tools]
@@ -215,14 +317,36 @@ name = "python3"
 permission = "agent"
 description = "Python3スクリプト実行"
 
-# verify 段 (evaluator): 契約付き active タスクの run 終了時、独立した context の
-# LLM で rubric 評価し、結果を session_logs とタスク台帳に記録する (record-only)。
-# エージェントは次ターンの会話で評価を見てギャップを自己修正する。
-# ツールを使わなかった run（アイドル tick 等）は評価しない。
+# evaluator: 契約付きタスクを独立 context の LLM で rubric 評価する設定。
+# #291 で「対話ターン中に毎ターン採点する」配線は撤去した（採点結果と指示文が会話へ
+# 割り込み、直前のユーザー発言より優先されてしまったため）。評価はスリープ中
+# （非対話時）へ寄せる方針で、その配線は別 issue。現在この設定は読まれない。
 [evaluator]
 enabled = true
 threshold = 0.7
 # model = "openrouter:openai/gpt-4o"  # 省略時はエージェントの実効モデル
+
+# スリープ凝縮ラン（#411 / 記憶の 3 段目）。本人が別セッションの新規 context で自分のユニット
+# （宣言した記憶）を時系列で少しずつ俯瞰し、「その出来事たちが何を意味するか」という原則を
+# node_type='meta' / source_type='condensed' として人格の核に刻む。
+#
+# **既定 ON（#457）**。ON にすると何が起きるか（LLM ランがいつ・どれだけ焼かれるか）:
+#   - 有効化ゲートは enabled 一点。メンテループ（memory_maintenance_interval_secs、既定 600 秒）が
+#     毎 tick 全エージェントを列挙する。エージェント単位の allowlist / opt-in は無い。
+#   - 進捗マーカー未作成のエージェントは最古のユニットから消化を始める。
+#   - 残ユニットが窓幅（min_new_units=20）以上の積み残しは throttle（min_interval_minutes=7 日）を
+#     待たず、メンテ tick ごとに 1 窓（20 件）ずつ 1 LLM ラン（timeout_secs=600 上限）で消化する。
+#     残 < 20 の端数だけ 7 日を待つ（初回は待たない）。partial が続いたときのみ指数バックオフ。
+#   - つまり蓄積ユニットの多いエージェントは ON 直後から連続で凝縮ランが走る（消化しきれば
+#     恒常運用は 7 日ごとの端数消化に落ち着く）。コストを止めたい場合は enabled = false にする。
+#
+# enabled 以外（min_new_units / min_interval_minutes / timeout_secs）は #411 PR-3 で実測確定する
+# 仮値。ここで上書きせず Rust 側の既定に委ねる（下は既定を明示しているだけ・変更不要）。
+[memory_condense]
+enabled = true
+# min_new_units = 20          # 窓幅かつ積み残し発火の下限（PR-3 で確定）
+# min_interval_minutes = 10080  # 端数待ち / partial バックオフ上限（= 7 日・PR-3 で確定）
+# timeout_secs = 600          # 1 ラン上限
 
 # ─ プロバイダー設定はダッシュボード（システム設定ページ）からも編集できます。
 #   ダッシュボードでの変更は DB に保存され、この TOML より優先されます。
@@ -250,3 +374,73 @@ threshold = 0.7
 # [voice.tts.agent_voices]
 # # crab = "3"
 # # rabomi = "1"
+
+# ─ 外部イベント受信（webhook intake / issue #454）─────────────────────────
+# 外部システム（第一号: ナレッジベース omoikane）の出来事を webhook で受け取り、
+# エージェントの受信箱（agent_inbox）に積んで、専用の消化ループが自律的に処理する。
+#
+#   受信: POST /api/hooks/{source}
+#     - source ごとの共有 secret で HMAC-SHA256 を検証（ヘッダ
+#       X-{Source}-Signature: sha256=<hex>、汎用 X-Hook-Signature も可）
+#     - secret 未設定の source は 404 / 署名不正は 401 / 受理は 202（積むだけ）
+#   消化: process_interval_secs ごとに未処理を確認。**空なら LLM を呼ばない**。
+#   catch-up: webhook は at-most-once。停止中に落ちたイベントは source 側の一覧 API を
+#             真実として catch_up_interval_secs ごとに補充する（重複は dedup で弾く）。
+#
+# セクションを書かなければ実質無効（テーブルは空・LLM は呼ばれない）。塞がずに事実だけ書く。
+# [intake]
+# process_interval_secs = 60      # 受信箱消化の間隔（秒）。最低 10 秒に丸める。
+# catch_up_interval_secs = 600    # catch-up ポーリングの間隔（秒）。最低 60 秒に丸める。
+#
+# # source ごとの共有 secret（HMAC 検証用）。値は ${ENV} で注入する（この公開リポジトリに
+# # 実値を書かない）。ここに無い / 空の source への POST は 404。
+# [intake.secrets]
+# omoikane = "${HOOK_SECRET_OMOIKANE}"
+#
+# # source × event_type → 配送先 agent_id（完全一致）。該当が無いイベントは受理（202）は
+# # するが積まれない。agent_id は config 名（例 "crab"）でも UUID でもよい。
+# [[intake.routes]]
+# source = "omoikane"
+# event_type = "comment.created"
+# agent_id = "scout"
+# [[intake.routes]]
+# source = "omoikane"
+# event_type = "chat.message"
+# agent_id = "sebastian"
+#
+# # catch-up ポーリング対象の source（一覧 API）。**source 名をキーにした汎用テーブル**。
+# # webhook 受信だけなら不要（webhook は secret さえあれば動く）。
+# #
+# # 2 つ目・3 つ目の source を足すには、この [[intake.sources]] ブロックをもう 1 個書くだけ
+# # ——コードは触らない。REST の一覧 API（配列を返す GET）なら kind = "rest_list" で足りる。
+# # 一時停止したいときは enabled = false（設定は残せる）。特殊な認証や非 REST（ページング等）が
+# # 要るときだけ新しい kind を実装する（設定を「何でも書ける言語」にはしない）。
+# #
+# # 重要: source の name は上の [[intake.routes]] の source と一致させること。一致しないと
+# # catch-up は取得できても配送先（route）が無くイベントが捨てられる（起動時に warn は出るが
+# # 処理はされない）。name のタイポがいちばん起きやすい・気づきにくい壊れ方。
+# [[intake.sources]]
+# name = "omoikane"                          # [intake.secrets] / [[intake.routes]] の source と同じキー
+# kind = "rest_list"                         # 一覧 API を叩く汎用型
+# enabled = true                             # 既定 true。false で設定を残したまま catch-up を止める
+# base_url = "https://kb.example"            # 末尾スラッシュは有無どちらでも可
+# auth = { kind = "bearer", token = "${SOURCE_API_TOKEN}" }  # 省略で無認証。token は秘密（${ENV} 注入）
+# list_path = "/v1/comments/recent"          # base_url に続けるパス
+# # URL クエリ（key=value をそのまま付ける・値は文字列）。取得件数の上限（limit 等）もここに書く。
+# # 注意: limit を省くと source 側の既定で取得する＝全件だと受信箱が膨らむ「広がる」方向。必ず設定する。
+# query = { entry_created_by = "${SOURCE_UID}", limit = "50" }
+# id_field = "id"                            # dedup に使う id フィールド名（既定 "id"）。取れない要素は捨てる
+# event_type = "comment.created"             # この一覧が生む event_type。webhook 側の type と一致させる
+# # array_path = "comments"                  # 省略可。レスポンス配列の場所（トップレベル単一キー）。
+# #                                          #   省略時は自動検出（トップレベル配列 / comments / data / items / results）
+# #
+# # 2 つ目の source の例（コード変更なし・設定だけ）:
+# # [[intake.sources]]
+# # name = "acme"
+# # kind = "rest_list"
+# # base_url = "https://acme.example"
+# # auth = { kind = "bearer", token = "${ACME_API_TOKEN}" }
+# # list_path = "/api/notes"
+# # query = { limit = "50" }
+# # id_field = "note_id"
+# # event_type = "note.created"

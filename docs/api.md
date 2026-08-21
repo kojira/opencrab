@@ -8,6 +8,8 @@ Base URL: `http://localhost:3000`
 |--------|----------|---------|
 | GET | `/health` | Health check → `"ok"` (plain text) |
 | GET | `/api/health` | Health check → `{"status":"ok"}` (JSON) |
+| **External Intake** | | |
+| POST | `/api/hooks/{source}` | Receive external event (HMAC-verified) → 202 |
 | **Agents** | | |
 | POST | `/api/agents` | Create agent |
 | GET | `/api/agents` | List agents |
@@ -50,6 +52,14 @@ Base URL: `http://localhost:3000`
 | POST | `/api/sessions/{id}/mentor` | Insert mentor instruction |
 | **Agent Messages** | | |
 | POST | `/api/agents/{id}/messages` | Send direct message to agent |
+| **Agent Schedules (#455)** | | |
+| GET | `/api/agents/{id}/schedules` | List schedules (each with computed `next_fire_at`) |
+| POST | `/api/agents/{id}/schedules` | Create schedule (cron/`@every`; validates cron/tz/session; 400 on invalid) |
+| PATCH | `/api/schedules/{sid}` | Update schedule (cron/tz change or enable resets anchor; disable preserves phase) |
+| DELETE | `/api/schedules/{sid}` | Delete schedule |
+| **Web** | | |
+| POST | `/api/agents/{id}/web/send` | Send message from web dashboard (inbound) |
+| GET | `/api/agents/{id}/web/stream` | Subscribe to agent utterances (SSE) |
 | **Analytics** | | |
 | GET | `/api/agents/{id}/analytics` | Analytics summary |
 | GET | `/api/agents/{id}/analytics/detail` | Analytics by model |
@@ -71,7 +81,6 @@ Base URL: `http://localhost:3000`
 | **Co-Agents** | | |
 | GET | `/api/agents/{id}/co-agents` | List co-agents |
 | POST | `/api/agents/{id}/co-agents` | Register co-agent |
-| PATCH | `/api/agents/{id}/co-agents/{co_agent_id}` | Update co-agent |
 | DELETE | `/api/agents/{id}/co-agents/{co_agent_id}` | Remove co-agent |
 | **Trusted Users** | | |
 | GET | `/api/agents/{id}/trusted-users` | List trusted users |
@@ -110,6 +119,48 @@ Base URL: `http://localhost:3000`
 ```json
 {"status": "ok"}
 ```
+
+---
+
+## External Event Intake
+
+外部システム（第一号: ナレッジベース omoikane）の出来事を受け取り、エージェントの受信箱
+（`agent_inbox`）に積む webhook（issue #454）。受理したイベントは **処理せず積むだけ**で、
+専用の消化ループが heartbeat とは独立に処理する。設定は `config/default.toml` の `[intake]`。
+
+### POST /api/hooks/{source}
+
+**目的**: 外部イベントを受信して受信箱へ積む（例: `/api/hooks/omoikane`）。
+
+**認証**: source ごとの共有 secret による HMAC-SHA256（**定数時間**照合）。
+
+- 署名ヘッダ: `X-{Source}-Signature: sha256=<hex(hmac-sha256(secret, raw_body))>`
+  （汎用 `X-Hook-Signature` も受理）。
+- secret は `[intake.secrets]`（`${ENV}` で注入）から解決。未設定 / 空の source は **404**。
+
+**Body**: `{"type": "<event type>", "data": {...}, "delivered_at": "..."}`
+
+**ルーティング**: `[[intake.routes]]` の `(source, event_type) → agent_id`（完全一致）。該当が
+無いイベントは受理（202）はするが受信箱に積まれない。
+
+**dedup**: `data.id` から `"{event_type}:{id}"` を作り、`UNIQUE(source, dedup_key)` +
+`INSERT OR IGNORE` で二重投入を防ぐ（webhook 再送 / catch-up との相互重複を弾く）。
+
+**Status**
+
+| Status | 条件 |
+|--------|------|
+| 202 Accepted | 署名 OK。積んだ / dedup で既存 / ルート無し（いずれも受理） |
+| 400 Bad Request | body が JSON でない / `type` が空 |
+| 401 Unauthorized | 署名ヘッダ欠落 or 不正（受信箱は汚染しない） |
+| 404 Not Found | secret 未設定の source |
+
+**信頼性（catch-up）**: webhook は at-most-once。停止中に落ちたイベントは source 側の一覧 API
+を真実として起動時 + 定期（`catch_up_interval_secs`）にポーリングし、未処理分を補充する。
+
+**消化**: 新規イベントを積んだ直後に消化ループを即起こし（`process_interval_secs` を待たない・
+issue #499）、`process_interval_secs` ごとのポーリングは取りこぼし・再試行の安全網として残す。
+いずれの起動でも**未処理が空なら LLM を呼ばない**。
 
 ---
 
@@ -1019,6 +1070,10 @@ Base URL: `http://localhost:3000`
 
 > メッセージ送信者（`agent_id`）以外の全参加者が自動的に応答する。LLM 呼び出しが発生する。
 
+**存在しない参加者は 404**（#632）: 参加者に `agents` 行の無い `agent_id` が含まれていると、その参加者のターンは走らず **`404 Not Found`**（`{"error": "agent not found: {id}"}`）を返す。セッションは `create_session` 時に参加者の存在を確認しない（`agent_sessions` に FK が無い）ため、でたらめな参加者 ID でセッションを作れてしまうが、実行はサーバ側チョークポイント（`process::run_agent_response`）で弾かれる。
+
+> **ツール実行は inline（同期）**: この経路は非ブロック dispatch を配線しない。エージェントが呼んだツールはすべて応答ターンの中で実行され、その結果を踏まえた最終応答が `responses[].content` に入る（`tool_calls_made` も実際の実行回数）。同じ「メッセージ送信」でも `POST /api/agents/{id}/messages` は意味論が異なる（後述）。
+
 **Request Body**
 
 | Field | Type | Required | Description |
@@ -1147,6 +1202,29 @@ Base URL: `http://localhost:3000`
 
 `user_id` はハンドラ入口で 1 回だけ前後の空白を除去され（trim）、以降の権限判定・セッション ID・`speaker_id` すべてで同じ正規化済みの値が使われる。つまり `" 123 "` と `"123"` は同じセッション・同じ送信者として扱われる。
 
+**存在しないエージェントは 404**（#632）: `agents` テーブルに `{id}` の行が無ければ、**ターンを起こさず** **`404 Not Found`**（`{"error": "agent not found: {id}"}`）を返す。行が無いと per-agent 設定（`heartbeat_instructions` / `model` / `persona` 等）が全部既定に落ちるのに「動いてしまう」ため、タイプミスに気づけないのを防ぐ。存在確認はサーバ側ターン実行の単一チョークポイント（`process::run_agent_response`）で 1 度だけ行い、`POST /api/sessions/{id}/messages`・`POST /api/agents/{id}/web/send` を含む全経路に同じ判定が効く。判定はエージェント行の有無のみで、**無効・停止中のエージェントの扱いは変えない**。（弾かれる前にセッション行や送信メッセージのログが書かれることはあるが、ターンは走らない。）
+
+**ツール実行は非ブロック（background subtask）**
+
+この経路は非ブロック dispatch を配線している。エージェントが返したツール呼び出しは、同一 assistant メッセージ分をまとめて 1 つの background subtask として dispatch され、**HTTP 応答はその完了を待たずに返る**。
+
+- **ツールの実行結果は応答本文に含まれない**。`responses[].content` はツールを呼ぶと決めた時点のエージェント発話であり、「ツール結果を踏まえた最終応答」ではない。
+- **一部のツールは従来どおり inline 実行**され、その結果は同じターンの応答本文に反映される。inline に留めるのは「背景化すると壊れるもの」で、分類の考え方は次のとおり:
+  - **配送系**（送信・投稿・返信・UI 提示）、**同ターンで戻り値を使うもの**（生成した ID / URL をそのターンで使う）、**run 内の共有状態を書くもの**（実行中モデルの切り替え等）、**純粋な読み取りで即答すべきもの**（一覧・検索）、そして **dispatch 自体の制御系**（`spawn_subtask` / `cancel_subtask` / `report_progress`）。
+  - inline 集合は**ツールの供給源ごとに別々に存在する** — 共通アクション群 / サーバ内蔵の設定ツール群 / Discord / Nostr の 4 つ。数十個規模で増減するため、ここでは列挙しない（列挙すると必ず実装と乖離する）。
+  - **MCP ツール（`mcp__*`）は既定で inline**。運用者が繋いだ外部ツールの性質を静的に判定できないため、安全側に倒している。
+  - 逆に、**明示的に dispatch 対象へ回されるものもある**（長時間処理。例: `nostr_generate_key` の vanity 鍵探索）。
+  - **正確な一覧の権威はコード**（`crates/actions/src/bridge.rs` の inline 集合 / dispatch 可集合の定数対）。分類基準の解説は `docs/DESIGN.md` §4.4「非ブロックツール実行」を参照。
+- dispatch は最上位ターンのみ。`spawn_subtask` で建てたサブエンジンの中は全ツール inline 実行。
+- **完了結果の取得**は `GET /api/sessions/{id}/logs`（`session_id` はレスポンスの `session_id`）。この経路の完了 sink は「保存のみ」で、結果を再注入して LLM を回し直す（resume）ことはしない。保存された完了本文は次回 POST 時の会話履歴として文脈に載る。
+- **`sessions.status` を「走行中かどうか」の判定に使わないこと**。この経路がセッション行を `active` にするのは**初回作成時だけ**で、`active` に戻す経路が無い。挙動は次のようになる:
+  - **1 通目**: 走行中の subtask がある間は `active` のままで、最後の subtask が決着（完了 / 停止）した時点で `completed` になる。決着前にサーバが停止すれば `active` のまま残る。
+  - **2 通目以降**: セッション行は既に `completed` なので、subtask が走行中でも `completed` と読める。つまり `completed` は「もう走っていない」ことを意味しない。
+  - 完了の観測には `sessions.status` ではなく `GET /api/sessions/{id}/logs` の `subtask_completed` を使うこと（上記「完了結果の取得」）。
+- background subtask はバッチ全体で既定 1,800 秒のタイムアウトを持つ（超過時は `exit_reason="timeout"` として決着する）。走行中の subtask はエージェントの `cancel_subtask` で停止できる（registry はセッション単位で共有されるため、後続リクエストからも到達できる）。
+
+> **送信 API ごとに意味論が違う**: `POST /api/sessions/{id}/messages` は非ブロック dispatch を配線せず、ツールを inline 実行した結果を応答本文に含めて返す。`POST /api/agents/{id}/web/send` は本エンドポイントと同じく dispatch するが、完了時に resume して結果を SSE で配送する（下記 Web セクション）。
+
 **Request Body**
 
 | Field | Type | Required | Description |
@@ -1154,8 +1232,9 @@ Base URL: `http://localhost:3000`
 | content | string | ✅ | メッセージ本文 |
 | user_id | string | ✅ | 送信者の ID（Discord ユーザー ID または エージェント ID）。前後の空白は除去される |
 
-**Caller 権限の決定ロジック**:
-- `user_id` が `trusted_users` テーブルに `co_agent` 権限で登録されている → `CoAgent`
+**Caller 権限の決定ロジック**（`trusted_users` は **`platform="rest"` の行だけ**を引く。
+`discord` の行では信頼されない — [Trusted Users](#trusted-users) の移行の注記を参照）:
+- `user_id` が `trusted_users` テーブルに `co-agent` 権限で登録されている → `CoAgent`
 - `user_id` が `trusted_users` テーブルに登録されている → `TrustedUser`
 - `user_id` がエージェントの Discord オーナー ID と一致する → `Owner`（比較は前後の空白を無視する。オーナー ID が空文字/空白のみ＝未設定なら誰とも一致しない）
 - それ以外 → `Agent`
@@ -1204,6 +1283,203 @@ Base URL: `http://localhost:3000`
   "error": "No LLM providers available"
 }
 ```
+
+---
+
+## Agent Schedules (#455)
+
+per-agent の定時実行（cron / `@every`）。中央スケジューラ（#439）の同一時刻源に載る。
+発火時は `message` を対象セッションへ self-message として注入し、通常メッセージ処理経路
+（caller=Owner）で 1 ターン走らせる。詳細は `docs/design-agent-schedules.md`。
+
+**次回発火時刻 `next_fire_at` は列に持たず照会時に算出**（heartbeat と同じ方針・stale フリー）。
+既定は無効（`enabled=false`・fail-closed）。**`heartbeat_enabled`（G）は schedule に掛からない**
+（G を切っても定時実行は止まらない。止めるには `enabled=false`）。
+
+### GET /api/agents/{id}/schedules
+
+```json
+{
+  "agent_id": "…",
+  "schedules": [
+    {
+      "id": 1, "agent_id": "…", "session_id": "nostr-…",
+      "cron_expr": "0 7 * * *", "timezone": "Asia/Tokyo",
+      "message": "毎朝のまとめを書いてください", "enabled": true,
+      "anchor_at": "2026-08-09T00:00:00+09:00",
+      "last_fired_at": null,
+      "next_fire_at": "2026-08-09T22:00:00+00:00"
+    }
+  ],
+  "count": 1
+}
+```
+
+### POST /api/agents/{id}/schedules
+
+Request:
+
+```json
+{
+  "session_id": "nostr-…",            // そのエージェントの発火経路を持つセッションに限る
+  "cron_expr": "0 7 * * *",           // 標準 5 フィールド cron、または "@every 3h"
+  "timezone": "Asia/Tokyo",           // 省略時 Asia/Tokyo
+  "message": "毎朝のまとめを書いてください",
+  "enabled": true                      // 省略時 false（fail-closed）
+}
+```
+
+- 不正な cron/`@every`/timezone は **400**。
+- `session_id` がそのエージェントの `nostr-`/`discord-` セッションでなければ **400**。
+- `enabled=true` で作ると `anchor_at=now`（初回発火は「now 以降の最初のスロット / now+周期」）。
+- 応答は作成された行（`next_fire_at` は照会時算出）。
+
+### PATCH /api/schedules/{sid}
+
+部分更新（送ったフィールドだけ変更）。存在しない `sid` は **404**。
+
+- **cron 式 / timezone の明示変更**、または **無効→有効化**では `anchor_at=now`・`last_fired_at=NULL`
+  にリセットする（新しい式で次スロットから）。
+- **有効→無効化**では anchor/last_fired を触らない（意図した疎らさを壊さない）。
+- 変更後はスケジューラを起こして即時反映（#437・再起動不要）。
+
+### DELETE /api/schedules/{sid}
+
+削除。存在しない `sid` は **404**。
+
+---
+
+## Web
+
+ダッシュボード（web UI）からエージェントと会話するためのゲートウェイ。送信（inbound）と購読（SSE）の 2 本で構成される。
+
+セッション ID は `web-{agent_id}-{conversation_id}` の形式で自動生成・再利用される（`conversation_id` が会話スレッドの単位）。同一セッションの inbound と subtask 完了 resume は 1 本のロックで直列化される（割り込みによる二重回答の防止）。別セッションは並行して処理される。
+
+### POST /api/agents/{id}/web/send
+
+**目的**: web UI からのメッセージを送信し、直接応答を得る（応答は同時に SSE へも配送される）
+
+**存在しないエージェントは 404**（#632）: `agents` テーブルに `{id}` の行が無ければ、**ターンを起こさず** **`404 Not Found`**（`{"error": "agent not found: {id}"}`）を返す。存在確認は web の唯一の公開ターン入口 `run_and_deliver_serialized` が担い、`POST /api/agents/{id}/messages` と同じ判定（エージェント行の有無のみ）に揃えてある。（弾かれる前にセッション行やユーザー発話行は書かれることはあるが、ターンは走らない＝ LLM は呼ばれない。存在確認そのものが DB エラーで失敗した場合は 404 ではなく `500` を返す。）
+
+**Request Body**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| conversation_id | string | ✅ | 会話 ID。セッション ID `web-{agent_id}-{conversation_id}` の構成要素 |
+| content | string | ✅ | メッセージ本文 |
+| user_id | string | ❌ | 送信者の ID（権限判定・`speaker_id` に使う）。省略時／空文字・空白のみのときは `"web-user"` |
+
+`user_id` は前後の空白を除去してから使われ、権限判定・`speaker_id` で同じ正規化済みの値が使われる（`POST /api/agents/{id}/messages` と同じ方針）。
+
+**Caller 権限の決定ロジック**: `POST /api/agents/{id}/messages` と同一（引く経路だけが違い、
+こちらは **`platform="web"` の行だけ**を見る）。
+
+- `user_id` が `trusted_users` テーブルに `co-agent` 権限で登録されている → `CoAgent`
+- `user_id` が `trusted_users` テーブルに登録されている → `TrustedUser`
+- `user_id` がエージェントの Discord オーナー ID と一致する → `Owner`（比較は前後の空白を無視する。オーナー ID が空文字/空白のみ＝未設定なら誰とも一致しない）
+- それ以外 → `Agent`
+
+> HTTP レベルの認証は無く（CORS は permissive）、権限はリクエストボディの `user_id` から導出される。既定値の `"web-user"` は `trusted_users` に `platform="web"` で登録しなければ `Agent` 権限にとどまる。ローカル／信頼済みネットワーク前提の想定である点は他のエンドポイントと同じ。
+
+セッションが存在しない場合は自動作成される（`theme` = `"web_conversation"`、`mode` = `"autonomous"`、`status` = `"active"`）。ユーザー発話は `session_logs` に記録され、応答生成時の会話履歴は毎回 DB から再構築される。
+
+**Example Request**
+
+```json
+{
+  "conversation_id": "conv-1",
+  "content": "今日のタスクを整理して",
+  "user_id": "123456789012345678"
+}
+```
+
+**Response**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| session_id | string | セッション ID（`web-{agent_id}-{conversation_id}`） |
+| caller_type | string | `"owner"` \| `"trusted_user"` \| `"co_agent"` \| `"agent"` |
+| response | string \| null | 直接応答の本文。`NO_REPLY`／空応答／エラー時は `null` |
+
+> **失敗時のレスポンス形は不揃いである（HTTP ステータスはいずれも 200）**: 上の 3 フィールドが必ず返るのは成功時と「LLM プロバイダ未設定」の経路だけで、セッション作成／発話記録の失敗の経路は **`error` だけ**を返し `session_id` / `caller_type` / `response` を含まない。ダッシュボードはエラー時にこれらのフィールドを読めない前提で書く必要がある（下の Error Response の例を参照）。この不揃い（および失敗時も 200 を返すこと）の是正は [#200](https://github.com/kojira/opencrab/issues/200) で扱い、本ドキュメントは現状の実装を記述している。
+
+**Example Response**
+
+```json
+{
+  "session_id": "web-550e8400-e29b-41d4-a716-446655440000-conv-1",
+  "caller_type": "owner",
+  "response": "了解。まず優先度順に並べ替えるね。"
+}
+```
+
+**ツール実行は非ブロック（background subtask）**
+
+`POST /api/agents/{id}/messages` と同じく非ブロック dispatch を配線しているため、**ツールの実行結果は `response` に含まれない**（inline に留まるツールとその分類は Agent Messages の記述を参照）。差分は完了後の扱いで、この経路は subtask が決着すると per-session ロックの下でエージェントを resume し、生成された応答を **SSE の `subtask_resume` イベントとして配送する**（HTTP 応答はすでに返っているため body には現れない）。
+
+**Error Response** (no LLM provider)
+
+```json
+{
+  "session_id": "web-...-conv-1",
+  "caller_type": "agent",
+  "response": null,
+  "error": "No LLM providers available"
+}
+```
+
+**Error Response** (セッション作成・発話記録の失敗)
+
+```json
+{"error": "Failed to create session: ..."}
+```
+
+```json
+{"error": "Failed to log message: ..."}
+```
+
+---
+
+### GET /api/agents/{id}/web/stream
+
+**目的**: エージェント発話を SSE（`text/event-stream`）で購読する
+
+**Query Parameters**
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| conversation | string | ✅ | 会話 ID。`web-{agent_id}-{conversation}` のセッションを購読する |
+
+購読自体に権限チェックは無い（`agent_id` と `conversation` を知っていれば購読できる）。keep-alive コメントが定期送出される。
+
+**Event 形式**
+
+SSE の `event:` 名は設定されない（既定の `message`）。各イベントの `data` は以下の JSON オブジェクトで、**種別は `kind` フィールドで判別する**。
+
+| Field | Type | Description |
+|-------|------|-------------|
+| kind | string | `"direct"` \| `"subtask_resume"` \| `"error"` |
+| agent_id | string | 発話したエージェントの ID |
+| content | string | 発話本文（`error` のときはエラーメッセージ） |
+
+| kind | 意味 |
+|------|------|
+| `direct` | `POST .../web/send` への直接応答。同じ本文が HTTP レスポンスの `response` にも入る（二重に見える点に注意） |
+| `subtask_resume` | dispatch した background subtask の完了を受けて resume したターンの応答。HTTP レスポンスには現れず、この経路のみで届く |
+| `error` | 応答生成が失敗した。`content` は `"(error: ...)"` 形式 |
+
+**Example Event**
+
+```
+data: {"kind":"subtask_resume","agent_id":"550e8400-e29b-41d4-a716-446655440000","content":"調査が終わったよ。結果は…"}
+```
+
+**配送の性質**
+
+- `direct` / `subtask_resume` の本文は `session_logs` にも保存される。stream を開く前に発生した発話や、取りこぼした発話は `GET /api/sessions/{id}/logs` で辿れる（`error` イベントは publish のみで DB に残らない）。
+- publish は best-effort。購読者がいないセッションのイベントは破棄される。
+- 未読バックログの上限は 256 件で、超過した購読者は溢れた分をスキップして受信を継続する（欠けた分は上記のログ経由で辿る）。
+- `NO_REPLY` および空応答は配送されない。
 
 ---
 
@@ -1635,9 +1911,10 @@ GET /api/agents/550e8400-.../channel-configs?guild_id=111222333444555666
 | id | UUID | レコード ID |
 | agent_id | UUID | 親エージェント ID |
 | co_agent_id | UUID | 共同エージェント ID |
-| allowed_actions | string[] \| null | 許可アクション一覧（`null` = 全許可） |
 | created_by | string | 作成者 |
 | created_at | ISO8601 | 作成日時 |
+
+> **Note (#490)**: `allowed_actions` は権限判定に使われないためレスポンスから外した。co_agent は owner 等価で、登録された相手は全アクションを実行できる。
 
 **Example Response**
 
@@ -1646,7 +1923,6 @@ GET /api/agents/550e8400-.../channel-configs?guild_id=111222333444555666
   "id": "e5f6a7b8-c9d0-1234-ef01-234567890123",
   "agent_id": "550e8400-e29b-41d4-a716-446655440000",
   "co_agent_id": "660f9500-f3a0-52e5-b827-557766551111",
-  "allowed_actions": ["chat", "memory_read"],
   "created_by": "admin",
   "created_at": "2026-03-20T10:00:00Z"
 }]
@@ -1663,39 +1939,22 @@ GET /api/agents/550e8400-.../channel-configs?guild_id=111222333444555666
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | co_agent_id | UUID | ✅ | 共同エージェントの ID |
-| allowed_actions | string[] | ❌ | 許可アクション一覧（省略時 = 全許可） |
+
+> **Note (#490)**: `allowed_actions` は受け付けない。非空で渡すと `400 Bad Request`（co_agent は owner 等価で権限判定に使われないため）。省略 / `null` / 空配列は許容。
 
 **Example Request**
 
 ```json
-{"co_agent_id": "660f9500-f3a0-52e5-b827-557766551111", "allowed_actions": ["chat", "memory_read"]}
+{"co_agent_id": "660f9500-f3a0-52e5-b827-557766551111"}
 ```
 
 **Response**: CoAgentRow（上記と同構造）
 
 ---
 
-### PATCH /api/agents/{id}/co-agents/{co_agent_id}
+### ~~PATCH /api/agents/{id}/co-agents/{co_agent_id}~~（#490 で撤去）
 
-**目的**: 共同エージェントの許可アクションを更新する
-
-**Request Body**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| allowed_actions | string[] | ✅ | 許可アクション一覧 |
-
-**Example Request**
-
-```json
-{"allowed_actions": ["chat", "memory_read", "memory_write"]}
-```
-
-**Response**
-
-```json
-{"updated": true}
-```
+**撤去済み**: 唯一の役割が `allowed_actions` の更新だったが、その列は権限判定に使われず API から外したため、更新できるフィールドが無くなった。何もしないエンドポイントを残すより撤去した（co_agent は owner 等価で、追加/削除は POST/DELETE で足りる）。**この経路への `PATCH` は `405 Method Not Allowed` を返す**（`DELETE` は下記のとおり有効）。
 
 ---
 
@@ -1713,6 +1972,25 @@ GET /api/agents/550e8400-.../channel-configs?guild_id=111222333444555666
 
 ## Trusted Users
 
+> **信頼は経路（`platform`）ごとに分かれている（#214 / #159）。**
+> 行は登録された経路でしか効かない。`discord` は Discord のユーザー ID、`web` は
+> ダッシュボード（`POST /api/web/agents/{id}/messages` 等）が申告する `user_id`、
+> `rest` は `POST /api/agents/{id}/messages` の `user_id` の識別子空間。
+> 経路が違えば同じ文字列でも別人として扱う（信頼は引き継がれない）。
+>
+> **移行が必要なケース（#159 で挙動が変わった点）**: #214 より前に登録した行はすべて
+> `platform="discord"` である。以前は「自経路の行が無ければ `discord` の行も見る」互換
+> 読みがあったため、web / REST の利用者もその行で信頼されていた。この互換読みは #159 で
+> **撤去した**ので、`web` / `rest` の行を持たない利用者は **web / REST で信頼を失い、
+> 最小権限（`Agent`）で動く**（拒否側に倒れるだけで、権限が緩むことはない）。該当する
+> 呼び出しが来ると、サーバは行の場所と直し方を WARN ログに出す
+> （`trusted user row exists only on the legacy 'discord' platform ...`）。
+>
+> **直し方**: その利用者の旧行を `DELETE /api/agents/{id}/trusted-users/{row_id}` で消し、
+> `platform` を指定して登録し直す。一意制約が `(user_id, agent_id)` のままなので、
+> **消す前に同じ識別子を別経路で登録すると 409 になる**（制約の作り直しは表の再構築を
+> 伴う非可逆な変更なので #159 に残してある）。Discord の利用者は何もしなくてよい。
+
 ### GET /api/agents/{id}/trusted-users
 
 **目的**: 信頼済みユーザー一覧を取得する
@@ -1722,22 +2000,28 @@ GET /api/agents/550e8400-.../channel-configs?guild_id=111222333444555666
 | Field | Type | Description |
 |-------|------|-------------|
 | id | UUID | レコード ID |
-| discord_user_id | string | Discord ユーザー ID |
+| user_id | string | その経路でのユーザー識別子（旧 `discord_user_id`） |
 | agent_id | UUID | エージェント ID |
-| permission | string | `"owner"` \| `"trusted"` \| `"user"` \| `"co_agent"` |
+| permission | string | `"owner"` \| `"user"` \| `"co-agent"` — **ケバブケース**（#234） |
 | created_by | string | 作成者 |
 | created_at | ISO8601 | 作成日時 |
+| display_name | string | ロスター表示用の名前（空文字可） |
+| platform | string | `"discord"` \| `"web"` \| `"rest"` — その行が効く経路 |
+
+一覧は**経路で絞らない**（運用者が全経路の登録を見渡せる必要があるため）。
 
 **Example Response**
 
 ```json
 [{
   "id": "f6a7b8c9-d0e1-2345-f012-345678901234",
-  "discord_user_id": "123456789012345678",
+  "user_id": "123456789012345678",
   "agent_id": "550e8400-e29b-41d4-a716-446655440000",
   "permission": "owner",
   "created_by": "owner",
-  "created_at": "2026-03-20T10:00:00Z"
+  "created_at": "2026-03-20T10:00:00Z",
+  "display_name": "",
+  "platform": "discord"
 }]
 ```
 
@@ -1751,36 +2035,62 @@ GET /api/agents/550e8400-.../channel-configs?guild_id=111222333444555666
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| discord_user_id | string | ✅ | Discord ユーザー ID |
-| permission | string | ❌ | `"owner"` \| `"trusted"` \| `"user"` (default: `"user"`) |
+| user_id | string | ✅ | その経路でのユーザー識別子（旧 `discord_user_id` も後方互換で受け付ける） |
+| permission | string | ❌ | `"owner"` \| `"user"` \| `"co-agent"` (default: `"user"`)。**これ以外は 400**（#234） |
+| display_name | string | ❌ | ロスター表示用の名前（default: 空文字） |
+| platform | string | ❌ | `"discord"` \| `"web"` \| `"rest"` (default: `"discord"`) — `user_id` がどの経路の識別子か |
 
 **Example Request**
 
 ```json
-{"discord_user_id": "123456789012345678", "permission": "trusted"}
+{"user_id": "123456789012345678", "permission": "user"}
 ```
 
-**Response**: TrustedUserRow（上記と同構造）
+ダッシュボード利用者を登録する例（この行は web 経路でのみ効く）:
+
+```json
+{"user_id": "web-user", "permission": "co-agent", "platform": "web"}
+```
+
+**Response**: TrustedUserRow（上記と同構造。`platform` を含む）
+
+**Errors**
+
+| Status | 意味 |
+|--------|------|
+| 400 | `platform` が `discord` / `web` / `rest` 以外、または `permission` が `owner` / `user` / `co-agent` 以外（登録できても誰とも一致しない・効かない行になるため弾く。旧いアンダースコア表記 `co_agent` も弾かれる — #234） |
+| 409 | 同じ `(user_id, agent_id)` が既に存在する。一意制約に経路が入っていないため、**同じ識別子を別経路で二重に持つことはまだできない**（先に旧行を削除する） |
 
 ---
 
 ### PATCH /api/agents/{id}/trusted-users/{user_id}
 
-**目的**: ユーザーの権限を変更する
+**目的**: 信頼済みユーザーの権限・表示名を変更する（部分更新）
 
 **Request Body**
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| permission | string | ✅ | `"owner"` \| `"trusted"` \| `"user"` |
+| permission | string | ❌ | `"owner"` \| `"user"` \| `"co-agent"`。**これ以外は 400**（#234）。省略時は権限に触らない |
+| display_name | string | ❌ | ロスター表示用の名前。省略時は表示名に触らない |
+
+どちらも省略可で、**指定したフィールドだけ**を更新する（両方指定した場合は 1 トランザクションで不可分に適用）。両方省略したリクエストは何も更新せず `{"updated": false}` を返す。
 
 **Example Request**
 
 ```json
-{"permission": "trusted"}
+{"permission": "co-agent"}
+```
+
+表示名だけを変更する:
+
+```json
+{"display_name": "Crab B"}
 ```
 
 **Response**
+
+`updated` は実際に行が更新されたか。対象の `user_id` が存在しない場合は `false`。
 
 ```json
 {"updated": true}

@@ -59,6 +59,108 @@ fn normalize_keywords(keywords: Vec<String>, fallback_title: &str) -> Vec<String
     out
 }
 
+/// heartbeat セッションの speech 行が「エージェント自身の idle（静観）応答」かどうかを判定する。
+///
+/// 判定は**過去データ**（旧 `SPEAK:` / `LEARN` / `IDLE` の語彙で残った heartbeat speech 行）を
+/// メモリ索引から除外するためのもの: 応答本文に非空の `SPEAK:` があれば発話、`LEARN` を含めば
+/// 学習として残す。**#588 Stage 3 でハートビートの専用語彙（旧 `HeartbeatDecision`）は撤去され、
+/// 新しい行はこの形式で書かれない**（通常の配送記録になる）ので、この判定は既存の履歴のための
+/// もの。マーカー集合を列挙せず「全大文字トークン + 中身の有無」で見るため、語彙撤去後の新しい
+/// 記録に対しても安全側（＝実ありとして残す）に働く。
+///
+/// #517: 残り（SPEAK/LEARN でない）は従来「一律 idle」としていたが、#515 で当時の HB は IDLE の
+/// 記録が「`IDLE: <なぜ見送ったか>`」という**本人の言葉の理由**を持つようになっていた（過去データ）。
+/// 理由つきの記録は材料として意味があるので落とさない。**中身があるか**で判定する:
+/// 先頭の全大文字マーカー（`IDLE` / `NO_REPLY` 等 = `[A-Z_]+` と続く任意の `:`）を剥いで
+/// なお非空の本文が残れば「実あり」として残し、剥いだ後が空（無内容の `IDLE` 等・
+/// pre-#515 の 2,991 件）だけを idle ノイズとして除外する。
+///
+/// この変更は**除外を狭める方向のみ**（新 idle 集合 ⊆ 旧 idle 集合）。SPEAK/LEARN の
+/// 扱いは不変。マーカー集合を列挙せず「全大文字トークン + 中身の有無」で見るので、
+/// 生成タイトルの揺れや将来のマーカー追加に強い。
+///
+/// **話者ガード**: idle として捨ててよいのは `speaker_id == agent_id`、つまり
+/// エージェント自身の応答行に限る。本番のハートビートセッションは実測で
+/// 単一話者（全 speech が自分）だが、万一「他者の発言」が混ざっても、それは
+/// 相手の言葉という実質なので idle 扱いにせず材料に残す（本文が SPEAK:/LEARN を
+/// 含まなくても落とさない）。
+///
+/// 対象は `speech` 行のみ。それ以外の log_type は常に「実あり」として残す
+/// （呼び出し側で heartbeat セッションに限定する）。
+fn is_idle_heartbeat_speech(log: &opencrab_db::queries::SessionLogRow, agent_id: &str) -> bool {
+    if log.log_type != "speech" {
+        return false;
+    }
+    // 自分以外の発話（他者の言葉）は idle 扱いにしない = 材料に残す。
+    if log.speaker_id.as_deref() != Some(agent_id) {
+        return false;
+    }
+    let text = log.content.trim();
+    // SPEAK: の後に非空の内容があれば発話 = 実あり。
+    if let Some(rest) = text
+        .lines()
+        .find(|l| l.contains("SPEAK:"))
+        .and_then(|l| l.split_once("SPEAK:").map(|x| x.1))
+    {
+        if !rest.trim().is_empty() {
+            return false;
+        }
+    }
+    // LEARN を含めば学習 = 実あり。
+    if text.to_uppercase().contains("LEARN") {
+        return false;
+    }
+    // #517: 先頭の全大文字マーカーを剥いで中身が残れば実あり（`IDLE: <理由>` を残す）。
+    // 無内容の裸マーカー（`IDLE` 等）だけが idle ノイズ。
+    idle_decision_has_no_reason(text)
+}
+
+/// 先頭の全大文字決定マーカー（`IDLE` / `NO_REPLY` 等 = `[A-Z_]+`）と続く任意の `:` を
+/// 剥いで、残りが空白のみか（＝理由本文が無い裸マーカー）を返す（#517）。
+///
+/// マーカーが無い本文（CJK 等で始まる散文）は剥がすものが無く、非空なら `false`。
+/// これにより「中身があるか」で idle を判定し、`IDLE: <理由>`・改行後に本文が続く
+/// `IDLE\n\n…`・マーカー無しの散文はすべて残し、無内容の `IDLE` / `NO_REPLY` /
+/// 空文字だけを true（＝ idle ノイズ）とする。
+fn idle_decision_has_no_reason(text: &str) -> bool {
+    let t = text.trim();
+    // 先頭の連続する [A-Z_] をマーカーとして数える（ASCII 大文字とアンダースコアのみ）。
+    let marker_len = t
+        .bytes()
+        .take_while(|b| b.is_ascii_uppercase() || *b == b'_')
+        .count();
+    // マーカーが実在するときだけ剥ぐ（無ければ本文全体をそのまま見る）。
+    let rest = &t[marker_len..];
+    let rest = rest.strip_prefix(':').unwrap_or(rest);
+    rest.trim().is_empty()
+}
+
+/// 「何もしていない tick」を構成するノイズ行かどうか（HB 由来ノイズの判定）。
+///
+/// #573 Stage A で呼び出し側の `heartbeat-` 接頭辞ゲートを外し、全セッションへ無条件適用
+/// するようになった。述語は元から接頭辞非依存で、下記 2 種は HB 経路しか生まない目印
+/// （`speaker_id='heartbeat'`）と中身の有無で判定するため、実会話セッションの中身のある
+/// 行を落とすことはない（[`is_idle_heartbeat_speech`] 参照）。
+///
+/// 除外対象は 2 種類:
+/// 1. 毎 tick 注入されるハートビートのプロンプト scaffolding
+///    （`log_type='system'` かつ `speaker_id='heartbeat'`, `main.rs` の 357-388 行）。
+///    これは記憶ではなく毎回同一の指示文で、除かないと全 heartbeat バッチに必ず
+///    残ってしまい「実質ログが残らない」バッチが存在しなくなる。
+/// 2. idle（静観）の speech 行（[`is_idle_heartbeat_speech`]）。
+///
+/// 逆に `tool_call` / `tool_result` / `inner_voice` / 実のある speech（SPEAK/LEARN）/
+/// 他者の発言は実際の活動・実質なので材料に残す。これらが 1 件も残らないバッチだけを
+/// 「純idle」として topic 化しない（#374）。
+fn is_heartbeat_noise(log: &opencrab_db::queries::SessionLogRow, agent_id: &str) -> bool {
+    if log.log_type == "system"
+        && log.speaker_id.as_deref() == Some(opencrab_db::queries::HEARTBEAT_SPEAKER_ID)
+    {
+        return true;
+    }
+    is_idle_heartbeat_speech(log, agent_id)
+}
+
 pub struct IndexBuilder;
 
 impl IndexBuilder {
@@ -160,6 +262,40 @@ impl IndexBuilder {
                 max_log_id = last_log_id;
             }
 
+            // 「何もしなかった tick」のノイズ行（毎tickのプロンプト scaffolding と idle の
+            // speech 行）を要約材料から除く。実質行が残らないグループは topic を作らずスキップ
+            // する（何もしなかったハートビートを索引しない — #374）。発生源（main.rs）は静観
+            // 履歴を自己文脈に使う設計のため手を入れず、索引側だけで落とす。バッチ結合で idle と
+            // 実のある tick が同居するため「グループ丸ごとスキップ」ではなく、ノイズ行を除いた
+            // 実質（SPEAK/LEARN の speech・tool・inner_voice 等）の有無で判定する。
+            // watermark（max_log_id）は上で前進済みなので、topic を作らなくても毎 tick
+            // 同じログを取り直す無限ループにはならない。
+            //
+            // #573 Stage A: `session_id.starts_with("heartbeat-")` のゲートを外し、
+            // [`is_heartbeat_noise`] を**全セッションに無条件適用**する。統合後（Stage B）は
+            // HB tick が実会話セッションに直接記録されるため、接頭辞でノイズを絞れなくなる。
+            // 述語自体は既に接頭辞非依存で安全: (1) scaffolding は `speaker_id='heartbeat'`
+            // （HB 経路しか書かない）で判定、(2) idle は #517 以降「中身の無い裸マーカー
+            // （`IDLE` / `NO_REPLY` 等）だけ」を落とし、`IDLE: <理由>` や散文・他者発言・
+            // 実のある発話は残す。実会話セッションに既にある裸 `NO_REPLY`（`record_agent_no_reply`
+            // が記録）が材料から落ちるだけで、中身のある行は落ちない（＝索引材料は縮まない方向に
+            // のみ変わる）。
+            // #425: エコー行（HB 発話の表示専用の二重記録）は topic 要約の材料に入れない。
+            // 記憶材料としての HB 発話は heartbeat セッション側が担うため、索引・宣言材料は
+            // この PR の前後で不変。watermark（max_log_id）は上でフィルタ前の session_logs から
+            // 算出済みなので、材料が空でも前進する（エコーだけのバッチが「永遠に未索引」で
+            // バッチを詰まらせない — #416 と同族の「無言で進まない」を作らない）。
+            let material_logs: Vec<&opencrab_db::queries::SessionLogRow> = session_logs
+                .iter()
+                .filter(|l| {
+                    !opencrab_db::queries::is_heartbeat_channel_echo(l.metadata_json.as_deref())
+                })
+                .filter(|l| !is_heartbeat_noise(l, agent_id))
+                .collect();
+            if material_logs.is_empty() {
+                continue;
+            }
+
             // 期間ノード（年月）を確保。
             // ラベルはログ自身のタイムスタンプから導出する。インデックス実行時刻
             // （Utc::now()）を使うと、rebuild や遅延インデックス時に過去のセッションが
@@ -212,8 +348,9 @@ impl IndexBuilder {
                     .lock()
                     .map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
                 if opencrab_db::queries::get_index_node(&db, &session_node_id)?.is_none() {
-                    // セッションノードのタイトルは最初のログから推測
-                    let preview = session_logs
+                    // セッションノードのタイトルは最初の実質ログから推測
+                    // （heartbeat では idle 行を除いた material_logs を使う）。
+                    let preview = material_logs
                         .first()
                         .map(|l| {
                             let chars: Vec<char> = l.content.chars().collect();
@@ -252,8 +389,8 @@ impl IndexBuilder {
                 }
             }
 
-            // ログテキスト連結
-            let chunk_text: String = session_logs
+            // ログテキスト連結（heartbeat では idle 行を除いた material_logs を材料にする）
+            let chunk_text: String = material_logs
                 .iter()
                 .map(|l| {
                     let speaker = l.speaker_id.as_deref().unwrap_or("unknown");
@@ -305,7 +442,7 @@ impl IndexBuilder {
                     let json_str = crate::llm_text::strip_code_fences(&text);
                     serde_json::from_str::<LlmSummary>(json_str).unwrap_or(LlmSummary {
                         title: format!("Topic (logs {first_log_id}-{last_log_id})"),
-                        summary: session_logs
+                        summary: material_logs
                             .first()
                             .map(|l| {
                                 let chars: Vec<char> = l.content.chars().collect();
@@ -320,18 +457,23 @@ impl IndexBuilder {
                     })
                 }
                 Err(e) => {
+                    // LLM 呼び出し自体が失敗したケース（JSON パース失敗ではない）。
+                    // 以前は "Summary generation failed" というプレースホルダ topic を
+                    // 作っていたが、中身ゼロのノードが索引・FTS に恒久的に残り続けるだけで
+                    // 意味がなかった（#378）。ここでは topic を作らずスキップする。
+                    // watermark（max_log_id）はループ冒頭（220-222 行）で既に前進済みなので、
+                    // topic を作らなくても毎 tick 同じログを取り直す無限ループにはならない
+                    // （#374 と同じ罠を回避）。ただし失敗レンジはその分二度と再要約されない
+                    // ため、何が抜けたか後から分かるよう warn に範囲とエラーを残す。
                     tracing::warn!(
                         agent_id = %agent_id,
-                        first_log_id = first_log_id,
-                        last_log_id = last_log_id,
+                        session_id = %session_id,
+                        start_log_id = first_log_id,
+                        end_log_id = last_log_id,
                         error = %e,
-                        "LLM summary generation failed, using fallback"
+                        "LLM summary generation failed, skipping topic (watermark still advances)"
                     );
-                    LlmSummary {
-                        title: format!("Topic (logs {first_log_id}-{last_log_id})"),
-                        summary: "Summary generation failed".to_string(),
-                        keywords: Vec::new(),
-                    }
+                    continue;
                 }
             };
             let keywords = normalize_keywords(summary.keywords, &summary.title);
@@ -1042,6 +1184,126 @@ mod tests {
         assert_eq!(r2.logs_indexed, 0);
     }
 
+    /// LLM 呼び出しそのものが失敗するモック（#378）。
+    struct FailingLlm;
+
+    #[async_trait]
+    impl LlmClient for FailingLlm {
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse> {
+            Err(anyhow::anyhow!("simulated provider failure"))
+        }
+    }
+
+    /// JSON ではない応答を返すモック（要約経路の `Ok` だがパース失敗ケース）。
+    struct InvalidJsonMockLlm;
+
+    #[async_trait]
+    impl LlmClient for InvalidJsonMockLlm {
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse> {
+            Ok(ChatResponse::text(
+                "これはJSONではない普通の文章です".to_string(),
+            ))
+        }
+    }
+
+    /// #378: LLM 呼び出しが Err のときはプレースホルダ topic を作らずスキップする。
+    /// ただし watermark は前進させ、同じログを毎 tick 取り直す無限ループ（#374 の罠）を防ぐ。
+    #[tokio::test]
+    async fn test_llm_error_skips_topic_but_advances_watermark() {
+        let db_conn = opencrab_db::init_memory().unwrap();
+        insert_logs(&db_conn, "agent-1", "session-1", 2);
+        let conn = opencrab_db::Db::from_connection(db_conn);
+
+        let result = IndexBuilder::build_incremental(
+            &conn,
+            "agent-1",
+            &FailingLlm,
+            "test-model",
+            50,
+            "",
+            None,
+        )
+        .await
+        .unwrap();
+
+        // logs は取得されている（スキップされたのは topic 生成だけ）
+        assert_eq!(result.logs_indexed, 2);
+
+        let db = conn.lock().unwrap();
+        let tree = opencrab_db::queries::get_index_tree(&db, "agent-1").unwrap();
+        // topic ノードは 1 件も作られない（"Summary generation failed" プレースホルダを作らない）
+        assert!(
+            !tree.iter().any(|n| n.node_type == "topic"),
+            "LLM エラー時に topic を作ってはならない"
+        );
+        assert!(
+            !tree
+                .iter()
+                .any(|n| n.summary == "Summary generation failed"),
+            "'Summary generation failed' プレースホルダを作ってはならない"
+        );
+
+        // watermark は最終ログ ID まで前進している（再ビルドで再取得しない）
+        let wm = opencrab_db::queries::get_index_watermark(&db, "agent-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            wm.last_indexed_log_id, 2,
+            "watermark は失敗レンジを追い越して前進すべき"
+        );
+        drop(db);
+
+        // 再ビルドしても新しいログは取得されない（毎 tick 再取得ループにならない）
+        let r2 = IndexBuilder::build_incremental(
+            &conn,
+            "agent-1",
+            &FailingLlm,
+            "test-model",
+            50,
+            "",
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(r2.logs_indexed, 0, "watermark 前進済みなので再取得しない");
+    }
+
+    /// #378: JSON パース失敗（応答は返っている）ケースは従来どおり topic を作る。
+    /// 先頭ログ本文の先頭 100 字を summary に使う既存挙動を変えない。
+    #[tokio::test]
+    async fn test_invalid_json_still_creates_topic() {
+        let db_conn = opencrab_db::init_memory().unwrap();
+        let content = "Rust の所有権について議論した内容のログ".to_string();
+        let log = opencrab_db::queries::SessionLogRow {
+            id: None,
+            agent_id: "agent-1".to_string(),
+            session_id: "session-1".to_string(),
+            log_type: "message".to_string(),
+            content: content.clone(),
+            speaker_id: Some("user-1".to_string()),
+            turn_number: Some(1),
+            metadata_json: None,
+            created_at: None,
+        };
+        opencrab_db::queries::insert_session_log(&db_conn, &log).unwrap();
+        let conn = opencrab_db::Db::from_connection(db_conn);
+
+        IndexBuilder::build_incremental(&conn, "agent-1", &InvalidJsonMockLlm, "m", 50, "", None)
+            .await
+            .unwrap();
+
+        let db = conn.lock().unwrap();
+        let tree = opencrab_db::queries::get_index_tree(&db, "agent-1").unwrap();
+        let topic = tree
+            .iter()
+            .find(|n| n.node_type == "topic")
+            .expect("パース失敗時も topic は作られるべき");
+        // 100 字未満なので先頭ログ本文がそのまま summary になる
+        assert_eq!(topic.summary, content);
+        assert_ne!(topic.summary, "Summary generation failed");
+        assert_eq!(topic.title, "Topic (logs 1-1)");
+    }
+
     /// ヘルパー: 指定セッションにN件のログを投入
     fn insert_logs(conn: &rusqlite::Connection, agent_id: &str, session_id: &str, count: usize) {
         for i in 0..count {
@@ -1690,5 +1952,581 @@ mod tests {
         // date_from/date_to should be None when all logs have empty created_at
         assert_eq!(t.date_from, None);
         assert_eq!(t.date_to, None);
+    }
+
+    // ================================================================
+    // #374: 何もしなかったハートビート（idle）を topic 化しない
+    // ================================================================
+
+    /// heartbeat セッションに任意の log_type / speaker の行を投入するヘルパー。
+    fn insert_hb_row(
+        conn: &rusqlite::Connection,
+        agent_id: &str,
+        session_id: &str,
+        log_type: &str,
+        speaker: &str,
+        content: &str,
+    ) {
+        let log = opencrab_db::queries::SessionLogRow {
+            id: None,
+            agent_id: agent_id.to_string(),
+            session_id: session_id.to_string(),
+            log_type: log_type.to_string(),
+            content: content.to_string(),
+            speaker_id: Some(speaker.to_string()),
+            turn_number: None,
+            metadata_json: None,
+            created_at: None,
+        };
+        opencrab_db::queries::insert_session_log(conn, &log).unwrap();
+    }
+
+    /// heartbeat セッションに agent の speech 行を投入するヘルパー。
+    fn insert_heartbeat_speech(
+        conn: &rusqlite::Connection,
+        agent_id: &str,
+        session_id: &str,
+        content: &str,
+    ) {
+        insert_hb_row(conn, agent_id, session_id, "speech", agent_id, content);
+    }
+
+    /// 毎 tick 注入される heartbeat のプロンプト scaffolding 行を投入するヘルパー。
+    fn insert_heartbeat_prompt(conn: &rusqlite::Connection, agent_id: &str, session_id: &str) {
+        insert_hb_row(
+            conn,
+            agent_id,
+            session_id,
+            "system",
+            "heartbeat",
+            "[ハートビート] 現在の会話「x」。出力形式: SPEAK/LEARN/IDLE のいずれか。",
+        );
+    }
+
+    /// idle 判定が過去データ（旧 SPEAK/LEARN/IDLE 語彙）の分類と一致することを直接確認する。
+    #[test]
+    fn test_is_idle_heartbeat_speech_classification() {
+        // speaker はデフォルトで自分（"a"）。
+        let mk = |content: &str, log_type: &str| opencrab_db::queries::SessionLogRow {
+            id: None,
+            agent_id: "a".to_string(),
+            session_id: "heartbeat-a-c".to_string(),
+            log_type: log_type.to_string(),
+            content: content.to_string(),
+            speaker_id: Some("a".to_string()),
+            turn_number: None,
+            metadata_json: None,
+            created_at: None,
+        };
+        // SPEAK: も LEARN も無い → idle
+        assert!(is_idle_heartbeat_speech(&mk("IDLE", "speech"), "a"));
+        assert!(is_idle_heartbeat_speech(&mk("  IDLE  ", "speech"), "a"));
+        // SPEAK: の後に非空 → 実あり
+        assert!(!is_idle_heartbeat_speech(
+            &mk("SPEAK: hello", "speech"),
+            "a"
+        ));
+        assert!(!is_idle_heartbeat_speech(
+            &mk("考えた結果\nSPEAK: みんなおはよう", "speech"),
+            "a"
+        ));
+        // SPEAK: が空 → idle（main.rs と同基準）
+        assert!(is_idle_heartbeat_speech(&mk("SPEAK:", "speech"), "a"));
+        assert!(is_idle_heartbeat_speech(&mk("SPEAK:   ", "speech"), "a"));
+        // LEARN を含む → 実あり
+        assert!(!is_idle_heartbeat_speech(&mk("LEARN", "speech"), "a"));
+        assert!(!is_idle_heartbeat_speech(
+            &mk("learn something new", "speech"),
+            "a"
+        ));
+        // speech 以外の log_type は常に実あり扱い（heartbeat の応答は speech のみ）
+        assert!(!is_idle_heartbeat_speech(&mk("IDLE", "system"), "a"));
+        // 話者ガード: 他者の発言は本文が idle 風でも idle 扱いにしない（材料に残す）
+        assert!(!is_idle_heartbeat_speech(
+            &mk("IDLE", "speech"),
+            "other-agent"
+        ));
+    }
+
+    /// #517: #515 以降、IDLE の記録は「`IDLE: <なぜ見送ったか>`」と本人の言葉の理由を持つ。
+    /// 理由つきは材料として意味があるので**索引に残す**。無内容の裸マーカーだけを除外する。
+    /// サンプルは本番 DB（`?mode=ro`）の実データから採取。
+    #[test]
+    fn idle_speech_keeps_reasoned_records_517() {
+        let mk = |content: &str| opencrab_db::queries::SessionLogRow {
+            id: None,
+            agent_id: "a".to_string(),
+            session_id: "heartbeat-a-c".to_string(),
+            log_type: "speech".to_string(),
+            content: content.to_string(),
+            speaker_id: Some("a".to_string()),
+            turn_number: None,
+            metadata_json: None,
+            created_at: None,
+        };
+
+        // 無内容の裸マーカー・空文字は従来どおり idle（除外）— 回帰ガード。
+        assert!(is_idle_heartbeat_speech(&mk("IDLE"), "a"));
+        assert!(is_idle_heartbeat_speech(&mk("  IDLE  "), "a"));
+        assert!(is_idle_heartbeat_speech(&mk("IDLE:"), "a"));
+        assert!(is_idle_heartbeat_speech(&mk("IDLE:   "), "a"));
+        assert!(
+            is_idle_heartbeat_speech(&mk("NO_REPLY"), "a"),
+            "裸の決定マーカーは除外"
+        );
+        assert!(is_idle_heartbeat_speech(&mk(""), "a"), "空文字は除外");
+
+        // #515 の理由つき IDLE（本番実サンプル）は実ありとして残す。
+        for s in [
+            "IDLE: 自分自身を直す開発ツールの再帰ネタで、TLへ自然に混ざった。",
+            "IDLE: まだ30分経っていない。静かに待つ。",
+            "IDLE: TLの新着を絞り込み中。",
+            // 改行後に本文が続く形（マーカー行の後に散文）も残す。
+            "IDLE\n\n特に話題もないしのんびりしてるよ〜☀️",
+        ] {
+            assert!(
+                !is_idle_heartbeat_speech(&mk(s), "a"),
+                "理由つき IDLE を落としている: {s}"
+            );
+        }
+
+        // マーカー無しの散文（本番実サンプル）も中身があるので残す。
+        assert!(!is_idle_heartbeat_speech(&mk("確認中だよ〜。"), "a"));
+
+        // SPEAK/LEARN の扱いは不変。
+        assert!(!is_idle_heartbeat_speech(&mk("SPEAK: おはよう"), "a"));
+        assert!(is_idle_heartbeat_speech(&mk("SPEAK:"), "a"));
+        assert!(!is_idle_heartbeat_speech(&mk("LEARN"), "a"));
+    }
+
+    /// #517: 理由判定ヘルパの単体。先頭全大文字マーカー＋任意の `:` を剥いだ残りの有無で決める。
+    #[test]
+    fn idle_decision_has_no_reason_unit_517() {
+        // 裸マーカー / 空 → 理由なし（true）。
+        assert!(idle_decision_has_no_reason("IDLE"));
+        assert!(idle_decision_has_no_reason("IDLE:"));
+        assert!(idle_decision_has_no_reason("NO_REPLY"));
+        assert!(idle_decision_has_no_reason("  IDLE  "));
+        assert!(idle_decision_has_no_reason(""));
+        // 理由つき / 散文 → 理由あり（false）。
+        assert!(!idle_decision_has_no_reason("IDLE: 理由"));
+        assert!(!idle_decision_has_no_reason("IDLE:理由"));
+        assert!(!idle_decision_has_no_reason("IDLE\n\n本文"));
+        assert!(!idle_decision_has_no_reason("確認中だよ〜。"));
+    }
+
+    /// is_heartbeat_noise: プロンプト scaffolding と idle speech を除き、
+    /// tool/inner_voice/実ある speech は残す。
+    #[test]
+    fn test_is_heartbeat_noise_classification() {
+        let mk =
+            |content: &str, log_type: &str, speaker: &str| opencrab_db::queries::SessionLogRow {
+                id: None,
+                agent_id: "a".to_string(),
+                session_id: "heartbeat-a-c".to_string(),
+                log_type: log_type.to_string(),
+                content: content.to_string(),
+                speaker_id: Some(speaker.to_string()),
+                turn_number: None,
+                metadata_json: None,
+                created_at: None,
+            };
+        // 毎tick のプロンプト scaffolding（system + speaker=heartbeat）→ ノイズ
+        assert!(is_heartbeat_noise(
+            &mk("[ハートビート] ...", "system", "heartbeat"),
+            "a"
+        ));
+        // idle speech（自分）→ ノイズ
+        assert!(is_heartbeat_noise(&mk("IDLE", "speech", "a"), "a"));
+        // 実のある speech → 残す
+        assert!(!is_heartbeat_noise(&mk("SPEAK: hi", "speech", "a"), "a"));
+        assert!(!is_heartbeat_noise(&mk("LEARN x", "speech", "a"), "a"));
+        // tool / inner_voice は実活動 → 残す
+        assert!(!is_heartbeat_noise(&mk("call foo", "tool_call", "a"), "a"));
+        assert!(!is_heartbeat_noise(&mk("result", "tool_result", "a"), "a"));
+        assert!(!is_heartbeat_noise(
+            &mk("考えている", "inner_voice", "a"),
+            "a"
+        ));
+        // system でも speaker が heartbeat 以外なら残す
+        assert!(!is_heartbeat_noise(&mk("なにか", "system", "a"), "a"));
+        // 他者の発言は本文が idle 風でも残す（相手の言葉を落とさない）
+        assert!(!is_heartbeat_noise(&mk("IDLE", "speech", "other"), "a"));
+    }
+
+    /// 純idle だけの heartbeat グループ（毎tick のプロンプト + idle speech のみ）
+    /// → topic を作らず、watermark は前進する。
+    #[tokio::test]
+    async fn test_heartbeat_idle_only_no_topic_but_watermark_advances() {
+        let db_conn = opencrab_db::init_memory().unwrap();
+        let sid = "heartbeat-agent-1-chan-1";
+        // 3 tick 分。各 tick は「プロンプト行 + idle の応答」の 2 行。
+        for _ in 0..3 {
+            insert_heartbeat_prompt(&db_conn, "agent-1", sid);
+            insert_heartbeat_speech(&db_conn, "agent-1", sid, "IDLE");
+        }
+        let conn = opencrab_db::Db::from_connection(db_conn);
+
+        let result = IndexBuilder::build_incremental(&conn, "agent-1", &MockLlm, "m", 50, "", None)
+            .await
+            .unwrap();
+        // 6 行は処理対象として消費される（logs_indexed は取得件数）
+        assert_eq!(result.logs_indexed, 6);
+
+        {
+            let db = conn.lock().unwrap();
+            let tree = opencrab_db::queries::get_index_tree(&db, "agent-1").unwrap();
+            // 実質行が無いので topic も session も作られない（root のみ）
+            assert!(
+                tree.iter().all(|n| n.node_type != "topic"),
+                "純idle なら topic は作られない"
+            );
+            assert!(
+                tree.iter().all(|n| n.node_type != "session"),
+                "純idle なら session ノードも作られない"
+            );
+            // watermark は最終ログ ID まで前進している
+            let wm = opencrab_db::queries::get_index_watermark(&db, "agent-1")
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                wm.last_indexed_log_id, 6,
+                "topic を作らなくても watermark は前進する"
+            );
+        }
+
+        // 再ビルドで同じログを取り直さない（無限ループにならない）
+        let r2 = IndexBuilder::build_incremental(&conn, "agent-1", &MockLlm, "m", 50, "", None)
+            .await
+            .unwrap();
+        assert_eq!(r2.logs_indexed, 0, "watermark 前進により再取得しない");
+    }
+
+    /// decision が idle でも tool/inner_voice の実活動があれば topic は作られる。
+    #[tokio::test]
+    async fn test_heartbeat_idle_decision_with_tool_activity_creates_topic() {
+        let db_conn = opencrab_db::init_memory().unwrap();
+        let sid = "heartbeat-agent-1-chan-1";
+        insert_heartbeat_prompt(&db_conn, "agent-1", sid);
+        insert_hb_row(
+            &db_conn,
+            "agent-1",
+            sid,
+            "inner_voice",
+            "agent-1",
+            "状況を確認しよう",
+        );
+        insert_hb_row(
+            &db_conn,
+            "agent-1",
+            sid,
+            "tool_call",
+            "agent-1",
+            "search(x)",
+        );
+        insert_hb_row(
+            &db_conn,
+            "agent-1",
+            sid,
+            "tool_result",
+            "agent-1",
+            "found y",
+        );
+        insert_heartbeat_speech(&db_conn, "agent-1", sid, "IDLE");
+        let conn = opencrab_db::Db::from_connection(db_conn);
+
+        IndexBuilder::build_incremental(&conn, "agent-1", &MockLlm, "m", 50, "", None)
+            .await
+            .unwrap();
+
+        let db = conn.lock().unwrap();
+        let tree = opencrab_db::queries::get_index_tree(&db, "agent-1").unwrap();
+        assert!(
+            tree.iter().any(|n| n.node_type == "topic"),
+            "tool/inner_voice の実活動があれば topic は作られる"
+        );
+    }
+
+    /// 話者ガード: heartbeat セッションに他者の発言が混ざっていたら、自分は idle でも
+    /// topic を作り、他者の言葉を要約材料に残す（相手の言葉を落とさない）。
+    #[tokio::test]
+    async fn test_heartbeat_others_speech_is_kept() {
+        let db_conn = opencrab_db::init_memory().unwrap();
+        let sid = "heartbeat-agent-1-chan-1";
+        // 自分は静観、しかし相手が話しかけてきた（本文は SPEAK:/LEARN を含まない実質発言）
+        insert_heartbeat_prompt(&db_conn, "agent-1", sid);
+        insert_heartbeat_speech(&db_conn, "agent-1", sid, "IDLE");
+        insert_hb_row(
+            &db_conn,
+            "agent-1",
+            sid,
+            "speech",
+            "someone-else",
+            "ねえ、これどう思う？相手からの実質発言marker",
+        );
+        let conn = opencrab_db::Db::from_connection(db_conn);
+
+        let last_request = Arc::new(Mutex::new(None));
+        let llm = RecordingMockLlm {
+            last_request: last_request.clone(),
+        };
+        IndexBuilder::build_incremental(&conn, "agent-1", &llm, "m", 50, "", None)
+            .await
+            .unwrap();
+
+        {
+            let db = conn.lock().unwrap();
+            let tree = opencrab_db::queries::get_index_tree(&db, "agent-1").unwrap();
+            assert!(
+                tree.iter().any(|n| n.node_type == "topic"),
+                "他者の発言があれば topic は作られる"
+            );
+        }
+        // 他者の発言は要約材料に含まれ、自分の idle 行は除かれる
+        let request = last_request.lock().unwrap().clone().unwrap();
+        let prompt = request.messages[1].text_content().unwrap_or("").to_string();
+        assert!(
+            prompt.contains("相手からの実質発言marker"),
+            "他者の発言は材料に残る"
+        );
+    }
+
+    /// idle と実のある tick が混在する heartbeat グループ → topic は作られ、
+    /// 要約の材料から idle 行が除かれている。被覆範囲は全ログを跨ぐ。
+    #[tokio::test]
+    async fn test_heartbeat_mixed_creates_topic_excluding_idle_material() {
+        let db_conn = opencrab_db::init_memory().unwrap();
+        let sid = "heartbeat-agent-1-chan-1";
+        // #517: idle 行は実在形の裸マーカー（`IDLE`）を使う。以前は "IDLE静観marker" と
+        // マーカーに内容を直結した合成文字列だったが、#517 で「中身があるか」判定に変えた
+        // 結果その形は理由つき扱いで残る（意図どおり）。無内容の裸 idle が材料から除かれる
+        // ことをここで担保する（理由つき idle を残すことは unit テストが担保）。
+        insert_heartbeat_speech(&db_conn, "agent-1", sid, "IDLE");
+        insert_heartbeat_speech(&db_conn, "agent-1", sid, "SPEAK: 実のある発言unique");
+        insert_heartbeat_speech(&db_conn, "agent-1", sid, "IDLE");
+        let conn = opencrab_db::Db::from_connection(db_conn);
+
+        let last_request = Arc::new(Mutex::new(None));
+        let llm = RecordingMockLlm {
+            last_request: last_request.clone(),
+        };
+        IndexBuilder::build_incremental(&conn, "agent-1", &llm, "m", 50, "", None)
+            .await
+            .unwrap();
+
+        {
+            let db = conn.lock().unwrap();
+            let tree = opencrab_db::queries::get_index_tree(&db, "agent-1").unwrap();
+            let topic = tree
+                .iter()
+                .find(|n| n.node_type == "topic")
+                .expect("実のある行があれば topic は作られる");
+            // 被覆範囲は idle を含む全ログを跨ぐ（watermark/カバレッジ維持）
+            assert_eq!(topic.start_log_id, Some(1));
+            assert_eq!(topic.end_log_id, Some(3));
+            let wm = opencrab_db::queries::get_index_watermark(&db, "agent-1")
+                .unwrap()
+                .unwrap();
+            assert_eq!(wm.last_indexed_log_id, 3);
+        }
+
+        // LLM に渡した要約材料から idle 行が除かれ、実のある行だけが含まれる
+        let request = last_request.lock().unwrap().clone().unwrap();
+        let prompt = request.messages[1].text_content().unwrap_or("").to_string();
+        assert!(
+            prompt.contains("実のある発言unique"),
+            "実のある行は材料に含まれる"
+        );
+        assert!(
+            !prompt.contains("IDLE"),
+            "無内容の裸 idle 行は要約材料から除かれる"
+        );
+    }
+
+    /// heartbeat の LEARN 行は実ありとして残り、topic が作られる。
+    #[tokio::test]
+    async fn test_heartbeat_learn_row_is_substantive() {
+        let db_conn = opencrab_db::init_memory().unwrap();
+        let sid = "heartbeat-agent-1-chan-1";
+        insert_heartbeat_speech(&db_conn, "agent-1", sid, "IDLE");
+        insert_heartbeat_speech(&db_conn, "agent-1", sid, "LEARN 新しい知見を得た");
+        let conn = opencrab_db::Db::from_connection(db_conn);
+
+        IndexBuilder::build_incremental(&conn, "agent-1", &MockLlm, "m", 50, "", None)
+            .await
+            .unwrap();
+
+        let db = conn.lock().unwrap();
+        let tree = opencrab_db::queries::get_index_tree(&db, "agent-1").unwrap();
+        assert!(
+            tree.iter().any(|n| n.node_type == "topic"),
+            "LEARN 行があれば topic は作られる"
+        );
+    }
+
+    /// 通常（非 heartbeat）セッションは idle フィルタの対象外。本文が "IDLE" でも
+    /// 従来どおり topic が作られる。
+    #[tokio::test]
+    async fn test_non_heartbeat_session_bare_idle_marker_is_filtered_573() {
+        // #573 Stage A: idle ノイズ除外は接頭辞ゲートを外し全セッションへ適用する。
+        // 通常セッション（`heartbeat-` で始まらない）でも、中身の無い裸マーカーだけの
+        // バッチは topic を作らない（実会話セッションの裸 `NO_REPLY` が材料を汚さない）。
+        let db_conn = opencrab_db::init_memory().unwrap();
+        insert_heartbeat_speech(&db_conn, "agent-1", "discord-agent-1-g-c", "NO_REPLY");
+        let conn = opencrab_db::Db::from_connection(db_conn);
+
+        IndexBuilder::build_incremental(&conn, "agent-1", &MockLlm, "m", 50, "", None)
+            .await
+            .unwrap();
+
+        let db = conn.lock().unwrap();
+        let tree = opencrab_db::queries::get_index_tree(&db, "agent-1").unwrap();
+        assert!(
+            !tree.iter().any(|n| n.node_type == "topic"),
+            "通常セッションでも裸マーカーのみのバッチは topic を作らない"
+        );
+    }
+
+    /// #573 Stage A: 接頭辞ゲートを外しても**中身のある発話は落とさない**（過剰フィルタ
+    /// でないことの包含確認）。通常セッションに実のある speech があれば topic が作られる。
+    #[tokio::test]
+    async fn test_non_heartbeat_session_substantive_speech_still_indexed_573() {
+        let db_conn = opencrab_db::init_memory().unwrap();
+        insert_heartbeat_speech(
+            &db_conn,
+            "agent-1",
+            "discord-agent-1-g-c",
+            "IDLE: 相手が寝る前の挨拶をしていたので静かに見送った。",
+        );
+        let conn = opencrab_db::Db::from_connection(db_conn);
+
+        IndexBuilder::build_incremental(&conn, "agent-1", &MockLlm, "m", 50, "", None)
+            .await
+            .unwrap();
+
+        let db = conn.lock().unwrap();
+        let tree = opencrab_db::queries::get_index_tree(&db, "agent-1").unwrap();
+        assert!(
+            tree.iter().any(|n| n.node_type == "topic"),
+            "中身のある IDLE 理由（#517）は通常セッションでも材料に残り topic 化する"
+        );
+    }
+
+    /// #425 表示専用エコー行を投入するヘルパー。実会話（discord）セッションに、
+    /// 印つき speech として入れる。
+    fn insert_echo(conn: &rusqlite::Connection, agent_id: &str, session_id: &str, content: &str) {
+        let log = opencrab_db::queries::SessionLogRow {
+            id: None,
+            agent_id: agent_id.to_string(),
+            session_id: session_id.to_string(),
+            log_type: "speech".to_string(),
+            content: content.to_string(),
+            speaker_id: Some(agent_id.to_string()),
+            turn_number: None,
+            metadata_json: Some(opencrab_db::queries::HEARTBEAT_CHANNEL_ECHO_METADATA.to_string()),
+            created_at: None,
+        };
+        opencrab_db::queries::insert_session_log(conn, &log).unwrap();
+    }
+
+    /// #425: エコー行だけのバッチ（実会話セッションに印つき行しか無い）→ topic を作らず、
+    /// watermark は前進する。エコー行が「永遠に未索引」で残ってバッチを詰まらせない
+    /// （#416 と同族の「無言で進まない」を作らない）。再ビルドで同じ行を取り直さない。
+    #[tokio::test]
+    async fn test_heartbeat_echo_only_no_topic_but_watermark_advances() {
+        let db_conn = opencrab_db::init_memory().unwrap();
+        let sid = "discord-agent-1-111-222";
+        insert_echo(&db_conn, "agent-1", sid, "エコー発話1");
+        insert_echo(&db_conn, "agent-1", sid, "エコー発話2");
+        insert_echo(&db_conn, "agent-1", sid, "エコー発話3");
+        let conn = opencrab_db::Db::from_connection(db_conn);
+
+        let result = IndexBuilder::build_incremental(&conn, "agent-1", &MockLlm, "m", 50, "", None)
+            .await
+            .unwrap();
+        // 3 行は取得（消費）される。
+        assert_eq!(result.logs_indexed, 3);
+
+        {
+            let db = conn.lock().unwrap();
+            let tree = opencrab_db::queries::get_index_tree(&db, "agent-1").unwrap();
+            assert!(
+                tree.iter().all(|n| n.node_type != "topic"),
+                "エコーだけなら topic は作られない（記憶材料に入れない）"
+            );
+            assert!(
+                tree.iter().all(|n| n.node_type != "session"),
+                "エコーだけなら session ノードも作られない"
+            );
+            let wm = opencrab_db::queries::get_index_watermark(&db, "agent-1")
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                wm.last_indexed_log_id, 3,
+                "topic を作らなくても watermark は前進する（バッチが詰まらない）"
+            );
+        }
+
+        // 再ビルドで同じログを取り直さない（無限ループにならない）。
+        let r2 = IndexBuilder::build_incremental(&conn, "agent-1", &MockLlm, "m", 50, "", None)
+            .await
+            .unwrap();
+        assert_eq!(r2.logs_indexed, 0, "watermark 前進により再取得しない");
+    }
+
+    /// #425: 実会話セッションに実発言とエコーが混在 → topic は作られるが、要約材料には
+    /// エコー行が入らない（記憶索引・宣言材料はこの PR の前後で不変）。被覆範囲は
+    /// エコーを含む全ログを跨ぐ（watermark 維持）。
+    #[tokio::test]
+    async fn test_heartbeat_echo_excluded_from_index_material() {
+        let db_conn = opencrab_db::init_memory().unwrap();
+        let sid = "discord-agent-1-111-222";
+        // 他者の実発言（材料に残る）→ 本人の HB エコー（材料から除く）。
+        insert_hb_row(
+            &db_conn,
+            "agent-1",
+            sid,
+            "speech",
+            "someone-else",
+            "他者の実発言substantivemarker",
+        );
+        insert_echo(&db_conn, "agent-1", sid, "本人のHBエコーechomarker");
+        let conn = opencrab_db::Db::from_connection(db_conn);
+
+        let last_request = Arc::new(Mutex::new(None));
+        let llm = RecordingMockLlm {
+            last_request: last_request.clone(),
+        };
+        IndexBuilder::build_incremental(&conn, "agent-1", &llm, "m", 50, "", None)
+            .await
+            .unwrap();
+
+        {
+            let db = conn.lock().unwrap();
+            let tree = opencrab_db::queries::get_index_tree(&db, "agent-1").unwrap();
+            let topic = tree
+                .iter()
+                .find(|n| n.node_type == "topic")
+                .expect("他者の実発言があれば topic は作られる");
+            // 被覆範囲はエコーを含む全ログを跨ぐ（カバレッジ・watermark 維持）。
+            assert_eq!(topic.start_log_id, Some(1));
+            assert_eq!(topic.end_log_id, Some(2));
+            let wm = opencrab_db::queries::get_index_watermark(&db, "agent-1")
+                .unwrap()
+                .unwrap();
+            assert_eq!(wm.last_indexed_log_id, 2);
+        }
+
+        // LLM に渡した要約材料からエコー行が除かれ、他者の実発言だけが含まれる。
+        let request = last_request.lock().unwrap().clone().unwrap();
+        let prompt = request.messages[1].text_content().unwrap_or("").to_string();
+        assert!(
+            prompt.contains("substantivemarker"),
+            "他者の実発言は材料に残る"
+        );
+        assert!(
+            !prompt.contains("echomarker"),
+            "エコー行は要約材料から除かれる（記憶索引に入れない）"
+        );
     }
 }

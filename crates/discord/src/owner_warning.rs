@@ -12,10 +12,21 @@
 use tracing::warn;
 
 /// owner 未設定が招く結果（両経路で同じ内容を出す）。
-const CONSEQUENCES: &str = "Consequences: (1) owner-only features are unavailable because no one \
-     is recognized as owner; (2) for agents with no trusted users registered, DMs from ANY \
-     Discord user are accepted; (3) owner-only UI (forms/modals/buttons) skips its operator \
-     check and is open to anyone who can see it.";
+///
+/// 未設定時のフォールバックは拒否側に統一した（#174）。以前のように「黙って権限が
+/// 緩む」のではなく「**黙って機能しない**」ので、何が動かなくなるかを具体的に書く。
+/// 運用者が「なぜ DM に応答しないのか分からない」状態に落ちるのを防ぐのがこの警告の
+/// 役目なので、ここの文面と実際のフォールバック挙動はセットで変えること。
+///
+/// (3) を「オーナー専用 UI」と書かないのは、操作者チェックが**すべての A2UI 描画面**に
+/// 効くため（`owner_only` 引数は DB の列にしか効かず、ゲートは見ていない）。狭く書くと
+/// 「オーナー専用じゃない UI は生きているはず」と誤読され、原因の切り分けを外す。
+const CONSEQUENCES: &str = "Consequences (an unset owner now fails closed): (1) owner-only \
+     features are unavailable because no one is recognized as owner; (2) for agents with no \
+     trusted Discord users registered, DMs are REJECTED from everyone, so the agent will not \
+     reply to any DM; (3) EVERY interactive UI the agent sends (forms/modals/buttons) cannot be \
+     operated by anyone -- the operator check runs on every A2UI surface, not just the ones \
+     marked owner-only.";
 
 /// Discord ゲートウェイが**実際に起動する**条件（`enabled` かつトークンがある）。
 ///
@@ -69,21 +80,95 @@ pub fn warn_if_agent_gateway_owner_unset(agent_id: &str, owner_discord_id: &str)
     true
 }
 
+/// 受信転送が連続で失敗しているときの警告（#284 P0-2）。警告したら `true`。
+///
+/// **沈黙して死ぬのが最悪**という前提でこの関数がある。以前は `recv()` が失敗すると
+/// 転送タスクが黙って終了し、他のイベント（サブタスク完了など）は流れ続けるため
+/// 「ボットは動いているのに人間の発言にだけ反応しない」状態が誰にも気づかれないまま
+/// 続いた。再試行しても復旧しないことをここで表面化させる。
+///
+/// 配送手段が `warn!` なのは意図的で、`recv()` が壊れている局面ではゲートウェイ経由の
+/// DM 送信も同時に壊れている可能性が高く、通知自体が黙って失敗しうるため。ログなら
+/// 落ちない（このモジュールの他の警告と同じ扱い）。
+pub fn warn_inbound_stalled(consecutive_failures: u32, secs_since_last_message: u64) -> bool {
+    warn!(
+        failures = consecutive_failures,
+        secs_since_last_message,
+        "Discord inbound receive has failed {consecutive_failures} times in a row and has not \
+         delivered a message for {secs_since_last_message}s. The forwarder keeps retrying with \
+         backoff, but user messages are NOT reaching agents while this lasts. Check the Discord \
+         gateway connection / token."
+    );
+    true
+}
+
+/// ユーザー発言をセッションログに記録できなかったときの警告（#284 P0-3）。警告したら `true`。
+///
+/// 発言の欠落は「副作用の取りこぼし」ではない。記録されなかった発言は会話履歴に
+/// 載らず、エージェントは**その指示を一度も見ないまま**応答する（#284 の症状そのもの）。
+/// 本文は出さない（プライバシー）。切り分けに要るのは「どのセッションで落ちたか」。
+pub fn warn_inbound_message_dropped(session_id: &str, sender_id: &str, text_len: usize) -> bool {
+    warn!(
+        session_id = %session_id,
+        sender_id = %sender_id,
+        text_len,
+        "failed to persist an inbound user message after retries. The agent will answer WITHOUT \
+         ever seeing this message. Check database health (disk full / locked / permissions)."
+    );
+    true
+}
+
 /// テスト用: `tracing` 出力を文字列として捕まえるヘルパー。
 ///
 /// 「警告条件を満たす」だけでなく「実際に warn イベントが出る」ことを検証するため。
 /// per-agent 経路の起動前処理（`manager::prepare_owner_for_gateway`）のテストからも使う。
 #[cfg(test)]
 pub(crate) mod capture {
+    use std::cell::RefCell;
     use std::io;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, Once};
 
-    #[derive(Clone, Default)]
-    struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+    // ---- プロセスで 1 個の subscriber + スレッドローカルの捕捉先 ----
+    //
+    // **`tracing::subscriber::with_default` で捕捉してはいけない。** tracing は
+    // callsite ごとの `Interest`（このイベントを組み立てるか）を**プロセス全体で
+    // 1 度だけ**決めてキャッシュする。誰も subscriber を張っていないスレッドが先に
+    // その callsite を踏むと `Interest::never()` が焼き付き、以後は誰が subscriber を
+    // 張ってもそのイベントは組み立てられない（捕捉バッファが空になる）。
+    //
+    // `with_default` はスレッドローカルなのでこれを止められない: subscriber を作った
+    // 瞬間にグローバルの最大レベルが WARN へ上がり（それまでは OFF で誰も callsite へ
+    // 到達しない）、**その直後から**、同じ警告を subscriber 無しで呼ぶ並行テスト
+    // （`shared_gateway_warning_fires_exactly_when_it_starts_without_owner` など）が
+    // 捕捉側より先に登録してしまう競合が開く。
+    //
+    // なのでプロセス全体で subscriber を 1 個だけ張る。以後どのスレッドが先に踏んでも
+    // `get_default` はその subscriber を返すので `Interest` は「出す」で焼き付く。
+    // どのテストの出力を捕まえるかは**スレッドローカルの捕捉先**で切り替える。テストは
+    // 1 本 1 スレッドで走るので、捕捉中でないスレッドの警告は捨てられ、干渉しない。
+    //
+    // **これでも窓は完全には閉じない。** `set_global_default` は内部で `Dispatch::new`
+    // →（登録の副作用で）最大レベルを WARN へ上げてから、大域の受け口を差し込む。
+    // その数命令の間に別スレッドが callsite を**初めて**踏むと、大域の受け口がまだ
+    // 無いので従来と同じ焼き付きが起きる。窓はプロセスで 1 回きり・マイクロ秒未満だが、
+    // 残すと「稀に落ちる」が残る。**張った直後に `rebuild_interest_cache()` を呼んで
+    // 塞ぐ** — 窓の中で焼き付いた `Interest` も大域の受け口を基準に計算し直される。
 
-    impl io::Write for CaptureWriter {
+    thread_local! {
+        /// このスレッドが捕捉中なら書き込み先。捕捉していなければ `None`（捨てる）。
+        static SINK: RefCell<Option<Arc<Mutex<Vec<u8>>>>> = const { RefCell::new(None) };
+    }
+
+    #[derive(Clone, Copy, Default)]
+    struct ThreadLocalWriter;
+
+    impl io::Write for ThreadLocalWriter {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
+            SINK.with(|sink| {
+                if let Some(sink) = sink.borrow().as_ref() {
+                    sink.lock().unwrap().extend_from_slice(buf);
+                }
+            });
             Ok(buf.len())
         }
         fn flush(&mut self) -> io::Result<()> {
@@ -91,22 +176,43 @@ pub(crate) mod capture {
         }
     }
 
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
-        type Writer = CaptureWriter;
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ThreadLocalWriter {
+        type Writer = ThreadLocalWriter;
         fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
+            *self
         }
     }
 
-    /// `f` の実行中に出た tracing 出力（WARN 以上）を返す。
+    /// `f` の実行中に**このスレッドで**出た tracing 出力（WARN 以上）を返す。
     pub(crate) fn captured_logs(f: impl FnOnce()) -> String {
+        static INSTALL: Once = Once::new();
+        INSTALL.call_once(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(ThreadLocalWriter)
+                .with_ansi(false)
+                .with_max_level(tracing::Level::WARN)
+                .finish();
+            // 張れなければ捕捉は成立しない（別の subscriber が先に居る = テストが
+            // 意味を失う）ので、握りつぶさず落とす。
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("捕捉用 subscriber を張れること（他に global default が居ない）");
+            // 張る途中の窓（上のコメント）で焼き付いた `Interest` を計算し直す。
+            tracing::callsite::rebuild_interest_cache();
+        });
+
+        /// `f` が panic しても捕捉先を残さない。
+        struct Capturing;
+        impl Drop for Capturing {
+            fn drop(&mut self) {
+                SINK.with(|sink| *sink.borrow_mut() = None);
+            }
+        }
+
         let buf: Arc<Mutex<Vec<u8>>> = Arc::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(CaptureWriter(buf.clone()))
-            .with_ansi(false)
-            .with_max_level(tracing::Level::WARN)
-            .finish();
-        tracing::subscriber::with_default(subscriber, f);
+        SINK.with(|sink| *sink.borrow_mut() = Some(buf.clone()));
+        let _capturing = Capturing;
+        f();
+        drop(_capturing);
         let bytes = buf.lock().unwrap().clone();
         String::from_utf8(bytes).unwrap()
     }
@@ -191,6 +297,42 @@ mod tests {
         );
     }
 
+    /// #284 P0-2: 受信が止まっていることが**沈黙ではなくログ**として出ること。
+    /// 以前は転送タスクが黙って死に、「ボットは生きているのに人間の発言だけ届かない」
+    /// 状態が誰にも見えなかった。
+    #[test]
+    fn inbound_stalled_warning_is_emitted() {
+        let logs = captured_logs(|| {
+            assert!(warn_inbound_stalled(5, 42));
+        });
+        assert!(logs.contains("WARN"), "warn レベルで出ること: {logs}");
+        assert!(
+            logs.contains("inbound receive has failed"),
+            "本文が出ること: {logs}"
+        );
+        // 「何回失敗したか」「何秒受信が無いか」が無いと切り分けできない。
+        assert!(logs.contains('5') && logs.contains("42"), "計測値: {logs}");
+    }
+
+    /// #284 P0-3: ユーザー発言を記録できなかったことが表面化すること。
+    /// 本文（プライバシー）は出さず、どのセッションかだけ出す。
+    #[test]
+    fn dropped_inbound_message_warning_is_emitted() {
+        let logs = captured_logs(|| {
+            assert!(warn_inbound_message_dropped(
+                "discord-crab-111-222",
+                "user-1",
+                12
+            ));
+        });
+        assert!(logs.contains("WARN"), "warn レベルで出ること: {logs}");
+        assert!(
+            logs.contains("failed to persist an inbound user message"),
+            "本文が出ること: {logs}"
+        );
+        assert!(logs.contains("discord-crab-111-222"), "session_id: {logs}");
+    }
+
     #[test]
     fn shared_gateway_warning_is_emitted() {
         let logs = captured_logs(|| {
@@ -201,6 +343,44 @@ mod tests {
             logs.contains("gateway.discord.owner_discord_id is empty"),
             "本文が出ること: {logs}"
         );
+    }
+
+    /// #174: 警告本文が「拒否側に倒れる」ことを伝えていること。
+    ///
+    /// フォールバックを拒否側に統一した以上、症状は「権限が緩む」ではなく
+    /// 「DM に応答しない・UI が動かない」。文面が旧挙動（全許可）のままだと、
+    /// 運用者は警告を読んでも原因にたどり着けない。両経路とも同じ本文を出す。
+    #[test]
+    fn warning_explains_that_unset_owner_fails_closed() {
+        for logs in [
+            captured_logs(|| {
+                warn_if_shared_gateway_owner_unset(true, "bot-token", "");
+            }),
+            captured_logs(|| {
+                warn_if_agent_gateway_owner_unset("crab", "");
+            }),
+        ] {
+            assert!(
+                logs.contains("fails closed"),
+                "拒否側に倒れると書いてあること: {logs}"
+            );
+            assert!(
+                logs.contains("DMs are REJECTED from everyone"),
+                "DM に応答しなくなると書いてあること: {logs}"
+            );
+            assert!(
+                logs.contains("EVERY interactive UI"),
+                "UI の影響範囲が全描画面だと書いてあること: {logs}"
+            );
+            assert!(
+                logs.contains("cannot be operated by anyone"),
+                "UI を誰も操作できないと書いてあること: {logs}"
+            );
+            assert!(
+                logs.contains("not just the ones marked owner-only"),
+                "オーナー専用に限らないと書いてあること（狭く読むと原因の切り分けを外す）: {logs}"
+            );
+        }
     }
 
     #[test]

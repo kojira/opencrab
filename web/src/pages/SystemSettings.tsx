@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, Fragment } from 'react';
 import { getLogLevel, patchLogLevel } from '../api/system';
 import {
   getLlmProviders,
@@ -18,6 +18,8 @@ import {
   CursorDiagnostics,
   AcpDiagnostics,
 } from '../api/providers';
+import { listModelPricing, ModelPricing } from '../api/modelPricing';
+import ModelPricingForm from '../components/ui/ModelPricingForm';
 
 const LOG_LEVELS = ['debug', 'info', 'warn', 'error'];
 
@@ -589,6 +591,167 @@ function AcpDiagnosticsCard() {
   );
 }
 
+// ============ モデル単価・コンテキスト長 (model_pricing) ============
+
+const pricingKey = (p: { provider: string; model: string }) => `${p.provider} ${p.model}`;
+
+export function ModelPricingSection() {
+  const [rows, setRows] = useState<ModelPricing[] | null>(null);
+  // 実効予算 = context_window × compaction_ratio。ratio は server-global の単一値。
+  // 旧サーバは返さないので null になりうる（その場合は実効予算列を出さない）。
+  const [ratio, setRatio] = useState<number | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [editingKey, setEditingKey] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const res = await listModelPricing();
+      setRows(res.models);
+      setRatio(typeof res.compaction_ratio === 'number' ? res.compaction_ratio : null);
+    } catch (e) {
+      // model_pricing API が無い旧サーバでは一覧を出さない
+      setRows([]);
+      setMessage(`エラー: ${String(e)}`);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const onSaved = async (saved: ModelPricing) => {
+    setAdding(false);
+    setEditingKey(null);
+    setMessage(`${saved.provider}:${saved.model} を保存しました`);
+    await load();
+  };
+
+  return (
+    <div className="card-elevated space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 className="text-lg font-semibold text-on-surface">
+          モデル単価・コンテキスト長 (model_pricing)
+        </h2>
+        <button
+          onClick={() => {
+            setEditingKey(null);
+            setAdding((v) => !v);
+          }}
+          className={btnGhost}
+        >
+          {adding ? '閉じる' : '追加'}
+        </button>
+      </div>
+      <p className="text-xs text-on-surface-variant">
+        エージェントに設定するモデルは、ここに <code className="font-mono">context_window</code> を
+        登録して初めて保存できます。<strong>
+          実効予算 = context_window × compaction_ratio（{ratio != null ? `現在 ${ratio}` : '既定 0.5'}）
+        </strong>
+        で決まり、小さすぎると注入が切り詰められます。値は
+        <strong>モデル提供元の公式ドキュメント</strong>を参照してください（集約サイトの数字は当てになりません）。
+      </p>
+
+      {message && (
+        <p className={`text-sm ${message.startsWith('エラー') ? 'text-red-500' : 'text-green-600'}`}>
+          {message}
+        </p>
+      )}
+
+      {adding && (
+        <ModelPricingForm submitLabel="登録" onSaved={onSaved} onCancel={() => setAdding(false)} />
+      )}
+
+      {rows === null ? (
+        <p className="py-4 text-sm text-on-surface-variant">読み込み中...</p>
+      ) : rows.length === 0 ? (
+        <p className="py-4 text-sm text-on-surface-variant">
+          登録済みのモデルはありません。「追加」から登録してください。
+        </p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[640px] text-sm">
+            <thead>
+              <tr className="border-b border-outline/40 text-left text-xs text-on-surface-variant">
+                <th className="py-2 pr-3 font-medium">provider</th>
+                <th className="py-2 pr-3 font-medium">model</th>
+                <th className="py-2 pr-3 text-right font-medium">context_window</th>
+                <th className="py-2 pr-3 text-right font-medium">
+                  実効予算{ratio != null ? ` (×${ratio})` : ''}
+                </th>
+                <th className="py-2 pr-3 text-right font-medium">入力 /1M</th>
+                <th className="py-2 pr-3 text-right font-medium">出力 /1M</th>
+                <th className="py-2 font-medium"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => {
+                const key = pricingKey(r);
+                const editing = editingKey === key;
+                return (
+                  <Fragment key={key}>
+                    <tr className="border-b border-outline/20">
+                      <td className="py-2 pr-3 font-mono text-on-surface">{r.provider}</td>
+                      <td className="py-2 pr-3 font-mono text-on-surface break-all">{r.model}</td>
+                      <td className="py-2 pr-3 text-right font-mono text-on-surface">
+                        {r.context_window == null ? (
+                          <span className="text-red-500">未登録</span>
+                        ) : (
+                          r.context_window.toLocaleString()
+                        )}
+                      </td>
+                      {/* 実効予算 = context_window × compaction_ratio。掛け算せず
+                          隣に並べて眺めるだけで「これだけ小さい」に気づけるのが狙い（#484）。
+                          context_window が未登録 / ratio 不明なら計算できないので '—'。 */}
+                      <td className="py-2 pr-3 text-right font-mono font-medium text-on-surface">
+                        {r.context_window == null || ratio == null ? (
+                          <span className="text-on-surface-variant">—</span>
+                        ) : (
+                          Math.round(r.context_window * ratio).toLocaleString()
+                        )}
+                      </td>
+                      <td className="py-2 pr-3 text-right font-mono text-on-surface-variant">
+                        {r.input_price_per_1m}
+                      </td>
+                      <td className="py-2 pr-3 text-right font-mono text-on-surface-variant">
+                        {r.output_price_per_1m}
+                      </td>
+                      <td className="py-2 text-right">
+                        <button
+                          onClick={() => {
+                            setAdding(false);
+                            setEditingKey(editing ? null : key);
+                          }}
+                          className={btnGhost}
+                        >
+                          {editing ? '閉じる' : '編集'}
+                        </button>
+                      </td>
+                    </tr>
+                    {editing && (
+                      <tr>
+                        <td colSpan={7} className="pb-3">
+                          <ModelPricingForm
+                            initial={r}
+                            keysReadOnly
+                            submitLabel="保存"
+                            onSaved={onSaved}
+                            onCancel={() => setEditingKey(null)}
+                          />
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ============ 音声 (VC) 設定 ============
 
 function VoiceSettings() {
@@ -909,6 +1072,8 @@ export default function SystemSettings() {
           )}
         </div>
       </div>
+
+      <ModelPricingSection />
 
       <CodexDiagnosticsCard />
       <CursorDiagnosticsCard />

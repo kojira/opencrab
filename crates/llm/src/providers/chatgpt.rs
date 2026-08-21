@@ -20,6 +20,12 @@ const OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 /// access_token の失効をこの秒数だけ前倒しで判定する（リクエスト飛行中の失効を防ぐ）。
 const TOKEN_EXPIRY_MARGIN_SECS: i64 = 60;
+/// チャット補完リクエスト全体（＝生成の読み切り）の timeout 既定値（秒）。
+/// `reasoning_effort` を上げると 1 ターンの生成がこれを超えることがあるので、
+/// config の `timeout_secs` で伸ばせる（#433）。
+const DEFAULT_TIMEOUT_SECS: u64 = 60;
+/// 接続確立の timeout（秒）。生成の長さとは無関係なので config では変えない。
+const CONNECT_TIMEOUT_SECS: u64 = 10;
 
 /// リフレッシュの直列化（同時多発の 401 で refresh_token を並行消費しない）。
 /// OpenAI はリフレッシュでトークンをローテーションするため、並行リフレッシュは
@@ -213,6 +219,15 @@ fn token_expired(token: &str) -> bool {
     exp - TOKEN_EXPIRY_MARGIN_SECS <= now
 }
 
+/// チャット補完用の HTTP クライアントを組む。read timeout だけが可変。
+fn build_client(timeout_secs: u64) -> Client {
+    Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+        .build()
+        .unwrap_or_default()
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatGptProvider {
     client: Client,
@@ -224,6 +239,11 @@ pub struct ChatGptProvider {
     default_model: String,
     reasoning_effort: Option<String>,
     include_encrypted_content: bool,
+    /// `client` に設定済みの read timeout（秒）。`Client` からは読み出せないので保持する。
+    timeout_secs: u64,
+    /// テレメトリ用の表示名（既定は形式名 "chatgpt"）。ルーティングキーは
+    /// router 登録時に別途決まる。
+    name: String,
 }
 
 impl Default for ChatGptProvider {
@@ -236,18 +256,33 @@ impl ChatGptProvider {
     pub fn new() -> Self {
         let home = std::env::var("HOME").unwrap_or_default();
         Self {
-            client: Client::builder()
-                .timeout(Duration::from_secs(60))
-                .connect_timeout(Duration::from_secs(10))
-                .build()
-                .unwrap_or_default(),
+            client: build_client(DEFAULT_TIMEOUT_SECS),
             auth_file: format!("{}/.codex/auth.json", home),
             base_url: CHATGPT_BASE_URL.to_string(),
             oauth_token_url: OAUTH_TOKEN_URL.to_string(),
             default_model: DEFAULT_MODEL.to_string(),
             reasoning_effort: Some("low".to_string()),
             include_encrypted_content: false,
+            timeout_secs: DEFAULT_TIMEOUT_SECS,
+            name: "chatgpt".to_string(),
         }
+    }
+
+    /// 表示名を上書きする（同じ形式の接続先を別名で登録するとき）。
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+
+    /// チャット補完リクエストの read timeout を秒で上書きする（#433）。
+    ///
+    /// 既定は 60 秒。`reasoning_effort` の高い体は 1 ターンの生成がこれを超えることが
+    /// あり、超えると `failed to read response body: operation timed out` になって
+    /// router がリトライする。config の `[providers.chatgpt] timeout_secs` から渡す。
+    pub fn with_timeout_secs(mut self, secs: u64) -> Self {
+        self.client = build_client(secs);
+        self.timeout_secs = secs;
+        self
     }
 
     /// テスト用: OAuth トークンエンドポイントを差し替える。
@@ -646,7 +681,7 @@ impl ChatGptProvider {
                         // assistant がツールコールと同時にテキストを返した場合、そのテキストも
                         // 履歴に残す（以前は continue で本文が欠落していた）。
                         // 空テキストは追加しない。
-                        let has_text = msg.text_content().map_or(false, |t| !t.is_empty());
+                        let has_text = msg.text_content().is_some_and(|t| !t.is_empty());
                         if has_text {
                             if let Some(content) = Self::message_content_value(&msg.content) {
                                 input.push(serde_json::json!({
@@ -795,11 +830,19 @@ impl ChatGptProvider {
     }
 
     /// Parse a fully-collected SSE response body into a `ChatResponse`.
-    fn parse_response(&self, sse_text: &str, model: &str) -> Result<ChatResponse> {
+    // #676: pub —— chatgpt の SSE パース（incomplete→Length を含む）を server 側の
+    // 「incomplete→ターン失敗」end-to-end テストから直接叩けるようにする（純パーサ）。
+    pub fn parse_response(&self, sse_text: &str, model: &str) -> Result<ChatResponse> {
         let mut content = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut id = String::new();
         let mut usage = Usage::default();
+        // #676（方針3）: Responses API が出力上限で応答を打ち切ったか。status=="incomplete"
+        // かつ incomplete_details.reason=="max_output_tokens" のとき真。合成する finish_reason を
+        // Length に倒し、エンジンがターンを失敗させられるようにする（切り捨てを黙って最終回答に
+        // しない）。chatgpt は cap 値を送らないので、これがモデル内部既定に当たった gpt-5.6 等を
+        // 守る実質的な防衛線になる。
+        let mut truncated_by_max_tokens = false;
         let mut dbg_data_line_count: usize = 0;
         let mut dbg_delta_event_count: usize = 0;
         let mut current_event = String::new();
@@ -840,9 +883,18 @@ impl ChatGptProvider {
                         tool_calls.push(call);
                     }
                 }
-                "response.completed" | "response.done" => {
+                "response.completed" | "response.done" | "response.incomplete" => {
                     if let Some(rid) = parsed["response"]["id"].as_str() {
                         id = rid.to_string();
+                    }
+                    // #676（方針3）: 出力上限による打ち切りを拾う。incomplete イベントだけでなく、
+                    // completed に status/incomplete_details が載る実装差にも耐えるよう、イベント
+                    // 名でなく response 本体の status/reason で判定する。
+                    if parsed["response"]["status"].as_str() == Some("incomplete")
+                        && parsed["response"]["incomplete_details"]["reason"].as_str()
+                            == Some("max_output_tokens")
+                    {
+                        truncated_by_max_tokens = true;
                     }
                     if let Some(output) = parsed["response"]["output"].as_array() {
                         for item in output {
@@ -854,11 +906,21 @@ impl ChatGptProvider {
                         }
                     }
                     let u = &parsed["response"]["usage"];
+                    // Responses API は cached 分を usage.input_tokens_details.cached_tokens
+                    // にネストして返す（codex CLI が flat な cached_input_tokens で返すのとは
+                    // 構造が違う点に注意）。フィールドが無い/ null のときは 0 に倒す。
+                    let cached = u["input_tokens_details"]["cached_tokens"]
+                        .as_u64()
+                        .unwrap_or(0) as u32;
                     usage = Usage {
                         prompt_tokens: u["input_tokens"].as_u64().unwrap_or(0) as u32,
                         completion_tokens: u["output_tokens"].as_u64().unwrap_or(0) as u32,
                         total_tokens: u["total_tokens"].as_u64().unwrap_or(0) as u32,
-                        cache_read_input_tokens: 0,
+                        cache_read_input_tokens: cached,
+                        // OpenAI はキャッシュ書き込みを別課金しない（cache write は
+                        // 通常の input と同じ料金）ため、Anthropic のような
+                        // cache_creation の概念が無く、Responses API も該当フィールドを
+                        // 返さない。ここが 0 なのはバグではなく仕様。
                         cache_creation_input_tokens: 0,
                     };
                 }
@@ -887,7 +949,12 @@ impl ChatGptProvider {
         } else {
             Some(MessageContent::Text(content))
         };
-        let finish_reason = if tool_calls.is_empty() {
+        // #676（方針3）: 出力上限による打ち切りは tool_calls / content の有無より優先して
+        // Length にする。切り捨てられた応答は tool_call JSON も本文も途中で切れており、最終回答
+        // にもツール往復の一手にもしてはならない（エンジンがこの Length を見てターンを失敗させる）。
+        let finish_reason = if truncated_by_max_tokens {
+            FinishReason::Length
+        } else if tool_calls.is_empty() {
             FinishReason::Stop
         } else {
             FinishReason::ToolCalls
@@ -946,7 +1013,14 @@ impl ChatGptProvider {
 #[async_trait]
 impl LlmProvider for ChatGptProvider {
     fn name(&self) -> &str {
-        "chatgpt"
+        &self.name
+    }
+
+    // #676: Responses API は max_output_tokens が 400（Unsupported parameter）なので
+    // 送らない（build_request_body でも載せない）。よって出力上限のモデル登録は不要
+    // （opt-out）。切り捨て検知は方針3の incomplete_details→Length→bail が担う。
+    fn sends_max_output_tokens(&self) -> bool {
+        false
     }
 
     async fn available_models(&self) -> Result<Vec<ModelInfo>> {
@@ -1642,6 +1716,104 @@ mod tests {
         assert_eq!(calls[0].function.arguments, r#"{"query":"opencrab"}"#);
     }
 
+    /// #502: cached_tokens が usage.input_tokens_details.cached_tokens にあるとき
+    /// cache_read_input_tokens に反映されること。
+    #[test]
+    fn test_parse_response_reads_cached_tokens() {
+        let provider = ChatGptProvider::new();
+        let sse = concat!(
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-c\",",
+            "\"output\":[],\"usage\":{\"input_tokens\":100,\"output_tokens\":20,",
+            "\"total_tokens\":120,\"input_tokens_details\":{\"cached_tokens\":80}}}}\n",
+            "\n",
+        );
+        let resp = provider
+            .parse_response(sse, "gpt-5.5")
+            .expect("parse failed");
+        assert_eq!(resp.usage.prompt_tokens, 100);
+        assert_eq!(resp.usage.completion_tokens, 20);
+        assert_eq!(resp.usage.cache_read_input_tokens, 80);
+        // OpenAI はキャッシュ書き込みを別課金しないため常に 0。
+        assert_eq!(resp.usage.cache_creation_input_tokens, 0);
+    }
+
+    /// #676（方針3）: Responses API が出力上限で応答を打ち切ったとき（status=="incomplete"
+    /// かつ incomplete_details.reason=="max_output_tokens"）、finish_reason=Length にする。
+    /// 前置きテキストが出ていても Stop に倒さない（エンジンがこの Length を見て切り捨てを
+    /// 失敗させる。chatgpt は cap を送らないので、これが in-use の gpt-5.6 系を守る防衛線）。
+    #[test]
+    fn test_parse_response_incomplete_max_output_tokens_is_length() {
+        let provider = ChatGptProvider::new();
+        let sse = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"これから報告を書\"}\n",
+            "\n",
+            "event: response.incomplete\n",
+            "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp-inc\",",
+            "\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},",
+            "\"output\":[],\"usage\":{\"input_tokens\":10,\"output_tokens\":4096,",
+            "\"total_tokens\":4106}}}\n",
+            "\n",
+        );
+        let resp = provider
+            .parse_response(sse, "gpt-5.6-sol")
+            .expect("parse failed");
+        assert_eq!(resp.choices[0].finish_reason, Some(FinishReason::Length));
+        assert_eq!(resp.usage.completion_tokens, 4096);
+    }
+
+    /// #676 回帰防止: status=="completed"（打ち切りなし）は従来どおり Stop のまま。
+    #[test]
+    fn test_parse_response_completed_status_stays_stop() {
+        let provider = ChatGptProvider::new();
+        let sse = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"完了\"}\n",
+            "\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-ok\",",
+            "\"status\":\"completed\",\"output\":[],",
+            "\"usage\":{\"input_tokens\":10,\"output_tokens\":2,\"total_tokens\":12}}}\n",
+            "\n",
+        );
+        let resp = provider
+            .parse_response(sse, "gpt-5.6-sol")
+            .expect("parse failed");
+        assert_eq!(resp.choices[0].finish_reason, Some(FinishReason::Stop));
+    }
+
+    /// #502: input_tokens_details / cached_tokens が欠落しても panic せず 0 に倒れること。
+    #[test]
+    fn test_parse_response_missing_cached_tokens_defaults_to_zero() {
+        let provider = ChatGptProvider::new();
+        // details ごと欠落。
+        let sse_missing = concat!(
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-m\",",
+            "\"output\":[],\"usage\":{\"input_tokens\":7,\"output_tokens\":4,\"total_tokens\":11}}}\n",
+            "\n",
+        );
+        let resp = provider
+            .parse_response(sse_missing, "gpt-5.5")
+            .expect("parse failed");
+        assert_eq!(resp.usage.prompt_tokens, 7);
+        assert_eq!(resp.usage.cache_read_input_tokens, 0);
+
+        // cached_tokens が null のケース。
+        let sse_null = concat!(
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-n\",",
+            "\"output\":[],\"usage\":{\"input_tokens\":7,\"output_tokens\":4,\"total_tokens\":11,",
+            "\"input_tokens_details\":{\"cached_tokens\":null}}}}\n",
+            "\n",
+        );
+        let resp_null = provider
+            .parse_response(sse_null, "gpt-5.5")
+            .expect("parse failed");
+        assert_eq!(resp_null.usage.cache_read_input_tokens, 0);
+    }
+
     // ── build_request_body field validation ──────────────────────────────────
 
     #[test]
@@ -2096,6 +2268,53 @@ mod tests {
         assert!(!token_expired(&fake_jwt(3600)));
         // exp が読めないトークンは false（401 リトライ側に任せる）
         assert!(!token_expired("not-a-jwt"));
+    }
+
+    /// リクエストを受けてから `delay` 待って 200 を返すモック（read timeout 検証用）。
+    async fn spawn_slow_mock(delay: Duration) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let _ = sock.read(&mut buf).await;
+                    tokio::time::sleep(delay).await;
+                    let resp =
+                        "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}";
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}/slow")
+    }
+
+    /// #433: read timeout は 60 秒ハードコードではなく、`with_timeout_secs` で伸ばせる。
+    /// 保持している値だけでなく、**実際に client へ効いている**ことまで見る。
+    #[tokio::test]
+    async fn test_timeout_secs_is_applied_to_the_http_client() {
+        assert_eq!(
+            ChatGptProvider::new().timeout_secs,
+            DEFAULT_TIMEOUT_SECS,
+            "未設定の既定は 60 秒のまま"
+        );
+
+        let url = spawn_slow_mock(Duration::from_millis(1500)).await;
+
+        let short = ChatGptProvider::new().with_timeout_secs(1);
+        let err = short.client.get(&url).send().await.unwrap_err();
+        assert!(err.is_timeout(), "1 秒なら読み切る前に timeout する: {err}");
+
+        let long = ChatGptProvider::new().with_timeout_secs(10);
+        let resp = long
+            .client
+            .get(&url)
+            .send()
+            .await
+            .expect("10 秒なら読み切れる");
+        assert!(resp.status().is_success());
     }
 
     /// 1 接続だけ受けて固定レスポンスを返す極小 HTTP モック。

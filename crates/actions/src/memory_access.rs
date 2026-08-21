@@ -275,6 +275,213 @@ impl Action for SearchMemoryIndexAction {
     }
 }
 
+// ============================================
+// タグ操作アクション（issue #359 / #313 段階2）
+// ============================================
+// エージェント自身が記憶（topic）にタグを付ける道具 3 個。整理ラン（段階3・caller=Owner）
+// から使う。**TRUSTED_ONLY**（`bridge::TRUSTED_ONLY_ACTIONS`）で Nostr（caller=Agent）
+// からは list_tools に出ず dispatch でも拒否される。タグは `node_type='category'` の
+// ノードで、一覧は `browse_memory_index` で引けるので専用の一覧アクションは作らない。
+
+/// topic_id（short_id またはフル id）を解決してフル id を返す。member 行には join が
+/// 効くフル id を格納する（`list_unassigned_topics` 等が `topic_node.id` と突き合わせる）。
+fn resolve_topic_full_id(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    topic_id: &str,
+) -> Result<String, String> {
+    match opencrab_db::queries::get_index_node_by_short_or_id(conn, agent_id, topic_id) {
+        Ok(Some(node)) => Ok(node.id),
+        Ok(None) => Err(format!("topic '{topic_id}' が見つかりません")),
+        Err(e) => Err(format!("topic の解決に失敗しました: {e}")),
+    }
+}
+
+/// 記憶（topic）に複数タグを付けるアクション（多対多）。無いタグ名は同時に新設する。
+pub struct TagTopicAction;
+
+#[async_trait]
+impl Action for TagTopicAction {
+    fn name(&self) -> &str {
+        "tag_topic"
+    }
+
+    fn description(&self) -> &str {
+        "記憶インデックスの topic にタグを付ける（複数可・多対多）。無いタグ名はその場で新設される。付いたタグは browse_memory_index / search_memory_index の category ノードとして引ける。"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": ["topic_id", "tags"],
+            "properties": {
+                "topic_id": {
+                    "type": "string",
+                    "description": "対象 topic の short_id またはフル node_id"
+                },
+                "tags": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "付けるタグ名の配列（無い名前は新設）"
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, args: &serde_json::Value, ctx: &ActionContext) -> ActionResult {
+        let topic_id = match args["topic_id"].as_str() {
+            Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => return ActionResult::error("topic_id is required"),
+        };
+        let tags: Vec<String> = match args["tags"].as_array() {
+            Some(arr) => arr
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            None => return ActionResult::error("tags is required (array of strings)"),
+        };
+        if tags.is_empty() {
+            return ActionResult::error("tags must contain at least one non-empty tag");
+        }
+
+        let conn = match ctx.db.lock() {
+            Ok(c) => c,
+            Err(_) => return ActionResult::error("Failed to acquire DB lock"),
+        };
+        let full_id = match resolve_topic_full_id(&conn, &ctx.agent_id, &topic_id) {
+            Ok(id) => id,
+            Err(e) => return ActionResult::error(&e),
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        // タグ新設が黙って失敗しないよう、DB 層が read-back で検証し失敗を Err にする（#359）。
+        match opencrab_db::queries::tag_topic(&conn, &ctx.agent_id, &full_id, &tags, &now) {
+            Ok(()) => ActionResult::success(json!({
+                "topic_id": full_id,
+                "tags": tags,
+            })),
+            Err(e) => ActionResult::error(&format!("タグ付けに失敗しました: {e}")),
+        }
+    }
+}
+
+/// 記憶（topic）からタグ 1 個の付与を取り消すアクション。
+pub struct UntagTopicAction;
+
+#[async_trait]
+impl Action for UntagTopicAction {
+    fn name(&self) -> &str {
+        "untag_topic"
+    }
+
+    fn description(&self) -> &str {
+        "記憶インデックスの topic からタグ 1 個の付与を外す。タグノード自体は消さない（他の topic にまだ付いているかもしれない）。"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": ["topic_id", "tag"],
+            "properties": {
+                "topic_id": {
+                    "type": "string",
+                    "description": "対象 topic の short_id またはフル node_id"
+                },
+                "tag": {
+                    "type": "string",
+                    "description": "外すタグ名"
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, args: &serde_json::Value, ctx: &ActionContext) -> ActionResult {
+        let topic_id = match args["topic_id"].as_str() {
+            Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => return ActionResult::error("topic_id is required"),
+        };
+        let tag = match args["tag"].as_str() {
+            Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => return ActionResult::error("tag is required"),
+        };
+
+        let conn = match ctx.db.lock() {
+            Ok(c) => c,
+            Err(_) => return ActionResult::error("Failed to acquire DB lock"),
+        };
+        let full_id = match resolve_topic_full_id(&conn, &ctx.agent_id, &topic_id) {
+            Ok(id) => id,
+            Err(e) => return ActionResult::error(&e),
+        };
+        match opencrab_db::queries::remove_tag_member(&conn, &ctx.agent_id, &full_id, &tag) {
+            Ok(removed) => ActionResult::success(json!({
+                "topic_id": full_id,
+                "tag": tag,
+                "removed": removed,
+            })),
+            Err(e) => ActionResult::error(&format!("タグ外しに失敗しました: {e}")),
+        }
+    }
+}
+
+/// タグを統合するアクション（member を付け替え、from ノードを削除）。
+pub struct MergeTagsAction;
+
+#[async_trait]
+impl Action for MergeTagsAction {
+    fn name(&self) -> &str {
+        "merge_tags"
+    }
+
+    fn description(&self) -> &str {
+        "2 つのタグを統合する。from タグの付与を全て into タグへ付け替え、from タグノードを削除する。into が無ければ新設する（実質リネームにもなる）。"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": ["from", "into"],
+            "properties": {
+                "from": {
+                    "type": "string",
+                    "description": "統合元タグ名（付け替え後に削除される）"
+                },
+                "into": {
+                    "type": "string",
+                    "description": "統合先タグ名（無ければ新設）"
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, args: &serde_json::Value, ctx: &ActionContext) -> ActionResult {
+        let from = match args["from"].as_str() {
+            Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => return ActionResult::error("from is required"),
+        };
+        let into = match args["into"].as_str() {
+            Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => return ActionResult::error("into is required"),
+        };
+
+        let conn = match ctx.db.lock() {
+            Ok(c) => c,
+            Err(_) => return ActionResult::error("Failed to acquire DB lock"),
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        match opencrab_db::queries::merge_tags(&conn, &ctx.agent_id, &from, &into, &now) {
+            Ok(outcome) => ActionResult::success(json!({
+                "from": from,
+                "into": into,
+                "moved": outcome.moved,
+                "into_category_id": outcome.into_category_id,
+            })),
+            Err(e) => ActionResult::error(&format!("タグ統合に失敗しました: {e}")),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,5 +661,130 @@ mod tests {
         let messages = nodes[0]["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["content"], "Hello from test");
+    }
+
+    // ---- タグ操作アクション（#359 / #313 段階2）----
+
+    /// テスト用に topic ノードを 1 件積む（short_id 付き）。
+    fn seed_topic(ctx: &ActionContext, id: &str, short_id: &str) {
+        let conn = ctx.db.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        opencrab_db::queries::insert_index_node(
+            &conn,
+            &opencrab_db::queries::IndexNodeRow {
+                id: id.to_string(),
+                agent_id: "agent-1".to_string(),
+                parent_id: None,
+                node_type: "topic".to_string(),
+                source_type: "session_log".to_string(),
+                title: format!("topic-{id}"),
+                summary: "s".to_string(),
+                start_log_id: None,
+                end_log_id: None,
+                source_session_id: None,
+                date_from: None,
+                date_to: None,
+                depth: 0,
+                child_count: 0,
+                token_count: 0,
+                created_at: now.clone(),
+                updated_at: now,
+                short_id: Some(short_id.to_string()),
+                keywords_json: "[]".to_string(),
+                summary_refreshed_at: None,
+            },
+        )
+        .unwrap();
+    }
+
+    /// tag_topic は short_id で topic を解決し、複数タグを付ける。untag で外せる。
+    #[tokio::test]
+    async fn test_tag_and_untag_topic_action() {
+        let (_dir, ctx) = test_context();
+        seed_topic(&ctx, "topic-1", "t1");
+
+        // short_id で解決して 2 タグを付ける。
+        let r = TagTopicAction
+            .execute(&json!({"topic_id": "t1", "tags": ["Rust", "設計"]}), &ctx)
+            .await;
+        assert!(r.success, "tag_topic 失敗: {:?}", r.error);
+        // member 行にはフル id が入る（join が効くため）。
+        assert_eq!(r.data.unwrap()["topic_id"], "topic-1");
+        {
+            let conn = ctx.db.lock().unwrap();
+            let total: i64 = opencrab_db::queries::count_category_members(&conn, "agent-1")
+                .unwrap()
+                .values()
+                .sum();
+            assert_eq!(total, 2, "1 topic に 2 タグ");
+        }
+
+        // 1 タグを外す。
+        let r = UntagTopicAction
+            .execute(&json!({"topic_id": "t1", "tag": "Rust"}), &ctx)
+            .await;
+        assert!(r.success);
+        assert_eq!(r.data.unwrap()["removed"], true);
+        {
+            let conn = ctx.db.lock().unwrap();
+            let total: i64 = opencrab_db::queries::count_category_members(&conn, "agent-1")
+                .unwrap()
+                .values()
+                .sum();
+            assert_eq!(total, 1, "1 タグ外れて残り 1");
+        }
+    }
+
+    /// merge_tags は from を into へ付け替え、from ノードを消す。
+    #[tokio::test]
+    async fn test_merge_tags_action() {
+        let (_dir, ctx) = test_context();
+        seed_topic(&ctx, "topic-1", "t1");
+        TagTopicAction
+            .execute(&json!({"topic_id": "t1", "tags": ["旧"]}), &ctx)
+            .await;
+
+        let r = MergeTagsAction
+            .execute(&json!({"from": "旧", "into": "新"}), &ctx)
+            .await;
+        assert!(r.success, "merge_tags 失敗: {:?}", r.error);
+        assert_eq!(r.data.unwrap()["moved"], 1);
+        let conn = ctx.db.lock().unwrap();
+        assert!(
+            opencrab_db::queries::get_category_node_by_title(&conn, "agent-1", "旧")
+                .unwrap()
+                .is_none(),
+            "from タグは消える"
+        );
+        assert!(
+            opencrab_db::queries::get_category_node_by_title(&conn, "agent-1", "新")
+                .unwrap()
+                .is_some(),
+            "into タグは残る"
+        );
+    }
+
+    /// 不明な topic_id / 引数不足はエラー（policy 拒否ではなく通常のバリデーション）。
+    #[tokio::test]
+    async fn test_tag_topic_validation() {
+        let (_dir, ctx) = test_context();
+        // topic 未存在。
+        let r = TagTopicAction
+            .execute(&json!({"topic_id": "nope", "tags": ["x"]}), &ctx)
+            .await;
+        assert!(!r.success);
+        // tags 空。
+        seed_topic(&ctx, "topic-1", "t1");
+        let r = TagTopicAction
+            .execute(&json!({"topic_id": "t1", "tags": []}), &ctx)
+            .await;
+        assert!(!r.success);
+        // 引数不足。
+        let r = UntagTopicAction
+            .execute(&json!({"topic_id": "t1"}), &ctx)
+            .await;
+        assert!(!r.success);
+        let r = MergeTagsAction.execute(&json!({"from": "a"}), &ctx).await;
+        assert!(!r.success);
     }
 }

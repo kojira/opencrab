@@ -10,7 +10,13 @@
 //! InteractionResponse の推論をループ内で await すると、その間**全チャンネル・
 //! 全エージェント**の受信処理が停止する（サブタスクが report_progress するたびに
 //! メインが無応答になる）。現在は全イベントを spawn + セッション単位ロック
-//! （`spawn_serialized_on_session`）で処理し、直列化の範囲を同一セッションに限定する。
+//! （`SessionLocks::spawn_serialized`）で処理し、直列化の範囲を同一セッションに限定する。
+//!
+//! v3.2 (#156 S2): セッションロック表は Discord 独自実装をやめ、gateway 非依存層の
+//! [`SessionLocks`](opencrab_actions::SessionLocks) に統合した（web / Nostr と同一実装）。
+//! Discord 固有なのは「結果を待たずに spawn する」形だけで、それも共通側の薄い入口
+//! [`SessionLocks::spawn_serialized`](opencrab_actions::SessionLocks::spawn_serialized)
+//! に寄せてある。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,20 +25,83 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
+use crate::gateway::DiscordGateway;
+use opencrab_actions::SessionLocks;
 use opencrab_core::a2ui::UiRenderer;
-use opencrab_gateway::DiscordGateway;
 use opencrab_gateway::IncomingMessage;
+
+use crate::AgentRunner;
 
 /// 同一(channel, sender)のメッセージをまとめるまでの待機時間。
 const DEBOUNCE_DELAY: Duration = Duration::from_secs(2);
 
-/// セッションID → 推論直列化ロック。
+/// 受信転送タスクが `recv()` エラーから再試行するまでの初回待機（#284 P0-2）。
 ///
-/// 同一セッションの推論を直列化し、割り込みメッセージによる履歴不整合（同じ内容の
-/// 二重回答）を防ぐために使う。
-type SessionLocks = Arc<dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>>;
+/// 短くしすぎるとゲートウェイ切断中に error ログでディスクを埋める。長くしすぎると
+/// 復旧後の受信再開が遅れる。500ms から始めて指数で伸ばし、上限で頭打ちにする。
+const RECV_RETRY_BASE: Duration = Duration::from_millis(500);
+/// 再試行間隔の上限。切断が長引いても 30 秒以内には必ず再接続を試す
+/// （Discord 側の再接続が済んでいれば次の `recv()` で受信が戻る）。
+const RECV_RETRY_MAX: Duration = Duration::from_secs(30);
+/// これだけ連続で失敗したらオーナーへエスカレーションする。
+///
+/// 一過性の切断は数回の再試行で戻るので、単発では鳴らさない。5 回連続
+/// （= 概ね 8 秒以上復旧しない）なら「沈黙したまま受信が死んでいる」疑いが濃い。
+const RECV_FAILURES_BEFORE_ALERT: u32 = 5;
 
-use crate::AgentRunner;
+/// この回数の失敗ごとにエスカレーションを繰り返す（#286）。
+///
+/// 「N 回目ちょうど」で 1 度だけ鳴らすと、以後いくら失敗し続けても二度と警告が出ない
+/// ＝ 復旧しないまま沈黙する（この機構が防ぎたかった状態そのもの）。バックオフが
+/// 上限 30 秒で頭打ちなので、5 回ごと ≒ 2〜3 分おきの再通知になる。
+fn should_alert_inbound_stalled(consecutive_failures: u32) -> bool {
+    consecutive_failures >= RECV_FAILURES_BEFORE_ALERT
+        && consecutive_failures.is_multiple_of(RECV_FAILURES_BEFORE_ALERT)
+}
+
+/// 連続失敗回数に対する再試行間隔（指数バックオフ、上限あり）。
+fn recv_retry_backoff(consecutive_failures: u32) -> Duration {
+    let shift = consecutive_failures.saturating_sub(1).min(16);
+    RECV_RETRY_BASE
+        .saturating_mul(1u32 << shift)
+        .min(RECV_RETRY_MAX)
+}
+
+/// whitelist / DM trust による受信破棄を INFO で残すときの間引き窓（#419）。
+///
+/// 破棄自体は正しい動作だが、busy な非 whitelist チャンネルで破棄が連発すると
+/// 同じ 1 行で `.server.log` が埋まる。同一宛先・同一理由の破棄は最大この間隔に
+/// 1 行へ抑え、「このエージェントは今この宛先を設定で無視している」ことが grep で
+/// 分かる可視性は保ちつつ洪水を防ぐ。
+const DROP_LOG_THROTTLE: Duration = Duration::from_secs(300);
+
+/// (理由:宛先) ごとに最後に破棄 INFO を出した時刻。プロセス内のログ間引き専用。
+static DROP_LOG_LAST: std::sync::LazyLock<std::sync::Mutex<HashMap<String, Instant>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// `key`（理由と宛先の組）の破棄を今 INFO で出してよいかを返す。
+///
+/// 初回、または前回出力から `window` 以上経過していれば true を返し、最終出力時刻を
+/// `now` に更新する。窓の内側での連続破棄では false を返してログを間引く。
+fn should_emit_drop_log(
+    last_by_key: &std::sync::Mutex<HashMap<String, Instant>>,
+    key: &str,
+    now: Instant,
+    window: Duration,
+) -> bool {
+    let mut map = last_by_key.lock().unwrap();
+    match map.get(key) {
+        Some(&last) if now.duration_since(last) < window => false,
+        _ => {
+            // #423: 出力のたびに窓を超えた古いエントリを掃除し、マップの無制限な成長を防ぐ。
+            // 掃除後に現在のキーを入れる（now は窓内なので残る）。これで保持数は「直近 window
+            // 以内に破棄が起きた宛先数」で有界になる。
+            map.retain(|_, &mut last| now.duration_since(last) < window);
+            map.insert(key.to_string(), now);
+            true
+        }
+    }
+}
 
 /// メッセージループへの内部イベント。
 pub enum LoopEvent {
@@ -49,6 +118,11 @@ pub enum LoopEvent {
         channel_id_str: String,
         guild_id: String,
         is_dm: bool,
+        /// resume する親ターンの呼び出し元（#298）。subtask を spawn した run の
+        /// caller をそのまま引き継ぐ。ここを `Agent` 固定にすると、オーナー発の
+        /// ターンが subtask 決着で降格し、owner/trusted のツールが list_tools からも
+        /// dispatch からも丸ごと消える。
+        caller: opencrab_actions::CallerIdentity,
     },
     /// A2UIインタラクション応答（ボタンクリック or タイムアウト）。
     InteractionResponse {
@@ -60,6 +134,31 @@ pub enum LoopEvent {
         guild_id: String,
         response: opencrab_core::a2ui::A2uiUserAction,
         is_dm: bool,
+        /// resume する run の呼び出し元 =**その UI を描いた run の caller**
+        /// （`PendingInteraction.caller` / #298 / #302）。
+        ///
+        /// 応答者（`response.responder_id`）から導出しては**いけない**。`send_ui` の
+        /// `channel_id` は自由引数で、描画先チャンネルと resume 先セッションは
+        /// 独立している。応答者から導くと `Agent` / `TrustedUser` のターンが描いた UI を
+        /// オーナーが押した瞬間にそのセッションが `Owner` で resume する（昇格経路）。
+        caller: opencrab_actions::CallerIdentity,
+    },
+    /// 時刻起因の発火（#588 TimedFire）。scheduler が「時刻が来たら、このセッションで・この
+    /// プロンプトで 1 ターン回して」と送る。メッセージ以外の理由でターンを回す点は
+    /// `SubtaskCompleted` と同じで、受けたら**いつもの turn**（配送・ロック・記録・継続ターンは
+    /// ループ既存の実装）を回すだけ。`prompt` は system プロンプトへ足す（会話ログに「発言」として
+    /// 残さない）。イベントは**種別を知らない**（ハートビート/アラーム/定時実行いずれも同じ口）。
+    TimedFire {
+        session_id: String,
+        agent_id: String,
+        channel_id: u64,
+        channel_id_str: String,
+        guild_id: String,
+        is_dm: bool,
+        /// system プロンプトへ足す入力。#584 指示解決の結果などを scheduler が渡す。
+        prompt: String,
+        /// 実行権限（時刻発火は本人の自己実行なので `Owner`）。
+        caller: opencrab_actions::CallerIdentity,
     },
 }
 
@@ -113,13 +212,44 @@ pub fn create_event_channel() -> (
     mpsc::unbounded_channel()
 }
 
+/// scheduler の時刻発火（#588 TimedFire）を Discord ループへ流すための受け口。
+///
+/// [`opencrab_actions::TimedFireRouter`] に登録され、`fire_timed_turn` で
+/// [`LoopEvent::TimedFire`] を 1 本 send するだけ（受け口は薄く保つ）。以降のターンは
+/// ループ既存の実装（配送・ロック・記録・継続）が回す。Discord の宛先（channel_id u64 / is_dm）は
+/// transport 中立な要求（`channel_id` 文字列 / `guild_id`）から復元する。
+pub struct DiscordTimedFireSink {
+    pub event_tx: mpsc::UnboundedSender<LoopEvent>,
+}
+
+impl opencrab_actions::TimedFireSink for DiscordTimedFireSink {
+    fn fire_timed_turn(&self, req: opencrab_actions::TimedFireRequest) {
+        let channel_id: u64 = req.channel_id.parse().unwrap_or(0);
+        let is_dm = req.guild_id.is_empty();
+        // send 失敗（ループ終了）は握りつぶす: 次 tick で再送される。
+        let _ = self.event_tx.send(LoopEvent::TimedFire {
+            session_id: req.session_id,
+            agent_id: req.agent_id,
+            channel_id,
+            channel_id_str: req.channel_id,
+            guild_id: req.guild_id,
+            is_dm,
+            prompt: req.prompt,
+            caller: req.caller,
+        });
+    }
+}
+
+// Discord ループの起動エントリ。各引数は独立した依存（gateway / state / registry /
+// voice / 各種フラグ）で、構造体化しても呼び出し側の見通しが良くならないため許容する。
+#[allow(clippy::too_many_arguments)]
 pub async fn run_discord_loop<T: AgentRunner>(
     gateway: Arc<DiscordGateway>,
     state: T,
     agent_ids: Vec<String>,
     gateway_actions: Arc<dyn opencrab_gateway::GatewayActions>,
     owner_discord_id: String,
-    pending_registry: Option<crate::PendingInteractionRegistry>,
+    pending_registry: Option<opencrab_core::a2ui::PendingInteractionRegistry>,
     event_channel: Option<(
         mpsc::UnboundedSender<LoopEvent>,
         mpsc::UnboundedReceiver<LoopEvent>,
@@ -132,6 +262,10 @@ pub async fn run_discord_loop<T: AgentRunner>(
     skip_agents_with_dedicated_gateway: bool,
     // VC 対話が有効なとき Some。エージェント返信を対応する VC で読み上げる。
     voice: Option<std::sync::Arc<crate::voice_session::VoiceSessionManager>>,
+    // auto-dispatch した background subtask を載せる共有 registry（RFC #152 S3a / P0）。
+    // `DiscordGatewayActions` と**同一**の registry を渡すことで、auto-dispatch した
+    // 単一ツール subtask が `cancel_subtask` の認可ゲート経由で親/owner から停止可能になる。
+    subtask_registry: opencrab_actions::subtask::SubtaskRegistry,
 ) {
     let (event_tx, mut event_rx) = match event_channel {
         Some((tx, rx)) => (tx, rx),
@@ -139,18 +273,53 @@ pub async fn run_discord_loop<T: AgentRunner>(
     };
 
     // Discord受信をイベントに変換するタスク（P1: メインループをブロックしない）
+    //
+    // #284 P0-2: **このタスクは recv エラーで死んではいけない。**
+    // 以前は `recv()` が `Err` を返した時点で `break` していた。以後 `IncomingMessage` は
+    // 二度と流れないが、`SubtaskCompleted` 等は別経路で届き続けるため、外からは
+    // 「ループは生きているのにユーザーの発言だけが永久に届かない」状態に見える。
+    // 抜けてよいのはイベントループ側が畳まれたとき（送信先チャンネルが閉じたとき）だけ。
+    //
+    // **ただしこれは #284 の真因ではない**（#286 のレビューで判明）。現在の
+    // `crate::gateway::DiscordGateway::recv` が `Err` を返すのは
+    // 受信チャンネルの全 Sender が drop されたときだけで、その `tx` は `DiscordGateway`
+    // 構造体のフィールドとして保持されている。ゲートウェイが生きている限り `Err` は
+    // 起きず、旧コードの `break` は**到達不能**だった。真因は別（イベントループの滞留が
+    // 有力）。ここに残すのは、実装が変わって `Err` が起きうるようになったときに
+    // 「沈黙して死ぬ」形へ戻らないための防御であって、事故の説明ではない。
     {
         let gw = gateway.clone();
         let tx = event_tx.clone();
         tokio::spawn(async move {
+            let mut consecutive_failures: u32 = 0;
+            let mut last_ok = Instant::now();
             loop {
                 match gw.recv().await {
                     Ok(msg) => {
-                        let _ = tx.send(LoopEvent::IncomingMessage(msg));
+                        consecutive_failures = 0;
+                        last_ok = Instant::now();
+                        if tx.send(LoopEvent::IncomingMessage(msg)).is_err() {
+                            // 受け手（イベントループ）が終了した。ここでだけ抜ける。
+                            warn!("Discord event loop receiver closed; stopping inbound forwarder");
+                            break;
+                        }
                     }
                     Err(e) => {
-                        error!("Discord recv error: {e}");
-                        break;
+                        consecutive_failures += 1;
+                        let backoff = recv_retry_backoff(consecutive_failures);
+                        error!(
+                            failures = consecutive_failures,
+                            secs_since_last_message = last_ok.elapsed().as_secs(),
+                            retry_in_ms = backoff.as_millis() as u64,
+                            "Discord recv error: {e}"
+                        );
+                        if should_alert_inbound_stalled(consecutive_failures) {
+                            crate::owner_warning::warn_inbound_stalled(
+                                consecutive_failures,
+                                last_ok.elapsed().as_secs(),
+                            );
+                        }
+                        tokio::time::sleep(backoff).await;
                     }
                 }
             }
@@ -190,15 +359,32 @@ pub async fn run_discord_loop<T: AgentRunner>(
     );
 
     // イベント処理ループ（直列）: P2のDB競合を構造的に解消
-    // デバウンス: 同一(channel_id, sender_id)のメッセージを DEBOUNCE_DELAY 分まとめてから処理
-    let mut debounce_buffers: HashMap<(String, String), (Vec<IncomingMessage>, Instant)> =
-        HashMap::new();
+    // #543 / #556: デバウンス**バッファ**は **channel ごとに 1 本**（タイマーも 1 本）。
+    // オーナー指示「デバウンスはチャンネルごと。人で分けたらだめ」そのまま。全メッセージは
+    // 個別に記録して送信者の帰属を保つ。run は**フラッシュ時に切る「連続同権限グループ」**
+    // ごとに 1 回（下のフラッシュ箇所を参照）。
+    //
+    // **権限で並行バッファに割らない理由（#556）**: run は DB から会話全体を読むので、権限で
+    // 別バッファに割ると同じ文脈に対して 2 回 run が起き 2 回答える＝減らそうとした増幅になる。
+    // かといって channel だけで丸ごと 1 run にすると、caller が最後の送信者で決まり owner 指示が
+    // 降格しうる。両方を避けるため、バッファは 1 本にしつつ**フラッシュ時に連続同権限で
+    // グループへ切る**（グループ内は権限が揃うので caller が一意・別権限は別 run で混ざらない）。
+    let mut debounce_buffers: HashMap<String, (Vec<IncomingMessage>, Instant)> = HashMap::new();
 
-    // セッション単位の推論直列化ロック。
+    // セッション単位の推論直列化ランタイム（gateway 非依存層の共通実装 / #156 S2）。
     // 同一セッションへの推論が並行実行されると、1つ目の応答がまだDBに記録されていない
     // 状態で2つ目の会話履歴が構築され、同じ内容を二重回答してしまう。これを防ぐため、
     // 会話履歴の構築・推論・応答ログをセッション単位で直列化する。
-    let session_locks: SessionLocks = Arc::new(dashmap::DashMap::new());
+    // dispatch registry は既存どおり呼び出し側から受け取る（DiscordGatewayActions と
+    // 同じ Arc を共有する必要があるため）。そのためここで使うのは登録簿を持たない
+    // `SessionLocks`（#223）。登録簿つきの `SessionRuntime` を持つと、その登録簿を
+    // 「共有のもの」と誤認して dispatch 先を差し替えたときに cancel_subtask が
+    // 走行中 subtask に届かなくなる。型として存在しなければその取り違えは起きない。
+    //
+    // #588 Stage 2: ローカル生成をやめ、プロセス全体で 1 つの共有 `SessionLocks`
+    // （`AppState::session_locks`）を使う。これで同一セッション（`discord-{agent}-{guild}-{channel}`）
+    // の通常メッセージ処理ターンと heartbeat の時間トリガーターンが直列化される。
+    let session_locks = state.session_locks();
 
     loop {
         // 次にフラッシュすべきバッファのデッドラインを計算
@@ -211,9 +397,11 @@ pub async fn run_discord_loop<T: AgentRunner>(
             event = event_rx.recv() => {
                 match event {
                     Some(LoopEvent::IncomingMessage(msg)) => {
-                        let key = debounce_key(&msg);
+                        // バッファキー = channel だけ（#556）。同一 channel は権限に関わらず 1 本の
+                        // バッファに貯める。権限による run の分割は**フラッシュ時**（連続同権限
+                        // グループ）に行う。ここでは caller を解決しない（グループ分けは flush 側）。
                         let entry = debounce_buffers
-                            .entry(key)
+                            .entry(debounce_window_key(&msg))
                             .or_insert_with(|| (Vec::new(), Instant::now() + DEBOUNCE_DELAY));
                         entry.0.push(msg);
                         entry.1 = Instant::now() + DEBOUNCE_DELAY; // タイマーリセット
@@ -228,6 +416,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         channel_id_str,
                         guild_id,
                         is_dm,
+                        caller,
                     }) => {
                         // 推論をイベントループ内で await しない。以前はここでフル推論を
                         // 直列実行していたため、サブタスクの report_progress / 完了のたびに
@@ -238,8 +427,10 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         let state_c = state.clone();
                         let ga_c = gateway_actions.clone();
                         let voice_c = voice.clone();
+                        let event_tx_c = event_tx.clone();
+                        let registry_c = subtask_registry.clone();
                         let sess = session_id.clone();
-                        spawn_serialized_on_session(session_locks.clone(), sess, async move {
+                        session_locks.spawn_serialized(sess, async move {
                             process_subtask_completed(
                                 session_id,
                                 agent_id,
@@ -254,9 +445,13 @@ pub async fn run_discord_loop<T: AgentRunner>(
                                 state_c,
                                 ga_c,
                                 voice_c,
+                                event_tx_c,
+                                registry_c,
+                                caller,
                             )
                             .await;
                         });
+                        // 実行ハンドルは返ってこない（応答は待たない = 受信ループを止めない）。
                     }
                     Some(LoopEvent::InteractionResponse {
                         interaction_id,
@@ -267,13 +462,14 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         guild_id,
                         response,
                         is_dm,
+                        caller,
                     }) => {
                         // SubtaskCompleted と同じ理由でループ内では await しない。
                         let gateway_c = gateway.clone();
                         let state_c = state.clone();
                         let ga_c = gateway_actions.clone();
                         let sess = session_id.clone();
-                        spawn_serialized_on_session(session_locks.clone(), sess, async move {
+                        session_locks.spawn_serialized(sess, async move {
                             process_interaction_response(
                                 interaction_id,
                                 session_id,
@@ -286,6 +482,46 @@ pub async fn run_discord_loop<T: AgentRunner>(
                                 gateway_c,
                                 state_c,
                                 ga_c,
+                                caller,
+                            )
+                            .await;
+                        });
+                    }
+                    Some(LoopEvent::TimedFire {
+                        session_id,
+                        agent_id,
+                        channel_id,
+                        channel_id_str,
+                        guild_id,
+                        is_dm,
+                        prompt,
+                        caller,
+                    }) => {
+                        // SubtaskCompleted と同じ理由でループ内では await しない。同一セッションの
+                        // 直列化はセッションロックが担保する（通常メッセージ・継続ターンと同じロック）。
+                        let gateway_c = gateway.clone();
+                        let state_c = state.clone();
+                        let ga_c = gateway_actions.clone();
+                        let voice_c = voice.clone();
+                        let event_tx_c = event_tx.clone();
+                        let registry_c = subtask_registry.clone();
+                        let sess = session_id.clone();
+                        session_locks.spawn_serialized(sess, async move {
+                            process_timed_fire(
+                                session_id,
+                                agent_id,
+                                channel_id,
+                                channel_id_str,
+                                guild_id,
+                                is_dm,
+                                prompt,
+                                gateway_c,
+                                state_c,
+                                ga_c,
+                                voice_c,
+                                event_tx_c,
+                                registry_c,
+                                caller,
                             )
                             .await;
                         });
@@ -308,23 +544,67 @@ pub async fn run_discord_loop<T: AgentRunner>(
 
         for key in expired_keys {
             if let Some((messages, _)) = debounce_buffers.remove(&key) {
-                let merged = merge_incoming_messages(messages);
-                if let Some(merged) = merged {
-                    let count = merged
-                        .metadata
-                        .get("debounce_count")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(1);
-                    if count > 1 {
-                        info!(
-                            channel = %key.0,
-                            sender = %key.1,
-                            count = count,
-                            "Debounced messages merged"
-                        );
+                // #665: デバウンス窓が満了し、溜めていた受信の処理へ進む段。ここより前は「受信を溜めて
+                // いる」正常状態で、ここが「ターン処理へ入る」入口。session_id はまだ無い（agent 毎に
+                // process_incoming_message 内で決まる）ので相関はチャンネルキーで出す。
+                debug!(
+                    channel = %key,
+                    messages = messages.len(),
+                    stage = "debounce_flush",
+                    "turn: デバウンス満了 → 受信処理開始"
+                );
+                // #543 / #556: 全メッセージを**個別に**記録する（送信者の帰属を保つ）。run は
+                // **到着順のまま「連続した同一 trust_level」で切ったグループ**ごとに 1 回だけ、
+                // そのグループ内の**内容のある最後のメッセージ**が起こす。run は DB から会話全体を
+                // 読むので、文脈は全員分・正しい帰属で入る。
+                //
+                // **なぜ「連続同権限グループ」か（#556）**: バッファを channel だけで 1 本にすると
+                // owner と外部ユーザーが混ざる。窓を丸ごと 1 run にすると caller が最後の送信者で
+                // 決まり owner 指示が降格しうる。権限ごとに並行バッファへ割ると同じ文脈に 2 回 run が
+                // 起きて増幅する。連続同権限だけをグループにすれば、**グループ内は権限が揃うので
+                // caller が一意**（降格しない）で、かつ**別権限は別グループ＝別 run**（混ざらない）。
+                // 例: owner→外部→co_agent は [owner][外部][co_agent] の 3 run、owner→co_agent→外部は
+                // [owner,co_agent][外部] の 2 run。
+                //
+                // **#489 未修正の今の実運用**: co_agent は resolve_caller で `Agent`(=0) に落ちるため、
+                // owner→co_agent は同権限にならず別グループになる。ここでのグループ分けは
+                // trust_level が揃った場合の挙動で、#489 が直れば owner 等価(=2)として合流する。
+                let levels: Vec<u8> = messages
+                    .iter()
+                    .map(|m| {
+                        state
+                            .resolve_caller(&m.sender.id, &agent_ids, &owner_discord_id)
+                            .trust_level()
+                    })
+                    .collect();
+                let groups = consecutive_groups(&levels);
+
+                if messages.len() > 1 {
+                    info!(
+                        channel = %key,
+                        messages = messages.len(),
+                        groups = groups.len(),
+                        "Debounced (channel): recording all, running once per consecutive-privilege group"
+                    );
+                }
+
+                // グループごとにトリガー（内容のある最後）を決め、それ以外は record-only にする。
+                // trigger の無い（全部空の）グループは run を起こさない（記録だけ済む）。
+                let mut record_only_flags = vec![true; messages.len()];
+                for &(start, len) in &groups {
+                    if let Some(rel) = messages[start..start + len]
+                        .iter()
+                        .rposition(incoming_has_content)
+                    {
+                        record_only_flags[start + rel] = false; // このメッセージがグループの run トリガー
                     }
+                }
+
+                for (i, msg) in messages.into_iter().enumerate() {
+                    // トリガー以外は record-only（記録と 👀 まで。run は起こさない）。
+                    let record_only = record_only_flags[i];
                     process_incoming_message(
-                        merged,
+                        msg,
                         gateway.clone(),
                         state.clone(),
                         agent_ids.clone(),
@@ -333,6 +613,9 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         session_locks.clone(),
                         skip_agents_with_dedicated_gateway,
                         voice.clone(),
+                        event_tx.clone(),
+                        subtask_registry.clone(),
+                        record_only,
                     )
                     .await;
                 }
@@ -341,6 +624,40 @@ pub async fn run_discord_loop<T: AgentRunner>(
     }
 
     info!("Discord event loop v3 ended");
+}
+
+/// ユーザー発言をセッションログへ記録する（#284 P0-1 / P0-3）。
+///
+/// セッションロックを取る**前**に呼ぶこと。記録に失敗したら握り潰さず、
+/// オーナーへ届くレベルでエスカレーションする（ユーザー発言の欠落は副作用の
+/// 取りこぼしではなく、対話そのものが成立しなくなる致命傷）。
+fn record_discord_inbound<T: AgentRunner>(
+    state: &T,
+    agent_id: &str,
+    session_id: &str,
+    channel_id_str: &str,
+    incoming: &IncomingMessage,
+    text: &str,
+    image_urls: &[String],
+) {
+    let inbound = opencrab_actions::InboundMessageRecord {
+        session_id,
+        recipient_agent_id: agent_id,
+        sender_id: &incoming.sender.id,
+        sender_name: &incoming.sender.name,
+        avatar_url: incoming.sender.avatar_url.as_deref(),
+        channel_id: Some(channel_id_str),
+        pubkey: None,
+        text,
+        image_urls,
+    };
+    if !state.record_inbound_message(opencrab_actions::TranscriptSource::Discord, &inbound) {
+        crate::owner_warning::warn_inbound_message_dropped(
+            session_id,
+            &incoming.sender.id,
+            text.len(),
+        );
+    }
 }
 
 /// 受信メッセージを処理する。
@@ -354,9 +671,15 @@ async fn process_incoming_message<T: AgentRunner>(
     agent_ids: Vec<String>,
     gateway_actions: Arc<dyn opencrab_gateway::GatewayActions>,
     owner_discord_id: String,
-    session_locks: SessionLocks,
+    session_locks: Arc<SessionLocks>,
     skip_agents_with_dedicated_gateway: bool,
     voice: Option<std::sync::Arc<crate::voice_session::VoiceSessionManager>>,
+    event_tx: mpsc::UnboundedSender<LoopEvent>,
+    subtask_registry: opencrab_actions::subtask::SubtaskRegistry,
+    // #543: true なら**記録（と 👀）まで**で終え、推論（run）は起こさない。デバウンス窓で
+    // 合流したメッセージのうち、run トリガーでないものに使う。各メッセージを正しい送信者で
+    // 個別に会話ログへ残しつつ、run は窓につき 1 回だけにするための分岐。
+    record_only: bool,
 ) {
     let (text, image_urls) = extract_discord_content(&incoming.content);
     if text.is_empty() && image_urls.is_empty() {
@@ -407,10 +730,16 @@ async fn process_incoming_message<T: AgentRunner>(
 
     // DM whitelist check（いずれかのエージェントが信頼していれば通す事前ゲート）
     if is_dm && !state.dm_allowed_any(&incoming.sender.id, &agent_ids, &owner_discord_id) {
-        debug!(
-            sender = %incoming.sender.id,
-            "Ignoring DM from non-whitelisted user"
-        );
+        // #419: 破棄は正しい動作だが debug だと運用ログ（INFO）に出ず「無言・エラー
+        // なし」の切り分けが難しい。設定による破棄を 1 行 INFO で残す（宛先ごとに間引き）。
+        let key = format!("dm_gate:{}", incoming.sender.id);
+        if should_emit_drop_log(&DROP_LOG_LAST, &key, Instant::now(), DROP_LOG_THROTTLE) {
+            info!(
+                sender = %incoming.sender.id,
+                reason = "dm_sender_not_trusted",
+                "受信DMを破棄: 設定によりどのエージェントも送信者を信頼していない"
+            );
+        }
         return;
     }
 
@@ -438,19 +767,27 @@ async fn process_incoming_message<T: AgentRunner>(
         .unwrap_or("")
         .to_string();
 
-    // 処理対象として確定したメッセージに付ける 👀 を一度だけ付与するためのフラグ。
-    // bot投稿（自bot/他bot）には付けない。自botは受信側で除外済みだが念のためここでも弾く。
-    let mut reaction_added = incoming.sender.is_bot;
+    // 処理対象として確定したメッセージに付ける 👀 を**一度だけ**付与するためのフラグ。
+    // 複数エージェントが同じ投稿を処理しても 1 個で済ませる、それだけの役目。
+    // 送信者で付け外しはしない（自分自身の投稿は受信側 `is_own_message` で既に除外済み）。
+    let mut reaction_added = false;
 
     for agent_id in &agent_ids {
         // Per-agent channel whitelist check
         if !is_dm {
             if !state.is_channel_whitelisted_for_agent(&channel_id_str, agent_id) {
-                debug!(
-                    channel = %channel_id_str,
-                    agent = %agent_id,
-                    "Ignoring message from non-whitelisted channel for agent"
-                );
+                // #419: 設定によるチャンネル破棄を 1 行 INFO で残す（宛先ごとに間引き）。
+                // 全エージェントが非 whitelist ならメッセージは無言のまま処理されないので、
+                // 運用ログでゲート破棄だと即断できるようにする。
+                let key = format!("chan_wl:{agent_id}:{channel_id_str}");
+                if should_emit_drop_log(&DROP_LOG_LAST, &key, Instant::now(), DROP_LOG_THROTTLE) {
+                    info!(
+                        channel = %channel_id_str,
+                        agent = %agent_id,
+                        reason = "channel_not_whitelisted",
+                        "受信メッセージを破棄: 設定によりこのエージェントの非whitelistチャンネル"
+                    );
+                }
                 continue; // skip this agent, not return
             }
         } else {
@@ -459,53 +796,124 @@ async fn process_incoming_message<T: AgentRunner>(
             // ここで各エージェント個別に信頼を確認しないと、あるエージェントにしか信頼
             // 登録していないユーザーのDMに全エージェントが応答してしまう。
             if !state.dm_allowed(&incoming.sender.id, agent_id, &owner_discord_id) {
-                debug!(
-                    sender = %incoming.sender.id,
-                    agent = %agent_id,
-                    "Ignoring DM: sender not trusted for this agent"
-                );
+                // #419: 設定による DM 破棄を 1 行 INFO で残す（宛先ごとに間引き）。
+                let key = format!("dm_trust:{}:{}", agent_id, incoming.sender.id);
+                if should_emit_drop_log(&DROP_LOG_LAST, &key, Instant::now(), DROP_LOG_THROTTLE) {
+                    info!(
+                        sender = %incoming.sender.id,
+                        agent = %agent_id,
+                        reason = "dm_sender_not_trusted_for_agent",
+                        "受信DMを破棄: 設定によりこのエージェントは送信者を信頼していない"
+                    );
+                }
                 continue; // skip this agent, not return
             }
         }
 
+        let session_id = format!("discord-{}-{}-{}", agent_id, guild_id, channel_id);
+        ensure_discord_session(
+            &state,
+            &session_id,
+            std::slice::from_ref(agent_id),
+            &incoming,
+        );
+
+        // #284 P0-1 / #286: ユーザー発言の記録は**この処理で最初に行う副作用**でなければ
+        // ならない。セッションロックより前なのはもちろん、**Discord API 呼び出しよりも前**。
+        //
+        // 経緯:
+        // - 元は `spawn_serialized` の内側（ロック取得後）だった。長い推論の最中に届いた
+        //   発言は推論完了まで DB に入らず、その窓で失われる。
+        // - #285 でロックの外へ出したが、まだ 👀 リアクション付与と typing 表示の**後**
+        //   だった。この 2 つはイベントループ内で `await` される Discord HTTP 呼び出しで、
+        //   レートリミットやハングで詰まると記録に到達しない（かつ全メッセージ処理が
+        //   止まる）。「ボットは生きているのに人間の発言だけ残らない」という実観測と整合する。
+        //
+        // ネットワーク越しの飾り（リアクション・typing）より、発言を残すことが先。
+        // 二重回答を防ぐ不変条件（履歴構築 → 推論 → 応答ログがロック内で不可分）は
+        // 壊れない。記録の方が先に確定するので、ロック内で組み立てる履歴には必ず載る。
+        // #665: 受信をセッションログへ記録する段（#284 P0-1: 副作用の最初）。session_id が確定した
+        // この地点から Discord ターンを session_id で追える。
+        debug!(agent_id = %agent_id, session_id = %session_id, stage = "record_inbound", "turn: 受信記録 開始（入）");
+        record_discord_inbound(
+            &state,
+            agent_id,
+            &session_id,
+            &channel_id_str,
+            &incoming,
+            &text,
+            &image_urls,
+        );
+        debug!(agent_id = %agent_id, session_id = %session_id, stage = "record_inbound", "turn: 受信記録 完了（出）");
+
         // 処理対象として確定したので 👀 を付ける（DM whitelist / channel whitelist 通過後）。
         // 失敗は非致命的。複数エージェントが同一投稿を処理しても一度だけ付与する。
         if !reaction_added {
-            add_seen_reaction(&gateway, channel_id, &channel_id_str, &discord_message_id).await;
+            add_reaction_non_fatal(
+                gateway.as_ref(),
+                channel_id,
+                &channel_id_str,
+                &discord_message_id,
+                SEEN_EMOJI,
+            )
+            .await;
             reaction_added = true;
         }
 
-        // タイピングインジケーター送信（ホワイトリスト通過後のみ）
-        if let Err(e) = gateway.start_typing(channel_id).await {
-            warn!("Failed to start typing indicator: {e}");
+        // #543: record-only パス（デバウンス窓の非トリガーメッセージ）は、記録と 👀 まで。
+        // typing / 推論（run）は起こさない。合流窓のトリガー 1 通だけが run を起こし、その run が
+        // DB から会話全体（この記録も含む）を読むので、情報は落ちず文脈には正しい帰属で入る。
+        if record_only {
+            continue;
         }
 
-        let session_id = format!("discord-{}-{}-{}", agent_id, guild_id, channel_id);
-        ensure_discord_session(&state, &session_id, &[agent_id.clone()], &incoming);
+        // タイピングインジケーター（ホワイトリスト通過後のみ）。
+        // #429: 1 回だけ打つと Discord の失効（約 10 秒）で応答前に消えるため、ターンが
+        // 生きている間は打ち直し続ける keepalive を起こす。ガード `typing_keepalive` は
+        // 下の spawn_serialized 内へ move し、ターン終了（成功・空・NO_REPLY・エラー）で
+        // drop されて確実に停止する。keepalive は別タスクなのでイベントループもターン本体も
+        // ブロックしない。発火条件は従来どおり（ここに来た＝応答する体だけ）。
+        let typing_keepalive = {
+            let gw = gateway.clone();
+            crate::typing_keepalive::spawn_typing_keepalive(
+                crate::typing_keepalive::TYPING_REFRESH_INTERVAL,
+                move || {
+                    let gw = gw.clone();
+                    async move {
+                        if let Err(e) = gw.start_typing(channel_id).await {
+                            warn!("Failed to refresh typing indicator: {e}");
+                        }
+                    }
+                },
+            )
+        };
 
-        // [Peer Review] 返信の自動記録（#58）: このエージェントの active タスクへ
-        // score/gaps/summary を決定的に記録する（LLM のプロンプト規約任せにしない）。
-        // 送信者が登録済み co_agent で、未回収の依頼がある場合のみ記録される。
-        // 追加処理であり、メッセージはこの後通常どおり LLM にも流れる。
-        crate::gateway_actions::record_peer_review_reply(
-            state.db(),
-            agent_id,
-            &session_id,
-            &incoming.sender.id,
-            &incoming.sender.name,
-            &text,
-        );
+        // NOTE: 会話履歴の構築は、推論本体とともにセッション単位ロックの内側（spawn 内）で
+        // 行う。これにより、割り込みメッセージが直前の推論完了前に走って履歴が不整合に
+        // なり、同じ内容を二重回答する問題を防ぐ。
 
-        // NOTE: ユーザーメッセージのログと会話履歴の構築は、推論本体とともに
-        // セッション単位ロックの内側（spawn 内）で行う。これにより、割り込みメッセージが
-        // 直前の推論完了前に走って履歴が不整合になり、同じ内容を二重回答する問題を防ぐ。
-
-        let (base_prompt, agent_name) = state.build_agent_context(agent_id);
+        // #352: 本ターンの caller（resolve_caller の結果）で index を絞る。
+        let (base_prompt, agent_name) = state.build_agent_context(agent_id, &caller);
         let system_prompt = format!(
             "{}\n\n{}",
             base_prompt,
             discord_context_line(&guild_id, &channel_id_str)
         );
+
+        // #431: 「発言終わり」リアクション用に、このターンで自分が最後に投稿した
+        // メッセージ id を追跡する。on_response_text は反復ごとに発火しうるため、
+        // 送信は detach spawn（P1 非ブロック）のままにしつつ、**発火順（seq）が最大**の
+        // 送信を「最後の投稿」として採る（完了順は前後しうるので発火順で選ぶ）。
+        // ターン終了時に送信完了を待ってからリアクションを打つため、ハンドルも集める。
+        let last_self_post: std::sync::Arc<std::sync::Mutex<(u64, Option<u64>)>> =
+            std::sync::Arc::new(std::sync::Mutex::new((0, None)));
+        let reply_send_seq = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let reply_send_tasks: std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        // #431: このターンが background subtask を起こしたか。`reply_send_seq` と同じ
+        // ターン寿命で、run が返った後に読む。自動 dispatch と明示 `spawn_subtask` の
+        // 両経路が、登録簿への登録が成立したところで加算する（`RunRequest::subtask_starts`）。
+        let subtask_starts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         let on_response_text: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>> = {
             let state_for_cb = state.clone();
@@ -514,6 +922,9 @@ async fn process_incoming_message<T: AgentRunner>(
             let is_dm_for_cb = is_dm;
             let voice_for_cb = voice.clone();
             let agent_id_for_cb = agent_id.clone();
+            let last_self_post_cb = last_self_post.clone();
+            let reply_send_seq_cb = reply_send_seq.clone();
+            let reply_send_tasks_cb = reply_send_tasks.clone();
             Some(std::sync::Arc::new(move |text: String| {
                 tracing::warn!(
                     channel_id = channel_id,
@@ -534,25 +945,39 @@ async fn process_incoming_message<T: AgentRunner>(
                 let voice_cb = voice_for_cb.clone();
                 let channel_id_str_cb = channel_id_str_for_cb.clone();
                 let agent_id_cb = agent_id_for_cb.clone();
-                tokio::spawn(async move {
+                let last_self_post_task = last_self_post_cb.clone();
+                // 発火順の連番。後段で最大 seq の送信＝最後の投稿を採る。
+                let seq = reply_send_seq_cb.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let handle = tokio::spawn(async move {
                     tracing::warn!(
                         channel_id = channel_id,
                         text_len = text.len(),
                         "on_response_text: sending to Discord channel"
                     );
-                    if let Err(e) = gateway_cb.send_to_channel(channel_id, &text).await {
-                        tracing::error!("on_response_text Discord send failed: {e}");
-                    } else {
-                        tracing::warn!(
-                            channel_id = channel_id,
-                            "on_response_text: Discord send succeeded"
-                        );
-                        // VC セッションがこのチャンネルに紐づいていれば読み上げる
-                        if let Some(v) = &voice_cb {
-                            v.maybe_speak(&channel_id_str_cb, &agent_id_cb, &text);
+                    match gateway_cb.send_to_channel(channel_id, &text).await {
+                        Ok(msg_id) => {
+                            tracing::warn!(
+                                channel_id = channel_id,
+                                "on_response_text: Discord send succeeded"
+                            );
+                            // #431: 発火順が最大の送信だけを「最後の投稿」として記録する。
+                            if let Some(id) = msg_id {
+                                let mut g = last_self_post_task.lock().unwrap();
+                                if seq >= g.0 {
+                                    *g = (seq, Some(id));
+                                }
+                            }
+                            // VC セッションがこのチャンネルに紐づいていれば読み上げる
+                            if let Some(v) = &voice_cb {
+                                v.maybe_speak(&channel_id_str_cb, &agent_id_cb, &text);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("on_response_text Discord send failed: {e}");
                         }
                     }
                 });
+                reply_send_tasks_cb.lock().unwrap().push(handle);
             }))
         };
 
@@ -567,37 +992,85 @@ async fn process_incoming_message<T: AgentRunner>(
         let caller_spawn = caller.clone();
         let image_urls_spawn = image_urls.clone();
         let discord_message_id_spawn = discord_message_id.clone();
+        // NO_REPLY の可視化（#317）で使う。`gateway_for_cb`（:657）と同じ形の持ち込み。
+        let gateway_spawn = gateway.clone();
         let channel_id_str_spawn = channel_id_str.clone();
         let sender_id_spawn = incoming.sender.id.clone();
         let sender_name_spawn = incoming.sender.name.clone();
         let sender_avatar_spawn = incoming.sender.avatar_url.clone();
         let text_spawn = text.clone();
+        let event_tx_spawn = event_tx.clone();
+        let registry_spawn = subtask_registry.clone();
+        // #429: typing keepalive をターン本体へ move する。この future がどの経路で
+        // 終わっても（下の早期パスを含む）ここで束ねたガードが drop され、keepalive は停止する。
+        let typing_keepalive_spawn = typing_keepalive;
+        // #431: 「発言終わり」リアクションの判定に使う（最後の自分の投稿 id / 送信ハンドル /
+        // 実送信を試みた回数＝このターンで発話したか）。
+        let last_self_post_spawn = last_self_post.clone();
+        let reply_send_tasks_spawn = reply_send_tasks.clone();
+        let reply_send_seq_spawn = reply_send_seq.clone();
+        let subtask_starts_spawn = subtask_starts.clone();
 
-        spawn_serialized_on_session(session_locks.clone(), session_id.clone(), async move {
-            // ユーザーメッセージをDBにログ（ロック内で履歴の一部として確定させる）。
-            state_spawn.record_user_message(
-                &session_id_spawn,
-                &sender_id_spawn,
-                &sender_name_spawn,
-                sender_avatar_spawn.as_deref(),
-                &channel_id_str_spawn,
-                &text_spawn,
-                &image_urls_spawn,
+        // #665: ターン本体を session 直列キューへ投入する（結果は待たない・#223）。この後、直列ロックの
+        // 取得は共通の `SessionLocks::run_serialized`（session_lock 段）で計装される。
+        debug!(agent_id = %agent_id, session_id = %session_id, stage = "enqueue_turn", "turn: ターンを直列キューへ投入");
+        session_locks.spawn_serialized(session_id.clone(), async move {
+            // ターンの寿命に typing keepalive を束ねる（#429）。名前付きで保持し、
+            // ブロック終端まで生かす。drop = keepalive 停止。
+            let _typing_keepalive = typing_keepalive_spawn;
+            let inbound = opencrab_actions::InboundMessageRecord {
+                session_id: &session_id_spawn,
+                recipient_agent_id: &agent_id_spawn,
+                sender_id: &sender_id_spawn,
+                sender_name: &sender_name_spawn,
+                avatar_url: sender_avatar_spawn.as_deref(),
+                channel_id: Some(&channel_id_str_spawn),
+                pubkey: None,
+                text: &text_spawn,
+                image_urls: &image_urls_spawn,
+            };
+
+            // NOTE: ユーザーメッセージの記録（`record_inbound_message`）はロックを取る
+            // **前**に済んでいる（#284 P0-1）。ここでやり直すと二重に記録される。
+
+            // 受信の共通フック（#156 S4）: 汎用層の受信処理（現状は [Peer Review] 返信の
+            // 回収 / #58）へ通す。Discord 側は**呼ぶだけ**で、解析もゲートも持たない。
+            // 会話文字列を組み立てる**前**に呼ぶこと（回収した verdict は台帳経由で
+            // 会話先頭の [Task Ledger] に載るため、後に回すとこのターンに現れない）。
+            state_spawn.on_inbound_message(
+                opencrab_actions::TranscriptSource::Discord,
+                &agent_id_spawn,
+                &inbound,
             );
 
             // 会話履歴の構築（直前の応答が確定した後に行うことで二重回答を防ぐ）。
             // 失敗しても early-return せず、末尾のロック回収を必ず通す。
             let budget = state_spawn.context_budget_tokens(&agent_id_spawn);
+            // #665: 会話履歴の構築（直列ロック取得後・run_agent_response の手前）。ここで詰まると
+            // LLM リクエスト前の宙吊りになる。入と、既存の ok/failed 行を出として stage で束ねる。
+            debug!(agent_id = %agent_id_spawn, session_id = %session_id_spawn, stage = "context_build", "turn: 文脈構築 開始（入）");
             let conversation = match state_spawn.build_conversation_string(
                 &session_id_spawn,
                 &agent_id_spawn,
                 budget,
             ) {
-                Ok(raw) => Some(prepend_runtime_context_discord(
-                    &raw,
-                    "Discord conversation",
-                    &discord_message_id_spawn,
-                )),
+                Ok(raw) => {
+                    // #272 P1: 履歴が痩せた/欠けたときの切り分け用。会話文字列の中身は
+                    // 秘匿・肥大のため出さず長さのみ（含まれた log_id の範囲は
+                    // `build_full_conversation` 側で debug 出力する）。
+                    debug!(
+                        session_id = %session_id_spawn,
+                        agent_id = %agent_id_spawn,
+                        conversation_len = raw.len(),
+                        stage = "context_build",
+                        "turn: 文脈構築 完了（出）"
+                    );
+                    Some(prepend_runtime_context_discord(
+                        &raw,
+                        "Discord conversation",
+                        &discord_message_id_spawn,
+                    ))
+                }
                 Err(e) => {
                     tracing::error!(session_id = %session_id_spawn, agent_id = %agent_id_spawn, "build_conversation_string failed: {e}");
                     None
@@ -617,6 +1090,10 @@ async fn process_incoming_message<T: AgentRunner>(
                             caller_spawn,
                         )
                         .with_gateway_actions(ga_spawn)
+                        // 返信先（gateway 不透明 token / #158 S1）= 受信チャンネルの
+                        // 数値文字列。Discord は従来 session_id から復元して間に合わせて
+                        // いたが、ツール文脈まで運べば宛先引数を省略できる。
+                        .with_reply_target(channel_id_str_spawn.clone())
                         .with_image_urls(image_urls_spawn.clone());
                         if !discord_message_id_spawn.is_empty() {
                             run_req =
@@ -625,84 +1102,159 @@ async fn process_incoming_message<T: AgentRunner>(
                         if let Some(cb) = on_response_text {
                             run_req = run_req.with_on_response_text(cb);
                         }
+                        // 非ブロック自動 dispatch（RFC #152 S3a）: 完了再注入は Discord の
+                        // イベントループ（LoopEvent::SubtaskCompleted → 同一セッション直列
+                        // resume）へ流す sink を配線する。これで掘削中も同一チャンネルの
+                        // 後続メッセージに応答できる（セッションロックは run 終了で解放され、
+                        // background subtask 完了時に別途 resume される）。
+                        let sink: std::sync::Arc<dyn opencrab_actions::SubtaskCompletionSink> =
+                            std::sync::Arc::new(crate::gateway_actions::DiscordCompletionSink {
+                                event_tx: Some(event_tx_spawn.clone()),
+                            });
+                        // 共有 registry（DiscordGatewayActions と同一）に載せて、
+                        // auto-dispatch した subtask を cancel_subtask で停止可能にする（P0）。
+                        run_req = run_req.with_dispatch(Some(registry_spawn.clone()), sink);
+                        // #431: このターンが subtask を起こしたら数える（両経路）。
+                        run_req = run_req.with_subtask_starts(subtask_starts_spawn.clone());
                         run_req
                     })
                     .await;
 
+                // #431: 「発言終わり」リアクションの可否を result を move する前に確定する。
+                // 「発話したか」は最終応答テキストではなく、このターンで on_response_text が
+                // 送信タスクを起こした回数で見る（run_agent_response は既に完了しているので
+                // 発火は出揃っている。送信タスク自体の完了待ちは下の detach 側で行う）。
+                // 反復途中で喋って最終応答が NO_REPLY のターンを取りこぼさないため。
+                let posted =
+                    reply_send_seq_spawn.load(std::sync::atomic::Ordering::SeqCst) > 0;
+                // このターンが「次の行動」を起こしたか（自動 dispatch / 明示 spawn_subtask）。
+                let started_subtask =
+                    subtask_starts_spawn.load(std::sync::atomic::Ordering::SeqCst) > 0;
+                let eos_qualifies = end_of_speech_qualifies(&result, posted, started_subtask);
+
+                // #665: run から戻り、最終応答の処理・配送（記録／NO_REPLY 可視化）へ入る段。反復途中の
+                // 配送は on_response_text の detach spawn（別途 warn ログあり）で、ここは最終応答の後始末。
+                debug!(agent_id = %agent_id_spawn, session_id = %session_id_spawn, stage = "reply", "turn: 応答処理・配送 開始（入）");
                 handle_agent_response(
                     result,
                     &agent_id_spawn,
                     &session_id_spawn,
+                    channel_id,
                     &channel_id_str_spawn,
                     &state_spawn,
+                    gateway_spawn.as_ref(),
+                    &discord_message_id_spawn,
                 )
                 .await;
+                debug!(agent_id = %agent_id_spawn, session_id = %session_id_spawn, stage = "reply", "turn: 応答処理・配送 完了（出）");
+
+                // #431: 自然終了かつ発話ありなら、そのターンで自分が最後に投稿した
+                // メッセージに SPOKE_EMOJI を付ける。ストリーミング送信（detach spawn）が
+                // 全て完了してから最後の投稿 id を読むが、その待機はセッションロックを
+                // 塞がないよう別 detach タスクで行う（応答経路もブロックしない・non-fatal）。
+                if eos_qualifies {
+                    let handles: Vec<tokio::task::JoinHandle<()>> =
+                        std::mem::take(&mut *reply_send_tasks_spawn.lock().unwrap());
+                    let last_self_post_react = last_self_post_spawn.clone();
+                    let gateway_react = gateway_spawn.clone();
+                    let channel_id_str_react = channel_id_str_spawn.clone();
+                    tokio::spawn(async move {
+                        for h in handles {
+                            let _ = h.await;
+                        }
+                        let last_id = last_self_post_react.lock().unwrap().1;
+                        if let Some(id) = last_id {
+                            add_reaction_non_fatal(
+                                gateway_react.as_ref(),
+                                channel_id,
+                                &channel_id_str_react,
+                                &id.to_string(),
+                                SPOKE_EMOJI,
+                            )
+                            .await;
+                        }
+                    });
+                }
             }
         });
     }
 }
 
-/// セッション単位ロックの下で `fut` を実行するタスクを spawn する。
-///
-/// イベントループを推論でブロックしないための共通経路（受信メッセージ = P1、
-/// サブタスク完了/進捗・A2UI 応答 = 旧 P2 直列実行の置き換え）:
-/// - ループ自体は即座に次のイベントへ進む（全チャンネル・全エージェントが停止しない）
-/// - 同一セッションの履歴構築→推論→応答ログはロックで直列化される（割り込み二重回答の防止）
-/// - 終了時に待機者がいなければ map からロックエントリを回収する（#39:
-///   session_locks はプロセス生存中に単調増加していた）。remove_if は DashMap の
-///   shard 書き込みロック下で述語を評価し、entry() も同じ shard ロックを取るため、
-///   「strong_count == 1（= map 以外に保持者なし）」の判定と削除の間に新しい clone が
-///   割り込むことはない。待機者がいれば残す。
-fn spawn_serialized_on_session<F>(session_locks: SessionLocks, session_id: String, fut: F)
-where
-    F: std::future::Future<Output = ()> + Send + 'static,
-{
-    let sess_lock = session_locks
-        .entry(session_id.clone())
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone();
-    tokio::spawn(async move {
-        let guard = sess_lock.lock().await;
-        fut.await;
-        drop(guard);
-        drop(sess_lock);
-        session_locks.remove_if(&session_id, |_, lock| Arc::strong_count(lock) == 1);
-    });
-}
-
 /// エージェント応答結果を処理してDiscordに送信する。
-async fn handle_agent_response<T: AgentRunner>(
+///
+/// `gateway` / `channel_id` / `message_id` は `NO_REPLY` の可視化（#317）にだけ使う。
+/// `message_id` は元のユーザー投稿の Discord ID（空なら付与をスキップ）。
+#[allow(clippy::too_many_arguments)]
+async fn handle_agent_response<T: AgentRunner, G: ReactionAdder>(
     result: anyhow::Result<opencrab_core::EngineResult>,
     agent_id: &str,
     session_id: &str,
+    channel_id: u64,
     channel_id_str: &str,
     state: &T,
+    gateway: &G,
+    message_id: &str,
 ) {
     match result {
         Ok(engine_result) if !engine_result.response.is_empty() => {
             if engine_result.response.trim() == "NO_REPLY" {
                 debug!(agent_id = %agent_id, "Agent returned NO_REPLY");
                 state.record_agent_no_reply(agent_id, session_id);
+                // 黙ったことを投稿者に見せる（#317）。失敗しても応答処理は続けない
+                // ＝ NO_REPLY のまま終わるのは変わらない。
+                add_reaction_non_fatal(
+                    gateway,
+                    channel_id,
+                    channel_id_str,
+                    message_id,
+                    NO_REPLY_EMOJI,
+                )
+                .await;
                 return;
             }
-            state.record_agent_reply(
-                agent_id,
-                session_id,
-                channel_id_str,
-                &engine_result.response,
-                crate::DiscordReplyContext::Direct {
-                    tool_calls_made: engine_result.tool_calls_made,
+            state.record_outbound_reply(
+                opencrab_actions::TranscriptSource::Discord,
+                &opencrab_actions::OutboundReplyRecord {
+                    agent_id,
+                    session_id,
+                    channel_id: Some(channel_id_str),
+                    text: &engine_result.response,
+                    context: Some(opencrab_actions::AgentReplyContext::Direct {
+                        tool_calls_made: engine_result.tool_calls_made,
+                    }),
                 },
             );
         }
         Ok(_) => debug!(agent_id = %agent_id, "Agent produced empty response"),
         // {:#} で anyhow のコンテキストチェーン全体を出す（プロバイダの生エラーを
         // 握りつぶさない）。Display（%e）だと最外側の要約しか出ない。
-        Err(e) => error!(agent_id = %agent_id, error = format!("{e:#}"), "SkillEngine failed"),
+        Err(e) => {
+            error!(agent_id = %agent_id, error = format!("{e:#}"), "SkillEngine failed");
+            // #668: ターンが失敗したことを、トリガー投稿への ❌ リアクションだけで可視化する。
+            // **エラー本文はチャンネルへ出さない**（複数エージェントが居るチャンネルで互いの
+            // エラー文に反応し合う無限ループを防ぐ。詳細はログ＝#665 の計装と llm_logs が持つ）。
+            // ここに来るのはターンにつき 1 回・最終 Result の Err なので、エンジン内リトライ
+            // （#667）が決着した後の**最終失敗時のみ**付く（途中のリトライには付かない）。
+            // 付与失敗自体は add_reaction_non_fatal が warn ログで握る（それ以上連鎖しない）。
+            add_reaction_non_fatal(
+                gateway,
+                channel_id,
+                channel_id_str,
+                message_id,
+                FAILED_EMOJI,
+            )
+            .await;
+        }
     }
 }
 
 /// サブタスク完了イベントを処理する（P2: イベントループで直列実行）。
+///
+/// `caller` は subtask を spawn した**元のターンの呼び出し元**（#298）。resume は
+/// 元の会話の続きなので、ここで最小権限へ落とすと owner/trusted のツールが
+/// `policy_allows` で list_tools からも dispatch からも消える。引き継ぐだけで、
+/// 昇格はしない（元が `Agent` のターンは `Agent` のまま）。
+#[allow(clippy::too_many_arguments)]
 async fn process_subtask_completed<T: AgentRunner>(
     session_id: String,
     agent_id: String,
@@ -717,8 +1269,12 @@ async fn process_subtask_completed<T: AgentRunner>(
     state: T,
     gateway_actions: Arc<dyn opencrab_gateway::GatewayActions>,
     voice: Option<std::sync::Arc<crate::voice_session::VoiceSessionManager>>,
+    event_tx: mpsc::UnboundedSender<LoopEvent>,
+    subtask_registry: opencrab_actions::subtask::SubtaskRegistry,
+    caller: opencrab_actions::CallerIdentity,
 ) {
-    let (base_prompt, agent_name) = state.build_agent_context(&agent_id);
+    // #352: 本ターンの caller で index を絞る（resume は元ターンの caller を引き継ぐ）。
+    let (base_prompt, agent_name) = state.build_agent_context(&agent_id, &caller);
 
     // Get task description from subtask session
     let task_description = {
@@ -743,6 +1299,9 @@ async fn process_subtask_completed<T: AgentRunner>(
         task_description,
         exit_reason
     );
+    // #665: 文脈構築（直列ロック取得後・run_agent_response 手前）。ここで詰まると LLM リクエスト前の
+    // 宙吊りになる。入と出で挟む（時刻発火・subtask 完了 resume・interaction 応答の各ターン入口で共通）。
+    debug!(agent_id = %agent_id, session_id = %session_id, stage = "context_build", "turn: 文脈構築 開始（入）");
     let conversation_raw = match state.build_conversation_string(
         &session_id,
         &agent_id,
@@ -754,8 +1313,13 @@ async fn process_subtask_completed<T: AgentRunner>(
             return;
         }
     };
+    debug!(agent_id = %agent_id, session_id = %session_id, conversation_len = conversation_raw.len(), stage = "context_build", "turn: 文脈構築 完了（出）");
     let conversation =
         prepend_runtime_context_discord(&conversation_raw, "Discord conversation", "");
+
+    // #431: resume ターンが**さらに** subtask を投げたら、そこにも「発言終わり」は
+    // 付けず次の resume へ委ねる。通常経路と同じカウンタの張り方。
+    let subtask_starts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     match state
         .run_agent_response(
@@ -766,9 +1330,24 @@ async fn process_subtask_completed<T: AgentRunner>(
                 &system_prompt,
                 &conversation,
                 "discord",
-                opencrab_actions::CallerIdentity::Agent,
+                // 元のターンの呼び出し元をそのまま使う（#298）。以前はここが
+                // `CallerIdentity::Agent` 固定で、subtask が決着した瞬間に権限が
+                // 降格していた。
+                caller,
             )
-            .with_gateway_actions(gateway_actions),
+            .with_subtask_starts(subtask_starts.clone())
+            .with_gateway_actions(gateway_actions)
+            // 返信先（gateway 不透明 token / #158 S1）= resume 対象チャンネルの数値文字列。
+            .with_reply_target(channel_id_str.clone())
+            .with_dispatch(Some(subtask_registry.clone()), {
+                // resume したメインエンジンも非ブロック dispatch を継続できるよう sink を配線。
+                // 共有 registry に載せて停止可能にする（P0）。
+                let sink: std::sync::Arc<dyn opencrab_actions::SubtaskCompletionSink> =
+                    std::sync::Arc::new(crate::gateway_actions::DiscordCompletionSink {
+                        event_tx: Some(event_tx.clone()),
+                    });
+                sink
+            }),
         )
         .await
     {
@@ -780,23 +1359,201 @@ async fn process_subtask_completed<T: AgentRunner>(
             if !is_dm && !state.is_channel_writable(&channel_id_str) {
                 return;
             }
-            if let Err(e) = gateway
+            let sent_id = match gateway
                 .send_to_channel(channel_id, &engine_result.response)
                 .await
             {
-                error!("Subtask completion Discord send failed: {e}");
-            } else if let Some(v) = &voice {
-                v.maybe_speak(&channel_id_str, &agent_id, &engine_result.response);
-            }
-            state.record_agent_reply(
-                &agent_id,
-                &session_id,
-                &channel_id_str,
-                &engine_result.response,
-                crate::DiscordReplyContext::SubtaskCompleted,
+                Ok(id) => {
+                    if let Some(v) = &voice {
+                        v.maybe_speak(&channel_id_str, &agent_id, &engine_result.response);
+                    }
+                    id
+                }
+                Err(e) => {
+                    error!("Subtask completion Discord send failed: {e}");
+                    None
+                }
+            };
+            state.record_outbound_reply(
+                opencrab_actions::TranscriptSource::Discord,
+                &opencrab_actions::OutboundReplyRecord {
+                    agent_id: &agent_id,
+                    session_id: &session_id,
+                    channel_id: Some(&channel_id_str),
+                    text: &engine_result.response,
+                    context: Some(opencrab_actions::AgentReplyContext::SubtaskCompleted),
+                },
             );
+            // #431: 自然終了（NO_REPLY/空は上で return 済み）かつ打ち切りでなく、実際に
+            // 投稿できたなら「発言終わり」を付ける。判定は通常経路と同じゲートへ寄せる。
+            // この経路は 1 応答 1 送信なので `posted` = 送信 id の有無。付与失敗は non-fatal。
+            if end_of_speech_qualifies_ok(
+                &engine_result,
+                sent_id.is_some(),
+                subtask_starts.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            ) {
+                if let Some(id) = sent_id {
+                    add_reaction_non_fatal(
+                        gateway.as_ref(),
+                        channel_id,
+                        &channel_id_str,
+                        &id.to_string(),
+                        SPOKE_EMOJI,
+                    )
+                    .await;
+                }
+            }
         }
         _ => {}
+    }
+}
+
+/// 時刻起因の発火（#588 TimedFire）を**いつもの Discord ターン**として処理する。
+///
+/// `SubtaskCompleted` の resume と同型（受信を記録せず system プロンプトへマーカー/プロンプトを足して
+/// ターンを回す）だが、初回発火は「宣言 → `spawn_subtask` → 最終 `NO_REPLY`」の形になるので、通常の
+/// 受信ターンと同じく **`on_response_text` で反復ごとに配送**する（そうしないと最終が `NO_REPLY` のとき
+/// 宣言がチャンネルに出ない）。継続ターンは `with_dispatch`（`DiscordCompletionSink` → `SubtaskCompleted`）
+/// でループ既存の resume 経路に載る（ハートビート専用の継続機構は不要）。
+///
+/// **受け口は薄い**: 送信・ロック・記録・継続はすべてループ既存の実装。ここが担うのは
+/// 「渡された prompt を system プロンプトへ足して回す」だけ。プロンプトは会話ログに「発言」として
+/// 残さない（#501）。時刻発火の沈黙（`NO_REPLY`）は無記録（ハートビートの決定を踏襲。通常の受信ターンは
+/// NO_REPLY マーカーを残すが、ここは発火元メッセージが無いのでマーカー行を積み上げない）。
+#[allow(clippy::too_many_arguments)]
+async fn process_timed_fire<T: AgentRunner>(
+    session_id: String,
+    agent_id: String,
+    channel_id: u64,
+    channel_id_str: String,
+    guild_id: String,
+    is_dm: bool,
+    prompt: String,
+    gateway: Arc<DiscordGateway>,
+    state: T,
+    gateway_actions: Arc<dyn opencrab_gateway::GatewayActions>,
+    voice: Option<std::sync::Arc<crate::voice_session::VoiceSessionManager>>,
+    event_tx: mpsc::UnboundedSender<LoopEvent>,
+    subtask_registry: opencrab_actions::subtask::SubtaskRegistry,
+    caller: opencrab_actions::CallerIdentity,
+) {
+    // 時刻発火の受信ログ（#588）。送信側（scheduler）の「発火」ログと突き合わせれば、
+    // scheduler→この Discord ループ間で落ちたかが分かる。heartbeat 専用の文言にしない。
+    tracing::info!(
+        agent_id = %agent_id,
+        session_id = %session_id,
+        transport = "discord",
+        is_dm,
+        prompt_preview = %opencrab_actions::prompt_preview(&prompt),
+        "timed-fire: ターン開始（Discord loop 受信）"
+    );
+    let (base_prompt, agent_name) = state.build_agent_context(&agent_id, &caller);
+    // 渡された prompt（#584 指示解決の結果など）は system プロンプトへ足す（通常ターンの
+    // discord_context_line も付ける）。会話ログには「発言」として残さない（#501）。
+    let system_prompt = format!(
+        "{}\n\n{}\n\n{}",
+        base_prompt,
+        discord_context_line(&guild_id, &channel_id_str),
+        prompt
+    );
+    // #665: 文脈構築（直列ロック取得後・run_agent_response 手前）。ここで詰まると LLM リクエスト前の
+    // 宙吊りになる。入と出で挟む（時刻発火・subtask 完了 resume・interaction 応答の各ターン入口で共通）。
+    debug!(agent_id = %agent_id, session_id = %session_id, stage = "context_build", "turn: 文脈構築 開始（入）");
+    let conversation_raw = match state.build_conversation_string(
+        &session_id,
+        &agent_id,
+        state.context_budget_tokens(&agent_id),
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(session_id = %session_id, agent_id = %agent_id, "build_conversation_string failed: {e}");
+            return;
+        }
+    };
+    debug!(agent_id = %agent_id, session_id = %session_id, conversation_len = conversation_raw.len(), stage = "context_build", "turn: 文脈構築 完了（出）");
+    let conversation =
+        prepend_runtime_context_discord(&conversation_raw, "Discord conversation", "");
+
+    // 反復ごとに応答テキストを配送する（通常の受信ターンと同じ on_response_text）。宣言が出る要。
+    // NO_REPLY・空はスキップ。書き込み不可チャンネルもスキップ。発火を塞がないよう spawn。
+    let on_response_text: Arc<dyn Fn(String) + Send + Sync> = {
+        let gateway = gateway.clone();
+        let state = state.clone();
+        let voice = voice.clone();
+        let channel_id_str = channel_id_str.clone();
+        let agent_id = agent_id.clone();
+        Arc::new(move |text: String| {
+            if text.is_empty() || text.trim() == "NO_REPLY" {
+                return;
+            }
+            if !is_dm && !state.is_channel_writable(&channel_id_str) {
+                return;
+            }
+            let gateway = gateway.clone();
+            let voice = voice.clone();
+            let channel_id_str = channel_id_str.clone();
+            let agent_id = agent_id.clone();
+            tokio::spawn(async move {
+                match gateway.send_to_channel(channel_id, &text).await {
+                    Ok(_) => {
+                        if let Some(v) = &voice {
+                            v.maybe_speak(&channel_id_str, &agent_id, &text);
+                        }
+                    }
+                    Err(e) => tracing::error!("TimedFire Discord send failed: {e}"),
+                }
+            });
+        })
+    };
+
+    let result = state
+        .run_agent_response(
+            opencrab_actions::RunRequest::new(
+                &agent_id,
+                &agent_name,
+                &session_id,
+                &system_prompt,
+                &conversation,
+                "discord",
+                caller,
+            )
+            .with_gateway_actions(gateway_actions)
+            .with_reply_target(channel_id_str.clone())
+            .with_on_response_text(on_response_text)
+            .with_dispatch(Some(subtask_registry.clone()), {
+                // 継続ターンはループ既存の resume（SubtaskCompleted）へ載せる。
+                let sink: std::sync::Arc<dyn opencrab_actions::SubtaskCompletionSink> =
+                    std::sync::Arc::new(crate::gateway_actions::DiscordCompletionSink {
+                        event_tx: Some(event_tx.clone()),
+                    });
+                sink
+            }),
+        )
+        .await;
+
+    // 記録（配送は on_response_text が済ませているので送信はしない）。最終応答が NO_REPLY 以外なら
+    // 通常ターンと同じ record_outbound_reply。沈黙は無記録（上記 doc）。
+    match result {
+        Ok(engine_result) => {
+            let text = engine_result.response.trim();
+            if !text.is_empty() && text != "NO_REPLY" {
+                state.record_outbound_reply(
+                    opencrab_actions::TranscriptSource::Discord,
+                    &opencrab_actions::OutboundReplyRecord {
+                        agent_id: &agent_id,
+                        session_id: &session_id,
+                        channel_id: Some(&channel_id_str),
+                        text: &engine_result.response,
+                        context: Some(opencrab_actions::AgentReplyContext::Direct {
+                            tool_calls_made: engine_result.tool_calls_made,
+                        }),
+                    },
+                );
+            }
+        }
+        Err(e) => {
+            error!(agent_id = %agent_id, error = format!("{e:#}"), "TimedFire turn failed");
+        }
     }
 }
 
@@ -805,8 +1562,8 @@ async fn process_subtask_completed<T: AgentRunner>(
 /// PendingInteractionRegistryから該当するインタラクションを検索し、
 /// LoopEvent::InteractionResponseとしてイベントループに送信する。
 async fn handle_component_interaction(
-    data: opencrab_gateway::ComponentInteractionData,
-    registry: &crate::PendingInteractionRegistry,
+    data: crate::gateway::ComponentInteractionData,
+    registry: &opencrab_core::a2ui::PendingInteractionRegistry,
     renderer_http: Arc<serenity::http::Http>,
     event_tx: mpsc::UnboundedSender<LoopEvent>,
 ) {
@@ -827,12 +1584,13 @@ async fn handle_component_interaction(
         let pending_ref = registry.get(&interaction_id);
         match pending_ref {
             Some(ref pending) => {
-                // Owner-only check
-                if !pending.owner_discord_id.is_empty() && data.user_id != pending.owner_discord_id
-                {
+                // Owner-only check.
+                // オーナー未設定（空文字・空白のみ）なら誰も操作できない（#174）。
+                // 以前は「空なら判定しない」＝誰でも操作可という fail-open だった。
+                if !opencrab_core::owner::is_owner_id(&pending.owner_id, &data.user_id) {
                     debug!(
                         user_id = %data.user_id,
-                        owner_id = %pending.owner_discord_id,
+                        owner_id = %pending.owner_id,
                         "Non-owner tried to interact with owner-only UI"
                     );
                     return;
@@ -841,11 +1599,22 @@ async fn handle_component_interaction(
                 Some((
                     pending.session_id.clone(),
                     pending.agent_id.clone(),
-                    pending.channel_id,
-                    pending.channel_id_str.clone(),
-                    pending.is_dm,
+                    // 保留状態はコアの `RenderTarget` を持つ（#156 S3）。Discord の
+                    // チャンネル識別子は数値なので、移設前と同じフォールバック
+                    // （`parse().unwrap_or(0)`）で数値化する。
+                    pending.target.channel_id.parse::<u64>().unwrap_or(0),
+                    pending.target.channel_id.clone(),
+                    // 旧 `PendingInteraction.is_dm` は send_ui 時点で常に false が入って
+                    // いた（送信時には判定できない）。移設後もその既定を保つ。
+                    false,
                     pending.surface_id.clone(),
                     pending.rendered_message.clone(),
+                    // resume の呼び出し元は**この UI を描いた run の caller**（#302）。
+                    // クリックした本人からは導出しない: 上の owner-only ゲートで
+                    // 押せるのはオーナーだけなので、応答者から導くと
+                    // 「`Agent` のターンが描いた UI をオーナーが押す」＝昇格に
+                    // なってしまう。
+                    pending.caller.clone(),
                 ))
             }
             None => {
@@ -858,14 +1627,22 @@ async fn handle_component_interaction(
         }
     };
 
-    let (session_id, agent_id, channel_id, channel_id_str, is_dm, surface_id, rendered_message) =
-        match pending_data {
-            Some(d) => d,
-            None => return,
-        };
+    let (
+        session_id,
+        agent_id,
+        channel_id,
+        channel_id_str,
+        is_dm,
+        surface_id,
+        rendered_message,
+        caller,
+    ) = match pending_data {
+        Some(d) => d,
+        None => return,
+    };
 
     // Handle ModalSubmit: extract field values and merge into context
-    if data.interaction_kind == opencrab_gateway::InteractionKind::ModalSubmit {
+    if data.interaction_kind == crate::gateway::InteractionKind::ModalSubmit {
         // Remove from registry
         let _ = registry.remove(&interaction_id);
 
@@ -892,12 +1669,13 @@ async fn handle_component_interaction(
                 responder_id: data.user_id,
             },
             is_dm,
+            caller: caller.clone(),
         });
         return;
     }
 
     // Handle SelectMenu: merge selected_values into context
-    if data.interaction_kind == opencrab_gateway::InteractionKind::SelectMenu {
+    if data.interaction_kind == crate::gateway::InteractionKind::SelectMenu {
         // Remove from registry
         let _ = registry.remove(&interaction_id);
 
@@ -943,6 +1721,7 @@ async fn handle_component_interaction(
                 responder_id: data.user_id,
             },
             is_dm,
+            caller: caller.clone(),
         });
         return;
     }
@@ -981,6 +1760,7 @@ async fn handle_component_interaction(
             responder_id: data.user_id,
         },
         is_dm,
+        caller,
     });
 }
 
@@ -988,6 +1768,17 @@ async fn handle_component_interaction(
 ///
 /// SubtaskCompletedと同様のパターンで、応答情報をシステムプロンプトに含めて
 /// エージェントを再呼び出しする。
+///
+/// `caller` は**この UI を描いた run の呼び出し元**（`PendingInteraction.caller` /
+/// #298 / #302）。subtask 決着の resume（[`process_subtask_completed`]）とまったく
+/// 同じ方針で、元のターンの呼び出し元を**引き継ぐだけ**。
+///
+/// `CallerIdentity::Agent` 固定にすると owner/trusted のツールが `policy_allows` で
+/// 丸ごと消える（降格）。逆に応答者（`response.responder_id`）から導出すると昇格経路に
+/// なる: `send_ui` の `channel_id` は自由引数なので、描画先チャンネルと resume 先
+/// セッションは独立している。`Agent` のターンがオーナーの見るチャンネルへ UI を描き、
+/// オーナーが押すとそのセッションが `Owner` で resume してしまう。
+#[allow(clippy::too_many_arguments)]
 async fn process_interaction_response<T: AgentRunner>(
     interaction_id: String,
     session_id: String,
@@ -1000,6 +1791,7 @@ async fn process_interaction_response<T: AgentRunner>(
     gateway: Arc<DiscordGateway>,
     state: T,
     gateway_actions: Arc<dyn opencrab_gateway::GatewayActions>,
+    caller: opencrab_actions::CallerIdentity,
 ) {
     info!(
         interaction_id = %interaction_id,
@@ -1036,7 +1828,7 @@ async fn process_interaction_response<T: AgentRunner>(
         state.record_interaction_response(
             &agent_id,
             &session_id,
-            crate::InteractionRecord {
+            &opencrab_actions::InteractionRecord {
                 interaction_id: &interaction_id,
                 surface_id: &response.surface_id,
                 action_name: &response.action_name,
@@ -1048,7 +1840,8 @@ async fn process_interaction_response<T: AgentRunner>(
     }
 
     // 3. Re-invoke agent (same pattern as SubtaskCompleted)
-    let (base_prompt, agent_name) = state.build_agent_context(&agent_id);
+    // #352: 本ターンの caller で index を絞る（resume は元ターンの caller を引き継ぐ）。
+    let (base_prompt, agent_name) = state.build_agent_context(&agent_id, &caller);
 
     let context_str = response
         .context
@@ -1062,6 +1855,9 @@ async fn process_interaction_response<T: AgentRunner>(
         interaction_id, response.surface_id,
         response.action_name, response.component_id, context_str, response.responder_id,
     );
+    // #665: 文脈構築（直列ロック取得後・run_agent_response 手前）。ここで詰まると LLM リクエスト前の
+    // 宙吊りになる。入と出で挟む（時刻発火・subtask 完了 resume・interaction 応答の各ターン入口で共通）。
+    debug!(agent_id = %agent_id, session_id = %session_id, stage = "context_build", "turn: 文脈構築 開始（入）");
     let conversation_raw = match state.build_conversation_string(
         &session_id,
         &agent_id,
@@ -1073,8 +1869,12 @@ async fn process_interaction_response<T: AgentRunner>(
             return;
         }
     };
+    debug!(agent_id = %agent_id, session_id = %session_id, conversation_len = conversation_raw.len(), stage = "context_build", "turn: 文脈構築 完了（出）");
     let conversation =
         prepend_runtime_context_discord(&conversation_raw, "Discord conversation", "");
+
+    // #431: この経路も規則を揃える（subtask を起こしたターンには付けない）。
+    let subtask_starts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     match state
         .run_agent_response(
@@ -1085,9 +1885,12 @@ async fn process_interaction_response<T: AgentRunner>(
                 &system_prompt,
                 &conversation,
                 "discord",
-                opencrab_actions::CallerIdentity::Agent,
+                caller,
             )
-            .with_gateway_actions(gateway_actions),
+            .with_gateway_actions(gateway_actions)
+            .with_subtask_starts(subtask_starts.clone())
+            // 返信先（gateway 不透明 token / #158 S1）= UI 応答が来たチャンネルの数値文字列。
+            .with_reply_target(channel_id_str.clone()),
         )
         .await
     {
@@ -1099,21 +1902,47 @@ async fn process_interaction_response<T: AgentRunner>(
             if !is_dm && !state.is_channel_writable(&channel_id_str) {
                 return;
             }
-            if let Err(e) = gateway
+            let sent_id = match gateway
                 .send_to_channel(channel_id, &engine_result.response)
                 .await
             {
-                error!("Interaction response Discord send failed: {e}");
-            }
-            state.record_agent_reply(
-                &agent_id,
-                &session_id,
-                &channel_id_str,
-                &engine_result.response,
-                crate::DiscordReplyContext::InteractionResponse {
-                    interaction_id: &interaction_id,
+                Ok(id) => id,
+                Err(e) => {
+                    error!("Interaction response Discord send failed: {e}");
+                    None
+                }
+            };
+            state.record_outbound_reply(
+                opencrab_actions::TranscriptSource::Discord,
+                &opencrab_actions::OutboundReplyRecord {
+                    agent_id: &agent_id,
+                    session_id: &session_id,
+                    channel_id: Some(&channel_id_str),
+                    text: &engine_result.response,
+                    context: Some(opencrab_actions::AgentReplyContext::InteractionResponse {
+                        interaction_id: &interaction_id,
+                    }),
                 },
             );
+            // #431: 自然終了（NO_REPLY/空は上で return 済み）かつ打ち切りでなく、実際に
+            // 投稿できたなら「発言終わり」を付ける。判定は通常経路と同じゲートへ寄せる。
+            // この経路は 1 応答 1 送信なので `posted` = 送信 id の有無。付与失敗は non-fatal。
+            if end_of_speech_qualifies_ok(
+                &engine_result,
+                sent_id.is_some(),
+                subtask_starts.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            ) {
+                if let Some(id) = sent_id {
+                    add_reaction_non_fatal(
+                        gateway.as_ref(),
+                        channel_id,
+                        &channel_id_str,
+                        &id.to_string(),
+                        SPOKE_EMOJI,
+                    )
+                    .await;
+                }
+            }
         }
         _ => {}
     }
@@ -1193,7 +2022,7 @@ fn ensure_discord_session<T: AgentRunner>(
     incoming: &IncomingMessage,
 ) {
     let (theme, metadata_json) = build_discord_session_metadata(incoming);
-    state.ensure_session(session_id, agent_ids, &theme, &metadata_json);
+    state.ensure_session(session_id, agent_ids, &theme, &metadata_json, "discord");
 }
 
 /// Discord用: message_idを含む変動コンテキストを前置するヘルパー。
@@ -1210,107 +2039,205 @@ fn prepend_runtime_context_discord(
     )
 }
 
-/// 処理対象として確定したユーザー投稿に 👀 リアクションを付ける（非致命的）。
+/// リアクション付与だけを切り出した継ぎ目（#317）。
 ///
-/// 失敗（権限不足・削除済みメッセージ・無効なID等）してもエラーは握りつぶし、
-/// channel_id/message_id とエラー内容のみログに残す（秘密値は含めない）。
-async fn add_seen_reaction(
-    gateway: &DiscordGateway,
+/// 本番の実体は [`DiscordGateway`]。テストは Discord へ実際に HTTP を出せないため、
+/// 付与要求を記録する fake を差し替えて配線を固定する。gateway 非依存層には何も
+/// 足さない — この trait は `crates/discord` に閉じている。
+#[async_trait::async_trait]
+pub(crate) trait ReactionAdder: Send + Sync {
+    /// 固有メソッド `DiscordGateway::add_reaction` と**名前を分ける**。同名にすると
+    /// 実装本体（`DiscordGateway::add_reaction(self, ..)`）が固有メソッドではなく
+    /// この trait メソッド自身へ解決されうる。いまは固有メソッドが優先されるので
+    /// 動くが、固有側が改名・削除された瞬間に**コンパイルは通ったまま無限再帰**になる。
+    async fn add_unicode_reaction(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        emoji: &str,
+    ) -> anyhow::Result<()>;
+}
+
+#[async_trait::async_trait]
+impl ReactionAdder for DiscordGateway {
+    async fn add_unicode_reaction(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        emoji: &str,
+    ) -> anyhow::Result<()> {
+        self.add_reaction(channel_id, message_id, emoji).await
+    }
+}
+
+/// 元の投稿に Unicode 絵文字のリアクションを 1 個付ける（非致命的）。
+///
+/// 使い分けは**絵文字だけ**で、手続きは共通:
+/// - 👀 = 処理対象として確定した（受け取った）
+/// - 🤐 = エージェントが `NO_REPLY` を選んだ（読んで黙ると**決めた**）。
+///   これが無いと投稿者からは「読んで黙った」のか「落ちて返せなかった」のか区別できない（#317）
+///
+/// 絵文字は呼び出し側のハードコード（設定項目にしない）。付与失敗（権限不足・削除済み
+/// メッセージ・無効なID等）は握りつぶし、channel_id/message_id/絵文字とエラー内容だけを
+/// ログに残す（秘密値は含めない）。message_id が空/非数値なら付与自体を諦める。
+async fn add_reaction_non_fatal<G: ReactionAdder>(
+    gateway: &G,
     channel_id: u64,
     channel_id_str: &str,
     message_id: &str,
+    emoji: &str,
 ) {
-    const SEEN_EMOJI: &str = "👀";
-
-    let msg_id = match parse_seen_message_id(message_id) {
+    let msg_id = match parse_reaction_message_id(message_id) {
         Some(id) => id,
         None => {
             if !message_id.is_empty() {
                 warn!(
                     channel_id = %channel_id_str,
                     message_id = %message_id,
-                    "Skip 👀 reaction: invalid message_id"
+                    emoji = %emoji,
+                    "Skip reaction: invalid message_id"
                 );
             }
             return;
         }
     };
-    if let Err(e) = gateway.add_reaction(channel_id, msg_id, SEEN_EMOJI).await {
+    if let Err(e) = gateway
+        .add_unicode_reaction(channel_id, msg_id, emoji)
+        .await
+    {
         warn!(
             channel_id = %channel_id_str,
             message_id = %message_id,
+            emoji = %emoji,
             error = %e,
-            "Failed to add 👀 reaction (non-fatal)"
+            "Failed to add reaction (non-fatal)"
         );
     }
 }
 
-/// 👀 リアクションを付ける対象の message_id を解析する。
+/// 処理対象として確定した投稿に付ける「受け取った」の印。
+const SEEN_EMOJI: &str = "👀";
+
+/// エージェントが `NO_REPLY` を選んだことを示す印（#317）。
+/// 👀 と同じ絵文字にすると 2 つの状態が区別できなくなる。
+const NO_REPLY_EMOJI: &str = "🤐";
+
+/// ターンが自然終了したとき、自分が最後に投稿したメッセージに付ける「発言終わり」の印（#431）。
+///
+/// 目的: 見ている人間が「まだ続きを書いているのか、言い終わったのか」を判別できる。
+/// 👀（受信）/🤐（黙ると決めた）と意味が衝突しない絵文字にする。付与対象も違い、
+/// これは**自分の投稿**に付く（👀/🤐 は受信したユーザー投稿に付く）。
+/// 既存の 2 種と同様ハードコード（設定項目は増やさない / #431 の判断）。
+const SPOKE_EMOJI: &str = "🏁";
+
+/// ターンがエラーで失敗したことを示す印（#668）。
+///
+/// 上流プロバイダ障害等でターンが落ちたとき、**エラー本文をチャンネルへ出す代わりに**
+/// トリガー投稿へこれを付け「失敗した」ことだけを可視化する（本文投稿は複数エージェント間で
+/// エラー文に反応し合う無限ループを誘発するため出さない）。付与対象は受信したユーザー投稿
+/// （👀/🤐 と同じ側）だが、意味が衝突しない絵文字にする。既存の 3 種と同様ハードコード。
+const FAILED_EMOJI: &str = "❌";
+
+/// ターンが「発言終わり」リアクションの対象になるか（#431）。
+///
+/// `true` を返すのは、ターンが**自然に**（次の行動を選ばず）終わり、かつそのターンで
+/// 自分が**実際に投稿できた**（`posted`）ときだけ。以下は `false`:
+/// - エラー / タイムアウト（`Err`）… 「言い終わった」ではなく落ちた
+/// - 反復上限での打ち切り（`stopped_by_limit`）… 途中で切られた
+/// - `posted == false` … このターンで実投稿していない（全反復 NO_REPLY/空、または
+///   非 writable で送信に至らなかった）＝そもそも発話していない
+/// - `started_subtask == true` … このターンが background subtask を起こした。掘削を
+///   投げたターンは「次の行動を選んで」終わっている。ここで付けると『調べますね🏁』の
+///   数分後に続きが届く**逆の情報**になる。印は subtask 完了で resume したターンが
+///   自然終了したときにそちらへ付く（`process_subtask_completed`）。resume ターンが
+///   さらに subtask を投げた場合も同じ条件で弾かれ、次の resume へ委ねられる。
+///
+///   `started_subtask` の実体は `RunRequest::subtask_starts` に渡したターンローカルな
+///   カウンタで、**自動 dispatch と明示 `spawn_subtask` の両方**が登録簿への登録が
+///   成立したところで加算する。登録簿を後から覗く形にしないのは、run が返る前に決着
+///   した subtask が既に除去されていて取りこぼす（＝まさに resume が来るケースを
+///   見落とす）ため。
+///
+/// **最終応答テキストの中身（NO_REPLY/空）では判定しない。** 反復途中で発話し最終応答が
+/// `NO_REPLY` で自然終了するターン（例: 反復1で発話 → 最終 NO_REPLY）を取りこぼすため。
+/// 「発話したか」は実投稿の有無（`posted`）で見る。`posted` の実体は、通常経路では
+/// 実送信を試みた回数（`reply_send_seq > 0`）、subtask/interaction 経路では送信 id
+/// （`sent_id.is_some()`）。実送信を試みたが失敗して id が採れなかった場合は、この関数は
+/// `true` を返すが、実際の付与は呼び出し側の「最後の投稿 id が Some か」で最終的に弾かれる。
+fn end_of_speech_qualifies(
+    result: &anyhow::Result<opencrab_core::EngineResult>,
+    posted: bool,
+    started_subtask: bool,
+) -> bool {
+    matches!(result.as_ref(), Ok(r) if end_of_speech_qualifies_ok(r, posted, started_subtask))
+}
+
+/// [`end_of_speech_qualifies`] の `Ok` 側だけを取り出したもの。subtask 完了 /
+/// interaction 応答の経路は `EngineResult` を先に取り出しているため、判定を
+/// 共有するにはこの形が要る（`Err` は match の別腕で落ちている）。
+fn end_of_speech_qualifies_ok(
+    result: &opencrab_core::EngineResult,
+    posted: bool,
+    started_subtask: bool,
+) -> bool {
+    !result.stopped_by_limit && posted && !started_subtask
+}
+
+/// リアクションを付ける対象の message_id を解析する。
 ///
 /// 空文字（message_idがメタデータに無い）や数値でない場合は `None` を返し、
 /// 呼び出し側はリアクション付与をスキップする。
-fn parse_seen_message_id(message_id: &str) -> Option<u64> {
+fn parse_reaction_message_id(message_id: &str) -> Option<u64> {
     if message_id.is_empty() {
         return None;
     }
     message_id.parse::<u64>().ok()
 }
 
-/// デバウンスキーを生成する: (channel_id, sender_id)。
-fn debounce_key(msg: &IncomingMessage) -> (String, String) {
-    let channel_id = match &msg.source {
+/// デバウンス**バッファ**のキー = **channel だけ**（#543 / #556）。
+///
+/// オーナー指示「デバウンスはチャンネルごと。人で分けたらだめ」そのまま。バッファは channel
+/// ごとに 1 本（タイマーも 1 本）。権限で並行バッファに割らない: run は DB から会話全体を読む
+/// ので、権限で割ると同じ文脈に対し run が 2 回起きて増幅するだけ。
+///
+/// ただし**フラッシュ時に**、バッファ内を到着順のまま「連続した同一 trust_level」でグループへ
+/// 切り、run はグループごとに 1 回起こす（`consecutive_groups`）。これで別権限は別 run に分かれ、
+/// caller の降格（最後の送信者に引きずられる）も起きない。詳細は `run_discord_loop` のフラッシュ
+/// 箇所のコメントを参照。
+fn debounce_window_key(msg: &IncomingMessage) -> String {
+    match &msg.source {
         opencrab_gateway::MessageSource::Discord { channel_id, .. } => channel_id.clone(),
         _ => String::new(),
-    };
-    (channel_id, msg.sender.id.clone())
+    }
 }
 
-/// 複数のIncomingMessageを1つにマージする。
-/// テキストは改行で結合、画像URLはすべて集約、メタデータは最後のメッセージを使用。
-fn merge_incoming_messages(mut messages: Vec<IncomingMessage>) -> Option<IncomingMessage> {
-    if messages.is_empty() {
-        return None;
-    }
-    if messages.len() == 1 {
-        return Some(messages.remove(0));
-    }
-
-    let count = messages.len();
-    let mut texts = Vec::new();
-    let mut images = Vec::new();
-
-    for msg in &messages {
-        let (text, img_urls) = extract_discord_content(&msg.content);
-        if !text.is_empty() {
-            texts.push(text);
+/// 連続した同一要素の並びを `(開始 index, 長さ)` のグループに切る（#556）。到着順を保ち、
+/// 隣り合う要素が変わったところでグループが切れる。
+///
+/// デバウンスバッファのフラッシュで、メッセージ列を trust_level 列に写してから呼ぶ。
+/// 例: `[2,0,2]` → `[(0,1),(1,1),(2,1)]`（3 グループ）、`[2,2,0]` → `[(0,2),(2,1)]`（2 グループ）。
+fn consecutive_groups<T: PartialEq>(items: &[T]) -> Vec<(usize, usize)> {
+    let mut groups = Vec::new();
+    let mut start = 0;
+    while start < items.len() {
+        let mut end = start + 1;
+        while end < items.len() && items[end] == items[start] {
+            end += 1;
         }
-        images.extend(img_urls);
+        groups.push((start, end - start));
+        start = end;
     }
+    groups
+}
 
-    // 最後のメッセージをベースにする（最新のメタデータ・タイムスタンプ）
-    let mut merged = messages.pop().unwrap();
-
-    // コンテンツをマージ
-    let merged_text = texts.join("\n");
-    if images.is_empty() {
-        merged.content = opencrab_gateway::MessageContent::Text(merged_text);
-    } else {
-        let mut parts: Vec<opencrab_gateway::ContentPart> = Vec::new();
-        if !merged_text.is_empty() {
-            parts.push(opencrab_gateway::ContentPart::Text(merged_text));
-        }
-        for url in images {
-            parts.push(opencrab_gateway::ContentPart::Image { url, alt: None });
-        }
-        merged.content = opencrab_gateway::MessageContent::Multi(parts);
-    }
-
-    // デバウンスでまとめたことをメタデータに記録
-    merged
-        .metadata
-        .insert("debounce_count".to_string(), serde_json::json!(count));
-
-    Some(merged)
+/// メッセージが応答対象になる内容（テキストまたは画像）を持つか（#543）。
+///
+/// デバウンス窓の run トリガー選びに使う。`process_incoming_message` 冒頭の早期 return
+/// （text も image も空なら何もしない）と同じ判定にそろえ、内容の無いメッセージを
+/// トリガーに選んで run を消してしまうことを防ぐ。
+fn incoming_has_content(msg: &IncomingMessage) -> bool {
+    let (text, images) = extract_discord_content(&msg.content);
+    !text.is_empty() || !images.is_empty()
 }
 
 /// メッセージコンテンツからテキストと画像URLを抽出する。
@@ -1332,13 +2259,239 @@ fn extract_discord_content(content: &opencrab_gateway::MessageContent) -> (Strin
     }
 }
 
+// 本番配線の同一性テスト（#203）。変異注入の実験でこのファイルだけを巻き戻しても
+// テストが消えないよう、別ファイルに置いている。
+#[cfg(test)]
+#[path = "message_loop_wiring_tests.rs"]
+mod wiring_tests;
+
 #[cfg(test)]
 mod tests {
     use super::{
-        discord_context_line, parse_discord_session, parse_seen_message_id,
-        spawn_serialized_on_session, SessionLocks,
+        discord_context_line, end_of_speech_qualifies, end_of_speech_qualifies_ok,
+        parse_discord_session, parse_reaction_message_id, recv_retry_backoff,
+        should_alert_inbound_stalled, should_emit_drop_log, FAILED_EMOJI, NO_REPLY_EMOJI,
+        RECV_FAILURES_BEFORE_ALERT, RECV_RETRY_BASE, RECV_RETRY_MAX, SEEN_EMOJI, SPOKE_EMOJI,
     };
-    use std::sync::Arc;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use tokio::time::{Duration, Instant};
+
+    /// #431 テスト用に `EngineResult` を組む。判定に効くのは `stopped_by_limit` だけで、
+    /// `response` は「最終応答テキストでは判定しない」ことを示すために置いている。
+    fn mk_result(response: &str, stopped_by_limit: bool) -> opencrab_core::EngineResult {
+        opencrab_core::EngineResult {
+            response: response.to_string(),
+            iterations: 1,
+            tool_calls_made: 0,
+            stopped_by_limit,
+            xml_fallback_parses: 0,
+        }
+    }
+
+    /// #431: 「発言終わり」の絵文字は既存の 2 種と衝突しない（区別できないと意味がない）。
+    #[test]
+    fn spoke_emoji_is_distinct_from_existing_reactions() {
+        assert_ne!(SPOKE_EMOJI, SEEN_EMOJI);
+        assert_ne!(SPOKE_EMOJI, NO_REPLY_EMOJI);
+        assert!(!SPOKE_EMOJI.is_empty());
+    }
+
+    /// #668: 「失敗」の絵文字は他の 3 種すべてと衝突しない。受信（👀）や NO_REPLY（🤐）と
+    /// 同じだと「失敗した」のか「受け取った／黙った」のか区別できず可視化の意味が消える。
+    #[test]
+    fn failed_emoji_is_distinct_from_existing_reactions() {
+        assert_ne!(FAILED_EMOJI, SEEN_EMOJI);
+        assert_ne!(FAILED_EMOJI, NO_REPLY_EMOJI);
+        assert_ne!(FAILED_EMOJI, SPOKE_EMOJI);
+        assert!(!FAILED_EMOJI.is_empty());
+    }
+
+    /// #431: 自然終了かつ発話成立のターンだけが対象。
+    #[test]
+    fn end_of_speech_marks_only_natural_completed_replies() {
+        // 発話して自然終了・subtask を起こしていない → 対象
+        assert!(end_of_speech_qualifies(
+            &Ok(mk_result("言い終わったよ", false)),
+            true,
+            false
+        ));
+    }
+
+    /// #431: **反復途中で喋り、最終応答が `NO_REPLY` で自然終了した**ターンも対象。
+    /// これが取りこぼされると「調べます」と言ったきり沈黙する——🏁 が解決すべき当の
+    /// 状況——に印が付かない。判定は最終応答テキストではなく実投稿の有無で見る。
+    #[test]
+    fn end_of_speech_marks_turn_that_spoke_then_ended_with_no_reply() {
+        assert!(end_of_speech_qualifies(
+            &Ok(mk_result("NO_REPLY", false)),
+            true,
+            false
+        ));
+        // 最終応答が空で終わるターン（ツール実行だけして締める）も同じ。
+        assert!(end_of_speech_qualifies(
+            &Ok(mk_result("", false)),
+            true,
+            false
+        ));
+    }
+
+    /// #431: 付けない経路を網羅する（恒真回避 — 各除外条件を個別に踏む）。
+    #[test]
+    fn end_of_speech_excludes_non_speech_and_cutoff() {
+        // 発話ゼロ（全反復 NO_REPLY / 非 writable で送信に至らず）→ 付けない。
+        // 逆流防止: 実投稿が無いターンには最終応答が何であれ付かない。
+        assert!(!end_of_speech_qualifies(
+            &Ok(mk_result("NO_REPLY", false)),
+            false,
+            false
+        ));
+        assert!(!end_of_speech_qualifies(
+            &Ok(mk_result("", false)),
+            false,
+            false
+        ));
+        assert!(!end_of_speech_qualifies(
+            &Ok(mk_result("送れなかった本文", false)),
+            false,
+            false
+        ));
+        // 反復上限で打ち切り（自然終了でない）→ 発話していても付けない
+        assert!(!end_of_speech_qualifies(
+            &Ok(mk_result("途中まで", true)),
+            true,
+            false
+        ));
+        // エラー / タイムアウト終了 → 付けない
+        assert!(!end_of_speech_qualifies(
+            &Err(anyhow::anyhow!("boom")),
+            true,
+            false
+        ));
+    }
+
+    /// #431: **subtask を起こして終わったターンには付けない。**
+    ///
+    /// 掘削を投げたターンは「次の行動を選んで」終わっており、数分後に完了 resume の
+    /// 続きが届く。ここで付けると『調べますね🏁』という逆の情報になる。発話していても
+    /// （`posted == true`）付けないのが要点。
+    ///
+    /// 起動経路（自動 dispatch / 明示 `spawn_subtask`）はこのゲートからは見えない。
+    /// 両方が同じカウンタへ載ることは呼び出し側の配線テストが押さえる
+    /// （`message_loop_wiring_tests.rs`）。
+    #[test]
+    fn end_of_speech_excludes_turn_that_started_a_subtask() {
+        // 「調べますね」と喋ってから掘削を投げたターン。
+        assert!(!end_of_speech_qualifies(
+            &Ok(mk_result("調べますね", false)),
+            true,
+            true
+        ));
+        // subtask 完了 resume / interaction 経路の `Ok` 側ゲートも同じ規則に従う。
+        // resume ターンがさらに subtask を投げたら、その resume にも付けず次へ委ねる。
+        assert!(!end_of_speech_qualifies_ok(
+            &mk_result("もう少し掘る", false),
+            true,
+            true
+        ));
+        // 回帰: subtask を起こしていない自然終了は従来どおり対象。
+        assert!(end_of_speech_qualifies(
+            &Ok(mk_result("言い終わったよ", false)),
+            true,
+            false
+        ));
+        assert!(end_of_speech_qualifies_ok(
+            &mk_result("言い終わったよ", false),
+            true,
+            false
+        ));
+    }
+
+    /// #419: フィルタ破棄 INFO は宛先ごとに間引く。初回は出し、窓の内側では抑制し、
+    /// 窓を越えたら再び出す。異なる宛先どうしは互いに間引かない。
+    #[test]
+    fn drop_log_throttle_emits_first_suppresses_within_window_reemits_after() {
+        let map: Mutex<HashMap<String, Instant>> = Mutex::new(HashMap::new());
+        let window = Duration::from_secs(300);
+        let t0 = Instant::now();
+
+        // 初回は必ず出す。
+        assert!(should_emit_drop_log(&map, "chan_wl:a1:c1", t0, window));
+        // 窓の内側（同一宛先）は抑制する。ここが常に true だと洪水対策が壊れる。
+        assert!(!should_emit_drop_log(
+            &map,
+            "chan_wl:a1:c1",
+            t0 + window - Duration::from_millis(1),
+            window
+        ));
+        // 別宛先は独立に出す（他宛先の破棄で自分が間引かれない）。
+        assert!(should_emit_drop_log(&map, "chan_wl:a1:c2", t0, window));
+        // 窓を越えたら同一宛先でも再び出す（沈黙し続けないため）。
+        assert!(should_emit_drop_log(
+            &map,
+            "chan_wl:a1:c1",
+            t0 + window,
+            window
+        ));
+    }
+
+    /// #423: 出力のたびに窓を超えた古いエントリを掃除し、マップが無制限に育たない。
+    /// retain を外すとここで len が増え続けて落ちる。
+    #[test]
+    fn drop_log_throttle_prunes_stale_entries_on_emit() {
+        let map: Mutex<HashMap<String, Instant>> = Mutex::new(HashMap::new());
+        let window = Duration::from_secs(300);
+        let t0 = Instant::now();
+
+        // 3 宛先を t0 で記録。
+        assert!(should_emit_drop_log(&map, "a", t0, window));
+        assert!(should_emit_drop_log(&map, "b", t0, window));
+        assert!(should_emit_drop_log(&map, "c", t0, window));
+        assert_eq!(map.lock().unwrap().len(), 3);
+
+        // 窓を越えた時刻で新しい宛先 d を記録 → 出力時に窓超えの a/b/c が掃除され d だけ残る。
+        let later = t0 + window + Duration::from_secs(1);
+        assert!(should_emit_drop_log(&map, "d", later, window));
+        let m = map.lock().unwrap();
+        assert_eq!(m.len(), 1, "窓超えの古いエントリは掃除される");
+        assert!(m.contains_key("d"));
+    }
+
+    /// #286: エスカレーションは 1 度きりで終わらない。
+    ///
+    /// 「N 回目ちょうど」だけで鳴らすと、復旧しないまま失敗し続けても二度と警告が
+    /// 出ず、この機構が防ぎたかった「沈黙したまま受信が死ぬ」状態に戻る。
+    #[test]
+    fn stalled_alert_repeats_instead_of_firing_once() {
+        let n = RECV_FAILURES_BEFORE_ALERT;
+        // 閾値未満では鳴らさない（一過性の切断でノイズを出さない）。
+        for failures in 0..n {
+            assert!(!should_alert_inbound_stalled(failures), "{failures}");
+        }
+        // 閾値ちょうど、およびその倍数で鳴る。
+        assert!(should_alert_inbound_stalled(n));
+        assert!(should_alert_inbound_stalled(n * 2));
+        assert!(should_alert_inbound_stalled(n * 20));
+        // 間は鳴らさない（毎回鳴らすとログが埋まる）。
+        assert!(!should_alert_inbound_stalled(n + 1));
+    }
+
+    /// #284 P0-2: 再試行間隔は指数で伸び、上限で頭打ちになる（0 にならない）。
+    ///
+    /// 0 に落ちると切断中にビジーループでログを埋める。頭打ちが無いと、長い切断の後に
+    /// 復旧しても受信再開が何時間も遅れる。
+    #[test]
+    fn recv_backoff_grows_then_caps() {
+        assert_eq!(recv_retry_backoff(1), RECV_RETRY_BASE);
+        assert_eq!(recv_retry_backoff(2), RECV_RETRY_BASE * 2);
+        assert_eq!(recv_retry_backoff(3), RECV_RETRY_BASE * 4);
+        // 何回失敗しても上限を超えず、かつ 0 にはならない（overflow で 0 に落ちない）。
+        for failures in [8u32, 20, 1_000, u32::MAX] {
+            let d = recv_retry_backoff(failures);
+            assert_eq!(d, RECV_RETRY_MAX, "failures={failures}");
+        }
+        assert!(recv_retry_backoff(0) > std::time::Duration::ZERO);
+    }
 
     #[test]
     fn parse_discord_session_guild_channel() {
@@ -1394,94 +2547,22 @@ mod tests {
     }
 
     #[test]
-    fn parse_seen_message_id_accepts_valid_numeric_id() {
+    fn parse_reaction_message_id_accepts_valid_numeric_id() {
         assert_eq!(
-            parse_seen_message_id("1234567890123456789"),
+            parse_reaction_message_id("1234567890123456789"),
             Some(1234567890123456789)
         );
     }
 
     #[test]
-    fn parse_seen_message_id_rejects_empty() {
+    fn parse_reaction_message_id_rejects_empty() {
         // メタデータに discord_message_id が無いケース → スキップ
-        assert_eq!(parse_seen_message_id(""), None);
+        assert_eq!(parse_reaction_message_id(""), None);
     }
 
     #[test]
-    fn parse_seen_message_id_rejects_non_numeric() {
-        assert_eq!(parse_seen_message_id("not-a-number"), None);
-        assert_eq!(parse_seen_message_id("123abc"), None);
-    }
-
-    #[tokio::test]
-    async fn test_spawn_serialized_on_session_does_not_block_caller() {
-        let locks: SessionLocks = Arc::new(dashmap::DashMap::new());
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        // 完了までブロックする future を渡しても、spawn 呼び出し自体は即座に返る
-        spawn_serialized_on_session(locks.clone(), "s1".to_string(), async move {
-            let _ = rx.await;
-        });
-        // caller 側はブロックされていない（この行に到達できることが検証）
-        let _ = tx.send(());
-        // 完了後にロックエントリが回収される
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while locks.contains_key("s1") {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("lock entry must be reclaimed after completion");
-    }
-
-    #[tokio::test]
-    async fn test_spawn_serialized_same_session_serializes() {
-        let locks: SessionLocks = Arc::new(dashmap::DashMap::new());
-        let concurrent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let max_seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let done = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        for _ in 0..5 {
-            let c = concurrent.clone();
-            let m = max_seen.clone();
-            let d = done.clone();
-            spawn_serialized_on_session(locks.clone(), "same".to_string(), async move {
-                let now = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-                m.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                c.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                d.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            });
-        }
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while done.load(std::sync::atomic::Ordering::SeqCst) < 5 {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("all serialized tasks must finish");
-        assert_eq!(
-            max_seen.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "same-session futures must never run concurrently"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_spawn_serialized_different_sessions_run_concurrently() {
-        let locks: SessionLocks = Arc::new(dashmap::DashMap::new());
-        // s-block は保持したまま、s-free が完了できることを確認する
-        // （旧実装 = イベントループ直列 await では s-block が全体を塞いでいた）。
-        let (hold_tx, hold_rx) = tokio::sync::oneshot::channel::<()>();
-        spawn_serialized_on_session(locks.clone(), "s-block".to_string(), async move {
-            let _ = hold_rx.await;
-        });
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
-        spawn_serialized_on_session(locks.clone(), "s-free".to_string(), async move {
-            let _ = done_tx.send(());
-        });
-        tokio::time::timeout(std::time::Duration::from_secs(5), done_rx)
-            .await
-            .expect("other sessions must not be blocked by a long-running session")
-            .unwrap();
-        let _ = hold_tx.send(());
+    fn parse_reaction_message_id_rejects_non_numeric() {
+        assert_eq!(parse_reaction_message_id("not-a-number"), None);
+        assert_eq!(parse_reaction_message_id("123abc"), None);
     }
 }

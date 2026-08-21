@@ -5,14 +5,20 @@ pub mod analytics;
 pub mod channel_configs;
 pub mod co_agents;
 pub mod daily_log_index;
+pub mod hooks;
 pub mod import;
 pub mod import_sync;
 pub mod llm;
 pub mod llm_logs;
 pub mod mcp;
 pub mod memory;
+pub mod model_pricing;
+#[cfg(feature = "nostr")]
 pub mod nostr;
+#[cfg(feature = "nostr")]
+pub mod nostr_relay;
 pub mod providers;
+pub mod schedules;
 pub mod sessions;
 pub mod setup;
 pub mod skills;
@@ -23,18 +29,13 @@ pub mod workspace;
 
 /// `owner_discord_id` と呼び出し元 ID が一致するか判定する。
 ///
-/// owner は「未設定」を取り得る。per-agent Discord 設定の DB 既定値が空文字
-/// （`owner_discord_id TEXT NOT NULL DEFAULT ''`）であり、UI/API から owner を
-/// 指定せずに作成された行が存在しうるため、素朴な `==` だと空の呼び出し元 ID が
-/// owner と一致してしまう。TOML 側も `${OWNER_DISCORD_ID}` 参照が未定義のとき
-/// 空文字に展開されるので同じことが起きる。
+/// 実体は [`opencrab_core::owner::is_owner_id`]。判定を下位クレートの 1 実装へ
+/// 集約し、server / discord の両方から同じ述語を使う（#174）。以前はここに実装が
+/// あり、依存方向の都合で `crates/discord` からは使えず生比較が別実装として
+/// 残っていた。この別名は既存の呼び出し元との互換のために残している。
 ///
-/// 空のオーナー ID は「オーナー無し」として誰とも一致させない（安全側）。
-/// 空白のみの値も未設定として扱い、比較前に両辺を trim する。
-pub fn is_owner_id(owner_discord_id: &str, user_id: &str) -> bool {
-    let owner = owner_discord_id.trim();
-    !owner.is_empty() && owner == user_id.trim()
-}
+/// 未設定（空文字・空白のみ）のオーナー ID は誰とも一致しない。
+pub use opencrab_core::owner::is_owner_id;
 
 #[cfg(test)]
 mod tests {
@@ -72,5 +73,53 @@ mod tests {
         assert!(is_owner_id(" 123456789012345678 ", "123456789012345678"));
         assert!(is_owner_id("123456789012345678", " 123456789012345678\n"));
         assert!(!is_owner_id(" 123456789012345678 ", "987654321098765432"));
+    }
+
+    /// web gateway の `user_id` 正規化（`opencrab-web-gateway` 側）と owner 判定
+    /// （ここ）の噛み合わせ。正規化はゲートウェイクレート、owner 判定は server に
+    /// あり、境界を跨ぐのでテストは判定側に置く（#190 S4 で旧 `api/web.rs` から移設）。
+    #[cfg(feature = "web")]
+    mod web_user_id {
+        use super::is_owner_id;
+        use opencrab_web_gateway::http::{normalize_user_id, DEFAULT_WEB_USER_ID};
+
+        #[test]
+        fn unset_owner_matches_nobody() {
+            // 回帰ガード: owner 未設定（空文字）のとき、空の user_id を owner と判定しない。
+            assert!(!is_owner_id("", ""));
+            assert!(!is_owner_id("", DEFAULT_WEB_USER_ID));
+            assert!(!is_owner_id("", "123456789012345678"));
+        }
+
+        #[test]
+        fn whitespace_only_owner_matches_nobody() {
+            // 空白のみの owner 設定は未設定と同じ扱い。空白だけを送って owner に
+            // なれないこと（`is_owner_id` が両辺を trim する前提の確認）。
+            assert!(!is_owner_id("   ", "   "));
+            assert!(!is_owner_id("\t", DEFAULT_WEB_USER_ID));
+            assert!(!is_owner_id(" \n ", "123456789012345678"));
+        }
+
+        #[test]
+        fn configured_owner_matches_only_exact_id() {
+            assert!(is_owner_id("123456789012345678", "123456789012345678"));
+            assert!(!is_owner_id("123456789012345678", "987654321098765432"));
+            assert!(!is_owner_id("123456789012345678", ""));
+        }
+
+        #[test]
+        fn normalized_empty_user_id_is_not_owner_even_if_owner_is_default_name() {
+            // 空 user_id は既定値へ落ちるため、owner 未設定と組み合わせても owner にならない。
+            let user_id = normalize_user_id(Some(""));
+            assert!(!is_owner_id("", &user_id));
+        }
+
+        #[test]
+        fn normalized_user_id_matches_owner_with_stray_whitespace() {
+            // `.env` 由来の owner 値に空白が混ざっても、正規化済み user_id と一致する。
+            let user_id = normalize_user_id(Some("  123456789012345678  "));
+            assert_eq!(user_id, "123456789012345678");
+            assert!(is_owner_id(" 123456789012345678\n", &user_id));
+        }
     }
 }

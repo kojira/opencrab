@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::traits::{Action, ActionContext, ActionResult, CallerIdentity};
+use crate::traits::{Action, ActionContext, ActionResult};
 
 /// instructionsを更新するアクション（Ownerのみ実行可能）
 pub struct UpdateInstructionsAction;
@@ -34,10 +34,10 @@ impl Action for UpdateInstructionsAction {
     }
 
     async fn execute(&self, args: &serde_json::Value, ctx: &ActionContext) -> ActionResult {
-        // Owner判定：CallerIdentity::Ownerのみ実行可能
-        if ctx.caller != CallerIdentity::Owner {
+        // owner 等価判定（#485: co_agent も owner 等価。唯一の源は is_owner_equivalent）。
+        if !ctx.caller.is_owner_equivalent() {
             return ActionResult::error(
-                "update_instructions はownerからのメッセージへの返信時のみ実行可能です",
+                "update_instructions はowner（または owner 等価の co_agent）からのメッセージへの返信時のみ実行可能です",
             );
         }
 
@@ -76,6 +76,9 @@ impl Action for UpdateInstructionsAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 本体は `is_owner_equivalent()` 経由でしか caller を見ないので、型そのものを使うのは
+    // テストだけ。本体側の `use` に混ぜると未使用警告になるためここで引く。
+    use crate::traits::CallerIdentity;
     use opencrab_db::queries::{upsert_agent, AgentRow};
     use serde_json::json;
 

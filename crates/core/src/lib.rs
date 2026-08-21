@@ -14,34 +14,50 @@
 
 pub mod a2ui;
 pub mod agent;
+pub mod caller;
+pub mod context_budget;
+pub mod conversation;
 pub mod engine;
 pub mod evaluator;
 pub mod heartbeat;
 pub mod identity;
 pub mod import;
+pub mod impression_section;
+pub mod injection;
 pub mod llm_text;
 pub mod memory;
 pub mod memory_index;
+pub mod owner;
+pub mod runtime_context;
+pub mod secret_box;
 pub mod skill;
 pub mod soul;
 pub mod task_ledger;
+pub mod text_delivery;
+pub mod tokens;
+pub mod tool_result_log;
 pub mod workspace;
 
 // Re-export primary types for convenience.
 pub use agent::{Agent, AgentLlmConfig, AgentModels, ModelRef};
+pub use caller::CallerIdentity;
 pub use engine::{
-    ActionExecutor, ActionResult, ChatRequest, ChatResponse, EngineResult, FunctionDefinition,
-    LlmCallLog, LlmClient, SkillEngine, ToolCall,
+    ActionExecutor, ActionResult, ChatRequest, ChatResponse, DispatchCall, DispatchOutcome,
+    EngineResult, FunctionDefinition, LiveInboundSource, LlmCallLog, LlmClient, SkillEngine,
+    ToolCall, ToolDispatcher,
 };
-pub use heartbeat::{heartbeat_loop, HeartbeatCallback, HeartbeatConfig, HeartbeatDecision};
+pub use heartbeat::HeartbeatConfig;
 pub use identity::Identity;
 pub use memory::MemoryManager;
+pub use owner::{is_owner_id, owner_is_unset};
+pub use runtime_context::prepend_runtime_context;
 pub use skill::{Skill, SkillManager, SkillSource};
 pub use soul::{Soul, ThinkingStyle};
 pub use workspace::{FileEntry, Workspace};
 
 // A2UI types
 pub use a2ui::{
-    build_confirmation_components, A2uiAction, A2uiComponent, A2uiComponentType, A2uiUserAction,
-    RenderError, RenderTarget, RenderedMessage, UiRenderer, UserActionResponse,
+    build_confirmation_components, A2uiAction, A2uiComponent, A2uiComponentType, A2uiSurface,
+    A2uiUserAction, PendingInteraction, PendingInteractionRegistry, PendingUiSurface, RenderError,
+    RenderTarget, RenderedMessage, UiRenderer, UiResponseEvent, UiResponseSink, UserActionResponse,
 };

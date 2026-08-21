@@ -61,6 +61,16 @@ pub struct MaintenanceReport {
     pub keywords_backfilled: usize,
     pub rolled_up_month: Option<String>,
     pub skill_consolidated: bool,
+    /// カテゴリ層（#313）: 種まきで新設したカテゴリ数。
+    pub categories_seeded: usize,
+    /// カテゴリ層（#313）: 既存カテゴリへ割り当てた topic 数。
+    pub topics_categorized: usize,
+    /// 整理ラン（#313 段階3 / #361）を実際に起動したか。既定オフ・ゲート未達では false。
+    pub organized: bool,
+    /// 宣言ラン（#384 / #376 段階2）を実際に起動したか。既定オフ・ゲート未達では false。
+    pub declared: bool,
+    /// 凝縮ラン（#411 / 記憶の 3 段目）を実際に起動したか。無効化時（既定 ON・opt-out 可）・ゲート未達では false。
+    pub condensed: bool,
 }
 
 impl MaintenanceReport {
@@ -69,6 +79,11 @@ impl MaintenanceReport {
             || self.keywords_backfilled > 0
             || self.rolled_up_month.is_some()
             || self.skill_consolidated
+            || self.categories_seeded > 0
+            || self.topics_categorized > 0
+            || self.organized
+            || self.declared
+            || self.condensed
     }
 }
 
@@ -100,6 +115,10 @@ pub fn spawn_memory_maintenance_loop(state: AppState, interval_secs: u64) {
                             logs_indexed = report.logs_indexed,
                             keywords_backfilled = report.keywords_backfilled,
                             rolled_up_month = ?report.rolled_up_month,
+                            categories_seeded = report.categories_seeded,
+                            topics_categorized = report.topics_categorized,
+                            organized = report.organized,
+                            declared = report.declared,
                             "memory maintenance tick"
                         );
                     }
@@ -222,12 +241,78 @@ pub async fn run_maintenance_tick(
         }
     }
 
-    // ④ スキル棚卸し（自己 curation）。メモリ統合の後に走らせる（設計: 統合→振り返り）。
+    // ④ カテゴリ層（issue #313）: 種まき（LLM ゼロコール）＋ 未分類 topic の割当（≤1 コール）。
+    // sleep 中にのみ整理する（対話ターンでは走らせない = #291 の再来を避ける）。既存の
+    // rollup と同じく「1 tick 1 LLM コール / ロックを await 跨ぎで保持しない / sticky で冪等」。
+    // category/meta ノードは同一テーブルなので browse/search/retrieve から能動的に引ける。
+    //
+    // #345: #313 の方針が「エージェント自身に整理させる（一期一会）」へ変わり、いまの
+    // 単一ラベル・sticky・12件ずつの割当は作り直しになるため、作り直す前提の処理へ LLM
+    // 費用を払い続けないよう、config で丸ごと止められるようにする（既定オフ）。
+    // `skill_consolidation` と同じく LLM を消費する自律処理なので同じ opt-in の流儀に揃える。
+    // 機能そのものは #313 で作り直す際に参照するので残す（既存データ・スキーマは触らない）。
+    if state.category_maintenance.enabled {
+        match opencrab_core::memory_index::category::maintain_categories(
+            &state.db,
+            agent_id,
+            &llm,
+            &effective_model,
+            &persona_name,
+            personality.as_deref(),
+        )
+        .await
+        {
+            Ok((seeded, assigned)) => {
+                report.categories_seeded = seeded;
+                report.topics_categorized = assigned;
+            }
+            Err(e) => {
+                tracing::warn!(agent_id = %agent_id, error = %e, "category maintenance failed");
+            }
+        }
+    }
+
+    // ⑤ スキル棚卸し（自己 curation）。メモリ統合の後に走らせる（設計: 統合→振り返り）。
     // 既定は無効（config skill_consolidation.enabled）。トリガ未達なら即 return。
     match crate::skill_consolidation::maybe_run_skill_consolidation(state, agent_id).await {
         Ok(ran) => report.skill_consolidated = ran,
         Err(e) => {
             tracing::warn!(agent_id = %agent_id, error = %e, "skill consolidation failed");
+        }
+    }
+
+    // ⑥ 宣言ラン（#384 / #376 段階2）。本人が別セッション・本人の人格で自分の生ログを俯瞰し、
+    // 「どこからどこまでが一つの記憶か」を宣言する。宣言（何が 1 つの記憶か）はタグ付け（どう
+    // 分類するか）の一段下＝先なので、⑦のタグ整理ランより**前**に置く（設計 #376: 宣言 → タグ）。
+    // **既定オフ**（config memory_declare.enabled）。ゲート未達ならゼロコールで即 return。
+    // 対話ターンでは走らせない（呼び出し元はこの sleep ループのみ / #291）。
+    match crate::memory_declare::maybe_run_memory_declare(state, agent_id).await {
+        Ok(ran) => report.declared = ran,
+        Err(e) => {
+            tracing::warn!(agent_id = %agent_id, error = %e, "memory declare failed");
+        }
+    }
+
+    // ⑦ エージェンティック整理ラン（#313 段階3 / #361）。①〜③で索引を確定させた**後**に、
+    // 本人が別セッション・本人の人格で自分の記憶（topic）にタグを付けて整理する。
+    // **既定オフ**（config memory_organize.enabled）。ゲート（日次 + 下限）未達なら
+    // ゼロコールで即 return。対話ターンでは走らせない（呼び出し元はこの sleep ループのみ / #291）。
+    match crate::memory_organize::maybe_run_memory_organize(state, agent_id).await {
+        Ok(ran) => report.organized = ran,
+        Err(e) => {
+            tracing::warn!(agent_id = %agent_id, error = %e, "memory organize failed");
+        }
+    }
+
+    // ⑧ 凝縮ラン（#411 / 記憶の 3 段目）。ユニット（⑥で確定した記憶の単位）を俯瞰して「大事な
+    // こと」を抽出し、node_type='meta' として人格の核に刻む。宣言（⑥）→ タグ整理（⑦）が
+    // 記憶の単位とその分類を確定させた**後**に置く（凝縮はユニットの意味を抽出する一段上）。
+    // **既定 ON（#457・config memory_condense.enabled で opt-out 可）**。ゲート（ユニット増加の下限 + throttle）
+    // 未達ならゼロコールで即 return。対話ターンでは走らせない（呼び出し元はこの sleep ループのみ）。
+    match crate::memory_condense::maybe_run_memory_condense(state, agent_id).await {
+        Ok(ran) => report.condensed = ran,
+        Err(e) => {
+            tracing::warn!(agent_id = %agent_id, error = %e, "memory condense failed");
         }
     }
 

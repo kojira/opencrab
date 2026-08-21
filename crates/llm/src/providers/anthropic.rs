@@ -4,6 +4,7 @@ use futures::stream::BoxStream;
 use futures::StreamExt;
 use reqwest::Client;
 use serde_json::Value;
+use std::time::Duration;
 use tracing::debug;
 
 use crate::message::*;
@@ -12,21 +13,50 @@ use crate::traits::{LlmProvider, ModelInfo};
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1";
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 
+/// チャット補完リクエスト全体の上限時間（秒）。超過で reqwest が timeout エラーを
+/// 返し、ターンが fail loud に落ちる（#667）。値の根拠は openai.rs の同名定数と同じ
+/// （非ストリーミング単発 POST で上流無応答を有限で切る。実測 79 tok/s・128K 上限でも
+/// 実運用の生成は数分で完了する）。タイムアウトは 4xx でないため router のリトライ対象。
+const CHAT_TIMEOUT_SECS: u64 = 600;
+/// 接続確立の timeout（秒）。生成の長さとは無関係。接続すら張れない状態を即検知する。
+const CONNECT_TIMEOUT_SECS: u64 = 10;
+
+/// チャット補完用の HTTP クライアントを組む（総時間 timeout 付き・#667）。
+fn build_client(timeout_secs: u64) -> Client {
+    Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+        .build()
+        // 起動時 1 回の構築。ここで失敗した client へ無言退化すると timeout 無しに戻り
+        // 本 PR の主旨（無応答を有限で切る）を裏切るため fail loud に落とす（#667）。
+        .expect("failed to build HTTP client with timeout")
+}
+
 /// Anthropic Claude API provider.
 #[derive(Debug, Clone)]
 pub struct AnthropicProvider {
     client: Client,
     api_key: String,
     base_url: String,
+    /// テレメトリ用の表示名（既定は形式名 "anthropic"）。ルーティングキーは
+    /// router 登録時に別途決まる。
+    name: String,
 }
 
 impl AnthropicProvider {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: build_client(CHAT_TIMEOUT_SECS),
             api_key: api_key.into(),
             base_url: ANTHROPIC_API_URL.to_string(),
+            name: "anthropic".to_string(),
         }
+    }
+
+    /// 表示名を上書きする（同じ形式の接続先を別名で登録するとき）。
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
     }
 
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
@@ -45,7 +75,7 @@ impl AnthropicProvider {
 
     /// Convert unified messages to Anthropic Messages API format.
     /// Anthropic separates the system message from the messages array.
-    fn build_request_body(&self, request: &ChatRequest) -> Value {
+    fn build_request_body(&self, request: &ChatRequest) -> Result<Value> {
         let mut system_prompt: Option<String> = None;
         let mut messages: Vec<Value> = Vec::new();
 
@@ -71,7 +101,7 @@ impl AnthropicProvider {
                     }));
                 }
                 Role::Assistant => {
-                    let has_tool_calls = msg.tool_calls.as_ref().map_or(false, |tc| !tc.is_empty());
+                    let has_tool_calls = msg.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty());
                     if has_tool_calls {
                         // Build content array with text parts + tool_use blocks
                         let mut content_blocks: Vec<Value> = Vec::new();
@@ -128,14 +158,14 @@ impl AnthropicProvider {
         let mut merged: Vec<Value> = Vec::new();
         for msg in messages {
             let is_tool_result_user = msg["role"] == "user"
-                && msg["content"].as_array().map_or(false, |arr| {
+                && msg["content"].as_array().is_some_and(|arr| {
                     !arr.is_empty() && arr.iter().all(|b| b["type"] == "tool_result")
                 });
             if is_tool_result_user {
                 // Check if the previous message is also a tool_result user message
-                let should_merge = merged.last().map_or(false, |prev: &Value| {
+                let should_merge = merged.last().is_some_and(|prev: &Value| {
                     prev["role"] == "user"
-                        && prev["content"].as_array().map_or(false, |arr| {
+                        && prev["content"].as_array().is_some_and(|arr| {
                             !arr.is_empty() && arr.iter().all(|b| b["type"] == "tool_result")
                         })
                 });
@@ -187,7 +217,15 @@ impl AnthropicProvider {
             }
         }
 
-        let max_tokens = request.max_tokens.unwrap_or(4096);
+        // Anthropic の messages API は max_tokens を必須フィールドとして要求する。
+        // #676 で「出力上限はモデル毎の実能力値・未登録は fail loud」に整理した通り、
+        // None のとき任意定数へ黙って落とさず、うるさく失敗させる（#681）。
+        let max_tokens = request.max_tokens.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Anthropic requires max_tokens but the request supplied none; \
+                 register this model's max_output_tokens (#676). No implicit default is applied."
+            )
+        })?;
 
         let mut body = serde_json::json!({
             "model": request.model,
@@ -231,7 +269,7 @@ impl AnthropicProvider {
             body["tools"] = serde_json::json!(tools);
         }
 
-        body
+        Ok(body)
     }
 
     fn convert_content_to_anthropic(&self, msg: &Message) -> Value {
@@ -361,7 +399,7 @@ impl AnthropicProvider {
 #[async_trait]
 impl LlmProvider for AnthropicProvider {
     fn name(&self) -> &str {
-        "anthropic"
+        &self.name
     }
 
     async fn available_models(&self) -> Result<Vec<ModelInfo>> {
@@ -401,7 +439,7 @@ impl LlmProvider for AnthropicProvider {
     async fn chat_completion(&self, request: ChatRequest) -> Result<ChatResponse> {
         debug!(model = %request.model, "Anthropic chat completion");
 
-        let body = self.build_request_body(&request);
+        let body = self.build_request_body(&request)?;
         let resp = self
             .request_builder("messages")
             .json(&body)
@@ -431,7 +469,7 @@ impl LlmProvider for AnthropicProvider {
     ) -> Result<BoxStream<'static, Result<ChatStreamDelta>>> {
         debug!(model = %request.model, "Anthropic streaming chat completion");
 
-        let mut body = self.build_request_body(&request);
+        let mut body = self.build_request_body(&request)?;
         body["stream"] = serde_json::json!(true);
 
         let resp = self
@@ -577,7 +615,9 @@ mod tests {
     #[test]
     fn cache_policy_applied_by_provider() {
         let provider = AnthropicProvider::new("k");
-        let body = provider.build_request_body(&base_request());
+        let body = provider
+            .build_request_body(&base_request())
+            .expect("valid request builds a body");
 
         let system = body["system"].as_array().expect("system must be blocks");
         assert_eq!(system.len(), 1);
@@ -619,7 +659,9 @@ mod tests {
         let provider = AnthropicProvider::new("k");
         let mut req = base_request();
         req.functions = None;
-        let body = provider.build_request_body(&req);
+        let body = provider
+            .build_request_body(&req)
+            .expect("valid request builds a body");
         let messages = body["messages"].as_array().unwrap();
         let last = messages.last().unwrap();
         assert!(
@@ -634,9 +676,63 @@ mod tests {
         let mut req = base_request();
         req.messages.insert(1, Message::system("second sys"));
         let provider = AnthropicProvider::new("k");
-        let body = provider.build_request_body(&req);
+        let body = provider
+            .build_request_body(&req)
+            .expect("valid request builds a body");
         let system = body["system"].as_array().unwrap();
         assert_eq!(system.len(), 1);
         assert_eq!(system[0]["text"], "sys prompt\n\nsecond sys");
+    }
+
+    /// max_tokens が None のときは任意定数へ黙って落とさず fail loud する（#681）。
+    /// Anthropic の messages API は max_tokens を必須で要求するため省略もできない。
+    #[test]
+    fn missing_max_tokens_fails_loud() {
+        let mut req = base_request();
+        req.max_tokens = None;
+        let provider = AnthropicProvider::new("k");
+        let err = provider
+            .build_request_body(&req)
+            .expect_err("None max_tokens must be a loud error, not a silent default");
+        assert!(
+            err.to_string().contains("max_tokens"),
+            "error should name the missing field: {err}"
+        );
+    }
+
+    /// リクエストを受けてから `delay` 待って 200 を返すモック（timeout 検証用）。
+    async fn spawn_slow_mock(delay: Duration) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let _ = sock.read(&mut buf).await;
+                    tokio::time::sleep(delay).await;
+                    let resp =
+                        "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}";
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}/slow")
+    }
+
+    /// #667: 総時間 timeout が実際に client へ効いていることを確認する。無応答の上流を
+    /// 有限で切る（fail loud）ための肝なので、定数の保持ではなく client の挙動で見る。
+    #[tokio::test]
+    async fn test_chat_timeout_is_applied_to_the_http_client() {
+        let url = spawn_slow_mock(Duration::from_millis(1500)).await;
+
+        let short = build_client(1);
+        let err = short.get(&url).send().await.unwrap_err();
+        assert!(err.is_timeout(), "1 秒なら timeout するはず: {err}");
+
+        let long = build_client(10);
+        let resp = long.get(&url).send().await.expect("10 秒なら読み切れる");
+        assert!(resp.status().is_success());
     }
 }

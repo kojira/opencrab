@@ -257,9 +257,16 @@ if tool_name == "send_noreact" || tool_name == "no_reply" {
 
 **リスク:** send_noreactが意図的にテキスト + no_replyを組み合わせるケースはない（そもそもno_replyと矛盾する）。実装コストは低い。
 
-#### B. 会話履歴でのBot/Humanフラグ付与
+#### B. 会話履歴でのBot/Humanフラグ付与 — **不採用（2026-08-01 / #317）**
 
-`crates/gateway/src/adapters/discord.rs` で `msg.author.bot` フラグを `Sender` に正しく設定する。
+> `Sender.is_bot` は削除した。無限ループを止めるのは「**自分自身の投稿か**」の判定
+> （`crates/discord/src/gateway.rs` の `is_own_message`、VC は
+> `crates/discord/src/voice_session.rs` の `should_transcribe`）であって、bot フラグでは
+> ない。bot を一律に別扱いすると §9 の「Botを完全無視する設計はNG」に反する。実際、
+> 他エージェントの投稿には👀が付かず、VC でも他エージェントの声が一切文字起こしされて
+> いなかった。以下は当時の案として残す。
+
+`crates/discord/src/gateway.rs` で `msg.author.bot` フラグを `Sender` に正しく設定する。
 
 **現在（バグ）:**
 ```rust
@@ -333,7 +340,7 @@ send_noreactを使う時はtextを空にすること。
 | 🔴 最高 | 絵文字への返事禁止ルール | かいろのinstructions | 低（DB更新のみ） | ループのトリガーを排除 |
 | 🟡 高 | system promptのSilent Reply改善 | process.rs | 低（コード変更） | 全Botに横断適用 |
 | 🟡 高 | send_noreact呼び出し時にテキストもキャンセル | bridge.rs / message_loop.rs | 中（コード変更） | LLMのミスを吸収するフェイルセーフ |
-| 🟢 中 | is_botフラグを会話履歴に反映 | gateway + process.rs | 中（コード変更） | LLMのBot識別精度向上 |
+| ⬛ 不採用 | ~~is_botフラグを会話履歴に反映~~（#317 で `is_bot` ごと削除。§4.4-B 参照） | — | — | — |
 
 ---
 
@@ -356,8 +363,9 @@ send_noreactを使う時はtextを空にすること。
    - send_noreact/no_replyツールが呼ばれた時に`first_sent`フラグを立ててテキスト投稿をキャンセル
    - アーキテクチャ的なフェイルセーフ（§4.4-A参照）
 
-3. **`crates/gateway/src/adapters/discord.rs`**（中優先度）
-   - `msg.author.bot`を`Sender::bot()`で正しく設定（§4.4-B参照）
+3. ~~**`crates/discord/src/gateway.rs`**（中優先度）~~ **不採用（2026-08-01 / #317）**
+   - ~~`msg.author.bot`を`Sender::bot()`で正しく設定~~ → `Sender.is_bot` ごと削除。
+     判定は `is_own_message`（自分自身の投稿か）だけにした（§4.4-B参照）
 
 ---
 

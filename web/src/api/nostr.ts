@@ -60,3 +60,46 @@ export function stopNostrGateway(agentId: string): Promise<{ stopped: boolean }>
 export function deleteNostrConfig(agentId: string): Promise<{ deleted: boolean }> {
   return api.del(`/agents/${agentId}/nostr`);
 }
+
+// ---- Nostr 受信 → Discord 転記先（issue #252 段階 B）----
+
+export interface NostrRelayConfigDto {
+  /** 行が存在するか（未設定なら false）。 */
+  configured: boolean;
+  enabled: boolean;
+  /** 転記先 webhook が設定済みか。 */
+  has_webhook: boolean;
+  /** 伏字化した webhook URL（生 URL は API から返らない）。 */
+  webhook_url_masked: string;
+}
+
+export interface UpdateNostrRelayBody {
+  /** 省略時は現状維持。 */
+  enabled?: boolean;
+  /**
+   * 三状態: **フィールド省略** = 転記先を保持 / **null** = 消去 / **文字列** = 設定。
+   * enabled トグルだけの保存で既存 webhook を無言で消さないため、保持したいときは
+   * このフィールド自体を送らない（`undefined` は JSON.stringify で除かれる）。
+   */
+  webhook_url?: string | null;
+}
+
+export interface UpdateNostrRelayResult {
+  updated: boolean;
+  enabled: boolean;
+  has_webhook: boolean;
+  webhook_url_masked: string;
+  /** 有効かつ転記先未設定のときだけ付く注意喚起。 */
+  warning?: string;
+}
+
+export function getNostrRelayConfig(agentId: string): Promise<NostrRelayConfigDto> {
+  return api.get<NostrRelayConfigDto>(`/agents/${agentId}/nostr-relay`);
+}
+
+export function updateNostrRelayConfig(
+  agentId: string,
+  body: UpdateNostrRelayBody,
+): Promise<UpdateNostrRelayResult> {
+  return api.put(`/agents/${agentId}/nostr-relay`, body);
+}

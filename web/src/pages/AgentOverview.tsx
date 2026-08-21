@@ -11,12 +11,16 @@ import {
   patchAgent,
 } from '../api/agents';
 import { getLlmModelChoices } from '../api/llm';
+import ModelPricingForm from '../components/ui/ModelPricingForm';
 import {
   getNostrConfig,
   updateNostrConfig,
   deleteNostrConfig,
   generateNostrKey,
+  getNostrRelayConfig,
+  updateNostrRelayConfig,
   type NostrConfigDto,
+  type NostrRelayConfigDto,
 } from '../api/nostr';
 import {
   listMcpServers,
@@ -311,7 +315,7 @@ function DiscordBotSection({ agentId }: { agentId: string }) {
   );
 }
 
-function LlmModelSection({ agentId }: { agentId: string }) {
+export function LlmModelSection({ agentId }: { agentId: string }) {
   const { t } = useTranslation();
   const { agent } = useAgentContext();
   const [defaultModel, setDefaultModel] = useState('');
@@ -321,6 +325,8 @@ function LlmModelSection({ agentId }: { agentId: string }) {
   const [webSearch, setWebSearch] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  // 保存が「未登録モデル」エラーで弾かれたときに、その場で登録するための spec。
+  const [unregisteredSpec, setUnregisteredSpec] = useState<string | null>(null);
 
   useEffect(() => {
     getLlmModelChoices()
@@ -346,24 +352,61 @@ function LlmModelSection({ agentId }: { agentId: string }) {
     setWebSearch(agent?.web_search ?? false);
   }, [agent?.web_search]);
 
+  // サーバーが「model_pricing に context_window が無い」ときに返す文言（process.rs:958）。
+  const UNREGISTERED_MARKER = 'has no context_window registered in model_pricing';
+
+  // patchAgent を実行し、失敗ならエラー文字列を返す（成功なら null）。
+  const runPatch = async (): Promise<string | null> => {
+    const res = await patchAgent(agentId, {
+      model: selection === '' ? null : selection,
+      // 既定選択時は空文字を送る（サーバー側で NULL に正規化）。null は
+      // serde の都合で「変更なし」に潰れてクリアできないため。
+      reasoning_effort: reasoningEffort,
+      web_search: webSearch,
+    });
+    if (res.updated) return null;
+    return res.error ?? t('agentDetail.modelSaveFailed');
+  };
+
   const save = async () => {
     setSaving(true);
     setMessage(null);
+    setUnregisteredSpec(null);
     try {
-      const res = await patchAgent(agentId, {
-        model: selection === '' ? null : selection,
-        // 既定選択時は空文字を送る（サーバー側で NULL に正規化）。null は
-        // serde の都合で「変更なし」に潰れてクリアできないため。
-        reasoning_effort: reasoningEffort,
-        web_search: webSearch,
-      });
-      if (res.updated) {
+      const err = await runPatch();
+      if (!err) {
         setMessage(t('agentDetail.modelSaved'));
+      } else if (err.includes(UNREGISTERED_MARKER)) {
+        // エラー文から失敗した spec を拾う（無ければ選択中の spec）。その場に
+        // 登録フォームを出す導線。ターミナルで curl を叩く必要をなくす。
+        const m = err.match(/model "([^"]+)"/);
+        setUnregisteredSpec(m ? m[1] : selection);
+        setMessage(t('agentDetail.modelUnregisteredHint'));
       } else {
-        setMessage(res.error ?? t('agentDetail.modelSaveFailed'));
+        setMessage(err);
       }
     } catch (e) {
       setMessage(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // 登録が済んだら、元々やろうとしていたモデル保存を自動で再試行する。
+  // 「登録できたのか / 保存できたのか」を分けて見せる（登録は成功したが保存が
+  // 別理由で失敗する経路があるため）。
+  const onPricingRegistered = async () => {
+    setUnregisteredSpec(null);
+    setSaving(true);
+    try {
+      const err = await runPatch();
+      if (!err) {
+        setMessage(t('agentDetail.modelRegisteredAndSaved'));
+      } else {
+        setMessage(t('agentDetail.modelRegisteredButSaveFailed', { error: err }));
+      }
+    } catch (e) {
+      setMessage(t('agentDetail.modelRegisteredButSaveFailed', { error: String(e) }));
     } finally {
       setSaving(false);
     }
@@ -441,8 +484,29 @@ function LlmModelSection({ agentId }: { agentId: string }) {
           </span>
         </span>
       </label>
+
+      {unregisteredSpec && (
+        <div className="mt-4">
+          <p className="text-label-lg text-on-surface mb-2">
+            {t('agentDetail.registerModelTitle', { spec: unregisteredSpec })}
+          </p>
+          <ModelPricingForm
+            initial={splitModelSpec(unregisteredSpec)}
+            submitLabel={t('agentDetail.registerAndSave')}
+            onSaved={onPricingRegistered}
+            onCancel={() => setUnregisteredSpec(null)}
+          />
+        </div>
+      )}
     </div>
   );
+}
+
+// "provider:model" 形式の spec を登録フォームの初期値に分解する。
+function splitModelSpec(spec: string): { provider?: string; model?: string } {
+  const i = spec.indexOf(':');
+  if (i < 0) return { model: spec };
+  return { provider: spec.slice(0, i), model: spec.slice(i + 1) };
 }
 
 export default function AgentOverview() {
@@ -518,6 +582,9 @@ export default function AgentOverview() {
 
       {/* Nostr sub-gateway */}
       <NostrSection agentId={agentId} />
+
+      {/* Nostr 受信 → Discord 転記先 */}
+      <NostrRelaySection agentId={agentId} />
 
       {/* MCP servers */}
       <McpSection agentId={agentId} />
@@ -980,6 +1047,153 @@ function NostrSection({ agentId }: { agentId: string }) {
               onClick={() => void remove()}
             >
               {t('common.delete')}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Nostr 受信 → Discord 転記先の設定（issue #252 段階 B）。
+ *
+ * 自分宛の Nostr 受信（メンション/リプライ/DM）を、指定した Discord チャンネルの
+ * webhook へ転記する。webhook URL の生値は API から返らない（伏字のみ）ため、入力欄は
+ * 常に空で、現在値は伏字表示する。
+ *
+ * webhook_url は三状態（省略=保持 / null=消去 / 文字列=設定）。保存で入力欄が空なら
+ * webhook_url を**送らず現状維持**する（enabled トグルだけの保存で既存転記先が消えない）。
+ * 消去は「転記先を削除」ボタンの明示操作に分離する。
+ */
+export function NostrRelaySection({ agentId }: { agentId: string }) {
+  const { t } = useTranslation();
+  const [cfg, setCfg] = useState<NostrRelayConfigDto | null>(null);
+  const [enabled, setEnabled] = useState(false);
+  const [webhookUrl, setWebhookUrl] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const c = await getNostrRelayConfig(agentId);
+      setCfg(c);
+      setEnabled(c.enabled);
+      // 生 URL は取得できない（伏字のみ）。入力欄は空のまま上書き入力させる。
+      setWebhookUrl('');
+    } catch {
+      setCfg(null);
+    }
+  }, [agentId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  // 入力欄が空なら webhook_url を送らず（保持）、入力があればそれを設定する。
+  const save = async () => {
+    setSaving(true);
+    setMessage(null);
+    setWarning(null);
+    try {
+      const trimmed = webhookUrl.trim();
+      const res = await updateNostrRelayConfig(agentId, {
+        enabled,
+        // 空欄 = 現状維持なのでフィールド自体を送らない（undefined は JSON から除かれる）。
+        ...(trimmed === '' ? {} : { webhook_url: trimmed }),
+      });
+      setEnabled(res.enabled);
+      setWebhookUrl('');
+      setMessage(t('common.save') + ' OK');
+      if (res.warning) setWarning(res.warning);
+      await load();
+    } catch (e) {
+      setMessage(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // 転記先を明示的に消去する（null を送る）。誤操作を避けるため確認する。
+  const clearWebhook = async () => {
+    if (!window.confirm(t('agentDetail.nostrRelayDeleteConfirm'))) return;
+    setSaving(true);
+    setMessage(null);
+    setWarning(null);
+    try {
+      const res = await updateNostrRelayConfig(agentId, {
+        enabled,
+        webhook_url: null,
+      });
+      setEnabled(res.enabled);
+      setWebhookUrl('');
+      setMessage(t('common.save') + ' OK');
+      if (res.warning) setWarning(res.warning);
+      await load();
+    } catch (e) {
+      setMessage(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="card-outlined mt-6">
+      <h2 className="section-title flex items-center gap-2">
+        <span className="material-symbols-outlined text-xl text-primary">forward_to_inbox</span>
+        {t('agentDetail.nostrRelay')}
+      </h2>
+      <p className="text-body-sm text-on-surface-variant mb-3">
+        {t('agentDetail.nostrRelayDesc')}
+      </p>
+      {message && <p className="text-body-sm mb-2 text-on-surface-variant">{message}</p>}
+      {warning && <p className="text-body-sm mb-2 text-error">{warning}</p>}
+      <div className="space-y-3">
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={enabled}
+            onChange={(e) => setEnabled(e.target.checked)}
+          />
+          <span className="text-label-lg">{t('agentDetail.nostrRelayEnabled')}</span>
+        </label>
+        <div>
+          <label className="text-label-lg text-on-surface-variant block mb-1">
+            {t('agentDetail.nostrRelayWebhook')}
+          </label>
+          {cfg?.has_webhook && (
+            <p className="text-body-sm text-on-surface-variant mb-1">
+              {t('agentDetail.nostrRelayCurrent', { url: cfg.webhook_url_masked })}
+            </p>
+          )}
+          <input
+            className="input w-full"
+            placeholder="https://discord.com/api/webhooks/..."
+            value={webhookUrl}
+            onChange={(e) => setWebhookUrl(e.target.value)}
+          />
+          <p className="text-body-sm text-on-surface-variant mt-1">
+            {t('agentDetail.nostrRelayWebhookHint')}
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            className="btn-filled"
+            disabled={saving}
+            onClick={() => void save()}
+          >
+            {t('common.save')}
+          </button>
+          {cfg?.has_webhook && (
+            <button
+              type="button"
+              className="btn-text text-error"
+              disabled={saving}
+              onClick={() => void clearWebhook()}
+            >
+              {t('agentDetail.nostrRelayDelete')}
             </button>
           )}
         </div>

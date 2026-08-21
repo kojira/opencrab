@@ -291,7 +291,7 @@ async fn test_evaluate_models_across_tasks() {
                 "  [{model}] {}ms, {}tok → {}",
                 latency_ms,
                 response.usage.total_tokens,
-                &response_text.chars().take(80).collect::<String>(),
+                response_text.chars().take(80).collect::<String>(),
             );
 
             // 2. Have the evaluator judge the response.

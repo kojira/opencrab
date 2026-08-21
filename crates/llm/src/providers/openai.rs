@@ -4,10 +4,40 @@ use futures::stream::BoxStream;
 use futures::StreamExt;
 use reqwest::Client;
 use serde_json::Value;
+use std::time::Duration;
 use tracing::debug;
 
 use crate::message::*;
 use crate::traits::{LlmProvider, ModelInfo};
+
+/// チャット補完リクエスト全体の上限時間（秒）。超過で reqwest が timeout エラーを
+/// 返し、ターンが fail loud に落ちる（#667）。
+///
+/// なぜ「総時間」で「アイドル間隔」でないか: 本番経路は非ストリーミング単発 POST で、
+/// hermit-shell は上流 Anthropic を内部でストリーミングしつつ **finalMessage まで集約して
+/// 1 回で返す**（生成中は opencrab→hermit 間にバイトが流れない）。よってチャンク間の
+/// アイドル timeout は正当な無音生成を誤殺してしまうため、この経路で効くのは総時間 timeout
+/// だけになる。
+///
+/// なぜ 600 秒か: 出力上限（hermit:claude-opus-5 で 128K）まで許すが、実測の生成速度は
+/// 79 tok/s（#676: completion 4096 tok = 51.9 秒）で、実運用の大きな報告でも数分で完了する。
+/// 10 分を超える単発生成は極めて稀（数万トークン超の一括応答）で、上流の無応答（週次上限到達の
+/// 429 沈黙 sleep・プロセスクラッシュ後のソケット沈黙）と区別して確実に有限で切るための値。
+/// タイムアウトは 4xx でないため router の既存リトライ対象に含まれる。
+const CHAT_TIMEOUT_SECS: u64 = 600;
+/// 接続確立の timeout（秒）。生成の長さとは無関係。接続すら張れない状態を即検知する。
+const CONNECT_TIMEOUT_SECS: u64 = 10;
+
+/// チャット補完用の HTTP クライアントを組む（総時間 timeout 付き・#667）。
+fn build_client(timeout_secs: u64) -> Client {
+    Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+        .build()
+        // 起動時 1 回の構築。ここで失敗した client へ無言退化すると timeout 無しに戻り
+        // 本 PR の主旨（無応答を有限で切る）を裏切るため fail loud に落とす（#667）。
+        .expect("failed to build HTTP client with timeout")
+}
 
 /// GPT-5 系 / o シリーズ（推論モデル）を chat/completions で呼ぶときの制約を
 /// 判定する。これらのモデルは:
@@ -35,17 +65,27 @@ pub struct OpenAiProvider {
     /// GPT-5 系 / o シリーズに付与する reasoning_effort（"minimal"|"low"|"medium"
     /// |"high"）。空/未設定なら送らない（サーバ既定 = medium）。
     reasoning_effort: Option<String>,
+    /// テレメトリ用の表示名。ルーティングキーは router 登録時に別途決まるため、
+    /// これは接続先を人間に見せるためのラベルにすぎない（既定は形式名 "openai"）。
+    name: String,
 }
 
 impl OpenAiProvider {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: build_client(CHAT_TIMEOUT_SECS),
             api_key: api_key.into(),
             base_url: "https://api.openai.com/v1".to_string(),
             org_id: None,
             reasoning_effort: None,
+            name: "openai".to_string(),
         }
+    }
+
+    /// 表示名を上書きする（同じ形式の接続先を別名で登録するとき）。
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
     }
 
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
@@ -164,7 +204,7 @@ impl OpenAiProvider {
 #[async_trait]
 impl LlmProvider for OpenAiProvider {
     fn name(&self) -> &str {
-        "openai"
+        &self.name
     }
 
     async fn available_models(&self) -> Result<Vec<ModelInfo>> {
@@ -350,5 +390,43 @@ mod tests {
         // 非推論モデルには reasoning_effort を付けない
         assert!(body.get("reasoning_effort").is_none());
         assert!(body.get("max_completion_tokens").is_none());
+    }
+
+    /// リクエストを受けてから `delay` 待って 200 を返すモック（timeout 検証用）。
+    async fn spawn_slow_mock(delay: Duration) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let _ = sock.read(&mut buf).await;
+                    tokio::time::sleep(delay).await;
+                    let resp =
+                        "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}";
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}/slow")
+    }
+
+    /// #667: 総時間 timeout が実際に client へ効いていることを確認する。無応答の上流を
+    /// 有限で切る（fail loud）ための肝なので、定数の保持ではなく client の挙動で見る。
+    #[tokio::test]
+    async fn test_chat_timeout_is_applied_to_the_http_client() {
+        let url = spawn_slow_mock(Duration::from_millis(1500)).await;
+
+        // 短い timeout の client は読み切る前に timeout する。
+        let short = build_client(1);
+        let err = short.get(&url).send().await.unwrap_err();
+        assert!(err.is_timeout(), "1 秒なら timeout するはず: {err}");
+
+        // 十分長い timeout の client は読み切れる。
+        let long = build_client(10);
+        let resp = long.get(&url).send().await.expect("10 秒なら読み切れる");
+        assert!(resp.status().is_success());
     }
 }

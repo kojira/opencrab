@@ -26,16 +26,12 @@ pub enum SkillSource {
 /// Permission level required to use this skill.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum SkillPermission {
     CoAgent,
+    #[default]
     Agent,
     Owner,
-}
-
-impl Default for SkillPermission {
-    fn default() -> Self {
-        SkillPermission::Agent
-    }
 }
 
 impl SkillPermission {
@@ -134,6 +130,11 @@ impl SkillManager {
             is_active: true,
             permission: SkillPermission::Agent.as_db_str().to_string(),
             archived: false,
+            // #335: 実行時 caller は持たない汎用取得経路。None = legacy grandfather
+            // （read_skill では Owner 相当扱い）。
+            created_caller: None,
+            // #352: 汎用取得経路。Agent 露出は既定 false（オーナーが REST で切り替える）。
+            agent_visible: false,
         };
 
         queries::insert_skill(&conn, &row)?;
@@ -259,7 +260,7 @@ impl SkillManager {
                 ctx.push_str(&format!("Guidance:\n  {}\n", skill.guidance));
             }
 
-            ctx.push_str("\n");
+            ctx.push('\n');
         }
 
         Ok(ctx)

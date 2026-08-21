@@ -117,11 +117,7 @@ pub fn scan_workspace(dir: &str, options: &ScanOptions) -> anyhow::Result<ScanRe
     if let Ok(content) = fs::read_to_string(path.join("USER.md")) {
         memory_curated.push(parse_user_md(&content));
     }
-    let instructions = if let Ok(content) = fs::read_to_string(path.join("AGENTS.md")) {
-        content
-    } else {
-        String::new()
-    };
+    let instructions = fs::read_to_string(path.join("AGENTS.md")).unwrap_or_default();
 
     let mut daily_logs = Vec::new();
     if options.include_daily_logs {
@@ -130,11 +126,11 @@ pub fn scan_workspace(dir: &str, options: &ScanOptions) -> anyhow::Result<ScanRe
             let mut entries: Vec<_> = fs::read_dir(&memory_dir)?
                 .filter_map(|e| e.ok())
                 .filter(|e| {
-                    e.path().extension().map_or(false, |ext| ext == "md")
+                    e.path().extension().is_some_and(|ext| ext == "md")
                         && e.path()
                             .file_stem()
                             .and_then(|s| s.to_str())
-                            .map_or(false, |s| {
+                            .is_some_and(|s| {
                                 // Match YYYY-MM-DD pattern
                                 s.len() == 10
                                     && s.chars().nth(4) == Some('-')
@@ -142,7 +138,7 @@ pub fn scan_workspace(dir: &str, options: &ScanOptions) -> anyhow::Result<ScanRe
                             })
                 })
                 .collect();
-            entries.sort_by(|a, b| b.path().cmp(&a.path()));
+            entries.sort_by_key(|b| std::cmp::Reverse(b.path()));
             entries.truncate(options.daily_log_days as usize);
 
             for entry in entries {

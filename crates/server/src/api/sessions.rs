@@ -1,10 +1,13 @@
 use axum::{
     extract::{Path, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
     Json,
 };
 use serde::Deserialize;
 
 use crate::process;
+use crate::process::AgentNotFound;
 use crate::AppState;
 
 pub async fn list_session_logs(
@@ -111,7 +114,7 @@ pub async fn send_message(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<SendMessageRequest>,
-) -> Json<serde_json::Value> {
+) -> Response {
     // 1. Log the sender's message to DB.
     let log = opencrab_db::queries::SessionLogRow {
         id: None,
@@ -129,13 +132,14 @@ pub async fn send_message(
         let conn = match state.db.lock() {
             Ok(conn) => conn,
             Err(_) => {
-                return Json(serde_json::json!({"error": "database unavailable"}));
+                return Json(serde_json::json!({"error": "database unavailable"})).into_response();
             }
         };
         match opencrab_db::queries::insert_session_log(&conn, &log) {
             Ok(id) => id,
             Err(e) => {
-                return Json(serde_json::json!({"error": format!("failed to log message: {e}")}));
+                return Json(serde_json::json!({"error": format!("failed to log message: {e}")}))
+                    .into_response();
             }
         }
     };
@@ -145,7 +149,8 @@ pub async fn send_message(
         return Json(serde_json::json!({
             "id": log_id,
             "session_id": id,
-        }));
+        }))
+        .into_response();
     }
 
     // 3. Get session and participant IDs.
@@ -153,16 +158,18 @@ pub async fn send_message(
         let conn = match state.db.lock() {
             Ok(conn) => conn,
             Err(_) => {
-                return Json(serde_json::json!({"error": "database unavailable"}));
+                return Json(serde_json::json!({"error": "database unavailable"})).into_response();
             }
         };
         match opencrab_db::queries::get_session(&conn, &id) {
             Ok(Some(session)) => session,
             Ok(None) => {
-                return Json(serde_json::json!({"error": format!("session not found: {id}")}));
+                return Json(serde_json::json!({"error": format!("session not found: {id}")}))
+                    .into_response();
             }
             Err(e) => {
-                return Json(serde_json::json!({"error": format!("failed to load session: {e}")}));
+                return Json(serde_json::json!({"error": format!("failed to load session: {e}")}))
+                    .into_response();
             }
         }
     };
@@ -170,7 +177,9 @@ pub async fn send_message(
     let participant_ids: Vec<String> = {
         let conn = match state.db.lock() {
             Ok(conn) => conn,
-            Err(_) => return Json(serde_json::json!({"error": "database unavailable"})),
+            Err(_) => {
+                return Json(serde_json::json!({"error": "database unavailable"})).into_response()
+            }
         };
         opencrab_db::queries::list_session_participants(&conn, &id).unwrap_or_default()
     };
@@ -184,10 +193,11 @@ pub async fn send_message(
             continue;
         }
 
-        // Build agent context from DB.
+        // Build agent context from DB. この経路の run は caller=Owner（下の RunRequest と
+        // 一致）。Owner には全 skill を見せる（#352）。
         let (system_prompt, agent_name) = {
             let conn = state.db.lock().unwrap();
-            process::build_agent_context(&conn, agent_id)
+            process::build_agent_context(&conn, agent_id, &opencrab_actions::CallerIdentity::Owner)
         };
 
         // Build conversation history from session logs.
@@ -212,19 +222,31 @@ pub async fn send_message(
         };
 
         // Run agent through the shared pipeline.
-        let result = process::run_agent_response(
-            &state,
-            opencrab_actions::RunRequest::new(
-                agent_id,
-                &agent_name,
+        //
+        // 同一セッションへの並行 POST を直列化する（#640）。`send_agent_message` と同じ共有
+        // ロック（`state.session_locks`）を、ここでも session（= path の `id`）単位で被せる。
+        // これは判断ではなく配線漏れの解消で、この経路も `run_agent_response` を直呼びしていた。
+        //
+        // 粒度は **session_id 単位であって global ではない**。同一セッションの run だけが直列化
+        // され、別セッションへの POST は従来どおり並行に走る。粒度を広げないこと。
+        let result = state
+            .session_locks
+            .run_serialized(
                 &id,
-                &system_prompt,
-                &conversation,
-                "rest",
-                opencrab_actions::CallerIdentity::Owner,
-            ),
-        )
-        .await;
+                process::run_agent_response(
+                    &state,
+                    opencrab_actions::RunRequest::new(
+                        agent_id,
+                        &agent_name,
+                        &id,
+                        &system_prompt,
+                        &conversation,
+                        "rest",
+                        opencrab_actions::CallerIdentity::Owner,
+                    ),
+                ),
+            )
+            .await;
 
         match result {
             Ok(engine_result) => {
@@ -249,6 +271,16 @@ pub async fn send_message(
                 }));
             }
             Err(e) => {
+                // #632: 存在しない participant はチョークポイント（run_agent_response）で
+                // 弾かれる。ターンは走らない。他 participant の結果を混ぜず 404 に写像する
+                // （でたらめな participant を含むセッションへの send を無効な要求として扱う）。
+                if let Some(nf) = e.downcast_ref::<AgentNotFound>() {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(serde_json::json!({"error": nf.to_string()})),
+                    )
+                        .into_response();
+                }
                 tracing::error!(agent_id = %agent_id, error = %e, "SkillEngine failed");
                 responses.push(serde_json::json!({
                     "agent_id": agent_id,
@@ -265,4 +297,5 @@ pub async fn send_message(
         "session_id": id,
         "responses": responses,
     }))
+    .into_response()
 }

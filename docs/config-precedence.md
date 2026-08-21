@@ -17,6 +17,18 @@ opencrab の設定は 2 系統ある。どちらが勝つかの規則をここ�
   上書きするのではない。`resolve_heartbeat_instructions` 参照）。どちらも無ければ
   組み込み既定。
 
+## ハートビートと定時実行のマスタスイッチ（#439 / #455）
+
+- **ハートビート**は**セッション単位**の設定（`session_heartbeat_config`）に一本化された
+  （#439/#456。旧 agent/channel スコープは廃止）。発火・アンカーは中央スケジューラが握る。
+- **`[agent].heartbeat_enabled`（G）はハートビートのマスタスイッチ**。中央スケジューラは
+  発火時に live（hot-reload 追従）で参照し、`discord-` セッションの HB を G でゲートする
+  （`nostr-` は G 非依存）。
+- **`agent_schedules`（#455 の定時実行）に G は掛からない。** schedule は自身の `enabled`
+  （既定 0）で制御する。**運用者が `heartbeat_enabled=false` にしても定時実行は止まらない**
+  （止めるには各 schedule の `enabled=false`）。heartbeat と schedule は別概念なので、G が
+  両方を止めると名前が実体を裏切る（意図した分離）。詳細は `docs/design-agent-schedules.md`。
+
 ## Discord ゲートウェイの二重起動防止（DB 優先）
 
 同一エージェントが「TOML の共有ゲートウェイ（`[gateway.discord].agent_ids`）」と
@@ -57,9 +69,18 @@ per-agent ゲートウェイ側のループ（`manager.rs`）はこのチェッ�
 `crates/server/src/hot_reload.rs` は config.toml の変更を検知すると共有の
 `ToolsConfig` を**丸ごと差し替える**。一見 DB 由来の許可コマンドが消えるように
 見えるが、消えない: `agent_allowed_commands` は保存時に ToolsConfig へは書かれず、
-**実行のたびに** DB から読んでエージェント専用のクローンへマージされる
-（`process.rs` / `subtask_engine.rs` の executor 組み立て時）。共有 ToolsConfig は
-常に「TOML の姿」だけを持ち、DB のランタイム追加分は per-call で合成される。
+**実行のたびに** DB から読んでエージェント専用のクローンへマージされる。合成関数は
+`crates/server/src/process.rs` の `resolve_run_tools_config` 1 箇所だけで、run の冒頭で
+必ず呼ばれる。共有 ToolsConfig は常に「TOML の姿」だけを持ち、DB のランタイム追加分は
+per-run で合成される。
+
+この不変条件（DB 由来を共有 ToolsConfig へ書かない）は、**許可コマンドの追加・削除
+ツールにも適用される**。かつて Discord 実装は DB と共有 ToolsConfig の両方へ書いており、
+それが「あるエージェントの許可が全エージェントへ漏れる」不具合（#202）だった。
+#157 S1 の移設時に書き込みを撤去した。撤去しても呼び出し元が困らないのは、
+上記の合成が毎 run 走るため**次の run で必ず効く**からである。なお**同一ターン内では
+元から効かない**（`register_tools_from_config` が run 冒頭で `ShellToolConfig` を
+clone してスナップショットする）。
 
 ## 新しい設定を足すときの指針
 

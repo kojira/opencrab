@@ -42,11 +42,29 @@ impl LlmRouter {
         }
     }
 
-    /// Register a provider under its name.
-    pub fn add_provider(&mut self, provider: Arc<dyn LlmProvider>) {
-        let name = provider.name().to_string();
+    /// Register a provider under an explicit routing name.
+    ///
+    /// The `name` given here — **not** `provider.name()` — is the key that
+    /// `provider:model` specs resolve against. Keeping the routing key at this
+    /// single caller-supplied assignment point is what stops it from silently
+    /// diverging from the config section key: the router never reads
+    /// `provider.name()` to decide routing, so the name a caller registers under
+    /// and the name a spec resolves to are the same string by construction.
+    /// `provider.name()` is only a display label for telemetry.
+    pub fn register_provider(&mut self, name: impl Into<String>, provider: Arc<dyn LlmProvider>) {
+        let name = name.into();
         info!(provider = %name, "Registered LLM provider");
         self.providers.insert(name, provider);
+    }
+
+    /// Register a provider under its own reported [`LlmProvider::name`].
+    ///
+    /// Convenience for callers (mostly tests) that want the provider's
+    /// self-reported name as the routing key. Production wiring uses
+    /// [`Self::register_provider`] with the config section key instead.
+    pub fn add_provider(&mut self, provider: Arc<dyn LlmProvider>) {
+        let name = provider.name().to_string();
+        self.register_provider(name, provider);
     }
 
     /// Set the default provider name.
@@ -111,6 +129,23 @@ impl LlmRouter {
                 "No default provider set and model '{}' is not in provider:model format",
                 model_or_alias
             );
+        }
+    }
+
+    /// #676: この `model`（alias / `provider:model`）を捌くプロバイダが `max_tokens`
+    /// を backend へ送るか。出力上限のモデル登録を要求すべきか（＝送るなら要求）の判断に使う。
+    ///
+    /// 解決先のプロバイダ自身の能力宣言（[`LlmProvider::sends_max_output_tokens`]）を返す。
+    /// core 側で provider 名や type 文字列を突き合わせない（条件1）。解決失敗 / 未登録
+    /// プロバイダは **`true`（送る＝登録必須側）** に倒す（新規や未知が黙って素通りしない）。
+    pub fn sends_max_output_tokens(&self, model_or_alias: &str) -> bool {
+        match self.resolve_model(model_or_alias) {
+            Ok((provider_name, _)) => self
+                .providers
+                .get(&provider_name)
+                .map(|p| p.sends_max_output_tokens())
+                .unwrap_or(true),
+            Err(_) => true,
         }
     }
 
@@ -288,7 +323,7 @@ impl LlmRouter {
     ///
     /// Retry policy:
     ///   - Retryable:     429 (rate-limit), 5xx (transient server errors),
-    ///                    ステータス不明のエラー（ネットワーク・サブプロセス等）
+    ///     ステータス不明のエラー（ネットワーク・サブプロセス等）
     ///   - Non-retryable: other 4xx (permanent client errors — retrying won't help)
     ///
     /// 分類は型付き [`LlmError`] の downcast で行う（anyhow は context チェーンを
