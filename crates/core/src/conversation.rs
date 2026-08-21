@@ -460,15 +460,16 @@ pub(crate) fn result_reference(tool_name: &str, result_json: &str) -> String {
         let out = d.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
         let err = d.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
         if code != 0 {
-            return format!(
-                "終了コード {code}（失敗）・出力 {} 文字\n{}",
-                out.chars().count(),
-                if err.is_empty() {
-                    "（stderr は空）".to_string()
-                } else {
-                    err.to_string()
-                }
-            );
+            // **失敗したコマンドは結果をそのまま残す**（`success: false` と同じ扱い）。
+            //
+            // 当初は stderr だけを残したが、それでは**片肺**だった（#709 レビュー 2 巡目）:
+            // `cargo build` のコンパイルエラーは stderr に出るが、`cargo test` / pytest / jest の
+            // **assert 失敗やパニックの詳細は stdout** に出る。エージェントが最も頻繁に読むものを
+            // 取りこぼしていた。どちらに出るかをこちらが決められない以上、失敗は丸ごと残す。
+            //
+            // 会話を圧迫する心配は要らない——1 件あたりは上流の退避しきい値（2,500 トークン）で
+            // 既に頭打ちで、それを超える大きい失敗出力は退避ファイル側に落ちている。
+            return result_json.to_string();
         }
         return format!(
             "終了コード 0・出力 {} 文字{}（本文は会話に残していない）",
@@ -2423,7 +2424,31 @@ mod result_reference_tests {
             r.contains("E0308") && r.contains("src/main.rs:42"),
             "失敗の理由（stderr）が消えている: {r}"
         );
-        assert!(r.contains("失敗"), "失敗だと分からない: {r}");
+        assert!(
+            r.contains("exit_code") || r.contains("1"),
+            "失敗だと分からない: {r}"
+        );
+    }
+
+    /// #709 レビュー 2 巡目: **失敗詳細が stdout に出るケース**（cargo test / pytest / jest）でも
+    /// 本文が残る。stderr だけを残す形では `cargo build` しか塞げていなかった。
+    #[test]
+    fn failed_commands_keep_stdout_details_too() {
+        let result = serde_json::json!({
+            "success": true,
+            "data": {
+                "exit_code": 101,
+                "stdout": "thread 'tests::budget' panicked at src/lib.rs:88:\nassertion failed: used <= budget",
+                "stderr": "error: test failed, to rerun pass `-p opencrab-core --lib`"
+            }
+        })
+        .to_string();
+
+        let r = result_reference("execute_shell", &result);
+        assert!(
+            r.contains("assertion failed") && r.contains("tests::budget"),
+            "stdout に出た失敗詳細が消えている: {r}"
+        );
     }
 
     /// #709 レビュー指摘: 非冪等なツールに「もう一度呼ぶ」と言わない。
