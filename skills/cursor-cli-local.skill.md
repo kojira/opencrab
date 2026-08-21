@@ -13,8 +13,10 @@ actions:
 
 1. **`execute_shell` はシェルを介さずバイナリを直接起動する。** `|` `>` `<` `&&` `$(...)` は一切使えない。
    引数は `args` 配列で、1要素 = 1引数として渡す。
-2. **プロンプトは positional 引数で渡す。** positional も `stdin` も与えないと、Cursor CLI は入力終端を
-   待ってハングし、タイムアウトまで枠を占有する。
+2. **プロンプトは positional 引数で渡す。** positional を与えないと Cursor CLI は応答を返さず、
+   タイムアウトまで枠を占有する事例がある。`execute_shell` は `stdin` フィールドが無ければ子の
+   stdin を `Stdio::null()`（即 EOF）にするので、これは「入力終端を待っている」わけではない。
+   正確な原因（対話/TTY 前提など）は未確認だが、いずれにせよ positional は毎回渡す。
 3. **`timeout_secs` を毎回明示する。** 省略時は 30 秒で、Cursor CLI の応答には短すぎる（上限 1800）。
 4. **コマンド名は完全一致。** 自分に付与された名前だけが通る（既定は `agent`）。`cursor-agent` は
    同じバイナリの別名だが、許可されていなければ弾かれる。
@@ -35,8 +37,12 @@ actions:
 ## 編集させる場合の注意
 
 `--force`（別名 `--yolo`）を付けると承認を待たずに進むが、**起動される Cursor CLI 自身が write と
-shell を持つ**。つまり自分の許可コマンド一覧の外にあることまで実行できてしまう。加えて子プロセスは
-親の環境変数（トークンや API キー）を引き継ぐ。
+shell を持つ**。ここで効かなくなるのは `execute_shell` の許可コマンド一覧だけではない。**opencrab の
+caller 権限（Owner / CoAgent / TrustedUser / Agent による `ws_write` / `execute_shell` のゲート）は
+Cursor CLI の中では丸ごと無効になる** — Cursor CLI は opencrab の Action / caller 権限の層の外で走る
+別プロセスなので、「opencrab の権限内で動く」わけではない。自分が直接呼べばゲートで止まる書き込みや
+コマンドも、Cursor CLI 経由なら素通りする。加えて子プロセスは親の環境変数（トークンや API キー）を
+引き継ぐ。
 
 したがって:
 
@@ -138,14 +144,5 @@ cursor-agent -p --output-format json -m <model> --force <prompt>
 - `agent` と `cursor-agent` は同じバイナリへの symlink（正式名は `agent`、Usage 表記も `agent`）
 - 認証は `CURSOR_API_KEY` か `agent login` 済みのアンビエント認証
 
-## ターミナルから直接使う場合（人間向け・参考）
-
-シェル経由ならリダイレクトとパイプが使える。**`execute_shell` からは使えない**ので混同しないこと。
-
-```bash
-agent -p "指示" --model cursor-grok-4.6-high --force            # 基本形
-agent -p "指示" --model cursor-grok-4.6-high --plan --trust     # 調査専用
-agent -p --model cursor-grok-4.6-high --force < task.txt        # 長い指示（EOF が来る形で渡す）
-agent --resume "<session_id>" -p "続きの指示"      # 続きから
-agent --list-models                                # モデル一覧
-```
+> 人間が生のシェルから叩く場合はリダイレクトやパイプ（`< task.txt` など）も使えるが、それは
+> `execute_shell` の契約とは別物で、この文書からコピーしてはいけない（本文の作法をそのまま守ること）。
