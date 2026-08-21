@@ -572,6 +572,25 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // 退避ファイル（workspace/tmp）の掃除（#711）。退避経路は書くだけで消す実装が無く、
+    // ファイルが無限に増える。全エージェントの `workspace/tmp/` を日次で巡回し、mtime が
+    // 保持日数より古い**通常ファイルのみ**を個別 remove_file で消す（グロブ・再帰なし）。
+    // 発火判定用マーカーは DB ファイルの親（DB と同じボリューム = 内蔵ディスクに置かない）
+    // 直下に置き、どのエージェントの tmp とも混ざらないようにする。
+    if cfg.offload_cleanup.enabled {
+        let marker_dir = std::path::Path::new(&cfg.database.path)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf();
+        opencrab_server::offload_cleanup::spawn_offload_cleanup_loop(
+            state.db.clone(),
+            cfg.agent.workspace_path.clone(),
+            marker_dir,
+            cfg.offload_cleanup.retention_days,
+            cfg.offload_cleanup.interval_secs,
+        );
+    }
+
     // 外部イベント受信（webhook intake / #454）。
     //
     // 消化ループは heartbeat の起動条件（グローバル有効 or opt-in）に**依存させない**。
