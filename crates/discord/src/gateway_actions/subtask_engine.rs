@@ -613,6 +613,7 @@ mod tests {
             "heartbeat-agent-x",
             "nostr-agent-x-npub1abc",
             "subtask-11111111-2222-3333-4444-555555555555",
+            "agent-msg-agent-x-user-1",
             "",
         ] {
             let (sink, mut rx) = sink_with_channel();
