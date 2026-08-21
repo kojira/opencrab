@@ -43,6 +43,10 @@ pub mod system_actions;
 pub mod web_runner_impl;
 pub mod webhook_targets;
 
+#[cfg(feature = "baseline-l1")]
+#[doc(hidden)]
+pub mod baseline_l1;
+
 #[cfg(feature = "discord")]
 mod agent_runner_impl;
 pub mod transcript;
@@ -288,9 +292,9 @@ pub fn register_production_descriptors(router: &opencrab_actions::TimedFireRoute
 
 /// 最小構成の `AppState`（in-memory DB、LLM プロバイダ 0 件、gateway マネージャ無し）。
 ///
-/// crate 内のユニットテスト共用。`AppState` にフィールドが増えたときの追随箇所を
-/// 1 つに保つ（テストごとの構造体リテラル複製を避ける）。
-#[cfg(test)]
+/// crate 内のユニットテストと L1 採取器で共用。`AppState` にフィールドが増えたときの
+/// 追随箇所を 1 つに保つ（テスト／採取器ごとの構造体リテラル複製を避ける）。
+#[cfg(any(test, feature = "baseline-l1"))]
 pub(crate) fn test_app_state() -> AppState {
     let conn = opencrab_db::init_memory().unwrap();
     // #628: 本番（main.rs）と同じ transport descriptor を生存非依存で登録する（源は 1 本化・

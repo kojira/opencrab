@@ -8,6 +8,12 @@ default = ["discord", "nostr", "web"]
 discord = ["dep:opencrab-discord"]
 nostr = ["dep:opencrab-nostr"]
 web = ["dep:opencrab-web-gateway"]
+baseline-l1 = ["dep:syn"]
+
+[[bin]]
+name = "baseline-l1"
+path = "src/bin/baseline-l1.rs"
+required-features = ["baseline-l1"]
 
 [dependencies]
 tokio = { workspace = true }
@@ -53,6 +59,7 @@ hmac = "0.12"
 sha2 = { workspace = true }
 croner = "3.0.1"
 chrono-tz = "0.10.4"
+syn = { version = "2", features = ["full", "visit"], optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
