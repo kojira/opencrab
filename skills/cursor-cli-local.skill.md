@@ -24,7 +24,7 @@ actions:
 ```json
 {
   "command": "agent",
-  "args": ["-p", "ここに指示", "--model", "gpt-5.2", "--plan", "--trust",
+  "args": ["-p", "ここに指示", "--model", "cursor-grok-4.6-high", "--plan", "--trust",
            "--output-format", "json"],
   "timeout_secs": 600
 }
@@ -48,7 +48,7 @@ shell を持つ**。つまり自分の許可コマンド一覧の外にあるこ
 {
   "command": "agent",
   "args": ["-p", "対象は src/foo.rs のみ。最小修正だけ。目的外変更禁止。最後に diff を要約して",
-           "--model", "gpt-5.2", "--force", "--output-format", "json"],
+           "--model", "cursor-grok-4.6-high", "--force", "--output-format", "json"],
   "timeout_secs": 900
 }
 ```
@@ -90,7 +90,7 @@ shell を持つ**。つまり自分の許可コマンド一覧の外にあるこ
 {
   "command": "agent",
   "args": ["--resume", "<前回の session_id>", "-p", "その調査結果に基づいて最小修正を実施して",
-           "--model", "gpt-5.2", "--force", "--output-format", "json"],
+           "--model", "cursor-grok-4.6-high", "--force", "--output-format", "json"],
   "timeout_secs": 900
 }
 ```
@@ -143,9 +143,9 @@ cursor-agent -p --output-format json -m <model> --force <prompt>
 シェル経由ならリダイレクトとパイプが使える。**`execute_shell` からは使えない**ので混同しないこと。
 
 ```bash
-agent -p "指示" --model gpt-5.2 --force            # 基本形
-agent -p "指示" --model gpt-5.2 --plan --trust     # 調査専用
-agent -p --model gpt-5.2 --force < task.txt        # 長い指示（EOF が来る形で渡す）
+agent -p "指示" --model cursor-grok-4.6-high --force            # 基本形
+agent -p "指示" --model cursor-grok-4.6-high --plan --trust     # 調査専用
+agent -p --model cursor-grok-4.6-high --force < task.txt        # 長い指示（EOF が来る形で渡す）
 agent --resume "<session_id>" -p "続きの指示"      # 続きから
 agent --list-models                                # モデル一覧
 ```
