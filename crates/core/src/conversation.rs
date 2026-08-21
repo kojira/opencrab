@@ -554,6 +554,14 @@ fn build_result_reference(tool_name: &str, result_json: &str) -> String {
 /// 散文応答・timeout / error の平文・退避 notice・失敗・想定外 JSON——は `result_str` を**そのまま
 /// 返す**（握り潰さない・fail-safe）。生産者A の散文は「エージェントが出した答え・報告書」であって
 /// 塊ではなく、参照化しない（#713 決定B）。
+///
+/// **受容した制限（決定B のサイレントな誤分類・#716 レビュー指摘2）**: 生産者A と B を分ける唯一の
+/// 信号は**値の形**（`success` 封筒の有無）だけで、完了本文に由来（切り離しツール／サブエージェント
+/// 会話）を示すフィールドは無い（`settle_completed` は `engine_result.response` をそのまま `result` へ
+/// 載せる）。したがってサブエージェントが最終応答として `{"success":true,"data":{…}}` 形の JSON を
+/// 返すと生産者B と区別できず**畳まれる**。これは受容する: 長さ不変条件で小さい答えは残る／DB に全文が
+/// 残る／`session_id` ポインタも残る／本番実測で該当例は未発見。由来フィールドを生産者側へ足すのは
+/// スコープ外（別 issue）。将来この誤分類が実害化したときここから辿れるよう明記しておく。
 fn fold_subtask_completed(
     exit_reason: &str,
     session_id: &str,
@@ -627,9 +635,24 @@ fn build_subtask_single_reference(
 ) -> String {
     let suffix = subtask_audit_suffix(session_id);
     if let Some(code) = d.get("exit_code").and_then(|x| x.as_i64()) {
+        // 非ゼロ終了は `signals_failure` が本文ごと残すので、ここへ来るのは成功（code==0）だけ。
+        // 双子の `build_result_reference` と対称に tripwire を置き、不変条件が破れたら気づく。
+        debug_assert_eq!(
+            code, 0,
+            "非ゼロ終了は signals_failure が本文ごと残すはず（#709 の不変条件が破れている）"
+        );
+        // stdout **と** stderr の両方を数える（統括レビュー指摘1）。cargo build の warning など
+        // 正常終了でも stderr へ大量に出るツールがあり、stdout だけだと「出力 0 文字」と事実と
+        // 違う表示になる。本文は落とすが、会話に残す唯一の数字は正しくする。
         let out = d.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
+        let err = d.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
+        let stderr_note = if err.is_empty() {
+            String::new()
+        } else {
+            format!("・stderr {} 文字", err.chars().count())
+        };
         return format!(
-            "サブタスク {subtask_id} 完了・終了コード {code}・出力 {} 文字{suffix}",
+            "サブタスク {subtask_id} 完了・終了コード {code}・出力 {} 文字{stderr_note}{suffix}",
             out.chars().count(),
         );
     }
@@ -2862,6 +2885,29 @@ mod subtask_completed_folding_tests {
         );
     }
 
+    /// 1b. 正常終了でも stderr に大量に出るツール（cargo build の warning 等）の規模を数える
+    ///     （#716 レビュー指摘1）。stdout が空でも「出力 0 文字」で終わらず stderr の規模を出す。
+    #[test]
+    fn single_tool_reference_counts_stderr_size() {
+        let err = "warning: unused variable `x`\n".repeat(2_000);
+        let result = serde_json::json!({
+            "success": true,
+            "data": {"exit_code": 0, "stdout": "", "stderr": err}
+        })
+        .to_string();
+
+        let o = format_single_log(&subtask_completed_log("completed", &result));
+        assert!(
+            !o.contains("warning: unused variable"),
+            "stderr 本文が会話へ載っている: {o:.120}"
+        );
+        assert!(o.contains("出力 0 文字"), "stdout 規模が無い: {o}");
+        assert!(
+            o.contains(&format!("stderr {} 文字", err.chars().count())),
+            "stderr の規模が数えられていない（stdout だけ数えて事実と違う表示）: {o}"
+        );
+    }
+
     /// 2. 単一ツール失敗（execute_shell は success:true のまま exit_code!=0）→ 本文を丸ごと残す。
     ///    stderr / stdout を選り分けず両方残す（罠2）。
     #[test]
@@ -3030,19 +3076,19 @@ mod subtask_completed_folding_tests {
         );
     }
 
-    /// 11. **構造テスト（設計 Q2 #9 の盲点封じ・#713 の再発防止の本体）**。
+    /// 11a. **構造テスト（設計 Q2 #9 の盲点封じ・#713 の再発防止の本体）: top-level の未知 log_type**。
     ///
     /// `format_single_log` の catch-all は log_type を問わず `content` を**丸ごと**会話へ運ぶ。
     /// 本文を畳む（参照化する）経路を持つのは現在 2 つだけ——`tool_result`（result_reference）と
-    /// `system` + `type=="subtask_completed"`（fold_subtask_completed）。それ以外の log_type が
-    /// 本文を運ぶ経路（catch-all）をここで顕在化させる。**新しい log_type を足した人がこの持ち越しに
-    /// 気づかず**、tool_result / subtask_completed で塞いだ穴を黙って開くのを防ぐ: 新 type を
-    /// 「畳む」なら下の許可集合とこのテストを更新することになり、更新せず本文が漏れれば別テスト
-    /// （各アーム）が、畳むべきものを畳まなければこのテストが根拠になる。
+    /// `system` + `type=="subtask_completed"`（format_subtask_completed → fold_subtask_completed）。
+    /// ここでは top-level の新 log_type が catch-all で全文を運ぶ経路を顕在化させる。**新しい log_type を
+    /// 足した人がこの持ち越しに気づかず**、tool_result / subtask_completed で塞いだ穴を黙って開くのを
+    /// 防ぐ: 新 type を「畳む」なら下の許可集合とこのテストを更新することになり、更新せず本文が漏れれば
+    /// 別テスト（各アーム）が、畳むべきものを畳まなければこのテストが根拠になる。
     #[test]
     fn unknown_log_types_carry_full_body_through_catch_all() {
         // 本文を畳む経路を持つ log_type（top-level）はこれだけ。system は subtype で分岐するので
-        // 別扱い（下）。ここを増やすときは畳み経路を意識的に足したことの証跡になる。
+        // 11b で別に census する。ここを増やすときは畳み経路を意識的に足したことの証跡になる。
         const FOLDS_BODY_TOP_LEVEL: &[&str] = &["tool_result"];
 
         let body = "運ばれてはいけない生本文".repeat(30);
@@ -3074,6 +3120,59 @@ mod subtask_completed_folding_tests {
                 out.contains(&body),
                 "catch-all が log_type={lt} の本文を落としている。畳み経路を足したなら \
                  FOLDS_BODY_TOP_LEVEL とこのテストを更新し「畳むか・運ぶか」を明示的に決めること: {out:.80}"
+            );
+        }
+    }
+
+    /// 11b. **構造テスト: `system` の未知サブタイプ（#716 レビュー指摘1・最も再発しやすい形）**。
+    ///
+    /// #713 自身が「`system` の 1 サブタイプ（`type=="subtask_completed"`）」として現れたとおり、
+    /// **次の運び手も最も自然には `system` + 新しい `type`**（切り離しツールの別カリア等）として来る。
+    /// その形は 11a の top-level census を素通りし、`system` アームの `if kind == "subtask_completed"`
+    /// も素通りして `to_string_pretty` の丸ごと pretty-print に落ちて**本文を会話へ運ぶ**。11a だけでは
+    /// **#713 が生きている次元（system サブタイプ）そのものが盲点**だった。
+    ///
+    /// ここでは「本文を畳む system サブタイプ」の許可集合を明示し、それ以外のサブタイプが本文を運ぶ
+    /// ことを固定する。**system に新しい `type` を足して黙って畳む（＝本文を握り潰す）と census が赤、
+    /// 逆に畳むべき塊を素通しすればその type を許可集合へ載せる判断を迫られる。** どちらの向きでも
+    /// 「気づかず素通し」を不可にする。
+    #[test]
+    fn unknown_system_subtypes_carry_full_body() {
+        // 本文を畳む（参照化する）system サブタイプはこれだけ。ここを増やす＝新しい切り離し系
+        // カリアを畳むと決めたことの証跡。増やさずに畳む枝を足すと下の census が赤くなる。
+        const FOLDS_BODY_SYSTEM_SUBTYPES: &[&str] = &["subtask_completed"];
+
+        let body = "運ばれてはいけない生本文".repeat(30);
+        // system ログは content に `type` を持つ JSON。畳まれなければ pretty-print が本文（note）を運ぶ。
+        let system_log = |subtype: &str| SessionLogRow {
+            id: None,
+            agent_id: "agent-1".to_string(),
+            session_id: "s".to_string(),
+            log_type: "system".to_string(),
+            content: serde_json::json!({ "type": subtype, "note": body }).to_string(),
+            speaker_id: None,
+            turn_number: None,
+            metadata_json: None,
+            created_at: None,
+        };
+
+        // 将来のカリアを含む代表 census。許可集合に無いサブタイプは全文を運ぶ。
+        for subtype in [
+            "reflection_note",
+            "handoff",
+            "new_tool_carrier_2027",
+            "some_future_system_kind",
+        ] {
+            assert!(
+                !FOLDS_BODY_SYSTEM_SUBTYPES.contains(&subtype),
+                "census が畳み集合と衝突している（テストの前提が壊れた）: {subtype}"
+            );
+            let out = format_single_log(&system_log(subtype));
+            assert!(
+                out.contains(&body),
+                "system サブタイプ type={subtype} の本文が会話から落ちた。切り離し系の新カリアを \
+                 畳むなら FOLDS_BODY_SYSTEM_SUBTYPES とこのテストを更新し、そうでなければ本文を \
+                 運ぶ（握り潰さない）こと: {out:.80}"
             );
         }
     }
