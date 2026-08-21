@@ -842,6 +842,10 @@ mod tests {
     };
     use serde_json::Value;
 
+    /// ログコールバックで捕捉した (error_code, error_str) の並び。
+    /// `-D warnings` の `clippy::type_complexity` を避けるための別名。
+    type CapturedErrors = Arc<std::sync::Mutex<Vec<(Option<String>, Option<String>)>>>;
+
     /// Build a canonical tool call with JSON arguments (as a value, serialized).
     fn tc(id: &str, name: &str, args: Value) -> ToolCall {
         ToolCall {
@@ -1040,8 +1044,7 @@ mod tests {
     #[tokio::test]
     async fn test_empty_response_is_recorded_in_log_with_reason() {
         use std::sync::Mutex;
-        let captured: Arc<Mutex<Vec<(Option<String>, Option<String>)>>> =
-            Arc::new(Mutex::new(Vec::new()));
+        let captured: CapturedErrors = Arc::new(Mutex::new(Vec::new()));
         let sink = captured.clone();
 
         let llm = MockLlm::new(vec![resp(None, vec![])]); // content 欠落・tool_call 無し
