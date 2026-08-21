@@ -399,17 +399,58 @@ fn is_excluded_from_conversation(log: &opencrab_db::queries::SessionLogRow) -> b
 /// `workspace/tmp` にも残り、平文の退避 notice（非 JSON）はここを素通しするので読み方の案内が
 /// 壊れない。**しきい値未満の結果はエージェントからは読み直せない**ので、再取得を案内するのは
 /// 同じものが返ると保証できるとき（読み・一覧）だけにする。
+///
+/// **参照が本文より短くならないなら潰さない**（#709 レビュー指摘1）。会話を軽くするための
+/// 仕組みが会話を重くするのは本末転倒——`ws_write` などの `{"path":"...","written":true}`
+/// のような数十文字の結果は、参照へ化けさせると逆に長くなり、識別子（path）まで消える。長さの
+/// 不変条件は入口の `result_reference` が一括で掛け、参照が本文以上なら本文をそのまま残す。
+///
+/// **失敗は必ず本文ごと残す**（#709 レビュー指摘2）。この系の不変条件——失敗は `success: false`
+/// または `data.exit_code != 0` のいずれかでしか表されない——を `signals_failure` に集約する。
+/// catch-all の中立文言は成功を主張しないが、それだけでは将来この不変条件を破る新ツールの失敗が
+/// 黙って要約されて消える。判定を一箇所に集めることで `failures_are_never_summarized_as_success`
+/// テストがどちらの経路が落ちても落ちる。
 pub(crate) fn result_reference(tool_name: &str, result_json: &str) -> String {
+    let reference = build_result_reference(tool_name, result_json);
+    // 会話を軽くするための仕組みが会話を重くしては本末転倒（#709 レビュー指摘1）。参照が本文
+    // より短くならないなら潰す意味がないので本文をそのまま残す。小さな mutation 結果はここで
+    // そのまま残り、`build_result_reference` が返す本文（失敗・非 JSON）もこの不変条件を通る。
+    if reference.chars().count() >= result_json.chars().count() {
+        result_json.to_string()
+    } else {
+        reference
+    }
+}
+
+/// 失敗を表す形か（#709 レビュー指摘2）。この系の不変条件を一箇所に集約する:
+/// **失敗は `success: false` または `data.exit_code != 0` のいずれかでしか表されない**。
+/// 失敗した結果を参照へ潰すと「成功した」ように読める文字列へ化ける（握り潰し・#692 / #284）ので
+/// 本文を丸ごと残す。`execute_shell` は非ゼロ終了でもツール層では `success: true` を返すため、
+/// `success` 判定だけでは捕まらない——両経路をここで見る。将来この不変条件を破る新ツール
+/// （`success: true` のまま data の中で失敗を表す等）が入ると失敗が catch-all で「結果 N 文字」へ
+/// 潰れて黙って消えるので、判定をここへ集約し `failures_are_never_summarized_as_success` で固定する。
+fn signals_failure(v: &serde_json::Value, d: &serde_json::Value) -> bool {
+    if v.get("success").and_then(|x| x.as_bool()) != Some(true) {
+        return true;
+    }
+    matches!(d.get("exit_code").and_then(|x| x.as_i64()), Some(code) if code != 0)
+}
+
+/// 会話へ残す参照本体を組む。長さの不変条件（参照が本文以上なら本文を残す）は入口の
+/// `result_reference` が掛けるので、ここでは形ごとの参照を作ることに集中する。
+fn build_result_reference(tool_name: &str, result_json: &str) -> String {
     let v: serde_json::Value = match serde_json::from_str(result_json) {
         Ok(v) => v,
         // 判断材料が無いので推測で捨てず、そのまま残す。
         Err(_) => return result_json.to_string(),
     };
-    if v.get("success").and_then(|x| x.as_bool()) != Some(true) {
-        return result_json.to_string();
-    }
     let null = serde_json::Value::Null;
     let d = v.get("data").unwrap_or(&null);
+
+    // 失敗は参照へ潰さず本文を丸ごと残す（握り潰し防止）。判定は signals_failure に集約。
+    if signals_failure(&v, d) {
+        return result_json.to_string();
+    }
 
     // ディレクトリ一覧: 件数と正しい再取得ツール。
     if let Some(entries) = d.get("entries").and_then(|x| x.as_array()) {
@@ -450,27 +491,16 @@ pub(crate) fn result_reference(tool_name: &str, result_json: &str) -> String {
         }
     }
 
-    // コマンド実行: 終了コードと規模。
-    //
-    // **失敗したコマンドは stderr を本文で残す**（#709 レビュー指摘）。`execute_shell` は非ゼロ
-    // 終了でもツール層では `success: true` を返すので、上の `success != true` 判定では捕まらない。
-    // ここを塞がないと**コンパイルエラーやテスト失敗の理由がターンをまたぐと消える**——エージェント
-    // が最も頻繁に読むものであり、握り潰しになる（#692 / #284 の理念に反する）。
+    // コマンド実行（成功のみ）: 終了コードと規模。非ゼロ終了は上の signals_failure が本文ごと
+    // 残しているので、ここへ来るのは成功したコマンドだけ——`cargo build` / `cargo test` /
+    // pytest / jest の失敗詳細（stderr にも stdout にも出る）はどちらも丸ごと残る。
     if let Some(code) = d.get("exit_code").and_then(|x| x.as_i64()) {
+        debug_assert_eq!(
+            code, 0,
+            "非ゼロ終了は signals_failure が本文ごと残すはず（#709 の不変条件が破れている）"
+        );
         let out = d.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
         let err = d.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
-        if code != 0 {
-            // **失敗したコマンドは結果をそのまま残す**（`success: false` と同じ扱い）。
-            //
-            // 当初は stderr だけを残したが、それでは**片肺**だった（#709 レビュー 2 巡目）:
-            // `cargo build` のコンパイルエラーは stderr に出るが、`cargo test` / pytest / jest の
-            // **assert 失敗やパニックの詳細は stdout** に出る。エージェントが最も頻繁に読むものを
-            // 取りこぼしていた。どちらに出るかをこちらが決められない以上、失敗は丸ごと残す。
-            //
-            // 会話を圧迫する心配は要らない——1 件あたりは上流の退避しきい値（2,500 トークン）で
-            // 既に頭打ちで、それを超える大きい失敗出力は退避ファイル側に落ちている。
-            return result_json.to_string();
-        }
         return format!(
             "終了コード 0・出力 {} 文字{}（本文は会話に残していない）",
             out.chars().count(),
@@ -482,7 +512,10 @@ pub(crate) fn result_reference(tool_name: &str, result_json: &str) -> String {
         );
     }
 
-    // それ以外（記憶・検索・内なる声など）: 規模だけ残す。何を呼んだかは tool_name が示す。
+    // それ以外（記憶・検索・内なる声・mutation など）: 規模だけ残す。何を呼んだかは tool_name が示す。
+    //
+    // **path があれば参照に含める**（#709 レビュー指摘1）。`ws_write` / `ws_edit` / `ws_delete` /
+    // `ws_mkdir` などは `{"path":"...","written":true}` を返す——「何をしたか」の対象を消さない。
     //
     // **「もう一度呼ぶ」とは言わない**（#709 レビュー指摘）。ここへ落ちるツールには非冪等なものが
     // 混じる——`generate_inner_voice` を呼び直すと**別の思考**が生成され、過去のそれは回収できない。
@@ -491,7 +524,12 @@ pub(crate) fn result_reference(tool_name: &str, result_json: &str) -> String {
     let size = serde_json::to_string(d)
         .map(|t| t.chars().count())
         .unwrap_or(0);
-    format!("結果 {size} 文字（本文は会話に残していない）")
+    match d.get("path").and_then(|x| x.as_str()) {
+        Some(path) => {
+            format!("{path} を {tool_name} した（結果 {size} 文字・本文は会話に残していない）")
+        }
+        None => format!("結果 {size} 文字（本文は会話に残していない）"),
+    }
 }
 
 /// heartbeat セッションで過去に積まれた指示文（プロンプト scaffolding）か（#501）。
@@ -2513,5 +2551,71 @@ mod result_reference_tests {
             "本文が載っている: {r:.80}"
         );
         assert!(r.contains("文字"), "規模が分からない: {r}");
+    }
+
+    /// #709 レビュー指摘1: 小さな mutation 結果を参照化しても、書いた対象（path）を会話から
+    /// 消さない。`ws_write` の `{"path":"...","written":true}` が「結果 N 文字」に化けると
+    /// **どのファイルを書いたのかが会話から消える**——削減効果ゼロなのに作業記憶を削っていた。
+    #[test]
+    fn mutation_results_keep_their_path() {
+        let result = serde_json::json!({
+            "success": true,
+            "data": {"path": "crates/core/src/lib.rs", "written": true}
+        })
+        .to_string();
+
+        let r = result_reference("ws_write", &result);
+        assert!(
+            r.contains("crates/core/src/lib.rs"),
+            "書いたファイルが会話から消えた: {r}"
+        );
+        assert!(!r.contains("\"written\""), "本文がそのまま載っている: {r}");
+    }
+
+    /// #709 レビュー指摘1: 参照が本文より長くなるなら潰さず本文を残す（会話を軽くする仕組みが
+    /// 会話を重くしない）。極小の結果は参照化の固定オーバーヘッドの方が長くなる。
+    #[test]
+    fn tiny_results_are_never_expanded() {
+        // 参照文（path + tool_name + 定型句）の方が本文より長くなる極小ケース。
+        let result = serde_json::json!({
+            "success": true, "data": {"path": "x"}
+        })
+        .to_string();
+
+        let r = result_reference("configure_self", &result);
+        assert!(
+            r.chars().count() <= result.chars().count(),
+            "参照が本文より長い（会話を重くしている）: ref={} body={} / {r}",
+            r.chars().count(),
+            result.chars().count()
+        );
+    }
+
+    /// #709 レビュー指摘2: 失敗は必ず本文ごと残る——catch-all の「結果 N 文字」へ潰れて黙って
+    /// 消えることはない。この系の不変条件（失敗は `success:false` **または** `exit_code!=0`）を
+    /// `signals_failure` に集約したので、どちらの経路を落としてもこのテストが落ちる。
+    #[test]
+    fn failures_are_never_summarized_as_success() {
+        // (a) ツール層の失敗: success:false。
+        let tool_fail = serde_json::json!({
+            "success": false, "data": {"foo": "bar"}, "error": "boom"
+        })
+        .to_string();
+        assert_eq!(
+            result_reference("some_tool", &tool_fail),
+            tool_fail,
+            "success:false が要約されて消えた"
+        );
+
+        // (b) コマンドの非ゼロ終了: execute_shell は success:true のまま返す。
+        let cmd_fail = serde_json::json!({
+            "success": true, "data": {"exit_code": 2, "stdout": "", "stderr": "boom"}
+        })
+        .to_string();
+        assert_eq!(
+            result_reference("execute_shell", &cmd_fail),
+            cmd_fail,
+            "非ゼロ終了が要約されて消えた"
+        );
     }
 }
