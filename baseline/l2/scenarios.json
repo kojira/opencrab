@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "selection_rule": "Select credential-free, deterministic scenarios whose breakage would remove a user-visible route, branch, visible tool, permission boundary, or MCP behavior. Inputs and rationale live here; responses are always captured from the current code.",
+  "http": {
+    "expansion": "For every path×method in baseline/l1/opencrab-l1.json, capture a normal/local-precondition probe and an input-rejection or resource-absence probe. Normal branches that require an external credential, live service, LLM, or operator workspace are emitted as uncollected L3 entries.",
+    "why": [
+      "A replacement must not silently drop an HTTP method that remains present in the L1 route inventory.",
+      "Malformed JSON and missing-resource behavior are consumed by the dashboard and integrations, not just happy-path payloads.",
+      "Fresh seeded state per probe prevents ordering from becoming part of the contract."
+    ]
+  },
+  "tool_visibility": {
+    "dimensions": [
+      "caller: owner, co_agent, trusted_user, agent",
+      "depth: 0, 1, and the depth-2 spawn cap",
+      "configured feature: shell enabled and disabled",
+      "run allowlist across core, gateway, and MCP slots",
+      "MCP public versus trusted-only server"
+    ],
+    "why": "These are the independent gates used by the production executor before the LLM sees definitions."
+  },
+  "tool_execution": {
+    "selected_facets": [
+      "empty arguments for every observed tool whose live schema declares required fields",
+      "direct-call permission rejection for every observed owner-only, trusted-only, and trusted-only-MCP tool",
+      "contained successful calls spanning core read/control, workspace mutation, task state, system gateway reads, and MCP",
+      "MCP tool-declared failure and forwarding/transport failure"
+    ],
+    "why": "Visibility alone does not prove direct invocation is gated or that result/error translation survives a replacement.",
+    "non_selected_success_policy": "A tool without a credential-free and side-effect-contained successful scenario is emitted as uncollected instead of being called with guessed arguments."
+  },
+  "mcp": {
+    "transport": "in-memory duplex JSON-RPC peer",
+    "selected_flow": [
+      "initialize",
+      "notifications/initialized",
+      "tools/list",
+      "tools/call"
+    ],
+    "why": "This exercises the real MCP framing/parser without a production credential, subprocess package, network, or external server."
+  },
+  "l3": [
+    "Discord gateway start and live transport actions",
+    "Nostr relay start and live transport actions",
+    "real provider endpoint tests and LLM-backed message runs",
+    "operator-configured MCP subprocess startup semantics",
+    "imports from a real operator workspace",
+    "voice provider I/O",
+    "network delivery to configured webhooks"
+  ]
+}

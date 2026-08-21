@@ -47,6 +47,10 @@ pub mod webhook_targets;
 #[doc(hidden)]
 pub mod baseline_l1;
 
+#[cfg(feature = "baseline-l2")]
+#[doc(hidden)]
+pub mod baseline_l2;
+
 #[cfg(feature = "discord")]
 mod agent_runner_impl;
 pub mod transcript;
