@@ -118,10 +118,15 @@ terminate_pid() {
 #  - パターン kill 禁止。PID を列挙 → 個別に kill する。pkill -f nostaro は新しい子や別
 #    checkout の隔離テスト用 nostaro まで巻き込む。
 #  - 照合は「バイナリ名 nostaro（argv0 の basename）」と「--config が $SCRIPT_DIR/data/agents/
-#    で始まる」の両方を要求する。nostaro は PATH 上の共有バイナリ（cli.rs の
-#    DEFAULT_NOSTARO_PATH="nostaro"）で checkout を区別できないため、区別の鍵は --config 接頭辞。
+#    で始まる」の両方を要求する。nostaro のバイナリは opencrab の checkout の外（別プロジェクト
+#    の絶対パス、実測では /Volumes/2TB/openclaw/workspace/projects/nostaro/target/release/nostaro）
+#    にあり、この opencrab checkout を指さない。よってバイナリのパスでは checkout を区別できず、
+#    区別の鍵はこの checkout 配下を指す --config 接頭辞になる。
 #  - kill する前に ppid==1（孤児）であることを確認する。ppid!=1 の一致は「殺すべき親付き
-#    プロセス」＝想定外なので kill せずログに残す。
+#    プロセス」＝想定外なので kill せずログに残す。これは孤児が pid 1 に付き直す darwin/launchd
+#    前提の環境結合。プロセススーパーバイザや subreaper 配下では孤児が別の ppid に付くため、
+#    自 checkout の孤児でも config_matches=1 && ppid!=1 の「親付き」warn に落ち kill されず
+#    蓄積する（warn は出るので黙りはしない）。その環境では ppid 判定の見直しが要る。
 #  - degrade（plan_cwd_and_config が None を返し --config が相対で渡る）で取りこぼした
 #    nostaro 孤児は黙って見逃さず警告する。殺さないのは pattern-kill 禁止のため、黙らないのは
 #    no-fallback のため。
