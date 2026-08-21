@@ -440,62 +440,90 @@ impl SkillEngine {
                 "turn: LLM リクエスト 完了（出）"
             );
 
-            if let Some(cb) = &self.log_callback {
-                match &llm_result {
-                    Ok(resp) => cb(&LlmCallLog {
-                        request: request_for_log.clone(),
-                        response: Some(resp.clone()),
-                        error_str: None,
-                        latency_ms,
-                        requested_at: requested_at.clone(),
-                        is_bot_iteration: iterations > 1,
-                    }),
-                    Err(e) => cb(&LlmCallLog {
-                        request: request_for_log.clone(),
-                        response: None,
-                        error_str: Some(e.to_string()),
-                        latency_ms,
-                        requested_at: requested_at.clone(),
-                        is_bot_iteration: iterations > 1,
-                    }),
+            // #706 / #676: transport の成否とは別に「このターンの応答は使えるか」を
+            // **log_callback の前に**判定する。log_callback（process.rs 側）はこの時点で
+            // llm_logs へ即 INSERT するので、判定結果を載せずに呼ぶと、切り捨て（#676）や
+            // 意味的に空（#706）の応答が error 欄空の「成功行」として残り、fail loud に
+            // しても理由がログに載らない（設計 §1-c の落とし穴）。空応答と出力上限切り捨てを
+            // 同じ 1 経路で捕まえ、種別（error_code）を engine 側で確定させる——process は
+            // その値を写すだけにする。判定は中身の形だけで行い、finish_reason=Length は
+            // 「上限切り捨て」の特定にのみ使う（空判定には混ぜない＝stop を名乗る空応答を
+            // 取りこぼさない）。
+            let call_failure: Option<(String, String)> = match &llm_result {
+                Err(e) => {
+                    let body = e.to_string();
+                    let code = if opencrab_llm_types::is_context_window_error(&body) {
+                        opencrab_llm_types::CONTEXT_WINDOW_EXCEEDED_ERROR_CODE.to_string()
+                    } else {
+                        "error".to_string()
+                    };
+                    Some((code, body))
                 }
+                Ok(resp) => {
+                    let finish_reason = resp.choices.first().and_then(|c| c.finish_reason.as_ref());
+                    if finish_reason == Some(&FinishReason::Length) {
+                        // #676: 出力トークン上限で切り捨てられた応答は、最終回答としても
+                        // ツール往復の一手としても扱わない。継続生成などの自動リカバリは
+                        // 入れない（#676 方針）。
+                        let body = format!(
+                            "LLM 応答が出力トークン上限（model={}, max_output_tokens={:?}, \
+                             completion_tokens={}）に達して切り捨てられました。切り捨てられた\
+                             応答は最終回答として扱いません（fail loud / 継続生成は #676 方針に\
+                             よりしない）。上限を上げるには model_pricing にそのモデルの \
+                             max_output_tokens を登録し直してください。",
+                            model, self.max_output_tokens, resp.usage.completion_tokens,
+                        );
+                        Some((
+                            opencrab_llm_types::OUTPUT_TRUNCATED_ERROR_CODE.to_string(),
+                            body,
+                        ))
+                    } else if opencrab_llm_types::is_empty_response(resp) {
+                        // #706: HTTP 200・finish_reason=stop を名乗りつつ content も tool_call
+                        // も無いターン。最終回答として扱わず、なぜ黙ったかを llm_logs に残す。
+                        let body = format!(
+                            "LLM 応答が意味的に空でした（content がフィールド欠落／空文字／\
+                             空白のみ、かつ tool_call 無し）。最終回答として扱いません（fail \
+                             loud / リトライ・フォールバックは #706 方針によりしない）。\
+                             model={}, finish_reason={:?}, prompt_tokens={}",
+                            model, finish_reason, resp.usage.prompt_tokens,
+                        );
+                        Some((
+                            opencrab_llm_types::EMPTY_RESPONSE_ERROR_CODE.to_string(),
+                            body,
+                        ))
+                    } else {
+                        None
+                    }
+                }
+            };
+
+            if let Some(cb) = &self.log_callback {
+                cb(&LlmCallLog {
+                    request: request_for_log.clone(),
+                    response: llm_result.as_ref().ok().cloned(),
+                    error_str: call_failure.as_ref().map(|(_, body)| body.clone()),
+                    error_code: call_failure.as_ref().map(|(code, _)| code.clone()),
+                    latency_ms,
+                    requested_at: requested_at.clone(),
+                    is_bot_iteration: iterations > 1,
+                });
             }
 
+            // transport 失敗はここで打ち切り（理由は上で llm_logs に残した）。
             let response = llm_result?;
 
-            // #676: 出力トークン上限に達して切り捨てられた応答は、最終回答としても
-            // ツール往復の一手としても扱わない（fail loud）。tool_calls / content を
-            // 抽出する**前**に見るのが要点——実バグは「ツール呼び出し JSON が途中で
-            // 切れてパース不能 → tool_calls 空 → 最終応答扱い」で成果物が黙って消える
-            // 形だったので、切り捨てられた本文と切り捨てられた tool_call をここ 1 点で
-            // 同時に捕まえる。検知はプロバイダが finish_reason=Length を返す経路
-            // （openai 形式 / anthropic / chatgpt など）でのみ効く。継続生成などの
-            // 自動リカバリは入れない（#676 方針）。
-            if response
-                .choices
-                .first()
-                .and_then(|c| c.finish_reason.as_ref())
-                == Some(&FinishReason::Length)
-            {
-                let completion_tokens = response.usage.completion_tokens;
+            // Ok だが意味的に使えない応答（空 #706 / 切り捨て #676）は fail loud で打ち切る。
+            // tool_calls / content を抽出する**前**に見る——切り捨てられた tool_call JSON が
+            // 「空の tool_calls → 最終応答扱い」で黙って消える形をここ 1 点で塞ぐ。
+            if let Some((code, body)) = call_failure {
                 tracing::error!(
                     iteration = iterations,
-                    max_output_tokens = ?self.max_output_tokens,
-                    completion_tokens,
+                    error_code = %code,
                     model = %model,
-                    stage = "output_truncated",
-                    "turn: LLM 応答が出力トークン上限で切り捨てられた（ターン失敗）"
+                    stage = "turn_failed",
+                    "turn: LLM 応答が使えないためターン失敗（fail loud）"
                 );
-                anyhow::bail!(
-                    "LLM 応答が出力トークン上限（model={}, max_output_tokens={:?}, \
-                     completion_tokens={}）に達して切り捨てられました。切り捨てられた応答は\
-                     最終回答として扱いません（fail loud / 継続生成は #676 方針によりしない）。\
-                     上限を上げるには model_pricing にそのモデルの max_output_tokens を\
-                     登録し直してください。",
-                    model,
-                    self.max_output_tokens,
-                    completion_tokens,
-                );
+                anyhow::bail!("{body}");
             }
 
             // 応答本文とツールコールをローカルに抽出（正準モデルは choices[0] を持つ）。
@@ -784,9 +812,9 @@ impl SkillEngine {
                 "SkillEngine final response ready"
             );
 
-            if final_text.is_empty() {
-                tracing::debug!("LLM returned empty content (no tool calls), using empty response");
-            }
+            // ここに来る最終応答は本文がある（#706: content 欠落／空文字／空白のみで
+            // tool_call も無いターンは上流の意味的検証で fail loud 済み。空応答が Ok として
+            // 通る唯一の穴だった 787 はこれで塞がっている）。
 
             return Ok(EngineResult {
                 response: final_text,
@@ -969,6 +997,92 @@ mod tests {
             msg.contains("max_output_tokens"),
             "エラー文言が上限（登録先）を含んでいない: {msg}"
         );
+    }
+
+    /// #706: 意味的に空の応答（content 欠落／空文字／空白のみ、かつ tool_call 無し）は
+    /// ターンを失敗させる（fail loud）。3 形すべてを対象にする。finish_reason は付けない
+    /// （＝provider が "stop" 相当を名乗る経路と同じ）。
+    #[tokio::test]
+    async fn test_empty_response_fails_the_turn_all_three_shapes() {
+        // (content の形, 説明) の 3 形。
+        let cases: Vec<(Option<&str>, &str)> = vec![
+            (None, "content フィールド欠落"),
+            (Some(""), "空文字"),
+            (Some("   \n\t  "), "空白のみ"),
+        ];
+        for (content, label) in cases {
+            let llm = MockLlm::new(vec![resp(content, vec![])]);
+            let engine = SkillEngine::new(Box::new(llm), Box::new(MockExecutor::new()), 10);
+            let err = engine
+                .run("system", "答えて", "cursor:grok")
+                .await
+                .expect_err(&format!("空応答（{label}）は Err にならねばならない"));
+            assert!(
+                err.to_string().contains("意味的に空"),
+                "空応答（{label}）の Err 文言が理由を明示していない: {err}"
+            );
+        }
+    }
+
+    /// #706（最重要）: 空応答が **llm_logs に理由付きで残る**こと。log_callback は意味的
+    /// 検証の結果（error_code / error_body）を受け取らねばならない——「error 欄空の成功行」
+    /// として残る旧穴（設計 §1-c）が塞がっていることを固定する。特に「content フィールド
+    /// 欠落 + tool_call 無し」を失敗として記録する。
+    #[tokio::test]
+    async fn test_empty_response_is_recorded_in_log_with_reason() {
+        use std::sync::Mutex;
+        let captured: Arc<Mutex<Vec<(Option<String>, Option<String>)>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let sink = captured.clone();
+
+        let llm = MockLlm::new(vec![resp(None, vec![])]); // content 欠落・tool_call 無し
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(MockExecutor::new()), 10);
+        engine.set_log_callback(move |log: &LlmCallLog| {
+            sink.lock()
+                .unwrap()
+                .push((log.error_code.clone(), log.error_str.clone()));
+        });
+
+        let _ = engine.run("system", "答えて", "cursor:grok").await;
+
+        let logs = captured.lock().unwrap();
+        assert_eq!(logs.len(), 1, "1 ターン = 1 ログ行のはず");
+        let (code, body) = &logs[0];
+        assert_eq!(
+            code.as_deref(),
+            Some("empty_response"),
+            "error_code が empty_response でない: {code:?}"
+        );
+        let body = body.as_deref().unwrap_or("");
+        assert!(
+            body.contains("意味的に空"),
+            "error_body が空応答を明示していない: {body}"
+        );
+    }
+
+    /// #706 回帰防止: empty content でも **tool_call があれば空ではない**（ツール往復の
+    /// 一手なのでターンは継続する）。空判定に tool_call を混ぜていることの固定。
+    #[tokio::test]
+    async fn test_empty_content_with_tool_call_is_not_empty() {
+        let llm = MockLlm::new(vec![
+            tool_call_response(vec![tc("c1", "test_tool", serde_json::json!({}))]),
+            text_response("done"),
+        ]);
+        let executor = MockExecutor::new().add_result(
+            "test_tool",
+            ActionResult {
+                success: true,
+                data: serde_json::json!("ok"),
+                error: None,
+            },
+        );
+        let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+        let result = engine
+            .run("system", "使って", "test-model")
+            .await
+            .expect("tool_call 付きの空 content は失敗にならない");
+        assert_eq!(result.response, "done");
+        assert_eq!(result.tool_calls_made, 1);
     }
 
     /// #676: finish_reason=Stop の正常応答は従来どおり最終回答として返る（回帰防止）。

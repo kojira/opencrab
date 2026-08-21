@@ -721,15 +721,11 @@ fn set_llm_log_callback(
             prompt_tokens,
             completion_tokens,
             total_tokens,
-            // #539: context 超過を専用コードで判別可能にする（それ以外は従来どおり総称
-            // "error"）。判定はプロバイダ文言の一致を集約した唯一の口を通す。
-            error_code: log.error_str.as_ref().map(|s| {
-                if opencrab_llm_types::is_context_window_error(s) {
-                    opencrab_llm_types::CONTEXT_WINDOW_EXCEEDED_ERROR_CODE.to_string()
-                } else {
-                    "error".to_string()
-                }
-            }),
+            // #706 / #676 / #539: error_code の判定は engine 側で一元化済み
+            // （transport error / context 超過 / 空応答 / 出力上限切り捨て）。ここは
+            // その値を写すだけ——文字列一致を process 側で再実装しない（判断は core、
+            // ゲート/writer は配送）。
+            error_code: log.error_code.clone(),
             error_body: log.error_str.clone(),
             requested_at: Some(log.requested_at.clone()),
             trigger_message_id: log_trigger_message_id.clone(),
