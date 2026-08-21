@@ -62,12 +62,14 @@ pub fn verify_signature(secret: &str, raw_body: &[u8], provided: &str) -> bool {
 /// ここは秘密に依存しない（提示された署名値のデコード）ので定数時間である必要はない。
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
     let bytes = s.as_bytes();
-    // chunks_exact(2) は末尾の余りを黙って落とすので、奇数長・空は先に弾く。
+    // as_chunks::<2>() は末尾の余りを黙って落とすので、奇数長・空は先に弾く。
     if bytes.is_empty() || !bytes.len().is_multiple_of(2) {
         return None;
     }
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let hi = (pair[0] as char).to_digit(16)?;
             let lo = (pair[1] as char).to_digit(16)?;

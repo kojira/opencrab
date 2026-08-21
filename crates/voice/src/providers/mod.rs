@@ -24,10 +24,7 @@ pub(crate) mod test_util {
                     let mut req = Vec::new();
                     let mut buf = [0u8; 8192];
                     // Content-Length 分まで読む（multipart は複数 read になる）
-                    loop {
-                        let Ok(n) = sock.read(&mut buf).await else {
-                            break;
-                        };
+                    while let Ok(n) = sock.read(&mut buf).await {
                         if n == 0 {
                             break;
                         }
