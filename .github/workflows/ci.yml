@@ -29,8 +29,14 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             cmake pkg-config libopus-dev libssl-dev lld
 
+      # toolchain は明示バージョンで固定する（#702）。`@stable` のままだと Rust の
+      # 新 stable が出るたびに新規・変更された clippy lint が `-D warnings` で拾われ、
+      # 無関係な PR や main が突然赤くなる（この PR 自身が 1.93→1.98 で踏んだ）。
+      # バージョンは自動追従させず、人が意図的に上げる: 下の値を新しい版に書き換え、
+      # ローカルで `cargo +<新版> clippy --workspace --all-targets --all-features -- -D warnings`
+      # が green になることを確認してから上げること。
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: rustfmt, clippy
 
