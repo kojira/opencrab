@@ -740,10 +740,18 @@ async fn api_health_check() -> axum::Json<serde_json::Value> {
 
 /// readiness probe（#722）。**有効なゲートが必要物を揃えているか**を、config・DB 事実・
 /// router 登録の有無だけで手元判定する（外部疎通は投げない）。未充足が 1 つでもあれば
-/// **503**（本文に未充足ゲートの `gate`/`what` を列挙・**値は出さない**）、全充足なら **200**。
+/// **503**、全充足なら **200**。
 ///
-/// hot-reload / DB オーバーライドで実効設定が変わりうるので、起動時スナップショットに固めず
-/// **リクエスト時に** `AppState` から評価する（設計 §5.2）。
+/// **本文は必要最小限しか出さない**（`/ready` は `CorsLayer::permissive()` の下で認証なしに
+/// 任意オリジンから叩ける / #723 レビュー1）:
+/// - 200: `{"ready": true, "required": <充足済みを含む必須件数>}`——**内訳は出さない**。
+/// - 503: `{"ready": false, "unsatisfied": [<ゲート名>...]}`——**未充足のゲート名だけ**。
+///   充足済みは出さず、provider 名など構成を露出する literal も出さない。詳細（どの env を
+///   どう直すか）は運用者向けにログ側＝設計の C（warn/banner）へ出る。
+///
+/// 各入力の鮮度: **llm はライブ router**（`llm_router.get()`・hot-reload/override 追従）、
+/// **nostr は毎リクエスト DB を読む**、**discord は起動時スナップショット**（token/enabled は
+/// TOML 専用で runtime に変わらない / `required_credentials` の該当コメント参照）。
 async fn readiness_check(
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> impl axum::response::IntoResponse {
@@ -771,26 +779,32 @@ async fn readiness_check(
     };
 
     let required = config::required_credentials(&inputs);
-    let unsatisfied: Vec<&config::RequiredInput> =
-        required.iter().filter(|r| !r.satisfied).collect();
+    // 未充足のゲート名だけを集める（レビュー1: 認証なしで叩けるので露出は最小限）。
+    let unsatisfied: Vec<&str> = required
+        .iter()
+        .filter(|r| !r.satisfied)
+        .map(|r| r.gate)
+        .collect();
 
-    let status = if unsatisfied.is_empty() {
-        StatusCode::OK
+    if unsatisfied.is_empty() {
+        // 全充足: 内訳は出さず、必須件数（＝有効ゲート数）だけ返す。
+        (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({
+                "ready": true,
+                "required": required.len(),
+            })),
+        )
     } else {
-        StatusCode::SERVICE_UNAVAILABLE
-    };
-    let body = axum::Json(serde_json::json!({
-        "ready": unsatisfied.is_empty(),
-        "unsatisfied": unsatisfied
-            .iter()
-            .map(|r| serde_json::json!({"gate": r.gate, "what": r.what}))
-            .collect::<Vec<_>>(),
-        "required": required
-            .iter()
-            .map(|r| serde_json::json!({"gate": r.gate, "what": r.what, "satisfied": r.satisfied}))
-            .collect::<Vec<_>>(),
-    }));
-    (status, body)
+        // 未充足あり: 未充足のゲート名だけ返す（充足済み・provider 名は出さない）。
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({
+                "ready": false,
+                "unsatisfied": unsatisfied,
+            })),
+        )
+    }
 }
 
 /// transport 登録簿（#191 段階2 PR2）が、実物のマネージャを載せて期待どおり働くこと。
@@ -1247,5 +1261,69 @@ mod readiness_tests {
             .await
             .into_response();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// レスポンス本文を JSON に読み出す。
+    async fn body_json(resp: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// 露出の最小化（#723 レビュー1）: **200 は内訳を出さない**。件数だけで、
+    /// ゲート名・provider 名・satisfied フラグを含まない。
+    #[tokio::test]
+    async fn readiness_200_body_has_count_only_no_internals() {
+        let state = test_app_state();
+        satisfy_llm(&state);
+        let resp = readiness_check(axum::extract::State(state))
+            .await
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ready"], serde_json::json!(true));
+        assert!(
+            json["required"].is_number(),
+            "required は件数（数値）であるべき"
+        );
+        assert!(json.get("unsatisfied").is_none(), "200 で内訳を出さない");
+        // 生成物全体を文字列化して、構成を露出する literal が漏れていないことを確認。
+        let dump = json.to_string();
+        assert!(
+            !dump.contains("openai") && !dump.contains("provider"),
+            "200 本文に provider 名/内訳が漏れてはいけない: {dump}"
+        );
+    }
+
+    /// 露出の最小化（#723 レビュー1）: **503 は未充足のゲート名だけ**。充足済み・
+    /// provider 名・satisfied フラグ・`what` の説明を含まない。
+    #[cfg(feature = "discord")]
+    #[tokio::test]
+    async fn readiness_503_body_lists_unsatisfied_gate_names_only() {
+        let mut state = test_app_state();
+        satisfy_llm(&state); // llm は充足 → 内訳に出てはいけない
+        state.discord_shared_gateway = Arc::new(config::DiscordGatewayConfig {
+            enabled: true,
+            token: "".to_string(),
+            ..Default::default()
+        });
+        let resp = readiness_check(axum::extract::State(state))
+            .await
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let json = body_json(resp).await;
+        assert_eq!(json["ready"], serde_json::json!(false));
+        let unsat = json["unsatisfied"].as_array().expect("配列であるべき");
+        assert_eq!(
+            unsat,
+            &vec![serde_json::json!("discord.shared")],
+            "未充足の discord.shared だけを出す（充足済みの llm は出さない）"
+        );
+        let dump = json.to_string();
+        assert!(
+            !dump.contains("\"satisfied\"") && !dump.contains("llm.default_provider"),
+            "503 本文に satisfied フラグや充足済みゲートが漏れてはいけない: {dump}"
+        );
     }
 }

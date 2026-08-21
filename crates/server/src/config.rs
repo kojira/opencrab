@@ -1566,6 +1566,19 @@ pub struct ReadinessInputs<'a> {
 /// 対象なので、それを必須性の条件にすると自己言及で常に「不要」に倒れる（設計 §2）。
 ///
 /// **外部疎通は投げない**（config・DB 事実・router 登録の有無だけで手元で判定する / 設計 §6）。
+///
+/// # 新しいゲートを足す人へ（この関数は手書きインベントリ・規約依存）
+///
+/// **これはコンパイラに強制されない手書きの一覧である。** 受信ゲート（外部資格情報を
+/// 要求するサブシステム）を新設したら、**ここに 1 アーム足すこと**。足し忘れると readiness は
+/// そのゲートを見ないまま **ready を返し続ける**——まさに #722 が塞いだ「必要物が欠けたまま
+/// 黙って動く」欠陥の再来で、コンパイラは気づかない。網羅 match / trait による型強制は
+/// していない（現スコープ外）。**唯一の防波堤はこの doc と規約、そして
+/// `every_enabled_gate_contributes_one_entry` テスト**（既存アームの削除は捕まえるが、
+/// **未追加のアームは捕まえられない**）である点を正直に述べておく。
+///
+/// `what` は運用者向けの短い識別名で、**provider 名など構成を露出する literal を入れない**
+/// （readiness は認証なしで叩ける。詳細はログ側 = 設計の C に出る / #723 レビュー1）。
 pub fn required_credentials(inputs: &ReadinessInputs) -> Vec<RequiredInput> {
     let mut out = Vec::new();
 
@@ -1573,10 +1586,11 @@ pub fn required_credentials(inputs: &ReadinessInputs) -> Vec<RequiredInput> {
     // 見る（キー未設定で `build_llm_router` が黙ってスキップした場合を捕まえる）。
     // 空 default_provider は「既定を明示的に置かない」構成なので必須に入れない
     // （`build_llm_router` の bail 規則と対称 / 設計 §2・§5.1）。
+    // `what` に provider 名を入れない（どの LLM backend か露出させない / レビュー1）。
     if !inputs.llm_default_provider.is_empty() {
         out.push(RequiredInput {
             gate: "llm.default_provider",
-            what: format!("registered provider '{}'", inputs.llm_default_provider),
+            what: "registered default provider".to_string(),
             satisfied: inputs
                 .llm_router
                 .get_provider(inputs.llm_default_provider)
@@ -1587,6 +1601,11 @@ pub fn required_credentials(inputs: &ReadinessInputs) -> Vec<RequiredInput> {
     // discord 共有: `enabled` で必須化し、token が非空かで充足を見る
     // （`gateway_will_start = enabled && !token.is_empty()` の分解）。feature-off では
     // このアームごと消える＝ discord の必須物は列挙されない。
+    // `discord`（enabled/token）は **TOML 専用で起動時のスナップショット**。hot-reload は
+    // tools と heartbeat しか適用せず（`hot_reload.rs`）、共有ゲートウェイの token/enabled を
+    // runtime で差し替える経路は無い（DB オーバーライドも無し）ので、起動時の値を報告するのが
+    // 実際の起動判定と一致する（レビュー C で確認）。llm はライブ router、nostr は毎リクエスト
+    // DB を読むのに対し、ここだけスナップショットなのはこの理由による。
     #[cfg(feature = "discord")]
     {
         if inputs.discord.enabled {
@@ -2804,5 +2823,56 @@ default_webhook = { url = "" }
             find(&req, "nostr").is_none(),
             "nostr feature off では nostr の必須物は列挙されない"
         );
+    }
+
+    /// 「有効化した各ゲートが必ず 1 エントリを寄与する」ことを固定する（#723 レビュー B）。
+    ///
+    /// これは**既存アームの削除**を捕まえる防波堤——現在有効な全ゲートを同時に必須化し、
+    /// 期待するゲート名の集合とエントリ数が完全一致することを要求する。どれか 1 アームを
+    /// 消すと集合が欠けて落ちる。**未追加のアーム（新ゲートの足し忘れ）はここでは捕まえ
+    /// られない**（それは `required_credentials` の doc に規約として明記した通り）。
+    #[test]
+    fn every_enabled_gate_contributes_one_entry() {
+        // llm を必須化・充足（登録済み provider）。
+        let router = router_with_anthropic("sk-test");
+
+        // 現在の feature 構成で「有効化したとき現れるべきゲート名」を集める。
+        // discord/nostr が両方 off の構成では push が無く mut が未使用になる。
+        #[allow(unused_mut)]
+        let mut expected: Vec<&str> = vec!["llm.default_provider"];
+        #[cfg(feature = "discord")]
+        expected.push("discord.shared");
+        #[cfg(feature = "nostr")]
+        expected.push("nostr");
+
+        let inputs = ReadinessInputs {
+            llm_default_provider: "anthropic",
+            llm_router: &router,
+            #[cfg(feature = "discord")]
+            discord: &DiscordGatewayConfig {
+                enabled: true,
+                token: "a-token".to_string(),
+                ..Default::default()
+            },
+            #[cfg(feature = "nostr")]
+            nostr_configured: true,
+            #[cfg(feature = "nostr")]
+            nostr_master_key_present: true,
+        };
+        let req = required_credentials(&inputs);
+
+        // エントリ数が「有効化したゲート数」と完全一致（多くも少なくもない）。
+        assert_eq!(
+            req.len(),
+            expected.len(),
+            "有効化した各ゲートがちょうど 1 エントリを寄与すべき: got {:?}",
+            req.iter().map(|r| r.gate).collect::<Vec<_>>()
+        );
+        for gate in &expected {
+            assert!(
+                find(&req, gate).is_some(),
+                "有効化した {gate} がインベントリに現れていない（アーム削除の疑い）"
+            );
+        }
     }
 }
