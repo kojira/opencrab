@@ -31,6 +31,7 @@ pub mod memory_organize;
 pub mod nostr_runner_impl;
 #[cfg(feature = "nostr")]
 pub mod nostr_secret_migration;
+pub mod offload_cleanup;
 pub mod peer_review;
 pub mod process;
 pub mod schedule_cron;

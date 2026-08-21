@@ -49,6 +49,9 @@ pub struct AppConfig {
     /// 古い LLM ログの zip アーカイブ（#337）。
     #[serde(default)]
     pub llm_log_archive: LlmLogArchiveConfig,
+    /// 退避ファイル（workspace/tmp）の掃除（#711）。
+    #[serde(default)]
+    pub offload_cleanup: OffloadCleanupConfig,
     /// 外部イベント受信（webhook intake / issue #454）。既定は実質無効。
     #[serde(default)]
     pub intake: IntakeConfig,
@@ -99,6 +102,49 @@ fn default_archive_retention_days() -> i64 {
     30
 }
 fn default_archive_interval_secs() -> u64 {
+    86400
+}
+
+/// 退避ファイル（`workspace/tmp/`）の掃除設定（#711）。
+///
+/// ツール結果が inline 上限を超えると本文が `data/agents/{agent_id}/workspace/tmp/` へ
+/// 退避されるが、消す経路がコードに無く無限に増える（実測 206MB / 2,636 個・+44/日）。
+/// mtime がこれより古い退避ファイルを日次で消す。**対象は `tmp/` の通常ファイルのみ**で、
+/// ディレクトリ・サブディレクトリ・マーカー/隠しファイル・DB には触れない
+/// （詳細は `offload_cleanup` モジュール参照）。
+#[derive(Debug, Deserialize, Clone)]
+pub struct OffloadCleanupConfig {
+    /// 掃除ループの on/off。既定 true。止めたいときは false（再ビルド不要）。
+    #[serde(default = "default_offload_cleanup_enabled")]
+    pub enabled: bool,
+    /// 保持日数。mtime がこれより古い退避ファイルを消す。既定 7 日。
+    /// オーナーが 7 日超を手動削除して破綻報告なし = 実測の安全な上界を採用（発明しない）。
+    /// `0` や負値は「今書いたファイルまで消す」危険側なので `offload_cleanup` 側で下限 1 へ
+    /// 丸めて warn を出す（掃除を止めたいなら `enabled = false`）。
+    #[serde(default = "default_offload_cleanup_retention_days")]
+    pub retention_days: i64,
+    /// 掃除 tick の間隔（秒）。既定 86400（日次）。最低 3600 秒に丸める。
+    #[serde(default = "default_offload_cleanup_interval_secs")]
+    pub interval_secs: u64,
+}
+
+impl Default for OffloadCleanupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_offload_cleanup_enabled(),
+            retention_days: default_offload_cleanup_retention_days(),
+            interval_secs: default_offload_cleanup_interval_secs(),
+        }
+    }
+}
+
+fn default_offload_cleanup_enabled() -> bool {
+    true
+}
+fn default_offload_cleanup_retention_days() -> i64 {
+    7
+}
+fn default_offload_cleanup_interval_secs() -> u64 {
     86400
 }
 
