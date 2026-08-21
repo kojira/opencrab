@@ -1,10 +1,29 @@
 # OpenCrab server — multi-stage build.
 #   docker build -t opencrab:local .
-# Runtime expects:
-#   - ./config mounted at /app/config (default.toml)
-#   - ./data   mounted at /app/data   (SQLite + agent workspaces)
-#   - env: DISCORD_TOKEN / OPENROUTER_API_KEY / OPENAI_API_KEY... as used
-# The REST gateway listens on 8080 (see config/default.toml).
+#
+# ── 起動に必要なマウント / env ─────────────────────────────────────────────
+#   - ./config を /app/config にマウント（default.toml）
+#   - ./data   を /app/data   にマウント（SQLite + agent workspaces）
+#   - env: DISCORD_TOKEN / OPENROUTER_API_KEY / OPENAI_API_KEY... を必要に応じて
+#   REST ゲートウェイは 8080 で待ち受ける（config/default.toml）。
+#
+# ── 運用上の注意（コンテナで動かす人向け・事故りやすい3点）─────────────────
+#   1. ./data は永続ボリューム必須。database.path = "data/opencrab.db" は cwd 相対
+#      （WORKDIR /app からの相対）なので、ボリュームをマウントしないと DB は
+#      コンテナ寿命で揮発する。必ず -v で ./data を永続化すること。
+#
+#   2. ./config 未マウントは起動時に即落ちる。main.rs の load_config(...)? が
+#      config/default.toml を読めないと Err で終了する。これは fail-loud で
+#      正しい挙動（黙って動かない状態を避ける）。config は必ずマウントする。
+#
+#   3. 必須 env が無くても "healthy" のまま黙って無効化される点に注意。
+#      config の ${VAR} 展開は未定義時に空文字になる（unwrap_or_default）ため、
+#      例えば DISCORD_TOKEN を渡し忘れても、warn ログを出すだけでプロセスは起動し、
+#      空キーのプロバイダ/ゲートウェイは登録がスキップされるだけになる。しかも
+#      /health は静的に "ok" を返すので HEALTHCHECK は緑のまま。
+#      → 「healthy と表示されているのに何も喋らない」状態が起こりうる。必須 env の
+#        渡し忘れは HEALTHCHECK では検出できないので、投入前に env を確認すること。
+#      （この挙動自体は既存サーバの仕様であり本 Dockerfile の欠陥ではない。別 issue で追跡。）
 
 # Rust は CI とバージョンを揃える（.github/workflows/ci.yml の dtolnay/rust-toolchain@1.98.0）。
 # CI と Docker で toolchain がずれると、片方でだけ通る/落ちる状態になるため固定する。
