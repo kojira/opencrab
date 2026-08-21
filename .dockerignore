@@ -1,0 +1,16 @@
+# ビルドコンテキストを絞る。COPY . . が target/ や .git を丸ごと送ると
+# 数 GB になり遅くなる上、古いホスト成果物が紛れ込む恐れがある。
+target/
+**/target/
+.git/
+.gitignore
+web/node_modules/
+**/node_modules/
+# ローカルの実行データ・秘密は像に入れない
+data/
+*.db
+*.sqlite
+.env
+.hermit-auth
+# ドキュメント類はビルドに不要
+*.md

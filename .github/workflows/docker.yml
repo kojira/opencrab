@@ -1,0 +1,39 @@
+name: Docker
+
+# Dockerfile は誰も参照しておらず（compose も docs も無し）、放置すると
+# 黙って腐る。毎 PR で docker build を回すと CI 時間を食うため、ここでは回さない。
+# 代わりに「バージョンタグを打ったリリース時」にだけビルドが通ることを確認する。
+# push: tags のみを購読しているので、通常の PR / main への push では発火しない。
+on:
+  push:
+    tags:
+      - 'v*.*.*'   # 例: v0.2.18
+  # タグを打たなくても、この workflow 自体を手で叩いて検証できるようにする。
+  # PR では発火しないという保証（push:tags のみ購読）はそのまま。
+  workflow_dispatch:
+
+concurrency:
+  group: docker-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docker-build:
+    name: docker build (release tag)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Dockerfile を実際にビルドする。失敗すればこのジョブが赤くなり、
+      # タグ付きリリースが「Docker が壊れたまま」で進むのを止める（黙って通さない）。
+      # レジストリは未設定なので push はしない（load でローカルに焼くだけ）。
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          load: true
+          tags: opencrab-server:${{ github.ref_name }}
