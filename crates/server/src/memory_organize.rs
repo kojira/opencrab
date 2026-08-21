@@ -1465,9 +1465,9 @@ mod tests {
         ];
 
         // 経路1: 許可リスト定数そのものの内容。
-        for f in forbidden.iter().copied() {
+        for f in forbidden.iter() {
             assert!(
-                !ORGANIZE_ALLOWED_TOOLS.contains(&f),
+                !ORGANIZE_ALLOWED_TOOLS.contains(f),
                 "許可リストに外向きツール {f} が入っている"
             );
         }
@@ -1485,7 +1485,7 @@ mod tests {
             .into_iter()
             .map(|t| t.name)
             .collect();
-        for f in forbidden.iter().copied() {
+        for f in forbidden.iter() {
             assert!(
                 base.contains(&f.to_string()),
                 "許可リスト無しでは {f} が届くはず（許可リストが効いている証跡の対照）: {base:?}"
@@ -1497,7 +1497,7 @@ mod tests {
 
         // 経路2: list_tools（可視性）。許可外は 1 つも出ない。
         let visible: Vec<String> = executor.list_tools().into_iter().map(|t| t.name).collect();
-        for f in forbidden.iter().copied() {
+        for f in forbidden.iter() {
             assert!(
                 !visible.contains(&f.to_string()),
                 "整理ランの list_tools に外向きツール {f} が出ている: {visible:?}"

@@ -606,7 +606,7 @@ fn fold_subtask_completed(
         serde_json::Value::Array(items) => {
             // どれか 1 要素でも失敗なら配列を丸ごと残す（罠2）。判定は要素の `result` に
             // 同じ `signals_failure` を掛ける（非オブジェクト要素は失敗側＝本文保持へ倒す）。
-            if items.iter().any(|e| batch_entry_signals_failure(e)) {
+            if items.iter().any(batch_entry_signals_failure) {
                 return result_str.to_string();
             }
             build_subtask_batch_reference(subtask_id, session_id, items.len(), result_str)

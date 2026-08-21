@@ -120,7 +120,7 @@ impl GoogleProvider {
         if let Some(ref stop) = request.stop {
             gen_config["stopSequences"] = serde_json::json!(stop);
         }
-        if gen_config.as_object().map_or(false, |o| !o.is_empty()) {
+        if gen_config.as_object().is_some_and(|o| !o.is_empty()) {
             body["generationConfig"] = gen_config;
         }
 

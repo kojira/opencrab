@@ -26,16 +26,12 @@ pub enum SkillSource {
 /// Permission level required to use this skill.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum SkillPermission {
     CoAgent,
+    #[default]
     Agent,
     Owner,
-}
-
-impl Default for SkillPermission {
-    fn default() -> Self {
-        SkillPermission::Agent
-    }
 }
 
 impl SkillPermission {
@@ -264,7 +260,7 @@ impl SkillManager {
                 ctx.push_str(&format!("Guidance:\n  {}\n", skill.guidance));
             }
 
-            ctx.push_str("\n");
+            ctx.push('\n');
         }
 
         Ok(ctx)

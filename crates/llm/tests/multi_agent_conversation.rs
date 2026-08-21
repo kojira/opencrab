@@ -95,7 +95,7 @@ async fn test_three_agent_discussion() {
     println!("{sep}\n");
 
     // Shared conversation history (user messages represent each agent's speech)
-    let mut history: Vec<Message> = vec![Message::user(&format!(
+    let mut history: Vec<Message> = vec![Message::user(format!(
         "[Moderator]: Let's discuss: {topic}\nEach of you, share your perspective."
     ))];
 
@@ -106,7 +106,7 @@ async fn test_three_agent_discussion() {
         println!("[{}]: {}\n", agent.name, response);
 
         // Add to shared history as user message so other agents see it
-        history.push(Message::assistant(&format!(
+        history.push(Message::assistant(format!(
             "[{}]: {}",
             agent.name, response
         )));
@@ -123,7 +123,7 @@ async fn test_three_agent_discussion() {
         let response = agent.respond(&p, &history).await.unwrap();
         println!("[{}]: {}\n", agent.name, response);
 
-        history.push(Message::assistant(&format!(
+        history.push(Message::assistant(format!(
             "[{}]: {}",
             agent.name, response
         )));
@@ -141,7 +141,7 @@ async fn test_three_agent_discussion() {
         println!("[{}]: {}\n", agent.name, response);
         final_responses.push(response.clone());
 
-        history.push(Message::assistant(&format!(
+        history.push(Message::assistant(format!(
             "[{}]: {}",
             agent.name, response
         )));
@@ -152,7 +152,7 @@ async fn test_three_agent_discussion() {
     // Each agent produced non-empty responses in all rounds
     assert_eq!(
         history.len(),
-        1 + (3 * 2) + 1 + (3 * 1) + 1 + (3 * 1),
+        1 + (3 * 2) + 1 + 3 + 1 + 3,
         "History should have the right number of messages"
     );
 
@@ -229,7 +229,7 @@ async fn test_three_agent_creative_story() {
             let response = agent.respond(&p, &history).await.unwrap();
             println!("[{}]: {}\n", agent.name, response);
 
-            history.push(Message::assistant(&format!(
+            history.push(Message::assistant(format!(
                 "[{}]: {}",
                 agent.name, response
             )));
@@ -331,7 +331,7 @@ async fn test_three_agent_with_db_and_session() {
     assert_eq!(session.as_ref().unwrap().theme, "Rust vs Go discussion");
 
     // Each agent generates a response and logs it
-    let system_prompts = vec![
+    let system_prompts = [
         "You are Kai, a pragmatic engineer. Keep responses to 1-2 sentences.",
         "You are Aria, a creative researcher. Keep responses to 1-2 sentences.",
         "You are Reo, a cautious analyst. Keep responses to 1-2 sentences.",
@@ -370,7 +370,7 @@ async fn test_three_agent_with_db_and_session() {
         };
         opencrab_db::queries::insert_session_log(&conn, &log).unwrap();
 
-        conversation_messages.push(Message::assistant(&format!(
+        conversation_messages.push(Message::assistant(format!(
             "[{}]: {}",
             agent_configs[i].0, text
         )));

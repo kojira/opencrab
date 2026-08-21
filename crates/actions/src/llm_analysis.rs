@@ -163,7 +163,7 @@ impl Action for RecallModelExperiencesAction {
 
         let metrics: Vec<serde_json::Value> = model_stats
             .iter()
-            .filter(|s| model_filter.map_or(true, |f| s.model == f))
+            .filter(|s| model_filter.is_none_or(|f| s.model == f))
             .map(|s| {
                 json!({
                     "provider": s.provider,
@@ -187,7 +187,7 @@ impl Action for RecallModelExperiencesAction {
 
         let by_purpose: Vec<serde_json::Value> = purpose_stats
             .iter()
-            .filter(|s| model_filter.map_or(true, |f| s.model == f))
+            .filter(|s| model_filter.is_none_or(|f| s.model == f))
             .map(|s| {
                 json!({
                     "provider": s.provider,
@@ -710,11 +710,9 @@ mod tests {
         let evals = data["recent_evaluations"].as_array().unwrap();
         assert!(!evals.is_empty());
         // Evaluations contain free-text Japanese.
-        let has_japanese_eval = evals.iter().any(|e| {
-            e["evaluation"]
-                .as_str()
-                .map_or(false, |t| t.contains("丁寧"))
-        });
+        let has_japanese_eval = evals
+            .iter()
+            .any(|e| e["evaluation"].as_str().is_some_and(|t| t.contains("丁寧")));
         assert!(
             has_japanese_eval,
             "Evaluations should contain free-text feedback"
@@ -727,7 +725,7 @@ mod tests {
         let has_insight = notes.iter().any(|n| {
             n["observation"]
                 .as_str()
-                .map_or(false, |t| t.contains("ステップバイステップ"))
+                .is_some_and(|t| t.contains("ステップバイステップ"))
         });
         assert!(has_insight, "Notes should contain qualitative observations");
 

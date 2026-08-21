@@ -88,7 +88,7 @@ impl OllamaProvider {
         if let Some(ref stop) = request.stop {
             options["stop"] = serde_json::json!(stop);
         }
-        if options.as_object().map_or(false, |o| !o.is_empty()) {
+        if options.as_object().is_some_and(|o| !o.is_empty()) {
             body["options"] = options;
         }
 

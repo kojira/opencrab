@@ -101,7 +101,7 @@ impl AnthropicProvider {
                     }));
                 }
                 Role::Assistant => {
-                    let has_tool_calls = msg.tool_calls.as_ref().map_or(false, |tc| !tc.is_empty());
+                    let has_tool_calls = msg.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty());
                     if has_tool_calls {
                         // Build content array with text parts + tool_use blocks
                         let mut content_blocks: Vec<Value> = Vec::new();
@@ -158,14 +158,14 @@ impl AnthropicProvider {
         let mut merged: Vec<Value> = Vec::new();
         for msg in messages {
             let is_tool_result_user = msg["role"] == "user"
-                && msg["content"].as_array().map_or(false, |arr| {
+                && msg["content"].as_array().is_some_and(|arr| {
                     !arr.is_empty() && arr.iter().all(|b| b["type"] == "tool_result")
                 });
             if is_tool_result_user {
                 // Check if the previous message is also a tool_result user message
-                let should_merge = merged.last().map_or(false, |prev: &Value| {
+                let should_merge = merged.last().is_some_and(|prev: &Value| {
                     prev["role"] == "user"
-                        && prev["content"].as_array().map_or(false, |arr| {
+                        && prev["content"].as_array().is_some_and(|arr| {
                             !arr.is_empty() && arr.iter().all(|b| b["type"] == "tool_result")
                         })
                 });

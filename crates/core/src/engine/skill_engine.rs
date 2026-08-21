@@ -1291,7 +1291,7 @@ mod tests {
 
         // Should contain an assistant message with non-empty tool_calls
         let has_assistant_with_tool_calls = second_call_msgs.iter().any(|m| {
-            m.role == Role::Assistant && m.tool_calls.as_ref().map_or(false, |t| !t.is_empty())
+            m.role == Role::Assistant && m.tool_calls.as_ref().is_some_and(|t| !t.is_empty())
         });
         assert!(
             has_assistant_with_tool_calls,

@@ -418,7 +418,7 @@ fn redact_secret_token(tok: &str) -> (String, bool) {
         return (REDACTED.to_string(), false);
     }
     // KEY=VALUE / KEY:VALUE （キーに TOKEN/SECRET/PASSWORD/KEY/API を含む）
-    if let Some(idx) = core.find(|c: char| c == '=' || c == ':') {
+    if let Some(idx) = core.find(['=', ':']) {
         let (k, rest) = core.split_at(idx);
         let delim = &core[idx..idx + 1];
         let value = &rest[1..];
