@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# pwd -P で物理パス（symlink 解決済み）にする。#712 の孤児 nostaro 掃除は、この
+# SCRIPT_DIR を接頭辞に nostaro 子の --config を照合する。--config はサーバの
+# std::env::current_dir()（getcwd＝物理パス）由来なので、こちらが論理パス（pwd、symlink を
+# 残す）だと経路に symlink が 1 つでもあると文字列が食い違い、自 checkout の正当な孤児を
+# 取りこぼす。SERVER_BIN と stop_stray_servers の pgrep 照合、server の cw（下の cd）も
+# すべてこの SCRIPT_DIR 由来なので、物理パスに揃えて齟齬を無くす（server の cwd も下の cd 由来）。
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 cd "$SCRIPT_DIR"
 
 SERVER_PID_FILE="$SCRIPT_DIR/.server.pid"
@@ -77,6 +83,32 @@ stop_stray_servers() {
     echo "    停止しました"
 }
 
+# PID を 1 つ、死ぬまで確実に終わらせる。TERM → 最大 5 秒ポーリング → 残存なら KILL(-9)
+# → 再度ポーリングして消滅を確認する。「送った」ではなく「消えた」を戻り値で表す:
+#   0 = 消滅を確認 / 1 = TERM の送信に失敗（権限・PID 再利用・既に消滅）/ 2 = -9 後も残存
+# stop_stray_servers は同じ規律（kill → 最大 5 秒待機 → 残存なら -9）をパターン一括で持つ。
+# こちらは孤児掃除のため PID 個別に適用するが、待ち方・エスカレーション・死亡確認の規律を
+# 揃える（3 つ目の子プロセス種別が来たら共通化を検討する余地がある）。
+terminate_pid() {
+    local pid="$1"
+    local _
+    # 握り潰さない: TERM が送れなければ理由を呼び出し側へ返す（rc=1）。
+    if ! kill "$pid" 2>/dev/null; then
+        return 1
+    fi
+    for _ in $(seq 1 50); do
+        kill -0 "$pid" 2>/dev/null || return 0
+        sleep 0.1
+    done
+    # TERM で消えない → -9 へエスカレーション。
+    kill -9 "$pid" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+        kill -0 "$pid" 2>/dev/null || return 0
+        sleep 0.1
+    done
+    return 2
+}
+
 # #712: サーバが後始末コード（kill_on_drop）を走らせられずに死ぬ経路
 # （kill -9・panic・OOM・電源断・graceful shutdown を持たない旧バイナリ）で、
 # nostaro watch の子プロセスが ppid=1 の孤児として残る。次の起動をまたいで watcher が
@@ -95,9 +127,12 @@ stop_stray_servers() {
 #    no-fallback のため。
 stop_orphan_nostaro() {
     local config_prefix="$SCRIPT_DIR/data/agents/"
-    local killed_count=0
+    # matched_orphans = ppid==1 かつ config 一致（この checkout に帰属できた孤児）。
+    # kill が成功したかではなく「帰属できたか」で数える。kill 失敗は個別に fail-loud で
+    # 出すので、帰属できた孤児は下の unattributed から差し引く（過小計上を避ける）。
+    local matched_orphans=0
     local orphan_total=0
-    local pid ppid rest exe base config_matches
+    local pid ppid rest exe base config_matches rc
 
     # ps -axww: argv を切り詰めずに全取得。先頭 2 語が pid・ppid、残りが command 全体。
     while read -r pid ppid rest; do
@@ -118,9 +153,22 @@ stop_orphan_nostaro() {
 
         if [ "$config_matches" = "1" ]; then
             if [ "$ppid" = "1" ]; then
-                echo "==> 孤児 nostaro watcher を停止 (PID: $pid)"
-                kill "$pid" 2>/dev/null || true
-                killed_count=$((killed_count + 1))
+                # 帰属できた孤児として数える（kill 成否に依らず）。
+                matched_orphans=$((matched_orphans + 1))
+                echo "==> 孤児 nostaro watcher を停止します (PID: $pid)..."
+                # 「送った」ではなく「消えた」を確認してから成功ログを出す。
+                if terminate_pid "$pid"; then
+                    echo "    停止を確認しました (PID: $pid)"
+                else
+                    rc=$?
+                    if [ "$rc" = "1" ]; then
+                        # TERM が送れなかった。握り潰さず理由を添えて warn（他の PID は続行）。
+                        echo "==> [warn] 孤児 nostaro の kill に失敗 (PID: $pid)。権限・PID 再利用・既に消滅の可能性。スキップして継続します。"
+                    else
+                        # -9 でも消えない。狙った不変条件（掃除できた）が破れているので error。
+                        echo "==> [error] 孤児 nostaro が SIGKILL 後も残存 (PID: $pid)。手動確認が必要です。" >&2
+                    fi
+                fi
             else
                 # この checkout の子なのに親が生きている。stop_server 直後にこれが出るのは
                 # 想定外（本体を殺し損ねている可能性）。kill せず記録する。
@@ -129,10 +177,15 @@ stop_orphan_nostaro() {
         fi
     done < <(ps -axww -o pid=,ppid=,command=)
 
-    # degrade で取りこぼした孤児 nostaro（ppid=1 だが --config が接頭辞に一致せず checkout を
-    # 確証できないもの）を黙って見逃さない。別 checkout の正当な孤児もここに数え上がり得るが、
-    # 「確証できないため kill しない」という観測結果として fail-loud に出す。
-    local unattributed=$((orphan_total - killed_count))
+    # 帰属できなかった孤児 nostaro（ppid=1 だが --config が接頭辞に一致しないもの）を黙って
+    # 見逃さない。このカウンタは 2 つの原因を混ぜており、切り分けられない（仕様として許容）:
+    #   (a) 自 checkout の degrade 孤児（plan_cwd_and_config が None → --config が相対で渡る）
+    #   (b) 別 checkout が同じ共有マシンに残した正当な孤児
+    # (b) が居ると、こちらの restart のたびに無関係な孤児についても警告が出る。それでも
+    # 「帰属できず kill しない」という観測結果を fail-loud に出す（no-fallback）。
+    # matched_orphans（kill 成否に依らず帰属できた数）を引くので、kill 失敗でこの値が
+    # 過小になって警告が黙ることはない（kill 失敗は上で個別に warn 済み）。
+    local unattributed=$((orphan_total - matched_orphans))
     if [ "$unattributed" -gt 0 ]; then
         echo "==> [warn] ppid=1 の孤児 nostaro を ${unattributed} 個検出しましたが、--config が"
         echo "    ${config_prefix} で始まらず checkout を確証できないため kill しません。"
