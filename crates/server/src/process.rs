@@ -1317,7 +1317,7 @@ pub async fn run_agent_response(
                     Some(subtask_registry.clone()),
                     // 停止も 1 箇所（neutral な cancel_subtask）から sink へ通知する。停止は
                     // `on_subtask_cancelled`（既定 no-op）なので resume する sink の挙動は
-                    // 変わらず、REST だけがセッション状態の整合を取る。
+                    // 変わらず、必要な経路だけが追加の状態整合を取れる。
                     req.completion_sink.clone(),
                 )
                 // #431: 明示 `spawn_subtask` の起動を親ターンのカウンタへ載せる。

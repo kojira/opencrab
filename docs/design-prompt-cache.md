@@ -325,32 +325,9 @@ pub fn build_conversation_messages(
 
 ---
 
-### 3-3. `crates/server/src/api/agents_messages.rs`
+### 3-3. direct-message REST（撤去済み）
 
-**Phase 1変更:** `build_agent_context()` + `prepend_runtime_context()` の適用
-
-```rust
-// 変更前:
-let (system_prompt, agent_name) = {
-    let conn = state.db.lock().unwrap();
-    process::build_agent_context(&conn, &id, "direct_message")
-};
-let conversation = {
-    let conn = state.db.lock().unwrap();
-    process::build_conversation_string(&conn, &session_id)
-};
-
-// 変更後 (Phase 1):
-let (system_prompt, agent_name) = {
-    let conn = state.db.lock().unwrap();
-    process::build_agent_context(&conn, &id)  // session_theme引数を削除
-};
-let conversation_raw = {
-    let conn = state.db.lock().unwrap();
-    process::build_conversation_string(&conn, &session_id)
-};
-let conversation = process::prepend_runtime_context(&conversation_raw, "direct_message");
-```
+この設計時に存在した direct-message REST は PR #725 で撤去されたため、現在の変更対象はない。
 
 ---
 
@@ -422,7 +399,6 @@ role判定は `speaker_id == agent_id` の比較で十分（`Sender.is_bot` は 
    - `prepend_runtime_context()` ヘルパーを追加
 
 2. **すべての呼び出し元で `prepend_runtime_context()` を適用**
-   - `api/agents_messages.rs`
    - `discord/src/message_loop.rs`（2箇所: 通常処理 + subtask completion callback）
    - その他 `build_agent_context()` を呼ぶ箇所すべて
 

@@ -2025,7 +2025,7 @@ async fn test_dispatched_subtask_carries_the_run_caller_to_settlement() {
     ] {
         let (app, _db, mock, state) = create_test_app_with_state();
         let (agent_id, _app) = create_test_agent_named(app, "DispatchCaller", "TestPersona").await;
-        let session_id = format!("agent-msg-{agent_id}-u298");
+        let session_id = format!("web-{agent_id}-u298");
 
         mock.push_tool_call_response(vec![ToolCall {
             id: "tc-298".to_string(),
@@ -2051,7 +2051,7 @@ async fn test_dispatched_subtask_carries_the_run_caller_to_settlement() {
             &session_id,
             "system",
             "user: スキルを覚えて",
-            "rest",
+            "web",
             caller.clone(),
         )
         .with_dispatch(
@@ -2133,7 +2133,7 @@ async fn test_run_counts_subtask_starts_from_both_launch_paths() {
     for (tool_name, args) in cases {
         let (app, _db, mock, state) = create_test_app_with_state();
         let (agent_id, _app) = create_test_agent_named(app, "StartCounter", "TestPersona").await;
-        let session_id = format!("agent-msg-{agent_id}-u431");
+        let session_id = format!("web-{agent_id}-u431");
 
         mock.push_tool_call_response(vec![ToolCall {
             id: "tc-431".to_string(),
@@ -2155,7 +2155,7 @@ async fn test_run_counts_subtask_starts_from_both_launch_paths() {
             &session_id,
             "system",
             "user: ログを調べて",
-            "rest",
+            "web",
             opencrab_actions::CallerIdentity::Owner,
         )
         .with_dispatch(
@@ -2182,8 +2182,8 @@ async fn test_run_counts_subtask_starts_from_both_launch_paths() {
 ///
 /// このテストが必要な理由: 非ブロック dispatch の注入は `process.rs` の 1 箇所
 /// （`depth == 0 && state.subtask_auto_dispatch` の分岐）で決まる。そこを潰しても
-/// 従来は REST のテスト 1 本しか落ちず、web / Discord / Nostr / heartbeat は全緑
-/// だった。web の配線をここで固定して、看板機能が無音で失われるのを防ぐ。
+/// 低レイヤの dispatcher テストだけでは web の配線漏れを検出できない。ここで実際の
+/// web 入口を固定して、看板機能が無音で失われるのを防ぐ。
 #[cfg(feature = "web")]
 #[tokio::test]
 async fn test_web_send_dispatches_tool_as_background_subtask() {

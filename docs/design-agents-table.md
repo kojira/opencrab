@@ -181,7 +181,6 @@ DROP TABLE identity;
 - `crates/server/src/api/agents.rs`: soul/identity 個別エンドポイント → agents 統合エンドポイント
 - `crates/server/src/api/import.rs`: インポート時の soul/identity 書き込み
 - `crates/server/src/process.rs`: `build_agent_context()` での soul/identity 読み取り
-- `crates/server/src/api/agents_messages.rs`: `default_model` 参照箇所 → agents.model 優先
 - `crates/core/src/memory/`: memory_curated の agent_rules 等
 
 ### React UI

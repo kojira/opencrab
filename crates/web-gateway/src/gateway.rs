@@ -99,7 +99,7 @@ impl WebGateway {
     /// このセッションに未決着の subtask が残っているか。
     ///
     /// `cancel_subtask` が引く registry と同一のものを見るので、決着後に空になることを
-    /// 外から確認できる（REST 側の `SubtaskRegistries::has_running` と対称）。
+    /// 外から確認できる。
     pub fn has_running(&self, session_id: &str) -> bool {
         self.runtime.has_running(session_id)
     }

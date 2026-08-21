@@ -71,14 +71,14 @@ mod tests {
     #[tokio::test]
     async fn same_key_yields_same_registry() {
         let registries = SubtaskRegistries::new();
-        let a = registries.registry_for("agent-msg-x-u1");
-        let b = registries.registry_for("agent-msg-x-u1");
+        let a = registries.registry_for("web-x-conv1");
+        let b = registries.registry_for("web-x-conv1");
         assert!(
             Arc::ptr_eq(&a, &b),
             "同一キーでは同じ registry を共有しなければならない"
         );
         // 片方への登録が他方から見える。
-        a.insert("st-1".to_string(), fake_subtask("agent-msg-x-u1"));
+        a.insert("st-1".to_string(), fake_subtask("web-x-conv1"));
         assert!(b.contains_key("st-1"));
         b.get("st-1").unwrap().abort_handle.abort();
     }
@@ -87,13 +87,13 @@ mod tests {
     #[tokio::test]
     async fn different_keys_are_isolated() {
         let registries = SubtaskRegistries::new();
-        let a = registries.registry_for("agent-msg-x-u1");
-        let b = registries.registry_for("agent-msg-x-u2");
+        let a = registries.registry_for("web-x-conv1");
+        let b = registries.registry_for("web-x-conv2");
         assert!(!Arc::ptr_eq(&a, &b));
-        a.insert("st-1".to_string(), fake_subtask("agent-msg-x-u1"));
+        a.insert("st-1".to_string(), fake_subtask("web-x-conv1"));
         assert!(!b.contains_key("st-1"));
-        assert!(registries.has_running("agent-msg-x-u1"));
-        assert!(!registries.has_running("agent-msg-x-u2"));
+        assert!(registries.has_running("web-x-conv1"));
+        assert!(!registries.has_running("web-x-conv2"));
         a.get("st-1").unwrap().abort_handle.abort();
     }
 

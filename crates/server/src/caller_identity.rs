@@ -22,7 +22,7 @@ use opencrab_db::queries::TrustedUserPermission;
 /// `(経路, 識別子, エージェント)` から呼び出し元の権限を導出する。
 ///
 /// **owner 識別子を Discord 設定から取り出して [`resolve_caller_identity_with_owner`] に
-/// 委譲する**（Nostr と共有する 1 実装）。web / REST は専用の owner を持たず、Discord
+/// 委譲する**（Nostr と共有する 1 実装）。web は専用の owner を持たず、Discord
 /// 設定の owner だけが owner 判定を決める（モジュール冒頭の「動かしてはいけない線」）。
 ///
 /// 優先順は委譲先に従い **owner 判定が先** → 自経路の信頼済みユーザー行 → `Agent`
@@ -38,7 +38,7 @@ pub fn resolve_caller_identity(
     user_id: &str,
     agent_id: &str,
 ) -> CallerIdentity {
-    // web / REST の owner 判定は Discord 設定の owner が決める（専用 owner を新設しない）。
+    // web の owner 判定は Discord 設定の owner が決める（専用 owner を新設しない）。
     // 設定行が無い / 引けない = オーナー未設定（空文字は誰とも一致しない）。
     let owner_id = opencrab_db::queries::get_agent_discord_config(conn, agent_id)
         .ok()
@@ -94,8 +94,8 @@ pub fn resolve_caller_identity_with_owner(
     // ので、両方に該当する相手は co_agent を採る。
     //
     // **#489: 識別子空間の逆引き。** `trusted_co_agents` は agent UUID 対（agent_id ↔
-    // co_agent_id）で登録されるが、ここへ来る発言者は経路の生の識別子（Nostr pubkey / web・
-    // REST の user_id）。生識別子をそのまま突き合わせても UUID 登録の行には一致しないので、
+    // co_agent_id）で登録されるが、ここへ来る発言者は経路の生の識別子（Nostr pubkey / web の
+    // user_id）。生識別子をそのまま突き合わせても UUID 登録の行には一致しないので、
     // まず [`resolve_co_agent_uuid`] で **発言者識別子 → agent UUID** を逆引きしてから
     // `is_trusted_co_agent` を引く。逆引き表（各 agent の自己識別子）は**各 agent 自身の接続**
     // からしか書かれないので、ここで得た UUID は「その識別子の持ち主」であることが接続で担保
@@ -141,8 +141,7 @@ pub fn resolve_caller_identity_with_owner(
 /// 「識別子 ↔ UUID」を仕込む経路は存在しない。
 ///
 /// - **Nostr**: `identifier` は 64 桁小文字 hex（呼び出し側が正規化済み）。
-/// - **web / REST**: agent の自己識別子を持たない経路なので常に `None`（fail-closed。
-///   agent 同士の REST 相互作用は #489 の対象外）。
+/// - **web**: agent の自己識別子を持たない経路なので常に `None`（fail-closed）。
 /// - Discord の逆引きは同じ表（`agent_discord_config.bot_user_id`）を [`crate::agent_runner_impl`]
 ///   の `resolve_caller` が直接引く（Discord は本 1 実装を経由しない別経路のため）。ここでも
 ///   分岐を持たせて経路名で一貫させておく。
@@ -160,7 +159,7 @@ pub(crate) fn resolve_co_agent_uuid(
         opencrab_db::queries::TRUSTED_PLATFORM_NOSTR => {
             opencrab_db::queries::resolve_agent_by_nostr_self_pubkey(conn, identifier)
         }
-        // web / REST は自己識別子の逆引き表を持たない（#489 の対象外）。
+        // web は自己識別子の逆引き表を持たない（#489 の対象外）。
         _ => None,
     }
 }
@@ -210,7 +209,7 @@ pub fn warn_legacy_row_no_longer_read(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opencrab_db::queries::{TRUSTED_PLATFORM_DISCORD, TRUSTED_PLATFORM_REST};
+    use opencrab_db::queries::{TRUSTED_PLATFORM_DISCORD, TRUSTED_PLATFORM_WEB};
     use std::cell::RefCell;
     use std::io;
     use std::sync::{Arc, Mutex, Once};
@@ -337,7 +336,7 @@ mod tests {
             TrustedUserPermission::User,
         );
         assert_eq!(
-            resolve_caller_identity(&conn, TRUSTED_PLATFORM_REST, "42", "agent-1"),
+            resolve_caller_identity(&conn, TRUSTED_PLATFORM_WEB, "42", "agent-1"),
             CallerIdentity::Agent
         );
     }
@@ -353,7 +352,7 @@ mod tests {
             TrustedUserPermission::User,
         );
         let logs = captured_logs(|| {
-            resolve_caller_identity(&conn, TRUSTED_PLATFORM_REST, "42", "agent-1");
+            resolve_caller_identity(&conn, TRUSTED_PLATFORM_WEB, "42", "agent-1");
         });
         assert!(logs.contains("WARN"), "warn レベルで出ること: {logs}");
         assert!(
@@ -376,7 +375,7 @@ mod tests {
         let conn = opencrab_db::init_memory().unwrap();
         assert!(!warn_legacy_row_no_longer_read(
             &conn,
-            TRUSTED_PLATFORM_REST,
+            TRUSTED_PLATFORM_WEB,
             "999",
             "agent-1"
         ));
@@ -395,7 +394,7 @@ mod tests {
         ));
         assert!(warn_legacy_row_no_longer_read(
             &conn,
-            TRUSTED_PLATFORM_REST,
+            TRUSTED_PLATFORM_WEB,
             "42",
             "agent-1"
         ));
@@ -407,29 +406,29 @@ mod tests {
         let conn = opencrab_db::init_memory().unwrap();
         register(
             &conn,
-            TRUSTED_PLATFORM_REST,
-            "rest-user",
+            TRUSTED_PLATFORM_WEB,
+            "web-user",
             TrustedUserPermission::User,
         );
         register(
             &conn,
-            TRUSTED_PLATFORM_REST,
-            "rest-bot",
+            TRUSTED_PLATFORM_WEB,
+            "web-bot",
             TrustedUserPermission::CoAgent,
         );
         assert_eq!(
-            resolve_caller_identity(&conn, TRUSTED_PLATFORM_REST, "rest-user", "agent-1"),
+            resolve_caller_identity(&conn, TRUSTED_PLATFORM_WEB, "web-user", "agent-1"),
             CallerIdentity::TrustedUser
         );
         assert_eq!(
-            resolve_caller_identity(&conn, TRUSTED_PLATFORM_REST, "rest-bot", "agent-1"),
+            resolve_caller_identity(&conn, TRUSTED_PLATFORM_WEB, "web-bot", "agent-1"),
             CallerIdentity::CoAgent {
-                agent_id: "rest-bot".to_string()
+                agent_id: "web-bot".to_string()
             }
         );
     }
 
-    /// Discord 設定に owner を置く（web / REST の owner 判定の出どころ）。
+    /// Discord 設定に owner を置く（web の owner 判定の出どころ）。
     fn set_discord_owner(conn: &rusqlite::Connection, agent_id: &str, owner_discord_id: &str) {
         opencrab_db::queries::upsert_agent_discord_config(
             conn,
@@ -453,12 +452,12 @@ mod tests {
         // owner が自経路の行としても User / CoAgent で登録されている。
         register(
             &conn,
-            TRUSTED_PLATFORM_REST,
+            TRUSTED_PLATFORM_WEB,
             "owner-id",
             TrustedUserPermission::User,
         );
         assert_eq!(
-            resolve_caller_identity(&conn, TRUSTED_PLATFORM_REST, "owner-id", "agent-1"),
+            resolve_caller_identity(&conn, TRUSTED_PLATFORM_WEB, "owner-id", "agent-1"),
             CallerIdentity::Owner,
             "owner が表の行に隠れて降格した"
         );
@@ -466,12 +465,12 @@ mod tests {
         set_discord_owner(&conn, "agent-1", "owner-id");
         register(
             &conn,
-            TRUSTED_PLATFORM_REST,
+            TRUSTED_PLATFORM_WEB,
             "owner-id",
             TrustedUserPermission::CoAgent,
         );
         assert_eq!(
-            resolve_caller_identity(&conn, TRUSTED_PLATFORM_REST, "owner-id", "agent-1"),
+            resolve_caller_identity(&conn, TRUSTED_PLATFORM_WEB, "owner-id", "agent-1"),
             CallerIdentity::Owner
         );
     }
@@ -483,12 +482,12 @@ mod tests {
         set_discord_owner(&conn, "agent-1", "owner-id");
         register(
             &conn,
-            TRUSTED_PLATFORM_REST,
+            TRUSTED_PLATFORM_WEB,
             "someone-else",
             TrustedUserPermission::User,
         );
         assert_eq!(
-            resolve_caller_identity(&conn, TRUSTED_PLATFORM_REST, "someone-else", "agent-1"),
+            resolve_caller_identity(&conn, TRUSTED_PLATFORM_WEB, "someone-else", "agent-1"),
             CallerIdentity::TrustedUser
         );
     }
@@ -499,11 +498,11 @@ mod tests {
         let conn = opencrab_db::init_memory().unwrap();
         // Discord 設定そのものが無い（= オーナー未設定）
         assert_eq!(
-            resolve_caller_identity(&conn, TRUSTED_PLATFORM_REST, "", "agent-1"),
+            resolve_caller_identity(&conn, TRUSTED_PLATFORM_WEB, "", "agent-1"),
             CallerIdentity::Agent
         );
         assert_eq!(
-            resolve_caller_identity(&conn, TRUSTED_PLATFORM_REST, "anyone", "agent-1"),
+            resolve_caller_identity(&conn, TRUSTED_PLATFORM_WEB, "anyone", "agent-1"),
             CallerIdentity::Agent
         );
     }

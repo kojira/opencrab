@@ -571,27 +571,13 @@ AppLayout（AppLayout.tsx）
 turn_number: None,  // ← list_sessions の SQL クエリが turn_number を取得していない
 ```
 
-`agents_messages.rs`:
-```rust
-turn_number: 0,  // ← 新規セッション作成時にハードコード
-```
-
 **修正箇所**:  
 - `crates/server/src/api/sessions.rs`: `list_sessions` SQLクエリで `turn_number` を SELECT に含める
 - `crates/db/src/queries.rs`: `list_sessions()` 関数の SELECT句を確認・修正
 
 ### 7.3 全セッションがアクティブ表示
 
-**原因（確認済み）**: `crates/server/src/api/agents_messages.rs`:
-```rust
-status: "active".to_string(),  // ← ハードコード
-```
-Discord経由でセッションが作成されるたびに `status = "active"` が固定セット。  
-セッション終了時に `status` が更新されていない可能性。
-
-**修正箇所**:
-- `crates/server/src/api/agents_messages.rs`: セッション完了時に `status = "completed"` を UPDATE
-- または `crates/db/src/queries.rs` に `update_session_status()` 関数を追加
+この設計時に原因としていた direct-message REST は PR #725 で撤去されたため、現在の修正対象はない。
 
 ### 7.4 ツール利用回数が0のまま（`SkillDto.usage_count`）
 
@@ -660,9 +646,8 @@ Discord経由でセッションが作成されるたびに `status = "active"` �
 
 ### Phase 3（APIバグ修正）
 9. **ターン数表示修正** — `sessions.rs` のSQLクエリ修正
-10. **セッションステータス修正** — `agents_messages.rs` + DB更新ロジック
-11. **セッション数修正** — `agents.rs` のSQLテーブル名確認・修正
-12. **ツール利用回数修正** — `queries.rs` の `usage_count` 更新ロジック追加
+10. **セッション数修正** — `agents.rs` のSQLテーブル名確認・修正
+11. **ツール利用回数修正** — `queries.rs` の `usage_count` 更新ロジック追加
 
 ---
 
