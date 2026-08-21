@@ -229,6 +229,10 @@ async fn main() -> anyhow::Result<()> {
         // 既存暗号文と不一致のときは None（暗号化を有効化していない＝従来挙動）。
         #[cfg(feature = "nostr")]
         nostr_master_key: nostr_master_key.clone(),
+        // #722: readiness が「discord enabled なのに token 空＝黙って起動しない」を検出する
+        // ために、共有ゲートウェイの実効設定を保持する（起動判定に使う値と同じ源）。
+        #[cfg(feature = "discord")]
+        discord_shared_gateway: Arc::new(cfg.gateway.discord.clone()),
         tools_config: Arc::new(std::sync::RwLock::new(tools_cfg)),
         default_model,
         compaction_ratio: cfg.llm.compaction_ratio,

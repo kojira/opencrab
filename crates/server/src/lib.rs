@@ -100,6 +100,11 @@ pub struct AppState {
     /// 従来挙動）。Nostr サブシステムは `Some` のときだけ起動する（`None` ならバナーで拒否）。
     #[cfg(feature = "nostr")]
     pub nostr_master_key: Option<opencrab_nostr::MasterKey>,
+    /// Discord 共有ゲートウェイの実効設定（enabled / token）。readiness（`GET /ready` /
+    /// #722）が「enabled なのに token が空＝黙って起動しない」を検出するために参照する。
+    /// discord feature を外すとフィールドごと消える（必須物の列挙から構造的に外れる）。
+    #[cfg(feature = "discord")]
+    pub discord_shared_gateway: Arc<config::DiscordGatewayConfig>,
     pub default_model: String,
     pub tools_config: Arc<RwLock<opencrab_actions::tools::ToolsConfig>>,
     /// コンパクション比率: context_window のうち会話履歴に使う割合 (0.0-1.0, デフォルト 0.5)。
@@ -309,6 +314,8 @@ pub(crate) fn test_app_state() -> AppState {
         // #620: テストは暗号化を有効化しない（None＝平文フォールバック / 従来挙動）。
         #[cfg(feature = "nostr")]
         nostr_master_key: None,
+        #[cfg(feature = "discord")]
+        discord_shared_gateway: Arc::new(config::DiscordGatewayConfig::default()),
         default_model: "mock:test".to_string(),
         tools_config: Arc::new(RwLock::new(opencrab_actions::tools::ToolsConfig::default())),
         compaction_ratio: 0.5,
@@ -346,6 +353,12 @@ pub fn create_router(state: AppState) -> Router {
     let mut router = Router::new()
         .route("/health", get(health_check))
         .route("/api/health", get(api_health_check))
+        // readiness（#722）: liveness とは別 probe。有効な全ゲートが必要物を揃えて
+        // いるかを見る。未充足なら 503（orchestrator はトラフィックを載せない /
+        // デプロイを止める）。`/health` は静的 "ok" のまま（再起動では直らないため
+        // liveness を赤くしない — 設計 §4）。
+        .route("/ready", get(readiness_check))
+        .route("/api/ready", get(readiness_check))
         // 外部イベント受信 webhook（#454）。source ごとの共有 secret で HMAC 検証し、
         // 受理したイベントを agent_inbox へ積む（処理は intake_process ループ）。
         .route("/api/hooks/{source}", post(api::hooks::receive_hook))
@@ -725,6 +738,61 @@ async fn api_health_check() -> axum::Json<serde_json::Value> {
     axum::Json(serde_json::json!({"status": "ok"}))
 }
 
+/// readiness probe（#722）。**有効なゲートが必要物を揃えているか**を、config・DB 事実・
+/// router 登録の有無だけで手元判定する（外部疎通は投げない）。未充足が 1 つでもあれば
+/// **503**（本文に未充足ゲートの `gate`/`what` を列挙・**値は出さない**）、全充足なら **200**。
+///
+/// hot-reload / DB オーバーライドで実効設定が変わりうるので、起動時スナップショットに固めず
+/// **リクエスト時に** `AppState` から評価する（設計 §5.2）。
+async fn readiness_check(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> impl axum::response::IntoResponse {
+    use axum::http::StatusCode;
+
+    // nostr の必須化述語は「Nostr 設定済みエージェントが 1 つ以上あるか」。DB からリクエスト
+    // 時に読む（新設定は足さない / #620 の起動判定と同じ源）。lock 取得失敗時は false 側へ
+    // 倒す（readiness は観測面であり、ここで別のエラーを持ち込まない）。
+    #[cfg(feature = "nostr")]
+    let nostr_configured = match state.db.lock() {
+        Ok(conn) => opencrab_db::queries::has_any_agent_nostr_config(&conn).unwrap_or(false),
+        Err(_) => false,
+    };
+
+    let router = state.llm_router.get();
+    let inputs = config::ReadinessInputs {
+        llm_default_provider: state.llm_config.default_provider.as_str(),
+        llm_router: &router,
+        #[cfg(feature = "discord")]
+        discord: &state.discord_shared_gateway,
+        #[cfg(feature = "nostr")]
+        nostr_configured,
+        #[cfg(feature = "nostr")]
+        nostr_master_key_present: state.nostr_master_key.is_some(),
+    };
+
+    let required = config::required_credentials(&inputs);
+    let unsatisfied: Vec<&config::RequiredInput> =
+        required.iter().filter(|r| !r.satisfied).collect();
+
+    let status = if unsatisfied.is_empty() {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    let body = axum::Json(serde_json::json!({
+        "ready": unsatisfied.is_empty(),
+        "unsatisfied": unsatisfied
+            .iter()
+            .map(|r| serde_json::json!({"gate": r.gate, "what": r.what}))
+            .collect::<Vec<_>>(),
+        "required": required
+            .iter()
+            .map(|r| serde_json::json!({"gate": r.gate, "what": r.what, "satisfied": r.satisfied}))
+            .collect::<Vec<_>>(),
+    }));
+    (status, body)
+}
+
 /// transport 登録簿（#191 段階2 PR2）が、実物のマネージャを載せて期待どおり働くこと。
 ///
 /// 偽実装ではなく `DiscordGatewayManager` / `NostrGatewayManager` を入れる。生成は
@@ -1091,5 +1159,93 @@ mod gateway_registry_tests {
                 .is_running(gateway_kinds::NOSTR, "agent-191-pr3"),
             "弾かれたのに稼働してはいけない"
         );
+    }
+}
+
+/// readiness エンドポイント（`GET /ready`・#722）の HTTP グルーを固定する。
+/// `required_credentials` の単体テスト（config.rs）が「赤くなる向き」を押さえるのに対し、
+/// ここは「未充足 → 503 / 全充足 → 200」のマッピングと `AppState` からの入力組み立て
+/// （db lock・router 読み・discord 設定参照）が実際に繋がっていることを固定する。
+#[cfg(test)]
+mod readiness_tests {
+    use super::*;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    /// test_app_state の既定 provider（"openai"）を登録済みにして llm ゲートを充足させる。
+    /// これをしないと router が空で llm が未充足になる（＝それ自体が正しい 503 挙動）。
+    fn satisfy_llm(state: &AppState) {
+        let mut providers = std::collections::HashMap::new();
+        providers.insert(
+            state.llm_config.default_provider.clone(),
+            config::ProviderConfig {
+                api_key: "sk-test".to_string(),
+                ..Default::default()
+            },
+        );
+        let cfg = config::LlmConfig {
+            providers,
+            default_provider: state.llm_config.default_provider.clone(),
+            ..Default::default()
+        };
+        state
+            .llm_router
+            .swap(config::build_llm_router(&cfg).unwrap());
+    }
+
+    /// llm 充足・discord disabled・nostr 未設定 ⇒ 必須物すべて充足 ＝ 200。
+    #[tokio::test]
+    async fn readiness_ok_when_all_required_satisfied() {
+        let state = test_app_state();
+        satisfy_llm(&state);
+        let resp = readiness_check(axum::extract::State(state))
+            .await
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// 既定 provider が未登録（キー欠落でスキップ相当）⇒ llm 未充足で 503。
+    #[tokio::test]
+    async fn readiness_503_when_default_provider_unregistered() {
+        let state = test_app_state(); // router は空（既定 "openai" が未登録）
+        let resp = readiness_check(axum::extract::State(state))
+            .await
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// discord enabled かつ token 空 ⇒ readiness は 503（黙って起動しない状態を ready と
+    /// 誤判定させない）。llm は充足させ、discord だけを欠陥にする。discord feature 有効時のみ。
+    #[cfg(feature = "discord")]
+    #[tokio::test]
+    async fn readiness_503_when_discord_enabled_but_token_empty() {
+        let mut state = test_app_state();
+        satisfy_llm(&state);
+        state.discord_shared_gateway = Arc::new(config::DiscordGatewayConfig {
+            enabled: true,
+            token: "".to_string(),
+            ..Default::default()
+        });
+        let resp = readiness_check(axum::extract::State(state))
+            .await
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// discord enabled かつ token 非空 ⇒ 200（llm も充足させる）。
+    #[cfg(feature = "discord")]
+    #[tokio::test]
+    async fn readiness_ok_when_discord_enabled_with_token() {
+        let mut state = test_app_state();
+        satisfy_llm(&state);
+        state.discord_shared_gateway = Arc::new(config::DiscordGatewayConfig {
+            enabled: true,
+            token: "a-token".to_string(),
+            ..Default::default()
+        });
+        let resp = readiness_check(axum::extract::State(state))
+            .await
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

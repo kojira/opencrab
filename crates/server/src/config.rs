@@ -1518,6 +1518,102 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
     Ok(router)
 }
 
+// ---------- Readiness: 必要なものが欠けたまま黙って動かない（#722） ----------
+
+/// 「有効なゲートが要求する 1 つの入力」と、その充足有無。
+///
+/// readiness エンドポイント（`GET /ready`）はこの列挙を評価し、未充足が 1 つでも
+/// あれば 503 を返す。**値そのものは持たない**（`what` は運用者向けの識別名で、
+/// トークンや鍵の値は入れない）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequiredInput {
+    /// どのゲートが要求するか（例: `"discord.shared"` / `"nostr"` / `"llm.default_provider"`）。
+    pub gate: &'static str,
+    /// 運用者向けの識別名（例: `"DISCORD_TOKEN"`）。**値は入れない。**
+    pub what: String,
+    /// 充足しているか。
+    pub satisfied: bool,
+}
+
+/// `required_credentials` が読む「実効状態」。
+///
+/// 各フィールドは呼び出し側（readiness エンドポイント）が `AppState` からリクエスト時に
+/// 組み立てる。**feature を外すとそのゲートのフィールドごと消える**——runtime フラグで
+/// 「off なら要らない」と分岐するのではなく、構造で「読む要素が無い＝必須にならない」を
+/// 表す（#620 の env スクラブ / timed-fire の feature-off と同じ流儀）。
+pub struct ReadinessInputs<'a> {
+    /// 実効設定の `default_provider`（bare model の解決先。TOML 専用で runtime 変更不可）。
+    pub llm_default_provider: &'a str,
+    /// 現時点のルーター。**キー欠落でスキップされた provider を捕まえる**ために、
+    /// `default_provider` が登録済みかをここで見る（hot-reload 追従）。
+    pub llm_router: &'a LlmRouter,
+    /// Discord 共有ゲートウェイの実効設定（enabled / token）。
+    #[cfg(feature = "discord")]
+    pub discord: &'a DiscordGatewayConfig,
+    /// Nostr が設定済みのエージェントが 1 つ以上あるか（`has_any_agent_nostr_config`）。
+    /// これが必須化の述語で、**マスターキーの有無ではない**（自己言及回避 / 設計 §2）。
+    #[cfg(feature = "nostr")]
+    pub nostr_configured: bool,
+    /// 有効なマスターキー（形式が正しく既存暗号文とも一致）を握っているか。充足判定に使う。
+    #[cfg(feature = "nostr")]
+    pub nostr_master_key_present: bool,
+}
+
+/// 有効な各ゲートが要求する必須入力を **単一のインベントリ**として列挙する（#722）。
+///
+/// per-gate に N 個のチェックを撒かず、ここ 1 本に集約する（「同じ形の不具合は 1 つの
+/// 欠落」）。必須性は **`enabled` 側の述語** にキーする——トークンの有無は我々が検査する
+/// 対象なので、それを必須性の条件にすると自己言及で常に「不要」に倒れる（設計 §2）。
+///
+/// **外部疎通は投げない**（config・DB 事実・router 登録の有無だけで手元で判定する / 設計 §6）。
+pub fn required_credentials(inputs: &ReadinessInputs) -> Vec<RequiredInput> {
+    let mut out = Vec::new();
+
+    // llm: 既定 provider が空でなければ必須。充足は「その provider が **登録済み**か」で
+    // 見る（キー未設定で `build_llm_router` が黙ってスキップした場合を捕まえる）。
+    // 空 default_provider は「既定を明示的に置かない」構成なので必須に入れない
+    // （`build_llm_router` の bail 規則と対称 / 設計 §2・§5.1）。
+    if !inputs.llm_default_provider.is_empty() {
+        out.push(RequiredInput {
+            gate: "llm.default_provider",
+            what: format!("registered provider '{}'", inputs.llm_default_provider),
+            satisfied: inputs
+                .llm_router
+                .get_provider(inputs.llm_default_provider)
+                .is_some(),
+        });
+    }
+
+    // discord 共有: `enabled` で必須化し、token が非空かで充足を見る
+    // （`gateway_will_start = enabled && !token.is_empty()` の分解）。feature-off では
+    // このアームごと消える＝ discord の必須物は列挙されない。
+    #[cfg(feature = "discord")]
+    {
+        if inputs.discord.enabled {
+            out.push(RequiredInput {
+                gate: "discord.shared",
+                what: "DISCORD_TOKEN".to_string(),
+                satisfied: !inputs.discord.token.trim().is_empty(),
+            });
+        }
+    }
+
+    // nostr: 設定済みエージェントが 1 つ以上あれば必須化し、有効なマスターキーの有無で
+    // 充足を見る（#620 の起動判定と同型）。feature-off ではアームごと消える。
+    #[cfg(feature = "nostr")]
+    {
+        if inputs.nostr_configured {
+            out.push(RequiredInput {
+                gate: "nostr",
+                what: "OPENCRAB_SECRET_MASTER_KEY".to_string(),
+                satisfied: inputs.nostr_master_key_present,
+            });
+        }
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2443,5 +2539,270 @@ default_webhook = { url = "" }
         assert_eq!(cfg.memory_condense.min_new_units, 20);
         assert_eq!(cfg.memory_condense.min_interval_minutes, 10080);
         assert_eq!(cfg.memory_condense.timeout_secs, 600);
+    }
+
+    // ---------- readiness インベントリ（#722） ----------
+    //
+    // これらのテストは「赤くなる向き」を固定する。判定を反転させる変異（例:
+    // `!token.trim().is_empty()` → `token.trim().is_empty()`、`is_some()` → `is_none()`、
+    // 必須化述語 `enabled` → `!enabled`）を入れると、対応するテストが必ず落ちる。
+    // 落ちないテストは何も守っていない。
+
+    /// anthropic を api_key 付き / 空きで組んだルーターを返す。空きなら
+    /// `build_llm_router` が登録をスキップする（＝ readiness が捕まえるべき欠陥の再現）。
+    fn router_with_anthropic(api_key: &str) -> LlmRouter {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "anthropic".to_string(),
+            ProviderConfig {
+                api_key: api_key.to_string(),
+                ..Default::default()
+            },
+        );
+        let config = LlmConfig {
+            providers,
+            default_provider: "anthropic".to_string(),
+            ..Default::default()
+        };
+        build_llm_router(&config).unwrap()
+    }
+
+    /// 指定 gate のエントリを取り出す（無ければ None）。
+    fn find<'a>(v: &'a [RequiredInput], gate: &str) -> Option<&'a RequiredInput> {
+        v.iter().find(|r| r.gate == gate)
+    }
+
+    /// llm: 既定 provider がキー空でスキップ ⇒ 必須かつ **未充足**（欠陥の向きに赤い）。
+    #[test]
+    fn readiness_llm_unregistered_default_provider_is_unsatisfied() {
+        let router = router_with_anthropic(""); // 空キー → 登録スキップ
+        assert!(
+            router.get_provider("anthropic").is_none(),
+            "前提: 空キーの anthropic は登録されない"
+        );
+        let inputs = ReadinessInputs {
+            llm_default_provider: "anthropic",
+            llm_router: &router,
+            #[cfg(feature = "discord")]
+            discord: &DiscordGatewayConfig::default(),
+            #[cfg(feature = "nostr")]
+            nostr_configured: false,
+            #[cfg(feature = "nostr")]
+            nostr_master_key_present: false,
+        };
+        let req = required_credentials(&inputs);
+        let e = find(&req, "llm.default_provider").expect("必須に入るべき");
+        assert!(!e.satisfied, "未登録の既定 provider は未充足で赤くなるべき");
+    }
+
+    /// llm: 既定 provider が登録済み ⇒ 充足。
+    #[test]
+    fn readiness_llm_registered_default_provider_is_satisfied() {
+        let router = router_with_anthropic("sk-test"); // 非空 → 登録
+        let inputs = ReadinessInputs {
+            llm_default_provider: "anthropic",
+            llm_router: &router,
+            #[cfg(feature = "discord")]
+            discord: &DiscordGatewayConfig::default(),
+            #[cfg(feature = "nostr")]
+            nostr_configured: false,
+            #[cfg(feature = "nostr")]
+            nostr_master_key_present: false,
+        };
+        let req = required_credentials(&inputs);
+        let e = find(&req, "llm.default_provider").expect("必須に入るべき");
+        assert!(e.satisfied, "登録済みの既定 provider は充足すべき");
+    }
+
+    /// llm: 既定 provider が空 ⇒ **必須に入らない**（構成の自由度を殺さない）。
+    #[test]
+    fn readiness_llm_empty_default_provider_not_required() {
+        let router = LlmRouter::new();
+        let inputs = ReadinessInputs {
+            llm_default_provider: "",
+            llm_router: &router,
+            #[cfg(feature = "discord")]
+            discord: &DiscordGatewayConfig::default(),
+            #[cfg(feature = "nostr")]
+            nostr_configured: false,
+            #[cfg(feature = "nostr")]
+            nostr_master_key_present: false,
+        };
+        let req = required_credentials(&inputs);
+        assert!(
+            find(&req, "llm.default_provider").is_none(),
+            "空の既定 provider は必須に入れない"
+        );
+    }
+
+    /// discord: enabled=true, token="" ⇒ 必須かつ **未充足**（黙って起動しない欠陥の向き）。
+    #[cfg(feature = "discord")]
+    #[test]
+    fn readiness_discord_enabled_empty_token_is_unsatisfied() {
+        let router = LlmRouter::new();
+        let discord = DiscordGatewayConfig {
+            enabled: true,
+            token: "   ".to_string(), // 空白のみ = 実質空
+            ..Default::default()
+        };
+        let inputs = ReadinessInputs {
+            llm_default_provider: "",
+            llm_router: &router,
+            discord: &discord,
+            #[cfg(feature = "nostr")]
+            nostr_configured: false,
+            #[cfg(feature = "nostr")]
+            nostr_master_key_present: false,
+        };
+        let req = required_credentials(&inputs);
+        let e = find(&req, "discord.shared").expect("enabled なら必須に入るべき");
+        assert!(!e.satisfied, "token 空は未充足で赤くなるべき");
+    }
+
+    /// discord: enabled=true, token 非空 ⇒ 充足。
+    #[cfg(feature = "discord")]
+    #[test]
+    fn readiness_discord_enabled_with_token_is_satisfied() {
+        let router = LlmRouter::new();
+        let discord = DiscordGatewayConfig {
+            enabled: true,
+            token: "a-token".to_string(),
+            ..Default::default()
+        };
+        let inputs = ReadinessInputs {
+            llm_default_provider: "",
+            llm_router: &router,
+            discord: &discord,
+            #[cfg(feature = "nostr")]
+            nostr_configured: false,
+            #[cfg(feature = "nostr")]
+            nostr_master_key_present: false,
+        };
+        let req = required_credentials(&inputs);
+        let e = find(&req, "discord.shared").expect("enabled なら必須に入るべき");
+        assert!(e.satisfied, "token 非空は充足すべき");
+    }
+
+    /// discord: enabled=false ⇒ **必須に入らない**（token 空でも赤くしない）。
+    #[cfg(feature = "discord")]
+    #[test]
+    fn readiness_discord_disabled_is_not_required() {
+        let router = LlmRouter::new();
+        let discord = DiscordGatewayConfig {
+            enabled: false,
+            token: "".to_string(),
+            ..Default::default()
+        };
+        let inputs = ReadinessInputs {
+            llm_default_provider: "",
+            llm_router: &router,
+            discord: &discord,
+            #[cfg(feature = "nostr")]
+            nostr_configured: false,
+            #[cfg(feature = "nostr")]
+            nostr_master_key_present: false,
+        };
+        let req = required_credentials(&inputs);
+        assert!(
+            find(&req, "discord.shared").is_none(),
+            "disabled な discord は必須に入れない"
+        );
+    }
+
+    /// nostr: 設定済み + マスターキー無し ⇒ 必須かつ **未充足**。
+    #[cfg(feature = "nostr")]
+    #[test]
+    fn readiness_nostr_configured_without_key_is_unsatisfied() {
+        let router = LlmRouter::new();
+        let inputs = ReadinessInputs {
+            llm_default_provider: "",
+            llm_router: &router,
+            #[cfg(feature = "discord")]
+            discord: &DiscordGatewayConfig::default(),
+            nostr_configured: true,
+            nostr_master_key_present: false,
+        };
+        let req = required_credentials(&inputs);
+        let e = find(&req, "nostr").expect("設定済みなら必須に入るべき");
+        assert!(!e.satisfied, "マスターキー無しは未充足で赤くなるべき");
+    }
+
+    /// nostr: 設定済み + 有効マスターキー有り ⇒ 充足。
+    #[cfg(feature = "nostr")]
+    #[test]
+    fn readiness_nostr_configured_with_key_is_satisfied() {
+        let router = LlmRouter::new();
+        let inputs = ReadinessInputs {
+            llm_default_provider: "",
+            llm_router: &router,
+            #[cfg(feature = "discord")]
+            discord: &DiscordGatewayConfig::default(),
+            nostr_configured: true,
+            nostr_master_key_present: true,
+        };
+        let req = required_credentials(&inputs);
+        let e = find(&req, "nostr").expect("設定済みなら必須に入るべき");
+        assert!(e.satisfied, "有効マスターキー有りは充足すべき");
+    }
+
+    /// nostr: 未設定 ⇒ **必須に入らない**（キー無しでも赤くしない）。
+    #[cfg(feature = "nostr")]
+    #[test]
+    fn readiness_nostr_not_configured_is_not_required() {
+        let router = LlmRouter::new();
+        let inputs = ReadinessInputs {
+            llm_default_provider: "",
+            llm_router: &router,
+            #[cfg(feature = "discord")]
+            discord: &DiscordGatewayConfig::default(),
+            nostr_configured: false,
+            nostr_master_key_present: false,
+        };
+        let req = required_credentials(&inputs);
+        assert!(
+            find(&req, "nostr").is_none(),
+            "未設定の nostr は必須に入れない"
+        );
+    }
+
+    /// feature off: discord アームがコンパイルごと消え、必須物に現れない。
+    /// このテストは discord 無効ビルドでのみコンパイルされる（＝アームが構造的に
+    /// 消えていることの証拠）。ReadinessInputs に discord フィールドが無くても
+    /// 組めることそのものが、feature-off で入力ごと消える構造を固定する。
+    #[cfg(not(feature = "discord"))]
+    #[test]
+    fn readiness_discord_arm_absent_when_feature_off() {
+        let router = LlmRouter::new();
+        let inputs = ReadinessInputs {
+            llm_default_provider: "",
+            llm_router: &router,
+            #[cfg(feature = "nostr")]
+            nostr_configured: false,
+            #[cfg(feature = "nostr")]
+            nostr_master_key_present: false,
+        };
+        let req = required_credentials(&inputs);
+        assert!(
+            find(&req, "discord.shared").is_none(),
+            "discord feature off では discord の必須物は列挙されない"
+        );
+    }
+
+    /// feature off: nostr アームがコンパイルごと消え、必須物に現れない。
+    #[cfg(not(feature = "nostr"))]
+    #[test]
+    fn readiness_nostr_arm_absent_when_feature_off() {
+        let router = LlmRouter::new();
+        let inputs = ReadinessInputs {
+            llm_default_provider: "",
+            llm_router: &router,
+            #[cfg(feature = "discord")]
+            discord: &DiscordGatewayConfig::default(),
+        };
+        let req = required_credentials(&inputs);
+        assert!(
+            find(&req, "nostr").is_none(),
+            "nostr feature off では nostr の必須物は列挙されない"
+        );
     }
 }
