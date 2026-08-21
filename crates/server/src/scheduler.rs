@@ -366,7 +366,7 @@ async fn run_one_schedule(
         return None;
     }
 
-    // 前処理（schedule 固有）1: 注入先セッションを用意（無ければ作る。`send_agent_message` と同型）。
+    // 前処理（schedule 固有）1: 注入先セッションを用意する（無ければ作る）。
     {
         let conn = db.lock().ok()?;
         let existing = opencrab_db::queries::get_session(&conn, session_id)
@@ -398,8 +398,8 @@ async fn run_one_schedule(
     }
 
     // 前処理（schedule 固有）2: `message` を **speech**（speaker=`schedule`・≠ agent_id）として注入する。
-    // `send_agent_message`（REST）と同じ形にするのが要点: `is_user_speech`（log_type=="speech"
-    // かつ speaker!=agent_id・#284）が「エージェントが応答すべき直近のユーザー発言」として認識し、
+    // `is_user_speech`（log_type=="speech" かつ speaker!=agent_id・#284）が
+    // 「エージェントが応答すべき直近のユーザー発言」として認識できる形にするのが要点で、
     // コンテキスト切り詰め後も会話へ混ぜ戻す（`system` で注入すると truncation で落ちて発火しても
     // 届かないことがある）。ハートビートの指示文と違い毎回内容が変わるので会話へ積んでよい（#501）。
     {

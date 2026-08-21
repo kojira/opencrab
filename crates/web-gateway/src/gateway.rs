@@ -28,8 +28,7 @@ pub fn web_session_id(agent_id: &str, conversation_id: &str) -> String {
 /// 呼び出し元種別の表示名（HTTP レスポンスの `caller_type`）。
 ///
 /// 権限判定そのものは [`WebAgentRunner::resolve_caller`](crate::WebAgentRunner::resolve_caller)
-/// が行う。ここはその結果をレスポンス用の文字列にするだけの純関数
-/// （REST の `agents_messages` と同じ語彙を使う）。
+/// が行う。ここはその結果をレスポンス用の文字列にするだけの純関数。
 pub fn caller_type_label(caller: &CallerIdentity) -> &'static str {
     match caller {
         CallerIdentity::CoAgent { .. } => "co_agent",
@@ -100,7 +99,7 @@ impl WebGateway {
     /// このセッションに未決着の subtask が残っているか。
     ///
     /// `cancel_subtask` が引く registry と同一のものを見るので、決着後に空になることを
-    /// 外から確認できる（REST 側の `SubtaskRegistries::has_running` と対称）。
+    /// 外から確認できる。
     pub fn has_running(&self, session_id: &str) -> bool {
         self.runtime.has_running(session_id)
     }

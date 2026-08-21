@@ -8,7 +8,7 @@
 > **読み方（後続 issue で方針が変わった箇所がある）**
 > 本 RFC は**執筆時点（main HEAD `8d64bef`）の現状分析と当時の意思決定の記録**であり、現在のコードの説明ではない。後続の実装で判断が変わった箇所には `> **更新（#…）**` の注記を**その場に追記**してある（当時の判断は消していない）。現状のコードを知りたい場合は注記側を、なぜそう決めたかの経緯を知りたい場合は本文側を読むこと。
 >
-> 現時点で方針が変わっているもの: §2-3 / §4 S4 の**転記型の所在**（#158 S3 で `opencrab_actions::transcript` へ移設）。
+> 現時点で方針が変わっているもの: §2-3 / §4 S4 の**転記型の所在**（#158 S3 で `opencrab_actions::transcript` へ移設）。また、本 RFC が対象にしていた direct-message REST は PR #725 で撤去済みであり、本文中の REST 記述は執筆当時の設計記録である。
 
 > **基準（オーナー確定）**
 > 1. **main（HEAD `8d64bef`）から作り直す**。#144/#150/#151 の未コミット fix 版（`BackgroundDispatch` / `dispatch_pending_tool_calls` / `subtask_dispatch` / `cancel_job` / `cancel_running_tools` / `RunningJob` 等）は**プロトタイプとして破棄済み**であり、本設計は引きずらない。本 RFC の行番号はすべて main HEAD に対して張っている（上記 fix 版のシンボルは main に存在しない — §0.1 で実証）。
@@ -94,7 +94,7 @@ db, gateway, voice, llm-types      （葉）
 |---|---|---|---|
 | **Discord** | `run_discord_loop<T: AgentRunner>`（`message_loop.rs` 本体）。`LoopEvent` を mpsc で処理。推論は `AgentRunner`（`crates/discord/src/lib.rs`、server の AppState が実装）。 | **あり**（唯一）。§1.3。 | `gateway.send_to_channel`（`message_loop.rs:784`） |
 | **Nostr** | `NostrGatewayManager`：子プロセス `nostaro watch` の stdout を行読み → `handle_event`（`crates/nostr/src/manager.rs:~276`）→ `NostrAgentRunner::run_agent_response`（`manager.rs:324`）。**1イベント=1推論の同期完結**。 | **無し**。`crates/nostr/` に subtask 参照ゼロ。**per-session 直列化も無い**（§6）。 | `cli.reply(agent_id, event.reply_target(), ...)`（`manager.rs:341`、`reply_target` は `event.rs:35`） |
-| **REST** | `agents_messages.rs`：`process::run_agent_response(&state, req).await` の**同期一発**（`agents_messages.rs:178`）。完了後 `status='completed'`（`agents_messages.rs:200`）。 | **無し**。使い捨ての空 registry を新規生成（`agents_messages.rs:118`）、`DiscordGatewayActions::new` を **`with_event_tx` 無し**で構築（`agents_messages.rs:120`）→ event_tx=None → 通知は破棄（`subtask_engine.rs:94-99`）。 | 現状 HTTP 応答のみ（非同期返信経路なし） |
+| **REST** | 当時の direct-message REST ハンドラから `process::run_agent_response(&state, req).await` の**同期一発**。完了後 `status='completed'`。 | **無し**。使い捨ての空 registry を新規生成し、`DiscordGatewayActions::new` を **`with_event_tx` 無し**で構築 → event_tx=None → 通知は破棄。 | 当時は HTTP 応答のみ（非同期返信経路なし） |
 | **heartbeat** | core の `heartbeat_loop`（`crates/core/src/heartbeat.rs:86`）のタイマ駆動。`make_heartbeat_callback`（`crates/server/src/main.rs:48`）→ `run_agent_response`（`main.rs:227`）。session_id は `heartbeat-{agent}-{channel}`（`main.rs:22`）。 | **無し**。`parse_discord_session` が非 Discord 形式で失敗し送信スキップ（`subtask_engine.rs:101-108`）。 | 次 tick 拾い or 保存 |
 
 ### 1.5 SpawnedSubtask は Discord 型（webhook）を抱えている
@@ -123,7 +123,7 @@ db, gateway, voice, llm-types      （葉）
 
 1. **非 Discord で完了再注入が不可**: 完了通知が `LoopEvent`（Discord 専用 enum）に固定され、event_tx を持たない/Discord セッション形式でない親では破棄される（`subtask_engine.rs:94-108`）。→ Nostr / REST / heartbeat で subtask が実質機能しない（§1.4）。
 2. **server ツールが subtask から不達**: 子に root gateway が渡らず、sub-engine が合成 `SystemGatewayActions` を見られない（§1.7）。→ 長時間 server ツールを subtask 化できない。
-3. **逆依存**: server が discord のサブタスク型を import する（`opencrab_discord::SubtaskRegistry`：`crates/server/src/main.rs:565`、`crates/server/src/api/agents_messages.rs:118`／`DiscordReplyContext`：`crates/server/src/transcript.rs:93`）。REST は使い捨て registry を新規構築（`agents_messages.rs:118`）。
+3. **逆依存**: server が discord のサブタスク型を import する（`opencrab_discord::SubtaskRegistry`／`DiscordReplyContext`）。当時の direct-message REST は使い捨て registry を新規構築していた。
    - > **更新（#158 S3、2026-07）**: 転記型の逆依存は解消済み。`DiscordReplyContext` / `InteractionRecord` は `opencrab_actions::transcript` へ移設され（`AgentReplyContext` / `InteractionRecord`）、`crates/server/src/transcript.rs` は discord crate を参照しない。§4 S4 の当時の判断（下記）から方針が変わっている。
 4. **ゲートウェイ非対称**: Discord だけが再注入を持ち、他は同期完結。共通能力のはずが1ゲートウェイの実装詳細に埋まっている。
 
@@ -212,10 +212,10 @@ pub struct SubtaskSettled {
   - `GatewayCallContext` への `root_gateway` 注入 API（自己参照 Arc の構築順/`Weak`）と、deny-by-default 最外周フィルタ（開放ツールの個別列挙＋triage）を**先に設計・合意**してから実装（§3.1(3)）。
   - 完了条件: subtask 内から許可した server ツール（例 `nostr_generate_key`）のみ実行可能。`send_ui`/`discord_channel_config` 等が引き続き遮断されることをテストで固定。
 - **S3. 他ゲートウェイ配線（全ゲートウェイ対応）**
-  - Nostr/REST/heartbeat 用の sink を実装。**再注入は全 GW で実装**、配送のみ GW 別（Discord=send_to_channel / Nostr=reply / REST=保存＋取得 / heartbeat=次tick or 保存）。Nostr sink は**同一セッション直列を担保**（§6(a)）。ツール宣言/dispatch を gateway 非依存へ移す（§6(b)）。REST の使い捨て registry 構築（`agents_messages.rs:118`）を actions ランタイム経由へ。
+  - Nostr/REST/heartbeat 用の sink を実装。**再注入は全 GW で実装**、配送のみ GW 別（Discord=send_to_channel / Nostr=reply / REST=保存＋取得 / heartbeat=次tick or 保存）。Nostr sink は**同一セッション直列を担保**（§6(a)）。ツール宣言/dispatch を gateway 非依存へ移す（§6(b)）。当時の REST の使い捨て registry 構築を actions ランタイム経由へ。
   - 完了条件: 少なくとも Nostr で spawn→completion→再注入→reply が動く。REST/heartbeat は resume が走り結果が会話へ入る。
 - **S4. 旧結合の除去**
-  - server の `opencrab_discord::SubtaskRegistry` 参照（`main.rs:565` / `agents_messages.rs:118`）を actions 由来へ置換。`DiscordReplyContext`（`transcript.rs:93`）等 Discord 固有の転記型は Discord 側に残す。
+  - server の `opencrab_discord::SubtaskRegistry` 参照を actions 由来へ置換。`DiscordReplyContext` 等 Discord 固有の転記型は Discord 側に残す。
   - 完了条件: server が discord のサブタスク**ランタイム型**に依存しない。
   - > **更新（#158 S3、2026-07）**: 転記型を Discord 側に残す判断は**取り消された**。本 RFC 時点では「Discord 固有」と見なしていたが、実際には `DiscordReplyContext` の 3 variant は「このターンが何で起動されたか」（直接の発話 / サブタスク完了 / A2UI 応答）を表すだけで transport 依存の型を含まず、`InteractionRecord` も同様だった。この 2 型が discord crate に居るせいで server の転記関数が `#[cfg(feature = "discord")]` 配下に落ち、discord feature を切ると Nostr とまったく同じ形の記録まで消えていた。
     >

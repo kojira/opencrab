@@ -69,8 +69,8 @@ pub const DEFAULT_WEB_USER_ID: &str = "web-user";
 ///
 /// owner 判定そのものは [`WebAgentRunner::resolve_caller`] の実装側（`crates/server`
 /// の `is_owner_id` / #164）に委ねる。前後の空白はここで落としておき、認可・
-/// セッションキー・speaker_id すべてで同じ値を使う（REST の `agents_messages` と
-/// 同じ方針）。正規化とその owner 判定の噛み合わせは server 側にテストがある。
+/// セッションキー・speaker_id すべてで同じ値を使う。正規化とその owner 判定の
+/// 噛み合わせは server 側にテストがある。
 ///
 /// **公開契約ではない**: [`DEFAULT_WEB_USER_ID`] と同じく、`pub` なのは server 側の
 /// 境界テストから呼ぶためだけである（正規化はゲートウェイ、owner 判定は server に
@@ -99,7 +99,7 @@ pub async fn send_web_message<R: WebAgentRunner>(
     // 存在しないエージェントの弾き出し（#632）は `run_and_deliver_serialized`（web の
     // 唯一の公開ターン入口）が担う。ここでは `AgentNotFound` を 404 に写像する（下の match）。
 
-    // 1. 認可: 既存 REST（agents_messages）に倣い trusted_users から caller を導出する。
+    // 1. 認可: trusted_users から caller を導出する。
     let caller = state.resolve_caller(&id, &user_id);
     let caller_type = caller_type_label(&caller);
 

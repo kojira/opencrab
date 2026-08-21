@@ -223,8 +223,8 @@ pub async fn send_message(
 
         // Run agent through the shared pipeline.
         //
-        // 同一セッションへの並行 POST を直列化する（#640）。`send_agent_message` と同じ共有
-        // ロック（`state.session_locks`）を、ここでも session（= path の `id`）単位で被せる。
+        // 同一セッションへの並行 POST を直列化する（#640）。共有ロック
+        // （`state.session_locks`）を session（= path の `id`）単位で被せる。
         // これは判断ではなく配線漏れの解消で、この経路も `run_agent_response` を直呼びしていた。
         //
         // 粒度は **session_id 単位であって global ではない**。同一セッションの run だけが直列化
