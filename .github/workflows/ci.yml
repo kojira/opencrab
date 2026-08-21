@@ -40,10 +40,11 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
-      # 警告レベルの lint では失敗しないが、workspace の deny 指定
-      # (await_holding_lock 等) は clippy がここで強制する。
+      # 警告レベルの lint も含めて 1 件でも出たら赤くする（#702）。`-D warnings` で
+      # 全ての warning を error に昇格させ、再蓄積を止める。workspace の deny 指定
+      # (await_holding_lock 等) も従来どおりここで強制される。
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Build
         run: cargo build --workspace --all-features
