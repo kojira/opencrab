@@ -296,18 +296,22 @@ pub fn cleanup_all(
     retention_days: i64,
     now: DateTime<Utc>,
 ) -> Result<CleanupReport> {
-    // 危険な設定値を安全側へ丸め、丸めたら必ず可視化する（黙って別の値で動かさない）。
-    let retention_days = {
-        let effective = effective_retention_days(retention_days);
-        if effective != retention_days {
-            tracing::warn!(
-                configured = retention_days,
-                effective,
-                "offload cleanup: retention_days を安全な範囲 [1, {MAX_RETENTION_DAYS}] へ丸めた"
-            );
-        }
-        effective
-    };
+    // 危険な設定値を安全側へ丸め、丸めたら必ず可視化する（黙って別の値で動かさない）。丸めは
+    // 1 tick に 1 回だけ warn する（エージェントごとに出すと騒がしい）。ここで **cutoff まで
+    // 計算しきって** `cleanup_tmp_dir` へ渡す: 消費点は生の `retention_days` を受け取らないので、
+    // 危険な cutoff（`0` で全 fresh 削除・`i64::MAX` で `Duration::days` パニック）を作る手段が
+    // そもそも無くなり、不変条件をコメントではなく構造で守れる（#715 2 巡目指摘1）。
+    let effective = effective_retention_days(retention_days);
+    if effective != retention_days {
+        tracing::warn!(
+            configured = retention_days,
+            effective,
+            "offload cleanup: retention_days を安全な範囲 [1, {MAX_RETENTION_DAYS}] へ丸めた"
+        );
+    }
+    // `effective` は `[1, MAX_RETENTION_DAYS]` なので `Duration::days` は決してパニックしない。
+    // この行が全 tick で唯一の cutoff 計算点。
+    let cutoff = now - chrono::Duration::days(effective);
 
     let agent_ids: Vec<String> = {
         let conn = db
@@ -332,7 +336,7 @@ pub fn cleanup_all(
             }
         };
         let tmp = workspace.join("tmp");
-        cleanup_tmp_dir(&tmp, retention_days, now, &mut report);
+        cleanup_tmp_dir(&tmp, cutoff, &mut report);
     }
     Ok(report)
 }
@@ -342,16 +346,11 @@ pub fn cleanup_all(
 /// Stage 1 で `mtime <= cutoff` の**通常ファイル**の実パスだけを列挙し、Stage 2 でその
 /// 各パスに `remove_file` を 1 回ずつ掛ける。結果は `report` に加算する。
 ///
-/// `retention_days` は `cleanup_all` で `[1, MAX_RETENTION_DAYS]` に丸め済みの前提
-/// （`chrono::Duration::days` のオーバーフロー = パニックをこの範囲で避ける）。
-fn cleanup_tmp_dir(
-    dir: &Path,
-    retention_days: i64,
-    now: DateTime<Utc>,
-    report: &mut CleanupReport,
-) {
-    let cutoff = now - chrono::Duration::days(retention_days);
-
+/// **`retention_days` ではなく計算済みの `cutoff` を受け取る**（#715 2 巡目指摘1）: 消費点で
+/// `chrono::Duration::days` を呼ばないので、丸め前の危険な値（`0` で全 fresh 削除・`i64::MAX`
+/// でパニック）が cutoff に化ける経路がそもそも存在しない。丸め＋cutoff 計算は唯一の呼び出し元
+/// `cleanup_all` に集約され、不変条件をコメントではなく構造で守る。
+fn cleanup_tmp_dir(dir: &Path, cutoff: DateTime<Utc>, report: &mut CleanupReport) {
     let rd = match std::fs::read_dir(dir) {
         Ok(rd) => rd,
         // tmp/ 自体が無い = このエージェントは退避実績が無い → 掃除対象ゼロ。失敗の握り潰し
@@ -477,6 +476,11 @@ mod tests {
         now() - chrono::Duration::days(d)
     }
 
+    /// `cleanup_tmp_dir` は cutoff を受け取るので、`retention_days` 日ぶんの cutoff を作る。
+    fn cutoff(retention_days: i64) -> DateTime<Utc> {
+        now() - chrono::Duration::days(retention_days)
+    }
+
     // 最重要 1: 保持期間より古いものは消し、期間内のものは残す（age 述語の固定）。
     #[test]
     fn deletes_expired_keeps_recent() {
@@ -487,7 +491,7 @@ mod tests {
         write_file_with_mtime(&recent, b"keep me", days_ago(1)); // 1 日前 → 残す
 
         let mut report = CleanupReport::default();
-        cleanup_tmp_dir(tmp.path(), 7, now(), &mut report);
+        cleanup_tmp_dir(tmp.path(), cutoff(7), &mut report);
 
         assert_eq!(report.deleted, 1);
         assert_eq!(report.freed_bytes, 10);
@@ -506,7 +510,7 @@ mod tests {
         write_file_with_mtime(&b, b"bbb", days_ago(6)); // ぎりぎり保持内（<7日）
 
         let mut report = CleanupReport::default();
-        cleanup_tmp_dir(tmp.path(), 7, now(), &mut report);
+        cleanup_tmp_dir(tmp.path(), cutoff(7), &mut report);
 
         assert_eq!(report.deleted, 0, "保持期間内は 1 つも消さない");
         assert_eq!(report.freed_bytes, 0);
@@ -521,7 +525,7 @@ mod tests {
         write_file_with_mtime(&f, b"x", days_ago(7));
 
         let mut report = CleanupReport::default();
-        cleanup_tmp_dir(tmp.path(), 7, now(), &mut report);
+        cleanup_tmp_dir(tmp.path(), cutoff(7), &mut report);
         assert_eq!(report.deleted, 1);
         assert!(!f.exists());
     }
@@ -542,7 +546,7 @@ mod tests {
         write_file_with_mtime(&regular, b"r", days_ago(100));
 
         let mut report = CleanupReport::default();
-        cleanup_tmp_dir(tmp.path(), 7, now(), &mut report);
+        cleanup_tmp_dir(tmp.path(), cutoff(7), &mut report);
 
         assert_eq!(report.deleted, 1, "通常ファイルだけ消える");
         assert!(marker.exists(), "マーカーは保護");
@@ -558,7 +562,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let missing = tmp.path().join("does-not-exist");
         let mut report = CleanupReport::default();
-        cleanup_tmp_dir(&missing, 7, now(), &mut report);
+        cleanup_tmp_dir(&missing, cutoff(7), &mut report);
         assert_eq!(report.deleted, 0);
         assert_eq!(report.vanished, 0);
         assert!(report.errors.is_empty(), "存在しない tmp はエラーにしない");
@@ -579,7 +583,7 @@ mod tests {
         std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
 
         let mut report = CleanupReport::default();
-        cleanup_tmp_dir(tmp.path(), 7, now(), &mut report);
+        cleanup_tmp_dir(tmp.path(), cutoff(7), &mut report);
 
         // 後始末（tempdir が消せるよう権限を戻す）。
         std::fs::set_permissions(tmp.path(), orig).unwrap();
