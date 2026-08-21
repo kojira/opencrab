@@ -46,7 +46,9 @@ fn create_test_state(compaction_ratio: f64) -> (AppState, opencrab_db::Db) {
         #[cfg(feature = "nostr")]
         nostr_master_key: None,
         #[cfg(feature = "discord")]
-        discord_shared_gateway: std::sync::Arc::new(opencrab_server::config::DiscordGatewayConfig::default()),
+        discord_shared_gateway: std::sync::Arc::new(
+            opencrab_server::config::DiscordGatewayConfig::default(),
+        ),
         default_model: "mock:test".to_string(),
         tools_config: Arc::new(std::sync::RwLock::new(
             opencrab_actions::tools::ToolsConfig::default(),
@@ -1093,7 +1095,9 @@ fn create_test_app_with_state() -> (Router, opencrab_db::Db, Arc<MockLlmProvider
         #[cfg(feature = "nostr")]
         nostr_master_key: None,
         #[cfg(feature = "discord")]
-        discord_shared_gateway: std::sync::Arc::new(opencrab_server::config::DiscordGatewayConfig::default()),
+        discord_shared_gateway: std::sync::Arc::new(
+            opencrab_server::config::DiscordGatewayConfig::default(),
+        ),
         default_model: "mock:gpt-4o".to_string(),
         tools_config: Arc::new(std::sync::RwLock::new(
             opencrab_actions::tools::ToolsConfig::default(),
@@ -2014,7 +2018,9 @@ fn state_with_consolidation(
         #[cfg(feature = "nostr")]
         nostr_master_key: None,
         #[cfg(feature = "discord")]
-        discord_shared_gateway: std::sync::Arc::new(opencrab_server::config::DiscordGatewayConfig::default()),
+        discord_shared_gateway: std::sync::Arc::new(
+            opencrab_server::config::DiscordGatewayConfig::default(),
+        ),
         default_model: "mock:gpt-4o".to_string(),
         tools_config: Arc::new(std::sync::RwLock::new(
             opencrab_actions::tools::ToolsConfig::default(),

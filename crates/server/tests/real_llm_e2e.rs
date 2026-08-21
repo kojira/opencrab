@@ -53,7 +53,9 @@ fn create_real_llm_app() -> (Router, opencrab_db::Db) {
         #[cfg(feature = "nostr")]
         nostr_master_key: None,
         #[cfg(feature = "discord")]
-        discord_shared_gateway: std::sync::Arc::new(opencrab_server::config::DiscordGatewayConfig::default()),
+        discord_shared_gateway: std::sync::Arc::new(
+            opencrab_server::config::DiscordGatewayConfig::default(),
+        ),
         default_model: "openrouter:openai/gpt-4o".to_string(),
         tools_config: Arc::new(std::sync::RwLock::new(
             opencrab_actions::tools::ToolsConfig::default(),
