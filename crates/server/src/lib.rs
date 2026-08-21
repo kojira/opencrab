@@ -600,11 +600,6 @@ pub fn create_router(state: AppState) -> Router {
             axum::routing::patch(api::trusted_users::update_trusted_user)
                 .delete(api::trusted_users::delete_trusted_user),
         )
-        // エージェントメッセージ
-        .route(
-            "/api/agents/{id}/messages",
-            post(api::agents_messages::send_agent_message),
-        )
         // 定時実行スケジュール（#455）。ダッシュボード config API と同じ認証層の内側。
         .route(
             "/api/agents/{id}/schedules",

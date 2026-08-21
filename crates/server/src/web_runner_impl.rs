@@ -14,7 +14,7 @@ use opencrab_web_gateway::{WebAgentRunner, WebGateway, WEB_SESSION_THEME};
 use crate::AppState;
 
 impl WebAgentRunner for AppState {
-    /// 呼び出し元の権限判定。REST（`agents_messages`）と同じ 1 実装
+    /// 呼び出し元の権限判定を 1 実装
     /// （[`crate::caller_identity::resolve_caller_identity`]）へ委譲する（#164 / #159）。
     /// owner 判定に使う設定が Discord の owner のままである線引きもそちらの doc にある。
     ///

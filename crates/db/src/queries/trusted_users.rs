@@ -116,7 +116,7 @@ pub fn delete_trusted_co_agent(
 pub const TRUSTED_PLATFORM_DISCORD: &str = "discord";
 /// ダッシュボード（web ゲートウェイ）が申告するユーザー識別子の経路。
 pub const TRUSTED_PLATFORM_WEB: &str = "web";
-/// REST `POST /api/agents/{id}/messages` が申告するユーザー識別子の経路。
+/// 撤去済みの direct-message REST が使用していた識別子の経路（既存行の互換用）。
 pub const TRUSTED_PLATFORM_REST: &str = "rest";
 /// Nostr 受信イベントの著者 pubkey の経路（#319）。
 ///

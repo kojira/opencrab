@@ -198,9 +198,9 @@ pub struct SubtaskSettled {
 /// ランタイムは `Arc<dyn SubtaskCompletionSink>` を保持し、**DB 永続化の後に**
 /// `on_subtask_settled` を呼ぶだけで、`LoopEvent` を知らない。sink 実装が
 /// 「resume ＋ その gateway の配送口」を担う（Discord=`send_to_channel` /
-/// Nostr=`reply` / REST=保存して取得 / heartbeat=次 tick 拾い or 保存）。
+/// Nostr=`reply` / web=SSE / heartbeat=次 tick 拾い or 保存）。
 pub trait SubtaskCompletionSink: Send + Sync {
-    /// この transport が持つ**親セッション ID の接頭辞**（例 `discord-` / `web-` / `agent-msg-`）。
+    /// この transport が持つ**親セッション ID の接頭辞**（例 `discord-` / `web-`）。
     ///
     /// 継続を起こすかの判断（[`dispatch_settled`]）が使う。sink は spawn 時に transport ごとへ
     /// 選ばれるが、ネストした subtask（`subtask-*`）や heartbeat（`heartbeat-*`）の決着が同じ
@@ -209,7 +209,7 @@ pub trait SubtaskCompletionSink: Send + Sync {
     /// **既定実装を与えない**（#638）。新しい transport を足したとき、コンパイラがここで止める。
     ///
     /// **接頭辞は transport 間で互いに素であること**（現状 `discord-` / `web-` / `nostr-` /
-    /// `agent-msg-` / `heartbeat-` / `subtask-` は重ならない）。重なると、判断
+    /// `heartbeat-` / `subtask-` は重ならない）。重なると、判断
     /// （[`dispatch_settled`]）が親セッションを取り違えて継続を誤配送する——コンパイラは
     /// ここを強制できないので、transport を足すときに既存の接頭辞と衝突しないことを確かめる。
     fn session_prefix(&self) -> &'static str;
@@ -217,7 +217,7 @@ pub trait SubtaskCompletionSink: Send + Sync {
     /// **進捗（[`SettleKind::Progress`]）も継続として配送するか**（Discord だけ `true`）。
     ///
     /// `report_progress` のデバウンス発火が「進捗実況」としてメインエンジンを呼び直す Discord
-    /// 固有の機能。web / Nostr / REST は完了だけを配送する（進捗で resume すると、まだ走って
+    /// 固有の機能。web / Nostr は完了だけを配送する（進捗で resume すると、まだ走って
     /// いる run の途中で二重に応答してしまう）。**transport ごとに違うのはここだけ**なので、
     /// 判断ではなく**性質**として名乗らせる（#638）。
     ///
@@ -257,10 +257,8 @@ pub trait SubtaskCompletionSink: Send + Sync {
 /// **継続ターンを起こすかどうかの判断（#638・唯一の実装）**。
 ///
 /// 以前は transport ごとの sink が同じ判断をそれぞれ書いていた（Discord / web / Nostr の 3 本）。
-/// 同型実装が 3 つあると「3 箇所とも直さないと直らない」うえ、実際に不一致が生まれていた——
-/// **REST には継続そのものが無く**（`POST /api/agents/{id}/messages` で subtask を投げると、
-/// 完了が届いても続きが走らない / #631 の実測）、web / Nostr は完了 1 本ごとに継続するのに
-/// REST だけ「未完がゼロのとき」というゲートを持っていた。判断をここへ集約し、transport は
+/// 同型実装が 3 つあると「3 箇所とも直さないと直らない」うえ、実際に不一致が生まれていた。
+/// 判断をここへ集約し、transport は
 /// [`SubtaskCompletionSink::deliver_continuation`]（配送）と
 /// [`SubtaskCompletionSink::forwards_progress`]（性質）だけを答える。
 ///

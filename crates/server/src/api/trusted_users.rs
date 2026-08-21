@@ -23,7 +23,7 @@ pub struct TrustedUserDto {
     pub created_by: String,
     pub created_at: String,
     pub display_name: String,
-    /// `user_id` がどの経路の識別子か（`discord` / `web` / `rest`, #159）。
+    /// `user_id` がどの経路の識別子か（`discord` / `web` / legacy `rest`, #159）。
     ///
     /// **応答に出す**: 互換読みの撤去後は「どの経路の行か」が権限そのものを決めるため、
     /// 一覧に出ていないと運用者は「登録したのに効かない」行を見分けられない。
@@ -69,8 +69,8 @@ pub struct AddTrustedUserRequest {
 /// 信頼済みユーザーを 1 件登録する。
 ///
 /// `platform` で識別子空間を選ぶ（#159）。省略時は従来どおり `discord`。ダッシュボード
-/// 利用者は `web`、`POST /api/agents/{id}/messages` の利用者は `rest` で登録する
-/// （互換読みの撤去後、他経路の行はその経路の権限を与えない）。
+/// 利用者は `web` で登録する。`rest` は撤去済みの direct-message REST に属する既存行との
+/// 互換のため受け付ける（互換読みの撤去後、他経路の行はその経路の権限を与えない）。
 ///
 /// 未定義の経路は 400 で弾く（登録できても誰とも一致しない行になり、「登録したのに
 /// 効かない」が黙って残るため）。一意制約 `(user_id, agent_id)` の衝突は 409

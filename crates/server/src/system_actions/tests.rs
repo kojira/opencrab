@@ -2555,8 +2555,8 @@ async fn generic_management_tools_are_not_delegated_to_inner() {
 /// の反転**である。旧テストは「inner が居てもグローバル設定に反映される」ことを
 /// 不変条件として固定していたが、それは #202 の漏れそのものだった。
 ///
-/// 経緯（#197 との関係）: REST（`crate::api::agents_messages`）は Discord が有効な
-/// とき `SystemGatewayActions { inner: Some(DiscordGatewayActions) }` を組む。移設前は
+/// 経緯（#197 との関係）: 旧 REST 会話経路は Discord が有効な
+/// とき `SystemGatewayActions { inner: Some(DiscordGatewayActions) }` を組んでいた。移設前は
 /// その Discord gateway へ `Arc::new(RwLock::new(state.tools_config.read().clone()))`
 /// ＝**使い捨てのコピー**を渡していた。そのおかげで REST 経路は**偶然この漏れが
 /// 無かった**。素朴に移設すると共有実体へ届いて漏れる側に揃ってしまうため、同じ
