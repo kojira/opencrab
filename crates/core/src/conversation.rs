@@ -412,11 +412,17 @@ fn is_excluded_from_conversation(log: &opencrab_db::queries::SessionLogRow) -> b
 /// テストがどちらの経路が落ちても落ちる。
 pub(crate) fn result_reference(tool_name: &str, result_json: &str) -> String {
     let reference = build_result_reference(tool_name, result_json);
-    // 会話を軽くするための仕組みが会話を重くしては本末転倒（#709 レビュー指摘1）。参照が本文
-    // より短くならないなら潰す意味がないので本文をそのまま残す。小さな mutation 結果はここで
-    // そのまま残り、`build_result_reference` が返す本文（失敗・非 JSON）もこの不変条件を通る。
-    if reference.chars().count() >= result_json.chars().count() {
-        result_json.to_string()
+    shorter_of_reference_or_body(reference, result_json)
+}
+
+/// 長さの不変条件（#709 レビュー指摘1）を 1 箇所に集約する: 参照が本文より短くならないなら
+/// 潰す意味がないので本文をそのまま残す。会話を軽くするための仕組みが会話を重くしては本末転倒。
+/// `tool_result`（[`result_reference`]）と `subtask_completed`（[`fold_subtask_completed`]）が
+/// **同じ判断**を共有し、同じ形の判断を 2 箇所に書かない（[[same-shaped-bugs-mean-one-missing-thing]]）。
+/// 小さな結果や、参照器が本文をそのまま返した（失敗・非 JSON）ケースもここを通る。
+fn shorter_of_reference_or_body(reference: String, body: &str) -> String {
+    if reference.chars().count() >= body.chars().count() {
+        body.to_string()
     } else {
         reference
     }
@@ -530,6 +536,155 @@ fn build_result_reference(tool_name: &str, result_json: &str) -> String {
         }
         None => format!("結果 {size} 文字（本文は会話に残していない）"),
     }
+}
+
+/// `subtask_completed` の内側 `result`（ツール実行の本文）を会話へ持ち越さない形へ畳む（#713）。
+///
+/// opencrab は「ツールを常に切り離す」ため、実運用ではツール結果の主経路が **`tool_result` では
+/// なく完了本文の入れ子 `result`** になる。#709 が `tool_result` で塞いだのと同じ塊がここに現れる
+/// （本番実測でツール結果 JSON が 150 件 / 281,347 文字・subtask_completed 全体の 86%）。
+///
+/// **判定の核**——`signals_failure`（失敗は本文ごと残す）と長さ不変条件——は [`result_reference`] と
+/// **共有**し、**文言だけ** subtask 用に分ける（[[single-source-of-truth-no-parallel-paths]]）。
+/// `tool_result` と決定的に違うのは**再取得できないこと**（切り離したサブタスクの結果は取り直せない
+/// ＝非冪等・罠3）。だから参照は「もう一度読む」と**約束しない**。代わりに監査の在り処——完了本文の
+/// `session_id`（サブセッション）——を指し、全文が記録に残ることだけ伝える。
+///
+/// 返すのは会話へ載せる `result` の中身。畳めない/畳むべきでない形——生産者A（サブエージェント）の
+/// 散文応答・timeout / error の平文・退避 notice・失敗・想定外 JSON——は `result_str` を**そのまま
+/// 返す**（握り潰さない・fail-safe）。生産者A の散文は「エージェントが出した答え・報告書」であって
+/// 塊ではなく、参照化しない（#713 決定B）。
+///
+/// **受容した制限（決定B のサイレントな誤分類・#716 レビュー指摘2）**: 生産者A と B を分ける唯一の
+/// 信号は**値の形**（`success` 封筒の有無）だけで、完了本文に由来（切り離しツール／サブエージェント
+/// 会話）を示すフィールドは無い（`settle_completed` は `engine_result.response` をそのまま `result` へ
+/// 載せる）。したがってサブエージェントが最終応答として `{"success":true,"data":{…}}` 形の JSON を
+/// 返すと生産者B と区別できず**畳まれる**。これは受容する: 長さ不変条件で小さい答えは残る／DB に全文が
+/// 残る／`session_id` ポインタも残る／本番実測で該当例は未発見。由来フィールドを生産者側へ足すのは
+/// スコープ外（別 issue）。将来この誤分類が実害化したときここから辿れるよう明記しておく。
+fn fold_subtask_completed(
+    exit_reason: &str,
+    session_id: &str,
+    subtask_id: &str,
+    result_str: &str,
+) -> String {
+    // ゲート1（外側）: completed 以外は本文を丸ごと残す。timeout / error / stopped_by_limit は
+    // 「プロセス完了＝clean」ではない。**completed を成功と読み替えない**ための belt——completed でも
+    // 下のゲート2でさらに中身を見る（罠1）。
+    if exit_reason != "completed" {
+        return result_str.to_string();
+    }
+
+    // ゲート2（内側・データの形で分岐）。
+    let inner: serde_json::Value = match serde_json::from_str(result_str) {
+        Ok(v) => v,
+        // 非 JSON = 生産者A の散文 / timeout・error の平文 / 退避 notice（読み方レシピ入り）。
+        // #709 が非 JSON を素通しするのと同じ——推測で捨てない（罠4・fail-safe）。
+        Err(_) => return result_str.to_string(),
+    };
+
+    let reference = match &inner {
+        // 単一ツール: `{"success":bool,"data":{…}}`（`tool_result` と同一形）。
+        serde_json::Value::Object(_) => {
+            // 生産者B のツール結果は `success` の封筒を持つ。その封筒でない任意の JSON
+            // オブジェクト（生産者A がたまたま JSON を返した等）は「答え・成果物」であって
+            // ツール結果ではない——畳まず残す（決定B・fail-safe）。※封筒が無い場合は下の
+            // `signals_failure` も失敗側へ倒すが、意図を明示するためここで先に切る。
+            if inner.get("success").is_none() {
+                return result_str.to_string();
+            }
+            let null = serde_json::Value::Null;
+            let d = inner.get("data").unwrap_or(&null);
+            // 失敗は参照へ潰さず本文を丸ごと残す。判定は #709 と共有（success:false または
+            // data.exit_code!=0）。stdout / stderr を選り分けない（罠2）。
+            if signals_failure(&inner, d) {
+                return result_str.to_string();
+            }
+            build_subtask_single_reference(subtask_id, session_id, d)
+        }
+        // 複数ツール（batch）: `[{"tool":…,"tool_call_id":…,"result":<value>}, …]`。
+        serde_json::Value::Array(items) => {
+            // どれか 1 要素でも失敗なら配列を丸ごと残す（罠2）。判定は要素の `result` に
+            // 同じ `signals_failure` を掛ける（非オブジェクト要素は失敗側＝本文保持へ倒す）。
+            if items.iter().any(|e| batch_entry_signals_failure(e)) {
+                return result_str.to_string();
+            }
+            build_subtask_batch_reference(subtask_id, session_id, items.len(), result_str)
+        }
+        // 想定外の JSON（scalar 等）: 推測で捨てず残す（fail-safe）。
+        _ => return result_str.to_string(),
+    };
+
+    // 長さ不変条件（#709 と共有）: 参照が本文以上なら本文を残す。
+    shorter_of_reference_or_body(reference, result_str)
+}
+
+/// 監査の在り処（サブセッション）を指す共通の後置き（#713 決定A）。**再取得は約束しない**（罠3）——
+/// `result` の read/list 文言（「もう一度 X で読む」）は切り離した subtask には嘘になる。全文が
+/// 記録（`memory_sessions` / `session_logs`）に残ることと、その在り処（`session_id`）だけ伝える。
+fn subtask_audit_suffix(session_id: &str) -> String {
+    format!("（本文は会話に残していない。全文は記録に残る: session={session_id}）")
+}
+
+/// 単一ツールの subtask 参照。`exit_code` があれば終了コードと出力規模、無ければ結果規模。
+/// ここへ来るのは `signals_failure` を通った成功だけなので終了コードは 0。
+fn build_subtask_single_reference(
+    subtask_id: &str,
+    session_id: &str,
+    d: &serde_json::Value,
+) -> String {
+    let suffix = subtask_audit_suffix(session_id);
+    if let Some(code) = d.get("exit_code").and_then(|x| x.as_i64()) {
+        // 非ゼロ終了は `signals_failure` が本文ごと残すので、ここへ来るのは成功（code==0）だけ。
+        // 双子の `build_result_reference` と対称に tripwire を置き、不変条件が破れたら気づく。
+        debug_assert_eq!(
+            code, 0,
+            "非ゼロ終了は signals_failure が本文ごと残すはず（#709 の不変条件が破れている）"
+        );
+        // stdout **と** stderr の両方を数える（統括レビュー指摘1）。cargo build の warning など
+        // 正常終了でも stderr へ大量に出るツールがあり、stdout だけだと「出力 0 文字」と事実と
+        // 違う表示になる。本文は落とすが、会話に残す唯一の数字は正しくする。
+        let out = d.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
+        let err = d.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
+        let stderr_note = if err.is_empty() {
+            String::new()
+        } else {
+            format!("・stderr {} 文字", err.chars().count())
+        };
+        return format!(
+            "サブタスク {subtask_id} 完了・終了コード {code}・出力 {} 文字{stderr_note}{suffix}",
+            out.chars().count(),
+        );
+    }
+    // exit_code の無いツール結果は data の規模だけ残す（何を呼んだかは記録に残る）。
+    let size = serde_json::to_string(d)
+        .map(|t| t.chars().count())
+        .unwrap_or(0);
+    format!("サブタスク {subtask_id} 完了・結果 {size} 文字{suffix}")
+}
+
+/// batch（複数ツール）の subtask 参照。件数と合計規模（配列 JSON の文字数）を残す。
+fn build_subtask_batch_reference(
+    subtask_id: &str,
+    session_id: &str,
+    count: usize,
+    result_str: &str,
+) -> String {
+    format!(
+        "サブタスク {subtask_id} 完了・{count} 件のツール結果・合計 {} 文字{}",
+        result_str.chars().count(),
+        subtask_audit_suffix(session_id),
+    )
+}
+
+/// batch 要素（`{"tool":…,"tool_call_id":…,"result":<value>}`）が失敗を表すか。
+/// 要素の `result` に #709 の `signals_failure` を掛ける。`result` が非オブジェクト
+/// （パースできず String で入った・欠落した等）は失敗側へ倒す＝配列全体を本文保持（fail-safe）。
+fn batch_entry_signals_failure(entry: &serde_json::Value) -> bool {
+    let null = serde_json::Value::Null;
+    let result = entry.get("result").unwrap_or(&null);
+    let d = result.get("data").unwrap_or(&null);
+    signals_failure(result, d)
 }
 
 /// heartbeat セッションで過去に積まれた指示文（プロンプト scaffolding）か（#501）。
@@ -920,6 +1075,13 @@ pub fn format_single_log(log: &opencrab_db::queries::SessionLogRow) -> String {
         "system" => {
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&log.content) {
                 if let Some(kind) = value.get("type").and_then(|v| v.as_str()) {
+                    // #713: `subtask_completed` **だけ**、入れ子 `result`（ツール実行の本文）を
+                    // 会話へ持ち越さず参照へ畳む。他の system type は現状どおり丸ごと
+                    // pretty-print（範囲外・塊の証拠なし）。**厳密一致**で 1 type だけ分岐し、
+                    // 他の type を巻き込まない（設計 Q2 #8）。
+                    if kind == "subtask_completed" {
+                        return format_subtask_completed(&value, &log.content, &ts);
+                    }
                     let content = serde_json::to_string_pretty(&value)
                         .unwrap_or_else(|_| log.content.clone());
                     return format!("[system: {}]{}:\n{}", kind, ts, content);
@@ -927,8 +1089,49 @@ pub fn format_single_log(log: &opencrab_db::queries::SessionLogRow) -> String {
             }
             format!("[system]{}:\n{}", ts, log.content)
         }
+        // catch-all: 未知の log_type は `content` を**丸ごと**運ぶ（設計 Q2 #9 の構造的盲点）。
+        // 将来 log_type を足した人が本文の持ち越しに気づけるよう
+        // `unknown_log_types_carry_full_body_through_catch_all` で固定する。
         other => format!("[{}]{}:\n{}", other, ts, log.content),
     }
+}
+
+/// `subtask_completed` の完了本文を会話行へ整形する（#713）。入れ子 `result`（ツール実行の本文）を
+/// [`fold_subtask_completed`] で参照へ畳んでから、外側の封筒（`subtask_id` / `session_id` /
+/// `exit_reason`）はそのまま pretty-print する——監査の相関（起動応答との突き合わせ・記録の在り処）を
+/// 会話から消さない。畳めない形（失敗・散文・退避 notice 等）では `result` は原文のまま残るので、
+/// 表示は従来の pretty-print と一致する（挙動を変えるのは畳めたときだけ）。
+fn format_subtask_completed(value: &serde_json::Value, raw_content: &str, ts: &str) -> String {
+    let pretty = |v: &serde_json::Value| {
+        serde_json::to_string_pretty(v).unwrap_or_else(|_| raw_content.to_string())
+    };
+
+    // `result` は文字列（`settle_completed` が `result_text` を JSON 文字列として載せる）。
+    // 想定外に文字列でなければ触らず現状の pretty-print に委ねる（fail-safe）。
+    let Some(result_str) = value.get("result").and_then(|v| v.as_str()) else {
+        return format!("[system: subtask_completed]{ts}:\n{}", pretty(value));
+    };
+
+    let exit_reason = value
+        .get("exit_reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let session_id = value
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let subtask_id = value
+        .get("subtask_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let folded = fold_subtask_completed(exit_reason, session_id, subtask_id, result_str);
+
+    let mut shown = value.clone();
+    if let Some(obj) = shown.as_object_mut() {
+        obj.insert("result".to_string(), serde_json::Value::String(folded));
+    }
+    format!("[system: subtask_completed]{ts}:\n{}", pretty(&shown))
 }
 
 #[cfg(test)]
@@ -2617,5 +2820,376 @@ mod result_reference_tests {
             cmd_fail,
             "非ゼロ終了が要約されて消えた"
         );
+    }
+}
+
+/// #713: `subtask_completed` の入れ子 `result`（ツール実行の本文）を会話へ持ち越さない。
+///
+/// opencrab は「ツールを常に切り離す」ため、実運用ではツール結果の主経路がここ（`tool_result`
+/// ではなく完了本文の入れ子 `result`）。全テストは公開入口 `format_single_log` を通して実際の
+/// `system` アーム分岐を叩く（変異検知の best altitude）。
+#[cfg(test)]
+mod subtask_completed_folding_tests {
+    use super::format_single_log;
+    use opencrab_db::queries::SessionLogRow;
+
+    /// `settle_completed` が書く完了本文と同一形の system ログを作る。`result` は**文字列**
+    /// （`result_text` を JSON 文字列として載せる）。`speaker_id=None`（scaffolding と区別）。
+    fn subtask_completed_log(exit_reason: &str, result_str: &str) -> SessionLogRow {
+        let content = serde_json::json!({
+            "type": "subtask_completed",
+            "subtask_id": "st-1",
+            "session_id": "subtask-st-1",
+            "exit_reason": exit_reason,
+            "result": result_str,
+        })
+        .to_string();
+        SessionLogRow {
+            id: None,
+            agent_id: "agent-1".to_string(),
+            session_id: "parent".to_string(),
+            log_type: "system".to_string(),
+            content,
+            speaker_id: None,
+            turn_number: None,
+            metadata_json: None,
+            created_at: None,
+        }
+    }
+
+    /// 1. 単一ツール成功（execute_shell 大出力）→ 参照化され stdout 本文が会話に載らない。
+    ///    監査の相関（起動応答との突き合わせ）を残すため封筒（subtask_id / exit_reason）と
+    ///    記録の在り処（session=）も残る。
+    #[test]
+    fn single_tool_success_leaves_only_a_reference() {
+        let out = "x".repeat(50_000);
+        let result = serde_json::json!({
+            "success": true, "data": {"exit_code": 0, "stdout": out, "stderr": ""}
+        })
+        .to_string();
+
+        let o = format_single_log(&subtask_completed_log("completed", &result));
+        assert!(
+            !o.contains(&"x".repeat(100)),
+            "stdout 本文が会話へ載っている（#709 の状態）: {o:.120}"
+        );
+        assert!(o.contains("終了コード 0"), "終了コードが無い: {o}");
+        assert!(o.contains("50000"), "出力規模が無い: {o}");
+        assert!(
+            o.contains("st-1"),
+            "起動応答と突き合わせる subtask_id が消えた: {o}"
+        );
+        assert!(
+            o.contains("session=subtask-st-1"),
+            "監査の在り処（session_id）が消えた: {o}"
+        );
+    }
+
+    /// 1b. 正常終了でも stderr に大量に出るツール（cargo build の warning 等）の規模を数える
+    ///     （#716 レビュー指摘1）。stdout が空でも「出力 0 文字」で終わらず stderr の規模を出す。
+    #[test]
+    fn single_tool_reference_counts_stderr_size() {
+        let err = "warning: unused variable `x`\n".repeat(2_000);
+        let result = serde_json::json!({
+            "success": true,
+            "data": {"exit_code": 0, "stdout": "", "stderr": err}
+        })
+        .to_string();
+
+        let o = format_single_log(&subtask_completed_log("completed", &result));
+        assert!(
+            !o.contains("warning: unused variable"),
+            "stderr 本文が会話へ載っている: {o:.120}"
+        );
+        assert!(o.contains("出力 0 文字"), "stdout 規模が無い: {o}");
+        assert!(
+            o.contains(&format!("stderr {} 文字", err.chars().count())),
+            "stderr の規模が数えられていない（stdout だけ数えて事実と違う表示）: {o}"
+        );
+    }
+
+    /// 2. 単一ツール失敗（execute_shell は success:true のまま exit_code!=0）→ 本文を丸ごと残す。
+    ///    stderr / stdout を選り分けず両方残す（罠2）。
+    #[test]
+    fn single_tool_failure_keeps_the_whole_body() {
+        let result = serde_json::json!({
+            "success": true,
+            "data": {
+                "exit_code": 1,
+                "stdout": "panicked at src/lib.rs:88",
+                "stderr": "error[E0308]: mismatched types"
+            }
+        })
+        .to_string();
+
+        let o = format_single_log(&subtask_completed_log("completed", &result));
+        assert!(o.contains("E0308"), "stderr の失敗理由が消えた: {o}");
+        assert!(
+            o.contains("src/lib.rs:88"),
+            "stdout の失敗詳細が消えた: {o}"
+        );
+    }
+
+    /// 3. `exit_reason=="completed"` でも内側 `exit_code!=0` なら本文保持（外側 completed に騙されない・罠1）。
+    #[test]
+    fn completed_outer_does_not_mask_inner_nonzero_exit() {
+        let stdout = "assertion failed: used <= budget ".repeat(2_000);
+        let result = serde_json::json!({
+            "success": true,
+            "data": {"exit_code": 101, "stdout": stdout, "stderr": "test failed"}
+        })
+        .to_string();
+
+        let o = format_single_log(&subtask_completed_log("completed", &result));
+        assert!(
+            o.contains("assertion failed: used <= budget"),
+            "外側 completed で内側の失敗詳細が消えた: {o:.120}"
+        );
+    }
+
+    /// 4. `exit_reason ∈ {timeout,error,stopped_by_limit}` → 畳めるはずの本文でも丸ごと残す（罠1）。
+    #[test]
+    fn non_completed_exit_reasons_keep_the_body() {
+        let out = "x".repeat(50_000);
+        // completed なら畳まれる成功ツール結果。exit_reason だけで保持へ倒れることを見る。
+        let result = serde_json::json!({
+            "success": true, "data": {"exit_code": 0, "stdout": out, "stderr": ""}
+        })
+        .to_string();
+
+        for er in ["timeout", "error", "stopped_by_limit"] {
+            let o = format_single_log(&subtask_completed_log(er, &result));
+            assert!(
+                o.contains(&"x".repeat(100)),
+                "exit_reason={er} で本文が畳まれた（completed 以外は保持のはず）: {o:.120}"
+            );
+        }
+    }
+
+    /// 5. 生産者A（サブエージェント最終応答・非 JSON の散文）→ そのまま残る（要約で消さない・決定B）。
+    #[test]
+    fn producer_a_prose_is_left_intact() {
+        let prose = "サブエージェントが出した最終応答の本文。".repeat(50);
+        let o = format_single_log(&subtask_completed_log("completed", &prose));
+        assert!(
+            o.contains("サブエージェントが出した最終応答の本文。"),
+            "散文の答えが消えた（決定B に反する）: {o:.120}"
+        );
+        assert!(
+            !o.contains("本文は会話に残していない"),
+            "散文を参照へ潰した: {o:.120}"
+        );
+    }
+
+    /// 5b. 生産者A がたまたま JSON オブジェクトを返しても（`success` 封筒が無い）畳まない（決定B・fail-safe）。
+    #[test]
+    fn producer_a_bare_json_object_is_not_folded() {
+        let answer = serde_json::json!({
+            "answer": "これはサブエージェントの答え".repeat(100), "confidence": "high"
+        })
+        .to_string();
+        let o = format_single_log(&subtask_completed_log("completed", &answer));
+        assert!(
+            o.contains("これはサブエージェントの答え"),
+            "ツール封筒でない JSON を畳んで答えを消した: {o:.120}"
+        );
+    }
+
+    /// 6. 退避 notice（非 JSON・読み方レシピ入り）→ そのまま素通し（レシピが壊れない・罠4）。
+    #[test]
+    fn offload_notice_passes_through_untouched() {
+        let notice =
+            "結果が大きいため退避しました: workspace/offload/abc.txt（全 1234 行）。読み方: ws_read で行範囲を指定して読む。";
+        let o = format_single_log(&subtask_completed_log("completed", notice));
+        assert!(
+            o.contains("workspace/offload/abc.txt") && o.contains("ws_read で行範囲"),
+            "退避 notice の読み方レシピが壊れた: {o}"
+        );
+    }
+
+    /// 7. batch 配列で 1 要素でも失敗 → 配列全体を保持（罠2）。
+    #[test]
+    fn batch_with_one_failure_keeps_the_whole_array() {
+        let arr = serde_json::json!([
+            {"tool":"execute_shell","tool_call_id":"c1",
+             "result":{"success":true,"data":{"exit_code":0,"stdout":"ok"}}},
+            {"tool":"ws_read","tool_call_id":"c2",
+             "result":{"success":false,"data":null,"error":"path not found: docs/missing.md"}}
+        ])
+        .to_string();
+
+        let o = format_single_log(&subtask_completed_log("completed", &arr));
+        assert!(
+            o.contains("path not found: docs/missing.md"),
+            "batch の失敗要素が消えた: {o:.160}"
+        );
+    }
+
+    /// 8. batch 全成功 → 「N 件のツール結果・合計 M 文字」参照。個々の stdout 本文は載らない。
+    #[test]
+    fn batch_all_success_becomes_a_count_reference() {
+        let big = "y".repeat(20_000);
+        let arr = serde_json::json!([
+            {"tool":"execute_shell","tool_call_id":"c1",
+             "result":{"success":true,"data":{"exit_code":0,"stdout":big}}},
+            {"tool":"execute_shell","tool_call_id":"c2",
+             "result":{"success":true,"data":{"exit_code":0,"stdout":big}}}
+        ])
+        .to_string();
+
+        let o = format_single_log(&subtask_completed_log("completed", &arr));
+        assert!(
+            !o.contains(&"y".repeat(100)),
+            "batch の本文が会話へ載っている: {o:.120}"
+        );
+        assert!(o.contains("2 件"), "件数が無い: {o}");
+        assert!(
+            o.contains("session=subtask-st-1"),
+            "監査の在り処が消えた: {o}"
+        );
+    }
+
+    /// 9. 参照が本文以上に長くなる極小結果 → 本文を残す（長さ不変条件・#709 と共有）。
+    #[test]
+    fn tiny_results_are_never_expanded() {
+        let result = serde_json::json!({"success": true, "data": {"path": "x"}}).to_string();
+        let o = format_single_log(&subtask_completed_log("completed", &result));
+        assert!(
+            !o.contains("本文は会話に残していない"),
+            "極小結果を参照へ潰した（長さ不変条件が効いていない）: {o}"
+        );
+    }
+
+    /// 10. 参照に再取得誘導（「もう一度…読む」）を**含まない**（非冪等・罠3）。
+    #[test]
+    fn reference_never_promises_refetch() {
+        let out = "x".repeat(50_000);
+        let result = serde_json::json!({
+            "success": true, "data": {"exit_code": 0, "stdout": out}
+        })
+        .to_string();
+
+        let o = format_single_log(&subtask_completed_log("completed", &result));
+        assert!(
+            !o.contains("もう一度"),
+            "回収できない subtask に再取得を約束している: {o}"
+        );
+    }
+
+    /// 11a. **構造テスト: top-level の未知 log_type が catch-all で全文を運ぶことの固定**。
+    ///
+    /// `format_single_log` の catch-all は log_type を問わず `content` を**丸ごと**会話へ運ぶ。
+    /// 本文を畳む（参照化する）経路を持つのは現在 2 つだけ——`tool_result`（result_reference）と
+    /// `system` + `type=="subtask_completed"`（format_subtask_completed → fold_subtask_completed）。
+    /// ここでは top-level の未知 log_type が catch-all で全文を運ぶことを固定する。
+    ///
+    /// **このテストが守る向き・守らない向き（#716 レビュー 2 巡目・正確に）**:
+    /// - **守る**: 許可集合 `FOLDS_BODY_TOP_LEVEL` を更新せずに、census 内の type を**畳む枝を足した**とき
+    ///   赤くなる（残骸を減らす安全な方向の変更を「意図的に決めた」証跡として要求する）。
+    /// - **守らない**: 新しい log_type が**畳まれずに追加され、30 万文字を運び始める**ケース——**これは
+    ///   #713 の再発そのもの**（`subtask_completed` は誰も畳まず 324,176 文字を黙って積み上げた）だが、
+    ///   このテストは通ってしまう。catch-all は元から全文を運ぶのが仕様なので、新カリアが catch-all を
+    ///   通っても assert は緑のまま。**「新しい運び手はこのテストが検知する」と誤解しないこと。**
+    /// - **危険な向き（畳まれない新カリアの追加）を機械的に捕まえるには**、生産者側（`log_type` /
+    ///   `type` を書く箇所）を型で持って分類を強制する必要があり、**それは別スコープ**（別 issue）。
+    ///   守られていないのに守られていると信じるのが最悪なので、ここに非対称性を明記する。
+    #[test]
+    fn unknown_log_types_carry_full_body_through_catch_all() {
+        // 本文を畳む経路を持つ log_type（top-level）はこれだけ。system は subtype で分岐するので
+        // 11b で別に census する。ここを増やすときは畳み経路を意識的に足したことの証跡になる。
+        const FOLDS_BODY_TOP_LEVEL: &[&str] = &["tool_result"];
+
+        let body = "運ばれてはいけない生本文".repeat(30);
+        let raw_log = |log_type: &str| SessionLogRow {
+            id: None,
+            agent_id: "agent-1".to_string(),
+            session_id: "s".to_string(),
+            log_type: log_type.to_string(),
+            content: body.clone(),
+            speaker_id: Some("agent-1".to_string()),
+            turn_number: None,
+            metadata_json: None,
+            created_at: None,
+        };
+
+        // 将来 type を含む代表 census。畳み集合に無い type は catch-all で全文を運ぶ。
+        for lt in [
+            "evaluation_note",
+            "reflection",
+            "brand_new_type_2027",
+            "some_future_log_kind",
+        ] {
+            assert!(
+                !FOLDS_BODY_TOP_LEVEL.contains(&lt),
+                "census が畳み集合と衝突している（テストの前提が壊れた）: {lt}"
+            );
+            let out = format_single_log(&raw_log(lt));
+            assert!(
+                out.contains(&body),
+                "catch-all が log_type={lt} の本文を落としている。畳み経路を足したなら \
+                 FOLDS_BODY_TOP_LEVEL とこのテストを更新し「畳むか・運ぶか」を明示的に決めること: {out:.80}"
+            );
+        }
+    }
+
+    /// 11b. **構造テスト: `system` の未知サブタイプが全文を運ぶことの固定（#716 レビュー指摘1）**。
+    ///
+    /// #713 自身が「`system` の 1 サブタイプ（`type=="subtask_completed"`）」として現れたとおり、
+    /// **次の運び手も最も自然には `system` + 新しい `type`**（切り離しツールの別カリア等）として来る。
+    /// その形は 11a の top-level census を素通りし、`system` アームの `if kind == "subtask_completed"`
+    /// も素通りして `to_string_pretty` の丸ごと pretty-print に落ちて**本文を会話へ運ぶ**。11a だけでは
+    /// **#713 が生きている次元（system サブタイプ）そのものを見ていなかった**ので、その次元を固定する。
+    ///
+    /// **このテストが守る向き・守らない向き（#716 レビュー 2 巡目・正確に）**:
+    /// - **守る**: 許可集合 `FOLDS_BODY_SYSTEM_SUBTYPES` を更新せずに、census 内のサブタイプを**畳む枝を
+    ///   足した**とき赤くなる（system アームに fold 枝を足す＝本文を減らす方向の変更を「意図的に決めた」
+    ///   証跡として要求する）。
+    /// - **守らない**: 新しい system サブタイプが**畳まれずに追加され、30 万文字を運び始める**ケース——
+    ///   **これは #713 の再発そのもの**だが、このテストは通ってしまう。system アームは未知 type を元から
+    ///   pretty-print で全文運ぶのが現状の仕様なので、新カリアがそこを通っても assert は緑のまま。
+    ///   統括指示の目的「新しい type を足した人が本文の持ち越しに気づかず素通しできてしまう状態を無くす」は
+    ///   **この census では達成できていない**（＝ fold を足す向きだけを縛り、運び手を足す向きは縛れない）。
+    /// - **危険な向き（畳まれない新カリアの追加）を機械的に捕まえるには**、生産者側（`log_type='system'` を
+    ///   書く箇所）を型で持って分類を強制する必要があり、**それは別スコープ**（別 issue）。守られていない
+    ///   のに守られていると信じるのが最悪なので、この非対称性をここに明記する。
+    #[test]
+    fn unknown_system_subtypes_carry_full_body() {
+        // 本文を畳む（参照化する）system サブタイプはこれだけ。ここを増やす＝新しい切り離し系
+        // カリアを畳むと決めたことの証跡。増やさずに畳む枝を足すと下の census が赤くなる。
+        const FOLDS_BODY_SYSTEM_SUBTYPES: &[&str] = &["subtask_completed"];
+
+        let body = "運ばれてはいけない生本文".repeat(30);
+        // system ログは content に `type` を持つ JSON。畳まれなければ pretty-print が本文（note）を運ぶ。
+        let system_log = |subtype: &str| SessionLogRow {
+            id: None,
+            agent_id: "agent-1".to_string(),
+            session_id: "s".to_string(),
+            log_type: "system".to_string(),
+            content: serde_json::json!({ "type": subtype, "note": body }).to_string(),
+            speaker_id: None,
+            turn_number: None,
+            metadata_json: None,
+            created_at: None,
+        };
+
+        // 将来のカリアを含む代表 census。許可集合に無いサブタイプは全文を運ぶ。
+        for subtype in [
+            "reflection_note",
+            "handoff",
+            "new_tool_carrier_2027",
+            "some_future_system_kind",
+        ] {
+            assert!(
+                !FOLDS_BODY_SYSTEM_SUBTYPES.contains(&subtype),
+                "census が畳み集合と衝突している（テストの前提が壊れた）: {subtype}"
+            );
+            let out = format_single_log(&system_log(subtype));
+            assert!(
+                out.contains(&body),
+                "system サブタイプ type={subtype} の本文が会話から落ちた。切り離し系の新カリアを \
+                 畳むなら FOLDS_BODY_SYSTEM_SUBTYPES とこのテストを更新し、そうでなければ本文を \
+                 運ぶ（握り潰さない）こと: {out:.80}"
+            );
+        }
     }
 }
