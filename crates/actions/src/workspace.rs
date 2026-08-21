@@ -13,13 +13,11 @@ impl Action for WsReadAction {
     }
 
     fn description(&self) -> &str {
-        "ワークスペース内のファイルを読み取る。全文が inline 上限を超えると結果は退避される\
-         （#284/#294）ので、大きなファイルは start_line / line_count で行範囲を指定して読む。\
-         grep が返す行番号をそのまま start_line に渡せる。範囲を指定すれば退避されずに読め、\
-         has_more なら next_line を start_line に入れて続きを辿れる。1 行が長すぎると切られ\
-         末尾に ` …⟨+M文字⟩` が付く。継続は行単位なので、切られた行の続き（行内の残り）は\
-         再取得できない（標識がそれを示す）。1 行しか無いファイルは常に同じ先頭 512 文字＋標識が\
-         返り has_more=false になる。"
+        "ワークスペース内のファイルを読み取る。既定で先頭から 2,000 行を返す（省略時も 1 ページ目）。\
+         start_line で読み始める行、line_count で行数を指定できる。grep が返す行番号をそのまま \
+         start_line に渡せる。続きがあれば has_more=true と next_line が付くので、next_line を \
+         start_line に入れて辿る。1 行は最大 2,000 文字で切られ、切られた行の末尾には \
+         ` …⟨+M文字⟩`（M は切り捨てた文字数）が付く（その行の残りは再取得できない）。"
     }
 
     fn parameters(&self) -> serde_json::Value {

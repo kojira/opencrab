@@ -379,11 +379,11 @@ fn is_excluded_from_conversation(log: &opencrab_db::queries::SessionLogRow) -> b
 
 /// 結果の本文を次のターンへ持ち越さない**読み**のツールか（#707）。
 ///
-/// 軸は「**もう一度呼べば同じものが得られるか**」。ファイルの読みは副作用が無く読み直せる——
-/// だから会話に焼き付ける価値が無い。コマンド実行のように「そのとき限りの結果」は落とすと
-/// 失われるので従来どおり本文を残す。
+/// 定義は [`crate::tool_result_log::is_read_tool`] が唯一の源——**ここで再列挙しない**。
+/// 退避上限（`inline_limit_for_tool`）と同じ集合を指す必要があり、2 箇所で別々に並べると
+/// 片方だけ直す事故が起きる（レビュー指摘）。
 pub(crate) fn is_read_tool(tool_name: &str) -> bool {
-    matches!(tool_name, "ws_read" | "ws_list")
+    crate::tool_result_log::is_read_tool(tool_name)
 }
 
 /// 読みの結果から、会話へ残す**参照**を組む（#707）。本文は載せない。
@@ -397,6 +397,14 @@ pub(crate) fn read_reference(result_json: &str) -> String {
         // 判断材料が無いので推測で捨てず、そのまま残す。
         Err(_) => return result_json.to_string(),
     };
+    // **失敗した読みは本文をそのまま残す**（#707 レビュー指摘）。読みの参照化は「もう一度
+    // 呼べば同じものが得られる」ことが根拠だが、失敗（not found / パストラバーサル拒否 /
+    // IO エラー / timeout）はその前提の外で、参照へ潰すと `? の 全体 を読んだ` という
+    // **読めたことにする文字列**に化ける。エラー文言が消え、エージェントは失敗の事実と理由を
+    // 失う——握り潰しであり、#692（捏造）と #284（黙って捨てない）の理念に反する。
+    if v.get("success").and_then(|x| x.as_bool()) != Some(true) {
+        return result_json.to_string();
+    }
     let null = serde_json::Value::Null;
     let d = v.get("data").unwrap_or(&null);
     let path = d.get("path").and_then(|x| x.as_str()).unwrap_or("?");
@@ -407,6 +415,15 @@ pub(crate) fn read_reference(result_json: &str) -> String {
         .map(|c| c.lines().count());
     let tokens = d.get("estimated_tokens").and_then(|x| x.as_u64());
     let has_more = d.get("has_more").and_then(|x| x.as_bool()).unwrap_or(false);
+
+    // ws_list（ディレクトリ列挙）は content を持たず、ws_read では読み直せない。件数と
+    // 正しい再取得ツールを出す（間違ったツールへ誘導しない）。
+    if let Some(entries) = d.get("entries").and_then(|x| x.as_array()) {
+        return format!(
+            "{path} を一覧した（{} 件・内容は会話に残していない。必要ならもう一度 ws_list で見る）",
+            entries.len()
+        );
+    }
 
     let range = match (start, lines) {
         (Some(s), Some(n)) if n > 0 => format!("{s}〜{} 行目", s as usize + n - 1),
@@ -2321,6 +2338,47 @@ mod read_reference_tests {
         assert!(
             rendered.contains("ws_read"),
             "読み直す方法が分からない: {rendered}"
+        );
+    }
+
+    /// #707 レビュー指摘: **失敗した読みは本文を残す**。参照へ潰すと「読めた」ことに化ける。
+    #[test]
+    fn failed_reads_keep_their_error() {
+        let failed = serde_json::json!({
+            "success": false,
+            "data": null,
+            "error": "path not found: docs/missing.md"
+        })
+        .to_string();
+
+        let rendered = read_reference(&failed);
+        assert!(
+            rendered.contains("path not found"),
+            "失敗の理由が消えている（握り潰し）: {rendered}"
+        );
+        assert!(
+            !rendered.contains("読んだ"),
+            "読めていないのに読んだことになっている: {rendered}"
+        );
+    }
+
+    /// #707 レビュー指摘: ws_list は件数を出し、**正しいツール**へ誘導する。
+    #[test]
+    fn list_reference_points_at_the_right_tool() {
+        let listed = serde_json::json!({
+            "success": true,
+            "data": {
+                "path": "src",
+                "entries": ["a.rs", "b.rs", "c.rs"]
+            }
+        })
+        .to_string();
+
+        let rendered = read_reference(&listed);
+        assert!(rendered.contains("3 件"), "規模が分からない: {rendered}");
+        assert!(
+            rendered.contains("ws_list"),
+            "ws_read へ誤誘導している（ws_list は ws_read で読み直せない）: {rendered}"
         );
     }
 

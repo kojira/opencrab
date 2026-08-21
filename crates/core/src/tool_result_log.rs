@@ -99,10 +99,25 @@ pub const READ_TOOL_RESULT_TOKEN_LIMIT: usize = 30_000;
 /// 決めているので、上限は「会話に収まるか」だけ見ればよい。コマンドの stdout は量が事前に
 /// 分からないので低い cap で退避へ倒す（#284 の防御）。
 pub fn inline_limit_for_tool(tool_name: &str) -> usize {
-    match tool_name {
-        "ws_read" | "ws_list" => READ_TOOL_RESULT_TOKEN_LIMIT,
-        _ => TOOL_RESULT_TOKEN_LIMIT,
+    if is_read_tool(tool_name) {
+        READ_TOOL_RESULT_TOKEN_LIMIT
+    } else {
+        TOOL_RESULT_TOKEN_LIMIT
     }
+}
+
+/// **「読み」の唯一の定義**（#707）。もう一度呼べば同じものが得られ、副作用が無いツール。
+///
+/// この 1 つの述語を、性質の違う 2 つの判断が**両方**参照する:
+/// - [`inline_limit_for_tool`]（この結果を退避するか＝1 回で運べる量）
+/// - `conversation::is_read_tool` 経由の参照化（この本文を次のターンへ持ち越すか）
+///
+/// **2 箇所で別々に列挙してはいけない**（レビュー指摘）。片方にだけ 3 つ目を足すと、本 #707 が
+/// 直した 2 つのバグが片肺で再発する——上限側だけなら本文が毎ターン焼き付き（#284 の再来）、
+/// 参照化側だけなら 2,500 で切られて退避ファイルが増える（#707 の再来）。**読みを増やすときは
+/// ここだけを直す。**
+pub fn is_read_tool(tool_name: &str) -> bool {
+    matches!(tool_name, "ws_read" | "ws_list")
 }
 
 /// 退避ファイル名 1 コンポーネント（session_id / tool_call_id）の上限バイト数。
@@ -585,6 +600,19 @@ mod tests {
     use super::*;
 
     /// 秘密を含まない結果は**改変されない**（byte 一致）。前フィルタで parse すらしない。
+    #[test]
+    fn read_predicate_is_the_single_source_for_both_decisions() {
+        // 「読み」の定義は 1 つ。上限（退避するか）と参照化（持ち越すか）が同じ集合を指す。
+        for t in ["ws_read", "ws_list"] {
+            assert!(is_read_tool(t));
+            assert_eq!(inline_limit_for_tool(t), READ_TOOL_RESULT_TOKEN_LIMIT);
+        }
+        for t in ["execute_shell", "search_my_history", "ws_write"] {
+            assert!(!is_read_tool(t));
+            assert_eq!(inline_limit_for_tool(t), TOOL_RESULT_TOKEN_LIMIT);
+        }
+    }
+
     #[test]
     fn sanitize_leaves_secretless_result_byte_identical() {
         let json = r#"{"success":true,"data":{"npub":"npub1ok","note":"hello"},"error":null}"#;
