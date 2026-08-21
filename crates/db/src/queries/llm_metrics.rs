@@ -154,13 +154,16 @@ pub fn list_model_experience_notes(
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
+/// 1 行分の評価レコード: (model, purpose, self_evaluation, quality_score, tags, timestamp)。
+type RecentEvaluationRow = (String, String, String, f64, Option<String>, Option<String>);
+
 /// Get recent evaluations with free-text feedback (self_evaluation) for a model.
 pub fn get_recent_evaluations(
     conn: &Connection,
     agent_id: &str,
     model_filter: Option<&str>,
     limit: usize,
-) -> Result<Vec<(String, String, String, f64, Option<String>, Option<String>)>> {
+) -> Result<Vec<RecentEvaluationRow>> {
     // Returns: (model, purpose, self_evaluation, quality_score, tags, timestamp)
     let (sql, param_values): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(model) =
         model_filter

@@ -32,6 +32,9 @@ use super::webhook::{
 const TOOL_EVENT_MAX_CHARS: usize = 1500;
 const TOOL_EVENT_CAP: usize = 200;
 
+/// 配送を諦めたときに親セッションログへ 1 件記録する give-up sink。
+type GiveupSink = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// subtask lifecycle を Discord webhook へ通知するファクトリ。
 ///
 /// 走行ごとに宛先を解決し、その run 専用の配送ワーカーを 1 本起動して
@@ -115,7 +118,7 @@ impl SubtaskLifecycleNotifier for DiscordWebhookNotifier {
         let webhook_source_str: Option<&'static str> = webhook_source.map(|s| s.as_str());
 
         // give-up 時に親セッションログへ 1 件記録する sink を構築する。
-        let giveup_sink: Option<Arc<dyn Fn(&str) + Send + Sync>> =
+        let giveup_sink: Option<GiveupSink> =
             if webhook.is_some() && !run.parent_session_id.is_empty() {
                 let db_sink = self.db.clone();
                 let agent_sink = run.agent_id.to_string();
