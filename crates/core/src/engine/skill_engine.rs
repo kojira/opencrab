@@ -480,17 +480,13 @@ impl SkillEngine {
                     } else if opencrab_llm_types::is_empty_response(resp) {
                         // #706: HTTP 200・finish_reason=stop を名乗りつつ content も tool_call
                         // も無いターン。最終回答として扱わず、なぜ黙ったかを llm_logs に残す。
+                        // プロンプト長（空応答の実因）は process 側が失敗行へ一様に付ける
+                        // （error_body_with_prompt_size）——ここで手書きしない（数字の出所を 1 つに）。
                         let body = format!(
                             "LLM 応答が意味的に空でした（content がフィールド欠落／空文字／\
                              空白のみ、かつ tool_call 無し）。最終回答として扱いません（fail \
                              loud / リトライ・フォールバックは #706 方針によりしない）。\
-                             model={}, finish_reason={:?}, prompt_chars={}（opencrab が送った\
-                             本文の文字数。空応答は 335k〜365k 文字帯で頻発する実測がある——\
-                             長さが原因かの当たり付け用。provider の usage.prompt_tokens は\
-                             当てにならないため実測値を使う。閾値判定はしない）",
-                            model,
-                            finish_reason,
-                            request_for_log.message_content_chars(),
+                             model={model}, finish_reason={finish_reason:?}"
                         );
                         Some((
                             opencrab_llm_types::EMPTY_RESPONSE_ERROR_CODE.to_string(),
@@ -1030,36 +1026,32 @@ mod tests {
     }
 
     /// #706（最重要）: 空応答が **llm_logs に理由付きで残る**こと。log_callback は意味的
-    /// 検証の結果（error_code / error_body）を受け取らねばならない——「error 欄空の成功行」
+    /// 検証の結果（error_code / error_str）を受け取らねばならない——「error 欄空の成功行」
     /// として残る旧穴（設計 §1-c）が塞がっていることを固定する。特に「content フィールド
-    /// 欠落 + tool_call 無し」を失敗として記録する。加えて、**原因の当たり付けに必要な
-    /// opencrab 実測のプロンプト文字数**が本文に載ること（provider の usage ではなく engine
-    /// が測った値）を固定する。
+    /// 欠落 + tool_call 無し」を失敗として記録する。
+    ///
+    /// 原因の当たり付け材料（プロンプト長）は process 側が失敗行へ一様に付ける
+    /// （`error_body_with_prompt_size`）。ここは engine が種別と理由を渡すところまでを固定する。
     #[tokio::test]
     async fn test_empty_response_is_recorded_in_log_with_reason() {
         use std::sync::Mutex;
-        // (error_code, error_str, opencrab がこのリクエストで送った本文の文字数)
-        let captured: Arc<Mutex<Vec<(Option<String>, Option<String>, usize)>>> =
+        let captured: Arc<Mutex<Vec<(Option<String>, Option<String>)>>> =
             Arc::new(Mutex::new(Vec::new()));
         let sink = captured.clone();
 
         let llm = MockLlm::new(vec![resp(None, vec![])]); // content 欠落・tool_call 無し
         let mut engine = SkillEngine::new(Box::new(llm), Box::new(MockExecutor::new()), 10);
         engine.set_log_callback(move |log: &LlmCallLog| {
-            sink.lock().unwrap().push((
-                log.error_code.clone(),
-                log.error_str.clone(),
-                log.request.message_content_chars(),
-            ));
+            sink.lock()
+                .unwrap()
+                .push((log.error_code.clone(), log.error_str.clone()));
         });
 
-        // provider usage は既定で prompt_tokens=0（当てにならない経路）。本文は engine が
-        // 組む system + conversation なので、実測文字数は 0 より大きくなるはず。
         let _ = engine.run("system", "答えて", "cursor:grok").await;
 
         let logs = captured.lock().unwrap();
         assert_eq!(logs.len(), 1, "1 ターン = 1 ログ行のはず");
-        let (code, body, sent_chars) = &logs[0];
+        let (code, body) = &logs[0];
         assert_eq!(
             code.as_deref(),
             Some("empty_response"),
@@ -1069,16 +1061,6 @@ mod tests {
         assert!(
             body.contains("意味的に空"),
             "error_body が空応答を明示していない: {body}"
-        );
-        // 原因の当たり付け材料: opencrab 実測のプロンプト文字数が本文に載っていること。
-        assert!(
-            *sent_chars > 0,
-            "opencrab 実測の本文文字数が 0（測れていない）"
-        );
-        assert!(
-            body.contains(&format!("prompt_chars={sent_chars}")),
-            "error_body に opencrab 実測のプロンプト文字数が載っていない（body={body}, \
-             期待 prompt_chars={sent_chars}）"
         );
     }
 
