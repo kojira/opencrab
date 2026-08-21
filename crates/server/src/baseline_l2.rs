@@ -26,6 +26,7 @@ use crate::{create_router, system_actions::SystemGatewayActions, test_app_state,
 
 const AGENT_ID: &str = "baseline-agent";
 const SESSION_ID: &str = "baseline-session";
+const TOOL_SESSION_ID: &str = "web-baseline-agent-conversation";
 const MISSING: &str = "baseline-missing";
 
 fn read_json(path: &Path) -> Result<Value, String> {
@@ -39,12 +40,25 @@ fn normalize(value: &mut Value) {
         Value::Object(map) => {
             for (key, value) in map.iter_mut() {
                 normalize(value);
-                if matches!(
-                    key.as_str(),
-                    "created_at" | "updated_at" | "started_at" | "finished_at"
-                ) && value.is_string()
+                if (key.ends_with("_at")
+                    || (matches!(key.as_str(), "date_from" | "date_to")
+                        && value.as_str().is_some_and(|s| s.contains('T'))))
+                    && value.is_string()
                 {
                     *value = Value::String("<timestamp>".to_string());
+                }
+                if let Some(text) = value.as_str() {
+                    let generated = [("unit_id", "unit-"), ("core_id", "core-")]
+                        .iter()
+                        .find_map(|(field, prefix)| {
+                            (key == *field).then(|| text.strip_prefix(prefix)).flatten()
+                        })
+                        .is_some_and(|suffix| {
+                            suffix.len() == 24 && suffix.chars().all(|c| c.is_ascii_hexdigit())
+                        });
+                    if generated {
+                        *value = Value::String(format!("<generated-{key}>"));
+                    }
                 }
                 if matches!(key.as_str(), "duration_ms" | "latency_ms") && value.is_number() {
                     *value = Value::String("<duration>".to_string());
@@ -53,6 +67,14 @@ fn normalize(value: &mut Value) {
         }
         Value::String(text) if uuid::Uuid::parse_str(text).is_ok() => {
             *text = "<uuid>".to_string();
+        }
+        Value::String(text) => {
+            if text
+                .strip_prefix("subtask-")
+                .is_some_and(|suffix| uuid::Uuid::parse_str(suffix).is_ok())
+            {
+                *text = "subtask-<uuid>".to_string();
+            }
         }
         _ => {}
     }
@@ -578,14 +600,191 @@ async fn collect_http(l1: &Value) -> Result<Value, String> {
 fn action_context(caller: opencrab_actions::CallerIdentity) -> opencrab_actions::ActionContext {
     let root =
         std::env::temp_dir().join(format!("opencrab-baseline-l2-tools-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).expect("create baseline tool workspace");
     let workspace = opencrab_core::workspace::Workspace::from_root(root)
         .expect("baseline tool workspace must be valid");
+    let db = opencrab_db::Db::memory().expect("in-memory baseline DB");
+    {
+        let conn = db.lock().expect("lock baseline tool DB");
+        opencrab_db::queries::upsert_agent(
+            &conn,
+            &opencrab_db::queries::AgentRow {
+                agent_id: AGENT_ID.to_string(),
+                name: "Baseline Agent".to_string(),
+                job_title: Some("Compatibility Probe".to_string()),
+                organization: Some("opencrab".to_string()),
+                image_url: None,
+                persona_name: "Baseline".to_string(),
+                personality: Some("deterministic".to_string()),
+                instructions: "baseline instructions".to_string(),
+                heartbeat_instructions: "baseline heartbeat".to_string(),
+                model: None,
+                reasoning_effort: None,
+                web_search: None,
+                metadata_json: None,
+            },
+        )
+        .expect("seed baseline tool agent");
+        opencrab_db::queries::insert_skill(
+            &conn,
+            &opencrab_db::queries::SkillRow {
+                id: "baseline-seed-skill".to_string(),
+                agent_id: AGENT_ID.to_string(),
+                name: "Seed Skill".to_string(),
+                description: "seed skill".to_string(),
+                situation_pattern: "baseline".to_string(),
+                guidance: "preserve behavior".to_string(),
+                source_type: "baseline".to_string(),
+                source_context: None,
+                file_path: None,
+                effectiveness: None,
+                usage_count: 0,
+                is_active: true,
+                permission: "private".to_string(),
+                archived: false,
+                created_caller: Some("owner".to_string()),
+                agent_visible: false,
+            },
+        )
+        .expect("seed baseline tool skill");
+        for content in ["baseline memory first", "baseline memory second"] {
+            opencrab_db::queries::insert_session_log(
+                &conn,
+                &opencrab_db::queries::SessionLogRow {
+                    id: None,
+                    agent_id: AGENT_ID.to_string(),
+                    session_id: SESSION_ID.to_string(),
+                    log_type: "message".to_string(),
+                    content: content.to_string(),
+                    speaker_id: Some(AGENT_ID.to_string()),
+                    turn_number: Some(1),
+                    metadata_json: None,
+                    created_at: Some("2026-01-01T00:00:00Z".to_string()),
+                },
+            )
+            .expect("seed baseline tool history");
+        }
+        let node = |id: &str,
+                    node_type: &str,
+                    source_type: &str,
+                    title: &str,
+                    short_id: &str,
+                    start: Option<i64>,
+                    end: Option<i64>,
+                    keywords_json: &str| opencrab_db::queries::IndexNodeRow {
+            id: id.to_string(),
+            agent_id: AGENT_ID.to_string(),
+            parent_id: None,
+            node_type: node_type.to_string(),
+            source_type: source_type.to_string(),
+            title: title.to_string(),
+            summary: format!("{title} summary"),
+            start_log_id: start,
+            end_log_id: end,
+            source_session_id: None,
+            date_from: Some("2026-01-01".to_string()),
+            date_to: Some("2026-01-01".to_string()),
+            depth: 0,
+            child_count: 0,
+            token_count: 0,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            short_id: Some(short_id.to_string()),
+            keywords_json: keywords_json.to_string(),
+            summary_refreshed_at: None,
+        };
+        for n in [
+            node(
+                "baseline-topic",
+                "topic",
+                "session_log",
+                "Baseline Topic",
+                "t1",
+                Some(1),
+                Some(2),
+                "[]",
+            ),
+            node(
+                "baseline-unit-source",
+                "unit",
+                "declared",
+                "Baseline Unit Source",
+                "u1",
+                Some(1),
+                Some(2),
+                "[]",
+            ),
+            node(
+                "baseline-unit-retract",
+                "unit",
+                "declared",
+                "Baseline Unit Retract",
+                "u2",
+                Some(1),
+                Some(1),
+                "[]",
+            ),
+            node(
+                "baseline-core-update",
+                "meta",
+                "condensed",
+                "Baseline Core Update",
+                "m1",
+                Some(1),
+                Some(2),
+                "[\"u1\"]",
+            ),
+            node(
+                "baseline-core-retract",
+                "meta",
+                "condensed",
+                "Baseline Core Retract",
+                "m2",
+                Some(1),
+                Some(2),
+                "[\"u1\"]",
+            ),
+            node(
+                "baseline-tag",
+                "category",
+                "category",
+                "Baseline Tag",
+                "c1",
+                None,
+                None,
+                "[]",
+            ),
+            node(
+                "baseline-merge-from",
+                "category",
+                "category",
+                "Merge From",
+                "c2",
+                None,
+                None,
+                "[]",
+            ),
+            node(
+                "baseline-merge-into",
+                "category",
+                "category",
+                "Merge Into",
+                "c3",
+                None,
+                None,
+                "[]",
+            ),
+        ] {
+            opencrab_db::queries::insert_index_node(&conn, &n)
+                .expect("seed baseline tool memory node");
+        }
+    }
     opencrab_actions::ActionContext {
         agent_id: AGENT_ID.to_string(),
         agent_name: "Baseline Agent".to_string(),
-        session_id: Some(SESSION_ID.to_string()),
-        db: opencrab_db::Db::memory().expect("in-memory baseline DB"),
+        session_id: Some(TOOL_SESSION_ID.to_string()),
+        db,
         workspace: Arc::new(workspace),
         last_metrics_id: Arc::new(std::sync::Mutex::new(None)),
         model_override: Arc::new(std::sync::Mutex::new(None)),
@@ -598,6 +797,46 @@ fn action_context(caller: opencrab_actions::CallerIdentity) -> opencrab_actions:
             gateway: "baseline".to_string(),
         })),
     }
+}
+
+fn seeded_tool_state() -> AppState {
+    let state = test_app_state();
+    {
+        let conn = state.db.lock().expect("lock baseline gateway DB");
+        opencrab_db::queries::upsert_agent(
+            &conn,
+            &opencrab_db::queries::AgentRow {
+                agent_id: AGENT_ID.to_string(),
+                name: "Baseline Agent".to_string(),
+                job_title: Some("Compatibility Probe".to_string()),
+                organization: Some("opencrab".to_string()),
+                image_url: None,
+                persona_name: "Baseline".to_string(),
+                personality: Some("deterministic".to_string()),
+                instructions: "baseline instructions".to_string(),
+                heartbeat_instructions: "baseline heartbeat".to_string(),
+                model: None,
+                reasoning_effort: None,
+                web_search: None,
+                metadata_json: None,
+            },
+        )
+        .expect("seed baseline gateway agent");
+        #[cfg(feature = "nostr")]
+        opencrab_db::queries::upsert_agent_nostr_config(
+            &conn,
+            &opencrab_db::queries::AgentNostrConfigRow {
+                agent_id: AGENT_ID.to_string(),
+                enabled: false,
+                relays_json: "[]".to_string(),
+                filter_json: "{\"authors\":[],\"keywords\":[],\"kinds\":[]}".to_string(),
+                secret_key: "nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqzqujme"
+                    .to_string(),
+            },
+        )
+        .expect("seed baseline Nostr config");
+    }
+    state
 }
 
 #[derive(Clone)]
@@ -695,7 +934,7 @@ fn build_executor(
     caller_is_trusted_for_mcp: bool,
 ) -> opencrab_actions::BridgedExecutor {
     let root_gateway: Arc<dyn GatewayActions> = Arc::new(SystemGatewayActions::new(
-        test_app_state(),
+        seeded_tool_state(),
         None,
         None,
         None,
@@ -714,6 +953,55 @@ fn build_executor(
         .with_gateway_actions(gateway)
         .with_mcp_actions(mcp)
         .with_tool_allowlist(allowlist)
+}
+
+fn subtask_fixture_registry(
+    subtask_id: &str,
+    sub_session_id: &str,
+    parent_session_id: &str,
+    steerable: bool,
+) -> opencrab_actions::SubtaskRegistry {
+    let registry: opencrab_actions::SubtaskRegistry = Arc::new(dashmap::DashMap::new());
+    registry.insert(
+        subtask_id.to_string(),
+        opencrab_actions::SpawnedSubtask {
+            abort_handle: tokio::spawn(std::future::pending::<()>()).abort_handle(),
+            session_id: sub_session_id.to_string(),
+            parent_session_id: parent_session_id.to_string(),
+            agent_id: AGENT_ID.to_string(),
+            label: "baseline subtask".to_string(),
+            tool_name: "spawn_subtask".to_string(),
+            started_at: std::time::Instant::now(),
+            reply_target: None,
+            caller: opencrab_actions::CallerIdentity::Owner,
+            lifecycle: opencrab_actions::SubtaskLifecycle::new(),
+            steerable,
+        },
+    );
+    registry
+}
+
+fn build_subtask_fixture_executor(
+    session_id: &str,
+    depth: u32,
+    registry: opencrab_actions::SubtaskRegistry,
+) -> opencrab_actions::BridgedExecutor {
+    let root_gateway: Arc<dyn GatewayActions> = Arc::new(SystemGatewayActions::new(
+        seeded_tool_state(),
+        None,
+        Some(registry),
+        None,
+    ));
+    let gateway: Arc<dyn GatewayActions> = if depth == 0 {
+        root_gateway
+    } else {
+        Arc::new(opencrab_actions::SubEngineGatewayActions::new(root_gateway))
+    };
+    let mut ctx = action_context(opencrab_actions::CallerIdentity::Owner);
+    ctx.session_id = Some(session_id.to_string());
+    opencrab_actions::BridgedExecutor::new(dispatcher(false), ctx)
+        .with_depth(depth)
+        .with_gateway_actions(gateway)
 }
 
 fn collect_visibility() -> Value {
@@ -836,7 +1124,7 @@ fn result_json(mut result: opencrab_core::ActionResult) -> Value {
     json!({"success":result.success,"data":result.data,"error":result.error})
 }
 
-async fn collect_tool_execution() -> Value {
+async fn collect_tool_execution() -> Result<Value, String> {
     use opencrab_actions::CallerIdentity;
     let owner = build_executor(CallerIdentity::Owner, 0, true, None, true);
     let all_defs = owner.list_tools();
@@ -880,6 +1168,14 @@ async fn collect_tool_execution() -> Value {
     let success_cases = [
         ("get_system_info", json!({})),
         ("declare_done", json!({"reason":"baseline complete"})),
+        (
+            "generate_inner_voice",
+            json!({"thought":"baseline thought"}),
+        ),
+        (
+            "update_impression",
+            json!({"target_id":"baseline-peer","target_name":"Baseline Peer","agreement":"neutral"}),
+        ),
         ("ws_mkdir", json!({"path":"captured"})),
         (
             "ws_write",
@@ -888,19 +1184,249 @@ async fn collect_tool_execution() -> Value {
         ("ws_read", json!({"path":"captured/file.txt"})),
         ("ws_list", json!({"path":"captured"})),
         (
-            "open_task",
-            json!({"goal":"baseline goal","acceptance_criteria":["captured"]}),
+            "ws_edit",
+            json!({"path":"captured/file.txt","old_string":"baseline","new_string":"captured"}),
         ),
+        ("ws_delete", json!({"path":"captured/file.txt"})),
+        (
+            "learn_from_experience",
+            json!({"experience":"baseline run","outcome":"success","lesson":"capture real results","skill_name":"Experience Skill"}),
+        ),
+        (
+            "learn_from_peer",
+            json!({"peer_name":"Baseline Peer","observed_pattern":"records fixtures","lesson":"make preconditions explicit","skill_name":"Peer Skill"}),
+        ),
+        (
+            "reflect_and_learn",
+            json!({"reflection":"baseline reflection","insights":["observed"],"action_items":["preserve"]}),
+        ),
+        ("search_my_history", json!({"query":"baseline","limit":5})),
+        (
+            "summarize_and_save",
+            json!({"content":"baseline summary","filename":"captured/summary.txt","summary_type":"note"}),
+        ),
+        (
+            "create_my_skill",
+            json!({"name":"Captured Skill","description":"captured","situation_pattern":"baseline","guidance":"preserve","actions":["get_system_info"]}),
+        ),
+        ("retire_my_skill", json!({"name":"Seed Skill"})),
+        ("restore_my_skill", json!({"name":"Seed Skill"})),
+        ("read_skill", json!({"name":"Seed Skill"})),
+        ("browse_memory_index", json!({"max_depth":3})),
+        ("retrieve_memory_nodes", json!({"node_ids":["t1"]})),
+        ("search_memory_index", json!({"query":"Baseline","limit":5})),
+        (
+            "tag_topic",
+            json!({"topic_id":"t1","tags":["Baseline Tag","Merge From"]}),
+        ),
+        ("untag_topic", json!({"topic_id":"t1","tag":"Baseline Tag"})),
+        (
+            "merge_tags",
+            json!({"from":"Merge From","into":"Merge Into"}),
+        ),
+        (
+            "survey_my_history",
+            json!({"granularity":"day","max_buckets":5}),
+        ),
+        ("read_my_history", json!({"session_id":SESSION_ID})),
+        (
+            "record_memory_unit",
+            json!({"from_id":1,"to_id":2,"title":"Recorded Unit","summary":"captured"}),
+        ),
+        ("retract_memory_unit", json!({"unit_id":"u2"})),
+        (
+            "plan_next_memory_window",
+            json!({"next_from_id":1,"window_size":10,"note":"baseline"}),
+        ),
+        (
+            "record_memory_core",
+            json!({"axis":"Recorded Core","body":"captured principle","sources":["u1"]}),
+        ),
+        (
+            "update_memory_core",
+            json!({"core_id":"m1","axis":"Updated Core","body":"updated principle","sources":["u1"]}),
+        ),
+        ("retract_memory_core", json!({"core_id":"m2"})),
+        (
+            "select_llm",
+            json!({"model_alias":"baseline:model","reason":"compatibility capture","purpose":"baseline","duration":"this_turn"}),
+        ),
+        (
+            "evaluate_response",
+            json!({"evaluation":"baseline evaluation","quality_score":0.75,"task_success":true,"tags":["baseline"]}),
+        ),
+        ("analyze_llm_usage", json!({"period":"all"})),
+        (
+            "recall_model_experiences",
+            json!({"include_notes":true,"evaluation_limit":5}),
+        ),
+        (
+            "save_model_insight",
+            json!({"situation":"baseline","observation":"captured behavior","recommendation":"preserve","model":"baseline:model","tags":["compatibility"]}),
+        ),
+        (
+            "update_instructions",
+            json!({"instructions":"baseline updated instructions","reason":"compatibility capture"}),
+        ),
+        (
+            "open_task",
+            json!({"goal":"baseline goal","contract":"captured"}),
+        ),
+        (
+            "update_task_contract",
+            json!({"goal":"baseline updated goal","contract":"captured result"}),
+        ),
+        (
+            "record_task_progress",
+            json!({"content":"baseline progress","kind":"progress"}),
+        ),
+        ("get_task", json!({})),
+        (
+            "close_task",
+            json!({"status":"done","summary":"baseline done"}),
+        ),
+        (
+            "execute_shell",
+            json!({"command":"printf","args":["baseline-shell"]}),
+        ),
+        (
+            "configure_llm_provider",
+            json!({"provider":"openai","enabled":false}),
+        ),
+        ("manage_allowed_commands", json!({"action":"list"})),
+        ("configure_nostr", json!({"enabled":false})),
+        (
+            "configure_self",
+            json!({"personality":"baseline configured"}),
+        ),
+        ("configure_mcp_server", json!({"action":"list"})),
+        ("nostr_list_keys", json!({})),
+        ("rebuild_memory_index", json!({})),
+        (
+            "update_memory_index_config",
+            json!({"batch_size":20,"threshold":100}),
+        ),
+        ("add_allowed_command", json!({"command":"baseline_cmd"})),
         ("list_allowed_commands", json!({})),
+        ("remove_allowed_command", json!({"command":"baseline_cmd"})),
+        (
+            "create_skill",
+            json!({"name":"Gateway Skill","description":"captured","guidance":"preserve"}),
+        ),
+        (
+            "update_heartbeat_instructions",
+            json!({"scope":"agent","instructions":"baseline heartbeat updated","reason":"compatibility capture"}),
+        ),
+        ("read_heartbeat_instructions", json!({"scope":"agent"})),
+        ("get_my_nostr_relay", json!({})),
+        (
+            "set_my_nostr_relay",
+            json!({"enabled":false,"webhook_url":""}),
+        ),
+        ("get_my_heartbeat", json!({})),
+        (
+            "set_my_heartbeat",
+            json!({"enabled":false,"interval_secs":3600}),
+        ),
+        ("get_my_schedules", json!({})),
+        (
+            "set_my_schedule",
+            json!({"cron_expr":"0 9 * * *","message":"baseline schedule","timezone":"UTC","enabled":true}),
+        ),
+        (
+            "update_my_schedule",
+            json!({"id":1,"message":"baseline schedule updated","enabled":false}),
+        ),
+        ("delete_my_schedule", json!({"id":1})),
         ("get_default_webhook", json!({})),
         ("get_default_subtask_webhook", json!({})),
+        (
+            "set_default_subtask_webhook",
+            json!({"scope":"agent","kind":"discord","url":"https://discord.com/api/webhooks/1/baseline","enabled":false}),
+        ),
+        (
+            "list_subtask_webhooks",
+            json!({"scope":"all","include_disabled":true}),
+        ),
+        (
+            "set_default_webhook",
+            json!({"scope":"agent","family":"tool","url":"https://discord.com/api/webhooks/1/baseline","enabled":false}),
+        ),
+        (
+            "list_webhooks",
+            json!({"scope":"all","include_disabled":true}),
+        ),
         ("mcp__public_local__echo", json!({"value":"baseline"})),
         ("mcp__trusted_local__echo", json!({"value":"baseline"})),
     ];
     let mut successes = Vec::new();
+    let mut unsuccessful_attempts = Vec::new();
     for (tool, arguments) in success_cases {
         let result = owner.execute(tool, &arguments).await;
-        successes.push(json!({"tool":tool,"arguments":arguments,"result":result_json(result)}));
+        let result = result_json(result);
+        if result["success"] == true {
+            successes.push(json!({"tool":tool,"arguments":arguments,"result":result}));
+        } else {
+            unsuccessful_attempts.push(json!({
+                "tool":tool,
+                "arguments":arguments,
+                "result":result,
+                "status":"uncollected",
+                "reason":"the selected local success precondition reached the real implementation but did not return success"
+            }));
+        }
+    }
+
+    let subtask_cases = [
+        (
+            "spawn_subtask",
+            TOOL_SESSION_ID,
+            0,
+            false,
+            json!({"task":"baseline delegated task","label":"baseline subtask","timeout_secs":1}),
+        ),
+        (
+            "cancel_subtask",
+            TOOL_SESSION_ID,
+            0,
+            false,
+            json!({"subtask_id":"baseline-subtask"}),
+        ),
+        (
+            "steer_subtask",
+            TOOL_SESSION_ID,
+            0,
+            true,
+            json!({"subtask_id":"baseline-subtask","message":"baseline steering"}),
+        ),
+        (
+            "report_progress",
+            "subtask-baseline-subtask",
+            1,
+            true,
+            json!({"subtask_id":"baseline-subtask","message":"baseline progress"}),
+        ),
+    ];
+    for (tool, session_id, depth, steerable, arguments) in subtask_cases {
+        let registry = subtask_fixture_registry(
+            "baseline-subtask",
+            "subtask-baseline-subtask",
+            TOOL_SESSION_ID,
+            steerable,
+        );
+        let executor = build_subtask_fixture_executor(session_id, depth, registry);
+        let result = result_json(executor.execute(tool, &arguments).await);
+        if result["success"] == true {
+            successes.push(json!({"tool":tool,"arguments":arguments,"result":result}));
+        } else {
+            unsuccessful_attempts.push(json!({
+                "tool":tool,
+                "arguments":arguments,
+                "result":result,
+                "status":"uncollected",
+                "reason":"the selected in-memory running-subtask precondition reached the real implementation but did not return success"
+            }));
+        }
     }
 
     let forwarding_cases = [
@@ -926,22 +1452,41 @@ async fn collect_tool_execution() -> Value {
     let success_uncollected: Vec<_> = all_defs
         .iter()
         .filter(|d| !success_names.contains(d.name.as_str()))
-        .map(|d| json!({
-            "tool":d.name,
-            "facet":"success",
-            "status":"uncollected",
-            "reason":"no credential-free, side-effect-contained successful scenario was selected for L2"
-        }))
+        .map(|d| {
+            let reason = match d.name.as_str() {
+                "nostr_generate_key" => "L3: successful key generation requires the operator's nostaro executable and writes key material outside the temporary workspace",
+                "nostr_switch_identity" => "L3: success requires a generated Nostr key and a configured Nostr transport capability",
+                "nostr_run" => "L3: success requires an adopted identity plus the operator's nostaro executable and may use live relays",
+                "run_my_heartbeat" => "L3: success fires an actual agent turn through a configured transport and LLM provider",
+                "request_peer_review" => "L3: success delivers a message through the active transport",
+                _ => "the attempted local fixture did not produce a successful result; see unsuccessful_attempts",
+            };
+            json!({
+                "tool":d.name,
+                "facet":"success",
+                "status":"uncollected",
+                "reason":reason
+            })
+        })
         .collect();
 
+    if !unsuccessful_attempts.is_empty() {
+        return Err(format!(
+            "selected tool success scenario did not succeed: {}",
+            serde_json::to_string(&unsuccessful_attempts)
+                .unwrap_or_else(|_| "<unserializable attempts>".to_string())
+        ));
+    }
+
     let uncollected = [no_required_args_uncollected, success_uncollected].concat();
-    json!({
+    Ok(json!({
         "missing_arguments":required_missing,
         "permission_denied":permission,
         "successful_calls":successes,
+        "unsuccessful_attempts":unsuccessful_attempts,
         "forwarding_failures":forwarding,
         "uncollected":uncollected
-    })
+    }))
 }
 
 async fn collect_mcp_protocol() -> Result<Value, String> {
@@ -1017,7 +1562,7 @@ fn coverage(http: &Value, tools: &Value) -> Value {
     json!({
         "http_observed_status_classes":by_status,
         "http_uncollected_count":http["uncollected"].as_array().map_or(0, Vec::len),
-        "tool_success_uncollected_count":tools["uncollected"].as_array().map_or(0, Vec::len),
+        "tool_success_uncollected_count":tools["uncollected"].as_array().map_or(0, |items| items.iter().filter(|item| item["facet"] == "success").count()),
         "claim":"Only scenarios with captured observations are fixed by this artifact; every uncollected entry is an explicit non-claim."
     })
 }
@@ -1030,13 +1575,19 @@ pub async fn capture(l1_path: &Path, scenario_path: &Path) -> Result<Value, Stri
     }
     let http = collect_http(&l1).await?;
     let visibility = collect_visibility();
-    let tools = collect_tool_execution().await;
+    let tools = collect_tool_execution().await?;
     let mcp = collect_mcp_protocol().await?;
     let coverage = coverage(&http, &tools);
     Ok(json!({
         "schema_version":1,
         "source":{"l1":l1_path.file_name().and_then(|s|s.to_str()).unwrap_or("opencrab-l1.json"),"scenario_catalog":scenario_path.file_name().and_then(|s|s.to_str()).unwrap_or("scenarios.json")},
-        "normalization":["content-length response header omitted","timestamp-valued created_at/updated_at/started_at/finished_at replaced with <timestamp>","numeric duration_ms/latency_ms replaced with <duration>"],
+        "normalization":[
+            "content-length response header omitted",
+            "timestamp-valued *_at fields and timestamp-valued date_from/date_to fields replaced with <timestamp>",
+            "numeric duration_ms/latency_ms replaced with <duration>",
+            "UUID strings and subtask-UUID strings replaced with <uuid> markers",
+            "implementation-generated unit-*/core-* identifiers replaced with field-specific markers; fixed fixture identifiers remain literal"
+        ],
         "scenario_catalog":scenarios,
         "http":http,
         "tool_visibility":visibility,

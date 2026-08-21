@@ -6,7 +6,7 @@
       "4xx": 41
     },
     "http_uncollected_count": 16,
-    "tool_success_uncollected_count": 101
+    "tool_success_uncollected_count": 5
   },
   "http": {
     "probes": [
@@ -7603,8 +7603,10 @@
   },
   "normalization": [
     "content-length response header omitted",
-    "timestamp-valued created_at/updated_at/started_at/finished_at replaced with <timestamp>",
-    "numeric duration_ms/latency_ms replaced with <duration>"
+    "timestamp-valued *_at fields and timestamp-valued date_from/date_to fields replaced with <timestamp>",
+    "numeric duration_ms/latency_ms replaced with <duration>",
+    "UUID strings and subtask-UUID strings replaced with <uuid> markers",
+    "implementation-generated unit-*/core-* identifiers replaced with field-specific markers; fixed fixture identifiers remain literal"
   ],
   "scenario_catalog": {
     "http": {
@@ -7644,6 +7646,338 @@
         "contained successful calls spanning core read/control, workspace mutation, task state, system gateway reads, and MCP",
         "MCP tool-declared failure and forwarding/transport failure"
       ],
+      "success_arguments": {
+        "add_allowed_command": {
+          "command": "baseline_cmd"
+        },
+        "analyze_llm_usage": {
+          "period": "all"
+        },
+        "browse_memory_index": {
+          "max_depth": 3
+        },
+        "cancel_subtask": {
+          "subtask_id": "baseline-subtask"
+        },
+        "close_task": {
+          "status": "done",
+          "summary": "baseline done"
+        },
+        "configure_llm_provider": {
+          "enabled": false,
+          "provider": "openai"
+        },
+        "configure_mcp_server": {
+          "action": "list"
+        },
+        "configure_nostr": {
+          "enabled": false
+        },
+        "configure_self": {
+          "personality": "baseline configured"
+        },
+        "create_my_skill": {
+          "actions": [
+            "get_system_info"
+          ],
+          "description": "captured",
+          "guidance": "preserve",
+          "name": "Captured Skill",
+          "situation_pattern": "baseline"
+        },
+        "create_skill": {
+          "description": "captured",
+          "guidance": "preserve",
+          "name": "Gateway Skill"
+        },
+        "declare_done": {
+          "reason": "baseline complete"
+        },
+        "delete_my_schedule": {
+          "id": 1
+        },
+        "evaluate_response": {
+          "evaluation": "baseline evaluation",
+          "quality_score": 0.75,
+          "tags": [
+            "baseline"
+          ],
+          "task_success": true
+        },
+        "execute_shell": {
+          "args": [
+            "baseline-shell"
+          ],
+          "command": "printf"
+        },
+        "generate_inner_voice": {
+          "thought": "baseline thought"
+        },
+        "get_default_subtask_webhook": {},
+        "get_default_webhook": {},
+        "get_my_heartbeat": {},
+        "get_my_nostr_relay": {},
+        "get_my_schedules": {},
+        "get_system_info": {},
+        "get_task": {},
+        "learn_from_experience": {
+          "experience": "baseline run",
+          "lesson": "capture real results",
+          "outcome": "success",
+          "skill_name": "Experience Skill"
+        },
+        "learn_from_peer": {
+          "lesson": "make preconditions explicit",
+          "observed_pattern": "records fixtures",
+          "peer_name": "Baseline Peer",
+          "skill_name": "Peer Skill"
+        },
+        "list_allowed_commands": {},
+        "list_subtask_webhooks": {
+          "include_disabled": true,
+          "scope": "all"
+        },
+        "list_webhooks": {
+          "include_disabled": true,
+          "scope": "all"
+        },
+        "manage_allowed_commands": {
+          "action": "list"
+        },
+        "mcp__public_local__echo": {
+          "value": "baseline"
+        },
+        "mcp__trusted_local__echo": {
+          "value": "baseline"
+        },
+        "merge_tags": {
+          "from": "Merge From",
+          "into": "Merge Into"
+        },
+        "nostr_list_keys": {},
+        "open_task": {
+          "contract": "captured",
+          "goal": "baseline goal"
+        },
+        "plan_next_memory_window": {
+          "next_from_id": 1,
+          "note": "baseline",
+          "window_size": 10
+        },
+        "read_heartbeat_instructions": {
+          "scope": "agent"
+        },
+        "read_my_history": {
+          "session_id": "baseline-session"
+        },
+        "read_skill": {
+          "name": "Seed Skill"
+        },
+        "rebuild_memory_index": {},
+        "recall_model_experiences": {
+          "evaluation_limit": 5,
+          "include_notes": true
+        },
+        "record_memory_core": {
+          "axis": "Recorded Core",
+          "body": "captured principle",
+          "sources": [
+            "u1"
+          ]
+        },
+        "record_memory_unit": {
+          "from_id": 1,
+          "summary": "captured",
+          "title": "Recorded Unit",
+          "to_id": 2
+        },
+        "record_task_progress": {
+          "content": "baseline progress",
+          "kind": "progress"
+        },
+        "reflect_and_learn": {
+          "action_items": [
+            "preserve"
+          ],
+          "insights": [
+            "observed"
+          ],
+          "reflection": "baseline reflection"
+        },
+        "remove_allowed_command": {
+          "command": "baseline_cmd"
+        },
+        "report_progress": {
+          "message": "baseline progress",
+          "subtask_id": "baseline-subtask"
+        },
+        "restore_my_skill": {
+          "name": "Seed Skill"
+        },
+        "retire_my_skill": {
+          "name": "Seed Skill"
+        },
+        "retract_memory_core": {
+          "core_id": "m2"
+        },
+        "retract_memory_unit": {
+          "unit_id": "u2"
+        },
+        "retrieve_memory_nodes": {
+          "node_ids": [
+            "t1"
+          ]
+        },
+        "save_model_insight": {
+          "model": "baseline:model",
+          "observation": "captured behavior",
+          "recommendation": "preserve",
+          "situation": "baseline",
+          "tags": [
+            "compatibility"
+          ]
+        },
+        "search_memory_index": {
+          "limit": 5,
+          "query": "Baseline"
+        },
+        "search_my_history": {
+          "limit": 5,
+          "query": "baseline"
+        },
+        "select_llm": {
+          "duration": "this_turn",
+          "model_alias": "baseline:model",
+          "purpose": "baseline",
+          "reason": "compatibility capture"
+        },
+        "set_default_subtask_webhook": {
+          "enabled": false,
+          "kind": "discord",
+          "scope": "agent",
+          "url": "https://discord.com/api/webhooks/1/baseline"
+        },
+        "set_default_webhook": {
+          "enabled": false,
+          "family": "tool",
+          "scope": "agent",
+          "url": "https://discord.com/api/webhooks/1/baseline"
+        },
+        "set_my_heartbeat": {
+          "enabled": false,
+          "interval_secs": 3600
+        },
+        "set_my_nostr_relay": {
+          "enabled": false,
+          "webhook_url": ""
+        },
+        "set_my_schedule": {
+          "cron_expr": "0 9 * * *",
+          "enabled": true,
+          "message": "baseline schedule",
+          "timezone": "UTC"
+        },
+        "spawn_subtask": {
+          "label": "baseline subtask",
+          "task": "baseline delegated task",
+          "timeout_secs": 1
+        },
+        "steer_subtask": {
+          "message": "baseline steering",
+          "subtask_id": "baseline-subtask"
+        },
+        "summarize_and_save": {
+          "content": "baseline summary",
+          "filename": "captured/summary.txt",
+          "summary_type": "note"
+        },
+        "survey_my_history": {
+          "granularity": "day",
+          "max_buckets": 5
+        },
+        "tag_topic": {
+          "tags": [
+            "Baseline Tag",
+            "Merge From"
+          ],
+          "topic_id": "t1"
+        },
+        "untag_topic": {
+          "tag": "Baseline Tag",
+          "topic_id": "t1"
+        },
+        "update_heartbeat_instructions": {
+          "instructions": "baseline heartbeat updated",
+          "reason": "compatibility capture",
+          "scope": "agent"
+        },
+        "update_impression": {
+          "agreement": "neutral",
+          "target_id": "baseline-peer",
+          "target_name": "Baseline Peer"
+        },
+        "update_instructions": {
+          "instructions": "baseline updated instructions",
+          "reason": "compatibility capture"
+        },
+        "update_memory_core": {
+          "axis": "Updated Core",
+          "body": "updated principle",
+          "core_id": "m1",
+          "sources": [
+            "u1"
+          ]
+        },
+        "update_memory_index_config": {
+          "batch_size": 20,
+          "threshold": 100
+        },
+        "update_my_schedule": {
+          "enabled": false,
+          "id": 1,
+          "message": "baseline schedule updated"
+        },
+        "update_task_contract": {
+          "contract": "captured result",
+          "goal": "baseline updated goal"
+        },
+        "ws_delete": {
+          "path": "captured/file.txt"
+        },
+        "ws_edit": {
+          "new_string": "captured",
+          "old_string": "baseline",
+          "path": "captured/file.txt"
+        },
+        "ws_list": {
+          "path": "captured"
+        },
+        "ws_mkdir": {
+          "path": "captured"
+        },
+        "ws_read": {
+          "path": "captured/file.txt"
+        },
+        "ws_write": {
+          "content": "baseline",
+          "path": "captured/file.txt"
+        }
+      },
+      "success_fixture": {
+        "core_db": "A fresh in-memory DB contains agent baseline-agent, two fixed session logs for baseline-session (ids 1 and 2), active owner-created skill Seed Skill, topic t1, declared units u1/u2, condensed cores m1/m2, and category nodes c1/c2/c3. Fixed timestamps and IDs are used only as preconditions; tool-created IDs come from the implementation and are normalized after capture.",
+        "gateway_db": "A separate fresh in-memory AppState DB contains baseline-agent and a disabled Nostr row with a deterministic non-production fixture nsec. No production credential, operator workspace, network service, or live gateway is used.",
+        "mcp": "Two in-memory McpServer implementations expose public_local/echo and trusted_local/echo. Calls traverse the real McpToolProvider and BridgedExecutor.",
+        "session": "Gateway self-management calls use web-baseline-agent-conversation so the production TimedFire descriptor resolves a real local web session target. History reads use baseline-session.",
+        "subtasks": "cancel_subtask, steer_subtask, and report_progress receive an in-memory running SubtaskRegistry entry with id baseline-subtask, parent web-baseline-agent-conversation, sub-session subtask-baseline-subtask, an actual pending Tokio abort handle, owner caller, and the real lifecycle latch. spawn_subtask receives a real registry and runs the real spawn path; its background LLM run has no provider and is not represented as a successful completion.",
+        "workspace": "A fresh temporary workspace contains no operator files. The cases create captured/, captured/file.txt, captured/summary.txt, and skills/captured-skill.skill.md through the real tools; the shell allowlist contains only printf."
+      },
+      "success_uncollected_l3": {
+        "nostr_generate_key": "Requires the operator's nostaro executable and writes key material outside the temporary workspace.",
+        "nostr_run": "Requires an adopted identity, operator nostaro executable, and potentially live relay/service I/O.",
+        "nostr_switch_identity": "Requires a generated key and configured Nostr transport capability; successful adoption may start a live relay connection.",
+        "request_peer_review": "Success delivers a message through the active transport. A local fake delivery would not fix live delivery behavior.",
+        "run_my_heartbeat": "Successful manual fire runs an actual agent turn through a configured transport and LLM provider."
+      },
       "why": "Visibility alone does not prove direct invocation is gated or that result/error translation survives a replacement."
     },
     "tool_visibility": {
@@ -8317,7 +8651,7 @@
         ],
         "result": {
           "data": null,
-          "error": "このセッションからは定時実行を設定・照会できません（このセッション種別には発火経路がありません）。設定したい対象のセッション——Discord のチャンネル、Nostr の自発投稿、ダッシュボードの会話——で実行してください。",
+          "error": "cron_exprは必須です。cron 5 フィールド（例: 0 7 * * * = 毎朝 7 時）か @every 形式（例: @every 3h）で指定してください。",
           "success": false
         },
         "tool": "set_my_schedule"
@@ -8329,7 +8663,7 @@
         ],
         "result": {
           "data": null,
-          "error": "このセッションからは定時実行を設定・照会できません（このセッション種別には発火経路がありません）。設定したい対象のセッション——Discord のチャンネル、Nostr の自発投稿、ダッシュボードの会話——で実行してください。",
+          "error": "idは必須です。get_my_schedules が返した id をそのまま渡してください。",
           "success": false
         },
         "tool": "update_my_schedule"
@@ -8341,7 +8675,7 @@
         ],
         "result": {
           "data": null,
-          "error": "このセッションからは定時実行を設定・照会できません（このセッション種別には発火経路がありません）。設定したい対象のセッション——Discord のチャンネル、Nostr の自発投稿、ダッシュボードの会話——で実行してください。",
+          "error": "idは必須です。get_my_schedules が返した id をそのまま渡してください。",
           "success": false
         },
         "tool": "delete_my_schedule"
@@ -9204,6 +9538,36 @@
       },
       {
         "arguments": {
+          "thought": "baseline thought"
+        },
+        "result": {
+          "data": {
+            "recorded": true,
+            "thought": "baseline thought"
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "generate_inner_voice"
+      },
+      {
+        "arguments": {
+          "agreement": "neutral",
+          "target_id": "baseline-peer",
+          "target_name": "Baseline Peer"
+        },
+        "result": {
+          "data": {
+            "target": "Baseline Peer",
+            "updated": true
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "update_impression"
+      },
+      {
+        "arguments": {
           "path": "captured"
         },
         "result": {
@@ -9272,14 +9636,863 @@
       },
       {
         "arguments": {
-          "acceptance_criteria": [
-            "captured"
+          "new_string": "captured",
+          "old_string": "baseline",
+          "path": "captured/file.txt"
+        },
+        "result": {
+          "data": {
+            "edited": true,
+            "path": "captured/file.txt"
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "ws_edit"
+      },
+      {
+        "arguments": {
+          "path": "captured/file.txt"
+        },
+        "result": {
+          "data": {
+            "deleted": true,
+            "path": "captured/file.txt"
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "ws_delete"
+      },
+      {
+        "arguments": {
+          "experience": "baseline run",
+          "lesson": "capture real results",
+          "outcome": "success",
+          "skill_name": "Experience Skill"
+        },
+        "result": {
+          "data": {
+            "message": "新しいスキルを獲得しました",
+            "skill_id": "<uuid>",
+            "skill_name": "Experience Skill"
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "learn_from_experience"
+      },
+      {
+        "arguments": {
+          "lesson": "make preconditions explicit",
+          "observed_pattern": "records fixtures",
+          "peer_name": "Baseline Peer",
+          "skill_name": "Peer Skill"
+        },
+        "result": {
+          "data": {
+            "message": "他者から新しいスキルを学びました",
+            "skill_id": "<uuid>",
+            "skill_name": "Peer Skill"
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "learn_from_peer"
+      },
+      {
+        "arguments": {
+          "action_items": [
+            "preserve"
           ],
+          "insights": [
+            "observed"
+          ],
+          "reflection": "baseline reflection"
+        },
+        "result": {
+          "data": {
+            "reflected": true,
+            "reflection": "baseline reflection"
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "reflect_and_learn"
+      },
+      {
+        "arguments": {
+          "limit": 5,
+          "query": "baseline"
+        },
+        "result": {
+          "data": {
+            "count": 3,
+            "estimated_tokens": 210,
+            "inline_limit_tokens": 2500,
+            "query": "baseline",
+            "results": [
+              {
+                "content": "baseline thought",
+                "content_truncated": false,
+                "created_at": "<timestamp>",
+                "id": 3,
+                "log_type": "inner_voice",
+                "score": -1.1139240506329115e-6,
+                "session_id": "web-baseline-agent-conversation"
+              },
+              {
+                "content": "baseline memory first",
+                "content_truncated": false,
+                "created_at": "<timestamp>",
+                "id": 1,
+                "log_type": "message",
+                "score": -9.513513513513513e-7,
+                "session_id": "baseline-session"
+              },
+              {
+                "content": "baseline memory second",
+                "content_truncated": false,
+                "created_at": "<timestamp>",
+                "id": 2,
+                "log_type": "message",
+                "score": -9.513513513513513e-7,
+                "session_id": "baseline-session"
+              }
+            ]
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "search_my_history"
+      },
+      {
+        "arguments": {
+          "content": "baseline summary",
+          "filename": "captured/summary.txt",
+          "summary_type": "note"
+        },
+        "result": {
+          "data": {
+            "filename": "captured/summary.txt",
+            "saved": true
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "summarize_and_save"
+      },
+      {
+        "arguments": {
+          "actions": [
+            "get_system_info"
+          ],
+          "description": "captured",
+          "guidance": "preserve",
+          "name": "Captured Skill",
+          "situation_pattern": "baseline"
+        },
+        "result": {
+          "data": {
+            "created": true,
+            "file_path": "skills/captured-skill.skill.md",
+            "skill_id": "<uuid>"
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "create_my_skill"
+      },
+      {
+        "arguments": {
+          "name": "Seed Skill"
+        },
+        "result": {
+          "data": {
+            "name": "Seed Skill",
+            "retired": true,
+            "skill_id": "baseline-seed-skill"
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "retire_my_skill"
+      },
+      {
+        "arguments": {
+          "name": "Seed Skill"
+        },
+        "result": {
+          "data": {
+            "name": "Seed Skill",
+            "restored": true,
+            "skill_id": "baseline-seed-skill"
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "restore_my_skill"
+      },
+      {
+        "arguments": {
+          "name": "Seed Skill"
+        },
+        "result": {
+          "data": {
+            "archived": false,
+            "description": "seed skill",
+            "guidance": "preserve behavior",
+            "is_active": true,
+            "name": "Seed Skill",
+            "situation_pattern": "baseline",
+            "source_type": "baseline",
+            "usage_count": 0
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "read_skill"
+      },
+      {
+        "arguments": {
+          "max_depth": 3
+        },
+        "result": {
+          "data": {
+            "node_count": 8,
+            "tree": [
+              {
+                "child_count": 0,
+                "depth": 0,
+                "end_log_id": null,
+                "keywords": [],
+                "node_id": "baseline-tag",
+                "node_type": "category",
+                "parent_id": null,
+                "short_id": "c1",
+                "start_log_id": null,
+                "summary": "Baseline Tag summary",
+                "title": "Baseline Tag"
+              },
+              {
+                "child_count": 0,
+                "depth": 0,
+                "end_log_id": null,
+                "keywords": [],
+                "node_id": "baseline-merge-from",
+                "node_type": "category",
+                "parent_id": null,
+                "short_id": "c2",
+                "start_log_id": null,
+                "summary": "Merge From summary",
+                "title": "Merge From"
+              },
+              {
+                "child_count": 0,
+                "depth": 0,
+                "end_log_id": null,
+                "keywords": [],
+                "node_id": "baseline-merge-into",
+                "node_type": "category",
+                "parent_id": null,
+                "short_id": "c3",
+                "start_log_id": null,
+                "summary": "Merge Into summary",
+                "title": "Merge Into"
+              },
+              {
+                "child_count": 0,
+                "depth": 0,
+                "end_log_id": 2,
+                "keywords": [
+                  "u1"
+                ],
+                "node_id": "baseline-core-update",
+                "node_type": "meta",
+                "parent_id": null,
+                "short_id": "m1",
+                "start_log_id": 1,
+                "summary": "Baseline Core Update summary",
+                "title": "Baseline Core Update"
+              },
+              {
+                "child_count": 0,
+                "depth": 0,
+                "end_log_id": 2,
+                "keywords": [
+                  "u1"
+                ],
+                "node_id": "baseline-core-retract",
+                "node_type": "meta",
+                "parent_id": null,
+                "short_id": "m2",
+                "start_log_id": 1,
+                "summary": "Baseline Core Retract summary",
+                "title": "Baseline Core Retract"
+              },
+              {
+                "child_count": 0,
+                "depth": 0,
+                "end_log_id": 2,
+                "keywords": [],
+                "node_id": "baseline-unit-source",
+                "node_type": "unit",
+                "parent_id": null,
+                "short_id": "u1",
+                "start_log_id": 1,
+                "summary": "Baseline Unit Source summary",
+                "title": "Baseline Unit Source"
+              },
+              {
+                "child_count": 0,
+                "depth": 0,
+                "end_log_id": 1,
+                "keywords": [],
+                "node_id": "baseline-unit-retract",
+                "node_type": "unit",
+                "parent_id": null,
+                "short_id": "u2",
+                "start_log_id": 1,
+                "summary": "Baseline Unit Retract summary",
+                "title": "Baseline Unit Retract"
+              },
+              {
+                "child_count": 0,
+                "depth": 0,
+                "end_log_id": 2,
+                "keywords": [],
+                "node_id": "baseline-topic",
+                "node_type": "topic",
+                "parent_id": null,
+                "short_id": "t1",
+                "start_log_id": 1,
+                "summary": "Baseline Topic summary",
+                "title": "Baseline Topic"
+              }
+            ]
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "browse_memory_index"
+      },
+      {
+        "arguments": {
+          "node_ids": [
+            "t1"
+          ]
+        },
+        "result": {
+          "data": {
+            "nodes": [
+              {
+                "keywords": [],
+                "messages": [
+                  {
+                    "content": "baseline memory first",
+                    "log_type": "message",
+                    "speaker": "baseline-agent"
+                  },
+                  {
+                    "content": "baseline memory second",
+                    "log_type": "message",
+                    "speaker": "baseline-agent"
+                  }
+                ],
+                "node_id": "baseline-topic",
+                "node_type": "topic",
+                "summary": "Baseline Topic summary",
+                "title": "Baseline Topic"
+              }
+            ]
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "retrieve_memory_nodes"
+      },
+      {
+        "arguments": {
+          "limit": 5,
+          "query": "Baseline"
+        },
+        "result": {
+          "data": {
+            "count": 5,
+            "nodes": [
+              {
+                "child_count": 0,
+                "date_from": "2026-01-01",
+                "date_to": "2026-01-01",
+                "keywords": [],
+                "node_id": "baseline-tag",
+                "node_type": "category",
+                "score": -1.4666666666666667e-6,
+                "short_id": "c1",
+                "source_type": "category",
+                "summary": "Baseline Tag summary",
+                "title": "Baseline Tag"
+              },
+              {
+                "child_count": 0,
+                "date_from": "2026-01-01",
+                "date_to": "2026-01-01",
+                "keywords": [],
+                "node_id": "baseline-topic",
+                "node_type": "topic",
+                "score": -1.4193548387096774e-6,
+                "short_id": "t1",
+                "source_type": "session_log",
+                "summary": "Baseline Topic summary",
+                "title": "Baseline Topic"
+              },
+              {
+                "child_count": 0,
+                "date_from": "2026-01-01",
+                "date_to": "2026-01-01",
+                "keywords": [],
+                "node_id": "baseline-unit-source",
+                "node_type": "unit",
+                "score": -1.2941176470588235e-6,
+                "short_id": "u1",
+                "source_type": "declared",
+                "summary": "Baseline Unit Source summary",
+                "title": "Baseline Unit Source"
+              },
+              {
+                "child_count": 0,
+                "date_from": "2026-01-01",
+                "date_to": "2026-01-01",
+                "keywords": [
+                  "u1"
+                ],
+                "node_id": "baseline-core-update",
+                "node_type": "meta",
+                "score": -1.2941176470588235e-6,
+                "short_id": "m1",
+                "source_type": "condensed",
+                "summary": "Baseline Core Update summary",
+                "title": "Baseline Core Update"
+              },
+              {
+                "child_count": 0,
+                "date_from": "2026-01-01",
+                "date_to": "2026-01-01",
+                "keywords": [],
+                "node_id": "baseline-unit-retract",
+                "node_type": "unit",
+                "score": -1.2753623188405798e-6,
+                "short_id": "u2",
+                "source_type": "declared",
+                "summary": "Baseline Unit Retract summary",
+                "title": "Baseline Unit Retract"
+              }
+            ],
+            "query": "Baseline"
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "search_memory_index"
+      },
+      {
+        "arguments": {
+          "tags": [
+            "Baseline Tag",
+            "Merge From"
+          ],
+          "topic_id": "t1"
+        },
+        "result": {
+          "data": {
+            "tags": [
+              "Baseline Tag",
+              "Merge From"
+            ],
+            "topic_id": "baseline-topic"
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "tag_topic"
+      },
+      {
+        "arguments": {
+          "tag": "Baseline Tag",
+          "topic_id": "t1"
+        },
+        "result": {
+          "data": {
+            "removed": true,
+            "tag": "Baseline Tag",
+            "topic_id": "baseline-topic"
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "untag_topic"
+      },
+      {
+        "arguments": {
+          "from": "Merge From",
+          "into": "Merge Into"
+        },
+        "result": {
+          "data": {
+            "from": "Merge From",
+            "into": "Merge Into",
+            "into_category_id": "baseline-merge-into",
+            "moved": 1
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "merge_tags"
+      },
+      {
+        "arguments": {
+          "granularity": "day",
+          "max_buckets": 5
+        },
+        "result": {
+          "data": {
+            "buckets": [
+              {
+                "bucket": "2026-08-21",
+                "content_chars": 59,
+                "est_tokens": 39,
+                "log_count": 3,
+                "max_id": 3,
+                "min_id": 1,
+                "session_count": 2,
+                "type_counts": {
+                  "inner_voice": 1,
+                  "message": 2
+                }
+              }
+            ],
+            "granularity": "day",
+            "inline_limit_tokens": 2500,
+            "max_id": 3,
+            "min_id": 1,
+            "returned_buckets": 1,
+            "total_buckets": 1,
+            "total_content_chars": 59,
+            "total_est_tokens": 39,
+            "total_logs": 3,
+            "total_sessions": 2,
+            "truncated": false
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "survey_my_history"
+      },
+      {
+        "arguments": {
+          "session_id": "baseline-session"
+        },
+        "result": {
+          "data": {
+            "estimated_tokens": 135,
+            "inline_limit_tokens": 2500,
+            "next_from_id": null,
+            "range_total": 2,
+            "returned": 2,
+            "rows": [
+              {
+                "agent_id": "baseline-agent",
+                "content": "baseline memory first",
+                "created_at": "<timestamp>",
+                "id": 1,
+                "log_type": "message",
+                "metadata_json": null,
+                "session_id": "baseline-session",
+                "speaker_id": "baseline-agent",
+                "turn_number": 1
+              },
+              {
+                "agent_id": "baseline-agent",
+                "content": "baseline memory second",
+                "created_at": "<timestamp>",
+                "id": 2,
+                "log_type": "message",
+                "metadata_json": null,
+                "session_id": "baseline-session",
+                "speaker_id": "baseline-agent",
+                "turn_number": 1
+              }
+            ],
+            "truncated": false
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "read_my_history"
+      },
+      {
+        "arguments": {
+          "from_id": 1,
+          "summary": "captured",
+          "title": "Recorded Unit",
+          "to_id": 2
+        },
+        "result": {
+          "data": {
+            "date_from": "<timestamp>",
+            "date_to": "<timestamp>",
+            "from_id": 1,
+            "logs_in_range": 2,
+            "short_id": "u3",
+            "tag_error": null,
+            "tags": [],
+            "title": "Recorded Unit",
+            "to_id": 2,
+            "unit_id": "<generated-unit_id>"
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "record_memory_unit"
+      },
+      {
+        "arguments": {
+          "unit_id": "u2"
+        },
+        "result": {
+          "data": {
+            "retracted": true,
+            "unit_id": "baseline-unit-retract"
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "retract_memory_unit"
+      },
+      {
+        "arguments": {
+          "next_from_id": 1,
+          "note": "baseline",
+          "window_size": 10
+        },
+        "result": {
+          "data": {
+            "applies_to": "next_run",
+            "hint": "next_from_id はこのランの終わりに一度だけ使われます（必ず前へ進むよう丸められます）。window_size は変えるまで効き続けます。広さの上限は既定 600 件（運用の設定がそれより広ければその値）で、実際に使われた広さは次回の「今回の範囲」に出ます。ただし既定より広げた設定のまま、ターンが途中で潰れる（時間切れ・反復上限・エラー）ことが続いたら、既定の広さへ自動で戻ります（そのときは自分で広げ直せます）。狭めた設定はそのまま残ります。",
+            "next_from_id": 1,
+            "note": "baseline",
+            "window_size": 50,
+            "window_size_max_default": 600,
+            "window_size_min": 50,
+            "window_size_raised_to_min": true
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "plan_next_memory_window"
+      },
+      {
+        "arguments": {
+          "axis": "Recorded Core",
+          "body": "captured principle",
+          "sources": [
+            "u1"
+          ]
+        },
+        "result": {
+          "data": {
+            "axis": "Recorded Core",
+            "core_id": "<generated-core_id>",
+            "end_log_id": 2,
+            "short_id": "m3",
+            "sources": [
+              "u1"
+            ],
+            "start_log_id": 1,
+            "unresolved_sources": []
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "record_memory_core"
+      },
+      {
+        "arguments": {
+          "axis": "Updated Core",
+          "body": "updated principle",
+          "core_id": "m1",
+          "sources": [
+            "u1"
+          ]
+        },
+        "result": {
+          "data": {
+            "axis": "Updated Core",
+            "core_id": "baseline-core-update",
+            "short_id": "m1",
+            "sources": [
+              "u1"
+            ],
+            "unresolved_sources": [],
+            "updated": true
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "update_memory_core"
+      },
+      {
+        "arguments": {
+          "core_id": "m2"
+        },
+        "result": {
+          "data": {
+            "core_id": "baseline-core-retract",
+            "retracted": true
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "retract_memory_core"
+      },
+      {
+        "arguments": {
+          "duration": "this_turn",
+          "model_alias": "baseline:model",
+          "purpose": "baseline",
+          "reason": "compatibility capture"
+        },
+        "result": {
+          "data": {
+            "duration": "this_turn",
+            "purpose": "baseline",
+            "reason": "compatibility capture",
+            "selected": "baseline:model",
+            "switched": true
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "select_llm"
+      },
+      {
+        "arguments": {
+          "evaluation": "baseline evaluation",
+          "quality_score": 0.75,
+          "tags": [
+            "baseline"
+          ],
+          "task_success": true
+        },
+        "result": {
+          "data": {
+            "evaluated": true,
+            "evaluation": "baseline evaluation",
+            "meta": {
+              "evaluator_model": "baseline:model",
+              "note": "この評価はevaluator_modelによって行われた。評価の信頼性はevaluatorの能力に依存する。"
+            },
+            "metrics_id": null,
+            "quality_score": 0.75,
+            "tags": [
+              "baseline"
+            ],
+            "task_success": true
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "evaluate_response"
+      },
+      {
+        "arguments": {
+          "period": "all"
+        },
+        "result": {
+          "data": {
+            "by_model": [],
+            "by_model_and_purpose": [],
+            "period": "all",
+            "summary": {
+              "avg_latency_ms": null,
+              "avg_quality": null,
+              "total_cost_usd": null,
+              "total_requests": 0,
+              "total_tokens": null
+            }
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "analyze_llm_usage"
+      },
+      {
+        "arguments": {
+          "evaluation_limit": 5,
+          "include_notes": true
+        },
+        "result": {
+          "data": {
+            "by_purpose": [],
+            "experience_notes": [],
+            "model_metrics": [],
+            "recent_evaluations": []
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "recall_model_experiences"
+      },
+      {
+        "arguments": {
+          "model": "baseline:model",
+          "observation": "captured behavior",
+          "recommendation": "preserve",
+          "situation": "baseline",
+          "tags": [
+            "compatibility"
+          ]
+        },
+        "result": {
+          "data": {
+            "meta": {
+              "author_model": "baseline:model",
+              "note": "この知見はauthor_modelによって記録された。"
+            },
+            "model": "baseline:model",
+            "note_id": "<uuid>",
+            "saved": true,
+            "situation": "baseline"
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "save_model_insight"
+      },
+      {
+        "arguments": {
+          "instructions": "baseline updated instructions",
+          "reason": "compatibility capture"
+        },
+        "result": {
+          "data": {
+            "instructions_length": 29,
+            "reason": "compatibility capture",
+            "updated": true
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "update_instructions"
+      },
+      {
+        "arguments": {
+          "contract": "captured",
           "goal": "baseline goal"
         },
         "result": {
           "data": {
-            "contract": null,
+            "contract": "captured",
             "goal": "baseline goal",
             "status": "active",
             "task_id": 1
@@ -9288,6 +10501,239 @@
           "success": true
         },
         "tool": "open_task"
+      },
+      {
+        "arguments": {
+          "contract": "captured result",
+          "goal": "baseline updated goal"
+        },
+        "result": {
+          "data": {
+            "contract": "captured result",
+            "created_at": "<timestamp>",
+            "goal": "baseline updated goal",
+            "status": "active",
+            "task_id": 1,
+            "updated_at": "<timestamp>"
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "update_task_contract"
+      },
+      {
+        "arguments": {
+          "content": "baseline progress",
+          "kind": "progress"
+        },
+        "result": {
+          "data": {
+            "kind": "progress",
+            "progress_id": 1,
+            "task_id": 1
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "record_task_progress"
+      },
+      {
+        "arguments": {},
+        "result": {
+          "data": {
+            "contract": "captured result",
+            "created_at": "<timestamp>",
+            "goal": "baseline updated goal",
+            "progress": [
+              {
+                "content": "baseline progress",
+                "created_at": "<timestamp>",
+                "kind": "progress"
+              }
+            ],
+            "progress_total": 1,
+            "status": "active",
+            "task_id": 1,
+            "updated_at": "<timestamp>"
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "get_task"
+      },
+      {
+        "arguments": {
+          "status": "done",
+          "summary": "baseline done"
+        },
+        "result": {
+          "data": {
+            "goal": "baseline updated goal",
+            "status": "done",
+            "task_id": 1
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "close_task"
+      },
+      {
+        "arguments": {
+          "args": [
+            "baseline-shell"
+          ],
+          "command": "printf"
+        },
+        "result": {
+          "data": {
+            "exit_code": 0,
+            "stderr": "",
+            "stdout": "baseline-shell",
+            "truncated": false
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "execute_shell"
+      },
+      {
+        "arguments": {
+          "enabled": false,
+          "provider": "openai"
+        },
+        "result": {
+          "data": {
+            "applied": true,
+            "provider": "openai",
+            "rolled_back": false,
+            "test_ok": null
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "configure_llm_provider"
+      },
+      {
+        "arguments": {
+          "action": "list"
+        },
+        "result": {
+          "data": {
+            "commands": []
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "manage_allowed_commands"
+      },
+      {
+        "arguments": {
+          "enabled": false
+        },
+        "result": {
+          "data": {
+            "agent_id": "baseline-agent",
+            "authors": [],
+            "enabled": false,
+            "keywords": [],
+            "kinds": [],
+            "owner_pubkey": "",
+            "relays": []
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "configure_nostr"
+      },
+      {
+        "arguments": {
+          "personality": "baseline configured"
+        },
+        "result": {
+          "data": {
+            "agent_id": "baseline-agent",
+            "updated": true
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "configure_self"
+      },
+      {
+        "arguments": {
+          "action": "list"
+        },
+        "result": {
+          "data": {
+            "servers": []
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "configure_mcp_server"
+      },
+      {
+        "arguments": {},
+        "result": {
+          "data": {
+            "note": "あなたが生成した鍵の npub 一覧です。nostr_switch_identity で本鍵に採用できます。秘密鍵(nsec)はサーバ内に安全に保存されており、ここには含まれません。",
+            "npubs": []
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "nostr_list_keys"
+      },
+      {
+        "arguments": {},
+        "result": {
+          "data": {
+            "agent_id": "baseline-agent",
+            "logs_indexed": 0,
+            "message": "メモリインデックスを再構築しました（0件のログ → 0ノード作成）",
+            "nodes_created": 0
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "rebuild_memory_index"
+      },
+      {
+        "arguments": {
+          "batch_size": 20,
+          "threshold": 100
+        },
+        "result": {
+          "data": {
+            "agent_id": "baseline-agent",
+            "current": {
+              "batch_size": 20,
+              "threshold": 100
+            },
+            "previous": {
+              "batch_size": 50,
+              "threshold": 20
+            }
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "update_memory_index_config"
+      },
+      {
+        "arguments": {
+          "command": "baseline_cmd"
+        },
+        "result": {
+          "data": {
+            "agent_id": "baseline-agent",
+            "command": "baseline_cmd",
+            "message": "`baseline_cmd` を許可コマンドに追加しました"
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "add_allowed_command"
       },
       {
         "arguments": {},
@@ -9301,6 +10747,234 @@
           "success": true
         },
         "tool": "list_allowed_commands"
+      },
+      {
+        "arguments": {
+          "command": "baseline_cmd"
+        },
+        "result": {
+          "data": {
+            "agent_id": "baseline-agent",
+            "command": "baseline_cmd",
+            "message": "`baseline_cmd` を許可コマンドから削除しました"
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "remove_allowed_command"
+      },
+      {
+        "arguments": {
+          "description": "captured",
+          "guidance": "preserve",
+          "name": "Gateway Skill"
+        },
+        "result": {
+          "data": {
+            "action": "created",
+            "id": "<uuid>",
+            "name": "Gateway Skill"
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "create_skill"
+      },
+      {
+        "arguments": {
+          "instructions": "baseline heartbeat updated",
+          "reason": "compatibility capture",
+          "scope": "agent"
+        },
+        "result": {
+          "data": {
+            "channel_id": null,
+            "length": 26,
+            "preview": "baseline heartbeat updated",
+            "scope": "agent",
+            "success": true
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "update_heartbeat_instructions"
+      },
+      {
+        "arguments": {
+          "scope": "agent"
+        },
+        "result": {
+          "data": {
+            "instructions": "baseline heartbeat updated",
+            "scope": "agent"
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "read_heartbeat_instructions"
+      },
+      {
+        "arguments": {},
+        "result": {
+          "data": {
+            "agent_id": "baseline-agent",
+            "enabled": false,
+            "redacted_url": null,
+            "webhook_configured": false
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "get_my_nostr_relay"
+      },
+      {
+        "arguments": {
+          "enabled": false,
+          "webhook_url": ""
+        },
+        "result": {
+          "data": {
+            "agent_id": "baseline-agent",
+            "enabled": false,
+            "redacted_url": null,
+            "success": true,
+            "webhook_configured": false
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "set_my_nostr_relay"
+      },
+      {
+        "arguments": {},
+        "result": {
+          "data": {
+            "anchor_at": null,
+            "configured_interval_secs": null,
+            "default_interval_secs": 29,
+            "enabled": false,
+            "gated": false,
+            "gated_reason": null,
+            "interval_secs": 300,
+            "last_fired_at": null,
+            "max_interval_secs": 86400,
+            "min_interval_secs": 300,
+            "next_fire_at": null,
+            "session_id": "web-baseline-agent-conversation"
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "get_my_heartbeat"
+      },
+      {
+        "arguments": {
+          "enabled": false,
+          "interval_secs": 3600
+        },
+        "result": {
+          "data": {
+            "anchor_at": null,
+            "configured_interval_secs": 3600,
+            "default_interval_secs": 29,
+            "enabled": false,
+            "gated": false,
+            "gated_reason": null,
+            "interval_secs": 3600,
+            "last_fired_at": null,
+            "max_interval_secs": 86400,
+            "min_interval_secs": 300,
+            "next_fire_at": null,
+            "session_id": "web-baseline-agent-conversation",
+            "success": true
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "set_my_heartbeat"
+      },
+      {
+        "arguments": {},
+        "result": {
+          "data": {
+            "count": 0,
+            "schedules": [],
+            "session_id": "web-baseline-agent-conversation"
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "get_my_schedules"
+      },
+      {
+        "arguments": {
+          "cron_expr": "0 9 * * *",
+          "enabled": true,
+          "message": "baseline schedule",
+          "timezone": "UTC"
+        },
+        "result": {
+          "data": {
+            "agent_id": "baseline-agent",
+            "anchor_at": "<timestamp>",
+            "cron_expr": "0 9 * * *",
+            "enabled": true,
+            "gated": false,
+            "gated_reason": null,
+            "id": 1,
+            "last_fired_at": null,
+            "message": "baseline schedule",
+            "next_fire_at": "<timestamp>",
+            "session_id": "web-baseline-agent-conversation",
+            "success": true,
+            "timezone": "UTC"
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "set_my_schedule"
+      },
+      {
+        "arguments": {
+          "enabled": false,
+          "id": 1,
+          "message": "baseline schedule updated"
+        },
+        "result": {
+          "data": {
+            "agent_id": "baseline-agent",
+            "anchor_at": "<timestamp>",
+            "cron_expr": "0 9 * * *",
+            "enabled": false,
+            "gated": false,
+            "gated_reason": null,
+            "id": 1,
+            "last_fired_at": null,
+            "message": "baseline schedule updated",
+            "next_fire_at": "<timestamp>",
+            "session_id": "web-baseline-agent-conversation",
+            "success": true,
+            "timezone": "UTC"
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "update_my_schedule"
+      },
+      {
+        "arguments": {
+          "id": 1
+        },
+        "result": {
+          "data": {
+            "id": 1,
+            "message": "スケジュールを削除しました",
+            "success": true
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "delete_my_schedule"
       },
       {
         "arguments": {},
@@ -9338,6 +11012,76 @@
       },
       {
         "arguments": {
+          "enabled": false,
+          "kind": "discord",
+          "scope": "agent",
+          "url": "https://discord.com/api/webhooks/1/baseline"
+        },
+        "result": {
+          "data": {
+            "agent_id": "baseline-agent",
+            "enabled": false,
+            "family": "discord",
+            "redacted_url": null,
+            "scope": "agent",
+            "tool_name": ""
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "set_default_subtask_webhook"
+      },
+      {
+        "arguments": {
+          "include_disabled": true,
+          "scope": "all"
+        },
+        "result": {
+          "data": {
+            "webhooks": []
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "list_subtask_webhooks"
+      },
+      {
+        "arguments": {
+          "enabled": false,
+          "family": "tool",
+          "scope": "agent",
+          "url": "https://discord.com/api/webhooks/1/baseline"
+        },
+        "result": {
+          "data": {
+            "agent_id": "baseline-agent",
+            "enabled": false,
+            "family": "tool",
+            "redacted_url": null,
+            "scope": "agent",
+            "tool_name": ""
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "set_default_webhook"
+      },
+      {
+        "arguments": {
+          "include_disabled": true,
+          "scope": "all"
+        },
+        "result": {
+          "data": {
+            "webhooks": []
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "list_webhooks"
+      },
+      {
+        "arguments": {
           "value": "baseline"
         },
         "result": {
@@ -9361,6 +11105,74 @@
           "success": true
         },
         "tool": "mcp__trusted_local__echo"
+      },
+      {
+        "arguments": {
+          "label": "baseline subtask",
+          "task": "baseline delegated task",
+          "timeout_secs": 1
+        },
+        "result": {
+          "data": {
+            "session_id": "subtask-<uuid>",
+            "spawned_at": "<timestamp>",
+            "status": "spawned",
+            "subtask_id": "<uuid>",
+            "webhook_error": null,
+            "webhook_redacted_url": null,
+            "webhook_source": null,
+            "webhook_status": "none"
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "spawn_subtask"
+      },
+      {
+        "arguments": {
+          "subtask_id": "baseline-subtask"
+        },
+        "result": {
+          "data": {
+            "cancelled": true,
+            "subtask_id": "baseline-subtask"
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "cancel_subtask"
+      },
+      {
+        "arguments": {
+          "message": "baseline steering",
+          "subtask_id": "baseline-subtask"
+        },
+        "result": {
+          "data": {
+            "note": "追加指示を記録しました。サブタスクは次の反復の合間にこれを読み、受領/反映を親へ返します。",
+            "steered": true,
+            "subtask_id": "baseline-subtask"
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "steer_subtask"
+      },
+      {
+        "arguments": {
+          "message": "baseline progress",
+          "subtask_id": "baseline-subtask"
+        },
+        "result": {
+          "data": {
+            "message": "baseline progress",
+            "notified": false,
+            "reported": true
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "report_progress"
       }
     ],
     "uncollected": [
@@ -9540,437 +11352,36 @@
       },
       {
         "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "generate_inner_voice"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "update_impression"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "ws_edit"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "ws_delete"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "learn_from_experience"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "learn_from_peer"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "reflect_and_learn"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "search_my_history"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "summarize_and_save"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "create_my_skill"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "retire_my_skill"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "restore_my_skill"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "read_skill"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "browse_memory_index"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "retrieve_memory_nodes"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "search_memory_index"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "tag_topic"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "untag_topic"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "merge_tags"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "survey_my_history"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "read_my_history"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "record_memory_unit"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "retract_memory_unit"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "plan_next_memory_window"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "record_memory_core"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "update_memory_core"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "retract_memory_core"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "select_llm"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "evaluate_response"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "analyze_llm_usage"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "recall_model_experiences"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "save_model_insight"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "update_instructions"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "update_task_contract"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "record_task_progress"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "close_task"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "get_task"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "execute_shell"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "configure_llm_provider"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "manage_allowed_commands"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "configure_nostr"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "configure_self"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "configure_mcp_server"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
+        "reason": "L3: successful key generation requires the operator's nostaro executable and writes key material outside the temporary workspace",
         "status": "uncollected",
         "tool": "nostr_generate_key"
       },
       {
         "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "nostr_list_keys"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
+        "reason": "L3: success requires a generated Nostr key and a configured Nostr transport capability",
         "status": "uncollected",
         "tool": "nostr_switch_identity"
       },
       {
         "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
+        "reason": "L3: success requires an adopted identity plus the operator's nostaro executable and may use live relays",
         "status": "uncollected",
         "tool": "nostr_run"
       },
       {
         "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "spawn_subtask"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "cancel_subtask"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "steer_subtask"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "rebuild_memory_index"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "report_progress"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "update_memory_index_config"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "add_allowed_command"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "remove_allowed_command"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "create_skill"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "update_heartbeat_instructions"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "read_heartbeat_instructions"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "get_my_nostr_relay"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "set_my_nostr_relay"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "get_my_heartbeat"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "set_my_heartbeat"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
+        "reason": "L3: success fires an actual agent turn through a configured transport and LLM provider",
         "status": "uncollected",
         "tool": "run_my_heartbeat"
       },
       {
         "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "get_my_schedules"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "set_my_schedule"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "update_my_schedule"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "delete_my_schedule"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "set_default_subtask_webhook"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "list_subtask_webhooks"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "set_default_webhook"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
-        "status": "uncollected",
-        "tool": "list_webhooks"
-      },
-      {
-        "facet": "success",
-        "reason": "no credential-free, side-effect-contained successful scenario was selected for L2",
+        "reason": "L3: success delivers a message through the active transport",
         "status": "uncollected",
         "tool": "request_peer_review"
       }
-    ]
+    ],
+    "unsuccessful_attempts": []
   },
   "tool_visibility": {
     "scenarios": [
