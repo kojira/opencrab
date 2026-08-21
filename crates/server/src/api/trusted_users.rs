@@ -60,7 +60,7 @@ pub struct AddTrustedUserRequest {
     pub permission: Option<String>,
     /// ロスター表示用の名前（ピアレビュアー一覧等）。省略時は空。
     pub display_name: Option<String>,
-    /// `user_id` がどの経路の識別子か（`discord` / `web` / `rest`, #159）。
+    /// `user_id` がどの経路の識別子か（`discord` / `web` / legacy `rest`, #159）。
     ///
     /// **省略時は `discord`**（#214 以前からの登録リクエストがそのまま動く）。
     pub platform: Option<String>,
@@ -98,7 +98,7 @@ pub async fn add_trusted_user(
     // その信頼ユーザーが読み出しで一致しない。正規化できない値は保存せず 400
     // （設定できたように見えて永久に誰とも一致しない行を作らせない）。入口 `configure_nostr`
     // / REST の owner_pubkey と同じ扱いで、新しい制約ではなく既存の入口正規化の網羅。
-    // 他経路（discord / web / rest）の識別子は素通し（挙動を変えない）。
+    // 他の値（discord / web / legacy rest）の識別子は素通し（挙動を変えない）。
     // PR-1B: 公開鍵の正規化は Nostr クレートの実装なので nostr feature の内側。nostr を
     // 外した構成では `platform='nostr'` の信頼ユーザーは正規化できないため**受け付けず
     // 400 で拒否**する（丸めず・素通しの平文保存もしない＝暗黙のフォールバックを作らない）。
@@ -275,7 +275,7 @@ mod tests {
         .is_some());
     }
 
-    /// 経路を指定すればその経路の行になる（互換読みの撤去後、これが唯一の登録手段）。
+    /// 経路を指定すればその経路の行になる。legacy `rest` も既存行との互換用に受け付ける。
     #[tokio::test]
     async fn platform_is_taken_from_the_request() {
         let state = crate::test_app_state();

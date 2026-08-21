@@ -1909,7 +1909,7 @@ GET /api/agents/550e8400-.../channel-configs?guild_id=111222333444555666
 | created_by | string | 作成者 |
 | created_at | ISO8601 | 作成日時 |
 | display_name | string | ロスター表示用の名前（空文字可） |
-| platform | string | `"discord"` \| `"web"` \| `"rest"` — その行が効く経路 |
+| platform | string | `"discord"` \| `"web"` \| `"rest"` — その行の識別子空間。`rest` は既存行との互換用で、現行の読取経路はない |
 
 一覧は**経路で絞らない**（運用者が全経路の登録を見渡せる必要があるため）。
 
@@ -1941,7 +1941,7 @@ GET /api/agents/550e8400-.../channel-configs?guild_id=111222333444555666
 | user_id | string | ✅ | その経路でのユーザー識別子（旧 `discord_user_id` も後方互換で受け付ける） |
 | permission | string | ❌ | `"owner"` \| `"user"` \| `"co-agent"` (default: `"user"`)。**これ以外は 400**（#234） |
 | display_name | string | ❌ | ロスター表示用の名前（default: 空文字） |
-| platform | string | ❌ | `"discord"` \| `"web"` \| `"rest"` (default: `"discord"`) — `user_id` がどの経路の識別子か |
+| platform | string | ❌ | `"discord"` \| `"web"` \| `"rest"` (default: `"discord"`) — `user_id` の識別子空間。`rest` は既存行との互換用 |
 
 **Example Request**
 
