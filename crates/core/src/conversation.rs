@@ -377,67 +377,92 @@ fn is_excluded_from_conversation(log: &opencrab_db::queries::SessionLogRow) -> b
     log.log_type == "evaluation"
 }
 
-/// 結果の本文を次のターンへ持ち越さない**読み**のツールか（#707）。
+/// ツール結果から、会話へ残す**参照**を組む（#709）。本文は載せない。
 ///
-/// 定義は [`crate::tool_result_log::is_read_tool`] が唯一の源——**ここで再列挙しない**。
-/// 退避上限（`inline_limit_for_tool`）と同じ集合を指す必要があり、2 箇所で別々に並べると
-/// 片方だけ直す事故が起きる（レビュー指摘）。
-pub(crate) fn is_read_tool(tool_name: &str) -> bool {
-    crate::tool_result_log::is_read_tool(tool_name)
-}
-
-/// 読みの結果から、会話へ残す**参照**を組む（#707）。本文は載せない。
+/// #707 では「読み直せるか」で分け、`ws_read` / `ws_list` だけを参照化した。**その軸が誤り**
+/// だった——落とすのは**会話履歴からだけ**で、記録（`memory_sessions`）には完全な本文が残る。
+/// 読み直せないもの（`execute_shell` の出力）も失われない。
 ///
-/// 「読んだ事実」と「もう一度読む方法」が分かる形にする——落としたことを隠すとエージェントは
-/// 自分が何を読んだのか分からなくなる。参照は**元のファイル名がそのまま**使える（退避ファイル
-/// 名を作る必要が無い）。
-pub(crate) fn read_reference(result_json: &str) -> String {
+/// 実害（本番実測 2026-08-21）: らぼみのプロンプトが 46 万文字に達し、cursor(grok) が空応答を
+/// 返して沈黙した。しきい値は実測 20〜30 万文字。tool_result の内訳は execute_shell 10 万・
+/// inner_voice 6 万・read_my_history 3.2 万…で、**読みだけを参照化しても 5.7% しか減らない**。
+///
+/// **ターン内の挙動は変わらない**（ツール往復は会話再構成を通らない）。落とすのは次のターン
+/// 以降への持ち越しだけで、往復は増えない。
+///
+/// **失敗した結果は本文を残す**（#707 レビュー指摘）。参照へ潰すとエラー理由が消え、成功した
+/// ように読める文字列に化ける——握り潰しであり #692 / #284 の理念に反する。
+pub(crate) fn result_reference(tool_name: &str, result_json: &str) -> String {
     let v: serde_json::Value = match serde_json::from_str(result_json) {
         Ok(v) => v,
         // 判断材料が無いので推測で捨てず、そのまま残す。
         Err(_) => return result_json.to_string(),
     };
-    // **失敗した読みは本文をそのまま残す**（#707 レビュー指摘）。読みの参照化は「もう一度
-    // 呼べば同じものが得られる」ことが根拠だが、失敗（not found / パストラバーサル拒否 /
-    // IO エラー / timeout）はその前提の外で、参照へ潰すと `? の 全体 を読んだ` という
-    // **読めたことにする文字列**に化ける。エラー文言が消え、エージェントは失敗の事実と理由を
-    // 失う——握り潰しであり、#692（捏造）と #284（黙って捨てない）の理念に反する。
     if v.get("success").and_then(|x| x.as_bool()) != Some(true) {
         return result_json.to_string();
     }
     let null = serde_json::Value::Null;
     let d = v.get("data").unwrap_or(&null);
-    let path = d.get("path").and_then(|x| x.as_str()).unwrap_or("?");
-    let start = d.get("start_line").and_then(|x| x.as_u64());
-    let lines = d
-        .get("content")
-        .and_then(|x| x.as_str())
-        .map(|c| c.lines().count());
-    let tokens = d.get("estimated_tokens").and_then(|x| x.as_u64());
-    let has_more = d.get("has_more").and_then(|x| x.as_bool()).unwrap_or(false);
 
-    // ws_list（ディレクトリ列挙）は content を持たず、ws_read では読み直せない。件数と
-    // 正しい再取得ツールを出す（間違ったツールへ誘導しない）。
+    // ディレクトリ一覧: 件数と正しい再取得ツール。
     if let Some(entries) = d.get("entries").and_then(|x| x.as_array()) {
+        let path = d.get("path").and_then(|x| x.as_str()).unwrap_or("?");
         return format!(
-            "{path} を一覧した（{} 件・内容は会話に残していない。必要ならもう一度 ws_list で見る）",
+            "{path} を一覧した（{} 件・内容は会話に残していない。必要ならもう一度 {tool_name} で見る）",
             entries.len()
         );
     }
 
-    let range = match (start, lines) {
-        (Some(s), Some(n)) if n > 0 => format!("{s}〜{} 行目", s as usize + n - 1),
-        (Some(s), _) => format!("{s} 行目から"),
-        (None, Some(n)) => format!("{n} 行"),
-        _ => "全体".to_string(),
-    };
-    let size = tokens
-        .map(|t| format!("・約 {t} トークン"))
-        .unwrap_or_default();
-    let more = if has_more { "・続きあり" } else { "" };
-    format!(
-        "{path} の {range} を読んだ{size}{more}（本文は会話に残していない。必要ならもう一度 ws_read で読む）"
-    )
+    // ファイルの読み: 元のファイル名がそのまま参照になる。
+    if let Some(path) = d.get("path").and_then(|x| x.as_str()) {
+        if d.get("content").is_some() {
+            let start = d.get("start_line").and_then(|x| x.as_u64());
+            let lines = d
+                .get("content")
+                .and_then(|x| x.as_str())
+                .map(|c| c.lines().count());
+            let range = match (start, lines) {
+                (Some(st), Some(n)) if n > 0 => format!("{st}〜{} 行目", st as usize + n - 1),
+                (Some(st), _) => format!("{st} 行目から"),
+                (None, Some(n)) => format!("{n} 行"),
+                _ => "全体".to_string(),
+            };
+            let tokens = d
+                .get("estimated_tokens")
+                .and_then(|x| x.as_u64())
+                .map(|t| format!("・約 {t} トークン"))
+                .unwrap_or_default();
+            let more = if d.get("has_more").and_then(|x| x.as_bool()) == Some(true) {
+                "・続きあり"
+            } else {
+                ""
+            };
+            return format!(
+                "{path} の {range} を読んだ{tokens}{more}（本文は会話に残していない。必要ならもう一度 {tool_name} で読む）"
+            );
+        }
+    }
+
+    // コマンド実行: 終了コードと規模。本文は記録（と、大きければ退避ファイル）に残っている。
+    if let Some(code) = d.get("exit_code").and_then(|x| x.as_i64()) {
+        let out = d.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
+        let err = d.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
+        return format!(
+            "終了コード {code}・出力 {} 文字{}（本文は会話に残していない）",
+            out.chars().count(),
+            if err.is_empty() {
+                String::new()
+            } else {
+                format!("・stderr {} 文字", err.chars().count())
+            }
+        );
+    }
+
+    // それ以外（記憶・検索・内なる声など）: 規模だけ残す。何を呼んだかは tool_name が示す。
+    let size = serde_json::to_string(d)
+        .map(|t| t.chars().count())
+        .unwrap_or(0);
+    format!("結果 {size} 文字（本文は会話に残していない。必要ならもう一度 {tool_name} を呼ぶ）")
 }
 
 /// heartbeat セッションで過去に積まれた指示文（プロンプト scaffolding）か（#501）。
@@ -799,20 +824,13 @@ pub fn format_single_log(log: &opencrab_db::queries::SessionLogRow) -> String {
             // 読みは**もう一度呼べば同じものが得られる**ので、会話には参照だけを残す。落とす
             // のは次のターン以降への持ち越しだけで、そのターンの中では従来どおり本文がモデル
             // へ渡る（ツール往復は会話再構成を通らない）。記録（DB）も完全なまま残す。
-            if is_read_tool(tool_name) {
-                format!(
-                    "[tool_result]{}:\n[id={}]: {} → {}",
-                    ts,
-                    tool_call_id,
-                    tool_name,
-                    read_reference(&log.content)
-                )
-            } else {
-                format!(
-                    "[tool_result]{}:\n[id={}]: {} → {}",
-                    ts, tool_call_id, tool_name, log.content
-                )
-            }
+            format!(
+                "[tool_result]{}:\n[id={}]: {} → {}",
+                ts,
+                tool_call_id,
+                tool_name,
+                result_reference(tool_name, &log.content)
+            )
         }
         "tool_cancelled" => {
             let meta = log
@@ -2301,11 +2319,12 @@ mod response_only_directive_tests {
     }
 }
 
-/// #707: **読みの本文を次のターンへ持ち越さない**ことの回帰ガード。
+/// #709: **ツール結果の本文を次のターンへ持ち越さない**ことの回帰ガード。
 #[cfg(test)]
-mod read_reference_tests {
-    use super::{is_read_tool, read_reference};
+mod result_reference_tests {
+    use super::result_reference;
 
+    /// 読みは元のファイル名がそのまま参照になる。
     #[test]
     fn read_results_leave_only_a_reference() {
         let body = "秘密の設計メモ本文".repeat(50);
@@ -2321,75 +2340,78 @@ mod read_reference_tests {
         })
         .to_string();
 
-        let rendered = read_reference(&result);
+        let r = result_reference("ws_read", &result);
         assert!(
-            !rendered.contains("秘密の設計メモ本文"),
-            "読みの本文が会話へ載っている（次のターンへ持ち越される）: {rendered}"
+            !r.contains("秘密の設計メモ本文"),
+            "本文が会話へ載っている: {r}"
         );
-        assert!(
-            rendered.contains("docs/design.md"),
-            "どのファイルを読んだか分からない: {rendered}"
-        );
-        assert!(rendered.contains("18000"), "規模が分からない: {rendered}");
-        assert!(
-            rendered.contains("続きあり"),
-            "続きの有無が分からない: {rendered}"
-        );
-        assert!(
-            rendered.contains("ws_read"),
-            "読み直す方法が分からない: {rendered}"
-        );
+        assert!(r.contains("docs/design.md"), "ファイル名が無い: {r}");
+        assert!(r.contains("18000"), "規模が無い: {r}");
+        assert!(r.contains("続きあり"), "続きの有無が無い: {r}");
     }
 
-    /// #707 レビュー指摘: **失敗した読みは本文を残す**。参照へ潰すと「読めた」ことに化ける。
+    /// #709 の中心: **コマンド実行の結果も**本文を持ち越さない。
+    ///
+    /// #707 は「読み直せないので落としたら失われる」として本文を残していたが、記録
+    /// （memory_sessions）には完全な本文が残るので失われない。らぼみの tool_result 30 万文字の
+    /// うち execute_shell が 10 万で最大——ここを落とさないと沈黙は解けない。
     #[test]
-    fn failed_reads_keep_their_error() {
-        let failed = serde_json::json!({
-            "success": false,
-            "data": null,
-            "error": "path not found: docs/missing.md"
+    fn shell_results_also_leave_only_a_reference() {
+        let out = "x".repeat(50_000);
+        let result = serde_json::json!({
+            "success": true,
+            "data": {"exit_code": 0, "stdout": out, "stderr": ""}
         })
         .to_string();
 
-        let rendered = read_reference(&failed);
+        let r = result_reference("execute_shell", &result);
         assert!(
-            rendered.contains("path not found"),
-            "失敗の理由が消えている（握り潰し）: {rendered}"
+            !r.contains(&"x".repeat(100)),
+            "コマンド出力が会話へ載っている（#709 の状態に戻っている）: {r:.120}"
         );
-        assert!(
-            !rendered.contains("読んだ"),
-            "読めていないのに読んだことになっている: {rendered}"
-        );
+        assert!(r.contains("終了コード 0"), "終了コードが無い: {r}");
+        assert!(r.contains("50000"), "出力の規模が無い: {r}");
     }
 
-    /// #707 レビュー指摘: ws_list は件数を出し、**正しいツール**へ誘導する。
+    /// 失敗した結果は本文を残す（参照へ潰すと「成功した」ことに化ける）。
+    #[test]
+    fn failed_results_keep_their_error() {
+        let failed = serde_json::json!({
+            "success": false, "data": null, "error": "path not found: docs/missing.md"
+        })
+        .to_string();
+
+        let r = result_reference("ws_read", &failed);
+        assert!(r.contains("path not found"), "失敗の理由が消えている: {r}");
+        assert!(!r.contains("読んだ"), "読めていないのに読んだことに: {r}");
+    }
+
+    /// 一覧は件数と正しい再取得ツールを出す。
     #[test]
     fn list_reference_points_at_the_right_tool() {
         let listed = serde_json::json!({
-            "success": true,
-            "data": {
-                "path": "src",
-                "entries": ["a.rs", "b.rs", "c.rs"]
-            }
+            "success": true, "data": {"path": "src", "entries": ["a.rs","b.rs","c.rs"]}
         })
         .to_string();
 
-        let rendered = read_reference(&listed);
-        assert!(rendered.contains("3 件"), "規模が分からない: {rendered}");
-        assert!(
-            rendered.contains("ws_list"),
-            "ws_read へ誤誘導している（ws_list は ws_read で読み直せない）: {rendered}"
-        );
+        let r = result_reference("ws_list", &listed);
+        assert!(r.contains("3 件"), "件数が無い: {r}");
+        assert!(r.contains("ws_list"), "誤ったツールへ誘導: {r}");
     }
 
+    /// その他のツール（記憶・検索など）も規模だけ残す。
     #[test]
-    fn non_read_tools_keep_their_body() {
-        assert!(is_read_tool("ws_read"));
-        assert!(is_read_tool("ws_list"));
+    fn other_tools_leave_size_only() {
+        let big = serde_json::json!({
+            "success": true, "data": {"hits": vec!["長い検索結果".repeat(500)]}
+        })
+        .to_string();
+
+        let r = result_reference("search_my_history", &big);
         assert!(
-            !is_read_tool("execute_shell"),
-            "実行結果は読み直せないので落とさない"
+            !r.contains("長い検索結果長い検索結果"),
+            "本文が載っている: {r:.80}"
         );
-        assert!(!is_read_tool("search_my_history"));
+        assert!(r.contains("search_my_history"), "呼び直す方法が無い: {r}");
     }
 }
