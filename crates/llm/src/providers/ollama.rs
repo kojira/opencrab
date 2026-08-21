@@ -16,6 +16,9 @@ const OLLAMA_DEFAULT_URL: &str = "http://localhost:11434";
 pub struct OllamaProvider {
     client: Client,
     base_url: String,
+    /// テレメトリ用の表示名（既定は形式名 "ollama"）。ルーティングキーは
+    /// router 登録時に別途決まる。
+    name: String,
 }
 
 impl OllamaProvider {
@@ -23,7 +26,14 @@ impl OllamaProvider {
         Self {
             client: Client::new(),
             base_url: OLLAMA_DEFAULT_URL.to_string(),
+            name: "ollama".to_string(),
         }
+    }
+
+    /// 表示名を上書きする（同じ形式の接続先を別名で登録するとき）。
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
     }
 
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
@@ -78,7 +88,7 @@ impl OllamaProvider {
         if let Some(ref stop) = request.stop {
             options["stop"] = serde_json::json!(stop);
         }
-        if options.as_object().map_or(false, |o| !o.is_empty()) {
+        if options.as_object().is_some_and(|o| !o.is_empty()) {
             body["options"] = options;
         }
 
@@ -121,9 +131,9 @@ impl OllamaProvider {
             .filter(|s| !s.is_empty())
             .map(|s| MessageContent::Text(s.to_string()));
 
-        let tool_calls = msg.get("tool_calls").and_then(|tc| {
-            serde_json::from_value::<Vec<ToolCall>>(tc.clone()).ok()
-        });
+        let tool_calls = msg
+            .get("tool_calls")
+            .and_then(|tc| serde_json::from_value::<Vec<ToolCall>>(tc.clone()).ok());
 
         let finish_reason = if body["done"].as_bool().unwrap_or(false) {
             Some(FinishReason::Stop)
@@ -154,10 +164,50 @@ impl OllamaProvider {
                 prompt_tokens,
                 completion_tokens,
                 total_tokens: prompt_tokens + completion_tokens,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             },
             created: chrono::Utc::now().timestamp(),
         })
     }
+}
+
+/// Ollama の NDJSON 1行（`sse::line_stream` が yield した完全行）から delta を組み立てる。
+/// 空行・パース不能な行は None（keep-alive 等）。
+/// Ollama の mid-stream エラーオブジェクト（`{"error": "..."}` ）は Err として表面化させる
+/// （握りつぶすと、生成が途中で落ちたのに finish_reason 無しでストリームが終わり、
+/// 消費側が「正常完了した短い応答」と誤認する）。
+fn delta_from_ndjson_line(line: &str, model: &str) -> Option<Result<ChatStreamDelta>> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let parsed = serde_json::from_str::<Value>(line).ok()?;
+    if let Some(err) = parsed["error"].as_str() {
+        return Some(Err(anyhow::anyhow!("Ollama stream error: {err}")));
+    }
+    let content = parsed["message"]["content"]
+        .as_str()
+        .filter(|c| !c.is_empty())
+        .map(String::from);
+    let done = parsed["done"].as_bool().unwrap_or(false);
+    if content.is_none() && !done {
+        return None;
+    }
+    Some(Ok(ChatStreamDelta {
+        id: uuid::Uuid::new_v4().to_string(),
+        model: model.to_string(),
+        choices: vec![StreamChoice {
+            index: 0,
+            delta: DeltaMessage {
+                role: None,
+                content,
+                function_call: None,
+                tool_calls: None,
+            },
+            finish_reason: if done { Some(FinishReason::Stop) } else { None },
+        }],
+    }))
 }
 
 impl Default for OllamaProvider {
@@ -169,7 +219,7 @@ impl Default for OllamaProvider {
 #[async_trait]
 impl LlmProvider for OllamaProvider {
     fn name(&self) -> &str {
-        "ollama"
+        &self.name
     }
 
     async fn available_models(&self) -> Result<Vec<ModelInfo>> {
@@ -181,7 +231,10 @@ impl LlmProvider for OllamaProvider {
             .await
             .context("failed to list Ollama models")?;
 
-        let body: Value = resp.json().await.context("failed to parse Ollama model list")?;
+        let body: Value = resp
+            .json()
+            .await
+            .context("failed to parse Ollama model list")?;
         let models = body["models"]
             .as_array()
             .map(|arr| {
@@ -220,10 +273,13 @@ impl LlmProvider for OllamaProvider {
         let status = resp.status();
         if !status.is_success() {
             let err_text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Ollama API error ({}): {}", status, err_text);
+            return Err(crate::error::api_error("Ollama", status, err_text));
         }
 
-        let resp_body: Value = resp.json().await.context("failed to parse Ollama response")?;
+        let resp_body: Value = resp
+            .json()
+            .await
+            .context("failed to parse Ollama response")?;
         self.parse_response(resp_body)
     }
 
@@ -247,57 +303,22 @@ impl LlmProvider for OllamaProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let err_text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Ollama API error ({}): {}", status, err_text);
+            return Err(crate::error::api_error("Ollama", status, err_text));
         }
 
+        // Ollama は NDJSON（1行=1 JSON オブジェクト）を流す。行分割は共有の
+        // `sse::line_stream` に任せる — チャンク境界で JSON が分断されると黙って
+        // 捨てられる / マルチバイト UTF-8 が per-chunk lossy デコードで壊れる、
+        // という修正済みバグの再実装をしない（#38）。
         let model = request.model.clone();
-        let stream = resp.bytes_stream().map(move |chunk| {
-            let chunk = chunk.context("stream chunk error")?;
-            let text = String::from_utf8_lossy(&chunk);
-            let model = model.clone();
-
-            // Ollama streams newline-delimited JSON objects
-            let mut content_text = String::new();
-            let mut done = false;
-
-            for line in text.lines() {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                if let Ok(parsed) = serde_json::from_str::<Value>(line) {
-                    if let Some(c) = parsed["message"]["content"].as_str() {
-                        content_text.push_str(c);
-                    }
-                    if parsed["done"].as_bool().unwrap_or(false) {
-                        done = true;
-                    }
-                }
-            }
-
-            Ok(ChatStreamDelta {
-                id: uuid::Uuid::new_v4().to_string(),
-                model,
-                choices: vec![StreamChoice {
-                    index: 0,
-                    delta: DeltaMessage {
-                        role: None,
-                        content: if content_text.is_empty() {
-                            None
-                        } else {
-                            Some(content_text)
-                        },
-                        function_call: None,
-                        tool_calls: None,
-                    },
-                    finish_reason: if done {
-                        Some(FinishReason::Stop)
-                    } else {
-                        None
-                    },
-                }],
-            })
-        });
+        let stream =
+            crate::providers::sse::line_stream(resp.bytes_stream()).filter_map(move |line_res| {
+                let out = match line_res {
+                    Err(e) => Some(Err(e)),
+                    Ok(line) => delta_from_ndjson_line(&line, &model),
+                };
+                futures::future::ready(out)
+            });
 
         Ok(Box::pin(stream))
     }
@@ -316,5 +337,68 @@ impl LlmProvider for OllamaProvider {
         let url = format!("{}/api/tags", self.base_url);
         let resp = self.client.get(&url).send().await?;
         Ok(resp.status().is_success())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+
+    #[test]
+    fn ndjson_line_variants() {
+        let d = delta_from_ndjson_line(r#"{"message":{"content":"こん"},"done":false}"#, "m")
+            .unwrap()
+            .unwrap();
+        assert_eq!(d.choices[0].delta.content.as_deref(), Some("こん"));
+        assert_eq!(d.choices[0].finish_reason, None);
+
+        // done 行（content 空でも emit され finish_reason が付く）
+        let d = delta_from_ndjson_line(r#"{"message":{"content":""},"done":true}"#, "m")
+            .unwrap()
+            .unwrap();
+        assert_eq!(d.choices[0].delta.content, None);
+        assert_eq!(d.choices[0].finish_reason, Some(FinishReason::Stop));
+
+        // 空行・壊れた JSON・情報の無い行は None
+        assert!(delta_from_ndjson_line("", "m").is_none());
+        assert!(delta_from_ndjson_line("{broken", "m").is_none());
+        assert!(delta_from_ndjson_line(r#"{"noise":1}"#, "m").is_none());
+
+        // mid-stream エラーオブジェクトは Err として表面化（黙って握りつぶさない）
+        let err = delta_from_ndjson_line(r#"{"error":"model runner stopped"}"#, "m")
+            .unwrap()
+            .unwrap_err();
+        assert!(err.to_string().contains("model runner stopped"));
+    }
+
+    /// チャンク境界で JSON オブジェクト・マルチバイト UTF-8 が分断されても
+    /// content が欠落・破壊されないこと（#38 で再導入されていたバグの回帰テスト）。
+    #[tokio::test]
+    async fn ndjson_survives_chunk_boundaries() {
+        // 「あ」(E3 81 82) の途中 + JSON オブジェクトの途中でチャンクを割る
+        let full = "{\"message\":{\"content\":\"あい\"},\"done\":false}\n{\"message\":{\"content\":\"うえ\"},\"done\":true}\n";
+        let bytes = full.as_bytes();
+        let chunks: Vec<reqwest::Result<Vec<u8>>> = vec![
+            Ok(bytes[..25].to_vec()),   // 「あ」のバイト途中
+            Ok(bytes[25..50].to_vec()), // 1つ目のオブジェクト途中〜2つ目の先頭
+            Ok(bytes[50..].to_vec()),
+        ];
+        let byte_stream = futures::stream::iter(chunks);
+        let deltas: Vec<ChatStreamDelta> = crate::providers::sse::line_stream(byte_stream)
+            .filter_map(|r| futures::future::ready(delta_from_ndjson_line(&r.unwrap(), "m")))
+            .map(|r| r.unwrap())
+            .collect()
+            .await;
+
+        let text: String = deltas
+            .iter()
+            .filter_map(|d| d.choices[0].delta.content.clone())
+            .collect();
+        assert_eq!(text, "あいうえ");
+        assert_eq!(
+            deltas.last().unwrap().choices[0].finish_reason,
+            Some(FinishReason::Stop)
+        );
     }
 }

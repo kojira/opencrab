@@ -56,10 +56,7 @@ impl Agent {
             .with_max_tokens(150);
 
         let response = provider.chat_completion(request).await?;
-        let text = response
-            .first_text()
-            .unwrap_or("[no response]")
-            .to_string();
+        let text = response.first_text().unwrap_or("[no response]").to_string();
         Ok(text)
     }
 }
@@ -98,7 +95,7 @@ async fn test_three_agent_discussion() {
     println!("{sep}\n");
 
     // Shared conversation history (user messages represent each agent's speech)
-    let mut history: Vec<Message> = vec![Message::user(&format!(
+    let mut history: Vec<Message> = vec![Message::user(format!(
         "[Moderator]: Let's discuss: {topic}\nEach of you, share your perspective."
     ))];
 
@@ -109,7 +106,10 @@ async fn test_three_agent_discussion() {
         println!("[{}]: {}\n", agent.name, response);
 
         // Add to shared history as user message so other agents see it
-        history.push(Message::assistant(&format!("[{}]: {}", agent.name, response)));
+        history.push(Message::assistant(format!(
+            "[{}]: {}",
+            agent.name, response
+        )));
         history.push(Message::user("Next participant, please share your view."));
     }
 
@@ -123,7 +123,10 @@ async fn test_three_agent_discussion() {
         let response = agent.respond(&p, &history).await.unwrap();
         println!("[{}]: {}\n", agent.name, response);
 
-        history.push(Message::assistant(&format!("[{}]: {}", agent.name, response)));
+        history.push(Message::assistant(format!(
+            "[{}]: {}",
+            agent.name, response
+        )));
     }
 
     // Round 3: Summary and conclusion
@@ -138,7 +141,10 @@ async fn test_three_agent_discussion() {
         println!("[{}]: {}\n", agent.name, response);
         final_responses.push(response.clone());
 
-        history.push(Message::assistant(&format!("[{}]: {}", agent.name, response)));
+        history.push(Message::assistant(format!(
+            "[{}]: {}",
+            agent.name, response
+        )));
     }
 
     // ---------- Assertions ----------
@@ -146,7 +152,7 @@ async fn test_three_agent_discussion() {
     // Each agent produced non-empty responses in all rounds
     assert_eq!(
         history.len(),
-        1 + (3 * 2) + 1 + (3 * 1) + 1 + (3 * 1),
+        1 + (3 * 2) + 1 + 3 + 1 + 3,
         "History should have the right number of messages"
     );
 
@@ -172,7 +178,10 @@ async fn test_three_agent_discussion() {
     );
 
     println!("{sep}");
-    println!("Discussion complete! {} total messages exchanged.", history.len());
+    println!(
+        "Discussion complete! {} total messages exchanged.",
+        history.len()
+    );
     println!("{sep}");
 }
 
@@ -220,7 +229,10 @@ async fn test_three_agent_creative_story() {
             let response = agent.respond(&p, &history).await.unwrap();
             println!("[{}]: {}\n", agent.name, response);
 
-            history.push(Message::assistant(&format!("[{}]: {}", agent.name, response)));
+            history.push(Message::assistant(format!(
+                "[{}]: {}",
+                agent.name, response
+            )));
         }
         if round < 2 {
             history.push(Message::user("Continue the story. What happens next?"));
@@ -236,7 +248,9 @@ async fn test_three_agent_creative_story() {
         .to_lowercase();
 
     assert!(
-        story_text.contains("library") || story_text.contains("book") || story_text.contains("ancient"),
+        story_text.contains("library")
+            || story_text.contains("book")
+            || story_text.contains("ancient"),
         "Story should reference the library setting"
     );
 
@@ -270,27 +284,22 @@ async fn test_three_agent_with_db_and_session() {
     let mut agent_ids = Vec::new();
     for (name, persona, _role) in &agent_configs {
         let id = uuid::Uuid::new_v4().to_string();
-        opencrab_db::queries::upsert_identity(
+        opencrab_db::queries::upsert_agent(
             &conn,
-            &opencrab_db::queries::IdentityRow {
+            &opencrab_db::queries::AgentRow {
                 agent_id: id.clone(),
                 name: name.to_string(),
                 job_title: None,
                 organization: None,
                 image_url: None,
-                metadata_json: None,
-            },
-        )
-        .unwrap();
-        opencrab_db::queries::upsert_soul(
-            &conn,
-            &opencrab_db::queries::SoulRow {
-                agent_id: id.clone(),
                 persona_name: persona.to_string(),
-                social_style_json: "{}".to_string(),
-                personality_json: "{}".to_string(),
-                thinking_style_json: "{}".to_string(),
-                custom_traits_json: None,
+                personality: None,
+                instructions: String::new(),
+                heartbeat_instructions: String::new(),
+                model: None,
+                reasoning_effort: None,
+                web_search: None,
+                metadata_json: None,
             },
         )
         .unwrap();
@@ -322,7 +331,7 @@ async fn test_three_agent_with_db_and_session() {
     assert_eq!(session.as_ref().unwrap().theme, "Rust vs Go discussion");
 
     // Each agent generates a response and logs it
-    let system_prompts = vec![
+    let system_prompts = [
         "You are Kai, a pragmatic engineer. Keep responses to 1-2 sentences.",
         "You are Aria, a creative researcher. Keep responses to 1-2 sentences.",
         "You are Reo, a cautious analyst. Keep responses to 1-2 sentences.",
@@ -357,10 +366,11 @@ async fn test_three_agent_with_db_and_session() {
             speaker_id: Some(agent_id.clone()),
             turn_number: Some(i as i32 + 1),
             metadata_json: None,
+            created_at: None,
         };
         opencrab_db::queries::insert_session_log(&conn, &log).unwrap();
 
-        conversation_messages.push(Message::assistant(&format!(
+        conversation_messages.push(Message::assistant(format!(
             "[{}]: {}",
             agent_configs[i].0, text
         )));
@@ -378,9 +388,12 @@ async fn test_three_agent_with_db_and_session() {
 
     // Verify all 3 agents exist
     for id in &agent_ids {
-        let identity = opencrab_db::queries::get_identity(&conn, id).unwrap();
-        assert!(identity.is_some(), "Agent should exist in DB");
+        let agent = opencrab_db::queries::get_agent(&conn, id).unwrap();
+        assert!(agent.is_some(), "Agent should exist in DB");
     }
 
-    println!("Full integration test passed! 3 agents, 1 session, {} logs.", agent_ids.len());
+    println!(
+        "Full integration test passed! 3 agents, 1 session, {} logs.",
+        agent_ids.len()
+    );
 }

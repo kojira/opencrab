@@ -51,10 +51,7 @@ impl Action for LearnFromExperienceAction {
     }
 
     async fn execute(&self, args: &serde_json::Value, ctx: &ActionContext) -> ActionResult {
-        let skill_name = args["skill_name"]
-            .as_str()
-            .unwrap_or("unnamed")
-            .to_string();
+        let skill_name = args["skill_name"].as_str().unwrap_or("unnamed").to_string();
         let skill_id = uuid::Uuid::new_v4().to_string();
 
         let skill = opencrab_db::queries::SkillRow {
@@ -62,10 +59,7 @@ impl Action for LearnFromExperienceAction {
             agent_id: ctx.agent_id.clone(),
             name: skill_name.clone(),
             description: args["lesson"].as_str().unwrap_or("").to_string(),
-            situation_pattern: args["situation_pattern"]
-                .as_str()
-                .unwrap_or("")
-                .to_string(),
+            situation_pattern: args["situation_pattern"].as_str().unwrap_or("").to_string(),
             guidance: args["guidance"].as_str().unwrap_or("").to_string(),
             source_type: "experience".to_string(),
             source_context: args["experience"].as_str().map(|s| s.to_string()),
@@ -73,6 +67,12 @@ impl Action for LearnFromExperienceAction {
             effectiveness: None,
             usage_count: 0,
             is_active: true,
+            permission: "\"agent\"".to_string(),
+            archived: false,
+            // #335: 作成時 caller の trust class を記録（read_skill のゲートで参照）。
+            created_caller: Some(ctx.caller.skill_origin_tag().to_string()),
+            // #352: Agent が作った skill を Agent 自身へ露出しない（fail-closed）。
+            agent_visible: false,
         };
 
         if let Ok(conn) = ctx.db.lock() {
@@ -133,10 +133,7 @@ impl Action for LearnFromPeerAction {
     }
 
     async fn execute(&self, args: &serde_json::Value, ctx: &ActionContext) -> ActionResult {
-        let skill_name = args["skill_name"]
-            .as_str()
-            .unwrap_or("unnamed")
-            .to_string();
+        let skill_name = args["skill_name"].as_str().unwrap_or("unnamed").to_string();
         let skill_id = uuid::Uuid::new_v4().to_string();
 
         let source_context = format!(
@@ -158,6 +155,12 @@ impl Action for LearnFromPeerAction {
             effectiveness: None,
             usage_count: 0,
             is_active: true,
+            permission: "\"agent\"".to_string(),
+            archived: false,
+            // #335: 作成時 caller の trust class を記録（read_skill のゲートで参照）。
+            created_caller: Some(ctx.caller.skill_origin_tag().to_string()),
+            // #352: Agent が作った skill を Agent 自身へ露出しない（fail-closed）。
+            agent_visible: false,
         };
 
         if let Ok(conn) = ctx.db.lock() {
@@ -220,10 +223,9 @@ impl Action for ReflectAndLearnAction {
             category: "reflection".to_string(),
             content: format!(
                 "振り返り: {}\n洞察: {:?}\nアクション: {:?}",
-                reflection,
-                args["insights"],
-                args["action_items"]
+                reflection, args["insights"], args["action_items"]
             ),
+            created_at: String::new(),
         };
 
         if let Ok(conn) = ctx.db.lock() {
@@ -251,7 +253,7 @@ mod tests {
             agent_id: "agent-1".to_string(),
             agent_name: "Test Agent".to_string(),
             session_id: Some("session-1".to_string()),
-            db: std::sync::Arc::new(std::sync::Mutex::new(conn)),
+            db: opencrab_db::Db::from_connection(conn),
             workspace: std::sync::Arc::new(ws),
             last_metrics_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
             model_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -262,7 +264,7 @@ mod tests {
                 available_providers: vec!["mock".to_string()],
                 gateway: "test".to_string(),
             })),
-
+            caller: CallerIdentity::Owner,
         };
         (dir, ctx)
     }
@@ -288,7 +290,10 @@ mod tests {
         assert!(result.success);
         let data = result.data.unwrap();
         assert_eq!(data["skill_name"], "debugging_help");
-        assert!(result.side_effects.iter().any(|e| matches!(e, SideEffect::SkillAcquired { .. })));
+        assert!(result
+            .side_effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::SkillAcquired { .. })));
 
         // Verify DB
         let conn = ctx.db.lock().unwrap();
@@ -363,10 +368,14 @@ mod tests {
         let data = result.data.unwrap();
         assert!(data["reflected"].as_bool().unwrap());
 
-        // Verify curated memory was saved
+        // Verify curated memory was saved. 本番の読み手（#428 / #544）と同じ前方一致で引く
+        // （"reflection" に派生見出し `reflection/<…>` は無いので完全一致と同結果）。完全一致
+        // `get_curated_memories` は #[cfg(test)] で db クレート内テスト専用になったため、他
+        // クレートのこのテストからは参照できない。
         let conn = ctx.db.lock().unwrap();
         let memories =
-            opencrab_db::queries::get_curated_memories(&conn, "agent-1", "reflection").unwrap();
+            opencrab_db::queries::get_curated_memories_by_prefix(&conn, "agent-1", "reflection")
+                .unwrap();
         assert_eq!(memories.len(), 1);
         assert!(memories[0].content.contains("overly long responses"));
     }

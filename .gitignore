@@ -1,12 +1,19 @@
 /target
+dashboard/target/
+dashboard/Cargo.lock
 **/*.rs.bk
+# 設定などのローカルバックアップは追跡しない
+*.bak
 *.pdb
 .DS_Store
 data/
 *.db
 *.db-journal
 .env
-web/node_modules/
+# node_modules はルート直下・web 配下どちらにも生成されるので depth 非依存で無視する
+node_modules/
+# vitest などのローカルキャッシュ
+.vite/
 web/dist/
 .server.pid
 .web.pid

@@ -53,8 +53,7 @@ fn eval_models() -> Vec<String> {
 
 /// Read evaluator model from EVAL_EVALUATOR env var.
 fn eval_evaluator() -> String {
-    std::env::var("EVAL_EVALUATOR")
-        .unwrap_or_else(|_| "anthropic/claude-sonnet-4-6".to_string())
+    std::env::var("EVAL_EVALUATOR").unwrap_or_else(|_| "anthropic/claude-sonnet-4-6".to_string())
 }
 
 /// Read evaluator's soul/personality from EVAL_SOUL env var.
@@ -243,13 +242,15 @@ async fn test_evaluate_models_across_tasks() {
 
     for eval_prompt in &prompts {
         println!("--- Category: {} ---", eval_prompt.category);
-        println!("  Prompt: {}\n", &eval_prompt.prompt[..eval_prompt.prompt.len().min(80)]);
+        println!(
+            "  Prompt: {}\n",
+            &eval_prompt.prompt[..eval_prompt.prompt.len().min(80)]
+        );
 
         for model in &models {
             // 1. Get response from the model under test.
-            let is_reasoning = model.contains("o3")
-                || model.contains("o4")
-                || model.contains("gpt-5");
+            let is_reasoning =
+                model.contains("o3") || model.contains("o4") || model.contains("gpt-5");
             let max_tok = if is_reasoning { 4096 } else { 500 };
             let temp = if is_reasoning { 1.0 } else { 0.3 };
 
@@ -273,10 +274,7 @@ async fn test_evaluate_models_across_tasks() {
             };
             let latency_ms = start.elapsed().as_millis() as u64;
 
-            let response_text = response
-                .first_text()
-                .unwrap_or("[no response]")
-                .to_string();
+            let response_text = response.first_text().unwrap_or("[no response]").to_string();
 
             let model_response = ModelResponse {
                 model: model.clone(),
@@ -293,22 +291,16 @@ async fn test_evaluate_models_across_tasks() {
                 "  [{model}] {}ms, {}tok → {}",
                 latency_ms,
                 response.usage.total_tokens,
-                &response_text.chars().take(80).collect::<String>(),
+                response_text.chars().take(80).collect::<String>(),
             );
 
             // 2. Have the evaluator judge the response.
-            let eval_user_msg = build_evaluator_prompt(
-                eval_prompt.category,
-                eval_prompt.prompt,
-                &response_text,
-            );
+            let eval_user_msg =
+                build_evaluator_prompt(eval_prompt.category, eval_prompt.prompt, &response_text);
 
             let eval_request = ChatRequest::new(
                 evaluator.as_str(),
-                vec![
-                    Message::system(&eval_sys),
-                    Message::user(&eval_user_msg),
-                ],
+                vec![Message::system(&eval_sys), Message::user(&eval_user_msg)],
             )
             .with_temperature(0.0)
             .with_max_tokens(300);
@@ -371,7 +363,11 @@ async fn test_evaluate_models_across_tasks() {
         let avg_overall: f64 = model_results.iter().map(|r| r.scores.overall).sum::<f64>() / n;
         let avg_accuracy: f64 = model_results.iter().map(|r| r.scores.accuracy).sum::<f64>() / n;
         let avg_quality: f64 = model_results.iter().map(|r| r.scores.quality).sum::<f64>() / n;
-        let avg_latency: f64 = model_results.iter().map(|r| r.response.latency_ms as f64).sum::<f64>() / n;
+        let avg_latency: f64 = model_results
+            .iter()
+            .map(|r| r.response.latency_ms as f64)
+            .sum::<f64>()
+            / n;
         let total_tokens: u32 = model_results.iter().map(|r| r.response.total_tokens).sum();
 
         println!("[{model}]");
@@ -381,9 +377,7 @@ async fn test_evaluate_models_across_tasks() {
         for result in &model_results {
             println!(
                 "    {}: {:.0}/10 — {}",
-                result.response.category,
-                result.scores.overall,
-                result.scores.evaluation_text,
+                result.response.category, result.scores.overall, result.scores.evaluation_text,
             );
         }
         println!();
@@ -404,9 +398,10 @@ async fn test_evaluate_models_across_tasks() {
             .filter(|r| r.response.category == *cat)
             .collect();
 
-        if let Some(best) = cat_results.iter().max_by(|a, b| {
-            a.scores.overall.partial_cmp(&b.scores.overall).unwrap()
-        }) {
+        if let Some(best) = cat_results
+            .iter()
+            .max_by(|a, b| a.scores.overall.partial_cmp(&b.scores.overall).unwrap())
+        {
             println!(
                 "  {}: {} ({:.0}/10)",
                 cat, best.response.model, best.scores.overall,
@@ -462,10 +457,7 @@ async fn test_evaluate_and_record_to_db() {
         // Call model.
         let request = ChatRequest::new(
             model.as_str(),
-            vec![
-                Message::system(prompt.system),
-                Message::user(prompt.prompt),
-            ],
+            vec![Message::system(prompt.system), Message::user(prompt.prompt)],
         )
         .with_temperature(0.0)
         .with_max_tokens(300);
@@ -480,13 +472,16 @@ async fn test_evaluate_and_record_to_db() {
         };
         let latency_ms = start.elapsed().as_millis() as u64;
 
-        let response_text = response
-            .first_text()
-            .unwrap_or("[no response]")
-            .to_string();
+        let response_text = response.first_text().unwrap_or("[no response]").to_string();
 
-        println!("[{model}] {}ms, {}tok", latency_ms, response.usage.total_tokens);
-        println!("  Response: {}", response_text.chars().take(100).collect::<String>());
+        println!(
+            "[{model}] {}ms, {}tok",
+            latency_ms, response.usage.total_tokens
+        );
+        println!(
+            "  Response: {}",
+            response_text.chars().take(100).collect::<String>()
+        );
 
         // Parse provider/model from the OpenRouter model ID.
         let (db_provider, db_model) = if model.contains('/') {
@@ -518,17 +513,10 @@ async fn test_evaluate_and_record_to_db() {
         opencrab_db::queries::insert_llm_metrics(&conn, &row).unwrap();
 
         // Evaluate with the evaluator model.
-        let eval_user_msg = build_evaluator_prompt(
-            prompt.category,
-            prompt.prompt,
-            &response_text,
-        );
+        let eval_user_msg = build_evaluator_prompt(prompt.category, prompt.prompt, &response_text);
         let eval_request = ChatRequest::new(
             evaluator.as_str(),
-            vec![
-                Message::system(&eval_sys),
-                Message::user(&eval_user_msg),
-            ],
+            vec![Message::system(&eval_sys), Message::user(&eval_user_msg)],
         )
         .with_temperature(0.0)
         .with_max_tokens(300);
@@ -562,18 +550,18 @@ async fn test_evaluate_and_record_to_db() {
         let mut tag_list = vec![
             serde_json::json!(prompt.category),
             serde_json::json!(format!("evaluated_by:{evaluator}")),
-            serde_json::json!(if task_success { "success" } else { "needs_improvement" }),
+            serde_json::json!(if task_success {
+                "success"
+            } else {
+                "needs_improvement"
+            }),
         ];
         if soul.is_some() {
             tag_list.push(serde_json::json!("soul_biased_evaluation"));
         }
         let tags = serde_json::Value::Array(tag_list);
-        opencrab_db::queries::update_llm_metrics_tags(
-            &conn,
-            &metrics_id,
-            &tags.to_string(),
-        )
-        .unwrap();
+        opencrab_db::queries::update_llm_metrics_tags(&conn, &metrics_id, &tags.to_string())
+            .unwrap();
 
         // Save an experience note.
         let note = opencrab_db::queries::ModelExperienceNote {
@@ -586,7 +574,10 @@ async fn test_evaluate_and_record_to_db() {
             recommendation: if task_success {
                 Some(format!("{}タスクに{db_model}は有効", prompt.category))
             } else {
-                Some(format!("{}タスクに{db_model}は不十分。他モデルを検討", prompt.category))
+                Some(format!(
+                    "{}タスクに{db_model}は不十分。他モデルを検討",
+                    prompt.category
+                ))
             },
             tags: Some(tags.to_string()),
             created_at: None,
@@ -601,16 +592,16 @@ async fn test_evaluate_and_record_to_db() {
     }
 
     // Verify DB contents.
-    let metrics_summary = opencrab_db::queries::get_llm_metrics_summary(
-        &conn,
-        agent_id,
-        "1970-01-01T00:00:00Z",
-    )
-    .unwrap();
+    let metrics_summary =
+        opencrab_db::queries::get_llm_metrics_summary(&conn, agent_id, "1970-01-01T00:00:00Z")
+            .unwrap();
     println!("--- DB Summary ---");
     println!("  Total requests: {}", metrics_summary.count);
     println!("  Total tokens: {:?}", metrics_summary.total_tokens);
-    println!("  Avg quality: {:.2}", metrics_summary.avg_quality.unwrap_or(0.0));
+    println!(
+        "  Avg quality: {:.2}",
+        metrics_summary.avg_quality.unwrap_or(0.0)
+    );
 
     let notes = opencrab_db::queries::list_model_experience_notes(&conn, agent_id, None).unwrap();
     println!("  Experience notes: {}", notes.len());
@@ -640,7 +631,10 @@ async fn test_single_model_quick_eval() {
     let soul = eval_soul();
 
     // Just use the first model from EVAL_MODELS (or the evaluator itself).
-    let model = eval_models().into_iter().next().unwrap_or(evaluator.clone());
+    let model = eval_models()
+        .into_iter()
+        .next()
+        .unwrap_or(evaluator.clone());
 
     println!("\n--- Quick eval: {model} (judged by {evaluator}) ---");
     if let Some(ref s) = soul {
@@ -663,7 +657,10 @@ async fn test_single_model_quick_eval() {
     let latency = start.elapsed().as_millis();
 
     let text = response.first_text().unwrap();
-    println!("[{model}] ({latency}ms, {}tok):\n{text}\n", response.usage.total_tokens);
+    println!(
+        "[{model}] ({latency}ms, {}tok):\n{text}\n",
+        response.usage.total_tokens
+    );
 
     // Evaluate.
     let eval_sys = evaluator_system_prompt(&soul);
@@ -674,10 +671,7 @@ async fn test_single_model_quick_eval() {
     );
     let eval_request = ChatRequest::new(
         evaluator.as_str(),
-        vec![
-            Message::system(&eval_sys),
-            Message::user(&eval_msg),
-        ],
+        vec![Message::system(&eval_sys), Message::user(&eval_msg)],
     )
     .with_temperature(0.0)
     .with_max_tokens(300);
@@ -705,7 +699,10 @@ async fn test_single_model_quick_eval() {
 async fn test_soul_biased_evaluation() {
     let p = provider();
     let evaluator = eval_evaluator();
-    let model = eval_models().into_iter().next().unwrap_or(evaluator.clone());
+    let model = eval_models()
+        .into_iter()
+        .next()
+        .unwrap_or(evaluator.clone());
 
     // Get a single response to evaluate.
     let prompt = "Write a short description of what makes a good software engineer.";
@@ -724,7 +721,10 @@ async fn test_soul_biased_evaluation() {
 
     println!("\n--- Soul-Biased Evaluation Demo ---");
     println!("Model: {model}");
-    println!("Response: {}\n", response_text.chars().take(120).collect::<String>());
+    println!(
+        "Response: {}\n",
+        response_text.chars().take(120).collect::<String>()
+    );
 
     // Evaluate with different souls.
     let souls = vec![
@@ -749,10 +749,7 @@ async fn test_soul_biased_evaluation() {
 
         let eval_request = ChatRequest::new(
             evaluator.as_str(),
-            vec![
-                Message::system(&eval_sys),
-                Message::user(&eval_msg),
-            ],
+            vec![Message::system(&eval_sys), Message::user(&eval_msg)],
         )
         .with_temperature(0.0)
         .with_max_tokens(300);
@@ -765,17 +762,23 @@ async fn test_soul_biased_evaluation() {
             }
         };
 
-        let eval_text = eval_response.first_text().unwrap_or("OVERALL: 5\nEVALUATION: error");
+        let eval_text = eval_response
+            .first_text()
+            .unwrap_or("OVERALL: 5\nEVALUATION: error");
         let scores = parse_eval_scores(eval_text);
 
         println!("{sep}");
         println!("Evaluator soul: {label}");
-        println!("  Overall: {:.0}/10 | Accuracy: {:.0}/10 | Quality: {:.0}/10",
-            scores.overall, scores.accuracy, scores.quality);
+        println!(
+            "  Overall: {:.0}/10 | Accuracy: {:.0}/10 | Quality: {:.0}/10",
+            scores.overall, scores.accuracy, scores.quality
+        );
         println!("  {}", scores.evaluation_text);
     }
     println!("{sep}");
-    println!("\nDifferent souls should produce different scores/perspectives for the same response.");
+    println!(
+        "\nDifferent souls should produce different scores/perspectives for the same response."
+    );
 }
 
 // ==================== Multi-Agent Conversation Evaluation ====================
@@ -934,15 +937,13 @@ async fn run_conversation(
         // Add a nudge for the last turn.
         if turn == num_turns - 1 {
             messages.push(Message::user(
-                "[司会] これが最終ラウンドです。議論のまとめと最も重要な気づきを述べてください。"
+                "[司会] これが最終ラウンドです。議論のまとめと最も重要な気づきを述べてください。",
             ));
         }
 
         // Reasoning models (e.g. gpt-5-mini, o3/o4) consume tokens for internal
         // chain-of-thought. Need at least 4096 to leave room for visible output.
-        let is_reasoning = model.contains("o3")
-            || model.contains("o4")
-            || model.contains("gpt-5");
+        let is_reasoning = model.contains("o3") || model.contains("o4") || model.contains("gpt-5");
         let max_tok = if is_reasoning { 4096 } else { 400 };
 
         let request = ChatRequest::new(model, messages)
@@ -958,10 +959,7 @@ async fn run_conversation(
         total_latency_ms += latency;
         total_tokens += response.usage.total_tokens;
 
-        let text = response
-            .first_text()
-            .unwrap_or("[no response]")
-            .to_string();
+        let text = response.first_text().unwrap_or("[no response]").to_string();
 
         let line = format!("[{}]: {}", agent.name, text);
         transcript_lines.push(line.clone());
@@ -997,8 +995,9 @@ async fn test_multi_agent_conversation_evaluation() {
     let evaluator = eval_evaluator();
     let soul = eval_soul();
     let num_turns = 10;
-    let theme = std::env::var("EVAL_THEME")
-        .unwrap_or_else(|_| "AIエージェントが自律的にスキルを獲得し自己改善することの可能性と危険性".to_string());
+    let theme = std::env::var("EVAL_THEME").unwrap_or_else(|_| {
+        "AIエージェントが自律的にスキルを獲得し自己改善することの可能性と危険性".to_string()
+    });
 
     let sep = "=".repeat(70);
     println!("\n{sep}");
@@ -1053,8 +1052,12 @@ async fn test_multi_agent_conversation_evaluation() {
             println!();
         }
         println!();
-        println!("  Stats: {}ms total, {}tok total, {:.0}ms/turn avg",
-            total_latency, total_tokens, total_latency as f64 / num_turns as f64);
+        println!(
+            "  Stats: {}ms total, {}tok total, {:.0}ms/turn avg",
+            total_latency,
+            total_tokens,
+            total_latency as f64 / num_turns as f64
+        );
 
         // 2. Evaluate the full transcript.
         let full_transcript = transcript.join("\n\n");
@@ -1071,10 +1074,7 @@ async fn test_multi_agent_conversation_evaluation() {
 
         let eval_request = ChatRequest::new(
             evaluator.as_str(),
-            vec![
-                Message::system(&eval_sys),
-                Message::user(&eval_user),
-            ],
+            vec![Message::system(&eval_sys), Message::user(&eval_user)],
         )
         .with_temperature(0.0)
         .with_max_tokens(500);
@@ -1093,10 +1093,14 @@ async fn test_multi_agent_conversation_evaluation() {
         let scores = parse_conversation_scores(eval_text);
 
         println!("\n  EVALUATION:");
-        println!("    Coherence: {:.0}/10 | Character: {:.0}/10 | Depth: {:.0}/10",
-            scores.coherence, scores.character, scores.depth);
-        println!("    Interaction: {:.0}/10 | Insight: {:.0}/10 | Overall: {:.0}/10",
-            scores.interaction, scores.insight, scores.overall);
+        println!(
+            "    Coherence: {:.0}/10 | Character: {:.0}/10 | Depth: {:.0}/10",
+            scores.coherence, scores.character, scores.depth
+        );
+        println!(
+            "    Interaction: {:.0}/10 | Insight: {:.0}/10 | Overall: {:.0}/10",
+            scores.interaction, scores.insight, scores.overall
+        );
         println!("    Best agent: {}", scores.best_agent);
         println!("    {}\n", scores.evaluation_text);
 
@@ -1115,8 +1119,10 @@ async fn test_multi_agent_conversation_evaluation() {
     println!("COMPARISON TABLE");
     println!("{sep}\n");
 
-    println!("{:<40} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>8} {:>8}",
-        "Model", "Coh", "Char", "Depth", "Inter", "Insght", "TOTAL", "Latency", "Tokens");
+    println!(
+        "{:<40} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>8} {:>8}",
+        "Model", "Coh", "Char", "Depth", "Inter", "Insght", "TOTAL", "Latency", "Tokens"
+    );
     println!("{}", "-".repeat(110));
 
     for r in &results {
@@ -1131,17 +1137,30 @@ async fn test_multi_agent_conversation_evaluation() {
     println!();
 
     // Winner.
-    if let Some(best) = results.iter().max_by(|a, b| {
-        a.scores.overall.partial_cmp(&b.scores.overall).unwrap()
-    }) {
-        println!("WINNER: {} (Overall: {:.0}/10)", best.model, best.scores.overall);
-        println!("  Best agent in winning conversation: {}", best.scores.best_agent);
+    if let Some(best) = results
+        .iter()
+        .max_by(|a, b| a.scores.overall.partial_cmp(&b.scores.overall).unwrap())
+    {
+        println!(
+            "WINNER: {} (Overall: {:.0}/10)",
+            best.model, best.scores.overall
+        );
+        println!(
+            "  Best agent in winning conversation: {}",
+            best.scores.best_agent
+        );
         println!("  {}", best.scores.evaluation_text);
     }
 
     println!("\n{sep}");
-    println!("Evaluated by: {evaluator}{}",
-        if soul.is_some() { " (with soul bias)" } else { "" });
+    println!(
+        "Evaluated by: {evaluator}{}",
+        if soul.is_some() {
+            " (with soul bias)"
+        } else {
+            ""
+        }
+    );
     println!("{sep}");
 
     assert!(

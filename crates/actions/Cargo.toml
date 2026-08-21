@@ -14,11 +14,17 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 rusqlite = { workspace = true }
+dashmap = { workspace = true }
+futures = { workspace = true }
 opencrab-core = { workspace = true }
-opencrab-llm = { workspace = true }
 opencrab-gateway = { workspace = true }
 opencrab-db = { workspace = true }
+indexmap = "2"
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+opencrab-llm-types = { workspace = true }
+
+[lints]
+workspace = true

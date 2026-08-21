@@ -78,7 +78,11 @@ impl PricingRegistry {
     /// Load default pricing data for well-known models.
     fn load_defaults(&mut self) {
         let defaults = vec![
-            // OpenAI
+            // OpenAI — GPT-5.6 family（gpt-5.6 は Sol にエイリアス）
+            ModelPricing::new("openai", "gpt-5.6", 5.00, 30.00),
+            ModelPricing::new("openai", "gpt-5.6-sol", 5.00, 30.00),
+            ModelPricing::new("openai", "gpt-5.6-terra", 2.50, 15.00),
+            ModelPricing::new("openai", "gpt-5.6-luna", 1.00, 6.00),
             ModelPricing::new("openai", "gpt-4o", 2.50, 10.00),
             ModelPricing::new("openai", "gpt-4o-mini", 0.15, 0.60),
             ModelPricing::new("openai", "gpt-4-turbo", 10.00, 30.00),
@@ -135,6 +139,25 @@ mod tests {
             registry.get("openai", "gpt-4o").is_some(),
             "gpt-4o should be in default registry"
         );
+    }
+
+    #[test]
+    fn test_gpt56_pricing_registered() {
+        let registry = PricingRegistry::new();
+        // gpt-5.6 は Sol と同料金（$5 in / $30 out）
+        let sol = registry.get("openai", "gpt-5.6-sol").expect("sol pricing");
+        assert!((sol.input_per_million - 5.0).abs() < f64::EPSILON);
+        assert!((sol.output_per_million - 30.0).abs() < f64::EPSILON);
+        let alias = registry.get("openai", "gpt-5.6").expect("alias pricing");
+        assert!((alias.input_per_million - 5.0).abs() < f64::EPSILON);
+        let terra = registry
+            .get("openai", "gpt-5.6-terra")
+            .expect("terra pricing");
+        assert!((terra.output_per_million - 15.0).abs() < f64::EPSILON);
+        let luna = registry
+            .get("openai", "gpt-5.6-luna")
+            .expect("luna pricing");
+        assert!((luna.input_per_million - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]

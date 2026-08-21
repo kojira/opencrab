@@ -17,6 +17,9 @@ pub struct GoogleProvider {
     client: Client,
     api_key: String,
     base_url: String,
+    /// テレメトリ用の表示名（既定は形式名 "google"）。ルーティングキーは
+    /// router 登録時に別途決まる。
+    name: String,
 }
 
 impl GoogleProvider {
@@ -25,7 +28,14 @@ impl GoogleProvider {
             client: Client::new(),
             api_key: api_key.into(),
             base_url: GEMINI_API_URL.to_string(),
+            name: "google".to_string(),
         }
+    }
+
+    /// 表示名を上書きする（同じ形式の接続先を別名で登録するとき）。
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
     }
 
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
@@ -43,16 +53,17 @@ impl GoogleProvider {
 
     /// Convert unified messages to Gemini API format.
     fn build_request_body(&self, request: &ChatRequest) -> Value {
-        let mut system_instruction: Option<Value> = None;
+        let mut system_texts: Vec<String> = Vec::new();
         let mut contents: Vec<Value> = Vec::new();
 
         for msg in &request.messages {
             match msg.role {
                 Role::System => {
+                    // 複数の system メッセージは連結する（上書きすると先行指示が失われる）。
                     if let Some(text) = msg.text_content() {
-                        system_instruction = Some(serde_json::json!({
-                            "parts": [{"text": text}]
-                        }));
+                        if !text.is_empty() {
+                            system_texts.push(text.to_string());
+                        }
                     }
                 }
                 Role::User => {
@@ -92,8 +103,10 @@ impl GoogleProvider {
             "contents": contents,
         });
 
-        if let Some(si) = system_instruction {
-            body["systemInstruction"] = si;
+        if !system_texts.is_empty() {
+            body["systemInstruction"] = serde_json::json!({
+                "parts": [{"text": system_texts.join("\n\n")}]
+            });
         }
 
         // Generation config
@@ -107,11 +120,12 @@ impl GoogleProvider {
         if let Some(ref stop) = request.stop {
             gen_config["stopSequences"] = serde_json::json!(stop);
         }
-        if gen_config.as_object().map_or(false, |o| !o.is_empty()) {
+        if gen_config.as_object().is_some_and(|o| !o.is_empty()) {
             body["generationConfig"] = gen_config;
         }
 
         // Tools (function declarations)
+        let mut tools: Vec<Value> = Vec::new();
         if let Some(ref functions) = request.functions {
             let declarations: Vec<Value> = functions
                 .iter()
@@ -123,12 +137,42 @@ impl GoogleProvider {
                     })
                 })
                 .collect();
-            body["tools"] = serde_json::json!([{
+            tools.push(serde_json::json!({
                 "functionDeclarations": declarations,
-            }]);
+            }));
+        }
+        // 本文URL読取り（エージェント単位オプトイン）: プロンプト中の URL を自動取得
+        // する url_context を有効化（HTML/JSON/画像/PDF 対応）。function calling との
+        // 併用は Gemini 3 系以降で公式サポート。それ以前（1.x/2.x）は併用が 400 に
+        // なりうるため、フラグONでも付与せずスキップする（エージェントを壊さない）。
+        if request
+            .metadata
+            .get("web_search")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            if Self::url_context_supported_model(&request.model) {
+                tools.push(serde_json::json!({"url_context": {}}));
+            } else {
+                debug!(
+                    model = %request.model,
+                    "url_context skipped: model predates Gemini 3 (tool combination unsupported)"
+                );
+            }
+        }
+        if !tools.is_empty() {
+            body["tools"] = serde_json::json!(tools);
         }
 
         body
+    }
+
+    /// url_context を function calling と併用できるモデルか。
+    /// Gemini 1.x/2.x は併用非対応（400 になりうる）ため除外し、それ以外
+    /// （gemini-3 以降・将来系列）は許可する（allow-list より前方互換）。
+    fn url_context_supported_model(model: &str) -> bool {
+        let m = model.to_ascii_lowercase();
+        !(m.starts_with("gemini-1") || m.starts_with("gemini-2"))
     }
 
     fn convert_parts(&self, msg: &Message) -> Vec<Value> {
@@ -144,32 +188,27 @@ impl GoogleProvider {
                     }
                 })]
             }
-            Some(MessageContent::Multi(parts)) => {
-                parts
-                    .iter()
-                    .map(|p| match p {
-                        ContentPart::Text { text } => serde_json::json!({"text": text}),
-                        ContentPart::ImageUrl { image_url } => {
-                            serde_json::json!({
-                                "inlineData": {
-                                    "mimeType": "image/jpeg",
-                                    "data": image_url.url,
-                                }
-                            })
-                        }
-                    })
-                    .collect()
-            }
+            Some(MessageContent::Multi(parts)) => parts
+                .iter()
+                .map(|p| match p {
+                    ContentPart::Text { text } => serde_json::json!({"text": text}),
+                    ContentPart::ImageUrl { image_url } => {
+                        serde_json::json!({
+                            "inlineData": {
+                                "mimeType": "image/jpeg",
+                                "data": image_url.url,
+                            }
+                        })
+                    }
+                })
+                .collect(),
             None => vec![serde_json::json!({"text": ""})],
         }
     }
 
     /// Parse Gemini API response into unified format.
     fn parse_response(&self, body: Value, model: &str) -> Result<ChatResponse> {
-        let candidates = body["candidates"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
+        let candidates = body["candidates"].as_array().cloned().unwrap_or_default();
 
         let mut choices: Vec<Choice> = Vec::new();
         for (i, candidate) in candidates.iter().enumerate() {
@@ -232,6 +271,8 @@ impl GoogleProvider {
                 prompt_tokens: meta["promptTokenCount"].as_u64().unwrap_or(0) as u32,
                 completion_tokens: meta["candidatesTokenCount"].as_u64().unwrap_or(0) as u32,
                 total_tokens: meta["totalTokenCount"].as_u64().unwrap_or(0) as u32,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             }
         } else {
             Usage::default()
@@ -250,7 +291,7 @@ impl GoogleProvider {
 #[async_trait]
 impl LlmProvider for GoogleProvider {
     fn name(&self) -> &str {
-        "google"
+        &self.name
     }
 
     async fn available_models(&self) -> Result<Vec<ModelInfo>> {
@@ -304,13 +345,16 @@ impl LlmProvider for GoogleProvider {
             .context("Gemini API request failed")?;
 
         let status = resp.status();
-        let resp_body: Value = resp.json().await.context("failed to parse Gemini response")?;
+        let resp_body: Value = resp
+            .json()
+            .await
+            .context("failed to parse Gemini response")?;
 
         if !status.is_success() {
             let error_msg = resp_body["error"]["message"]
                 .as_str()
                 .unwrap_or("unknown error");
-            anyhow::bail!("Gemini API error ({}): {}", status, error_msg);
+            return Err(crate::error::api_error("Gemini", status, error_msg));
         }
 
         self.parse_response(resp_body, &request.model)
@@ -322,7 +366,13 @@ impl LlmProvider for GoogleProvider {
     ) -> Result<BoxStream<'static, Result<ChatStreamDelta>>> {
         debug!(model = %request.model, "Google Gemini streaming chat completion");
 
-        let url = self.endpoint_url(&request.model, "streamGenerateContent");
+        // `alt=sse` を付けると Gemini は SSE 形式（`data: {json}` 行）で返す。
+        // これを指定しないと pretty-print された1つの巨大JSON配列がチャンク分割されて届き、
+        // チャンク単体では有効なJSONにならず本文が取り出せない。
+        let url = format!(
+            "{}&alt=sse",
+            self.endpoint_url(&request.model, "streamGenerateContent")
+        );
         let body = self.build_request_body(&request);
 
         let resp = self
@@ -340,48 +390,60 @@ impl LlmProvider for GoogleProvider {
             let msg = err_body["error"]["message"]
                 .as_str()
                 .unwrap_or("unknown error");
-            anyhow::bail!("Gemini API error ({}): {}", status, msg);
+            return Err(crate::error::api_error("Gemini", status, msg));
         }
 
         let model = request.model.clone();
-        let stream = resp.bytes_stream().map(move |chunk| {
-            let chunk = chunk.context("stream chunk error")?;
-            let text = String::from_utf8_lossy(&chunk);
-            let model = model.clone();
-
-            // Gemini stream returns JSON array elements separated by commas
-            let trimmed = text.trim().trim_start_matches('[').trim_end_matches(']').trim_start_matches(',').trim();
-
-            let mut content_text = String::new();
-            if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
-                if let Some(parts) = parsed["candidates"][0]["content"]["parts"].as_array() {
-                    for part in parts {
-                        if let Some(t) = part["text"].as_str() {
-                            content_text.push_str(t);
+        // チャンク境界を跨いでバッファし、SSEの `data:` 行ごとに1デルタを emit する。
+        let stream =
+            crate::providers::sse::line_stream(resp.bytes_stream()).filter_map(move |line_res| {
+                let model = model.clone();
+                let out = match line_res {
+                    Err(e) => Some(Err(e)),
+                    Ok(line) => {
+                        let line = line.trim();
+                        if let Some(data) = line.strip_prefix("data:") {
+                            let data = data.trim();
+                            match serde_json::from_str::<Value>(data) {
+                                Ok(parsed) => {
+                                    let mut content_text = String::new();
+                                    if let Some(parts) =
+                                        parsed["candidates"][0]["content"]["parts"].as_array()
+                                    {
+                                        for part in parts {
+                                            if let Some(t) = part["text"].as_str() {
+                                                content_text.push_str(t);
+                                            }
+                                        }
+                                    }
+                                    if content_text.is_empty() {
+                                        None
+                                    } else {
+                                        Some(Ok(ChatStreamDelta {
+                                            id: String::new(),
+                                            model,
+                                            choices: vec![StreamChoice {
+                                                index: 0,
+                                                delta: DeltaMessage {
+                                                    role: None,
+                                                    content: Some(content_text),
+                                                    function_call: None,
+                                                    tool_calls: None,
+                                                },
+                                                finish_reason: None,
+                                            }],
+                                        }))
+                                    }
+                                }
+                                Err(_) => None,
+                            }
+                        } else {
+                            None
                         }
                     }
-                }
-            }
-
-            Ok(ChatStreamDelta {
-                id: uuid::Uuid::new_v4().to_string(),
-                model,
-                choices: vec![StreamChoice {
-                    index: 0,
-                    delta: DeltaMessage {
-                        role: None,
-                        content: if content_text.is_empty() {
-                            None
-                        } else {
-                            Some(content_text)
-                        },
-                        function_call: None,
-                        tool_calls: None,
-                    },
-                    finish_reason: None,
-                }],
-            })
-        });
+                };
+                futures::future::ready(out)
+            });
 
         Ok(Box::pin(stream))
     }
@@ -398,5 +460,73 @@ impl LlmProvider for GoogleProvider {
         let url = format!("{}/models?key={}", self.base_url, self.api_key);
         let resp = self.client.get(&url).send().await?;
         Ok(resp.status().is_success())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// metadata の web_search=true で url_context ツールが tools に載ること。
+    /// 未設定なら載らない（function declarations のみ/無し）。
+    #[test]
+    fn test_build_request_body_url_context_tool() {
+        let provider = GoogleProvider::new("test-key");
+
+        let mut request = ChatRequest::new("gemini-3-pro", vec![Message::user("このURLを見て")]);
+        request
+            .metadata
+            .insert("web_search".to_string(), serde_json::json!(true));
+        request.functions = Some(vec![FunctionDefinition {
+            name: "my_tool".to_string(),
+            description: None,
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+        }]);
+        let body = provider.build_request_body(&request);
+        let tools = body["tools"].as_array().expect("tools array");
+        assert!(tools
+            .iter()
+            .any(|t| t.get("functionDeclarations").is_some()));
+        assert!(
+            tools.iter().any(|t| t.get("url_context").is_some()),
+            "url_context tool present"
+        );
+
+        let plain = ChatRequest::new("gemini-3-pro", vec![Message::user("hi")]);
+        let body = provider.build_request_body(&plain);
+        assert!(body.get("tools").is_none());
+    }
+
+    /// Gemini 1.x/2.x は function calling との併用が 400 になりうるため、フラグON
+    /// でも url_context を付与しない（エージェントを壊さない側に倒す）。
+    #[test]
+    fn test_url_context_skipped_on_pre_gemini3_models() {
+        let provider = GoogleProvider::new("test-key");
+        let mut request = ChatRequest::new("gemini-2.5-pro", vec![Message::user("URLを見て")]);
+        request
+            .metadata
+            .insert("web_search".to_string(), serde_json::json!(true));
+        request.functions = Some(vec![FunctionDefinition {
+            name: "my_tool".to_string(),
+            description: None,
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+        }]);
+        let body = provider.build_request_body(&request);
+        let tools = body["tools"].as_array().expect("tools array");
+        assert!(
+            !tools.iter().any(|t| t.get("url_context").is_some()),
+            "url_context must be skipped on gemini-2.x"
+        );
+
+        assert!(GoogleProvider::url_context_supported_model("gemini-3-pro"));
+        assert!(GoogleProvider::url_context_supported_model(
+            "gemini-4-flash"
+        ));
+        assert!(!GoogleProvider::url_context_supported_model(
+            "gemini-2.5-flash"
+        ));
+        assert!(!GoogleProvider::url_context_supported_model(
+            "gemini-1.5-pro"
+        ));
     }
 }

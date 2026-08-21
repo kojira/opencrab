@@ -60,20 +60,13 @@ impl Action for EvaluateResponseAction {
         let evaluation = args["evaluation"].as_str().unwrap_or("");
 
         // Meta: record which model is making this evaluation (the evaluator itself).
-        let evaluator_model = ctx.model_override.lock()
-            .ok()
-            .and_then(|m| m.clone());
+        let evaluator_model = ctx.model_override.lock().ok().and_then(|m| m.clone());
 
         // Resolve metrics_id: explicit param or auto-fill from last LLM call.
         let metrics_id = args["metrics_id"]
             .as_str()
             .map(|s| s.to_string())
-            .or_else(|| {
-                ctx.last_metrics_id
-                    .lock()
-                    .ok()
-                    .and_then(|id| id.clone())
-            });
+            .or_else(|| ctx.last_metrics_id.lock().ok().and_then(|id| id.clone()));
 
         // Save tags as JSON string.
         let tags_json = if args["tags"].is_array() {
@@ -115,6 +108,7 @@ impl Action for EvaluateResponseAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::traits::CallerIdentity;
     use std::sync::Arc;
 
     fn test_context_with_metrics() -> (tempfile::TempDir, ActionContext, String) {
@@ -144,10 +138,11 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let ws = opencrab_core::workspace::Workspace::from_root(dir.path()).unwrap();
         let ctx = ActionContext {
+            caller: CallerIdentity::Owner,
             agent_id: "agent-1".to_string(),
             agent_name: "Test Agent".to_string(),
             session_id: Some("session-1".to_string()),
-            db: Arc::new(std::sync::Mutex::new(conn)),
+            db: opencrab_db::Db::from_connection(conn),
             workspace: Arc::new(ws),
             last_metrics_id: Arc::new(std::sync::Mutex::new(Some(metrics_id.clone()))),
             model_override: Arc::new(std::sync::Mutex::new(None)),
@@ -158,7 +153,6 @@ mod tests {
                 available_providers: vec!["mock".to_string()],
                 gateway: "test".to_string(),
             })),
-
         };
         (dir, ctx, metrics_id)
     }
@@ -216,9 +210,6 @@ mod tests {
             .await;
 
         assert!(result.success);
-        assert_eq!(
-            result.data.as_ref().unwrap()["metrics_id"],
-            metrics_id,
-        );
+        assert_eq!(result.data.as_ref().unwrap()["metrics_id"], metrics_id,);
     }
 }

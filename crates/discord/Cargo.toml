@@ -11,9 +11,24 @@ tracing = { workspace = true }
 anyhow = { workspace = true }
 rusqlite = { workspace = true }
 serenity = { workspace = true }
+songbird = { workspace = true }
+# songbird の symphonia レジストリに wav/pcm デコーダを有効化する（TTS 再生用）
+symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm"] }
+opencrab-voice = { workspace = true }
 opencrab-core = { workspace = true }
-opencrab-gateway = { workspace = true, features = ["discord"] }
+opencrab-actions = { workspace = true }
+opencrab-gateway = { workspace = true }
 opencrab-db = { workspace = true }
+uuid = { workspace = true }
+dashmap = { workspace = true }
+chrono = { workspace = true }
+iana-time-zone = { workspace = true }
+reqwest = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# owner 未設定警告が実際に warn イベントとして出ることをテストで捕まえる。
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

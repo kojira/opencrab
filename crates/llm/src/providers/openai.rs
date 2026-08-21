@@ -4,10 +4,56 @@ use futures::stream::BoxStream;
 use futures::StreamExt;
 use reqwest::Client;
 use serde_json::Value;
+use std::time::Duration;
 use tracing::debug;
 
 use crate::message::*;
 use crate::traits::{LlmProvider, ModelInfo};
+
+/// チャット補完リクエスト全体の上限時間（秒）。超過で reqwest が timeout エラーを
+/// 返し、ターンが fail loud に落ちる（#667）。
+///
+/// なぜ「総時間」で「アイドル間隔」でないか: 本番経路は非ストリーミング単発 POST で、
+/// hermit-shell は上流 Anthropic を内部でストリーミングしつつ **finalMessage まで集約して
+/// 1 回で返す**（生成中は opencrab→hermit 間にバイトが流れない）。よってチャンク間の
+/// アイドル timeout は正当な無音生成を誤殺してしまうため、この経路で効くのは総時間 timeout
+/// だけになる。
+///
+/// なぜ 600 秒か: 出力上限（hermit:claude-opus-5 で 128K）まで許すが、実測の生成速度は
+/// 79 tok/s（#676: completion 4096 tok = 51.9 秒）で、実運用の大きな報告でも数分で完了する。
+/// 10 分を超える単発生成は極めて稀（数万トークン超の一括応答）で、上流の無応答（週次上限到達の
+/// 429 沈黙 sleep・プロセスクラッシュ後のソケット沈黙）と区別して確実に有限で切るための値。
+/// タイムアウトは 4xx でないため router の既存リトライ対象に含まれる。
+const CHAT_TIMEOUT_SECS: u64 = 600;
+/// 接続確立の timeout（秒）。生成の長さとは無関係。接続すら張れない状態を即検知する。
+const CONNECT_TIMEOUT_SECS: u64 = 10;
+
+/// チャット補完用の HTTP クライアントを組む（総時間 timeout 付き・#667）。
+fn build_client(timeout_secs: u64) -> Client {
+    Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+        .build()
+        // 起動時 1 回の構築。ここで失敗した client へ無言退化すると timeout 無しに戻り
+        // 本 PR の主旨（無応答を有限で切る）を裏切るため fail loud に落とす（#667）。
+        .expect("failed to build HTTP client with timeout")
+}
+
+/// GPT-5 系 / o シリーズ（推論モデル）を chat/completions で呼ぶときの制約を
+/// 判定する。これらのモデルは:
+/// - `temperature` は既定値 (1) のみ受け付け、他の値は 400 を返す
+/// - `max_tokens` は不可で `max_completion_tokens` を使う（推論トークンも消費）
+/// - `reasoning_effort` を受け付ける
+///
+/// `*-chat*` 変種（例: gpt-5-chat-latest）は非推論で従来どおり temperature/
+/// max_tokens を受け付けるため除外する。
+fn is_reasoning_model(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    if m.contains("chat") {
+        return false;
+    }
+    m.starts_with("gpt-5") || m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4")
+}
 
 /// OpenAI API provider.
 #[derive(Debug, Clone)]
@@ -16,16 +62,30 @@ pub struct OpenAiProvider {
     api_key: String,
     base_url: String,
     org_id: Option<String>,
+    /// GPT-5 系 / o シリーズに付与する reasoning_effort（"minimal"|"low"|"medium"
+    /// |"high"）。空/未設定なら送らない（サーバ既定 = medium）。
+    reasoning_effort: Option<String>,
+    /// テレメトリ用の表示名。ルーティングキーは router 登録時に別途決まるため、
+    /// これは接続先を人間に見せるためのラベルにすぎない（既定は形式名 "openai"）。
+    name: String,
 }
 
 impl OpenAiProvider {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: build_client(CHAT_TIMEOUT_SECS),
             api_key: api_key.into(),
             base_url: "https://api.openai.com/v1".to_string(),
             org_id: None,
+            reasoning_effort: None,
+            name: "openai".to_string(),
         }
+    }
+
+    /// 表示名を上書きする（同じ形式の接続先を別名で登録するとき）。
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
     }
 
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
@@ -38,10 +98,20 @@ impl OpenAiProvider {
         self
     }
 
+    /// GPT-5 系 / o シリーズに付与する reasoning_effort を設定する。
+    /// 空文字は「未設定」として扱う。
+    pub fn with_reasoning_effort(mut self, effort: impl Into<String>) -> Self {
+        let s = effort.into();
+        self.reasoning_effort = if s.is_empty() { None } else { Some(s) };
+        self
+    }
+
     /// Build the request with auth headers.
     fn request_builder(&self, endpoint: &str) -> reqwest::RequestBuilder {
         let url = format!("{}/{}", self.base_url, endpoint);
-        let mut builder = self.client.post(&url)
+        let mut builder = self
+            .client
+            .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json");
 
@@ -56,14 +126,38 @@ impl OpenAiProvider {
     fn build_request_body(&self, request: &ChatRequest) -> Value {
         let mut body = serde_json::json!({
             "model": request.model,
-            "messages": self.convert_messages(&request.messages),
+            "messages": super::openai_compat::messages_to_json(&request.messages),
         });
 
+        let reasoning = is_reasoning_model(&request.model);
+
         if let Some(temp) = request.temperature {
-            body["temperature"] = serde_json::json!(temp);
+            // GPT-5 系 / o シリーズは temperature 既定値 (1) 以外を 400 で拒否する。
+            // エンジンは 0.7/0.0 を送ってくるため、推論モデルでは温度を送らない
+            // （サーバ既定にフォールバック）。それ以外は従来どおり。
+            if !reasoning {
+                body["temperature"] = serde_json::json!(temp);
+            }
         }
         if let Some(max) = request.max_tokens {
-            body["max_tokens"] = serde_json::json!(max);
+            // 推論モデルは max_tokens 不可 → max_completion_tokens を使う。
+            // 注: 内部推論トークンもこの予算を消費するため、小さすぎると出力が
+            // 途中で切れうる（呼び出し側の予算設定の問題で、リクエストは成功する）。
+            if reasoning {
+                body["max_completion_tokens"] = serde_json::json!(max);
+            } else {
+                body["max_tokens"] = serde_json::json!(max);
+            }
+        }
+        if reasoning {
+            // per-request（エージェント個別）を優先し、無ければ構築時の既定。
+            if let Some(effort) = request
+                .reasoning_effort
+                .as_deref()
+                .or(self.reasoning_effort.as_deref())
+            {
+                body["reasoning_effort"] = serde_json::json!(effort);
+            }
         }
         if let Some(ref stop) = request.stop {
             body["stop"] = serde_json::json!(stop);
@@ -72,10 +166,11 @@ impl OpenAiProvider {
             body["stream"] = serde_json::json!(stream);
         }
         if let Some(ref functions) = request.functions {
-            // Convert to OpenAI tools format
             let tools: Vec<Value> = functions
                 .iter()
                 .map(|f| {
+                    // cache_control は Anthropic 固有のフィールドで、OpenAI は未知の
+                    // パラメータとして 400 で拒否するため、ここでは出力しない。
                     serde_json::json!({
                         "type": "function",
                         "function": {
@@ -104,152 +199,12 @@ impl OpenAiProvider {
 
         body
     }
-
-    fn convert_messages(&self, messages: &[Message]) -> Vec<Value> {
-        messages.iter().map(|m| self.convert_message(m)).collect()
-    }
-
-    fn convert_message(&self, msg: &Message) -> Value {
-        let mut obj = serde_json::json!({
-            "role": msg.role,
-        });
-
-        if let Some(ref content) = msg.content {
-            match content {
-                MessageContent::Text(text) => {
-                    obj["content"] = serde_json::json!(text);
-                }
-                MessageContent::Image { image_url, .. } => {
-                    obj["content"] = serde_json::json!([
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": image_url.url,
-                            }
-                        }
-                    ]);
-                }
-                MessageContent::Multi(parts) => {
-                    let parts_json: Vec<Value> = parts
-                        .iter()
-                        .map(|p| match p {
-                            ContentPart::Text { text } => {
-                                serde_json::json!({"type": "text", "text": text})
-                            }
-                            ContentPart::ImageUrl { image_url } => {
-                                serde_json::json!({
-                                    "type": "image_url",
-                                    "image_url": {"url": image_url.url}
-                                })
-                            }
-                        })
-                        .collect();
-                    obj["content"] = serde_json::json!(parts_json);
-                }
-            }
-        }
-
-        if let Some(ref name) = msg.name {
-            obj["name"] = serde_json::json!(name);
-        }
-        if let Some(ref tool_calls) = msg.tool_calls {
-            obj["tool_calls"] = serde_json::to_value(tool_calls).unwrap_or_default();
-        }
-        if let Some(ref tool_call_id) = msg.tool_call_id {
-            obj["tool_call_id"] = serde_json::json!(tool_call_id);
-        }
-
-        obj
-    }
-
-    /// Parse the OpenAI API response into our unified format.
-    fn parse_response(&self, body: Value) -> Result<ChatResponse> {
-        let id = body["id"].as_str().unwrap_or_default().to_string();
-        let model = body["model"].as_str().unwrap_or_default().to_string();
-        let created = body["created"].as_i64().unwrap_or(0);
-
-        let usage = if let Some(u) = body.get("usage") {
-            Usage {
-                prompt_tokens: u["prompt_tokens"].as_u64().unwrap_or(0) as u32,
-                completion_tokens: u["completion_tokens"].as_u64().unwrap_or(0) as u32,
-                total_tokens: u["total_tokens"].as_u64().unwrap_or(0) as u32,
-            }
-        } else {
-            Usage::default()
-        };
-
-        let choices = body["choices"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .map(|c| {
-                        let msg = &c["message"];
-                        let role = match msg["role"].as_str().unwrap_or("assistant") {
-                            "system" => Role::System,
-                            "user" => Role::User,
-                            "assistant" => Role::Assistant,
-                            "tool" => Role::Tool,
-                            _ => Role::Assistant,
-                        };
-
-                        let content = msg.get("content").and_then(|v| {
-                            v.as_str().map(|s| MessageContent::Text(s.to_string()))
-                        });
-
-                        let function_call = msg.get("function_call").and_then(|fc| {
-                            serde_json::from_value::<FunctionCall>(fc.clone()).ok()
-                        });
-
-                        let tool_calls = msg.get("tool_calls").and_then(|tc| {
-                            serde_json::from_value::<Vec<ToolCall>>(tc.clone()).ok()
-                        });
-
-                        let tool_call_id = msg
-                            .get("tool_call_id")
-                            .and_then(|v| v.as_str().map(String::from));
-
-                        let finish_reason = c.get("finish_reason").and_then(|fr| {
-                            match fr.as_str()? {
-                                "stop" => Some(FinishReason::Stop),
-                                "length" => Some(FinishReason::Length),
-                                "function_call" => Some(FinishReason::FunctionCall),
-                                "tool_calls" => Some(FinishReason::ToolCalls),
-                                "content_filter" => Some(FinishReason::ContentFilter),
-                                _ => None,
-                            }
-                        });
-
-                        Choice {
-                            index: c["index"].as_u64().unwrap_or(0) as u32,
-                            message: Message {
-                                role,
-                                content,
-                                name: None,
-                                function_call,
-                                tool_calls,
-                                tool_call_id,
-                            },
-                            finish_reason,
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        Ok(ChatResponse {
-            id,
-            model,
-            choices,
-            usage,
-            created,
-        })
-    }
 }
 
 #[async_trait]
 impl LlmProvider for OpenAiProvider {
     fn name(&self) -> &str {
-        "openai"
+        &self.name
     }
 
     async fn available_models(&self) -> Result<Vec<ModelInfo>> {
@@ -296,16 +251,19 @@ impl LlmProvider for OpenAiProvider {
             .context("OpenAI API request failed")?;
 
         let status = resp.status();
-        let resp_body: Value = resp.json().await.context("failed to parse OpenAI response")?;
+        let resp_body: Value = resp
+            .json()
+            .await
+            .context("failed to parse OpenAI response")?;
 
         if !status.is_success() {
             let error_msg = resp_body["error"]["message"]
                 .as_str()
                 .unwrap_or("unknown error");
-            anyhow::bail!("OpenAI API error ({}): {}", status, error_msg);
+            return Err(crate::error::api_error("OpenAI", status, error_msg));
         }
 
-        self.parse_response(resp_body)
+        Ok(super::openai_compat::parse_chat_response(&resp_body, ""))
     }
 
     async fn chat_completion_stream(
@@ -330,71 +288,19 @@ impl LlmProvider for OpenAiProvider {
             let msg = err_body["error"]["message"]
                 .as_str()
                 .unwrap_or("unknown error");
-            anyhow::bail!("OpenAI API error ({}): {}", status, msg);
+            return Err(crate::error::api_error("OpenAI", status, msg));
         }
 
-        let stream = resp.bytes_stream().map(move |chunk| {
-            let chunk = chunk.context("stream chunk error")?;
-            let text = String::from_utf8_lossy(&chunk);
-
-            let mut last_delta = None;
-            for line in text.lines() {
-                let line = line.trim();
-                if line.is_empty() || line == "data: [DONE]" {
-                    continue;
-                }
-                if let Some(data) = line.strip_prefix("data: ") {
-                    if let Ok(parsed) = serde_json::from_str::<Value>(data) {
-                        let id = parsed["id"].as_str().unwrap_or_default().to_string();
-                        let model = parsed["model"].as_str().unwrap_or_default().to_string();
-                        let choices = parsed["choices"]
-                            .as_array()
-                            .map(|arr| {
-                                arr.iter()
-                                    .map(|c| {
-                                        let delta = &c["delta"];
-                                        StreamChoice {
-                                            index: c["index"].as_u64().unwrap_or(0) as u32,
-                                            delta: DeltaMessage {
-                                                role: delta
-                                                    .get("role")
-                                                    .and_then(|r| {
-                                                        serde_json::from_value(r.clone()).ok()
-                                                    }),
-                                                content: delta
-                                                    .get("content")
-                                                    .and_then(|v| {
-                                                        v.as_str().map(String::from)
-                                                    }),
-                                                function_call: delta
-                                                    .get("function_call")
-                                                    .and_then(|fc| {
-                                                        serde_json::from_value(fc.clone()).ok()
-                                                    }),
-                                                tool_calls: delta
-                                                    .get("tool_calls")
-                                                    .and_then(|tc| {
-                                                        serde_json::from_value(tc.clone()).ok()
-                                                    }),
-                                            },
-                                            finish_reason: c
-                                                .get("finish_reason")
-                                                .and_then(|fr| {
-                                                    serde_json::from_value(fr.clone()).ok()
-                                                }),
-                                        }
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-
-                        last_delta = Some(ChatStreamDelta { id, model, choices });
-                    }
-                }
-            }
-
-            last_delta.ok_or_else(|| anyhow::anyhow!("no parseable SSE data in chunk"))
-        });
+        // チャンク境界を跨いでバッファし、完全な行ごとに1イベントとして処理する。
+        // `data:` 行の delta 抽出は openai_compat に一本化（[DONE]/コメント行はスキップ）。
+        let stream =
+            crate::providers::sse::line_stream(resp.bytes_stream()).filter_map(move |line_res| {
+                let out = match line_res {
+                    Err(e) => Some(Err(e)),
+                    Ok(line) => super::openai_compat::delta_from_sse_line(&line).map(Ok),
+                };
+                futures::future::ready(out)
+            });
 
         Ok(Box::pin(stream))
     }
@@ -419,3 +325,108 @@ impl LlmProvider for OpenAiProvider {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_reasoning_model() {
+        assert!(is_reasoning_model("gpt-5.6"));
+        assert!(is_reasoning_model("gpt-5.6-sol"));
+        assert!(is_reasoning_model("gpt-5.6-terra"));
+        assert!(is_reasoning_model("gpt-5.5"));
+        assert!(is_reasoning_model("o1"));
+        assert!(is_reasoning_model("o3-mini"));
+        // chat 変種と従来モデルは非推論扱い
+        assert!(!is_reasoning_model("gpt-5-chat-latest"));
+        assert!(!is_reasoning_model("gpt-4o"));
+        assert!(!is_reasoning_model("gpt-4o-mini"));
+    }
+
+    #[test]
+    fn test_gpt5_body_omits_temperature_uses_max_completion_tokens() {
+        let p = OpenAiProvider::new("k").with_reasoning_effort("high");
+        let req = ChatRequest::new("gpt-5.6", vec![Message::user("hi")])
+            .with_temperature(0.7)
+            .with_max_tokens(4096);
+        let body = p.build_request_body(&req);
+        // GPT-5 系: temperature は送らない、max は max_completion_tokens に
+        assert!(
+            body.get("temperature").is_none(),
+            "temperature must be omitted for gpt-5"
+        );
+        assert!(
+            body.get("max_tokens").is_none(),
+            "max_tokens must not be sent for gpt-5"
+        );
+        assert_eq!(body["max_completion_tokens"], 4096);
+        assert_eq!(body["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn test_per_request_reasoning_effort_overrides_provider_default() {
+        let p = OpenAiProvider::new("k").with_reasoning_effort("low");
+        // request 側（エージェント個別）が provider 既定より優先される
+        let mut req = ChatRequest::new("gpt-5.6", vec![Message::user("hi")]);
+        req.reasoning_effort = Some("high".to_string());
+        let body = p.build_request_body(&req);
+        assert_eq!(body["reasoning_effort"], "high");
+
+        // request 側が無ければ provider 既定
+        let req2 = ChatRequest::new("gpt-5.6", vec![Message::user("hi")]);
+        let body2 = p.build_request_body(&req2);
+        assert_eq!(body2["reasoning_effort"], "low");
+    }
+
+    #[test]
+    fn test_gpt4o_body_keeps_temperature_and_max_tokens() {
+        let p = OpenAiProvider::new("k").with_reasoning_effort("high");
+        let req = ChatRequest::new("gpt-4o", vec![Message::user("hi")])
+            .with_temperature(0.7)
+            .with_max_tokens(4096);
+        let body = p.build_request_body(&req);
+        assert_eq!(body["temperature"], 0.7);
+        assert_eq!(body["max_tokens"], 4096);
+        // 非推論モデルには reasoning_effort を付けない
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("max_completion_tokens").is_none());
+    }
+
+    /// リクエストを受けてから `delay` 待って 200 を返すモック（timeout 検証用）。
+    async fn spawn_slow_mock(delay: Duration) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let _ = sock.read(&mut buf).await;
+                    tokio::time::sleep(delay).await;
+                    let resp =
+                        "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}";
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}/slow")
+    }
+
+    /// #667: 総時間 timeout が実際に client へ効いていることを確認する。無応答の上流を
+    /// 有限で切る（fail loud）ための肝なので、定数の保持ではなく client の挙動で見る。
+    #[tokio::test]
+    async fn test_chat_timeout_is_applied_to_the_http_client() {
+        let url = spawn_slow_mock(Duration::from_millis(1500)).await;
+
+        // 短い timeout の client は読み切る前に timeout する。
+        let short = build_client(1);
+        let err = short.get(&url).send().await.unwrap_err();
+        assert!(err.is_timeout(), "1 秒なら timeout するはず: {err}");
+
+        // 十分長い timeout の client は読み切れる。
+        let long = build_client(10);
+        let resp = long.get(&url).send().await.expect("10 秒なら読み切れる");
+        assert!(resp.status().is_success());
+    }
+}

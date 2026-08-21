@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 同一ブランチの古い実行はキャンセルして無駄を省く
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  rust:
+    name: Rust (fmt / clippy / build / test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # songbird(voice) は opus、reqwest(native-tls) は OpenSSL、
+      # audiopus_sys のビルドに cmake/pkg-config が要る。rusqlite は bundled。
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake pkg-config libopus-dev libssl-dev lld
+
+      # toolchain は明示バージョンで固定する（#702）。`@stable` のままだと Rust の
+      # 新 stable が出るたびに新規・変更された clippy lint が `-D warnings` で拾われ、
+      # 無関係な PR や main が突然赤くなる（この PR 自身が 1.93→1.98 で踏んだ）。
+      # バージョンは自動追従させず、人が意図的に上げる: 下の値を新しい版に書き換え、
+      # ローカルで `cargo +<新版> clippy --workspace --all-targets --all-features -- -D warnings`
+      # が green になることを確認してから上げること。
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      # 警告レベルの lint も含めて 1 件でも出たら赤くする（#702）。`-D warnings` で
+      # 全ての warning を error に昇格させ、再蓄積を止める。workspace の deny 指定
+      # (await_holding_lock 等) も従来どおりここで強制される。
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Build
+        run: cargo build --workspace --all-features
+
+      - name: Test
+        run: cargo test --workspace --all-features
+
+      # R4: opencrab-core が gate/SDK クレートへ依存し始めていないかを
+      # 依存ツリーで検査する（ビルドの成否には現れない逆流を止める）。
+      # R7（core の production コードに gate 名が出ない）は上の Test に含まれる。
+      - name: Dependency boundary checks
+        run: bash scripts/check-deps.sh
+
+  web:
+    name: Web (typecheck / build / test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # `npm run build` は tsc -b（型チェック）+ vite build を実行する。
+      - name: Typecheck & build
+        run: npm run build
+
+      - name: Test
+        run: npm run test

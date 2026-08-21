@@ -1,77 +1,1095 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 use axum::{
-    routing::{get, post},
+    routing::{delete, get, patch, post, put},
     Router,
 };
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
+pub mod agent_heartbeat;
+pub mod agent_log;
+pub mod agent_management;
+#[cfg(feature = "nostr")]
+pub mod agent_nostr_relay;
+pub mod agent_runtime_impl;
+pub mod agent_schedule;
 pub mod api;
+pub mod caller_identity;
 pub mod config;
+pub mod heartbeat_fire;
+pub mod heartbeat_instructions;
+pub mod hot_reload;
+pub mod intake;
 pub mod llm_adapter;
+pub mod llm_log_archive;
+pub mod memory_condense;
+pub mod memory_declare;
+pub mod memory_maintenance;
+pub mod memory_organize;
+#[cfg(feature = "nostr")]
+pub mod nostr_runner_impl;
+#[cfg(feature = "nostr")]
+pub mod nostr_secret_migration;
+pub mod offload_cleanup;
+pub mod peer_review;
 pub mod process;
+pub mod schedule_cron;
+pub mod skill_consolidation;
+pub mod subtask_registries;
+pub mod subtask_spawn;
+pub mod system_actions;
+#[cfg(feature = "web")]
+pub mod web_runner_impl;
+pub mod webhook_targets;
 
 #[cfg(feature = "discord")]
 mod agent_runner_impl;
+pub mod transcript;
+
+/// per-agent Nostr sub-gateway マネージャの共有ハンドル。
+#[cfg(feature = "nostr")]
+pub type SharedNostrManager = Arc<opencrab_nostr::NostrGatewayManager<AppState>>;
+
+/// per-agent MCP 接続マネージャの共有ハンドル。
+pub type SharedMcpManager = Arc<opencrab_mcp::McpClientManager>;
 
 use opencrab_llm::router::LlmRouter;
 
+/// ホットスワップ可能な LlmRouter の共有ハンドル。
+///
+/// ダッシュボードのプロバイダー設定変更時に、再起動なしでルーターを
+/// 差し替えるために使う。読み手は `get()` でその時点のスナップショットを
+/// 取得する（実行中のリクエストは古いルーターで完走する — 破壊的でない）。
+#[derive(Clone)]
+pub struct SharedLlmRouter(Arc<std::sync::RwLock<Arc<LlmRouter>>>);
+
+impl SharedLlmRouter {
+    pub fn new(router: LlmRouter) -> Self {
+        Self(Arc::new(std::sync::RwLock::new(Arc::new(router))))
+    }
+
+    /// 現在のルーターのスナップショットを返す。
+    pub fn get(&self) -> Arc<LlmRouter> {
+        self.0.read().unwrap().clone()
+    }
+
+    /// ルーターを差し替える（プロバイダー設定変更時）。
+    pub fn swap(&self, router: LlmRouter) {
+        *self.0.write().unwrap() = Arc::new(router);
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
-    pub db: Arc<Mutex<rusqlite::Connection>>,
-    pub llm_router: Arc<LlmRouter>,
+    pub db: opencrab_db::Db,
+    pub llm_router: SharedLlmRouter,
+    /// 起動時に読んだ TOML の [llm] 設定（DB オーバーライド適用前の土台）。
+    /// プロバイダー設定変更時のルーター再構築に使う。
+    pub llm_config: Arc<config::LlmConfig>,
+    /// 起動時に読んだ TOML の [voice] 設定（DB オーバーライド適用前の土台）。
+    pub voice_config: Arc<opencrab_voice::VoiceConfig>,
+    /// 稼働中の VC 対話ランタイム（discord 起動後にセットされる）。
+    /// プロバイダー設定変更を再起動なしで反映するために使う。
+    pub voice_runtime: Arc<std::sync::Mutex<Option<Arc<dyn opencrab_voice::VoiceRuntime>>>>,
     pub workspace_base: String,
+    /// #620: Nostr の at-rest 秘密（DB 本鍵・生成鍵ファイル）の暗号/復号に使うマスターキー。
+    /// 起動時に env `OPENCRAB_SECRET_MASTER_KEY` から読んで即 `remove_var` し、ここへ保持する。
+    /// **有効（base64 32B かつ既存暗号文とも一致）なマスターキーがあるときだけ `Some`**。
+    /// `None` は未設定 / 不正形式 / 既存暗号文と不一致のいずれか（暗号化を有効化していない＝
+    /// 従来挙動）。Nostr サブシステムは `Some` のときだけ起動する（`None` ならバナーで拒否）。
+    #[cfg(feature = "nostr")]
+    pub nostr_master_key: Option<opencrab_nostr::MasterKey>,
     pub default_model: String,
+    pub tools_config: Arc<RwLock<opencrab_actions::tools::ToolsConfig>>,
+    /// コンパクション比率: context_window のうち会話履歴に使う割合 (0.0-1.0, デフォルト 0.5)。
+    pub compaction_ratio: f64,
+    /// evaluator（契約に対する独立 rubric 評価）の設定。
+    /// #291 で対話ターンからの呼び出しを撤去したため現在は未参照。
+    /// スリープ側へ評価を移す配線（別 issue）で使う。
+    pub evaluator: config::EvaluatorConfig,
+    /// スリープ時スキル棚卸し（自己 curation ループ）の設定。
+    pub skill_consolidation: config::SkillConsolidationConfig,
+    /// 記憶カテゴリ層（#313/#344）の sleep 中自動割当の設定。既定オフ（#345）。
+    pub category_maintenance: config::CategoryMaintenanceConfig,
+    /// スリープ整理ラン（#313 段階3 / #361）の設定。既定オフ（opt-in / #346）。
+    pub memory_organize: config::MemoryOrganizeConfig,
+    /// スリープ宣言ラン（#384 / #376 段階2）の設定。既定オフ（opt-in / #346）。
+    pub memory_declare: config::MemoryDeclareConfig,
+    /// スリープ凝縮ラン（#411 / 記憶の 3 段目）の設定。既定 ON（#457。`enabled=false` で opt-out 可）。
+    pub memory_condense: config::MemoryCondenseConfig,
+    /// ループ再起動 v1（#52）: 反復上限停止 + active タスク残存時の1回自動再実行。
+    pub loop_restart_enabled: bool,
+    /// エージェント単位のインデックスビルド in-flight フラグ（post-run トリガーと
+    /// メンテナンスループの二重 LLM 支出防止）。
+    pub index_build_inflight: memory_maintenance::IndexBuildInflight,
+    pub mcp_manager: Option<SharedMcpManager>,
+    /// 受信を持つ transport の per-agent ライフサイクル登録簿（#191 段階2）。
+    ///
+    /// **Discord / Nostr の名指しフィールドはもう無い**（PR4 で撤去）。共通操作
+    /// （起動 / 停止 / 生存確認）も transport 固有の操作（ツール実行の実体・鍵の
+    /// 払い出し）も、すべてここから種別名（[`opencrab_actions::gateway_kinds`]）で
+    /// 引く。後者は既定 `None` の capability accessor
+    /// （`gateway_actions_for` / `key_provisioning`）で、`GatewayActions` の
+    /// `a2ui_surface` / `text_delivery` と同じ流儀。
+    /// 未登録の種別は生存確認が **false**（共有ゲートウェイが処理を続ける側）。
+    ///
+    /// **内部可変**（[`opencrab_actions::AgentGatewayRegistry`] が中で `RwLock` を持つ）。
+    /// マネージャの生成順は仕様であり（Discord のマネージャは共有ゲートウェイへ渡す
+    /// state clone より前、Nostr はルータ構築の直前）、不変フィールドにすると
+    /// 「全マネージャが state 構築前に揃っていること」を要求してその順序と衝突する。
+    /// 後から登録できる形にして順序依存を構造的に消す（`voice_runtime` /
+    /// `subtask_lifecycle_notifier` と同じ流儀）。
+    ///
+    /// **MCP は入れない。** `crates/mcp` は受信を持たず transport ではない（道具の
+    /// 供給者で、注入は深さ 0 限定）。`mcp_manager` は名指しのまま残す。
+    pub gateways: Arc<opencrab_actions::AgentGatewayRegistry>,
+    /// web gateway ランタイム（#154）: SSE 配送 / per-session 直列化 / dispatch registry。
+    /// 実体は独立クレート `opencrab-web-gateway`（#190）。
+    #[cfg(feature = "web")]
+    pub web_gateway: Arc<opencrab_web_gateway::WebGateway>,
+    /// 非ブロック dispatch（#152 S3a）の subtask registry 置き場（#169）。
+    /// REST は session_id キー、heartbeat は agent_id キーで貸し借りし、
+    /// dispatcher と `cancel_subtask`（#161）が同一 registry を見るようにする。
+    pub subtask_registries: Arc<subtask_registries::SubtaskRegistries>,
+    /// プロセス全体で 1 つの per-session 直列化ロック表（#588 Stage 2）。
+    ///
+    /// 時間トリガー（heartbeat）のターンと通常メッセージ処理のターンを**同一セッション上で
+    /// 直列化**するための共有実体。各ゲートウェイの受信ループ（Discord）や per-session
+    /// ランタイム（Nostr の `SessionRuntime::with_locks`）・scheduler・heartbeat runner は、
+    /// ローカルに `SessionLocks::new()` を作るのをやめてこの 1 つを clone して共有する。
+    /// `AgentRuntime::session_locks` がこれを返す（gateway 非依存層からの参照口）。
+    pub session_locks: Arc<opencrab_actions::SessionLocks>,
+    /// #588 TimedFire: 時刻発火の受け口登録簿。各ゲートウェイのループが起動時に自分の受け口を
+    /// 登録し、scheduler が発火時にここを引いてイベントを 1 本流す（配送・ロック・記録はループ側）。
+    pub timed_fire_router: Arc<opencrab_actions::TimedFireRouter>,
+    /// `report_progress`（#175 S1）のデバウンス世代カウンタ。
+    ///
+    /// `SystemGatewayActions` は run ごとに作り直されるため、そのフィールドに置くと
+    /// デバウンスが毎回リセットされ全ての進捗報告が発火する。プロセス寿命の共有状態
+    /// である `AppState` に置いて、gateway の生成を跨いで間引きが効くようにする。
+    pub progress_debounce: Arc<subtask_registries::ProgressDebounce>,
+    /// 走行中サブタスクの lifecycle 通知口（subtask_id → 通知口 / #175 S3・S4）。
+    ///
+    /// `spawn_subtask`（server 側）が insert し、決着・停止で remove する。registry と
+    /// 対で共有し、Discord の `cancel_subtask` もここから引いて中断を通知する。
+    pub subtask_notifiers: opencrab_actions::subtask_notify::SubtaskNotifiers,
+    /// サブタスク lifecycle 通知の実装（未設定なら通知しない / #175 S4）。
+    ///
+    /// Discord webhook 実装は起動時にここへ差し込む。`AppState` は clone されて
+    /// 各所へ配られるため、後から差し替えられるよう内部可変にしている
+    /// （`voice_runtime` と同じ流儀）。
+    pub subtask_lifecycle_notifier: Arc<
+        std::sync::Mutex<
+            Option<Arc<dyn opencrab_actions::subtask_notify::SubtaskLifecycleNotifier>>,
+        >,
+    >,
+    /// 非ブロック dispatch の kill switch（`[subtask] auto_dispatch` / 既定 true）。
+    /// `false` にすると全ツールが inline 実行に戻る（#152 導入前の挙動）。
+    pub subtask_auto_dispatch: bool,
+    /// 設定ファイル由来の**通知先フォールバック**（#157 S5）。
+    ///
+    /// 通知先の解決は「明示指定 → DB の scope 別既定（tool>agent>global）→ ここ」の順で、
+    /// DB 行が皆無のときだけ効く（`WebhookSource::EnvConfig`）。以前この値は Discord
+    /// 起動ブロックのローカル変数にしか無く、gateway 非依存層からは到達できなかった。
+    /// 管理ツール（`get_default_subtask_webhook` 等）を合成層へ移すにあたり、
+    /// **transport の機能フラグに依存しない形**でここへ持ち上げた
+    /// （`config::AppConfig::default_subtask_webhook`）。
+    pub default_subtask_webhook: Option<opencrab_actions::webhook_target::WebhookConfig>,
+    /// エージェント単位ハートビート設定の境界値（#247）。
+    ///
+    /// エージェント自身が触るツール（`get_my_heartbeat` / `set_my_heartbeat`）が
+    /// 参照する。下限は設定ファイル（`[agent] heartbeat_min_interval_secs`）由来で、
+    /// 運用者が費用と負荷の許容範囲を決める。
+    pub heartbeat_limits: config::HeartbeatLimits,
+    /// 外部イベント受信（webhook intake / issue #454）の設定。
+    ///
+    /// webhook ハンドラ（source→secret の解決 / ルーティング）と、受信箱の消化・catch-up
+    /// ループが参照する。秘密（source secret / Bearer）を含むため、ログや API 応答へ
+    /// そのまま出さないこと。
+    pub intake: Arc<config::IntakeConfig>,
+    /// 受信箱消化ループ（`intake_process`）の起床通知（#499）。
+    ///
+    /// `scheduler_wake` と同じ `Notify` パターン。webhook（`POST /api/hooks/{source}`）で
+    /// **新規イベントを積んだ直後**に鳴らし、消化ループがポーリング間隔を待たずに即処理する。
+    /// **payload を載せない**（取りこぼしてもポーリングが安全網として拾う自己回復）。消化ループは
+    /// 単一タスクで inbox を直列に処理するため、通知が処理中に複数来ても permit は 1 つに畳まれ、
+    /// 現在の処理が終わったあと 1 回だけ再消化される（多重ターンにならない）。受信箱が空なら
+    /// 消化ループ側の非空ゲートで LLM を呼ばない（空振り wake は no-op）。
+    pub intake_wake: Arc<tokio::sync::Notify>,
+    /// 中央ハートビートスケジューラの起床通知（#437 / #439 / 設計 §3.5）。
+    ///
+    /// スケジューラは `notified()` で起きて DB から発火予定を組み直す（rebuild）。
+    /// **payload を載せない**（取りこぼしても次ウェイクで収束する自己回復）。鳴らす源:
+    /// (a) `set_my_heartbeat`（PR3 で配線）・(b) schedule CRUD（PR4）・(c) global config
+    /// 変更・(d) **発火ターンの完了**（in-flight 除去と同じ箇所で鳴らし、走行中に眠って
+    /// いたスケジューラを即座に rebuild させる）。PR2 では (c)(d) を配線する。
+    pub scheduler_wake: Arc<tokio::sync::Notify>,
+    /// live G（global heartbeat kill-switch = `[agent] heartbeat_enabled`）を読む口
+    /// （#394 / 設計 §13.1）。
+    ///
+    /// 中央スケジューラが発火時に読むのと**同一の watch 源**（hot-reload 追従）。
+    /// `get_my_heartbeat` が `discord-` セッションの「enabled なのに G=false でゲート中」を
+    /// 本人へ見せるために `borrow().enabled` を読む（起動時スナップにしない＝表示と実発火の
+    /// 乖離を防ぐ）。`nostr-` は G 非依存なのでゲート理由に使わない（設計 §5）。
+    pub heartbeat_config_rx:
+        tokio::sync::watch::Receiver<opencrab_core::heartbeat::HeartbeatConfig>,
+}
+
+/// live G を読む「切り離し済み」受信端を作る（送信端を即 drop する）。
+///
+/// テストや、config watcher を配線しない構成で [`AppState::heartbeat_config_rx`] を埋める
+/// ために使う。送信端を落としても `borrow()` は `initial` を返し続けるので、ゲート理由の
+/// 読み取りは動く（このフィールドの読み手は `borrow()` だけで `changed()` は使わない）。
+/// 本番は `main.rs` が hot-reload 配線済みの受信端を渡すので、これは使わない。
+pub fn disconnected_heartbeat_config_rx(
+    initial: opencrab_core::heartbeat::HeartbeatConfig,
+) -> tokio::sync::watch::Receiver<opencrab_core::heartbeat::HeartbeatConfig> {
+    let (_tx, rx) = tokio::sync::watch::channel(initial);
+    rx
+}
+
+impl AppState {
+    /// サブタスク lifecycle 通知の実装を返す（未設定なら何もしない Noop）。
+    pub fn subtask_lifecycle_notifier(
+        &self,
+    ) -> Arc<dyn opencrab_actions::subtask_notify::SubtaskLifecycleNotifier> {
+        self.subtask_lifecycle_notifier
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .unwrap_or_else(|| Arc::new(opencrab_actions::NoopLifecycleNotifier))
+    }
+}
+
+/// 本番の transport 発火先 descriptor を **1 箇所で**登録する（#628・生存非依存）。
+///
+/// **登録の源はこの関数だけ**にする（main.rs の起動配線 / `test_app_state` / scheduler の
+/// `test_router` / 登録簿を反復する generic テストが**すべてこれを呼ぶ**）。個々の register を
+/// 各所に散らすと、本番へ足してテスト側への追記を忘れる隙ができ、prefix 衝突が本番でだけ
+/// 顕在化しうる（#628 が直した密結合と同じ形になる）。重複を消せば、generic テストが**本当に
+/// 本番登録簿を反復する**。Discord は feature gate の内側（クレート自体が居ない構成がある）。
+///
+/// なお起動時の防御は [`opencrab_actions::TimedFireRouter::self_check`]（本番登録簿そのもので
+/// prefix 衝突・登録漏れを検出）が担う。この 1 本化は「登録関数への追加忘れ」を減らす方で、
+/// 両方あって初めて塞がる。
+#[cfg_attr(
+    not(any(feature = "discord", feature = "nostr", feature = "web")),
+    allow(unused_variables)
+)]
+pub fn register_production_descriptors(router: &opencrab_actions::TimedFireRouter) {
     #[cfg(feature = "discord")]
-    pub discord_manager: Option<Arc<opencrab_discord::DiscordGatewayManager<AppState>>>,
+    router.register_descriptor(Arc::new(opencrab_discord::DiscordFire));
+    #[cfg(feature = "nostr")]
+    router.register_descriptor(Arc::new(opencrab_nostr::NostrFire));
+    #[cfg(feature = "web")]
+    router.register_descriptor(Arc::new(opencrab_web_gateway::WebFire));
+}
+
+/// 最小構成の `AppState`（in-memory DB、LLM プロバイダ 0 件、gateway マネージャ無し）。
+///
+/// crate 内のユニットテスト共用。`AppState` にフィールドが増えたときの追随箇所を
+/// 1 つに保つ（テストごとの構造体リテラル複製を避ける）。
+#[cfg(test)]
+pub(crate) fn test_app_state() -> AppState {
+    let conn = opencrab_db::init_memory().unwrap();
+    // #628: 本番（main.rs）と同じ transport descriptor を生存非依存で登録する（源は 1 本化・
+    // `register_production_descriptors`）。これが無いと set/get_my_heartbeat・schedule ツールが
+    // 発火先を解決できず（登録簿が空）拒否される。
+    let timed_fire_router = opencrab_actions::TimedFireRouter::new();
+    register_production_descriptors(&timed_fire_router);
+    AppState {
+        db: opencrab_db::Db::from_connection(conn),
+        llm_router: SharedLlmRouter::new(LlmRouter::new()),
+        llm_config: Arc::new(toml::from_str("").unwrap()),
+        subtask_auto_dispatch: true,
+        voice_config: Arc::new(Default::default()),
+        voice_runtime: Arc::new(std::sync::Mutex::new(None)),
+        workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
+        // #620: テストは暗号化を有効化しない（None＝平文フォールバック / 従来挙動）。
+        #[cfg(feature = "nostr")]
+        nostr_master_key: None,
+        default_model: "mock:test".to_string(),
+        tools_config: Arc::new(RwLock::new(opencrab_actions::tools::ToolsConfig::default())),
+        compaction_ratio: 0.5,
+        evaluator: config::EvaluatorConfig::default(),
+        skill_consolidation: config::SkillConsolidationConfig::default(),
+        category_maintenance: config::CategoryMaintenanceConfig::default(),
+        memory_organize: config::MemoryOrganizeConfig::default(),
+        memory_declare: config::MemoryDeclareConfig::default(),
+        memory_condense: config::MemoryCondenseConfig::default(),
+        loop_restart_enabled: false,
+        index_build_inflight: Arc::new(dashmap::DashMap::new()),
+        intake: Arc::new(config::IntakeConfig::default()),
+        intake_wake: Arc::new(tokio::sync::Notify::new()),
+        mcp_manager: None,
+        gateways: Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
+        #[cfg(feature = "web")]
+        web_gateway: Arc::new(opencrab_web_gateway::WebGateway::new()),
+        subtask_registries: Arc::new(subtask_registries::SubtaskRegistries::new()),
+        session_locks: Arc::new(opencrab_actions::SessionLocks::new()),
+        timed_fire_router: Arc::new(timed_fire_router),
+        progress_debounce: Arc::new(subtask_registries::ProgressDebounce::new()),
+        subtask_notifiers: Arc::new(dashmap::DashMap::new()),
+        subtask_lifecycle_notifier: Arc::new(std::sync::Mutex::new(None)),
+        default_subtask_webhook: None,
+        heartbeat_limits: config::HeartbeatLimits::default(),
+        scheduler_wake: Arc::new(tokio::sync::Notify::new()),
+        heartbeat_config_rx: disconnected_heartbeat_config_rx(
+            opencrab_core::heartbeat::HeartbeatConfig::default(),
+        ),
+    }
 }
 
 pub fn create_router(state: AppState) -> Router {
-    Router::new()
+    #[allow(unused_mut)]
+    let mut router = Router::new()
         .route("/health", get(health_check))
+        .route("/api/health", get(api_health_check))
+        // 外部イベント受信 webhook（#454）。source ごとの共有 secret で HMAC 検証し、
+        // 受理したイベントを agent_inbox へ積む（処理は intake_process ループ）。
+        .route("/api/hooks/{source}", post(api::hooks::receive_hook))
         // エージェント管理
-        .route("/api/agents", get(api::agents::list_agents).post(api::agents::create_agent))
-        .route("/api/agents/{id}", get(api::agents::get_agent).delete(api::agents::delete_agent))
-        .route("/api/agents/{id}/soul", get(api::agents::get_soul).put(api::agents::update_soul))
-        .route("/api/agents/{id}/identity", get(api::agents::get_identity).put(api::agents::update_identity))
+        .route(
+            "/api/agents",
+            get(api::agents::list_agents).post(api::agents::create_agent),
+        )
+        .route(
+            "/api/agents/{id}",
+            get(api::agents::get_agent)
+                .put(api::agents::put_agent)
+                .patch(api::agents::patch_agent)
+                .delete(api::agents::delete_agent),
+        )
+        // オンボーディング（初回セットアップ進捗の集約）
+        .route(
+            "/api/agents/{id}/sleep-logs",
+            get(api::sleep::get_sleep_logs),
+        )
+        .route("/api/setup/status", get(api::setup::get_setup_status))
+        .route(
+            "/api/agents/{id}/skills/seed-standard",
+            post(api::setup::seed_standard_skills),
+        )
+        .route("/api/llm/model-choices", get(api::llm::model_choices))
+        // モデル単価 / コンテキスト長の登録（#412）。文脈予算の出所であり、
+        // モデルを設定する側はここに登録済みのモデルしか受け付けない。
+        .route(
+            "/api/llm/model-pricing",
+            get(api::model_pricing::list_model_pricing).put(api::model_pricing::put_model_pricing),
+        )
+        // プロバイダー設定（ダッシュボード編集 + ホットリロード）
+        .route("/api/llm/providers", get(api::providers::list_providers))
+        .route(
+            "/api/llm/providers/reload",
+            post(api::providers::reload_providers),
+        )
+        // codex 診断（サーバーが使う codex のパス/バージョン）
+        .route(
+            "/api/llm/codex/diagnostics",
+            get(api::providers::codex_diagnostics),
+        )
+        // cursor 診断（サーバーが使う cursor CLI のパス/バージョン）
+        .route(
+            "/api/llm/cursor/diagnostics",
+            get(api::providers::cursor_diagnostics),
+        )
+        // acp 診断（起動バイナリ/引数/解決パス）
+        .route(
+            "/api/llm/acp/diagnostics",
+            get(api::providers::acp_diagnostics),
+        )
+        .route(
+            "/api/llm/providers/{name}",
+            put(api::providers::update_provider),
+        )
+        .route(
+            "/api/llm/providers/{name}/override",
+            delete(api::providers::delete_provider_override),
+        )
+        .route(
+            "/api/llm/providers/{name}/test",
+            post(api::providers::test_provider_endpoint),
+        )
+        .route(
+            "/api/voice/config",
+            get(api::providers::get_voice_config)
+                .put(api::providers::update_voice_config)
+                .delete(api::providers::delete_voice_config),
+        )
         // ペルソナプリセット
-        .route("/api/agents/{id}/soul/presets", get(api::agents::list_soul_presets).post(api::agents::create_soul_preset))
-        .route("/api/agents/{id}/soul/presets/{preset_id}", axum::routing::delete(api::agents::delete_soul_preset))
-        .route("/api/agents/{id}/soul/presets/{preset_id}/apply", post(api::agents::apply_soul_preset))
+        .route(
+            "/api/agents/{id}/soul/presets",
+            get(api::agents::list_soul_presets).post(api::agents::create_soul_preset),
+        )
+        .route(
+            "/api/agents/{id}/soul/presets/{preset_id}",
+            axum::routing::delete(api::agents::delete_soul_preset),
+        )
+        .route(
+            "/api/agents/{id}/soul/presets/{preset_id}/apply",
+            post(api::agents::apply_soul_preset),
+        )
         // スキル管理
-        .route("/api/agents/{id}/skills", get(api::skills::list_skills).post(api::skills::add_skill))
-        .route("/api/agents/{id}/skills/{skill_id}/toggle", post(api::skills::toggle_skill))
+        .route(
+            "/api/agents/{id}/skills",
+            get(api::skills::list_skills).post(api::skills::add_skill),
+        )
+        .route(
+            "/api/agents/{id}/skills/{skill_id}",
+            put(api::skills::update_skill),
+        )
+        .route(
+            "/api/agents/{id}/skills/{skill_id}/toggle",
+            post(api::skills::toggle_skill),
+        )
+        .route(
+            "/api/agents/{id}/skills/{skill_id}/archive",
+            post(api::skills::archive_skill),
+        )
+        .route(
+            "/api/agents/{id}/skills/{skill_id}/restore",
+            post(api::skills::restore_skill),
+        )
+        .route(
+            "/api/agents/{id}/skills/unused",
+            get(api::skills::list_unused),
+        )
         // 記憶管理
-        .route("/api/agents/{id}/memory/curated", get(api::memory::list_curated_memory))
-        .route("/api/agents/{id}/memory/search", post(api::memory::search_memory))
-        .route("/api/agents/{id}/memory/index", get(api::agents::get_memory_index_status).post(api::agents::trigger_memory_index_build))
+        .route(
+            "/api/agents/{id}/memory/curated",
+            get(api::memory::list_curated_memory),
+        )
+        .route(
+            "/api/agents/{id}/memory/curated/{entry_id}",
+            axum::routing::delete(api::memory::delete_curated_memory_entry),
+        )
+        .route(
+            "/api/agents/{id}/memory/search",
+            post(api::memory::search_memory),
+        )
+        .route(
+            "/api/agents/{id}/memory/index",
+            get(api::agents::get_memory_index_status)
+                .post(api::agents::trigger_memory_index_build)
+                .delete(api::agents::delete_memory_index),
+        )
+        .route(
+            "/api/agents/{id}/memory/index/tree",
+            get(api::memory::get_memory_index_tree),
+        )
+        .route(
+            "/api/agents/{id}/memory/index/config",
+            put(api::agents::update_memory_index_config),
+        )
+        .route(
+            "/api/agents/{id}/memory/index/rebuild",
+            post(api::agents::rebuild_memory_index),
+        )
+        .route(
+            "/api/agents/{id}/daily-log-index/status",
+            get(api::daily_log_index::get_status),
+        )
+        .route(
+            "/api/agents/{id}/daily-log-index/rebuild",
+            post(api::daily_log_index::rebuild),
+        )
+        .route(
+            "/api/agents/{id}/daily-log-index/run",
+            post(api::daily_log_index::run),
+        )
+        .route(
+            "/api/agents/{id}/memory/index/merge",
+            post(api::agents::merge_memory_index_topics),
+        )
         // セッション管理
-        .route("/api/sessions", get(api::sessions::list_sessions).post(api::sessions::create_session))
+        .route(
+            "/api/sessions",
+            get(api::sessions::list_sessions).post(api::sessions::create_session),
+        )
         .route("/api/sessions/{id}", get(api::sessions::get_session))
-        .route("/api/sessions/{id}/messages", post(api::sessions::send_message))
-        .route("/api/sessions/{id}/logs", get(api::sessions::list_session_logs))
-        .route("/api/sessions/{id}/mentor", post(api::sessions::send_mentor_instruction))
+        .route(
+            "/api/sessions/{id}/messages",
+            post(api::sessions::send_message),
+        )
+        .route(
+            "/api/sessions/{id}/logs",
+            get(api::sessions::list_session_logs),
+        )
+        .route(
+            "/api/sessions/{id}/mentor",
+            post(api::sessions::send_mentor_instruction),
+        )
         // アナリティクス
-        .route("/api/agents/{id}/analytics", get(api::analytics::get_metrics_summary))
-        .route("/api/agents/{id}/analytics/detail", get(api::analytics::get_metrics_detail))
+        .route(
+            "/api/agents/{id}/analytics",
+            get(api::analytics::get_metrics_summary),
+        )
+        .route(
+            "/api/agents/{id}/analytics/detail",
+            get(api::analytics::get_metrics_detail),
+        )
         // ワークスペース管理
-        .route("/api/agents/{id}/workspace", get(api::workspace::list_workspace))
-        .route("/api/agents/{id}/workspace/{*path}", get(api::workspace::read_file).put(api::workspace::write_file))
+        .route(
+            "/api/agents/{id}/workspace",
+            get(api::workspace::list_workspace),
+        )
+        .route(
+            "/api/agents/{id}/workspace/{*path}",
+            get(api::workspace::read_file).put(api::workspace::write_file),
+        )
         // Discord per-agent config (always available; gateway ops require discord feature)
         .route(
             "/api/agents/{id}/discord",
             get(api::agents::get_discord_config)
                 .put(api::agents::update_discord_config)
+                .patch(api::agents::patch_discord_config)
                 .delete(api::agents::delete_discord_config),
         )
-        .route("/api/agents/{id}/discord/start", post(api::agents::start_discord_gateway))
-        .route("/api/agents/{id}/discord/stop", post(api::agents::stop_discord_gateway))
+        .route(
+            "/api/agents/{id}/discord/start",
+            post(api::agents::start_discord_gateway),
+        )
+        .route(
+            "/api/agents/{id}/discord/stop",
+            post(api::agents::stop_discord_gateway),
+        )
+        // MCP サーバ per-agent 設定
+        .route(
+            "/api/agents/{id}/mcp",
+            get(api::mcp::list_mcp_servers).put(api::mcp::put_mcp_server),
+        )
+        .route(
+            "/api/agents/{id}/mcp/{name}",
+            axum::routing::delete(api::mcp::delete_mcp_server),
+        )
+        .route(
+            "/api/agents/{id}/mcp/{name}/enabled",
+            post(api::mcp::set_mcp_enabled),
+        )
+        .route(
+            "/api/agents/{id}/mcp/{name}/test",
+            post(api::mcp::test_mcp_server),
+        )
+        // Co-Agent管理
+        .route(
+            "/api/agents/{id}/co-agents",
+            get(api::co_agents::list_co_agents).post(api::co_agents::add_co_agent),
+        )
+        .route(
+            // PATCH は #490 で撤去（可変フィールドの allowed_actions を API から外したため）。
+            "/api/agents/{id}/co-agents/{co_agent_id}",
+            axum::routing::delete(api::co_agents::delete_co_agent),
+        )
+        // チャンネル設定
+        .route(
+            "/api/agents/{id}/channel-configs",
+            get(api::channel_configs::list_channel_configs)
+                .put(api::channel_configs::upsert_channel_config),
+        )
+        .route(
+            "/api/agents/{id}/channel-configs/{channel_id}",
+            delete(api::channel_configs::delete_channel_config),
+        )
+        .route(
+            "/api/agents/{id}/trusted-users",
+            get(api::trusted_users::list_trusted_users).post(api::trusted_users::add_trusted_user),
+        )
+        .route(
+            "/api/agents/{id}/trusted-users/{user_id}",
+            axum::routing::patch(api::trusted_users::update_trusted_user)
+                .delete(api::trusted_users::delete_trusted_user),
+        )
+        // エージェントメッセージ
+        .route(
+            "/api/agents/{id}/messages",
+            post(api::agents_messages::send_agent_message),
+        )
+        // 定時実行スケジュール（#455）。ダッシュボード config API と同じ認証層の内側。
+        .route(
+            "/api/agents/{id}/schedules",
+            get(api::schedules::list_schedules).post(api::schedules::create_schedule),
+        )
+        .route(
+            "/api/schedules/{sid}",
+            patch(api::schedules::update_schedule).delete(api::schedules::delete_schedule),
+        )
+        // 許可コマンド管理
+        .route(
+            "/api/agents/{id}/allowed-commands",
+            get(api::allowed_commands::list_allowed_commands)
+                .post(api::allowed_commands::add_allowed_command),
+        )
+        .route(
+            "/api/agents/{id}/allowed-commands/{command}",
+            axum::routing::delete(api::allowed_commands::remove_allowed_command),
+        )
+        // LLMログ
+        .route(
+            "/api/agents/{id}/llm-logs",
+            get(api::llm_logs::list_llm_logs),
+        )
+        .route(
+            "/api/agents/{id}/llm-logs/stats",
+            get(api::llm_logs::llm_logs_stats),
+        )
+        // インポート
+        .route(
+            "/api/import/scan",
+            post(api::import::scan_workspace_handler),
+        )
+        .route(
+            "/api/import/execute",
+            post(api::import::execute_import_handler),
+        )
+        .route(
+            "/api/agents/{id}/import/sync/status",
+            get(api::import_sync::get_sync_status),
+        )
+        .route(
+            "/api/agents/{id}/import/sync",
+            post(api::import_sync::execute_import_sync),
+        )
+        .route(
+            "/api/agents/{id}/import/sync/history",
+            get(api::import_sync::get_import_sync_history),
+        )
+        .route(
+            "/api/system/log-level",
+            get(api::system::get_log_level_handler).patch(api::system::patch_log_level_handler),
+        );
+
+    // Nostr sub-gateway の per-agent 設定 API と、Nostr 受信 → Discord 転記先設定
+    // （#252 段階 B）。これらは Nostr の**会話ゲート**を操作する API なので nostr feature
+    // の内側に置く。外せるのは会話ゲートであって、他の管理 API（設定・ログ・一覧・
+    // ダッシュボード配信）は feature を外しても残る。
+    #[cfg(feature = "nostr")]
+    {
+        router = router.merge(nostr_routes());
+    }
+
+    // web gateway（#154）: ダッシュボードからの会話 + SSE 配送。ルート定義とハンドラは
+    // 独立クレート側にあり、ここは取り付けるだけ（#190 S4）。web の**会話ゲート**なので
+    // web feature の内側。HTTP サーバ（管理 API）本体はこれを外しても残る。
+    #[cfg(feature = "web")]
+    {
+        router = router.merge(opencrab_web_gateway::routes::<AppState>());
+    }
+
+    router
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
 
+/// Nostr sub-gateway の per-agent 設定ルート群（nostr feature 限定）。
+///
+/// `create_router` から nostr feature が有効なときだけ `.merge` される。会話ゲートを
+/// 外した構成（`--no-default-features`）ではこの 5 ルートは載らないが、それ以外の
+/// 管理 API は残る。
+#[cfg(feature = "nostr")]
+fn nostr_routes() -> Router<AppState> {
+    Router::new()
+        // Nostr sub-gateway per-agent config
+        .route(
+            "/api/agents/{id}/nostr",
+            get(api::nostr::get_nostr_config)
+                .put(api::nostr::update_nostr_config)
+                .delete(api::nostr::delete_nostr_config),
+        )
+        .route(
+            "/api/agents/{id}/nostr/generate",
+            post(api::nostr::generate_nostr_key),
+        )
+        .route(
+            "/api/agents/{id}/nostr/start",
+            post(api::nostr::start_nostr_gateway),
+        )
+        .route(
+            "/api/agents/{id}/nostr/stop",
+            post(api::nostr::stop_nostr_gateway),
+        )
+        // Nostr 受信 → Discord 転記先の per-agent 設定（issue #252 段階 B）
+        .route(
+            "/api/agents/{id}/nostr-relay",
+            get(api::nostr_relay::get_nostr_relay_config)
+                .put(api::nostr_relay::update_nostr_relay_config),
+        )
+}
+
 async fn health_check() -> &'static str {
     "ok"
+}
+
+async fn api_health_check() -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({"status": "ok"}))
+}
+
+/// transport 登録簿（#191 段階2 PR2）が、実物のマネージャを載せて期待どおり働くこと。
+///
+/// 偽実装ではなく `DiscordGatewayManager` / `NostrGatewayManager` を入れる。生成は
+/// ネットワークに出ない（実際の接続は `start` を呼んだときだけ）ので、
+/// 「本物がトレイトオブジェクトとして成立するか」をここで押さえられる。
+#[cfg(test)]
+mod gateway_registry_tests {
+    // これらの import はどのテストも discord / nostr のマネージャを組むために使う。
+    // 両 feature を外した構成（例 `--no-default-features` / web のみ）ではこのモジュールの
+    // テストが 1 つも残らないため、import も条件付きにして未使用警告を出さない。
+    #[cfg(any(feature = "discord", feature = "nostr"))]
+    use super::*;
+    #[cfg(any(feature = "discord", feature = "nostr"))]
+    use opencrab_actions::gateway_kinds;
+
+    /// state を clone しても登録簿は**同じ 1 つ**を指す。
+    ///
+    /// これが成り立たないと「共有ゲートウェイへ渡した clone からは専用ゲートウェイが
+    /// 見えない」ことになり、内部可変にして後から登録する意味が無くなる（#40 の
+    /// 二重処理防止が壊れる）。
+    #[cfg(feature = "nostr")]
+    #[test]
+    fn registry_is_shared_across_state_clones() {
+        let state = test_app_state();
+        let clone = state.clone();
+        assert!(Arc::ptr_eq(&state.gateways, &clone.gateways));
+
+        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(
+            state.clone(),
+            state.timed_fire_router.clone(),
+        ));
+        state.gateways.register(nostr);
+        assert_eq!(clone.gateways.kinds(), vec![gateway_kinds::NOSTR]);
+    }
+
+    /// 実物のマネージャを登録順どおりに載せられる（Discord → Nostr）。
+    #[cfg(all(feature = "discord", feature = "nostr"))]
+    #[test]
+    fn real_managers_register_in_startup_order() {
+        let state = test_app_state();
+        let discord = Arc::new(opencrab_discord::DiscordGatewayManager::new(
+            state.clone(),
+            state.timed_fire_router.clone(),
+        ));
+        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(
+            state.clone(),
+            state.timed_fire_router.clone(),
+        ));
+        state.gateways.register(discord);
+        state.gateways.register(nostr);
+
+        assert_eq!(
+            state.gateways.kinds(),
+            vec![gateway_kinds::DISCORD, gateway_kinds::NOSTR],
+            "登録順 = main の起動順。PR5 の走査がこの順を再現する"
+        );
+    }
+
+    /// **起動処理が実際に取る形**を実物のマネージャで再現する（#191 段階2 PR5）。
+    ///
+    /// `main` は復元位置を 2 つ持つ（Discord = 共有ゲートウェイ起動後 / Nostr = ルータ
+    /// 構築の直前）。各位置で「登録済みかつ未復元の分だけ」を走査するので、走る対象は
+    /// 移設前の `manager.restore_from_db()` と 1 対 1 になる。**1 回に畳むと Discord の
+    /// 復元が後ろへずれ、直後の heartbeat 用 HTTP クライアント取得が空振りする。**
+    ///
+    /// DB は空なので復元は 1 件も起動しない（＝実ネットワークに出ない）。ここで見たいのは
+    /// 「どのマネージャが・どの位置で・何回走査に拾われるか」。
+    #[cfg(all(feature = "discord", feature = "nostr"))]
+    #[tokio::test]
+    async fn startup_sweep_restores_each_manager_at_its_own_point() {
+        let state = test_app_state();
+
+        // 位置 1: Discord だけが登録済み。
+        let discord = Arc::new(opencrab_discord::DiscordGatewayManager::new(
+            state.clone(),
+            state.timed_fire_router.clone(),
+        ));
+        state.gateways.register(discord);
+        assert_eq!(
+            state.gateways.restore_pending().await,
+            vec![gateway_kinds::DISCORD]
+        );
+
+        // 位置 2: Nostr を登録してから走査。Discord は**もう拾わない**。
+        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(
+            state.clone(),
+            state.timed_fire_router.clone(),
+        ));
+        state.gateways.register(nostr);
+        assert_eq!(
+            state.gateways.restore_pending().await,
+            vec![gateway_kinds::NOSTR],
+            "2 度目の走査が Discord を巻き込むと、稼働中の接続を張り直してしまう"
+        );
+
+        // 復元は起動時 1 回だけ（周期的な自己修復は持たない）。
+        assert!(state.gateways.restore_pending().await.is_empty());
+    }
+
+    /// **Discord を落とした構成**では位置 1 の走査ごと消え、残る 1 回が Nostr を復元する。
+    #[cfg(all(not(feature = "discord"), feature = "nostr"))]
+    #[tokio::test]
+    async fn startup_sweep_restores_nostr_without_discord() {
+        let state = test_app_state();
+        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(
+            state.clone(),
+            state.timed_fire_router.clone(),
+        ));
+        state.gateways.register(nostr);
+
+        assert_eq!(
+            state.gateways.restore_pending().await,
+            vec![gateway_kinds::NOSTR]
+        );
+        assert!(state.gateways.restore_pending().await.is_empty());
+    }
+
+    /// 生存確認は「稼働していない / 未登録」のどちらでも false に倒れる。
+    ///
+    /// これはルーティング判定（専用ゲートウェイに任せるか、共有側が続けるか）なので、
+    /// 未登録で true に倒すと二重処理、panic させると停止する。
+    #[cfg(feature = "nostr")]
+    #[test]
+    fn is_running_falls_back_to_false() {
+        let state = test_app_state();
+        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(
+            state.clone(),
+            state.timed_fire_router.clone(),
+        ));
+        state.gateways.register(nostr);
+
+        assert!(
+            !state.gateways.is_running(gateway_kinds::NOSTR, "crab"),
+            "起動していないエージェントは false"
+        );
+        assert!(
+            !state.gateways.is_running(gateway_kinds::DISCORD, "crab"),
+            "未登録の種別も false（共有側が処理を続ける）"
+        );
+        assert!(
+            !state.gateways.is_running("mcp", "crab"),
+            "MCP は登録簿に入れない（受信を持たない）"
+        );
+    }
+
+    /// トレイト経由で起動を呼べる。設定行が無ければ `Err`（panic しない）。
+    #[cfg(feature = "nostr")]
+    #[tokio::test]
+    async fn start_through_trait_errors_without_db_config() {
+        let state = test_app_state();
+        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(
+            state.clone(),
+            state.timed_fire_router.clone(),
+        ));
+        state.gateways.register(nostr);
+
+        let gw = state.gateways.get(gateway_kinds::NOSTR).unwrap();
+        assert!(
+            gw.start("no-such-agent").await.is_err(),
+            "設定を DB から読む契約なので、行が無ければ Err"
+        );
+        // 停止と全停止は稼働ゼロでも安全に呼べる。
+        gw.stop("no-such-agent").await;
+        gw.shutdown_all().await;
+    }
+
+    /// Discord も同じ契約で扱える（`start` は DB から読み、行が無ければ `Err`）。
+    ///
+    /// ここまで来れば実ネットワークには出ない（接続は設定行があるときだけ）。
+    #[cfg(feature = "discord")]
+    #[tokio::test]
+    async fn discord_start_through_trait_errors_without_db_config() {
+        let state = test_app_state();
+        let discord = Arc::new(opencrab_discord::DiscordGatewayManager::new(
+            state.clone(),
+            state.timed_fire_router.clone(),
+        ));
+        state.gateways.register(discord);
+
+        let gw = state.gateways.get(gateway_kinds::DISCORD).unwrap();
+        let err = gw.start("no-such-agent").await.unwrap_err().to_string();
+        assert!(
+            err.contains("no-such-agent"),
+            "どのエージェントか分かること: {err}"
+        );
+        gw.stop("no-such-agent").await;
+        gw.shutdown_all().await;
+    }
+
+    // ------------------------------------------------------------------
+    // 起動条件のガード（#191 段階2 PR3）
+    //
+    // 呼び出しを登録簿経由に差し替えるにあたり、REST ハンドラが**呼び出しの手前**で
+    // 行っていた起動条件の判定を、各実装の `start` の中へ持ち上げた。ガードが効いて
+    // いないと「無効にしたはずの設定 / 空白だけの資格情報でも起動する」穴が開くので、
+    // ここで固定する。
+    //
+    // どのテストも**実ネットワークに出ない**。ガードは接続を試みる手前で弾くため、
+    // 弾けていなければ実際の接続失敗（別種のエラー）になり、`is_start_declined` の
+    // assert が落ちる。
+    // ------------------------------------------------------------------
+
+    #[cfg(feature = "discord")]
+    fn put_discord_config(state: &AppState, agent_id: &str, token: &str, enabled: bool) {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::upsert_agent_discord_config(
+            &conn,
+            &opencrab_db::queries::AgentDiscordConfigRow {
+                agent_id: agent_id.to_string(),
+                bot_token: token.to_string(),
+                owner_discord_id: "111111111111111111".to_string(),
+                enabled,
+            },
+        )
+        .unwrap();
+    }
+
+    /// **無効化された設定では起動しない。**
+    ///
+    /// 移設前は `PATCH /api/agents/{id}/discord` が
+    /// `opencrab_discord::gateway_will_start(enabled, token)` を呼び出しの手前で見ていた。
+    /// 同じ述語・同じ引数（同一の DB 行の `enabled` と `bot_token`）を `start` の中へ
+    /// 移しただけなので、判定は移設前と 1 対 1 で一致する。
+    #[cfg(feature = "discord")]
+    #[tokio::test]
+    async fn discord_start_declines_when_config_is_disabled() {
+        let state = test_app_state();
+        let discord = Arc::new(opencrab_discord::DiscordGatewayManager::new(
+            state.clone(),
+            state.timed_fire_router.clone(),
+        ));
+        state.gateways.register(discord);
+        // トークンはあるが enabled=0（「停止したはず」の設定）。
+        put_discord_config(&state, "crab", "bot-token-looks-real", false);
+
+        let gw = state.gateways.get(gateway_kinds::DISCORD).unwrap();
+        let err = gw.start("crab").await.unwrap_err();
+        assert!(
+            opencrab_actions::is_start_declined(&err),
+            "無効な設定で起動を試みている（ガードが落ちている）: {err}"
+        );
+        assert!(
+            !state.gateways.is_running(gateway_kinds::DISCORD, "crab"),
+            "弾かれたのにゲートウェイが登録されている"
+        );
+    }
+
+    /// **空白だけのトークンでは起動しない**（`gateway_will_start` は trim して判定する）。
+    #[cfg(feature = "discord")]
+    #[tokio::test]
+    async fn discord_start_declines_on_blank_token() {
+        let state = test_app_state();
+        let discord = Arc::new(opencrab_discord::DiscordGatewayManager::new(
+            state.clone(),
+            state.timed_fire_router.clone(),
+        ));
+        state.gateways.register(discord);
+        put_discord_config(&state, "crab", " \t\n", true);
+
+        let gw = state.gateways.get(gateway_kinds::DISCORD).unwrap();
+        let err = gw.start("crab").await.unwrap_err();
+        assert!(
+            opencrab_actions::is_start_declined(&err),
+            "空白だけのトークンで起動を試みている: {err}"
+        );
+        assert!(!state.gateways.is_running(gateway_kinds::DISCORD, "crab"));
+    }
+
+    /// **鍵が未設定の Nostr 設定では起動しない。**
+    ///
+    /// 移設前は `PUT /api/agents/{id}/nostr` が「鍵が無ければ 400」を呼び出しの手前で
+    /// 返していた（`POST /nostr/start` にはその判定が無く、素通りしていた）。判定を
+    /// `start_agent_gateway` の単一チョークポイントへ置き直したので、どの呼び出し口
+    /// からでも同じように弾かれる。
+    #[cfg(feature = "nostr")]
+    #[tokio::test]
+    async fn nostr_start_declines_without_secret_key() {
+        let state = test_app_state();
+        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(
+            state.clone(),
+            state.timed_fire_router.clone(),
+        ));
+        state.gateways.register(nostr);
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::upsert_agent_nostr_config(
+                &conn,
+                &opencrab_db::queries::AgentNostrConfigRow {
+                    agent_id: "agent-191-pr3".to_string(),
+                    secret_key: "  ".to_string(),
+                    relays_json: "[]".to_string(),
+                    filter_json: r#"{"authors":["npub1abc"],"keywords":[],"kinds":[1]}"#
+                        .to_string(),
+                    enabled: true,
+                },
+            )
+            .unwrap();
+        }
+
+        let gw = state.gateways.get(gateway_kinds::NOSTR).unwrap();
+        let err = gw.start("agent-191-pr3").await.unwrap_err();
+        assert!(
+            opencrab_actions::is_start_declined(&err),
+            "鍵が無いのに起動を試みている: {err}"
+        );
+        assert!(!state
+            .gateways
+            .is_running(gateway_kinds::NOSTR, "agent-191-pr3"));
+    }
+
+    /// **Nostr の `start` は DB の `enabled` を見ない。**
+    ///
+    /// ハンドラ側の方針が「起動が成功してから `enabled=true`」なので、`PUT /nostr` は
+    /// **わざと `enabled=false` の行を書いてから** `start` を呼ぶ。ここに Discord と同じ
+    /// 有効フラグのガードを足すと、その正しい経路が毎回自分のガードに弾かれて Nostr が
+    /// 二度と起動しなくなる（無効化ではなく**機能停止**）。
+    ///
+    /// `enabled=false` の行で `start` を呼び、返ってくるのが**秘密鍵の拒否**であることを
+    /// 見る。有効フラグのガードが先に弾いていればこの文言にはならないので、「`enabled=false`
+    /// を素通りして資格情報の検査まで到達している」ことが分かる。
+    ///
+    /// [#271/#278] 以前はここで「フィルタが無制限（author も keyword も無い）」の拒否文言を
+    /// 見ていた。新 nostaro では `watch` が mention-only 既定で自分宛だけを購読するため
+    /// **空フィルタは洪水ではなく最も狭い購読**で、そのガード自体が無くなった。テストの意図
+    /// （`enabled` を見ずに検査へ到達する）はそのままに、到達を確かめる対象を今も残っている
+    /// 資格情報ガードへ移した。鍵の拒否は設定ファイルを書き出す**手前**なので、実プロセスも
+    /// ファイルシステムも触らないという性質も変わらない。
+    #[cfg(feature = "nostr")]
+    #[tokio::test]
+    async fn nostr_start_does_not_look_at_the_enabled_flag() {
+        let state = test_app_state();
+        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(
+            state.clone(),
+            state.timed_fire_router.clone(),
+        ));
+        state.gateways.register(nostr);
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::upsert_agent_nostr_config(
+                &conn,
+                &opencrab_db::queries::AgentNostrConfigRow {
+                    agent_id: "agent-191-pr3".to_string(),
+                    // 空白だけの nsec = 資格情報ガードに弾かれる（起動は試みられる）。
+                    secret_key: "  ".to_string(),
+                    relays_json: "[]".to_string(),
+                    filter_json: r#"{"authors":[],"keywords":[],"kinds":[1]}"#.to_string(),
+                    // `PUT /nostr` が start を呼ぶ瞬間の状態そのもの。
+                    enabled: false,
+                },
+            )
+            .unwrap();
+        }
+
+        let gw = state.gateways.get(gateway_kinds::NOSTR).unwrap();
+        let err = gw.start("agent-191-pr3").await.unwrap_err();
+        assert!(
+            err.to_string().contains("秘密鍵"),
+            "enabled=false の行が資格情報の検査より手前で弾かれている\
+             （enabled を見るガードを足すと PUT /nostr が通らなくなる）: {err}"
+        );
+        assert!(
+            !state
+                .gateways
+                .is_running(gateway_kinds::NOSTR, "agent-191-pr3"),
+            "弾かれたのに稼働してはいけない"
+        );
+    }
 }

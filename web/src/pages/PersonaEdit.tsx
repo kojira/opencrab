@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { getAgent, updateSoul, listSoulPresets, createSoulPreset, deleteSoulPreset, applySoulPreset } from '../api/agents';
+import { getAgent, patchAgent, listSoulPresets, createSoulPreset, deleteSoulPreset, applySoulPreset } from '../api/agents';
 import type { SoulPresetDto } from '../api/types';
 
 export default function PersonaEdit() {
@@ -9,6 +9,7 @@ export default function PersonaEdit() {
   const { id } = useParams<{ id: string }>();
   const [personaName, setPersonaName] = useState('');
   const [customTraits, setCustomTraits] = useState('');
+  const [instructions, setInstructions] = useState('');
   const [initialized, setInitialized] = useState(false);
 
   // Toast
@@ -45,7 +46,8 @@ export default function PersonaEdit() {
     if (!id) return;
     getAgent(id).then((detail) => {
       setPersonaName(detail.persona_name);
-      setCustomTraits(detail.custom_traits_json || '');
+      setCustomTraits(detail.personality || '');
+      setInstructions(detail.instructions || '');
       setInitialized(true);
     });
     loadPresets();
@@ -54,12 +56,10 @@ export default function PersonaEdit() {
   const handleSave = async () => {
     if (!id) return;
     try {
-      await updateSoul(id, {
+      await patchAgent(id, {
         persona_name: personaName,
-        social_style_json: '{}',
-        personality_json: '{}',
-        thinking_style_json: '{}',
-        custom_traits_json: customTraits || null,
+        personality: customTraits || null,
+        instructions: instructions,
       });
       showToast(t('personaEdit.savedSuccess'));
     } catch (e) {
@@ -71,12 +71,10 @@ export default function PersonaEdit() {
     if (!id || !presetNameInput.trim()) return;
     setSavingPreset(true);
     try {
-      await updateSoul(id, {
+      await patchAgent(id, {
         persona_name: personaName,
-        social_style_json: '{}',
-        personality_json: '{}',
-        thinking_style_json: '{}',
-        custom_traits_json: customTraits || null,
+        personality: customTraits || null,
+        instructions: instructions,
       });
       await createSoulPreset(id, presetNameInput.trim());
       setPresetNameInput('');
@@ -100,7 +98,7 @@ export default function PersonaEdit() {
     await applySoulPreset(id, presetId);
     const detail = await getAgent(id);
     setPersonaName(detail.persona_name);
-    setCustomTraits(detail.custom_traits_json || '');
+    setCustomTraits(detail.personality || '');
     setConfirmApplyId(null);
     showToast(t('personaEdit.presetApplied'));
   };
@@ -290,6 +288,26 @@ export default function PersonaEdit() {
           placeholder={t('personaEdit.customTraitsPlaceholder')}
           value={customTraits}
           onChange={(e) => setCustomTraits(e.target.value)}
+        />
+      </div>
+
+      {/* Instructions (AGENTS.md相当) section */}
+      <div className="card-outlined mb-6">
+        <h2 className="section-title flex items-center gap-2">
+          <span className="material-symbols-outlined text-xl text-primary">
+            rule
+          </span>
+          Instructions (操作ルール / AGENTS.md相当)
+        </h2>
+        <p className="text-body-sm text-on-surface-variant mb-3">
+          NO_REPLYの使い方、安全ルール、グループチャットの振る舞い等。毎回システムプロンプトに展開されます。
+        </p>
+        <textarea
+          className="input-outlined w-full font-mono text-sm"
+          rows={16}
+          placeholder="NO_REPLYの使い方、安全ルール、グループチャットの振る舞い等"
+          value={instructions}
+          onChange={(e) => setInstructions(e.target.value)}
         />
       </div>
 

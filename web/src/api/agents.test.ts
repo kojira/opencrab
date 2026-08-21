@@ -6,6 +6,7 @@ vi.mock('./client', () => ({
     post: vi.fn(),
     put: vi.fn(),
     del: vi.fn(),
+    patch: vi.fn(),
   },
 }));
 
@@ -19,7 +20,6 @@ import {
   startDiscordGateway,
   stopDiscordGateway,
 } from './agents';
-import type { IdentityRow, SoulRow } from './types';
 
 const mockedApi = vi.mocked(api);
 
@@ -35,25 +35,21 @@ describe('getAgents', () => {
 });
 
 describe('getAgent', () => {
-  it('flattens identity + soul into AgentDetail', async () => {
-    const identity: IdentityRow = {
+  it('maps flat agent row into AgentDetail', async () => {
+    const agentRow = {
       agent_id: 'a1',
       name: 'Alice',
       job_title: 'Engineer',
       organization: 'Acme',
       image_url: 'https://example.com/alice.png',
+      persona_name: 'Curious Alice',
+      personality: '{"style":"analytical"}',
+      instructions: 'Be helpful',
+      model: 'anthropic:claude-sonnet-4-20250514',
       metadata_json: null,
     };
-    const soul: SoulRow = {
-      agent_id: 'a1',
-      persona_name: 'Curious Alice',
-      social_style_json: '{"style":"analytical"}',
-      personality_json: '{"openness":0.8}',
-      thinking_style_json: '{"primary":"logical"}',
-      custom_traits_json: null,
-    };
 
-    mockedApi.get.mockResolvedValue({ identity, soul });
+    mockedApi.get.mockResolvedValue(agentRow);
 
     const result = await getAgent('a1');
 
@@ -64,30 +60,19 @@ describe('getAgent', () => {
       organization: 'Acme',
       image_url: 'https://example.com/alice.png',
       persona_name: 'Curious Alice',
-      social_style_json: '{"style":"analytical"}',
-      personality_json: '{"openness":0.8}',
-      thinking_style_json: '{"primary":"logical"}',
-      custom_traits_json: null,
+      personality: '{"style":"analytical"}',
+      instructions: 'Be helpful',
+      model: 'anthropic:claude-sonnet-4-20250514',
+      reasoning_effort: null,
+      web_search: null,
+      metadata_json: null,
     });
   });
 
-  it('uses defaults when identity and soul are null', async () => {
-    mockedApi.get.mockResolvedValue({ identity: null, soul: null });
+  it('uses defaults when response is null', async () => {
+    mockedApi.get.mockResolvedValue(null);
 
-    const result = await getAgent('x1');
-
-    expect(result).toEqual({
-      id: 'x1',
-      name: '',
-      job_title: null,
-      organization: null,
-      image_url: null,
-      persona_name: '',
-      social_style_json: '{}',
-      personality_json: '{}',
-      thinking_style_json: '{}',
-      custom_traits_json: null,
-    });
+    await expect(getAgent('x1')).rejects.toThrow('Agent not found');
   });
 });
 

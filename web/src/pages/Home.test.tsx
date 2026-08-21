@@ -95,27 +95,33 @@ describe('Home', () => {
     expect(screen.getByText('home.title')).toBeInTheDocument();
   });
 
+  // 現在の Home はスタットバー（ラベル+コロン+数値）+ エージェント/セッション
+  // プレビューという構成。旧クイックリンク UI を前提とした期待値から更新した。
   it('displays agent and session counts after loading', async () => {
     mockedGetAgents.mockResolvedValue(fakeAgents);
     mockedGetSessions.mockResolvedValue(fakeSessions);
     renderHome();
 
     await waitFor(() => {
-      expect(screen.getByText('home.totalAgents').parentElement).toHaveTextContent('2');
+      expect(screen.getByText('home.totalAgents:').parentElement).toHaveTextContent('2');
     });
-    expect(screen.getByText('home.totalSessions').parentElement).toHaveTextContent('3');
-    expect(screen.getByText('home.activeSessions').parentElement).toHaveTextContent('2');
+    expect(screen.getByText('home.totalSessions:').parentElement).toHaveTextContent('3');
+    expect(screen.getByText('home.activeSessions:').parentElement).toHaveTextContent('2');
   });
 
-  it('renders 4 quick action links', () => {
-    mockedGetAgents.mockResolvedValue([]);
-    mockedGetSessions.mockResolvedValue([]);
+  it('renders agent preview and recent sessions after loading', async () => {
+    mockedGetAgents.mockResolvedValue(fakeAgents);
+    mockedGetSessions.mockResolvedValue(fakeSessions);
     renderHome();
 
-    expect(screen.getByText('home.agentManagement')).toBeInTheDocument();
-    expect(screen.getByText('home.sessionMonitor')).toBeInTheDocument();
-    expect(screen.getByText('home.memoryExplorer')).toBeInTheDocument();
-    expect(screen.getByText('home.analyticsMetrics')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText('Alice')).toBeInTheDocument();
+    });
+    expect(screen.getByText('Bob')).toBeInTheDocument();
+    expect(screen.getByText('agents.newAgent')).toBeInTheDocument();
+    // 直近セッションのプレビュー（SessionCard がテーマを表示する）
+    expect(screen.getByText('AI')).toBeInTheDocument();
+    expect(screen.getByText('Ethics')).toBeInTheDocument();
   });
 
   it('renders stat labels', () => {
@@ -123,8 +129,8 @@ describe('Home', () => {
     mockedGetSessions.mockResolvedValue([]);
     renderHome();
 
-    expect(screen.getByText('home.totalAgents')).toBeInTheDocument();
-    expect(screen.getByText('home.totalSessions')).toBeInTheDocument();
-    expect(screen.getByText('home.activeSessions')).toBeInTheDocument();
+    expect(screen.getByText('home.totalAgents:')).toBeInTheDocument();
+    expect(screen.getByText('home.totalSessions:')).toBeInTheDocument();
+    expect(screen.getByText('home.activeSessions:')).toBeInTheDocument();
   });
 });

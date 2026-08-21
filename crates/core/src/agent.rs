@@ -1,7 +1,5 @@
 use anyhow::{Context, Result};
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
 
 use crate::heartbeat::HeartbeatConfig;
 use crate::identity::Identity;
@@ -105,7 +103,7 @@ impl Agent {
         id: impl Into<String>,
         soul: Soul,
         identity: Identity,
-        conn: Arc<Mutex<Connection>>,
+        conn: opencrab_db::Db,
         workspace_root: impl Into<std::path::PathBuf>,
         llm_config: AgentLlmConfig,
         heartbeat: HeartbeatConfig,
@@ -133,7 +131,7 @@ impl Agent {
     /// agent with managers for memory, skills, and workspace.
     pub fn load(
         agent_id: &str,
-        conn: Arc<Mutex<Connection>>,
+        conn: opencrab_db::Db,
         workspace_root: impl Into<std::path::PathBuf>,
         llm_config: AgentLlmConfig,
         heartbeat: HeartbeatConfig,
@@ -141,31 +139,21 @@ impl Agent {
         let (soul, identity) = {
             let db = conn.lock().unwrap();
 
-            let soul_row = queries::get_soul(&db, agent_id)?
-                .with_context(|| format!("Soul not found for agent: {}", agent_id))?;
-
-            let identity_row = queries::get_identity(&db, agent_id)?
-                .with_context(|| format!("Identity not found for agent: {}", agent_id))?;
+            let row = queries::get_agent(&db, agent_id)?
+                .with_context(|| format!("Agent not found for agent: {}", agent_id))?;
 
             let soul = Soul {
-                persona_name: soul_row.persona_name,
-                social_style: serde_json::from_str(&soul_row.social_style_json)
-                    .unwrap_or_default(),
-                personality: serde_json::from_str(&soul_row.personality_json)
-                    .unwrap_or_default(),
-                thinking_style: serde_json::from_str(&soul_row.thinking_style_json)
-                    .unwrap_or_default(),
-                custom_traits: soul_row
-                    .custom_traits_json
-                    .and_then(|s| serde_json::from_str(&s).ok()),
+                persona_name: row.persona_name,
+                thinking_style: Default::default(),
+                custom_traits: row.personality.and_then(|s| serde_json::from_str(&s).ok()),
             };
 
             let identity = Identity {
-                agent_id: identity_row.agent_id,
-                name: identity_row.name,
-                job_title: identity_row.job_title,
-                organization: identity_row.organization,
-                image_url: identity_row.image_url,
+                agent_id: row.agent_id,
+                name: row.name,
+                job_title: row.job_title,
+                organization: row.organization,
+                image_url: row.image_url,
             };
 
             (soul, identity)
@@ -212,9 +200,9 @@ impl Agent {
 mod tests {
     use super::*;
 
-    fn test_conn() -> Arc<Mutex<Connection>> {
+    fn test_conn() -> opencrab_db::Db {
         let conn = opencrab_db::init_memory().unwrap();
-        Arc::new(Mutex::new(conn))
+        opencrab_db::Db::from_connection(conn)
     }
 
     #[test]
@@ -244,29 +232,23 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let conn = test_conn();
 
-        // Upsert soul and identity to the database.
         {
             let db = conn.lock().unwrap();
-            queries::upsert_soul(
+            queries::upsert_agent(
                 &db,
-                &queries::SoulRow {
-                    agent_id: "agent-1".to_string(),
-                    persona_name: "LoadedPersona".to_string(),
-                    social_style_json: serde_json::to_string(&crate::soul::SocialStyle::default()).unwrap(),
-                    personality_json: serde_json::to_string(&crate::soul::Personality::default()).unwrap(),
-                    thinking_style_json: serde_json::to_string(&crate::soul::ThinkingStyle::default()).unwrap(),
-                    custom_traits_json: None,
-                },
-            )
-            .unwrap();
-            queries::upsert_identity(
-                &db,
-                &queries::IdentityRow {
+                &queries::AgentRow {
                     agent_id: "agent-1".to_string(),
                     name: "LoadedAgent".to_string(),
                     job_title: None,
                     organization: None,
                     image_url: None,
+                    persona_name: "LoadedPersona".to_string(),
+                    personality: None,
+                    instructions: String::new(),
+                    heartbeat_instructions: String::new(),
+                    model: None,
+                    reasoning_effort: None,
+                    web_search: None,
                     metadata_json: None,
                 },
             )

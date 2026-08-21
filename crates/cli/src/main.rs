@@ -1,5 +1,4 @@
 use std::io::{self, Write};
-use std::sync::{Arc, Mutex};
 
 fn prompt(label: &str) -> String {
     print!("{}: ", label);
@@ -12,7 +11,11 @@ fn prompt(label: &str) -> String {
 /// Prompt with a default value shown in brackets.
 fn prompt_default(label: &str, default: &str) -> String {
     let val = prompt(&format!("{} [{}]", label, default));
-    if val.is_empty() { default.to_string() } else { val }
+    if val.is_empty() {
+        default.to_string()
+    } else {
+        val
+    }
 }
 
 /// Resolve a partial agent ID or name to a single agent_id.
@@ -53,9 +56,8 @@ async fn main() -> anyhow::Result<()> {
     // Load config
     let cfg = opencrab_server::config::load_config("config/default.toml")?;
 
-    // DB初期化
-    let conn = opencrab_db::init_connection(&cfg.database.path)?;
-    let db = Arc::new(Mutex::new(conn));
+    // DB初期化（コネクションプール）
+    let db = opencrab_db::Db::open(&cfg.database.path)?;
 
     // Build LLM router
     let _llm_router = opencrab_server::config::build_llm_router(&cfg.llm)?;
@@ -91,10 +93,7 @@ async fn main() -> anyhow::Result<()> {
             ["agents", "list"] => {
                 let conn = db.lock().unwrap();
                 let mut stmt = conn
-                    .prepare(
-                        "SELECT i.agent_id, i.name, COALESCE(s.persona_name, '') \
-                         FROM identity i LEFT JOIN soul s ON i.agent_id = s.agent_id",
-                    )
+                    .prepare("SELECT agent_id, name, COALESCE(persona_name, '') FROM agents")
                     .unwrap();
                 let rows = stmt
                     .query_map([], |row| {
@@ -106,11 +105,9 @@ async fn main() -> anyhow::Result<()> {
                     })
                     .unwrap();
                 let mut count = 0;
-                for row in rows {
-                    if let Ok((id, name, persona)) = row {
-                        println!("  {} - {} ({})", &id[..8], name, persona);
-                        count += 1;
-                    }
+                for (id, name, persona) in rows.flatten() {
+                    println!("  {} - {} ({})", &id[..8], name, persona);
+                    count += 1;
                 }
                 if count == 0 {
                     println!("  (no agents found)");
@@ -129,27 +126,26 @@ async fn main() -> anyhow::Result<()> {
                 let agent_id = uuid::Uuid::new_v4().to_string();
                 let conn = db.lock().unwrap();
 
-                opencrab_db::queries::upsert_identity(
+                opencrab_db::queries::upsert_agent(
                     &conn,
-                    &opencrab_db::queries::IdentityRow {
+                    &opencrab_db::queries::AgentRow {
                         agent_id: agent_id.clone(),
                         name: name.clone(),
                         job_title: None,
                         organization: None,
                         image_url: None,
+                        persona_name: if persona.is_empty() {
+                            name.clone()
+                        } else {
+                            persona
+                        },
+                        personality: None,
+                        instructions: String::new(),
+                        heartbeat_instructions: String::new(),
+                        model: None,
+                        reasoning_effort: None,
+                        web_search: None,
                         metadata_json: None,
-                    },
-                )?;
-
-                opencrab_db::queries::upsert_soul(
-                    &conn,
-                    &opencrab_db::queries::SoulRow {
-                        agent_id: agent_id.clone(),
-                        persona_name: if persona.is_empty() { name.clone() } else { persona },
-                        social_style_json: "{}".to_string(),
-                        personality_json: "{}".to_string(),
-                        thinking_style_json: "{}".to_string(),
-                        custom_traits_json: None,
                     },
                 )?;
 
@@ -160,30 +156,29 @@ async fn main() -> anyhow::Result<()> {
             ["agents", "show", query] => {
                 let conn = db.lock().unwrap();
                 if let Some(agent_id) = resolve_agent(&conn, query) {
-                    let identity = opencrab_db::queries::get_identity(&conn, &agent_id)?;
-                    let soul = opencrab_db::queries::get_soul(&conn, &agent_id)?;
+                    let agent = opencrab_db::queries::get_agent(&conn, &agent_id)?;
                     let skills = opencrab_db::queries::list_skills(&conn, &agent_id, false)?;
 
-                    if let Some(id) = identity {
-                        println!("Agent: {}", id.name);
-                        println!("  ID:           {}", id.agent_id);
-                        if let Some(ref jt) = id.job_title {
+                    if let Some(a) = agent {
+                        println!("Agent: {}", a.name);
+                        println!("  ID:           {}", a.agent_id);
+                        if let Some(ref jt) = a.job_title {
                             println!("  Job title:    {}", jt);
                         }
-                        if let Some(ref org) = id.organization {
+                        if let Some(ref org) = a.organization {
                             println!("  Organization: {}", org);
                         }
-                    }
-
-                    if let Some(s) = soul {
-                        println!("  Persona:      {}", s.persona_name);
+                        println!("  Persona:      {}", a.persona_name);
                     }
 
                     if !skills.is_empty() {
                         println!("  Skills ({}):", skills.len());
                         for sk in &skills {
                             let status = if sk.is_active { "active" } else { "inactive" };
-                            println!("    - {} [{}] (used {} times)", sk.name, status, sk.usage_count);
+                            println!(
+                                "    - {} [{}] (used {} times)",
+                                sk.name, status, sk.usage_count
+                            );
                         }
                     }
                 }
@@ -203,11 +198,13 @@ async fn main() -> anyhow::Result<()> {
                     // Read current values
                     let (cur_name, cur_persona) = {
                         let conn = db.lock().unwrap();
-                        let identity = opencrab_db::queries::get_identity(&conn, &agent_id)?;
-                        let soul = opencrab_db::queries::get_soul(&conn, &agent_id)?;
+                        let agent = opencrab_db::queries::get_agent(&conn, &agent_id)?;
                         (
-                            identity.as_ref().map(|i| i.name.clone()).unwrap_or_default(),
-                            soul.as_ref().map(|s| s.persona_name.clone()).unwrap_or_default(),
+                            agent.as_ref().map(|a| a.name.clone()).unwrap_or_default(),
+                            agent
+                                .as_ref()
+                                .map(|a| a.persona_name.clone())
+                                .unwrap_or_default(),
                         )
                     };
 
@@ -219,17 +216,11 @@ async fn main() -> anyhow::Result<()> {
 
                     let conn = db.lock().unwrap();
 
-                    // Re-read full rows to preserve other fields
-                    let identity = opencrab_db::queries::get_identity(&conn, &agent_id)?;
-                    if let Some(mut id) = identity {
-                        id.name = name.clone();
-                        opencrab_db::queries::upsert_identity(&conn, &id)?;
-                    }
-
-                    let soul = opencrab_db::queries::get_soul(&conn, &agent_id)?;
-                    if let Some(mut s) = soul {
-                        s.persona_name = persona;
-                        opencrab_db::queries::upsert_soul(&conn, &s)?;
+                    let agent = opencrab_db::queries::get_agent(&conn, &agent_id)?;
+                    if let Some(mut a) = agent {
+                        a.name = name.clone();
+                        a.persona_name = persona;
+                        opencrab_db::queries::upsert_agent(&conn, &a)?;
                     }
 
                     println!("Updated agent: {}", name);
@@ -243,8 +234,10 @@ async fn main() -> anyhow::Result<()> {
             ["agents", "delete", query] => {
                 let conn = db.lock().unwrap();
                 if let Some(agent_id) = resolve_agent(&conn, query) {
-                    let identity = opencrab_db::queries::get_identity(&conn, &agent_id)?;
-                    let name = identity.map(|i| i.name).unwrap_or_else(|| agent_id[..8].to_string());
+                    let agent = opencrab_db::queries::get_agent(&conn, &agent_id)?;
+                    let name = agent
+                        .map(|a| a.name)
+                        .unwrap_or_else(|| agent_id[..8].to_string());
                     drop(conn); // release lock for prompt
 
                     let confirm = prompt(&format!("Delete agent '{}'? (yes/no)", name));
@@ -273,10 +266,7 @@ async fn main() -> anyhow::Result<()> {
                     println!("  (no sessions found)");
                 } else {
                     for s in sessions {
-                        println!(
-                            "  {} - {} [{}] ({})",
-                            &s.id[..8], s.theme, s.status, s.mode
-                        );
+                        println!("  {} - {} [{}] ({})", &s.id[..8], s.theme, s.status, s.mode);
                     }
                 }
             }
@@ -295,9 +285,7 @@ async fn main() -> anyhow::Result<()> {
                 // List agents for participant selection
                 let agents: Vec<(String, String)> = {
                     let conn = db.lock().unwrap();
-                    let mut stmt = conn
-                        .prepare("SELECT agent_id, name FROM identity")
-                        .unwrap();
+                    let mut stmt = conn.prepare("SELECT agent_id, name FROM agents").unwrap();
                     stmt.query_map([], |row| {
                         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
                     })
@@ -316,7 +304,8 @@ async fn main() -> anyhow::Result<()> {
                     println!("  {}. {} ({})", i + 1, name, &id[..8]);
                 }
 
-                let selection = prompt_default("Select participants (comma-separated numbers)", "all");
+                let selection =
+                    prompt_default("Select participants (comma-separated numbers)", "all");
                 let participant_ids: Vec<String> = if selection == "all" {
                     agents.iter().map(|(id, _)| id.clone()).collect()
                 } else {
@@ -363,7 +352,10 @@ async fn main() -> anyhow::Result<()> {
 
             _ => {
                 if !input.is_empty() {
-                    println!("Unknown command: {}. Type 'help' for available commands.", input);
+                    println!(
+                        "Unknown command: {}. Type 'help' for available commands.",
+                        input
+                    );
                 }
             }
         }

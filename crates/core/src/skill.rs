@@ -1,7 +1,5 @@
 use anyhow::Result;
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
 use tracing;
 use uuid::Uuid;
 
@@ -25,6 +23,35 @@ pub enum SkillSource {
     },
 }
 
+/// Permission level required to use this skill.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+#[derive(Default)]
+pub enum SkillPermission {
+    CoAgent,
+    #[default]
+    Agent,
+    Owner,
+}
+
+impl SkillPermission {
+    pub fn from_db_str(s: &str) -> Self {
+        match s.trim_matches('"') {
+            "owner" => SkillPermission::Owner,
+            "co_agent" | "co-agent" | "coagent" => SkillPermission::CoAgent,
+            _ => SkillPermission::Agent,
+        }
+    }
+
+    pub fn as_db_str(&self) -> &str {
+        match self {
+            SkillPermission::Owner => "\"owner\"",
+            SkillPermission::CoAgent => "\"co_agent\"",
+            SkillPermission::Agent => "\"agent\"",
+        }
+    }
+}
+
 /// A skill that an agent can use.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Skill {
@@ -46,6 +73,8 @@ pub struct Skill {
     pub usage_count: i32,
     /// Effectiveness score (0.0 to 1.0), if evaluated.
     pub effectiveness: Option<f64>,
+    /// Permission level required to use this skill.
+    pub permission: SkillPermission,
 }
 
 /// Manages skills for an agent.
@@ -55,12 +84,12 @@ pub struct Skill {
 #[derive(Debug, Clone)]
 pub struct SkillManager {
     agent_id: String,
-    conn: Arc<Mutex<Connection>>,
+    conn: opencrab_db::Db,
 }
 
 impl SkillManager {
     /// Create a new SkillManager for the given agent.
-    pub fn new(agent_id: impl Into<String>, conn: Arc<Mutex<Connection>>) -> Self {
+    pub fn new(agent_id: impl Into<String>, conn: opencrab_db::Db) -> Self {
         Self {
             agent_id: agent_id.into(),
             conn,
@@ -99,6 +128,13 @@ impl SkillManager {
             effectiveness: None,
             usage_count: 0,
             is_active: true,
+            permission: SkillPermission::Agent.as_db_str().to_string(),
+            archived: false,
+            // #335: 実行時 caller は持たない汎用取得経路。None = legacy grandfather
+            // （read_skill では Owner 相当扱い）。
+            created_caller: None,
+            // #352: 汎用取得経路。Agent 露出は既定 false（オーナーが REST で切り替える）。
+            agent_visible: false,
         };
 
         queries::insert_skill(&conn, &row)?;
@@ -123,6 +159,7 @@ impl SkillManager {
             },
             usage_count: 0,
             effectiveness: None,
+            permission: SkillPermission::Agent,
         })
     }
 
@@ -132,6 +169,71 @@ impl SkillManager {
         queries::increment_skill_usage(&conn, skill_id)?;
         tracing::debug!(skill_id = %skill_id, "Incremented skill usage");
         Ok(())
+    }
+
+    /// Acquire a skill with deduplication (upsert behavior).
+    /// If a skill with the same name exists, update it instead of creating a new one.
+    pub fn acquire_skill_dedup(
+        &self,
+        name: &str,
+        description: &str,
+        guidance: &str,
+        source_type: &str,
+        source_context: &str,
+    ) -> Result<Skill> {
+        let conn = self.conn.lock().unwrap();
+
+        if let Some(existing) = queries::find_skill_by_name(&conn, &self.agent_id, name)? {
+            let mut updated = existing;
+            updated.description = description.to_string();
+            updated.guidance = guidance.to_string();
+            queries::update_skill(&conn, &updated)?;
+
+            tracing::info!(
+                agent_id = %self.agent_id,
+                skill_name = %name,
+                "Updated existing skill (dedup)"
+            );
+
+            Ok(Self::row_to_skill(updated))
+        } else {
+            drop(conn);
+            self.acquire_skill(name, description, guidance, source_type, source_context)
+        }
+    }
+
+    /// Archive a skill (logical deletion).
+    pub fn archive_skill(&self, skill_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        queries::archive_skill(&conn, skill_id, true)?;
+        tracing::info!(skill_id = %skill_id, "Archived skill");
+        Ok(())
+    }
+
+    /// Restore an archived skill.
+    pub fn restore_skill(&self, skill_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        queries::archive_skill(&conn, skill_id, false)?;
+        tracing::info!(skill_id = %skill_id, "Restored skill");
+        Ok(())
+    }
+
+    /// Check for unused skills and log them.
+    pub fn check_and_cleanup_duplicates(&self) -> Result<(usize, usize)> {
+        let conn = self.conn.lock().unwrap();
+
+        let unused = queries::find_unused_skills(&conn, &self.agent_id, 7)?;
+        let unused_count = unused.len();
+
+        if unused_count > 0 {
+            tracing::info!(
+                agent_id = %self.agent_id,
+                unused_count = unused_count,
+                "Found unused skills (7+ days old)"
+            );
+        }
+
+        Ok((0, unused_count))
     }
 
     /// Build a context string describing available skills for LLM prompts.
@@ -144,7 +246,10 @@ impl SkillManager {
         let mut ctx = String::from("## Available Skills\n\n");
 
         for skill in &skills {
-            ctx.push_str(&format!("### {} (used {} times)\n", skill.name, skill.usage_count));
+            ctx.push_str(&format!(
+                "### {} (used {} times)\n",
+                skill.name, skill.usage_count
+            ));
             ctx.push_str(&format!("{}\n", skill.description));
 
             if !skill.actions.is_empty() {
@@ -152,7 +257,7 @@ impl SkillManager {
             }
 
             if !skill.guidance.is_empty() {
-                ctx.push_str(&format!("Guidance: {}\n", skill.guidance));
+                ctx.push_str(&format!("Guidance:\n  {}\n", skill.guidance));
             }
 
             ctx.push('\n');
@@ -197,6 +302,7 @@ impl SkillManager {
             source,
             usage_count: row.usage_count,
             effectiveness: row.effectiveness,
+            permission: SkillPermission::from_db_str(&row.permission),
         }
     }
 }
@@ -207,14 +313,20 @@ mod tests {
 
     fn test_sm() -> SkillManager {
         let conn = opencrab_db::init_memory().unwrap();
-        SkillManager::new("agent-test", Arc::new(Mutex::new(conn)))
+        SkillManager::new("agent-test", opencrab_db::Db::from_connection(conn))
     }
 
     #[test]
     fn test_acquire_skill() {
         let sm = test_sm();
         let skill = sm
-            .acquire_skill("coding", "Write code", "Use best practices", "training", "initial setup")
+            .acquire_skill(
+                "coding",
+                "Write code",
+                "Use best practices",
+                "training",
+                "initial setup",
+            )
             .unwrap();
         assert_eq!(skill.name, "coding");
         assert_eq!(skill.description, "Write code");
@@ -231,8 +343,10 @@ mod tests {
     #[test]
     fn test_get_active_with_skills() {
         let sm = test_sm();
-        sm.acquire_skill("skill-a", "desc a", "guide a", "training", "ctx").unwrap();
-        sm.acquire_skill("skill-b", "desc b", "guide b", "training", "ctx").unwrap();
+        sm.acquire_skill("skill-a", "desc a", "guide a", "training", "ctx")
+            .unwrap();
+        sm.acquire_skill("skill-b", "desc b", "guide b", "training", "ctx")
+            .unwrap();
         let skills = sm.get_active_skills().unwrap();
         assert_eq!(skills.len(), 2);
     }

@@ -95,13 +95,7 @@ impl MetricsCollector {
     }
 
     /// Record a failed completion call.
-    pub fn record_failure(
-        &self,
-        provider: &str,
-        model: &str,
-        latency_ms: u64,
-        error: &str,
-    ) {
+    pub fn record_failure(&self, provider: &str, model: &str, latency_ms: u64, error: &str) {
         self.record(UsageRecord {
             timestamp: Utc::now(),
             provider: provider.to_string(),
@@ -178,9 +172,12 @@ impl MetricsCollector {
         stats.total_tokens += rec.total_tokens as u64;
         stats.total_latency_ms += rec.latency_ms;
 
-        if let Some(cost) =
-            pricing.calculate_cost(&rec.provider, &rec.model, rec.prompt_tokens, rec.completion_tokens)
-        {
+        if let Some(cost) = pricing.calculate_cost(
+            &rec.provider,
+            &rec.model,
+            rec.prompt_tokens,
+            rec.completion_tokens,
+        ) {
             stats.estimated_cost_usd += cost;
         }
     }

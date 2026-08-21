@@ -18,9 +18,9 @@ export default function Agents() {
 
   return (
     <div className="max-w-7xl mx-auto">
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="page-title">{t('agents.title')}</h1>
-        <Link to="/agents/new" className="btn-filled">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between mb-6 gap-3">
+        <h1 className="page-title whitespace-nowrap">{t('agents.title')}</h1>
+        <Link to="/agents/new" className="btn-filled shrink-0 self-start sm:self-auto">
           <span className="material-symbols-outlined text-xl">add</span>
           {t('agents.newAgent')}
         </Link>

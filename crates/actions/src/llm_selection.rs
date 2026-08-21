@@ -74,6 +74,7 @@ impl Action for SelectLlmAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::traits::CallerIdentity;
     use std::sync::Arc;
 
     fn test_context() -> (tempfile::TempDir, ActionContext) {
@@ -84,7 +85,7 @@ mod tests {
             agent_id: "agent-1".to_string(),
             agent_name: "Test Agent".to_string(),
             session_id: Some("session-1".to_string()),
-            db: Arc::new(std::sync::Mutex::new(conn)),
+            db: opencrab_db::Db::from_connection(conn),
             workspace: Arc::new(ws),
             last_metrics_id: Arc::new(std::sync::Mutex::new(None)),
             model_override: Arc::new(std::sync::Mutex::new(None)),
@@ -95,7 +96,7 @@ mod tests {
                 available_providers: vec!["mock".to_string()],
                 gateway: "test".to_string(),
             })),
-
+            caller: CallerIdentity::Owner,
         };
         (dir, ctx)
     }
@@ -118,7 +119,10 @@ mod tests {
 
         assert!(result.success);
         assert_eq!(result.data.as_ref().unwrap()["switched"], true);
-        assert_eq!(result.data.as_ref().unwrap()["selected"], "openai:gpt-4o-mini");
+        assert_eq!(
+            result.data.as_ref().unwrap()["selected"],
+            "openai:gpt-4o-mini"
+        );
 
         // Verify model_override was updated.
         let override_val = ctx.model_override.lock().unwrap();

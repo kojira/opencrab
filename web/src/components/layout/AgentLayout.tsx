@@ -8,8 +8,14 @@ import ConfirmDialog from '../ui/ConfirmDialog';
 const tabs = [
   { key: 'overview', path: '', icon: 'info', labelKey: 'agentNav.overview' },
   { key: 'skills', path: '/skills', icon: 'psychology', labelKey: 'agentNav.skills' },
+  { key: 'sleep', path: '/sleep', icon: 'bedtime', labelKey: 'agentNav.sleep' },
   { key: 'memory', path: '/memory', icon: 'memory', labelKey: 'agentNav.memory' },
   { key: 'sessions', path: '/sessions', icon: 'forum', labelKey: 'agentNav.sessions' },
+  { key: 'co-agents', path: '/co-agents', icon: 'group', labelKey: 'agentNav.coAgents' },
+  { key: 'trusted-users', path: '/trusted-users', icon: 'shield_person', labelKey: 'agentNav.trustedUsers' },
+  { key: 'channels', path: '/channels', icon: 'tag', labelKey: 'agentNav.channels' },
+  { key: 'allowed-commands', path: '/allowed-commands', icon: 'terminal', labelKey: 'agentNav.allowedCommands' },
+  { key: 'llm-logs', path: '/llm-logs', icon: 'receipt_long', labelKey: 'agentNav.llmLogs' },
   { key: 'analytics', path: '/analytics', icon: 'analytics', labelKey: 'agentNav.analytics' },
 ];
 
@@ -76,32 +82,30 @@ export default function AgentLayout() {
       </nav>
 
       {/* Agent header card */}
-      <div className="card-elevated mb-6">
-        <div className="flex items-center gap-5">
-          <div className="w-16 h-16 rounded-full bg-primary-container flex items-center justify-center">
-            <span className="text-headline-sm text-primary-on-container font-semibold">
+      <div className="rounded-xl bg-gradient-to-r from-primary-container/60 to-surface-container border border-primary/20 p-3 mb-4 shadow-elevation-1">
+        <div className="flex items-center gap-1.5">
+          <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-primary to-primary/70 flex items-center justify-center shadow-elevation-2 shrink-0">
+            <span className="text-xs text-white font-bold">
               {agent.name.charAt(0) || '?'}
             </span>
           </div>
           <div className="flex-1 min-w-0">
-            <h1 className="text-headline-sm text-on-surface font-medium truncate">
+            <h1 className="text-sm font-semibold text-on-surface truncate">
               {agent.name}
             </h1>
-            <p className="text-body-lg text-on-surface-variant">
+            <p className="text-xs text-on-surface-variant truncate">
               {agent.persona_name}
             </p>
           </div>
-          <div className="flex items-center gap-2">
-            <Link to={`/agents/${id}/edit`} className="btn-tonal">
+          <div className="flex items-center gap-1 shrink-0">
+            <Link to={`/agents/${id}/edit`} className="btn-tonal p-1.5">
               <span className="material-symbols-outlined text-xl">edit</span>
-              {t('common.edit')}
             </Link>
             <button
-              className="btn-outlined border-error text-error hover:bg-error-container/30"
+              className="btn-outlined border-error text-error hover:bg-error-container/30 p-1.5"
               onClick={() => setShowDeleteConfirm(true)}
             >
               <span className="material-symbols-outlined text-xl">delete</span>
-              {t('common.delete')}
             </button>
           </div>
         </div>
@@ -116,9 +120,10 @@ export default function AgentLayout() {
         />
       )}
 
-      {/* Tab navigation */}
+      {/* Tab navigation。横スクロール+フェードだと後半のタブ（LLMログ・分析等）が
+          デスクトップ幅でも隠れて存在に気づけないため、折り返して全タブを常時表示する。 */}
       {!isEditRoute && (
-        <div className="flex border-b border-outline-variant mb-6 gap-1">
+        <div className="flex flex-wrap mb-6 gap-0.5 bg-surface-container-high rounded-xl p-1">
           {tabs.map((tab) => {
             const tabPath = `${basePath}${tab.path}`;
             const active =
@@ -129,14 +134,15 @@ export default function AgentLayout() {
               <Link
                 key={tab.key}
                 to={tabPath}
-                className={`flex items-center gap-1.5 px-4 py-3 text-label-lg border-b-2 transition-colors ${
+                title={t(tab.labelKey)}
+                className={`flex flex-col sm:flex-row items-center gap-0.5 sm:gap-1.5 px-2 sm:px-3 py-2 text-label-sm sm:text-label-lg rounded-lg transition-all duration-200 whitespace-nowrap ${
                   active
-                    ? 'border-primary text-primary'
-                    : 'border-transparent text-on-surface-variant hover:text-on-surface hover:bg-surface-container'
+                    ? 'bg-surface-container shadow-elevation-1 text-primary font-semibold'
+                    : 'text-on-surface-variant hover:text-on-surface hover:bg-surface-container/60'
                 }`}
               >
-                <span className="material-symbols-outlined text-lg">{tab.icon}</span>
-                {t(tab.labelKey)}
+                <span className="material-symbols-outlined text-xl">{tab.icon}</span>
+                <span className="hidden sm:inline">{t(tab.labelKey)}</span>
               </Link>
             );
           })}

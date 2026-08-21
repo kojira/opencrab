@@ -135,7 +135,7 @@ export default function Workspace() {
       <div className="flex items-center gap-2 text-body-md text-on-surface-variant mb-6">
         <span className="material-symbols-outlined text-lg">smart_toy</span>
         <span>{t('workspace.agent')} </span>
-        <span className="font-mono text-on-surface">{agentId}</span>
+        <span className="font-mono text-xs text-on-surface" title={agentId ?? ''}>{agentId ? agentId.slice(0, 8) + '...' : ''}</span>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

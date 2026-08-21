@@ -1,0 +1,4 @@
+# ビルド高速化: 遅い GNU ld ではなく lld でリンクする。
+# lld は各バイナリのリンク時間を大幅に短縮する（多クレート/テストバイナリで顕著）。
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]

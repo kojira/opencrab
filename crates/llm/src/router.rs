@@ -3,11 +3,17 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use futures::stream::BoxStream;
+use tokio::time::Duration;
 use tracing::{debug, info, warn};
 
 use crate::message::{ChatRequest, ChatResponse, ChatStreamDelta};
 use crate::metrics::MetricsCollector;
 use crate::traits::LlmProvider;
+
+/// Maximum number of retry attempts per provider.
+const MAX_RETRIES: u32 = 3;
+/// Base delay for exponential backoff (doubles each retry: 1s, 2s, 4s).
+const BACKOFF_BASE_MS: u64 = 1000;
 
 /// LLM Router for dynamic provider switching with fallback chains.
 ///
@@ -36,11 +42,29 @@ impl LlmRouter {
         }
     }
 
-    /// Register a provider under its name.
-    pub fn add_provider(&mut self, provider: Arc<dyn LlmProvider>) {
-        let name = provider.name().to_string();
+    /// Register a provider under an explicit routing name.
+    ///
+    /// The `name` given here — **not** `provider.name()` — is the key that
+    /// `provider:model` specs resolve against. Keeping the routing key at this
+    /// single caller-supplied assignment point is what stops it from silently
+    /// diverging from the config section key: the router never reads
+    /// `provider.name()` to decide routing, so the name a caller registers under
+    /// and the name a spec resolves to are the same string by construction.
+    /// `provider.name()` is only a display label for telemetry.
+    pub fn register_provider(&mut self, name: impl Into<String>, provider: Arc<dyn LlmProvider>) {
+        let name = name.into();
         info!(provider = %name, "Registered LLM provider");
         self.providers.insert(name, provider);
+    }
+
+    /// Register a provider under its own reported [`LlmProvider::name`].
+    ///
+    /// Convenience for callers (mostly tests) that want the provider's
+    /// self-reported name as the routing key. Production wiring uses
+    /// [`Self::register_provider`] with the config section key instead.
+    pub fn add_provider(&mut self, provider: Arc<dyn LlmProvider>) {
+        let name = provider.name().to_string();
+        self.register_provider(name, provider);
     }
 
     /// Set the default provider name.
@@ -108,6 +132,23 @@ impl LlmRouter {
         }
     }
 
+    /// #676: この `model`（alias / `provider:model`）を捌くプロバイダが `max_tokens`
+    /// を backend へ送るか。出力上限のモデル登録を要求すべきか（＝送るなら要求）の判断に使う。
+    ///
+    /// 解決先のプロバイダ自身の能力宣言（[`LlmProvider::sends_max_output_tokens`]）を返す。
+    /// core 側で provider 名や type 文字列を突き合わせない（条件1）。解決失敗 / 未登録
+    /// プロバイダは **`true`（送る＝登録必須側）** に倒す（新規や未知が黙って素通りしない）。
+    pub fn sends_max_output_tokens(&self, model_or_alias: &str) -> bool {
+        match self.resolve_model(model_or_alias) {
+            Ok((provider_name, _)) => self
+                .providers
+                .get(&provider_name)
+                .map(|p| p.sends_max_output_tokens())
+                .unwrap_or(true),
+            Err(_) => true,
+        }
+    }
+
     fn parse_provider_model(&self, s: &str) -> Result<(String, String)> {
         let parts: Vec<&str> = s.splitn(2, ':').collect();
         if parts.len() != 2 {
@@ -128,43 +169,34 @@ impl LlmRouter {
 
         debug!(provider = %provider_name, model = %request.model, "Routing chat completion");
 
-        // Try the resolved provider first
+        // 試した全プロバイダのエラーを保持する。last_error だけだと、primary
+        // （例: codex）が失敗して fallback（例: ollama）も失敗したとき、最後の
+        // fallback のエラーで primary のエラーが上書きされて消える。原因究明に
+        // 必要なのは大抵 primary のエラーなので、全て残して要約文へ畳み込む。
+        // 型付き LlmError の downcast（#35）は最後のエラーを chain の根に残して生かす。
+        let mut errors: Vec<(String, anyhow::Error)> = Vec::new();
+
+        // Try the resolved provider first (with retries)
         if let Some(provider) = self.providers.get(&provider_name) {
-            let start = std::time::Instant::now();
-            match provider.chat_completion(request.clone()).await {
-                Ok(response) => {
-                    if let Some(ref metrics) = self.metrics {
-                        metrics.record_success(
-                            &provider_name,
-                            &response.model,
-                            response.usage.prompt_tokens,
-                            response.usage.completion_tokens,
-                            start.elapsed().as_millis() as u64,
-                        );
-                    }
-                    return Ok(response);
-                }
+            match self
+                .try_provider_with_retry(provider, &provider_name, &request)
+                .await
+            {
+                Ok(response) => return Ok(response),
                 Err(e) => {
                     warn!(
                         provider = %provider_name,
-                        error = %e,
-                        "Primary provider failed, trying fallback chain"
+                        error = format!("{e:#}"),
+                        "Primary provider failed after {MAX_RETRIES} attempts, trying fallback chain"
                     );
-                    if let Some(ref metrics) = self.metrics {
-                        metrics.record_failure(
-                            &provider_name,
-                            &request.model,
-                            start.elapsed().as_millis() as u64,
-                            &e.to_string(),
-                        );
-                    }
+                    errors.push((provider_name.clone(), e));
                 }
             }
         } else {
             warn!(provider = %provider_name, "Provider not found, trying fallback chain");
         }
 
-        // Try fallback chain
+        // Try fallback chain (each with retries)
         for fallback_name in &self.fallback_chain {
             if fallback_name == &provider_name {
                 continue; // Skip the provider we already tried
@@ -172,46 +204,52 @@ impl LlmRouter {
 
             if let Some(provider) = self.providers.get(fallback_name) {
                 debug!(provider = %fallback_name, "Trying fallback provider");
-                let start = std::time::Instant::now();
-                match provider.chat_completion(request.clone()).await {
+                match self
+                    .try_provider_with_retry(provider, fallback_name, &request)
+                    .await
+                {
                     Ok(response) => {
                         info!(provider = %fallback_name, "Fallback provider succeeded");
-                        if let Some(ref metrics) = self.metrics {
-                            metrics.record_success(
-                                fallback_name,
-                                &response.model,
-                                response.usage.prompt_tokens,
-                                response.usage.completion_tokens,
-                                start.elapsed().as_millis() as u64,
-                            );
-                        }
                         return Ok(response);
                     }
                     Err(e) => {
                         warn!(
                             provider = %fallback_name,
-                            error = %e,
-                            "Fallback provider failed"
+                            error = format!("{e:#}"),
+                            "Fallback provider failed after {MAX_RETRIES} attempts"
                         );
-                        if let Some(ref metrics) = self.metrics {
-                            metrics.record_failure(
-                                fallback_name,
-                                &request.model,
-                                start.elapsed().as_millis() as u64,
-                                &e.to_string(),
-                            );
-                        }
+                        errors.push((fallback_name.clone(), e));
                     }
                 }
             }
         }
 
-        anyhow::bail!(
-            "All providers failed for model '{}'. Tried: {} + fallback chain {:?}",
-            request.model,
-            provider_name,
-            self.fallback_chain
-        )
+        // 各プロバイダの完全なエラーチェーン（{:#}）を要約文へ畳み込む。こうすると
+        // 表示側が Display（{})でも全プロバイダの原因が見え、生エラーが消えない。
+        let detail = errors
+            .iter()
+            .map(|(name, e)| format!("  [{name}] {e:#}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let summary = if errors.is_empty() {
+            format!(
+                "No providers available for model '{}'. Resolved provider: {}, fallback chain: {:?}",
+                request.model, provider_name, self.fallback_chain
+            )
+        } else {
+            format!(
+                "All providers failed for model '{}' ({} tried):\n{}",
+                request.model,
+                errors.len(),
+                detail
+            )
+        };
+        // 最後のエラーを chain の根に残す（型付き LlmError の downcast を生かす — #35）。
+        // 要約文には全プロバイダのエラーが既に含まれる。
+        Err(match errors.pop() {
+            Some((_, e)) => e.context(summary),
+            None => anyhow::anyhow!(summary),
+        })
     }
 
     /// Route a streaming chat completion request.
@@ -224,28 +262,37 @@ impl LlmRouter {
 
         debug!(provider = %provider_name, model = %request.model, "Routing streaming chat completion");
 
-        // Try resolved provider first
+        let mut last_error: Option<anyhow::Error> = None;
+
+        // Try resolved provider first (with retries)
         if let Some(provider) = self.providers.get(&provider_name) {
-            match provider.chat_completion_stream(request.clone()).await {
+            match self
+                .try_provider_stream_with_retry(provider, &provider_name, &request)
+                .await
+            {
                 Ok(stream) => return Ok(stream),
                 Err(e) => {
                     warn!(
                         provider = %provider_name,
                         error = %e,
-                        "Primary provider stream failed, trying fallback chain"
+                        "Primary provider stream failed after {MAX_RETRIES} attempts, trying fallback chain"
                     );
+                    last_error = Some(e);
                 }
             }
         }
 
-        // Try fallback chain
+        // Try fallback chain (each with retries)
         for fallback_name in &self.fallback_chain {
             if fallback_name == &provider_name {
                 continue;
             }
 
             if let Some(provider) = self.providers.get(fallback_name) {
-                match provider.chat_completion_stream(request.clone()).await {
+                match self
+                    .try_provider_stream_with_retry(provider, fallback_name, &request)
+                    .await
+                {
                     Ok(stream) => {
                         info!(provider = %fallback_name, "Fallback provider stream succeeded");
                         return Ok(stream);
@@ -254,19 +301,155 @@ impl LlmRouter {
                         warn!(
                             provider = %fallback_name,
                             error = %e,
-                            "Fallback provider stream failed"
+                            "Fallback provider stream failed after {MAX_RETRIES} attempts"
                         );
+                        last_error = Some(e);
                     }
                 }
             }
         }
 
-        anyhow::bail!(
+        let summary = format!(
             "All providers failed for streaming model '{}'. Tried: {} + fallback chain {:?}",
-            request.model,
-            provider_name,
-            self.fallback_chain
-        )
+            request.model, provider_name, self.fallback_chain
+        );
+        Err(match last_error {
+            Some(e) => e.context(summary),
+            None => anyhow::anyhow!(summary),
+        })
+    }
+
+    /// Returns true if the error represents a non-retryable client-side HTTP error.
+    ///
+    /// Retry policy:
+    ///   - Retryable:     429 (rate-limit), 5xx (transient server errors),
+    ///     ステータス不明のエラー（ネットワーク・サブプロセス等）
+    ///   - Non-retryable: other 4xx (permanent client errors — retrying won't help)
+    ///
+    /// 分類は型付き [`LlmError`] の downcast で行う（anyhow は context チェーンを
+    /// 遡って downcast する）。Display 文字列の部分一致には依存しない（#35）。
+    fn is_non_retryable_error(error: &anyhow::Error) -> bool {
+        match error.downcast_ref::<crate::LlmError>() {
+            Some(llm_error) => llm_error.is_non_retryable(),
+            // ステータスを運ばないエラーは retryable（従来挙動を維持）
+            None => false,
+        }
+    }
+
+    /// Try a provider with exponential backoff retry (up to MAX_RETRIES attempts).
+    ///
+    /// Non-retryable 4xx errors are returned immediately without further attempts.
+    async fn try_provider_with_retry(
+        &self,
+        provider: &Arc<dyn LlmProvider>,
+        provider_name: &str,
+        request: &ChatRequest,
+    ) -> Result<ChatResponse> {
+        let mut last_error = None;
+
+        for attempt in 0..MAX_RETRIES {
+            if attempt > 0 {
+                let delay = Duration::from_millis(BACKOFF_BASE_MS * 2u64.pow(attempt - 1));
+                warn!(
+                    provider = %provider_name,
+                    attempt = attempt + 1,
+                    delay_ms = delay.as_millis() as u64,
+                    "Retrying after backoff"
+                );
+                tokio::time::sleep(delay).await;
+            }
+
+            let start = std::time::Instant::now();
+            match provider.chat_completion(request.clone()).await {
+                Ok(response) => {
+                    if let Some(ref metrics) = self.metrics {
+                        metrics.record_success(
+                            provider_name,
+                            &response.model,
+                            response.usage.prompt_tokens,
+                            response.usage.completion_tokens,
+                            start.elapsed().as_millis() as u64,
+                        );
+                    }
+                    return Ok(response);
+                }
+                Err(e) => {
+                    if let Some(ref metrics) = self.metrics {
+                        metrics.record_failure(
+                            provider_name,
+                            &request.model,
+                            start.elapsed().as_millis() as u64,
+                            &e.to_string(),
+                        );
+                    }
+                    warn!(
+                        provider = %provider_name,
+                        attempt = attempt + 1,
+                        error = %e,
+                        "Provider attempt failed"
+                    );
+                    if Self::is_non_retryable_error(&e) {
+                        warn!(
+                            provider = %provider_name,
+                            error = %e,
+                            "Non-retryable client error (4xx), aborting retry"
+                        );
+                        return Err(e);
+                    }
+                    last_error = Some(e);
+                }
+            }
+        }
+
+        Err(last_error.unwrap())
+    }
+
+    /// Try a streaming provider with exponential backoff retry (up to MAX_RETRIES attempts).
+    ///
+    /// Non-retryable 4xx errors are returned immediately without further attempts.
+    async fn try_provider_stream_with_retry(
+        &self,
+        provider: &Arc<dyn LlmProvider>,
+        provider_name: &str,
+        request: &ChatRequest,
+    ) -> Result<BoxStream<'static, Result<ChatStreamDelta>>> {
+        let mut last_error = None;
+
+        for attempt in 0..MAX_RETRIES {
+            if attempt > 0 {
+                let delay = Duration::from_millis(BACKOFF_BASE_MS * 2u64.pow(attempt - 1));
+                warn!(
+                    provider = %provider_name,
+                    attempt = attempt + 1,
+                    delay_ms = delay.as_millis() as u64,
+                    "Retrying stream after backoff"
+                );
+                tokio::time::sleep(delay).await;
+            }
+
+            match provider.chat_completion_stream(request.clone()).await {
+                Ok(stream) => return Ok(stream),
+                Err(e) => {
+                    warn!(
+                        provider = %provider_name,
+                        attempt = attempt + 1,
+                        error = %e,
+                        "Provider stream attempt failed"
+                    );
+                    if Self::is_non_retryable_error(&e) {
+                        warn!(
+                            provider = %provider_name,
+                            error = %e,
+                            "Non-retryable client error (4xx), aborting stream retry"
+                        );
+                        return Err(e);
+                    }
+                    last_error = Some(e);
+                }
+            }
+        }
+
+        Err(last_error.unwrap())
     }
 
     /// Run health checks on all registered providers.
@@ -342,10 +525,52 @@ mod tests {
                     prompt_tokens: 10,
                     completion_tokens: 5,
                     total_tokens: 15,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
                 },
                 created: 0,
             })
         }
+    }
+
+    /// 常に型付き 400 を返すモック（非リトライ分類とエラー伝播の検証用）。
+    struct Http400Provider;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for Http400Provider {
+        fn name(&self) -> &str {
+            "http400"
+        }
+        async fn available_models(&self) -> anyhow::Result<Vec<crate::traits::ModelInfo>> {
+            Ok(vec![])
+        }
+        async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+            Err(crate::error::api_error(
+                "Mock",
+                reqwest::StatusCode::BAD_REQUEST,
+                "context length exceeded",
+            ))
+        }
+    }
+
+    /// フォールバック枯渇時に最後のプロバイダエラー（型付き LlmError）が
+    /// 汎用文字列に握りつぶされず downcast 可能なまま返ること（#35 の end-to-end）。
+    #[tokio::test]
+    async fn test_exhausted_router_error_preserves_typed_status() {
+        let mut router = LlmRouter::new();
+        router.add_provider(Arc::new(Http400Provider));
+        router.set_default_provider("http400");
+
+        let request = ChatRequest::new("http400:some-model", vec![Message::user("hello")]);
+        let err = router.chat_completion(request).await.unwrap_err();
+
+        // サマリ context は付くが、根の LlmError は downcast で取り出せる
+        assert!(err.to_string().contains("All providers failed"));
+        let llm = err
+            .downcast_ref::<crate::LlmError>()
+            .expect("typed error must survive router exhaustion");
+        assert_eq!(llm.status(), Some(400));
+        assert!(llm.is_non_retryable());
     }
 
     #[test]
@@ -421,6 +646,31 @@ mod tests {
         assert!(response.is_err());
     }
 
+    /// primary と fallback の両方が失敗したとき、集約エラーに**両方**のプロバイダの
+    /// エラーが残ること（last_error だけ残すと primary=codex の原因が消えていた）。
+    #[tokio::test]
+    async fn test_aggregated_error_keeps_all_provider_errors() {
+        let mut router = LlmRouter::new();
+        router.add_provider(Arc::new(MockProvider::new("primary", true)));
+        router.add_provider(Arc::new(MockProvider::new("fallback", true)));
+        router.set_default_provider("primary");
+        router.set_fallback_chain(vec!["fallback".to_string()]);
+
+        let request = ChatRequest::new("some-model", vec![Message::user("hello")]);
+        let err = router.chat_completion(request).await.unwrap_err();
+        // Display（{})だけでも両プロバイダの原因が見える
+        let shown = format!("{err}");
+        assert!(
+            shown.contains("[primary]"),
+            "primary エラーが消えている: {shown}"
+        );
+        assert!(
+            shown.contains("[fallback]"),
+            "fallback エラーが消えている: {shown}"
+        );
+        assert!(shown.contains("2 tried"), "{shown}");
+    }
+
     #[tokio::test]
     async fn test_skip_already_tried() {
         let mut router = LlmRouter::new();
@@ -432,6 +682,38 @@ mod tests {
         let request = ChatRequest::new("some-model", vec![Message::user("hello")]);
         let response = router.chat_completion(request).await;
         assert!(response.is_err());
+    }
+
+    #[test]
+    fn test_is_non_retryable_error_classifies_typed_errors() {
+        use crate::error::api_error;
+        use reqwest::StatusCode;
+
+        // 4xx（429以外）は non-retryable
+        let e400 = api_error("OpenAI", StatusCode::BAD_REQUEST, "bad param");
+        assert!(LlmRouter::is_non_retryable_error(&e400));
+        let e401 = api_error("Anthropic", StatusCode::UNAUTHORIZED, "invalid key");
+        assert!(LlmRouter::is_non_retryable_error(&e401));
+
+        // 429 はリトライ対象
+        let e429 = api_error("OpenAI", StatusCode::TOO_MANY_REQUESTS, "slow down");
+        assert!(!LlmRouter::is_non_retryable_error(&e429));
+
+        // 5xx はリトライ対象
+        let e500 = api_error("OpenAI", StatusCode::INTERNAL_SERVER_ERROR, "oops");
+        assert!(!LlmRouter::is_non_retryable_error(&e500));
+
+        // context で包まれても downcast で分類できる（anyhow はチェーンを遡る）
+        let wrapped = api_error("Gemini", StatusCode::FORBIDDEN, "denied")
+            .context("while calling chat_completion");
+        assert!(LlmRouter::is_non_retryable_error(&wrapped));
+
+        // 型付きでないエラー（ネットワーク・サブプロセス等）はリトライ対象
+        let enet = anyhow::anyhow!("connection refused");
+        assert!(!LlmRouter::is_non_retryable_error(&enet));
+        // 旧形式の文字列だけを持つエラーも（もう文字列は見ないので）リトライ対象側に落ちる
+        let legacy = anyhow::anyhow!("OpenAI API error (400 Bad Request): bad param");
+        assert!(!LlmRouter::is_non_retryable_error(&legacy));
     }
 
     #[test]

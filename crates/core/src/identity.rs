@@ -17,10 +17,7 @@ pub struct Identity {
 
 impl Identity {
     /// Create a new Identity with the given agent_id and name.
-    pub fn new(
-        agent_id: impl Into<String>,
-        name: impl Into<String>,
-    ) -> Self {
+    pub fn new(agent_id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             agent_id: agent_id.into(),
             name: name.into(),
@@ -34,7 +31,7 @@ impl Identity {
     pub fn build_context(&self) -> String {
         let mut ctx = String::new();
 
-        ctx.push_str(&format!("## Identity\n\n"));
+        ctx.push_str("## Identity\n\n");
         ctx.push_str(&format!("- Name: {}\n", self.name));
 
         if let Some(ref title) = self.job_title {

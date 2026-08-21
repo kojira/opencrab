@@ -9,21 +9,54 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use opencrab_actions::bridge::BridgedExecutor;
 use opencrab_actions::dispatcher::ActionDispatcher;
-use opencrab_actions::traits::ActionContext;
-use opencrab_core::{
-    ChatRequestSimple, ChatResponseSimple, LlmClient, SkillEngine, ToolCall,
-};
+use opencrab_actions::traits::{ActionContext, CallerIdentity};
+use opencrab_core::{ChatRequest, ChatResponse, LlmClient, SkillEngine, ToolCall};
+use opencrab_llm_types::{Choice, FunctionCall, Message, MessageContent, Role, Usage};
+
+/// Build a canonical tool call with JSON arguments.
+fn tc(id: &str, name: &str, args: serde_json::Value) -> ToolCall {
+    ToolCall {
+        id: id.to_string(),
+        call_type: "function".to_string(),
+        function: FunctionCall {
+            name: name.to_string(),
+            arguments: serde_json::to_string(&args).unwrap(),
+        },
+    }
+}
+
+/// Build a single-choice ChatResponse with optional text and tool calls.
+fn resp(text: Option<String>, calls: Vec<ToolCall>) -> ChatResponse {
+    ChatResponse {
+        id: String::new(),
+        model: String::new(),
+        choices: vec![Choice {
+            index: 0,
+            message: Message {
+                role: Role::Assistant,
+                content: text.map(MessageContent::Text),
+                name: None,
+                function_call: None,
+                tool_calls: if calls.is_empty() { None } else { Some(calls) },
+                tool_call_id: None,
+            },
+            finish_reason: None,
+        }],
+        usage: Usage::default(),
+        created: 0,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // MockLlm — returns pre-queued responses in order
 // ---------------------------------------------------------------------------
 
 struct MockLlm {
-    responses: Mutex<Vec<ChatResponseSimple>>,
+    responses: Mutex<Vec<ChatResponse>>,
 }
 
 impl MockLlm {
-    fn new(responses: Vec<ChatResponseSimple>) -> Self {
+    fn new(responses: Vec<ChatResponse>) -> Self {
         Self {
             responses: Mutex::new(responses),
         }
@@ -32,7 +65,7 @@ impl MockLlm {
 
 #[async_trait]
 impl LlmClient for MockLlm {
-    async fn chat(&self, _req: ChatRequestSimple) -> anyhow::Result<ChatResponseSimple> {
+    async fn chat(&self, _req: ChatRequest) -> anyhow::Result<ChatResponse> {
         let mut rs = self.responses.lock().unwrap();
         if rs.is_empty() {
             anyhow::bail!("MockLlm: no more responses");
@@ -51,10 +84,11 @@ fn setup() -> (tempfile::TempDir, BridgedExecutor) {
     let ws = opencrab_core::workspace::Workspace::from_root(dir.path()).unwrap();
 
     let ctx = ActionContext {
+        caller: CallerIdentity::Owner,
         agent_id: "agent-1".to_string(),
         agent_name: "Test Agent".to_string(),
         session_id: Some("session-1".to_string()),
-        db: Arc::new(Mutex::new(conn)),
+        db: opencrab_db::Db::from_connection(conn),
         workspace: Arc::new(ws),
         last_metrics_id: Arc::new(Mutex::new(None)),
         model_override: Arc::new(Mutex::new(None)),
@@ -65,14 +99,13 @@ fn setup() -> (tempfile::TempDir, BridgedExecutor) {
             available_providers: vec!["mock".to_string()],
             gateway: "test".to_string(),
         })),
-
     };
 
     let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx);
     (dir, executor)
 }
 
-fn setup_with_data() -> (tempfile::TempDir, BridgedExecutor, Arc<Mutex<rusqlite::Connection>>) {
+fn setup_with_data() -> (tempfile::TempDir, BridgedExecutor, opencrab_db::Db) {
     let conn = opencrab_db::init_memory().unwrap();
 
     // Seed a session log so search_my_history can find it
@@ -85,18 +118,20 @@ fn setup_with_data() -> (tempfile::TempDir, BridgedExecutor, Arc<Mutex<rusqlite:
         speaker_id: Some("agent-1".to_string()),
         turn_number: Some(1),
         metadata_json: None,
+        created_at: None,
     };
     opencrab_db::queries::insert_session_log(&conn, &log).unwrap();
 
-    let db = Arc::new(Mutex::new(conn));
+    let db = opencrab_db::Db::from_connection(conn);
     let dir = tempfile::TempDir::new().unwrap();
     let ws = opencrab_core::workspace::Workspace::from_root(dir.path()).unwrap();
 
     let ctx = ActionContext {
+        caller: CallerIdentity::Owner,
         agent_id: "agent-1".to_string(),
         agent_name: "Test Agent".to_string(),
         session_id: Some("session-1".to_string()),
-        db: Arc::clone(&db),
+        db: db.clone(),
         workspace: Arc::new(ws),
         last_metrics_id: Arc::new(Mutex::new(None)),
         model_override: Arc::new(Mutex::new(None)),
@@ -107,7 +142,6 @@ fn setup_with_data() -> (tempfile::TempDir, BridgedExecutor, Arc<Mutex<rusqlite:
             available_providers: vec!["mock".to_string()],
             gateway: "test".to_string(),
         })),
-
     };
 
     let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx);
@@ -125,42 +159,36 @@ async fn test_engine_search_then_create_skill() {
 
     let llm = MockLlm::new(vec![
         // Step 1: LLM calls search_my_history
-        ChatResponseSimple {
-            content: None,
-            tool_calls: vec![ToolCall {
-                id: "tc-1".to_string(),
-                name: "search_my_history".to_string(),
-                arguments: serde_json::json!({"query": "Rust"}),
-            }],
-            finish_reason: "tool_calls".to_string(),
-            usage: None,
-        },
+        resp(
+            None,
+            vec![tc(
+                "tc-1",
+                "search_my_history",
+                serde_json::json!({"query": "Rust"}),
+            )],
+        ),
         // Step 2: LLM calls create_my_skill based on search results
-        ChatResponseSimple {
-            content: None,
-            tool_calls: vec![ToolCall {
-                id: "tc-2".to_string(),
-                name: "create_my_skill".to_string(),
-                arguments: serde_json::json!({
+        resp(
+            None,
+            vec![tc(
+                "tc-2",
+                "create_my_skill",
+                serde_json::json!({
                     "name": "Rust Expertise",
                     "description": "Knowledge about Rust programming",
                     "situation_pattern": "when discussing Rust",
                     "guidance": "Share detailed Rust knowledge"
                 }),
-            }],
-            finish_reason: "tool_calls".to_string(),
-            usage: None,
-        },
+            )],
+        ),
         // Step 3: Final text response
-        ChatResponseSimple {
-            content: Some(
+        resp(
+            Some(
                 "I searched my history and created a new skill based on my Rust knowledge."
                     .to_string(),
             ),
-            tool_calls: vec![],
-            finish_reason: "stop".to_string(),
-            usage: None,
-        },
+            vec![],
+        ),
     ]);
 
     let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
@@ -192,12 +220,12 @@ async fn test_engine_learn_from_experience() {
     let (_dir, executor, db) = setup_with_data();
 
     let llm = MockLlm::new(vec![
-        ChatResponseSimple {
-            content: None,
-            tool_calls: vec![ToolCall {
-                id: "tc-1".to_string(),
-                name: "learn_from_experience".to_string(),
-                arguments: serde_json::json!({
+        resp(
+            None,
+            vec![tc(
+                "tc-1",
+                "learn_from_experience",
+                serde_json::json!({
                     "experience": "Helped user debug a complex issue",
                     "outcome": "success",
                     "lesson": "Ask for error messages first",
@@ -205,16 +233,12 @@ async fn test_engine_learn_from_experience() {
                     "situation_pattern": "when user reports a bug",
                     "guidance": "Request stack trace before suggesting fixes"
                 }),
-            }],
-            finish_reason: "tool_calls".to_string(),
-            usage: None,
-        },
-        ChatResponseSimple {
-            content: Some("I've learned a new debugging workflow skill.".to_string()),
-            tool_calls: vec![],
-            finish_reason: "stop".to_string(),
-            usage: None,
-        },
+            )],
+        ),
+        resp(
+            Some("I've learned a new debugging workflow skill.".to_string()),
+            vec![],
+        ),
     ]);
 
     let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
@@ -243,18 +267,26 @@ async fn test_engine_lists_all_tools() {
     let tools = executor.list_tools();
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
 
-    assert!(names.contains(&"search_my_history"), "missing search_my_history");
-    assert!(names.contains(&"create_my_skill"), "missing create_my_skill");
+    assert!(
+        names.contains(&"search_my_history"),
+        "missing search_my_history"
+    );
+    assert!(
+        names.contains(&"create_my_skill"),
+        "missing create_my_skill"
+    );
     assert!(
         names.contains(&"learn_from_experience"),
         "missing learn_from_experience"
     );
-    assert!(names.contains(&"learn_from_peer"), "missing learn_from_peer");
+    assert!(
+        names.contains(&"learn_from_peer"),
+        "missing learn_from_peer"
+    );
     assert!(
         names.contains(&"reflect_and_learn"),
         "missing reflect_and_learn"
     );
-    assert!(names.contains(&"send_speech"), "missing send_speech");
     assert!(names.contains(&"ws_read"), "missing ws_read");
     assert!(tools.len() >= 20, "expected 20+ tools, got {}", tools.len());
 }
@@ -264,29 +296,53 @@ async fn test_engine_lists_all_tools() {
 // ---------------------------------------------------------------------------
 
 /// ログ投入 + インデックス構築のセットアップヘルパー（async版）
-async fn setup_with_indexed_memory() -> (tempfile::TempDir, BridgedExecutor, Arc<Mutex<rusqlite::Connection>>) {
+async fn setup_with_indexed_memory() -> (tempfile::TempDir, BridgedExecutor, opencrab_db::Db) {
     let conn = opencrab_db::init_memory().unwrap();
 
     // 3つのセッションに異なるトピックのログを投入
     let sessions = vec![
-        ("session-rust", vec![
-            ("user-1", "Rustのライフタイムについて教えてください"),
-            ("agent-1", "ライフタイムは参照の有効期間を示すアノテーションです"),
-            ("user-1", "借用チェッカーとの関係は？"),
-            ("agent-1", "借用チェッカーがライフタイムを検証してメモリ安全性を保証します"),
-        ]),
-        ("session-python", vec![
-            ("user-1", "Pythonのasync/awaitについて質問があります"),
-            ("agent-1", "Pythonのasyncioは非同期I/Oフレームワークです"),
-            ("user-1", "イベントループの仕組みは？"),
-            ("agent-1", "asyncioはシングルスレッドのイベントループでコルーチンをスケジューリングします"),
-        ]),
-        ("session-db", vec![
-            ("user-1", "SQLiteのWALモードの利点を教えてください"),
-            ("agent-1", "WALモードは書き込みと読み取りの並行性を向上させます"),
-            ("user-1", "パフォーマンスへの影響は？"),
-            ("agent-1", "読み取りが書き込みをブロックしないため、高負荷時のスループットが向上します"),
-        ]),
+        (
+            "session-rust",
+            vec![
+                ("user-1", "Rustのライフタイムについて教えてください"),
+                (
+                    "agent-1",
+                    "ライフタイムは参照の有効期間を示すアノテーションです",
+                ),
+                ("user-1", "借用チェッカーとの関係は？"),
+                (
+                    "agent-1",
+                    "借用チェッカーがライフタイムを検証してメモリ安全性を保証します",
+                ),
+            ],
+        ),
+        (
+            "session-python",
+            vec![
+                ("user-1", "Pythonのasync/awaitについて質問があります"),
+                ("agent-1", "Pythonのasyncioは非同期I/Oフレームワークです"),
+                ("user-1", "イベントループの仕組みは？"),
+                (
+                    "agent-1",
+                    "asyncioはシングルスレッドのイベントループでコルーチンをスケジューリングします",
+                ),
+            ],
+        ),
+        (
+            "session-db",
+            vec![
+                ("user-1", "SQLiteのWALモードの利点を教えてください"),
+                (
+                    "agent-1",
+                    "WALモードは書き込みと読み取りの並行性を向上させます",
+                ),
+                ("user-1", "パフォーマンスへの影響は？"),
+                (
+                    "agent-1",
+                    "読み取りが書き込みをブロックしないため、高負荷時のスループットが向上します",
+                ),
+            ],
+        ),
     ];
 
     for (session_id, messages) in &sessions {
@@ -300,6 +356,7 @@ async fn setup_with_indexed_memory() -> (tempfile::TempDir, BridgedExecutor, Arc
                 speaker_id: Some(speaker.to_string()),
                 turn_number: Some(i as i32),
                 metadata_json: None,
+                created_at: None,
             };
             opencrab_db::queries::insert_session_log(&conn, &log).unwrap();
         }
@@ -310,8 +367,12 @@ async fn setup_with_indexed_memory() -> (tempfile::TempDir, BridgedExecutor, Arc
 
     #[async_trait]
     impl LlmClient for IndexMockLlm {
-        async fn chat(&self, req: ChatRequestSimple) -> anyhow::Result<ChatResponseSimple> {
-            let content = req.messages.last().map(|m| m.content.as_str()).unwrap_or("");
+        async fn chat(&self, req: ChatRequest) -> anyhow::Result<ChatResponse> {
+            let content = req
+                .messages
+                .last()
+                .and_then(|m| m.text_content())
+                .unwrap_or("");
             let summary = if content.contains("ライフタイム") || content.contains("借用") {
                 r#"{"title": "Rustのライフタイムと借用チェッカー", "summary": "Rustのライフタイムアノテーションと借用チェッカーの仕組みについての議論。メモリ安全性の保証方法を解説。"}"#
             } else if content.contains("async") || content.contains("Python") {
@@ -321,16 +382,11 @@ async fn setup_with_indexed_memory() -> (tempfile::TempDir, BridgedExecutor, Arc
             } else {
                 r#"{"title": "一般的な議論", "summary": "トピックの議論。"}"#
             };
-            Ok(ChatResponseSimple {
-                content: Some(summary.to_string()),
-                tool_calls: vec![],
-                finish_reason: "stop".to_string(),
-                usage: None,
-            })
+            Ok(resp(Some(summary.to_string()), vec![]))
         }
     }
 
-    let db = Arc::new(Mutex::new(conn));
+    let db = opencrab_db::Db::from_connection(conn);
 
     // インデックス構築
     opencrab_core::memory_index::IndexBuilder::build_incremental(
@@ -339,6 +395,8 @@ async fn setup_with_indexed_memory() -> (tempfile::TempDir, BridgedExecutor, Arc
         &IndexMockLlm,
         "test-model",
         50,
+        "",
+        None,
     )
     .await
     .unwrap();
@@ -347,10 +405,11 @@ async fn setup_with_indexed_memory() -> (tempfile::TempDir, BridgedExecutor, Arc
     let ws = opencrab_core::workspace::Workspace::from_root(dir.path()).unwrap();
 
     let ctx = ActionContext {
+        caller: CallerIdentity::Owner,
         agent_id: "agent-1".to_string(),
         agent_name: "Test Agent".to_string(),
         session_id: Some("session-1".to_string()),
-        db: Arc::clone(&db),
+        db: db.clone(),
         workspace: Arc::new(ws),
         last_metrics_id: Arc::new(Mutex::new(None)),
         model_override: Arc::new(Mutex::new(None)),
@@ -391,37 +450,12 @@ async fn test_agentic_rag_browse_then_retrieve() {
     // MockLlm: browse → (ツリーを見てRustトピックを選択) → retrieve → 最終回答
     let llm = MockLlm::new(vec![
         // Step 1: LLMが browse_memory_index を呼ぶ
-        ChatResponseSimple {
-            content: None,
-            tool_calls: vec![ToolCall {
-                id: "tc-browse".to_string(),
-                name: "browse_memory_index".to_string(),
-                arguments: serde_json::json!({"max_depth": 3}),
-            }],
-            finish_reason: "tool_calls".to_string(),
-            usage: None,
-        },
+        resp(None, vec![tc("tc-browse", "browse_memory_index", serde_json::json!({"max_depth": 3}))]),
         // Step 2: ツリー結果を見てRustトピックのnode_idで retrieve を呼ぶ
-        ChatResponseSimple {
-            content: None,
-            tool_calls: vec![ToolCall {
-                id: "tc-retrieve".to_string(),
-                name: "retrieve_memory_nodes".to_string(),
-                arguments: serde_json::json!({"node_ids": [rust_topic_id]}),
-            }],
-            finish_reason: "tool_calls".to_string(),
-            usage: None,
-        },
+        resp(None, vec![tc("tc-retrieve", "retrieve_memory_nodes", serde_json::json!({"node_ids": [rust_topic_id]}))]),
         // Step 3: 取得した全文テキストをもとに最終回答
-        ChatResponseSimple {
-            content: Some(
-                "過去の会話によると、Rustのライフタイムは参照の有効期間を示すアノテーションで、借用チェッカーがこれを検証してメモリ安全性を保証します。"
-                    .to_string(),
-            ),
-            tool_calls: vec![],
-            finish_reason: "stop".to_string(),
-            usage: None,
-        },
+        resp(Some("過去の会話によると、Rustのライフタイムは参照の有効期間を示すアノテーションで、借用チェッカーがこれを検証してメモリ安全性を保証します。"
+                    .to_string()), vec![]),
     ]);
 
     let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
@@ -450,34 +484,24 @@ async fn test_agentic_rag_empty_index() {
 
     let llm = MockLlm::new(vec![
         // LLMがbrowseを呼ぶ
-        ChatResponseSimple {
-            content: None,
-            tool_calls: vec![ToolCall {
-                id: "tc-1".to_string(),
-                name: "browse_memory_index".to_string(),
-                arguments: serde_json::json!({}),
-            }],
-            finish_reason: "tool_calls".to_string(),
-            usage: None,
-        },
+        resp(
+            None,
+            vec![tc("tc-1", "browse_memory_index", serde_json::json!({}))],
+        ),
         // 空のツリーを受け取り、FTS検索にフォールバック
-        ChatResponseSimple {
-            content: None,
-            tool_calls: vec![ToolCall {
-                id: "tc-2".to_string(),
-                name: "search_my_history".to_string(),
-                arguments: serde_json::json!({"query": "Rust"}),
-            }],
-            finish_reason: "tool_calls".to_string(),
-            usage: None,
-        },
+        resp(
+            None,
+            vec![tc(
+                "tc-2",
+                "search_my_history",
+                serde_json::json!({"query": "Rust"}),
+            )],
+        ),
         // 最終回答
-        ChatResponseSimple {
-            content: Some("記憶インデックスに該当する情報がありませんでした。".to_string()),
-            tool_calls: vec![],
-            finish_reason: "stop".to_string(),
-            usage: None,
-        },
+        resp(
+            Some("記憶インデックスに該当する情報がありませんでした。".to_string()),
+            vec![],
+        ),
     ]);
 
     let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
@@ -500,44 +524,25 @@ async fn test_agentic_rag_multi_node_retrieve() {
     let (rust_topic_id, db_topic_id) = {
         let conn = db.lock().unwrap();
         let tree = opencrab_db::queries::get_index_tree(&conn, "agent-1").unwrap();
-        let rust = tree.iter().find(|n| n.node_type == "topic" && n.title.contains("Rust")).unwrap();
-        let db_node = tree.iter().find(|n| n.node_type == "topic" && n.title.contains("SQLite")).unwrap();
+        let rust = tree
+            .iter()
+            .find(|n| n.node_type == "topic" && n.title.contains("Rust"))
+            .unwrap();
+        let db_node = tree
+            .iter()
+            .find(|n| n.node_type == "topic" && n.title.contains("SQLite"))
+            .unwrap();
         (rust.id.clone(), db_node.id.clone())
     };
 
     let llm = MockLlm::new(vec![
         // browse
-        ChatResponseSimple {
-            content: None,
-            tool_calls: vec![ToolCall {
-                id: "tc-1".to_string(),
-                name: "browse_memory_index".to_string(),
-                arguments: serde_json::json!({}),
-            }],
-            finish_reason: "tool_calls".to_string(),
-            usage: None,
-        },
+        resp(None, vec![tc("tc-1", "browse_memory_index", serde_json::json!({}))]),
         // 2つのノードを同時にretrieve
-        ChatResponseSimple {
-            content: None,
-            tool_calls: vec![ToolCall {
-                id: "tc-2".to_string(),
-                name: "retrieve_memory_nodes".to_string(),
-                arguments: serde_json::json!({"node_ids": [rust_topic_id, db_topic_id]}),
-            }],
-            finish_reason: "tool_calls".to_string(),
-            usage: None,
-        },
+        resp(None, vec![tc("tc-2", "retrieve_memory_nodes", serde_json::json!({"node_ids": [rust_topic_id, db_topic_id]}))]),
         // 横断的な回答
-        ChatResponseSimple {
-            content: Some(
-                "RustとSQLiteの両方について議論しました。Rustではライフタイムと借用チェッカー、SQLiteではWALモードのパフォーマンスについて話しました。"
-                    .to_string(),
-            ),
-            tool_calls: vec![],
-            finish_reason: "stop".to_string(),
-            usage: None,
-        },
+        resp(Some("RustとSQLiteの両方について議論しました。Rustではライフタイムと借用チェッカー、SQLiteではWALモードのパフォーマンスについて話しました。"
+                    .to_string()), vec![]),
     ]);
 
     let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
@@ -565,54 +570,23 @@ async fn test_agentic_rag_combined_with_fts() {
     let python_topic_id = {
         let conn = db.lock().unwrap();
         let tree = opencrab_db::queries::get_index_tree(&conn, "agent-1").unwrap();
-        let python = tree.iter().find(|n| n.node_type == "topic" && n.title.contains("Python")).unwrap();
+        let python = tree
+            .iter()
+            .find(|n| n.node_type == "topic" && n.title.contains("Python"))
+            .unwrap();
         python.id.clone()
     };
 
     let llm = MockLlm::new(vec![
         // Step 1: まずFTS検索でキーワードヒット
-        ChatResponseSimple {
-            content: None,
-            tool_calls: vec![ToolCall {
-                id: "tc-1".to_string(),
-                name: "search_my_history".to_string(),
-                arguments: serde_json::json!({"query": "async await", "limit": 5}),
-            }],
-            finish_reason: "tool_calls".to_string(),
-            usage: None,
-        },
+        resp(None, vec![tc("tc-1", "search_my_history", serde_json::json!({"query": "async await", "limit": 5}))]),
         // Step 2: FTS結果を見てより詳しい文脈が欲しい → browse
-        ChatResponseSimple {
-            content: None,
-            tool_calls: vec![ToolCall {
-                id: "tc-2".to_string(),
-                name: "browse_memory_index".to_string(),
-                arguments: serde_json::json!({}),
-            }],
-            finish_reason: "tool_calls".to_string(),
-            usage: None,
-        },
+        resp(None, vec![tc("tc-2", "browse_memory_index", serde_json::json!({}))]),
         // Step 3: Pythonトピックを特定してretrieve
-        ChatResponseSimple {
-            content: None,
-            tool_calls: vec![ToolCall {
-                id: "tc-3".to_string(),
-                name: "retrieve_memory_nodes".to_string(),
-                arguments: serde_json::json!({"node_ids": [python_topic_id]}),
-            }],
-            finish_reason: "tool_calls".to_string(),
-            usage: None,
-        },
+        resp(None, vec![tc("tc-3", "retrieve_memory_nodes", serde_json::json!({"node_ids": [python_topic_id]}))]),
         // Step 4: 全情報をもとに最終回答
-        ChatResponseSimple {
-            content: Some(
-                "Pythonのasync/awaitとasyncioイベントループについて過去に議論しました。シングルスレッドのイベントループでコルーチンをスケジューリングする仕組みです。"
-                    .to_string(),
-            ),
-            tool_calls: vec![],
-            finish_reason: "stop".to_string(),
-            usage: None,
-        },
+        resp(Some("Pythonのasync/awaitとasyncioイベントループについて過去に議論しました。シングルスレッドのイベントループでコルーチンをスケジューリングする仕組みです。"
+                    .to_string()), vec![]),
     ]);
 
     let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
@@ -639,22 +613,11 @@ async fn test_engine_unknown_action_handled() {
     let (_dir, executor) = setup();
 
     let llm = MockLlm::new(vec![
-        ChatResponseSimple {
-            content: None,
-            tool_calls: vec![ToolCall {
-                id: "tc-1".to_string(),
-                name: "nonexistent_action".to_string(),
-                arguments: serde_json::json!({}),
-            }],
-            finish_reason: "tool_calls".to_string(),
-            usage: None,
-        },
-        ChatResponseSimple {
-            content: Some("That action was not found.".to_string()),
-            tool_calls: vec![],
-            finish_reason: "stop".to_string(),
-            usage: None,
-        },
+        resp(
+            None,
+            vec![tc("tc-1", "nonexistent_action", serde_json::json!({}))],
+        ),
+        resp(Some("That action was not found.".to_string()), vec![]),
     ]);
 
     let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);

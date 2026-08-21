@@ -9,6 +9,7 @@ export interface AgentSummary {
   session_count: number;
 }
 
+/** GET /api/agents/:id のフラットレスポンスに対応 */
 export interface AgentDetail {
   id: string;
   name: string;
@@ -16,28 +17,30 @@ export interface AgentDetail {
   organization: string | null;
   image_url: string | null;
   persona_name: string;
-  social_style_json: string;
-  personality_json: string;
-  thinking_style_json: string;
-  custom_traits_json: string | null;
-}
-
-export interface IdentityRow {
-  agent_id: string;
-  name: string;
-  job_title: string | null;
-  organization: string | null;
-  image_url: string | null;
+  personality: string | null;
+  instructions: string;
+  /** null = サーバー既定の default_model を使用 */
+  model: string | null;
+  /** 推論（thinking）強度。null/空 = プロバイダー既定。 */
+  reasoning_effort: string | null;
+  /** 本文URL読取り（provider native web_search / url_context）。null = 無効。 */
+  web_search: boolean | null;
   metadata_json: string | null;
 }
 
-export interface SoulRow {
-  agent_id: string;
-  persona_name: string;
-  social_style_json: string;
-  personality_json: string;
-  thinking_style_json: string;
-  custom_traits_json: string | null;
+/** PATCH /api/agents/:id 用（未指定フィールドは変更しない） */
+export interface AgentPatchBody {
+  name?: string;
+  job_title?: string | null;
+  organization?: string | null;
+  image_url?: string | null;
+  persona_name?: string;
+  personality?: string | null;
+  instructions?: string;
+  model?: string | null;
+  reasoning_effort?: string | null;
+  web_search?: boolean | null;
+  metadata_json?: string | null;
 }
 
 export interface PersonalityDto {
@@ -62,6 +65,7 @@ export interface SkillDto {
   effectiveness: number | null;
   usage_count: number;
   is_active: boolean;
+  archived: boolean;
 }
 
 // Memory
@@ -117,6 +121,7 @@ export interface SessionLogRow {
   speaker_id: string | null;
   turn_number: number | null;
   metadata_json: string | null;
+  created_at: string | null;
 }
 
 // Workspace
@@ -160,4 +165,22 @@ export interface LlmMetricsDetailDto {
   total_cost: number;
   request_count: number;
   avg_latency: number;
+}
+
+// Channel Config
+export interface ChannelConfigDto {
+  channel_id: string;
+  guild_id: string;
+  channel_name: string;
+  readable: boolean;
+  writable: boolean;
+  whitelisted: boolean;
+  heartbeat_enabled: boolean;
+  heartbeat_interval_secs: number | null;
+}
+
+export interface ChannelConfigListResponse {
+  guild_id: string;
+  configs: ChannelConfigDto[];
+  count: number;
 }

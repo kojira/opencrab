@@ -1,0 +1,235 @@
+# OpenCrab 設定テンプレート
+#
+# このファイルを `config/default.toml` にコピーしてサーバーを起動してください。
+#   cp config/default.toml.example config/default.toml
+#
+# 初回セットアップ（LLM プロバイダ / エージェント作成 / Discord 接続 /
+# チャンネル許可）は、サーバー起動後にダッシュボードの `/setup` から
+# すべて完結できます。このファイルを手で編集する必要はありません。
+#
+# ダッシュボードで変更した設定は DB に保存され、この TOML より優先されます。
+# LLM プロバイダーの変更は再起動なしで反映されます。
+#
+# `${VAR}` は環境変数に展開されます（未定義なら空文字）。
+
+[agent]
+heartbeat_interval_secs = 1800
+heartbeat_enabled = false
+workspace_path = "data/agents/{agent_id}/workspace"
+max_workspace_size_mb = 100
+
+# ===== LLM =====
+# 既定は hermit-shell（localhost:8765 の OpenAI 互換 Anthropic プロキシ、macOS 向け）。
+# それ以外を使う場合は、ダッシュボードの `/setup` または「システム設定」から
+# プロバイダーを有効化して API キーを設定してください（TOML 編集は不要）。
+
+[subtask]
+# ツール呼び出しをバックグラウンド実行に回すか（既定 true）。
+#
+# false にすると全ツールが同期実行に戻る（この機能の導入前と同じ挙動）。
+# 環境変数 OPENCRAB_SUBTASK_AUTO_DISPATCH（0/false/off/no）が
+# この値より優先されるので、.env だけで切り戻せる。
+# 詳しくは docs/DESIGN.md の「非ブロックツール実行」を参照。
+auto_dispatch = true
+
+# 通知先（webhook）の設定ファイル由来フォールバック。
+#
+# 通知先は「呼び出しで明示 → DB の scope 別既定（tool>agent>global）→ ここ」の順で
+# 解決され、DB に設定が 1 つも無いときだけこの値が使われる。
+# 特定の transport（Discord 等）に依存しない設定なので [subtask] に置く。
+#
+# 旧キー [gateway.discord] default_subtask_webhook も引き続き読まれる（後方互換）。
+# 両方書いた場合はこちらが優先。url = "" または未指定なら無効。
+# default_webhook = { url = "${SUBTASK_WEBHOOK_URL}", events = ["started", "progress", "completed", "failed", "timed_out", "aborted"] }
+
+[llm]
+default_provider = "openai"
+default_model = "claude-sonnet-4-6"
+
+[llm.self_selection]
+enabled = false
+allowed_aliases = ["fast", "smart", "reasoning", "creative", "local", "cheap"]
+
+[llm.fallback]
+chain = ["anthropic", "ollama"]
+
+# hermit-shell 経由（OpenAI 互換）。本物の OpenAI を使う場合は base_url を空にし、
+# api_key に実キーを入れる（またはダッシュボードから設定）。
+[llm.providers.openai]
+api_key = "dummy"
+base_url = "http://localhost:8765/v1"
+organization = ""
+# reasoning_effort = "medium"   # GPT-5 系/o シリーズ利用時の推論強度（任意）
+
+[llm.providers.anthropic]
+api_key = "${ANTHROPIC_API_KEY}"
+base_url = "https://api.anthropic.com"
+
+[llm.providers.google]
+api_key = "${GOOGLE_API_KEY}"
+
+[llm.providers.openrouter]
+api_key = "${OPENROUTER_API_KEY}"
+base_url = "https://openrouter.ai/api/v1"
+site_url = ""
+app_name = "OpenCrab"
+
+[llm.providers.ollama]
+base_url = "http://localhost:11434"
+default_model = "llama3.1:8b"
+
+[llm.providers.llamacpp]
+base_url = "http://localhost:8080"
+
+# Codex CLI（ローカル。codex サブスク利用時）。binary_path 省略時は PATH から検索。
+[llm.providers.codex]
+default_model = "o4-mini"
+sandbox = "read-only"
+timeout_secs = 300
+models = ["gpt-5.6", "gpt-5.5", "o4-mini", "o3", "codex-mini"]
+# reasoning_effort = "medium"
+# binary_path = "/usr/local/bin/codex"
+
+# Cursor CLI（ローカル。headless agent）。「推論専用の頭」として使う（#674）:
+# 読取専用モード（--plan）を常時付与し cursor-agent 自身の write/shell を封じる。
+# コマンド名はインストールでゆれる（cursor-agent / agent / cursor）ため binary_path で
+# 設定可能。既定 cursor-agent。
+[llm.providers.cursor]
+default_model = "auto"                   # account 非依存。旧既定 gpt-5 は現行 CLI で無効
+timeout_secs = 300
+models = ["auto", "gpt-5.2", "claude-opus-5", "claude-sonnet-5"]
+# sandbox = "enabled"                    # "enabled" | "disabled"。省略時 enabled（最安全）
+# binary_path = "cursor-agent"
+# 認証は CURSOR_API_KEY か `cursor-agent login` 済みのアンビエント認証。
+# api_key = "${CURSOR_API_KEY}"
+
+# ACP (Agent Client Protocol) エージェント（stdio JSON-RPC）。binary_path + args で起動。
+# [llm.providers.acp]
+# default_model = "default"
+# binary_path = "gemini"
+# args = ["--experimental-acp"]
+# models = ["default"]
+
+# ChatGPT direct API（~/.codex/auth.json の OAuth トークンを使用）
+[llm.providers.chatgpt]
+enabled = false
+auth_file = "~/.codex/auth.json"
+default_model = "gpt-5.5"
+reasoning_effort = "low"
+
+[llm.aliases]
+fast = { provider = "openai", model = "claude-haiku" }
+smart = { provider = "openai", model = "claude-sonnet-4-6" }
+reasoning = { provider = "openai", model = "claude-sonnet-4-6" }
+creative = { provider = "openai", model = "claude-sonnet-4-6" }
+local = { provider = "ollama", model = "llama3.1:8b" }
+cheap = { provider = "openai", model = "claude-haiku" }
+
+# ===== Gateway =====
+[gateway.rest]
+enabled = true
+port = 8080
+
+# 全体（共有）Discord ゲートウェイ。オンボーディングでは **エージェント個別** の
+# Discord 設定（ダッシュボード `/setup` の「Discord 接続」）を推奨するため、
+# ここは既定で無効。個人 ID は含めない。
+[gateway.discord]
+enabled = false
+token = "${DISCORD_TOKEN}"
+guild_ids = []
+agent_ids = []           # 応答させるエージェント ID（per-agent 設定を使う場合は空でよい）
+# オーナーの Discord ユーザー ID。環境ごとに変わるので `.env` の
+# OWNER_DISCORD_ID から渡す。空にすると、オーナー専用機能が使えなくなる一方で
+# 信頼ユーザー未登録のエージェントでは DM が全許可になり、オーナー専用 UI も
+# 開く（docs/discord.md 参照）。Discord を使うなら必ず設定する。
+owner_discord_id = "${OWNER_DISCORD_ID}"
+# spawn_subtask.webhook を明示しない時に使う lifecycle 通知先。
+# 実 URL は `.env` の DISCORD_SUBTASK_WEBHOOK_URL から渡す。
+# url = "" または行ごと未指定なら無効。
+#
+# 【旧キー】transport 非依存の [subtask] default_webhook へ移動した。ここも
+# 引き続き読まれる（後方互換）が、新規に書くなら [subtask] 側を使うこと。
+# default_subtask_webhook = { url = "${DISCORD_SUBTASK_WEBHOOK_URL}", events = ["started", "progress", "completed", "failed", "timed_out", "aborted"] }
+
+[dashboard]
+enabled = true
+port = 3000
+
+[database]
+path = "data/opencrab.db"
+
+# ===== ツール設定 =====
+[tools]
+enabled = true
+
+[tools.shell]
+enabled = true
+allowed_commands = []
+timeout_secs = 30
+inherit_env = true
+allowed_env_vars = ["PATH", "HOME", "LANG", "USER", "LOGNAME", "SHELL", "SSH_AUTH_SOCK"]
+max_output_bytes = 65536
+
+[[tools.shell.commands]]
+name = "echo"
+permission = "agent"
+
+[[tools.shell.commands]]
+name = "date"
+permission = "agent"
+
+[[tools.shell.commands]]
+name = "ls"
+permission = "agent"
+
+[[tools.shell.commands]]
+name = "cat"
+permission = "agent"
+
+# evaluator: 契約付きタスクを独立 context で rubric 評価する設定。
+# #291 で対話ターン中の採点は撤去済み（評価はスリープ中へ寄せる。配線は別 issue）。
+# 現在この設定は読まれない。
+[evaluator]
+enabled = true
+threshold = 0.7
+
+# スリープ時スキル棚卸し（自己 curation ループ）。エージェントがアイドル時に自分の人格で
+# スキルを keep/retire/refine/create する。LLM を消費するため既定は無効（opt-in）。
+# 詳細: docs/design-sleep-skill-consolidation.md
+[skill_consolidation]
+enabled = false           # 有効化で opt-in
+trigger_new_sessions = 10 # この件数の新規セッションが溜まったら発火
+time_cap_hours = 24       # あるいは前回からこの時間経過で発火（活動が1件以上ある時）
+min_interval_secs = 3600  # 最短間隔
+include_archived_in_review = 3  # 棚卸し時に再検討する引退済みスキル数
+
+# 記憶カテゴリ層（#313/#344）の sleep 中自動割当。エージェントがアイドル時に未分類 topic を
+# LLM でカテゴリへ割り当てる。#313 の方針が「エージェント自身に整理させる（一期一会）」へ
+# 変わり作り直しになるため、既定は無効（opt-in / #345）。有効化すると従来どおり動く。
+[category_maintenance]
+enabled = false           # 有効化で opt-in
+
+# スリープ整理ラン（#313 段階3 / #361）。エージェント本人が別セッションの新規 context で、
+# 自分の記憶（topic）に自分の人格でタグを付けて整理する（一期一会）。呼び出し元は sleep の
+# memory maintenance ループのみ（対話ターンでは走らせない）。LLM を消費する自律ランなので
+# 既定は無効（opt-in）。N・下限・間隔は実測してから確定するため config 可変にしている。
+[memory_organize]
+enabled = false           # 有効化で opt-in（既定オフ = 1 コールも呼ばない）
+max_topics = 50           # 1 回の worklist に載せる新規 topic の上限 N
+min_new_topics = 20       # この件数以上の新規 topic が溜まったら発火（下限ゲート）
+min_interval_minutes = 1440  # 前回からこの分数以上経つまで発火しない（既定 1440 = 24 時間）
+timeout_secs = 600        # 整理ラン 1 回のタイムアウト（超過は partial 扱いで前進しない）
+
+# VC（ボイスチャンネル）対話。使う場合はコメントを外して設定する。
+# [voice]
+# enabled = true
+#
+# [voice.stt]
+# provider = "openai"
+# model = "whisper-1"
+# api_key_env = "OPENAI_API_KEY"
+# language = "ja"
+#
+# [voice.tts]
+# provider = "voicevox"
+# default_voice = "3"

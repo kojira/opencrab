@@ -1,3 +1,4 @@
+pub mod error;
 pub mod message;
 pub mod metrics;
 pub mod pricing;
@@ -6,6 +7,7 @@ pub mod router;
 pub mod traits;
 
 // Re-export primary types for convenience.
+pub use error::{api_error, LlmError};
 pub use message::{
     ChatRequest, ChatResponse, ChatStreamDelta, Choice, ContentPart, DeltaMessage, FinishReason,
     FunctionCall, FunctionCallBehavior, FunctionDefinition, ImageUrl, Message, MessageContent,
@@ -18,6 +20,6 @@ pub use traits::{LlmProvider, ModelInfo};
 
 // Re-export providers.
 pub use providers::{
-    AnthropicProvider, GoogleProvider, LlamaCppProvider, OllamaProvider, OpenAiProvider,
-    OpenRouterProvider,
+    AcpProvider, AnthropicProvider, CodexProvider, CursorProvider, GoogleProvider,
+    LlamaCppProvider, OllamaProvider, OpenAiProvider, OpenRouterProvider,
 };

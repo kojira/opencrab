@@ -1,84 +1,7 @@
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::traits::{Action, ActionContext, ActionResult, SideEffect};
-
-/// 発言アクション
-pub struct SendSpeechAction;
-
-#[async_trait]
-impl Action for SendSpeechAction {
-    fn name(&self) -> &str {
-        "send_speech"
-    }
-
-    fn description(&self) -> &str {
-        "メッセージを送信する"
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "required": ["content"],
-            "properties": {
-                "content": {
-                    "type": "string",
-                    "description": "送信するメッセージの内容"
-                }
-            }
-        })
-    }
-
-    async fn execute(&self, args: &serde_json::Value, _ctx: &ActionContext) -> ActionResult {
-        let content = match args["content"].as_str() {
-            Some(c) => c.to_string(),
-            None => return ActionResult::error("content is required"),
-        };
-
-        ActionResult::success(json!({
-            "sent": true,
-            "content": content,
-        }))
-        .with_side_effect(SideEffect::MessageSent {
-            channel: "default".to_string(),
-            content,
-        })
-    }
-}
-
-/// 無反応アクション
-pub struct SendNoreactAction;
-
-#[async_trait]
-impl Action for SendNoreactAction {
-    fn name(&self) -> &str {
-        "send_noreact"
-    }
-
-    fn description(&self) -> &str {
-        "発言しない（何も反応しない）"
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "reason": {
-                    "type": "string",
-                    "description": "発言しない理由"
-                }
-            }
-        })
-    }
-
-    async fn execute(&self, args: &serde_json::Value, _ctx: &ActionContext) -> ActionResult {
-        let reason = args["reason"].as_str().unwrap_or("特になし");
-        ActionResult::success(json!({
-            "action": "noreact",
-            "reason": reason,
-        }))
-    }
-}
+use crate::traits::{Action, ActionContext, ActionResult};
 
 /// 心の声アクション
 pub struct GenerateInnerVoiceAction;
@@ -123,9 +46,10 @@ impl Action for GenerateInnerVoiceAction {
                 speaker_id: Some(ctx.agent_id.clone()),
                 turn_number: None,
                 metadata_json: None,
+                created_at: None,
             };
             if let Ok(conn) = ctx.db.lock() {
-                let _ = opencrab_db::queries::insert_session_log(&conn, &log);
+                opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
             }
         }
 
@@ -205,7 +129,10 @@ impl Action for UpdateImpressionAction {
             target_id: target_id.to_string(),
             target_name: target_name.to_string(),
             personality: args["personality"].as_str().unwrap_or("").to_string(),
-            communication_style: args["communication_style"].as_str().unwrap_or("").to_string(),
+            communication_style: args["communication_style"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
             recent_behavior: args["recent_behavior"].as_str().unwrap_or("").to_string(),
             agreement: args["agreement"].as_str().unwrap_or("中立").to_string(),
             notes: args["notes"].as_str().unwrap_or("").to_string(),
@@ -247,7 +174,9 @@ impl Action for GetSystemInfoAction {
 
     async fn execute(&self, _args: &serde_json::Value, ctx: &ActionContext) -> ActionResult {
         let info = ctx.runtime_info.lock().unwrap().clone();
-        let active = info.active_model.unwrap_or_else(|| info.default_model.clone());
+        let active = info
+            .active_model
+            .unwrap_or_else(|| info.default_model.clone());
 
         ActionResult::success(json!({
             "agent_id": ctx.agent_id,
@@ -308,51 +237,28 @@ mod tests {
             agent_id: "agent-1".to_string(),
             agent_name: "Test Agent".to_string(),
             session_id: Some("session-1".to_string()),
-            db: std::sync::Arc::new(std::sync::Mutex::new(conn)),
+            db: opencrab_db::Db::from_connection(conn),
             workspace: std::sync::Arc::new(ws),
             last_metrics_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
             model_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
             current_purpose: std::sync::Arc::new(std::sync::Mutex::new("conversation".to_string())),
+            caller: CallerIdentity::Owner,
             runtime_info: std::sync::Arc::new(std::sync::Mutex::new(crate::RuntimeInfo {
                 default_model: "mock:test-model".to_string(),
                 active_model: None,
                 available_providers: vec!["mock".to_string()],
                 gateway: "test".to_string(),
             })),
-
         };
         (dir, ctx)
     }
 
     #[tokio::test]
-    async fn test_send_speech_success() {
-        let (_dir, ctx) = test_context();
-        let result = SendSpeechAction.execute(&json!({"content": "hello"}), &ctx).await;
-        assert!(result.success);
-        assert!(
-            result.side_effects.iter().any(|e| matches!(e, SideEffect::MessageSent { .. })),
-            "Expected MessageSent side effect"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_send_speech_missing_content() {
-        let (_dir, ctx) = test_context();
-        let result = SendSpeechAction.execute(&json!({}), &ctx).await;
-        assert!(!result.success);
-    }
-
-    #[tokio::test]
-    async fn test_send_noreact() {
-        let (_dir, ctx) = test_context();
-        let result = SendNoreactAction.execute(&json!({"reason": "thinking"}), &ctx).await;
-        assert!(result.success);
-    }
-
-    #[tokio::test]
     async fn test_declare_done() {
         let (_dir, ctx) = test_context();
-        let result = DeclareDoneAction.execute(&json!({"reason": "done"}), &ctx).await;
+        let result = DeclareDoneAction
+            .execute(&json!({"reason": "done"}), &ctx)
+            .await;
         assert!(result.success);
     }
 }

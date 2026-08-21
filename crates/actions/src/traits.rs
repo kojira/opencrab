@@ -44,12 +44,21 @@ pub enum SideEffect {
     LlmSwitched { purpose: String, model: String },
 }
 
+/// 呼び出し元の識別子。
+///
+/// 実体は [`opencrab_core::caller::CallerIdentity`]。A2UI の保留状態
+/// （`opencrab_core::a2ui::PendingInteraction`）が「その UI を描いた run の
+/// 呼び出し元」を持つため core 側に置いてある（core は actions に依存できない）。
+/// `opencrab_actions::CallerIdentity` の参照パスは従来どおり。
+pub use opencrab_core::caller::CallerIdentity;
+
 /// アクション実行コンテキスト
 pub struct ActionContext {
+    pub caller: CallerIdentity,
     pub agent_id: String,
     pub agent_name: String,
     pub session_id: Option<String>,
-    pub db: Arc<std::sync::Mutex<rusqlite::Connection>>,
+    pub db: opencrab_db::Db,
     pub workspace: Arc<opencrab_core::workspace::Workspace>,
     /// Shared last metrics ID, updated by LlmRouterAdapter after each LLM call.
     /// Used by evaluate_response to auto-link evaluations.
@@ -86,9 +95,5 @@ pub trait Action: Send + Sync {
     fn description(&self) -> &str;
     fn parameters(&self) -> serde_json::Value;
 
-    async fn execute(
-        &self,
-        args: &serde_json::Value,
-        ctx: &ActionContext,
-    ) -> ActionResult;
+    async fn execute(&self, args: &serde_json::Value, ctx: &ActionContext) -> ActionResult;
 }

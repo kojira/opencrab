@@ -10,7 +10,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tower::ServiceExt;
 
 use opencrab_llm::providers::openrouter::OpenRouterProvider;
@@ -25,9 +25,9 @@ fn api_key() -> String {
 }
 
 /// Create a test app backed by a real OpenRouter LLM provider.
-fn create_real_llm_app() -> (Router, Arc<Mutex<rusqlite::Connection>>) {
+fn create_real_llm_app() -> (Router, opencrab_db::Db) {
     let conn = opencrab_db::init_memory().unwrap();
-    let db = Arc::new(Mutex::new(conn));
+    let db = opencrab_db::Db::from_connection(conn);
 
     let provider = OpenRouterProvider::new(api_key()).with_title("OpenCrab E2E Test");
 
@@ -44,11 +44,47 @@ fn create_real_llm_app() -> (Router, Arc<Mutex<rusqlite::Connection>>) {
 
     let state = AppState {
         db: db.clone(),
-        llm_router: Arc::new(router),
+        llm_router: opencrab_server::SharedLlmRouter::new(router),
+        llm_config: Arc::new(toml::from_str("").unwrap()),
+        subtask_auto_dispatch: true,
+        voice_config: Arc::new(Default::default()),
+        voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base,
+        #[cfg(feature = "nostr")]
+        nostr_master_key: None,
         default_model: "openrouter:openai/gpt-4o".to_string(),
-        #[cfg(feature = "discord")]
-        discord_manager: None,
+        tools_config: Arc::new(std::sync::RwLock::new(
+            opencrab_actions::tools::ToolsConfig::default(),
+        )),
+        compaction_ratio: 0.5,
+        evaluator: opencrab_server::config::EvaluatorConfig::default(),
+        skill_consolidation: opencrab_server::config::SkillConsolidationConfig::default(),
+        category_maintenance: opencrab_server::config::CategoryMaintenanceConfig::default(),
+        memory_organize: opencrab_server::config::MemoryOrganizeConfig::default(),
+        memory_declare: opencrab_server::config::MemoryDeclareConfig::default(),
+        memory_condense: opencrab_server::config::MemoryCondenseConfig::default(),
+        loop_restart_enabled: false,
+        index_build_inflight: std::sync::Arc::new(dashmap::DashMap::new()),
+        intake: std::sync::Arc::new(Default::default()),
+        intake_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
+        mcp_manager: None,
+        gateways: std::sync::Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
+        #[cfg(feature = "web")]
+        web_gateway: std::sync::Arc::new(opencrab_web_gateway::WebGateway::new()),
+        subtask_registries: std::sync::Arc::new(
+            opencrab_server::subtask_registries::SubtaskRegistries::new(),
+        ),
+        session_locks: std::sync::Arc::new(opencrab_actions::SessionLocks::new()),
+        subtask_notifiers: std::sync::Arc::new(dashmap::DashMap::new()),
+        subtask_lifecycle_notifier: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        default_subtask_webhook: None,
+        heartbeat_limits: Default::default(),
+        scheduler_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
+        heartbeat_config_rx: opencrab_server::disconnected_heartbeat_config_rx(Default::default()),
+        timed_fire_router: std::sync::Arc::new(opencrab_actions::TimedFireRouter::new()),
+        progress_debounce: std::sync::Arc::new(
+            opencrab_server::subtask_registries::ProgressDebounce::new(),
+        ),
     };
     let app = create_router(state);
     (app, db)
@@ -70,11 +106,12 @@ async fn send_request(
         "GET" => builder.method("GET"),
         "POST" => builder.method("POST"),
         "PUT" => builder.method("PUT"),
+        "PATCH" => builder.method("PATCH"),
         "DELETE" => builder.method("DELETE"),
         _ => panic!("unsupported method"),
     };
 
-    if method == "POST" || method == "PUT" {
+    if method == "POST" || method == "PUT" || method == "PATCH" {
         builder = builder.header("content-type", "application/json");
     }
 
@@ -82,8 +119,8 @@ async fn send_request(
     let response = app.oneshot(req).await.unwrap();
     let status = response.status();
     let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
-    let json: serde_json::Value = serde_json::from_slice(&body_bytes)
-        .unwrap_or(serde_json::json!(body_bytes.to_vec()));
+    let json: serde_json::Value =
+        serde_json::from_slice(&body_bytes).unwrap_or(serde_json::json!(body_bytes.to_vec()));
     (status, json)
 }
 
@@ -108,18 +145,13 @@ async fn create_agent_with_personality(
     .await;
     let agent_id = resp["id"].as_str().unwrap().to_string();
 
-    // Update soul with personality that encourages tool usage
     send_request(
         app.clone(),
-        "PUT",
-        &format!("/api/agents/{agent_id}/soul"),
+        "PATCH",
+        &format!("/api/agents/{agent_id}"),
         Some(serde_json::json!({
-            "agent_id": agent_id,
             "persona_name": persona,
-            "social_style_json": "{}",
-            "personality_json": personality,
-            "thinking_style_json": "{}",
-            "custom_traits_json": null
+            "personality": personality
         })),
     )
     .await;
@@ -138,10 +170,20 @@ async fn create_agent_with_personality(
 async fn test_real_llm_basic_conversation() {
     let (app, _db) = create_real_llm_app();
 
-    let (agent_a, app) =
-        create_agent_with_personality(app, "Alice", "Curious Researcher", r#"{"trait":"curious","style":"asks questions"}"#).await;
-    let (agent_b, app) =
-        create_agent_with_personality(app, "Bob", "Thoughtful Analyst", r#"{"trait":"analytical","style":"gives detailed answers"}"#).await;
+    let (agent_a, app) = create_agent_with_personality(
+        app,
+        "Alice",
+        "Curious Researcher",
+        r#"{"trait":"curious","style":"asks questions"}"#,
+    )
+    .await;
+    let (agent_b, app) = create_agent_with_personality(
+        app,
+        "Bob",
+        "Thoughtful Analyst",
+        r#"{"trait":"analytical","style":"gives detailed answers"}"#,
+    )
+    .await;
 
     // Create session
     let (_, resp) = send_request(
@@ -212,13 +254,9 @@ async fn test_real_llm_agent_learns_and_creates_skill() {
     })
     .to_string();
 
-    let (learner_id, app) = create_agent_with_personality(
-        app,
-        "Learner",
-        "Self-Improving Agent",
-        &learner_personality,
-    )
-    .await;
+    let (learner_id, app) =
+        create_agent_with_personality(app, "Learner", "Self-Improving Agent", &learner_personality)
+            .await;
 
     // Create session
     let (_, resp) = send_request(
@@ -278,7 +316,10 @@ async fn test_real_llm_agent_learns_and_creates_skill() {
             !skills.is_empty(),
             "Learner used tools but no skills were created"
         );
-        println!("\n✓ Learner successfully created {} skill(s) via real LLM!", skills.len());
+        println!(
+            "\n✓ Learner successfully created {} skill(s) via real LLM!",
+            skills.len()
+        );
     } else {
         println!("\n⚠ Learner didn't use tools this time (LLM chose text-only response)");
         println!("  This can happen — real LLMs are non-deterministic.");
@@ -310,13 +351,9 @@ async fn test_real_llm_multi_round_discussion_with_reflection() {
     })
     .to_string();
 
-    let (debater_id, app) = create_agent_with_personality(
-        app,
-        "Debater",
-        "Strong Advocate",
-        &debater_personality,
-    )
-    .await;
+    let (debater_id, app) =
+        create_agent_with_personality(app, "Debater", "Strong Advocate", &debater_personality)
+            .await;
 
     let (reflector_id, app) = create_agent_with_personality(
         app,
@@ -359,7 +396,10 @@ async fn test_real_llm_multi_round_discussion_with_reflection() {
     let responses = resp["responses"].as_array().unwrap();
     if !responses.is_empty() {
         println!("[Debater]: I believe AI agents should be able to modify their own code...");
-        println!("[Reflector]: {}\n", responses[0]["content"].as_str().unwrap_or("(no response)"));
+        println!(
+            "[Reflector]: {}\n",
+            responses[0]["content"].as_str().unwrap_or("(no response)")
+        );
     }
 
     // Round 2: Reflector pushes back, Debater responds
@@ -378,7 +418,10 @@ async fn test_real_llm_multi_round_discussion_with_reflection() {
     let responses = resp["responses"].as_array().unwrap();
     if !responses.is_empty() {
         println!("[Reflector]: While self-improvement sounds appealing...");
-        println!("[Debater]: {}\n", responses[0]["content"].as_str().unwrap_or("(no response)"));
+        println!(
+            "[Debater]: {}\n",
+            responses[0]["content"].as_str().unwrap_or("(no response)")
+        );
     }
 
     // Round 3: Final round — Debater sends closing argument,
@@ -398,7 +441,9 @@ async fn test_real_llm_multi_round_discussion_with_reflection() {
     let responses = resp["responses"].as_array().unwrap();
     if !responses.is_empty() {
         let reflector_resp = &responses[0];
-        let content = reflector_resp["content"].as_str().unwrap_or("(no response)");
+        let content = reflector_resp["content"]
+            .as_str()
+            .unwrap_or("(no response)");
         let tool_calls = reflector_resp["tool_calls_made"].as_i64().unwrap_or(0);
         println!("[Debater]: (closing argument + encouragement to use tools)");
         println!("[Reflector]: {}", content);
@@ -409,8 +454,9 @@ async fn test_real_llm_multi_round_discussion_with_reflection() {
     let (skills_reflector, memories_reflector) = {
         let conn = db.lock().unwrap();
         let skills = opencrab_db::queries::list_skills(&conn, &reflector_id, false).unwrap();
-        let memories =
-            opencrab_db::queries::list_curated_memories(&conn, &reflector_id).unwrap();
+        let memories = opencrab_db::queries::list_curated_memories(&conn, &reflector_id, 10000, 0)
+            .unwrap()
+            .0;
         (skills, memories)
     };
 
@@ -418,14 +464,21 @@ async fn test_real_llm_multi_round_discussion_with_reflection() {
     println!("RESULTS:");
     println!("  Reflector skills: {}", skills_reflector.len());
     for s in &skills_reflector {
-        println!("    - {} (type: {}, active: {})", s.name, s.source_type, s.is_active);
+        println!(
+            "    - {} (type: {}, active: {})",
+            s.name, s.source_type, s.is_active
+        );
         if !s.description.is_empty() {
             println!("      {}", s.description);
         }
     }
     println!("  Reflector memories: {}", memories_reflector.len());
     for m in &memories_reflector {
-        println!("    - [{}] {}", m.category, &m.content[..m.content.len().min(80)]);
+        println!(
+            "    - [{}] {}",
+            m.category,
+            &m.content[..m.content.len().min(80)]
+        );
     }
 
     // Verify conversation was logged
@@ -519,7 +572,10 @@ async fn test_real_llm_search_history_and_create_skill() {
         .await;
     }
 
-    println!("\n--- Seeded {} messages about collaboration ---\n", seed_messages.len());
+    println!(
+        "\n--- Seeded {} messages about collaboration ---\n",
+        seed_messages.len()
+    );
 
     // Now Prompter asks Researcher to review and learn
     let (status, resp) = send_request(

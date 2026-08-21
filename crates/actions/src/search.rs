@@ -1,7 +1,74 @@
 use async_trait::async_trait;
 use serde_json::json;
 
+use crate::memory_units::{HISTORY_RESULT_TOKEN_BUDGET, INLINE_LIMIT_TOKENS};
 use crate::traits::{Action, ActionContext, ActionResult, SideEffect};
+
+/// `search_my_history` が受け付けるヒット件数の上限（clamp）。
+///
+/// 従来は `limit` を無制限に受けており、大きな値を渡すと生ログ本文がそのまま何十件も
+/// 積まれて #294 のキャップに掛かっていた。俯瞰・関連探しの道具なので、`search_memory_index`
+/// と同じ 25 件を上限にする。
+const SEARCH_HIT_LIMIT_MAX: u64 = 25;
+
+/// 1 ヒットの本文プレビューの最大文字数。
+///
+/// 生ログ本文をそのまま返すと 1 件で数十 KB になり、#294 のツール結果キャップで**丸ごと
+/// メタ情報のスタブに差し替えられる**（宣言ランで検索結果が 544 バイトに潰れた #386）。
+/// 検索は「関連する場面を特定する」道具なので、本文はヒットを見分けられる長さに切り、
+/// 全文が要るなら `id` を `read_my_history(around_id=…)` に渡して読む導線にする。
+const SEARCH_SNIPPET_CHARS: usize = 300;
+
+/// 文字列を「最大 `max` 文字」で切り、切ったかどうかを返す（文字境界で切る）。
+///
+/// バイトではなく**文字数**で数えるのは、日本語（1 文字 3 バイト）の途中で切って壊れた
+/// UTF-8 を作らないため。切ったときは末尾に省略記号を付け、切ったことを `true` で返す。
+fn truncate_chars(s: &str, max: usize) -> (String, bool) {
+    if s.chars().count() <= max {
+        return (s.to_string(), false);
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    (out, true)
+}
+
+/// 検索結果 JSON（`{query,count,results}`）の serialize 後トークン数が `budget_tokens` に
+/// 収まるよう、**スコア下位のヒットから**落とす。落とした件数を返す。
+///
+/// 本文をスニペット化しても、日本語のヒットは 1 件あたりのトークンが重く、上限件数
+/// （[`SEARCH_HIT_LIMIT_MAX`]）ぶん積むと超えうる。`search_session_logs` は bm25 昇順
+/// （小さいほど良い＝先頭が上位）で返すので、末尾（下位）から削れば上位ヒットは残る。
+fn fit_hits_to_budget(
+    query: &str,
+    hits: &mut Vec<serde_json::Value>,
+    budget_tokens: usize,
+) -> usize {
+    let tokens_for = |slice: &[serde_json::Value]| -> usize {
+        let json = serde_json::to_string(&json!({
+            "query": query,
+            "count": slice.len(),
+            "results": slice,
+        }))
+        .unwrap_or_default();
+        opencrab_core::tokens::estimate_tokens(&json)
+    };
+    if tokens_for(hits) <= budget_tokens {
+        return 0;
+    }
+    let all_len = hits.len();
+    // 収まる最大の keep 件数を二分探索（先頭 keep 件＝上位を残す）。
+    let (mut lo, mut hi) = (0usize, all_len);
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if tokens_for(&hits[..mid]) <= budget_tokens {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    hits.truncate(lo);
+    all_len - lo
+}
 
 /// 自分の履歴を検索するアクション
 pub struct SearchMyHistoryAction;
@@ -13,7 +80,7 @@ impl Action for SearchMyHistoryAction {
     }
 
     fn description(&self) -> &str {
-        "自分の過去のやりとりを検索する"
+        "自分の過去のやりとりを生ログから全文検索する。関連する場面の特定に使う。本文はプレビュー（先頭の一部）で返り、estimated_tokens と inline_limit_tokens も返る。全文が要るときはヒットの id を read_my_history(around_id=…) に渡して読む。取る前に規模を知りたいときは estimate_only=true で、本文を返さずマッチ総件数（match_total）と推定トークン数だけ返す。"
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -27,8 +94,12 @@ impl Action for SearchMyHistoryAction {
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "取得件数（デフォルト: 10）",
+                    "description": format!("取得件数（デフォルト: 10 / 最大: {SEARCH_HIT_LIMIT_MAX}）"),
                     "default": 10
+                },
+                "estimate_only": {
+                    "type": "boolean",
+                    "description": "true なら本文を返さず、マッチ総件数（match_total）と、実際に取ったときの推定トークン数（estimated_tokens）と fits だけ返す。"
                 }
             }
         })
@@ -39,22 +110,106 @@ impl Action for SearchMyHistoryAction {
             Some(q) => q,
             None => return ActionResult::error("query is required"),
         };
-        let limit = args["limit"].as_u64().unwrap_or(10) as usize;
+        let estimate_only = args["estimate_only"].as_bool().unwrap_or(false);
+        let limit = args["limit"]
+            .as_u64()
+            .unwrap_or(10)
+            .clamp(1, SEARCH_HIT_LIMIT_MAX) as usize;
 
-        let results = if let Ok(conn) = ctx.db.lock() {
-            match opencrab_db::queries::search_session_logs(&conn, &ctx.agent_id, query, limit) {
-                Ok(r) => r,
-                Err(e) => return ActionResult::error(&format!("Search failed: {e}")),
-            }
-        } else {
-            return ActionResult::error("Failed to acquire DB lock");
+        let (results, match_total) = {
+            let conn = match ctx.db.lock() {
+                Ok(c) => c,
+                Err(_) => return ActionResult::error("Failed to acquire DB lock"),
+            };
+            let results =
+                match opencrab_db::queries::search_session_logs(&conn, &ctx.agent_id, query, limit)
+                {
+                    Ok(r) => r,
+                    Err(e) => return ActionResult::error(&format!("Search failed: {e}")),
+                };
+            // estimate_only のときだけ総マッチ件数（LIMIT なし）を数える。
+            let match_total = if estimate_only {
+                opencrab_db::queries::count_matching_session_logs(&conn, &ctx.agent_id, query)
+                    .unwrap_or(results.len() as i64)
+            } else {
+                results.len() as i64
+            };
+            (results, match_total)
         };
 
-        ActionResult::success(json!({
+        // 生ログ本文をそのまま返すと 1 件で数十 KB になり、#294 のキャップで丸ごと
+        // スタブに潰れる（#386）。本文はヒットを見分けられる長さに切り、全文は id を
+        // read_my_history(around_id) に渡して読む導線にする。
+        let mut any_content_truncated = false;
+        let mut hits: Vec<serde_json::Value> = results
+            .iter()
+            .map(|r| {
+                let (content, truncated) = truncate_chars(&r.content, SEARCH_SNIPPET_CHARS);
+                any_content_truncated |= truncated;
+                json!({
+                    "id": r.id,
+                    "session_id": r.session_id,
+                    "log_type": r.log_type,
+                    "created_at": r.created_at,
+                    "score": r.score,
+                    "content": content,
+                    "content_truncated": truncated,
+                })
+            })
+            .collect();
+
+        // スニペット化しても日本語ヒットはトークンが重い。予算に収まるヒット数まで
+        // スコア下位から落とす（上位は残る）。
+        let dropped = fit_hits_to_budget(query, &mut hits, HISTORY_RESULT_TOKEN_BUDGET);
+        let estimated_tokens = opencrab_core::tokens::estimate_tokens(
+            &serde_json::to_string(&json!({
+                "query": query,
+                "count": hits.len(),
+                "results": hits,
+            }))
+            .unwrap_or_default(),
+        );
+
+        // estimate_only: 本文を返さず規模だけ返す（#386）。取る前に「絞るべきか」を判断できる。
+        if estimate_only {
+            return ActionResult::success(json!({
+                "estimate_only": true,
+                "query": query,
+                "match_total": match_total,
+                "returned_if_read": hits.len(),
+                "estimated_tokens": estimated_tokens,
+                "inline_limit_tokens": INLINE_LIMIT_TOKENS,
+                "fits": estimated_tokens <= INLINE_LIMIT_TOKENS,
+                "suggestion": if match_total > hits.len() as i64 {
+                    "マッチが多い。クエリを絞るか、上位ヒットの id を read_my_history で読む"
+                } else {
+                    "そのまま search_my_history で読める"
+                },
+            }));
+        }
+
+        let mut data = json!({
             "query": query,
-            "count": results.len(),
-            "results": results,
-        }))
+            "count": hits.len(),
+            "results": hits,
+            "estimated_tokens": estimated_tokens,
+            "inline_limit_tokens": INLINE_LIMIT_TOKENS,
+        });
+        // 本文を切った / 件数を落としたときだけ、全文への導線を 1 行添える。
+        if any_content_truncated || dropped > 0 {
+            let note = if dropped > 0 {
+                format!(
+                    "本文はプレビュー。全文は read_my_history(around_id=<ヒットのid>) で読める。\
+                     さらに下位のヒット {dropped} 件は上限内に収めるため省いた（クエリを絞ると良い）。"
+                )
+            } else {
+                "本文はプレビュー。全文は read_my_history(around_id=<ヒットのid>) で読める。"
+                    .to_string()
+            };
+            data["note"] = json!(note);
+        }
+
+        ActionResult::success(data)
     }
 }
 
@@ -116,287 +271,6 @@ impl Action for SummarizeAndSaveAction {
     }
 }
 
-/// 自作スキル作成アクション
-pub struct CreateMySkillAction;
-
-#[async_trait]
-impl Action for CreateMySkillAction {
-    fn name(&self) -> &str {
-        "create_my_skill"
-    }
-
-    fn description(&self) -> &str {
-        "学んだことを正式なスキルファイルとして保存する"
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "required": ["name", "description", "situation_pattern", "guidance"],
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "スキル名"
-                },
-                "description": {
-                    "type": "string",
-                    "description": "スキルの説明"
-                },
-                "situation_pattern": {
-                    "type": "string",
-                    "description": "スキルが適用できる状況パターン"
-                },
-                "guidance": {
-                    "type": "string",
-                    "description": "具体的な行動指針"
-                },
-                "actions": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "関連するアクション名のリスト"
-                }
-            }
-        })
-    }
-
-    async fn execute(&self, args: &serde_json::Value, ctx: &ActionContext) -> ActionResult {
-        let name = match args["name"].as_str() {
-            Some(n) => n,
-            None => return ActionResult::error("name is required"),
-        };
-
-        let actions: Vec<String> = args["actions"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let skill_content = format!(
-            "---\nname: {name}\ndescription: \"{desc}\"\nversion: 1\nactions:\n{actions_yaml}\n---\n\n# {name}\n\n## 状況パターン\n{pattern}\n\n## 行動指針\n{guidance}\n",
-            name = name,
-            desc = args["description"].as_str().unwrap_or(""),
-            actions_yaml = actions
-                .iter()
-                .map(|a| format!("  - {a}"))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            pattern = args["situation_pattern"].as_str().unwrap_or(""),
-            guidance = args["guidance"].as_str().unwrap_or(""),
-        );
-
-        let file_path = format!("skills/{}.skill.md", name.replace(' ', "-").to_lowercase());
-        match ctx.workspace.write(&file_path, &skill_content).await {
-            Ok(_) => {
-                // DBにも登録
-                let skill_id = uuid::Uuid::new_v4().to_string();
-                let skill = opencrab_db::queries::SkillRow {
-                    id: skill_id.clone(),
-                    agent_id: ctx.agent_id.clone(),
-                    name: name.to_string(),
-                    description: args["description"].as_str().unwrap_or("").to_string(),
-                    situation_pattern: args["situation_pattern"]
-                        .as_str()
-                        .unwrap_or("")
-                        .to_string(),
-                    guidance: args["guidance"].as_str().unwrap_or("").to_string(),
-                    source_type: "self_created".to_string(),
-                    source_context: None,
-                    file_path: Some(file_path.clone()),
-                    effectiveness: None,
-                    usage_count: 0,
-                    is_active: true,
-                };
-
-                if let Ok(conn) = ctx.db.lock() {
-                    let _ = opencrab_db::queries::insert_skill(&conn, &skill);
-                }
-
-                ActionResult::success(json!({
-                    "created": true,
-                    "skill_id": skill_id,
-                    "file_path": file_path,
-                }))
-                .with_side_effect(SideEffect::SkillAcquired { skill_id })
-                .with_side_effect(SideEffect::FileWritten { path: file_path })
-            }
-            Err(e) => ActionResult::error(&e.to_string()),
-        }
-    }
-}
-
-/// 記憶インデックスのツリー構造を閲覧するアクション
-pub struct BrowseMemoryIndexAction;
-
-#[async_trait]
-impl Action for BrowseMemoryIndexAction {
-    fn name(&self) -> &str {
-        "browse_memory_index"
-    }
-
-    fn description(&self) -> &str {
-        "記憶インデックスのツリー構造を閲覧する。タイトルと要約のみのコンパクト表示。関連しそうなノードを見つけたら retrieve_memory_nodes で全文を取得できる。"
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "max_depth": {
-                    "type": "integer",
-                    "description": "表示する最大深さ（デフォルト: 3）",
-                    "default": 3
-                }
-            }
-        })
-    }
-
-    async fn execute(&self, args: &serde_json::Value, ctx: &ActionContext) -> ActionResult {
-        let max_depth = args["max_depth"].as_i64().unwrap_or(3) as i32;
-
-        let tree = if let Ok(conn) = ctx.db.lock() {
-            match opencrab_db::queries::get_index_tree(&conn, &ctx.agent_id) {
-                Ok(nodes) => nodes,
-                Err(e) => return ActionResult::error(&format!("Failed to get index tree: {e}")),
-            }
-        } else {
-            return ActionResult::error("Failed to acquire DB lock");
-        };
-
-        let filtered: Vec<serde_json::Value> = tree
-            .iter()
-            .filter(|n| n.depth <= max_depth)
-            .map(|n| {
-                json!({
-                    "node_id": n.id,
-                    "parent_id": n.parent_id,
-                    "node_type": n.node_type,
-                    "title": n.title,
-                    "summary": n.summary,
-                    "depth": n.depth,
-                    "child_count": n.child_count,
-                    "start_log_id": n.start_log_id,
-                    "end_log_id": n.end_log_id,
-                })
-            })
-            .collect();
-
-        ActionResult::success(json!({
-            "node_count": filtered.len(),
-            "tree": filtered,
-        }))
-    }
-}
-
-/// 記憶インデックスノードの全文テキストを取得するアクション
-pub struct RetrieveMemoryNodesAction;
-
-#[async_trait]
-impl Action for RetrieveMemoryNodesAction {
-    fn name(&self) -> &str {
-        "retrieve_memory_nodes"
-    }
-
-    fn description(&self) -> &str {
-        "browse_memory_indexで見つけたノードの全文テキストを取得する。"
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "required": ["node_ids"],
-            "properties": {
-                "node_ids": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "取得するノードIDのリスト（1-5個）",
-                    "minItems": 1,
-                    "maxItems": 5
-                }
-            }
-        })
-    }
-
-    async fn execute(&self, args: &serde_json::Value, ctx: &ActionContext) -> ActionResult {
-        let node_ids: Vec<String> = match args["node_ids"].as_array() {
-            Some(arr) => arr.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
-            None => return ActionResult::error("node_ids is required (array of strings)"),
-        };
-
-        if node_ids.is_empty() {
-            return ActionResult::error("node_ids must not be empty");
-        }
-        if node_ids.len() > 5 {
-            return ActionResult::error("Maximum 5 node_ids allowed");
-        }
-
-        let conn = match ctx.db.lock() {
-            Ok(c) => c,
-            Err(_) => return ActionResult::error("Failed to acquire DB lock"),
-        };
-
-        let mut results: Vec<serde_json::Value> = Vec::new();
-
-        for node_id in &node_ids {
-            let node = match opencrab_db::queries::get_index_node(&conn, node_id) {
-                Ok(Some(n)) => n,
-                Ok(None) => {
-                    results.push(json!({
-                        "node_id": node_id,
-                        "error": "Node not found",
-                    }));
-                    continue;
-                }
-                Err(e) => {
-                    results.push(json!({
-                        "node_id": node_id,
-                        "error": format!("Query error: {e}"),
-                    }));
-                    continue;
-                }
-            };
-
-            // ログIDレンジがある場合は全文取得
-            let messages = if let (Some(start), Some(end)) = (node.start_log_id, node.end_log_id) {
-                match opencrab_db::queries::get_session_logs_by_id_range(
-                    &conn,
-                    &ctx.agent_id,
-                    start,
-                    end,
-                ) {
-                    Ok(logs) => logs
-                        .iter()
-                        .map(|l| {
-                            json!({
-                                "speaker": l.speaker_id.as_deref().unwrap_or("unknown"),
-                                "content": l.content,
-                                "log_type": l.log_type,
-                            })
-                        })
-                        .collect::<Vec<_>>(),
-                    Err(_) => vec![],
-                }
-            } else {
-                vec![]
-            };
-
-            results.push(json!({
-                "node_id": node.id,
-                "title": node.title,
-                "summary": node.summary,
-                "node_type": node.node_type,
-                "messages": messages,
-            }));
-        }
-
-        ActionResult::success(json!({
-            "nodes": results,
-        }))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,7 +285,7 @@ mod tests {
             agent_id: "agent-1".to_string(),
             agent_name: "Test Agent".to_string(),
             session_id: Some("session-1".to_string()),
-            db: std::sync::Arc::new(std::sync::Mutex::new(conn)),
+            db: opencrab_db::Db::from_connection(conn),
             workspace: std::sync::Arc::new(ws),
             last_metrics_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
             model_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -422,7 +296,7 @@ mod tests {
                 available_providers: vec!["mock".to_string()],
                 gateway: "test".to_string(),
             })),
-
+            caller: CallerIdentity::Owner,
         };
         (dir, ctx)
     }
@@ -462,6 +336,7 @@ mod tests {
                 speaker_id: Some("agent-1".to_string()),
                 turn_number: Some(1),
                 metadata_json: None,
+                created_at: None,
             };
             opencrab_db::queries::insert_session_log(&conn, &log).unwrap();
         }
@@ -483,200 +358,153 @@ mod tests {
         assert_eq!(result.data.unwrap()["count"], 0);
     }
 
-    // ---- CreateMySkillAction ----
+    // ---- 返り値を上限内に収める（#386）----
 
-    #[tokio::test]
-    async fn test_create_my_skill_success() {
-        let (_dir, ctx) = test_context();
-        let result = CreateMySkillAction
-            .execute(
-                &json!({
-                    "name": "Test Skill",
-                    "description": "A test skill",
-                    "situation_pattern": "when testing",
-                    "guidance": "Be thorough",
-                    "actions": ["ws_read", "ws_write"]
-                }),
-                &ctx,
-            )
-            .await;
-        assert!(result.success);
-        let data = result.data.unwrap();
-        assert!(data["created"].as_bool().unwrap());
-        assert!(data["skill_id"].as_str().is_some());
-        assert!(data["file_path"].as_str().unwrap().contains("skills/"));
-
-        // Verify side effects
-        assert!(result.side_effects.iter().any(|e| matches!(e, SideEffect::SkillAcquired { .. })));
-        assert!(result.side_effects.iter().any(|e| matches!(e, SideEffect::FileWritten { .. })));
-
-        // Verify DB insertion
+    fn insert_log(ctx: &ActionContext, session: &str, content: &str) {
         let conn = ctx.db.lock().unwrap();
-        let skills = opencrab_db::queries::list_skills(&conn, "agent-1", true).unwrap();
-        assert_eq!(skills.len(), 1);
-        assert_eq!(skills[0].name, "Test Skill");
-        assert_eq!(skills[0].source_type, "self_created");
-    }
-
-    #[tokio::test]
-    async fn test_create_my_skill_missing_name() {
-        let (_dir, ctx) = test_context();
-        let result = CreateMySkillAction
-            .execute(&json!({"description": "no name"}), &ctx)
-            .await;
-        assert!(!result.success);
-        assert!(result.error.as_ref().unwrap().contains("name is required"));
-    }
-
-    #[tokio::test]
-    async fn test_create_my_skill_file_content() {
-        let (_dir, ctx) = test_context();
-        CreateMySkillAction
-            .execute(
-                &json!({
-                    "name": "File Check",
-                    "description": "desc",
-                    "situation_pattern": "pattern",
-                    "guidance": "guide"
-                }),
-                &ctx,
-            )
-            .await;
-        let content = ctx.workspace.read("skills/file-check.skill.md").await.unwrap();
-        assert!(content.contains("File Check"));
-        assert!(content.contains("guide"));
-        assert!(content.contains("pattern"));
-    }
-
-    // ---- BrowseMemoryIndexAction ----
-
-    #[tokio::test]
-    async fn test_browse_memory_index_empty() {
-        let (_dir, ctx) = test_context();
-        let result = BrowseMemoryIndexAction.execute(&json!({}), &ctx).await;
-        assert!(result.success);
-        let data = result.data.unwrap();
-        assert_eq!(data["node_count"], 0);
-    }
-
-    #[tokio::test]
-    async fn test_browse_memory_index_with_nodes() {
-        let (_dir, ctx) = test_context();
-        {
-            let conn = ctx.db.lock().unwrap();
-            let now = chrono::Utc::now().to_rfc3339();
-            let node = opencrab_db::queries::IndexNodeRow {
-                id: "root-agent-1".to_string(),
-                agent_id: "agent-1".to_string(),
-                parent_id: None,
-                node_type: "root".to_string(),
-                title: "Memory Root".to_string(),
-                summary: "Root node".to_string(),
-                start_log_id: None,
-                end_log_id: None,
-                source_session_id: None,
-                depth: 0,
-                child_count: 1,
-                token_count: 0,
-                created_at: now.clone(),
-                updated_at: now.clone(),
-            };
-            opencrab_db::queries::insert_index_node(&conn, &node).unwrap();
-            let topic = opencrab_db::queries::IndexNodeRow {
-                id: "topic-1".to_string(),
-                agent_id: "agent-1".to_string(),
-                parent_id: Some("root-agent-1".to_string()),
-                node_type: "topic".to_string(),
-                title: "Rust Discussion".to_string(),
-                summary: "A discussion about Rust.".to_string(),
-                start_log_id: Some(1),
-                end_log_id: Some(5),
-                source_session_id: Some("session-1".to_string()),
-                depth: 1,
-                child_count: 0,
-                token_count: 100,
-                created_at: now.clone(),
-                updated_at: now,
-            };
-            opencrab_db::queries::insert_index_node(&conn, &topic).unwrap();
-        }
-        let result = BrowseMemoryIndexAction.execute(&json!({}), &ctx).await;
-        assert!(result.success);
-        let data = result.data.unwrap();
-        assert_eq!(data["node_count"], 2);
-        let tree = data["tree"].as_array().unwrap();
-        assert!(tree.iter().any(|n| n["title"] == "Rust Discussion"));
-    }
-
-    // ---- RetrieveMemoryNodesAction ----
-
-    #[tokio::test]
-    async fn test_retrieve_memory_nodes_missing_ids() {
-        let (_dir, ctx) = test_context();
-        let result = RetrieveMemoryNodesAction.execute(&json!({}), &ctx).await;
-        assert!(!result.success);
-    }
-
-    #[tokio::test]
-    async fn test_retrieve_memory_nodes_not_found() {
-        let (_dir, ctx) = test_context();
-        let result = RetrieveMemoryNodesAction
-            .execute(&json!({"node_ids": ["nonexistent"]}), &ctx)
-            .await;
-        assert!(result.success);
-        let data = result.data.unwrap();
-        let nodes = data["nodes"].as_array().unwrap();
-        assert_eq!(nodes.len(), 1);
-        assert!(nodes[0]["error"].as_str().unwrap().contains("not found"));
-    }
-
-    #[tokio::test]
-    async fn test_retrieve_memory_nodes_with_logs() {
-        let (_dir, ctx) = test_context();
-        {
-            let conn = ctx.db.lock().unwrap();
-            // Insert log
-            let log = opencrab_db::queries::SessionLogRow {
+        opencrab_db::queries::insert_session_log(
+            &conn,
+            &opencrab_db::queries::SessionLogRow {
                 id: None,
                 agent_id: "agent-1".to_string(),
-                session_id: "session-1".to_string(),
-                log_type: "message".to_string(),
-                content: "Hello from test".to_string(),
-                speaker_id: Some("user-1".to_string()),
+                session_id: session.to_string(),
+                log_type: "speech".to_string(),
+                content: content.to_string(),
+                speaker_id: Some("agent-1".to_string()),
                 turn_number: Some(1),
                 metadata_json: None,
-            };
-            opencrab_db::queries::insert_session_log(&conn, &log).unwrap();
-            // Insert index node
-            let now = chrono::Utc::now().to_rfc3339();
-            let node = opencrab_db::queries::IndexNodeRow {
-                id: "topic-test".to_string(),
-                agent_id: "agent-1".to_string(),
-                parent_id: None,
-                node_type: "topic".to_string(),
-                title: "Test Topic".to_string(),
-                summary: "Test summary".to_string(),
-                start_log_id: Some(1),
-                end_log_id: Some(1),
-                source_session_id: Some("session-1".to_string()),
-                depth: 3,
-                child_count: 0,
-                token_count: 10,
-                created_at: now.clone(),
-                updated_at: now,
-            };
-            opencrab_db::queries::insert_index_node(&conn, &node).unwrap();
-        }
-        let result = RetrieveMemoryNodesAction
-            .execute(&json!({"node_ids": ["topic-test"]}), &ctx)
+                created_at: None,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn truncate_chars_is_char_safe() {
+        // 短い → そのまま。
+        let (s, t) = truncate_chars("あいう", 10);
+        assert_eq!(s, "あいう");
+        assert!(!t);
+        // 長い → 文字境界で切って省略記号（壊れた UTF-8 を作らない）。
+        let (s, t) = truncate_chars(&"あ".repeat(100), 5);
+        assert!(t);
+        assert_eq!(s.chars().count(), 6); // 5 文字 + …
+        assert!(s.ends_with('…'));
+    }
+
+    #[test]
+    fn fit_hits_to_budget_drops_low_ranked_until_it_fits() {
+        // 予算を超える太いヒットを積む。
+        let hits_src: Vec<serde_json::Value> = (0..25)
+            .map(|i| {
+                json!({
+                    "id": i,
+                    "content": "あ".repeat(SEARCH_SNIPPET_CHARS),
+                    "content_truncated": true,
+                })
+            })
+            .collect();
+        let mut hits = hits_src.clone();
+        let dropped = fit_hits_to_budget("q", &mut hits, HISTORY_RESULT_TOKEN_BUDGET);
+        assert!(dropped > 0, "予算超過なら落とすはず");
+        assert_eq!(hits.len() + dropped, 25);
+        // 上位（先頭）を残す。
+        assert_eq!(hits[0]["id"], 0);
+        // 収まっている。
+        let json =
+            serde_json::to_string(&json!({"query":"q","count":hits.len(),"results":hits})).unwrap();
+        assert!(opencrab_core::tokens::estimate_tokens(&json) <= HISTORY_RESULT_TOKEN_BUDGET);
+    }
+
+    /// 1 件の長大ログでも、本文はプレビューに切られ id で全文へ辿れる。
+    #[tokio::test]
+    async fn search_caps_long_content_and_points_to_read() {
+        let (_dir, ctx) = test_context();
+        insert_log(&ctx, "s1", &format!("keyword {}", "あ".repeat(5000)));
+
+        let r = SearchMyHistoryAction
+            .execute(&json!({"query": "keyword"}), &ctx)
             .await;
-        assert!(result.success);
-        let data = result.data.unwrap();
-        let nodes = data["nodes"].as_array().unwrap();
-        assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0]["title"], "Test Topic");
-        let messages = nodes[0]["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0]["content"], "Hello from test");
+        assert!(r.success);
+        let data = r.data.unwrap();
+        assert_eq!(data["count"], 1);
+        let hit = &data["results"][0];
+        // 本文はスニペット（元 5000+ 文字が 300+1 文字に）。
+        assert!(hit["content"].as_str().unwrap().chars().count() <= SEARCH_SNIPPET_CHARS + 1);
+        assert_eq!(hit["content_truncated"], true);
+        // 全文へ辿るための id が載る。
+        assert!(hit["id"].as_i64().is_some());
+        // 全文への導線 note がある。
+        assert!(data["note"].as_str().unwrap().contains("read_my_history"));
+    }
+
+    /// 大量の長大ログ（生 content 合計が巨大）でも、返り値はラッパ込みで上限未満。
+    #[tokio::test]
+    async fn search_result_stays_under_inline_limit() {
+        let (_dir, ctx) = test_context();
+        for i in 0..40 {
+            insert_log(
+                &ctx,
+                &format!("s{i}"),
+                &format!("keyword {}", "設計と実装 ".repeat(400)),
+            );
+        }
+        // limit を上限超えに指定しても clamp される。
+        let r = SearchMyHistoryAction
+            .execute(&json!({"query": "keyword", "limit": 1000}), &ctx)
+            .await;
+        assert!(r.success);
+        let wrapped = serde_json::to_string(&r).unwrap();
+        let tokens = opencrab_core::tokens::estimate_tokens(&wrapped);
+        assert!(
+            tokens < opencrab_core::tool_result_log::TOOL_RESULT_TOKEN_LIMIT,
+            "search over inline limit: {tokens}"
+        );
+        let data = r.data.unwrap();
+        // clamp（<=25）＋予算トリムで件数は絞られる。
+        assert!(data["count"].as_u64().unwrap() <= 25);
+        assert!(data["note"].as_str().unwrap().contains("read_my_history"));
+    }
+
+    /// 小さい結果は従来どおり本文が丸ごと載る（プレビュー切りも note も無い）。
+    #[tokio::test]
+    async fn search_small_result_is_full_and_unmarked() {
+        let (_dir, ctx) = test_context();
+        insert_log(&ctx, "s1", "keyword short body");
+
+        let r = SearchMyHistoryAction
+            .execute(&json!({"query": "keyword"}), &ctx)
+            .await;
+        let data = r.data.unwrap();
+        assert_eq!(data["count"], 1);
+        let hit = &data["results"][0];
+        assert_eq!(hit["content"], "keyword short body");
+        assert_eq!(hit["content_truncated"], false);
+        // 切っても落としてもいないので note は付かない。
+        assert!(data.get("note").is_none());
+        // サイズ情報は常に載る（#386）。
+        assert!(data["estimated_tokens"].as_i64().unwrap() > 0);
+        assert_eq!(data["inline_limit_tokens"], json!(INLINE_LIMIT_TOKENS));
+    }
+
+    /// estimate_only は本文を返さず、マッチ総件数と推定トークン数だけ返す（#386）。
+    #[tokio::test]
+    async fn search_estimate_only_reports_match_total_without_bodies() {
+        let (_dir, ctx) = test_context();
+        for i in 0..12 {
+            insert_log(&ctx, &format!("s{i}"), &format!("keyword body {i}"));
+        }
+        let r = SearchMyHistoryAction
+            .execute(&json!({"query": "keyword", "estimate_only": true}), &ctx)
+            .await;
+        assert!(r.success, "{:?}", r.error);
+        let data = r.data.unwrap();
+        assert_eq!(data["estimate_only"], true);
+        // 全 12 件マッチ（limit=10 clamp とは独立に総数を数える）。
+        assert_eq!(data["match_total"], 12);
+        assert!(data["estimated_tokens"].as_i64().unwrap() > 0);
+        assert_eq!(data["inline_limit_tokens"], json!(INLINE_LIMIT_TOKENS));
+        // 本文（results）は返さない。
+        assert!(data.get("results").is_none());
     }
 }

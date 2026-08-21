@@ -11,15 +11,26 @@ pub struct WorkspaceQuery {
     pub path: Option<String>,
 }
 
+/// Open the agent's real workspace (the same directory the agent runs in),
+/// validating the agent id to prevent path traversal via the `id` segment.
+fn open_agent_workspace(
+    state: &AppState,
+    id: &str,
+) -> Result<opencrab_core::workspace::Workspace, String> {
+    let ws_path = opencrab_core::workspace::resolve_agent_workspace(&state.workspace_base, id)
+        .map_err(|e| e.to_string())?;
+    opencrab_core::workspace::Workspace::from_root(&ws_path).map_err(|e| e.to_string())
+}
+
 pub async fn list_workspace(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<WorkspaceQuery>,
 ) -> Json<serde_json::Value> {
-    let workspace = match opencrab_core::workspace::Workspace::new(&id, "data") {
+    let workspace = match open_agent_workspace(&state, &id) {
         Ok(ws) => ws,
         Err(e) => {
-            return Json(serde_json::json!({"error": e.to_string()}));
+            return Json(serde_json::json!({"error": e}));
         }
     };
 
@@ -42,13 +53,13 @@ pub async fn list_workspace(
 }
 
 pub async fn read_file(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Path((id, path)): Path<(String, String)>,
 ) -> Json<serde_json::Value> {
-    let workspace = match opencrab_core::workspace::Workspace::new(&id, "data") {
+    let workspace = match open_agent_workspace(&state, &id) {
         Ok(ws) => ws,
         Err(e) => {
-            return Json(serde_json::json!({"error": e.to_string()}));
+            return Json(serde_json::json!({"error": e}));
         }
     };
 
@@ -67,14 +78,14 @@ pub struct WriteFileRequest {
 }
 
 pub async fn write_file(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Path((id, path)): Path<(String, String)>,
     Json(req): Json<WriteFileRequest>,
 ) -> Json<serde_json::Value> {
-    let workspace = match opencrab_core::workspace::Workspace::new(&id, "data") {
+    let workspace = match open_agent_workspace(&state, &id) {
         Ok(ws) => ws,
         Err(e) => {
-            return Json(serde_json::json!({"error": e.to_string()}));
+            return Json(serde_json::json!({"error": e}));
         }
     };
 

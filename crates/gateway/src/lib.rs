@@ -1,18 +1,9 @@
-pub mod traits;
 pub mod message;
-pub mod adapters;
+pub mod traits;
 
-pub use traits::Gateway;
-pub use traits::{GatewayActions, GatewayActionDef, GatewayActionResult};
-pub use message::{
-    IncomingMessage, OutgoingMessage,
-    MessageSource, MessageContent, ContentPart,
-    MessageTarget, Sender, Channel,
-    GatewayConfig,
+pub use message::{Channel, ContentPart, IncomingMessage, MessageContent, MessageSource, Sender};
+pub use traits::{
+    DispatchMode, GatewayActionDef, GatewayActionResult, GatewayActions, GatewayCallContext,
+    GatewayCaller, SubEngineAccess, ToolClass, ToolSharing, PEER_REVIEW_REPLY_MARKER,
+    PEER_REVIEW_REQUEST_MARKER,
 };
-pub use adapters::rest::RestGateway;
-pub use adapters::cli::CliGateway;
-pub use adapters::websocket::WebSocketGateway;
-
-#[cfg(feature = "discord")]
-pub use adapters::discord::DiscordGateway;
