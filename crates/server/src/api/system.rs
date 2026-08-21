@@ -26,7 +26,7 @@ pub async fn patch_log_level_handler(
     State(_state): State<AppState>,
     Json(req): Json<PatchLogLevelRequest>,
 ) -> Result<Json<LogLevelResponse>, (StatusCode, String)> {
-    let level = LogLevel::from_str(&req.log_level).ok_or_else(|| {
+    let level = LogLevel::parse_str(&req.log_level).ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
             format!(

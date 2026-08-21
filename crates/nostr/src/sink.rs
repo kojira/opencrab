@@ -26,9 +26,7 @@ use std::sync::Arc;
 
 use tracing::{debug, error};
 
-use opencrab_actions::{
-    CallerIdentity, RunRequest, SettleKind, SubtaskCompletionSink, SubtaskSettled,
-};
+use opencrab_actions::{CallerIdentity, RunRequest, SubtaskCompletionSink, SubtaskSettled};
 use opencrab_gateway::GatewayActions;
 
 use crate::actions::NostrGatewayActions;
@@ -355,7 +353,7 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    use opencrab_actions::SubtaskSettled;
+    use opencrab_actions::{SettleKind, SubtaskSettled};
     use opencrab_core::EngineResult;
     use opencrab_db::queries::AgentNostrConfigRow;
 

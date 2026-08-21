@@ -29,6 +29,9 @@ pub struct PendingInteractionRow {
 }
 
 /// pending_interactions テーブルへの挿入
+// 各引数は pending_interactions の 1 カラムに 1:1 対応する挿入値。構造体化しても
+// テーブルとの対応が見えにくくなるだけで実際の結合は減らないため許容する。
+#[allow(clippy::too_many_arguments)]
 pub fn insert_pending_interaction(
     conn: &Connection,
     id: &str,

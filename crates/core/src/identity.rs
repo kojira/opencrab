@@ -31,7 +31,7 @@ impl Identity {
     pub fn build_context(&self) -> String {
         let mut ctx = String::new();
 
-        ctx.push_str(&format!("## Identity\n\n"));
+        ctx.push_str("## Identity\n\n");
         ctx.push_str(&format!("- Name: {}\n", self.name));
 
         if let Some(ref title) = self.job_title {

@@ -8,9 +8,7 @@ use axum::{
 };
 use serde::Deserialize;
 
-use opencrab_actions::{
-    gateway_kinds, SettleKind, SubtaskCompletionSink, SubtaskRegistry, SubtaskSettled,
-};
+use opencrab_actions::{gateway_kinds, SubtaskCompletionSink, SubtaskRegistry, SubtaskSettled};
 
 use crate::process;
 use crate::process::AgentNotFound;

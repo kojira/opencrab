@@ -31,6 +31,9 @@ pub use opencrab_actions::webhook_target::{
     WebhookMessage, WebhookResolution, WebhookSource,
 };
 
+/// 送信を最終的にあきらめたとき、短いエラー説明文字列で呼ばれる give-up sink。
+type GiveupSink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+
 /// Discord メッセージの安全な本文長（2000 上限に対し metadata 用の余裕を残す）。
 pub const DISCORD_CHUNK_LIMIT: usize = 1900;
 const DISCORD_MESSAGE_LIMIT: usize = 2000;
@@ -163,10 +166,9 @@ pub fn spawn_run_worker(client: reqwest::Client) -> mpsc::UnboundedSender<Delive
 ///
 /// `on_giveup` は送信を最終的にあきらめたとき、短いエラー説明文字列で呼ばれる
 /// （raw url は渡さない）。`spawn_run_worker` は None を渡して従来挙動を保つ。
-#[allow(clippy::type_complexity)]
 pub fn spawn_run_worker_with_sink(
     client: reqwest::Client,
-    on_giveup: Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>>,
+    on_giveup: Option<GiveupSink>,
 ) -> mpsc::UnboundedSender<DeliveryBatch> {
     let (tx, mut rx) = mpsc::unbounded_channel::<DeliveryBatch>();
     tokio::spawn(async move {
@@ -191,7 +193,7 @@ async fn send_with_retry(
     client: &reqwest::Client,
     url: &str,
     message: &WebhookMessage,
-    on_giveup: Option<&std::sync::Arc<dyn Fn(&str) + Send + Sync>>,
+    on_giveup: Option<&GiveupSink>,
 ) {
     // 即時 / 2s / 10s / 30s / 120s
     const BACKOFFS: [u64; 5] = [0, 2, 10, 30, 120];

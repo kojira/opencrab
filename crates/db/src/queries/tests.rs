@@ -1084,7 +1084,7 @@ fn test_find_skill_by_name_any_includes_archived() {
         found.is_some(),
         "find_skill_by_name_any should find archived skill"
     );
-    assert_eq!(found.unwrap().archived, true);
+    assert!(found.unwrap().archived);
 }
 
 // 11b. test_update_skill_full_fields
@@ -1125,8 +1125,8 @@ fn test_update_skill_full_fields() {
     let s = found.unwrap();
     assert_eq!(s.description, "Updated description");
     assert_eq!(s.guidance, "Updated guidance");
-    assert_eq!(s.archived, false);
-    assert_eq!(s.is_active, true);
+    assert!(!s.archived);
+    assert!(s.is_active);
 }
 
 // 11. test_impressions_upsert_and_get

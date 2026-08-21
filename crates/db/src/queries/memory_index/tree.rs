@@ -102,6 +102,9 @@ fn keywords_fts_text(keywords_json: &str) -> String {
 /// keywords 更新 / rollup）はこの関数を通して FTS と同期すること。
 /// トリガーは使わない: v5 マイグレーションの DROP/RENAME 前例でトリガーが
 /// 消えるため、既存の memory_sessions_fts と同じ「クエリ層で手動同期」に揃える。
+// 各引数は memory_index_fts の 1 カラムに 1:1 対応する書き込み値。構造体化しても
+// テーブルとの対応が見えにくくなるだけで実際の結合は減らないため許容する。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn fts_upsert_node(
     conn: &Connection,
     node_id: &str,

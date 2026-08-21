@@ -98,28 +98,21 @@ pub async fn execute_import_handler(
     };
 
     let mut total_indexed: usize = 0;
-    loop {
-        match opencrab_core::memory_index::IndexBuilder::build_incremental(
-            &state.db,
-            &agent_id,
-            &llm_adapter,
-            &model,
-            batch_size,
-            &persona_name,
-            personality.as_deref(),
-        )
-        .await
-        {
-            Ok(index_result) => {
-                if index_result.logs_indexed == 0 {
-                    break;
-                }
-                total_indexed += index_result.logs_indexed;
-            }
-            Err(_) => {
-                break;
-            }
+    while let Ok(index_result) = opencrab_core::memory_index::IndexBuilder::build_incremental(
+        &state.db,
+        &agent_id,
+        &llm_adapter,
+        &model,
+        batch_size,
+        &persona_name,
+        personality.as_deref(),
+    )
+    .await
+    {
+        if index_result.logs_indexed == 0 {
+            break;
         }
+        total_indexed += index_result.logs_indexed;
     }
 
     let mut result = import_result;

@@ -7,7 +7,7 @@
 //! （兄弟モジュールの private 項目）。resume は必ず直列化込みの
 //! [`run_and_deliver_serialized`] を通る = ロック取得の忘れがコンパイル時に不可能。
 
-use opencrab_actions::{SettleKind, SubtaskCompletionSink, SubtaskSettled};
+use opencrab_actions::{SubtaskCompletionSink, SubtaskSettled};
 
 use crate::gateway::WEB_SESSION_PREFIX;
 use crate::respond::run_and_deliver_serialized;
@@ -79,7 +79,7 @@ impl<R: WebAgentRunner> SubtaskCompletionSink for WebCompletionSink<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opencrab_actions::CallerIdentity;
+    use opencrab_actions::{CallerIdentity, SettleKind};
     use std::time::Duration;
 
     use crate::gateway::web_session_id;

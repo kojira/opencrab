@@ -124,6 +124,9 @@ pub fn spawn_activity_tool_event_sink(
     }))
 }
 
+// 診断イベント送出に要る独立した材料（DB / HTTP client / 宛先解決の各値 / 既存 tx）を
+// 受け取るだけの関数。まとめる自然な単位が無いため許容する。
+#[allow(clippy::too_many_arguments)]
 pub(super) fn emit_activity_diagnostic(
     db: opencrab_db::Db,
     client: reqwest::Client,

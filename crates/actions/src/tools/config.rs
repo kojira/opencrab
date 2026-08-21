@@ -2,16 +2,12 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum CommandPermission {
     Owner,
+    #[default]
     Agent,
     CoAgent,
-}
-
-impl Default for CommandPermission {
-    fn default() -> Self {
-        CommandPermission::Agent
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

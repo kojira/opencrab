@@ -681,7 +681,7 @@ impl ChatGptProvider {
                         // assistant がツールコールと同時にテキストを返した場合、そのテキストも
                         // 履歴に残す（以前は continue で本文が欠落していた）。
                         // 空テキストは追加しない。
-                        let has_text = msg.text_content().map_or(false, |t| !t.is_empty());
+                        let has_text = msg.text_content().is_some_and(|t| !t.is_empty());
                         if has_text {
                             if let Some(content) = Self::message_content_value(&msg.content) {
                                 input.push(serde_json::json!({

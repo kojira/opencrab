@@ -16,6 +16,11 @@ use opencrab_llm_types::{
 // SkillEngine
 // ---------------------------------------------------------------------------
 
+/// LLM 呼び出しごとのログコールバック。
+type LogCallback = Box<dyn Fn(&LlmCallLog) + Send + Sync>;
+/// ツール結果受信フック: (tool_call_id, tool_name, result_json, is_error)。
+type ToolResultHook = Arc<dyn Fn(String, String, String, bool) + Send + Sync>;
+
 /// The LLM-driven action loop engine.
 ///
 /// The SkillEngine orchestrates the cycle of:
@@ -37,7 +42,7 @@ pub struct SkillEngine {
     /// Set of actions declared by active skills. If Some, only declared actions are allowed.
     pub allowed_actions: Option<std::collections::HashSet<String>>,
     /// Optional callback invoked after each LLM call for logging.
-    pub log_callback: Option<Box<dyn Fn(&LlmCallLog) + Send + Sync>>,
+    pub log_callback: Option<LogCallback>,
     /// Optional callback invoked with response text on every LLM reply.
     pub on_response_text: Option<Arc<dyn Fn(String) + Send + Sync>>,
     /// Callbacks invoked when the assistant produces tool calls: (assistant_content, tool_calls_json).
@@ -47,7 +52,7 @@ pub struct SkillEngine {
     on_tool_call: Vec<Arc<dyn Fn(String, String) + Send + Sync>>,
     /// Callbacks invoked when a tool result is received: (tool_call_id, tool_name, result_json, is_error).
     /// [`Self::on_tool_call`] と同じく複数持ち、登録順に全部呼ぶ（#397）。
-    on_tool_result: Vec<Arc<dyn Fn(String, String, String, bool) + Send + Sync>>,
+    on_tool_result: Vec<ToolResultHook>,
     /// Per-run reasoning (thinking) effort. Attached to every ChatRequest so
     /// providers can override their construction-time default per agent.
     reasoning_effort: Option<String>,
@@ -1409,7 +1414,7 @@ mod tests {
 
         // Should contain an assistant message with non-empty tool_calls
         let has_assistant_with_tool_calls = second_call_msgs.iter().any(|m| {
-            m.role == Role::Assistant && m.tool_calls.as_ref().map_or(false, |t| !t.is_empty())
+            m.role == Role::Assistant && m.tool_calls.as_ref().is_some_and(|t| !t.is_empty())
         });
         assert!(
             has_assistant_with_tool_calls,

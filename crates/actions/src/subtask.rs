@@ -543,7 +543,7 @@ pub fn settle_completed(
     // 3. sink を発火する（本文は運ばない = DB 永続化済み）。継続を起こすかの判断は
     //    `dispatch_settled`（#638・唯一の実装）が持つ——sink のメソッドを直接呼ばない。
     dispatch_settled(
-        &*sink,
+        sink,
         SubtaskSettled {
             session_id: ctx.parent_session_id,
             agent_id: ctx.agent_id,

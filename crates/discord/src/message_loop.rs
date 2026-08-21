@@ -240,6 +240,9 @@ impl opencrab_actions::TimedFireSink for DiscordTimedFireSink {
     }
 }
 
+// Discord ループの起動エントリ。各引数は独立した依存（gateway / state / registry /
+// voice / 各種フラグ）で、構造体化しても呼び出し側の見通しが良くならないため許容する。
+#[allow(clippy::too_many_arguments)]
 pub async fn run_discord_loop<T: AgentRunner>(
     gateway: Arc<DiscordGateway>,
     state: T,
@@ -808,7 +811,12 @@ async fn process_incoming_message<T: AgentRunner>(
         }
 
         let session_id = format!("discord-{}-{}-{}", agent_id, guild_id, channel_id);
-        ensure_discord_session(&state, &session_id, &[agent_id.clone()], &incoming);
+        ensure_discord_session(
+            &state,
+            &session_id,
+            std::slice::from_ref(agent_id),
+            &incoming,
+        );
 
         // #284 P0-1 / #286: ユーザー発言の記録は**この処理で最初に行う副作用**でなければ
         // ならない。セッションロックより前なのはもちろん、**Discord API 呼び出しよりも前**。

@@ -159,10 +159,8 @@ impl opencrab_discord::AgentRunner for AppState {
             .db
             .lock()
             .map_err(anyhow::Error::from)
-            .and_then(|conn| {
-                opencrab_db::queries::list_enabled_agent_discord_configs(&conn)
-                    .map_err(anyhow::Error::from)
-            }) {
+            .and_then(|conn| opencrab_db::queries::list_enabled_agent_discord_configs(&conn))
+        {
             Ok(configs) => configs,
             Err(e) => {
                 // 起動時の復元経路で使われるため、失敗を黙って空にしない。
