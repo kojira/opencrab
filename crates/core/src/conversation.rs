@@ -377,67 +377,159 @@ fn is_excluded_from_conversation(log: &opencrab_db::queries::SessionLogRow) -> b
     log.log_type == "evaluation"
 }
 
-/// 結果の本文を次のターンへ持ち越さない**読み**のツールか（#707）。
+/// ツール結果から、会話へ残す**参照**を組む（#709）。本文は載せない。
 ///
-/// 定義は [`crate::tool_result_log::is_read_tool`] が唯一の源——**ここで再列挙しない**。
-/// 退避上限（`inline_limit_for_tool`）と同じ集合を指す必要があり、2 箇所で別々に並べると
-/// 片方だけ直す事故が起きる（レビュー指摘）。
-pub(crate) fn is_read_tool(tool_name: &str) -> bool {
-    crate::tool_result_log::is_read_tool(tool_name)
+/// #707 では「読み直せるか」で分け、`ws_read` / `ws_list` だけを参照化した。**その軸が誤り**
+/// だった——落とすのは**会話履歴からだけ**で、記録（`memory_sessions`）には完全な本文が残る。
+/// 読み直せないもの（`execute_shell` の出力）も失われない。
+///
+/// 実害（本番実測 2026-08-21）: らぼみのプロンプトが 46 万文字に達し、cursor(grok) が空応答を
+/// 返して沈黙した。しきい値は実測 20〜30 万文字。tool_result の内訳は execute_shell 10 万・
+/// inner_voice 6 万・read_my_history 3.2 万…で、**読みだけを参照化しても 5.7% しか減らない**。
+///
+/// **ターン内の挙動は変わらない**（ツール往復は会話再構成を通らない）。落とすのは次のターン
+/// 以降への持ち越しだけで、往復は増えない。
+///
+/// **失敗した結果は本文を残す**（#707 / #709 レビュー指摘）。参照へ潰すとエラー理由が消え、
+/// 成功したように読める文字列に化ける——握り潰しであり #692 / #284 の理念に反する。ツール層の
+/// 失敗（`success: false`）だけでなく、**コマンドの非ゼロ終了**も対象（`execute_shell` は非ゼロ
+/// でも `success: true` を返すため、それだけでは捕まらない）。
+///
+/// 成功した結果の本文は記録（`memory_sessions`）に残る。退避しきい値を超えた大きい結果は
+/// `workspace/tmp` にも残り、平文の退避 notice（非 JSON）はここを素通しするので読み方の案内が
+/// 壊れない。**しきい値未満の結果はエージェントからは読み直せない**ので、再取得を案内するのは
+/// 同じものが返ると保証できるとき（読み・一覧）だけにする。
+///
+/// **参照が本文より短くならないなら潰さない**（#709 レビュー指摘1）。会話を軽くするための
+/// 仕組みが会話を重くするのは本末転倒——`ws_write` などの `{"path":"...","written":true}`
+/// のような数十文字の結果は、参照へ化けさせると逆に長くなり、識別子（path）まで消える。長さの
+/// 不変条件は入口の `result_reference` が一括で掛け、参照が本文以上なら本文をそのまま残す。
+///
+/// **失敗は必ず本文ごと残す**（#709 レビュー指摘2）。この系の不変条件——失敗は `success: false`
+/// または `data.exit_code != 0` のいずれかでしか表されない——を `signals_failure` に集約する。
+/// catch-all の中立文言は成功を主張しないが、それだけでは将来この不変条件を破る新ツールの失敗が
+/// 黙って要約されて消える。判定を一箇所に集めることで `failures_are_never_summarized_as_success`
+/// テストがどちらの経路が落ちても落ちる。
+pub(crate) fn result_reference(tool_name: &str, result_json: &str) -> String {
+    let reference = build_result_reference(tool_name, result_json);
+    // 会話を軽くするための仕組みが会話を重くしては本末転倒（#709 レビュー指摘1）。参照が本文
+    // より短くならないなら潰す意味がないので本文をそのまま残す。小さな mutation 結果はここで
+    // そのまま残り、`build_result_reference` が返す本文（失敗・非 JSON）もこの不変条件を通る。
+    if reference.chars().count() >= result_json.chars().count() {
+        result_json.to_string()
+    } else {
+        reference
+    }
 }
 
-/// 読みの結果から、会話へ残す**参照**を組む（#707）。本文は載せない。
-///
-/// 「読んだ事実」と「もう一度読む方法」が分かる形にする——落としたことを隠すとエージェントは
-/// 自分が何を読んだのか分からなくなる。参照は**元のファイル名がそのまま**使える（退避ファイル
-/// 名を作る必要が無い）。
-pub(crate) fn read_reference(result_json: &str) -> String {
+/// 失敗を表す形か（#709 レビュー指摘2）。この系の不変条件を一箇所に集約する:
+/// **失敗は `success: false` または `data.exit_code != 0` のいずれかでしか表されない**。
+/// 失敗した結果を参照へ潰すと「成功した」ように読める文字列へ化ける（握り潰し・#692 / #284）ので
+/// 本文を丸ごと残す。`execute_shell` は非ゼロ終了でもツール層では `success: true` を返すため、
+/// `success` 判定だけでは捕まらない——両経路をここで見る。将来この不変条件を破る新ツール
+/// （`success: true` のまま data の中で失敗を表す等）が入ると失敗が catch-all で「結果 N 文字」へ
+/// 潰れて黙って消えるので、判定をここへ集約し `failures_are_never_summarized_as_success` で固定する。
+fn signals_failure(v: &serde_json::Value, d: &serde_json::Value) -> bool {
+    if v.get("success").and_then(|x| x.as_bool()) != Some(true) {
+        return true;
+    }
+    matches!(d.get("exit_code").and_then(|x| x.as_i64()), Some(code) if code != 0)
+}
+
+/// 会話へ残す参照本体を組む。長さの不変条件（参照が本文以上なら本文を残す）は入口の
+/// `result_reference` が掛けるので、ここでは形ごとの参照を作ることに集中する。
+fn build_result_reference(tool_name: &str, result_json: &str) -> String {
     let v: serde_json::Value = match serde_json::from_str(result_json) {
         Ok(v) => v,
         // 判断材料が無いので推測で捨てず、そのまま残す。
         Err(_) => return result_json.to_string(),
     };
-    // **失敗した読みは本文をそのまま残す**（#707 レビュー指摘）。読みの参照化は「もう一度
-    // 呼べば同じものが得られる」ことが根拠だが、失敗（not found / パストラバーサル拒否 /
-    // IO エラー / timeout）はその前提の外で、参照へ潰すと `? の 全体 を読んだ` という
-    // **読めたことにする文字列**に化ける。エラー文言が消え、エージェントは失敗の事実と理由を
-    // 失う——握り潰しであり、#692（捏造）と #284（黙って捨てない）の理念に反する。
-    if v.get("success").and_then(|x| x.as_bool()) != Some(true) {
-        return result_json.to_string();
-    }
     let null = serde_json::Value::Null;
     let d = v.get("data").unwrap_or(&null);
-    let path = d.get("path").and_then(|x| x.as_str()).unwrap_or("?");
-    let start = d.get("start_line").and_then(|x| x.as_u64());
-    let lines = d
-        .get("content")
-        .and_then(|x| x.as_str())
-        .map(|c| c.lines().count());
-    let tokens = d.get("estimated_tokens").and_then(|x| x.as_u64());
-    let has_more = d.get("has_more").and_then(|x| x.as_bool()).unwrap_or(false);
 
-    // ws_list（ディレクトリ列挙）は content を持たず、ws_read では読み直せない。件数と
-    // 正しい再取得ツールを出す（間違ったツールへ誘導しない）。
+    // 失敗は参照へ潰さず本文を丸ごと残す（握り潰し防止）。判定は signals_failure に集約。
+    if signals_failure(&v, d) {
+        return result_json.to_string();
+    }
+
+    // ディレクトリ一覧: 件数と正しい再取得ツール。
     if let Some(entries) = d.get("entries").and_then(|x| x.as_array()) {
+        let path = d.get("path").and_then(|x| x.as_str()).unwrap_or("?");
         return format!(
-            "{path} を一覧した（{} 件・内容は会話に残していない。必要ならもう一度 ws_list で見る）",
+            "{path} を一覧した（{} 件・内容は会話に残していない。必要ならもう一度 {tool_name} で見る）",
             entries.len()
         );
     }
 
-    let range = match (start, lines) {
-        (Some(s), Some(n)) if n > 0 => format!("{s}〜{} 行目", s as usize + n - 1),
-        (Some(s), _) => format!("{s} 行目から"),
-        (None, Some(n)) => format!("{n} 行"),
-        _ => "全体".to_string(),
-    };
-    let size = tokens
-        .map(|t| format!("・約 {t} トークン"))
-        .unwrap_or_default();
-    let more = if has_more { "・続きあり" } else { "" };
-    format!(
-        "{path} の {range} を読んだ{size}{more}（本文は会話に残していない。必要ならもう一度 ws_read で読む）"
-    )
+    // ファイルの読み: 元のファイル名がそのまま参照になる。
+    if let Some(path) = d.get("path").and_then(|x| x.as_str()) {
+        if d.get("content").is_some() {
+            let start = d.get("start_line").and_then(|x| x.as_u64());
+            let lines = d
+                .get("content")
+                .and_then(|x| x.as_str())
+                .map(|c| c.lines().count());
+            let range = match (start, lines) {
+                (Some(st), Some(n)) if n > 0 => format!("{st}〜{} 行目", st as usize + n - 1),
+                (Some(st), _) => format!("{st} 行目から"),
+                (None, Some(n)) => format!("{n} 行"),
+                _ => "全体".to_string(),
+            };
+            let tokens = d
+                .get("estimated_tokens")
+                .and_then(|x| x.as_u64())
+                .map(|t| format!("・約 {t} トークン"))
+                .unwrap_or_default();
+            let more = if d.get("has_more").and_then(|x| x.as_bool()) == Some(true) {
+                "・続きあり"
+            } else {
+                ""
+            };
+            return format!(
+                "{path} の {range} を読んだ{tokens}{more}（本文は会話に残していない。必要ならもう一度 {tool_name} で読む）"
+            );
+        }
+    }
+
+    // コマンド実行（成功のみ）: 終了コードと規模。非ゼロ終了は上の signals_failure が本文ごと
+    // 残しているので、ここへ来るのは成功したコマンドだけ——`cargo build` / `cargo test` /
+    // pytest / jest の失敗詳細（stderr にも stdout にも出る）はどちらも丸ごと残る。
+    if let Some(code) = d.get("exit_code").and_then(|x| x.as_i64()) {
+        debug_assert_eq!(
+            code, 0,
+            "非ゼロ終了は signals_failure が本文ごと残すはず（#709 の不変条件が破れている）"
+        );
+        let out = d.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
+        let err = d.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
+        return format!(
+            "終了コード 0・出力 {} 文字{}（本文は会話に残していない）",
+            out.chars().count(),
+            if err.is_empty() {
+                String::new()
+            } else {
+                format!("・stderr {} 文字", err.chars().count())
+            }
+        );
+    }
+
+    // それ以外（記憶・検索・内なる声・mutation など）: 規模だけ残す。何を呼んだかは tool_name が示す。
+    //
+    // **path があれば参照に含める**（#709 レビュー指摘1）。`ws_write` / `ws_edit` / `ws_delete` /
+    // `ws_mkdir` などは `{"path":"...","written":true}` を返す——「何をしたか」の対象を消さない。
+    //
+    // **「もう一度呼ぶ」とは言わない**（#709 レビュー指摘）。ここへ落ちるツールには非冪等なものが
+    // 混じる——`generate_inner_voice` を呼び直すと**別の思考**が生成され、過去のそれは回収できない。
+    // 回収できないものを回収できることにする誘導は、失敗を成功に見せるのと同じ質の嘘になる。
+    // 再取得を案内するのは、同じものが返ると保証できるとき（読み・一覧）だけにする。
+    let size = serde_json::to_string(d)
+        .map(|t| t.chars().count())
+        .unwrap_or(0);
+    match d.get("path").and_then(|x| x.as_str()) {
+        Some(path) => {
+            format!("{path} を {tool_name} した（結果 {size} 文字・本文は会話に残していない）")
+        }
+        None => format!("結果 {size} 文字（本文は会話に残していない）"),
+    }
 }
 
 /// heartbeat セッションで過去に積まれた指示文（プロンプト scaffolding）か（#501）。
@@ -799,20 +891,13 @@ pub fn format_single_log(log: &opencrab_db::queries::SessionLogRow) -> String {
             // 読みは**もう一度呼べば同じものが得られる**ので、会話には参照だけを残す。落とす
             // のは次のターン以降への持ち越しだけで、そのターンの中では従来どおり本文がモデル
             // へ渡る（ツール往復は会話再構成を通らない）。記録（DB）も完全なまま残す。
-            if is_read_tool(tool_name) {
-                format!(
-                    "[tool_result]{}:\n[id={}]: {} → {}",
-                    ts,
-                    tool_call_id,
-                    tool_name,
-                    read_reference(&log.content)
-                )
-            } else {
-                format!(
-                    "[tool_result]{}:\n[id={}]: {} → {}",
-                    ts, tool_call_id, tool_name, log.content
-                )
-            }
+            format!(
+                "[tool_result]{}:\n[id={}]: {} → {}",
+                ts,
+                tool_call_id,
+                tool_name,
+                result_reference(tool_name, &log.content)
+            )
         }
         "tool_cancelled" => {
             let meta = log
@@ -2301,11 +2386,12 @@ mod response_only_directive_tests {
     }
 }
 
-/// #707: **読みの本文を次のターンへ持ち越さない**ことの回帰ガード。
+/// #709: **ツール結果の本文を次のターンへ持ち越さない**ことの回帰ガード。
 #[cfg(test)]
-mod read_reference_tests {
-    use super::{is_read_tool, read_reference};
+mod result_reference_tests {
+    use super::result_reference;
 
+    /// 読みは元のファイル名がそのまま参照になる。
     #[test]
     fn read_results_leave_only_a_reference() {
         let body = "秘密の設計メモ本文".repeat(50);
@@ -2321,75 +2407,215 @@ mod read_reference_tests {
         })
         .to_string();
 
-        let rendered = read_reference(&result);
+        let r = result_reference("ws_read", &result);
         assert!(
-            !rendered.contains("秘密の設計メモ本文"),
-            "読みの本文が会話へ載っている（次のターンへ持ち越される）: {rendered}"
+            !r.contains("秘密の設計メモ本文"),
+            "本文が会話へ載っている: {r}"
         );
-        assert!(
-            rendered.contains("docs/design.md"),
-            "どのファイルを読んだか分からない: {rendered}"
-        );
-        assert!(rendered.contains("18000"), "規模が分からない: {rendered}");
-        assert!(
-            rendered.contains("続きあり"),
-            "続きの有無が分からない: {rendered}"
-        );
-        assert!(
-            rendered.contains("ws_read"),
-            "読み直す方法が分からない: {rendered}"
-        );
+        assert!(r.contains("docs/design.md"), "ファイル名が無い: {r}");
+        assert!(r.contains("18000"), "規模が無い: {r}");
+        assert!(r.contains("続きあり"), "続きの有無が無い: {r}");
     }
 
-    /// #707 レビュー指摘: **失敗した読みは本文を残す**。参照へ潰すと「読めた」ことに化ける。
+    /// #709 の中心: **コマンド実行の結果も**本文を持ち越さない。
+    ///
+    /// #707 は「読み直せないので落としたら失われる」として本文を残していたが、記録
+    /// （memory_sessions）には完全な本文が残るので失われない。らぼみの tool_result 30 万文字の
+    /// うち execute_shell が 10 万で最大——ここを落とさないと沈黙は解けない。
     #[test]
-    fn failed_reads_keep_their_error() {
-        let failed = serde_json::json!({
-            "success": false,
-            "data": null,
-            "error": "path not found: docs/missing.md"
+    fn shell_results_also_leave_only_a_reference() {
+        let out = "x".repeat(50_000);
+        let result = serde_json::json!({
+            "success": true,
+            "data": {"exit_code": 0, "stdout": out, "stderr": ""}
         })
         .to_string();
 
-        let rendered = read_reference(&failed);
+        let r = result_reference("execute_shell", &result);
         assert!(
-            rendered.contains("path not found"),
-            "失敗の理由が消えている（握り潰し）: {rendered}"
+            !r.contains(&"x".repeat(100)),
+            "コマンド出力が会話へ載っている（#709 の状態に戻っている）: {r:.120}"
         );
-        assert!(
-            !rendered.contains("読んだ"),
-            "読めていないのに読んだことになっている: {rendered}"
-        );
+        assert!(r.contains("終了コード 0"), "終了コードが無い: {r}");
+        assert!(r.contains("50000"), "出力の規模が無い: {r}");
     }
 
-    /// #707 レビュー指摘: ws_list は件数を出し、**正しいツール**へ誘導する。
+    /// #709 レビュー指摘: **コマンドの非ゼロ終了は stderr を本文で残す**。
+    ///
+    /// `execute_shell` は非ゼロ終了でもツール層では `success: true` を返すので、`success` 判定
+    /// では捕まらない。ここを塞がないとコンパイルエラーやテスト失敗の理由がターンをまたぐと
+    /// 消える——エージェントが最も頻繁に読むものであり、握り潰しになる。
     #[test]
-    fn list_reference_points_at_the_right_tool() {
-        let listed = serde_json::json!({
+    fn failed_commands_keep_their_stderr() {
+        let result = serde_json::json!({
             "success": true,
             "data": {
-                "path": "src",
-                "entries": ["a.rs", "b.rs", "c.rs"]
+                "exit_code": 1,
+                "stdout": "",
+                "stderr": "error[E0308]: mismatched types\n  --> src/main.rs:42:9"
             }
         })
         .to_string();
 
-        let rendered = read_reference(&listed);
-        assert!(rendered.contains("3 件"), "規模が分からない: {rendered}");
+        let r = result_reference("execute_shell", &result);
         assert!(
-            rendered.contains("ws_list"),
-            "ws_read へ誤誘導している（ws_list は ws_read で読み直せない）: {rendered}"
+            r.contains("E0308") && r.contains("src/main.rs:42"),
+            "失敗の理由（stderr）が消えている: {r}"
+        );
+        assert!(
+            r.contains("exit_code") || r.contains("1"),
+            "失敗だと分からない: {r}"
         );
     }
 
+    /// #709 レビュー 2 巡目: **失敗詳細が stdout に出るケース**（cargo test / pytest / jest）でも
+    /// 本文が残る。stderr だけを残す形では `cargo build` しか塞げていなかった。
     #[test]
-    fn non_read_tools_keep_their_body() {
-        assert!(is_read_tool("ws_read"));
-        assert!(is_read_tool("ws_list"));
+    fn failed_commands_keep_stdout_details_too() {
+        let result = serde_json::json!({
+            "success": true,
+            "data": {
+                "exit_code": 101,
+                "stdout": "thread 'tests::budget' panicked at src/lib.rs:88:\nassertion failed: used <= budget",
+                "stderr": "error: test failed, to rerun pass `-p opencrab-core --lib`"
+            }
+        })
+        .to_string();
+
+        let r = result_reference("execute_shell", &result);
         assert!(
-            !is_read_tool("execute_shell"),
-            "実行結果は読み直せないので落とさない"
+            r.contains("assertion failed") && r.contains("tests::budget"),
+            "stdout に出た失敗詳細が消えている: {r}"
         );
-        assert!(!is_read_tool("search_my_history"));
+    }
+
+    /// #709 レビュー指摘: 非冪等なツールに「もう一度呼ぶ」と言わない。
+    ///
+    /// `generate_inner_voice` を呼び直すと**別の思考**が生成され、過去のそれは回収できない。
+    /// 回収できないものを回収できることにする誘導は、失敗を成功に見せるのと同じ質の嘘になる。
+    #[test]
+    fn non_idempotent_tools_do_not_promise_recovery() {
+        let result = serde_json::json!({
+            "success": true, "data": {"voice": "思考の断片".repeat(200)}
+        })
+        .to_string();
+
+        let r = result_reference("generate_inner_voice", &result);
+        assert!(
+            !r.contains("思考の断片思考の断片"),
+            "本文が載っている: {r:.80}"
+        );
+        assert!(
+            !r.contains("もう一度"),
+            "回収できないのに再取得を約束している: {r}"
+        );
+    }
+
+    /// 失敗した結果は本文を残す（参照へ潰すと「成功した」ことに化ける）。
+    #[test]
+    fn failed_results_keep_their_error() {
+        let failed = serde_json::json!({
+            "success": false, "data": null, "error": "path not found: docs/missing.md"
+        })
+        .to_string();
+
+        let r = result_reference("ws_read", &failed);
+        assert!(r.contains("path not found"), "失敗の理由が消えている: {r}");
+        assert!(!r.contains("読んだ"), "読めていないのに読んだことに: {r}");
+    }
+
+    /// 一覧は件数と正しい再取得ツールを出す。
+    #[test]
+    fn list_reference_points_at_the_right_tool() {
+        let listed = serde_json::json!({
+            "success": true, "data": {"path": "src", "entries": ["a.rs","b.rs","c.rs"]}
+        })
+        .to_string();
+
+        let r = result_reference("ws_list", &listed);
+        assert!(r.contains("3 件"), "件数が無い: {r}");
+        assert!(r.contains("ws_list"), "誤ったツールへ誘導: {r}");
+    }
+
+    /// その他のツール（記憶・検索など）も規模だけ残す。
+    #[test]
+    fn other_tools_leave_size_only() {
+        let big = serde_json::json!({
+            "success": true, "data": {"hits": vec!["長い検索結果".repeat(500)]}
+        })
+        .to_string();
+
+        let r = result_reference("search_my_history", &big);
+        assert!(
+            !r.contains("長い検索結果長い検索結果"),
+            "本文が載っている: {r:.80}"
+        );
+        assert!(r.contains("文字"), "規模が分からない: {r}");
+    }
+
+    /// #709 レビュー指摘1: 小さな mutation 結果を参照化しても、書いた対象（path）を会話から
+    /// 消さない。`ws_write` の `{"path":"...","written":true}` が「結果 N 文字」に化けると
+    /// **どのファイルを書いたのかが会話から消える**——削減効果ゼロなのに作業記憶を削っていた。
+    #[test]
+    fn mutation_results_keep_their_path() {
+        let result = serde_json::json!({
+            "success": true,
+            "data": {"path": "crates/core/src/lib.rs", "written": true}
+        })
+        .to_string();
+
+        let r = result_reference("ws_write", &result);
+        assert!(
+            r.contains("crates/core/src/lib.rs"),
+            "書いたファイルが会話から消えた: {r}"
+        );
+        assert!(!r.contains("\"written\""), "本文がそのまま載っている: {r}");
+    }
+
+    /// #709 レビュー指摘1: 参照が本文より長くなるなら潰さず本文を残す（会話を軽くする仕組みが
+    /// 会話を重くしない）。極小の結果は参照化の固定オーバーヘッドの方が長くなる。
+    #[test]
+    fn tiny_results_are_never_expanded() {
+        // 参照文（path + tool_name + 定型句）の方が本文より長くなる極小ケース。
+        let result = serde_json::json!({
+            "success": true, "data": {"path": "x"}
+        })
+        .to_string();
+
+        let r = result_reference("configure_self", &result);
+        assert!(
+            r.chars().count() <= result.chars().count(),
+            "参照が本文より長い（会話を重くしている）: ref={} body={} / {r}",
+            r.chars().count(),
+            result.chars().count()
+        );
+    }
+
+    /// #709 レビュー指摘2: 失敗は必ず本文ごと残る——catch-all の「結果 N 文字」へ潰れて黙って
+    /// 消えることはない。この系の不変条件（失敗は `success:false` **または** `exit_code!=0`）を
+    /// `signals_failure` に集約したので、どちらの経路を落としてもこのテストが落ちる。
+    #[test]
+    fn failures_are_never_summarized_as_success() {
+        // (a) ツール層の失敗: success:false。
+        let tool_fail = serde_json::json!({
+            "success": false, "data": {"foo": "bar"}, "error": "boom"
+        })
+        .to_string();
+        assert_eq!(
+            result_reference("some_tool", &tool_fail),
+            tool_fail,
+            "success:false が要約されて消えた"
+        );
+
+        // (b) コマンドの非ゼロ終了: execute_shell は success:true のまま返す。
+        let cmd_fail = serde_json::json!({
+            "success": true, "data": {"exit_code": 2, "stdout": "", "stderr": "boom"}
+        })
+        .to_string();
+        assert_eq!(
+            result_reference("execute_shell", &cmd_fail),
+            cmd_fail,
+            "非ゼロ終了が要約されて消えた"
+        );
     }
 }
