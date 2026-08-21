@@ -156,8 +156,16 @@ pub struct LlmCallLog {
     pub request: ChatRequest,
     /// The response from the LLM (None if an error occurred).
     pub response: Option<ChatResponse>,
-    /// Error message string if the LLM call failed.
+    /// Error message string if the LLM call failed (human-readable body →
+    /// `llm_logs.error_body`). Set both for transport failures and for
+    /// semantically-unusable responses (empty / output-truncated).
     pub error_str: Option<String>,
+    /// Classified error code for this call, computed by the engine's semantic
+    /// validation and copied verbatim into `llm_logs.error_code` (#706 / #676 /
+    /// #539). `None` on success. The engine is the single place that decides the
+    /// code (transport error vs context-window vs empty vs output-truncated); the
+    /// server-side log writer must not re-derive it from strings.
+    pub error_code: Option<String>,
     /// Latency of the LLM call in milliseconds.
     pub latency_ms: i64,
     /// RFC3339 timestamp (millisecond precision) of when the request was sent.

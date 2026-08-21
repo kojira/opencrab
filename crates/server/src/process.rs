@@ -664,6 +664,29 @@ pub fn prepend_runtime_context_discord(
     )
 }
 
+/// 失敗行の `error_body` に、`llm_logs.prompt` 列と**同じ全体シリアライズ**のサイズ
+/// （文字数）を一様に付ける（#706）。空応答など「なぜ答えられなかったか」の行を見た人が、
+/// 別列 `prompt` を辿らずに **1 クエリで「長さが原因か」の当たり**を付けられるようにする。
+///
+/// - `error_str` が `None`（＝成功行）のときは `None` を返し、**サイズを一切測らない**
+///   （毎リクエストで 100 万文字規模を再走査しない）。
+/// - `prompt_json` は呼び出し側が `prompt` 列用に既に持っている文字列を渡す前提
+///   （追加のシリアライズはしない）。文字数は `llm_logs.prompt` と同一スケールなので、
+///   運用者の実測帯（プロンプト全体で測った値）と直接比較できる。tool 定義・過去の
+///   tool_call arguments も含まれる（本文のみだと過小になり読み違いを招く）。
+/// - **閾値判定はしない**。事実（送ったサイズ）だけを残し、判断は読む人に委ねる。
+/// - error_code に依らず失敗行へ一様に付くので、**新しい失敗種別を足しても自動で載る**
+///   （種別ごとの手書き補間を engine 側に散らさない）。
+fn error_body_with_prompt_size(error_str: Option<&str>, prompt_json: &str) -> Option<String> {
+    error_str.map(|body| {
+        let prompt_chars = prompt_json.chars().count();
+        format!(
+            "{body} [prompt_chars={prompt_chars}（llm_logs.prompt と同じ全体シリアライズの\
+             文字数。provider の usage は当てにならないため実測。閾値判定なし）]"
+        )
+    })
+}
+
 /// LLM 呼び出しログ（llm_logs テーブル）記録コールバックの配線（#33: 段の分解）。
 fn set_llm_log_callback(
     engine: &mut opencrab_core::SkillEngine,
@@ -703,12 +726,17 @@ fn set_llm_log_callback(
             .map(|r| serde_json::to_string(r).unwrap_or_default())
             .unwrap_or_default();
 
+        // #706: リクエスト全体のシリアライズは prompt 列用に元々ここで走る。空応答など
+        // 失敗行の原因（プロンプト長）の当たり付けに、この**同じ**文字列のサイズを使い回す
+        // （追加のシリアライズも、成功行での再走査もしない。error_body_with_prompt_size 参照）。
+        let prompt_json = serde_json::to_string(&log.request).unwrap_or_default();
+
         let log_row = opencrab_db::queries::LlmLogRow {
             id: uuid::Uuid::new_v4().to_string(),
             agent_id: log_agent_id.clone(),
             session_id: Some(log_session_id.clone()),
             model: Some(log.request.model.clone()),
-            prompt: serde_json::to_string(&log.request).unwrap_or_default(),
+            prompt: prompt_json.clone(),
             response: response_str,
             tool_calls: log
                 .response
@@ -721,16 +749,12 @@ fn set_llm_log_callback(
             prompt_tokens,
             completion_tokens,
             total_tokens,
-            // #539: context 超過を専用コードで判別可能にする（それ以外は従来どおり総称
-            // "error"）。判定はプロバイダ文言の一致を集約した唯一の口を通す。
-            error_code: log.error_str.as_ref().map(|s| {
-                if opencrab_llm_types::is_context_window_error(s) {
-                    opencrab_llm_types::CONTEXT_WINDOW_EXCEEDED_ERROR_CODE.to_string()
-                } else {
-                    "error".to_string()
-                }
-            }),
-            error_body: log.error_str.clone(),
+            // #706 / #676 / #539: error_code の判定は engine 側で一元化済み
+            // （transport error / context 超過 / 空応答 / 出力上限切り捨て）。ここは
+            // その値を写すだけ——文字列一致を process 側で再実装しない（判断は core、
+            // ゲート/writer は配送）。
+            error_code: log.error_code.clone(),
+            error_body: error_body_with_prompt_size(log.error_str.as_deref(), &prompt_json),
             requested_at: Some(log.requested_at.clone()),
             trigger_message_id: log_trigger_message_id.clone(),
             is_bot_iteration: log.is_bot_iteration,
@@ -1879,6 +1903,39 @@ mod skill_mentioned_tests {
     fn no_match_when_absent() {
         let resp = "普通の返答です".to_lowercase();
         assert!(!skill_mentioned(&resp, "translation-helper"));
+    }
+}
+
+#[cfg(test)]
+mod error_body_with_prompt_size_tests {
+    use super::error_body_with_prompt_size;
+
+    /// #706: 成功行（error_str=None）にはサイズを付けない（＝毎リクエストで再走査しない）。
+    #[test]
+    fn success_row_gets_no_size() {
+        assert_eq!(
+            error_body_with_prompt_size(None, "とても長いプロンプト"),
+            None
+        );
+    }
+
+    /// #706: 失敗行には prompt 列と同じ全体シリアライズの**文字数**が一様に載る。
+    /// マルチバイトでもバイト数ではなく文字数（Unicode スカラー数）で数える。
+    #[test]
+    fn failure_row_appends_prompt_char_count() {
+        // "あいうえお" = 5 文字 / 15 バイト。文字数で数えていることを固定する。
+        let prompt_json = "あいうえお";
+        let out = error_body_with_prompt_size(Some("空でした"), prompt_json)
+            .expect("失敗行にはサイズ付き error_body が返るはず");
+        assert!(out.contains("空でした"), "元の理由が保たれていない: {out}");
+        assert!(
+            out.contains("prompt_chars=5"),
+            "prompt 列と同じシリアライズの文字数（5）が載っていない: {out}"
+        );
+        assert!(
+            !out.contains("prompt_chars=15"),
+            "バイト数で数えてしまっている: {out}"
+        );
     }
 }
 

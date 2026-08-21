@@ -440,6 +440,60 @@ pub fn is_context_window_error(message: &str) -> bool {
     MARKERS.iter().any(|m| lower.contains(m))
 }
 
+/// `llm_logs.error_code` に入れる、意味的に空の応答を表す専用コード（#706）。
+///
+/// provider が HTTP 200・`finish_reason:"stop"` を名乗りながら本文（content）も
+/// tool_call も返さなかったターンをこの値で判別できるようにする。従来はこの種の応答が
+/// error 欄空の「成功行」として llm_logs に残り、なぜ黙ったかの切り分けに server.log との
+/// 突き合わせが要った。読み手はこの値で分岐してよい（#539 の context 超過コードと同じ扱い）。
+pub const EMPTY_RESPONSE_ERROR_CODE: &str = "empty_response";
+
+/// `llm_logs.error_code` に入れる、出力トークン上限で切り捨てられた応答を表す専用コード（#676）。
+///
+/// 空応答（[`EMPTY_RESPONSE_ERROR_CODE`]）と同じく「意味的に使えないターン」だが、原因が
+/// 出力上限だと分かる方が運用者の初動が早いので別コードにする。判定材料は
+/// `finish_reason == Length` だが、コードの付与はエンジン（core）で一元化し、読み手はこの
+/// 値で分岐してよい。
+pub const OUTPUT_TRUNCATED_ERROR_CODE: &str = "output_truncated";
+
+/// 応答が「意味的に空」か（#706）。
+///
+/// **判定は中身の形だけで行う。** `finish_reason` や HTTP ステータスは条件に足さない——
+/// 実バグ（cursor:grok）は `finish_reason:"stop"` を名乗りつつ content フィールドごと
+/// 欠落していたので、それらを条件に足すと同じ形の別 provider を取りこぼす。
+///
+/// 「空」の定義（3 形すべてを対象）:
+/// - content フィールドが **欠落**（`None`）
+/// - content が **空文字**
+/// - content が **空白のみ**（trim して空）
+///
+/// かつ **tool_call が無い**こと（tool_call があればツール往復の一手なので空ではない）。
+///
+/// content 抽出はエンジンの最終応答抽出（`ChatResponse::first_text` → `Message::text_content`）
+/// と同じ経路に揃える。Text 以外（画像のみ等）はエンジン側でも本文 0 として扱われるため、
+/// ここでも空とみなす（両者が食い違うと「空なのに成功として通る」穴が戻る）。判定は全
+/// provider の正規化後 `ChatResponse` に対して行うので、provider ごとに検知を分けない。
+pub fn is_empty_response(response: &ChatResponse) -> bool {
+    let message = match response.first_message() {
+        Some(m) => m,
+        // choices 自体が無い＝使える応答が無い。
+        None => return true,
+    };
+    // tool_call があれば空ではない。
+    if message
+        .tool_calls
+        .as_ref()
+        .is_some_and(|calls| !calls.is_empty())
+    {
+        return false;
+    }
+    // content: 欠落／空文字／空白のみ をすべて空とみなす。
+    match message.text_content() {
+        Some(text) => text.trim().is_empty(),
+        None => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -495,6 +549,88 @@ mod tests {
     fn test_first_text() {
         let response = ChatResponse::text("the answer");
         assert_eq!(response.first_text(), Some("the answer"));
+    }
+
+    /// choices[0].message を content / tool_calls 指定で組んだ 1 択応答。
+    fn empty_test_response(
+        content: Option<&str>,
+        tool_calls: Option<Vec<ToolCall>>,
+    ) -> ChatResponse {
+        ChatResponse {
+            id: String::new(),
+            model: String::new(),
+            choices: vec![Choice {
+                index: 0,
+                message: Message {
+                    role: Role::Assistant,
+                    content: content.map(|s| MessageContent::Text(s.to_string())),
+                    name: None,
+                    function_call: None,
+                    tool_calls,
+                    tool_call_id: None,
+                },
+                // #706: finish_reason は判定に混ぜない。実バグは "stop" を名乗っていた。
+                finish_reason: Some(FinishReason::Stop),
+            }],
+            usage: Usage::default(),
+            created: 0,
+        }
+    }
+
+    fn a_tool_call() -> ToolCall {
+        ToolCall {
+            id: "c1".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "test".to_string(),
+                arguments: "{}".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn is_empty_response_matches_the_three_empty_shapes() {
+        // #706: content 欠落／空文字／空白のみ、いずれも tool_call 無しなら空。
+        assert!(
+            is_empty_response(&empty_test_response(None, None)),
+            "content フィールド欠落は空"
+        );
+        assert!(
+            is_empty_response(&empty_test_response(Some(""), None)),
+            "空文字は空"
+        );
+        assert!(
+            is_empty_response(&empty_test_response(Some("   \n\t "), None)),
+            "空白のみは空"
+        );
+    }
+
+    #[test]
+    fn is_empty_response_is_false_when_there_is_usable_output() {
+        // 本文がある。
+        assert!(!is_empty_response(&empty_test_response(Some("hi"), None)));
+        // 空 content でも tool_call があればツール往復の一手＝空ではない。
+        assert!(!is_empty_response(&empty_test_response(
+            None,
+            Some(vec![a_tool_call()])
+        )));
+        assert!(!is_empty_response(&empty_test_response(
+            Some(""),
+            Some(vec![a_tool_call()])
+        )));
+    }
+
+    #[test]
+    fn is_empty_response_true_when_no_choices() {
+        // choices 自体が無い＝使える応答が無い。
+        let resp = ChatResponse {
+            id: String::new(),
+            model: String::new(),
+            choices: vec![],
+            usage: Usage::default(),
+            created: 0,
+        };
+        assert!(is_empty_response(&resp));
     }
 
     #[test]
