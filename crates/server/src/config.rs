@@ -1734,6 +1734,39 @@ mod tests {
         }
     }
 
+    /// Cursor CLI（`agent` / `cursor-agent`）は config のグローバル許可リストに載せない。
+    ///
+    /// `-p --force` で起動した Cursor CLI は自身が write と shell を持つため、許可
+    /// コマンド一覧の外にあることまで実行できてしまう（許可リストが実質無効になる）。
+    /// 必要なエージェントにだけ per-agent の `agent_allowed_commands` で与える運用に
+    /// 固定し、config への逆戻りを回帰ガードする。
+    #[test]
+    fn shipped_configs_do_not_globally_allow_cursor_cli() {
+        let _lock = env_lock();
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for name in ["config/default.toml.example", "config/default.toml"] {
+            let path = repo_root.join(name);
+            let cfg = load_config(path.to_str().unwrap())
+                .unwrap_or_else(|e| panic!("{name} is not valid TOML: {e:#}"));
+            let Some(shell) = cfg.tools.shell.as_ref() else {
+                continue;
+            };
+            let allowed: Vec<String> = shell
+                .effective_commands()
+                .into_iter()
+                .map(|c| c.name)
+                .collect();
+            for forbidden in ["agent", "cursor-agent", "cursor"] {
+                assert!(
+                    !allowed.iter().any(|c| c == forbidden),
+                    "{name}: '{forbidden}' must not be globally allowed \
+                     (it can spawn an agent with its own write/shell access, which bypasses \
+                     this allowlist). Grant it per-agent via agent_allowed_commands instead"
+                );
+            }
+        }
+    }
+
     /// 配布テンプレートは共有ゲートウェイを既定で無効にしている（個人 ID や
     /// トークンを持たない状態で配られる）。
     ///

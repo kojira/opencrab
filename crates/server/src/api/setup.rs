@@ -445,6 +445,21 @@ mod tests {
         assert!(p.body.contains("権限モデル"));
     }
 
+    /// Cursor CLI ガイドが標準スキルとして seed 可能なことを実ファイルで検証する。
+    ///
+    /// このスキルは `execute_shell` 経由でしか実行できない手順なので、actions の
+    /// 欠落（= ツールが露出しない）も drift として落とす。
+    #[test]
+    fn cursor_cli_skill_parses() {
+        let content = include_str!("../../../../skills/cursor-cli-local.skill.md");
+        let p = parse_skill_md(content).expect("cursor-cli-local must parse as a standard skill");
+        assert_eq!(p.name, "cursor-cli-local");
+        assert!(!p.description.is_empty());
+        assert!(p.permission_db.contains("agent"));
+        assert_eq!(p.actions, vec!["execute_shell"]);
+        assert!(p.body.len() > 200, "guide body should be substantial");
+    }
+
     use crate::config::{LlmConfig, ProviderConfig};
     use opencrab_db::queries::LlmProviderOverrideRow;
 
