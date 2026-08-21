@@ -105,11 +105,9 @@ async fn main() -> anyhow::Result<()> {
                     })
                     .unwrap();
                 let mut count = 0;
-                for row in rows {
-                    if let Ok((id, name, persona)) = row {
-                        println!("  {} - {} ({})", &id[..8], name, persona);
-                        count += 1;
-                    }
+                for (id, name, persona) in rows.flatten() {
+                    println!("  {} - {} ({})", &id[..8], name, persona);
+                    count += 1;
                 }
                 if count == 0 {
                     println!("  (no agents found)");

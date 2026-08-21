@@ -110,6 +110,7 @@ pub fn inline_limit_for_tool(tool_name: &str) -> usize {
 ///
 /// この 1 つの述語を、性質の違う 2 つの判断が**両方**参照する:
 /// - [`inline_limit_for_tool`]（この結果を退避するか＝1 回で運べる量）
+///
 /// **#709 以降、参照化はすべてのツール結果に掛かる**ので、この述語が効くのは
 /// [`inline_limit_for_tool`]（1 回で運べる量）だけになった。「読み」を増やすときはここを直す。
 pub fn is_read_tool(tool_name: &str) -> bool {

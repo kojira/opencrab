@@ -323,7 +323,7 @@ impl LlmRouter {
     ///
     /// Retry policy:
     ///   - Retryable:     429 (rate-limit), 5xx (transient server errors),
-    ///                    ステータス不明のエラー（ネットワーク・サブプロセス等）
+    ///     ステータス不明のエラー（ネットワーク・サブプロセス等）
     ///   - Non-retryable: other 4xx (permanent client errors — retrying won't help)
     ///
     /// 分類は型付き [`LlmError`] の downcast で行う（anyhow は context チェーンを

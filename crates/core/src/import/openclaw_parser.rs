@@ -138,7 +138,7 @@ pub fn scan_workspace(dir: &str, options: &ScanOptions) -> anyhow::Result<ScanRe
                             })
                 })
                 .collect();
-            entries.sort_by(|a, b| b.path().cmp(&a.path()));
+            entries.sort_by_key(|b| std::cmp::Reverse(b.path()));
             entries.truncate(options.daily_log_days as usize);
 
             for entry in entries {

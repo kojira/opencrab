@@ -1712,6 +1712,7 @@ fn memory_index_category_migration_v23_widens_check_and_preserves_rows() {
 ///  - 時系列ツリー（node_type 別）と memory_curated が 1 行も減らないこと
 ///  - members が空になり、PK が多対多になって同一 topic に複数 category を入れられること
 ///  - user_version が上がり、2 回実行しても落ちないこと
+///
 /// を固定する。
 #[test]
 fn memory_index_reset_and_multi_tag_migration_v26() {

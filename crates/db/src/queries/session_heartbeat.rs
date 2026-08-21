@@ -202,8 +202,6 @@ pub fn heartbeat_next_fire_at(
 mod tests {
     use super::*;
 
-    const AGENT_UUID: &str = "6b79ac3a-7f17-4618-a827-5bda992a3698";
-
     // 発火先の parse/build（旧 `resolve_session_fire_target` / `channel_session_id` / 旧 enum）は
     // 各 transport の `TransportFire` descriptor へ移設した（#628）。それらの単体テスト（fail-closed /
     // UUID 剥がし / round-trip）は各 descriptor crate に、登録簿一括の排他・round-trip は

@@ -287,7 +287,7 @@ async fn test_create_and_list_sessions() {
     assert!(resp["id"].as_str().is_some());
 
     let (_, resp) = send_request(app, "GET", "/api/sessions", None).await;
-    assert!(resp.as_array().unwrap().len() >= 1);
+    assert!(!resp.as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -1278,7 +1278,7 @@ async fn test_agents_discuss_and_generate_skill() {
     // Verify skill was created in the DB.
     let skills = {
         let conn = db.lock().unwrap();
-        opencrab_db::queries::list_skills(&conn, &responses[0]["agent_id"].as_str().unwrap(), false)
+        opencrab_db::queries::list_skills(&conn, responses[0]["agent_id"].as_str().unwrap(), false)
             .unwrap()
     };
     assert!(
@@ -3092,7 +3092,7 @@ async fn test_web_subtask_completion_resumes_parent_conversation() {
 #[cfg(feature = "web")]
 #[tokio::test]
 async fn test_web_progress_settlement_does_not_resume() {
-    use opencrab_actions::{SettleKind, SubtaskCompletionSink, SubtaskSettled};
+    use opencrab_actions::{SettleKind, SubtaskSettled};
     use opencrab_web_gateway::WebCompletionSink;
 
     let (app, _db, mock, state) = create_test_app_with_state();
