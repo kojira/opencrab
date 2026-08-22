@@ -57,9 +57,22 @@ init_paths() {
     SETTINGS_FILE="$DEV_DIR/settings"
     SUPERVISOR_PID_FILE="$PID_DIR/supervisor.pid"
     SUPERVISOR_LOCK="$DEV_DIR/supervisor.lock"
+    LIFECYCLE_LOCK="$DEV_DIR/lifecycle.lock"
     READY_FILE="$DEV_DIR/ready"
     FAILED_FILE="$DEV_DIR/failed"
     mkdir -p "$PID_DIR" "$LOG_DIR"
+
+    local requested_target="${CARGO_TARGET_DIR:-$SCRIPT_DIR/target}"
+    case "$requested_target" in
+        /*) ;;
+        *) requested_target="$SCRIPT_DIR/$requested_target" ;;
+    esac
+    mkdir -p "$requested_target"
+    TARGET_DIR="$(cd "$requested_target" && pwd -P)"
+    CORE_BIN="$TARGET_DIR/debug/opencrab-social-runtime"
+    WEB_BIN="$TARGET_DIR/debug/web-gate"
+    NOSTR_BIN="$TARGET_DIR/debug/nostr-gate"
+    LOCK_BIN="$TARGET_DIR/debug/opencrab-lock-fd"
 }
 
 validate_port() {
@@ -124,17 +137,6 @@ load_start_config() {
         die "lsof is required on systems without /proc to verify PID ownership safely"
     fi
 
-    local requested_target="${CARGO_TARGET_DIR:-$SCRIPT_DIR/target}"
-    case "$requested_target" in
-        /*) ;;
-        *) requested_target="$SCRIPT_DIR/$requested_target" ;;
-    esac
-    mkdir -p "$requested_target"
-    TARGET_DIR="$(cd "$requested_target" && pwd -P)"
-    CORE_BIN="$TARGET_DIR/debug/opencrab-social-runtime"
-    WEB_BIN="$TARGET_DIR/debug/web-gate"
-    NOSTR_BIN="$TARGET_DIR/debug/nostr-gate"
-    LOCK_BIN="$TARGET_DIR/debug/opencrab-lock-fd"
 }
 
 read_pid() {
@@ -229,6 +231,31 @@ supervisor_owned() {
     fi
     command -v lsof >/dev/null 2>&1 || return 2
     lsof -Fn -a -p "$pid" -- "$SUPERVISOR_LOCK" 2>/dev/null | grep -Fqx "n$SUPERVISOR_LOCK"
+}
+
+acquire_lifecycle_lock() {
+    if [ ! -x "$LOCK_BIN" ] && [ -f "$SETTINGS_FILE" ]; then
+        local saved_target
+        saved_target="$(sed -n 's/^target_dir=//p' "$SETTINGS_FILE" | sed -n '1p')"
+        if [ -n "$saved_target" ] && [ -x "$saved_target/debug/opencrab-lock-fd" ]; then
+            LOCK_BIN="$saved_target/debug/opencrab-lock-fd"
+        fi
+    fi
+    [ -x "$LOCK_BIN" ] || die "launcher lock helper is missing; run './dev.sh start' to build it"
+
+    # FD 9 is inherited by a newly spawned supervisor.  supervise() replaces
+    # it with SUPERVISOR_LOCK before touching shared state, leaving this
+    # command as the sole lifecycle-lock owner while it waits for readiness.
+    exec 9> "$LIFECYCLE_LOCK"
+    "$LOCK_BIN" 9 --wait || die "could not acquire the launcher lifecycle lock"
+}
+
+run_with_lifecycle_lock() {
+    local rc=0
+    acquire_lifecycle_lock
+    "$@" || rc=$?
+    exec 9>&-
+    return "$rc"
 }
 
 build_components() {
@@ -381,8 +408,17 @@ terminate_component() {
         return 0
     fi
 
+    terminate_component_pid "$name" "$pid"
+}
+
+terminate_component_pid() {
+    local name="$1"
+    local pid="$2"
+    local pid_file="$PID_DIR/$name.pid"
+    local rc i
+
     if ! group_alive "$pid"; then
-        rm -f "$pid_file" "$PID_DIR/$name.owner"
+        remove_component_state_if_matches "$name" "$pid" || return 1
         return 0
     fi
 
@@ -423,8 +459,21 @@ terminate_component() {
         echo "[error] $name process group $pid remains after SIGKILL" >&2
         return 1
     fi
-    rm -f "$pid_file" "$PID_DIR/$name.owner"
+    remove_component_state_if_matches "$name" "$pid" || return 1
     echo "    $name stopped"
+}
+
+remove_component_state_if_matches() {
+    local name="$1"
+    local expected_pid="$2"
+    local pid_file="$PID_DIR/$name.pid"
+    local registered_pid
+    if registered_pid="$(read_pid "$pid_file" 2>/dev/null)" \
+        && [ "$registered_pid" != "$expected_pid" ]; then
+        echo "[error] $name PID registration changed; preserving the newer state" >&2
+        return 1
+    fi
+    rm -f "$pid_file" "$PID_DIR/$name.owner"
 }
 
 supervisor_cleanup() {
@@ -612,7 +661,29 @@ launch_supervisor() {
 
 stop_all() {
     local failed=0
-    local supervisor_pid rc i
+    local supervisor_pid rc i name pid
+    local core_pid="" web_pid="" nostr_pid=""
+
+    # Freeze the recovery targets before signaling the supervisor.  The
+    # lifecycle lock prevents another command from publishing a new generation,
+    # and these snapshots ensure recovery never selects a target by rereading a
+    # PID file after the old supervisor has exited.
+    for name in core web nostr; do
+        if pid="$(read_pid "$PID_DIR/$name.pid" 2>/dev/null)"; then
+            case "$name" in
+                core) core_pid="$pid" ;;
+                web) web_pid="$pid" ;;
+                nostr) nostr_pid="$pid" ;;
+            esac
+        else
+            rc=$?
+            if [ "$rc" -eq 2 ]; then
+                echo "[error] Invalid PID file: $PID_DIR/$name.pid" >&2
+                failed=1
+            fi
+        fi
+    done
+
     if supervisor_pid="$(read_pid "$SUPERVISOR_PID_FILE" 2>/dev/null)"; then
         if pid_alive "$supervisor_pid"; then
             if supervisor_owned "$supervisor_pid"; then
@@ -650,9 +721,9 @@ stop_all() {
 
     # Normally the supervisor already removed these.  This is the recovery path
     # after SIGKILL/panic and is what prevents registered orphan groups building up.
-    terminate_component nostr || failed=1
-    terminate_component web || failed=1
-    terminate_component core || failed=1
+    [ -z "$nostr_pid" ] || terminate_component_pid nostr "$nostr_pid" || failed=1
+    [ -z "$web_pid" ] || terminate_component_pid web "$web_pid" || failed=1
+    [ -z "$core_pid" ] || terminate_component_pid core "$core_pid" || failed=1
 
     if [ "$failed" -ne 0 ]; then
         echo "[error] Not every launcher process was stopped" >&2
@@ -660,6 +731,11 @@ stop_all() {
     fi
     clean_dead_state
     echo "==> Stopped; no registered process group remains"
+}
+
+restart_all() {
+    stop_all || return 1
+    launch_supervisor
 }
 
 component_status() {
@@ -747,16 +823,15 @@ case "${1:-}" in
     start)
         load_start_config
         build_components
-        launch_supervisor
+        run_with_lifecycle_lock launch_supervisor
         ;;
     stop)
-        stop_all
+        run_with_lifecycle_lock stop_all
         ;;
     restart)
         load_start_config
         build_components
-        stop_all
-        launch_supervisor
+        run_with_lifecycle_lock restart_all
         ;;
     status)
         show_status
