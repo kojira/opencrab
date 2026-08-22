@@ -99,7 +99,7 @@ async fn live_roundtrip_against_yabu() {
     // 3. 自分で署名した kind-1 note を発行し OK を待つ。
     let (id_hex, event) = nostr::build_say(
         &key,
-        "opencrab2 nostr-gate 疎通テスト（使い捨て鍵・自動投稿）",
+        "nostr-gate 疎通テスト（使い捨て鍵・自動投稿）",
         None,
         nostr::now_secs(),
     )
