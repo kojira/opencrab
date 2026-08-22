@@ -1034,10 +1034,17 @@ impl Engine for HttpSseEngine {
     }
 }
 
-/// 設定（環境変数）から本物のプロバイダを選ぶ。設定が無ければ `None`——app は echo に落ち着く
-/// （フォールバックではなく、設定による選択・§15）。**プロバイダを足すときはここに 1 アーム**。
-pub fn engine_from_env() -> Option<Arc<dyn Engine>> {
-    match std::env::var("OPENCRAB_LLM_PROVIDER").ok().as_deref() {
+/// 設定（環境変数）から本物のプロバイダを選ぶ。設定が無ければ `Ok(None)`——app は echo に落ち着く。
+/// 明示値が未知なら `Err` で起動を止め、echo へフォールバックしない。**プロバイダを足すときはここに 1 アーム**。
+pub fn engine_from_env() -> Result<Option<Arc<dyn Engine>>, String> {
+    let configured = match std::env::var("OPENCRAB_LLM_PROVIDER") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err("OPENCRAB_LLM_PROVIDER is not valid Unicode".to_string())
+        }
+    };
+    let engine = match configured.as_deref() {
         Some("anthropic") => {
             // 本番は https。手順書に合わせ、既定は本物の API。偽サーバのときだけ base を差し替える。
             let base = std::env::var("OPENCRAB_LLM_BASE_URL")
@@ -1116,9 +1123,11 @@ pub fn engine_from_env() -> Option<Arc<dyn Engine>> {
                 model, binary, sandbox, api_key,
             )) as Arc<dyn Engine>)
         }
-        // 知らない・未設定は本物を選ばない（近いものへ寄せない・§15）。
-        _ => None,
-    }
+        // 未設定だけが echo を選ぶ。未知・空の明示値は近いものへ寄せない（§15）。
+        None => None,
+        Some(other) => return Err(format!("unknown OPENCRAB_LLM_PROVIDER: {other}")),
+    };
+    Ok(engine)
 }
 
 // ---- HTTP/SSE の転送（TLS は reqwest が終端。断片ごとに chunk() を叩く）----
