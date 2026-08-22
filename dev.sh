@@ -243,9 +243,9 @@ acquire_lifecycle_lock() {
     fi
     [ -x "$LOCK_BIN" ] || die "launcher lock helper is missing; run './dev.sh start' to build it"
 
-    # FD 9 is inherited by a newly spawned supervisor.  supervise() replaces
-    # it with SUPERVISOR_LOCK before touching shared state, leaving this
-    # command as the sole lifecycle-lock owner while it waits for readiness.
+    # launch_supervisor() duplicates FD 9 into the detached supervisor as FD 7.
+    # Both descriptors then refer to the same open-file description, so either
+    # process can keep the lifecycle lock held if the other exits first.
     exec 9> "$LIFECYCLE_LOCK"
     "$LOCK_BIN" 9 --wait || die "could not acquire the launcher lifecycle lock"
 }
@@ -325,6 +325,10 @@ start_component() {
     : > "$LOG_DIR/$name.log"
     : > "$owner_file"
     (
+        # Only the supervisor owns the startup lifecycle descriptor.  If a
+        # component retained it, stop/restart could wait forever after a
+        # supervisor failure.
+        exec 7>&-
         # FD 8 is intentionally inherited by the component and its children.
         exec 8> "$owner_file"
         exec "$@"
@@ -484,6 +488,9 @@ supervisor_cleanup() {
     terminate_component web || failed=1
     terminate_component core || failed=1
     rm -f "$READY_FILE" "$CORE_SOCKET" "$SUPERVISOR_PID_FILE"
+    # Failure/termination cleanup is now complete.  This is the earliest point
+    # at which a waiting lifecycle command may inspect and mutate state.
+    exec 7>&-
     if [ "$failed" -ne 0 ]; then
         echo "[error] Supervisor could not stop every component" >&2
         exit 1
@@ -506,10 +513,16 @@ supervise() {
     TARGET_DIR="$OC_TARGET_DIR"
     NOSTR_GATE_RELAY="${OC_NOSTR_GATE_RELAY:-}"
 
-    # The lock is acquired on this inherited descriptor.  flock(2) attaches to
-    # the shared open-file description, so it remains held after the helper
-    # exits and for this supervisor's entire lifetime.  Nothing below may read
-    # or mutate shared launcher state before this succeeds.
+    # FD 7 is the startup lifecycle lock inherited from launch_supervisor().
+    # Keep it separate from the long-lived supervisor lock on FD 9 until ready
+    # publication or failure cleanup has completed.
+    if ! : >&7 2>/dev/null; then
+        die "launcher supervisor is missing its inherited lifecycle lock"
+    fi
+
+    # flock(2) attaches to the shared open-file description, so this lock
+    # remains held after the helper exits and for the supervisor's lifetime.
+    # Nothing below may read or mutate shared launcher state before it succeeds.
     exec 9> "$SUPERVISOR_LOCK"
     "$LOCK_BIN" 9 || die "another launcher start is already in progress or running"
 
@@ -566,6 +579,10 @@ supervise() {
 
     touch "$READY_FILE"
     echo "==> All configured components are ready"
+    # All state for this generation is now published.  The foreground command
+    # still has FD 9 when it is alive; if it died, closing FD 7 releases the
+    # shared lifecycle lock and lets a waiting stop/restart proceed.
+    exec 7>&-
 
     local name pid
     while :; do
@@ -610,7 +627,9 @@ launch_supervisor() {
     export OC_TARGET_DIR="$TARGET_DIR"
     export OC_NOSTR_GATE_RELAY="${NOSTR_GATE_RELAY:-}"
 
-    nohup bash "$SCRIPT_DIR/dev.sh" __supervise </dev/null >> "$LOG_DIR/launcher.log" 2>&1 &
+    # dup(2) semantics make child FD 7 share FD 9's open-file description and
+    # therefore its lifecycle lock.  Only the detached child receives FD 7.
+    nohup bash "$SCRIPT_DIR/dev.sh" __supervise 7>&9 </dev/null >> "$LOG_DIR/launcher.log" 2>&1 &
     local supervisor_pid=$!
     local registered_pid
     local owned_state=0
