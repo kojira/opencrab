@@ -1467,7 +1467,7 @@ mod tests {
         let path = NostaroCli::materialize_config(
             agent,
             &[
-                "wss://x.kojira.io".to_string(),
+                "wss://relay-one.example.com".to_string(),
                 "wss://relay.two".to_string(),
             ],
             None,
@@ -1485,11 +1485,13 @@ mod tests {
         );
         // relays と default_relays の両方が同じリレー集合で書かれる。
         assert!(
-            content.contains("relays = [\"wss://x.kojira.io\", \"wss://relay.two\"]"),
+            content.contains("relays = [\"wss://relay-one.example.com\", \"wss://relay.two\"]"),
             "relays missing: {content}"
         );
         assert!(
-            content.contains("default_relays = [\"wss://x.kojira.io\", \"wss://relay.two\"]"),
+            content.contains(
+                "default_relays = [\"wss://relay-one.example.com\", \"wss://relay.two\"]"
+            ),
             "default_relays missing: {content}"
         );
         let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
@@ -1912,7 +1914,7 @@ mod tests {
                     "-k".to_string(),
                     "40".to_string(),
                     "-c".to_string(),
-                    "らぼみ実験室".to_string(),
+                    "テスト用チャンネル".to_string(),
                 ],
             )
             .await

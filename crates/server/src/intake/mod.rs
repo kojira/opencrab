@@ -158,7 +158,7 @@ pub fn route_and_enqueue(
 }
 
 /// source 側の一覧 API から未処理分を取り出す抽象。汎用実装は [`rest_list::RestListAdapter`]
-/// （`kind = "rest_list"`）。第一号 omoikane も config の値としてこの型で構成する。
+/// （`kind = "rest_list"`）。第一号 sample-source も config の値としてこの型で構成する。
 #[async_trait::async_trait]
 pub trait SourceAdapter: Send + Sync {
     /// source 名（`/api/hooks/{source}` / config のキーと一致）。
@@ -358,7 +358,7 @@ process_interval_secs = 60
 catch_up_interval_secs = 600
 
 [[sources]]
-name = "omoikane"
+name = "sample-source"
 kind = "rest_list"
 base_url = "https://kb.example"
 auth = { kind = "bearer", token = "tok-1" }
@@ -383,7 +383,7 @@ array_path = "results"
         let names: Vec<&str> = adapters.iter().map(|a| a.source()).collect();
         assert_eq!(
             names,
-            vec!["omoikane", "acme"],
+            vec!["sample-source", "acme"],
             "2 つ目の source が設定だけでアダプタ化される（コード変更ゼロ）"
         );
     }
@@ -417,20 +417,20 @@ event_type = "e.created"
     fn sources_missing_routes_flags_name_route_mismatch() {
         let toml = r#"
 [[routes]]
-source = "omoikane"
+source = "sample-source"
 event_type = "comment.created"
-agent_id = "scout"
+agent_id = "agent_alpha"
 
 # name が routes.source と不一致（タイポ相当）→ 取得しても捨てられる
 [[sources]]
-name = "omoiakne"
+name = "sample-soruce"
 kind = "rest_list"
 base_url = "https://kb.example"
 event_type = "comment.created"
 
 # name が route と一致 → 配送先あり
 [[sources]]
-name = "omoikane"
+name = "sample-source"
 kind = "rest_list"
 base_url = "https://kb2.example"
 event_type = "comment.created"
@@ -441,8 +441,8 @@ event_type = "comment.created"
             .map(|a| a.source().to_string())
             .collect();
         let missing = sources_missing_routes(&cfg.routes, &active);
-        // route と一致する "omoikane" は含まれず、不一致の "omoiakne" だけが検出される。
-        assert_eq!(missing, vec!["omoiakne"]);
+        // route と一致する "sample-source" は含まれず、不一致の typo だけが検出される。
+        assert_eq!(missing, vec!["sample-soruce"]);
     }
 
     /// `intake_wake` に permit が記憶されている（=鳴らされた）かを、消費して判定する。
@@ -477,14 +477,14 @@ event_type = "comment.created"
         let mut state = crate::test_app_state();
         state.intake = std::sync::Arc::new(crate::config::IntakeConfig {
             routes: vec![crate::config::IntakeRoute {
-                source: "omoikane".into(),
+                source: "sample-source".into(),
                 event_type: "comment.created".into(),
-                agent_id: "scout".into(),
+                agent_id: "agent_alpha".into(),
             }],
             ..Default::default()
         });
         let adapter = MockAdapter {
-            source: "omoikane".into(),
+            source: "sample-source".into(),
             events: vec![IntakeEvent {
                 event_type: "comment.created".into(),
                 dedup_key: "comment.created:1".into(),
@@ -513,7 +513,7 @@ event_type = "comment.created"
         let routes = vec![crate::config::IntakeRoute {
             source: "active".into(),
             event_type: "e.created".into(),
-            agent_id: "scout".into(),
+            agent_id: "agent_alpha".into(),
         }];
         // active_sources には有効化された source のみ入る前提（build_adapters が畳む）。
         let active = vec!["active".to_string()];

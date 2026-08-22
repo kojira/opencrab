@@ -145,8 +145,8 @@ DROP TABLE identity;
 ```json
 {
     "agent_id": "...",
-    "name": "かいろ",
-    "persona_name": "kairo",
+    "name": "エージェントA",
+    "persona_name": "agent-a",
     "personality": "...",
     "instructions": "...",
     "model": "claude-sonnet-4-6",

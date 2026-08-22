@@ -1107,8 +1107,8 @@ mod tests {
             .execute(
                 "discord_channel_config",
                 &json!({
-                    "channel_id": 1479115942293409942u64,
-                    "guild_id": 1465697209541726362u64,
+                    "channel_id": 444455556666777788u64,
+                    "guild_id": 222233334444555566u64,
                     "readable": true,
                     "writable": true,
                     "whitelisted": false,
@@ -1126,27 +1126,27 @@ mod tests {
         let conn = db.lock().unwrap();
         let cfg = opencrab_db::queries::get_channel_config_for_agent(
             &conn,
-            "1479115942293409942",
+            "444455556666777788",
             "test-agent",
         )
         .unwrap()
         .unwrap();
         assert!(cfg.readable);
         assert!(cfg.writable);
-        assert_eq!(cfg.guild_id, "1465697209541726362");
+        assert_eq!(cfg.guild_id, "222233334444555566");
     }
 
     #[test]
     fn test_normalize_id_args_stringifies_only_id_numbers() {
         // *_id の整数は文字列化、それ以外（真偽・非 id 数値・既に文字列）は不変。
         let input = json!({
-            "channel_id": 1479115942293409942u64,
+            "channel_id": 444455556666777788u64,
             "guild_id": "already-str",
             "readable": true,
             "count": 5,
         });
         let out = normalize_id_args(&input);
-        assert_eq!(out["channel_id"], json!("1479115942293409942"));
+        assert_eq!(out["channel_id"], json!("444455556666777788"));
         assert_eq!(out["guild_id"], json!("already-str"));
         assert_eq!(out["readable"], json!(true));
         assert_eq!(out["count"], json!(5));

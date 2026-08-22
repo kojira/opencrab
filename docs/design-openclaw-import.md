@@ -87,7 +87,7 @@ OpenClawには2種類のワークスペースがある：
 #### IDENTITY.md
 ```markdown
 # IDENTITY.md - Who Am I?
-- **Name:** のすたろう
+- **Name:** エージェントC
 - **Creature:** Nostr空間上に住む電脳存在
 - **Vibe:** 17歳男子高校生。...
 - **Emoji:** ⚡
@@ -101,12 +101,12 @@ OpenClawには2種類のワークスペースがある：
 
 #### MEMORY.md
 ```markdown
-# MEMORY.md - のすたろうの長期記憶
+# MEMORY.md - エージェントCの長期記憶
 
 ## 重要な仲間
 （人物情報）
 
-## Agent Hub
+## サンプルサーバー
 （サーバー設定）
 
 ## セキュリティルール
@@ -121,7 +121,7 @@ OpenClawには2種類のワークスペースがある：
 
 #### memory/YYYY-MM-DD.md
 ```markdown
-# 2026-03-21 のすたろう日記
+# 2026-03-21 エージェントC日記
 ## Nostr会話（00:41〜）
 ...
 ```
@@ -261,12 +261,12 @@ Body: {
 {
   "scan_result": {
     "soul": {
-      "persona_name": "のすたろう",
+      "persona_name": "エージェントC",
       "personality_length": 2048,
       "found": true
     },
     "identity": {
-      "name": "のすたろう",
+      "name": "エージェントC",
       "image_url": null,
       "found": true
     },
@@ -296,7 +296,7 @@ Body: {
 POST /api/import/execute
 Body: {
   "source_dir": "/Volumes/2TB/openclaw/workspace",
-  "agent_name": "のすたろう",
+  "agent_name": "エージェントC",
   "options": { ... },
   "confirmed": true
 }
@@ -326,12 +326,12 @@ GET /api/import/status/{import_id}
 ┌────────────────────────────────────────────────────┐
 │  OpenClaw インポート                                │
 ├────────────────────────────────────────────────────┤
-│  新規エージェント名: [のすたろう    ]              │
+│  新規エージェント名: [エージェントC    ]              │
 │  ソースディレクトリ: [/Volumes/2TB/openclaw/workspace] [スキャン] │
 ├────────────────────────────────────────────────────┤
 │  スキャン結果                                       │
 │  ✅ SOUL.md      → soul.personality (2.0KB)        │
-│  ✅ IDENTITY.md  → identity.name = "のすたろう"    │
+│  ✅ IDENTITY.md  → identity.name = "エージェントC"    │
 │  ✅ MEMORY.md    → 8セクション → memory_curated    │
 │  ✅ memory/*.md  → 45日分 (最新30日インポート)     │
 │  ✅ skills/      → 20スキル                        │
@@ -351,15 +351,15 @@ GET /api/import/status/{import_id}
 
 ```bash
 # スキャン（dryrun）
-opencrab import scan --name のすたろう --source /path/to/openclaw/workspace
+opencrab import scan --name エージェントC --source /path/to/openclaw/workspace
 
 # 実行
-opencrab import run --name のすたろう --source /path/to/openclaw/workspace \
+opencrab import run --name エージェントC --source /path/to/openclaw/workspace \
   --daily-log-days 30 \
   --overwrite
 
 # 対話式（おすすめ）
-opencrab import --name のすたろう --source /path/to/openclaw/workspace
+opencrab import --name エージェントC --source /path/to/openclaw/workspace
 > スキャン結果を表示... インポートしますか？ [y/N]
 ```
 
@@ -663,15 +663,15 @@ impressions, heartbeat_log
 
 *このドキュメントはOpenCrab開発の一部として作成されました。*
 
-## レビューメモ（2026-03-22 by らぼみ）
+## レビューメモ（2026-03-22 by エージェントB）
 
 - **`TOOLS.md` を除外リストに追加**: SSHホスト・IPアドレス等のインフラ情報が含まれる可能性があるため除外対象とする（またはシークレット検出対象に含める）
 - **`situation_pattern` の初期値**: descriptionをそのまま流用しているが、「どういう状況で使うか」と「何をするか」は異なる概念。NOTE: インポート後にユーザーが手動で修正することを推奨
 
-## 追加レビューメモ（2026-03-22 by kojira指摘）
+## 追加レビューメモ（2026-03-22 by owner指摘）
 
 - **スキルスクリプトのワークスペースコピーが未考慮**: 現在の設計はSKILL.mdのguidanceテキストのみを取り込む設計になっている
-- **必要な追加**: スキルに関連する実行スクリプト（.py等）をかいろのワークスペース内にコピーするフローが必要
+- **必要な追加**: スキルに関連する実行スクリプト（.py等）をエージェントAのワークスペース内にコピーするフローが必要
   - 例: `scripts/generate_image.py` → `{agent_workspace}/scripts/nano-banana-pro/generate_image.py`
   - guidanceのスクリプトパスもワークスペース相対パスに書き換える
 - **設計原則**: ワークスペース外への参照はNG。スクリプト・依存ファイルはすべてワークスペース内に配置する

@@ -2197,7 +2197,7 @@ mod curated_long_term_injection_tests {
         curate(&conn, "long_term/A100サーバー", "- GPU は 8 枚");
         curate(&conn, "long_term/Nostr", "- リレーは wss://…");
         // user_profile は単一の完全一致（従来から生きている経路）。
-        curate(&conn, "user_profile", "kojira さんは…");
+        curate(&conn, "user_profile", "owner さんは…");
         // daily_log/* は注入対象外。前方一致が別 prefix を巻き込まないことの確認。
         curate(&conn, "daily_log/2026-08-11", "きょうの日記の本文");
 
@@ -2217,7 +2217,7 @@ mod curated_long_term_injection_tests {
         );
         // user_profile は従来どおり見出し無しで注入（回帰していない）。
         assert!(
-            prompt.contains("## User Profile") && prompt.contains("kojira さんは…"),
+            prompt.contains("## User Profile") && prompt.contains("owner さんは…"),
             "user_profile の注入が壊れている:\n{prompt}"
         );
         // daily_log は注入されない（前方一致が別カテゴリを巻き込まない）。
@@ -2304,7 +2304,7 @@ mod recent_user_speech_guarantee_tests {
     use opencrab_actions::transcript::{InboundMessageRecord, TranscriptSource};
 
     const AGENT: &str = "a1";
-    const USER: &str = "kojira";
+    const USER: &str = "owner";
     const SESSION: &str = "s1";
 
     /// ユーザー発言を**本番と同じ書き手**（`record_inbound_message`）で入れる。
@@ -2319,7 +2319,7 @@ mod recent_user_speech_guarantee_tests {
                     session_id: SESSION,
                     recipient_agent_id: AGENT,
                     sender_id: USER,
-                    sender_name: "kojira",
+                    sender_name: "owner",
                     avatar_url: None,
                     channel_id: Some("222"),
                     pubkey: None,
@@ -2468,7 +2468,7 @@ mod recent_user_speech_guarantee_tests {
     /// #286 は「受信行が `agent_id == speaker_id` になり、列比較の述語
     /// `speaker_id != log.agent_id` が恒偽になる」バグだった。#377 で受信行が
     /// `agent_id != speaker_id`（受信側≠送信者）に直ったため、仮に述語を旧・列比較へ
-    /// 戻しても "kojira" != "a1" で真になり、**このテストは落ちない**。
+    /// 戻しても "owner" != "a1" で真になり、**このテストは落ちない**。
     ///
     /// それでも無防備になった性質は無い: 行の形が直ったので列比較でも正しい答えになる
     /// （＝ #286 のバグ自体が成立しなくなった）。述語が引数比較であるべきことは
@@ -2517,7 +2517,7 @@ mod live_inbound_source_tests {
     use opencrab_core::LiveInboundSource;
 
     const AGENT: &str = "a1";
-    const USER: &str = "kojira";
+    const USER: &str = "owner";
     const SESSION: &str = "s1";
 
     /// ユーザー発言を本番と同じ書き手（`record_inbound_message`）で入れる。
@@ -2533,7 +2533,7 @@ mod live_inbound_source_tests {
                     session_id: SESSION,
                     recipient_agent_id: AGENT,
                     sender_id: USER,
-                    sender_name: "kojira",
+                    sender_name: "owner",
                     avatar_url: None,
                     channel_id: Some("222"),
                     pubkey: None,

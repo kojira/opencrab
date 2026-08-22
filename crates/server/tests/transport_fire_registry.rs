@@ -14,7 +14,7 @@
 
 use opencrab_actions::TimedFireRouter;
 
-const AGENT_UUID: &str = "6b79ac3a-7f17-4618-a827-5bda992a3698";
+const AGENT_UUID: &str = "11111111-1111-4111-8111-111111111111";
 
 /// 本番と同じ源（`register_production_descriptors`）で登録した登録簿。新 transport を本番へ
 /// 足せば、この generic テストが自動で反復する（手書き registry への追記漏れが起きない）。

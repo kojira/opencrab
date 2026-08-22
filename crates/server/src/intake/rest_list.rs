@@ -4,7 +4,7 @@
 //! 返ってきた配列の各要素を [`IntakeEvent`] に写す。`id_field` の値で dedup_key
 //! `{event_type}:{id}` を作るので、webhook 配送と**同じキー**になり相互に重複を弾く。
 //! **特定サービス名に依存しない**——`[[intake.sources]]` を書くだけで 2 つ目・3 つ目の source を
-//! コード変更なしで足せる（#470 の目的）。第一号 omoikane も config の値としてこの型で構成する。
+//! コード変更なしで足せる（#470 の目的）。第一号 sample-source も config の値としてこの型で構成する。
 //!
 //! 秘密（Bearer トークン）はこの構造体に閉じ込め、ログ・エラーには出さない。
 
@@ -108,7 +108,7 @@ impl SourceAdapter for RestListAdapter {
         let items = extract_array(&value, self.array_path.as_deref());
         let mut events = Vec::with_capacity(items.len());
         for item in &items {
-            // id が取れない要素は dedup できないので飛ばす（現行 omoikane と同一挙動を保持）。
+            // id が取れない要素は dedup できないので飛ばす（現行 sample-source と同一挙動を保持）。
             if let Some(ev) = build_event(&self.event_type, &self.id_field, item) {
                 events.push(ev);
             }
@@ -195,7 +195,7 @@ mod tests {
 
     fn base_cfg() -> IntakeSourceConfig {
         IntakeSourceConfig {
-            name: "omoikane".into(),
+            name: "sample-source".into(),
             kind: IntakeSourceKind::RestList,
             enabled: true,
             base_url: "https://kb.example/".into(),
@@ -243,7 +243,7 @@ mod tests {
     #[test]
     fn from_config_builds_with_expected_source_and_url() {
         let a = RestListAdapter::from_config(&base_cfg()).expect("valid cfg builds");
-        assert_eq!(a.source(), "omoikane");
+        assert_eq!(a.source(), "sample-source");
         assert_eq!(
             a.url,
             "https://kb.example/v1/comments/recent?entry_created_by=uid-123&limit=50"

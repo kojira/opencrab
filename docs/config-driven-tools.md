@@ -19,13 +19,13 @@ opencrab の `ActionDispatcher` は現在、コード内でアクションをハ
 - `[tools]` セクションを TOML に追加
 - 起動時に `ToolsConfig` を読み込み、`ActionDispatcher` に動的にアクションを登録
 - 最初の実装は `execute_shell` アクション（ホワイトリスト方式）
-- SLM-kairo の `ToolsPlugin` が `load(config: toml::Value)` でコンフィグを受け取るパターンを参考にする
+- 比較対象システムの `ToolsPlugin` が `load(config: toml::Value)` でコンフィグを受け取るパターンを参考にする
 
-### KairoとOpenCrabの設計の違い
+### 比較対象システムとOpenCrabの設計の違い
 
-| 観点 | SLM-kairo | opencrab |
+| 観点 | 比較対象システム | opencrab |
 |------|-----------|----------|
-| プラグイン単位 | `KairoPlugin` トレイト + `on_message` / `pre_inference` フック | `Action` トレイト（同期的な1アクション1関数） |
+| プラグイン単位 | `ReferencePlugin` トレイト + `on_message` / `pre_inference` フック | `Action` トレイト（同期的な1アクション1関数） |
 | 登録方法 | `PluginRegistry` にプラグインをロード | `ActionDispatcher::register()` でアクションを登録 |
 | Config受け取り | `load(config: toml::Value)` | 現状なし → 今回追加 |
 
@@ -302,9 +302,9 @@ max_output_bytes = 65536
 
 長期的には、Wasmランタイム（Wasmtime等）上でツールを動かすことで、ファイルシステム・ネットワークアクセスをランタイムレベルでサンドボックス化できる。Configで `wasm_module_path` を指定するだけでカスタムツールを追加できる形にする。
 
-### 6.5 プラグイン動的ロード（kairo方式との統合）
+### 6.5 プラグイン動的ロード（比較対象システム方式との統合）
 
-kairo の `KairoPlugin` トレイトパターンを参考に、opencrab でも `ToolPlugin` トレイトを導入し、`.so`/`.dylib` ファイルを `dlopen` で動的ロードするDLプラグイン方式も検討できる。ただし安全性・デバッグ難易度のトレードオフがある。現状はConfig駆動の静的登録方式を優先する。
+比較対象システムの `ReferencePlugin` トレイトパターンを参考に、opencrab でも `ToolPlugin` トレイトを導入し、`.so`/`.dylib` ファイルを `dlopen` で動的ロードするDLプラグイン方式も検討できる。ただし安全性・デバッグ難易度のトレードオフがある。現状はConfig駆動の静的登録方式を優先する。
 
 ### 拡張の優先順位
 

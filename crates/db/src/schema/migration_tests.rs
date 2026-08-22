@@ -1687,7 +1687,7 @@ fn memory_index_category_migration_v23_widens_check_and_preserves_rows() {
     // 移行後は category / meta が実際に保存できる（OR IGNORE の沈黙が起きない）。
     conn.execute(
             "INSERT INTO memory_index_nodes (id, agent_id, parent_id, node_type, source_type, title, summary, created_at, updated_at)
-             VALUES ('cat1', 'a1', NULL, 'category', 'category', 'kojiraさんの教え', '', '2026-02-01', '2026-02-01'),
+             VALUES ('cat1', 'a1', NULL, 'category', 'category', 'ownerさんの教え', '', '2026-02-01', '2026-02-01'),
                     ('meta1', 'a1', NULL, 'meta', 'category', 'ルール群', '', '2026-02-01', '2026-02-01')",
             [],
         )
@@ -1740,7 +1740,7 @@ fn memory_index_reset_and_multi_tag_migration_v26() {
                     ('sess', 'a1', 'p', 'session', 'session_log', 'S', 's', '2026-01-01', '2026-01-01'),
                     ('t', 'a1', 'sess', 'topic', 'session_log', 'Rust入門', 's', '2026-01-02', '2026-01-02'),
                     ('d', 'a1', NULL, 'daily', 'daily_log', '2026-01-02', 's', '2026-01-02', '2026-01-02'),
-                    ('cat1', 'a1', NULL, 'category', 'category', 'kojiraさんの教え', '', '2026-02-01', '2026-02-01'),
+                    ('cat1', 'a1', NULL, 'category', 'category', 'ownerさんの教え', '', '2026-02-01', '2026-02-01'),
                     ('meta1', 'a1', NULL, 'meta', 'category', 'ルール群', '', '2026-02-01', '2026-02-01');
              -- 全ノードを FTS へ（分類ノードも。孤児掃除の対象になる）。
              INSERT INTO memory_index_fts (title, summary, keywords, node_id, agent_id, node_type, source_type)
@@ -3654,8 +3654,8 @@ fn v38_is_non_destructive_and_preserves_last_fired() {
 #[test]
 fn norm_discord_id_strips_quotes_and_whitespace() {
     assert_eq!(
-        norm_discord_id("\"1465697209541726362\""),
-        "1465697209541726362"
+        norm_discord_id("\"222233334444555566\""),
+        "222233334444555566"
     );
     assert_eq!(norm_discord_id("  123 456 "), "123456");
     assert_eq!(norm_discord_id("123\t\n"), "123");
@@ -3664,7 +3664,7 @@ fn norm_discord_id_strips_quotes_and_whitespace() {
 
 #[test]
 fn session_id_is_valid_handles_uuid_agent_and_fail_closed() {
-    let agent = "6b79ac3a-7f17-4618-a827-5bda992a3698"; // ハイフンを含む UUID
+    let agent = "11111111-1111-4111-8111-111111111111"; // ハイフンを含む UUID
     assert!(session_id_is_valid(&format!("nostr-{agent}"), agent));
     assert!(session_id_is_valid(
         &format!("discord-{agent}-100-201"),

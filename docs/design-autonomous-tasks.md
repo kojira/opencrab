@@ -17,7 +17,7 @@ opencrabは既に「LLMがtoolを選んで順次実行するループ」を実�
 
 ### OpenClawとの比較
 
-OpenClawはのすたろう（AIエージェント）が動くNode.js製フレームワーク。
+OpenClawはエージェントC（AIエージェント）が動くNode.js製フレームワーク。
 「LLMがtoolsを受け取り、tool callを返し、結果を受けてまた考える」ループで複合タスクを実現している。
 
 opencrabのアーキテクチャは本質的に同じ：
@@ -160,10 +160,10 @@ LLMが計画・実行・修正を自律的に行うため、`TaskPlan`/`SubTask`
 ## 理想フロー（Phase 1+2完成後）
 
 ```
-[かいろへの指示]
+[エージェントAへの指示]
 「Claude Codeの使い方を調べて、claudeコマンドを使えるようにして」
 
-[かいろの計画（LLMが自律立案）]
+[エージェントAの計画（LLMが自律立案）]
 1. execute_shell(curl, ["https://docs.anthropic.com/claude-code"]) → ドキュメント取得
    → または fetch_web("https://docs.anthropic.com/claude-code") → Markdown取得
 2. add_allowed_command("claude") → コマンド追加

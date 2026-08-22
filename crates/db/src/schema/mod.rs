@@ -1506,7 +1506,7 @@ const MIGRATIONS: &[Migration] = &[
         description: "agent_inbox: 外部イベント受信箱（webhook intake, issue #454）",
         // **新規テーブルの追加のみ。既存の表・行の内容には一切触れない。**
         //
-        // #454: 外部 source（第一号 omoikane）の webhook / catch-up ポーリングで受け取った
+        // #454: 外部 source（第一号 sample-source）の webhook / catch-up ポーリングで受け取った
         // 出来事を積む受信箱。専用ループ（`intake_process`）が未処理行を消化して
         // `processed_at` を刻む。
         //
@@ -1875,7 +1875,7 @@ fn run_migrations(conn: &Connection, migrations: &[Migration]) -> rusqlite::Resu
 
 /// Discord の `guild_id` / `channel_id` を正規化する（設計 §4.2 B3）。
 ///
-/// 本番データに引用符付きの値（例 `"1465697209541726362"`）が混ざるため、連結して
+/// 本番データに引用符付きの値（例 `"222233334444555566"`）が混ざるため、連結して
 /// `session_id` を作る前に `"` と空白（半角空白・タブ・改行など）を除去する。数字だけが
 /// 残る前提で、残らなければ後段の [`session_id_is_valid`] が弾く（fail-closed）。
 fn norm_discord_id(raw: &str) -> String {

@@ -19,7 +19,7 @@
 //! # 何をするか
 //!
 //! 専用セッション `intake-{agent}` で [`run_agent_response`] を直接呼ぶ。未処理イベントを
-//! **会話として渡す**だけで、エージェントは自分のツール経由でのみ作用する（omoikane への返信
+//! **会話として渡す**だけで、エージェントは自分のツール経由でのみ作用する（sample-source への返信
 //! 等）。**heartbeat の SPEAK 配送（broadcast）は通さない**。応答は監査用に intake セッションへ
 //! 記録する。
 //!
@@ -289,7 +289,7 @@ mod tests {
     fn row(id: &str, source: &str, ev: &str, payload: &str) -> AgentInboxRow {
         AgentInboxRow {
             id: id.to_string(),
-            agent_id: "scout".to_string(),
+            agent_id: "agent_alpha".to_string(),
             source: source.to_string(),
             event_type: ev.to_string(),
             dedup_key: format!("{ev}:{id}"),
@@ -304,17 +304,17 @@ mod tests {
         let rows = vec![
             row(
                 "1",
-                "omoikane",
+                "sample-source",
                 "comment.created",
                 "{\"id\":1,\"text\":\"hi\"}",
             ),
-            row("2", "omoikane", "chat.message", "{\"id\":2}"),
+            row("2", "sample-source", "chat.message", "{\"id\":2}"),
         ];
         let (p, included) = build_inbox_prompt(&rows);
         assert_eq!(included, 2, "小さい 2 件は両方載る");
         assert!(p.contains("2 件"));
-        assert!(p.contains("omoikane/comment.created"));
-        assert!(p.contains("omoikane/chat.message"));
+        assert!(p.contains("sample-source/comment.created"));
+        assert!(p.contains("sample-source/chat.message"));
         assert!(p.contains("\"text\":\"hi\""));
         // 消化ターンは外部配信しないことを本文で明示している（broadcast 誤解の防止）。
         assert!(p.contains("外部への発話配信を行いません"));
@@ -325,7 +325,7 @@ mod tests {
         // 各イベントが per-item 上限いっぱいの payload を持つと、合計 budget で件数が絞られる。
         let big = "x".repeat(PAYLOAD_PREVIEW_CHARS);
         let rows: Vec<AgentInboxRow> = (0..20)
-            .map(|i| row(&i.to_string(), "omoikane", "comment.created", &big))
+            .map(|i| row(&i.to_string(), "sample-source", "comment.created", &big))
             .collect();
         let (p, included) = build_inbox_prompt(&rows);
         // 全 20 件は載らない（budget で切れる）が、少なくとも 1 件は載る。
@@ -336,7 +336,7 @@ mod tests {
         // 1 件だけで budget を超える極端ケースでも 1 件は返す。
         let huge = vec![row(
             "0",
-            "omoikane",
+            "sample-source",
             "comment.created",
             &"y".repeat(PAYLOAD_PREVIEW_CHARS),
         )];

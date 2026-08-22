@@ -836,7 +836,7 @@ CREATE INDEX IF NOT EXISTS idx_pending_interactions_surface
 -- ============================================
 -- AGENT INBOX: 外部イベント受信箱（webhook intake / issue #454）
 -- ============================================
--- 外部 source（第一号: omoikane）の出来事を受け取り、heartbeat 外の専用ループが
+-- 外部 source（第一号: sample-source）の出来事を受け取り、heartbeat 外の専用ループが
 -- 消化するまで積んでおく。処理は `processed_at` を刻んで記録する（NULL = 未処理）。
 -- webhook は at-most-once なので、停止中に落ちたイベントは catch-up ポーリングが
 -- 補充する。同じ出来事が webhook と catch-up の両方から来ても二重に積まないよう、

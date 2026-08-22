@@ -706,7 +706,7 @@ async fn sleep_or_wake(sleep_secs: u64, wake: &tokio::sync::Notify) {
 mod tests {
     use super::*;
 
-    const AGENT_UUID: &str = "6b79ac3a-7f17-4618-a827-5bda992a3698";
+    const AGENT_UUID: &str = "11111111-1111-4111-8111-111111111111";
 
     /// テスト用の登録簿: **本番と同じ源**（`register_production_descriptors`）で descriptor を
     /// 積む（#628）。本番へ transport を足せば scheduler テストの登録簿も自動で追随する

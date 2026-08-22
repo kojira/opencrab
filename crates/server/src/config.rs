@@ -1882,14 +1882,14 @@ default_voice = "3"
 
 [voice.tts.agent_voices]
 crab = "3"
-rabomi = "1"
+agent-b = "1"
 "#;
         let cfg: AppConfig = toml::from_str(toml_str).expect("voice config must parse");
         assert!(cfg.voice.enabled);
         assert_eq!(cfg.voice.stt.provider, "openai");
         assert_eq!(cfg.voice.stt.language.as_deref(), Some("ja"));
         assert_eq!(cfg.voice.tts.voice_for_agent("crab"), "3");
-        assert_eq!(cfg.voice.tts.voice_for_agent("rabomi"), "1");
+        assert_eq!(cfg.voice.tts.voice_for_agent("agent-b"), "1");
         assert_eq!(cfg.voice.tts.voice_for_agent("unknown"), "3");
     }
 

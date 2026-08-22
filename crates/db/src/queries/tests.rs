@@ -2760,7 +2760,7 @@ fn test_get_index_node_by_short_id() {
     insert_index_node(
         &conn,
         &IndexNodeRow {
-            id: "topic-agent:nostarou:main-sess_abc-1-20".to_string(),
+            id: "topic-agent:agent-c:main-sess_abc-1-20".to_string(),
             agent_id: "a1".to_string(),
             parent_id: None,
             node_type: "topic".to_string(),
@@ -2785,10 +2785,7 @@ fn test_get_index_node_by_short_id() {
     .unwrap();
     let result = get_index_node_by_short_or_id(&conn, "a1", "t42").unwrap();
     assert!(result.is_some());
-    assert_eq!(
-        result.unwrap().id,
-        "topic-agent:nostarou:main-sess_abc-1-20"
-    );
+    assert_eq!(result.unwrap().id, "topic-agent:agent-c:main-sess_abc-1-20");
 }
 
 #[test]
@@ -2798,7 +2795,7 @@ fn test_get_index_node_by_full_id() {
     insert_index_node(
         &conn,
         &IndexNodeRow {
-            id: "topic-agent:nostarou:main-sess_abc-1-20".to_string(),
+            id: "topic-agent:agent-c:main-sess_abc-1-20".to_string(),
             agent_id: "a1".to_string(),
             parent_id: None,
             node_type: "topic".to_string(),
@@ -2822,13 +2819,10 @@ fn test_get_index_node_by_full_id() {
     )
     .unwrap();
     let result =
-        get_index_node_by_short_or_id(&conn, "a1", "topic-agent:nostarou:main-sess_abc-1-20")
+        get_index_node_by_short_or_id(&conn, "a1", "topic-agent:agent-c:main-sess_abc-1-20")
             .unwrap();
     assert!(result.is_some());
-    assert_eq!(
-        result.unwrap().id,
-        "topic-agent:nostarou:main-sess_abc-1-20"
-    );
+    assert_eq!(result.unwrap().id, "topic-agent:agent-c:main-sess_abc-1-20");
 }
 
 #[test]
@@ -2850,7 +2844,7 @@ fn test_get_index_node_by_short_id_not_found() {
 #[test]
 fn test_get_index_node_by_full_id_is_scoped_to_agent() {
     let conn = setup();
-    let node_id = "topic-agent:nostarou:secret-sess_abc-1-20";
+    let node_id = "topic-agent:agent-c:secret-sess_abc-1-20";
     insert_index_node(
         &conn,
         &IndexNodeRow {
@@ -5250,27 +5244,47 @@ fn inbox_enqueue_and_dedup() {
     // 新規は true。
     assert!(enqueue_inbox_event(
         &conn,
-        &inbox_insert("i1", "scout", "omoikane", "comment.created", "c-100")
+        &inbox_insert(
+            "i1",
+            "agent_alpha",
+            "sample-source",
+            "comment.created",
+            "c-100"
+        )
     )
     .unwrap());
     // 同じ (source, dedup_key) は false（二重に積まない）。id が違っても弾く。
     assert!(!enqueue_inbox_event(
         &conn,
-        &inbox_insert("i2", "scout", "omoikane", "comment.created", "c-100")
+        &inbox_insert(
+            "i2",
+            "agent_alpha",
+            "sample-source",
+            "comment.created",
+            "c-100"
+        )
     )
     .unwrap());
     // dedup_key が違えば新規。
     assert!(enqueue_inbox_event(
         &conn,
-        &inbox_insert("i3", "scout", "omoikane", "comment.created", "c-101")
+        &inbox_insert(
+            "i3",
+            "agent_alpha",
+            "sample-source",
+            "comment.created",
+            "c-101"
+        )
     )
     .unwrap());
     // dedup は source 単位。別 source なら同じ dedup_key でも積める。
-    assert!(
-        enqueue_inbox_event(&conn, &inbox_insert("i4", "scout", "other", "x", "c-100")).unwrap()
-    );
+    assert!(enqueue_inbox_event(
+        &conn,
+        &inbox_insert("i4", "agent_alpha", "other", "x", "c-100")
+    )
+    .unwrap());
 
-    assert_eq!(count_unprocessed_inbox(&conn, "scout").unwrap(), 3);
+    assert_eq!(count_unprocessed_inbox(&conn, "agent_alpha").unwrap(), 3);
 }
 
 #[test]
@@ -5278,46 +5292,51 @@ fn inbox_list_order_and_processing() {
     let conn = setup();
     enqueue_inbox_event(
         &conn,
-        &inbox_insert("a", "scout", "omoikane", "comment.created", "1"),
+        &inbox_insert("a", "agent_alpha", "sample-source", "comment.created", "1"),
     )
     .unwrap();
     enqueue_inbox_event(
         &conn,
-        &inbox_insert("b", "scout", "omoikane", "comment.created", "2"),
+        &inbox_insert("b", "agent_alpha", "sample-source", "comment.created", "2"),
     )
     .unwrap();
     enqueue_inbox_event(
         &conn,
-        &inbox_insert("z", "sebastian", "omoikane", "chat.message", "3"),
+        &inbox_insert("z", "agent_beta", "sample-source", "chat.message", "3"),
     )
     .unwrap();
 
     // agent スコープで絞られる。
-    let scout = list_unprocessed_inbox(&conn, "scout", 10).unwrap();
-    assert_eq!(scout.len(), 2);
+    let agent_alpha = list_unprocessed_inbox(&conn, "agent_alpha", 10).unwrap();
+    assert_eq!(agent_alpha.len(), 2);
     // received_at 同値でも id ASC で安定。
-    assert_eq!(scout[0].id, "a");
-    assert_eq!(scout[1].id, "b");
+    assert_eq!(agent_alpha[0].id, "a");
+    assert_eq!(agent_alpha[1].id, "b");
 
     // 処理済みにすると未処理から外れる。
     assert!(mark_inbox_processed(&conn, "a").unwrap());
-    assert_eq!(count_unprocessed_inbox(&conn, "scout").unwrap(), 1);
+    assert_eq!(count_unprocessed_inbox(&conn, "agent_alpha").unwrap(), 1);
     // 二重処理は false（既に刻んである）。
     assert!(!mark_inbox_processed(&conn, "a").unwrap());
 
     // 未処理を持つエージェント集合（クエリは agent_id ASC で返す）。
     assert_eq!(
         agents_with_unprocessed_inbox(&conn).unwrap(),
-        vec!["scout".to_string(), "sebastian".to_string()]
+        vec!["agent_alpha".to_string(), "agent_beta".to_string()]
     );
 
     // limit が効く。
     enqueue_inbox_event(
         &conn,
-        &inbox_insert("c", "scout", "omoikane", "comment.created", "4"),
+        &inbox_insert("c", "agent_alpha", "sample-source", "comment.created", "4"),
     )
     .unwrap();
-    assert_eq!(list_unprocessed_inbox(&conn, "scout", 1).unwrap().len(), 1);
+    assert_eq!(
+        list_unprocessed_inbox(&conn, "agent_alpha", 1)
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -5327,28 +5346,28 @@ fn inbox_scan_excludes_fully_processed_agents() {
     let conn = setup();
     enqueue_inbox_event(
         &conn,
-        &inbox_insert("a", "scout", "omoikane", "comment.created", "1"),
+        &inbox_insert("a", "agent_alpha", "sample-source", "comment.created", "1"),
     )
     .unwrap();
     enqueue_inbox_event(
         &conn,
-        &inbox_insert("b", "scout", "omoikane", "comment.created", "2"),
+        &inbox_insert("b", "agent_alpha", "sample-source", "comment.created", "2"),
     )
     .unwrap();
     assert_eq!(
         agents_with_unprocessed_inbox(&conn).unwrap(),
-        vec!["scout".to_string()]
+        vec!["agent_alpha".to_string()]
     );
 
     // 1 件処理してもまだ残るので対象。
     mark_inbox_processed(&conn, "a").unwrap();
     assert_eq!(
         agents_with_unprocessed_inbox(&conn).unwrap(),
-        vec!["scout".to_string()]
+        vec!["agent_alpha".to_string()]
     );
 
     // 全件処理済みにすると走査対象から消える（＝このエージェントには turn が起きない）。
     mark_inbox_processed(&conn, "b").unwrap();
     assert!(agents_with_unprocessed_inbox(&conn).unwrap().is_empty());
-    assert_eq!(count_unprocessed_inbox(&conn, "scout").unwrap(), 0);
+    assert_eq!(count_unprocessed_inbox(&conn, "agent_alpha").unwrap(), 0);
 }

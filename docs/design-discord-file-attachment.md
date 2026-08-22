@@ -7,7 +7,7 @@
 
 ## 1. 背景と目的
 
-opencrabのかいろ（エージェント）は現在、`send_speech` アクションでテキストメッセージのみをDiscordに送信できる。  
+opencrabのエージェントA（エージェント）は現在、`send_speech` アクションでテキストメッセージのみをDiscordに送信できる。  
 画像生成スクリプト（nano-banana-pro等）で生成したファイルをDiscordに直接送信する手段がない。
 
 本ドキュメントでは **Discordへのファイル（画像）添付送信** 機能を追加するための設計を定義する。
@@ -289,12 +289,12 @@ pub fn new(
 
 ## 5. nano-banana-pro との連携フロー
 
-### かいろが「画像を生成してDiscordに送って」と言われた時
+### エージェントAが「画像を生成してDiscordに送って」と言われた時
 
 ```
 ユーザー: "未来の東京の画像を生成してDiscordのgeneral（#1234567890）に送って"
     ↓
-かいろ (LLM思考):
+エージェントA (LLM思考):
   1. execute_shell で nano-banana-pro を実行して画像生成
   2. discord_send_file で生成した画像をDiscordに送信
     ↓
@@ -444,6 +444,6 @@ crates/
         └── dispatcher.rs         ← 変更なし
 ```
 
-## レビューメモ（2026-03-22 by らぼみ）
+## レビューメモ（2026-03-22 by エージェントB）
 
 - `filename_override` を受け取っているが、`CreateAttachment` の `display_name` に渡すのを忘れないこと

@@ -28,8 +28,8 @@ topic が数百件に達するとプロンプトだけで数万トークンを�
 
 | ノードタイプ | パターン | 例 | 文字数 |
 |---|---|---|---|
-| topic (session_log) | `topic-{agent_id}-{session_id}-{first}-{last}` | `topic-agent:nostarou:main-sess_abc123def456-1-20` | ~60–130 |
-| topic (daily_log) | `{agent_id}:daily_log:topic:{date}:{i}` | `agent:nostarou:main:daily_log:topic:2026-03-25:0` | ~55 |
+| topic (session_log) | `topic-{agent_id}-{session_id}-{first}-{last}` | `topic-agent:agent-c:main-sess_abc123def456-1-20` | ~60–130 |
+| topic (daily_log) | `{agent_id}:daily_log:topic:{date}:{i}` | `agent:agent-c:main:daily_log:topic:2026-03-25:0` | ~55 |
 | period | `period-{agent_id}-{YYYY-MM}` / `{agent_id}:daily_log:period:{YYYY-MM}` | — | ~40–60 |
 
 **問題**: topic 122件 × 平均 node_id 80文字 ≈ 9,760文字がキーだけで消費。
@@ -72,14 +72,14 @@ node_id に **連番ベースの短縮キー** を導入する。
 
 | 現行 | 新規 | 例 |
 |---|---|---|
-| `topic-agent:nostarou:main-sess_abc-1-20` | `t{seq}` | `t42` |
-| `period-agent:nostarou:main-2026-03` | `p{seq}` | `p7` |
+| `topic-agent:agent-c:main-sess_abc-1-20` | `t{seq}` | `t42` |
+| `period-agent:agent-c:main-2026-03` | `p{seq}` | `p7` |
 | `{agent_id}:daily_log:daily:2026-03-25` | `d{seq}` | `d15` |
 | (hourly ノード) | `h{seq}` | `h8` |
 | (weekly ノード) | `w{seq}` | `w5` |
 | (monthly ノード) | `m{seq}` | `m3` |
 | (yearly ノード) | `y{seq}` | `y1` |
-| `root-agent:nostarou:main` | `r0` | `r0` |
+| `root-agent:agent-c:main` | `r0` | `r0` |
 
 ### 2.2 スキーマ変更
 
@@ -111,7 +111,7 @@ fn next_short_id(conn: &Connection, agent_id: &str, prefix: &str) -> String {
 
 ### 2.4 プロンプトへの影響
 
-変更前: `- [topic-agent:nostarou:main-sess_abc123-1-20] Rustビルドエラー: ユーザーが...`
+変更前: `- [topic-agent:agent-c:main-sess_abc123-1-20] Rustビルドエラー: ユーザーが...`
 変更後: `- [t42] Rustビルドエラー: ユーザーが...`
 
 **削減効果**: 122 topic × 平均 70文字削減 ≈ **8,540文字（約 2,800トークン）削減**
@@ -325,7 +325,7 @@ yearly:
   ├─ [yearly] y1 "2025年: ..."  ← 完了した年は yearly に圧縮
   ├─ [monthly] m1 "2026年2月: FTv9学習とNostr統合が中心の月"
   │    ├─ [weekly] w1 "2/3週: FTv9データセット設計"
-  │    │    ├─ [daily] d1 "2/3: FTv9学習開始、kojiraとデータセット設計を議論"
+  │    │    ├─ [daily] d1 "2/3: FTv9学習開始、ownerとデータセット設計を議論"
   │    │    │    ├─ [hourly] h1 "2/3 14時台"
   │    │    │    │    ├─ [topic] t1 "FTv9データセット形式の決定"
   │    │    │    │    └─ [topic] t2 "Alpaca vs ShareGPT形式の比較"
@@ -454,7 +454,7 @@ let summary_section: String = topics.iter()
 ## 今月 (2026-04)
 [w9] 3/31週:
   [d52] 4/1: opencrab のメモリインデックス最適化に着手。node_id短縮の設計を始めた
-  [d53] 4/2: RollupEngine の設計ドラフトを作成。kojiraにレビュー依頼した
+  [d53] 4/2: RollupEngine の設計ドラフトを作成。ownerにレビュー依頼した
   [t120] (04-03 14:22) ロールアップのトリガー条件を時間+トークン数のOR条件に決定
   [t121] (04-03 15:10) weekly要約のペルソナプロンプトをテスト
 
@@ -930,8 +930,8 @@ yearly の導入で、長期運用時の past months セクションが **72% �
 
 | ID | テストケース | 入力 | 期待結果 |
 |---|---|---|---|
-| T-1.13 | short_id で検索 | query="t42" | id="topic-agent:nostarou:main-sess_abc-1-20" のノードが返る |
-| T-1.14 | 元の id で検索 | query="topic-agent:nostarou:main-sess_abc-1-20" | 同じノードが返る |
+| T-1.13 | short_id で検索 | query="t42" | id="topic-agent:agent-c:main-sess_abc-1-20" のノードが返る |
+| T-1.14 | 元の id で検索 | query="topic-agent:agent-c:main-sess_abc-1-20" | 同じノードが返る |
 | T-1.15 | 存在しない short_id | query="t99999" | 空の結果（エラーにならない） |
 
 ---
@@ -940,8 +940,8 @@ yearly の導入で、長期運用時の past months セクションが **72% �
 
 | ID | テストケース | 入力 | 期待結果 |
 |---|---|---|---|
-| T-2.1 | 要約が一人称になっている | persona_name="のすたろう", 会話ログ: Rustビルドエラーの質問と解決 | 要約に「俺が」「〜した」等の一人称表現が含まれる。「ユーザーが」「エージェントが」等の第三者表現を含まない |
-| T-2.2 | 注目ポイント4軸が含まれる | 会話ログ: FTv9 のデータセット設計で失敗→修正 | 要約に以下のうち少なくとも2つが含まれる: ①学び/技術知見、②判断理由、③関係性（kojira と〜）、④失敗と教訓 |
+| T-2.1 | 要約が一人称になっている | persona_name="エージェントC", 会話ログ: Rustビルドエラーの質問と解決 | 要約に「俺が」「〜した」等の一人称表現が含まれる。「ユーザーが」「エージェントが」等の第三者表現を含まない |
+| T-2.2 | 注目ポイント4軸が含まれる | 会話ログ: FTv9 のデータセット設計で失敗→修正 | 要約に以下のうち少なくとも2つが含まれる: ①学び/技術知見、②判断理由、③関係性（owner と〜）、④失敗と教訓 |
 | T-2.3 | 要約がトークン上限内 | topic 要約: 300トークン上限 | 生成されたサマリーが 300 トークン以下 |
 | T-2.4 | 各階層の要約長が適切 | hourly/daily/weekly/monthly/yearly それぞれの要約生成 | §5.3 の表に従った文字数範囲内: topic 100-200字, hourly 200-300字, daily 300-500字, weekly 500-800字, monthly 800-1200字, yearly 1500-2500字 |
 | T-2.5 | ペルソナ情報が空の場合 | persona_name="", persona_tone="" | デフォルトの一人称（「私が〜」）で要約が生成される。エラーにならない |
@@ -1091,7 +1091,7 @@ yearly の導入で、長期運用時の past months セクションが **72% �
 | T-D.2 | suppressed ノードが retrieve で取得できる | topic t42 を suppress → retrieve_memory_nodes(query="t42") | t42 のノードが返る（suppressed=true の状態で） |
 | T-D.3 | forget_memory アクションで suppressed が true になる | forget_memory(node_id="t42") 実行 | memory_index_nodes の t42 の suppressed が true に更新される |
 | T-D.4 | forget_memory を short_id で実行 | forget_memory(node_id="t42") | short_id="t42" のノードが suppressed=true になる |
-| T-D.5 | forget_memory を元の id で実行 | forget_memory(node_id="topic-agent:nostarou:main-sess_abc-1-20") | 同ノードが suppressed=true になる |
+| T-D.5 | forget_memory を元の id で実行 | forget_memory(node_id="topic-agent:agent-c:main-sess_abc-1-20") | 同ノードが suppressed=true になる |
 | T-D.6 | Dream 中に LLM が「不要」判断 | Dream モード実行。LLM が topic t85 を「不要」と判定 | t85 に suppressed=true が設定される |
 | T-D.7 | Dream 中に LLM が「教訓あり — 圧縮」判断 | Dream モード実行。LLM が topic t85 を「教訓あり」と判定 | t85 に suppressed=true が設定され、教訓が上位ノード（daily）のサマリーに追記される |
 | T-D.8 | Dream 中に LLM が「重要 — 保持」判断 | Dream モード実行。LLM が topic t90 を「重要」と判定 | t90 の suppressed は false のまま変更なし |

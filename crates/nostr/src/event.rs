@@ -199,13 +199,13 @@ mod tests {
 
     #[test]
     fn test_parse_full_event() {
-        let line = r#"{"id":"abc123","pubkey":"deadbeef","npub":"npub1xxx","note_id":"note1yyy","author_name":"kojira","created_at":1700000000,"kind":1,"content":"hello opencrab","tags":[["p","deadbeef"]]}"#;
+        let line = r#"{"id":"abc123","pubkey":"deadbeef","npub":"npub1xxx","note_id":"note1yyy","author_name":"owner","created_at":1700000000,"kind":1,"content":"hello opencrab","tags":[["p","deadbeef"]]}"#;
         let ev = parse_watch_line(line).expect("parsed");
         assert_eq!(ev.id, "abc123");
         assert_eq!(ev.kind, 1);
         assert_eq!(ev.content, "hello opencrab");
         assert_eq!(ev.reply_target(), "note1yyy");
-        assert_eq!(ev.author_label(), "kojira");
+        assert_eq!(ev.author_label(), "owner");
     }
 
     #[test]
@@ -271,7 +271,7 @@ mod tests {
             pubkey: "0011223344556677".to_string(),
             npub: Some("npub1author".to_string()),
             note_id: Some("note1target".to_string()),
-            author_name: Some("kojira".to_string()),
+            author_name: Some("owner".to_string()),
             created_at: 1_700_000_000,
             kind,
             content: "こんにちは".to_string(),
@@ -356,7 +356,7 @@ mod tests {
     #[test]
     fn test_author_key_prefers_npub_over_name() {
         assert_eq!(ev(1).author_key(), "npub1author");
-        assert_eq!(ev(1).author_label(), "kojira");
+        assert_eq!(ev(1).author_label(), "owner");
         let mut e = ev(1);
         e.npub = None;
         assert_eq!(e.author_key(), "0011223344556677");

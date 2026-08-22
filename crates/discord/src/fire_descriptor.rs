@@ -93,7 +93,7 @@ impl TransportFire for DiscordFire {
 mod tests {
     use super::*;
 
-    const AGENT_UUID: &str = "6b79ac3a-7f17-4618-a827-5bda992a3698";
+    const AGENT_UUID: &str = "11111111-1111-4111-8111-111111111111";
 
     /// UUID（ハイフン入り）を保存済み agent_id で剥がすので割れない。
     #[test]

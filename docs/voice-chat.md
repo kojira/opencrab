@@ -51,7 +51,7 @@ default_voice = "3"        # VOICEVOX スタイル ID
 # エージェントごとに声を分ける
 [voice.tts.agent_voices]
 crab = "3"                 # ずんだもん ノーマル
-rabomi = "1"               # 四国めたん あまあま
+agent-b = "1"               # 四国めたん あまあま
 ```
 
 VOICEVOX を使う場合は [VOICEVOX ENGINE](https://voicevox.hiroshiba.jp/) を

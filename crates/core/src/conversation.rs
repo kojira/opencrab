@@ -383,7 +383,7 @@ fn is_excluded_from_conversation(log: &opencrab_db::queries::SessionLogRow) -> b
 /// だった——落とすのは**会話履歴からだけ**で、記録（`memory_sessions`）には完全な本文が残る。
 /// 読み直せないもの（`execute_shell` の出力）も失われない。
 ///
-/// 実害（本番実測 2026-08-21）: らぼみのプロンプトが 46 万文字に達し、cursor(grok) が空応答を
+/// 実害（本番実測 2026-08-21）: エージェントBのプロンプトが 46 万文字に達し、cursor(grok) が空応答を
 /// 返して沈黙した。しきい値は実測 20〜30 万文字。tool_result の内訳は execute_shell 10 万・
 /// inner_voice 6 万・read_my_history 3.2 万…で、**読みだけを参照化しても 5.7% しか減らない**。
 ///
@@ -1900,12 +1900,7 @@ mod budget_driven_recent_window_tests {
     fn newest_user_speech_survives_tool_flood_after_merge_removal() {
         let conn = opencrab_db::init_memory().unwrap();
         // 一番古い位置に置くユーザー発言（これが「今の指示」で、末尾からは押し出される）。
-        insert_raw(
-            &conn,
-            "speech",
-            Some("kojira"),
-            "この指示は消えてはいけない",
-        );
+        insert_raw(&conn, "speech", Some("owner"), "この指示は消えてはいけない");
         // 末尾を埋める巨大なツール往復（ユーザー発言を連続区間の外へ押し出す）。
         for i in 0..40 {
             insert_raw(
@@ -2103,7 +2098,7 @@ mod orphan_user_speech_tests {
     use opencrab_db::queries::SessionLogRow;
 
     const AGENT: &str = "a1";
-    const USER: &str = "kojira";
+    const USER: &str = "owner";
     const SESSION: &str = "s1";
 
     fn user_speech(content: &str, created_at: &str) -> SessionLogRow {
@@ -2223,7 +2218,7 @@ mod evaluation_not_in_conversation_tests {
         insert(
             conn,
             "speech",
-            "kojira",
+            "owner",
             "既存フォローはわたしだけなのでは？",
         );
         insert(conn, "evaluation", "evaluator", EVAL_CONTENT);
@@ -2376,7 +2371,7 @@ mod heartbeat_prompt_dedup_tests {
         let conn = opencrab_db::init_memory().unwrap();
         // 3 tick 分の（過去の）指示文と、その間の発話・subtask 完了本文を積む。
         insert(&conn, "system", Some("heartbeat"), HB_PROMPT);
-        insert(&conn, "speech", Some("kojira"), "新着あった？");
+        insert(&conn, "speech", Some("owner"), "新着あった？");
         insert(&conn, "system", Some("heartbeat"), HB_PROMPT);
         insert(&conn, "speech", Some(AGENT), "SPEAK: ありました");
         // subtask 完了本文（#404 / #405）: speaker_id=None なので落としてはならない。
@@ -2623,7 +2618,7 @@ mod result_reference_tests {
     /// #709 の中心: **コマンド実行の結果も**本文を持ち越さない。
     ///
     /// #707 は「読み直せないので落としたら失われる」として本文を残していたが、記録
-    /// （memory_sessions）には完全な本文が残るので失われない。らぼみの tool_result 30 万文字の
+    /// （memory_sessions）には完全な本文が残るので失われない。エージェントBの tool_result 30 万文字の
     /// うち execute_shell が 10 万で最大——ここを落とさないと沈黙は解けない。
     #[test]
     fn shell_results_also_leave_only_a_reference() {

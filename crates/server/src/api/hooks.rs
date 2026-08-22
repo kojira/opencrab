@@ -103,7 +103,7 @@ pub async fn receive_hook(
     }
 }
 
-/// 署名ヘッダの値を取り出す。`X-{Source}-Signature`（例 `X-Omoikane-Signature`）を優先し、
+/// 署名ヘッダの値を取り出す。`X-{Source}-Signature`（例 `X-Sample-Source-Signature`）を優先し、
 /// 無ければ汎用の `X-Hook-Signature`。ヘッダ名は HTTP 仕様で大文字小文字を区別しない。
 fn signature_header(headers: &HeaderMap, source: &str) -> Option<String> {
     let specific = format!("x-{}-signature", source.to_lowercase());
@@ -138,13 +138,13 @@ mod tests {
     fn state_with_route() -> AppState {
         let mut state = crate::test_app_state();
         let mut secrets = HashMap::new();
-        secrets.insert("omoikane".to_string(), SECRET.to_string());
+        secrets.insert("sample-source".to_string(), SECRET.to_string());
         state.intake = Arc::new(IntakeConfig {
             secrets,
             routes: vec![IntakeRoute {
-                source: "omoikane".to_string(),
+                source: "sample-source".to_string(),
                 event_type: "comment.created".to_string(),
-                agent_id: "scout".to_string(),
+                agent_id: "agent_alpha".to_string(),
             }],
             ..IntakeConfig::default()
         });
@@ -166,7 +166,10 @@ mod tests {
     fn headers_with(sig: Option<&str>) -> HeaderMap {
         let mut h = HeaderMap::new();
         if let Some(s) = sig {
-            h.insert("x-omoikane-signature", HeaderValue::from_str(s).unwrap());
+            h.insert(
+                "x-sample-source-signature",
+                HeaderValue::from_str(s).unwrap(),
+            );
         }
         h
     }
@@ -199,7 +202,7 @@ mod tests {
         // 署名ヘッダ欠落 → 401。
         let code = receive_hook(
             State(state.clone()),
-            Path("omoikane".to_string()),
+            Path("sample-source".to_string()),
             headers_with(None),
             body.clone(),
         )
@@ -209,7 +212,7 @@ mod tests {
         // 不正署名 → 401。
         let code = receive_hook(
             State(state.clone()),
-            Path("omoikane".to_string()),
+            Path("sample-source".to_string()),
             headers_with(Some("sha256=deadbeef")),
             body.clone(),
         )
@@ -219,7 +222,7 @@ mod tests {
         // 別 secret で署名 → 401。
         let code = receive_hook(
             State(state.clone()),
-            Path("omoikane".to_string()),
+            Path("sample-source".to_string()),
             headers_with(Some(&sign("wrong", &body))),
             body,
         )
@@ -227,7 +230,7 @@ mod tests {
         assert_eq!(code, StatusCode::UNAUTHORIZED);
 
         // inbox は汚染されない。
-        assert_eq!(unprocessed(&state, "scout"), 0);
+        assert_eq!(unprocessed(&state, "agent_alpha"), 0);
     }
 
     #[tokio::test]
@@ -237,24 +240,24 @@ mod tests {
         let sig = sign(SECRET, &body);
         let code = receive_hook(
             State(state.clone()),
-            Path("omoikane".to_string()),
+            Path("sample-source".to_string()),
             headers_with(Some(&sig)),
             body.clone(),
         )
         .await;
         assert_eq!(code, StatusCode::ACCEPTED);
-        assert_eq!(unprocessed(&state, "scout"), 1);
+        assert_eq!(unprocessed(&state, "agent_alpha"), 1);
 
         // 同じイベントの再送は dedup で積み増さない（202 のまま）。
         let code = receive_hook(
             State(state.clone()),
-            Path("omoikane".to_string()),
+            Path("sample-source".to_string()),
             headers_with(Some(&sig)),
             body,
         )
         .await;
         assert_eq!(code, StatusCode::ACCEPTED);
-        assert_eq!(unprocessed(&state, "scout"), 1);
+        assert_eq!(unprocessed(&state, "agent_alpha"), 1);
     }
 
     #[tokio::test]
@@ -265,13 +268,13 @@ mod tests {
         let sig = sign(SECRET, &body);
         let code = receive_hook(
             State(state.clone()),
-            Path("omoikane".to_string()),
+            Path("sample-source".to_string()),
             headers_with(Some(&sig)),
             body,
         )
         .await;
         assert_eq!(code, StatusCode::ACCEPTED);
-        assert_eq!(unprocessed(&state, "scout"), 0);
+        assert_eq!(unprocessed(&state, "agent_alpha"), 0);
     }
 
     /// `intake_wake` に permit が記憶されている（=鳴らされた）かを、消費して判定する。
@@ -293,7 +296,7 @@ mod tests {
         let sig = sign(SECRET, &body);
         let code = receive_hook(
             State(state.clone()),
-            Path("omoikane".to_string()),
+            Path("sample-source".to_string()),
             headers_with(Some(&sig)),
             body,
         )
@@ -309,7 +312,7 @@ mod tests {
         let sig = sign(SECRET, &body);
         let code = receive_hook(
             State(state.clone()),
-            Path("omoikane".to_string()),
+            Path("sample-source".to_string()),
             headers_with(Some(&sig)),
             body.clone(),
         )
@@ -323,7 +326,7 @@ mod tests {
         // (3) 同一イベントの再送（dedup）→ 積み増さないので鳴らさない。
         let code = receive_hook(
             State(state.clone()),
-            Path("omoikane".to_string()),
+            Path("sample-source".to_string()),
             headers_with(Some(&sig)),
             body,
         )
@@ -342,12 +345,12 @@ mod tests {
         let sig = sign(SECRET, &body);
         let code = receive_hook(
             State(state.clone()),
-            Path("omoikane".to_string()),
+            Path("sample-source".to_string()),
             headers_with(Some(&sig)),
             body,
         )
         .await;
         assert_eq!(code, StatusCode::BAD_REQUEST);
-        assert_eq!(unprocessed(&state, "scout"), 0);
+        assert_eq!(unprocessed(&state, "agent_alpha"), 0);
     }
 }

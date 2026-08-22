@@ -282,7 +282,7 @@ POST /api/agents/{id}/import/sync
               "id": "daily-2026-02-01",
               "node_type": "daily",
               "title": "2026-02-01",
-              "summary": "FTv9学習開始。kojiraさんとの長い議論でデータセット設計が固まった。"
+              "summary": "FTv9学習開始。ownerさんとの長い議論でデータセット設計が固まった。"
             },
             ...
           ]
@@ -308,7 +308,7 @@ POST /api/agents/{id}/import/sync
   "nodes": [
     {
       "id": "daily-2026-02-01",
-      "content": "# 2026-02-01 のすたろう日記\n## Nostr会話（00:41〜）\n..."
+      "content": "# 2026-02-01 エージェントC日記\n## Nostr会話（00:41〜）\n..."
     }
   ]
 }

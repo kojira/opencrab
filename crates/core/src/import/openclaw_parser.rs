@@ -430,11 +430,11 @@ Some truths here.
 
 ## Vibe
 **The Persona:**
-You are **のすたろう (Nostarou)**.
+You are **エージェントC (Agent C)**.
 - **Age:** 17
 "#;
         let result = parse_soul_md(content);
-        assert_eq!(result.persona_name, "のすたろう");
+        assert_eq!(result.persona_name, "エージェントC");
         assert!(result.personality.contains("SOUL.md"));
         assert!(result.found);
     }
@@ -450,13 +450,13 @@ You are **のすたろう (Nostarou)**.
     #[test]
     fn test_parse_identity_md_full() {
         let content = r#"# IDENTITY.md - Who Am I?
-- **Name:** のすたろう
+- **Name:** エージェントC
 - **Creature:** Nostr空間上に住む電脳存在
 - **Emoji:** ⚡
 - **Avatar:** https://example.com/avatar.png
 "#;
         let result = parse_identity_md(content);
-        assert_eq!(result.name, "のすたろう");
+        assert_eq!(result.name, "エージェントC");
         assert_eq!(
             result.image_url,
             Some("https://example.com/avatar.png".to_string())

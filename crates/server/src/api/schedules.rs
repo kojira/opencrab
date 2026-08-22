@@ -119,7 +119,7 @@ impl ScheduleDto {
 /// cron/`@every`/timezone を検証し、`session_id` がそのエージェントの発火経路を持つことを確認する。
 ///
 /// **冪等性（同じことを 2 回言っても 1 回）**: `(session_id, cron_expr, message)` が**完全一致**する
-/// 既存行があれば**新規作成せず**その行を更新して**同じ id を返す**。同じ内容の再登録（omoikane が
+/// 既存行があれば**新規作成せず**その行を更新して**同じ id を返す**。同じ内容の再登録（sample-source が
 /// 巡回指示を再送するたびに `set_my_schedule` が呼ばれる等）でも enabled 行が増えず、同一スロットの
 /// 二重発火が起きない。**cron だけでは dedup しない**——message が違えば別スケジュール（「毎朝 7 時に
 /// まとめ」と「毎朝 7 時に巡回」は別物）。制約の追加ではなく当たり前の意味論（できることは減らない）。
@@ -552,7 +552,7 @@ pub async fn delete_schedule(
 mod tests {
     use super::*;
 
-    const AGENT: &str = "6b79ac3a-7f17-4618-a827-5bda992a3698";
+    const AGENT: &str = "11111111-1111-4111-8111-111111111111";
 
     fn state_with_db() -> AppState {
         crate::test_app_state()

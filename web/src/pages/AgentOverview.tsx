@@ -979,7 +979,7 @@ function NostrSection({ agentId }: { agentId: string }) {
           </label>
           <input
             className="input w-full"
-            placeholder="wss://yabu.me, wss://r.kojira.io"
+            placeholder="wss://relay.example.com, wss://relay2.example.com"
             value={relays}
             onChange={(e) => setRelays(e.target.value)}
           />

@@ -29,7 +29,7 @@ execute_shellを含む全ツール呼び出しは非同期で処理され、proc
 
 **【LLMコール #1】** ユーザー発言を受けて
 ```
-[system]    "You are らぼみ..."
+[system]    "You are エージェントB..."
 [user]      "ドイツの天気教えて"
 ```
 → LLMレスポンス:
@@ -45,7 +45,7 @@ tool_calls = [{id:"t01", name:"execute_shell", input:{command:"curl", args:["wtt
 
 **【LLMコール #2】** process_subtask_completedで再構築
 ```
-[system]    "You are らぼみ..."
+[system]    "You are エージェントB..."
 [user]      "ドイツの天気教えて"
 [assistant] content="調べてみる。"
             tool_calls=[{id:"t01", name:"execute_shell", input:{command:"curl", args:["wttr.in/Frankfurt?format=j1"]}}]
@@ -60,7 +60,7 @@ content = "取れた！フランクフルトの天気は5°C、晴れだよ！"
 
 **ツールが2回呼ばれた場合のLLMコール #3:**
 ```
-[system]    "You are らぼみ..."
+[system]    "You are エージェントB..."
 [user]      "ドイツの天気教えて"
 [assistant] content="調べてみる。"
             tool_calls=[{id:"t01", name:"execute_shell", ...}]

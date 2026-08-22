@@ -2636,7 +2636,7 @@ mod tests {
             pubkey: "0011223344556677".to_string(),
             npub: Some("npub1author".to_string()),
             note_id: Some("note1target".to_string()),
-            author_name: Some("kojira".to_string()),
+            author_name: Some("owner".to_string()),
             created_at: 1_700_000_000,
             kind,
             content: "こんにちは".to_string(),
