@@ -57,24 +57,24 @@ if [ -z "$SELF_GITHUB_PREFIX" ]; then
     | head -1 || true)"
 fi
 
-# 既定 relay は製品が接続する公共 Nostr relay で、個人の endpoint ではないため許可する。
-# first label が r の既定 relay は Damus の日本語圏の既定で、誰でも接続できる公共 server。
-# 同じ domain にある first label が x の relay も公共 relay として許可対象である。
-PUBLIC_RELAY_HOSTS=()
+# 製品の既定 relay は誰でも接続できる公共 Nostr relay であり、個人の endpoint では
+# ないため許可する。source 全体から拾うと、任意の wss:// を書くだけで自己許可できるので、
+# 新 runtime が実際に使う DEFAULT_RELAY の定義行だけを参照する。
+# r.kojira.io は旧 runtime で使っていた Damus 日本語圏の公共 relay。機械採取した
+# baseline と stale docs にだけ残るため、その exact host だけを明示的に許可する。
+PUBLIC_RELAY_HOSTS=("r.kojira.io")
 while IFS= read -r host; do
   [ -n "$host" ] || continue
   PUBLIC_RELAY_HOSTS+=("$host")
-  case "$host" in
-    r.*) PUBLIC_RELAY_HOSTS+=("x.${host#*.}") ;;
-  esac
-done < <(sed -nE '/^pub const DEFAULT_RELAYS:/p' crates/nostr/src/config.rs 2>/dev/null \
+done < <(sed -nE '/^const DEFAULT_RELAY: &str = "wss:\/\/[[:alnum:].-]+";$/p' \
+  crates/nostr-gate/src/main.rs 2>/dev/null \
   | grep -oE 'wss://[[:alnum:].-]+' \
-    | sed 's|^wss://||' | sort -u)
+  | sed 's|^wss://||' | sort -u)
 
 is_public_relay_host() {
   local candidate=$1
   local allowed
-  for allowed in "${PUBLIC_RELAY_HOSTS[@]}"; do
+  for allowed in ${PUBLIC_RELAY_HOSTS[@]+"${PUBLIC_RELAY_HOSTS[@]}"}; do
     [ "$candidate" = "$allowed" ] && return 0
   done
   return 1
@@ -220,7 +220,7 @@ strip_allowed_references() {
     allowed=${SELF_GITHUB_PREFIX#https://github.com/}
     text=$(strip_fixed "$text" "$allowed")
   fi
-  for host in "${PUBLIC_RELAY_HOSTS[@]}"; do
+  for host in ${PUBLIC_RELAY_HOSTS[@]+"${PUBLIC_RELAY_HOSTS[@]}"}; do
     text=$(strip_fixed "$text" "wss://${host}")
     text=$(strip_fixed "$text" "$host")
   done
