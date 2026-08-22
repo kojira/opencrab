@@ -44,7 +44,7 @@ pub mod webhook_targets;
 #[doc(hidden)]
 pub mod baseline_l1;
 
-#[cfg(any(test, feature = "baseline-l2"))]
+#[cfg(feature = "baseline-l2")]
 #[doc(hidden)]
 pub mod baseline_l2;
 
