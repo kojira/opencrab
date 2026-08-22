@@ -1,0 +1,35 @@
+[package]
+name = "opencrab-nostr-gate"
+edition.workspace = true
+version.workspace = true
+
+# nostr ゲート（プラグイン）。**core の型（opencrab-*）を一切使わない** — 依存は tokio・tokio-tungstenite・
+# secp256k1・sha2・bech32・rand・serde_json だけ。線に載る JSON はプロトコル 版1 と NIP-01 の仕様だけを
+# 見て自分で組む。クレートの依存グラフに opencrab-* が無いので、「うっかり core の型を使う」が構造的に起きない。
+#
+# lib（純関数: NIP-01 の id/署名・NIP-19 の bech32・フィルタ変換・core 出来事の組み立て）と、
+# bin `nostr-gate`（core への Unix ソケットと実リレーへの WebSocket をつなぐ配線）を分ける。
+# lib にすることで tests/ の統合テスト（実リレー・#[ignore]）が純関数とリレー補助を再利用できる。
+
+[[bin]]
+name = "nostr-gate"
+path = "src/main.rs"
+
+[lib]
+name = "opencrab_nostr_gate"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "net", "io-util"] }
+serde_json = { workspace = true }
+# wss:// のため rustls + webpki-roots。connect で connect_async が有効になる。
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+# tokio-tungstenite の WebSocketStream を駆動する Stream/Sink 拡張。tokio-tungstenite を使うのに必須の相方。
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+# rustls 0.23 は既定の暗号プロバイダを内蔵しない（tokio-tungstenite は provider 機能を有効にしない）。
+# wss:// を張る前に ring provider を install_default する 1 行のためだけに直接依存する（既に依存グラフ内）。
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+secp256k1 = { version = "0.30", default-features = false, features = ["std"] }
+sha2 = "0.10"
+bech32 = "0.11"
+rand = "0.8"

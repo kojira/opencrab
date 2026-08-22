@@ -25,6 +25,9 @@
 #   ただし「明らかに合成」の値はこの検査が意図的に見逃すので、
 #   構造検査の負のテストには「実在しないが実在の形をした」値を作って使う。
 
+# 実行する前に `git add` を済ませること。この検査は追跡ファイルだけを見るので、
+# 未追跡のまま実行すると新規ファイルが対象外になり、CI で初めて落ちる（実際に起きた）。
+
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -148,6 +151,9 @@ is_allowed_nostr_key() {
     # NIP-19 本文の公開 example。相互運用テストに必要な固定ベクタなので許可する。
     npub10elfcs4fr0l0r8af98jlmgdh9c8tcxjvz9qkw038js35mp4dma8qzvjptg) return 0 ;;
     nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5) return 0 ;;
+    # NIP-19 の正準ベクトル（hex 3bf0c63f... とのペア）。規格が公開している検証用の値で
+    # 誰の鍵でもない。bech32 の実装が仕様どおりかを釘付けにするために必要。
+    npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6) return 0 ;;
     # 32 byte がすべて 0 の決定的な合成 fixture。実鍵としては無効なので許可する。
     nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqzqujme) return 0 ;;
   esac
