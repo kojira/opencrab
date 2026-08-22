@@ -1,4 +1,23 @@
 {
+  "capture_profile": {
+    "build": {
+      "required_cargo_features": [
+        "discord",
+        "nostr",
+        "web"
+      ],
+      "selection": "the baseline-l2 Cargo feature enables baseline-l1 and its exact feature set; ambient feature unification is not used",
+      "target_family": "unix"
+    },
+    "id": "full-production-surface-v1",
+    "runtime": {
+      "configuration": "collector-owned AppState, tool, provider, MCP, and gateway fixtures; no operator config file is read",
+      "database": "fresh in-memory database seeded by the collector for every probe",
+      "environment": "no parent environment value is a semantic input; fixture subprocesses receive an empty environment",
+      "external_processes": "only a collector-owned executable fixture with fixed bytes and /bin/sh interpreter; no PATH lookup, operator binary, network service, or live gateway",
+      "filesystem": "fresh collector-owned workspaces with fixed contents; generated roots are normalized to <workspace>"
+    }
+  },
   "coverage": {
     "claim": "Only nonempty observations satisfying their facet predicate are fixed by this artifact; every uncollected or not_applicable entry is an explicit non-claim.",
     "http_facets": {
@@ -2583,7 +2602,7 @@
         "request": {
           "body": null,
           "method": "GET",
-          "uri": "/api/agents/baseline-agent/import/sync/status?source_dir=/dev&include_daily_logs=false"
+          "uri": "/api/agents/baseline-agent/import/sync/status?source_dir=<workspace>/import-source&include_daily_logs=false"
         },
         "response": {
           "body": {
@@ -2604,7 +2623,7 @@
               "sections_updated": 0,
               "status": "not_found"
             },
-            "source_dir": "/dev"
+            "source_dir": "<workspace>/import-source"
           },
           "headers": [
             {
@@ -7149,10 +7168,10 @@
         },
         "response": {
           "body": {
-            "configured_path": "/__opencrab_baseline_missing__/codex",
-            "error": "codex を実行できませんでした（/__opencrab_baseline_missing__/codex）: No such file or directory (os error 2)",
-            "resolved_path": "/__opencrab_baseline_missing__/codex",
-            "version": null
+            "configured_path": "<workspace>/baseline-command",
+            "error": null,
+            "resolved_path": "<workspace>/baseline-command",
+            "version": "baseline-cli 1.0"
           },
           "headers": [
             {
@@ -7185,10 +7204,10 @@
         },
         "response": {
           "body": {
-            "configured_path": "/__opencrab_baseline_missing__/codex",
-            "error": "codex を実行できませんでした（/__opencrab_baseline_missing__/codex）: No such file or directory (os error 2)",
-            "resolved_path": "/__opencrab_baseline_missing__/codex",
-            "version": null
+            "configured_path": "<workspace>/baseline-command",
+            "error": null,
+            "resolved_path": "<workspace>/baseline-command",
+            "version": "baseline-cli 1.0"
           },
           "headers": [
             {
@@ -7222,10 +7241,10 @@
         },
         "response": {
           "body": {
-            "configured_path": "/__opencrab_baseline_missing__/cursor-agent",
-            "error": "cursor を実行できませんでした（/__opencrab_baseline_missing__/cursor-agent）: No such file or directory (os error 2)",
-            "resolved_path": "/__opencrab_baseline_missing__/cursor-agent",
-            "version": null
+            "configured_path": "<workspace>/baseline-command",
+            "error": null,
+            "resolved_path": "<workspace>/baseline-command",
+            "version": "baseline-cli 1.0"
           },
           "headers": [
             {
@@ -7258,10 +7277,10 @@
         },
         "response": {
           "body": {
-            "configured_path": "/__opencrab_baseline_missing__/cursor-agent",
-            "error": "cursor を実行できませんでした（/__opencrab_baseline_missing__/cursor-agent）: No such file or directory (os error 2)",
-            "resolved_path": "/__opencrab_baseline_missing__/cursor-agent",
-            "version": null
+            "configured_path": "<workspace>/baseline-command",
+            "error": null,
+            "resolved_path": "<workspace>/baseline-command",
+            "version": "baseline-cli 1.0"
           },
           "headers": [
             {
@@ -7678,7 +7697,7 @@
                 "api_key_source": "none",
                 "args": [],
                 "base_url": "",
-                "binary_path": "/__opencrab_baseline_missing__/codex",
+                "binary_path": "<workspace>/baseline-command",
                 "default_model": "",
                 "enabled_override": null,
                 "has_override": false,
@@ -7694,7 +7713,7 @@
                 "api_key_source": "none",
                 "args": [],
                 "base_url": "",
-                "binary_path": "/__opencrab_baseline_missing__/cursor-agent",
+                "binary_path": "<workspace>/baseline-command",
                 "default_model": "",
                 "enabled_override": null,
                 "has_override": false,
@@ -7873,7 +7892,7 @@
                 "api_key_source": "none",
                 "args": [],
                 "base_url": "",
-                "binary_path": "/__opencrab_baseline_missing__/codex",
+                "binary_path": "<workspace>/baseline-command",
                 "default_model": "",
                 "enabled_override": null,
                 "has_override": false,
@@ -7889,7 +7908,7 @@
                 "api_key_source": "none",
                 "args": [],
                 "base_url": "",
-                "binary_path": "/__opencrab_baseline_missing__/cursor-agent",
+                "binary_path": "<workspace>/baseline-command",
                 "default_model": "",
                 "enabled_override": null,
                 "has_override": false,
@@ -10327,7 +10346,7 @@
         }
       },
       "query_suffixes": {
-        "/api/agents/{id}/import/sync/status": "?source_dir=/dev&include_daily_logs=false"
+        "/api/agents/{id}/import/sync/status": "?source_dir={collector_workspace}/import-source&include_daily_logs=false"
       },
       "why": [
         "A replacement must not silently drop an HTTP method that remains present in the L1 route inventory.",
@@ -10747,7 +10766,7 @@
           "args": [
             "baseline-shell"
           ],
-          "command": "printf"
+          "command": "{collector_workspace}/baseline-command"
         },
         "generate_inner_voice": {
           "thought": "baseline thought"
@@ -11008,7 +11027,7 @@
         "mcp": "Two in-memory McpServer implementations expose public_local/echo and trusted_local/echo. Calls traverse the real McpToolProvider and BridgedExecutor.",
         "session": "Gateway self-management calls use web-baseline-agent-conversation so the production TimedFire descriptor resolves a real local web session target. History reads use baseline-session.",
         "subtasks": "cancel_subtask, steer_subtask, and report_progress receive an in-memory running SubtaskRegistry entry with id baseline-subtask, parent web-baseline-agent-conversation, sub-session subtask-baseline-subtask, an actual pending Tokio abort handle, owner caller, and the real lifecycle latch. spawn_subtask receives a real registry and runs the real spawn path; its background LLM run has no provider and is not represented as a successful completion.",
-        "workspace": "A fresh temporary workspace contains no operator files. The cases create captured/, captured/file.txt, captured/summary.txt, and skills/captured-skill.skill.md through the real tools; the shell allowlist contains only printf."
+        "workspace": "Fresh temporary roots contain only collector-owned files. The collector creates a fixed baseline-command executable fixture and an empty import-source directory outside agent workspaces; tool cases create captured/, captured/file.txt, captured/summary.txt, and skills/captured-skill.skill.md through the real tools. The shell allowlist contains only the absolute path of baseline-command, and its subprocess environment is empty."
       },
       "success_uncollected_l3": {
         "nostr_generate_key": "Requires the operator's nostaro executable and writes key material outside the temporary workspace.",
@@ -12614,7 +12633,7 @@
             "data": {
               "agent_id": "baseline-agent",
               "commands": [
-                "printf"
+                "<workspace>/baseline-command"
               ],
               "count": 1
             },
@@ -12628,7 +12647,7 @@
             "data": {
               "agent_id": "baseline-agent",
               "commands": [
-                "printf",
+                "<workspace>/baseline-command",
                 "baseline_cmd"
               ],
               "count": 2
@@ -13738,7 +13757,7 @@
           "args": [
             "baseline-shell"
           ],
-          "command": "printf"
+          "command": "<workspace>/baseline-command"
         },
         "postcondition": null,
         "result": {
@@ -13995,7 +14014,7 @@
           "data": {
             "agent_id": "baseline-agent",
             "commands": [
-              "printf"
+              "<workspace>/baseline-command"
             ],
             "count": 1
           },
@@ -14042,7 +14061,7 @@
         "result": {
           "data": {
             "commands": [
-              "printf"
+              "<workspace>/baseline-command"
             ]
           },
           "error": null,
@@ -15021,7 +15040,7 @@
             "data": {
               "agent_id": "baseline-agent",
               "commands": [
-                "printf",
+                "<workspace>/baseline-command",
                 "baseline_cmd"
               ],
               "count": 2
@@ -15036,7 +15055,7 @@
             "data": {
               "agent_id": "baseline-agent",
               "commands": [
-                "printf"
+                "<workspace>/baseline-command"
               ],
               "count": 1
             },

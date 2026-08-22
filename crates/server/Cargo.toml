@@ -8,7 +8,7 @@ default = ["discord", "nostr", "web"]
 discord = ["dep:opencrab-discord"]
 nostr = ["dep:opencrab-nostr"]
 web = ["dep:opencrab-web-gateway"]
-baseline-l1 = []
+baseline-l1 = ["discord", "nostr", "web"]
 baseline-l2 = ["baseline-l1"]
 
 [[bin]]

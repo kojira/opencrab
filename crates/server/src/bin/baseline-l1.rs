@@ -11,6 +11,7 @@ async fn main() {
 }
 
 async fn run() -> Result<(), String> {
+    let capture_profile = opencrab_server::baseline_l1::capture_profile()?;
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let repo = manifest
         .parent()
@@ -26,6 +27,7 @@ async fn run() -> Result<(), String> {
     let document = json!({
         "schema_version": 1,
         "scope": "opencrab-external-shape-l1",
+        "capture_profile": capture_profile,
         "http": {
             "route_count": route_count,
             "routes": routes,

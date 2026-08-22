@@ -1,4 +1,21 @@
 {
+  "capture_profile": {
+    "build": {
+      "required_cargo_features": [
+        "discord",
+        "nostr",
+        "web"
+      ],
+      "selection": "the baseline-l1 Cargo feature enables this exact set; ambient feature unification is not used"
+    },
+    "id": "full-production-surface-v1",
+    "runtime": {
+      "configuration": "collector-owned values only",
+      "database": "fresh in-memory fixture",
+      "external_processes": "none",
+      "filesystem": "collector-owned workspace; storage location is not serialized"
+    }
+  },
   "fixed_responses": {
     "probes": [
       {

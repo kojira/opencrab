@@ -13,6 +13,36 @@ use tower::ServiceExt;
 
 use crate::{create_router, process, test_app_state};
 
+pub fn capture_profile() -> Result<Value, String> {
+    let missing_features = [
+        (!cfg!(feature = "discord")).then_some("discord"),
+        (!cfg!(feature = "nostr")).then_some("nostr"),
+        (!cfg!(feature = "web")).then_some("web"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    if !missing_features.is_empty() {
+        return Err(format!(
+            "baseline full-production-surface-v1 requires Cargo features: {}",
+            missing_features.join(", ")
+        ));
+    }
+    Ok(json!({
+        "id": "full-production-surface-v1",
+        "build": {
+            "required_cargo_features": ["discord", "nostr", "web"],
+            "selection": "the baseline-l1 Cargo feature enables this exact set; ambient feature unification is not used"
+        },
+        "runtime": {
+            "database": "fresh in-memory fixture",
+            "configuration": "collector-owned values only",
+            "filesystem": "collector-owned workspace; storage location is not serialized",
+            "external_processes": "none"
+        }
+    }))
+}
+
 fn class_json(class: Option<ToolClass>) -> Value {
     let Some(class) = class else {
         return json!({"collection_status":"uncollected"});

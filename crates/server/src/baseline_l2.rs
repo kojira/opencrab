@@ -32,6 +32,8 @@ const AGENT_ID: &str = "baseline-agent";
 const SESSION_ID: &str = "baseline-session";
 const TOOL_SESSION_ID: &str = "web-baseline-agent-conversation";
 static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+const COLLECTOR_WORKSPACE_TOKEN: &str = "{collector_workspace}";
+const FIXTURE_EXECUTABLE_NAME: &str = "baseline-command";
 
 fn fixture_workspace(kind: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
@@ -39,6 +41,93 @@ fn fixture_workspace(kind: &str) -> std::path::PathBuf {
         std::process::id(),
         FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ))
+}
+
+fn capture_profile() -> Result<Value, String> {
+    let missing_features = [
+        (!cfg!(feature = "discord")).then_some("discord"),
+        (!cfg!(feature = "nostr")).then_some("nostr"),
+        (!cfg!(feature = "web")).then_some("web"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    if !missing_features.is_empty() {
+        return Err(format!(
+            "baseline full-production-surface-v1 requires Cargo features: {}",
+            missing_features.join(", ")
+        ));
+    }
+    if !cfg!(unix) {
+        return Err(
+            "baseline full-production-surface-v1 requires a Unix target with /bin/sh".to_string(),
+        );
+    }
+    Ok(json!({
+        "id": "full-production-surface-v1",
+        "build": {
+            "required_cargo_features": ["discord", "nostr", "web"],
+            "selection": "the baseline-l2 Cargo feature enables baseline-l1 and its exact feature set; ambient feature unification is not used",
+            "target_family": "unix"
+        },
+        "runtime": {
+            "database": "fresh in-memory database seeded by the collector for every probe",
+            "configuration": "collector-owned AppState, tool, provider, MCP, and gateway fixtures; no operator config file is read",
+            "environment": "no parent environment value is a semantic input; fixture subprocesses receive an empty environment",
+            "filesystem": "fresh collector-owned workspaces with fixed contents; generated roots are normalized to <workspace>",
+            "external_processes": "only a collector-owned executable fixture with fixed bytes and /bin/sh interpreter; no PATH lookup, operator binary, network service, or live gateway"
+        }
+    }))
+}
+
+fn seed_fixture_executable(root: &Path) -> Result<std::path::PathBuf, String> {
+    fs::create_dir_all(root).map_err(|error| format!("create baseline workspace: {error}"))?;
+    let executable = root.join(FIXTURE_EXECUTABLE_NAME);
+    fs::write(
+        &executable,
+        b"#!/bin/sh\nif [ \"${1-}\" = \"--version\" ]; then\n  printf 'baseline-cli 1.0\\n'\nelse\n  printf '%s' \"${1-}\"\nfi\n",
+    )
+    .map_err(|error| format!("seed baseline executable: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&executable)
+            .map_err(|error| format!("read baseline executable metadata: {error}"))?
+            .permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&executable, permissions)
+            .map_err(|error| format!("make baseline executable runnable: {error}"))?;
+    }
+    Ok(executable)
+}
+
+fn percent_encode_query_value(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+fn materialize_uri(uri: &str) -> Result<String, String> {
+    if !uri.contains(COLLECTOR_WORKSPACE_TOKEN) {
+        return Ok(uri.to_string());
+    }
+    let import_root = fixture_workspace("import");
+    fs::create_dir_all(import_root.join("import-source"))
+        .map_err(|error| format!("seed baseline import source: {error}"))?;
+    Ok(uri.replace(
+        COLLECTOR_WORKSPACE_TOKEN,
+        &percent_encode_query_value(&import_root.to_string_lossy()),
+    ))
+}
+
+fn captured_uri(uri: &str) -> String {
+    uri.replace(COLLECTOR_WORKSPACE_TOKEN, "<workspace>")
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -222,6 +311,8 @@ fn normalize_string(text: &mut String) {
     for marker in [
         "opencrab-baseline-l2-tools-",
         "opencrab-baseline-l2-workspace-",
+        "opencrab-baseline-l2-process-",
+        "opencrab-baseline-l2-import-",
     ] {
         let Some(marker_start) = text.find(marker) else {
             continue;
@@ -229,8 +320,8 @@ fn normalize_string(text: &mut String) {
         let path_start = text[..marker_start]
             .rfind(": ")
             .map(|start| start + 2)
-            .or_else(|| text[..marker_start].find('/'))
-            .unwrap_or(marker_start);
+            .or_else(|| text[..marker_start].rfind('=').map(|start| start + 1))
+            .unwrap_or(0);
         let marker_end = marker_start + marker.len();
         let path_end = text[marker_end..]
             .find('/')
@@ -241,21 +332,23 @@ fn normalize_string(text: &mut String) {
 
 fn seeded_state() -> Result<AppState, String> {
     let mut state = test_app_state();
-    state.llm_config = Arc::new(
-        toml::from_str(
-            r#"
-[providers.codex]
-binary_path = "/__opencrab_baseline_missing__/codex"
-[providers.cursor]
-binary_path = "/__opencrab_baseline_missing__/cursor-agent"
-"#,
-        )
-        .map_err(|error| format!("build deterministic diagnostic config: {error}"))?,
-    );
     let workspace = fixture_workspace("workspace");
-    fs::create_dir_all(&workspace).map_err(|e| format!("create baseline workspace: {e}"))?;
+    fs::create_dir_all(&workspace)
+        .map_err(|error| format!("create baseline workspace: {error}"))?;
     fs::write(workspace.join("baseline.txt"), b"baseline\n")
-        .map_err(|e| format!("seed baseline workspace: {e}"))?;
+        .map_err(|error| format!("seed baseline workspace: {error}"))?;
+    let executable = seed_fixture_executable(&fixture_workspace("process"))?;
+    let mut llm_config: crate::config::LlmConfig =
+        toml::from_str("[providers.codex]\n[providers.cursor]\n")
+            .map_err(|error| format!("build deterministic diagnostic config: {error}"))?;
+    for provider in ["codex", "cursor"] {
+        llm_config
+            .providers
+            .get_mut(provider)
+            .ok_or_else(|| format!("deterministic diagnostic config omitted {provider}"))?
+            .binary_path = executable.to_string_lossy().to_string();
+    }
+    state.llm_config = Arc::new(llm_config);
     state.workspace_base = workspace.to_string_lossy().to_string();
     state.intake = Arc::new(crate::config::IntakeConfig {
         secrets: [("baseline-source".to_string(), "baseline-secret".to_string())]
@@ -615,7 +708,7 @@ async fn collect_http(l1: &Value, catalog: &HttpScenarioCatalog) -> Result<Value
                     "branch":"normal", "status":"uncollected", "reason":reason, "level":"L3"
                 }));
             } else {
-                let uri = concrete_uri(catalog, path, false)?;
+                let catalog_uri = concrete_uri(catalog, path, false)?;
                 let body_value = catalog.normal_bodies.get(&key).cloned();
                 if matches!(method, "POST" | "PUT" | "PATCH")
                     && body_value.is_none()
@@ -631,6 +724,8 @@ async fn collect_http(l1: &Value, catalog: &HttpScenarioCatalog) -> Result<Value
                     .transpose()
                     .map_err(|error| format!("serialize {stem} normal body: {error}"))?;
                 let state = seeded_state()?;
+                let uri = materialize_uri(&catalog_uri)?;
+                let artifact_uri = captured_uri(&catalog_uri);
                 let observer = catalog.mutation_postconditions.get(&key);
                 let before = if let Some(observer) = observer {
                     let observer_uri = concrete_uri(catalog, &observer.path, false)?;
@@ -702,7 +797,7 @@ async fn collect_http(l1: &Value, catalog: &HttpScenarioCatalog) -> Result<Value
                 probes.push(json!({
                     "name":format!("{stem}__normal"),
                     "selection":"normal_or_local_precondition_branch",
-                    "request":{"method":method,"uri":uri,"body":body_value},
+                    "request":{"method":method,"uri":artifact_uri,"body":body_value},
                     "response":response,
                     "effect":effect
                 }));
@@ -1190,6 +1285,12 @@ fn build_executor_with_state(
     let mut state = seeded_tool_state();
     state.db = context.db.clone();
     state.workspace_base = context.workspace.root().to_string_lossy().to_string();
+    let fixture_command = shell_enabled.then(|| {
+        seed_fixture_executable(&fixture_workspace("process"))
+            .expect("seed baseline process fixture")
+            .to_string_lossy()
+            .to_string()
+    });
     #[cfg(feature = "nostr")]
     {
         let connection = state.db.lock().expect("lock baseline Nostr DB");
@@ -1209,7 +1310,8 @@ fn build_executor_with_state(
     *state.tools_config.write().expect("baseline tools config") = opencrab_actions::ToolsConfig {
         enabled: shell_enabled,
         shell: shell_enabled.then(|| opencrab_actions::ShellToolConfig {
-            allowed_commands: vec!["printf".to_string()],
+            allowed_commands: vec![fixture_command.expect("enabled shell fixture")],
+            allowed_env_vars: Vec::new(),
             ..Default::default()
         }),
     };
@@ -1585,8 +1687,22 @@ async fn collect_tool_execution(catalog: &ToolScenarioCatalog) -> Result<Value, 
         } else {
             None
         };
-        let result = executor.execute(tool, arguments).await;
+        let mut execution_arguments = arguments.clone();
+        if tool == "execute_shell" {
+            let command = state
+                .tools_config
+                .read()
+                .map_err(|error| format!("read baseline tools config: {error}"))?
+                .shell
+                .as_ref()
+                .and_then(|shell| shell.allowed_commands.first())
+                .cloned()
+                .ok_or_else(|| "baseline shell fixture is missing".to_string())?;
+            execution_arguments["command"] = command.into();
+        }
+        let result = executor.execute(tool, &execution_arguments).await;
         let result = result_json(result);
+        normalize(&mut execution_arguments);
         if result["success"] == true {
             let postcondition = if let Some(postcondition) = catalog.postconditions.get(tool) {
                 let observed =
@@ -1622,11 +1738,11 @@ async fn collect_tool_execution(catalog: &ToolScenarioCatalog) -> Result<Value, 
             } else {
                 None
             };
-            successes.push(json!({"tool":tool,"arguments":arguments,"result":result,"postcondition":postcondition}));
+            successes.push(json!({"tool":tool,"arguments":execution_arguments,"result":result,"postcondition":postcondition}));
         } else {
             unsuccessful_attempts.push(json!({
                 "tool":tool,
-                "arguments":arguments,
+                "arguments":execution_arguments,
                 "result":result,
                 "status":"uncollected",
                 "reason":"the selected local success precondition reached the real implementation but did not return success"
@@ -1921,6 +2037,7 @@ fn coverage(http: &Value, tools: &Value) -> Value {
 }
 
 pub async fn capture(l1_path: &Path, scenario_path: &Path) -> Result<Value, String> {
+    let capture_profile = capture_profile()?;
     let l1 = read_json(l1_path)?;
     let (scenarios, catalog) = read_scenarios(scenario_path)?;
     if catalog.schema_version != 1 {
@@ -1933,6 +2050,7 @@ pub async fn capture(l1_path: &Path, scenario_path: &Path) -> Result<Value, Stri
     let coverage = coverage(&http, &tools);
     let mut artifact = json!({
         "schema_version":1,
+        "capture_profile":capture_profile,
         "source":{"l1":l1_path.file_name().and_then(|s|s.to_str()).unwrap_or("opencrab-l1.json"),"scenario_catalog":scenario_path.file_name().and_then(|s|s.to_str()).unwrap_or("scenarios.json")},
         "normalization":[
             "content-length response header omitted",
@@ -2172,7 +2290,7 @@ mod tests {
         assert_eq!(
             first["scenario_catalog"]["http"]["query_suffixes"]
                 ["/api/agents/{id}/import/sync/status"],
-            "?source_dir=/dev&include_daily_logs=false"
+            "?source_dir={collector_workspace}/import-source&include_daily_logs=false"
         );
         let sync_status = first["http"]["probes"]
             .as_array()
@@ -2181,7 +2299,43 @@ mod tests {
             .find(|probe| probe["name"] == "get___api_agents_id_import_sync_status__normal")
             .expect("import sync status probe");
         assert_eq!(sync_status["response"]["status"], 200);
-        assert_eq!(sync_status["response"]["body"]["source_dir"], "/dev");
+        assert_eq!(
+            sync_status["response"]["body"]["source_dir"],
+            "<workspace>/import-source"
+        );
+        assert_eq!(
+            first["capture_profile"]["build"]["required_cargo_features"],
+            json!(["discord", "nostr", "web"])
+        );
+        let diagnostic_probe = |name: &str| {
+            first["http"]["probes"]
+                .as_array()
+                .expect("HTTP probes")
+                .iter()
+                .find(|probe| probe["name"] == name)
+                .expect("diagnostic probe")
+        };
+        for name in [
+            "get___api_llm_codex_diagnostics__normal",
+            "get___api_llm_cursor_diagnostics__normal",
+        ] {
+            let body = &diagnostic_probe(name)["response"]["body"];
+            assert_eq!(body["configured_path"], "<workspace>/baseline-command");
+            assert_eq!(body["resolved_path"], "<workspace>/baseline-command");
+            assert_eq!(body["version"], "baseline-cli 1.0");
+            assert!(body["error"].is_null());
+        }
+        let shell_call = first["tool_execution"]["successful_calls"]
+            .as_array()
+            .expect("successful tool calls")
+            .iter()
+            .find(|call| call["tool"] == "execute_shell")
+            .expect("execute_shell call");
+        assert_eq!(
+            shell_call["arguments"]["command"],
+            "<workspace>/baseline-command"
+        );
+        assert_eq!(shell_call["result"]["data"]["stdout"], "baseline-shell");
         assert!(text.contains("2026-01-01"));
     }
 }

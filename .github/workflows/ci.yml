@@ -58,6 +58,16 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-features
 
+      # baseline の外形構成は周囲の feature union やローカル Nostr 設定に依存させない。
+      # default feature を切った状態から baseline-l2 だけを選び、採取 profile 自身が
+      # discord / nostr / web を有効化して checked artifact と一致することを Linux で検査する。
+      - name: Baseline capture profile (no ambient features or Nostr config)
+        run: |
+          env -u OPENCRAB_SECRET_MASTER_KEY -u OPENCRAB_SKILLS_DIR \
+            cargo test -p opencrab-server \
+              --no-default-features --features baseline-l2 \
+              baseline_l2::tests::
+
       # R4: opencrab-core が gate/SDK クレートへ依存し始めていないかを
       # 依存ツリーで検査する（ビルドの成否には現れない逆流を止める）。
       # R7（core の production コードに gate 名が出ない）は上の Test に含まれる。
