@@ -110,6 +110,8 @@ struct Shared {
     pending: Mutex<HashMap<String, oneshot::Sender<Resp>>>,
     reqid: AtomicU64,
     token: String,
+    /// launcher が起動ごとに渡す readiness token。通常の手動起動では endpoint 自体を出さない。
+    launcher_ready_token: Option<String>,
     /// 発話・効果に振る外界識別子（§03/§04）。記録は持たない（§10）——番号を振るだけ。
     origins: OriginMint,
 }
@@ -285,7 +287,7 @@ fn urls_in(text: &str) -> Vec<String> {
 }
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() {
+async fn main() -> std::io::Result<()> {
     let mut args = std::env::args().skip(1);
     let socket_path = args
         .next()
@@ -299,6 +301,9 @@ async fn main() {
         .next()
         .or_else(|| std::env::var("WEB_TOKEN").ok())
         .unwrap_or_else(|| "secret-token".to_string());
+    let launcher_ready_token = std::env::var("OPENCRAB_WEB_READY_TOKEN")
+        .ok()
+        .filter(|token| !token.is_empty());
 
     let shared = Arc::new(Shared {
         bound: Mutex::new(HashMap::new()),
@@ -307,12 +312,14 @@ async fn main() {
         pending: Mutex::new(HashMap::new()),
         reqid: AtomicU64::new(1),
         token,
+        launcher_ready_token,
         origins: OriginMint::new(),
     });
 
     let link = tokio::spawn(run_core_link(socket_path, shared.clone()));
-    let http = tokio::spawn(run_http(http_port, shared.clone()));
-    let _ = tokio::join!(link, http);
+    let result = run_http(http_port, shared).await;
+    link.abort();
+    result
 }
 
 // ---- core への線（プロトコル§00-§06）----
@@ -483,11 +490,9 @@ fn handle_core_message(v: &Value, shared: &Arc<Shared>, out: &mpsc::UnboundedSen
 
 // ---- HTTP（人の側）----
 
-async fn run_http(port: u16, shared: Arc<Shared>) {
+async fn run_http(port: u16, shared: Arc<Shared>) -> std::io::Result<()> {
     let bind_addr = std::env::var("WEB_GATE_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
-    let listener = TcpListener::bind((bind_addr.as_str(), port))
-        .await
-        .expect("bind http port");
+    let listener = TcpListener::bind((bind_addr.as_str(), port)).await?;
     eprintln!("web-gate: http on {bind_addr}:{port}");
     loop {
         let (stream, _) = match listener.accept().await {
@@ -571,6 +576,15 @@ async fn handle_http(
         Some(r) => r,
         None => return write_response(&mut stream, 400, &json!({"error":"bad request"})).await,
     };
+
+    // 起動ごとの token を知る、この web-gate だけが成功する launcher 専用 probe。
+    // 別サービスや以前の web-gate が同じ port で応答しても ready にはならない。
+    if req.method == "GET" && req.path == "/__opencrab_launcher_ready" {
+        return match shared.launcher_ready_token.as_deref() {
+            Some(token) => write_text(&mut stream, 200, token).await,
+            None => write_response(&mut stream, 404, &json!({"error":"not found"})).await,
+        };
+    }
 
     // 体験用の 1 枚チャット画面（依存なし・localhost 前提）。`GET /` か `GET /chat` で HTML を返す。
     // これはゲートの記録ではない——画面の JS が下の `GET/POST /rooms/<room>/messages` を叩き、履歴は
@@ -766,6 +780,21 @@ async fn write_response(
     stream.flush().await
 }
 
+async fn write_text(
+    stream: &mut tokio::net::TcpStream,
+    status: u16,
+    body: &str,
+) -> std::io::Result<()> {
+    let reason = if status == 200 { "OK" } else { "Not Found" };
+    let head = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).await?;
+    stream.write_all(body.as_bytes()).await?;
+    stream.flush().await
+}
+
 /// 体験用のチャット画面を返す（`text/html`）。JSON の `write_response` と別経路——本文は HTML。
 async fn write_html(stream: &mut tokio::net::TcpStream, html: &str) -> std::io::Result<()> {
     let body = html.as_bytes();
@@ -900,6 +929,7 @@ mod tests {
             pending: Mutex::new(HashMap::new()),
             reqid: AtomicU64::new(1),
             token: "t".into(),
+            launcher_ready_token: None,
             origins: OriginMint::new(),
         }
     }

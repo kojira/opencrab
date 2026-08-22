@@ -121,7 +121,11 @@ pub fn parse_places_config(json: &str) -> Result<Vec<PlaceSpec>, String> {
 /// 設定で本物を選んだのにプロバイダが失敗すれば、そのターンは失敗で終わる（echo へ戻らない・§15）。
 /// 鍵が無くてもここは通る（本物を選んでいなければ echo・選んでいても組めるが実行時に失敗を返す）。
 fn select_engine() -> Arc<dyn Engine> {
-    provider::engine_from_env().unwrap_or_else(|| Arc::new(EchoEngine))
+    match provider::engine_from_env() {
+        Ok(Some(engine)) => engine,
+        Ok(None) => Arc::new(EchoEngine),
+        Err(message) => panic!("{message}"),
+    }
 }
 
 /// 決まった応答を返す推論の口（差し替え可能・詳細§01）。本物の LLM は今回入れない。

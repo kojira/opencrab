@@ -3,10 +3,12 @@ set -euo pipefail
 
 # New-runtime development launcher.
 #
-# A long-lived supervisor owns one process group per component.  Stopping a
-# group, instead of only its leader, also stops any cursor/shell child that the
-# core may have started during a turn.  PID files remain usable after an
-# ungraceful supervisor death, so the next `stop` can still clean the groups.
+# A long-lived supervisor owns one process group per component.  Every process
+# in a component inherits an open descriptor for that component's owner file.
+# Stopping a verified group, instead of only its leader, also stops any
+# cursor/shell child that the core may have started during a turn.  The owner
+# descriptor remains usable after either the leader or supervisor dies, so the
+# next `stop` can safely clean the group without trusting a reusable PID alone.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 cd "$SCRIPT_DIR"
@@ -153,31 +155,64 @@ group_alive() {
     kill -0 -- "-$1" 2>/dev/null
 }
 
-# Confirm a stale PID still names the binary recorded when it was spawned.
-# Linux exposes the executable through /proc; macOS exposes it through lsof.
-component_owned() {
+# Confirm that a process still holds the owner file inherited at component
+# spawn.  A process with a reused PID, even one running the same executable,
+# cannot acquire this descriptor retroactively.
+process_holds_component_owner() {
     local name="$1"
     local pid="$2"
-    local expected_file="$PID_DIR/$name.exe"
-    local expected actual
-    [ -f "$expected_file" ] || return 2
-    expected="$(sed -n '1p' "$expected_file")"
-    [ -n "$expected" ] || return 2
+    local owner_file="$PID_DIR/$name.owner"
+    [ -f "$owner_file" ] || return 2
 
-    if [ -L "/proc/$pid/exe" ]; then
-        actual="$(readlink "/proc/$pid/exe" 2>/dev/null || true)"
-        case "$actual" in
-            "$expected"|"$expected (deleted)") return 0 ;;
-            *) return 1 ;;
-        esac
+    if [ -d "/proc/$pid/fd" ]; then
+        local fd target
+        for fd in /proc/"$pid"/fd/*; do
+            target="$(readlink "$fd" 2>/dev/null || true)"
+            [ "$target" = "$owner_file" ] && return 0
+        done
+        return 1
     fi
     command -v lsof >/dev/null 2>&1 || return 2
-    local line
-    while IFS= read -r line; do
-        case "$line" in
-            "n$expected"|"n$expected (deleted)") return 0 ;;
-        esac
-    done < <(lsof -a -p "$pid" -d txt -Fn 2>/dev/null)
+    lsof -Fn -a -p "$pid" -- "$owner_file" 2>/dev/null | grep -Fqx "n$owner_file"
+}
+
+# Verify ownership from any live member, not only the process-group leader.
+# This is what lets cleanup reclaim children after the leader exits first.
+component_owned() {
+    local name="$1"
+    local pgid="$2"
+    local owner_file="$PID_DIR/$name.owner"
+    local stat line rest state parent member_pgid member rc
+    local unverifiable=0
+    [ -f "$owner_file" ] || return 2
+
+    if [ -d /proc/self/fd ]; then
+        for stat in /proc/[0-9]*/stat; do
+            [ -r "$stat" ] || continue
+            line="$(sed -n '1p' "$stat" 2>/dev/null || true)"
+            [ -n "$line" ] || continue
+            member="${line%% *}"
+            # comm is parenthesized and may contain spaces or ')'.  Removing
+            # through the final ') ' leaves: state ppid pgrp ...
+            rest="${line##*) }"
+            read -r state parent member_pgid rest <<< "$rest"
+            [ "$member_pgid" = "$pgid" ] || continue
+            if process_holds_component_owner "$name" "$member"; then
+                return 0
+            else
+                rc=$?
+                [ "$rc" -eq 2 ] && unverifiable=1
+            fi
+        done
+        [ "$unverifiable" -eq 0 ] || return 2
+        return 1
+    fi
+
+    command -v lsof >/dev/null 2>&1 || return 2
+    if lsof -a -g "$pgid" -Fn -- "$owner_file" 2>/dev/null | grep -Fqx "n$owner_file"; then
+        return 0
+    fi
+    [ "$unverifiable" -eq 0 ] || return 2
     return 1
 }
 
@@ -250,19 +285,23 @@ clean_dead_state() {
     local name
     rm -f "$SUPERVISOR_PID_FILE" "$READY_FILE" "$FAILED_FILE" "$CORE_SOCKET"
     for name in core web nostr; do
-        rm -f "$PID_DIR/$name.pid" "$PID_DIR/$name.exe"
+        rm -f "$PID_DIR/$name.pid" "$PID_DIR/$name.owner"
     done
 }
 
 start_component() {
     local name="$1"
-    local expected="$2"
-    shift 2
+    shift
+    local owner_file="$PID_DIR/$name.owner"
     : > "$LOG_DIR/$name.log"
-    "$@" >> "$LOG_DIR/$name.log" 2>&1 &
+    : > "$owner_file"
+    (
+        # FD 8 is intentionally inherited by the component and its children.
+        exec 8> "$owner_file"
+        exec "$@"
+    ) >> "$LOG_DIR/$name.log" 2>&1 &
     local pid=$!
     printf '%s\n' "$pid" > "$PID_DIR/$name.pid"
-    printf '%s\n' "$expected" > "$PID_DIR/$name.exe"
     if ! group_alive "$pid"; then
         echo "[error] $name did not start in its own process group" >&2
         return 1
@@ -283,11 +322,16 @@ wait_for_socket() {
 
 wait_for_web() {
     local pid="$1"
-    local url="http://127.0.0.1:$HTTP_PORT/"
+    local url="http://127.0.0.1:$HTTP_PORT/__opencrab_launcher_ready"
+    local response
     local i
     for ((i = 0; i < 100; i++)); do
-        if curl --noproxy '*' --silent --show-error --fail --max-time 1 "$url" >/dev/null 2>&1; then
-            # With the built-in place, also require the gate/core bind to be ready.
+        response="$(curl --noproxy '*' --silent --show-error --fail --max-time 1 "$url" 2>/dev/null || true)"
+        if [ "$response" = "$WEB_READY_TOKEN" ] && pid_alive "$pid" \
+            && component_owned web "$pid"; then
+            # With a custom places file the launcher does not know which web
+            # room to probe.  Otherwise also wait for the configured room to
+            # be bound to core, as the previous readiness check did.
             if [ -n "${OPENCRAB_PLACES:-}" ]; then
                 return 0
             fi
@@ -336,24 +380,19 @@ terminate_component() {
     fi
 
     if ! group_alive "$pid"; then
-        rm -f "$pid_file" "$PID_DIR/$name.exe"
+        rm -f "$pid_file" "$PID_DIR/$name.owner"
         return 0
     fi
 
-    if pid_alive "$pid"; then
-        if component_owned "$name" "$pid"; then
-            :
-        else
-            rc=$?
-            if [ "$rc" -eq 2 ]; then
-                echo "[error] Cannot verify $name PID $pid; refusing to signal it" >&2
-            else
-                echo "[error] $name PID $pid belongs to another executable; refusing to signal it" >&2
-            fi
-            return 1
-        fi
+    if component_owned "$name" "$pid"; then
+        :
     else
-        echo "[error] $name leader PID $pid is gone but process group $pid remains; refusing an unverified group kill" >&2
+        rc=$?
+        if [ "$rc" -eq 2 ]; then
+            echo "[error] Cannot verify ownership of $name process group $pid; refusing to signal it" >&2
+        else
+            echo "[error] $name process group $pid does not hold this launcher's owner file; refusing to signal it" >&2
+        fi
         return 1
     fi
 
@@ -365,7 +404,14 @@ terminate_component() {
     done
     if group_alive "$pid"; then
         echo "    $name did not stop after 5s; sending SIGKILL"
-        kill -KILL -- "-$pid" 2>/dev/null || true
+        # TERM may have removed the original group and freed its numeric PGID.
+        # Re-check the inherited owner FD before signaling that number again.
+        if component_owned "$name" "$pid"; then
+            kill -KILL -- "-$pid" 2>/dev/null || true
+        else
+            echo "[error] Ownership of $name process group $pid changed; refusing SIGKILL" >&2
+            return 1
+        fi
         for ((i = 0; i < 20; i++)); do
             group_alive "$pid" || break
             sleep 0.1
@@ -375,7 +421,7 @@ terminate_component() {
         echo "[error] $name process group $pid remains after SIGKILL" >&2
         return 1
     fi
-    rm -f "$pid_file" "$PID_DIR/$name.exe"
+    rm -f "$pid_file" "$PID_DIR/$name.owner"
     echo "    $name stopped"
 }
 
@@ -396,12 +442,13 @@ supervisor_cleanup() {
 
 supervise() {
     : "${OC_CORE_BIN:?}" "${OC_WEB_BIN:?}" "${OC_NOSTR_BIN:?}"
-    : "${OC_HTTP_PORT:?}" "${OC_WEB_TOKEN:?}" "${OC_ROOM:?}" "${OC_GATES:?}"
+    : "${OC_HTTP_PORT:?}" "${OC_WEB_TOKEN:?}" "${OC_WEB_READY_TOKEN:?}" "${OC_ROOM:?}" "${OC_GATES:?}"
     CORE_BIN="$OC_CORE_BIN"
     WEB_BIN="$OC_WEB_BIN"
     NOSTR_BIN="$OC_NOSTR_BIN"
     HTTP_PORT="$OC_HTTP_PORT"
     WEB_TOKEN="$OC_WEB_TOKEN"
+    WEB_READY_TOKEN="$OC_WEB_READY_TOKEN"
     ROOM="$OC_ROOM"
     GATES="$OC_GATES"
 
@@ -414,7 +461,7 @@ supervise() {
 
     # Monitor mode gives every background component its own process group.
     set -m
-    start_component core "$CORE_BIN" "$CORE_BIN" "$CORE_SOCKET" "$DB_PATH" "$ROOM" || {
+    start_component core "$CORE_BIN" "$CORE_SOCKET" "$DB_PATH" "$ROOM" || {
         echo "core failed to start" > "$FAILED_FILE"
         exit 1
     }
@@ -426,7 +473,8 @@ supervise() {
     }
 
     if gate_enabled web; then
-        start_component web "$WEB_BIN" env WEB_GATE_BIND=127.0.0.1 \
+        start_component web env WEB_GATE_BIND=127.0.0.1 \
+            OPENCRAB_WEB_READY_TOKEN="$WEB_READY_TOKEN" \
             "$WEB_BIN" "$CORE_SOCKET" "$HTTP_PORT" "$WEB_TOKEN" || {
             echo "web gate failed to start" > "$FAILED_FILE"
             exit 1
@@ -440,7 +488,7 @@ supervise() {
     fi
 
     if gate_enabled nostr; then
-        start_component nostr "$NOSTR_BIN" env NOSTR_GATE_RELAY="$NOSTR_GATE_RELAY" \
+        start_component nostr env NOSTR_GATE_RELAY="$NOSTR_GATE_RELAY" \
             "$NOSTR_BIN" "$CORE_SOCKET" || {
             echo "nostr gate failed to start" > "$FAILED_FILE"
             exit 1
@@ -488,11 +536,16 @@ launch_supervisor() {
     write_settings
     : > "$LOG_DIR/launcher.log"
 
+    local web_ready_token
+    web_ready_token="$(LC_ALL=C od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+    [ "${#web_ready_token}" -eq 32 ] || die "could not generate a web-gate readiness token"
+
     export OC_CORE_BIN="$CORE_BIN"
     export OC_WEB_BIN="$WEB_BIN"
     export OC_NOSTR_BIN="$NOSTR_BIN"
     export OC_HTTP_PORT="$HTTP_PORT"
     export OC_WEB_TOKEN="$WEB_TOKEN"
+    export OC_WEB_READY_TOKEN="$web_ready_token"
     export OC_ROOM="$ROOM"
     export OC_GATES="$GATES"
 
