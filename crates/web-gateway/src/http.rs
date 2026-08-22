@@ -22,7 +22,6 @@ use axum::{
     http::StatusCode,
     response::sse::{Event, KeepAlive, Sse},
     response::{IntoResponse, Response},
-    routing::{get, post},
     Json, Router,
 };
 use futures::Stream;
@@ -32,14 +31,54 @@ use crate::gateway::{caller_type_label, web_session_id};
 use crate::respond::{run_and_deliver_serialized, WebTurnOutcome};
 use crate::runner::WebAgentRunner;
 
+/// Production router と read-only inventory が共有するルート宣言。
+///
+/// method と handler を同じ行に置くことで、外形採取器が別の一覧を再構築できない形にする。
+macro_rules! web_routes {
+    ($apply:ident, $target:ident, $runner:ty) => {
+        $apply!(
+            $target,
+            "/api/agents/{id}/web/send",
+            post => send_web_message::<$runner>
+        );
+        $apply!(
+            $target,
+            "/api/agents/{id}/web/stream",
+            get => web_stream::<$runner>
+        );
+    };
+}
+
+macro_rules! mount_route {
+    ($router:ident, $path:literal, $first_method:ident => $first_handler:expr $(, $method:ident => $handler:expr)*) => {
+        $router = $router.route(
+            $path,
+            axum::routing::$first_method($first_handler)$(.$method($handler))*,
+        );
+    };
+}
+
+macro_rules! describe_route {
+    ($routes:ident, $path:literal, $($method:ident => $handler:expr),+ $(,)?) => {
+        $routes.extend(std::iter::once(($path, vec![$(stringify!($method).to_ascii_uppercase()),+])));
+    };
+}
+
 /// web gateway の HTTP ルート（`POST .../web/send` と `GET .../web/stream`）。
 ///
 /// 状態型 `R` は上位のアプリ状態そのもの（`Router<R>` として返す）。上位は
 /// `with_state` の前に `.merge(routes())` するだけでよい。パスは移設前と同一。
 pub fn routes<R: WebAgentRunner>() -> Router<R> {
-    Router::new()
-        .route("/api/agents/{id}/web/send", post(send_web_message::<R>))
-        .route("/api/agents/{id}/web/stream", get(web_stream::<R>))
+    let mut router = Router::new();
+    web_routes!(mount_route, router, R);
+    router
+}
+
+/// [`routes`] が実際に mount する path/method の read-only inventory。
+pub fn route_inventory<R: WebAgentRunner>() -> Vec<(&'static str, Vec<String>)> {
+    let mut routes = Vec::new();
+    web_routes!(describe_route, routes, R);
+    routes
 }
 
 #[derive(Debug, Deserialize)]

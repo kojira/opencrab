@@ -9,7 +9,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::Path,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 
 use async_trait::async_trait;
@@ -19,19 +22,130 @@ use axum::{
 };
 use opencrab_core::engine::ActionExecutor;
 use opencrab_gateway::GatewayActions;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-use crate::{create_router, system_actions::SystemGatewayActions, test_app_state, AppState};
+use crate::{create_router, process, test_app_state, AppState};
 
 const AGENT_ID: &str = "baseline-agent";
 const SESSION_ID: &str = "baseline-session";
 const TOOL_SESSION_ID: &str = "web-baseline-agent-conversation";
-const MISSING: &str = "baseline-missing";
+static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+fn fixture_workspace(kind: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "opencrab-baseline-l2-{kind}-{}-{}",
+        std::process::id(),
+        FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ScenarioCatalog {
+    schema_version: u32,
+    http: HttpScenarioCatalog,
+    tool_visibility: ToolVisibilityCatalog,
+    tool_execution: ToolScenarioCatalog,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ToolVisibilityCatalog {
+    cases: Vec<ToolVisibilityScenario>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ToolVisibilityScenario {
+    name: String,
+    caller: String,
+    depth: u32,
+    shell_enabled: bool,
+    #[serde(default)]
+    allowlist: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct HttpScenarioCatalog {
+    path_parameters: BTreeMap<String, PathParameter>,
+    #[serde(default)]
+    path_overrides: BTreeMap<String, PathParameter>,
+    #[serde(default)]
+    query_suffixes: BTreeMap<String, String>,
+    normal_bodies: BTreeMap<String, Value>,
+    normal_uncollected_l3: BTreeMap<String, String>,
+    bodyless_alternates: BTreeMap<String, AlternateScenario>,
+    #[serde(default)]
+    mutation_postconditions: BTreeMap<String, HttpPostcondition>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct PathParameter {
+    normal: String,
+    missing: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum AlternateScenario {
+    MissingResource,
+    NotApplicable { reason: String },
+    Uncollected { reason: String },
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct HttpPostcondition {
+    method: String,
+    path: String,
+    #[serde(default)]
+    body: Option<Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ToolScenarioCatalog {
+    success_arguments: BTreeMap<String, Value>,
+    success_uncollected_l3: BTreeMap<String, String>,
+    #[serde(default)]
+    fixtures: BTreeMap<String, String>,
+    #[serde(default)]
+    postconditions: BTreeMap<String, ToolPostcondition>,
+    #[serde(default)]
+    effectful_tools: BTreeSet<String>,
+    forwarding: BTreeMap<String, ForwardingScenario>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ForwardingScenario {
+    tool: String,
+    arguments: Value,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ToolPostcondition {
+    #[serde(default)]
+    tool: Option<String>,
+    #[serde(default)]
+    method: Option<String>,
+    #[serde(default)]
+    uri: Option<String>,
+    #[serde(default)]
+    db_query: Option<String>,
+    arguments: Value,
+    #[serde(default)]
+    expect_success: bool,
+    #[serde(default)]
+    expect_status: Option<u16>,
+}
 
 fn read_json(path: &Path) -> Result<Value, String> {
     let bytes = fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     serde_json::from_slice(&bytes).map_err(|e| format!("parse {}: {e}", path.display()))
+}
+
+fn read_scenarios(path: &Path) -> Result<(Value, ScenarioCatalog), String> {
+    let raw = read_json(path)?;
+    let typed = serde_json::from_value(raw.clone())
+        .map_err(|error| format!("parse typed scenario catalog {}: {error}", path.display()))?;
+    Ok((raw, typed))
 }
 
 fn normalize(value: &mut Value) {
@@ -63,29 +177,82 @@ fn normalize(value: &mut Value) {
                 if matches!(key.as_str(), "duration_ms" | "latency_ms") && value.is_number() {
                     *value = Value::String("<duration>".to_string());
                 }
+                if key == "score" {
+                    if let Some(number) = value.as_f64().and_then(|number| {
+                        serde_json::Number::from_f64(
+                            (number * 1_000_000_000_000.0).round() / 1_000_000_000_000.0,
+                        )
+                    }) {
+                        *value = Value::Number(number);
+                    }
+                }
             }
         }
-        Value::String(text) if uuid::Uuid::parse_str(text).is_ok() => {
-            *text = "<uuid>".to_string();
-        }
-        Value::String(text) => {
-            if text
-                .strip_prefix("subtask-")
-                .is_some_and(|suffix| uuid::Uuid::parse_str(suffix).is_ok())
-            {
-                *text = "subtask-<uuid>".to_string();
-            }
-        }
+        Value::String(text) => normalize_string(text),
         _ => {}
+    }
+}
+
+fn normalize_string(text: &mut String) {
+    for (prefix, marker) in [
+        ("unit-", "<generated-unit-id>"),
+        ("core-", "<generated-core-id>"),
+    ] {
+        if text.strip_prefix(prefix).is_some_and(|suffix| {
+            suffix.len() == 24
+                && suffix
+                    .chars()
+                    .all(|character| character.is_ascii_hexdigit())
+        }) {
+            *text = marker.to_string();
+            return;
+        }
+    }
+    if uuid::Uuid::parse_str(text).is_ok() {
+        *text = "<uuid>".to_string();
+        return;
+    }
+    if text
+        .strip_prefix("subtask-")
+        .is_some_and(|suffix| uuid::Uuid::parse_str(suffix).is_ok())
+    {
+        *text = "subtask-<uuid>".to_string();
+        return;
+    }
+    for marker in [
+        "opencrab-baseline-l2-tools-",
+        "opencrab-baseline-l2-workspace-",
+    ] {
+        let Some(marker_start) = text.find(marker) else {
+            continue;
+        };
+        let path_start = text[..marker_start]
+            .rfind(": ")
+            .map(|start| start + 2)
+            .or_else(|| text[..marker_start].find('/'))
+            .unwrap_or(marker_start);
+        let marker_end = marker_start + marker.len();
+        let path_end = text[marker_end..]
+            .find('/')
+            .map_or(text.len(), |offset| marker_end + offset + 1);
+        text.replace_range(path_start..path_end, "<workspace>/");
     }
 }
 
 fn seeded_state() -> Result<AppState, String> {
     let mut state = test_app_state();
-    let workspace = std::env::temp_dir().join(format!(
-        "opencrab-baseline-l2-workspace-{}",
-        std::process::id()
-    ));
+    state.llm_config = Arc::new(
+        toml::from_str(
+            r#"
+[providers.codex]
+binary_path = "/__opencrab_baseline_missing__/codex"
+[providers.cursor]
+binary_path = "/__opencrab_baseline_missing__/cursor-agent"
+"#,
+        )
+        .map_err(|error| format!("build deterministic diagnostic config: {error}"))?,
+    );
+    let workspace = fixture_workspace("workspace");
     fs::create_dir_all(&workspace).map_err(|e| format!("create baseline workspace: {e}"))?;
     fs::write(workspace.join("baseline.txt"), b"baseline\n")
         .map_err(|e| format!("seed baseline workspace: {e}"))?;
@@ -223,6 +390,13 @@ fn seeded_state() -> Result<AppState, String> {
         },
     )
     .map_err(|e| format!("seed channel config: {e}"))?;
+    opencrab_db::queries::add_agent_allowed_command(
+        &conn,
+        AGENT_ID,
+        "baseline-command",
+        "baseline",
+    )
+    .map_err(|e| format!("seed allowed command: {e}"))?;
     opencrab_db::queries::upsert_agent_discord_config(
         &conn,
         &opencrab_db::queries::AgentDiscordConfigRow {
@@ -277,120 +451,45 @@ fn seeded_state() -> Result<AppState, String> {
     Ok(state)
 }
 
-fn concrete_path(template: &str, missing: bool) -> String {
-    let id = if missing { MISSING } else { AGENT_ID };
-    template
-        .replace("{id}", id)
-        .replace("{sid}", if missing { "999999" } else { "1" })
-        .replace(
-            "{skill_id}",
-            if missing { MISSING } else { "baseline-skill" },
-        )
-        .replace(
-            "{preset_id}",
-            if missing { MISSING } else { "baseline-preset" },
-        )
-        .replace(
-            "{entry_id}",
-            if missing { MISSING } else { "baseline-memory" },
-        )
-        .replace(
-            "{co_agent_id}",
-            if missing { MISSING } else { "baseline-peer" },
-        )
-        .replace(
-            "{channel_id}",
-            if missing { MISSING } else { "baseline-channel" },
-        )
-        // The handler currently passes this path field to DB functions that key by row id
-        // despite the public placeholder being named `user_id`; capture that behavior as-is.
-        .replace(
-            "{user_id}",
-            if missing {
-                MISSING
-            } else {
-                "baseline-trusted-row"
-            },
-        )
-        .replace("{command}", "baseline-command")
-        .replace("{source}", "baseline-source")
-        .replace("{name}", "baseline")
-        .replace("{*path}", "baseline.txt")
+fn scenario_key(method: &str, path: &str) -> String {
+    format!("{method} {path}")
 }
 
-fn concrete_uri(template: &str, missing: bool) -> String {
-    let path = concrete_path(template, missing);
-    if template == "/api/agents/{id}/import/sync/status" {
-        format!("{path}?source_dir=/tmp")
+fn concrete_uri(
+    catalog: &HttpScenarioCatalog,
+    template: &str,
+    missing: bool,
+) -> Result<String, String> {
+    let mut path = if let Some(value) = catalog.path_overrides.get(template) {
+        if missing {
+            value.missing.clone()
+        } else {
+            value.normal.clone()
+        }
     } else {
-        path
-    }
-}
-
-fn nominal_body(method: &str, path: &str) -> Option<Value> {
-    if !matches!(method, "POST" | "PUT" | "PATCH") {
-        return None;
-    }
-    let body = match path {
-        "/api/agents" => json!({"name":"Created Baseline Agent","persona_name":"Created"}),
-        "/api/agents/{id}" => json!({"name":"Baseline Agent","persona_name":"Baseline"}),
-        "/api/agents/{id}/allowed-commands" => json!({"command":"printf"}),
-        "/api/agents/{id}/channel-configs" => {
-            json!({"channel_id":"baseline-new-channel","guild_id":"baseline-guild","channel_name":"new","readable":true,"writable":true,"whitelisted":true})
-        }
-        "/api/agents/{id}/co-agents" => json!({"co_agent_id":"baseline-new-peer"}),
-        "/api/agents/{id}/discord" => {
-            if method == "PUT" {
-                json!({"bot_token":"baseline-not-a-credential","owner_discord_id":"baseline-owner"})
-            } else {
-                json!({"owner_discord_id":"baseline-owner-2"})
-            }
-        }
-        "/api/agents/{id}/mcp" => {
-            json!({"name":"baseline","command":"false","args":[],"env":{},"enabled":false,"trusted_only":false})
-        }
-        "/api/agents/{id}/mcp/{name}/enabled" => json!({"enabled":false}),
-        "/api/agents/{id}/memory/index/config" => json!({"enabled":false}),
-        "/api/agents/{id}/memory/index/merge" => {
-            json!({"source_topic_id":"missing-a","target_topic_id":"missing-b"})
-        }
-        "/api/agents/{id}/memory/search" => json!({"query":"baseline","limit":10}),
-        "/api/agents/{id}/nostr" => json!({"enabled":false}),
-        "/api/agents/{id}/nostr-relay" => json!({"enabled":false}),
-        "/api/agents/{id}/schedules" => {
-            json!({"session_id":format!("nostr-{AGENT_ID}"),"cron_expr":"0 1 * * *","timezone":"Asia/Tokyo","message":"baseline","enabled":false})
-        }
-        "/api/agents/{id}/skills" => {
-            json!({"name":"Baseline Skill","description":"baseline","situation_pattern":"baseline","guidance":"baseline"})
-        }
-        "/api/agents/{id}/skills/{skill_id}" => {
-            json!({"name":"Baseline Skill","description":"baseline","situation_pattern":"baseline","guidance":"baseline"})
-        }
-        "/api/agents/{id}/skills/{skill_id}/toggle" => json!({"active":false}),
-        "/api/agents/{id}/soul/presets" => {
-            json!({"preset_name":"Baseline","persona_name":"Baseline"})
-        }
-        "/api/agents/{id}/trusted-users" => {
-            json!({"platform":"web","user_id":"baseline-new-user","display_name":"Baseline New User","permission":"user"})
-        }
-        "/api/agents/{id}/trusted-users/{user_id}" => json!({"display_name":"Renamed"}),
-        "/api/agents/{id}/workspace/{*path}" => json!({"content":"baseline write\n"}),
-        "/api/hooks/{source}" => json!({"type":"baseline.event","data":{"id":"baseline-event"}}),
-        "/api/import/scan" => json!({"path":"."}),
-        "/api/import/execute" => json!({"confirmed":false}),
-        "/api/llm/model-pricing" => {
-            json!({"provider":"baseline","model":"model","input_price_per_1m":0.0,"output_price_per_1m":0.0,"context_window":4096})
-        }
-        "/api/llm/providers/{name}" => json!({"enabled":false}),
-        "/api/schedules/{sid}" => json!({"enabled":false}),
-        "/api/sessions" => json!({"theme":"Baseline","participant_ids":[]}),
-        "/api/sessions/{id}/mentor" => json!({"content":"baseline"}),
-        "/api/sessions/{id}/messages" => json!({"agent_id":AGENT_ID,"content":"baseline"}),
-        "/api/system/log-level" => json!({"log_level":"info"}),
-        "/api/voice/config" => json!({}),
-        _ => json!({}),
+        template.to_string()
     };
-    Some(body)
+    for (placeholder, value) in &catalog.path_parameters {
+        path = path.replace(
+            &format!("{{{placeholder}}}"),
+            if missing {
+                &value.missing
+            } else {
+                &value.normal
+            },
+        );
+    }
+    if path.contains('{') {
+        return Err(format!(
+            "scenario catalog has no value for path template {template}"
+        ));
+    }
+    if !missing {
+        if let Some(suffix) = catalog.query_suffixes.get(template) {
+            path.push_str(suffix);
+        }
+    }
+    Ok(path)
 }
 
 async fn request_once(
@@ -440,7 +539,7 @@ async fn request_once(
                 .map_err(|e| format!("{name}: invalid response header: {e}"))
         })
         .collect::<Result<_, _>>()?;
-    headers.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+    headers.sort_by_key(|a| a.to_string());
     let bytes = to_bytes(response.into_body(), 4 * 1024 * 1024)
         .await
         .map_err(|e| format!("{name}: read response: {e}"))?;
@@ -454,42 +553,42 @@ async fn request_once(
     }))
 }
 
-fn route_is_l3(method: &str, path: &str) -> Option<&'static str> {
-    match (method, path) {
-        ("POST", "/api/agents/{id}/discord/start") => Some("would connect to Discord"),
-        ("POST", "/api/agents/{id}/nostr/start") => Some("would connect to Nostr relays"),
-        ("POST", "/api/agents/{id}/nostr/generate") => {
-            Some("successful vanity-key generation requires the operator's nostaro executable")
-        }
-        ("POST", "/api/agents/{id}/mcp/{name}/test") => Some("operator supplied subprocess"),
-        ("POST", "/api/llm/providers/{name}/test") => Some("provider network endpoint"),
-        ("POST", "/api/sessions/{id}/messages") => {
-            Some("successful branch requires an LLM provider")
-        }
-        ("POST", "/api/agents/{id}/web/send") => Some("successful branch requires an LLM provider"),
-        ("GET", "/api/agents/{id}/web/stream") => {
-            Some("successful response is an intentionally non-terminating SSE stream")
-        }
-        (
-            "POST",
-            "/api/agents/{id}/daily-log-index/rebuild" | "/api/agents/{id}/daily-log-index/run",
-        ) => Some("successful branch schedules LLM-backed indexing"),
-        ("POST", "/api/agents/{id}/memory/index" | "/api/agents/{id}/memory/index/rebuild") => {
-            Some("successful branch schedules LLM-backed indexing")
-        }
-        ("POST", "/api/agents/{id}/import/sync") => Some("depends on an operator import source"),
-        ("POST", "/api/import/scan" | "/api/import/execute") => {
-            Some("depends on an operator-selected external workspace")
-        }
-        _ => None,
-    }
-}
-
-async fn collect_http(l1: &Value) -> Result<Value, String> {
+async fn collect_http(l1: &Value, catalog: &HttpScenarioCatalog) -> Result<Value, String> {
     let routes = l1
         .pointer("/http/routes")
         .and_then(Value::as_array)
         .ok_or_else(|| "L1 /http/routes is missing or not an array".to_string())?;
+    let mut live_keys = BTreeSet::new();
+    for route in routes {
+        let path = route["path"]
+            .as_str()
+            .ok_or_else(|| "L1 route has no string path".to_string())?;
+        for method in route["methods"]
+            .as_array()
+            .ok_or_else(|| format!("L1 route {path} has no methods"))?
+        {
+            live_keys.insert(scenario_key(
+                method
+                    .as_str()
+                    .ok_or_else(|| format!("L1 route {path} has a non-string method"))?,
+                path,
+            ));
+        }
+    }
+    for key in catalog
+        .normal_bodies
+        .keys()
+        .chain(catalog.normal_uncollected_l3.keys())
+        .chain(catalog.bodyless_alternates.keys())
+        .chain(catalog.mutation_postconditions.keys())
+    {
+        if !live_keys.contains(key) {
+            return Err(format!(
+                "scenario catalog contains non-production route: {key}"
+            ));
+        }
+    }
+
     let mut probes = Vec::new();
     let mut uncollected = Vec::new();
     for route in routes {
@@ -503,32 +602,60 @@ async fn collect_http(l1: &Value) -> Result<Value, String> {
             let method = method
                 .as_str()
                 .ok_or_else(|| format!("L1 route {path} has a non-string method"))?;
+            let key = scenario_key(method, path);
             let stem = format!(
                 "{}__{}",
                 method.to_ascii_lowercase(),
                 path.replace('/', "_").replace(['{', '}', '*'], "")
             );
 
-            if let Some(reason) = route_is_l3(method, path) {
+            if let Some(reason) = catalog.normal_uncollected_l3.get(&key) {
                 uncollected.push(json!({
-                    "name": format!("{stem}__normal"),
-                    "method": method,
-                    "path": path,
-                    "branch": "normal",
-                    "status": "uncollected",
-                    "reason": reason,
-                    "level": "L3"
+                    "name":format!("{stem}__normal"), "method":method, "path":path,
+                    "branch":"normal", "status":"uncollected", "reason":reason, "level":"L3"
                 }));
             } else {
-                let uri = concrete_uri(path, false);
-                let body_value = nominal_body(method, path);
+                let uri = concrete_uri(catalog, path, false)?;
+                let body_value = catalog.normal_bodies.get(&key).cloned();
+                if matches!(method, "POST" | "PUT" | "PATCH")
+                    && body_value.is_none()
+                    && !catalog.bodyless_alternates.contains_key(&key)
+                {
+                    return Err(format!(
+                        "mutating route has neither body nor explicit bodyless classification: {key}"
+                    ));
+                }
                 let body = body_value
                     .as_ref()
                     .map(serde_json::to_vec)
                     .transpose()
-                    .map_err(|e| format!("serialize {stem} normal body: {e}"))?;
+                    .map_err(|error| format!("serialize {stem} normal body: {error}"))?;
+                let state = seeded_state()?;
+                let observer = catalog.mutation_postconditions.get(&key);
+                let before = if let Some(observer) = observer {
+                    let observer_uri = concrete_uri(catalog, &observer.path, false)?;
+                    let observer_body = observer
+                        .body
+                        .as_ref()
+                        .map(serde_json::to_vec)
+                        .transpose()
+                        .map_err(|error| format!("serialize {stem} precondition body: {error}"))?;
+                    Some(
+                        request_once(
+                            state.clone(),
+                            &format!("{stem}__effect_before"),
+                            &observer.method,
+                            &observer_uri,
+                            observer_body,
+                            observer.body.as_ref().map(|_| "application/json"),
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
+                };
                 let response = request_once(
-                    seeded_state()?,
+                    state.clone(),
                     &format!("{stem}__normal"),
                     method,
                     &uri,
@@ -536,38 +663,88 @@ async fn collect_http(l1: &Value) -> Result<Value, String> {
                     body_value.as_ref().map(|_| "application/json"),
                 )
                 .await?;
+                let successful_mutation = matches!(method, "POST" | "PUT" | "PATCH" | "DELETE")
+                    && response["status"]
+                        .as_u64()
+                        .is_some_and(|status| (200..300).contains(&status));
+                let effect = if successful_mutation {
+                    if let Some(observer) = observer {
+                        let observer_uri = concrete_uri(catalog, &observer.path, false)?;
+                        let observer_body = observer
+                            .body
+                            .as_ref()
+                            .map(serde_json::to_vec)
+                            .transpose()
+                            .map_err(|error| {
+                                format!("serialize {stem} postcondition body: {error}")
+                            })?;
+                        let after = request_once(
+                            state,
+                            &format!("{stem}__effect_after"),
+                            &observer.method,
+                            &observer_uri,
+                            observer_body,
+                            observer.body.as_ref().map(|_| "application/json"),
+                        )
+                        .await?;
+                        if before.as_ref() == Some(&after) {
+                            return Err(format!(
+                                "HTTP postcondition for {key} did not change; a no-op handler would pass"
+                            ));
+                        }
+                        json!({"status":"observed","request":{"method":observer.method,"uri":observer_uri,"body":observer.body},"before":before,"after":after})
+                    } else {
+                        json!({"status":"uncollected","reason":"scenario catalog declares no independent read-back for this successful mutation"})
+                    }
+                } else {
+                    Value::Null
+                };
                 probes.push(json!({
-                    "name": format!("{stem}__normal"),
-                    "selection": "normal_or_local_precondition_branch",
-                    "request": {"method":method,"uri":uri,"body":body_value},
-                    "response": response
+                    "name":format!("{stem}__normal"),
+                    "selection":"normal_or_local_precondition_branch",
+                    "request":{"method":method,"uri":uri,"body":body_value},
+                    "response":response,
+                    "effect":effect
                 }));
-            }
-
-            if method == "GET" && path == "/api/agents/{id}/web/stream" {
-                uncollected.push(json!({
-                    "name": format!("{stem}__reject_or_absent"),
-                    "method": method,
-                    "path": path,
-                    "branch": "resource_absence_or_empty_state",
-                    "status": "uncollected",
-                    "reason": "collector does not substitute a finite body for the route's non-terminating SSE contract",
-                    "level": "L3"
-                }));
-                continue;
             }
 
             let (uri, body, content_type, selection) = if matches!(method, "POST" | "PUT" | "PATCH")
             {
-                (
-                    concrete_uri(path, false),
-                    Some(b"{".to_vec()),
-                    Some("application/json"),
-                    "malformed_json_rejection",
-                )
+                if let Some(alternate) = catalog.bodyless_alternates.get(&key) {
+                    match alternate {
+                        AlternateScenario::MissingResource => (
+                            concrete_uri(catalog, path, true)?,
+                            None,
+                            None,
+                            "missing_resource_rejection",
+                        ),
+                        AlternateScenario::NotApplicable { reason } => {
+                            uncollected.push(json!({"name":format!("{stem}__reject_or_absent"),"method":method,"path":path,"branch":"input_rejection","status":"not_applicable","reason":reason}));
+                            continue;
+                        }
+                        AlternateScenario::Uncollected { reason } => {
+                            uncollected.push(json!({"name":format!("{stem}__reject_or_absent"),"method":method,"path":path,"branch":"input_rejection","status":"uncollected","reason":reason}));
+                            continue;
+                        }
+                    }
+                } else if catalog.normal_bodies.contains_key(&key) {
+                    (
+                        concrete_uri(catalog, path, false)?,
+                        Some(b"{".to_vec()),
+                        Some("application/json"),
+                        "malformed_json_rejection",
+                    )
+                } else {
+                    return Err(format!(
+                        "bodyless route has no alternate classification: {key}"
+                    ));
+                }
+            } else if method == "GET" && path == "/api/agents/{id}/web/stream" {
+                uncollected.push(json!({"name":format!("{stem}__reject_or_absent"),"method":method,"path":path,"branch":"resource_absence_or_empty_state","status":"uncollected","reason":"the production SSE contract does not terminate","level":"L3"}));
+                continue;
             } else {
                 (
-                    concrete_uri(path, true),
+                    concrete_uri(catalog, path, true)?,
                     None,
                     None,
                     "resource_absence_or_empty_state",
@@ -582,26 +759,37 @@ async fn collect_http(l1: &Value) -> Result<Value, String> {
                 content_type,
             )
             .await?;
+            let status = response["status"].as_u64().unwrap_or_default();
+            if matches!(
+                selection,
+                "malformed_json_rejection" | "missing_resource_rejection"
+            ) && !(400..500).contains(&status)
+            {
+                return Err(format!(
+                    "{key} {selection} did not reject: observed HTTP {status}"
+                ));
+            }
             probes.push(json!({
-                "name": format!("{stem}__reject_or_absent"),
-                "selection": selection,
-                "request": {"method":method,"uri":uri,"body_utf8": if content_type.is_some() { Value::String("{".to_string()) } else { Value::Null }},
-                "response": response
+                "name":format!("{stem}__reject_or_absent"), "selection":selection,
+                "request":{"method":method,"uri":uri,"body_utf8":if content_type.is_some(){Value::String("{".to_string())}else{Value::Null}},
+                "response":response
             }));
         }
     }
-    Ok(json!({
-        "source_route_count": routes.len(),
-        "probes": probes,
-        "uncollected": uncollected,
-    }))
+    Ok(json!({"source_route_count":routes.len(),"probes":probes,"uncollected":uncollected}))
 }
 
-fn action_context(caller: opencrab_actions::CallerIdentity) -> opencrab_actions::ActionContext {
-    let root =
-        std::env::temp_dir().join(format!("opencrab-baseline-l2-tools-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
+fn action_context(
+    caller: opencrab_actions::CallerIdentity,
+    fixture: &str,
+) -> opencrab_actions::ActionContext {
+    let root = fixture_workspace("tools");
     fs::create_dir_all(&root).expect("create baseline tool workspace");
+    if fixture == "workspace_file" {
+        fs::create_dir_all(root.join("captured")).expect("create captured fixture directory");
+        fs::write(root.join("captured/file.txt"), b"baseline")
+            .expect("write captured fixture file");
+    }
     let workspace = opencrab_core::workspace::Workspace::from_root(root)
         .expect("baseline tool workspace must be valid");
     let db = opencrab_db::Db::memory().expect("in-memory baseline DB");
@@ -665,6 +853,11 @@ fn action_context(caller: opencrab_actions::CallerIdentity) -> opencrab_actions:
             )
             .expect("seed baseline tool history");
         }
+        conn.execute(
+            "UPDATE memory_sessions SET created_at = '2026-01-01T00:00:00Z' WHERE agent_id = ?1 AND session_id = ?2",
+            rusqlite::params![AGENT_ID, SESSION_ID],
+        )
+        .expect("fix baseline history clock input");
         let node = |id: &str,
                     node_type: &str,
                     source_type: &str,
@@ -779,6 +972,79 @@ fn action_context(caller: opencrab_actions::CallerIdentity) -> opencrab_actions:
             opencrab_db::queries::insert_index_node(&conn, &n)
                 .expect("seed baseline tool memory node");
         }
+        if fixture == "active_task" {
+            opencrab_db::queries::insert_task_ledger(
+                &conn,
+                AGENT_ID,
+                TOOL_SESSION_ID,
+                "fixture task",
+                Some("fixture contract"),
+            )
+            .expect("seed active task fixture");
+        }
+        if fixture == "active_schedule" {
+            opencrab_db::queries::insert_agent_schedule(
+                &conn,
+                &opencrab_db::queries::AgentScheduleRow {
+                    id: None,
+                    agent_id: AGENT_ID.to_string(),
+                    session_id: TOOL_SESSION_ID.to_string(),
+                    cron_expr: "0 9 * * *".to_string(),
+                    timezone: "UTC".to_string(),
+                    message: "fixture schedule".to_string(),
+                    enabled: true,
+                    anchor_at: None,
+                    last_fired_at: None,
+                },
+            )
+            .expect("seed active schedule fixture");
+        }
+        if fixture == "llm_metrics" {
+            opencrab_db::queries::insert_llm_metrics(
+                &conn,
+                &opencrab_db::queries::LlmMetricsRow {
+                    id: "baseline-metrics".to_string(),
+                    agent_id: AGENT_ID.to_string(),
+                    session_id: Some(TOOL_SESSION_ID.to_string()),
+                    timestamp: "2026-01-01T00:00:00Z".to_string(),
+                    provider: "baseline".to_string(),
+                    model: "baseline:model".to_string(),
+                    purpose: "baseline".to_string(),
+                    task_type: None,
+                    complexity: None,
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    total_tokens: 15,
+                    estimated_cost_usd: 0.0,
+                    latency_ms: 1,
+                    time_to_first_token_ms: None,
+                },
+            )
+            .expect("seed LLM metrics fixture");
+        }
+        if fixture == "allowed_command" {
+            opencrab_db::queries::add_agent_allowed_command(
+                &conn,
+                AGENT_ID,
+                "baseline_cmd",
+                "baseline",
+            )
+            .expect("seed allowed command fixture");
+        }
+        if fixture == "archived_skill" {
+            opencrab_db::queries::archive_skill(&conn, "baseline-seed-skill", true)
+                .expect("seed archived skill fixture");
+        }
+        if fixture == "tagged_topic" {
+            opencrab_db::queries::assign_topic_to_category(
+                &conn,
+                AGENT_ID,
+                "baseline-topic",
+                "baseline-tag",
+                "2026-01-01T00:00:00Z",
+            )
+            .expect("seed tagged topic fixture");
+        }
     }
     opencrab_actions::ActionContext {
         agent_id: AGENT_ID.to_string(),
@@ -786,7 +1052,9 @@ fn action_context(caller: opencrab_actions::CallerIdentity) -> opencrab_actions:
         session_id: Some(TOOL_SESSION_ID.to_string()),
         db,
         workspace: Arc::new(workspace),
-        last_metrics_id: Arc::new(std::sync::Mutex::new(None)),
+        last_metrics_id: Arc::new(std::sync::Mutex::new(
+            (fixture == "llm_metrics").then(|| "baseline-metrics".to_string()),
+        )),
         model_override: Arc::new(std::sync::Mutex::new(None)),
         current_purpose: Arc::new(std::sync::Mutex::new("baseline".to_string())),
         caller,
@@ -905,25 +1173,66 @@ fn mcp_servers() -> Vec<opencrab_mcp::ConnectedServer> {
     ]
 }
 
-fn dispatcher(shell_enabled: bool) -> opencrab_actions::ActionDispatcher {
-    let mut dispatcher = opencrab_actions::ActionDispatcher::new();
-    opencrab_actions::register_tools_from_config(
-        &opencrab_actions::ToolsConfig {
-            enabled: shell_enabled,
-            shell: shell_enabled.then(|| opencrab_actions::ShellToolConfig {
-                allowed_commands: vec!["printf".to_string()],
-                ..Default::default()
-            }),
-        },
-        &mut dispatcher,
-    );
-    dispatcher
-}
-
 fn tool_names(executor: &opencrab_actions::BridgedExecutor) -> Vec<String> {
     let mut names: Vec<_> = executor.list_tools().into_iter().map(|d| d.name).collect();
     names.sort();
     names
+}
+
+fn build_executor_with_state(
+    caller: opencrab_actions::CallerIdentity,
+    depth: u32,
+    shell_enabled: bool,
+    allowlist: Option<Vec<String>>,
+    fixture: &str,
+) -> (opencrab_actions::BridgedExecutor, AppState) {
+    let context = action_context(caller, fixture);
+    let mut state = seeded_tool_state();
+    state.db = context.db.clone();
+    state.workspace_base = context.workspace.root().to_string_lossy().to_string();
+    #[cfg(feature = "nostr")]
+    {
+        let connection = state.db.lock().expect("lock baseline Nostr DB");
+        opencrab_db::queries::upsert_agent_nostr_config(
+            &connection,
+            &opencrab_db::queries::AgentNostrConfigRow {
+                agent_id: AGENT_ID.to_string(),
+                enabled: false,
+                relays_json: "[]".to_string(),
+                filter_json: "{\"authors\":[],\"keywords\":[],\"kinds\":[]}".to_string(),
+                secret_key: "nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqzqujme"
+                    .to_string(),
+            },
+        )
+        .expect("seed baseline Nostr config");
+    }
+    *state.tools_config.write().expect("baseline tools config") = opencrab_actions::ToolsConfig {
+        enabled: shell_enabled,
+        shell: shell_enabled.then(|| opencrab_actions::ShellToolConfig {
+            allowed_commands: vec!["printf".to_string()],
+            ..Default::default()
+        }),
+    };
+    let executor = process::build_turn_executor(
+        &state,
+        process::TurnExecutorWiring {
+            context,
+            depth,
+            gateway_actions: None,
+            subtask_registry: Arc::new(dashmap::DashMap::new()),
+            completion_sink: None,
+            subtask_starts: None,
+            reply_target: None,
+            tool_allowlist: allowlist,
+        },
+        |caller_is_trusted| {
+            Some(Arc::new(opencrab_mcp::McpToolProvider::new(
+                mcp_servers(),
+                caller_is_trusted,
+            )) as Arc<dyn GatewayActions>)
+        },
+    );
+    (executor, state)
 }
 
 fn build_executor(
@@ -931,28 +1240,9 @@ fn build_executor(
     depth: u32,
     shell_enabled: bool,
     allowlist: Option<Vec<String>>,
-    caller_is_trusted_for_mcp: bool,
+    fixture: &str,
 ) -> opencrab_actions::BridgedExecutor {
-    let root_gateway: Arc<dyn GatewayActions> = Arc::new(SystemGatewayActions::new(
-        seeded_tool_state(),
-        None,
-        None,
-        None,
-    ));
-    let gateway: Arc<dyn GatewayActions> = if depth == 0 {
-        root_gateway
-    } else {
-        Arc::new(opencrab_actions::SubEngineGatewayActions::new(root_gateway))
-    };
-    let mcp: Arc<dyn GatewayActions> = Arc::new(opencrab_mcp::McpToolProvider::new(
-        mcp_servers(),
-        caller_is_trusted_for_mcp,
-    ));
-    opencrab_actions::BridgedExecutor::new(dispatcher(shell_enabled), action_context(caller))
-        .with_depth(depth)
-        .with_gateway_actions(gateway)
-        .with_mcp_actions(mcp)
-        .with_tool_allowlist(allowlist)
+    build_executor_with_state(caller, depth, shell_enabled, allowlist, fixture).0
 }
 
 fn subtask_fixture_registry(
@@ -985,125 +1275,73 @@ fn build_subtask_fixture_executor(
     session_id: &str,
     depth: u32,
     registry: opencrab_actions::SubtaskRegistry,
-) -> opencrab_actions::BridgedExecutor {
-    let root_gateway: Arc<dyn GatewayActions> = Arc::new(SystemGatewayActions::new(
-        seeded_tool_state(),
-        None,
-        Some(registry),
-        None,
-    ));
-    let gateway: Arc<dyn GatewayActions> = if depth == 0 {
-        root_gateway
-    } else {
-        Arc::new(opencrab_actions::SubEngineGatewayActions::new(root_gateway))
-    };
-    let mut ctx = action_context(opencrab_actions::CallerIdentity::Owner);
-    ctx.session_id = Some(session_id.to_string());
-    opencrab_actions::BridgedExecutor::new(dispatcher(false), ctx)
-        .with_depth(depth)
-        .with_gateway_actions(gateway)
+) -> (opencrab_actions::BridgedExecutor, AppState) {
+    let mut context = action_context(opencrab_actions::CallerIdentity::Owner, "default");
+    context.session_id = Some(session_id.to_string());
+    let mut state = seeded_tool_state();
+    state.db = context.db.clone();
+    state.workspace_base = context.workspace.root().to_string_lossy().to_string();
+    let executor = process::build_turn_executor(
+        &state,
+        process::TurnExecutorWiring {
+            context,
+            depth,
+            gateway_actions: None,
+            subtask_registry: registry,
+            completion_sink: None,
+            subtask_starts: None,
+            reply_target: None,
+            tool_allowlist: None,
+        },
+        |_| None,
+    );
+    (executor, state)
 }
 
-fn collect_visibility() -> Value {
+fn collect_visibility(catalog: &ToolVisibilityCatalog) -> Result<Value, String> {
     use opencrab_actions::CallerIdentity;
-    let cases = vec![
-        (
-            "owner_depth0_all_features",
-            CallerIdentity::Owner,
-            0,
-            true,
-            None,
-            true,
-        ),
-        (
-            "coagent_owner_equivalent",
-            CallerIdentity::CoAgent {
-                agent_id: "baseline-peer".to_string(),
-            },
-            0,
-            true,
-            None,
-            true,
-        ),
-        (
-            "trusted_user",
-            CallerIdentity::TrustedUser,
-            0,
-            true,
-            None,
-            true,
-        ),
-        (
-            "untrusted_agent",
-            CallerIdentity::Agent,
-            0,
-            true,
-            None,
-            false,
-        ),
-        (
-            "owner_depth1_subengine",
-            CallerIdentity::Owner,
-            1,
-            true,
-            None,
-            true,
-        ),
-        (
-            "owner_depth2_cap",
-            CallerIdentity::Owner,
-            2,
-            true,
-            None,
-            true,
-        ),
-        (
-            "owner_shell_disabled",
-            CallerIdentity::Owner,
-            0,
-            false,
-            None,
-            true,
-        ),
-        (
-            "owner_cross_slot_allowlist",
-            CallerIdentity::Owner,
-            0,
-            true,
-            Some(vec![
-                "get_system_info".to_string(),
-                "list_allowed_commands".to_string(),
-                "mcp__public_local__echo".to_string(),
-            ]),
-            true,
-        ),
-        (
-            "untrusted_mcp_trusted_server_hidden",
-            CallerIdentity::Agent,
-            0,
-            false,
-            None,
-            false,
-        ),
-    ];
-    let rows: Vec<_> = cases
-        .into_iter()
-        .map(|(name, caller, depth, shell, allowlist, mcp_trusted)| {
+    let mut names = BTreeSet::new();
+    let rows = catalog
+        .cases
+        .iter()
+        .map(|scenario| {
+            if !names.insert(&scenario.name) {
+                return Err(format!(
+                    "duplicate tool visibility scenario: {}",
+                    scenario.name
+                ));
+            }
+            let caller = match scenario.caller.as_str() {
+                "owner" => CallerIdentity::Owner,
+                "co_agent" => CallerIdentity::CoAgent {
+                    agent_id: "baseline-peer".to_string(),
+                },
+                "trusted_user" => CallerIdentity::TrustedUser,
+                "agent" => CallerIdentity::Agent,
+                other => return Err(format!("unknown visibility caller: {other}")),
+            };
             let caller_name = match &caller {
                 CallerIdentity::Owner => "owner",
                 CallerIdentity::Agent => "agent",
                 CallerIdentity::TrustedUser => "trusted_user",
                 CallerIdentity::CoAgent { .. } => "co_agent",
             };
-            let executor = build_executor(caller, depth, shell, allowlist.clone(), mcp_trusted);
-            json!({
-                "name":name,
-                "dimensions": {"caller":caller_name,"depth":depth,"shell_enabled":shell,"allowlist":allowlist,"mcp_caller_is_trusted":mcp_trusted},
+            let mcp_trusted = !matches!(caller, CallerIdentity::Agent);
+            let executor = build_executor(
+                caller,
+                scenario.depth,
+                scenario.shell_enabled,
+                scenario.allowlist.clone(),
+                "default",
+            );
+            Ok(json!({
+                "name":scenario.name,
+                "dimensions": {"caller":caller_name,"depth":scenario.depth,"shell_enabled":scenario.shell_enabled,"allowlist":scenario.allowlist,"mcp_caller_is_trusted":mcp_trusted},
                 "visible_tools": tool_names(&executor)
-            })
+            }))
         })
-        .collect();
-    json!({"scenarios":rows})
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(json!({"scenarios":rows}))
 }
 
 fn required_args(schema: &Value) -> Vec<String> {
@@ -1119,15 +1357,174 @@ fn required_args(schema: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn result_json(mut result: opencrab_core::ActionResult) -> Value {
-    normalize(&mut result.data);
-    json!({"success":result.success,"data":result.data,"error":result.error})
+fn result_json(result: opencrab_core::ActionResult) -> Value {
+    let mut value = json!({"success":result.success,"data":result.data,"error":result.error});
+    normalize(&mut value);
+    value
 }
 
-async fn collect_tool_execution() -> Result<Value, String> {
+fn session_log_count(state: &AppState, session_id: &str) -> Result<i64, String> {
+    state
+        .db
+        .lock()
+        .map_err(|error| format!("session log observer lock: {error}"))?
+        .query_row(
+            "SELECT COUNT(*) FROM memory_sessions WHERE session_id = ?1",
+            rusqlite::params![session_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("session log observer query: {error}"))
+}
+
+async fn observe_tool_postcondition(
+    executor: &opencrab_actions::BridgedExecutor,
+    state: &AppState,
+    scenario: &ToolPostcondition,
+    name: &str,
+) -> Result<Value, String> {
+    match (
+        &scenario.tool,
+        &scenario.method,
+        &scenario.uri,
+        &scenario.db_query,
+    ) {
+        (Some(tool), None, None, None) => Ok(result_json(
+            executor.execute(tool, &scenario.arguments).await,
+        )),
+        (None, Some(method), Some(uri), None) => {
+            let body = (!scenario.arguments.is_null())
+                .then(|| serde_json::to_vec(&scenario.arguments))
+                .transpose()
+                .map_err(|error| format!("serialize {name} postcondition body: {error}"))?;
+            request_once(
+                state.clone(),
+                name,
+                method,
+                uri,
+                body,
+                (!scenario.arguments.is_null()).then_some("application/json"),
+            )
+            .await
+        }
+        (None, None, None, Some(query)) if query == "memory_declare_window" => {
+            let connection = state
+                .db
+                .lock()
+                .map_err(|error| format!("{name} DB observer lock: {error}"))?;
+            let mut value = serde_json::to_value(
+                opencrab_db::queries::get_memory_declare_window(&connection, AGENT_ID)
+                    .map_err(|error| format!("{name} DB observer: {error}"))?,
+            )
+            .map_err(|error| format!("{name} DB observer serialize: {error}"))?;
+            normalize(&mut value);
+            Ok(json!({"db_query":query,"value":value}))
+        }
+        (None, None, None, Some(query)) if query == "executor_runtime" => {
+            let runtime = executor.runtime_state();
+            Ok(json!({
+                "db_query":query,
+                "value":{
+                    "model_override":runtime.model_override,
+                    "current_purpose":runtime.current_purpose,
+                }
+            }))
+        }
+        (None, None, None, Some(query)) if query == "webhook_configs" => {
+            let connection = state
+                .db
+                .lock()
+                .map_err(|error| format!("{name} DB observer lock: {error}"))?;
+            let rows =
+                opencrab_db::queries::list_agent_webhook_config(&connection, Some(AGENT_ID), true)
+                    .map_err(|error| format!("{name} DB observer: {error}"))?;
+            let mut value = serde_json::to_value(rows)
+                .map_err(|error| format!("{name} DB observer serialize: {error}"))?;
+            normalize(&mut value);
+            Ok(json!({"db_query":query,"value":value}))
+        }
+        (None, None, None, Some(query)) if query == "memory_index_state" => {
+            let connection = state
+                .db
+                .lock()
+                .map_err(|error| format!("{name} DB observer lock: {error}"))?;
+            let mut nodes_statement = connection
+                .prepare("SELECT id, title, node_type, source_type, summary, keywords_json FROM memory_index_nodes WHERE agent_id = ?1 ORDER BY id")
+                .map_err(|error| format!("{name} nodes observer prepare: {error}"))?;
+            let nodes = nodes_statement
+                .query_map(rusqlite::params![AGENT_ID], |row| {
+                    Ok(json!({"id":row.get::<_,String>(0)?,"title":row.get::<_,String>(1)?,"node_type":row.get::<_,String>(2)?,"source_type":row.get::<_,String>(3)?,"summary":row.get::<_,String>(4)?,"keywords_json":row.get::<_,String>(5)?}))
+                })
+                .map_err(|error| format!("{name} nodes observer query: {error}"))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("{name} nodes observer row: {error}"))?;
+            let mut members_statement = connection
+                .prepare("SELECT topic_id, category_id FROM memory_category_members WHERE agent_id = ?1 ORDER BY topic_id, category_id")
+                .map_err(|error| format!("{name} members observer prepare: {error}"))?;
+            let members = members_statement
+                .query_map(rusqlite::params![AGENT_ID], |row| {
+                    Ok(json!({"topic_id":row.get::<_,String>(0)?,"category_id":row.get::<_,String>(1)?}))
+                })
+                .map_err(|error| format!("{name} members observer query: {error}"))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("{name} members observer row: {error}"))?;
+            Ok(json!({"db_query":query,"nodes":nodes,"members":members}))
+        }
+        (None, None, None, Some(query)) if query == "memory_index_config" => {
+            let connection = state
+                .db
+                .lock()
+                .map_err(|error| format!("{name} DB observer lock: {error}"))?;
+            let mut value = serde_json::to_value(
+                opencrab_db::queries::get_memory_index_config(&connection, AGENT_ID)
+                    .map_err(|error| format!("{name} DB observer: {error}"))?,
+            )
+            .map_err(|error| format!("{name} DB observer serialize: {error}"))?;
+            normalize(&mut value);
+            Ok(json!({"db_query":query,"value":value}))
+        }
+        _ => Err(format!(
+            "postcondition for {name} must select exactly one tool or HTTP method+uri"
+        )),
+    }
+}
+
+async fn collect_tool_execution(catalog: &ToolScenarioCatalog) -> Result<Value, String> {
     use opencrab_actions::CallerIdentity;
-    let owner = build_executor(CallerIdentity::Owner, 0, true, None, true);
+    let owner = build_executor(CallerIdentity::Owner, 0, true, None, "default");
     let all_defs = owner.list_tools();
+    let live_tools: BTreeSet<_> = all_defs
+        .iter()
+        .map(|definition| definition.name.clone())
+        .collect();
+    let selected_tools: BTreeSet<_> = catalog
+        .success_arguments
+        .keys()
+        .chain(catalog.success_uncollected_l3.keys())
+        .cloned()
+        .collect();
+    let overlap: Vec<_> = catalog
+        .success_arguments
+        .keys()
+        .filter(|name| catalog.success_uncollected_l3.contains_key(*name))
+        .cloned()
+        .collect();
+    if !overlap.is_empty() || live_tools != selected_tools {
+        return Err(format!(
+            "tool scenario catalog is not a bijection with production tools; overlap={overlap:?}, missing={:?}, unknown={:?}",
+            live_tools.difference(&selected_tools).collect::<Vec<_>>(),
+            selected_tools.difference(&live_tools).collect::<Vec<_>>()
+        ));
+    }
+    let missing_postconditions: Vec<_> = catalog
+        .effectful_tools
+        .iter()
+        .filter(|tool| !catalog.postconditions.contains_key(*tool))
+        .collect();
+    if !missing_postconditions.is_empty() {
+        return Err(format!(
+            "effectful tool scenarios lack postconditions: {missing_postconditions:?}"
+        ));
+    }
     let mut required_missing = Vec::new();
     let mut no_required_args_uncollected = Vec::new();
     for def in &all_defs {
@@ -1150,7 +1547,7 @@ async fn collect_tool_execution() -> Result<Value, String> {
         }));
     }
 
-    let agent = build_executor(CallerIdentity::Agent, 0, true, None, false);
+    let agent = build_executor(CallerIdentity::Agent, 0, true, None, "default");
     let mut permission = Vec::new();
     for def in &all_defs {
         let policy = opencrab_actions::tool_policy(&def.name);
@@ -1165,207 +1562,67 @@ async fn collect_tool_execution() -> Result<Value, String> {
         }
     }
 
-    let success_cases = [
-        ("get_system_info", json!({})),
-        ("declare_done", json!({"reason":"baseline complete"})),
-        (
-            "generate_inner_voice",
-            json!({"thought":"baseline thought"}),
-        ),
-        (
-            "update_impression",
-            json!({"target_id":"baseline-peer","target_name":"Baseline Peer","agreement":"neutral"}),
-        ),
-        ("ws_mkdir", json!({"path":"captured"})),
-        (
-            "ws_write",
-            json!({"path":"captured/file.txt","content":"baseline"}),
-        ),
-        ("ws_read", json!({"path":"captured/file.txt"})),
-        ("ws_list", json!({"path":"captured"})),
-        (
-            "ws_edit",
-            json!({"path":"captured/file.txt","old_string":"baseline","new_string":"captured"}),
-        ),
-        ("ws_delete", json!({"path":"captured/file.txt"})),
-        (
-            "learn_from_experience",
-            json!({"experience":"baseline run","outcome":"success","lesson":"capture real results","skill_name":"Experience Skill"}),
-        ),
-        (
-            "learn_from_peer",
-            json!({"peer_name":"Baseline Peer","observed_pattern":"records fixtures","lesson":"make preconditions explicit","skill_name":"Peer Skill"}),
-        ),
-        (
-            "reflect_and_learn",
-            json!({"reflection":"baseline reflection","insights":["observed"],"action_items":["preserve"]}),
-        ),
-        ("search_my_history", json!({"query":"baseline","limit":5})),
-        (
-            "summarize_and_save",
-            json!({"content":"baseline summary","filename":"captured/summary.txt","summary_type":"note"}),
-        ),
-        (
-            "create_my_skill",
-            json!({"name":"Captured Skill","description":"captured","situation_pattern":"baseline","guidance":"preserve","actions":["get_system_info"]}),
-        ),
-        ("retire_my_skill", json!({"name":"Seed Skill"})),
-        ("restore_my_skill", json!({"name":"Seed Skill"})),
-        ("read_skill", json!({"name":"Seed Skill"})),
-        ("browse_memory_index", json!({"max_depth":3})),
-        ("retrieve_memory_nodes", json!({"node_ids":["t1"]})),
-        ("search_memory_index", json!({"query":"Baseline","limit":5})),
-        (
-            "tag_topic",
-            json!({"topic_id":"t1","tags":["Baseline Tag","Merge From"]}),
-        ),
-        ("untag_topic", json!({"topic_id":"t1","tag":"Baseline Tag"})),
-        (
-            "merge_tags",
-            json!({"from":"Merge From","into":"Merge Into"}),
-        ),
-        (
-            "survey_my_history",
-            json!({"granularity":"day","max_buckets":5}),
-        ),
-        ("read_my_history", json!({"session_id":SESSION_ID})),
-        (
-            "record_memory_unit",
-            json!({"from_id":1,"to_id":2,"title":"Recorded Unit","summary":"captured"}),
-        ),
-        ("retract_memory_unit", json!({"unit_id":"u2"})),
-        (
-            "plan_next_memory_window",
-            json!({"next_from_id":1,"window_size":10,"note":"baseline"}),
-        ),
-        (
-            "record_memory_core",
-            json!({"axis":"Recorded Core","body":"captured principle","sources":["u1"]}),
-        ),
-        (
-            "update_memory_core",
-            json!({"core_id":"m1","axis":"Updated Core","body":"updated principle","sources":["u1"]}),
-        ),
-        ("retract_memory_core", json!({"core_id":"m2"})),
-        (
-            "select_llm",
-            json!({"model_alias":"baseline:model","reason":"compatibility capture","purpose":"baseline","duration":"this_turn"}),
-        ),
-        (
-            "evaluate_response",
-            json!({"evaluation":"baseline evaluation","quality_score":0.75,"task_success":true,"tags":["baseline"]}),
-        ),
-        ("analyze_llm_usage", json!({"period":"all"})),
-        (
-            "recall_model_experiences",
-            json!({"include_notes":true,"evaluation_limit":5}),
-        ),
-        (
-            "save_model_insight",
-            json!({"situation":"baseline","observation":"captured behavior","recommendation":"preserve","model":"baseline:model","tags":["compatibility"]}),
-        ),
-        (
-            "update_instructions",
-            json!({"instructions":"baseline updated instructions","reason":"compatibility capture"}),
-        ),
-        (
-            "open_task",
-            json!({"goal":"baseline goal","contract":"captured"}),
-        ),
-        (
-            "update_task_contract",
-            json!({"goal":"baseline updated goal","contract":"captured result"}),
-        ),
-        (
-            "record_task_progress",
-            json!({"content":"baseline progress","kind":"progress"}),
-        ),
-        ("get_task", json!({})),
-        (
-            "close_task",
-            json!({"status":"done","summary":"baseline done"}),
-        ),
-        (
-            "execute_shell",
-            json!({"command":"printf","args":["baseline-shell"]}),
-        ),
-        (
-            "configure_llm_provider",
-            json!({"provider":"openai","enabled":false}),
-        ),
-        ("manage_allowed_commands", json!({"action":"list"})),
-        ("configure_nostr", json!({"enabled":false})),
-        (
-            "configure_self",
-            json!({"personality":"baseline configured"}),
-        ),
-        ("configure_mcp_server", json!({"action":"list"})),
-        ("nostr_list_keys", json!({})),
-        ("rebuild_memory_index", json!({})),
-        (
-            "update_memory_index_config",
-            json!({"batch_size":20,"threshold":100}),
-        ),
-        ("add_allowed_command", json!({"command":"baseline_cmd"})),
-        ("list_allowed_commands", json!({})),
-        ("remove_allowed_command", json!({"command":"baseline_cmd"})),
-        (
-            "create_skill",
-            json!({"name":"Gateway Skill","description":"captured","guidance":"preserve"}),
-        ),
-        (
-            "update_heartbeat_instructions",
-            json!({"scope":"agent","instructions":"baseline heartbeat updated","reason":"compatibility capture"}),
-        ),
-        ("read_heartbeat_instructions", json!({"scope":"agent"})),
-        ("get_my_nostr_relay", json!({})),
-        (
-            "set_my_nostr_relay",
-            json!({"enabled":false,"webhook_url":""}),
-        ),
-        ("get_my_heartbeat", json!({})),
-        (
-            "set_my_heartbeat",
-            json!({"enabled":false,"interval_secs":3600}),
-        ),
-        ("get_my_schedules", json!({})),
-        (
-            "set_my_schedule",
-            json!({"cron_expr":"0 9 * * *","message":"baseline schedule","timezone":"UTC","enabled":true}),
-        ),
-        (
-            "update_my_schedule",
-            json!({"id":1,"message":"baseline schedule updated","enabled":false}),
-        ),
-        ("delete_my_schedule", json!({"id":1})),
-        ("get_default_webhook", json!({})),
-        ("get_default_subtask_webhook", json!({})),
-        (
-            "set_default_subtask_webhook",
-            json!({"scope":"agent","kind":"discord","url":"https://discord.com/api/webhooks/1/baseline","enabled":false}),
-        ),
-        (
-            "list_subtask_webhooks",
-            json!({"scope":"all","include_disabled":true}),
-        ),
-        (
-            "set_default_webhook",
-            json!({"scope":"agent","family":"tool","url":"https://discord.com/api/webhooks/1/baseline","enabled":false}),
-        ),
-        (
-            "list_webhooks",
-            json!({"scope":"all","include_disabled":true}),
-        ),
-        ("mcp__public_local__echo", json!({"value":"baseline"})),
-        ("mcp__trusted_local__echo", json!({"value":"baseline"})),
-    ];
+    let success_cases = &catalog.success_arguments;
     let mut successes = Vec::new();
     let mut unsuccessful_attempts = Vec::new();
     for (tool, arguments) in success_cases {
-        let result = owner.execute(tool, &arguments).await;
+        if catalog
+            .fixtures
+            .get(tool)
+            .is_some_and(|fixture| fixture.starts_with("subtask_"))
+        {
+            continue;
+        }
+        let fixture = catalog
+            .fixtures
+            .get(tool)
+            .map(String::as_str)
+            .unwrap_or("default");
+        let (executor, state) =
+            build_executor_with_state(CallerIdentity::Owner, 0, true, None, fixture);
+        let before = if let Some(postcondition) = catalog.postconditions.get(tool) {
+            Some(observe_tool_postcondition(&executor, &state, postcondition, tool).await?)
+        } else {
+            None
+        };
+        let result = executor.execute(tool, arguments).await;
         let result = result_json(result);
         if result["success"] == true {
-            successes.push(json!({"tool":tool,"arguments":arguments,"result":result}));
+            let postcondition = if let Some(postcondition) = catalog.postconditions.get(tool) {
+                let observed =
+                    observe_tool_postcondition(&executor, &state, postcondition, tool).await?;
+                if postcondition.tool.is_some()
+                    && observed["success"] != postcondition.expect_success
+                {
+                    return Err(format!(
+                        "postcondition for {tool} did not satisfy expected success={}: {observed}",
+                        postcondition.expect_success
+                    ));
+                }
+                if let Some(expected) = postcondition.expect_status {
+                    if observed["status"] != expected {
+                        return Err(format!("postcondition for {tool} did not satisfy expected HTTP status={expected}: {observed}"));
+                    }
+                }
+                if before.as_ref() == Some(&observed) {
+                    return Err(format!(
+                        "postcondition for {tool} did not change; a no-op implementation would pass"
+                    ));
+                }
+                Some(json!({
+                    "tool":postcondition.tool,
+                    "method":postcondition.method,
+                    "uri":postcondition.uri,
+                    "db_query":postcondition.db_query,
+                    "arguments":postcondition.arguments,
+                    "expect_success":postcondition.expect_success,
+                    "before":before,
+                    "observed":observed
+                }))
+            } else {
+                None
+            };
+            successes.push(json!({"tool":tool,"arguments":arguments,"result":result,"postcondition":postcondition}));
         } else {
             unsuccessful_attempts.push(json!({
                 "tool":tool,
@@ -1377,47 +1634,109 @@ async fn collect_tool_execution() -> Result<Value, String> {
         }
     }
 
-    let subtask_cases = [
-        (
-            "spawn_subtask",
-            TOOL_SESSION_ID,
-            0,
-            false,
-            json!({"task":"baseline delegated task","label":"baseline subtask","timeout_secs":1}),
-        ),
-        (
-            "cancel_subtask",
-            TOOL_SESSION_ID,
-            0,
-            false,
-            json!({"subtask_id":"baseline-subtask"}),
-        ),
-        (
-            "steer_subtask",
-            TOOL_SESSION_ID,
-            0,
-            true,
-            json!({"subtask_id":"baseline-subtask","message":"baseline steering"}),
-        ),
-        (
-            "report_progress",
-            "subtask-baseline-subtask",
-            1,
-            true,
-            json!({"subtask_id":"baseline-subtask","message":"baseline progress"}),
-        ),
-    ];
-    for (tool, session_id, depth, steerable, arguments) in subtask_cases {
-        let registry = subtask_fixture_registry(
-            "baseline-subtask",
-            "subtask-baseline-subtask",
-            TOOL_SESSION_ID,
-            steerable,
-        );
-        let executor = build_subtask_fixture_executor(session_id, depth, registry);
-        let result = result_json(executor.execute(tool, &arguments).await);
+    for (tool, fixture) in &catalog.fixtures {
+        let Some((session_id, depth, steerable)) = (match fixture.as_str() {
+            "subtask_spawn" => Some((TOOL_SESSION_ID, 0, false)),
+            "subtask_cancel" => Some((TOOL_SESSION_ID, 0, false)),
+            "subtask_steer" => Some((TOOL_SESSION_ID, 0, true)),
+            "subtask_report" => Some(("subtask-baseline-subtask", 1, true)),
+            _ => None,
+        }) else {
+            continue;
+        };
+        let arguments = catalog
+            .success_arguments
+            .get(tool)
+            .ok_or_else(|| format!("fixture {fixture} has no success arguments for {tool}"))?;
+        let registry = if fixture == "subtask_spawn" {
+            Arc::new(dashmap::DashMap::new())
+        } else {
+            subtask_fixture_registry(
+                "baseline-subtask",
+                "subtask-baseline-subtask",
+                TOOL_SESSION_ID,
+                steerable,
+            )
+        };
+        let registry_observer = registry.clone();
+        let (executor, state) = build_subtask_fixture_executor(session_id, depth, registry);
+        let before_logs = if matches!(fixture.as_str(), "subtask_steer" | "subtask_report") {
+            let observed_session = if fixture == "subtask_steer" {
+                "subtask-baseline-subtask"
+            } else {
+                TOOL_SESSION_ID
+            };
+            Some(session_log_count(&state, observed_session)?)
+        } else {
+            None
+        };
+        let raw_result = executor.execute(tool, arguments).await;
+        let raw_data = raw_result.data.clone();
+        let result = result_json(raw_result);
+        let effect = match fixture.as_str() {
+            "subtask_spawn" if result["success"] == true => {
+                let subtask_id = raw_data["subtask_id"]
+                    .as_str()
+                    .ok_or_else(|| "spawn_subtask succeeded without a subtask_id".to_string())?;
+                let session_id = raw_data["session_id"]
+                    .as_str()
+                    .ok_or_else(|| "spawn_subtask succeeded without a session_id".to_string())?;
+                let durable_session_registered = state
+                    .db
+                    .lock()
+                    .map_err(|error| format!("spawn_subtask DB observer lock: {error}"))?
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?1)",
+                        rusqlite::params![session_id],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .map_err(|error| format!("spawn_subtask DB observer: {error}"))?;
+                if !durable_session_registered {
+                    return Err(
+                        "spawn_subtask returned success without registering its durable session"
+                            .to_string(),
+                    );
+                }
+                Some(json!({
+                    "accepted":true,
+                    "registry_registered_when_observed":registry_observer.contains_key(subtask_id),
+                    "durable_session_registered":true,
+                    "completion":{
+                        "status":"uncollected",
+                        "reason":"the production spawn path was accepted and registered; its background LLM completion has no provider and is not claimed as success"
+                    }
+                }))
+            }
+            "subtask_cancel" if result["success"] == true => {
+                if registry_observer.contains_key("baseline-subtask") {
+                    return Err(
+                        "cancel_subtask returned success without removing the registry entry"
+                            .to_string(),
+                    );
+                }
+                Some(json!({"registry_before":true,"registry_after":false}))
+            }
+            "subtask_steer" | "subtask_report" if result["success"] == true => {
+                let observed_session = if fixture == "subtask_steer" {
+                    "subtask-baseline-subtask"
+                } else {
+                    TOOL_SESSION_ID
+                };
+                let after_logs = session_log_count(&state, observed_session)?;
+                if before_logs == Some(after_logs) {
+                    return Err(format!(
+                        "{tool} returned success without recording its delivered effect"
+                    ));
+                }
+                Some(
+                    json!({"session_id":observed_session,"logs_before":before_logs,"logs_after":after_logs}),
+                )
+            }
+            _ => None,
+        };
         if result["success"] == true {
-            successes.push(json!({"tool":tool,"arguments":arguments,"result":result}));
+            successes
+                .push(json!({"tool":tool,"arguments":arguments,"result":result,"effect":effect}));
         } else {
             unsuccessful_attempts.push(json!({
                 "tool":tool,
@@ -1429,20 +1748,16 @@ async fn collect_tool_execution() -> Result<Value, String> {
         }
     }
 
-    let forwarding_cases = [
-        (
-            "mcp_tool_error",
-            json!({"value":"baseline","mode":"tool_error"}),
-        ),
-        (
-            "mcp_transport_error",
-            json!({"value":"baseline","mode":"transport_error"}),
-        ),
-    ];
     let mut forwarding = Vec::new();
-    for (name, arguments) in forwarding_cases {
-        let result = owner.execute("mcp__public_local__echo", &arguments).await;
-        forwarding.push(json!({"name":name,"tool":"mcp__public_local__echo","arguments":arguments,"result":result_json(result)}));
+    for (name, scenario) in &catalog.forwarding {
+        if !live_tools.contains(&scenario.tool) {
+            return Err(format!(
+                "forwarding scenario {name} selects unknown tool {}",
+                scenario.tool
+            ));
+        }
+        let result = owner.execute(&scenario.tool, &scenario.arguments).await;
+        forwarding.push(json!({"name":name,"tool":scenario.tool,"arguments":scenario.arguments,"result":result_json(result)}));
     }
 
     let success_names: BTreeSet<_> = successes
@@ -1453,14 +1768,11 @@ async fn collect_tool_execution() -> Result<Value, String> {
         .iter()
         .filter(|d| !success_names.contains(d.name.as_str()))
         .map(|d| {
-            let reason = match d.name.as_str() {
-                "nostr_generate_key" => "L3: successful key generation requires the operator's nostaro executable and writes key material outside the temporary workspace",
-                "nostr_switch_identity" => "L3: success requires a generated Nostr key and a configured Nostr transport capability",
-                "nostr_run" => "L3: success requires an adopted identity plus the operator's nostaro executable and may use live relays",
-                "run_my_heartbeat" => "L3: success fires an actual agent turn through a configured transport and LLM provider",
-                "request_peer_review" => "L3: success delivers a message through the active transport",
-                _ => "the attempted local fixture did not produce a successful result; see unsuccessful_attempts",
-            };
+            let reason = catalog
+                .success_uncollected_l3
+                .get(&d.name)
+                .map(String::as_str)
+                .unwrap_or("selected success scenario did not satisfy its postcondition");
             json!({
                 "tool":d.name,
                 "facet":"success",
@@ -1550,6 +1862,9 @@ async fn collect_mcp_protocol() -> Result<Value, String> {
 
 fn coverage(http: &Value, tools: &Value) -> Value {
     let mut by_status = BTreeMap::<String, usize>::new();
+    let mut rejection_observed = 0;
+    let mut effect_observed = 0;
+    let mut effect_uncollected = 0;
     if let Some(probes) = http["probes"].as_array() {
         for probe in probes {
             let status = probe
@@ -1557,34 +1872,74 @@ fn coverage(http: &Value, tools: &Value) -> Value {
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
             *by_status.entry(format!("{}xx", status / 100)).or_default() += 1;
+            if matches!(
+                probe["selection"].as_str(),
+                Some("malformed_json_rejection" | "missing_resource_rejection")
+            ) && (400..500).contains(&status)
+            {
+                rejection_observed += 1;
+            }
+            match probe["effect"]["status"].as_str() {
+                Some("observed") => effect_observed += 1,
+                Some("uncollected") => effect_uncollected += 1,
+                _ => {}
+            }
         }
     }
+    let uncollected = http["uncollected"].as_array();
+    let http_uncollected = uncollected.map_or(0, |items| {
+        items
+            .iter()
+            .filter(|item| item["status"] == "uncollected")
+            .count()
+    });
+    let http_not_applicable = uncollected.map_or(0, |items| {
+        items
+            .iter()
+            .filter(|item| item["status"] == "not_applicable")
+            .count()
+    });
+    let tool_postconditions = tools["successful_calls"].as_array().map_or(0, |items| {
+        items
+            .iter()
+            .filter(|item| !item["postcondition"].is_null() || !item["effect"].is_null())
+            .count()
+    });
     json!({
         "http_observed_status_classes":by_status,
-        "http_uncollected_count":http["uncollected"].as_array().map_or(0, Vec::len),
+        "http_facets":{
+            "valid_rejections":rejection_observed,
+            "effects_observed":effect_observed,
+            "effects_uncollected":effect_uncollected,
+            "uncollected":http_uncollected,
+            "not_applicable":http_not_applicable
+        },
+        "tool_effects_observed":tool_postconditions,
         "tool_success_uncollected_count":tools["uncollected"].as_array().map_or(0, |items| items.iter().filter(|item| item["facet"] == "success").count()),
-        "claim":"Only scenarios with captured observations are fixed by this artifact; every uncollected entry is an explicit non-claim."
+        "claim":"Only nonempty observations satisfying their facet predicate are fixed by this artifact; every uncollected or not_applicable entry is an explicit non-claim."
     })
 }
 
 pub async fn capture(l1_path: &Path, scenario_path: &Path) -> Result<Value, String> {
     let l1 = read_json(l1_path)?;
-    let scenarios = read_json(scenario_path)?;
-    if scenarios["schema_version"] != 1 {
+    let (scenarios, catalog) = read_scenarios(scenario_path)?;
+    if catalog.schema_version != 1 {
         return Err("scenario catalog schema_version must be 1".to_string());
     }
-    let http = collect_http(&l1).await?;
-    let visibility = collect_visibility();
-    let tools = collect_tool_execution().await?;
+    let http = collect_http(&l1, &catalog.http).await?;
+    let visibility = collect_visibility(&catalog.tool_visibility)?;
+    let tools = collect_tool_execution(&catalog.tool_execution).await?;
     let mcp = collect_mcp_protocol().await?;
     let coverage = coverage(&http, &tools);
-    Ok(json!({
+    let mut artifact = json!({
         "schema_version":1,
         "source":{"l1":l1_path.file_name().and_then(|s|s.to_str()).unwrap_or("opencrab-l1.json"),"scenario_catalog":scenario_path.file_name().and_then(|s|s.to_str()).unwrap_or("scenarios.json")},
         "normalization":[
             "content-length response header omitted",
             "timestamp-valued *_at fields and timestamp-valued date_from/date_to fields replaced with <timestamp>",
             "numeric duration_ms/latency_ms replaced with <duration>",
+            "floating score values rounded to 12 decimal places to remove platform-level SQLite FTS noise",
+            "collector-owned temporary workspace roots replaced with <workspace>",
             "UUID strings and subtask-UUID strings replaced with <uuid> markers",
             "implementation-generated unit-*/core-* identifiers replaced with field-specific markers; fixed fixture identifiers remain literal"
         ],
@@ -1594,5 +1949,198 @@ pub async fn capture(l1_path: &Path, scenario_path: &Path) -> Result<Value, Stri
         "tool_execution":tools,
         "mcp_protocol":mcp,
         "coverage":coverage
-    }))
+    });
+    normalize(&mut artifact);
+    Ok(artifact)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn first_difference(left: &Value, right: &Value, path: &str) -> Option<String> {
+        match (left, right) {
+            (Value::Object(left), Value::Object(right)) => {
+                for key in left.keys().chain(right.keys()) {
+                    if left.get(key) != right.get(key) {
+                        let child = format!("{path}/{key}");
+                        return match (left.get(key), right.get(key)) {
+                            (Some(left), Some(right)) => {
+                                first_difference(left, right, &child).or(Some(child))
+                            }
+                            _ => Some(child),
+                        };
+                    }
+                }
+                None
+            }
+            (Value::Array(left), Value::Array(right)) => left
+                .iter()
+                .zip(right)
+                .enumerate()
+                .find_map(|(index, (left, right))| {
+                    (left != right).then(|| {
+                        first_difference(left, right, &format!("{path}/{index}"))
+                            .unwrap_or_else(|| format!("{path}/{index}"))
+                    })
+                })
+                .or_else(|| (left.len() != right.len()).then(|| format!("{path}/length"))),
+            _ => (left != right).then(|| path.to_string()),
+        }
+    }
+
+    fn baseline_paths() -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("server crate must be below the repository root");
+        (
+            repository.join("baseline/l1/opencrab-l1.json"),
+            repository.join("baseline/l2/scenarios.json"),
+            repository.join("baseline/l2/opencrab-l2.json"),
+        )
+    }
+
+    #[test]
+    fn production_builder_and_capture_visibility_are_identical() {
+        let (_, scenarios_path, _) = baseline_paths();
+        let (_, catalog) = read_scenarios(&scenarios_path).expect("read scenario catalog");
+        let visibility = collect_visibility(&catalog.tool_visibility)
+            .expect("collect through production executor builder");
+        let rows = visibility["scenarios"].as_array().expect("visibility rows");
+        let mcp_count = |name: &str| {
+            rows.iter()
+                .find(|row| row["name"] == name)
+                .and_then(|row| row["visible_tools"].as_array())
+                .expect("named visibility row")
+                .iter()
+                .filter(|tool| {
+                    tool.as_str()
+                        .is_some_and(|tool_name| tool_name.starts_with("mcp__"))
+                })
+                .count()
+        };
+        assert_eq!(mcp_count("owner_depth0_all_features"), 2);
+        assert_eq!(mcp_count("owner_depth1_subengine"), 0);
+        assert_eq!(mcp_count("owner_depth2_cap"), 0);
+    }
+
+    #[test]
+    fn live_routes_and_tools_match_the_scenario_catalog() {
+        let (l1_path, scenarios_path, _) = baseline_paths();
+        let l1 = read_json(&l1_path).expect("read checked L1 artifact");
+        let production_routes = serde_json::to_value(crate::production_route_inventory())
+            .expect("serialize production route inventory");
+        assert_eq!(l1["http"]["routes"], production_routes);
+
+        let (_, catalog) = read_scenarios(&scenarios_path).expect("read scenario catalog");
+        let owner = build_executor(
+            opencrab_actions::CallerIdentity::Owner,
+            0,
+            true,
+            None,
+            "default",
+        );
+        let live_tools: BTreeSet<_> = owner
+            .list_tools()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+        let selected_tools: BTreeSet<_> = catalog
+            .tool_execution
+            .success_arguments
+            .keys()
+            .chain(catalog.tool_execution.success_uncollected_l3.keys())
+            .cloned()
+            .collect();
+        assert_eq!(live_tools, selected_tools);
+    }
+
+    #[tokio::test]
+    async fn observed_facets_have_valid_statuses_and_nonempty_effects() {
+        let (l1_path, scenarios_path, _) = baseline_paths();
+        let artifact = capture(&l1_path, &scenarios_path)
+            .await
+            .expect("capture L2 artifact");
+        let probes = artifact["http"]["probes"].as_array().expect("HTTP probes");
+        for probe in probes {
+            if matches!(
+                probe["selection"].as_str(),
+                Some("malformed_json_rejection" | "missing_resource_rejection")
+            ) {
+                let status = probe["response"]["status"]
+                    .as_u64()
+                    .expect("rejection status");
+                assert!((400..500).contains(&status));
+            }
+            if probe["effect"]["status"] == "observed" {
+                assert_ne!(probe["effect"]["before"], probe["effect"]["after"]);
+            }
+        }
+
+        let successful_calls = artifact["tool_execution"]["successful_calls"]
+            .as_array()
+            .expect("successful tool calls");
+        for tool in &[
+            "spawn_subtask",
+            "cancel_subtask",
+            "steer_subtask",
+            "report_progress",
+        ] {
+            let row = successful_calls
+                .iter()
+                .find(|row| row["tool"] == *tool)
+                .expect("subtask effect row");
+            assert!(!row["effect"].is_null());
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_is_deterministic_and_matches_the_checked_artifact() {
+        let (l1_path, scenarios_path, artifact_path) = baseline_paths();
+        let first = capture(&l1_path, &scenarios_path)
+            .await
+            .expect("first L2 capture");
+        let second = capture(&l1_path, &scenarios_path)
+            .await
+            .expect("second L2 capture");
+        if first != second {
+            panic!(
+                "successive captures differ at {}",
+                first_difference(&first, &second, "").unwrap_or_else(|| "unknown".to_string())
+            );
+        }
+
+        let mut bytes = serde_json::to_vec_pretty(&first).expect("serialize fresh L2 artifact");
+        bytes.push(b'\n');
+        let checked_bytes = fs::read(artifact_path).expect("read checked L2 artifact");
+        let checked: Value =
+            serde_json::from_slice(&checked_bytes).expect("parse checked L2 artifact");
+        if first != checked {
+            let uncollected_effects = |artifact: &Value| {
+                artifact["http"]["probes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|probe| probe["effect"]["status"] == "uncollected")
+                    .filter_map(|probe| probe["name"].as_str().map(ToOwned::to_owned))
+                    .collect::<Vec<_>>()
+            };
+            let difference =
+                first_difference(&first, &checked, "").unwrap_or_else(|| "unknown".to_string());
+            panic!(
+                "fresh capture differs from checked artifact at {difference}: fresh={:?}, checked={:?}; fresh uncollected effects={:?}; checked={:?}",
+                first.pointer(&difference),
+                checked.pointer(&difference),
+                uncollected_effects(&first),
+                uncollected_effects(&checked),
+            );
+        }
+        assert_eq!(bytes, checked_bytes, "checked artifact formatting differs");
+        let text = String::from_utf8(bytes).expect("artifact is UTF-8");
+        assert!(!text.contains("/Users/"));
+        assert!(!text.contains("/Volumes/"));
+        assert!(!text.contains(&std::env::temp_dir().to_string_lossy().to_string()));
+        assert!(text.contains("2026-01-01"));
+    }
 }

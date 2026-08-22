@@ -35,9 +35,10 @@ pub use agent_gateway::{
 };
 pub use agent_runtime::AgentRuntime;
 pub use bridge::{
-    tool_policy, BridgedExecutor, SubEngineGatewayActions, ToolEvent, ToolEventSink,
-    ToolEventStatus, ToolPolicy, CORE_DISPATCHABLE_ACTIONS, CORE_INLINE_ACTIONS, MCP_TOOL_PREFIX,
-    OWNER_ONLY_ACTIONS, REJECTION_CODE_PREFIX, TRUSTED_ONLY_ACTIONS,
+    tool_policy, BridgedExecutor, EffectiveToolDefinition, ExecutorRuntimeState,
+    SubEngineGatewayActions, ToolEvent, ToolEventSink, ToolEventStatus, ToolPolicy, ToolSlot,
+    CORE_DISPATCHABLE_ACTIONS, CORE_INLINE_ACTIONS, MCP_TOOL_PREFIX, OWNER_ONLY_ACTIONS,
+    REJECTION_CODE_PREFIX, TRUSTED_ONLY_ACTIONS,
 };
 pub use dispatcher::ActionDispatcher;
 pub use run_request::{LiveInboundScope, RunRequest};

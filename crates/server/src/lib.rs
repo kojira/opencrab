@@ -1,9 +1,6 @@
 use std::sync::{Arc, RwLock};
 
-use axum::{
-    routing::{delete, get, patch, post, put},
-    Router,
-};
+use axum::Router;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
@@ -47,7 +44,7 @@ pub mod webhook_targets;
 #[doc(hidden)]
 pub mod baseline_l1;
 
-#[cfg(feature = "baseline-l2")]
+#[cfg(any(test, feature = "baseline-l2"))]
 #[doc(hidden)]
 pub mod baseline_l2;
 
@@ -349,375 +346,181 @@ pub(crate) fn test_app_state() -> AppState {
     }
 }
 
-pub fn create_router(state: AppState) -> Router {
-    #[allow(unused_mut)]
-    let mut router = Router::new()
-        .route("/health", get(health_check))
-        .route("/api/health", get(api_health_check))
-        // 外部イベント受信 webhook（#454）。source ごとの共有 secret で HMAC 検証し、
-        // 受理したイベントを agent_inbox へ積む（処理は intake_process ループ）。
-        .route("/api/hooks/{source}", post(api::hooks::receive_hook))
-        // エージェント管理
-        .route(
-            "/api/agents",
-            get(api::agents::list_agents).post(api::agents::create_agent),
-        )
-        .route(
-            "/api/agents/{id}",
-            get(api::agents::get_agent)
-                .put(api::agents::put_agent)
-                .patch(api::agents::patch_agent)
-                .delete(api::agents::delete_agent),
-        )
-        // オンボーディング（初回セットアップ進捗の集約）
-        .route(
-            "/api/agents/{id}/sleep-logs",
-            get(api::sleep::get_sleep_logs),
-        )
-        .route("/api/setup/status", get(api::setup::get_setup_status))
-        .route(
-            "/api/agents/{id}/skills/seed-standard",
-            post(api::setup::seed_standard_skills),
-        )
-        .route("/api/llm/model-choices", get(api::llm::model_choices))
-        // モデル単価 / コンテキスト長の登録（#412）。文脈予算の出所であり、
-        // モデルを設定する側はここに登録済みのモデルしか受け付けない。
-        .route(
-            "/api/llm/model-pricing",
-            get(api::model_pricing::list_model_pricing).put(api::model_pricing::put_model_pricing),
-        )
-        // プロバイダー設定（ダッシュボード編集 + ホットリロード）
-        .route("/api/llm/providers", get(api::providers::list_providers))
-        .route(
-            "/api/llm/providers/reload",
-            post(api::providers::reload_providers),
-        )
-        // codex 診断（サーバーが使う codex のパス/バージョン）
-        .route(
-            "/api/llm/codex/diagnostics",
-            get(api::providers::codex_diagnostics),
-        )
-        // cursor 診断（サーバーが使う cursor CLI のパス/バージョン）
-        .route(
-            "/api/llm/cursor/diagnostics",
-            get(api::providers::cursor_diagnostics),
-        )
-        // acp 診断（起動バイナリ/引数/解決パス）
-        .route(
-            "/api/llm/acp/diagnostics",
-            get(api::providers::acp_diagnostics),
-        )
-        .route(
-            "/api/llm/providers/{name}",
-            put(api::providers::update_provider),
-        )
-        .route(
-            "/api/llm/providers/{name}/override",
-            delete(api::providers::delete_provider_override),
-        )
-        .route(
-            "/api/llm/providers/{name}/test",
-            post(api::providers::test_provider_endpoint),
-        )
-        .route(
-            "/api/voice/config",
-            get(api::providers::get_voice_config)
-                .put(api::providers::update_voice_config)
-                .delete(api::providers::delete_voice_config),
-        )
-        // ペルソナプリセット
-        .route(
-            "/api/agents/{id}/soul/presets",
-            get(api::agents::list_soul_presets).post(api::agents::create_soul_preset),
-        )
-        .route(
-            "/api/agents/{id}/soul/presets/{preset_id}",
-            axum::routing::delete(api::agents::delete_soul_preset),
-        )
-        .route(
-            "/api/agents/{id}/soul/presets/{preset_id}/apply",
-            post(api::agents::apply_soul_preset),
-        )
-        // スキル管理
-        .route(
-            "/api/agents/{id}/skills",
-            get(api::skills::list_skills).post(api::skills::add_skill),
-        )
-        .route(
-            "/api/agents/{id}/skills/{skill_id}",
-            put(api::skills::update_skill),
-        )
-        .route(
-            "/api/agents/{id}/skills/{skill_id}/toggle",
-            post(api::skills::toggle_skill),
-        )
-        .route(
-            "/api/agents/{id}/skills/{skill_id}/archive",
-            post(api::skills::archive_skill),
-        )
-        .route(
-            "/api/agents/{id}/skills/{skill_id}/restore",
-            post(api::skills::restore_skill),
-        )
-        .route(
-            "/api/agents/{id}/skills/unused",
-            get(api::skills::list_unused),
-        )
-        // 記憶管理
-        .route(
-            "/api/agents/{id}/memory/curated",
-            get(api::memory::list_curated_memory),
-        )
-        .route(
-            "/api/agents/{id}/memory/curated/{entry_id}",
-            axum::routing::delete(api::memory::delete_curated_memory_entry),
-        )
-        .route(
-            "/api/agents/{id}/memory/search",
-            post(api::memory::search_memory),
-        )
-        .route(
-            "/api/agents/{id}/memory/index",
-            get(api::agents::get_memory_index_status)
-                .post(api::agents::trigger_memory_index_build)
-                .delete(api::agents::delete_memory_index),
-        )
-        .route(
-            "/api/agents/{id}/memory/index/tree",
-            get(api::memory::get_memory_index_tree),
-        )
-        .route(
-            "/api/agents/{id}/memory/index/config",
-            put(api::agents::update_memory_index_config),
-        )
-        .route(
-            "/api/agents/{id}/memory/index/rebuild",
-            post(api::agents::rebuild_memory_index),
-        )
-        .route(
-            "/api/agents/{id}/daily-log-index/status",
-            get(api::daily_log_index::get_status),
-        )
-        .route(
-            "/api/agents/{id}/daily-log-index/rebuild",
-            post(api::daily_log_index::rebuild),
-        )
-        .route(
-            "/api/agents/{id}/daily-log-index/run",
-            post(api::daily_log_index::run),
-        )
-        .route(
-            "/api/agents/{id}/memory/index/merge",
-            post(api::agents::merge_memory_index_topics),
-        )
-        // セッション管理
-        .route(
-            "/api/sessions",
-            get(api::sessions::list_sessions).post(api::sessions::create_session),
-        )
-        .route("/api/sessions/{id}", get(api::sessions::get_session))
-        .route(
-            "/api/sessions/{id}/messages",
-            post(api::sessions::send_message),
-        )
-        .route(
-            "/api/sessions/{id}/logs",
-            get(api::sessions::list_session_logs),
-        )
-        .route(
-            "/api/sessions/{id}/mentor",
-            post(api::sessions::send_mentor_instruction),
-        )
-        // アナリティクス
-        .route(
-            "/api/agents/{id}/analytics",
-            get(api::analytics::get_metrics_summary),
-        )
-        .route(
-            "/api/agents/{id}/analytics/detail",
-            get(api::analytics::get_metrics_detail),
-        )
-        // ワークスペース管理
-        .route(
-            "/api/agents/{id}/workspace",
-            get(api::workspace::list_workspace),
-        )
-        .route(
-            "/api/agents/{id}/workspace/{*path}",
-            get(api::workspace::read_file).put(api::workspace::write_file),
-        )
-        // Discord per-agent config (always available; gateway ops require discord feature)
-        .route(
-            "/api/agents/{id}/discord",
-            get(api::agents::get_discord_config)
-                .put(api::agents::update_discord_config)
-                .patch(api::agents::patch_discord_config)
-                .delete(api::agents::delete_discord_config),
-        )
-        .route(
-            "/api/agents/{id}/discord/start",
-            post(api::agents::start_discord_gateway),
-        )
-        .route(
-            "/api/agents/{id}/discord/stop",
-            post(api::agents::stop_discord_gateway),
-        )
-        // MCP サーバ per-agent 設定
-        .route(
-            "/api/agents/{id}/mcp",
-            get(api::mcp::list_mcp_servers).put(api::mcp::put_mcp_server),
-        )
-        .route(
-            "/api/agents/{id}/mcp/{name}",
-            axum::routing::delete(api::mcp::delete_mcp_server),
-        )
-        .route(
-            "/api/agents/{id}/mcp/{name}/enabled",
-            post(api::mcp::set_mcp_enabled),
-        )
-        .route(
-            "/api/agents/{id}/mcp/{name}/test",
-            post(api::mcp::test_mcp_server),
-        )
-        // Co-Agent管理
-        .route(
-            "/api/agents/{id}/co-agents",
-            get(api::co_agents::list_co_agents).post(api::co_agents::add_co_agent),
-        )
-        .route(
-            // PATCH は #490 で撤去（可変フィールドの allowed_actions を API から外したため）。
-            "/api/agents/{id}/co-agents/{co_agent_id}",
-            axum::routing::delete(api::co_agents::delete_co_agent),
-        )
-        // チャンネル設定
-        .route(
-            "/api/agents/{id}/channel-configs",
-            get(api::channel_configs::list_channel_configs)
-                .put(api::channel_configs::upsert_channel_config),
-        )
-        .route(
-            "/api/agents/{id}/channel-configs/{channel_id}",
-            delete(api::channel_configs::delete_channel_config),
-        )
-        .route(
-            "/api/agents/{id}/trusted-users",
-            get(api::trusted_users::list_trusted_users).post(api::trusted_users::add_trusted_user),
-        )
-        .route(
-            "/api/agents/{id}/trusted-users/{user_id}",
-            axum::routing::patch(api::trusted_users::update_trusted_user)
-                .delete(api::trusted_users::delete_trusted_user),
-        )
-        // 定時実行スケジュール（#455）。ダッシュボード config API と同じ認証層の内側。
-        .route(
-            "/api/agents/{id}/schedules",
-            get(api::schedules::list_schedules).post(api::schedules::create_schedule),
-        )
-        .route(
-            "/api/schedules/{sid}",
-            patch(api::schedules::update_schedule).delete(api::schedules::delete_schedule),
-        )
-        // 許可コマンド管理
-        .route(
-            "/api/agents/{id}/allowed-commands",
-            get(api::allowed_commands::list_allowed_commands)
-                .post(api::allowed_commands::add_allowed_command),
-        )
-        .route(
-            "/api/agents/{id}/allowed-commands/{command}",
-            axum::routing::delete(api::allowed_commands::remove_allowed_command),
-        )
-        // LLMログ
-        .route(
-            "/api/agents/{id}/llm-logs",
-            get(api::llm_logs::list_llm_logs),
-        )
-        .route(
-            "/api/agents/{id}/llm-logs/stats",
-            get(api::llm_logs::llm_logs_stats),
-        )
-        // インポート
-        .route(
-            "/api/import/scan",
-            post(api::import::scan_workspace_handler),
-        )
-        .route(
-            "/api/import/execute",
-            post(api::import::execute_import_handler),
-        )
-        .route(
-            "/api/agents/{id}/import/sync/status",
-            get(api::import_sync::get_sync_status),
-        )
-        .route(
-            "/api/agents/{id}/import/sync",
-            post(api::import_sync::execute_import_sync),
-        )
-        .route(
-            "/api/agents/{id}/import/sync/history",
-            get(api::import_sync::get_import_sync_history),
-        )
-        .route(
-            "/api/system/log-level",
-            get(api::system::get_log_level_handler).patch(api::system::patch_log_level_handler),
-        );
+/// Router 構築と外形 inventory が共有する production route 宣言。
+macro_rules! production_routes {
+    ($apply:ident, $target:ident) => {
+        $apply!($target, "/health", get => health_check);
+        $apply!($target, "/api/health", get => api_health_check);
+        $apply!($target, "/api/hooks/{source}", post => api::hooks::receive_hook);
+        $apply!($target, "/api/agents", get => api::agents::list_agents, post => api::agents::create_agent);
+        $apply!($target, "/api/agents/{id}", get => api::agents::get_agent, put => api::agents::put_agent, patch => api::agents::patch_agent, delete => api::agents::delete_agent);
+        $apply!($target, "/api/agents/{id}/sleep-logs", get => api::sleep::get_sleep_logs);
+        $apply!($target, "/api/setup/status", get => api::setup::get_setup_status);
+        $apply!($target, "/api/agents/{id}/skills/seed-standard", post => api::setup::seed_standard_skills);
+        $apply!($target, "/api/llm/model-choices", get => api::llm::model_choices);
+        $apply!($target, "/api/llm/model-pricing", get => api::model_pricing::list_model_pricing, put => api::model_pricing::put_model_pricing);
+        $apply!($target, "/api/llm/providers", get => api::providers::list_providers);
+        $apply!($target, "/api/llm/providers/reload", post => api::providers::reload_providers);
+        $apply!($target, "/api/llm/codex/diagnostics", get => api::providers::codex_diagnostics);
+        $apply!($target, "/api/llm/cursor/diagnostics", get => api::providers::cursor_diagnostics);
+        $apply!($target, "/api/llm/acp/diagnostics", get => api::providers::acp_diagnostics);
+        $apply!($target, "/api/llm/providers/{name}", put => api::providers::update_provider);
+        $apply!($target, "/api/llm/providers/{name}/override", delete => api::providers::delete_provider_override);
+        $apply!($target, "/api/llm/providers/{name}/test", post => api::providers::test_provider_endpoint);
+        $apply!($target, "/api/voice/config", get => api::providers::get_voice_config, put => api::providers::update_voice_config, delete => api::providers::delete_voice_config);
+        $apply!($target, "/api/agents/{id}/soul/presets", get => api::agents::list_soul_presets, post => api::agents::create_soul_preset);
+        $apply!($target, "/api/agents/{id}/soul/presets/{preset_id}", delete => api::agents::delete_soul_preset);
+        $apply!($target, "/api/agents/{id}/soul/presets/{preset_id}/apply", post => api::agents::apply_soul_preset);
+        $apply!($target, "/api/agents/{id}/skills", get => api::skills::list_skills, post => api::skills::add_skill);
+        $apply!($target, "/api/agents/{id}/skills/{skill_id}", put => api::skills::update_skill);
+        $apply!($target, "/api/agents/{id}/skills/{skill_id}/toggle", post => api::skills::toggle_skill);
+        $apply!($target, "/api/agents/{id}/skills/{skill_id}/archive", post => api::skills::archive_skill);
+        $apply!($target, "/api/agents/{id}/skills/{skill_id}/restore", post => api::skills::restore_skill);
+        $apply!($target, "/api/agents/{id}/skills/unused", get => api::skills::list_unused);
+        $apply!($target, "/api/agents/{id}/memory/curated", get => api::memory::list_curated_memory);
+        $apply!($target, "/api/agents/{id}/memory/curated/{entry_id}", delete => api::memory::delete_curated_memory_entry);
+        $apply!($target, "/api/agents/{id}/memory/search", post => api::memory::search_memory);
+        $apply!($target, "/api/agents/{id}/memory/index", get => api::agents::get_memory_index_status, post => api::agents::trigger_memory_index_build, delete => api::agents::delete_memory_index);
+        $apply!($target, "/api/agents/{id}/memory/index/tree", get => api::memory::get_memory_index_tree);
+        $apply!($target, "/api/agents/{id}/memory/index/config", put => api::agents::update_memory_index_config);
+        $apply!($target, "/api/agents/{id}/memory/index/rebuild", post => api::agents::rebuild_memory_index);
+        $apply!($target, "/api/agents/{id}/daily-log-index/status", get => api::daily_log_index::get_status);
+        $apply!($target, "/api/agents/{id}/daily-log-index/rebuild", post => api::daily_log_index::rebuild);
+        $apply!($target, "/api/agents/{id}/daily-log-index/run", post => api::daily_log_index::run);
+        $apply!($target, "/api/agents/{id}/memory/index/merge", post => api::agents::merge_memory_index_topics);
+        $apply!($target, "/api/sessions", get => api::sessions::list_sessions, post => api::sessions::create_session);
+        $apply!($target, "/api/sessions/{id}", get => api::sessions::get_session);
+        $apply!($target, "/api/sessions/{id}/messages", post => api::sessions::send_message);
+        $apply!($target, "/api/sessions/{id}/logs", get => api::sessions::list_session_logs);
+        $apply!($target, "/api/sessions/{id}/mentor", post => api::sessions::send_mentor_instruction);
+        $apply!($target, "/api/agents/{id}/analytics", get => api::analytics::get_metrics_summary);
+        $apply!($target, "/api/agents/{id}/analytics/detail", get => api::analytics::get_metrics_detail);
+        $apply!($target, "/api/agents/{id}/workspace", get => api::workspace::list_workspace);
+        $apply!($target, "/api/agents/{id}/workspace/{*path}", get => api::workspace::read_file, put => api::workspace::write_file);
+        $apply!($target, "/api/agents/{id}/discord", get => api::agents::get_discord_config, put => api::agents::update_discord_config, patch => api::agents::patch_discord_config, delete => api::agents::delete_discord_config);
+        $apply!($target, "/api/agents/{id}/discord/start", post => api::agents::start_discord_gateway);
+        $apply!($target, "/api/agents/{id}/discord/stop", post => api::agents::stop_discord_gateway);
+        $apply!($target, "/api/agents/{id}/mcp", get => api::mcp::list_mcp_servers, put => api::mcp::put_mcp_server);
+        $apply!($target, "/api/agents/{id}/mcp/{name}", delete => api::mcp::delete_mcp_server);
+        $apply!($target, "/api/agents/{id}/mcp/{name}/enabled", post => api::mcp::set_mcp_enabled);
+        $apply!($target, "/api/agents/{id}/mcp/{name}/test", post => api::mcp::test_mcp_server);
+        $apply!($target, "/api/agents/{id}/co-agents", get => api::co_agents::list_co_agents, post => api::co_agents::add_co_agent);
+        $apply!($target, "/api/agents/{id}/co-agents/{co_agent_id}", delete => api::co_agents::delete_co_agent);
+        $apply!($target, "/api/agents/{id}/channel-configs", get => api::channel_configs::list_channel_configs, put => api::channel_configs::upsert_channel_config);
+        $apply!($target, "/api/agents/{id}/channel-configs/{channel_id}", delete => api::channel_configs::delete_channel_config);
+        $apply!($target, "/api/agents/{id}/trusted-users", get => api::trusted_users::list_trusted_users, post => api::trusted_users::add_trusted_user);
+        $apply!($target, "/api/agents/{id}/trusted-users/{user_id}", patch => api::trusted_users::update_trusted_user, delete => api::trusted_users::delete_trusted_user);
+        $apply!($target, "/api/agents/{id}/schedules", get => api::schedules::list_schedules, post => api::schedules::create_schedule);
+        $apply!($target, "/api/schedules/{sid}", patch => api::schedules::update_schedule, delete => api::schedules::delete_schedule);
+        $apply!($target, "/api/agents/{id}/allowed-commands", get => api::allowed_commands::list_allowed_commands, post => api::allowed_commands::add_allowed_command);
+        $apply!($target, "/api/agents/{id}/allowed-commands/{command}", delete => api::allowed_commands::remove_allowed_command);
+        $apply!($target, "/api/agents/{id}/llm-logs", get => api::llm_logs::list_llm_logs);
+        $apply!($target, "/api/agents/{id}/llm-logs/stats", get => api::llm_logs::llm_logs_stats);
+        $apply!($target, "/api/import/scan", post => api::import::scan_workspace_handler);
+        $apply!($target, "/api/import/execute", post => api::import::execute_import_handler);
+        $apply!($target, "/api/agents/{id}/import/sync/status", get => api::import_sync::get_sync_status);
+        $apply!($target, "/api/agents/{id}/import/sync", post => api::import_sync::execute_import_sync);
+        $apply!($target, "/api/agents/{id}/import/sync/history", get => api::import_sync::get_import_sync_history);
+        $apply!($target, "/api/system/log-level", get => api::system::get_log_level_handler, patch => api::system::patch_log_level_handler);
+    };
+}
 
-    // Nostr sub-gateway の per-agent 設定 API と、Nostr 受信 → Discord 転記先設定
-    // （#252 段階 B）。これらは Nostr の**会話ゲート**を操作する API なので nostr feature
-    // の内側に置く。外せるのは会話ゲートであって、他の管理 API（設定・ログ・一覧・
-    // ダッシュボード配信）は feature を外しても残る。
+#[cfg(feature = "nostr")]
+macro_rules! nostr_production_routes {
+    ($apply:ident, $target:ident) => {
+        $apply!($target, "/api/agents/{id}/nostr", get => api::nostr::get_nostr_config, put => api::nostr::update_nostr_config, delete => api::nostr::delete_nostr_config);
+        $apply!($target, "/api/agents/{id}/nostr/generate", post => api::nostr::generate_nostr_key);
+        $apply!($target, "/api/agents/{id}/nostr/start", post => api::nostr::start_nostr_gateway);
+        $apply!($target, "/api/agents/{id}/nostr/stop", post => api::nostr::stop_nostr_gateway);
+        $apply!($target, "/api/agents/{id}/nostr-relay", get => api::nostr_relay::get_nostr_relay_config, put => api::nostr_relay::update_nostr_relay_config);
+    };
+}
+
+macro_rules! mount_route {
+    ($router:ident, $path:literal, $first_method:ident => $first_handler:expr $(, $method:ident => $handler:expr)*) => {
+        $router = $router.route(
+            $path,
+            axum::routing::$first_method($first_handler)$(.$method($handler))*,
+        );
+    };
+}
+
+macro_rules! describe_route {
+    ($routes:ident, $path:literal, $($method:ident => $handler:expr),+ $(,)?) => {{
+        let mut methods = vec![$(stringify!($method).to_ascii_uppercase()),+];
+        methods.sort();
+        $routes.push(HttpRouteDescriptor {
+            path: $path.to_string(),
+            methods,
+            activation: "always".to_string(),
+            source: "opencrab_server::create_router".to_string(),
+        });
+    }};
+}
+
+#[cfg(feature = "nostr")]
+macro_rules! describe_nostr_route {
+    ($routes:ident, $path:literal, $($method:ident => $handler:expr),+ $(,)?) => {{
+        let mut methods = vec![$(stringify!($method).to_ascii_uppercase()),+];
+        methods.sort();
+        $routes.push(HttpRouteDescriptor {
+            path: $path.to_string(),
+            methods,
+            activation: "cfg(feature = \"nostr\")".to_string(),
+            source: "opencrab_server::nostr_routes".to_string(),
+        });
+    }};
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct HttpRouteDescriptor {
+    pub path: String,
+    pub methods: Vec<String>,
+    pub activation: String,
+    pub source: String,
+}
+
+/// Production router が mount する宣言そのものから得る read-only inventory。
+pub fn production_route_inventory() -> Vec<HttpRouteDescriptor> {
+    let mut routes = Vec::new();
+    production_routes!(describe_route, routes);
+    #[cfg(feature = "nostr")]
+    nostr_production_routes!(describe_nostr_route, routes);
+    #[cfg(feature = "web")]
+    routes.extend(
+        opencrab_web_gateway::route_inventory::<AppState>()
+            .into_iter()
+            .map(|(path, mut methods)| {
+                methods.sort();
+                HttpRouteDescriptor {
+                    path: path.to_string(),
+                    methods,
+                    activation: "cfg(feature = \"web\")".to_string(),
+                    source: "opencrab_web_gateway::routes".to_string(),
+                }
+            }),
+    );
+    routes.sort_by(|a, b| a.path.cmp(&b.path));
+    routes
+}
+
+pub fn create_router(state: AppState) -> Router {
+    let mut router = Router::new();
+    production_routes!(mount_route, router);
     #[cfg(feature = "nostr")]
     {
-        router = router.merge(nostr_routes());
+        let mut nostr = Router::new();
+        nostr_production_routes!(mount_route, nostr);
+        router = router.merge(nostr);
     }
-
-    // web gateway（#154）: ダッシュボードからの会話 + SSE 配送。ルート定義とハンドラは
-    // 独立クレート側にあり、ここは取り付けるだけ（#190 S4）。web の**会話ゲート**なので
-    // web feature の内側。HTTP サーバ（管理 API）本体はこれを外しても残る。
     #[cfg(feature = "web")]
     {
         router = router.merge(opencrab_web_gateway::routes::<AppState>());
     }
-
     router
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
-}
-
-/// Nostr sub-gateway の per-agent 設定ルート群（nostr feature 限定）。
-///
-/// `create_router` から nostr feature が有効なときだけ `.merge` される。会話ゲートを
-/// 外した構成（`--no-default-features`）ではこの 5 ルートは載らないが、それ以外の
-/// 管理 API は残る。
-#[cfg(feature = "nostr")]
-fn nostr_routes() -> Router<AppState> {
-    Router::new()
-        // Nostr sub-gateway per-agent config
-        .route(
-            "/api/agents/{id}/nostr",
-            get(api::nostr::get_nostr_config)
-                .put(api::nostr::update_nostr_config)
-                .delete(api::nostr::delete_nostr_config),
-        )
-        .route(
-            "/api/agents/{id}/nostr/generate",
-            post(api::nostr::generate_nostr_key),
-        )
-        .route(
-            "/api/agents/{id}/nostr/start",
-            post(api::nostr::start_nostr_gateway),
-        )
-        .route(
-            "/api/agents/{id}/nostr/stop",
-            post(api::nostr::stop_nostr_gateway),
-        )
-        // Nostr 受信 → Discord 転記先の per-agent 設定（issue #252 段階 B）
-        .route(
-            "/api/agents/{id}/nostr-relay",
-            get(api::nostr_relay::get_nostr_relay_config)
-                .put(api::nostr_relay::update_nostr_relay_config),
-        )
 }
 
 async fn health_check() -> &'static str {

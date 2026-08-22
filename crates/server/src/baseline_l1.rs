@@ -1,75 +1,38 @@
 //! L1 baseline collector internals. This module is compiled only by the
 //! `baseline-l1` feature and is not part of the production server binary.
 
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use axum::{
     body::{to_bytes, Body},
     http::Request,
 };
-use opencrab_core::engine::ActionExecutor;
-use opencrab_gateway::{
-    DispatchMode, GatewayActionDef, GatewayActions, SubEngineAccess, ToolClass, ToolSharing,
-};
+use opencrab_gateway::{DispatchMode, GatewayActions, SubEngineAccess, ToolClass, ToolSharing};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-use crate::{create_router, system_actions::SystemGatewayActions, test_app_state};
+use crate::{create_router, process, test_app_state};
 
-fn class_json(class: ToolClass) -> Value {
-    let dispatch = match class.dispatch {
-        DispatchMode::Inline => "inline",
-        DispatchMode::Dispatchable => "dispatchable",
-    };
-    let sub_engine = match class.sub_engine {
-        SubEngineAccess::Allowed => "allowed",
-        SubEngineAccess::Blocked => "blocked",
-        SubEngineAccess::NotExposed => "not_exposed",
-    };
-    let sharing = match class.sharing {
-        ToolSharing::ConversationBound => "conversation_bound",
-        ToolSharing::AgentBound => "agent_bound",
+fn class_json(class: Option<ToolClass>) -> Value {
+    let Some(class) = class else {
+        return json!({"collection_status":"uncollected"});
     };
     json!({
-        "dispatch": dispatch,
-        "sub_engine": sub_engine,
-        "sharing": sharing,
+        "dispatch": match class.dispatch { DispatchMode::Inline => "inline", DispatchMode::Dispatchable => "dispatchable" },
+        "sub_engine": match class.sub_engine { SubEngineAccess::Allowed => "allowed", SubEngineAccess::Blocked => "blocked", SubEngineAccess::NotExposed => "not_exposed" },
+        "sharing": match class.sharing { ToolSharing::ConversationBound => "conversation_bound", ToolSharing::AgentBound => "agent_bound" },
+        "collection_status":"observed"
     })
 }
 
-fn gateway_definition_json(def: GatewayActionDef, origin: &str) -> Value {
-    let policy = opencrab_actions::tool_policy(&def.name);
-    json!({
-        "name": def.name,
-        "description": def.description,
-        "input_schema": def.parameters,
-        "classification": class_json(def.class),
-        "visibility": {
-            "owner_only": policy.owner_only,
-            "trusted_only": policy.trusted_only,
-            "depth_capped": policy.depth_capped,
-        },
-        "origin": origin,
-    })
-}
-
-fn gateway_definitions_json(defs: Vec<GatewayActionDef>, origin: &str) -> Vec<Value> {
-    let mut values: Vec<_> = defs
-        .into_iter()
-        .map(|def| gateway_definition_json(def, origin))
-        .collect();
-    values.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-    values
-}
-
-fn action_context() -> opencrab_actions::ActionContext {
+fn action_context(state: &crate::AppState) -> Result<opencrab_actions::ActionContext, String> {
     let workspace = opencrab_core::workspace::Workspace::from_root(std::env::temp_dir())
-        .expect("temporary directory must be a valid baseline workspace");
-    opencrab_actions::ActionContext {
+        .map_err(|error| format!("baseline workspace: {error}"))?;
+    Ok(opencrab_actions::ActionContext {
         agent_id: "baseline-agent".to_string(),
         agent_name: "Baseline Agent".to_string(),
         session_id: Some("baseline-session".to_string()),
-        db: opencrab_db::Db::memory().expect("in-memory baseline DB must initialize"),
+        db: state.db.clone(),
         workspace: Arc::new(workspace),
         last_metrics_id: Arc::new(std::sync::Mutex::new(None)),
         model_override: Arc::new(std::sync::Mutex::new(None)),
@@ -81,127 +44,118 @@ fn action_context() -> opencrab_actions::ActionContext {
             available_providers: vec![],
             gateway: "baseline".to_string(),
         })),
-    }
+    })
 }
 
-/// Collect tool definitions by invoking the same definition constructors used
-/// for an agent run. No external service is contacted.
-pub fn collect_tools() -> Value {
-    let mut dispatcher = opencrab_actions::ActionDispatcher::new();
-    let shell_config = opencrab_actions::ShellToolConfig {
-        allowed_commands: vec!["baseline-command".to_string()],
-        ..Default::default()
+fn production_executor(
+    shell_enabled: bool,
+    gateway_actions: Option<Arc<dyn GatewayActions>>,
+) -> Result<opencrab_actions::BridgedExecutor, String> {
+    let state = test_app_state();
+    *state
+        .tools_config
+        .write()
+        .map_err(|error| error.to_string())? = opencrab_actions::ToolsConfig {
+        enabled: shell_enabled,
+        shell: shell_enabled.then(|| opencrab_actions::ShellToolConfig {
+            allowed_commands: vec!["baseline-command".to_string()],
+            ..Default::default()
+        }),
     };
-    opencrab_actions::register_tools_from_config(
-        &opencrab_actions::ToolsConfig {
-            enabled: true,
-            shell: Some(shell_config),
+    let context = action_context(&state)?;
+    Ok(process::build_turn_executor(
+        &state,
+        process::TurnExecutorWiring {
+            context,
+            depth: 0,
+            gateway_actions,
+            subtask_registry: Arc::new(dashmap::DashMap::new()),
+            completion_sink: None,
+            subtask_starts: None,
+            reply_target: None,
+            tool_allowlist: None,
         },
-        &mut dispatcher,
-    );
+        |_| None,
+    ))
+}
 
-    let core = opencrab_actions::BridgedExecutor::new(dispatcher, action_context());
-    let inline = core.inline_tool_names();
-    let mut core_defs: Vec<Value> = core
-        .list_tools()
+fn definitions_json(
+    executor: &opencrab_actions::BridgedExecutor,
+    disabled_names: &BTreeSet<String>,
+) -> Vec<Value> {
+    let mut definitions: Vec<_> = executor
+        .effective_tool_definitions()
         .into_iter()
-        .map(|def| {
-            let policy = opencrab_actions::tool_policy(&def.name);
-            let is_configured_shell = def.name == "execute_shell";
-            // BridgedExecutor synthesizes the full class only for actions in
-            // CORE_INLINE_ACTIONS / CORE_DISPATCHABLE_ACTIONS. execute_shell
-            // is config-registered, so only its observed dispatch decision is
-            // available; do not fill the other fields with plausible defaults.
-            let classification = if is_configured_shell {
-                json!({
-                    "dispatch": if inline.contains(&def.name) { "inline" } else { "dispatchable" },
-                    "sub_engine": Value::Null,
-                    "sharing": Value::Null,
-                    "collection_status": "partial",
-                })
-            } else {
-                class_json(ToolClass {
-                    dispatch: if inline.contains(&def.name) {
-                        DispatchMode::Inline
-                    } else {
-                        DispatchMode::Dispatchable
-                    },
-                    sub_engine: SubEngineAccess::NotExposed,
-                    sharing: ToolSharing::AgentBound,
-                })
-            };
+        .map(|tool| {
+            let policy = opencrab_actions::tool_policy(&tool.definition.name);
             json!({
-                "name": def.name,
-                "description": def.description,
-                "input_schema": def.parameters,
-                "classification": classification,
+                "name": tool.definition.name,
+                "description": tool.definition.description,
+                "input_schema": tool.definition.parameters,
+                "classification": class_json(tool.class),
                 "visibility": {
                     "owner_only": policy.owner_only,
                     "trusted_only": policy.trusted_only,
                     "depth_capped": policy.depth_capped,
                 },
-                "origin": if is_configured_shell { "configured_action" } else { "core_action" },
-                "activation": if is_configured_shell {
-                    Value::String("tools.enabled && tools.shell.present && tools.shell.enabled".to_string())
-                } else {
-                    Value::String("always".to_string())
+                "origin": match tool.slot {
+                    opencrab_actions::ToolSlot::Dispatcher => "dispatcher",
+                    opencrab_actions::ToolSlot::Gateway => "gateway",
+                    opencrab_actions::ToolSlot::Mcp => "mcp",
                 },
+                "activation": if disabled_names.contains(&tool.definition.name) { "always" } else { "observed_only_when_tools_enabled" },
             })
         })
         .collect();
-    core_defs.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    definitions.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
+    definitions
+}
 
-    let system = SystemGatewayActions::new(test_app_state(), None, None, None);
-    let system_defs = gateway_definitions_json(system.definitions(), "effective_system_gateway");
+/// Production executor builder の実出力だけを L1 tool metadata として保存する。
+pub fn collect_tools() -> Result<Value, String> {
+    let disabled = production_executor(false, None)?;
+    let disabled_names: BTreeSet<_> = disabled
+        .effective_tool_definitions()
+        .into_iter()
+        .map(|tool| tool.definition.name)
+        .collect();
+    let without_transport = production_executor(true, None)?;
 
     #[cfg(feature = "discord")]
-    let discord_defs = {
-        let inner: Arc<dyn GatewayActions> =
+    let discord = {
+        let gateway: Arc<dyn GatewayActions> =
             Arc::new(opencrab_discord::DiscordGatewayActions::from_token(
                 "baseline-not-a-credential",
-                opencrab_db::Db::memory().expect("in-memory Discord baseline DB must initialize"),
+                opencrab_db::Db::memory().map_err(|error| error.to_string())?,
                 std::env::temp_dir().to_string_lossy().to_string(),
                 None,
             ));
-        let effective = SystemGatewayActions::new(test_app_state(), Some(inner), None, None);
-        gateway_definitions_json(effective.definitions(), "effective_discord_turn")
+        definitions_json(&production_executor(true, Some(gateway))?, &disabled_names)
     };
     #[cfg(not(feature = "discord"))]
-    let discord_defs: Vec<Value> = vec![];
+    let discord: Vec<Value> = Vec::new();
 
     #[cfg(feature = "nostr")]
-    let nostr_defs = {
-        let inner: Arc<dyn GatewayActions> = Arc::new(opencrab_nostr::NostrGatewayActions::new(
+    let nostr = {
+        let gateway: Arc<dyn GatewayActions> = Arc::new(opencrab_nostr::NostrGatewayActions::new(
             opencrab_nostr::NostaroCli::new(),
         ));
-        let effective = SystemGatewayActions::new(test_app_state(), Some(inner), None, None);
-        gateway_definitions_json(effective.definitions(), "effective_nostr_turn")
+        definitions_json(&production_executor(true, Some(gateway))?, &disabled_names)
     };
     #[cfg(not(feature = "nostr"))]
-    let nostr_defs: Vec<Value> = vec![];
+    let nostr: Vec<Value> = Vec::new();
 
-    json!({
-        "core_and_configured": core_defs,
-        "effective_gateway_profiles": {
-            "without_transport_surface": system_defs,
-            "discord_turn": discord_defs,
-            "nostr_turn": nostr_defs,
+    Ok(json!({
+        "effective_profiles": {
+            "without_transport_surface": definitions_json(&without_transport, &disabled_names),
+            "discord_turn": discord,
+            "nostr_turn": nostr,
         },
-        "uncollected": [
-            {
-                "kind": "mcp_tools",
-                "reason": "Definitions depend on operator-configured external MCP servers and are not L1."
-            },
-            {
-                "kind": "situational_visible_tool_lists",
-                "reason": "Caller, depth, allowlist, running gateway, and MCP connection combinations are explicitly outside this L1 scope."
-            },
-            {
-                "kind": "execute_shell_sub_engine_and_sharing_class",
-                "reason": "execute_shell is config-registered and has no ToolClass entry in BridgedExecutor; dispatch is observed from inline_tool_names, and the unavailable fields are null rather than inferred."
-            }
-        ]
-    })
+        "uncollected": [{
+            "kind":"configured_action_class",
+            "reason":"A configured dispatcher action without a production ToolClass index entry is emitted with classification.collection_status=uncollected."
+        }]
+    }))
 }
 
 struct Probe {
@@ -268,7 +222,6 @@ pub async fn collect_responses() -> Result<Value, String> {
 
     let mut captured = Vec::new();
     for probe in probes {
-        // A fresh in-memory application makes every probe independent of order.
         let app = create_router(test_app_state());
         let mut builder = Request::builder().method(probe.method).uri(probe.uri);
         if let Some(content_type) = probe.content_type {
@@ -276,11 +229,11 @@ pub async fn collect_responses() -> Result<Value, String> {
         }
         let request = builder
             .body(Body::from(probe.body.to_vec()))
-            .map_err(|e| format!("{}: request build failed: {e}", probe.name))?;
+            .map_err(|error| format!("{}: request build failed: {error}", probe.name))?;
         let response = app
             .oneshot(request)
             .await
-            .map_err(|e| format!("{}: request failed: {e}", probe.name))?;
+            .map_err(|error| format!("{}: request failed: {error}", probe.name))?;
         let status = response.status().as_u16();
         let mut headers: Vec<Value> = response
             .headers()
@@ -288,32 +241,28 @@ pub async fn collect_responses() -> Result<Value, String> {
             .map(|(name, value)| {
                 value
                     .to_str()
-                    .map(|v| json!({"name": name.as_str(), "value": v}))
-                    .map_err(|e| format!("{}: non-UTF-8 header {}: {e}", probe.name, name))
+                    .map(|value| json!({"name": name.as_str(), "value": value}))
+                    .map_err(|error| format!("{}: non-UTF-8 header {}: {error}", probe.name, name))
             })
             .collect::<Result<_, _>>()?;
-        headers.sort_by(|a, b| {
-            (a["name"].as_str(), a["value"].as_str())
-                .cmp(&(b["name"].as_str(), b["value"].as_str()))
+        headers.sort_by(|left, right| {
+            (left["name"].as_str(), left["value"].as_str())
+                .cmp(&(right["name"].as_str(), right["value"].as_str()))
         });
         let body = to_bytes(response.into_body(), 1024 * 1024)
             .await
-            .map_err(|e| format!("{}: response body failed: {e}", probe.name))?;
+            .map_err(|error| format!("{}: response body failed: {error}", probe.name))?;
         let body = std::str::from_utf8(&body)
-            .map_err(|e| format!("{}: response body is not UTF-8: {e}", probe.name))?;
+            .map_err(|error| format!("{}: response body is not UTF-8: {error}", probe.name))?;
         captured.push(json!({
             "name": probe.name,
             "request": {
                 "method": probe.method,
                 "uri": probe.uri,
-                "headers": probe.content_type.map(|v| json!({"content-type": v})).unwrap_or_else(|| json!({})),
-                "body_utf8": std::str::from_utf8(probe.body).map_err(|e| format!("{}: request body is not UTF-8: {e}", probe.name))?,
+                "headers": probe.content_type.map(|value| json!({"content-type": value})).unwrap_or_else(|| json!({})),
+                "body_utf8": std::str::from_utf8(probe.body).map_err(|error| format!("{}: request body is not UTF-8: {error}", probe.name))?,
             },
-            "response": {
-                "status": status,
-                "headers": headers,
-                "body_utf8": body,
-            }
+            "response": { "status": status, "headers": headers, "body_utf8": body }
         }));
     }
     Ok(json!({
