@@ -20,7 +20,7 @@ use axum::{
     body::{to_bytes, Body},
     http::Request,
 };
-use opencrab_core::engine::ActionExecutor;
+use opencrab_core::engine::{ActionExecutor, FunctionDefinition};
 use opencrab_gateway::GatewayActions;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -73,7 +73,7 @@ fn capture_profile() -> Result<Value, String> {
         "runtime": {
             "database": "fresh in-memory database seeded by the collector for every probe",
             "configuration": "collector-owned AppState, tool, provider, MCP, and gateway fixtures; no operator config file is read",
-            "environment": "no parent environment value is a semantic input; fixture subprocesses receive an empty environment",
+            "environment": "the shell fixture receives an empty allowlisted environment; provider diagnostic fixtures inherit the parent environment, but execute a fixed collector-owned binary whose output does not read it",
             "filesystem": "fresh collector-owned workspaces with fixed contents; generated roots are normalized to <workspace>",
             "external_processes": "only a collector-owned executable fixture with fixed bytes and /bin/sh interpreter; no PATH lookup, operator binary, network service, or live gateway"
         }
@@ -150,6 +150,8 @@ struct ToolVisibilityScenario {
     depth: u32,
     shell_enabled: bool,
     #[serde(default)]
+    transport: ToolTransportProfile,
+    #[serde(default)]
     allowlist: Option<Vec<String>>,
 }
 
@@ -165,6 +167,8 @@ struct HttpScenarioCatalog {
     bodyless_alternates: BTreeMap<String, AlternateScenario>,
     #[serde(default)]
     mutation_postconditions: BTreeMap<String, HttpPostcondition>,
+    #[serde(default)]
+    successful_non_mutations: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -183,10 +187,14 @@ enum AlternateScenario {
 
 #[derive(Clone, Debug, Deserialize)]
 struct HttpPostcondition {
-    method: String,
-    path: String,
+    #[serde(default)]
+    method: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
     #[serde(default)]
     body: Option<Value>,
+    #[serde(default)]
+    db_query: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -199,7 +207,28 @@ struct ToolScenarioCatalog {
     postconditions: BTreeMap<String, ToolPostcondition>,
     #[serde(default)]
     effectful_tools: BTreeSet<String>,
+    #[serde(default)]
+    read_only_tools: BTreeSet<String>,
     forwarding: BTreeMap<String, ForwardingScenario>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ToolTransportProfile {
+    #[default]
+    WithoutTransport,
+    Discord,
+    Nostr,
+}
+
+impl ToolTransportProfile {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::WithoutTransport => "without_transport",
+            Self::Discord => "discord",
+            Self::Nostr => "nostr",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -421,6 +450,28 @@ fn seeded_state() -> Result<AppState, String> {
         },
     )
     .map_err(|e| format!("seed skill: {e}"))?;
+    opencrab_db::queries::insert_skill(
+        &conn,
+        &opencrab_db::queries::SkillRow {
+            id: "baseline-archived-skill".to_string(),
+            agent_id: AGENT_ID.to_string(),
+            name: "Archived Seed Skill".to_string(),
+            description: "archived seed".to_string(),
+            situation_pattern: "archived seed".to_string(),
+            guidance: "archived seed".to_string(),
+            source_type: "baseline".to_string(),
+            source_context: None,
+            file_path: None,
+            effectiveness: None,
+            usage_count: 0,
+            is_active: true,
+            permission: "private".to_string(),
+            archived: true,
+            created_caller: Some("owner".to_string()),
+            agent_visible: false,
+        },
+    )
+    .map_err(|e| format!("seed archived skill: {e}"))?;
     opencrab_db::queries::insert_soul_preset(
         &conn,
         &opencrab_db::queries::SoulPresetRow {
@@ -496,7 +547,7 @@ fn seeded_state() -> Result<AppState, String> {
             agent_id: AGENT_ID.to_string(),
             bot_token: "baseline-not-a-credential".to_string(),
             owner_discord_id: "baseline-owner".to_string(),
-            enabled: false,
+            enabled: true,
         },
     )
     .map_err(|e| format!("seed Discord config: {e}"))?;
@@ -521,10 +572,41 @@ fn seeded_state() -> Result<AppState, String> {
                 .to_string(),
             relays_json: "[]".to_string(),
             filter_json: "{\"authors\":[],\"keywords\":[],\"kinds\":[]}".to_string(),
-            enabled: false,
+            enabled: true,
         },
     )
     .map_err(|e| format!("seed Nostr config: {e}"))?;
+    opencrab_db::queries::set_voice_config_override(
+        &conn,
+        r#"{"enabled":false,"stt":{"language":"ja"}}"#,
+    )
+    .map_err(|e| format!("seed voice config: {e}"))?;
+    opencrab_db::queries::insert_index_node(
+        &conn,
+        &opencrab_db::queries::IndexNodeRow {
+            id: "baseline-http-index-node".to_string(),
+            agent_id: AGENT_ID.to_string(),
+            parent_id: None,
+            node_type: "topic".to_string(),
+            source_type: "session_log".to_string(),
+            title: "Baseline HTTP Topic".to_string(),
+            summary: "baseline HTTP index seed".to_string(),
+            start_log_id: None,
+            end_log_id: None,
+            source_session_id: None,
+            date_from: Some("2026-01-01".to_string()),
+            date_to: Some("2026-01-01".to_string()),
+            depth: 0,
+            child_count: 0,
+            token_count: 0,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            short_id: Some("t-http".to_string()),
+            keywords_json: "[]".to_string(),
+            summary_refreshed_at: None,
+        },
+    )
+    .map_err(|e| format!("seed HTTP memory index: {e}"))?;
     opencrab_db::queries::insert_agent_schedule(
         &conn,
         &opencrab_db::queries::AgentScheduleRow {
@@ -646,6 +728,64 @@ async fn request_once(
     }))
 }
 
+async fn observe_http_postcondition(
+    state: AppState,
+    catalog: &HttpScenarioCatalog,
+    observer: &HttpPostcondition,
+    name: &str,
+) -> Result<Value, String> {
+    match (&observer.method, &observer.path, &observer.db_query) {
+        (Some(method), Some(path), None) => {
+            let uri = concrete_uri(catalog, path, false)?;
+            let body = observer
+                .body
+                .as_ref()
+                .map(serde_json::to_vec)
+                .transpose()
+                .map_err(|error| format!("serialize {name} postcondition body: {error}"))?;
+            request_once(
+                state,
+                name,
+                method,
+                &uri,
+                body,
+                observer.body.as_ref().map(|_| "application/json"),
+            )
+            .await
+        }
+        (None, None, Some(query)) if query == "agent_inbox" => {
+            let connection = state
+                .db
+                .lock()
+                .map_err(|error| format!("{name} DB observer lock: {error}"))?;
+            let mut statement = connection
+                .prepare(
+                    "SELECT agent_id, source, event_type, dedup_key, payload_json, \
+                     processed_at IS NOT NULL FROM agent_inbox ORDER BY source, dedup_key",
+                )
+                .map_err(|error| format!("{name} DB observer prepare: {error}"))?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok(json!({
+                        "agent_id":row.get::<_, String>(0)?,
+                        "source":row.get::<_, String>(1)?,
+                        "event_type":row.get::<_, String>(2)?,
+                        "dedup_key":row.get::<_, String>(3)?,
+                        "payload_json":row.get::<_, String>(4)?,
+                        "processed":row.get::<_, bool>(5)?,
+                    }))
+                })
+                .map_err(|error| format!("{name} DB observer query: {error}"))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("{name} DB observer row: {error}"))?;
+            Ok(json!({"db_query":query,"rows":rows}))
+        }
+        _ => Err(format!(
+            "HTTP postcondition for {name} must select exactly one method+path or db_query"
+        )),
+    }
+}
+
 async fn collect_http(l1: &Value, catalog: &HttpScenarioCatalog) -> Result<Value, String> {
     let routes = l1
         .pointer("/http/routes")
@@ -674,6 +814,7 @@ async fn collect_http(l1: &Value, catalog: &HttpScenarioCatalog) -> Result<Value
         .chain(catalog.normal_uncollected_l3.keys())
         .chain(catalog.bodyless_alternates.keys())
         .chain(catalog.mutation_postconditions.keys())
+        .chain(catalog.successful_non_mutations.keys())
     {
         if !live_keys.contains(key) {
             return Err(format!(
@@ -728,21 +869,12 @@ async fn collect_http(l1: &Value, catalog: &HttpScenarioCatalog) -> Result<Value
                 let artifact_uri = captured_uri(&catalog_uri);
                 let observer = catalog.mutation_postconditions.get(&key);
                 let before = if let Some(observer) = observer {
-                    let observer_uri = concrete_uri(catalog, &observer.path, false)?;
-                    let observer_body = observer
-                        .body
-                        .as_ref()
-                        .map(serde_json::to_vec)
-                        .transpose()
-                        .map_err(|error| format!("serialize {stem} precondition body: {error}"))?;
                     Some(
-                        request_once(
+                        observe_http_postcondition(
                             state.clone(),
+                            catalog,
+                            observer,
                             &format!("{stem}__effect_before"),
-                            &observer.method,
-                            &observer_uri,
-                            observer_body,
-                            observer.body.as_ref().map(|_| "application/json"),
                         )
                         .await?,
                     )
@@ -764,22 +896,11 @@ async fn collect_http(l1: &Value, catalog: &HttpScenarioCatalog) -> Result<Value
                         .is_some_and(|status| (200..300).contains(&status));
                 let effect = if successful_mutation {
                     if let Some(observer) = observer {
-                        let observer_uri = concrete_uri(catalog, &observer.path, false)?;
-                        let observer_body = observer
-                            .body
-                            .as_ref()
-                            .map(serde_json::to_vec)
-                            .transpose()
-                            .map_err(|error| {
-                                format!("serialize {stem} postcondition body: {error}")
-                            })?;
-                        let after = request_once(
+                        let after = observe_http_postcondition(
                             state,
+                            catalog,
+                            observer,
                             &format!("{stem}__effect_after"),
-                            &observer.method,
-                            &observer_uri,
-                            observer_body,
-                            observer.body.as_ref().map(|_| "application/json"),
                         )
                         .await?;
                         if before.as_ref() == Some(&after) {
@@ -787,9 +908,13 @@ async fn collect_http(l1: &Value, catalog: &HttpScenarioCatalog) -> Result<Value
                                 "HTTP postcondition for {key} did not change; a no-op handler would pass"
                             ));
                         }
-                        json!({"status":"observed","request":{"method":observer.method,"uri":observer_uri,"body":observer.body},"before":before,"after":after})
+                        json!({"status":"observed","observer":{"method":observer.method,"path":observer.path,"body":observer.body,"db_query":observer.db_query},"before":before,"after":after})
+                    } else if let Some(reason) = catalog.successful_non_mutations.get(&key) {
+                        json!({"status":"not_applicable","reason":reason})
                     } else {
-                        json!({"status":"uncollected","reason":"scenario catalog declares no independent read-back for this successful mutation"})
+                        return Err(format!(
+                            "successful HTTP mutation lacks an independent read-back or explicit read-only classification: {key}"
+                        ));
                     }
                 } else {
                     Value::Null
@@ -1280,6 +1405,7 @@ fn build_executor_with_state(
     shell_enabled: bool,
     allowlist: Option<Vec<String>>,
     fixture: &str,
+    transport: ToolTransportProfile,
 ) -> (opencrab_actions::BridgedExecutor, AppState) {
     let context = action_context(caller, fixture);
     let mut state = seeded_tool_state();
@@ -1315,12 +1441,26 @@ fn build_executor_with_state(
             ..Default::default()
         }),
     };
+    let gateway_actions: Option<Arc<dyn GatewayActions>> = match transport {
+        ToolTransportProfile::WithoutTransport => None,
+        ToolTransportProfile::Discord => Some(Arc::new(
+            opencrab_discord::DiscordGatewayActions::from_token(
+                "baseline-not-a-credential",
+                state.db.clone(),
+                state.workspace_base.clone(),
+                None,
+            ),
+        )),
+        ToolTransportProfile::Nostr => Some(Arc::new(opencrab_nostr::NostrGatewayActions::new(
+            opencrab_nostr::NostaroCli::new(),
+        ))),
+    };
     let executor = process::build_turn_executor(
         &state,
         process::TurnExecutorWiring {
             context,
             depth,
-            gateway_actions: None,
+            gateway_actions,
             subtask_registry: Arc::new(dashmap::DashMap::new()),
             completion_sink: None,
             subtask_starts: None,
@@ -1344,7 +1484,15 @@ fn build_executor(
     allowlist: Option<Vec<String>>,
     fixture: &str,
 ) -> opencrab_actions::BridgedExecutor {
-    build_executor_with_state(caller, depth, shell_enabled, allowlist, fixture).0
+    build_executor_with_state(
+        caller,
+        depth,
+        shell_enabled,
+        allowlist,
+        fixture,
+        ToolTransportProfile::WithoutTransport,
+    )
+    .0
 }
 
 fn subtask_fixture_registry(
@@ -1429,16 +1577,18 @@ fn collect_visibility(catalog: &ToolVisibilityCatalog) -> Result<Value, String> 
                 CallerIdentity::CoAgent { .. } => "co_agent",
             };
             let mcp_trusted = !matches!(caller, CallerIdentity::Agent);
-            let executor = build_executor(
+            let executor = build_executor_with_state(
                 caller,
                 scenario.depth,
                 scenario.shell_enabled,
                 scenario.allowlist.clone(),
                 "default",
-            );
+                scenario.transport,
+            )
+            .0;
             Ok(json!({
                 "name":scenario.name,
-                "dimensions": {"caller":caller_name,"depth":scenario.depth,"shell_enabled":scenario.shell_enabled,"allowlist":scenario.allowlist,"mcp_caller_is_trusted":mcp_trusted},
+                "dimensions": {"caller":caller_name,"depth":scenario.depth,"shell_enabled":scenario.shell_enabled,"transport":scenario.transport.as_str(),"allowlist":scenario.allowlist,"mcp_caller_is_trusted":mcp_trusted},
                 "visible_tools": tool_names(&executor)
             }))
         })
@@ -1463,6 +1613,13 @@ fn result_json(result: opencrab_core::ActionResult) -> Value {
     let mut value = json!({"success":result.success,"data":result.data,"error":result.error});
     normalize(&mut value);
     value
+}
+
+fn has_custom_subtask_observer(fixture: &str) -> bool {
+    matches!(
+        fixture,
+        "subtask_spawn" | "subtask_cancel" | "subtask_steer" | "subtask_report"
+    )
 }
 
 fn session_log_count(state: &AppState, session_id: &str) -> Result<i64, String> {
@@ -1544,6 +1701,61 @@ async fn observe_tool_postcondition(
             normalize(&mut value);
             Ok(json!({"db_query":query,"value":value}))
         }
+        (None, None, None, Some(query)) if query == "inner_voice_logs" => {
+            let connection = state
+                .db
+                .lock()
+                .map_err(|error| format!("{name} DB observer lock: {error}"))?;
+            let mut statement = connection
+                .prepare(
+                    "SELECT session_id, log_type, content, speaker_id FROM memory_sessions \
+                     WHERE agent_id = ?1 AND log_type = 'inner_voice' ORDER BY id",
+                )
+                .map_err(|error| format!("{name} DB observer prepare: {error}"))?;
+            let rows = statement
+                .query_map(rusqlite::params![AGENT_ID], |row| {
+                    Ok(json!({
+                        "session_id":row.get::<_, String>(0)?,
+                        "log_type":row.get::<_, String>(1)?,
+                        "content":row.get::<_, String>(2)?,
+                        "speaker_id":row.get::<_, Option<String>>(3)?,
+                    }))
+                })
+                .map_err(|error| format!("{name} DB observer query: {error}"))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("{name} DB observer row: {error}"))?;
+            Ok(json!({"db_query":query,"rows":rows}))
+        }
+        (None, None, None, Some(query)) if query == "impressions" => {
+            let connection = state
+                .db
+                .lock()
+                .map_err(|error| format!("{name} DB observer lock: {error}"))?;
+            let mut value = serde_json::to_value(
+                opencrab_db::queries::get_impressions(&connection, AGENT_ID)
+                    .map_err(|error| format!("{name} DB observer: {error}"))?,
+            )
+            .map_err(|error| format!("{name} DB observer serialize: {error}"))?;
+            normalize(&mut value);
+            Ok(json!({"db_query":query,"value":value}))
+        }
+        (None, None, None, Some(query)) if query == "reflection_memory" => {
+            let connection = state
+                .db
+                .lock()
+                .map_err(|error| format!("{name} DB observer lock: {error}"))?;
+            let mut value = serde_json::to_value(
+                opencrab_db::queries::get_curated_memories_by_prefix(
+                    &connection,
+                    AGENT_ID,
+                    "reflection",
+                )
+                .map_err(|error| format!("{name} DB observer: {error}"))?,
+            )
+            .map_err(|error| format!("{name} DB observer serialize: {error}"))?;
+            normalize(&mut value);
+            Ok(json!({"db_query":query,"value":value}))
+        }
         (None, None, None, Some(query)) if query == "memory_index_state" => {
             let connection = state
                 .db
@@ -1590,14 +1802,126 @@ async fn observe_tool_postcondition(
     }
 }
 
-async fn collect_tool_execution(catalog: &ToolScenarioCatalog) -> Result<Value, String> {
+async fn collect_tool_execution(
+    l1: &Value,
+    catalog: &ToolScenarioCatalog,
+) -> Result<Value, String> {
     use opencrab_actions::CallerIdentity;
-    let owner = build_executor(CallerIdentity::Owner, 0, true, None, "default");
-    let all_defs = owner.list_tools();
+    let owner_profiles = [
+        (
+            ToolTransportProfile::WithoutTransport,
+            build_executor(CallerIdentity::Owner, 0, true, None, "default"),
+        ),
+        (
+            ToolTransportProfile::Discord,
+            build_executor_with_state(
+                CallerIdentity::Owner,
+                0,
+                true,
+                None,
+                "default",
+                ToolTransportProfile::Discord,
+            )
+            .0,
+        ),
+        (
+            ToolTransportProfile::Nostr,
+            build_executor_with_state(
+                CallerIdentity::Owner,
+                0,
+                true,
+                None,
+                "default",
+                ToolTransportProfile::Nostr,
+            )
+            .0,
+        ),
+    ];
+    let mut definitions: BTreeMap<String, (usize, FunctionDefinition)> = BTreeMap::new();
+    for (profile_index, (_, executor)) in owner_profiles.iter().enumerate() {
+        for definition in executor.list_tools() {
+            if let Some((_, existing)) = definitions.get(&definition.name) {
+                let mut existing_definition = json!({
+                    "description":existing.description,
+                    "parameters":existing.parameters,
+                });
+                let mut observed_definition = json!({
+                    "description":definition.description,
+                    "parameters":definition.parameters,
+                });
+                normalize(&mut existing_definition);
+                normalize(&mut observed_definition);
+                if existing_definition != observed_definition {
+                    return Err(format!(
+                        "tool {} has inconsistent definitions across transport profiles",
+                        definition.name
+                    ));
+                }
+            } else {
+                definitions.insert(definition.name.clone(), (profile_index, definition));
+            }
+        }
+    }
+    let all_defs: Vec<_> = definitions
+        .values()
+        .map(|(_, definition)| definition.clone())
+        .collect();
     let live_tools: BTreeSet<_> = all_defs
         .iter()
         .map(|definition| definition.name.clone())
         .collect();
+    let l1_profiles = l1
+        .pointer("/tools/effective_profiles")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "L1 tool profiles are missing".to_string())?;
+    for (profile_name, (profile, executor)) in [
+        ("without_transport_surface", &owner_profiles[0]),
+        ("discord_turn", &owner_profiles[1]),
+        ("nostr_turn", &owner_profiles[2]),
+    ] {
+        let expected: BTreeSet<_> = l1_profiles
+            .get(profile_name)
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("L1 tool profile {profile_name} is missing"))?
+            .iter()
+            .filter_map(|definition| definition["name"].as_str())
+            .map(ToOwned::to_owned)
+            .collect();
+        let observed: BTreeSet<_> = executor
+            .list_tools()
+            .into_iter()
+            .map(|definition| definition.name)
+            .filter(|name| !name.starts_with("mcp__"))
+            .collect();
+        if expected != observed {
+            return Err(format!(
+                "L2 {} profile is not identical to L1 {profile_name}; missing={:?}, unknown={:?}",
+                profile.as_str(),
+                expected.difference(&observed).collect::<Vec<_>>(),
+                observed.difference(&expected).collect::<Vec<_>>()
+            ));
+        }
+    }
+    let mut expected_tools: BTreeSet<_> = l1_profiles
+        .values()
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(|definition| definition["name"].as_str())
+        .map(ToOwned::to_owned)
+        .collect();
+    expected_tools.extend(
+        live_tools
+            .iter()
+            .filter(|name| name.starts_with("mcp__"))
+            .cloned(),
+    );
+    if live_tools != expected_tools {
+        return Err(format!(
+            "L2 tool union is not identical to the L1 profile union plus local MCP fixtures; missing={:?}, unknown={:?}",
+            expected_tools.difference(&live_tools).collect::<Vec<_>>(),
+            live_tools.difference(&expected_tools).collect::<Vec<_>>()
+        ));
+    }
     let selected_tools: BTreeSet<_> = catalog
         .success_arguments
         .keys()
@@ -1617,14 +1941,47 @@ async fn collect_tool_execution(catalog: &ToolScenarioCatalog) -> Result<Value, 
             selected_tools.difference(&live_tools).collect::<Vec<_>>()
         ));
     }
+    let classified_successes: BTreeSet<_> = catalog
+        .effectful_tools
+        .union(&catalog.read_only_tools)
+        .cloned()
+        .collect();
+    let classification_overlap: Vec<_> = catalog
+        .effectful_tools
+        .intersection(&catalog.read_only_tools)
+        .collect();
+    let successful_scenarios: BTreeSet<_> = catalog.success_arguments.keys().cloned().collect();
+    if !classification_overlap.is_empty() || classified_successes != successful_scenarios {
+        return Err(format!(
+            "successful tool scenarios are not a bijection with read-only/effect-observed classifications; overlap={classification_overlap:?}, missing={:?}, unknown={:?}",
+            successful_scenarios.difference(&classified_successes).collect::<Vec<_>>(),
+            classified_successes.difference(&successful_scenarios).collect::<Vec<_>>()
+        ));
+    }
     let missing_postconditions: Vec<_> = catalog
         .effectful_tools
         .iter()
-        .filter(|tool| !catalog.postconditions.contains_key(*tool))
+        .filter(|tool| {
+            !catalog.postconditions.contains_key(*tool)
+                && !catalog
+                    .fixtures
+                    .get(*tool)
+                    .is_some_and(|fixture| has_custom_subtask_observer(fixture))
+        })
         .collect();
     if !missing_postconditions.is_empty() {
         return Err(format!(
             "effectful tool scenarios lack postconditions: {missing_postconditions:?}"
+        ));
+    }
+    let read_only_postconditions: Vec<_> = catalog
+        .postconditions
+        .keys()
+        .filter(|tool| !catalog.effectful_tools.contains(*tool))
+        .collect();
+    if !read_only_postconditions.is_empty() {
+        return Err(format!(
+            "read-only tool scenarios unexpectedly declare effect postconditions: {read_only_postconditions:?}"
         ));
     }
     let mut required_missing = Vec::new();
@@ -1640,7 +1997,14 @@ async fn collect_tool_execution(catalog: &ToolScenarioCatalog) -> Result<Value, 
             }));
             continue;
         }
-        let result = owner.execute(&def.name, &json!({})).await;
+        let profile_index = definitions
+            .get(&def.name)
+            .map(|(profile_index, _)| *profile_index)
+            .ok_or_else(|| format!("missing executor profile for {}", def.name))?;
+        let result = owner_profiles[profile_index]
+            .1
+            .execute(&def.name, &json!({}))
+            .await;
         required_missing.push(json!({
             "tool":def.name,
             "required_by_observed_schema":required,
@@ -1649,12 +2013,38 @@ async fn collect_tool_execution(catalog: &ToolScenarioCatalog) -> Result<Value, 
         }));
     }
 
-    let agent = build_executor(CallerIdentity::Agent, 0, true, None, "default");
+    let agent_profiles = [
+        build_executor(CallerIdentity::Agent, 0, true, None, "default"),
+        build_executor_with_state(
+            CallerIdentity::Agent,
+            0,
+            true,
+            None,
+            "default",
+            ToolTransportProfile::Discord,
+        )
+        .0,
+        build_executor_with_state(
+            CallerIdentity::Agent,
+            0,
+            true,
+            None,
+            "default",
+            ToolTransportProfile::Nostr,
+        )
+        .0,
+    ];
     let mut permission = Vec::new();
     for def in &all_defs {
         let policy = opencrab_actions::tool_policy(&def.name);
         if policy.owner_only || policy.trusted_only || def.name == "mcp__trusted_local__echo" {
-            let result = agent.execute(&def.name, &json!({})).await;
+            let profile_index = definitions
+                .get(&def.name)
+                .map(|(profile_index, _)| *profile_index)
+                .ok_or_else(|| format!("missing executor profile for {}", def.name))?;
+            let result = agent_profiles[profile_index]
+                .execute(&def.name, &json!({}))
+                .await;
             permission.push(json!({
                 "tool":def.name,
                 "caller":"agent",
@@ -1671,7 +2061,7 @@ async fn collect_tool_execution(catalog: &ToolScenarioCatalog) -> Result<Value, 
         if catalog
             .fixtures
             .get(tool)
-            .is_some_and(|fixture| fixture.starts_with("subtask_"))
+            .is_some_and(|fixture| has_custom_subtask_observer(fixture))
         {
             continue;
         }
@@ -1680,8 +2070,14 @@ async fn collect_tool_execution(catalog: &ToolScenarioCatalog) -> Result<Value, 
             .get(tool)
             .map(String::as_str)
             .unwrap_or("default");
-        let (executor, state) =
-            build_executor_with_state(CallerIdentity::Owner, 0, true, None, fixture);
+        let (executor, state) = build_executor_with_state(
+            CallerIdentity::Owner,
+            0,
+            true,
+            None,
+            fixture,
+            ToolTransportProfile::WithoutTransport,
+        );
         let before = if let Some(postcondition) = catalog.postconditions.get(tool) {
             Some(observe_tool_postcondition(&executor, &state, postcondition, tool).await?)
         } else {
@@ -1872,7 +2268,10 @@ async fn collect_tool_execution(catalog: &ToolScenarioCatalog) -> Result<Value, 
                 scenario.tool
             ));
         }
-        let result = owner.execute(&scenario.tool, &scenario.arguments).await;
+        let result = owner_profiles[0]
+            .1
+            .execute(&scenario.tool, &scenario.arguments)
+            .await;
         forwarding.push(json!({"name":name,"tool":scenario.tool,"arguments":scenario.arguments,"result":result_json(result)}));
     }
 
@@ -1880,6 +2279,22 @@ async fn collect_tool_execution(catalog: &ToolScenarioCatalog) -> Result<Value, 
         .iter()
         .filter_map(|v| v["tool"].as_str())
         .collect();
+    let unobserved_effectful_successes: Vec<_> = successes
+        .iter()
+        .filter(|row| {
+            row["tool"].as_str().is_some_and(|tool| {
+                catalog.effectful_tools.contains(tool)
+                    && row["postcondition"].is_null()
+                    && row["effect"].is_null()
+            })
+        })
+        .filter_map(|row| row["tool"].as_str())
+        .collect();
+    if !unobserved_effectful_successes.is_empty() {
+        return Err(format!(
+            "effectful successful tools lack a nonempty observation: {unobserved_effectful_successes:?}"
+        ));
+    }
     let success_uncollected: Vec<_> = all_defs
         .iter()
         .filter(|d| !success_names.contains(d.name.as_str()))
@@ -2045,7 +2460,7 @@ pub async fn capture(l1_path: &Path, scenario_path: &Path) -> Result<Value, Stri
     }
     let http = collect_http(&l1, &catalog.http).await?;
     let visibility = collect_visibility(&catalog.tool_visibility)?;
-    let tools = collect_tool_execution(&catalog.tool_execution).await?;
+    let tools = collect_tool_execution(&l1, &catalog.tool_execution).await?;
     let mcp = collect_mcp_protocol().await?;
     let coverage = coverage(&http, &tools);
     let mut artifact = json!({
@@ -2152,18 +2567,26 @@ mod tests {
         assert_eq!(l1["http"]["routes"], production_routes);
 
         let (_, catalog) = read_scenarios(&scenarios_path).expect("read scenario catalog");
-        let owner = build_executor(
-            opencrab_actions::CallerIdentity::Owner,
-            0,
-            true,
-            None,
-            "default",
-        );
-        let live_tools: BTreeSet<_> = owner
+        let live_tools: BTreeSet<_> = [
+            ToolTransportProfile::WithoutTransport,
+            ToolTransportProfile::Discord,
+            ToolTransportProfile::Nostr,
+        ]
+        .into_iter()
+        .flat_map(|transport| {
+            build_executor_with_state(
+                opencrab_actions::CallerIdentity::Owner,
+                0,
+                true,
+                None,
+                "default",
+                transport,
+            )
+            .0
             .list_tools()
-            .into_iter()
-            .map(|definition| definition.name)
-            .collect();
+        })
+        .map(|definition| definition.name)
+        .collect();
         let selected_tools: BTreeSet<_> = catalog
             .tool_execution
             .success_arguments
@@ -2172,6 +2595,33 @@ mod tests {
             .cloned()
             .collect();
         assert_eq!(live_tools, selected_tools);
+        assert_eq!(
+            live_tools
+                .iter()
+                .filter(|name| {
+                    name.starts_with("discord_")
+                        || matches!(
+                            name.as_str(),
+                            "ensure_subtask_webhook"
+                                | "ensure_webhook"
+                                | "join_voice_channel"
+                                | "leave_voice_channel"
+                                | "send_ui"
+                        )
+                })
+                .count(),
+            12
+        );
+        assert_eq!(
+            live_tools
+                .iter()
+                .filter(|name| matches!(
+                    name.as_str(),
+                    "nostr_post" | "nostr_reply" | "nostr_upload" | "nostr_zap"
+                ))
+                .count(),
+            4
+        );
     }
 
     #[tokio::test]

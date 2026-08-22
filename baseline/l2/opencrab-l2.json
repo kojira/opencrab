@@ -13,7 +13,7 @@
     "runtime": {
       "configuration": "collector-owned AppState, tool, provider, MCP, and gateway fixtures; no operator config file is read",
       "database": "fresh in-memory database seeded by the collector for every probe",
-      "environment": "no parent environment value is a semantic input; fixture subprocesses receive an empty environment",
+      "environment": "the shell fixture receives an empty allowlisted environment; provider diagnostic fixtures inherit the parent environment, but execute a fixed collector-owned binary whose output does not read it",
       "external_processes": "only a collector-owned executable fixture with fixed bytes and /bin/sh interpreter; no PATH lookup, operator binary, network service, or live gateway",
       "filesystem": "fresh collector-owned workspaces with fixed contents; generated roots are normalized to <workspace>"
     }
@@ -21,19 +21,19 @@
   "coverage": {
     "claim": "Only nonempty observations satisfying their facet predicate are fixed by this artifact; every uncollected or not_applicable entry is an explicit non-claim.",
     "http_facets": {
-      "effects_observed": 36,
-      "effects_uncollected": 11,
+      "effects_observed": 45,
+      "effects_uncollected": 0,
       "not_applicable": 3,
-      "uncollected": 33,
+      "uncollected": 34,
       "valid_rejections": 34
     },
     "http_observed_status_classes": {
-      "2xx": 137,
+      "2xx": 136,
       "4xx": 39,
       "5xx": 4
     },
-    "tool_effects_observed": 47,
-    "tool_success_uncollected_count": 5
+    "tool_effects_observed": 50,
+    "tool_success_uncollected_count": 21
   },
   "http": {
     "probes": [
@@ -53,7 +53,7 @@
               "name": "Baseline Agent",
               "persona_name": "Baseline",
               "session_count": 1,
-              "skill_count": 1,
+              "skill_count": 2,
               "status": "idle"
             }
           ],
@@ -94,7 +94,7 @@
               "name": "Baseline Agent",
               "persona_name": "Baseline",
               "session_count": 1,
-              "skill_count": 1,
+              "skill_count": 2,
               "status": "idle"
             }
           ],
@@ -130,7 +130,7 @@
                 "name": "Baseline Agent",
                 "persona_name": "Baseline",
                 "session_count": 1,
-                "skill_count": 1,
+                "skill_count": 2,
                 "status": "idle"
               },
               {
@@ -171,7 +171,7 @@
                 "name": "Baseline Agent",
                 "persona_name": "Baseline",
                 "session_count": 1,
-                "skill_count": 1,
+                "skill_count": 2,
                 "status": "idle"
               }
             ],
@@ -195,10 +195,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents"
+            "path": "/api/agents"
           },
           "status": "observed"
         },
@@ -301,7 +302,7 @@
                 "name": "Baseline Agent",
                 "persona_name": "Baseline",
                 "session_count": 1,
-                "skill_count": 1,
+                "skill_count": 2,
                 "status": "idle"
               }
             ],
@@ -325,10 +326,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents"
+            "path": "/api/agents"
           },
           "status": "observed"
         },
@@ -548,10 +550,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent"
+            "path": "/api/agents/{id}"
           },
           "status": "observed"
         },
@@ -694,10 +697,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent"
+            "path": "/api/agents/{id}"
           },
           "status": "observed"
         },
@@ -891,10 +895,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent/allowed-commands"
+            "path": "/api/agents/{id}/allowed-commands"
           },
           "status": "observed"
         },
@@ -1014,10 +1019,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent/allowed-commands"
+            "path": "/api/agents/{id}/allowed-commands"
           },
           "status": "observed"
         },
@@ -1400,10 +1406,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent/channel-configs"
+            "path": "/api/agents/{id}/channel-configs"
           },
           "status": "observed"
         },
@@ -1547,10 +1554,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent/channel-configs"
+            "path": "/api/agents/{id}/channel-configs"
           },
           "status": "observed"
         },
@@ -1754,10 +1762,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent/co-agents"
+            "path": "/api/agents/{id}/co-agents"
           },
           "status": "observed"
         },
@@ -1884,10 +1893,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent/co-agents"
+            "path": "/api/agents/{id}/co-agents"
           },
           "status": "observed"
         },
@@ -2056,7 +2066,7 @@
           "before": {
             "body": {
               "configured": true,
-              "enabled": false,
+              "enabled": true,
               "owner_discord_id": "baseline-owner",
               "running": false,
               "token_masked": "baseline-n..."
@@ -2081,10 +2091,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent/discord"
+            "path": "/api/agents/{id}/discord"
           },
           "status": "observed"
         },
@@ -2164,7 +2175,7 @@
         "response": {
           "body": {
             "configured": true,
-            "enabled": false,
+            "enabled": true,
             "owner_discord_id": "baseline-owner",
             "running": false,
             "token_masked": "baseline-n..."
@@ -2229,7 +2240,7 @@
           "after": {
             "body": {
               "configured": true,
-              "enabled": false,
+              "enabled": true,
               "owner_discord_id": "baseline-owner-2",
               "running": false,
               "token_masked": "baseline-n..."
@@ -2257,7 +2268,7 @@
           "before": {
             "body": {
               "configured": true,
-              "enabled": false,
+              "enabled": true,
               "owner_discord_id": "baseline-owner",
               "running": false,
               "token_masked": "baseline-n..."
@@ -2282,10 +2293,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent/discord"
+            "path": "/api/agents/{id}/discord"
           },
           "status": "observed"
         },
@@ -2300,7 +2312,7 @@
         "response": {
           "body": {
             "configured": true,
-            "enabled": false,
+            "enabled": true,
             "ok": true,
             "owner_discord_id": "baseline-owner-2",
             "token_masked": "baseline-n..."
@@ -2391,7 +2403,7 @@
           "before": {
             "body": {
               "configured": true,
-              "enabled": false,
+              "enabled": true,
               "owner_discord_id": "baseline-owner",
               "running": false,
               "token_masked": "baseline-n..."
@@ -2416,10 +2428,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent/discord"
+            "path": "/api/agents/{id}/discord"
           },
           "status": "observed"
         },
@@ -2492,8 +2505,69 @@
       },
       {
         "effect": {
-          "reason": "scenario catalog declares no independent read-back for this successful mutation",
-          "status": "uncollected"
+          "after": {
+            "body": {
+              "configured": true,
+              "enabled": false,
+              "owner_discord_id": "baseline-owner",
+              "running": false,
+              "token_masked": "baseline-n..."
+            },
+            "headers": [
+              {
+                "name": "access-control-allow-origin",
+                "value": "*"
+              },
+              {
+                "name": "access-control-expose-headers",
+                "value": "*"
+              },
+              {
+                "name": "content-type",
+                "value": "application/json"
+              },
+              {
+                "name": "vary",
+                "value": "origin, access-control-request-method, access-control-request-headers"
+              }
+            ],
+            "status": 200
+          },
+          "before": {
+            "body": {
+              "configured": true,
+              "enabled": true,
+              "owner_discord_id": "baseline-owner",
+              "running": false,
+              "token_masked": "baseline-n..."
+            },
+            "headers": [
+              {
+                "name": "access-control-allow-origin",
+                "value": "*"
+              },
+              {
+                "name": "access-control-expose-headers",
+                "value": "*"
+              },
+              {
+                "name": "content-type",
+                "value": "application/json"
+              },
+              {
+                "name": "vary",
+                "value": "origin, access-control-request-method, access-control-request-headers"
+              }
+            ],
+            "status": 200
+          },
+          "observer": {
+            "body": null,
+            "db_query": null,
+            "method": "GET",
+            "path": "/api/agents/{id}/discord"
+          },
+          "status": "observed"
         },
         "name": "post___api_agents_id_discord_stop__normal",
         "request": {
@@ -2957,10 +3031,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent/mcp"
+            "path": "/api/agents/{id}/mcp"
           },
           "status": "observed"
         },
@@ -3097,10 +3172,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent/mcp"
+            "path": "/api/agents/{id}/mcp"
           },
           "status": "observed"
         },
@@ -3169,20 +3245,97 @@
       },
       {
         "effect": {
-          "reason": "scenario catalog declares no independent read-back for this successful mutation",
-          "status": "uncollected"
+          "after": {
+            "body": {
+              "servers": [
+                {
+                  "args": [],
+                  "command": "false",
+                  "connect_error": null,
+                  "connected": false,
+                  "enabled": true,
+                  "env_keys": [],
+                  "name": "baseline",
+                  "tools": null,
+                  "trusted_only": false
+                }
+              ]
+            },
+            "headers": [
+              {
+                "name": "access-control-allow-origin",
+                "value": "*"
+              },
+              {
+                "name": "access-control-expose-headers",
+                "value": "*"
+              },
+              {
+                "name": "content-type",
+                "value": "application/json"
+              },
+              {
+                "name": "vary",
+                "value": "origin, access-control-request-method, access-control-request-headers"
+              }
+            ],
+            "status": 200
+          },
+          "before": {
+            "body": {
+              "servers": [
+                {
+                  "args": [],
+                  "command": "false",
+                  "connect_error": null,
+                  "connected": false,
+                  "enabled": false,
+                  "env_keys": [],
+                  "name": "baseline",
+                  "tools": null,
+                  "trusted_only": false
+                }
+              ]
+            },
+            "headers": [
+              {
+                "name": "access-control-allow-origin",
+                "value": "*"
+              },
+              {
+                "name": "access-control-expose-headers",
+                "value": "*"
+              },
+              {
+                "name": "content-type",
+                "value": "application/json"
+              },
+              {
+                "name": "vary",
+                "value": "origin, access-control-request-method, access-control-request-headers"
+              }
+            ],
+            "status": 200
+          },
+          "observer": {
+            "body": null,
+            "db_query": null,
+            "method": "GET",
+            "path": "/api/agents/{id}/mcp"
+          },
+          "status": "observed"
         },
         "name": "post___api_agents_id_mcp_name_enabled__normal",
         "request": {
           "body": {
-            "enabled": false
+            "enabled": true
           },
           "method": "POST",
           "uri": "/api/agents/baseline-agent/mcp/baseline/enabled"
         },
         "response": {
           "body": {
-            "enabled": false,
+            "enabled": true,
             "updated": true
           },
           "headers": [
@@ -3375,10 +3528,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent/memory/curated"
+            "path": "/api/agents/{id}/memory/curated"
           },
           "status": "observed"
         },
@@ -3450,8 +3604,91 @@
       },
       {
         "effect": {
-          "reason": "scenario catalog declares no independent read-back for this successful mutation",
-          "status": "uncollected"
+          "after": {
+            "body": {
+              "agent_id": "baseline-agent",
+              "config": {
+                "batch_size": 50,
+                "batch_size_min": 10,
+                "threshold": 20,
+                "threshold_min": 5
+              },
+              "node_type_counts": {
+                "period": 0,
+                "root": 0,
+                "session": 0,
+                "topic": 0
+              },
+              "total_nodes": 0,
+              "unindexed_logs": 0,
+              "watermark": null
+            },
+            "headers": [
+              {
+                "name": "access-control-allow-origin",
+                "value": "*"
+              },
+              {
+                "name": "access-control-expose-headers",
+                "value": "*"
+              },
+              {
+                "name": "content-type",
+                "value": "application/json"
+              },
+              {
+                "name": "vary",
+                "value": "origin, access-control-request-method, access-control-request-headers"
+              }
+            ],
+            "status": 200
+          },
+          "before": {
+            "body": {
+              "agent_id": "baseline-agent",
+              "config": {
+                "batch_size": 50,
+                "batch_size_min": 10,
+                "threshold": 20,
+                "threshold_min": 5
+              },
+              "node_type_counts": {
+                "period": 0,
+                "root": 0,
+                "session": 0,
+                "topic": 1
+              },
+              "total_nodes": 1,
+              "unindexed_logs": 0,
+              "watermark": null
+            },
+            "headers": [
+              {
+                "name": "access-control-allow-origin",
+                "value": "*"
+              },
+              {
+                "name": "access-control-expose-headers",
+                "value": "*"
+              },
+              {
+                "name": "content-type",
+                "value": "application/json"
+              },
+              {
+                "name": "vary",
+                "value": "origin, access-control-request-method, access-control-request-headers"
+              }
+            ],
+            "status": 200
+          },
+          "observer": {
+            "body": null,
+            "db_query": null,
+            "method": "GET",
+            "path": "/api/agents/{id}/memory/index"
+          },
+          "status": "observed"
         },
         "name": "delete___api_agents_id_memory_index__normal",
         "request": {
@@ -3541,9 +3778,9 @@
               "period": 0,
               "root": 0,
               "session": 0,
-              "topic": 0
+              "topic": 1
             },
-            "total_nodes": 0,
+            "total_nodes": 1,
             "unindexed_logs": 0,
             "watermark": null
           },
@@ -3632,9 +3869,9 @@
                 "period": 0,
                 "root": 0,
                 "session": 0,
-                "topic": 0
+                "topic": 1
               },
-              "total_nodes": 0,
+              "total_nodes": 1,
               "unindexed_logs": 0,
               "watermark": null
             },
@@ -3671,9 +3908,9 @@
                 "period": 0,
                 "root": 0,
                 "session": 0,
-                "topic": 0
+                "topic": 1
               },
-              "total_nodes": 0,
+              "total_nodes": 1,
               "unindexed_logs": 0,
               "watermark": null
             },
@@ -3697,10 +3934,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent/memory/index"
+            "path": "/api/agents/{id}/memory/index"
           },
           "status": "observed"
         },
@@ -3776,49 +4014,6 @@
         "selection": "malformed_json_rejection"
       },
       {
-        "effect": {
-          "reason": "scenario catalog declares no independent read-back for this successful mutation",
-          "status": "uncollected"
-        },
-        "name": "post___api_agents_id_memory_index_merge__normal",
-        "request": {
-          "body": {
-            "source_topic_id": "missing-a",
-            "target_topic_id": "missing-b"
-          },
-          "method": "POST",
-          "uri": "/api/agents/baseline-agent/memory/index/merge"
-        },
-        "response": {
-          "body": {
-            "ok": true,
-            "periods_processed": 0,
-            "topics_deleted": 0,
-            "topics_merged": 0
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "normal_or_local_precondition_branch"
-      },
-      {
         "effect": null,
         "name": "get___api_agents_id_memory_index_tree__normal",
         "request": {
@@ -3828,8 +4023,41 @@
         },
         "response": {
           "body": {
-            "nodes": [],
-            "tree": []
+            "nodes": [
+              {
+                "agent_id": "baseline-agent",
+                "child_count": 0,
+                "created_at": "<timestamp>",
+                "date_from": "2026-01-01",
+                "date_to": "2026-01-01",
+                "depth": 0,
+                "end_log_id": null,
+                "id": "baseline-http-index-node",
+                "keywords_json": "[]",
+                "node_type": "topic",
+                "parent_id": null,
+                "short_id": "t-http",
+                "source_session_id": null,
+                "source_type": "session_log",
+                "start_log_id": null,
+                "summary": "baseline HTTP index seed",
+                "summary_refreshed_at": null,
+                "title": "Baseline HTTP Topic",
+                "token_count": 0,
+                "updated_at": "<timestamp>"
+              }
+            ],
+            "tree": [
+              {
+                "child_count": 0,
+                "children": [],
+                "depth": 0,
+                "id": "baseline-http-index-node",
+                "node_type": "topic",
+                "summary": "baseline HTTP index seed",
+                "title": "Baseline HTTP Topic"
+              }
+            ]
           },
           "headers": [
             {
@@ -3889,8 +4117,8 @@
       },
       {
         "effect": {
-          "reason": "scenario catalog declares no independent read-back for this successful mutation",
-          "status": "uncollected"
+          "reason": "query endpoint; a successful call is read-only",
+          "status": "not_applicable"
         },
         "name": "post___api_agents_id_memory_search__normal",
         "request": {
@@ -4003,7 +4231,7 @@
           "before": {
             "body": {
               "configured": true,
-              "enabled": false,
+              "enabled": true,
               "filter": {
                 "authors": [],
                 "keywords": [],
@@ -4038,10 +4266,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent/nostr"
+            "path": "/api/agents/{id}/nostr"
           },
           "status": "observed"
         },
@@ -4121,7 +4350,7 @@
         "response": {
           "body": {
             "configured": true,
-            "enabled": false,
+            "enabled": true,
             "filter": {
               "authors": [],
               "keywords": [],
@@ -4207,8 +4436,89 @@
       },
       {
         "effect": {
-          "reason": "scenario catalog declares no independent read-back for this successful mutation",
-          "status": "uncollected"
+          "after": {
+            "body": {
+              "configured": true,
+              "enabled": false,
+              "filter": {
+                "authors": [],
+                "keywords": [],
+                "kinds": []
+              },
+              "has_secret_key": true,
+              "owner_pubkey": "",
+              "relays": [
+                "wss://yabu.me",
+                "wss://r.kojira.io"
+              ],
+              "running": false,
+              "secret_key_masked": "••••••••"
+            },
+            "headers": [
+              {
+                "name": "access-control-allow-origin",
+                "value": "*"
+              },
+              {
+                "name": "access-control-expose-headers",
+                "value": "*"
+              },
+              {
+                "name": "content-type",
+                "value": "application/json"
+              },
+              {
+                "name": "vary",
+                "value": "origin, access-control-request-method, access-control-request-headers"
+              }
+            ],
+            "status": 200
+          },
+          "before": {
+            "body": {
+              "configured": true,
+              "enabled": true,
+              "filter": {
+                "authors": [],
+                "keywords": [],
+                "kinds": []
+              },
+              "has_secret_key": true,
+              "owner_pubkey": "",
+              "relays": [
+                "wss://yabu.me",
+                "wss://r.kojira.io"
+              ],
+              "running": false,
+              "secret_key_masked": "••••••••"
+            },
+            "headers": [
+              {
+                "name": "access-control-allow-origin",
+                "value": "*"
+              },
+              {
+                "name": "access-control-expose-headers",
+                "value": "*"
+              },
+              {
+                "name": "content-type",
+                "value": "application/json"
+              },
+              {
+                "name": "vary",
+                "value": "origin, access-control-request-method, access-control-request-headers"
+              }
+            ],
+            "status": 200
+          },
+          "observer": {
+            "body": null,
+            "db_query": null,
+            "method": "GET",
+            "path": "/api/agents/{id}/nostr"
+          },
+          "status": "observed"
         },
         "name": "put___api_agents_id_nostr__normal",
         "request": {
@@ -4405,10 +4715,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent/nostr-relay"
+            "path": "/api/agents/{id}/nostr-relay"
           },
           "status": "observed"
         },
@@ -4482,8 +4793,89 @@
       },
       {
         "effect": {
-          "reason": "scenario catalog declares no independent read-back for this successful mutation",
-          "status": "uncollected"
+          "after": {
+            "body": {
+              "configured": true,
+              "enabled": false,
+              "filter": {
+                "authors": [],
+                "keywords": [],
+                "kinds": []
+              },
+              "has_secret_key": true,
+              "owner_pubkey": "",
+              "relays": [
+                "wss://yabu.me",
+                "wss://r.kojira.io"
+              ],
+              "running": false,
+              "secret_key_masked": "••••••••"
+            },
+            "headers": [
+              {
+                "name": "access-control-allow-origin",
+                "value": "*"
+              },
+              {
+                "name": "access-control-expose-headers",
+                "value": "*"
+              },
+              {
+                "name": "content-type",
+                "value": "application/json"
+              },
+              {
+                "name": "vary",
+                "value": "origin, access-control-request-method, access-control-request-headers"
+              }
+            ],
+            "status": 200
+          },
+          "before": {
+            "body": {
+              "configured": true,
+              "enabled": true,
+              "filter": {
+                "authors": [],
+                "keywords": [],
+                "kinds": []
+              },
+              "has_secret_key": true,
+              "owner_pubkey": "",
+              "relays": [
+                "wss://yabu.me",
+                "wss://r.kojira.io"
+              ],
+              "running": false,
+              "secret_key_masked": "••••••••"
+            },
+            "headers": [
+              {
+                "name": "access-control-allow-origin",
+                "value": "*"
+              },
+              {
+                "name": "access-control-expose-headers",
+                "value": "*"
+              },
+              {
+                "name": "content-type",
+                "value": "application/json"
+              },
+              {
+                "name": "vary",
+                "value": "origin, access-control-request-method, access-control-request-headers"
+              }
+            ],
+            "status": 200
+          },
+          "observer": {
+            "body": null,
+            "db_query": null,
+            "method": "GET",
+            "path": "/api/agents/{id}/nostr"
+          },
+          "status": "observed"
         },
         "name": "post___api_agents_id_nostr_stop__normal",
         "request": {
@@ -4701,10 +5093,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent/schedules"
+            "path": "/api/agents/{id}/schedules"
           },
           "status": "observed"
         },
@@ -4972,10 +5365,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent/skills"
+            "path": "/api/agents/{id}/skills"
           },
           "status": "observed"
         },
@@ -5194,10 +5588,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent/skills"
+            "path": "/api/agents/{id}/skills"
           },
           "status": "observed"
         },
@@ -5334,10 +5729,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent/skills"
+            "path": "/api/agents/{id}/skills"
           },
           "status": "observed"
         },
@@ -5375,14 +5771,119 @@
       },
       {
         "effect": {
-          "reason": "scenario catalog declares no independent read-back for this successful mutation",
-          "status": "uncollected"
+          "after": {
+            "body": [
+              {
+                "agent_id": "baseline-agent",
+                "agent_visible": false,
+                "archived": false,
+                "created_caller": "owner",
+                "description": "seed",
+                "effectiveness": null,
+                "file_path": null,
+                "guidance": "seed",
+                "id": "baseline-skill",
+                "is_active": true,
+                "name": "Seed Skill",
+                "permission": "private",
+                "situation_pattern": "seed",
+                "source_context": null,
+                "source_type": "baseline",
+                "usage_count": 0
+              },
+              {
+                "agent_id": "baseline-agent",
+                "agent_visible": false,
+                "archived": false,
+                "created_caller": "owner",
+                "description": "archived seed",
+                "effectiveness": null,
+                "file_path": null,
+                "guidance": "archived seed",
+                "id": "baseline-archived-skill",
+                "is_active": true,
+                "name": "Archived Seed Skill",
+                "permission": "private",
+                "situation_pattern": "archived seed",
+                "source_context": null,
+                "source_type": "baseline",
+                "usage_count": 0
+              }
+            ],
+            "headers": [
+              {
+                "name": "access-control-allow-origin",
+                "value": "*"
+              },
+              {
+                "name": "access-control-expose-headers",
+                "value": "*"
+              },
+              {
+                "name": "content-type",
+                "value": "application/json"
+              },
+              {
+                "name": "vary",
+                "value": "origin, access-control-request-method, access-control-request-headers"
+              }
+            ],
+            "status": 200
+          },
+          "before": {
+            "body": [
+              {
+                "agent_id": "baseline-agent",
+                "agent_visible": false,
+                "archived": false,
+                "created_caller": "owner",
+                "description": "seed",
+                "effectiveness": null,
+                "file_path": null,
+                "guidance": "seed",
+                "id": "baseline-skill",
+                "is_active": true,
+                "name": "Seed Skill",
+                "permission": "private",
+                "situation_pattern": "seed",
+                "source_context": null,
+                "source_type": "baseline",
+                "usage_count": 0
+              }
+            ],
+            "headers": [
+              {
+                "name": "access-control-allow-origin",
+                "value": "*"
+              },
+              {
+                "name": "access-control-expose-headers",
+                "value": "*"
+              },
+              {
+                "name": "content-type",
+                "value": "application/json"
+              },
+              {
+                "name": "vary",
+                "value": "origin, access-control-request-method, access-control-request-headers"
+              }
+            ],
+            "status": 200
+          },
+          "observer": {
+            "body": null,
+            "db_query": null,
+            "method": "GET",
+            "path": "/api/agents/{id}/skills"
+          },
+          "status": "observed"
         },
         "name": "post___api_agents_id_skills_skill_id_restore__normal",
         "request": {
           "body": null,
           "method": "POST",
-          "uri": "/api/agents/baseline-agent/skills/baseline-skill/restore"
+          "uri": "/api/agents/baseline-agent/skills/baseline-archived-skill/restore"
         },
         "response": {
           "body": {
@@ -5494,10 +5995,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent/skills"
+            "path": "/api/agents/{id}/skills"
           },
           "status": "observed"
         },
@@ -5773,10 +6275,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent/soul/presets"
+            "path": "/api/agents/{id}/soul/presets"
           },
           "status": "observed"
         },
@@ -5901,10 +6404,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent/soul/presets"
+            "path": "/api/agents/{id}/soul/presets"
           },
           "status": "observed"
         },
@@ -6047,10 +6551,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent"
+            "path": "/api/agents/{id}"
           },
           "status": "observed"
         },
@@ -6238,10 +6743,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent/trusted-users"
+            "path": "/api/agents/{id}/trusted-users"
           },
           "status": "observed"
         },
@@ -6377,10 +6883,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent/trusted-users"
+            "path": "/api/agents/{id}/trusted-users"
           },
           "status": "observed"
         },
@@ -6517,10 +7024,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent/trusted-users"
+            "path": "/api/agents/{id}/trusted-users"
           },
           "status": "observed"
         },
@@ -6819,10 +7327,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent/workspace/baseline.txt"
+            "path": "/api/agents/{id}/workspace/{*path}"
           },
           "status": "observed"
         },
@@ -6960,8 +7469,30 @@
       },
       {
         "effect": {
-          "reason": "scenario catalog declares no independent read-back for this successful mutation",
-          "status": "uncollected"
+          "after": {
+            "db_query": "agent_inbox",
+            "rows": [
+              {
+                "agent_id": "baseline-agent",
+                "dedup_key": "baseline.event:baseline-event",
+                "event_type": "baseline.event",
+                "payload_json": "{\"data\":{\"id\":\"baseline-event\"},\"type\":\"baseline.event\"}",
+                "processed": false,
+                "source": "baseline-source"
+              }
+            ]
+          },
+          "before": {
+            "db_query": "agent_inbox",
+            "rows": []
+          },
+          "observer": {
+            "body": null,
+            "db_query": "agent_inbox",
+            "method": null,
+            "path": null
+          },
+          "status": "observed"
         },
         "name": "post___api_hooks_source__normal",
         "request": {
@@ -7503,10 +8034,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/llm/model-pricing"
+            "path": "/api/llm/model-pricing"
           },
           "status": "observed"
         },
@@ -8203,10 +8735,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent/schedules"
+            "path": "/api/agents/{id}/schedules"
           },
           "status": "observed"
         },
@@ -8354,10 +8887,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/agents/baseline-agent/schedules"
+            "path": "/api/agents/{id}/schedules"
           },
           "status": "observed"
         },
@@ -8615,10 +9149,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/sessions"
+            "path": "/api/sessions"
           },
           "status": "observed"
         },
@@ -8884,10 +9419,11 @@
             ],
             "status": 200
           },
-          "request": {
+          "observer": {
             "body": null,
+            "db_query": null,
             "method": "GET",
-            "uri": "/api/sessions/baseline-session/logs"
+            "path": "/api/sessions/{id}/logs"
           },
           "status": "observed"
         },
@@ -9011,7 +9547,7 @@
               "discord": {
                 "count": 1,
                 "done": true,
-                "enabled": 0
+                "enabled": 1
               },
               "llm_provider": {
                 "count": 0,
@@ -9066,7 +9602,7 @@
               "discord": {
                 "count": 1,
                 "done": true,
-                "enabled": 0
+                "enabled": 1
               },
               "llm_provider": {
                 "count": 0,
@@ -9198,8 +9734,99 @@
       },
       {
         "effect": {
-          "reason": "scenario catalog declares no independent read-back for this successful mutation",
-          "status": "uncollected"
+          "after": {
+            "body": {
+              "config": {
+                "enabled": false,
+                "stt": {
+                  "api_key_env": "OPENAI_API_KEY",
+                  "base_url": null,
+                  "language": null,
+                  "model": "whisper-1",
+                  "provider": "openai"
+                },
+                "tts": {
+                  "agent_voices": {},
+                  "api_key_env": "OPENAI_API_KEY",
+                  "base_url": null,
+                  "default_voice": "3",
+                  "model": "gpt-4o-mini-tts",
+                  "provider": "voicevox"
+                }
+              },
+              "runtime_active": false,
+              "source": "toml"
+            },
+            "headers": [
+              {
+                "name": "access-control-allow-origin",
+                "value": "*"
+              },
+              {
+                "name": "access-control-expose-headers",
+                "value": "*"
+              },
+              {
+                "name": "content-type",
+                "value": "application/json"
+              },
+              {
+                "name": "vary",
+                "value": "origin, access-control-request-method, access-control-request-headers"
+              }
+            ],
+            "status": 200
+          },
+          "before": {
+            "body": {
+              "config": {
+                "enabled": false,
+                "stt": {
+                  "api_key_env": "OPENAI_API_KEY",
+                  "base_url": null,
+                  "language": "ja",
+                  "model": "whisper-1",
+                  "provider": "openai"
+                },
+                "tts": {
+                  "agent_voices": {},
+                  "api_key_env": "OPENAI_API_KEY",
+                  "base_url": null,
+                  "default_voice": "3",
+                  "model": "gpt-4o-mini-tts",
+                  "provider": "voicevox"
+                }
+              },
+              "runtime_active": false,
+              "source": "db"
+            },
+            "headers": [
+              {
+                "name": "access-control-allow-origin",
+                "value": "*"
+              },
+              {
+                "name": "access-control-expose-headers",
+                "value": "*"
+              },
+              {
+                "name": "content-type",
+                "value": "application/json"
+              },
+              {
+                "name": "vary",
+                "value": "origin, access-control-request-method, access-control-request-headers"
+              }
+            ],
+            "status": 200
+          },
+          "observer": {
+            "body": null,
+            "db_query": null,
+            "method": "GET",
+            "path": "/api/voice/config"
+          },
+          "status": "observed"
         },
         "name": "delete___api_voice_config__normal",
         "request": {
@@ -9283,7 +9910,7 @@
               "stt": {
                 "api_key_env": "OPENAI_API_KEY",
                 "base_url": null,
-                "language": null,
+                "language": "ja",
                 "model": "whisper-1",
                 "provider": "openai"
               },
@@ -9297,7 +9924,7 @@
               }
             },
             "runtime_active": false,
-            "source": "toml"
+            "source": "db"
           },
           "headers": [
             {
@@ -9335,7 +9962,7 @@
               "stt": {
                 "api_key_env": "OPENAI_API_KEY",
                 "base_url": null,
-                "language": null,
+                "language": "ja",
                 "model": "whisper-1",
                 "provider": "openai"
               },
@@ -9349,7 +9976,7 @@
               }
             },
             "runtime_active": false,
-            "source": "toml"
+            "source": "db"
           },
           "headers": [
             {
@@ -9375,8 +10002,99 @@
       },
       {
         "effect": {
-          "reason": "scenario catalog declares no independent read-back for this successful mutation",
-          "status": "uncollected"
+          "after": {
+            "body": {
+              "config": {
+                "enabled": false,
+                "stt": {
+                  "api_key_env": "OPENAI_API_KEY",
+                  "base_url": null,
+                  "language": null,
+                  "model": "whisper-1",
+                  "provider": "openai"
+                },
+                "tts": {
+                  "agent_voices": {},
+                  "api_key_env": "OPENAI_API_KEY",
+                  "base_url": null,
+                  "default_voice": "3",
+                  "model": "gpt-4o-mini-tts",
+                  "provider": "voicevox"
+                }
+              },
+              "runtime_active": false,
+              "source": "db"
+            },
+            "headers": [
+              {
+                "name": "access-control-allow-origin",
+                "value": "*"
+              },
+              {
+                "name": "access-control-expose-headers",
+                "value": "*"
+              },
+              {
+                "name": "content-type",
+                "value": "application/json"
+              },
+              {
+                "name": "vary",
+                "value": "origin, access-control-request-method, access-control-request-headers"
+              }
+            ],
+            "status": 200
+          },
+          "before": {
+            "body": {
+              "config": {
+                "enabled": false,
+                "stt": {
+                  "api_key_env": "OPENAI_API_KEY",
+                  "base_url": null,
+                  "language": "ja",
+                  "model": "whisper-1",
+                  "provider": "openai"
+                },
+                "tts": {
+                  "agent_voices": {},
+                  "api_key_env": "OPENAI_API_KEY",
+                  "base_url": null,
+                  "default_voice": "3",
+                  "model": "gpt-4o-mini-tts",
+                  "provider": "voicevox"
+                }
+              },
+              "runtime_active": false,
+              "source": "db"
+            },
+            "headers": [
+              {
+                "name": "access-control-allow-origin",
+                "value": "*"
+              },
+              {
+                "name": "access-control-expose-headers",
+                "value": "*"
+              },
+              {
+                "name": "content-type",
+                "value": "application/json"
+              },
+              {
+                "name": "vary",
+                "value": "origin, access-control-request-method, access-control-request-headers"
+              }
+            ],
+            "status": 200
+          },
+          "observer": {
+            "body": null,
+            "db_query": null,
+            "method": "GET",
+            "path": "/api/voice/config"
+          },
+          "status": "observed"
         },
         "name": "put___api_voice_config__normal",
         "request": {
@@ -9617,6 +10335,15 @@
         "name": "post___api_agents_id_memory_index__reject_or_absent",
         "path": "/api/agents/{id}/memory/index",
         "reason": "bodyless scheduling action has no deterministic rejection branch without changing production preconditions",
+        "status": "uncollected"
+      },
+      {
+        "branch": "normal",
+        "level": "L3",
+        "method": "POST",
+        "name": "post___api_agents_id_memory_index_merge__normal",
+        "path": "/api/agents/{id}/memory/index/merge",
+        "reason": "successful mutation requires an LLM-backed merge; the local no-provider branch has no state change to claim",
         "status": "uncollected"
       },
       {
@@ -9993,6 +10720,10 @@
           "method": "GET",
           "path": "/api/agents/{id}/memory/curated"
         },
+        "DELETE /api/agents/{id}/memory/index": {
+          "method": "GET",
+          "path": "/api/agents/{id}/memory/index"
+        },
         "DELETE /api/agents/{id}/nostr": {
           "method": "GET",
           "path": "/api/agents/{id}/nostr"
@@ -10008,6 +10739,10 @@
         "DELETE /api/schedules/{sid}": {
           "method": "GET",
           "path": "/api/agents/{id}/schedules"
+        },
+        "DELETE /api/voice/config": {
+          "method": "GET",
+          "path": "/api/voice/config"
         },
         "PATCH /api/agents/{id}": {
           "method": "GET",
@@ -10037,6 +10772,18 @@
           "method": "GET",
           "path": "/api/agents/{id}/co-agents"
         },
+        "POST /api/agents/{id}/discord/stop": {
+          "method": "GET",
+          "path": "/api/agents/{id}/discord"
+        },
+        "POST /api/agents/{id}/mcp/{name}/enabled": {
+          "method": "GET",
+          "path": "/api/agents/{id}/mcp"
+        },
+        "POST /api/agents/{id}/nostr/stop": {
+          "method": "GET",
+          "path": "/api/agents/{id}/nostr"
+        },
         "POST /api/agents/{id}/schedules": {
           "method": "GET",
           "path": "/api/agents/{id}/schedules"
@@ -10046,6 +10793,10 @@
           "path": "/api/agents/{id}/skills"
         },
         "POST /api/agents/{id}/skills/{skill_id}/archive": {
+          "method": "GET",
+          "path": "/api/agents/{id}/skills"
+        },
+        "POST /api/agents/{id}/skills/{skill_id}/restore": {
           "method": "GET",
           "path": "/api/agents/{id}/skills"
         },
@@ -10064,6 +10815,9 @@
         "POST /api/agents/{id}/trusted-users": {
           "method": "GET",
           "path": "/api/agents/{id}/trusted-users"
+        },
+        "POST /api/hooks/{source}": {
+          "db_query": "agent_inbox"
         },
         "POST /api/sessions": {
           "method": "GET",
@@ -10093,6 +10847,10 @@
           "method": "GET",
           "path": "/api/agents/{id}/memory/index"
         },
+        "PUT /api/agents/{id}/nostr": {
+          "method": "GET",
+          "path": "/api/agents/{id}/nostr"
+        },
         "PUT /api/agents/{id}/nostr-relay": {
           "method": "GET",
           "path": "/api/agents/{id}/nostr-relay"
@@ -10112,6 +10870,10 @@
         "PUT /api/llm/providers/{name}": {
           "method": "GET",
           "path": "/api/llm/providers"
+        },
+        "PUT /api/voice/config": {
+          "method": "GET",
+          "path": "/api/voice/config"
         }
       },
       "normal_bodies": {
@@ -10141,7 +10903,7 @@
           "co_agent_id": "baseline-new-peer"
         },
         "POST /api/agents/{id}/mcp/{name}/enabled": {
-          "enabled": false
+          "enabled": true
         },
         "POST /api/agents/{id}/memory/index/merge": {
           "source_topic_id": "missing-a",
@@ -10267,6 +11029,7 @@
         "POST /api/agents/{id}/import/sync": "depends on an operator import source",
         "POST /api/agents/{id}/mcp/{name}/test": "operator supplied subprocess",
         "POST /api/agents/{id}/memory/index": "successful branch schedules LLM-backed indexing",
+        "POST /api/agents/{id}/memory/index/merge": "successful mutation requires an LLM-backed merge; the local no-provider branch has no state change to claim",
         "POST /api/agents/{id}/memory/index/rebuild": "successful branch schedules LLM-backed indexing",
         "POST /api/agents/{id}/nostr/generate": "successful key generation requires the operator's nostaro executable",
         "POST /api/agents/{id}/nostr/start": "would connect to Nostr relays",
@@ -10278,6 +11041,10 @@
         "POST /api/sessions/{id}/messages": "successful branch requires an LLM provider"
       },
       "path_overrides": {
+        "/api/agents/{id}/skills/{skill_id}/restore": {
+          "missing": "/api/agents/baseline-agent/skills/baseline-missing/restore",
+          "normal": "/api/agents/baseline-agent/skills/baseline-archived-skill/restore"
+        },
         "/api/sessions/{id}": {
           "missing": "/api/sessions/baseline-missing",
           "normal": "/api/sessions/baseline-session"
@@ -10348,6 +11115,9 @@
       "query_suffixes": {
         "/api/agents/{id}/import/sync/status": "?source_dir={collector_workspace}/import-source&include_daily_logs=false"
       },
+      "successful_non_mutations": {
+        "POST /api/agents/{id}/memory/search": "query endpoint; a successful call is read-only"
+      },
       "why": [
         "A replacement must not silently drop an HTTP method that remains present in the L1 route inventory.",
         "Malformed JSON and missing-resource behavior are consumed by the dashboard and integrations, not just happy-path payloads.",
@@ -10382,8 +11152,11 @@
         "ws_edit",
         "ws_delete",
         "summarize_and_save",
+        "generate_inner_voice",
+        "update_impression",
         "learn_from_experience",
         "learn_from_peer",
+        "reflect_and_learn",
         "create_my_skill",
         "retire_my_skill",
         "restore_my_skill",
@@ -10419,7 +11192,11 @@
         "update_my_schedule",
         "delete_my_schedule",
         "set_default_subtask_webhook",
-        "set_default_webhook"
+        "set_default_webhook",
+        "spawn_subtask",
+        "cancel_subtask",
+        "steer_subtask",
+        "report_progress"
       ],
       "fixtures": {
         "cancel_subtask": "subtask_cancel",
@@ -10514,6 +11291,10 @@
           "expect_success": true,
           "tool": "recall_model_experiences"
         },
+        "generate_inner_voice": {
+          "arguments": null,
+          "db_query": "inner_voice_logs"
+        },
         "learn_from_experience": {
           "arguments": {
             "name": "Experience Skill"
@@ -10557,6 +11338,10 @@
           "arguments": {},
           "expect_success": true,
           "tool": "get_task"
+        },
+        "reflect_and_learn": {
+          "arguments": null,
+          "db_query": "reflection_memory"
         },
         "remove_allowed_command": {
           "arguments": {},
@@ -10642,6 +11427,10 @@
           "expect_success": true,
           "tool": "read_heartbeat_instructions"
         },
+        "update_impression": {
+          "arguments": null,
+          "db_query": "impressions"
+        },
         "update_instructions": {
           "arguments": null,
           "expect_status": 200,
@@ -10695,6 +11484,37 @@
           "tool": "ws_read"
         }
       },
+      "read_only_tools": [
+        "analyze_llm_usage",
+        "browse_memory_index",
+        "configure_mcp_server",
+        "declare_done",
+        "execute_shell",
+        "get_default_subtask_webhook",
+        "get_default_webhook",
+        "get_my_heartbeat",
+        "get_my_nostr_relay",
+        "get_my_schedules",
+        "get_system_info",
+        "get_task",
+        "list_allowed_commands",
+        "list_subtask_webhooks",
+        "list_webhooks",
+        "manage_allowed_commands",
+        "mcp__public_local__echo",
+        "mcp__trusted_local__echo",
+        "nostr_list_keys",
+        "read_heartbeat_instructions",
+        "read_my_history",
+        "read_skill",
+        "recall_model_experiences",
+        "retrieve_memory_nodes",
+        "search_memory_index",
+        "search_my_history",
+        "survey_my_history",
+        "ws_list",
+        "ws_read"
+      ],
       "selected_facets": [
         "empty arguments for every observed tool whose live schema declares required fields",
         "direct-call permission rejection for every observed owner-only, trusted-only, and trusted-only-MCP tool",
@@ -11030,11 +11850,27 @@
         "workspace": "Fresh temporary roots contain only collector-owned files. The collector creates a fixed baseline-command executable fixture and an empty import-source directory outside agent workspaces; tool cases create captured/, captured/file.txt, captured/summary.txt, and skills/captured-skill.skill.md through the real tools. The shell allowlist contains only the absolute path of baseline-command, and its subprocess environment is empty."
       },
       "success_uncollected_l3": {
+        "discord_add_reaction": "Requires a live Discord gateway and mutates a remote message.",
+        "discord_channel_config": "Requires a live Discord gateway and reads or mutates remote channel configuration.",
+        "discord_create_channel": "Requires a live Discord gateway and creates a remote channel.",
+        "discord_create_webhook": "Requires a live Discord gateway and creates a remote webhook.",
+        "discord_list_channels": "Requires a live Discord gateway to list remote channels.",
+        "discord_list_guilds": "Requires a live Discord gateway to list remote guilds.",
+        "discord_send_file": "Requires a live Discord gateway and uploads a file to a remote channel.",
+        "ensure_subtask_webhook": "Requires a live Discord gateway and may create a remote webhook.",
+        "ensure_webhook": "Requires a live Discord gateway and may create a remote webhook.",
+        "join_voice_channel": "Requires a live Discord gateway and joins a remote voice channel.",
+        "leave_voice_channel": "Requires a live Discord gateway and leaves a remote voice channel.",
         "nostr_generate_key": "Requires the operator's nostaro executable and writes key material outside the temporary workspace.",
+        "nostr_post": "Requires an adopted Nostr identity and publishes to live relays.",
+        "nostr_reply": "Requires an adopted Nostr identity and publishes to live relays.",
         "nostr_run": "Requires an adopted identity, operator nostaro executable, and potentially live relay/service I/O.",
         "nostr_switch_identity": "Requires a generated key and configured Nostr transport capability; successful adoption may start a live relay connection.",
+        "nostr_upload": "Requires an adopted Nostr identity and uploads to a live external service.",
+        "nostr_zap": "Requires an adopted Nostr identity and performs a live external payment flow.",
         "request_peer_review": "Success delivers a message through the active transport. A local fake delivery would not fix live delivery behavior.",
-        "run_my_heartbeat": "Successful manual fire runs an actual agent turn through a configured transport and LLM provider."
+        "run_my_heartbeat": "Successful manual fire runs an actual agent turn through a configured transport and LLM provider.",
+        "send_ui": "Requires a live Discord gateway and sends remote UI components."
       },
       "why": "Visibility alone does not prove direct invocation is gated or that result/error translation survives a replacement."
     },
@@ -11045,6 +11881,20 @@
           "depth": 0,
           "name": "owner_depth0_all_features",
           "shell_enabled": true
+        },
+        {
+          "caller": "owner",
+          "depth": 0,
+          "name": "owner_depth0_discord",
+          "shell_enabled": true,
+          "transport": "discord"
+        },
+        {
+          "caller": "owner",
+          "depth": 0,
+          "name": "owner_depth0_nostr",
+          "shell_enabled": true,
+          "transport": "nostr"
         },
         {
           "caller": "co_agent",
@@ -11150,6 +12000,220 @@
       {
         "arguments": {},
         "required_by_observed_schema": [
+          "command"
+        ],
+        "result": {
+          "data": null,
+          "error": "commandパラメータが必要です",
+          "success": false
+        },
+        "tool": "add_allowed_command"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "subtask_id"
+        ],
+        "result": {
+          "data": null,
+          "error": "cancel_subtask: 'subtask_id' is required",
+          "success": false
+        },
+        "tool": "cancel_subtask"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "status"
+        ],
+        "result": {
+          "data": null,
+          "error": "status is required ('done' or 'abandoned')",
+          "success": false
+        },
+        "tool": "close_task"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "provider"
+        ],
+        "result": {
+          "data": null,
+          "error": "provider is required",
+          "success": false
+        },
+        "tool": "configure_llm_provider"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "action"
+        ],
+        "result": {
+          "data": null,
+          "error": "unknown action:  (list/add/remove/set_enabled)",
+          "success": false
+        },
+        "tool": "configure_mcp_server"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "name",
+          "description",
+          "situation_pattern",
+          "guidance"
+        ],
+        "result": {
+          "data": null,
+          "error": "name is required",
+          "success": false
+        },
+        "tool": "create_my_skill"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "name",
+          "description"
+        ],
+        "result": {
+          "data": null,
+          "error": "name is required",
+          "success": false
+        },
+        "tool": "create_skill"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "id"
+        ],
+        "result": {
+          "data": null,
+          "error": "idは必須です。get_my_schedules が返した id をそのまま渡してください。",
+          "success": false
+        },
+        "tool": "delete_my_schedule"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "channel_id",
+          "message_id",
+          "emoji"
+        ],
+        "result": {
+          "data": null,
+          "error": "channel_idパラメータが必要です",
+          "success": false
+        },
+        "tool": "discord_add_reaction"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "channel_id",
+          "guild_id",
+          "readable",
+          "writable"
+        ],
+        "result": {
+          "data": null,
+          "error": "channel_idパラメータが必要です",
+          "success": false
+        },
+        "tool": "discord_channel_config"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "guild_id",
+          "name"
+        ],
+        "result": {
+          "data": null,
+          "error": "guild_idパラメータが必要です（デフォルトサーバーは解決できないため、discord_list_guildsで取得した数値IDを指定してください）",
+          "success": false
+        },
+        "tool": "discord_create_channel"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "channel_id"
+        ],
+        "result": {
+          "data": null,
+          "error": "channel_idパラメータが必要です",
+          "success": false
+        },
+        "tool": "discord_create_webhook"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "guild_id"
+        ],
+        "result": {
+          "data": null,
+          "error": "guild_idパラメータが必要です",
+          "success": false
+        },
+        "tool": "discord_list_channels"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "channel_id",
+          "file_path"
+        ],
+        "result": {
+          "data": null,
+          "error": "channel_idパラメータが必要です",
+          "success": false
+        },
+        "tool": "discord_send_file"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "evaluation"
+        ],
+        "result": {
+          "data": {
+            "evaluated": true,
+            "evaluation": "",
+            "meta": {
+              "evaluator_model": null,
+              "note": "この評価はevaluator_modelによって行われた。評価の信頼性はevaluatorの能力に依存する。"
+            },
+            "metrics_id": null,
+            "quality_score": 0.5,
+            "tags": null,
+            "task_success": false
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "evaluate_response"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "command"
+        ],
+        "result": {
+          "data": null,
+          "error": "Missing required field: command",
+          "success": false
+        },
+        "tool": "execute_shell"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
           "thought"
         ],
         "result": {
@@ -11162,78 +12226,14 @@
       {
         "arguments": {},
         "required_by_observed_schema": [
-          "target_id",
-          "target_name"
+          "channel_id"
         ],
         "result": {
           "data": null,
-          "error": "target_id is required",
+          "error": "voice 機能が無効です（config.toml の [voice] enabled = true が必要）",
           "success": false
         },
-        "tool": "update_impression"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "path"
-        ],
-        "result": {
-          "data": null,
-          "error": "path is required",
-          "success": false
-        },
-        "tool": "ws_read"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "path",
-          "content"
-        ],
-        "result": {
-          "data": null,
-          "error": "path is required",
-          "success": false
-        },
-        "tool": "ws_write"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "path",
-          "old_string",
-          "new_string"
-        ],
-        "result": {
-          "data": null,
-          "error": "path is required",
-          "success": false
-        },
-        "tool": "ws_edit"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "path"
-        ],
-        "result": {
-          "data": null,
-          "error": "path is required",
-          "success": false
-        },
-        "tool": "ws_delete"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "path"
-        ],
-        "result": {
-          "data": null,
-          "error": "path is required",
-          "success": false
-        },
-        "tool": "ws_mkdir"
+        "tool": "join_voice_channel"
       },
       {
         "arguments": {},
@@ -11274,42 +12274,153 @@
       {
         "arguments": {},
         "required_by_observed_schema": [
-          "query"
+          "action"
         ],
         "result": {
           "data": null,
-          "error": "query is required",
+          "error": "unknown action:  (list/add/remove)",
           "success": false
         },
-        "tool": "search_my_history"
+        "tool": "manage_allowed_commands"
       },
       {
         "arguments": {},
         "required_by_observed_schema": [
-          "content",
-          "filename"
+          "value"
         ],
         "result": {
-          "data": null,
-          "error": "content is required",
-          "success": false
+          "data": {
+            "result": "echo:ok"
+          },
+          "error": null,
+          "success": true
         },
-        "tool": "summarize_and_save"
+        "tool": "mcp__public_local__echo"
       },
       {
         "arguments": {},
         "required_by_observed_schema": [
-          "name",
-          "description",
-          "situation_pattern",
-          "guidance"
+          "value"
+        ],
+        "result": {
+          "data": {
+            "result": "echo:ok"
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "mcp__trusted_local__echo"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "from",
+          "into"
         ],
         "result": {
           "data": null,
-          "error": "name is required",
+          "error": "from is required",
           "success": false
         },
-        "tool": "create_my_skill"
+        "tool": "merge_tags"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "text"
+        ],
+        "result": {
+          "data": null,
+          "error": "text パラメータが必要です",
+          "success": false
+        },
+        "tool": "nostr_post"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "target",
+          "text"
+        ],
+        "result": {
+          "data": null,
+          "error": "target と text パラメータが必要です",
+          "success": false
+        },
+        "tool": "nostr_reply"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "subcommand"
+        ],
+        "result": {
+          "data": null,
+          "error": "subcommand パラメータが必要です",
+          "success": false
+        },
+        "tool": "nostr_run"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "npub"
+        ],
+        "result": {
+          "data": null,
+          "error": "npub パラメータが必要です",
+          "success": false
+        },
+        "tool": "nostr_switch_identity"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "path"
+        ],
+        "result": {
+          "data": null,
+          "error": "path パラメータが必要です",
+          "success": false
+        },
+        "tool": "nostr_upload"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "recipient",
+          "amount"
+        ],
+        "result": {
+          "data": null,
+          "error": "recipient パラメータが必要です",
+          "success": false
+        },
+        "tool": "nostr_zap"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "goal"
+        ],
+        "result": {
+          "data": null,
+          "error": "goal is required",
+          "success": false
+        },
+        "tool": "open_task"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "scope"
+        ],
+        "result": {
+          "data": null,
+          "error": "scope=effectiveのときはchannel_idが必要です",
+          "success": false
+        },
+        "tool": "read_heartbeat_instructions"
       },
       {
         "arguments": {},
@@ -11321,7 +12432,83 @@
           "error": "name is required",
           "success": false
         },
-        "tool": "retire_my_skill"
+        "tool": "read_skill"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "axis",
+          "body",
+          "sources"
+        ],
+        "result": {
+          "data": null,
+          "error": "axis is required",
+          "success": false
+        },
+        "tool": "record_memory_core"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "from_id",
+          "to_id",
+          "title"
+        ],
+        "result": {
+          "data": null,
+          "error": "from_id は integer で指定してください",
+          "success": false
+        },
+        "tool": "record_memory_unit"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "content"
+        ],
+        "result": {
+          "data": null,
+          "error": "content is required",
+          "success": false
+        },
+        "tool": "record_task_progress"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "command"
+        ],
+        "result": {
+          "data": null,
+          "error": "commandパラメータが必要です",
+          "success": false
+        },
+        "tool": "remove_allowed_command"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "message"
+        ],
+        "result": {
+          "data": null,
+          "error": "report_progress: 'message' is required",
+          "success": false
+        },
+        "tool": "report_progress"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "content"
+        ],
+        "result": {
+          "data": null,
+          "error": "request_peer_review はこのゲートウェイでは利用できません（メッセージを送信できません）。このターンの transport はテキストを送れないため、ピアレビュー依頼は省略して先へ進んでよい。",
+          "success": false
+        },
+        "tool": "request_peer_review"
       },
       {
         "arguments": {},
@@ -11345,7 +12532,31 @@
           "error": "name is required",
           "success": false
         },
-        "tool": "read_skill"
+        "tool": "retire_my_skill"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "core_id"
+        ],
+        "result": {
+          "data": null,
+          "error": "core_id is required",
+          "success": false
+        },
+        "tool": "retract_memory_core"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "unit_id"
+        ],
+        "result": {
+          "data": null,
+          "error": "unit_id is required",
+          "success": false
+        },
+        "tool": "retract_memory_unit"
       },
       {
         "arguments": {},
@@ -11362,6 +12573,19 @@
       {
         "arguments": {},
         "required_by_observed_schema": [
+          "situation",
+          "observation"
+        ],
+        "result": {
+          "data": null,
+          "error": "situation is required",
+          "success": false
+        },
+        "tool": "save_model_insight"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
           "query"
         ],
         "result": {
@@ -11370,6 +12594,125 @@
           "success": false
         },
         "tool": "search_memory_index"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "query"
+        ],
+        "result": {
+          "data": null,
+          "error": "query is required",
+          "success": false
+        },
+        "tool": "search_my_history"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "model_alias",
+          "reason"
+        ],
+        "result": {
+          "data": {
+            "duration": "this_turn",
+            "purpose": "conversation",
+            "reason": "",
+            "selected": "smart",
+            "switched": true
+          },
+          "error": null,
+          "success": true
+        },
+        "tool": "select_llm"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "channel_id",
+          "components"
+        ],
+        "result": {
+          "data": null,
+          "error": "channel_idパラメータが必要です",
+          "success": false
+        },
+        "tool": "send_ui"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "scope"
+        ],
+        "result": {
+          "data": null,
+          "error": "scope is required: 'agent' | 'tool' | 'global'",
+          "success": false
+        },
+        "tool": "set_default_subtask_webhook"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "scope"
+        ],
+        "result": {
+          "data": null,
+          "error": "scope is required: 'agent' | 'tool' | 'global'",
+          "success": false
+        },
+        "tool": "set_default_webhook"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "cron_expr",
+          "message"
+        ],
+        "result": {
+          "data": null,
+          "error": "cron_exprは必須です。cron 5 フィールド（例: 0 7 * * * = 毎朝 7 時）か @every 形式（例: @every 3h）で指定してください。",
+          "success": false
+        },
+        "tool": "set_my_schedule"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "task"
+        ],
+        "result": {
+          "data": null,
+          "error": "spawn_subtask: 'task' argument is required",
+          "success": false
+        },
+        "tool": "spawn_subtask"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "subtask_id",
+          "message"
+        ],
+        "result": {
+          "data": null,
+          "error": "steer_subtask: 'subtask_id' is required",
+          "success": false
+        },
+        "tool": "steer_subtask"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "content",
+          "filename"
+        ],
+        "result": {
+          "data": null,
+          "error": "content is required",
+          "success": false
+        },
+        "tool": "summarize_and_save"
       },
       {
         "arguments": {},
@@ -11400,55 +12743,40 @@
       {
         "arguments": {},
         "required_by_observed_schema": [
-          "from",
-          "into"
+          "scope",
+          "instructions"
         ],
         "result": {
           "data": null,
-          "error": "from is required",
+          "error": "instructionsパラメータが必要です",
           "success": false
         },
-        "tool": "merge_tags"
+        "tool": "update_heartbeat_instructions"
       },
       {
         "arguments": {},
         "required_by_observed_schema": [
-          "from_id",
-          "to_id",
-          "title"
+          "target_id",
+          "target_name"
         ],
         "result": {
           "data": null,
-          "error": "from_id は integer で指定してください",
+          "error": "target_id is required",
           "success": false
         },
-        "tool": "record_memory_unit"
+        "tool": "update_impression"
       },
       {
         "arguments": {},
         "required_by_observed_schema": [
-          "unit_id"
+          "instructions"
         ],
         "result": {
           "data": null,
-          "error": "unit_id is required",
+          "error": "instructions is required",
           "success": false
         },
-        "tool": "retract_memory_unit"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "axis",
-          "body",
-          "sources"
-        ],
-        "result": {
-          "data": null,
-          "error": "axis is required",
-          "success": false
-        },
-        "tool": "record_memory_core"
+        "tool": "update_instructions"
       },
       {
         "arguments": {},
@@ -11467,317 +12795,6 @@
       {
         "arguments": {},
         "required_by_observed_schema": [
-          "core_id"
-        ],
-        "result": {
-          "data": null,
-          "error": "core_id is required",
-          "success": false
-        },
-        "tool": "retract_memory_core"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "model_alias",
-          "reason"
-        ],
-        "result": {
-          "data": {
-            "duration": "this_turn",
-            "purpose": "conversation",
-            "reason": "",
-            "selected": "smart",
-            "switched": true
-          },
-          "error": null,
-          "success": true
-        },
-        "tool": "select_llm"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "evaluation"
-        ],
-        "result": {
-          "data": {
-            "evaluated": true,
-            "evaluation": "",
-            "meta": {
-              "evaluator_model": "smart",
-              "note": "この評価はevaluator_modelによって行われた。評価の信頼性はevaluatorの能力に依存する。"
-            },
-            "metrics_id": null,
-            "quality_score": 0.5,
-            "tags": null,
-            "task_success": false
-          },
-          "error": null,
-          "success": true
-        },
-        "tool": "evaluate_response"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "situation",
-          "observation"
-        ],
-        "result": {
-          "data": null,
-          "error": "situation is required",
-          "success": false
-        },
-        "tool": "save_model_insight"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "instructions"
-        ],
-        "result": {
-          "data": null,
-          "error": "instructions is required",
-          "success": false
-        },
-        "tool": "update_instructions"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "goal"
-        ],
-        "result": {
-          "data": null,
-          "error": "goal is required",
-          "success": false
-        },
-        "tool": "open_task"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "content"
-        ],
-        "result": {
-          "data": null,
-          "error": "content is required",
-          "success": false
-        },
-        "tool": "record_task_progress"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "status"
-        ],
-        "result": {
-          "data": null,
-          "error": "status is required ('done' or 'abandoned')",
-          "success": false
-        },
-        "tool": "close_task"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "command"
-        ],
-        "result": {
-          "data": null,
-          "error": "Missing required field: command",
-          "success": false
-        },
-        "tool": "execute_shell"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "provider"
-        ],
-        "result": {
-          "data": null,
-          "error": "provider is required",
-          "success": false
-        },
-        "tool": "configure_llm_provider"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "action"
-        ],
-        "result": {
-          "data": null,
-          "error": "unknown action:  (list/add/remove)",
-          "success": false
-        },
-        "tool": "manage_allowed_commands"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "action"
-        ],
-        "result": {
-          "data": null,
-          "error": "unknown action:  (list/add/remove/set_enabled)",
-          "success": false
-        },
-        "tool": "configure_mcp_server"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "npub"
-        ],
-        "result": {
-          "data": null,
-          "error": "npub パラメータが必要です",
-          "success": false
-        },
-        "tool": "nostr_switch_identity"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "subcommand"
-        ],
-        "result": {
-          "data": null,
-          "error": "subcommand パラメータが必要です",
-          "success": false
-        },
-        "tool": "nostr_run"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "task"
-        ],
-        "result": {
-          "data": null,
-          "error": "spawn_subtask: 'task' argument is required",
-          "success": false
-        },
-        "tool": "spawn_subtask"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "subtask_id"
-        ],
-        "result": {
-          "data": null,
-          "error": "cancel_subtask: 'subtask_id' is required",
-          "success": false
-        },
-        "tool": "cancel_subtask"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "subtask_id",
-          "message"
-        ],
-        "result": {
-          "data": null,
-          "error": "steer_subtask: 'subtask_id' is required",
-          "success": false
-        },
-        "tool": "steer_subtask"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "message"
-        ],
-        "result": {
-          "data": null,
-          "error": "report_progress: 'message' is required",
-          "success": false
-        },
-        "tool": "report_progress"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "command"
-        ],
-        "result": {
-          "data": null,
-          "error": "commandパラメータが必要です",
-          "success": false
-        },
-        "tool": "add_allowed_command"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "command"
-        ],
-        "result": {
-          "data": null,
-          "error": "commandパラメータが必要です",
-          "success": false
-        },
-        "tool": "remove_allowed_command"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "name",
-          "description"
-        ],
-        "result": {
-          "data": null,
-          "error": "name is required",
-          "success": false
-        },
-        "tool": "create_skill"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "scope",
-          "instructions"
-        ],
-        "result": {
-          "data": null,
-          "error": "instructionsパラメータが必要です",
-          "success": false
-        },
-        "tool": "update_heartbeat_instructions"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "scope"
-        ],
-        "result": {
-          "data": null,
-          "error": "scope=effectiveのときはchannel_idが必要です",
-          "success": false
-        },
-        "tool": "read_heartbeat_instructions"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "cron_expr",
-          "message"
-        ],
-        "result": {
-          "data": null,
-          "error": "cron_exprは必須です。cron 5 フィールド（例: 0 7 * * * = 毎朝 7 時）か @every 形式（例: @every 3h）で指定してください。",
-          "success": false
-        },
-        "tool": "set_my_schedule"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
           "id"
         ],
         "result": {
@@ -11790,81 +12807,264 @@
       {
         "arguments": {},
         "required_by_observed_schema": [
-          "id"
+          "path"
         ],
         "result": {
           "data": null,
-          "error": "idは必須です。get_my_schedules が返した id をそのまま渡してください。",
+          "error": "path is required",
+          "success": false
+        },
+        "tool": "ws_delete"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "path",
+          "old_string",
+          "new_string"
+        ],
+        "result": {
+          "data": null,
+          "error": "path is required",
+          "success": false
+        },
+        "tool": "ws_edit"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "path"
+        ],
+        "result": {
+          "data": null,
+          "error": "path is required",
+          "success": false
+        },
+        "tool": "ws_mkdir"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "path"
+        ],
+        "result": {
+          "data": null,
+          "error": "path is required",
+          "success": false
+        },
+        "tool": "ws_read"
+      },
+      {
+        "arguments": {},
+        "required_by_observed_schema": [
+          "path",
+          "content"
+        ],
+        "result": {
+          "data": null,
+          "error": "path is required",
+          "success": false
+        },
+        "tool": "ws_write"
+      }
+    ],
+    "permission_denied": [
+      {
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": true,
+          "trusted_only": false
+        },
+        "result": {
+          "data": null,
+          "error": "rejected: action 'add_allowed_command' requires owner",
+          "success": false
+        },
+        "tool": "add_allowed_command"
+      },
+      {
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": true,
+          "trusted_only": false
+        },
+        "result": {
+          "data": null,
+          "error": "rejected: action 'configure_llm_provider' requires owner",
+          "success": false
+        },
+        "tool": "configure_llm_provider"
+      },
+      {
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": true,
+          "trusted_only": false
+        },
+        "result": {
+          "data": null,
+          "error": "rejected: action 'configure_mcp_server' requires owner",
+          "success": false
+        },
+        "tool": "configure_mcp_server"
+      },
+      {
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": true,
+          "trusted_only": false
+        },
+        "result": {
+          "data": null,
+          "error": "rejected: action 'configure_nostr' requires owner",
+          "success": false
+        },
+        "tool": "configure_nostr"
+      },
+      {
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": true,
+          "trusted_only": false
+        },
+        "result": {
+          "data": null,
+          "error": "rejected: action 'configure_self' requires owner",
+          "success": false
+        },
+        "tool": "configure_self"
+      },
+      {
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": false,
+          "trusted_only": true
+        },
+        "result": {
+          "data": null,
+          "error": "rejected: action 'create_my_skill' requires a trusted caller (owner/co_agent/trusted_user)",
+          "success": false
+        },
+        "tool": "create_my_skill"
+      },
+      {
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": false,
+          "trusted_only": true
+        },
+        "result": {
+          "data": null,
+          "error": "rejected: action 'create_skill' requires a trusted caller (owner/co_agent/trusted_user)",
+          "success": false
+        },
+        "tool": "create_skill"
+      },
+      {
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": false,
+          "trusted_only": true
+        },
+        "result": {
+          "data": null,
+          "error": "rejected: action 'delete_my_schedule' requires a trusted caller (owner/co_agent/trusted_user)",
           "success": false
         },
         "tool": "delete_my_schedule"
       },
       {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "scope"
-        ],
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": true,
+          "trusted_only": false
+        },
         "result": {
           "data": null,
-          "error": "scope is required: 'agent' | 'tool' | 'global'",
+          "error": "rejected: action 'execute_shell' requires owner",
           "success": false
         },
-        "tool": "set_default_subtask_webhook"
+        "tool": "execute_shell"
       },
       {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "scope"
-        ],
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": false,
+          "trusted_only": true
+        },
         "result": {
           "data": null,
-          "error": "scope is required: 'agent' | 'tool' | 'global'",
+          "error": "rejected: action 'get_default_subtask_webhook' requires a trusted caller (owner/co_agent/trusted_user)",
           "success": false
         },
-        "tool": "set_default_webhook"
+        "tool": "get_default_subtask_webhook"
       },
       {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "content"
-        ],
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": false,
+          "trusted_only": true
+        },
         "result": {
           "data": null,
-          "error": "request_peer_review はこのゲートウェイでは利用できません（メッセージを送信できません）。このターンの transport はテキストを送れないため、ピアレビュー依頼は省略して先へ進んでよい。",
+          "error": "rejected: action 'get_default_webhook' requires a trusted caller (owner/co_agent/trusted_user)",
           "success": false
         },
-        "tool": "request_peer_review"
+        "tool": "get_default_webhook"
       },
       {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "value"
-        ],
-        "result": {
-          "data": {
-            "result": "echo:ok"
-          },
-          "error": null,
-          "success": true
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": false,
+          "trusted_only": true
         },
-        "tool": "mcp__public_local__echo"
+        "result": {
+          "data": null,
+          "error": "rejected: action 'get_my_heartbeat' requires a trusted caller (owner/co_agent/trusted_user)",
+          "success": false
+        },
+        "tool": "get_my_heartbeat"
       },
       {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "value"
-        ],
-        "result": {
-          "data": {
-            "result": "echo:ok"
-          },
-          "error": null,
-          "success": true
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": false,
+          "trusted_only": true
         },
-        "tool": "mcp__trusted_local__echo"
-      }
-    ],
-    "permission_denied": [
+        "result": {
+          "data": null,
+          "error": "rejected: action 'get_my_nostr_relay' requires a trusted caller (owner/co_agent/trusted_user)",
+          "success": false
+        },
+        "tool": "get_my_nostr_relay"
+      },
+      {
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": false,
+          "trusted_only": true
+        },
+        "result": {
+          "data": null,
+          "error": "rejected: action 'get_my_schedules' requires a trusted caller (owner/co_agent/trusted_user)",
+          "success": false
+        },
+        "tool": "get_my_schedules"
+      },
       {
         "caller": "agent",
         "policy": {
@@ -11883,85 +13083,15 @@
         "caller": "agent",
         "policy": {
           "mcp_trusted_only": false,
-          "owner_only": true,
-          "trusted_only": false
+          "owner_only": false,
+          "trusted_only": true
         },
         "result": {
           "data": null,
-          "error": "rejected: action 'ws_read' requires owner",
+          "error": "rejected: action 'join_voice_channel' requires a trusted caller (owner/co_agent/trusted_user)",
           "success": false
         },
-        "tool": "ws_read"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": true,
-          "trusted_only": false
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'ws_write' requires owner",
-          "success": false
-        },
-        "tool": "ws_write"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": true,
-          "trusted_only": false
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'ws_edit' requires owner",
-          "success": false
-        },
-        "tool": "ws_edit"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": true,
-          "trusted_only": false
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'ws_list' requires owner",
-          "success": false
-        },
-        "tool": "ws_list"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": true,
-          "trusted_only": false
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'ws_delete' requires owner",
-          "success": false
-        },
-        "tool": "ws_delete"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": true,
-          "trusted_only": false
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'ws_mkdir' requires owner",
-          "success": false
-        },
-        "tool": "ws_mkdir"
+        "tool": "join_voice_channel"
       },
       {
         "caller": "agent",
@@ -12000,10 +13130,10 @@
         },
         "result": {
           "data": null,
-          "error": "rejected: action 'reflect_and_learn' requires a trusted caller (owner/co_agent/trusted_user)",
+          "error": "rejected: action 'leave_voice_channel' requires a trusted caller (owner/co_agent/trusted_user)",
           "success": false
         },
-        "tool": "reflect_and_learn"
+        "tool": "leave_voice_channel"
       },
       {
         "caller": "agent",
@@ -12014,10 +13144,10 @@
         },
         "result": {
           "data": null,
-          "error": "rejected: action 'create_my_skill' requires a trusted caller (owner/co_agent/trusted_user)",
+          "error": "rejected: action 'list_allowed_commands' requires a trusted caller (owner/co_agent/trusted_user)",
           "success": false
         },
-        "tool": "create_my_skill"
+        "tool": "list_allowed_commands"
       },
       {
         "caller": "agent",
@@ -12028,10 +13158,10 @@
         },
         "result": {
           "data": null,
-          "error": "rejected: action 'tag_topic' requires a trusted caller (owner/co_agent/trusted_user)",
+          "error": "rejected: action 'list_subtask_webhooks' requires a trusted caller (owner/co_agent/trusted_user)",
           "success": false
         },
-        "tool": "tag_topic"
+        "tool": "list_subtask_webhooks"
       },
       {
         "caller": "agent",
@@ -12042,178 +13172,10 @@
         },
         "result": {
           "data": null,
-          "error": "rejected: action 'untag_topic' requires a trusted caller (owner/co_agent/trusted_user)",
+          "error": "rejected: action 'list_webhooks' requires a trusted caller (owner/co_agent/trusted_user)",
           "success": false
         },
-        "tool": "untag_topic"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'merge_tags' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "merge_tags"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'survey_my_history' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "survey_my_history"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'read_my_history' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "read_my_history"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'record_memory_unit' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "record_memory_unit"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'retract_memory_unit' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "retract_memory_unit"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'plan_next_memory_window' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "plan_next_memory_window"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'record_memory_core' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "record_memory_core"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'update_memory_core' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "update_memory_core"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'retract_memory_core' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "retract_memory_core"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": true,
-          "trusted_only": false
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'update_instructions' requires owner",
-          "success": false
-        },
-        "tool": "update_instructions"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": true,
-          "trusted_only": false
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'execute_shell' requires owner",
-          "success": false
-        },
-        "tool": "execute_shell"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": true,
-          "trusted_only": false
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'configure_llm_provider' requires owner",
-          "success": false
-        },
-        "tool": "configure_llm_provider"
+        "tool": "list_webhooks"
       },
       {
         "caller": "agent",
@@ -12232,44 +13194,30 @@
       {
         "caller": "agent",
         "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": true,
+          "mcp_trusted_only": true,
+          "owner_only": false,
           "trusted_only": false
         },
         "result": {
           "data": null,
-          "error": "rejected: action 'configure_nostr' requires owner",
+          "error": "rejected: mcp__trusted_local は信頼された呼び出し元（owner/co_agent/trusted_user）のみ利用できます",
           "success": false
         },
-        "tool": "configure_nostr"
+        "tool": "mcp__trusted_local__echo"
       },
       {
         "caller": "agent",
         "policy": {
           "mcp_trusted_only": false,
-          "owner_only": true,
-          "trusted_only": false
+          "owner_only": false,
+          "trusted_only": true
         },
         "result": {
           "data": null,
-          "error": "rejected: action 'configure_self' requires owner",
+          "error": "rejected: action 'merge_tags' requires a trusted caller (owner/co_agent/trusted_user)",
           "success": false
         },
-        "tool": "configure_self"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": true,
-          "trusted_only": false
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'configure_mcp_server' requires owner",
-          "success": false
-        },
-        "tool": "configure_mcp_server"
+        "tool": "merge_tags"
       },
       {
         "caller": "agent",
@@ -12308,80 +13256,10 @@
         },
         "result": {
           "data": null,
-          "error": "rejected: action 'update_memory_index_config' requires a trusted caller (owner/co_agent/trusted_user)",
+          "error": "rejected: action 'plan_next_memory_window' requires a trusted caller (owner/co_agent/trusted_user)",
           "success": false
         },
-        "tool": "update_memory_index_config"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": true,
-          "trusted_only": false
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'add_allowed_command' requires owner",
-          "success": false
-        },
-        "tool": "add_allowed_command"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'list_allowed_commands' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "list_allowed_commands"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": true,
-          "trusted_only": false
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'remove_allowed_command' requires owner",
-          "success": false
-        },
-        "tool": "remove_allowed_command"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'create_skill' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "create_skill"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": true,
-          "trusted_only": false
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'update_heartbeat_instructions' requires owner",
-          "success": false
-        },
-        "tool": "update_heartbeat_instructions"
+        "tool": "plan_next_memory_window"
       },
       {
         "caller": "agent",
@@ -12406,10 +13284,10 @@
         },
         "result": {
           "data": null,
-          "error": "rejected: action 'get_my_nostr_relay' requires a trusted caller (owner/co_agent/trusted_user)",
+          "error": "rejected: action 'read_my_history' requires a trusted caller (owner/co_agent/trusted_user)",
           "success": false
         },
-        "tool": "get_my_nostr_relay"
+        "tool": "read_my_history"
       },
       {
         "caller": "agent",
@@ -12420,10 +13298,10 @@
         },
         "result": {
           "data": null,
-          "error": "rejected: action 'set_my_nostr_relay' requires a trusted caller (owner/co_agent/trusted_user)",
+          "error": "rejected: action 'record_memory_core' requires a trusted caller (owner/co_agent/trusted_user)",
           "success": false
         },
-        "tool": "set_my_nostr_relay"
+        "tool": "record_memory_core"
       },
       {
         "caller": "agent",
@@ -12434,10 +13312,10 @@
         },
         "result": {
           "data": null,
-          "error": "rejected: action 'get_my_heartbeat' requires a trusted caller (owner/co_agent/trusted_user)",
+          "error": "rejected: action 'record_memory_unit' requires a trusted caller (owner/co_agent/trusted_user)",
           "success": false
         },
-        "tool": "get_my_heartbeat"
+        "tool": "record_memory_unit"
       },
       {
         "caller": "agent",
@@ -12448,10 +13326,52 @@
         },
         "result": {
           "data": null,
-          "error": "rejected: action 'set_my_heartbeat' requires a trusted caller (owner/co_agent/trusted_user)",
+          "error": "rejected: action 'reflect_and_learn' requires a trusted caller (owner/co_agent/trusted_user)",
           "success": false
         },
-        "tool": "set_my_heartbeat"
+        "tool": "reflect_and_learn"
+      },
+      {
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": true,
+          "trusted_only": false
+        },
+        "result": {
+          "data": null,
+          "error": "rejected: action 'remove_allowed_command' requires owner",
+          "success": false
+        },
+        "tool": "remove_allowed_command"
+      },
+      {
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": false,
+          "trusted_only": true
+        },
+        "result": {
+          "data": null,
+          "error": "rejected: action 'retract_memory_core' requires a trusted caller (owner/co_agent/trusted_user)",
+          "success": false
+        },
+        "tool": "retract_memory_core"
+      },
+      {
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": false,
+          "trusted_only": true
+        },
+        "result": {
+          "data": null,
+          "error": "rejected: action 'retract_memory_unit' requires a trusted caller (owner/co_agent/trusted_user)",
+          "success": false
+        },
+        "tool": "retract_memory_unit"
       },
       {
         "caller": "agent",
@@ -12476,108 +13396,10 @@
         },
         "result": {
           "data": null,
-          "error": "rejected: action 'get_my_schedules' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "get_my_schedules"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'set_my_schedule' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "set_my_schedule"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'update_my_schedule' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "update_my_schedule"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'delete_my_schedule' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "delete_my_schedule"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'get_default_subtask_webhook' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "get_default_subtask_webhook"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
           "error": "rejected: action 'set_default_subtask_webhook' requires a trusted caller (owner/co_agent/trusted_user)",
           "success": false
         },
         "tool": "set_default_subtask_webhook"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'list_subtask_webhooks' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "list_subtask_webhooks"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'get_default_webhook' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "get_default_webhook"
       },
       {
         "caller": "agent",
@@ -12602,24 +13424,234 @@
         },
         "result": {
           "data": null,
-          "error": "rejected: action 'list_webhooks' requires a trusted caller (owner/co_agent/trusted_user)",
+          "error": "rejected: action 'set_my_heartbeat' requires a trusted caller (owner/co_agent/trusted_user)",
           "success": false
         },
-        "tool": "list_webhooks"
+        "tool": "set_my_heartbeat"
       },
       {
         "caller": "agent",
         "policy": {
-          "mcp_trusted_only": true,
+          "mcp_trusted_only": false,
           "owner_only": false,
+          "trusted_only": true
+        },
+        "result": {
+          "data": null,
+          "error": "rejected: action 'set_my_nostr_relay' requires a trusted caller (owner/co_agent/trusted_user)",
+          "success": false
+        },
+        "tool": "set_my_nostr_relay"
+      },
+      {
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": false,
+          "trusted_only": true
+        },
+        "result": {
+          "data": null,
+          "error": "rejected: action 'set_my_schedule' requires a trusted caller (owner/co_agent/trusted_user)",
+          "success": false
+        },
+        "tool": "set_my_schedule"
+      },
+      {
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": false,
+          "trusted_only": true
+        },
+        "result": {
+          "data": null,
+          "error": "rejected: action 'survey_my_history' requires a trusted caller (owner/co_agent/trusted_user)",
+          "success": false
+        },
+        "tool": "survey_my_history"
+      },
+      {
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": false,
+          "trusted_only": true
+        },
+        "result": {
+          "data": null,
+          "error": "rejected: action 'tag_topic' requires a trusted caller (owner/co_agent/trusted_user)",
+          "success": false
+        },
+        "tool": "tag_topic"
+      },
+      {
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": false,
+          "trusted_only": true
+        },
+        "result": {
+          "data": null,
+          "error": "rejected: action 'untag_topic' requires a trusted caller (owner/co_agent/trusted_user)",
+          "success": false
+        },
+        "tool": "untag_topic"
+      },
+      {
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": true,
           "trusted_only": false
         },
         "result": {
           "data": null,
-          "error": "rejected: mcp__trusted_local は信頼された呼び出し元（owner/co_agent/trusted_user）のみ利用できます",
+          "error": "rejected: action 'update_heartbeat_instructions' requires owner",
           "success": false
         },
-        "tool": "mcp__trusted_local__echo"
+        "tool": "update_heartbeat_instructions"
+      },
+      {
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": true,
+          "trusted_only": false
+        },
+        "result": {
+          "data": null,
+          "error": "rejected: action 'update_instructions' requires owner",
+          "success": false
+        },
+        "tool": "update_instructions"
+      },
+      {
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": false,
+          "trusted_only": true
+        },
+        "result": {
+          "data": null,
+          "error": "rejected: action 'update_memory_core' requires a trusted caller (owner/co_agent/trusted_user)",
+          "success": false
+        },
+        "tool": "update_memory_core"
+      },
+      {
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": false,
+          "trusted_only": true
+        },
+        "result": {
+          "data": null,
+          "error": "rejected: action 'update_memory_index_config' requires a trusted caller (owner/co_agent/trusted_user)",
+          "success": false
+        },
+        "tool": "update_memory_index_config"
+      },
+      {
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": false,
+          "trusted_only": true
+        },
+        "result": {
+          "data": null,
+          "error": "rejected: action 'update_my_schedule' requires a trusted caller (owner/co_agent/trusted_user)",
+          "success": false
+        },
+        "tool": "update_my_schedule"
+      },
+      {
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": true,
+          "trusted_only": false
+        },
+        "result": {
+          "data": null,
+          "error": "rejected: action 'ws_delete' requires owner",
+          "success": false
+        },
+        "tool": "ws_delete"
+      },
+      {
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": true,
+          "trusted_only": false
+        },
+        "result": {
+          "data": null,
+          "error": "rejected: action 'ws_edit' requires owner",
+          "success": false
+        },
+        "tool": "ws_edit"
+      },
+      {
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": true,
+          "trusted_only": false
+        },
+        "result": {
+          "data": null,
+          "error": "rejected: action 'ws_list' requires owner",
+          "success": false
+        },
+        "tool": "ws_list"
+      },
+      {
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": true,
+          "trusted_only": false
+        },
+        "result": {
+          "data": null,
+          "error": "rejected: action 'ws_mkdir' requires owner",
+          "success": false
+        },
+        "tool": "ws_mkdir"
+      },
+      {
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": true,
+          "trusted_only": false
+        },
+        "result": {
+          "data": null,
+          "error": "rejected: action 'ws_read' requires owner",
+          "success": false
+        },
+        "tool": "ws_read"
+      },
+      {
+        "caller": "agent",
+        "policy": {
+          "mcp_trusted_only": false,
+          "owner_only": true,
+          "trusted_only": false
+        },
+        "result": {
+          "data": null,
+          "error": "rejected: action 'ws_write' requires owner",
+          "success": false
+        },
+        "tool": "ws_write"
       }
     ],
     "successful_calls": [
@@ -13776,7 +14808,29 @@
         "arguments": {
           "thought": "baseline thought"
         },
-        "postcondition": null,
+        "postcondition": {
+          "arguments": null,
+          "before": {
+            "db_query": "inner_voice_logs",
+            "rows": []
+          },
+          "db_query": "inner_voice_logs",
+          "expect_success": false,
+          "method": null,
+          "observed": {
+            "db_query": "inner_voice_logs",
+            "rows": [
+              {
+                "content": "baseline thought",
+                "log_type": "inner_voice",
+                "session_id": "web-baseline-agent-conversation",
+                "speaker_id": "baseline-agent"
+              }
+            ]
+          },
+          "tool": null,
+          "uri": null
+        },
         "result": {
           "data": {
             "recorded": true,
@@ -15019,7 +16073,30 @@
           ],
           "reflection": "baseline reflection"
         },
-        "postcondition": null,
+        "postcondition": {
+          "arguments": null,
+          "before": {
+            "db_query": "reflection_memory",
+            "value": []
+          },
+          "db_query": "reflection_memory",
+          "expect_success": false,
+          "method": null,
+          "observed": {
+            "db_query": "reflection_memory",
+            "value": [
+              {
+                "agent_id": "baseline-agent",
+                "category": "reflection",
+                "content": "振り返り: baseline reflection\n洞察: Array [String(\"observed\")]\nアクション: Array [String(\"preserve\")]",
+                "created_at": "<timestamp>",
+                "id": "<uuid>"
+              }
+            ]
+          },
+          "tool": null,
+          "uri": null
+        },
         "result": {
           "data": {
             "reflected": true,
@@ -16531,7 +17608,36 @@
           "target_id": "baseline-peer",
           "target_name": "Baseline Peer"
         },
-        "postcondition": null,
+        "postcondition": {
+          "arguments": null,
+          "before": {
+            "db_query": "impressions",
+            "value": []
+          },
+          "db_query": "impressions",
+          "expect_success": false,
+          "method": null,
+          "observed": {
+            "db_query": "impressions",
+            "value": [
+              {
+                "agent_id": "baseline-agent",
+                "agreement": "neutral",
+                "communication_style": "",
+                "id": "<uuid>",
+                "last_updated_turn": 0,
+                "notes": "",
+                "personality": "",
+                "recent_behavior": "",
+                "session_id": "web-baseline-agent-conversation",
+                "target_id": "baseline-peer",
+                "target_name": "Baseline Peer"
+              }
+            ]
+          },
+          "tool": null,
+          "uri": null
+        },
         "result": {
           "data": {
             "target": "Baseline Peer",
@@ -17318,73 +18424,13 @@
         "facet": "missing_arguments",
         "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
         "status": "not_applicable",
-        "tool": "declare_done"
-      },
-      {
-        "facet": "missing_arguments",
-        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
-        "status": "not_applicable",
-        "tool": "get_system_info"
-      },
-      {
-        "facet": "missing_arguments",
-        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
-        "status": "not_applicable",
-        "tool": "ws_list"
-      },
-      {
-        "facet": "missing_arguments",
-        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
-        "status": "not_applicable",
-        "tool": "reflect_and_learn"
-      },
-      {
-        "facet": "missing_arguments",
-        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
-        "status": "not_applicable",
-        "tool": "browse_memory_index"
-      },
-      {
-        "facet": "missing_arguments",
-        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
-        "status": "not_applicable",
-        "tool": "survey_my_history"
-      },
-      {
-        "facet": "missing_arguments",
-        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
-        "status": "not_applicable",
-        "tool": "read_my_history"
-      },
-      {
-        "facet": "missing_arguments",
-        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
-        "status": "not_applicable",
-        "tool": "plan_next_memory_window"
-      },
-      {
-        "facet": "missing_arguments",
-        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
-        "status": "not_applicable",
         "tool": "analyze_llm_usage"
       },
       {
         "facet": "missing_arguments",
         "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
         "status": "not_applicable",
-        "tool": "recall_model_experiences"
-      },
-      {
-        "facet": "missing_arguments",
-        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
-        "status": "not_applicable",
-        "tool": "update_task_contract"
-      },
-      {
-        "facet": "missing_arguments",
-        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
-        "status": "not_applicable",
-        "tool": "get_task"
+        "tool": "browse_memory_index"
       },
       {
         "facet": "missing_arguments",
@@ -17402,6 +18448,96 @@
         "facet": "missing_arguments",
         "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
         "status": "not_applicable",
+        "tool": "declare_done"
+      },
+      {
+        "facet": "missing_arguments",
+        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
+        "status": "not_applicable",
+        "tool": "discord_list_guilds"
+      },
+      {
+        "facet": "missing_arguments",
+        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
+        "status": "not_applicable",
+        "tool": "ensure_subtask_webhook"
+      },
+      {
+        "facet": "missing_arguments",
+        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
+        "status": "not_applicable",
+        "tool": "ensure_webhook"
+      },
+      {
+        "facet": "missing_arguments",
+        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
+        "status": "not_applicable",
+        "tool": "get_default_subtask_webhook"
+      },
+      {
+        "facet": "missing_arguments",
+        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
+        "status": "not_applicable",
+        "tool": "get_default_webhook"
+      },
+      {
+        "facet": "missing_arguments",
+        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
+        "status": "not_applicable",
+        "tool": "get_my_heartbeat"
+      },
+      {
+        "facet": "missing_arguments",
+        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
+        "status": "not_applicable",
+        "tool": "get_my_nostr_relay"
+      },
+      {
+        "facet": "missing_arguments",
+        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
+        "status": "not_applicable",
+        "tool": "get_my_schedules"
+      },
+      {
+        "facet": "missing_arguments",
+        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
+        "status": "not_applicable",
+        "tool": "get_system_info"
+      },
+      {
+        "facet": "missing_arguments",
+        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
+        "status": "not_applicable",
+        "tool": "get_task"
+      },
+      {
+        "facet": "missing_arguments",
+        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
+        "status": "not_applicable",
+        "tool": "leave_voice_channel"
+      },
+      {
+        "facet": "missing_arguments",
+        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
+        "status": "not_applicable",
+        "tool": "list_allowed_commands"
+      },
+      {
+        "facet": "missing_arguments",
+        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
+        "status": "not_applicable",
+        "tool": "list_subtask_webhooks"
+      },
+      {
+        "facet": "missing_arguments",
+        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
+        "status": "not_applicable",
+        "tool": "list_webhooks"
+      },
+      {
+        "facet": "missing_arguments",
+        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
+        "status": "not_applicable",
         "tool": "nostr_generate_key"
       },
       {
@@ -17414,37 +18550,37 @@
         "facet": "missing_arguments",
         "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
         "status": "not_applicable",
+        "tool": "plan_next_memory_window"
+      },
+      {
+        "facet": "missing_arguments",
+        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
+        "status": "not_applicable",
+        "tool": "read_my_history"
+      },
+      {
+        "facet": "missing_arguments",
+        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
+        "status": "not_applicable",
         "tool": "rebuild_memory_index"
       },
       {
         "facet": "missing_arguments",
         "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
         "status": "not_applicable",
-        "tool": "update_memory_index_config"
+        "tool": "recall_model_experiences"
       },
       {
         "facet": "missing_arguments",
         "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
         "status": "not_applicable",
-        "tool": "list_allowed_commands"
+        "tool": "reflect_and_learn"
       },
       {
         "facet": "missing_arguments",
         "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
         "status": "not_applicable",
-        "tool": "get_my_nostr_relay"
-      },
-      {
-        "facet": "missing_arguments",
-        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
-        "status": "not_applicable",
-        "tool": "set_my_nostr_relay"
-      },
-      {
-        "facet": "missing_arguments",
-        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
-        "status": "not_applicable",
-        "tool": "get_my_heartbeat"
+        "tool": "run_my_heartbeat"
       },
       {
         "facet": "missing_arguments",
@@ -17456,37 +18592,97 @@
         "facet": "missing_arguments",
         "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
         "status": "not_applicable",
-        "tool": "run_my_heartbeat"
+        "tool": "set_my_nostr_relay"
       },
       {
         "facet": "missing_arguments",
         "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
         "status": "not_applicable",
-        "tool": "get_my_schedules"
+        "tool": "survey_my_history"
       },
       {
         "facet": "missing_arguments",
         "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
         "status": "not_applicable",
-        "tool": "get_default_subtask_webhook"
+        "tool": "update_memory_index_config"
       },
       {
         "facet": "missing_arguments",
         "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
         "status": "not_applicable",
-        "tool": "list_subtask_webhooks"
+        "tool": "update_task_contract"
       },
       {
         "facet": "missing_arguments",
         "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
         "status": "not_applicable",
-        "tool": "get_default_webhook"
+        "tool": "ws_list"
       },
       {
-        "facet": "missing_arguments",
-        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
-        "status": "not_applicable",
-        "tool": "list_webhooks"
+        "facet": "success",
+        "reason": "Requires a live Discord gateway and mutates a remote message.",
+        "status": "uncollected",
+        "tool": "discord_add_reaction"
+      },
+      {
+        "facet": "success",
+        "reason": "Requires a live Discord gateway and reads or mutates remote channel configuration.",
+        "status": "uncollected",
+        "tool": "discord_channel_config"
+      },
+      {
+        "facet": "success",
+        "reason": "Requires a live Discord gateway and creates a remote channel.",
+        "status": "uncollected",
+        "tool": "discord_create_channel"
+      },
+      {
+        "facet": "success",
+        "reason": "Requires a live Discord gateway and creates a remote webhook.",
+        "status": "uncollected",
+        "tool": "discord_create_webhook"
+      },
+      {
+        "facet": "success",
+        "reason": "Requires a live Discord gateway to list remote channels.",
+        "status": "uncollected",
+        "tool": "discord_list_channels"
+      },
+      {
+        "facet": "success",
+        "reason": "Requires a live Discord gateway to list remote guilds.",
+        "status": "uncollected",
+        "tool": "discord_list_guilds"
+      },
+      {
+        "facet": "success",
+        "reason": "Requires a live Discord gateway and uploads a file to a remote channel.",
+        "status": "uncollected",
+        "tool": "discord_send_file"
+      },
+      {
+        "facet": "success",
+        "reason": "Requires a live Discord gateway and may create a remote webhook.",
+        "status": "uncollected",
+        "tool": "ensure_subtask_webhook"
+      },
+      {
+        "facet": "success",
+        "reason": "Requires a live Discord gateway and may create a remote webhook.",
+        "status": "uncollected",
+        "tool": "ensure_webhook"
+      },
+      {
+        "facet": "success",
+        "reason": "Requires a live Discord gateway and joins a remote voice channel.",
+        "status": "uncollected",
+        "tool": "join_voice_channel"
+      },
+      {
+        "facet": "success",
+        "reason": "Requires a live Discord gateway and leaves a remote voice channel.",
+        "status": "uncollected",
+        "tool": "leave_voice_channel"
       },
       {
         "facet": "success",
@@ -17496,9 +18692,15 @@
       },
       {
         "facet": "success",
-        "reason": "Requires a generated key and configured Nostr transport capability; successful adoption may start a live relay connection.",
+        "reason": "Requires an adopted Nostr identity and publishes to live relays.",
         "status": "uncollected",
-        "tool": "nostr_switch_identity"
+        "tool": "nostr_post"
+      },
+      {
+        "facet": "success",
+        "reason": "Requires an adopted Nostr identity and publishes to live relays.",
+        "status": "uncollected",
+        "tool": "nostr_reply"
       },
       {
         "facet": "success",
@@ -17508,15 +18710,39 @@
       },
       {
         "facet": "success",
-        "reason": "Successful manual fire runs an actual agent turn through a configured transport and LLM provider.",
+        "reason": "Requires a generated key and configured Nostr transport capability; successful adoption may start a live relay connection.",
         "status": "uncollected",
-        "tool": "run_my_heartbeat"
+        "tool": "nostr_switch_identity"
+      },
+      {
+        "facet": "success",
+        "reason": "Requires an adopted Nostr identity and uploads to a live external service.",
+        "status": "uncollected",
+        "tool": "nostr_upload"
+      },
+      {
+        "facet": "success",
+        "reason": "Requires an adopted Nostr identity and performs a live external payment flow.",
+        "status": "uncollected",
+        "tool": "nostr_zap"
       },
       {
         "facet": "success",
         "reason": "Success delivers a message through the active transport. A local fake delivery would not fix live delivery behavior.",
         "status": "uncollected",
         "tool": "request_peer_review"
+      },
+      {
+        "facet": "success",
+        "reason": "Successful manual fire runs an actual agent turn through a configured transport and LLM provider.",
+        "status": "uncollected",
+        "tool": "run_my_heartbeat"
+      },
+      {
+        "facet": "success",
+        "reason": "Requires a live Discord gateway and sends remote UI components.",
+        "status": "uncollected",
+        "tool": "send_ui"
       }
     ],
     "unsuccessful_attempts": []
@@ -17529,7 +18755,8 @@
           "caller": "owner",
           "depth": 0,
           "mcp_caller_is_trusted": true,
-          "shell_enabled": true
+          "shell_enabled": true,
+          "transport": "without_transport"
         },
         "name": "owner_depth0_all_features",
         "visible_tools": [
@@ -17622,10 +18849,221 @@
       {
         "dimensions": {
           "allowlist": null,
+          "caller": "owner",
+          "depth": 0,
+          "mcp_caller_is_trusted": true,
+          "shell_enabled": true,
+          "transport": "discord"
+        },
+        "name": "owner_depth0_discord",
+        "visible_tools": [
+          "add_allowed_command",
+          "analyze_llm_usage",
+          "browse_memory_index",
+          "cancel_subtask",
+          "close_task",
+          "configure_llm_provider",
+          "configure_mcp_server",
+          "configure_nostr",
+          "configure_self",
+          "create_my_skill",
+          "create_skill",
+          "declare_done",
+          "delete_my_schedule",
+          "discord_add_reaction",
+          "discord_channel_config",
+          "discord_create_channel",
+          "discord_create_webhook",
+          "discord_list_channels",
+          "discord_list_guilds",
+          "discord_send_file",
+          "ensure_subtask_webhook",
+          "ensure_webhook",
+          "evaluate_response",
+          "execute_shell",
+          "generate_inner_voice",
+          "get_default_subtask_webhook",
+          "get_default_webhook",
+          "get_my_heartbeat",
+          "get_my_nostr_relay",
+          "get_my_schedules",
+          "get_system_info",
+          "get_task",
+          "join_voice_channel",
+          "learn_from_experience",
+          "learn_from_peer",
+          "leave_voice_channel",
+          "list_allowed_commands",
+          "list_subtask_webhooks",
+          "list_webhooks",
+          "manage_allowed_commands",
+          "mcp__public_local__echo",
+          "mcp__trusted_local__echo",
+          "merge_tags",
+          "nostr_generate_key",
+          "nostr_list_keys",
+          "nostr_run",
+          "nostr_switch_identity",
+          "open_task",
+          "plan_next_memory_window",
+          "read_heartbeat_instructions",
+          "read_my_history",
+          "read_skill",
+          "rebuild_memory_index",
+          "recall_model_experiences",
+          "record_memory_core",
+          "record_memory_unit",
+          "record_task_progress",
+          "reflect_and_learn",
+          "remove_allowed_command",
+          "report_progress",
+          "request_peer_review",
+          "restore_my_skill",
+          "retire_my_skill",
+          "retract_memory_core",
+          "retract_memory_unit",
+          "retrieve_memory_nodes",
+          "run_my_heartbeat",
+          "save_model_insight",
+          "search_memory_index",
+          "search_my_history",
+          "select_llm",
+          "send_ui",
+          "set_default_subtask_webhook",
+          "set_default_webhook",
+          "set_my_heartbeat",
+          "set_my_nostr_relay",
+          "set_my_schedule",
+          "spawn_subtask",
+          "steer_subtask",
+          "summarize_and_save",
+          "survey_my_history",
+          "tag_topic",
+          "untag_topic",
+          "update_heartbeat_instructions",
+          "update_impression",
+          "update_instructions",
+          "update_memory_core",
+          "update_memory_index_config",
+          "update_my_schedule",
+          "update_task_contract",
+          "ws_delete",
+          "ws_edit",
+          "ws_list",
+          "ws_mkdir",
+          "ws_read",
+          "ws_write"
+        ]
+      },
+      {
+        "dimensions": {
+          "allowlist": null,
+          "caller": "owner",
+          "depth": 0,
+          "mcp_caller_is_trusted": true,
+          "shell_enabled": true,
+          "transport": "nostr"
+        },
+        "name": "owner_depth0_nostr",
+        "visible_tools": [
+          "add_allowed_command",
+          "analyze_llm_usage",
+          "browse_memory_index",
+          "cancel_subtask",
+          "close_task",
+          "configure_llm_provider",
+          "configure_mcp_server",
+          "configure_nostr",
+          "configure_self",
+          "create_my_skill",
+          "create_skill",
+          "declare_done",
+          "delete_my_schedule",
+          "evaluate_response",
+          "execute_shell",
+          "generate_inner_voice",
+          "get_default_subtask_webhook",
+          "get_default_webhook",
+          "get_my_heartbeat",
+          "get_my_nostr_relay",
+          "get_my_schedules",
+          "get_system_info",
+          "get_task",
+          "learn_from_experience",
+          "learn_from_peer",
+          "list_allowed_commands",
+          "list_subtask_webhooks",
+          "list_webhooks",
+          "manage_allowed_commands",
+          "mcp__public_local__echo",
+          "mcp__trusted_local__echo",
+          "merge_tags",
+          "nostr_generate_key",
+          "nostr_list_keys",
+          "nostr_post",
+          "nostr_reply",
+          "nostr_run",
+          "nostr_switch_identity",
+          "nostr_upload",
+          "nostr_zap",
+          "open_task",
+          "plan_next_memory_window",
+          "read_heartbeat_instructions",
+          "read_my_history",
+          "read_skill",
+          "rebuild_memory_index",
+          "recall_model_experiences",
+          "record_memory_core",
+          "record_memory_unit",
+          "record_task_progress",
+          "reflect_and_learn",
+          "remove_allowed_command",
+          "report_progress",
+          "request_peer_review",
+          "restore_my_skill",
+          "retire_my_skill",
+          "retract_memory_core",
+          "retract_memory_unit",
+          "retrieve_memory_nodes",
+          "run_my_heartbeat",
+          "save_model_insight",
+          "search_memory_index",
+          "search_my_history",
+          "select_llm",
+          "set_default_subtask_webhook",
+          "set_default_webhook",
+          "set_my_heartbeat",
+          "set_my_nostr_relay",
+          "set_my_schedule",
+          "spawn_subtask",
+          "steer_subtask",
+          "summarize_and_save",
+          "survey_my_history",
+          "tag_topic",
+          "untag_topic",
+          "update_heartbeat_instructions",
+          "update_impression",
+          "update_instructions",
+          "update_memory_core",
+          "update_memory_index_config",
+          "update_my_schedule",
+          "update_task_contract",
+          "ws_delete",
+          "ws_edit",
+          "ws_list",
+          "ws_mkdir",
+          "ws_read",
+          "ws_write"
+        ]
+      },
+      {
+        "dimensions": {
+          "allowlist": null,
           "caller": "co_agent",
           "depth": 0,
           "mcp_caller_is_trusted": true,
-          "shell_enabled": true
+          "shell_enabled": true,
+          "transport": "without_transport"
         },
         "name": "coagent_owner_equivalent",
         "visible_tools": [
@@ -17721,7 +19159,8 @@
           "caller": "trusted_user",
           "depth": 0,
           "mcp_caller_is_trusted": true,
-          "shell_enabled": true
+          "shell_enabled": true,
+          "transport": "without_transport"
         },
         "name": "trusted_user",
         "visible_tools": [
@@ -17800,7 +19239,8 @@
           "caller": "agent",
           "depth": 0,
           "mcp_caller_is_trusted": false,
-          "shell_enabled": true
+          "shell_enabled": true,
+          "transport": "without_transport"
         },
         "name": "untrusted_agent",
         "visible_tools": [
@@ -17842,7 +19282,8 @@
           "caller": "owner",
           "depth": 1,
           "mcp_caller_is_trusted": true,
-          "shell_enabled": true
+          "shell_enabled": true,
+          "transport": "without_transport"
         },
         "name": "owner_depth1_subengine",
         "visible_tools": [
@@ -17901,7 +19342,8 @@
           "caller": "owner",
           "depth": 2,
           "mcp_caller_is_trusted": true,
-          "shell_enabled": true
+          "shell_enabled": true,
+          "transport": "without_transport"
         },
         "name": "owner_depth2_cap",
         "visible_tools": [
@@ -17960,7 +19402,8 @@
           "caller": "owner",
           "depth": 0,
           "mcp_caller_is_trusted": true,
-          "shell_enabled": false
+          "shell_enabled": false,
+          "transport": "without_transport"
         },
         "name": "owner_shell_disabled",
         "visible_tools": [
@@ -18059,7 +19502,8 @@
           "caller": "owner",
           "depth": 0,
           "mcp_caller_is_trusted": true,
-          "shell_enabled": true
+          "shell_enabled": true,
+          "transport": "without_transport"
         },
         "name": "owner_cross_slot_allowlist",
         "visible_tools": [
@@ -18074,7 +19518,8 @@
           "caller": "agent",
           "depth": 0,
           "mcp_caller_is_trusted": false,
-          "shell_enabled": false
+          "shell_enabled": false,
+          "transport": "without_transport"
         },
         "name": "untrusted_mcp_trusted_server_hidden",
         "visible_tools": [
