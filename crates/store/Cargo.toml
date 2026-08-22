@@ -1,0 +1,9 @@
+[package]
+name = "opencrab-store"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+opencrab-port = { path = "../port" }
+rusqlite = { workspace = true }
+serde_json = { workspace = true }

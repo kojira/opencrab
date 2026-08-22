@@ -1,0 +1,52 @@
+[package]
+name = "opencrab-app"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+name = "opencrab_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "opencrab-social-runtime"
+path = "src/bin/opencrab-social-runtime.rs"
+
+# e2e が必ず「いまの web-gate のコード」を動かすための保証（タスク #1）。
+# web-gate の本体は別クレート `web-gate`（core の型を使わない構造規律はそこで保たれる）。ここは
+# その**同じソース**を app 自身の bin として持つだけ。同一パッケージの bin なので cargo は
+# `CARGO_BIN_EXE_web-gate-e2e` を e2e に渡し、テスト前に**必ず再ビルドする** — `-p opencrab-app` の
+# ような絞り込みでも古いバイナリで緑にならない（兄弟クレートの bin は絞り込みでは作り直されない）。
+# 手順書の「先に build しろ」に依存しない（書き忘れが起き得ない）。
+# `test = false`: 同じソースの `#[cfg(test)]` を二重に走らせない（本体は `web-gate` クレートで走る）。
+[[bin]]
+name = "web-gate-e2e"
+path = "../web-gate/src/main.rs"
+test = false
+
+[dependencies]
+opencrab-port = { path = "../port" }
+opencrab-store = { path = "../store" }
+opencrab-social-runtime = { path = "../social-runtime" }
+opencrab-plugd = { path = "../plugd" }
+# process: 平文専用の cursor engine が `cursor-agent` CLI を子プロセスで起動する（crates/app/src/cursor.rs）。
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "net", "io-util", "process"] }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+# 本物のプロバイダの HTTPS 終端（TLS を自前で張らない・オーナー判断）。rustls + webpki の根。
+# 断片は `Response::chunk()` で読む（stream 機能）。gzip 等は要らない（SSE は非圧縮）。
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+# cursor engine の空の一時 cwd（RAII で削除・孤児を残さない）。deny cli.json の置き場（crates/app/src/cursor.rs）。
+tempfile = "3"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "net", "io-util", "process", "rt-multi-thread"] }
+# 本物の TLS 経路でアイドル上限が効くことを見せるための、ローカルの自己署名 TLS サーバ。
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rcgen = "0.13"
+# 実リレーで Nostr の場を通しで動かす #[ignore] E2E（tests/nostr_e2e.rs・タスク#1）用。投稿側の鍵生成・
+# 署名・リレーへの WebSocket 発行に、ゲートと**同じ純関数**（opencrab-nostr-gate の lib）を使う。これらは既に
+# nostr-gate クレートが依存グラフに持つので、workspace の再コンパイルは増えない（app のテストバイナリが link するだけ）。
+opencrab-nostr-gate = { path = "../nostr-gate" }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }

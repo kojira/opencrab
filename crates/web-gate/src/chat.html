@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>opencrab2 chat</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    display: flex; flex-direction: column; height: 100vh;
+    background: Canvas; color: CanvasText;
+    overflow-x: hidden; max-width: 100%;
+  }
+  header {
+    padding: 8px 12px; border-bottom: 1px solid rgba(128,128,128,.3);
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  }
+  header .title { font-weight: 600; margin-right: auto; }
+  header input {
+    font: inherit; font-size: 16px; padding: 4px 6px; border: 1px solid rgba(128,128,128,.4);
+    border-radius: 6px; background: Field; color: FieldText;
+  }
+  header input.room { width: 8em; }
+  header input.token { width: 12em; }
+  #log { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+  .msg { max-width: 78%; padding: 6px 10px; border-radius: 12px; white-space: pre-wrap; word-break: break-word; }
+  .msg .who { font-size: 12px; opacity: .65; margin-bottom: 2px; }
+  .msg.user { align-self: flex-end; background: #2f6fed; color: #fff; }
+  .msg.user .who { color: #dce6ff; }
+  .msg.agent { align-self: flex-start; background: rgba(128,128,128,.18); }
+  .sys { align-self: center; font-size: 13px; opacity: .7; font-style: italic; }
+  #status { align-self: center; font-size: 13px; opacity: .6; height: 1.2em; }
+  footer { padding: 8px 12px; border-top: 1px solid rgba(128,128,128,.3); display: flex; gap: 8px; }
+  footer input.text { flex: 1; min-width: 0; font: inherit; font-size: 16px; padding: 8px 10px; border: 1px solid rgba(128,128,128,.4); border-radius: 8px; background: Field; color: FieldText; }
+  footer button { font: inherit; padding: 8px 16px; border: 0; border-radius: 8px; background: #2f6fed; color: #fff; cursor: pointer; }
+  footer button:disabled { opacity: .5; cursor: default; }
+</style>
+</head>
+<body>
+<header>
+  <span class="title">opencrab2 chat</span>
+  <label>あなた <input id="author" value="test-owner" class="room"></label>
+  <label>room <input id="room" value="main" class="room"></label>
+  <label>token <input id="token" value="secret-token" class="token" type="password"></label>
+</header>
+<div id="log"></div>
+<div id="status"></div>
+<footer>
+  <input id="text" class="text" placeholder="メッセージを入力… (Enter で送信)" autocomplete="off">
+  <button id="send">送信</button>
+</footer>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const log = $("log"), statusEl = $("status");
+  let since = 0;          // 既読の最大 seq（core の read の from に使う）
+  let seen = new Set();   // 表示済み seq（重複描画を避ける）
+  let atBottom = true;
+
+  log.addEventListener("scroll", () => {
+    atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+  });
+
+  function esc(s) {
+    return String(s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  }
+
+  function addMessage(m) {
+    if (seen.has(m.seq)) return;
+    seen.add(m.seq);
+    if (typeof m.seq === "number" && m.seq > since) since = m.seq;
+
+    const el = document.createElement("div");
+    if (m.kind === "user" || m.kind === "agent") {
+      el.className = "msg " + m.kind;
+      el.innerHTML = `<div class="who">${esc(m.who)}</div>${esc(m.text)}`;
+    } else {
+      // react・settled 等はシステム行として簡素に見せる（黙って落とさない）。
+      el.className = "sys";
+      if (m.kind === "settled") {
+        el.textContent = `（決着）${m.text || ""}`.trim();
+      } else if (m.kind === "react" || m.kind === "reacted") {
+        // 絵文字は symbol に載る（text ではない）。無ければ言葉で表す。
+        el.textContent = `${m.who}が ${m.symbol || "リアクション"} をつけた`;
+      } else {
+        el.textContent = `${m.who} [${m.kind}] ${m.text || ""}`.trim();
+      }
+    }
+    log.appendChild(el);
+    if (atBottom) log.scrollTop = log.scrollHeight;
+  }
+
+  async function poll() {
+    const room = $("room").value.trim() || "main";
+    try {
+      const r = await fetch(`/rooms/${encodeURIComponent(room)}/messages?since=${since}`);
+      if (r.ok) {
+        const data = await r.json();
+        (data.messages || []).forEach(addMessage);
+        statusEl.textContent = data.label ? data.label : (data.active ? "エージェントBが入力中…" : "");
+      } else if (r.status === 503) {
+        statusEl.textContent = "（場の準備中…）";
+      } else {
+        statusEl.textContent = `（読み込みエラー ${r.status}）`;
+      }
+    } catch (e) {
+      statusEl.textContent = "（接続待ち…）";
+    }
+  }
+
+  async function send() {
+    const room = $("room").value.trim() || "main";
+    const author = $("author").value.trim() || "anon";
+    const token = $("token").value;
+    const text = $("text").value.trim();
+    if (!text) return;
+    $("send").disabled = true;
+    try {
+      const r = await fetch(`/rooms/${encodeURIComponent(room)}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+        body: JSON.stringify({ author, text }),
+      });
+      if (r.ok) {
+        $("text").value = "";
+        poll();
+      } else {
+        statusEl.textContent = `（送信できません ${r.status}）`;
+      }
+    } catch (e) {
+      statusEl.textContent = "（送信失敗）";
+    } finally {
+      $("send").disabled = false;
+      $("text").focus();
+    }
+  }
+
+  $("send").addEventListener("click", send);
+  $("text").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); send(); }
+  });
+  // room を変えたら読み直す（既読をリセット）。
+  $("room").addEventListener("change", () => { since = 0; seen = new Set(); log.innerHTML = ""; poll(); });
+
+  poll();
+  setInterval(poll, 2000);
+})();
+</script>
+</body>
+</html>

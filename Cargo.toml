@@ -14,6 +14,14 @@ members = [
     "crates/server",
     "crates/cli",
     "crates/voice",
+    "crates/port",
+    "crates/store",
+    "crates/engine",
+    "crates/social-runtime",
+    "crates/plugd",
+    "crates/app",
+    "crates/web-gate",
+    "crates/nostr-gate",
 ]
 
 [workspace.lints.clippy]
@@ -63,6 +71,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Tokenization (context budget accounting)
 tiktoken-rs = "0.9.1"
+regex = "1"
 
 # 行走査（ws_read の逐次読みで `\n` を数える / #617）
 memchr = "2"
