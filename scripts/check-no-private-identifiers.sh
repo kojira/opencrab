@@ -82,21 +82,46 @@ done
 # 運用者ハンドルだけは正当な参照にも必要なので、許可文字列を除去した残りを見る。
 # 許可するのは (1) この repository 自身の URL/issue shorthand と、(2) 挙動維持に必要な
 # 稼働中の既定 Nostr relay の exact hostname だけ。行単位では除外しない。
-operator_hits="$(git grep -inIF 'kojira' "${GREP_SCOPE[@]}" 2>/dev/null || true)"
+# 運用者ハンドル。次は許可する（消すと壊れる／個人を指さない）:
+#   - このリポジトリ自身の GitHub URL と issue 参照（消すとリンクが壊れる）
+#   - r.kojira.io / x.kojira.io ——**公共の Nostr パブリックリレー**。
+#     r.kojira.io は Damus の日本語圏における既定リレーで、誰でも接続できる公共サーバー。
+#     ドメインにハンドルが入っているだけで、運用者個人を指す情報ではない。
+#     opencrab の既定リレーに入っているのは、日本語圏で自然な選択（オーナー確認済み 2026-08-22）
+#
+# 行ごと捨てると同じ行の別の出現を見逃すので、出現を 1 件ずつ取り出して判定する。
+operator_hits=""
+while IFS= read -r hit; do
+  [ -n "$hit" ] || continue
+  case "$hit" in
+    # このリポジトリ自身（URL・issue 参照・CI バッジ）。opencrab-private のような
+    # 別リポジトリを通さないよう、opencrab の直後に境界を要求する。
+    *"kojira/opencrab") ;;
+    *"kojira/opencrab/"*|*"kojira/opencrab#"*|*"kojira/opencrab."*) ;;
+    "r.kojira.io"|"x.kojira.io"|"wss://r.kojira.io"|"wss://x.kojira.io") ;;
+    *) operator_hits="${operator_hits}${hit}"$'\n' ;;
+  esac
+done <<< "$(git grep -oIhE '(wss://)?[[:alnum:].-]*kojira[[:alnum:]./#-]*' "${GREP_SCOPE[@]}" 2>/dev/null | sort -u || true)"
+
 if [ -n "$operator_hits" ]; then
-  unexpected_operator_hits="$(printf '%s\n' "$operator_hits" \
-    | sed -E 's|https://github\.com/kojira/opencrab[^[:space:]<>"]*||g; s|kojira/opencrab#[0-9]+||g; s|r\.kojira\.io||g' \
-    | grep -i 'kojira' || true)"
-  if [ -n "$unexpected_operator_hits" ]; then
-    echo "[error] 許可参照以外の運用者ハンドルが追跡ファイルに入っています:"
-    printf '%s\n' "$unexpected_operator_hits" | head -20
-    fail=1
-  fi
+  echo "[error] 許可参照以外の運用者ハンドルが追跡ファイルに入っています:"
+  printf '%s\n' "$operator_hits" | head -20
+  fail=1
 fi
 
 # 平文メール。公開用の予約ドメインだけは合成 fixture として許可する。
-email_hits="$(git grep -nIE '[[:alnum:]._%+-]+@[[:alnum:].-]+\.[[:alpha:]]{2,}' "${GREP_SCOPE[@]}" 2>/dev/null \
-  | grep -vEi '@([^[:space:]]+\.)?(example\.com|example\.test|invalid)([^[:alnum:]]|$)' || true)"
+# 平文メール。予約ドメイン（合成 fixture）だけ許可する。
+# 行ごと捨てると同じ行の別メールを見逃すので、メールを 1 件ずつ取り出して判定する。
+email_hits=""
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  addr="${line##*:}"
+  case "$addr" in
+    *@example.com|*@example.test|*@invalid|*@*.example.com|*@*.example.test|*@*.invalid) ;;
+    *) email_hits="${email_hits}${line}"$'\n' ;;
+  esac
+done <<< "$(git grep -oIhE '[[:alnum:]._%+-]+@[[:alnum:].-]+\.[[:alpha:]]{2,}' "${GREP_SCOPE[@]}" 2>/dev/null | sort -u || true)"
+
 if [ -n "$email_hits" ]; then
   echo "[error] 平文メールアドレスが追跡ファイルに入っています:"
   printf '%s\n' "$email_hits" | head -20
