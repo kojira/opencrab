@@ -37,6 +37,7 @@ serde_json = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 # cursor engine の空の一時 cwd（RAII で削除・孤児を残さない）。deny cli.json の置き場（crates/app/src/cursor.rs）。
 tempfile = "3"
+libc = "0.2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "net", "io-util", "process", "rt-multi-thread"] }

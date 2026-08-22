@@ -579,10 +579,16 @@ async fn handle_http(
 
     // 起動ごとの token を知る、この web-gate だけが成功する launcher 専用 probe。
     // 別サービスや以前の web-gate が同じ port で応答しても ready にはならない。
-    if req.method == "GET" && req.path == "/__opencrab_launcher_ready" {
-        return match shared.launcher_ready_token.as_deref() {
-            Some(token) => write_text(&mut stream, 200, token).await,
-            None => write_response(&mut stream, 404, &json!({"error":"not found"})).await,
+    if let Some(readiness) = launcher_readiness(
+        &req.method,
+        &req.path,
+        shared.launcher_ready_token.as_deref(),
+    ) {
+        return match readiness {
+            LauncherReadiness::Ready(token) => write_text(&mut stream, 200, token).await,
+            LauncherReadiness::NotFound => {
+                write_response(&mut stream, 404, &json!({"error":"not found"})).await
+            }
         };
     }
 
@@ -614,6 +620,29 @@ async fn handle_http(
         "POST" => handle_post(&mut stream, &req, &room, &shared).await,
         _ => write_response(&mut stream, 405, &json!({"error":"method not allowed"})).await,
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum LauncherReadiness<'a> {
+    Ready(&'a str),
+    NotFound,
+}
+
+/// Recognize the launcher-only route and preserve the token from this exact
+/// web-gate process.  `None` means this is an ordinary HTTP route; `NotFound`
+/// hides the launcher endpoint when the process was not started with a token.
+fn launcher_readiness<'a>(
+    method: &str,
+    path: &str,
+    token: Option<&'a str>,
+) -> Option<LauncherReadiness<'a>> {
+    if method != "GET" || path != "/__opencrab_launcher_ready" {
+        return None;
+    }
+    Some(match token {
+        Some(token) => LauncherReadiness::Ready(token),
+        None => LauncherReadiness::NotFound,
+    })
 }
 
 /// 履歴を返す。web は自分の記録を持たない——その都度 core の `read`（§02）で読む。
@@ -824,6 +853,35 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launcher_readiness_returns_only_its_own_start_token() {
+        let readiness = launcher_readiness(
+            "GET",
+            "/__opencrab_launcher_ready",
+            Some("this-launch-token"),
+        );
+        assert_eq!(
+            readiness,
+            Some(LauncherReadiness::Ready("this-launch-token"))
+        );
+        assert_ne!(
+            readiness,
+            Some(LauncherReadiness::Ready("another-launch-token"))
+        );
+    }
+
+    #[test]
+    fn launcher_readiness_is_hidden_without_a_start_token() {
+        assert_eq!(
+            launcher_readiness("GET", "/__opencrab_launcher_ready", None),
+            Some(LauncherReadiness::NotFound)
+        );
+        assert_eq!(
+            launcher_readiness("POST", "/__opencrab_launcher_ready", Some("token")),
+            None
+        );
+    }
 
     // origin は毎回別の値（同じ場の中で衝突しない）。記録を持たずに一意な番号を振る（§10）。
     #[test]

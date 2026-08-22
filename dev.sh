@@ -134,6 +134,7 @@ load_start_config() {
     CORE_BIN="$TARGET_DIR/debug/opencrab-social-runtime"
     WEB_BIN="$TARGET_DIR/debug/web-gate"
     NOSTR_BIN="$TARGET_DIR/debug/nostr-gate"
+    LOCK_BIN="$TARGET_DIR/debug/opencrab-lock-fd"
 }
 
 read_pid() {
@@ -234,6 +235,7 @@ build_components() {
     local cargo_args=(
         build --locked
         -p opencrab-app --bin opencrab-social-runtime
+        -p opencrab-app --bin opencrab-lock-fd
     )
     if gate_enabled web; then
         cargo_args+=( -p opencrab-web-gate --bin web-gate )
@@ -441,19 +443,31 @@ supervisor_cleanup() {
 }
 
 supervise() {
-    : "${OC_CORE_BIN:?}" "${OC_WEB_BIN:?}" "${OC_NOSTR_BIN:?}"
+    : "${OC_CORE_BIN:?}" "${OC_WEB_BIN:?}" "${OC_NOSTR_BIN:?}" "${OC_LOCK_BIN:?}"
     : "${OC_HTTP_PORT:?}" "${OC_WEB_TOKEN:?}" "${OC_WEB_READY_TOKEN:?}" "${OC_ROOM:?}" "${OC_GATES:?}"
     CORE_BIN="$OC_CORE_BIN"
     WEB_BIN="$OC_WEB_BIN"
     NOSTR_BIN="$OC_NOSTR_BIN"
+    LOCK_BIN="$OC_LOCK_BIN"
     HTTP_PORT="$OC_HTTP_PORT"
     WEB_TOKEN="$OC_WEB_TOKEN"
     WEB_READY_TOKEN="$OC_WEB_READY_TOKEN"
     ROOM="$OC_ROOM"
     GATES="$OC_GATES"
+    TARGET_DIR="$OC_TARGET_DIR"
+    NOSTR_GATE_RELAY="${OC_NOSTR_GATE_RELAY:-}"
 
-    # Holding this file open lets stop distinguish our supervisor from a reused PID.
+    # The lock is acquired on this inherited descriptor.  flock(2) attaches to
+    # the shared open-file description, so it remains held after the helper
+    # exits and for this supervisor's entire lifetime.  Nothing below may read
+    # or mutate shared launcher state before this succeeds.
     exec 9> "$SUPERVISOR_LOCK"
+    "$LOCK_BIN" 9 || die "another launcher start is already in progress or running"
+
+    state_has_live_processes && die "launcher state still has live processes; run './dev.sh stop' first"
+    clean_dead_state
+    write_settings
+    : > "$LOG_DIR/launcher.log"
     printf '%s\n' "$$" > "$SUPERVISOR_PID_FILE"
     rm -f "$READY_FILE" "$FAILED_FILE" "$CORE_SOCKET"
     trap 'exit 0' TERM INT HUP
@@ -531,11 +545,6 @@ show_failure_logs() {
 }
 
 launch_supervisor() {
-    state_has_live_processes && die "launcher state still has live processes; run './dev.sh stop' first"
-    clean_dead_state
-    write_settings
-    : > "$LOG_DIR/launcher.log"
-
     local web_ready_token
     web_ready_token="$(LC_ALL=C od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
     [ "${#web_ready_token}" -eq 32 ] || die "could not generate a web-gate readiness token"
@@ -543,39 +552,61 @@ launch_supervisor() {
     export OC_CORE_BIN="$CORE_BIN"
     export OC_WEB_BIN="$WEB_BIN"
     export OC_NOSTR_BIN="$NOSTR_BIN"
+    export OC_LOCK_BIN="$LOCK_BIN"
     export OC_HTTP_PORT="$HTTP_PORT"
     export OC_WEB_TOKEN="$WEB_TOKEN"
     export OC_WEB_READY_TOKEN="$web_ready_token"
     export OC_ROOM="$ROOM"
     export OC_GATES="$GATES"
+    export OC_TARGET_DIR="$TARGET_DIR"
+    export OC_NOSTR_GATE_RELAY="${NOSTR_GATE_RELAY:-}"
 
     nohup bash "$SCRIPT_DIR/dev.sh" __supervise </dev/null >> "$LOG_DIR/launcher.log" 2>&1 &
     local supervisor_pid=$!
+    local registered_pid
+    local owned_state=0
     local i
     for ((i = 0; i < 180; i++)); do
-        if [ -f "$READY_FILE" ]; then
-            echo "==> Ready"
-            cat "$SETTINGS_FILE"
-            echo "logs=$LOG_DIR"
-            return 0
-        fi
-        if [ -f "$FAILED_FILE" ]; then
-            echo "[error] $(cat "$FAILED_FILE")" >&2
-            show_failure_logs
-            stop_all >/dev/null 2>&1 || true
-            return 1
+        if registered_pid="$(read_pid "$SUPERVISOR_PID_FILE" 2>/dev/null)" \
+            && [ "$registered_pid" = "$supervisor_pid" ] \
+            && pid_alive "$supervisor_pid" \
+            && supervisor_owned "$supervisor_pid"; then
+            owned_state=1
+            if [ -f "$FAILED_FILE" ]; then
+                echo "[error] $(cat "$FAILED_FILE")" >&2
+                wait "$supervisor_pid" 2>/dev/null || true
+                show_failure_logs
+                return 1
+            fi
+            if [ -f "$READY_FILE" ]; then
+                echo "==> Ready"
+                cat "$SETTINGS_FILE"
+                echo "logs=$LOG_DIR"
+                return 0
+            fi
         fi
         if ! pid_alive "$supervisor_pid"; then
-            echo "[error] launcher supervisor exited before readiness" >&2
-            show_failure_logs
-            stop_all >/dev/null 2>&1 || true
+            wait "$supervisor_pid" 2>/dev/null || true
+            if [ "$owned_state" -eq 1 ]; then
+                echo "[error] launcher supervisor exited before readiness" >&2
+                show_failure_logs
+            else
+                echo "[error] launcher start lost the exclusive lock; another start is in progress or running" >&2
+            fi
             return 1
         fi
         sleep 0.1
     done
     echo "[error] launcher supervisor did not become ready within 18s" >&2
     show_failure_logs
-    stop_all >/dev/null 2>&1 || true
+    if registered_pid="$(read_pid "$SUPERVISOR_PID_FILE" 2>/dev/null)" \
+        && [ "$registered_pid" = "$supervisor_pid" ] \
+        && supervisor_owned "$supervisor_pid"; then
+        kill -TERM "$supervisor_pid" 2>/dev/null || true
+        wait "$supervisor_pid" 2>/dev/null || true
+    else
+        echo "[error] timed-out supervisor ownership changed; refusing to signal it" >&2
+    fi
     return 1
 }
 
