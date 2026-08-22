@@ -1455,7 +1455,10 @@ async fn debounce_flush_records_all_messages_and_runs_once_through_the_loop() {
         2,
         "窓の内容ありメッセージは全部個別に記録される（畳まない・落とさない）: {records:?}"
     );
-    assert!(records.contains(&"エージェントAの発言".to_string()), "{records:?}");
+    assert!(
+        records.contains(&"エージェントAの発言".to_string()),
+        "{records:?}"
+    );
     assert!(
         records.contains(&"エージェントCの発言".to_string()),
         "{records:?}"

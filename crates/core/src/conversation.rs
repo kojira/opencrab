@@ -1900,12 +1900,7 @@ mod budget_driven_recent_window_tests {
     fn newest_user_speech_survives_tool_flood_after_merge_removal() {
         let conn = opencrab_db::init_memory().unwrap();
         // 一番古い位置に置くユーザー発言（これが「今の指示」で、末尾からは押し出される）。
-        insert_raw(
-            &conn,
-            "speech",
-            Some("owner"),
-            "この指示は消えてはいけない",
-        );
+        insert_raw(&conn, "speech", Some("owner"), "この指示は消えてはいけない");
         // 末尾を埋める巨大なツール往復（ユーザー発言を連続区間の外へ押し出す）。
         for i in 0..40 {
             insert_raw(
