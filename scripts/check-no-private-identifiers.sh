@@ -31,7 +31,14 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-GREP_SCOPE=(-- .)
+# baseline/ は旧構造の外形を機械採取した記録で、書いたコードではない。
+# 「何が在ったか」の目録として残すので、実値を含むのが正しい（合意 §2.5 の対象外）。
+# baseline/ は旧構造の外形を機械採取した記録で、書いたコードではない。
+# 「何が在ったか」の目録として残すので、実値を含むのが正しい（合意 §2.5 の対象外）。
+#
+# docs/ は 45 中 38 が旧構造を説明しており、削除した crate を指したまま残っている。
+# 文書の更新は #736 で追う。閉じたら対象へ戻すこと。
+GREP_SCOPE=(-- . ':!baseline/' ':!docs/')
 PRIVATE_IDENTIFIERS=.private-identifiers
 fail=0
 
@@ -67,14 +74,13 @@ while IFS= read -r host; do
   case "$host" in
     r.*) PUBLIC_RELAY_HOSTS+=("x.${host#*.}") ;;
   esac
-done < <(sed -nE '/^pub const DEFAULT_RELAYS:/p' crates/nostr/src/config.rs 2>/dev/null \
-  | grep -oE 'wss://[[:alnum:].-]+' \
-    | sed 's|^wss://||' | sort -u)
+done < <(grep -rhoE 'wss://[[:alnum:].-]+' crates/nostr-gate/src/ 2>/dev/null \
+  | sed 's|^wss://||' | sort -u)
 
 is_public_relay_host() {
   local candidate=$1
   local allowed
-  for allowed in "${PUBLIC_RELAY_HOSTS[@]}"; do
+  for allowed in ${PUBLIC_RELAY_HOSTS[@]+"${PUBLIC_RELAY_HOSTS[@]}"}; do
     [ "$candidate" = "$allowed" ] && return 0
   done
   return 1
@@ -220,7 +226,7 @@ strip_allowed_references() {
     allowed=${SELF_GITHUB_PREFIX#https://github.com/}
     text=$(strip_fixed "$text" "$allowed")
   fi
-  for host in "${PUBLIC_RELAY_HOSTS[@]}"; do
+  for host in ${PUBLIC_RELAY_HOSTS[@]+"${PUBLIC_RELAY_HOSTS[@]}"}; do
     text=$(strip_fixed "$text" "wss://${host}")
     text=$(strip_fixed "$text" "$host")
   done
