@@ -169,7 +169,7 @@ let completion_cb: SubtaskCompletionFn = Arc::new(move |subtask_id, _result, exi
 > 「ツールは非同期イベント。メインは起動したら忘れて次へ進む。完了通知で戻ってくる」
 
 これはHTTPサーバーのリクエスト/レスポンスモデルではなく、**Webhookモデル**に相当する。  
-（TODO #19「もぐたろう防止アーキテクチャ」が目指していたものがまさにこれ）
+（TODO #19「長時間処理詰まり防止アーキテクチャ」が目指していたものがまさにこれ）
 
 ### 2.2 新しいフロー（全体像）
 
@@ -214,7 +214,7 @@ completion_registry に登録されたコールバック発火
 最終応答 → Discord送信
 ```
 
-### 2.3 TODO #19（もぐたろう防止）との統合
+### 2.3 TODO #19（長時間処理詰まり防止）との統合
 
 TODO #19で設計された「一次回答+バックグラウンド処理分離」は、まさにこのv3のEvent-Drivenモデルと同じ考え方だ。
 
@@ -1036,7 +1036,7 @@ let completion_cb: SubtaskCompletionFn = Arc::new(move |subtask_id, result, exit
 
 ## 12. 参考資料
 
-- **TODO #19**: もぐたろう防止アーキテクチャ（commit `e04a3d3`）
+- **TODO #19**: 長時間処理詰まり防止アーキテクチャ（commit `e04a3d3`）
 - **v2設計書**: `docs/design-message-loop-v2.md`（CancellationToken方式の詳細）
 - **engine.rs**: `crates/core/src/engine.rs` L410-422（on_first_response実装）
 - **message_loop.rs**: `crates/discord/src/message_loop.rs` L418-420（should_sendロジック）

@@ -1202,7 +1202,7 @@ async fn debounced_window_records_every_message_but_runs_once() {
 
     // フラッシュの再現: 非トリガーは record-only、内容のある最後のメッセージが run トリガー。
     process_incoming_message(
-        discord_msg("222", "kairo", "エージェントAの発言"),
+        discord_msg("222", "agent-a", "エージェントAの発言"),
         gateway.clone(),
         state.clone(),
         vec!["crab".to_string()],
@@ -1217,7 +1217,7 @@ async fn debounced_window_records_every_message_but_runs_once() {
     )
     .await;
     process_incoming_message(
-        discord_msg("222", "nostarou", "エージェントCの発言"),
+        discord_msg("222", "agent-c", "エージェントCの発言"),
         gateway,
         state.clone(),
         vec!["crab".to_string()],
@@ -1279,7 +1279,7 @@ fn flush_groups_consecutive_same_privilege() {
     use opencrab_actions::CallerIdentity;
     let owner = CallerIdentity::Owner;
     let co_agent = CallerIdentity::CoAgent {
-        agent_id: "kairo".to_string(),
+        agent_id: "agent-a".to_string(),
     };
     let external = CallerIdentity::Agent;
 
@@ -1436,9 +1436,9 @@ async fn debounce_flush_records_all_messages_and_runs_once_through_the_loop() {
     // 同一チャンネル・同権限（非オーナー = TrustedUser）の内容あり 2 通 ＋ 末尾に空 1 通。
     // 別 sender でも同権限なので 1 グループにまとまり、1 回のフラッシュで 1 run。
     for (sender, text) in [
-        ("kairo", "エージェントAの発言"),
-        ("nostarou", "エージェントCの発言"),
-        ("nostarou", ""),
+        ("agent-a", "エージェントAの発言"),
+        ("agent-c", "エージェントCの発言"),
+        ("agent-c", ""),
     ] {
         tx.send(super::LoopEvent::IncomingMessage(discord_msg(
             "222", sender, text,

@@ -45,16 +45,16 @@ Dashboard UI redesign with mobile-first responsive layout.
 ### Test Flow
 
 #### Step 1: REST API via /api/sessions/{id}/messages
-- Created session: `eeb24f06-2f66-4816-a3bd-fbd558b50dee`
+- Created session: `22222222-2222-4222-8222-222222222222`
 - Sent: "天気を調べるスキルを作って（executableスキルとして）"
-- **Result: FAILED** — kairo responded (tool_calls_made=1) but created `skill_type=experience`
+- **Result: FAILED** — agent-a responded (tool_calls_made=1) but created `skill_type=experience`
 - **Root Cause:** REST API session calls `run_agent_response(..., gateway_actions=None)` → gateway actions unavailable; LLM uses built-in `create_my_skill` action (hardcoded `skill_type=experience`)
 
-#### Step 2: create_skill via Discord kairo-test (#1470698801395273861)
+#### Step 2: create_skill via Discord agent-a-test (#333344445555666677)
 - **Observation:** Even via Discord, LLM initially chose `create_my_skill` (built-in) over `create_skill` (gateway)
 - **Resolution:** Explicit instruction: "create_my_skillではなくcreate_skillというゲートウェイアクションを使って"
 - **Result: SUCCESS**
-  - Skill created: ID=`fdb8d880`, name=`東京天気executable`, skill_type=`executable`
+  - Skill created: ID=`example-skill-1`, name=`東京天気executable`, skill_type=`executable`
   - Code: `curl -s https://wttr.in/Tokyo?format=%25l:+%25c+%25t`
   - source_type: `acquired` (confirms gateway action was used, not built-in)
 - Discord: エージェントA「東京の天気を取得するスキル「東京天気executable」を作成しました」
@@ -113,14 +113,14 @@ trusted_user not found                → CallerIdentity::Agent
 ### テスト結果
 
 #### Step 1: trusted_user からスキル作成リクエスト
-- user_id: 1157167346817958009（エージェントC、permission=co-agent）
+- user_id: 111122223333444455（エージェントC、permission=co-agent）
 - **caller_type: "trusted_user"** ✅
-- セッションID: `agent-msg-54fab4ec-fad2-45d9-92dd-e62e50e2b36b-1157167346817958009`
+- セッションID: `agent-msg-agent-a-111122223333444455`
 
 #### Step 2: create_skill(executable) 実行確認
 - リクエスト: "create_skillというゲートウェイアクションを使って、skill_type=executableで「東京天気v2」というスキルを作って。codeは curl https://wttr.in/Tokyo?format=%l:+%c+%t で"
 - **結果: SUCCESS**
-  - Skill ID: `24428fff`
+  - Skill ID: `example-skill-2`
   - name: 東京天気v2
   - skill_type: **executable** ✅
   - source_type: **acquired** ✅（= gateway action create_skill が呼ばれた証拠）

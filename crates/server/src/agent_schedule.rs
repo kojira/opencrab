@@ -16,7 +16,7 @@
 //! # なぜエージェント自身に開くか（設計 §7.4 の制約撤回・オーナー裁定 2026-08-09）
 //!
 //! 当初の設計は「新しい自己設定ツールは追加しない」としていたが、これは issue #455 に無い制約で、
-//! **omoikane の巡回指示ループを閉じられない**（巡回指示が webhook で届いても本人がスケジュールを
+//! **sample-source の巡回指示ループを閉じられない**（巡回指示が webhook で届いても本人がスケジュールを
 //! 作れず、毎回オーナーが dashboard から登録することになる）。ハートビート（「いつ動くか」）は既に
 //! 本人が `set_my_heartbeat` で設定できる（#456）ので、schedule だけ人の承認を要求する理由が実測に
 //! 無い。**増えるのは「何ができるか」ではなく「いつ動くかを自分で決められるか」だけ**（作用面は
@@ -190,7 +190,7 @@ pub(crate) fn set_my_schedule(
         Ok(s) => s,
         Err(e) => return e,
     };
-    // enabled は省略時 true（omoikane: 「登録したらそのまま回る」）。型違いは拒否。
+    // enabled は省略時 true（sample-source: 「登録したらそのまま回る」）。型違いは拒否。
     let enabled = match args.get("enabled") {
         None | Some(serde_json::Value::Null) => true,
         Some(serde_json::Value::Bool(b)) => *b,

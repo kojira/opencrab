@@ -4,7 +4,7 @@
 //! Nostr で行う。Nostr プロトコルの実処理は自作 CLI **nostaro** に subprocess で委譲し
 //! （[`cli::NostaroCli`]）、OpenCrab は購読・イベント配送・送信ツールの配線を担う。
 //!
-//! - [`config::NostrConfig`]: リレー（既定 yabu.me / r.owner.io・ダッシュボードで変更可）
+//! - [`config::NostrConfig`]: リレー（既定 yabu.me / r.kojira.io・ダッシュボードで変更可）
 //!   と購読フィルタ（author / keyword / kind）。
 //! - [`event::NostrEvent`]: `nostaro watch --json` の1件（JSONL）。
 //! - [`actions::NostrGatewayActions`]: `nostr_post`/`reply`/`zap`/`upload` ツール

@@ -969,7 +969,7 @@ function VoiceSettings() {
             <textarea
               value={agentVoicesText}
               onChange={(e) => setAgentVoicesText(e.target.value)}
-              placeholder={'crab=3\nrabomi=1'}
+              placeholder={'crab=3\nagent-b=1'}
               rows={3}
               className={`${inputCls} font-mono`}
             />

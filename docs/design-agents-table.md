@@ -146,7 +146,7 @@ DROP TABLE identity;
 {
     "agent_id": "...",
     "name": "エージェントA",
-    "persona_name": "kairo",
+    "persona_name": "agent-a",
     "personality": "...",
     "instructions": "...",
     "model": "claude-sonnet-4-6",

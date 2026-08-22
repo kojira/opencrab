@@ -198,7 +198,7 @@ port = 8080
 enabled = true
 token = "${DISCORD_TOKEN}"
 guild_ids = []
-agent_ids = ["crab", "54fab4ec-fad2-45d9-92dd-e62e50e2b36b", "6b79ac3a-7f17-4618-a827-5bda992a3698"]  # Discordメッセージに応答するエージェントID
+agent_ids = ["crab", "agent-a", "11111111-1111-4111-8111-111111111111"]  # Discordメッセージに応答するエージェントID
 # DMに応答するオーナーのDiscord User ID。環境ごとに変わるので `.env` の
 # OWNER_DISCORD_ID から渡す（未設定なら空 = オーナー無しとして扱われる）。
 owner_discord_id = "${OWNER_DISCORD_ID}"
@@ -373,10 +373,10 @@ enabled = true
 # # エージェントごとに声を分ける（agent_id = スタイルID）
 # [voice.tts.agent_voices]
 # # crab = "3"
-# # rabomi = "1"
+# # agent-b = "1"
 
 # ─ 外部イベント受信（webhook intake / issue #454）─────────────────────────
-# 外部システム（第一号: ナレッジベース omoikane）の出来事を webhook で受け取り、
+# 外部システム（第一号: ナレッジベース sample-source）の出来事を webhook で受け取り、
 # エージェントの受信箱（agent_inbox）に積んで、専用の消化ループが自律的に処理する。
 #
 #   受信: POST /api/hooks/{source}
@@ -395,18 +395,18 @@ enabled = true
 # # source ごとの共有 secret（HMAC 検証用）。値は ${ENV} で注入する（この公開リポジトリに
 # # 実値を書かない）。ここに無い / 空の source への POST は 404。
 # [intake.secrets]
-# omoikane = "${HOOK_SECRET_OMOIKANE}"
+# sample-source = "${HOOK_SECRET_SAMPLE_SOURCE}"
 #
 # # source × event_type → 配送先 agent_id（完全一致）。該当が無いイベントは受理（202）は
 # # するが積まれない。agent_id は config 名（例 "crab"）でも UUID でもよい。
 # [[intake.routes]]
-# source = "omoikane"
+# source = "sample-source"
 # event_type = "comment.created"
-# agent_id = "scout"
+# agent_id = "agent_alpha"
 # [[intake.routes]]
-# source = "omoikane"
+# source = "sample-source"
 # event_type = "chat.message"
-# agent_id = "sebastian"
+# agent_id = "agent_beta"
 #
 # # catch-up ポーリング対象の source（一覧 API）。**source 名をキーにした汎用テーブル**。
 # # webhook 受信だけなら不要（webhook は secret さえあれば動く）。
@@ -420,7 +420,7 @@ enabled = true
 # # catch-up は取得できても配送先（route）が無くイベントが捨てられる（起動時に warn は出るが
 # # 処理はされない）。name のタイポがいちばん起きやすい・気づきにくい壊れ方。
 # [[intake.sources]]
-# name = "omoikane"                          # [intake.secrets] / [[intake.routes]] の source と同じキー
+# name = "sample-source"                          # [intake.secrets] / [[intake.routes]] の source と同じキー
 # kind = "rest_list"                         # 一覧 API を叩く汎用型
 # enabled = true                             # 既定 true。false で設定を残したまま catch-up を止める
 # base_url = "https://kb.example"            # 末尾スラッシュは有無どちらでも可

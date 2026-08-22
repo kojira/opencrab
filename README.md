@@ -402,8 +402,8 @@ webhook. The target is set from the dashboard, or by the agent itself with `get_
 by `nostr_switch_identity` matches the agent's npub as a **keyword in the note body**, so a reply
 that only references the agent through `e` / `p` tags — which is what a normal Nostr client
 produces — matches nothing and is dropped **systematically**, not occasionally. Fixing it takes
-changes in both places: the filter this repo writes (`owner/opencrab#271`) and the subscription
-nostaro builds from it (`owner/nostaro#6`, unmerged). Until then, do not assume every mention
+changes in both places: the filter this repo writes (`kojira/opencrab#271`) and the subscription
+nostaro builds from it (`nostaro` issue #6, unmerged). Until then, do not assume every mention
 produces a turn. Outbound — posting, and replying to an event the agent did receive — is the part
 that is exercised today.
 

@@ -28,8 +28,8 @@ topic が数百件に達するとプロンプトだけで数万トークンを�
 
 | ノードタイプ | パターン | 例 | 文字数 |
 |---|---|---|---|
-| topic (session_log) | `topic-{agent_id}-{session_id}-{first}-{last}` | `topic-agent:nostarou:main-sess_abc123def456-1-20` | ~60–130 |
-| topic (daily_log) | `{agent_id}:daily_log:topic:{date}:{i}` | `agent:nostarou:main:daily_log:topic:2026-03-25:0` | ~55 |
+| topic (session_log) | `topic-{agent_id}-{session_id}-{first}-{last}` | `topic-agent:agent-c:main-sess_abc123def456-1-20` | ~60–130 |
+| topic (daily_log) | `{agent_id}:daily_log:topic:{date}:{i}` | `agent:agent-c:main:daily_log:topic:2026-03-25:0` | ~55 |
 | period | `period-{agent_id}-{YYYY-MM}` / `{agent_id}:daily_log:period:{YYYY-MM}` | — | ~40–60 |
 
 **問題**: topic 122件 × 平均 node_id 80文字 ≈ 9,760文字がキーだけで消費。
@@ -72,14 +72,14 @@ node_id に **連番ベースの短縮キー** を導入する。
 
 | 現行 | 新規 | 例 |
 |---|---|---|
-| `topic-agent:nostarou:main-sess_abc-1-20` | `t{seq}` | `t42` |
-| `period-agent:nostarou:main-2026-03` | `p{seq}` | `p7` |
+| `topic-agent:agent-c:main-sess_abc-1-20` | `t{seq}` | `t42` |
+| `period-agent:agent-c:main-2026-03` | `p{seq}` | `p7` |
 | `{agent_id}:daily_log:daily:2026-03-25` | `d{seq}` | `d15` |
 | (hourly ノード) | `h{seq}` | `h8` |
 | (weekly ノード) | `w{seq}` | `w5` |
 | (monthly ノード) | `m{seq}` | `m3` |
 | (yearly ノード) | `y{seq}` | `y1` |
-| `root-agent:nostarou:main` | `r0` | `r0` |
+| `root-agent:agent-c:main` | `r0` | `r0` |
 
 ### 2.2 スキーマ変更
 
@@ -111,7 +111,7 @@ fn next_short_id(conn: &Connection, agent_id: &str, prefix: &str) -> String {
 
 ### 2.4 プロンプトへの影響
 
-変更前: `- [topic-agent:nostarou:main-sess_abc123-1-20] Rustビルドエラー: ユーザーが...`
+変更前: `- [topic-agent:agent-c:main-sess_abc123-1-20] Rustビルドエラー: ユーザーが...`
 変更後: `- [t42] Rustビルドエラー: ユーザーが...`
 
 **削減効果**: 122 topic × 平均 70文字削減 ≈ **8,540文字（約 2,800トークン）削減**
@@ -930,8 +930,8 @@ yearly の導入で、長期運用時の past months セクションが **72% �
 
 | ID | テストケース | 入力 | 期待結果 |
 |---|---|---|---|
-| T-1.13 | short_id で検索 | query="t42" | id="topic-agent:nostarou:main-sess_abc-1-20" のノードが返る |
-| T-1.14 | 元の id で検索 | query="topic-agent:nostarou:main-sess_abc-1-20" | 同じノードが返る |
+| T-1.13 | short_id で検索 | query="t42" | id="topic-agent:agent-c:main-sess_abc-1-20" のノードが返る |
+| T-1.14 | 元の id で検索 | query="topic-agent:agent-c:main-sess_abc-1-20" | 同じノードが返る |
 | T-1.15 | 存在しない short_id | query="t99999" | 空の結果（エラーにならない） |
 
 ---
@@ -1091,7 +1091,7 @@ yearly の導入で、長期運用時の past months セクションが **72% �
 | T-D.2 | suppressed ノードが retrieve で取得できる | topic t42 を suppress → retrieve_memory_nodes(query="t42") | t42 のノードが返る（suppressed=true の状態で） |
 | T-D.3 | forget_memory アクションで suppressed が true になる | forget_memory(node_id="t42") 実行 | memory_index_nodes の t42 の suppressed が true に更新される |
 | T-D.4 | forget_memory を short_id で実行 | forget_memory(node_id="t42") | short_id="t42" のノードが suppressed=true になる |
-| T-D.5 | forget_memory を元の id で実行 | forget_memory(node_id="topic-agent:nostarou:main-sess_abc-1-20") | 同ノードが suppressed=true になる |
+| T-D.5 | forget_memory を元の id で実行 | forget_memory(node_id="topic-agent:agent-c:main-sess_abc-1-20") | 同ノードが suppressed=true になる |
 | T-D.6 | Dream 中に LLM が「不要」判断 | Dream モード実行。LLM が topic t85 を「不要」と判定 | t85 に suppressed=true が設定される |
 | T-D.7 | Dream 中に LLM が「教訓あり — 圧縮」判断 | Dream モード実行。LLM が topic t85 を「教訓あり」と判定 | t85 に suppressed=true が設定され、教訓が上位ノード（daily）のサマリーに追記される |
 | T-D.8 | Dream 中に LLM が「重要 — 保持」判断 | Dream モード実行。LLM が topic t90 を「重要」と判定 | t90 の suppressed は false のまま変更なし |

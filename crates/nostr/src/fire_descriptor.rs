@@ -75,7 +75,7 @@ impl TransportFire for NostrFire {
 mod tests {
     use super::*;
 
-    const AGENT_UUID: &str = "6b79ac3a-7f17-4618-a827-5bda992a3698";
+    const AGENT_UUID: &str = "11111111-1111-4111-8111-111111111111";
 
     #[test]
     fn parse_matches_exact_and_carries_no_channel() {

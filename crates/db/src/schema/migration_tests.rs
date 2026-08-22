@@ -3654,8 +3654,8 @@ fn v38_is_non_destructive_and_preserves_last_fired() {
 #[test]
 fn norm_discord_id_strips_quotes_and_whitespace() {
     assert_eq!(
-        norm_discord_id("\"1465697209541726362\""),
-        "1465697209541726362"
+        norm_discord_id("\"222233334444555566\""),
+        "222233334444555566"
     );
     assert_eq!(norm_discord_id("  123 456 "), "123456");
     assert_eq!(norm_discord_id("123\t\n"), "123");
@@ -3664,7 +3664,7 @@ fn norm_discord_id_strips_quotes_and_whitespace() {
 
 #[test]
 fn session_id_is_valid_handles_uuid_agent_and_fail_closed() {
-    let agent = "6b79ac3a-7f17-4618-a827-5bda992a3698"; // ハイフンを含む UUID
+    let agent = "11111111-1111-4111-8111-111111111111"; // ハイフンを含む UUID
     assert!(session_id_is_valid(&format!("nostr-{agent}"), agent));
     assert!(session_id_is_valid(
         &format!("discord-{agent}-100-201"),

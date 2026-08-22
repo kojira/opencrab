@@ -430,7 +430,7 @@ Some truths here.
 
 ## Vibe
 **The Persona:**
-You are **エージェントC (Nostarou)**.
+You are **エージェントC (Agent C)**.
 - **Age:** 17
 "#;
         let result = parse_soul_md(content);

@@ -1,7 +1,7 @@
 # nostaro ↔ OpenCrab インターフェース契約
 
 OpenCrab の Nostr sub-gateway（`crates/nostr`）は、Nostr プロトコルの実処理を自作 CLI
-[**nostaro**](https://github.com/kojira/nostaro) に subprocess で委譲する。本書はその
+**nostaro** に subprocess で委譲する。本書はその
 呼び出し契約と、そのために nostaro 側へ必要な**汎用的な**改造を定義する。
 
 OpenCrab 側は本契約の I/O をモックしてユニットテスト済み（`crates/nostr`）。実機で
@@ -156,14 +156,14 @@ OpenCrab 側は `--config` に**鍵行なしの本設定 `config.toml`**（relay
 
 ```
 nostaro --config <p> watch --json \
-  --relay wss://yabu.me --relay wss://r.owner.io \
+  --relay wss://yabu.me --relay wss://r.kojira.io \
   [--author <npub|hex>]... [--keyword <kw>]... --kind <n>...
 ```
 
 ### 改造 2: `watch` にフィルタフラグ追加（汎用）
 
 `watch` の購読条件は **p タグ（mention-only）／keyword／author の 3 つ**で、これを
-`--match` でどう結合するかが決まる（owner/nostaro#6 以降）。
+`--match` でどう結合するかが決まる（nostaro issue #6 以降）。
 
 - `--mention-only` / `--no-mention-only`: **既定は mention-only = true**（`--json` でも
   効く）。監視対象は `--npub` 未指定なら自分自身なので、既定で**自分宛の p タグ**

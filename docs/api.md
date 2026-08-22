@@ -122,13 +122,13 @@ Base URL: `http://localhost:3000`
 
 ## External Event Intake
 
-外部システム（第一号: ナレッジベース omoikane）の出来事を受け取り、エージェントの受信箱
+外部システム（第一号: ナレッジベース sample-source）の出来事を受け取り、エージェントの受信箱
 （`agent_inbox`）に積む webhook（issue #454）。受理したイベントは **処理せず積むだけ**で、
 専用の消化ループが heartbeat とは独立に処理する。設定は `config/default.toml` の `[intake]`。
 
 ### POST /api/hooks/{source}
 
-**目的**: 外部イベントを受信して受信箱へ積む（例: `/api/hooks/omoikane`）。
+**目的**: 外部イベントを受信して受信箱へ積む（例: `/api/hooks/sample-source`）。
 
 **認証**: source ごとの共有 secret による HMAC-SHA256（**定数時間**照合）。
 
@@ -179,7 +179,7 @@ issue #499）、`process_interval_secs` ごとのポーリングは取りこぼ�
 **Example Request**
 
 ```json
-{"name": "kairo", "persona_name": "エージェントA"}
+{"name": "agent-a", "persona_name": "エージェントA"}
 ```
 
 **Response**
@@ -192,7 +192,7 @@ issue #499）、`process_interval_secs` ごとのポーリングは取りこぼ�
 **Example Response**
 
 ```json
-{"id": "550e8400-e29b-41d4-a716-446655440000", "name": "kairo"}
+{"id": "550e8400-e29b-41d4-a716-446655440000", "name": "agent-a"}
 ```
 
 ---
@@ -216,7 +216,7 @@ issue #499）、`process_interval_secs` ごとのポーリングは取りこぼ�
 **Example Response**
 
 ```json
-[{"id": "550e8400-e29b-41d4-a716-446655440000", "name": "kairo", "persona_name": "エージェントA", "image_url": "https://example.com/kairo.png", "status": "active", "skill_count": 5, "session_count": 12}]
+[{"id": "550e8400-e29b-41d4-a716-446655440000", "name": "agent-a", "persona_name": "エージェントA", "image_url": "https://example.com/agent-a.png", "status": "active", "skill_count": 5, "session_count": 12}]
 ```
 
 ---
@@ -238,10 +238,10 @@ issue #499）、`process_interval_secs` ごとのポーリングは取りこぼ�
 {
   "identity": {
     "agent_id": "550e8400-e29b-41d4-a716-446655440000",
-    "name": "kairo",
+    "name": "agent-a",
     "job_title": "AI Assistant",
     "organization": "opencrab",
-    "image_url": "https://example.com/kairo.png",
+    "image_url": "https://example.com/agent-a.png",
     "metadata_json": "{}"
   },
   "soul": {
@@ -376,7 +376,7 @@ issue #499）、`process_interval_secs` ごとのポーリングは取りこぼ�
 **Example Response**
 
 ```json
-{"agent_id": "550e8400-e29b-41d4-a716-446655440000", "name": "kairo", "job_title": "AI Assistant", "organization": "opencrab", "image_url": "https://example.com/kairo.png", "metadata_json": "{}"}
+{"agent_id": "550e8400-e29b-41d4-a716-446655440000", "name": "agent-a", "job_title": "AI Assistant", "organization": "opencrab", "image_url": "https://example.com/agent-a.png", "metadata_json": "{}"}
 ```
 
 ---
@@ -400,7 +400,7 @@ issue #499）、`process_interval_secs` ごとのポーリングは取りこぼ�
 **Example Request**
 
 ```json
-{"name": "kairo", "job_title": "AI Assistant"}
+{"name": "agent-a", "job_title": "AI Assistant"}
 ```
 
 **Response**
@@ -2285,7 +2285,7 @@ openclaw ワークスペース（SOUL.md、IDENTITY.md、skills/ など）を op
 ```json
 {
   "source_dir": "/Volumes/2TB/openclaw/workspace",
-  "agent_name": "nostarou",
+  "agent_name": "agent-c",
   "options": {
     "include_daily_logs": true,
     "daily_log_days": 90,

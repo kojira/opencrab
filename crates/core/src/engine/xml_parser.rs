@@ -173,7 +173,7 @@ mod tests {
 <function_calls>
 <invoke name="execute_shell">
 <command>curl</command>
-<args>["https://wttr.in/Hakata?format=%l:+%c+%t"]</args>
+<args>["https://wttr.in/SampleCity?format=%l:+%c+%t"]</args>
 </invoke>
 </function_calls>"#;
 
@@ -186,7 +186,7 @@ mod tests {
         // args should be parsed as a JSON array
         let args = &call_args["args"];
         assert!(args.is_array());
-        assert_eq!(args[0], "https://wttr.in/Hakata?format=%l:+%c+%t");
+        assert_eq!(args[0], "https://wttr.in/SampleCity?format=%l:+%c+%t");
     }
 
     #[test]

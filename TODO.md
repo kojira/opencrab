@@ -25,12 +25,12 @@
      - 各チャンネルにセッション `heartbeat-{agent_id}-{channel_id}` を作成
      - SPEAKはそのチャンネルIDに投稿
      - heartbeat_logにchannel_idを記録（result_json=channel_id=...）
-     - E2Eテスト: kairo-test(1470698801395273861)への自発投稿確認済み
+     - E2Eテスト: agent-a-test(333344445555666677)への自発投稿確認済み
 
 7. **ツリー再マージ・インデックス再構築のDiscord E2E確認**
    - cargo testは通過済み、DBにインデックス78件あり（自動構築？）
    - Claude設定後にDiscord経由で `rebuild_memory_index` をエージェントAが実行したエビデンスなし
-   - kairo-testで「メモリインデックスを再構築して」と指示して確認が必要
+   - agent-a-testで「メモリインデックスを再構築して」と指示して確認が必要
 
 8. ~~**一般ユーザーからのメッセージへの反応確認**~~ ✅ 完了（2026-03-21、ownerさんが「自己紹介して」でエージェントA返答確認済み）
 
@@ -58,7 +58,7 @@
 
 14. ~~**スキル呼び出しの自然言語対応（プロンプト改善）**~~ ✅ 完了（2026-03-22）
     - `build_context()` 更新により LLM が guidance を読んで動的に execute_shell で実行
-    - エージェントAが「博多の天気は？」等で柔軟に動作確認済み
+    - エージェントAが「サンプル都市の天気は？」等で柔軟に動作確認済み
 
 15. ~~**自律的複合タスク実行の設計（実装なし）**~~ ✅ Phase 1 完了（2026-03-22）
     - Bootstrap allowed_commands 実装済み (`64a783f`)
@@ -79,7 +79,7 @@
     - SOUL.md → soul、IDENTITY.md → identity、memory/*.md → curated memories変換
     - 設計中: `docs/design-openclaw-import.md`（サブエージェント作成中）
 
-19. ✅ **もぐたろう防止アーキテクチャ（一次回答+バックグラウンド処理分離）**
+19. ✅ **長時間処理詰まり防止アーキテクチャ（一次回答+バックグラウンド処理分離）**
     - 現状: エージェントAのメインループで長い処理をするとコンテキストが膨張
     - 求める設計: 受信→即時一次応答→長い処理はサブタスク自動エスカレート→完了通知
     - HTTPサーバーのリクエスト/レスポンスモデルに相当
@@ -174,7 +174,7 @@
 34. **バイナリ配布（GitHub Releases / Homebrew tap）**
     - 現状: cloneして自分でビルドする必要がある
     - GitHub Actionsでcross-compileしてリリースにバイナリ添付
-    - `brew install owner/tap/opencrab` 形式のHomebrew tapも検討
+    - `brew install example/tap/opencrab` 形式のHomebrew tapも検討
 
 37. **サブタスク状況問い合わせ機能**
     - メインエージェントが `query_subtask(subtask_id, question)` でサブに状況を問い合わせられる
