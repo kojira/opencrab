@@ -8,6 +8,18 @@ default = ["discord", "nostr", "web"]
 discord = ["dep:opencrab-discord"]
 nostr = ["dep:opencrab-nostr"]
 web = ["dep:opencrab-web-gateway"]
+baseline-l1 = ["discord", "nostr", "web"]
+baseline-l2 = ["baseline-l1"]
+
+[[bin]]
+name = "baseline-l1"
+path = "src/bin/baseline-l1.rs"
+required-features = ["baseline-l1"]
+
+[[bin]]
+name = "baseline-l2"
+path = "src/bin/baseline-l2.rs"
+required-features = ["baseline-l2"]
 
 [dependencies]
 tokio = { workspace = true }

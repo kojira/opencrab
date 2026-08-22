@@ -52,6 +52,27 @@ pub trait ToolEventSink: Send + Sync {
 /// するため使わない。
 pub const REJECTION_CODE_PREFIX: &str = "rejected: ";
 
+/// [`BridgedExecutor`] の実効ツールがどの production slot から来たか。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolSlot {
+    Dispatcher,
+    Gateway,
+    Mcp,
+}
+
+/// `list_tools` と同じ gate を通った定義と、dispatch に使う class 索引の組。
+pub struct EffectiveToolDefinition {
+    pub definition: FunctionDefinition,
+    pub class: Option<opencrab_gateway::ToolClass>,
+    pub slot: ToolSlot,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecutorRuntimeState {
+    pub model_override: Option<String>,
+    pub current_purpose: String,
+}
+
 /// 権限ポリシーによる拒否を `GatewayActionResult` として組み立てる（`rejected:` マーカー付き）。
 fn gateway_reject(msg: impl Into<String>) -> opencrab_gateway::GatewayActionResult {
     let msg = msg.into();
@@ -646,6 +667,95 @@ impl BridgedExecutor {
         self
     }
 
+    /// LLM に見せる実効定義を、production の slot/class 索引と一緒に列挙する。
+    ///
+    /// `list_tools` はこの結果から定義だけを取り出すため、採取用の分類再構築と
+    /// production 可視性が別々に進む余地はない。
+    pub fn effective_tool_definitions(&self) -> Vec<EffectiveToolDefinition> {
+        let opt_desc = |description: String| {
+            if description.is_empty() {
+                None
+            } else {
+                Some(description)
+            }
+        };
+        let mut tools: Vec<EffectiveToolDefinition> = self
+            .dispatcher
+            .get_definitions(&[])
+            .into_iter()
+            .filter(|definition| {
+                self.policy_allows(&definition.name) && self.run_allows(&definition.name)
+            })
+            .map(|definition| {
+                let class = self.tool_class_index.get(&definition.name).copied();
+                EffectiveToolDefinition {
+                    definition: FunctionDefinition {
+                        name: definition.name,
+                        description: opt_desc(definition.description),
+                        parameters: definition.parameters,
+                    },
+                    class,
+                    slot: ToolSlot::Dispatcher,
+                }
+            })
+            .collect();
+
+        if let Some(ref gateway) = self.gateway_actions {
+            for definition in gateway.definitions() {
+                if !self.policy_allows(&definition.name) || !self.run_allows(&definition.name) {
+                    continue;
+                }
+                let class = self.tool_class_index.get(&definition.name).copied();
+                tools.push(EffectiveToolDefinition {
+                    definition: FunctionDefinition {
+                        name: definition.name,
+                        description: opt_desc(definition.description),
+                        parameters: definition.parameters,
+                    },
+                    class,
+                    slot: ToolSlot::Gateway,
+                });
+            }
+        }
+
+        if let Some(ref mcp) = self.mcp_actions {
+            for definition in mcp.definitions() {
+                if !self.policy_allows(&definition.name) || !self.run_allows(&definition.name) {
+                    continue;
+                }
+                let class = self.tool_class_index.get(&definition.name).copied();
+                tools.push(EffectiveToolDefinition {
+                    definition: FunctionDefinition {
+                        name: definition.name,
+                        description: opt_desc(definition.description),
+                        parameters: definition.parameters,
+                    },
+                    class,
+                    slot: ToolSlot::Mcp,
+                });
+            }
+        }
+        tools
+    }
+
+    /// 同じ executor を使う engine が次の LLM call で読む turn-local 状態。
+    pub fn runtime_state(&self) -> ExecutorRuntimeState {
+        ExecutorRuntimeState {
+            model_override: self
+                .context
+                .model_override
+                .lock()
+                .ok()
+                .and_then(|value| value.clone()),
+            current_purpose: self
+                .context
+                .current_purpose
+                .lock()
+                .map(|value| value.clone())
+                .unwrap_or_default(),
+        }
+    }
+
     /// この run のツール許可リストが `name` を許すか（#368）。`None`（未設定）なら常に
     /// 許可（無制限）。`Some` のときは集合に載る名前だけを許す。`policy_allows`（caller/depth
     /// ゲート）とは独立の**追加**述語で、`list_tools`（可視）と `dispatch_inner`（実行）の
@@ -907,51 +1017,10 @@ impl ActionExecutor for BridgedExecutor {
     }
 
     fn list_tools(&self) -> Vec<FunctionDefinition> {
-        // 空 description は None にする（旧 to_function_def の挙動を踏襲）。
-        let opt_desc = |d: String| if d.is_empty() { None } else { Some(d) };
-
-        let mut tools: Vec<FunctionDefinition> = self
-            .dispatcher
-            .get_definitions(&[])
+        self.effective_tool_definitions()
             .into_iter()
-            .filter(|d| self.policy_allows(&d.name) && self.run_allows(&d.name))
-            .map(|d| FunctionDefinition {
-                name: d.name,
-                description: opt_desc(d.description),
-                parameters: d.parameters,
-            })
-            .collect();
-
-        // Merge gateway action definitions（同じポリシー述語でフィルタ）。
-        if let Some(ref gw) = self.gateway_actions {
-            for def in gw.definitions() {
-                if !self.policy_allows(&def.name) || !self.run_allows(&def.name) {
-                    continue;
-                }
-                tools.push(FunctionDefinition {
-                    name: def.name,
-                    description: opt_desc(def.description),
-                    parameters: def.parameters,
-                });
-            }
-        }
-
-        // Merge MCP tool definitions。MCP 側の trusted_only ゲートはプロバイダが
-        // caller で既にフィルタ済み（本ターンの caller で構築される）。静的 policy も一応適用。
-        if let Some(ref mcp) = self.mcp_actions {
-            for def in mcp.definitions() {
-                if !self.policy_allows(&def.name) || !self.run_allows(&def.name) {
-                    continue;
-                }
-                tools.push(FunctionDefinition {
-                    name: def.name,
-                    description: opt_desc(def.description),
-                    parameters: def.parameters,
-                });
-            }
-        }
-
-        tools
+            .map(|tool| tool.definition)
+            .collect()
     }
 
     /// 非同期化しないツール名（inline 実行のまま）。

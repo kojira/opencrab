@@ -64,6 +64,75 @@ pub(crate) fn resolve_run_tools_config(
     tools_cfg
 }
 
+/// Production の turn executor を組み立てるための wiring。
+///
+/// ここにある値は transport/run ごとの依存物だけで、caller/depth gate、system gateway
+/// 合成、shell 登録、allowlist、MCP の depth-0 制限は [`build_turn_executor`] が決める。
+pub(crate) struct TurnExecutorWiring {
+    pub context: opencrab_actions::ActionContext,
+    pub depth: u32,
+    pub gateway_actions: Option<Arc<dyn opencrab_gateway::GatewayActions>>,
+    pub subtask_registry: opencrab_actions::SubtaskRegistry,
+    pub completion_sink: Option<Arc<dyn opencrab_actions::SubtaskCompletionSink>>,
+    pub subtask_starts: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    pub reply_target: Option<String>,
+    pub tool_allowlist: Option<Vec<String>>,
+}
+
+/// Production と外形採取が共有する turn executor の唯一の組立口。
+///
+/// `mcp_provider` は接続済み provider の供給だけを抽象化する。信頼判定と depth-0 限定は
+/// この関数内に残るため、呼び出し側が production と異なる注入条件を再実装できない。
+pub(crate) fn build_turn_executor<F>(
+    state: &AppState,
+    wiring: TurnExecutorWiring,
+    mcp_provider: F,
+) -> opencrab_actions::BridgedExecutor
+where
+    F: FnOnce(bool) -> Option<Arc<dyn opencrab_gateway::GatewayActions>>,
+{
+    let mut dispatcher = opencrab_actions::ActionDispatcher::new();
+    let tools_config = resolve_run_tools_config(state, &wiring.context.agent_id);
+    opencrab_actions::register_tools_from_config(&tools_config, &mut dispatcher);
+
+    let caller_is_trusted = matches!(
+        wiring.context.caller,
+        opencrab_actions::CallerIdentity::Owner
+            | opencrab_actions::CallerIdentity::CoAgent { .. }
+            | opencrab_actions::CallerIdentity::TrustedUser
+    );
+    let system_actions: Arc<dyn opencrab_gateway::GatewayActions> = Arc::new(
+        crate::system_actions::SystemGatewayActions::new(
+            state.clone(),
+            wiring.gateway_actions,
+            Some(wiring.subtask_registry),
+            wiring.completion_sink,
+        )
+        .with_subtask_starts(wiring.subtask_starts),
+    );
+    let gateway_actions: Arc<dyn opencrab_gateway::GatewayActions> = if wiring.depth == 0 {
+        system_actions
+    } else {
+        Arc::new(opencrab_actions::SubEngineGatewayActions::new(
+            system_actions,
+        ))
+    };
+    let bridged = opencrab_actions::BridgedExecutor::new(dispatcher, wiring.context)
+        .with_depth(wiring.depth)
+        .with_reply_target(wiring.reply_target)
+        .with_tool_allowlist(wiring.tool_allowlist)
+        .with_gateway_actions(gateway_actions);
+
+    if wiring.depth == 0 {
+        match mcp_provider(caller_is_trusted) {
+            Some(provider) => bridged.with_mcp_actions(provider),
+            None => bridged,
+        }
+    } else {
+        bridged
+    }
+}
+
 /// そのエージェントが `execute_shell` で**実際に実行できる**コマンド名の一覧（#300）。
 ///
 /// [`resolve_run_tools_config`] の結果に `ShellToolConfig::effective_commands()` を
@@ -1264,22 +1333,6 @@ pub async fn run_agent_response(
         current_purpose: current_purpose.clone(),
         runtime_info: Arc::new(std::sync::Mutex::new(runtime_info)),
     };
-    let mut dispatcher = opencrab_actions::ActionDispatcher::new();
-    // このエージェント専用の許可コマンド（DB管理）を、ローカルコピーにのみマージする。
-    // グローバル config に足すと他エージェントにも許可が漏れる（per-agent スコープの担保）。
-    let tools_cfg = resolve_run_tools_config(state, agent_id);
-    // 登録はここで **スナップショット**される（`register_tools_from_config` は
-    // `ShellToolConfig` を clone して `ShellToolAction` に持たせる）。したがって
-    // 走行中に設定を書き換えても本ターンのツールには届かない。許可コマンドの
-    // 追加・削除が効くのは常に**次の run** からである（#202 の根拠）。
-    opencrab_actions::register_tools_from_config(&tools_cfg, &mut dispatcher);
-    // MCP の trusted_only サーバは信頼された呼び出し元のターンでのみ露出する。
-    let caller_is_trusted = matches!(
-        ctx.caller,
-        opencrab_actions::CallerIdentity::Owner
-            | opencrab_actions::CallerIdentity::CoAgent { .. }
-            | opencrab_actions::CallerIdentity::TrustedUser
-    );
     // 走行中 subtask の共有 registry を **1 度だけ**解決する。`SystemGatewayActions`
     // （cancel_subtask / report_progress）と自動 dispatcher、そして `spawn_subtask`
     // （#175 S4）が同一 Arc を見ることで「停止の到達性」が保たれる。呼び出し側が
@@ -1290,69 +1343,25 @@ pub async fn run_agent_response(
         .clone()
         .unwrap_or_else(|| std::sync::Arc::new(dashmap::DashMap::new()));
 
-    let executor = {
-        // inbound の返信先（gateway 不透明 token / #167）をツール実行の文脈
-        // （`GatewayCallContext.reply_target`）まで運ぶ（#158 S1）。宛先を引数で受ける
-        // gateway アクションが、引数省略時のフォールバックとして読む。
-        let bridged = opencrab_actions::BridgedExecutor::new(dispatcher, ctx)
-            .with_depth(depth)
-            .with_reply_target(req.reply_target.clone())
-            // この run のツール許可リスト（#368）。`Some` のときだけ有効で、可視性
-            // （`list_tools`）と実行（`dispatch_inner`）の両方を、全スロット
-            // （dispatcher / gateway own = `SystemGatewayActions` / MCP）にわたって
-            // 許可リスト内に絞る。既存 caller/depth ゲートの**上乗せ**。sleep 整理ラン
-            // だけが渡し、他ターン（`None`）は従来どおり無制限。
-            .with_tool_allowlist(req.tool_allowlist.clone());
-        // サーバ内設定ツール（configure_llm_provider 等）を transport 非依存で全ターンに
-        // 供給する。既存 gateway（Discord/Nostr）は inner として委譲される（composite）。
-        // owner 限定ツールは bridge の OWNER_ONLY_ACTIONS が可視性/実行を強制する。
-        // 共有 registry を neutral 層の cancel_subtask（#161）へ配線する。dispatcher が
-        // 使う registry と同一 Arc を渡すことで、auto-dispatch された subtask を
-        // cancel_subtask で停止できる（Discord では gateway_actions の registry とも同一）。
-        let system_actions: std::sync::Arc<dyn opencrab_gateway::GatewayActions> =
-            std::sync::Arc::new(
-                crate::system_actions::SystemGatewayActions::new(
-                    state.clone(),
-                    req.gateway_actions,
-                    Some(subtask_registry.clone()),
-                    // 停止も 1 箇所（neutral な cancel_subtask）から sink へ通知する。停止は
-                    // `on_subtask_cancelled`（既定 no-op）なので resume する sink の挙動は
-                    // 変わらず、必要な経路だけが追加の状態整合を取れる。
-                    req.completion_sink.clone(),
-                )
-                // #431: 明示 `spawn_subtask` の起動を親ターンのカウンタへ載せる。
-                // 下の `SubtaskToolDispatcher` へ渡すのと同一 Arc（両経路を 1 つの数で見る）。
-                .with_subtask_starts(req.subtask_starts.clone()),
-            );
-        // depth >= 1（sub-engine）は許可リストで最外周を絞る（#63 / RFC #152 S2）。
-        // **合成後**（server ツール + transport の union）に被せるのが要点で、これが
-        // 無いと再入実行がそのまま設定ツールや `spawn_subtask` へ到達し、サブタスクの
-        // ネスト禁止も崩れる。deny-by-default なので新ツールを足しても自動では開かない。
-        let gateway_actions: std::sync::Arc<dyn opencrab_gateway::GatewayActions> = if depth == 0 {
-            system_actions
-        } else {
-            std::sync::Arc::new(opencrab_actions::SubEngineGatewayActions::new(
-                system_actions,
-            ))
-        };
-        let bridged = bridged.with_gateway_actions(gateway_actions);
-        // 接続済み MCP サーバのツールを注入する（本ターンの caller で trusted_only を出し分け）。
-        //
-        // **depth 0 限定**。MCP は gateway とは別スロットなので、sub-engine の許可リスト
-        // （`SubEngineGatewayActions`）を通らない。深さを見ずに注入すると、deny-by-default
-        // のはずの sub-engine が運用者の繋いだ任意の外部ツール（送信・削除を含みうる）に
-        // 到達できてしまい、最小権限の前提が崩れる。移設前の sub-engine も MCP は
-        // 持っていなかった（`git show <移設前>:...subtask_engine.rs` に注入なし）ので、
-        // ここは従来挙動の維持でもある。sub-engine へ開けたい場合は許可リストと同じく
-        // 明示的な opt-in を設計してから行う。
-        match state.mcp_manager.as_ref() {
-            Some(m) if depth == 0 => {
-                let provider = m.provider_for(agent_id, caller_is_trusted);
-                bridged.with_mcp_actions(std::sync::Arc::new(provider))
-            }
-            _ => bridged,
-        }
-    };
+    let executor = build_turn_executor(
+        state,
+        TurnExecutorWiring {
+            context: ctx,
+            depth,
+            gateway_actions: req.gateway_actions.clone(),
+            subtask_registry: subtask_registry.clone(),
+            completion_sink: req.completion_sink.clone(),
+            subtask_starts: req.subtask_starts.clone(),
+            reply_target: req.reply_target.clone(),
+            tool_allowlist: req.tool_allowlist.clone(),
+        },
+        |caller_is_trusted| {
+            state.mcp_manager.as_ref().map(|manager| {
+                Arc::new(manager.provider_for(agent_id, caller_is_trusted))
+                    as Arc<dyn opencrab_gateway::GatewayActions>
+            })
+        },
+    );
     // ツール/コマンド活動を webhook へ実況する sink を挿す。
     //
     // - サブタスク走行（`run_notifier` あり）は、その run 専用の配送ワーカーを共有する
