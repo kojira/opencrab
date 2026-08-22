@@ -274,7 +274,7 @@ mod tests {
             session_id: "sess-1",
             recipient_agent_id: "agent-1",
             sender_id: "111",
-            sender_name: "のすたろう",
+            sender_name: "エージェントC",
             avatar_url,
             channel_id: Some("222"),
             pubkey: None,
@@ -287,7 +287,7 @@ mod tests {
     fn discord_inbound_metadata_is_byte_identical() {
         assert_eq!(
             inbound_metadata_json(TranscriptSource::Discord, &discord_inbound(None, &[])),
-            r#"{"channel_id":"222","source":"discord","user_name":"のすたろう"}"#
+            r#"{"channel_id":"222","source":"discord","user_name":"エージェントC"}"#
         );
     }
 
@@ -302,7 +302,7 @@ mod tests {
                 TranscriptSource::Discord,
                 &discord_inbound(Some("https://cdn/avatar.png"), &images)
             ),
-            r#"{"channel_id":"222","image_urls":["https://cdn/a.png","https://cdn/b.png"],"source":"discord","user_avatar_url":"https://cdn/avatar.png","user_name":"のすたろう"}"#
+            r#"{"channel_id":"222","image_urls":["https://cdn/a.png","https://cdn/b.png"],"source":"discord","user_avatar_url":"https://cdn/avatar.png","user_name":"エージェントC"}"#
         );
     }
 
@@ -436,7 +436,7 @@ mod tests {
                     "agent-1".to_string(),
                     "111".to_string(),
                     "speech".to_string(),
-                    r#"{"channel_id":"222","source":"discord","user_name":"のすたろう"}"#
+                    r#"{"channel_id":"222","source":"discord","user_name":"エージェントC"}"#
                         .to_string(),
                 ),
                 (

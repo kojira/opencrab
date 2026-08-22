@@ -1467,7 +1467,7 @@ mod tests {
         let path = NostaroCli::materialize_config(
             agent,
             &[
-                "wss://x.kojira.io".to_string(),
+                "wss://x.owner.io".to_string(),
                 "wss://relay.two".to_string(),
             ],
             None,
@@ -1485,11 +1485,11 @@ mod tests {
         );
         // relays と default_relays の両方が同じリレー集合で書かれる。
         assert!(
-            content.contains("relays = [\"wss://x.kojira.io\", \"wss://relay.two\"]"),
+            content.contains("relays = [\"wss://x.owner.io\", \"wss://relay.two\"]"),
             "relays missing: {content}"
         );
         assert!(
-            content.contains("default_relays = [\"wss://x.kojira.io\", \"wss://relay.two\"]"),
+            content.contains("default_relays = [\"wss://x.owner.io\", \"wss://relay.two\"]"),
             "default_relays missing: {content}"
         );
         let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
@@ -1713,7 +1713,7 @@ mod tests {
             .collect();
         // 既定リレー2つが = 形式のフラグで渡る（config の default に依存しない）。
         assert!(args.contains(&"--relay=wss://yabu.me".to_string()));
-        assert!(args.contains(&"--relay=wss://r.kojira.io".to_string()));
+        assert!(args.contains(&"--relay=wss://r.owner.io".to_string()));
         assert!(args.contains(&"--author=npub1abc".to_string()));
         assert!(args.contains(&"--keyword=opencrab".to_string()));
         // kind 未指定 → 既定 1。
@@ -1912,7 +1912,7 @@ mod tests {
                     "-k".to_string(),
                     "40".to_string(),
                     "-c".to_string(),
-                    "らぼみ実験室".to_string(),
+                    "エージェントB実験室".to_string(),
                 ],
             )
             .await

@@ -1037,7 +1037,7 @@ mod tests {
             &llm,
             "test-model",
             50,
-            "のすたろう",
+            "エージェントC",
             Some("17歳のオタク高校生"),
         )
         .await
@@ -1046,7 +1046,7 @@ mod tests {
         let request = last_request.lock().unwrap().clone().unwrap();
         let prompt = request.messages[1].text_content().unwrap_or("");
         assert!(
-            prompt.contains("のすたろう"),
+            prompt.contains("エージェントC"),
             "プロンプトにペルソナ名が含まれるべき"
         );
         assert!(

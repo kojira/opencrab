@@ -185,5 +185,5 @@ opencrabの非同期動作は特定エージェントの個性ではなく**プ�
 ## 6. 関連ファイル
 
 - `design-message-loop-v3.md` — Event-Drivenモデルの実装詳細
-- `design-bot-loop-prevention.md` — かいろのループ事例と対策
+- `design-bot-loop-prevention.md` — エージェントAのループ事例と対策
 - `design-agent-instructions.md` — instructionsフィールド追加の設計

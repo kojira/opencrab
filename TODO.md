@@ -16,9 +16,9 @@
 5. ~~**テスト設計の改善**~~ ✅ 完了（2026-03-21、E2Eテスト全タスクに組み込み）
 
 6. **ハートビートをエージェントのセッションとして処理する設計への刷新** ✅ v2完了（チャンネルごとセッション設計）
-   - ~~現状：サーバー側で独立したLLM呼び出し、かいろは「今がハートビートの実行」と知らない。SPEAKしても会話履歴に残らない~~
+   - ~~現状：サーバー側で独立したLLM呼び出し、エージェントAは「今がハートビートの実行」と知らない。SPEAKしても会話履歴に残らない~~
    - ~~必要：ハートビートtickごとにエージェントのセッションを作成し、「ハートビートの時間です。今この瞬間何をしますか？」というシステムイベントとして投入する~~
-   - ~~これによりかいろが自律的に判断・行動し、SPEAKした内容も会話履歴として蓄積される~~
+   - ~~これによりエージェントAが自律的に判断・行動し、SPEAKした内容も会話履歴として蓄積される~~
    - **v1完了（2026-03-21）**: エージェントセッション統合、SkillEngine経由でchat_completion実行
    - **v2完了（2026-03-21）**: チャンネルごとのセッション設計に刷新
      - `discord_channel_config`からwhitelisted=trueのチャンネルを全取得
@@ -29,17 +29,17 @@
 
 7. **ツリー再マージ・インデックス再構築のDiscord E2E確認**
    - cargo testは通過済み、DBにインデックス78件あり（自動構築？）
-   - Claude設定後にDiscord経由で `rebuild_memory_index` をかいろが実行したエビデンスなし
+   - Claude設定後にDiscord経由で `rebuild_memory_index` をエージェントAが実行したエビデンスなし
    - kairo-testで「メモリインデックスを再構築して」と指示して確認が必要
 
-8. ~~**一般ユーザーからのメッセージへの反応確認**~~ ✅ 完了（2026-03-21、kojiraさんが「自己紹介して」でかいろ返答確認済み）
+8. ~~**一般ユーザーからのメッセージへの反応確認**~~ ✅ 完了（2026-03-21、ownerさんが「自己紹介して」でエージェントA返答確認済み）
 
 9. ~~**シナリオ3後の実動作確認**~~ ✅ 完了（2026-03-21）
 
 10. ~~**ツール許可リストのダッシュボード管理機能**~~ ✅ 完了（2026-03-21）
     - gateway actions: add/list/remove_allowed_command 実装済み
     - ダッシュボードUI: AgentAllowedCommands.tsx 追加済み
-    - E2E確認: kojiraが「curlを追加して」→実行→「削除して」フル動作確認済み
+    - E2E確認: ownerが「curlを追加して」→実行→「削除して」フル動作確認済み
 
 11. ~~**`dashboard/` (Leptosクレート) の整理**~~ ✅ 完了（削除済み）
     - `dashboard/` ディレクトリは既に削除済み（`67820ca`）
@@ -58,7 +58,7 @@
 
 14. ~~**スキル呼び出しの自然言語対応（プロンプト改善）**~~ ✅ 完了（2026-03-22）
     - `build_context()` 更新により LLM が guidance を読んで動的に execute_shell で実行
-    - かいろが「博多の天気は？」等で柔軟に動作確認済み
+    - エージェントAが「博多の天気は？」等で柔軟に動作確認済み
 
 15. ~~**自律的複合タスク実行の設計（実装なし）**~~ ✅ Phase 1 完了（2026-03-22）
     - Bootstrap allowed_commands 実装済み (`64a783f`)
@@ -71,7 +71,7 @@
 17. **Discord画像添付送信サポート**
     - 現状: `send_speech`はテキストのみ
     - 必要: ファイル（画像）をDiscordに送信するgateway action (`discord_send_file` など)
-    - 用途: nano-banan-proで生成した画像をかいろがDiscordに投稿できるようにする
+    - 用途: nano-banan-proで生成した画像をエージェントAがDiscordに投稿できるようにする
     - 関連: `serenity`のcreate_message + file_uploadまたはattachment機能
 
 18. **OpenClaw→OpenCrabインポート機能**
@@ -80,10 +80,10 @@
     - 設計中: `docs/design-openclaw-import.md`（サブエージェント作成中）
 
 19. ✅ **もぐたろう防止アーキテクチャ（一次回答+バックグラウンド処理分離）**
-    - 現状: かいろのメインループで長い処理をするとコンテキストが膨張
+    - 現状: エージェントAのメインループで長い処理をするとコンテキストが膨張
     - 求める設計: 受信→即時一次応答→長い処理はサブタスク自動エスカレート→完了通知
     - HTTPサーバーのリクエスト/レスポンスモデルに相当
-    - 3人（のすたろう・らぼみ・kojira）でレビューしてから実装
+    - 3人（エージェントC・エージェントB・owner）でレビューしてから実装
 
 20. **エージェントシークレット管理**
     - 現状: GEMINI_API_KEY等はホストの環境変数に依存
@@ -99,7 +99,7 @@
 22. ~~**Discord添付画像のvision対応**~~ ✅
     - 現状: LLMレイヤーに`ImageUrl`/`supports_vision`実装あるが、Discord添付→LLMパイプラインが未接続
     - 修正: `message_loop.rs`でDiscordの`attachments`を取得し、画像URLをLLMの`ContentPart::ImageUrl`として渡す
-    - 効果: かいろがDiscordで送られた画像を理解できるようになる
+    - 効果: エージェントAがDiscordで送られた画像を理解できるようになる
 
 23. **ホワイトリスト外チャンネルでのセッションDB保存バグ修正**
     - 現状: whitelist外チャンネルのメッセージもDBにセッションログが蓄積される
@@ -129,14 +129,14 @@
     - 影響: 同じ名前のエージェントが複数作成されてしまう問題
 
 27. **複数Discord Bot対応（マルチエージェントDiscord）**
-    - 現状: 1エージェント=1Discord Bot接続の設計。かいろBot=かいろエージェントのみ
+    - 現状: 1エージェント=1Discord Bot接続の設計。エージェントABot=エージェントAエージェントのみ
     - Phase 1: 1つのBotトークンで複数エージェントが応答（agent_idsを実質的に機能させる）
-    - Phase 2: エージェントごとに異なるBotトークンを設定できるアーキテクチャ（らぼみBot=らぼみエージェント）
-    - 関連: インポート機能でらぼみをopencrabに移行する前提として必要
+    - Phase 2: エージェントごとに異なるBotトークンを設定できるアーキテクチャ（エージェントBBot=エージェントBエージェント）
+    - 関連: インポート機能でエージェントBをopencrabに移行する前提として必要
 
 28. **Botループ防止（同チャンネルに複数Bot共存時）**
     - 現状: 同じチャンネルに複数のBotが存在するとBot同士が反応し合って無限ループになる
-    - 原因: bot=trueのメッセージは無視しているが、異なるBotアカウント（opencrab版らぼみ×OpenClaw版らぼみ×かいろ）が互いに反応した
+    - 原因: bot=trueのメッセージは無視しているが、異なるBotアカウント（opencrab版エージェントB×OpenClaw版エージェントB×エージェントA）が互いに反応した
     - 修正案: 同じサーバーの既知Bot IDリストを管理し、それらからのメッセージは無視する
 
 29. **インポート設計: AGENTS.mdをsystemインストラクションとして扱う**
@@ -165,7 +165,7 @@
 33. **インポート時のAGENTS.md→opencrab向けinstructions LLM変換**
     - 現状: インポート時にOpenClawのAGENTS.mdがそのままinstructionsに入る
     - LLMで「OpenClaw固有の記述を除去してopencrab向けのinstructionsに変換する」処理が必要
-    - 設計書作成→kojiraレビュー→実装の順で進める
+    - 設計書作成→ownerレビュー→実装の順で進める
 
 35. **PATCH /discord 後にGateway自動再起動**
     - 現状: PATCH でowner_discord_idやbot_tokenを変更しても起動中のGatewayループに反映されない
@@ -174,7 +174,7 @@
 34. **バイナリ配布（GitHub Releases / Homebrew tap）**
     - 現状: cloneして自分でビルドする必要がある
     - GitHub Actionsでcross-compileしてリリースにバイナリ添付
-    - `brew install kojira/tap/opencrab` 形式のHomebrew tapも検討
+    - `brew install owner/tap/opencrab` 形式のHomebrew tapも検討
 
 37. **サブタスク状況問い合わせ機能**
     - メインエージェントが `query_subtask(subtask_id, question)` でサブに状況を問い合わせられる

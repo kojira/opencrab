@@ -18,7 +18,7 @@
 エンジンが送るリクエスト（現状）:
 messages:
   {role: "system", content: "You are ...（固定）...\n## Runtime\nCurrent date: 2026-03-23..."}
-  {role: "user",   content: "[kojira]: こんにちは\n[agent]: やあ！\n[kojira]: 今日は何の日？\n...（全履歴）"}
+  {role: "user",   content: "[owner]: こんにちは\n[agent]: やあ！\n[owner]: 今日は何の日？\n...（全履歴）"}
 ```
 
 この構造では **Automatic Caching が効くのは tools と system のみ**。
@@ -97,12 +97,12 @@ CallerIdentity別にツール定義が異なっても自動的に別キャッシ
 |--------|--------|------|
 | エージェント自身（自分） | `assistant` | LLMの自己発言 |
 | 人間ユーザー | `user` | 標準のユーザーターン |
-| **他のBot（らぼみbot等）** | **`user`** | **`assistant`ロールにしない！** |
+| **他のBot（エージェントBbot等）** | **`user`** | **`assistant`ロールにしない！** |
 
 **他Botを `assistant` にしてはいけない理由:**
 Anthropicの仕様では `assistant` ロールは「自分自身の過去の発言」を表す。
 他のBotの発言を `assistant` に入れると、LLMが「自分がそれを言った」と誤解する。
-他Botは `user` ロールで、発言者名をコンテンツ内に含める（例: `[らぼみbot]: ...`）。
+他Botは `user` ロールで、発言者名をコンテンツ内に含める（例: `[エージェントBbot]: ...`）。
 
 **実装上の判定方法:**
 発言者が「自エージェント (`agent_id`)」でない限り `user` ロールを使用する。
@@ -141,9 +141,9 @@ system末尾:
 
 ```
 過去メッセージの例:
-  [2026-03-23 02:30:15] [kojira (123456789012345678)]: こんにちは
+  [2026-03-23 02:30:15] [owner (123456789012345678)]: こんにちは
   [2026-03-23 02:31:07] [agent]: やあ！
-  [2026-03-23 05:51:42] [kojira (123456789012345678)]: 久しぶりだけど...  ← 3時間の間隔が分かる
+  [2026-03-23 05:51:42] [owner (123456789012345678)]: 久しぶりだけど...  ← 3時間の間隔が分かる
 
 最後のuserメッセージ:
   [Context]
@@ -645,8 +645,8 @@ subtask completion callback（line ~277）の2箇所で
 
 **発言フォーマット（非エージェント発言）:**
 ```
-[2026-03-23 02:30:15] [kojira (123456789012345678)]: こんにちは
-[2026-03-23 02:31:00] [らぼみbot (876543210987654321)]: よろしく
+[2026-03-23 02:30:15] [owner (123456789012345678)]: こんにちは
+[2026-03-23 02:31:00] [エージェントBbot (876543210987654321)]: よろしく
 ```
 `speaker_id`を付与することで、同名ユーザーが複数存在する場合でも正確に識別できる。
 
@@ -657,9 +657,9 @@ Anthropic APIのmessages配列は **user→assistant→user→assistant の交�
 
 **問題の例:**
 ```
-[kojira]: こんにちは        → user
-[らぼみbot]: よろしく       → user（連続！APIがエラーになる）
-[kojira]: 質問があって...   → user（さらに連続！）
+[owner]: こんにちは        → user
+[エージェントBbot]: よろしく       → user（連続！APIがエラーになる）
+[owner]: 質問があって...   → user（さらに連続！）
 [agent]: はい、どうぞ       → assistant
 ```
 
@@ -670,10 +670,10 @@ Anthropic APIのmessages配列は **user→assistant→user→assistant の交�
 
 ```
 マージ結果:
-[kojira]: こんにちは
-[らぼみbot]: よろしく
-[kojira]: 質問があって...
-→ role: "user", content: "[kojira]: こんにちは\n[らぼみbot]: よろしく\n[kojira]: 質問があって..."
+[owner]: こんにちは
+[エージェントBbot]: よろしく
+[owner]: 質問があって...
+→ role: "user", content: "[owner]: こんにちは\n[エージェントBbot]: よろしく\n[owner]: 質問があって..."
 
 [agent]: はい、どうぞ
 → role: "assistant", content: "はい、どうぞ"

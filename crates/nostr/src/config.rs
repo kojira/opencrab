@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// 既定リレー。ダッシュボードから変更可能な**初期値**にすぎない（不変の
 /// allowlist ではない）。稼働中のリレー2つを既定にする。
-pub const DEFAULT_RELAYS: &[&str] = &["wss://yabu.me", "wss://r.kojira.io"];
+pub const DEFAULT_RELAYS: &[&str] = &["wss://yabu.me", "wss://r.owner.io"];
 
 /// エージェント1体の Nostr ゲートウェイ設定。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,7 +121,7 @@ mod tests {
         let c = NostrConfig::default();
         assert_eq!(
             c.effective_relays(),
-            vec!["wss://yabu.me", "wss://r.kojira.io"]
+            vec!["wss://yabu.me", "wss://r.owner.io"]
         );
     }
 

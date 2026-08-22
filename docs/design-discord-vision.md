@@ -445,7 +445,7 @@ MVP では許容し、将来的にプロキシキャッシュを検討する。
 - `to_llm_message()` でマルチモーダル変換のテスト
 
 **Step 4-2**: 実機テスト
-- Discord で画像を送信してかいろが説明できるか確認
+- Discord で画像を送信してエージェントAが説明できるか確認
 - テキスト+画像の複合メッセージのテスト
 - 画像のみメッセージのテスト
 
@@ -504,7 +504,7 @@ Discord ではデフォルト最大 8MB（Nitro では 50MB）の添付が可能
 3. `engine.rs`: ChatContentPart + ChatMessage 拡張（+15行）
 4. `llm_adapter.rs`: content_parts → MessageContent::Multi 変換（+15行）
 
-この MVP で「画像を送ったらかいろが認識できる（ただし履歴には画像が残らない）」が実現できる。
+この MVP で「画像を送ったらエージェントAが認識できる（ただし履歴には画像が残らない）」が実現できる。
 
 ---
 
@@ -533,7 +533,7 @@ crates/
       agent_runner_impl.rs    # AgentRunner トレイト実装
 ```
 
-## レビューメモ（2026-03-22 by らぼみ）
+## レビューメモ（2026-03-22 by エージェントB）
 
 - 設計の問題箇所特定とURLパッシングスルー方式はOK
 - **型変換に注意**: `gateway::MessageContent::ContentPart::Image {url, alt}` と `llm::MessageContent::ContentPart::ImageUrl {image_url: ImageUrl}` は別の型。`gateway→llm` の型変換ロジックが漏れないように実装すること

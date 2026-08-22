@@ -14,7 +14,7 @@ SOUL.md / AGENTS.md / USER.md 等の複数ファイルを**毎回**注入する�
 - AGENTS.md → `memory_curated`（RAG検索でヒットした時のみ参照）❌
 
 RAG依存のため、AGENTS.mdの「NO_REPLYを使う」「グループチャットで黙る」等の基本ルールが
-常に参照されるとは限らない。これがかいろとcrabらぼみんのループの根本原因。
+常に参照されるとは限らない。これがエージェントAとcrabエージェントBんのループの根本原因。
 
 ## 解決策: `instructions` フィールド追加
 
@@ -153,14 +153,14 @@ AGENTS.md以外のルール系MDファイル（USER.md等）はinstructionsに�
 3. `build_agent_context()`: instructions をシステムプロンプトに展開
 4. ダッシュボードUI: InstructionsテキストエリアをSoulタブに追加
 5. インポート: AGENTS.md → instructions に変更
-6. crabらぼみん再インポート
-7. かいろのinstructionsを手動 or 自律的に設定
+6. crabエージェントBん再インポート
+7. エージェントAのinstructionsを手動 or 自律的に設定
 
 ## 未解決事項（レビューで議論）
 
 1. **USER.mdはどこに入れるか？** instructionsに追記？memory_curatedのまま？
 2. **instructionsの文字数制限** トークン節約のため上限設けるか？
-3. **かいろの初期instructions** 誰が書くか（kojira？かいろ自身？）
+3. **エージェントAの初期instructions** 誰が書くか（owner？エージェントA自身？）
 4. **他のMDファイル（HEARTBEAT.md等）はどう扱うか**
 
 ## 実装コスト

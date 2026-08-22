@@ -745,7 +745,7 @@ mod tests {
     #[tokio::test]
     async fn test_daily_persona_prompt_contains_persona_info() {
         let db = opencrab_db::init_memory().unwrap();
-        insert_daily_log(&db, "agent-1", "2026-02-01", "kojiraとRustの設計を議論した");
+        insert_daily_log(&db, "agent-1", "2026-02-01", "ownerとRustの設計を議論した");
         let conn = opencrab_db::Db::from_connection(db);
         let last_request = Arc::new(Mutex::new(None));
         let indexer = DailyLogIndexer::new(
@@ -754,7 +754,7 @@ mod tests {
                 last_request: last_request.clone(),
             }),
             "test-model".to_string(),
-            "のすたろう".to_string(),
+            "エージェントC".to_string(),
             Some("17歳のオタク高校生。クールに振る舞うけど根はオタク。".to_string()),
         );
         let stats = indexer.run("agent-1").await.unwrap();
@@ -763,7 +763,7 @@ mod tests {
         let request = last_request.lock().unwrap().clone().unwrap();
         let prompt = request.messages[0].text_content().unwrap_or("");
         assert!(
-            prompt.contains("のすたろう"),
+            prompt.contains("エージェントC"),
             "プロンプトにpersona_nameが含まれるべき"
         );
         assert!(

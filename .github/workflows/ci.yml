@@ -71,6 +71,11 @@ jobs:
       # R4: opencrab-core が gate/SDK クレートへ依存し始めていないかを
       # 依存ツリーで検査する（ビルドの成否には現れない逆流を止める）。
       # R7（core の production コードに gate 名が出ない）は上の Test に含まれる。
+      # 公開リポジトリに運用者・稼働中エージェントの実名が入るのを止める。
+      # 人のレビューでは止まらなかった（278 箇所が公開状態だった）ので機械で落とす。
+      - name: No private identifiers
+        run: bash scripts/check-no-private-identifiers.sh
+
       - name: Dependency boundary checks
         run: bash scripts/check-deps.sh
 

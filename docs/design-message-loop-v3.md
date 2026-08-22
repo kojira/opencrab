@@ -1044,5 +1044,5 @@ let completion_cb: SubtaskCompletionFn = Arc::new(move |subtask_id, result, exit
 ---
 
 *設計確定日: 2026-03-23*  
-*設計者: kojira + のすたろう*  
+*設計者: owner + エージェントC*  
 *実装開始条件: Phase 0はすぐ開始可能。Phase 1以降は別途実装チケットを作成。*

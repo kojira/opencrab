@@ -156,14 +156,14 @@ OpenCrab 側は `--config` に**鍵行なしの本設定 `config.toml`**（relay
 
 ```
 nostaro --config <p> watch --json \
-  --relay wss://yabu.me --relay wss://r.kojira.io \
+  --relay wss://yabu.me --relay wss://r.owner.io \
   [--author <npub|hex>]... [--keyword <kw>]... --kind <n>...
 ```
 
 ### 改造 2: `watch` にフィルタフラグ追加（汎用）
 
 `watch` の購読条件は **p タグ（mention-only）／keyword／author の 3 つ**で、これを
-`--match` でどう結合するかが決まる（kojira/nostaro#6 以降）。
+`--match` でどう結合するかが決まる（owner/nostaro#6 以降）。
 
 - `--mention-only` / `--no-mention-only`: **既定は mention-only = true**（`--json` でも
   効く）。監視対象は `--npub` 未指定なら自分自身なので、既定で**自分宛の p タグ**
@@ -228,7 +228,7 @@ stdout に出力する（JSONL）。スキーマ（`crates/nostr/src/event.rs` �
   "pubkey": "<hex pubkey>",
   "npub": "npub1...",          // 任意
   "note_id": "note1...",        // 任意（返信対象指定に使う）
-  "author_name": "kojira",      // 任意（プロフィール由来）
+  "author_name": "owner",      // 任意（プロフィール由来）
   "created_at": 1700000000,
   "kind": 1,
   "content": "本文",

@@ -4203,7 +4203,7 @@
               "owner_pubkey": "",
               "relays": [
                 "wss://yabu.me",
-                "wss://r.kojira.io"
+                "wss://r.owner.io"
               ],
               "running": false,
               "secret_key_masked": ""
@@ -4241,7 +4241,7 @@
               "owner_pubkey": "",
               "relays": [
                 "wss://yabu.me",
-                "wss://r.kojira.io"
+                "wss://r.owner.io"
               ],
               "running": false,
               "secret_key_masked": "••••••••"
@@ -4360,7 +4360,7 @@
             "owner_pubkey": "",
             "relays": [
               "wss://yabu.me",
-              "wss://r.kojira.io"
+              "wss://r.owner.io"
             ],
             "running": false,
             "secret_key_masked": "••••••••"
@@ -4407,7 +4407,7 @@
             "owner_pubkey": "",
             "relays": [
               "wss://yabu.me",
-              "wss://r.kojira.io"
+              "wss://r.owner.io"
             ],
             "running": false,
             "secret_key_masked": ""
@@ -4449,7 +4449,7 @@
               "owner_pubkey": "",
               "relays": [
                 "wss://yabu.me",
-                "wss://r.kojira.io"
+                "wss://r.owner.io"
               ],
               "running": false,
               "secret_key_masked": "••••••••"
@@ -4487,7 +4487,7 @@
               "owner_pubkey": "",
               "relays": [
                 "wss://yabu.me",
-                "wss://r.kojira.io"
+                "wss://r.owner.io"
               ],
               "running": false,
               "secret_key_masked": "••••••••"
@@ -4806,7 +4806,7 @@
               "owner_pubkey": "",
               "relays": [
                 "wss://yabu.me",
-                "wss://r.kojira.io"
+                "wss://r.owner.io"
               ],
               "running": false,
               "secret_key_masked": "••••••••"
@@ -4844,7 +4844,7 @@
               "owner_pubkey": "",
               "relays": [
                 "wss://yabu.me",
-                "wss://r.kojira.io"
+                "wss://r.owner.io"
               ],
               "running": false,
               "secret_key_masked": "••••••••"
@@ -14324,7 +14324,7 @@
               "owner_pubkey": "",
               "relays": [
                 "wss://yabu.me",
-                "wss://r.kojira.io"
+                "wss://r.owner.io"
               ],
               "running": false,
               "secret_key_masked": "••••••••"
@@ -14367,7 +14367,7 @@
               "owner_pubkey": "",
               "relays": [
                 "wss://yabu.me",
-                "wss://r.kojira.io"
+                "wss://r.owner.io"
               ],
               "running": false,
               "secret_key_masked": "••••••••"

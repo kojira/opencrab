@@ -145,7 +145,7 @@ DROP TABLE identity;
 ```json
 {
     "agent_id": "...",
-    "name": "かいろ",
+    "name": "エージェントA",
     "persona_name": "kairo",
     "personality": "...",
     "instructions": "...",

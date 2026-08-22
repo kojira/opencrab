@@ -179,7 +179,7 @@ issue #499）、`process_interval_secs` ごとのポーリングは取りこぼ�
 **Example Request**
 
 ```json
-{"name": "kairo", "persona_name": "かいろ"}
+{"name": "kairo", "persona_name": "エージェントA"}
 ```
 
 **Response**
@@ -216,7 +216,7 @@ issue #499）、`process_interval_secs` ごとのポーリングは取りこぼ�
 **Example Response**
 
 ```json
-[{"id": "550e8400-e29b-41d4-a716-446655440000", "name": "kairo", "persona_name": "かいろ", "image_url": "https://example.com/kairo.png", "status": "active", "skill_count": 5, "session_count": 12}]
+[{"id": "550e8400-e29b-41d4-a716-446655440000", "name": "kairo", "persona_name": "エージェントA", "image_url": "https://example.com/kairo.png", "status": "active", "skill_count": 5, "session_count": 12}]
 ```
 
 ---
@@ -246,7 +246,7 @@ issue #499）、`process_interval_secs` ごとのポーリングは取りこぼ�
   },
   "soul": {
     "agent_id": "550e8400-e29b-41d4-a716-446655440000",
-    "persona_name": "かいろ",
+    "persona_name": "エージェントA",
     "social_style_json": "{\"assertiveness\":0.3,\"responsiveness\":0.8,\"style_name\":\"Amiable\"}",
     "thinking_style_json": "{\"primary\":\"直感的\",\"secondary\":\"論理的\",\"description\":\"\"}",
     "personality": "friendly and curious",
@@ -322,7 +322,7 @@ issue #499）、`process_interval_secs` ごとのポーリングは取りこぼ�
 ```json
 {
   "agent_id": "550e8400-e29b-41d4-a716-446655440000",
-  "persona_name": "かいろ",
+  "persona_name": "エージェントA",
   "social_style_json": "{\"assertiveness\":0.3,\"responsiveness\":0.8,\"style_name\":\"Amiable\"}",
   "thinking_style_json": "{\"primary\":\"直感的\",\"secondary\":\"論理的\",\"description\":\"\"}",
   "personality": "friendly and curious",
@@ -352,7 +352,7 @@ issue #499）、`process_interval_secs` ごとのポーリングは取りこぼ�
 
 ```json
 {
-  "persona_name": "かいろ",
+  "persona_name": "エージェントA",
   "social_style_json": "{\"assertiveness\":0.3,\"responsiveness\":0.8,\"style_name\":\"Amiable\"}",
   "thinking_style_json": "{\"primary\":\"直感的\",\"secondary\":\"論理的\",\"description\":\"\"}",
   "instructions": "You are a helpful hermit crab AI agent."
@@ -430,7 +430,7 @@ issue #499）、`process_interval_secs` ごとのポーリングは取りこぼ�
 **Example Response**
 
 ```json
-[{"id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "agent_id": "550e8400-e29b-41d4-a716-446655440000", "preset_name": "formal-mode", "persona_name": "かいろ", "custom_traits_json": null}]
+[{"id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "agent_id": "550e8400-e29b-41d4-a716-446655440000", "preset_name": "formal-mode", "persona_name": "エージェントA", "custom_traits_json": null}]
 ```
 
 ---
@@ -2246,8 +2246,8 @@ openclaw ワークスペース（SOUL.md、IDENTITY.md、skills/ など）を op
 ```json
 {
   "source_dir": "/Volumes/2TB/openclaw/workspace",
-  "soul": {"persona_name": "のすたろう", "personality": "17歳高校生...", "found": true},
-  "identity": {"name": "のすたろう", "image_url": null, "metadata_json": "{}", "found": true},
+  "soul": {"persona_name": "エージェントC", "personality": "17歳高校生...", "found": true},
+  "identity": {"name": "エージェントC", "image_url": null, "metadata_json": "{}", "found": true},
   "memory_curated": [{"category": "preference", "content": "..."}],
   "instructions": "You are a helpful agent...",
   "skills": [{"name": "weather", "description": "Get weather info", "situation_pattern": "...", "guidance": "...", "source_type": "skill_dir", "source_context": "weather", "script_files": []}],

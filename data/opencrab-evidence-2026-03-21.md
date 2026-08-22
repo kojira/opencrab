@@ -57,7 +57,7 @@ Dashboard UI redesign with mobile-first responsive layout.
   - Skill created: ID=`fdb8d880`, name=`東京天気executable`, skill_type=`executable`
   - Code: `curl -s https://wttr.in/Tokyo?format=%25l:+%25c+%25t`
   - source_type: `acquired` (confirms gateway action was used, not built-in)
-- Discord: かいろ「東京の天気を取得するスキル「東京天気executable」を作成しました」
+- Discord: エージェントA「東京の天気を取得するスキル「東京天気executable」を作成しました」
 
 #### Step 3: execute_skill — "東京の天気を教えて"
 - Sent: "execute_skillを使ってskill_name=東京天気executableを実行して東京の天気を教えて"
@@ -65,7 +65,7 @@ Dashboard UI redesign with mobile-first responsive layout.
   - tool_calls_made=2 (add_allowed_command試行→失敗, execute_skill→成功)
   - `execute_skill` ran: `sh -c "curl -s https://wttr.in/Tokyo?format=%25l:+%25c+%25t"`
   - **Output: 東京: ☀️ +14°C**
-  - Discord: かいろ「東京: ☀️ +14°C」
+  - Discord: エージェントA「東京: ☀️ +14°C」
 
 ### Findings
 
@@ -113,7 +113,7 @@ trusted_user not found                → CallerIdentity::Agent
 ### テスト結果
 
 #### Step 1: trusted_user からスキル作成リクエスト
-- user_id: 1157167346817958009（のすたろう、permission=co-agent）
+- user_id: 1157167346817958009（エージェントC、permission=co-agent）
 - **caller_type: "trusted_user"** ✅
 - セッションID: `agent-msg-54fab4ec-fad2-45d9-92dd-e62e50e2b36b-1157167346817958009`
 

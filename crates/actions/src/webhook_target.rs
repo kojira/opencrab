@@ -952,7 +952,7 @@ mod tests {
         assert_eq!(attachment_filename("../../etc/passwd"), "etc-passwd.txt");
         assert_eq!(attachment_filename("a b\tc"), "a-b-c.txt");
         // 非 ASCII だけの slug（名前・本文の断片）は丸ごと落ちて既定名になる。
-        assert_eq!(attachment_filename("のすたろう"), "output.txt");
+        assert_eq!(attachment_filename("日本語のみ"), "output.txt");
         // 空・記号のみは既定名へフォールバック。
         assert_eq!(attachment_filename(""), "output.txt");
         assert_eq!(attachment_filename("..."), "output.txt");
