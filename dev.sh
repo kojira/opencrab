@@ -314,7 +314,8 @@ clean_dead_state() {
     local name
     rm -f "$SUPERVISOR_PID_FILE" "$READY_FILE" "$FAILED_FILE" "$CORE_SOCKET"
     for name in core web nostr; do
-        rm -f "$PID_DIR/$name.pid" "$PID_DIR/$name.owner"
+        rm -f "$PID_DIR/$name.pid" "$PID_DIR/$name.owner" \
+            "$PID_DIR/$name.pid."*.tmp
     done
 }
 
@@ -322,19 +323,36 @@ start_component() {
     local name="$1"
     shift
     local owner_file="$PID_DIR/$name.owner"
+    local pid_file="$PID_DIR/$name.pid"
     : > "$LOG_DIR/$name.log"
     : > "$owner_file"
     (
-        # Only the supervisor owns the startup lifecycle descriptor.  If a
-        # component retained it, stop/restart could wait forever after a
-        # supervisor failure.
-        exec 7>&-
         # FD 8 is intentionally inherited by the component and its children.
+        # The helper publishes this process's PID by atomic rename while FD 7
+        # is still open, then closes only FD 7 before replacing itself with the
+        # component.  A lifecycle waiter therefore cannot observe a live but
+        # unregistered component after a supervisor crash.  FD 9 remains
+        # inherited to prevent generations from overlapping.
         exec 8> "$owner_file"
-        exec "$@"
+        exec "$LOCK_BIN" 7 --publish-pid "$pid_file" -- "$@"
     ) >> "$LOG_DIR/$name.log" 2>&1 &
     local pid=$!
-    printf '%s\n' "$pid" > "$PID_DIR/$name.pid"
+
+    local registered_pid
+    while :; do
+        if registered_pid="$(read_pid "$pid_file" 2>/dev/null)"; then
+            if [ "$registered_pid" != "$pid" ]; then
+                echo "[error] $name published unexpected PID $registered_pid (expected $pid)" >&2
+                return 1
+            fi
+            break
+        fi
+        if ! pid_alive "$pid"; then
+            echo "[error] $name exited before publishing its PID" >&2
+            return 1
+        fi
+        sleep 0.05
+    done
     if ! group_alive "$pid"; then
         echo "[error] $name did not start in its own process group" >&2
         return 1
