@@ -31,14 +31,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# baseline/ は旧構造の外形を機械採取した記録で、書いたコードではない。
-# 「何が在ったか」の目録として残すので、実値を含むのが正しい（合意 §2.5 の対象外）。
-# baseline/ は旧構造の外形を機械採取した記録で、書いたコードではない。
-# 「何が在ったか」の目録として残すので、実値を含むのが正しい（合意 §2.5 の対象外）。
-#
-# docs/ は 45 中 38 が旧構造を説明しており、削除した crate を指したまま残っている。
-# 文書の更新は #736 で追う。閉じたら対象へ戻すこと。
-GREP_SCOPE=(-- . ':!baseline/' ':!docs/')
+GREP_SCOPE=(-- .)
 PRIVATE_IDENTIFIERS=.private-identifiers
 fail=0
 
@@ -64,17 +57,18 @@ if [ -z "$SELF_GITHUB_PREFIX" ]; then
     | head -1 || true)"
 fi
 
-# 既定 relay は製品が接続する公共 Nostr relay で、個人の endpoint ではないため許可する。
-# first label が r の既定 relay は Damus の日本語圏の既定で、誰でも接続できる公共 server。
-# 同じ domain にある first label が x の relay も公共 relay として許可対象である。
-PUBLIC_RELAY_HOSTS=()
+# 製品の既定 relay は誰でも接続できる公共 Nostr relay であり、個人の endpoint では
+# ないため許可する。source 全体から拾うと、任意の wss:// を書くだけで自己許可できるので、
+# 新 runtime が実際に使う DEFAULT_RELAY の定義行だけを参照する。
+# r.kojira.io は旧 runtime で使っていた Damus 日本語圏の公共 relay。機械採取した
+# baseline と stale docs にだけ残るため、その exact host だけを明示的に許可する。
+PUBLIC_RELAY_HOSTS=("r.kojira.io")
 while IFS= read -r host; do
   [ -n "$host" ] || continue
   PUBLIC_RELAY_HOSTS+=("$host")
-  case "$host" in
-    r.*) PUBLIC_RELAY_HOSTS+=("x.${host#*.}") ;;
-  esac
-done < <(grep -rhoE 'wss://[[:alnum:].-]+' crates/nostr-gate/src/ 2>/dev/null \
+done < <(sed -nE '/^const DEFAULT_RELAY: &str = "wss:\/\/[[:alnum:].-]+";$/p' \
+  crates/nostr-gate/src/main.rs 2>/dev/null \
+  | grep -oE 'wss://[[:alnum:].-]+' \
   | sed 's|^wss://||' | sort -u)
 
 is_public_relay_host() {
