@@ -1,0 +1,687 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# New-runtime development launcher.
+#
+# A long-lived supervisor owns one process group per component.  Stopping a
+# group, instead of only its leader, also stops any cursor/shell child that the
+# core may have started during a turn.  PID files remain usable after an
+# ungraceful supervisor death, so the next `stop` can still clean the groups.
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+cd "$SCRIPT_DIR"
+
+die() {
+    echo "[error] $*" >&2
+    exit 1
+}
+
+usage() {
+    cat <<'EOF'
+Usage: ./dev.sh <command>
+
+Commands:
+  start             Build and start core + configured gates
+  stop              Stop the supervisor, gates, core, and their descendants
+  restart           Build first, then stop and start everything
+  status             Show the supervisor and every configured component
+  logs [component]   Follow core, web, nostr, or launcher log (default: core)
+
+Start configuration:
+  OPENCRAB_DEV_DIR          State directory (default: .opencrab-dev)
+  OPENCRAB_DEV_HTTP_PORT    web-gate port (default: 3000)
+  OPENCRAB_DEV_WEB_TOKEN    web-gate token (default: secret-token)
+  OPENCRAB_DEV_ROOM         default core room (default: room:main)
+  OPENCRAB_DEV_GATES        web, nostr, or web,nostr (default: web)
+
+Nostr is never started implicitly.  When OPENCRAB_DEV_GATES contains nostr,
+NOSTR_GATE_RELAY must also be set explicitly.  Runtime variables such as
+OPENCRAB_PLACES and OPENCRAB_LLM_PROVIDER are passed through unchanged.
+EOF
+}
+
+init_paths() {
+    local requested="${OPENCRAB_DEV_DIR:-$SCRIPT_DIR/.opencrab-dev}"
+    case "$requested" in
+        /*) ;;
+        *) requested="$SCRIPT_DIR/$requested" ;;
+    esac
+    mkdir -p "$requested"
+    DEV_DIR="$(cd "$requested" && pwd -P)"
+    PID_DIR="$DEV_DIR/pids"
+    LOG_DIR="$DEV_DIR/logs"
+    CORE_SOCKET="$DEV_DIR/core.sock"
+    DB_PATH="$DEV_DIR/opencrab.db"
+    SETTINGS_FILE="$DEV_DIR/settings"
+    SUPERVISOR_PID_FILE="$PID_DIR/supervisor.pid"
+    SUPERVISOR_LOCK="$DEV_DIR/supervisor.lock"
+    READY_FILE="$DEV_DIR/ready"
+    FAILED_FILE="$DEV_DIR/failed"
+    mkdir -p "$PID_DIR" "$LOG_DIR"
+}
+
+validate_port() {
+    case "$1" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+
+gate_enabled() {
+    case ",$GATES," in
+        *,"$1",*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+load_start_config() {
+    HTTP_PORT="${OPENCRAB_DEV_HTTP_PORT:-3000}"
+    WEB_TOKEN="${OPENCRAB_DEV_WEB_TOKEN:-secret-token}"
+    ROOM="${OPENCRAB_DEV_ROOM:-room:main}"
+    GATES="${OPENCRAB_DEV_GATES:-web}"
+
+    validate_port "$HTTP_PORT" || die "OPENCRAB_DEV_HTTP_PORT must be an integer from 1 to 65535"
+    [ -n "$ROOM" ] || die "OPENCRAB_DEV_ROOM must not be empty"
+    case "$GATES" in
+        ''|,*|*,|*,,*) die "OPENCRAB_DEV_GATES must be a non-empty comma-separated list" ;;
+    esac
+
+    local old_ifs="$IFS"
+    local gate
+    local seen_web=0
+    local seen_nostr=0
+    IFS=,
+    for gate in $GATES; do
+        case "$gate" in
+            web)
+                [ "$seen_web" -eq 0 ] || die "OPENCRAB_DEV_GATES contains web more than once"
+                seen_web=1
+                ;;
+            nostr)
+                [ "$seen_nostr" -eq 0 ] || die "OPENCRAB_DEV_GATES contains nostr more than once"
+                seen_nostr=1
+                ;;
+            '') die "OPENCRAB_DEV_GATES contains an empty gate name" ;;
+            *) die "unknown gate in OPENCRAB_DEV_GATES: $gate" ;;
+        esac
+    done
+    IFS="$old_ifs"
+    [ "$seen_web" -eq 1 ] || [ "$seen_nostr" -eq 1 ] || die "OPENCRAB_DEV_GATES must select at least one gate"
+    if [ "$seen_web" -eq 1 ]; then
+        [ -n "$WEB_TOKEN" ] || die "OPENCRAB_DEV_WEB_TOKEN must not be empty"
+        command -v curl >/dev/null 2>&1 || die "curl is required to verify web-gate readiness"
+    fi
+
+    if [ "$seen_nostr" -eq 1 ]; then
+        [ -n "${NOSTR_GATE_RELAY:-}" ] || die "NOSTR_GATE_RELAY is required when nostr is selected"
+        [ -n "${OPENCRAB_PLACES:-}" ] || die "OPENCRAB_PLACES is required to provision a place when nostr is selected"
+    fi
+    command -v cargo >/dev/null 2>&1 || die "cargo is required to build the runtime"
+    command -v nohup >/dev/null 2>&1 || die "nohup is required to detach the launcher supervisor"
+    if [ ! -d /proc/self/fd ] && ! command -v lsof >/dev/null 2>&1; then
+        die "lsof is required on systems without /proc to verify PID ownership safely"
+    fi
+
+    local requested_target="${CARGO_TARGET_DIR:-$SCRIPT_DIR/target}"
+    case "$requested_target" in
+        /*) ;;
+        *) requested_target="$SCRIPT_DIR/$requested_target" ;;
+    esac
+    mkdir -p "$requested_target"
+    TARGET_DIR="$(cd "$requested_target" && pwd -P)"
+    CORE_BIN="$TARGET_DIR/debug/opencrab-social-runtime"
+    WEB_BIN="$TARGET_DIR/debug/web-gate"
+    NOSTR_BIN="$TARGET_DIR/debug/nostr-gate"
+}
+
+read_pid() {
+    local file="$1"
+    local pid
+    [ -f "$file" ] || return 1
+    pid="$(sed -n '1p' "$file")"
+    case "$pid" in
+        ''|*[!0-9]*) return 2 ;;
+    esac
+    printf '%s\n' "$pid"
+}
+
+pid_alive() {
+    kill -0 "$1" 2>/dev/null
+}
+
+group_alive() {
+    kill -0 -- "-$1" 2>/dev/null
+}
+
+# Confirm a stale PID still names the binary recorded when it was spawned.
+# Linux exposes the executable through /proc; macOS exposes it through lsof.
+component_owned() {
+    local name="$1"
+    local pid="$2"
+    local expected_file="$PID_DIR/$name.exe"
+    local expected actual
+    [ -f "$expected_file" ] || return 2
+    expected="$(sed -n '1p' "$expected_file")"
+    [ -n "$expected" ] || return 2
+
+    if [ -L "/proc/$pid/exe" ]; then
+        actual="$(readlink "/proc/$pid/exe" 2>/dev/null || true)"
+        case "$actual" in
+            "$expected"|"$expected (deleted)") return 0 ;;
+            *) return 1 ;;
+        esac
+    fi
+    command -v lsof >/dev/null 2>&1 || return 2
+    local line
+    while IFS= read -r line; do
+        case "$line" in
+            "n$expected"|"n$expected (deleted)") return 0 ;;
+        esac
+    done < <(lsof -a -p "$pid" -d txt -Fn 2>/dev/null)
+    return 1
+}
+
+supervisor_owned() {
+    local pid="$1"
+    if [ -d "/proc/$pid/fd" ]; then
+        local fd target
+        for fd in /proc/"$pid"/fd/*; do
+            target="$(readlink "$fd" 2>/dev/null || true)"
+            [ "$target" = "$SUPERVISOR_LOCK" ] && return 0
+        done
+        return 1
+    fi
+    command -v lsof >/dev/null 2>&1 || return 2
+    lsof -Fn -a -p "$pid" -- "$SUPERVISOR_LOCK" 2>/dev/null | grep -Fqx "n$SUPERVISOR_LOCK"
+}
+
+build_components() {
+    local cargo_args=(
+        build --locked
+        -p opencrab-app --bin opencrab-social-runtime
+    )
+    if gate_enabled web; then
+        cargo_args+=( -p opencrab-web-gate --bin web-gate )
+    fi
+    if gate_enabled nostr; then
+        cargo_args+=( -p opencrab-nostr-gate --bin nostr-gate )
+    fi
+    echo "==> Building core and gates: $GATES"
+    CARGO_TARGET_DIR="$TARGET_DIR" cargo "${cargo_args[@]}"
+}
+
+write_settings() {
+    local places="default ($ROOM)"
+    local provider="echo"
+    [ -z "${OPENCRAB_PLACES:-}" ] || places="$OPENCRAB_PLACES"
+    [ -z "${OPENCRAB_LLM_PROVIDER:-}" ] || provider="$OPENCRAB_LLM_PROVIDER"
+    {
+        echo "state_dir=$DEV_DIR"
+        echo "socket=$CORE_SOCKET"
+        echo "database=$DB_PATH"
+        echo "gates=$GATES"
+        if gate_enabled web; then
+            echo "web_url=http://127.0.0.1:$HTTP_PORT"
+        fi
+        echo "places=$places"
+        echo "llm_provider=$provider"
+        if gate_enabled nostr; then
+            echo "nostr_relay=$NOSTR_GATE_RELAY"
+        fi
+        echo "target_dir=$TARGET_DIR"
+    } > "$SETTINGS_FILE"
+}
+
+state_has_live_processes() {
+    local file pid name
+    if pid="$(read_pid "$SUPERVISOR_PID_FILE" 2>/dev/null)" && pid_alive "$pid"; then
+        return 0
+    fi
+    for name in core web nostr; do
+        file="$PID_DIR/$name.pid"
+        if pid="$(read_pid "$file" 2>/dev/null)" && group_alive "$pid"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+clean_dead_state() {
+    local name
+    rm -f "$SUPERVISOR_PID_FILE" "$READY_FILE" "$FAILED_FILE" "$CORE_SOCKET"
+    for name in core web nostr; do
+        rm -f "$PID_DIR/$name.pid" "$PID_DIR/$name.exe"
+    done
+}
+
+start_component() {
+    local name="$1"
+    local expected="$2"
+    shift 2
+    : > "$LOG_DIR/$name.log"
+    "$@" >> "$LOG_DIR/$name.log" 2>&1 &
+    local pid=$!
+    printf '%s\n' "$pid" > "$PID_DIR/$name.pid"
+    printf '%s\n' "$expected" > "$PID_DIR/$name.exe"
+    if ! group_alive "$pid"; then
+        echo "[error] $name did not start in its own process group" >&2
+        return 1
+    fi
+    echo "==> Started $name (PID/PGID: $pid)"
+}
+
+wait_for_socket() {
+    local pid="$1"
+    local i
+    for ((i = 0; i < 100; i++)); do
+        [ -S "$CORE_SOCKET" ] && return 0
+        pid_alive "$pid" || return 1
+        sleep 0.1
+    done
+    return 1
+}
+
+wait_for_web() {
+    local pid="$1"
+    local url="http://127.0.0.1:$HTTP_PORT/"
+    local i
+    for ((i = 0; i < 100; i++)); do
+        if curl --noproxy '*' --silent --show-error --fail --max-time 1 "$url" >/dev/null 2>&1; then
+            # With the built-in place, also require the gate/core bind to be ready.
+            if [ -n "${OPENCRAB_PLACES:-}" ]; then
+                return 0
+            fi
+            case "$ROOM" in
+                room:*)
+                    local room_name="${ROOM#room:}"
+                    if curl --noproxy '*' --silent --show-error --fail --max-time 1 \
+                        "http://127.0.0.1:$HTTP_PORT/rooms/$room_name/messages" >/dev/null 2>&1; then
+                        return 0
+                    fi
+                    ;;
+                *) return 0 ;;
+            esac
+        fi
+        pid_alive "$pid" || return 1
+        sleep 0.1
+    done
+    return 1
+}
+
+wait_for_nostr() {
+    local pid="$1"
+    local expected="nostr-gate: relay 接続 $NOSTR_GATE_RELAY"
+    local i
+    for ((i = 0; i < 150; i++)); do
+        grep -Fq "$expected" "$LOG_DIR/nostr.log" 2>/dev/null && return 0
+        pid_alive "$pid" || return 1
+        sleep 0.1
+    done
+    return 1
+}
+
+terminate_component() {
+    local name="$1"
+    local pid_file="$PID_DIR/$name.pid"
+    local pid rc i
+    if pid="$(read_pid "$pid_file" 2>/dev/null)"; then
+        :
+    else
+        rc=$?
+        if [ "$rc" -eq 2 ]; then
+            echo "[error] Invalid PID file: $pid_file" >&2
+            return 1
+        fi
+        return 0
+    fi
+
+    if ! group_alive "$pid"; then
+        rm -f "$pid_file" "$PID_DIR/$name.exe"
+        return 0
+    fi
+
+    if pid_alive "$pid"; then
+        if component_owned "$name" "$pid"; then
+            :
+        else
+            rc=$?
+            if [ "$rc" -eq 2 ]; then
+                echo "[error] Cannot verify $name PID $pid; refusing to signal it" >&2
+            else
+                echo "[error] $name PID $pid belongs to another executable; refusing to signal it" >&2
+            fi
+            return 1
+        fi
+    else
+        echo "[error] $name leader PID $pid is gone but process group $pid remains; refusing an unverified group kill" >&2
+        return 1
+    fi
+
+    echo "==> Stopping $name (PGID: $pid)"
+    kill -TERM -- "-$pid" 2>/dev/null || true
+    for ((i = 0; i < 50; i++)); do
+        group_alive "$pid" || break
+        sleep 0.1
+    done
+    if group_alive "$pid"; then
+        echo "    $name did not stop after 5s; sending SIGKILL"
+        kill -KILL -- "-$pid" 2>/dev/null || true
+        for ((i = 0; i < 20; i++)); do
+            group_alive "$pid" || break
+            sleep 0.1
+        done
+    fi
+    if group_alive "$pid"; then
+        echo "[error] $name process group $pid remains after SIGKILL" >&2
+        return 1
+    fi
+    rm -f "$pid_file" "$PID_DIR/$name.exe"
+    echo "    $name stopped"
+}
+
+supervisor_cleanup() {
+    local rc=$?
+    trap - EXIT TERM INT HUP
+    local failed=0
+    terminate_component nostr || failed=1
+    terminate_component web || failed=1
+    terminate_component core || failed=1
+    rm -f "$READY_FILE" "$CORE_SOCKET" "$SUPERVISOR_PID_FILE"
+    if [ "$failed" -ne 0 ]; then
+        echo "[error] Supervisor could not stop every component" >&2
+        exit 1
+    fi
+    exit "$rc"
+}
+
+supervise() {
+    : "${OC_CORE_BIN:?}" "${OC_WEB_BIN:?}" "${OC_NOSTR_BIN:?}"
+    : "${OC_HTTP_PORT:?}" "${OC_WEB_TOKEN:?}" "${OC_ROOM:?}" "${OC_GATES:?}"
+    CORE_BIN="$OC_CORE_BIN"
+    WEB_BIN="$OC_WEB_BIN"
+    NOSTR_BIN="$OC_NOSTR_BIN"
+    HTTP_PORT="$OC_HTTP_PORT"
+    WEB_TOKEN="$OC_WEB_TOKEN"
+    ROOM="$OC_ROOM"
+    GATES="$OC_GATES"
+
+    # Holding this file open lets stop distinguish our supervisor from a reused PID.
+    exec 9> "$SUPERVISOR_LOCK"
+    printf '%s\n' "$$" > "$SUPERVISOR_PID_FILE"
+    rm -f "$READY_FILE" "$FAILED_FILE" "$CORE_SOCKET"
+    trap 'exit 0' TERM INT HUP
+    trap supervisor_cleanup EXIT
+
+    # Monitor mode gives every background component its own process group.
+    set -m
+    start_component core "$CORE_BIN" "$CORE_BIN" "$CORE_SOCKET" "$DB_PATH" "$ROOM" || {
+        echo "core failed to start" > "$FAILED_FILE"
+        exit 1
+    }
+    local core_pid
+    core_pid="$(read_pid "$PID_DIR/core.pid")"
+    wait_for_socket "$core_pid" || {
+        echo "core did not create its Unix socket within 10s" > "$FAILED_FILE"
+        exit 1
+    }
+
+    if gate_enabled web; then
+        start_component web "$WEB_BIN" env WEB_GATE_BIND=127.0.0.1 \
+            "$WEB_BIN" "$CORE_SOCKET" "$HTTP_PORT" "$WEB_TOKEN" || {
+            echo "web gate failed to start" > "$FAILED_FILE"
+            exit 1
+        }
+        local web_pid
+        web_pid="$(read_pid "$PID_DIR/web.pid")"
+        wait_for_web "$web_pid" || {
+            echo "web gate was not ready within 10s" > "$FAILED_FILE"
+            exit 1
+        }
+    fi
+
+    if gate_enabled nostr; then
+        start_component nostr "$NOSTR_BIN" env NOSTR_GATE_RELAY="$NOSTR_GATE_RELAY" \
+            "$NOSTR_BIN" "$CORE_SOCKET" || {
+            echo "nostr gate failed to start" > "$FAILED_FILE"
+            exit 1
+        }
+        local nostr_pid
+        nostr_pid="$(read_pid "$PID_DIR/nostr.pid")"
+        wait_for_nostr "$nostr_pid" || {
+            echo "nostr gate did not connect to the explicit relay within 15s" > "$FAILED_FILE"
+            exit 1
+        }
+    fi
+
+    touch "$READY_FILE"
+    echo "==> All configured components are ready"
+
+    local name pid
+    while :; do
+        for name in core web nostr; do
+            [ -f "$PID_DIR/$name.pid" ] || continue
+            pid="$(read_pid "$PID_DIR/$name.pid")" || {
+                echo "invalid $name PID file" > "$FAILED_FILE"
+                exit 1
+            }
+            if ! pid_alive "$pid"; then
+                echo "$name exited unexpectedly; see $LOG_DIR/$name.log" > "$FAILED_FILE"
+                exit 1
+            fi
+        done
+        sleep 0.5
+    done
+}
+
+show_failure_logs() {
+    local name
+    for name in core web nostr launcher; do
+        [ -s "$LOG_DIR/$name.log" ] || continue
+        echo "--- $name.log (last 20 lines) ---" >&2
+        tail -n 20 "$LOG_DIR/$name.log" >&2
+    done
+}
+
+launch_supervisor() {
+    state_has_live_processes && die "launcher state still has live processes; run './dev.sh stop' first"
+    clean_dead_state
+    write_settings
+    : > "$LOG_DIR/launcher.log"
+
+    export OC_CORE_BIN="$CORE_BIN"
+    export OC_WEB_BIN="$WEB_BIN"
+    export OC_NOSTR_BIN="$NOSTR_BIN"
+    export OC_HTTP_PORT="$HTTP_PORT"
+    export OC_WEB_TOKEN="$WEB_TOKEN"
+    export OC_ROOM="$ROOM"
+    export OC_GATES="$GATES"
+
+    nohup bash "$SCRIPT_DIR/dev.sh" __supervise </dev/null >> "$LOG_DIR/launcher.log" 2>&1 &
+    local supervisor_pid=$!
+    local i
+    for ((i = 0; i < 180; i++)); do
+        if [ -f "$READY_FILE" ]; then
+            echo "==> Ready"
+            cat "$SETTINGS_FILE"
+            echo "logs=$LOG_DIR"
+            return 0
+        fi
+        if [ -f "$FAILED_FILE" ]; then
+            echo "[error] $(cat "$FAILED_FILE")" >&2
+            show_failure_logs
+            stop_all >/dev/null 2>&1 || true
+            return 1
+        fi
+        if ! pid_alive "$supervisor_pid"; then
+            echo "[error] launcher supervisor exited before readiness" >&2
+            show_failure_logs
+            stop_all >/dev/null 2>&1 || true
+            return 1
+        fi
+        sleep 0.1
+    done
+    echo "[error] launcher supervisor did not become ready within 18s" >&2
+    show_failure_logs
+    stop_all >/dev/null 2>&1 || true
+    return 1
+}
+
+stop_all() {
+    local failed=0
+    local supervisor_pid rc i
+    if supervisor_pid="$(read_pid "$SUPERVISOR_PID_FILE" 2>/dev/null)"; then
+        if pid_alive "$supervisor_pid"; then
+            if supervisor_owned "$supervisor_pid"; then
+                echo "==> Stopping launcher supervisor (PID: $supervisor_pid)"
+                kill -TERM "$supervisor_pid" 2>/dev/null || failed=1
+                for ((i = 0; i < 120; i++)); do
+                    pid_alive "$supervisor_pid" || break
+                    sleep 0.1
+                done
+                if pid_alive "$supervisor_pid"; then
+                    echo "    supervisor did not stop after 12s; sending SIGKILL"
+                    if supervisor_owned "$supervisor_pid"; then
+                        kill -KILL "$supervisor_pid" 2>/dev/null || failed=1
+                    else
+                        echo "[error] Supervisor ownership changed; refusing SIGKILL" >&2
+                        failed=1
+                    fi
+                fi
+            else
+                rc=$?
+                if [ "$rc" -eq 2 ]; then
+                    echo "[error] Cannot verify supervisor PID $supervisor_pid; refusing to signal it" >&2
+                else
+                    echo "[error] Supervisor PID $supervisor_pid does not hold this launcher's lock" >&2
+                fi
+                failed=1
+            fi
+        else
+            echo "==> Supervisor is not running; cleaning its registered process groups"
+        fi
+    elif [ -f "$SUPERVISOR_PID_FILE" ]; then
+        echo "[error] Invalid supervisor PID file: $SUPERVISOR_PID_FILE" >&2
+        failed=1
+    fi
+
+    # Normally the supervisor already removed these.  This is the recovery path
+    # after SIGKILL/panic and is what prevents registered orphan groups building up.
+    terminate_component nostr || failed=1
+    terminate_component web || failed=1
+    terminate_component core || failed=1
+
+    if [ "$failed" -ne 0 ]; then
+        echo "[error] Not every launcher process was stopped" >&2
+        return 1
+    fi
+    clean_dead_state
+    echo "==> Stopped; no registered process group remains"
+}
+
+component_status() {
+    local name="$1"
+    local pid rc
+    if pid="$(read_pid "$PID_DIR/$name.pid" 2>/dev/null)"; then
+        :
+    else
+        if [ -f "$PID_DIR/$name.pid" ]; then
+            echo "    $name: invalid PID file"
+            return 1
+        fi
+        echo "    $name: not configured/running"
+        return 0
+    fi
+    if pid_alive "$pid"; then
+        if component_owned "$name" "$pid"; then
+            echo "    $name: running (PID/PGID $pid, log $LOG_DIR/$name.log)"
+            return 0
+        else
+            rc=$?
+        fi
+        if [ "$rc" -eq 2 ]; then
+            echo "    $name: PID $pid is alive but ownership cannot be verified"
+        else
+            echo "    $name: stale/reused PID $pid"
+        fi
+        return 1
+    fi
+    if group_alive "$pid"; then
+        echo "    $name: leader exited but process group $pid remains"
+    else
+        echo "    $name: stopped (stale PID $pid)"
+    fi
+    return 1
+}
+
+show_status() {
+    local failed=0
+    echo "==> Launcher status"
+    if [ -f "$SETTINGS_FILE" ]; then
+        sed 's/^/    /' "$SETTINGS_FILE"
+    else
+        echo "    no saved settings"
+    fi
+    local pid
+    if pid="$(read_pid "$SUPERVISOR_PID_FILE" 2>/dev/null)" && pid_alive "$pid"; then
+        if supervisor_owned "$pid"; then
+            echo "    supervisor: running (PID $pid)"
+        else
+            echo "    supervisor: PID $pid is alive but not owned by this launcher"
+            failed=1
+        fi
+    else
+        echo "    supervisor: not running"
+        [ -f "$READY_FILE" ] && failed=1
+    fi
+    component_status core || failed=1
+    component_status web || failed=1
+    component_status nostr || failed=1
+    [ -f "$FAILED_FILE" ] && {
+        echo "    last failure: $(cat "$FAILED_FILE")"
+        failed=1
+    }
+    return "$failed"
+}
+
+follow_logs() {
+    local name="${1:-core}"
+    case "$name" in
+        core|web|nostr|launcher) ;;
+        *) die "unknown log component: $name" ;;
+    esac
+    local file="$LOG_DIR/$name.log"
+    [ -f "$file" ] || die "log does not exist: $file"
+    tail -n 100 -f "$file"
+}
+
+init_paths
+
+case "${1:-}" in
+    __supervise)
+        supervise
+        ;;
+    start)
+        load_start_config
+        build_components
+        launch_supervisor
+        ;;
+    stop)
+        stop_all
+        ;;
+    restart)
+        load_start_config
+        build_components
+        stop_all
+        launch_supervisor
+        ;;
+    status)
+        show_status
+        ;;
+    logs)
+        follow_logs "${2:-core}"
+        ;;
+    *)
+        usage
+        exit 1
+        ;;
+esac

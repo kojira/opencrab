@@ -184,33 +184,49 @@ See [docs/nostaro-interface.md](docs/nostaro-interface.md) for how the key is us
 ### 4. Development (recommended)
 
 ```bash
-./dev.sh start     # Build + start backend & frontend → http://localhost:3000
-./dev.sh stop      # Stop all
-./dev.sh restart   # Rebuild & restart backend only (frontend stays)
-./dev.sh status    # Show running processes
-./dev.sh logs      # Tail server log
+./dev.sh start       # Build + start core and web-gate → http://127.0.0.1:3000
+./dev.sh status      # Show the supervisor, core, gates, and their log paths
+./dev.sh restart     # Build first, then restart every component
+./dev.sh stop        # Stop every component and descendant process
+./dev.sh logs core   # Follow a component log (core / web / nostr / launcher)
 ```
+
+The default development state is isolated under `.opencrab-dev/`: the Unix
+socket, SQLite database, PID files, and logs all live there. The default web
+token is `secret-token`, and the listener is deliberately fixed to
+`127.0.0.1`. Set `OPENCRAB_DEV_DIR` to use another isolated state directory,
+or `OPENCRAB_DEV_HTTP_PORT` to change the HTTP port.
+
+The launcher does not contact a Nostr relay unless it is explicitly selected.
+To run both gates, provide the relay and a places file that provisions the
+desired Nostr place:
+
+```bash
+OPENCRAB_DEV_GATES=web,nostr \
+NOSTR_GATE_RELAY=wss://relay.example \
+OPENCRAB_PLACES=/absolute/path/to/places.json \
+./dev.sh start
+```
+
+`OPENCRAB_PLACES`, `OPENCRAB_LLM_PROVIDER`, and the provider-specific runtime
+variables are passed through unchanged. The launcher does not load `.env` or
+invent a replacement setting; an explicitly selected runtime configuration
+fails as configured.
 
 ### 5. Manual startup
 
 ```bash
-# Backend (default: Discord / Nostr / Web conversation gates all enabled)
-cargo run -p opencrab-server
-# Listening on 0.0.0.0:8080
-#
-# To drop conversation gates you don't need, disable default features and opt in
-# to just the ones you want (the management REST API stays either way):
-#   cargo run -p opencrab-server --no-default-features --features nostr
+# Terminal 1: core
+cargo run -p opencrab-app --bin opencrab-social-runtime -- \
+  /tmp/opencrab.sock /tmp/opencrab.db room:main
 
-# Frontend dev server (separate terminal)
-cd web && ./dev.sh
-# Proxies /api to :8080 → http://localhost:3000
-```
+# Terminal 2: local web gate
+WEB_GATE_BIND=127.0.0.1 cargo run -p opencrab-web-gate --bin web-gate -- \
+  /tmp/opencrab.sock 3000 secret-token
 
-### 6. CLI
-
-```bash
-cargo run -p opencrab-cli
+# Optional terminal 3: Nostr gate. Set the relay explicitly for this process.
+NOSTR_GATE_RELAY=wss://relay.example \
+  cargo run -p opencrab-nostr-gate --bin nostr-gate -- /tmp/opencrab.sock
 ```
 
 ## First-time setup (recommended)

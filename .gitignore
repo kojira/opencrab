@@ -17,7 +17,5 @@ node_modules/
 # vitest などのローカルキャッシュ
 .vite/
 web/dist/
-.server.pid
-.web.pid
-.server.log
-.web.log
+# 新 runtime の開発ランチャーが使う socket / DB / PID / log。
+.opencrab-dev/
