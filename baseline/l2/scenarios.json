@@ -22,7 +22,7 @@
       "/api/sessions/{id}/logs": {"normal":"/api/sessions/baseline-session/logs","missing":"/api/sessions/baseline-missing/logs"},
       "/api/sessions/{id}/mentor": {"normal":"/api/sessions/baseline-session/mentor","missing":"/api/sessions/baseline-missing/mentor"}
     },
-    "query_suffixes": {"/api/agents/{id}/import/sync/status":"?source_dir=/tmp"},
+    "query_suffixes": {"/api/agents/{id}/import/sync/status":"?source_dir=/dev&include_daily_logs=false"},
     "normal_bodies": {
       "POST /api/agents":{"name":"Created Baseline Agent","persona_name":"Created"},
       "PUT /api/agents/{id}":{"name":"Updated Baseline Agent","persona_name":"Updated"},

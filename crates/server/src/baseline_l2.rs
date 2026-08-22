@@ -2138,9 +2138,50 @@ mod tests {
         }
         assert_eq!(bytes, checked_bytes, "checked artifact formatting differs");
         let text = String::from_utf8(bytes).expect("artifact is UTF-8");
-        assert!(!text.contains("/Users/"));
-        assert!(!text.contains("/Volumes/"));
-        assert!(!text.contains(&std::env::temp_dir().to_string_lossy().to_string()));
+        for host_path in [
+            std::env::temp_dir(),
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+        ] {
+            let host_path = host_path.to_string_lossy();
+            assert!(
+                !text.contains(host_path.as_ref()),
+                "artifact contains host path {host_path:?}"
+            );
+        }
+        for host_marker in [
+            "/tmp",
+            "/private/tmp",
+            "/var/folders/",
+            "/Users/",
+            "/Volumes/",
+            "/home/",
+            "Linux",
+            "Darwin",
+            "macOS",
+            "Windows",
+        ] {
+            assert!(
+                !text.contains(host_marker),
+                "artifact contains host marker {host_marker:?}"
+            );
+        }
+        assert!(
+            !text.contains(":\\\\"),
+            "artifact contains a Windows absolute path"
+        );
+        assert_eq!(
+            first["scenario_catalog"]["http"]["query_suffixes"]
+                ["/api/agents/{id}/import/sync/status"],
+            "?source_dir=/dev&include_daily_logs=false"
+        );
+        let sync_status = first["http"]["probes"]
+            .as_array()
+            .expect("HTTP probes")
+            .iter()
+            .find(|probe| probe["name"] == "get___api_agents_id_import_sync_status__normal")
+            .expect("import sync status probe");
+        assert_eq!(sync_status["response"]["status"], 200);
+        assert_eq!(sync_status["response"]["body"]["source_dir"], "/dev");
         assert!(text.contains("2026-01-01"));
     }
 }

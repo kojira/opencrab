@@ -2583,7 +2583,7 @@
         "request": {
           "body": null,
           "method": "GET",
-          "uri": "/api/agents/baseline-agent/import/sync/status?source_dir=/tmp"
+          "uri": "/api/agents/baseline-agent/import/sync/status?source_dir=/dev&include_daily_logs=false"
         },
         "response": {
           "body": {
@@ -2604,7 +2604,7 @@
               "sections_updated": 0,
               "status": "not_found"
             },
-            "source_dir": "/private/tmp"
+            "source_dir": "/dev"
           },
           "headers": [
             {
@@ -10327,7 +10327,7 @@
         }
       },
       "query_suffixes": {
-        "/api/agents/{id}/import/sync/status": "?source_dir=/tmp"
+        "/api/agents/{id}/import/sync/status": "?source_dir=/dev&include_daily_logs=false"
       },
       "why": [
         "A replacement must not silently drop an HTTP method that remains present in the L1 route inventory.",
