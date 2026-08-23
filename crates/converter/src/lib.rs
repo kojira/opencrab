@@ -1,3 +1,4 @@
+mod phase3;
 mod provenance;
 mod report;
 mod schema;
@@ -8,24 +9,40 @@ mod uuid;
 pub use report::{ClassAccounting, ConversionReport};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use provenance::{
-    composite_key, digest_file, immutable_sqlite_uri, integer_key, reject_nonempty_sqlite_sidecars,
-    text, MigrationProvenance,
-};
+use phase3::assemble_phase3;
+use provenance::{composite_key, digest_file, integer_key, text, MigrationProvenance};
 use report::ContributionKey;
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
-use schema::create_phase1_schema;
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use schema::create_migration_owned_schema;
 use serde::de::{DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
 use sha2::{Digest, Sha256};
 use source::{SourceRow, SourceTable};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Display, Formatter};
-use std::fs::OpenOptions;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use time::parse_utc_nanos;
 use uuid::parse_canonical_uuid;
 
 const SOURCE_DB: &str = "data/opencrab.db";
+
+/// Verbatim firing Policy JSON written by oc2 `create_place` / `provision_place`
+/// when given `Policy::default()` (DESIGN-DB-MIGRATION §12.8.1).
+///
+/// Config-derived Discord admission is the ledger transform into
+/// `place_default_policies` / `place_subject_policies`, not this column.
+/// History/closed places use the same JSON: `Policy::default()` is the unique
+/// non-firing value in code (empty `immediate`, no unconditional interval, no
+/// `default_subject`); archival is `closed_at` / `close_reason`.
+fn default_place_policy_json() -> String {
+    serde_json::json!({
+        "immediate": [],
+        "immediate_from": "anyone",
+        "batch_window_ms": serde_json::Value::Null,
+        "unconditional_interval_ms": serde_json::Value::Null,
+        "default_subject": serde_json::Value::Null,
+    })
+    .to_string()
+}
 
 pub type Result<T> = std::result::Result<T, ConverterError>;
 
@@ -37,7 +54,7 @@ pub enum ConverterError {
     SourceSnapshot(String),
     SourceSchema(String),
     InstanceSet(String),
-    TargetNotFresh,
+    AlreadyApplied,
     Accounting(String),
 }
 
@@ -50,7 +67,10 @@ impl Display for ConverterError {
             Self::SourceSnapshot(message) => write!(formatter, "source snapshot error: {message}"),
             Self::SourceSchema(message) => write!(formatter, "source schema error: {message}"),
             Self::InstanceSet(message) => write!(formatter, "instance-set error: {message}"),
-            Self::TargetNotFresh => write!(formatter, "target database path already exists"),
+            Self::AlreadyApplied => write!(
+                formatter,
+                "schema_migration_state already has inplace-v1; refuse double INSERT"
+            ),
             Self::Accounting(message) => write!(formatter, "accounting error: {message}"),
         }
     }
@@ -112,7 +132,7 @@ struct MigrationInstanceSet(Vec<MigrationInstance>);
 ///
 /// Implementations read from the same open source snapshot and assemble migration-created
 /// instances directly in the fresh target transaction. They do not return a caller-supplied
-/// authority set: after this phase completes, `convert` reads the authoritative set back from
+/// authority set: after this phase completes, `migrate_in_place` reads the authoritative set back from
 /// `gate_instances` before assembling principals.
 pub trait MigrationInstanceAssembler {
     fn assemble(&self, source: &Connection, target: &MigrationInstanceTarget<'_, '_>)
@@ -166,33 +186,7 @@ impl MigrationInstanceAssembler for NoMigrationInstances {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct ConvertOptions {
-    /// Immutable, checkpointed SQLite main database file.
-    ///
-    /// The snapshot authority covers this one file only. A non-empty sibling `-wal`, `-shm`, or
-    /// `-journal` sidecar makes the input invalid and is rejected before source rows are read.
-    /// The caller must keep the main file's bytes stable until [`convert`] returns. SQLite's
-    /// `immutable=1` mode does not pin unread pages when the connection is opened.
-    pub source: PathBuf,
-    pub target: PathBuf,
-    /// Immutable TOML resource captured for this conversion run.
-    pub config: PathBuf,
-    /// Immutable dotenv resource containing the effective environment captured for this run.
-    pub environment: PathBuf,
-    /// Immutable snapshot capture time in UTC nanoseconds.
-    ///
-    /// This explicit value is also the migration epoch. Filesystem metadata is not an authority
-    /// for either timestamp.
-    pub captured_at: i64,
-}
-
-#[derive(Clone, Debug)]
-pub struct ConvertOutcome {
-    pub report: ConversionReport,
-}
-
-struct RawCollector<'target, 'connection> {
+pub(crate) struct RawCollector<'target, 'connection> {
     target: &'target Transaction<'connection>,
 }
 
@@ -256,6 +250,7 @@ struct Principal {
     subject_id: i64,
     platform: String,
     external_id: String,
+    #[allow(dead_code)]
     public_id: String,
     display_name: String,
     created_at: i64,
@@ -275,8 +270,8 @@ struct GrantContributor {
     principal_subject_id: i64,
     role: &'static str,
     external_id: String,
-    gate_kind: Option<String>,
-    permission: Option<String>,
+    gate_kind: String,
+    permission: String,
     allowed_actions: Option<String>,
     source_record_key: Option<String>,
     created_by: String,
@@ -1004,13 +999,13 @@ fn assemble_discord_channel_policies(
                         })?;
                         target.execute(
                             "INSERT INTO places(
-                           id,parent_id,inherit_from_place_id,inherit_up_to_seq,policy,public_key,
+                           id,address,parent_id,policy_json,inherit_from_place,inherit_up_to_seq,
                            created_at,closed_at,close_reason
-                         ) VALUES(?1,NULL,NULL,NULL,?2,?3,?4,NULL,NULL)",
+                         ) VALUES(?1,?2,NULL,?3,NULL,NULL,?4,NULL,NULL)",
                             params![
                                 place_id,
-                                b"hard-default".as_slice(),
                                 format!("config:discord:{channel}"),
+                                default_place_policy_json(),
                                 created_at,
                             ],
                         )?;
@@ -1151,19 +1146,15 @@ fn flush_channel_policy_candidates(
             ])
         } else {
             let default_id = deterministic_uuid(snapshot_digest, key.as_bytes());
-            let policy_digest = Sha256::digest(&selected.signature);
             target.execute(
                 "INSERT INTO place_default_policies(
-                   default_id,place_id,kind_id,resolution,source_row,source_updated_at,
-                   policy_schema_id,policy_bytes,policy_digest
-                 ) VALUES(?1,?2,'discord','active',?3,?4,'place-policy/discord/v1',?5,?6)",
+                   default_id,place_id,kind_id,resolution,source_row,source_updated_at
+                 ) VALUES(?1,?2,'discord','active',?3,?4)",
                 params![
                     default_id,
                     selected.place_id,
                     selected.row.row_values,
                     selected.source_updated_at,
-                    selected.signature,
-                    policy_digest.as_slice(),
                 ],
             )?;
             *default_rows += 1;
@@ -1249,7 +1240,7 @@ fn parse_channel_policy(
     })
 }
 
-fn next_integer_id(target: &Transaction<'_>, table: &str) -> Result<i64> {
+pub(crate) fn next_integer_id(target: &Transaction<'_>, table: &str) -> Result<i64> {
     let current = target.query_row(
         &format!("SELECT COALESCE(MAX(id),0) FROM {table}"),
         [],
@@ -1346,6 +1337,10 @@ fn assemble_sessions(
     let mut place_rows = 0_u64;
     let mut membership_rows = 0_u64;
     let mut child_parents = Vec::<(i64, i64, String)>::new();
+    let subject_public_ids = agents
+        .iter()
+        .map(|(public_id, subject_id)| (*subject_id, public_id.clone()))
+        .collect::<BTreeMap<_, _>>();
     table.for_each_row(source, "id COLLATE BINARY,rowid", |row| {
         let mut row_accounting = accounting.start_streamed_row(&table, row);
         let result = parse_session_row(&table, row, agents);
@@ -1408,13 +1403,13 @@ fn assemble_sessions(
             };
             target.execute(
                 "INSERT INTO places(
-                   id,parent_id,inherit_from_place_id,inherit_up_to_seq,policy,public_key,
+                   id,address,parent_id,policy_json,inherit_from_place,inherit_up_to_seq,
                    created_at,closed_at,close_reason
-                 ) VALUES(?1,NULL,NULL,NULL,?2,?3,?4,?5,?6)",
+                 ) VALUES(?1,?2,NULL,?3,NULL,NULL,?4,?5,?6)",
                 params![
                     place_id,
-                    b"hard-default".as_slice(),
                     public_key,
+                    default_place_policy_json(),
                     parsed.created_at,
                     parsed.closed_at,
                     parsed.close_reason,
@@ -1467,13 +1462,13 @@ fn assemble_sessions(
         Ok(())
     })?;
     for (child_place_id, child_subject_id, parent_session_id) in child_parents {
-        let public_id = target.query_row(
-            "SELECT public_id FROM subjects WHERE id=?1",
-            [child_subject_id],
-            |row| row.get::<_, String>(0),
-        )?;
+        let public_id = subject_public_ids.get(&child_subject_id).ok_or_else(|| {
+            ConverterError::Accounting(format!(
+                "child session subject {child_subject_id} has no in-memory public_id"
+            ))
+        })?;
         let parent_place_id = live_sessions
-            .get(&(public_id, parent_session_id.clone()))
+            .get(&(public_id.clone(), parent_session_id.clone()))
             .map(|place| place.place_id)
             .or_else(|| {
                 target
@@ -1795,13 +1790,13 @@ fn ensure_live_place_and_bindings(
             let place_id = next_integer_id(target, "places")?;
             target.execute(
                 "INSERT INTO places(
-                   id,parent_id,inherit_from_place_id,inherit_up_to_seq,policy,public_key,
+                   id,address,parent_id,policy_json,inherit_from_place,inherit_up_to_seq,
                    created_at,closed_at,close_reason
-                 ) VALUES(?1,NULL,NULL,NULL,?2,?3,?4,NULL,NULL)",
+                 ) VALUES(?1,?2,NULL,?3,NULL,NULL,?4,NULL,NULL)",
                 params![
                     place_id,
-                    b"hard-default".as_slice(),
                     format!("live:{kind}:{}", URL_SAFE_NO_PAD.encode(address.as_bytes())),
+                    default_place_policy_json(),
                     created_at,
                 ],
             )?;
@@ -1837,8 +1832,8 @@ fn ensure_live_place_and_bindings(
     );
     target.execute(
         "INSERT OR IGNORE INTO external_origin_scopes(
-           scope_id,kind_id,address,mode,instance_id,binding_id,place_id
-         ) VALUES(?1,?2,?3,'kind_address',NULL,NULL,?4)",
+           scope_id,kind_id,address,mode,instance_id,place_id
+         ) VALUES(?1,?2,?3,'kind_address',NULL,?4)",
         params![scope_id, kind, address, place_id],
     )?;
     let metadata = if kind == "discord" {
@@ -1882,9 +1877,8 @@ fn ensure_live_place_and_bindings(
         target.execute(
             "INSERT OR IGNORE INTO gate_bindings(
                binding_id,place_id,instance_id,address,label,origin_scope_id,
-               binding_metadata_schema_id,binding_metadata_bytes,binding_metadata_digest,
-               catch_up_start,closed_at,close_reason
-             ) VALUES(?1,?2,?3,?4,NULL,?5,?6,?7,?8,NULL,NULL,NULL)",
+               binding_metadata_schema_id,binding_metadata_bytes,binding_metadata_digest
+             ) VALUES(?1,?2,?3,?4,NULL,?5,?6,?7,?8)",
             params![
                 binding_id,
                 place_id,
@@ -2340,17 +2334,17 @@ fn assemble_memory_history(
             let place_id = next_integer_id(target, "places")?;
             target.execute(
                 "INSERT INTO places(
-                   id,parent_id,inherit_from_place_id,inherit_up_to_seq,policy,public_key,
+                   id,address,parent_id,policy_json,inherit_from_place,inherit_up_to_seq,
                    created_at,closed_at,close_reason
-                 ) VALUES(?1,NULL,NULL,NULL,?2,?3,?4,?5,'legacy-history-import')",
+                 ) VALUES(?1,?2,NULL,?3,NULL,NULL,?4,?5,'legacy-history-import')",
                 params![
                     place_id,
-                    b"owner-private".as_slice(),
                     format!(
                         "legacy-agent:opencrab:{}:{}",
                         URL_SAFE_NO_PAD.encode(agent_id.as_bytes()),
                         URL_SAFE_NO_PAD.encode(session_id.as_bytes())
                     ),
+                    default_place_policy_json(),
                     created_at,
                     migration_epoch,
                 ],
@@ -2804,21 +2798,22 @@ fn insert_history_event(
     created_at: i64,
     for_subject_id: Option<i64>,
 ) -> Result<()> {
+    let content_json = std::str::from_utf8(content)
+        .map_err(|_| ConverterError::Accounting("history event content is not UTF-8".into()))?;
     target.execute(
         "INSERT INTO events(
-           place_id,seq,kind,author_subject_id,author_external_id,content,reply_to_seq,
-           target_seq,for_subject_id,created_at,attachments
-         ) VALUES(?1,?2,?3,?4,?5,?6,NULL,NULL,?7,?8,?9)",
+           place_id,seq,kind,author_subject_id,author_external_id,content_json,mentions_json,
+           reply_to_seq,target_seq,for_subject_id,created_at,attachments_json
+         ) VALUES(?1,?2,?3,?4,?5,?6,'[]',NULL,NULL,?7,?8,'[]')",
         params![
             place_id,
             seq,
             kind,
             author_subject_id,
             author_external_id,
-            content,
+            content_json,
             for_subject_id,
             created_at,
-            b"[]".as_slice(),
         ],
     )?;
     Ok(())
@@ -2870,7 +2865,7 @@ fn resolve_external_speaker(
          FROM gate_bindings b
          JOIN gate_instances gi ON gi.instance_id=b.instance_id
          JOIN gate_subject_identities i ON i.instance_id=gi.instance_id
-         WHERE b.place_id=?1 AND b.closed_at IS NULL AND gi.kind_id=?2
+         WHERE b.place_id=?1 AND gi.kind_id=?2
            AND (gi.owner_subject_id=?3 OR gi.owner_subject_id IS NULL)
            AND i.external_id=?4
          ORDER BY gi.instance_id,i.subject_id",
@@ -3231,7 +3226,9 @@ impl<'de> Visitor<'de> for UniqueJsonVisitor {
     }
 }
 
-fn parse_json_without_duplicate_keys(bytes: &[u8]) -> serde_json::Result<serde_json::Value> {
+pub(crate) fn parse_json_without_duplicate_keys(
+    bytes: &[u8],
+) -> serde_json::Result<serde_json::Value> {
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
     let value = UniqueJsonSeed.deserialize(&mut deserializer)?;
     deserializer.end()?;
@@ -3319,7 +3316,7 @@ fn reconcile_migrated_routes(target: &Transaction<'_>) -> Result<()> {
     let mut statement = target.prepare(
         "SELECT DISTINCT m.subject_id,m.place_id,gi.kind_id
          FROM memberships m
-         JOIN gate_bindings b ON b.place_id=m.place_id AND b.closed_at IS NULL
+         JOIN gate_bindings b ON b.place_id=m.place_id
          JOIN gate_instances gi ON gi.instance_id=b.instance_id
          ORDER BY m.subject_id,m.place_id,gi.kind_id",
     )?;
@@ -3347,37 +3344,11 @@ fn reconcile_migrated_routes(target: &Transaction<'_>) -> Result<()> {
                 ))
             },
         )?;
-        let policy = if subject_policy.0 == 1 {
-            subject_policy
-        } else {
-            let default_policy = target
-                .query_row(
-                    "SELECT policy_bytes FROM place_default_policies
-                     WHERE place_id=?1 AND kind_id=?2 AND resolution='active'",
-                    params![place_id, kind],
-                    |row| row.get::<_, Vec<u8>>(0),
-                )
-                .optional()?;
-            match default_policy {
-                Some(bytes) => {
-                    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-                    (
-                        1,
-                        value
-                            .get("whitelisted")
-                            .and_then(serde_json::Value::as_bool),
-                        value
-                            .get("heartbeat_enabled")
-                            .and_then(serde_json::Value::as_bool),
-                    )
-                }
-                None => subject_policy,
-            }
-        };
+        let policy = subject_policy;
         let metadata = target.query_row(
             "SELECT binding_metadata_bytes FROM gate_bindings b
              JOIN gate_instances gi ON gi.instance_id=b.instance_id
-             WHERE b.place_id=?1 AND gi.kind_id=?2 AND b.closed_at IS NULL LIMIT 1",
+             WHERE b.place_id=?1 AND gi.kind_id=?2 LIMIT 1",
             params![place_id, kind],
             |row| row.get::<_, Vec<u8>>(0),
         )?;
@@ -3451,7 +3422,7 @@ fn query_route_bindings(
          JOIN gate_instances gi ON gi.instance_id=b.instance_id
          JOIN gate_instance_revisions r ON r.instance_id=gi.instance_id AND r.revision=gi.active_revision
          WHERE {predicate} AND b.place_id=?2 AND gi.kind_id=?3
-           AND b.closed_at IS NULL AND r.present=1 AND r.enabled=1
+           AND r.present=1 AND r.enabled=1
          ORDER BY b.binding_id"
     );
     let mut statement = target.prepare(&sql)?;
@@ -3471,96 +3442,136 @@ fn query_route_bindings(
     Ok(rows)
 }
 
-/// Converts one staged snapshot into a fresh target database.
+pub const IN_PLACE_MIGRATION_ID: &str = "inplace-v1";
+
+/// Additive in-place migration: apply store schema, then fill new tables from old ones.
 ///
-/// The caller must keep `options.source`, `options.config`, and `options.environment` byte-stable
-/// until this function returns. In particular, opening the source with SQLite `immutable=1` does
-/// not release the caller from keeping the staged main database stable: SQLite may read previously
-/// unread pages at any point while the conversion is running.
-pub fn convert(
-    options: ConvertOptions,
+/// Phase S+D run in one transaction. A present `schema_migration_state` marker fails loud.
+pub fn migrate_in_place(
+    conn: &mut Connection,
+    config: impl AsRef<Path>,
+    environment: impl AsRef<Path>,
+    captured_at: i64,
+) -> Result<ConversionReport> {
+    migrate_in_place_with(
+        conn,
+        config.as_ref(),
+        environment.as_ref(),
+        captured_at,
+        &NoMigrationInstances,
+    )
+}
+
+pub fn migrate_in_place_with(
+    conn: &mut Connection,
+    config: &Path,
+    environment: &Path,
+    captured_at: i64,
     instance_assembler: &dyn MigrationInstanceAssembler,
-) -> Result<ConvertOutcome> {
-    reject_nonempty_sqlite_sidecars(&options.source)?;
-    let source_database_digest = digest_file(&options.source)?;
-    let effective_config_snapshot = load_effective_config(
-        source_database_digest,
-        options.captured_at,
-        &options.config,
-        &options.environment,
-    )?;
+) -> Result<ConversionReport> {
+    let already = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='schema_migration_state'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+    if already > 0 {
+        let marked: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM schema_migration_state WHERE migration_id=?1",
+            [IN_PLACE_MIGRATION_ID],
+            |row| row.get(0),
+        )?;
+        if marked > 0 {
+            return Err(ConverterError::AlreadyApplied);
+        }
+    }
+
+    let input_digest = inplace_input_digest(config, environment, captured_at)?;
+    let effective_config_snapshot =
+        load_effective_config(input_digest, captured_at, config, environment)?;
     let snapshot_digest = effective_config_snapshot.digest;
-    let source_uri = immutable_sqlite_uri(&options.source)?;
-    let source = Connection::open_with_flags(
-        source_uri,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+
+    let transaction = conn.transaction()?;
+    opencrab_store::apply_schema(&transaction)?;
+    create_migration_owned_schema(&transaction)?;
+
+    let agents = load_optional_schema(
+        &transaction,
+        "agents",
+        &[
+            "agent_id",
+            "name",
+            "job_title",
+            "organization",
+            "image_url",
+            "persona_name",
+            "personality",
+            "instructions",
+            "heartbeat_instructions",
+            "model",
+            "reasoning_effort",
+            "web_search",
+            "metadata_json",
+            "created_at",
+            "updated_at",
+        ],
     )?;
-    // Check again at the read boundary so a sidecar introduced while the explicit config snapshot
-    // was being loaded cannot silently change the SQLite snapshot after the main-file digest.
-    reject_nonempty_sqlite_sidecars(&options.source)?;
-    source.execute_batch("BEGIN")?;
-    let agents = SourceTable::load_schema(&source, "agents")?;
-    let model_pricing = SourceTable::load(&source, "model_pricing")?;
-    let trusted_users = SourceTable::load(&source, "trusted_users")?;
-    let trusted_co_agents = SourceTable::load(&source, "trusted_co_agents")?;
-    agents.require_exact_columns(&[
-        "agent_id",
-        "name",
-        "job_title",
-        "organization",
-        "image_url",
-        "persona_name",
-        "personality",
-        "instructions",
-        "heartbeat_instructions",
-        "model",
-        "reasoning_effort",
-        "web_search",
-        "metadata_json",
-        "created_at",
-        "updated_at",
-    ])?;
-    trusted_users.require_exact_columns(&[
-        "id",
-        "user_id",
-        "agent_id",
-        "permission",
-        "created_by",
-        "created_at",
-        "display_name",
-        "platform",
-    ])?;
-    trusted_co_agents.require_exact_columns(&[
-        "id",
-        "agent_id",
-        "co_agent_id",
-        "allowed_actions",
-        "created_by",
-        "created_at",
-    ])?;
-    model_pricing.require_exact_columns(&[
-        "provider",
-        "model",
-        "input_price_per_1m",
-        "output_price_per_1m",
-        "context_window",
-        "updated_at",
-        "max_output_tokens",
-    ])?;
-    let mut target = create_fresh_target(&options.target)?;
-    let transaction = target.transaction()?;
-    create_phase1_schema(&transaction)?;
+    let model_pricing = load_optional_rows(
+        &transaction,
+        "model_pricing",
+        &[
+            "provider",
+            "model",
+            "input_price_per_1m",
+            "output_price_per_1m",
+            "context_window",
+            "updated_at",
+            "max_output_tokens",
+        ],
+    )?;
+    let trusted_users = load_optional_rows(
+        &transaction,
+        "trusted_users",
+        &[
+            "id",
+            "user_id",
+            "agent_id",
+            "permission",
+            "created_by",
+            "created_at",
+            "display_name",
+            "platform",
+        ],
+    )?;
+    let trusted_co_agents = load_optional_rows(
+        &transaction,
+        "trusted_co_agents",
+        &[
+            "id",
+            "agent_id",
+            "co_agent_id",
+            "allowed_actions",
+            "created_by",
+            "created_at",
+        ],
+    )?;
+    let agents = agents.unwrap_or_else(|| SourceTable::empty("agents"));
+    let model_pricing = model_pricing.unwrap_or_else(|| SourceTable::empty("model_pricing"));
+    let trusted_users = trusted_users.unwrap_or_else(|| SourceTable::empty("trusted_users"));
+    let trusted_co_agents =
+        trusted_co_agents.unwrap_or_else(|| SourceTable::empty("trusted_co_agents"));
     let mut raw = RawCollector::new(&transaction);
     let mut report = ConversionReport {
         input_snapshot_digest: source::hex(&snapshot_digest),
         ..ConversionReport::default()
     };
     let provenance = MigrationProvenance::new(snapshot_digest);
-    let captured_at = options.captured_at;
 
     let effective_config = effective_config_snapshot.config;
     let agent_subjects = assemble_agents(
-        &source,
+        &transaction,
         &transaction,
         &agents,
         &model_pricing,
@@ -3571,7 +3582,7 @@ pub fn convert(
     )?;
 
     assemble_gate_configs(
-        &source,
+        &transaction,
         &transaction,
         snapshot_digest,
         captured_at,
@@ -3585,7 +3596,7 @@ pub fn convert(
     // The coordinator owns this transaction across both phases. Instance assembly runs after the
     // canonical agent family so dedicated/shared rows can resolve owners in this same snapshot.
     instance_assembler.assemble(
-        &source,
+        &transaction,
         &MigrationInstanceTarget {
             transaction: &transaction,
         },
@@ -3593,7 +3604,7 @@ pub fn convert(
     let migration_instances = load_migration_instances(&transaction)?;
 
     assemble_discord_channel_policies(
-        &source,
+        &transaction,
         &transaction,
         snapshot_digest,
         captured_at,
@@ -3633,7 +3644,7 @@ pub fn convert(
         &mut report,
     )?;
     assemble_history_and_events(
-        &source,
+        &transaction,
         &transaction,
         snapshot_digest,
         captured_at,
@@ -3642,7 +3653,24 @@ pub fn convert(
         &mut raw,
         &mut report,
     )?;
+    assemble_phase3(
+        &transaction,
+        &transaction,
+        &agent_subjects,
+        &provenance,
+        &mut raw,
+        &mut report,
+    )?;
     raw.write(&transaction)?;
+    transaction.execute(
+        "INSERT INTO schema_migration_state(migration_id, applied_at, source_row_digest)
+         VALUES(?1, ?2, ?3)",
+        params![
+            IN_PLACE_MIGRATION_ID,
+            captured_at,
+            snapshot_digest.as_slice()
+        ],
+    )?;
 
     for table in [
         "gate_instances",
@@ -3674,6 +3702,11 @@ pub fn convert(
         "interaction_responses",
         "migration_provenance",
         "legacy_unowned_source_rows",
+        "schedule_source_state",
+        "webhook_endpoints",
+        "model_observations",
+        "tasks",
+        "schema_migration_state",
     ] {
         let count = transaction.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
             row.get::<_, u64>(0)
@@ -3681,15 +3714,49 @@ pub fn convert(
         report.physical_rows.insert(table.into(), count);
     }
     report.verify()?;
-    source.execute_batch("ROLLBACK")?;
-    if digest_file(&options.source)? != source_database_digest {
-        return Err(ConverterError::SourceSnapshot(
-            "staged main database bytes changed during convert; the caller must keep the source byte-stable until convert returns"
-                .into(),
-        ));
-    }
     transaction.commit()?;
-    Ok(ConvertOutcome { report })
+    Ok(report)
+}
+
+fn load_optional_schema(
+    conn: &Connection,
+    name: &'static str,
+    columns: &[&str],
+) -> Result<Option<SourceTable>> {
+    if !SourceTable::exists(conn, name)? {
+        return Ok(None);
+    }
+    let table = SourceTable::load_schema(conn, name)?;
+    table.require_exact_columns(columns)?;
+    Ok(Some(table))
+}
+
+fn load_optional_rows(
+    conn: &Connection,
+    name: &'static str,
+    columns: &[&str],
+) -> Result<Option<SourceTable>> {
+    if !SourceTable::exists(conn, name)? {
+        return Ok(None);
+    }
+    let table = SourceTable::load(conn, name)?;
+    table.require_exact_columns(columns)?;
+    Ok(Some(table))
+}
+
+fn inplace_input_digest(config: &Path, environment: &Path, captured_at: i64) -> Result<[u8; 32]> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"opencrab-inplace-input-snapshot-v1\0");
+    hasher.update(digest_file(config)?);
+    hasher.update(digest_file(environment)?);
+    hasher.update(captured_at.to_be_bytes());
+    Ok(hasher.finalize().into())
+}
+
+#[cfg(test)]
+fn create_phase1_schema(conn: &Connection) -> Result<()> {
+    opencrab_store::apply_schema(conn)?;
+    create_migration_owned_schema(conn)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3746,9 +3813,15 @@ fn assemble_agents(
             .checked_add(1)
             .ok_or_else(|| ConverterError::Accounting("subject id overflow".into()))?;
         target.execute(
-            "INSERT INTO subjects(id,kind,public_id,display_name,created_at)
-             VALUES(?1,'agent',?2,?3,?4)",
-            params![subject_id, parsed.agent_id, parsed.name, parsed.created_at],
+            "INSERT INTO subjects(id,kind,name,persona,turn_runner,standing,created_at)
+             VALUES(?1,'agent',?2,?3,?4,'trusted',?5)",
+            params![
+                subject_id,
+                parsed.name,
+                parsed.persona_name,
+                parsed.turn_runner,
+                parsed.created_at
+            ],
         )?;
         target.execute(
             "INSERT INTO subject_profiles(
@@ -3837,6 +3910,7 @@ struct ParsedAgent {
     metadata: Option<String>,
     created_at: i64,
     updated_at: i64,
+    turn_runner: String,
     model_alias: Option<String>,
     reasoning_effort: Option<String>,
     web_search_enabled: Option<bool>,
@@ -3948,6 +4022,7 @@ fn parse_agent_aggregate(
         metadata,
         created_at,
         updated_at,
+        turn_runner: effective_model.to_owned(),
         model_alias,
         reasoning_effort: nullable("reasoning_effort")?,
         web_search_enabled,
@@ -4088,12 +4163,12 @@ fn assemble_principals(
                     .map_err(|_| ConverterError::Accounting("subject id overflow".into()))?,
             )
             .ok_or_else(|| ConverterError::Accounting("subject id overflow".into()))?;
+        // turn_runner='engine' is what oc2 `create_subject` writes (DESIGN-DB-MIGRATION §12.8.4).
         target.execute(
-            "INSERT INTO subjects(id,kind,public_id,display_name,created_at)
-             VALUES(?1,'human',?2,?3,?4)",
+            "INSERT INTO subjects(id,kind,name,persona,turn_runner,standing,created_at)
+             VALUES(?1,'human',?2,?2,'engine','unknown',?3)",
             params![
                 principal.subject_id,
-                principal.public_id,
                 principal.display_name,
                 principal.created_at
             ],
@@ -4265,9 +4340,9 @@ fn assemble_grants(
             let provenance_key = composite_key(&[
                 source::SqliteValue::Integer(contributor.agent_subject_id),
                 source::SqliteValue::Integer(contributor.principal_subject_id),
-                nullable_text(contributor.gate_kind.as_deref()),
+                text(&contributor.gate_kind),
                 text(&contributor.external_id),
-                nullable_text(contributor.permission.as_deref()),
+                text(&contributor.permission),
                 nullable_text(contributor.allowed_actions.as_deref()),
                 nullable_text(contributor.source_record_key.as_deref()),
                 text(&contributor.created_by),
@@ -4409,8 +4484,8 @@ fn parse_user_grant(
         principal_subject_id,
         role,
         external_id: external_id.into(),
-        gate_kind: Some(platform.into()),
-        permission: Some(permission.into()),
+        gate_kind: platform.into(),
+        permission: permission.into(),
         allowed_actions: None,
         source_record_key,
         created_by: created_by.into(),
@@ -4459,8 +4534,8 @@ fn parse_co_agent_grant(
         principal_subject_id,
         role: "owner_equivalent",
         external_id: co_agent_id.into(),
-        gate_kind: None,
-        permission: None,
+        gate_kind: "all".into(),
+        permission: "co-agent".into(),
         allowed_actions,
         source_record_key,
         created_by: created_by.into(),
@@ -4500,17 +4575,6 @@ fn role_rank(role: &str) -> u8 {
 
 fn report_group_count(target: &Transaction<'_>) -> Result<u64> {
     Ok(target.query_row("SELECT COUNT(*) FROM grant_sets", [], |row| row.get(0))?)
-}
-
-fn create_fresh_target(path: &Path) -> Result<Connection> {
-    match OpenOptions::new().write(true).create_new(true).open(path) {
-        Ok(file) => drop(file),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(ConverterError::TargetNotFresh);
-        }
-        Err(error) => return Err(error.into()),
-    }
-    Ok(Connection::open(path)?)
 }
 
 fn load_migration_instances(target: &Transaction<'_>) -> Result<MigrationInstanceSet> {

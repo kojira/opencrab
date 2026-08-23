@@ -1,0 +1,401 @@
+use opencrab_converter::{migrate_in_place, ConverterError, IN_PLACE_MIGRATION_ID};
+use opencrab_social_runtime::Policy;
+use rusqlite::types::ValueRef;
+use rusqlite::Connection;
+use std::collections::{BTreeMap, BTreeSet};
+
+const CAPTURED_AT: i64 = 1_770_000_000_000_000_000;
+const LLM_LOGS_ADDITIVE_COLUMNS: &[&str] =
+    &["turn_record_id", "iteration", "place_id", "subject_id"];
+const LLM_LOGS_ADDITIVE_INDEXES: &[&str] = &["idx_llm_logs_turn"];
+
+#[test]
+fn old_tables_stay_byte_stable_except_enumerated_llm_logs_columns() {
+    let temporary = tempfile::tempdir().unwrap();
+    let db = temporary.path().join("source.db");
+    let conn = Connection::open(&db).unwrap();
+    opencrab_db::schema::initialize(&conn).unwrap();
+    conn.execute_batch(
+        "INSERT INTO agents(
+           agent_id,name,persona_name,personality,instructions,heartbeat_instructions,
+           created_at,updated_at
+         ) VALUES(
+           'agent-a','Agent A','persona-a','kind','do work','hb',
+           '2024-01-01 00:00:00','2024-01-01 00:00:00'
+         );
+         INSERT INTO model_pricing(
+           provider,model,input_price_per_1m,output_price_per_1m,context_window,updated_at
+         ) VALUES('openai','synthetic-model',1,2,128000,'2024-01-01 00:00:00');
+         INSERT INTO llm_logs(id,agent_id,prompt,response,is_bot_iteration)
+         VALUES('log-1','agent-a','hello','world',0);",
+    )
+    .unwrap();
+    drop(conn);
+
+    let before = capture_legacy(&db);
+    run_migrate(&db);
+    let after = capture_legacy(&db);
+
+    for name in &before.names {
+        assert_eq!(
+            before.counts[name], after.counts[name],
+            "old table {name} row count must be unchanged"
+        );
+        if name == "llm_logs" {
+            for column in LLM_LOGS_ADDITIVE_COLUMNS {
+                assert!(
+                    !before.columns[name].iter().any(|c| c == column),
+                    "llm_logs fixture must start without {column}"
+                );
+                assert!(
+                    after.columns[name].iter().any(|c| c == column),
+                    "llm_logs must gain enumerated column {column}"
+                );
+            }
+        } else {
+            assert_eq!(
+                before.columns[name], after.columns[name],
+                "old table {name} columns must be unchanged"
+            );
+        }
+    }
+    assert_old_sqlite_master_unchanged(&before, &after);
+}
+
+#[test]
+fn conversion_report_accounting_balances() {
+    let temporary = tempfile::tempdir().unwrap();
+    let db = temporary.path().join("source.db");
+    Connection::open(&db)
+        .unwrap()
+        .execute_batch(include_str!("fixtures/phase1-dirty.sql"))
+        .unwrap();
+    let report = run_migrate(&db);
+    assert!(report
+        .classes
+        .iter()
+        .all(|class| class.exact_one_violations == 0));
+}
+
+#[test]
+fn two_pristine_copies_match_new_table_rows() {
+    let temporary = tempfile::tempdir().unwrap();
+    let first = temporary.path().join("a.db");
+    let second = temporary.path().join("b.db");
+    for path in [&first, &second] {
+        Connection::open(path)
+            .unwrap()
+            .execute_batch(include_str!("fixtures/phase1-dirty.sql"))
+            .unwrap();
+    }
+    run_migrate(&first);
+    run_migrate(&second);
+    assert_eq!(new_table_row_digest(&first), new_table_row_digest(&second));
+}
+
+#[test]
+fn every_migrated_place_policy_json_round_trips_through_policy_from_json() {
+    let temporary = tempfile::tempdir().unwrap();
+    let db = temporary.path().join("source.db");
+    Connection::open(&db)
+        .unwrap()
+        .execute_batch(include_str!("fixtures/phase1-dirty.sql"))
+        .unwrap();
+    run_migrate(&db);
+    let conn = Connection::open(&db).unwrap();
+    let mut statement = conn
+        .prepare("SELECT id, policy_json FROM places ORDER BY id")
+        .unwrap();
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(
+        !rows.is_empty(),
+        "fixture must produce at least one migrated place"
+    );
+    let expected = Policy::default().to_json();
+    for (id, policy_json) in rows {
+        Policy::from_json(&policy_json).unwrap_or_else(|error| {
+            panic!("place {id} policy_json rejected by Policy::from_json: {error}\n{policy_json}")
+        });
+        assert_eq!(
+            policy_json, expected,
+            "place {id} must write the oc2 default Policy JSON"
+        );
+    }
+}
+
+#[test]
+fn migrate_in_place_fails_loud_on_second_run() {
+    let temporary = tempfile::tempdir().unwrap();
+    let db = temporary.path().join("source.db");
+    Connection::open(&db)
+        .unwrap()
+        .execute_batch(include_str!("fixtures/phase1-dirty.sql"))
+        .unwrap();
+    run_migrate(&db);
+    let (config, environment) = write_inputs(temporary.path());
+    let mut conn = Connection::open(&db).unwrap();
+    let error = migrate_in_place(&mut conn, &config, &environment, CAPTURED_AT).unwrap_err();
+    assert!(matches!(error, ConverterError::AlreadyApplied));
+}
+
+#[test]
+fn fresh_database_writes_marker_and_zero_source_families() {
+    let temporary = tempfile::tempdir().unwrap();
+    let db = temporary.path().join("fresh.db");
+    let conn = Connection::open(&db).unwrap();
+    opencrab_db::schema::initialize(&conn).unwrap();
+    drop(conn);
+    let report = run_migrate(&db);
+    assert!(report
+        .classes
+        .iter()
+        .all(|class| class.exact_one_violations == 0));
+    for class in &report.classes {
+        assert_eq!(class.source_rows, 0, "{}", class.source_table);
+        assert_eq!(class.canonical_outcomes, 0, "{}", class.logical_class);
+        assert_eq!(class.raw_outcomes, 0, "{}", class.logical_class);
+    }
+    let conn = Connection::open(&db).unwrap();
+    let marker: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM schema_migration_state WHERE migration_id=?1",
+            [IN_PLACE_MIGRATION_ID],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(marker, 1);
+    let subjects: i64 = conn
+        .query_row("SELECT COUNT(*) FROM subjects", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(subjects, 0);
+}
+
+fn write_inputs(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let config = dir.join("empty.toml");
+    let environment = dir.join("empty.env");
+    std::fs::write(&config, "").unwrap();
+    std::fs::write(&environment, "").unwrap();
+    (config, environment)
+}
+
+fn run_migrate(db: &std::path::Path) -> opencrab_converter::ConversionReport {
+    let (config, environment) = write_inputs(db.parent().unwrap());
+    let mut conn = Connection::open(db).unwrap();
+    migrate_in_place(&mut conn, &config, &environment, CAPTURED_AT).unwrap()
+}
+
+struct MasterEntry {
+    type_name: String,
+    name: String,
+    tbl_name: String,
+    sql: Option<String>,
+}
+
+struct LegacySnapshot {
+    names: Vec<String>,
+    counts: BTreeMap<String, i64>,
+    columns: BTreeMap<String, Vec<String>>,
+    master: Vec<MasterEntry>,
+}
+
+fn capture_legacy(path: &std::path::Path) -> LegacySnapshot {
+    let conn = Connection::open(path).unwrap();
+    let mut statement = conn
+        .prepare(
+            "SELECT name FROM sqlite_master
+             WHERE type='table' AND name NOT LIKE 'sqlite_%'
+             ORDER BY name",
+        )
+        .unwrap();
+    let names = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    let mut counts = std::collections::BTreeMap::new();
+    let mut columns = std::collections::BTreeMap::new();
+    for name in &names {
+        let count: i64 = conn
+            .query_row(&format!("SELECT COUNT(*) FROM \"{name}\""), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        counts.insert(name.clone(), count);
+        columns.insert(name.clone(), table_columns(&conn, name));
+    }
+    LegacySnapshot {
+        names,
+        counts,
+        columns,
+        master: capture_sqlite_master(&conn),
+    }
+}
+
+fn table_columns(conn: &Connection, name: &str) -> Vec<String> {
+    let mut statement = conn
+        .prepare(&format!("PRAGMA table_info(\"{name}\")"))
+        .unwrap();
+    statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap()
+}
+
+fn capture_sqlite_master(conn: &Connection) -> Vec<MasterEntry> {
+    let mut statement = conn
+        .prepare(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master
+             WHERE name NOT LIKE 'sqlite_%'
+             ORDER BY type, name",
+        )
+        .unwrap();
+    statement
+        .query_map([], |row| {
+            Ok(MasterEntry {
+                type_name: row.get(0)?,
+                name: row.get(1)?,
+                tbl_name: row.get(2)?,
+                sql: row.get(3)?,
+            })
+        })
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap()
+}
+
+fn assert_old_sqlite_master_unchanged(before: &LegacySnapshot, after: &LegacySnapshot) {
+    let old_tables: BTreeSet<&str> = before.names.iter().map(String::as_str).collect();
+    let allowed_new_indexes: BTreeSet<&str> = LLM_LOGS_ADDITIVE_INDEXES.iter().copied().collect();
+    let before_by_key: BTreeMap<(&str, &str), &MasterEntry> = before
+        .master
+        .iter()
+        .map(|entry| ((entry.type_name.as_str(), entry.name.as_str()), entry))
+        .collect();
+    let after_old: Vec<&MasterEntry> = after
+        .master
+        .iter()
+        .filter(|entry| old_tables.contains(entry.tbl_name.as_str()))
+        .collect();
+
+    for entry in &before.master {
+        let after_entry = after_old
+            .iter()
+            .find(|candidate| {
+                candidate.type_name == entry.type_name && candidate.name == entry.name
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "old sqlite_master entry vanished: {} {}",
+                    entry.type_name, entry.name
+                )
+            });
+        if entry.tbl_name == "llm_logs" && entry.type_name == "table" {
+            assert_eq!(
+                strip_enumerated_llm_logs_columns(after_entry.sql.as_deref().unwrap_or("")),
+                entry.sql.as_deref().unwrap_or(""),
+                "llm_logs sqlite_master sql must match modulo enumerated ADD COLUMN"
+            );
+        } else {
+            assert_eq!(
+                after_entry.sql, entry.sql,
+                "old sqlite_master {}.{} sql must be unchanged",
+                entry.type_name, entry.name
+            );
+        }
+    }
+
+    for entry in after_old {
+        if before_by_key.contains_key(&(entry.type_name.as_str(), entry.name.as_str())) {
+            continue;
+        }
+        assert!(
+            entry.tbl_name == "llm_logs"
+                && entry.type_name == "index"
+                && allowed_new_indexes.contains(entry.name.as_str()),
+            "unexpected sqlite_master addition on old table {}: {} {}",
+            entry.tbl_name,
+            entry.type_name,
+            entry.name
+        );
+    }
+}
+
+fn strip_enumerated_llm_logs_columns(sql: &str) -> String {
+    let mut out = sql.to_string();
+    for column in LLM_LOGS_ADDITIVE_COLUMNS {
+        for pattern in [
+            format!(", {column} INTEGER"),
+            format!(",{column} INTEGER"),
+            format!(",\n              {column} INTEGER"),
+        ] {
+            out = out.replace(&pattern, "");
+        }
+    }
+    out
+}
+
+fn new_table_row_digest(path: &std::path::Path) -> String {
+    let conn = Connection::open(path).unwrap();
+    let mut statement = conn
+        .prepare(
+            "SELECT name FROM sqlite_master
+             WHERE type='table' AND name NOT LIKE 'sqlite_%'
+             ORDER BY name",
+        )
+        .unwrap();
+    let names = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    let mut digest = String::new();
+    for name in names {
+        let columns = table_columns(&conn, &name);
+        let quoted: Vec<String> = columns
+            .iter()
+            .map(|column| format!("\"{column}\""))
+            .collect();
+        digest.push_str(&name);
+        digest.push('\n');
+        if quoted.is_empty() {
+            continue;
+        }
+        let order = quoted.join(",");
+        let sql = format!("SELECT {order} FROM \"{name}\" ORDER BY {order}");
+        let mut rows = conn.prepare(&sql).unwrap();
+        let mut query = rows.query([]).unwrap();
+        while let Some(row) = query.next().unwrap() {
+            for index in 0..columns.len() {
+                if index > 0 {
+                    digest.push('|');
+                }
+                digest.push_str(&value_digest(row.get_ref(index).unwrap()));
+            }
+            digest.push('\n');
+        }
+    }
+    digest
+}
+
+fn value_digest(value: ValueRef<'_>) -> String {
+    match value {
+        ValueRef::Null => "NULL".into(),
+        ValueRef::Integer(value) => value.to_string(),
+        ValueRef::Real(value) => format!("{value:?}"),
+        ValueRef::Text(value) => format!("T:{}", String::from_utf8_lossy(value)),
+        ValueRef::Blob(value) => {
+            let mut hex = String::from("B:");
+            for byte in value {
+                hex.push_str(&format!("{byte:02x}"));
+            }
+            hex
+        }
+    }
+}

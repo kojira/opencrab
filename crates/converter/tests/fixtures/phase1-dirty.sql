@@ -187,7 +187,8 @@ CREATE TABLE task_ledger(
   contract TEXT,
   status TEXT NOT NULL,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  restart_count INTEGER NOT NULL DEFAULT 0
 );
 INSERT INTO task_ledger VALUES
-  (1,'agent_alpha','discord-agent_alpha-111-222','Synthetic Goal',NULL,'active','2024-01-05 00:00:00','2024-01-05 00:00:00');
+  (1,'agent_alpha','discord-agent_alpha-111-222','Synthetic Goal',NULL,'active','2024-01-05 00:00:00','2024-01-05 00:00:00',0);
