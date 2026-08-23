@@ -1265,37 +1265,88 @@ fn migrate_memberships(conn: &Connection) -> Result<()> {
         return Ok(());
     }
 
-    let has_read_seq = column_exists(conn, "memberships", "read_seq")?;
-    let has_left_at = column_exists(conn, "memberships", "left_at")?;
-    let has_shared_seen_seq = column_exists(conn, "memberships", "shared_seen_seq")?;
-    match (has_read_seq, has_left_at, has_shared_seen_seq) {
-        (false, false, true) => Ok(()),
-        (true, true, false) => {
-            conn.execute_batch(
-                "ALTER TABLE memberships RENAME TO memberships_before_shared_seen_seq;
-                 CREATE TABLE memberships(
-                   place_id INTEGER NOT NULL,
-                   subject_id INTEGER NOT NULL,
-                   role TEXT NOT NULL,
-                   joined_at INTEGER NOT NULL,
-                   shared_seen_seq INTEGER NOT NULL,
-                   PRIMARY KEY(place_id, subject_id)
-                 );
-                 INSERT INTO memberships(place_id,subject_id,role,joined_at,shared_seen_seq)
-                 SELECT place_id,subject_id,role,joined_at,read_seq
-                 FROM memberships_before_shared_seen_seq;
-                 DROP TABLE memberships_before_shared_seen_seq;",
-            )?;
-            Ok(())
-        }
-        shape => Err(rusqlite::Error::ToSqlConversionFailure(
-            format!(
-                "unknown memberships schema: read_seq={}, left_at={}, shared_seen_seq={}",
-                shape.0, shape.1, shape.2
-            )
-            .into(),
-        )),
+    #[derive(Debug, PartialEq, Eq)]
+    struct Column {
+        name: String,
+        declared_type: String,
+        not_null: i64,
+        primary_key_ordinal: i64,
     }
+
+    let mut statement = conn.prepare("PRAGMA table_info(memberships)")?;
+    let columns = statement
+        .query_map([], |row| {
+            Ok(Column {
+                name: row.get(1)?,
+                declared_type: row.get(2)?,
+                not_null: row.get(3)?,
+                primary_key_ordinal: row.get(5)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    drop(statement);
+
+    let expected =
+        |name: &str, declared_type: &str, not_null: i64, primary_key_ordinal: i64| Column {
+            name: name.to_string(),
+            declared_type: declared_type.to_string(),
+            not_null,
+            primary_key_ordinal,
+        };
+    let legacy_columns = vec![
+        expected("place_id", "INTEGER", 1, 1),
+        expected("subject_id", "INTEGER", 1, 2),
+        expected("role", "TEXT", 1, 0),
+        expected("read_seq", "INTEGER", 1, 0),
+        expected("joined_at", "INTEGER", 1, 0),
+        expected("left_at", "INTEGER", 0, 0),
+    ];
+    let current_columns = vec![
+        expected("place_id", "INTEGER", 1, 1),
+        expected("subject_id", "INTEGER", 1, 2),
+        expected("role", "TEXT", 1, 0),
+        expected("joined_at", "INTEGER", 1, 0),
+        expected("shared_seen_seq", "INTEGER", 1, 0),
+    ];
+
+    if columns == current_columns {
+        return Ok(());
+    }
+    if columns == legacy_columns {
+        let left_memberships: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM memberships WHERE left_at IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        if left_memberships != 0 {
+            return Err(rusqlite::Error::ToSqlConversionFailure(
+                format!(
+                    "cannot migrate memberships: {left_memberships} row(s) have non-NULL left_at"
+                )
+                .into(),
+            ));
+        }
+        conn.execute_batch(
+            "ALTER TABLE memberships RENAME TO memberships_before_shared_seen_seq;
+             CREATE TABLE memberships(
+               place_id INTEGER NOT NULL,
+               subject_id INTEGER NOT NULL,
+               role TEXT NOT NULL,
+               joined_at INTEGER NOT NULL,
+               shared_seen_seq INTEGER NOT NULL,
+               PRIMARY KEY(place_id, subject_id)
+             );
+             INSERT INTO memberships(place_id,subject_id,role,joined_at,shared_seen_seq)
+             SELECT place_id,subject_id,role,joined_at,read_seq
+             FROM memberships_before_shared_seen_seq;
+             DROP TABLE memberships_before_shared_seen_seq;",
+        )?;
+        return Ok(());
+    }
+
+    Err(rusqlite::Error::ToSqlConversionFailure(
+        format!("unknown memberships schema: {columns:?}").into(),
+    ))
 }
 
 fn initialize_schema(conn: &mut Connection) -> Result<()> {
@@ -4851,6 +4902,36 @@ fn json_value_from(json: &str, what: &str) -> rusqlite::Result<serde_json::Value
 mod tests {
     use super::*;
 
+    fn store_fixture_path(label: &str) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "opencrab-store-{label}-{}-{nonce}.sqlite",
+            std::process::id()
+        ))
+    }
+
+    fn table_column_signature(conn: &Connection, table: &str) -> Vec<(String, String, i64, i64)> {
+        conn.prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get(1)?, row.get(2)?, row.get(3)?, row.get(5)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap()
+    }
+
+    fn assert_memberships_startup_rolled_back(conn: &Connection) {
+        assert!(!table_exists(conn, "memberships_before_shared_seen_seq").unwrap());
+        assert!(
+            !table_exists(conn, "places").unwrap(),
+            "schema changes earlier in the failed startup transaction must also roll back"
+        );
+    }
+
     fn ev(text: &str) -> NewEvent {
         NewEvent {
             kind: EventKind::Said,
@@ -6556,14 +6637,7 @@ mod tests {
 
     #[test]
     fn pre_750_memberships_file_opens_with_cursor_and_values_preserved() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "opencrab-store-pre-750-memberships-{}-{nonce}.sqlite",
-            std::process::id()
-        ));
+        let path = store_fixture_path("pre-750-memberships");
 
         {
             let conn = Connection::open(&path).unwrap();
@@ -6658,6 +6732,221 @@ mod tests {
             );
         }
 
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn pre_750_memberships_with_left_at_fails_without_changes() {
+        let path = store_fixture_path("pre-750-memberships-left-at");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE memberships(
+                   place_id INTEGER NOT NULL,
+                   subject_id INTEGER NOT NULL,
+                   role TEXT NOT NULL,
+                   read_seq INTEGER NOT NULL,
+                   joined_at INTEGER NOT NULL,
+                   left_at INTEGER,
+                   PRIMARY KEY(place_id, subject_id)
+                 );
+                 INSERT INTO memberships(place_id,subject_id,role,read_seq,joined_at,left_at)
+                 VALUES
+                   (11,21,'participant',37,101,NULL),
+                   (11,22,'observer',38,102,103);",
+            )
+            .unwrap();
+        }
+
+        let error = Store::open(&path)
+            .err()
+            .expect("non-NULL left_at must fail migration");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot migrate memberships: 1 row(s) have non-NULL left_at"),
+            "unexpected error: {error}"
+        );
+
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            table_column_signature(&conn, "memberships"),
+            [
+                ("place_id".into(), "INTEGER".into(), 1, 1),
+                ("subject_id".into(), "INTEGER".into(), 1, 2),
+                ("role".into(), "TEXT".into(), 1, 0),
+                ("read_seq".into(), "INTEGER".into(), 1, 0),
+                ("joined_at".into(), "INTEGER".into(), 1, 0),
+                ("left_at".into(), "INTEGER".into(), 0, 0),
+            ],
+            "failed migration must leave the legacy table shape unchanged"
+        );
+        let rows = conn
+            .prepare(
+                "SELECT place_id,subject_id,role,read_seq,joined_at,left_at
+                 FROM memberships ORDER BY place_id,subject_id",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            [
+                (11, 21, "participant".into(), 37, 101, None),
+                (11, 22, "observer".into(), 38, 102, Some(103)),
+            ],
+            "failed migration must preserve every legacy row value"
+        );
+        assert_memberships_startup_rolled_back(&conn);
+        drop(conn);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn migration_rejects_legacy_memberships_with_unknown_column_without_changes() {
+        let path = store_fixture_path("memberships-unknown-column");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE memberships(
+                   place_id INTEGER NOT NULL,
+                   subject_id INTEGER NOT NULL,
+                   role TEXT NOT NULL,
+                   read_seq INTEGER NOT NULL,
+                   joined_at INTEGER NOT NULL,
+                   left_at INTEGER,
+                   source_metadata TEXT,
+                   PRIMARY KEY(place_id, subject_id)
+                 );
+                 INSERT INTO memberships(
+                   place_id,subject_id,role,read_seq,joined_at,left_at,source_metadata
+                 ) VALUES(11,21,'participant',37,101,NULL,'fixture-metadata');",
+            )
+            .unwrap();
+        }
+
+        let error = Store::open(&path)
+            .err()
+            .expect("legacy shape with an unknown column must fail migration");
+        assert!(
+            error.to_string().contains("unknown memberships schema"),
+            "unexpected error: {error}"
+        );
+
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            table_column_signature(&conn, "memberships"),
+            [
+                ("place_id".into(), "INTEGER".into(), 1, 1),
+                ("subject_id".into(), "INTEGER".into(), 1, 2),
+                ("role".into(), "TEXT".into(), 1, 0),
+                ("read_seq".into(), "INTEGER".into(), 1, 0),
+                ("joined_at".into(), "INTEGER".into(), 1, 0),
+                ("left_at".into(), "INTEGER".into(), 0, 0),
+                ("source_metadata".into(), "TEXT".into(), 0, 0),
+            ]
+        );
+        let stored: (i64, i64, String, i64, i64, Option<i64>, String) = conn
+            .query_row(
+                "SELECT place_id,subject_id,role,read_seq,joined_at,left_at,source_metadata
+                 FROM memberships",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            stored,
+            (
+                11,
+                21,
+                "participant".into(),
+                37,
+                101,
+                None,
+                "fixture-metadata".into()
+            ),
+            "unknown columns and their values must not be discarded"
+        );
+        assert_memberships_startup_rolled_back(&conn);
+        drop(conn);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn migration_rejects_incomplete_current_memberships_without_changes() {
+        let path = store_fixture_path("memberships-incomplete-current");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE memberships(
+                   place_id INTEGER NOT NULL,
+                   subject_id INTEGER NOT NULL,
+                   joined_at INTEGER NOT NULL,
+                   shared_seen_seq INTEGER NOT NULL,
+                   PRIMARY KEY(place_id, subject_id)
+                 );
+                 INSERT INTO memberships(place_id,subject_id,joined_at,shared_seen_seq)
+                 VALUES(11,21,101,37);",
+            )
+            .unwrap();
+        }
+
+        let error = Store::open(&path)
+            .err()
+            .expect("current marker with a required column missing must fail migration");
+        assert!(
+            error.to_string().contains("unknown memberships schema"),
+            "unexpected error: {error}"
+        );
+
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            table_column_signature(&conn, "memberships"),
+            [
+                ("place_id".into(), "INTEGER".into(), 1, 1),
+                ("subject_id".into(), "INTEGER".into(), 1, 2),
+                ("joined_at".into(), "INTEGER".into(), 1, 0),
+                ("shared_seen_seq".into(), "INTEGER".into(), 1, 0),
+            ]
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT place_id,subject_id,joined_at,shared_seen_seq FROM memberships",
+                [],
+                |row| Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?
+                )),
+            )
+            .unwrap(),
+            (11, 21, 101, 37),
+            "failed migration must preserve the incomplete table row"
+        );
+        assert_memberships_startup_rolled_back(&conn);
+        drop(conn);
         std::fs::remove_file(path).unwrap();
     }
 
