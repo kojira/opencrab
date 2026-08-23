@@ -36,7 +36,7 @@ fn phase1_dirty_fixture_public_convert_is_accounted_and_byte_stable() {
                 |row| row.get::<_, i64>(0),
             )
             .unwrap(),
-        3
+        4
     );
     assert_eq!(
         target
@@ -47,7 +47,7 @@ fn phase1_dirty_fixture_public_convert_is_accounted_and_byte_stable() {
                 |row| row.get::<_, i64>(0),
             )
             .unwrap(),
-        5
+        7
     );
 }
 
@@ -134,12 +134,42 @@ fn converter_rejects_every_preexisting_target_even_when_logically_empty() {
 fn snapshot(path: &std::path::Path, report: &str) -> String {
     let connection = Connection::open(path).unwrap();
     let mut output = String::new();
-    output.push_str("REPORT\n");
-    output.push_str(report);
+    output.push_str("ACCOUNTING\n");
+    let report: serde_json::Value = serde_json::from_str(report).unwrap();
+    for class in report["classes"].as_array().unwrap() {
+        writeln!(
+            output,
+            "{}|{}|{}|{}|{}|{}|{}",
+            class["source_table"].as_str().unwrap(),
+            class["logical_class"].as_str().unwrap(),
+            class["source_rows"].as_u64().unwrap(),
+            class["canonical_outcomes"].as_u64().unwrap(),
+            class["raw_outcomes"].as_u64().unwrap(),
+            class["dropped_outcomes"].as_u64().unwrap(),
+            class["exact_one_violations"].as_u64().unwrap(),
+        )
+        .unwrap();
+    }
+    output.push_str("COUNTS\n");
+    append_query(
+        &connection,
+        "SELECT
+           (SELECT COUNT(*) FROM subjects),
+           (SELECT COUNT(*) FROM gate_instances),
+           (SELECT COUNT(*) FROM places),
+           (SELECT COUNT(*) FROM gate_bindings),
+           (SELECT COUNT(*) FROM events),
+           (SELECT COUNT(*) FROM private_journal),
+           (SELECT COUNT(*) FROM legacy_audit_records),
+           (SELECT COUNT(*) FROM interactions),
+           (SELECT COUNT(*) FROM legacy_unowned_source_rows)",
+        &mut output,
+        9,
+    );
     output.push_str("SUBJECTS\n");
     append_query(
         &connection,
-        "SELECT id,kind,public_id,display_name,created_at FROM subjects ORDER BY id",
+        "SELECT id,kind,public_id,display_name,printf('%016x',created_at) FROM subjects ORDER BY id",
         &mut output,
         5,
     );
@@ -149,6 +179,94 @@ fn snapshot(path: &std::path::Path, report: &str) -> String {
         "SELECT instance_id,external_id,subject_id,display_name FROM gate_subject_identities ORDER BY instance_id,external_id",
         &mut output,
         4,
+    );
+    output.push_str("RUNTIME_CONFIGS\n");
+    append_query(
+        &connection,
+        "SELECT subject_id,model_alias,history_policy,output_policy FROM subject_runtime_configs ORDER BY subject_id",
+        &mut output,
+        4,
+    );
+    output.push_str("GATE_CONFIGS\n");
+    append_query(
+        &connection,
+        "SELECT gi.kind_id,gi.owner_subject_id,r.enabled,r.config_schema_id,length(sv.value),sv.at_rest_format
+         FROM gate_instances gi
+         JOIN gate_instance_revisions r ON r.instance_id=gi.instance_id AND r.revision=gi.active_revision
+         LEFT JOIN secret_values sv ON sv.secret_set_id=r.secret_set_id
+         ORDER BY gi.kind_id,gi.owner_subject_id,gi.instance_id",
+        &mut output,
+        6,
+    );
+    output.push_str("PLACES\n");
+    append_query(
+        &connection,
+        "SELECT p.id,p.public_key,r.classification,r.source_system,r.source_address
+         FROM places p LEFT JOIN place_source_refs r ON r.place_id=p.id ORDER BY p.id",
+        &mut output,
+        5,
+    );
+    output.push_str("POLICIES\n");
+    append_query(
+        &connection,
+        "SELECT place_id,kind_id,subject_id,admission,readable,writable,whitelisted,
+                heartbeat_enabled,heartbeat_interval_secs,heartbeat_instructions
+         FROM place_subject_policies ORDER BY place_id,kind_id,subject_id",
+        &mut output,
+        10,
+    );
+    output.push_str("BINDINGS\n");
+    append_query(
+        &connection,
+        "SELECT b.place_id,gi.kind_id,gi.owner_subject_id,b.address,b.binding_metadata_schema_id
+         FROM gate_bindings b JOIN gate_instances gi ON gi.instance_id=b.instance_id
+         ORDER BY b.place_id,gi.kind_id,gi.owner_subject_id,b.instance_id",
+        &mut output,
+        5,
+    );
+    output.push_str("ROUTES\n");
+    append_query(
+        &connection,
+        "SELECT subject_id,place_id,kind_id,purpose FROM subject_routes
+         ORDER BY subject_id,place_id,kind_id,purpose",
+        &mut output,
+        4,
+    );
+    output.push_str("INTERACTIONS\n");
+    append_query(
+        &connection,
+        "SELECT i.id,i.source_record_key,i.state,i.owner_subject_id,i.place_id,
+                r.responder_kind,r.responder_external_id
+         FROM interactions i LEFT JOIN interaction_responses r ON r.interaction_id=i.id
+         ORDER BY i.id",
+        &mut output,
+        7,
+    );
+    output.push_str("EVENTS\n");
+    append_query(
+        &connection,
+        "SELECT place_id,seq,kind,author_subject_id,author_external_id,CAST(content AS TEXT)
+         FROM events ORDER BY place_id,seq",
+        &mut output,
+        6,
+    );
+    output.push_str("JOURNAL_AUDIT\n");
+    append_query(
+        &connection,
+        "SELECT 'journal',owner_subject_id,place_id,CAST(content AS TEXT) FROM private_journal
+         UNION ALL
+         SELECT audit_kind,owner_subject_id,place_id,CAST(content AS TEXT) FROM legacy_audit_records
+         ORDER BY 1,4",
+        &mut output,
+        4,
+    );
+    output.push_str("HISTORY_SOURCES\n");
+    append_query(
+        &connection,
+        "SELECT subject_id,live_place_id,history_place_id,ordinal,history_max_seq
+         FROM subject_history_sources ORDER BY subject_id,live_place_id,ordinal",
+        &mut output,
+        5,
     );
     output.push_str("RAW\n");
     let mut statement = connection

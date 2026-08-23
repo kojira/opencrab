@@ -27,11 +27,14 @@ pub struct ClassAccounting {
     pub source_rows: u64,
     pub canonical_outcomes: u64,
     pub raw_outcomes: u64,
+    pub dropped_outcomes: u64,
     pub exact_one_violations: u64,
     pub physical_rows: BTreeMap<String, u64>,
     expected: BTreeMap<ContributionKey, u64>,
     canonical: BTreeMap<ContributionKey, u64>,
     raw: BTreeMap<ContributionKey, u64>,
+    dropped: BTreeMap<ContributionKey, u64>,
+    streaming: bool,
 }
 
 impl ClassAccounting {
@@ -52,12 +55,40 @@ impl ClassAccounting {
             source_rows,
             canonical_outcomes: 0,
             raw_outcomes: 0,
+            dropped_outcomes: 0,
             exact_one_violations: 0,
             physical_rows,
             expected,
             canonical: BTreeMap::new(),
             raw: BTreeMap::new(),
+            dropped: BTreeMap::new(),
+            streaming: false,
         }
+    }
+
+    pub(crate) fn streaming(
+        source_table: impl Into<String>,
+        logical_class: impl Into<String>,
+        physical_rows: BTreeMap<String, u64>,
+    ) -> Self {
+        let mut value = Self::new(source_table, logical_class, [], physical_rows);
+        value.streaming = true;
+        value
+    }
+
+    pub(crate) fn canonical_streamed(&mut self) {
+        self.source_rows += 1;
+        self.canonical_outcomes += 1;
+    }
+
+    pub(crate) fn raw_streamed(&mut self) {
+        self.source_rows += 1;
+        self.raw_outcomes += 1;
+    }
+
+    pub(crate) fn dropped_streamed(&mut self) {
+        self.source_rows += 1;
+        self.dropped_outcomes += 1;
     }
 
     pub(crate) fn canonical(&mut self, contribution: ContributionKey) {
@@ -71,11 +102,18 @@ impl ClassAccounting {
     }
 
     pub(crate) fn verify(&mut self) {
+        if self.streaming {
+            self.exact_one_violations = self
+                .source_rows
+                .abs_diff(self.canonical_outcomes + self.raw_outcomes + self.dropped_outcomes);
+            return;
+        }
         let keys = self
             .expected
             .keys()
             .chain(self.canonical.keys())
             .chain(self.raw.keys())
+            .chain(self.dropped.keys())
             .cloned()
             .collect::<BTreeSet<_>>();
         self.exact_one_violations = keys
@@ -83,7 +121,8 @@ impl ClassAccounting {
             .map(|key| {
                 let expected = self.expected.get(key).copied().unwrap_or(0);
                 let outcomes = self.canonical.get(key).copied().unwrap_or(0)
-                    + self.raw.get(key).copied().unwrap_or(0);
+                    + self.raw.get(key).copied().unwrap_or(0)
+                    + self.dropped.get(key).copied().unwrap_or(0);
                 if expected == 1 {
                     outcomes.abs_diff(1)
                 } else {
@@ -100,6 +139,7 @@ impl ClassAccounting {
             "source_rows": self.source_rows,
             "canonical_outcomes": self.canonical_outcomes,
             "raw_outcomes": self.raw_outcomes,
+            "dropped_outcomes": self.dropped_outcomes,
             "exact_one_violations": self.exact_one_violations,
             "physical_rows": self.physical_rows,
         })

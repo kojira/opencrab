@@ -28,6 +28,14 @@ pub(crate) struct SourceTable {
 }
 
 impl SourceTable {
+    pub fn exists(conn: &Connection, name: &str) -> Result<bool> {
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+            [name],
+            |row| row.get::<_, bool>(0),
+        )?)
+    }
+
     pub fn load(conn: &Connection, name: &'static str) -> Result<Self> {
         let exists = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
@@ -158,6 +166,105 @@ impl SourceTable {
         })
     }
 
+    pub fn load_schema(conn: &Connection, name: &'static str) -> Result<Self> {
+        if !Self::exists(conn, name)? {
+            return Err(ConverterError::SourceSchema(format!(
+                "required source table {name} is absent"
+            )));
+        }
+        let quoted = quote_identifier(name);
+        let mut info = conn.prepare(&format!("PRAGMA table_info({quoted})"))?;
+        let columns = info
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(Self {
+            name,
+            columns,
+            rows: Vec::new(),
+        })
+    }
+
+    pub fn for_each_row(
+        &self,
+        conn: &Connection,
+        order_by: &str,
+        mut consume: impl FnMut(&SourceRow) -> Result<()>,
+    ) -> Result<()> {
+        let quoted = quote_identifier(self.name);
+        let mut statement =
+            conn.prepare(&format!("SELECT rowid,* FROM {quoted} ORDER BY {order_by}"))?;
+        let primary_indices = {
+            let mut info = conn.prepare(&format!("PRAGMA table_info({quoted})"))?;
+            let mut primary = info
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+                .into_iter()
+                .filter(|(_, ordinal)| *ordinal > 0)
+                .collect::<Vec<_>>();
+            primary.sort_by_key(|(_, ordinal)| *ordinal);
+            primary
+                .iter()
+                .map(|(column, _)| {
+                    self.columns
+                        .iter()
+                        .position(|candidate| candidate == column)
+                        .ok_or_else(|| {
+                            ConverterError::SourceSchema(format!(
+                                "source table {} has an unreadable primary key",
+                                self.name
+                            ))
+                        })
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let rowid = row.get::<_, i64>(0)?;
+            let values = (1..row.as_ref().column_count())
+                .map(|index| {
+                    Ok(match row.get_ref(index)? {
+                        ValueRef::Null => SqliteValue::Null,
+                        ValueRef::Integer(value) => SqliteValue::Integer(value),
+                        ValueRef::Real(value) => SqliteValue::Real(value),
+                        ValueRef::Text(value) => SqliteValue::Text(value.to_vec()),
+                        ValueRef::Blob(value) => SqliteValue::Blob(value.to_vec()),
+                    })
+                })
+                .collect::<std::result::Result<Vec<_>, rusqlite::Error>>()?;
+            let primary_key = (!primary_indices.is_empty()
+                && primary_indices
+                    .iter()
+                    .all(|index| !matches!(values[*index], SqliteValue::Null)))
+            .then(|| {
+                encode_sqlite_values(
+                    &primary_indices
+                        .iter()
+                        .map(|index| values[*index].clone())
+                        .collect::<Vec<_>>(),
+                )
+            });
+            let mut source_key = Vec::new();
+            if let Some(key) = primary_key {
+                source_key.push(b'P');
+                source_key.extend_from_slice(&key);
+            } else {
+                source_key.push(b'R');
+                source_key.extend_from_slice(&encode_sqlite_values(&[SqliteValue::Integer(rowid)]));
+            }
+            let row_values = encode_sqlite_values(&values);
+            let row_digest = Sha256::digest(&row_values).into();
+            consume(&SourceRow {
+                source_key,
+                row_values,
+                row_digest,
+                values,
+            })?;
+        }
+        Ok(())
+    }
+
     pub fn value<'a>(&'a self, row: &'a SourceRow, column: &str) -> Option<&'a SqliteValue> {
         self.columns
             .iter()
@@ -198,6 +305,45 @@ impl SourceTable {
             SqliteValue::Text(value) => Some(Some(std::str::from_utf8(value).ok()?)),
             _ => None,
         }
+    }
+
+    pub fn integer(&self, row: &SourceRow, column: &str) -> Option<i64> {
+        match self.value(row, column)? {
+            SqliteValue::Integer(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub fn nullable_integer(&self, row: &SourceRow, column: &str) -> Option<Option<i64>> {
+        match self.value(row, column)? {
+            SqliteValue::Null => Some(None),
+            SqliteValue::Integer(value) => Some(Some(*value)),
+            _ => None,
+        }
+    }
+
+    pub fn bytes<'a>(&'a self, row: &'a SourceRow, column: &str) -> Option<&'a [u8]> {
+        match self.value(row, column)? {
+            SqliteValue::Text(value) | SqliteValue::Blob(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn nullable_bytes<'a>(
+        &'a self,
+        row: &'a SourceRow,
+        column: &str,
+    ) -> Option<Option<&'a [u8]>> {
+        match self.value(row, column)? {
+            SqliteValue::Null => Some(None),
+            SqliteValue::Text(value) | SqliteValue::Blob(value) => Some(Some(value)),
+            _ => None,
+        }
+    }
+
+    pub fn encoded_value(&self, row: &SourceRow, column: &str) -> Option<Vec<u8>> {
+        self.value(row, column)
+            .map(|value| encode_sqlite_values(std::slice::from_ref(value)))
     }
 }
 

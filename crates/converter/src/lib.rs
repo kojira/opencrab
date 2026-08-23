@@ -10,8 +10,10 @@ pub use report::{ClassAccounting, ConversionReport};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use provenance::{composite_key, digest_file, integer_key, text, MigrationProvenance};
 use report::ContributionKey;
-use rusqlite::{params, Connection, OpenFlags, Transaction};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 use schema::create_phase1_schema;
+use serde::de::{DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
+use sha2::{Digest, Sha256};
 use source::{SourceRow, SourceTable};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Display, Formatter};
@@ -170,49 +172,62 @@ pub struct ConvertOutcome {
     pub report: ConversionReport,
 }
 
-#[derive(Default)]
-struct RawCollector {
-    rows: BTreeMap<(String, Vec<u8>), RawRecord>,
+struct RawCollector<'target, 'connection> {
+    target: &'target Transaction<'connection>,
 }
 
-struct RawRecord {
-    row_values: Vec<u8>,
-    reasons: BTreeSet<&'static str>,
-}
+impl<'target, 'connection> RawCollector<'target, 'connection> {
+    fn new(target: &'target Transaction<'connection>) -> Self {
+        Self { target }
+    }
 
-impl RawCollector {
     fn add(&mut self, table: &SourceTable, row: &SourceRow, reason: &'static str) -> Result<()> {
-        let key = (table.name.to_string(), row.source_key.clone());
-        match self.rows.entry(key) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(RawRecord {
-                    row_values: row.row_values.clone(),
-                    reasons: BTreeSet::from([reason]),
-                });
+        let existing = self
+            .target
+            .query_row(
+                "SELECT row_values,reason FROM legacy_unowned_source_rows
+                 WHERE source_db=?1 AND source_table=?2 AND source_key=?3",
+                params![SOURCE_DB, table.name, row.source_key],
+                |result| Ok((result.get::<_, Vec<u8>>(0)?, result.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        if let Some((values, existing_reasons)) = existing {
+            if values != row.row_values {
+                return Err(ConverterError::Accounting(format!(
+                    "raw carrier collision for {} source key {}",
+                    table.name,
+                    source::hex(&row.source_key)
+                )));
             }
-            std::collections::btree_map::Entry::Occupied(mut entry) => {
-                if entry.get().row_values != row.row_values {
-                    return Err(ConverterError::Accounting(format!(
-                        "raw carrier collision for {} source key {}",
-                        table.name,
-                        source::hex(&row.source_key)
-                    )));
-                }
-                entry.get_mut().reasons.insert(reason);
-            }
+            let mut reasons = existing_reasons.split(',').collect::<BTreeSet<_>>();
+            reasons.insert(reason);
+            self.target.execute(
+                "UPDATE legacy_unowned_source_rows SET reason=?1
+                 WHERE source_db=?2 AND source_table=?3 AND source_key=?4",
+                params![
+                    reasons.into_iter().collect::<Vec<_>>().join(","),
+                    SOURCE_DB,
+                    table.name,
+                    row.source_key,
+                ],
+            )?;
+        } else {
+            self.target.execute(
+                "INSERT INTO legacy_unowned_source_rows(source_db,source_table,source_key,row_values,reason)
+                 VALUES(?1,?2,?3,?4,?5)",
+                params![
+                    SOURCE_DB,
+                    table.name,
+                    row.source_key,
+                    row.row_values,
+                    reason,
+                ],
+            )?;
         }
         Ok(())
     }
 
-    fn write(&self, target: &Transaction<'_>) -> Result<()> {
-        for ((table, source_key), record) in &self.rows {
-            let reason = record.reasons.iter().copied().collect::<Vec<_>>().join(",");
-            target.execute(
-                "INSERT INTO legacy_unowned_source_rows(source_db,source_table,source_key,row_values,reason)
-                 VALUES(?1,?2,?3,?4,?5)",
-                params![SOURCE_DB, table, source_key, record.row_values, reason],
-            )?;
-        }
+    fn write(&self, _target: &Transaction<'_>) -> Result<()> {
         Ok(())
     }
 }
@@ -251,6 +266,2667 @@ struct GrantContributor {
     contribution: ContributionKey,
 }
 
+#[derive(Clone, Debug, Default)]
+struct EffectiveConfig {
+    default_model: Option<String>,
+    compaction_ratio: f64,
+    source_config: Option<Vec<u8>>,
+    discord: Option<SharedDiscordConfig>,
+}
+
+#[derive(Clone, Debug)]
+struct SharedDiscordConfig {
+    enabled: bool,
+    token: Vec<u8>,
+    agent_ids: Vec<String>,
+    guild_ids: Vec<String>,
+    owner_external_id: String,
+}
+
+fn load_effective_config(source_path: &Path) -> Result<EffectiveConfig> {
+    let source_parent = source_path.parent().unwrap_or_else(|| Path::new("."));
+    let root = if source_parent.file_name().and_then(|value| value.to_str()) == Some("data") {
+        source_parent.parent().unwrap_or(source_parent)
+    } else {
+        source_parent
+    };
+    let path = root.join("config/default.toml");
+    if !path.exists() {
+        return Ok(EffectiveConfig {
+            compaction_ratio: 0.5,
+            ..EffectiveConfig::default()
+        });
+    }
+    let raw = std::fs::read(&path)?;
+    let text = std::str::from_utf8(&raw).map_err(|_| {
+        ConverterError::SourceSchema("config/default.toml is not valid UTF-8".into())
+    })?;
+    let expanded = expand_environment(text)?;
+    let parsed = parse_config_projection(&expanded)?;
+    let default_model = parsed.default_model;
+    let compaction_ratio = parsed.compaction_ratio.unwrap_or(0.5);
+    if !compaction_ratio.is_finite() || compaction_ratio < 0.0 {
+        return Err(ConverterError::SourceSchema(
+            "llm.compaction_ratio must be finite and non-negative".into(),
+        ));
+    }
+    let source_config = Some(serde_json::to_vec(&serde_json::json!({
+        "llm": {
+            "compaction_ratio": compaction_ratio,
+            "default_model": default_model,
+        }
+    }))?);
+    let discord = parsed.discord;
+    Ok(EffectiveConfig {
+        default_model,
+        compaction_ratio,
+        source_config,
+        discord,
+    })
+}
+
+fn expand_environment(input: &str) -> Result<String> {
+    let bytes = input.as_bytes();
+    let mut output = String::with_capacity(input.len());
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if bytes[cursor..].starts_with(b"${") {
+            let Some(relative_end) = bytes[cursor + 2..].iter().position(|byte| *byte == b'}')
+            else {
+                return Err(ConverterError::SourceSchema(
+                    "unterminated ${NAME} in config/default.toml".into(),
+                ));
+            };
+            let end = cursor + 2 + relative_end;
+            let name = &input[cursor + 2..end];
+            let valid = !name.is_empty()
+                && name.bytes().enumerate().all(|(index, byte)| {
+                    byte == b'_'
+                        || byte.is_ascii_alphabetic()
+                        || (index > 0 && byte.is_ascii_digit())
+                });
+            if !valid {
+                return Err(ConverterError::SourceSchema(format!(
+                    "invalid environment reference ${{{name}}} in config/default.toml"
+                )));
+            }
+            let value = std::env::var(name).map_err(|_| {
+                ConverterError::SourceSchema(format!(
+                    "environment variable {name} referenced by config/default.toml is missing"
+                ))
+            })?;
+            output.push_str(&value);
+            cursor = end + 1;
+        } else {
+            let character = input[cursor..].chars().next().expect("cursor is in range");
+            output.push(character);
+            cursor += character.len_utf8();
+        }
+    }
+    Ok(output)
+}
+
+#[derive(Default)]
+struct ConfigProjection {
+    default_model: Option<String>,
+    compaction_ratio: Option<f64>,
+    discord: Option<SharedDiscordConfig>,
+}
+
+fn parse_config_projection(input: &str) -> Result<ConfigProjection> {
+    let mut section = String::new();
+    let mut default_model = None;
+    let mut compaction_ratio = None;
+    let mut discord_seen = false;
+    let mut discord_enabled = false;
+    let mut discord_token = None;
+    let mut discord_owner = String::new();
+    let mut discord_agents = Vec::new();
+    let mut discord_guilds = Vec::new();
+    for raw_line in input.lines() {
+        let line = strip_toml_comment(raw_line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            section = line[1..line.len() - 1].trim().to_owned();
+            if section == "gateway.discord" {
+                discord_seen = true;
+            }
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim();
+        match (section.as_str(), key) {
+            ("llm", "default_model") => default_model = Some(parse_toml_string(value)?),
+            ("llm", "compaction_ratio") => {
+                compaction_ratio = Some(value.parse::<f64>().map_err(|_| {
+                    ConverterError::SourceSchema("llm.compaction_ratio is not a number".into())
+                })?)
+            }
+            ("gateway.discord", "enabled") => {
+                discord_enabled = value.parse::<bool>().map_err(|_| {
+                    ConverterError::SourceSchema("gateway.discord.enabled is not boolean".into())
+                })?
+            }
+            ("gateway.discord", "token") => {
+                discord_token = Some(parse_toml_string(value)?.into_bytes())
+            }
+            ("gateway.discord", "owner_discord_id") => discord_owner = parse_toml_string(value)?,
+            ("gateway.discord", "agent_ids") => {
+                for id in parse_string_array(value, "gateway.discord.agent_ids")? {
+                    if !id.is_empty() && !discord_agents.contains(&id) {
+                        discord_agents.push(id);
+                    }
+                }
+            }
+            ("gateway.discord", "guild_ids") => {
+                let values: serde_json::Value = serde_json::from_str(value).map_err(|_| {
+                    ConverterError::SourceSchema(
+                        "gateway.discord.guild_ids is not a TOML-compatible array".into(),
+                    )
+                })?;
+                discord_guilds = values
+                    .as_array()
+                    .ok_or_else(|| {
+                        ConverterError::SourceSchema(
+                            "gateway.discord.guild_ids is not an array".into(),
+                        )
+                    })?
+                    .iter()
+                    .map(|value| match value {
+                        serde_json::Value::String(value) => Ok(value.clone()),
+                        serde_json::Value::Number(value) if value.as_u64().is_some() => {
+                            Ok(value.to_string())
+                        }
+                        _ => Err(ConverterError::SourceSchema(
+                            "gateway.discord.guild_ids contains an invalid value".into(),
+                        )),
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+            }
+            _ => {}
+        }
+    }
+    let discord = if discord_seen {
+        Some(SharedDiscordConfig {
+            enabled: discord_enabled,
+            token: discord_token.ok_or_else(|| {
+                ConverterError::SourceSchema("gateway.discord.token is missing".into())
+            })?,
+            agent_ids: discord_agents,
+            guild_ids: discord_guilds,
+            owner_external_id: discord_owner,
+        })
+    } else {
+        None
+    };
+    Ok(ConfigProjection {
+        default_model,
+        compaction_ratio,
+        discord,
+    })
+}
+
+fn parse_toml_string(value: &str) -> Result<String> {
+    serde_json::from_str(value).map_err(|_| {
+        ConverterError::SourceSchema(format!("unsupported TOML string value: {value}"))
+    })
+}
+
+fn parse_string_array(value: &str, name: &str) -> Result<Vec<String>> {
+    let parsed: serde_json::Value = serde_json::from_str(value).map_err(|_| {
+        ConverterError::SourceSchema(format!("{name} is not a TOML-compatible string array"))
+    })?;
+    parsed
+        .as_array()
+        .ok_or_else(|| ConverterError::SourceSchema(format!("{name} is not an array")))?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| ConverterError::SourceSchema(format!("{name} contains non-string")))
+        })
+        .collect()
+}
+
+fn strip_toml_comment(line: &str) -> &str {
+    let mut quoted = false;
+    let mut escaped = false;
+    for (index, character) in line.char_indices() {
+        if quoted && character == '\\' && !escaped {
+            escaped = true;
+            continue;
+        }
+        if character == '"' && !escaped {
+            quoted = !quoted;
+        } else if character == '#' && !quoted {
+            return &line[..index];
+        }
+        escaped = false;
+    }
+    line
+}
+
+fn source_captured_at(path: &Path) -> Result<i64> {
+    let duration = std::fs::metadata(path)?
+        .modified()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| ConverterError::SourceSchema("source mtime predates Unix epoch".into()))?;
+    i64::try_from(duration.as_nanos())
+        .map_err(|_| ConverterError::SourceSchema("source mtime overflows utc_nanos".into()))
+}
+
+fn deterministic_uuid(snapshot_digest: [u8; 32], locator: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(snapshot_digest);
+    hasher.update((locator.len() as u64).to_be_bytes());
+    hasher.update(locator);
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assemble_gate_configs(
+    source: &Connection,
+    target: &Transaction<'_>,
+    snapshot_digest: [u8; 32],
+    captured_at: i64,
+    config: &EffectiveConfig,
+    agents: &BTreeMap<String, i64>,
+    provenance: &MigrationProvenance,
+    raw: &mut RawCollector,
+    report: &mut ConversionReport,
+) -> Result<()> {
+    if let Some(discord) = &config.discord {
+        for agent in &discord.agent_ids {
+            if !agents.contains_key(agent) {
+                return Err(ConverterError::InstanceSet(format!(
+                    "shared Discord config member {agent:?} does not resolve exactly once"
+                )));
+            }
+        }
+        let instance_id = deterministic_uuid(
+            snapshot_digest,
+            b"external:config/default.toml#/gateway/discord",
+        );
+        let config_bytes = serde_json::to_vec(&serde_json::json!({
+            "agent_ids": discord.agent_ids,
+            "guild_ids": discord.guild_ids,
+            "owner_external_id": discord.owner_external_id,
+            "self_external_id": serde_json::Value::Null,
+        }))?;
+        write_gate_assembly(
+            target,
+            &instance_id,
+            "discord",
+            "shared:discord",
+            None,
+            discord.enabled,
+            captured_at,
+            "gate-config/discord/v1",
+            &config_bytes,
+            "discord_bot_token",
+            &discord.token,
+        )?;
+    }
+    if SourceTable::exists(source, "agent_discord_config")? {
+        let table = SourceTable::load_schema(source, "agent_discord_config")?;
+        table.require_exact_columns(&[
+            "agent_id",
+            "bot_token",
+            "owner_discord_id",
+            "enabled",
+            "updated_at",
+            "bot_user_id",
+        ])?;
+        assemble_dedicated_gate_table(
+            source,
+            target,
+            &table,
+            "discord",
+            snapshot_digest,
+            captured_at,
+            agents,
+            provenance,
+            raw,
+            report,
+        )?;
+    }
+    if SourceTable::exists(source, "agent_nostr_config")? {
+        let table = SourceTable::load_schema(source, "agent_nostr_config")?;
+        table.require_exact_columns(&[
+            "agent_id",
+            "secret_key",
+            "relays_json",
+            "filter_json",
+            "enabled",
+            "updated_at",
+            "owner_pubkey",
+            "self_pubkey",
+        ])?;
+        assemble_dedicated_gate_table(
+            source,
+            target,
+            &table,
+            "nostr",
+            snapshot_digest,
+            captured_at,
+            agents,
+            provenance,
+            raw,
+            report,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assemble_dedicated_gate_table(
+    source: &Connection,
+    target: &Transaction<'_>,
+    table: &SourceTable,
+    kind: &'static str,
+    snapshot_digest: [u8; 32],
+    captured_at: i64,
+    agents: &BTreeMap<String, i64>,
+    provenance: &MigrationProvenance,
+    raw: &mut RawCollector,
+    report: &mut ConversionReport,
+) -> Result<()> {
+    let mut accounting =
+        ClassAccounting::streaming(table.name, "dedicated_gate_config", BTreeMap::new());
+    let mut canonical = 0_u64;
+    let mut provenance_rows = 0_u64;
+    table.for_each_row(source, "agent_id COLLATE BINARY,rowid", |row| {
+        let parsed = parse_dedicated_gate(table, row, kind, agents);
+        let parsed = match parsed {
+            Ok(parsed) => parsed,
+            Err(reason) => {
+                raw.add(table, row, reason)?;
+                accounting.raw_streamed();
+                return Ok(());
+            }
+        };
+        let locator = [table.name.as_bytes(), b"\0", &row.source_key].concat();
+        let instance_id = deterministic_uuid(snapshot_digest, &locator);
+        let label = format!(
+            "dedicated:{kind}:{}",
+            URL_SAFE_NO_PAD.encode(&row.source_key)
+        );
+        write_gate_assembly(
+            target,
+            &instance_id,
+            kind,
+            &label,
+            Some(parsed.owner_subject_id),
+            parsed.enabled,
+            captured_at,
+            parsed.config_schema_id,
+            &parsed.config_bytes,
+            parsed.secret_name,
+            &parsed.secret,
+        )?;
+        let instance_key = text(&instance_id);
+        for entity in [
+            "gate_instances",
+            "gate_instance_revisions",
+            "secret_sets",
+            "secret_values",
+        ] {
+            provenance.write(
+                target,
+                entity,
+                &composite_key(std::slice::from_ref(&instance_key)),
+                table,
+                row,
+            )?;
+            provenance_rows += 1;
+        }
+        canonical += 1;
+        accounting.canonical_streamed();
+        Ok(())
+    })?;
+    accounting.physical_rows = BTreeMap::from([
+        ("gate_instances".into(), canonical),
+        ("gate_instance_revisions".into(), canonical),
+        ("secret_sets".into(), canonical),
+        ("secret_values".into(), canonical),
+        ("migration_provenance".into(), provenance_rows),
+    ]);
+    report.classes.push(accounting);
+    Ok(())
+}
+
+struct ParsedDedicatedGate {
+    owner_subject_id: i64,
+    enabled: bool,
+    config_schema_id: &'static str,
+    config_bytes: Vec<u8>,
+    secret_name: &'static str,
+    secret: Vec<u8>,
+}
+
+fn parse_dedicated_gate(
+    table: &SourceTable,
+    row: &SourceRow,
+    kind: &str,
+    agents: &BTreeMap<String, i64>,
+) -> std::result::Result<ParsedDedicatedGate, &'static str> {
+    let agent = table
+        .text(row, "agent_id")
+        .ok_or("gate-instance-and-subject-v1:unknown_owner")?;
+    let owner_subject_id = *agents
+        .get(agent)
+        .ok_or("gate-instance-and-subject-v1:unknown_owner")?;
+    let enabled = table
+        .integer(row, "enabled")
+        .map(|value| value != 0)
+        .ok_or("gate-instance-and-subject-v1:noncanonical_storage")?;
+    let legacy_updated_at = URL_SAFE_NO_PAD.encode(
+        table
+            .encoded_value(row, "updated_at")
+            .ok_or("gate-instance-and-subject-v1:noncanonical_storage")?,
+    );
+    match kind {
+        "discord" => {
+            let secret = table
+                .bytes(row, "bot_token")
+                .ok_or("gate-instance-and-subject-v1:noncanonical_storage")?
+                .to_vec();
+            let owner_external_id = table
+                .text(row, "owner_discord_id")
+                .ok_or("gate-instance-and-subject-v1:noncanonical_storage")?;
+            let self_external_id = table
+                .text(row, "bot_user_id")
+                .ok_or("gate-instance-and-subject-v1:noncanonical_storage")?;
+            Ok(ParsedDedicatedGate {
+                owner_subject_id,
+                enabled,
+                config_schema_id: "gate-config/discord/v1",
+                config_bytes: serde_json::to_vec(&serde_json::json!({
+                    "agent_ids": [],
+                    "legacy_updated_at": legacy_updated_at,
+                    "owner_external_id": owner_external_id,
+                    "self_external_id": self_external_id,
+                }))
+                .map_err(|_| "gate-instance-and-subject-v1:config_encoding")?,
+                secret_name: "discord_bot_token",
+                secret,
+            })
+        }
+        "nostr" => {
+            let secret = table
+                .bytes(row, "secret_key")
+                .ok_or("gate-instance-and-subject-v1:noncanonical_storage")?
+                .to_vec();
+            let relays = table
+                .text(row, "relays_json")
+                .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+                .ok_or("gate-instance-and-subject-v1:invalid_relays_json")?;
+            let filter = table
+                .text(row, "filter_json")
+                .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+                .ok_or("gate-instance-and-subject-v1:invalid_filter_json")?;
+            let owner_pubkey = table
+                .text(row, "owner_pubkey")
+                .ok_or("gate-instance-and-subject-v1:noncanonical_storage")?;
+            let self_pubkey = table
+                .text(row, "self_pubkey")
+                .ok_or("gate-instance-and-subject-v1:noncanonical_storage")?;
+            Ok(ParsedDedicatedGate {
+                owner_subject_id,
+                enabled,
+                config_schema_id: "gate-config/nostr/v1",
+                config_bytes: serde_json::to_vec(&serde_json::json!({
+                    "filter": filter,
+                    "legacy_updated_at": legacy_updated_at,
+                    "owner_pubkey": owner_pubkey,
+                    "relays": relays,
+                    "self_pubkey": self_pubkey,
+                }))
+                .map_err(|_| "gate-instance-and-subject-v1:config_encoding")?,
+                secret_name: "nostr_secret_key",
+                secret,
+            })
+        }
+        _ => Err("gate-instance-and-subject-v1:unknown_kind"),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_gate_assembly(
+    target: &Transaction<'_>,
+    instance_id: &str,
+    kind: &str,
+    label: &str,
+    owner_subject_id: Option<i64>,
+    enabled: bool,
+    created_at: i64,
+    config_schema_id: &str,
+    config_bytes: &[u8],
+    secret_name: &str,
+    secret: &[u8],
+) -> Result<()> {
+    MigrationInstance::new(instance_id, kind)?;
+    let secret_set_id = deterministic_uuid(
+        Sha256::digest(instance_id.as_bytes()).into(),
+        b"secret-set\0revision-1",
+    );
+    let config_digest = Sha256::digest(config_bytes);
+    let secret_digest = Sha256::digest(secret);
+    let at_rest_format = if secret.starts_with(b"enc:v1:") {
+        "enc:v1"
+    } else {
+        "source-plaintext"
+    };
+    target.execute(
+        "INSERT INTO gate_instances(instance_id,kind_id,label,owner_subject_id,active_revision,lifecycle)
+         VALUES(?1,?2,?3,?4,1,'stopped')",
+        params![instance_id, kind, label, owner_subject_id],
+    )?;
+    target.execute(
+        "INSERT INTO gate_instance_revisions(
+           instance_id,revision,present,enabled,created_at,config_schema_id,config_bytes,
+           config_digest,secret_set_id
+         ) VALUES(?1,1,1,?2,?3,?4,?5,?6,?7)",
+        params![
+            instance_id,
+            enabled,
+            created_at,
+            config_schema_id,
+            config_bytes,
+            config_digest.as_slice(),
+            secret_set_id,
+        ],
+    )?;
+    target.execute(
+        "INSERT INTO secret_sets(secret_set_id,revision,scope,created_at)
+         VALUES(?1,1,?2,?3)",
+        params![
+            secret_set_id,
+            format!("gate-instance:{instance_id}"),
+            created_at
+        ],
+    )?;
+    target.execute(
+        "INSERT INTO secret_values(secret_set_id,name,at_rest_format,value,value_digest)
+         VALUES(?1,?2,?3,?4,?5)",
+        params![
+            secret_set_id,
+            secret_name,
+            at_rest_format,
+            secret,
+            secret_digest.as_slice(),
+        ],
+    )?;
+    Ok(())
+}
+
+#[derive(Clone)]
+struct ChannelPolicy {
+    row: SourceRow,
+    place_id: i64,
+    subject_id: Option<i64>,
+    readable: bool,
+    writable: bool,
+    whitelisted: bool,
+    heartbeat_enabled: bool,
+    heartbeat_interval_secs: Option<i64>,
+    heartbeat_instructions: String,
+    source_updated_at: i64,
+    signature: Vec<u8>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assemble_discord_channel_policies(
+    source: &Connection,
+    target: &Transaction<'_>,
+    snapshot_digest: [u8; 32],
+    captured_at: i64,
+    agents: &BTreeMap<String, i64>,
+    provenance: &MigrationProvenance,
+    raw: &mut RawCollector,
+    report: &mut ConversionReport,
+) -> Result<()> {
+    if !SourceTable::exists(source, "discord_channel_config")? {
+        return Ok(());
+    }
+    let table = SourceTable::load_schema(source, "discord_channel_config")?;
+    table.require_exact_columns(&[
+        "channel_id",
+        "agent_id",
+        "guild_id",
+        "channel_name",
+        "readable",
+        "writable",
+        "whitelisted",
+        "heartbeat_enabled",
+        "heartbeat_interval_secs",
+        "updated_at",
+        "heartbeat_instructions",
+    ])?;
+    let mut accounting =
+        ClassAccounting::streaming(table.name, "discord_channel_policy", BTreeMap::new());
+    let mut next_place_id = next_integer_id(target, "places")?;
+    let mut place_rows = 0_u64;
+    let mut default_rows = 0_u64;
+    let mut subject_rows = 0_u64;
+    let mut provenance_rows = 0_u64;
+    let mut current_channel = None::<String>;
+    let mut current_place = None::<i64>;
+    let mut candidates = BTreeMap::<String, Vec<ChannelPolicy>>::new();
+    table.for_each_row(
+        source,
+        "channel_id COLLATE BINARY,agent_id COLLATE BINARY,rowid",
+        |row| {
+            let channel = match table.text(row, "channel_id") {
+                Some(value) if !value.is_empty() => value,
+                _ => {
+                    raw.add(
+                        &table,
+                        row,
+                        "discord-channel-policy-router-v1:noncanonical_storage",
+                    )?;
+                    accounting.raw_streamed();
+                    return Ok(());
+                }
+            };
+            let created_at = table
+                .text(row, "updated_at")
+                .and_then(parse_utc_nanos)
+                .unwrap_or(captured_at);
+            if current_channel.as_deref() != Some(channel) {
+                flush_channel_policy_candidates(
+                    target,
+                    snapshot_digest,
+                    &table,
+                    provenance,
+                    raw,
+                    &mut accounting,
+                    &mut candidates,
+                    &mut default_rows,
+                    &mut subject_rows,
+                    &mut provenance_rows,
+                )?;
+                let matches = target.query_row(
+                    "SELECT COUNT(*),MIN(place_id) FROM place_source_refs
+                 WHERE source_system='discord' AND source_address=?1",
+                    [channel],
+                    |result| Ok((result.get::<_, i64>(0)?, result.get::<_, Option<i64>>(1)?)),
+                )?;
+                let place_id = match matches {
+                    (0, _) => {
+                        let place_id = next_place_id;
+                        next_place_id = next_place_id.checked_add(1).ok_or_else(|| {
+                            ConverterError::Accounting("place id overflow".into())
+                        })?;
+                        target.execute(
+                            "INSERT INTO places(
+                           id,parent_id,inherit_from_place_id,inherit_up_to_seq,policy,public_key,
+                           created_at,closed_at,close_reason
+                         ) VALUES(?1,NULL,NULL,NULL,?2,?3,?4,NULL,NULL)",
+                            params![
+                                place_id,
+                                b"hard-default".as_slice(),
+                                format!("config:discord:{channel}"),
+                                created_at,
+                            ],
+                        )?;
+                        target.execute(
+                            "INSERT INTO place_source_refs(
+                           place_id,classification,source_system,source_address,source_id,
+                           source_record_digest,mode,theme,phase,source_turn_number,source_status,
+                           participant_public_ids,facilitator_subject_id,source_done_count,
+                           source_max_turns,metadata,updated_at
+                         ) VALUES(?1,'config_only','discord',?2,?3,NULL,NULL,NULL,NULL,NULL,NULL,
+                                  NULL,NULL,NULL,NULL,NULL,?4)",
+                            params![place_id, channel, channel.as_bytes(), created_at],
+                        )?;
+                        place_rows += 1;
+                        place_id
+                    }
+                    (1, Some(place_id)) => place_id,
+                    _ => {
+                        raw.add(
+                            &table,
+                            row,
+                            "discord-channel-policy-router-v1:multiple_place_matches",
+                        )?;
+                        accounting.raw_streamed();
+                        return Ok(());
+                    }
+                };
+                current_channel = Some(channel.to_owned());
+                current_place = Some(place_id);
+            }
+            let place_id = current_place.expect("channel transition always assigns a place");
+            match parse_channel_policy(&table, row, place_id, agents, captured_at) {
+                Ok(policy) => {
+                    let key = match policy.subject_id {
+                        Some(subject) => format!("subject:{place_id}:discord:{subject}"),
+                        None => format!("default:{place_id}:discord"),
+                    };
+                    candidates.entry(key).or_default().push(policy);
+                }
+                Err(reason) => {
+                    raw.add(&table, row, reason)?;
+                    accounting.raw_streamed();
+                }
+            }
+            Ok(())
+        },
+    )?;
+    flush_channel_policy_candidates(
+        target,
+        snapshot_digest,
+        &table,
+        provenance,
+        raw,
+        &mut accounting,
+        &mut candidates,
+        &mut default_rows,
+        &mut subject_rows,
+        &mut provenance_rows,
+    )?;
+    accounting.physical_rows = BTreeMap::from([
+        ("places".into(), place_rows),
+        ("place_source_refs".into(), place_rows),
+        ("place_default_policies".into(), default_rows),
+        ("place_subject_policies".into(), subject_rows),
+        ("migration_provenance".into(), provenance_rows),
+    ]);
+    report.classes.push(accounting);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flush_channel_policy_candidates(
+    target: &Transaction<'_>,
+    snapshot_digest: [u8; 32],
+    table: &SourceTable,
+    provenance: &MigrationProvenance,
+    raw: &mut RawCollector<'_, '_>,
+    accounting: &mut ClassAccounting,
+    candidates: &mut BTreeMap<String, Vec<ChannelPolicy>>,
+    default_rows: &mut u64,
+    subject_rows: &mut u64,
+    provenance_rows: &mut u64,
+) -> Result<()> {
+    for (key, mut group) in std::mem::take(candidates) {
+        group.sort_by(|left, right| left.row.source_key.cmp(&right.row.source_key));
+        if group
+            .iter()
+            .skip(1)
+            .any(|candidate| candidate.signature != group[0].signature)
+        {
+            for candidate in group {
+                raw.add(
+                    table,
+                    &candidate.row,
+                    "discord-channel-policy-router-v1:conflicting_policy_class",
+                )?;
+                accounting.raw_streamed();
+            }
+            continue;
+        }
+        let selected = &group[0];
+        let target_key = if let Some(subject_id) = selected.subject_id {
+            target.execute(
+                "INSERT INTO place_subject_policies(
+                   place_id,kind_id,subject_id,admission,readable,writable,whitelisted,
+                   heartbeat_enabled,heartbeat_interval_secs,heartbeat_instructions,
+                   instructions_revision,source_row,source_updated_at
+                 ) VALUES(?1,'discord',?2,?3,?4,?5,?6,?7,?8,?9,1,?10,?11)",
+                params![
+                    selected.place_id,
+                    subject_id,
+                    if selected.whitelisted {
+                        "open"
+                    } else {
+                        "closed"
+                    },
+                    selected.readable,
+                    selected.writable,
+                    selected.whitelisted,
+                    selected.heartbeat_enabled,
+                    selected.heartbeat_interval_secs,
+                    selected.heartbeat_instructions,
+                    selected.row.row_values,
+                    selected.source_updated_at,
+                ],
+            )?;
+            *subject_rows += 1;
+            composite_key(&[
+                source::SqliteValue::Integer(selected.place_id),
+                text("discord"),
+                source::SqliteValue::Integer(subject_id),
+            ])
+        } else {
+            let default_id = deterministic_uuid(snapshot_digest, key.as_bytes());
+            let policy_digest = Sha256::digest(&selected.signature);
+            target.execute(
+                "INSERT INTO place_default_policies(
+                   default_id,place_id,kind_id,resolution,source_row,source_updated_at,
+                   policy_schema_id,policy_bytes,policy_digest
+                 ) VALUES(?1,?2,'discord','active',?3,?4,'place-policy/discord/v1',?5,?6)",
+                params![
+                    default_id,
+                    selected.place_id,
+                    selected.row.row_values,
+                    selected.source_updated_at,
+                    selected.signature,
+                    policy_digest.as_slice(),
+                ],
+            )?;
+            *default_rows += 1;
+            composite_key(&[text(&default_id)])
+        };
+        let entity = if selected.subject_id.is_some() {
+            "place_subject_policies"
+        } else {
+            "place_default_policies"
+        };
+        for candidate in group {
+            provenance.write(target, entity, &target_key, table, &candidate.row)?;
+            *provenance_rows += 1;
+            accounting.canonical_streamed();
+        }
+    }
+    Ok(())
+}
+
+fn parse_channel_policy(
+    table: &SourceTable,
+    row: &SourceRow,
+    place_id: i64,
+    agents: &BTreeMap<String, i64>,
+    captured_at: i64,
+) -> std::result::Result<ChannelPolicy, &'static str> {
+    let agent_id = table
+        .text(row, "agent_id")
+        .ok_or("discord-channel-policy-router-v1:noncanonical_storage")?;
+    let subject_id = if agent_id.is_empty() {
+        None
+    } else {
+        Some(
+            *agents
+                .get(agent_id)
+                .ok_or("discord-channel-policy-router-v1:unknown_owner")?,
+        )
+    };
+    let boolean = |column| {
+        table
+            .integer(row, column)
+            .map(|value| value != 0)
+            .ok_or("discord-channel-policy-router-v1:noncanonical_storage")
+    };
+    let readable = boolean("readable")?;
+    let writable = boolean("writable")?;
+    let whitelisted = boolean("whitelisted")?;
+    let heartbeat_enabled = boolean("heartbeat_enabled")?;
+    let heartbeat_interval_secs = table
+        .nullable_integer(row, "heartbeat_interval_secs")
+        .ok_or("discord-channel-policy-router-v1:noncanonical_storage")?;
+    let heartbeat_instructions = table
+        .text(row, "heartbeat_instructions")
+        .ok_or("discord-channel-policy-router-v1:noncanonical_storage")?
+        .to_owned();
+    let source_updated_at = table
+        .text(row, "updated_at")
+        .and_then(parse_utc_nanos)
+        .unwrap_or(captured_at);
+    let signature = serde_json::to_vec(&serde_json::json!({
+        "heartbeat_enabled": heartbeat_enabled,
+        "heartbeat_instructions": heartbeat_instructions,
+        "heartbeat_interval_secs": heartbeat_interval_secs,
+        "readable": readable,
+        "whitelisted": whitelisted,
+        "writable": writable,
+    }))
+    .map_err(|_| "discord-channel-policy-router-v1:policy_encoding")?;
+    Ok(ChannelPolicy {
+        row: row.clone(),
+        place_id,
+        subject_id,
+        readable,
+        writable,
+        whitelisted,
+        heartbeat_enabled,
+        heartbeat_interval_secs,
+        heartbeat_instructions,
+        source_updated_at,
+        signature,
+    })
+}
+
+fn next_integer_id(target: &Transaction<'_>, table: &str) -> Result<i64> {
+    let current = target.query_row(
+        &format!("SELECT COALESCE(MAX(id),0) FROM {table}"),
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    current
+        .checked_add(1)
+        .ok_or_else(|| ConverterError::Accounting(format!("{table} id overflow")))
+}
+
+#[derive(Clone, Debug)]
+struct LiveHistoryPlace {
+    place_id: i64,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assemble_history_and_events(
+    source: &Connection,
+    target: &Transaction<'_>,
+    snapshot_digest: [u8; 32],
+    migration_epoch: i64,
+    agents: &BTreeMap<String, i64>,
+    instances: &MigrationInstanceSet,
+    raw: &mut RawCollector,
+    report: &mut ConversionReport,
+) -> Result<()> {
+    let mut live_sessions = BTreeMap::<(String, String), LiveHistoryPlace>::new();
+    assemble_sessions(
+        source,
+        target,
+        snapshot_digest,
+        migration_epoch,
+        agents,
+        instances,
+        &mut live_sessions,
+        raw,
+        report,
+    )?;
+    seed_memory_live_bindings(
+        source,
+        target,
+        snapshot_digest,
+        migration_epoch,
+        agents,
+        instances,
+        &mut live_sessions,
+    )?;
+    assemble_pending_interactions(source, target, agents, instances, raw, report)?;
+    assemble_memory_history(
+        source,
+        target,
+        snapshot_digest,
+        migration_epoch,
+        agents,
+        &live_sessions,
+        report,
+    )?;
+    reconcile_migrated_routes(target)?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assemble_sessions(
+    source: &Connection,
+    target: &Transaction<'_>,
+    snapshot_digest: [u8; 32],
+    migration_epoch: i64,
+    agents: &BTreeMap<String, i64>,
+    instances: &MigrationInstanceSet,
+    live_sessions: &mut BTreeMap<(String, String), LiveHistoryPlace>,
+    raw: &mut RawCollector,
+    report: &mut ConversionReport,
+) -> Result<()> {
+    if !SourceTable::exists(source, "sessions")? {
+        return Ok(());
+    }
+    let table = SourceTable::load_schema(source, "sessions")?;
+    table.require_exact_columns(&[
+        "id",
+        "mode",
+        "theme",
+        "phase",
+        "turn_number",
+        "status",
+        "participant_ids_json",
+        "facilitator_id",
+        "done_count",
+        "max_turns",
+        "metadata_json",
+        "created_at",
+        "updated_at",
+    ])?;
+    let mut accounting = ClassAccounting::streaming(table.name, "session_place", BTreeMap::new());
+    let mut place_rows = 0_u64;
+    let mut membership_rows = 0_u64;
+    table.for_each_row(source, "id COLLATE BINARY,rowid", |row| {
+        let result = parse_session_row(&table, row, agents);
+        let parsed = match result {
+            Ok(parsed) => parsed,
+            Err(reason) => {
+                raw.add(&table, row, reason)?;
+                accounting.raw_streamed();
+                return Ok(());
+            }
+        };
+        let live = session_live_address(&parsed.id, parsed.metadata.as_deref(), None);
+        let place = if let Some((kind, address, address_kind, guild_id)) = live {
+            let place = ensure_live_place_and_bindings(
+                target,
+                snapshot_digest,
+                migration_epoch,
+                &kind,
+                &address,
+                &address_kind,
+                guild_id.as_deref(),
+                parsed.facilitator_subject_id,
+                instances,
+            )?;
+            live_sessions.insert(
+                (parsed.facilitator_public_id.clone(), parsed.id.clone()),
+                place.clone(),
+            );
+            place
+        } else {
+            let place_id = next_integer_id(target, "places")?;
+            target.execute(
+                "INSERT INTO places(
+                   id,parent_id,inherit_from_place_id,inherit_up_to_seq,policy,public_key,
+                   created_at,closed_at,close_reason
+                 ) VALUES(?1,NULL,NULL,NULL,?2,?3,?4,?5,?6)",
+                params![
+                    place_id,
+                    b"hard-default".as_slice(),
+                    format!(
+                        "legacy:opencrab:{}",
+                        URL_SAFE_NO_PAD.encode(parsed.id.as_bytes())
+                    ),
+                    parsed.created_at,
+                    parsed.closed_at,
+                    parsed.close_reason,
+                ],
+            )?;
+            target.execute(
+                "INSERT INTO place_source_refs(
+                   place_id,classification,source_system,source_address,source_id,
+                   source_record_digest,mode,theme,phase,source_turn_number,source_status,
+                   participant_public_ids,facilitator_subject_id,source_done_count,
+                   source_max_turns,metadata,updated_at
+                 ) VALUES(?1,'legacy_general','opencrab',?2,?3,?4,?5,?6,?7,?8,?9,?10,
+                          ?11,?12,?13,?14,?15)",
+                params![
+                    place_id,
+                    parsed.id,
+                    parsed.id.as_bytes(),
+                    row.row_digest.as_slice(),
+                    parsed.mode,
+                    parsed.theme,
+                    parsed.phase,
+                    parsed.turn_number,
+                    parsed.status,
+                    parsed.participant_json,
+                    parsed.facilitator_subject_id,
+                    parsed.done_count,
+                    parsed.max_turns,
+                    parsed.metadata,
+                    parsed.updated_at,
+                ],
+            )?;
+            place_rows += 1;
+            LiveHistoryPlace {
+                place_id,
+            }
+        };
+        for subject_id in parsed.participant_subject_ids {
+            membership_rows += target.execute(
+                "INSERT OR IGNORE INTO memberships(place_id,subject_id,role,joined_at,shared_seen_seq)
+                 VALUES(?1,?2,'participant',?3,0)",
+                params![place.place_id, subject_id, parsed.created_at],
+            )? as u64;
+        }
+        accounting.canonical_streamed();
+        Ok(())
+    })?;
+    accounting.physical_rows = BTreeMap::from([
+        ("places".into(), place_rows),
+        ("place_source_refs".into(), place_rows),
+        ("memberships".into(), membership_rows),
+    ]);
+    report.classes.push(accounting);
+    Ok(())
+}
+
+struct ParsedSession {
+    id: String,
+    mode: String,
+    theme: String,
+    phase: String,
+    turn_number: i64,
+    status: String,
+    participant_json: String,
+    participant_subject_ids: Vec<i64>,
+    facilitator_subject_id: Option<i64>,
+    facilitator_public_id: String,
+    done_count: i64,
+    max_turns: Option<i64>,
+    metadata: Option<String>,
+    created_at: i64,
+    updated_at: i64,
+    closed_at: Option<i64>,
+    close_reason: Option<String>,
+}
+
+fn parse_session_row(
+    table: &SourceTable,
+    row: &SourceRow,
+    agents: &BTreeMap<String, i64>,
+) -> std::result::Result<ParsedSession, &'static str> {
+    let text = |column| {
+        table
+            .text(row, column)
+            .map(str::to_owned)
+            .ok_or("sessions:noncanonical_storage")
+    };
+    let id = text("id")?;
+    let participant_json = text("participant_ids_json")?;
+    let participants = serde_json::from_str::<serde_json::Value>(&participant_json)
+        .ok()
+        .and_then(|value| value.as_array().cloned())
+        .ok_or("sessions:invalid_participant_ids_json")?;
+    let mut participant_subject_ids = Vec::new();
+    for participant in participants {
+        let public_id = participant
+            .as_str()
+            .ok_or("sessions:invalid_participant_ids_json")?;
+        if let Some(subject) = agents.get(public_id) {
+            if participant_subject_ids.contains(subject) {
+                return Err("sessions:duplicate_membership");
+            }
+            participant_subject_ids.push(*subject);
+        }
+    }
+    let facilitator_public_id = table
+        .nullable_text(row, "facilitator_id")
+        .ok_or("sessions:noncanonical_storage")?
+        .unwrap_or("")
+        .to_owned();
+    let facilitator_subject_id = agents.get(&facilitator_public_id).copied();
+    let metadata = table
+        .nullable_text(row, "metadata_json")
+        .ok_or("sessions:noncanonical_storage")?
+        .map(str::to_owned);
+    if let Some(value) = &metadata {
+        serde_json::from_str::<serde_json::Value>(value)
+            .map_err(|_| "sessions:invalid_metadata_json")?;
+    }
+    let created_at = table
+        .text(row, "created_at")
+        .and_then(parse_utc_nanos)
+        .ok_or("sessions:invalid_created_at")?;
+    let updated_at = table
+        .text(row, "updated_at")
+        .and_then(parse_utc_nanos)
+        .ok_or("sessions:invalid_updated_at")?;
+    let status = text("status")?;
+    let (closed_at, close_reason) = if matches!(
+        status.as_str(),
+        "closed" | "completed" | "done" | "archived"
+    ) {
+        (Some(updated_at), Some(format!("legacy-session-{status}")))
+    } else {
+        (None, None)
+    };
+    Ok(ParsedSession {
+        id,
+        mode: text("mode")?,
+        theme: text("theme")?,
+        phase: text("phase")?,
+        turn_number: table
+            .integer(row, "turn_number")
+            .ok_or("sessions:noncanonical_storage")?,
+        status,
+        participant_json,
+        participant_subject_ids,
+        facilitator_subject_id,
+        facilitator_public_id,
+        done_count: table
+            .integer(row, "done_count")
+            .ok_or("sessions:noncanonical_storage")?,
+        max_turns: table
+            .nullable_integer(row, "max_turns")
+            .ok_or("sessions:noncanonical_storage")?,
+        metadata,
+        created_at,
+        updated_at,
+        closed_at,
+        close_reason,
+    })
+}
+
+fn session_live_address(
+    session_id: &str,
+    metadata: Option<&str>,
+    agent_id: Option<&str>,
+) -> Option<(String, String, String, Option<String>)> {
+    if let Some(object) = metadata
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+        .and_then(|value| value.as_object().cloned())
+    {
+        let source = object.get("source").and_then(serde_json::Value::as_str);
+        let address = object.get("channel_id").and_then(serde_json::Value::as_str);
+        if let (Some(source @ ("discord" | "nostr")), Some(address)) = (source, address) {
+            let is_dm = object
+                .get("is_dm")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let guild = object
+                .get("guild_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned);
+            return Some((
+                source.to_owned(),
+                address.to_owned(),
+                if source == "discord" {
+                    if is_dm {
+                        "dm".into()
+                    } else if guild.is_some() {
+                        "guild".into()
+                    } else {
+                        "unknown".into()
+                    }
+                } else {
+                    "timeline".into()
+                },
+                guild,
+            ));
+        }
+    }
+    let agent = agent_id?;
+    let rest = session_id.strip_prefix(&format!("discord-{agent}-"))?;
+    let (guild, channel) = rest.split_once('-')?;
+    if channel.is_empty() || !channel.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    if guild.is_empty() {
+        Some(("discord".into(), channel.into(), "dm".into(), None))
+    } else if guild.bytes().all(|byte| byte.is_ascii_digit()) {
+        Some((
+            "discord".into(),
+            channel.into(),
+            "guild".into(),
+            Some(guild.into()),
+        ))
+    } else {
+        None
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn seed_memory_live_bindings(
+    source: &Connection,
+    target: &Transaction<'_>,
+    snapshot_digest: [u8; 32],
+    migration_epoch: i64,
+    agents: &BTreeMap<String, i64>,
+    instances: &MigrationInstanceSet,
+    live_sessions: &mut BTreeMap<(String, String), LiveHistoryPlace>,
+) -> Result<()> {
+    if !SourceTable::exists(source, "memory_sessions")? {
+        return Ok(());
+    }
+    let table = SourceTable::load_schema(source, "memory_sessions")?;
+    table.require_exact_columns(&[
+        "id",
+        "agent_id",
+        "session_id",
+        "log_type",
+        "content",
+        "speaker_id",
+        "turn_number",
+        "metadata_json",
+        "created_at",
+    ])?;
+    table.for_each_row(source, "id,rowid", |row| {
+        let (Some(agent_id), Some(session_id)) = (
+            table.text(row, "agent_id"),
+            table.text(row, "session_id"),
+        ) else {
+            return Ok(());
+        };
+        let Some(subject_id) = agents.get(agent_id).copied() else {
+            return Ok(());
+        };
+        let metadata = table.nullable_text(row, "metadata_json").flatten();
+        let live = session_live_address(session_id, metadata, Some(agent_id)).or_else(|| {
+            (session_id == format!("nostr-{agent_id}"))
+                .then(|| {
+                    instances
+                        .0
+                        .iter()
+                        .find(|instance| {
+                            instance.kind_id == "nostr"
+                                && target
+                                    .query_row(
+                                        "SELECT owner_subject_id FROM gate_instances WHERE instance_id=?1",
+                                        [&instance.instance_id],
+                                        |result| result.get::<_, Option<i64>>(0),
+                                    )
+                                    .ok()
+                                    .flatten()
+                                    == Some(subject_id)
+                        })
+                        .map(|instance| {
+                            (
+                                "nostr".into(),
+                                format!("timeline:{}", instance.instance_id),
+                                "timeline".into(),
+                                None,
+                            )
+                        })
+                })
+                .flatten()
+        });
+        let Some((kind, address, address_kind, guild_id)) = live else {
+            return Ok(());
+        };
+        let place = ensure_live_place_and_bindings(
+            target,
+            snapshot_digest,
+            migration_epoch,
+            &kind,
+            &address,
+            &address_kind,
+            guild_id.as_deref(),
+            Some(subject_id),
+            instances,
+        )?;
+        target.execute(
+            "INSERT OR IGNORE INTO memberships(place_id,subject_id,role,joined_at,shared_seen_seq)
+             VALUES(?1,?2,'participant',?3,0)",
+            params![place.place_id, subject_id, migration_epoch],
+        )?;
+        let key = (agent_id.to_owned(), session_id.to_owned());
+        if let Some(existing) = live_sessions.insert(key.clone(), place.clone()) {
+            if existing.place_id != place.place_id {
+                return Err(ConverterError::Accounting(format!(
+                    "history live session {key:?} resolves to multiple places"
+                )));
+            }
+        }
+        Ok(())
+    })?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ensure_live_place_and_bindings(
+    target: &Transaction<'_>,
+    snapshot_digest: [u8; 32],
+    created_at: i64,
+    kind: &str,
+    address: &str,
+    address_kind: &str,
+    guild_id: Option<&str>,
+    subject_id: Option<i64>,
+    instances: &MigrationInstanceSet,
+) -> Result<LiveHistoryPlace> {
+    let matches = target.query_row(
+        "SELECT COUNT(*),MIN(place_id),MIN(classification) FROM place_source_refs
+         WHERE source_system=?1 AND source_address=?2",
+        params![kind, address],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        },
+    )?;
+    let place_id = match matches {
+        (0, _, _) => {
+            let place_id = next_integer_id(target, "places")?;
+            target.execute(
+                "INSERT INTO places(
+                   id,parent_id,inherit_from_place_id,inherit_up_to_seq,policy,public_key,
+                   created_at,closed_at,close_reason
+                 ) VALUES(?1,NULL,NULL,NULL,?2,?3,?4,NULL,NULL)",
+                params![
+                    place_id,
+                    b"hard-default".as_slice(),
+                    format!("live:{kind}:{}", URL_SAFE_NO_PAD.encode(address.as_bytes())),
+                    created_at,
+                ],
+            )?;
+            target.execute(
+                "INSERT INTO place_source_refs(
+                   place_id,classification,source_system,source_address,source_id,
+                   source_record_digest,mode,theme,phase,source_turn_number,source_status,
+                   participant_public_ids,facilitator_subject_id,source_done_count,
+                   source_max_turns,metadata,updated_at
+                 ) VALUES(?1,'live',?2,?3,?4,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,?5)",
+                params![place_id, kind, address, address.as_bytes(), created_at],
+            )?;
+            place_id
+        }
+        (1, Some(place_id), Some(classification)) => {
+            if classification == "config_only" {
+                target.execute(
+                    "UPDATE place_source_refs SET classification='live' WHERE place_id=?1",
+                    [place_id],
+                )?;
+            }
+            place_id
+        }
+        _ => {
+            return Err(ConverterError::Accounting(format!(
+                "live place {kind}:{address} does not resolve exactly once"
+            )))
+        }
+    };
+    let scope_id = deterministic_uuid(
+        snapshot_digest,
+        format!("origin-scope\0{kind}\0{address}").as_bytes(),
+    );
+    target.execute(
+        "INSERT OR IGNORE INTO external_origin_scopes(
+           scope_id,kind_id,address,mode,instance_id,binding_id,place_id
+         ) VALUES(?1,?2,?3,'kind_address',NULL,NULL,?4)",
+        params![scope_id, kind, address, place_id],
+    )?;
+    let metadata = if kind == "discord" {
+        serde_json::to_vec(&serde_json::json!({
+            "address_kind": address_kind,
+            "guild_id": guild_id,
+        }))?
+    } else {
+        serde_json::to_vec(&serde_json::json!({"mode":"timeline"}))?
+    };
+    let metadata_schema = if kind == "discord" {
+        "gate-binding/discord/v1"
+    } else {
+        "gate-binding/nostr/v1"
+    };
+    for instance in instances
+        .0
+        .iter()
+        .filter(|instance| instance.kind_id == kind)
+    {
+        let owner = target.query_row(
+            "SELECT owner_subject_id FROM gate_instances WHERE instance_id=?1",
+            [&instance.instance_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )?;
+        if owner.is_some() && owner != subject_id {
+            continue;
+        }
+        let binding_id = deterministic_uuid(
+            snapshot_digest,
+            [
+                b"binding\0".as_slice(),
+                instance.uuid_bytes.as_slice(),
+                b"\0",
+                address.as_bytes(),
+            ]
+            .concat()
+            .as_slice(),
+        );
+        let digest = Sha256::digest(&metadata);
+        target.execute(
+            "INSERT OR IGNORE INTO gate_bindings(
+               binding_id,place_id,instance_id,address,label,origin_scope_id,
+               binding_metadata_schema_id,binding_metadata_bytes,binding_metadata_digest,
+               catch_up_start,closed_at,close_reason
+             ) VALUES(?1,?2,?3,?4,NULL,?5,?6,?7,?8,NULL,NULL,NULL)",
+            params![
+                binding_id,
+                place_id,
+                instance.instance_id,
+                address,
+                scope_id,
+                metadata_schema,
+                metadata,
+                digest.as_slice(),
+            ],
+        )?;
+    }
+    Ok(LiveHistoryPlace { place_id })
+}
+
+fn assemble_pending_interactions(
+    source: &Connection,
+    target: &Transaction<'_>,
+    agents: &BTreeMap<String, i64>,
+    instances: &MigrationInstanceSet,
+    raw: &mut RawCollector,
+    report: &mut ConversionReport,
+) -> Result<()> {
+    if !SourceTable::exists(source, "pending_interactions")? {
+        return Ok(());
+    }
+    let table = SourceTable::load_schema(source, "pending_interactions")?;
+    table.require_exact_columns(&[
+        "id",
+        "agent_id",
+        "session_id",
+        "channel_id",
+        "message_id",
+        "platform",
+        "surface_id",
+        "a2ui_components_json",
+        "status",
+        "response_json",
+        "responder_id",
+        "owner_only",
+        "timeout_secs",
+        "created_at",
+        "responded_at",
+        "updated_at",
+    ])?;
+    let mut accounting =
+        ClassAccounting::streaming(table.name, "pending_interaction", BTreeMap::new());
+    let mut next_id = 1_i64;
+    let mut response_rows = 0_u64;
+    table.for_each_row(source, "id COLLATE BINARY,rowid", |row| {
+        let source_id = match table.nullable_text(row, "id") {
+            Some(Some(value)) => value,
+            Some(None) => {
+                raw.add(&table, row, "pending-interaction-router-v2:null_source_key")?;
+                accounting.raw_streamed();
+                return Ok(());
+            }
+            None => {
+                raw.add(
+                    &table,
+                    row,
+                    "pending-interaction-router-v2:noncanonical_storage",
+                )?;
+                accounting.raw_streamed();
+                return Ok(());
+            }
+        };
+        let parsed = parse_pending_interaction(&table, row, source_id, agents, target);
+        let parsed = match parsed {
+            Ok(value) => value,
+            Err(reason) => {
+                raw.add(&table, row, reason)?;
+                accounting.raw_streamed();
+                return Ok(());
+            }
+        };
+        let response = if let Some(response) = parsed.response {
+            match classify_interaction_responder(
+                target,
+                instances,
+                &parsed.surface,
+                &response.responder_external_id,
+            ) {
+                Ok((kind, subject)) => Some((response, kind, subject)),
+                Err(reason) => {
+                    raw.add(&table, row, reason)?;
+                    accounting.raw_streamed();
+                    return Ok(());
+                }
+            }
+        } else {
+            None
+        };
+        let interaction_id = next_id;
+        next_id = next_id
+            .checked_add(1)
+            .ok_or_else(|| ConverterError::Accounting("pending interaction id overflow".into()))?;
+        target.execute(
+            "INSERT INTO interactions(
+               id,owner_subject_id,place_id,binding_id,surface,source_address,
+               source_message_id,surface_id,surface_payload,payload,owner_only,timeout_secs,
+               state,source_record_key,created_at,updated_at,deadline
+             ) VALUES(?1,?2,?3,NULL,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+            params![
+                interaction_id,
+                parsed.owner_subject_id,
+                parsed.place_id,
+                parsed.surface,
+                parsed.source_address,
+                parsed.source_message_id,
+                parsed.surface_id,
+                parsed.surface_payload,
+                parsed.payload,
+                parsed.owner_only,
+                parsed.timeout_secs,
+                parsed.state,
+                source_id,
+                parsed.created_at,
+                parsed.updated_at,
+                parsed.deadline,
+            ],
+        )?;
+        if let Some((response, responder_kind, responder_subject_id)) = response {
+            target.execute(
+                "INSERT INTO interaction_responses(
+                   interaction_id,interaction_source_key,response,responder_kind,
+                   responder_subject_id,responder_external_id,responded_at
+                 ) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                params![
+                    interaction_id,
+                    source_id,
+                    response.response,
+                    responder_kind,
+                    responder_subject_id,
+                    response.responder_external_id,
+                    response.responded_at,
+                ],
+            )?;
+            response_rows += 1;
+        }
+        accounting.canonical_streamed();
+        Ok(())
+    })?;
+    accounting.physical_rows = BTreeMap::from([
+        ("interactions".into(), accounting.canonical_outcomes),
+        ("interaction_responses".into(), response_rows),
+    ]);
+    report.classes.push(accounting);
+    Ok(())
+}
+
+struct ParsedInteractionResponse {
+    response: String,
+    responder_external_id: String,
+    responded_at: i64,
+}
+
+struct ParsedInteraction {
+    owner_subject_id: i64,
+    place_id: i64,
+    surface: String,
+    source_address: String,
+    source_message_id: Option<String>,
+    surface_id: String,
+    surface_payload: String,
+    payload: String,
+    owner_only: bool,
+    timeout_secs: i64,
+    state: &'static str,
+    created_at: i64,
+    updated_at: i64,
+    deadline: i64,
+    response: Option<ParsedInteractionResponse>,
+}
+
+fn parse_pending_interaction(
+    table: &SourceTable,
+    row: &SourceRow,
+    _source_id: &str,
+    agents: &BTreeMap<String, i64>,
+    target: &Transaction<'_>,
+) -> std::result::Result<ParsedInteraction, &'static str> {
+    let required = |column| {
+        table
+            .text(row, column)
+            .map(str::to_owned)
+            .ok_or("pending-interaction-router-v2:noncanonical_storage")
+    };
+    let owner = required("agent_id")?;
+    let owner_subject_id = *agents
+        .get(&owner)
+        .ok_or("pending-interaction-router-v2:unresolved_owner")?;
+    let surface = required("platform")?;
+    if !matches!(surface.as_str(), "discord" | "nostr" | "web" | "rest") {
+        return Err("pending-interaction-router-v2:unknown_surface");
+    }
+    let source_address = required("channel_id")?;
+    let place_matches = target
+        .query_row(
+            "SELECT COUNT(*),MIN(place_id) FROM place_source_refs
+             WHERE source_system=?1 AND source_address=?2",
+            params![surface, source_address],
+            |result| Ok((result.get::<_, i64>(0)?, result.get::<_, Option<i64>>(1)?)),
+        )
+        .map_err(|_| "pending-interaction-router-v2:place_query_failed")?;
+    let place_id = match place_matches {
+        (1, Some(value)) => value,
+        _ => return Err("pending-interaction-router-v2:unresolved_place"),
+    };
+    let surface_id = required("surface_id")?;
+    let surface_payload = required("a2ui_components_json")?;
+    let components: serde_json::Value = serde_json::from_str(&surface_payload)
+        .map_err(|_| "pending-interaction-router-v2:invalid_components")?;
+    let owner_only = table
+        .integer(row, "owner_only")
+        .map(|value| value != 0)
+        .ok_or("pending-interaction-router-v2:noncanonical_storage")?;
+    let timeout_secs = table
+        .integer(row, "timeout_secs")
+        .ok_or("pending-interaction-router-v2:noncanonical_storage")?;
+    let created_at = table
+        .text(row, "created_at")
+        .and_then(parse_utc_nanos)
+        .ok_or("pending-interaction-router-v2:invalid_created_at")?;
+    let updated_at = table
+        .text(row, "updated_at")
+        .and_then(parse_utc_nanos)
+        .ok_or("pending-interaction-router-v2:invalid_updated_at")?;
+    let deadline = timeout_secs
+        .checked_mul(1_000_000_000)
+        .and_then(|delta| created_at.checked_add(delta))
+        .ok_or("pending-interaction-router-v2:deadline_overflow")?;
+    let payload = serde_json::to_string(&serde_json::json!({
+        "components": components,
+        "owner_only": owner_only,
+        "surface_id": surface_id,
+    }))
+    .map_err(|_| "pending-interaction-router-v2:payload_encoding")?;
+    let status = required("status")?;
+    let response_json = table
+        .nullable_text(row, "response_json")
+        .ok_or("pending-interaction-router-v2:noncanonical_storage")?;
+    let responder_id = table
+        .nullable_text(row, "responder_id")
+        .ok_or("pending-interaction-router-v2:noncanonical_storage")?;
+    let responded_at = table
+        .nullable_text(row, "responded_at")
+        .ok_or("pending-interaction-router-v2:noncanonical_storage")?;
+    let all_null = response_json.is_none() && responder_id.is_none() && responded_at.is_none();
+    let all_present = response_json.is_some() && responder_id.is_some() && responded_at.is_some();
+    let state = match (status.as_str(), all_null, all_present) {
+        ("pending", true, false) => "pending",
+        ("responded", false, true) => "responded",
+        ("timeout" | "expired", true, false) | ("timeout" | "expired", false, true) => "expired",
+        _ => return Err("pending-interaction-router-v2:noncanonical_interaction"),
+    };
+    let response = if all_present {
+        let response = response_json.expect("all_present").to_owned();
+        serde_json::from_str::<serde_json::Value>(&response)
+            .map_err(|_| "pending-interaction-router-v2:invalid_response")?;
+        Some(ParsedInteractionResponse {
+            response,
+            responder_external_id: responder_id.expect("all_present").to_owned(),
+            responded_at: responded_at
+                .and_then(parse_utc_nanos)
+                .ok_or("pending-interaction-router-v2:invalid_responded_at")?,
+        })
+    } else {
+        None
+    };
+    Ok(ParsedInteraction {
+        owner_subject_id,
+        place_id,
+        surface,
+        source_address,
+        source_message_id: table
+            .nullable_text(row, "message_id")
+            .ok_or("pending-interaction-router-v2:noncanonical_storage")?
+            .map(str::to_owned),
+        surface_id,
+        surface_payload,
+        payload,
+        owner_only,
+        timeout_secs,
+        state,
+        created_at,
+        updated_at,
+        deadline,
+        response,
+    })
+}
+
+fn classify_interaction_responder(
+    target: &Transaction<'_>,
+    instances: &MigrationInstanceSet,
+    surface: &str,
+    responder: &str,
+) -> std::result::Result<(&'static str, Option<i64>), &'static str> {
+    if responder == "system" {
+        return Ok(("system", None));
+    }
+    let mut subjects = BTreeSet::new();
+    for instance in instances
+        .0
+        .iter()
+        .filter(|instance| instance.kind_id == surface)
+    {
+        let mut statement = target
+            .prepare(
+                "SELECT subject_id FROM gate_subject_identities
+                 WHERE instance_id=?1 AND external_id=?2",
+            )
+            .map_err(|_| "pending-interaction-router-v2:responder_query_failed")?;
+        let rows = statement
+            .query_map(params![instance.instance_id, responder], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(|_| "pending-interaction-router-v2:responder_query_failed")?;
+        for subject in rows {
+            subjects.insert(
+                subject.map_err(|_| "pending-interaction-router-v2:responder_query_failed")?,
+            );
+        }
+    }
+    match subjects.len() {
+        0 => Ok(("unknown", None)),
+        1 => Ok(("subject", subjects.into_iter().next())),
+        _ => Err("pending-interaction-router-v2:responder_subject_conflict"),
+    }
+}
+
+struct HistoryPlaceState {
+    place_id: i64,
+    subject_id: i64,
+    session_id: String,
+    event_seq: i64,
+    live_place_id: Option<i64>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assemble_memory_history(
+    source: &Connection,
+    target: &Transaction<'_>,
+    snapshot_digest: [u8; 32],
+    migration_epoch: i64,
+    agents: &BTreeMap<String, i64>,
+    live_sessions: &BTreeMap<(String, String), LiveHistoryPlace>,
+    report: &mut ConversionReport,
+) -> Result<()> {
+    if !SourceTable::exists(source, "memory_sessions")? {
+        return Ok(());
+    }
+    let table = SourceTable::load_schema(source, "memory_sessions")?;
+    table.require_exact_columns(&[
+        "id",
+        "agent_id",
+        "session_id",
+        "log_type",
+        "content",
+        "speaker_id",
+        "turn_number",
+        "metadata_json",
+        "created_at",
+    ])?;
+    let mut accounting = ClassAccounting::streaming(table.name, "history_event", BTreeMap::new());
+    let mut histories = BTreeMap::<(String, String), HistoryPlaceState>::new();
+    let mut archive_rows = 0_u64;
+    let mut event_rows = 0_u64;
+    let mut journal_rows = 0_u64;
+    let mut audit_rows = 0_u64;
+    let mut place_rows = 0_u64;
+    let mut journal_id = target
+        .query_row(
+            "SELECT COALESCE(MAX(journal_id),0) FROM private_journal",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?
+        .checked_add(1)
+        .ok_or_else(|| ConverterError::Accounting("private journal id overflow".into()))?;
+    let mut previous_source_id = None;
+    table.for_each_row(source, "id,rowid", |row| {
+        let source_row_id = table.integer(row, "id").ok_or_else(|| {
+            ConverterError::Accounting("history row has missing/non-integer source id".into())
+        })?;
+        if previous_source_id == Some(source_row_id) {
+            return Err(ConverterError::Accounting(format!(
+                "history source id {source_row_id} is duplicated"
+            )));
+        }
+        previous_source_id = Some(source_row_id);
+        let log_kind = table.text(row, "log_type").ok_or_else(|| {
+            ConverterError::Accounting(format!(
+                "history row {source_row_id} has non-text log_type"
+            ))
+        })?;
+        if matches!(log_kind, "tool_call" | "system") {
+            accounting.dropped_streamed();
+            return Ok(());
+        }
+        let agent_id = table.text(row, "agent_id").ok_or_else(|| {
+            ConverterError::Accounting(format!(
+                "history row {source_row_id} has non-text agent_id"
+            ))
+        })?;
+        let subject_id = agents.get(agent_id).copied().ok_or_else(|| {
+            ConverterError::Accounting(format!(
+                "history row {source_row_id} agent join is not exact-one"
+            ))
+        })?;
+        let session_id = table.text(row, "session_id").ok_or_else(|| {
+            ConverterError::Accounting(format!(
+                "history row {source_row_id} has non-text session_id"
+            ))
+        })?;
+        let content = table.bytes(row, "content").ok_or_else(|| {
+            ConverterError::Accounting(format!(
+                "history row {source_row_id} has non-text/blob content"
+            ))
+        })?;
+        let created_at = table
+            .text(row, "created_at")
+            .and_then(parse_utc_nanos)
+            .ok_or_else(|| {
+                ConverterError::Accounting(format!(
+                    "history row {source_row_id} has invalid created_at"
+                ))
+            })?;
+        let speaker = table.nullable_bytes(row, "speaker_id").ok_or_else(|| {
+            ConverterError::Accounting(format!(
+                "history row {source_row_id} has invalid speaker storage"
+            ))
+        })?;
+        let turn_number = table.nullable_integer(row, "turn_number").ok_or_else(|| {
+            ConverterError::Accounting(format!(
+                "history row {source_row_id} has invalid turn_number storage"
+            ))
+        })?;
+        let metadata = table.nullable_bytes(row, "metadata_json").ok_or_else(|| {
+            ConverterError::Accounting(format!(
+                "history row {source_row_id} has invalid metadata storage"
+            ))
+        })?;
+        let history_key = (agent_id.to_owned(), session_id.to_owned());
+        if !histories.contains_key(&history_key) {
+            let place_id = next_integer_id(target, "places")?;
+            target.execute(
+                "INSERT INTO places(
+                   id,parent_id,inherit_from_place_id,inherit_up_to_seq,policy,public_key,
+                   created_at,closed_at,close_reason
+                 ) VALUES(?1,NULL,NULL,NULL,?2,?3,?4,?5,'legacy-history-import')",
+                params![
+                    place_id,
+                    b"owner-private".as_slice(),
+                    format!(
+                        "legacy-agent:opencrab:{}:{}",
+                        URL_SAFE_NO_PAD.encode(agent_id.as_bytes()),
+                        URL_SAFE_NO_PAD.encode(session_id.as_bytes())
+                    ),
+                    created_at,
+                    migration_epoch,
+                ],
+            )?;
+            target.execute(
+                "INSERT INTO memberships(place_id,subject_id,role,joined_at,shared_seen_seq)
+                 VALUES(?1,?2,'participant',?3,0)",
+                params![place_id, subject_id, created_at],
+            )?;
+            histories.insert(
+                history_key.clone(),
+                HistoryPlaceState {
+                    place_id,
+                    subject_id,
+                    session_id: session_id.into(),
+                    event_seq: 0,
+                    live_place_id: live_sessions
+                        .get(&history_key)
+                        .map(|place| place.place_id),
+                },
+            );
+            place_rows += 1;
+        }
+        let state = histories.get_mut(&history_key).expect("inserted above");
+        if state.subject_id != subject_id {
+            return Err(ConverterError::Accounting(format!(
+                "history place for row {source_row_id} crosses subjects"
+            )));
+        }
+        target.execute(
+            "INSERT INTO legacy_history_archive(
+               source_db_digest,source_row_id,source_agent_id,source_session_id,log_kind,
+               content,speaker_source_id,source_turn_number,metadata,created_at,
+               created_at_source,metadata_source,row_digest,owner_subject_id,proposed_place_id,
+               owner_decision_revision
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+            params![
+                snapshot_digest.as_slice(),
+                source_row_id,
+                agent_id.as_bytes(),
+                session_id.as_bytes(),
+                log_kind,
+                content,
+                speaker,
+                turn_number,
+                metadata,
+                created_at,
+                table.encoded_value(row, "created_at"),
+                table.encoded_value(row, "metadata_json"),
+                row.row_digest.as_slice(),
+                subject_id,
+                state.place_id,
+                "design-v22:per-agent-history-v1",
+            ],
+        )?;
+        archive_rows += 1;
+
+        let speaker_is_agent = speaker == Some(agent_id.as_bytes());
+        if matches!(log_kind, "speech" | "message") && speaker_is_agent {
+            state.event_seq += 1;
+            insert_history_event(
+                target,
+                state.place_id,
+                state.event_seq,
+                "spoke",
+                Some(subject_id),
+                None,
+                content,
+                created_at,
+                None,
+            )?;
+            event_rows += 1;
+        } else if speaker.is_none() {
+            insert_history_audit(
+                target,
+                snapshot_digest,
+                source_row_id,
+                "conversation",
+                subject_id,
+                state.place_id,
+                agent_id,
+                content,
+                created_at,
+                metadata,
+                "owner-private source row",
+                log_kind,
+            )?;
+            audit_rows += 1;
+        } else {
+            match log_kind {
+                "speech" | "message" => {
+                    let external = std::str::from_utf8(speaker.expect("not null")).ok();
+                    let author = external
+                        .map(|value| resolve_external_speaker(target, value))
+                        .transpose()?
+                        .flatten();
+                    if let (Some(external), Some(author)) = (external, author) {
+                        state.event_seq += 1;
+                        insert_history_event(
+                            target,
+                            state.place_id,
+                            state.event_seq,
+                            "said",
+                            Some(author),
+                            Some(external),
+                            content,
+                            created_at,
+                            None,
+                        )?;
+                        event_rows += 1;
+                    } else {
+                        insert_history_audit(
+                            target,
+                            snapshot_digest,
+                            source_row_id,
+                            "conversation",
+                            subject_id,
+                            state.place_id,
+                            agent_id,
+                            content,
+                            created_at,
+                            metadata,
+                            "external speaker did not resolve",
+                            log_kind,
+                        )?;
+                        audit_rows += 1;
+                    }
+                }
+                "interaction_response" => {
+                    let object = inspected_metadata(metadata, source_row_id)?;
+                    let interaction_key = object
+                        .get("interaction_id")
+                        .and_then(serde_json::Value::as_str);
+                    let interaction = interaction_key
+                        .map(|key| {
+                            target.query_row(
+                                "SELECT COUNT(*),MIN(id) FROM interactions WHERE source_record_key=?1",
+                                [key],
+                                |row| {
+                                    Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
+                                },
+                            )
+                        })
+                        .transpose()?;
+                    match interaction {
+                        Some((1, Some(_))) => {
+                            state.event_seq += 1;
+                            insert_history_event(
+                                target,
+                                state.place_id,
+                                state.event_seq,
+                                "ui_action",
+                                None,
+                                std::str::from_utf8(speaker.expect("not null")).ok(),
+                                content,
+                                created_at,
+                                None,
+                            )?;
+                            event_rows += 1;
+                        }
+                        Some((count, _)) if count > 1 => {
+                            return Err(ConverterError::Accounting(format!(
+                                "history row {source_row_id} interaction join is multiple"
+                            )))
+                        }
+                        _ => {
+                            insert_history_audit(
+                                target,
+                                snapshot_digest,
+                                source_row_id,
+                                "activity",
+                                subject_id,
+                                state.place_id,
+                                agent_id,
+                                content,
+                                created_at,
+                                metadata,
+                                "interaction did not resolve",
+                                log_kind,
+                            )?;
+                            audit_rows += 1;
+                        }
+                    }
+                }
+                "tool_cancelled" => {
+                    inspected_metadata(metadata, source_row_id)?;
+                    insert_history_audit(
+                        target,
+                        snapshot_digest,
+                        source_row_id,
+                        "activity",
+                        subject_id,
+                        state.place_id,
+                        agent_id,
+                        content,
+                        created_at,
+                        metadata,
+                        "subtask cancellation did not resolve",
+                        log_kind,
+                    )?;
+                    audit_rows += 1;
+                }
+                "steer" | "task_event" => {
+                    inspected_metadata(metadata, source_row_id)?;
+                    insert_history_audit(
+                        target,
+                        snapshot_digest,
+                        source_row_id,
+                        "task",
+                        subject_id,
+                        state.place_id,
+                        agent_id,
+                        content,
+                        created_at,
+                        metadata,
+                        "task reference did not resolve",
+                        log_kind,
+                    )?;
+                    audit_rows += 1;
+                }
+                "tool_result" | "evaluation" => {
+                    insert_history_audit(
+                        target,
+                        snapshot_digest,
+                        source_row_id,
+                        if log_kind == "tool_result" {
+                            "tool_result"
+                        } else {
+                            "evaluation"
+                        },
+                        subject_id,
+                        state.place_id,
+                        agent_id,
+                        content,
+                        created_at,
+                        metadata,
+                        "typed legacy audit",
+                        log_kind,
+                    )?;
+                    audit_rows += 1;
+                }
+                "inner_voice" => {
+                    let provenance = serde_json::to_vec(&serde_json::json!({
+                        "source_db_digest": source::hex(&snapshot_digest),
+                        "source_row_id": source_row_id,
+                    }))?;
+                    target.execute(
+                        "INSERT INTO private_journal(
+                           journal_id,owner_subject_id,place_id,anchor_seq,content,created_at,provenance
+                         ) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                        params![
+                            journal_id,
+                            subject_id,
+                            state.place_id,
+                            state.event_seq,
+                            content,
+                            created_at,
+                            provenance,
+                        ],
+                    )?;
+                    journal_id = journal_id.checked_add(1).ok_or_else(|| {
+                        ConverterError::Accounting("private journal id overflow".into())
+                    })?;
+                    journal_rows += 1;
+                }
+                _ => {
+                    return Err(ConverterError::Accounting(format!(
+                        "history row {source_row_id} has unknown non-drop log_type {log_kind:?}"
+                    )))
+                }
+            }
+        }
+        accounting.canonical_streamed();
+        Ok(())
+    })?;
+
+    let mut link_groups = BTreeMap::<(i64, i64), Vec<&HistoryPlaceState>>::new();
+    for state in histories
+        .values()
+        .filter(|state| state.live_place_id.is_some())
+    {
+        link_groups
+            .entry((state.subject_id, state.live_place_id.expect("filtered")))
+            .or_default()
+            .push(state);
+    }
+    let mut history_source_rows = 0_u64;
+    for ((subject_id, live_place_id), mut states) in link_groups {
+        states.sort_by(|left, right| left.session_id.as_bytes().cmp(right.session_id.as_bytes()));
+        for (ordinal, state) in states.into_iter().enumerate() {
+            target.execute(
+                "INSERT INTO subject_history_sources(
+                   subject_id,live_place_id,history_place_id,ordinal,history_max_seq
+                 ) VALUES(?1,?2,?3,?4,?5)",
+                params![
+                    subject_id,
+                    live_place_id,
+                    state.place_id,
+                    ordinal as i64,
+                    state.event_seq,
+                ],
+            )?;
+            history_source_rows += 1;
+        }
+    }
+    accounting.physical_rows = BTreeMap::from([
+        ("legacy_history_archive".into(), archive_rows),
+        ("places".into(), place_rows),
+        ("memberships".into(), place_rows),
+        ("events".into(), event_rows),
+        ("private_journal".into(), journal_rows),
+        ("legacy_audit_records".into(), audit_rows),
+        ("subject_history_sources".into(), history_source_rows),
+    ]);
+    report.classes.push(accounting);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_history_event(
+    target: &Transaction<'_>,
+    place_id: i64,
+    seq: i64,
+    kind: &str,
+    author_subject_id: Option<i64>,
+    author_external_id: Option<&str>,
+    content: &[u8],
+    created_at: i64,
+    for_subject_id: Option<i64>,
+) -> Result<()> {
+    target.execute(
+        "INSERT INTO events(
+           place_id,seq,kind,author_subject_id,author_external_id,content,reply_to_seq,
+           target_seq,for_subject_id,created_at,attachments
+         ) VALUES(?1,?2,?3,?4,?5,?6,NULL,NULL,?7,?8,?9)",
+        params![
+            place_id,
+            seq,
+            kind,
+            author_subject_id,
+            author_external_id,
+            content,
+            for_subject_id,
+            created_at,
+            b"[]".as_slice(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn resolve_external_speaker(target: &Transaction<'_>, external: &str) -> Result<Option<i64>> {
+    let mut statement = target.prepare(
+        "SELECT DISTINCT subject_id FROM gate_subject_identities WHERE external_id=?1 ORDER BY subject_id",
+    )?;
+    let subjects = statement
+        .query_map([external], |row| row.get::<_, i64>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    match subjects.as_slice() {
+        [] => Ok(None),
+        [subject] => Ok(Some(*subject)),
+        _ => Err(ConverterError::Accounting(format!(
+            "external speaker {external:?} resolves to multiple subjects"
+        ))),
+    }
+}
+
+fn inspected_metadata(
+    metadata: Option<&[u8]>,
+    source_row_id: i64,
+) -> Result<serde_json::Map<String, serde_json::Value>> {
+    let bytes = metadata.ok_or_else(|| {
+        ConverterError::Accounting(format!(
+            "history row {source_row_id} lacks inspected metadata"
+        ))
+    })?;
+    let value = parse_json_without_duplicate_keys(bytes).map_err(|_| {
+        ConverterError::Accounting(format!(
+            "history row {source_row_id} has malformed inspected metadata"
+        ))
+    })?;
+    value.as_object().cloned().ok_or_else(|| {
+        ConverterError::Accounting(format!(
+            "history row {source_row_id} inspected metadata is not an object"
+        ))
+    })
+}
+
+struct UniqueJsonSeed;
+
+impl<'de> DeserializeSeed<'de> for UniqueJsonSeed {
+    type Value = serde_json::Value;
+
+    fn deserialize<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(UniqueJsonVisitor)
+    }
+}
+
+struct UniqueJsonVisitor;
+
+impl<'de> Visitor<'de> for UniqueJsonVisitor {
+    type Value = serde_json::Value;
+
+    fn expecting(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("valid JSON without duplicate object keys")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> std::result::Result<Self::Value, E> {
+        Ok(value.into())
+    }
+
+    fn visit_i64<E>(self, value: i64) -> std::result::Result<Self::Value, E> {
+        Ok(value.into())
+    }
+
+    fn visit_u64<E>(self, value: u64) -> std::result::Result<Self::Value, E> {
+        Ok(value.into())
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, value: f64) -> std::result::Result<Self::Value, E> {
+        serde_json::Number::from_f64(value)
+            .map(serde_json::Value::Number)
+            .ok_or_else(|| E::custom("non-finite JSON number"))
+    }
+
+    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E> {
+        Ok(value.into())
+    }
+
+    fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E> {
+        Ok(value.into())
+    }
+
+    fn visit_none<E>(self) -> std::result::Result<Self::Value, E> {
+        Ok(serde_json::Value::Null)
+    }
+
+    fn visit_unit<E>(self) -> std::result::Result<Self::Value, E> {
+        Ok(serde_json::Value::Null)
+    }
+
+    fn visit_some<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        UniqueJsonSeed.deserialize(deserializer)
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut values = Vec::new();
+        while let Some(value) = sequence.next_element_seed(UniqueJsonSeed)? {
+            values.push(value);
+        }
+        Ok(serde_json::Value::Array(values))
+    }
+
+    fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut values = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if values.contains_key(&key) {
+                return Err(A::Error::custom(format!("duplicate JSON key {key:?}")));
+            }
+            values.insert(key, map.next_value_seed(UniqueJsonSeed)?);
+        }
+        Ok(serde_json::Value::Object(values))
+    }
+}
+
+fn parse_json_without_duplicate_keys(bytes: &[u8]) -> serde_json::Result<serde_json::Value> {
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let value = UniqueJsonSeed.deserialize(&mut deserializer)?;
+    deserializer.end()?;
+    Ok(value)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_history_audit(
+    target: &Transaction<'_>,
+    snapshot_digest: [u8; 32],
+    source_row_id: i64,
+    audit_kind: &str,
+    owner_subject_id: i64,
+    place_id: i64,
+    caller_identity: &str,
+    content: &[u8],
+    created_at: i64,
+    metadata: Option<&[u8]>,
+    reason: &str,
+    scope: &str,
+) -> Result<()> {
+    let provenance = serde_json::to_vec(&serde_json::json!({
+        "source_db_digest": source::hex(&snapshot_digest),
+        "source_row_id": source_row_id,
+    }))?;
+    target.execute(
+        "INSERT INTO legacy_audit_records(
+           source_db_digest,source_row_id,audit_kind,owner_subject_id,place_id,activity_id,
+           caller_discord_id,caller_identity,content,created_at,metadata,new_value,old_value,
+           provenance,reason,scope,source_channel_id
+         ) VALUES(?1,?2,?3,?4,?5,NULL,NULL,?6,?7,?8,?9,NULL,NULL,?10,?11,?12,NULL)",
+        params![
+            snapshot_digest.as_slice(),
+            source_row_id,
+            audit_kind,
+            owner_subject_id,
+            place_id,
+            caller_identity,
+            content,
+            created_at,
+            metadata,
+            provenance,
+            reason,
+            scope,
+        ],
+    )?;
+    Ok(())
+}
+
+fn reconcile_migrated_routes(target: &Transaction<'_>) -> Result<()> {
+    let mut statement = target.prepare(
+        "SELECT DISTINCT m.subject_id,m.place_id,gi.kind_id
+         FROM memberships m
+         JOIN gate_bindings b ON b.place_id=m.place_id AND b.closed_at IS NULL
+         JOIN gate_instances gi ON gi.instance_id=b.instance_id
+         ORDER BY m.subject_id,m.place_id,gi.kind_id",
+    )?;
+    let tuples = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(statement);
+    for (subject_id, place_id, kind) in tuples {
+        let subject_policy = target.query_row(
+            "SELECT COUNT(*),MAX(whitelisted),MAX(heartbeat_enabled)
+             FROM place_subject_policies
+             WHERE place_id=?1 AND kind_id=?2 AND subject_id=?3",
+            params![place_id, kind, subject_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<bool>>(1)?,
+                    row.get::<_, Option<bool>>(2)?,
+                ))
+            },
+        )?;
+        let policy = if subject_policy.0 == 1 {
+            subject_policy
+        } else {
+            let default_policy = target
+                .query_row(
+                    "SELECT policy_bytes FROM place_default_policies
+                     WHERE place_id=?1 AND kind_id=?2 AND resolution='active'",
+                    params![place_id, kind],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()?;
+            match default_policy {
+                Some(bytes) => {
+                    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+                    (
+                        1,
+                        value
+                            .get("whitelisted")
+                            .and_then(serde_json::Value::as_bool),
+                        value
+                            .get("heartbeat_enabled")
+                            .and_then(serde_json::Value::as_bool),
+                    )
+                }
+                None => subject_policy,
+            }
+        };
+        let metadata = target.query_row(
+            "SELECT binding_metadata_bytes FROM gate_bindings b
+             JOIN gate_instances gi ON gi.instance_id=b.instance_id
+             WHERE b.place_id=?1 AND gi.kind_id=?2 AND b.closed_at IS NULL LIMIT 1",
+            params![place_id, kind],
+            |row| row.get::<_, Vec<u8>>(0),
+        )?;
+        let address_kind = serde_json::from_slice::<serde_json::Value>(&metadata)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("address_kind")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| {
+                if kind == "nostr" {
+                    "timeline".into()
+                } else {
+                    "unknown".into()
+                }
+            });
+        let eligible = match address_kind.as_str() {
+            "guild" => policy.0 == 1 && policy.1 == Some(true),
+            "dm" | "timeline" => true,
+            _ => false,
+        };
+        if !eligible {
+            continue;
+        }
+        let dedicated = query_route_bindings(target, subject_id, place_id, &kind, true)?;
+        let shared = query_route_bindings(target, subject_id, place_id, &kind, false)?;
+        let candidates = if !dedicated.is_empty() {
+            dedicated
+        } else {
+            shared
+        };
+        if candidates.len() > 1 {
+            return Err(ConverterError::Accounting(format!(
+                "route anchor is ambiguous for subject={subject_id},place={place_id},kind={kind}"
+            )));
+        }
+        let Some(binding_id) = candidates.first() else {
+            continue;
+        };
+        let mut purposes = vec!["inbound", "outbound"];
+        if policy.2 == Some(true) {
+            purposes.push("timed");
+        }
+        for purpose in purposes {
+            target.execute(
+                "INSERT INTO subject_routes(subject_id,place_id,kind_id,purpose,binding_id)
+                 VALUES(?1,?2,?3,?4,?5)",
+                params![subject_id, place_id, kind, purpose, binding_id],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn query_route_bindings(
+    target: &Transaction<'_>,
+    subject_id: i64,
+    place_id: i64,
+    kind: &str,
+    dedicated: bool,
+) -> Result<Vec<String>> {
+    let predicate = if dedicated {
+        "gi.owner_subject_id=?1"
+    } else {
+        "gi.owner_subject_id IS NULL"
+    };
+    let sql = format!(
+        "SELECT b.binding_id FROM gate_bindings b
+         JOIN gate_instances gi ON gi.instance_id=b.instance_id
+         JOIN gate_instance_revisions r ON r.instance_id=gi.instance_id AND r.revision=gi.active_revision
+         WHERE {predicate} AND b.place_id=?2 AND gi.kind_id=?3
+           AND b.closed_at IS NULL AND r.present=1 AND r.enabled=1
+         ORDER BY b.binding_id"
+    );
+    let mut statement = target.prepare(&sql)?;
+    let rows = if dedicated {
+        statement
+            .query_map(params![subject_id, place_id, kind], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+    } else {
+        statement
+            .query_map(params![subject_id, place_id, kind], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    Ok(rows)
+}
+
 pub fn convert(
     options: ConvertOptions,
     instance_assembler: &dyn MigrationInstanceAssembler,
@@ -261,7 +2937,8 @@ pub fn convert(
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
     )?;
     source.execute_batch("BEGIN")?;
-    let agents = SourceTable::load(&source, "agents")?;
+    let agents = SourceTable::load_schema(&source, "agents")?;
+    let model_pricing = SourceTable::load(&source, "model_pricing")?;
     let trusted_users = SourceTable::load(&source, "trusted_users")?;
     let trusted_co_agents = SourceTable::load(&source, "trusted_co_agents")?;
     agents.require_exact_columns(&[
@@ -299,12 +2976,49 @@ pub fn convert(
         "created_by",
         "created_at",
     ])?;
+    model_pricing.require_exact_columns(&[
+        "provider",
+        "model",
+        "input_price_per_1m",
+        "output_price_per_1m",
+        "context_window",
+        "updated_at",
+        "max_output_tokens",
+    ])?;
     let mut target = create_fresh_target(&options.target)?;
     let transaction = target.transaction()?;
     create_phase1_schema(&transaction)?;
-    // The coordinator owns this transaction across both phases. The assembler writes complete
-    // migration-created rows first; only rows read back from this transaction are principal
-    // authority. A file or caller-supplied UUID set is never production authority.
+    let mut raw = RawCollector::new(&transaction);
+    let mut report = ConversionReport::default();
+    let provenance = MigrationProvenance::new(source_database_digest);
+    let captured_at = source_captured_at(&options.source)?;
+
+    let effective_config = load_effective_config(&options.source)?;
+    let agent_subjects = assemble_agents(
+        &source,
+        &transaction,
+        &agents,
+        &model_pricing,
+        &effective_config,
+        &provenance,
+        &mut raw,
+        &mut report,
+    )?;
+
+    assemble_gate_configs(
+        &source,
+        &transaction,
+        source_database_digest,
+        captured_at,
+        &effective_config,
+        &agent_subjects,
+        &provenance,
+        &mut raw,
+        &mut report,
+    )?;
+
+    // The coordinator owns this transaction across both phases. Instance assembly runs after the
+    // canonical agent family so dedicated/shared rows can resolve owners in this same snapshot.
     instance_assembler.assemble(
         &source,
         &MigrationInstanceTarget {
@@ -313,37 +3027,16 @@ pub fn convert(
     )?;
     let migration_instances = load_migration_instances(&transaction)?;
 
-    let mut raw = RawCollector::default();
-    let mut report = ConversionReport::default();
-    let provenance = MigrationProvenance::new(source_database_digest);
-
-    // The current ledger has no source for either required runtime policy. It explicitly routes
-    // every complete agents row to raw; no fallback policy or partial subject is permitted.
-    for row in &agents.rows {
-        raw.add(
-            &agents,
-            row,
-            "create-subject-public-id-v1:missing_history_and_output_policy",
-        )?;
-    }
-    let mut agent_accounting = ClassAccounting::new(
-        agents.name,
-        "agent_aggregate",
-        agents
-            .rows
-            .iter()
-            .map(|row| ContributionKey::new(&agents, row)),
-        BTreeMap::from([
-            ("subjects".into(), 0),
-            ("subject_profiles".into(), 0),
-            ("subject_runtime_configs".into(), 0),
-        ]),
-    );
-    for row in &agents.rows {
-        agent_accounting.raw(ContributionKey::new(&agents, row));
-    }
-    report.classes.push(agent_accounting);
-    let agent_subjects = BTreeMap::<String, i64>::new();
+    assemble_discord_channel_policies(
+        &source,
+        &transaction,
+        source_database_digest,
+        captured_at,
+        &agent_subjects,
+        &provenance,
+        &mut raw,
+        &mut report,
+    )?;
 
     let principals = assemble_principals(
         &transaction,
@@ -352,6 +3045,7 @@ pub fn convert(
         &provenance,
         &mut raw,
         &mut report,
+        agent_subjects.len() as i64,
     )?;
     let principal_subjects = principals
         .iter()
@@ -373,6 +3067,16 @@ pub fn convert(
         &mut raw,
         &mut report,
     )?;
+    assemble_history_and_events(
+        &source,
+        &transaction,
+        source_database_digest,
+        captured_at,
+        &agent_subjects,
+        &migration_instances,
+        &mut raw,
+        &mut report,
+    )?;
     raw.write(&transaction)?;
 
     for table in [
@@ -385,6 +3089,24 @@ pub fn convert(
         "agent_grants",
         "grant_actions",
         "grant_source_provenance",
+        "gate_instance_revisions",
+        "secret_sets",
+        "secret_values",
+        "places",
+        "place_source_refs",
+        "place_default_policies",
+        "place_subject_policies",
+        "memberships",
+        "external_origin_scopes",
+        "gate_bindings",
+        "subject_routes",
+        "events",
+        "private_journal",
+        "legacy_history_archive",
+        "legacy_audit_records",
+        "subject_history_sources",
+        "interactions",
+        "interaction_responses",
         "migration_provenance",
         "legacy_unowned_source_rows",
     ] {
@@ -399,6 +3121,266 @@ pub fn convert(
     Ok(ConvertOutcome { report })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn assemble_agents(
+    source: &Connection,
+    target: &Transaction<'_>,
+    agents: &SourceTable,
+    model_pricing: &SourceTable,
+    config: &EffectiveConfig,
+    provenance: &MigrationProvenance,
+    raw: &mut RawCollector,
+    report: &mut ConversionReport,
+) -> Result<BTreeMap<String, i64>> {
+    let mut accounting =
+        ClassAccounting::streaming(agents.name, "agent_aggregate", BTreeMap::new());
+
+    let mut subjects = BTreeMap::new();
+    let mut next_id = 1_i64;
+    let mut profile_rows = 0_u64;
+    let mut runtime_rows = 0_u64;
+    let mut provenance_rows = 0_u64;
+    agents.for_each_row(source, "agent_id COLLATE BINARY,rowid", |row| {
+        let parsed = parse_agent_aggregate(agents, row, model_pricing, config);
+        let parsed = match parsed {
+            Ok(parsed) => {
+                let matches = source.query_row(
+                    "SELECT COUNT(*) FROM agents WHERE agent_id=?1",
+                    [&parsed.agent_id],
+                    |result| result.get::<_, i64>(0),
+                )?;
+                if matches == 1 {
+                    parsed
+                } else {
+                    raw.add(
+                        agents,
+                        row,
+                        "create-subject-public-id-v1:duplicate_public_id",
+                    )?;
+                    accounting.raw_streamed();
+                    return Ok(());
+                }
+            }
+            Err(reason) => {
+                raw.add(agents, row, reason)?;
+                accounting.raw_streamed();
+                return Ok(());
+            }
+        };
+        let subject_id = next_id;
+        next_id = next_id
+            .checked_add(1)
+            .ok_or_else(|| ConverterError::Accounting("subject id overflow".into()))?;
+        target.execute(
+            "INSERT INTO subjects(id,kind,public_id,display_name,created_at)
+             VALUES(?1,'agent',?2,?3,?4)",
+            params![subject_id, parsed.agent_id, parsed.name, parsed.created_at],
+        )?;
+        target.execute(
+            "INSERT INTO subject_profiles(
+               subject_id,revision,persona_name,persona,instructions,
+               default_heartbeat_instructions,job_title,organization,image_url,metadata,updated_at
+             ) VALUES(?1,1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![
+                subject_id,
+                parsed.persona_name,
+                parsed.persona,
+                parsed.instructions,
+                parsed.heartbeat_instructions,
+                parsed.job_title,
+                parsed.organization,
+                parsed.image_url,
+                parsed.metadata,
+                parsed.updated_at,
+            ],
+        )?;
+        target.execute(
+            "INSERT INTO subject_runtime_configs(
+               subject_id,revision,created_at,model_alias,reasoning_effort,web_search_enabled,
+               history_policy,output_policy,model_route_id,source_config
+             ) VALUES(?1,1,?2,?3,?4,?5,?6,?7,NULL,?8)",
+            params![
+                subject_id,
+                parsed.created_at,
+                parsed.model_alias,
+                parsed.reasoning_effort,
+                parsed.web_search_enabled,
+                parsed.history_policy,
+                parsed.output_policy,
+                config.source_config,
+            ],
+        )?;
+        let subject_key = integer_key(subject_id);
+        provenance.write(target, "subjects", &subject_key, agents, row)?;
+        provenance.write(
+            target,
+            "subject_profiles",
+            &composite_key(&[
+                source::SqliteValue::Integer(subject_id),
+                source::SqliteValue::Integer(1),
+            ]),
+            agents,
+            row,
+        )?;
+        provenance.write(
+            target,
+            "subject_runtime_configs",
+            &composite_key(&[
+                source::SqliteValue::Integer(subject_id),
+                source::SqliteValue::Integer(1),
+            ]),
+            agents,
+            row,
+        )?;
+        provenance_rows += 3;
+        profile_rows += 1;
+        runtime_rows += 1;
+        subjects.insert(parsed.agent_id, subject_id);
+        accounting.canonical_streamed();
+        Ok(())
+    })?;
+    accounting.physical_rows = BTreeMap::from([
+        ("subjects".into(), subjects.len() as u64),
+        ("subject_profiles".into(), profile_rows),
+        ("subject_runtime_configs".into(), runtime_rows),
+        ("migration_provenance".into(), provenance_rows),
+    ]);
+    report.classes.push(accounting);
+    Ok(subjects)
+}
+
+struct ParsedAgent {
+    agent_id: String,
+    name: String,
+    persona_name: String,
+    persona: String,
+    instructions: String,
+    heartbeat_instructions: String,
+    job_title: Option<String>,
+    organization: Option<String>,
+    image_url: Option<String>,
+    metadata: Option<String>,
+    created_at: i64,
+    updated_at: i64,
+    model_alias: Option<String>,
+    reasoning_effort: Option<String>,
+    web_search_enabled: Option<bool>,
+    history_policy: String,
+    output_policy: String,
+}
+
+fn parse_agent_aggregate(
+    agents: &SourceTable,
+    row: &SourceRow,
+    model_pricing: &SourceTable,
+    config: &EffectiveConfig,
+) -> std::result::Result<ParsedAgent, &'static str> {
+    let required = |column| {
+        agents
+            .text(row, column)
+            .map(str::to_owned)
+            .ok_or("create-subject-public-id-v1:noncanonical_storage")
+    };
+    let nullable = |column| {
+        agents
+            .nullable_text(row, column)
+            .map(|value| value.map(str::to_owned))
+            .ok_or("create-subject-public-id-v1:noncanonical_storage")
+    };
+    let agent_id = required("agent_id")?;
+    if agent_id.is_empty()
+        || agent_id
+            .bytes()
+            .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')))
+    {
+        return Err("create-subject-public-id-v1:invalid_public_id");
+    }
+    let name = required("name")?;
+    let persona_name = required("persona_name")?;
+    let persona = required("personality")?;
+    let instructions = required("instructions")?;
+    let heartbeat_instructions = required("heartbeat_instructions")?;
+    let metadata = nullable("metadata_json")?;
+    if let Some(metadata) = &metadata {
+        serde_json::from_str::<serde_json::Value>(metadata)
+            .map_err(|_| "create-subject-public-id-v1:invalid_metadata")?;
+    }
+    let created_at = agents
+        .text(row, "created_at")
+        .and_then(parse_utc_nanos)
+        .ok_or("create-subject-public-id-v1:invalid_created_at")?;
+    let updated_at = agents
+        .text(row, "updated_at")
+        .and_then(parse_utc_nanos)
+        .ok_or("create-subject-public-id-v1:invalid_updated_at")?;
+    let model_alias = nullable("model")?;
+    let effective_model = model_alias
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .or(config.default_model.as_deref())
+        .ok_or("create-subject-public-id-v1:missing_effective_model")?;
+    let (provider, model) = effective_model
+        .split_once(':')
+        .map_or(("", effective_model), |(provider, model)| (provider, model));
+    let provider = provider.trim();
+    let model = model.trim();
+    let matches = model_pricing
+        .rows
+        .iter()
+        .filter(|pricing| {
+            model_pricing.text(pricing, "provider") == Some(provider)
+                && model_pricing.text(pricing, "model") == Some(model)
+        })
+        .collect::<Vec<_>>();
+    if matches.len() != 1 {
+        return Err("create-subject-public-id-v1:effective_model_pricing_not_exact_one");
+    }
+    let pricing = matches[0];
+    let context_window = model_pricing
+        .integer(pricing, "context_window")
+        .filter(|value| *value > 0)
+        .ok_or("create-subject-public-id-v1:invalid_context_window")?;
+    let budget = (context_window as f64 * config.compaction_ratio).floor();
+    if !budget.is_finite() || budget < 0.0 || budget > i64::MAX as f64 {
+        return Err("create-subject-public-id-v1:invalid_history_budget");
+    }
+    let mut budget = budget as i64;
+    if provider == "chatgpt" {
+        budget = budget.min(305_000);
+    }
+    let max_output = model_pricing
+        .nullable_integer(pricing, "max_output_tokens")
+        .ok_or("create-subject-public-id-v1:invalid_max_output_tokens")?;
+    let history_policy = serde_json::to_string(&serde_json::json!({"budget_tokens": budget}))
+        .map_err(|_| "create-subject-public-id-v1:history_policy_encoding")?;
+    let output_policy =
+        serde_json::to_string(&serde_json::json!({"max_output_tokens": max_output}))
+            .map_err(|_| "create-subject-public-id-v1:output_policy_encoding")?;
+    let web_search_enabled = agents
+        .nullable_integer(row, "web_search")
+        .ok_or("create-subject-public-id-v1:noncanonical_storage")?
+        .map(|value| value != 0);
+    Ok(ParsedAgent {
+        agent_id,
+        name,
+        persona_name,
+        persona,
+        instructions,
+        heartbeat_instructions,
+        job_title: nullable("job_title")?,
+        organization: nullable("organization")?,
+        image_url: nullable("image_url")?,
+        metadata,
+        created_at,
+        updated_at,
+        model_alias,
+        reasoning_effort: nullable("reasoning_effort")?,
+        web_search_enabled,
+        history_policy,
+        output_policy,
+    })
+}
+
 fn assemble_principals(
     target: &Transaction<'_>,
     trusted_users: &SourceTable,
@@ -406,6 +3388,7 @@ fn assemble_principals(
     provenance: &MigrationProvenance,
     raw: &mut RawCollector,
     report: &mut ConversionReport,
+    subject_id_offset: i64,
 ) -> Result<Vec<Principal>> {
     let mut groups = BTreeMap::<(String, String), Vec<usize>>::new();
     let mut accounting = ClassAccounting::new(
@@ -524,8 +3507,12 @@ fn assemble_principals(
     let mut identity_rows = 0_u64;
     let mut provenance_rows = 0_u64;
     for (index, principal) in candidates.iter_mut().enumerate() {
-        principal.subject_id = i64::try_from(index + 1)
-            .map_err(|_| ConverterError::Accounting("subject id overflow".into()))?;
+        principal.subject_id = subject_id_offset
+            .checked_add(
+                i64::try_from(index + 1)
+                    .map_err(|_| ConverterError::Accounting("subject id overflow".into()))?,
+            )
+            .ok_or_else(|| ConverterError::Accounting("subject id overflow".into()))?;
         target.execute(
             "INSERT INTO subjects(id,kind,public_id,display_name,created_at)
              VALUES(?1,'human',?2,?3,?4)",
