@@ -16,7 +16,6 @@ pub(crate) fn assemble_phase3(
 ) -> Result<()> {
     assemble_heartbeat_source_state(source, target, agents, provenance, raw, report)?;
     assemble_webhooks(source, target, agents, provenance, raw, report)?;
-    assemble_soul_presets(source, target, agents, provenance, raw, report)?;
     assemble_model_observations(source, target, agents, provenance, raw, report)?;
     assemble_tasks(source, target, agents, provenance, raw, report)?;
     Ok(())
@@ -200,44 +199,6 @@ fn parse_webhook(
         tool_name: required_text(table, row, "tool_name")?,
         updated_at: required_time(table, row, "updated_at")?,
     })
-}
-
-fn assemble_soul_presets(
-    source: &Connection,
-    _target: &Transaction<'_>,
-    _agents: &BTreeMap<String, i64>,
-    _provenance: &MigrationProvenance,
-    _raw: &mut RawCollector<'_, '_>,
-    _report: &mut ConversionReport,
-) -> Result<()> {
-    if !SourceTable::exists(source, "soul_presets")? {
-        return Ok(());
-    }
-    let table = SourceTable::load_schema(source, "soul_presets")?;
-    if table
-        .require_exact_columns(&[
-            "id",
-            "agent_id",
-            "preset_name",
-            "persona_name",
-            "custom_traits_json",
-            "created_at",
-            "updated_at",
-        ])
-        .is_err()
-    {
-        return Ok(());
-    }
-    let legacy_rows: i64 =
-        source.query_row("SELECT COUNT(*) FROM soul_presets", [], |row| row.get(0))?;
-    if legacy_rows > 0 {
-        return Err(crate::ConverterError::SourceSchema(
-            "soul_presets legacy table name collides with the migration destination; \
-             nonempty in-place harvest is blocked (INV-1/INV-2)"
-                .into(),
-        ));
-    }
-    Ok(())
 }
 
 fn assemble_model_observations(

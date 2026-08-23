@@ -3685,7 +3685,6 @@ pub fn migrate_in_place_with(
         "legacy_unowned_source_rows",
         "schedule_source_state",
         "webhook_endpoints",
-        "soul_presets",
         "model_observations",
         "tasks",
         "schema_migration_state",

@@ -111,15 +111,6 @@ pub(crate) fn create_migration_owned_schema(conn: &Connection) -> Result<()> {
           raw_interval_secs INTEGER,
           source_updated_at INTEGER NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS soul_presets(
-          owner_subject_id INTEGER NOT NULL,
-          name TEXT NOT NULL,
-          persona_name TEXT NOT NULL,
-          custom_traits TEXT,
-          source_record_key TEXT,
-          created_at INTEGER NOT NULL,
-          updated_at INTEGER NOT NULL
-        );
         CREATE TABLE IF NOT EXISTS model_observations(
           id INTEGER NOT NULL PRIMARY KEY,
           created_at INTEGER NOT NULL,
