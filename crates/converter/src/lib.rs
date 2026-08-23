@@ -169,6 +169,11 @@ pub struct ConvertOptions {
     pub config: PathBuf,
     /// Immutable dotenv resource containing the effective environment captured for this run.
     pub environment: PathBuf,
+    /// Immutable snapshot capture time in UTC nanoseconds.
+    ///
+    /// This explicit value is also the migration epoch. Filesystem metadata is not an authority
+    /// for either timestamp.
+    pub captured_at: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -294,6 +299,7 @@ struct EffectiveConfigSnapshot {
 
 fn load_effective_config(
     database_digest: [u8; 32],
+    captured_at: i64,
     config_path: &Path,
     environment_path: &Path,
 ) -> Result<EffectiveConfigSnapshot> {
@@ -339,8 +345,10 @@ fn load_effective_config(
         discord,
     };
     let mut digest = Sha256::new();
-    digest.update(b"opencrab-converter-input-snapshot-v1\0");
+    digest.update(b"opencrab-converter-input-snapshot-v2\0");
     digest.update(database_digest);
+    digest.update(b"captured-at-utc-nanos\0");
+    digest.update(captured_at.to_be_bytes());
     digest.update((raw.len() as u64).to_be_bytes());
     digest.update(&raw);
     digest.update((environment_raw.len() as u64).to_be_bytes());
@@ -524,15 +532,6 @@ fn strip_toml_comment(line: &str) -> &str {
         escaped = false;
     }
     line
-}
-
-fn source_captured_at(path: &Path) -> Result<i64> {
-    let duration = std::fs::metadata(path)?
-        .modified()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| ConverterError::SourceSchema("source mtime predates Unix epoch".into()))?;
-    i64::try_from(duration.as_nanos())
-        .map_err(|_| ConverterError::SourceSchema("source mtime overflows utc_nanos".into()))
 }
 
 fn deterministic_uuid(snapshot_digest: [u8; 32], locator: &[u8]) -> String {
@@ -3468,6 +3467,7 @@ pub fn convert(
     let source_database_digest = digest_file(&options.source)?;
     let effective_config_snapshot = load_effective_config(
         source_database_digest,
+        options.captured_at,
         &options.config,
         &options.environment,
     )?;
@@ -3534,7 +3534,7 @@ pub fn convert(
         ..ConversionReport::default()
     };
     let provenance = MigrationProvenance::new(snapshot_digest);
-    let captured_at = source_captured_at(&options.source)?;
+    let captured_at = options.captured_at;
 
     let effective_config = effective_config_snapshot.config;
     let agent_subjects = assemble_agents(

@@ -4,7 +4,11 @@ use opencrab_converter::{
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
+use std::fs::{File, FileTimes};
 use std::process::Command;
+use std::time::{Duration, SystemTime};
+
+const FIXTURE_CAPTURED_AT: i64 = 1_770_000_000_123_456_789;
 
 #[test]
 fn phase1_dirty_fixture_public_convert_is_accounted_and_byte_stable() {
@@ -208,6 +212,7 @@ fn run_public_convert(source: &std::path::Path, target: &std::path::Path) -> (St
             target: target.to_path_buf(),
             config,
             environment,
+            captured_at: FIXTURE_CAPTURED_AT,
         },
         &FixtureInstanceAssembly,
     )
@@ -241,6 +246,7 @@ fn converter_rejects_every_preexisting_target_even_when_logically_empty() {
         .args(["--target", target.to_str().unwrap()])
         .args(["--config", config.to_str().unwrap()])
         .args(["--environment", environment.to_str().unwrap()])
+        .args(["--captured-at", &FIXTURE_CAPTURED_AT.to_string()])
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -279,6 +285,7 @@ fn public_convert_rejects_a_multiple_interaction_exact_join() {
             target: temporary.path().join("target.db"),
             config,
             environment,
+            captured_at: FIXTURE_CAPTURED_AT,
         },
         &FixtureInstanceAssembly,
     )
@@ -316,6 +323,7 @@ fn public_convert_rejects_a_multiple_task_exact_join() {
             target: temporary.path().join("target.db"),
             config,
             environment,
+            captured_at: FIXTURE_CAPTURED_AT,
         },
         &FixtureInstanceAssembly,
     )
@@ -359,6 +367,7 @@ guild_ids = ["111"]
             .args(["--target", target.to_str().unwrap()])
             .args(["--config", config.to_str().unwrap()])
             .args(["--environment", environment.to_str().unwrap()])
+            .args(["--captured-at", &FIXTURE_CAPTURED_AT.to_string()])
             .output()
             .unwrap()
     };
@@ -427,6 +436,119 @@ guild_ids = ["111"]
             )
             .unwrap(),
         1
+    );
+}
+
+#[test]
+fn public_cli_uses_explicit_time_and_ignores_source_database_mtime() {
+    let temporary = tempfile::tempdir().unwrap();
+    let seed = temporary.path().join("source-seed.db");
+    Connection::open(&seed)
+        .unwrap()
+        .execute_batch(include_str!("fixtures/phase1-dirty.sql"))
+        .unwrap();
+    let source_a = temporary.path().join("source-a.db");
+    let source_b = temporary.path().join("source-b.db");
+    std::fs::copy(&seed, &source_a).unwrap();
+    std::fs::copy(&seed, &source_b).unwrap();
+    File::options()
+        .write(true)
+        .open(&source_a)
+        .unwrap()
+        .set_times(
+            FileTimes::new()
+                .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1_767_196_860)),
+        )
+        .unwrap();
+    File::options()
+        .write(true)
+        .open(&source_b)
+        .unwrap()
+        .set_times(
+            FileTimes::new()
+                .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1_769_965_320)),
+        )
+        .unwrap();
+    assert_eq!(
+        std::fs::read(&source_a).unwrap(),
+        std::fs::read(&source_b).unwrap()
+    );
+    assert_ne!(
+        std::fs::metadata(&source_a).unwrap().modified().unwrap(),
+        std::fs::metadata(&source_b).unwrap().modified().unwrap()
+    );
+
+    let config = temporary.path().join("default.toml");
+    let environment = temporary.path().join("snapshot.env");
+    std::fs::write(&config, "").unwrap();
+    std::fs::write(&environment, "").unwrap();
+    let run = |source: &std::path::Path, target: &std::path::Path, captured_at: i64| {
+        Command::new(env!("CARGO_BIN_EXE_opencrab-converter"))
+            .args(["--source", source.to_str().unwrap()])
+            .args(["--target", target.to_str().unwrap()])
+            .args(["--config", config.to_str().unwrap()])
+            .args(["--environment", environment.to_str().unwrap()])
+            .args(["--captured-at", &captured_at.to_string()])
+            .output()
+            .unwrap()
+    };
+    let target_a = temporary.path().join("target-a.db");
+    let target_b = temporary.path().join("target-b.db");
+    let first = run(&source_a, &target_a, FIXTURE_CAPTURED_AT);
+    let second = run(&source_b, &target_b, FIXTURE_CAPTURED_AT);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(first.stdout, second.stdout);
+    assert_eq!(
+        std::fs::read(&target_a).unwrap(),
+        std::fs::read(&target_b).unwrap()
+    );
+    let target = Connection::open(&target_a).unwrap();
+    assert_eq!(
+        target
+            .query_row(
+                "SELECT COUNT(*) FROM gate_instance_revisions WHERE created_at=?1",
+                [FIXTURE_CAPTURED_AT],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        2,
+        "all migration-created revisions must use the explicit captured-at"
+    );
+    assert_eq!(
+        target
+            .query_row(
+                "SELECT COUNT(*) FROM places
+                 WHERE close_reason='legacy-history-import' AND closed_at=?1",
+                [FIXTURE_CAPTURED_AT],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        5,
+        "historical places must use the same explicit migration epoch"
+    );
+    drop(target);
+
+    let target_c = temporary.path().join("target-c.db");
+    let third = run(&source_a, &target_c, FIXTURE_CAPTURED_AT + 1);
+    assert!(
+        third.status.success(),
+        "{}",
+        String::from_utf8_lossy(&third.stderr)
+    );
+    let first_report: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    let third_report: serde_json::Value = serde_json::from_slice(&third.stdout).unwrap();
+    assert_ne!(
+        first_report["input_snapshot_digest"], third_report["input_snapshot_digest"],
+        "the explicit input timestamp must be part of snapshot authority"
     );
 }
 
