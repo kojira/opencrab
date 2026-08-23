@@ -137,14 +137,6 @@ pub(crate) fn create_migration_owned_schema(conn: &Connection) -> Result<()> {
           state TEXT NOT NULL,
           updated_at INTEGER NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS offloads(
-          activity_id INTEGER NOT NULL PRIMARY KEY,
-          body BLOB NOT NULL,
-          created_at INTEGER NOT NULL,
-          place_id INTEGER NOT NULL,
-          subject_id INTEGER NOT NULL,
-          truncated INTEGER NOT NULL
-        );
         "#,
     )?;
     Ok(())

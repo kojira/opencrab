@@ -21,7 +21,7 @@ fn discord_policy_anchors_guild_routes_from_subject_policy() {
             r#"INSERT INTO subjects(id,kind,name,persona,turn_runner,standing,created_at)
                VALUES(1,'agent','Agent','Agent','engine','trusted',0);
              INSERT INTO places(id,address,parent_id,policy_json,inherit_from_place,inherit_up_to_seq,created_at,closed_at,close_reason)
-               VALUES(1,NULL,NULL,'hard-default',NULL,NULL,0,NULL,NULL);
+               VALUES(1,NULL,NULL,'{"batch_window_ms":null,"default_subject":null,"immediate":[],"immediate_from":"anyone","unconditional_interval_ms":null}',NULL,NULL,0,NULL,NULL);
              INSERT INTO memberships VALUES(1,1,'participant',0,0);
              INSERT INTO gate_instances VALUES(
                '11111111-1111-4111-8111-111111111111','discord','shared',NULL,1,'stopped'

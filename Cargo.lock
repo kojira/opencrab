@@ -1170,6 +1170,7 @@ dependencies = [
  "base64",
  "dotenvy",
  "opencrab-db",
+ "opencrab-social-runtime",
  "opencrab-store",
  "rusqlite",
  "serde",

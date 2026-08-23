@@ -942,8 +942,8 @@ const SCHEMA: &str = r#"
             CREATE INDEX IF NOT EXISTS idx_llm_logs_created ON llm_logs(agent_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_llm_logs_requested ON llm_logs(agent_id, requested_at DESC);
             -- idx_llm_logs_turn は oc2 連結列（turn_record_id/iteration）依存。本体由来の既存
-            -- テーブル（連結列が未 ALTER）で SCHEMA が先に走っても壊れないよう、migrate 側で
-            -- 連結列を足した後に作る（ここでは作らない）。
+            -- テーブル（連結列が未 ALTER）で SCHEMA が先に走っても壊れないよう、
+            -- apply_shared_table_additions が連結列を足した後に作る（ここでは作らない）。
 
             CREATE TABLE IF NOT EXISTS schedule(
               place_id INTEGER NOT NULL,
@@ -1368,10 +1368,34 @@ const SCHEMA: &str = r#"
 
 /// Phase S schema application for in-place migration (#771).
 ///
-/// DDL only: does not open a transaction and does not recover runtime state.
+/// DDL only: does not open a transaction, does not recover runtime state, and
+/// does not run store `migrate()` (UPDATE / INSERT / RENAME). Shared-table
+/// additions are enumerated ADD COLUMN + CREATE INDEX IF NOT EXISTS
+/// (DESIGN-DB-MIGRATION §12.8.2 / Q4.1).
 pub fn apply_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA)?;
-    migrate(conn)?;
+    apply_shared_table_additions(conn)?;
+    Ok(())
+}
+
+/// Enumerated additive DDL for the shared `llm_logs` table.
+///
+/// Body indexes (agent / created / requested) stay in the body/SCHEMA definition.
+/// `idx_llm_logs_turn` is the one enumerated addition (depends on oc2 link columns).
+fn apply_shared_table_additions(conn: &Connection) -> Result<()> {
+    for (col, ty) in [
+        ("turn_record_id", "INTEGER"),
+        ("iteration", "INTEGER"),
+        ("place_id", "INTEGER"),
+        ("subject_id", "INTEGER"),
+    ] {
+        if !column_exists(conn, "llm_logs", col)? {
+            conn.execute(&format!("ALTER TABLE llm_logs ADD COLUMN {col} {ty}"), [])?;
+        }
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_llm_logs_turn ON llm_logs(turn_record_id, iteration);",
+    )?;
     Ok(())
 }
 
@@ -1431,22 +1455,8 @@ fn migrate(conn: &Connection) -> Result<()> {
          CREATE INDEX IF NOT EXISTS idx_llm_logs_created ON llm_logs(agent_id, created_at DESC);
          CREATE INDEX IF NOT EXISTS idx_llm_logs_requested ON llm_logs(agent_id, requested_at DESC);",
     )?;
-    //   2) oc2 連結列は本体テーブルには無いので、無ければ ALTER で足す（本体由来の既存 DB でも INSERT が
-    //      列不一致で落ちないように）。SCHEMA の全列 CREATE で既にある新規 DB では skip される。
-    for (col, ty) in [
-        ("turn_record_id", "INTEGER"),
-        ("iteration", "INTEGER"),
-        ("place_id", "INTEGER"),
-        ("subject_id", "INTEGER"),
-    ] {
-        if !column_exists(conn, "llm_logs", col)? {
-            conn.execute(&format!("ALTER TABLE llm_logs ADD COLUMN {col} {ty}"), [])?;
-        }
-    }
-    //   3) 連結列に依存する index は、列を足した後に作る。
-    conn.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_llm_logs_turn ON llm_logs(turn_record_id, iteration);",
-    )?;
+    //   2-3) oc2 連結列と idx_llm_logs_turn（列依存）は共有表の列挙追加。
+    apply_shared_table_additions(conn)?;
     let provenance_columns = [
         ("origin_from_exclusive", "INTEGER"),
         ("origin_to_inclusive", "INTEGER"),

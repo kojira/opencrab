@@ -25,6 +25,25 @@ use uuid::parse_canonical_uuid;
 
 const SOURCE_DB: &str = "data/opencrab.db";
 
+/// Verbatim firing Policy JSON written by oc2 `create_place` / `provision_place`
+/// when given `Policy::default()` (DESIGN-DB-MIGRATION §12.8.1).
+///
+/// Config-derived Discord admission is the ledger transform into
+/// `place_default_policies` / `place_subject_policies`, not this column.
+/// History/closed places use the same JSON: `Policy::default()` is the unique
+/// non-firing value in code (empty `immediate`, no unconditional interval, no
+/// `default_subject`); archival is `closed_at` / `close_reason`.
+fn default_place_policy_json() -> String {
+    serde_json::json!({
+        "immediate": [],
+        "immediate_from": "anyone",
+        "batch_window_ms": serde_json::Value::Null,
+        "unconditional_interval_ms": serde_json::Value::Null,
+        "default_subject": serde_json::Value::Null,
+    })
+    .to_string()
+}
+
 pub type Result<T> = std::result::Result<T, ConverterError>;
 
 #[derive(Debug)]
@@ -986,7 +1005,7 @@ fn assemble_discord_channel_policies(
                             params![
                                 place_id,
                                 format!("config:discord:{channel}"),
-                                "hard-default",
+                                default_place_policy_json(),
                                 created_at,
                             ],
                         )?;
@@ -1390,7 +1409,7 @@ fn assemble_sessions(
                 params![
                     place_id,
                     public_key,
-                    "hard-default",
+                    default_place_policy_json(),
                     parsed.created_at,
                     parsed.closed_at,
                     parsed.close_reason,
@@ -1777,7 +1796,7 @@ fn ensure_live_place_and_bindings(
                 params![
                     place_id,
                     format!("live:{kind}:{}", URL_SAFE_NO_PAD.encode(address.as_bytes())),
-                    "hard-default",
+                    default_place_policy_json(),
                     created_at,
                 ],
             )?;
@@ -2325,7 +2344,7 @@ fn assemble_memory_history(
                         URL_SAFE_NO_PAD.encode(agent_id.as_bytes()),
                         URL_SAFE_NO_PAD.encode(session_id.as_bytes())
                     ),
-                    "owner-private",
+                    default_place_policy_json(),
                     created_at,
                     migration_epoch,
                 ],
@@ -4144,6 +4163,7 @@ fn assemble_principals(
                     .map_err(|_| ConverterError::Accounting("subject id overflow".into()))?,
             )
             .ok_or_else(|| ConverterError::Accounting("subject id overflow".into()))?;
+        // turn_runner='engine' is what oc2 `create_subject` writes (DESIGN-DB-MIGRATION §12.8.4).
         target.execute(
             "INSERT INTO subjects(id,kind,name,persona,turn_runner,standing,created_at)
              VALUES(?1,'human',?2,?2,'engine','unknown',?3)",
