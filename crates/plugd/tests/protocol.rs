@@ -10,8 +10,9 @@
 use opencrab_engine::{CharCounter, ScriptedEngine, ScriptedShellHost, Step};
 use opencrab_plugd::Plugd;
 use opencrab_port::{
-    AttachmentKind, Content, EffectKind, EffectSpec, EventKind, GateName, IngressDiscovery,
-    Notifier as _Notifier, OriginScope, Property, Role, SubjectKind, ToolHost, Transport,
+    ActivityKindTag, AttachmentKind, Content, EffectKind, EffectSpec, EventKind, GateInstanceId,
+    GateName, GateRoute, IngressDiscovery, Notice, Notifier as _Notifier, OriginScope, Property,
+    Role, RoutePurpose, SubjectKind, ToolCallSpec, ToolHost, Transport,
 };
 use opencrab_social_runtime::{Config, Policy, System};
 use opencrab_store::Store;
@@ -282,6 +283,90 @@ fn read_ok(log: &[Value], id: &str) -> Option<Value> {
         .and_then(|v| v.get("ok").cloned())
 }
 
+fn protocol2_malformed_fixture() -> Value {
+    serde_json::from_str(include_str!("fixtures/protocol2-malformed.json")).unwrap()
+}
+
+fn replace_fixture_marker(value: &mut Value, marker: &str, replacement: Value) {
+    match value {
+        Value::String(text) if text == marker => *value = replacement,
+        Value::Array(values) => {
+            for value in values {
+                replace_fixture_marker(value, marker, replacement.clone());
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values_mut() {
+                replace_fixture_marker(value, marker, replacement.clone());
+            }
+        }
+        _ => {}
+    }
+}
+
+fn install_protocol2_fixture(h: &H) -> (GateInstanceId, GateName) {
+    let instance =
+        GateInstanceId::parse("018f0000-0000-7000-8000-000000000021".to_string()).unwrap();
+    let kind = GateName::new("protocol-two");
+    h.sys
+        .store()
+        .install_gate_instance_revision(
+            &instance,
+            &kind,
+            "synthetic",
+            None,
+            1,
+            true,
+            OriginScope::KindAddress,
+            IngressDiscovery::Membership,
+            "gate-config/synthetic/v1",
+            &[],
+            1,
+        )
+        .unwrap();
+    (instance, kind)
+}
+
+async fn hello_protocol2_ready(gate: &TestGate, instance: &GateInstanceId, kind: &GateName) -> u64 {
+    gate.send(json!({
+        "id":"hello-v2","m":"hello","protocol":2,"kind_id":kind.as_str(),
+        "instance_id":instance.as_str(),"revision":1,"origin_scope":"kind_address",
+        "address_form":".+","ingress_discovery":"membership",
+        "tools":[{"name":"synthetic-op","description":"synthetic","params":{"type":"object","properties":{},"required":[]}}],
+        "effects":["say"],"capabilities":[],"actions":[]
+    }));
+    assert!(gate.wait_for(|log| has_reply_ok(log, "hello-v2")).await);
+    let epoch = gate
+        .log()
+        .iter()
+        .find(|value| value.get("id").and_then(Value::as_str) == Some("hello-v2"))
+        .and_then(|value| value.pointer("/ok/connection_epoch"))
+        .and_then(Value::as_u64)
+        .unwrap();
+    gate.send(json!({"id":"ready-v2","m":"ready","connection_epoch":epoch}));
+    assert!(gate.wait_for(|log| has_reply_ok(log, "ready-v2")).await);
+    epoch
+}
+
+fn protocol2_route(
+    instance: &GateInstanceId,
+    kind: &GateName,
+    epoch: u64,
+    revision: u64,
+) -> GateRoute {
+    GateRoute {
+        subject_id: 1,
+        place_id: 1,
+        kind_id: kind.clone(),
+        instance_id: instance.clone(),
+        binding_id: "binding-synthetic".into(),
+        address: "room:synthetic".into(),
+        connection_epoch: epoch,
+        revision,
+        purpose: RoutePurpose::tool("synthetic-op").unwrap(),
+    }
+}
+
 // ===== 目標 1: 6 つのメッセージが往復する =====
 
 // hello → ok（プロトコル§01）。名乗りが core にとってのゲートの全部。
@@ -377,6 +462,200 @@ async fn protocol2_requires_ready_and_membership_read_never_hits_store() {
         })
         .await
     );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn protocol2_malformed_failed_response_and_protocol_matrix_is_strict() {
+    let fixture = protocol2_malformed_fixture();
+
+    for case in fixture["hello_protocol"].as_array().unwrap() {
+        let h = build();
+        let gate = TestGate::connect(&h.plugd);
+        let message = case["message"].clone();
+        let id = message
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_string();
+        let expected = case["error"].as_str().unwrap();
+        gate.send(message);
+        assert!(
+            gate.wait_for(|log| err_code(log, &id).as_deref() == Some(expected))
+                .await,
+            "hello malformed case {}: {:?}",
+            case["name"],
+            gate.log()
+        );
+        assert!(gate.wait_disconnect().await);
+    }
+
+    {
+        let h = build();
+        let (instance, kind) = install_protocol2_fixture(&h);
+        let gate = TestGate::connect(&h.plugd);
+        let epoch = hello_protocol2_ready(&gate, &instance, &kind).await;
+        for case in fixture["failed"].as_array().unwrap() {
+            let mut message = case["message"].clone();
+            replace_fixture_marker(&mut message, "$epoch", json!(epoch));
+            replace_fixture_marker(&mut message, "$wrong_epoch", json!(epoch + 1));
+            let expected = case["error"].as_str().unwrap();
+            let response_id = message
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let before = gate.log().len();
+            gate.send(message);
+            assert!(
+                gate.wait_for(|log| {
+                    log[before..].iter().any(|value| {
+                        value.get("id").and_then(Value::as_str) == Some(response_id.as_str())
+                            && value.pointer("/err/code").and_then(Value::as_str) == Some(expected)
+                    })
+                })
+                .await,
+                "failed malformed case {}: {:?}",
+                case["name"],
+                gate.log()
+            );
+            assert!(
+                !gate.is_disconnected(),
+                "invalid failed request must keep the connection"
+            );
+        }
+        gate.send(json!({
+            "id":"failed-valid","m":"failed","connection_epoch":epoch,
+            "code":"synthetic_failure"
+        }));
+        assert!(gate.wait_for(|log| has_reply_ok(log, "failed-valid")).await);
+        assert!(gate.wait_disconnect().await);
+    }
+
+    {
+        let h = build();
+        let (instance, kind) = install_protocol2_fixture(&h);
+        let gate = TestGate::connect(&h.plugd);
+        gate.set_cfg(|cfg| cfg.auto = false);
+        let epoch = hello_protocol2_ready(&gate, &instance, &kind).await;
+
+        for case in fixture["response_without_waiter"].as_array().unwrap() {
+            let before = gate.log().len();
+            gate.send(case["message"].clone());
+            let expected = case["error"].as_str().unwrap();
+            assert!(
+                gate.wait_for(|log| {
+                    log[before..].iter().any(|value| {
+                        value.pointer("/err/code").and_then(Value::as_str) == Some(expected)
+                    })
+                })
+                .await,
+                "response malformed case {}: {:?}",
+                case["name"],
+                gate.log()
+            );
+        }
+
+        let route = protocol2_route(&instance, &kind, epoch, 1);
+        for case in fixture["response_with_waiter"].as_array().unwrap() {
+            let before = gate.log().len();
+            let plugd = h.plugd.clone();
+            let route = route.clone();
+            let task = tokio::spawn(async move {
+                plugd
+                    .invoke_route(
+                        &route,
+                        &ToolCallSpec {
+                            id: "call-synthetic".into(),
+                            name: "synthetic-op".into(),
+                            args: json!({}),
+                        },
+                    )
+                    .await
+            });
+            assert!(
+                gate.wait_for(|log| {
+                    log[before..]
+                        .iter()
+                        .any(|value| value.get("m").and_then(Value::as_str) == Some("tool"))
+                })
+                .await
+            );
+            let request_id = gate.log()[before..]
+                .iter()
+                .find(|value| value.get("m").and_then(Value::as_str) == Some("tool"))
+                .and_then(|value| value.get("id"))
+                .and_then(Value::as_str)
+                .unwrap()
+                .to_string();
+            let mut message = case["message"].clone();
+            replace_fixture_marker(&mut message, "$request_id", json!(request_id));
+            gate.send(message);
+            let error = task.await.unwrap().unwrap_err();
+            assert!(
+                error.0.contains(case["error"].as_str().unwrap()),
+                "response malformed case {} returned {:?}",
+                case["name"],
+                error
+            );
+        }
+        assert!(!gate.is_disconnected());
+    }
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn stale_route_epoch_or_revision_sends_neither_tool_nor_activity() {
+    let h = build();
+    let (instance, kind) = install_protocol2_fixture(&h);
+    let first = TestGate::connect(&h.plugd);
+    let first_epoch = hello_protocol2_ready(&first, &instance, &kind).await;
+    let old_route = protocol2_route(&instance, &kind, first_epoch, 1);
+    first.send(json!({
+        "id":"restart","m":"failed","connection_epoch":first_epoch,
+        "code":"synthetic_restart"
+    }));
+    assert!(first.wait_for(|log| has_reply_ok(log, "restart")).await);
+    assert!(first.wait_disconnect().await);
+
+    let second = TestGate::connect(&h.plugd);
+    let second_epoch = hello_protocol2_ready(&second, &instance, &kind).await;
+    assert!(second_epoch > first_epoch);
+    let wrong_revision_route = protocol2_route(&instance, &kind, second_epoch, 2);
+
+    for route in [old_route, wrong_revision_route] {
+        let before = second.log().len();
+        let error = h
+            .plugd
+            .invoke_route(
+                &route,
+                &ToolCallSpec {
+                    id: "call-stale".into(),
+                    name: "synthetic-op".into(),
+                    args: json!({}),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(error.0.contains("route connection epoch"));
+        h.plugd.notify(Notice::RoutedActivityStarted {
+            route,
+            activity: 1,
+            kind: ActivityKindTag::Turn,
+            label: None,
+        });
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            second.log()[before..].iter().all(|value| {
+                !matches!(
+                    value.get("m").and_then(Value::as_str),
+                    Some("tool" | "activity")
+                )
+            }),
+            "stale route reached the replacement connection: {:?}",
+            second.log()
+        );
+    }
 }
 
 // bind → ok（プロトコル§02）。場を作るのは core。プラグインは購読を頼まれる。

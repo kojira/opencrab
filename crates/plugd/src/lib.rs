@@ -191,6 +191,15 @@ impl Plugd {
         self.0.conns.lock().unwrap().get(instance).cloned()
     }
 
+    fn connection_matches_route(conn: &Conn, route: &GateRoute) -> bool {
+        if !*conn.active.lock().unwrap() {
+            return false;
+        }
+        conn.gate.lock().unwrap().as_ref().is_some_and(|current| {
+            current.connection_epoch == route.connection_epoch && current.revision == route.revision
+        })
+    }
+
     /// 1 本の接続を回す。線を割り当てた運び方（子プロセス・ソケット・duplex）は問わない（§00）。
     /// `stream` は双方向のバイト列。読みと書きに分けて 2 つのタスクで回す。
     pub fn serve<S>(&self, stream: S)
@@ -307,16 +316,16 @@ impl Plugd {
                     }
                 }
                 Some("failed") => {
-                    let id = id.unwrap_or_default();
-                    let code = obj
-                        .get("code")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("unknown");
-                    if let Some(gate) = conn.gate.lock().unwrap().clone() {
-                        let _ = self.sys().fail_gate_connection(&gate, code);
+                    let response_id = id.unwrap_or_default();
+                    match self.handle_failed(&conn, obj) {
+                        Ok(()) => {
+                            conn.send_line(&serde_json::json!({"id":response_id,"ok":{}}));
+                            break;
+                        }
+                        Err(error) => {
+                            conn.send_line(&error.to_json(&response_id));
+                        }
                     }
-                    conn.send_line(&serde_json::json!({"id":id,"ok":{}}));
-                    break;
                 }
                 Some("event") => {
                     let id = id.unwrap_or_default();
@@ -350,10 +359,7 @@ impl Plugd {
                 }
                 None => {
                     // m が無い = core→plugin 要求への応答（ok/err）。id で対応づける。
-                    // id も m も無い物体は捨てる（対応づけられない）。
-                    if let Some(id) = id {
-                        self.route_response(&conn, &id, obj);
-                    }
+                    self.route_response(&conn, obj);
                 }
             }
         }
@@ -363,17 +369,23 @@ impl Plugd {
 
     /// 応答を待ち手へ渡す。待ち手が居ない（期限切れ・完了・そもそも要求していない）id は捨てる（§00）。
     /// これが「終わった活動への応答」を握り潰さず、静かに落とす箇所。
-    fn route_response(
-        &self,
-        conn: &Conn,
-        id: &str,
-        obj: &serde_json::Map<String, serde_json::Value>,
-    ) {
+    fn route_response(&self, conn: &Conn, obj: &serde_json::Map<String, serde_json::Value>) {
+        let Some(id) = obj.get("id").and_then(|value| value.as_str()) else {
+            conn.send_line(&WireErr::at("missing_field", "response.id").to_json(""));
+            return;
+        };
         let waiter = conn.pending.lock().unwrap().remove(id);
         let waiter = match waiter {
             Some(w) => w,
             None => return, // 期限後・未知の id → 捨てる（§00）
         };
+        if let Some(bad) = unknown_field(obj, &["id", "ok", "err"]) {
+            let _ = waiter.send(Err(WireErr::at(
+                "unknown_field",
+                &format!("response.{bad}"),
+            )));
+            return;
+        }
         if let Some(ok) = obj.get("ok") {
             let _ = waiter.send(Ok(ok.clone()));
         } else if let Some(err) = obj.get("err") {
@@ -383,8 +395,9 @@ impl Plugd {
                 .unwrap_or("unknown")
                 .to_string();
             let _ = waiter.send(Err(WireErr::new(&code)));
+        } else {
+            let _ = waiter.send(Err(WireErr::new("response_invalid")));
         }
-        // ok も err も無い応答は捨てる（対応づけられない）。
     }
 
     /// hello を検証し、GateSpec を組んで core へ登録する（プロトコル§01）。
@@ -401,11 +414,15 @@ impl Plugd {
             .to_string();
         let mkerr = |e: WireErr| (id.clone(), e);
 
-        let protocol = obj
+        let protocol_value = obj
             .get("protocol")
             .and_then(|x| x.as_u64())
-            .ok_or_else(|| mkerr(WireErr::at("missing_field", "hello.protocol")))?
-            as u32;
+            .ok_or_else(|| mkerr(WireErr::at("missing_field", "hello.protocol")))?;
+        let protocol = match protocol_value {
+            value if value == u64::from(PROTOCOL_VERSION) => PROTOCOL_VERSION,
+            value if value == u64::from(PROTOCOL_V2) => PROTOCOL_V2,
+            _ => return Err(mkerr(WireErr::new("protocol_unsupported"))),
+        };
         let allowed_v1 = [
             "id",
             "m",
@@ -627,6 +644,39 @@ impl Plugd {
             .map_err(|_| WireErr::new("store_error"))?;
         *conn.active.lock().unwrap() = true;
         Ok(())
+    }
+
+    fn handle_failed(
+        &self,
+        conn: &Conn,
+        obj: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), WireErr> {
+        if let Some(bad) = unknown_field(obj, &["id", "m", "connection_epoch", "code"]) {
+            return Err(WireErr::at("unknown_field", &format!("failed.{bad}")));
+        }
+        obj.get("id")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| WireErr::at("missing_field", "failed.id"))?;
+        let epoch = obj
+            .get("connection_epoch")
+            .and_then(|value| value.as_u64())
+            .ok_or_else(|| WireErr::at("missing_field", "failed.connection_epoch"))?;
+        let code = obj
+            .get("code")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| WireErr::at("missing_field", "failed.code"))?;
+        let connection = conn
+            .gate
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| WireErr::new("not_ready"))?;
+        if connection.connection_epoch != epoch {
+            return Err(WireErr::new("epoch_mismatch"));
+        }
+        self.sys()
+            .fail_gate_connection(&connection, code)
+            .map_err(|_| WireErr::new("store_error"))
     }
 
     /// event を GateEvent へ写して core へ渡す（プロトコル§03）。知らない欄・列挙値は err（§00）。
@@ -1001,10 +1051,7 @@ impl Transport for Plugd {
                 route.instance_id
             )));
         }
-        let current = conn.gate.lock().unwrap().clone();
-        if !current.as_ref().is_some_and(|current| {
-            current.connection_epoch == route.connection_epoch && current.revision == route.revision
-        }) {
+        if !Self::connection_matches_route(&conn, route) {
             return TransportDeliveryResult::DefiniteFailure(TransportError(
                 "route connection epoch is no longer active".into(),
             ));
@@ -1139,29 +1186,29 @@ impl Notifier for Plugd {
                 kind,
                 label,
             } => {
-                let mut body = serde_json::json!({"m":"activity","address":route.address,"activity_id":activity.to_string(),"kind":atag_wire(kind),"state":"started"});
+                let mut body = serde_json::json!({"m":"activity","address":route.address.clone(),"activity_id":activity.to_string(),"kind":atag_wire(kind),"state":"started"});
                 if let Some(label) = label {
                     body["label"] = label.into();
                 }
-                Some((route.instance_id, body))
+                Some((route, body))
             }
             Notice::RoutedActivityProgress {
                 route,
                 activity,
                 label,
-            } => Some((
-                route.instance_id,
-                serde_json::json!({"m":"activity","address":route.address,"activity_id":activity.to_string(),"state":"progress","label":label}),
-            )),
-            Notice::RoutedActivityEnded { route, activity } => Some((
-                route.instance_id,
-                serde_json::json!({"m":"activity","address":route.address,"activity_id":activity.to_string(),"state":"ended"}),
-            )),
+            } => {
+                let body = serde_json::json!({"m":"activity","address":route.address.clone(),"activity_id":activity.to_string(),"state":"progress","label":label});
+                Some((route, body))
+            }
+            Notice::RoutedActivityEnded { route, activity } => {
+                let body = serde_json::json!({"m":"activity","address":route.address.clone(),"activity_id":activity.to_string(),"state":"ended"});
+                Some((route, body))
+            }
             _ => None,
         };
-        if let Some((instance, body)) = routed {
-            if let Some(conn) = self.conn_for_instance(&instance) {
-                if *conn.active.lock().unwrap() {
+        if let Some((route, body)) = routed {
+            if let Some(conn) = self.conn_for_instance(&route.instance_id) {
+                if Self::connection_matches_route(&conn, &route) {
                     conn.send_line(&body);
                 }
             }
@@ -1248,6 +1295,11 @@ impl ToolHost for Plugd {
                 "gate instance not ready: {}",
                 route.instance_id
             )));
+        }
+        if !Self::connection_matches_route(&conn, route) {
+            return Err(ToolError(
+                "route connection epoch is no longer active".into(),
+            ));
         }
         let mut req = serde_json::Map::new();
         req.insert("m".into(), "tool".into());

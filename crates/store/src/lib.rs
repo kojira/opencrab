@@ -1622,33 +1622,20 @@ fn migrate_v1_gate_tables(conn: &Connection) -> Result<()> {
     let dedup_hits = load_raw_source_table(conn, "v1_dedup_hits", "dedup_hits")?;
     let expanded_tools = load_raw_source_table(conn, "v1_expanded_tools", "expanded_tools")?;
 
-    let mut names = std::collections::BTreeSet::new();
-    for table in [
-        &channels,
-        &external_refs,
-        &deliveries,
-        &identities,
-        &dedup_hits,
-        &expanded_tools,
-    ] {
-        for row in &table.rows {
-            if let Some(name) = raw_text(table, row, "gate_name") {
-                if GateKindId::parse(name.to_string()).is_ok() {
-                    names.insert(name.to_string());
-                }
-            }
-        }
-    }
-    for name in &names {
-        let kind = GateKindId::parse(name.clone()).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        seed_compatibility_instance_on(conn, &kind)?;
+    struct ClassifiedContribution {
+        index: usize,
+        parent_id: Option<i64>,
+        failure: Option<&'static str>,
     }
 
+    // Compatibility kinds are runtime entities too. Seed them only when a complete logical class
+    // becomes canonical; a syntactically valid gate_name on an otherwise dirty row is not enough.
+    let mut canonical_kinds = std::collections::BTreeSet::new();
+
     let mut binding_groups =
-        std::collections::BTreeMap::<(String, String), Vec<(usize, i64)>>::new();
+        std::collections::BTreeMap::<(String, String), Vec<ClassifiedContribution>>::new();
     for (index, row) in channels.rows.iter().enumerate() {
-        let (Some(place), Some(kind), Some(address)) = (
-            raw_integer(&channels, row, "place_id"),
+        let (Some(kind), Some(address)) = (
             raw_text(&channels, row, "gate_name"),
             raw_text(&channels, row, "address"),
         ) else {
@@ -1659,31 +1646,52 @@ fn migrate_v1_gate_tables(conn: &Connection) -> Result<()> {
             retain_raw_source_row(conn, &channels, row, "unknown_enum")?;
             continue;
         }
-        let parent: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM places WHERE id=?1)",
-            params![place],
-            |result| result.get(0),
-        )?;
-        if !parent {
-            retain_raw_source_row(conn, &channels, row, "unresolved_parent")?;
-            continue;
-        }
+        let place = raw_integer(&channels, row, "place_id");
+        let failure = match place {
+            None => Some("noncanonical_storage"),
+            Some(place) => {
+                let parent: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM places WHERE id=?1)",
+                    params![place],
+                    |result| result.get(0),
+                )?;
+                (!parent).then_some("unresolved_parent")
+            }
+        };
         binding_groups
             .entry((kind.to_string(), address.to_string()))
             .or_default()
-            .push((index, place));
+            .push(ClassifiedContribution {
+                index,
+                parent_id: place,
+                failure,
+            });
     }
     for ((kind, address), contributions) in binding_groups {
-        let places = contributions
+        if contributions
             .iter()
-            .map(|(_, place)| *place)
-            .collect::<std::collections::BTreeSet<_>>();
-        if places.len() != 1 {
-            for (index, _) in contributions {
+            .any(|contribution| contribution.failure.is_some())
+        {
+            for contribution in contributions {
                 retain_raw_source_row(
                     conn,
                     &channels,
-                    &channels.rows[index],
+                    &channels.rows[contribution.index],
+                    contribution.failure.unwrap_or("conflicting_binding_class"),
+                )?;
+            }
+            continue;
+        }
+        let places = contributions
+            .iter()
+            .filter_map(|contribution| contribution.parent_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        if places.len() != 1 {
+            for contribution in contributions {
+                retain_raw_source_row(
+                    conn,
+                    &channels,
+                    &channels.rows[contribution.index],
                     "conflicting_binding_class",
                 )?;
             }
@@ -1691,6 +1699,7 @@ fn migrate_v1_gate_tables(conn: &Connection) -> Result<()> {
         }
         let kind = GateKindId::parse(kind).map_err(|_| rusqlite::Error::InvalidQuery)?;
         ensure_compat_binding(conn, *places.iter().next().unwrap(), &kind, &address)?;
+        canonical_kinds.insert(kind.as_str().to_string());
     }
 
     for row in &deliveries.rows {
@@ -1698,56 +1707,82 @@ fn migrate_v1_gate_tables(conn: &Connection) -> Result<()> {
     }
 
     let mut identity_groups =
-        std::collections::BTreeMap::<(String, String), Vec<(usize, i64)>>::new();
+        std::collections::BTreeMap::<(String, String), Vec<ClassifiedContribution>>::new();
     for (index, row) in identities.rows.iter().enumerate() {
-        let (Some(subject), Some(kind), Some(external)) = (
-            raw_integer(&identities, row, "subject_id"),
+        let (Some(kind), Some(external)) = (
             raw_text(&identities, row, "gate_name"),
             raw_text(&identities, row, "external_id"),
         ) else {
             retain_raw_source_row(conn, &identities, row, "noncanonical_storage")?;
             continue;
         };
-        let parent: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM subjects WHERE id=?1)",
-            params![subject],
-            |result| result.get(0),
-        )?;
-        let instance = names
-            .contains(kind)
-            .then(|| GateKindId::parse(kind.to_string()).ok())
-            .flatten()
-            .map(|kind| compatibility_instance_id(&kind));
-        let Some(instance) = instance.filter(|_| parent) else {
-            retain_raw_source_row(conn, &identities, row, "unresolved_parent")?;
+        if GateKindId::parse(kind.to_string()).is_err() {
+            retain_raw_source_row(conn, &identities, row, "unknown_enum")?;
             continue;
+        }
+        let subject = raw_integer(&identities, row, "subject_id");
+        let failure = match subject {
+            None => Some("noncanonical_storage"),
+            Some(subject) => {
+                let parent: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM subjects WHERE id=?1)",
+                    params![subject],
+                    |result| result.get(0),
+                )?;
+                (!parent).then_some("unresolved_parent")
+            }
         };
         identity_groups
-            .entry((instance.as_str().to_string(), external.to_string()))
+            .entry((kind.to_string(), external.to_string()))
             .or_default()
-            .push((index, subject));
+            .push(ClassifiedContribution {
+                index,
+                parent_id: subject,
+                failure,
+            });
     }
-    for ((instance, external), contributions) in identity_groups {
-        let subjects = contributions
+    for ((kind, external), contributions) in identity_groups {
+        if contributions
             .iter()
-            .map(|(_, subject)| *subject)
-            .collect::<std::collections::BTreeSet<_>>();
-        if subjects.len() != 1 {
-            for (index, _) in contributions {
+            .any(|contribution| contribution.failure.is_some())
+        {
+            for contribution in contributions {
                 retain_raw_source_row(
                     conn,
                     &identities,
-                    &identities.rows[index],
+                    &identities.rows[contribution.index],
+                    contribution.failure.unwrap_or("identity_conflict"),
+                )?;
+            }
+            continue;
+        }
+        let subjects = contributions
+            .iter()
+            .filter_map(|contribution| contribution.parent_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        if subjects.len() != 1 {
+            for contribution in contributions {
+                retain_raw_source_row(
+                    conn,
+                    &identities,
+                    &identities.rows[contribution.index],
                     "identity_conflict",
                 )?;
             }
             continue;
         }
+        let kind = GateKindId::parse(kind).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let instance = seed_compatibility_instance_on(conn, &kind)?;
         conn.execute(
             "INSERT INTO gate_subject_identities(instance_id,external_id,subject_id,display_name)
              VALUES(?1,?2,?3,NULL)",
-            params![instance, external, *subjects.iter().next().unwrap()],
+            params![
+                instance.as_str(),
+                external,
+                *subjects.iter().next().unwrap()
+            ],
         )?;
+        canonical_kinds.insert(kind.as_str().to_string());
     }
 
     let mut expanded_targets = std::collections::BTreeSet::new();
@@ -1760,17 +1795,22 @@ fn migrate_v1_gate_tables(conn: &Connection) -> Result<()> {
             retain_raw_source_row(conn, &expanded_tools, row, "noncanonical_storage")?;
             continue;
         };
+        let Ok(kind_id) = GateKindId::parse(kind.to_string()) else {
+            retain_raw_source_row(conn, &expanded_tools, row, "unknown_enum")?;
+            continue;
+        };
         let parents: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM places WHERE id=?1)
-                    AND EXISTS(SELECT 1 FROM subjects WHERE id=?2)
-                    AND EXISTS(SELECT 1 FROM gate_kinds WHERE kind_id=?3)",
-            params![place, subject, kind],
+                    AND EXISTS(SELECT 1 FROM subjects WHERE id=?2)",
+            params![place, subject],
             |result| result.get(0),
         )?;
         if !parents {
             retain_raw_source_row(conn, &expanded_tools, row, "unresolved_parent")?;
             continue;
         }
+        seed_compatibility_instance_on(conn, &kind_id)?;
+        canonical_kinds.insert(kind.to_string());
         expanded_targets.insert((place, subject, kind.to_string()));
     }
     for (place, subject, kind) in expanded_targets {
@@ -1867,7 +1907,7 @@ fn migrate_v1_gate_tables(conn: &Connection) -> Result<()> {
 
     // One route pass after every contribution has been classified. Compatibility kinds use one
     // exact binding per place; ambiguous channel groups above have no runtime binding.
-    for name in names {
+    for name in canonical_kinds {
         let kind = GateKindId::parse(name).map_err(|_| rusqlite::Error::InvalidQuery)?;
         let mut statement = conn.prepare(
             "SELECT m.subject_id,m.place_id,MIN(gb.binding_id),COUNT(gb.binding_id)
@@ -2355,30 +2395,31 @@ impl Store {
         existing_seq: Seq,
         at: i64,
     ) -> Result<()> {
-        let conn = self.c();
-        let scope: String = conn.query_row(
+        let mut conn = self.c();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let scope: String = tx.query_row(
             "SELECT origin_scope_id FROM gate_bindings WHERE binding_id=?1",
             params![binding_id],
             |row| row.get(0),
         )?;
-        let ordinal: i64 = conn.query_row(
+        let ordinal: i64 = tx.query_row(
             "SELECT COALESCE(MAX(source_row_ordinal),-1)+1 FROM gate_dedup_hits WHERE origin_scope_id=?1",
             params![scope],
             |row| row.get(0),
         )?;
         let hit_id = runtime_uuid_v7(at, &format!("dedup\0{binding_id}\0{external}\0{ordinal}"));
-        conn.execute(
+        tx.execute(
             "INSERT INTO gate_dedup_hits(hit_id,kind_id,origin_scope_id,place_id,external_id,existing_seq,observed_at,source_row_ordinal)
              VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
             params![hit_id,kind.as_str(),scope,place,external,existing_seq,at,ordinal],
         )?;
         // Keep the protocol-1 query facade coherent while it remains supported.
-        conn.execute(
+        tx.execute(
             "INSERT INTO v1_dedup_hits(gate_name,place_id,external_id,existing_seq,at)
              VALUES(?1,?2,?3,?4,?5)",
             params![kind.as_str(), place, external, existing_seq, at],
         )?;
-        Ok(())
+        tx.commit()
     }
 
     pub fn gate_status(&self) -> Result<Vec<GateStatusRow>> {
@@ -2955,19 +2996,20 @@ impl Store {
     }
 
     pub fn add_identity(&self, subject: SubjectId, gate: &GateName, external: &str) -> Result<()> {
-        let conn = self.c();
-        conn.execute(
+        let mut conn = self.c();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
             "INSERT INTO v1_subject_identities(subject_id,gate_name,external_id) VALUES(?1,?2,?3)",
             params![subject, gate.as_str(), external],
         )?;
-        let instance = seed_compatibility_instance_on(&conn, gate)?;
-        conn.execute(
+        let instance = seed_compatibility_instance_on(&tx, gate)?;
+        tx.execute(
             "INSERT INTO gate_subject_identities(instance_id,external_id,subject_id,display_name)
              VALUES(?1,?2,?3,NULL)
              ON CONFLICT(instance_id,external_id) DO UPDATE SET subject_id=?3",
             params![instance.as_str(), external, subject],
         )?;
-        Ok(())
+        tx.commit()
     }
 
     /// 名寄せ。見つからなければ None（=主体は付かない・権限ゼロ）。
@@ -3318,14 +3360,15 @@ impl Store {
 
     /// 場をゲートの住所へ結ぶ（冪等・プロトコル§02）。同じ (place, gate) は住所を更新する。
     pub fn add_channel(&self, place: PlaceId, gate: &GateName, address: &str) -> Result<()> {
-        let conn = self.c();
-        conn.execute(
+        let mut conn = self.c();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
             "INSERT INTO v1_channels(place_id,gate_name,address) VALUES(?1,?2,?3)
              ON CONFLICT(place_id,gate_name) DO UPDATE SET address=?3",
             params![place, gate.as_str(), address],
         )?;
-        ensure_compat_binding(&conn, place, gate, address)?;
-        Ok(())
+        ensure_compat_binding(&tx, place, gate, address)?;
+        tx.commit()
     }
 
     pub fn remove_channel(&self, place: PlaceId, gate: &GateName) -> Result<()> {
@@ -3405,26 +3448,40 @@ impl Store {
         external_id: &str,
         direction: &str,
     ) -> Result<()> {
-        let conn = self.c();
-        conn.execute(
+        let canonical_direction = match direction {
+            "in" => "inbound",
+            "out" => "outbound",
+            _ => return Err(rusqlite::Error::InvalidQuery),
+        };
+        let mut conn = self.c();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let bindings = {
+            let mut statement = tx.prepare(
+                "SELECT gi.instance_id,gb.binding_id FROM gate_bindings gb
+                 JOIN gate_instances gi ON gi.instance_id=gb.instance_id
+                 WHERE gb.place_id=?1 AND gi.kind_id=?2 ORDER BY gi.instance_id,gb.binding_id",
+            )?;
+            let rows = statement
+                .query_map(params![place, gate.as_str()], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>>>()?;
+            rows
+        };
+        let [(instance, binding)] = bindings.as_slice() else {
+            return Err(rusqlite::Error::InvalidQuery);
+        };
+        tx.execute(
             "INSERT INTO v1_external_refs(place_id,seq,gate_name,external_id,direction) VALUES(?1,?2,?3,?4,?5)
              ON CONFLICT(place_id,seq,gate_name) DO UPDATE SET external_id=?4, direction=?5",
             params![place, seq, gate.as_str(), external_id, direction],
         )?;
-        if let Some((instance, binding)) = conn.query_row(
-            "SELECT gi.instance_id,gb.binding_id FROM gate_bindings gb JOIN gate_instances gi ON gi.instance_id=gb.instance_id
-             WHERE gb.place_id=?1 AND gi.kind_id=?2 ORDER BY gi.instance_id LIMIT 1",
-            params![place, gate.as_str()],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        ).optional()? {
-            let direction = match direction { "in" => "inbound", "out" => "outbound", _ => return Err(rusqlite::Error::InvalidQuery) };
-            conn.execute(
-                "INSERT INTO external_refs(place_id,seq,instance_id,binding_id,external_id,direction) VALUES(?1,?2,?3,?4,?5,?6)
-                 ON CONFLICT(place_id,seq,binding_id) DO UPDATE SET external_id=?5,direction=?6",
-                params![place,seq,instance,binding,external_id,direction],
-            )?;
-        }
-        Ok(())
+        tx.execute(
+            "INSERT INTO external_refs(place_id,seq,instance_id,binding_id,external_id,direction) VALUES(?1,?2,?3,?4,?5,?6)
+             ON CONFLICT(place_id,seq,binding_id) DO UPDATE SET external_id=?5,direction=?6",
+            params![place,seq,instance,binding,external_id,canonical_direction],
+        )?;
+        tx.commit()
     }
 
     /// 外界識別子 → その場での seq（返信先・対象の解決・プロトコル§03）。方向は問わない。
@@ -3470,16 +3527,17 @@ impl Store {
         subject: SubjectId,
         gate: &GateName,
     ) -> Result<()> {
-        let conn = self.c();
-        conn.execute(
+        let mut conn = self.c();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
             "INSERT OR IGNORE INTO v1_expanded_tools(place_id,subject_id,gate_name) VALUES(?1,?2,?3)",
             params![place, subject, gate.as_str()],
         )?;
-        conn.execute(
+        tx.execute(
             "INSERT OR IGNORE INTO expanded_gate_tools(place_id,subject_id,kind_id) VALUES(?1,?2,?3)",
             params![place, subject, gate.as_str()],
         )?;
-        Ok(())
+        tx.commit()
     }
 
     /// この参加（場×主体）で展開済みのゲート名。広告（advertised_tools）が本体を出す判断に使う。
@@ -4562,6 +4620,67 @@ mod tests {
     }
 
     #[test]
+    fn dirty_logical_sibling_prevents_channel_and_identity_canonicalization_in_any_order() {
+        use rusqlite::types::Value;
+
+        for dirty_parent in [Value::Integer(99), Value::Blob(vec![0x01])] {
+            for reverse in [false, true] {
+                let mut conn = Connection::open_in_memory().unwrap();
+                create_loose_v1_fixture(&conn);
+                let ordered = if reverse {
+                    vec![dirty_parent.clone(), Value::Integer(1)]
+                } else {
+                    vec![Value::Integer(1), dirty_parent.clone()]
+                };
+                for parent in &ordered {
+                    conn.execute(
+                        "INSERT INTO channels(place_id,gate_name,address) VALUES(?1,'web','room:same')",
+                        params![parent],
+                    )
+                    .unwrap();
+                    conn.execute(
+                        "INSERT INTO subject_identities(subject_id,gate_name,external_id) VALUES(?1,'web','principal-same')",
+                        params![parent],
+                    )
+                    .unwrap();
+                }
+
+                initialize_schema(&mut conn).unwrap();
+
+                for table in ["channels", "subject_identities"] {
+                    assert_eq!(
+                        conn.query_row(
+                            "SELECT COUNT(*) FROM legacy_unowned_source_rows WHERE source_table=?1",
+                            params![table],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .unwrap(),
+                        2,
+                        "{table}, reverse={reverse}, dirty_parent={dirty_parent:?}"
+                    );
+                }
+                for table in [
+                    "gate_bindings",
+                    "external_origin_scopes",
+                    "subject_routes",
+                    "gate_subject_identities",
+                    "gate_kinds",
+                    "gate_instances",
+                ] {
+                    assert_eq!(
+                        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                            row.get::<_, i64>(0)
+                        })
+                        .unwrap(),
+                        0,
+                        "dirty-only logical classes must not create {table}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn every_sqlite_storage_class_is_read_raw_before_typed_classification() {
         let mut conn = Connection::open_in_memory().unwrap();
         create_loose_v1_fixture(&conn);
@@ -4632,6 +4751,241 @@ mod tests {
         );
     }
 
+    #[test]
+    fn canonical_and_v1_projection_pairs_rollback_together() {
+        {
+            let store = Store::new_in_memory().unwrap();
+            let place = store.create_place(Some("p"), None, "{}", None, 0).unwrap();
+            let kind = GateName::new("dedup-fixture");
+            store.add_channel(place, &kind, "room:dedup").unwrap();
+            let binding: String = store
+                .c()
+                .query_row("SELECT binding_id FROM gate_bindings", [], |row| row.get(0))
+                .unwrap();
+            store
+                .c()
+                .execute_batch(
+                    "CREATE TRIGGER reject_v1_dedup_insert BEFORE INSERT ON v1_dedup_hits
+                     BEGIN SELECT RAISE(ABORT,'synthetic projection failure'); END;",
+                )
+                .unwrap();
+            assert!(store
+                .record_dedup_on_binding(&kind, &binding, place, "origin-a", 1, 10)
+                .is_err());
+            let conn = store.c();
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM gate_dedup_hits", [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM v1_dedup_hits", [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+
+        {
+            let store = Store::new_in_memory().unwrap();
+            let subject = store
+                .create_subject(SubjectKind::Agent, "A", "A", "engine", Standing::Trusted, 0)
+                .unwrap();
+            let kind = GateName::new("identity-fixture");
+            store
+                .c()
+                .execute_batch(
+                    "CREATE TRIGGER reject_canonical_identity_insert BEFORE INSERT ON gate_subject_identities
+                     BEGIN SELECT RAISE(ABORT,'synthetic canonical failure'); END;",
+                )
+                .unwrap();
+            assert!(store.add_identity(subject, &kind, "principal-a").is_err());
+            let conn = store.c();
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM v1_subject_identities", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+                0
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM gate_subject_identities", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+                0
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM gate_instances WHERE kind_id=?1",
+                    params![kind.as_str()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+                0
+            );
+        }
+
+        {
+            let store = Store::new_in_memory().unwrap();
+            let place = store.create_place(Some("p"), None, "{}", None, 0).unwrap();
+            let kind = GateName::new("channel-fixture");
+            store
+                .c()
+                .execute_batch(
+                    "CREATE TRIGGER reject_canonical_binding_insert BEFORE INSERT ON gate_bindings
+                     BEGIN SELECT RAISE(ABORT,'synthetic canonical failure'); END;",
+                )
+                .unwrap();
+            assert!(store.add_channel(place, &kind, "room:channel").is_err());
+            let conn = store.c();
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM v1_channels", [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM gate_bindings", [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM gate_instances WHERE kind_id=?1",
+                    params![kind.as_str()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+                0
+            );
+        }
+
+        {
+            let store = Store::new_in_memory().unwrap();
+            let place = store.create_place(Some("p"), None, "{}", None, 0).unwrap();
+            let kind = GateName::new("external-ref-fixture");
+            store.add_channel(place, &kind, "room:ref").unwrap();
+            store.append(place, &ev("event"), 1).unwrap();
+            store
+                .c()
+                .execute_batch(
+                    "CREATE TRIGGER reject_canonical_external_ref_insert BEFORE INSERT ON external_refs
+                     BEGIN SELECT RAISE(ABORT,'synthetic canonical failure'); END;",
+                )
+                .unwrap();
+            assert!(store
+                .record_external_ref(place, 1, &kind, "origin-a", "in")
+                .is_err());
+            let conn = store.c();
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM v1_external_refs", [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM external_refs", [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+
+        {
+            let store = Store::new_in_memory().unwrap();
+            let place = store.create_place(Some("p"), None, "{}", None, 0).unwrap();
+            let subject = store
+                .create_subject(SubjectKind::Agent, "A", "A", "engine", Standing::Trusted, 0)
+                .unwrap();
+            let kind = GateName::new("expanded-fixture");
+            store
+                .c()
+                .execute_batch(
+                    "CREATE TRIGGER reject_canonical_expanded_insert BEFORE INSERT ON expanded_gate_tools
+                     BEGIN SELECT RAISE(ABORT,'synthetic canonical failure'); END;",
+                )
+                .unwrap();
+            assert!(store.expand_gate_tools(place, subject, &kind).is_err());
+            let conn = store.c();
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM v1_expanded_tools", [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM expanded_gate_tools", [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn external_ref_requires_exactly_one_binding_without_projection_write() {
+        let kind = GateName::new("external-ref-cardinality");
+
+        let store = Store::new_in_memory().unwrap();
+        let place = store.create_place(Some("p"), None, "{}", None, 0).unwrap();
+        store.append(place, &ev("event"), 1).unwrap();
+        assert!(store
+            .record_external_ref(place, 1, &kind, "origin-none", "in")
+            .is_err());
+        assert_eq!(
+            store
+                .c()
+                .query_row("SELECT COUNT(*) FROM v1_external_refs", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+
+        store.add_channel(place, &kind, "room:first").unwrap();
+        let second_instance = "018f0000-0000-7000-8000-000000000099";
+        {
+            let conn = store.c();
+            conn.execute(
+                "INSERT INTO gate_instances(instance_id,kind_id,label,owner_subject_id,active_revision,lifecycle)
+                 VALUES(?1,?2,'second',NULL,1,'stopped')",
+                params![second_instance, kind.as_str()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO external_origin_scopes(scope_id,kind_id,address,mode,instance_id,place_id)
+                 VALUES('scope-second',?1,'room:second','instance',?2,?3)",
+                params![kind.as_str(), second_instance, place],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO gate_bindings(binding_id,place_id,instance_id,address,label,origin_scope_id,binding_metadata_schema_id,binding_metadata_bytes,binding_metadata_digest)
+                 VALUES('binding-second',?1,?2,'room:second',NULL,'scope-second','compat/v1',x'',x'')",
+                params![place, second_instance],
+            )
+            .unwrap();
+        }
+        assert!(store
+            .record_external_ref(place, 1, &kind, "origin-many", "in")
+            .is_err());
+        let conn = store.c();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM v1_external_refs", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM external_refs", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
     // 冪等は**表の制約**で守る（詳細§04）: append_incoming を同じ origin で 2 度呼んでも、二重に
     // 採番せず、既にある連番へ畳む。呼ばれ方（直列かどうか）に依存しない。
     #[test]
@@ -4668,6 +5022,7 @@ mod tests {
         let s = Store::new_in_memory().unwrap();
         let p = s.create_place(Some("p"), None, "{}", None, 0).unwrap();
         let g = GateName::new("nostr");
+        s.add_channel(p, &g, "room:external-ref").unwrap();
         // seq=1 に note1X を張る。
         s.append(p, &ev("A"), 1).unwrap();
         s.record_external_ref(p, 1, &g, "note1X", "in").unwrap();
