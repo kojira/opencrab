@@ -1177,6 +1177,7 @@ const SCHEMA: &str = r#"
 /// 列を足さないので、古い DB には `ALTER TABLE ... ADD COLUMN` で足す。列が既にあれば何もしない
 /// （PRAGMA で確認するので、エラー文字列に依存しない）。新規 DB は SCHEMA 側で既に列を持つ。
 fn migrate(conn: &Connection) -> Result<()> {
+    migrate_memberships(conn)?;
     if !column_exists(conn, "turn_records", "failure_detail")? {
         conn.execute(
             "ALTER TABLE turn_records ADD COLUMN failure_detail TEXT",
@@ -1253,6 +1254,48 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute("UPDATE subjects SET name = persona WHERE name = ''", [])?;
     }
     Ok(())
+}
+
+/// `CREATE TABLE IF NOT EXISTS` does not update a table created by the pre-#750 store. Rebuild the
+/// one known legacy memberships shape so its shared cursor keeps the value previously stored as
+/// `read_seq`. The replacement deliberately does not add the newer role/cursor CHECK constraints:
+/// migration preserves SQLite values accepted by the old table instead of strengthening them.
+fn migrate_memberships(conn: &Connection) -> Result<()> {
+    if !table_exists(conn, "memberships")? {
+        return Ok(());
+    }
+
+    let has_read_seq = column_exists(conn, "memberships", "read_seq")?;
+    let has_left_at = column_exists(conn, "memberships", "left_at")?;
+    let has_shared_seen_seq = column_exists(conn, "memberships", "shared_seen_seq")?;
+    match (has_read_seq, has_left_at, has_shared_seen_seq) {
+        (false, false, true) => Ok(()),
+        (true, true, false) => {
+            conn.execute_batch(
+                "ALTER TABLE memberships RENAME TO memberships_before_shared_seen_seq;
+                 CREATE TABLE memberships(
+                   place_id INTEGER NOT NULL,
+                   subject_id INTEGER NOT NULL,
+                   role TEXT NOT NULL,
+                   joined_at INTEGER NOT NULL,
+                   shared_seen_seq INTEGER NOT NULL,
+                   PRIMARY KEY(place_id, subject_id)
+                 );
+                 INSERT INTO memberships(place_id,subject_id,role,joined_at,shared_seen_seq)
+                 SELECT place_id,subject_id,role,joined_at,read_seq
+                 FROM memberships_before_shared_seen_seq;
+                 DROP TABLE memberships_before_shared_seen_seq;",
+            )?;
+            Ok(())
+        }
+        shape => Err(rusqlite::Error::ToSqlConversionFailure(
+            format!(
+                "unknown memberships schema: read_seq={}, left_at={}, shared_seen_seq={}",
+                shape.0, shape.1, shape.2
+            )
+            .into(),
+        )),
+    }
 }
 
 fn initialize_schema(conn: &mut Connection) -> Result<()> {
@@ -6509,6 +6552,113 @@ mod tests {
             name2, "別の表示名",
             "冪等: 2 回目は既存 name を上書きしない"
         );
+    }
+
+    #[test]
+    fn pre_750_memberships_file_opens_with_cursor_and_values_preserved() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "opencrab-store-pre-750-memberships-{}-{nonce}.sqlite",
+            std::process::id()
+        ));
+
+        {
+            let conn = Connection::open(&path).unwrap();
+            // Exact memberships DDL emitted before the #750 schema landed. Building the fixture
+            // as a file first is important: Store::open must encounter, rebuild, and then use it.
+            conn.execute_batch(
+                "CREATE TABLE memberships(
+                   place_id INTEGER NOT NULL,
+                   subject_id INTEGER NOT NULL,
+                   role TEXT NOT NULL,
+                   read_seq INTEGER NOT NULL,
+                   joined_at INTEGER NOT NULL,
+                   left_at INTEGER,
+                   PRIMARY KEY(place_id, subject_id)
+                 );
+                 INSERT INTO memberships(place_id,subject_id,role,read_seq,joined_at,left_at)
+                 VALUES
+                   (11,21,'participant',37,101,NULL),
+                   (11,22,'observer',-4,102,NULL),
+                   (12,23,'legacy-role',55,103,NULL);",
+            )
+            .unwrap();
+        }
+
+        {
+            let store = Store::open(&path).expect("pre-#750 file must open and migrate");
+            let participant = store.get_membership(11, 21).unwrap().unwrap();
+            assert_eq!(participant.role, Role::Participant);
+            assert_eq!(participant.read_seq, 37, "read_seq becomes shared_seen_seq");
+            let observer = store.get_membership(11, 22).unwrap().unwrap();
+            assert_eq!(observer.role, Role::Observer);
+            assert_eq!(
+                observer.read_seq, -4,
+                "migration must not tighten cursor values"
+            );
+
+            let conn = store.c();
+            let columns = conn
+                .prepare("PRAGMA table_info(memberships)")
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<Vec<_>>>()
+                .unwrap();
+            assert_eq!(
+                columns,
+                [
+                    "place_id",
+                    "subject_id",
+                    "role",
+                    "joined_at",
+                    "shared_seen_seq"
+                ]
+            );
+            let stored: (String, i64, i64) = conn
+                .query_row(
+                    "SELECT role,joined_at,shared_seen_seq FROM memberships
+                     WHERE place_id=11 AND subject_id=21",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(stored, ("participant".into(), 101, 37));
+            let loose_role: (String, i64) = conn
+                .query_row(
+                    "SELECT role,shared_seen_seq FROM memberships
+                     WHERE place_id=12 AND subject_id=23",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                loose_role,
+                ("legacy-role".into(), 55),
+                "migration preserves values accepted by the old loose role column"
+            );
+            drop(conn);
+
+            store.set_read_seq(11, 21, 38).unwrap();
+            assert_eq!(store.get_membership(11, 21).unwrap().unwrap().read_seq, 38);
+        }
+
+        {
+            let reopened = Store::open(&path).expect("new memberships shape must reopen unchanged");
+            assert_eq!(
+                reopened.get_membership(11, 21).unwrap().unwrap().read_seq,
+                38
+            );
+            assert_eq!(
+                reopened.get_membership(11, 22).unwrap().unwrap().read_seq,
+                -4
+            );
+        }
+
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
