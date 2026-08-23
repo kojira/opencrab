@@ -151,11 +151,13 @@ fn gate(name: &str, effects: &[EffectKind], actions: Vec<ActionDef>) -> GateSpec
     }
 }
 
-/// ゲートを名乗らせ、場をその住所へ結ぶ（transport.bind は使わず store に直接——テストの簡略化）。
+/// ゲートを名乗らせ、場をその住所へ provision する（接続後なので route も同じ入口で整合する）。
 fn bind(h: &Harness, place: PlaceId, spec: GateSpec, address: &str) {
     let name = spec.name.clone();
     h.sys.register_gate(spec).unwrap();
-    h.sys.store().add_channel(place, &name, address).unwrap();
+    h.sys
+        .provision_channel(place, name.as_str(), address)
+        .unwrap();
 }
 
 fn inbound(address: &str, author: &str, text: &str, origin: &str) -> GateEvent {

@@ -1133,11 +1133,31 @@ fn initialize_schema(conn: &mut Connection) -> Result<()> {
         migrate_v1_gate_tables(&tx)?;
     }
     tx.commit()?;
-    recover_stale_deliveries(conn)
+    recover_stale_runtime_state(conn)
 }
 
-fn recover_stale_deliveries(conn: &mut Connection) -> Result<()> {
+fn recover_stale_runtime_state(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+    // The core process is the sole owner of live gate connections. If opening the store observes
+    // a non-terminal epoch, its owning process no longer exists: an orderly disconnect would have
+    // closed it before this startup. Close every such epoch before accepting any new hello, and
+    // keep the instance lifecycle projection in the same startup transaction.
+    tx.execute(
+        "UPDATE gate_instances SET lifecycle='stopped'
+         WHERE EXISTS(
+           SELECT 1 FROM gate_connections gc
+           WHERE gc.instance_id=gate_instances.instance_id
+             AND gc.state IN ('connecting','active')
+         )",
+        [],
+    )?;
+    tx.execute(
+        "UPDATE gate_connections SET state='closed'
+         WHERE state IN ('connecting','active')",
+        [],
+    )?;
+
     let mut statement = tx.prepare(
         "SELECT d.place_id,d.seq,gi.kind_id
          FROM deliveries d JOIN gate_instances gi ON gi.instance_id=d.instance_id
@@ -1342,6 +1362,44 @@ fn reconcile_subject_routes_on(
     }
     for purpose in purposes {
         set_subject_route_on(conn, subject, place, kind, purpose, binding_id)?;
+    }
+    Ok(())
+}
+
+fn reconcile_compatibility_routes_for_kind_on(
+    conn: &Connection,
+    kind: &GateKindId,
+    tool_names: &[String],
+) -> Result<()> {
+    let mut purposes = vec![RoutePurpose::inbound(), RoutePurpose::outbound()];
+    for tool in tool_names {
+        purposes.push(RoutePurpose::tool(tool).map_err(|_| rusqlite::Error::InvalidQuery)?);
+    }
+    let mut statement = conn.prepare(
+        "SELECT m.subject_id,m.place_id,MIN(gb.binding_id),COUNT(gb.binding_id)
+         FROM memberships m
+         JOIN gate_bindings gb ON gb.place_id=m.place_id
+         JOIN gate_instances gi ON gi.instance_id=gb.instance_id AND gi.kind_id=?1
+         JOIN gate_kinds gk ON gk.kind_id=gi.kind_id AND gk.ingress_discovery='prebound'
+         WHERE m.role='participant'
+         GROUP BY m.subject_id,m.place_id ORDER BY m.subject_id,m.place_id",
+    )?;
+    let rows = statement
+        .query_map(params![kind.as_str()], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    drop(statement);
+    for (subject, place, binding, count) in rows {
+        if count != 1 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        reconcile_subject_routes_on(conn, subject, place, kind, Some(&binding), &purposes)?;
     }
     Ok(())
 }
@@ -2016,12 +2074,13 @@ impl Store {
         Ok(epoch as u64)
     }
 
-    /// Validate a protocol-2 hello against the canonical instance declaration and create its
-    /// connecting epoch as one command. Every rejection is decided before the first mutation.
+    /// Validate a hello against the canonical instance declaration and create its connecting
+    /// epoch as one command. Every rejection is decided before the first mutation.
     pub fn begin_gate_connection_checked(
         &self,
         instance: &GateInstanceId,
         revision: u64,
+        protocol_major: u32,
         spec: &GateKindSpec,
         now: i64,
     ) -> std::result::Result<u64, GateConnectionStartError> {
@@ -2071,10 +2130,10 @@ impl Store {
                 },
             )
             .optional()?;
-        let Some((protocol_major, origin_scope, ingress_discovery)) = declaration else {
+        let Some((declared_protocol_major, origin_scope, ingress_discovery)) = declaration else {
             return Err(GateConnectionStartError::KindDeclarationMismatch);
         };
-        if protocol_major != 2
+        if declared_protocol_major != i64::from(protocol_major)
             || origin_scope != spec.origin_scope.as_wire()
             || ingress_discovery != spec.ingress_discovery.as_wire()
         {
@@ -2088,6 +2147,15 @@ impl Store {
         )?;
         if occupied {
             return Err(GateConnectionStartError::InstanceActive);
+        }
+
+        // Compatibility bindings are configured before their protocol-1 process connects.
+        // Reconcile their selected routes in the same checked command that accepts the live
+        // declaration, so a successful hello cannot leave an active compatibility instance
+        // without the outbound route needed to create and acknowledge deliveries.
+        if declared_protocol_major == 1 {
+            let tool_names: Vec<_> = spec.tools.iter().map(|tool| tool.name.clone()).collect();
+            reconcile_compatibility_routes_for_kind_on(&tx, &spec.kind_id, &tool_names)?;
         }
 
         let epoch: i64 = tx.query_row(
@@ -2190,36 +2258,7 @@ impl Store {
     ) -> Result<()> {
         let mut conn = self.c();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let mut purposes = vec![RoutePurpose::inbound(), RoutePurpose::outbound()];
-        for tool in tool_names {
-            purposes.push(RoutePurpose::tool(tool).map_err(|_| rusqlite::Error::InvalidQuery)?);
-        }
-        let mut statement = tx.prepare(
-            "SELECT m.subject_id,m.place_id,MIN(gb.binding_id),COUNT(gb.binding_id)
-             FROM memberships m
-             JOIN gate_bindings gb ON gb.place_id=m.place_id
-             JOIN gate_instances gi ON gi.instance_id=gb.instance_id AND gi.kind_id=?1
-             JOIN gate_kinds gk ON gk.kind_id=gi.kind_id AND gk.ingress_discovery='prebound'
-             WHERE m.role='participant'
-             GROUP BY m.subject_id,m.place_id ORDER BY m.subject_id,m.place_id",
-        )?;
-        let rows = statement
-            .query_map(params![kind.as_str()], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>>>()?;
-        drop(statement);
-        for (subject, place, binding, count) in rows {
-            if count != 1 {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
-            reconcile_subject_routes_on(&tx, subject, place, kind, Some(&binding), &purposes)?;
-        }
+        reconcile_compatibility_routes_for_kind_on(&tx, kind, tool_names)?;
         tx.commit()
     }
 
@@ -3891,7 +3930,109 @@ mod tests {
         assert_eq!(store.compatibility_instance(&kind).unwrap(), Some(first));
     }
 
-    fn protocol2_spec(kind: &str, discovery: IngressDiscovery) -> GateKindSpec {
+    #[test]
+    fn compatibility_hello_matches_protocol_one_declaration() {
+        let store = Store::new_in_memory().unwrap();
+        let kind = GateKindId::parse("web".to_string()).unwrap();
+        let instance = store.seed_compatibility_instance(&kind).unwrap();
+        let spec = gate_kind_spec("web", IngressDiscovery::Prebound);
+
+        assert!(matches!(
+            store.begin_gate_connection_checked(&instance, 1, 2, &spec, 9),
+            Err(GateConnectionStartError::KindDeclarationMismatch)
+        ));
+        let epoch = store
+            .begin_gate_connection_checked(&instance, 1, 1, &spec, 10)
+            .unwrap();
+        assert_eq!(epoch, 1);
+    }
+
+    #[test]
+    fn compatibility_hello_routes_outbound_ack_origin_into_v1_external_ref() {
+        let store = Store::new_in_memory().unwrap();
+        let kind = GateKindId::parse("web".to_string()).unwrap();
+        let instance = store.seed_compatibility_instance(&kind).unwrap();
+        let subject = store
+            .create_subject(
+                SubjectKind::Agent,
+                "fixture-agent",
+                "fixture-agent",
+                "scripted",
+                Standing::Trusted,
+                1,
+            )
+            .unwrap();
+        let place = store
+            .create_place(Some("room:fixture"), None, "{}", None, 2)
+            .unwrap();
+        store.join(place, subject, Role::Participant, 0, 3).unwrap();
+        store.add_channel(place, &kind, "room:fixture").unwrap();
+        let (_, binding_id) = store
+            .ensure_compatibility_binding(place, &kind, "room:fixture")
+            .unwrap();
+
+        assert_eq!(
+            store
+                .c()
+                .query_row("SELECT COUNT(*) FROM subject_routes", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0,
+            "provision before hello has no live compatibility declaration to reconcile"
+        );
+
+        let spec = gate_kind_spec("web", IngressDiscovery::Prebound);
+        let epoch = store
+            .begin_gate_connection_checked(&instance, 1, 1, &spec, 4)
+            .unwrap();
+        store.activate_gate_connection(&instance, epoch, 5).unwrap();
+        let route = store
+            .gate_route(subject, place, &kind, &RoutePurpose::outbound())
+            .unwrap()
+            .expect("checked compatibility hello reconciles the outbound route");
+
+        assert_eq!(
+            store
+                .append_incoming_on_binding(
+                    place,
+                    &ev("inbound"),
+                    &instance,
+                    &binding_id,
+                    "origin-inbound",
+                    6,
+                )
+                .unwrap(),
+            Ingest::Appended(1)
+        );
+        let mut spoke = ev("outbound");
+        spoke.kind = EventKind::Spoke;
+        spoke.author_subject = Some(subject);
+        spoke.author_external = None;
+        let seq = store
+            .append_with_delivery_routes(place, &spoke, std::slice::from_ref(&route), 7)
+            .unwrap();
+        assert_eq!(seq, 2);
+        assert!(store.begin_delivery(place, seq, &route.binding_id).unwrap());
+        assert!(store
+            .complete_delivery(
+                &route,
+                seq,
+                "delivered",
+                None,
+                Some("origin-outbound"),
+                b"definite-ack",
+                8,
+            )
+            .unwrap());
+
+        assert_eq!(
+            store.external_ref_of(place, 2).unwrap(),
+            Some((kind, "origin-outbound".into()))
+        );
+    }
+
+    fn gate_kind_spec(kind: &str, discovery: IngressDiscovery) -> GateKindSpec {
         GateKindSpec {
             kind_id: GateKindId::parse(kind.to_string()).unwrap(),
             origin_scope: OriginScope::Instance,
@@ -3908,7 +4049,7 @@ mod tests {
     fn protocol2_hello_validation_and_epoch_creation_are_one_command() {
         let store = Store::new_in_memory().unwrap();
         let instance = GateInstanceId::parse("018f1d4e-7b00-7000-8000-000000000001").unwrap();
-        let spec = protocol2_spec("synthetic", IngressDiscovery::Membership);
+        let spec = gate_kind_spec("synthetic", IngressDiscovery::Membership);
         store
             .install_gate_instance_revision(
                 &instance,
@@ -3925,9 +4066,9 @@ mod tests {
             )
             .unwrap();
 
-        let wrong_kind = protocol2_spec("different", IngressDiscovery::Membership);
+        let wrong_kind = gate_kind_spec("different", IngressDiscovery::Membership);
         assert!(matches!(
-            store.begin_gate_connection_checked(&instance, 1, &wrong_kind, 11),
+            store.begin_gate_connection_checked(&instance, 1, 2, &wrong_kind, 11),
             Err(GateConnectionStartError::KindMismatch)
         ));
         let count = store
@@ -3939,13 +4080,13 @@ mod tests {
         assert_eq!(count, 0);
 
         let epoch = store
-            .begin_gate_connection_checked(&instance, 1, &spec, 12)
+            .begin_gate_connection_checked(&instance, 1, 2, &spec, 12)
             .unwrap();
         store
             .activate_gate_connection(&instance, epoch, 13)
             .unwrap();
         assert!(matches!(
-            store.begin_gate_connection_checked(&instance, 1, &spec, 14),
+            store.begin_gate_connection_checked(&instance, 1, 2, &spec, 14),
             Err(GateConnectionStartError::InstanceActive)
         ));
         let readiness = store
@@ -4125,6 +4266,60 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(states, ("indeterminate".into(), "failed".into()));
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn reopening_store_closes_stale_active_epoch_before_checked_hello() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "opencrab-store-stale-connection-{}-{nonce}.sqlite",
+            std::process::id()
+        ));
+        let kind = GateKindId::parse("web".to_string()).unwrap();
+        let instance;
+        {
+            let store = Store::open(&path).unwrap();
+            instance = store.seed_compatibility_instance(&kind).unwrap();
+            let spec = gate_kind_spec("web", IngressDiscovery::Prebound);
+            let epoch = store
+                .begin_gate_connection_checked(&instance, 1, 1, &spec, 10)
+                .unwrap();
+            store
+                .activate_gate_connection(&instance, epoch, 11)
+                .unwrap();
+        }
+
+        {
+            let reopened = Store::open(&path).unwrap();
+            let recovered = reopened
+                .c()
+                .query_row(
+                    "SELECT gi.lifecycle,gc.state,gc.disconnected_at
+                     FROM gate_instances gi JOIN gate_connections gc
+                       ON gc.instance_id=gi.instance_id
+                     WHERE gi.instance_id=?1 AND gc.connection_epoch=1",
+                    params![instance.as_str()],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                        ))
+                    },
+                )
+                .unwrap();
+            assert_eq!(recovered, ("stopped".into(), "closed".into(), None));
+
+            let spec = gate_kind_spec("web", IngressDiscovery::Prebound);
+            let epoch = reopened
+                .begin_gate_connection_checked(&instance, 1, 1, &spec, 12)
+                .unwrap();
+            assert_eq!(epoch, 2, "checked hello starts a new epoch after recovery");
         }
         std::fs::remove_file(path).unwrap();
     }

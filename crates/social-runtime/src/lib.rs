@@ -1061,6 +1061,7 @@ impl System {
         &self,
         instance_id: GateInstanceId,
         revision: u64,
+        protocol_major: u32,
         spec: GateKindSpec,
     ) -> Result<GateConnection, HelloReject> {
         let _registration = self.0.gate_registration.lock().unwrap();
@@ -1074,7 +1075,13 @@ impl System {
         let epoch = self
             .0
             .store
-            .begin_gate_connection_checked(&instance_id, revision, &spec, self.now_wall_nanos())
+            .begin_gate_connection_checked(
+                &instance_id,
+                revision,
+                protocol_major,
+                &spec,
+                self.now_wall_nanos(),
+            )
             .map_err(|error| match error {
                 opencrab_store::GateConnectionStartError::InstanceUnknown => {
                     HelloReject::InstanceUnknown

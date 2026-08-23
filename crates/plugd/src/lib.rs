@@ -284,6 +284,7 @@ impl Plugd {
                     }
                     // 名乗りが落ちた → err を返して切断（§01/§02）。
                     Err((id, e)) => {
+                        eprintln!("opencrab-plugd: hello rejected: {}", e.code);
                         conn.send_line(&e.to_json(&id));
                         break;
                     }
@@ -545,7 +546,10 @@ impl Plugd {
             capabilities,
             actions,
         };
-        let connection = match self.sys().start_gate_connection(instance, revision, spec) {
+        let connection = match self
+            .sys()
+            .start_gate_connection(instance, revision, protocol, spec)
+        {
             Ok(connection) => connection,
             Err(HelloReject::ProtocolUnsupported) => {
                 return Err(mkerr(WireErr::new("protocol_unsupported")))

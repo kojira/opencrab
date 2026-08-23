@@ -63,6 +63,31 @@ async fn settle() {
     }
 }
 
+fn provision_gate_tools(h: &Harness, place: PlaceId, names: &[&str]) {
+    let kind = GateName::new("test-gate");
+    h.sys
+        .register_gate(GateSpec {
+            name: kind.clone(),
+            protocol: PROTOCOL_VERSION,
+            address_form: ".*".into(),
+            tools: names
+                .iter()
+                .map(|name| ToolDef {
+                    name: (*name).to_string(),
+                    description: (*name).to_string(),
+                    params: serde_json::json!({}),
+                })
+                .collect(),
+            effects: Default::default(),
+            capabilities: Default::default(),
+            actions: Vec::new(),
+        })
+        .unwrap();
+    h.sys
+        .provision_channel(place, kind.as_str(), &format!("place:{place}"))
+        .unwrap();
+}
+
 fn edited(author: SubjectId, target: Seq, text: &str) -> Incoming {
     Incoming {
         kind: EventKind::Edited,
@@ -560,6 +585,7 @@ async fn background_survives_and_settles_same_subject() {
     );
     h.sys.join(p, a, Role::Participant);
     h.sys.join(p, human, Role::Participant);
+    provision_gate_tools(&h, p, &["gate-long"]);
 
     h.host
         .set_slow("gate-long", Duration::from_secs(120), "SLOWRESULT");
@@ -634,6 +660,7 @@ async fn interrupted_background_not_reexecuted() {
     );
     h.sys.join(p, a, Role::Participant);
     h.sys.join(p, human, Role::Participant);
+    provision_gate_tools(&h, p, &["gate-forever"]);
 
     h.host
         .set_slow("gate-forever", Duration::from_secs(600), "never");
@@ -678,6 +705,7 @@ async fn interleaved_utterances_and_settle_carry_result_into_context() {
     );
     h.sys.join(p, a, Role::Participant);
     h.sys.join(p, human, Role::Participant);
+    provision_gate_tools(&h, p, &["slow"]);
 
     h.host
         .set_slow("slow", Duration::from_secs(100), "SLOWRESULT-XYZ");
@@ -767,6 +795,7 @@ async fn failed_background_settles_as_failure_with_error() {
     );
     h.sys.join(p, a, Role::Participant);
     h.sys.join(p, human, Role::Participant);
+    provision_gate_tools(&h, p, &["no-such-tool"]);
 
     // 未登録のツールは host が Err（unknown tool）を返す（近いものへ寄せない）。常時切り離しで背景へ移り、
     // 失敗として決着する。
@@ -822,6 +851,7 @@ async fn bg_stop_kills_own_background_activity() {
     );
     h.sys.join(p, a, Role::Participant);
     h.sys.join(p, human, Role::Participant);
+    provision_gate_tools(&h, p, &["runaway"]);
 
     // 走り続けるツールを切り離す。
     h.host
@@ -886,6 +916,7 @@ async fn large_result_is_offloaded_and_read_back_by_bg_read() {
     );
     h.sys.join(p, a, Role::Participant);
     h.sys.join(p, human, Role::Participant);
+    provision_gate_tools(&h, p, &["bigtool"]);
 
     // CharCounter では 1 文字 = 1 トークン。300 行（各 ~12 文字）で inline 上限 2,500 を超える。
     let big: String = (0..300)
@@ -1646,6 +1677,7 @@ async fn tool_receipt_same_turn_and_result_via_settle() {
     );
     h.sys.join(p, a, Role::Participant);
     h.sys.join(p, human, Role::Participant);
+    provision_gate_tools(&h, p, &["echo"]);
 
     // 即返るツールでも常時切り離しの対象（速いものだけ同期、という経路は無い）。
     h.host.set_immediate("echo", "TOOLOUT_MARKER");
@@ -1701,6 +1733,7 @@ async fn background_activities_are_capped() {
     );
     h.sys.join(p, a, Role::Participant);
     h.sys.join(p, human, Role::Participant);
+    provision_gate_tools(&h, p, &["t1", "t2"]);
 
     h.host.set_slow("t1", Duration::from_secs(300), "r1");
     h.host.set_slow("t2", Duration::from_secs(300), "r2");
