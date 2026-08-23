@@ -26,7 +26,7 @@ use opencrab_port::{
     ChunkSink, Context, EffectSpec, Engine, EngineError, GateKindId, InferOutput, Property, Role,
     Standing, SubjectId, SubjectKind,
 };
-use opencrab_social_runtime::{Config, ImmediateFrom, Policy, System};
+use opencrab_social_runtime::{Clock, Config, ImmediateFrom, Policy, System};
 use opencrab_store::Store;
 use std::sync::Arc;
 use tokio::net::UnixListener;
@@ -243,6 +243,11 @@ impl Host {
         Host::boot_with_engine(store, select_engine())
     }
 
+    /// Process E2E が core の時刻源だけを差し替える入口。場・発火判断・配送は通常の [`Host`] と同じ。
+    pub fn boot_with_clock(store: Store, clock: Arc<dyn Clock>) -> Host {
+        Host::boot_configured(store, select_engine(), Config::default(), Some(clock))
+    }
+
     /// engine を明示して組み立てる（テストが本物のプロバイダ実装を差し込むのに使う）。
     pub fn boot_with_engine(store: Store, engine: Arc<dyn Engine>) -> Host {
         Host::boot_with(store, engine, Config::default())
@@ -250,6 +255,15 @@ impl Host {
 
     /// engine と Config を明示して組み立てる（アイドル上限などを短くしたテスト用）。
     pub fn boot_with(store: Store, engine: Arc<dyn Engine>, cfg: Config) -> Host {
+        Host::boot_configured(store, engine, cfg, None)
+    }
+
+    fn boot_configured(
+        store: Store,
+        engine: Arc<dyn Engine>,
+        cfg: Config,
+        clock: Option<Arc<dyn Clock>>,
+    ) -> Host {
         let plugd = Plugd::new();
         // 予算の物差し（§06）を先に登録する——System::new が実効モデルの context_window を引いて
         // 会話予算を確定する（未登録なら fail loud）。冪等なので再起動でも同じ 1 本で足りる。
@@ -259,17 +273,19 @@ impl Host {
         let shell_root = std::env::var("OPENCRAB_SHELL_ROOT")
             .ok()
             .map(std::path::PathBuf::from);
-        let sys = System::new(
-            store,
-            engine,
-            Arc::new(plugd.clone()) as Arc<dyn opencrab_port::ToolHost>,
-            Arc::new(TokioShellHost::new(shell_root)) as Arc<dyn opencrab_port::ShellHost>,
-            Arc::new(plugd.clone()) as Arc<dyn opencrab_port::Notifier>,
-            // 文脈予算の物差し（§06/§10）。本番は o200k 見積り（本体と同じ物差し・還流のため）。
-            Arc::new(opencrab_social_runtime::O200kCounter::new())
-                as Arc<dyn opencrab_port::TokenCounter>,
-            cfg,
-        );
+        let tool_host = Arc::new(plugd.clone()) as Arc<dyn opencrab_port::ToolHost>;
+        let shell_host =
+            Arc::new(TokioShellHost::new(shell_root)) as Arc<dyn opencrab_port::ShellHost>;
+        let notifier = Arc::new(plugd.clone()) as Arc<dyn opencrab_port::Notifier>;
+        // 文脈予算の物差し（§06/§10）。本番は o200k 見積り（本体と同じ物差し・還流のため）。
+        let counter = Arc::new(opencrab_social_runtime::O200kCounter::new())
+            as Arc<dyn opencrab_port::TokenCounter>;
+        let sys = match clock {
+            Some(clock) => System::new_with_clock(
+                store, engine, tool_host, shell_host, notifier, counter, cfg, clock,
+            ),
+            None => System::new(store, engine, tool_host, shell_host, notifier, counter, cfg),
+        };
         plugd.attach_system(sys.clone());
         sys.attach_transport(Arc::new(plugd.clone()) as Arc<dyn opencrab_port::Transport>);
         // URL の中身取得の口（DESIGN-images §3）。core-look / core-read が使う。本番は reqwest。

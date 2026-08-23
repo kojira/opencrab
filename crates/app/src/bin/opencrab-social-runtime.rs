@@ -13,8 +13,45 @@
 //! 直書きしない（配線漏れの是正・タスク#1）。JSON の形は `opencrab_app::parse_places_config` を参照。
 
 use opencrab_app::{bind_unix, parse_places_config, Host};
+use opencrab_social_runtime::FakeClock;
 use opencrab_store::Store;
+use std::io::{Error, ErrorKind};
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixListener;
+
+const TEST_CLOCK_SOCKET_ENV: &str = "OPENCRAB_TEST_CLOCK_SOCKET";
+
+async fn serve_test_clock(listener: UnixListener, clock: FakeClock) -> std::io::Result<()> {
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+        while let Some(line) = lines.next_line().await? {
+            let millis = line
+                .strip_prefix("advance_ms=")
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::InvalidData,
+                        "test clock command must be advance_ms=<u64>",
+                    )
+                })?
+                .parse::<u64>()
+                .map_err(|error| {
+                    Error::new(
+                        ErrorKind::InvalidData,
+                        format!("invalid test clock milliseconds: {error}"),
+                    )
+                })?;
+            clock.advance(Duration::from_millis(millis));
+            write
+                .write_all(format!("advanced_ms={millis}\n").as_bytes())
+                .await?;
+        }
+    }
+}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::io::Result<()> {
@@ -33,7 +70,32 @@ async fn main() -> std::io::Result<()> {
         Store::open(&db_path).expect("open store")
     };
 
-    let host = Host::boot(store);
+    // Process E2E だけが明示する時計制御口。時刻源のみを差し替え、batch/debounce の判断は production と
+    // 同じ core 実装を通る。未知コマンドや不正値は test server を失敗させ、通常時計へは倒さない。
+    let test_clock = match std::env::var(TEST_CLOCK_SOCKET_ENV) {
+        Ok(path) if !path.trim().is_empty() => {
+            let clock = FakeClock::new();
+            let listener = bind_unix(Path::new(&path))?;
+            Some((clock, listener))
+        }
+        Ok(_) => {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("{TEST_CLOCK_SOCKET_ENV} must not be empty"),
+            ))
+        }
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("{TEST_CLOCK_SOCKET_ENV} must be Unicode"),
+            ))
+        }
+    };
+    let host = match &test_clock {
+        Some((clock, _)) => Host::boot_with_clock(store, Arc::new(clock.clone())),
+        None => Host::boot(store),
+    };
 
     // 場を用意する（設定）。プラグインが（再）接続した瞬間に core が結び直す（rebind_gate・プロトコル§08）。
     match std::env::var("OPENCRAB_PLACES") {
@@ -64,5 +126,13 @@ async fn main() -> std::io::Result<()> {
 
     let listener = bind_unix(Path::new(&socket_path))?;
     eprintln!("opencrab-social-runtime: listening on {socket_path} (db={db_path})");
-    host.serve_unix(listener).await
+    match test_clock {
+        Some((clock, clock_listener)) => {
+            tokio::select! {
+                result = host.serve_unix(listener) => result,
+                result = serve_test_clock(clock_listener, clock) => result,
+            }
+        }
+        None => host.serve_unix(listener).await,
+    }
 }
