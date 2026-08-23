@@ -176,6 +176,167 @@ fn fresh_database_writes_marker_and_zero_source_families() {
     assert_eq!(subjects, 0);
 }
 
+#[test]
+fn null_personality_stays_canonical_and_writes_null_persona() {
+    let temporary = tempfile::tempdir().unwrap();
+    let db = temporary.path().join("source.db");
+    let conn = Connection::open(&db).unwrap();
+    opencrab_db::schema::initialize(&conn).unwrap();
+    conn.execute_batch(
+        "INSERT INTO agents(
+           agent_id,name,persona_name,personality,instructions,heartbeat_instructions,
+           model,created_at,updated_at
+         ) VALUES(
+           'agent-null-persona','Agent N','persona-n',NULL,'do work','hb',
+           'openai:synthetic-model','2024-01-01 00:00:00','2024-01-01 00:00:00'
+         );
+         INSERT INTO model_pricing(
+           provider,model,input_price_per_1m,output_price_per_1m,context_window,updated_at
+         ) VALUES('openai','synthetic-model',1,2,128000,'2024-01-01 00:00:00');",
+    )
+    .unwrap();
+    drop(conn);
+
+    run_migrate(&db);
+    let conn = Connection::open(&db).unwrap();
+    let subjects: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM subjects WHERE kind='agent'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(subjects, 1);
+    let persona: Option<String> = conn
+        .query_row("SELECT persona FROM subject_profiles", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(persona, None);
+    let raw: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM legacy_unowned_source_rows",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(raw, 0);
+}
+
+#[test]
+fn missing_discord_config_member_names_absence() {
+    let temporary = tempfile::tempdir().unwrap();
+    let db = temporary.path().join("source.db");
+    let conn = Connection::open(&db).unwrap();
+    opencrab_db::schema::initialize(&conn).unwrap();
+    conn.execute_batch(
+        "INSERT INTO agents(
+           agent_id,name,persona_name,personality,instructions,heartbeat_instructions,
+           model,created_at,updated_at
+         ) VALUES(
+           'agent-present','Agent P','persona-p','kind','do work','hb',
+           'openai:synthetic-model','2024-01-01 00:00:00','2024-01-01 00:00:00'
+         );
+         INSERT INTO model_pricing(
+           provider,model,input_price_per_1m,output_price_per_1m,context_window,updated_at
+         ) VALUES('openai','synthetic-model',1,2,128000,'2024-01-01 00:00:00');",
+    )
+    .unwrap();
+    drop(conn);
+
+    let config = temporary.path().join("default.toml");
+    let environment = temporary.path().join("empty.env");
+    std::fs::write(
+        &config,
+        r#"[gateway.discord]
+enabled = true
+token = "fixture-token"
+agent_ids = ["agent-absent"]
+"#,
+    )
+    .unwrap();
+    std::fs::write(&environment, "").unwrap();
+    let mut conn = Connection::open(&db).unwrap();
+    let error = migrate_in_place(&mut conn, &config, &environment, CAPTURED_AT).unwrap_err();
+    match error {
+        ConverterError::InstanceSet(message) => {
+            assert!(
+                message.contains("absent"),
+                "instance-set must name absence: {message}"
+            );
+            assert!(
+                !message.contains("exactly once"),
+                "instance-set must not say exactly once for absence: {message}"
+            );
+        }
+        other => panic!("expected InstanceSet, got {other}"),
+    }
+}
+
+#[test]
+fn null_personality_discord_shared_member_migrates_end_to_end() {
+    let temporary = tempfile::tempdir().unwrap();
+    let db = temporary.path().join("source.db");
+    let conn = Connection::open(&db).unwrap();
+    opencrab_db::schema::initialize(&conn).unwrap();
+    conn.execute_batch(
+        "INSERT INTO agents(
+           agent_id,name,persona_name,personality,instructions,heartbeat_instructions,
+           model,created_at,updated_at
+         ) VALUES(
+           'agent-null-persona','Agent N','persona-n',NULL,'do work','hb',
+           'openai:synthetic-model','2024-01-01 00:00:00','2024-01-01 00:00:00'
+         );
+         INSERT INTO model_pricing(
+           provider,model,input_price_per_1m,output_price_per_1m,context_window,updated_at
+         ) VALUES('openai','synthetic-model',1,2,128000,'2024-01-01 00:00:00');",
+    )
+    .unwrap();
+    drop(conn);
+
+    let config = temporary.path().join("default.toml");
+    let environment = temporary.path().join("empty.env");
+    std::fs::write(
+        &config,
+        r#"[gateway.discord]
+enabled = true
+token = "fixture-token"
+agent_ids = ["agent-null-persona"]
+"#,
+    )
+    .unwrap();
+    std::fs::write(&environment, "").unwrap();
+    let mut conn = Connection::open(&db).unwrap();
+    migrate_in_place(&mut conn, &config, &environment, CAPTURED_AT).unwrap();
+
+    let subjects: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM subjects WHERE kind='agent'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(subjects, 1);
+    let instances: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM gate_instances WHERE kind_id='discord' AND label='shared:discord'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(instances, 1);
+    let raw: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM legacy_unowned_source_rows",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(raw, 0);
+    let persona: Option<String> = conn
+        .query_row("SELECT persona FROM subject_profiles", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(persona, None);
+}
+
 fn write_inputs(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
     let config = dir.join("empty.toml");
     let environment = dir.join("empty.env");
