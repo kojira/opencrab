@@ -30,6 +30,7 @@ fn grant_assembly_uses_closed_roles_unsplit_actions_and_nullable_co_agent_proven
     let principals = BTreeMap::from([(("discord".into(), "principal".into()), 2)]);
     let mut raw = RawCollector::default();
     let mut report = ConversionReport::default();
+    let provenance = MigrationProvenance::new([7; 32]);
 
     assemble_grants(
         &transaction,
@@ -37,6 +38,7 @@ fn grant_assembly_uses_closed_roles_unsplit_actions_and_nullable_co_agent_proven
         &co_agents,
         &agents,
         &principals,
+        &provenance,
         &mut raw,
         &mut report,
     )
@@ -100,4 +102,121 @@ fn grant_assembly_uses_closed_roles_unsplit_actions_and_nullable_co_agent_proven
     );
     assert_eq!(report.classes[0].canonical_outcomes, 4);
     assert_eq!(report.classes[0].raw_outcomes, 0);
+    assert_eq!(
+        transaction
+            .query_row("SELECT COUNT(*) FROM migration_provenance", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        13
+    );
+    for (table, source_table) in [(&users, "trusted_users"), (&co_agents, "trusted_co_agents")] {
+        for row in &table.rows {
+            let found = transaction
+                .query_row(
+                    "SELECT COUNT(*) FROM migration_provenance
+                     WHERE target_entity='grant_source_provenance'
+                       AND source_locator=?1 AND source_key=?2 AND source_row_digest=?3",
+                    params![
+                        format!("table:{source_table}"),
+                        row.source_key,
+                        row.row_digest.as_slice()
+                    ],
+                    |result| result.get::<_, i64>(0),
+                )
+                .unwrap();
+            assert_eq!(found, 1);
+        }
+    }
+}
+
+#[test]
+fn principal_assembly_raw_routes_empty_external_id_and_preserves_all_contributors() {
+    let source = Connection::open_in_memory().unwrap();
+    source
+        .execute_batch(
+            "CREATE TABLE trusted_users(
+               id TEXT PRIMARY KEY,user_id TEXT,agent_id TEXT,permission TEXT,
+               created_by TEXT,created_at TEXT,display_name TEXT,platform TEXT
+             );
+             INSERT INTO trusted_users VALUES
+               ('u-a','principal','agent-a','user','fixture','2024-01-01 00:00:00','Winner','discord'),
+               ('u-b','principal','agent-a','owner','fixture','2024-01-02 00:00:00','Other','discord'),
+               ('u-empty','','agent-a','user','fixture','2024-01-03 00:00:00','Empty Id','discord');",
+        )
+        .unwrap();
+    let users = SourceTable::load(&source, "trusted_users").unwrap();
+    let mut target = Connection::open_in_memory().unwrap();
+    let transaction = target.transaction().unwrap();
+    create_phase1_schema(&transaction).unwrap();
+    transaction
+        .execute_batch(
+            "INSERT INTO gate_instances(
+               instance_id,kind_id,label,owner_subject_id,active_revision,lifecycle
+             ) VALUES
+               ('22222222-2222-4222-8222-222222222222','discord','fixture-b',NULL,1,'stopped'),
+               ('11111111-1111-4111-8111-111111111111','discord','fixture-a',NULL,1,'stopped')",
+        )
+        .unwrap();
+    let instances = load_migration_instances(&transaction).unwrap();
+    let provenance = MigrationProvenance::new([9; 32]);
+    let mut raw = RawCollector::default();
+    let mut report = ConversionReport::default();
+
+    let principals = assemble_principals(
+        &transaction,
+        &users,
+        &instances,
+        &provenance,
+        &mut raw,
+        &mut report,
+    )
+    .unwrap();
+    report.verify().unwrap();
+
+    assert_eq!(principals.len(), 1);
+    assert_eq!(
+        principals[0].instances,
+        [
+            "11111111-1111-4111-8111-111111111111",
+            "22222222-2222-4222-8222-222222222222"
+        ]
+    );
+    assert_eq!(report.classes[0].canonical_outcomes, 2);
+    assert_eq!(report.classes[0].raw_outcomes, 1);
+    assert_eq!(report.classes[0].exact_one_violations, 0);
+    let empty = users
+        .rows
+        .iter()
+        .find(|row| users.text(row, "user_id") == Some(""))
+        .unwrap();
+    assert!(raw
+        .rows
+        .contains_key(&(users.name.into(), empty.source_key.clone())));
+    assert_eq!(
+        transaction
+            .query_row(
+                "SELECT COUNT(*) FROM migration_provenance
+                 WHERE target_entity='subjects' AND source_locator='table:trusted_users'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        2
+    );
+    for row in users
+        .rows
+        .iter()
+        .filter(|row| users.text(row, "user_id") == Some("principal"))
+    {
+        let found = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM migration_provenance
+                 WHERE target_entity='subjects' AND source_key=?1 AND source_row_digest=?2",
+                params![row.source_key, row.row_digest.as_slice()],
+                |result| result.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(found, 1);
+    }
 }

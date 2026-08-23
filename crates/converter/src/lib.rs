@@ -1,3 +1,4 @@
+mod provenance;
 mod report;
 mod schema;
 mod source;
@@ -7,11 +8,14 @@ mod uuid;
 pub use report::{ClassAccounting, ConversionReport};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use provenance::{composite_key, digest_file, integer_key, text, MigrationProvenance};
+use report::ContributionKey;
 use rusqlite::{params, Connection, OpenFlags, Transaction};
-use schema::{create_phase1_schema, require_empty_target};
+use schema::create_phase1_schema;
 use source::{SourceRow, SourceTable};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Display, Formatter};
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use time::parse_utc_nanos;
 use uuid::parse_canonical_uuid;
@@ -27,7 +31,7 @@ pub enum ConverterError {
     Json(serde_json::Error),
     SourceSchema(String),
     InstanceSet(String),
-    TargetNotEmpty,
+    TargetNotFresh,
     Accounting(String),
 }
 
@@ -39,7 +43,7 @@ impl Display for ConverterError {
             Self::Json(error) => write!(formatter, "JSON error: {error}"),
             Self::SourceSchema(message) => write!(formatter, "source schema error: {message}"),
             Self::InstanceSet(message) => write!(formatter, "instance-set error: {message}"),
-            Self::TargetNotEmpty => write!(formatter, "target database is not empty"),
+            Self::TargetNotFresh => write!(formatter, "target database path already exists"),
             Self::Accounting(message) => write!(formatter, "accounting error: {message}"),
         }
     }
@@ -66,14 +70,14 @@ impl From<serde_json::Error> for ConverterError {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MigrationInstance {
-    pub instance_id: String,
-    pub kind_id: String,
+struct MigrationInstance {
+    instance_id: String,
+    kind_id: String,
     uuid_bytes: [u8; 16],
 }
 
 impl MigrationInstance {
-    pub fn new(instance_id: impl Into<String>, kind_id: impl Into<String>) -> Result<Self> {
+    fn new(instance_id: impl Into<String>, kind_id: impl Into<String>) -> Result<Self> {
         let instance_id = instance_id.into();
         let kind_id = kind_id.into();
         let uuid_bytes = parse_canonical_uuid(&instance_id).ok_or_else(|| {
@@ -92,53 +96,15 @@ impl MigrationInstance {
             uuid_bytes,
         })
     }
-
-    pub fn read_set(path: impl AsRef<Path>) -> Result<Vec<Self>> {
-        let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
-        let entries = value.as_array().ok_or_else(|| {
-            ConverterError::InstanceSet("instance set must be a JSON array".into())
-        })?;
-        let mut instances = Vec::with_capacity(entries.len());
-        let mut ids = BTreeSet::new();
-        for entry in entries {
-            let object = entry.as_object().ok_or_else(|| {
-                ConverterError::InstanceSet("each instance must be an object".into())
-            })?;
-            if object.len() != 2
-                || !object.contains_key("instance_id")
-                || !object.contains_key("kind_id")
-            {
-                return Err(ConverterError::InstanceSet(
-                    "each instance must contain exactly instance_id and kind_id".into(),
-                ));
-            }
-            let instance_id = object["instance_id"]
-                .as_str()
-                .ok_or_else(|| ConverterError::InstanceSet("instance_id must be text".into()))?;
-            let kind_id = object["kind_id"]
-                .as_str()
-                .ok_or_else(|| ConverterError::InstanceSet("kind_id must be text".into()))?;
-            let instance = Self::new(instance_id, kind_id)?;
-            if !ids.insert(instance.instance_id.clone()) {
-                return Err(ConverterError::InstanceSet(format!(
-                    "duplicate instance_id {:?}",
-                    instance.instance_id
-                )));
-            }
-            instances.push(instance);
-        }
-        instances.sort_by_key(|instance| instance.uuid_bytes);
-        Ok(instances)
-    }
 }
+
+#[derive(Clone, Debug, Default)]
+struct MigrationInstanceSet(Vec<MigrationInstance>);
 
 #[derive(Clone, Debug)]
 pub struct ConvertOptions {
     pub source: PathBuf,
     pub target: PathBuf,
-    /// Complete output of the earlier instance-assembly phase. Phase 1 consumes this set but does
-    /// not manufacture instance rows or defaults.
-    pub migration_instances: Vec<MigrationInstance>,
 }
 
 #[derive(Clone, Debug)]
@@ -224,10 +190,11 @@ struct GrantContributor {
     created_at: i64,
     source_key: Vec<u8>,
     row_digest: [u8; 32],
+    contribution: ContributionKey,
 }
 
 pub fn convert(options: ConvertOptions) -> Result<ConvertOutcome> {
-    validate_instances(&options.migration_instances)?;
+    let source_database_digest = digest_file(&options.source)?;
     let source = Connection::open_with_flags(
         &options.source,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
@@ -273,13 +240,17 @@ pub fn convert(options: ConvertOptions) -> Result<ConvertOutcome> {
     ])?;
     source.execute_batch("ROLLBACK")?;
 
-    let mut target = Connection::open(&options.target)?;
-    require_empty_target(&target)?;
+    let mut target = create_fresh_target(&options.target)?;
     let transaction = target.transaction()?;
     create_phase1_schema(&transaction)?;
+    // This is deliberately loaded only from the target transaction. Instance assembly will write
+    // gate_instances earlier in this same transaction; a file or caller-supplied UUID set is never
+    // production authority.
+    let migration_instances = load_migration_instances(&transaction)?;
 
     let mut raw = RawCollector::default();
     let mut report = ConversionReport::default();
+    let provenance = MigrationProvenance::new(source_database_digest);
 
     // The current ledger has no source for either required runtime policy. It explicitly routes
     // every complete agents row to raw; no fallback policy or partial subject is permitted.
@@ -290,25 +261,30 @@ pub fn convert(options: ConvertOptions) -> Result<ConvertOutcome> {
             "create-subject-public-id-v1:missing_history_and_output_policy",
         )?;
     }
-    report.classes.push(ClassAccounting {
-        source_table: agents.name.into(),
-        logical_class: "agent_aggregate".into(),
-        source_rows: agents.rows.len() as u64,
-        canonical_outcomes: 0,
-        raw_outcomes: agents.rows.len() as u64,
-        exact_one_violations: 0,
-        physical_rows: BTreeMap::from([
+    let mut agent_accounting = ClassAccounting::new(
+        agents.name,
+        "agent_aggregate",
+        agents
+            .rows
+            .iter()
+            .map(|row| ContributionKey::new(&agents, row)),
+        BTreeMap::from([
             ("subjects".into(), 0),
             ("subject_profiles".into(), 0),
             ("subject_runtime_configs".into(), 0),
         ]),
-    });
+    );
+    for row in &agents.rows {
+        agent_accounting.raw(ContributionKey::new(&agents, row));
+    }
+    report.classes.push(agent_accounting);
     let agent_subjects = BTreeMap::<String, i64>::new();
 
     let principals = assemble_principals(
         &transaction,
         &trusted_users,
-        &options.migration_instances,
+        &migration_instances,
+        &provenance,
         &mut raw,
         &mut report,
     )?;
@@ -328,12 +304,14 @@ pub fn convert(options: ConvertOptions) -> Result<ConvertOutcome> {
         &trusted_co_agents,
         &agent_subjects,
         &principal_subjects,
+        &provenance,
         &mut raw,
         &mut report,
     )?;
     raw.write(&transaction)?;
 
     for table in [
+        "gate_instances",
         "subjects",
         "subject_profiles",
         "subject_runtime_configs",
@@ -342,6 +320,7 @@ pub fn convert(options: ConvertOptions) -> Result<ConvertOutcome> {
         "agent_grants",
         "grant_actions",
         "grant_source_provenance",
+        "migration_provenance",
         "legacy_unowned_source_rows",
     ] {
         let count = transaction.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
@@ -357,12 +336,21 @@ pub fn convert(options: ConvertOptions) -> Result<ConvertOutcome> {
 fn assemble_principals(
     target: &Transaction<'_>,
     trusted_users: &SourceTable,
-    instances: &[MigrationInstance],
+    instances: &MigrationInstanceSet,
+    provenance: &MigrationProvenance,
     raw: &mut RawCollector,
     report: &mut ConversionReport,
 ) -> Result<Vec<Principal>> {
     let mut groups = BTreeMap::<(String, String), Vec<usize>>::new();
-    let mut raw_outcomes = 0_u64;
+    let mut accounting = ClassAccounting::new(
+        trusted_users.name,
+        "external_principal",
+        trusted_users
+            .rows
+            .iter()
+            .map(|row| ContributionKey::new(trusted_users, row)),
+        BTreeMap::new(),
+    );
     for (index, row) in trusted_users.rows.iter().enumerate() {
         let (Some(platform), Some(external_id)) = (
             trusted_users.text(row, "platform"),
@@ -373,7 +361,7 @@ fn assemble_principals(
                 row,
                 "resolve-external-principal-v1:noncanonical_storage",
             )?;
-            raw_outcomes += 1;
+            accounting.raw(ContributionKey::new(trusted_users, row));
             continue;
         };
         if !matches!(platform, "discord" | "nostr" | "web" | "rest") {
@@ -382,7 +370,7 @@ fn assemble_principals(
                 row,
                 "resolve-external-principal-v1:unknown_platform",
             )?;
-            raw_outcomes += 1;
+            accounting.raw(ContributionKey::new(trusted_users, row));
             continue;
         }
         groups
@@ -401,6 +389,7 @@ fn assemble_principals(
                 .then(left.row_digest.cmp(&right.row_digest))
         });
         let mut matching_instances = instances
+            .0
             .iter()
             .filter(|instance| instance.kind_id == platform)
             .collect::<Vec<_>>();
@@ -419,7 +408,9 @@ fn assemble_principals(
                 .filter(|value| !value.is_empty())
                 .map(str::to_string)
         });
-        let reason = if matching_instances.is_empty() {
+        let reason = if external_id.is_empty() {
+            Some("resolve-external-principal-v1:invalid_external_id")
+        } else if matching_instances.is_empty() {
             Some("resolve-external-principal-v1:zero_matching_instances")
         } else if created_at.is_none() {
             Some("resolve-external-principal-v1:invalid_created_at")
@@ -431,7 +422,10 @@ fn assemble_principals(
         if let Some(reason) = reason {
             for index in contributors {
                 raw.add(trusted_users, &trusted_users.rows[index], reason)?;
-                raw_outcomes += 1;
+                accounting.raw(ContributionKey::new(
+                    trusted_users,
+                    &trusted_users.rows[index],
+                ));
             }
             continue;
         }
@@ -461,8 +455,8 @@ fn assemble_principals(
                     .cmp(right.external_id.as_bytes()),
             )
     });
-    let mut canonical_outcomes = 0_u64;
     let mut identity_rows = 0_u64;
+    let mut provenance_rows = 0_u64;
     for (index, principal) in candidates.iter_mut().enumerate() {
         principal.subject_id = i64::try_from(index + 1)
             .map_err(|_| ConverterError::Accounting("subject id overflow".into()))?;
@@ -476,6 +470,12 @@ fn assemble_principals(
                 principal.created_at
             ],
         )?;
+        let subject_key = integer_key(principal.subject_id);
+        for contributor in &principal.contributors {
+            let row = &trusted_users.rows[*contributor];
+            provenance.write(target, "subjects", &subject_key, trusted_users, row)?;
+            provenance_rows += 1;
+        }
         for instance in &principal.instances {
             target.execute(
                 "INSERT INTO gate_subject_identities(instance_id,external_id,subject_id,display_name)
@@ -488,21 +488,32 @@ fn assemble_principals(
                 ],
             )?;
             identity_rows += 1;
+            let identity_key = composite_key(&[text(instance), text(&principal.external_id)]);
+            for contributor in &principal.contributors {
+                let row = &trusted_users.rows[*contributor];
+                provenance.write(
+                    target,
+                    "gate_subject_identities",
+                    &identity_key,
+                    trusted_users,
+                    row,
+                )?;
+                provenance_rows += 1;
+            }
         }
-        canonical_outcomes += principal.contributors.len() as u64;
+        for contributor in &principal.contributors {
+            accounting.canonical(ContributionKey::new(
+                trusted_users,
+                &trusted_users.rows[*contributor],
+            ));
+        }
     }
-    report.classes.push(ClassAccounting {
-        source_table: trusted_users.name.into(),
-        logical_class: "external_principal".into(),
-        source_rows: trusted_users.rows.len() as u64,
-        canonical_outcomes,
-        raw_outcomes,
-        exact_one_violations: 0,
-        physical_rows: BTreeMap::from([
-            ("subjects".into(), candidates.len() as u64),
-            ("gate_subject_identities".into(), identity_rows),
-        ]),
-    });
+    accounting.physical_rows = BTreeMap::from([
+        ("subjects".into(), candidates.len() as u64),
+        ("gate_subject_identities".into(), identity_rows),
+        ("migration_provenance".into(), provenance_rows),
+    ]);
+    report.classes.push(accounting);
     Ok(candidates)
 }
 
@@ -513,17 +524,32 @@ fn assemble_grants(
     trusted_co_agents: &SourceTable,
     agent_subjects: &BTreeMap<String, i64>,
     principal_subjects: &BTreeMap<(String, String), i64>,
+    provenance: &MigrationProvenance,
     raw: &mut RawCollector,
     report: &mut ConversionReport,
 ) -> Result<()> {
     let mut contributors = Vec::<GrantContributor>::new();
-    let mut raw_outcomes = 0_u64;
+    let mut accounting = ClassAccounting::new(
+        "trusted_users+trusted_co_agents",
+        "grant_contributor",
+        trusted_users
+            .rows
+            .iter()
+            .map(|row| ContributionKey::new(trusted_users, row))
+            .chain(
+                trusted_co_agents
+                    .rows
+                    .iter()
+                    .map(|row| ContributionKey::new(trusted_co_agents, row)),
+            ),
+        BTreeMap::new(),
+    );
     for row in &trusted_users.rows {
         match parse_user_grant(trusted_users, row, agent_subjects, principal_subjects) {
             Ok(contributor) => contributors.push(contributor),
             Err(reason) => {
                 raw.add(trusted_users, row, reason)?;
-                raw_outcomes += 1;
+                accounting.raw(ContributionKey::new(trusted_users, row));
             }
         }
     }
@@ -532,7 +558,7 @@ fn assemble_grants(
             Ok(contributor) => contributors.push(contributor),
             Err(reason) => {
                 raw.add(trusted_co_agents, row, reason)?;
-                raw_outcomes += 1;
+                accounting.raw(ContributionKey::new(trusted_co_agents, row));
             }
         }
     }
@@ -554,13 +580,28 @@ fn assemble_grants(
     let mut grant_rows = 0_u64;
     let mut action_rows = 0_u64;
     let mut provenance_rows = 0_u64;
-    let mut canonical_outcomes = 0_u64;
+    let mut common_provenance_rows = 0_u64;
     for (agent, group) in groups {
         let created_at = group[0].created_at;
         target.execute(
             "INSERT INTO grant_sets(agent_subject_id,revision,created_at) VALUES(?1,1,?2)",
             params![agent, created_at],
         )?;
+        let grant_set_key = composite_key(&[
+            source::SqliteValue::Integer(agent),
+            source::SqliteValue::Integer(1),
+        ]);
+        for contributor in &group {
+            provenance.write_parts(
+                target,
+                "grant_sets",
+                &grant_set_key,
+                grant_source_table(contributor.source),
+                &contributor.source_key,
+                &contributor.row_digest,
+            )?;
+            common_provenance_rows += 1;
+        }
         let mut selected_roles = BTreeMap::<i64, &'static str>::new();
         let mut actions = BTreeSet::<(i64, String)>::new();
         for contributor in &group {
@@ -593,6 +634,27 @@ fn assemble_grants(
                 ],
             )?;
             provenance_rows += 1;
+            let provenance_key = composite_key(&[
+                source::SqliteValue::Integer(contributor.agent_subject_id),
+                source::SqliteValue::Integer(contributor.principal_subject_id),
+                nullable_text(contributor.gate_kind.as_deref()),
+                text(&contributor.external_id),
+                nullable_text(contributor.permission.as_deref()),
+                nullable_text(contributor.allowed_actions.as_deref()),
+                nullable_text(contributor.source_record_key.as_deref()),
+                text(&contributor.created_by),
+                source::SqliteValue::Integer(contributor.created_at),
+                source::SqliteValue::Blob(contributor.source_key.clone()),
+            ]);
+            provenance.write_parts(
+                target,
+                "grant_source_provenance",
+                &provenance_key,
+                grant_source_table(contributor.source),
+                &contributor.source_key,
+                &contributor.row_digest,
+            )?;
+            common_provenance_rows += 1;
         }
         for (principal, role) in selected_roles {
             target.execute(
@@ -602,6 +664,27 @@ fn assemble_grants(
                 params![agent, principal, role],
             )?;
             grant_rows += 1;
+            let grant_key = composite_key(&[
+                source::SqliteValue::Integer(agent),
+                source::SqliteValue::Integer(1),
+                source::SqliteValue::Integer(principal),
+                text(role),
+                text("agent"),
+            ]);
+            for contributor in group
+                .iter()
+                .filter(|contributor| contributor.principal_subject_id == principal)
+            {
+                provenance.write_parts(
+                    target,
+                    "agent_grants",
+                    &grant_key,
+                    grant_source_table(contributor.source),
+                    &contributor.source_key,
+                    &contributor.row_digest,
+                )?;
+                common_provenance_rows += 1;
+            }
         }
         for (principal, action) in actions {
             target.execute(
@@ -611,24 +694,40 @@ fn assemble_grants(
                 params![agent, principal, action],
             )?;
             action_rows += 1;
+            let action_key = composite_key(&[
+                source::SqliteValue::Integer(agent),
+                source::SqliteValue::Integer(1),
+                source::SqliteValue::Integer(principal),
+                text(&action),
+            ]);
+            for contributor in group.iter().filter(|contributor| {
+                contributor.principal_subject_id == principal
+                    && contributor.allowed_actions.as_deref() == Some(action.as_str())
+            }) {
+                provenance.write_parts(
+                    target,
+                    "grant_actions",
+                    &action_key,
+                    grant_source_table(contributor.source),
+                    &contributor.source_key,
+                    &contributor.row_digest,
+                )?;
+                common_provenance_rows += 1;
+            }
         }
-        canonical_outcomes += group.len() as u64;
+        for contributor in &group {
+            accounting.canonical(contributor.contribution.clone());
+        }
     }
 
-    report.classes.push(ClassAccounting {
-        source_table: "trusted_users+trusted_co_agents".into(),
-        logical_class: "grant_contributor".into(),
-        source_rows: (trusted_users.rows.len() + trusted_co_agents.rows.len()) as u64,
-        canonical_outcomes,
-        raw_outcomes,
-        exact_one_violations: 0,
-        physical_rows: BTreeMap::from([
-            ("grant_sets".into(), report_group_count(target)?),
-            ("agent_grants".into(), grant_rows),
-            ("grant_actions".into(), action_rows),
-            ("grant_source_provenance".into(), provenance_rows),
-        ]),
-    });
+    accounting.physical_rows = BTreeMap::from([
+        ("grant_sets".into(), report_group_count(target)?),
+        ("agent_grants".into(), grant_rows),
+        ("grant_actions".into(), action_rows),
+        ("grant_source_provenance".into(), provenance_rows),
+        ("migration_provenance".into(), common_provenance_rows),
+    ]);
+    report.classes.push(accounting);
     Ok(())
 }
 
@@ -690,6 +789,7 @@ fn parse_user_grant(
         created_at,
         source_key: row.source_key.clone(),
         row_digest: row.row_digest,
+        contribution: ContributionKey::new(table, row),
     })
 }
 
@@ -739,6 +839,7 @@ fn parse_co_agent_grant(
         created_at,
         source_key: row.source_key.clone(),
         row_digest: row.row_digest,
+        contribution: ContributionKey::new(table, row),
     })
 }
 
@@ -747,6 +848,17 @@ fn grant_source_rank(source: GrantSource) -> u8 {
         GrantSource::User => 0,
         GrantSource::CoAgent => 1,
     }
+}
+
+fn grant_source_table(source: GrantSource) -> &'static str {
+    match source {
+        GrantSource::User => "trusted_users",
+        GrantSource::CoAgent => "trusted_co_agents",
+    }
+}
+
+fn nullable_text(value: Option<&str>) -> source::SqliteValue {
+    value.map(text).unwrap_or(source::SqliteValue::Null)
 }
 
 fn role_rank(role: &str) -> u8 {
@@ -760,6 +872,33 @@ fn role_rank(role: &str) -> u8 {
 
 fn report_group_count(target: &Transaction<'_>) -> Result<u64> {
     Ok(target.query_row("SELECT COUNT(*) FROM grant_sets", [], |row| row.get(0))?)
+}
+
+fn create_fresh_target(path: &Path) -> Result<Connection> {
+    match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(file) => drop(file),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(ConverterError::TargetNotFresh);
+        }
+        Err(error) => return Err(error.into()),
+    }
+    Ok(Connection::open(path)?)
+}
+
+fn load_migration_instances(target: &Transaction<'_>) -> Result<MigrationInstanceSet> {
+    let mut statement = target.prepare("SELECT instance_id,kind_id FROM gate_instances")?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut instances = rows
+        .into_iter()
+        .map(|(instance_id, kind_id)| MigrationInstance::new(instance_id, kind_id))
+        .collect::<Result<Vec<_>>>()?;
+    validate_instances(&instances)?;
+    instances.sort_by_key(|instance| instance.uuid_bytes);
+    Ok(MigrationInstanceSet(instances))
 }
 
 fn validate_instances(instances: &[MigrationInstance]) -> Result<()> {

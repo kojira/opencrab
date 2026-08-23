@@ -7,15 +7,13 @@ use std::process::Command;
 fn phase1_dirty_fixture_is_accounted_and_byte_stable() {
     let temporary = tempfile::tempdir().unwrap();
     let source = temporary.path().join("source.db");
-    let instances = temporary.path().join("instances.json");
-    std::fs::write(&instances, include_bytes!("fixtures/phase1-instances.json")).unwrap();
     Connection::open(&source)
         .unwrap()
         .execute_batch(include_str!("fixtures/phase1-dirty.sql"))
         .unwrap();
 
-    let first = run_converter(&source, &temporary.path().join("target-a.db"), &instances);
-    let second = run_converter(&source, &temporary.path().join("target-b.db"), &instances);
+    let first = run_converter(&source, &temporary.path().join("target-a.db"));
+    let second = run_converter(&source, &temporary.path().join("target-b.db"));
     assert_eq!(first.0, second.0, "accounting report must be deterministic");
     assert_eq!(
         std::fs::read(temporary.path().join("target-a.db")).unwrap(),
@@ -28,41 +26,37 @@ fn phase1_dirty_fixture_is_accounted_and_byte_stable() {
 }
 
 #[test]
-fn converter_rejects_a_nonempty_target() {
+fn converter_rejects_every_preexisting_target_even_when_logically_empty() {
     let temporary = tempfile::tempdir().unwrap();
     let source = temporary.path().join("source.db");
     let target = temporary.path().join("target.db");
-    let instances = temporary.path().join("instances.json");
-    std::fs::write(&instances, include_bytes!("fixtures/phase1-instances.json")).unwrap();
     Connection::open(&source)
         .unwrap()
         .execute_batch(include_str!("fixtures/phase1-dirty.sql"))
         .unwrap();
     Connection::open(&target)
         .unwrap()
-        .execute("CREATE TABLE occupied(id INTEGER)", [])
+        .execute_batch(
+            "PRAGMA user_version=37;
+             CREATE TABLE discarded(x);
+             DROP TABLE discarded;",
+        )
         .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_opencrab-converter"))
         .args(["--source", source.to_str().unwrap()])
         .args(["--target", target.to_str().unwrap()])
-        .args(["--instance-set", instances.to_str().unwrap()])
         .output()
         .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8(output.stderr)
         .unwrap()
-        .contains("target database is not empty"));
+        .contains("target database path already exists"));
 }
 
-fn run_converter(
-    source: &std::path::Path,
-    target: &std::path::Path,
-    instances: &std::path::Path,
-) -> (String, Vec<u8>) {
+fn run_converter(source: &std::path::Path, target: &std::path::Path) -> (String, Vec<u8>) {
     let output = Command::new(env!("CARGO_BIN_EXE_opencrab-converter"))
         .args(["--source", source.to_str().unwrap()])
         .args(["--target", target.to_str().unwrap()])
-        .args(["--instance-set", instances.to_str().unwrap()])
         .output()
         .unwrap();
     assert!(

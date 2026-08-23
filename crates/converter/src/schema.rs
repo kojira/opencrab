@@ -1,22 +1,18 @@
-use crate::{ConverterError, Result};
+use crate::Result;
 use rusqlite::Connection;
-
-pub(crate) fn require_empty_target(conn: &Connection) -> Result<()> {
-    let count = conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'",
-        [],
-        |row| row.get::<_, i64>(0),
-    )?;
-    if count != 0 {
-        return Err(ConverterError::TargetNotEmpty);
-    }
-    Ok(())
-}
 
 pub(crate) fn create_phase1_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
         PRAGMA foreign_keys=ON;
+        CREATE TABLE gate_instances(
+          instance_id TEXT NOT NULL PRIMARY KEY,
+          kind_id TEXT NOT NULL CHECK(kind_id IN ('discord','nostr','web','rest')),
+          label TEXT NOT NULL,
+          owner_subject_id INTEGER,
+          active_revision INTEGER NOT NULL,
+          lifecycle TEXT NOT NULL CHECK(lifecycle IN ('stopped','starting','running','stopping'))
+        );
         CREATE TABLE subjects(
           id INTEGER NOT NULL PRIMARY KEY,
           kind TEXT NOT NULL CHECK(kind IN ('human','agent')),
@@ -101,6 +97,15 @@ pub(crate) fn create_phase1_schema(conn: &Connection) -> Result<()> {
           source_record_key TEXT,
           created_by TEXT NOT NULL,
           created_at INTEGER NOT NULL
+        );
+        CREATE TABLE migration_provenance(
+          target_entity TEXT NOT NULL,
+          target_key BLOB NOT NULL,
+          source_database_digest BLOB NOT NULL CHECK(length(source_database_digest)=32),
+          source_locator TEXT NOT NULL CHECK(source_locator <> ''),
+          source_key BLOB NOT NULL,
+          source_row_digest BLOB NOT NULL CHECK(length(source_row_digest)=32),
+          PRIMARY KEY(target_entity,target_key,source_locator,source_key)
         );
         CREATE TABLE legacy_unowned_source_rows(
           source_db TEXT NOT NULL,

@@ -45,6 +45,7 @@ INSERT INTO trusted_users VALUES
   ('tu-rest','principal-rest','agent_alpha','user','fixture','2024-04-01 00:00:00','Synthetic Rest','rest'),
   ('tu-empty','principal-empty','agent_alpha','user','fixture','2024-05-01 00:00:00','','discord'),
   ('tu-time','principal-time','agent_alpha','user','fixture','not-a-time','Synthetic Time','discord'),
+  ('tu-empty-id','','agent_alpha','user','fixture','2024-01-01 00:00:00','Synthetic Empty Id','discord'),
   ('tu-unknown','principal-unknown','agent_alpha','user','fixture','2024-06-01 00:00:00','Synthetic Unknown','matrix');
 
 INSERT INTO trusted_co_agents VALUES
