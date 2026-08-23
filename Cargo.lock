@@ -840,6 +840,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "opencrab-converter"
+version = "0.2.17"
+dependencies = [
+ "base64",
+ "rusqlite",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "opencrab-engine"
 version = "0.2.17"
 dependencies = [

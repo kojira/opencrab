@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/converter",
     "crates/port",
     "crates/store",
     "crates/engine",
@@ -30,6 +31,7 @@ futures = "0.3"
 serde_json = "1"
 sha2 = "0.10"
 sha1 = "0.10"
+base64 = "0.22"
 
 # HTTP
 reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
