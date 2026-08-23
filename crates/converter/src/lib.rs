@@ -311,7 +311,7 @@ fn load_effective_config(
 ) -> Result<EffectiveConfigSnapshot> {
     let raw = std::fs::read(config_path)?;
     let environment_raw = std::fs::read(environment_path)?;
-    if environment_raw.contains(&b'$') {
+    if environment_assignment_values_contain_dollar(&environment_raw) {
         return Err(ConverterError::SourceSchema(
             "environment snapshot must contain resolved values, not variable references".into(),
         ));
@@ -369,6 +369,29 @@ fn load_effective_config(
         config,
         digest: digest.finalize().into(),
     })
+}
+
+fn environment_assignment_values_contain_dollar(environment_raw: &[u8]) -> bool {
+    for mut line in environment_raw.split(|&b| b == b'\n') {
+        if let Some(stripped) = line.strip_suffix(b"\r") {
+            line = stripped;
+        }
+        let start = line
+            .iter()
+            .position(|b| !b.is_ascii_whitespace())
+            .unwrap_or(line.len());
+        let trimmed = &line[start..];
+        if trimmed.is_empty() || trimmed[0] == b'#' {
+            continue;
+        }
+        let Some(eq) = trimmed.iter().position(|&b| b == b'=') else {
+            continue;
+        };
+        if trimmed[eq + 1..].contains(&b'$') {
+            return true;
+        }
+    }
+    false
 }
 
 fn expand_environment(input: &str, environment: &BTreeMap<String, String>) -> String {
