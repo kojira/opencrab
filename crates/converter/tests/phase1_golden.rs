@@ -327,7 +327,7 @@ fn public_convert_rejects_a_multiple_task_exact_join() {
         .execute(
             "INSERT INTO task_ledger VALUES(
                1,'agent_alpha','discord-agent_alpha-111-222','Duplicate Synthetic Goal',NULL,
-               'active','2024-01-05 00:00:00','2024-01-05 00:00:00'
+               'active','2024-01-05 00:00:00','2024-01-05 00:00:00',0
              )",
             [],
         )
@@ -1136,6 +1136,50 @@ fn snapshot(path: &std::path::Path, report: &str) -> String {
         &mut output,
         5,
     );
+    output.push_str("PHASE3\n");
+    append_query(
+        &connection,
+        "SELECT owner_subject_id,enabled,raw_interval_secs,printf('%016x',source_updated_at)
+         FROM schedule_source_state ORDER BY owner_subject_id,source_updated_at",
+        &mut output,
+        4,
+    );
+    append_query(
+        &connection,
+        "SELECT id,owner_subject_id,kind,scope,tool_name,endpoint,enabled,maximum_output_chars
+         FROM webhook_endpoints ORDER BY id",
+        &mut output,
+        8,
+    );
+    append_query(
+        &connection,
+        "SELECT owner_subject_id,name,persona_name,custom_traits,source_record_key
+         FROM soul_presets ORDER BY owner_subject_id,name",
+        &mut output,
+        5,
+    );
+    append_query(
+        &connection,
+        "SELECT id,owner_subject_id,place_id,model,CAST(request_body AS TEXT),CAST(response_body AS TEXT)
+         FROM llm_call_records ORDER BY id",
+        &mut output,
+        6,
+    );
+    append_query(
+        &connection,
+        "SELECT id,owner_subject_id,model,situation,observation,tags_json
+         FROM model_observations ORDER BY id",
+        &mut output,
+        6,
+    );
+    append_query(
+        &connection,
+        "SELECT id,owner_subject_id,place_id,goal,state,restart_count,source_record_key
+         FROM tasks ORDER BY id",
+        &mut output,
+        7,
+    );
+    append_query(&connection, "SELECT COUNT(*) FROM offloads", &mut output, 1);
     output.push_str("RAW\n");
     let mut statement = connection
         .prepare(
@@ -1192,5 +1236,14 @@ fn append_query(connection: &Connection, sql: &str, output: &mut String, columns
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    bytes
+        .chunks(4)
+        .map(|chunk| {
+            chunk
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join(":")
 }

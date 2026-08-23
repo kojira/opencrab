@@ -187,7 +187,95 @@ CREATE TABLE task_ledger(
   contract TEXT,
   status TEXT NOT NULL,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  restart_count INTEGER NOT NULL DEFAULT 0
 );
 INSERT INTO task_ledger VALUES
-  (1,'agent_alpha','discord-agent_alpha-111-222','Synthetic Goal',NULL,'active','2024-01-05 00:00:00','2024-01-05 00:00:00');
+  (1,'agent_alpha','discord-agent_alpha-111-222','Synthetic Goal',NULL,'active','2024-01-05 00:00:00','2024-01-05 00:00:00',0),
+  (2,'agent_alpha','subtask-tool-1','Synthetic Child Goal',NULL,'active','2024-01-05 00:01:00','2024-01-05 00:01:00',0),
+  (3,'agent_missing','subtask-tool-1','Unknown Owner Goal',NULL,'active','2024-01-05 00:02:00','2024-01-05 00:02:00',0);
+
+CREATE TABLE agent_heartbeat_config(
+  agent_id TEXT,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  interval_secs INTEGER,
+  updated_at TEXT NOT NULL
+);
+INSERT INTO agent_heartbeat_config VALUES
+  ('agent_alpha',1,60,'2024-01-06 00:00:00'),
+  ('agent_missing',1,30,'2024-01-06 00:00:00'),
+  ('agent_alpha','not-bool',15,'2024-01-06 00:00:00');
+
+CREATE TABLE agent_webhook_config(
+  scope TEXT NOT NULL DEFAULT 'agent',
+  agent_id TEXT NOT NULL,
+  tool_name TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT 'subtask',
+  url TEXT NOT NULL,
+  events_json TEXT,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  name TEXT,
+  created_by TEXT,
+  output_mode TEXT NOT NULL DEFAULT 'summary',
+  max_chars INTEGER NOT NULL DEFAULT 1500,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(scope,agent_id,tool_name,kind)
+);
+INSERT INTO agent_webhook_config VALUES
+  ('agent','agent_alpha','synthetic_hook','subtask','https://example.invalid/hook','["done"]',1,'Synthetic Hook','fixture','summary',1500,'2024-01-07 00:00:00'),
+  ('agent','agent_missing','missing_hook','subtask','https://example.invalid/missing',NULL,1,NULL,NULL,'summary',1500,'2024-01-07 00:00:00'),
+  ('agent','agent_alpha','dirty_hook','subtask','https://example.invalid/dirty','{"a":1,"a":2}',1,'Dirty Hook','fixture','summary',1500,'2024-01-07 00:00:00');
+
+CREATE TABLE soul_presets(
+  id TEXT,
+  agent_id TEXT NOT NULL,
+  preset_name TEXT NOT NULL,
+  persona_name TEXT NOT NULL,
+  custom_traits_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+INSERT INTO soul_presets VALUES
+  ('soul-a','agent_alpha','Synthetic Preset','Synthetic Persona','{"tone":"calm"}','2024-01-08 00:00:00','2024-01-08 00:00:01'),
+  ('soul-dirty','agent_alpha','Dirty Preset','Dirty Persona',NULL,'not-a-time','2024-01-08 00:00:01');
+
+CREATE TABLE llm_logs(
+  id TEXT,
+  agent_id TEXT NOT NULL,
+  session_id TEXT,
+  model TEXT,
+  prompt TEXT NOT NULL,
+  response TEXT NOT NULL,
+  tool_calls TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  latency_ms INTEGER,
+  prompt_tokens INTEGER,
+  completion_tokens INTEGER,
+  total_tokens INTEGER,
+  error_code TEXT,
+  error_body TEXT,
+  requested_at TEXT,
+  trigger_message_id TEXT,
+  is_bot_iteration INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER,
+  cache_creation_tokens INTEGER
+);
+INSERT INTO llm_logs VALUES
+  ('llm-a','agent_alpha','discord-agent_alpha-111-222','synthetic-model','prompt-a','response-a',NULL,'2024-01-09 00:00:00',10,1,2,3,NULL,NULL,'2024-01-09 00:00:00',NULL,1,NULL,NULL),
+  ('llm-missing','agent_missing',NULL,'synthetic-model','prompt-b','response-b',NULL,'2024-01-09 00:00:01',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,0,NULL,NULL),
+  ('llm-dirty','agent_alpha',NULL,'synthetic-model','prompt-c','response-c','{"k":1,"k":2}','2024-01-09 00:00:02',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,0,NULL,NULL);
+
+CREATE TABLE model_experience_notes(
+  id TEXT,
+  agent_id TEXT NOT NULL,
+  provider TEXT,
+  model TEXT,
+  situation TEXT NOT NULL,
+  observation TEXT NOT NULL,
+  recommendation TEXT,
+  tags TEXT,
+  created_at TEXT NOT NULL
+);
+INSERT INTO model_experience_notes VALUES
+  ('note-a','agent_alpha','synthetic','synthetic-model','Synthetic situation','Synthetic observation',NULL,'["ok"]','2024-01-10 00:00:00'),
+  ('note-missing','agent_missing',NULL,NULL,'Unknown situation','Unknown observation',NULL,NULL,'2024-01-10 00:00:01');

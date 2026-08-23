@@ -339,6 +339,94 @@ pub(crate) fn create_phase1_schema(conn: &Connection) -> Result<()> {
           reason TEXT NOT NULL CHECK(reason <> ''),
           PRIMARY KEY(source_db,source_table,source_key)
         );
+        CREATE TABLE schedule_source_state(
+          owner_subject_id INTEGER NOT NULL,
+          enabled INTEGER NOT NULL,
+          raw_interval_secs INTEGER,
+          source_updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE webhook_endpoints(
+          id INTEGER NOT NULL PRIMARY KEY,
+          created_by TEXT,
+          enabled INTEGER NOT NULL,
+          endpoint TEXT NOT NULL,
+          event_filter TEXT,
+          kind TEXT NOT NULL,
+          maximum_output_chars INTEGER NOT NULL,
+          name TEXT,
+          output_mode TEXT NOT NULL,
+          owner_subject_id INTEGER NOT NULL,
+          scope TEXT NOT NULL,
+          tool_name TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE soul_presets(
+          owner_subject_id INTEGER NOT NULL,
+          name TEXT NOT NULL,
+          persona_name TEXT NOT NULL,
+          custom_traits TEXT,
+          source_record_key TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE llm_call_records(
+          id INTEGER NOT NULL PRIMARY KEY,
+          bot_iteration INTEGER NOT NULL,
+          cache_creation_tokens INTEGER,
+          cache_read_tokens INTEGER,
+          completion_tokens INTEGER,
+          created_at INTEGER,
+          error_body TEXT,
+          error_code TEXT,
+          latency_ms INTEGER,
+          model TEXT,
+          model_id TEXT,
+          owner_subject_id INTEGER NOT NULL,
+          place_id INTEGER,
+          prompt_tokens INTEGER,
+          provider_id TEXT,
+          request_body BLOB NOT NULL,
+          requested_at INTEGER,
+          response_body BLOB NOT NULL,
+          source_record_key TEXT,
+          tool_call_payload TEXT,
+          total_tokens INTEGER,
+          trigger_external_id TEXT
+        );
+        CREATE TABLE model_observations(
+          id INTEGER NOT NULL PRIMARY KEY,
+          created_at INTEGER NOT NULL,
+          model TEXT,
+          model_id TEXT,
+          observation TEXT NOT NULL,
+          owner_subject_id INTEGER NOT NULL,
+          provider TEXT,
+          provider_id TEXT,
+          recommendation TEXT,
+          situation TEXT NOT NULL,
+          source_record_key TEXT,
+          tags_json TEXT
+        );
+        CREATE TABLE tasks(
+          id INTEGER NOT NULL PRIMARY KEY,
+          contract TEXT,
+          created_at INTEGER NOT NULL,
+          goal TEXT NOT NULL,
+          owner_subject_id INTEGER NOT NULL,
+          place_id INTEGER NOT NULL,
+          restart_count INTEGER NOT NULL,
+          source_record_key INTEGER,
+          state TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE offloads(
+          activity_id INTEGER NOT NULL PRIMARY KEY,
+          body BLOB NOT NULL,
+          created_at INTEGER NOT NULL,
+          place_id INTEGER NOT NULL,
+          subject_id INTEGER NOT NULL,
+          truncated INTEGER NOT NULL
+        );
         "#,
     )?;
     Ok(())

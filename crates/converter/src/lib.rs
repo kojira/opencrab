@@ -1,3 +1,4 @@
+mod phase3;
 mod provenance;
 mod report;
 mod schema;
@@ -3642,6 +3643,14 @@ pub fn convert(
         &mut raw,
         &mut report,
     )?;
+    phase3::assemble_phase3(
+        &source,
+        &transaction,
+        &agent_subjects,
+        &provenance,
+        &mut raw,
+        &mut report,
+    )?;
     raw.write(&transaction)?;
 
     for table in [
@@ -3672,6 +3681,13 @@ pub fn convert(
         "subject_history_sources",
         "interactions",
         "interaction_responses",
+        "schedule_source_state",
+        "webhook_endpoints",
+        "soul_presets",
+        "llm_call_records",
+        "model_observations",
+        "tasks",
+        "offloads",
         "migration_provenance",
         "legacy_unowned_source_rows",
     ] {
