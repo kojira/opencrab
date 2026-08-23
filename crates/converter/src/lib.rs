@@ -101,6 +101,64 @@ impl MigrationInstance {
 #[derive(Clone, Debug, Default)]
 struct MigrationInstanceSet(Vec<MigrationInstance>);
 
+/// Phase boundary used by the production conversion coordinator.
+///
+/// Implementations read from the same open source snapshot and assemble migration-created
+/// instances directly in the fresh target transaction. They do not return a caller-supplied
+/// authority set: after this phase completes, `convert` reads the authoritative set back from
+/// `gate_instances` before assembling principals.
+pub trait MigrationInstanceAssembler {
+    fn assemble(&self, source: &Connection, target: &MigrationInstanceTarget<'_, '_>)
+        -> Result<()>;
+}
+
+/// Restricted target writer passed to the migration instance assembly phase.
+pub struct MigrationInstanceTarget<'target, 'connection> {
+    transaction: &'target Transaction<'connection>,
+}
+
+impl MigrationInstanceTarget<'_, '_> {
+    /// Writes one complete migration-created instance row.
+    ///
+    /// Phase 1 fixes the initial revision and lifecycle values; the assembly owns the instance ID,
+    /// kind, label, and optional owner produced from its migration sources.
+    pub fn create_instance(
+        &self,
+        instance_id: &str,
+        kind_id: &str,
+        label: &str,
+        owner_subject_id: Option<i64>,
+    ) -> Result<()> {
+        MigrationInstance::new(instance_id, kind_id)?;
+        if label.is_empty() {
+            return Err(ConverterError::InstanceSet(
+                "migration-created instance label must not be empty".into(),
+            ));
+        }
+        self.transaction.execute(
+            "INSERT INTO gate_instances(
+               instance_id,kind_id,label,owner_subject_id,active_revision,lifecycle
+             ) VALUES(?1,?2,?3,?4,1,'stopped')",
+            params![instance_id, kind_id, label, owner_subject_id],
+        )?;
+        Ok(())
+    }
+}
+
+/// Instance phase for a conversion slice which has no instance-producing source family.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoMigrationInstances;
+
+impl MigrationInstanceAssembler for NoMigrationInstances {
+    fn assemble(
+        &self,
+        _source: &Connection,
+        _target: &MigrationInstanceTarget<'_, '_>,
+    ) -> Result<()> {
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ConvertOptions {
     pub source: PathBuf,
@@ -193,7 +251,10 @@ struct GrantContributor {
     contribution: ContributionKey,
 }
 
-pub fn convert(options: ConvertOptions) -> Result<ConvertOutcome> {
+pub fn convert(
+    options: ConvertOptions,
+    instance_assembler: &dyn MigrationInstanceAssembler,
+) -> Result<ConvertOutcome> {
     let source_database_digest = digest_file(&options.source)?;
     let source = Connection::open_with_flags(
         &options.source,
@@ -238,14 +299,18 @@ pub fn convert(options: ConvertOptions) -> Result<ConvertOutcome> {
         "created_by",
         "created_at",
     ])?;
-    source.execute_batch("ROLLBACK")?;
-
     let mut target = create_fresh_target(&options.target)?;
     let transaction = target.transaction()?;
     create_phase1_schema(&transaction)?;
-    // This is deliberately loaded only from the target transaction. Instance assembly will write
-    // gate_instances earlier in this same transaction; a file or caller-supplied UUID set is never
-    // production authority.
+    // The coordinator owns this transaction across both phases. The assembler writes complete
+    // migration-created rows first; only rows read back from this transaction are principal
+    // authority. A file or caller-supplied UUID set is never production authority.
+    instance_assembler.assemble(
+        &source,
+        &MigrationInstanceTarget {
+            transaction: &transaction,
+        },
+    )?;
     let migration_instances = load_migration_instances(&transaction)?;
 
     let mut raw = RawCollector::default();
@@ -329,6 +394,7 @@ pub fn convert(options: ConvertOptions) -> Result<ConvertOutcome> {
         report.physical_rows.insert(table.into(), count);
     }
     report.verify()?;
+    source.execute_batch("ROLLBACK")?;
     transaction.commit()?;
     Ok(ConvertOutcome { report })
 }

@@ -1,4 +1,4 @@
-use opencrab_converter::{convert, ConvertOptions};
+use opencrab_converter::{convert, ConvertOptions, NoMigrationInstances};
 use std::path::PathBuf;
 
 fn usage() -> ! {
@@ -27,7 +27,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (Some(source), Some(target)) = (source, target) else {
         usage();
     };
-    let outcome = convert(ConvertOptions { source, target })?;
+    let outcome = convert(ConvertOptions { source, target }, &NoMigrationInstances)?;
     let rendered = outcome.report.to_pretty_json()?;
     print!("{rendered}");
     Ok(())
