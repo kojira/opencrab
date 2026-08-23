@@ -6,6 +6,8 @@
 //! を知らない。
 
 use std::collections::BTreeSet;
+use std::future::Future;
+use std::pin::Pin;
 use tokio::time::Instant;
 
 pub type PlaceId = i64;
@@ -653,16 +655,11 @@ pub struct ToolError(pub String);
 /// core は core ツール以外の呼び出しをここへ渡す。今回の範囲ではテスト用の実装だけ。
 #[async_trait::async_trait]
 pub trait ToolHost: Send + Sync {
-    async fn invoke(&self, call: &ToolCallSpec) -> Result<String, ToolError>;
-
     async fn invoke_route(
         &self,
         route: &GateRoute,
         call: &ToolCallSpec,
-    ) -> Result<String, ToolError> {
-        let _ = route;
-        self.invoke(call).await
-    }
+    ) -> Result<String, ToolError>;
 }
 
 /// shell（core builtin `core-shell`）を実行する seam。テストでは fake、実機では tokio::process。
@@ -952,6 +949,21 @@ pub struct DeliveryAck {
 #[derive(Debug)]
 pub struct TransportError(pub String);
 
+/// Result of one canonical routed delivery, classified at the external-acceptance boundary.
+pub type LateDeliveryObservation = Pin<Box<dyn Future<Output = Option<Vec<u8>>> + Send + 'static>>;
+
+pub enum TransportDeliveryResult {
+    /// The request was rejected before it could reach the external API.
+    DefiniteFailure(TransportError),
+    /// The gate definitely acknowledged the request.
+    DefiniteAck(DeliveryAck),
+    /// The request crossed the acceptance boundary but its outcome could not be observed.
+    Indeterminate {
+        error: TransportError,
+        late_observation: Option<LateDeliveryObservation>,
+    },
+}
+
 /// core → plugin の要求（応答を伴うもの）を運ぶ seam。本番では plugd が実装する。
 ///
 /// 活動（通知・応答なし）は `Notifier` が、ゲートのツール実行は `ToolHost` が担う。
@@ -959,39 +971,34 @@ pub struct TransportError(pub String);
 /// core はこの trait にだけ依存し、plugd を知らない（詳細§01）。
 #[async_trait::async_trait]
 pub trait Transport: Send + Sync {
-    async fn bind(&self, gate: &GateName, address: &str) -> Result<(), TransportError>;
-    async fn unbind(&self, gate: &GateName, address: &str) -> Result<(), TransportError>;
+    /// Explicit protocol-1 compatibility boundary. Canonical callers use the route methods.
+    async fn compat_bind(&self, gate: &GateName, address: &str) -> Result<(), TransportError>;
+    async fn compat_unbind(&self, gate: &GateName, address: &str) -> Result<(), TransportError>;
     /// 外に容れ物を作る（§02 `open`）。返ってきた住所に core が新しい場を結ぶ。
-    async fn open(
+    async fn compat_open(
         &self,
         gate: &GateName,
         under: &str,
         hint: Option<&str>,
     ) -> Result<String, TransportError>;
     /// 確定済みの効果を、あるチャネル（gate+address）へ運ぶ（§04）。ack で origin を返し得る。
-    async fn deliver_effect(
+    async fn compat_deliver_effect(
         &self,
         gate: &GateName,
         address: &str,
         effect: OutgoingEffect,
     ) -> Result<DeliveryAck, TransportError>;
 
-    async fn bind_route(&self, route: &GateRoute) -> Result<(), TransportError> {
-        self.bind(&route.kind_id, &route.address).await
-    }
+    async fn bind_route(&self, route: &GateRoute) -> Result<(), TransportError>;
 
-    async fn unbind_route(&self, route: &GateRoute) -> Result<(), TransportError> {
-        self.unbind(&route.kind_id, &route.address).await
-    }
+    async fn unbind_route(&self, route: &GateRoute) -> Result<(), TransportError>;
 
     async fn deliver_effect_route(
         &self,
         route: &GateRoute,
+        seq: Seq,
         effect: OutgoingEffect,
-    ) -> Result<DeliveryAck, TransportError> {
-        self.deliver_effect(&route.kind_id, &route.address, effect)
-            .await
-    }
+    ) -> TransportDeliveryResult;
 }
 
 /// プラグインから届いた出来事（プロトコル§03）。外界の識別子は文字列のまま core へ渡し、

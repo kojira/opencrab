@@ -11,6 +11,24 @@ use std::sync::{Arc, Mutex};
 
 pub type Result<T> = std::result::Result<T, rusqlite::Error>;
 
+#[derive(Debug)]
+pub enum GateConnectionStartError {
+    InstanceUnknown,
+    KindMismatch,
+    RevisionMismatch,
+    RevisionUnavailable,
+    InstanceDisabled,
+    KindDeclarationMismatch,
+    InstanceActive,
+    Store(rusqlite::Error),
+}
+
+impl From<rusqlite::Error> for GateConnectionStartError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Store(error)
+    }
+}
+
 #[derive(Clone)]
 pub struct Store {
     conn: Arc<Mutex<Connection>>,
@@ -594,10 +612,9 @@ const SCHEMA: &str = r#"
             CREATE TABLE IF NOT EXISTS memberships(
               place_id INTEGER NOT NULL,
               subject_id INTEGER NOT NULL,
-              role TEXT NOT NULL,
-              read_seq INTEGER NOT NULL,
+              role TEXT NOT NULL CHECK(role IN ('participant','observer')),
               joined_at INTEGER NOT NULL,
-              left_at INTEGER,
+              shared_seen_seq INTEGER NOT NULL CHECK(shared_seen_seq >= 0),
               PRIMARY KEY(place_id, subject_id)
             );
 
@@ -743,13 +760,13 @@ const SCHEMA: &str = r#"
             -- issue #742 canonical gate model. These tables are created even when the converter
             -- emits no rows; runtime read-set closure is a schema property, not converter output.
             CREATE TABLE IF NOT EXISTS gate_kinds(
-              kind_id TEXT PRIMARY KEY,
+              kind_id TEXT NOT NULL PRIMARY KEY,
               protocol_major INTEGER NOT NULL,
               origin_scope TEXT NOT NULL CHECK(origin_scope IN ('instance','kind_address')),
               ingress_discovery TEXT NOT NULL CHECK(ingress_discovery IN ('prebound','membership'))
             );
             CREATE TABLE IF NOT EXISTS gate_instances(
-              instance_id TEXT PRIMARY KEY,
+              instance_id TEXT NOT NULL PRIMARY KEY,
               kind_id TEXT NOT NULL,
               label TEXT NOT NULL,
               owner_subject_id INTEGER,
@@ -781,7 +798,7 @@ const SCHEMA: &str = r#"
             CREATE UNIQUE INDEX IF NOT EXISTS idx_gate_connections_one_active
               ON gate_connections(instance_id) WHERE state='active';
             CREATE TABLE IF NOT EXISTS external_origin_scopes(
-              scope_id TEXT PRIMARY KEY,
+              scope_id TEXT NOT NULL PRIMARY KEY,
               kind_id TEXT NOT NULL,
               address TEXT NOT NULL,
               mode TEXT NOT NULL CHECK(mode IN ('instance','kind_address')),
@@ -793,7 +810,7 @@ const SCHEMA: &str = r#"
             CREATE UNIQUE INDEX IF NOT EXISTS idx_origin_scope_kind_address
               ON external_origin_scopes(kind_id,address) WHERE mode='kind_address';
             CREATE TABLE IF NOT EXISTS gate_bindings(
-              binding_id TEXT PRIMARY KEY,
+              binding_id TEXT NOT NULL PRIMARY KEY,
               place_id INTEGER NOT NULL,
               instance_id TEXT NOT NULL,
               address TEXT NOT NULL,
@@ -830,7 +847,7 @@ const SCHEMA: &str = r#"
               UNIQUE(place_id,seq,binding_id)
             );
             CREATE TABLE IF NOT EXISTS deliveries(
-              delivery_id TEXT PRIMARY KEY,
+              delivery_id TEXT NOT NULL PRIMARY KEY,
               place_id INTEGER NOT NULL,
               seq INTEGER NOT NULL,
               binding_id TEXT NOT NULL,
@@ -843,7 +860,7 @@ const SCHEMA: &str = r#"
               error TEXT
             );
             CREATE TABLE IF NOT EXISTS delivery_observations(
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
               delivery_id TEXT NOT NULL,
               connection_epoch INTEGER NOT NULL,
               kind TEXT NOT NULL,
@@ -851,7 +868,7 @@ const SCHEMA: &str = r#"
               observed_at INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS gate_dedup_hits(
-              hit_id TEXT PRIMARY KEY,
+              hit_id TEXT NOT NULL PRIMARY KEY,
               kind_id TEXT NOT NULL,
               origin_scope_id TEXT NOT NULL,
               place_id INTEGER NOT NULL,
@@ -876,34 +893,36 @@ const SCHEMA: &str = r#"
               PRIMARY KEY(origin_scope_id,external_id)
             );
             CREATE TABLE IF NOT EXISTS agent_grants(
-              subject_id INTEGER NOT NULL,
-              grant_revision INTEGER NOT NULL,
-              permission TEXT NOT NULL,
-              PRIMARY KEY(subject_id,grant_revision)
+              grant_set_revision INTEGER NOT NULL,
+              grant_set_subject_id INTEGER NOT NULL,
+              principal_subject_id INTEGER NOT NULL,
+              role TEXT NOT NULL CHECK(role IN ('owner','owner_equivalent','trusted','agent')),
+              scope TEXT NOT NULL,
+              PRIMARY KEY(grant_set_subject_id,grant_set_revision,principal_subject_id,role,scope)
             );
             CREATE TABLE IF NOT EXISTS grant_sets(
-              subject_id INTEGER NOT NULL,
+              agent_subject_id INTEGER NOT NULL,
               revision INTEGER NOT NULL,
               created_at INTEGER NOT NULL,
-              PRIMARY KEY(subject_id,revision)
+              PRIMARY KEY(agent_subject_id,revision)
             );
             CREATE TABLE IF NOT EXISTS grant_source_provenance(
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              principal_subject_id INTEGER,
-              gate_kind TEXT,
-              external_id TEXT,
-              source_permission TEXT,
+              agent_subject_id INTEGER NOT NULL,
+              principal_subject_id INTEGER NOT NULL,
+              gate_kind TEXT NOT NULL,
+              external_id TEXT NOT NULL,
+              source_permission TEXT NOT NULL,
               source_allowed_actions TEXT,
               source_record_key TEXT,
-              created_by TEXT,
-              created_at INTEGER
+              created_by TEXT NOT NULL,
+              created_at INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS place_source_refs(
               source_system TEXT NOT NULL,
               source_address TEXT NOT NULL,
               place_id INTEGER NOT NULL,
               source_id BLOB NOT NULL,
-              classification TEXT NOT NULL,
+              classification TEXT NOT NULL CHECK(classification IN ('live','legacy_general','child','config_only')),
               metadata TEXT,
               facilitator_subject_id INTEGER,
               participant_public_ids TEXT,
@@ -919,7 +938,7 @@ const SCHEMA: &str = r#"
               UNIQUE(source_system,source_address)
             );
             CREATE TABLE IF NOT EXISTS place_default_policies(
-              default_id TEXT PRIMARY KEY,
+              default_id TEXT NOT NULL PRIMARY KEY,
               place_id INTEGER,
               kind_id TEXT NOT NULL,
               resolution TEXT NOT NULL CHECK(resolution IN ('active','ambiguous_place','invalid_runtime_fields','conflicting_default')),
@@ -945,10 +964,10 @@ const SCHEMA: &str = r#"
               PRIMARY KEY(place_id,kind_id,subject_id)
             );
             CREATE TABLE IF NOT EXISTS schedules(
-              id INTEGER PRIMARY KEY,
+              id INTEGER NOT NULL PRIMARY KEY,
               owner_subject_id INTEGER NOT NULL,
               place_id INTEGER NOT NULL,
-              kind TEXT NOT NULL,
+              kind TEXT NOT NULL CHECK(kind IN ('heartbeat','cron','every')),
               expression TEXT NOT NULL,
               timezone TEXT NOT NULL,
               interval_secs INTEGER,
@@ -972,25 +991,25 @@ const SCHEMA: &str = r#"
               subject_id INTEGER NOT NULL,
               policy_revision INTEGER NOT NULL,
               tool_id TEXT NOT NULL,
-              visibility TEXT NOT NULL,
+              visibility TEXT NOT NULL CHECK(visibility IN ('hidden','visible')),
               allowed INTEGER NOT NULL,
               PRIMARY KEY(subject_id,policy_revision,tool_id)
             );
             CREATE TABLE IF NOT EXISTS gate_operations(
-              operation_id TEXT PRIMARY KEY,
+              operation_id TEXT NOT NULL PRIMARY KEY,
               subject_id INTEGER,
               kind TEXT NOT NULL,
               binding_id TEXT,
               instance_id TEXT NOT NULL,
               connection_epoch INTEGER,
-              state TEXT NOT NULL,
+              state TEXT NOT NULL CHECK(state IN ('prepared','sending','succeeded','failed','indeterminate')),
               attempt INTEGER NOT NULL,
               deadline INTEGER,
               error TEXT,
               public_result TEXT
             );
             CREATE TABLE IF NOT EXISTS interactions(
-              id INTEGER PRIMARY KEY,
+              id INTEGER NOT NULL PRIMARY KEY,
               owner_subject_id INTEGER NOT NULL,
               place_id INTEGER NOT NULL,
               binding_id TEXT,
@@ -1003,22 +1022,22 @@ const SCHEMA: &str = r#"
               owner_only INTEGER NOT NULL,
               timeout_secs INTEGER NOT NULL,
               deadline INTEGER NOT NULL,
-              state TEXT NOT NULL,
+              state TEXT NOT NULL CHECK(state IN ('pending','responded','expired')),
               source_record_key TEXT,
               created_at INTEGER NOT NULL,
               updated_at INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS interaction_responses(
-              interaction_id INTEGER PRIMARY KEY,
+              interaction_id INTEGER NOT NULL PRIMARY KEY,
               interaction_source_key TEXT,
-              responder_kind TEXT NOT NULL,
+              responder_kind TEXT NOT NULL CHECK(responder_kind IN ('subject','system','unknown')),
               responder_subject_id INTEGER,
               responder_external_id TEXT NOT NULL,
               response TEXT NOT NULL,
               responded_at INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS secret_sets(
-              secret_set_id TEXT PRIMARY KEY,
+              secret_set_id TEXT NOT NULL PRIMARY KEY,
               revision INTEGER NOT NULL,
               scope TEXT NOT NULL,
               created_at INTEGER NOT NULL
@@ -1041,7 +1060,7 @@ const SCHEMA: &str = r#"
               adopted_at INTEGER
             );
             CREATE TABLE IF NOT EXISTS webhook_endpoints(
-              id INTEGER PRIMARY KEY,
+              id INTEGER NOT NULL PRIMARY KEY,
               owner_subject_id INTEGER NOT NULL,
               kind TEXT NOT NULL,
               scope TEXT NOT NULL,
@@ -1101,8 +1120,52 @@ fn migrate(conn: &Connection) -> Result<()> {
         )?;
         conn.execute("UPDATE subjects SET name = persona WHERE name = ''", [])?;
     }
-    migrate_v1_gate_tables(conn)?;
     Ok(())
+}
+
+fn initialize_schema(conn: &mut Connection) -> Result<()> {
+    let canonical_gate_schema_existed = table_exists(conn, "gate_kinds")?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    prepare_v1_gate_tables(&tx)?;
+    tx.execute_batch(SCHEMA)?;
+    migrate(&tx)?;
+    if !canonical_gate_schema_existed {
+        migrate_v1_gate_tables(&tx)?;
+    }
+    tx.commit()?;
+    recover_stale_deliveries(conn)
+}
+
+fn recover_stale_deliveries(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let mut statement = tx.prepare(
+        "SELECT d.place_id,d.seq,gi.kind_id
+         FROM deliveries d JOIN gate_instances gi ON gi.instance_id=d.instance_id
+         WHERE d.state='sending'",
+    )?;
+    let stale = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    drop(statement);
+    for (place, seq, kind) in stale {
+        tx.execute(
+            "UPDATE v1_deliveries SET state='failed',error='indeterminate: stale sending recovered'
+             WHERE place_id=?1 AND seq=?2 AND gate_name=?3",
+            params![place, seq, kind],
+        )?;
+    }
+    tx.execute(
+        "UPDATE deliveries SET state='indeterminate',error='stale sending recovered after restart'
+         WHERE state='sending'",
+        [],
+    )?;
+    tx.commit()
 }
 
 fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
@@ -1231,15 +1294,56 @@ fn ensure_compat_binding(
          ON CONFLICT(instance_id,address) DO UPDATE SET place_id=?2,origin_scope_id=?5",
         params![binding_id, place, instance.as_str(), address, scope_id, metadata, sha256(&[])],
     )?;
+    Ok((instance, binding_id))
+}
+
+fn set_subject_route_on(
+    conn: &Connection,
+    subject: SubjectId,
+    place: PlaceId,
+    kind: &GateKindId,
+    purpose: &RoutePurpose,
+    binding_id: &str,
+) -> Result<()> {
     conn.execute(
         "INSERT INTO subject_routes(subject_id,place_id,kind_id,purpose,binding_id)
-         SELECT subject_id,?1,?2,purpose,?3 FROM memberships
-         CROSS JOIN (SELECT 'inbound' AS purpose UNION ALL SELECT 'outbound')
-         WHERE place_id=?1 AND role='participant' AND left_at IS NULL
-         ON CONFLICT(subject_id,place_id,kind_id,purpose) DO UPDATE SET binding_id=?3",
-        params![place, kind.as_str(), binding_id],
+         VALUES(?1,?2,?3,?4,?5)
+         ON CONFLICT(subject_id,place_id,kind_id,purpose) DO UPDATE SET binding_id=?5",
+        params![subject, place, kind.as_str(), purpose.as_str(), binding_id],
     )?;
-    Ok((instance, binding_id))
+    Ok(())
+}
+
+fn reconcile_subject_routes_on(
+    conn: &Connection,
+    subject: SubjectId,
+    place: PlaceId,
+    kind: &GateKindId,
+    binding_id: Option<&str>,
+    purposes: &[RoutePurpose],
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM subject_routes WHERE subject_id=?1 AND place_id=?2 AND kind_id=?3",
+        params![subject, place, kind.as_str()],
+    )?;
+    let Some(binding_id) = binding_id else {
+        return Ok(());
+    };
+    let valid: bool = conn.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM gate_bindings gb JOIN gate_instances gi ON gi.instance_id=gb.instance_id
+           WHERE gb.binding_id=?1 AND gb.place_id=?2 AND gi.kind_id=?3
+         )",
+        params![binding_id, place, kind.as_str()],
+        |row| row.get(0),
+    )?;
+    if !valid {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    for purpose in purposes {
+        set_subject_route_on(conn, subject, place, kind, purpose, binding_id)?;
+    }
+    Ok(())
 }
 
 fn encode_sqlite_values(values: &[rusqlite::types::Value]) -> Vec<u8> {
@@ -1272,27 +1376,63 @@ fn encode_sqlite_values(values: &[rusqlite::types::Value]) -> Vec<u8> {
     out
 }
 
-fn raw_v1_row(
-    conn: &Connection,
-    table: &str,
+#[derive(Clone)]
+struct RawSourceRow {
     rowid: i64,
-    values: &[rusqlite::types::Value],
-    reason: &str,
-) -> Result<()> {
-    let key = encode_sqlite_values(&[rusqlite::types::Value::Integer(rowid)]);
-    let row_values = encode_sqlite_values(values);
-    conn.execute(
-        "INSERT INTO legacy_unowned_source_rows(source_db,source_table,source_key,row_values,reason)
-         VALUES('worktree-v1',?1,?2,?3,?4)
-         ON CONFLICT(source_db,source_table,source_key) DO UPDATE SET row_values=?3,reason=?4",
-        params![table,key,row_values,reason],
-    )?;
-    Ok(())
+    source_key: Vec<u8>,
+    values: Vec<rusqlite::types::Value>,
 }
 
-fn raw_all_v1_rows(conn: &Connection, table: &str, reason: &str) -> Result<()> {
-    let mut stmt = conn.prepare(&format!("SELECT rowid,* FROM {table} ORDER BY rowid"))?;
-    let rows = stmt
+struct RawSourceTable {
+    source_name: &'static str,
+    columns: Vec<String>,
+    rows: Vec<RawSourceRow>,
+}
+
+impl RawSourceTable {
+    fn value<'a>(
+        &'a self,
+        row: &'a RawSourceRow,
+        name: &str,
+    ) -> Option<&'a rusqlite::types::Value> {
+        self.columns
+            .iter()
+            .position(|column| column == name)
+            .and_then(|index| row.values.get(index))
+    }
+}
+
+fn load_raw_source_table(
+    conn: &Connection,
+    table: &'static str,
+    source_name: &'static str,
+) -> Result<RawSourceTable> {
+    if !table_exists(conn, table)? {
+        return Ok(RawSourceTable {
+            source_name,
+            columns: Vec::new(),
+            rows: Vec::new(),
+        });
+    }
+    let mut info = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut definitions = info
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    drop(info);
+    let columns = definitions
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    definitions.sort_by_key(|(_, primary_key_ordinal)| *primary_key_ordinal);
+    let primary_key_indices = definitions
+        .iter()
+        .filter(|(_, ordinal)| *ordinal > 0)
+        .filter_map(|(name, _)| columns.iter().position(|column| column == name))
+        .collect::<Vec<_>>();
+    let mut statement = conn.prepare(&format!("SELECT rowid,* FROM {table} ORDER BY rowid"))?;
+    let mut rows = statement
         .query_map([], |row| {
             let rowid = row.get::<_, i64>(0)?;
             let mut values = Vec::with_capacity(row.as_ref().column_count() - 1);
@@ -1302,147 +1442,417 @@ fn raw_all_v1_rows(conn: &Connection, table: &str, reason: &str) -> Result<()> {
             Ok((rowid, values))
         })?
         .collect::<Result<Vec<_>>>()?;
-    for (rowid, values) in rows {
-        raw_v1_row(conn, table, rowid, &values, reason)?;
+    drop(statement);
+
+    let mut primary_key_counts = std::collections::BTreeMap::<Vec<u8>, usize>::new();
+    for (_, values) in &rows {
+        if !primary_key_indices.is_empty()
+            && primary_key_indices
+                .iter()
+                .all(|index| !matches!(values[*index], rusqlite::types::Value::Null))
+        {
+            let key_values = primary_key_indices
+                .iter()
+                .map(|index| values[*index].clone())
+                .collect::<Vec<_>>();
+            *primary_key_counts
+                .entry(encode_sqlite_values(&key_values))
+                .or_default() += 1;
+        }
+    }
+    let rows = rows
+        .drain(..)
+        .map(|(rowid, values)| {
+            let primary = if !primary_key_indices.is_empty()
+                && primary_key_indices
+                    .iter()
+                    .all(|index| !matches!(values[*index], rusqlite::types::Value::Null))
+            {
+                let key_values = primary_key_indices
+                    .iter()
+                    .map(|index| values[*index].clone())
+                    .collect::<Vec<_>>();
+                let encoded = encode_sqlite_values(&key_values);
+                (primary_key_counts.get(&encoded) == Some(&1)).then_some(encoded)
+            } else {
+                None
+            };
+            let mut source_key = Vec::new();
+            match primary {
+                Some(encoded) => {
+                    source_key.push(b'P');
+                    source_key.extend_from_slice(&encoded);
+                }
+                None => {
+                    source_key.push(b'R');
+                    source_key.extend_from_slice(&encode_sqlite_values(&[
+                        rusqlite::types::Value::Integer(rowid),
+                    ]));
+                }
+            }
+            RawSourceRow {
+                rowid,
+                source_key,
+                values,
+            }
+        })
+        .collect();
+    Ok(RawSourceTable {
+        source_name,
+        columns,
+        rows,
+    })
+}
+
+fn retain_raw_source_row(
+    conn: &Connection,
+    table: &RawSourceTable,
+    row: &RawSourceRow,
+    reason: &str,
+) -> Result<()> {
+    let row_values = encode_sqlite_values(&row.values);
+    conn.execute(
+        "INSERT INTO legacy_unowned_source_rows(source_db,source_table,source_key,row_values,reason)
+         VALUES('worktree-v1',?1,?2,?3,?4)
+         ON CONFLICT(source_db,source_table,source_key) DO UPDATE SET
+           row_values=excluded.row_values,
+           reason=CASE WHEN instr(reason,excluded.reason)>0 THEN reason ELSE reason || ',' || excluded.reason END",
+        params![table.source_name, row.source_key, row_values, reason],
+    )?;
+    Ok(())
+}
+
+fn raw_integer(table: &RawSourceTable, row: &RawSourceRow, name: &str) -> Option<i64> {
+    match table.value(row, name)? {
+        rusqlite::types::Value::Integer(value) => Some(*value),
+        _ => None,
+    }
+}
+
+fn raw_text<'a>(table: &'a RawSourceTable, row: &'a RawSourceRow, name: &str) -> Option<&'a str> {
+    match table.value(row, name)? {
+        rusqlite::types::Value::Text(value) => Some(value),
+        _ => None,
+    }
+}
+
+fn exact_binding_for(
+    conn: &Connection,
+    place: PlaceId,
+    kind: &str,
+) -> Result<Option<(String, String, String)>> {
+    let mut statement = conn.prepare(
+        "SELECT gb.instance_id,gb.binding_id,gb.origin_scope_id
+         FROM gate_bindings gb JOIN gate_instances gi ON gi.instance_id=gb.instance_id
+         WHERE gb.place_id=?1 AND gi.kind_id=?2 ORDER BY gb.binding_id",
+    )?;
+    let rows = statement
+        .query_map(params![place, kind], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    Ok((rows.len() == 1).then(|| rows[0].clone()))
+}
+
+fn migrate_v1_gate_tables(conn: &Connection) -> Result<()> {
+    // Read every source value with rusqlite::Value before any typed data read. Classification
+    // below can therefore retain every legal SQLite storage class instead of aborting conversion.
+    let channels = load_raw_source_table(conn, "v1_channels", "channels")?;
+    let external_refs = load_raw_source_table(conn, "v1_external_refs", "external_refs")?;
+    let deliveries = load_raw_source_table(conn, "v1_deliveries", "deliveries")?;
+    let identities = load_raw_source_table(conn, "v1_subject_identities", "subject_identities")?;
+    let dedup_hits = load_raw_source_table(conn, "v1_dedup_hits", "dedup_hits")?;
+    let expanded_tools = load_raw_source_table(conn, "v1_expanded_tools", "expanded_tools")?;
+
+    let mut names = std::collections::BTreeSet::new();
+    for table in [
+        &channels,
+        &external_refs,
+        &deliveries,
+        &identities,
+        &dedup_hits,
+        &expanded_tools,
+    ] {
+        for row in &table.rows {
+            if let Some(name) = raw_text(table, row, "gate_name") {
+                if GateKindId::parse(name.to_string()).is_ok() {
+                    names.insert(name.to_string());
+                }
+            }
+        }
+    }
+    for name in &names {
+        let kind = GateKindId::parse(name.clone()).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        seed_compatibility_instance_on(conn, &kind)?;
+    }
+
+    let mut binding_groups =
+        std::collections::BTreeMap::<(String, String), Vec<(usize, i64)>>::new();
+    for (index, row) in channels.rows.iter().enumerate() {
+        let (Some(place), Some(kind), Some(address)) = (
+            raw_integer(&channels, row, "place_id"),
+            raw_text(&channels, row, "gate_name"),
+            raw_text(&channels, row, "address"),
+        ) else {
+            retain_raw_source_row(conn, &channels, row, "noncanonical_storage")?;
+            continue;
+        };
+        if GateKindId::parse(kind.to_string()).is_err() {
+            retain_raw_source_row(conn, &channels, row, "unknown_enum")?;
+            continue;
+        }
+        let parent: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM places WHERE id=?1)",
+            params![place],
+            |result| result.get(0),
+        )?;
+        if !parent {
+            retain_raw_source_row(conn, &channels, row, "unresolved_parent")?;
+            continue;
+        }
+        binding_groups
+            .entry((kind.to_string(), address.to_string()))
+            .or_default()
+            .push((index, place));
+    }
+    for ((kind, address), contributions) in binding_groups {
+        let places = contributions
+            .iter()
+            .map(|(_, place)| *place)
+            .collect::<std::collections::BTreeSet<_>>();
+        if places.len() != 1 {
+            for (index, _) in contributions {
+                retain_raw_source_row(
+                    conn,
+                    &channels,
+                    &channels.rows[index],
+                    "conflicting_binding_class",
+                )?;
+            }
+            continue;
+        }
+        let kind = GateKindId::parse(kind).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        ensure_compat_binding(conn, *places.iter().next().unwrap(), &kind, &address)?;
+    }
+
+    for row in &deliveries.rows {
+        retain_raw_source_row(conn, &deliveries, row, "unresolved_parent")?;
+    }
+
+    let mut identity_groups =
+        std::collections::BTreeMap::<(String, String), Vec<(usize, i64)>>::new();
+    for (index, row) in identities.rows.iter().enumerate() {
+        let (Some(subject), Some(kind), Some(external)) = (
+            raw_integer(&identities, row, "subject_id"),
+            raw_text(&identities, row, "gate_name"),
+            raw_text(&identities, row, "external_id"),
+        ) else {
+            retain_raw_source_row(conn, &identities, row, "noncanonical_storage")?;
+            continue;
+        };
+        let parent: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM subjects WHERE id=?1)",
+            params![subject],
+            |result| result.get(0),
+        )?;
+        let instance = names
+            .contains(kind)
+            .then(|| GateKindId::parse(kind.to_string()).ok())
+            .flatten()
+            .map(|kind| compatibility_instance_id(&kind));
+        let Some(instance) = instance.filter(|_| parent) else {
+            retain_raw_source_row(conn, &identities, row, "unresolved_parent")?;
+            continue;
+        };
+        identity_groups
+            .entry((instance.as_str().to_string(), external.to_string()))
+            .or_default()
+            .push((index, subject));
+    }
+    for ((instance, external), contributions) in identity_groups {
+        let subjects = contributions
+            .iter()
+            .map(|(_, subject)| *subject)
+            .collect::<std::collections::BTreeSet<_>>();
+        if subjects.len() != 1 {
+            for (index, _) in contributions {
+                retain_raw_source_row(
+                    conn,
+                    &identities,
+                    &identities.rows[index],
+                    "identity_conflict",
+                )?;
+            }
+            continue;
+        }
+        conn.execute(
+            "INSERT INTO gate_subject_identities(instance_id,external_id,subject_id,display_name)
+             VALUES(?1,?2,?3,NULL)",
+            params![instance, external, *subjects.iter().next().unwrap()],
+        )?;
+    }
+
+    let mut expanded_targets = std::collections::BTreeSet::new();
+    for row in &expanded_tools.rows {
+        let (Some(place), Some(subject), Some(kind)) = (
+            raw_integer(&expanded_tools, row, "place_id"),
+            raw_integer(&expanded_tools, row, "subject_id"),
+            raw_text(&expanded_tools, row, "gate_name"),
+        ) else {
+            retain_raw_source_row(conn, &expanded_tools, row, "noncanonical_storage")?;
+            continue;
+        };
+        let parents: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM places WHERE id=?1)
+                    AND EXISTS(SELECT 1 FROM subjects WHERE id=?2)
+                    AND EXISTS(SELECT 1 FROM gate_kinds WHERE kind_id=?3)",
+            params![place, subject, kind],
+            |result| result.get(0),
+        )?;
+        if !parents {
+            retain_raw_source_row(conn, &expanded_tools, row, "unresolved_parent")?;
+            continue;
+        }
+        expanded_targets.insert((place, subject, kind.to_string()));
+    }
+    for (place, subject, kind) in expanded_targets {
+        conn.execute(
+            "INSERT INTO expanded_gate_tools(place_id,subject_id,kind_id) VALUES(?1,?2,?3)",
+            params![place, subject, kind],
+        )?;
+    }
+
+    for row in &external_refs.rows {
+        let (Some(place), Some(seq), Some(kind), Some(external), Some(direction)) = (
+            raw_integer(&external_refs, row, "place_id"),
+            raw_integer(&external_refs, row, "seq"),
+            raw_text(&external_refs, row, "gate_name"),
+            raw_text(&external_refs, row, "external_id"),
+            raw_text(&external_refs, row, "direction"),
+        ) else {
+            retain_raw_source_row(conn, &external_refs, row, "noncanonical_storage")?;
+            continue;
+        };
+        let direction = match direction {
+            "in" => "inbound",
+            "out" => "outbound",
+            _ => {
+                retain_raw_source_row(conn, &external_refs, row, "unknown_enum")?;
+                continue;
+            }
+        };
+        let event_exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM events WHERE place_id=?1 AND seq=?2)",
+            params![place, seq],
+            |result| result.get(0),
+        )?;
+        let Some((instance, binding, scope)) = exact_binding_for(conn, place, kind)? else {
+            retain_raw_source_row(conn, &external_refs, row, "unresolved_parent")?;
+            continue;
+        };
+        if !event_exists {
+            retain_raw_source_row(conn, &external_refs, row, "unresolved_parent")?;
+            continue;
+        }
+        conn.execute(
+            "INSERT INTO external_refs(place_id,seq,instance_id,binding_id,external_id,direction)
+             VALUES(?1,?2,?3,?4,?5,?6)",
+            params![place, seq, instance, binding, external, direction],
+        )?;
+        if direction == "inbound" {
+            let (author, content): (Option<String>, String) = conn.query_row(
+                "SELECT author_external_id,content_json FROM events WHERE place_id=?1 AND seq=?2",
+                params![place, seq],
+                |event| Ok((event.get(0)?, event.get(1)?)),
+            )?;
+            conn.execute(
+                "INSERT INTO external_origins(origin_scope_id,external_id,place_id,seq,author_digest,content_digest)
+                 VALUES(?1,?2,?3,?4,?5,?6)",
+                params![
+                    scope,
+                    external,
+                    place,
+                    seq,
+                    sha256(author.unwrap_or_default().as_bytes()),
+                    sha256(content.as_bytes())
+                ],
+            )?;
+        }
+    }
+
+    for row in &dedup_hits.rows {
+        let (Some(kind), Some(place), Some(external), Some(existing), Some(at)) = (
+            raw_text(&dedup_hits, row, "gate_name"),
+            raw_integer(&dedup_hits, row, "place_id"),
+            raw_text(&dedup_hits, row, "external_id"),
+            raw_integer(&dedup_hits, row, "existing_seq"),
+            raw_integer(&dedup_hits, row, "at"),
+        ) else {
+            retain_raw_source_row(conn, &dedup_hits, row, "noncanonical_storage")?;
+            continue;
+        };
+        let Some((_, _, scope)) = exact_binding_for(conn, place, kind)? else {
+            retain_raw_source_row(conn, &dedup_hits, row, "unresolved_parent")?;
+            continue;
+        };
+        let hit_id = deterministic_id(&format!(
+            "v1-dedup\0{}\0{}",
+            dedup_hits.source_name,
+            hex_bytes(&row.source_key)
+        ));
+        conn.execute(
+            "INSERT INTO gate_dedup_hits(hit_id,kind_id,origin_scope_id,place_id,external_id,existing_seq,observed_at,source_row_ordinal)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![hit_id, kind, scope, place, external, existing, at, row.rowid],
+        )?;
+    }
+
+    // One route pass after every contribution has been classified. Compatibility kinds use one
+    // exact binding per place; ambiguous channel groups above have no runtime binding.
+    for name in names {
+        let kind = GateKindId::parse(name).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let mut statement = conn.prepare(
+            "SELECT m.subject_id,m.place_id,MIN(gb.binding_id),COUNT(gb.binding_id)
+             FROM memberships m JOIN gate_bindings gb ON gb.place_id=m.place_id
+             JOIN gate_instances gi ON gi.instance_id=gb.instance_id AND gi.kind_id=?1
+             WHERE m.role='participant' GROUP BY m.subject_id,m.place_id",
+        )?;
+        let routes = statement
+            .query_map(params![kind.as_str()], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>>>()?;
+        drop(statement);
+        for (subject, place, binding, count) in routes {
+            if count != 1 {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            reconcile_subject_routes_on(
+                conn,
+                subject,
+                place,
+                &kind,
+                Some(&binding),
+                &[RoutePurpose::inbound(), RoutePurpose::outbound()],
+            )?;
+        }
     }
     Ok(())
 }
 
-fn migrate_v1_gate_tables(conn: &Connection) -> Result<()> {
-    if !table_exists(conn, "v1_channels")? {
-        return Ok(());
+fn hex_bytes(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
     }
-    let mut names = std::collections::BTreeSet::new();
-    for table in [
-        "v1_channels",
-        "v1_external_refs",
-        "v1_deliveries",
-        "v1_subject_identities",
-        "v1_dedup_hits",
-        "v1_expanded_tools",
-    ] {
-        if !table_exists(conn, table)? {
-            continue;
-        }
-        let mut stmt = conn.prepare(&format!(
-            "SELECT DISTINCT gate_name FROM {table} WHERE gate_name <> ''"
-        ))?;
-        for name in stmt.query_map([], |row| row.get::<_, String>(0))? {
-            names.insert(name?);
-        }
-    }
-    for name in names {
-        let kind = GateKindId::parse(name).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        seed_compatibility_instance_on(conn, &kind)?;
-    }
-
-    let mut stmt = conn.prepare(
-        "SELECT place_id,gate_name,address FROM v1_channels ORDER BY place_id,gate_name",
-    )?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?
-        .collect::<Result<Vec<_>>>()?;
-    for (place, name, address) in rows {
-        let kind = GateKindId::parse(name).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        ensure_compat_binding(conn, place, &kind, &address)?;
-    }
-
-    conn.execute_batch(
-        "INSERT OR IGNORE INTO gate_subject_identities(instance_id,external_id,subject_id,display_name)
-         SELECT gi.instance_id,v.external_id,v.subject_id,NULL
-         FROM v1_subject_identities v JOIN gate_instances gi ON gi.kind_id=v.gate_name;
-
-         INSERT OR IGNORE INTO expanded_gate_tools(place_id,subject_id,kind_id)
-         SELECT place_id,subject_id,gate_name FROM v1_expanded_tools;"
-    )?;
-
-    let mut stmt = conn.prepare(
-        "SELECT r.place_id,r.seq,r.gate_name,r.external_id,r.direction,b.instance_id,b.binding_id
-         FROM v1_external_refs r JOIN gate_bindings b ON b.place_id=r.place_id
-         JOIN gate_instances gi ON gi.instance_id=b.instance_id AND gi.kind_id=r.gate_name",
-    )?;
-    let refs = stmt
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
-            ))
-        })?
-        .collect::<Result<Vec<_>>>()?;
-    for (place, seq, _kind, external, direction, instance, binding) in refs {
-        let direction = match direction.as_str() {
-            "in" => "inbound",
-            "out" => "outbound",
-            _ => continue,
-        };
-        conn.execute(
-            "INSERT OR IGNORE INTO external_refs(place_id,seq,instance_id,binding_id,external_id,direction) VALUES(?1,?2,?3,?4,?5,?6)",
-            params![place,seq,instance,binding,external,direction],
-        )?;
-    }
-
-    // v1 deliveries lack both revision and connection_epoch. They are preserved exactly in the
-    // unified raw carrier and are never weakened into the strict runtime delivery state machine.
-    raw_all_v1_rows(conn, "v1_deliveries", "unresolved_parent")?;
-
-    // Dedup observations are immutable and preserve duplicates by source row ordinal.
-    let mut stmt = conn.prepare(
-        "SELECT d.rowid,d.gate_name,d.place_id,d.external_id,d.existing_seq,d.at,
-                gb.origin_scope_id
-         FROM v1_dedup_hits d
-         LEFT JOIN gate_instances gi ON gi.kind_id=d.gate_name
-         LEFT JOIN gate_bindings gb ON gb.instance_id=gi.instance_id AND gb.place_id=d.place_id
-         ORDER BY d.rowid",
-    )?;
-    let hits = stmt
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, Option<String>>(6)?,
-            ))
-        })?
-        .collect::<Result<Vec<_>>>()?;
-    for (rowid, kind, place, external, existing, at, scope) in hits {
-        if let Some(scope) = scope {
-            let hit_id = deterministic_id(&format!("v1-dedup\0{rowid}"));
-            conn.execute(
-                "INSERT OR IGNORE INTO gate_dedup_hits(hit_id,kind_id,origin_scope_id,place_id,external_id,existing_seq,observed_at,source_row_ordinal)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
-                params![hit_id,kind,scope,place,external,existing,at,rowid],
-            )?;
-        } else {
-            raw_v1_row(
-                conn,
-                "v1_dedup_hits",
-                rowid,
-                &[
-                    rusqlite::types::Value::Text(kind),
-                    rusqlite::types::Value::Integer(place),
-                    rusqlite::types::Value::Text(external),
-                    rusqlite::types::Value::Integer(existing),
-                    rusqlite::types::Value::Integer(at),
-                ],
-                "unresolved_parent",
-            )?;
-        }
-    }
-    Ok(())
+    output
 }
 
 /// テーブルにその列があるか（`PRAGMA table_info`）。table は系内の定数だけを渡す（PRAGMA は
@@ -1460,10 +1870,8 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
 
 impl Store {
     pub fn new_in_memory() -> Result<Store> {
-        let conn = Connection::open_in_memory()?;
-        prepare_v1_gate_tables(&conn)?;
-        conn.execute_batch(SCHEMA)?;
-        migrate(&conn)?;
+        let mut conn = Connection::open_in_memory()?;
+        initialize_schema(&mut conn)?;
         Ok(Store {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -1473,10 +1881,8 @@ impl Store {
     /// 場もログも生き残る（詳細§03/§11）。テストは `:memory:` を使うが、実プロセスの再起動を跨ぐ検証と
     /// 本番の app はこちらを使う。スキーマは `IF NOT EXISTS` なので、開き直しても既存の権威を壊さない。
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Store> {
-        let conn = Connection::open(path)?;
-        prepare_v1_gate_tables(&conn)?;
-        conn.execute_batch(SCHEMA)?;
-        migrate(&conn)?;
+        let mut conn = Connection::open(path)?;
+        initialize_schema(&mut conn)?;
         Ok(Store {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -1490,6 +1896,19 @@ impl Store {
 
     pub fn seed_compatibility_instance(&self, kind: &GateKindId) -> Result<GateInstanceId> {
         seed_compatibility_instance_on(&self.c(), kind)
+    }
+
+    pub fn gate_ingress_discovery(&self, kind: &GateKindId) -> Result<Option<IngressDiscovery>> {
+        self.c()
+            .query_row(
+                "SELECT ingress_discovery FROM gate_kinds WHERE kind_id=?1",
+                params![kind.as_str()],
+                |row| {
+                    let value: String = row.get(0)?;
+                    IngressDiscovery::from_wire(&value).ok_or(rusqlite::Error::InvalidQuery)
+                },
+            )
+            .optional()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1597,18 +2016,96 @@ impl Store {
         Ok(epoch as u64)
     }
 
-    pub fn gate_instance_revision_matches(
+    /// Validate a protocol-2 hello against the canonical instance declaration and create its
+    /// connecting epoch as one command. Every rejection is decided before the first mutation.
+    pub fn begin_gate_connection_checked(
         &self,
         instance: &GateInstanceId,
         revision: u64,
-    ) -> Result<Option<bool>> {
-        self.c()
+        spec: &GateKindSpec,
+        now: i64,
+    ) -> std::result::Result<u64, GateConnectionStartError> {
+        let mut conn = self.c();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let configured = tx
             .query_row(
-                "SELECT active_revision=?2 FROM gate_instances WHERE instance_id=?1",
-                params![instance.as_str(), revision as i64],
-                |row| row.get::<_, bool>(0),
+                "SELECT kind_id,active_revision FROM gate_instances WHERE instance_id=?1",
+                params![instance.as_str()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
             )
-            .optional()
+            .optional()?;
+        let Some((kind_id, active_revision)) = configured else {
+            return Err(GateConnectionStartError::InstanceUnknown);
+        };
+        if kind_id != spec.kind_id.as_str() {
+            return Err(GateConnectionStartError::KindMismatch);
+        }
+        if active_revision != revision as i64 {
+            return Err(GateConnectionStartError::RevisionMismatch);
+        }
+        let desired = tx
+            .query_row(
+                "SELECT present,enabled FROM gate_instance_revisions
+                 WHERE instance_id=?1 AND revision=?2",
+                params![instance.as_str(), revision as i64],
+                |row| Ok((row.get::<_, i64>(0)? != 0, row.get::<_, i64>(1)? != 0)),
+            )
+            .optional()?;
+        let Some((present, enabled)) = desired else {
+            return Err(GateConnectionStartError::RevisionUnavailable);
+        };
+        if !present || !enabled {
+            return Err(GateConnectionStartError::InstanceDisabled);
+        }
+        let declaration = tx
+            .query_row(
+                "SELECT protocol_major,origin_scope,ingress_discovery
+                 FROM gate_kinds WHERE kind_id=?1",
+                params![spec.kind_id.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((protocol_major, origin_scope, ingress_discovery)) = declaration else {
+            return Err(GateConnectionStartError::KindDeclarationMismatch);
+        };
+        if protocol_major != 2
+            || origin_scope != spec.origin_scope.as_wire()
+            || ingress_discovery != spec.ingress_discovery.as_wire()
+        {
+            return Err(GateConnectionStartError::KindDeclarationMismatch);
+        }
+        let occupied: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM gate_connections
+             WHERE instance_id=?1 AND state IN ('connecting','active'))",
+            params![instance.as_str()],
+            |row| row.get(0),
+        )?;
+        if occupied {
+            return Err(GateConnectionStartError::InstanceActive);
+        }
+
+        let epoch: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(connection_epoch),0)+1 FROM gate_connections WHERE instance_id=?1",
+            params![instance.as_str()],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO gate_connections(instance_id,connection_epoch,revision,state,connected_at,disconnected_at,last_error)
+             VALUES(?1,?2,?3,'connecting',?4,NULL,NULL)",
+            params![instance.as_str(), epoch, revision as i64, now],
+        )?;
+        tx.execute(
+            "UPDATE gate_instances SET lifecycle='starting' WHERE instance_id=?1",
+            params![instance.as_str()],
+        )?;
+        tx.commit()?;
+        Ok(epoch as u64)
     }
 
     pub fn activate_gate_connection(
@@ -1648,15 +2145,21 @@ impl Store {
         } else {
             "closed"
         };
-        tx.execute(
+        let changed = tx.execute(
             "UPDATE gate_connections SET state=?3,disconnected_at=?4,last_error=?5
              WHERE instance_id=?1 AND connection_epoch=?2 AND state IN ('connecting','active')",
             params![instance.as_str(), epoch as i64, state, now, failed_code],
         )?;
-        tx.execute(
-            "UPDATE gate_instances SET lifecycle='stopped' WHERE instance_id=?1",
-            params![instance.as_str()],
-        )?;
+        if changed == 1 {
+            tx.execute(
+                "UPDATE gate_instances SET lifecycle='stopped' WHERE instance_id=?1
+                 AND NOT EXISTS(
+                   SELECT 1 FROM gate_connections
+                   WHERE instance_id=?1 AND state IN ('connecting','active')
+                 )",
+                params![instance.as_str()],
+            )?;
+        }
         tx.commit()
     }
 
@@ -1677,34 +2180,47 @@ impl Store {
         purpose: &RoutePurpose,
         binding_id: &str,
     ) -> Result<()> {
-        let conn = self.c();
-        conn.execute(
-            "INSERT INTO subject_routes(subject_id,place_id,kind_id,purpose,binding_id) VALUES(?1,?2,?3,?4,?5)
-             ON CONFLICT(subject_id,place_id,kind_id,purpose) DO UPDATE SET binding_id=?5",
-            params![subject,place,kind.as_str(),purpose.as_str(),binding_id],
-        )?;
-        Ok(())
+        set_subject_route_on(&self.c(), subject, place, kind, purpose, binding_id)
     }
 
-    pub fn ensure_tool_routes_for_kind(
+    pub fn reconcile_compatibility_routes_for_kind(
         &self,
         kind: &GateKindId,
         tool_names: &[String],
     ) -> Result<()> {
-        let conn = self.c();
+        let mut conn = self.c();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut purposes = vec![RoutePurpose::inbound(), RoutePurpose::outbound()];
         for tool in tool_names {
-            let purpose = RoutePurpose::tool(tool).map_err(|_| rusqlite::Error::InvalidQuery)?;
-            conn.execute(
-                "INSERT INTO subject_routes(subject_id,place_id,kind_id,purpose,binding_id)
-                 SELECT m.subject_id,m.place_id,?1,?2,gb.binding_id
-                 FROM memberships m JOIN gate_bindings gb ON gb.place_id=m.place_id
-                 JOIN gate_instances gi ON gi.instance_id=gb.instance_id AND gi.kind_id=?1
-                 WHERE m.role='participant' AND m.left_at IS NULL
-                 ON CONFLICT(subject_id,place_id,kind_id,purpose) DO UPDATE SET binding_id=excluded.binding_id",
-                params![kind.as_str(),purpose.as_str()],
-            )?;
+            purposes.push(RoutePurpose::tool(tool).map_err(|_| rusqlite::Error::InvalidQuery)?);
         }
-        Ok(())
+        let mut statement = tx.prepare(
+            "SELECT m.subject_id,m.place_id,MIN(gb.binding_id),COUNT(gb.binding_id)
+             FROM memberships m
+             JOIN gate_bindings gb ON gb.place_id=m.place_id
+             JOIN gate_instances gi ON gi.instance_id=gb.instance_id AND gi.kind_id=?1
+             JOIN gate_kinds gk ON gk.kind_id=gi.kind_id AND gk.ingress_discovery='prebound'
+             WHERE m.role='participant'
+             GROUP BY m.subject_id,m.place_id ORDER BY m.subject_id,m.place_id",
+        )?;
+        let rows = statement
+            .query_map(params![kind.as_str()], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>>>()?;
+        drop(statement);
+        for (subject, place, binding, count) in rows {
+            if count != 1 {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            reconcile_subject_routes_on(&tx, subject, place, kind, Some(&binding), &purposes)?;
+        }
+        tx.commit()
     }
 
     pub fn gate_route(
@@ -2175,22 +2691,145 @@ impl Store {
         )? == 1)
     }
 
-    pub fn finish_delivery(
+    #[allow(clippy::too_many_arguments)]
+    pub fn complete_delivery(
         &self,
-        place: PlaceId,
+        route: &GateRoute,
         seq: Seq,
-        binding_id: &str,
         state: &str,
         error: Option<&str>,
+        origin: Option<&str>,
+        observation: &[u8],
+        now: i64,
     ) -> Result<bool> {
         if !matches!(state, "delivered" | "failed" | "indeterminate") {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        Ok(self.c().execute(
-            "UPDATE deliveries SET state=?4,error=?5
-             WHERE place_id=?1 AND seq=?2 AND binding_id=?3 AND state='sending'",
-            params![place, seq, binding_id, state, error],
-        )? == 1)
+        let mut conn = self.c();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let delivery = tx
+            .query_row(
+                "SELECT delivery_id,state,instance_id,revision,connection_epoch
+                 FROM deliveries WHERE place_id=?1 AND seq=?2 AND binding_id=?3",
+                params![route.place_id, seq, route.binding_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((delivery_id, current_state, instance, revision, epoch)) = delivery else {
+            return Err(rusqlite::Error::InvalidQuery);
+        };
+        if current_state != "sending"
+            || instance != route.instance_id.as_str()
+            || revision != route.revision as i64
+            || epoch != route.connection_epoch as i64
+        {
+            tx.execute(
+                "INSERT INTO delivery_observations(delivery_id,connection_epoch,kind,payload_digest,observed_at)
+                 VALUES(?1,?2,'late_or_wrong_epoch',?3,?4)",
+                params![delivery_id, route.connection_epoch as i64, sha256(observation), now],
+            )?;
+            tx.commit()?;
+            return Ok(false);
+        }
+
+        if let Some(origin) = origin {
+            tx.execute(
+                "INSERT INTO external_refs(place_id,seq,instance_id,binding_id,external_id,direction)
+                 VALUES(?1,?2,?3,?4,?5,'outbound')",
+                params![
+                    route.place_id,
+                    seq,
+                    route.instance_id.as_str(),
+                    route.binding_id,
+                    origin
+                ],
+            )?;
+            tx.execute(
+                "INSERT INTO v1_external_refs(place_id,seq,gate_name,external_id,direction)
+                 VALUES(?1,?2,?3,?4,'out')
+                 ON CONFLICT(place_id,seq,gate_name) DO UPDATE SET external_id=?4,direction='out'",
+                params![route.place_id, seq, route.kind_id.as_str(), origin],
+            )?;
+        }
+        let changed = tx.execute(
+            "UPDATE deliveries SET state=?2,error=?3 WHERE delivery_id=?1 AND state='sending'",
+            params![delivery_id, state, error],
+        )?;
+        if changed != 1 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let projected_state = if state == "delivered" {
+            "sent"
+        } else {
+            "failed"
+        };
+        tx.execute(
+            "UPDATE v1_deliveries SET state=?4,error=?5,attempted_at=?6
+             WHERE place_id=?1 AND seq=?2 AND gate_name=?3",
+            params![
+                route.place_id,
+                seq,
+                route.kind_id.as_str(),
+                projected_state,
+                error,
+                now
+            ],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn record_delivery_observation(
+        &self,
+        route: &GateRoute,
+        seq: Seq,
+        kind: &str,
+        payload: &[u8],
+        now: i64,
+    ) -> Result<bool> {
+        if kind.is_empty() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let conn = self.c();
+        let delivery_id = conn
+            .query_row(
+                "SELECT delivery_id FROM deliveries
+                 WHERE place_id=?1 AND seq=?2 AND binding_id=?3
+                   AND instance_id=?4 AND revision=?5 AND connection_epoch=?6",
+                params![
+                    route.place_id,
+                    seq,
+                    route.binding_id,
+                    route.instance_id.as_str(),
+                    route.revision as i64,
+                    route.connection_epoch as i64
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(delivery_id) = delivery_id else {
+            return Ok(false);
+        };
+        conn.execute(
+            "INSERT INTO delivery_observations(delivery_id,connection_epoch,kind,payload_digest,observed_at)
+             VALUES(?1,?2,?3,?4,?5)",
+            params![
+                delivery_id,
+                route.connection_epoch as i64,
+                kind,
+                sha256(payload),
+                now
+            ],
+        )?;
+        Ok(true)
     }
 
     pub fn latest_seq(&self, place: PlaceId) -> Result<Seq> {
@@ -2342,22 +2981,11 @@ impl Store {
     ) -> Result<()> {
         let conn = self.c();
         conn.execute(
-            "INSERT INTO memberships(place_id,subject_id,role,read_seq,joined_at)
+            "INSERT INTO memberships(place_id,subject_id,role,shared_seen_seq,joined_at)
              VALUES(?1,?2,?3,?4,?5)
-             ON CONFLICT(place_id,subject_id) DO UPDATE SET role=?3, left_at=NULL",
+             ON CONFLICT(place_id,subject_id) DO UPDATE SET role=?3",
             params![place, subject, role_str(role), read_seq, now],
         )?;
-        if role == Role::Participant {
-            conn.execute(
-                "INSERT INTO subject_routes(subject_id,place_id,kind_id,purpose,binding_id)
-                 SELECT ?2,?1,gi.kind_id,purpose,gb.binding_id
-                 FROM gate_bindings gb JOIN gate_instances gi ON gi.instance_id=gb.instance_id
-                 CROSS JOIN (SELECT 'inbound' AS purpose UNION ALL SELECT 'outbound')
-                 WHERE gb.place_id=?1
-                 ON CONFLICT(subject_id,place_id,kind_id,purpose) DO UPDATE SET binding_id=excluded.binding_id",
-                params![place, subject],
-            )?;
-        }
         Ok(())
     }
 
@@ -2368,7 +2996,7 @@ impl Store {
     ) -> Result<Option<MembershipRow>> {
         self.c()
             .query_row(
-                "SELECT place_id,subject_id,role,read_seq FROM memberships WHERE place_id=?1 AND subject_id=?2 AND left_at IS NULL",
+                "SELECT place_id,subject_id,role,shared_seen_seq FROM memberships WHERE place_id=?1 AND subject_id=?2",
                 params![place, subject],
                 |r| {
                     Ok(MembershipRow {
@@ -2385,7 +3013,7 @@ impl Store {
     pub fn members(&self, place: PlaceId) -> Result<Vec<MembershipRow>> {
         let c = self.c();
         let mut stmt = c.prepare(
-            "SELECT place_id,subject_id,role,read_seq FROM memberships WHERE place_id=?1 AND left_at IS NULL ORDER BY subject_id",
+            "SELECT place_id,subject_id,role,shared_seen_seq FROM memberships WHERE place_id=?1 ORDER BY subject_id",
         )?;
         let rows = stmt
             .query_map(params![place], |r| {
@@ -2402,7 +3030,7 @@ impl Store {
 
     pub fn set_read_seq(&self, place: PlaceId, subject: SubjectId, read_seq: Seq) -> Result<()> {
         self.c().execute(
-            "UPDATE memberships SET read_seq=?3 WHERE place_id=?1 AND subject_id=?2",
+            "UPDATE memberships SET shared_seen_seq=?3 WHERE place_id=?1 AND subject_id=?2",
             params![place, subject, read_seq],
         )?;
         Ok(())
@@ -2662,20 +3290,28 @@ impl Store {
     }
 
     pub fn remove_channel(&self, place: PlaceId, gate: &GateName) -> Result<()> {
-        let conn = self.c();
-        conn.execute(
+        let mut conn = self.c();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut statement = tx.prepare(
+            "SELECT DISTINCT subject_id FROM subject_routes
+             WHERE place_id=?1 AND kind_id=?2 ORDER BY subject_id",
+        )?;
+        let subjects = statement
+            .query_map(params![place, gate.as_str()], |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>>>()?;
+        drop(statement);
+        for subject in subjects {
+            reconcile_subject_routes_on(&tx, subject, place, gate, None, &[])?;
+        }
+        tx.execute(
             "DELETE FROM v1_channels WHERE place_id=?1 AND gate_name=?2",
             params![place, gate.as_str()],
         )?;
-        conn.execute(
-            "DELETE FROM subject_routes WHERE place_id=?1 AND kind_id=?2",
-            params![place, gate.as_str()],
-        )?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM gate_bindings WHERE place_id=?1 AND instance_id IN (SELECT instance_id FROM gate_instances WHERE kind_id=?2)",
             params![place, gate.as_str()],
         )?;
-        Ok(())
+        tx.commit()
     }
 
     /// 場に結ばれた全チャネル（gate, address）。効果の配送先と可能な効果の和に使う（詳細§02/§08）。
@@ -2747,50 +3383,6 @@ impl Store {
                 "INSERT INTO external_refs(place_id,seq,instance_id,binding_id,external_id,direction) VALUES(?1,?2,?3,?4,?5,?6)
                  ON CONFLICT(place_id,seq,binding_id) DO UPDATE SET external_id=?5,direction=?6",
                 params![place,seq,instance,binding,external_id,direction],
-            )?;
-        }
-        Ok(())
-    }
-
-    pub fn record_external_ref_on_route(
-        &self,
-        route: &GateRoute,
-        seq: Seq,
-        external_id: &str,
-        direction: &str,
-    ) -> Result<()> {
-        let direction = match direction {
-            "in" => "inbound",
-            "out" => "outbound",
-            _ => return Err(rusqlite::Error::InvalidQuery),
-        };
-        let conn = self.c();
-        conn.execute(
-            "INSERT INTO external_refs(place_id,seq,instance_id,binding_id,external_id,direction)
-             VALUES(?1,?2,?3,?4,?5,?6)
-             ON CONFLICT(place_id,seq,binding_id) DO UPDATE SET external_id=?5,direction=?6",
-            params![
-                route.place_id,
-                seq,
-                route.instance_id.as_str(),
-                route.binding_id,
-                external_id,
-                direction
-            ],
-        )?;
-        if route.instance_id == compatibility_instance_id(&route.kind_id) {
-            let legacy_direction = if direction == "inbound" { "in" } else { "out" };
-            conn.execute(
-                "INSERT INTO v1_external_refs(place_id,seq,gate_name,external_id,direction)
-                 VALUES(?1,?2,?3,?4,?5)
-                 ON CONFLICT(place_id,seq,gate_name) DO UPDATE SET external_id=?4,direction=?5",
-                params![
-                    route.place_id,
-                    seq,
-                    route.kind_id.as_str(),
-                    external_id,
-                    legacy_direction
-                ],
             )?;
         }
         Ok(())
@@ -3299,56 +3891,344 @@ mod tests {
         assert_eq!(store.compatibility_instance(&kind).unwrap(), Some(first));
     }
 
-    #[test]
-    fn canonical_runtime_read_set_tables_exist_without_converter_rows() {
-        let store = Store::new_in_memory().unwrap();
-        let conn = store.c();
-        for table in [
-            "agent_grants",
-            "deliveries",
-            "delivery_observations",
-            "expanded_gate_tools",
-            "external_origin_scopes",
-            "external_origins",
-            "external_refs",
-            "gate_bindings",
-            "gate_connections",
-            "gate_dedup_hits",
-            "gate_instance_revisions",
-            "gate_instances",
-            "gate_kinds",
-            "gate_operations",
-            "gate_subject_identities",
-            "grant_sets",
-            "grant_source_provenance",
-            "interactions",
-            "interaction_responses",
-            "nostr_generated_keys",
-            "place_default_policies",
-            "place_source_refs",
-            "place_subject_policies",
-            "schedules",
-            "secret_sets",
-            "secret_values",
-            "subject_routes",
-            "tool_policy_entries",
-            "tool_policy_sets",
-            "webhook_endpoints",
-        ] {
-            assert!(table_exists(&conn, table).unwrap(), "missing table {table}");
+    fn protocol2_spec(kind: &str, discovery: IngressDiscovery) -> GateKindSpec {
+        GateKindSpec {
+            kind_id: GateKindId::parse(kind.to_string()).unwrap(),
+            origin_scope: OriginScope::Instance,
+            address_form: ".+".into(),
+            ingress_discovery: discovery,
+            tools: Vec::new(),
+            effects: std::collections::BTreeSet::new(),
+            capabilities: std::collections::BTreeSet::new(),
+            actions: Vec::new(),
         }
     }
 
     #[test]
+    fn protocol2_hello_validation_and_epoch_creation_are_one_command() {
+        let store = Store::new_in_memory().unwrap();
+        let instance = GateInstanceId::parse("018f1d4e-7b00-7000-8000-000000000001").unwrap();
+        let spec = protocol2_spec("synthetic", IngressDiscovery::Membership);
+        store
+            .install_gate_instance_revision(
+                &instance,
+                &spec.kind_id,
+                "synthetic",
+                None,
+                1,
+                true,
+                spec.origin_scope,
+                spec.ingress_discovery,
+                "gate-config/synthetic/v1",
+                b"{}",
+                10,
+            )
+            .unwrap();
+
+        let wrong_kind = protocol2_spec("different", IngressDiscovery::Membership);
+        assert!(matches!(
+            store.begin_gate_connection_checked(&instance, 1, &wrong_kind, 11),
+            Err(GateConnectionStartError::KindMismatch)
+        ));
+        let count = store
+            .c()
+            .query_row("SELECT COUNT(*) FROM gate_connections", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+
+        let epoch = store
+            .begin_gate_connection_checked(&instance, 1, &spec, 12)
+            .unwrap();
+        store
+            .activate_gate_connection(&instance, epoch, 13)
+            .unwrap();
+        assert!(matches!(
+            store.begin_gate_connection_checked(&instance, 1, &spec, 14),
+            Err(GateConnectionStartError::InstanceActive)
+        ));
+        let readiness = store
+            .c()
+            .query_row(
+                "SELECT gi.lifecycle,gc.state FROM gate_instances gi
+                 JOIN gate_connections gc ON gc.instance_id=gi.instance_id
+                 WHERE gi.instance_id=?1 AND gc.connection_epoch=?2",
+                params![instance.as_str(), epoch as i64],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(readiness, ("running".into(), "active".into()));
+    }
+
+    fn prepared_delivery_fixture(store: &Store, state: &str) -> GateRoute {
+        let kind = GateKindId::parse("synthetic".to_string()).unwrap();
+        let instance = store.seed_compatibility_instance(&kind).unwrap();
+        let route = GateRoute {
+            subject_id: 7,
+            place_id: 11,
+            kind_id: kind,
+            instance_id: instance,
+            binding_id: "binding-synthetic".into(),
+            address: "room:synthetic".into(),
+            connection_epoch: 3,
+            revision: 1,
+            purpose: RoutePurpose::outbound(),
+        };
+        let conn = store.c();
+        conn.execute(
+            "INSERT INTO deliveries(delivery_id,place_id,seq,binding_id,instance_id,revision,connection_epoch,state,attempt,deadline,error)
+             VALUES('delivery-synthetic',?1,1,?2,?3,1,3,?4,1,NULL,NULL)",
+            params![
+                route.place_id,
+                route.binding_id,
+                route.instance_id.as_str(),
+                state
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO v1_deliveries(place_id,seq,gate_name,state,error,attempted_at)
+             VALUES(?1,1,?2,'pending',NULL,1)",
+            params![route.place_id, route.kind_id.as_str()],
+        )
+        .unwrap();
+        route
+    }
+
+    #[test]
+    fn delivery_terminal_ref_and_v1_projection_commit_together_and_late_ack_is_observed() {
+        let store = Store::new_in_memory().unwrap();
+        let route = prepared_delivery_fixture(&store, "sending");
+        store
+            .c()
+            .execute_batch(
+                "CREATE TRIGGER reject_v1_delivery_update BEFORE UPDATE ON v1_deliveries
+                 BEGIN SELECT RAISE(ABORT,'synthetic projection failure'); END;",
+            )
+            .unwrap();
+        assert!(store
+            .complete_delivery(
+                &route,
+                1,
+                "delivered",
+                None,
+                Some("origin-synthetic"),
+                b"ack",
+                20,
+            )
+            .is_err());
+        let conn = store.c();
+        assert_eq!(
+            conn.query_row(
+                "SELECT state FROM deliveries WHERE delivery_id='delivery-synthetic'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "sending"
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM external_refs", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        conn.execute_batch("DROP TRIGGER reject_v1_delivery_update")
+            .unwrap();
+        drop(conn);
+
+        assert!(store
+            .complete_delivery(
+                &route,
+                1,
+                "delivered",
+                None,
+                Some("origin-synthetic"),
+                b"ack",
+                21,
+            )
+            .unwrap());
+        let conn = store.c();
+        let states = conn
+            .query_row(
+                "SELECT d.state,v.state FROM deliveries d JOIN v1_deliveries v
+                 ON v.place_id=d.place_id AND v.seq=d.seq
+                 WHERE d.delivery_id='delivery-synthetic'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(states, ("delivered".into(), "sent".into()));
+        assert_eq!(
+            conn.query_row("SELECT external_id FROM external_refs", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap(),
+            "origin-synthetic"
+        );
+        assert_eq!(
+            conn.query_row("SELECT external_id FROM v1_external_refs", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap(),
+            "origin-synthetic"
+        );
+        drop(conn);
+
+        assert!(!store
+            .complete_delivery(
+                &route,
+                1,
+                "delivered",
+                None,
+                Some("origin-late"),
+                b"late-ack",
+                22,
+            )
+            .unwrap());
+        assert_eq!(
+            store
+                .c()
+                .query_row("SELECT COUNT(*) FROM delivery_observations", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn reopening_store_recovers_stale_sending_to_terminal_with_v1_projection() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "opencrab-store-stale-delivery-{}-{nonce}.sqlite",
+            std::process::id()
+        ));
+        {
+            let store = Store::open(&path).unwrap();
+            prepared_delivery_fixture(&store, "sending");
+        }
+        {
+            let reopened = Store::open(&path).unwrap();
+            let states = reopened
+                .c()
+                .query_row(
+                    "SELECT d.state,v.state FROM deliveries d JOIN v1_deliveries v
+                     ON v.place_id=d.place_id AND v.seq=d.seq
+                     WHERE d.delivery_id='delivery-synthetic'",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .unwrap();
+            assert_eq!(states, ("indeterminate".into(), "failed".into()));
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn canonical_runtime_read_set_matches_target_schema_ledger() {
+        let ledger: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/target-schema-runtime-v15.json"
+        ))
+        .unwrap();
+        let store = Store::new_in_memory().unwrap();
+        let conn = store.c();
+        let mut mismatches = Vec::new();
+        for entity in ledger["entities"].as_array().unwrap() {
+            let table = entity["id"].as_str().unwrap();
+            assert!(table_exists(&conn, table).unwrap(), "missing table {table}");
+            let mut statement = conn
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap();
+            let actual = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?.to_ascii_uppercase(),
+                        row.get::<_, i64>(3)? != 0,
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>>>()
+                .unwrap();
+            let mut expected = entity["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|field| {
+                    let logical = field["type"].as_str().unwrap().trim_end_matches('?');
+                    let sql_type = match logical {
+                        "boolean" | "i64" | "integer_id" | "u32" | "u64" | "utc_nanos" => "INTEGER",
+                        "f64" => "REAL",
+                        "bytes"
+                        | "secret_bytes"
+                        | "sha256"
+                        | "schema(discord-channel-config-source-row-v1)"
+                        | "schema(nostr-key-source-record-v1)"
+                        | "schema(webhook-events)" => "BLOB",
+                        _ => "TEXT",
+                    };
+                    (
+                        field["name"].as_str().unwrap().to_string(),
+                        sql_type.to_string(),
+                        !field["nullable"].as_bool().unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut actual = actual;
+            actual.sort();
+            expected.sort();
+            if actual != expected {
+                mismatches.push(format!("{table}: actual={actual:?} expected={expected:?}"));
+            }
+
+            let ddl: String = conn
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
+                    params![table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            for field in entity["fields"].as_array().unwrap() {
+                let logical = field["type"].as_str().unwrap().trim_end_matches('?');
+                if let Some(values) = logical
+                    .strip_prefix("enum(")
+                    .and_then(|value| value.strip_suffix(')'))
+                {
+                    for value in values.split(',') {
+                        if !ddl.contains(&format!("'{value}'")) {
+                            mismatches.push(format!(
+                                "{table}.{} does not constrain enum state {value}",
+                                field["name"].as_str().unwrap()
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+    }
+
+    #[test]
     fn worktree_v1_six_tables_migrate_or_retain_raw() {
-        let conn = Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE channels(place_id INTEGER NOT NULL,gate_name TEXT NOT NULL,address TEXT NOT NULL,PRIMARY KEY(place_id,gate_name));
+            "CREATE TABLE places(id INTEGER PRIMARY KEY AUTOINCREMENT,address TEXT,parent_id INTEGER,policy_json TEXT NOT NULL,inherit_from_place INTEGER,inherit_up_to_seq INTEGER,created_at INTEGER NOT NULL,closed_at INTEGER,close_reason TEXT);
+             CREATE TABLE subjects(id INTEGER PRIMARY KEY AUTOINCREMENT,kind TEXT NOT NULL,name TEXT NOT NULL DEFAULT '',persona TEXT NOT NULL,turn_runner TEXT NOT NULL,standing TEXT NOT NULL,created_at INTEGER NOT NULL);
+             CREATE TABLE events(place_id INTEGER NOT NULL,seq INTEGER NOT NULL,kind TEXT NOT NULL,author_subject_id INTEGER,author_external_id TEXT,content_json TEXT NOT NULL,mentions_json TEXT NOT NULL,reply_to_seq INTEGER,target_seq INTEGER,for_subject_id INTEGER,created_at INTEGER NOT NULL,attachments_json TEXT NOT NULL DEFAULT '[]',PRIMARY KEY(place_id,seq));
+             CREATE TABLE channels(place_id INTEGER NOT NULL,gate_name TEXT NOT NULL,address TEXT NOT NULL,PRIMARY KEY(place_id,gate_name));
              CREATE TABLE external_refs(place_id INTEGER NOT NULL,seq INTEGER NOT NULL,gate_name TEXT NOT NULL,external_id TEXT NOT NULL,direction TEXT NOT NULL,PRIMARY KEY(place_id,seq,gate_name));
              CREATE TABLE deliveries(place_id INTEGER NOT NULL,seq INTEGER NOT NULL,gate_name TEXT NOT NULL,state TEXT NOT NULL,error TEXT,attempted_at INTEGER NOT NULL,PRIMARY KEY(place_id,seq,gate_name));
              CREATE TABLE subject_identities(subject_id INTEGER NOT NULL,gate_name TEXT NOT NULL,external_id TEXT NOT NULL,PRIMARY KEY(subject_id,gate_name));
              CREATE TABLE dedup_hits(gate_name TEXT NOT NULL,place_id INTEGER NOT NULL,external_id TEXT NOT NULL,existing_seq INTEGER NOT NULL,at INTEGER NOT NULL);
              CREATE TABLE expanded_tools(place_id INTEGER NOT NULL,subject_id INTEGER NOT NULL,gate_name TEXT NOT NULL,PRIMARY KEY(place_id,subject_id,gate_name));
+             INSERT INTO places(id,address,policy_json,created_at) VALUES(1,'room:a','{}',0);
+             INSERT INTO subjects(id,kind,name,persona,turn_runner,standing,created_at) VALUES(1,'agent','A','A','engine','trusted',0);
+             INSERT INTO events(place_id,seq,kind,author_external_id,content_json,mentions_json,created_at) VALUES(1,1,'said','principal-a','{\"text\":\"hello\"}','[]',1);
              INSERT INTO channels VALUES(1,'web','room:a');
              INSERT INTO external_refs VALUES(1,1,'web','message-a','in');
              INSERT INTO deliveries VALUES(1,1,'web','sent',NULL,10);
@@ -3357,20 +4237,7 @@ mod tests {
              INSERT INTO expanded_tools VALUES(1,1,'web');",
         )
         .unwrap();
-        prepare_v1_gate_tables(&conn).unwrap();
-        conn.execute_batch(SCHEMA).unwrap();
-        conn.execute(
-            "INSERT INTO places(id,address,policy_json,created_at) VALUES(1,'room:a','{}',0)",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO subjects(id,kind,name,persona,turn_runner,standing,created_at)
-             VALUES(1,'agent','A','A','engine','trusted',0)",
-            [],
-        )
-        .unwrap();
-        migrate(&conn).unwrap();
+        initialize_schema(&mut conn).unwrap();
 
         for table in [
             "v1_channels",
@@ -3396,7 +4263,7 @@ mod tests {
         );
         assert_eq!(
             conn.query_row(
-                "SELECT COUNT(*) FROM legacy_unowned_source_rows WHERE source_table='v1_deliveries'",
+                "SELECT COUNT(*) FROM legacy_unowned_source_rows WHERE source_table='deliveries'",
                 [],
                 |row| row.get::<_, i64>(0),
             )
@@ -3408,6 +4275,165 @@ mod tests {
                 .get::<_, i64>(0))
                 .unwrap(),
             0
+        );
+    }
+
+    fn create_loose_v1_fixture(conn: &Connection) {
+        conn.execute_batch(
+            "CREATE TABLE places(id INTEGER PRIMARY KEY AUTOINCREMENT,address TEXT,parent_id INTEGER,policy_json TEXT NOT NULL,inherit_from_place INTEGER,inherit_up_to_seq INTEGER,created_at INTEGER NOT NULL,closed_at INTEGER,close_reason TEXT);
+             CREATE TABLE subjects(id INTEGER PRIMARY KEY AUTOINCREMENT,kind TEXT NOT NULL,name TEXT NOT NULL DEFAULT '',persona TEXT NOT NULL,turn_runner TEXT NOT NULL,standing TEXT NOT NULL,created_at INTEGER NOT NULL);
+             CREATE TABLE events(place_id INTEGER NOT NULL,seq INTEGER NOT NULL,kind TEXT NOT NULL,author_subject_id INTEGER,author_external_id TEXT,content_json TEXT NOT NULL,mentions_json TEXT NOT NULL,reply_to_seq INTEGER,target_seq INTEGER,for_subject_id INTEGER,created_at INTEGER NOT NULL,attachments_json TEXT NOT NULL DEFAULT '[]',PRIMARY KEY(place_id,seq));
+             CREATE TABLE channels(place_id INTEGER,gate_name TEXT,address TEXT,PRIMARY KEY(place_id,gate_name));
+             CREATE TABLE external_refs(place_id INTEGER,seq INTEGER,gate_name TEXT,external_id TEXT,direction TEXT);
+             CREATE TABLE deliveries(place_id INTEGER,seq INTEGER,gate_name TEXT,state TEXT,error TEXT,attempted_at INTEGER);
+             CREATE TABLE subject_identities(subject_id INTEGER,gate_name TEXT,external_id TEXT);
+             CREATE TABLE dedup_hits(gate_name TEXT,place_id INTEGER,external_id TEXT,existing_seq INTEGER,at INTEGER);
+             CREATE TABLE expanded_tools(place_id INTEGER,subject_id INTEGER,gate_name TEXT);
+             INSERT INTO places(id,address,policy_json,created_at) VALUES(1,'room:one','{}',0),(2,'room:two','{}',0);
+             INSERT INTO subjects(id,kind,name,persona,turn_runner,standing,created_at) VALUES(1,'agent','A','A','engine','trusted',0);
+             INSERT INTO events(place_id,seq,kind,author_external_id,content_json,mentions_json,created_at) VALUES(1,1,'said','principal-a','{\"text\":\"hello\"}','[]',1);",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn dirty_v1_duplicate_orphan_and_unknown_rows_are_fully_accounted() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        create_loose_v1_fixture(&conn);
+        conn.execute_batch(
+            "INSERT INTO channels VALUES(1,'web','room:same'),(2,'web','room:same'),(1,'nostr','room:one');
+             INSERT INTO external_refs VALUES(99,1,'nostr','orphan-ref','in'),(1,1,'nostr','unknown-direction','sideways');
+             INSERT INTO deliveries VALUES(1,1,'nostr','sent',NULL,10);
+             INSERT INTO subject_identities VALUES(99,'nostr','orphan-principal');
+             INSERT INTO dedup_hits VALUES('nostr',1,'same-origin',1,11),('nostr',1,'same-origin',1,11);
+             INSERT INTO expanded_tools VALUES(1,99,'nostr');",
+        )
+        .unwrap();
+        initialize_schema(&mut conn).unwrap();
+
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM legacy_unowned_source_rows WHERE source_table='channels'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM gate_bindings gb JOIN gate_instances gi ON gi.instance_id=gb.instance_id WHERE gi.kind_id='web'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM gate_dedup_hits", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            2
+        );
+        for (table, expected) in [
+            ("external_refs", 2_i64),
+            ("deliveries", 1),
+            ("subject_identities", 1),
+            ("expanded_tools", 1),
+        ] {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM legacy_unowned_source_rows WHERE source_table=?1",
+                    params![table],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+                expected,
+                "{table}"
+            );
+        }
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM legacy_unowned_source_rows
+                 WHERE source_table='channels' AND substr(source_key,1,1)=x'50'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            2,
+            "source_key must be the source PK tuple, not rowid"
+        );
+    }
+
+    #[test]
+    fn every_sqlite_storage_class_is_read_raw_before_typed_classification() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        create_loose_v1_fixture(&conn);
+        conn.execute_batch(
+            "INSERT INTO channels VALUES(1,x'776562','room:blob-kind');
+             INSERT INTO external_refs VALUES('not-an-integer',1,'web','ref','in');
+             INSERT INTO deliveries VALUES(1,1,'web',x'7374617465',NULL,10);
+             INSERT INTO subject_identities VALUES(1.5,'web','principal');
+             INSERT INTO dedup_hits VALUES('web',1,'origin','not-an-integer',11);
+             INSERT INTO expanded_tools VALUES(x'01',1,'web');",
+        )
+        .unwrap();
+        initialize_schema(&mut conn).unwrap();
+
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM legacy_unowned_source_rows",
+                [],
+                |row| { row.get::<_, i64>(0) }
+            )
+            .unwrap(),
+            6
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM gate_bindings", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT typeof(gate_name) FROM v1_channels", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap(),
+            "blob"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT typeof(subject_id) FROM v1_subject_identities",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "real"
+        );
+    }
+
+    #[test]
+    fn failed_v1_conversion_rolls_back_rename_schema_and_rows_together() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        create_loose_v1_fixture(&conn);
+        conn.execute_batch(
+            "INSERT INTO channels VALUES(1,'web','room:one');
+             CREATE TABLE gate_bindings(binding_id TEXT PRIMARY KEY CHECK(0));",
+        )
+        .unwrap();
+        assert!(initialize_schema(&mut conn).is_err());
+        assert!(table_exists(&conn, "channels").unwrap());
+        assert!(!table_exists(&conn, "v1_channels").unwrap());
+        assert!(!table_exists(&conn, "gate_kinds").unwrap());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM channels", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            1
         );
     }
 

@@ -321,7 +321,9 @@ impl Host {
         };
         // 住所を用意する（設定）。bind はまだ送らない——プラグインが（再）接続した瞬間に core が結び直す
         // （`rebind_gate`・プロトコル§08）。冪等なので、初回も再起動後も同じ 1 本で足りる。
-        self.sys.provision_channel(place, &spec.gate, &spec.address);
+        self.sys
+            .provision_channel(place, &spec.gate, &spec.address)
+            .expect("configured compatibility gate must be prebound");
         (place, agent)
     }
 

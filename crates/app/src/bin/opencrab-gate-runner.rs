@@ -9,6 +9,17 @@ use std::process::Command;
 use zeroize::{Zeroize, Zeroizing};
 
 const MASTER_KEY_ENV: &str = "OPENCRAB_SECRET_MASTER_KEY";
+const RUNNER_OWNED_ENVS: [&str; 8] = [
+    MASTER_KEY_ENV,
+    "OPENCRAB_GATE_TOKEN",
+    "OPENCRAB_GATE_BOOT_ERROR_CODE",
+    "OPENCRAB_GATE_INSTANCE_ID",
+    "OPENCRAB_GATE_KIND_ID",
+    "OPENCRAB_GATE_REVISION",
+    "OPENCRAB_GATE_SOCKET",
+    "OPENCRAB_GATE_CONFIG_SCHEMA",
+];
+const GATE_CONFIG_B64_ENV: &str = "OPENCRAB_GATE_CONFIG_B64";
 
 fn usage() -> ! {
     panic!("usage: opencrab-gate-runner <db> <instance-uuid> <core-socket> <adapter> [args...]")
@@ -28,10 +39,10 @@ fn quarter_round(state: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) 
 fn hchacha20(key: &[u8; 32], nonce: &[u8; 16]) -> [u8; 32] {
     let mut state = [0_u32; 16];
     state[..4].copy_from_slice(&[0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574]);
-    for (index, chunk) in key.chunks_exact(4).enumerate() {
+    for (index, chunk) in key.chunks_exact(std::mem::size_of::<u32>()).enumerate() {
         state[4 + index] = u32::from_le_bytes(chunk.try_into().unwrap());
     }
-    for (index, chunk) in nonce.chunks_exact(4).enumerate() {
+    for (index, chunk) in nonce.chunks_exact(std::mem::size_of::<u32>()).enumerate() {
         state[12 + index] = u32::from_le_bytes(chunk.try_into().unwrap());
     }
     for _ in 0..10 {
@@ -112,6 +123,22 @@ fn resolve_secret(
     }
 }
 
+fn adapter_command(adapter: std::ffi::OsString, adapter_args: Vec<std::ffi::OsString>) -> Command {
+    let mut command = Command::new(adapter);
+    command.args(adapter_args);
+    for name in RUNNER_OWNED_ENVS {
+        command.env_remove(name);
+    }
+    command.env_remove(GATE_CONFIG_B64_ENV);
+    command
+}
+
+fn set_boot_error(command: &mut Command, code: &'static str) {
+    command
+        .env_remove("OPENCRAB_GATE_TOKEN")
+        .env("OPENCRAB_GATE_BOOT_ERROR_CODE", code);
+}
+
 fn main() {
     let mut args = std::env::args_os().skip(1);
     let db = args.next().unwrap_or_else(|| usage());
@@ -131,8 +158,7 @@ fn main() {
     let launch = gate_launch_read_only(&db, &instance).ok().flatten();
     let mut boot_error = None;
     let mut token = Zeroizing::new(Vec::new());
-    let mut command = Command::new(adapter);
-    command.args(adapter_args).env_remove(MASTER_KEY_ENV);
+    let mut command = adapter_command(adapter, adapter_args);
 
     if let Some(launch) = launch {
         command
@@ -142,7 +168,7 @@ fn main() {
             .env("OPENCRAB_GATE_SOCKET", socket)
             .env("OPENCRAB_GATE_CONFIG_SCHEMA", launch.config_schema_id)
             .env(
-                "OPENCRAB_GATE_CONFIG_B64",
+                GATE_CONFIG_B64_ENV,
                 base64::engine::general_purpose::STANDARD.encode(launch.config_bytes),
             );
         let expected = match launch.kind_id.as_str() {
@@ -169,7 +195,7 @@ fn main() {
     }
 
     if let Some(code) = boot_error {
-        command.env("OPENCRAB_GATE_BOOT_ERROR_CODE", code);
+        set_boot_error(&mut command, code);
     } else {
         use std::os::unix::ffi::OsStringExt as _;
         command.env(
@@ -184,7 +210,10 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::hchacha20;
+    use super::{
+        adapter_command, hchacha20, set_boot_error, GATE_CONFIG_B64_ENV, RUNNER_OWNED_ENVS,
+    };
+    use std::ffi::OsStr;
 
     #[test]
     fn hchacha20_matches_draft_vector() {
@@ -200,5 +229,27 @@ mod tests {
                 0x26, 0xd3, 0xec, 0xdc,
             ]
         );
+    }
+
+    #[test]
+    fn boot_error_child_has_no_inherited_runner_state_or_token() {
+        let mut command = adapter_command("synthetic-adapter".into(), Vec::new());
+        set_boot_error(&mut command, "instance_config_unavailable");
+
+        let envs: std::collections::BTreeMap<_, _> = command
+            .get_envs()
+            .map(|(name, value)| (name.to_os_string(), value.map(OsStr::to_os_string)))
+            .collect();
+        assert_eq!(envs.get(OsStr::new("OPENCRAB_GATE_TOKEN")), Some(&None));
+        assert_eq!(
+            envs.get(OsStr::new("OPENCRAB_GATE_BOOT_ERROR_CODE")),
+            Some(&Some("instance_config_unavailable".into()))
+        );
+        for name in RUNNER_OWNED_ENVS {
+            if name != "OPENCRAB_GATE_BOOT_ERROR_CODE" {
+                assert_eq!(envs.get(OsStr::new(name)), Some(&None), "{name}");
+            }
+        }
+        assert_eq!(envs.get(OsStr::new(GATE_CONFIG_B64_ENV)), Some(&None));
     }
 }

@@ -94,16 +94,23 @@ impl Conn {
     fn issue(
         &self,
         mut req: serde_json::Map<String, serde_json::Value>,
-    ) -> (
+    ) -> Option<(
         String,
         oneshot::Receiver<Result<serde_json::Value, WireErr>>,
-    ) {
+    )> {
         let id = self.new_id();
         req.insert("id".into(), id.clone().into());
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(id.clone(), tx);
-        self.send_line(&serde_json::Value::Object(req));
-        (id, rx)
+        if self
+            .out
+            .send(serde_json::Value::Object(req).to_string())
+            .is_err()
+        {
+            self.pending.lock().unwrap().remove(&id);
+            return None;
+        }
+        Some((id, rx))
     }
     fn drop_pending(&self, id: &str) {
         self.pending.lock().unwrap().remove(id);
@@ -557,6 +564,15 @@ impl Plugd {
             Err(HelloReject::KindSpecMismatch) => {
                 return Err(mkerr(WireErr::new("kind_spec_mismatch")))
             }
+            Err(HelloReject::KindMismatch) => {
+                return Err(mkerr(WireErr::new("instance_kind_mismatch")))
+            }
+            Err(HelloReject::InstanceDisabled) => {
+                return Err(mkerr(WireErr::new("instance_disabled")))
+            }
+            Err(HelloReject::KindDeclarationMismatch) => {
+                return Err(mkerr(WireErr::new("kind_declaration_mismatch")))
+            }
             Err(HelloReject::InstanceUnknown) => {
                 return Err(mkerr(WireErr::new("instance_unknown")))
             }
@@ -873,21 +889,21 @@ impl Plugd {
 
 #[async_trait::async_trait]
 impl Transport for Plugd {
-    async fn bind(&self, gate: &GateName, address: &str) -> Result<(), TransportError> {
+    async fn compat_bind(&self, gate: &GateName, address: &str) -> Result<(), TransportError> {
         let mut req = serde_json::Map::new();
         req.insert("m".into(), "bind".into());
         req.insert("address".into(), address.into());
         self.request_ok(gate, req, BIND_TIMEOUT).await.map(|_| ())
     }
 
-    async fn unbind(&self, gate: &GateName, address: &str) -> Result<(), TransportError> {
+    async fn compat_unbind(&self, gate: &GateName, address: &str) -> Result<(), TransportError> {
         let mut req = serde_json::Map::new();
         req.insert("m".into(), "unbind".into());
         req.insert("address".into(), address.into());
         self.request_ok(gate, req, BIND_TIMEOUT).await.map(|_| ())
     }
 
-    async fn open(
+    async fn compat_open(
         &self,
         gate: &GateName,
         under: &str,
@@ -906,7 +922,7 @@ impl Transport for Plugd {
             .ok_or_else(|| TransportError("open ack lacks address".into()))
     }
 
-    async fn deliver_effect(
+    async fn compat_deliver_effect(
         &self,
         gate: &GateName,
         address: &str,
@@ -966,8 +982,29 @@ impl Transport for Plugd {
     async fn deliver_effect_route(
         &self,
         route: &GateRoute,
+        _seq: Seq,
         effect: OutgoingEffect,
-    ) -> Result<DeliveryAck, TransportError> {
+    ) -> TransportDeliveryResult {
+        let Some(conn) = self.conn_for_instance(&route.instance_id) else {
+            return TransportDeliveryResult::DefiniteFailure(TransportError(format!(
+                "gate instance not connected: {}",
+                route.instance_id
+            )));
+        };
+        if !*conn.active.lock().unwrap() {
+            return TransportDeliveryResult::DefiniteFailure(TransportError(format!(
+                "gate instance not ready: {}",
+                route.instance_id
+            )));
+        }
+        let current = conn.gate.lock().unwrap().clone();
+        if !current.as_ref().is_some_and(|current| {
+            current.connection_epoch == route.connection_epoch && current.revision == route.revision
+        }) {
+            return TransportDeliveryResult::DefiniteFailure(TransportError(
+                "route connection epoch is no longer active".into(),
+            ));
+        }
         let mut payload = serde_json::Map::new();
         if let Some(text) = &effect.text {
             payload.insert("text".into(), text.clone().into());
@@ -986,19 +1023,49 @@ impl Transport for Plugd {
         if let Some(verb) = &effect.verb {
             req.insert("verb".into(), verb.clone().into());
         }
-        let ok = self
-            .request_ok_instance(&route.instance_id, req, EFFECT_TIMEOUT)
-            .await?;
-        Ok(DeliveryAck {
-            delivered: ok
-                .get("delivered")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false),
-            origin: ok
-                .get("origin")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-        })
+        let Some((_id, mut rx)) = conn.issue(req) else {
+            return TransportDeliveryResult::DefiniteFailure(TransportError(
+                "connection writer unavailable before effect acceptance".into(),
+            ));
+        };
+        match tokio::time::timeout(EFFECT_TIMEOUT, &mut rx).await {
+            Ok(Ok(Ok(ok))) => {
+                let Some(delivered) = ok.get("delivered").and_then(|value| value.as_bool()) else {
+                    return TransportDeliveryResult::Indeterminate {
+                        error: TransportError("effect ack lacks boolean delivered".into()),
+                        late_observation: None,
+                    };
+                };
+                let origin = match ok.get("origin") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(serde_json::Value::String(value)) => Some(value.clone()),
+                    Some(_) => {
+                        return TransportDeliveryResult::Indeterminate {
+                            error: TransportError("effect ack has invalid origin".into()),
+                            late_observation: None,
+                        }
+                    }
+                };
+                TransportDeliveryResult::DefiniteAck(DeliveryAck { delivered, origin })
+            }
+            Ok(Ok(Err(error))) => TransportDeliveryResult::DefiniteFailure(TransportError(
+                format!("err: {}", error.code),
+            )),
+            Ok(Err(_)) => TransportDeliveryResult::Indeterminate {
+                error: TransportError("connection dropped after effect acceptance".into()),
+                late_observation: None,
+            },
+            Err(_) => TransportDeliveryResult::Indeterminate {
+                error: TransportError("effect timed out after acceptance".into()),
+                late_observation: Some(Box::pin(async move {
+                    match rx.await {
+                        Ok(Ok(value)) => serde_json::to_vec(&value).ok(),
+                        Ok(Err(error)) => serde_json::to_vec(&error.to_json("")).ok(),
+                        Err(_) => None,
+                    }
+                })),
+            },
+        }
     }
 }
 
@@ -1013,7 +1080,9 @@ impl Plugd {
         let conn = self
             .conn_for_gate(gate)
             .ok_or_else(|| TransportError(format!("gate not connected: {gate}")))?;
-        let (id, rx) = conn.issue(req);
+        let (id, rx) = conn
+            .issue(req)
+            .ok_or_else(|| TransportError("connection writer unavailable".into()))?;
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(Ok(ok))) => Ok(ok),
             Ok(Ok(Err(e))) => Err(TransportError(format!("err: {}", e.code))),
@@ -1040,7 +1109,9 @@ impl Plugd {
                 "gate instance not ready: {instance}"
             )));
         }
-        let (id, rx) = conn.issue(req);
+        let (id, rx) = conn
+            .issue(req)
+            .ok_or_else(|| TransportError("connection writer unavailable".into()))?;
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(Ok(ok))) => Ok(ok),
             Ok(Ok(Err(error))) => Err(TransportError(format!("err: {}", error.code))),
@@ -1157,44 +1228,6 @@ impl Notifier for Plugd {
 
 #[async_trait::async_trait]
 impl ToolHost for Plugd {
-    async fn invoke(&self, call: &ToolCallSpec) -> Result<String, ToolError> {
-        let instance = self
-            .0
-            .tools
-            .lock()
-            .unwrap()
-            .get(&call.name)
-            .cloned()
-            .ok_or_else(|| ToolError(format!("no gate for tool: {}", call.name)))?;
-        let conn = self
-            .conn_for_instance(&instance)
-            .ok_or_else(|| ToolError(format!("gate instance not connected: {instance}")))?;
-        let mut req = serde_json::Map::new();
-        req.insert("m".into(), "tool".into());
-        req.insert("name".into(), call.name.clone().into());
-        req.insert("args".into(), call.args.clone());
-        // ツールの期限はこの呼び出しが属する活動の残り時間（§00）。core が背景へ移し・上限で切るので、
-        // ここでは自前の期限を足さず待つ（新しい数を足さない）。**前提**: この invoke は core の
-        // 監督下でしか呼ばれない——常時切り離しで即座に背景の活動になり、supervise_background が
-        // bg_cap で切る（かつ core-bg-stop で殺せる）。監督外から呼ぶ経路が 1 本でもできると無期限に
-        // 待つので、その時はここに期限が要る。
-        // core がタスクを畳めば `rx` を待つこの future も drop され、下の guard が待ち行列を外す。
-        let (id, rx) = conn.issue(req);
-        let _guard = PendingGuard {
-            conn: conn.clone(),
-            id,
-        };
-        match rx.await {
-            Ok(Ok(ok)) => ok
-                .get("result")
-                .and_then(|x| x.as_str())
-                .map(|s| s.to_string())
-                .ok_or_else(|| ToolError("tool ok lacks result".into())),
-            Ok(Err(e)) => Err(ToolError(format!("tool err: {}", e.code))),
-            Err(_) => Err(ToolError("connection dropped".into())),
-        }
-    }
-
     async fn invoke_route(
         &self,
         route: &GateRoute,
@@ -1216,7 +1249,9 @@ impl ToolHost for Plugd {
         req.insert("m".into(), "tool".into());
         req.insert("name".into(), call.name.clone().into());
         req.insert("args".into(), call.args.clone());
-        let (id, rx) = conn.issue(req);
+        let (id, rx) = conn
+            .issue(req)
+            .ok_or_else(|| ToolError("connection writer unavailable".into()))?;
         let _guard = PendingGuard { conn, id };
         match rx.await {
             Ok(Ok(ok)) => ok

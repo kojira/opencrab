@@ -516,6 +516,9 @@ pub enum HelloReject {
     ActionToolCollision,
     InstanceTaken,
     KindSpecMismatch,
+    KindMismatch,
+    InstanceDisabled,
+    KindDeclarationMismatch,
     InstanceUnknown,
     RevisionMismatch,
 }
@@ -602,6 +605,7 @@ struct Inner {
     /// Active connection registry keyed by credential/process instance. `gates` above is the
     /// ref-counted kind-spec index retained while at least one instance is connected.
     gate_instances: StdMutex<HashMap<GateInstanceId, GateConnection>>,
+    gate_registration: StdMutex<()>,
     /// core → plugin の要求を運ぶ seam（bind/open/effect）。本番では plugd。無ければチャネル配送をしない。
     transport: StdMutex<Option<Arc<dyn Transport>>>,
     /// チャネルごとの配送の列（§08）。順序を保つため (place, gate) ごとに 1 本。
@@ -680,6 +684,7 @@ impl System {
             gates: StdMutex::new(HashMap::new()),
             gate_kind_specs: StdMutex::new(HashMap::new()),
             gate_instances: StdMutex::new(HashMap::new()),
+            gate_registration: StdMutex::new(()),
             transport: StdMutex::new(None),
             lanes: StdMutex::new(HashMap::new()),
             // 元栓は未設定で始まる（許可集合の源がまだ配送されていない）。従来どおり全着火を通す。
@@ -810,7 +815,7 @@ impl System {
                 let names: Vec<_> = spec.tools.into_iter().map(|tool| tool.name).collect();
                 self.0
                     .store
-                    .ensure_tool_routes_for_kind(&spec.name, &names)
+                    .reconcile_compatibility_routes_for_kind(&spec.name, &names)
                     .unwrap();
             }
         }
@@ -912,11 +917,17 @@ impl System {
             .iter()
             .map(|tool| tool.name.clone())
             .collect();
-        let _ = self.0.store.ensure_tool_routes_for_kind(&kind, &names);
+        let _ = self
+            .0
+            .store
+            .reconcile_compatibility_routes_for_kind(&kind, &names);
         Ok(())
     }
 
-    pub fn register_gate_instance(&self, connection: GateConnection) -> Result<(), HelloReject> {
+    fn validate_gate_instance_registration(
+        &self,
+        connection: &GateConnection,
+    ) -> Result<GateSpec, HelloReject> {
         if self
             .0
             .gate_instances
@@ -937,7 +948,7 @@ impl System {
             capabilities: connection.spec.capabilities.clone(),
             actions: connection.spec.actions.clone(),
         };
-        let mut canonical_kinds = self.0.gate_kind_specs.lock().unwrap();
+        let canonical_kinds = self.0.gate_kind_specs.lock().unwrap();
         if let Some(existing) = canonical_kinds.get(&connection.spec.kind_id) {
             if *existing != connection.spec {
                 return Err(HelloReject::KindSpecMismatch);
@@ -967,7 +978,7 @@ impl System {
             {
                 return Err(HelloReject::ActionToolCollision);
             }
-            let mut kinds = self.0.gates.lock().unwrap();
+            let kinds = self.0.gates.lock().unwrap();
             for existing in kinds.values() {
                 if existing.name != compatibility.name
                     && existing
@@ -978,23 +989,36 @@ impl System {
                     return Err(HelloReject::ToolNameTaken);
                 }
             }
-            kinds.insert(compatibility.name.clone(), compatibility);
+        }
+        Ok(compatibility)
+    }
+
+    fn commit_gate_instance_registration(
+        &self,
+        connection: GateConnection,
+        compatibility: GateSpec,
+    ) {
+        let mut canonical_kinds = self.0.gate_kind_specs.lock().unwrap();
+        if !canonical_kinds.contains_key(&connection.spec.kind_id) {
+            self.0
+                .gates
+                .lock()
+                .unwrap()
+                .insert(compatibility.name.clone(), compatibility);
             canonical_kinds.insert(connection.spec.kind_id.clone(), connection.spec.clone());
         }
         drop(canonical_kinds);
-        let kind = connection.spec.kind_id.clone();
-        let names: Vec<_> = connection
-            .spec
-            .tools
-            .iter()
-            .map(|tool| tool.name.clone())
-            .collect();
         self.0
             .gate_instances
             .lock()
             .unwrap()
             .insert(connection.instance_id.clone(), connection);
-        let _ = self.0.store.ensure_tool_routes_for_kind(&kind, &names);
+    }
+
+    pub fn register_gate_instance(&self, connection: GateConnection) -> Result<(), HelloReject> {
+        let _registration = self.0.gate_registration.lock().unwrap();
+        let compatibility = self.validate_gate_instance_registration(&connection)?;
+        self.commit_gate_instance_registration(connection, compatibility);
         Ok(())
     }
 
@@ -1039,35 +1063,45 @@ impl System {
         revision: u64,
         spec: GateKindSpec,
     ) -> Result<GateConnection, HelloReject> {
-        match self
-            .0
-            .store
-            .gate_instance_revision_matches(&instance_id, revision)
-        {
-            Ok(None) => return Err(HelloReject::InstanceUnknown),
-            Ok(Some(false)) | Err(_) => return Err(HelloReject::RevisionMismatch),
-            Ok(Some(true)) => {}
-        }
+        let _registration = self.0.gate_registration.lock().unwrap();
+        let pending = GateConnection {
+            instance_id: instance_id.clone(),
+            revision,
+            connection_epoch: 0,
+            spec: spec.clone(),
+        };
+        let compatibility = self.validate_gate_instance_registration(&pending)?;
         let epoch = self
             .0
             .store
-            .begin_gate_connection(&instance_id, revision, self.now_wall_nanos())
-            .map_err(|_| HelloReject::RevisionMismatch)?;
+            .begin_gate_connection_checked(&instance_id, revision, &spec, self.now_wall_nanos())
+            .map_err(|error| match error {
+                opencrab_store::GateConnectionStartError::InstanceUnknown => {
+                    HelloReject::InstanceUnknown
+                }
+                opencrab_store::GateConnectionStartError::KindMismatch => HelloReject::KindMismatch,
+                opencrab_store::GateConnectionStartError::RevisionMismatch
+                | opencrab_store::GateConnectionStartError::RevisionUnavailable => {
+                    HelloReject::RevisionMismatch
+                }
+                opencrab_store::GateConnectionStartError::InstanceDisabled => {
+                    HelloReject::InstanceDisabled
+                }
+                opencrab_store::GateConnectionStartError::KindDeclarationMismatch => {
+                    HelloReject::KindDeclarationMismatch
+                }
+                opencrab_store::GateConnectionStartError::InstanceActive => {
+                    HelloReject::InstanceTaken
+                }
+                opencrab_store::GateConnectionStartError::Store(_) => HelloReject::RevisionMismatch,
+            })?;
         let connection = GateConnection {
             instance_id,
             revision,
             connection_epoch: epoch,
             spec,
         };
-        if let Err(error) = self.register_gate_instance(connection.clone()) {
-            let _ = self.0.store.close_gate_connection(
-                &connection.instance_id,
-                connection.connection_epoch,
-                Some("hello_rejected"),
-                self.now_wall_nanos(),
-            );
-            return Err(error);
-        }
+        self.commit_gate_instance_registration(connection.clone(), compatibility);
         Ok(connection)
     }
 
@@ -1151,20 +1185,28 @@ impl System {
         address: &str,
     ) -> Result<(), String> {
         let gate = GateName::new(gate);
-        if self.gate_spec(&gate).is_none() {
-            return Err("gate not connected".into());
+        let discovery = self
+            .0
+            .gate_kind_specs
+            .lock()
+            .unwrap()
+            .get(&gate)
+            .map(|spec| spec.ingress_discovery)
+            .ok_or("gate not connected")?;
+        if discovery != IngressDiscovery::Prebound {
+            return Err("membership-driven gate cannot be bound by core".into());
         }
         if !self.address_matches(&gate, address) {
             return Err("address does not match gate's form".into());
         }
         let t = self.transport().ok_or("no transport")?;
-        t.bind(&gate, address).await.map_err(|e| e.0)?;
+        t.compat_bind(&gate, address).await.map_err(|e| e.0)?;
         self.0.store.add_channel(place, &gate, address).unwrap();
         if let Some(spec) = self.gate_spec(&gate) {
             let names: Vec<_> = spec.tools.into_iter().map(|tool| tool.name).collect();
             self.0
                 .store
-                .ensure_tool_routes_for_kind(&gate, &names)
+                .reconcile_compatibility_routes_for_kind(&gate, &names)
                 .unwrap();
         }
         Ok(())
@@ -1177,8 +1219,19 @@ impl System {
         address: &str,
     ) -> Result<(), String> {
         let gate = GateName::new(gate);
+        let discovery = self
+            .0
+            .gate_kind_specs
+            .lock()
+            .unwrap()
+            .get(&gate)
+            .map(|spec| spec.ingress_discovery)
+            .ok_or("gate not connected")?;
+        if discovery != IngressDiscovery::Prebound {
+            return Err("membership-driven gate cannot be unbound by core".into());
+        }
         let t = self.transport().ok_or("no transport")?;
-        t.unbind(&gate, address).await.map_err(|e| e.0)?;
+        t.compat_unbind(&gate, address).await.map_err(|e| e.0)?;
         self.0.store.remove_channel(place, &gate).unwrap();
         Ok(())
     }
@@ -1188,16 +1241,33 @@ impl System {
     ///
     /// これで「起動順」の鶏卵を解く: app は起動時に、プラグインの接続を待たずに住所を用意でき、
     /// プラグインが繋がった瞬間に core が結び直す（プロトコル§08）。冪等（同じ (place, gate) は住所を更新）。
-    pub fn provision_channel(&self, place: PlaceId, gate: &str, address: &str) {
+    pub fn provision_channel(
+        &self,
+        place: PlaceId,
+        gate: &str,
+        address: &str,
+    ) -> Result<(), String> {
         let gate = GateName::new(gate);
-        self.0.store.add_channel(place, &gate, address).unwrap();
+        match self.0.store.gate_ingress_discovery(&gate) {
+            Ok(Some(IngressDiscovery::Prebound)) => {}
+            Ok(Some(IngressDiscovery::Membership)) => {
+                return Err("membership-driven gate cannot be provisioned as prebound".into())
+            }
+            Ok(None) => return Err("gate kind is not configured".into()),
+            Err(error) => return Err(format!("gate kind lookup failed: {error}")),
+        }
+        self.0
+            .store
+            .add_channel(place, &gate, address)
+            .map_err(|error| error.to_string())?;
         if let Some(spec) = self.gate_spec(&gate) {
             let names: Vec<_> = spec.tools.into_iter().map(|tool| tool.name).collect();
             self.0
                 .store
-                .ensure_tool_routes_for_kind(&gate, &names)
-                .unwrap();
+                .reconcile_compatibility_routes_for_kind(&gate, &names)
+                .map_err(|error| error.to_string())?;
         }
+        Ok(())
     }
 
     /// あるゲートが（再）接続したとき、そのゲートに結ばれている全チャネルを結び直す（プロトコル§08）。
@@ -1208,7 +1278,14 @@ impl System {
     ///
     /// 送るだけ。応答が返らない・失敗しても再送しない（§08）。名乗りが無ければ（未接続なら）何もしない。
     pub async fn rebind_gate(&self, gate: &GateName) {
-        if self.gate_spec(gate).is_none() {
+        let prebound = self
+            .0
+            .gate_kind_specs
+            .lock()
+            .unwrap()
+            .get(gate)
+            .is_some_and(|spec| spec.ingress_discovery == IngressDiscovery::Prebound);
+        if !prebound {
             return;
         }
         let t = match self.transport() {
@@ -1223,7 +1300,7 @@ impl System {
         for (_place, address) in channels {
             // 住所は自分の書式に照らす（プロトコル§01）。合わないものは結ばない（設定ミスを黙って通さない）。
             if self.address_matches(gate, &address) {
-                let _ = t.bind(gate, &address).await;
+                let _ = t.compat_bind(gate, &address).await;
             }
         }
     }
@@ -1244,14 +1321,14 @@ impl System {
             return Err("gate does not support open".into());
         }
         let t = self.transport().ok_or("no transport")?;
-        let address = t.open(&gate, under, hint).await.map_err(|e| e.0)?;
+        let address = t.compat_open(&gate, under, hint).await.map_err(|e| e.0)?;
         // core は返ってきた住所に新しい場を結ぶ（§02）。誰が来るかは外界が決める。
         let child = self.create_place(Some(&address), Some(parent), policy, None);
         self.0.store.add_channel(child, &gate, &address).unwrap();
         let names: Vec<_> = spec.tools.into_iter().map(|tool| tool.name).collect();
         self.0
             .store
-            .ensure_tool_routes_for_kind(&gate, &names)
+            .reconcile_compatibility_routes_for_kind(&gate, &names)
             .unwrap();
         Ok(child)
     }
@@ -3730,10 +3807,6 @@ impl System {
     // 確定時に残っているので、更新に失敗しても「消える」ことは無い（pending のまま見える）。
     #[allow(clippy::disallowed_methods)]
     async fn run_delivery(&self, job: DeliveryJob) {
-        let t = match self.transport() {
-            Some(t) => t,
-            None => return, // pending 行は確定時に作られている。運べないなら pending のまま残る（§08）。
-        };
         if self
             .0
             .store
@@ -3742,82 +3815,72 @@ impl System {
         {
             return;
         }
-        // pending 行は確定（`append_with_deliveries`）で既に作られている。ここでは運んだ結果へ更新するだけ。
-        match t.deliver_effect_route(&job.route, job.effect.clone()).await {
-            Ok(ack) => {
-                // 外に出たものの識別子を返したら記録する（自分の投稿に後から反応できる・§08）。
-                // これは**自分が書くもの**。落ちたら握り潰さない（§15）——黙って落ちると、自分の投稿を
-                // 後から指せず、しかもどこにも数えられない。配送は failed として理由つきで残し、数える。
-                // 外界へは既に出ているが再送はしない（§08）。ここで「引けなかった」を「送れた」に化けさせない。
-                if let Some(origin) = ack.origin {
-                    if let Err(e) = self
-                        .0
-                        .store
-                        .record_external_ref_on_route(&job.route, job.seq, &origin, "out")
-                    {
-                        let detail = format!("delivered but external_ref record failed: {e}");
-                        let _ = self.0.store.finish_delivery(
-                            job.place,
-                            job.seq,
-                            &job.route.binding_id,
-                            "failed",
-                            Some(&detail),
-                        );
-                        self.0
-                            .store
-                            .record_delivery(
-                                job.place,
-                                job.seq,
-                                &job.route.kind_id,
-                                "failed",
-                                Some(&detail),
-                                self.now_wall_nanos(),
-                            )
-                            .ok();
-                        return;
-                    }
-                }
-                let canonical_state = if ack.delivered { "delivered" } else { "failed" };
-                let _ = self.0.store.finish_delivery(
-                    job.place,
-                    job.seq,
-                    &job.route.binding_id,
-                    canonical_state,
-                    (!ack.delivered).then_some("gate reported delivered=false"),
-                );
-                let state = if ack.delivered { "sent" } else { "failed" };
-                self.0
-                    .store
-                    .record_delivery(
-                        job.place,
-                        job.seq,
-                        &job.route.kind_id,
-                        state,
-                        None,
-                        self.now_wall_nanos(),
-                    )
-                    .ok();
+        let outcome = match self.transport() {
+            Some(transport) => {
+                transport
+                    .deliver_effect_route(&job.route, job.seq, job.effect.clone())
+                    .await
             }
-            Err(e) => {
-                // 運べなかったら記録して終わり。再送しない（§08）。
-                let _ = self.0.store.finish_delivery(
-                    job.place,
+            None => TransportDeliveryResult::DefiniteFailure(TransportError(
+                "transport unavailable before external acceptance".into(),
+            )),
+        };
+        let now = self.now_wall_nanos();
+        match outcome {
+            TransportDeliveryResult::DefiniteAck(ack) => {
+                let state = if ack.delivered { "delivered" } else { "failed" };
+                let error = (!ack.delivered).then_some("gate reported delivered=false");
+                let observation = format!("definite_ack:delivered={}", ack.delivered);
+                let origin = ack.delivered.then_some(ack.origin).flatten();
+                let _ = self.0.store.complete_delivery(
+                    &job.route,
                     job.seq,
-                    &job.route.binding_id,
-                    "indeterminate",
-                    Some(&e.0),
+                    state,
+                    error,
+                    origin.as_deref(),
+                    observation.as_bytes(),
+                    now,
                 );
-                self.0
-                    .store
-                    .record_delivery(
-                        job.place,
-                        job.seq,
-                        &job.route.kind_id,
-                        "failed",
-                        Some(&e.0),
-                        self.now_wall_nanos(),
-                    )
-                    .ok();
+            }
+            TransportDeliveryResult::DefiniteFailure(error) => {
+                let _ = self.0.store.complete_delivery(
+                    &job.route,
+                    job.seq,
+                    "failed",
+                    Some(&error.0),
+                    None,
+                    error.0.as_bytes(),
+                    now,
+                );
+            }
+            TransportDeliveryResult::Indeterminate {
+                error,
+                late_observation,
+            } => {
+                let _ = self.0.store.complete_delivery(
+                    &job.route,
+                    job.seq,
+                    "indeterminate",
+                    Some(&error.0),
+                    None,
+                    error.0.as_bytes(),
+                    now,
+                );
+                if let Some(late_observation) = late_observation {
+                    let system = self.clone();
+                    let route = job.route.clone();
+                    tokio::spawn(async move {
+                        if let Some(payload) = late_observation.await {
+                            let _ = system.0.store.record_delivery_observation(
+                                &route,
+                                job.seq,
+                                "late_transport_result",
+                                &payload,
+                                system.now_wall_nanos(),
+                            );
+                        }
+                    });
+                }
             }
         }
     }
@@ -4086,11 +4149,7 @@ impl System {
                 .filter(|gate| gate.tools.iter().any(|tool| tool.name == call.name))
                 .map(|gate| gate.name)
                 .collect();
-            if kinds.is_empty() {
-                // Internal ToolHost test seams may be used without a gate registry. Once a gate
-                // declares the tool, the canonical selected route below is mandatory.
-                None
-            } else if kinds.len() != 1 {
+            if kinds.len() != 1 {
                 return self.refuse_or_settle(
                     must_settle,
                     place,
@@ -4142,7 +4201,7 @@ impl System {
                     Some(route) => {
                         tokio::spawn(async move { host.invoke_route(&route, &callc).await })
                     }
-                    None => tokio::spawn(async move { host.invoke(&callc).await }),
+                    None => unreachable!("non-shell tools require a canonical route"),
                 };
                 (task, call.name.clone())
             }
