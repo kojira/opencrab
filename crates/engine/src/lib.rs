@@ -380,7 +380,11 @@ impl ScriptedToolHost {
 
 #[async_trait::async_trait]
 impl ToolHost for ScriptedToolHost {
-    async fn invoke(&self, call: &ToolCallSpec) -> Result<String, ToolError> {
+    async fn invoke_route(
+        &self,
+        _route: &GateRoute,
+        call: &ToolCallSpec,
+    ) -> Result<String, ToolError> {
         self.invokes.lock().unwrap().push(call.name.clone());
         self.args
             .lock()

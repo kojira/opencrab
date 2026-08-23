@@ -11,6 +11,14 @@ path = "src/lib.rs"
 name = "opencrab-social-runtime"
 path = "src/bin/opencrab-social-runtime.rs"
 
+[[bin]]
+name = "opencrab-gate-status"
+path = "src/bin/opencrab-gate-status.rs"
+
+[[bin]]
+name = "opencrab-gate-runner"
+path = "src/bin/opencrab-gate-runner.rs"
+
 # e2e が必ず「いまの web-gate のコード」を動かすための保証（タスク #1）。
 # web-gate の本体は別クレート `web-gate`（core の型を使わない構造規律はそこで保たれる）。ここは
 # その**同じソース**を app 自身の bin として持つだけ。同一パッケージの bin なので cargo は
@@ -49,6 +57,9 @@ libc = "0.2"
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+base64 = "0.22"
+ring = "0.17"
+zeroize = "1"
 
 [dev-dependencies]
 opencrab-engine = { path = "../engine" }

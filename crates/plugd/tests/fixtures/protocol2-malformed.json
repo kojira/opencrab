@@ -1,0 +1,133 @@
+{
+  "hello_protocol": [
+    {
+      "name": "u32-wraparound",
+      "message": {
+        "id": "hello-wrap",
+        "m": "hello",
+        "protocol": 4294967297,
+        "name": "web",
+        "address_form": ".+",
+        "tools": [],
+        "effects": [],
+        "capabilities": []
+      },
+      "error": "protocol_unsupported"
+    }
+  ],
+  "failed": [
+    {
+      "name": "unknown-field",
+      "message": {
+        "id": "failed-unknown",
+        "m": "failed",
+        "connection_epoch": "$epoch",
+        "code": "synthetic_failure",
+        "extra": true
+      },
+      "error": "unknown_field"
+    },
+    {
+      "name": "missing-epoch",
+      "message": {
+        "id": "failed-no-epoch",
+        "m": "failed",
+        "code": "synthetic_failure"
+      },
+      "error": "missing_field"
+    },
+    {
+      "name": "wrong-epoch",
+      "message": {
+        "id": "failed-wrong-epoch",
+        "m": "failed",
+        "connection_epoch": "$wrong_epoch",
+        "code": "synthetic_failure"
+      },
+      "error": "epoch_mismatch"
+    },
+    {
+      "name": "missing-code",
+      "message": {
+        "id": "failed-no-code",
+        "m": "failed",
+        "connection_epoch": "$epoch"
+      },
+      "error": "missing_field"
+    },
+    {
+      "name": "non-string-code",
+      "message": {
+        "id": "failed-bad-code",
+        "m": "failed",
+        "connection_epoch": "$epoch",
+        "code": 7
+      },
+      "error": "missing_field"
+    },
+    {
+      "name": "missing-id",
+      "message": {
+        "m": "failed",
+        "connection_epoch": "$epoch",
+        "code": "synthetic_failure"
+      },
+      "error": "missing_field"
+    },
+    {
+      "name": "non-string-id",
+      "message": {
+        "id": 7,
+        "m": "failed",
+        "connection_epoch": "$epoch",
+        "code": "synthetic_failure"
+      },
+      "error": "missing_field"
+    }
+  ],
+  "response_without_waiter": [
+    {
+      "name": "missing-id",
+      "message": {
+        "ok": {}
+      },
+      "error": "missing_field"
+    },
+    {
+      "name": "non-string-id",
+      "message": {
+        "id": 7,
+        "ok": {}
+      },
+      "error": "missing_field"
+    }
+  ],
+  "response_with_waiter": [
+    {
+      "name": "missing-ok-and-err",
+      "message": {
+        "id": "$request_id"
+      },
+      "error": "response_invalid"
+    },
+    {
+      "name": "unknown-field",
+      "message": {
+        "id": "$request_id",
+        "ok": {},
+        "extra": true
+      },
+      "error": "unknown_field"
+    },
+    {
+      "name": "non-string-error-code",
+      "message": {
+        "id": "$request_id",
+        "err": {
+          "code": 7
+        }
+      },
+      "error": "unknown"
+    }
+  ]
+}

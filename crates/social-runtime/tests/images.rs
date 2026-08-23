@@ -113,6 +113,7 @@ fn said_with(
                 origin_author: oa.map(|s| s.to_string()),
             })
             .collect(),
+        discovery: None,
     }
 }
 

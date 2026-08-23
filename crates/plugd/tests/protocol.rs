@@ -10,8 +10,10 @@
 use opencrab_engine::{CharCounter, ScriptedEngine, ScriptedShellHost, Step};
 use opencrab_plugd::Plugd;
 use opencrab_port::{
-    AttachmentKind, Content, EffectKind, EffectSpec, EventKind, GateName, Notifier as _Notifier,
-    Property, Role, SubjectKind, ToolHost, Transport,
+    ActivityKindTag, AttachmentKind, Content, EffectKind, EffectSpec, EventKind, GateInstanceId,
+    GateName, GateRoute, IngressDiscovery, Notice, Notifier as _Notifier, OriginScope,
+    OutgoingEffect, Property, Role, RoutePurpose, SubjectKind, ToolCallSpec, ToolHost, Transport,
+    TransportDeliveryResult,
 };
 use opencrab_social_runtime::{Config, Policy, System};
 use opencrab_store::{NewEvent, Store};
@@ -36,6 +38,13 @@ fn build() -> H {
 
 fn build_cfg(cfg: Config) -> H {
     let store = Store::new_in_memory().unwrap();
+    // 本番 app の起動時 seed を再現する。hello は compatibility instance を作らず、
+    // ここで設定済みとした v1 gate だけを exact-one で解決する。
+    for name in ["web", "nostr", "discord", "other"] {
+        store
+            .seed_compatibility_instance(&GateName::new(name))
+            .unwrap();
+    }
     // 会話予算の物差し（§06）。ScriptedEngine の既定モデル "scripted" に context_window を登録する
     // （200_000 × compaction_ratio 0.5 = 100_000・旧固定既定と同値）。未登録だと System::new が fail loud。
     store
@@ -275,6 +284,90 @@ fn read_ok(log: &[Value], id: &str) -> Option<Value> {
         .and_then(|v| v.get("ok").cloned())
 }
 
+fn protocol2_malformed_fixture() -> Value {
+    serde_json::from_str(include_str!("fixtures/protocol2-malformed.json")).unwrap()
+}
+
+fn replace_fixture_marker(value: &mut Value, marker: &str, replacement: Value) {
+    match value {
+        Value::String(text) if text == marker => *value = replacement,
+        Value::Array(values) => {
+            for value in values {
+                replace_fixture_marker(value, marker, replacement.clone());
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values_mut() {
+                replace_fixture_marker(value, marker, replacement.clone());
+            }
+        }
+        _ => {}
+    }
+}
+
+fn install_protocol2_fixture(h: &H) -> (GateInstanceId, GateName) {
+    let instance =
+        GateInstanceId::parse("018f0000-0000-7000-8000-000000000021".to_string()).unwrap();
+    let kind = GateName::new("protocol-two");
+    h.sys
+        .store()
+        .install_gate_instance_revision(
+            &instance,
+            &kind,
+            "synthetic",
+            None,
+            1,
+            true,
+            OriginScope::KindAddress,
+            IngressDiscovery::Membership,
+            "gate-config/synthetic/v1",
+            &[],
+            1,
+        )
+        .unwrap();
+    (instance, kind)
+}
+
+async fn hello_protocol2_ready(gate: &TestGate, instance: &GateInstanceId, kind: &GateName) -> u64 {
+    gate.send(json!({
+        "id":"hello-v2","m":"hello","protocol":2,"kind_id":kind.as_str(),
+        "instance_id":instance.as_str(),"revision":1,"origin_scope":"kind_address",
+        "address_form":".+","ingress_discovery":"membership",
+        "tools":[{"name":"synthetic-op","description":"synthetic","params":{"type":"object","properties":{},"required":[]}}],
+        "effects":["say"],"capabilities":[],"actions":[]
+    }));
+    assert!(gate.wait_for(|log| has_reply_ok(log, "hello-v2")).await);
+    let epoch = gate
+        .log()
+        .iter()
+        .find(|value| value.get("id").and_then(Value::as_str) == Some("hello-v2"))
+        .and_then(|value| value.pointer("/ok/connection_epoch"))
+        .and_then(Value::as_u64)
+        .unwrap();
+    gate.send(json!({"id":"ready-v2","m":"ready","connection_epoch":epoch}));
+    assert!(gate.wait_for(|log| has_reply_ok(log, "ready-v2")).await);
+    epoch
+}
+
+fn protocol2_route(
+    instance: &GateInstanceId,
+    kind: &GateName,
+    epoch: u64,
+    revision: u64,
+) -> GateRoute {
+    GateRoute {
+        subject_id: 1,
+        place_id: 1,
+        kind_id: kind.clone(),
+        instance_id: instance.clone(),
+        binding_id: "binding-synthetic".into(),
+        address: "room:synthetic".into(),
+        connection_epoch: epoch,
+        revision,
+        purpose: RoutePurpose::tool("synthetic-op").unwrap(),
+    }
+}
+
 // ===== 目標 1: 6 つのメッセージが往復する =====
 
 // hello → ok（プロトコル§01）。名乗りが core にとってのゲートの全部。
@@ -297,6 +390,316 @@ async fn m1_hello_roundtrips() {
         .expect("gate registered");
     assert_eq!(spec.protocol, 1);
     assert!(spec.effects.contains(&EffectKind::React));
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn protocol2_requires_ready_and_membership_read_never_hits_store() {
+    let h = build();
+    let instance =
+        opencrab_port::GateInstanceId::parse("018f0000-0000-7000-8000-000000000001".to_string())
+            .unwrap();
+    let kind = GateName::new("discord");
+    h.sys
+        .store()
+        .install_gate_instance_revision(
+            &instance,
+            &kind,
+            "synthetic",
+            None,
+            1,
+            true,
+            OriginScope::KindAddress,
+            IngressDiscovery::Membership,
+            "gate-config/discord/v1",
+            &[],
+            1,
+        )
+        .unwrap();
+    let g = TestGate::connect(&h.plugd);
+    g.send(json!({
+        "id":"h2","m":"hello","protocol":2,"kind_id":"discord",
+        "instance_id":instance.as_str(),"revision":1,"origin_scope":"kind_address",
+        "address_form":".+","ingress_discovery":"membership",
+        "tools":[],"effects":["say"],"capabilities":[],"actions":[]
+    }));
+    assert!(g.wait_for(|log| has_reply_ok(log, "h2")).await);
+    let epoch = g
+        .log()
+        .iter()
+        .find(|value| value.get("id").and_then(Value::as_str) == Some("h2"))
+        .and_then(|value| value.pointer("/ok/connection_epoch"))
+        .and_then(Value::as_u64)
+        .unwrap();
+
+    g.send(json!({
+        "id":"early","m":"event","kind":"said","address":"channel-a",
+        "author":{"id":"principal-a"},"content":{"text":"hello"},"origin":"message-a",
+        "discovery":{"address_kind":"guild","guild_id":"guild-a"}
+    }));
+    assert!(
+        g.wait_for(|log| err_code(log, "early").as_deref() == Some("instance_not_ready"))
+            .await
+    );
+
+    g.send(json!({"id":"ready","m":"ready","connection_epoch":epoch}));
+    assert!(g.wait_for(|log| has_reply_ok(log, "ready")).await);
+    g.send(json!({"id":"read2","m":"read","address":"channel-a"}));
+    assert!(
+        g.wait_for(|log| err_code(log, "read2").as_deref() == Some("membership_read_unsupported"))
+            .await
+    );
+
+    g.send(json!({
+        "id":"observed","m":"event","kind":"said","address":"channel-a",
+        "author":{"id":"principal-a"},"content":{"text":"hello"},"origin":"message-a",
+        "discovery":{"address_kind":"guild","guild_id":"guild-a","label":"synthetic"}
+    }));
+    assert!(
+        g.wait_for(|log| {
+            log.iter().any(|value| {
+                value.get("id").and_then(Value::as_str) == Some("observed")
+                    && value.pointer("/ok/seq").is_some_and(Value::is_null)
+            })
+        })
+        .await
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn protocol2_malformed_failed_response_and_protocol_matrix_is_strict() {
+    let fixture = protocol2_malformed_fixture();
+
+    for case in fixture["hello_protocol"].as_array().unwrap() {
+        let h = build();
+        let gate = TestGate::connect(&h.plugd);
+        let message = case["message"].clone();
+        let id = message
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_string();
+        let expected = case["error"].as_str().unwrap();
+        gate.send(message);
+        assert!(
+            gate.wait_for(|log| err_code(log, &id).as_deref() == Some(expected))
+                .await,
+            "hello malformed case {}: {:?}",
+            case["name"],
+            gate.log()
+        );
+        assert!(gate.wait_disconnect().await);
+    }
+
+    {
+        let h = build();
+        let (instance, kind) = install_protocol2_fixture(&h);
+        let gate = TestGate::connect(&h.plugd);
+        let epoch = hello_protocol2_ready(&gate, &instance, &kind).await;
+        for case in fixture["failed"].as_array().unwrap() {
+            let mut message = case["message"].clone();
+            replace_fixture_marker(&mut message, "$epoch", json!(epoch));
+            replace_fixture_marker(&mut message, "$wrong_epoch", json!(epoch + 1));
+            let expected = case["error"].as_str().unwrap();
+            let response_id = message
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let before = gate.log().len();
+            gate.send(message);
+            assert!(
+                gate.wait_for(|log| {
+                    log[before..].iter().any(|value| {
+                        value.get("id").and_then(Value::as_str) == Some(response_id.as_str())
+                            && value.pointer("/err/code").and_then(Value::as_str) == Some(expected)
+                    })
+                })
+                .await,
+                "failed malformed case {}: {:?}",
+                case["name"],
+                gate.log()
+            );
+            assert!(
+                !gate.is_disconnected(),
+                "invalid failed request must keep the connection"
+            );
+        }
+        gate.send(json!({
+            "id":"failed-valid","m":"failed","connection_epoch":epoch,
+            "code":"synthetic_failure"
+        }));
+        assert!(gate.wait_for(|log| has_reply_ok(log, "failed-valid")).await);
+        assert!(gate.wait_disconnect().await);
+    }
+
+    {
+        let h = build();
+        let (instance, kind) = install_protocol2_fixture(&h);
+        let gate = TestGate::connect(&h.plugd);
+        gate.set_cfg(|cfg| cfg.auto = false);
+        let epoch = hello_protocol2_ready(&gate, &instance, &kind).await;
+
+        for case in fixture["response_without_waiter"].as_array().unwrap() {
+            let before = gate.log().len();
+            gate.send(case["message"].clone());
+            let expected = case["error"].as_str().unwrap();
+            assert!(
+                gate.wait_for(|log| {
+                    log[before..].iter().any(|value| {
+                        value.pointer("/err/code").and_then(Value::as_str) == Some(expected)
+                    })
+                })
+                .await,
+                "response malformed case {}: {:?}",
+                case["name"],
+                gate.log()
+            );
+        }
+
+        let route = protocol2_route(&instance, &kind, epoch, 1);
+        for case in fixture["response_with_waiter"].as_array().unwrap() {
+            let before = gate.log().len();
+            let plugd = h.plugd.clone();
+            let route = route.clone();
+            let task = tokio::spawn(async move {
+                plugd
+                    .invoke_route(
+                        &route,
+                        &ToolCallSpec {
+                            id: "call-synthetic".into(),
+                            name: "synthetic-op".into(),
+                            args: json!({}),
+                        },
+                    )
+                    .await
+            });
+            assert!(
+                gate.wait_for(|log| {
+                    log[before..]
+                        .iter()
+                        .any(|value| value.get("m").and_then(Value::as_str) == Some("tool"))
+                })
+                .await
+            );
+            let request_id = gate.log()[before..]
+                .iter()
+                .find(|value| value.get("m").and_then(Value::as_str) == Some("tool"))
+                .and_then(|value| value.get("id"))
+                .and_then(Value::as_str)
+                .unwrap()
+                .to_string();
+            let mut message = case["message"].clone();
+            replace_fixture_marker(&mut message, "$request_id", json!(request_id));
+            gate.send(message);
+            let error = task.await.unwrap().unwrap_err();
+            assert!(
+                error.0.contains(case["error"].as_str().unwrap()),
+                "response malformed case {} returned {:?}",
+                case["name"],
+                error
+            );
+        }
+        assert!(!gate.is_disconnected());
+    }
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn failed_connection_cannot_send_or_remove_its_replacement() {
+    let h = build();
+    let (instance, kind) = install_protocol2_fixture(&h);
+    let first = TestGate::connect(&h.plugd);
+    let first_epoch = hello_protocol2_ready(&first, &instance, &kind).await;
+    let old_route = protocol2_route(&instance, &kind, first_epoch, 1);
+    first.send(json!({
+        "id":"restart","m":"failed","connection_epoch":first_epoch,
+        "code":"synthetic_restart"
+    }));
+    assert!(first.wait_for(|log| has_reply_ok(log, "restart")).await);
+
+    // The replacement starts after the failed epoch is committed but before the old reader has
+    // necessarily returned. Its registry/runtime/tool ownership must survive the old cleanup.
+    let second = TestGate::connect(&h.plugd);
+    let second_epoch = hello_protocol2_ready(&second, &instance, &kind).await;
+    assert!(second_epoch > first_epoch);
+    let wrong_revision_route = protocol2_route(&instance, &kind, second_epoch, 2);
+
+    for route in [old_route, wrong_revision_route] {
+        let before = second.log().len();
+        let error = h
+            .plugd
+            .invoke_route(
+                &route,
+                &ToolCallSpec {
+                    id: "call-stale".into(),
+                    name: "synthetic-op".into(),
+                    args: json!({}),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(error.0.contains("route connection epoch"));
+        h.plugd.notify(Notice::RoutedActivityStarted {
+            route: route.clone(),
+            activity: 1,
+            kind: ActivityKindTag::Turn,
+            label: None,
+        });
+        let delivery = h
+            .plugd
+            .deliver_effect_route(
+                &route,
+                1,
+                OutgoingEffect {
+                    kind: EffectKind::Say,
+                    text: Some("synthetic".into()),
+                    symbol: None,
+                    target_origin: None,
+                    verb: None,
+                },
+            )
+            .await;
+        assert!(matches!(
+            delivery,
+            TransportDeliveryResult::DefiniteFailure(_)
+        ));
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            second.log()[before..].iter().all(|value| {
+                !matches!(
+                    value.get("m").and_then(Value::as_str),
+                    Some("tool" | "activity" | "effect")
+                )
+            }),
+            "stale route reached the replacement connection: {:?}",
+            second.log()
+        );
+    }
+
+    assert!(first.wait_disconnect().await);
+    let current_route = protocol2_route(&instance, &kind, second_epoch, 1);
+    assert_eq!(
+        h.plugd
+            .invoke_route(
+                &current_route,
+                &ToolCallSpec {
+                    id: "call-current".into(),
+                    name: "synthetic-op".into(),
+                    args: json!({}),
+                },
+            )
+            .await
+            .unwrap(),
+        "TOOL_OK"
+    );
+    assert_eq!(
+        h.sys
+            .gate_connection(&instance)
+            .expect("replacement runtime remains registered")
+            .connection_epoch,
+        second_epoch
+    );
 }
 
 // bind → ok（プロトコル§02）。場を作るのは core。プラグインは購読を頼まれる。
@@ -1096,7 +1499,7 @@ async fn settle(mut pred: impl FnMut() -> bool) -> bool {
 
 // ===== 機構 7（ツール索引と展開・システム設計§10）: ゲート横断のツール共有 =====
 //
-// web の場にいるエージェントが、結ばれていない Nostr のツールを **索引 → 展開 → 実行** できる。
+// web の場にいるエージェントが、選択済み Nostr tool route を **索引 → 展開 → 実行** できる。
 //   - 自分の場に繋がっているゲートのツールは全部見える（ここでは web には道具が無い）。
 //   - それ以外のゲート（nostr）のツールは索引に 1 行だけ（core-expand-tools の説明・enum は名簿由来）。
 //   - 展開すると次のターンから本体として見え、呼ぶと nostr ゲートへ tool 要求が届く。
@@ -1108,7 +1511,7 @@ async fn cross_gate_tool_index_expand_and_use() {
     let web = TestGate::connect(&h.plugd);
     web.hello_ok("web", "web:.+", json!(["say"]), json!([]), json!([]))
         .await;
-    // nostr ゲート（**結ばない**）: nostr-whoami を名乗る。tool の結果は npub を模す。
+    // nostr ゲート: nostr-whoami を名乗る。tool の結果は npub を模す。
     let nostr = TestGate::connect(&h.plugd);
     nostr.set_cfg(|c| c.tool_result = "npub1demo".into());
     nostr
@@ -1135,6 +1538,21 @@ async fn cross_gate_tool_index_expand_and_use() {
     );
     h.sys.join(p, a, Role::Participant);
     h.sys.bind_place(p, "web", "web:room1").await.unwrap();
+    let (_, nostr_binding) = h
+        .sys
+        .store()
+        .ensure_compatibility_binding(p, &GateName::new("nostr"), "filter:room1")
+        .unwrap();
+    h.sys
+        .store()
+        .set_subject_route(
+            a,
+            p,
+            &GateName::new("nostr"),
+            &opencrab_port::RoutePurpose::tool("nostr-whoami").unwrap(),
+            &nostr_binding,
+        )
+        .unwrap();
 
     // 展開前: nostr-whoami は本体としては見えない。索引（core-expand-tools）に nostr が 1 行。
     let names0: Vec<String> = h
@@ -1207,7 +1625,7 @@ async fn cross_gate_tool_index_expand_and_use() {
         "展開しきったら索引は消える（他に未展開ゲートが無い）: {names1:?}"
     );
 
-    // 使う: 次のターンで nostr-whoami を呼ぶ → **結ばれていない** nostr ゲートへ tool 要求が届く。
+    // 使う: 次のターンで nostr-whoami を呼ぶ → 選択済み instance へ tool 要求が届く。
     // 常時切り離しでツールは背景へ移るので、その決着から起きるターンぶんの台本も要る。
     h.eng.push(Step::cont().with_tool("nostr-whoami"));
     h.eng.push(Step::no_reply());
