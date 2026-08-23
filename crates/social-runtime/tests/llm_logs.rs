@@ -89,36 +89,42 @@ async fn done_turn_persists_request_and_response() {
 
     let turns = h.sys.store().all_turn_records().unwrap();
     assert_eq!(turns.len(), 1, "1 ターン走る");
-    let logs = h.sys.store().llm_logs(turns[0].id).unwrap();
+    // エージェント（subject）単位で引ける（本体 API `/llm-logs` と同形）。agent_id=subject の文字列。
+    let subject = turns[0].subject;
+    let logs = h
+        .sys
+        .store()
+        .list_llm_logs(&subject.to_string(), 10)
+        .unwrap();
     assert_eq!(logs.len(), 1, "1 反復 = 1 ログ");
     let log = &logs[0];
-    assert_eq!(log.iteration, 1);
-    assert_eq!(log.turn_record_id, turns[0].id);
-    assert_eq!(log.model, TEST_MODEL);
-    assert_eq!(log.outcome, "done");
-    assert_eq!(log.error_detail, None);
-    // 送ったもの（入力が rendered に入っている）。
+    assert_eq!(log.iteration, Some(1));
+    assert_eq!(log.turn_record_id, Some(turns[0].id));
+    assert_eq!(log.model.as_deref(), Some(TEST_MODEL));
+    assert!(!log.is_bot_iteration, "初回反復は継続ではない");
+    assert_eq!(log.error_code, None);
+    // 送ったもの（入力が user メッセージに入っている・ChatRequestSimple 同型）。
     assert!(
-        log.request.contains("猫について教えて"),
-        "request に送った文脈が入る: {}",
-        log.request
+        log.prompt.contains("猫について教えて") && log.prompt.contains("\"messages\""),
+        "prompt に送った文脈が正規化 JSON で入る: {}",
+        log.prompt
     );
-    // 返ったもの（発話本文）。ネイティブ道具は呼んでいないので tool_calls は None。
+    // 返ったもの（発話本文・ChatResponseSimple 同型）。ネイティブ道具は呼んでいないので tool_calls は None。
     assert!(
-        log.response.as_deref().unwrap().contains("にゃー"),
-        "response に返答が入る: {:?}",
+        log.response.contains("にゃー") && log.response.contains("\"finish_reason\""),
+        "response に返答が入る: {}",
         log.response
     );
     assert_eq!(log.tool_calls, None);
 
-    // 直近順の読み口でも同じ 1 件が引ける（ダッシュボードの入口）。
-    let recent = h.sys.store().recent_llm_logs(10).unwrap();
-    assert_eq!(recent.len(), 1);
-    assert_eq!(recent[0].id, log.id);
+    // turn 単位のドリルダウン（oc2 連結列）でも同じ 1 件。
+    let by_turn = h.sys.store().llm_logs(turns[0].id).unwrap();
+    assert_eq!(by_turn.len(), 1);
+    assert_eq!(by_turn[0].id, log.id);
 }
 
-// 失敗のターン（意味的に空の応答）: engine が回っても記録は必ず書かれ、outcome=failed・理由が
-// 逐語で残る（挙動調査で「なぜ落ちたか」を失わない）。
+// 失敗のターン（意味的に空の応答）: engine が回っても記録は必ず書かれ、error_code/error_body が
+// 残る（挙動調査で「なぜ落ちたか」を失わない）。
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn failed_turn_persists_reason() {
     let h = build();
@@ -135,16 +141,15 @@ async fn failed_turn_persists_reason() {
     assert_eq!(turns.len(), 1);
     let logs = h.sys.store().llm_logs(turns[0].id).unwrap();
     assert_eq!(logs.len(), 1);
-    assert_eq!(logs[0].outcome, "failed");
+    assert_eq!(logs[0].error_code.as_deref(), Some("empty_response"));
     assert!(
         logs[0]
-            .error_detail
+            .error_body
             .as_deref()
             .unwrap()
             .contains("empty_response"),
         "失敗理由が逐語で残る: {:?}",
-        logs[0].error_detail
+        logs[0].error_body
     );
-    assert_eq!(logs[0].response, None);
     let _ = p;
 }

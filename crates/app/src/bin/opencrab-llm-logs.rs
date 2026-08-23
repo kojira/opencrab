@@ -1,22 +1,34 @@
 //! Read-only viewer for persisted LLM logs (#766).
 //!
 //! 挙動調査の第一手はここ——「そのターンで何を送り・何が返り・どのツールが呼ばれたか」を DB から
-//! 直接引く。稼働中の core を所有せず読み取り専用で開くので、観測が権威（gate epoch 等）を触らない。
-//! 将来のダッシュボードはこの読み口（`recent_llm_logs_read_only` / `llm_log_read_only`）を土台にする。
+//! 直接引く。稼働中の core を所有せず読み取り専用で開くので、観測が権威（gate epoch 等）を触らない
+//! （AGREED §2.11 補足）。列は本体 opencrab の llm_logs と同一。将来のダッシュボード（旧 API 互換）は
+//! 同じ読み口（`list_llm_logs_read_only` / `llm_logs_stats_read_only`）を土台にできる。
 //!
 //! usage:
-//!   opencrab-llm-logs --db <path> list [--limit N]   直近のログを新しい順に一覧（既定 N=20）
-//!   opencrab-llm-logs --db <path> show <id>          1 件の全文（request / response / tool_calls）
+//!   opencrab-llm-logs --db <path> list [--agent <subject>] [--limit N]  ログ一覧（新しい順・既定 N=20）
+//!   opencrab-llm-logs --db <path> show <id>                             1 件の全文（prompt/response/tool_calls）
+//!   opencrab-llm-logs --db <path> stats --agent <subject> [--days N]    日次統計（既定 N=30）
 
-use opencrab_store::{llm_log_read_only, recent_llm_logs_read_only, LlmLogRow};
+use opencrab_store::{
+    list_llm_logs_read_only, llm_log_read_only, llm_logs_stats_read_only,
+    recent_llm_logs_read_only, LlmLogRow,
+};
 
 fn usage() -> ! {
     eprintln!(
         "usage:\n  \
-         opencrab-llm-logs --db <path> list [--limit N]\n  \
-         opencrab-llm-logs --db <path> show <id>"
+         opencrab-llm-logs --db <path> list [--agent <subject>] [--limit N]\n  \
+         opencrab-llm-logs --db <path> show <id>\n  \
+         opencrab-llm-logs --db <path> stats --agent <subject> [--days N]"
     );
     std::process::exit(1);
+}
+
+fn opt(rest: &[String], key: &str) -> Option<String> {
+    rest.iter()
+        .position(|a| a == key)
+        .and_then(|i| rest.get(i + 1).cloned())
 }
 
 fn main() {
@@ -30,21 +42,14 @@ fn main() {
 
     match cmd.as_str() {
         "list" => {
-            let mut limit: i64 = 20;
-            let mut i = 0;
-            while i < rest.len() {
-                match rest[i].as_str() {
-                    "--limit" => {
-                        let Some(v) = rest.get(i + 1).and_then(|s| s.parse::<i64>().ok()) else {
-                            usage();
-                        };
-                        limit = v;
-                        i += 2;
-                    }
-                    _ => usage(),
-                }
-            }
-            let rows = match recent_llm_logs_read_only(db, limit) {
+            let limit = opt(rest, "--limit")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(20);
+            let rows = match opt(rest, "--agent") {
+                Some(agent) => list_llm_logs_read_only(db, &agent, limit),
+                None => recent_llm_logs_read_only(db, limit),
+            };
+            let rows = match rows {
                 Ok(rows) => rows,
                 Err(e) => {
                     eprintln!("llm logs unavailable: {e}");
@@ -62,23 +67,28 @@ fn main() {
                 } else {
                     format!(" tools=[{tools}]")
                 };
+                let err = r
+                    .error_code
+                    .as_deref()
+                    .map(|c| format!(" error={c}"))
+                    .unwrap_or_default();
                 println!(
-                    "#{id} {ts} turn={turn} subject={subject} iter={iter} model={model} outcome={outcome} latency={lat}ms{tools}",
+                    "{id} {ts} agent={agent} session={session} iter={iter} model={model} latency={lat}ms{tools}{err}",
                     id = r.id,
-                    ts = fmt_utc(r.requested_at),
-                    turn = r.turn_record_id,
-                    subject = r.subject,
-                    iter = r.iteration,
-                    model = r.model,
-                    outcome = r.outcome,
-                    lat = r.latency_ms,
+                    ts = r.requested_at.as_deref().unwrap_or(&r.created_at),
+                    agent = r.agent_id,
+                    session = r.session_id.as_deref().unwrap_or("-"),
+                    iter = r.iteration.map(|i| i.to_string()).unwrap_or_else(|| "-".into()),
+                    model = r.model.as_deref().unwrap_or("-"),
+                    lat = r.latency_ms.map(|l| l.to_string()).unwrap_or_else(|| "-".into()),
                 );
             }
         }
         "show" => {
-            let Some(id) = rest.first().and_then(|s| s.parse::<i64>().ok()) else {
+            let Some(id) = rest.first() else { usage() };
+            if id.starts_with("--") {
                 usage();
-            };
+            }
             let row = match llm_log_read_only(db, id) {
                 Ok(Some(row)) => row,
                 Ok(None) => {
@@ -92,32 +102,75 @@ fn main() {
             };
             print_detail(&row);
         }
+        "stats" => {
+            let Some(agent) = opt(rest, "--agent") else {
+                usage()
+            };
+            let days = opt(rest, "--days")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(30);
+            let rows = match llm_logs_stats_read_only(db, &agent, days) {
+                Ok(rows) => rows,
+                Err(e) => {
+                    eprintln!("llm logs unavailable: {e}");
+                    std::process::exit(1);
+                }
+            };
+            if rows.is_empty() {
+                println!("(no stats)");
+                return;
+            }
+            println!("date        calls  total_tok  prompt_tok  compl_tok  avg_latency  errors");
+            for d in rows {
+                println!(
+                    "{date}  {count:>5}  {total:>9}  {prompt:>10}  {compl:>9}  {lat:>9.1}ms  {err:>6}",
+                    date = d.date,
+                    count = d.count,
+                    total = d.total_tokens,
+                    prompt = d.prompt_tokens,
+                    compl = d.completion_tokens,
+                    lat = d.avg_latency_ms,
+                    err = d.error_count,
+                );
+            }
+        }
         _ => usage(),
     }
 }
 
 fn print_detail(r: &LlmLogRow) {
+    let dash = |o: &Option<i64>| o.map(|v| v.to_string()).unwrap_or_else(|| "-".into());
     println!("id            {}", r.id);
+    println!("requested_at  {}", r.requested_at.as_deref().unwrap_or("-"));
+    println!("created_at    {}", r.created_at);
+    println!("agent_id      {}", r.agent_id);
+    println!("session_id    {}", r.session_id.as_deref().unwrap_or("-"));
+    if let Some(t) = &r.turn_record_id {
+        println!("turn_record   {t}");
+    }
+    println!("iteration     {}", dash(&r.iteration));
+    println!("is_bot_iter   {}", r.is_bot_iteration);
+    println!("model         {}", r.model.as_deref().unwrap_or("-"));
+    println!("latency_ms    {}", dash(&r.latency_ms));
+    if let Some(tm) = &r.trigger_message_id {
+        println!("trigger_msg   {tm}");
+    }
     println!(
-        "requested_at  {} ({} ns)",
-        fmt_utc(r.requested_at),
-        r.requested_at
+        "tokens        prompt={} completion={} total={} cache_read={} cache_creation={}",
+        dash(&r.prompt_tokens),
+        dash(&r.completion_tokens),
+        dash(&r.total_tokens),
+        dash(&r.cache_read_tokens),
+        dash(&r.cache_creation_tokens),
     );
-    println!("turn_record   {}", r.turn_record_id);
-    println!("place         {}", r.place);
-    println!("subject       {}", r.subject);
-    println!("iteration     {}", r.iteration);
-    println!("model         {}", r.model);
-    println!("outcome       {}", r.outcome);
-    println!("latency_ms    {}", r.latency_ms);
-    if let Some(e) = &r.error_detail {
-        println!("error_detail  {e}");
+    if let Some(code) = &r.error_code {
+        println!("error_code    {code}");
     }
-    println!("\n--- request (sent) ---\n{}", pretty(&r.request));
-    match &r.response {
-        Some(resp) => println!("\n--- response (returned) ---\n{}", pretty(resp)),
-        None => println!("\n--- response (returned) ---\n(none)"),
+    if let Some(body) = &r.error_body {
+        println!("error_body    {body}");
     }
+    println!("\n--- prompt (sent) ---\n{}", pretty(&r.prompt));
+    println!("\n--- response (returned) ---\n{}", pretty(&r.response));
     match &r.tool_calls {
         Some(tc) => println!("\n--- tool_calls ---\n{}", pretty(tc)),
         None => println!("\n--- tool_calls ---\n(none)"),
@@ -142,31 +195,4 @@ fn tool_names(s: &str) -> String {
         .filter_map(|c| c.get("name").and_then(|n| n.as_str()))
         .collect::<Vec<_>>()
         .join(",")
-}
-
-/// unix epoch nanos → `YYYY-MM-DD HH:MM:SS UTC`（chrono を足さず、civil-from-days で組む）。
-fn fmt_utc(nanos: i64) -> String {
-    if nanos <= 0 {
-        return "-".to_string();
-    }
-    let secs = nanos / 1_000_000_000;
-    let days = secs.div_euclid(86_400);
-    let tod = secs.rem_euclid(86_400);
-    let (h, mi, s) = (tod / 3600, (tod % 3600) / 60, tod % 60);
-    let (y, m, d) = civil_from_days(days);
-    format!("{y:04}-{m:02}-{d:02} {h:02}:{mi:02}:{s:02} UTC")
-}
-
-/// Howard Hinnant の civil_from_days（epoch=1970-01-01 からの日数 → 年月日）。
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
 }

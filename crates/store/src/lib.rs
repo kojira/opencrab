@@ -191,29 +191,70 @@ pub fn gate_status_read_only(path: impl AsRef<std::path::Path>) -> Result<Vec<Ga
     rows
 }
 
-/// 稼働中の core を所有せずに、直近の LLM ログを新しい順に引く（#766・読み口）。
-/// 読み取り専用で開くので、観測が core の権威（gate epoch 等）を触ることはない。
+/// 稼働中の core を所有せずに、直近の LLM ログを新しい順に引く（#766・読み口。全 agent 横断）。
+/// 読み取り専用で開くので、観測が core の権威（gate epoch 等）を触ることはない（AGREED §2.11 補足）。
 pub fn recent_llm_logs_read_only(
     path: impl AsRef<std::path::Path>,
     limit: i64,
 ) -> Result<Vec<LlmLogRow>> {
     let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let mut stmt = conn.prepare(
-        "SELECT id,turn_record_id,place_id,subject_id,iteration,model,request,response,tool_calls,outcome,error_detail,requested_at,latency_ms
-         FROM llm_logs ORDER BY id DESC LIMIT ?1",
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {LLM_LOG_COLS} FROM llm_logs ORDER BY created_at DESC LIMIT ?1"
+    ))?;
     let rows = stmt
         .query_map(params![limit], map_llm_log)?
         .collect::<Result<Vec<_>>>()?;
     Ok(rows)
 }
 
+/// 稼働中の core を所有せずに、あるエージェント（subject）のログを新しい順に引く（本体 API と同形）。
+pub fn list_llm_logs_read_only(
+    path: impl AsRef<std::path::Path>,
+    agent_id: &str,
+    limit: i64,
+) -> Result<Vec<LlmLogRow>> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {LLM_LOG_COLS} FROM llm_logs WHERE agent_id=?1 ORDER BY created_at DESC LIMIT ?2"
+    ))?;
+    let rows = stmt
+        .query_map(params![agent_id, limit], map_llm_log)?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// 稼働中の core を所有せずに、あるエージェント（subject）の日次統計を引く（本体 API `/stats` と同形）。
+pub fn llm_logs_stats_read_only(
+    path: impl AsRef<std::path::Path>,
+    agent_id: &str,
+    days: i64,
+) -> Result<Vec<LlmLogStatRow>> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut stmt = conn.prepare(LLM_LOG_STATS_SQL)?;
+    let days_param = format!("-{days} days");
+    let rows = stmt
+        .query_map(params![agent_id, days_param], |row| {
+            Ok(LlmLogStatRow {
+                date: row.get(0)?,
+                count: row.get(1)?,
+                total_tokens: row.get(2)?,
+                prompt_tokens: row.get(3)?,
+                completion_tokens: row.get(4)?,
+                avg_latency_ms: row.get(5)?,
+                error_count: row.get(6)?,
+                cache_read_tokens: row.get(7)?,
+                cache_creation_tokens: row.get(8)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 /// 稼働中の core を所有せずに、1 件の LLM ログを id で引く（#766・読み口の詳細）。
-pub fn llm_log_read_only(path: impl AsRef<std::path::Path>, id: i64) -> Result<Option<LlmLogRow>> {
+pub fn llm_log_read_only(path: impl AsRef<std::path::Path>, id: &str) -> Result<Option<LlmLogRow>> {
     let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     conn.query_row(
-        "SELECT id,turn_record_id,place_id,subject_id,iteration,model,request,response,tool_calls,outcome,error_detail,requested_at,latency_ms
-         FROM llm_logs WHERE id=?1",
+        &format!("SELECT {LLM_LOG_COLS} FROM llm_logs WHERE id=?1"),
         params![id],
         map_llm_log,
     )
@@ -402,40 +443,80 @@ pub struct ContextRecordRow {
     pub prompt_tokens: i64,
 }
 
-/// 1 回の LLM 呼び出しの記録（#766）。反復ごとに 1 件。挙動調査の第一手——「そのターンで何を送り・
-/// 何が返り・どのツールが呼ばれたか」を DB から直接引く。`request`/`response`/`tool_calls` は core が
-/// 組んだ形（Context / InferOutput）を逐語で写した JSON 文字列。core は what を決め、store は写すだけ。
+/// 1 回の LLM 呼び出しの記録（#766・AGREED §2.11）。反復ごとに 1 件。列は本体 opencrab の llm_logs
+/// をそのまま採る（旧ダッシュボード・旧 API をほぼ無改変で載せ直すため）。キーは新概念へ対応づける:
+/// `agent_id`←subject・`session_id`←place・`trigger_message_id`←起点 seq。`prompt`/`response` は本体
+/// プロバイダのシリアライズと同型の**正規化 JSON**（ダッシュボードの ChatRequestSimple/ChatResponseSimple
+/// が解釈できる形）。トークン列は provider の usage が必要で、現状の Engine seam には載らないため None。
+/// `id` は `"{turn_record_id}-{iteration}"`（反復ごとに一意）。core が what を決め、store は写すだけ。
 #[derive(Clone, Debug)]
 pub struct NewLlmLog {
-    pub turn_record_id: i64,
-    pub place: PlaceId,
-    pub subject: SubjectId,
-    pub iteration: i64,
-    pub model: String,
-    pub request: String,
-    pub response: Option<String>,
+    pub id: String,
+    pub agent_id: String,
+    pub session_id: Option<String>,
+    pub model: Option<String>,
+    pub prompt: String,
+    pub response: String,
     pub tool_calls: Option<String>,
-    pub outcome: String,
-    pub error_detail: Option<String>,
-    pub requested_at: i64,
-    pub latency_ms: i64,
+    pub latency_ms: Option<i64>,
+    pub prompt_tokens: Option<i64>,
+    pub completion_tokens: Option<i64>,
+    pub total_tokens: Option<i64>,
+    pub error_code: Option<String>,
+    pub error_body: Option<String>,
+    pub requested_at: Option<String>,
+    pub trigger_message_id: Option<String>,
+    pub is_bot_iteration: bool,
+    pub cache_read_tokens: Option<i64>,
+    pub cache_creation_tokens: Option<i64>,
+    pub created_at: String,
+    // oc2 連結列（追加）。
+    pub turn_record_id: Option<i64>,
+    pub iteration: Option<i64>,
+    pub place_id: Option<PlaceId>,
+    pub subject_id: Option<SubjectId>,
 }
 
 #[derive(Clone, Debug)]
 pub struct LlmLogRow {
-    pub id: i64,
-    pub turn_record_id: i64,
-    pub place: PlaceId,
-    pub subject: SubjectId,
-    pub iteration: i64,
-    pub model: String,
-    pub request: String,
-    pub response: Option<String>,
+    pub id: String,
+    pub agent_id: String,
+    pub session_id: Option<String>,
+    pub model: Option<String>,
+    pub prompt: String,
+    pub response: String,
     pub tool_calls: Option<String>,
-    pub outcome: String,
-    pub error_detail: Option<String>,
-    pub requested_at: i64,
-    pub latency_ms: i64,
+    pub latency_ms: Option<i64>,
+    pub prompt_tokens: Option<i64>,
+    pub completion_tokens: Option<i64>,
+    pub total_tokens: Option<i64>,
+    pub error_code: Option<String>,
+    pub error_body: Option<String>,
+    pub requested_at: Option<String>,
+    pub trigger_message_id: Option<String>,
+    pub is_bot_iteration: bool,
+    pub cache_read_tokens: Option<i64>,
+    pub cache_creation_tokens: Option<i64>,
+    pub created_at: String,
+    pub turn_record_id: Option<i64>,
+    pub iteration: Option<i64>,
+    pub place_id: Option<PlaceId>,
+    pub subject_id: Option<SubjectId>,
+}
+
+/// LLM ログの日次統計（#766）。本体 opencrab の `LlmLogStatRow` と同型（ダッシュボードの stats 表示・
+/// `/llm-logs/stats` レスポンスと一致させる）。
+#[derive(Clone, Debug)]
+pub struct LlmLogStatRow {
+    pub date: String,
+    pub count: i64,
+    pub total_tokens: i64,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub avg_latency_ms: f64,
+    pub error_count: i64,
+    pub cache_read_tokens: i64,
+    pub cache_creation_tokens: i64,
 }
 
 /// 記憶の 1 件（記憶とワーカー §01）。主体・本文・由来（場＋連番範囲）・書かれた時刻・
@@ -823,36 +904,44 @@ const SCHEMA: &str = r#"
             );
 
             -- LLM 呼び出しの永続ログ（#766）。1 反復 = 1 行。挙動調査の第一手はここ——「そのターンで
-            -- 何を送り・何が返り・どのツールが呼ばれたか」を DB から直接引ける。turn_records / iteration に
-            -- 紐付く（turn_record_id は turn を書き終えてから確定するので、context_records と同じく
-            -- ターン末に一括で書く）。秘密（Authorization・API キー）は core の Context に存在しないので
-            -- 構造的に載らない——wire に足すのは provider で、ここはその手前の core の文脈だけを写す。
+            -- 何を送り・何が返り・どのツールが呼ばれたか」を DB から直接引ける。**列構成は本体
+            -- opencrab の llm_logs をそのまま採る**（AGREED §2.11: DB は本体を正とし、oc2 差分だけを
+            -- 足す）。旧ダッシュボード（web/src/pages/AgentLlmLogs.tsx）と旧 API のクエリ・表示を
+            -- ほぼ無改変で載せ直せるようにするため。キーは新概念へ対応づける（agent_id←subject・
+            -- session_id←place・trigger_message_id←起点 seq）。oc2 の連結列（turn_record_id・
+            -- iteration・place_id・subject_id）は末尾に追加（既存列の削除・改名はしない）。
+            -- 秘密は載せない: prompt/response は本体プロバイダのシリアライズと同型の正規化 JSON で、
+            -- Authorization・API キーは含めない。
             CREATE TABLE IF NOT EXISTS llm_logs(
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              turn_record_id INTEGER NOT NULL,
-              place_id INTEGER NOT NULL,
-              subject_id INTEGER NOT NULL,
-              iteration INTEGER NOT NULL,
-              -- 予算の物差しにした実効モデル名（engine.model()）。
-              model TEXT NOT NULL,
-              -- 送ったもの（core が組んだ文脈を逐語で: system・rendered・history・tools・throttle の JSON）。
-              request TEXT NOT NULL,
-              -- 返ったもの（推論が出した効果の JSON）。失敗・アイドルでは NULL。
-              response TEXT,
-              -- 呼ばれたネイティブ道具（tool_calls の JSON 配列）。無ければ NULL。
+              id TEXT PRIMARY KEY,
+              agent_id TEXT NOT NULL,
+              session_id TEXT,
+              model TEXT,
+              prompt TEXT NOT NULL DEFAULT '',
+              response TEXT NOT NULL DEFAULT '',
               tool_calls TEXT,
-              -- 結末: done | failed | idle。
-              outcome TEXT NOT NULL,
-              -- 失敗の本文（outcome=failed のとき・逐語）。それ以外は NULL。
-              error_detail TEXT,
-              -- 推論を投げた壁時計（nanos）。再起動を跨いで意味を持つ時刻はこちら。
-              requested_at INTEGER NOT NULL,
-              -- 推論に掛かった時間（ms・単調時計の差）。
-              latency_ms INTEGER NOT NULL
+              latency_ms INTEGER,
+              prompt_tokens INTEGER,
+              completion_tokens INTEGER,
+              total_tokens INTEGER,
+              error_code TEXT,
+              error_body TEXT,
+              requested_at TEXT,
+              trigger_message_id TEXT,
+              is_bot_iteration INTEGER NOT NULL DEFAULT 0,
+              cache_read_tokens INTEGER,
+              cache_creation_tokens INTEGER,
+              created_at TEXT DEFAULT (datetime('now')),
+              -- oc2 連結列（追加・#766 / AGREED §2.11 のキー対応）。
+              turn_record_id INTEGER,
+              iteration INTEGER,
+              place_id INTEGER,
+              subject_id INTEGER
             );
+            CREATE INDEX IF NOT EXISTS idx_llm_logs_agent ON llm_logs(agent_id);
+            CREATE INDEX IF NOT EXISTS idx_llm_logs_created ON llm_logs(agent_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_llm_logs_requested ON llm_logs(agent_id, requested_at DESC);
             CREATE INDEX IF NOT EXISTS idx_llm_logs_turn ON llm_logs(turn_record_id, iteration);
-            CREATE INDEX IF NOT EXISTS idx_llm_logs_recent ON llm_logs(id DESC);
-            CREATE INDEX IF NOT EXISTS idx_llm_logs_subject ON llm_logs(subject_id, id DESC);
 
             CREATE TABLE IF NOT EXISTS schedule(
               place_id INTEGER NOT NULL,
@@ -1296,26 +1385,38 @@ fn migrate(conn: &Connection) -> Result<()> {
          )",
         [],
     )?;
-    // LLM ログ（#766）。既存 DB には無いので冪等に足す（新規 DB は SCHEMA 側で既に持つ）。
+    // LLM ログ（#766・AGREED §2.11）。本体 opencrab の llm_logs をそのまま採り、oc2 連結列を末尾に足す。
+    // 既存 DB には無いので冪等に足す（新規 DB は SCHEMA 側で既に持つ）。定義は SCHEMA と一致させる。
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS llm_logs(
-           id INTEGER PRIMARY KEY AUTOINCREMENT,
-           turn_record_id INTEGER NOT NULL,
-           place_id INTEGER NOT NULL,
-           subject_id INTEGER NOT NULL,
-           iteration INTEGER NOT NULL,
-           model TEXT NOT NULL,
-           request TEXT NOT NULL,
-           response TEXT,
+           id TEXT PRIMARY KEY,
+           agent_id TEXT NOT NULL,
+           session_id TEXT,
+           model TEXT,
+           prompt TEXT NOT NULL DEFAULT '',
+           response TEXT NOT NULL DEFAULT '',
            tool_calls TEXT,
-           outcome TEXT NOT NULL,
-           error_detail TEXT,
-           requested_at INTEGER NOT NULL,
-           latency_ms INTEGER NOT NULL
+           latency_ms INTEGER,
+           prompt_tokens INTEGER,
+           completion_tokens INTEGER,
+           total_tokens INTEGER,
+           error_code TEXT,
+           error_body TEXT,
+           requested_at TEXT,
+           trigger_message_id TEXT,
+           is_bot_iteration INTEGER NOT NULL DEFAULT 0,
+           cache_read_tokens INTEGER,
+           cache_creation_tokens INTEGER,
+           created_at TEXT DEFAULT (datetime('now')),
+           turn_record_id INTEGER,
+           iteration INTEGER,
+           place_id INTEGER,
+           subject_id INTEGER
          );
-         CREATE INDEX IF NOT EXISTS idx_llm_logs_turn ON llm_logs(turn_record_id, iteration);
-         CREATE INDEX IF NOT EXISTS idx_llm_logs_recent ON llm_logs(id DESC);
-         CREATE INDEX IF NOT EXISTS idx_llm_logs_subject ON llm_logs(subject_id, id DESC);",
+         CREATE INDEX IF NOT EXISTS idx_llm_logs_agent ON llm_logs(agent_id);
+         CREATE INDEX IF NOT EXISTS idx_llm_logs_created ON llm_logs(agent_id, created_at DESC);
+         CREATE INDEX IF NOT EXISTS idx_llm_logs_requested ON llm_logs(agent_id, requested_at DESC);
+         CREATE INDEX IF NOT EXISTS idx_llm_logs_turn ON llm_logs(turn_record_id, iteration);",
     )?;
     let provenance_columns = [
         ("origin_from_exclusive", "INTEGER"),
@@ -4252,43 +4353,54 @@ impl Store {
         Ok(rows)
     }
 
-    // ---- LLM ログ（反復ごと・#766）----
+    // ---- LLM ログ（反復ごと・#766・本体 opencrab スキーマ／AGREED §2.11）----
 
     /// 1 回の LLM 呼び出しを記録する。書き込みの失敗は握り潰さず呼び手へ返す（fail loud）。
-    pub fn write_llm_log(&self, r: &NewLlmLog) -> Result<i64> {
-        let c = self.c();
-        c.execute(
-            "INSERT INTO llm_logs(turn_record_id,place_id,subject_id,iteration,model,request,response,tool_calls,outcome,error_detail,requested_at,latency_ms)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+    pub fn write_llm_log(&self, r: &NewLlmLog) -> Result<()> {
+        self.c().execute(
+            "INSERT INTO llm_logs(id,agent_id,session_id,model,prompt,response,tool_calls,latency_ms,prompt_tokens,completion_tokens,total_tokens,error_code,error_body,requested_at,trigger_message_id,is_bot_iteration,cache_read_tokens,cache_creation_tokens,created_at,turn_record_id,iteration,place_id,subject_id)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
             params![
-                r.turn_record_id, r.place, r.subject, r.iteration, r.model,
-                r.request, r.response, r.tool_calls, r.outcome, r.error_detail,
-                r.requested_at, r.latency_ms
+                r.id, r.agent_id, r.session_id, r.model, r.prompt, r.response, r.tool_calls,
+                r.latency_ms, r.prompt_tokens, r.completion_tokens, r.total_tokens,
+                r.error_code, r.error_body, r.requested_at, r.trigger_message_id,
+                r.is_bot_iteration, r.cache_read_tokens, r.cache_creation_tokens, r.created_at,
+                r.turn_record_id, r.iteration, r.place_id, r.subject_id
             ],
         )?;
-        Ok(c.last_insert_rowid())
+        Ok(())
     }
 
-    /// あるターンの LLM ログを反復順で引く（詳細表示の一部・turn 単位のドリルダウン）。
+    /// あるエージェント（subject）の LLM ログを新しい順に引く（本体 API `/llm-logs` と同形・リスト表示）。
+    pub fn list_llm_logs(&self, agent_id: &str, limit: i64) -> Result<Vec<LlmLogRow>> {
+        let c = self.c();
+        let mut stmt = c.prepare(&format!(
+            "SELECT {LLM_LOG_COLS} FROM llm_logs WHERE agent_id=?1 ORDER BY created_at DESC LIMIT ?2"
+        ))?;
+        let rows = stmt
+            .query_map(params![agent_id, limit], map_llm_log)?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// あるターンの LLM ログを反復順で引く（oc2 連結列でのドリルダウン・turn 単位）。
     pub fn llm_logs(&self, turn_record_id: i64) -> Result<Vec<LlmLogRow>> {
         let c = self.c();
-        let mut stmt = c.prepare(
-            "SELECT id,turn_record_id,place_id,subject_id,iteration,model,request,response,tool_calls,outcome,error_detail,requested_at,latency_ms
-             FROM llm_logs WHERE turn_record_id=?1 ORDER BY iteration",
-        )?;
+        let mut stmt = c.prepare(&format!(
+            "SELECT {LLM_LOG_COLS} FROM llm_logs WHERE turn_record_id=?1 ORDER BY iteration"
+        ))?;
         let rows = stmt
             .query_map(params![turn_record_id], map_llm_log)?
             .collect::<Result<Vec<_>>>()?;
         Ok(rows)
     }
 
-    /// 直近の LLM ログを新しい順に引く（リスト表示・ダッシュボードの入口）。
+    /// 直近の LLM ログを新しい順に引く（全 agent 横断・CLI 読み口の入口）。
     pub fn recent_llm_logs(&self, limit: i64) -> Result<Vec<LlmLogRow>> {
         let c = self.c();
-        let mut stmt = c.prepare(
-            "SELECT id,turn_record_id,place_id,subject_id,iteration,model,request,response,tool_calls,outcome,error_detail,requested_at,latency_ms
-             FROM llm_logs ORDER BY id DESC LIMIT ?1",
-        )?;
+        let mut stmt = c.prepare(&format!(
+            "SELECT {LLM_LOG_COLS} FROM llm_logs ORDER BY created_at DESC LIMIT ?1"
+        ))?;
         let rows = stmt
             .query_map(params![limit], map_llm_log)?
             .collect::<Result<Vec<_>>>()?;
@@ -4296,15 +4408,37 @@ impl Store {
     }
 
     /// 1 件の LLM ログを id で引く（詳細表示）。
-    pub fn llm_log(&self, id: i64) -> Result<Option<LlmLogRow>> {
+    pub fn llm_log(&self, id: &str) -> Result<Option<LlmLogRow>> {
         let c = self.c();
         c.query_row(
-            "SELECT id,turn_record_id,place_id,subject_id,iteration,model,request,response,tool_calls,outcome,error_detail,requested_at,latency_ms
-             FROM llm_logs WHERE id=?1",
+            &format!("SELECT {LLM_LOG_COLS} FROM llm_logs WHERE id=?1"),
             params![id],
             map_llm_log,
         )
         .optional()
+    }
+
+    /// エージェント（subject）の日次 LLM 統計（本体 API `/llm-logs/stats` と同形・#537 の julianday 比較を継承）。
+    pub fn llm_logs_stats(&self, agent_id: &str, days: i64) -> Result<Vec<LlmLogStatRow>> {
+        let c = self.c();
+        let mut stmt = c.prepare(LLM_LOG_STATS_SQL)?;
+        let days_param = format!("-{days} days");
+        let rows = stmt
+            .query_map(params![agent_id, days_param], |row| {
+                Ok(LlmLogStatRow {
+                    date: row.get(0)?,
+                    count: row.get(1)?,
+                    total_tokens: row.get(2)?,
+                    prompt_tokens: row.get(3)?,
+                    completion_tokens: row.get(4)?,
+                    avg_latency_ms: row.get(5)?,
+                    error_count: row.get(6)?,
+                    cache_read_tokens: row.get(7)?,
+                    cache_creation_tokens: row.get(8)?,
+                })
+            })?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     pub fn turn_records(&self, place: PlaceId) -> Result<Vec<TurnRecordRow>> {
@@ -5106,21 +5240,50 @@ fn map_turn_record(r: &rusqlite::Row<'_>) -> rusqlite::Result<TurnRecordRow> {
     })
 }
 
+/// llm_logs の列並び（SELECT と map_llm_log で共有・#766）。本体 opencrab の列＋oc2 連結列。
+const LLM_LOG_COLS: &str = "id,agent_id,session_id,model,prompt,response,tool_calls,latency_ms,prompt_tokens,completion_tokens,total_tokens,error_code,error_body,requested_at,trigger_message_id,is_bot_iteration,cache_read_tokens,cache_creation_tokens,created_at,turn_record_id,iteration,place_id,subject_id";
+
+/// 日次統計 SQL（本体 opencrab の llm_logs_stats と同一・#537 の julianday 境界比較を継承）。
+const LLM_LOG_STATS_SQL: &str = "SELECT date(COALESCE(requested_at, created_at)) as date,
+       COUNT(*) as count,
+       COALESCE(SUM(total_tokens),0) as total_tokens,
+       COALESCE(SUM(prompt_tokens),0) as prompt_tokens,
+       COALESCE(SUM(completion_tokens),0) as completion_tokens,
+       COALESCE(AVG(latency_ms),0) as avg_latency_ms,
+       COUNT(CASE WHEN error_code IS NOT NULL THEN 1 END) as error_count,
+       COALESCE(SUM(cache_read_tokens),0) as cache_read_tokens,
+       COALESCE(SUM(cache_creation_tokens),0) as cache_creation_tokens
+FROM llm_logs
+WHERE agent_id = ?1
+  AND julianday(COALESCE(requested_at, created_at)) >= julianday('now', ?2)
+GROUP BY date(COALESCE(requested_at, created_at))
+ORDER BY date ASC";
+
 fn map_llm_log(r: &rusqlite::Row<'_>) -> rusqlite::Result<LlmLogRow> {
     Ok(LlmLogRow {
         id: r.get(0)?,
-        turn_record_id: r.get(1)?,
-        place: r.get(2)?,
-        subject: r.get(3)?,
-        iteration: r.get(4)?,
-        model: r.get(5)?,
-        request: r.get(6)?,
-        response: r.get(7)?,
-        tool_calls: r.get(8)?,
-        outcome: r.get(9)?,
-        error_detail: r.get(10)?,
-        requested_at: r.get(11)?,
-        latency_ms: r.get(12)?,
+        agent_id: r.get(1)?,
+        session_id: r.get(2)?,
+        model: r.get(3)?,
+        prompt: r.get(4)?,
+        response: r.get(5)?,
+        tool_calls: r.get(6)?,
+        latency_ms: r.get(7)?,
+        prompt_tokens: r.get(8)?,
+        completion_tokens: r.get(9)?,
+        total_tokens: r.get(10)?,
+        error_code: r.get(11)?,
+        error_body: r.get(12)?,
+        requested_at: r.get(13)?,
+        trigger_message_id: r.get(14)?,
+        is_bot_iteration: r.get::<_, i64>(15)? != 0,
+        cache_read_tokens: r.get(16)?,
+        cache_creation_tokens: r.get(17)?,
+        created_at: r.get(18)?,
+        turn_record_id: r.get(19)?,
+        iteration: r.get(20)?,
+        place_id: r.get(21)?,
+        subject_id: r.get(22)?,
     })
 }
 
@@ -6694,10 +6857,10 @@ mod tests {
         assert_eq!(rows[1].tool_lines, None);
     }
 
-    // LLM ログ（#766）: 反復ごとに書いた「送ったもの・返ったもの・呼ばれた道具」を、turn 単位・
-    // 直近順・id 単体の 3 経路で逐語に引ける。migrate を二度呼んでも冪等（列・表は既にあり no-op）。
+    // LLM ログ（#766・本体スキーマ）: エージェント単位（本体 API 同形）・turn 単位・id 単体で引け、
+    // 日次統計が集計できる。migrate を二度呼んでも冪等（表は既にあり no-op）。
     #[test]
-    fn llm_logs_roundtrip_and_migrate_is_idempotent() {
+    fn llm_logs_roundtrip_stats_and_migrate_is_idempotent() {
         let s = Store::new_in_memory().unwrap();
         {
             let c = s.c();
@@ -6705,87 +6868,83 @@ mod tests {
             migrate(&c).unwrap();
             assert!(table_exists(&c, "llm_logs").unwrap());
         }
-        let p = s.create_place(Some("p"), None, "{}", None, 0).unwrap();
-        let subj = s
-            .create_subject(SubjectKind::Agent, "A", "A", "e", Standing::Trusted, 0)
-            .unwrap();
-        let act = s
-            .start_activity(p, subj, ActivityKindTag::Turn, None, 0, 0, None)
-            .unwrap();
-        let turn = s
-            .write_turn_record(&NewTurnRecord {
-                place: p,
-                subject: subj,
-                activity: act,
-                inherit_from_seq: None,
-                inherit_to_seq: None,
-                iterations: 2,
-                started_at: 0,
-                ended_at: 0,
-                end_reason: "done".into(),
-                failure_detail: None,
-                withheld_text: None,
-                tool_lines: None,
-                fired_by: None,
-            })
-            .unwrap();
-
-        // 反復 1: 道具を呼んだ。反復 2: 発話で終わった。
-        s.write_llm_log(&NewLlmLog {
-            turn_record_id: turn,
-            place: p,
-            subject: subj,
-            iteration: 1,
-            model: "scripted".into(),
-            request: r#"{"rendered":"猫について"}"#.into(),
-            response: Some(r#"{"effects":[],"done":false}"#.into()),
-            tool_calls: Some(r#"[{"id":"c0","name":"core-recall","args":{}}]"#.into()),
-            outcome: "done".into(),
-            error_detail: None,
-            requested_at: 1_700_000_000_000_000_000,
-            latency_ms: 12,
-        })
+        // 反復 1: 道具を呼んだ（トークン付き）。反復 2: 発話で終わった。同じ agent・同日。
+        let mk = |iter: i64, tool_calls: Option<&str>, resp: &str, pt: Option<i64>| NewLlmLog {
+            id: format!("100-{iter}"),
+            agent_id: "7".into(),
+            session_id: Some("3".into()),
+            model: Some("scripted".into()),
+            prompt: r#"{"model":"scripted","messages":[{"role":"user","content":"猫について"}]}"#
+                .into(),
+            response: resp.into(),
+            tool_calls: tool_calls.map(|s| s.to_string()),
+            latency_ms: Some(12),
+            prompt_tokens: pt,
+            completion_tokens: pt.map(|_| 5),
+            total_tokens: pt.map(|p| p + 5),
+            error_code: None,
+            error_body: None,
+            requested_at: Some("2026-08-24T00:00:00Z".into()),
+            trigger_message_id: Some("42".into()),
+            is_bot_iteration: iter > 1,
+            cache_read_tokens: None,
+            cache_creation_tokens: None,
+            created_at: "2026-08-24T00:00:00Z".into(),
+            turn_record_id: Some(100),
+            iteration: Some(iter),
+            place_id: Some(3),
+            subject_id: Some(7),
+        };
+        s.write_llm_log(&mk(
+            1,
+            Some(r#"[{"id":"c0","name":"core-recall","arguments":{}}]"#),
+            r#"{"content":"","tool_calls":[{"id":"c0","name":"core-recall","arguments":{}}],"finish_reason":"tool_use","usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#,
+            Some(10),
+        ))
         .unwrap();
-        s.write_llm_log(&NewLlmLog {
-            turn_record_id: turn,
-            place: p,
-            subject: subj,
-            iteration: 2,
-            model: "scripted".into(),
-            request: r#"{"rendered":"猫について"}"#.into(),
-            response: Some(r#"{"effects":[{"kind":"say","text":"にゃー"}],"done":true}"#.into()),
-            tool_calls: None,
-            outcome: "done".into(),
-            error_detail: None,
-            requested_at: 1_700_000_000_500_000_000,
-            latency_ms: 34,
-        })
+        s.write_llm_log(&mk(
+            2,
+            None,
+            r#"{"content":"にゃー","tool_calls":[],"finish_reason":"stop","usage":{"prompt_tokens":20,"completion_tokens":5,"total_tokens":25}}"#,
+            Some(20),
+        ))
         .unwrap();
 
-        // turn 単位: 反復順に 2 件。呼ばれた道具・返答が逐語で引ける。
-        let by_turn = s.llm_logs(turn).unwrap();
+        // エージェント単位（本体 API `/llm-logs` 同形・新しい順）。
+        let by_agent = s.list_llm_logs("7", 10).unwrap();
+        assert_eq!(by_agent.len(), 2);
+        assert!(by_agent.iter().all(|r| r.agent_id == "7"));
+        // 別 agent は混ざらない。
+        assert!(s.list_llm_logs("999", 10).unwrap().is_empty());
+
+        // turn 単位（oc2 連結列でのドリルダウン・反復順）。
+        let by_turn = s.llm_logs(100).unwrap();
         assert_eq!(by_turn.len(), 2);
-        assert_eq!(by_turn[0].iteration, 1);
-        assert_eq!(by_turn[0].subject, subj);
+        assert_eq!(by_turn[0].iteration, Some(1));
+        assert!(!by_turn[0].is_bot_iteration);
         assert_eq!(
             by_turn[0].tool_calls.as_deref(),
-            Some(r#"[{"id":"c0","name":"core-recall","args":{}}]"#)
+            Some(r#"[{"id":"c0","name":"core-recall","arguments":{}}]"#)
         );
-        assert_eq!(by_turn[1].iteration, 2);
-        assert!(by_turn[1].response.as_deref().unwrap().contains("にゃー"));
+        assert_eq!(by_turn[1].iteration, Some(2));
+        assert!(by_turn[1].is_bot_iteration);
+        assert!(by_turn[1].response.contains("にゃー"));
         assert_eq!(by_turn[1].tool_calls, None);
-
-        // 直近順: 新しい id が先頭。
-        let recent = s.recent_llm_logs(10).unwrap();
-        assert_eq!(recent.len(), 2);
-        assert_eq!(recent[0].iteration, 2);
-        assert_eq!(recent[1].iteration, 1);
+        assert_eq!(by_turn[1].trigger_message_id.as_deref(), Some("42"));
 
         // id 単体（詳細）。
-        let one = s.llm_log(by_turn[0].id).unwrap().expect("引ける");
-        assert_eq!(one.model, "scripted");
-        assert_eq!(one.latency_ms, 12);
-        assert!(s.llm_log(999_999).unwrap().is_none());
+        let one = s.llm_log("100-1").unwrap().expect("引ける");
+        assert_eq!(one.model.as_deref(), Some("scripted"));
+        assert_eq!(one.latency_ms, Some(12));
+        assert!(s.llm_log("nope").unwrap().is_none());
+
+        // 日次統計（本体 API `/stats` 同形）。同日 2 件・トークン合算・エラー 0。
+        let stats = s.llm_logs_stats("7", 30).unwrap();
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].count, 2);
+        assert_eq!(stats[0].total_tokens, 40);
+        assert_eq!(stats[0].prompt_tokens, 30);
+        assert_eq!(stats[0].error_count, 0);
     }
 
     // 退避は主体で絞る（記憶と同じ主体分離）: 他人の退避を指す read_offload は None に落ちる。

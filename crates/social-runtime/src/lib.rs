@@ -176,117 +176,209 @@ struct CtxObs {
     skipped_to_seq: Option<Seq>,
 }
 
-/// 反復 1 回ぶんの LLM 呼び出しの観測（#766）。ターン終了時にまとめて `llm_logs` へ書く
-/// （`turn_record_id` は turn を書き終えて初めて確定するので、`CtxObs` と同じくターン末に流す）。
-/// `request`/`response`/`tool_calls` は core が組んだ形（`Context`/`InferOutput`）を写した JSON 文字列。
+/// 反復 1 回ぶんの LLM 呼び出しの観測（#766・本体 llm_logs スキーマ）。ターン終了時にまとめて
+/// `llm_logs` へ書く（`turn_record_id` は turn を書き終えて初めて確定するので、`CtxObs` と同じく
+/// ターン末に流す）。`prompt`/`response`/`tool_calls` は**本体プロバイダのシリアライズと同型の正規化
+/// JSON**（ダッシュボードの ChatRequestSimple/ChatResponseSimple が解釈できる形）。トークンは provider
+/// の usage が要るが現状の Engine seam に載らないため None（別 issue）。
 struct LlmObs {
     iteration: i64,
-    model: String,
-    request: String,
-    response: Option<String>,
+    model: Option<String>,
+    prompt: String,
+    response: String,
     tool_calls: Option<String>,
-    outcome: &'static str,
-    error_detail: Option<String>,
-    requested_at: i64,
+    error_code: Option<String>,
+    error_body: Option<String>,
+    requested_at: Option<String>,
     latency_ms: i64,
+    is_bot_iteration: bool,
 }
 
-/// core が組んだ文脈（送ったもの）を逐語で JSON 文字列へ写す（#766）。**秘密は Context に存在しない**
-/// （Authorization・API キーを wire に足すのは provider）ので、ここに載ることは構造的に無い。
-/// 画像パートは実バイトを載せず種別と大きさだけ残す（ログを肥大させない・秘密でもない）。
-fn render_llm_request(ctx: &Context) -> String {
-    let history: Vec<serde_json::Value> = ctx
-        .history
+/// ダッシュボードが読む 1 メッセージ（ChatMessage 同型）を組む。
+fn chat_message(
+    role: &str,
+    content: &str,
+    tool_calls: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "role": role,
+        "content": content,
+        "tool_call_id": serde_json::Value::Null,
+        "tool_calls": tool_calls,
+        "content_parts": [],
+    })
+}
+
+/// 送った文脈（`Context`）を、ダッシュボードの ChatRequestSimple と同型の正規化 JSON へ写す（#766）。
+/// **秘密は Context に存在しない**（Authorization・API キーを wire に足すのは provider）ので、ここに
+/// 載ることは構造的に無い。画像パートは実バイトを載せず種別と大きさだけ残す（肥大させない）。
+fn build_prompt_json(ctx: &Context, model: Option<&str>) -> String {
+    let mut messages: Vec<serde_json::Value> = vec![];
+    if !ctx.system.is_empty() {
+        messages.push(chat_message("system", &ctx.system, vec![]));
+    }
+    messages.push(chat_message("user", &ctx.rendered, vec![]));
+    for m in &ctx.history {
+        push_history_messages(&mut messages, m);
+    }
+    let tools: Vec<serde_json::Value> = ctx
+        .tools
         .iter()
-        .map(|m| {
-            let role = match m.role {
-                MsgRole::User => "user",
-                MsgRole::Assistant => "assistant",
-            };
-            let content: Vec<serde_json::Value> = m.content.iter().map(render_block).collect();
-            serde_json::json!({ "role": role, "content": content })
+        .map(|t| {
+            serde_json::json!({
+                "name": t.name,
+                "description": t.description,
+                "parameters": t.params,
+            })
         })
         .collect();
-    let tools: Vec<&str> = ctx.tools.iter().map(|t| t.name.as_str()).collect();
-    let throttle = ctx.throttle.map(|t| {
-        serde_json::json!({
-            "max_output_tokens": t.max_output_tokens,
-            "effort": match t.effort {
-                Effort::Low => "low",
-                Effort::Medium => "medium",
-                Effort::High => "high",
-            },
-        })
-    });
-    serde_json::json!({
-        "system": ctx.system,
-        "rendered": ctx.rendered,
-        "history": history,
+    let mut req = serde_json::json!({
+        "model": model.unwrap_or_default(),
+        "messages": messages,
         "tools": tools,
-        "throttle": throttle,
+    });
+    if let Some(t) = ctx.throttle {
+        if let Some(max) = t.max_output_tokens {
+            req["max_tokens"] = serde_json::json!(max);
+        }
+    }
+    req.to_string()
+}
+
+/// ターン内会話の 1 メッセージを、ダッシュボードの ChatMessage 列へ展開する（#766）。テキストと
+/// ネイティブ道具呼び出しは 1 通に、道具結果は role=tool の別メッセージに分ける。
+fn push_history_messages(out: &mut Vec<serde_json::Value>, m: &Message) {
+    let role = match m.role {
+        MsgRole::User => "user",
+        MsgRole::Assistant => "assistant",
+    };
+    let mut text = String::new();
+    let mut tool_calls: Vec<serde_json::Value> = vec![];
+    let mut tool_results: Vec<serde_json::Value> = vec![];
+    for b in &m.content {
+        match b {
+            Block::Text(t) => {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(t);
+            }
+            Block::ToolUse { id, name, input } => {
+                tool_calls.push(serde_json::json!({
+                    "id": id, "name": name, "arguments": input,
+                }));
+            }
+            Block::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } => {
+                let mut body = String::new();
+                for p in content {
+                    match p {
+                        Part::Text(t) => {
+                            if !body.is_empty() {
+                                body.push('\n');
+                            }
+                            body.push_str(t);
+                        }
+                        // 実バイトは載せない（大きい・不要）。種別と大きさだけ。
+                        Part::ImageBytes { media_type, data } => {
+                            body.push_str(&format!("[image {media_type}, {} bytes]", data.len()));
+                        }
+                    }
+                }
+                tool_results.push(serde_json::json!({
+                    "role": "tool",
+                    "content": body,
+                    "tool_call_id": tool_use_id,
+                    "tool_calls": [],
+                    "content_parts": [],
+                }));
+            }
+        }
+    }
+    if !text.is_empty() || !tool_calls.is_empty() {
+        out.push(chat_message(role, &text, tool_calls));
+    }
+    out.extend(tool_results);
+}
+
+/// 推論が返したもの（`InferOutput`）を、ダッシュボードの ChatResponseSimple と同型の正規化 JSON へ写す
+/// （#766）。返り値は `(response_json, tool_calls_col)`——`response` は本文＋道具呼び出し＋finish_reason＋
+/// usage、`tool_calls` 列は道具呼び出しの配列（無ければ None・本体の列分離と同じ）。usage は provider の
+/// 実測が要るため 0（トークン列は別 issue）。
+fn build_response_json(o: &InferOutput) -> (String, Option<String>) {
+    let content: String = o
+        .effects
+        .iter()
+        .filter(|e| e.kind == EffectKind::Say)
+        .filter_map(|e| e.content.text.as_deref())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let calls: Vec<serde_json::Value> = o
+        .tool_calls
+        .iter()
+        .map(|tc| serde_json::json!({ "id": tc.id, "name": tc.name, "arguments": tc.args }))
+        .collect();
+    let finish_reason = if !o.tool_calls.is_empty() {
+        "tool_use"
+    } else {
+        "stop"
+    };
+    let response = serde_json::json!({
+        "content": content,
+        "tool_calls": calls,
+        "finish_reason": finish_reason,
+        "usage": { "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0 },
+    })
+    .to_string();
+    let tool_calls_col = if calls.is_empty() {
+        None
+    } else {
+        Some(serde_json::json!(calls).to_string())
+    };
+    (response, tool_calls_col)
+}
+
+/// 失敗・アイドルの response 列（本文なし・finish_reason に理由）。ダッシュボードの ChatResponseSimple
+/// が壊れずに読める形を保つ。
+fn empty_response_json(finish_reason: &str) -> String {
+    serde_json::json!({
+        "content": "",
+        "tool_calls": [],
+        "finish_reason": finish_reason,
+        "usage": { "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0 },
     })
     .to_string()
 }
 
-fn render_block(b: &Block) -> serde_json::Value {
-    match b {
-        Block::Text(t) => serde_json::json!({ "type": "text", "text": t }),
-        Block::ToolUse { id, name, input } => {
-            serde_json::json!({ "type": "tool_use", "id": id, "name": name, "input": input })
-        }
-        Block::ToolResult {
-            tool_use_id,
-            content,
-            is_error,
-        } => {
-            let parts: Vec<serde_json::Value> = content
-                .iter()
-                .map(|p| match p {
-                    Part::Text(t) => serde_json::json!({ "type": "text", "text": t }),
-                    // 実バイトは載せない（大きく・秘密ではないが不要）。種別と大きさだけ。
-                    Part::ImageBytes { media_type, data } => {
-                        serde_json::json!({ "type": "image", "media_type": media_type, "bytes": data.len() })
-                    }
-                })
-                .collect();
-            serde_json::json!({
-                "type": "tool_result",
-                "tool_use_id": tool_use_id,
-                "is_error": is_error,
-                "content": parts,
-            })
-        }
+/// unix epoch nanos（壁時計）→ RFC3339 文字列（`YYYY-MM-DDTHH:MM:SSZ`）。ダッシュボードは
+/// `new Date(requested_at)` で解釈するので ISO 文字列で持つ（本体も requested_at は TEXT）。0 以下は None。
+fn rfc3339_from_wall_nanos(nanos: i64) -> Option<String> {
+    if nanos <= 0 {
+        return None;
     }
+    let secs = nanos / 1_000_000_000;
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400);
+    let (h, mi, s) = (tod / 3600, (tod % 3600) / 60, tod % 60);
+    let (y, m, d) = civil_from_days(days);
+    Some(format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z"))
 }
 
-/// 推論が返したもの（効果と道具呼び出し）を JSON 文字列へ写す（#766）。効果本文＝返答、道具呼び出しは
-/// 別列（元 opencrab の `response`/`tool_calls` 分離と同じ）。呼び出しが無ければ tool_calls は None。
-fn summarize_output(o: &InferOutput) -> (String, Option<String>) {
-    let effects: Vec<serde_json::Value> = o
-        .effects
-        .iter()
-        .map(|e| {
-            serde_json::json!({
-                "kind": e.kind.as_wire(),
-                "text": e.content.text,
-                "place": e.place,
-                "target": e.target,
-                "verb": e.verb,
-            })
-        })
-        .collect();
-    let response = serde_json::json!({ "effects": effects, "done": o.done }).to_string();
-    let tool_calls = if o.tool_calls.is_empty() {
-        None
-    } else {
-        let calls: Vec<serde_json::Value> = o
-            .tool_calls
-            .iter()
-            .map(|tc| serde_json::json!({ "id": tc.id, "name": tc.name, "args": tc.args }))
-            .collect();
-        Some(serde_json::json!(calls).to_string())
-    };
-    (response, tool_calls)
+/// Howard Hinnant の civil_from_days（epoch=1970-01-01 からの日数 → 年月日）。
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 struct ImmediateCandidate {
@@ -2762,43 +2854,53 @@ impl System {
 
             // 上限を掛けるのは 1 回の推論だけ（§05）。チャンク間のアイドルで測る（総時間ではない）ので、
             // バイトが流れている限り長い生成は切らず、止まった推論だけ切る。プロバイダがストールしても枠を永久に握らない。
-            // LLM ログ（#766）。この反復で「何を送り・何が返り・どのツールが呼ばれたか」を写す。
-            // request は推論を投げる前の文脈から作る。requested_at は再起動を跨いで意味を持つ壁時計、
-            // latency は単調時計の差。結末（done/failed/idle）ごとに 1 件積み、ターン末に turn_id と書く。
-            let llm_request = render_llm_request(&ctx);
+            // LLM ログ（#766）。この反復で「何を送り・何が返り・どのツールが呼ばれたか」を、本体
+            // llm_logs と同型の正規化 JSON で写す。prompt は推論を投げる前の文脈から作る。requested_at は
+            // 再起動を跨いで意味を持つ壁時計（RFC3339）、latency は単調時計の差。is_bot_iteration は 2 反復
+            // 目以降（道具往復の継続）。結末（done/failed/idle）ごとに 1 件積み、ターン末に turn_id と書く。
             let llm_model = self.0.engine.model().to_string();
-            let llm_requested_at = self.now_wall_nanos();
+            let llm_prompt = build_prompt_json(&ctx, Some(&llm_model));
+            let llm_requested_at = rfc3339_from_wall_nanos(self.now_wall_nanos());
+            let llm_is_bot = iterations > 1;
             let llm_started = self.now_nanos();
             let outcome = self.infer_with_idle_cap(&ctx).await;
             let llm_latency_ms = (self.now_nanos() - llm_started) / 1_000_000;
             let out = match outcome {
                 InferOutcome::Done(o) => {
-                    let (response, tool_calls) = summarize_output(&o);
+                    let (response, tool_calls) = build_response_json(&o);
                     llm_obs.push(LlmObs {
                         iteration: iterations,
-                        model: llm_model,
-                        request: llm_request,
-                        response: Some(response),
+                        model: Some(llm_model),
+                        prompt: llm_prompt,
+                        response,
                         tool_calls,
-                        outcome: "done",
-                        error_detail: None,
+                        error_code: None,
+                        error_body: None,
                         requested_at: llm_requested_at,
                         latency_ms: llm_latency_ms,
+                        is_bot_iteration: llm_is_bot,
                     });
                     o
                 }
                 InferOutcome::Failed(error) => {
                     // 空応答（§EMPTY_RESPONSE_DETAIL）もここに来る——理由を逐語で llm_logs に残す。
+                    // error_code は粗い分類（空応答か一般エラーか）、error_body は逐語。
+                    let code = if error.0.starts_with("empty_response") {
+                        "empty_response"
+                    } else {
+                        "engine_error"
+                    };
                     llm_obs.push(LlmObs {
                         iteration: iterations,
-                        model: llm_model,
-                        request: llm_request,
-                        response: None,
+                        model: Some(llm_model),
+                        prompt: llm_prompt,
+                        response: empty_response_json("error"),
                         tool_calls: None,
-                        outcome: "failed",
-                        error_detail: Some(error.0.clone()),
+                        error_code: Some(code.to_string()),
+                        error_body: Some(error.0.clone()),
                         requested_at: llm_requested_at,
                         latency_ms: llm_latency_ms,
+                        is_bot_iteration: llm_is_bot,
                     });
                     end_reason = "failed";
                     failure_detail = Some(error.0);
@@ -2808,14 +2910,15 @@ impl System {
                     // アイドル上限に達した（ストール）。黙って再試行せず、ターンを終える（§05）。
                     llm_obs.push(LlmObs {
                         iteration: iterations,
-                        model: llm_model,
-                        request: llm_request,
-                        response: None,
+                        model: Some(llm_model),
+                        prompt: llm_prompt,
+                        response: empty_response_json("idle_timeout"),
                         tool_calls: None,
-                        outcome: "idle",
-                        error_detail: None,
+                        error_code: Some("idle_timeout".to_string()),
+                        error_body: Some("inference stalled: idle cap reached".to_string()),
                         requested_at: llm_requested_at,
                         latency_ms: llm_latency_ms,
+                        is_bot_iteration: llm_is_bot,
                     });
                     end_reason = "idle_timeout";
                     break;
@@ -3092,24 +3195,49 @@ impl System {
                 .expect("context record must be written");
         }
 
-        // 反復ごとの LLM 呼び出しを残す（#766）。書き込みの失敗は握り潰さず落とす（context record と
-        // 同じ流儀・fail loud）。挙動調査の第一手がこの行——欠けたら「何を送り何が返ったか」を失う。
+        // 反復ごとの LLM 呼び出しを残す（#766・本体 llm_logs スキーマ）。書き込みの失敗は握り潰さず
+        // 落とす（context record と同じ流儀・fail loud）。挙動調査の第一手がこの行——欠けたら「何を送り
+        // 何が返ったか」を失う。キー対応: agent_id←subject・session_id←place・trigger_message_id←起点 seq。
+        // id は "{turn_id}-{iteration}"（反復ごとに一意）。
+        let agent_id = subject.to_string();
+        let session_id = Some(place.to_string());
+        let trigger_message_id = match reason {
+            TurnReason::Immediate(seq) => Some(seq.to_string()),
+            TurnReason::Batch | TurnReason::Unconditional => None,
+        };
+        let created_fallback = rfc3339_from_wall_nanos(self.now_wall_nanos()).unwrap_or_default();
         for o in llm_obs {
+            let created_at = o
+                .requested_at
+                .clone()
+                .unwrap_or_else(|| created_fallback.clone());
             self.0
                 .store
                 .write_llm_log(&opencrab_store::NewLlmLog {
-                    turn_record_id: turn_id,
-                    place,
-                    subject,
-                    iteration: o.iteration,
+                    id: format!("{turn_id}-{}", o.iteration),
+                    agent_id: agent_id.clone(),
+                    session_id: session_id.clone(),
                     model: o.model,
-                    request: o.request,
+                    prompt: o.prompt,
                     response: o.response,
                     tool_calls: o.tool_calls,
-                    outcome: o.outcome.to_string(),
-                    error_detail: o.error_detail,
+                    latency_ms: Some(o.latency_ms),
+                    // トークンは provider の usage が要る（現状の Engine seam に載らない）。別 issue。
+                    prompt_tokens: None,
+                    completion_tokens: None,
+                    total_tokens: None,
+                    error_code: o.error_code,
+                    error_body: o.error_body,
                     requested_at: o.requested_at,
-                    latency_ms: o.latency_ms,
+                    trigger_message_id: trigger_message_id.clone(),
+                    is_bot_iteration: o.is_bot_iteration,
+                    cache_read_tokens: None,
+                    cache_creation_tokens: None,
+                    created_at,
+                    turn_record_id: Some(turn_id),
+                    iteration: Some(o.iteration),
+                    place_id: Some(place),
+                    subject_id: Some(subject),
                 })
                 .expect("llm log must be written");
         }
