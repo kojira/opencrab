@@ -1,6 +1,60 @@
 use super::*;
 
 #[test]
+fn inspected_json_rejects_duplicate_keys_at_every_depth() {
+    assert!(parse_json_without_duplicate_keys(br#"{"outer":{"key":1,"key":2}}"#).is_err());
+    assert!(parse_json_without_duplicate_keys(br#"{"key":1,"key":2}"#).is_err());
+    assert_eq!(
+        parse_json_without_duplicate_keys(br#"{"outer":{"key":1},"items":[true,null]}"#).unwrap()
+            ["outer"]["key"],
+        1
+    );
+}
+
+#[test]
+fn global_discord_policy_anchors_guild_routes_when_no_subject_override_exists() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    let transaction = connection.transaction().unwrap();
+    create_phase1_schema(&transaction).unwrap();
+    transaction
+        .execute_batch(
+            r#"INSERT INTO subjects VALUES(1,'agent','agent','Agent',0);
+             INSERT INTO places VALUES(1,NULL,NULL,NULL,x'00','place',0,NULL,NULL);
+             INSERT INTO memberships VALUES(1,1,'participant',0,0);
+             INSERT INTO gate_instances VALUES(
+               '11111111-1111-4111-8111-111111111111','discord','shared',NULL,1,'stopped'
+             );
+             INSERT INTO gate_instance_revisions VALUES(
+               '11111111-1111-4111-8111-111111111111',1,1,1,0,'fixture',x'00',
+               zeroblob(32),NULL
+             );
+             INSERT INTO gate_bindings VALUES(
+               '22222222-2222-4222-8222-222222222222',1,
+               '11111111-1111-4111-8111-111111111111','111',NULL,'scope',
+               'gate-binding/discord/v1',CAST('{"address_kind":"guild"}' AS BLOB),
+               zeroblob(32),NULL,NULL,NULL
+             );
+             INSERT INTO place_default_policies VALUES(
+               '33333333-3333-4333-8333-333333333333',1,'discord','active',NULL,NULL,
+               'place-policy/discord/v1',CAST(
+                 '{"heartbeat_enabled":false,"whitelisted":true}' AS BLOB
+               ),zeroblob(32)
+             );"#,
+        )
+        .unwrap();
+
+    reconcile_migrated_routes(&transaction).unwrap();
+
+    assert_eq!(
+        transaction
+            .query_row("SELECT COUNT(*) FROM subject_routes", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+}
+
+#[test]
 fn grant_assembly_uses_closed_roles_unsplit_actions_and_nullable_co_agent_provenance() {
     let source = Connection::open_in_memory().unwrap();
     source
@@ -28,7 +82,7 @@ fn grant_assembly_uses_closed_roles_unsplit_actions_and_nullable_co_agent_proven
     create_phase1_schema(&transaction).unwrap();
     let agents = BTreeMap::from([("agent-a".into(), 1), ("agent-b".into(), 3)]);
     let principals = BTreeMap::from([(("discord".into(), "principal".into()), 2)]);
-    let mut raw = RawCollector::default();
+    let mut raw = RawCollector::new(&transaction);
     let mut report = ConversionReport::default();
     let provenance = MigrationProvenance::new([7; 32]);
 
@@ -44,7 +98,16 @@ fn grant_assembly_uses_closed_roles_unsplit_actions_and_nullable_co_agent_proven
     )
     .unwrap();
 
-    assert!(raw.rows.is_empty());
+    assert_eq!(
+        transaction
+            .query_row(
+                "SELECT COUNT(*) FROM legacy_unowned_source_rows",
+                [],
+                |row| { row.get::<_, i64>(0) }
+            )
+            .unwrap(),
+        0
+    );
     assert_eq!(
         transaction
             .query_row(
@@ -160,7 +223,7 @@ fn principal_assembly_raw_routes_empty_external_id_and_preserves_all_contributor
         .unwrap();
     let instances = load_migration_instances(&transaction).unwrap();
     let provenance = MigrationProvenance::new([9; 32]);
-    let mut raw = RawCollector::default();
+    let mut raw = RawCollector::new(&transaction);
     let mut report = ConversionReport::default();
 
     let principals = assemble_principals(
@@ -170,6 +233,7 @@ fn principal_assembly_raw_routes_empty_external_id_and_preserves_all_contributor
         &provenance,
         &mut raw,
         &mut report,
+        0,
     )
     .unwrap();
     report.verify().unwrap();
@@ -190,9 +254,17 @@ fn principal_assembly_raw_routes_empty_external_id_and_preserves_all_contributor
         .iter()
         .find(|row| users.text(row, "user_id") == Some(""))
         .unwrap();
-    assert!(raw
-        .rows
-        .contains_key(&(users.name.into(), empty.source_key.clone())));
+    assert_eq!(
+        transaction
+            .query_row(
+                "SELECT COUNT(*) FROM legacy_unowned_source_rows
+                 WHERE source_table=?1 AND source_key=?2",
+                params![users.name, empty.source_key],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
     assert_eq!(
         transaction
             .query_row(
