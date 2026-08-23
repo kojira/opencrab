@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use opencrab_engine::*;
 use opencrab_port::*;
 use opencrab_social_runtime::*;
-use opencrab_store::{NewEvent, Store};
+use opencrab_store::{BackgroundProvenance, NewEvent, SettledProvenance, Store};
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -312,20 +312,122 @@ async fn settled_turn_includes_the_already_read_originating_request() {
     assert_eq!(contexts.len(), 2, "request turn and settled turn");
     let follow_up = &contexts[1];
     assert!(
-        follow_up.contains("=== 決着の発端 ===")
+        follow_up.contains("=== 決着の対応 ===")
             && follow_up.contains("synthetic request needing lookup"),
         "already-read origin is restored: {follow_up}"
     );
     assert!(
-        follow_up.contains("（決着・発端 #1）") && follow_up.contains("synthetic lookup result"),
-        "settled result is associated with the origin: {follow_up}"
+        follow_up.contains("発端入力: #1..#1")
+            && follow_up.contains("受理ツール: gate-lookup args={\"query\":\"synthetic query\"}")
+            && follow_up.contains("結果:")
+            && follow_up.contains("synthetic lookup result"),
+        "origin, accepted call, and result are associated: {follow_up}"
     );
+    let activity = bg_activities(&h).into_iter().next().expect("background");
+    let activity_provenance = activity.provenance.expect("activity provenance");
+    assert_eq!(activity_provenance.origin_from_exclusive, 0);
+    assert_eq!(activity_provenance.origin_to_inclusive, 1);
+    assert_eq!(activity_provenance.origin_standing, Standing::Unknown);
+    assert_eq!(activity_provenance.tool_name, "gate-lookup");
+    assert_eq!(
+        activity_provenance.tool_args,
+        serde_json::json!({"query": "synthetic query"})
+    );
+    let settled_provenance = h
+        .sys
+        .store()
+        .settled_provenance(place, settled.seq)
+        .unwrap()
+        .expect("settled provenance");
+    assert_eq!(settled_provenance.activity, activity.id);
+    assert_eq!(settled_provenance.tool_args, activity_provenance.tool_args);
     assert_eq!(
         h.host.invoke_count("gate-lookup"),
         1,
         "tool is not re-executed"
     );
     assert_eq!(h.tx.says(), vec!["synthetic final answer"]);
+}
+
+// #750 R2: 同じ standing の A/B が一つの turn に入った場合、tool call を単一 trigger seq に縮めず、
+// turn が実際に処理した入力 range 全体を activity/settled に保持して次 turn へ復元する。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn settled_restores_the_full_origin_range_for_a_b_in_one_turn() {
+    let h = build();
+    let (place, _subject) = place_with(
+        &h,
+        Standing::Trusted,
+        &[EffectKind::Say],
+        vec![],
+        vec![tool_one_string("gate-range", "input")],
+    );
+    h.host.set_immediate("gate-range", "synthetic range result");
+    h.eng
+        .push(Step::say_done("gate-range::based-on-b\nNO_REPLY"));
+    h.eng.push(Step::no_reply());
+
+    for (text, now) in [("synthetic request a", 1), ("synthetic request b", 2)] {
+        h.sys
+            .store()
+            .append(
+                place,
+                &NewEvent {
+                    kind: EventKind::Said,
+                    author_subject: None,
+                    author_external: Some("synthetic-author".into()),
+                    content: Content::text(text),
+                    mentions: vec![],
+                    reply_to: None,
+                    target: None,
+                    for_subject: None,
+                    attachments: vec![],
+                },
+                now,
+            )
+            .unwrap();
+    }
+    h.sys.startup();
+    settle().await;
+
+    let activity = bg_activities(&h).into_iter().next().expect("background");
+    let activity_provenance = activity.provenance.expect("activity provenance");
+    assert_eq!(activity_provenance.origin_from_exclusive, 0);
+    assert_eq!(activity_provenance.origin_to_inclusive, 2);
+    assert_eq!(activity_provenance.tool_name, "gate-range");
+    assert_eq!(
+        activity_provenance.tool_args,
+        serde_json::json!({"input": "based-on-b"})
+    );
+
+    let latest = h.sys.store().latest_seq(place).unwrap();
+    let settled = h
+        .sys
+        .store()
+        .read_range(place, 0, latest)
+        .unwrap()
+        .into_iter()
+        .find(|event| event.kind == EventKind::Settled)
+        .expect("settled");
+    let settled_provenance = h
+        .sys
+        .store()
+        .settled_provenance(place, settled.seq)
+        .unwrap()
+        .expect("settled provenance");
+    assert_eq!(settled_provenance.origin_from_exclusive, 0);
+    assert_eq!(settled_provenance.origin_to_inclusive, 2);
+
+    let contexts = h.eng.contexts();
+    assert_eq!(contexts.len(), 2, "request turn and settled turn");
+    let follow_up = &contexts[1];
+    assert!(follow_up.contains("発端入力: #1..#2"), "{follow_up}");
+    assert!(follow_up.contains("synthetic request a"), "{follow_up}");
+    assert!(follow_up.contains("synthetic request b"), "{follow_up}");
+    assert!(
+        follow_up.contains("受理ツール: gate-range args={\"input\":\"based-on-b\"}")
+            && follow_up.contains("synthetic range result"),
+        "{follow_up}"
+    );
 }
 
 // #750: 異なる発端の settled が同時に未読でも 1 turn へ混ぜない。各結果を受けて呼んだ平文 tool の
@@ -386,44 +488,49 @@ async fn settled_with_different_origins_chain_tools_to_their_own_requests() {
         .set_read_seq(place, subject, origin_b)
         .unwrap();
 
-    let settled_a = h
-        .sys
-        .store()
-        .append(
-            place,
-            &NewEvent {
-                kind: EventKind::Settled,
-                author_subject: None,
-                author_external: None,
-                content: Content::text("synthetic result a"),
-                mentions: vec![],
-                reply_to: Some(origin_a),
-                target: None,
-                for_subject: Some(subject),
-                attachments: vec![],
-            },
-            3,
-        )
-        .unwrap();
-    let settled_b = h
-        .sys
-        .store()
-        .append(
-            place,
-            &NewEvent {
-                kind: EventKind::Settled,
-                author_subject: None,
-                author_external: None,
-                content: Content::text("synthetic result b"),
-                mentions: vec![],
-                reply_to: Some(origin_b),
-                target: None,
-                for_subject: Some(subject),
-                attachments: vec![],
-            },
-            4,
-        )
-        .unwrap();
+    let seed_settled = |origin: Seq, name: &str, result: &str, now: i64| {
+        let provenance = BackgroundProvenance {
+            origin_from_exclusive: origin - 1,
+            origin_to_inclusive: origin,
+            origin_standing: Standing::Unknown,
+            tool_name: name.into(),
+            tool_args: serde_json::json!({"input": name}),
+        };
+        let activity = h
+            .sys
+            .store()
+            .start_activity_with_provenance(
+                place,
+                subject,
+                ActivityKindTag::Background,
+                Some(name),
+                100,
+                now,
+                None,
+                Some(&provenance),
+            )
+            .unwrap();
+        h.sys.store().end_activity(activity, "done", now).unwrap();
+        h.sys
+            .store()
+            .append_settled(
+                place,
+                subject,
+                result,
+                &SettledProvenance {
+                    activity,
+                    origin_from_exclusive: provenance.origin_from_exclusive,
+                    origin_to_inclusive: provenance.origin_to_inclusive,
+                    origin_standing: provenance.origin_standing,
+                    tool_name: provenance.tool_name,
+                    tool_args: provenance.tool_args,
+                },
+                now,
+            )
+            .unwrap()
+    };
+    let settled_a = seed_settled(origin_a, "seed-a", "synthetic result a", 3);
+    let settled_b = seed_settled(origin_b, "seed-b", "synthetic result b", 4);
 
     h.eng.push(Step::say_done("gate-follow::from-a\nNO_REPLY"));
     h.eng.push(Step::say_done("gate-follow::from-b\nNO_REPLY"));

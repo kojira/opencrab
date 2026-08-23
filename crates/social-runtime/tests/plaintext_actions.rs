@@ -873,6 +873,8 @@ async fn no_reply_lookalikes_are_delivered_as_ordinary_prose() {
         "NO_REPLYという文字列を説明する",
         "NO_REPLY:12:本文",
         "NO_REPLY::説明",
+        " NO_REPLY",
+        "\tNO_REPLY::",
     ];
     for text in prose {
         h.eng.push(Step::say_done(text));

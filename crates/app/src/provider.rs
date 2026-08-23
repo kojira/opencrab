@@ -148,7 +148,7 @@ impl Engine for MockEngine {
                 }
             }
             MockScript::PlaintextToolSettledReply => {
-                let settled = ctx.rendered.contains("（決着");
+                let settled = ctx.rendered.contains("=== 決着の対応 ===");
                 if !settled {
                     return Ok(say("nostr-whoami::{}\nNO_REPLY"));
                 }
@@ -164,6 +164,12 @@ impl Engine for MockEngine {
                 if !ctx.rendered.contains("npub1") {
                     return Err(EngineError(
                         "mock plaintext settled turn did not receive the tool result".to_string(),
+                    ));
+                }
+                if !ctx.rendered.contains("受理ツール: nostr-whoami args={}") {
+                    return Err(EngineError(
+                        "mock plaintext settled turn did not receive the accepted tool call"
+                            .to_string(),
                     ));
                 }
                 Ok(say("mock reply after settled plaintext tool result"))
@@ -1531,7 +1537,7 @@ mod tests {
         let first = plaintext.infer(&ctx, &chunks).await.unwrap();
         assert_eq!(only_say(&first), "nostr-whoami::{}\nNO_REPLY");
         let settled_ctx = Context {
-            rendered: "=== 決着の発端 ===\nsynthetic mention for plaintext_tool_settled_reply\n[2] （決着・発端 #1）npub1synthetic"
+            rendered: "=== 決着の対応 ===\n活動 #2\n発端入力: #1..#1\nsynthetic mention for plaintext_tool_settled_reply\n受理ツール: nostr-whoami args={}\n結果:\nnpub1synthetic"
                 .to_string(),
             ..Context::default()
         };

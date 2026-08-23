@@ -98,6 +98,31 @@ pub struct ActivityRow {
     pub ended_at: Option<i64>,
     pub end_reason: Option<String>,
     pub detached_from: Option<ActivityId>,
+    /// background activity が生まれた turn の入力範囲・権限・受理 tool call。
+    /// turn activity と provenance 導入前の既存行では None。
+    pub provenance: Option<BackgroundProvenance>,
+}
+
+/// background activity の発端と、core が権限確認後に受理した tool call。
+/// range は store の通常の読み方と同じ `(from_exclusive, to_inclusive]`。
+#[derive(Clone, Debug, PartialEq)]
+pub struct BackgroundProvenance {
+    pub origin_from_exclusive: Seq,
+    pub origin_to_inclusive: Seq,
+    pub origin_standing: Standing,
+    pub tool_name: String,
+    pub tool_args: serde_json::Value,
+}
+
+/// settled event と、その結果を生んだ background activity / 発端 / tool call の対応。
+#[derive(Clone, Debug, PartialEq)]
+pub struct SettledProvenance {
+    pub activity: ActivityId,
+    pub origin_from_exclusive: Seq,
+    pub origin_to_inclusive: Seq,
+    pub origin_standing: Standing,
+    pub tool_name: String,
+    pub tool_args: serde_json::Value,
 }
 
 /// ターンの事実だけを持つ（詳細§05）。文脈の事実（範囲・切り詰め・トークン数）は
@@ -462,7 +487,26 @@ const SCHEMA: &str = r#"
               started_at INTEGER NOT NULL,
               ended_at INTEGER,
               end_reason TEXT,
-              detached_from INTEGER
+              detached_from INTEGER,
+              origin_from_exclusive INTEGER,
+              origin_to_inclusive INTEGER,
+              origin_standing TEXT,
+              accepted_tool_name TEXT,
+              accepted_tool_args_json TEXT
+            );
+
+            -- Settled は結果本文だけでなく、発端 range・standing・受理 tool call・activity id を
+            -- 同じ event seq に結びつける。events への追記とこの行は 1 transaction で行う。
+            CREATE TABLE IF NOT EXISTS settled_provenance(
+              place_id INTEGER NOT NULL,
+              seq INTEGER NOT NULL,
+              activity_id INTEGER NOT NULL,
+              origin_from_exclusive INTEGER NOT NULL,
+              origin_to_inclusive INTEGER NOT NULL,
+              origin_standing TEXT NOT NULL,
+              accepted_tool_name TEXT NOT NULL,
+              accepted_tool_args_json TEXT NOT NULL,
+              PRIMARY KEY(place_id, seq)
             );
 
             CREATE TABLE IF NOT EXISTS turn_records(
@@ -610,6 +654,20 @@ fn migrate(conn: &Connection) -> Result<()> {
     }
     if !column_exists(conn, "turn_records", "fired_by")? {
         conn.execute("ALTER TABLE turn_records ADD COLUMN fired_by TEXT", [])?;
+    }
+    for (column, sql_type) in [
+        ("origin_from_exclusive", "INTEGER"),
+        ("origin_to_inclusive", "INTEGER"),
+        ("origin_standing", "TEXT"),
+        ("accepted_tool_name", "TEXT"),
+        ("accepted_tool_args_json", "TEXT"),
+    ] {
+        if !column_exists(conn, "activities", column)? {
+            conn.execute(
+                &format!("ALTER TABLE activities ADD COLUMN {column} {sql_type}"),
+                [],
+            )?;
+        }
     }
     // 添付列（DESIGN-images §1）。既定 '[]' で足す——添付なしの既存イベントは従来どおり読める（後方互換）。
     if !column_exists(conn, "events", "attachments_json")? {
@@ -798,6 +856,121 @@ impl Store {
         )?;
         tx.commit()?;
         Ok(seq)
+    }
+
+    /// background result と provenance を 1 transaction で Settled event にする。
+    /// provenance の無い結果 event を新規生成する口は core へ出さない。
+    pub fn append_settled(
+        &self,
+        place: PlaceId,
+        subject: SubjectId,
+        content: &str,
+        provenance: &SettledProvenance,
+        now: i64,
+    ) -> Result<Seq> {
+        let mut c = self.c();
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if provenance.origin_to_inclusive < provenance.origin_from_exclusive {
+            return Err(rusqlite::Error::ToSqlConversionFailure(
+                "settled origin range is reversed".into(),
+            ));
+        }
+        let stored: BackgroundProvenance = tx.query_row(
+            "SELECT origin_from_exclusive,origin_to_inclusive,origin_standing,accepted_tool_name,accepted_tool_args_json
+             FROM activities
+             WHERE id=?1 AND place_id=?2 AND subject_id=?3 AND kind='background' AND ended_at IS NOT NULL
+               AND origin_from_exclusive IS NOT NULL AND origin_to_inclusive IS NOT NULL
+               AND origin_standing IS NOT NULL AND accepted_tool_name IS NOT NULL
+               AND accepted_tool_args_json IS NOT NULL",
+            params![provenance.activity, place, subject],
+            |r| {
+                let standing: String = r.get(2)?;
+                let args: String = r.get(4)?;
+                Ok(BackgroundProvenance {
+                    origin_from_exclusive: r.get(0)?,
+                    origin_to_inclusive: r.get(1)?,
+                    origin_standing: standing_from(&standing)?,
+                    tool_name: r.get(3)?,
+                    tool_args: json_value_from(&args, "activity tool args")?,
+                })
+            },
+        )?;
+        let expected = BackgroundProvenance {
+            origin_from_exclusive: provenance.origin_from_exclusive,
+            origin_to_inclusive: provenance.origin_to_inclusive,
+            origin_standing: provenance.origin_standing,
+            tool_name: provenance.tool_name.clone(),
+            tool_args: provenance.tool_args.clone(),
+        };
+        if stored != expected {
+            return Err(rusqlite::Error::ToSqlConversionFailure(
+                "settled provenance does not match its activity".into(),
+            ));
+        }
+        let seq: Seq = tx.query_row(
+            "SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE place_id=?1",
+            params![place],
+            |r| r.get(0),
+        )?;
+        let args_json = serde_json::to_string(&provenance.tool_args)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        let reply_to = if provenance.origin_to_inclusive == provenance.origin_from_exclusive {
+            None
+        } else {
+            Some(
+                provenance
+                    .origin_from_exclusive
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        rusqlite::Error::ToSqlConversionFailure(
+                            "origin range start overflow".into(),
+                        )
+                    })?,
+            )
+        };
+        tx.execute(
+            "INSERT INTO events(place_id,seq,kind,author_subject_id,author_external_id,content_json,mentions_json,reply_to_seq,target_seq,for_subject_id,created_at,attachments_json)
+             VALUES(?1,?2,'settled',NULL,NULL,?3,'[]',?4,NULL,?5,?6,'[]')",
+            params![
+                place,
+                seq,
+                content_to_json(&Content::text(content)),
+                reply_to,
+                subject,
+                now,
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO settled_provenance(place_id,seq,activity_id,origin_from_exclusive,origin_to_inclusive,origin_standing,accepted_tool_name,accepted_tool_args_json)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![
+                place,
+                seq,
+                provenance.activity,
+                provenance.origin_from_exclusive,
+                provenance.origin_to_inclusive,
+                standing_str(provenance.origin_standing),
+                provenance.tool_name,
+                args_json,
+            ],
+        )?;
+        tx.commit()?;
+        Ok(seq)
+    }
+
+    pub fn settled_provenance(
+        &self,
+        place: PlaceId,
+        seq: Seq,
+    ) -> Result<Option<SettledProvenance>> {
+        self.c()
+            .query_row(
+                "SELECT activity_id,origin_from_exclusive,origin_to_inclusive,origin_standing,accepted_tool_name,accepted_tool_args_json
+                 FROM settled_provenance WHERE place_id=?1 AND seq=?2",
+                params![place, seq],
+                map_settled_provenance,
+            )
+            .optional()
     }
 
     /// 外界識別子つきの出来事を、**1 トランザクションで**畳み・採番・追記・ref(in) 記録まで行う（詳細§04）。
@@ -1120,11 +1293,57 @@ impl Store {
         started_at: i64,
         detached_from: Option<ActivityId>,
     ) -> Result<ActivityId> {
+        self.start_activity_with_provenance(
+            place,
+            subject,
+            kind,
+            label,
+            deadline_at,
+            started_at,
+            detached_from,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_activity_with_provenance(
+        &self,
+        place: PlaceId,
+        subject: SubjectId,
+        kind: ActivityKindTag,
+        label: Option<&str>,
+        deadline_at: i64,
+        started_at: i64,
+        detached_from: Option<ActivityId>,
+        provenance: Option<&BackgroundProvenance>,
+    ) -> Result<ActivityId> {
+        if provenance.is_some_and(|p| p.origin_to_inclusive < p.origin_from_exclusive) {
+            return Err(rusqlite::Error::ToSqlConversionFailure(
+                "activity origin range is reversed".into(),
+            ));
+        }
         let c = self.c();
+        let args_json = provenance
+            .map(|p| serde_json::to_string(&p.tool_args))
+            .transpose()
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
         c.execute(
-            "INSERT INTO activities(place_id,subject_id,kind,label,deadline_at,started_at,detached_from)
-             VALUES(?1,?2,?3,?4,?5,?6,?7)",
-            params![place, subject, atag_str(kind), label, deadline_at, started_at, detached_from],
+            "INSERT INTO activities(place_id,subject_id,kind,label,deadline_at,started_at,detached_from,origin_from_exclusive,origin_to_inclusive,origin_standing,accepted_tool_name,accepted_tool_args_json)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            params![
+                place,
+                subject,
+                atag_str(kind),
+                label,
+                deadline_at,
+                started_at,
+                detached_from,
+                provenance.map(|p| p.origin_from_exclusive),
+                provenance.map(|p| p.origin_to_inclusive),
+                provenance.map(|p| standing_str(p.origin_standing)),
+                provenance.map(|p| p.tool_name.as_str()),
+                args_json,
+            ],
         )?;
         Ok(c.last_insert_rowid())
     }
@@ -1152,7 +1371,7 @@ impl Store {
     pub fn get_activity(&self, id: ActivityId) -> Result<Option<ActivityRow>> {
         self.c()
             .query_row(
-                "SELECT id,place_id,subject_id,kind,label,deadline_at,started_at,ended_at,end_reason,detached_from
+                "SELECT id,place_id,subject_id,kind,label,deadline_at,started_at,ended_at,end_reason,detached_from,origin_from_exclusive,origin_to_inclusive,origin_standing,accepted_tool_name,accepted_tool_args_json
                  FROM activities WHERE id=?1",
                 params![id],
                 map_activity,
@@ -1163,7 +1382,7 @@ impl Store {
     pub fn all_activities(&self) -> Result<Vec<ActivityRow>> {
         let c = self.c();
         let mut stmt = c.prepare(
-            "SELECT id,place_id,subject_id,kind,label,deadline_at,started_at,ended_at,end_reason,detached_from
+            "SELECT id,place_id,subject_id,kind,label,deadline_at,started_at,ended_at,end_reason,detached_from,origin_from_exclusive,origin_to_inclusive,origin_standing,accepted_tool_name,accepted_tool_args_json
              FROM activities ORDER BY id",
         )?;
         let rows = stmt
@@ -1175,7 +1394,7 @@ impl Store {
     pub fn running_activities(&self) -> Result<Vec<ActivityRow>> {
         let c = self.c();
         let mut stmt = c.prepare(
-            "SELECT id,place_id,subject_id,kind,label,deadline_at,started_at,ended_at,end_reason,detached_from
+            "SELECT id,place_id,subject_id,kind,label,deadline_at,started_at,ended_at,end_reason,detached_from,origin_from_exclusive,origin_to_inclusive,origin_standing,accepted_tool_name,accepted_tool_args_json
              FROM activities WHERE ended_at IS NULL ORDER BY id",
         )?;
         let rows = stmt
@@ -1900,6 +2119,30 @@ fn map_offload(r: &rusqlite::Row<'_>) -> rusqlite::Result<OffloadRow> {
 }
 
 fn map_activity(r: &rusqlite::Row<'_>) -> rusqlite::Result<ActivityRow> {
+    let origin_from_exclusive: Option<Seq> = r.get(10)?;
+    let origin_to_inclusive: Option<Seq> = r.get(11)?;
+    let origin_standing: Option<String> = r.get(12)?;
+    let tool_name: Option<String> = r.get(13)?;
+    let tool_args_json: Option<String> = r.get(14)?;
+    let provenance = match (
+        origin_from_exclusive,
+        origin_to_inclusive,
+        origin_standing,
+        tool_name,
+        tool_args_json,
+    ) {
+        (None, None, None, None, None) => None,
+        (Some(from), Some(to), Some(standing), Some(name), Some(args)) => {
+            Some(BackgroundProvenance {
+                origin_from_exclusive: from,
+                origin_to_inclusive: to,
+                origin_standing: standing_from(&standing)?,
+                tool_name: name,
+                tool_args: json_value_from(&args, "accepted tool args")?,
+            })
+        }
+        _ => return Err(decode_err("activity provenance", "partial row")),
+    };
     Ok(ActivityRow {
         id: r.get(0)?,
         place: r.get(1)?,
@@ -1911,6 +2154,30 @@ fn map_activity(r: &rusqlite::Row<'_>) -> rusqlite::Result<ActivityRow> {
         ended_at: r.get(7)?,
         end_reason: r.get(8)?,
         detached_from: r.get(9)?,
+        provenance,
+    })
+}
+
+fn map_settled_provenance(r: &rusqlite::Row<'_>) -> rusqlite::Result<SettledProvenance> {
+    let standing: String = r.get(3)?;
+    let args: String = r.get(5)?;
+    Ok(SettledProvenance {
+        activity: r.get(0)?,
+        origin_from_exclusive: r.get(1)?,
+        origin_to_inclusive: r.get(2)?,
+        origin_standing: standing_from(&standing)?,
+        tool_name: r.get(4)?,
+        tool_args: json_value_from(&args, "settled tool args")?,
+    })
+}
+
+fn json_value_from(json: &str, what: &str) -> rusqlite::Result<serde_json::Value> {
+    serde_json::from_str(json).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            format!("invalid {what}: {e}").into(),
+        )
     })
 }
 
@@ -2118,6 +2385,64 @@ mod tests {
         assert!(s.deliveries_for(p, seq2).unwrap().is_empty());
     }
 
+    #[test]
+    fn background_and_settled_provenance_roundtrip_typed_args_and_empty_range() {
+        let s = Store::new_in_memory().unwrap();
+        let place = s.create_place(Some("p"), None, "{}", None, 0).unwrap();
+        let subject = s
+            .create_subject(SubjectKind::Agent, "A", "A", "engine", Standing::Trusted, 0)
+            .unwrap();
+        let activity_provenance = BackgroundProvenance {
+            origin_from_exclusive: 0,
+            origin_to_inclusive: 0,
+            origin_standing: Standing::Owner,
+            tool_name: "synthetic-tool".into(),
+            tool_args: serde_json::json!({
+                "flag": true,
+                "count": 2,
+                "items": ["a", "b"]
+            }),
+        };
+        let activity = s
+            .start_activity_with_provenance(
+                place,
+                subject,
+                ActivityKindTag::Background,
+                Some("synthetic-tool"),
+                10,
+                1,
+                None,
+                Some(&activity_provenance),
+            )
+            .unwrap();
+        assert!(s.end_activity(activity, "done", 2).unwrap());
+        assert_eq!(
+            s.get_activity(activity).unwrap().unwrap().provenance,
+            Some(activity_provenance.clone())
+        );
+
+        let settled_provenance = SettledProvenance {
+            activity,
+            origin_from_exclusive: activity_provenance.origin_from_exclusive,
+            origin_to_inclusive: activity_provenance.origin_to_inclusive,
+            origin_standing: activity_provenance.origin_standing,
+            tool_name: activity_provenance.tool_name.clone(),
+            tool_args: activity_provenance.tool_args.clone(),
+        };
+        let seq = s
+            .append_settled(place, subject, "synthetic result", &settled_provenance, 3)
+            .unwrap();
+        assert_eq!(
+            s.settled_provenance(place, seq).unwrap(),
+            Some(settled_provenance)
+        );
+        assert_eq!(
+            s.get_event(place, seq).unwrap().unwrap().reply_to,
+            None,
+            "empty origin range must not invent a reply target"
+        );
+    }
+
     // name/persona 分離の移行（統括裁定）。旧 DB（name 列なし）に name を足し、既存 persona からコピーする。
     // 冪等: 2 回目は列が既にあり、既に非空の name は上書きしない。
     #[test]
@@ -2135,7 +2460,9 @@ mod tests {
              );
              CREATE TABLE turn_records(id INTEGER PRIMARY KEY, withheld_text TEXT, tool_lines TEXT);
              -- 旧 events（attachments_json が無い）。migrate が列を足す（本番は SCHEMA が先に作る）。
-             CREATE TABLE events(place_id INTEGER NOT NULL, seq INTEGER NOT NULL, PRIMARY KEY(place_id, seq));",
+             CREATE TABLE events(place_id INTEGER NOT NULL, seq INTEGER NOT NULL, PRIMARY KEY(place_id, seq));
+             -- 旧 activities（provenance 列が無い）。
+             CREATE TABLE activities(id INTEGER PRIMARY KEY);",
         )
         .unwrap();
         conn.execute(
@@ -2159,6 +2486,10 @@ mod tests {
         assert!(
             column_exists(&conn, "subjects", "name").unwrap(),
             "name 列が足される"
+        );
+        assert!(
+            column_exists(&conn, "activities", "accepted_tool_args_json").unwrap(),
+            "activity provenance 列が足される"
         );
         let name: String = conn
             .query_row("SELECT name FROM subjects WHERE id=1", [], |r| r.get(0))

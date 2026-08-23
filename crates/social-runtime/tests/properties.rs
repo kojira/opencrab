@@ -999,6 +999,95 @@ async fn large_result_is_offloaded_and_read_back_by_bg_read() {
     );
 }
 
+// #750 R2: native tool の background provenance は owner standing を保持し、settled turn はその
+// standing を継承する。OwnerFollowUp 専用の core-allow-command が第 2 turn でも認可されることで固定する。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn native_settled_turn_inherits_owner_standing_and_pairs_call_with_result() {
+    let h = build(Config::default());
+    let agent = h
+        .sys
+        .create_subject(SubjectKind::Agent, "Agent", "Agent", Standing::Trusted);
+    let owner = h
+        .sys
+        .create_subject(SubjectKind::Human, "Owner", "Owner", Standing::Owner);
+    let place = h.sys.create_place(
+        None,
+        None,
+        &Policy::immediate_on(&[Property::Direct]).with_default(agent),
+        None,
+    );
+    h.sys.join(place, agent, Role::Participant);
+    h.sys.join(place, owner, Role::Participant);
+    h.host
+        .set_immediate("synthetic-native", "synthetic native result");
+    h.eng.push(
+        Step::done().with_tool_args("synthetic-native", serde_json::json!({"mode": "bounded"})),
+    );
+    h.eng.push(Step::done().with_tool_args(
+        "core-allow-command",
+        serde_json::json!({"command": "synthetic-command"}),
+    ));
+
+    h.sys
+        .deliver(place, Incoming::said(owner, "synthetic owner request"))
+        .unwrap();
+    settle().await;
+
+    let activity = h
+        .sys
+        .store()
+        .all_activities()
+        .unwrap()
+        .into_iter()
+        .find(|activity| activity.kind == ActivityKindTag::Background)
+        .expect("background activity");
+    let activity_provenance = activity.provenance.expect("activity provenance");
+    assert_eq!(activity_provenance.origin_standing, Standing::Owner);
+    assert_eq!(activity_provenance.origin_from_exclusive, 0);
+    assert_eq!(activity_provenance.origin_to_inclusive, 1);
+    assert_eq!(activity_provenance.tool_name, "synthetic-native");
+    assert_eq!(
+        activity_provenance.tool_args,
+        serde_json::json!({"mode": "bounded"})
+    );
+
+    assert!(
+        h.sys
+            .store()
+            .subject_allows_command(agent, "synthetic-command")
+            .unwrap(),
+        "settled turn inherits OwnerFollowUp and can use the owner-only tool"
+    );
+    let latest = h.sys.store().latest_seq(place).unwrap();
+    let settled = h
+        .sys
+        .store()
+        .read_range(place, 0, latest)
+        .unwrap()
+        .into_iter()
+        .find(|event| event.kind == EventKind::Settled)
+        .expect("settled event");
+    let settled_provenance = h
+        .sys
+        .store()
+        .settled_provenance(place, settled.seq)
+        .unwrap()
+        .expect("settled provenance");
+    assert_eq!(settled_provenance.activity, activity.id);
+    assert_eq!(settled_provenance.origin_standing, Standing::Owner);
+
+    let contexts = h.eng.contexts();
+    assert_eq!(contexts.len(), 2, "origin and settled turns");
+    let follow_up = &contexts[1];
+    assert!(follow_up.contains("synthetic owner request"), "{follow_up}");
+    assert!(
+        follow_up.contains("受理ツール: synthetic-native args={\"mode\":\"bounded\"}")
+            && follow_up.contains("結果:")
+            && follow_up.contains("synthetic native result"),
+        "native call/result correspondence is rendered: {follow_up}"
+    );
+}
+
 // 14. サブの場が親と同じことをできる（子の場が自分で起き、孫を作る）。
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn sub_place_wakes_itself_and_creates_grandchild() {
