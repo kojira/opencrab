@@ -817,6 +817,7 @@ name = "opencrab-app"
 version = "0.2.17"
 dependencies = [
  "async-trait",
+ "base64",
  "futures-util",
  "libc",
  "opencrab-nostr-gate",
@@ -826,12 +827,14 @@ dependencies = [
  "opencrab-store",
  "rcgen",
  "reqwest",
+ "ring",
  "rustls",
  "serde_json",
  "tempfile",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
+ "zeroize",
 ]
 
 [[package]]
@@ -903,6 +906,8 @@ dependencies = [
  "opencrab-port",
  "rusqlite",
  "serde_json",
+ "sha1",
+ "sha2",
 ]
 
 [[package]]

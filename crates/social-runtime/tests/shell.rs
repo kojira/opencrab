@@ -115,6 +115,7 @@ fn inbound(author_external: &str, text: &str, nonce: &str) -> GateEvent {
         target: None,
         origin: Some(format!("note-{nonce}")),
         attachments: vec![],
+        discovery: None,
     }
 }
 

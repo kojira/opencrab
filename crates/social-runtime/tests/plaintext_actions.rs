@@ -150,6 +150,7 @@ fn inbound(address: &str, author: &str, text: &str, origin: &str) -> GateEvent {
         target: None,
         origin: Some(origin.into()),
         attachments: vec![],
+        discovery: None,
     }
 }
 

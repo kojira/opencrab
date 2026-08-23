@@ -157,7 +157,7 @@ fn gate(
 fn bind(h: &Harness, place: PlaceId, spec: GateSpec, address: &str) {
     let name = spec.name.clone();
     h.sys.register_gate(spec).unwrap();
-    h.sys.store().add_channel(place, &name, address).unwrap();
+    h.sys.provision_channel(place, name.as_str(), address);
 }
 
 fn inbound(address: &str, author: &str, text: &str, origin: &str) -> GateEvent {
@@ -172,6 +172,7 @@ fn inbound(address: &str, author: &str, text: &str, origin: &str) -> GateEvent {
         target: None,
         origin: Some(origin.into()),
         attachments: vec![],
+        discovery: None,
     }
 }
 

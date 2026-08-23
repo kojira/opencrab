@@ -8,8 +8,8 @@
 
 use opencrab_port::*;
 use opencrab_social_runtime::{
-    EventReject, HelloReject, ReadEvent, ReadPage, ReadReject, System, PROTOCOL_VERSION,
-    READ_LIMIT_MAX,
+    EventReject, HelloReject, ReadEvent, ReadPage, ReadReject, System, PROTOCOL_V2,
+    PROTOCOL_VERSION, READ_LIMIT_MAX,
 };
 use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -72,8 +72,9 @@ impl WireErr {
 
 /// 1 つのプラグイン接続。線への書き出しと、core→plugin 要求の応答待ちを持つ。
 struct Conn {
-    /// 名乗りが通った後のゲート名。
-    gate: Mutex<Option<GateName>>,
+    /// Canonical kind/instance/revision/epoch after hello.
+    gate: Mutex<Option<GateConnection>>,
+    active: Mutex<bool>,
     /// 線へ書き出す 1 行（末尾改行なし）。writer タスクが受け取って改行を付けて流す。
     out: mpsc::UnboundedSender<String>,
     /// core→plugin の要求の応答待ち（id → 待ち手）。応答が来たら外す。
@@ -127,9 +128,9 @@ impl Drop for PendingGuard {
 struct PlugdInner {
     sys: OnceLock<System>,
     /// 接続中のゲート名 → 接続。名乗りが通ってからここに入る。
-    conns: Mutex<HashMap<GateName, Arc<Conn>>>,
-    /// ツール名 → ゲート名（ツール呼び出しの宛先を引く）。
-    tools: Mutex<HashMap<String, GateName>>,
+    conns: Mutex<HashMap<GateInstanceId, Arc<Conn>>>,
+    /// ツール名 → instance（route-selected operations may bypass this compatibility index）。
+    tools: Mutex<HashMap<String, GateInstanceId>>,
 }
 
 /// core と線の間を繋ぐハブ。`Transport`・`Notifier`・`ToolHost` を実装し、core に差し込む。
@@ -161,7 +162,26 @@ impl Plugd {
     }
 
     fn conn_for_gate(&self, gate: &GateName) -> Option<Arc<Conn>> {
-        self.0.conns.lock().unwrap().get(gate).cloned()
+        let matches: Vec<_> = self
+            .0
+            .conns
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|conn| {
+                conn.gate
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|active| active.spec.kind_id == *gate)
+            })
+            .cloned()
+            .collect();
+        (matches.len() == 1).then(|| matches[0].clone())
+    }
+
+    fn conn_for_instance(&self, instance: &GateInstanceId) -> Option<Arc<Conn>> {
+        self.0.conns.lock().unwrap().get(instance).cloned()
     }
 
     /// 1 本の接続を回す。線を割り当てた運び方（子プロセス・ソケット・duplex）は問わない（§00）。
@@ -174,6 +194,7 @@ impl Plugd {
         let (out_tx, out_rx) = mpsc::unbounded_channel::<String>();
         let conn = Arc::new(Conn {
             gate: Mutex::new(None),
+            active: Mutex::new(false),
             out: out_tx,
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
@@ -235,19 +256,24 @@ impl Plugd {
                 match self.handle_hello(&conn, obj) {
                     Ok(gate) => {
                         *conn.gate.lock().unwrap() = Some(gate.clone());
+                        *conn.active.lock().unwrap() =
+                            gate.spec.ingress_discovery == IngressDiscovery::Prebound;
                         self.0
                             .conns
                             .lock()
                             .unwrap()
-                            .insert(gate.clone(), conn.clone());
+                            .insert(gate.instance_id.clone(), conn.clone());
                         ready = true;
                         // （再）接続したので、このゲートに結ばれている場を core に結び直させる（プロトコル§08）。
                         // 接続イベントで駆動する（ポーリングしない）ので、繋ぎ直しを取りこぼさない。
                         // conns へ入れた後に起こすこと——rebind の bind 要求は conn を引いて送るため。
-                        let sys = self.sys().clone();
-                        tokio::spawn(async move {
-                            sys.rebind_gate(&gate).await;
-                        });
+                        if gate.spec.ingress_discovery == IngressDiscovery::Prebound {
+                            let sys = self.sys().clone();
+                            let kind = gate.spec.kind_id.clone();
+                            tokio::spawn(async move {
+                                sys.rebind_gate(&kind).await;
+                            });
+                        }
                     }
                     // 名乗りが落ちた → err を返して切断（§01/§02）。
                     Err((id, e)) => {
@@ -265,8 +291,31 @@ impl Plugd {
                 .map(|s| s.to_string());
             match obj.get("m").and_then(|x| x.as_str()) {
                 Some("hello") => break, // 二度目の名乗り → 切断（§02）
+                Some("ready") => {
+                    let id = id.unwrap_or_default();
+                    match self.handle_ready(&conn, obj) {
+                        Ok(()) => conn.send_line(&serde_json::json!({"id":id,"ok":{}})),
+                        Err(e) => conn.send_line(&e.to_json(&id)),
+                    }
+                }
+                Some("failed") => {
+                    let id = id.unwrap_or_default();
+                    let code = obj
+                        .get("code")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("unknown");
+                    if let Some(gate) = conn.gate.lock().unwrap().clone() {
+                        let _ = self.sys().fail_gate_connection(&gate, code);
+                    }
+                    conn.send_line(&serde_json::json!({"id":id,"ok":{}}));
+                    break;
+                }
                 Some("event") => {
                     let id = id.unwrap_or_default();
+                    if !*conn.active.lock().unwrap() {
+                        conn.send_line(&WireErr::new("instance_not_ready").to_json(&id));
+                        continue;
+                    }
                     match self.handle_event(&conn, obj) {
                         // 着火の元栓で捨てた出来事は seq を持たない（DESIGN-attention §1）。ack は返すが
                         // （ゲートは待たない）、seq は null——記録も採番もされていない（誰も観測できなくてよい）。
@@ -336,7 +385,7 @@ impl Plugd {
         &self,
         conn: &Conn,
         obj: &serde_json::Map<String, serde_json::Value>,
-    ) -> Result<GateName, (String, WireErr)> {
+    ) -> Result<GateConnection, (String, WireErr)> {
         let id = obj
             .get("id")
             .and_then(|x| x.as_str())
@@ -344,8 +393,12 @@ impl Plugd {
             .to_string();
         let mkerr = |e: WireErr| (id.clone(), e);
 
-        // 知らない欄を弾く（§00）。
-        const ALLOWED: &[&str] = &[
+        let protocol = obj
+            .get("protocol")
+            .and_then(|x| x.as_u64())
+            .ok_or_else(|| mkerr(WireErr::at("missing_field", "hello.protocol")))?
+            as u32;
+        let allowed_v1 = [
             "id",
             "m",
             "protocol",
@@ -356,20 +409,80 @@ impl Plugd {
             "capabilities",
             "actions",
         ];
-        if let Some(bad) = unknown_field(obj, ALLOWED) {
+        let allowed_v2 = [
+            "id",
+            "m",
+            "protocol",
+            "kind_id",
+            "instance_id",
+            "revision",
+            "origin_scope",
+            "address_form",
+            "ingress_discovery",
+            "tools",
+            "effects",
+            "capabilities",
+            "actions",
+        ];
+        let allowed = match protocol {
+            PROTOCOL_VERSION => &allowed_v1[..],
+            PROTOCOL_V2 => &allowed_v2[..],
+            _ => return Err(mkerr(WireErr::new("protocol_unsupported"))),
+        };
+        if let Some(bad) = unknown_field(obj, allowed) {
             return Err(mkerr(WireErr::at("unknown_field", &format!("hello.{bad}"))));
         }
 
-        let protocol = obj
-            .get("protocol")
-            .and_then(|x| x.as_u64())
-            .ok_or_else(|| mkerr(WireErr::at("missing_field", "hello.protocol")))?
-            as u32;
-        let name = obj
-            .get("name")
+        let kind_text = obj
+            .get(if protocol == PROTOCOL_VERSION {
+                "name"
+            } else {
+                "kind_id"
+            })
             .and_then(|x| x.as_str())
-            .ok_or_else(|| mkerr(WireErr::at("missing_field", "hello.name")))?
-            .to_string();
+            .ok_or_else(|| {
+                mkerr(WireErr::at(
+                    "missing_field",
+                    if protocol == PROTOCOL_VERSION {
+                        "hello.name"
+                    } else {
+                        "hello.kind_id"
+                    },
+                ))
+            })?;
+        let kind = GateKindId::parse(kind_text.to_string())
+            .map_err(|_| mkerr(WireErr::at("bad_kind_id", "hello.kind_id")))?;
+        let (provided_instance, revision, origin_scope, ingress_discovery) =
+            if protocol == PROTOCOL_VERSION {
+                (
+                    None,
+                    1_u64,
+                    OriginScope::Instance,
+                    IngressDiscovery::Prebound,
+                )
+            } else {
+                let instance = obj
+                    .get("instance_id")
+                    .and_then(|x| x.as_str())
+                    .ok_or_else(|| mkerr(WireErr::at("missing_field", "hello.instance_id")))?;
+                let instance = GateInstanceId::parse(instance.to_string())
+                    .map_err(|_| mkerr(WireErr::at("bad_instance_id", "hello.instance_id")))?;
+                let revision = obj
+                    .get("revision")
+                    .and_then(|x| x.as_u64())
+                    .ok_or_else(|| mkerr(WireErr::at("missing_field", "hello.revision")))?;
+                let origin_scope = obj
+                    .get("origin_scope")
+                    .and_then(|x| x.as_str())
+                    .and_then(OriginScope::from_wire)
+                    .ok_or_else(|| mkerr(WireErr::at("unknown_enum", "hello.origin_scope")))?;
+                let discovery = obj
+                    .get("ingress_discovery")
+                    .and_then(|x| x.as_str())
+                    .and_then(IngressDiscovery::from_wire)
+                    .ok_or_else(|| mkerr(WireErr::at("unknown_enum", "hello.ingress_discovery")))?;
+                (Some(instance), revision, origin_scope, discovery)
+            };
         let address_form = obj
             .get("address_form")
             .and_then(|x| x.as_str())
@@ -402,20 +515,31 @@ impl Plugd {
             }
         }
 
-        let gate = GateName::new(name);
-        let spec = GateSpec {
-            name: gate.clone(),
-            protocol,
+        // v1 compatibility lookup is deliberately read-only and happens only after the
+        // complete wire payload has been validated. A valid hello for an unconfigured gate
+        // fails loudly; the connection path never seeds or repairs instances.
+        let instance = match provided_instance {
+            Some(instance) => instance,
+            None => self
+                .sys()
+                .store()
+                .compatibility_instance(&kind)
+                .map_err(|_| mkerr(WireErr::new("store_error")))?
+                .ok_or_else(|| mkerr(WireErr::new("instance_unknown")))?,
+        };
+
+        let spec = GateKindSpec {
+            kind_id: kind.clone(),
+            origin_scope,
             address_form,
+            ingress_discovery,
             tools: tools.clone(),
             effects,
             capabilities,
             actions,
         };
-        // core の判定（版・名前衝突・ツール名衝突）。ゲートの名前で分岐しない（§02）。
-        // ツール名衝突で 2 本目を拒否したとき、1 本目の名乗りとツールはそのまま生き残る。
-        match self.sys().register_gate(spec) {
-            Ok(()) => {}
+        let connection = match self.sys().start_gate_connection(instance, revision, spec) {
+            Ok(connection) => connection,
             Err(HelloReject::ProtocolUnsupported) => {
                 return Err(mkerr(WireErr::new("protocol_unsupported")))
             }
@@ -426,16 +550,63 @@ impl Plugd {
             Err(HelloReject::ActionToolCollision) => {
                 return Err(mkerr(WireErr::new("action_tool_collision")))
             }
-        }
-        // ツール名 → ゲート名を控える（呼び出しの宛先に使う）。
+            Err(HelloReject::InstanceTaken) if protocol == PROTOCOL_VERSION => {
+                return Err(mkerr(WireErr::new("name_taken")))
+            }
+            Err(HelloReject::InstanceTaken) => return Err(mkerr(WireErr::new("instance_active"))),
+            Err(HelloReject::KindSpecMismatch) => {
+                return Err(mkerr(WireErr::new("kind_spec_mismatch")))
+            }
+            Err(HelloReject::InstanceUnknown) => {
+                return Err(mkerr(WireErr::new("instance_unknown")))
+            }
+            Err(HelloReject::RevisionMismatch) => {
+                return Err(mkerr(WireErr::new("revision_mismatch")))
+            }
+        };
         {
             let mut map = self.0.tools.lock().unwrap();
             for t in &tools {
-                map.insert(t.name.clone(), gate.clone());
+                map.insert(t.name.clone(), connection.instance_id.clone());
             }
         }
-        conn.send_line(&serde_json::json!({"id": id, "ok": {"protocol": PROTOCOL_VERSION}}));
-        Ok(gate)
+        if protocol == PROTOCOL_VERSION {
+            self.sys()
+                .ready_gate_connection(&connection)
+                .map_err(|_| mkerr(WireErr::new("store_error")))?;
+            conn.send_line(&serde_json::json!({"id": id, "ok": {"protocol": PROTOCOL_VERSION}}));
+        } else {
+            conn.send_line(&serde_json::json!({"id": id, "ok": {"protocol": PROTOCOL_V2, "connection_epoch": connection.connection_epoch}}));
+        }
+        Ok(connection)
+    }
+
+    fn handle_ready(
+        &self,
+        conn: &Conn,
+        obj: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), WireErr> {
+        if let Some(bad) = unknown_field(obj, &["id", "m", "connection_epoch"]) {
+            return Err(WireErr::at("unknown_field", &format!("ready.{bad}")));
+        }
+        let epoch = obj
+            .get("connection_epoch")
+            .and_then(|value| value.as_u64())
+            .ok_or_else(|| WireErr::at("missing_field", "ready.connection_epoch"))?;
+        let connection = conn
+            .gate
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| WireErr::new("not_ready"))?;
+        if connection.connection_epoch != epoch {
+            return Err(WireErr::new("epoch_mismatch"));
+        }
+        self.sys()
+            .ready_gate_connection(&connection)
+            .map_err(|_| WireErr::new("store_error"))?;
+        *conn.active.lock().unwrap() = true;
+        Ok(())
     }
 
     /// event を GateEvent へ写して core へ渡す（プロトコル§03）。知らない欄・列挙値は err（§00）。
@@ -460,6 +631,7 @@ impl Plugd {
             "removed",
             "action",
             "attachments",
+            "discovery",
         ];
         if let Some(bad) = unknown_field(obj, ALLOWED) {
             return Err(WireErr::at("unknown_field", &format!("event.{bad}")));
@@ -581,6 +753,15 @@ impl Plugd {
             .unwrap()
             .clone()
             .ok_or_else(|| WireErr::new("not_ready"))?;
+        let discovery = match gate.spec.ingress_discovery {
+            IngressDiscovery::Prebound => {
+                if obj.contains_key("discovery") {
+                    return Err(WireErr::at("unknown_field", "event.discovery"));
+                }
+                None
+            }
+            IngressDiscovery::Membership => Some(parse_membership_discovery(obj)?),
+        };
         let ev = GateEvent {
             kind,
             address,
@@ -592,8 +773,9 @@ impl Plugd {
             target,
             origin,
             attachments,
+            discovery,
         };
-        match self.sys().deliver_event(&gate, ev) {
+        match self.sys().deliver_gate_event(&gate, ev) {
             // Some(seq)=追記/畳み・None=元栓で捨てた（DESIGN-attention §1・呼び手が seq null で ack）。
             Ok(outcome) => Ok(outcome),
             Err(EventReject::NotBound) => Err(WireErr::at("not_bound", "event.address")),
@@ -636,7 +818,13 @@ impl Plugd {
             .unwrap()
             .clone()
             .ok_or_else(|| WireErr::new("not_ready"))?;
-        match self.sys().read_log(&gate, &address, from, limit) {
+        if gate.spec.ingress_discovery == IngressDiscovery::Membership {
+            return Err(WireErr::at("membership_read_unsupported", "read"));
+        }
+        match self
+            .sys()
+            .read_log(&gate.spec.kind_id, &address, from, limit)
+        {
             Ok(page) => Ok(render_read_page(&page)),
             Err(ReadReject::NotBound) => Err(WireErr::at("not_bound", "read.address")),
             Err(ReadReject::Failed(m)) => Err(WireErr::at_detail("failed", "read", &m)),
@@ -646,10 +834,35 @@ impl Plugd {
     fn disconnect(&self, conn: &Conn) {
         let gate = conn.gate.lock().unwrap().clone();
         if let Some(g) = gate {
-            self.0.conns.lock().unwrap().remove(&g);
-            self.sys().unregister_gate(&g);
+            self.0.conns.lock().unwrap().remove(&g.instance_id);
+            let _ = self.sys().store().close_gate_connection(
+                &g.instance_id,
+                g.connection_epoch,
+                None,
+                0,
+            );
+            self.sys().unregister_gate_instance(&g.instance_id);
             let mut tools = self.0.tools.lock().unwrap();
-            tools.retain(|_, v| *v != g);
+            tools.retain(|_, v| *v != g.instance_id);
+            let remaining: Vec<_> = self.0.conns.lock().unwrap().values().cloned().collect();
+            for tool in &g.spec.tools {
+                if tools.contains_key(&tool.name) {
+                    continue;
+                }
+                if let Some(instance) = remaining.iter().find_map(|candidate| {
+                    let candidate = candidate.gate.lock().unwrap();
+                    candidate.as_ref().and_then(|candidate| {
+                        candidate
+                            .spec
+                            .tools
+                            .iter()
+                            .any(|other| other.name == tool.name)
+                            .then(|| candidate.instance_id.clone())
+                    })
+                }) {
+                    tools.insert(tool.name.clone(), instance);
+                }
+            }
         }
         // 未応答の待ち手は落ちる（oneshot が drop され、待っている Transport は失敗を受ける）。
         conn.pending.lock().unwrap().clear();
@@ -731,6 +944,62 @@ impl Transport for Plugd {
                 .map(|s| s.to_string()),
         })
     }
+
+    async fn bind_route(&self, route: &GateRoute) -> Result<(), TransportError> {
+        let mut req = serde_json::Map::new();
+        req.insert("m".into(), "bind".into());
+        req.insert("address".into(), route.address.clone().into());
+        self.request_ok_instance(&route.instance_id, req, BIND_TIMEOUT)
+            .await
+            .map(|_| ())
+    }
+
+    async fn unbind_route(&self, route: &GateRoute) -> Result<(), TransportError> {
+        let mut req = serde_json::Map::new();
+        req.insert("m".into(), "unbind".into());
+        req.insert("address".into(), route.address.clone().into());
+        self.request_ok_instance(&route.instance_id, req, BIND_TIMEOUT)
+            .await
+            .map(|_| ())
+    }
+
+    async fn deliver_effect_route(
+        &self,
+        route: &GateRoute,
+        effect: OutgoingEffect,
+    ) -> Result<DeliveryAck, TransportError> {
+        let mut payload = serde_json::Map::new();
+        if let Some(text) = &effect.text {
+            payload.insert("text".into(), text.clone().into());
+        }
+        if let Some(symbol) = &effect.symbol {
+            payload.insert("symbol".into(), symbol.clone().into());
+        }
+        let mut req = serde_json::Map::new();
+        req.insert("m".into(), "effect".into());
+        req.insert("address".into(), route.address.clone().into());
+        req.insert("kind".into(), effect.kind.as_wire().into());
+        req.insert("payload".into(), serde_json::Value::Object(payload));
+        if let Some(target) = &effect.target_origin {
+            req.insert("target".into(), target.clone().into());
+        }
+        if let Some(verb) = &effect.verb {
+            req.insert("verb".into(), verb.clone().into());
+        }
+        let ok = self
+            .request_ok_instance(&route.instance_id, req, EFFECT_TIMEOUT)
+            .await?;
+        Ok(DeliveryAck {
+            delivered: ok
+                .get("delivered")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
+            origin: ok
+                .get("origin")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+        })
+    }
 }
 
 impl Plugd {
@@ -756,12 +1025,73 @@ impl Plugd {
             }
         }
     }
+
+    async fn request_ok_instance(
+        &self,
+        instance: &GateInstanceId,
+        req: serde_json::Map<String, serde_json::Value>,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, TransportError> {
+        let conn = self
+            .conn_for_instance(instance)
+            .ok_or_else(|| TransportError(format!("gate instance not connected: {instance}")))?;
+        if !*conn.active.lock().unwrap() {
+            return Err(TransportError(format!(
+                "gate instance not ready: {instance}"
+            )));
+        }
+        let (id, rx) = conn.issue(req);
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(Ok(ok))) => Ok(ok),
+            Ok(Ok(Err(error))) => Err(TransportError(format!("err: {}", error.code))),
+            Ok(Err(_)) => Err(TransportError("connection dropped".into())),
+            Err(_) => {
+                conn.drop_pending(&id);
+                Err(TransportError("timed out".into()))
+            }
+        }
+    }
 }
 
 // ---- 活動の通知（core → plugin・応答なし・プロトコル§05）----
 
 impl Notifier for Plugd {
     fn notify(&self, n: Notice) {
+        let routed = match n.clone() {
+            Notice::RoutedActivityStarted {
+                route,
+                activity,
+                kind,
+                label,
+            } => {
+                let mut body = serde_json::json!({"m":"activity","address":route.address,"activity_id":activity.to_string(),"kind":atag_wire(kind),"state":"started"});
+                if let Some(label) = label {
+                    body["label"] = label.into();
+                }
+                Some((route.instance_id, body))
+            }
+            Notice::RoutedActivityProgress {
+                route,
+                activity,
+                label,
+            } => Some((
+                route.instance_id,
+                serde_json::json!({"m":"activity","address":route.address,"activity_id":activity.to_string(),"state":"progress","label":label}),
+            )),
+            Notice::RoutedActivityEnded { route, activity } => Some((
+                route.instance_id,
+                serde_json::json!({"m":"activity","address":route.address,"activity_id":activity.to_string(),"state":"ended"}),
+            )),
+            _ => None,
+        };
+        if let Some((instance, body)) = routed {
+            if let Some(conn) = self.conn_for_instance(&instance) {
+                if *conn.active.lock().unwrap() {
+                    conn.send_line(&body);
+                }
+            }
+            return;
+        }
         // 通知は応答しない。描く手段が無いゲートは無視してよい（§05）。
         // 効果の配送は Transport で行うので、ここでは扱わない。
         let (place, body): (PlaceId, serde_json::Value) = match n {
@@ -804,6 +1134,9 @@ impl Notifier for Plugd {
                 }),
             ),
             Notice::Effect { .. } => return, // 配送は Transport（§08）
+            Notice::RoutedActivityStarted { .. }
+            | Notice::RoutedActivityProgress { .. }
+            | Notice::RoutedActivityEnded { .. } => unreachable!(),
         };
         // 活動は場の全チャネルへ描く。住所を添える（§05 の例）。
         let channels = match self.sys().store().channels_for_place(place) {
@@ -825,7 +1158,7 @@ impl Notifier for Plugd {
 #[async_trait::async_trait]
 impl ToolHost for Plugd {
     async fn invoke(&self, call: &ToolCallSpec) -> Result<String, ToolError> {
-        let gate = self
+        let instance = self
             .0
             .tools
             .lock()
@@ -834,8 +1167,8 @@ impl ToolHost for Plugd {
             .cloned()
             .ok_or_else(|| ToolError(format!("no gate for tool: {}", call.name)))?;
         let conn = self
-            .conn_for_gate(&gate)
-            .ok_or_else(|| ToolError(format!("gate not connected: {gate}")))?;
+            .conn_for_instance(&instance)
+            .ok_or_else(|| ToolError(format!("gate instance not connected: {instance}")))?;
         let mut req = serde_json::Map::new();
         req.insert("m".into(), "tool".into());
         req.insert("name".into(), call.name.clone().into());
@@ -858,6 +1191,40 @@ impl ToolHost for Plugd {
                 .map(|s| s.to_string())
                 .ok_or_else(|| ToolError("tool ok lacks result".into())),
             Ok(Err(e)) => Err(ToolError(format!("tool err: {}", e.code))),
+            Err(_) => Err(ToolError("connection dropped".into())),
+        }
+    }
+
+    async fn invoke_route(
+        &self,
+        route: &GateRoute,
+        call: &ToolCallSpec,
+    ) -> Result<String, ToolError> {
+        let conn = self.conn_for_instance(&route.instance_id).ok_or_else(|| {
+            ToolError(format!(
+                "gate instance not connected: {}",
+                route.instance_id
+            ))
+        })?;
+        if !*conn.active.lock().unwrap() {
+            return Err(ToolError(format!(
+                "gate instance not ready: {}",
+                route.instance_id
+            )));
+        }
+        let mut req = serde_json::Map::new();
+        req.insert("m".into(), "tool".into());
+        req.insert("name".into(), call.name.clone().into());
+        req.insert("args".into(), call.args.clone());
+        let (id, rx) = conn.issue(req);
+        let _guard = PendingGuard { conn, id };
+        match rx.await {
+            Ok(Ok(ok)) => ok
+                .get("result")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+                .ok_or_else(|| ToolError("tool ok lacks result".into())),
+            Ok(Err(error)) => Err(ToolError(format!("tool err: {}", error.code))),
             Err(_) => Err(ToolError("connection dropped".into())),
         }
     }
@@ -1109,6 +1476,70 @@ fn parse_actions(
         });
     }
     Ok(out)
+}
+
+fn parse_membership_discovery(
+    event: &serde_json::Map<String, serde_json::Value>,
+) -> Result<MembershipDiscovery, WireErr> {
+    let discovery = event
+        .get("discovery")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| WireErr::at("missing_field", "event.discovery"))?;
+    if let Some(bad) = unknown_field(discovery, &["address_kind", "guild_id", "label"]) {
+        return Err(WireErr::at(
+            "unknown_field",
+            &format!("event.discovery.{bad}"),
+        ));
+    }
+    let kind = match discovery
+        .get("address_kind")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("guild") => AddressKind::Guild,
+        Some("dm") => AddressKind::Dm,
+        Some("thread") => AddressKind::Thread,
+        Some(other) => {
+            return Err(WireErr::at_detail(
+                "unknown_enum",
+                "event.discovery.address_kind",
+                other,
+            ))
+        }
+        None => return Err(WireErr::at("missing_field", "event.discovery.address_kind")),
+    };
+    let guild_id = match discovery.get("guild_id") {
+        None => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| WireErr::at("invalid_field", "event.discovery.guild_id"))?
+                .to_string(),
+        ),
+    };
+    match kind {
+        AddressKind::Guild if guild_id.is_none() => {
+            return Err(WireErr::at("missing_field", "event.discovery.guild_id"))
+        }
+        AddressKind::Dm | AddressKind::Thread if guild_id.is_some() => {
+            return Err(WireErr::at("unknown_field", "event.discovery.guild_id"))
+        }
+        _ => {}
+    }
+    let label = match discovery.get("label") {
+        None => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .ok_or_else(|| WireErr::at("invalid_field", "event.discovery.label"))?
+                .to_string(),
+        ),
+    };
+    Ok(MembershipDiscovery {
+        address_kind: kind,
+        guild_id,
+        label,
+    })
 }
 
 /// 外から届く出来事の種別だけを受ける（プロトコル§03）。効果の確定でログに載る種別は届かない。
