@@ -115,16 +115,6 @@ struct MigrationInstanceSet(Vec<MigrationInstance>);
 /// authority set: after this phase completes, `convert` reads the authoritative set back from
 /// `gate_instances` before assembling principals.
 pub trait MigrationInstanceAssembler {
-    /// Called after the immutable source connection is open and the final sidecar check succeeds,
-    /// immediately before the first SQLite read.
-    ///
-    /// Coordinators may use this notification to release resources that keep an immutable staged
-    /// snapshot stable during preflight. Filesystem changes after this point cannot join the
-    /// already-open immutable SQLite snapshot.
-    fn source_snapshot_verified(&self) -> Result<()> {
-        Ok(())
-    }
-
     fn assemble(&self, source: &Connection, target: &MigrationInstanceTarget<'_, '_>)
         -> Result<()>;
 }
@@ -182,6 +172,8 @@ pub struct ConvertOptions {
     ///
     /// The snapshot authority covers this one file only. A non-empty sibling `-wal`, `-shm`, or
     /// `-journal` sidecar makes the input invalid and is rejected before source rows are read.
+    /// The caller must keep the main file's bytes stable until [`convert`] returns. SQLite's
+    /// `immutable=1` mode does not pin unread pages when the connection is opened.
     pub source: PathBuf,
     pub target: PathBuf,
     /// Immutable TOML resource captured for this conversion run.
@@ -3479,6 +3471,12 @@ fn query_route_bindings(
     Ok(rows)
 }
 
+/// Converts one staged snapshot into a fresh target database.
+///
+/// The caller must keep `options.source`, `options.config`, and `options.environment` byte-stable
+/// until this function returns. In particular, opening the source with SQLite `immutable=1` does
+/// not release the caller from keeping the staged main database stable: SQLite may read previously
+/// unread pages at any point while the conversion is running.
 pub fn convert(
     options: ConvertOptions,
     instance_assembler: &dyn MigrationInstanceAssembler,
@@ -3500,7 +3498,6 @@ pub fn convert(
     // Check again at the read boundary so a sidecar introduced while the explicit config snapshot
     // was being loaded cannot silently change the SQLite snapshot after the main-file digest.
     reject_nonempty_sqlite_sidecars(&options.source)?;
-    instance_assembler.source_snapshot_verified()?;
     source.execute_batch("BEGIN")?;
     let agents = SourceTable::load_schema(&source, "agents")?;
     let model_pricing = SourceTable::load(&source, "model_pricing")?;
@@ -3685,6 +3682,12 @@ pub fn convert(
     }
     report.verify()?;
     source.execute_batch("ROLLBACK")?;
+    if digest_file(&options.source)? != source_database_digest {
+        return Err(ConverterError::SourceSnapshot(
+            "staged main database bytes changed during convert; the caller must keep the source byte-stable until convert returns"
+                .into(),
+        ));
+    }
     transaction.commit()?;
     Ok(ConvertOutcome { report })
 }

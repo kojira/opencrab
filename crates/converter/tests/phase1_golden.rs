@@ -5,7 +5,9 @@ use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 use std::fs::{File, FileTimes};
+use std::io::Write as _;
 use std::process::Command;
+use std::sync::mpsc;
 use std::time::{Duration, SystemTime};
 
 const FIXTURE_CAPTURED_AT: i64 = 1_770_000_000_123_456_789;
@@ -197,24 +199,20 @@ impl MigrationInstanceAssembler for FixtureInstanceAssembly {
     }
 }
 
-struct WalAfterSnapshotCheckAssembly {
+struct WalDuringAssembly {
     source: std::path::PathBuf,
     wal: Vec<u8>,
     shm: Vec<u8>,
 }
 
-impl MigrationInstanceAssembler for WalAfterSnapshotCheckAssembly {
-    fn source_snapshot_verified(&self) -> opencrab_converter::Result<()> {
-        std::fs::write(sqlite_sidecar_path(&self.source, "-wal"), &self.wal)?;
-        std::fs::write(sqlite_sidecar_path(&self.source, "-shm"), &self.shm)?;
-        Ok(())
-    }
-
+impl MigrationInstanceAssembler for WalDuringAssembly {
     fn assemble(
         &self,
         source: &Connection,
         target: &MigrationInstanceTarget<'_, '_>,
     ) -> opencrab_converter::Result<()> {
+        std::fs::write(sqlite_sidecar_path(&self.source, "-wal"), &self.wal)?;
+        std::fs::write(sqlite_sidecar_path(&self.source, "-shm"), &self.shm)?;
         FixtureInstanceAssembly.assemble(source, target)
     }
 }
@@ -797,7 +795,9 @@ fn public_convert_immutable_uri_ignores_wal_created_after_final_sidecar_check() 
     writer.execute_batch("PRAGMA wal_autocheckpoint=0").unwrap();
     writer
         .execute(
-            "UPDATE agents SET name='Synthetic WAL Only' WHERE agent_id='agent_alpha'",
+            "UPDATE discord_channel_config
+             SET heartbeat_instructions='Synthetic WAL Only'
+             WHERE agent_id='agent_alpha'",
             [],
         )
         .unwrap();
@@ -820,7 +820,7 @@ fn public_convert_immutable_uri_ignores_wal_created_after_final_sidecar_check() 
             environment,
             captured_at: FIXTURE_CAPTURED_AT,
         },
-        &WalAfterSnapshotCheckAssembly {
+        &WalDuringAssembly {
             source: staged.clone(),
             wal,
             shm,
@@ -846,12 +846,13 @@ fn public_convert_immutable_uri_ignores_wal_created_after_final_sidecar_check() 
     assert_eq!(
         target
             .query_row(
-                "SELECT display_name FROM subjects WHERE public_id='agent_alpha'",
+                "SELECT heartbeat_instructions FROM place_subject_policies
+                 WHERE subject_id=(SELECT id FROM subjects WHERE public_id='agent_alpha')",
                 [],
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-        "Synthetic Agent",
+        "subject instruction",
         "immutable=1 must keep digest-external WAL bytes out of converted rows"
     );
 
@@ -863,7 +864,8 @@ fn public_convert_immutable_uri_ignores_wal_created_after_final_sidecar_check() 
     assert_eq!(
         ordinary_read_only
             .query_row(
-                "SELECT name FROM agents WHERE agent_id='agent_alpha'",
+                "SELECT heartbeat_instructions FROM discord_channel_config
+                 WHERE agent_id='agent_alpha'",
                 [],
                 |row| row.get::<_, String>(0),
             )
@@ -872,6 +874,106 @@ fn public_convert_immutable_uri_ignores_wal_created_after_final_sidecar_check() 
         "the injected WAL must be valid and observable without immutable=1"
     );
     drop(writer);
+}
+
+#[test]
+fn public_convert_rejects_main_file_replaced_after_digest_before_first_read() {
+    let temporary = tempfile::tempdir().unwrap();
+    let staged = temporary.path().join("staged.db");
+    Connection::open(&staged)
+        .unwrap()
+        .execute_batch(include_str!("fixtures/phase1-dirty.sql"))
+        .unwrap();
+
+    let replacement = temporary.path().join("replacement.db");
+    std::fs::copy(&staged, &replacement).unwrap();
+    Connection::open(&replacement)
+        .unwrap()
+        .execute(
+            "UPDATE agents SET name='Synthetic Replacement' WHERE agent_id='agent_alpha'",
+            [],
+        )
+        .unwrap();
+
+    let config_fifo = temporary.path().join("snapshot-config.fifo");
+    let mkfifo = Command::new("mkfifo").arg(&config_fifo).output().unwrap();
+    assert!(
+        mkfifo.status.success(),
+        "mkfifo failed: {}",
+        String::from_utf8_lossy(&mkfifo.stderr)
+    );
+    let environment = temporary.path().join("snapshot.env");
+    std::fs::write(&environment, "").unwrap();
+    let target = temporary.path().join("target.db");
+
+    let conversion_source = staged.clone();
+    let conversion_target = target.clone();
+    let conversion_config = config_fifo.clone();
+    let conversion_environment = environment.clone();
+    let conversion = std::thread::spawn(move || {
+        convert(
+            ConvertOptions {
+                source: conversion_source,
+                target: conversion_target,
+                config: conversion_config,
+                environment: conversion_environment,
+                captured_at: FIXTURE_CAPTURED_AT,
+            },
+            &FixtureInstanceAssembly,
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+    });
+
+    // Opening the FIFO writer completes only after convert has digested the main file and opened
+    // the config for reading. Keeping the writer open blocks config loading, so replacing the main
+    // file here is deterministically after the digest and before the immutable open/first read.
+    let (writer_ready, writer_opened) = mpsc::sync_channel(1);
+    let fifo_writer = std::thread::spawn(move || {
+        writer_ready
+            .send(File::create(config_fifo).unwrap())
+            .unwrap();
+    });
+    let mut config_writer = writer_opened
+        .recv_timeout(Duration::from_secs(10))
+        .expect("convert did not reach config snapshot loading");
+    std::fs::copy(&replacement, &staged).unwrap();
+    config_writer.write_all(b"").unwrap();
+    drop(config_writer);
+    fifo_writer.join().unwrap();
+
+    let error = conversion
+        .join()
+        .unwrap()
+        .expect_err("changed main bytes must not produce a successful conversion");
+    assert!(
+        error.contains("staged main database bytes changed during convert"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        Connection::open(&staged)
+            .unwrap()
+            .query_row(
+                "SELECT name FROM agents WHERE agent_id='agent_alpha'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "Synthetic Replacement",
+        "the replacement must be a valid SQLite snapshot with different source rows"
+    );
+    assert_eq!(
+        Connection::open(target)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE name='subjects'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0,
+        "rows read under the old digest must not be committed"
+    );
 }
 
 fn run_cli_conversion(
