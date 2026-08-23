@@ -3202,6 +3202,31 @@ impl Store {
         Ok(rows)
     }
 
+    /// すべての場を id 昇順で返す（開いた場も閉じた場も。管理面の読み取り専用列挙・#767）。
+    /// セッション一覧はアーカイブ表示のため閉じた場も出すので `all_open_places` とは別に置く。
+    pub fn all_places(&self) -> Result<Vec<PlaceRow>> {
+        let c = self.c();
+        let mut stmt = c.prepare(
+            "SELECT id,address,parent_id,policy_json,inherit_from_place,inherit_up_to_seq,closed_at,close_reason
+             FROM places ORDER BY id",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(PlaceRow {
+                    id: r.get(0)?,
+                    address: r.get(1)?,
+                    parent_id: r.get(2)?,
+                    policy_json: r.get(3)?,
+                    inherit_from_place: r.get(4)?,
+                    inherit_up_to_seq: r.get(5)?,
+                    closed_at: r.get(6)?,
+                    close_reason: r.get(7)?,
+                })
+            })?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     // ---- events / log ----
 
     /// 追記の中で採番する（BEGIN IMMEDIATE 相当をトランザクションで）。seq は場ごとに 1 から単調増加。
@@ -3953,6 +3978,28 @@ impl Store {
                 },
             )
             .optional()
+    }
+
+    /// すべての主体を id 昇順で返す（管理面の読み取り専用列挙・#767）。判断はしない——
+    /// 呼び手（admin-server）が kind で絞り、旧ダッシュボードの JSON 形へ写す。
+    pub fn all_subjects(&self) -> Result<Vec<SubjectRow>> {
+        let c = self.c();
+        let mut stmt = c.prepare(
+            "SELECT id,kind,name,persona,turn_runner,standing FROM subjects ORDER BY id",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(SubjectRow {
+                    id: r.get(0)?,
+                    kind: kind_from(&r.get::<_, String>(1)?)?,
+                    name: r.get(2)?,
+                    persona: r.get(3)?,
+                    turn_runner: r.get(4)?,
+                    standing: standing_from(&r.get::<_, String>(5)?)?,
+                })
+            })?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     pub fn add_identity(&self, subject: SubjectId, gate: &GateName, external: &str) -> Result<()> {
