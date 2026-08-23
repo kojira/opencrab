@@ -115,6 +115,12 @@ async fn done_turn_persists_request_and_response() {
         "response に返答が入る: {}",
         log.response
     );
+    // usage は載せない（欠測）。0 埋めするとダッシュボードが「計測済みでゼロ」と誤読するため（#769 で実測）。
+    assert!(
+        !log.response.contains("usage"),
+        "usage は欠測（省略）: {}",
+        log.response
+    );
     assert_eq!(log.tool_calls, None);
 
     // turn 単位のドリルダウン（oc2 連結列）でも同じ 1 件。

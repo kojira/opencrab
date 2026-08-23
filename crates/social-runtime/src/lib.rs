@@ -305,9 +305,10 @@ fn push_history_messages(out: &mut Vec<serde_json::Value>, m: &Message) {
 }
 
 /// 推論が返したもの（`InferOutput`）を、ダッシュボードの ChatResponseSimple と同型の正規化 JSON へ写す
-/// （#766）。返り値は `(response_json, tool_calls_col)`——`response` は本文＋道具呼び出し＋finish_reason＋
-/// usage、`tool_calls` 列は道具呼び出しの配列（無ければ None・本体の列分離と同じ）。usage は provider の
-/// 実測が要るため 0（トークン列は別 issue）。
+/// （#766）。返り値は `(response_json, tool_calls_col)`——`response` は本文＋道具呼び出し＋finish_reason、
+/// `tool_calls` 列は道具呼び出しの配列（無ければ None・本体の列分離と同じ）。
+/// **`usage` は載せない（欠測）**——provider の wire usage が要るが現状の Engine seam に無い。0 を埋めると
+/// ダッシュボードが「計測済みでゼロ」と誤読するので、フィールド自体を省いて欠測扱いにする（#769 で実測を入れる）。
 fn build_response_json(o: &InferOutput) -> (String, Option<String>) {
     let content: String = o
         .effects
@@ -330,7 +331,6 @@ fn build_response_json(o: &InferOutput) -> (String, Option<String>) {
         "content": content,
         "tool_calls": calls,
         "finish_reason": finish_reason,
-        "usage": { "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0 },
     })
     .to_string();
     let tool_calls_col = if calls.is_empty() {
@@ -342,13 +342,12 @@ fn build_response_json(o: &InferOutput) -> (String, Option<String>) {
 }
 
 /// 失敗・アイドルの response 列（本文なし・finish_reason に理由）。ダッシュボードの ChatResponseSimple
-/// が壊れずに読める形を保つ。
+/// が壊れずに読める形を保つ。**`usage` は載せない（欠測）**——0 埋めは「計測済みでゼロ」と誤読される。
 fn empty_response_json(finish_reason: &str) -> String {
     serde_json::json!({
         "content": "",
         "tool_calls": [],
         "finish_reason": finish_reason,
-        "usage": { "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0 },
     })
     .to_string()
 }
