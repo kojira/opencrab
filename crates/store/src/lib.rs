@@ -1279,6 +1279,29 @@ fn normalize_create_table_sql(sql: &str) -> String {
     normalized.replacen("CREATE TABLE IF NOT EXISTS ", "CREATE TABLE ", 1)
 }
 
+/// Conservatively find an identifier in stored schema SQL. The legacy table name is ASCII, so an
+/// ASCII case-insensitive token scan covers quoted and unquoted spellings without trying to fully
+/// parse SQLite SQL. Treat non-ASCII bytes as identifier bytes so a longer Unicode identifier is
+/// never mistaken for the target. Matches in literals or comments are intentionally fail-loud.
+fn schema_sql_mentions_identifier(sql: &str, identifier: &str) -> bool {
+    fn is_identifier_byte(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$') || !byte.is_ascii()
+    }
+
+    let sql = sql.as_bytes();
+    let identifier = identifier.as_bytes();
+    if identifier.is_empty() || identifier.len() > sql.len() {
+        return false;
+    }
+
+    (0..=sql.len() - identifier.len()).any(|start| {
+        let end = start + identifier.len();
+        sql[start..end].eq_ignore_ascii_case(identifier)
+            && (start == 0 || !is_identifier_byte(sql[start - 1]))
+            && (end == sql.len() || !is_identifier_byte(sql[end]))
+    })
+}
+
 fn migrate_memberships(conn: &Connection) -> Result<()> {
     if !table_exists(conn, "memberships")? {
         return Ok(());
@@ -1341,29 +1364,42 @@ fn migrate_memberships(conn: &Connection) -> Result<()> {
             [],
             |row| row.get(0),
         )?;
-        let mut statement = conn.prepare(
-            "SELECT type,name,sql FROM sqlite_schema
-             WHERE tbl_name='memberships' AND name<>'memberships'
-             ORDER BY type,name",
-        )?;
-        let dependent_objects = statement
+        let mut statement =
+            conn.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name")?;
+        let schema_objects = statement
             .query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                 ))
             })?
             .collect::<Result<Vec<_>>>()?;
         drop(statement);
 
-        // The composite primary key creates this internal index. No explicit index, trigger, or
-        // other table-owned schema object was emitted by the legacy Store.
-        let expected_objects = vec![(
-            "index".to_string(),
-            "sqlite_autoindex_memberships_1".to_string(),
-            None,
-        )];
+        // Scan every stored schema statement, not only objects whose tbl_name is memberships:
+        // views and triggers on other tables retain their own tbl_name even when their SQL reads
+        // memberships. The known table statement and its internal primary-key index are the only
+        // allowed matches. The tbl_name check also fails loudly for an unexpected SQL-less object.
+        let dependent_objects = schema_objects
+            .iter()
+            .filter(|(object_type, name, tbl_name, sql)| {
+                let is_table =
+                    object_type == "table" && name == "memberships" && tbl_name == "memberships";
+                let is_primary_key_index = object_type == "index"
+                    && name == "sqlite_autoindex_memberships_1"
+                    && tbl_name == "memberships"
+                    && sql.is_none();
+                !is_table
+                    && !is_primary_key_index
+                    && (tbl_name == "memberships"
+                        || sql.as_deref().is_some_and(|statement| {
+                            schema_sql_mentions_identifier(statement, "memberships")
+                        }))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         let mut schema_mismatches = Vec::new();
         if normalize_create_table_sql(&table_sql)
             != normalize_create_table_sql(LEGACY_MEMBERSHIPS_CREATE_TABLE)
@@ -1371,9 +1407,9 @@ fn migrate_memberships(conn: &Connection) -> Result<()> {
             schema_mismatches
                 .push("sqlite_schema.sql does not match the known legacy CREATE TABLE".to_string());
         }
-        if dependent_objects != expected_objects {
+        if !dependent_objects.is_empty() {
             schema_mismatches.push(format!(
-                "unexpected memberships-dependent sqlite_schema objects: {dependent_objects:?}"
+                "unexpected memberships-dependent sqlite_schema objects found by scanning every sqlite_schema.sql: {dependent_objects:?}"
             ));
         }
         if !schema_mismatches.is_empty() {
@@ -5042,6 +5078,20 @@ mod tests {
         .unwrap()
     }
 
+    fn sqlite_schema_snapshot(conn: &Connection) -> Vec<(String, String, String, Option<String>)> {
+        conn.prepare(
+            "SELECT type,name,tbl_name,sql FROM sqlite_schema
+             ORDER BY type,name,tbl_name",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>>>()
+        .unwrap()
+    }
+
     fn ev(text: &str) -> NewEvent {
         NewEvent {
             kind: EventKind::Said,
@@ -7197,6 +7247,143 @@ mod tests {
         assert_eq!(
             logged_updates, 0,
             "failed startup must not fire or otherwise mutate the preserved trigger fixture"
+        );
+        assert_memberships_startup_rolled_back(&conn);
+        drop(conn);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn migration_rejects_view_and_other_table_trigger_referencing_legacy_memberships() {
+        let path = store_fixture_path("memberships-cross-object-dependencies");
+        let original_schema;
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE memberships(
+                   place_id INTEGER NOT NULL,
+                   subject_id INTEGER NOT NULL,
+                   role TEXT NOT NULL,
+                   read_seq INTEGER NOT NULL,
+                   joined_at INTEGER NOT NULL,
+                   left_at INTEGER,
+                   PRIMARY KEY(place_id, subject_id)
+                 );
+                 CREATE VIEW active_membership_projection AS
+                 SELECT place_id,subject_id,role
+                 FROM memberships
+                 WHERE left_at IS NULL;
+                 CREATE TABLE incoming_events(
+                   event_id INTEGER PRIMARY KEY,
+                   place_id INTEGER NOT NULL,
+                   subject_id INTEGER NOT NULL
+                 );
+                 CREATE TABLE membership_observations(
+                   event_id INTEGER NOT NULL,
+                   observed_read_seq INTEGER NOT NULL
+                 );
+                 CREATE TRIGGER incoming_event_membership_audit
+                 AFTER INSERT ON incoming_events
+                 BEGIN
+                   INSERT INTO membership_observations(event_id,observed_read_seq)
+                   SELECT new.event_id,read_seq
+                   FROM memberships
+                   WHERE place_id=new.place_id AND subject_id=new.subject_id;
+                 END;
+                 INSERT INTO memberships(place_id,subject_id,role,read_seq,joined_at,left_at)
+                 VALUES
+                   (11,21,'participant',37,101,NULL),
+                   (11,22,'observer',38,102,NULL);
+                 INSERT INTO incoming_events(event_id,place_id,subject_id)
+                 VALUES(501,11,21);",
+            )
+            .unwrap();
+            original_schema = sqlite_schema_snapshot(&conn);
+        }
+
+        let error = Store::open(&path)
+            .err()
+            .expect("a view and another table's trigger must block the rebuild")
+            .to_string();
+        assert!(
+            error.contains("unexpected memberships-dependent sqlite_schema objects"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.contains("active_membership_projection"),
+            "view dependency was not reported: {error}"
+        );
+        assert!(
+            error.contains("incoming_event_membership_audit"),
+            "cross-table trigger dependency was not reported: {error}"
+        );
+
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            sqlite_schema_snapshot(&conn),
+            original_schema,
+            "failed startup must preserve every schema object and its SQL"
+        );
+        let membership_rows = conn
+            .prepare(
+                "SELECT place_id,subject_id,role,read_seq,joined_at,left_at
+                 FROM memberships ORDER BY place_id,subject_id",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            membership_rows,
+            [
+                (11, 21, "participant".into(), 37, 101, None),
+                (11, 22, "observer".into(), 38, 102, None),
+            ],
+            "failed startup must preserve every legacy membership row"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT event_id,place_id,subject_id FROM incoming_events",
+                [],
+                |row| Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?
+                )),
+            )
+            .unwrap(),
+            (501, 11, 21),
+            "failed startup must preserve the other table's rows"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT event_id,observed_read_seq FROM membership_observations",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap(),
+            (501, 37),
+            "failed startup must preserve rows previously written by the trigger"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM active_membership_projection",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            2,
+            "the preserved view must remain usable after rollback"
         );
         assert_memberships_startup_rolled_back(&conn);
         drop(conn);
