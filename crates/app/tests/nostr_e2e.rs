@@ -9,7 +9,7 @@ use opencrab_nostr_gate::nostr::{self, Key};
 use opencrab_port::{EventKind, GateName};
 use opencrab_store::{Store, TurnRecordRow};
 use serde_json::{json, Value};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -31,6 +31,38 @@ impl Drop for Proc {
     }
 }
 
+struct E2eScratch {
+    path: PathBuf,
+    _temporary: Option<tempfile::TempDir>,
+}
+
+impl E2eScratch {
+    fn new() -> Self {
+        let temporary = tempfile::Builder::new()
+            .prefix("ne2e-")
+            .tempdir_in(bin_dir())
+            .expect("create short E2E directory");
+        let path = temporary.path().to_path_buf();
+        if std::env::var("OPENCRAB_E2E_KEEP_ARTIFACTS").as_deref() == Ok("1") {
+            let path = temporary.keep();
+            eprintln!("[nostr-e2e] preserving artifacts at {}", path.display());
+            Self {
+                path,
+                _temporary: None,
+            }
+        } else {
+            Self {
+                path,
+                _temporary: Some(temporary),
+            }
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 struct SyntheticRelay {
     url: String,
     incoming: mpsc::UnboundedSender<Value>,
@@ -46,7 +78,7 @@ impl Drop for SyntheticRelay {
 }
 
 impl SyntheticRelay {
-    async fn start() -> Self {
+    async fn start(log_path: &Path) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind synthetic relay");
@@ -55,8 +87,11 @@ impl SyntheticRelay {
         let (subscription_tx, subscription_rx) = mpsc::unbounded_channel::<Value>();
         let outgoing = Arc::new(Mutex::new(Vec::new()));
         let captured = outgoing.clone();
+        let mut log = std::fs::File::create(log_path)
+            .unwrap_or_else(|error| panic!("create relay log {}: {error}", log_path.display()));
         let task = tokio::spawn(async move {
             let (tcp, _) = listener.accept().await.expect("accept nostr-gate");
+            writeln!(log, "accepted websocket peer").expect("write relay log");
             let ws = tokio_tungstenite::accept_async(tcp)
                 .await
                 .expect("WebSocket handshake");
@@ -67,6 +102,7 @@ impl SyntheticRelay {
                     maybe_event = incoming_rx.recv() => {
                         let Some(event) = maybe_event else { break };
                         let id = subid.as_deref().expect("test sent EVENT before gate REQ");
+                        writeln!(log, "relay -> gate: {}", json!(["EVENT", id, &event])).expect("write relay log");
                         sink.send(Message::Text(json!(["EVENT", id, event]).to_string()))
                             .await
                             .expect("send inbound EVENT");
@@ -75,6 +111,7 @@ impl SyntheticRelay {
                         let Some(message) = maybe_message else { break };
                         match message.expect("read gate relay frame") {
                             Message::Text(text) => {
+                                writeln!(log, "gate -> relay: {text}").expect("write relay log");
                                 let frame: Value = serde_json::from_str(text.as_ref())
                                     .expect("gate sent JSON relay frame");
                                 let items = frame.as_array().expect("relay frame is array");
@@ -121,10 +158,10 @@ impl SyntheticRelay {
         }
     }
 
-    async fn wait_for_subscription(&mut self) -> Value {
+    async fn wait_for_hello_ready_subscription(&mut self) -> Value {
         tokio::time::timeout(TIMEOUT, self.subscriptions.recv())
             .await
-            .expect("nostr-gate did not send REQ")
+            .expect("nostr-gate did not complete core hello and send REQ")
             .expect("synthetic relay stopped before REQ")
     }
 
@@ -188,15 +225,18 @@ fn bin_dir() -> PathBuf {
         .to_path_buf()
 }
 
-fn drain_stderr(stderr: std::process::ChildStderr, name: &'static str) {
+fn drain_stderr(stderr: std::process::ChildStderr, name: &'static str, log_path: PathBuf) {
     std::thread::spawn(move || {
+        let mut log = std::fs::File::create(&log_path)
+            .unwrap_or_else(|error| panic!("create child log {}: {error}", log_path.display()));
         for line in BufReader::new(stderr).lines().map_while(Result::ok) {
             eprintln!("[{name}] {line}");
+            writeln!(log, "{line}").expect("write child log");
         }
     });
 }
 
-fn spawn_gate(socket: &Path, relay_url: &str) -> (Proc, String) {
+fn spawn_gate(socket: &Path, relay_url: &str, log_path: &Path) -> (Proc, String) {
     let child = Command::new(env!("CARGO_BIN_EXE_nostr-gate-e2e"))
         .arg(socket)
         .env("NOSTR_GATE_RELAY", relay_url)
@@ -207,10 +247,14 @@ fn spawn_gate(socket: &Path, relay_url: &str) -> (Proc, String) {
         .expect("spawn nostr-gate");
     let mut proc = Proc(child);
     let stderr = proc.0.stderr.take().expect("gate stderr");
+    let log_path = log_path.to_path_buf();
     let (npub_tx, npub_rx) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || {
+        let mut log = std::fs::File::create(&log_path)
+            .unwrap_or_else(|error| panic!("create gate log {}: {error}", log_path.display()));
         for line in BufReader::new(stderr).lines().map_while(Result::ok) {
             eprintln!("[nostr-gate] {line}");
+            writeln!(log, "{line}").expect("write gate log");
             if let Some(npub) = line
                 .split_whitespace()
                 .find(|word| word.starts_with("npub1"))
@@ -225,7 +269,7 @@ fn spawn_gate(socket: &Path, relay_url: &str) -> (Proc, String) {
     (proc, npub)
 }
 
-fn spawn_core(socket: &Path, db: &Path, places: &Path, script: &str) -> Proc {
+fn spawn_core(socket: &Path, db: &Path, places: &Path, script: &str, log_path: &Path) -> Proc {
     let child = Command::new(env!("CARGO_BIN_EXE_opencrab-social-runtime"))
         .arg(socket)
         .arg(db)
@@ -237,7 +281,11 @@ fn spawn_core(socket: &Path, db: &Path, places: &Path, script: &str) -> Proc {
         .spawn()
         .expect("spawn opencrab-social-runtime");
     let mut proc = Proc(child);
-    drain_stderr(proc.0.stderr.take().expect("core stderr"), "core");
+    drain_stderr(
+        proc.0.stderr.take().expect("core stderr"),
+        "core",
+        log_path.to_path_buf(),
+    );
     proc
 }
 
@@ -245,7 +293,9 @@ async fn open_store(path: &Path) -> Store {
     let start = Instant::now();
     loop {
         if path.exists() {
-            if let Ok(store) = Store::open(path) {
+            // The child core owns startup recovery. This process is only a live observer: using
+            // Store::open here would treat the active child epoch as stale and close it.
+            if let Ok(store) = Store::open_read_only(path) {
                 return store;
             }
         }
@@ -298,13 +348,24 @@ async fn wait_for_turns(store: &Store, place: i64, count: usize) -> Vec<TurnReco
     }
 }
 
-async fn wait_for_post(relay: &SyntheticRelay) -> Value {
+async fn wait_for_post(relay: &SyntheticRelay, store: &Store, place: i64) -> Value {
     let start = Instant::now();
     loop {
         if let Some(event) = relay.posts().first() {
             return event.clone();
         }
-        assert!(start.elapsed() < TIMEOUT, "gate did not publish to relay");
+        assert!(
+            !relay.task.is_finished(),
+            "synthetic relay stopped before an outbound post; turns={:?}; events={:?}",
+            store.turn_records(place),
+            store.read_range(place, 0, store.latest_seq(place).unwrap_or(0))
+        );
+        assert!(
+            start.elapsed() < TIMEOUT,
+            "gate did not publish to relay; turns={:?}; events={:?}",
+            store.turn_records(place),
+            store.read_range(place, 0, store.latest_seq(place).unwrap_or(0))
+        );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
@@ -342,11 +403,8 @@ async fn wait_for_out_ref(store: &Store, place: i64, expected_text: &str) -> i64
 
 async fn run_case(case: Case) {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let mut relay = SyntheticRelay::start().await;
-    let scratch = tempfile::Builder::new()
-        .prefix("ne2e-")
-        .tempdir_in(bin_dir())
-        .expect("create short E2E directory");
+    let scratch = E2eScratch::new();
+    let mut relay = SyntheticRelay::start(&scratch.path().join("relay.log")).await;
     let socket = scratch.path().join("core.sock");
     let db = scratch.path().join("core.db");
     let places = scratch.path().join("places.json");
@@ -356,7 +414,8 @@ async fn run_case(case: Case) {
     );
 
     let poster = Key::generate();
-    let (gate, gate_npub) = spawn_gate(&socket, &relay.url);
+    let (gate, gate_npub) =
+        spawn_gate(&socket, &relay.url, &scratch.path().join("gate.stderr.log"));
     let address = format!("filter:kind=1&author={}", poster.npub);
     let config = json!({
         "places": [{
@@ -374,9 +433,18 @@ async fn run_case(case: Case) {
         }]
     });
     std::fs::write(&places, config.to_string()).expect("write places config");
-    let core = spawn_core(&socket, &db, &places, case.script());
+    let core = spawn_core(
+        &socket,
+        &db,
+        &places,
+        case.script(),
+        &scratch.path().join("core.stderr.log"),
+    );
 
-    let filter = relay.wait_for_subscription().await;
+    // nostr-gate does not open a relay subscription until core has accepted its checked hello and
+    // the gate has accepted the initial bind. REQ is therefore the synchronization boundary after
+    // which the synthetic relay may inject an EVENT.
+    let filter = relay.wait_for_hello_ready_subscription().await;
     assert_eq!(filter["kinds"], json!([1]));
     assert_eq!(filter["authors"], json!([poster.pubkey_hex.clone()]));
 
@@ -386,14 +454,6 @@ async fn run_case(case: Case) {
             .expect("gate identity"),
     )
     .expect("gate npub to hex");
-    let (_incoming_id, incoming) = nostr::build_signed(
-        &poster,
-        1,
-        json!([["p", gate_hex]]),
-        &case.first_input(),
-        nostr::now_secs(),
-    );
-    relay.publish(incoming);
 
     let store = open_store(&db).await;
     let place_wait_started = Instant::now();
@@ -407,11 +467,19 @@ async fn run_case(case: Case) {
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     };
+    let (_incoming_id, incoming) = nostr::build_signed(
+        &poster,
+        1,
+        json!([["p", gate_hex]]),
+        &case.first_input(),
+        nostr::now_secs(),
+    );
+    relay.publish(incoming);
 
     if matches!(case, Case::History) {
         let first_turn = wait_for_turn(&store, place).await;
         assert_eq!(first_turn.end_reason, "done");
-        let first_post = wait_for_post(&relay).await;
+        let first_post = wait_for_post(&relay, &store, place).await;
         assert_eq!(
             first_post["content"],
             json!("mock history seed acknowledged")
@@ -460,7 +528,7 @@ async fn run_case(case: Case) {
 
     match case.expected_reply() {
         Some(expected) => {
-            let post = wait_for_post(&relay).await;
+            let post = wait_for_post(&relay, &store, place).await;
             nostr::verify_event(&post).expect("gate produced a valid signed Nostr event");
             assert_eq!(post["kind"], json!(1));
             assert_eq!(post["content"], json!(expected));

@@ -21,16 +21,17 @@ use futures_util::{SinkExt, StreamExt};
 use opencrab_nostr_gate::nostr::{self, Key};
 use opencrab_nostr_gate::relay::{self, RelayMsg};
 use serde_json::{json, Value};
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Notify};
 use tokio_tungstenite::tungstenite::Message;
 
 const PROTOCOL: u64 = 1;
+const HELLO_ID: &str = "hello-1";
 const ADDRESS_FORM: &str = "^(npub1[a-z0-9]+|filter:.+)$";
 const DEFAULT_RELAY: &str = "wss://yabu.me";
 const MAX_LINE: usize = 1024 * 1024;
@@ -42,12 +43,17 @@ const PUBLISH_TIMEOUT: Duration = Duration::from_secs(60);
 struct Sub {
     subid: String,
     filter: Value,
+    requested: bool,
 }
 
 struct Shared {
     key: Key,
     /// core への書き出し口。切れていれば None。
     outbound: Mutex<Option<mpsc::UnboundedSender<String>>>,
+    /// 現在の core 接続で checked hello が受理されたか。relay の購読開始条件。
+    core_hello_accepted: AtomicBool,
+    /// 初回の checked hello 受理まで relay link の起動を待たせる。
+    core_hello_ready: Notify,
     /// リレーへの書き出し口（フレーム）。切れていれば None。
     relay_tx: Mutex<Option<mpsc::UnboundedSender<Message>>>,
     /// 結んでいる住所（§02）。core が切れたら畳んで CLOSE する（再接続で core が結び直す・§08）。
@@ -58,6 +64,9 @@ struct Shared {
     pending_pub: Mutex<HashMap<String, oneshot::Sender<(bool, String)>>>,
     /// core へ送る `event` の id 用（応答は待たない・§03）。
     evctr: AtomicU64,
+    /// core に送った inbound event の応答待ち。成功は忘れ、拒否は stderr へ出す。
+    /// 配送自体は従来どおり fire-and-forget で、ターンを待たせない。
+    pending_inbound: Mutex<HashSet<String>>,
     subctr: AtomicU64,
 }
 
@@ -80,9 +89,25 @@ impl Shared {
             None => false,
         }
     }
+    fn accept_core_hello(&self) {
+        self.core_hello_accepted.store(true, Ordering::Release);
+        self.core_hello_ready.notify_one();
+        request_subscriptions(self);
+    }
+    async fn wait_for_core_hello(&self) {
+        while !self.core_hello_accepted.load(Ordering::Acquire) {
+            let notified = self.core_hello_ready.notified();
+            if self.core_hello_accepted.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
+    }
     /// core が切れた: 書き出し口を落とし、結びを畳んでリレーの購読を閉じる（再接続で結び直す・§08）。
     fn drop_core(&self) {
+        self.core_hello_accepted.store(false, Ordering::Release);
         *self.outbound.lock().unwrap() = None;
+        self.pending_inbound.lock().unwrap().clear();
         let subs: Vec<Sub> = self.subs.lock().unwrap().drain().map(|(_, s)| s).collect();
         self.subid_to_addr.lock().unwrap().clear();
         for s in subs {
@@ -141,16 +166,27 @@ async fn main() {
     let shared = Arc::new(Shared {
         key,
         outbound: Mutex::new(None),
+        core_hello_accepted: AtomicBool::new(false),
+        core_hello_ready: Notify::new(),
         relay_tx: Mutex::new(None),
         subs: Mutex::new(HashMap::new()),
         subid_to_addr: Mutex::new(HashMap::new()),
         pending_pub: Mutex::new(HashMap::new()),
         evctr: AtomicU64::new(1),
+        pending_inbound: Mutex::new(HashSet::new()),
         subctr: AtomicU64::new(1),
     });
 
     let link = tokio::spawn(run_core_link(socket_path, shared.clone()));
-    let relay = tokio::spawn(run_relay_link(shared.clone(), relay_url));
+    let relay = tokio::spawn({
+        let shared = shared.clone();
+        async move {
+            // relay は checked hello が受理されるまで起動しない。これにより、core が bind を送り
+            // gate が受理した後の REQ より先に relay EVENT が存在する起動順を構造的に除く。
+            shared.wait_for_core_hello().await;
+            run_relay_link(shared, relay_url).await;
+        }
+    });
     let _ = tokio::join!(link, relay);
 }
 
@@ -196,7 +232,7 @@ async fn serve_core(stream: UnixStream, shared: &Arc<Shared>) {
     //   ——エージェントは鍵を持ち回らずに自分の Nostr 上の宛先（npub）を知れる。他の場（web 等）から展開して
     //   使える（§10 の索引・展開の対象はゲートのツール）。capabilities 無し（open は要らない・住所を先に決める）。
     let hello = json!({
-        "id": "hello-1", "m": "hello", "protocol": PROTOCOL,
+        "id": HELLO_ID, "m": "hello", "protocol": PROTOCOL,
         "name": "nostr", "address_form": ADDRESS_FORM,
         "tools": [
             {"name": "nostr-whoami",
@@ -244,12 +280,30 @@ async fn serve_core(stream: UnixStream, shared: &Arc<Shared>) {
     let _ = writer.await;
 }
 
-/// core からの 1 メッセージを処理する。`m` があれば要求、無ければ（自分の hello/event への）応答＝捨てる。
+/// core からの 1 メッセージを処理する。`m` があれば要求、無ければ自分の要求への応答。
 fn handle_core_message(v: &Value, shared: &Arc<Shared>) {
     let id = v.get("id").and_then(|x| x.as_str()).map(|s| s.to_string());
     let m = match v.get("m").and_then(|x| x.as_str()) {
         Some(m) => m,
-        None => return, // 自分が送った要求（hello・event）への応答。待ち手は無い → 捨てる（§00）。
+        None => {
+            if let Some(id) = id {
+                if id == HELLO_ID {
+                    if v.get("ok").is_some() {
+                        shared.accept_core_hello();
+                    } else if let Some(error) = v.get("err") {
+                        eprintln!("nostr-gate: core rejected hello: {error}");
+                    }
+                    return;
+                }
+                let was_inbound = shared.pending_inbound.lock().unwrap().remove(&id);
+                if was_inbound {
+                    if let Some(error) = v.get("err") {
+                        eprintln!("nostr-gate: core rejected inbound event id={id}: {error}");
+                    }
+                }
+            }
+            return;
+        }
     };
     match m {
         // 通知（応答しない・§05）。入力中などは今は描かない。
@@ -345,6 +399,7 @@ fn on_bind(shared: &Arc<Shared>, addr: &str) -> Value {
         Sub {
             subid: subid.clone(),
             filter: filter.clone(),
+            requested: false,
         },
     );
     shared
@@ -352,8 +407,9 @@ fn on_bind(shared: &Arc<Shared>, addr: &str) -> Value {
         .lock()
         .unwrap()
         .insert(subid.clone(), addr.to_string());
-    // 繋がっていれば今すぐ REQ。切れていれば subs に残り、再接続で resubscribe される（§08）。
-    let _ = shared.send_relay(relay::req_frame(&subid, &filter));
+    // checked hello 受理後かつ relay 接続済みなら REQ。どちらかが未完了なら subs に残り、
+    // relay 接続時に resubscribe される（§08）。
+    request_subscriptions(shared);
     json!({"ok": {}})
 }
 
@@ -569,12 +625,8 @@ async fn run_relay_link(shared: Arc<Shared>, url: String) {
         });
 
         // いま結んでいる購読を張り直す（§08・再接続後は生きている bind を改めて購読する）。
-        {
-            let subs = shared.subs.lock().unwrap();
-            for sub in subs.values() {
-                let _ = wtx.send(relay::req_frame(&sub.subid, &sub.filter));
-            }
-        }
+        // core 再接続中なら、新しい checked hello と bind が完了するまで REQ は出さない。
+        request_subscriptions(&shared);
 
         while let Some(item) = stream.next().await {
             let msg = match item {
@@ -594,6 +646,9 @@ async fn run_relay_link(shared: Arc<Shared>, url: String) {
 
         // 切れた。発行の待ち手を落とし（再送しない・§08）、購読は subs に残して再接続で張り直す。
         *shared.relay_tx.lock().unwrap() = None;
+        for sub in shared.subs.lock().unwrap().values_mut() {
+            sub.requested = false;
+        }
         let waiters: Vec<_> = shared.pending_pub.lock().unwrap().drain().collect();
         for (_id, w) in waiters {
             let _ = w.send((false, "relay disconnected".to_string()));
@@ -601,6 +656,25 @@ async fn run_relay_link(shared: Arc<Shared>, url: String) {
         writer.abort();
         eprintln!("nostr-gate: relay 切断、再接続します");
         tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+fn request_subscriptions(shared: &Shared) {
+    if !shared.core_hello_accepted.load(Ordering::Acquire) {
+        return;
+    }
+    let relay_tx = match shared.relay_tx.lock().unwrap().as_ref().cloned() {
+        Some(relay_tx) => relay_tx,
+        None => return,
+    };
+    let mut subs = shared.subs.lock().unwrap();
+    for sub in subs.values_mut().filter(|sub| !sub.requested) {
+        if relay_tx
+            .send(relay::req_frame(&sub.subid, &sub.filter))
+            .is_ok()
+        {
+            sub.requested = true;
+        }
     }
 }
 
@@ -614,11 +688,18 @@ fn dispatch_relay(shared: &Arc<Shared>, text: &str) {
                 if let Some(mut ce) =
                     nostr::incoming_to_core_event(&event, &addr, &shared.key.pubkey_hex)
                 {
+                    let id = shared.next_event_id();
                     if let Some(obj) = ce.as_object_mut() {
-                        obj.insert("id".into(), Value::String(shared.next_event_id()));
+                        obj.insert("id".into(), Value::String(id.clone()));
                     }
                     // ターンを起こすかは core が決める（§03）。応答（seq）は待たない。
-                    let _ = shared.send_core(ce.to_string());
+                    shared.pending_inbound.lock().unwrap().insert(id.clone());
+                    if !shared.send_core(ce.to_string()) {
+                        shared.pending_inbound.lock().unwrap().remove(&id);
+                        eprintln!(
+                            "nostr-gate: could not send inbound event id={id}: core link unavailable"
+                        );
+                    }
                 }
             }
             // 未知の subid（畳んだ後に届いた EVENT 等）は無視。
@@ -634,5 +715,102 @@ fn dispatch_relay(shared: &Arc<Shared>, text: &str) {
         | RelayMsg::Notice(_)
         | RelayMsg::Closed { .. }
         | RelayMsg::Other(_) => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shared_with_links() -> (
+        Arc<Shared>,
+        mpsc::UnboundedReceiver<String>,
+        mpsc::UnboundedReceiver<Message>,
+    ) {
+        let (core_tx, core_rx) = mpsc::unbounded_channel();
+        let (relay_tx, relay_rx) = mpsc::unbounded_channel();
+        let shared = Arc::new(Shared {
+            key: Key::generate(),
+            outbound: Mutex::new(Some(core_tx)),
+            core_hello_accepted: AtomicBool::new(false),
+            core_hello_ready: Notify::new(),
+            relay_tx: Mutex::new(Some(relay_tx)),
+            subs: Mutex::new(HashMap::new()),
+            subid_to_addr: Mutex::new(HashMap::new()),
+            pending_pub: Mutex::new(HashMap::new()),
+            evctr: AtomicU64::new(1),
+            pending_inbound: Mutex::new(HashSet::new()),
+            subctr: AtomicU64::new(1),
+        });
+        (shared, core_rx, relay_rx)
+    }
+
+    #[test]
+    fn initial_bind_is_acked_before_req_and_req_waits_for_core_hello() {
+        let (shared, mut core_rx, mut relay_rx) = shared_with_links();
+        let address = "filter:kind=1";
+        handle_core_message(
+            &json!({"id": "bind-1", "m": "bind", "address": address}),
+            &shared,
+        );
+        let bind_ack: Value = serde_json::from_str(
+            &core_rx
+                .try_recv()
+                .expect("initial bind is acknowledged before hello completes"),
+        )
+        .expect("bind ack is JSON");
+        assert_eq!(bind_ack, json!({"id": "bind-1", "ok": {}}));
+        assert!(relay_rx.try_recv().is_err(), "REQ preceded core hello");
+
+        handle_core_message(
+            &json!({"id": HELLO_ID, "err": {"code": "rejected"}}),
+            &shared,
+        );
+        assert!(relay_rx.try_recv().is_err(), "REQ followed rejected hello");
+
+        handle_core_message(&json!({"id": HELLO_ID, "ok": {}}), &shared);
+        let frame = relay_rx
+            .try_recv()
+            .expect("REQ follows accepted core hello");
+        let frame: Value =
+            serde_json::from_str(&frame.into_text().expect("REQ is text")).expect("REQ is JSON");
+        assert_eq!(frame[0], json!("REQ"));
+        assert_eq!(frame[2], json!({"kinds": [1]}));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn say_effect_is_published_and_acknowledged() {
+        let (shared, mut core_rx, mut relay_rx) = shared_with_links();
+        let effect = json!({
+            "id": "effect-1",
+            "m": "effect",
+            "kind": "say",
+            "address": "filter:x",
+            "payload": {"text": "synthetic reply"}
+        });
+        let task = tokio::spawn({
+            let shared = shared.clone();
+            async move { handle_effect(&shared, "effect-1", &effect).await }
+        });
+
+        let frame = relay_rx.recv().await.expect("say publishes a relay frame");
+        let text = frame.into_text().expect("relay frame is text");
+        let frame: Value = serde_json::from_str(&text).expect("relay frame is JSON");
+        assert_eq!(frame[0], json!("EVENT"));
+        let event_id = frame[1]["id"].as_str().expect("published event id");
+        dispatch_relay(
+            &shared,
+            &json!(["OK", event_id, true, "stored"]).to_string(),
+        );
+        task.await.expect("effect task completes");
+
+        let response: Value =
+            serde_json::from_str(&core_rx.recv().await.expect("effect response reaches core"))
+                .expect("effect response is JSON");
+        assert_eq!(response["id"], json!("effect-1"));
+        assert_eq!(response["ok"]["delivered"], json!(true));
+        assert!(response["ok"]["origin"]
+            .as_str()
+            .is_some_and(|origin| origin.starts_with("note1")));
     }
 }

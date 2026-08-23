@@ -2202,6 +2202,19 @@ impl Store {
         })
     }
 
+    /// Open an existing database as a non-owning observer.
+    ///
+    /// Unlike [`Store::open`], this does not initialize the schema or recover runtime state.
+    /// In particular, observing a live core must not close its `connecting`/`active` gate epochs
+    /// as though a new core process had started. SQLite read-only mode also prevents an observer
+    /// from accidentally reaching a mutating store method successfully.
+    pub fn open_read_only(path: impl AsRef<std::path::Path>) -> Result<Store> {
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        Ok(Store {
+            conn: Arc::new(Mutex::new(conn)),
+        })
+    }
+
     fn c(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().unwrap()
     }
@@ -2556,6 +2569,18 @@ impl Store {
             .query_map(params![subject, place, purpose.as_str()], map_gate_route)?
             .collect::<Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// Whether the place has any configured external binding, independent of connection state.
+    /// Route reads intentionally require an active epoch; this read is only for diagnosing the
+    /// otherwise silent distinction between a truly internal place and a configured place whose
+    /// live route disappeared.
+    pub fn has_gate_binding_for_place(&self, place: PlaceId) -> Result<bool> {
+        self.c().query_row(
+            "SELECT EXISTS(SELECT 1 FROM gate_bindings WHERE place_id=?1)",
+            params![place],
+            |row| row.get(0),
+        )
     }
 
     /// Resolve an inbound address inside one concrete instance. The result is exact because
@@ -5217,6 +5242,71 @@ mod tests {
                 .unwrap();
             assert_eq!(epoch, 2, "checked hello starts a new epoch after recovery");
         }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn read_only_observer_preserves_active_epoch_and_delivery_planning() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "opencrab-store-live-observer-{}-{nonce}.sqlite",
+            std::process::id()
+        ));
+        let owner = Store::open(&path).unwrap();
+        let kind = GateKindId::parse("web".to_string()).unwrap();
+        let instance = owner.seed_compatibility_instance(&kind).unwrap();
+        let subject = owner
+            .create_subject(
+                SubjectKind::Agent,
+                "fixture-agent",
+                "fixture-agent",
+                "scripted",
+                Standing::Trusted,
+                1,
+            )
+            .unwrap();
+        let place = owner
+            .create_place(Some("room:observer"), None, "{}", None, 2)
+            .unwrap();
+        owner.join(place, subject, Role::Participant, 0, 3).unwrap();
+        owner.add_channel(place, &kind, "room:observer").unwrap();
+        let spec = gate_kind_spec("web", IngressDiscovery::Prebound);
+        let epoch = owner
+            .begin_gate_connection_checked(&instance, 1, 1, &spec, 4)
+            .unwrap();
+        owner.activate_gate_connection(&instance, epoch, 5).unwrap();
+
+        let observer = Store::open_read_only(&path).unwrap();
+        let status = observer
+            .gate_status()
+            .unwrap()
+            .into_iter()
+            .find(|row| row.instance_id == instance)
+            .unwrap();
+        assert_eq!(status.connection_state.as_deref(), Some("active"));
+        assert_eq!(status.lifecycle, "running");
+
+        let route = owner
+            .gate_route(subject, place, &kind, &RoutePurpose::outbound())
+            .unwrap()
+            .expect("observer must not remove the active route");
+        let mut spoke = ev("outbound while observed");
+        spoke.kind = EventKind::Spoke;
+        spoke.author_subject = Some(subject);
+        spoke.author_external = None;
+        let seq = owner
+            .append_with_delivery_routes(place, &spoke, &[route], 6)
+            .unwrap();
+        assert_eq!(
+            observer.deliveries_for(place, seq).unwrap(),
+            vec![(kind, "pending".into())]
+        );
+
+        drop(observer);
+        drop(owner);
         std::fs::remove_file(path).unwrap();
     }
 

@@ -332,6 +332,10 @@ impl Plugd {
                 }
                 match self.handle_hello(&conn, obj) {
                     Ok(gate) => {
+                        eprintln!(
+                            "opencrab-plugd: hello accepted: kind={} instance={} epoch={}",
+                            gate.spec.kind_id, gate.instance_id, gate.connection_epoch
+                        );
                         *conn.gate.lock().unwrap() = Some(gate.clone());
                         *conn.active.lock().unwrap() =
                             gate.spec.ingress_discovery == IngressDiscovery::Prebound;
@@ -397,6 +401,9 @@ impl Plugd {
                 Some("event") => {
                     let id = id.unwrap_or_default();
                     if !*conn.active.lock().unwrap() {
+                        eprintln!(
+                            "opencrab-plugd: inbound event rejected: id={id} code=instance_not_ready"
+                        );
                         conn.send_line(&WireErr::new("instance_not_ready").to_json(&id));
                         continue;
                     }
@@ -409,7 +416,22 @@ impl Plugd {
                         Ok(None) => conn.send_line(
                             &serde_json::json!({"id": id, "ok": {"seq": serde_json::Value::Null}}),
                         ),
-                        Err(e) => conn.send_line(&e.to_json(&id)),
+                        Err(e) => {
+                            let gate = conn.gate.lock().unwrap().clone();
+                            eprintln!(
+                                "opencrab-plugd: inbound event rejected: id={id} kind={} instance={} code={} at={} detail={}",
+                                gate.as_ref()
+                                    .map(|connection| connection.spec.kind_id.as_str())
+                                    .unwrap_or("<unidentified>"),
+                                gate.as_ref()
+                                    .map(|connection| connection.instance_id.as_str())
+                                    .unwrap_or("<unidentified>"),
+                                e.code,
+                                e.at.as_deref().unwrap_or("<none>"),
+                                e.detail.as_deref().unwrap_or("<none>")
+                            );
+                            conn.send_line(&e.to_json(&id));
+                        }
                     }
                 }
                 Some("read") => {

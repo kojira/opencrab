@@ -2142,6 +2142,178 @@ async fn liar_delivered_true_is_only_a_record() {
     );
 }
 
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn provision_materializes_compatibility_route_before_hello() {
+    let h = build();
+    let kind = GateName::new("nostr");
+    let a = h.sys.create_subject(
+        SubjectKind::Agent,
+        "A",
+        "A",
+        opencrab_port::Standing::Trusted,
+    );
+    let place = h.sys.create_place(
+        Some("p"),
+        None,
+        &Policy::immediate_on(&[Property::Direct]).with_default(a),
+        None,
+    );
+    h.sys.join(place, a, Role::Participant);
+    h.sys
+        .provision_channel(place, kind.as_str(), "filter:x")
+        .unwrap();
+
+    // Expose the configured selection without running hello reconciliation. Route reads still
+    // require a live epoch, so merely provisioning cannot send through a disconnected gate.
+    let instance = h
+        .sys
+        .store()
+        .compatibility_instance(&kind)
+        .unwrap()
+        .unwrap();
+    let epoch = h
+        .sys
+        .store()
+        .begin_gate_connection(&instance, 1, 1)
+        .unwrap();
+    h.sys
+        .store()
+        .activate_gate_connection(&instance, epoch, 2)
+        .unwrap();
+    assert!(h
+        .sys
+        .store()
+        .gate_route(a, place, &kind, &RoutePurpose::outbound())
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn checked_hello_activates_connection_and_plans_spoke_delivery() {
+    let h = build();
+    let a = h.sys.create_subject(
+        SubjectKind::Agent,
+        "A",
+        "A",
+        opencrab_port::Standing::Trusted,
+    );
+    let place = h.sys.create_place(
+        Some("p"),
+        None,
+        &Policy::immediate_on(&[Property::Direct]).with_default(a),
+        None,
+    );
+    h.sys.join(place, a, Role::Participant);
+    h.sys.provision_channel(place, "nostr", "filter:x").unwrap();
+
+    let g = TestGate::connect(&h.plugd);
+    g.hello_ok(
+        "nostr",
+        "^(npub1[a-z0-9]+|filter:.+)$",
+        json!(["say", "react", "boost", "quote", "retract"]),
+        json!([]),
+        json!([{
+            "name": "nostr-whoami",
+            "description": "synthetic identity",
+            "params": {"type": "object", "properties": {}, "required": []}
+        }]),
+    )
+    .await;
+    let status = h
+        .sys
+        .store()
+        .gate_status()
+        .unwrap()
+        .into_iter()
+        .find(|row| row.kind_id.as_str() == "nostr")
+        .expect("checked hello has a canonical connection row");
+    assert_eq!(status.connection_state.as_deref(), Some("active"));
+    assert_eq!(status.lifecycle, "running");
+    assert!(g.wait_for(|l| find_msg(l, "bind").is_some()).await);
+    assert!(h
+        .sys
+        .store()
+        .gate_route(
+            a,
+            place,
+            &GateName::new("nostr"),
+            &RoutePurpose::tool("nostr-whoami").unwrap(),
+        )
+        .unwrap()
+        .is_some());
+
+    h.eng.push(Step::say_done("preprovisioned reply"));
+    g.send(json!({"id":"e1","m":"event","kind":"said","address":"filter:x","author":{"id":"u"},"content":{"text":"go"}}));
+
+    assert!(
+        g.wait_for(|l| find_msg(l, "effect").is_some()).await,
+        "preprovisioned route must deliver after hello: {:?}",
+        g.log()
+    );
+    assert!(
+        g.wait_for(|_| !h.sys.store().deliveries_for(place, 2).unwrap().is_empty())
+            .await,
+        "accepted hello must remain active while the Spoke delivery is planned: {:?}",
+        h.sys.store().deliveries_for(place, 2)
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn prebound_event_can_arrive_while_bind_ack_is_pending() {
+    let h = build();
+    let kind = GateName::new("nostr");
+    let a = h.sys.create_subject(
+        SubjectKind::Agent,
+        "A",
+        "A",
+        opencrab_port::Standing::Trusted,
+    );
+    h.sys.add_identity(a, kind.as_str(), "npub1agent");
+    let place = h.sys.create_place(
+        Some("p"),
+        None,
+        &Policy::immediate_on(&[Property::MentionsMe]).with_default(a),
+        None,
+    );
+    h.sys.join(place, a, Role::Participant);
+    h.sys
+        .provision_channel(place, kind.as_str(), "filter:x")
+        .unwrap();
+
+    let g = TestGate::connect(&h.plugd);
+    g.set_cfg(|cfg| cfg.auto = false);
+    g.hello_ok(
+        kind.as_str(),
+        "filter:.+",
+        json!(["say"]),
+        json!([]),
+        json!([]),
+    )
+    .await;
+    assert!(
+        g.wait_for(|log| find_msg(log, "bind").is_some()).await,
+        "prebound gate receives bind after checked hello"
+    );
+
+    h.eng.push(Step::say_done("reply before bind ack"));
+    g.send(json!({
+        "id":"e-before-bind-ack",
+        "m":"event",
+        "kind":"said",
+        "address":"filter:x",
+        "author":{"id":"npub1poster"},
+        "content":{"text":"mention"},
+        "mentions":["npub1agent"],
+        "origin":"note1incoming"
+    }));
+
+    assert!(
+        g.wait_for(|log| find_msg(log, "effect").is_some()).await,
+        "checked hello and provisioned binding must accept and route an event before bind ack: {:?}",
+        g.log()
+    );
+}
+
 // 応答を返さない（遅い）: 期限で失敗として扱い、接続は切らない（プロトコル§00）。
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn slow_no_response_times_out_without_severing() {

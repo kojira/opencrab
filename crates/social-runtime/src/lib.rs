@@ -1304,13 +1304,20 @@ impl System {
             .store
             .add_channel(place, &gate, address)
             .map_err(|error| error.to_string())?;
-        if let Some(spec) = self.gate_spec(&gate) {
-            let names: Vec<_> = spec.tools.into_iter().map(|tool| tool.name).collect();
-            self.0
-                .store
-                .reconcile_compatibility_routes_for_kind(&gate, &names)
-                .map_err(|error| error.to_string())?;
-        }
+        // Provision owns the configured subject/binding selection even while the process is
+        // disconnected.  `gate_routes_for_place` still requires an active connection, so this
+        // cannot deliver through a stale credential.  A later protocol-1 hello atomically
+        // reconciles the same selection again with the live declaration and adds tool purposes.
+        // If the gate is already connected, include those declared tools in this pass as well.
+        let names: Vec<_> = self
+            .gate_spec(&gate)
+            .into_iter()
+            .flat_map(|spec| spec.tools.into_iter().map(|tool| tool.name))
+            .collect();
+        self.0
+            .store
+            .reconcile_compatibility_routes_for_kind(&gate, &names)
+            .map_err(|error| error.to_string())?;
         Ok(())
     }
 
@@ -2739,6 +2746,12 @@ impl System {
         } else {
             end_reason
         };
+        if !matches!(end_reason, "done" | "no_reply") {
+            eprintln!(
+                "opencrab-social-runtime: turn ended unsuccessfully (place={place}, subject={subject}, reason={end_reason}, detail={})",
+                failure_detail.as_deref().unwrap_or("<none>")
+            );
+        }
 
         // 記録は必ず書く（§05）。終わり方が何であっても 1 本の後始末。
         // ターンの記録にはターンの事実だけ。引き継ぎはターンの間ずっと一定なのでここに持つ。
@@ -4086,6 +4099,17 @@ impl System {
             Ok(seq) => seq,
             Err(_) => return None,
         };
+        if kind == EffectKind::Say && routes.is_empty() {
+            match self.0.store.has_gate_binding_for_place(target_place) {
+                Ok(true) => eprintln!(
+                    "opencrab-social-runtime: delivery plan empty; recorded Spoke without delivery (place={target_place}, seq={seq}, subject={subject}, reason=no active route for configured binding)"
+                ),
+                Ok(false) => {}
+                Err(error) => eprintln!(
+                    "opencrab-social-runtime: delivery plan empty; recorded Spoke and could not inspect configured bindings (place={target_place}, seq={seq}, subject={subject}, reason={error})"
+                ),
+            }
+        }
         // 効果は、まず場の出来事になる → 発火方針へ（steer もこの経路・§06）。効果は既に確定（ログ済み）。
         // 発火の再判定が一時的に引けなくても、ここでは落とさず委ねる — ターン終了時の pump が同じ判定に戻す
         // （保留中を状態に持たない・詳細§02）。「引けなかった」を「起きなかった」に化けさせない。
@@ -4169,6 +4193,12 @@ impl System {
             TransportDeliveryResult::DefiniteAck(ack) => {
                 let state = if ack.delivered { "delivered" } else { "failed" };
                 let error = (!ack.delivered).then_some("gate reported delivered=false");
+                if !ack.delivered {
+                    eprintln!(
+                        "opencrab-social-runtime: delivery failed (place={}, seq={}, instance={}, reason=gate reported delivered=false)",
+                        job.place, job.seq, job.route.instance_id
+                    );
+                }
                 let observation = format!("definite_ack:delivered={}", ack.delivered);
                 let origin = ack.delivered.then_some(ack.origin).flatten();
                 let _ = self.0.store.complete_delivery(
@@ -4182,6 +4212,10 @@ impl System {
                 );
             }
             TransportDeliveryResult::DefiniteFailure(error) => {
+                eprintln!(
+                    "opencrab-social-runtime: delivery failed (place={}, seq={}, instance={}, reason={})",
+                    job.place, job.seq, job.route.instance_id, error.0
+                );
                 let _ = self.0.store.complete_delivery(
                     &job.route,
                     job.seq,
@@ -4196,6 +4230,10 @@ impl System {
                 error,
                 late_observation,
             } => {
+                eprintln!(
+                    "opencrab-social-runtime: delivery indeterminate (place={}, seq={}, instance={}, reason={})",
+                    job.place, job.seq, job.route.instance_id, error.0
+                );
                 let _ = self.0.store.complete_delivery(
                     &job.route,
                     job.seq,
