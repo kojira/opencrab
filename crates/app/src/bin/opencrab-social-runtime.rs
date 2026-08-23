@@ -17,7 +17,7 @@ use opencrab_social_runtime::FakeClock;
 use opencrab_store::Store;
 use rusqlite::Connection;
 use std::io::{Error, ErrorKind};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -68,18 +68,9 @@ async fn main() -> std::io::Result<()> {
     let store = if db_path == ":memory:" {
         Store::new_in_memory().expect("open store")
     } else {
-        let mut conn = Connection::open(&db_path).expect("open db for migration");
-        opencrab_db::schema::initialize(&conn).expect("initialize legacy schema");
-        let inputs = migration_inputs().expect("migration inputs");
-        ensure_migrated(
-            &mut conn,
-            &inputs.config,
-            &inputs.environment,
-            inputs.captured_at,
-        )
-        .unwrap_or_else(|error| panic!("ensure_migrated: {error}"));
+        let conn = Connection::open(&db_path).expect("open db");
+        ensure_migrated(&conn).unwrap_or_else(|error| panic!("ensure_migrated: {error}"));
         drop(conn);
-        drop(inputs);
         Store::open(&db_path).expect("open store")
     };
 
@@ -147,56 +138,5 @@ async fn main() -> std::io::Result<()> {
             }
         }
         None => host.serve_unix(listener).await,
-    }
-}
-
-struct MigrationInputs {
-    config: PathBuf,
-    environment: PathBuf,
-    captured_at: i64,
-    _keep: Option<tempfile::TempDir>,
-}
-
-fn migration_inputs() -> std::io::Result<MigrationInputs> {
-    let config = std::env::var("OPENCRAB_MIGRATION_CONFIG");
-    let environment = std::env::var("OPENCRAB_MIGRATION_ENVIRONMENT");
-    let captured = std::env::var("OPENCRAB_MIGRATION_CAPTURED_AT");
-    match (config, environment, captured) {
-        (Ok(config), Ok(environment), Ok(captured)) => {
-            let captured_at = captured.parse::<i64>().map_err(|error| {
-                Error::new(
-                    ErrorKind::InvalidInput,
-                    format!("OPENCRAB_MIGRATION_CAPTURED_AT is not i64: {error}"),
-                )
-            })?;
-            Ok(MigrationInputs {
-                config: PathBuf::from(config),
-                environment: PathBuf::from(environment),
-                captured_at,
-                _keep: None,
-            })
-        }
-        (
-            Err(std::env::VarError::NotPresent),
-            Err(std::env::VarError::NotPresent),
-            Err(std::env::VarError::NotPresent),
-        ) => {
-            let dir = tempfile::tempdir()?;
-            let config = dir.path().join("empty.toml");
-            let environment = dir.path().join("empty.env");
-            std::fs::write(&config, "")?;
-            std::fs::write(&environment, "")?;
-            Ok(MigrationInputs {
-                config,
-                environment,
-                captured_at: 0,
-                _keep: Some(dir),
-            })
-        }
-        _ => Err(Error::new(
-            ErrorKind::InvalidInput,
-            "OPENCRAB_MIGRATION_CONFIG, OPENCRAB_MIGRATION_ENVIRONMENT, and \
-             OPENCRAB_MIGRATION_CAPTURED_AT must be set together",
-        )),
     }
 }

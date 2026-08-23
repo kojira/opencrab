@@ -16,7 +16,7 @@ mod migration;
 mod provider;
 mod shell;
 pub use cursor::CursorEngine;
-pub use migration::{ensure_migrated, EnsureMigratedError, MigrationStatus};
+pub use migration::{ensure_migrated, EnsureMigratedError};
 pub use provider::{
     AnthropicProvider, ChatGptProvider, ChatProvider, HttpSseEngine, MockEngine, OpenAiProvider,
     MOCK_MODEL,
