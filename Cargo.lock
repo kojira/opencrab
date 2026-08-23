@@ -1142,6 +1142,8 @@ dependencies = [
  "base64",
  "futures-util",
  "libc",
+ "opencrab-converter",
+ "opencrab-db",
  "opencrab-engine",
  "opencrab-nostr-gate",
  "opencrab-plugd",
@@ -1167,12 +1169,13 @@ version = "0.2.17"
 dependencies = [
  "base64",
  "dotenvy",
+ "opencrab-db",
+ "opencrab-store",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
- "url",
 ]
 
 [[package]]

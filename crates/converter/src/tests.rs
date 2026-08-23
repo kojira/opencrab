@@ -12,33 +12,42 @@ fn inspected_json_rejects_duplicate_keys_at_every_depth() {
 }
 
 #[test]
-fn global_discord_policy_anchors_guild_routes_when_no_subject_override_exists() {
+fn discord_policy_anchors_guild_routes_from_subject_policy() {
     let mut connection = Connection::open_in_memory().unwrap();
     let transaction = connection.transaction().unwrap();
     create_phase1_schema(&transaction).unwrap();
     transaction
         .execute_batch(
-            r#"INSERT INTO subjects VALUES(1,'agent','agent','Agent',0);
-             INSERT INTO places VALUES(1,NULL,NULL,NULL,x'00','place',0,NULL,NULL);
+            r#"INSERT INTO subjects(id,kind,name,persona,turn_runner,standing,created_at)
+               VALUES(1,'agent','Agent','Agent','engine','trusted',0);
+             INSERT INTO places(id,address,parent_id,policy_json,inherit_from_place,inherit_up_to_seq,created_at,closed_at,close_reason)
+               VALUES(1,NULL,NULL,'hard-default',NULL,NULL,0,NULL,NULL);
              INSERT INTO memberships VALUES(1,1,'participant',0,0);
              INSERT INTO gate_instances VALUES(
                '11111111-1111-4111-8111-111111111111','discord','shared',NULL,1,'stopped'
              );
-             INSERT INTO gate_instance_revisions VALUES(
-               '11111111-1111-4111-8111-111111111111',1,1,1,0,'fixture',x'00',
-               zeroblob(32),NULL
+             INSERT INTO gate_instance_revisions(
+               instance_id,revision,present,enabled,config_schema_id,config_bytes,
+               config_digest,secret_set_id,created_at
+             ) VALUES(
+               '11111111-1111-4111-8111-111111111111',1,1,1,'fixture',x'00',
+               zeroblob(32),NULL,0
              );
-             INSERT INTO gate_bindings VALUES(
+             INSERT INTO gate_bindings(
+               binding_id,place_id,instance_id,address,label,origin_scope_id,
+               binding_metadata_schema_id,binding_metadata_bytes,binding_metadata_digest
+             ) VALUES(
                '22222222-2222-4222-8222-222222222222',1,
                '11111111-1111-4111-8111-111111111111','111',NULL,'scope',
                'gate-binding/discord/v1',CAST('{"address_kind":"guild"}' AS BLOB),
-               zeroblob(32),NULL,NULL,NULL
+               zeroblob(32)
              );
-             INSERT INTO place_default_policies VALUES(
-               '33333333-3333-4333-8333-333333333333',1,'discord','active',NULL,NULL,
-               'place-policy/discord/v1',CAST(
-                 '{"heartbeat_enabled":false,"whitelisted":true}' AS BLOB
-               ),zeroblob(32)
+             INSERT INTO place_subject_policies(
+               place_id,kind_id,subject_id,admission,readable,writable,whitelisted,
+               heartbeat_enabled,heartbeat_interval_secs,heartbeat_instructions,
+               instructions_revision,source_row,source_updated_at
+             ) VALUES(
+               1,'discord',1,'open',1,1,1,0,NULL,'',1,x'00',0
              );"#,
         )
         .unwrap();
@@ -156,7 +165,7 @@ fn grant_assembly_uses_closed_roles_unsplit_actions_and_nullable_co_agent_proven
         transaction
             .query_row(
                 "SELECT COUNT(*) FROM grant_source_provenance
-                 WHERE principal_subject_id=3 AND gate_kind IS NULL AND source_permission IS NULL",
+                 WHERE principal_subject_id=3 AND gate_kind='all' AND source_permission='co-agent'",
                 [],
                 |row| row.get::<_, i64>(0),
             )

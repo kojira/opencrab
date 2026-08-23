@@ -28,6 +28,14 @@ pub(crate) struct SourceTable {
 }
 
 impl SourceTable {
+    pub fn empty(name: &'static str) -> Self {
+        Self {
+            name,
+            columns: Vec::new(),
+            rows: Vec::new(),
+        }
+    }
+
     pub fn exists(conn: &Connection, name: &str) -> Result<bool> {
         Ok(conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",

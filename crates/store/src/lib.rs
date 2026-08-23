@@ -1359,7 +1359,21 @@ const SCHEMA: &str = r#"
               reason TEXT NOT NULL CHECK(reason <> ''),
               PRIMARY KEY(source_db,source_table,source_key)
             );
+            CREATE TABLE IF NOT EXISTS schema_migration_state(
+              migration_id TEXT NOT NULL PRIMARY KEY,
+              applied_at INTEGER NOT NULL,
+              source_row_digest BLOB
+            );
             "#;
+
+/// Phase S schema application for in-place migration (#771).
+///
+/// DDL only: does not open a transaction and does not recover runtime state.
+pub fn apply_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(SCHEMA)?;
+    migrate(conn)?;
+    Ok(())
+}
 
 /// 冪等な移行（既存の流儀 `IF NOT EXISTS` と揃える）。`CREATE TABLE IF NOT EXISTS` は既存テーブルへ
 /// 列を足さないので、古い DB には `ALTER TABLE ... ADD COLUMN` で足す。列が既にあれば何もしない
