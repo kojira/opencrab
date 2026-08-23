@@ -1271,9 +1271,10 @@ fn migrate_memberships(conn: &Connection) -> Result<()> {
         declared_type: String,
         not_null: i64,
         primary_key_ordinal: i64,
+        hidden: i64,
     }
 
-    let mut statement = conn.prepare("PRAGMA table_info(memberships)")?;
+    let mut statement = conn.prepare("PRAGMA table_xinfo(memberships)")?;
     let columns = statement
         .query_map([], |row| {
             Ok(Column {
@@ -1281,6 +1282,7 @@ fn migrate_memberships(conn: &Connection) -> Result<()> {
                 declared_type: row.get(2)?,
                 not_null: row.get(3)?,
                 primary_key_ordinal: row.get(5)?,
+                hidden: row.get(6)?,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -1292,6 +1294,7 @@ fn migrate_memberships(conn: &Connection) -> Result<()> {
             declared_type: declared_type.to_string(),
             not_null,
             primary_key_ordinal,
+            hidden: 0,
         };
     let legacy_columns = vec![
         expected("place_id", "INTEGER", 1, 1),
@@ -4924,6 +4927,26 @@ mod tests {
             .unwrap()
     }
 
+    fn table_column_xsignature(
+        conn: &Connection,
+        table: &str,
+    ) -> Vec<(String, String, i64, i64, i64)> {
+        conn.prepare(&format!("PRAGMA table_xinfo({table})"))
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap()
+    }
+
     fn assert_memberships_startup_rolled_back(conn: &Connection) {
         assert!(!table_exists(conn, "memberships_before_shared_seen_seq").unwrap());
         assert!(
@@ -6887,6 +6910,101 @@ mod tests {
                 "fixture-metadata".into()
             ),
             "unknown columns and their values must not be discarded"
+        );
+        assert_memberships_startup_rolled_back(&conn);
+        drop(conn);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn migration_rejects_legacy_memberships_with_generated_column_without_changes() {
+        let path = store_fixture_path("memberships-generated-column");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE memberships(
+                   place_id INTEGER NOT NULL,
+                   subject_id INTEGER NOT NULL,
+                   role TEXT NOT NULL,
+                   read_seq INTEGER NOT NULL,
+                   joined_at INTEGER NOT NULL,
+                   left_at INTEGER,
+                   source_tag TEXT GENERATED ALWAYS AS (role || '-tag') STORED,
+                   PRIMARY KEY(place_id, subject_id)
+                 );
+                 INSERT INTO memberships(place_id,subject_id,role,read_seq,joined_at,left_at)
+                 VALUES
+                   (11,21,'participant',37,101,NULL),
+                   (11,22,'observer',38,102,NULL);",
+            )
+            .unwrap();
+        }
+
+        let error = Store::open(&path)
+            .err()
+            .expect("legacy shape with a generated column must fail migration");
+        assert!(
+            error.to_string().contains("unknown memberships schema"),
+            "unexpected error: {error}"
+        );
+
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            table_column_xsignature(&conn, "memberships"),
+            [
+                ("place_id".into(), "INTEGER".into(), 1, 1, 0),
+                ("subject_id".into(), "INTEGER".into(), 1, 2, 0),
+                ("role".into(), "TEXT".into(), 1, 0, 0),
+                ("read_seq".into(), "INTEGER".into(), 1, 0, 0),
+                ("joined_at".into(), "INTEGER".into(), 1, 0, 0),
+                ("left_at".into(), "INTEGER".into(), 0, 0, 0),
+                ("source_tag".into(), "TEXT".into(), 0, 0, 3),
+            ],
+            "failed migration must leave the generated column and legacy shape unchanged"
+        );
+        let rows = conn
+            .prepare(
+                "SELECT place_id,subject_id,role,read_seq,joined_at,left_at,source_tag
+                 FROM memberships ORDER BY place_id,subject_id",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            [
+                (
+                    11,
+                    21,
+                    "participant".into(),
+                    37,
+                    101,
+                    None,
+                    "participant-tag".into()
+                ),
+                (
+                    11,
+                    22,
+                    "observer".into(),
+                    38,
+                    102,
+                    None,
+                    "observer-tag".into()
+                ),
+            ],
+            "failed migration must preserve every legacy value and generated result"
         );
         assert_memberships_startup_rolled_back(&conn);
         drop(conn);
