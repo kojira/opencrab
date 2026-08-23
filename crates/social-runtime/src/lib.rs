@@ -18,14 +18,118 @@ use opencrab_store::{
     NewEvent, NewTurnRecord, Store,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
-use tokio::sync::{watch, Mutex as TokMutex, OwnedMutexGuard};
+use tokio::sync::{watch, Mutex as TokMutex, Notify, OwnedMutexGuard};
 use tokio::time::Instant;
 
 pub const REASON_BATCH: &str = "batch";
 pub const REASON_UNCOND: &str = "unconditional";
+
+/// Core が発火窓・期限・永続予定に使う時計。判断は [`System`] に置いたまま、テストは時刻だけを
+/// 決定的に進められる。通常経路と fake-clock 経路で batch/debounce の実装を二重化しないための seam。
+pub trait Clock: Send + Sync {
+    fn now(&self) -> Instant;
+    fn now_wall_nanos(&self) -> i64;
+    fn sleep_until(&self, deadline: Instant) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+}
+
+#[derive(Default)]
+struct TokioClock;
+
+impl Clock for TokioClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn now_wall_nanos(&self) -> i64 {
+        system_wall_nanos()
+    }
+
+    fn sleep_until(&self, deadline: Instant) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
+        Box::pin(tokio::time::sleep_until(deadline))
+    }
+}
+
+struct FakeClockInner {
+    base: Instant,
+    wall_base_nanos: i64,
+    advanced: StdMutex<Duration>,
+    changed: Notify,
+}
+
+/// Process E2E 用の手動時計。時間の読み方と sleeper だけを差し替え、発火判定・予定の永続化・turn 実行は
+/// production と同じ [`System`] の経路を通す。
+#[derive(Clone)]
+pub struct FakeClock(Arc<FakeClockInner>);
+
+impl Default for FakeClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FakeClock {
+    pub fn new() -> Self {
+        Self(Arc::new(FakeClockInner {
+            base: Instant::now(),
+            wall_base_nanos: system_wall_nanos(),
+            advanced: StdMutex::new(Duration::ZERO),
+            changed: Notify::new(),
+        }))
+    }
+
+    pub fn advance(&self, duration: Duration) {
+        let mut advanced = self.0.advanced.lock().unwrap();
+        *advanced = advanced
+            .checked_add(duration)
+            .expect("fake clock duration overflow");
+        drop(advanced);
+        self.0.changed.notify_waiters();
+    }
+
+    fn advanced(&self) -> Duration {
+        *self.0.advanced.lock().unwrap()
+    }
+}
+
+impl Clock for FakeClock {
+    fn now(&self) -> Instant {
+        self.0.base + self.advanced()
+    }
+
+    fn now_wall_nanos(&self) -> i64 {
+        self.0
+            .wall_base_nanos
+            .checked_add(self.advanced().as_nanos() as i64)
+            .expect("fake wall clock overflow")
+    }
+
+    fn sleep_until(&self, deadline: Instant) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
+        let clock = self.clone();
+        Box::pin(async move {
+            loop {
+                let changed = clock.0.changed.notified();
+                if clock.now() >= deadline {
+                    return;
+                }
+                changed.await;
+            }
+        })
+    }
+}
+
+#[allow(clippy::disallowed_methods)]
+fn system_wall_nanos() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0)
+}
 
 /// 返答の絞りの生成点指示（DESIGN-attention §2・生成点指示は本体 #692 で実証済みの型）。高消費の
 /// 着火作者への返答ターンで、応答直前の文脈（`rendered` の末尾）へ差し込む短文。max_tokens 絞り・
@@ -613,6 +717,7 @@ struct Inner {
     /// 文脈予算の物差し（§06/§10）。会話予算・記憶索引予算・文脈の観測を全部これで数える。
     /// 本番は o200k 見積り、テストは短い実装を差す（差し替え口・別プロバイダのトークナイザ差し替え）。
     counter: Arc<dyn TokenCounter>,
+    clock: Arc<dyn Clock>,
     base: Instant,
     cfg: Config,
     /// 起動時に確定した**会話予算**（近似トークン・§06）。= 実効モデル（`engine.model()`）の
@@ -671,6 +776,31 @@ impl System {
         counter: Arc<dyn TokenCounter>,
         cfg: Config,
     ) -> System {
+        Self::new_with_clock(
+            store,
+            engine,
+            tool_host,
+            shell_host,
+            notifier,
+            counter,
+            cfg,
+            Arc::new(TokioClock),
+        )
+    }
+
+    /// 時刻源を明示して組み立てる。発火や期限の判断は `System` の同じコードに留め、process E2E は
+    /// [`FakeClock`] だけを差し込む。
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_clock(
+        store: Store,
+        engine: Arc<dyn Engine>,
+        tool_host: Arc<dyn ToolHost>,
+        shell_host: Arc<dyn ShellHost>,
+        notifier: Arc<dyn Notifier>,
+        counter: Arc<dyn TokenCounter>,
+        cfg: Config,
+        clock: Arc<dyn Clock>,
+    ) -> System {
         // 割合の妥当域を起動時に fail loud で検査する（window>0 ガードと同じ流儀・非対称を作らない・§15）。
         // 負値は `as usize` で黙って 0 予算（＝毎ターン切り詰め）へ落ちるので塞ぐ。会話予算は window の
         // 何割なので 0<r<=1（1.0 は「window 全部」で許す）。記憶索引は会話予算の**一部**なので 0<r<1。
@@ -696,6 +826,7 @@ impl System {
         // 記憶索引予算は会話予算の割合で導出する（記憶とワーカー §03・固定値を持たない）。
         let memory_index_budget_tokens =
             ((context_budget_tokens as f64) * cfg.memory_index_ratio) as usize;
+        let base = clock.now();
         System(Arc::new(Inner {
             store,
             engine,
@@ -704,7 +835,8 @@ impl System {
             fetcher: StdMutex::new(None),
             notifier,
             counter,
-            base: Instant::now(),
+            clock,
+            base,
             cfg,
             context_budget_tokens,
             memory_index_budget_tokens,
@@ -751,10 +883,10 @@ impl System {
         self.0.transport.lock().unwrap().clone()
     }
 
-    // ---- 時刻（Clock 抽象を足さない。tokio::time を使う。詳細§01）----
+    // ---- 時刻（判断は core。時計だけを seam にして process E2E から進める）----
 
     fn now(&self) -> Instant {
-        Instant::now()
+        self.0.clock.now()
     }
     fn nanos(&self, i: Instant) -> i64 {
         i.saturating_duration_since(self.0.base).as_nanos() as i64
@@ -764,15 +896,17 @@ impl System {
     }
     /// 壁時計（詳細§04「時計は 2 種類ある」）。予定の時刻・出来事の時刻はこれで持つ。
     /// プロセスを跨いで意味を持つので、単調時計で永続化すると再起動で位相が消える。
-    /// 抽象（Clock trait）は足さない — 直接 SystemTime を読む。
     // 壁時計が epoch より前（起こり得ないが型上あり得る）なら 0。Err に「引けなかった」の意味は無い。
-    #[allow(clippy::disallowed_methods)]
     fn now_wall_nanos(&self) -> i64 {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos() as i64)
-            .unwrap_or(0)
+        self.0.clock.now_wall_nanos()
+    }
+
+    fn sleep_until(&self, deadline: Instant) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
+        self.0.clock.sleep_until(deadline)
+    }
+
+    fn sleep_for(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
+        self.sleep_until(self.now() + duration)
     }
 
     // ---- 立ち上げ用 API（本番では app が担う）----
@@ -2315,7 +2449,7 @@ impl System {
                     // 断片が届いた → ループでアイドルの sleep を張り直す（＝計測の取り直し）。
                     // sink はこの関数が持っているので、送信側が落ちて None が返ることはない。
                 }
-                _ = tokio::time::sleep(self.0.cfg.idle_cap) => {
+                _ = self.sleep_for(self.0.cfg.idle_cap) => {
                     return InferOutcome::Idle;
                 }
             }
@@ -4784,7 +4918,7 @@ impl System {
                     Err(_) => self.settle_background(bg, SettleOutcome::Failed("ツールタスクが異常終了")),
                 }
             }
-            _ = tokio::time::sleep_until(deadline.0) => {
+            _ = self.sleep_until(deadline.0) => {
                 // 上限で中断として決着させる。勝手に再実行しない（§07・§15）。
                 task.abort();
                 self.settle_background(bg, SettleOutcome::Deadline);
@@ -5587,7 +5721,7 @@ impl System {
         let sys = self.clone();
         let reason_owned = reason.to_string();
         let jh = tokio::spawn(async move {
-            tokio::time::sleep_until(at).await;
+            sys.sleep_until(at).await;
             sys.batch_fire(place, &reason_owned);
         });
         sl.insert(key, jh.abort_handle());

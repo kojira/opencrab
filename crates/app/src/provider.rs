@@ -46,6 +46,7 @@ enum MockScript {
     PrefixedNoReply,
     ToolThenReply,
     PlaintextToolSettledReply,
+    ClockBatch,
 }
 
 pub const MOCK_MODEL: &str = "mock";
@@ -76,6 +77,7 @@ impl MockEngine {
             "prefixed_no_reply" => MockScript::PrefixedNoReply,
             "tool_then_reply" => MockScript::ToolThenReply,
             "plaintext_tool_settled_reply" => MockScript::PlaintextToolSettledReply,
+            "clock_batch" => MockScript::ClockBatch,
             other => return Err(format!("unknown OPENCRAB_MOCK_LLM_SCRIPT: {other}")),
         };
         Ok(Self { script })
@@ -189,6 +191,24 @@ impl Engine for MockEngine {
                     ));
                 }
                 Ok(say("mock reply after settled plaintext tool result"))
+            }
+            MockScript::ClockBatch => {
+                let has_first = ctx.rendered.contains("synthetic batched first");
+                let has_second = ctx.rendered.contains("synthetic batched second");
+                if has_first || has_second {
+                    if !(has_first && has_second) {
+                        return Err(EngineError(
+                            "mock batch turn did not receive both same-standing events".to_string(),
+                        ));
+                    }
+                    Ok(say("mock batched pair"))
+                } else if ctx.rendered.contains("synthetic immediate clock probe") {
+                    Ok(say("mock immediate clock reply"))
+                } else {
+                    Err(EngineError(
+                        "mock clock script received an unknown turn".to_string(),
+                    ))
+                }
             }
         }
     }
@@ -1575,6 +1595,22 @@ mod tests {
             only_say(&second),
             "mock reply after settled plaintext tool result"
         );
+
+        let clock = MockEngine {
+            script: MockScript::ClockBatch,
+        };
+        let immediate_ctx = Context {
+            rendered: "synthetic immediate clock probe".to_string(),
+            ..Context::default()
+        };
+        let immediate = clock.infer(&immediate_ctx, &chunks).await.unwrap();
+        assert_eq!(only_say(&immediate), "mock immediate clock reply");
+        let batched_ctx = Context {
+            rendered: "synthetic batched first\nsynthetic batched second".to_string(),
+            ..Context::default()
+        };
+        let batched = clock.infer(&batched_ctx, &chunks).await.unwrap();
+        assert_eq!(only_say(&batched), "mock batched pair");
     }
 
     fn only_error(deltas: Vec<Delta>) -> String {
