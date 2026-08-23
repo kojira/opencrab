@@ -487,6 +487,145 @@ fn orphan_history_agent_id_lands_in_raw_class_with_byte_identical_ids() {
     }
 }
 
+#[test]
+fn external_speaker_null_metadata_and_turn_number_preserve_nulls() {
+    const SPEAKER_ID: &[u8] = b"1000000000000002";
+    let speaker_id = std::str::from_utf8(SPEAKER_ID).unwrap();
+    let temporary = tempfile::tempdir().unwrap();
+    let db = temporary.path().join("source.db");
+    let conn = Connection::open(&db).unwrap();
+    opencrab_db::schema::initialize(&conn).unwrap();
+    conn.execute_batch(&format!(
+        "INSERT INTO agents(
+           agent_id,name,persona_name,personality,instructions,heartbeat_instructions,
+           model,created_at,updated_at
+         ) VALUES(
+           'agent-canonical','Agent C','persona-c','kind','do work','hb',
+           'openai:synthetic-model','2024-01-01 00:00:00','2024-01-01 00:00:00'
+         );
+         INSERT INTO model_pricing(
+           provider,model,input_price_per_1m,output_price_per_1m,context_window,updated_at
+         ) VALUES('openai','synthetic-model',1,2,128000,'2024-01-01 00:00:00');
+         INSERT INTO memory_sessions(
+           id,agent_id,session_id,log_type,content,speaker_id,turn_number,metadata_json,created_at
+         ) VALUES
+           (1,'agent-canonical','sess-external','speech','external speech','{speaker_id}',NULL,NULL,'2024-01-05 00:00:00');"
+    ))
+    .unwrap();
+    drop(conn);
+
+    let report = run_migrate(&db);
+    assert!(
+        report
+            .classes
+            .iter()
+            .all(|class| class.exact_one_violations == 0),
+        "accounting must balance"
+    );
+
+    let history = report
+        .classes
+        .iter()
+        .find(|class| {
+            class.source_table == "memory_sessions" && class.logical_class == "history_event"
+        })
+        .expect("history_event class");
+    assert_eq!(history.source_rows, 1);
+    assert_eq!(history.canonical_outcomes, 1);
+    assert_eq!(history.dropped_outcomes, 0);
+    assert_eq!(history.raw_outcomes, 0);
+    assert_eq!(
+        history.physical_rows.get("legacy_history_archive").copied(),
+        Some(1)
+    );
+    assert!(
+        report
+            .classes
+            .iter()
+            .all(|class| class.logical_class != "orphan_history_raw"),
+        "canonical external speaker must not take the orphan raw class"
+    );
+
+    let conn = Connection::open(&db).unwrap();
+    let archive = conn
+        .query_row(
+            "SELECT speaker_source_id,source_turn_number,metadata,log_kind
+             FROM legacy_history_archive",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, Option<Vec<u8>>>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<Vec<u8>>>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(archive.0.as_deref(), Some(SPEAKER_ID));
+    assert_eq!(archive.1, None, "NULL turn_number must stay NULL");
+    assert_eq!(archive.2, None, "NULL metadata_json must stay NULL");
+    assert_eq!(archive.3, "speech");
+
+    let said: i64 = conn
+        .query_row("SELECT COUNT(*) FROM events WHERE kind='said'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        said, 0,
+        "NULL metadata cannot invent a Discord/Nostr Said join"
+    );
+
+    let audits: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM legacy_audit_records WHERE metadata IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(audits, 1);
+}
+
+#[test]
+fn malformed_non_null_history_metadata_fails_loud() {
+    let temporary = tempfile::tempdir().unwrap();
+    let db = temporary.path().join("source.db");
+    let conn = Connection::open(&db).unwrap();
+    opencrab_db::schema::initialize(&conn).unwrap();
+    conn.execute_batch(
+        "INSERT INTO agents(
+           agent_id,name,persona_name,personality,instructions,heartbeat_instructions,
+           model,created_at,updated_at
+         ) VALUES(
+           'agent-canonical','Agent C','persona-c','kind','do work','hb',
+           'openai:synthetic-model','2024-01-01 00:00:00','2024-01-01 00:00:00'
+         );
+         INSERT INTO model_pricing(
+           provider,model,input_price_per_1m,output_price_per_1m,context_window,updated_at
+         ) VALUES('openai','synthetic-model',1,2,128000,'2024-01-01 00:00:00');
+         INSERT INTO memory_sessions(
+           id,agent_id,session_id,log_type,content,speaker_id,turn_number,metadata_json,created_at
+         ) VALUES
+           (1,'agent-canonical','sess-external','speech','external speech','1000000000000002',NULL,'{','2024-01-05 00:00:00');",
+    )
+    .unwrap();
+    drop(conn);
+
+    let (config, environment) = write_inputs(db.parent().unwrap());
+    let mut conn = Connection::open(&db).unwrap();
+    let error = migrate_in_place(&mut conn, &config, &environment, CAPTURED_AT).unwrap_err();
+    match error {
+        ConverterError::Accounting(message) => {
+            assert!(
+                message.contains("malformed inspected metadata"),
+                "expected malformed inspect failure, got {message}"
+            );
+        }
+        other => panic!("expected Accounting, got {other}"),
+    }
+}
+
 fn write_inputs(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
     let config = dir.join("empty.toml");
     let environment = dir.join("empty.env");

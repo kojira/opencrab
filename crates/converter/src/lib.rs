@@ -3163,11 +3163,9 @@ fn inspected_metadata(
     metadata: Option<&[u8]>,
     source_row_id: i64,
 ) -> Result<serde_json::Map<String, serde_json::Value>> {
-    let bytes = metadata.ok_or_else(|| {
-        ConverterError::Accounting(format!(
-            "history row {source_row_id} lacks inspected metadata"
-        ))
-    })?;
+    let Some(bytes) = metadata else {
+        return Ok(serde_json::Map::new());
+    };
     let value = parse_json_without_duplicate_keys(bytes).map_err(|_| {
         ConverterError::Accounting(format!(
             "history row {source_row_id} has malformed inspected metadata"
