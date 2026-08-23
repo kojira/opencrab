@@ -123,6 +123,51 @@ async fn later_turn_sees_prior_utterance() {
     );
 }
 
+// #752: 通常の即応ターンは、着火した発言を会話ログの一部として読むだけでなく、
+// 「どの発言への応答か」が分かる予約済みブロックへ同じ seq で明示する。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn immediate_turn_identifies_its_trigger_separately_from_the_log() {
+    let h = build(Config::default());
+    let agent = h
+        .sys
+        .create_subject(SubjectKind::Agent, "Agent", "Agent", Standing::Trusted);
+    let human = h
+        .sys
+        .create_subject(SubjectKind::Human, "Human", "Human", Standing::Owner);
+    let place = h.sys.create_place(
+        None,
+        None,
+        &Policy::immediate_on(&[Property::Direct]).with_default(agent),
+        None,
+    );
+    h.sys.join(place, agent, Role::Participant);
+    h.sys.join(place, human, Role::Participant);
+    h.eng.push(Step::say_done("synthetic reply"));
+
+    let trigger = h
+        .sys
+        .deliver(place, Incoming::said(human, "synthetic trigger"))
+        .unwrap();
+    settle().await;
+
+    let contexts = h.eng.contexts();
+    assert_eq!(contexts.len(), 1, "one immediate turn");
+    let context = &contexts[0];
+    let trigger_block = context
+        .split_once("=== 即応の発端 ===\n")
+        .and_then(|(_, rest)| rest.split_once("\n\n").map(|(block, _)| block))
+        .expect("explicit trigger block");
+    assert!(
+        trigger_block.contains(&format!("[{trigger}] Human: synthetic trigger")),
+        "trigger block identifies the exact event: {context}"
+    );
+    assert_eq!(
+        context.matches("synthetic trigger").count(),
+        2,
+        "the trigger is distinct from, and also remains in, the conversation log"
+    );
+}
+
 // 2. 即応が走っているターンを早期に終わらせる（割り込み）。
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn immediate_interrupts_running_turn() {
@@ -1839,16 +1884,16 @@ async fn read_log_recovers_skipped_range() {
 
     let ctxs = h.eng.contexts();
     assert!(ctxs.len() >= 2, "2 反復回るべき");
-    // 1 反復目の文脈（最初の user テキスト）では古い SEED0 は切り詰められている。
+    // 1 反復目では発端の SEED0 は #752 の予約ブロックに残るが、次に古い SEED1 は切り詰められる。
     assert!(
-        !ctxs[0].contains("SEED0"),
-        "SEED0 は文脈から落ちている: {}",
+        !ctxs[0].contains("SEED1"),
+        "発端ではない古い SEED1 は文脈から落ちている: {}",
         ctxs[0]
     );
     // ツールで読み直した結果は、tool_result ブロックとして 2 反復目の会話に戻る（テキストに混ぜない・§05）。
     let hists = h.eng.histories();
     assert!(
-        hists[1].contains("SEED0"),
+        hists[1].contains("SEED1"),
         "落ちた分をツールで手に取れる（tool_result で還る）: {}",
         hists[1]
     );
@@ -2027,6 +2072,65 @@ async fn read_log_rounds_limit_to_the_cap() {
             Err(ReadReject::NotBound)
         ),
         "結んでいない住所は not_bound"
+    );
+}
+
+// #751: core の read 投影が内部イベントを分類する。行自体は消さず、チャット面が既定で分離する印を持つ。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn read_log_marks_internal_events_without_deleting_them() {
+    let h = build(Config::default());
+    let gate = GateName::new("web");
+    let addr = "room:main";
+    let place = h
+        .sys
+        .create_place(Some(addr), None, &Policy::default(), None);
+    h.sys.store().add_channel(place, &gate, addr).unwrap();
+
+    for (index, kind) in [
+        EventKind::Said,
+        EventKind::Spoke,
+        EventKind::Settled,
+        EventKind::Interrupted,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        h.sys
+            .store()
+            .append(
+                place,
+                &NewEvent {
+                    kind,
+                    author_subject: None,
+                    author_external: None,
+                    content: Content::text(format!("synthetic event {index}")),
+                    mentions: vec![],
+                    reply_to: None,
+                    target: None,
+                    for_subject: None,
+                    attachments: vec![],
+                },
+                index as i64,
+            )
+            .unwrap();
+    }
+
+    let page = h.sys.read_log(&gate, addr, 1, 10).expect("read ok");
+    assert_eq!(page.events.len(), 4, "internal events remain readable");
+    let projected: Vec<(EventKind, bool)> = page
+        .events
+        .into_iter()
+        .map(|event| (event.kind, event.internal))
+        .collect();
+    assert_eq!(
+        projected,
+        vec![
+            (EventKind::Said, false),
+            (EventKind::Spoke, false),
+            (EventKind::Settled, true),
+            (EventKind::Interrupted, true),
+        ],
+        "only core system events are marked internal"
     );
 }
 

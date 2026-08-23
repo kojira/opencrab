@@ -972,6 +972,7 @@ fn render_read_event(e: &ReadEvent) -> serde_json::Value {
     let mut m = serde_json::Map::new();
     m.insert("seq".into(), e.seq.into());
     m.insert("kind".into(), e.kind.as_str().into());
+    m.insert("internal".into(), e.internal.into());
     m.insert("author".into(), serde_json::Value::Object(author));
     m.insert("content".into(), serde_json::Value::Object(content));
     if let Some(r) = e.reply_to {

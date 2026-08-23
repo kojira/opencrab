@@ -98,7 +98,25 @@ impl Engine for MockEngine {
             done: true,
         };
         match self.script {
-            MockScript::Reply => Ok(say("mock reply")),
+            MockScript::Reply => {
+                // Nostr E2E の合成 mention では、通常の即応ターンに着火発言が会話ログと区別して
+                // 明示されたことまで mock 境界で検査する。通常の provider unit context は対象外。
+                if ctx.rendered.contains("synthetic mention for reply") {
+                    let trigger_block = ctx
+                        .rendered
+                        .split_once("=== 即応の発端 ===\n")
+                        .and_then(|(_, rest)| rest.split_once("\n\n").map(|(block, _)| block));
+                    if !trigger_block.is_some_and(|block| {
+                        block.contains("synthetic mention for reply") && block.contains("[1]")
+                    }) {
+                        return Err(EngineError(
+                            "mock reply turn did not receive the explicit triggering utterance"
+                                .to_string(),
+                        ));
+                    }
+                }
+                Ok(say("mock reply"))
+            }
             MockScript::NoReply => Ok(say("NO_REPLY")),
             MockScript::PrefixedNoReply => Ok(say("mock internal reasoning\nNO_REPLY")),
             MockScript::ToolThenReply => {

@@ -14,7 +14,7 @@ use opencrab_port::{
     Property, Role, SubjectKind, ToolHost, Transport,
 };
 use opencrab_social_runtime::{Config, Policy, System};
-use opencrab_store::Store;
+use opencrab_store::{NewEvent, Store};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1378,6 +1378,51 @@ async fn read_returns_the_whole_conversation() {
     );
     // 2 件で尽きているので next は無い（§02）。
     assert!(ok.get("next").is_none(), "続きが無ければ next は返らない");
+}
+
+// #751: plugd は core の表示判断を変えず、内部イベントの marker を線へ写す。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn read_serializes_core_internal_marker() {
+    let h = build();
+    let g = TestGate::connect(&h.plugd);
+    g.hello_ok("web", "room:.+", json!([]), json!([]), json!([]))
+        .await;
+    let place = h
+        .sys
+        .create_place(Some("room:main"), None, &Policy::default(), None);
+    h.sys.bind_place(place, "web", "room:main").await.unwrap();
+
+    for (index, kind) in [EventKind::Said, EventKind::Settled]
+        .into_iter()
+        .enumerate()
+    {
+        h.sys
+            .store()
+            .append(
+                place,
+                &NewEvent {
+                    kind,
+                    author_subject: None,
+                    author_external: None,
+                    content: Content::text(format!("synthetic event {index}")),
+                    mentions: vec![],
+                    reply_to: None,
+                    target: None,
+                    for_subject: None,
+                    attachments: vec![],
+                },
+                index as i64,
+            )
+            .unwrap();
+    }
+
+    g.send(json!({"id":"r1","m":"read","address":"room:main","from":1}));
+    assert!(g.wait_for(|lines| read_ok(lines, "r1").is_some()).await);
+    let ok = read_ok(&g.log(), "r1").unwrap();
+    let events = ok.get("events").and_then(Value::as_array).unwrap();
+    assert_eq!(events.len(), 2, "read does not delete the internal row");
+    assert_eq!(events[0].get("internal"), Some(&json!(false)));
+    assert_eq!(events[1].get("internal"), Some(&json!(true)));
 }
 
 // 範囲と続きの扱い（プロトコル§02）: limit で切り、続きがあれば next、尽きたら next 無し。

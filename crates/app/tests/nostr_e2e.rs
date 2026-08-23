@@ -482,7 +482,7 @@ async fn run_case(case: Case) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mention_posts_mock_reply_and_records_outbound_external_ref() {
+async fn mention_context_identifies_trigger_and_posts_mock_reply() {
     run_case(Case::Reply).await;
 }
 

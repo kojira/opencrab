@@ -257,6 +257,8 @@ pub struct DeliverError(pub String);
 pub struct ReadEvent {
     pub seq: Seq,
     pub kind: EventKind,
+    /// チャット面へ既定表示しない core 内部イベント。read からは消さず、表示境界がこの印で分離する。
+    pub internal: bool,
     /// そのゲートでの著者の識別子。素性が無ければ None。
     pub author_id: Option<String>,
     /// 表示名（主体なら `name` 列——人格本文 `persona` ではない・統括裁定で分離）。
@@ -1182,7 +1184,8 @@ impl System {
 
     /// 結んだ場のログを読む（プロトコル§02 `read`）。結んでいない住所は `NotBound`。
     ///
-    /// 返すのは**場で起きたこと全部**——種別で絞らない・他のチャネルから入った発話も返る
+    /// 返すのは**場で起きたこと全部**——内部イベントも消さず `ReadEvent::internal` で明示し、
+    /// チャット面の既定表示から分離できるようにする。他のチャネルから入った発話も返る
     /// （1 つの場に複数のチャネルが結ばれていれば、それは同じ 1 つの会話・§02）。読みは
     /// 場でスコープされる（`read_range` は place 単位・ゲートで絞らない）ので、それが自然に守られる。
     ///
@@ -1248,6 +1251,7 @@ impl System {
             events.push(ReadEvent {
                 seq: ev.seq,
                 kind: ev.kind,
+                internal: is_internal_read_kind(ev.kind),
                 author_id,
                 author_display,
                 content: ev.content,
@@ -1808,20 +1812,21 @@ impl System {
 
         // 文脈は**ターンで 1 度だけ**場のログから組む（§05）。反復ごとに組み直さない。
         // 一時的に組めなければ、ターンを失敗として終える（同じ 1 本の後始末へ・§05/§15）。
-        let (mut base_ctx, build_ok) = match self.build_context(&slot, subject, owner_follow_up) {
-            Ok(c) => (c, true),
-            Err(CtxErr::Busy) => {
-                end_reason = "store_busy";
-                // 記録を書いて枠を離す（下の後始末へ）。空の観測で進む。
-                (Context::default(), false)
-            }
-            Err(CtxErr::EmptyPersona) => {
-                // Agent の persona が空——fail loud（黙って空 system を engine へ渡さない）。engine は回さず、
-                // 記録に理由を残して終える（store_busy と同じ「組めなかったので回さない」経路・別の理由）。
-                end_reason = "empty_persona";
-                (Context::default(), false)
-            }
-        };
+        let (mut base_ctx, build_ok) =
+            match self.build_context(&slot, subject, reason, owner_follow_up) {
+                Ok(c) => (c, true),
+                Err(CtxErr::Busy) => {
+                    end_reason = "store_busy";
+                    // 記録を書いて枠を離す（下の後始末へ）。空の観測で進む。
+                    (Context::default(), false)
+                }
+                Err(CtxErr::EmptyPersona) => {
+                    // Agent の persona が空——fail loud（黙って空 system を engine へ渡さない）。engine は回さず、
+                    // 記録に理由を残して終える（store_busy と同じ「組めなかったので回さない」経路・別の理由）。
+                    end_reason = "empty_persona";
+                    (Context::default(), false)
+                }
+            };
 
         // 返答の絞り（DESIGN-attention §2）。着火作者が直近窓で閾値超えなら、このターンを 3 点で絞る:
         // (1) 生成点への短文指示（rendered 末尾） (2) 出力トークン上限 (3) 推論努力ヒント。オーナー・
@@ -2289,6 +2294,7 @@ impl System {
         &self,
         slot: &TurnSlot,
         subject: SubjectId,
+        reason: TurnReason,
         owner_follow_up: bool,
     ) -> Result<Context, CtxErr> {
         let place = slot.place;
@@ -2357,6 +2363,28 @@ impl System {
                     prefix.push('\n');
                 }
                 prefix.push('\n');
+            }
+        }
+
+        // 通常の即応ターンは、着火した event を会話ログとは別の予約済みブロックでも明示する。
+        // trigger は TurnReason が持つ実際の seq から引き、近傍 event へ推測で寄せない。
+        // settled 起点の Immediate は #748 で最初の依頼 seq を保持しており、下の「決着の発端」が
+        // 同じ参照を描くため、そちらへ一本化して二重には載せない。
+        if let TurnReason::Immediate(Some(origin_seq)) = reason {
+            let settled_origin = unread
+                .iter()
+                .any(|ev| ev.kind == EventKind::Settled && ev.reply_to == Some(origin_seq));
+            if !settled_origin {
+                let origin = self
+                    .0
+                    .store
+                    .get_event(place, origin_seq)
+                    .map_err(|_| Busy)?
+                    .expect("immediate origin event must exist in the same place");
+                prefix.push_str("=== 即応の発端 ===\n");
+                let name = self.author_name(&origin)?;
+                prefix.push_str(&render_event(&origin, name.as_deref()));
+                prefix.push_str("\n\n");
             }
         }
 
@@ -5248,5 +5276,26 @@ fn render_event(ev: &opencrab_store::EventRow, author_name: Option<&str>) -> Str
     match attachment_address(ev) {
         Some(addr) => format!("{line}{addr}"),
         None => line,
+    }
+}
+
+/// read は生ログを欠落させず、チャット面へ既定表示しない「系の出来事」を印で分離する。
+/// 列挙を網羅して、新しい EventKind が増えたときに core で表示判断を要求する。
+fn is_internal_read_kind(kind: EventKind) -> bool {
+    match kind {
+        EventKind::Settled | EventKind::Interrupted => true,
+        EventKind::Said
+        | EventKind::Edited
+        | EventKind::Retracted
+        | EventKind::Reacted
+        | EventKind::UiAction
+        | EventKind::Spoke
+        | EventKind::Quoted
+        | EventKind::Boosted
+        | EventKind::ReactEffect
+        | EventKind::Amended
+        | EventKind::RetractEffect
+        | EventKind::UiPosted
+        | EventKind::ReadMarked => false,
     }
 }

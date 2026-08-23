@@ -667,7 +667,17 @@ async fn handle_get(
     });
     match shared.request(id, read).await {
         Outcome::Ok(ok) => {
-            let messages = read_to_messages(&ok);
+            let messages = match read_to_messages(&ok) {
+                Ok(messages) => messages,
+                Err(()) => {
+                    return write_response(
+                        stream,
+                        502,
+                        &json!({"error":"invalid core read projection"}),
+                    )
+                    .await;
+                }
+            };
             // 場の揮発表示（§05）を添える: `active`（ターンが走っているか）と `label`（進捗・無ければ null）。
             // 履歴（messages）は core の read、活動（active/label）は core の activity 通知の写し——別の源。
             let (active, label) = shared.room_status(room);
@@ -697,14 +707,16 @@ async fn handle_get(
     }
 }
 
-/// `read` の 1 ページ（events）を、web の HTTP の形（messages）へ写す。何を描くかはゲートが決める（§02）。
-/// 発話（said/spoke）を人／エージェントとして見せ、他の種別はそのままの種別で残す（黙って落とさない）。
-fn read_to_messages(ok: &Value) -> Vec<Value> {
+/// `read` の 1 ページ（events）を、web の HTTP の形（messages）へ写す。
+/// core が決めた `internal` の印はそのまま運び、チャット画面が既定表示から分離できるようにする。
+/// 発話（said/spoke）を人／エージェントとして見せ、他の種別も生ログとしては落とさない。
+fn read_to_messages(ok: &Value) -> Result<Vec<Value>, ()> {
     let mut out = vec![];
     if let Some(arr) = ok.get("events").and_then(|x| x.as_array()) {
         for ev in arr {
             let seq = ev.get("seq").and_then(|x| x.as_i64()).unwrap_or(0);
             let kind_wire = ev.get("kind").and_then(|x| x.as_str()).unwrap_or("");
+            let internal = ev.get("internal").and_then(|x| x.as_bool()).ok_or(())?;
             let kind = match kind_wire {
                 "said" => "user",
                 "spoke" => "agent",
@@ -725,10 +737,17 @@ fn read_to_messages(ok: &Value) -> Vec<Value> {
                 .pointer("/content/symbol")
                 .and_then(|x| x.as_str())
                 .unwrap_or("");
-            out.push(json!({"seq": seq, "who": who, "text": text, "kind": kind, "symbol": symbol}));
+            out.push(json!({
+                "seq": seq,
+                "who": who,
+                "text": text,
+                "kind": kind,
+                "symbol": symbol,
+                "internal": internal,
+            }));
         }
     }
-    out
+    Ok(out)
 }
 
 async fn handle_post(
@@ -927,6 +946,50 @@ mod tests {
         );
         // ここが肝：origin を送るからこそ、この発話が宛先つき効果の対象になれる（§03）。
         assert_eq!(ev.get("origin").and_then(|x| x.as_str()), Some("web-42-7"));
+    }
+
+    // #751: HTTP 投影は core の internal marker を失わない。画面はこの印を見て既定非表示にする。
+    #[test]
+    fn read_projection_preserves_core_internal_marker() {
+        let messages = read_to_messages(&json!({
+            "events": [
+                {
+                    "seq": 1,
+                    "kind": "said",
+                    "internal": false,
+                    "author": {"display": "Synthetic Human"},
+                    "content": {"text": "hello"}
+                },
+                {
+                    "seq": 2,
+                    "kind": "settled",
+                    "internal": true,
+                    "author": {},
+                    "content": {"text": "synthetic result"}
+                }
+            ]
+        }))
+        .expect("valid core projection");
+        assert_eq!(messages.len(), 2, "raw HTTP projection keeps both rows");
+        assert_eq!(messages[0].get("internal"), Some(&json!(false)));
+        assert_eq!(messages[1].get("internal"), Some(&json!(true)));
+        assert!(
+            CHAT_HTML.contains("if (m.internal === true) return;"),
+            "the chat surface hides core-marked internal rows by default"
+        );
+    }
+
+    #[test]
+    fn read_projection_rejects_a_missing_internal_marker() {
+        let result = read_to_messages(&json!({
+            "events": [{
+                "seq": 1,
+                "kind": "said",
+                "author": {"display": "Synthetic Human"},
+                "content": {"text": "hello"}
+            }]
+        }));
+        assert!(result.is_err(), "missing core judgment must not fall back");
     }
 
     // say の ack は origin を返す（§04・自分の発話を後から指せるように）。

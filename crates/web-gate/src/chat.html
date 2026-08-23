@@ -72,16 +72,17 @@
     seen.add(m.seq);
     if (typeof m.seq === "number" && m.seq > since) since = m.seq;
 
+    // core が内部と判定した event は read/seq から消さず、チャット面だけ既定で分離する。
+    if (m.internal === true) return;
+
     const el = document.createElement("div");
     if (m.kind === "user" || m.kind === "agent") {
       el.className = "msg " + m.kind;
       el.innerHTML = `<div class="who">${esc(m.who)}</div>${esc(m.text)}`;
     } else {
-      // react・settled 等はシステム行として簡素に見せる（黙って落とさない）。
+      // react 等の会話上の効果はシステム行として簡素に見せる。
       el.className = "sys";
-      if (m.kind === "settled") {
-        el.textContent = `（決着）${m.text || ""}`.trim();
-      } else if (m.kind === "react" || m.kind === "reacted") {
+      if (m.kind === "react" || m.kind === "reacted") {
         // 絵文字は symbol に載る（text ではない）。無ければ言葉で表す。
         el.textContent = `${m.who}が ${m.symbol || "リアクション"} をつけた`;
       } else {
