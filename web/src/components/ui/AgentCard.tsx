@@ -64,7 +64,11 @@ export default function AgentCard({ agent }: Props) {
           <span className="material-symbols-outlined text-base text-primary/60">
             psychology
           </span>
-          <span>{t('agentCard.skills', { count: agent.skill_count })}</span>
+          <span>
+            {agent.skill_count == null
+              ? '—'
+              : t('agentCard.skills', { count: agent.skill_count })}
+          </span>
         </div>
         <div className="flex items-center gap-1.5 text-body-sm text-on-surface-variant">
           <span className="material-symbols-outlined text-base text-tertiary/60">forum</span>

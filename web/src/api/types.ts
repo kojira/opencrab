@@ -2,10 +2,12 @@
 export interface AgentSummary {
   id: string;
   name: string;
-  persona_name: string;
+  // oc2 に該当概念が無いと API は null（未計測）を返す。nullable にして描画側で扱う。
+  persona_name: string | null;
   image_url: string | null;
   status: string;
-  skill_count: number;
+  // null = 未計測（oc2 に skills が無い）。0（実測で0件）とは意味が違う。
+  skill_count: number | null;
   session_count: number;
 }
 
@@ -72,7 +74,8 @@ export interface SkillDto {
 export interface CuratedMemoryDto {
   id: string;
   agent_id: string;
-  category: string;
+  // oc2 の memories にカテゴリの概念が無いと API は null（未計測）。
+  category: string | null;
   content: string;
 }
 
@@ -88,21 +91,23 @@ export interface SessionLogResult {
 // Session
 export interface SessionRow {
   id: string;
-  mode: string;
+  // oc2 の place に mode/done_count の概念が無いと API は null（未計測）。
+  mode: string | null;
   theme: string;
   phase: string;
   turn_number: number;
   status: string;
   participant_ids_json: string;
   facilitator_id: string | null;
-  done_count: number;
+  done_count: number | null;
   max_turns: number | null;
   metadata_json: string | null;
 }
 
 export interface SessionDto {
   id: string;
-  mode: string;
+  // SessionRow.mode（nullable）をそのまま写す。
+  mode: string | null;
   theme: string;
   phase: string;
   turn_number: number;

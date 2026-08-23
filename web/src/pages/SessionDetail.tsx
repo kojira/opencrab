@@ -174,7 +174,7 @@ export default function SessionDetail() {
                   {session.theme}
                 </h1>
                 <div className="flex items-center gap-2 flex-wrap text-body-sm text-on-surface-variant mt-0.5">
-                  <span>{t('sessionDetail.mode', { value: session.mode })}</span>
+                  <span>{t('sessionDetail.mode', { value: session.mode ?? '—' })}</span>
                   <span>{t('sessionDetail.phase', { value: session.phase })}</span>
                   <span>{t('sessionDetail.turn', { value: session.turn_number })}</span>
                 </div>

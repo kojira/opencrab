@@ -81,7 +81,7 @@ export default function AgentMemory() {
                 <div className="flex items-center justify-between mb-3">
                   <span className="badge-info">
                     <span className="material-symbols-outlined text-sm mr-0.5">label</span>
-                    {memory.category}
+                    {memory.category ?? '—'}
                   </span>
                   <span className="text-label-sm text-on-surface-variant font-mono">
                     {memory.id}
