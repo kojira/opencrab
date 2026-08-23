@@ -1,0 +1,33 @@
+[package]
+name = "opencrab-admin-server"
+version.workspace = true
+edition.workspace = true
+
+# 管理面（ダッシュボード）の読み取り API + SPA 配信（#767 Phase 1）。
+# 会話ゲート（web-gate）とは別プロセス・別クレート。旧 crates/server の読み系ハンドラを
+# ほぼそのまま移植し、置き場所だけ分離した。判断は core/store・DB（opencrab-db）側に置き、
+# ここは HTTP への配送とレスポンス整形だけを担う。
+[[bin]]
+name = "admin-server"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
+rusqlite = { workspace = true }
+# schedules の next_fire 算出（旧 crates/server::schedule_cron を移植）。版は旧ワークスペースのまま。
+chrono-tz = "0.10.4"
+croner = "3.0.1"
+opencrab-store = { path = "../store" }
+opencrab-port = { path = "../port" }
+# 本体 DB スキーマ（正本・AGREED §2.11）の queries と Db ハンドル。旧テーブル系の読み取りに使う。
+opencrab-db = { path = "../db" }
+
+[lints]
+workspace = true
