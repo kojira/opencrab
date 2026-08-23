@@ -15,6 +15,11 @@ path = "src/bin/opencrab-social-runtime.rs"
 name = "opencrab-gate-status"
 path = "src/bin/opencrab-gate-status.rs"
 
+# LLM ログの読み口（#766）。読み取り専用で稼働 DB を覗き、リスト＋詳細を出す。
+[[bin]]
+name = "opencrab-llm-logs"
+path = "src/bin/opencrab-llm-logs.rs"
+
 [[bin]]
 name = "opencrab-gate-runner"
 path = "src/bin/opencrab-gate-runner.rs"

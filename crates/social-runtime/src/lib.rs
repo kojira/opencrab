@@ -176,6 +176,119 @@ struct CtxObs {
     skipped_to_seq: Option<Seq>,
 }
 
+/// 反復 1 回ぶんの LLM 呼び出しの観測（#766）。ターン終了時にまとめて `llm_logs` へ書く
+/// （`turn_record_id` は turn を書き終えて初めて確定するので、`CtxObs` と同じくターン末に流す）。
+/// `request`/`response`/`tool_calls` は core が組んだ形（`Context`/`InferOutput`）を写した JSON 文字列。
+struct LlmObs {
+    iteration: i64,
+    model: String,
+    request: String,
+    response: Option<String>,
+    tool_calls: Option<String>,
+    outcome: &'static str,
+    error_detail: Option<String>,
+    requested_at: i64,
+    latency_ms: i64,
+}
+
+/// core が組んだ文脈（送ったもの）を逐語で JSON 文字列へ写す（#766）。**秘密は Context に存在しない**
+/// （Authorization・API キーを wire に足すのは provider）ので、ここに載ることは構造的に無い。
+/// 画像パートは実バイトを載せず種別と大きさだけ残す（ログを肥大させない・秘密でもない）。
+fn render_llm_request(ctx: &Context) -> String {
+    let history: Vec<serde_json::Value> = ctx
+        .history
+        .iter()
+        .map(|m| {
+            let role = match m.role {
+                MsgRole::User => "user",
+                MsgRole::Assistant => "assistant",
+            };
+            let content: Vec<serde_json::Value> = m.content.iter().map(render_block).collect();
+            serde_json::json!({ "role": role, "content": content })
+        })
+        .collect();
+    let tools: Vec<&str> = ctx.tools.iter().map(|t| t.name.as_str()).collect();
+    let throttle = ctx.throttle.map(|t| {
+        serde_json::json!({
+            "max_output_tokens": t.max_output_tokens,
+            "effort": match t.effort {
+                Effort::Low => "low",
+                Effort::Medium => "medium",
+                Effort::High => "high",
+            },
+        })
+    });
+    serde_json::json!({
+        "system": ctx.system,
+        "rendered": ctx.rendered,
+        "history": history,
+        "tools": tools,
+        "throttle": throttle,
+    })
+    .to_string()
+}
+
+fn render_block(b: &Block) -> serde_json::Value {
+    match b {
+        Block::Text(t) => serde_json::json!({ "type": "text", "text": t }),
+        Block::ToolUse { id, name, input } => {
+            serde_json::json!({ "type": "tool_use", "id": id, "name": name, "input": input })
+        }
+        Block::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => {
+            let parts: Vec<serde_json::Value> = content
+                .iter()
+                .map(|p| match p {
+                    Part::Text(t) => serde_json::json!({ "type": "text", "text": t }),
+                    // 実バイトは載せない（大きく・秘密ではないが不要）。種別と大きさだけ。
+                    Part::ImageBytes { media_type, data } => {
+                        serde_json::json!({ "type": "image", "media_type": media_type, "bytes": data.len() })
+                    }
+                })
+                .collect();
+            serde_json::json!({
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "is_error": is_error,
+                "content": parts,
+            })
+        }
+    }
+}
+
+/// 推論が返したもの（効果と道具呼び出し）を JSON 文字列へ写す（#766）。効果本文＝返答、道具呼び出しは
+/// 別列（元 opencrab の `response`/`tool_calls` 分離と同じ）。呼び出しが無ければ tool_calls は None。
+fn summarize_output(o: &InferOutput) -> (String, Option<String>) {
+    let effects: Vec<serde_json::Value> = o
+        .effects
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "kind": e.kind.as_wire(),
+                "text": e.content.text,
+                "place": e.place,
+                "target": e.target,
+                "verb": e.verb,
+            })
+        })
+        .collect();
+    let response = serde_json::json!({ "effects": effects, "done": o.done }).to_string();
+    let tool_calls = if o.tool_calls.is_empty() {
+        None
+    } else {
+        let calls: Vec<serde_json::Value> = o
+            .tool_calls
+            .iter()
+            .map(|tc| serde_json::json!({ "id": tc.id, "name": tc.name, "args": tc.args }))
+            .collect();
+        Some(serde_json::json!(calls).to_string())
+    };
+    (response, tool_calls)
+}
+
 struct ImmediateCandidate {
     subject: SubjectId,
     trigger: Seq,
@@ -2502,6 +2615,8 @@ impl System {
         let mut pending_prose: Vec<EffectSpec> = vec![];
         // 反復ごとの文脈の観測（§10）。会話が積み上がるので反復ごとにトークン数が増える。
         let mut ctx_obs: Vec<CtxObs> = vec![];
+        // 反復ごとの LLM 呼び出しの観測（#766）。ターン末に turn_id と紐付けて llm_logs へ書く。
+        let mut llm_obs: Vec<LlmObs> = vec![];
 
         // read cursor を進める前に、この turn の origin input range / standing を確定する。
         // Settled turn は永続 provenance の standing を継承するため、owner-only tool も元 turn と同じ
@@ -2647,15 +2762,61 @@ impl System {
 
             // 上限を掛けるのは 1 回の推論だけ（§05）。チャンク間のアイドルで測る（総時間ではない）ので、
             // バイトが流れている限り長い生成は切らず、止まった推論だけ切る。プロバイダがストールしても枠を永久に握らない。
-            let out = match self.infer_with_idle_cap(&ctx).await {
-                InferOutcome::Done(o) => o,
+            // LLM ログ（#766）。この反復で「何を送り・何が返り・どのツールが呼ばれたか」を写す。
+            // request は推論を投げる前の文脈から作る。requested_at は再起動を跨いで意味を持つ壁時計、
+            // latency は単調時計の差。結末（done/failed/idle）ごとに 1 件積み、ターン末に turn_id と書く。
+            let llm_request = render_llm_request(&ctx);
+            let llm_model = self.0.engine.model().to_string();
+            let llm_requested_at = self.now_wall_nanos();
+            let llm_started = self.now_nanos();
+            let outcome = self.infer_with_idle_cap(&ctx).await;
+            let llm_latency_ms = (self.now_nanos() - llm_started) / 1_000_000;
+            let out = match outcome {
+                InferOutcome::Done(o) => {
+                    let (response, tool_calls) = summarize_output(&o);
+                    llm_obs.push(LlmObs {
+                        iteration: iterations,
+                        model: llm_model,
+                        request: llm_request,
+                        response: Some(response),
+                        tool_calls,
+                        outcome: "done",
+                        error_detail: None,
+                        requested_at: llm_requested_at,
+                        latency_ms: llm_latency_ms,
+                    });
+                    o
+                }
                 InferOutcome::Failed(error) => {
+                    // 空応答（§EMPTY_RESPONSE_DETAIL）もここに来る——理由を逐語で llm_logs に残す。
+                    llm_obs.push(LlmObs {
+                        iteration: iterations,
+                        model: llm_model,
+                        request: llm_request,
+                        response: None,
+                        tool_calls: None,
+                        outcome: "failed",
+                        error_detail: Some(error.0.clone()),
+                        requested_at: llm_requested_at,
+                        latency_ms: llm_latency_ms,
+                    });
                     end_reason = "failed";
                     failure_detail = Some(error.0);
                     break;
                 }
                 InferOutcome::Idle => {
                     // アイドル上限に達した（ストール）。黙って再試行せず、ターンを終える（§05）。
+                    llm_obs.push(LlmObs {
+                        iteration: iterations,
+                        model: llm_model,
+                        request: llm_request,
+                        response: None,
+                        tool_calls: None,
+                        outcome: "idle",
+                        error_detail: None,
+                        requested_at: llm_requested_at,
+                        latency_ms: llm_latency_ms,
+                    });
                     end_reason = "idle_timeout";
                     break;
                 }
@@ -2929,6 +3090,28 @@ impl System {
                     prompt_tokens: o.prompt_tokens,
                 })
                 .expect("context record must be written");
+        }
+
+        // 反復ごとの LLM 呼び出しを残す（#766）。書き込みの失敗は握り潰さず落とす（context record と
+        // 同じ流儀・fail loud）。挙動調査の第一手がこの行——欠けたら「何を送り何が返ったか」を失う。
+        for o in llm_obs {
+            self.0
+                .store
+                .write_llm_log(&opencrab_store::NewLlmLog {
+                    turn_record_id: turn_id,
+                    place,
+                    subject,
+                    iteration: o.iteration,
+                    model: o.model,
+                    request: o.request,
+                    response: o.response,
+                    tool_calls: o.tool_calls,
+                    outcome: o.outcome.to_string(),
+                    error_detail: o.error_detail,
+                    requested_at: o.requested_at,
+                    latency_ms: o.latency_ms,
+                })
+                .expect("llm log must be written");
         }
 
         // 終わり方が 5 通りあって、後始末は 1 本（§05）。活動にも実際の終わり方を残す。
