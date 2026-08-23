@@ -1,218 +1,312 @@
-# 外部 gateway 実装者向け入口
+# 外部 gateway kind 契約
 
-この文書は、任意の言語で独自の gateway kind を実装し、opencrab と接続する人のための入口である。
-例では合成名 `kind_id=example` を使う。
-特定の外部サービス、運用者、稼働中のエージェントを前提にしない。
+この文書はexternal gatewayを任意の言語で実装するための自己完結した正本である。例は合成識別子だけを使う。[gateway overview](./gateway-overview.md)、[Discord gate](./discord-gate.md)、[Nostr gate](./nostr-gate.md) は背景とbuiltin例であり、external admin DTOやwire grammarの正本ではない。
 
-wire の正本は [Discord gate 設計](./discord-gate.md) §2 の protocol 2 である。
-全体像は [ゲートウェイ仕様概要](./gateway-overview.md)、kind 固有設計の例は
-[Discord gate 設計](./discord-gate.md) と [Nostr gate 設計](./nostr-gate.md) を参照する。
-この文書は wire を再定義せず、外部実装者が最初に必要とする共通契約と未決事項を示す。
+## 1. 初期surfaceと所有境界
 
-## 最初に押さえる境界
+初期形は protocol 2 / prebound / external container / one instance-one subject / one conversation-one place / literal `['inbound','outbound']` / all immediate / hello `effects:['say']` / `capabilities:['open']` だけである。
 
-gateway は外部サービスとの I/O と protocol 変換を担当する独立プロセスである。
-会話履歴、場、参加者、policy、route、turn、権限、delivery の正本は core/store に置く。
-gateway は「誰に考えさせるか」「返答してよいか」「再送するか」を独自判断しない。
+- core/store: schema、kind、instance、revision、place、binding、membership、route、origin dedup、cursor CAS、admission、turn、delivery、delivery observation、deadline、startup recovery、control outcomeのtotal写像、revision invalidation outcomeの生成。
+- plugd: connection epoch、LF-JSON parse/render、ordered bind/catch-up、socket close、opaque connection Arc authority付きwire outcome返却。delivery tableを直接読書きせず、`revision_invalidated` outcomeを生成しない。
+- gateway: external API I/O、protocol変換、platform固有pagination/display。
+- orchestrator: container/PID/restart、revision directory、config/secret file/mount/cleanup。
 
-外部 kind を追加するときも、Discord や Nostr の内部実装を複製する必要はない。
-必要なのは、共通の kind / instance / revision、place / binding / route、protocol 2 に沿うことである。
-ただし、現行には任意 kind の登録から起動までを完結する公開管理 API はまだない。
+gatewayはDBを開かず、誰が考えるか、返答可否、debounce、retry、routeを決めない。coreはcontainerをspawn/restart/stopせず、platform固有配送を持たない。
 
-## B1: kind と instance を登録する
+## 2. 永続model
 
-### 二つの宣言がそろって初めて接続できる
+`gate_schemas`、`gate_kinds`、`gate_instances`、`gate_instance_revisions`、`gate_bindings`、`external_origin_scopes`、`gate_source_cursors`、`deliveries`、`delivery_observations` はstore-owned。`gate_connections` だけはplugd-owned observed epochで、設定ではない。
 
-永続設定の正本は次の DB entity である。
+external instanceはnon-NULL immutable sole `owner_subject_id`を持つ。作成時 `active_revision=1,lifecycle=stopped`。external lifecycleは以後もstoppedで、readinessはactive revisionに属するlatest connection epochだけから投影する。external revisionはconfig/present/enabledを持ち `secret_set_id=NULL`。secret valueとprocess stateを持たない。
 
-- `gate_kinds`: kind の protocol major、origin scope、ingress discovery
-- `gate_instances`: credential とプロセスの単位、および active revision
-- `gate_instance_revisions`: immutable な schema-bound config と desired enabled state
-- `secret_sets` / `secret_values`: revision が使う secret
-- `gate_connections`: 接続 epoch と観測状態。設定ではない
+core/store startupはschema作成・migration完了後、runtime listener、hello受付、timer、plugd handoffを開始する前に `RecoverStaleRuntimeState` をexact一回完了する。このcommandが失敗したstartupはruntime portを開かず失敗する。
 
-これとは別に、gateway は接続直後の protocol 2 `hello` で live spec を宣言する。
-`hello` は `kind_id`、`instance_id`、`revision` に加え、`origin_scope`、`address_form`、
-`ingress_discovery`、tools、effects、capabilities、actions を含む。
+## 3. admin wire正本
 
-core は `hello` を登録要求として扱わない。
-DB に instance、active revision、kind 宣言が先に存在し、present かつ enabled でなければ拒否する。
-さらに kind、revision、protocol major、origin scope、ingress discovery が DB 宣言と一致しなければ拒否する。
-同じ kind の active instance 間では、address form を含む live spec 全体も同一でなければならない。
+全pathは既存operator認証内、JSON media typeは `application/json; charset=utf-8`。objectはunknown memberとduplicate memberを拒否する。UUIDはcanonical lowercase、binaryはRFC 4648 standard padded base64、digestは64 lowerhex。object field orderは以下の記載順、arrayは明示した順でserializeする。
 
-`kind_id` は小文字英字で始まり、小文字英数字、`_`、`-` からなる最大 64 byte の識別子である。
-`instance_id` は canonical lowercase UUID、revision は DB の active revision と一致させる。
-一つの credential を一つの instance、一つの gateway process として登録する。
+全errorは、未認証を含め必ず次の一形である。`at` / `detail` は値が無くてもmemberを省略せずnullにする。
 
-protocol 1 の compatibility seed は既存 web / Nostr を移行するための経路である。
-新しい外部 kind を protocol 1 名で接続して自動作成する仕組みではない。
-protocol 2 の `hello` も DB row を作成・修復しない。
+```json
+{"error":{"code":"unauthorized","at":null,"detail":null}}
+```
 
-現行の protocol parser、kind registry、store の接続検査は kind 非依存である。
-したがって、登録済み kind を接続するたびに core の protocol 分岐を追加する必要はない。
-一方、現行の管理設定と launcher は任意 kind を設定だけで追加する公開 surface を提供していない。
-外部 kind は、現時点では DB 登録と launcher 統合を行う実装作業なしに配備できない。
+HTTP statusは次のtotal mapだけを使う。
 
-> **未決（issue 化）:** 任意 kind の `gate_kinds` / instance / revision を作成・更新する公開管理面、
-> config schema の登録方法、secret 名と gateway への安全な受け渡し、launcher への executable 宣言を定める。
-> 手動 SQL を正式な登録経路とはみなさず、`hello` による暗黙作成も導入しない。
+| status | stable code |
+|---|---|
+| 401 | `unauthorized` |
+| 400 | `bad_request`, `bad_schema_id`, `bad_kind_id`, `bad_instance_id`, `bad_binding_id`, `unknown_field`, `path_body_mismatch` |
+| 404 | `schema_unknown`, `kind_unknown`, `subject_unknown`, `instance_unknown`, `binding_unknown` |
+| 409 | `schema_conflict`, `kind_in_use`, `builtin_reserved`, `instance_conflict`, `instance_deleted`, `revision_conflict`, `instance_disabled`, `binding_closed`, `binding_conflict`, `address_in_use`, `instance_active`, `instance_not_ready`, `epoch_mismatch`, `catch_up_in_progress` |
+| 422 | `schema_validation_failed`, `schema_role_mismatch`, `address_form_invalid`, `address_invalid`, `catch_up_contract_invalid`, `cursor_invalid`, `catch_up_unsupported` |
+| 500 | `store_error` |
 
-## B2: プロセスモデルと transport
+validation priorityは authentication → media/JSON object/duplicate/unknown shape → path/query grammar → referenced row existence → immutable/state conflict → schema/value validation → transaction/store。同段はrequest field順で最初の一件だけを返す。
 
-現行契約は Unix domain socket 上の UTF-8 LF-JSON である。
-一つの JSON object を一行にし、LF で終端する。一行の上限は 1 MiB である。
-gateway が client として core の socket に接続し、最初の request として `hello` を送る。
-protocol 2 では `hello` 成功後、外部サービス側の準備が完了してから `ready` を送る。
+### 3.1 exact DTO
 
-gateway は core と同じプロセス内の plugin ではない。
-起動、PID 所有、停止、監督は launcher の責務であり、core は gateway を spawn しない。
-core は接続状態を記録するが、それを根拠にプロセスを勝手に再起動しない。
+```text
+Schema = {schema_id:string,role:instance_config|binding_metadata|secret_manifest|source_cursor,
+          format:json-schema-2020-12|secret-manifest-v1|opaque-cursor-v1,
+          document_b64:B64,document_digest:Digest,created_at:i64}
 
-別コンテナで動かす場合も transport は変わらない。
-core が作る socket の親ディレクトリを volume として両コンテナへ共有し、
-gateway コンテナから同じ socket pathname を開けるようにする。
-volume mount だけでなく、Unix socket を開ける UID/GID と directory permission も揃える。
-TCP への置換や socket proxy は、現行契約には含まれない。
+Kind = {kind_id:string,registration:builtin|external,protocol_major:u32,
+        origin_scope:instance|kind_address,ingress_discovery:prebound|membership,
+        address_form:string|null,config_schema_id:string|null,
+        binding_metadata_schema_id:string|null,secret_manifest_schema_id:string|null,
+        catch_up_mode:none|cursor|null,cursor_schema_id:string|null}
 
-gateway が落ちた場合に上げ直す主体は launcher、service manager、またはコンテナ orchestrator である。
-現行の同梱 launcher は gateway を自動 restart せず、異常終了を degraded として扱う。
-復旧は明示的な restart、または外側の supervisor policy で新しいプロセスを起動して行う。
-再接続時は新しい connection epoch で `hello` と `ready` をやり直す。
+Connection = {state:stopped|connecting|active|closed|failed,revision:u64|null,epoch:u64|null}
+SecretManifest = {required:string[],optional:string[]}  // each byte-sorted/distinct
+Instance = {instance_id:UUID,kind_id:string,label:string,subject_id:positive-i64,
+            active_revision:u64,present:boolean,enabled:boolean,config_b64:B64,
+            config_digest:Digest,created_at:i64,connection:Connection,
+            secret_manifest:SecretManifest}
 
-## B3: 一つの instance を複数エージェントで共有する
+CatchUpStart = null | {mode:"now"} | {mode:"beginning"} |
+               {mode:"supplied",cursor_b64:B64}          // request
+StoredStart  = null | {mode:"now"} | {mode:"beginning"} | {mode:"supplied"} // response
+Binding = {binding_id:UUID,instance_id:UUID,address:string,label:string|null,
+           binding_metadata_b64:B64,purposes:["inbound","outbound"],
+           catch_up_start:StoredStart,place_public_key:string,subject_id:positive-i64,
+           closed_at:i64|null,close_reason:string|null,cursor_digest:Digest|null}
 
-core の route モデルは kind 非依存であり、1 instance : N subject を表現できる。
-Discord の shared instance と同じ構造を、外部 kind にも使う。
+Cursor = {binding_id:UUID,initial_mode:now|beginning|supplied,initialized:boolean,
+          cursor_b64:B64|null,cursor_digest:Digest|null,size:u32,updated_at:i64|null}
+```
 
-正本の関係は次のとおりである。
+`Connection` はactive revisionの最大epochを選ぶ。row無しはexact `{state:"stopped",revision:null,epoch:null}`。row有りはその `connecting|active|closed|failed` とnon-null revision/epoch。`Binding.closed_at` / `close_reason` は同時nullまたは同時non-null。cursor row無しは `initialized=false,cursor_b64=null,cursor_digest=null,size=0,updated_at=null`。row有りはdigest/positive size/updated_atがnon-nullで、`include_bytes=false` の時だけbytesをnullへredactする。
 
-1. `places` に、会話の単位となる場を一つ作る。
-2. `gate_bindings` に、その place と instance の外部 address を結ぶ binding を作る。
-3. 各エージェント subject を place の participant として扱う。
-4. 各 subject について `subject_routes(subject, place, kind, purpose)` を作る。
-5. 複数 subject の route の `binding_id` を同じ binding に向ける。
+### 3.2 7 path / 14 operation
 
-route purpose は `inbound`、`outbound`、`timed`、`tool:<name>` である。
-同じ binding を共有しても、subject ごとの policy、tool visibility、turn、履歴は core 側で分離される。
-送信開始時には選択済み route の instance、revision、connection epoch、address を snapshot する。
-接続不能になっても同 kind の別 instance へ自動 fallback しない。
+| operation | exact request | success | operation stable errors（共通 `unauthorized,bad_request,store_error` を含む） |
+|---|---|---|---|
+| `GET /api/gate-schemas/{schema_id}` | bodyなし | `200 Schema` | `bad_schema_id,schema_unknown` |
+| `PUT /api/gate-schemas/{schema_id}` | `{role,format,document_b64}` | new `201 Schema`; byte同値 `200 Schema` | `bad_schema_id,unknown_field,schema_validation_failed,schema_conflict` |
+| `GET /api/gate-kinds/{kind_id}` | bodyなし | `200 Kind` | `bad_kind_id,kind_unknown` |
+| `PUT /api/gate-kinds/{kind_id}` | `{protocol_major:2,origin_scope,ingress_discovery:"prebound",address_form,config_schema_id,binding_metadata_schema_id,secret_manifest_schema_id,catch_up_mode,cursor_schema_id}` | new `201 Kind`; equivalent/pre-use replace `200 Kind` | `bad_kind_id,unknown_field,schema_unknown,schema_role_mismatch,address_form_invalid,catch_up_contract_invalid,builtin_reserved,kind_in_use` |
+| `GET /api/gate-instances/{instance_id}` | bodyなし | `200 Instance` | `bad_instance_id,instance_unknown` |
+| `PUT /api/gate-instances/{instance_id}` | path UUIDv7; `{kind_id,label,subject_id,enabled,config_b64}` | new `201 Instance`; aggregate同値 `200 Instance` | `bad_instance_id,unknown_field,kind_unknown,subject_unknown,instance_conflict,schema_validation_failed` |
+| `DELETE /api/gate-instances/{instance_id}` | bodyなし | `200 {instance_id,deleted:boolean,revision:u64}` | `bad_instance_id,instance_unknown` |
+| `POST /api/gate-instances/{instance_id}/revisions` | `{expected_active_revision,enabled,config_b64}` | `201 {instance_id,revision,config_digest,enabled}` | `bad_instance_id,unknown_field,instance_unknown,instance_deleted,revision_conflict,schema_validation_failed` |
+| `GET /api/gate-bindings/{binding_id}` | bodyなし | `200 Binding` | `bad_binding_id,binding_unknown` |
+| `PUT /api/gate-bindings/{binding_id}` | path UUIDv7; `{instance_id,address,label,binding_metadata_b64,catch_up_start}` | new `201 Binding`; byte同値 `200 Binding` | `bad_binding_id,unknown_field,instance_unknown,instance_disabled,address_invalid,schema_validation_failed,catch_up_contract_invalid,binding_closed,binding_conflict,address_in_use` |
+| `DELETE /api/gate-bindings/{binding_id}` | bodyなし | `200 {binding_id,closed:true}` | `bad_binding_id,binding_unknown` |
+| `GET /api/gate-bindings/{binding_id}/source-cursor?include_bytes=false|true` | bodyなし; default false | `200 Cursor` | `bad_binding_id,binding_unknown,catch_up_unsupported` |
+| `PUT /api/gate-bindings/{binding_id}/source-cursor` | `{expected_connection_epoch:null,start:{mode:"now"}|{mode:"beginning"}|{mode:"supplied",cursor_b64}}` | `200 Cursor` as include_bytes=false | `bad_binding_id,unknown_field,binding_unknown,binding_closed,catch_up_unsupported,instance_active,cursor_invalid` |
+| `POST /api/gate-bindings/{binding_id}/catch-up` | `{expected_connection_epoch:u64}` | `202 {binding_id,connection_epoch,accepted:true}` | `bad_binding_id,unknown_field,binding_unknown,binding_closed,catch_up_unsupported,instance_not_ready,epoch_mismatch,catch_up_in_progress` |
 
-`prebound` kind では、core が登録済み binding を `bind` で gateway に知らせる。
-`membership` kind では gateway が観測した address を `event.discovery` で提示し、
-core が admission 後に place / binding / membership / route を実体化する。
-どちらを採るかは外部サービスの発見モデルから kind spec で宣言し、実装者の都合で接続中に変えない。
+Instance PUTは `lifecycle=stopped,active_revision=1` とrevision 1の全non-null値を一transactionで作る。Binding PUT requestに `purposes` は存在しない。serverが必ずsole subjectのrouteを `inbound`、次に `outbound` の二行作り、responseもliteral順を返す。片方向は作れない。
 
-> **未決（issue 化）:** 外部 kind について、共有 instance の participant 集合、place、binding、
-> subject route と purpose を宣言・更新する汎用 admin/config surface を定める。
-> DB model は表現できるが、外部連携者向けの安定した宣言手順はまだない。
+DELETE instanceはtombstone revisionをappendし、open binding/placeをclose、selecting routeを削除し、旧revisionの全 `connecting|active` epochを同transactionでcloseする。Revision POSTも旧revisionの全 `connecting|active` epochを同transactionでcloseする。commit後にplugdが対応する全Arcをcloseする。既にtombstoneのDELETEはwrite-zero `deleted=false`。
 
-## B4: 切断中の配送保証
+## 4. config/secret delivery
 
-共通原則は「gateway や core link に未完データを buffer しない、自動再送しない」である。
-失敗を成功に見せず、結果を確定できない時は不定として残す。
+orchestratorはInstance GETからcanonical config/digest/revisionとmanifestだけを読み、revision専用directoryを作る。
 
-outbound delivery の状態は `prepared -> sending -> delivered | failed | indeterminate` である。
-active connection epoch が無いまま送信を始められなければ `failed` になる。
-外部 API へ渡す前後を区別できない timeout、socket drop、process crash は `indeterminate` になる。
-terminal state を後から成功へ推測せず、同じ delivery を自動再送しない。
+```text
+<revision-dir>/config.json       canonical bytes, regular, 0444
+<revision-dir>/secrets/          directory, 0700
+<revision-dir>/secrets/<name>    binary value, regular, 0400
+```
 
-したがって gateway が 5 分停止している間に core が作った返信は、黙って消えない。
-未接続が確定していれば delivery は `failed`、送信開始後に結果が分からなくなれば `indeterminate` として残る。
-自動復旧後にその delivery が勝手に再投稿されることはない。
-再送が必要なら、運用者または上位の明示操作が新しい effect / delivery を作る必要がある。
+required欠落、unknown name、symlink、subdirectory、non-regular fileは起動失敗。directoryはread-only mountし、pathだけを `OPENCRAB_GATE_SOCKET`, `OPENCRAB_GATE_INSTANCE_ID`, `OPENCRAB_GATE_REVISION`, `OPENCRAB_GATE_CONFIG_PATH`, `OPENCRAB_GATE_SECRETS_DIR` で渡す。secret value、config bytes、master keyをargv、env value、log、status、admin errorへ複製しない。
 
-反対方向、すなわち停止中に外部サービスへ到着した入力は、core がまだ観測していない。
-外部サービスが durable な一覧・履歴 API を持つ kind は、gateway が復帰後に source を read し、
-安定した origin を付けた通常の `event` として catch-up する。
-live 配信と catch-up が重なる場合も同じ origin にして、core の dedup に委ねる。
-gateway 独自 DB を会話履歴や dedup の正本にしない。
-source read の失敗や cursor gap は診断可能な失敗として表に出し、catch-up 済みと報告しない。
+stage/fsync directory → revision POST → 全旧epoch失効commit → new mount/container → hello/ready/bind → old directory cleanupの順。失敗時に旧revisionへ暗黙rollbackしない。gatewayはconfig file SHA-256 lowerhexを `hello.config_digest` に入れる。
 
-source に読戻し API が無い、cursor を保存していない、または履歴範囲外なら、その 5 分の入力は回収できない。
-現行 protocol の `m=read` は prebound gateway が core の場ログを読む request であり、
-外部サービスの欠落入力を復元する命令ではない。membership kind ではこの `read` 自体を使えない。
-外部入力の catch-up 可否、cursor、pagination、同一 origin の作り方は kind 固有契約に明記する。
+## 5. protocol 2 grammar
 
-> **未決（issue 化）:** 独自 kind 共通の source-side catch-up 管理面と cursor 永続化契約はない。
-> 外部 API が持つ読戻し能力に基づき、kind ごとの issue で範囲と非保証を固定する。
+transportはUnix domain socket。UTF-8、一行一JSON object + LF、LF込み最大1048576 bytes。duplicate memberを拒否する。request `id` は1〜128 byteのnonempty string、`m` は下記literal。top-levelと下記exact nested objectのunknown memberを拒否する。
 
-## B5: place と address を設計する
+共通型:
 
-`address_form` は gateway が `hello` で宣言する正規表現で、address 文字列全体に適用される。
-同じ kind の全 active instance は同じ form を宣言する。
-address は外部 API の locator であり、表示名や推測可能な別名を identity の代用にしない。
+```text
+UUID = canonical lowercase UUID
+Digest = 64 lowercase hex
+B64 = RFC4648 standard padded base64
+Author = {id:string,display?:string}
+Content = {text?:string}
+Attachment = {kind:"image",url:string,origin_author?:string}
+Action = {surface_id:string,component_id:string,action_name:string,
+          context:JSON|null,responder_id:string}
+WireErr = {code:string,at:string|null,detail:string|null}
+ConnectionArcAuthority = opaque Arc identity; in-process only, non-serializable,
+                         non-persistent, equality is Arc::ptr_eq only
+```
 
-place の粒度は「一続きの会話として履歴と policy を共有する単位」である。
-Discord ならチャンネル、必要な kind ではスレッド、Nostr の現行設計なら設定済み timeline が相当する。
-relay、HTTP endpoint、credential、process といった接続上の都合だけで place を分割しない。
+message union:
 
-既知の場は provision により place / binding を先に作れる。
-外部 membership が場を発見する kind は、検証済み `event.discovery` の観測を core が admission し、
-eligible subject がいる場合だけ place / binding / membership / route を実体化できる。
-gateway は観測したという理由だけで policy や participant を決めない。
+| direction / `m` | exact fields and value grammar | success `ok` |
+|---|---|---|
+| gate→core `hello` | `{id,m,protocol:2,kind_id,instance_id:UUID,revision:u64,config_digest:Digest,origin_scope:instance|kind_address,address_form:string,ingress_discovery:"prebound",effects:["say"],capabilities:["open"]}` | `{protocol:2,connection_epoch:u64}` |
+| gate→core `ready` | `{id,m,connection_epoch:u64}` | `{}` |
+| gate→core `failed` | `{id,m,connection_epoch:u64,code:string}` | `{}` then close |
+| core→gate `bind` / `unbind` | `{id,m,binding_id:UUID,address:string}` | `{}` |
+| gate→core `event` | `{id,m,kind:said|edited|retracted|reacted|ui_action,address:string,binding_id:UUID,author:Author,content?:Content,mentions?:string[],reply_to?:string,origin:string,target?:string,symbol?:string,removed?:boolean,action?:Action,attachments?:Attachment[]}` | `{seq:i64|null,binding_id:UUID}` |
+| gate→core `source_checkpoint` | `{id,m,binding_id:UUID,expected_cursor_digest:Digest|null,cursor_b64:B64}` | `{cursor_digest:Digest,updated_at:i64}` |
+| gate→core `place_closed` | `{id,m,binding_id:UUID,address:string,reason:deleted|archived|left|unavailable}` | `{closed:true}` |
+| core→gate `catch_up` | `{id,m,binding_id:UUID,address:string,start:{mode:"now"}|{mode:"beginning"}|{mode:"cursor",cursor_b64:B64,cursor_digest:Digest}}` | `{}`; checkpointは別request |
+| gate→core `read` | `{id,m,address:string,from?:i64,limit?:u32}` | `{events:{seq:i64,kind:string,author:Author,content:Content,reply_to?:i64,origin?:string}[],next?:i64}` |
+| core→gate `effect` | `{id:UUID,m,binding_id:UUID,address:string,kind:"say",payload:JSON}`; `id` is byte-equal canonical text of `delivery_id` | `{delivered:true,origin:string}` xor `{delivered:false}` |
+| core→gate `activity` | `{m,address:string,activity_id:string,state:started|progress|ended,kind?:turn|background,label?:string}` | responseなし |
+| response | exact `{id,ok:JSON}` xor `{id,err:WireErr}` | pending request ID一件に対応 |
 
-> **未決（issue 化）:** 外部側の会話が削除、archive、退出、address 再利用になった時の
-> place / binding / membership / route の閉鎖・保持・再 provision 契約は共通仕様として未決である。
-> kind ごとの消滅イベントと core の管理操作を定めるまで、gateway が物理削除を推測してはならない。
+`event.origin` はnonemptyでlive/catch-up同一stable ID。prebound external eventの `binding_id` は必須で、connection instance/revision/epoch、open binding generation、addressと一致させる。`source_checkpoint` はaddress fieldを持たず、address一致検査も `address_mismatch` errorもない。bindingのinstance/open generation、cursor schema/size、expected digest CASだけを検査する。`place_closed` はaddressを持つためbinding addressも検査する。
 
-## B6: 添付
+eventのkind別required/forbiddenは次である。表にないoptional fieldはforbidden。
 
-現行の共通 wire が受け付ける添付は URL 参照の画像だけである。
-`event.attachments` の各要素は `kind=image` と `url` を持ち、必要なら由来作者を付ける。
-画像 byte、base64、multipart body、ローカル file path を LF-JSON に載せない。
-core が必要時に URL を取得し、content type と実 byte を検査する。
+| kind | required | optional |
+|---|---|---|
+| `said` | `content.text` またはnonempty `attachments` の少なくとも一方、`origin` | `mentions,reply_to,attachments` |
+| `edited` | `content.text,origin,target` | `mentions,reply_to,attachments` |
+| `retracted` | `origin,target,removed:true` | なし |
+| `reacted` | `origin,target,symbol,removed:boolean` | なし |
+| `ui_action` | `origin,action` | なし |
 
-画像以外の file、動画、音声、inline byte、upload/spool/transfer protocol は現行契約にない。
-未知の attachment kind を画像へ近似せず、kind 固有 field を共通 payload に追加しない。
-添付拡張は #745 系の後続 issue で共通 wire と取得境界を更新してから利用する。
+全string identity/address/origin/target/symbolはnonempty。`Author.id` はnonempty、`Content` は少なくとも一member、attachment URLはabsolute `https` URL。`read.from` はpositive、`limit` は1..1000。`failed.code` はnonempty。helloの `effects` と `capabilities` はsetではなく記載順・長さも含むexact literalである。`tools` / `actions` fieldはunknown fieldであり、空・追加・逆順・重複specも `kind_spec_mismatch` でcloseする。期待specは永続catalogから導出せず、この初期protocol literalそのものである。
 
-## C1〜C4: core 共通機能との関係
+activityは `started` が `kind` 必須・`label` optional、`progress` が `label` 必須・`kind` forbidden、`ended` が `kind,label` forbidden。違反activityは `invalid_field` としてresponse無しで捨て、connectionをkeepする。他messageのfield/type違反はerror responseを返す。
 
-### C1: #747 と #748
+validation priorityは framing/size → request/response union → top-level field → nested field → connection state → instance/revision/epoch → binding generation/address（fieldがあるmessageだけ）→ schema/value → store/CAS。
 
-#747 の NO_REPLY fail-closed と #748 の settled context は engine/core の契約であり、kind 非依存である。
-外部 gateway は NO_REPLY を外部投稿へ補完せず、settled turn の文脈を独自に再構成しない。
-登録済み外部 kind にも追加の wire や kind 固有実装なしで、そのまま効く。
+| violation | stable outcome | connection | durable effect |
+|---|---|---|---|
+| invalid UTF-8/JSON/non-object/duplicate member | response可能なら `bad_request` | close | incomplete sendingは既存failed/indeterminate規則 |
+| >1048576 bytes | `too_large` | close | 同上 |
+| hello timeout、hello前別message、二回目hello | `protocol_order` | close | new active epoch 0 |
+| hello protocol/kind/instance/revision/config/spec mismatch | `protocol_unsupported|bad_kind_id|bad_instance_id|instance_unknown|instance_disabled|revision_mismatch|config_digest_mismatch|kind_declaration_mismatch|kind_spec_mismatch|instance_active` | close | new active epoch 0 |
+| malformed response union for a known pending effect ID | `response_invalid` | close | 同Arc上の全pendingへ `protocol_error` outcomeを一回ずつ返す。期限前current sendingだけ `error=protocol_error`、期限到達後はmatrixにより `error=timeout` |
+| malformed/unknown response ID | `response_invalid` | close | malformed/unknown ID自身のdelivery/observation write 0。同Arc上の既知sendingへ `protocol_error` outcomeを一回ずつ返す |
+| ready/bind完了前 event/effect | `instance_not_ready` | keep | request write 0 |
+| hello `tools`/`actions` field、またはcore→gate `tool` | `unknown_field|unknown_message` | helloはclose、post-readyはkeep | write 0 |
+| post-ready unknown message/field/value | `unknown_message|unknown_field|missing_field|invalid_field|unknown_enum` | keep | request write 0 |
+| binding absent/closed/wrong generation/address | `binding_unknown|binding_closed|binding_generation_mismatch|address_mismatch` | keep | Event/cursor write 0 |
+| checkpoint unsupported/schema/digest/order | `catch_up_unsupported|cursor_invalid|cursor_digest_mismatch|checkpoint_out_of_order` | keep | cursor不変 |
+| bind error/60s timeout | `bind_failed` | failed then close | provision保持、catch-up 0 |
+| explicit `failed` / socket close | reported code / disconnect | close | cursor不変、single-flight解放。同じpendingへprotocol_error後またはintentional revision close後のdisconnectを重ねない。期限到達後はmatrixにより `error=timeout` |
+| store failure after ready | `store_error` | close | transaction rollback |
 
-### C2: activity の語彙
+## 6. state、revision invalidation、catch-up
 
-`activity` は core から gateway への応答なしの表示通知である。
-共通 field は `m=activity`、`address`、文字列の `activity_id`、`state` である。
+```text
+CONNECTED --valid hello--> SYNCHRONIZING(epoch=connecting)
+SYNCHRONIZING --valid ready--> BINDING
+BINDING --all open binding ack in binding_id byte order--> ACTIVE
+ACTIVE --new provision--> BINDING(epoch remains connecting until ack)
+any --fatal|failed|socket close|revision invalidation--> CLOSED
+```
 
-- `state=started`: `kind=turn|background` を持ち、`label` は任意
-- `state=progress`: `label` を持つ
-- `state=ended`: 終了を示す
+ready後も全bind ack前はnot ready。bindはbinding ID byte orderで一件ずつack待ち。全ack後だけstate=active、その後cursor-capable bindingを同順でautomatic catch-upする。
 
-これは typing や進捗表示のための best-effort 通知で、effect や delivery ではない。
-route 不在、未接続、queue 満杯、gateway 側の表示失敗で delivery を作らず、会話結果も変えない。
+revision POST / instance DELETE transactionは、hello後ready前、ready後各bind待ち、active、active→connecting再同期中のどこでも、旧revisionに属する全 `connecting|active` epochをclosedにする。coreのrevision invalidation coordinatorはtransaction内で `invalidated_at` を一回取得し、旧Arcに属するprocess-local pendingをsnapshotする。commit時点で全旧socketのwriter authorityが消え、後続messageはEvent/write 0である。
 
-### C3: 外部 API token
+`BeginExternalDelivery` のactive authority検査、successful `sending` commitとin-flight registry登録、全 `RecordExternalDeliveryOutcome` callback、revision/deleteのauthority除去・pending snapshotは同じcore coordination guardで直列化する。通常callbackはguard permitを取得してからRecordを呼び、revision invalidation coordinatorは取得済みpermitを各Record呼出しへ渡すため再取得せず、再入deadlockを作らない。Begin側が先にcommitしたdeliveryはsnapshotにexact一回含まれ、revision/delete側が先にcommitした時はBegin側がpre-wire `failed(error=not_connected)` になり、`sending` とhandoffを作らない。transaction rollback時はregistry/snapshotも公開しない。
 
-外部 API token は instance revision に結び付く `secret_sets` / `secret_values` に置く想定である。
-同じ kind でも instance ごとに secret を分け、config bytes、argv、通常ログ、status、report に値を出さない。
-launcher/runner が active revision の secret を解決し、gateway process だけへ渡す境界を使う。
+revision/delete commit後、core revision invalidation coordinatorだけがsnapshot各件へ `received_at=invalidated_at` の `revision_invalidated` outcomeをexact一回生成し、同じexpected Arcとtupleで `RecordExternalDeliveryOutcome` へ渡す。coordinatorは全snapshot outcomeが `Applied|AlreadyTerminal` になるまでcoordination guardを保持し、その後plugdへtyped intentional closeを渡して対応Arcを資源解放させ、最後にguardを解放する。そのcloseから `disconnect` / `protocol_error` outcomeを生成させない。これによりcommit後/outcome前へresponse、timeout、disconnect、protocol callbackは割り込まない。plugd closeは永続safetyの条件でもoutcome producerでもない。commit後にprocess crashした時だけoutcome fan-outは未完になり得るが、残存 `sending` は既定の `RecoverStaleRuntimeState` が回収し、revision outcomeを再生成しない。
 
-> **未決（issue 化）:** 任意 kind の secret name、必須/任意 schema、rotation、runner からの注入形式は未決である。
-> 現行 runner の既知 kind 用規則を外部 kind が流用できるとはみなさない。
+automatic/manual catch-upは `(binding_id,connection_epoch)` single-flight。重複manualは `catch_up_in_progress`。gatewayはpage順eventのdefinitive ack後だけcheckpointを送る。gap、fetch/event failure、timeout、disconnect、out-of-order、CAS mismatchはcursorを進めずsingle-flightを解放する。
 
-### C4: 即応とまとめ入力
+## 7. binding generation、close、delivery
 
-即応と debounce の二層入力は place policy と core inbox/turn の責務であり、kind 非依存である。
-gateway は event と安定した origin、author、address を運び、即応判定や window を持たない。
-同じ外部 kind でも place または authority layer ごとの core policy として宣言できる構造である。
+Binding PUTはfresh place、`scope_id=binding_id` のorigin scope、open binding、sole-subject membership、literal inbound/outbound二routeを一transactionで作る。`UNIQUE(instance_id,address) WHERE closed_at IS NULL`。同address再利用はnew UUIDv7 binding/place/scopeで、closed generationをreopen/repointしない。
 
-> **未決（issue 化）:** 任意 kind 用 place policy schema と、その作成・更新を行う汎用管理 surface は未決である。
-> gateway の private config に debounce 値を置いて core policy を迂回してはならない。
+authoritative external deletion/archive/leave/unavailable確認時だけ `place_closed` を送る。disconnect、list欠落、fetch failure、cursor gapからcloseを推測しない。closeはbinding/place/routeだけを変え、membership/origin/cursor/event/deliveryを保持する。
 
-## 実装前チェックリスト
+outboundの唯一の永続ownerはcore/storeで、状態は `prepared -> sending -> delivered|failed|indeterminate`。自動再送と別instance fallbackはなく、`attempt` は0または1だけである。external effectの時間正本はこの文書で宣言する固定値 `EXTERNAL_EFFECT_TIMEOUT_SECS=300`、すなわち `EXTERNAL_EFFECT_TIMEOUT_NANOS=300_000_000_000` である。設定値ではなく、builtin Discordから継承もしない。
 
-- kind、instance、revision が DB に事前登録され、`hello` と一致している
-- launcher が gateway を独立 process として起動し、core socket だけを transport に使う
-- place、binding、各 subject の route purpose が宣言されている
-- address と origin が安定し、display name から identity を推測しない
-- failed と indeterminate を区別し、自動再送しない
-- source-side catch-up の可否と非保証を kind 固有文書に書く
-- 添付は現行の URL-based image 契約だけを送る
-- activity、NO_REPLY、settled context、二層入力を gateway 側へ再実装しない
-- secret を instance 単位で隔離し、通常の設定・ログ・引数へ出さない
-- 未決マーカーの項目を推測で埋めず、対応 issue が確定してから実装する
+reply effectと `prepared` deliveryは一transactionで作る。coreが選択済みoutbound routeのexact `binding_id` をcopyし、そのbindingから `instance_id` を固定する。`prepared` は `attempt=0`、`revision/connection_epoch/deadline/remote_origin/error=NULL` である。addressだけから別bindingを選び直さない。
+
+socketごとにplugdは一つのopaque `Arc<ConnectionArcAuthority>` を作る。authorityは `(instance_id,revision,connection_epoch)` を保持するが、同じ値を持つ別Arcは別authorityである。同じallocationを保つ `Arc::clone` だけを許し、tupleからの再構築、serialize、DB保存、wire送信は禁止する。同一性は `Arc::ptr_eq` だけで比較する。coreのconnection registryはactive epochとそのexact Arcを一対一で保持する。
+
+`BeginExternalDelivery(delivery_id, arc_authority)` はcore/store commandである。一つのimmediate transaction内でdelivery、選択済みroute、`gate_bindings` を `binding_id` でexact joinし、bindingがopenで同じplace/instance/address generationであること、authorityのtupleとactive revisionのactive connectionがexact-oneであること、registryのauthorityと `Arc::ptr_eq` であることを検査する。binding closed、route changed、未接続、authority不一致ならwire I/O 0のまま `prepared -> failed`、`error=binding_closed|route_changed|not_connected|connection_authority_mismatch` とする。
+
+検査成功時、storeはtransaction時刻 `claimed_at` を一回だけ取得し、signed-i64 checked加算 `deadline=claimed_at+300_000_000_000` を行う。overflowなら同じtransactionで `prepared -> failed(error=deadline_overflow)` としwire I/Oは0。成功時だけ `attempt=1`、revision、connection_epoch、deadlineをsnapshotして `prepared -> sending` にし、commit後に同じopaque authorityを含む次のimmutable commandをplugdへ渡す。
+
+```text
+ExternalWireDelivery = {delivery_id:UUID,binding_id:UUID,instance_id:UUID,
+                        revision:u64,connection_epoch:u64,address:string,
+                        kind:"say",payload:JSON,deadline:i64,
+                        arc_authority:Arc<ConnectionArcAuthority>}
+ExternalWireOutcome  = {delivery_id:UUID,binding_id:UUID,instance_id:UUID,
+                        revision:u64,connection_epoch:u64,received_at:i64,
+                        arc_authority:Arc<ConnectionArcAuthority>,
+                        result:delivered(origin)|rejected|error(WireErr)|timeout|
+                               disconnect|protocol_error|revision_invalidated,
+                        response_digest:Digest|null}
+```
+
+plugdはcommandの `delivery_id` をcanonical UUID textにしてeffect `id` に使い、commandの `binding_id/address` をそのままrenderする。commandを受けるsocket authorityは `Arc::ptr_eq(command.arc_authority, owned_arc)` を必須とし、別Arcへrerouteしない。plugdは状態を遷移せず、受け取ったexact authorityをwire由来の `ExternalWireOutcome` へ戻す。gatewayの `err` は「external APIが受理していないと確定」の時だけ許す。受理前後が不明なら成功/拒否/errorを捏造せずsocketを閉じ、`disconnect` とする。`revision_invalidated` variantはcore revision invalidation coordinatorだけが生成し、plugdが生成することは禁止する。
+
+`received_at` はresponseの完全なLF frameをplugdが受理した時、またはtimeout/disconnect/protocol failureを観測した時に一回取得するcore processのUTC nanosecondsである。`revision_invalidated` だけはrevision/delete transactionが一回取得した `invalidated_at` を使う。期限内response/controlは厳密に `received_at < deadline` だけで、`received_at == deadline` を含む `received_at >= deadline` はdeadline到達済みである。
+
+protocol違反でArcをcloseする時、plugdはclose理由を失う前に、そのArc上の全pending deliveryへexact一回 `protocol_error` outcomeを返す。そのpendingへclose由来の `disconnect` を重ねない。明示failed、EOF、I/O dropだけが `disconnect` である。typed revision invalidation closeはcoreが `revision_invalidated` を生成し、plugd control outcomeは0件である。gateway `err:WireErr`、`protocol_error`、`disconnect`、`revision_invalidated` は互いに代用しない。
+
+`response_digest` は `delivered|rejected|error(WireErr)` のfull response frameでnon-NULL、`timeout|disconnect|protocol_error|revision_invalidated` ではNULLである。
+
+`RecordExternalDeliveryOutcome(expected_arc_authority,outcome)` だけが次を一つのimmediate transactionで適用する。expected authorityは `BeginExternalDelivery` がin-flight registryへ置いたexact Arcで、outcome authorityとの比較は `Arc::ptr_eq` だけである。戻り値はexact `Applied`、`AlreadyTerminal`、`ContractViolation(EarlyTimeout|UnknownDelivery|AuthorityMismatch)` のいずれかである。`ContractViolation` はdelivery/observation write 0でruntimeをfail-loudにする。registryはterminal/timeout後もvalid responseを一意分類できるよう、responseを一件受理するか、そのArcのread loopとclose callbackを全てdrainするまで `delivery_id -> expected Arc` を保持する。process crash後のregistry再構築はせず、startup recoveryが残存sendingをterminal化する。
+
+valid responseのbranch分類順は (1) malformed/unknown ID、(2) known IDだがbinding/instance/revision/epochまたはArc pointer不一致、(3) tuple/Arc一致かつ `received_at >= deadline`、(4) tuple/Arc一致だが既にterminal、(5) `received_at < deadline` のcurrent `sending` である。(2) はstate/deadlineにかかわらず `wrong_epoch_response`。(3) はまず `sending -> indeterminate(error=timeout)` CASを行い、その後同じtransactionで `late_response` をappendする。timeout workerとresponseが競合してもstore serializationとこの順序により、等号時のcanonical winnerは必ずtimeoutである。(4) はstate不変の `late_response`。一responseを二種類のobservationへ記録しない。
+
+matching control outcomeのbranch分類順は (1) unknown deliveryまたはtuple/Arc不一致を `ContractViolation(UnknownDelivery|AuthorityMismatch)`、(2) terminalを `AlreadyTerminal`、(3) current `sending` かつ `received_at >= deadline` をcauseにかかわらずcanonical timeout、(4) current `sending` かつ `received_at < deadline` をcause別に処理、である。(2) は二件目のexact idempotent successで、delivery/observation write 0、runtime fail 0。(4) のtimeoutだけは `ContractViolation(EarlyTimeout)` でwrite 0/fail-loud、他三causeはexact errorへterminal化する。
+
+| current row / time | `timeout` | `disconnect` | `protocol_error` | `revision_invalidated` |
+|---|---|---|---|---|
+| current `sending`, `received_at < deadline` | `ContractViolation(EarlyTimeout)`、write 0、fail-loud | `Applied`: `indeterminate(error=disconnect)` | `Applied`: `indeterminate(error=protocol_error)` | `Applied`: `indeterminate(error=revision_invalidated)` |
+| current `sending`, `received_at >= deadline` | `Applied`: `indeterminate(error=timeout)` | `Applied`: `indeterminate(error=timeout)` | `Applied`: `indeterminate(error=timeout)` | `Applied`: `indeterminate(error=timeout)` |
+| terminal, `received_at < deadline` | `AlreadyTerminal`、write 0 | `AlreadyTerminal`、write 0 | `AlreadyTerminal`、write 0 | `AlreadyTerminal`、write 0 |
+| terminal, `received_at >= deadline` | `AlreadyTerminal`、write 0 | `AlreadyTerminal`、write 0 | `AlreadyTerminal`、write 0 | `AlreadyTerminal`、write 0 |
+
+同一pendingのmatching callbackはstore transaction取得順で直列化する。期限前のdisconnect/protocol_error/revision_invalidated同士は最初にcommitした一件だけがterminal winnerで、二件目以降は `AlreadyTerminal`。deadline以後にcurrent `sending` を最初に得たcontrol callbackはvariantを問わずtimeout winnerで、後続は `AlreadyTerminal`。期限前timeoutはwinnerにならない。producer側のprotocol-close disconnect抑止とintentional revision-close control抑止は重複を通常経路で減らすが、競合safeの根拠はこのtotal matrixとterminal no-opである。
+
+| port result / wire branch | exact current-row条件 | 永続結果 |
+|---|---|---|
+| `delivered(origin)` | `received_at < deadline`、current `sending`、tuple/Arc一致、origin nonempty | `delivered`、`remote_origin=origin`、`error=NULL` |
+| `rejected` | 同上、originなし | `failed`、`remote_origin=NULL`、`error=not_delivered` |
+| `error(WireErr)` | 同上 | `failed`、`remote_origin=NULL`、`error` にcanonical WireErrを保持 |
+| `timeout` | 同じcurrent `sending` tuple/Arc、`received_at >= deadline` | `indeterminate`、`remote_origin=NULL`、`error=timeout` |
+| `disconnect` | 同じcurrent `sending` tuple/Arc、`received_at < deadline` | `indeterminate`、`remote_origin=NULL`、`error=disconnect` |
+| `protocol_error` | 同じcurrent `sending` tuple/Arc、`received_at < deadline` | `indeterminate`、`remote_origin=NULL`、`error=protocol_error` |
+| `revision_invalidated` | 同じcurrent `sending` tuple/Arc、`received_at < deadline` | `indeterminate`、`remote_origin=NULL`、`error=revision_invalidated` |
+| 任意のcontrol outcome | 同じcurrent `sending` tuple/Arc、`received_at >= deadline` | causeを上書きして `indeterminate`、`remote_origin=NULL`、`error=timeout` |
+| 任意のcontrol outcome | 同じterminal tuple/Arc、時刻不問 | `AlreadyTerminal` success、delivery/observation write 0、runtime fail 0 |
+| `timeout` かつ `received_at < deadline` | internal port contract violation | delivery/observation write 0、runtime fail-loud |
+| deadline到達後またはterminal後のvalid response | `delivery_id` とtuple/Arcは一致 | timeout CASを先にした後、またはstate不変で `delivery_observations.kind=late_response` をappend |
+| revision/epoch/Arc pointerがsnapshot authorityと不一致のvalid response | `delivery_id` は既知 | state不変、`delivery_observations.kind=wrong_epoch_response` をappend。正authorityのpendingは別途timeout可能 |
+| unknownまたはtuple/Arc不一致の `timeout|disconnect|protocol_error|revision_invalidated` | response bytesなし | `ContractViolation(UnknownDelivery|AuthorityMismatch)`、delivery/observation write 0、runtime fail-loud |
+
+observationはobserved revision/epoch、outcome `delivered|rejected|error`、exact response bytesのdigest、`received_at` を持つ。control outcomeはobservationを作らない。valid late/wrong-epoch `delivered:true` のnonempty originは `delivery_observations.remote_origin` にだけ保持し、canonical `deliveries.remote_origin` を変更しない。初期effectは `say` だけなので、期限内の `delivered:true` でorigin欠落/空は成功ではなく `protocol_error` としてArcをcloseし、同Arcの全pendingへprotocol_error outcomeを返す。その永続結果は各pendingのdeadline/current stateをtotal matrixへ通して決める。unknown/malformed response ID自身はdelivery row/observationを書かない。
+
+`RecoverStaleRuntimeState` はcore/storeのstartup commandである。schema作成・migration完了後、runtime listener、hello、timer、plugd handoffより前に一回だけ、`BEGIN IMMEDIATE` transaction開始時点の `deliveries WHERE state='sending'` 全行を走査する。これは既存のstale nonterminal gate epoch回収と同じcommand・同じtransactionであり、deliveryだけの二つ目のstartup passを作らない。deadline、kind、instance、revision、epochで絞らず、全行をwire I/O 0のまま `indeterminate`、`remote_origin=NULL`、exact `error="stale sending recovered after restart"` にする。observationは追加せず、preparedとterminalは変更しない。compatibility projectionが存在する間は同じtransactionで対応rowも既存public failed projectionへ収束させる。途中失敗はepochとdeliveryを含む全回収をrollbackしてstartup自体を失敗させる。commit前のlistener開始、残存sendingの再handoff、自動再送、hello側repairは禁止する。二回目startupは対象0でwrite 0である。
+
+## 8. purpose、input、添付
+
+external purposeは常にbyte-exact `['inbound','outbound']`。片方向、`timed`、`tool:<name>` は初期surfaceにない。inputは全てimmediateで、gatewayはauthority/debounce/timer/window/policyを持たない。
+
+external helloは常にbyte-exact `effects:['say']` / `capabilities:['open']`。tool/action declarationはfield自体が無く、core→gate `tool` messageも無い。dynamic specはこのgrammarへ追加せず、永続正本・offline admin投影・route生成・互換性を同時に定義する後続issueで扱う。
+
+添付はURL参照 `image` だけ。byte/base64/multipart/local path/unknown kindを送らない。activityはbest-effort表示でdeliveryを作らない。NO_REPLY、settled context、permission、route selectionはcore契約である。
+
+## 9. 実装checklist
+
+- adminでschema→kind→instance→bindingを先に登録した
+- binding requestにpurposesを送らず、responseがliteral二purposeである
+- revision config/secret directoryをread-only注入しhello digestを照合した
+- ready後ordered bind完了までeventを送らない
+- event/checkpoint/closeに正しいbinding generationを付けた
+- checkpointへaddressを追加しない
+- helloにliteral以外のeffect/capabilityやtools/actionsを追加しない
+- effect `id` にdelivery_idを使い、binding/revision/epoch/opaque Arc authorityを選び直さない
+- external正本の300秒をtransaction時刻へchecked加算し、等号をtimeout CASへ倒した
+- delivery outcomeはprotocol_errorとdisconnectを区別して必ずcoreのstate commandへ返し、plugdからdelivery tableを書かない
+- control outcomeは16セルmatrixへ通し、deadline到達後は全causeをtimeout、terminal二件目はAlreadyTerminalにする
+- revision/deleteだけがrevision_invalidated outcomeを生成し、intentional plugd closeからdisconnect/protocol_errorを返さない
+- runtime port開始前にRecoverStaleRuntimeStateを完了し、全残存sendingを再送しない
+- cursorはcore CAS後だけ進んだと扱う
+- revision/delete後の全旧socketを無効化する
+- closeを推測せずaddress reuseをnew generationにする
+- core判断とgateway配送を互いの側へ移さない
+- secret、実在識別子、private service値をcode/test/log/reportに入れない
+- この文書で表現できない現物は補完せず持ち帰る
+
+片方向、shared instance、managed runner、dynamic effect/tool/action spec、timed/tool route、generic debounce、TCP、画像以外の添付は、実在要求が出た時の別issueである。初期surfaceの未決ではない。
