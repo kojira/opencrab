@@ -150,7 +150,11 @@ enum LeftoverTurn {
 // Owner 起点の running Background を実ファイルへ残し、reopen 後の Interrupted turn が
 // origin range・standing・activity・accepted tool call・中断結果を一対一で復元する。同じ場の汎用
 // Turn 中断が無い場合と Background の前後にある場合を同じ assertion で固定する。
-async fn assert_background_interruption_recovery(tag: &str, leftover_turn: LeftoverTurn) {
+async fn assert_background_interruption_recovery(
+    tag: &str,
+    leftover_turn: LeftoverTurn,
+    background_already_closed: bool,
+) {
     let db = tmp_db(tag);
     let _ = std::fs::remove_file(&db);
 
@@ -223,6 +227,22 @@ async fn assert_background_interruption_recovery(tag: &str, leftover_turn: Lefto
                 .store()
                 .start_activity(place, agent, ActivityKindTag::Turn, None, 10, 0, None)
                 .expect("seed running turn after background");
+        }
+        if background_already_closed {
+            // 旧 startup が activity の終端だけを確定し、Interrupted event の追記前に再停止した
+            // 実ファイル状態。次の reopen は running_activities() だけではこの行を拾えない。
+            assert!(
+                host.sys
+                    .store()
+                    .end_activity(activity, "interrupted", 2)
+                    .expect("close activity before simulated crash"),
+                "seed the crash point between the old two transactions"
+            );
+            assert_eq!(
+                host.sys.store().latest_seq(place).unwrap(),
+                origin,
+                "the interrupted result is still absent at the simulated crash point"
+            );
         }
         (place, agent, activity)
     };
@@ -321,17 +341,60 @@ async fn assert_background_interruption_recovery(tag: &str, leftover_turn: Lefto
         "Owner standing is restored for the follow-up tool boundary"
     );
 
+    // もう一度 reopen しても、同じ activity の Interrupted / provenance / follow-up turn は増えない。
+    // 最初の回収 transaction の commit 後にプロセスが再停止した場合の収束を固定する。
+    let latest_after_recovery = host.sys.store().latest_seq(place).unwrap();
+    drop(host);
+    let store = Store::open(&db).expect("second reopen");
+    store
+        .register_model_context_window("scripted", 200_000)
+        .expect("register scripted model after second reopen");
+    let second_engine = ScriptedEngine::new();
+    second_engine.push(Step::no_reply());
+    let second_host = Host::boot_with_engine(store, Arc::new(second_engine.clone()));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        second_engine.call_count(),
+        0,
+        "{tag}: a converged recovery must not start another follow-up turn"
+    );
+    assert_eq!(
+        second_host.sys.store().latest_seq(place).unwrap(),
+        latest_after_recovery,
+        "{tag}: a converged recovery must not append another event"
+    );
+    let interrupted_after_second_reopen = second_host
+        .sys
+        .store()
+        .read_range(place, 0, latest_after_recovery)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == EventKind::Interrupted)
+        .count();
+    assert_eq!(interrupted_after_second_reopen, expected_turns);
+
     let _ = std::fs::remove_file(&db);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn background_interruption_restores_full_provenance_after_real_file_reopen() {
-    assert_background_interruption_recovery("background-only", LeftoverTurn::Absent).await;
+    assert_background_interruption_recovery("background-only", LeftoverTurn::Absent, false).await;
     assert_background_interruption_recovery(
         "turn-before-background",
         LeftoverTurn::BeforeBackground,
+        false,
     )
     .await;
-    assert_background_interruption_recovery("turn-after-background", LeftoverTurn::AfterBackground)
+    assert_background_interruption_recovery(
+        "turn-after-background",
+        LeftoverTurn::AfterBackground,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_interruption_recovers_after_activity_close_crash_point() {
+    assert_background_interruption_recovery("closed-before-event", LeftoverTurn::Absent, true)
         .await;
 }

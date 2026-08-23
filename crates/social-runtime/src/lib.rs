@@ -14,7 +14,8 @@ pub use tokens::O200kCounter;
 
 use opencrab_port::*;
 use opencrab_store::{
-    BackgroundProvenance, Ingest, NewEvent, NewTurnRecord, SettledProvenance, Store,
+    ActivityInterruption, BackgroundProvenance, Ingest, NewEvent, NewTurnRecord, SettledProvenance,
+    Store,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -5006,72 +5007,40 @@ impl System {
     // ---- 再起動（詳細§11）----
 
     pub fn startup(&self) {
-        // 1. 走り残しを interrupted で閉じ、2. 中断を出来事にする。Turn は汎用 Interrupted、
-        // Background は保存済み provenance と一対一に結んだ Interrupted 結果として復元する。
-        for act in self.0.store.running_activities().unwrap() {
-            let transitioned = self
+        // 1. 走り残しを interrupted で閉じ、対応 event（Background は provenance も）を store の
+        // 1 transaction で確定する。旧処理が終端更新だけを残した Background も同じ入口で収束する。
+        for act in self.0.store.activities_needing_interruption().unwrap() {
+            let content = match act.kind {
+                ActivityKindTag::Turn => "再起動により中断".to_string(),
+                ActivityKindTag::Background => format!(
+                    "活動 #{} は再起動により中断した（勝手に再実行しない）",
+                    act.id
+                ),
+            };
+            match self
                 .0
                 .store
-                .end_activity(act.id, "interrupted", self.now_nanos())
-                .unwrap();
-            assert!(transitioned, "startup row must still be running");
-            let seq = match act.kind {
-                ActivityKindTag::Turn => {
-                    let ne = NewEvent {
-                        kind: EventKind::Interrupted,
-                        author_subject: None,
-                        author_external: None,
-                        content: Content::text("再起動により中断"),
-                        mentions: vec![],
-                        reply_to: None,
-                        target: None,
-                        for_subject: Some(act.subject),
-                        attachments: vec![],
-                    };
-                    self.0
-                        .store
-                        .append(act.place, &ne, self.now_wall_nanos())
-                        .unwrap()
+                .interrupt_activity(act.id, &content, self.now_nanos(), self.now_wall_nanos())
+                .unwrap()
+            {
+                ActivityInterruption::Appended { place, seq } => {
+                    // 出来事の時刻は壁時計。兄弟の追記と桁を揃える（§10 の観測を汚さない・§04）。
+                    // 中断はログ済み。発火の再判定が一時的に引けなくても、下の open 場ループ・
+                    // 以後の追記が拾う（§02）。
+                    let _ = self.on_append(place, seq);
                 }
-                ActivityKindTag::Background => {
-                    let provenance = act
-                        .provenance
-                        .expect("running background must retain accepted tool provenance");
-                    let result = SettledProvenance {
-                        activity: act.id,
-                        origin_from_exclusive: provenance.origin_from_exclusive,
-                        origin_to_inclusive: provenance.origin_to_inclusive,
-                        origin_standing: provenance.origin_standing,
-                        tool_name: provenance.tool_name,
-                        tool_args: provenance.tool_args,
-                    };
-                    self.0
-                        .store
-                        .append_interrupted(
-                            act.place,
-                            act.subject,
-                            &format!(
-                                "活動 #{} は再起動により中断した（勝手に再実行しない）",
-                                act.id
-                            ),
-                            &result,
-                            self.now_wall_nanos(),
-                        )
-                        .unwrap()
-                }
-            };
-            // 出来事の時刻は壁時計。兄弟の追記と桁を揃える（§10 の観測を汚さない・§04）。
-            // 中断はログ済み。発火の再判定が一時的に引けなくても、下の open 場ループ・以後の追記が拾う（§02）。
-            let _ = self.on_append(act.place, seq);
+                ActivityInterruption::AlreadyRecorded { .. }
+                | ActivityInterruption::AlreadyEnded => {}
+            }
         }
-        // 3. 予定を読み直す（位相はそのまま）。壁時計で持った予定を、単調時計の待ちへ変換する（§04）。
+        // 2. 予定を読み直す（位相はそのまま）。壁時計で持った予定を、単調時計の待ちへ変換する（§04）。
         //    残り = 予定（壁） − いまの壁時計。過ぎていれば即時（now）に判定させる。
         let now_wall = self.now_wall_nanos();
         for (place, reason, wall_at) in self.0.store.schedule_all().unwrap() {
             let remaining = Duration::from_nanos((wall_at - now_wall).max(0) as u64);
             self.arm_sleeper(place, &reason, self.now() + remaining);
         }
-        // 4. プラグインの接続は範囲外。開いている場の未読からの発火だけ回す。
+        // 3. プラグインの接続は範囲外。開いている場の未読からの発火だけ回す。
         //    一時的に引けない場は、この起動時には見送る（次の追記・pump が拾う・§15）。
         for p in self.0.store.all_open_places().unwrap() {
             let _ = self.maybe_fire(p);

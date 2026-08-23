@@ -48,6 +48,15 @@ pub enum Ingest {
     Duplicate(Seq),
 }
 
+/// 再起動時の activity 回収結果。`Appended` のときだけ新しい event が生まれ、呼び手は
+/// 発火判定を行う。`AlreadyRecorded` / `AlreadyEnded` は再実行時の no-op。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActivityInterruption {
+    Appended { place: PlaceId, seq: Seq },
+    AlreadyRecorded { place: PlaceId, seq: Seq },
+    AlreadyEnded,
+}
+
 #[derive(Clone, Debug)]
 pub struct EventRow {
     pub place: PlaceId,
@@ -518,6 +527,10 @@ const SCHEMA: &str = r#"
               accepted_tool_args_json TEXT NOT NULL,
               PRIMARY KEY(place_id, seq)
             );
+            -- 1 activity の結果は 1 event だけ。再起動回収を繰り返しても Background の
+            -- Interrupted を二重に作れないことを表でも守る。
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_settled_provenance_activity
+              ON settled_provenance(activity_id);
 
             CREATE TABLE IF NOT EXISTS turn_records(
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -881,24 +894,138 @@ impl Store {
         self.append_background_result(EventKind::Settled, place, subject, content, provenance, now)
     }
 
-    /// 再起動で中断された background と provenance を 1 transaction で Interrupted event にする。
-    /// Turn の汎用 Interrupted は provenance を持たず、通常の [`Store::append`] を使う。
-    pub fn append_interrupted(
+    /// 再起動で残った activity を閉じ、対応する Interrupted event を同じ transaction で追記する。
+    /// Background は保存済み provenance も同じ transaction に入れる。
+    ///
+    /// 旧処理が残し得た「activity は interrupted 済みだが結果 event は無い」Background も、
+    /// provenance が未記録ならここで回収する。既に結果がある Background と、既に終わった Turn は
+    /// no-op なので、起動を繰り返しても重複しない。
+    pub fn interrupt_activity(
         &self,
-        place: PlaceId,
-        subject: SubjectId,
+        id: ActivityId,
         content: &str,
-        provenance: &SettledProvenance,
-        now: i64,
-    ) -> Result<Seq> {
-        self.append_background_result(
-            EventKind::Interrupted,
-            place,
-            subject,
-            content,
-            provenance,
-            now,
-        )
+        ended_at: i64,
+        event_created_at: i64,
+    ) -> Result<ActivityInterruption> {
+        let mut c = self.c();
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let activity = tx.query_row(
+            "SELECT id,place_id,subject_id,kind,label,deadline_at,started_at,ended_at,end_reason,detached_from,origin_from_exclusive,origin_to_inclusive,origin_standing,accepted_tool_name,accepted_tool_args_json
+             FROM activities WHERE id=?1",
+            params![id],
+            map_activity,
+        )?;
+        let existing_result: Option<(PlaceId, Seq)> = tx
+            .query_row(
+                "SELECT place_id,seq FROM settled_provenance WHERE activity_id=?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+
+        if activity.ended_at.is_some() {
+            if activity.kind == ActivityKindTag::Background
+                && activity.end_reason.as_deref() == Some("interrupted")
+            {
+                if let Some((place, seq)) = existing_result {
+                    tx.commit()?;
+                    return Ok(ActivityInterruption::AlreadyRecorded { place, seq });
+                }
+                // 旧 startup が activity だけを先に閉じて停止した中間状態。下で結果を補う。
+            } else {
+                tx.commit()?;
+                return Ok(ActivityInterruption::AlreadyEnded);
+            }
+        } else {
+            if existing_result.is_some() {
+                return Err(rusqlite::Error::ToSqlConversionFailure(
+                    "running activity already has settled provenance".into(),
+                ));
+            }
+            let changed = tx.execute(
+                "UPDATE activities SET ended_at=?2,end_reason='interrupted'
+                 WHERE id=?1 AND ended_at IS NULL",
+                params![id, ended_at],
+            )?;
+            if changed != 1 {
+                return Err(rusqlite::Error::ToSqlConversionFailure(
+                    "activity interruption transition was lost".into(),
+                ));
+            }
+        }
+
+        let background = match activity.kind {
+            ActivityKindTag::Turn => None,
+            ActivityKindTag::Background => Some(activity.provenance.ok_or_else(|| {
+                rusqlite::Error::ToSqlConversionFailure(
+                    "background activity has no accepted tool provenance".into(),
+                )
+            })?),
+        };
+        let reply_to = background
+            .as_ref()
+            .map(|provenance| {
+                if provenance.origin_to_inclusive < provenance.origin_from_exclusive {
+                    return Err(rusqlite::Error::ToSqlConversionFailure(
+                        "activity origin range is reversed".into(),
+                    ));
+                }
+                if provenance.origin_to_inclusive == provenance.origin_from_exclusive {
+                    Ok(None)
+                } else {
+                    provenance
+                        .origin_from_exclusive
+                        .checked_add(1)
+                        .map(Some)
+                        .ok_or_else(|| {
+                            rusqlite::Error::ToSqlConversionFailure(
+                                "origin range start overflow".into(),
+                            )
+                        })
+                }
+            })
+            .transpose()?
+            .flatten();
+        let seq: Seq = tx.query_row(
+            "SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE place_id=?1",
+            params![activity.place],
+            |r| r.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO events(place_id,seq,kind,author_subject_id,author_external_id,content_json,mentions_json,reply_to_seq,target_seq,for_subject_id,created_at,attachments_json)
+             VALUES(?1,?2,'interrupted',NULL,NULL,?3,'[]',?4,NULL,?5,?6,'[]')",
+            params![
+                activity.place,
+                seq,
+                content_to_json(&Content::text(content)),
+                reply_to,
+                activity.subject,
+                event_created_at,
+            ],
+        )?;
+        if let Some(provenance) = background {
+            let args_json = serde_json::to_string(&provenance.tool_args)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            tx.execute(
+                "INSERT INTO settled_provenance(place_id,seq,activity_id,origin_from_exclusive,origin_to_inclusive,origin_standing,accepted_tool_name,accepted_tool_args_json)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![
+                    activity.place,
+                    seq,
+                    activity.id,
+                    provenance.origin_from_exclusive,
+                    provenance.origin_to_inclusive,
+                    standing_str(provenance.origin_standing),
+                    provenance.tool_name,
+                    args_json,
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(ActivityInterruption::Appended {
+            place: activity.place,
+            seq,
+        })
     }
 
     fn append_background_result(
@@ -1525,6 +1652,26 @@ impl Store {
         let mut stmt = c.prepare(
             "SELECT id,place_id,subject_id,kind,label,deadline_at,started_at,ended_at,end_reason,detached_from,origin_from_exclusive,origin_to_inclusive,origin_standing,accepted_tool_name,accepted_tool_args_json
              FROM activities WHERE ended_at IS NULL ORDER BY id",
+        )?;
+        let rows = stmt
+            .query_map([], map_activity)?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// 再起動で原子的に中断へ収束させる対象。通常の running 行に加え、旧 startup が activity の
+    /// 終端だけを確定して結果追記前に止まった Background を拾う。通常実行中に中断された Turn は
+    /// 回収対象へ混ぜない。
+    pub fn activities_needing_interruption(&self) -> Result<Vec<ActivityRow>> {
+        let c = self.c();
+        let mut stmt = c.prepare(
+            "SELECT id,place_id,subject_id,kind,label,deadline_at,started_at,ended_at,end_reason,detached_from,origin_from_exclusive,origin_to_inclusive,origin_standing,accepted_tool_name,accepted_tool_args_json
+             FROM activities
+             WHERE ended_at IS NULL
+                OR (kind='background' AND end_reason='interrupted' AND NOT EXISTS (
+                    SELECT 1 FROM settled_provenance WHERE activity_id=activities.id
+                ))
+             ORDER BY id",
         )?;
         let rows = stmt
             .query_map([], map_activity)?
@@ -2570,6 +2717,64 @@ mod tests {
             None,
             "empty origin range must not invent a reply target"
         );
+    }
+
+    #[test]
+    fn interrupt_activity_atomically_closes_and_appends_once() {
+        let s = Store::new_in_memory().unwrap();
+        let place = s.create_place(Some("p"), None, "{}", None, 0).unwrap();
+        let subject = s
+            .create_subject(SubjectKind::Agent, "A", "A", "engine", Standing::Trusted, 0)
+            .unwrap();
+        let activity_provenance = BackgroundProvenance {
+            origin_from_exclusive: 0,
+            origin_to_inclusive: 0,
+            origin_standing: Standing::Owner,
+            tool_name: "synthetic-tool".into(),
+            tool_args: serde_json::json!({"mode": "bounded"}),
+        };
+        let activity = s
+            .start_activity_with_provenance(
+                place,
+                subject,
+                ActivityKindTag::Background,
+                None,
+                10,
+                1,
+                None,
+                Some(&activity_provenance),
+            )
+            .unwrap();
+
+        let first = s
+            .interrupt_activity(activity, "synthetic interruption", 2, 3)
+            .unwrap();
+        let seq = match first {
+            ActivityInterruption::Appended { place: p, seq } => {
+                assert_eq!(p, place);
+                seq
+            }
+            other => panic!("first interruption must append: {other:?}"),
+        };
+        assert_eq!(
+            s.get_activity(activity)
+                .unwrap()
+                .unwrap()
+                .end_reason
+                .as_deref(),
+            Some("interrupted")
+        );
+        assert_eq!(
+            s.settled_provenance(place, seq).unwrap().unwrap().activity,
+            activity
+        );
+
+        assert_eq!(
+            s.interrupt_activity(activity, "must not be appended", 4, 5)
+                .unwrap(),
+            ActivityInterruption::AlreadyRecorded { place, seq }
+        );
+        assert_eq!(s.latest_seq(place).unwrap(), seq);
     }
 
     // name/persona 分離の移行（統括裁定）。旧 DB（name 列なし）に name を足し、既存 persona からコピーする。
