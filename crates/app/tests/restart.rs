@@ -469,6 +469,7 @@ async fn legacy_interrupted_background_upgrades_without_duplicate_recovery() {
     legacy
         .execute_batch(
             "DROP TABLE settled_provenance;
+             DROP TABLE legacy_background_activities;
              ALTER TABLE activities DROP COLUMN origin_from_exclusive;
              ALTER TABLE activities DROP COLUMN origin_to_inclusive;
              ALTER TABLE activities DROP COLUMN origin_standing;
@@ -505,6 +506,123 @@ async fn legacy_interrupted_background_upgrades_without_duplicate_recovery() {
 
     let second = Host::boot(Store::open(&db).expect("second upgraded reopen"));
     assert_eq!(second.sys.store().latest_seq(place).unwrap(), legacy_seq);
+    let _ = std::fs::remove_file(&db);
+}
+
+// main 形式でまだ running の Background も、schema 移行時に旧形式として明示分類し、provenance
+// なしの汎用 Interrupted へ 1 回だけ収束させる。新形式の一対一 provenance 契約とは混ぜない。
+#[tokio::test(flavor = "current_thread")]
+async fn legacy_running_background_upgrades_to_one_generic_interruption() {
+    let db = tmp_db("legacy-running-background");
+    let _ = std::fs::remove_file(&db);
+
+    let (place, activity) = {
+        let store = Store::open(&db).expect("create pre-upgrade database");
+        let place = store
+            .create_place(
+                Some("synthetic:legacy-running"),
+                None,
+                &Policy::default().to_json(),
+                None,
+                0,
+            )
+            .expect("seed place");
+        let subject = store
+            .create_subject(
+                SubjectKind::Agent,
+                "synthetic-agent",
+                "synthetic-agent",
+                "echo",
+                Standing::Trusted,
+                0,
+            )
+            .expect("seed subject");
+        let activity = store
+            .start_activity(
+                place,
+                subject,
+                ActivityKindTag::Background,
+                Some("synthetic legacy running background"),
+                10,
+                0,
+                None,
+            )
+            .expect("seed legacy running background");
+        (place, activity)
+    };
+
+    // merge-base schema と同じく、形式タグ・provenance 列・settled_provenance table が無い
+    // 実ファイルへ戻す。次の Store::open が旧形式だった事実を migration で保存する。
+    let legacy = Connection::open(&db).expect("open legacy schema fixture");
+    legacy
+        .execute_batch(
+            "DROP TABLE settled_provenance;
+             DROP TABLE legacy_background_activities;
+             ALTER TABLE activities DROP COLUMN origin_from_exclusive;
+             ALTER TABLE activities DROP COLUMN origin_to_inclusive;
+             ALTER TABLE activities DROP COLUMN origin_standing;
+             ALTER TABLE activities DROP COLUMN accepted_tool_name;
+             ALTER TABLE activities DROP COLUMN accepted_tool_args_json;",
+        )
+        .expect("downgrade fixture to merge-base activity schema");
+    drop(legacy);
+
+    let host = Host::boot(Store::open(&db).expect("upgrade legacy database"));
+    let first_latest = host.sys.store().latest_seq(place).unwrap();
+    let interrupted: Vec<_> = host
+        .sys
+        .store()
+        .read_range(place, 0, first_latest)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == EventKind::Interrupted)
+        .collect();
+    assert_eq!(interrupted.len(), 1, "upgrade creates one interruption");
+    assert_eq!(
+        interrupted[0].for_subject,
+        host.sys
+            .store()
+            .get_activity(activity)
+            .unwrap()
+            .map(|row| row.subject)
+    );
+    assert_eq!(
+        host.sys
+            .store()
+            .settled_provenance(place, interrupted[0].seq)
+            .unwrap(),
+        None,
+        "legacy generic interruption must not invent provenance"
+    );
+    let row = host
+        .sys
+        .store()
+        .get_activity(activity)
+        .unwrap()
+        .expect("legacy activity survives upgrade");
+    assert_eq!(row.end_reason.as_deref(), Some("interrupted"));
+    assert_eq!(row.provenance, None);
+    assert!(
+        host.sys
+            .store()
+            .activities_needing_interruption()
+            .unwrap()
+            .is_empty(),
+        "legacy running activity converges after the first recovery"
+    );
+    drop(host);
+
+    let second = Host::boot(Store::open(&db).expect("second upgraded reopen"));
+    assert_eq!(second.sys.store().latest_seq(place).unwrap(), first_latest);
+    let interrupted_after_second_reopen = second
+        .sys
+        .store()
+        .read_range(place, 0, first_latest)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == EventKind::Interrupted)
+        .count();
+    assert_eq!(interrupted_after_second_reopen, 1);
     let _ = std::fs::remove_file(&db);
 }
 

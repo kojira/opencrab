@@ -547,6 +547,13 @@ const SCHEMA: &str = r#"
             CREATE UNIQUE INDEX IF NOT EXISTS idx_settled_provenance_activity
               ON settled_provenance(activity_id);
 
+            -- provenance 導入前の schema から移行した Background の明示的な形式タグ。
+            -- NULL provenance だけでは「旧形式」と「新形式の破損」を区別できないため、移行時にだけ記録する。
+            -- 旧形式は汎用 Interrupted へ収束し、新形式の Background は引き続き完全な provenance を要求する。
+            CREATE TABLE IF NOT EXISTS legacy_background_activities(
+              activity_id INTEGER PRIMARY KEY
+            );
+
             CREATE TABLE IF NOT EXISTS turn_records(
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               place_id INTEGER NOT NULL,
@@ -693,18 +700,47 @@ fn migrate(conn: &Connection) -> Result<()> {
     if !column_exists(conn, "turn_records", "fired_by")? {
         conn.execute("ALTER TABLE turn_records ADD COLUMN fired_by TEXT", [])?;
     }
-    for (column, sql_type) in [
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS legacy_background_activities(
+           activity_id INTEGER PRIMARY KEY
+         )",
+        [],
+    )?;
+    let provenance_columns = [
         ("origin_from_exclusive", "INTEGER"),
         ("origin_to_inclusive", "INTEGER"),
         ("origin_standing", "TEXT"),
         ("accepted_tool_name", "TEXT"),
         ("accepted_tool_args_json", "TEXT"),
-    ] {
-        if !column_exists(conn, "activities", column)? {
+    ];
+    let present_provenance_columns = provenance_columns
+        .iter()
+        .map(|(column, _)| column_exists(conn, "activities", column))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|present| *present)
+        .count();
+    match present_provenance_columns {
+        0 => {
+            // main の旧形式だった事実を、列追加で失う前に行単位で保存する。以後に作られる
+            // provenance 無し Background はここへ入らないため、旧形式だけを汎用中断として扱える。
             conn.execute(
-                &format!("ALTER TABLE activities ADD COLUMN {column} {sql_type}"),
+                "INSERT OR IGNORE INTO legacy_background_activities(activity_id)
+                 SELECT id FROM activities WHERE kind='background'",
                 [],
             )?;
+            for (column, sql_type) in provenance_columns {
+                conn.execute(
+                    &format!("ALTER TABLE activities ADD COLUMN {column} {sql_type}"),
+                    [],
+                )?;
+            }
+        }
+        5 => {}
+        count => {
+            return Err(rusqlite::Error::ToSqlConversionFailure(
+                format!("unknown activities provenance schema: found {count} of 5 columns").into(),
+            ));
         }
     }
     // 添付列（DESIGN-images §1）。既定 '[]' で足す——添付なしの既存イベントは従来どおり読める（後方互換）。
@@ -1038,7 +1074,8 @@ impl Store {
     }
 
     /// 再起動で残った activity を閉じ、対応する Interrupted event を同じ transaction で追記する。
-    /// Background は保存済み provenance も同じ transaction に入れる。
+    /// 新形式 Background は保存済み provenance も同じ transaction に入れる。移行時に明示分類した
+    /// 旧形式 Background だけは、provenance の無い汎用 Interrupted として同じ transaction で閉じる。
     ///
     /// provenance 導入後の旧処理が残し得た「activity は interrupted 済みだが結果 event は無い」
     /// Background も、結果が未記録ならここで回収する。既に結果がある Background と、既に終わった
@@ -1058,6 +1095,33 @@ impl Store {
             params![id],
             map_activity,
         )?;
+        let legacy_background = tx.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM legacy_background_activities WHERE activity_id=?1
+             )",
+            params![id],
+            |r| Ok(r.get::<_, i64>(0)? != 0),
+        )?;
+        let background = match (
+            activity.kind,
+            legacy_background,
+            activity.provenance.clone(),
+        ) {
+            (ActivityKindTag::Turn, false, None) => None,
+            (ActivityKindTag::Background, false, Some(provenance)) => Some(provenance),
+            // main 由来の旧形式だけは、provenance 導入前と同じ汎用 Interrupted にする。
+            (ActivityKindTag::Background, true, None) => None,
+            (ActivityKindTag::Background, false, None) => {
+                return Err(rusqlite::Error::ToSqlConversionFailure(
+                    "background activity has no accepted tool provenance".into(),
+                ));
+            }
+            _ => {
+                return Err(rusqlite::Error::ToSqlConversionFailure(
+                    "activity provenance does not match its stored format".into(),
+                ));
+            }
+        };
         let existing_result: Option<(PlaceId, Seq)> = tx
             .query_row(
                 "SELECT place_id,seq FROM settled_provenance WHERE activity_id=?1",
@@ -1097,14 +1161,6 @@ impl Store {
             }
         }
 
-        let background = match activity.kind {
-            ActivityKindTag::Turn => None,
-            ActivityKindTag::Background => Some(activity.provenance.ok_or_else(|| {
-                rusqlite::Error::ToSqlConversionFailure(
-                    "background activity has no accepted tool provenance".into(),
-                )
-            })?),
-        };
         let reply_to = background
             .as_ref()
             .map(|provenance| {
@@ -1690,7 +1746,8 @@ impl Store {
     /// 再起動で原子的に中断へ収束させる対象。通常の running 行に加え、provenance 導入後の旧処理が
     /// activity の終端だけを確定して結果追記前に止まった Background を拾う。provenance 列の無い
     /// main 由来の中断済み Background は、旧 startup が既に汎用 Interrupted を記録した正当な履歴なので
-    /// 再回収しない。通常実行中に中断された Turn も回収対象へ混ぜない。
+    /// 再回収しない。main 由来の running Background は通常の running 行として拾い、移行時の形式タグを
+    /// `interrupt_activity` が判定する。通常実行中に中断された Turn も回収対象へ混ぜない。
     pub fn activities_needing_interruption(&self) -> Result<Vec<ActivityRow>> {
         let c = self.c();
         let mut stmt = c.prepare(
@@ -2817,6 +2874,38 @@ mod tests {
         assert_eq!(s.latest_seq(place).unwrap(), seq);
     }
 
+    #[test]
+    fn new_background_without_provenance_is_not_treated_as_legacy() {
+        let s = Store::new_in_memory().unwrap();
+        let place = s.create_place(Some("p"), None, "{}", None, 0).unwrap();
+        let subject = s
+            .create_subject(SubjectKind::Agent, "A", "A", "engine", Standing::Trusted, 0)
+            .unwrap();
+        let activity = s
+            .start_activity(
+                place,
+                subject,
+                ActivityKindTag::Background,
+                None,
+                10,
+                1,
+                None,
+            )
+            .unwrap();
+
+        let error = s
+            .interrupt_activity(activity, "must fail loudly", 2, 3)
+            .expect_err("unmarked new-format Background must require provenance");
+        assert!(
+            error
+                .to_string()
+                .contains("background activity has no accepted tool provenance"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(s.get_activity(activity).unwrap().unwrap().ended_at, None);
+        assert_eq!(s.latest_seq(place).unwrap(), 0);
+    }
+
     // name/persona 分離の移行（統括裁定）。旧 DB（name 列なし）に name を足し、既存 persona からコピーする。
     // 冪等: 2 回目は列が既にあり、既に非空の name は上書きしない。
     #[test]
@@ -2836,7 +2925,8 @@ mod tests {
              -- 旧 events（attachments_json が無い）。migrate が列を足す（本番は SCHEMA が先に作る）。
              CREATE TABLE events(place_id INTEGER NOT NULL, seq INTEGER NOT NULL, PRIMARY KEY(place_id, seq));
              -- 旧 activities（provenance 列が無い）。
-             CREATE TABLE activities(id INTEGER PRIMARY KEY);",
+             CREATE TABLE activities(id INTEGER PRIMARY KEY, kind TEXT NOT NULL);
+             INSERT INTO activities(id,kind) VALUES(1,'background');",
         )
         .unwrap();
         conn.execute(
@@ -2865,6 +2955,14 @@ mod tests {
             column_exists(&conn, "activities", "accepted_tool_args_json").unwrap(),
             "activity provenance 列が足される"
         );
+        let legacy_backgrounds: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM legacy_background_activities WHERE activity_id=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_backgrounds, 1, "旧 Background の形式を保存する");
         let name: String = conn
             .query_row("SELECT name FROM subjects WHERE id=1", [], |r| r.get(0))
             .unwrap();
@@ -2880,6 +2978,38 @@ mod tests {
         assert_eq!(
             name2, "別の表示名",
             "冪等: 2 回目は既存 name を上書きしない"
+        );
+    }
+
+    #[test]
+    fn migration_rejects_unknown_partial_provenance_schema() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE turn_records(
+               id INTEGER PRIMARY KEY,
+               failure_detail TEXT,
+               withheld_text TEXT,
+               tool_lines TEXT,
+               fired_by TEXT
+             );
+             CREATE TABLE activities(
+               id INTEGER PRIMARY KEY,
+               kind TEXT NOT NULL,
+               origin_from_exclusive INTEGER
+             );",
+        )
+        .unwrap();
+
+        let error = migrate(&conn).expect_err("partial provenance schema is not a known format");
+        assert!(
+            error
+                .to_string()
+                .contains("unknown activities provenance schema: found 1 of 5 columns"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !column_exists(&conn, "activities", "accepted_tool_args_json").unwrap(),
+            "unknown format must not be completed as though it were legacy"
         );
     }
 
