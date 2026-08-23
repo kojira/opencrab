@@ -39,11 +39,12 @@ fn quarter_round(state: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) 
 fn hchacha20(key: &[u8; 32], nonce: &[u8; 16]) -> [u8; 32] {
     let mut state = [0_u32; 16];
     state[..4].copy_from_slice(&[0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574]);
-    for (index, chunk) in key.chunks_exact(std::mem::size_of::<u32>()).enumerate() {
-        state[4 + index] = u32::from_le_bytes(chunk.try_into().unwrap());
+    // Split into 4-byte chunks matching the width of u32.
+    for (index, chunk) in key.as_chunks::<4>().0.iter().enumerate() {
+        state[4 + index] = u32::from_le_bytes(*chunk);
     }
-    for (index, chunk) in nonce.chunks_exact(std::mem::size_of::<u32>()).enumerate() {
-        state[12 + index] = u32::from_le_bytes(chunk.try_into().unwrap());
+    for (index, chunk) in nonce.as_chunks::<4>().0.iter().enumerate() {
+        state[12 + index] = u32::from_le_bytes(*chunk);
     }
     for _ in 0..10 {
         quarter_round(&mut state, 0, 4, 8, 12);
