@@ -9,7 +9,7 @@ pub(crate) fn create_migration_owned_schema(conn: &Connection) -> Result<()> {
           subject_id INTEGER NOT NULL,
           revision INTEGER NOT NULL,
           persona_name TEXT NOT NULL,
-          persona TEXT NOT NULL,
+          persona TEXT,
           instructions TEXT NOT NULL,
           default_heartbeat_instructions TEXT NOT NULL,
           job_title TEXT,

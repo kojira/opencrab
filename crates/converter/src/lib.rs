@@ -602,7 +602,7 @@ fn assemble_gate_configs(
         for agent in &discord.agent_ids {
             if !agents.contains_key(agent) {
                 return Err(ConverterError::InstanceSet(format!(
-                    "shared Discord config member {agent:?} does not resolve exactly once"
+                    "shared Discord config member {agent:?} is absent from assembled agent subjects"
                 )));
             }
         }
@@ -3930,7 +3930,7 @@ struct ParsedAgent {
     agent_id: String,
     name: String,
     persona_name: String,
-    persona: String,
+    persona: Option<String>,
     instructions: String,
     heartbeat_instructions: String,
     job_title: Option<String>,
@@ -3975,7 +3975,7 @@ fn parse_agent_aggregate(
     }
     let name = required("name")?;
     let persona_name = required("persona_name")?;
-    let persona = required("personality")?;
+    let persona = nullable("personality")?;
     let instructions = required("instructions")?;
     let heartbeat_instructions = required("heartbeat_instructions")?;
     let metadata = nullable("metadata_json")?;
