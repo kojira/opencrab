@@ -41,6 +41,7 @@ use std::sync::Arc;
 #[derive(Clone, Copy)]
 enum MockScript {
     Reply,
+    History,
     NoReply,
     PrefixedNoReply,
     ToolThenReply,
@@ -70,6 +71,7 @@ impl MockEngine {
         };
         let script = match value.as_str() {
             "reply" => MockScript::Reply,
+            "history" => MockScript::History,
             "no_reply" => MockScript::NoReply,
             "prefixed_no_reply" => MockScript::PrefixedNoReply,
             "tool_then_reply" => MockScript::ToolThenReply,
@@ -116,6 +118,20 @@ impl Engine for MockEngine {
                     }
                 }
                 Ok(say("mock reply"))
+            }
+            MockScript::History => {
+                if !ctx.rendered.contains("synthetic history question") {
+                    return Ok(say("mock history seed acknowledged"));
+                }
+                if !ctx.rendered.contains("synthetic history seed")
+                    || !ctx.rendered.contains("mock history seed acknowledged")
+                {
+                    return Err(EngineError(
+                        "mock history turn did not receive the previously read conversation"
+                            .to_string(),
+                    ));
+                }
+                Ok(say("mock remembered synthetic history seed"))
             }
             MockScript::NoReply => Ok(say("NO_REPLY")),
             MockScript::PrefixedNoReply => Ok(say("mock internal reasoning\nNO_REPLY")),
@@ -1490,6 +1506,19 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(only_say(&reply), "mock reply");
+
+        let history = MockEngine {
+            script: MockScript::History,
+        };
+        let seed = history.infer(&ctx, &chunks).await.unwrap();
+        assert_eq!(only_say(&seed), "mock history seed acknowledged");
+        let history_ctx = Context {
+            rendered: "[1] Synthetic: synthetic history seed\n[2] Agent: mock history seed acknowledged\n[3] Synthetic: synthetic history question\n"
+                .to_string(),
+            ..Context::default()
+        };
+        let answer = history.infer(&history_ctx, &chunks).await.unwrap();
+        assert_eq!(only_say(&answer), "mock remembered synthetic history seed");
 
         let no_reply = MockEngine {
             script: MockScript::NoReply,

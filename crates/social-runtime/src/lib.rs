@@ -46,7 +46,7 @@ pub const PROGRESS: &str = "PROGRESS";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TurnReason {
-    /// 即応を起こした実際の event。settled の元発端は、この seq に結びついた provenance から引く。
+    /// 即応を起こした実際の event。Background 結果の元発端は、この seq に結びついた provenance から引く。
     Immediate(Seq),
     Batch,
     Unconditional,
@@ -1386,9 +1386,9 @@ impl System {
     /// （新しい概念を作らない）。切られた残りは未読のまま残り、次のターンが別の権限で処理する
     /// ——捨てない。
     ///
-    /// 作者のいない通常出来事は standing の区切りにしない。settled は provenance の origin range と
-    /// standing を区切りに使う。provenance 導入前の旧 settled だけは既存 `reply_to` を exact key とし、
-    /// 別 event から補完・推測しない。
+    /// 作者のいない通常出来事は standing の区切りにしない。provenance 付きの Background 結果
+    /// （Settled / Interrupted）は origin range と standing を区切りに使う。provenance 導入前の旧
+    /// Settled だけは既存 `reply_to` を exact key とし、別 event から補完・推測しない。
     fn first_standing_group(
         &self,
         subject: SubjectId,
@@ -1398,17 +1398,23 @@ impl System {
         let mut group: Option<Standing> = None;
         let mut settled_origin: Option<SettledOriginKey> = None;
         for ev in unread {
-            if ev.kind == EventKind::Settled {
+            if matches!(ev.kind, EventKind::Settled | EventKind::Interrupted) {
                 let provenance = self
                     .0
                     .store
                     .settled_provenance(ev.place, ev.seq)
                     .map_err(|_| Busy)?;
-                let key = match &provenance {
-                    Some(p) => {
+                let key = match (&provenance, ev.kind) {
+                    (Some(p), _) => {
                         SettledOriginKey::Provenance(p.origin_from_exclusive, p.origin_to_inclusive)
                     }
-                    None => SettledOriginKey::Legacy(ev.reply_to),
+                    (None, EventKind::Settled) => SettledOriginKey::Legacy(ev.reply_to),
+                    // Turn の汎用 Interrupted は provenance を持たず、standing の区切りにもならない。
+                    (None, EventKind::Interrupted) => {
+                        out.push(ev.clone());
+                        continue;
+                    }
+                    (None, _) => unreachable!("result kind was checked above"),
                 };
                 if settled_origin.is_some_and(|origin| origin != key) {
                     break;
@@ -1444,6 +1450,73 @@ impl System {
             }
         }
         Ok(out)
+    }
+
+    /// 未読を standing 区間へ分ける。候補探索は全区間を走査し、claim は選んだ 1 区間だけにする。
+    fn standing_groups(
+        &self,
+        subject: SubjectId,
+        unread: &[opencrab_store::EventRow],
+    ) -> Result<Vec<Vec<opencrab_store::EventRow>>, Busy> {
+        let mut groups = Vec::new();
+        let mut rest = unread;
+        while !rest.is_empty() {
+            let group = self.first_standing_group(subject, rest)?;
+            assert!(
+                !group.is_empty(),
+                "nonempty unread must form a standing group"
+            );
+            let consumed = group.len();
+            groups.push(group);
+            rest = &rest[consumed..];
+        }
+        Ok(groups)
+    }
+
+    fn out_of_order_reads(
+        &self,
+        place: PlaceId,
+        subject: SubjectId,
+        read: Seq,
+        latest: Seq,
+    ) -> Result<HashSet<Seq>, Busy> {
+        Ok(self
+            .0
+            .store
+            .out_of_order_read_seqs(place, subject, read, latest)
+            .map_err(|_| Busy)?
+            .into_iter()
+            .collect())
+    }
+
+    /// reason が指す standing 区間だけを選ぶ。即応は trigger を含む後続区間を選べるが、既に疎な
+    /// 既読として claim 済みの event は同じ standing に後から追記された event と一緒に再表示しない。
+    fn standing_group_for_reason(
+        &self,
+        subject: SubjectId,
+        unread: &[opencrab_store::EventRow],
+        already_read: &HashSet<Seq>,
+        reason: TurnReason,
+    ) -> Result<Vec<opencrab_store::EventRow>, Busy> {
+        let groups = self.standing_groups(subject, unread)?;
+        let chosen = match reason {
+            TurnReason::Immediate(trigger) => groups
+                .into_iter()
+                .find(|group| group.iter().any(|ev| ev.seq == trigger))
+                .expect("immediate trigger must belong to an unread standing group"),
+            TurnReason::Batch => groups
+                .into_iter()
+                .find(|group| group.iter().any(|ev| !already_read.contains(&ev.seq)))
+                .expect("batch turn must have an unread standing group"),
+            TurnReason::Unconditional => groups
+                .into_iter()
+                .find(|group| group.iter().any(|ev| !already_read.contains(&ev.seq)))
+                .unwrap_or_default(),
+        };
+        Ok(chosen
+            .into_iter()
+            .filter(|ev| !already_read.contains(&ev.seq))
+            .collect())
     }
 
     /// その出来事の **standing**（#14）。作者がいなければ `None`（区切りにしない）。
@@ -1580,15 +1653,22 @@ impl System {
                 .store
                 .read_range(place, read, latest)
                 .map_err(|_| Busy)?;
-            let unread = self.first_standing_group(s, &unread)?;
-            for ev in &unread {
-                if self.should_fire_immediate(place, &pol, s, ev)? {
-                    let fired_by = self.firing_key(ev)?;
-                    return Ok(Some(ImmediateCandidate {
-                        subject: s,
-                        trigger: ev.seq,
-                        fired_by,
-                    }));
+            let already_read = self.out_of_order_reads(place, s, read, latest)?;
+            // 探索は先頭区間だけに閉じない。claim 側は trigger の standing 区間だけを選ぶので、
+            // 後続の owner 即応を見つけても先頭の別 standing と同じターンには混ざらない。
+            for group in self.standing_groups(s, &unread)? {
+                for ev in &group {
+                    if already_read.contains(&ev.seq) {
+                        continue;
+                    }
+                    if self.should_fire_immediate(place, &pol, s, ev)? {
+                        let fired_by = self.firing_key(ev)?;
+                        return Ok(Some(ImmediateCandidate {
+                            subject: s,
+                            trigger: ev.seq,
+                            fired_by,
+                        }));
+                    }
                 }
             }
         }
@@ -2267,7 +2347,7 @@ impl System {
     // ---- 文脈の組み立て（詳細§06）----
 
     /// この turn の入力 range と権限を read cursor が進む前に確定する。
-    /// Settled 起点では event 近傍から推測せず、永続 provenance の元 turn 値を継承する。
+    /// Background 結果起点では event 近傍から推測せず、永続 provenance の元 turn 値を継承する。
     fn turn_origin_input(
         &self,
         place: PlaceId,
@@ -2281,28 +2361,32 @@ impl System {
                 .get_event(place, trigger)
                 .map_err(|_| Busy)?
                 .expect("immediate trigger event must exist in the same place");
-            if ev.kind == EventKind::Settled {
-                return Ok(self
+            if matches!(ev.kind, EventKind::Settled | EventKind::Interrupted) {
+                let provenance = self
                     .0
                     .store
                     .settled_provenance(place, trigger)
-                    .map_err(|_| Busy)?
-                    .map(|p| OriginInput {
+                    .map_err(|_| Busy)?;
+                if let Some(p) = provenance {
+                    return Ok(Some(OriginInput {
                         from_exclusive: p.origin_from_exclusive,
                         to_inclusive: p.origin_to_inclusive,
                         standing: p.origin_standing,
                     }));
+                }
             }
         }
 
         let read = self.read_seq(place, subject)?;
         let latest = self.0.store.latest_seq(place).map_err(|_| Busy)?;
-        let unread = self
+        let all_unread = self
             .0
             .store
             .read_range(place, read, latest)
             .map_err(|_| Busy)?;
-        let group = self.first_standing_group(subject, &unread)?;
+        let already_read = self.out_of_order_reads(place, subject, read, latest)?;
+        let group = self.standing_group_for_reason(subject, &all_unread, &already_read, reason)?;
+        let from_exclusive = group.first().map_or(read, |ev| ev.seq - 1);
         let to_inclusive = group.last().map_or(read, |ev| ev.seq);
         let mut standing = Standing::Unknown;
         for ev in &group {
@@ -2312,7 +2396,7 @@ impl System {
             }
         }
         Ok(Some(OriginInput {
-            from_exclusive: read,
+            from_exclusive,
             to_inclusive,
             standing,
         }))
@@ -2364,7 +2448,7 @@ impl System {
         let budget = self.0.context_budget_tokens;
         let counter = &self.0.counter;
 
-        let unread = self
+        let all_unread = self
             .0
             .store
             .read_range(place, read, latest)
@@ -2375,11 +2459,23 @@ impl System {
         // 混ざっていると権限昇格の経路になる: 着火は「未読の最初の発火イベント」で決まるのに
         // 文脈は「未読全部」だったので、owner の発言で着火したターンに見知らぬ相手の指示が
         // 同居し、owner の権限でそれを読むことになっていた。
-        let unread = self.first_standing_group(subject, &unread)?;
+        let already_read = self.out_of_order_reads(place, subject, read, latest)?;
+        let unread = self.standing_group_for_reason(subject, &all_unread, &already_read, reason)?;
+
+        // read_seq は「次に claim する位置」であって、既読イベントを会話から消す境界ではない。
+        // 連続して既読になった場のログを会話窓へ戻し、今回 claim した未読区間を末尾へ足す。
+        // read_seq より先の疎な既読は、間にある未処理 standing を飛び越して再表示すると R3 の
+        // 権限境界を壊すため、cursor が追いつくまでは履歴窓へ入れない。
+        let mut conversation = self.0.store.read_range(place, 0, read).map_err(|_| Busy)?;
+        // Settled / Interrupted は #751 で通常の会話表示から分離した内部結果。処理時の未読には
+        // provenance 付き対応ブロックとして入れるが、処理済みの結果を通常履歴へ再掲して別発端の
+        // 対応を混ぜない。外向きの Spoke は通常イベントなので履歴へ残る。
+        conversation.retain(|event| !is_internal_read_kind(event.kind));
+        conversation.extend(unread.iter().cloned());
 
         // 引き継ぎ（作られた時点の断面）を前置き。子の seq は汚さない（§06）。
         // 予算は前置きと子の一覧も勘定する（§06「予算が引き継ぎと子の一覧を勘定していない」）。
-        // まず前置き・子の一覧を組み、残りの予算に未読を収める。
+        // まず前置き・子の一覧を組み、残りの予算に会話ログ窓と未読を収める。
         let place_row = self
             .0
             .store
@@ -2420,7 +2516,15 @@ impl System {
                 .get_event(place, trigger_seq)
                 .map_err(|_| Busy)?
                 .expect("immediate trigger event must exist in the same place");
-            if trigger.kind != EventKind::Settled {
+            let has_result_provenance =
+                matches!(trigger.kind, EventKind::Settled | EventKind::Interrupted)
+                    && self
+                        .0
+                        .store
+                        .settled_provenance(place, trigger_seq)
+                        .map_err(|_| Busy)?
+                        .is_some();
+            if !has_result_provenance {
                 prefix.push_str("=== 即応の発端 ===\n");
                 let name = self.author_name(&trigger)?;
                 prefix.push_str(&render_event(&trigger, name.as_deref()));
@@ -2428,10 +2532,11 @@ impl System {
             }
         }
 
-        // Settled ごとに「発端 range + 受理 tool call + activity + 結果」を一つの予約ブロックへ描く。
+        // provenance 付き Background 結果ごとに「発端 range + 受理 tool call + activity + 結果」を
+        // 一つの予約ブロックへ描く。
         // read cursor より前の range は永続 provenance から正確に引き、近傍 event から推測しない。
         for ev in &unread {
-            if ev.kind != EventKind::Settled {
+            if !matches!(ev.kind, EventKind::Settled | EventKind::Interrupted) {
                 continue;
             }
             let Some(provenance) = self
@@ -2440,7 +2545,7 @@ impl System {
                 .settled_provenance(place, ev.seq)
                 .map_err(|_| Busy)?
             else {
-                // provenance 導入前の settled。別 event から補完・推測はしない。
+                // provenance 導入前の Settled と Turn の汎用 Interrupted。別 event から補完・推測はしない。
                 continue;
             };
             let origins = self
@@ -2497,13 +2602,14 @@ impl System {
             }
         }
 
-        // 前置きと子の一覧が食う分を差し引いた残りに、未読を新しい方から収める（§06）。
+        // 前置きと子の一覧が食う分を差し引いた残りに、既読の会話ログ窓と今回の未読を
+        // 新しい方から収める（§06）。既存の予算・切り詰め方向をそのまま使い、新しい窓制御は置かない。
         let reserved = counter.count(&prefix) + counter.count(&children_block);
         let available = budget.saturating_sub(reserved);
         let mut included: Vec<opencrab_store::EventRow> = vec![];
         let mut used = 0usize;
         let mut skipped_hi: Option<Seq> = None;
-        for ev in unread.iter().rev() {
+        for ev in conversation.iter().rev() {
             // +1 は 1 件ごとに足す改行の分（render_event の後に push('\n') する・下）。
             // 表示名（name）込みで測る——実際に rendered へ載る形と同じ物差しで予算を数える。
             let name = self.author_name(ev)?;
@@ -2517,7 +2623,7 @@ impl System {
         }
         included.reverse();
 
-        let dropped = unread.len() - included.len();
+        let dropped = conversation.len() - included.len();
         // #14: 読み位置は**この区間の末尾まで**（latest ではない）。区間で切ったのに latest まで
         // 進めると、切られた残りが処理されないまま既読になる＝黙って捨てることになる。
         let ctx_to = match unread.last() {
@@ -2526,7 +2632,7 @@ impl System {
         };
         let ctx_from = included.first().map(|e| e.seq);
         let (skipped_from, skipped_to) = if dropped > 0 {
-            (Some(read + 1), skipped_hi)
+            (conversation.first().map(|event| event.seq), skipped_hi)
         } else {
             (None, None)
         };
@@ -2585,10 +2691,15 @@ impl System {
             String::new()
         };
 
-        // 読み位置は「実際に目に入った範囲の最後」まで進める（§06）。書けなければ一時的失敗として上げる。
+        // 先頭 standing なら cursor を進める。後続 standing の即応なら疎な既読だけを残し、先頭の
+        // 非即応区間は batch 窓まで未読のまま保つ。書けなければ一時的失敗として上げる。
+        let read_seqs: Vec<Seq> = unread.iter().map(|ev| ev.seq).collect();
+        let is_prefix = unread
+            .first()
+            .is_some_and(|ev| read.checked_add(1) == Some(ev.seq));
         self.0
             .store
-            .set_read_seq(place, subject, ctx_to)
+            .mark_read_group(place, subject, &read_seqs, is_prefix)
             .map_err(|_| Busy)?;
 
         Ok(Context {
@@ -4889,29 +5000,61 @@ impl System {
     // ---- 再起動（詳細§11）----
 
     pub fn startup(&self) {
-        // 1. 走り残しを interrupted で閉じ、2. 中断を出来事にする。
+        // 1. 走り残しを interrupted で閉じ、2. 中断を出来事にする。Turn は汎用 Interrupted、
+        // Background は保存済み provenance と一対一に結んだ Interrupted 結果として復元する。
         for act in self.0.store.running_activities().unwrap() {
-            self.0
+            let transitioned = self
+                .0
                 .store
                 .end_activity(act.id, "interrupted", self.now_nanos())
                 .unwrap();
-            let ne = NewEvent {
-                kind: EventKind::Interrupted,
-                author_subject: None,
-                author_external: None,
-                content: Content::text("再起動により中断"),
-                mentions: vec![],
-                reply_to: None,
-                target: None,
-                for_subject: Some(act.subject),
-                attachments: vec![],
+            assert!(transitioned, "startup row must still be running");
+            let seq = match act.kind {
+                ActivityKindTag::Turn => {
+                    let ne = NewEvent {
+                        kind: EventKind::Interrupted,
+                        author_subject: None,
+                        author_external: None,
+                        content: Content::text("再起動により中断"),
+                        mentions: vec![],
+                        reply_to: None,
+                        target: None,
+                        for_subject: Some(act.subject),
+                        attachments: vec![],
+                    };
+                    self.0
+                        .store
+                        .append(act.place, &ne, self.now_wall_nanos())
+                        .unwrap()
+                }
+                ActivityKindTag::Background => {
+                    let provenance = act
+                        .provenance
+                        .expect("running background must retain accepted tool provenance");
+                    let result = SettledProvenance {
+                        activity: act.id,
+                        origin_from_exclusive: provenance.origin_from_exclusive,
+                        origin_to_inclusive: provenance.origin_to_inclusive,
+                        origin_standing: provenance.origin_standing,
+                        tool_name: provenance.tool_name,
+                        tool_args: provenance.tool_args,
+                    };
+                    self.0
+                        .store
+                        .append_interrupted(
+                            act.place,
+                            act.subject,
+                            &format!(
+                                "活動 #{} は再起動により中断した（勝手に再実行しない）",
+                                act.id
+                            ),
+                            &result,
+                            self.now_wall_nanos(),
+                        )
+                        .unwrap()
+                }
             };
             // 出来事の時刻は壁時計。兄弟の追記と桁を揃える（§10 の観測を汚さない・§04）。
-            let seq = self
-                .0
-                .store
-                .append(act.place, &ne, self.now_wall_nanos())
-                .unwrap();
             // 中断はログ済み。発火の再判定が一時的に引けなくても、下の open 場ループ・以後の追記が拾う（§02）。
             let _ = self.on_append(act.place, seq);
         }

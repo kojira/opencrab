@@ -142,6 +142,7 @@ impl SyntheticRelay {
 #[derive(Clone, Copy)]
 enum Case {
     Reply,
+    History,
     NoReply,
     PrefixedNoReply,
     ToolThenReply,
@@ -152,6 +153,7 @@ impl Case {
     fn script(self) -> &'static str {
         match self {
             Case::Reply => "reply",
+            Case::History => "history",
             Case::NoReply => "no_reply",
             Case::PrefixedNoReply => "prefixed_no_reply",
             Case::ToolThenReply => "tool_then_reply",
@@ -162,11 +164,19 @@ impl Case {
     fn expected_reply(self) -> Option<&'static str> {
         match self {
             Case::Reply => Some("mock reply"),
+            Case::History => Some("mock remembered synthetic history seed"),
             Case::ToolThenReply => Some("mock reply after tool result"),
             Case::PlaintextToolSettledReply => {
                 Some("mock reply after settled plaintext tool result")
             }
             Case::NoReply | Case::PrefixedNoReply => None,
+        }
+    }
+
+    fn first_input(self) -> String {
+        match self {
+            Case::History => "synthetic history seed".to_string(),
+            other => format!("synthetic mention for {}", other.script()),
         }
     }
 }
@@ -380,7 +390,7 @@ async fn run_case(case: Case) {
         &poster,
         1,
         json!([["p", gate_hex]]),
-        &format!("synthetic mention for {}", case.script()),
+        &case.first_input(),
         nostr::now_secs(),
     );
     relay.publish(incoming);
@@ -397,6 +407,55 @@ async fn run_case(case: Case) {
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     };
+
+    if matches!(case, Case::History) {
+        let first_turn = wait_for_turn(&store, place).await;
+        assert_eq!(first_turn.end_reason, "done");
+        let first_post = wait_for_post(&relay).await;
+        assert_eq!(
+            first_post["content"],
+            json!("mock history seed acknowledged")
+        );
+
+        let (_question_id, question) = nostr::build_signed(
+            &poster,
+            1,
+            json!([["p", gate_hex]]),
+            "synthetic history question",
+            nostr::now_secs(),
+        );
+        relay.publish(question);
+
+        let turns = wait_for_turns(&store, place, 2).await;
+        let started = Instant::now();
+        let posts = loop {
+            let posts = relay.posts();
+            if posts.len() >= 2 {
+                break posts;
+            }
+            assert!(
+                started.elapsed() < TIMEOUT,
+                "history answer was not published"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        };
+        assert_eq!(
+            posts[1]["content"],
+            json!("mock remembered synthetic history seed")
+        );
+        assert_eq!(turns[1].end_reason, "done");
+        let records = store.context_records(turns[1].id).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].ctx_from_seq, Some(1));
+        assert_eq!(records[0].ctx_to_seq, Some(3));
+
+        drop(store);
+        drop(core);
+        drop(gate);
+        drop(relay);
+        return;
+    }
+
     let turn = wait_for_turn(&store, place).await;
 
     match case.expected_reply() {
@@ -484,6 +543,11 @@ async fn run_case(case: Case) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mention_context_identifies_trigger_and_posts_mock_reply() {
     run_case(Case::Reply).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn second_turn_answers_from_previously_read_conversation_history() {
+    run_case(Case::History).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

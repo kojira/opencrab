@@ -87,7 +87,7 @@ fn retracted(author: SubjectId, target: Seq) -> Incoming {
     }
 }
 
-// 1. 後続ターンが先行の発話を見る。
+// 1. 後続ターンが、直前の未読だけでなく既読になった過去の発話も会話ログ窓で見る。
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn later_turn_sees_prior_utterance() {
     let h = build(Config::default());
@@ -108,19 +108,37 @@ async fn later_turn_sees_prior_utterance() {
 
     h.eng.push(Step::say_done("reply1"));
     h.eng.push(Step::say_done("reply2"));
+    h.eng.push(Step::say_done("reply3"));
 
     h.sys.deliver(p, Incoming::said(human, "first")).unwrap();
     settle().await;
     h.sys.deliver(p, Incoming::said(human, "second")).unwrap();
     settle().await;
+    h.sys.deliver(p, Incoming::said(human, "third")).unwrap();
+    settle().await;
 
     let ctxs = h.eng.contexts();
-    assert!(ctxs.len() >= 2, "two turns expected, got {}", ctxs.len());
+    assert_eq!(ctxs.len(), 3, "three turns expected");
     assert!(
         ctxs[1].contains("reply1"),
         "2本目の文脈に1本目の発話が入るべき: {}",
         ctxs[1]
     );
+    assert!(
+        ctxs[2].contains("[1] H: first"),
+        "既に cursor より前へ進んだ最初の発話も3本目の履歴窓に残るべき: {}",
+        ctxs[2]
+    );
+
+    let turns = h.sys.store().turn_records(p).unwrap();
+    let records = h.sys.store().context_records(turns[2].id).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].ctx_from_seq,
+        Some(1),
+        "履歴窓は最初の既読まで遡る"
+    );
+    assert_eq!(records[0].ctx_to_seq, Some(5), "今回の未読までを含む");
 }
 
 // #752: 通常の即応ターンは、着火した発言を会話ログの一部として読むだけでなく、
@@ -466,6 +484,107 @@ async fn batch_fires_once_on_fixed_window() {
     assert!(
         ctx.contains("m1") && ctx.contains("m2"),
         "未読全部で 1 ターン"
+    );
+}
+
+// #750 R3: 先頭の非即応 standing を未読のまま保ち、後続の別 standing の owner mention だけを
+// 即応で claim する。候補探索は全 standing 区間、1 turn の文脈は選んだ 1 区間に限定する。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn later_owner_mention_bypasses_batch_without_mixing_standings() {
+    let h = build(Config::default());
+    let agent = h
+        .sys
+        .create_subject(SubjectKind::Agent, "Agent", "Agent", Standing::Trusted);
+    let ordinary = h.sys.create_subject(
+        SubjectKind::Human,
+        "Ordinary",
+        "Ordinary",
+        Standing::Unknown,
+    );
+    let owner = h
+        .sys
+        .create_subject(SubjectKind::Human, "Owner", "Owner", Standing::Owner);
+    let window = Duration::from_secs(8);
+    let place = h.sys.create_place(
+        None,
+        None,
+        &Policy::immediate_on(&[Property::MentionsMe])
+            .with_batch_ms(window.as_millis() as i64)
+            .with_default(agent),
+        None,
+    );
+    h.sys.join(place, agent, Role::Participant);
+    h.sys.join(place, ordinary, Role::Participant);
+    h.sys.join(place, owner, Role::Participant);
+    h.eng.push(Step::no_reply());
+    h.eng.push(Step::no_reply());
+
+    h.sys
+        .deliver(place, Incoming::said(ordinary, "ordinary A"))
+        .unwrap();
+    settle().await;
+    assert_eq!(h.eng.call_count(), 0, "A は batch 窓まで claim しない");
+
+    h.sys
+        .deliver(
+            place,
+            Incoming {
+                kind: EventKind::Said,
+                author_subject: Some(owner),
+                author_external: None,
+                content: Content::text("owner mention B"),
+                mentions: vec![agent],
+                reply_to: None,
+                target: None,
+            },
+        )
+        .unwrap();
+    settle().await;
+
+    assert_eq!(h.eng.call_count(), 1, "B は clock advance なしで即応する");
+    let immediate = &h.eng.contexts()[0];
+    assert!(immediate.contains("owner mention B"), "{immediate}");
+    assert!(
+        !immediate.contains("ordinary A"),
+        "別 standing の A を owner turn に混ぜない: {immediate}"
+    );
+    assert_eq!(
+        h.sys
+            .store()
+            .get_membership(place, agent)
+            .unwrap()
+            .unwrap()
+            .read_seq,
+        0,
+        "後続だけを読んでも先頭 A の cursor は進めない"
+    );
+
+    tokio::time::advance(window).await;
+    settle().await;
+    assert_eq!(h.eng.call_count(), 2, "A は元の batch 窓で後から処理する");
+    let batched = &h.eng.contexts()[1];
+    assert!(batched.contains("ordinary A"), "{batched}");
+    assert!(
+        !batched.contains("owner mention B"),
+        "即応済み B を batch turn に再混入しない: {batched}"
+    );
+    assert_eq!(
+        h.sys
+            .store()
+            .get_membership(place, agent)
+            .unwrap()
+            .unwrap()
+            .read_seq,
+        2,
+        "A の処理後は連続する疎な既読 B まで cursor に畳む"
+    );
+    assert!(
+        h.sys
+            .store()
+            .out_of_order_read_seqs(place, agent, 0, 2)
+            .unwrap()
+            .is_empty(),
+        "cursor に畳んだ疎な既読を残さない"
     );
 }
 

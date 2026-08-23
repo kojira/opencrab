@@ -5,11 +5,13 @@
 //! 何が残り何が起きるかを直接検査できる。
 
 use opencrab_app::Host;
-use opencrab_port::{ActivityKindTag, EventKind, Standing, SubjectKind};
+use opencrab_engine::{ScriptedEngine, Step};
+use opencrab_port::{ActivityKindTag, Content, EventKind, Role, Standing, SubjectKind};
 use opencrab_social_runtime::Incoming;
-use opencrab_store::Store;
+use opencrab_store::{BackgroundProvenance, NewEvent, Store};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 fn tmp_db(tag: &str) -> PathBuf {
@@ -134,6 +136,133 @@ async fn leftover_running_activity_becomes_interruption_after_reopen() {
         "走り残りは閉じられる"
     );
     let _ = agent;
+
+    let _ = std::fs::remove_file(&db);
+}
+
+// Owner 起点の running Background を実ファイルへ残し、reopen 後の Interrupted turn が
+// origin range・standing・activity・accepted tool call・中断結果を一対一で復元する。
+#[tokio::test(flavor = "current_thread")]
+async fn background_interruption_restores_full_provenance_after_real_file_reopen() {
+    let db = tmp_db("background-provenance");
+    let _ = std::fs::remove_file(&db);
+
+    let (place, agent, activity) = {
+        let store = Store::open(&db).expect("open");
+        let host = Host::boot(store);
+        let (place, agent) =
+            host.provision_web_room("room:background", "synthetic-agent", "synthetic-agent");
+        let owner = host.sys.create_subject(
+            SubjectKind::Human,
+            "synthetic-owner",
+            "synthetic-owner",
+            Standing::Owner,
+        );
+        host.sys.join(place, owner, Role::Participant);
+        let origin = host
+            .sys
+            .store()
+            .append(
+                place,
+                &NewEvent {
+                    kind: EventKind::Said,
+                    author_subject: Some(owner),
+                    author_external: None,
+                    content: Content::text("synthetic background request"),
+                    mentions: vec![],
+                    reply_to: None,
+                    target: None,
+                    for_subject: None,
+                    attachments: vec![],
+                },
+                1,
+            )
+            .expect("seed origin");
+        let provenance = BackgroundProvenance {
+            origin_from_exclusive: origin - 1,
+            origin_to_inclusive: origin,
+            origin_standing: Standing::Owner,
+            tool_name: "synthetic-background-tool".into(),
+            tool_args: serde_json::json!({"mode": "bounded"}),
+        };
+        let activity = host
+            .sys
+            .store()
+            .start_activity_with_provenance(
+                place,
+                agent,
+                ActivityKindTag::Background,
+                Some("synthetic running background"),
+                10,
+                0,
+                None,
+                Some(&provenance),
+            )
+            .expect("seed running background");
+        (place, agent, activity)
+    };
+
+    let store = Store::open(&db).expect("reopen");
+    store
+        .register_model_context_window("scripted", 200_000)
+        .expect("register scripted model");
+    let engine = ScriptedEngine::new();
+    engine.push(Step::no_reply());
+    let host = Host::boot_with_engine(store, Arc::new(engine.clone()));
+    assert!(
+        wait_until(Duration::from_secs(5), || engine.call_count() == 1).await,
+        "Interrupted result starts exactly one follow-up turn"
+    );
+
+    let activity_row = host
+        .sys
+        .store()
+        .get_activity(activity)
+        .unwrap()
+        .expect("activity survives reopen");
+    assert_eq!(activity_row.end_reason.as_deref(), Some("interrupted"));
+    let latest = host.sys.store().latest_seq(place).unwrap();
+    let interrupted = host
+        .sys
+        .store()
+        .read_range(place, 0, latest)
+        .unwrap()
+        .into_iter()
+        .find(|event| event.kind == EventKind::Interrupted)
+        .expect("background interruption event");
+    assert_eq!(interrupted.for_subject, Some(agent));
+    let restored = host
+        .sys
+        .store()
+        .settled_provenance(place, interrupted.seq)
+        .unwrap()
+        .expect("Interrupted is linked to persisted provenance");
+    assert_eq!(restored.activity, activity);
+    assert_eq!(restored.origin_from_exclusive, 0);
+    assert_eq!(restored.origin_to_inclusive, 1);
+    assert_eq!(restored.origin_standing, Standing::Owner);
+    assert_eq!(restored.tool_name, "synthetic-background-tool");
+    assert_eq!(restored.tool_args, serde_json::json!({"mode": "bounded"}));
+
+    let contexts = engine.contexts();
+    assert_eq!(contexts.len(), 1, "one interruption maps to one turn");
+    let context = &contexts[0];
+    assert!(
+        context.contains("synthetic background request"),
+        "{context}"
+    );
+    assert!(context.contains(&format!("活動 #{activity}")), "{context}");
+    assert!(
+        context.contains("受理ツール: synthetic-background-tool args={\"mode\":\"bounded\"}"),
+        "{context}"
+    );
+    assert!(context.contains("再起動により中断した"), "{context}");
+    assert!(
+        engine.tools_seen()[0]
+            .iter()
+            .any(|name| name == "core-allow-command"),
+        "Owner standing is restored for the follow-up tool boundary"
+    );
 
     let _ = std::fs::remove_file(&db);
 }

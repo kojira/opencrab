@@ -819,6 +819,7 @@ dependencies = [
  "async-trait",
  "futures-util",
  "libc",
+ "opencrab-engine",
  "opencrab-nostr-gate",
  "opencrab-plugd",
  "opencrab-port",

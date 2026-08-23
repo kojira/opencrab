@@ -114,7 +114,7 @@ pub struct BackgroundProvenance {
     pub tool_args: serde_json::Value,
 }
 
-/// settled event と、その結果を生んだ background activity / 発端 / tool call の対応。
+/// Background の結果 event（Settled / Interrupted）と、それを生んだ activity / 発端 / tool call の対応。
 #[derive(Clone, Debug, PartialEq)]
 pub struct SettledProvenance {
     pub activity: ActivityId,
@@ -477,6 +477,15 @@ const SCHEMA: &str = r#"
               PRIMARY KEY(place_id, subject_id)
             );
 
+            -- read_seq より後の standing 区間を即応で先に読んだ事実。先頭の通常区間を捨てずに
+            -- 後続の即応区間だけを claim するための疎な既読で、read_seq が追いついたら削除する。
+            CREATE TABLE IF NOT EXISTS out_of_order_reads(
+              place_id INTEGER NOT NULL,
+              subject_id INTEGER NOT NULL,
+              seq INTEGER NOT NULL,
+              PRIMARY KEY(place_id, subject_id, seq)
+            );
+
             CREATE TABLE IF NOT EXISTS activities(
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               place_id INTEGER NOT NULL,
@@ -495,8 +504,9 @@ const SCHEMA: &str = r#"
               accepted_tool_args_json TEXT
             );
 
-            -- Settled は結果本文だけでなく、発端 range・standing・受理 tool call・activity id を
-            -- 同じ event seq に結びつける。events への追記とこの行は 1 transaction で行う。
+            -- Background の結果（Settled と再起動時の Interrupted）は、結果本文だけでなく、発端
+            -- range・standing・受理 tool call・activity id を同じ event seq に結びつける。
+            -- events への追記とこの行は 1 transaction で行う。
             CREATE TABLE IF NOT EXISTS settled_provenance(
               place_id INTEGER NOT NULL,
               seq INTEGER NOT NULL,
@@ -868,6 +878,39 @@ impl Store {
         provenance: &SettledProvenance,
         now: i64,
     ) -> Result<Seq> {
+        self.append_background_result(EventKind::Settled, place, subject, content, provenance, now)
+    }
+
+    /// 再起動で中断された background と provenance を 1 transaction で Interrupted event にする。
+    /// Turn の汎用 Interrupted は provenance を持たず、通常の [`Store::append`] を使う。
+    pub fn append_interrupted(
+        &self,
+        place: PlaceId,
+        subject: SubjectId,
+        content: &str,
+        provenance: &SettledProvenance,
+        now: i64,
+    ) -> Result<Seq> {
+        self.append_background_result(
+            EventKind::Interrupted,
+            place,
+            subject,
+            content,
+            provenance,
+            now,
+        )
+    }
+
+    fn append_background_result(
+        &self,
+        kind: EventKind,
+        place: PlaceId,
+        subject: SubjectId,
+        content: &str,
+        provenance: &SettledProvenance,
+        now: i64,
+    ) -> Result<Seq> {
+        debug_assert!(matches!(kind, EventKind::Settled | EventKind::Interrupted));
         let mut c = self.c();
         let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         if provenance.origin_to_inclusive < provenance.origin_from_exclusive {
@@ -930,10 +973,11 @@ impl Store {
         };
         tx.execute(
             "INSERT INTO events(place_id,seq,kind,author_subject_id,author_external_id,content_json,mentions_json,reply_to_seq,target_seq,for_subject_id,created_at,attachments_json)
-             VALUES(?1,?2,'settled',NULL,NULL,?3,'[]',?4,NULL,?5,?6,'[]')",
+             VALUES(?1,?2,?3,NULL,NULL,?4,'[]',?5,NULL,?6,?7,'[]')",
             params![
                 place,
                 seq,
+                kind.as_str(),
                 content_to_json(&Content::text(content)),
                 reply_to,
                 subject,
@@ -1273,10 +1317,95 @@ impl Store {
     }
 
     pub fn set_read_seq(&self, place: PlaceId, subject: SubjectId, read_seq: Seq) -> Result<()> {
-        self.c().execute(
+        let mut c = self.c();
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
             "UPDATE memberships SET read_seq=?3 WHERE place_id=?1 AND subject_id=?2",
             params![place, subject, read_seq],
         )?;
+        tx.execute(
+            "DELETE FROM out_of_order_reads
+             WHERE place_id=?1 AND subject_id=?2 AND seq<=?3",
+            params![place, subject, read_seq],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// `read_seq` より後で既に読んだ event の seq。後続 standing の即応を先に claim しても、
+    /// 先頭 standing を未読のまま保持するための疎な既読である。
+    pub fn out_of_order_read_seqs(
+        &self,
+        place: PlaceId,
+        subject: SubjectId,
+        from_excl: Seq,
+        to_incl: Seq,
+    ) -> Result<Vec<Seq>> {
+        let c = self.c();
+        let mut stmt = c.prepare(
+            "SELECT seq FROM out_of_order_reads
+             WHERE place_id=?1 AND subject_id=?2 AND seq>?3 AND seq<=?4 ORDER BY seq",
+        )?;
+        let rows = stmt
+            .query_map(params![place, subject, from_excl, to_incl], |r| r.get(0))?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// 1 standing 区間を既読にする。先頭区間なら cursor を進め、直後に連続する疎な既読も
+    /// 同じ transaction で畳む。後続区間なら cursor を動かさず、各 seq を疎な既読として残す。
+    pub fn mark_read_group(
+        &self,
+        place: PlaceId,
+        subject: SubjectId,
+        seqs: &[Seq],
+        is_prefix: bool,
+    ) -> Result<()> {
+        let Some(last) = seqs.last().copied() else {
+            return Ok(());
+        };
+        let mut c = self.c();
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if is_prefix {
+            let mut cursor = last;
+            let later = {
+                let mut stmt = tx.prepare(
+                    "SELECT seq FROM out_of_order_reads
+                     WHERE place_id=?1 AND subject_id=?2 AND seq>?3 ORDER BY seq",
+                )?;
+                let rows = stmt
+                    .query_map(params![place, subject, cursor], |r| r.get::<_, Seq>(0))?
+                    .collect::<Result<Vec<_>>>()?;
+                rows
+            };
+            for seq in later {
+                if seq != cursor.saturating_add(1) {
+                    break;
+                }
+                cursor = seq;
+            }
+            tx.execute(
+                "UPDATE memberships SET read_seq=?3
+                 WHERE place_id=?1 AND subject_id=?2 AND read_seq<?3",
+                params![place, subject, cursor],
+            )?;
+            tx.execute(
+                "DELETE FROM out_of_order_reads
+                 WHERE place_id=?1 AND subject_id=?2 AND seq<=?3",
+                params![place, subject, cursor],
+            )?;
+        } else {
+            {
+                let mut stmt = tx.prepare(
+                    "INSERT OR IGNORE INTO out_of_order_reads(place_id,subject_id,seq)
+                     VALUES(?1,?2,?3)",
+                )?;
+                for seq in seqs {
+                    stmt.execute(params![place, subject, seq])?;
+                }
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
