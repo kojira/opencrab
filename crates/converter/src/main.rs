@@ -2,7 +2,10 @@ use opencrab_converter::{convert, ConvertOptions, NoMigrationInstances};
 use std::path::PathBuf;
 
 fn usage() -> ! {
-    eprintln!("usage: opencrab-converter --source <source.db> --target <target.db>");
+    eprintln!(
+        "usage: opencrab-converter --source <source.db> --target <target.db> \
+         --config <default.toml> --environment <effective.env>"
+    );
     std::process::exit(2);
 }
 
@@ -16,18 +19,32 @@ fn main() {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut source = None;
     let mut target = None;
+    let mut config = None;
+    let mut environment = None;
     let mut args = std::env::args_os().skip(1);
     while let Some(argument) = args.next() {
         match argument.to_str() {
             Some("--source") => source = args.next().map(PathBuf::from),
             Some("--target") => target = args.next().map(PathBuf::from),
+            Some("--config") => config = args.next().map(PathBuf::from),
+            Some("--environment") => environment = args.next().map(PathBuf::from),
             _ => usage(),
         }
     }
-    let (Some(source), Some(target)) = (source, target) else {
+    let (Some(source), Some(target), Some(config), Some(environment)) =
+        (source, target, config, environment)
+    else {
         usage();
     };
-    let outcome = convert(ConvertOptions { source, target }, &NoMigrationInstances)?;
+    let outcome = convert(
+        ConvertOptions {
+            source,
+            target,
+            config,
+            environment,
+        },
+        &NoMigrationInstances,
+    )?;
     let rendered = outcome.report.to_pretty_json()?;
     print!("{rendered}");
     Ok(())

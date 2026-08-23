@@ -36,7 +36,7 @@ fn phase1_dirty_fixture_public_convert_is_accounted_and_byte_stable() {
                 |row| row.get::<_, i64>(0),
             )
             .unwrap(),
-        4
+        5
     );
     assert_eq!(
         target
@@ -48,6 +48,108 @@ fn phase1_dirty_fixture_public_convert_is_accounted_and_byte_stable() {
             )
             .unwrap(),
         7
+    );
+    assert_eq!(
+        target
+            .query_row(
+                "SELECT COUNT(*) FROM subject_history_sources
+                 WHERE live_place_id=(SELECT place_id FROM place_source_refs
+                                      WHERE source_system='discord' AND source_address='222')",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        3,
+        "both agents sharing one live address/session need separate history links"
+    );
+    assert_eq!(
+        target
+            .query_row(
+                "SELECT COUNT(*) FROM subject_history_sources h
+                 JOIN memberships m ON m.place_id=h.history_place_id
+                 WHERE m.subject_id=h.subject_id AND m.role='participant'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        3,
+        "each historical place membership must belong to its linked subject"
+    );
+    assert_eq!(
+        target
+            .query_row(
+                "SELECT COUNT(*) FROM subject_history_sources h
+                 JOIN memberships m ON m.place_id=h.history_place_id
+                 WHERE m.subject_id<>h.subject_id",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0,
+        "historical memberships must not cross agents"
+    );
+    assert_eq!(
+        target
+            .query_row(
+                "SELECT COUNT(*) FROM (
+                   SELECT subject_id,live_place_id,COUNT(*) AS n,MIN(ordinal) AS lo,MAX(ordinal) AS hi
+                   FROM subject_history_sources GROUP BY subject_id,live_place_id
+                 ) WHERE lo<>0 OR hi+1<>n",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0,
+        "ordinal must be dense from zero independently for each subject"
+    );
+    assert_eq!(
+        target
+            .query_row(
+                "SELECT COUNT(*) FROM events e
+                 JOIN subject_history_sources h ON h.history_place_id=e.place_id
+                 WHERE e.author_subject_id IN (1,2) AND e.author_subject_id<>h.subject_id",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0,
+        "one agent's self-authored event must never appear in the other's history place"
+    );
+    assert_eq!(
+        target
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE kind='interrupted'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        target
+            .query_row(
+                "SELECT COUNT(*) FROM private_journal j
+                 JOIN place_source_refs p ON p.place_id=j.place_id
+                 JOIN places child ON child.id=p.place_id
+                 JOIN place_source_refs parent ON parent.place_id=child.parent_id
+                 WHERE p.classification='child' AND parent.classification='live'
+                   AND CAST(j.content AS TEXT)='change direction'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        target
+            .query_row(
+                "SELECT COUNT(*) FROM legacy_audit_records
+                 WHERE scope='task_event' AND activity_id=1 AND reason='task reference resolved'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
     );
 }
 
@@ -92,10 +194,20 @@ impl MigrationInstanceAssembler for FixtureInstanceAssembly {
 }
 
 fn run_public_convert(source: &std::path::Path, target: &std::path::Path) -> (String, Vec<u8>) {
+    let config = source.parent().unwrap().join("snapshot-config.toml");
+    let environment = source.parent().unwrap().join("snapshot.env");
+    if !config.exists() {
+        std::fs::write(&config, "").unwrap();
+    }
+    if !environment.exists() {
+        std::fs::write(&environment, "").unwrap();
+    }
     let outcome = convert(
         ConvertOptions {
             source: source.to_path_buf(),
             target: target.to_path_buf(),
+            config,
+            environment,
         },
         &FixtureInstanceAssembly,
     )
@@ -120,15 +232,202 @@ fn converter_rejects_every_preexisting_target_even_when_logically_empty() {
              DROP TABLE discarded;",
         )
         .unwrap();
+    let config = temporary.path().join("default.toml");
+    let environment = temporary.path().join("snapshot.env");
+    std::fs::write(&config, "").unwrap();
+    std::fs::write(&environment, "").unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_opencrab-converter"))
         .args(["--source", source.to_str().unwrap()])
         .args(["--target", target.to_str().unwrap()])
+        .args(["--config", config.to_str().unwrap()])
+        .args(["--environment", environment.to_str().unwrap()])
         .output()
         .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8(output.stderr)
         .unwrap()
         .contains("target database path already exists"));
+}
+
+#[test]
+fn public_convert_rejects_a_multiple_interaction_exact_join() {
+    let temporary = tempfile::tempdir().unwrap();
+    let source = temporary.path().join("source.db");
+    let connection = Connection::open(&source).unwrap();
+    connection
+        .execute_batch(include_str!("fixtures/phase1-dirty.sql"))
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO pending_interactions VALUES(
+               'ui-responded','agent_alpha','discord-agent_alpha-111-222','222','msg-duplicate',
+               'discord','surface-b','[{\"type\":\"button\",\"id\":\"ok\"}]','responded',
+               '{\"surface_id\":\"surface-b\",\"component_id\":\"ok\",\"action_name\":\"submit\",\"context\":null,\"responder_id\":\"principal-1\"}',
+               'principal-1',0,30,'2024-01-05 00:03:00','2024-01-05 00:03:10','2024-01-05 00:03:10'
+             )",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let config = temporary.path().join("default.toml");
+    let environment = temporary.path().join("snapshot.env");
+    std::fs::write(&config, "").unwrap();
+    std::fs::write(&environment, "").unwrap();
+    let error = convert(
+        ConvertOptions {
+            source,
+            target: temporary.path().join("target.db"),
+            config,
+            environment,
+        },
+        &FixtureInstanceAssembly,
+    )
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("history row 8 interaction join is multiple"));
+}
+
+#[test]
+fn public_convert_rejects_a_multiple_task_exact_join() {
+    let temporary = tempfile::tempdir().unwrap();
+    let source = temporary.path().join("source.db");
+    let connection = Connection::open(&source).unwrap();
+    connection
+        .execute_batch(include_str!("fixtures/phase1-dirty.sql"))
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO task_ledger VALUES(
+               1,'agent_alpha','discord-agent_alpha-111-222','Duplicate Synthetic Goal',NULL,
+               'active','2024-01-05 00:00:00','2024-01-05 00:00:00'
+             )",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let config = temporary.path().join("default.toml");
+    let environment = temporary.path().join("snapshot.env");
+    std::fs::write(&config, "").unwrap();
+    std::fs::write(&environment, "").unwrap();
+    let error = convert(
+        ConvertOptions {
+            source,
+            target: temporary.path().join("target.db"),
+            config,
+            environment,
+        },
+        &FixtureInstanceAssembly,
+    )
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("history row 13 task join is multiple"));
+}
+
+#[test]
+fn public_cli_uses_explicit_config_and_dotenv_snapshot_reproducibly() {
+    let temporary = tempfile::tempdir().unwrap();
+    let source = temporary.path().join("source.db");
+    Connection::open(&source)
+        .unwrap()
+        .execute_batch(include_str!("fixtures/phase1-dirty.sql"))
+        .unwrap();
+    let config = temporary.path().join("default.toml");
+    let environment = temporary.path().join("cutover.env");
+    std::fs::write(
+        &config,
+        r#"[llm]
+default_model = "synthetic-model"
+compaction_ratio = 0.5
+[provider.synthetic]
+api_key = "${UNDEFINED_PROVIDER_SECRET}"
+[gateway.discord]
+enabled = true
+token = "${FIXTURE_DISCORD_TOKEN}"
+owner_discord_id = "principal-1"
+agent_ids = ["agent_alpha", "agent_beta"]
+guild_ids = ["111"]
+"#,
+    )
+    .unwrap();
+    std::fs::write(&environment, "FIXTURE_DISCORD_TOKEN=dotenv-token\n").unwrap();
+
+    let run = |target: &std::path::Path| {
+        Command::new(env!("CARGO_BIN_EXE_opencrab-converter"))
+            .args(["--source", source.to_str().unwrap()])
+            .args(["--target", target.to_str().unwrap()])
+            .args(["--config", config.to_str().unwrap()])
+            .args(["--environment", environment.to_str().unwrap()])
+            .output()
+            .unwrap()
+    };
+    let target_a = temporary.path().join("target-cli-a.db");
+    let target_b = temporary.path().join("target-cli-b.db");
+    let first = run(&target_a);
+    let second = run(&target_b);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(first.stdout, second.stdout);
+    assert_eq!(
+        std::fs::read(&target_a).unwrap(),
+        std::fs::read(&target_b).unwrap()
+    );
+    let target = Connection::open(target_a).unwrap();
+    assert_eq!(
+        target
+            .query_row(
+                "SELECT CAST(value AS TEXT) FROM secret_values WHERE value=CAST('dotenv-token' AS BLOB)",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "dotenv-token"
+    );
+    let first_authority = target
+        .query_row(
+            "SELECT hex(source_database_digest) FROM migration_provenance LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap();
+    drop(target);
+
+    std::fs::write(&environment, "FIXTURE_DISCORD_TOKEN=changed-token\n").unwrap();
+    let target_c = temporary.path().join("target-cli-c.db");
+    let third = run(&target_c);
+    assert!(
+        third.status.success(),
+        "{}",
+        String::from_utf8_lossy(&third.stderr)
+    );
+    let changed = Connection::open(target_c).unwrap();
+    let changed_authority = changed
+        .query_row(
+            "SELECT hex(source_database_digest) FROM migration_provenance LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap();
+    assert_ne!(first_authority, changed_authority);
+    assert_eq!(
+        changed
+            .query_row(
+                "SELECT COUNT(*) FROM secret_values WHERE value=CAST('changed-token' AS BLOB)",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
 }
 
 fn snapshot(path: &std::path::Path, report: &str) -> String {
@@ -139,7 +438,7 @@ fn snapshot(path: &std::path::Path, report: &str) -> String {
     for class in report["classes"].as_array().unwrap() {
         writeln!(
             output,
-            "{}|{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}|{}",
             class["source_table"].as_str().unwrap(),
             class["logical_class"].as_str().unwrap(),
             class["source_rows"].as_u64().unwrap(),
@@ -147,6 +446,7 @@ fn snapshot(path: &std::path::Path, report: &str) -> String {
             class["raw_outcomes"].as_u64().unwrap(),
             class["dropped_outcomes"].as_u64().unwrap(),
             class["exact_one_violations"].as_u64().unwrap(),
+            class["drop_reasons"],
         )
         .unwrap();
     }

@@ -49,6 +49,7 @@ INSERT INTO model_pricing VALUES
 
 INSERT INTO agents VALUES
   ('agent_alpha','Synthetic Agent',NULL,NULL,NULL,'Synthetic Persona','Synthetic personality','Synthetic instructions','Synthetic heartbeat','synthetic-model','medium',1,'{"fixture":true}','2024-01-01 00:00:00','2024-01-02 00:00:00'),
+  ('agent_beta','Synthetic Peer',NULL,NULL,NULL,'Synthetic Peer Persona','Synthetic peer personality','Synthetic peer instructions','Synthetic peer heartbeat','synthetic-model','low',0,'{"fixture":true}','2024-01-01 00:00:01','2024-01-02 00:00:01'),
   (x'626164','Dirty Agent',NULL,NULL,NULL,'Dirty Persona',NULL,'','',NULL,NULL,'not-an-integer','{"fixture":true}','2024-01-01 00:00:00','2024-01-02 00:00:00');
 
 INSERT INTO trusted_users VALUES
@@ -113,7 +114,7 @@ CREATE TABLE sessions(
   updated_at TEXT NOT NULL
 );
 CREATE TABLE pending_interactions(
-  id TEXT PRIMARY KEY,
+  id TEXT,
   agent_id TEXT NOT NULL,
   session_id TEXT NOT NULL,
   channel_id TEXT NOT NULL,
@@ -152,17 +153,41 @@ INSERT INTO discord_channel_config VALUES
   ('222','agent_alpha','111','synthetic-room',1,1,1,1,60,'2024-01-04 00:00:00','subject instruction'),
   ('333','agent_missing','111','unknown-owner-room',1,0,0,0,-1,'not-a-time','');
 INSERT INTO sessions VALUES
-  ('discord-agent_alpha-111-222','facilitated','Synthetic Session','divergent',2,'active','["agent_alpha"]','agent_alpha',0,NULL,'{"source":"discord","channel_id":"222","guild_id":"111","is_dm":false}','2024-01-05 00:00:00','2024-01-05 00:01:00');
+  ('discord-agent_alpha-111-222','facilitated','Synthetic Session','divergent',2,'active','["agent_alpha","agent_beta"]','agent_alpha',0,NULL,'{"source":"discord","channel_id":"222","guild_id":"111","is_dm":false}','2024-01-05 00:00:00','2024-01-05 00:01:00'),
+  ('subtask-tool-1','subtask','Subtask: Synthetic Work','active',0,'completed','["agent_alpha"]',NULL,0,NULL,'{"parent_session_id":"discord-agent_alpha-111-222","depth":1,"subtask_id":"tool-1"}','2024-01-05 00:01:00','2024-01-05 00:01:30');
 INSERT INTO pending_interactions VALUES
   ('ui-pending','agent_alpha','discord-agent_alpha-111-222','222','msg-1','discord','surface-a','[{"type":"text","value":"hello"}]','pending',NULL,NULL,1,300,'2024-01-05 00:02:00',NULL,'2024-01-05 00:02:00'),
-  ('ui-responded','agent_alpha','discord-agent_alpha-111-222','222','msg-2','discord','surface-b','[{"type":"button","id":"ok"}]','responded','{"action":"ok"}','system',0,30,'2024-01-05 00:03:00','2024-01-05 00:03:10','2024-01-05 00:03:10'),
+  ('ui-responded','agent_alpha','discord-agent_alpha-111-222','222','msg-2','discord','surface-b','[{"type":"button","id":"ok"}]','responded','{"surface_id":"surface-b","component_id":"ok","action_name":"submit","context":null,"responder_id":"principal-1"}','principal-1',0,30,'2024-01-05 00:03:00','2024-01-05 00:03:10','2024-01-05 00:03:10'),
   (NULL,'agent_alpha','discord-agent_alpha-111-222','222',NULL,'discord','surface-null','[]','pending',NULL,NULL,1,30,'2024-01-05 00:04:00',NULL,'2024-01-05 00:04:00');
 INSERT INTO memory_sessions VALUES
   (1,'agent_alpha','discord-agent_alpha-111-222','message','agent speech','agent_alpha',1,NULL,'2024-01-05 00:05:00'),
-  (2,'agent_alpha','discord-agent_alpha-111-222','message','principal speech','principal-1',2,NULL,'2024-01-05 00:06:00'),
+  (2,'agent_alpha','discord-agent_alpha-111-222','message','principal speech','principal-1',2,'{"source":"discord","channel_id":"222","user_name":"Synthetic Principal"}','2024-01-05 00:06:00'),
   (3,'agent_alpha','discord-agent_alpha-111-222','inner_voice','private thought','agent_alpha',3,NULL,'2024-01-05 00:07:00'),
   (4,'agent_alpha','discord-agent_alpha-111-222','tool_result','tool output','agent_alpha',4,NULL,'2024-01-05 00:08:00'),
   (5,'agent_alpha','discord-agent_alpha-111-222','message','owner private',NULL,5,NULL,'2024-01-05 00:09:00'),
   (6,'agent_alpha','discord-agent_alpha-111-222','tool_call','dropped call','agent_alpha',6,NULL,'2024-01-05 00:10:00'),
   (7,'agent_alpha','discord-agent_alpha-111-222','system','dropped system','agent_alpha',7,NULL,'2024-01-05 00:11:00'),
-  (8,'agent_alpha','discord-agent_alpha-111-222','interaction_response','ui response','principal-1',8,'{"interaction_id":"ui-responded"}','2024-01-05 00:12:00');
+  (8,'agent_alpha','discord-agent_alpha-111-222','interaction_response','ui response','principal-1',8,'{"interaction_id":"ui-responded","surface_id":"surface-b","action_name":"submit","component_id":"ok","responder_id":"principal-1"}','2024-01-05 00:12:00'),
+  (9,'agent_beta','discord-agent_alpha-111-222','message','peer history','agent_beta',1,'{"source":"discord","channel_id":"222"}','2024-01-05 00:13:00'),
+  (10,'agent_beta','discord-agent_alpha-111-222','message','peer principal history','principal-1',2,'{"source":"discord","channel_id":"222","user_name":"Synthetic Principal"}','2024-01-05 00:14:00'),
+  (11,'agent_alpha','discord-agent_alpha-111-222','tool_cancelled','cancelled work',NULL,NULL,'{"tool_call_id":"tool-1","tool_name":"synthetic_tool","task":"Synthetic Work","label":"Synthetic Work","completed_calls":[]}','2024-01-05 00:15:00'),
+  (12,'agent_alpha','subtask-tool-1','steer','change direction',NULL,NULL,'{"subtask_id":"tool-1","from_session":"discord-agent_alpha-111-222"}','2024-01-05 00:16:00'),
+  (13,'agent_alpha','discord-agent_alpha-111-222','task_event','task update','system',NULL,'{"task_id":1,"event":"synthetic"}','2024-01-05 00:17:00'),
+  (14,'agent_alpha','discord-agent_alpha-111-222','interaction_response','unmatched ui','principal-1',NULL,'{"interaction_id":"missing","surface_id":"surface-b","action_name":"submit","component_id":"ok","responder_id":"principal-1"}','2024-01-05 00:18:00'),
+  (15,'agent_alpha','discord-agent_alpha-111-222','tool_cancelled','unmatched cancel',NULL,NULL,'{"tool_call_id":"missing"}','2024-01-05 00:19:00'),
+  (16,'agent_alpha','subtask-missing','steer','unmatched steer',NULL,NULL,'{"subtask_id":"missing","from_session":"discord-agent_alpha-111-222"}','2024-01-05 00:20:00'),
+  (17,'agent_alpha','discord-agent_alpha-111-222','task_event','unmatched task','system',NULL,'{"task_id":999,"event":"synthetic"}','2024-01-05 00:21:00'),
+  (18,'agent_alpha','discord-agent_alpha-111-222-alt','message','second history prefix','agent_alpha',1,'{"source":"discord","channel_id":"222"}','2024-01-05 00:22:00');
+
+CREATE TABLE task_ledger(
+  id INTEGER,
+  agent_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  goal TEXT NOT NULL,
+  contract TEXT,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+INSERT INTO task_ledger VALUES
+  (1,'agent_alpha','discord-agent_alpha-111-222','Synthetic Goal',NULL,'active','2024-01-05 00:00:00','2024-01-05 00:00:00');

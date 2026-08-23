@@ -28,13 +28,41 @@ pub struct ClassAccounting {
     pub canonical_outcomes: u64,
     pub raw_outcomes: u64,
     pub dropped_outcomes: u64,
+    pub drop_reasons: BTreeMap<String, u64>,
     pub exact_one_violations: u64,
     pub physical_rows: BTreeMap<String, u64>,
     expected: BTreeMap<ContributionKey, u64>,
     canonical: BTreeMap<ContributionKey, u64>,
     raw: BTreeMap<ContributionKey, u64>,
     dropped: BTreeMap<ContributionKey, u64>,
-    streaming: bool,
+    active_streamed: Option<ContributionKey>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StreamedOutcome {
+    Canonical,
+    Raw,
+    Dropped,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct StreamedRowAccounting {
+    contribution: Option<ContributionKey>,
+    outcomes: Vec<(StreamedOutcome, Option<&'static str>)>,
+}
+
+impl StreamedRowAccounting {
+    pub(crate) fn canonical(&mut self) {
+        self.outcomes.push((StreamedOutcome::Canonical, None));
+    }
+
+    pub(crate) fn raw(&mut self) {
+        self.outcomes.push((StreamedOutcome::Raw, None));
+    }
+
+    pub(crate) fn dropped(&mut self, reason: &'static str) {
+        self.outcomes.push((StreamedOutcome::Dropped, Some(reason)));
+    }
 }
 
 impl ClassAccounting {
@@ -56,13 +84,14 @@ impl ClassAccounting {
             canonical_outcomes: 0,
             raw_outcomes: 0,
             dropped_outcomes: 0,
+            drop_reasons: BTreeMap::new(),
             exact_one_violations: 0,
             physical_rows,
             expected,
             canonical: BTreeMap::new(),
             raw: BTreeMap::new(),
             dropped: BTreeMap::new(),
-            streaming: false,
+            active_streamed: None,
         }
     }
 
@@ -71,24 +100,61 @@ impl ClassAccounting {
         logical_class: impl Into<String>,
         physical_rows: BTreeMap<String, u64>,
     ) -> Self {
-        let mut value = Self::new(source_table, logical_class, [], physical_rows);
-        value.streaming = true;
-        value
+        Self::new(source_table, logical_class, [], physical_rows)
     }
 
-    pub(crate) fn canonical_streamed(&mut self) {
-        self.source_rows += 1;
-        self.canonical_outcomes += 1;
+    pub(crate) fn start_streamed_row(
+        &mut self,
+        table: &SourceTable,
+        row: &SourceRow,
+    ) -> StreamedRowAccounting {
+        self.start_streamed_contribution(ContributionKey::new(table, row))
     }
 
-    pub(crate) fn raw_streamed(&mut self) {
+    fn start_streamed_contribution(
+        &mut self,
+        contribution: ContributionKey,
+    ) -> StreamedRowAccounting {
+        if self.active_streamed.replace(contribution.clone()).is_some() {
+            self.exact_one_violations += 1;
+        }
         self.source_rows += 1;
-        self.raw_outcomes += 1;
+        StreamedRowAccounting {
+            contribution: Some(contribution),
+            outcomes: Vec::new(),
+        }
     }
 
-    pub(crate) fn dropped_streamed(&mut self) {
-        self.source_rows += 1;
-        self.dropped_outcomes += 1;
+    pub(crate) fn finish_streamed_row(&mut self, mut row: StreamedRowAccounting) -> Result<()> {
+        let contribution = row
+            .contribution
+            .take()
+            .expect("streamed row has a contribution key");
+        if self.active_streamed.as_ref() != Some(&contribution) {
+            self.exact_one_violations += 1;
+        } else {
+            self.active_streamed = None;
+        }
+        if row.outcomes.len() != 1 {
+            self.exact_one_violations += row.outcomes.len().abs_diff(1) as u64;
+        }
+        for (outcome, reason) in row.outcomes {
+            match outcome {
+                StreamedOutcome::Canonical => self.canonical_outcomes += 1,
+                StreamedOutcome::Raw => self.raw_outcomes += 1,
+                StreamedOutcome::Dropped => {
+                    let reason = reason.expect("dropped outcome has a reason");
+                    if reason != "agreed-drop-tool-call-system" {
+                        return Err(ConverterError::Accounting(format!(
+                            "unknown drop reason {reason:?}"
+                        )));
+                    }
+                    self.dropped_outcomes += 1;
+                    *self.drop_reasons.entry(reason.into()).or_default() += 1;
+                }
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn canonical(&mut self, contribution: ContributionKey) {
@@ -102,10 +168,10 @@ impl ClassAccounting {
     }
 
     pub(crate) fn verify(&mut self) {
-        if self.streaming {
-            self.exact_one_violations = self
-                .source_rows
-                .abs_diff(self.canonical_outcomes + self.raw_outcomes + self.dropped_outcomes);
+        if self.active_streamed.take().is_some() {
+            self.exact_one_violations += 1;
+        }
+        if self.expected.is_empty() && self.source_rows != 0 {
             return;
         }
         let keys = self
@@ -140,6 +206,7 @@ impl ClassAccounting {
             "canonical_outcomes": self.canonical_outcomes,
             "raw_outcomes": self.raw_outcomes,
             "dropped_outcomes": self.dropped_outcomes,
+            "drop_reasons": self.drop_reasons,
             "exact_one_violations": self.exact_one_violations,
             "physical_rows": self.physical_rows,
         })
@@ -150,6 +217,7 @@ impl ClassAccounting {
 pub struct ConversionReport {
     pub classes: Vec<ClassAccounting>,
     pub physical_rows: BTreeMap<String, u64>,
+    pub input_snapshot_digest: String,
 }
 
 impl ConversionReport {
@@ -172,8 +240,9 @@ impl ConversionReport {
 
     pub fn to_pretty_json(&self) -> Result<String> {
         let value = json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "source_db": "data/opencrab.db",
+            "input_snapshot_digest": self.input_snapshot_digest,
             "classes": self.classes.iter().map(ClassAccounting::json).collect::<Vec<_>>(),
             "physical_rows": self.physical_rows,
         });
@@ -213,5 +282,35 @@ mod tests {
         assert_eq!(accounting.source_rows, 2);
         assert_eq!(accounting.canonical_outcomes + accounting.raw_outcomes, 2);
         assert_eq!(accounting.exact_one_violations, 2);
+    }
+
+    #[test]
+    fn streamed_accounting_rejects_duplicate_and_missing_that_cancel_in_totals() {
+        let mut accounting =
+            ClassAccounting::streaming("fixture", "fixture_class", BTreeMap::new());
+        let mut duplicate = accounting.start_streamed_contribution(key(1));
+        duplicate.canonical();
+        duplicate.raw();
+        accounting.finish_streamed_row(duplicate).unwrap();
+        accounting.start_streamed_contribution(key(2));
+
+        accounting.verify();
+
+        assert_eq!(accounting.source_rows, 2);
+        assert_eq!(accounting.canonical_outcomes + accounting.raw_outcomes, 2);
+        assert_eq!(accounting.exact_one_violations, 2);
+    }
+
+    #[test]
+    fn streamed_drop_requires_and_reports_the_agreed_reason() {
+        let mut accounting =
+            ClassAccounting::streaming("fixture", "fixture_class", BTreeMap::new());
+        let mut row = accounting.start_streamed_contribution(key(1));
+        row.dropped("agreed-drop-tool-call-system");
+        accounting.finish_streamed_row(row).unwrap();
+        assert_eq!(
+            accounting.drop_reasons,
+            BTreeMap::from([("agreed-drop-tool-call-system".into(), 1)])
+        );
     }
 }

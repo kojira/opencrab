@@ -1,33 +1,40 @@
 ACCOUNTING
-agents|agent_aggregate|2|1|1|0|0
-agent_discord_config|dedicated_gate_config|2|1|1|0|0
-agent_nostr_config|dedicated_gate_config|1|1|0|0|0
-discord_channel_config|discord_channel_policy|3|2|1|0|0
-trusted_users|external_principal|8|3|5|0|0
-trusted_users+trusted_co_agents|grant_contributor|10|3|7|0|0
-sessions|session_place|1|1|0|0|0
-pending_interactions|pending_interaction|3|2|1|0|0
-memory_sessions|history_event|8|6|0|2|0
+agents|agent_aggregate|3|2|1|0|0|{}
+agent_discord_config|dedicated_gate_config|2|1|1|0|0|{}
+agent_nostr_config|dedicated_gate_config|1|1|0|0|0|{}
+discord_channel_config|discord_channel_policy|3|2|1|0|0|{}
+trusted_users|external_principal|8|3|5|0|0|{}
+trusted_users+trusted_co_agents|grant_contributor|10|5|5|0|0|{}
+sessions|session_place|2|2|0|0|0|{}
+pending_interactions|pending_interaction|3|2|1|0|0|{}
+memory_sessions|history_event|18|16|0|2|0|{"agreed-drop-tool-call-system":2}
 COUNTS
-3|5|3|3|3|1|2|2|11
+4|5|8|3|7|2|7|2|9
 SUBJECTS
 1|agent|agent_alpha|Synthetic Agent|17a6101701650000
-2|human|external:discord:cHJpbmNpcGFsLTE|Synthetic Alpha|0003328b944c4001
-3|human|external:web:cHJpbmNpcGFsLXdlYg|Synthetic Web|0003328b944c4002
+2|agent|agent_beta|Synthetic Peer|17a610173cffca00
+3|human|external:discord:cHJpbmNpcGFsLTE|Synthetic Alpha|0003328b944c4001
+4|human|external:web:cHJpbmNpcGFsLXdlYg|Synthetic Web|0003328b944c4002
 IDENTITIES
-11111111-1111-4111-8111-111111111111|principal-1|2|Synthetic Alpha
-22222222-2222-4222-8222-222222222222|principal-1|2|Synthetic Alpha
-33333333-3333-4333-8333-333333333333|principal-web|3|Synthetic Web
-56717524-4cb5-4cdf-bf8b-a90ad44b6fc0|principal-1|2|Synthetic Alpha
+11111111-1111-4111-8111-111111111111|principal-1|3|Synthetic Alpha
+22222222-2222-4222-8222-222222222222|principal-1|3|Synthetic Alpha
+2da0e546-e086-48e8-8368-569681f1f41b|principal-1|3|Synthetic Alpha
+33333333-3333-4333-8333-333333333333|principal-web|4|Synthetic Web
 RUNTIME_CONFIGS
 1|synthetic-model|{"budget_tokens":500}|{"max_output_tokens":null}
+2|synthetic-model|{"budget_tokens":500}|{"max_output_tokens":null}
 GATE_CONFIGS
 discord|1|1|gate-config/discord/v1|23|source-plaintext
 nostr|1|0|gate-config/nostr/v1|20|enc:v1
 PLACES
 1|config:discord:222|live|discord|222
 2|config:discord:333|config_only|discord|333
-3|legacy-agent:opencrab:YWdlbnRfYWxwaGE:ZGlzY29yZC1hZ2VudF9hbHBoYS0xMTEtMjIy|NULL|NULL|NULL
+3|child:opencrab:c3VidGFzay10b29sLTE|child|opencrab|subtask-tool-1
+4|legacy-agent:opencrab:YWdlbnRfYWxwaGE:ZGlzY29yZC1hZ2VudF9hbHBoYS0xMTEtMjIy|NULL|NULL|NULL
+5|legacy-agent:opencrab:YWdlbnRfYmV0YQ:ZGlzY29yZC1hZ2VudF9hbHBoYS0xMTEtMjIy|NULL|NULL|NULL
+6|legacy-agent:opencrab:YWdlbnRfYWxwaGE:c3VidGFzay10b29sLTE|NULL|NULL|NULL
+7|legacy-agent:opencrab:YWdlbnRfYWxwaGE:c3VidGFzay1taXNzaW5n|NULL|NULL|NULL
+8|legacy-agent:opencrab:YWdlbnRfYWxwaGE:ZGlzY29yZC1hZ2VudF9hbHBoYS0xMTEtMjIyLWFsdA|NULL|NULL|NULL
 POLICIES
 1|discord|1|open|1|1|1|1|60|subject instruction
 BINDINGS
@@ -40,24 +47,34 @@ ROUTES
 1|1|discord|timed
 INTERACTIONS
 1|ui-pending|pending|1|1|NULL|NULL
-2|ui-responded|responded|1|1|system|system
+2|ui-responded|responded|1|1|subject|principal-1
 EVENTS
-3|1|spoke|1|NULL|agent speech
-3|2|said|2|principal-1|principal speech
-3|3|ui_action|NULL|principal-1|ui response
+4|1|spoke|1|NULL|agent speech
+4|2|said|3|principal-1|principal speech
+4|3|ui_action|NULL|principal-1|ui response
+4|4|interrupted|NULL|NULL|cancelled work
+5|1|spoke|2|NULL|peer history
+5|2|said|3|principal-1|peer principal history
+8|1|spoke|1|NULL|second history prefix
 JOURNAL_AUDIT
-conversation|1|3|owner private
-journal|1|3|private thought
-tool_result|1|3|tool output
+activity|1|4|unmatched cancel
+activity|1|4|unmatched ui
+conversation|1|4|owner private
+journal|1|3|change direction
+journal|1|4|private thought
+task|1|4|task update
+task|1|7|unmatched steer
+task|1|4|unmatched task
+tool_result|1|4|tool output
 HISTORY_SOURCES
-1|1|3|0|3
+1|1|4|0|4
+1|1|8|1|1
+2|1|5|0|2
 RAW
 agent_discord_config|50000000000000000103000000000000000d6167656e745f6d697373696e67|55a98bd05c225638510458e3869f7211daecc46153155aeb9a64ec3c40fdf2a5|gate-instance-and-subject-v1:unknown_owner
 agents|500000000000000001040000000000000003626164|17d4e784dba4169245fdd781a69ac7ca3e02f9d6fd11b56a569333c395cb5633|create-subject-public-id-v1:noncanonical_storage
 discord_channel_config|50000000000000000203000000000000000333333303000000000000000d6167656e745f6d697373696e67|7118356aeaa2833fe870dd4565796cd91f01e11ced7542c61b60000f59fdfb64|discord-channel-policy-router-v1:unknown_owner
 pending_interactions|520000000000000001010000000000000003|f488814ce1d936c8d923a209a26e5af11aac244740f29cbe4063fcfabbde505c|pending-interaction-router-v2:null_source_key
-trusted_co_agents|50000000000000000103000000000000000474632d61|8cba9f34187b3b69bedae0dde9d4e0fe25fc65615bdfffd26dead8a86d005632|grant-permission-v1:unresolved_principal
-trusted_co_agents|50000000000000000103000000000000000474632d62|13ca353b15376a927cc84ec01b551cdfaaa31c0b887a2a753053d52d2a5ba891|grant-permission-v1:unresolved_principal
 trusted_users|50000000000000000103000000000000000774752d72657374|d7a6f5c8bc2608a84d43176b028c6c335319afef662981826a96bd23733f949d|grant-permission-v1:unresolved_principal,resolve-external-principal-v1:zero_matching_instances
 trusted_users|50000000000000000103000000000000000774752d74696d65|e78c43c8f2e380e8c63f1f6d5eacc0debc964eac123e352332939515f55e4eca|grant-permission-v1:unresolved_principal,resolve-external-principal-v1:invalid_created_at
 trusted_users|50000000000000000103000000000000000874752d656d707479|b70432d113a013aab636d491b1d5794d4901bc05eabc735bdbc2cfd4c60982f4|grant-permission-v1:unresolved_principal,resolve-external-principal-v1:missing_display_name

@@ -165,6 +165,10 @@ impl MigrationInstanceAssembler for NoMigrationInstances {
 pub struct ConvertOptions {
     pub source: PathBuf,
     pub target: PathBuf,
+    /// Immutable TOML resource captured for this conversion run.
+    pub config: PathBuf,
+    /// Immutable dotenv resource containing the effective environment captured for this run.
+    pub environment: PathBuf,
 }
 
 #[derive(Clone, Debug)]
@@ -283,25 +287,36 @@ struct SharedDiscordConfig {
     owner_external_id: String,
 }
 
-fn load_effective_config(source_path: &Path) -> Result<EffectiveConfig> {
-    let source_parent = source_path.parent().unwrap_or_else(|| Path::new("."));
-    let root = if source_parent.file_name().and_then(|value| value.to_str()) == Some("data") {
-        source_parent.parent().unwrap_or(source_parent)
-    } else {
-        source_parent
-    };
-    let path = root.join("config/default.toml");
-    if !path.exists() {
-        return Ok(EffectiveConfig {
-            compaction_ratio: 0.5,
-            ..EffectiveConfig::default()
-        });
+struct EffectiveConfigSnapshot {
+    config: EffectiveConfig,
+    digest: [u8; 32],
+}
+
+fn load_effective_config(
+    database_digest: [u8; 32],
+    config_path: &Path,
+    environment_path: &Path,
+) -> Result<EffectiveConfigSnapshot> {
+    let raw = std::fs::read(config_path)?;
+    let environment_raw = std::fs::read(environment_path)?;
+    if environment_raw.contains(&b'$') {
+        return Err(ConverterError::SourceSchema(
+            "environment snapshot must contain resolved values, not variable references".into(),
+        ));
     }
-    let raw = std::fs::read(&path)?;
-    let text = std::str::from_utf8(&raw).map_err(|_| {
-        ConverterError::SourceSchema("config/default.toml is not valid UTF-8".into())
-    })?;
-    let expanded = expand_environment(text)?;
+    let mut environment = BTreeMap::<String, String>::new();
+    for parsed in dotenvy::from_read_iter(environment_raw.as_slice()) {
+        let (name, value) = parsed.map_err(|error| {
+            ConverterError::SourceSchema(format!("environment snapshot is invalid: {error}"))
+        })?;
+        // Production dotenv loading preserves the first definition and does not overwrite an
+        // already captured value. The converter receives the complete effective environment as
+        // one immutable resource, so it never consults its own process environment.
+        environment.entry(name).or_insert(value);
+    }
+    let text = std::str::from_utf8(&raw)
+        .map_err(|_| ConverterError::SourceSchema("config snapshot is not valid UTF-8".into()))?;
+    let expanded = expand_environment(text, &environment);
     let parsed = parse_config_projection(&expanded)?;
     let default_model = parsed.default_model;
     let compaction_ratio = parsed.compaction_ratio.unwrap_or(0.5);
@@ -317,53 +332,52 @@ fn load_effective_config(source_path: &Path) -> Result<EffectiveConfig> {
         }
     }))?);
     let discord = parsed.discord;
-    Ok(EffectiveConfig {
+    let config = EffectiveConfig {
         default_model,
         compaction_ratio,
         source_config,
         discord,
+    };
+    let mut digest = Sha256::new();
+    digest.update(b"opencrab-converter-input-snapshot-v1\0");
+    digest.update(database_digest);
+    digest.update((raw.len() as u64).to_be_bytes());
+    digest.update(&raw);
+    digest.update((environment_raw.len() as u64).to_be_bytes());
+    digest.update(&environment_raw);
+    for (name, value) in &environment {
+        digest.update((name.len() as u64).to_be_bytes());
+        digest.update(name.as_bytes());
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    Ok(EffectiveConfigSnapshot {
+        config,
+        digest: digest.finalize().into(),
     })
 }
 
-fn expand_environment(input: &str) -> Result<String> {
-    let bytes = input.as_bytes();
+fn expand_environment(input: &str, environment: &BTreeMap<String, String>) -> String {
     let mut output = String::with_capacity(input.len());
-    let mut cursor = 0;
-    while cursor < bytes.len() {
-        if bytes[cursor..].starts_with(b"${") {
-            let Some(relative_end) = bytes[cursor + 2..].iter().position(|byte| *byte == b'}')
-            else {
-                return Err(ConverterError::SourceSchema(
-                    "unterminated ${NAME} in config/default.toml".into(),
-                ));
-            };
-            let end = cursor + 2 + relative_end;
-            let name = &input[cursor + 2..end];
-            let valid = !name.is_empty()
-                && name.bytes().enumerate().all(|(index, byte)| {
-                    byte == b'_'
-                        || byte.is_ascii_alphabetic()
-                        || (index > 0 && byte.is_ascii_digit())
-                });
-            if !valid {
-                return Err(ConverterError::SourceSchema(format!(
-                    "invalid environment reference ${{{name}}} in config/default.toml"
-                )));
-            }
-            let value = std::env::var(name).map_err(|_| {
-                ConverterError::SourceSchema(format!(
-                    "environment variable {name} referenced by config/default.toml is missing"
-                ))
-            })?;
-            output.push_str(&value);
-            cursor = end + 1;
+    let mut rest = input;
+    loop {
+        let Some(start) = rest.find("${") else {
+            output.push_str(rest);
+            break;
+        };
+        output.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let line_end = after.find('\n').unwrap_or(after.len());
+        if let Some(close) = after[..line_end].find('}') {
+            let name = &after[..close];
+            output.push_str(environment.get(name).map(String::as_str).unwrap_or(""));
+            rest = &after[close + 1..];
         } else {
-            let character = input[cursor..].chars().next().expect("cursor is in range");
-            output.push(character);
-            cursor += character.len_utf8();
+            output.push_str("${");
+            rest = after;
         }
     }
-    Ok(output)
+    output
 }
 
 #[derive(Default)]
@@ -651,12 +665,14 @@ fn assemble_dedicated_gate_table(
     let mut canonical = 0_u64;
     let mut provenance_rows = 0_u64;
     table.for_each_row(source, "agent_id COLLATE BINARY,rowid", |row| {
+        let mut row_accounting = accounting.start_streamed_row(table, row);
         let parsed = parse_dedicated_gate(table, row, kind, agents);
         let parsed = match parsed {
             Ok(parsed) => parsed,
             Err(reason) => {
                 raw.add(table, row, reason)?;
-                accounting.raw_streamed();
+                row_accounting.raw();
+                accounting.finish_streamed_row(row_accounting)?;
                 return Ok(());
             }
         };
@@ -696,7 +712,8 @@ fn assemble_dedicated_gate_table(
             provenance_rows += 1;
         }
         canonical += 1;
-        accounting.canonical_streamed();
+        row_accounting.canonical();
+        accounting.finish_streamed_row(row_accounting)?;
         Ok(())
     })?;
     accounting.physical_rows = BTreeMap::from([
@@ -935,12 +952,14 @@ fn assemble_discord_channel_policies(
             let channel = match table.text(row, "channel_id") {
                 Some(value) if !value.is_empty() => value,
                 _ => {
+                    let mut row_accounting = accounting.start_streamed_row(&table, row);
                     raw.add(
                         &table,
                         row,
                         "discord-channel-policy-router-v1:noncanonical_storage",
                     )?;
-                    accounting.raw_streamed();
+                    row_accounting.raw();
+                    accounting.finish_streamed_row(row_accounting)?;
                     return Ok(());
                 }
             };
@@ -1000,12 +1019,14 @@ fn assemble_discord_channel_policies(
                     }
                     (1, Some(place_id)) => place_id,
                     _ => {
+                        let mut row_accounting = accounting.start_streamed_row(&table, row);
                         raw.add(
                             &table,
                             row,
                             "discord-channel-policy-router-v1:multiple_place_matches",
                         )?;
-                        accounting.raw_streamed();
+                        row_accounting.raw();
+                        accounting.finish_streamed_row(row_accounting)?;
                         return Ok(());
                     }
                 };
@@ -1022,8 +1043,10 @@ fn assemble_discord_channel_policies(
                     candidates.entry(key).or_default().push(policy);
                 }
                 Err(reason) => {
+                    let mut row_accounting = accounting.start_streamed_row(&table, row);
                     raw.add(&table, row, reason)?;
-                    accounting.raw_streamed();
+                    row_accounting.raw();
+                    accounting.finish_streamed_row(row_accounting)?;
                 }
             }
             Ok(())
@@ -1078,7 +1101,9 @@ fn flush_channel_policy_candidates(
                     &candidate.row,
                     "discord-channel-policy-router-v1:conflicting_policy_class",
                 )?;
-                accounting.raw_streamed();
+                let mut row_accounting = accounting.start_streamed_row(table, &candidate.row);
+                row_accounting.raw();
+                accounting.finish_streamed_row(row_accounting)?;
             }
             continue;
         }
@@ -1142,7 +1167,9 @@ fn flush_channel_policy_candidates(
         for candidate in group {
             provenance.write(target, entity, &target_key, table, &candidate.row)?;
             *provenance_rows += 1;
-            accounting.canonical_streamed();
+            let mut row_accounting = accounting.start_streamed_row(table, &candidate.row);
+            row_accounting.canonical();
+            accounting.finish_streamed_row(row_accounting)?;
         }
     }
     Ok(())
@@ -1308,17 +1335,35 @@ fn assemble_sessions(
     let mut accounting = ClassAccounting::streaming(table.name, "session_place", BTreeMap::new());
     let mut place_rows = 0_u64;
     let mut membership_rows = 0_u64;
+    let mut child_parents = Vec::<(i64, i64, String)>::new();
     table.for_each_row(source, "id COLLATE BINARY,rowid", |row| {
+        let mut row_accounting = accounting.start_streamed_row(&table, row);
         let result = parse_session_row(&table, row, agents);
         let parsed = match result {
             Ok(parsed) => parsed,
             Err(reason) => {
                 raw.add(&table, row, reason)?;
-                accounting.raw_streamed();
+                row_accounting.raw();
+                accounting.finish_streamed_row(row_accounting)?;
                 return Ok(());
             }
         };
         let live = session_live_address(&parsed.id, parsed.metadata.as_deref(), None);
+        let child_parent = (parsed.mode == "subtask")
+            .then(|| {
+                parsed
+                    .metadata
+                    .as_deref()
+                    .and_then(|metadata| serde_json::from_str::<serde_json::Value>(metadata).ok())
+                    .and_then(|metadata| {
+                        metadata
+                            .get("parent_session_id")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .zip(parsed.participant_subject_ids.first().copied())
+            })
+            .flatten();
         let place = if let Some((kind, address, address_kind, guild_id)) = live {
             let place = ensure_live_place_and_bindings(
                 target,
@@ -1338,6 +1383,19 @@ fn assemble_sessions(
             place
         } else {
             let place_id = next_integer_id(target, "places")?;
+            let is_child = parsed.mode == "subtask";
+            let classification = if is_child { "child" } else { "legacy_general" };
+            let public_key = if is_child {
+                format!(
+                    "child:opencrab:{}",
+                    URL_SAFE_NO_PAD.encode(parsed.id.as_bytes())
+                )
+            } else {
+                format!(
+                    "legacy:opencrab:{}",
+                    URL_SAFE_NO_PAD.encode(parsed.id.as_bytes())
+                )
+            };
             target.execute(
                 "INSERT INTO places(
                    id,parent_id,inherit_from_place_id,inherit_up_to_seq,policy,public_key,
@@ -1346,10 +1404,7 @@ fn assemble_sessions(
                 params![
                     place_id,
                     b"hard-default".as_slice(),
-                    format!(
-                        "legacy:opencrab:{}",
-                        URL_SAFE_NO_PAD.encode(parsed.id.as_bytes())
-                    ),
+                    public_key,
                     parsed.created_at,
                     parsed.closed_at,
                     parsed.close_reason,
@@ -1361,10 +1416,11 @@ fn assemble_sessions(
                    source_record_digest,mode,theme,phase,source_turn_number,source_status,
                    participant_public_ids,facilitator_subject_id,source_done_count,
                    source_max_turns,metadata,updated_at
-                 ) VALUES(?1,'legacy_general','opencrab',?2,?3,?4,?5,?6,?7,?8,?9,?10,
-                          ?11,?12,?13,?14,?15)",
+                 ) VALUES(?1,?2,'opencrab',?3,?4,?5,?6,?7,?8,?9,?10,?11,
+                          ?12,?13,?14,?15,?16)",
                 params![
                     place_id,
+                    classification,
                     parsed.id,
                     parsed.id.as_bytes(),
                     row.row_digest.as_slice(),
@@ -1386,6 +1442,9 @@ fn assemble_sessions(
                 place_id,
             }
         };
+        if let Some((parent_session_id, child_subject_id)) = child_parent {
+            child_parents.push((place.place_id, child_subject_id, parent_session_id));
+        }
         for subject_id in parsed.participant_subject_ids {
             membership_rows += target.execute(
                 "INSERT OR IGNORE INTO memberships(place_id,subject_id,role,joined_at,shared_seen_seq)
@@ -1393,9 +1452,38 @@ fn assemble_sessions(
                 params![place.place_id, subject_id, parsed.created_at],
             )? as u64;
         }
-        accounting.canonical_streamed();
+        row_accounting.canonical();
+        accounting.finish_streamed_row(row_accounting)?;
         Ok(())
     })?;
+    for (child_place_id, child_subject_id, parent_session_id) in child_parents {
+        let public_id = target.query_row(
+            "SELECT public_id FROM subjects WHERE id=?1",
+            [child_subject_id],
+            |row| row.get::<_, String>(0),
+        )?;
+        let parent_place_id = live_sessions
+            .get(&(public_id, parent_session_id.clone()))
+            .map(|place| place.place_id)
+            .or_else(|| {
+                target
+                    .query_row(
+                        "SELECT place_id FROM place_source_refs
+                         WHERE source_system='opencrab' AND source_address=?1",
+                        [&parent_session_id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()
+                    .ok()
+                    .flatten()
+            });
+        if let Some(parent_place_id) = parent_place_id {
+            target.execute(
+                "UPDATE places SET parent_id=?1 WHERE id=?2",
+                params![parent_place_id, child_place_id],
+            )?;
+        }
+    }
     accounting.physical_rows = BTreeMap::from([
         ("places".into(), place_rows),
         ("place_source_refs".into(), place_rows),
@@ -1837,11 +1925,13 @@ fn assemble_pending_interactions(
     let mut next_id = 1_i64;
     let mut response_rows = 0_u64;
     table.for_each_row(source, "id COLLATE BINARY,rowid", |row| {
+        let mut row_accounting = accounting.start_streamed_row(&table, row);
         let source_id = match table.nullable_text(row, "id") {
             Some(Some(value)) => value,
             Some(None) => {
                 raw.add(&table, row, "pending-interaction-router-v2:null_source_key")?;
-                accounting.raw_streamed();
+                row_accounting.raw();
+                accounting.finish_streamed_row(row_accounting)?;
                 return Ok(());
             }
             None => {
@@ -1850,7 +1940,8 @@ fn assemble_pending_interactions(
                     row,
                     "pending-interaction-router-v2:noncanonical_storage",
                 )?;
-                accounting.raw_streamed();
+                row_accounting.raw();
+                accounting.finish_streamed_row(row_accounting)?;
                 return Ok(());
             }
         };
@@ -1859,7 +1950,8 @@ fn assemble_pending_interactions(
             Ok(value) => value,
             Err(reason) => {
                 raw.add(&table, row, reason)?;
-                accounting.raw_streamed();
+                row_accounting.raw();
+                accounting.finish_streamed_row(row_accounting)?;
                 return Ok(());
             }
         };
@@ -1873,7 +1965,8 @@ fn assemble_pending_interactions(
                 Ok((kind, subject)) => Some((response, kind, subject)),
                 Err(reason) => {
                     raw.add(&table, row, reason)?;
-                    accounting.raw_streamed();
+                    row_accounting.raw();
+                    accounting.finish_streamed_row(row_accounting)?;
                     return Ok(());
                 }
             }
@@ -1927,7 +2020,8 @@ fn assemble_pending_interactions(
             )?;
             response_rows += 1;
         }
-        accounting.canonical_streamed();
+        row_accounting.canonical();
+        accounting.finish_streamed_row(row_accounting)?;
         Ok(())
     })?;
     accounting.physical_rows = BTreeMap::from([
@@ -2168,6 +2262,7 @@ fn assemble_memory_history(
         .ok_or_else(|| ConverterError::Accounting("private journal id overflow".into()))?;
     let mut previous_source_id = None;
     table.for_each_row(source, "id,rowid", |row| {
+        let mut row_accounting = accounting.start_streamed_row(&table, row);
         let source_row_id = table.integer(row, "id").ok_or_else(|| {
             ConverterError::Accounting("history row has missing/non-integer source id".into())
         })?;
@@ -2183,7 +2278,8 @@ fn assemble_memory_history(
             ))
         })?;
         if matches!(log_kind, "tool_call" | "system") {
-            accounting.dropped_streamed();
+            row_accounting.dropped("agreed-drop-tool-call-system");
+            accounting.finish_streamed_row(row_accounting)?;
             return Ok(());
         }
         let agent_id = table.text(row, "agent_id").ok_or_else(|| {
@@ -2317,7 +2413,7 @@ fn assemble_memory_history(
                 None,
             )?;
             event_rows += 1;
-        } else if speaker.is_none() {
+        } else if matches!(log_kind, "speech" | "message") && speaker.is_none() {
             insert_history_audit(
                 target,
                 snapshot_digest,
@@ -2338,7 +2434,16 @@ fn assemble_memory_history(
                 "speech" | "message" => {
                     let external = std::str::from_utf8(speaker.expect("not null")).ok();
                     let author = external
-                        .map(|value| resolve_external_speaker(target, value))
+                        .map(|value| {
+                            resolve_external_speaker(
+                                target,
+                                state.live_place_id,
+                                subject_id,
+                                value,
+                                metadata,
+                                source_row_id,
+                            )
+                        })
                         .transpose()?
                         .flatten();
                     if let (Some(external), Some(author)) = (external, author) {
@@ -2375,22 +2480,14 @@ fn assemble_memory_history(
                 }
                 "interaction_response" => {
                     let object = inspected_metadata(metadata, source_row_id)?;
-                    let interaction_key = object
-                        .get("interaction_id")
-                        .and_then(serde_json::Value::as_str);
-                    let interaction = interaction_key
-                        .map(|key| {
-                            target.query_row(
-                                "SELECT COUNT(*),MIN(id) FROM interactions WHERE source_record_key=?1",
-                                [key],
-                                |row| {
-                                    Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
-                                },
-                            )
-                        })
-                        .transpose()?;
-                    match interaction {
-                        Some((1, Some(_))) => {
+                    let interactions = resolve_history_interaction(
+                        target,
+                        state.live_place_id,
+                        subject_id,
+                        &object,
+                    )?;
+                    match interactions.as_slice() {
+                        [_] => {
                             state.event_seq += 1;
                             insert_history_event(
                                 target,
@@ -2398,14 +2495,16 @@ fn assemble_memory_history(
                                 state.event_seq,
                                 "ui_action",
                                 None,
-                                std::str::from_utf8(speaker.expect("not null")).ok(),
+                                object
+                                    .get("responder_id")
+                                    .and_then(serde_json::Value::as_str),
                                 content,
                                 created_at,
                                 None,
                             )?;
                             event_rows += 1;
                         }
-                        Some((count, _)) if count > 1 => {
+                        [_, _, ..] => {
                             return Err(ConverterError::Accounting(format!(
                                 "history row {source_row_id} interaction join is multiple"
                             )))
@@ -2430,40 +2529,159 @@ fn assemble_memory_history(
                     }
                 }
                 "tool_cancelled" => {
-                    inspected_metadata(metadata, source_row_id)?;
-                    insert_history_audit(
+                    let object = inspected_metadata(metadata, source_row_id)?;
+                    let matches = resolve_subtask_places(
+                        source,
                         target,
-                        snapshot_digest,
-                        source_row_id,
-                        "activity",
-                        subject_id,
-                        state.place_id,
                         agent_id,
-                        content,
-                        created_at,
-                        metadata,
-                        "subtask cancellation did not resolve",
-                        log_kind,
+                        session_id,
+                        &object,
+                        SubtaskJoin::Cancelled,
                     )?;
-                    audit_rows += 1;
+                    match matches.as_slice() {
+                        [_] => {
+                            state.event_seq += 1;
+                            insert_history_event(
+                                target,
+                                state.place_id,
+                                state.event_seq,
+                                "interrupted",
+                                None,
+                                None,
+                                content,
+                                created_at,
+                                Some(subject_id),
+                            )?;
+                            event_rows += 1;
+                        }
+                        [] => {
+                            insert_history_audit(
+                                target,
+                                snapshot_digest,
+                                source_row_id,
+                                "activity",
+                                subject_id,
+                                state.place_id,
+                                agent_id,
+                                content,
+                                created_at,
+                                metadata,
+                                "subtask cancellation did not resolve",
+                                log_kind,
+                            )?;
+                            audit_rows += 1;
+                        }
+                        _ => {
+                            return Err(ConverterError::Accounting(format!(
+                                "history row {source_row_id} subtask join is multiple"
+                            )))
+                        }
+                    }
                 }
-                "steer" | "task_event" => {
-                    inspected_metadata(metadata, source_row_id)?;
-                    insert_history_audit(
+                "steer" => {
+                    let object = inspected_metadata(metadata, source_row_id)?;
+                    let matches = resolve_subtask_places(
+                        source,
                         target,
-                        snapshot_digest,
-                        source_row_id,
-                        "task",
-                        subject_id,
-                        state.place_id,
                         agent_id,
-                        content,
-                        created_at,
-                        metadata,
-                        "task reference did not resolve",
-                        log_kind,
+                        session_id,
+                        &object,
+                        SubtaskJoin::Steer,
                     )?;
-                    audit_rows += 1;
+                    match matches.as_slice() {
+                        [child_place_id] => {
+                            let provenance = serde_json::to_vec(&serde_json::json!({
+                                "source_db_digest": source::hex(&snapshot_digest),
+                                "source_row_id": source_row_id,
+                                "subtask_child_place_id": child_place_id,
+                            }))?;
+                            target.execute(
+                                "INSERT INTO private_journal(
+                                   journal_id,owner_subject_id,place_id,anchor_seq,content,created_at,provenance
+                                 ) VALUES(?1,?2,?3,0,?4,?5,?6)",
+                                params![
+                                    journal_id,
+                                    subject_id,
+                                    child_place_id,
+                                    content,
+                                    created_at,
+                                    provenance,
+                                ],
+                            )?;
+                            journal_id = journal_id.checked_add(1).ok_or_else(|| {
+                                ConverterError::Accounting("private journal id overflow".into())
+                            })?;
+                            journal_rows += 1;
+                        }
+                        [] => {
+                            insert_history_audit(
+                                target,
+                                snapshot_digest,
+                                source_row_id,
+                                "task",
+                                subject_id,
+                                state.place_id,
+                                agent_id,
+                                content,
+                                created_at,
+                                metadata,
+                                "child place did not resolve",
+                                log_kind,
+                            )?;
+                            audit_rows += 1;
+                        }
+                        _ => {
+                            return Err(ConverterError::Accounting(format!(
+                                "history row {source_row_id} child place join is multiple"
+                            )))
+                        }
+                    }
+                }
+                "task_event" => {
+                    let object = inspected_metadata(metadata, source_row_id)?;
+                    let matches = resolve_task_references(source, agent_id, session_id, &object)?;
+                    match matches.as_slice() {
+                        [task_id] => {
+                            insert_history_audit_with_activity(
+                                target,
+                                snapshot_digest,
+                                source_row_id,
+                                "task",
+                                subject_id,
+                                state.place_id,
+                                Some(*task_id),
+                                agent_id,
+                                content,
+                                created_at,
+                                metadata,
+                                "task reference resolved",
+                                log_kind,
+                            )?;
+                            audit_rows += 1;
+                        }
+                        [] => {
+                            insert_history_audit(
+                                target,
+                                snapshot_digest,
+                                source_row_id,
+                                "task",
+                                subject_id,
+                                state.place_id,
+                                agent_id,
+                                content,
+                                created_at,
+                                metadata,
+                                "task reference did not resolve",
+                                log_kind,
+                            )?;
+                            audit_rows += 1;
+                        }
+                        _ => {
+                            return Err(ConverterError::Accounting(format!(
+                                "history row {source_row_id} task join is multiple"
+                            )))
+                        }
+                    }
                 }
                 "tool_result" | "evaluation" => {
                     insert_history_audit(
@@ -2517,7 +2735,8 @@ fn assemble_memory_history(
                 }
             }
         }
-        accounting.canonical_streamed();
+        row_accounting.canonical();
+        accounting.finish_streamed_row(row_accounting)?;
         Ok(())
     })?;
 
@@ -2595,20 +2814,301 @@ fn insert_history_event(
     Ok(())
 }
 
-fn resolve_external_speaker(target: &Transaction<'_>, external: &str) -> Result<Option<i64>> {
+fn resolve_external_speaker(
+    target: &Transaction<'_>,
+    live_place_id: Option<i64>,
+    owner_subject_id: i64,
+    external: &str,
+    metadata: Option<&[u8]>,
+    source_row_id: i64,
+) -> Result<Option<i64>> {
+    let object = inspected_metadata(metadata, source_row_id)?;
+    let Some(source_kind @ ("discord" | "nostr")) =
+        object.get("source").and_then(serde_json::Value::as_str)
+    else {
+        return Ok(None);
+    };
+    let Some(place_id) = live_place_id else {
+        return Ok(None);
+    };
+    let address_matches = if source_kind == "discord" {
+        let Some(channel_id) = object.get("channel_id").and_then(serde_json::Value::as_str) else {
+            return Ok(None);
+        };
+        target.query_row(
+            "SELECT COUNT(*) FROM place_source_refs
+             WHERE place_id=?1 AND source_system='discord' AND source_address=?2",
+            params![place_id, channel_id],
+            |row| row.get::<_, i64>(0),
+        )?
+    } else {
+        if object.get("pubkey").and_then(serde_json::Value::as_str) != Some(external) {
+            return Ok(None);
+        }
+        target.query_row(
+            "SELECT COUNT(*) FROM place_source_refs
+             WHERE place_id=?1 AND source_system='nostr'",
+            [place_id],
+            |row| row.get::<_, i64>(0),
+        )?
+    };
+    if address_matches != 1 {
+        return Ok(None);
+    }
     let mut statement = target.prepare(
-        "SELECT DISTINCT subject_id FROM gate_subject_identities WHERE external_id=?1 ORDER BY subject_id",
+        "SELECT i.subject_id
+         FROM gate_bindings b
+         JOIN gate_instances gi ON gi.instance_id=b.instance_id
+         JOIN gate_subject_identities i ON i.instance_id=gi.instance_id
+         WHERE b.place_id=?1 AND b.closed_at IS NULL AND gi.kind_id=?2
+           AND (gi.owner_subject_id=?3 OR gi.owner_subject_id IS NULL)
+           AND i.external_id=?4
+         ORDER BY gi.instance_id,i.subject_id",
     )?;
     let subjects = statement
-        .query_map([external], |row| row.get::<_, i64>(0))?
+        .query_map(
+            params![place_id, source_kind, owner_subject_id, external],
+            |row| row.get::<_, i64>(0),
+        )?
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    match subjects.as_slice() {
-        [] => Ok(None),
-        [subject] => Ok(Some(*subject)),
+    let distinct = subjects.into_iter().collect::<BTreeSet<_>>();
+    match distinct.len() {
+        0 => Ok(None),
+        1 => Ok(distinct.into_iter().next()),
         _ => Err(ConverterError::Accounting(format!(
             "external speaker {external:?} resolves to multiple subjects"
         ))),
     }
+}
+
+fn resolve_history_interaction(
+    target: &Transaction<'_>,
+    live_place_id: Option<i64>,
+    owner_subject_id: i64,
+    metadata: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Vec<i64>> {
+    let Some(interaction_key) = metadata
+        .get("interaction_id")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(Vec::new());
+    };
+    let Some(surface_id) = metadata
+        .get("surface_id")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(Vec::new());
+    };
+    let Some(action_name) = metadata
+        .get("action_name")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(Vec::new());
+    };
+    let Some(component_id) = metadata
+        .get("component_id")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(Vec::new());
+    };
+    let Some(responder_id) = metadata
+        .get("responder_id")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(Vec::new());
+    };
+    let Some(place_id) = live_place_id else {
+        return Ok(Vec::new());
+    };
+    let mut statement = target.prepare(
+        "SELECT i.id,i.surface_payload,r.response
+         FROM interactions i
+         JOIN interaction_responses r ON r.interaction_id=i.id
+         JOIN place_source_refs p ON p.place_id=i.place_id
+           AND p.classification='live' AND p.source_system=i.surface
+           AND p.source_address=i.source_address
+         WHERE i.source_record_key=?1 AND i.owner_subject_id=?2 AND i.place_id=?3
+           AND i.surface_id=?4 AND i.state IN ('responded','expired')
+           AND r.interaction_source_key=?1 AND r.responder_external_id=?5
+         ORDER BY i.id",
+    )?;
+    let candidates = statement
+        .query_map(
+            params![
+                interaction_key,
+                owner_subject_id,
+                place_id,
+                surface_id,
+                responder_id
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut matches = Vec::new();
+    for (id, components, response) in candidates {
+        let components = parse_json_without_duplicate_keys(components.as_bytes())?;
+        let response = parse_json_without_duplicate_keys(response.as_bytes())?;
+        let response_matches = response.as_object().is_some_and(|object| {
+            object.get("surface_id").and_then(serde_json::Value::as_str) == Some(surface_id)
+                && object
+                    .get("action_name")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(action_name)
+                && object
+                    .get("component_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(component_id)
+                && object
+                    .get("responder_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(responder_id)
+        });
+        if response_matches && json_contains_component_id(&components, component_id) {
+            matches.push(id);
+        }
+    }
+    Ok(matches)
+}
+
+fn json_contains_component_id(value: &serde_json::Value, component_id: &str) -> bool {
+    match value {
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| json_contains_component_id(value, component_id)),
+        serde_json::Value::Object(object) => {
+            object.get("id").and_then(serde_json::Value::as_str) == Some(component_id)
+                || object
+                    .values()
+                    .any(|value| json_contains_component_id(value, component_id))
+        }
+        _ => false,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SubtaskJoin {
+    Cancelled,
+    Steer,
+}
+
+fn resolve_subtask_places(
+    source: &Connection,
+    target: &Transaction<'_>,
+    agent_id: &str,
+    history_session_id: &str,
+    history_metadata: &serde_json::Map<String, serde_json::Value>,
+    join: SubtaskJoin,
+) -> Result<Vec<i64>> {
+    if !SourceTable::exists(source, "sessions")? {
+        return Ok(Vec::new());
+    }
+    let Some(subtask_id) = history_metadata
+        .get(match join {
+            SubtaskJoin::Cancelled => "tool_call_id",
+            SubtaskJoin::Steer => "subtask_id",
+        })
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(Vec::new());
+    };
+    let expected_session_id = format!("subtask-{subtask_id}");
+    if matches!(join, SubtaskJoin::Steer) && history_session_id != expected_session_id {
+        return Ok(Vec::new());
+    }
+    let mut statement = source.prepare(
+        "SELECT id,mode,participant_ids_json,metadata_json
+         FROM sessions WHERE id=?1 ORDER BY rowid",
+    )?;
+    let rows = statement
+        .query_map([&expected_session_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut matches = Vec::new();
+    for (session_id, mode, participants, metadata) in rows {
+        if mode != "subtask" {
+            continue;
+        }
+        let participants = parse_json_without_duplicate_keys(participants.as_bytes())?;
+        let participant_matches = participants
+            .as_array()
+            .is_some_and(|values| values.len() == 1 && values[0].as_str() == Some(agent_id));
+        let Some(metadata) = metadata else {
+            continue;
+        };
+        let session_metadata = parse_json_without_duplicate_keys(metadata.as_bytes())?;
+        let session_metadata = session_metadata.as_object();
+        let metadata_matches = session_metadata.is_some_and(|object| {
+            object.get("subtask_id").and_then(serde_json::Value::as_str) == Some(subtask_id)
+                && match join {
+                    SubtaskJoin::Cancelled => {
+                        object
+                            .get("parent_session_id")
+                            .and_then(serde_json::Value::as_str)
+                            == Some(history_session_id)
+                    }
+                    SubtaskJoin::Steer => {
+                        history_metadata
+                            .get("from_session")
+                            .and_then(serde_json::Value::as_str)
+                            == object
+                                .get("parent_session_id")
+                                .and_then(serde_json::Value::as_str)
+                    }
+                }
+        });
+        if !participant_matches || !metadata_matches {
+            continue;
+        }
+        let mut place_statement = target.prepare(
+            "SELECT place_id FROM place_source_refs
+             WHERE classification='child' AND source_system='opencrab' AND source_address=?1
+             ORDER BY place_id",
+        )?;
+        let places = place_statement
+            .query_map([session_id], |row| row.get::<_, i64>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        matches.extend(places);
+    }
+    Ok(matches)
+}
+
+fn resolve_task_references(
+    source: &Connection,
+    agent_id: &str,
+    session_id: &str,
+    metadata: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Vec<i64>> {
+    if !SourceTable::exists(source, "task_ledger")? {
+        return Ok(Vec::new());
+    }
+    let Some(task_id) = metadata.get("task_id").and_then(serde_json::Value::as_i64) else {
+        return Ok(Vec::new());
+    };
+    if task_id <= 0 {
+        return Ok(Vec::new());
+    }
+    let mut statement = source.prepare(
+        "SELECT id FROM task_ledger
+         WHERE id=?1 AND agent_id=?2 AND session_id=?3 ORDER BY rowid",
+    )?;
+    let matches = statement
+        .query_map(params![task_id, agent_id, session_id], |row| {
+            row.get::<_, i64>(0)
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(matches)
 }
 
 fn inspected_metadata(
@@ -2743,6 +3243,39 @@ fn insert_history_audit(
     reason: &str,
     scope: &str,
 ) -> Result<()> {
+    insert_history_audit_with_activity(
+        target,
+        snapshot_digest,
+        source_row_id,
+        audit_kind,
+        owner_subject_id,
+        place_id,
+        None,
+        caller_identity,
+        content,
+        created_at,
+        metadata,
+        reason,
+        scope,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_history_audit_with_activity(
+    target: &Transaction<'_>,
+    snapshot_digest: [u8; 32],
+    source_row_id: i64,
+    audit_kind: &str,
+    owner_subject_id: i64,
+    place_id: i64,
+    activity_id: Option<i64>,
+    caller_identity: &str,
+    content: &[u8],
+    created_at: i64,
+    metadata: Option<&[u8]>,
+    reason: &str,
+    scope: &str,
+) -> Result<()> {
     let provenance = serde_json::to_vec(&serde_json::json!({
         "source_db_digest": source::hex(&snapshot_digest),
         "source_row_id": source_row_id,
@@ -2752,13 +3285,14 @@ fn insert_history_audit(
            source_db_digest,source_row_id,audit_kind,owner_subject_id,place_id,activity_id,
            caller_discord_id,caller_identity,content,created_at,metadata,new_value,old_value,
            provenance,reason,scope,source_channel_id
-         ) VALUES(?1,?2,?3,?4,?5,NULL,NULL,?6,?7,?8,?9,NULL,NULL,?10,?11,?12,NULL)",
+         ) VALUES(?1,?2,?3,?4,?5,?6,NULL,?7,?8,?9,?10,NULL,NULL,?11,?12,?13,NULL)",
         params![
             snapshot_digest.as_slice(),
             source_row_id,
             audit_kind,
             owner_subject_id,
             place_id,
+            activity_id,
             caller_identity,
             content,
             created_at,
@@ -2932,6 +3466,12 @@ pub fn convert(
     instance_assembler: &dyn MigrationInstanceAssembler,
 ) -> Result<ConvertOutcome> {
     let source_database_digest = digest_file(&options.source)?;
+    let effective_config_snapshot = load_effective_config(
+        source_database_digest,
+        &options.config,
+        &options.environment,
+    )?;
+    let snapshot_digest = effective_config_snapshot.digest;
     let source = Connection::open_with_flags(
         &options.source,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
@@ -2989,11 +3529,14 @@ pub fn convert(
     let transaction = target.transaction()?;
     create_phase1_schema(&transaction)?;
     let mut raw = RawCollector::new(&transaction);
-    let mut report = ConversionReport::default();
-    let provenance = MigrationProvenance::new(source_database_digest);
+    let mut report = ConversionReport {
+        input_snapshot_digest: source::hex(&snapshot_digest),
+        ..ConversionReport::default()
+    };
+    let provenance = MigrationProvenance::new(snapshot_digest);
     let captured_at = source_captured_at(&options.source)?;
 
-    let effective_config = load_effective_config(&options.source)?;
+    let effective_config = effective_config_snapshot.config;
     let agent_subjects = assemble_agents(
         &source,
         &transaction,
@@ -3008,7 +3551,7 @@ pub fn convert(
     assemble_gate_configs(
         &source,
         &transaction,
-        source_database_digest,
+        snapshot_digest,
         captured_at,
         &effective_config,
         &agent_subjects,
@@ -3030,7 +3573,7 @@ pub fn convert(
     assemble_discord_channel_policies(
         &source,
         &transaction,
-        source_database_digest,
+        snapshot_digest,
         captured_at,
         &agent_subjects,
         &provenance,
@@ -3070,7 +3613,7 @@ pub fn convert(
     assemble_history_and_events(
         &source,
         &transaction,
-        source_database_digest,
+        snapshot_digest,
         captured_at,
         &agent_subjects,
         &migration_instances,
@@ -3141,6 +3684,7 @@ fn assemble_agents(
     let mut runtime_rows = 0_u64;
     let mut provenance_rows = 0_u64;
     agents.for_each_row(source, "agent_id COLLATE BINARY,rowid", |row| {
+        let mut row_accounting = accounting.start_streamed_row(agents, row);
         let parsed = parse_agent_aggregate(agents, row, model_pricing, config);
         let parsed = match parsed {
             Ok(parsed) => {
@@ -3157,13 +3701,15 @@ fn assemble_agents(
                         row,
                         "create-subject-public-id-v1:duplicate_public_id",
                     )?;
-                    accounting.raw_streamed();
+                    row_accounting.raw();
+                    accounting.finish_streamed_row(row_accounting)?;
                     return Ok(());
                 }
             }
             Err(reason) => {
                 raw.add(agents, row, reason)?;
-                accounting.raw_streamed();
+                row_accounting.raw();
+                accounting.finish_streamed_row(row_accounting)?;
                 return Ok(());
             }
         };
@@ -3236,7 +3782,8 @@ fn assemble_agents(
         profile_rows += 1;
         runtime_rows += 1;
         subjects.insert(parsed.agent_id, subject_id);
-        accounting.canonical_streamed();
+        row_accounting.canonical();
+        accounting.finish_streamed_row(row_accounting)?;
         Ok(())
     })?;
     accounting.physical_rows = BTreeMap::from([
