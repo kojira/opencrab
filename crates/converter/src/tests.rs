@@ -1,6 +1,90 @@
 use super::*;
 
 #[test]
+fn environment_snapshot_allows_dollar_only_in_comment() {
+    let temporary = tempfile::tempdir().unwrap();
+    let config = temporary.path().join("fixture.toml");
+    let environment = temporary.path().join("fixture.env");
+    std::fs::write(&config, "").unwrap();
+    std::fs::write(
+        &environment,
+        "  # rehearsal note: previous template used ${SYNTHETIC_TOKEN}\n\
+         SYNTHETIC_TOKEN=fixture-token\n\
+         \n\
+         # price was $0 in the source comment\n",
+    )
+    .unwrap();
+    load_effective_config([0; 32], 0, &config, &environment).unwrap();
+}
+
+#[test]
+fn environment_snapshot_rejects_dollar_brace_in_value() {
+    let temporary = tempfile::tempdir().unwrap();
+    let config = temporary.path().join("fixture.toml");
+    let environment = temporary.path().join("fixture.env");
+    std::fs::write(&config, "").unwrap();
+    std::fs::write(&environment, "SYNTHETIC_TOKEN=${SYNTHETIC_TOKEN}\n").unwrap();
+    match load_effective_config([0; 32], 0, &config, &environment) {
+        Err(ConverterError::SourceSchema(message)) => {
+            assert_eq!(
+                message,
+                "environment snapshot must contain resolved values, not variable references"
+            );
+        }
+        Err(error) => panic!("unexpected error: {error}"),
+        Ok(_) => panic!("expected a ${{VAR}} reference in a value to fail loud"),
+    }
+}
+
+#[test]
+fn environment_snapshot_rejects_bare_dollar_in_value() {
+    let temporary = tempfile::tempdir().unwrap();
+    let config = temporary.path().join("fixture.toml");
+    let environment = temporary.path().join("fixture.env");
+    std::fs::write(&config, "").unwrap();
+    std::fs::write(&environment, "SYNTHETIC_NOTE=cost is $0\n").unwrap();
+    match load_effective_config([0; 32], 0, &config, &environment) {
+        Err(ConverterError::SourceSchema(message)) => {
+            assert_eq!(
+                message,
+                "environment snapshot must contain resolved values, not variable references"
+            );
+        }
+        Err(error) => panic!("unexpected error: {error}"),
+        Ok(_) => panic!("expected a bare $ in a value to fail loud"),
+    }
+}
+
+#[test]
+fn environment_snapshot_rejects_dollar_on_quoted_multiline_continuation() {
+    let temporary = tempfile::tempdir().unwrap();
+    let config = temporary.path().join("fixture.toml");
+    let environment = temporary.path().join("fixture.env");
+    std::fs::write(&config, "").unwrap();
+    std::fs::write(&environment, "SYNTHETIC_TOKEN=\"a\n$SECRET\"\n").unwrap();
+    match load_effective_config([0; 32], 0, &config, &environment) {
+        Err(ConverterError::SourceSchema(message)) => {
+            assert_eq!(
+                message,
+                "environment snapshot must contain resolved values, not variable references"
+            );
+        }
+        Err(error) => panic!("unexpected error: {error}"),
+        Ok(_) => panic!("expected $ on a quoted multiline continuation to fail loud"),
+    }
+}
+
+#[test]
+fn environment_snapshot_allows_quoted_multiline_value_without_dollar() {
+    let temporary = tempfile::tempdir().unwrap();
+    let config = temporary.path().join("fixture.toml");
+    let environment = temporary.path().join("fixture.env");
+    std::fs::write(&config, "").unwrap();
+    std::fs::write(&environment, "SYNTHETIC_NOTE=\"a\nresolved-value\"\n").unwrap();
+    load_effective_config([0; 32], 0, &config, &environment).unwrap();
+}
+
+#[test]
 fn inspected_json_rejects_duplicate_keys_at_every_depth() {
     assert!(parse_json_without_duplicate_keys(br#"{"outer":{"key":1,"key":2}}"#).is_err());
     assert!(parse_json_without_duplicate_keys(br#"{"key":1,"key":2}"#).is_err());

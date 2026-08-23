@@ -13,3 +13,9 @@ Operator path for a non-empty legacy database:
 App startup (`ensure_migrated`) is a no-op when the marker is present. A non-empty legacy
 database without the marker fails loud and does not serve. A fresh database (legacy tables
 empty or absent) runs `migrate_in_place` in place.
+
+The environment snapshot must contain resolved assignment values. A `$` on a non-comment,
+non-blank line fails loud when `migrate_in_place` loads that snapshot (the CLI already
+has the database connection open). Comment lines (optional leading whitespace then `#`)
+and blank lines are not inspected. Every other line is scanned in full if it has no `=`,
+or after the first `=` if it has one.
