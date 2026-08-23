@@ -262,6 +262,72 @@ async fn positional_content_binds_to_single_required_string() {
     );
 }
 
+// #748: 平文ツールの結果は別 turn の settled で戻る。最初の turn が元依頼を既読にしていても、
+// settled の発端参照から元依頼を復元し、結果と同じ context に載せる。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn settled_turn_includes_the_already_read_originating_request() {
+    let h = build();
+    let (place, _a) = place_with(
+        &h,
+        Standing::Trusted,
+        &[EffectKind::Say],
+        vec![],
+        vec![tool_one_string("gate-lookup", "query")],
+    );
+    h.host
+        .set_immediate("gate-lookup", "synthetic lookup result");
+    h.eng
+        .push(Step::say_done("gate-lookup::synthetic query\nNO_REPLY"));
+    h.eng.push(Step::say_done("synthetic final answer"));
+
+    h.sys
+        .deliver_event(
+            &GateName::new("web"),
+            inbound(
+                "room:main",
+                "synthetic-author",
+                "synthetic request needing lookup",
+                "synthetic-origin",
+            ),
+        )
+        .unwrap();
+    settle().await;
+
+    let latest = h.sys.store().latest_seq(place).unwrap();
+    let settled = h
+        .sys
+        .store()
+        .read_range(place, 0, latest)
+        .unwrap()
+        .into_iter()
+        .find(|event| event.kind == EventKind::Settled)
+        .expect("settled event");
+    assert_eq!(
+        settled.reply_to,
+        Some(1),
+        "settled points to its origin event"
+    );
+
+    let contexts = h.eng.contexts();
+    assert_eq!(contexts.len(), 2, "request turn and settled turn");
+    let follow_up = &contexts[1];
+    assert!(
+        follow_up.contains("=== 決着の発端 ===")
+            && follow_up.contains("synthetic request needing lookup"),
+        "already-read origin is restored: {follow_up}"
+    );
+    assert!(
+        follow_up.contains("（決着・発端 #1）") && follow_up.contains("synthetic lookup result"),
+        "settled result is associated with the origin: {follow_up}"
+    );
+    assert_eq!(
+        h.host.invoke_count("gate-lookup"),
+        1,
+        "tool is not re-executed"
+    );
+    assert_eq!(h.tx.says(), vec!["synthetic final answer"]);
+}
+
 // 2. 1 行 JSON: content が { で始まれば JSON として読み、required の存在と enum 会員を検証する。
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn one_line_json_is_parsed_and_validated() {

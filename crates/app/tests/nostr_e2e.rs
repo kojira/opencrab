@@ -145,6 +145,7 @@ enum Case {
     NoReply,
     PrefixedNoReply,
     ToolThenReply,
+    PlaintextToolSettledReply,
 }
 
 impl Case {
@@ -154,6 +155,7 @@ impl Case {
             Case::NoReply => "no_reply",
             Case::PrefixedNoReply => "prefixed_no_reply",
             Case::ToolThenReply => "tool_then_reply",
+            Case::PlaintextToolSettledReply => "plaintext_tool_settled_reply",
         }
     }
 
@@ -161,6 +163,9 @@ impl Case {
         match self {
             Case::Reply => Some("mock reply"),
             Case::ToolThenReply => Some("mock reply after tool result"),
+            Case::PlaintextToolSettledReply => {
+                Some("mock reply after settled plaintext tool result")
+            }
             Case::NoReply | Case::PrefixedNoReply => None,
         }
     }
@@ -263,6 +268,22 @@ async fn wait_for_turn(store: &Store, place: i64) -> TurnRecordRow {
             }
         }
         assert!(start.elapsed() < TIMEOUT, "turn record was not written");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn wait_for_turns(store: &Store, place: i64, count: usize) -> Vec<TurnRecordRow> {
+    let start = Instant::now();
+    loop {
+        if let Ok(records) = store.turn_records(place) {
+            if records.len() >= count {
+                return records;
+            }
+        }
+        assert!(
+            start.elapsed() < TIMEOUT,
+            "expected {count} turn records were not written"
+        );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
@@ -389,8 +410,28 @@ async fn run_case(case: Case) {
                 store.external_ref_of(place, seq).unwrap().is_some(),
                 "outbound Spoke has an external ref"
             );
-            assert_eq!(turn.end_reason, "done");
-            if matches!(case, Case::ToolThenReply) {
+            if matches!(case, Case::PlaintextToolSettledReply) {
+                let turns = wait_for_turns(&store, place, 2).await;
+                assert_eq!(turns[0].end_reason, "no_reply");
+                assert_eq!(turns[0].iterations, 1);
+                assert_eq!(turns[0].tool_lines.as_deref(), Some("nostr-whoami::{}"));
+                assert_eq!(turns[1].end_reason, "done");
+                assert_eq!(turns[1].iterations, 1);
+
+                let latest = store.latest_seq(place).unwrap();
+                let settled = store
+                    .read_range(place, 0, latest)
+                    .unwrap()
+                    .into_iter()
+                    .find(|event| event.kind == EventKind::Settled)
+                    .expect("plaintext tool writes a settled event");
+                assert_eq!(
+                    settled.reply_to,
+                    Some(1),
+                    "settled event retains the originating synthetic mention"
+                );
+            } else if matches!(case, Case::ToolThenReply) {
+                assert_eq!(turn.end_reason, "done");
                 assert_eq!(turn.iterations, 2, "tool result causes a second inference");
                 assert_eq!(
                     store.context_records(turn.id).unwrap().len(),
@@ -398,6 +439,7 @@ async fn run_case(case: Case) {
                     "both inference iterations are observed"
                 );
             } else {
+                assert_eq!(turn.end_reason, "done");
                 assert_eq!(turn.iterations, 1);
             }
         }
@@ -457,4 +499,9 @@ async fn prefixed_no_reply_posts_nothing() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tool_result_drives_second_inference_and_reply() {
     run_case(Case::ToolThenReply).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plaintext_tool_settled_turn_receives_origin_and_replies() {
+    run_case(Case::PlaintextToolSettledReply).await;
 }

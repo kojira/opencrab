@@ -44,6 +44,7 @@ enum MockScript {
     NoReply,
     PrefixedNoReply,
     ToolThenReply,
+    PlaintextToolSettledReply,
 }
 
 pub const MOCK_MODEL: &str = "mock";
@@ -72,6 +73,7 @@ impl MockEngine {
             "no_reply" => MockScript::NoReply,
             "prefixed_no_reply" => MockScript::PrefixedNoReply,
             "tool_then_reply" => MockScript::ToolThenReply,
+            "plaintext_tool_settled_reply" => MockScript::PlaintextToolSettledReply,
             other => return Err(format!("unknown OPENCRAB_MOCK_LLM_SCRIPT: {other}")),
         };
         Ok(Self { script })
@@ -80,6 +82,10 @@ impl MockEngine {
 
 #[async_trait::async_trait]
 impl Engine for MockEngine {
+    fn emits_tool_calls(&self) -> bool {
+        !matches!(self.script, MockScript::PlaintextToolSettledReply)
+    }
+
     fn model(&self) -> &str {
         MOCK_MODEL
     }
@@ -122,6 +128,27 @@ impl Engine for MockEngine {
                     )),
                     Some((_, false)) => Ok(say("mock reply after tool result")),
                 }
+            }
+            MockScript::PlaintextToolSettledReply => {
+                let settled = ctx.rendered.contains("（決着");
+                if !settled {
+                    return Ok(say("nostr-whoami::{}\nNO_REPLY"));
+                }
+                if !ctx
+                    .rendered
+                    .contains("synthetic mention for plaintext_tool_settled_reply")
+                {
+                    return Err(EngineError(
+                        "mock plaintext settled turn did not receive the originating request"
+                            .to_string(),
+                    ));
+                }
+                if !ctx.rendered.contains("npub1") {
+                    return Err(EngineError(
+                        "mock plaintext settled turn did not receive the tool result".to_string(),
+                    ));
+                }
+                Ok(say("mock reply after settled plaintext tool result"))
             }
         }
     }
@@ -1478,6 +1505,23 @@ mod tests {
         let second = engine.infer(&with_result, &chunks).await.unwrap();
         assert!(second.done);
         assert_eq!(only_say(&second), "mock reply after tool result");
+
+        let plaintext = MockEngine {
+            script: MockScript::PlaintextToolSettledReply,
+        };
+        assert!(!plaintext.emits_tool_calls());
+        let first = plaintext.infer(&ctx, &chunks).await.unwrap();
+        assert_eq!(only_say(&first), "nostr-whoami::{}\nNO_REPLY");
+        let settled_ctx = Context {
+            rendered: "=== 決着の発端 ===\nsynthetic mention for plaintext_tool_settled_reply\n[2] （決着・発端 #1）npub1synthetic"
+                .to_string(),
+            ..Context::default()
+        };
+        let second = plaintext.infer(&settled_ctx, &chunks).await.unwrap();
+        assert_eq!(
+            only_say(&second),
+            "mock reply after settled plaintext tool result"
+        );
     }
 
     fn only_error(deltas: Vec<Delta>) -> String {
