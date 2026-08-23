@@ -103,10 +103,12 @@ fn iso_from_nanos(ts: i64) -> String {
 struct AgentSummary {
     id: String,
     name: String,
-    persona_name: String,
+    // oc2 に persona_name（人格テンプレート名）の概念が無いので null（name で埋めない・偽装しない）。
+    persona_name: Option<String>,
     image_url: Option<String>,
     status: String,
-    skill_count: i32,
+    // oc2 に skills が無いので「0 件」ではなく「測れない」= null（#766 の usage 0 埋め廃止と同原則）。
+    skill_count: Option<i32>,
     session_count: i32,
 }
 
@@ -117,7 +119,8 @@ struct AgentDetail {
     job_title: Option<String>,
     organization: Option<String>,
     image_url: Option<String>,
-    persona_name: String,
+    // oc2 に persona_name の概念が無いので null。
+    persona_name: Option<String>,
     personality: Option<String>,
     instructions: String,
     model: Option<String>,
@@ -129,14 +132,16 @@ struct AgentDetail {
 #[derive(Serialize)]
 struct SessionRow {
     id: String,
-    mode: String,
+    // oc2 の place に mode（旧セッションの議論形式）の概念が無いので null。
+    mode: Option<String>,
     theme: String,
     phase: String,
     turn_number: i64,
     status: String,
     participant_ids_json: String,
     facilitator_id: Option<String>,
-    done_count: i64,
+    // oc2 に done_count の概念が無いので null（フロント未使用）。
+    done_count: Option<i64>,
     max_turns: Option<i64>,
     metadata_json: Option<String>,
 }
@@ -158,7 +163,8 @@ struct SessionLogRow {
 struct CuratedMemoryDto {
     id: String,
     agent_id: String,
-    category: String,
+    // oc2 の memories にカテゴリの概念が無いので null（"memory" で埋めない・偽装しない）。
+    category: Option<String>,
     content: String,
 }
 
@@ -187,11 +193,11 @@ async fn list_agents(State(st): State<AdminState>) -> ApiResult<Json<Vec<AgentSu
         }
         out.push(AgentSummary {
             id: s.id.to_string(),
-            name: s.name.clone(),
-            persona_name: s.name,
+            name: s.name,
+            persona_name: None,
             image_url: None,
             status: "idle".to_string(),
-            skill_count: 0,
+            skill_count: None,
             session_count,
         });
     }
@@ -213,7 +219,7 @@ async fn get_agent(
         job_title: None,
         organization: None,
         image_url: None,
-        persona_name: s.name,
+        persona_name: None,
         personality: None,
         instructions: s.persona,
         model: Some(s.turn_runner),
@@ -236,18 +242,20 @@ fn place_to_session_row(st: &AdminState, place_id: i64) -> ApiResult<SessionRow>
     let turn_number = st.store.turn_records(p.id).map_err(store_err)?.len() as i64;
     Ok(SessionRow {
         id: p.id.to_string(),
-        mode: "conversation".to_string(),
+        mode: None,
         theme: p.address.clone().unwrap_or_default(),
         phase: String::new(),
         turn_number,
+        // フロント（Sessions.tsx フィルタ・Home.tsx 件数）は active/completed 語彙。
+        // 場の開閉（closed_at）を旧語彙へ写す: 開いている=active、閉じている=completed。
         status: if p.closed_at.is_some() {
-            "closed".to_string()
+            "completed".to_string()
         } else {
-            "open".to_string()
+            "active".to_string()
         },
         participant_ids_json: serde_json::to_string(&participant_ids).unwrap(),
         facilitator_id: None,
-        done_count: 0,
+        done_count: None,
         max_turns: None,
         metadata_json: Some(p.policy_json),
     })
@@ -321,7 +329,7 @@ async fn list_curated_memory(
         .map(|m| CuratedMemoryDto {
             id: m.id.to_string(),
             agent_id: sid.to_string(),
-            category: "memory".to_string(),
+            category: None,
             content: m.body,
         })
         .collect();
@@ -333,11 +341,54 @@ async fn list_curated_memory(
 //      ハンドラを移植。opencrab-db の queries をそのまま呼び、旧 JSON 形で返す。統合 DB へ
 //      未移行のテーブルは db_read が 501 で明示する（現在の oc2 DB には旧テーブルが無い）。 ----
 
+/// path の {id}（＝/api/agents が返す subject の内部 int id）を、旧テーブルのキーである
+/// **旧 agent_id（UUID/スラッグ）へ実際に結合して解決する**。ID 空間が違うまま旧表を引くと、
+/// マイグレーション後に「データがあるのに空配列」＝偽の空になるため（レビュー blocker 1）。
+///
+/// §2.11 で本体 DB の旧 `agents` 表が正本なので、それを読み subject の表示名で突き合わせる
+/// （converter は agents.name を subject の表示名へ写すので name が結合キー）。旧 `agents` 表が
+/// まだ無い（未移行）・subject が無い・対応する旧 agent が無い場合は `None` を返し、呼び手が 501
+/// で明示する（偽の空を返さない）。統合スキーマに subjects.public_id（旧 UUID）が入ったら、
+/// name 結合を public_id 結合へ差し替える（issue-later）。
+fn resolve_legacy_agent_id(st: &AdminState, subject_id: i64) -> ApiResult<Option<String>> {
+    let Some(subject) = st.store.get_subject(subject_id).map_err(store_err)? else {
+        return Ok(None);
+    };
+    let conn = st.db.lock().map_err(db_lock_err)?;
+    let found: rusqlite::Result<String> = conn.query_row(
+        "SELECT agent_id FROM agents WHERE name = ?1 LIMIT 1",
+        rusqlite::params![subject.name],
+        |r| r.get(0),
+    );
+    match found {
+        Ok(id) => Ok(Some(id)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        // 旧 `agents` 表が未移行（no such table）も「解決不能」として None（呼び手が 501）。
+        Err(e) if e.to_string().contains("no such table") => Ok(None),
+        Err(e) => Err(store_err(e)),
+    }
+}
+
+/// subject→旧 agent_id を解決できないときの明示 501（偽の空配列を返さない）。
+fn unresolved_agent() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(json!({
+            "error": "unimplemented",
+            "detail": "subject に対応する旧 agent_id を解決できません（本体 DB の agents 表が未移行、または対応行なし）。統合 DB のマイグレーション後に解決されます。",
+        })),
+    )
+}
+
 /// GET /api/agents/{id}/allowed-commands — 許可コマンドの一覧（DB 行のみ・#300）。
 async fn list_allowed_commands(
     State(st): State<AdminState>,
-    Path(agent_id): Path<String>,
+    Path(id): Path<String>,
 ) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    let sid: i64 = id.parse().map_err(|_| bad_id())?;
+    let Some(agent_id) = resolve_legacy_agent_id(&st, sid)? else {
+        return Err(unresolved_agent());
+    };
     let conn = st.db.lock().map_err(db_lock_err)?;
     let commands = db_read(queries::list_agent_allowed_commands(&conn, &agent_id))?;
     Ok(Json(
@@ -365,8 +416,12 @@ struct TrustedUserDto {
 /// GET /api/agents/{id}/trusted-users — 信頼済みユーザー一覧（全経路・認可には使わない）。
 async fn list_trusted_users(
     State(st): State<AdminState>,
-    Path(agent_id): Path<String>,
+    Path(id): Path<String>,
 ) -> ApiResult<Json<Vec<TrustedUserDto>>> {
+    let sid: i64 = id.parse().map_err(|_| bad_id())?;
+    let Some(agent_id) = resolve_legacy_agent_id(&st, sid)? else {
+        return Err(unresolved_agent());
+    };
     let conn = st.db.lock().map_err(db_lock_err)?;
     let rows = db_read(queries::list_trusted_users(&conn, &agent_id))?;
     let dtos = rows
@@ -459,8 +514,12 @@ impl ScheduleDto {
 /// GET /api/agents/{id}/schedules — 定時実行スケジュール一覧（旧 {agent_id,schedules,count} 封筒）。
 async fn list_schedules(
     State(st): State<AdminState>,
-    Path(agent_id): Path<String>,
+    Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let sid: i64 = id.parse().map_err(|_| bad_id())?;
+    let Some(agent_id) = resolve_legacy_agent_id(&st, sid)? else {
+        return Err(unresolved_agent());
+    };
     let conn = st.db.lock().map_err(db_lock_err)?;
     let rows = db_read(queries::list_agent_schedules(&conn, &agent_id))?;
     let schedules: Vec<ScheduleDto> = rows.into_iter().map(ScheduleDto::from_row).collect();
