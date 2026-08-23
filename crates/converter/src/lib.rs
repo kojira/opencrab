@@ -384,11 +384,17 @@ fn environment_assignment_values_contain_dollar(environment_raw: &[u8]) -> bool 
         if trimmed.is_empty() || trimmed[0] == b'#' {
             continue;
         }
-        let Some(eq) = trimmed.iter().position(|&b| b == b'=') else {
-            continue;
-        };
-        if trimmed[eq + 1..].contains(&b'$') {
-            return true;
+        match trimmed.iter().position(|&b| b == b'=') {
+            Some(eq) => {
+                if trimmed[eq + 1..].contains(&b'$') {
+                    return true;
+                }
+            }
+            None => {
+                if trimmed.contains(&b'$') {
+                    return true;
+                }
+            }
         }
     }
     false
