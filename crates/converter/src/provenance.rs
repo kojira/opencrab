@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use url::Url;
 
 pub(crate) struct MigrationProvenance {
     source_database_digest: [u8; 32],
@@ -94,6 +95,24 @@ pub(crate) fn reject_nonempty_sqlite_sidecars(path: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+pub(crate) fn immutable_sqlite_uri(path: &Path) -> Result<String> {
+    let absolute = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut uri = Url::from_file_path(&absolute).map_err(|()| {
+        ConverterError::SourceSnapshot(format!(
+            "source database path cannot be represented as a file URI: {}",
+            path.display()
+        ))
+    })?;
+    uri.query_pairs_mut()
+        .append_pair("mode", "ro")
+        .append_pair("immutable", "1");
+    Ok(uri.into())
 }
 
 fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {

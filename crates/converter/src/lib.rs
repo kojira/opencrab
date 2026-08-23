@@ -9,8 +9,8 @@ pub use report::{ClassAccounting, ConversionReport};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use provenance::{
-    composite_key, digest_file, integer_key, reject_nonempty_sqlite_sidecars, text,
-    MigrationProvenance,
+    composite_key, digest_file, immutable_sqlite_uri, integer_key, reject_nonempty_sqlite_sidecars,
+    text, MigrationProvenance,
 };
 use report::ContributionKey;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
@@ -115,6 +115,16 @@ struct MigrationInstanceSet(Vec<MigrationInstance>);
 /// authority set: after this phase completes, `convert` reads the authoritative set back from
 /// `gate_instances` before assembling principals.
 pub trait MigrationInstanceAssembler {
+    /// Called after the immutable source connection is open and the final sidecar check succeeds,
+    /// immediately before the first SQLite read.
+    ///
+    /// Coordinators may use this notification to release resources that keep an immutable staged
+    /// snapshot stable during preflight. Filesystem changes after this point cannot join the
+    /// already-open immutable SQLite snapshot.
+    fn source_snapshot_verified(&self) -> Result<()> {
+        Ok(())
+    }
+
     fn assemble(&self, source: &Connection, target: &MigrationInstanceTarget<'_, '_>)
         -> Result<()>;
 }
@@ -3482,13 +3492,15 @@ pub fn convert(
         &options.environment,
     )?;
     let snapshot_digest = effective_config_snapshot.digest;
+    let source_uri = immutable_sqlite_uri(&options.source)?;
     let source = Connection::open_with_flags(
-        &options.source,
+        source_uri,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
     )?;
     // Check again at the read boundary so a sidecar introduced while the explicit config snapshot
     // was being loaded cannot silently change the SQLite snapshot after the main-file digest.
     reject_nonempty_sqlite_sidecars(&options.source)?;
+    instance_assembler.source_snapshot_verified()?;
     source.execute_batch("BEGIN")?;
     let agents = SourceTable::load_schema(&source, "agents")?;
     let model_pricing = SourceTable::load(&source, "model_pricing")?;

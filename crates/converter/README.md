@@ -19,5 +19,6 @@ Prepare a source snapshot as follows:
    and their explicit UTC-nanosecond capture time in `--captured-at`.
 
 The converter fails loudly before reading source rows when any non-empty `-wal`, `-shm`, or
-`-journal` sibling is present. It does not merge sidecar bytes into the digest and does not run
-checkpoint or journal recovery on the operator's behalf.
+`-journal` sibling is present. It URI-encodes the source path and opens it as
+`file:...?mode=ro&immutable=1` with SQLite URI handling enabled. It does not merge sidecar bytes
+into the digest and does not run checkpoint or journal recovery on the operator's behalf.

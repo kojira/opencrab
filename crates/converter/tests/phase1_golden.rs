@@ -197,6 +197,28 @@ impl MigrationInstanceAssembler for FixtureInstanceAssembly {
     }
 }
 
+struct WalAfterSnapshotCheckAssembly {
+    source: std::path::PathBuf,
+    wal: Vec<u8>,
+    shm: Vec<u8>,
+}
+
+impl MigrationInstanceAssembler for WalAfterSnapshotCheckAssembly {
+    fn source_snapshot_verified(&self) -> opencrab_converter::Result<()> {
+        std::fs::write(sqlite_sidecar_path(&self.source, "-wal"), &self.wal)?;
+        std::fs::write(sqlite_sidecar_path(&self.source, "-shm"), &self.shm)?;
+        Ok(())
+    }
+
+    fn assemble(
+        &self,
+        source: &Connection,
+        target: &MigrationInstanceTarget<'_, '_>,
+    ) -> opencrab_converter::Result<()> {
+        FixtureInstanceAssembly.assemble(source, target)
+    }
+}
+
 fn run_public_convert(source: &std::path::Path, target: &std::path::Path) -> (String, Vec<u8>) {
     let config = source.parent().unwrap().join("snapshot-config.toml");
     let environment = source.parent().unwrap().join("snapshot.env");
@@ -747,6 +769,109 @@ fn public_cli_rejects_hot_journal_and_accepts_checkpointed_single_file_byte_stab
         std::fs::read(target_b).unwrap(),
         "checkpointed single-file snapshots must retain byte-stable conversion"
     );
+}
+
+#[test]
+fn public_convert_immutable_uri_ignores_wal_created_after_final_sidecar_check() {
+    let temporary = tempfile::tempdir().unwrap();
+    let staged = temporary.path().join("source #%?.db");
+    let wal_builder = temporary.path().join("wal-builder.db");
+    Connection::open(&wal_builder)
+        .unwrap()
+        .execute_batch(include_str!("fixtures/phase1-dirty.sql"))
+        .unwrap();
+    let checkpoint_connection = Connection::open(&wal_builder).unwrap();
+    assert_eq!(
+        checkpoint_connection
+            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get::<_, String>(0))
+            .unwrap(),
+        "wal"
+    );
+    checkpoint_connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    drop(checkpoint_connection);
+    std::fs::copy(&wal_builder, &staged).unwrap();
+
+    let writer = Connection::open(&wal_builder).unwrap();
+    writer.execute_batch("PRAGMA wal_autocheckpoint=0").unwrap();
+    writer
+        .execute(
+            "UPDATE agents SET name='Synthetic WAL Only' WHERE agent_id='agent_alpha'",
+            [],
+        )
+        .unwrap();
+    let wal = std::fs::read(sqlite_sidecar_path(&wal_builder, "-wal")).unwrap();
+    let shm = std::fs::read(sqlite_sidecar_path(&wal_builder, "-shm")).unwrap();
+    assert!(!wal.is_empty());
+    assert!(!shm.is_empty());
+    let staged_main = std::fs::read(&staged).unwrap();
+
+    let config = temporary.path().join("snapshot-config.toml");
+    let environment = temporary.path().join("snapshot.env");
+    std::fs::write(&config, "").unwrap();
+    std::fs::write(&environment, "").unwrap();
+    let target = temporary.path().join("target.db");
+    convert(
+        ConvertOptions {
+            source: staged.clone(),
+            target: target.clone(),
+            config,
+            environment,
+            captured_at: FIXTURE_CAPTURED_AT,
+        },
+        &WalAfterSnapshotCheckAssembly {
+            source: staged.clone(),
+            wal,
+            shm,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        std::fs::read(&staged).unwrap(),
+        staged_main,
+        "the bytes covered by the source digest must remain unchanged"
+    );
+    for suffix in ["-wal", "-shm"] {
+        assert!(
+            std::fs::metadata(sqlite_sidecar_path(&staged, suffix))
+                .unwrap()
+                .len()
+                > 0,
+            "the WAL snapshot must be introduced only after the final sidecar check"
+        );
+    }
+    let target = Connection::open(target).unwrap();
+    assert_eq!(
+        target
+            .query_row(
+                "SELECT display_name FROM subjects WHERE public_id='agent_alpha'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "Synthetic Agent",
+        "immutable=1 must keep digest-external WAL bytes out of converted rows"
+    );
+
+    let ordinary_read_only = Connection::open_with_flags(
+        &staged,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .unwrap();
+    assert_eq!(
+        ordinary_read_only
+            .query_row(
+                "SELECT name FROM agents WHERE agent_id='agent_alpha'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "Synthetic WAL Only",
+        "the injected WAL must be valid and observable without immutable=1"
+    );
+    drop(writer);
 }
 
 fn run_cli_conversion(
