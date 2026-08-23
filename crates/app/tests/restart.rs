@@ -140,11 +140,18 @@ async fn leftover_running_activity_becomes_interruption_after_reopen() {
     let _ = std::fs::remove_file(&db);
 }
 
+#[derive(Clone, Copy)]
+enum LeftoverTurn {
+    Absent,
+    BeforeBackground,
+    AfterBackground,
+}
+
 // Owner 起点の running Background を実ファイルへ残し、reopen 後の Interrupted turn が
-// origin range・standing・activity・accepted tool call・中断結果を一対一で復元する。
-#[tokio::test(flavor = "current_thread")]
-async fn background_interruption_restores_full_provenance_after_real_file_reopen() {
-    let db = tmp_db("background-provenance");
+// origin range・standing・activity・accepted tool call・中断結果を一対一で復元する。同じ場の汎用
+// Turn 中断が無い場合と Background の前後にある場合を同じ assertion で固定する。
+async fn assert_background_interruption_recovery(tag: &str, leftover_turn: LeftoverTurn) {
+    let db = tmp_db(tag);
     let _ = std::fs::remove_file(&db);
 
     let (place, agent, activity) = {
@@ -178,6 +185,12 @@ async fn background_interruption_restores_full_provenance_after_real_file_reopen
                 1,
             )
             .expect("seed origin");
+        // Background は親 turn が入力を claim した後に切り離される。実際の crash state と同じく、
+        // origin は既読にしておき、reopen 後は recovery が作る中断だけを発火対象にする。
+        host.sys
+            .store()
+            .set_read_seq(place, agent, origin)
+            .expect("parent turn claimed origin before crash");
         let provenance = BackgroundProvenance {
             origin_from_exclusive: origin - 1,
             origin_to_inclusive: origin,
@@ -185,6 +198,12 @@ async fn background_interruption_restores_full_provenance_after_real_file_reopen
             tool_name: "synthetic-background-tool".into(),
             tool_args: serde_json::json!({"mode": "bounded"}),
         };
+        if matches!(leftover_turn, LeftoverTurn::BeforeBackground) {
+            host.sys
+                .store()
+                .start_activity(place, agent, ActivityKindTag::Turn, None, 10, 0, None)
+                .expect("seed running turn before background");
+        }
         let activity = host
             .sys
             .store()
@@ -199,6 +218,12 @@ async fn background_interruption_restores_full_provenance_after_real_file_reopen
                 Some(&provenance),
             )
             .expect("seed running background");
+        if matches!(leftover_turn, LeftoverTurn::AfterBackground) {
+            host.sys
+                .store()
+                .start_activity(place, agent, ActivityKindTag::Turn, None, 10, 0, None)
+                .expect("seed running turn after background");
+        }
         (place, agent, activity)
     };
 
@@ -207,12 +232,24 @@ async fn background_interruption_restores_full_provenance_after_real_file_reopen
         .register_model_context_window("scripted", 200_000)
         .expect("register scripted model");
     let engine = ScriptedEngine::new();
-    engine.push(Step::no_reply());
+    let expected_turns = match leftover_turn {
+        LeftoverTurn::Absent => 1,
+        LeftoverTurn::BeforeBackground | LeftoverTurn::AfterBackground => 2,
+    };
+    for _ in 0..expected_turns {
+        engine.push(Step::no_reply());
+    }
     let host = Host::boot_with_engine(store, Arc::new(engine.clone()));
     assert!(
-        wait_until(Duration::from_secs(5), || engine.call_count() == 1).await,
-        "Interrupted result starts exactly one follow-up turn"
+        wait_until(Duration::from_secs(5), || {
+            engine.contexts().len() == expected_turns
+                && host.sys.store().running_activities().unwrap().is_empty()
+        })
+        .await,
+        "{tag}: each interrupted activity starts its own follow-up turn; contexts={:?}",
+        engine.contexts()
     );
+    assert_eq!(engine.call_count() as usize, expected_turns);
 
     let activity_row = host
         .sys
@@ -222,21 +259,32 @@ async fn background_interruption_restores_full_provenance_after_real_file_reopen
         .expect("activity survives reopen");
     assert_eq!(activity_row.end_reason.as_deref(), Some("interrupted"));
     let latest = host.sys.store().latest_seq(place).unwrap();
-    let interrupted = host
+    let interrupted: Vec<_> = host
         .sys
         .store()
         .read_range(place, 0, latest)
         .unwrap()
         .into_iter()
-        .find(|event| event.kind == EventKind::Interrupted)
-        .expect("background interruption event");
+        .filter(|event| event.kind == EventKind::Interrupted)
+        .collect();
+    assert_eq!(interrupted.len(), expected_turns);
+    let with_provenance: Vec<_> = interrupted
+        .iter()
+        .filter_map(|event| {
+            host.sys
+                .store()
+                .settled_provenance(place, event.seq)
+                .unwrap()
+                .map(|provenance| (event, provenance))
+        })
+        .collect();
+    assert_eq!(
+        with_provenance.len(),
+        1,
+        "generic Turn interruption must neither absorb nor copy Background provenance"
+    );
+    let (interrupted, restored) = &with_provenance[0];
     assert_eq!(interrupted.for_subject, Some(agent));
-    let restored = host
-        .sys
-        .store()
-        .settled_provenance(place, interrupted.seq)
-        .unwrap()
-        .expect("Interrupted is linked to persisted provenance");
     assert_eq!(restored.activity, activity);
     assert_eq!(restored.origin_from_exclusive, 0);
     assert_eq!(restored.origin_to_inclusive, 1);
@@ -245,8 +293,17 @@ async fn background_interruption_restores_full_provenance_after_real_file_reopen
     assert_eq!(restored.tool_args, serde_json::json!({"mode": "bounded"}));
 
     let contexts = engine.contexts();
-    assert_eq!(contexts.len(), 1, "one interruption maps to one turn");
-    let context = &contexts[0];
+    let background_contexts: Vec<_> = contexts
+        .iter()
+        .enumerate()
+        .filter(|(_, context)| context.contains("受理ツール: synthetic-background-tool"))
+        .collect();
+    assert_eq!(
+        background_contexts.len(),
+        1,
+        "{tag}: one Background interruption maps to one provenance follow-up turn; contexts={contexts:#?}"
+    );
+    let (background_context_index, context) = background_contexts[0];
     assert!(
         context.contains("synthetic background request"),
         "{context}"
@@ -258,11 +315,23 @@ async fn background_interruption_restores_full_provenance_after_real_file_reopen
     );
     assert!(context.contains("再起動により中断した"), "{context}");
     assert!(
-        engine.tools_seen()[0]
+        engine.tools_seen()[background_context_index]
             .iter()
             .any(|name| name == "core-allow-command"),
         "Owner standing is restored for the follow-up tool boundary"
     );
 
     let _ = std::fs::remove_file(&db);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_interruption_restores_full_provenance_after_real_file_reopen() {
+    assert_background_interruption_recovery("background-only", LeftoverTurn::Absent).await;
+    assert_background_interruption_recovery(
+        "turn-before-background",
+        LeftoverTurn::BeforeBackground,
+    )
+    .await;
+    assert_background_interruption_recovery("turn-after-background", LeftoverTurn::AfterBackground)
+        .await;
 }

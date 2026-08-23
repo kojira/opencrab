@@ -1388,7 +1388,8 @@ impl System {
     ///
     /// 作者のいない通常出来事は standing の区切りにしない。provenance 付きの Background 結果
     /// （Settled / Interrupted）は origin range と standing を区切りに使う。provenance 導入前の旧
-    /// Settled だけは既存 `reply_to` を exact key とし、別 event から補完・推測しない。
+    /// Settled だけは既存 `reply_to` を exact key とし、別 event から補完・推測しない。Turn の
+    /// 汎用 Interrupted は単独区間にし、前後の Background 結果の provenance を吸収しない。
     fn first_standing_group(
         &self,
         subject: SubjectId,
@@ -1409,10 +1410,15 @@ impl System {
                         SettledOriginKey::Provenance(p.origin_from_exclusive, p.origin_to_inclusive)
                     }
                     (None, EventKind::Settled) => SettledOriginKey::Legacy(ev.reply_to),
-                    // Turn の汎用 Interrupted は provenance を持たず、standing の区切りにもならない。
+                    // Turn の汎用 Interrupted は provenance を持たない。前後の
+                    // Background 結果と同じ turn に入れると、汎用中断の Unknown
+                    // standing が永続 provenance を吸収する。どちらが先に追記されても
+                    // 混ざらないよう、汎用中断は常に 1 event の独立区間にする。
                     (None, EventKind::Interrupted) => {
-                        out.push(ev.clone());
-                        continue;
+                        if out.is_empty() {
+                            out.push(ev.clone());
+                        }
+                        break;
                     }
                     (None, _) => unreachable!("result kind was checked above"),
                 };
