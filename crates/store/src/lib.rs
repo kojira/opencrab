@@ -1260,6 +1260,25 @@ fn migrate(conn: &Connection) -> Result<()> {
 /// one known legacy memberships shape so its shared cursor keeps the value previously stored as
 /// `read_seq`. The replacement deliberately does not add the newer role/cursor CHECK constraints:
 /// migration preserves SQLite values accepted by the old table instead of strengthening them.
+const LEGACY_MEMBERSHIPS_CREATE_TABLE: &str = r#"CREATE TABLE IF NOT EXISTS memberships(
+  place_id INTEGER NOT NULL,
+  subject_id INTEGER NOT NULL,
+  role TEXT NOT NULL,
+  read_seq INTEGER NOT NULL,
+  joined_at INTEGER NOT NULL,
+  left_at INTEGER,
+  PRIMARY KEY(place_id, subject_id)
+);"#;
+
+/// SQLite removes `IF NOT EXISTS` and the trailing semicolon when it records a CREATE TABLE in
+/// sqlite_schema.sql. Ignore those two documented storage differences and insignificant layout,
+/// while retaining every other token from the exact statement emitted by the legacy Store.
+fn normalize_create_table_sql(sql: &str) -> String {
+    let sql = sql.trim().strip_suffix(';').unwrap_or(sql.trim());
+    let normalized = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    normalized.replacen("CREATE TABLE IF NOT EXISTS ", "CREATE TABLE ", 1)
+}
+
 fn migrate_memberships(conn: &Connection) -> Result<()> {
     if !table_exists(conn, "memberships")? {
         return Ok(());
@@ -1316,6 +1335,57 @@ fn migrate_memberships(conn: &Connection) -> Result<()> {
         return Ok(());
     }
     if columns == legacy_columns {
+        let table_sql: String = conn.query_row(
+            "SELECT sql FROM sqlite_schema
+             WHERE type='table' AND name='memberships' AND tbl_name='memberships'",
+            [],
+            |row| row.get(0),
+        )?;
+        let mut statement = conn.prepare(
+            "SELECT type,name,sql FROM sqlite_schema
+             WHERE tbl_name='memberships' AND name<>'memberships'
+             ORDER BY type,name",
+        )?;
+        let dependent_objects = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>>>()?;
+        drop(statement);
+
+        // The composite primary key creates this internal index. No explicit index, trigger, or
+        // other table-owned schema object was emitted by the legacy Store.
+        let expected_objects = vec![(
+            "index".to_string(),
+            "sqlite_autoindex_memberships_1".to_string(),
+            None,
+        )];
+        let mut schema_mismatches = Vec::new();
+        if normalize_create_table_sql(&table_sql)
+            != normalize_create_table_sql(LEGACY_MEMBERSHIPS_CREATE_TABLE)
+        {
+            schema_mismatches
+                .push("sqlite_schema.sql does not match the known legacy CREATE TABLE".to_string());
+        }
+        if dependent_objects != expected_objects {
+            schema_mismatches.push(format!(
+                "unexpected memberships-dependent sqlite_schema objects: {dependent_objects:?}"
+            ));
+        }
+        if !schema_mismatches.is_empty() {
+            return Err(rusqlite::Error::ToSqlConversionFailure(
+                format!(
+                    "unknown memberships schema: {}",
+                    schema_mismatches.join("; ")
+                )
+                .into(),
+            ));
+        }
+
         let left_memberships: i64 = conn.query_row(
             "SELECT COUNT(*) FROM memberships WHERE left_at IS NOT NULL",
             [],
@@ -4955,6 +5025,23 @@ mod tests {
         );
     }
 
+    fn memberships_schema_snapshot(
+        conn: &Connection,
+    ) -> Vec<(String, String, String, Option<String>)> {
+        conn.prepare(
+            "SELECT type,name,tbl_name,sql FROM sqlite_schema
+             WHERE name='memberships' OR tbl_name='memberships'
+             ORDER BY type,name",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>>>()
+        .unwrap()
+    }
+
     fn ev(text: &str) -> NewEvent {
         NewEvent {
             kind: EventKind::Said,
@@ -7005,6 +7092,111 @@ mod tests {
                 ),
             ],
             "failed migration must preserve every legacy value and generated result"
+        );
+        assert_memberships_startup_rolled_back(&conn);
+        drop(conn);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn migration_rejects_legacy_memberships_with_default_and_schema_objects_without_changes() {
+        let path = store_fixture_path("memberships-default-trigger-index");
+        let original_schema;
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE memberships(
+                   place_id INTEGER NOT NULL,
+                   subject_id INTEGER NOT NULL,
+                   role TEXT NOT NULL DEFAULT 'participant',
+                   read_seq INTEGER NOT NULL,
+                   joined_at INTEGER NOT NULL,
+                   left_at INTEGER,
+                   PRIMARY KEY(place_id, subject_id)
+                 );
+                 CREATE TABLE membership_update_log(
+                   place_id INTEGER NOT NULL,
+                   subject_id INTEGER NOT NULL,
+                   previous_role TEXT NOT NULL
+                 );
+                 CREATE INDEX memberships_role_idx ON memberships(role);
+                 CREATE TRIGGER memberships_role_audit
+                 AFTER UPDATE OF role ON memberships
+                 BEGIN
+                   INSERT INTO membership_update_log(place_id,subject_id,previous_role)
+                   VALUES(old.place_id,old.subject_id,old.role);
+                 END;
+                 INSERT INTO memberships(place_id,subject_id,read_seq,joined_at,left_at)
+                 VALUES(11,21,37,101,NULL);
+                 INSERT INTO memberships(place_id,subject_id,role,read_seq,joined_at,left_at)
+                 VALUES(11,22,'observer',38,102,NULL);",
+            )
+            .unwrap();
+            original_schema = memberships_schema_snapshot(&conn);
+        }
+
+        let error = Store::open(&path)
+            .err()
+            .expect("legacy columns with a default and schema objects must fail migration");
+        let error = error.to_string();
+        assert!(
+            error.contains("sqlite_schema.sql does not match the known legacy CREATE TABLE"),
+            "default-bearing DDL mismatch was not reported: {error}"
+        );
+        assert!(
+            error.contains("unexpected memberships-dependent sqlite_schema objects"),
+            "dependent schema objects were not reported: {error}"
+        );
+        assert!(
+            error.contains("memberships_role_idx"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.contains("memberships_role_audit"),
+            "unexpected error: {error}"
+        );
+
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            memberships_schema_snapshot(&conn),
+            original_schema,
+            "failed startup must preserve table DDL, its PK index, explicit index, and trigger"
+        );
+        let rows = conn
+            .prepare(
+                "SELECT place_id,subject_id,role,read_seq,joined_at,left_at
+                 FROM memberships ORDER BY place_id,subject_id",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            [
+                (11, 21, "participant".into(), 37, 101, None),
+                (11, 22, "observer".into(), 38, 102, None),
+            ],
+            "failed migration must preserve every legacy row and the applied default value"
+        );
+        let logged_updates: i64 = conn
+            .query_row("SELECT COUNT(*) FROM membership_update_log", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            logged_updates, 0,
+            "failed startup must not fire or otherwise mutate the preserved trigger fixture"
         );
         assert_memberships_startup_rolled_back(&conn);
         drop(conn);
