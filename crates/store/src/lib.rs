@@ -941,7 +941,9 @@ const SCHEMA: &str = r#"
             CREATE INDEX IF NOT EXISTS idx_llm_logs_agent ON llm_logs(agent_id);
             CREATE INDEX IF NOT EXISTS idx_llm_logs_created ON llm_logs(agent_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_llm_logs_requested ON llm_logs(agent_id, requested_at DESC);
-            CREATE INDEX IF NOT EXISTS idx_llm_logs_turn ON llm_logs(turn_record_id, iteration);
+            -- idx_llm_logs_turn は oc2 連結列（turn_record_id/iteration）依存。本体由来の既存
+            -- テーブル（連結列が未 ALTER）で SCHEMA が先に走っても壊れないよう、migrate 側で
+            -- 連結列を足した後に作る（ここでは作らない）。
 
             CREATE TABLE IF NOT EXISTS schedule(
               place_id INTEGER NOT NULL,
@@ -1385,8 +1387,10 @@ fn migrate(conn: &Connection) -> Result<()> {
          )",
         [],
     )?;
-    // LLM ログ（#766・AGREED §2.11）。本体 opencrab の llm_logs をそのまま採り、oc2 連結列を末尾に足す。
-    // 既存 DB には無いので冪等に足す（新規 DB は SCHEMA 側で既に持つ）。定義は SCHEMA と一致させる。
+    // LLM ログ（#766・AGREED §2.11）。**DB は本体 opencrab を正とし、llm_logs は本番 in-place 移行後の
+    // 世界では既に存在する。** よって migrate は「無ければ本体定義で作る／あれば追加列（oc2 連結列）だけ
+    // ALTER で足す」。本体列の削除・改名はしない。
+    //   1) 本体定義で CREATE（既存＝本番の本体テーブルには no-op。真の新規にだけ作られる）。
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS llm_logs(
            id TEXT PRIMARY KEY,
@@ -1407,16 +1411,27 @@ fn migrate(conn: &Connection) -> Result<()> {
            is_bot_iteration INTEGER NOT NULL DEFAULT 0,
            cache_read_tokens INTEGER,
            cache_creation_tokens INTEGER,
-           created_at TEXT DEFAULT (datetime('now')),
-           turn_record_id INTEGER,
-           iteration INTEGER,
-           place_id INTEGER,
-           subject_id INTEGER
+           created_at TEXT DEFAULT (datetime('now'))
          );
          CREATE INDEX IF NOT EXISTS idx_llm_logs_agent ON llm_logs(agent_id);
          CREATE INDEX IF NOT EXISTS idx_llm_logs_created ON llm_logs(agent_id, created_at DESC);
-         CREATE INDEX IF NOT EXISTS idx_llm_logs_requested ON llm_logs(agent_id, requested_at DESC);
-         CREATE INDEX IF NOT EXISTS idx_llm_logs_turn ON llm_logs(turn_record_id, iteration);",
+         CREATE INDEX IF NOT EXISTS idx_llm_logs_requested ON llm_logs(agent_id, requested_at DESC);",
+    )?;
+    //   2) oc2 連結列は本体テーブルには無いので、無ければ ALTER で足す（本体由来の既存 DB でも INSERT が
+    //      列不一致で落ちないように）。SCHEMA の全列 CREATE で既にある新規 DB では skip される。
+    for (col, ty) in [
+        ("turn_record_id", "INTEGER"),
+        ("iteration", "INTEGER"),
+        ("place_id", "INTEGER"),
+        ("subject_id", "INTEGER"),
+    ] {
+        if !column_exists(conn, "llm_logs", col)? {
+            conn.execute(&format!("ALTER TABLE llm_logs ADD COLUMN {col} {ty}"), [])?;
+        }
+    }
+    //   3) 連結列に依存する index は、列を足した後に作る。
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_llm_logs_turn ON llm_logs(turn_record_id, iteration);",
     )?;
     let provenance_columns = [
         ("origin_from_exclusive", "INTEGER"),
@@ -6945,6 +6960,59 @@ mod tests {
         assert_eq!(stats[0].total_tokens, 40);
         assert_eq!(stats[0].prompt_tokens, 30);
         assert_eq!(stats[0].error_count, 0);
+    }
+
+    // 本番 in-place 移行の帰結（AGREED §2.11）: 本体 opencrab の llm_logs が**既に存在する** DB に対して
+    // migrate を当てると、本体列は保たれたまま oc2 連結列だけが ALTER で足され、全列 INSERT が通る。
+    // 今の CREATE TABLE IF NOT EXISTS だけだと既存テーブルに no-op → 連結列が無く INSERT が落ちる、を防ぐ。
+    #[test]
+    fn migrate_adds_oc2_columns_to_preexisting_body_llm_logs() {
+        let s = Store::new_in_memory().unwrap();
+        let c = s.c();
+        // 本番を模す: llm_logs を本体 opencrab の形（連結列なし）に置き換え、移行前データを 1 件置く。
+        c.execute_batch(
+            "DROP TABLE llm_logs;
+             CREATE TABLE llm_logs(
+               id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, session_id TEXT, model TEXT,
+               prompt TEXT NOT NULL DEFAULT '', response TEXT NOT NULL DEFAULT '', tool_calls TEXT,
+               latency_ms INTEGER, prompt_tokens INTEGER, completion_tokens INTEGER, total_tokens INTEGER,
+               error_code TEXT, error_body TEXT, requested_at TEXT, trigger_message_id TEXT,
+               is_bot_iteration INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER,
+               cache_creation_tokens INTEGER, created_at TEXT DEFAULT (datetime('now')));
+             CREATE INDEX idx_llm_logs_agent ON llm_logs(agent_id);
+             INSERT INTO llm_logs(id,agent_id,prompt,response) VALUES('legacy','7','{}','{}');",
+        )
+        .unwrap();
+        assert!(!column_exists(&c, "llm_logs", "turn_record_id").unwrap());
+
+        // migrate を当てる → 連結列が ALTER で足される（本体列・既存行は保たれる）。
+        migrate(&c).unwrap();
+        for col in ["turn_record_id", "iteration", "place_id", "subject_id"] {
+            assert!(
+                column_exists(&c, "llm_logs", col).unwrap(),
+                "{col} が ALTER で足される"
+            );
+        }
+        // 既存の本体行は残っている（移行前データを失わない）。
+        let n: i64 = c
+            .query_row("SELECT COUNT(*) FROM llm_logs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+
+        // 全 23 列 INSERT（連結列込み）が列不一致で落ちない。
+        c.execute(
+            "INSERT INTO llm_logs(id,agent_id,session_id,model,prompt,response,tool_calls,latency_ms,prompt_tokens,completion_tokens,total_tokens,error_code,error_body,requested_at,trigger_message_id,is_bot_iteration,cache_read_tokens,cache_creation_tokens,created_at,turn_record_id,iteration,place_id,subject_id)
+             VALUES('100-1','7','3','m','{}','{}',NULL,12,NULL,NULL,NULL,NULL,NULL,'2026-08-24T00:00:00Z','42',0,NULL,NULL,'2026-08-24T00:00:00Z',100,1,3,7)",
+            [],
+        )
+        .unwrap();
+
+        // 二度目の migrate は冪等（列は既にあり ALTER されない・turn index も IF NOT EXISTS）。
+        migrate(&c).unwrap();
+        let n: i64 = c
+            .query_row("SELECT COUNT(*) FROM llm_logs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2);
     }
 
     // 退避は主体で絞る（記憶と同じ主体分離）: 他人の退避を指す read_offload は None に落ちる。
