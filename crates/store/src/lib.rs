@@ -1528,6 +1528,25 @@ impl Store {
             .optional()
     }
 
+    /// The recorded direction for one gate-specific external reference.
+    ///
+    /// This is intentionally a separate query so existing callers of `external_ref_of` keep their
+    /// established tuple shape while process E2E can distinguish ingress from confirmed egress.
+    pub fn external_ref_direction(
+        &self,
+        place: PlaceId,
+        seq: Seq,
+        gate: &GateName,
+    ) -> Result<Option<String>> {
+        self.c()
+            .query_row(
+                "SELECT direction FROM external_refs WHERE place_id=?1 AND seq=?2 AND gate_name=?3",
+                params![place, seq, gate.as_str()],
+                |r| r.get(0),
+            )
+            .optional()
+    }
+
     /// その場に外界識別子つきの出来事が 1 つでもあるか（宛先にできる出来事の有無・詳細§08）。
     /// 「宛先にできる出来事だけを提示する」判定に使う。
     pub fn place_has_external_refs(&self, place: PlaceId) -> Result<bool> {
@@ -1952,6 +1971,11 @@ mod tests {
         // seq=1 に note1X を張る。
         s.append(p, &ev("A"), 1).unwrap();
         s.record_external_ref(p, 1, &g, "note1X", "in").unwrap();
+        assert_eq!(
+            s.external_ref_direction(p, 1, &g).unwrap().as_deref(),
+            Some("in"),
+            "direction is observable without changing external_ref_of's tuple"
+        );
         // 別の seq=2 に同じ note1X を張ろうとすると、表が弾く（黙って二重にならない）。
         s.append(p, &ev("B"), 2).unwrap();
         assert!(

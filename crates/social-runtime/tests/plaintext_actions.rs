@@ -753,6 +753,31 @@ async fn no_reply_with_action_delivers_only_the_action_and_withholds_prose() {
     );
 }
 
+// 13c. #747: sentinel の前後に地の文があっても fail-closed で全地の文を保留する。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn embedded_no_reply_sentinel_withholds_all_prose() {
+    let h = build();
+    let (place, _a) = place_with_gate(&h, &[EffectKind::Say], vec![]);
+    h.eng
+        .push(Step::say_done("内部の考えを先に書く NO_REPLY 末尾にも文章"));
+    h.sys
+        .deliver_event(
+            &GateName::new("web"),
+            inbound("room:main", "npubX", "ねえ", "note1"),
+        )
+        .unwrap();
+    settle().await;
+
+    assert!(h.tx.all().is_empty(), "sentinel を含む出力は公開しない");
+    let recs = h.sys.store().turn_records(place).unwrap();
+    assert_eq!(recs[0].end_reason, "no_reply");
+    assert_eq!(
+        recs[0].withheld_text.as_deref(),
+        Some("内部の考えを先に書く NO_REPLY 末尾にも文章"),
+        "握った本文は turn record に残す"
+    );
+}
+
 // 14. メニュー描画: 文脈に NO_REPLY が最初に無条件注入され、宣言されたアクションがテンプレートで
 //     列挙される（番号欄は Ui 以外が持つ）。内容枠の意味（絵文字等）は core が発明せず description に委ねる。
 #[tokio::test(flavor = "current_thread", start_paused = true)]

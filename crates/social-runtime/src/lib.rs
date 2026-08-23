@@ -30,8 +30,9 @@ pub const REASON_UNCOND: &str = "unconditional";
 pub const THROTTLE_HINT: &str =
     "\n\n[系: この相手は短時間に多くの資源を消費させている。返答は短く簡潔にすること。]";
 
-/// 平文アクション文法の唯一の core 共通語（設計）。trim 後に行全体がこれ（`NO_REPLY::` も同義）なら
-/// 「今回は発話しない」制御行——そのターンの残余 say を配送しない（外界にも場の共有ログにも出さない）。
+/// 平文アクション文法の唯一の core 共通語（設計）。出力のどこかにこの sentinel が含まれたら、
+/// そのターンの残余 say を配送しない（外界にも場の共有ログにも出さない）。前後の説明文も漏らさない
+/// fail-closed な制御語で、裸の `NO_REPLY::` も同義として受理する。
 pub const NO_REPLY: &str = "NO_REPLY";
 
 /// 平文アクション文法の 2 つ目の core 共通語（設計）。`PROGRESS::<文>` 行——「いま何をしているかを
@@ -79,7 +80,7 @@ struct Interpreted {
     tool_lines: Vec<String>,
     /// 残余 say の本文（地の文と、不成立 3 段の行を逐語で残したもの）。空なら None。
     remainder: Option<String>,
-    /// NO_REPLY 制御行を見た（残余 say を配送しない印）。明示アクション行は影響を受けず発火する。
+    /// NO_REPLY sentinel を見た（残余 say を配送しない印）。明示アクション行は影響を受けず発火する。
     no_reply: bool,
     /// PROGRESS 制御行（`PROGRESS::<文>`）で見た進捗文言を出現順に集めたもの（進捗の揮発表示）。
     /// say でもイベントでもないので remainder にも actions にも入れない——turn 側が activity progress
@@ -1958,6 +1959,9 @@ impl System {
                         }
                     }
                     if interp.no_reply {
+                        eprintln!(
+                            "opencrab-social-runtime: NO_REPLY sentinel detected; withholding public text (place={place}, subject={subject})"
+                        );
                         // 残余 say を配送しない（外界にも場の共有ログにも出さない）。保留した地の文は
                         // ターン記録の withheld_text へ残し、end_reason=no_reply を立てる（下の後始末で）。
                         no_reply_seen = true;
@@ -3069,7 +3073,9 @@ impl System {
         let mut tools: Vec<Authorized<ToolCallSpec>> = vec![];
         let mut tool_lines: Vec<String> = vec![];
         let mut remainder_lines: Vec<&str> = vec![];
-        let mut no_reply = false;
+        // Fail closed: providers sometimes put reasoning before or after the control sentinel.
+        // Bare-line detection leaked that prose (and the sentinel) as a public Say (#747).
+        let mut no_reply = text.contains(NO_REPLY);
         let mut progress_labels: Vec<String> = vec![];
 
         for line in text.split('\n') {
@@ -3079,7 +3085,7 @@ impl System {
                 continue;
             }
             let trimmed = line.trim();
-            // NO_REPLY 制御行（bare）。残余 say を配送しない印。地の文には残さない。
+            // NO_REPLY 制御行（bare）。sentinel 自体は地の文には残さない。
             if trimmed == NO_REPLY {
                 no_reply = true;
                 continue;

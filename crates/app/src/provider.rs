@@ -33,6 +33,100 @@ use opencrab_port::{
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+/// Deterministic response scripts exposed by the explicit `mock` provider.
+///
+/// The mock is a real `Engine` implementation selected at the same provider boundary as the
+/// network providers. It is never selected implicitly: both `OPENCRAB_LLM_PROVIDER=mock` and a
+/// known `OPENCRAB_MOCK_LLM_SCRIPT` value are required.
+#[derive(Clone, Copy)]
+enum MockScript {
+    Reply,
+    NoReply,
+    PrefixedNoReply,
+    ToolThenReply,
+}
+
+pub const MOCK_MODEL: &str = "mock";
+
+/// Provider-level deterministic engine for process E2E tests and offline deployments.
+pub struct MockEngine {
+    script: MockScript,
+}
+
+impl MockEngine {
+    fn from_env() -> Result<Self, String> {
+        let value = match std::env::var("OPENCRAB_MOCK_LLM_SCRIPT") {
+            Ok(value) => value,
+            Err(std::env::VarError::NotPresent) => {
+                return Err(
+                    "OPENCRAB_MOCK_LLM_SCRIPT is required when OPENCRAB_LLM_PROVIDER=mock"
+                        .to_string(),
+                )
+            }
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err("OPENCRAB_MOCK_LLM_SCRIPT is not valid Unicode".to_string())
+            }
+        };
+        let script = match value.as_str() {
+            "reply" => MockScript::Reply,
+            "no_reply" => MockScript::NoReply,
+            "prefixed_no_reply" => MockScript::PrefixedNoReply,
+            "tool_then_reply" => MockScript::ToolThenReply,
+            other => return Err(format!("unknown OPENCRAB_MOCK_LLM_SCRIPT: {other}")),
+        };
+        Ok(Self { script })
+    }
+}
+
+#[async_trait::async_trait]
+impl Engine for MockEngine {
+    fn model(&self) -> &str {
+        MOCK_MODEL
+    }
+
+    async fn infer(&self, ctx: &Context, chunks: &ChunkSink) -> Result<InferOutput, EngineError> {
+        chunks.chunk();
+        let say = |text: &str| InferOutput {
+            effects: vec![EffectSpec::say(text)],
+            tool_calls: vec![],
+            done: true,
+        };
+        match self.script {
+            MockScript::Reply => Ok(say("mock reply")),
+            MockScript::NoReply => Ok(say("NO_REPLY")),
+            MockScript::PrefixedNoReply => Ok(say("mock internal reasoning\nNO_REPLY")),
+            MockScript::ToolThenReply => {
+                let result = ctx.history.iter().find_map(|message| {
+                    message.content.iter().find_map(|block| match block {
+                        Block::ToolResult {
+                            content, is_error, ..
+                        } => Some((content, *is_error)),
+                        _ => None,
+                    })
+                });
+                match result {
+                    None => Ok(InferOutput {
+                        effects: vec![],
+                        tool_calls: vec![ToolCallSpec {
+                            id: "mock-tool-call-1".to_string(),
+                            name: "core-child-list".to_string(),
+                            args: serde_json::json!({}),
+                        }],
+                        done: false,
+                    }),
+                    Some((_, true)) => Err(EngineError(
+                        "mock tool_then_reply received an error tool result".to_string(),
+                    )),
+                    Some((content, false)) if content.is_empty() => Err(EngineError(
+                        "mock tool_then_reply received an empty tool result".to_string(),
+                    )),
+                    Some((_, false)) => Ok(say("mock reply after tool result")),
+                }
+            }
+        }
+    }
+}
+
 /// SSE の 1 イベントの意味（プロバイダごとに解釈が違うので値で返す）。転送側（`stream_request`）が
 /// 断片を跨いで積む——このenumは 1 イベント＝1 値で、状態を持たない。
 pub enum Delta {
@@ -1045,6 +1139,7 @@ pub fn engine_from_env() -> Result<Option<Arc<dyn Engine>>, String> {
         }
     };
     let engine = match configured.as_deref() {
+        Some("mock") => Some(Arc::new(MockEngine::from_env()?) as Arc<dyn Engine>),
         Some("anthropic") => {
             // 本番は https。手順書に合わせ、既定は本物の API。偽サーバのときだけ base を差し替える。
             let base = std::env::var("OPENCRAB_LLM_BASE_URL")
@@ -1323,6 +1418,67 @@ fn apply_delta(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn only_say(output: &InferOutput) -> &str {
+        output.effects[0]
+            .content
+            .text
+            .as_deref()
+            .expect("mock Say text")
+    }
+
+    #[tokio::test]
+    async fn mock_scripts_are_deterministic_and_tool_script_requires_a_result() {
+        let (chunks, _rx) = ChunkSink::channel();
+        let ctx = Context::default();
+
+        let reply = MockEngine {
+            script: MockScript::Reply,
+        }
+        .infer(&ctx, &chunks)
+        .await
+        .unwrap();
+        assert_eq!(only_say(&reply), "mock reply");
+
+        let no_reply = MockEngine {
+            script: MockScript::NoReply,
+        }
+        .infer(&ctx, &chunks)
+        .await
+        .unwrap();
+        assert_eq!(only_say(&no_reply), "NO_REPLY");
+
+        let prefixed = MockEngine {
+            script: MockScript::PrefixedNoReply,
+        }
+        .infer(&ctx, &chunks)
+        .await
+        .unwrap();
+        assert_eq!(only_say(&prefixed), "mock internal reasoning\nNO_REPLY");
+
+        let engine = MockEngine {
+            script: MockScript::ToolThenReply,
+        };
+        let first = engine.infer(&ctx, &chunks).await.unwrap();
+        assert!(!first.done);
+        assert_eq!(first.tool_calls.len(), 1);
+        assert_eq!(first.tool_calls[0].name, "core-child-list");
+
+        let with_result = Context {
+            history: vec![opencrab_port::Message {
+                role: MsgRole::User,
+                content: vec![Block::ToolResult {
+                    tool_use_id: "mock-tool-call-1".to_string(),
+                    content: vec![Part::text("synthetic result")],
+                    is_error: false,
+                }],
+            }],
+            ..Context::default()
+        };
+        let second = engine.infer(&with_result, &chunks).await.unwrap();
+        assert!(second.done);
+        assert_eq!(only_say(&second), "mock reply after tool result");
+    }
 
     fn only_error(deltas: Vec<Delta>) -> String {
         match deltas.as_slice() {
