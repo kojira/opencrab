@@ -30,9 +30,9 @@ pub const REASON_UNCOND: &str = "unconditional";
 pub const THROTTLE_HINT: &str =
     "\n\n[系: この相手は短時間に多くの資源を消費させている。返答は短く簡潔にすること。]";
 
-/// 平文アクション文法の唯一の core 共通語（設計）。出力のどこかにこの sentinel が含まれたら、
-/// そのターンの残余 say を配送しない（外界にも場の共有ログにも出さない）。前後の説明文も漏らさない
-/// fail-closed な制御語で、裸の `NO_REPLY::` も同義として受理する。
+/// 平文アクション文法の唯一の core 共通語（設計）。独立した token として成立する sentinel を出力中に
+/// 見たら、そのターンの残余 say を配送しない（外界にも場の共有ログにも出さない）。前後の reasoning も
+/// 漏らさない fail-closed な制御語で、裸の `NO_REPLY::` も同義として受理する。
 pub const NO_REPLY: &str = "NO_REPLY";
 
 /// 平文アクション文法の 2 つ目の core 共通語（設計）。`PROGRESS::<文>` 行——「いま何をしているかを
@@ -1361,15 +1361,16 @@ impl System {
         Ok(out)
     }
 
-    /// 未読を **standing の変わり目で切り、先頭の 1 区間だけ**を返す（#14）。
+    /// 未読を **standing または settled の発端の変わり目で切り、先頭の 1 区間だけ**を返す（#14/#750）。
     ///
     /// 「権限の違う発言を混ぜて処理しない」（オーナー方針）の実体。1 ターンが扱うのは 1 区間
     /// ＝そのターンの発言はすべて同じ権限で、**ターンの権限は区間の standing そのもの**になる
     /// （新しい概念を作らない）。切られた残りは未読のまま残り、次のターンが別の権限で処理する
     /// ——捨てない。
     ///
-    /// 作者のいない出来事（決着など）は**区切りにしない**（直前の区間に属する）。単独で先頭に
-    /// 来た場合は、その活動を始めたターンの standing を引き継ぐ（[`Self::event_standing`]）。
+    /// 作者のいない出来事は standing の区切りにしない。ただし settled は turn-level の発端参照を
+    /// 連鎖 tool へ渡すため、異なる `reply_to` を同じ区間へ混ぜない。発端参照のない旧 settled も
+    /// `None` という一つの区間として扱い、別 event へ推測で寄せない。
     fn first_standing_group(
         &self,
         subject: SubjectId,
@@ -1377,7 +1378,16 @@ impl System {
     ) -> Result<Vec<opencrab_store::EventRow>, Busy> {
         let mut out: Vec<opencrab_store::EventRow> = vec![];
         let mut group: Option<Standing> = None;
+        let mut settled_origin_seen = false;
+        let mut settled_origin: Option<Seq> = None;
         for ev in unread {
+            if ev.kind == EventKind::Settled {
+                if settled_origin_seen && settled_origin != ev.reply_to {
+                    break;
+                }
+                settled_origin_seen = true;
+                settled_origin = ev.reply_to;
+            }
             // 自分の発話は区切りにしない（権限の話ではない）。系の出来事（決着）も同じ。
             if ev.author_subject == Some(subject) {
                 out.push(ev.clone());
@@ -1783,6 +1793,9 @@ impl System {
         let mut tool_lines_acc: Option<String> = None;
         // NO_REPLY を見たら end_reason を no_reply にする（ターンが通常完了で終わるとき）。
         let mut no_reply_seen = false;
+        // 散文 say はターンの NO_REPLY 判定が確定するまで外へ出さない。別 Say や後続反復で sentinel が
+        // 現れても、同じターンの散文を一部だけ先に公開しないための turn-level buffer。
+        let mut pending_prose: Vec<EffectSpec> = vec![];
         // 反復ごとの文脈の観測（§10）。会話が積み上がるので反復ごとにトークン数が増える。
         let mut ctx_obs: Vec<CtxObs> = vec![];
 
@@ -1993,21 +2006,22 @@ impl System {
                         eprintln!(
                             "opencrab-social-runtime: NO_REPLY sentinel detected; withholding public text (place={place}, subject={subject})"
                         );
-                        // 残余 say を配送しない（外界にも場の共有ログにも出さない）。保留した地の文は
-                        // ターン記録の withheld_text へ残し、end_reason=no_reply を立てる（下の後始末で）。
-                        no_reply_seen = true;
-                        if let Some(rem) = interp.remainder {
-                            match &mut withheld_text {
-                                Some(acc) => {
-                                    acc.push('\n');
-                                    acc.push_str(&rem);
-                                }
-                                None => withheld_text = Some(rem),
+                        // 同じターンで先に保留していた別 Say も含め、散文を配送しない。握った本文は
+                        // ターン記録へ出現順に残し、end_reason=no_reply を立てる（下の後始末で）。
+                        for pending in pending_prose.drain(..) {
+                            if let Some(text) = pending.content.text {
+                                append_recorded_text(&mut withheld_text, text);
                             }
                         }
-                    } else if let Some(rem) = interp.remainder {
-                        // 残余 say（地の文＋不成立 3 段の行を逐語で保つ）は従来どおり target None の say。
-                        to_confirm.push(EffectSpec::say(rem));
+                        no_reply_seen = true;
+                    }
+                    if let Some(rem) = interp.remainder {
+                        if no_reply_seen {
+                            append_recorded_text(&mut withheld_text, rem);
+                        } else {
+                            // ターン終了まで確定を待ち、後続 Say / 反復の sentinel と一括判定する。
+                            pending_prose.push(EffectSpec::say(rem));
+                        }
                     }
                     // PROGRESS（core 共通語・進捗の揮発表示）: 集めた文言を activity progress 通知として
                     // 揮発配送し、走行中ターンの activities.label を更新する。say でもイベントでもないので
@@ -2125,6 +2139,26 @@ impl System {
             }
         }
         // ターン終了。`history` はここで捨てる（ターン内だけ・§05）。次のターンは場のログから組み直す。
+
+        // sentinel を一度も見なかったターンだけ、保留していた全散文 Say を確定する。明示アクションは
+        // 各反復ですでに確定済みであり、この buffer の対象には含めない。
+        if !no_reply_seen {
+            for e in pending_prose {
+                match self.authorize_effect(place, subject, &e) {
+                    Ok(a) => match self.confirm(&slot, subject, a) {
+                        Some(c) => self.enqueue_delivery(c),
+                        None => {
+                            end_reason = "failed";
+                            break;
+                        }
+                    },
+                    Err(_) => {
+                        end_reason = "failed";
+                        break;
+                    }
+                }
+            }
+        }
 
         // NO_REPLY（平文アクション文法）を見て、かつ通常完了（done）で終わったなら end_reason=no_reply。
         // 失敗・中断・上限などの終わり方が優先する（それらはそのまま残す——なぜ止まったかの方が重要）。
@@ -3141,9 +3175,9 @@ impl System {
         let mut tools: Vec<Authorized<ToolCallSpec>> = vec![];
         let mut tool_lines: Vec<String> = vec![];
         let mut remainder_lines: Vec<&str> = vec![];
-        // Fail closed: providers sometimes put reasoning before or after the control sentinel.
-        // Bare-line detection leaked that prose (and the sentinel) as a public Say (#747).
-        let mut no_reply = text.contains(NO_REPLY);
+        // Fail closed: providers sometimes put reasoning before or after an independent sentinel token. Partial
+        // strings, quoted names, and malformed NO_REPLY action lines remain ordinary prose (#750).
+        let mut no_reply = contains_no_reply_sentinel(text);
         let mut progress_labels: Vec<String> = vec![];
 
         for line in text.split('\n') {
@@ -4705,6 +4739,35 @@ impl System {
         for p in self.0.store.all_open_places().unwrap() {
             let _ = self.maybe_fire(p);
         }
+    }
+}
+
+/// NO_REPLY sentinel の lexical boundary。制御として成立するのは、行全体の `NO_REPLY` /
+/// `NO_REPLY::`、または ASCII 空白（行端を含む）で区切られた token だけ。これにより reasoning の
+/// 前後に置かれた sentinel は fail-closed に拾いつつ、部分文字列・引用符内・不正 action 形は拾わない。
+fn contains_no_reply_sentinel(text: &str) -> bool {
+    text.split('\n').any(|line| {
+        let trimmed = line.trim();
+        if trimmed == NO_REPLY || trimmed.strip_suffix("::") == Some(NO_REPLY) {
+            return true;
+        }
+        line.match_indices(NO_REPLY).any(|(start, token)| {
+            let before = line[..start].chars().next_back();
+            let after = line[start + token.len()..].chars().next();
+            before.is_none_or(|c| c.is_ascii_whitespace())
+                && after.is_none_or(|c| c.is_ascii_whitespace())
+        })
+    })
+}
+
+/// ターン記録の複数本文を Say の出現順に 1 本へ連結する。
+fn append_recorded_text(recorded: &mut Option<String>, text: String) {
+    match recorded {
+        Some(acc) => {
+            acc.push('\n');
+            acc.push_str(&text);
+        }
+        None => *recorded = Some(text),
     }
 }
 

@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use opencrab_engine::*;
 use opencrab_port::*;
 use opencrab_social_runtime::*;
-use opencrab_store::Store;
+use opencrab_store::{NewEvent, Store};
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -326,6 +326,135 @@ async fn settled_turn_includes_the_already_read_originating_request() {
         "tool is not re-executed"
     );
     assert_eq!(h.tx.says(), vec!["synthetic final answer"]);
+}
+
+// #750: 異なる発端の settled が同時に未読でも 1 turn へ混ぜない。各結果を受けて呼んだ平文 tool の
+// settled は、それぞれの元依頼を reply_to に保つ。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn settled_with_different_origins_chain_tools_to_their_own_requests() {
+    let h = build();
+    let (place, subject) = place_with(
+        &h,
+        Standing::Trusted,
+        &[EffectKind::Say],
+        vec![],
+        vec![tool_one_string("gate-follow", "input")],
+    );
+    h.host
+        .set_immediate("gate-follow", "synthetic chained result");
+
+    let origin_a = h
+        .sys
+        .store()
+        .append(
+            place,
+            &NewEvent {
+                kind: EventKind::Said,
+                author_subject: None,
+                author_external: Some("synthetic-author-a".into()),
+                content: Content::text("synthetic request a"),
+                mentions: vec![],
+                reply_to: None,
+                target: None,
+                for_subject: None,
+                attachments: vec![],
+            },
+            1,
+        )
+        .unwrap();
+    let origin_b = h
+        .sys
+        .store()
+        .append(
+            place,
+            &NewEvent {
+                kind: EventKind::Said,
+                author_subject: None,
+                author_external: Some("synthetic-author-b".into()),
+                content: Content::text("synthetic request b"),
+                mentions: vec![],
+                reply_to: None,
+                target: None,
+                for_subject: None,
+                attachments: vec![],
+            },
+            2,
+        )
+        .unwrap();
+    h.sys
+        .store()
+        .set_read_seq(place, subject, origin_b)
+        .unwrap();
+
+    let settled_a = h
+        .sys
+        .store()
+        .append(
+            place,
+            &NewEvent {
+                kind: EventKind::Settled,
+                author_subject: None,
+                author_external: None,
+                content: Content::text("synthetic result a"),
+                mentions: vec![],
+                reply_to: Some(origin_a),
+                target: None,
+                for_subject: Some(subject),
+                attachments: vec![],
+            },
+            3,
+        )
+        .unwrap();
+    let settled_b = h
+        .sys
+        .store()
+        .append(
+            place,
+            &NewEvent {
+                kind: EventKind::Settled,
+                author_subject: None,
+                author_external: None,
+                content: Content::text("synthetic result b"),
+                mentions: vec![],
+                reply_to: Some(origin_b),
+                target: None,
+                for_subject: Some(subject),
+                attachments: vec![],
+            },
+            4,
+        )
+        .unwrap();
+
+    h.eng.push(Step::say_done("gate-follow::from-a\nNO_REPLY"));
+    h.eng.push(Step::say_done("gate-follow::from-b\nNO_REPLY"));
+    h.eng.push(Step::no_reply());
+    h.eng.push(Step::no_reply());
+    h.sys.startup();
+    settle().await;
+
+    let latest = h.sys.store().latest_seq(place).unwrap();
+    let chained_origins: Vec<Option<Seq>> = h
+        .sys
+        .store()
+        .read_range(place, settled_b, latest)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == EventKind::Settled && event.seq > settled_b)
+        .map(|event| event.reply_to)
+        .collect();
+    assert_eq!(settled_a + 1, settled_b, "seed settled は連続している");
+    assert_eq!(h.host.invoke_count("gate-follow"), 2);
+    assert_eq!(
+        chained_origins,
+        vec![Some(origin_a), Some(origin_b)],
+        "各連鎖 tool の決着は対応する発端を保つ"
+    );
+
+    let contexts = h.eng.contexts();
+    assert!(contexts[0].contains("synthetic result a"));
+    assert!(!contexts[0].contains("synthetic result b"));
+    assert!(contexts[1].contains("synthetic result b"));
+    assert!(!contexts[1].contains("synthetic result a"));
 }
 
 // 2. 1 行 JSON: content が { で始まれば JSON として読み、required の存在と enum 会員を検証する。
