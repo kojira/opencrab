@@ -8,7 +8,10 @@ mod uuid;
 pub use report::{ClassAccounting, ConversionReport};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use provenance::{composite_key, digest_file, integer_key, text, MigrationProvenance};
+use provenance::{
+    composite_key, digest_file, integer_key, reject_nonempty_sqlite_sidecars, text,
+    MigrationProvenance,
+};
 use report::ContributionKey;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 use schema::create_phase1_schema;
@@ -31,6 +34,7 @@ pub enum ConverterError {
     Io(std::io::Error),
     Sql(rusqlite::Error),
     Json(serde_json::Error),
+    SourceSnapshot(String),
     SourceSchema(String),
     InstanceSet(String),
     TargetNotFresh,
@@ -43,6 +47,7 @@ impl Display for ConverterError {
             Self::Io(error) => write!(formatter, "I/O error: {error}"),
             Self::Sql(error) => write!(formatter, "SQLite error: {error}"),
             Self::Json(error) => write!(formatter, "JSON error: {error}"),
+            Self::SourceSnapshot(message) => write!(formatter, "source snapshot error: {message}"),
             Self::SourceSchema(message) => write!(formatter, "source schema error: {message}"),
             Self::InstanceSet(message) => write!(formatter, "instance-set error: {message}"),
             Self::TargetNotFresh => write!(formatter, "target database path already exists"),
@@ -163,6 +168,10 @@ impl MigrationInstanceAssembler for NoMigrationInstances {
 
 #[derive(Clone, Debug)]
 pub struct ConvertOptions {
+    /// Immutable, checkpointed SQLite main database file.
+    ///
+    /// The snapshot authority covers this one file only. A non-empty sibling `-wal`, `-shm`, or
+    /// `-journal` sidecar makes the input invalid and is rejected before source rows are read.
     pub source: PathBuf,
     pub target: PathBuf,
     /// Immutable TOML resource captured for this conversion run.
@@ -3464,6 +3473,7 @@ pub fn convert(
     options: ConvertOptions,
     instance_assembler: &dyn MigrationInstanceAssembler,
 ) -> Result<ConvertOutcome> {
+    reject_nonempty_sqlite_sidecars(&options.source)?;
     let source_database_digest = digest_file(&options.source)?;
     let effective_config_snapshot = load_effective_config(
         source_database_digest,
@@ -3476,6 +3486,9 @@ pub fn convert(
         &options.source,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
     )?;
+    // Check again at the read boundary so a sidecar introduced while the explicit config snapshot
+    // was being loaded cannot silently change the SQLite snapshot after the main-file digest.
+    reject_nonempty_sqlite_sidecars(&options.source)?;
     source.execute_batch("BEGIN")?;
     let agents = SourceTable::load_schema(&source, "agents")?;
     let model_pricing = SourceTable::load(&source, "model_pricing")?;

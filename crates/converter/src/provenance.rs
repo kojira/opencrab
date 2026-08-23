@@ -1,10 +1,10 @@
 use crate::source::{encode_sqlite_values, SourceRow, SourceTable, SqliteValue};
-use crate::Result;
+use crate::{ConverterError, Result};
 use rusqlite::{params, Transaction};
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub(crate) struct MigrationProvenance {
     source_database_digest: [u8; 32],
@@ -75,6 +75,31 @@ pub(crate) fn digest_file(path: &Path) -> Result<[u8; 32]> {
         digest.update(&buffer[..read]);
     }
     Ok(digest.finalize().into())
+}
+
+pub(crate) fn reject_nonempty_sqlite_sidecars(path: &Path) -> Result<()> {
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let sidecar = sqlite_sidecar_path(path, suffix);
+        match sidecar.metadata() {
+            Ok(metadata) if metadata.len() > 0 => {
+                return Err(ConverterError::SourceSnapshot(format!(
+                    "source database must be a checkpointed single-file snapshot; non-empty \
+                     SQLite sidecar {} is present",
+                    sidecar.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut sidecar = path.as_os_str().to_os_string();
+    sidecar.push(suffix);
+    PathBuf::from(sidecar)
 }
 
 pub(crate) fn integer_key(value: i64) -> Vec<u8> {

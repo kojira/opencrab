@@ -552,6 +552,225 @@ fn public_cli_uses_explicit_time_and_ignores_source_database_mtime() {
     );
 }
 
+#[test]
+fn public_cli_rejects_both_same_main_database_snapshots_with_different_wals() {
+    let temporary = tempfile::tempdir().unwrap();
+    let seed = temporary.path().join("seed.db");
+    Connection::open(&seed)
+        .unwrap()
+        .execute_batch(include_str!("fixtures/phase1-dirty.sql"))
+        .unwrap();
+
+    let capture_wal_snapshot = |label: &str, agent_name: &str| {
+        let live_directory = temporary.path().join(format!("live-{label}"));
+        let snapshot_directory = temporary.path().join(format!("snapshot-{label}"));
+        std::fs::create_dir(&live_directory).unwrap();
+        std::fs::create_dir(&snapshot_directory).unwrap();
+        let live = live_directory.join("source.db");
+        let snapshot = snapshot_directory.join("source.db");
+        std::fs::copy(&seed, &live).unwrap();
+        let connection = Connection::open(&live).unwrap();
+        assert_eq!(
+            connection
+                .query_row("PRAGMA journal_mode=WAL", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "wal"
+        );
+        connection
+            .execute_batch("PRAGMA wal_autocheckpoint=0")
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE agents SET name=?1 WHERE agent_id='agent_alpha'",
+                [agent_name],
+            )
+            .unwrap();
+
+        std::fs::copy(&live, &snapshot).unwrap();
+        for suffix in ["-wal", "-shm"] {
+            let live_sidecar = sqlite_sidecar_path(&live, suffix);
+            let snapshot_sidecar = sqlite_sidecar_path(&snapshot, suffix);
+            assert!(std::fs::metadata(&live_sidecar).unwrap().len() > 0);
+            std::fs::copy(live_sidecar, snapshot_sidecar).unwrap();
+        }
+        drop(connection);
+        snapshot
+    };
+
+    let source_a = capture_wal_snapshot("a", "Synthetic WAL Alpha");
+    let source_b = capture_wal_snapshot("b", "Synthetic WAL Beta");
+    assert_eq!(
+        std::fs::read(&source_a).unwrap(),
+        std::fs::read(&source_b).unwrap(),
+        "the two WAL snapshots must have byte-identical main database files"
+    );
+    assert_ne!(
+        std::fs::read(sqlite_sidecar_path(&source_a, "-wal")).unwrap(),
+        std::fs::read(sqlite_sidecar_path(&source_b, "-wal")).unwrap(),
+        "the committed logical changes must differ in the WAL files"
+    );
+
+    let config = temporary.path().join("default.toml");
+    let environment = temporary.path().join("snapshot.env");
+    std::fs::write(&config, "").unwrap();
+    std::fs::write(&environment, "").unwrap();
+    for (source, target_name) in [(&source_a, "target-a.db"), (&source_b, "target-b.db")] {
+        let target = temporary.path().join(target_name);
+        let output = run_cli_conversion(source, &target, &config, &environment);
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("checkpointed single-file snapshot"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !target.exists(),
+            "sidecar rejection must happen before target creation"
+        );
+    }
+
+    std::fs::remove_file(sqlite_sidecar_path(&source_a, "-wal")).unwrap();
+    let shm_target = temporary.path().join("target-shm.db");
+    let shm_output = run_cli_conversion(&source_a, &shm_target, &config, &environment);
+    assert!(!shm_output.status.success());
+    assert!(String::from_utf8_lossy(&shm_output.stderr).contains("-shm"));
+    assert!(!shm_target.exists());
+}
+
+#[test]
+fn public_cli_rejects_hot_journal_and_accepts_checkpointed_single_file_byte_stably() {
+    let temporary = tempfile::tempdir().unwrap();
+    let seed = temporary.path().join("seed.db");
+    Connection::open(&seed)
+        .unwrap()
+        .execute_batch(include_str!("fixtures/phase1-dirty.sql"))
+        .unwrap();
+    let config = temporary.path().join("default.toml");
+    let environment = temporary.path().join("snapshot.env");
+    std::fs::write(&config, "").unwrap();
+    std::fs::write(&environment, "").unwrap();
+
+    let live_hot = temporary.path().join("live-hot.db");
+    let hot_snapshot = temporary.path().join("hot-snapshot.db");
+    std::fs::copy(&seed, &live_hot).unwrap();
+    let hot_connection = Connection::open(&live_hot).unwrap();
+    hot_connection
+        .execute_batch(
+            "PRAGMA journal_mode=DELETE;
+             PRAGMA synchronous=FULL;
+             PRAGMA cache_size=1;
+             BEGIN IMMEDIATE;
+             UPDATE agents SET name='Synthetic Hot Journal' WHERE agent_id='agent_alpha';",
+        )
+        .unwrap();
+    let live_journal = sqlite_sidecar_path(&live_hot, "-journal");
+    let mut journal_bytes = std::fs::read(&live_journal).unwrap();
+    assert!(journal_bytes.len() > 512);
+    // SQLite keeps the first header zero until the journal is synced. Model the subsequent crash
+    // state by making the copied journal header live while retaining the real page records.
+    journal_bytes[..8].copy_from_slice(&[0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7]);
+    assert_eq!(
+        &journal_bytes[..8],
+        &[0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7],
+        "the copied rollback journal must have a live SQLite journal header"
+    );
+    std::fs::copy(&live_hot, &hot_snapshot).unwrap();
+    std::fs::write(
+        sqlite_sidecar_path(&hot_snapshot, "-journal"),
+        journal_bytes,
+    )
+    .unwrap();
+    drop(hot_connection);
+
+    let hot_target = temporary.path().join("target-hot.db");
+    let hot_output = run_cli_conversion(&hot_snapshot, &hot_target, &config, &environment);
+    assert!(!hot_output.status.success());
+    assert!(String::from_utf8_lossy(&hot_output.stderr).contains("-journal"));
+    assert!(!hot_target.exists());
+
+    let checkpoint_live = temporary.path().join("checkpoint-live.db");
+    std::fs::copy(&seed, &checkpoint_live).unwrap();
+    let checkpoint_connection = Connection::open(&checkpoint_live).unwrap();
+    assert_eq!(
+        checkpoint_connection
+            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get::<_, String>(0))
+            .unwrap(),
+        "wal"
+    );
+    checkpoint_connection
+        .execute_batch("PRAGMA wal_autocheckpoint=0")
+        .unwrap();
+    checkpoint_connection
+        .execute(
+            "UPDATE agents SET name='Synthetic Checkpointed' WHERE agent_id='agent_alpha'",
+            [],
+        )
+        .unwrap();
+    let checkpoint = checkpoint_connection
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(checkpoint.0, 0, "checkpoint must not report a busy writer");
+    drop(checkpoint_connection);
+
+    let source_a = temporary.path().join("checkpointed-a.db");
+    let source_b = temporary.path().join("checkpointed-b.db");
+    std::fs::copy(&checkpoint_live, &source_a).unwrap();
+    std::fs::copy(&checkpoint_live, &source_b).unwrap();
+    for source in [&source_a, &source_b] {
+        for suffix in ["-wal", "-shm", "-journal"] {
+            assert!(!sqlite_sidecar_path(source, suffix).exists());
+        }
+    }
+    let target_a = temporary.path().join("checkpointed-target-a.db");
+    let target_b = temporary.path().join("checkpointed-target-b.db");
+    let first = run_cli_conversion(&source_a, &target_a, &config, &environment);
+    let second = run_cli_conversion(&source_b, &target_b, &config, &environment);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(first.stdout, second.stdout);
+    assert_eq!(
+        std::fs::read(target_a).unwrap(),
+        std::fs::read(target_b).unwrap(),
+        "checkpointed single-file snapshots must retain byte-stable conversion"
+    );
+}
+
+fn run_cli_conversion(
+    source: &std::path::Path,
+    target: &std::path::Path,
+    config: &std::path::Path,
+    environment: &std::path::Path,
+) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_opencrab-converter"))
+        .args(["--source", source.to_str().unwrap()])
+        .args(["--target", target.to_str().unwrap()])
+        .args(["--config", config.to_str().unwrap()])
+        .args(["--environment", environment.to_str().unwrap()])
+        .args(["--captured-at", &FIXTURE_CAPTURED_AT.to_string()])
+        .output()
+        .unwrap()
+}
+
+fn sqlite_sidecar_path(path: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+    let mut sidecar = path.as_os_str().to_os_string();
+    sidecar.push(suffix);
+    sidecar.into()
+}
+
 fn snapshot(path: &std::path::Path, report: &str) -> String {
     let connection = Connection::open(path).unwrap();
     let mut output = String::new();

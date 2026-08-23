@@ -2,6 +2,7 @@
 name = "opencrab-converter"
 edition.workspace = true
 version.workspace = true
+readme = "README.md"
 
 [dependencies]
 base64.workspace = true
