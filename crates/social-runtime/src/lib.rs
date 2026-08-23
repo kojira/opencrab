@@ -14,8 +14,8 @@ pub use tokens::O200kCounter;
 
 use opencrab_port::*;
 use opencrab_store::{
-    ActivityInterruption, BackgroundProvenance, Ingest, NewEvent, NewTurnRecord, SettledProvenance,
-    Store,
+    ActivityInterruption, BackgroundProvenance, BackgroundSettlement, Ingest, NewBackgroundOffload,
+    NewEvent, NewTurnRecord, Store,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -3799,8 +3799,8 @@ impl System {
         id
     }
 
-    /// 活動を終わらせ、実際に遷移したかを返す（`true`＝走っている→終わりを起こした）。二度目の終了は
-    /// 0 行で `false`——通知も二度出さない（§02）。ターンの活動終了と背景の決着の両方がここを通る。
+    /// Turn 活動を終わらせ、実際に遷移したかを返す（`true`＝走っている→終わりを起こした）。二度目の
+    /// 終了は 0 行で `false`——通知も二度出さない（§02）。Background は結果と原子的に決着する別 API。
     fn end_activity_reason(&self, id: ActivityId, reason: &str) -> bool {
         let transitioned = self
             .0
@@ -3897,7 +3897,7 @@ impl System {
             } else {
                 SettleOutcome::Failed(&body)
             };
-            self.settle_background(bg, place, subject, outcome);
+            self.settle_background(bg, outcome);
             return ToolResult::MovedToBackground(bg);
         }
         // shell は core builtin だが touches_world（DESIGN-shell.md）——同期の core 経路ではなく、
@@ -3935,7 +3935,7 @@ impl System {
             } else {
                 SettleOutcome::Failed(&body)
             };
-            self.settle_background(bg, place, subject, outcome);
+            self.settle_background(bg, outcome);
             return ToolResult::MovedToBackground(bg);
         }
         // shell は spawn する前に argv を**構造化引数から**取り出し、argv[0] の allowlist を掛ける
@@ -4069,8 +4069,7 @@ impl System {
         );
         let sys = self.clone();
         tokio::spawn(async move {
-            sys.supervise_background(bg, place, subject, deadline, task)
-                .await;
+            sys.supervise_background(bg, deadline, task).await;
         });
         ToolResult::MovedToBackground(bg)
     }
@@ -4107,7 +4106,7 @@ impl System {
                     Some(provenance),
                 )
                 .await;
-            self.settle_background(bg, place, subject, SettleOutcome::Failed(&reason));
+            self.settle_background(bg, SettleOutcome::Failed(&reason));
         }
         ToolResult::Failed(reason)
     }
@@ -4140,88 +4139,84 @@ impl System {
     async fn supervise_background(
         &self,
         bg: ActivityId,
-        place: PlaceId,
-        subject: SubjectId,
         deadline: Deadline,
         mut task: tokio::task::JoinHandle<Result<String, ToolError>>,
     ) {
         tokio::select! {
             res = &mut task => {
                 match res {
-                    Ok(Ok(output)) => self.settle_background(bg, place, subject, SettleOutcome::Done(&output)),
-                    Ok(Err(e)) => self.settle_background(bg, place, subject, SettleOutcome::Failed(&e.0)),
+                    Ok(Ok(output)) => self.settle_background(bg, SettleOutcome::Done(&output)),
+                    Ok(Err(e)) => self.settle_background(bg, SettleOutcome::Failed(&e.0)),
                     // タスクが panic した／core-bg-stop 以外の理由で異常終了した。失敗として決着させる。
-                    // （core-bg-stop は自分で先に決着させるので、その競合はここでは遷移ガードで no-op になる。）
-                    Err(_) => self.settle_background(bg, place, subject, SettleOutcome::Failed("ツールタスクが異常終了")),
+                    // （core-bg-stop との競合は store が先に commit した結果へ収束する。）
+                    Err(_) => self.settle_background(bg, SettleOutcome::Failed("ツールタスクが異常終了")),
                 }
             }
             _ = tokio::time::sleep_until(deadline.0) => {
                 // 上限で中断として決着させる。勝手に再実行しない（§07・§15）。
                 task.abort();
-                self.settle_background(bg, place, subject, SettleOutcome::Deadline);
+                self.settle_background(bg, SettleOutcome::Deadline);
             }
         }
     }
 
-    /// 背景の活動を 1 度だけ決着させる（§07）。決着は `end_activity` の遷移で**1 回きり**を守る
-    /// ——core-bg-stop（停止）と自然完走／上限が競合しても、先に遷移させた 1 つだけが出来事を積む。
-    /// 成功/失敗が判る生テキストを決着本文に載せ、大きい結果は退避する（`settle_content`）。
-    fn settle_background(
-        &self,
-        bg: ActivityId,
-        place: PlaceId,
-        subject: SubjectId,
-        outcome: SettleOutcome,
-    ) {
-        if !self.end_activity_reason(bg, outcome.reason()) {
-            return; // 既に決着済み（競合の負け側）。二重に出来事を積まない。
-        }
-        // 実行中タスクの取っ手を落とす（kill 用の登録の後始末・じわ漏れ防止）。
-        self.0.bg_tasks.lock().unwrap().remove(&bg);
-        let activity = self
+    /// 背景の活動を 1 度だけ決着させる（§07）。activity 終端・結果 event・provenance・必要な offload は
+    /// store の 1 transaction で確定する。core-bg-stop（停止）と自然完走／上限の競合、および commit 後の
+    /// 再実行は、store が最初に確定した 1 結果へ収束させる。
+    fn settle_background(&self, bg: ActivityId, outcome: SettleOutcome) {
+        let reason = outcome.reason();
+        let (content, offload) = self.settle_content(bg, outcome);
+        let result = self
             .0
             .store
-            .get_activity(bg)
-            .expect("settled activity lookup must succeed")
-            .expect("settled activity must exist");
-        let provenance = activity
-            .provenance
-            .expect("background activity must retain accepted tool provenance");
-        let content = self.settle_content(place, subject, bg, outcome);
-        self.append_settled(place, subject, bg, content, &provenance);
+            .settle_background_activity(
+                bg,
+                reason,
+                &content,
+                offload.as_ref(),
+                self.now_nanos(),
+                self.now_wall_nanos(),
+            )
+            .unwrap();
+        // 実行中タスクの取っ手を落とす（kill 用の登録の後始末・じわ漏れ防止）。競合の負け側も、
+        // store 上は既に決着済みなので同じ後始末へ収束する。
+        self.0.bg_tasks.lock().unwrap().remove(&bg);
+        if let BackgroundSettlement::Appended { place, seq } = result {
+            self.0.notifier.notify(Notice::ActivityEnded {
+                place,
+                activity: bg,
+            });
+            // 決着は既にログ済み。発火の再判定が一時的に引けなくても、次の pump/startup が拾う（§02）。
+            let _ = self.on_append(place, seq);
+        }
     }
 
     /// 決着イベントの本文（生テキスト・非 JSON・§15）。識別子つきで、成功/失敗が判る。小さい結果は
     /// 本文そのまま、大きい結果は退避して案内＋読み方レシピだけを載せる（`offload`）。
     fn settle_content(
         &self,
-        place: PlaceId,
-        subject: SubjectId,
         bg: ActivityId,
         outcome: SettleOutcome,
-    ) -> String {
+    ) -> (String, Option<NewBackgroundOffload>) {
         match outcome {
-            SettleOutcome::Deadline => {
-                format!("活動 #{bg} は実行の上限に達して中断した（勝手に再実行しない）")
-            }
-            SettleOutcome::Stopped => format!("活動 #{bg} を停止した"),
-            SettleOutcome::Done(body) => self.settle_result_content(place, subject, bg, true, body),
-            SettleOutcome::Failed(body) => {
-                self.settle_result_content(place, subject, bg, false, body)
-            }
+            SettleOutcome::Deadline => (
+                format!("活動 #{bg} は実行の上限に達して中断した（勝手に再実行しない）"),
+                None,
+            ),
+            SettleOutcome::Stopped => (format!("活動 #{bg} を停止した"), None),
+            SettleOutcome::Done(body) => self.settle_result_content(bg, true, body),
+            SettleOutcome::Failed(body) => self.settle_result_content(bg, false, body),
         }
     }
 
-    /// 成功/失敗の結果本文を決着本文へ写す。inline 上限を超えたら退避する。**退避に失敗したら
-    /// 黙って本文へ切り替えず、失敗として決着を記録する**（家風: フォールバックを作らない・§15）。
+    /// 成功/失敗の結果本文を決着本文へ写す。inline 上限を超えたら、store が決着と同じ transaction で
+    /// 保存する offload を返す。保存に失敗すれば activity 終端を含む transaction 全体が失敗する。
     fn settle_result_content(
         &self,
-        place: PlaceId,
-        subject: SubjectId,
         bg: ActivityId,
         ok: bool,
         body: &str,
-    ) -> String {
+    ) -> (String, Option<NewBackgroundOffload>) {
         let head = if ok {
             format!("活動 #{bg} が完了した（成功）")
         } else {
@@ -4230,55 +4225,19 @@ impl System {
         if !offload::exceeds_limit(self.0.counter.as_ref(), body) {
             // 小さい結果は本文そのまま（識別子つきの生テキスト）。
             if body.is_empty() {
-                return format!("{head}（出力なし）");
+                return (format!("{head}（出力なし）"), None);
             }
-            return format!("{head}:\n{body}");
+            return (format!("{head}:\n{body}"), None);
         }
         // 大きい結果は store 背番号へ退避し、案内＋読み方レシピだけ載せる（本文は 1 バイトも載せない）。
         let (saved, truncated) = offload::clamp_body(body);
-        match self.0.store.create_offload(
-            bg,
-            subject,
-            place,
-            &saved,
-            truncated,
-            self.now_wall_nanos(),
-        ) {
-            Ok(()) => offload::settle_notice(bg, ok, &saved, truncated, self.0.counter.as_ref()),
-            Err(e) => {
-                // 退避できなかった。生本文を決着へ載せない（載せると次ターンの予算を溢れさせる・#284 同型）
-                // ——失敗として決着を記録する（黙って本文へ切り替えない）。
-                format!("活動 #{bg} は結果を退避できず失敗として決着した（本文は捨てた）: {e}")
-            }
-        }
-    }
-
-    /// 決着の出来事をログへ積む（`for_subject` でその主体のターンを起こす・§07）。本文は呼び手が
-    /// 組んだ生テキスト（`settle_content`）。
-    fn append_settled(
-        &self,
-        place: PlaceId,
-        subject: SubjectId,
-        activity: ActivityId,
-        content: String,
-        provenance: &BackgroundProvenance,
-    ) -> Seq {
-        let settled = SettledProvenance {
-            activity,
-            origin_from_exclusive: provenance.origin_from_exclusive,
-            origin_to_inclusive: provenance.origin_to_inclusive,
-            origin_standing: provenance.origin_standing,
-            tool_name: provenance.tool_name.clone(),
-            tool_args: provenance.tool_args.clone(),
-        };
-        let seq = self
-            .0
-            .store
-            .append_settled(place, subject, &content, &settled, self.now_wall_nanos())
-            .unwrap();
-        // 決着は既にログ済み。発火の再判定が一時的に引けなくても、次の pump/startup が拾う（§02）。
-        let _ = self.on_append(place, seq);
-        seq
+        (
+            offload::settle_notice(bg, ok, &saved, truncated, self.0.counter.as_ref()),
+            Some(NewBackgroundOffload {
+                body: saved,
+                truncated,
+            }),
+        )
     }
 
     // ---- 画像・リンク（DESIGN-images §3/§3b）----
@@ -4778,12 +4737,13 @@ impl System {
                 if row.ended_at.is_some() {
                     return ToolResult::Failed(format!("活動 #{bg} は既に決着している"));
                 }
-                // 走っているツールタスクを止める（暴走 kill）。取っ手が無ければ決着競合中——遷移ガードに任せる。
+                // 走っているツールタスクを止める（暴走 kill）。取っ手が無ければ決着競合中——store の
+                // 原子的な決着に任せる。
                 if let Some(task) = self.0.bg_tasks.lock().unwrap().get(&bg).cloned() {
                     task.abort.abort();
                 }
-                // 停止として決着させる（二度目は遷移ガードで no-op・自然完走との競合は先着が勝つ）。
-                self.settle_background(bg, row.place, subject, SettleOutcome::Stopped);
+                // 停止として決着させる（二度目と自然完走との競合は、先に commit した結果へ収束する）。
+                self.settle_background(bg, SettleOutcome::Stopped);
                 ToolResult::Done(format!("活動 #{bg} を停止した"))
             }
             // 背景の活動の退避結果を行範囲で読む（§07/§06）。**自分の退避だけ**（store が subject で絞る）。

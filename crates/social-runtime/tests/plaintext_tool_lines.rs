@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use opencrab_engine::*;
 use opencrab_port::*;
 use opencrab_social_runtime::*;
-use opencrab_store::{BackgroundProvenance, NewEvent, SettledProvenance, Store};
+use opencrab_store::{BackgroundProvenance, BackgroundSettlement, NewEvent, Store};
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -510,24 +510,18 @@ async fn settled_with_different_origins_chain_tools_to_their_own_requests() {
                 Some(&provenance),
             )
             .unwrap();
-        h.sys.store().end_activity(activity, "done", now).unwrap();
-        h.sys
+        match h
+            .sys
             .store()
-            .append_settled(
-                place,
-                subject,
-                result,
-                &SettledProvenance {
-                    activity,
-                    origin_from_exclusive: provenance.origin_from_exclusive,
-                    origin_to_inclusive: provenance.origin_to_inclusive,
-                    origin_standing: provenance.origin_standing,
-                    tool_name: provenance.tool_name,
-                    tool_args: provenance.tool_args,
-                },
-                now,
-            )
+            .settle_background_activity(activity, "done", result, None, now, now)
             .unwrap()
+        {
+            BackgroundSettlement::Appended { place: p, seq } => {
+                assert_eq!(p, place);
+                seq
+            }
+            other => panic!("synthetic settlement must append: {other:?}"),
+        }
     };
     let settled_a = seed_settled(origin_a, "seed-a", "synthetic result a", 3);
     let settled_b = seed_settled(origin_b, "seed-b", "synthetic result b", 4);

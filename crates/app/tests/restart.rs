@@ -7,11 +7,14 @@
 use opencrab_app::Host;
 use opencrab_engine::{ScriptedEngine, Step};
 use opencrab_port::{ActivityKindTag, Content, EventKind, Role, Standing, SubjectKind};
-use opencrab_social_runtime::Incoming;
-use opencrab_store::{BackgroundProvenance, NewEvent, Store};
+use opencrab_social_runtime::{Incoming, Policy};
+use opencrab_store::{
+    BackgroundProvenance, BackgroundSettlement, NewBackgroundOffload, NewEvent, Store,
+};
+use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
 fn tmp_db(tag: &str) -> PathBuf {
@@ -397,4 +400,363 @@ async fn background_interruption_restores_full_provenance_after_real_file_reopen
 async fn background_interruption_recovers_after_activity_close_crash_point() {
     assert_background_interruption_recovery("closed-before-event", LeftoverTurn::Absent, true)
         .await;
+}
+
+// main の旧 schema で既に再起動回収された Background は provenance を持たず、汎用 Interrupted event
+// だけを持つ。upgrade はこれを PR 途中版の「activity 終端だけ commit 済み」と誤認せず、そのまま起動する。
+#[tokio::test(flavor = "current_thread")]
+async fn legacy_interrupted_background_upgrades_without_duplicate_recovery() {
+    let db = tmp_db("legacy-interrupted-background");
+    let _ = std::fs::remove_file(&db);
+
+    let (place, activity, legacy_seq) = {
+        let store = Store::open(&db).expect("create pre-upgrade database");
+        let place = store
+            .create_place(
+                Some("synthetic:legacy"),
+                None,
+                &Policy::default().to_json(),
+                None,
+                0,
+            )
+            .expect("seed place");
+        let subject = store
+            .create_subject(
+                SubjectKind::Agent,
+                "synthetic-agent",
+                "synthetic-agent",
+                "echo",
+                Standing::Trusted,
+                0,
+            )
+            .expect("seed subject");
+        let activity = store
+            .start_activity(
+                place,
+                subject,
+                ActivityKindTag::Background,
+                Some("synthetic legacy background"),
+                10,
+                0,
+                None,
+            )
+            .expect("seed legacy background");
+        assert!(store
+            .end_activity(activity, "interrupted", 1)
+            .expect("legacy startup closes activity"));
+        let legacy_seq = store
+            .append(
+                place,
+                &NewEvent {
+                    kind: EventKind::Interrupted,
+                    author_subject: None,
+                    author_external: None,
+                    content: Content::text("synthetic legacy interruption"),
+                    mentions: vec![],
+                    reply_to: None,
+                    target: None,
+                    for_subject: Some(subject),
+                    attachments: vec![],
+                },
+                2,
+            )
+            .expect("legacy startup appends generic interruption");
+        (place, activity, legacy_seq)
+    };
+
+    // merge-base schema と同じく provenance 列・settled_provenance table が無いファイルへ戻す。
+    let legacy = Connection::open(&db).expect("open legacy schema fixture");
+    legacy
+        .execute_batch(
+            "DROP TABLE settled_provenance;
+             ALTER TABLE activities DROP COLUMN origin_from_exclusive;
+             ALTER TABLE activities DROP COLUMN origin_to_inclusive;
+             ALTER TABLE activities DROP COLUMN origin_standing;
+             ALTER TABLE activities DROP COLUMN accepted_tool_name;
+             ALTER TABLE activities DROP COLUMN accepted_tool_args_json;",
+        )
+        .expect("downgrade fixture to merge-base activity schema");
+    drop(legacy);
+
+    let store = Store::open(&db).expect("upgrade legacy database");
+    let host = Host::boot(store);
+    assert_eq!(
+        host.sys.store().latest_seq(place).unwrap(),
+        legacy_seq,
+        "upgrade startup must not duplicate the legacy generic interruption"
+    );
+    let row = host
+        .sys
+        .store()
+        .get_activity(activity)
+        .unwrap()
+        .expect("legacy activity survives upgrade");
+    assert_eq!(row.end_reason.as_deref(), Some("interrupted"));
+    assert_eq!(row.provenance, None, "migrated legacy columns remain NULL");
+    assert!(
+        host.sys
+            .store()
+            .activities_needing_interruption()
+            .unwrap()
+            .is_empty(),
+        "already recovered legacy background is not selected again"
+    );
+    drop(host);
+
+    let second = Host::boot(Store::open(&db).expect("second upgraded reopen"));
+    assert_eq!(second.sys.store().latest_seq(place).unwrap(), legacy_seq);
+    let _ = std::fs::remove_file(&db);
+}
+
+fn seed_atomic_background(store: &Store, tag: &str) -> (i64, i64, i64) {
+    let place = store
+        .create_place(Some(tag), None, "{}", None, 0)
+        .expect("seed atomic place");
+    let subject = store
+        .create_subject(
+            SubjectKind::Agent,
+            "synthetic-agent",
+            "synthetic-agent",
+            "echo",
+            Standing::Trusted,
+            0,
+        )
+        .expect("seed atomic subject");
+    let provenance = BackgroundProvenance {
+        origin_from_exclusive: 0,
+        origin_to_inclusive: 0,
+        origin_standing: Standing::Owner,
+        tool_name: "synthetic-background-tool".into(),
+        tool_args: serde_json::json!({"mode": "atomic"}),
+    };
+    let activity = store
+        .start_activity_with_provenance(
+            place,
+            subject,
+            ActivityKindTag::Background,
+            Some("synthetic atomic background"),
+            10,
+            0,
+            None,
+            Some(&provenance),
+        )
+        .expect("seed atomic background");
+    (place, subject, activity)
+}
+
+// transaction の最後（provenance INSERT）を強制失敗させ、先行する activity UPDATE / offload / event も
+// 実ファイル reopen 後に一切残らないこと、その後の同じ done が完全な 1 結果として再実行できることを固定する。
+#[test]
+fn background_done_rolls_back_whole_transaction_and_retries_after_reopen() {
+    let db = tmp_db("atomic-done-rollback");
+    let _ = std::fs::remove_file(&db);
+    let (place, subject, activity) = {
+        let store = Store::open(&db).expect("open");
+        seed_atomic_background(&store, "synthetic:atomic-done")
+    };
+    let conn = Connection::open(&db).expect("install synthetic crash point");
+    conn.execute_batch(
+        "CREATE TRIGGER synthetic_settlement_crash
+         BEFORE INSERT ON settled_provenance
+         BEGIN SELECT RAISE(ABORT, 'synthetic settlement crash'); END;",
+    )
+    .unwrap();
+    drop(conn);
+
+    let offload = NewBackgroundOffload {
+        body: "synthetic saved result".into(),
+        truncated: false,
+    };
+    let store = Store::open(&db).expect("reopen at crash fixture");
+    assert!(
+        store
+            .settle_background_activity(
+                activity,
+                "done",
+                "synthetic done notice",
+                Some(&offload),
+                1,
+                2,
+            )
+            .is_err(),
+        "forced failure at the final write must surface"
+    );
+    drop(store);
+
+    let after_failure = Store::open(&db).expect("reopen after failed transaction");
+    let row = after_failure.get_activity(activity).unwrap().unwrap();
+    assert_eq!(row.ended_at, None, "activity end rolls back");
+    assert_eq!(
+        after_failure.latest_seq(place).unwrap(),
+        0,
+        "event rolls back"
+    );
+    assert!(
+        after_failure
+            .read_offload(subject, activity)
+            .unwrap()
+            .is_none(),
+        "offload rolls back"
+    );
+    drop(after_failure);
+
+    let conn = Connection::open(&db).expect("remove synthetic crash point");
+    conn.execute_batch("DROP TRIGGER synthetic_settlement_crash;")
+        .unwrap();
+    drop(conn);
+
+    let store = Store::open(&db).expect("retry reopen");
+    let seq = match store
+        .settle_background_activity(
+            activity,
+            "done",
+            "synthetic done notice",
+            Some(&offload),
+            3,
+            4,
+        )
+        .unwrap()
+    {
+        BackgroundSettlement::Appended { place: p, seq } => {
+            assert_eq!(p, place);
+            seq
+        }
+        other => panic!("retry must append the complete result: {other:?}"),
+    };
+    drop(store);
+
+    let reopened = Store::open(&db).expect("reopen committed result");
+    assert_eq!(
+        reopened
+            .settle_background_activity(
+                activity,
+                "failed",
+                "must not replace committed result",
+                None,
+                5,
+                6,
+            )
+            .unwrap(),
+        BackgroundSettlement::AlreadyRecorded { place, seq },
+        "commit後の再実行は保存済み結果へ収束する"
+    );
+    assert_eq!(reopened.latest_seq(place).unwrap(), seq);
+    assert_eq!(
+        reopened
+            .get_activity(activity)
+            .unwrap()
+            .unwrap()
+            .end_reason
+            .as_deref(),
+        Some("done")
+    );
+    assert_eq!(
+        reopened
+            .get_event(place, seq)
+            .unwrap()
+            .unwrap()
+            .content
+            .text
+            .as_deref(),
+        Some("synthetic done notice")
+    );
+    assert_eq!(
+        reopened
+            .read_offload(subject, activity)
+            .unwrap()
+            .unwrap()
+            .body,
+        "synthetic saved result"
+    );
+    assert_eq!(
+        reopened
+            .settled_provenance(place, seq)
+            .unwrap()
+            .unwrap()
+            .activity,
+        activity
+    );
+    let _ = std::fs::remove_file(&db);
+}
+
+// stop と自然完走を同時に決着させても、片方だけが activity/event/provenance を commit し、負け側と
+// reopen 後の二回目実行は同じ結果へ収束する。
+#[test]
+fn background_stop_and_natural_completion_race_converges_after_reopen() {
+    let db = tmp_db("atomic-stop-race");
+    let _ = std::fs::remove_file(&db);
+    let store = Store::open(&db).expect("open");
+    let (place, _subject, activity) = seed_atomic_background(&store, "synthetic:stop-race");
+    let barrier = Arc::new(Barrier::new(3));
+    let stopped_store = store.clone();
+    let stopped_barrier = barrier.clone();
+    let stopped = std::thread::spawn(move || {
+        stopped_barrier.wait();
+        stopped_store
+            .settle_background_activity(activity, "stopped", "synthetic stopped result", None, 1, 2)
+            .unwrap()
+    });
+    let done_store = store.clone();
+    let done_barrier = barrier.clone();
+    let done = std::thread::spawn(move || {
+        done_barrier.wait();
+        done_store
+            .settle_background_activity(activity, "done", "synthetic natural result", None, 3, 4)
+            .unwrap()
+    });
+    barrier.wait();
+    let stopped = stopped.join().unwrap();
+    let done = done.join().unwrap();
+    let seq = match (stopped, done) {
+        (
+            BackgroundSettlement::Appended { place: p, seq },
+            BackgroundSettlement::AlreadyRecorded { place: q, seq: s },
+        )
+        | (
+            BackgroundSettlement::AlreadyRecorded { place: q, seq: s },
+            BackgroundSettlement::Appended { place: p, seq },
+        ) => {
+            assert_eq!((p, seq), (q, s));
+            assert_eq!(p, place);
+            seq
+        }
+        other => panic!("exactly one competing settlement must append: {other:?}"),
+    };
+    drop(store);
+
+    let reopened = Store::open(&db).expect("reopen race winner");
+    let row = reopened.get_activity(activity).unwrap().unwrap();
+    let event = reopened.get_event(place, seq).unwrap().unwrap();
+    match row.end_reason.as_deref() {
+        Some("stopped") => assert_eq!(
+            event.content.text.as_deref(),
+            Some("synthetic stopped result")
+        ),
+        Some("done") => assert_eq!(
+            event.content.text.as_deref(),
+            Some("synthetic natural result")
+        ),
+        other => panic!("unexpected winning end reason: {other:?}"),
+    }
+    for (reason, content) in [
+        ("stopped", "second stopped result"),
+        ("done", "second natural result"),
+    ] {
+        assert_eq!(
+            reopened
+                .settle_background_activity(activity, reason, content, None, 5, 6)
+                .unwrap(),
+            BackgroundSettlement::AlreadyRecorded { place, seq }
+        );
+    }
+    assert_eq!(reopened.latest_seq(place).unwrap(), seq);
+    assert_eq!(
+        reopened
+            .settled_provenance(place, seq)
+            .unwrap()
+            .unwrap()
+            .activity,
+        activity
+    );
+    let _ = std::fs::remove_file(&db);
 }

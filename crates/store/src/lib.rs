@@ -57,6 +57,21 @@ pub enum ActivityInterruption {
     AlreadyEnded,
 }
 
+/// 通常の Background 決着結果。activity 終端・結果 event・provenance（必要なら offload）を
+/// 1 transaction で確定し、再実行は保存済みの同じ結果へ収束する。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackgroundSettlement {
+    Appended { place: PlaceId, seq: Seq },
+    AlreadyRecorded { place: PlaceId, seq: Seq },
+}
+
+/// Background の大きな結果を、決着と同じ transaction で保存するための入力。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewBackgroundOffload {
+    pub body: String,
+    pub truncated: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct EventRow {
     pub place: PlaceId,
@@ -725,6 +740,20 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     Ok(false)
 }
 
+fn origin_reply_to(from_exclusive: Seq, to_inclusive: Seq) -> Result<Option<Seq>> {
+    if to_inclusive < from_exclusive {
+        return Err(rusqlite::Error::ToSqlConversionFailure(
+            "activity origin range is reversed".into(),
+        ));
+    }
+    if to_inclusive == from_exclusive {
+        return Ok(None);
+    }
+    from_exclusive.checked_add(1).map(Some).ok_or_else(|| {
+        rusqlite::Error::ToSqlConversionFailure("origin range start overflow".into())
+    })
+}
+
 impl Store {
     pub fn new_in_memory() -> Result<Store> {
         let conn = Connection::open_in_memory()?;
@@ -881,25 +910,139 @@ impl Store {
         Ok(seq)
     }
 
-    /// background result と provenance を 1 transaction で Settled event にする。
-    /// provenance の無い結果 event を新規生成する口は core へ出さない。
-    pub fn append_settled(
+    /// running Background を通常決着させ、結果 event・provenance（必要なら offload）を同じ
+    /// transaction で確定する。stop / deadline / success / failure の競合は、最初に commit した結果へ
+    /// 収束する。commit 後の再実行も `AlreadyRecorded` となり、結果を二重追記しない。
+    pub fn settle_background_activity(
         &self,
-        place: PlaceId,
-        subject: SubjectId,
+        id: ActivityId,
+        end_reason: &str,
         content: &str,
-        provenance: &SettledProvenance,
-        now: i64,
-    ) -> Result<Seq> {
-        self.append_background_result(EventKind::Settled, place, subject, content, provenance, now)
+        offload: Option<&NewBackgroundOffload>,
+        ended_at: i64,
+        event_created_at: i64,
+    ) -> Result<BackgroundSettlement> {
+        let mut c = self.c();
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let activity = tx.query_row(
+            "SELECT id,place_id,subject_id,kind,label,deadline_at,started_at,ended_at,end_reason,detached_from,origin_from_exclusive,origin_to_inclusive,origin_standing,accepted_tool_name,accepted_tool_args_json
+             FROM activities WHERE id=?1",
+            params![id],
+            map_activity,
+        )?;
+        let existing_result: Option<(PlaceId, Seq)> = tx
+            .query_row(
+                "SELECT place_id,seq FROM settled_provenance WHERE activity_id=?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some((place, seq)) = existing_result {
+            if activity.kind != ActivityKindTag::Background
+                || activity.ended_at.is_none()
+                || activity.place != place
+            {
+                return Err(rusqlite::Error::ToSqlConversionFailure(
+                    "settled provenance does not match its background activity".into(),
+                ));
+            }
+            tx.commit()?;
+            return Ok(BackgroundSettlement::AlreadyRecorded { place, seq });
+        }
+        if activity.ended_at.is_some() {
+            return Err(rusqlite::Error::ToSqlConversionFailure(
+                "background activity ended without settled provenance".into(),
+            ));
+        }
+        if activity.kind != ActivityKindTag::Background {
+            return Err(rusqlite::Error::ToSqlConversionFailure(
+                "only background activity can be settled".into(),
+            ));
+        }
+        let provenance = activity.provenance.ok_or_else(|| {
+            rusqlite::Error::ToSqlConversionFailure(
+                "background activity has no accepted tool provenance".into(),
+            )
+        })?;
+        if provenance.origin_to_inclusive < provenance.origin_from_exclusive {
+            return Err(rusqlite::Error::ToSqlConversionFailure(
+                "settled origin range is reversed".into(),
+            ));
+        }
+
+        let changed = tx.execute(
+            "UPDATE activities SET ended_at=?2,end_reason=?3 WHERE id=?1 AND ended_at IS NULL",
+            params![id, ended_at, end_reason],
+        )?;
+        if changed != 1 {
+            return Err(rusqlite::Error::ToSqlConversionFailure(
+                "background settlement transition was lost".into(),
+            ));
+        }
+        if let Some(offload) = offload {
+            tx.execute(
+                "INSERT INTO offloads(activity_id,subject_id,place_id,body,truncated,created_at)
+                 VALUES(?1,?2,?3,?4,?5,?6)",
+                params![
+                    activity.id,
+                    activity.subject,
+                    activity.place,
+                    offload.body,
+                    offload.truncated as i64,
+                    event_created_at,
+                ],
+            )?;
+        }
+        let reply_to = origin_reply_to(
+            provenance.origin_from_exclusive,
+            provenance.origin_to_inclusive,
+        )?;
+        let seq: Seq = tx.query_row(
+            "SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE place_id=?1",
+            params![activity.place],
+            |r| r.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO events(place_id,seq,kind,author_subject_id,author_external_id,content_json,mentions_json,reply_to_seq,target_seq,for_subject_id,created_at,attachments_json)
+             VALUES(?1,?2,'settled',NULL,NULL,?3,'[]',?4,NULL,?5,?6,'[]')",
+            params![
+                activity.place,
+                seq,
+                content_to_json(&Content::text(content)),
+                reply_to,
+                activity.subject,
+                event_created_at,
+            ],
+        )?;
+        let args_json = serde_json::to_string(&provenance.tool_args)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        tx.execute(
+            "INSERT INTO settled_provenance(place_id,seq,activity_id,origin_from_exclusive,origin_to_inclusive,origin_standing,accepted_tool_name,accepted_tool_args_json)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![
+                activity.place,
+                seq,
+                activity.id,
+                provenance.origin_from_exclusive,
+                provenance.origin_to_inclusive,
+                standing_str(provenance.origin_standing),
+                provenance.tool_name,
+                args_json,
+            ],
+        )?;
+        tx.commit()?;
+        Ok(BackgroundSettlement::Appended {
+            place: activity.place,
+            seq,
+        })
     }
 
     /// 再起動で残った activity を閉じ、対応する Interrupted event を同じ transaction で追記する。
     /// Background は保存済み provenance も同じ transaction に入れる。
     ///
-    /// 旧処理が残し得た「activity は interrupted 済みだが結果 event は無い」Background も、
-    /// provenance が未記録ならここで回収する。既に結果がある Background と、既に終わった Turn は
-    /// no-op なので、起動を繰り返しても重複しない。
+    /// provenance 導入後の旧処理が残し得た「activity は interrupted 済みだが結果 event は無い」
+    /// Background も、結果が未記録ならここで回収する。既に結果がある Background と、既に終わった
+    /// Turn は no-op なので、起動を繰り返しても重複しない。
     pub fn interrupt_activity(
         &self,
         id: ActivityId,
@@ -965,24 +1108,10 @@ impl Store {
         let reply_to = background
             .as_ref()
             .map(|provenance| {
-                if provenance.origin_to_inclusive < provenance.origin_from_exclusive {
-                    return Err(rusqlite::Error::ToSqlConversionFailure(
-                        "activity origin range is reversed".into(),
-                    ));
-                }
-                if provenance.origin_to_inclusive == provenance.origin_from_exclusive {
-                    Ok(None)
-                } else {
-                    provenance
-                        .origin_from_exclusive
-                        .checked_add(1)
-                        .map(Some)
-                        .ok_or_else(|| {
-                            rusqlite::Error::ToSqlConversionFailure(
-                                "origin range start overflow".into(),
-                            )
-                        })
-                }
+                origin_reply_to(
+                    provenance.origin_from_exclusive,
+                    provenance.origin_to_inclusive,
+                )
             })
             .transpose()?
             .flatten();
@@ -1026,107 +1155,6 @@ impl Store {
             place: activity.place,
             seq,
         })
-    }
-
-    fn append_background_result(
-        &self,
-        kind: EventKind,
-        place: PlaceId,
-        subject: SubjectId,
-        content: &str,
-        provenance: &SettledProvenance,
-        now: i64,
-    ) -> Result<Seq> {
-        debug_assert!(matches!(kind, EventKind::Settled | EventKind::Interrupted));
-        let mut c = self.c();
-        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        if provenance.origin_to_inclusive < provenance.origin_from_exclusive {
-            return Err(rusqlite::Error::ToSqlConversionFailure(
-                "settled origin range is reversed".into(),
-            ));
-        }
-        let stored: BackgroundProvenance = tx.query_row(
-            "SELECT origin_from_exclusive,origin_to_inclusive,origin_standing,accepted_tool_name,accepted_tool_args_json
-             FROM activities
-             WHERE id=?1 AND place_id=?2 AND subject_id=?3 AND kind='background' AND ended_at IS NOT NULL
-               AND origin_from_exclusive IS NOT NULL AND origin_to_inclusive IS NOT NULL
-               AND origin_standing IS NOT NULL AND accepted_tool_name IS NOT NULL
-               AND accepted_tool_args_json IS NOT NULL",
-            params![provenance.activity, place, subject],
-            |r| {
-                let standing: String = r.get(2)?;
-                let args: String = r.get(4)?;
-                Ok(BackgroundProvenance {
-                    origin_from_exclusive: r.get(0)?,
-                    origin_to_inclusive: r.get(1)?,
-                    origin_standing: standing_from(&standing)?,
-                    tool_name: r.get(3)?,
-                    tool_args: json_value_from(&args, "activity tool args")?,
-                })
-            },
-        )?;
-        let expected = BackgroundProvenance {
-            origin_from_exclusive: provenance.origin_from_exclusive,
-            origin_to_inclusive: provenance.origin_to_inclusive,
-            origin_standing: provenance.origin_standing,
-            tool_name: provenance.tool_name.clone(),
-            tool_args: provenance.tool_args.clone(),
-        };
-        if stored != expected {
-            return Err(rusqlite::Error::ToSqlConversionFailure(
-                "settled provenance does not match its activity".into(),
-            ));
-        }
-        let seq: Seq = tx.query_row(
-            "SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE place_id=?1",
-            params![place],
-            |r| r.get(0),
-        )?;
-        let args_json = serde_json::to_string(&provenance.tool_args)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-        let reply_to = if provenance.origin_to_inclusive == provenance.origin_from_exclusive {
-            None
-        } else {
-            Some(
-                provenance
-                    .origin_from_exclusive
-                    .checked_add(1)
-                    .ok_or_else(|| {
-                        rusqlite::Error::ToSqlConversionFailure(
-                            "origin range start overflow".into(),
-                        )
-                    })?,
-            )
-        };
-        tx.execute(
-            "INSERT INTO events(place_id,seq,kind,author_subject_id,author_external_id,content_json,mentions_json,reply_to_seq,target_seq,for_subject_id,created_at,attachments_json)
-             VALUES(?1,?2,?3,NULL,NULL,?4,'[]',?5,NULL,?6,?7,'[]')",
-            params![
-                place,
-                seq,
-                kind.as_str(),
-                content_to_json(&Content::text(content)),
-                reply_to,
-                subject,
-                now,
-            ],
-        )?;
-        tx.execute(
-            "INSERT INTO settled_provenance(place_id,seq,activity_id,origin_from_exclusive,origin_to_inclusive,origin_standing,accepted_tool_name,accepted_tool_args_json)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![
-                place,
-                seq,
-                provenance.activity,
-                provenance.origin_from_exclusive,
-                provenance.origin_to_inclusive,
-                standing_str(provenance.origin_standing),
-                provenance.tool_name,
-                args_json,
-            ],
-        )?;
-        tx.commit()?;
-        Ok(seq)
     }
 
     pub fn settled_provenance(
@@ -1659,18 +1687,25 @@ impl Store {
         Ok(rows)
     }
 
-    /// 再起動で原子的に中断へ収束させる対象。通常の running 行に加え、旧 startup が activity の
-    /// 終端だけを確定して結果追記前に止まった Background を拾う。通常実行中に中断された Turn は
-    /// 回収対象へ混ぜない。
+    /// 再起動で原子的に中断へ収束させる対象。通常の running 行に加え、provenance 導入後の旧処理が
+    /// activity の終端だけを確定して結果追記前に止まった Background を拾う。provenance 列の無い
+    /// main 由来の中断済み Background は、旧 startup が既に汎用 Interrupted を記録した正当な履歴なので
+    /// 再回収しない。通常実行中に中断された Turn も回収対象へ混ぜない。
     pub fn activities_needing_interruption(&self) -> Result<Vec<ActivityRow>> {
         let c = self.c();
         let mut stmt = c.prepare(
             "SELECT id,place_id,subject_id,kind,label,deadline_at,started_at,ended_at,end_reason,detached_from,origin_from_exclusive,origin_to_inclusive,origin_standing,accepted_tool_name,accepted_tool_args_json
              FROM activities
              WHERE ended_at IS NULL
-                OR (kind='background' AND end_reason='interrupted' AND NOT EXISTS (
-                    SELECT 1 FROM settled_provenance WHERE activity_id=activities.id
-                ))
+                OR (kind='background' AND end_reason='interrupted'
+                    AND origin_from_exclusive IS NOT NULL
+                    AND origin_to_inclusive IS NOT NULL
+                    AND origin_standing IS NOT NULL
+                    AND accepted_tool_name IS NOT NULL
+                    AND accepted_tool_args_json IS NOT NULL
+                    AND NOT EXISTS (
+                        SELECT 1 FROM settled_provenance WHERE activity_id=activities.id
+                    ))
              ORDER BY id",
         )?;
         let rows = stmt
@@ -2213,8 +2248,8 @@ impl Store {
 
     // ---- 退避（常時切り離しの大きな結果・案 A）----
     //
-    // 1 つの背景活動は 1 度だけ決着する（supervise_background の遷移ガード）ので、退避も活動ごとに
-    // 1 件（activity_id が主鍵）。読みは **主体で絞る**（記憶と同じ主体分離）——他人の退避を指す
+    // 1 つの背景活動は store の原子的な決着で 1 度だけ確定するので、退避も活動ごとに 1 件
+    //（activity_id が主鍵）。読みは **主体で絞る**（記憶と同じ主体分離）——他人の退避を指す
     // SQL が 0 行に落ち、呼び手はそれを「無い」として扱える。
 
     /// 決着の大きな結果を退避する（活動ごと 1 件）。二度目の挿入は主鍵衝突で失敗する——決着は
@@ -2662,7 +2697,7 @@ mod tests {
     }
 
     #[test]
-    fn background_and_settled_provenance_roundtrip_typed_args_and_empty_range() {
+    fn background_settlement_roundtrips_typed_args_and_empty_range() {
         let s = Store::new_in_memory().unwrap();
         let place = s.create_place(Some("p"), None, "{}", None, 0).unwrap();
         let subject = s
@@ -2691,12 +2726,16 @@ mod tests {
                 Some(&activity_provenance),
             )
             .unwrap();
-        assert!(s.end_activity(activity, "done", 2).unwrap());
-        assert_eq!(
-            s.get_activity(activity).unwrap().unwrap().provenance,
-            Some(activity_provenance.clone())
-        );
-
+        let first = s
+            .settle_background_activity(activity, "done", "synthetic result", None, 2, 3)
+            .unwrap();
+        let seq = match first {
+            BackgroundSettlement::Appended { place: p, seq } => {
+                assert_eq!(p, place);
+                seq
+            }
+            other => panic!("first settlement must append: {other:?}"),
+        };
         let settled_provenance = SettledProvenance {
             activity,
             origin_from_exclusive: activity_provenance.origin_from_exclusive,
@@ -2705,9 +2744,10 @@ mod tests {
             tool_name: activity_provenance.tool_name.clone(),
             tool_args: activity_provenance.tool_args.clone(),
         };
-        let seq = s
-            .append_settled(place, subject, "synthetic result", &settled_provenance, 3)
-            .unwrap();
+        assert_eq!(
+            s.get_activity(activity).unwrap().unwrap().provenance,
+            Some(activity_provenance)
+        );
         assert_eq!(
             s.settled_provenance(place, seq).unwrap(),
             Some(settled_provenance)

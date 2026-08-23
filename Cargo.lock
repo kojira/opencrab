@@ -827,6 +827,7 @@ dependencies = [
  "opencrab-store",
  "rcgen",
  "reqwest",
+ "rusqlite",
  "rustls",
  "serde_json",
  "tempfile",
