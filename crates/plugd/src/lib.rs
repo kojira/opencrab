@@ -83,6 +83,18 @@ struct Conn {
     next_id: AtomicU64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ToolOwner {
+    instance_id: GateInstanceId,
+    connection_epoch: u64,
+}
+
+enum RouteIssueError {
+    NotReady,
+    Stale,
+    WriterUnavailable,
+}
+
 impl Conn {
     fn send_line(&self, v: &serde_json::Value) {
         let _ = self.out.send(v.to_string());
@@ -112,6 +124,64 @@ impl Conn {
         }
         Some((id, rx))
     }
+    fn issue_if_ready(
+        &self,
+        req: serde_json::Map<String, serde_json::Value>,
+    ) -> Option<(
+        String,
+        oneshot::Receiver<Result<serde_json::Value, WireErr>>,
+    )> {
+        let active = self.active.lock().unwrap();
+        if !*active {
+            return None;
+        }
+        self.issue(req)
+    }
+    fn issue_for_route(
+        &self,
+        route: &GateRoute,
+        req: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<
+        (
+            String,
+            oneshot::Receiver<Result<serde_json::Value, WireErr>>,
+        ),
+        RouteIssueError,
+    > {
+        let active = self.active.lock().unwrap();
+        if !*active {
+            return Err(RouteIssueError::NotReady);
+        }
+        let current = self.gate.lock().unwrap();
+        if !current.as_ref().is_some_and(|connection| {
+            connection.connection_epoch == route.connection_epoch
+                && connection.revision == route.revision
+        }) {
+            return Err(RouteIssueError::Stale);
+        }
+        self.issue(req).ok_or(RouteIssueError::WriterUnavailable)
+    }
+    fn send_if_ready(&self, value: &serde_json::Value) -> bool {
+        let active = self.active.lock().unwrap();
+        if !*active {
+            return false;
+        }
+        self.out.send(value.to_string()).is_ok()
+    }
+    fn send_for_route(&self, route: &GateRoute, value: &serde_json::Value) -> bool {
+        let active = self.active.lock().unwrap();
+        if !*active {
+            return false;
+        }
+        let current = self.gate.lock().unwrap();
+        if !current.as_ref().is_some_and(|connection| {
+            connection.connection_epoch == route.connection_epoch
+                && connection.revision == route.revision
+        }) {
+            return false;
+        }
+        self.out.send(value.to_string()).is_ok()
+    }
     fn drop_pending(&self, id: &str) {
         self.pending.lock().unwrap().remove(id);
     }
@@ -137,7 +207,7 @@ struct PlugdInner {
     /// 接続中のゲート名 → 接続。名乗りが通ってからここに入る。
     conns: Mutex<HashMap<GateInstanceId, Arc<Conn>>>,
     /// ツール名 → instance（route-selected operations may bypass this compatibility index）。
-    tools: Mutex<HashMap<String, GateInstanceId>>,
+    tools: Mutex<HashMap<String, ToolOwner>>,
 }
 
 /// core と線の間を繋ぐハブ。`Transport`・`Notifier`・`ToolHost` を実装し、core に差し込む。
@@ -189,15 +259,6 @@ impl Plugd {
 
     fn conn_for_instance(&self, instance: &GateInstanceId) -> Option<Arc<Conn>> {
         self.0.conns.lock().unwrap().get(instance).cloned()
-    }
-
-    fn connection_matches_route(conn: &Conn, route: &GateRoute) -> bool {
-        if !*conn.active.lock().unwrap() {
-            return false;
-        }
-        conn.gate.lock().unwrap().as_ref().is_some_and(|current| {
-            current.connection_epoch == route.connection_epoch && current.revision == route.revision
-        })
     }
 
     /// 1 本の接続を回す。線を割り当てた運び方（子プロセス・ソケット・duplex）は問わない（§00）。
@@ -319,7 +380,13 @@ impl Plugd {
                     let response_id = id.unwrap_or_default();
                     match self.handle_failed(&conn, obj) {
                         Ok(()) => {
+                            // `failed` の commit と同時にこの接続の所有物を退役させる。
+                            // reader_loop 末尾まで残すと、replacement hello が旧 cleanup と競合する。
+                            self.disconnect(&conn);
                             conn.send_line(&serde_json::json!({"id":response_id,"ok":{}}));
+                            // ack と replacement hello が旧 reader の return より先に進んでも、末尾の
+                            // disconnect は Arc ownership check により replacement を消さない。
+                            tokio::task::yield_now().await;
                             break;
                         }
                         Err(error) => {
@@ -604,7 +671,13 @@ impl Plugd {
         {
             let mut map = self.0.tools.lock().unwrap();
             for t in &tools {
-                map.insert(t.name.clone(), connection.instance_id.clone());
+                map.insert(
+                    t.name.clone(),
+                    ToolOwner {
+                        instance_id: connection.instance_id.clone(),
+                        connection_epoch: connection.connection_epoch,
+                    },
+                );
             }
         }
         if protocol == PROTOCOL_VERSION {
@@ -674,9 +747,12 @@ impl Plugd {
         if connection.connection_epoch != epoch {
             return Err(WireErr::new("epoch_mismatch"));
         }
+        let mut active = conn.active.lock().unwrap();
         self.sys()
             .fail_gate_connection(&connection, code)
-            .map_err(|_| WireErr::new("store_error"))
+            .map_err(|_| WireErr::new("store_error"))?;
+        *active = false;
+        Ok(())
     }
 
     /// event を GateEvent へ写して core へ渡す（プロトコル§03）。知らない欄・列挙値は err（§00）。
@@ -901,10 +977,28 @@ impl Plugd {
         }
     }
 
-    fn disconnect(&self, conn: &Conn) {
+    fn disconnect(&self, conn: &Arc<Conn>) {
+        // Outgoing route checks hold this same lock through enqueue. Once false is visible,
+        // no tool/activity/effect can be accepted by this connection.
+        *conn.active.lock().unwrap() = false;
         let gate = conn.gate.lock().unwrap().clone();
         if let Some(g) = gate {
-            self.0.conns.lock().unwrap().remove(&g.instance_id);
+            let owned = {
+                let mut conns = self.0.conns.lock().unwrap();
+                if conns
+                    .get(&g.instance_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, conn))
+                {
+                    conns.remove(&g.instance_id);
+                    true
+                } else {
+                    false
+                }
+            };
+            if !owned {
+                conn.pending.lock().unwrap().clear();
+                return;
+            }
             let _ = self.sys().store().close_gate_connection(
                 &g.instance_id,
                 g.connection_epoch,
@@ -913,7 +1007,11 @@ impl Plugd {
             );
             self.sys().unregister_gate_instance(&g.instance_id);
             let mut tools = self.0.tools.lock().unwrap();
-            tools.retain(|_, v| *v != g.instance_id);
+            let retired = ToolOwner {
+                instance_id: g.instance_id.clone(),
+                connection_epoch: g.connection_epoch,
+            };
+            tools.retain(|_, owner| *owner != retired);
             let remaining: Vec<_> = self.0.conns.lock().unwrap().values().cloned().collect();
             for tool in &g.spec.tools {
                 if tools.contains_key(&tool.name) {
@@ -927,7 +1025,10 @@ impl Plugd {
                             .tools
                             .iter()
                             .any(|other| other.name == tool.name)
-                            .then(|| candidate.instance_id.clone())
+                            .then(|| ToolOwner {
+                                instance_id: candidate.instance_id.clone(),
+                                connection_epoch: candidate.connection_epoch,
+                            })
                     })
                 }) {
                     tools.insert(tool.name.clone(), instance);
@@ -1045,17 +1146,6 @@ impl Transport for Plugd {
                 route.instance_id
             )));
         };
-        if !*conn.active.lock().unwrap() {
-            return TransportDeliveryResult::DefiniteFailure(TransportError(format!(
-                "gate instance not ready: {}",
-                route.instance_id
-            )));
-        }
-        if !Self::connection_matches_route(&conn, route) {
-            return TransportDeliveryResult::DefiniteFailure(TransportError(
-                "route connection epoch is no longer active".into(),
-            ));
-        }
         let mut payload = serde_json::Map::new();
         if let Some(text) = &effect.text {
             payload.insert("text".into(), text.clone().into());
@@ -1074,10 +1164,24 @@ impl Transport for Plugd {
         if let Some(verb) = &effect.verb {
             req.insert("verb".into(), verb.clone().into());
         }
-        let Some((_id, mut rx)) = conn.issue(req) else {
-            return TransportDeliveryResult::DefiniteFailure(TransportError(
-                "connection writer unavailable before effect acceptance".into(),
-            ));
+        let mut rx = match conn.issue_for_route(route, req) {
+            Ok((_id, rx)) => rx,
+            Err(RouteIssueError::NotReady) => {
+                return TransportDeliveryResult::DefiniteFailure(TransportError(format!(
+                    "gate instance not ready: {}",
+                    route.instance_id
+                )))
+            }
+            Err(RouteIssueError::Stale) => {
+                return TransportDeliveryResult::DefiniteFailure(TransportError(
+                    "route connection epoch is no longer active".into(),
+                ))
+            }
+            Err(RouteIssueError::WriterUnavailable) => {
+                return TransportDeliveryResult::DefiniteFailure(TransportError(
+                    "connection writer unavailable before effect acceptance".into(),
+                ))
+            }
         };
         match tokio::time::timeout(EFFECT_TIMEOUT, &mut rx).await {
             Ok(Ok(Ok(ok))) => {
@@ -1132,8 +1236,8 @@ impl Plugd {
             .conn_for_gate(gate)
             .ok_or_else(|| TransportError(format!("gate not connected: {gate}")))?;
         let (id, rx) = conn
-            .issue(req)
-            .ok_or_else(|| TransportError("connection writer unavailable".into()))?;
+            .issue_if_ready(req)
+            .ok_or_else(|| TransportError("gate connection not ready".into()))?;
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(Ok(ok))) => Ok(ok),
             Ok(Ok(Err(e))) => Err(TransportError(format!("err: {}", e.code))),
@@ -1155,14 +1259,9 @@ impl Plugd {
         let conn = self
             .conn_for_instance(instance)
             .ok_or_else(|| TransportError(format!("gate instance not connected: {instance}")))?;
-        if !*conn.active.lock().unwrap() {
-            return Err(TransportError(format!(
-                "gate instance not ready: {instance}"
-            )));
-        }
         let (id, rx) = conn
-            .issue(req)
-            .ok_or_else(|| TransportError("connection writer unavailable".into()))?;
+            .issue_if_ready(req)
+            .ok_or_else(|| TransportError(format!("gate instance not ready: {instance}")))?;
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(Ok(ok))) => Ok(ok),
             Ok(Ok(Err(error))) => Err(TransportError(format!("err: {}", error.code))),
@@ -1208,9 +1307,7 @@ impl Notifier for Plugd {
         };
         if let Some((route, body)) = routed {
             if let Some(conn) = self.conn_for_instance(&route.instance_id) {
-                if Self::connection_matches_route(&conn, &route) {
-                    conn.send_line(&body);
-                }
+                conn.send_for_route(&route, &body);
             }
             return;
         }
@@ -1269,7 +1366,7 @@ impl Notifier for Plugd {
             if let Some(conn) = self.conn_for_gate(&gate) {
                 let mut m = body.clone();
                 m["address"] = address.into();
-                conn.send_line(&m);
+                conn.send_if_ready(&m);
             }
         }
     }
@@ -1290,24 +1387,27 @@ impl ToolHost for Plugd {
                 route.instance_id
             ))
         })?;
-        if !*conn.active.lock().unwrap() {
-            return Err(ToolError(format!(
-                "gate instance not ready: {}",
-                route.instance_id
-            )));
-        }
-        if !Self::connection_matches_route(&conn, route) {
-            return Err(ToolError(
-                "route connection epoch is no longer active".into(),
-            ));
-        }
         let mut req = serde_json::Map::new();
         req.insert("m".into(), "tool".into());
         req.insert("name".into(), call.name.clone().into());
         req.insert("args".into(), call.args.clone());
-        let (id, rx) = conn
-            .issue(req)
-            .ok_or_else(|| ToolError("connection writer unavailable".into()))?;
+        let (id, rx) = match conn.issue_for_route(route, req) {
+            Ok(request) => request,
+            Err(RouteIssueError::NotReady) => {
+                return Err(ToolError(format!(
+                    "gate instance not ready: {}",
+                    route.instance_id
+                )))
+            }
+            Err(RouteIssueError::Stale) => {
+                return Err(ToolError(
+                    "route connection epoch is no longer active".into(),
+                ))
+            }
+            Err(RouteIssueError::WriterUnavailable) => {
+                return Err(ToolError("connection writer unavailable".into()))
+            }
+        };
         let _guard = PendingGuard { conn, id };
         match rx.await {
             Ok(Ok(ok)) => ok

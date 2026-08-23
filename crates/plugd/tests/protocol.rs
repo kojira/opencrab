@@ -11,8 +11,9 @@ use opencrab_engine::{CharCounter, ScriptedEngine, ScriptedShellHost, Step};
 use opencrab_plugd::Plugd;
 use opencrab_port::{
     ActivityKindTag, AttachmentKind, Content, EffectKind, EffectSpec, EventKind, GateInstanceId,
-    GateName, GateRoute, IngressDiscovery, Notice, Notifier as _Notifier, OriginScope, Property,
-    Role, RoutePurpose, SubjectKind, ToolCallSpec, ToolHost, Transport,
+    GateName, GateRoute, IngressDiscovery, Notice, Notifier as _Notifier, OriginScope,
+    OutgoingEffect, Property, Role, RoutePurpose, SubjectKind, ToolCallSpec, ToolHost, Transport,
+    TransportDeliveryResult,
 };
 use opencrab_social_runtime::{Config, Policy, System};
 use opencrab_store::Store;
@@ -603,7 +604,7 @@ async fn protocol2_malformed_failed_response_and_protocol_matrix_is_strict() {
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn stale_route_epoch_or_revision_sends_neither_tool_nor_activity() {
+async fn failed_connection_cannot_send_or_remove_its_replacement() {
     let h = build();
     let (instance, kind) = install_protocol2_fixture(&h);
     let first = TestGate::connect(&h.plugd);
@@ -614,8 +615,9 @@ async fn stale_route_epoch_or_revision_sends_neither_tool_nor_activity() {
         "code":"synthetic_restart"
     }));
     assert!(first.wait_for(|log| has_reply_ok(log, "restart")).await);
-    assert!(first.wait_disconnect().await);
 
+    // The replacement starts after the failed epoch is committed but before the old reader has
+    // necessarily returned. Its registry/runtime/tool ownership must survive the old cleanup.
     let second = TestGate::connect(&h.plugd);
     let second_epoch = hello_protocol2_ready(&second, &instance, &kind).await;
     assert!(second_epoch > first_epoch);
@@ -637,11 +639,29 @@ async fn stale_route_epoch_or_revision_sends_neither_tool_nor_activity() {
             .unwrap_err();
         assert!(error.0.contains("route connection epoch"));
         h.plugd.notify(Notice::RoutedActivityStarted {
-            route,
+            route: route.clone(),
             activity: 1,
             kind: ActivityKindTag::Turn,
             label: None,
         });
+        let delivery = h
+            .plugd
+            .deliver_effect_route(
+                &route,
+                1,
+                OutgoingEffect {
+                    kind: EffectKind::Say,
+                    text: Some("synthetic".into()),
+                    symbol: None,
+                    target_origin: None,
+                    verb: None,
+                },
+            )
+            .await;
+        assert!(matches!(
+            delivery,
+            TransportDeliveryResult::DefiniteFailure(_)
+        ));
         for _ in 0..32 {
             tokio::task::yield_now().await;
         }
@@ -649,13 +669,37 @@ async fn stale_route_epoch_or_revision_sends_neither_tool_nor_activity() {
             second.log()[before..].iter().all(|value| {
                 !matches!(
                     value.get("m").and_then(Value::as_str),
-                    Some("tool" | "activity")
+                    Some("tool" | "activity" | "effect")
                 )
             }),
             "stale route reached the replacement connection: {:?}",
             second.log()
         );
     }
+
+    assert!(first.wait_disconnect().await);
+    let current_route = protocol2_route(&instance, &kind, second_epoch, 1);
+    assert_eq!(
+        h.plugd
+            .invoke_route(
+                &current_route,
+                &ToolCallSpec {
+                    id: "call-current".into(),
+                    name: "synthetic-op".into(),
+                    args: json!({}),
+                },
+            )
+            .await
+            .unwrap(),
+        "TOOL_OK"
+    );
+    assert_eq!(
+        h.sys
+            .gate_connection(&instance)
+            .expect("replacement runtime remains registered")
+            .connection_epoch,
+        second_epoch
+    );
 }
 
 // bind → ok（プロトコル§02）。場を作るのは core。プラグインは購読を頼まれる。

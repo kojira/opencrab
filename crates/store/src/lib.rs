@@ -1317,6 +1317,76 @@ fn ensure_compat_binding(
     Ok((instance, binding_id))
 }
 
+fn binding_has_nonmovable_history(
+    conn: &Connection,
+    binding_id: &str,
+    origin_scope_id: &str,
+) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM deliveries WHERE binding_id=?1
+           UNION ALL SELECT 1 FROM gate_operations WHERE binding_id=?1
+           UNION ALL SELECT 1 FROM interactions WHERE binding_id=?1
+           UNION ALL SELECT 1 FROM external_origins WHERE origin_scope_id=?2
+           UNION ALL SELECT 1 FROM gate_dedup_hits WHERE origin_scope_id=?2
+         )",
+        params![binding_id, origin_scope_id],
+        |row| row.get(0),
+    )
+}
+
+fn compatibility_place_has_history(
+    conn: &Connection,
+    place: PlaceId,
+    kind: &GateKindId,
+) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM v1_external_refs WHERE place_id=?1 AND gate_name=?2
+           UNION ALL SELECT 1 FROM v1_deliveries WHERE place_id=?1 AND gate_name=?2
+           UNION ALL SELECT 1 FROM v1_dedup_hits WHERE place_id=?1 AND gate_name=?2
+         )",
+        params![place, kind.as_str()],
+        |row| row.get(0),
+    )
+}
+
+fn retire_compat_binding_on(
+    conn: &Connection,
+    binding_id: &str,
+    origin_scope_id: &str,
+    replacement_binding_id: &str,
+) -> Result<()> {
+    if binding_id == replacement_binding_id {
+        return Ok(());
+    }
+    if binding_has_nonmovable_history(conn, binding_id, origin_scope_id)? {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    conn.execute(
+        "UPDATE subject_routes SET binding_id=?2 WHERE binding_id=?1",
+        params![binding_id, replacement_binding_id],
+    )?;
+    // v1 refs belong to the logical (place,kind) channel rather than its current address. Move
+    // their canonical projection to the replacement binding so dedup semantics stay identical.
+    conn.execute(
+        "UPDATE external_refs SET binding_id=?2 WHERE binding_id=?1",
+        params![binding_id, replacement_binding_id],
+    )?;
+    conn.execute(
+        "DELETE FROM gate_bindings WHERE binding_id=?1",
+        params![binding_id],
+    )?;
+    conn.execute(
+        "DELETE FROM external_origin_scopes WHERE scope_id=?1
+         AND NOT EXISTS(SELECT 1 FROM gate_bindings WHERE origin_scope_id=?1)
+         AND NOT EXISTS(SELECT 1 FROM external_origins WHERE origin_scope_id=?1)
+         AND NOT EXISTS(SELECT 1 FROM gate_dedup_hits WHERE origin_scope_id=?1)",
+        params![origin_scope_id],
+    )?;
+    Ok(())
+}
+
 fn set_subject_route_on(
     conn: &Connection,
     subject: SubjectId,
@@ -3362,12 +3432,108 @@ impl Store {
     pub fn add_channel(&self, place: PlaceId, gate: &GateName, address: &str) -> Result<()> {
         let mut conn = self.c();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let instance = seed_compatibility_instance_on(&tx, gate)?;
+        let previous_address = tx
+            .query_row(
+                "SELECT address FROM v1_channels WHERE place_id=?1 AND gate_name=?2",
+                params![place, gate.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if previous_address
+            .as_deref()
+            .is_some_and(|old| old != address)
+        {
+            let has_nonmovable_v1_history: bool = tx.query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM v1_deliveries WHERE place_id=?1 AND gate_name=?2
+                   UNION ALL SELECT 1 FROM v1_dedup_hits WHERE place_id=?1 AND gate_name=?2
+                 )",
+                params![place, gate.as_str()],
+                |row| row.get(0),
+            )?;
+            if has_nonmovable_v1_history {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+        }
+
+        let displaced_places = {
+            let mut statement = tx.prepare(
+                "SELECT place_id FROM v1_channels
+                 WHERE gate_name=?1 AND address=?2 AND place_id<>?3 ORDER BY place_id",
+            )?;
+            let rows = statement
+                .query_map(params![gate.as_str(), address, place], |row| row.get(0))?
+                .collect::<Result<Vec<PlaceId>>>()?;
+            rows
+        };
+        for displaced in &displaced_places {
+            if compatibility_place_has_history(&tx, *displaced, gate)? {
+                // Moving an address must not silently detach historical rows from their place.
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+        }
+
+        if let Some((binding_id, origin_scope_id, binding_place)) = tx
+            .query_row(
+                "SELECT binding_id,origin_scope_id,place_id FROM gate_bindings
+                 WHERE instance_id=?1 AND address=?2",
+                params![instance.as_str(), address],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, PlaceId>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+        {
+            if binding_place != place
+                && (binding_has_nonmovable_history(&tx, &binding_id, &origin_scope_id)?
+                    || tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM external_refs WHERE binding_id=?1)",
+                        params![binding_id],
+                        |row| row.get::<_, bool>(0),
+                    )?)
+            {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+        }
+
+        let (_, replacement_binding) = ensure_compat_binding(&tx, place, gate, address)?;
         tx.execute(
             "INSERT INTO v1_channels(place_id,gate_name,address) VALUES(?1,?2,?3)
              ON CONFLICT(place_id,gate_name) DO UPDATE SET address=?3",
             params![place, gate.as_str(), address],
         )?;
-        ensure_compat_binding(&tx, place, gate, address)?;
+
+        let stale_bindings = {
+            let mut statement = tx.prepare(
+                "SELECT binding_id,origin_scope_id FROM gate_bindings
+                 WHERE place_id=?1 AND instance_id=?2 AND binding_id<>?3 ORDER BY binding_id",
+            )?;
+            let rows = statement
+                .query_map(
+                    params![place, instance.as_str(), replacement_binding],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )?
+                .collect::<Result<Vec<_>>>()?;
+            rows
+        };
+        for (binding_id, origin_scope_id) in stale_bindings {
+            retire_compat_binding_on(&tx, &binding_id, &origin_scope_id, &replacement_binding)?;
+        }
+        for displaced in displaced_places {
+            tx.execute(
+                "DELETE FROM subject_routes WHERE place_id=?1 AND kind_id=?2",
+                params![displaced, gate.as_str()],
+            )?;
+            tx.execute(
+                "DELETE FROM v1_channels WHERE place_id=?1 AND gate_name=?2 AND address=?3",
+                params![displaced, gate.as_str(), address],
+            )?;
+        }
         tx.commit()
     }
 
@@ -3975,6 +4141,24 @@ mod tests {
             for_subject: None,
             attachments: vec![],
         }
+    }
+
+    fn compat_bindings(store: &Store, kind: &GateKindId) -> Vec<(PlaceId, String, String, String)> {
+        let conn = store.c();
+        let mut statement = conn
+            .prepare(
+                "SELECT gb.place_id,gb.address,gb.binding_id,gb.origin_scope_id
+                 FROM gate_bindings gb JOIN gate_instances gi ON gi.instance_id=gb.instance_id
+                 WHERE gi.kind_id=?1 ORDER BY gb.place_id,gb.address",
+            )
+            .unwrap();
+        statement
+            .query_map(params![kind.as_str()], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap()
     }
 
     #[test]
@@ -4924,6 +5108,188 @@ mod tests {
                 0
             );
         }
+    }
+
+    #[test]
+    fn add_channel_reconciles_address_updates_and_place_moves() {
+        let store = Store::new_in_memory().unwrap();
+        let kind = GateName::new("channel-update-fixture");
+        let first_place = store
+            .create_place(Some("first"), None, "{}", None, 0)
+            .unwrap();
+        let second_place = store
+            .create_place(Some("second"), None, "{}", None, 0)
+            .unwrap();
+        let subject = store
+            .create_subject(
+                SubjectKind::Agent,
+                "fixture-agent",
+                "fixture-agent",
+                "engine",
+                Standing::Trusted,
+                0,
+            )
+            .unwrap();
+
+        store
+            .add_channel(first_place, &kind, "room:before")
+            .unwrap();
+        let old_binding = compat_bindings(&store, &kind)[0].2.clone();
+        store
+            .set_subject_route(
+                subject,
+                first_place,
+                &kind,
+                &RoutePurpose::outbound(),
+                &old_binding,
+            )
+            .unwrap();
+        store.append(first_place, &ev("first"), 1).unwrap();
+        store
+            .record_external_ref(first_place, 1, &kind, "origin-before", "in")
+            .unwrap();
+
+        store.add_channel(first_place, &kind, "room:after").unwrap();
+        let bindings = compat_bindings(&store, &kind);
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(
+            (bindings[0].0, bindings[0].1.as_str()),
+            (first_place, "room:after")
+        );
+        let replacement = bindings[0].2.clone();
+        assert_ne!(replacement, old_binding);
+        let conn = store.c();
+        assert_eq!(
+            conn.query_row(
+                "SELECT binding_id FROM subject_routes WHERE subject_id=?1 AND place_id=?2 AND kind_id=?3",
+                params![subject, first_place, kind.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            replacement
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT binding_id FROM external_refs WHERE place_id=?1 AND seq=1",
+                params![first_place],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            replacement
+        );
+        drop(conn);
+        store.append(first_place, &ev("second"), 2).unwrap();
+        store
+            .record_external_ref(first_place, 2, &kind, "origin-after", "in")
+            .unwrap();
+        store.add_channel(first_place, &kind, "room:after").unwrap();
+        assert_eq!(compat_bindings(&store, &kind).len(), 1, "idempotent replay");
+
+        // Moving an unused address removes the old place's v1 row and routes, while retaining one
+        // canonical binding at the new place.
+        let moving_kind = GateName::new("channel-place-move-fixture");
+        store
+            .add_channel(first_place, &moving_kind, "room:moving")
+            .unwrap();
+        let moving_binding = compat_bindings(&store, &moving_kind)[0].2.clone();
+        store
+            .set_subject_route(
+                subject,
+                first_place,
+                &moving_kind,
+                &RoutePurpose::outbound(),
+                &moving_binding,
+            )
+            .unwrap();
+        store
+            .add_channel(second_place, &moving_kind, "room:moving")
+            .unwrap();
+        let moved = compat_bindings(&store, &moving_kind);
+        assert_eq!(moved.len(), 1);
+        assert_eq!(
+            (moved[0].0, moved[0].1.as_str()),
+            (second_place, "room:moving")
+        );
+        let conn = store.c();
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM v1_channels WHERE gate_name=?1",
+                params![moving_kind.as_str()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM subject_routes WHERE place_id=?1 AND kind_id=?2",
+                params![first_place, moving_kind.as_str()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn add_channel_history_conflict_and_late_failure_roll_back_both_projections() {
+        let store = Store::new_in_memory().unwrap();
+        let kind = GateName::new("channel-history-fixture");
+        let first_place = store
+            .create_place(Some("first"), None, "{}", None, 0)
+            .unwrap();
+        let second_place = store
+            .create_place(Some("second"), None, "{}", None, 0)
+            .unwrap();
+        store
+            .add_channel(first_place, &kind, "room:stable")
+            .unwrap();
+        store.append(first_place, &ev("history"), 1).unwrap();
+        store
+            .record_external_ref(first_place, 1, &kind, "origin-stable", "in")
+            .unwrap();
+        assert!(store
+            .add_channel(second_place, &kind, "room:stable")
+            .is_err());
+        assert_eq!(
+            compat_bindings(&store, &kind)
+                .into_iter()
+                .map(|(place, address, _, _)| (place, address))
+                .collect::<Vec<_>>(),
+            vec![(first_place, "room:stable".to_string())]
+        );
+
+        let rollback_kind = GateName::new("channel-rollback-fixture");
+        store
+            .add_channel(first_place, &rollback_kind, "room:before")
+            .unwrap();
+        store
+            .c()
+            .execute_batch(
+                "CREATE TRIGGER reject_old_binding_delete BEFORE DELETE ON gate_bindings
+                 WHEN OLD.address='room:before'
+                 BEGIN SELECT RAISE(ABORT,'synthetic late cleanup failure'); END;",
+            )
+            .unwrap();
+        assert!(store
+            .add_channel(first_place, &rollback_kind, "room:after")
+            .is_err());
+        assert_eq!(
+            store
+                .channels_for_place(first_place)
+                .unwrap()
+                .into_iter()
+                .find(|(gate, _)| gate == &rollback_kind)
+                .map(|(_, address)| address),
+            Some("room:before".to_string())
+        );
+        assert_eq!(
+            compat_bindings(&store, &rollback_kind)
+                .into_iter()
+                .map(|(place, address, _, _)| (place, address))
+                .collect::<Vec<_>>(),
+            vec![(first_place, "room:before".to_string())]
+        );
     }
 
     #[test]

@@ -1023,6 +1023,10 @@ impl System {
     }
 
     pub fn unregister_gate_instance(&self, instance: &GateInstanceId) {
+        // Registration and removal are one ownership transition. Without the shared lock, a
+        // replacement can validate after the old entry is removed and then lose its kind/runtime
+        // indexes to the remainder of the old cleanup.
+        let _registration = self.0.gate_registration.lock().unwrap();
         let removed = self.0.gate_instances.lock().unwrap().remove(instance);
         let Some(connection) = removed else {
             return;
