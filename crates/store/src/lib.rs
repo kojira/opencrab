@@ -68,6 +68,30 @@ pub enum Ingest {
     Duplicate(Seq),
 }
 
+/// 再起動時の activity 回収結果。`Appended` のときだけ新しい event が生まれ、呼び手は
+/// 発火判定を行う。`AlreadyRecorded` / `AlreadyEnded` は再実行時の no-op。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActivityInterruption {
+    Appended { place: PlaceId, seq: Seq },
+    AlreadyRecorded { place: PlaceId, seq: Seq },
+    AlreadyEnded,
+}
+
+/// 通常の Background 決着結果。activity 終端・結果 event・provenance（必要なら offload）を
+/// 1 transaction で確定し、再実行は保存済みの同じ結果へ収束する。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackgroundSettlement {
+    Appended { place: PlaceId, seq: Seq },
+    AlreadyRecorded { place: PlaceId, seq: Seq },
+}
+
+/// Background の大きな結果を、決着と同じ transaction で保存するための入力。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewBackgroundOffload {
+    pub body: String,
+    pub truncated: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct EventRow {
     pub place: PlaceId,
@@ -248,6 +272,31 @@ pub struct ActivityRow {
     pub ended_at: Option<i64>,
     pub end_reason: Option<String>,
     pub detached_from: Option<ActivityId>,
+    /// background activity が生まれた turn の入力範囲・権限・受理 tool call。
+    /// turn activity と provenance 導入前の既存行では None。
+    pub provenance: Option<BackgroundProvenance>,
+}
+
+/// background activity の発端と、core が権限確認後に受理した tool call。
+/// range は store の通常の読み方と同じ `(from_exclusive, to_inclusive]`。
+#[derive(Clone, Debug, PartialEq)]
+pub struct BackgroundProvenance {
+    pub origin_from_exclusive: Seq,
+    pub origin_to_inclusive: Seq,
+    pub origin_standing: Standing,
+    pub tool_name: String,
+    pub tool_args: serde_json::Value,
+}
+
+/// Background の結果 event（Settled / Interrupted）と、それを生んだ activity / 発端 / tool call の対応。
+#[derive(Clone, Debug, PartialEq)]
+pub struct SettledProvenance {
+    pub activity: ActivityId,
+    pub origin_from_exclusive: Seq,
+    pub origin_to_inclusive: Seq,
+    pub origin_standing: Standing,
+    pub tool_name: String,
+    pub tool_args: serde_json::Value,
 }
 
 /// ターンの事実だけを持つ（詳細§05）。文脈の事実（範囲・切り詰め・トークン数）は
@@ -618,6 +667,15 @@ const SCHEMA: &str = r#"
               PRIMARY KEY(place_id, subject_id)
             );
 
+            -- read_seq より後の standing 区間を即応で先に読んだ事実。先頭の通常区間を捨てずに
+            -- 後続の即応区間だけを claim するための疎な既読で、read_seq が追いついたら削除する。
+            CREATE TABLE IF NOT EXISTS out_of_order_reads(
+              place_id INTEGER NOT NULL,
+              subject_id INTEGER NOT NULL,
+              seq INTEGER NOT NULL,
+              PRIMARY KEY(place_id, subject_id, seq)
+            );
+
             CREATE TABLE IF NOT EXISTS activities(
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               place_id INTEGER NOT NULL,
@@ -628,7 +686,38 @@ const SCHEMA: &str = r#"
               started_at INTEGER NOT NULL,
               ended_at INTEGER,
               end_reason TEXT,
-              detached_from INTEGER
+              detached_from INTEGER,
+              origin_from_exclusive INTEGER,
+              origin_to_inclusive INTEGER,
+              origin_standing TEXT,
+              accepted_tool_name TEXT,
+              accepted_tool_args_json TEXT
+            );
+
+            -- Background の結果（Settled と再起動時の Interrupted）は、結果本文だけでなく、発端
+            -- range・standing・受理 tool call・activity id を同じ event seq に結びつける。
+            -- events への追記とこの行は 1 transaction で行う。
+            CREATE TABLE IF NOT EXISTS settled_provenance(
+              place_id INTEGER NOT NULL,
+              seq INTEGER NOT NULL,
+              activity_id INTEGER NOT NULL,
+              origin_from_exclusive INTEGER NOT NULL,
+              origin_to_inclusive INTEGER NOT NULL,
+              origin_standing TEXT NOT NULL,
+              accepted_tool_name TEXT NOT NULL,
+              accepted_tool_args_json TEXT NOT NULL,
+              PRIMARY KEY(place_id, seq)
+            );
+            -- 1 activity の結果は 1 event だけ。再起動回収を繰り返しても Background の
+            -- Interrupted を二重に作れないことを表でも守る。
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_settled_provenance_activity
+              ON settled_provenance(activity_id);
+
+            -- provenance 導入前の schema から移行した Background の明示的な形式タグ。
+            -- NULL provenance だけでは「旧形式」と「新形式の破損」を区別できないため、移行時にだけ記録する。
+            -- 旧形式は汎用 Interrupted へ収束し、新形式の Background は引き続き完全な provenance を要求する。
+            CREATE TABLE IF NOT EXISTS legacy_background_activities(
+              activity_id INTEGER PRIMARY KEY
             );
 
             CREATE TABLE IF NOT EXISTS turn_records(
@@ -1102,6 +1191,49 @@ fn migrate(conn: &Connection) -> Result<()> {
     }
     if !column_exists(conn, "turn_records", "fired_by")? {
         conn.execute("ALTER TABLE turn_records ADD COLUMN fired_by TEXT", [])?;
+    }
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS legacy_background_activities(
+           activity_id INTEGER PRIMARY KEY
+         )",
+        [],
+    )?;
+    let provenance_columns = [
+        ("origin_from_exclusive", "INTEGER"),
+        ("origin_to_inclusive", "INTEGER"),
+        ("origin_standing", "TEXT"),
+        ("accepted_tool_name", "TEXT"),
+        ("accepted_tool_args_json", "TEXT"),
+    ];
+    let present_provenance_columns = provenance_columns
+        .iter()
+        .map(|(column, _)| column_exists(conn, "activities", column))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|present| *present)
+        .count();
+    match present_provenance_columns {
+        0 => {
+            // main の旧形式だった事実を、列追加で失う前に行単位で保存する。以後に作られる
+            // provenance 無し Background はここへ入らないため、旧形式だけを汎用中断として扱える。
+            conn.execute(
+                "INSERT OR IGNORE INTO legacy_background_activities(activity_id)
+                 SELECT id FROM activities WHERE kind='background'",
+                [],
+            )?;
+            for (column, sql_type) in provenance_columns {
+                conn.execute(
+                    &format!("ALTER TABLE activities ADD COLUMN {column} {sql_type}"),
+                    [],
+                )?;
+            }
+        }
+        5 => {}
+        count => {
+            return Err(rusqlite::Error::ToSqlConversionFailure(
+                format!("unknown activities provenance schema: found {count} of 5 columns").into(),
+            ));
+        }
     }
     // 添付列（DESIGN-images §1）。既定 '[]' で足す——添付なしの既存イベントは従来どおり読める（後方互換）。
     if !column_exists(conn, "events", "attachments_json")? {
@@ -2036,6 +2168,20 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     Ok(false)
 }
 
+fn origin_reply_to(from_exclusive: Seq, to_inclusive: Seq) -> Result<Option<Seq>> {
+    if to_inclusive < from_exclusive {
+        return Err(rusqlite::Error::ToSqlConversionFailure(
+            "activity origin range is reversed".into(),
+        ));
+    }
+    if to_inclusive == from_exclusive {
+        return Ok(None);
+    }
+    from_exclusive.checked_add(1).map(Some).ok_or_else(|| {
+        rusqlite::Error::ToSqlConversionFailure("origin range start overflow".into())
+    })
+}
+
 impl Store {
     pub fn new_in_memory() -> Result<Store> {
         let mut conn = Connection::open_in_memory()?;
@@ -2051,6 +2197,19 @@ impl Store {
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Store> {
         let mut conn = Connection::open(path)?;
         initialize_schema(&mut conn)?;
+        Ok(Store {
+            conn: Arc::new(Mutex::new(conn)),
+        })
+    }
+
+    /// Open an existing database as a non-owning observer.
+    ///
+    /// Unlike [`Store::open`], this does not initialize the schema or recover runtime state.
+    /// In particular, observing a live core must not close its `connecting`/`active` gate epochs
+    /// as though a new core process had started. SQLite read-only mode also prevents an observer
+    /// from accidentally reaching a mutating store method successfully.
+    pub fn open_read_only(path: impl AsRef<std::path::Path>) -> Result<Store> {
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         Ok(Store {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -2412,6 +2571,18 @@ impl Store {
         Ok(rows)
     }
 
+    /// Whether the place has any configured external binding, independent of connection state.
+    /// Route reads intentionally require an active epoch; this read is only for diagnosing the
+    /// otherwise silent distinction between a truly internal place and a configured place whose
+    /// live route disappeared.
+    pub fn has_gate_binding_for_place(&self, place: PlaceId) -> Result<bool> {
+        self.c().query_row(
+            "SELECT EXISTS(SELECT 1 FROM gate_bindings WHERE place_id=?1)",
+            params![place],
+            |row| row.get(0),
+        )
+    }
+
     /// Resolve an inbound address inside one concrete instance. The result is exact because
     /// `(instance_id,address)` is unique; callers never fall back to another instance of the kind.
     pub fn inbound_binding(
@@ -2626,6 +2797,288 @@ impl Store {
         )?;
         tx.commit()?;
         Ok(seq)
+    }
+
+    /// running Background を通常決着させ、結果 event・provenance（必要なら offload）を同じ
+    /// transaction で確定する。stop / deadline / success / failure の競合は、最初に commit した結果へ
+    /// 収束する。commit 後の再実行も `AlreadyRecorded` となり、結果を二重追記しない。
+    pub fn settle_background_activity(
+        &self,
+        id: ActivityId,
+        end_reason: &str,
+        content: &str,
+        offload: Option<&NewBackgroundOffload>,
+        ended_at: i64,
+        event_created_at: i64,
+    ) -> Result<BackgroundSettlement> {
+        let mut c = self.c();
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let activity = tx.query_row(
+            "SELECT id,place_id,subject_id,kind,label,deadline_at,started_at,ended_at,end_reason,detached_from,origin_from_exclusive,origin_to_inclusive,origin_standing,accepted_tool_name,accepted_tool_args_json
+             FROM activities WHERE id=?1",
+            params![id],
+            map_activity,
+        )?;
+        let existing_result: Option<(PlaceId, Seq)> = tx
+            .query_row(
+                "SELECT place_id,seq FROM settled_provenance WHERE activity_id=?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some((place, seq)) = existing_result {
+            if activity.kind != ActivityKindTag::Background
+                || activity.ended_at.is_none()
+                || activity.place != place
+            {
+                return Err(rusqlite::Error::ToSqlConversionFailure(
+                    "settled provenance does not match its background activity".into(),
+                ));
+            }
+            tx.commit()?;
+            return Ok(BackgroundSettlement::AlreadyRecorded { place, seq });
+        }
+        if activity.ended_at.is_some() {
+            return Err(rusqlite::Error::ToSqlConversionFailure(
+                "background activity ended without settled provenance".into(),
+            ));
+        }
+        if activity.kind != ActivityKindTag::Background {
+            return Err(rusqlite::Error::ToSqlConversionFailure(
+                "only background activity can be settled".into(),
+            ));
+        }
+        let provenance = activity.provenance.ok_or_else(|| {
+            rusqlite::Error::ToSqlConversionFailure(
+                "background activity has no accepted tool provenance".into(),
+            )
+        })?;
+        if provenance.origin_to_inclusive < provenance.origin_from_exclusive {
+            return Err(rusqlite::Error::ToSqlConversionFailure(
+                "settled origin range is reversed".into(),
+            ));
+        }
+
+        let changed = tx.execute(
+            "UPDATE activities SET ended_at=?2,end_reason=?3 WHERE id=?1 AND ended_at IS NULL",
+            params![id, ended_at, end_reason],
+        )?;
+        if changed != 1 {
+            return Err(rusqlite::Error::ToSqlConversionFailure(
+                "background settlement transition was lost".into(),
+            ));
+        }
+        if let Some(offload) = offload {
+            tx.execute(
+                "INSERT INTO offloads(activity_id,subject_id,place_id,body,truncated,created_at)
+                 VALUES(?1,?2,?3,?4,?5,?6)",
+                params![
+                    activity.id,
+                    activity.subject,
+                    activity.place,
+                    offload.body,
+                    offload.truncated as i64,
+                    event_created_at,
+                ],
+            )?;
+        }
+        let reply_to = origin_reply_to(
+            provenance.origin_from_exclusive,
+            provenance.origin_to_inclusive,
+        )?;
+        let seq: Seq = tx.query_row(
+            "SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE place_id=?1",
+            params![activity.place],
+            |r| r.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO events(place_id,seq,kind,author_subject_id,author_external_id,content_json,mentions_json,reply_to_seq,target_seq,for_subject_id,created_at,attachments_json)
+             VALUES(?1,?2,'settled',NULL,NULL,?3,'[]',?4,NULL,?5,?6,'[]')",
+            params![
+                activity.place,
+                seq,
+                content_to_json(&Content::text(content)),
+                reply_to,
+                activity.subject,
+                event_created_at,
+            ],
+        )?;
+        let args_json = serde_json::to_string(&provenance.tool_args)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        tx.execute(
+            "INSERT INTO settled_provenance(place_id,seq,activity_id,origin_from_exclusive,origin_to_inclusive,origin_standing,accepted_tool_name,accepted_tool_args_json)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![
+                activity.place,
+                seq,
+                activity.id,
+                provenance.origin_from_exclusive,
+                provenance.origin_to_inclusive,
+                standing_str(provenance.origin_standing),
+                provenance.tool_name,
+                args_json,
+            ],
+        )?;
+        tx.commit()?;
+        Ok(BackgroundSettlement::Appended {
+            place: activity.place,
+            seq,
+        })
+    }
+
+    /// 再起動で残った activity を閉じ、対応する Interrupted event を同じ transaction で追記する。
+    /// 新形式 Background は保存済み provenance も同じ transaction に入れる。移行時に明示分類した
+    /// 旧形式 Background だけは、provenance の無い汎用 Interrupted として同じ transaction で閉じる。
+    ///
+    /// provenance 導入後の旧処理が残し得た「activity は interrupted 済みだが結果 event は無い」
+    /// Background も、結果が未記録ならここで回収する。既に結果がある Background と、既に終わった
+    /// Turn は no-op なので、起動を繰り返しても重複しない。
+    pub fn interrupt_activity(
+        &self,
+        id: ActivityId,
+        content: &str,
+        ended_at: i64,
+        event_created_at: i64,
+    ) -> Result<ActivityInterruption> {
+        let mut c = self.c();
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let activity = tx.query_row(
+            "SELECT id,place_id,subject_id,kind,label,deadline_at,started_at,ended_at,end_reason,detached_from,origin_from_exclusive,origin_to_inclusive,origin_standing,accepted_tool_name,accepted_tool_args_json
+             FROM activities WHERE id=?1",
+            params![id],
+            map_activity,
+        )?;
+        let legacy_background = tx.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM legacy_background_activities WHERE activity_id=?1
+             )",
+            params![id],
+            |r| Ok(r.get::<_, i64>(0)? != 0),
+        )?;
+        let background = match (
+            activity.kind,
+            legacy_background,
+            activity.provenance.clone(),
+        ) {
+            (ActivityKindTag::Turn, false, None) => None,
+            (ActivityKindTag::Background, false, Some(provenance)) => Some(provenance),
+            // main 由来の旧形式だけは、provenance 導入前と同じ汎用 Interrupted にする。
+            (ActivityKindTag::Background, true, None) => None,
+            (ActivityKindTag::Background, false, None) => {
+                return Err(rusqlite::Error::ToSqlConversionFailure(
+                    "background activity has no accepted tool provenance".into(),
+                ));
+            }
+            _ => {
+                return Err(rusqlite::Error::ToSqlConversionFailure(
+                    "activity provenance does not match its stored format".into(),
+                ));
+            }
+        };
+        let existing_result: Option<(PlaceId, Seq)> = tx
+            .query_row(
+                "SELECT place_id,seq FROM settled_provenance WHERE activity_id=?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+
+        if activity.ended_at.is_some() {
+            if activity.kind == ActivityKindTag::Background
+                && activity.end_reason.as_deref() == Some("interrupted")
+            {
+                if let Some((place, seq)) = existing_result {
+                    tx.commit()?;
+                    return Ok(ActivityInterruption::AlreadyRecorded { place, seq });
+                }
+                // 旧 startup が activity だけを先に閉じて停止した中間状態。下で結果を補う。
+            } else {
+                tx.commit()?;
+                return Ok(ActivityInterruption::AlreadyEnded);
+            }
+        } else {
+            if existing_result.is_some() {
+                return Err(rusqlite::Error::ToSqlConversionFailure(
+                    "running activity already has settled provenance".into(),
+                ));
+            }
+            let changed = tx.execute(
+                "UPDATE activities SET ended_at=?2,end_reason='interrupted'
+                 WHERE id=?1 AND ended_at IS NULL",
+                params![id, ended_at],
+            )?;
+            if changed != 1 {
+                return Err(rusqlite::Error::ToSqlConversionFailure(
+                    "activity interruption transition was lost".into(),
+                ));
+            }
+        }
+
+        let reply_to = background
+            .as_ref()
+            .map(|provenance| {
+                origin_reply_to(
+                    provenance.origin_from_exclusive,
+                    provenance.origin_to_inclusive,
+                )
+            })
+            .transpose()?
+            .flatten();
+        let seq: Seq = tx.query_row(
+            "SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE place_id=?1",
+            params![activity.place],
+            |r| r.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO events(place_id,seq,kind,author_subject_id,author_external_id,content_json,mentions_json,reply_to_seq,target_seq,for_subject_id,created_at,attachments_json)
+             VALUES(?1,?2,'interrupted',NULL,NULL,?3,'[]',?4,NULL,?5,?6,'[]')",
+            params![
+                activity.place,
+                seq,
+                content_to_json(&Content::text(content)),
+                reply_to,
+                activity.subject,
+                event_created_at,
+            ],
+        )?;
+        if let Some(provenance) = background {
+            let args_json = serde_json::to_string(&provenance.tool_args)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            tx.execute(
+                "INSERT INTO settled_provenance(place_id,seq,activity_id,origin_from_exclusive,origin_to_inclusive,origin_standing,accepted_tool_name,accepted_tool_args_json)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![
+                    activity.place,
+                    seq,
+                    activity.id,
+                    provenance.origin_from_exclusive,
+                    provenance.origin_to_inclusive,
+                    standing_str(provenance.origin_standing),
+                    provenance.tool_name,
+                    args_json,
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(ActivityInterruption::Appended {
+            place: activity.place,
+            seq,
+        })
+    }
+
+    pub fn settled_provenance(
+        &self,
+        place: PlaceId,
+        seq: Seq,
+    ) -> Result<Option<SettledProvenance>> {
+        self.c()
+            .query_row(
+                "SELECT activity_id,origin_from_exclusive,origin_to_inclusive,origin_standing,accepted_tool_name,accepted_tool_args_json
+                 FROM settled_provenance WHERE place_id=?1 AND seq=?2",
+                params![place, seq],
+                map_settled_provenance,
+            )
+            .optional()
     }
 
     /// 外界識別子つきの出来事を、**1 トランザクションで**畳み・採番・追記・ref(in) 記録まで行う（詳細§04）。
@@ -3180,10 +3633,95 @@ impl Store {
     }
 
     pub fn set_read_seq(&self, place: PlaceId, subject: SubjectId, read_seq: Seq) -> Result<()> {
-        self.c().execute(
+        let mut c = self.c();
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
             "UPDATE memberships SET shared_seen_seq=?3 WHERE place_id=?1 AND subject_id=?2",
             params![place, subject, read_seq],
         )?;
+        tx.execute(
+            "DELETE FROM out_of_order_reads
+             WHERE place_id=?1 AND subject_id=?2 AND seq<=?3",
+            params![place, subject, read_seq],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// `read_seq` より後で既に読んだ event の seq。後続 standing の即応を先に claim しても、
+    /// 先頭 standing を未読のまま保持するための疎な既読である。
+    pub fn out_of_order_read_seqs(
+        &self,
+        place: PlaceId,
+        subject: SubjectId,
+        from_excl: Seq,
+        to_incl: Seq,
+    ) -> Result<Vec<Seq>> {
+        let c = self.c();
+        let mut stmt = c.prepare(
+            "SELECT seq FROM out_of_order_reads
+             WHERE place_id=?1 AND subject_id=?2 AND seq>?3 AND seq<=?4 ORDER BY seq",
+        )?;
+        let rows = stmt
+            .query_map(params![place, subject, from_excl, to_incl], |r| r.get(0))?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// 1 standing 区間を既読にする。先頭区間なら cursor を進め、直後に連続する疎な既読も
+    /// 同じ transaction で畳む。後続区間なら cursor を動かさず、各 seq を疎な既読として残す。
+    pub fn mark_read_group(
+        &self,
+        place: PlaceId,
+        subject: SubjectId,
+        seqs: &[Seq],
+        is_prefix: bool,
+    ) -> Result<()> {
+        let Some(last) = seqs.last().copied() else {
+            return Ok(());
+        };
+        let mut c = self.c();
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if is_prefix {
+            let mut cursor = last;
+            let later = {
+                let mut stmt = tx.prepare(
+                    "SELECT seq FROM out_of_order_reads
+                     WHERE place_id=?1 AND subject_id=?2 AND seq>?3 ORDER BY seq",
+                )?;
+                let rows = stmt
+                    .query_map(params![place, subject, cursor], |r| r.get::<_, Seq>(0))?
+                    .collect::<Result<Vec<_>>>()?;
+                rows
+            };
+            for seq in later {
+                if seq != cursor.saturating_add(1) {
+                    break;
+                }
+                cursor = seq;
+            }
+            tx.execute(
+                "UPDATE memberships SET shared_seen_seq=?3
+                 WHERE place_id=?1 AND subject_id=?2 AND shared_seen_seq<?3",
+                params![place, subject, cursor],
+            )?;
+            tx.execute(
+                "DELETE FROM out_of_order_reads
+                 WHERE place_id=?1 AND subject_id=?2 AND seq<=?3",
+                params![place, subject, cursor],
+            )?;
+        } else {
+            {
+                let mut stmt = tx.prepare(
+                    "INSERT OR IGNORE INTO out_of_order_reads(place_id,subject_id,seq)
+                     VALUES(?1,?2,?3)",
+                )?;
+                for seq in seqs {
+                    stmt.execute(params![place, subject, seq])?;
+                }
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -3200,11 +3738,57 @@ impl Store {
         started_at: i64,
         detached_from: Option<ActivityId>,
     ) -> Result<ActivityId> {
+        self.start_activity_with_provenance(
+            place,
+            subject,
+            kind,
+            label,
+            deadline_at,
+            started_at,
+            detached_from,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_activity_with_provenance(
+        &self,
+        place: PlaceId,
+        subject: SubjectId,
+        kind: ActivityKindTag,
+        label: Option<&str>,
+        deadline_at: i64,
+        started_at: i64,
+        detached_from: Option<ActivityId>,
+        provenance: Option<&BackgroundProvenance>,
+    ) -> Result<ActivityId> {
+        if provenance.is_some_and(|p| p.origin_to_inclusive < p.origin_from_exclusive) {
+            return Err(rusqlite::Error::ToSqlConversionFailure(
+                "activity origin range is reversed".into(),
+            ));
+        }
         let c = self.c();
+        let args_json = provenance
+            .map(|p| serde_json::to_string(&p.tool_args))
+            .transpose()
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
         c.execute(
-            "INSERT INTO activities(place_id,subject_id,kind,label,deadline_at,started_at,detached_from)
-             VALUES(?1,?2,?3,?4,?5,?6,?7)",
-            params![place, subject, atag_str(kind), label, deadline_at, started_at, detached_from],
+            "INSERT INTO activities(place_id,subject_id,kind,label,deadline_at,started_at,detached_from,origin_from_exclusive,origin_to_inclusive,origin_standing,accepted_tool_name,accepted_tool_args_json)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            params![
+                place,
+                subject,
+                atag_str(kind),
+                label,
+                deadline_at,
+                started_at,
+                detached_from,
+                provenance.map(|p| p.origin_from_exclusive),
+                provenance.map(|p| p.origin_to_inclusive),
+                provenance.map(|p| standing_str(p.origin_standing)),
+                provenance.map(|p| p.tool_name.as_str()),
+                args_json,
+            ],
         )?;
         Ok(c.last_insert_rowid())
     }
@@ -3232,7 +3816,7 @@ impl Store {
     pub fn get_activity(&self, id: ActivityId) -> Result<Option<ActivityRow>> {
         self.c()
             .query_row(
-                "SELECT id,place_id,subject_id,kind,label,deadline_at,started_at,ended_at,end_reason,detached_from
+                "SELECT id,place_id,subject_id,kind,label,deadline_at,started_at,ended_at,end_reason,detached_from,origin_from_exclusive,origin_to_inclusive,origin_standing,accepted_tool_name,accepted_tool_args_json
                  FROM activities WHERE id=?1",
                 params![id],
                 map_activity,
@@ -3243,7 +3827,7 @@ impl Store {
     pub fn all_activities(&self) -> Result<Vec<ActivityRow>> {
         let c = self.c();
         let mut stmt = c.prepare(
-            "SELECT id,place_id,subject_id,kind,label,deadline_at,started_at,ended_at,end_reason,detached_from
+            "SELECT id,place_id,subject_id,kind,label,deadline_at,started_at,ended_at,end_reason,detached_from,origin_from_exclusive,origin_to_inclusive,origin_standing,accepted_tool_name,accepted_tool_args_json
              FROM activities ORDER BY id",
         )?;
         let rows = stmt
@@ -3255,8 +3839,36 @@ impl Store {
     pub fn running_activities(&self) -> Result<Vec<ActivityRow>> {
         let c = self.c();
         let mut stmt = c.prepare(
-            "SELECT id,place_id,subject_id,kind,label,deadline_at,started_at,ended_at,end_reason,detached_from
+            "SELECT id,place_id,subject_id,kind,label,deadline_at,started_at,ended_at,end_reason,detached_from,origin_from_exclusive,origin_to_inclusive,origin_standing,accepted_tool_name,accepted_tool_args_json
              FROM activities WHERE ended_at IS NULL ORDER BY id",
+        )?;
+        let rows = stmt
+            .query_map([], map_activity)?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// 再起動で原子的に中断へ収束させる対象。通常の running 行に加え、provenance 導入後の旧処理が
+    /// activity の終端だけを確定して結果追記前に止まった Background を拾う。provenance 列の無い
+    /// main 由来の中断済み Background は、旧 startup が既に汎用 Interrupted を記録した正当な履歴なので
+    /// 再回収しない。main 由来の running Background は通常の running 行として拾い、移行時の形式タグを
+    /// `interrupt_activity` が判定する。通常実行中に中断された Turn も回収対象へ混ぜない。
+    pub fn activities_needing_interruption(&self) -> Result<Vec<ActivityRow>> {
+        let c = self.c();
+        let mut stmt = c.prepare(
+            "SELECT id,place_id,subject_id,kind,label,deadline_at,started_at,ended_at,end_reason,detached_from,origin_from_exclusive,origin_to_inclusive,origin_standing,accepted_tool_name,accepted_tool_args_json
+             FROM activities
+             WHERE ended_at IS NULL
+                OR (kind='background' AND end_reason='interrupted'
+                    AND origin_from_exclusive IS NOT NULL
+                    AND origin_to_inclusive IS NOT NULL
+                    AND origin_standing IS NOT NULL
+                    AND accepted_tool_name IS NOT NULL
+                    AND accepted_tool_args_json IS NOT NULL
+                    AND NOT EXISTS (
+                        SELECT 1 FROM settled_provenance WHERE activity_id=activities.id
+                    ))
+             ORDER BY id",
         )?;
         let rows = stmt
             .query_map([], map_activity)?
@@ -3758,6 +4370,25 @@ impl Store {
             .optional()
     }
 
+    /// The recorded direction for one gate-specific external reference.
+    ///
+    /// This is intentionally a separate query so existing callers of `external_ref_of` keep their
+    /// established tuple shape while process E2E can distinguish ingress from confirmed egress.
+    pub fn external_ref_direction(
+        &self,
+        place: PlaceId,
+        seq: Seq,
+        gate: &GateName,
+    ) -> Result<Option<String>> {
+        self.c()
+            .query_row(
+                "SELECT direction FROM v1_external_refs WHERE place_id=?1 AND seq=?2 AND gate_name=?3",
+                params![place, seq, gate.as_str()],
+                |r| r.get(0),
+            )
+            .optional()
+    }
+
     /// その場に外界識別子つきの出来事が 1 つでもあるか（宛先にできる出来事の有無・詳細§08）。
     /// 「宛先にできる出来事だけを提示する」判定に使う。
     pub fn place_has_external_refs(&self, place: PlaceId) -> Result<bool> {
@@ -3929,8 +4560,8 @@ impl Store {
 
     // ---- 退避（常時切り離しの大きな結果・案 A）----
     //
-    // 1 つの背景活動は 1 度だけ決着する（supervise_background の遷移ガード）ので、退避も活動ごとに
-    // 1 件（activity_id が主鍵）。読みは **主体で絞る**（記憶と同じ主体分離）——他人の退避を指す
+    // 1 つの背景活動は store の原子的な決着で 1 度だけ確定するので、退避も活動ごとに 1 件
+    //（activity_id が主鍵）。読みは **主体で絞る**（記憶と同じ主体分離）——他人の退避を指す
     // SQL が 0 行に落ち、呼び手はそれを「無い」として扱える。
 
     /// 決着の大きな結果を退避する（活動ごと 1 件）。二度目の挿入は主鍵衝突で失敗する——決着は
@@ -4111,6 +4742,30 @@ fn map_offload(r: &rusqlite::Row<'_>) -> rusqlite::Result<OffloadRow> {
 }
 
 fn map_activity(r: &rusqlite::Row<'_>) -> rusqlite::Result<ActivityRow> {
+    let origin_from_exclusive: Option<Seq> = r.get(10)?;
+    let origin_to_inclusive: Option<Seq> = r.get(11)?;
+    let origin_standing: Option<String> = r.get(12)?;
+    let tool_name: Option<String> = r.get(13)?;
+    let tool_args_json: Option<String> = r.get(14)?;
+    let provenance = match (
+        origin_from_exclusive,
+        origin_to_inclusive,
+        origin_standing,
+        tool_name,
+        tool_args_json,
+    ) {
+        (None, None, None, None, None) => None,
+        (Some(from), Some(to), Some(standing), Some(name), Some(args)) => {
+            Some(BackgroundProvenance {
+                origin_from_exclusive: from,
+                origin_to_inclusive: to,
+                origin_standing: standing_from(&standing)?,
+                tool_name: name,
+                tool_args: json_value_from(&args, "accepted tool args")?,
+            })
+        }
+        _ => return Err(decode_err("activity provenance", "partial row")),
+    };
     Ok(ActivityRow {
         id: r.get(0)?,
         place: r.get(1)?,
@@ -4122,6 +4777,30 @@ fn map_activity(r: &rusqlite::Row<'_>) -> rusqlite::Result<ActivityRow> {
         ended_at: r.get(7)?,
         end_reason: r.get(8)?,
         detached_from: r.get(9)?,
+        provenance,
+    })
+}
+
+fn map_settled_provenance(r: &rusqlite::Row<'_>) -> rusqlite::Result<SettledProvenance> {
+    let standing: String = r.get(3)?;
+    let args: String = r.get(5)?;
+    Ok(SettledProvenance {
+        activity: r.get(0)?,
+        origin_from_exclusive: r.get(1)?,
+        origin_to_inclusive: r.get(2)?,
+        origin_standing: standing_from(&standing)?,
+        tool_name: r.get(4)?,
+        tool_args: json_value_from(&args, "settled tool args")?,
+    })
+}
+
+fn json_value_from(json: &str, what: &str) -> rusqlite::Result<serde_json::Value> {
+    serde_json::from_str(json).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            format!("invalid {what}: {e}").into(),
+        )
     })
 }
 
@@ -4563,6 +5242,71 @@ mod tests {
                 .unwrap();
             assert_eq!(epoch, 2, "checked hello starts a new epoch after recovery");
         }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn read_only_observer_preserves_active_epoch_and_delivery_planning() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "opencrab-store-live-observer-{}-{nonce}.sqlite",
+            std::process::id()
+        ));
+        let owner = Store::open(&path).unwrap();
+        let kind = GateKindId::parse("web".to_string()).unwrap();
+        let instance = owner.seed_compatibility_instance(&kind).unwrap();
+        let subject = owner
+            .create_subject(
+                SubjectKind::Agent,
+                "fixture-agent",
+                "fixture-agent",
+                "scripted",
+                Standing::Trusted,
+                1,
+            )
+            .unwrap();
+        let place = owner
+            .create_place(Some("room:observer"), None, "{}", None, 2)
+            .unwrap();
+        owner.join(place, subject, Role::Participant, 0, 3).unwrap();
+        owner.add_channel(place, &kind, "room:observer").unwrap();
+        let spec = gate_kind_spec("web", IngressDiscovery::Prebound);
+        let epoch = owner
+            .begin_gate_connection_checked(&instance, 1, 1, &spec, 4)
+            .unwrap();
+        owner.activate_gate_connection(&instance, epoch, 5).unwrap();
+
+        let observer = Store::open_read_only(&path).unwrap();
+        let status = observer
+            .gate_status()
+            .unwrap()
+            .into_iter()
+            .find(|row| row.instance_id == instance)
+            .unwrap();
+        assert_eq!(status.connection_state.as_deref(), Some("active"));
+        assert_eq!(status.lifecycle, "running");
+
+        let route = owner
+            .gate_route(subject, place, &kind, &RoutePurpose::outbound())
+            .unwrap()
+            .expect("observer must not remove the active route");
+        let mut spoke = ev("outbound while observed");
+        spoke.kind = EventKind::Spoke;
+        spoke.author_subject = Some(subject);
+        spoke.author_external = None;
+        let seq = owner
+            .append_with_delivery_routes(place, &spoke, &[route], 6)
+            .unwrap();
+        assert_eq!(
+            observer.deliveries_for(place, seq).unwrap(),
+            vec![(kind, "pending".into())]
+        );
+
+        drop(observer);
+        drop(owner);
         std::fs::remove_file(path).unwrap();
     }
 
@@ -5392,6 +6136,11 @@ mod tests {
         // seq=1 に note1X を張る。
         s.append(p, &ev("A"), 1).unwrap();
         s.record_external_ref(p, 1, &g, "note1X", "in").unwrap();
+        assert_eq!(
+            s.external_ref_direction(p, 1, &g).unwrap().as_deref(),
+            Some("in"),
+            "direction is observable without changing external_ref_of's tuple"
+        );
         // 別の seq=2 に同じ note1X を張ろうとすると、表が弾く（黙って二重にならない）。
         s.append(p, &ev("B"), 2).unwrap();
         assert!(
@@ -5534,6 +6283,159 @@ mod tests {
         assert!(s.deliveries_for(p, seq2).unwrap().is_empty());
     }
 
+    #[test]
+    fn background_settlement_roundtrips_typed_args_and_empty_range() {
+        let s = Store::new_in_memory().unwrap();
+        let place = s.create_place(Some("p"), None, "{}", None, 0).unwrap();
+        let subject = s
+            .create_subject(SubjectKind::Agent, "A", "A", "engine", Standing::Trusted, 0)
+            .unwrap();
+        let activity_provenance = BackgroundProvenance {
+            origin_from_exclusive: 0,
+            origin_to_inclusive: 0,
+            origin_standing: Standing::Owner,
+            tool_name: "synthetic-tool".into(),
+            tool_args: serde_json::json!({
+                "flag": true,
+                "count": 2,
+                "items": ["a", "b"]
+            }),
+        };
+        let activity = s
+            .start_activity_with_provenance(
+                place,
+                subject,
+                ActivityKindTag::Background,
+                Some("synthetic-tool"),
+                10,
+                1,
+                None,
+                Some(&activity_provenance),
+            )
+            .unwrap();
+        let first = s
+            .settle_background_activity(activity, "done", "synthetic result", None, 2, 3)
+            .unwrap();
+        let seq = match first {
+            BackgroundSettlement::Appended { place: p, seq } => {
+                assert_eq!(p, place);
+                seq
+            }
+            other => panic!("first settlement must append: {other:?}"),
+        };
+        let settled_provenance = SettledProvenance {
+            activity,
+            origin_from_exclusive: activity_provenance.origin_from_exclusive,
+            origin_to_inclusive: activity_provenance.origin_to_inclusive,
+            origin_standing: activity_provenance.origin_standing,
+            tool_name: activity_provenance.tool_name.clone(),
+            tool_args: activity_provenance.tool_args.clone(),
+        };
+        assert_eq!(
+            s.get_activity(activity).unwrap().unwrap().provenance,
+            Some(activity_provenance)
+        );
+        assert_eq!(
+            s.settled_provenance(place, seq).unwrap(),
+            Some(settled_provenance)
+        );
+        assert_eq!(
+            s.get_event(place, seq).unwrap().unwrap().reply_to,
+            None,
+            "empty origin range must not invent a reply target"
+        );
+    }
+
+    #[test]
+    fn interrupt_activity_atomically_closes_and_appends_once() {
+        let s = Store::new_in_memory().unwrap();
+        let place = s.create_place(Some("p"), None, "{}", None, 0).unwrap();
+        let subject = s
+            .create_subject(SubjectKind::Agent, "A", "A", "engine", Standing::Trusted, 0)
+            .unwrap();
+        let activity_provenance = BackgroundProvenance {
+            origin_from_exclusive: 0,
+            origin_to_inclusive: 0,
+            origin_standing: Standing::Owner,
+            tool_name: "synthetic-tool".into(),
+            tool_args: serde_json::json!({"mode": "bounded"}),
+        };
+        let activity = s
+            .start_activity_with_provenance(
+                place,
+                subject,
+                ActivityKindTag::Background,
+                None,
+                10,
+                1,
+                None,
+                Some(&activity_provenance),
+            )
+            .unwrap();
+
+        let first = s
+            .interrupt_activity(activity, "synthetic interruption", 2, 3)
+            .unwrap();
+        let seq = match first {
+            ActivityInterruption::Appended { place: p, seq } => {
+                assert_eq!(p, place);
+                seq
+            }
+            other => panic!("first interruption must append: {other:?}"),
+        };
+        assert_eq!(
+            s.get_activity(activity)
+                .unwrap()
+                .unwrap()
+                .end_reason
+                .as_deref(),
+            Some("interrupted")
+        );
+        assert_eq!(
+            s.settled_provenance(place, seq).unwrap().unwrap().activity,
+            activity
+        );
+
+        assert_eq!(
+            s.interrupt_activity(activity, "must not be appended", 4, 5)
+                .unwrap(),
+            ActivityInterruption::AlreadyRecorded { place, seq }
+        );
+        assert_eq!(s.latest_seq(place).unwrap(), seq);
+    }
+
+    #[test]
+    fn new_background_without_provenance_is_not_treated_as_legacy() {
+        let s = Store::new_in_memory().unwrap();
+        let place = s.create_place(Some("p"), None, "{}", None, 0).unwrap();
+        let subject = s
+            .create_subject(SubjectKind::Agent, "A", "A", "engine", Standing::Trusted, 0)
+            .unwrap();
+        let activity = s
+            .start_activity(
+                place,
+                subject,
+                ActivityKindTag::Background,
+                None,
+                10,
+                1,
+                None,
+            )
+            .unwrap();
+
+        let error = s
+            .interrupt_activity(activity, "must fail loudly", 2, 3)
+            .expect_err("unmarked new-format Background must require provenance");
+        assert!(
+            error
+                .to_string()
+                .contains("background activity has no accepted tool provenance"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(s.get_activity(activity).unwrap().unwrap().ended_at, None);
+        assert_eq!(s.latest_seq(place).unwrap(), 0);
+    }
+
     // name/persona 分離の移行（統括裁定）。旧 DB（name 列なし）に name を足し、既存 persona からコピーする。
     // 冪等: 2 回目は列が既にあり、既に非空の name は上書きしない。
     #[test]
@@ -5551,7 +6453,10 @@ mod tests {
              );
              CREATE TABLE turn_records(id INTEGER PRIMARY KEY, withheld_text TEXT, tool_lines TEXT);
              -- 旧 events（attachments_json が無い）。migrate が列を足す（本番は SCHEMA が先に作る）。
-             CREATE TABLE events(place_id INTEGER NOT NULL, seq INTEGER NOT NULL, PRIMARY KEY(place_id, seq));",
+             CREATE TABLE events(place_id INTEGER NOT NULL, seq INTEGER NOT NULL, PRIMARY KEY(place_id, seq));
+             -- 旧 activities（provenance 列が無い）。
+             CREATE TABLE activities(id INTEGER PRIMARY KEY, kind TEXT NOT NULL);
+             INSERT INTO activities(id,kind) VALUES(1,'background');",
         )
         .unwrap();
         conn.execute(
@@ -5576,6 +6481,18 @@ mod tests {
             column_exists(&conn, "subjects", "name").unwrap(),
             "name 列が足される"
         );
+        assert!(
+            column_exists(&conn, "activities", "accepted_tool_args_json").unwrap(),
+            "activity provenance 列が足される"
+        );
+        let legacy_backgrounds: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM legacy_background_activities WHERE activity_id=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_backgrounds, 1, "旧 Background の形式を保存する");
         let name: String = conn
             .query_row("SELECT name FROM subjects WHERE id=1", [], |r| r.get(0))
             .unwrap();
@@ -5591,6 +6508,38 @@ mod tests {
         assert_eq!(
             name2, "別の表示名",
             "冪等: 2 回目は既存 name を上書きしない"
+        );
+    }
+
+    #[test]
+    fn migration_rejects_unknown_partial_provenance_schema() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE turn_records(
+               id INTEGER PRIMARY KEY,
+               failure_detail TEXT,
+               withheld_text TEXT,
+               tool_lines TEXT,
+               fired_by TEXT
+             );
+             CREATE TABLE activities(
+               id INTEGER PRIMARY KEY,
+               kind TEXT NOT NULL,
+               origin_from_exclusive INTEGER
+             );",
+        )
+        .unwrap();
+
+        let error = migrate(&conn).expect_err("partial provenance schema is not a known format");
+        assert!(
+            error
+                .to_string()
+                .contains("unknown activities provenance schema: found 1 of 5 columns"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !column_exists(&conn, "activities", "accepted_tool_args_json").unwrap(),
+            "unknown format must not be completed as though it were legacy"
         );
     }
 

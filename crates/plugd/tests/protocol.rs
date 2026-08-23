@@ -16,7 +16,7 @@ use opencrab_port::{
     TransportDeliveryResult,
 };
 use opencrab_social_runtime::{Config, Policy, System};
-use opencrab_store::Store;
+use opencrab_store::{NewEvent, Store};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1798,6 +1798,51 @@ async fn read_returns_the_whole_conversation() {
     assert!(ok.get("next").is_none(), "続きが無ければ next は返らない");
 }
 
+// #751: plugd は core の表示判断を変えず、内部イベントの marker を線へ写す。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn read_serializes_core_internal_marker() {
+    let h = build();
+    let g = TestGate::connect(&h.plugd);
+    g.hello_ok("web", "room:.+", json!([]), json!([]), json!([]))
+        .await;
+    let place = h
+        .sys
+        .create_place(Some("room:main"), None, &Policy::default(), None);
+    h.sys.bind_place(place, "web", "room:main").await.unwrap();
+
+    for (index, kind) in [EventKind::Said, EventKind::Settled]
+        .into_iter()
+        .enumerate()
+    {
+        h.sys
+            .store()
+            .append(
+                place,
+                &NewEvent {
+                    kind,
+                    author_subject: None,
+                    author_external: None,
+                    content: Content::text(format!("synthetic event {index}")),
+                    mentions: vec![],
+                    reply_to: None,
+                    target: None,
+                    for_subject: None,
+                    attachments: vec![],
+                },
+                index as i64,
+            )
+            .unwrap();
+    }
+
+    g.send(json!({"id":"r1","m":"read","address":"room:main","from":1}));
+    assert!(g.wait_for(|lines| read_ok(lines, "r1").is_some()).await);
+    let ok = read_ok(&g.log(), "r1").unwrap();
+    let events = ok.get("events").and_then(Value::as_array).unwrap();
+    assert_eq!(events.len(), 2, "read does not delete the internal row");
+    assert_eq!(events[0].get("internal"), Some(&json!(false)));
+    assert_eq!(events[1].get("internal"), Some(&json!(true)));
+}
+
 // 範囲と続きの扱い（プロトコル§02）: limit で切り、続きがあれば next、尽きたら next 無し。
 // limit の丸め: 上限（500）を超える指定は上限に丸める。
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -2094,6 +2139,178 @@ async fn liar_delivered_true_is_only_a_record() {
             .await,
         "配送は記録される（§09 の「記録≠証拠」）: {:?}",
         h.sys.store().deliveries_for(place, 2)
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn provision_materializes_compatibility_route_before_hello() {
+    let h = build();
+    let kind = GateName::new("nostr");
+    let a = h.sys.create_subject(
+        SubjectKind::Agent,
+        "A",
+        "A",
+        opencrab_port::Standing::Trusted,
+    );
+    let place = h.sys.create_place(
+        Some("p"),
+        None,
+        &Policy::immediate_on(&[Property::Direct]).with_default(a),
+        None,
+    );
+    h.sys.join(place, a, Role::Participant);
+    h.sys
+        .provision_channel(place, kind.as_str(), "filter:x")
+        .unwrap();
+
+    // Expose the configured selection without running hello reconciliation. Route reads still
+    // require a live epoch, so merely provisioning cannot send through a disconnected gate.
+    let instance = h
+        .sys
+        .store()
+        .compatibility_instance(&kind)
+        .unwrap()
+        .unwrap();
+    let epoch = h
+        .sys
+        .store()
+        .begin_gate_connection(&instance, 1, 1)
+        .unwrap();
+    h.sys
+        .store()
+        .activate_gate_connection(&instance, epoch, 2)
+        .unwrap();
+    assert!(h
+        .sys
+        .store()
+        .gate_route(a, place, &kind, &RoutePurpose::outbound())
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn checked_hello_activates_connection_and_plans_spoke_delivery() {
+    let h = build();
+    let a = h.sys.create_subject(
+        SubjectKind::Agent,
+        "A",
+        "A",
+        opencrab_port::Standing::Trusted,
+    );
+    let place = h.sys.create_place(
+        Some("p"),
+        None,
+        &Policy::immediate_on(&[Property::Direct]).with_default(a),
+        None,
+    );
+    h.sys.join(place, a, Role::Participant);
+    h.sys.provision_channel(place, "nostr", "filter:x").unwrap();
+
+    let g = TestGate::connect(&h.plugd);
+    g.hello_ok(
+        "nostr",
+        "^(npub1[a-z0-9]+|filter:.+)$",
+        json!(["say", "react", "boost", "quote", "retract"]),
+        json!([]),
+        json!([{
+            "name": "nostr-whoami",
+            "description": "synthetic identity",
+            "params": {"type": "object", "properties": {}, "required": []}
+        }]),
+    )
+    .await;
+    let status = h
+        .sys
+        .store()
+        .gate_status()
+        .unwrap()
+        .into_iter()
+        .find(|row| row.kind_id.as_str() == "nostr")
+        .expect("checked hello has a canonical connection row");
+    assert_eq!(status.connection_state.as_deref(), Some("active"));
+    assert_eq!(status.lifecycle, "running");
+    assert!(g.wait_for(|l| find_msg(l, "bind").is_some()).await);
+    assert!(h
+        .sys
+        .store()
+        .gate_route(
+            a,
+            place,
+            &GateName::new("nostr"),
+            &RoutePurpose::tool("nostr-whoami").unwrap(),
+        )
+        .unwrap()
+        .is_some());
+
+    h.eng.push(Step::say_done("preprovisioned reply"));
+    g.send(json!({"id":"e1","m":"event","kind":"said","address":"filter:x","author":{"id":"u"},"content":{"text":"go"}}));
+
+    assert!(
+        g.wait_for(|l| find_msg(l, "effect").is_some()).await,
+        "preprovisioned route must deliver after hello: {:?}",
+        g.log()
+    );
+    assert!(
+        g.wait_for(|_| !h.sys.store().deliveries_for(place, 2).unwrap().is_empty())
+            .await,
+        "accepted hello must remain active while the Spoke delivery is planned: {:?}",
+        h.sys.store().deliveries_for(place, 2)
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn prebound_event_can_arrive_while_bind_ack_is_pending() {
+    let h = build();
+    let kind = GateName::new("nostr");
+    let a = h.sys.create_subject(
+        SubjectKind::Agent,
+        "A",
+        "A",
+        opencrab_port::Standing::Trusted,
+    );
+    h.sys.add_identity(a, kind.as_str(), "npub1agent");
+    let place = h.sys.create_place(
+        Some("p"),
+        None,
+        &Policy::immediate_on(&[Property::MentionsMe]).with_default(a),
+        None,
+    );
+    h.sys.join(place, a, Role::Participant);
+    h.sys
+        .provision_channel(place, kind.as_str(), "filter:x")
+        .unwrap();
+
+    let g = TestGate::connect(&h.plugd);
+    g.set_cfg(|cfg| cfg.auto = false);
+    g.hello_ok(
+        kind.as_str(),
+        "filter:.+",
+        json!(["say"]),
+        json!([]),
+        json!([]),
+    )
+    .await;
+    assert!(
+        g.wait_for(|log| find_msg(log, "bind").is_some()).await,
+        "prebound gate receives bind after checked hello"
+    );
+
+    h.eng.push(Step::say_done("reply before bind ack"));
+    g.send(json!({
+        "id":"e-before-bind-ack",
+        "m":"event",
+        "kind":"said",
+        "address":"filter:x",
+        "author":{"id":"npub1poster"},
+        "content":{"text":"mention"},
+        "mentions":["npub1agent"],
+        "origin":"note1incoming"
+    }));
+
+    assert!(
+        g.wait_for(|log| find_msg(log, "effect").is_some()).await,
+        "checked hello and provisioned binding must accept and route an event before bind ack: {:?}",
+        g.log()
     );
 }
 

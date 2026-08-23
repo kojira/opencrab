@@ -1,242 +1,639 @@
-//! 実リレーで Nostr の場を**通しで**動かす E2E（タスク#1・配線漏れの是正の検証）。ネットワークに触るので
-//! 既定の `cargo test` を汚さないよう `#[ignore]`。設計で一番新しいところ——「流れてくるものが溜まり、
-//! メンションと返信だけ即応、残りは窓でまとめて 1 ターン、取りに行かない」——が、**生きた系で**動くことを示す。
+//! Nostr end-to-end tests over real processes, a real Unix socket, and a synthetic WebSocket relay.
 //!
-//! これは「決定的テストの中にしか無い」機構を、実物の配線（設定→場→ゲート→実リレー）で走らせる。
-//!
-//! 走らせ方（要: 事前に nostr-gate をビルド）:
-//! ```sh
-//!   export CARGO_TARGET_DIR=$PWD/.cargo-target   # 内蔵ディスクを使わない
-//!   cargo build -p opencrab-nostr-gate --bin nostr-gate
-//!   E2E_NOSTR_GATE_BIN=$PWD/.cargo-target/debug/nostr-gate \
-//!   E2E_RELAY=wss://yabu.me \
-//!     cargo test -p opencrab-app --test nostr_e2e -- --ignored --nocapture
-//! ```
-//!
-//! 鍵の安全: ゲートは**起動のたびに使い捨て鍵を生成**し、その npub を stderr に出す（本番の鍵は一切読まない）。
-//! 投稿側の鍵もこのテストプロセス内で毎回生成する使い捨て。本番の身元は構造的に紛れ込まない。
+//! Every case starts `opencrab-social-runtime` and `nostr-gate-e2e` from this package. The relay is
+//! deliberately tiny (REQ/EVENT/OK/EOSE), but it is a real TCP/WebSocket peer. No live relay, LLM,
+//! key, npub, or event id is reused: both Nostr identities are generated for each test.
 
 use futures_util::{SinkExt, StreamExt};
-use opencrab_app::{bind_unix, EchoEngine, Host, PlaceSpec};
 use opencrab_nostr_gate::nostr::{self, Key};
-use opencrab_nostr_gate::relay::{self, RelayMsg};
-use opencrab_port::{EventKind, GateName, Property};
-use opencrab_social_runtime::{ImmediateFrom, Policy};
-use opencrab_store::Store;
-use serde_json::json;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use opencrab_port::{EventKind, GateName};
+use opencrab_store::{Store, TurnRecordRow};
+use serde_json::{json, Value};
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tokio::net::TcpListener;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 
 const NOSTR: &str = "nostr";
-const BATCH_MS: i64 = 6000;
+const TIMEOUT: Duration = Duration::from_secs(15);
 
-/// この場（nostr）の spoke（エージェントの発話＝ターンが起きた印）の数を数える。
-fn spoke_count(host: &Host, address: &str) -> usize {
-    let page = host
-        .sys
-        .read_log(&GateName::new(NOSTR), address, 1, 500)
-        .expect("read_log");
-    page.events
-        .iter()
-        .filter(|e| e.kind == EventKind::Spoke)
-        .count()
-}
+struct Proc(Child);
 
-async fn wait(ms: u64) {
-    tokio::time::sleep(Duration::from_millis(ms)).await;
-}
-
-/// リレーへ 1 件発行し、その id への OK（真）を待つ。失敗は panic（E2E なので明示的に落とす）。
-async fn publish(
-    sink: &mut (impl SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin),
-    stream: &mut (impl StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin),
-    id_hex: &str,
-    event: &serde_json::Value,
-    label: &str,
-) {
-    sink.send(relay::event_frame(event))
-        .await
-        .expect("send EVENT");
-    loop {
-        let text = match tokio::time::timeout(Duration::from_secs(20), stream.next()).await {
-            Ok(Some(Ok(Message::Text(t)))) => t,
-            Ok(Some(Ok(Message::Ping(p)))) => {
-                let _ = sink.send(Message::Pong(p)).await;
-                continue;
-            }
-            Ok(Some(Ok(_))) => continue,
-            other => panic!("{label}: リレーからの OK を待てなかった: {other:?}"),
-        };
-        if let RelayMsg::Ok { id, ok, msg } = relay::parse_relay(&text) {
-            if id == id_hex {
-                assert!(ok, "{label}: リレーが発行を拒否した: {msg}");
-                eprintln!("== {label}: relay OK");
-                return;
-            }
-        }
+impl Drop for Proc {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
-#[ignore]
-async fn nostr_place_accumulates_fires_immediate_on_mention_and_batches() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let relay_url = std::env::var("E2E_RELAY").unwrap_or_else(|_| "wss://yabu.me".to_string());
-    let gate_bin = std::env::var("E2E_NOSTR_GATE_BIN")
-        .expect("E2E_NOSTR_GATE_BIN（nostr-gate バイナリのパス）を設定して走らせる（ヘッダ参照）");
+struct E2eScratch {
+    path: PathBuf,
+    _temporary: Option<tempfile::TempDir>,
+}
 
-    // --- core をこのプロセス内で起こす（EchoEngine・実ソケットでプラグインを受ける）。---
-    let scratch = std::env::temp_dir().join(format!(
-        "opencrab-nostr-gate-e2e-{}.sock",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&scratch);
-    let store = Store::new_in_memory().expect("store");
-    let host = Host::boot_with_engine(store, Arc::new(EchoEngine));
-    let listener = bind_unix(&scratch).expect("bind unix");
-    let serve_host = host.clone();
-    tokio::spawn(async move {
-        let _ = serve_host.serve_unix(listener).await;
-    });
+impl E2eScratch {
+    fn new() -> Self {
+        let temporary = tempfile::Builder::new()
+            .prefix("ne2e-")
+            .tempdir_in(bin_dir())
+            .expect("create short E2E directory");
+        let path = temporary.path().to_path_buf();
+        if std::env::var("OPENCRAB_E2E_KEEP_ARTIFACTS").as_deref() == Ok("1") {
+            let path = temporary.keep();
+            eprintln!("[nostr-e2e] preserving artifacts at {}", path.display());
+            Self {
+                path,
+                _temporary: None,
+            }
+        } else {
+            Self {
+                path,
+                _temporary: Some(temporary),
+            }
+        }
+    }
 
-    // --- 実プロセスの nostr-gate を起動（使い捨て鍵を生成・npub を stderr に出す）。---
-    let mut child = tokio::process::Command::new(&gate_bin)
-        .arg(scratch.to_str().unwrap())
-        .env("NOSTR_GATE_RELAY", &relay_url)
-        .stderr(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn nostr-gate");
-    let stderr = child.stderr.take().unwrap();
-    let mut lines = BufReader::new(stderr).lines();
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
 
-    // 使い捨て npub を stderr から読む（本番の鍵でないことをオペレータが確認できる印・そのものを掴む）。
-    let gate_npub = {
-        let read = async {
-            while let Ok(Some(line)) = lines.next_line().await {
-                eprintln!("[gate] {line}");
-                if let Some(pos) = line.find("npub1") {
-                    return line[pos..].split_whitespace().next().unwrap().to_string();
+struct SyntheticRelay {
+    url: String,
+    incoming: mpsc::UnboundedSender<Value>,
+    subscriptions: mpsc::UnboundedReceiver<Value>,
+    outgoing: Arc<Mutex<Vec<Value>>>,
+    task: JoinHandle<()>,
+}
+
+impl Drop for SyntheticRelay {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+impl SyntheticRelay {
+    async fn start(log_path: &Path) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind synthetic relay");
+        let address = listener.local_addr().expect("relay local address");
+        let (incoming_tx, mut incoming_rx) = mpsc::unbounded_channel::<Value>();
+        let (subscription_tx, subscription_rx) = mpsc::unbounded_channel::<Value>();
+        let outgoing = Arc::new(Mutex::new(Vec::new()));
+        let captured = outgoing.clone();
+        let mut log = std::fs::File::create(log_path)
+            .unwrap_or_else(|error| panic!("create relay log {}: {error}", log_path.display()));
+        let task = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.expect("accept nostr-gate");
+            writeln!(log, "accepted websocket peer").expect("write relay log");
+            let ws = tokio_tungstenite::accept_async(tcp)
+                .await
+                .expect("WebSocket handshake");
+            let (mut sink, mut stream) = ws.split();
+            let mut subid: Option<String> = None;
+            loop {
+                tokio::select! {
+                    maybe_event = incoming_rx.recv() => {
+                        let Some(event) = maybe_event else { break };
+                        let id = subid.as_deref().expect("test sent EVENT before gate REQ");
+                        writeln!(log, "relay -> gate: {}", json!(["EVENT", id, &event])).expect("write relay log");
+                        sink.send(Message::Text(json!(["EVENT", id, event]).to_string()))
+                            .await
+                            .expect("send inbound EVENT");
+                    }
+                    maybe_message = stream.next() => {
+                        let Some(message) = maybe_message else { break };
+                        match message.expect("read gate relay frame") {
+                            Message::Text(text) => {
+                                writeln!(log, "gate -> relay: {text}").expect("write relay log");
+                                let frame: Value = serde_json::from_str(text.as_ref())
+                                    .expect("gate sent JSON relay frame");
+                                let items = frame.as_array().expect("relay frame is array");
+                                match items.first().and_then(Value::as_str) {
+                                    Some("REQ") => {
+                                        let id = items.get(1).and_then(Value::as_str)
+                                            .expect("REQ subid").to_string();
+                                        let filter = items.get(2).cloned().expect("REQ filter");
+                                        subid = Some(id.clone());
+                                        subscription_tx.send(filter).expect("record REQ");
+                                        sink.send(Message::Text(json!(["EOSE", id]).to_string()))
+                                            .await
+                                            .expect("send EOSE");
+                                    }
+                                    Some("EVENT") => {
+                                        let event = items.get(1).cloned().expect("EVENT body");
+                                        let id = event.get("id").and_then(Value::as_str)
+                                            .expect("outbound event id").to_string();
+                                        captured.lock().unwrap().push(event);
+                                        sink.send(Message::Text(json!(["OK", id, true, "stored"]).to_string()))
+                                            .await
+                                            .expect("send OK");
+                                    }
+                                    Some("CLOSE") => {}
+                                    other => panic!("unexpected relay frame: {other:?}: {frame}"),
+                                }
+                            }
+                            Message::Ping(payload) => {
+                                sink.send(Message::Pong(payload)).await.expect("send pong");
+                            }
+                            Message::Close(_) => break,
+                            _ => {}
+                        }
+                    }
                 }
             }
-            panic!("gate stderr に npub が出なかった");
-        };
-        tokio::time::timeout(Duration::from_secs(10), read)
+        });
+        Self {
+            url: format!("ws://{address}"),
+            incoming: incoming_tx,
+            subscriptions: subscription_rx,
+            outgoing,
+            task,
+        }
+    }
+
+    async fn wait_for_hello_ready_subscription(&mut self) -> Value {
+        tokio::time::timeout(TIMEOUT, self.subscriptions.recv())
             .await
-            .expect("npub を待てなかった")
-    };
-    eprintln!("== ゲートの使い捨て npub（エージェントの Nostr 上の宛先）= {gate_npub}");
-    // 残りの stderr は捨てずに流し続ける（証跡）。
-    tokio::spawn(async move {
-        while let Ok(Some(line)) = lines.next_line().await {
-            eprintln!("[gate] {line}");
+            .expect("nostr-gate did not complete core hello and send REQ")
+            .expect("synthetic relay stopped before REQ")
+    }
+
+    fn publish(&self, event: Value) {
+        self.incoming
+            .send(event)
+            .expect("synthetic relay task stopped");
+    }
+
+    fn posts(&self) -> Vec<Value> {
+        self.outgoing.lock().unwrap().clone()
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Case {
+    Reply,
+    History,
+    NoReply,
+    PrefixedNoReply,
+    ToolThenReply,
+    PlaintextToolSettledReply,
+}
+
+impl Case {
+    fn script(self) -> &'static str {
+        match self {
+            Case::Reply => "reply",
+            Case::History => "history",
+            Case::NoReply => "no_reply",
+            Case::PrefixedNoReply => "prefixed_no_reply",
+            Case::ToolThenReply => "tool_then_reply",
+            Case::PlaintextToolSettledReply => "plaintext_tool_settled_reply",
+        }
+    }
+
+    fn expected_reply(self) -> Option<&'static str> {
+        match self {
+            Case::Reply => Some("mock reply"),
+            Case::History => Some("mock remembered synthetic history seed"),
+            Case::ToolThenReply => Some("mock reply after tool result"),
+            Case::PlaintextToolSettledReply => {
+                Some("mock reply after settled plaintext tool result")
+            }
+            Case::NoReply | Case::PrefixedNoReply => None,
+        }
+    }
+
+    fn first_input(self) -> String {
+        match self {
+            Case::History => "synthetic history seed".to_string(),
+            other => format!("synthetic mention for {}", other.script()),
+        }
+    }
+}
+
+fn bin_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_opencrab-social-runtime"))
+        .parent()
+        .expect("core binary parent")
+        .to_path_buf()
+}
+
+fn drain_stderr(stderr: std::process::ChildStderr, name: &'static str, log_path: PathBuf) {
+    std::thread::spawn(move || {
+        let mut log = std::fs::File::create(&log_path)
+            .unwrap_or_else(|error| panic!("create child log {}: {error}", log_path.display()));
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            eprintln!("[{name}] {line}");
+            writeln!(log, "{line}").expect("write child log");
         }
     });
+}
 
-    // gate が hello を送って core に登録されるまで待つ。
-    for _ in 0..50 {
-        if host.sys.gate_spec(&GateName::new(NOSTR)).is_some() {
-            break;
+fn spawn_gate(socket: &Path, relay_url: &str, log_path: &Path) -> (Proc, String) {
+    let child = Command::new(env!("CARGO_BIN_EXE_nostr-gate-e2e"))
+        .arg(socket)
+        .env("NOSTR_GATE_RELAY", relay_url)
+        .env_remove("NOSTR_GATE_NSEC")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn nostr-gate");
+    let mut proc = Proc(child);
+    let stderr = proc.0.stderr.take().expect("gate stderr");
+    let log_path = log_path.to_path_buf();
+    let (npub_tx, npub_rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut log = std::fs::File::create(&log_path)
+            .unwrap_or_else(|error| panic!("create gate log {}: {error}", log_path.display()));
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            eprintln!("[nostr-gate] {line}");
+            writeln!(log, "{line}").expect("write gate log");
+            if let Some(npub) = line
+                .split_whitespace()
+                .find(|word| word.starts_with("npub1"))
+            {
+                let _ = npub_tx.try_send(npub.to_string());
+            }
         }
-        wait(100).await;
+    });
+    let npub = npub_rx
+        .recv_timeout(TIMEOUT)
+        .expect("nostr-gate did not report its generated npub");
+    (proc, npub)
+}
+
+fn spawn_core(socket: &Path, db: &Path, places: &Path, script: &str, log_path: &Path) -> Proc {
+    let child = Command::new(env!("CARGO_BIN_EXE_opencrab-social-runtime"))
+        .arg(socket)
+        .arg(db)
+        .env("OPENCRAB_PLACES", places)
+        .env("OPENCRAB_LLM_PROVIDER", "mock")
+        .env("OPENCRAB_MOCK_LLM_SCRIPT", script)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn opencrab-social-runtime");
+    let mut proc = Proc(child);
+    drain_stderr(
+        proc.0.stderr.take().expect("core stderr"),
+        "core",
+        log_path.to_path_buf(),
+    );
+    proc
+}
+
+async fn open_store(path: &Path) -> Store {
+    let start = Instant::now();
+    loop {
+        if path.exists() {
+            // The child core owns startup recovery. This process is only a live observer: using
+            // Store::open here would treat the active child epoch as stale and close it.
+            if let Ok(store) = Store::open_read_only(path) {
+                return store;
+            }
+        }
+        assert!(
+            start.elapsed() < TIMEOUT,
+            "core database did not become readable"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
+}
+
+fn find_place(store: &Store, address: &str) -> Option<i64> {
+    store.all_open_places().ok()?.into_iter().find(|place| {
+        store
+            .get_place(*place)
+            .ok()
+            .flatten()
+            .and_then(|row| row.address)
+            .as_deref()
+            == Some(address)
+    })
+}
+
+async fn wait_for_turn(store: &Store, place: i64) -> TurnRecordRow {
+    let start = Instant::now();
+    loop {
+        if let Ok(records) = store.turn_records(place) {
+            if let Some(record) = records.last() {
+                return record.clone();
+            }
+        }
+        assert!(start.elapsed() < TIMEOUT, "turn record was not written");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn wait_for_turns(store: &Store, place: i64, count: usize) -> Vec<TurnRecordRow> {
+    let start = Instant::now();
+    loop {
+        if let Ok(records) = store.turn_records(place) {
+            if records.len() >= count {
+                return records;
+            }
+        }
+        assert!(
+            start.elapsed() < TIMEOUT,
+            "expected {count} turn records were not written"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn wait_for_post(relay: &SyntheticRelay, store: &Store, place: i64) -> Value {
+    let start = Instant::now();
+    loop {
+        if let Some(event) = relay.posts().first() {
+            return event.clone();
+        }
+        assert!(
+            !relay.task.is_finished(),
+            "synthetic relay stopped before an outbound post; turns={:?}; events={:?}",
+            store.turn_records(place),
+            store.read_range(place, 0, store.latest_seq(place).unwrap_or(0))
+        );
+        assert!(
+            start.elapsed() < TIMEOUT,
+            "gate did not publish to relay; turns={:?}; events={:?}",
+            store.turn_records(place),
+            store.read_range(place, 0, store.latest_seq(place).unwrap_or(0))
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn wait_for_out_ref(store: &Store, place: i64, expected_text: &str) -> i64 {
+    let gate = GateName::new(NOSTR);
+    let start = Instant::now();
+    loop {
+        if let Ok(latest) = store.latest_seq(place) {
+            for seq in 1..=latest {
+                let event = match store.get_event(place, seq) {
+                    Ok(Some(event)) => event,
+                    _ => continue,
+                };
+                if event.kind == EventKind::Spoke
+                    && event.content.text.as_deref() == Some(expected_text)
+                    && store
+                        .external_ref_direction(place, seq, &gate)
+                        .ok()
+                        .flatten()
+                        .as_deref()
+                        == Some("out")
+                {
+                    return seq;
+                }
+            }
+        }
+        assert!(
+            start.elapsed() < TIMEOUT,
+            "outbound external ref was not recorded"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn run_case(case: Case) {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let scratch = E2eScratch::new();
+    let mut relay = SyntheticRelay::start(&scratch.path().join("relay.log")).await;
+    let socket = scratch.path().join("core.sock");
+    let db = scratch.path().join("core.db");
+    let places = scratch.path().join("places.json");
     assert!(
-        host.sys.gate_spec(&GateName::new(NOSTR)).is_some(),
-        "nostr ゲートが接続・登録されなかった"
+        socket.as_os_str().len() < 100,
+        "Unix socket path is too long"
     );
 
-    // --- 投稿側の使い捨て鍵（このプロセス内。秘密はここから出ない）。---
     let poster = Key::generate();
-    let poster_npub = poster.npub.clone();
-    eprintln!("== 投稿側の使い捨て npub = {poster_npub}");
+    let (gate, gate_npub) =
+        spawn_gate(&socket, &relay.url, &scratch.path().join("gate.stderr.log"));
+    let address = format!("filter:kind=1&author={}", poster.npub);
+    let config = json!({
+        "places": [{
+            "address": address,
+            "gate": NOSTR,
+            "name": "synthetic-agent",
+            "persona": "You are a synthetic E2E agent.",
+            "policy": {
+                "immediate": ["mentions_me", "replies_to_me"],
+                "immediate_from": "anyone",
+                "batch_window_ms": null,
+                "unconditional_interval_ms": null
+            },
+            "identities": [{"gate": NOSTR, "external": gate_npub}]
+        }]
+    });
+    std::fs::write(&places, config.to_string()).expect("write places config");
+    let core = spawn_core(
+        &socket,
+        &db,
+        &places,
+        case.script(),
+        &scratch.path().join("core.stderr.log"),
+    );
 
-    // --- Nostr の場を「設定で」起こす（配線漏れの是正の実物）。---
-    // 住所＝投稿側の kind-1 を購読するフィルタ。発火方針: メンション・返信だけ即応、残りは窓でまとめて 1 ターン。
-    // identities: エージェントの Nostr 上の宛先（ゲートの npub）。これで「自分宛の言及」が名寄せで解決する。
-    let address = format!("filter:kind=1&author={poster_npub}");
-    let policy = Policy::immediate_on(&[Property::MentionsMe, Property::RepliesToMe])
-        .with_from(ImmediateFrom::Anyone)
-        .with_batch_ms(BATCH_MS);
-    let spec = PlaceSpec {
-        address: address.clone(),
-        gate: NOSTR.to_string(),
-        name: "エージェントA".to_string(),
-        persona: "エージェントA".to_string(),
-        policy,
-        identities: vec![(NOSTR.to_string(), gate_npub.clone())],
-    };
-    let (place, _agent) = host.provision_place(&spec);
-    // ゲートは既に繋がっているので、設定の記録に続けて実際の購読を張る（bind を送る・プロトコル§02）。
-    host.sys
-        .bind_place(place, NOSTR, &address)
-        .await
-        .expect("bind nostr place");
-    eprintln!("== 場を起こした place={place} gate={NOSTR} address={address}");
-    // 購読が実リレーに届くまで少し待つ。
-    wait(1500).await;
+    // nostr-gate does not open a relay subscription until core has accepted its checked hello and
+    // the gate has accepted the initial bind. REQ is therefore the synchronization boundary after
+    // which the synthetic relay may inject an EVENT.
+    let filter = relay.wait_for_hello_ready_subscription().await;
+    assert_eq!(filter["kinds"], json!([1]));
+    assert_eq!(filter["authors"], json!([poster.pubkey_hex.clone()]));
 
-    // --- 投稿側をリレーへ繋ぐ。---
-    let ws = relay::connect(&relay_url)
-        .await
-        .expect("connect relay (poster)");
-    let (mut sink, mut stream) = ws.split();
+    let gate_hex = nostr::npub_to_hex(
+        config["places"][0]["identities"][0]["external"]
+            .as_str()
+            .expect("gate identity"),
+    )
+    .expect("gate npub to hex");
 
-    // === (1) 溜まる: 3 件の平の note（誰宛でもない）。即応せず、窓が来るまでターンが起きない。===
-    for i in 1..=3u32 {
-        let now = nostr::now_secs();
-        let (id_hex, ev) = nostr::build_signed(
-            &poster,
-            1,
-            json!([]),
-            &format!("e2e タイムライン投稿 {i}（誰宛でもない）"),
-            now,
+    let store = open_store(&db).await;
+    let place_wait_started = Instant::now();
+    let place = loop {
+        if let Some(place) = find_place(&store, &address) {
+            break place;
+        }
+        assert!(
+            place_wait_started.elapsed() < TIMEOUT,
+            "configured Nostr place did not become readable"
         );
-        publish(&mut sink, &mut stream, &id_hex, &ev, &format!("plain#{i}")).await;
-        wait(300).await;
-    }
-    // 窓の途中で確認: note は届いているがターンはまだ起きていない（溜まっている）。
-    wait(2000).await;
-    let mid = spoke_count(&host, &address);
-    eprintln!("== 窓の途中（3 件投稿後 ~2s）: spoke（ターン）= {mid}");
-    assert_eq!(mid, 0, "溜まっている間はターンが起きない（即応しない）");
-
-    // 窓が明けるまで待つ。まとめて 1 ターンだけ起きる。
-    wait((BATCH_MS as u64) + 2500).await;
-    let after_batch = spoke_count(&host, &address);
-    eprintln!("== 窓明け後: spoke（ターン）= {after_batch}（3 件が 1 ターンにまとまった）");
-    assert_eq!(after_batch, 1, "溜まった 3 件は窓で 1 ターンにまとまる");
-
-    // === (2) 即応: エージェントを p-tag で言及した note。窓を待たず即座にターンが起きる。===
-    let now = nostr::now_secs();
-    let gate_hex = nostr::npub_to_hex(&gate_npub).expect("npub->hex");
-    let (id_hex, ev) = nostr::build_signed(
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    let (_incoming_id, incoming) = nostr::build_signed(
         &poster,
         1,
         json!([["p", gate_hex]]),
-        "エージェントA、これ見た？（メンション）",
-        now,
+        &case.first_input(),
+        nostr::now_secs(),
     );
-    publish(&mut sink, &mut stream, &id_hex, &ev, "mention").await;
-    // 窓（6s）より十分短い時間で、もう 1 ターン起きること。
-    let mut immediate_ok = false;
-    for _ in 0..30 {
-        wait(200).await;
-        if spoke_count(&host, &address) >= 2 {
-            immediate_ok = true;
-            break;
+    relay.publish(incoming);
+
+    if matches!(case, Case::History) {
+        let first_turn = wait_for_turn(&store, place).await;
+        assert_eq!(first_turn.end_reason, "done");
+        let first_post = wait_for_post(&relay, &store, place).await;
+        assert_eq!(
+            first_post["content"],
+            json!("mock history seed acknowledged")
+        );
+
+        let (_question_id, question) = nostr::build_signed(
+            &poster,
+            1,
+            json!([["p", gate_hex]]),
+            "synthetic history question",
+            nostr::now_secs(),
+        );
+        relay.publish(question);
+
+        let turns = wait_for_turns(&store, place, 2).await;
+        let started = Instant::now();
+        let posts = loop {
+            let posts = relay.posts();
+            if posts.len() >= 2 {
+                break posts;
+            }
+            assert!(
+                started.elapsed() < TIMEOUT,
+                "history answer was not published"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        };
+        assert_eq!(
+            posts[1]["content"],
+            json!("mock remembered synthetic history seed")
+        );
+        assert_eq!(turns[1].end_reason, "done");
+        let records = store.context_records(turns[1].id).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].ctx_from_seq, Some(1));
+        assert_eq!(records[0].ctx_to_seq, Some(3));
+
+        drop(store);
+        drop(core);
+        drop(gate);
+        drop(relay);
+        return;
+    }
+
+    let turn = wait_for_turn(&store, place).await;
+
+    match case.expected_reply() {
+        Some(expected) => {
+            let post = wait_for_post(&relay, &store, place).await;
+            nostr::verify_event(&post).expect("gate produced a valid signed Nostr event");
+            assert_eq!(post["kind"], json!(1));
+            assert_eq!(post["content"], json!(expected));
+            let seq = wait_for_out_ref(&store, place, expected).await;
+            assert!(
+                store.external_ref_of(place, seq).unwrap().is_some(),
+                "outbound Spoke has an external ref"
+            );
+            if matches!(case, Case::PlaintextToolSettledReply) {
+                let turns = wait_for_turns(&store, place, 2).await;
+                assert_eq!(turns[0].end_reason, "no_reply");
+                assert_eq!(turns[0].iterations, 1);
+                assert_eq!(turns[0].tool_lines.as_deref(), Some("nostr-whoami::{}"));
+                assert_eq!(turns[1].end_reason, "done");
+                assert_eq!(turns[1].iterations, 1);
+
+                let latest = store.latest_seq(place).unwrap();
+                let settled = store
+                    .read_range(place, 0, latest)
+                    .unwrap()
+                    .into_iter()
+                    .find(|event| event.kind == EventKind::Settled)
+                    .expect("plaintext tool writes a settled event");
+                assert_eq!(
+                    settled.reply_to,
+                    Some(1),
+                    "settled event retains the originating synthetic mention"
+                );
+            } else if matches!(case, Case::ToolThenReply) {
+                assert_eq!(turn.end_reason, "done");
+                assert_eq!(turn.iterations, 2, "tool result causes a second inference");
+                assert_eq!(
+                    store.context_records(turn.id).unwrap().len(),
+                    2,
+                    "both inference iterations are observed"
+                );
+            } else {
+                assert_eq!(turn.end_reason, "done");
+                assert_eq!(turn.iterations, 1);
+            }
+        }
+        None => {
+            assert_eq!(turn.end_reason, "no_reply");
+            if matches!(case, Case::PrefixedNoReply) {
+                assert_eq!(
+                    turn.withheld_text.as_deref(),
+                    Some("mock internal reasoning"),
+                    "prefixed prose is retained in the turn record"
+                );
+            } else {
+                assert!(
+                    turn.withheld_text.is_none(),
+                    "bare sentinel has no prose to retain"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert!(
+                relay.posts().is_empty(),
+                "NO_REPLY must publish zero events"
+            );
+            let latest = store.latest_seq(place).unwrap();
+            assert!(
+                (1..=latest).all(|seq| {
+                    store
+                        .get_event(place, seq)
+                        .unwrap()
+                        .is_none_or(|event| event.kind != EventKind::Spoke)
+                }),
+                "NO_REPLY must not even confirm a Spoke event"
+            );
         }
     }
-    let total = spoke_count(&host, &address);
-    eprintln!("== メンション後（~<3s）: spoke（ターン）= {total}");
-    assert!(
-        immediate_ok,
-        "メンションは窓を待たず即応する（spoke が 2 に増える）: total={total}"
-    );
 
-    // --- 後始末 ---
-    let _ = child.kill().await;
-    let _ = std::fs::remove_file(&scratch);
-    eprintln!("== E2E 完了: 溜まった(0) → 窓でまとまった(1) → メンションで即応(2)");
+    drop(store);
+    drop(core);
+    drop(gate);
+    drop(relay);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mention_context_identifies_trigger_and_posts_mock_reply() {
+    run_case(Case::Reply).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn second_turn_answers_from_previously_read_conversation_history() {
+    run_case(Case::History).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bare_no_reply_posts_nothing_and_records_no_reply_turn() {
+    run_case(Case::NoReply).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prefixed_no_reply_posts_nothing() {
+    run_case(Case::PrefixedNoReply).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_result_drives_second_inference_and_reply() {
+    run_case(Case::ToolThenReply).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plaintext_tool_settled_turn_receives_origin_and_replies() {
+    run_case(Case::PlaintextToolSettledReply).await;
 }

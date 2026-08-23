@@ -13,7 +13,10 @@ pub use policy::{ImmediateFrom, Policy};
 pub use tokens::O200kCounter;
 
 use opencrab_port::*;
-use opencrab_store::{Ingest, NewEvent, NewTurnRecord, Store};
+use opencrab_store::{
+    ActivityInterruption, BackgroundProvenance, BackgroundSettlement, Ingest, NewBackgroundOffload,
+    NewEvent, NewTurnRecord, Store,
+};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -30,8 +33,9 @@ pub const REASON_UNCOND: &str = "unconditional";
 pub const THROTTLE_HINT: &str =
     "\n\n[系: この相手は短時間に多くの資源を消費させている。返答は短く簡潔にすること。]";
 
-/// 平文アクション文法の唯一の core 共通語（設計）。trim 後に行全体がこれ（`NO_REPLY::` も同義）なら
-/// 「今回は発話しない」制御行——そのターンの残余 say を配送しない（外界にも場の共有ログにも出さない）。
+/// 平文アクション文法の唯一の core 共通語（設計）。独立した token として成立する sentinel を出力中に
+/// 見たら、そのターンの残余 say を配送しない（外界にも場の共有ログにも出さない）。前後の reasoning も
+/// 漏らさない fail-closed な制御語で、裸の `NO_REPLY::` も同義として受理する。
 pub const NO_REPLY: &str = "NO_REPLY";
 
 /// 平文アクション文法の 2 つ目の core 共通語（設計）。`PROGRESS::<文>` 行——「いま何をしているかを
@@ -43,7 +47,8 @@ pub const PROGRESS: &str = "PROGRESS";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TurnReason {
-    Immediate,
+    /// 即応を起こした実際の event。Background 結果の元発端は、この seq に結びついた provenance から引く。
+    Immediate(Seq),
     Batch,
     Unconditional,
 }
@@ -67,6 +72,32 @@ struct CtxObs {
     skipped_to_seq: Option<Seq>,
 }
 
+struct ImmediateCandidate {
+    subject: SubjectId,
+    trigger: Seq,
+    fired_by: Option<String>,
+}
+
+/// turn が tool call を受理した時点の入力 range と standing。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OriginInput {
+    from_exclusive: Seq,
+    to_inclusive: Seq,
+    standing: Standing,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettledOriginKey {
+    Provenance(Seq, Seq),
+    Legacy(Option<Seq>),
+}
+
+/// 実行中の背景 future の取っ手。provenance の正本は activities に永続化する。
+#[derive(Clone)]
+struct BackgroundTask {
+    abort: tokio::task::AbortHandle,
+}
+
 /// 散文 say を平文アクション文法で解釈した結果（設計）。1 本の散文 say の本文を行ごとに独立解釈して、
 /// 成立したアクション効果の列・残余 say（地の文＋不成立行を逐語で保つ）・NO_REPLY 制御を見たかに分ける。
 struct Interpreted {
@@ -79,7 +110,7 @@ struct Interpreted {
     tool_lines: Vec<String>,
     /// 残余 say の本文（地の文と、不成立 3 段の行を逐語で残したもの）。空なら None。
     remainder: Option<String>,
-    /// NO_REPLY 制御行を見た（残余 say を配送しない印）。明示アクション行は影響を受けず発火する。
+    /// NO_REPLY sentinel を見た（残余 say を配送しない印）。明示アクション行は影響を受けず発火する。
     no_reply: bool,
     /// PROGRESS 制御行（`PROGRESS::<文>`）で見た進捗文言を出現順に集めたもの（進捗の揮発表示）。
     /// say でもイベントでもないので remainder にも actions にも入れない——turn 側が activity progress
@@ -241,6 +272,8 @@ pub struct DeliverError(pub String);
 pub struct ReadEvent {
     pub seq: Seq,
     pub kind: EventKind,
+    /// チャット面へ既定表示しない core 内部イベント。read からは消さず、表示境界がこの印で分離する。
+    pub internal: bool,
     /// そのゲートでの著者の識別子。素性が無ければ None。
     pub author_id: Option<String>,
     /// 表示名（主体なら `name` 列——人格本文 `persona` ではない・統括裁定で分離）。
@@ -595,7 +628,7 @@ struct Inner {
     /// 走っている背景の活動の**タスクの取っ手**（常時切り離し・詳細§07）。権威は DB（activities 表）に
     /// あり、ここは「実行中の future への取っ手」だけ（store のプロセス内状態の定義と同じ）。core-bg-stop が
     /// 暴走ツールを殺すのに使う。決着（`settle_background`）で必ず外す（じわ漏れ防止）。
-    bg_tasks: StdMutex<HashMap<ActivityId, tokio::task::AbortHandle>>,
+    bg_tasks: StdMutex<HashMap<ActivityId, BackgroundTask>>,
     activity_routes: StdMutex<HashMap<ActivityId, GateRoute>>,
     legacy_activity_notices: StdMutex<HashSet<ActivityId>>,
     /// 接続中のゲートの名乗り（プロトコル§01・接続中だけ持つ・詳細§03）。
@@ -1271,13 +1304,20 @@ impl System {
             .store
             .add_channel(place, &gate, address)
             .map_err(|error| error.to_string())?;
-        if let Some(spec) = self.gate_spec(&gate) {
-            let names: Vec<_> = spec.tools.into_iter().map(|tool| tool.name).collect();
-            self.0
-                .store
-                .reconcile_compatibility_routes_for_kind(&gate, &names)
-                .map_err(|error| error.to_string())?;
-        }
+        // Provision owns the configured subject/binding selection even while the process is
+        // disconnected.  `gate_routes_for_place` still requires an active connection, so this
+        // cannot deliver through a stale credential.  A later protocol-1 hello atomically
+        // reconciles the same selection again with the live declaration and adds tool purposes.
+        // If the gate is already connected, include those declared tools in this pass as well.
+        let names: Vec<_> = self
+            .gate_spec(&gate)
+            .into_iter()
+            .flat_map(|spec| spec.tools.into_iter().map(|tool| tool.name))
+            .collect();
+        self.0
+            .store
+            .reconcile_compatibility_routes_for_kind(&gate, &names)
+            .map_err(|error| error.to_string())?;
         Ok(())
     }
 
@@ -1608,7 +1648,8 @@ impl System {
 
     /// 結んだ場のログを読む（プロトコル§02 `read`）。結んでいない住所は `NotBound`。
     ///
-    /// 返すのは**場で起きたこと全部**——種別で絞らない・他のチャネルから入った発話も返る
+    /// 返すのは**場で起きたこと全部**——内部イベントも消さず `ReadEvent::internal` で明示し、
+    /// チャット面の既定表示から分離できるようにする。他のチャネルから入った発話も返る
     /// （1 つの場に複数のチャネルが結ばれていれば、それは同じ 1 つの会話・§02）。読みは
     /// 場でスコープされる（`read_range` は place 単位・ゲートで絞らない）ので、それが自然に守られる。
     ///
@@ -1674,6 +1715,7 @@ impl System {
             events.push(ReadEvent {
                 seq: ev.seq,
                 kind: ev.kind,
+                internal: is_internal_read_kind(ev.kind),
                 author_id,
                 author_display,
                 content: ev.content,
@@ -1787,15 +1829,17 @@ impl System {
         Ok(out)
     }
 
-    /// 未読を **standing の変わり目で切り、先頭の 1 区間だけ**を返す（#14）。
+    /// 未読を **standing または settled の発端の変わり目で切り、先頭の 1 区間だけ**を返す（#14/#750）。
     ///
     /// 「権限の違う発言を混ぜて処理しない」（オーナー方針）の実体。1 ターンが扱うのは 1 区間
     /// ＝そのターンの発言はすべて同じ権限で、**ターンの権限は区間の standing そのもの**になる
     /// （新しい概念を作らない）。切られた残りは未読のまま残り、次のターンが別の権限で処理する
     /// ——捨てない。
     ///
-    /// 作者のいない出来事（決着など）は**区切りにしない**（直前の区間に属する）。単独で先頭に
-    /// 来た場合は、その活動を始めたターンの standing を引き継ぐ（[`Self::event_standing`]）。
+    /// 作者のいない通常出来事は standing の区切りにしない。provenance 付きの Background 結果
+    /// （Settled / Interrupted）は origin range と standing を区切りに使う。provenance 導入前の旧
+    /// Settled だけは既存 `reply_to` を exact key とし、別 event から補完・推測しない。Turn の
+    /// 汎用 Interrupted は単独区間にし、前後の Background 結果の provenance を吸収しない。
     fn first_standing_group(
         &self,
         subject: SubjectId,
@@ -1803,7 +1847,45 @@ impl System {
     ) -> Result<Vec<opencrab_store::EventRow>, Busy> {
         let mut out: Vec<opencrab_store::EventRow> = vec![];
         let mut group: Option<Standing> = None;
+        let mut settled_origin: Option<SettledOriginKey> = None;
         for ev in unread {
+            if matches!(ev.kind, EventKind::Settled | EventKind::Interrupted) {
+                let provenance = self
+                    .0
+                    .store
+                    .settled_provenance(ev.place, ev.seq)
+                    .map_err(|_| Busy)?;
+                let key = match (&provenance, ev.kind) {
+                    (Some(p), _) => {
+                        SettledOriginKey::Provenance(p.origin_from_exclusive, p.origin_to_inclusive)
+                    }
+                    (None, EventKind::Settled) => SettledOriginKey::Legacy(ev.reply_to),
+                    // Turn の汎用 Interrupted は provenance を持たない。前後の
+                    // Background 結果と同じ turn に入れると、汎用中断の Unknown
+                    // standing が永続 provenance を吸収する。どちらが先に追記されても
+                    // 混ざらないよう、汎用中断は常に 1 event の独立区間にする。
+                    (None, EventKind::Interrupted) => {
+                        if out.is_empty() {
+                            out.push(ev.clone());
+                        }
+                        break;
+                    }
+                    (None, _) => unreachable!("result kind was checked above"),
+                };
+                if settled_origin.is_some_and(|origin| origin != key) {
+                    break;
+                }
+                settled_origin = Some(key);
+                if let Some(p) = provenance {
+                    match group {
+                        None => group = Some(p.origin_standing),
+                        Some(standing) if standing == p.origin_standing => {}
+                        Some(_) => break,
+                    }
+                    out.push(ev.clone());
+                    continue;
+                }
+            }
             // 自分の発話は区切りにしない（権限の話ではない）。系の出来事（決着）も同じ。
             if ev.author_subject == Some(subject) {
                 out.push(ev.clone());
@@ -1824,6 +1906,73 @@ impl System {
             }
         }
         Ok(out)
+    }
+
+    /// 未読を standing 区間へ分ける。候補探索は全区間を走査し、claim は選んだ 1 区間だけにする。
+    fn standing_groups(
+        &self,
+        subject: SubjectId,
+        unread: &[opencrab_store::EventRow],
+    ) -> Result<Vec<Vec<opencrab_store::EventRow>>, Busy> {
+        let mut groups = Vec::new();
+        let mut rest = unread;
+        while !rest.is_empty() {
+            let group = self.first_standing_group(subject, rest)?;
+            assert!(
+                !group.is_empty(),
+                "nonempty unread must form a standing group"
+            );
+            let consumed = group.len();
+            groups.push(group);
+            rest = &rest[consumed..];
+        }
+        Ok(groups)
+    }
+
+    fn out_of_order_reads(
+        &self,
+        place: PlaceId,
+        subject: SubjectId,
+        read: Seq,
+        latest: Seq,
+    ) -> Result<HashSet<Seq>, Busy> {
+        Ok(self
+            .0
+            .store
+            .out_of_order_read_seqs(place, subject, read, latest)
+            .map_err(|_| Busy)?
+            .into_iter()
+            .collect())
+    }
+
+    /// reason が指す standing 区間だけを選ぶ。即応は trigger を含む後続区間を選べるが、既に疎な
+    /// 既読として claim 済みの event は同じ standing に後から追記された event と一緒に再表示しない。
+    fn standing_group_for_reason(
+        &self,
+        subject: SubjectId,
+        unread: &[opencrab_store::EventRow],
+        already_read: &HashSet<Seq>,
+        reason: TurnReason,
+    ) -> Result<Vec<opencrab_store::EventRow>, Busy> {
+        let groups = self.standing_groups(subject, unread)?;
+        let chosen = match reason {
+            TurnReason::Immediate(trigger) => groups
+                .into_iter()
+                .find(|group| group.iter().any(|ev| ev.seq == trigger))
+                .expect("immediate trigger must belong to an unread standing group"),
+            TurnReason::Batch => groups
+                .into_iter()
+                .find(|group| group.iter().any(|ev| !already_read.contains(&ev.seq)))
+                .expect("batch turn must have an unread standing group"),
+            TurnReason::Unconditional => groups
+                .into_iter()
+                .find(|group| group.iter().any(|ev| !already_read.contains(&ev.seq)))
+                .unwrap_or_default(),
+        };
+        Ok(chosen
+            .into_iter()
+            .filter(|ev| !already_read.contains(&ev.seq))
+            .collect())
     }
 
     /// その出来事の **standing**（#14）。作者がいなければ `None`（区切りにしない）。
@@ -1947,10 +2096,7 @@ impl System {
 
     /// 即応の候補（起こす主体）と、それを起こした**着火作者の会計キー**（DESIGN-attention §2）を返す。
     /// キーは返答の絞りの積算に使う——オーナー・系・作者不明では `None`（会計に載せない・常に素通し）。
-    fn find_immediate_candidate(
-        &self,
-        place: PlaceId,
-    ) -> Result<Option<(SubjectId, Option<String>)>, Busy> {
+    fn find_immediate_candidate(&self, place: PlaceId) -> Result<Option<ImmediateCandidate>, Busy> {
         let pol = self.policy(place)?;
         let latest = self.0.store.latest_seq(place).map_err(|_| Busy)?;
         for s in self.agent_members(place)? {
@@ -1963,10 +2109,22 @@ impl System {
                 .store
                 .read_range(place, read, latest)
                 .map_err(|_| Busy)?;
-            for ev in &unread {
-                if self.should_fire_immediate(place, &pol, s, ev)? {
-                    let fired_by = self.firing_key(ev)?;
-                    return Ok(Some((s, fired_by)));
+            let already_read = self.out_of_order_reads(place, s, read, latest)?;
+            // 探索は先頭区間だけに閉じない。claim 側は trigger の standing 区間だけを選ぶので、
+            // 後続の owner 即応を見つけても先頭の別 standing と同じターンには混ざらない。
+            for group in self.standing_groups(s, &unread)? {
+                for ev in &group {
+                    if already_read.contains(&ev.seq) {
+                        continue;
+                    }
+                    if self.should_fire_immediate(place, &pol, s, ev)? {
+                        let fired_by = self.firing_key(ev)?;
+                        return Ok(Some(ImmediateCandidate {
+                            subject: s,
+                            trigger: ev.seq,
+                            fired_by,
+                        }));
+                    }
                 }
             }
         }
@@ -2105,9 +2263,13 @@ impl System {
             None => return Ok(()), // 枠が塞がっている。ターン終了時に再判定される
         };
         match self.find_immediate_candidate(place)? {
-            Some((s, fired_by)) => {
-                self.spawn_turn(place, s, TurnReason::Immediate, fired_by, guard)
-            }
+            Some(candidate) => self.spawn_turn(
+                place,
+                candidate.subject,
+                TurnReason::Immediate(candidate.trigger),
+                candidate.fired_by,
+                guard,
+            ),
             None => drop(guard),
         }
         Ok(())
@@ -2177,7 +2339,15 @@ impl System {
 
         let deadline = Deadline(self.now() + self.0.cfg.turn_cap);
         let act = self
-            .start_activity(place, subject, ActivityKindTag::Turn, deadline, None, None)
+            .start_activity(
+                place,
+                subject,
+                ActivityKindTag::Turn,
+                deadline,
+                None,
+                None,
+                None,
+            )
             .await;
         let started = self.now_nanos();
 
@@ -2193,31 +2363,43 @@ impl System {
         let mut tool_lines_acc: Option<String> = None;
         // NO_REPLY を見たら end_reason を no_reply にする（ターンが通常完了で終わるとき）。
         let mut no_reply_seen = false;
+        // 散文 say はターンの NO_REPLY 判定が確定するまで外へ出さない。別 Say や後続反復で sentinel が
+        // 現れても、同じターンの散文を一部だけ先に公開しないための turn-level buffer。
+        let mut pending_prose: Vec<EffectSpec> = vec![];
         // 反復ごとの文脈の観測（§10）。会話が積み上がるので反復ごとにトークン数が増える。
         let mut ctx_obs: Vec<CtxObs> = vec![];
 
-        // owner の後追い（OwnerFollowUp・DESIGN-shell.md）: このターンが反応している未読スライスに
-        // owner の発話があるか。**build_context が読み位置を進める前に**見る（進んだ後は未読が空になる）。
-        // core-allow-command の可否（広告・実行）に効く。
-        // #14: このターンの権限＝処理する区間の standing。混ざらなくなったので近似が要らない。
-        let turn_standing = self.turn_standing(place, subject);
-        let owner_follow_up = turn_standing == Standing::Owner;
+        // read cursor を進める前に、この turn の origin input range / standing を確定する。
+        // Settled turn は永続 provenance の standing を継承するため、owner-only tool も元 turn と同じ
+        // 条件で広告・認可される。読み失敗は Unknown へ落とさず turn 自体を store_busy にする。
+        let (origin_input, provenance_ok) = match self.turn_origin_input(place, subject, reason) {
+            Ok(origin) => (origin, true),
+            Err(Busy) => {
+                end_reason = "store_busy";
+                (None, false)
+            }
+        };
+        let owner_follow_up = origin_input.is_some_and(|origin| origin.standing == Standing::Owner);
 
         // 文脈は**ターンで 1 度だけ**場のログから組む（§05）。反復ごとに組み直さない。
         // 一時的に組めなければ、ターンを失敗として終える（同じ 1 本の後始末へ・§05/§15）。
-        let (mut base_ctx, build_ok) = match self.build_context(&slot, subject, owner_follow_up) {
-            Ok(c) => (c, true),
-            Err(CtxErr::Busy) => {
-                end_reason = "store_busy";
-                // 記録を書いて枠を離す（下の後始末へ）。空の観測で進む。
-                (Context::default(), false)
+        let (mut base_ctx, build_ok) = if provenance_ok {
+            match self.build_context(&slot, subject, reason, owner_follow_up) {
+                Ok(c) => (c, true),
+                Err(CtxErr::Busy) => {
+                    end_reason = "store_busy";
+                    // 記録を書いて枠を離す（下の後始末へ）。空の観測で進む。
+                    (Context::default(), false)
+                }
+                Err(CtxErr::EmptyPersona) => {
+                    // Agent の persona が空——fail loud（黙って空 system を engine へ渡さない）。engine は回さず、
+                    // 記録に理由を残して終える（store_busy と同じ「組めなかったので回さない」経路・別の理由）。
+                    end_reason = "empty_persona";
+                    (Context::default(), false)
+                }
             }
-            Err(CtxErr::EmptyPersona) => {
-                // Agent の persona が空——fail loud（黙って空 system を engine へ渡さない）。engine は回さず、
-                // 記録に理由を残して終える（store_busy と同じ「組めなかったので回さない」経路・別の理由）。
-                end_reason = "empty_persona";
-                (Context::default(), false)
-            }
+        } else {
+            (Context::default(), false)
         };
 
         // 返答の絞り（DESIGN-attention §2）。着火作者が直近窓で閾値超えなら、このターンを 3 点で絞る:
@@ -2400,21 +2582,25 @@ impl System {
                         }
                     }
                     if interp.no_reply {
-                        // 残余 say を配送しない（外界にも場の共有ログにも出さない）。保留した地の文は
-                        // ターン記録の withheld_text へ残し、end_reason=no_reply を立てる（下の後始末で）。
-                        no_reply_seen = true;
-                        if let Some(rem) = interp.remainder {
-                            match &mut withheld_text {
-                                Some(acc) => {
-                                    acc.push('\n');
-                                    acc.push_str(&rem);
-                                }
-                                None => withheld_text = Some(rem),
+                        eprintln!(
+                            "opencrab-social-runtime: NO_REPLY sentinel detected; withholding public text (place={place}, subject={subject})"
+                        );
+                        // 同じターンで先に保留していた別 Say も含め、散文を配送しない。握った本文は
+                        // ターン記録へ出現順に残し、end_reason=no_reply を立てる（下の後始末で）。
+                        for pending in pending_prose.drain(..) {
+                            if let Some(text) = pending.content.text {
+                                append_recorded_text(&mut withheld_text, text);
                             }
                         }
-                    } else if let Some(rem) = interp.remainder {
-                        // 残余 say（地の文＋不成立 3 段の行を逐語で保つ）は従来どおり target None の say。
-                        to_confirm.push(EffectSpec::say(rem));
+                        no_reply_seen = true;
+                    }
+                    if let Some(rem) = interp.remainder {
+                        if no_reply_seen {
+                            append_recorded_text(&mut withheld_text, rem);
+                        } else {
+                            // ターン終了まで確定を待ち、後続 Say / 反復の sentinel と一括判定する。
+                            pending_prose.push(EffectSpec::say(rem));
+                        }
                     }
                     // PROGRESS（core 共通語・進捗の揮発表示）: 集めた文言を activity progress 通知として
                     // 揮発配送し、走行中ターンの activities.label を更新する。say でもイベントでもないので
@@ -2477,7 +2663,9 @@ impl System {
                 match self.authorize_tool(place, subject, &c, owner_follow_up, true) {
                     Ok(a) => {
                         // ネイティブ経路: must_settle=false（core は同期・現状不変）。
-                        let r = self.invoke_or_detach(act, place, subject, a, false).await;
+                        let r = self
+                            .invoke_or_detach(act, place, subject, a, false, origin_input)
+                            .await;
                         // マルチパート（DESIGN-images §4）。core-look はここで画像パートを積む。
                         let (content, is_error) = r.to_result_parts();
                         results.push(Block::ToolResult {
@@ -2507,7 +2695,9 @@ impl System {
             // must_settle=true で決着イベント化する（core も背景も）。背景上限の Refused は
             // invoke_or_detach が決着イベントで可視化するので、戻り値は捨ててよい（turn を失敗させない）。
             for a in plaintext_tools {
-                let _ = self.invoke_or_detach(act, place, subject, a, true).await;
+                let _ = self
+                    .invoke_or_detach(act, place, subject, a, true, origin_input)
+                    .await;
             }
 
             if out.done {
@@ -2529,6 +2719,26 @@ impl System {
         }
         // ターン終了。`history` はここで捨てる（ターン内だけ・§05）。次のターンは場のログから組み直す。
 
+        // sentinel を一度も見なかったターンだけ、保留していた全散文 Say を確定する。明示アクションは
+        // 各反復ですでに確定済みであり、この buffer の対象には含めない。
+        if !no_reply_seen {
+            for e in pending_prose {
+                match self.authorize_effect(place, subject, &e) {
+                    Ok(a) => match self.confirm(&slot, subject, a) {
+                        Some(c) => self.enqueue_delivery(c),
+                        None => {
+                            end_reason = "failed";
+                            break;
+                        }
+                    },
+                    Err(_) => {
+                        end_reason = "failed";
+                        break;
+                    }
+                }
+            }
+        }
+
         // NO_REPLY（平文アクション文法）を見て、かつ通常完了（done）で終わったなら end_reason=no_reply。
         // 失敗・中断・上限などの終わり方が優先する（それらはそのまま残す——なぜ止まったかの方が重要）。
         let end_reason = if no_reply_seen && end_reason == "done" {
@@ -2536,6 +2746,12 @@ impl System {
         } else {
             end_reason
         };
+        if !matches!(end_reason, "done" | "no_reply") {
+            eprintln!(
+                "opencrab-social-runtime: turn ended unsuccessfully (place={place}, subject={subject}, reason={end_reason}, detail={})",
+                failure_detail.as_deref().unwrap_or("<none>")
+            );
+        }
 
         // 記録は必ず書く（§05）。終わり方が何であっても 1 本の後始末。
         // ターンの記録にはターンの事実だけ。引き継ぎはターンの間ずっと一定なのでここに持つ。
@@ -2584,7 +2800,6 @@ impl System {
         // 終わり方が 5 通りあって、後始末は 1 本（§05）。活動にも実際の終わり方を残す。
         self.end_activity_reason(act, end_reason);
         self.0.running.lock().unwrap().remove(&place);
-        let _ = reason; // 入口理由（記録は turn_records の end_reason 側で持つ）
         drop(slot);
 
         // 枠が空いたので、その場の発火判定をやり直す（§04）。
@@ -2593,50 +2808,60 @@ impl System {
 
     // ---- 文脈の組み立て（詳細§06）----
 
-    /// このターンが反応している未読スライスに owner の発話があるか（OwnerFollowUp・DESIGN-shell.md）。
-    /// **build_context が読み位置を進める前に**呼ぶ（進んだ後は未読が空になる）。owner 判定は著者の
-    /// standing==Owner。読みが一時的に引けなければ **false（＝不許可側）** に倒す——認可の信号なので
-    /// fail-closed が安全側（owner を見落として core-allow-command が通らないだけで、次ターンで再判定される）。
-    /// 握り潰す禁止コンビネータ（`Result::ok`/`unwrap_or*`）は使わず明示の `match` で倒す（core の clippy）。
-    /// **このターンの権限**（#14）。処理する区間（[`Self::first_standing_group`] が切った先頭の
-    /// 1 区間）の standing がそのままターンの権限になる。
-    ///
-    /// 以前は「未読に owner の発話が 1 つでもあるか」という近似（`owner_spoke_in_unread`）だった。
-    /// 権限の違う発言が 1 ターンに混ざっていたので近似するしかなく、owner が話した直後に別の人が
-    /// 話しかけたターンでも owner 権限として通っていた。混ぜなくなったので近似が要らない。
-    ///
-    /// 読みが引けなければ **Unknown（＝最小権限）** に倒す——認可の信号なので fail-closed。
-    fn turn_standing(&self, place: PlaceId, subject: SubjectId) -> Standing {
-        let read = match self.read_seq(place, subject) {
-            Ok(r) => r,
-            Err(_) => return Standing::Unknown,
-        };
-        let latest = match self.0.store.latest_seq(place) {
-            Ok(l) => l,
-            Err(_) => return Standing::Unknown,
-        };
-        if latest <= read {
-            return Standing::Unknown;
-        }
-        let unread = match self.0.store.read_range(place, read, latest) {
-            Ok(u) => u,
-            Err(_) => return Standing::Unknown,
-        };
-        let group = match self.first_standing_group(subject, &unread) {
-            Ok(g) => g,
-            Err(_) => return Standing::Unknown,
-        };
-        // 区間の standing（作者のいる最初の出来事が決める）。作者が 1 人もいない区間
-        // （決着だけ）は、その活動を始めたターンの権限を引き継ぐのが正しいが、活動に
-        // standing を持たせるまでは最小権限へ倒す（昇格させない）。
-        for ev in &group {
-            match self.event_standing(ev) {
-                Ok(Some(st)) => return st,
-                Ok(None) => continue,
-                Err(_) => return Standing::Unknown,
+    /// この turn の入力 range と権限を read cursor が進む前に確定する。
+    /// Background 結果起点では event 近傍から推測せず、永続 provenance の元 turn 値を継承する。
+    fn turn_origin_input(
+        &self,
+        place: PlaceId,
+        subject: SubjectId,
+        reason: TurnReason,
+    ) -> Result<Option<OriginInput>, Busy> {
+        if let TurnReason::Immediate(trigger) = reason {
+            let ev = self
+                .0
+                .store
+                .get_event(place, trigger)
+                .map_err(|_| Busy)?
+                .expect("immediate trigger event must exist in the same place");
+            if matches!(ev.kind, EventKind::Settled | EventKind::Interrupted) {
+                let provenance = self
+                    .0
+                    .store
+                    .settled_provenance(place, trigger)
+                    .map_err(|_| Busy)?;
+                if let Some(p) = provenance {
+                    return Ok(Some(OriginInput {
+                        from_exclusive: p.origin_from_exclusive,
+                        to_inclusive: p.origin_to_inclusive,
+                        standing: p.origin_standing,
+                    }));
+                }
             }
         }
-        Standing::Unknown
+
+        let read = self.read_seq(place, subject)?;
+        let latest = self.0.store.latest_seq(place).map_err(|_| Busy)?;
+        let all_unread = self
+            .0
+            .store
+            .read_range(place, read, latest)
+            .map_err(|_| Busy)?;
+        let already_read = self.out_of_order_reads(place, subject, read, latest)?;
+        let group = self.standing_group_for_reason(subject, &all_unread, &already_read, reason)?;
+        let from_exclusive = group.first().map_or(read, |ev| ev.seq - 1);
+        let to_inclusive = group.last().map_or(read, |ev| ev.seq);
+        let mut standing = Standing::Unknown;
+        for ev in &group {
+            if let Some(found) = self.event_standing(ev)? {
+                standing = found;
+                break;
+            }
+        }
+        Ok(Some(OriginInput {
+            from_exclusive,
+            to_inclusive,
+            standing,
+        }))
     }
 
     /// 文脈を組む（詳細§06）。読みは全部 store に依るので、一時的に引けなければ `Busy` を返し、
@@ -2659,6 +2884,7 @@ impl System {
         &self,
         slot: &TurnSlot,
         subject: SubjectId,
+        reason: TurnReason,
         owner_follow_up: bool,
     ) -> Result<Context, CtxErr> {
         let place = slot.place;
@@ -2684,7 +2910,7 @@ impl System {
         let budget = self.0.context_budget_tokens;
         let counter = &self.0.counter;
 
-        let unread = self
+        let all_unread = self
             .0
             .store
             .read_range(place, read, latest)
@@ -2695,11 +2921,23 @@ impl System {
         // 混ざっていると権限昇格の経路になる: 着火は「未読の最初の発火イベント」で決まるのに
         // 文脈は「未読全部」だったので、owner の発言で着火したターンに見知らぬ相手の指示が
         // 同居し、owner の権限でそれを読むことになっていた。
-        let unread = self.first_standing_group(subject, &unread)?;
+        let already_read = self.out_of_order_reads(place, subject, read, latest)?;
+        let unread = self.standing_group_for_reason(subject, &all_unread, &already_read, reason)?;
+
+        // read_seq は「次に claim する位置」であって、既読イベントを会話から消す境界ではない。
+        // 連続して既読になった場のログを会話窓へ戻し、今回 claim した未読区間を末尾へ足す。
+        // read_seq より先の疎な既読は、間にある未処理 standing を飛び越して再表示すると R3 の
+        // 権限境界を壊すため、cursor が追いつくまでは履歴窓へ入れない。
+        let mut conversation = self.0.store.read_range(place, 0, read).map_err(|_| Busy)?;
+        // Settled / Interrupted は #751 で通常の会話表示から分離した内部結果。処理時の未読には
+        // provenance 付き対応ブロックとして入れるが、処理済みの結果を通常履歴へ再掲して別発端の
+        // 対応を混ぜない。外向きの Spoke は通常イベントなので履歴へ残る。
+        conversation.retain(|event| !is_internal_read_kind(event.kind));
+        conversation.extend(unread.iter().cloned());
 
         // 引き継ぎ（作られた時点の断面）を前置き。子の seq は汚さない（§06）。
         // 予算は前置きと子の一覧も勘定する（§06「予算が引き継ぎと子の一覧を勘定していない」）。
-        // まず前置き・子の一覧を組み、残りの予算に未読を収める。
+        // まず前置き・子の一覧を組み、残りの予算に会話ログ窓と未読を収める。
         let place_row = self
             .0
             .store
@@ -2730,6 +2968,84 @@ impl System {
             }
         }
 
+        // 通常の即応ターンは、着火した event を会話ログとは別の予約済みブロックでも明示する。
+        // trigger は TurnReason が持つ実際の seq から引き、近傍 event へ推測で寄せない。
+        // settled 起点は下の対応ブロックへ一本化し、通常即応だけをここへ載せる。
+        if let TurnReason::Immediate(trigger_seq) = reason {
+            let trigger = self
+                .0
+                .store
+                .get_event(place, trigger_seq)
+                .map_err(|_| Busy)?
+                .expect("immediate trigger event must exist in the same place");
+            let has_result_provenance =
+                matches!(trigger.kind, EventKind::Settled | EventKind::Interrupted)
+                    && self
+                        .0
+                        .store
+                        .settled_provenance(place, trigger_seq)
+                        .map_err(|_| Busy)?
+                        .is_some();
+            if !has_result_provenance {
+                prefix.push_str("=== 即応の発端 ===\n");
+                let name = self.author_name(&trigger)?;
+                prefix.push_str(&render_event(&trigger, name.as_deref()));
+                prefix.push_str("\n\n");
+            }
+        }
+
+        // provenance 付き Background 結果ごとに「発端 range + 受理 tool call + activity + 結果」を
+        // 一つの予約ブロックへ描く。
+        // read cursor より前の range は永続 provenance から正確に引き、近傍 event から推測しない。
+        for ev in &unread {
+            if !matches!(ev.kind, EventKind::Settled | EventKind::Interrupted) {
+                continue;
+            }
+            let Some(provenance) = self
+                .0
+                .store
+                .settled_provenance(place, ev.seq)
+                .map_err(|_| Busy)?
+            else {
+                // provenance 導入前の Settled と Turn の汎用 Interrupted。別 event から補完・推測はしない。
+                continue;
+            };
+            let origins = self
+                .0
+                .store
+                .read_range(
+                    place,
+                    provenance.origin_from_exclusive,
+                    provenance.origin_to_inclusive,
+                )
+                .map_err(|_| Busy)?;
+            prefix.push_str("=== 決着の対応 ===\n");
+            prefix.push_str(&format!("活動 #{}\n", provenance.activity));
+            if origins.is_empty() {
+                prefix.push_str("発端入力: なし\n");
+            } else {
+                let first_origin = origins.first().expect("nonempty origin range").seq;
+                prefix.push_str(&format!(
+                    "発端入力: #{}..#{}\n",
+                    first_origin, provenance.origin_to_inclusive
+                ));
+                for origin in &origins {
+                    let name = self.author_name(origin)?;
+                    prefix.push_str(&render_event(origin, name.as_deref()));
+                    prefix.push('\n');
+                }
+            }
+            let args = serde_json::to_string(&provenance.tool_args)
+                .expect("serde_json::Value must serialize");
+            prefix.push_str(&format!(
+                "受理ツール: {} args={}\n",
+                provenance.tool_name, args
+            ));
+            prefix.push_str("結果:\n");
+            prefix.push_str(ev.content.text.as_deref().unwrap_or_default());
+            prefix.push_str("\n\n");
+        }
+
         // 子の一覧と状態（識別子・題・走っているか）だけ。中身は入れない（§03）。
         let children = self.0.store.child_places(place).map_err(|_| Busy)?;
         let mut children_block = String::new();
@@ -2748,13 +3064,14 @@ impl System {
             }
         }
 
-        // 前置きと子の一覧が食う分を差し引いた残りに、未読を新しい方から収める（§06）。
+        // 前置きと子の一覧が食う分を差し引いた残りに、既読の会話ログ窓と今回の未読を
+        // 新しい方から収める（§06）。既存の予算・切り詰め方向をそのまま使い、新しい窓制御は置かない。
         let reserved = counter.count(&prefix) + counter.count(&children_block);
         let available = budget.saturating_sub(reserved);
         let mut included: Vec<opencrab_store::EventRow> = vec![];
         let mut used = 0usize;
         let mut skipped_hi: Option<Seq> = None;
-        for ev in unread.iter().rev() {
+        for ev in conversation.iter().rev() {
             // +1 は 1 件ごとに足す改行の分（render_event の後に push('\n') する・下）。
             // 表示名（name）込みで測る——実際に rendered へ載る形と同じ物差しで予算を数える。
             let name = self.author_name(ev)?;
@@ -2768,7 +3085,7 @@ impl System {
         }
         included.reverse();
 
-        let dropped = unread.len() - included.len();
+        let dropped = conversation.len() - included.len();
         // #14: 読み位置は**この区間の末尾まで**（latest ではない）。区間で切ったのに latest まで
         // 進めると、切られた残りが処理されないまま既読になる＝黙って捨てることになる。
         let ctx_to = match unread.last() {
@@ -2777,7 +3094,7 @@ impl System {
         };
         let ctx_from = included.first().map(|e| e.seq);
         let (skipped_from, skipped_to) = if dropped > 0 {
-            (Some(read + 1), skipped_hi)
+            (conversation.first().map(|event| event.seq), skipped_hi)
         } else {
             (None, None)
         };
@@ -2836,10 +3153,15 @@ impl System {
             String::new()
         };
 
-        // 読み位置は「実際に目に入った範囲の最後」まで進める（§06）。書けなければ一時的失敗として上げる。
+        // 先頭 standing なら cursor を進める。後続 standing の即応なら疎な既読だけを残し、先頭の
+        // 非即応区間は batch 窓まで未読のまま保つ。書けなければ一時的失敗として上げる。
+        let read_seqs: Vec<Seq> = unread.iter().map(|ev| ev.seq).collect();
+        let is_prefix = unread
+            .first()
+            .is_some_and(|ev| read.checked_add(1) == Some(ev.seq));
         self.0
             .store
-            .set_read_seq(place, subject, ctx_to)
+            .mark_read_group(place, subject, &read_seqs, is_prefix)
             .map_err(|_| Busy)?;
 
         Ok(Context {
@@ -3269,6 +3591,23 @@ impl System {
                 Err(e) => return Err(Denied(format!("subject_allowed_tools lookup failed: {e}"))),
             }
         }
+        // Settled provenance に保持する args は serde_json::Value の型を保ち、実効モデルの context budget
+        // 以下に限定する。新しい任意の byte 上限は作らず、既に turn を規定する同じ上限を使う。
+        let args_json = serde_json::to_string(&c.args).map_err(|e| {
+            Denied(format!(
+                "tool args could not be represented as typed JSON: {e}"
+            ))
+        })?;
+        if self
+            .0
+            .counter
+            .count_reaches(&args_json, self.0.context_budget_tokens.saturating_add(1))
+        {
+            return Err(Denied(
+                "tool args exceed the model context budget and cannot be retained as settled provenance"
+                    .into(),
+            ));
+        }
         Ok(authorized)
     }
 
@@ -3511,7 +3850,9 @@ impl System {
         let mut tools: Vec<Authorized<ToolCallSpec>> = vec![];
         let mut tool_lines: Vec<String> = vec![];
         let mut remainder_lines: Vec<&str> = vec![];
-        let mut no_reply = false;
+        // Fail closed: providers sometimes put reasoning before or after an independent sentinel token. Partial
+        // strings, quoted names, and malformed NO_REPLY action lines remain ordinary prose (#750).
+        let mut no_reply = contains_no_reply_sentinel(text);
         let mut progress_labels: Vec<String> = vec![];
 
         for line in text.split('\n') {
@@ -3521,7 +3862,7 @@ impl System {
                 continue;
             }
             let trimmed = line.trim();
-            // NO_REPLY 制御行（bare）。残余 say を配送しない印。地の文には残さない。
+            // NO_REPLY 制御行（bare）。sentinel 自体は地の文には残さない。
             if trimmed == NO_REPLY {
                 no_reply = true;
                 continue;
@@ -3758,6 +4099,17 @@ impl System {
             Ok(seq) => seq,
             Err(_) => return None,
         };
+        if kind == EffectKind::Say && routes.is_empty() {
+            match self.0.store.has_gate_binding_for_place(target_place) {
+                Ok(true) => eprintln!(
+                    "opencrab-social-runtime: delivery plan empty; recorded Spoke without delivery (place={target_place}, seq={seq}, subject={subject}, reason=no active route for configured binding)"
+                ),
+                Ok(false) => {}
+                Err(error) => eprintln!(
+                    "opencrab-social-runtime: delivery plan empty; recorded Spoke and could not inspect configured bindings (place={target_place}, seq={seq}, subject={subject}, reason={error})"
+                ),
+            }
+        }
         // 効果は、まず場の出来事になる → 発火方針へ（steer もこの経路・§06）。効果は既に確定（ログ済み）。
         // 発火の再判定が一時的に引けなくても、ここでは落とさず委ねる — ターン終了時の pump が同じ判定に戻す
         // （保留中を状態に持たない・詳細§02）。「引けなかった」を「起きなかった」に化けさせない。
@@ -3841,6 +4193,12 @@ impl System {
             TransportDeliveryResult::DefiniteAck(ack) => {
                 let state = if ack.delivered { "delivered" } else { "failed" };
                 let error = (!ack.delivered).then_some("gate reported delivered=false");
+                if !ack.delivered {
+                    eprintln!(
+                        "opencrab-social-runtime: delivery failed (place={}, seq={}, instance={}, reason=gate reported delivered=false)",
+                        job.place, job.seq, job.route.instance_id
+                    );
+                }
                 let observation = format!("definite_ack:delivered={}", ack.delivered);
                 let origin = ack.delivered.then_some(ack.origin).flatten();
                 let _ = self.0.store.complete_delivery(
@@ -3854,6 +4212,10 @@ impl System {
                 );
             }
             TransportDeliveryResult::DefiniteFailure(error) => {
+                eprintln!(
+                    "opencrab-social-runtime: delivery failed (place={}, seq={}, instance={}, reason={})",
+                    job.place, job.seq, job.route.instance_id, error.0
+                );
                 let _ = self.0.store.complete_delivery(
                     &job.route,
                     job.seq,
@@ -3868,6 +4230,10 @@ impl System {
                 error,
                 late_observation,
             } => {
+                eprintln!(
+                    "opencrab-social-runtime: delivery indeterminate (place={}, seq={}, instance={}, reason={})",
+                    job.place, job.seq, job.route.instance_id, error.0
+                );
                 let _ = self.0.store.complete_delivery(
                     &job.route,
                     job.seq,
@@ -3898,6 +4264,7 @@ impl System {
 
     // ---- 活動（詳細§07）----
 
+    #[allow(clippy::too_many_arguments)]
     async fn start_activity(
         &self,
         place: PlaceId,
@@ -3906,11 +4273,12 @@ impl System {
         deadline: Deadline,
         label: Option<&str>,
         detached_from: Option<ActivityId>,
+        provenance: Option<&BackgroundProvenance>,
     ) -> ActivityId {
         let id = self
             .0
             .store
-            .start_activity(
+            .start_activity_with_provenance(
                 place,
                 subject,
                 kind,
@@ -3918,6 +4286,7 @@ impl System {
                 self.nanos(deadline.0),
                 self.now_nanos(),
                 detached_from,
+                provenance,
             )
             .unwrap();
         let routes = self
@@ -3957,8 +4326,8 @@ impl System {
         id
     }
 
-    /// 活動を終わらせ、実際に遷移したかを返す（`true`＝走っている→終わりを起こした）。二度目の終了は
-    /// 0 行で `false`——通知も二度出さない（§02）。ターンの活動終了と背景の決着の両方がここを通る。
+    /// Turn 活動を終わらせ、実際に遷移したかを返す（`true`＝走っている→終わりを起こした）。二度目の
+    /// 終了は 0 行で `false`——通知も二度出さない（§02）。Background は結果と原子的に決着する別 API。
     fn end_activity_reason(&self, id: ActivityId, reason: &str) -> bool {
         let transitioned = self
             .0
@@ -3968,20 +4337,26 @@ impl System {
         if !transitioned {
             return false;
         }
+        if let Some(activity) = self.0.store.get_activity(id).unwrap() {
+            self.notify_activity_ended(id, activity.place);
+        }
+        true
+    }
+
+    /// 開始時に snapshot した route と同じ credential/address だけへ終了を配送する。
+    /// gate を持たない legacy caller の揮発 notice も、開始時に記録した活動だけへ対称に閉じる。
+    fn notify_activity_ended(&self, id: ActivityId, place: PlaceId) {
         if let Some(route) = self.0.activity_routes.lock().unwrap().remove(&id) {
             self.0.notifier.notify(Notice::RoutedActivityEnded {
                 route,
                 activity: id,
             });
         } else if self.0.legacy_activity_notices.lock().unwrap().remove(&id) {
-            if let Some(activity) = self.0.store.get_activity(id).unwrap() {
-                self.0.notifier.notify(Notice::ActivityEnded {
-                    place: activity.place,
-                    activity: id,
-                });
-            }
+            self.0.notifier.notify(Notice::ActivityEnded {
+                place,
+                activity: id,
+            });
         }
-        true
     }
 
     /// 経過の表示。推論を 1 回も挟まない（詳細§08・プロトコル§05）。
@@ -4035,8 +4410,16 @@ impl System {
         subject: SubjectId,
         a: Authorized<ToolCallSpec>,
         must_settle: bool,
+        origin: Option<OriginInput>,
     ) -> ToolResult {
         let call = a.into_inner();
+        let provenance = origin.map(|origin| BackgroundProvenance {
+            origin_from_exclusive: origin.from_exclusive,
+            origin_to_inclusive: origin.to_inclusive,
+            origin_standing: origin.standing,
+            tool_name: call.name.clone(),
+            tool_args: call.args.clone(),
+        });
         let core_tool = authority::CoreTool::parse(&call.name);
         // 画像・リンク（DESIGN-images §3/§3b）は core builtin だが**async**（URL を fetch する）。同じ
         // ターンの tool_result に結果（look は画像・read は本文）を入れる必要があるので、背景へは移さず
@@ -4052,6 +4435,11 @@ impl System {
             if !must_settle {
                 return r;
             }
+            let Some(provenance) = provenance.as_ref() else {
+                return ToolResult::Failed(
+                    "background tool call has no origin input provenance".into(),
+                );
+            };
             let bg = self
                 .start_activity(
                     place,
@@ -4060,6 +4448,7 @@ impl System {
                     Deadline(self.now() + self.0.cfg.bg_cap),
                     Some(&call.name),
                     Some(parent_act),
+                    Some(provenance),
                 )
                 .await;
             let (ok, body) = r.to_settle_body();
@@ -4068,7 +4457,7 @@ impl System {
             } else {
                 SettleOutcome::Failed(&body)
             };
-            self.settle_background(bg, place, subject, outcome);
+            self.settle_background(bg, outcome);
             return ToolResult::MovedToBackground(bg);
         }
         // shell は core builtin だが touches_world（DESIGN-shell.md）——同期の core 経路ではなく、
@@ -4079,6 +4468,11 @@ impl System {
             if !must_settle {
                 return r; // ネイティブ経路: core は同期で返す（現状不変）。
             }
+            let Some(provenance) = provenance.as_ref() else {
+                return ToolResult::Failed(
+                    "background tool call has no origin input provenance".into(),
+                );
+            };
             // 平文ツール行経路: core も決着イベント化する（常時切り離しの一貫・結果は決着で返る）。
             // core ツールは速く副作用が小さいので同期に走らせ、その結果を決着として積む（背景の上限は
             // 掛けない——枠を握らずに即決着する）。決着本文は settle 経路を通すので、大きい結果は退避される。
@@ -4090,6 +4484,7 @@ impl System {
                     Deadline(self.now() + self.0.cfg.bg_cap),
                     Some(&call.name),
                     Some(parent_act),
+                    Some(provenance),
                 )
                 .await;
             // 同期の core ツールは Done/Failed のみを返す（背景・拒否・Looked は返さない）。想定外は
@@ -4100,7 +4495,7 @@ impl System {
             } else {
                 SettleOutcome::Failed(&body)
             };
-            self.settle_background(bg, place, subject, outcome);
+            self.settle_background(bg, outcome);
             return ToolResult::MovedToBackground(bg);
         }
         // shell は spawn する前に argv を**構造化引数から**取り出し、argv[0] の allowlist を掛ける
@@ -4109,7 +4504,19 @@ impl System {
         let shell_argv = if is_shell {
             let argv = match shell_argv_from_args(&call.args) {
                 Ok(v) => v,
-                Err(e) => return self.refuse_or_settle(must_settle, place, subject, e),
+                Err(e) => {
+                    return self
+                        .refuse_or_settle(
+                            must_settle,
+                            parent_act,
+                            place,
+                            subject,
+                            &call,
+                            provenance.as_ref(),
+                            e,
+                        )
+                        .await
+                }
             };
             match self.0.store.subject_allows_command(subject, &argv[0]) {
                 Ok(true) => {}
@@ -4118,15 +4525,30 @@ impl System {
                         "コマンド «{}» は許可されていない（core-allow-command で owner が許可したものだけ実行できる）",
                         argv[0]
                     );
-                    return self.refuse_or_settle(must_settle, place, subject, reason);
+                    return self
+                        .refuse_or_settle(
+                            must_settle,
+                            parent_act,
+                            place,
+                            subject,
+                            &call,
+                            provenance.as_ref(),
+                            reason,
+                        )
+                        .await;
                 }
                 Err(e) => {
-                    return self.refuse_or_settle(
-                        must_settle,
-                        place,
-                        subject,
-                        format!("許可の確認に失敗した: {e}"),
-                    )
+                    return self
+                        .refuse_or_settle(
+                            must_settle,
+                            parent_act,
+                            place,
+                            subject,
+                            &call,
+                            provenance.as_ref(),
+                            format!("許可の確認に失敗した: {e}"),
+                        )
+                        .await
                 }
             }
             Some(argv)
@@ -4147,10 +4569,25 @@ impl System {
                     call.name,
                     RefusedReason::BackgroundFull.as_str()
                 );
-                self.append_settled(place, subject, content);
+                let _ = self
+                    .refuse_or_settle(
+                        true,
+                        parent_act,
+                        place,
+                        subject,
+                        &call,
+                        provenance.as_ref(),
+                        content,
+                    )
+                    .await;
             }
             return ToolResult::Refused(RefusedReason::BackgroundFull);
         }
+        let Some(provenance) = provenance.as_ref() else {
+            return ToolResult::Failed(
+                "background tool call has no origin input provenance".into(),
+            );
+        };
         let tool_route = if is_shell {
             None
         } else {
@@ -4161,34 +4598,61 @@ impl System {
                 .map(|gate| gate.name)
                 .collect();
             if kinds.len() != 1 {
-                return self.refuse_or_settle(
-                    must_settle,
-                    place,
-                    subject,
-                    format!("ツール «{}» の gate kind を一意に解決できない", call.name),
-                );
+                return self
+                    .refuse_or_settle(
+                        must_settle,
+                        parent_act,
+                        place,
+                        subject,
+                        &call,
+                        Some(provenance),
+                        format!("ツール «{}» の gate kind を一意に解決できない", call.name),
+                    )
+                    .await;
             } else {
                 let purpose = match RoutePurpose::tool(&call.name) {
                     Ok(purpose) => purpose,
-                    Err(error) => return self.refuse_or_settle(must_settle, place, subject, error),
+                    Err(error) => {
+                        return self
+                            .refuse_or_settle(
+                                must_settle,
+                                parent_act,
+                                place,
+                                subject,
+                                &call,
+                                Some(provenance),
+                                error,
+                            )
+                            .await
+                    }
                 };
                 match self.0.store.gate_route(subject, place, &kinds[0], &purpose) {
                     Ok(Some(route)) => Some(route),
                     Ok(None) => {
-                        return self.refuse_or_settle(
-                            must_settle,
-                            place,
-                            subject,
-                            format!("ツール «{}» の選択済み route がない", call.name),
-                        )
+                        return self
+                            .refuse_or_settle(
+                                must_settle,
+                                parent_act,
+                                place,
+                                subject,
+                                &call,
+                                Some(provenance),
+                                format!("ツール «{}» の選択済み route がない", call.name),
+                            )
+                            .await
                     }
                     Err(error) => {
-                        return self.refuse_or_settle(
-                            must_settle,
-                            place,
-                            subject,
-                            format!("ツール route の確認に失敗した: {error}"),
-                        )
+                        return self
+                            .refuse_or_settle(
+                                must_settle,
+                                parent_act,
+                                place,
+                                subject,
+                                &call,
+                                Some(provenance),
+                                format!("ツール route の確認に失敗した: {error}"),
+                            )
+                            .await
                     }
                 }
             }
@@ -4225,18 +4689,19 @@ impl System {
                 deadline,
                 Some(&label),
                 Some(parent_act),
+                Some(provenance),
             )
             .await;
         // タスクの取っ手を控える（core-bg-stop が殺すため）。決着で必ず外す（`settle_background`）。
-        self.0
-            .bg_tasks
-            .lock()
-            .unwrap()
-            .insert(bg, task.abort_handle());
+        self.0.bg_tasks.lock().unwrap().insert(
+            bg,
+            BackgroundTask {
+                abort: task.abort_handle(),
+            },
+        );
         let sys = self.clone();
         tokio::spawn(async move {
-            sys.supervise_background(bg, place, subject, deadline, task)
-                .await;
+            sys.supervise_background(bg, deadline, task).await;
         });
         ToolResult::MovedToBackground(bg)
     }
@@ -4245,15 +4710,35 @@ impl System {
     /// `ToolResult::Failed` で tool_result に載る。平文ツール行経路（`must_settle=true`）はターン内の
     /// 戻り値が無いので、決着イベントとして可視化する（BackgroundFull の断りと同じ流儀・§15）——
     /// どちらも「実行しなかった」ことが理由つきでエージェントへ伝わり、勝手な再実行はしない。
-    fn refuse_or_settle(
+    #[allow(clippy::too_many_arguments)]
+    async fn refuse_or_settle(
         &self,
         must_settle: bool,
+        parent_act: ActivityId,
         place: PlaceId,
         subject: SubjectId,
+        call: &ToolCallSpec,
+        provenance: Option<&BackgroundProvenance>,
         reason: String,
     ) -> ToolResult {
         if must_settle {
-            self.append_settled(place, subject, reason.clone());
+            let Some(provenance) = provenance else {
+                return ToolResult::Failed(
+                    "background tool call has no origin input provenance".into(),
+                );
+            };
+            let bg = self
+                .start_activity(
+                    place,
+                    subject,
+                    ActivityKindTag::Background,
+                    Deadline(self.now() + self.0.cfg.bg_cap),
+                    Some(&call.name),
+                    Some(parent_act),
+                    Some(provenance),
+                )
+                .await;
+            self.settle_background(bg, SettleOutcome::Failed(&reason));
         }
         ToolResult::Failed(reason)
     }
@@ -4286,79 +4771,81 @@ impl System {
     async fn supervise_background(
         &self,
         bg: ActivityId,
-        place: PlaceId,
-        subject: SubjectId,
         deadline: Deadline,
         mut task: tokio::task::JoinHandle<Result<String, ToolError>>,
     ) {
         tokio::select! {
             res = &mut task => {
                 match res {
-                    Ok(Ok(output)) => self.settle_background(bg, place, subject, SettleOutcome::Done(&output)),
-                    Ok(Err(e)) => self.settle_background(bg, place, subject, SettleOutcome::Failed(&e.0)),
+                    Ok(Ok(output)) => self.settle_background(bg, SettleOutcome::Done(&output)),
+                    Ok(Err(e)) => self.settle_background(bg, SettleOutcome::Failed(&e.0)),
                     // タスクが panic した／core-bg-stop 以外の理由で異常終了した。失敗として決着させる。
-                    // （core-bg-stop は自分で先に決着させるので、その競合はここでは遷移ガードで no-op になる。）
-                    Err(_) => self.settle_background(bg, place, subject, SettleOutcome::Failed("ツールタスクが異常終了")),
+                    // （core-bg-stop との競合は store が先に commit した結果へ収束する。）
+                    Err(_) => self.settle_background(bg, SettleOutcome::Failed("ツールタスクが異常終了")),
                 }
             }
             _ = tokio::time::sleep_until(deadline.0) => {
                 // 上限で中断として決着させる。勝手に再実行しない（§07・§15）。
                 task.abort();
-                self.settle_background(bg, place, subject, SettleOutcome::Deadline);
+                self.settle_background(bg, SettleOutcome::Deadline);
             }
         }
     }
 
-    /// 背景の活動を 1 度だけ決着させる（§07）。決着は `end_activity` の遷移で**1 回きり**を守る
-    /// ——core-bg-stop（停止）と自然完走／上限が競合しても、先に遷移させた 1 つだけが出来事を積む。
-    /// 成功/失敗が判る生テキストを決着本文に載せ、大きい結果は退避する（`settle_content`）。
-    fn settle_background(
-        &self,
-        bg: ActivityId,
-        place: PlaceId,
-        subject: SubjectId,
-        outcome: SettleOutcome,
-    ) {
-        if !self.end_activity_reason(bg, outcome.reason()) {
-            return; // 既に決着済み（競合の負け側）。二重に出来事を積まない。
-        }
-        // 実行中タスクの取っ手を落とす（kill 用の登録の後始末・じわ漏れ防止）。
+    /// 背景の活動を 1 度だけ決着させる（§07）。activity 終端・結果 event・provenance・必要な offload は
+    /// store の 1 transaction で確定する。core-bg-stop（停止）と自然完走／上限の競合、および commit 後の
+    /// 再実行は、store が最初に確定した 1 結果へ収束させる。
+    fn settle_background(&self, bg: ActivityId, outcome: SettleOutcome) {
+        let reason = outcome.reason();
+        let (content, offload) = self.settle_content(bg, outcome);
+        let result = self
+            .0
+            .store
+            .settle_background_activity(
+                bg,
+                reason,
+                &content,
+                offload.as_ref(),
+                self.now_nanos(),
+                self.now_wall_nanos(),
+            )
+            .unwrap();
+        // 実行中タスクの取っ手を落とす（kill 用の登録の後始末・じわ漏れ防止）。競合の負け側も、
+        // store 上は既に決着済みなので同じ後始末へ収束する。
         self.0.bg_tasks.lock().unwrap().remove(&bg);
-        let content = self.settle_content(place, subject, bg, outcome);
-        self.append_settled(place, subject, content);
+        if let BackgroundSettlement::Appended { place, seq } = result {
+            self.notify_activity_ended(bg, place);
+            // 決着は既にログ済み。発火の再判定が一時的に引けなくても、次の pump/startup が拾う（§02）。
+            let _ = self.on_append(place, seq);
+        }
     }
 
     /// 決着イベントの本文（生テキスト・非 JSON・§15）。識別子つきで、成功/失敗が判る。小さい結果は
     /// 本文そのまま、大きい結果は退避して案内＋読み方レシピだけを載せる（`offload`）。
     fn settle_content(
         &self,
-        place: PlaceId,
-        subject: SubjectId,
         bg: ActivityId,
         outcome: SettleOutcome,
-    ) -> String {
+    ) -> (String, Option<NewBackgroundOffload>) {
         match outcome {
-            SettleOutcome::Deadline => {
-                format!("活動 #{bg} は実行の上限に達して中断した（勝手に再実行しない）")
-            }
-            SettleOutcome::Stopped => format!("活動 #{bg} を停止した"),
-            SettleOutcome::Done(body) => self.settle_result_content(place, subject, bg, true, body),
-            SettleOutcome::Failed(body) => {
-                self.settle_result_content(place, subject, bg, false, body)
-            }
+            SettleOutcome::Deadline => (
+                format!("活動 #{bg} は実行の上限に達して中断した（勝手に再実行しない）"),
+                None,
+            ),
+            SettleOutcome::Stopped => (format!("活動 #{bg} を停止した"), None),
+            SettleOutcome::Done(body) => self.settle_result_content(bg, true, body),
+            SettleOutcome::Failed(body) => self.settle_result_content(bg, false, body),
         }
     }
 
-    /// 成功/失敗の結果本文を決着本文へ写す。inline 上限を超えたら退避する。**退避に失敗したら
-    /// 黙って本文へ切り替えず、失敗として決着を記録する**（家風: フォールバックを作らない・§15）。
+    /// 成功/失敗の結果本文を決着本文へ写す。inline 上限を超えたら、store が決着と同じ transaction で
+    /// 保存する offload を返す。保存に失敗すれば activity 終端を含む transaction 全体が失敗する。
     fn settle_result_content(
         &self,
-        place: PlaceId,
-        subject: SubjectId,
         bg: ActivityId,
         ok: bool,
         body: &str,
-    ) -> String {
+    ) -> (String, Option<NewBackgroundOffload>) {
         let head = if ok {
             format!("活動 #{bg} が完了した（成功）")
         } else {
@@ -4367,51 +4854,19 @@ impl System {
         if !offload::exceeds_limit(self.0.counter.as_ref(), body) {
             // 小さい結果は本文そのまま（識別子つきの生テキスト）。
             if body.is_empty() {
-                return format!("{head}（出力なし）");
+                return (format!("{head}（出力なし）"), None);
             }
-            return format!("{head}:\n{body}");
+            return (format!("{head}:\n{body}"), None);
         }
         // 大きい結果は store 背番号へ退避し、案内＋読み方レシピだけ載せる（本文は 1 バイトも載せない）。
         let (saved, truncated) = offload::clamp_body(body);
-        match self.0.store.create_offload(
-            bg,
-            subject,
-            place,
-            &saved,
-            truncated,
-            self.now_wall_nanos(),
-        ) {
-            Ok(()) => offload::settle_notice(bg, ok, &saved, truncated, self.0.counter.as_ref()),
-            Err(e) => {
-                // 退避できなかった。生本文を決着へ載せない（載せると次ターンの予算を溢れさせる・#284 同型）
-                // ——失敗として決着を記録する（黙って本文へ切り替えない）。
-                format!("活動 #{bg} は結果を退避できず失敗として決着した（本文は捨てた）: {e}")
-            }
-        }
-    }
-
-    /// 決着の出来事をログへ積む（`for_subject` でその主体のターンを起こす・§07）。本文は呼び手が
-    /// 組んだ生テキスト（`settle_content`）。
-    fn append_settled(&self, place: PlaceId, subject: SubjectId, content: String) -> Seq {
-        let ne = NewEvent {
-            kind: EventKind::Settled,
-            author_subject: None,
-            author_external: None,
-            content: Content::text(content),
-            mentions: vec![],
-            reply_to: None,
-            target: None,
-            for_subject: Some(subject),
-            attachments: vec![],
-        };
-        let seq = self
-            .0
-            .store
-            .append(place, &ne, self.now_wall_nanos())
-            .unwrap();
-        // 決着は既にログ済み。発火の再判定が一時的に引けなくても、次の pump/startup が拾う（§02）。
-        let _ = self.on_append(place, seq);
-        seq
+        (
+            offload::settle_notice(bg, ok, &saved, truncated, self.0.counter.as_ref()),
+            Some(NewBackgroundOffload {
+                body: saved,
+                truncated,
+            }),
+        )
     }
 
     // ---- 画像・リンク（DESIGN-images §3/§3b）----
@@ -4911,12 +5366,13 @@ impl System {
                 if row.ended_at.is_some() {
                     return ToolResult::Failed(format!("活動 #{bg} は既に決着している"));
                 }
-                // 走っているツールタスクを止める（暴走 kill）。取っ手が無ければ決着競合中——遷移ガードに任せる。
-                if let Some(h) = self.0.bg_tasks.lock().unwrap().get(&bg).cloned() {
-                    h.abort();
+                // 走っているツールタスクを止める（暴走 kill）。取っ手が無ければ決着競合中——store の
+                // 原子的な決着に任せる。
+                if let Some(task) = self.0.bg_tasks.lock().unwrap().get(&bg).cloned() {
+                    task.abort.abort();
                 }
-                // 停止として決着させる（二度目は遷移ガードで no-op・自然完走との競合は先着が勝つ）。
-                self.settle_background(bg, row.place, subject, SettleOutcome::Stopped);
+                // 停止として決着させる（二度目と自然完走との競合は、先に commit した結果へ収束する）。
+                self.settle_background(bg, SettleOutcome::Stopped);
                 ToolResult::Done(format!("活動 #{bg} を停止した"))
             }
             // 背景の活動の退避結果を行範囲で読む（§07/§06）。**自分の退避だけ**（store が subject で絞る）。
@@ -5140,44 +5596,77 @@ impl System {
     // ---- 再起動（詳細§11）----
 
     pub fn startup(&self) {
-        // 1. 走り残しを interrupted で閉じ、2. 中断を出来事にする。
-        for act in self.0.store.running_activities().unwrap() {
-            self.0
-                .store
-                .end_activity(act.id, "interrupted", self.now_nanos())
-                .unwrap();
-            let ne = NewEvent {
-                kind: EventKind::Interrupted,
-                author_subject: None,
-                author_external: None,
-                content: Content::text("再起動により中断"),
-                mentions: vec![],
-                reply_to: None,
-                target: None,
-                for_subject: Some(act.subject),
-                attachments: vec![],
+        // 1. 走り残しを interrupted で閉じ、対応 event（Background は provenance も）を store の
+        // 1 transaction で確定する。旧処理が終端更新だけを残した Background も同じ入口で収束する。
+        for act in self.0.store.activities_needing_interruption().unwrap() {
+            let content = match act.kind {
+                ActivityKindTag::Turn => "再起動により中断".to_string(),
+                ActivityKindTag::Background => format!(
+                    "活動 #{} は再起動により中断した（勝手に再実行しない）",
+                    act.id
+                ),
             };
-            // 出来事の時刻は壁時計。兄弟の追記と桁を揃える（§10 の観測を汚さない・§04）。
-            let seq = self
+            match self
                 .0
                 .store
-                .append(act.place, &ne, self.now_wall_nanos())
-                .unwrap();
-            // 中断はログ済み。発火の再判定が一時的に引けなくても、下の open 場ループ・以後の追記が拾う（§02）。
-            let _ = self.on_append(act.place, seq);
+                .interrupt_activity(act.id, &content, self.now_nanos(), self.now_wall_nanos())
+                .unwrap()
+            {
+                ActivityInterruption::Appended { place, seq } => {
+                    // 出来事の時刻は壁時計。兄弟の追記と桁を揃える（§10 の観測を汚さない・§04）。
+                    // 中断はログ済み。発火の再判定が一時的に引けなくても、下の open 場ループ・
+                    // 以後の追記が拾う（§02）。
+                    let _ = self.on_append(place, seq);
+                }
+                ActivityInterruption::AlreadyRecorded { .. }
+                | ActivityInterruption::AlreadyEnded => {}
+            }
         }
-        // 3. 予定を読み直す（位相はそのまま）。壁時計で持った予定を、単調時計の待ちへ変換する（§04）。
+        // 2. 予定を読み直す（位相はそのまま）。壁時計で持った予定を、単調時計の待ちへ変換する（§04）。
         //    残り = 予定（壁） − いまの壁時計。過ぎていれば即時（now）に判定させる。
         let now_wall = self.now_wall_nanos();
         for (place, reason, wall_at) in self.0.store.schedule_all().unwrap() {
             let remaining = Duration::from_nanos((wall_at - now_wall).max(0) as u64);
             self.arm_sleeper(place, &reason, self.now() + remaining);
         }
-        // 4. プラグインの接続は範囲外。開いている場の未読からの発火だけ回す。
+        // 3. プラグインの接続は範囲外。開いている場の未読からの発火だけ回す。
         //    一時的に引けない場は、この起動時には見送る（次の追記・pump が拾う・§15）。
         for p in self.0.store.all_open_places().unwrap() {
             let _ = self.maybe_fire(p);
         }
+    }
+}
+
+/// NO_REPLY sentinel の lexical boundary。制御として成立するのは、行全体の `NO_REPLY` /
+/// `NO_REPLY::`、または ASCII 空白（行端を含む）で区切られた token だけ。これにより reasoning の
+/// 前後に置かれた sentinel は fail-closed に拾いつつ、部分文字列・引用符内・不正 action 形は拾わない。
+fn contains_no_reply_sentinel(text: &str) -> bool {
+    text.split('\n').any(|line| {
+        // 平文 action parser と同じ escape: 行頭に空白がある行は制御行としても読まず、逐語の地の文にする。
+        if line.starts_with(|c: char| c.is_whitespace()) {
+            return false;
+        }
+        let trimmed = line.trim();
+        if trimmed == NO_REPLY || trimmed.strip_suffix("::") == Some(NO_REPLY) {
+            return true;
+        }
+        line.match_indices(NO_REPLY).any(|(start, token)| {
+            let before = line[..start].chars().next_back();
+            let after = line[start + token.len()..].chars().next();
+            before.is_none_or(|c| c.is_ascii_whitespace())
+                && after.is_none_or(|c| c.is_ascii_whitespace())
+        })
+    })
+}
+
+/// ターン記録の複数本文を Say の出現順に 1 本へ連結する。
+fn append_recorded_text(recorded: &mut Option<String>, text: String) {
+    match recorded {
+        Some(acc) => {
+            acc.push('\n');
+            acc.push_str(&text);
+        }
+        None => *recorded = Some(text),
     }
 }
 
@@ -5647,7 +6136,10 @@ fn render_event(ev: &opencrab_store::EventRow, author_name: Option<&str>) -> Str
             who,
             ev.target.unwrap_or(0)
         ),
-        EventKind::Settled => format!("[{}] （決着）{}", ev.seq, text),
+        EventKind::Settled => match ev.reply_to {
+            Some(origin) => format!("[{}] （決着・発端 #{origin}）{}", ev.seq, text),
+            None => format!("[{}] （決着）{}", ev.seq, text),
+        },
         EventKind::Interrupted => format!("[{}] （中断）{}", ev.seq, text),
         other => format!("[{}] {} {}", ev.seq, who, other.as_str()),
     };
@@ -5655,5 +6147,26 @@ fn render_event(ev: &opencrab_store::EventRow, author_name: Option<&str>) -> Str
     match attachment_address(ev) {
         Some(addr) => format!("{line}{addr}"),
         None => line,
+    }
+}
+
+/// read は生ログを欠落させず、チャット面へ既定表示しない「系の出来事」を印で分離する。
+/// 列挙を網羅して、新しい EventKind が増えたときに core で表示判断を要求する。
+fn is_internal_read_kind(kind: EventKind) -> bool {
+    match kind {
+        EventKind::Settled | EventKind::Interrupted => true,
+        EventKind::Said
+        | EventKind::Edited
+        | EventKind::Retracted
+        | EventKind::Reacted
+        | EventKind::UiAction
+        | EventKind::Spoke
+        | EventKind::Quoted
+        | EventKind::Boosted
+        | EventKind::ReactEffect
+        | EventKind::Amended
+        | EventKind::RetractEffect
+        | EventKind::UiPosted
+        | EventKind::ReadMarked => false,
     }
 }

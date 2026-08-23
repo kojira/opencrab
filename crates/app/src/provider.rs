@@ -33,6 +33,167 @@ use opencrab_port::{
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+/// Deterministic response scripts exposed by the explicit `mock` provider.
+///
+/// The mock is a real `Engine` implementation selected at the same provider boundary as the
+/// network providers. It is never selected implicitly: both `OPENCRAB_LLM_PROVIDER=mock` and a
+/// known `OPENCRAB_MOCK_LLM_SCRIPT` value are required.
+#[derive(Clone, Copy)]
+enum MockScript {
+    Reply,
+    History,
+    NoReply,
+    PrefixedNoReply,
+    ToolThenReply,
+    PlaintextToolSettledReply,
+}
+
+pub const MOCK_MODEL: &str = "mock";
+
+/// Provider-level deterministic engine for process E2E tests and offline deployments.
+pub struct MockEngine {
+    script: MockScript,
+}
+
+impl MockEngine {
+    fn from_env() -> Result<Self, String> {
+        let value = match std::env::var("OPENCRAB_MOCK_LLM_SCRIPT") {
+            Ok(value) => value,
+            Err(std::env::VarError::NotPresent) => {
+                return Err(
+                    "OPENCRAB_MOCK_LLM_SCRIPT is required when OPENCRAB_LLM_PROVIDER=mock"
+                        .to_string(),
+                )
+            }
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err("OPENCRAB_MOCK_LLM_SCRIPT is not valid Unicode".to_string())
+            }
+        };
+        let script = match value.as_str() {
+            "reply" => MockScript::Reply,
+            "history" => MockScript::History,
+            "no_reply" => MockScript::NoReply,
+            "prefixed_no_reply" => MockScript::PrefixedNoReply,
+            "tool_then_reply" => MockScript::ToolThenReply,
+            "plaintext_tool_settled_reply" => MockScript::PlaintextToolSettledReply,
+            other => return Err(format!("unknown OPENCRAB_MOCK_LLM_SCRIPT: {other}")),
+        };
+        Ok(Self { script })
+    }
+}
+
+#[async_trait::async_trait]
+impl Engine for MockEngine {
+    fn emits_tool_calls(&self) -> bool {
+        !matches!(self.script, MockScript::PlaintextToolSettledReply)
+    }
+
+    fn model(&self) -> &str {
+        MOCK_MODEL
+    }
+
+    async fn infer(&self, ctx: &Context, chunks: &ChunkSink) -> Result<InferOutput, EngineError> {
+        chunks.chunk();
+        let say = |text: &str| InferOutput {
+            effects: vec![EffectSpec::say(text)],
+            tool_calls: vec![],
+            done: true,
+        };
+        match self.script {
+            MockScript::Reply => {
+                // Nostr E2E の合成 mention では、通常の即応ターンに着火発言が会話ログと区別して
+                // 明示されたことまで mock 境界で検査する。通常の provider unit context は対象外。
+                if ctx.rendered.contains("synthetic mention for reply") {
+                    let trigger_block = ctx
+                        .rendered
+                        .split_once("=== 即応の発端 ===\n")
+                        .and_then(|(_, rest)| rest.split_once("\n\n").map(|(block, _)| block));
+                    if !trigger_block.is_some_and(|block| {
+                        block.contains("synthetic mention for reply") && block.contains("[1]")
+                    }) {
+                        return Err(EngineError(
+                            "mock reply turn did not receive the explicit triggering utterance"
+                                .to_string(),
+                        ));
+                    }
+                }
+                Ok(say("mock reply"))
+            }
+            MockScript::History => {
+                if !ctx.rendered.contains("synthetic history question") {
+                    return Ok(say("mock history seed acknowledged"));
+                }
+                if !ctx.rendered.contains("synthetic history seed")
+                    || !ctx.rendered.contains("mock history seed acknowledged")
+                {
+                    return Err(EngineError(
+                        "mock history turn did not receive the previously read conversation"
+                            .to_string(),
+                    ));
+                }
+                Ok(say("mock remembered synthetic history seed"))
+            }
+            MockScript::NoReply => Ok(say("NO_REPLY")),
+            MockScript::PrefixedNoReply => Ok(say("mock internal reasoning\nNO_REPLY")),
+            MockScript::ToolThenReply => {
+                let result = ctx.history.iter().find_map(|message| {
+                    message.content.iter().find_map(|block| match block {
+                        Block::ToolResult {
+                            content, is_error, ..
+                        } => Some((content, *is_error)),
+                        _ => None,
+                    })
+                });
+                match result {
+                    None => Ok(InferOutput {
+                        effects: vec![],
+                        tool_calls: vec![ToolCallSpec {
+                            id: "mock-tool-call-1".to_string(),
+                            name: "core-child-list".to_string(),
+                            args: serde_json::json!({}),
+                        }],
+                        done: false,
+                    }),
+                    Some((_, true)) => Err(EngineError(
+                        "mock tool_then_reply received an error tool result".to_string(),
+                    )),
+                    Some((content, false)) if content.is_empty() => Err(EngineError(
+                        "mock tool_then_reply received an empty tool result".to_string(),
+                    )),
+                    Some((_, false)) => Ok(say("mock reply after tool result")),
+                }
+            }
+            MockScript::PlaintextToolSettledReply => {
+                let settled = ctx.rendered.contains("=== 決着の対応 ===");
+                if !settled {
+                    return Ok(say("nostr-whoami::{}\nNO_REPLY"));
+                }
+                if !ctx
+                    .rendered
+                    .contains("synthetic mention for plaintext_tool_settled_reply")
+                {
+                    return Err(EngineError(
+                        "mock plaintext settled turn did not receive the originating request"
+                            .to_string(),
+                    ));
+                }
+                if !ctx.rendered.contains("npub1") {
+                    return Err(EngineError(
+                        "mock plaintext settled turn did not receive the tool result".to_string(),
+                    ));
+                }
+                if !ctx.rendered.contains("受理ツール: nostr-whoami args={}") {
+                    return Err(EngineError(
+                        "mock plaintext settled turn did not receive the accepted tool call"
+                            .to_string(),
+                    ));
+                }
+                Ok(say("mock reply after settled plaintext tool result"))
+            }
+        }
+    }
+}
+
 /// SSE の 1 イベントの意味（プロバイダごとに解釈が違うので値で返す）。転送側（`stream_request`）が
 /// 断片を跨いで積む——このenumは 1 イベント＝1 値で、状態を持たない。
 pub enum Delta {
@@ -1045,6 +1206,7 @@ pub fn engine_from_env() -> Result<Option<Arc<dyn Engine>>, String> {
         }
     };
     let engine = match configured.as_deref() {
+        Some("mock") => Some(Arc::new(MockEngine::from_env()?) as Arc<dyn Engine>),
         Some("anthropic") => {
             // 本番は https。手順書に合わせ、既定は本物の API。偽サーバのときだけ base を差し替える。
             let base = std::env::var("OPENCRAB_LLM_BASE_URL")
@@ -1323,6 +1485,97 @@ fn apply_delta(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn only_say(output: &InferOutput) -> &str {
+        output.effects[0]
+            .content
+            .text
+            .as_deref()
+            .expect("mock Say text")
+    }
+
+    #[tokio::test]
+    async fn mock_scripts_are_deterministic_and_tool_script_requires_a_result() {
+        let (chunks, _rx) = ChunkSink::channel();
+        let ctx = Context::default();
+
+        let reply = MockEngine {
+            script: MockScript::Reply,
+        }
+        .infer(&ctx, &chunks)
+        .await
+        .unwrap();
+        assert_eq!(only_say(&reply), "mock reply");
+
+        let history = MockEngine {
+            script: MockScript::History,
+        };
+        let seed = history.infer(&ctx, &chunks).await.unwrap();
+        assert_eq!(only_say(&seed), "mock history seed acknowledged");
+        let history_ctx = Context {
+            rendered: "[1] Synthetic: synthetic history seed\n[2] Agent: mock history seed acknowledged\n[3] Synthetic: synthetic history question\n"
+                .to_string(),
+            ..Context::default()
+        };
+        let answer = history.infer(&history_ctx, &chunks).await.unwrap();
+        assert_eq!(only_say(&answer), "mock remembered synthetic history seed");
+
+        let no_reply = MockEngine {
+            script: MockScript::NoReply,
+        }
+        .infer(&ctx, &chunks)
+        .await
+        .unwrap();
+        assert_eq!(only_say(&no_reply), "NO_REPLY");
+
+        let prefixed = MockEngine {
+            script: MockScript::PrefixedNoReply,
+        }
+        .infer(&ctx, &chunks)
+        .await
+        .unwrap();
+        assert_eq!(only_say(&prefixed), "mock internal reasoning\nNO_REPLY");
+
+        let engine = MockEngine {
+            script: MockScript::ToolThenReply,
+        };
+        let first = engine.infer(&ctx, &chunks).await.unwrap();
+        assert!(!first.done);
+        assert_eq!(first.tool_calls.len(), 1);
+        assert_eq!(first.tool_calls[0].name, "core-child-list");
+
+        let with_result = Context {
+            history: vec![opencrab_port::Message {
+                role: MsgRole::User,
+                content: vec![Block::ToolResult {
+                    tool_use_id: "mock-tool-call-1".to_string(),
+                    content: vec![Part::text("synthetic result")],
+                    is_error: false,
+                }],
+            }],
+            ..Context::default()
+        };
+        let second = engine.infer(&with_result, &chunks).await.unwrap();
+        assert!(second.done);
+        assert_eq!(only_say(&second), "mock reply after tool result");
+
+        let plaintext = MockEngine {
+            script: MockScript::PlaintextToolSettledReply,
+        };
+        assert!(!plaintext.emits_tool_calls());
+        let first = plaintext.infer(&ctx, &chunks).await.unwrap();
+        assert_eq!(only_say(&first), "nostr-whoami::{}\nNO_REPLY");
+        let settled_ctx = Context {
+            rendered: "=== 決着の対応 ===\n活動 #2\n発端入力: #1..#1\nsynthetic mention for plaintext_tool_settled_reply\n受理ツール: nostr-whoami args={}\n結果:\nnpub1synthetic"
+                .to_string(),
+            ..Context::default()
+        };
+        let second = plaintext.infer(&settled_ctx, &chunks).await.unwrap();
+        assert_eq!(
+            only_say(&second),
+            "mock reply after settled plaintext tool result"
+        );
+    }
 
     fn only_error(deltas: Vec<Delta>) -> String {
         match deltas.as_slice() {

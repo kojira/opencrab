@@ -112,7 +112,7 @@ fn retracted(author: SubjectId, target: Seq) -> Incoming {
     }
 }
 
-// 1. 後続ターンが先行の発話を見る。
+// 1. 後続ターンが、直前の未読だけでなく既読になった過去の発話も会話ログ窓で見る。
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn later_turn_sees_prior_utterance() {
     let h = build(Config::default());
@@ -133,18 +133,81 @@ async fn later_turn_sees_prior_utterance() {
 
     h.eng.push(Step::say_done("reply1"));
     h.eng.push(Step::say_done("reply2"));
+    h.eng.push(Step::say_done("reply3"));
 
     h.sys.deliver(p, Incoming::said(human, "first")).unwrap();
     settle().await;
     h.sys.deliver(p, Incoming::said(human, "second")).unwrap();
     settle().await;
+    h.sys.deliver(p, Incoming::said(human, "third")).unwrap();
+    settle().await;
 
     let ctxs = h.eng.contexts();
-    assert!(ctxs.len() >= 2, "two turns expected, got {}", ctxs.len());
+    assert_eq!(ctxs.len(), 3, "three turns expected");
     assert!(
         ctxs[1].contains("reply1"),
         "2本目の文脈に1本目の発話が入るべき: {}",
         ctxs[1]
+    );
+    assert!(
+        ctxs[2].contains("[1] H: first"),
+        "既に cursor より前へ進んだ最初の発話も3本目の履歴窓に残るべき: {}",
+        ctxs[2]
+    );
+
+    let turns = h.sys.store().turn_records(p).unwrap();
+    let records = h.sys.store().context_records(turns[2].id).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].ctx_from_seq,
+        Some(1),
+        "履歴窓は最初の既読まで遡る"
+    );
+    assert_eq!(records[0].ctx_to_seq, Some(5), "今回の未読までを含む");
+}
+
+// #752: 通常の即応ターンは、着火した発言を会話ログの一部として読むだけでなく、
+// 「どの発言への応答か」が分かる予約済みブロックへ同じ seq で明示する。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn immediate_turn_identifies_its_trigger_separately_from_the_log() {
+    let h = build(Config::default());
+    let agent = h
+        .sys
+        .create_subject(SubjectKind::Agent, "Agent", "Agent", Standing::Trusted);
+    let human = h
+        .sys
+        .create_subject(SubjectKind::Human, "Human", "Human", Standing::Owner);
+    let place = h.sys.create_place(
+        None,
+        None,
+        &Policy::immediate_on(&[Property::Direct]).with_default(agent),
+        None,
+    );
+    h.sys.join(place, agent, Role::Participant);
+    h.sys.join(place, human, Role::Participant);
+    h.eng.push(Step::say_done("synthetic reply"));
+
+    let trigger = h
+        .sys
+        .deliver(place, Incoming::said(human, "synthetic trigger"))
+        .unwrap();
+    settle().await;
+
+    let contexts = h.eng.contexts();
+    assert_eq!(contexts.len(), 1, "one immediate turn");
+    let context = &contexts[0];
+    let trigger_block = context
+        .split_once("=== 即応の発端 ===\n")
+        .and_then(|(_, rest)| rest.split_once("\n\n").map(|(block, _)| block))
+        .expect("explicit trigger block");
+    assert!(
+        trigger_block.contains(&format!("[{trigger}] Human: synthetic trigger")),
+        "trigger block identifies the exact event: {context}"
+    );
+    assert_eq!(
+        context.matches("synthetic trigger").count(),
+        2,
+        "the trigger is distinct from, and also remains in, the conversation log"
     );
 }
 
@@ -446,6 +509,107 @@ async fn batch_fires_once_on_fixed_window() {
     assert!(
         ctx.contains("m1") && ctx.contains("m2"),
         "未読全部で 1 ターン"
+    );
+}
+
+// #750 R3: 先頭の非即応 standing を未読のまま保ち、後続の別 standing の owner mention だけを
+// 即応で claim する。候補探索は全 standing 区間、1 turn の文脈は選んだ 1 区間に限定する。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn later_owner_mention_bypasses_batch_without_mixing_standings() {
+    let h = build(Config::default());
+    let agent = h
+        .sys
+        .create_subject(SubjectKind::Agent, "Agent", "Agent", Standing::Trusted);
+    let ordinary = h.sys.create_subject(
+        SubjectKind::Human,
+        "Ordinary",
+        "Ordinary",
+        Standing::Unknown,
+    );
+    let owner = h
+        .sys
+        .create_subject(SubjectKind::Human, "Owner", "Owner", Standing::Owner);
+    let window = Duration::from_secs(8);
+    let place = h.sys.create_place(
+        None,
+        None,
+        &Policy::immediate_on(&[Property::MentionsMe])
+            .with_batch_ms(window.as_millis() as i64)
+            .with_default(agent),
+        None,
+    );
+    h.sys.join(place, agent, Role::Participant);
+    h.sys.join(place, ordinary, Role::Participant);
+    h.sys.join(place, owner, Role::Participant);
+    h.eng.push(Step::no_reply());
+    h.eng.push(Step::no_reply());
+
+    h.sys
+        .deliver(place, Incoming::said(ordinary, "ordinary A"))
+        .unwrap();
+    settle().await;
+    assert_eq!(h.eng.call_count(), 0, "A は batch 窓まで claim しない");
+
+    h.sys
+        .deliver(
+            place,
+            Incoming {
+                kind: EventKind::Said,
+                author_subject: Some(owner),
+                author_external: None,
+                content: Content::text("owner mention B"),
+                mentions: vec![agent],
+                reply_to: None,
+                target: None,
+            },
+        )
+        .unwrap();
+    settle().await;
+
+    assert_eq!(h.eng.call_count(), 1, "B は clock advance なしで即応する");
+    let immediate = &h.eng.contexts()[0];
+    assert!(immediate.contains("owner mention B"), "{immediate}");
+    assert!(
+        !immediate.contains("ordinary A"),
+        "別 standing の A を owner turn に混ぜない: {immediate}"
+    );
+    assert_eq!(
+        h.sys
+            .store()
+            .get_membership(place, agent)
+            .unwrap()
+            .unwrap()
+            .read_seq,
+        0,
+        "後続だけを読んでも先頭 A の cursor は進めない"
+    );
+
+    tokio::time::advance(window).await;
+    settle().await;
+    assert_eq!(h.eng.call_count(), 2, "A は元の batch 窓で後から処理する");
+    let batched = &h.eng.contexts()[1];
+    assert!(batched.contains("ordinary A"), "{batched}");
+    assert!(
+        !batched.contains("owner mention B"),
+        "即応済み B を batch turn に再混入しない: {batched}"
+    );
+    assert_eq!(
+        h.sys
+            .store()
+            .get_membership(place, agent)
+            .unwrap()
+            .unwrap()
+            .read_seq,
+        2,
+        "A の処理後は連続する疎な既読 B まで cursor に畳む"
+    );
+    assert!(
+        h.sys
+            .store()
+            .out_of_order_read_seqs(place, agent, 0, 2)
+            .unwrap()
+            .is_empty(),
+        "cursor に畳んだ疎な既読を残さない"
     );
 }
 
@@ -982,6 +1146,123 @@ async fn large_result_is_offloaded_and_read_back_by_bg_read() {
     assert!(
         !last_hist.contains("LINE00299"),
         "1 回の読みで全行を返さない（天井で切る）: {last_hist}"
+    );
+}
+
+// #750 R2: native tool の background provenance は owner standing を保持し、settled turn はその
+// standing を継承する。OwnerFollowUp 専用の core-allow-command が第 2 turn でも認可されることで固定する。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn native_settled_turn_inherits_owner_standing_and_pairs_call_with_result() {
+    let h = build(Config::default());
+    let agent = h
+        .sys
+        .create_subject(SubjectKind::Agent, "Agent", "Agent", Standing::Trusted);
+    let owner = h
+        .sys
+        .create_subject(SubjectKind::Human, "Owner", "Owner", Standing::Owner);
+    let place = h.sys.create_place(
+        None,
+        None,
+        &Policy::immediate_on(&[Property::Direct]).with_default(agent),
+        None,
+    );
+    h.sys.join(place, agent, Role::Participant);
+    h.sys.join(place, owner, Role::Participant);
+    provision_gate_tools(&h, place, &["synthetic-native"]);
+    h.host
+        .set_immediate("synthetic-native", "synthetic native result");
+    h.eng.push(
+        Step::done().with_tool_args("synthetic-native", serde_json::json!({"mode": "bounded"})),
+    );
+    h.eng.push(Step::done().with_tool_args(
+        "core-allow-command",
+        serde_json::json!({"command": "synthetic-command"}),
+    ));
+
+    h.sys
+        .deliver(place, Incoming::said(owner, "synthetic owner request"))
+        .unwrap();
+    settle().await;
+
+    let activity = h
+        .sys
+        .store()
+        .all_activities()
+        .unwrap()
+        .into_iter()
+        .find(|activity| activity.kind == ActivityKindTag::Background)
+        .expect("background activity");
+    let activity_provenance = activity.provenance.expect("activity provenance");
+    assert_eq!(activity_provenance.origin_standing, Standing::Owner);
+    assert_eq!(activity_provenance.origin_from_exclusive, 0);
+    assert_eq!(activity_provenance.origin_to_inclusive, 1);
+    assert_eq!(activity_provenance.tool_name, "synthetic-native");
+    assert_eq!(
+        activity_provenance.tool_args,
+        serde_json::json!({"mode": "bounded"})
+    );
+    let notices = h.notif.all();
+    let started_route = notices
+        .iter()
+        .find_map(|notice| match notice {
+            Notice::RoutedActivityStarted {
+                route,
+                activity: id,
+                kind: ActivityKindTag::Background,
+                ..
+            } if *id == activity.id => Some(route),
+            _ => None,
+        })
+        .expect("background routed start");
+    let ended_route = notices
+        .iter()
+        .find_map(|notice| match notice {
+            Notice::RoutedActivityEnded {
+                route,
+                activity: id,
+            } if *id == activity.id => Some(route),
+            _ => None,
+        })
+        .expect("background routed end");
+    assert_eq!(
+        ended_route, started_route,
+        "background settlement closes the exact GateRoute snapshot used at start"
+    );
+
+    assert!(
+        h.sys
+            .store()
+            .subject_allows_command(agent, "synthetic-command")
+            .unwrap(),
+        "settled turn inherits OwnerFollowUp and can use the owner-only tool"
+    );
+    let latest = h.sys.store().latest_seq(place).unwrap();
+    let settled = h
+        .sys
+        .store()
+        .read_range(place, 0, latest)
+        .unwrap()
+        .into_iter()
+        .find(|event| event.kind == EventKind::Settled)
+        .expect("settled event");
+    let settled_provenance = h
+        .sys
+        .store()
+        .settled_provenance(place, settled.seq)
+        .unwrap()
+        .expect("settled provenance");
+    assert_eq!(settled_provenance.activity, activity.id);
+    assert_eq!(settled_provenance.origin_standing, Standing::Owner);
+
+    let contexts = h.eng.contexts();
+    assert_eq!(contexts.len(), 2, "origin and settled turns");
+    let follow_up = &contexts[1];
+    assert!(follow_up.contains("synthetic owner request"), "{follow_up}");
+    assert!(
+        follow_up.contains("受理ツール: synthetic-native args={\"mode\":\"bounded\"}")
+            && follow_up.contains("結果:")
+            && follow_up.contains("synthetic native result"),
+        "native call/result correspondence is rendered: {follow_up}"
     );
 }
 
@@ -1872,16 +2153,16 @@ async fn read_log_recovers_skipped_range() {
 
     let ctxs = h.eng.contexts();
     assert!(ctxs.len() >= 2, "2 反復回るべき");
-    // 1 反復目の文脈（最初の user テキスト）では古い SEED0 は切り詰められている。
+    // 1 反復目では発端の SEED0 は #752 の予約ブロックに残るが、次に古い SEED1 は切り詰められる。
     assert!(
-        !ctxs[0].contains("SEED0"),
-        "SEED0 は文脈から落ちている: {}",
+        !ctxs[0].contains("SEED1"),
+        "発端ではない古い SEED1 は文脈から落ちている: {}",
         ctxs[0]
     );
     // ツールで読み直した結果は、tool_result ブロックとして 2 反復目の会話に戻る（テキストに混ぜない・§05）。
     let hists = h.eng.histories();
     assert!(
-        hists[1].contains("SEED0"),
+        hists[1].contains("SEED1"),
         "落ちた分をツールで手に取れる（tool_result で還る）: {}",
         hists[1]
     );
@@ -2060,6 +2341,65 @@ async fn read_log_rounds_limit_to_the_cap() {
             Err(ReadReject::NotBound)
         ),
         "結んでいない住所は not_bound"
+    );
+}
+
+// #751: core の read 投影が内部イベントを分類する。行自体は消さず、チャット面が既定で分離する印を持つ。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn read_log_marks_internal_events_without_deleting_them() {
+    let h = build(Config::default());
+    let gate = GateName::new("web");
+    let addr = "room:main";
+    let place = h
+        .sys
+        .create_place(Some(addr), None, &Policy::default(), None);
+    h.sys.store().add_channel(place, &gate, addr).unwrap();
+
+    for (index, kind) in [
+        EventKind::Said,
+        EventKind::Spoke,
+        EventKind::Settled,
+        EventKind::Interrupted,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        h.sys
+            .store()
+            .append(
+                place,
+                &NewEvent {
+                    kind,
+                    author_subject: None,
+                    author_external: None,
+                    content: Content::text(format!("synthetic event {index}")),
+                    mentions: vec![],
+                    reply_to: None,
+                    target: None,
+                    for_subject: None,
+                    attachments: vec![],
+                },
+                index as i64,
+            )
+            .unwrap();
+    }
+
+    let page = h.sys.read_log(&gate, addr, 1, 10).expect("read ok");
+    assert_eq!(page.events.len(), 4, "internal events remain readable");
+    let projected: Vec<(EventKind, bool)> = page
+        .events
+        .into_iter()
+        .map(|event| (event.kind, event.internal))
+        .collect();
+    assert_eq!(
+        projected,
+        vec![
+            (EventKind::Said, false),
+            (EventKind::Spoke, false),
+            (EventKind::Settled, true),
+            (EventKind::Interrupted, true),
+        ],
+        "only core system events are marked internal"
     );
 }
 

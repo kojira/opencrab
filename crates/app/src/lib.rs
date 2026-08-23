@@ -16,7 +16,8 @@ mod provider;
 mod shell;
 pub use cursor::CursorEngine;
 pub use provider::{
-    AnthropicProvider, ChatGptProvider, ChatProvider, HttpSseEngine, OpenAiProvider,
+    AnthropicProvider, ChatGptProvider, ChatProvider, HttpSseEngine, MockEngine, OpenAiProvider,
+    MOCK_MODEL,
 };
 pub use shell::TokioShellHost;
 
@@ -150,6 +151,8 @@ pub const ECHO_MODEL: &str = "echo";
 pub const KNOWN_MODEL_CONTEXT_WINDOWS: &[(&str, i64)] = &[
     // echo（差し替え実装・実 LLM ではない）。本体 claude 系と同じ 200_000 を物差しにする。
     (ECHO_MODEL, 200_000),
+    // mock（明示選択する決定的 provider）。実 LLM ではないが文脈予算の物差しは必要。
+    (MOCK_MODEL, 200_000),
     // Anthropic（本番 model_pricing: claude 系は 200_000）。hermit-shell 橋の haiku もこの id。
     ("claude-opus-5", 200_000),
     ("claude-sonnet-5", 200_000),

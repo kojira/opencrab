@@ -776,6 +776,169 @@ async fn no_reply_with_action_delivers_only_the_action_and_withholds_prose() {
     );
 }
 
+// 13c. #747: sentinel の前後に地の文があっても fail-closed で全地の文を保留する。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn embedded_no_reply_sentinel_withholds_all_prose() {
+    let h = build();
+    let (place, _a) = place_with_gate(&h, &[EffectKind::Say], vec![]);
+    h.eng
+        .push(Step::say_done("内部の考えを先に書く NO_REPLY 末尾にも文章"));
+    h.sys
+        .deliver_event(
+            &GateName::new("web"),
+            inbound("room:main", "npubX", "ねえ", "note1"),
+        )
+        .unwrap();
+    settle().await;
+
+    assert!(h.tx.all().is_empty(), "sentinel を含む出力は公開しない");
+    let recs = h.sys.store().turn_records(place).unwrap();
+    assert_eq!(recs[0].end_reason, "no_reply");
+    assert_eq!(
+        recs[0].withheld_text.as_deref(),
+        Some("内部の考えを先に書く NO_REPLY 末尾にも文章"),
+        "握った本文は turn record に残す"
+    );
+}
+
+// 13d. #750: sentinel は個々の Say ではなく InferOutput 全体へ効く。前後どちらの順でも別 Say を公開せず、
+// 握った散文は turn record に残す。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn no_reply_in_one_say_withholds_other_says_in_both_orders() {
+    let h = build();
+    let (place, _a) = place_with_gate(&h, &[EffectKind::Say], vec![]);
+    h.eng.push(
+        Step::done()
+            .with_effect(EffectSpec::say("NO_REPLY"))
+            .with_effect(EffectSpec::say("sentinel より後の散文")),
+    );
+    h.eng.push(
+        Step::done()
+            .with_effect(EffectSpec::say("sentinel より前の散文"))
+            .with_effect(EffectSpec::say("NO_REPLY")),
+    );
+
+    for (origin, request) in [("synthetic-one", "一件目"), ("synthetic-two", "二件目")] {
+        h.sys
+            .deliver_event(
+                &GateName::new("web"),
+                inbound("room:main", "synthetic-author", request, origin),
+            )
+            .unwrap();
+        settle().await;
+    }
+
+    assert!(h.tx.all().is_empty(), "同じ推論の別 Say も配送しない");
+    let recs = h.sys.store().turn_records(place).unwrap();
+    assert_eq!(recs.len(), 2);
+    assert_eq!(recs[0].end_reason, "no_reply");
+    assert_eq!(
+        recs[0].withheld_text.as_deref(),
+        Some("sentinel より後の散文")
+    );
+    assert_eq!(recs[1].end_reason, "no_reply");
+    assert_eq!(
+        recs[1].withheld_text.as_deref(),
+        Some("sentinel より前の散文")
+    );
+}
+
+// 13e. #750: tool result を受けた次反復で sentinel が出ても、先の反復と同じ反復の別 Say をともに公開しない。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn no_reply_after_tool_result_withholds_prose_across_iterations() {
+    let h = build();
+    let (place, _a) = place_with_gate(&h, &[EffectKind::Say], vec![]);
+    h.eng.push(
+        Step::cont()
+            .with_effect(EffectSpec::say("一反復目の散文"))
+            .with_tool("core-child-list"),
+    );
+    h.eng.push(
+        Step::done()
+            .with_effect(EffectSpec::say("NO_REPLY"))
+            .with_effect(EffectSpec::say("二反復目の散文")),
+    );
+    h.sys
+        .deliver_event(
+            &GateName::new("web"),
+            inbound(
+                "room:main",
+                "synthetic-author",
+                "子の場を確認して",
+                "synthetic-origin",
+            ),
+        )
+        .unwrap();
+    settle().await;
+
+    assert_eq!(h.eng.call_count(), 2, "tool result の後に再推論した");
+    assert!(h.tx.all().is_empty(), "どちらの反復の散文も配送しない");
+    let recs = h.sys.store().turn_records(place).unwrap();
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0].iterations, 2);
+    assert_eq!(recs[0].end_reason, "no_reply");
+    assert_eq!(
+        recs[0].withheld_text.as_deref(),
+        Some("一反復目の散文\n二反復目の散文")
+    );
+}
+
+// 13f. #750: sentinel は独立 token / 正しい空 action 形だけ。部分文字列、引用、説明中の隣接文字列、
+// content/seq を持つ不正 action 形は通常の発話として逐語で残す。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn no_reply_lookalikes_are_delivered_as_ordinary_prose() {
+    let h = build();
+    let (place, _a) = place_with_gate(&h, &[EffectKind::Say], vec![]);
+    let prose = [
+        "NO_REPLYING は別の語",
+        "`NO_REPLY` は制御語の説明",
+        "\"NO_REPLY\" は引用",
+        "NO_REPLYという文字列を説明する",
+        "NO_REPLY:12:本文",
+        "NO_REPLY::説明",
+        " NO_REPLY",
+        "\tNO_REPLY::",
+    ];
+    for text in prose {
+        h.eng.push(Step::say_done(text));
+    }
+    for (index, text) in prose.iter().enumerate() {
+        h.sys
+            .deliver_event(
+                &GateName::new("web"),
+                inbound(
+                    "room:main",
+                    "synthetic-author",
+                    "通常応答を求める",
+                    &format!("synthetic-origin-{index}"),
+                ),
+            )
+            .unwrap();
+        settle().await;
+        assert_eq!(
+            h.tx.all().len(),
+            index + 1,
+            "通常本文を 1 件ずつ配送する: {text}"
+        );
+    }
+
+    let delivered: Vec<String> =
+        h.tx.all()
+            .into_iter()
+            .filter_map(|(_, _, effect)| effect.text)
+            .collect();
+    assert_eq!(delivered, prose);
+    assert!(
+        h.sys
+            .store()
+            .turn_records(place)
+            .unwrap()
+            .iter()
+            .all(|record| record.end_reason == "done" && record.withheld_text.is_none()),
+        "lookalike は no_reply にしない"
+    );
+}
+
 // 14. メニュー描画: 文脈に NO_REPLY が最初に無条件注入され、宣言されたアクションがテンプレートで
 //     列挙される（番号欄は Ui 以外が持つ）。内容枠の意味（絵文字等）は core が発明せず description に委ねる。
 #[tokio::test(flavor = "current_thread", start_paused = true)]

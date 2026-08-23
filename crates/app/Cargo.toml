@@ -31,11 +31,19 @@ name = "web-gate-e2e"
 path = "../web-gate/src/main.rs"
 test = false
 
+# Nostr process E2E has the same freshness requirement as web: the integration test must execute
+# the gate source from this checkout, not a manually prebuilt sibling binary.
+[[bin]]
+name = "nostr-gate-e2e"
+path = "../nostr-gate/src/main.rs"
+test = false
+
 [dependencies]
 opencrab-port = { path = "../port" }
 opencrab-store = { path = "../store" }
 opencrab-social-runtime = { path = "../social-runtime" }
 opencrab-plugd = { path = "../plugd" }
+opencrab-nostr-gate = { path = "../nostr-gate" }
 # process: 平文専用の cursor engine が `cursor-agent` CLI を子プロセスで起動する（crates/app/src/cursor.rs）。
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "net", "io-util", "process"] }
 async-trait = { workspace = true }
@@ -46,19 +54,17 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # cursor engine の空の一時 cwd（RAII で削除・孤児を残さない）。deny cli.json の置き場（crates/app/src/cursor.rs）。
 tempfile = "3"
 libc = "0.2"
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 base64 = "0.22"
 ring = "0.17"
 zeroize = "1"
 
 [dev-dependencies]
+opencrab-engine = { path = "../engine" }
+rusqlite.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "net", "io-util", "process", "rt-multi-thread"] }
 # 本物の TLS 経路でアイドル上限が効くことを見せるための、ローカルの自己署名 TLS サーバ。
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 rcgen = "0.13"
-# 実リレーで Nostr の場を通しで動かす #[ignore] E2E（tests/nostr_e2e.rs・タスク#1）用。投稿側の鍵生成・
-# 署名・リレーへの WebSocket 発行に、ゲートと**同じ純関数**（opencrab-nostr-gate の lib）を使う。これらは既に
-# nostr-gate クレートが依存グラフに持つので、workspace の再コンパイルは増えない（app のテストバイナリが link するだけ）。
-opencrab-nostr-gate = { path = "../nostr-gate" }
-tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
-futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
-rustls = { version = "0.23", default-features = false, features = ["ring"] }
