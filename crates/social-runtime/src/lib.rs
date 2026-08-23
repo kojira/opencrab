@@ -440,7 +440,7 @@ pub struct Confirmed {
     /// 外界へ運ぶ中身（本文・記号・宛先の外界識別子）。確定時に determine 済み。
     outgoing: OutgoingEffect,
     /// 運ぶチャネル（確定と同じ tx で pending 行を作った先）。空なら運び先が無い（チャネルレスな場・§08）。
-    channels: Vec<(GateName, String)>,
+    routes: Vec<GateRoute>,
 }
 
 impl Confirmed {
@@ -493,14 +493,13 @@ impl Incoming {
 struct DeliveryJob {
     place: PlaceId,
     seq: Seq,
-    gate: GateName,
-    address: String,
+    route: GateRoute,
     effect: OutgoingEffect,
 }
 
 /// 効果の配送計画（詳細§08）: 宛先の外界識別子（あれば）と、運ぶチャネル `(gate, address)` の並び。
 /// 確定時（`confirm`/`plan_delivery`）に一度だけ決まり、`Confirmed` に載って配送へ渡る。
-type DeliveryPlan = (Option<String>, Vec<(GateName, String)>);
+type DeliveryPlan = (Option<String>, Vec<GateRoute>);
 
 /// 名乗りの拒否理由（プロトコル§01）。plugd がこれを線上の `err.code` へ写す。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -515,10 +514,18 @@ pub enum HelloReject {
     /// 同一ゲート内で action 名と tool 名が衝突している（平文ツール行の設計）。併合名簿では 1 つの verb は
     /// アクションかツールのどちらか——同じゲートが両方に同名を割り当てたら曖昧。入口で弾く。
     ActionToolCollision,
+    InstanceTaken,
+    KindSpecMismatch,
+    KindMismatch,
+    InstanceDisabled,
+    KindDeclarationMismatch,
+    InstanceUnknown,
+    RevisionMismatch,
 }
 
-/// core が扱えるプロトコルの版（プロトコル§07）。今は 1 のみ。
+/// Protocol-1 remains the compatibility wire; protocol 2 is the canonical instance wire.
 pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_V2: u32 = 2;
 
 /// 出来事の受理の失敗（プロトコル§03）。`NotBound` は「結んでいない住所への出来事」。
 #[derive(Debug)]
@@ -589,14 +596,23 @@ struct Inner {
     /// あり、ここは「実行中の future への取っ手」だけ（store のプロセス内状態の定義と同じ）。core-bg-stop が
     /// 暴走ツールを殺すのに使う。決着（`settle_background`）で必ず外す（じわ漏れ防止）。
     bg_tasks: StdMutex<HashMap<ActivityId, tokio::task::AbortHandle>>,
+    activity_routes: StdMutex<HashMap<ActivityId, GateRoute>>,
+    legacy_activity_notices: StdMutex<HashSet<ActivityId>>,
     /// 接続中のゲートの名乗り（プロトコル§01・接続中だけ持つ・詳細§03）。
     /// 切れたら消える。可能な効果の和・住所の検証・ツールの提示はここを読む（値であって分岐でない・§02）。
     gates: StdMutex<HashMap<GateName, GateSpec>>,
+    gate_kind_specs: StdMutex<HashMap<GateKindId, GateKindSpec>>,
+    /// Active connection registry keyed by credential/process instance. `gates` above is the
+    /// ref-counted kind-spec index retained while at least one instance is connected.
+    gate_instances: StdMutex<HashMap<GateInstanceId, GateConnection>>,
+    gate_registration: StdMutex<()>,
     /// core → plugin の要求を運ぶ seam（bind/open/effect）。本番では plugd。無ければチャネル配送をしない。
     transport: StdMutex<Option<Arc<dyn Transport>>>,
     /// チャネルごとの配送の列（§08）。順序を保つため (place, gate) ごとに 1 本。
     /// ゲートが切れたら `unregister_gate` が畳む（じわ漏れ防止）。
-    lanes: StdMutex<HashMap<(PlaceId, GateName), tokio::sync::mpsc::UnboundedSender<DeliveryJob>>>,
+    lanes: StdMutex<
+        HashMap<(PlaceId, GateInstanceId), tokio::sync::mpsc::UnboundedSender<DeliveryJob>>,
+    >,
     /// 着火の元栓の許可集合（DESIGN-attention §1）。`None` は**元栓未設定**——許可集合の源がまだ
     /// 配送されていない状態で、従来どおり全着火を通す（元栓は設定必須ではなく「許可集合が源」）。
     /// これは「引けなかったので全通し」という**フォールバックではない**（源が来ていないだけ）。一度
@@ -663,7 +679,12 @@ impl System {
             running: StdMutex::new(HashMap::new()),
             sleepers: StdMutex::new(HashMap::new()),
             bg_tasks: StdMutex::new(HashMap::new()),
+            activity_routes: StdMutex::new(HashMap::new()),
+            legacy_activity_notices: StdMutex::new(HashSet::new()),
             gates: StdMutex::new(HashMap::new()),
+            gate_kind_specs: StdMutex::new(HashMap::new()),
+            gate_instances: StdMutex::new(HashMap::new()),
+            gate_registration: StdMutex::new(()),
             transport: StdMutex::new(None),
             lanes: StdMutex::new(HashMap::new()),
             // 元栓は未設定で始まる（許可集合の源がまだ配送されていない）。従来どおり全着火を通す。
@@ -789,6 +810,15 @@ impl System {
             .store
             .join(place, subject, role, latest, self.now_nanos())
             .unwrap();
+        if role == Role::Participant {
+            for spec in self.connected_gates() {
+                let names: Vec<_> = spec.tools.into_iter().map(|tool| tool.name).collect();
+                self.0
+                    .store
+                    .reconcile_compatibility_routes_for_kind(&spec.name, &names)
+                    .unwrap();
+            }
+        }
     }
 
     fn arm_unconditional_if_set(&self, place: PlaceId, policy: &Policy) {
@@ -850,8 +880,261 @@ impl System {
                 }
             }
         }
-        gates.insert(spec.name.clone(), spec);
+        let compatibility_spec = spec.compatibility_kind_spec();
+        let kind = spec.name.clone();
+        gates.insert(kind.clone(), spec);
+        drop(gates);
+        let instance = self
+            .0
+            .store
+            .seed_compatibility_instance(&kind)
+            .map_err(|_| HelloReject::InstanceUnknown)?;
+        let epoch = self
+            .0
+            .store
+            .begin_gate_connection(&instance, 1, self.now_wall_nanos())
+            .map_err(|_| HelloReject::RevisionMismatch)?;
+        self.0
+            .store
+            .activate_gate_connection(&instance, epoch, self.now_wall_nanos())
+            .map_err(|_| HelloReject::RevisionMismatch)?;
+        self.0
+            .gate_kind_specs
+            .lock()
+            .unwrap()
+            .insert(kind.clone(), compatibility_spec.clone());
+        self.0.gate_instances.lock().unwrap().insert(
+            instance.clone(),
+            GateConnection {
+                instance_id: instance,
+                revision: 1,
+                connection_epoch: epoch,
+                spec: compatibility_spec.clone(),
+            },
+        );
+        let names: Vec<_> = compatibility_spec
+            .tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect();
+        let _ = self
+            .0
+            .store
+            .reconcile_compatibility_routes_for_kind(&kind, &names);
         Ok(())
+    }
+
+    fn validate_gate_instance_registration(
+        &self,
+        connection: &GateConnection,
+    ) -> Result<GateSpec, HelloReject> {
+        if self
+            .0
+            .gate_instances
+            .lock()
+            .unwrap()
+            .contains_key(&connection.instance_id)
+        {
+            return Err(HelloReject::InstanceTaken);
+        }
+        let compatibility = GateSpec {
+            name: connection.spec.kind_id.clone(),
+            // GateSpec is the protocol-1 compatibility view. Canonical callers use
+            // GateKindSpec/GateConnection and do not infer wire protocol from this facade.
+            protocol: PROTOCOL_VERSION,
+            address_form: connection.spec.address_form.clone(),
+            tools: connection.spec.tools.clone(),
+            effects: connection.spec.effects.clone(),
+            capabilities: connection.spec.capabilities.clone(),
+            actions: connection.spec.actions.clone(),
+        };
+        let canonical_kinds = self.0.gate_kind_specs.lock().unwrap();
+        if let Some(existing) = canonical_kinds.get(&connection.spec.kind_id) {
+            if *existing != connection.spec {
+                return Err(HelloReject::KindSpecMismatch);
+            }
+        } else {
+            // Apply the same reserved-name and cross-kind tool collision checks as protocol 1.
+            if compatibility
+                .tools
+                .iter()
+                .any(|t| authority::is_core_tool(&t.name))
+                || compatibility
+                    .actions
+                    .iter()
+                    .any(|a| authority::is_core_tool(&a.name))
+            {
+                return Err(HelloReject::ReservedName);
+            }
+            let own: BTreeSet<&str> = compatibility
+                .tools
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect();
+            if compatibility
+                .actions
+                .iter()
+                .any(|a| own.contains(a.name.as_str()))
+            {
+                return Err(HelloReject::ActionToolCollision);
+            }
+            let kinds = self.0.gates.lock().unwrap();
+            for existing in kinds.values() {
+                if existing.name != compatibility.name
+                    && existing
+                        .tools
+                        .iter()
+                        .any(|old| compatibility.tools.iter().any(|new| old.name == new.name))
+                {
+                    return Err(HelloReject::ToolNameTaken);
+                }
+            }
+        }
+        Ok(compatibility)
+    }
+
+    fn commit_gate_instance_registration(
+        &self,
+        connection: GateConnection,
+        compatibility: GateSpec,
+    ) {
+        let mut canonical_kinds = self.0.gate_kind_specs.lock().unwrap();
+        if !canonical_kinds.contains_key(&connection.spec.kind_id) {
+            self.0
+                .gates
+                .lock()
+                .unwrap()
+                .insert(compatibility.name.clone(), compatibility);
+            canonical_kinds.insert(connection.spec.kind_id.clone(), connection.spec.clone());
+        }
+        drop(canonical_kinds);
+        self.0
+            .gate_instances
+            .lock()
+            .unwrap()
+            .insert(connection.instance_id.clone(), connection);
+    }
+
+    pub fn register_gate_instance(&self, connection: GateConnection) -> Result<(), HelloReject> {
+        let _registration = self.0.gate_registration.lock().unwrap();
+        let compatibility = self.validate_gate_instance_registration(&connection)?;
+        self.commit_gate_instance_registration(connection, compatibility);
+        Ok(())
+    }
+
+    pub fn unregister_gate_instance(&self, instance: &GateInstanceId) {
+        // Registration and removal are one ownership transition. Without the shared lock, a
+        // replacement can validate after the old entry is removed and then lose its kind/runtime
+        // indexes to the remainder of the old cleanup.
+        let _registration = self.0.gate_registration.lock().unwrap();
+        let removed = self.0.gate_instances.lock().unwrap().remove(instance);
+        let Some(connection) = removed else {
+            return;
+        };
+        let kind_still_active = self
+            .0
+            .gate_instances
+            .lock()
+            .unwrap()
+            .values()
+            .any(|active| active.spec.kind_id == connection.spec.kind_id);
+        if !kind_still_active {
+            self.0
+                .gates
+                .lock()
+                .unwrap()
+                .remove(&connection.spec.kind_id);
+            self.0
+                .gate_kind_specs
+                .lock()
+                .unwrap()
+                .remove(&connection.spec.kind_id);
+        }
+        self.0
+            .lanes
+            .lock()
+            .unwrap()
+            .retain(|(_, active), _| active != instance);
+    }
+
+    pub fn gate_connection(&self, instance: &GateInstanceId) -> Option<GateConnection> {
+        self.0.gate_instances.lock().unwrap().get(instance).cloned()
+    }
+
+    pub fn start_gate_connection(
+        &self,
+        instance_id: GateInstanceId,
+        revision: u64,
+        protocol_major: u32,
+        spec: GateKindSpec,
+    ) -> Result<GateConnection, HelloReject> {
+        let _registration = self.0.gate_registration.lock().unwrap();
+        let pending = GateConnection {
+            instance_id: instance_id.clone(),
+            revision,
+            connection_epoch: 0,
+            spec: spec.clone(),
+        };
+        let compatibility = self.validate_gate_instance_registration(&pending)?;
+        let epoch = self
+            .0
+            .store
+            .begin_gate_connection_checked(
+                &instance_id,
+                revision,
+                protocol_major,
+                &spec,
+                self.now_wall_nanos(),
+            )
+            .map_err(|error| match error {
+                opencrab_store::GateConnectionStartError::InstanceUnknown => {
+                    HelloReject::InstanceUnknown
+                }
+                opencrab_store::GateConnectionStartError::KindMismatch => HelloReject::KindMismatch,
+                opencrab_store::GateConnectionStartError::RevisionMismatch
+                | opencrab_store::GateConnectionStartError::RevisionUnavailable => {
+                    HelloReject::RevisionMismatch
+                }
+                opencrab_store::GateConnectionStartError::InstanceDisabled => {
+                    HelloReject::InstanceDisabled
+                }
+                opencrab_store::GateConnectionStartError::KindDeclarationMismatch => {
+                    HelloReject::KindDeclarationMismatch
+                }
+                opencrab_store::GateConnectionStartError::InstanceActive => {
+                    HelloReject::InstanceTaken
+                }
+                opencrab_store::GateConnectionStartError::Store(_) => HelloReject::RevisionMismatch,
+            })?;
+        let connection = GateConnection {
+            instance_id,
+            revision,
+            connection_epoch: epoch,
+            spec,
+        };
+        self.commit_gate_instance_registration(connection.clone(), compatibility);
+        Ok(connection)
+    }
+
+    pub fn ready_gate_connection(&self, connection: &GateConnection) -> opencrab_store::Result<()> {
+        self.0.store.activate_gate_connection(
+            &connection.instance_id,
+            connection.connection_epoch,
+            self.now_wall_nanos(),
+        )
+    }
+
+    pub fn fail_gate_connection(
+        &self,
+        connection: &GateConnection,
+        code: &str,
+    ) -> opencrab_store::Result<()> {
+        self.0.store.close_gate_connection(
+            &connection.instance_id,
+            connection.connection_epoch,
+            Some(code),
+            self.now_wall_nanos(),
+        )
     }
 
     /// 回線が切れた／名乗りをやり直す（プロトコル§08）。接続中の登録を消す。
@@ -861,7 +1144,18 @@ impl System {
     /// `recv` が閉じて終わる。切れた先へ運ぶことはもう無い（§08「運ばれない・再送しない」）。
     pub fn unregister_gate(&self, name: &GateName) {
         self.0.gates.lock().unwrap().remove(name);
-        self.0.lanes.lock().unwrap().retain(|(_, g), _| g != name);
+        let instances: Vec<_> = self
+            .0
+            .gate_instances
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, connection)| connection.spec.kind_id == *name)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for instance in instances {
+            self.unregister_gate_instance(&instance);
+        }
     }
 
     pub fn gate_spec(&self, name: &GateName) -> Option<GateSpec> {
@@ -902,15 +1196,30 @@ impl System {
         address: &str,
     ) -> Result<(), String> {
         let gate = GateName::new(gate);
-        if self.gate_spec(&gate).is_none() {
-            return Err("gate not connected".into());
+        let discovery = self
+            .0
+            .gate_kind_specs
+            .lock()
+            .unwrap()
+            .get(&gate)
+            .map(|spec| spec.ingress_discovery)
+            .ok_or("gate not connected")?;
+        if discovery != IngressDiscovery::Prebound {
+            return Err("membership-driven gate cannot be bound by core".into());
         }
         if !self.address_matches(&gate, address) {
             return Err("address does not match gate's form".into());
         }
         let t = self.transport().ok_or("no transport")?;
-        t.bind(&gate, address).await.map_err(|e| e.0)?;
+        t.compat_bind(&gate, address).await.map_err(|e| e.0)?;
         self.0.store.add_channel(place, &gate, address).unwrap();
+        if let Some(spec) = self.gate_spec(&gate) {
+            let names: Vec<_> = spec.tools.into_iter().map(|tool| tool.name).collect();
+            self.0
+                .store
+                .reconcile_compatibility_routes_for_kind(&gate, &names)
+                .unwrap();
+        }
         Ok(())
     }
 
@@ -921,8 +1230,19 @@ impl System {
         address: &str,
     ) -> Result<(), String> {
         let gate = GateName::new(gate);
+        let discovery = self
+            .0
+            .gate_kind_specs
+            .lock()
+            .unwrap()
+            .get(&gate)
+            .map(|spec| spec.ingress_discovery)
+            .ok_or("gate not connected")?;
+        if discovery != IngressDiscovery::Prebound {
+            return Err("membership-driven gate cannot be unbound by core".into());
+        }
         let t = self.transport().ok_or("no transport")?;
-        t.unbind(&gate, address).await.map_err(|e| e.0)?;
+        t.compat_unbind(&gate, address).await.map_err(|e| e.0)?;
         self.0.store.remove_channel(place, &gate).unwrap();
         Ok(())
     }
@@ -932,9 +1252,33 @@ impl System {
     ///
     /// これで「起動順」の鶏卵を解く: app は起動時に、プラグインの接続を待たずに住所を用意でき、
     /// プラグインが繋がった瞬間に core が結び直す（プロトコル§08）。冪等（同じ (place, gate) は住所を更新）。
-    pub fn provision_channel(&self, place: PlaceId, gate: &str, address: &str) {
+    pub fn provision_channel(
+        &self,
+        place: PlaceId,
+        gate: &str,
+        address: &str,
+    ) -> Result<(), String> {
         let gate = GateName::new(gate);
-        self.0.store.add_channel(place, &gate, address).unwrap();
+        match self.0.store.gate_ingress_discovery(&gate) {
+            Ok(Some(IngressDiscovery::Prebound)) => {}
+            Ok(Some(IngressDiscovery::Membership)) => {
+                return Err("membership-driven gate cannot be provisioned as prebound".into())
+            }
+            Ok(None) => return Err("gate kind is not configured".into()),
+            Err(error) => return Err(format!("gate kind lookup failed: {error}")),
+        }
+        self.0
+            .store
+            .add_channel(place, &gate, address)
+            .map_err(|error| error.to_string())?;
+        if let Some(spec) = self.gate_spec(&gate) {
+            let names: Vec<_> = spec.tools.into_iter().map(|tool| tool.name).collect();
+            self.0
+                .store
+                .reconcile_compatibility_routes_for_kind(&gate, &names)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     /// あるゲートが（再）接続したとき、そのゲートに結ばれている全チャネルを結び直す（プロトコル§08）。
@@ -945,7 +1289,14 @@ impl System {
     ///
     /// 送るだけ。応答が返らない・失敗しても再送しない（§08）。名乗りが無ければ（未接続なら）何もしない。
     pub async fn rebind_gate(&self, gate: &GateName) {
-        if self.gate_spec(gate).is_none() {
+        let prebound = self
+            .0
+            .gate_kind_specs
+            .lock()
+            .unwrap()
+            .get(gate)
+            .is_some_and(|spec| spec.ingress_discovery == IngressDiscovery::Prebound);
+        if !prebound {
             return;
         }
         let t = match self.transport() {
@@ -960,7 +1311,7 @@ impl System {
         for (_place, address) in channels {
             // 住所は自分の書式に照らす（プロトコル§01）。合わないものは結ばない（設定ミスを黙って通さない）。
             if self.address_matches(gate, &address) {
-                let _ = t.bind(gate, &address).await;
+                let _ = t.compat_bind(gate, &address).await;
             }
         }
     }
@@ -981,10 +1332,15 @@ impl System {
             return Err("gate does not support open".into());
         }
         let t = self.transport().ok_or("no transport")?;
-        let address = t.open(&gate, under, hint).await.map_err(|e| e.0)?;
+        let address = t.compat_open(&gate, under, hint).await.map_err(|e| e.0)?;
         // core は返ってきた住所に新しい場を結ぶ（§02）。誰が来るかは外界が決める。
         let child = self.create_place(Some(&address), Some(parent), policy, None);
         self.0.store.add_channel(child, &gate, &address).unwrap();
+        let names: Vec<_> = spec.tools.into_iter().map(|tool| tool.name).collect();
+        self.0
+            .store
+            .reconcile_compatibility_routes_for_kind(&gate, &names)
+            .unwrap();
         Ok(child)
     }
 
@@ -1058,62 +1414,123 @@ impl System {
             .place_for_channel(gate, &ev.address)
             .map_err(|e| EventReject::Failed(format!("channel lookup failed: {e}")))?
             .ok_or(EventReject::NotBound)?;
+        self.deliver_event_at(gate, None, None, place, ev)
+    }
 
+    /// Canonical ingress path. All identity, dedup, reply, and append queries are scoped to the
+    /// concrete instance/binding that carried the event; another instance of the same kind is
+    /// never consulted as a fallback.
+    pub fn deliver_gate_event(
+        &self,
+        connection: &GateConnection,
+        ev: GateEvent,
+    ) -> Result<Option<Seq>, EventReject> {
+        if !self.fire_admits(&ev.author_external) {
+            self.0.fire_drops.fetch_add(1, Ordering::Relaxed);
+            return Ok(None);
+        }
+        let resolved = self
+            .0
+            .store
+            .inbound_binding(&connection.instance_id, &ev.address)
+            .map_err(|error| EventReject::Failed(format!("binding lookup failed: {error}")))?;
+        let (place, binding) = match resolved {
+            Some(resolved) => resolved,
+            None if connection.spec.ingress_discovery == IngressDiscovery::Membership => {
+                // Membership ingress is not prebound. With no admitted canonical participant,
+                // the observation is intentionally a no-op rather than `not_bound`; the full
+                // admission writer may materialize a binding before calling this path.
+                return Ok(None);
+            }
+            None => return Err(EventReject::NotBound),
+        };
+        self.deliver_event_at(
+            &connection.spec.kind_id,
+            Some(&connection.instance_id),
+            Some(&binding),
+            place,
+            ev,
+        )
+    }
+
+    fn deliver_event_at(
+        &self,
+        gate: &GateName,
+        instance: Option<&GateInstanceId>,
+        binding: Option<&str>,
+        place: PlaceId,
+        ev: GateEvent,
+    ) -> Result<Option<Seq>, EventReject> {
         // 重複は core で畳む（詳細§04）。外界識別子つきの出来事は (場, ゲート, 識別子) で一度きり。
         // 同じものが二度来たら——繋ぎ直し・送り直し・向こうが保存分を先に返したとき——断らず、二重にも
         // 書かず、既にある連番を返す。ゲート側で絞らない（絞ると切れていた間のものが本当に失われるし、
         // ゲートの数だけ実装が増える）。識別子を持たないものは畳めないので、そのまま追記する。
         if let Some(o) = &ev.origin {
-            if let Some(existing) = self
-                .0
-                .store
-                .resolve_external(place, gate, o)
-                .map_err(|e| EventReject::Failed(format!("dedup lookup failed: {e}")))?
-            {
+            let existing = match binding {
+                Some(binding) => self.0.store.resolve_external_on_binding(binding, o),
+                None => self.0.store.resolve_external(place, gate, o),
+            }
+            .map_err(|e| EventReject::Failed(format!("dedup lookup failed: {e}")))?;
+            if let Some(existing) = existing {
                 // 数える（§10）。どのゲートから何件重複が来たかは、その繋ぎ方の問題として見える。
-                self.0
-                    .store
-                    .record_dedup(gate, place, o, existing, self.now_wall_nanos())
-                    .map_err(|e| EventReject::Failed(format!("dedup record failed: {e}")))?;
+                let recorded = match binding {
+                    Some(binding) => self.0.store.record_dedup_on_binding(
+                        gate,
+                        binding,
+                        place,
+                        o,
+                        existing,
+                        self.now_wall_nanos(),
+                    ),
+                    None => {
+                        self.0
+                            .store
+                            .record_dedup(gate, place, o, existing, self.now_wall_nanos())
+                    }
+                };
+                recorded.map_err(|e| EventReject::Failed(format!("dedup record failed: {e}")))?;
                 // 「失敗したので別のことをする」ではなく「同じものなので同じ答えを返す」。発火もしない。
                 return Ok(Some(existing));
             }
         }
 
         // 名寄せ。見つからなければ主体は付かない（権限ゼロ・§09）。ログには載る。
-        let author = self
-            .0
-            .store
-            .resolve_subject(gate, &ev.author_external)
-            .map_err(|e| EventReject::Failed(format!("resolve failed: {e}")))?;
+        let author = match instance {
+            Some(instance) => self
+                .0
+                .store
+                .resolve_subject_on_instance(instance, &ev.author_external),
+            None => self.0.store.resolve_subject(gate, &ev.author_external),
+        }
+        .map_err(|e| EventReject::Failed(format!("resolve failed: {e}")))?;
 
         // 言及・返信先・対象の外界識別子を、この場・このゲートの中で解決する。
         // 引けなかった（Err）は失敗を返す。無かった（Ok(None)）だけを「主体なし／繋がりなし」にする。
         let mut mentions = vec![];
         for m in &ev.mentions {
-            let r = self
-                .0
-                .store
-                .resolve_subject(gate, m)
-                .map_err(|e| EventReject::Failed(format!("resolve mention failed: {e}")))?;
+            let r = match instance {
+                Some(instance) => self.0.store.resolve_subject_on_instance(instance, m),
+                None => self.0.store.resolve_subject(gate, m),
+            }
+            .map_err(|e| EventReject::Failed(format!("resolve mention failed: {e}")))?;
             if let Some(s) = r {
                 mentions.push(s);
             }
         }
         let reply_to = match &ev.reply_to {
-            Some(o) => self
-                .0
-                .store
-                .resolve_external(place, gate, o)
-                .map_err(|e| EventReject::Failed(format!("resolve reply_to failed: {e}")))?,
+            Some(o) => match binding {
+                Some(binding) => self.0.store.resolve_external_on_binding(binding, o),
+                None => self.0.store.resolve_external(place, gate, o),
+            }
+            .map_err(|e| EventReject::Failed(format!("resolve reply_to failed: {e}")))?,
             None => None,
         };
         let target = match &ev.target {
-            Some(o) => self
-                .0
-                .store
-                .resolve_external(place, gate, o)
-                .map_err(|e| EventReject::Failed(format!("resolve target failed: {e}")))?,
+            Some(o) => match binding {
+                Some(binding) => self.0.store.resolve_external_on_binding(binding, o),
+                None => self.0.store.resolve_external(place, gate, o),
+            }
+            .map_err(|e| EventReject::Failed(format!("resolve target failed: {e}")))?,
             None => None,
         };
 
@@ -1134,19 +1551,44 @@ impl System {
         // UNIQUE(place, gate, external_id) が守る——上の fast-path をすり抜けた並行の同一 origin でも、
         // 二本目の ref 挿入が弾かれて tx ごと巻き戻り、`Duplicate` として同じ答えに畳まれる（駆動経路非依存）。
         let seq = match &ev.origin {
-            Some(o) => match self
-                .0
-                .store
-                .append_incoming(place, &ne, gate, o, self.now_wall_nanos())
-                .map_err(|e| EventReject::Failed(format!("append failed: {e}")))?
+            Some(o) => match match (instance, binding) {
+                (Some(instance), Some(binding)) => self.0.store.append_incoming_on_binding(
+                    place,
+                    &ne,
+                    instance,
+                    binding,
+                    o,
+                    self.now_wall_nanos(),
+                ),
+                _ => self
+                    .0
+                    .store
+                    .append_incoming(place, &ne, gate, o, self.now_wall_nanos()),
+            }
+            .map_err(|e| EventReject::Failed(format!("append failed: {e}")))?
             {
                 Ingest::Appended(seq) => seq,
                 Ingest::Duplicate(existing) => {
                     // 競合で負けた（fast-path の後に同一 origin が割り込んだ）。同じものなので同じ答えを
                     // 返す。二重には書かれていない（表が弾いた）。数えて、発火はしない。
-                    self.0
-                        .store
-                        .record_dedup(gate, place, o, existing, self.now_wall_nanos())
+                    let recorded = match binding {
+                        Some(binding) => self.0.store.record_dedup_on_binding(
+                            gate,
+                            binding,
+                            place,
+                            o,
+                            existing,
+                            self.now_wall_nanos(),
+                        ),
+                        None => self.0.store.record_dedup(
+                            gate,
+                            place,
+                            o,
+                            existing,
+                            self.now_wall_nanos(),
+                        ),
+                    };
+                    recorded
                         .map_err(|e| EventReject::Failed(format!("dedup record failed: {e}")))?;
                     return Ok(Some(existing));
                 }
@@ -3224,11 +3666,16 @@ impl System {
     /// 確定させない（呼び手がターンを失敗にする）。黙って broadcast も drop もしない。
     fn plan_delivery(
         &self,
+        subject: SubjectId,
         place: PlaceId,
         kind: EffectKind,
         target: Option<Seq>,
     ) -> Result<DeliveryPlan, Busy> {
-        let all = self.0.store.channels_for_place(place).map_err(|_| Busy)?;
+        let all = self
+            .0
+            .store
+            .gate_routes_for_place(subject, place, &RoutePurpose::outbound())
+            .map_err(|_| Busy)?;
         match target {
             None if kind == EffectKind::Say => Ok((None, all)), // 散文発話は intrinsic → 全チャネル broadcast
             None => {
@@ -3236,8 +3683,8 @@ impl System {
                 // （gate.effects に kind を含むチャネル）。名乗っていないチャネルには漏らさない。
                 let chans = all
                     .into_iter()
-                    .filter(|(gate, _)| {
-                        self.gate_spec(gate)
+                    .filter(|route| {
+                        self.gate_spec(&route.kind_id)
                             .map(|spec| spec.effects.contains(&kind))
                             .unwrap_or(false)
                     })
@@ -3248,7 +3695,7 @@ impl System {
                 // 宛先が届いた 1 本へ。宛先の外界識別子はここで一度だけ引く。
                 Some((g, ext)) => Ok((
                     Some(ext),
-                    all.into_iter().filter(|(cg, _)| *cg == g).collect(),
+                    all.into_iter().filter(|route| route.kind_id == g).collect(),
                 )),
                 // 解決できない宛先は選択肢に出ないので通常来ない（§08/§09）。来たら配らない（broadcast しない）。
                 None => Ok((None, vec![])),
@@ -3276,10 +3723,11 @@ impl System {
         };
         // 運ぶチャネルと宛先の外界識別子を確定時に決める（§08）。引けなければ確定しない（§15）——
         // 「引けなかった」を「宛先が無い／全チャネル」に化けさせず、None を返してターンを失敗にする。
-        let (target_origin, channels) = match self.plan_delivery(target_place, kind, e.target) {
-            Ok(v) => v,
-            Err(Busy) => return None,
-        };
+        let (target_origin, routes) =
+            match self.plan_delivery(subject, target_place, kind, e.target) {
+                Ok(v) => v,
+                Err(Busy) => return None,
+            };
         let outgoing = OutgoingEffect {
             kind,
             text: e.content.text.clone(),
@@ -3301,10 +3749,10 @@ impl System {
             attachments: vec![],
         };
         // ログと deliveries(pending) を 1 tx で。書き込み失敗を握り潰さない（書けなければ確定しない・§08）。
-        let seq = match self.0.store.append_with_deliveries(
+        let seq = match self.0.store.append_with_delivery_routes(
             target_place,
             &ne,
-            &channels,
+            &routes,
             self.now_wall_nanos(),
         ) {
             Ok(seq) => seq,
@@ -3319,7 +3767,7 @@ impl System {
             seq,
             kind,
             outgoing,
-            channels,
+            routes,
         })
     }
 
@@ -3337,12 +3785,11 @@ impl System {
             // チャネルを持たない場と同じ。配送先が無い。pending 行があれば pending のまま残る（§08）。
             return;
         }
-        for (gate, address) in c.channels {
+        for route in c.routes {
             self.lane_send(DeliveryJob {
                 place: c.place,
                 seq: c.seq,
-                gate,
-                address,
+                route,
                 effect: c.outgoing.clone(),
             });
         }
@@ -3350,7 +3797,7 @@ impl System {
 
     /// (place, gate) ごとの配送の列へ 1 件積む。列が無ければワーカーを起こす（§08「1 本の列」）。
     fn lane_send(&self, job: DeliveryJob) {
-        let key = (job.place, job.gate.clone());
+        let key = (job.place, job.route.instance_id.clone());
         let mut lanes = self.0.lanes.lock().unwrap();
         let tx = lanes.entry(key).or_insert_with(|| {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DeliveryJob>();
@@ -3371,66 +3818,80 @@ impl System {
     // 確定時に残っているので、更新に失敗しても「消える」ことは無い（pending のまま見える）。
     #[allow(clippy::disallowed_methods)]
     async fn run_delivery(&self, job: DeliveryJob) {
-        let t = match self.transport() {
-            Some(t) => t,
-            None => return, // pending 行は確定時に作られている。運べないなら pending のまま残る（§08）。
-        };
-        // pending 行は確定（`append_with_deliveries`）で既に作られている。ここでは運んだ結果へ更新するだけ。
-        match t
-            .deliver_effect(&job.gate, &job.address, job.effect.clone())
-            .await
+        if self
+            .0
+            .store
+            .begin_delivery(job.place, job.seq, &job.route.binding_id)
+            != Ok(true)
         {
-            Ok(ack) => {
-                // 外に出たものの識別子を返したら記録する（自分の投稿に後から反応できる・§08）。
-                // これは**自分が書くもの**。落ちたら握り潰さない（§15）——黙って落ちると、自分の投稿を
-                // 後から指せず、しかもどこにも数えられない。配送は failed として理由つきで残し、数える。
-                // 外界へは既に出ているが再送はしない（§08）。ここで「引けなかった」を「送れた」に化けさせない。
-                if let Some(origin) = ack.origin {
-                    if let Err(e) = self
-                        .0
-                        .store
-                        .record_external_ref(job.place, job.seq, &job.gate, &origin, "out")
-                    {
-                        self.0
-                            .store
-                            .record_delivery(
-                                job.place,
-                                job.seq,
-                                &job.gate,
-                                "failed",
-                                Some(&format!("delivered but external_ref record failed: {e}")),
-                                self.now_wall_nanos(),
-                            )
-                            .ok();
-                        return;
-                    }
-                }
-                let state = if ack.delivered { "sent" } else { "failed" };
-                self.0
-                    .store
-                    .record_delivery(
-                        job.place,
-                        job.seq,
-                        &job.gate,
-                        state,
-                        None,
-                        self.now_wall_nanos(),
-                    )
-                    .ok();
+            return;
+        }
+        let outcome = match self.transport() {
+            Some(transport) => {
+                transport
+                    .deliver_effect_route(&job.route, job.seq, job.effect.clone())
+                    .await
             }
-            Err(e) => {
-                // 運べなかったら記録して終わり。再送しない（§08）。
-                self.0
-                    .store
-                    .record_delivery(
-                        job.place,
-                        job.seq,
-                        &job.gate,
-                        "failed",
-                        Some(&e.0),
-                        self.now_wall_nanos(),
-                    )
-                    .ok();
+            None => TransportDeliveryResult::DefiniteFailure(TransportError(
+                "transport unavailable before external acceptance".into(),
+            )),
+        };
+        let now = self.now_wall_nanos();
+        match outcome {
+            TransportDeliveryResult::DefiniteAck(ack) => {
+                let state = if ack.delivered { "delivered" } else { "failed" };
+                let error = (!ack.delivered).then_some("gate reported delivered=false");
+                let observation = format!("definite_ack:delivered={}", ack.delivered);
+                let origin = ack.delivered.then_some(ack.origin).flatten();
+                let _ = self.0.store.complete_delivery(
+                    &job.route,
+                    job.seq,
+                    state,
+                    error,
+                    origin.as_deref(),
+                    observation.as_bytes(),
+                    now,
+                );
+            }
+            TransportDeliveryResult::DefiniteFailure(error) => {
+                let _ = self.0.store.complete_delivery(
+                    &job.route,
+                    job.seq,
+                    "failed",
+                    Some(&error.0),
+                    None,
+                    error.0.as_bytes(),
+                    now,
+                );
+            }
+            TransportDeliveryResult::Indeterminate {
+                error,
+                late_observation,
+            } => {
+                let _ = self.0.store.complete_delivery(
+                    &job.route,
+                    job.seq,
+                    "indeterminate",
+                    Some(&error.0),
+                    None,
+                    error.0.as_bytes(),
+                    now,
+                );
+                if let Some(late_observation) = late_observation {
+                    let system = self.clone();
+                    let route = job.route.clone();
+                    tokio::spawn(async move {
+                        if let Some(payload) = late_observation.await {
+                            let _ = system.0.store.record_delivery_observation(
+                                &route,
+                                job.seq,
+                                "late_transport_result",
+                                &payload,
+                                system.now_wall_nanos(),
+                            );
+                        }
+                    });
+                }
             }
         }
     }
@@ -3459,12 +3920,40 @@ impl System {
                 detached_from,
             )
             .unwrap();
-        self.0.notifier.notify(Notice::ActivityStarted {
-            place,
-            activity: id,
-            kind,
-            label: label.map(|s| s.to_string()),
-        });
+        let routes = self
+            .0
+            .store
+            .gate_routes_for_place(subject, place, &RoutePurpose::outbound())
+            .unwrap();
+        let route = (routes.len() == 1).then(|| routes[0].clone());
+        if let Some(route) = route {
+            self.0
+                .activity_routes
+                .lock()
+                .unwrap()
+                .insert(id, route.clone());
+            self.0.notifier.notify(Notice::RoutedActivityStarted {
+                route,
+                activity: id,
+                kind,
+                label: label.map(str::to_string),
+            });
+        } else if routes.is_empty()
+            && self
+                .0
+                .store
+                .channels_for_place(place)
+                .is_ok_and(|channels| channels.is_empty())
+        {
+            // Internal/no-gate callers retain the established volatile notification seam.
+            self.0.legacy_activity_notices.lock().unwrap().insert(id);
+            self.0.notifier.notify(Notice::ActivityStarted {
+                place,
+                activity: id,
+                kind,
+                label: label.map(str::to_string),
+            });
+        }
         id
     }
 
@@ -3479,22 +3968,49 @@ impl System {
         if !transitioned {
             return false;
         }
-        if let Some(r) = self.0.store.get_activity(id).unwrap() {
-            self.0.notifier.notify(Notice::ActivityEnded {
-                place: r.place,
+        if let Some(route) = self.0.activity_routes.lock().unwrap().remove(&id) {
+            self.0.notifier.notify(Notice::RoutedActivityEnded {
+                route,
                 activity: id,
             });
+        } else if self.0.legacy_activity_notices.lock().unwrap().remove(&id) {
+            if let Some(activity) = self.0.store.get_activity(id).unwrap() {
+                self.0.notifier.notify(Notice::ActivityEnded {
+                    place: activity.place,
+                    activity: id,
+                });
+            }
         }
         true
     }
 
     /// 経過の表示。推論を 1 回も挟まない（詳細§08・プロトコル§05）。
     pub fn emit_progress(&self, place: PlaceId, activity: ActivityId, label: &str) {
-        self.0.notifier.notify(Notice::ActivityProgress {
-            place,
-            activity,
-            label: label.to_string(),
-        });
+        if let Some(route) = self
+            .0
+            .activity_routes
+            .lock()
+            .unwrap()
+            .get(&activity)
+            .cloned()
+        {
+            self.0.notifier.notify(Notice::RoutedActivityProgress {
+                route,
+                activity,
+                label: label.to_string(),
+            });
+        } else if self
+            .0
+            .store
+            .channels_for_place(place)
+            .is_ok_and(|channels| channels.is_empty())
+        {
+            self.0.notifier.notify(Notice::ActivityProgress {
+                place,
+                activity,
+                label: label.to_string(),
+            });
+        }
     }
 
     // ---- 常時切り離し（詳細§07）----
@@ -3635,6 +4151,48 @@ impl System {
             }
             return ToolResult::Refused(RefusedReason::BackgroundFull);
         }
+        let tool_route = if is_shell {
+            None
+        } else {
+            let kinds: Vec<_> = self
+                .connected_gates()
+                .into_iter()
+                .filter(|gate| gate.tools.iter().any(|tool| tool.name == call.name))
+                .map(|gate| gate.name)
+                .collect();
+            if kinds.len() != 1 {
+                return self.refuse_or_settle(
+                    must_settle,
+                    place,
+                    subject,
+                    format!("ツール «{}» の gate kind を一意に解決できない", call.name),
+                );
+            } else {
+                let purpose = match RoutePurpose::tool(&call.name) {
+                    Ok(purpose) => purpose,
+                    Err(error) => return self.refuse_or_settle(must_settle, place, subject, error),
+                };
+                match self.0.store.gate_route(subject, place, &kinds[0], &purpose) {
+                    Ok(Some(route)) => Some(route),
+                    Ok(None) => {
+                        return self.refuse_or_settle(
+                            must_settle,
+                            place,
+                            subject,
+                            format!("ツール «{}» の選択済み route がない", call.name),
+                        )
+                    }
+                    Err(error) => {
+                        return self.refuse_or_settle(
+                            must_settle,
+                            place,
+                            subject,
+                            format!("ツール route の確認に失敗した: {error}"),
+                        )
+                    }
+                }
+            }
+        };
         // 即 spawn して背景へ移す。捨てても死なないように（§07）。実行タスクは shell なら ShellHost
         // （直接 exec・cwd は subject ごとの作業領域）、他はゲートツール（ToolHost）。どちらも
         // `Result<String, ToolError>` を返すので、以降の見張り・決着・退避は同じ 1 本に載る。
@@ -3650,10 +4208,13 @@ impl System {
             None => {
                 let host = self.0.tool_host.clone();
                 let callc = call.clone();
-                (
-                    tokio::spawn(async move { host.invoke(&callc).await }),
-                    call.name.clone(),
-                )
+                let task = match tool_route {
+                    Some(route) => {
+                        tokio::spawn(async move { host.invoke_route(&route, &callc).await })
+                    }
+                    None => unreachable!("non-shell tools require a canonical route"),
+                };
+                (task, call.name.clone())
             }
         };
         let bg = self

@@ -6,6 +6,8 @@
 //! を知らない。
 
 use std::collections::BTreeSet;
+use std::future::Future;
+use std::pin::Pin;
 use tokio::time::Instant;
 
 pub type PlaceId = i64;
@@ -37,12 +39,167 @@ impl GateName {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub fn parse(s: impl Into<String>) -> Result<GateName, String> {
+        let value = s.into();
+        let mut chars = value.chars();
+        let first = chars
+            .next()
+            .ok_or_else(|| "empty gate kind id".to_string())?;
+        if !first.is_ascii_lowercase()
+            || value.len() > 64
+            || !chars
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-')
+        {
+            return Err(format!("invalid gate kind id: {value}"));
+        }
+        Ok(GateName(value))
+    }
 }
 
 impl std::fmt::Display for GateName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
+}
+
+/// Protocol family identifier. `GateName` remains as the protocol-1 facade name.
+pub type GateKindId = GateName;
+
+/// Credential/process instance identifier. The textual form is always canonical lowercase UUID.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+pub struct GateInstanceId(String);
+
+impl GateInstanceId {
+    pub fn parse(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        let bytes = value.as_bytes();
+        let valid = bytes.len() == 36
+            && bytes.iter().enumerate().all(|(index, byte)| {
+                if matches!(index, 8 | 13 | 18 | 23) {
+                    *byte == b'-'
+                } else {
+                    byte.is_ascii_digit() || (b'a'..=b'f').contains(byte)
+                }
+            });
+        if !valid {
+            return Err(format!("noncanonical gate instance id: {value}"));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn from_canonical(value: String) -> Self {
+        debug_assert!(Self::parse(value.clone()).is_ok());
+        Self(value)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for GateInstanceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OriginScope {
+    Instance,
+    KindAddress,
+}
+
+impl OriginScope {
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Instance => "instance",
+            Self::KindAddress => "kind_address",
+        }
+    }
+
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "instance" => Some(Self::Instance),
+            "kind_address" => Some(Self::KindAddress),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IngressDiscovery {
+    Prebound,
+    Membership,
+}
+
+impl IngressDiscovery {
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Prebound => "prebound",
+            Self::Membership => "membership",
+        }
+    }
+
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "prebound" => Some(Self::Prebound),
+            "membership" => Some(Self::Membership),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RoutePurpose(String);
+
+impl RoutePurpose {
+    pub fn inbound() -> Self {
+        Self("inbound".into())
+    }
+    pub fn outbound() -> Self {
+        Self("outbound".into())
+    }
+    pub fn timed() -> Self {
+        Self("timed".into())
+    }
+    pub fn tool(name: &str) -> Result<Self, String> {
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+        {
+            return Err(format!("invalid route tool name: {name}"));
+        }
+        Ok(Self(format!("tool:{name}")))
+    }
+    pub fn parse(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        if matches!(value.as_str(), "inbound" | "outbound" | "timed") {
+            return Ok(Self(value));
+        }
+        let name = value
+            .strip_prefix("tool:")
+            .ok_or_else(|| format!("invalid route purpose: {value}"))?;
+        Self::tool(name)
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Immutable route snapshot used by turn, delivery, operation, and activity seams.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GateRoute {
+    pub subject_id: SubjectId,
+    pub place_id: PlaceId,
+    pub kind_id: GateKindId,
+    pub instance_id: GateInstanceId,
+    pub binding_id: String,
+    pub address: String,
+    pub connection_epoch: u64,
+    pub revision: u64,
+    pub purpose: RoutePurpose,
 }
 
 pub type Seq = i64;
@@ -498,7 +655,11 @@ pub struct ToolError(pub String);
 /// core は core ツール以外の呼び出しをここへ渡す。今回の範囲ではテスト用の実装だけ。
 #[async_trait::async_trait]
 pub trait ToolHost: Send + Sync {
-    async fn invoke(&self, call: &ToolCallSpec) -> Result<String, ToolError>;
+    async fn invoke_route(
+        &self,
+        route: &GateRoute,
+        call: &ToolCallSpec,
+    ) -> Result<String, ToolError>;
 }
 
 /// shell（core builtin `core-shell`）を実行する seam。テストでは fake、実機では tokio::process。
@@ -548,6 +709,21 @@ pub enum ActivityKindTag {
 /// core が外界へ出す通知（活動・効果の配送依頼）。本番では plugd が受けてチャネルへ運ぶ。
 #[derive(Clone, Debug)]
 pub enum Notice {
+    RoutedActivityStarted {
+        route: GateRoute,
+        activity: ActivityId,
+        kind: ActivityKindTag,
+        label: Option<String>,
+    },
+    RoutedActivityProgress {
+        route: GateRoute,
+        activity: ActivityId,
+        label: String,
+    },
+    RoutedActivityEnded {
+        route: GateRoute,
+        activity: ActivityId,
+    },
     ActivityStarted {
         place: PlaceId,
         activity: ActivityId,
@@ -636,7 +812,7 @@ impl Capability {
 }
 
 /// ゲートが名乗るツールの定義（プロトコル§01 `tools`）。`params` は JSON Schema（不透明に保持）。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolDef {
     pub name: String,
     pub description: String,
@@ -659,7 +835,7 @@ pub struct ToolDef {
 /// （enum／自由文 等）を表す JSON Schema で、**パース検証にだけ**使う（違反した行は成立させない）。
 ///
 /// アクションは `tools` とは**別リスト**（効果配送の経路であって ToolHost 実行ではない）。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActionDef {
     pub name: String,
     pub description: String,
@@ -688,6 +864,66 @@ pub struct GateSpec {
     pub actions: Vec<ActionDef>,
 }
 
+/// Protocol-2 kind declaration. Multiple active instances of one kind must compare equal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GateKindSpec {
+    pub kind_id: GateKindId,
+    pub origin_scope: OriginScope,
+    pub address_form: String,
+    pub ingress_discovery: IngressDiscovery,
+    pub tools: Vec<ToolDef>,
+    pub effects: BTreeSet<EffectKind>,
+    pub capabilities: BTreeSet<Capability>,
+    pub actions: Vec<ActionDef>,
+}
+
+impl GateSpec {
+    pub fn compatibility_kind_spec(&self) -> GateKindSpec {
+        GateKindSpec {
+            kind_id: self.name.clone(),
+            origin_scope: OriginScope::Instance,
+            address_form: self.address_form.clone(),
+            ingress_discovery: IngressDiscovery::Prebound,
+            tools: self.tools.clone(),
+            effects: self.effects.clone(),
+            capabilities: self.capabilities.clone(),
+            actions: self.actions.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GateConnection {
+    pub instance_id: GateInstanceId,
+    pub revision: u64,
+    pub connection_epoch: u64,
+    pub spec: GateKindSpec,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AddressKind {
+    Guild,
+    Dm,
+    Thread,
+}
+
+impl AddressKind {
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Guild => "guild",
+            Self::Dm => "dm",
+            Self::Thread => "thread",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MembershipDiscovery {
+    pub address_kind: AddressKind,
+    pub guild_id: Option<String>,
+    pub label: Option<String>,
+}
+
 /// 外界へ運ぶ効果の中身（core → plugin・プロトコル§04）。
 /// core が確定済みの効果とその宛先（外界の識別子）から組み立て、plugd が線へ載せる。
 #[derive(Clone, Debug)]
@@ -713,6 +949,21 @@ pub struct DeliveryAck {
 #[derive(Debug)]
 pub struct TransportError(pub String);
 
+/// Result of one canonical routed delivery, classified at the external-acceptance boundary.
+pub type LateDeliveryObservation = Pin<Box<dyn Future<Output = Option<Vec<u8>>> + Send + 'static>>;
+
+pub enum TransportDeliveryResult {
+    /// The request was rejected before it could reach the external API.
+    DefiniteFailure(TransportError),
+    /// The gate definitely acknowledged the request.
+    DefiniteAck(DeliveryAck),
+    /// The request crossed the acceptance boundary but its outcome could not be observed.
+    Indeterminate {
+        error: TransportError,
+        late_observation: Option<LateDeliveryObservation>,
+    },
+}
+
 /// core → plugin の要求（応答を伴うもの）を運ぶ seam。本番では plugd が実装する。
 ///
 /// 活動（通知・応答なし）は `Notifier` が、ゲートのツール実行は `ToolHost` が担う。
@@ -720,22 +971,34 @@ pub struct TransportError(pub String);
 /// core はこの trait にだけ依存し、plugd を知らない（詳細§01）。
 #[async_trait::async_trait]
 pub trait Transport: Send + Sync {
-    async fn bind(&self, gate: &GateName, address: &str) -> Result<(), TransportError>;
-    async fn unbind(&self, gate: &GateName, address: &str) -> Result<(), TransportError>;
+    /// Explicit protocol-1 compatibility boundary. Canonical callers use the route methods.
+    async fn compat_bind(&self, gate: &GateName, address: &str) -> Result<(), TransportError>;
+    async fn compat_unbind(&self, gate: &GateName, address: &str) -> Result<(), TransportError>;
     /// 外に容れ物を作る（§02 `open`）。返ってきた住所に core が新しい場を結ぶ。
-    async fn open(
+    async fn compat_open(
         &self,
         gate: &GateName,
         under: &str,
         hint: Option<&str>,
     ) -> Result<String, TransportError>;
     /// 確定済みの効果を、あるチャネル（gate+address）へ運ぶ（§04）。ack で origin を返し得る。
-    async fn deliver_effect(
+    async fn compat_deliver_effect(
         &self,
         gate: &GateName,
         address: &str,
         effect: OutgoingEffect,
     ) -> Result<DeliveryAck, TransportError>;
+
+    async fn bind_route(&self, route: &GateRoute) -> Result<(), TransportError>;
+
+    async fn unbind_route(&self, route: &GateRoute) -> Result<(), TransportError>;
+
+    async fn deliver_effect_route(
+        &self,
+        route: &GateRoute,
+        seq: Seq,
+        effect: OutgoingEffect,
+    ) -> TransportDeliveryResult;
 }
 
 /// プラグインから届いた出来事（プロトコル§03）。外界の識別子は文字列のまま core へ渡し、
@@ -760,6 +1023,8 @@ pub struct GateEvent {
     /// この出来事に付いた添付（DESIGN-images §1）。ゲートが拾えたものを全部そのまま載せる（判断しない）。
     /// 既定 `[]`——添付を送らない既存ゲートは従来どおり（後方互換）。
     pub attachments: Vec<Attachment>,
+    /// Membership-driven discovery metadata. Protocol-1 prebound gates always use `None`.
+    pub discovery: Option<MembershipDiscovery>,
 }
 
 #[cfg(test)]

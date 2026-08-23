@@ -33,13 +33,13 @@ impl RecordingTransport {
 
 #[async_trait]
 impl Transport for RecordingTransport {
-    async fn bind(&self, _gate: &GateName, _address: &str) -> Result<(), TransportError> {
+    async fn compat_bind(&self, _gate: &GateName, _address: &str) -> Result<(), TransportError> {
         Ok(())
     }
-    async fn unbind(&self, _gate: &GateName, _address: &str) -> Result<(), TransportError> {
+    async fn compat_unbind(&self, _gate: &GateName, _address: &str) -> Result<(), TransportError> {
         Ok(())
     }
-    async fn open(
+    async fn compat_open(
         &self,
         _gate: &GateName,
         _under: &str,
@@ -47,7 +47,7 @@ impl Transport for RecordingTransport {
     ) -> Result<String, TransportError> {
         Err(TransportError("open not supported in test".into()))
     }
-    async fn deliver_effect(
+    async fn compat_deliver_effect(
         &self,
         gate: &GateName,
         address: &str,
@@ -62,6 +62,26 @@ impl Transport for RecordingTransport {
             delivered: true,
             origin: Some(format!("out-{n}")),
         })
+    }
+    async fn bind_route(&self, route: &GateRoute) -> Result<(), TransportError> {
+        self.compat_bind(&route.kind_id, &route.address).await
+    }
+    async fn unbind_route(&self, route: &GateRoute) -> Result<(), TransportError> {
+        self.compat_unbind(&route.kind_id, &route.address).await
+    }
+    async fn deliver_effect_route(
+        &self,
+        route: &GateRoute,
+        _seq: Seq,
+        effect: OutgoingEffect,
+    ) -> TransportDeliveryResult {
+        match self
+            .compat_deliver_effect(&route.kind_id, &route.address, effect)
+            .await
+        {
+            Ok(ack) => TransportDeliveryResult::DefiniteAck(ack),
+            Err(error) => TransportDeliveryResult::DefiniteFailure(error),
+        }
     }
 }
 
@@ -131,11 +151,13 @@ fn gate(name: &str, effects: &[EffectKind], actions: Vec<ActionDef>) -> GateSpec
     }
 }
 
-/// ゲートを名乗らせ、場をその住所へ結ぶ（transport.bind は使わず store に直接——テストの簡略化）。
+/// ゲートを名乗らせ、場をその住所へ provision する（接続後なので route も同じ入口で整合する）。
 fn bind(h: &Harness, place: PlaceId, spec: GateSpec, address: &str) {
     let name = spec.name.clone();
     h.sys.register_gate(spec).unwrap();
-    h.sys.store().add_channel(place, &name, address).unwrap();
+    h.sys
+        .provision_channel(place, name.as_str(), address)
+        .unwrap();
 }
 
 fn inbound(address: &str, author: &str, text: &str, origin: &str) -> GateEvent {
@@ -150,6 +172,7 @@ fn inbound(address: &str, author: &str, text: &str, origin: &str) -> GateEvent {
         target: None,
         origin: Some(origin.into()),
         attachments: vec![],
+        discovery: None,
     }
 }
 

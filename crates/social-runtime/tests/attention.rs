@@ -65,6 +65,7 @@ fn said_event(author_external: &str, text: &str, origin: &str) -> GateEvent {
         target: None,
         origin: Some(origin.to_string()),
         attachments: vec![],
+        discovery: None,
     }
 }
 
