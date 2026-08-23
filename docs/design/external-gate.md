@@ -113,6 +113,8 @@ orchestratorはInstance GETからcanonical config/digest/revisionとmanifestだ�
 
 required欠落、unknown name、symlink、subdirectory、non-regular fileは起動失敗。directoryはread-only mountし、pathだけを `OPENCRAB_GATE_SOCKET`, `OPENCRAB_GATE_INSTANCE_ID`, `OPENCRAB_GATE_REVISION`, `OPENCRAB_GATE_CONFIG_PATH`, `OPENCRAB_GATE_SECRETS_DIR` で渡す。secret value、config bytes、master keyをargv、env value、log、status、admin errorへ複製しない。
 
+本契約の単位はconnection/instanceであり、各接続が自instanceのhello、config digest、secret、epoch契約を満たす。OSプロセスへの詰め方はorchestratorの自由で、1プロセスが複数socket接続を張り、それぞれ別instanceとしてhelloしてよい。本節の環境変数はmanaged注入パターンの例示であり、wire要件ではない。複数instanceを1プロセスに同居させる場合、プロセス障害は同居する全instanceの切断としてそれぞれの契約どおり扱い、instance間でepoch、secret、configを共有しない。
+
 stage/fsync directory → revision POST → 全旧epoch失効commit → new mount/container → hello/ready/bind → old directory cleanupの順。失敗時に旧revisionへ暗黙rollbackしない。gatewayはconfig file SHA-256 lowerhexを `hello.config_digest` に入れる。
 
 ## 5. protocol 2 grammar
