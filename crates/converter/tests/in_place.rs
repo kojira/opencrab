@@ -337,6 +337,156 @@ agent_ids = ["agent-null-persona"]
     assert_eq!(persona, None);
 }
 
+#[test]
+fn orphan_history_agent_id_lands_in_raw_class_with_byte_identical_ids() {
+    const ORPHAN_AGENT_ID: &[u8] = b"1000000000000001";
+    let orphan_agent_id = std::str::from_utf8(ORPHAN_AGENT_ID).unwrap();
+    let temporary = tempfile::tempdir().unwrap();
+    let db = temporary.path().join("source.db");
+    let conn = Connection::open(&db).unwrap();
+    opencrab_db::schema::initialize(&conn).unwrap();
+    conn.execute_batch(
+        "INSERT INTO agents(
+           agent_id,name,persona_name,personality,instructions,heartbeat_instructions,
+           model,created_at,updated_at
+         ) VALUES(
+           'agent-canonical','Agent C','persona-c','kind','do work','hb',
+           'openai:synthetic-model','2024-01-01 00:00:00','2024-01-01 00:00:00'
+         );
+         INSERT INTO model_pricing(
+           provider,model,input_price_per_1m,output_price_per_1m,context_window,updated_at
+         ) VALUES('openai','synthetic-model',1,2,128000,'2024-01-01 00:00:00');
+         INSERT INTO memory_sessions(
+           id,agent_id,session_id,log_type,content,speaker_id,turn_number,metadata_json,created_at
+         ) VALUES
+           (1,'agent-canonical','sess-canonical','speech','canonical speech','agent-canonical',1,NULL,'2024-01-05 00:00:00'),
+           (2,'1000000000000001','sess-orphan-a','speech','orphan speech a','1000000000000001',1,NULL,'2024-01-05 00:01:00'),
+           (3,'1000000000000001','sess-orphan-b','speech','orphan speech b','1000000000000001',1,NULL,'2024-01-05 00:02:00'),
+           (4,'1000000000000001','sess-orphan-c','system','orphan system drop',NULL,NULL,NULL,'2024-01-05 00:03:00');",
+    )
+    .unwrap();
+    drop(conn);
+
+    let report = run_migrate(&db);
+    assert!(
+        report
+            .classes
+            .iter()
+            .all(|class| class.exact_one_violations == 0),
+        "accounting must balance"
+    );
+
+    let history = report
+        .classes
+        .iter()
+        .find(|class| {
+            class.source_table == "memory_sessions" && class.logical_class == "history_event"
+        })
+        .expect("history_event class");
+    assert_eq!(history.source_rows, 2);
+    assert_eq!(history.canonical_outcomes, 1);
+    assert_eq!(history.dropped_outcomes, 1);
+    assert_eq!(history.raw_outcomes, 0);
+
+    let orphan = report
+        .classes
+        .iter()
+        .find(|class| {
+            class.source_table == "memory_sessions" && class.logical_class == "orphan_history_raw"
+        })
+        .expect("orphan_history_raw must be a visible report class");
+    assert_eq!(orphan.source_rows, 2);
+    assert_eq!(orphan.raw_outcomes, 2);
+    assert_eq!(orphan.canonical_outcomes, 0);
+    assert_eq!(orphan.dropped_outcomes, 0);
+    assert_eq!(
+        orphan
+            .physical_rows
+            .get("legacy_unowned_source_rows")
+            .copied(),
+        Some(2)
+    );
+
+    let conn = Connection::open(&db).unwrap();
+    let subjects: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM subjects WHERE kind='agent'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        subjects, 1,
+        "canonical agent must migrate; no tombstone subject"
+    );
+    let orphan_named: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM subjects WHERE name=?1 OR persona=?1",
+            [orphan_agent_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(orphan_named, 0, "orphan agent_id must not become a subject");
+
+    let archive: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM legacy_history_archive WHERE source_agent_id=?1",
+            [b"agent-canonical".as_slice()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(archive, 1);
+    let orphan_archive: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM legacy_history_archive WHERE source_agent_id=?1",
+            [ORPHAN_AGENT_ID],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(orphan_archive, 0);
+
+    let mut statement = conn
+        .prepare(
+            "SELECT source_key,row_values,reason FROM legacy_unowned_source_rows
+             WHERE source_table='memory_sessions' ORDER BY source_key",
+        )
+        .unwrap();
+    let raw_rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(raw_rows.len(), 2);
+    let encoded_id = {
+        let mut bytes = vec![3_u8];
+        bytes.extend_from_slice(&(ORPHAN_AGENT_ID.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(ORPHAN_AGENT_ID);
+        bytes
+    };
+    for (source_key, row_values, reason) in &raw_rows {
+        assert_eq!(reason, "history-per-agent-router-v2:orphan_agent_id");
+        assert!(
+            row_values
+                .windows(encoded_id.len())
+                .any(|window| window == encoded_id),
+            "raw carrier must keep orphan agent_id bytes identical"
+        );
+        assert!(
+            row_values
+                .windows(ORPHAN_AGENT_ID.len())
+                .any(|window| window == ORPHAN_AGENT_ID),
+            "raw row_values must contain the orphan agent_id payload"
+        );
+        let _ = source_key;
+    }
+}
+
 fn write_inputs(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
     let config = dir.join("empty.toml");
     let environment = dir.join("empty.env");

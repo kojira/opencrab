@@ -1325,6 +1325,7 @@ fn assemble_history_and_events(
         migration_epoch,
         agents,
         &live_sessions,
+        raw,
         report,
     )?;
     reconcile_migrated_routes(target)?;
@@ -2261,6 +2262,7 @@ fn assemble_memory_history(
     migration_epoch: i64,
     agents: &BTreeMap<String, i64>,
     live_sessions: &BTreeMap<(String, String), LiveHistoryPlace>,
+    raw: &mut RawCollector,
     report: &mut ConversionReport,
 ) -> Result<()> {
     if !SourceTable::exists(source, "memory_sessions")? {
@@ -2279,12 +2281,15 @@ fn assemble_memory_history(
         "created_at",
     ])?;
     let mut accounting = ClassAccounting::streaming(table.name, "history_event", BTreeMap::new());
+    let mut orphan_accounting =
+        ClassAccounting::streaming(table.name, "orphan_history_raw", BTreeMap::new());
     let mut histories = BTreeMap::<(String, String), HistoryPlaceState>::new();
     let mut archive_rows = 0_u64;
     let mut event_rows = 0_u64;
     let mut journal_rows = 0_u64;
     let mut audit_rows = 0_u64;
     let mut place_rows = 0_u64;
+    let mut orphan_raw_rows = 0_u64;
     let mut journal_id = target
         .query_row(
             "SELECT COALESCE(MAX(journal_id),0) FROM private_journal",
@@ -2295,7 +2300,6 @@ fn assemble_memory_history(
         .ok_or_else(|| ConverterError::Accounting("private journal id overflow".into()))?;
     let mut previous_source_id = None;
     table.for_each_row(source, "id,rowid", |row| {
-        let mut row_accounting = accounting.start_streamed_row(&table, row);
         let source_row_id = table.integer(row, "id").ok_or_else(|| {
             ConverterError::Accounting("history row has missing/non-integer source id".into())
         })?;
@@ -2311,6 +2315,7 @@ fn assemble_memory_history(
             ))
         })?;
         if matches!(log_kind, "tool_call" | "system") {
+            let mut row_accounting = accounting.start_streamed_row(&table, row);
             row_accounting.dropped("agreed-drop-tool-call-system");
             accounting.finish_streamed_row(row_accounting)?;
             return Ok(());
@@ -2320,11 +2325,15 @@ fn assemble_memory_history(
                 "history row {source_row_id} has non-text agent_id"
             ))
         })?;
-        let subject_id = agents.get(agent_id).copied().ok_or_else(|| {
-            ConverterError::Accounting(format!(
-                "history row {source_row_id} agent join is not exact-one"
-            ))
-        })?;
+        let Some(subject_id) = agents.get(agent_id).copied() else {
+            raw.add(&table, row, "history-per-agent-router-v2:orphan_agent_id")?;
+            let mut row_accounting = orphan_accounting.start_streamed_row(&table, row);
+            row_accounting.raw();
+            orphan_accounting.finish_streamed_row(row_accounting)?;
+            orphan_raw_rows += 1;
+            return Ok(());
+        };
+        let mut row_accounting = accounting.start_streamed_row(&table, row);
         let session_id = table.text(row, "session_id").ok_or_else(|| {
             ConverterError::Accounting(format!(
                 "history row {source_row_id} has non-text session_id"
@@ -2812,6 +2821,11 @@ fn assemble_memory_history(
         ("subject_history_sources".into(), history_source_rows),
     ]);
     report.classes.push(accounting);
+    if orphan_raw_rows != 0 {
+        orphan_accounting.physical_rows =
+            BTreeMap::from([("legacy_unowned_source_rows".into(), orphan_raw_rows)]);
+        report.classes.push(orphan_accounting);
+    }
     Ok(())
 }
 
