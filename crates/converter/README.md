@@ -11,8 +11,9 @@ Operator path for a non-empty legacy database:
 3. A present `schema_migration_state.inplace-v1` marker fails loud. Re-run only on a pristine copy.
 
 App startup (`ensure_migrated`) is decoupled from conversion. It looks only at
-body-legacy sentinel tables (`agents`, `sessions`, `skills` — names the old
-implementation had that store SCHEMA does not), by existence, not row counts:
+body-legacy sentinel tables (`agents`, `sessions` — names the old
+implementation had that store SCHEMA does not; `skills` is now a store table),
+by existence, not row counts:
 
 - sentinel present and no `inplace-v1` marker → fail loud
   (`this is a legacy-implementation DB; run the migration`) and do not serve
