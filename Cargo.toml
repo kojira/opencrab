@@ -10,6 +10,7 @@ members = [
     "crates/app",
     "crates/web-gate",
     "crates/nostr-gate",
+    "crates/discord-gate",
     "crates/db",
     "crates/admin-server",
 ]

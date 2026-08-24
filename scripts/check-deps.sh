@@ -37,9 +37,14 @@ assert_absent \
   R2
 
 # 独立 gate は workspace 内 runtime crate の型へ link しない。
+# discord-gate だけ port 型を使ってよい（DESIGN-DISCORD-GATE-DELTA (c)1）。
 for package in opencrab-web-gate opencrab-nostr-gate; do
   assert_absent "$package" 'opencrab-(port|store|engine|social-runtime|plugd|app)' R3
 done
+assert_absent \
+  opencrab-discord-gate \
+  'opencrab-(store|engine|social-runtime|plugd|app)' \
+  R3
 
 # 旧 runtime package が workspace/lockfile に再び現れないことを固定する。
 # db は AGREED §2.11 で本体スキーマが正本に戻ったため除外（2026-08-24 統括裁定）。

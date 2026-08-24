@@ -1,0 +1,28 @@
+[package]
+name = "opencrab-discord-gate"
+edition.workspace = true
+version.workspace = true
+
+# Discord ゲート（plugin）。core/store は禁止。線上 JSON は v15 protocol 2。
+# 型は port だけを使い、I/O は serenity。
+
+[[bin]]
+name = "opencrab-discord-gate"
+path = "src/main.rs"
+
+[lib]
+name = "opencrab_discord_gate"
+path = "src/lib.rs"
+
+[dependencies]
+opencrab-port = { path = "../port" }
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "net", "io-util"] }
+serde_json = { workspace = true }
+serenity = { version = "0.12.5", default-features = false, features = [
+    "client",
+    "gateway",
+    "model",
+    "cache",
+    "http",
+    "rustls_backend",
+] }

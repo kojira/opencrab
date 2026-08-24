@@ -14,8 +14,9 @@ pub use tokens::O200kCounter;
 
 use opencrab_port::*;
 use opencrab_store::{
-    ActivityInterruption, BackgroundProvenance, BackgroundSettlement, Ingest, NewBackgroundOffload,
-    NewEvent, NewToolLog, NewTurnRecord, Store,
+    ActivityInterruption, BackgroundProvenance, BackgroundSettlement, Ingest, LabelUpdate,
+    NewBackgroundOffload, NewEvent, NewToolLog, NewTurnRecord, ObserveGateAddress, ObserveRequest,
+    Store,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
@@ -1843,6 +1844,56 @@ impl System {
             self.0.fire_drops.fetch_add(1, Ordering::Relaxed);
             return Ok(None);
         }
+        if connection.spec.ingress_discovery == IngressDiscovery::Membership {
+            let discovery = ev
+                .discovery
+                .as_ref()
+                .ok_or_else(|| EventReject::Failed("membership event missing discovery".into()))?;
+            let label = match &discovery.label {
+                Some(value) => LabelUpdate::Present(value.clone()),
+                None => LabelUpdate::Absent,
+            };
+            let outcome = self
+                .0
+                .store
+                .observe_gate_address(ObserveRequest {
+                    instance: &connection.instance_id,
+                    address: &ev.address,
+                    address_kind: discovery.address_kind,
+                    author_external_id: &ev.author_external,
+                    guild_id: discovery.guild_id.as_deref(),
+                    label,
+                    observed_at: self.now_wall_nanos(),
+                })
+                .map_err(|error| EventReject::Failed(format!("observe failed: {error}")))?;
+            return match outcome {
+                ObserveGateAddress::Rejected => Ok(None),
+                ObserveGateAddress::Ready {
+                    place, binding_id, ..
+                }
+                | ObserveGateAddress::ConcurrentEquivalent {
+                    place, binding_id, ..
+                } => self.deliver_event_at(
+                    &connection.spec.kind_id,
+                    Some(&connection.instance_id),
+                    Some(&binding_id),
+                    place,
+                    ev,
+                ),
+                ObserveGateAddress::BindingAmbiguous => {
+                    Err(EventReject::Failed("binding_ambiguous".into()))
+                }
+                ObserveGateAddress::BindingMetadataConflict => {
+                    Err(EventReject::Failed("binding_metadata_conflict".into()))
+                }
+                ObserveGateAddress::SourceRefMetadataShapeConflict => Err(EventReject::Failed(
+                    "source_ref_metadata_shape_conflict".into(),
+                )),
+                ObserveGateAddress::ParticipantResolutionError => {
+                    Err(EventReject::Failed("participant_resolution_error".into()))
+                }
+            };
+        }
         let resolved = self
             .0
             .store
@@ -1850,12 +1901,6 @@ impl System {
             .map_err(|error| EventReject::Failed(format!("binding lookup failed: {error}")))?;
         let (place, binding) = match resolved {
             Some(resolved) => resolved,
-            None if connection.spec.ingress_discovery == IngressDiscovery::Membership => {
-                // Membership ingress is not prebound. With no admitted canonical participant,
-                // the observation is intentionally a no-op rather than `not_bound`; the full
-                // admission writer may materialize a binding before calling this path.
-                return Ok(None);
-            }
             None => return Err(EventReject::NotBound),
         };
         self.deliver_event_at(

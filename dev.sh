@@ -27,7 +27,7 @@ Commands:
   stop              Stop the supervisor, gates, core, and their descendants
   restart           Build first, then stop and start everything
   status             Show the supervisor and every configured component
-  logs [component]   Follow core, web, nostr, or launcher log (default: core)
+  logs [component]   Follow core, web, nostr, launcher, or discord-<uuid> log (default: core)
 
 Start configuration:
   OPENCRAB_DEV_DIR          State directory (default: .opencrab-dev)
@@ -73,6 +73,9 @@ init_paths() {
     WEB_BIN="$TARGET_DIR/debug/web-gate"
     NOSTR_BIN="$TARGET_DIR/debug/nostr-gate"
     LOCK_BIN="$TARGET_DIR/debug/opencrab-lock-fd"
+    RUNNER_BIN="$TARGET_DIR/debug/opencrab-gate-runner"
+    DISCORD_GATE_BIN="$TARGET_DIR/debug/opencrab-discord-gate"
+    DISCORD_LAUNCH_LIST_BIN="$TARGET_DIR/debug/opencrab-discord-launch-list"
 }
 
 validate_port() {
@@ -263,6 +266,9 @@ build_components() {
         build --locked
         -p opencrab-app --bin opencrab-social-runtime
         -p opencrab-app --bin opencrab-lock-fd
+        -p opencrab-app --bin opencrab-gate-runner
+        -p opencrab-app --bin opencrab-discord-launch-list
+        -p opencrab-discord-gate --bin opencrab-discord-gate
     )
     if gate_enabled web; then
         cargo_args+=( -p opencrab-web-gate --bin web-gate )
@@ -307,6 +313,12 @@ state_has_live_processes() {
             return 0
         fi
     done
+    for file in "$PID_DIR"/discord-*.pid; do
+        [ -f "$file" ] || continue
+        if pid="$(read_pid "$file" 2>/dev/null)" && group_alive "$pid"; then
+            return 0
+        fi
+    done
     return 1
 }
 
@@ -314,6 +326,12 @@ clean_dead_state() {
     local name
     rm -f "$SUPERVISOR_PID_FILE" "$READY_FILE" "$FAILED_FILE" "$CORE_SOCKET"
     for name in core web nostr; do
+        rm -f "$PID_DIR/$name.pid" "$PID_DIR/$name.owner" \
+            "$PID_DIR/$name.pid."*.tmp
+    done
+    for file in "$PID_DIR"/discord-*.pid; do
+        [ -f "$file" ] || continue
+        name="$(basename "$file" .pid)"
         rm -f "$PID_DIR/$name.pid" "$PID_DIR/$name.owner" \
             "$PID_DIR/$name.pid."*.tmp
     done
@@ -502,6 +520,11 @@ supervisor_cleanup() {
     local rc=$?
     trap - EXIT TERM INT HUP
     local failed=0
+    local name
+    for name in "$PID_DIR"/discord-*.pid; do
+        [ -f "$name" ] || continue
+        terminate_component "$(basename "$name" .pid)" || failed=1
+    done
     terminate_component nostr || failed=1
     terminate_component web || failed=1
     terminate_component core || failed=1
@@ -518,11 +541,15 @@ supervisor_cleanup() {
 
 supervise() {
     : "${OC_CORE_BIN:?}" "${OC_WEB_BIN:?}" "${OC_NOSTR_BIN:?}" "${OC_LOCK_BIN:?}"
+    : "${OC_RUNNER_BIN:?}" "${OC_DISCORD_GATE_BIN:?}" "${OC_DISCORD_LAUNCH_LIST_BIN:?}"
     : "${OC_HTTP_PORT:?}" "${OC_WEB_TOKEN:?}" "${OC_WEB_READY_TOKEN:?}" "${OC_ROOM:?}" "${OC_GATES:?}"
     CORE_BIN="$OC_CORE_BIN"
     WEB_BIN="$OC_WEB_BIN"
     NOSTR_BIN="$OC_NOSTR_BIN"
     LOCK_BIN="$OC_LOCK_BIN"
+    RUNNER_BIN="$OC_RUNNER_BIN"
+    DISCORD_GATE_BIN="$OC_DISCORD_GATE_BIN"
+    DISCORD_LAUNCH_LIST_BIN="$OC_DISCORD_LAUNCH_LIST_BIN"
     HTTP_PORT="$OC_HTTP_PORT"
     WEB_TOKEN="$OC_WEB_TOKEN"
     WEB_READY_TOKEN="$OC_WEB_READY_TOKEN"
@@ -595,6 +622,20 @@ supervise() {
         }
     fi
 
+    local discord_uuid discord_name discord_list
+    if ! discord_list="$("$DISCORD_LAUNCH_LIST_BIN" --db "$DB_PATH")"; then
+        echo "discord launch list failed" > "$FAILED_FILE"
+        exit 1
+    fi
+    while IFS= read -r discord_uuid; do
+        [ -n "$discord_uuid" ] || continue
+        discord_name="discord-$discord_uuid"
+        start_component "$discord_name" "$RUNNER_BIN" "$DB_PATH" "$discord_uuid" "$CORE_SOCKET" "$DISCORD_GATE_BIN" || {
+            echo "discord gate $discord_uuid failed to start" > "$FAILED_FILE"
+            exit 1
+        }
+    done <<< "$discord_list"
+
     touch "$READY_FILE"
     echo "==> All configured components are ready"
     # All state for this generation is now published.  The foreground command
@@ -615,6 +656,18 @@ supervise() {
                 exit 1
             fi
         done
+        for file in "$PID_DIR"/discord-*.pid; do
+            [ -f "$file" ] || continue
+            name="$(basename "$file" .pid)"
+            pid="$(read_pid "$file")" || {
+                echo "invalid $name PID file" > "$FAILED_FILE"
+                exit 1
+            }
+            if ! pid_alive "$pid"; then
+                echo "$name exited unexpectedly; see $LOG_DIR/$name.log" > "$FAILED_FILE"
+                exit 1
+            fi
+        done
         sleep 0.5
     done
 }
@@ -625,6 +678,11 @@ show_failure_logs() {
         [ -s "$LOG_DIR/$name.log" ] || continue
         echo "--- $name.log (last 20 lines) ---" >&2
         tail -n 20 "$LOG_DIR/$name.log" >&2
+    done
+    for file in "$LOG_DIR"/discord-*.log; do
+        [ -s "$file" ] || continue
+        echo "--- $(basename "$file") (last 20 lines) ---" >&2
+        tail -n 20 "$file" >&2
     done
 }
 
@@ -637,6 +695,9 @@ launch_supervisor() {
     export OC_WEB_BIN="$WEB_BIN"
     export OC_NOSTR_BIN="$NOSTR_BIN"
     export OC_LOCK_BIN="$LOCK_BIN"
+    export OC_RUNNER_BIN="$RUNNER_BIN"
+    export OC_DISCORD_GATE_BIN="$DISCORD_GATE_BIN"
+    export OC_DISCORD_LAUNCH_LIST_BIN="$DISCORD_LAUNCH_LIST_BIN"
     export OC_HTTP_PORT="$HTTP_PORT"
     export OC_WEB_TOKEN="$WEB_TOKEN"
     export OC_WEB_READY_TOKEN="$web_ready_token"
@@ -700,6 +761,7 @@ stop_all() {
     local failed=0
     local supervisor_pid rc i name pid
     local core_pid="" web_pid="" nostr_pid=""
+    local discord_names=() discord_pids=()
 
     # Freeze the recovery targets before signaling the supervisor.  The
     # lifecycle lock prevents another command from publishing a new generation,
@@ -716,6 +778,20 @@ stop_all() {
             rc=$?
             if [ "$rc" -eq 2 ]; then
                 echo "[error] Invalid PID file: $PID_DIR/$name.pid" >&2
+                failed=1
+            fi
+        fi
+    done
+    for file in "$PID_DIR"/discord-*.pid; do
+        [ -f "$file" ] || continue
+        name="$(basename "$file" .pid)"
+        if pid="$(read_pid "$file" 2>/dev/null)"; then
+            discord_names+=("$name")
+            discord_pids+=("$pid")
+        else
+            rc=$?
+            if [ "$rc" -eq 2 ]; then
+                echo "[error] Invalid PID file: $file" >&2
                 failed=1
             fi
         fi
@@ -758,6 +834,10 @@ stop_all() {
 
     # Normally the supervisor already removed these.  This is the recovery path
     # after SIGKILL/panic and is what prevents registered orphan groups building up.
+    local i
+    for i in "${!discord_names[@]}"; do
+        terminate_component_pid "${discord_names[$i]}" "${discord_pids[$i]}" || failed=1
+    done
     [ -z "$nostr_pid" ] || terminate_component_pid nostr "$nostr_pid" || failed=1
     [ -z "$web_pid" ] || terminate_component_pid web "$web_pid" || failed=1
     [ -z "$core_pid" ] || terminate_component_pid core "$core_pid" || failed=1
@@ -833,6 +913,11 @@ show_status() {
     component_status core || failed=1
     component_status web || failed=1
     component_status nostr || failed=1
+    local file
+    for file in "$PID_DIR"/discord-*.pid; do
+        [ -f "$file" ] || continue
+        component_status "$(basename "$file" .pid)" || failed=1
+    done
     [ -f "$FAILED_FILE" ] && {
         echo "    last failure: $(cat "$FAILED_FILE")"
         failed=1
@@ -843,7 +928,7 @@ show_status() {
 follow_logs() {
     local name="${1:-core}"
     case "$name" in
-        core|web|nostr|launcher) ;;
+        core|web|nostr|launcher|discord-*) ;;
         *) die "unknown log component: $name" ;;
     esac
     local file="$LOG_DIR/$name.log"
