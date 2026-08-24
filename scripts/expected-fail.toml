@@ -1,0 +1,19 @@
+# Known-red ledger (TEST-DESIGN §4.1). Assertions stay at the real pass shape.
+# Initial sanctioned entries: #786=A4-shape, #787=A9-shape+G2, #784=F-shape.
+# Remove an entry only in the PR that CLOSES that issue.
+
+[[xfail]]
+issue = 786
+test = "web_e2e_mock::answer_then_no_reply_delivers_substantive_body"
+
+[[xfail]]
+issue = 787
+test = "web_e2e_mock::shell_failure_reason_readable_on_next_turn"
+
+[[xfail]]
+issue = 787
+test = "web_e2e_mock::tool_execution_writes_one_persistent_row"
+
+[[xfail]]
+issue = 784
+test = "startup_smoke::used_new_structure_db_without_marker_serves"
