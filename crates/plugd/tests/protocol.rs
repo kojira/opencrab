@@ -2000,6 +2000,30 @@ async fn drop_unknown_field() {
     assert!(!g.is_disconnected());
 }
 
+// voice STT の said は kind を増やさず metadata.source=discord_voice を載せる。未知欄ではない。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn said_with_discord_voice_metadata_is_accepted() {
+    let h = build();
+    let g = TestGate::connect(&h.plugd);
+    g.hello_ok("nostr", "filter:.+", json!([]), json!([]), json!([]))
+        .await;
+    let place = h
+        .sys
+        .create_place(Some("p"), None, &Policy::default(), None);
+    h.sys.bind_place(place, "nostr", "filter:x").await.unwrap();
+    g.send(json!({
+        "id":"e-voice","m":"event","kind":"said","address":"filter:x",
+        "author":{"id":"u"},"content":{"text":"声です"},
+        "metadata":{"source":"discord_voice"}
+    }));
+    assert!(
+        g.wait_for(|l| has_reply_ok(l, "e-voice")).await,
+        "discord_voice metadata は unknown_field ではない: {:?}",
+        g.log()
+    );
+    assert!(!g.is_disconnected());
+}
+
 // 知らない列挙値 → err（プロトコル§00）。近いものに寄せない。
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn drop_unknown_enum_in_hello() {

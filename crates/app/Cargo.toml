@@ -67,6 +67,7 @@ rusqlite.workspace = true
 opencrab-plugd = { path = "../plugd" }
 opencrab-nostr-gate = { path = "../nostr-gate" }
 opencrab-discord-gate = { path = "../discord-gate" }
+opencrab-voice = { path = "../voice" }
 serenity = { version = "0.12.5", default-features = false, features = [
     "client",
     "gateway",
@@ -74,7 +75,21 @@ serenity = { version = "0.12.5", default-features = false, features = [
     "cache",
     "http",
     "rustls_backend",
+    "voice",
 ] }
+songbird = { version = "0.4", default-features = false, features = [
+    "serenity",
+    "driver",
+    "gateway",
+    "receive",
+    "rustls",
+    "builtin-queue",
+] }
+symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm"] }
+dashmap = "6"
+anyhow = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
 # process: 平文専用の cursor engine が `cursor-agent` CLI を子プロセスで起動する（crates/app/src/cursor.rs）。
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "net", "io-util", "process"] }
 async-trait = { workspace = true }

@@ -800,6 +800,7 @@ impl Plugd {
             "action",
             "attachments",
             "discovery",
+            "metadata",
         ];
         if let Some(bad) = unknown_field(obj, ALLOWED) {
             return Err(WireErr::at("unknown_field", &format!("event.{bad}")));

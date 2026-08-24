@@ -1,10 +1,14 @@
 //! Read canonical instance config once, then replace this process with the selected gate adapter.
 
 use base64::Engine as _;
+use opencrab_discord_gate::{OWNER_AGENT_ID_ENV, VOICE_CONFIG_B64_ENV};
 use opencrab_port::GateInstanceId;
 use opencrab_store::{gate_launch_read_only, GateLaunchSecret};
+use opencrab_voice::VoiceConfig;
 use ring::aead;
+use rusqlite::{Connection, OptionalExtension};
 use std::os::unix::process::CommandExt as _;
+use std::path::Path;
 use std::process::Command;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -131,6 +135,8 @@ fn adapter_command(adapter: std::ffi::OsString, adapter_args: Vec<std::ffi::OsSt
         command.env_remove(name);
     }
     command.env_remove(GATE_CONFIG_B64_ENV);
+    command.env_remove(VOICE_CONFIG_B64_ENV);
+    command.env_remove(OWNER_AGENT_ID_ENV);
     command
 }
 
@@ -138,6 +144,65 @@ fn set_boot_error(command: &mut Command, code: &'static str) {
     command
         .env_remove("OPENCRAB_GATE_TOKEN")
         .env("OPENCRAB_GATE_BOOT_ERROR_CODE", code);
+}
+
+/// override 1 行があればそれ、無ければ `VoiceConfig::default()`。JSON が壊れていたら fail loud。
+fn voice_config_b64(db: impl AsRef<Path>) -> Result<String, String> {
+    let json = match read_voice_override_json(db.as_ref())? {
+        Some(raw) => {
+            let _: VoiceConfig = serde_json::from_str(&raw)
+                .map_err(|error| format!("voice_config_override JSON is invalid: {error}"))?;
+            raw
+        }
+        None => serde_json::to_string(&VoiceConfig::default())
+            .map_err(|error| format!("default VoiceConfig encode failed: {error}"))?,
+    };
+    Ok(base64::engine::general_purpose::STANDARD.encode(json.as_bytes()))
+}
+
+fn read_voice_override_json(db: &Path) -> Result<Option<String>, String> {
+    let conn = Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| format!("voice_config_override db: {error}"))?;
+    let exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='voice_config_override'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("voice_config_override catalog: {error}"))?;
+    if exists == 0 {
+        return Ok(None);
+    }
+    conn.query_row(
+        "SELECT config_json FROM voice_config_override WHERE id = 1",
+        [],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(|error| format!("voice_config_override read: {error}"))
+}
+
+fn dedicated_owner_agent_id(db: impl AsRef<Path>, instance: &GateInstanceId) -> Option<String> {
+    let conn = Connection::open_with_flags(db.as_ref(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .ok()?;
+    let label: String = conn
+        .query_row(
+            "SELECT label FROM gate_instances WHERE instance_id=?1",
+            [instance.as_str()],
+            |row| row.get(0),
+        )
+        .ok()?;
+    decode_dedicated_discord_agent_id(&label)
+}
+
+fn decode_dedicated_discord_agent_id(label: &str) -> Option<String> {
+    let encoded = label.strip_prefix("dedicated:discord:")?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded.as_bytes())
+        .ok()?;
+    String::from_utf8(bytes)
+        .ok()
+        .filter(|value| !value.is_empty())
 }
 
 fn main() {
@@ -195,6 +260,13 @@ fn main() {
             .env("OPENCRAB_GATE_SOCKET", socket);
     }
 
+    command.env(
+        VOICE_CONFIG_B64_ENV,
+        voice_config_b64(&db).unwrap_or_else(|error| panic!("{error}")),
+    );
+    if let Some(owner) = dedicated_owner_agent_id(&db, &instance) {
+        command.env(OWNER_AGENT_ID_ENV, owner);
+    }
     if let Some(code) = boot_error {
         set_boot_error(&mut command, code);
     } else {
@@ -212,7 +284,9 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        adapter_command, hchacha20, set_boot_error, GATE_CONFIG_B64_ENV, RUNNER_OWNED_ENVS,
+        adapter_command, decode_dedicated_discord_agent_id, hchacha20, set_boot_error,
+        voice_config_b64, GATE_CONFIG_B64_ENV, OWNER_AGENT_ID_ENV, RUNNER_OWNED_ENVS,
+        VOICE_CONFIG_B64_ENV,
     };
     use std::ffi::OsStr;
 
@@ -252,5 +326,71 @@ mod tests {
             }
         }
         assert_eq!(envs.get(OsStr::new(GATE_CONFIG_B64_ENV)), Some(&None));
+        assert_eq!(envs.get(OsStr::new(VOICE_CONFIG_B64_ENV)), Some(&None));
+        assert_eq!(envs.get(OsStr::new(OWNER_AGENT_ID_ENV)), Some(&None));
+    }
+
+    #[test]
+    fn dedicated_label_decodes_source_agent_uuid() {
+        let agent = "agent-uuid-1";
+        let encoded = base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            agent.as_bytes(),
+        );
+        let label = format!("dedicated:discord:{encoded}");
+        assert_eq!(
+            decode_dedicated_discord_agent_id(&label).as_deref(),
+            Some(agent)
+        );
+        assert_eq!(decode_dedicated_discord_agent_id("shared:discord"), None);
+    }
+
+    #[test]
+    fn voice_config_b64_without_override_table_is_default_disabled() {
+        let dir = std::env::temp_dir().join(format!("voice-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("empty.db");
+        rusqlite::Connection::open(&path).unwrap();
+        let encoded = voice_config_b64(&path).unwrap();
+        let json = String::from_utf8(
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded).unwrap(),
+        )
+        .unwrap();
+        let cfg: opencrab_voice::VoiceConfig = serde_json::from_str(&json).unwrap();
+        assert!(!cfg.enabled);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn voice_config_b64_uses_override_and_rejects_invalid_json() {
+        let dir = std::env::temp_dir().join(format!("voice-cfg-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("voice.db");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE voice_config_override (
+               id INTEGER PRIMARY KEY CHECK (id = 1),
+               config_json TEXT NOT NULL,
+               updated_at TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO voice_config_override(id,config_json,updated_at) VALUES(1,'{\"enabled\":true,\"stt\":{\"provider\":\"openai\",\"model\":\"whisper-1\",\"api_key_env\":\"OPENAI_API_KEY\"},\"tts\":{\"provider\":\"voicevox\",\"model\":\"gpt-4o-mini-tts\",\"api_key_env\":\"OPENAI_API_KEY\",\"default_voice\":\"3\"}}','t')",
+            [],
+        )
+        .unwrap();
+        let encoded = voice_config_b64(&path).unwrap();
+        let json = String::from_utf8(
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded).unwrap(),
+        )
+        .unwrap();
+        let cfg: opencrab_voice::VoiceConfig = serde_json::from_str(&json).unwrap();
+        assert!(cfg.enabled);
+        conn.execute("UPDATE voice_config_override SET config_json='{'", [])
+            .unwrap();
+        let err = voice_config_b64(&path).unwrap_err();
+        assert!(err.contains("invalid"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
