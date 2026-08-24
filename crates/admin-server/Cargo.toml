@@ -3,10 +3,10 @@ name = "opencrab-admin-server"
 version.workspace = true
 edition.workspace = true
 
-# 管理面（ダッシュボード）の読み取り API + SPA 配信（#767 Phase 1）。
+# 管理面（ダッシュボード）の API + SPA 配信。
 # 会話ゲート（web-gate）とは別プロセス・別クレート。旧 crates/server の読み系ハンドラを
 # ほぼそのまま移植し、置き場所だけ分離した。判断は core/store・DB（opencrab-db）側に置き、
-# ここは HTTP への配送とレスポンス整形だけを担う。
+# ここは HTTP への配送とレスポンス整形だけを担う。owner ID 書き系は DESIGN-OWNER-IDENTITY。
 [[bin]]
 name = "admin-server"
 path = "src/main.rs"

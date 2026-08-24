@@ -1,9 +1,10 @@
 # opencrab-admin-server
 
-ダッシュボード（管理面）の**読み取り専用 API + React SPA 配信**（#767 Phase 1）。
+ダッシュボード（管理面）の API + React SPA 配信。
 
 会話ゲート（`crates/web-gate`）とは**別プロセス・別クレート**。会話ゲートに管理 API を混ぜない。
-DB は常に**読み取り専用**で開く（書き系は Phase 1 の範囲外）。
+store は owner ID 日次書き込みのため **RW・no-recover** で開く（`Store::open` は使わない）。
+旧テーブル観測は読み取り専用。
 
 ## データの向き先（AGREED §2.11）
 
@@ -18,7 +19,7 @@ DB は常に**読み取り専用**で開く（書き系は Phase 1 の範囲外�
   `GET /api/agents/{id}/tool-logs` は JSON のみ（フロントページは未着手）。
 - 正本スキーマへ**未移行**のテーブル・列は、偽の空配列を返さず **501** で明示する（migration 側の責務）。
   データ実体の無い機能（skills / soul presets / analytics 等）も 501。
-- 書き系メソッドはルートに載せない（axum が **405** を返す＝偽の成功を作らない）。
+- Discord / Nostr owner ID（`GET/PUT/PATCH/DELETE /api/agents/{id}/discord`、`GET/PUT/DELETE /api/agents/{id}/nostr`）は本体 wire を復元する（DESIGN-OWNER-IDENTITY）。それ以外の書き系はルートに載せない（axum が **405**）。
 
 ## ビルドと起動
 
@@ -37,5 +38,6 @@ cd ..
 cargo run -p opencrab-admin-server -- data/opencrab.db 8787 web/dist
 ```
 
-**稼働中 core と同じ DB を開くときも安全**: `Store::open` は使わず、SQLite を read-only
-（`SQLITE_OPEN_READ_ONLY`）で直接開いて観測する（稼働中 core の epoch を閉じる副作用を避ける）。
+**稼働中 core と同じ DB を開くときも安全**: `Store::open` は使わず、
+`Store::open_read_write_no_recover` で schema 初期化も runtime 回収もしない
+（稼働中 core の epoch を閉じる副作用を避ける）。旧テーブルは `SQLITE_OPEN_READ_ONLY`。

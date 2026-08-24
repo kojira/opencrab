@@ -264,6 +264,8 @@
   "agentDetail.nostrDesc": "The agent responds to Nostr posts matching your relays and filters (reply, zap, DM, Blossom upload supported).",
   "agentDetail.nostrRunning": "running",
   "agentDetail.nostrSecretKey": "Secret key (nsec)",
+  "agentDetail.ownerPubkey": "Owner public key",
+  "agentDetail.ownerPubkeyHint": "npub1... or 64-hex. Save empty to clear.",
   "agentDetail.nostrGenerateHint": "No existing nsec? Generate a new key (optional vanity prefix: bech32 chars only, max 3).",
   "agentDetail.nostrVanityPlaceholder": "vanity prefix (optional, e.g. cat)",
   "agentDetail.nostrGenerate": "Generate new key",

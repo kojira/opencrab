@@ -1,7 +1,7 @@
-//! 管理面（ダッシュボード）の読み取り API（#767 Phase 1）。
+//! 管理面（ダッシュボード）の読み取り API + owner ID 書き系復元。
 //!
 //! ここは配送と整形だけを担う（AGREED §2.9）。データの判断・クエリは store 側に置き、
-//! この面は store の型付き読み取りを呼んで、旧ダッシュボードの JSON 形へ写すだけ。
+//! この面は store の型付き読み取り／owner コマンドを呼んで、旧ダッシュボードの JSON 形へ写すだけ。
 //!
 //! oc2 が概念を置き換えたもの（agent→subject、session→place、会話ログ→events/turn_records、
 //! memory→memories）は store の新テーブルへ向き先を差し替える。レスポンス形は旧のまま＝フロント無改変。
@@ -86,7 +86,7 @@ fn bad_id() -> (StatusCode, Json<serde_json::Value>) {
     )
 }
 
-type ApiResult<T> = Result<T, (StatusCode, Json<serde_json::Value>)>;
+pub(crate) type ApiResult<T> = Result<T, (StatusCode, Json<serde_json::Value>)>;
 
 /// ナノ秒エポックを RFC3339 文字列へ（events.created_at は ns・store の観測）。0/変換不能は空文字。
 fn iso_from_nanos(ts: i64) -> String {
@@ -729,8 +729,8 @@ async fn api_health() -> impl IntoResponse {
 }
 
 /// 読み系ルート表。旧 create_router の GET 面を移植し、実データのあるものはリダイレクト、
-/// それ以外は未実装を明示。書き系（POST/PUT/PATCH/DELETE）は Phase 1 の範囲外なので載せない
-/// （未載メソッドは axum が 405 を返す＝偽の成功を作らない）。
+/// それ以外は未実装を明示。owner ID（discord/nostr）だけ本体 wire の書き系を復元する。
+/// それ以外の未載メソッドは axum が 405 を返す（偽の成功を作らない）。
 pub fn create_router(state: AdminState) -> Router {
     Router::new()
         // health
@@ -837,14 +837,7 @@ pub fn create_router(state: AdminState) -> Router {
             "/api/agents/{id}/channel-configs",
             unimpl("channel-configs: oc2 は別系（gate）に再設計・範囲外"),
         )
-        .route(
-            "/api/agents/{id}/discord",
-            unimpl("discord config: oc2 は gate 系に再設計・範囲外"),
-        )
-        .route(
-            "/api/agents/{id}/nostr",
-            unimpl("nostr per-agent 設定: oc2 は nostr-gate に再設計・範囲外"),
-        )
+        .merge(crate::owner_routes::owner_id_routes())
         .route(
             "/api/agents/{id}/nostr-relay",
             unimpl("nostr-relay 設定: 範囲外"),
