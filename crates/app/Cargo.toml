@@ -53,6 +53,7 @@ opencrab-port = { path = "../port" }
 opencrab-store = { path = "../store" }
 opencrab-social-runtime = { path = "../social-runtime" }
 opencrab-converter = { path = "../converter" }
+opencrab-db = { path = "../db" }
 rusqlite.workspace = true
 opencrab-plugd = { path = "../plugd" }
 opencrab-nostr-gate = { path = "../nostr-gate" }

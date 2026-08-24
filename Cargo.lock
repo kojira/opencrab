@@ -1143,6 +1143,7 @@ dependencies = [
  "futures-util",
  "libc",
  "opencrab-converter",
+ "opencrab-db",
  "opencrab-engine",
  "opencrab-nostr-gate",
  "opencrab-plugd",

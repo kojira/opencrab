@@ -216,13 +216,13 @@ fn legacy_nonempty_without_marker_refuses() {
     let (code, stderr) = wait_exit(&mut spawned, TIMEOUT);
     assert_ne!(code, 0, "legacy nonempty without marker must exit nonzero");
     assert!(
-        stderr.contains("NeedsManualMigration") || stderr.contains("legacy tables are non-empty"),
-        "refusal body must identify NeedsManualMigration; stderr={stderr}"
+        stderr.contains("this is a legacy-implementation DB; run the migration"),
+        "refusal body must identify the three-way refuse; stderr={stderr}"
     );
 }
 
 /// F-shape (#784): a used new-structure DB (rows in events/subjects, no
-/// schema_migration_state) must serve. Today `legacy_tables_nonempty` refuses.
+/// schema_migration_state) must serve. No body-legacy sentinel → plain boot.
 #[test]
 fn used_new_structure_db_without_marker_serves() {
     let socket = scratch("used-new.sock");
