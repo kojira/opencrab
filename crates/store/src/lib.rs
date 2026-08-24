@@ -13,11 +13,15 @@ pub type Result<T> = std::result::Result<T, rusqlite::Error>;
 
 mod discord;
 mod observe;
+mod owner_identity;
 pub use discord::{
     discord_launch_decisions_on, discord_launch_decisions_read_only, upsert_discord_kind_on,
     DiscordLaunchDecision,
 };
 pub use observe::{LabelUpdate, ObserveGateAddress, ObserveRequest};
+pub use owner_identity::{
+    GateOwnerProjection, OwnerExternalChange, OwnerIdentityError, OwnerPrincipalOutcome,
+};
 
 #[derive(Debug)]
 pub enum GateConnectionStartError {
@@ -2952,6 +2956,18 @@ impl Store {
     /// from accidentally reaching a mutating store method successfully.
     pub fn open_read_only(path: impl AsRef<std::path::Path>) -> Result<Store> {
         let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        Ok(Store {
+            conn: Arc::new(Mutex::new(conn)),
+        })
+    }
+
+    /// Open an existing database for mutation without owning core startup.
+    ///
+    /// Unlike [`Store::open`], this does not initialize the schema or recover
+    /// runtime state. Admin writes (owner ID) must not close a live core's
+    /// `connecting`/`active` gate epochs.
+    pub fn open_read_write_no_recover(path: impl AsRef<std::path::Path>) -> Result<Store> {
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         Ok(Store {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -6395,6 +6411,40 @@ mod tests {
         );
 
         drop(observer);
+        drop(owner);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn read_write_no_recover_preserves_active_epoch() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "opencrab-store-rw-no-recover-{}-{nonce}.sqlite",
+            std::process::id()
+        ));
+        let owner = Store::open(&path).unwrap();
+        let kind = GateKindId::parse("web".to_string()).unwrap();
+        let instance = owner.seed_compatibility_instance(&kind).unwrap();
+        let spec = gate_kind_spec("web", IngressDiscovery::Prebound);
+        let epoch = owner
+            .begin_gate_connection_checked(&instance, 1, 1, &spec, 4)
+            .unwrap();
+        owner.activate_gate_connection(&instance, epoch, 5).unwrap();
+
+        let writer = Store::open_read_write_no_recover(&path).unwrap();
+        let status = writer
+            .gate_status()
+            .unwrap()
+            .into_iter()
+            .find(|row| row.instance_id == instance)
+            .unwrap();
+        assert_eq!(status.connection_state.as_deref(), Some("active"));
+        assert_eq!(status.lifecycle, "running");
+
+        drop(writer);
         drop(owner);
         std::fs::remove_file(path).unwrap();
     }

@@ -829,11 +829,12 @@ function McpSection({ agentId }: { agentId: string }) {
   );
 }
 
-function NostrSection({ agentId }: { agentId: string }) {
+export function NostrSection({ agentId }: { agentId: string }) {
   const { t } = useTranslation();
   const [cfg, setCfg] = useState<NostrConfigDto | null>(null);
   const [secretKey, setSecretKey] = useState('');
   const [vanityPrefix, setVanityPrefix] = useState('');
+  const [ownerPubkey, setOwnerPubkey] = useState('');
   const [relays, setRelays] = useState('');
   const [authors, setAuthors] = useState('');
   const [keywords, setKeywords] = useState('');
@@ -846,6 +847,7 @@ function NostrSection({ agentId }: { agentId: string }) {
     try {
       const c = await getNostrConfig(agentId);
       setCfg(c);
+      setOwnerPubkey(c.owner_pubkey || '');
       setRelays(c.relays.join(', '));
       setAuthors(c.filter.authors.join(', '));
       setKeywords(c.filter.keywords.join(', '));
@@ -872,6 +874,7 @@ function NostrSection({ agentId }: { agentId: string }) {
     try {
       const res = await updateNostrConfig(agentId, {
         secret_key: secretKey.trim() === '' ? undefined : secretKey.trim(),
+        owner_pubkey: ownerPubkey,
         relays: splitList(relays),
         authors: splitList(authors),
         keywords: splitList(keywords),
@@ -972,6 +975,20 @@ function NostrSection({ agentId }: { agentId: string }) {
               {t('agentDetail.nostrGenerate')}
             </button>
           </div>
+        </div>
+        <div>
+          <label className="text-label-lg text-on-surface-variant block mb-1">
+            {t('agentDetail.ownerPubkey')}
+          </label>
+          <input
+            className="input w-full"
+            placeholder="npub1... / 64-hex"
+            value={ownerPubkey}
+            onChange={(e) => setOwnerPubkey(e.target.value)}
+          />
+          <p className="text-body-sm text-on-surface-variant mt-1">
+            {t('agentDetail.ownerPubkeyHint')}
+          </p>
         </div>
         <div>
           <label className="text-label-lg text-on-surface-variant block mb-1">

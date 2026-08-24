@@ -1,9 +1,10 @@
-//! admin-server — ダッシュボードの読み取り API + React SPA 配信（#767 Phase 1）。
+//! admin-server — ダッシュボード API + React SPA 配信。
 //!
 //! 会話ゲート（web-gate）とは別プロセス・別クレート。会話ゲートに管理 API を混ぜない
 //! （DESIGN-gateway-takein §「管理 REST は会話 gateway に載せない」）。
 //!
-//! DB は読み取り専用（観測者）で開く。書き系は Phase 1 の範囲外なので、DB を書き換えない。
+//! store は owner ID 日次書き込みのため RW で開くが、`Store::open` は使わない
+//! （稼働中 core の epoch を閉じない）。旧テーブル観測は引き続き読み取り専用。
 //!
 //! 使い方:
 //!   admin-server <db_path> [http_port] [web_dist_dir]
@@ -13,6 +14,7 @@
 //!   web_dist_dir = env OPENCRAB_ADMIN_WEB_DIST / "web/dist"（`pnpm build` の出力）
 
 mod api;
+mod owner_routes;
 mod schedule_cron;
 
 use std::sync::Arc;
@@ -53,10 +55,10 @@ async fn main() -> std::io::Result<()> {
         .parse()
         .expect("compaction_ratio は小数である必要があります");
 
-    // 新テーブル（oc2 store）を観測者として開く（schema 初期化も runtime 回収もしない・読み取り専用）。
-    // 稼働中 core と同じ DB を Store::open で開くと epoch を閉じる副作用があるため、必ず read-only 観測で開く。
-    let store = Store::open_read_only(&db_path).unwrap_or_else(|e| {
-        panic!("DB（store）を読み取り専用で開けませんでした（{db_path}）: {e}");
+    // 新テーブル（oc2 store）を RW で開く。schema 初期化も runtime 回収もしない
+    // （稼働中 core と同じ DB を Store::open すると epoch を閉じる）。
+    let store = Store::open_read_write_no_recover(&db_path).unwrap_or_else(|e| {
+        panic!("DB（store）を開けませんでした（{db_path}）: {e}");
     });
     // 旧テーブル（本体 DB スキーマ・正本）を読む。**Store::open を使わず** SQLite を read-only で
     // 直接開き、opencrab-db の Db でラップする（from_connection は schema 初期化をしない＝DB を書かない）。

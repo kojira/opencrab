@@ -6,6 +6,8 @@ export interface NostrConfigDto {
   running: boolean;
   has_secret_key: boolean;
   secret_key_masked: string;
+  /** 平文。未設定は空文字。 */
+  owner_pubkey: string;
   relays: string[];
   filter: {
     authors: string[];
@@ -22,6 +24,8 @@ export interface UpdateNostrBody {
   keywords: string[];
   kinds: number[];
   enabled: boolean;
+  /** 省略=現状維持、`""`=クリア。npub または 64hex。 */
+  owner_pubkey?: string;
 }
 
 export function getNostrConfig(agentId: string): Promise<NostrConfigDto> {
