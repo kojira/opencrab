@@ -14,6 +14,7 @@ pub type Result<T> = std::result::Result<T, rusqlite::Error>;
 mod discord;
 mod observe;
 mod owner_identity;
+mod subjects;
 pub use discord::{
     declared_discord_operations, discord_launch_decisions_on, discord_launch_decisions_read_only,
     upsert_discord_kind_on, DiscordLaunchDecision,
@@ -22,6 +23,7 @@ pub use observe::{LabelUpdate, ObserveGateAddress, ObserveRequest};
 pub use owner_identity::{
     GateOwnerProjection, OwnerExternalChange, OwnerIdentityError, OwnerPrincipalOutcome,
 };
+pub use subjects::{compose_subject_persona, SubjectCommandError, SubjectPatch, SubjectReplace};
 
 #[derive(Debug)]
 pub enum GateConnectionStartError {
@@ -1514,6 +1516,34 @@ const SCHEMA: &str = r#"
               migration_id TEXT NOT NULL PRIMARY KEY,
               applied_at INTEGER NOT NULL,
               source_row_digest BLOB
+            );
+            -- 台帳 entity `skills`（DESIGN-DASHBOARD-P2 SLICE 1 / TARGET-SCHEMA）。
+            -- 旧表 `skills` は書かない。standalone hard delete は禁止だが、
+            -- subject aggregate delete は owner_subject_id で消す（DESIGN-RULINGS）。
+            CREATE TABLE IF NOT EXISTS skills(
+              skill_id TEXT NOT NULL PRIMARY KEY,
+              owner_subject_id INTEGER NOT NULL,
+              name TEXT NOT NULL,
+              description TEXT NOT NULL,
+              situation_pattern TEXT NOT NULL,
+              guidance TEXT NOT NULL,
+              permission TEXT NOT NULL,
+              visible_to_agent INTEGER NOT NULL,
+              active INTEGER NOT NULL,
+              archived INTEGER NOT NULL,
+              state TEXT NOT NULL CHECK(state IN ('active','retired','archived')),
+              definition BLOB NOT NULL,
+              source_type TEXT NOT NULL,
+              source_bytes BLOB,
+              source_context TEXT,
+              source_relative_path TEXT,
+              created_by_principal TEXT,
+              effectiveness REAL,
+              last_used_at INTEGER,
+              revision INTEGER NOT NULL,
+              usage_count INTEGER NOT NULL,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL
             );
             "#;
 

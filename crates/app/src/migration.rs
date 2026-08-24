@@ -3,7 +3,9 @@ use rusqlite::Connection;
 
 /// Body-legacy tables: names the old implementation created that store SCHEMA does not.
 /// Existence (not row counts) is the sentinel. Any one present means a legacy-implementation DB.
-const BODY_LEGACY_SENTINELS: &[&str] = &["agents", "sessions", "skills"];
+/// `skills` is no longer a sentinel: store SCHEMA now owns that name (DESIGN-DASHBOARD-P2 SLICE 1).
+/// Body-legacy DBs still have `agents` / `sessions`.
+const BODY_LEGACY_SENTINELS: &[&str] = &["agents", "sessions"];
 
 #[derive(Debug)]
 pub enum EnsureMigratedError {
@@ -148,6 +150,18 @@ mod tests {
              VALUES('agent','used','p','echo','trusted',1);
              INSERT INTO events(place_id,seq,kind,content_json,mentions_json,created_at)
              VALUES(1,1,'said','{}','[]',1);",
+        )
+        .unwrap();
+        ensure_migrated(&conn).unwrap();
+        assert_eq!(marker_row_count(&conn), 0);
+    }
+
+    #[test]
+    fn store_skills_table_without_body_sentinels_boots() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE skills(skill_id TEXT NOT NULL PRIMARY KEY, owner_subject_id INTEGER NOT NULL)",
+            [],
         )
         .unwrap();
         ensure_migrated(&conn).unwrap();
