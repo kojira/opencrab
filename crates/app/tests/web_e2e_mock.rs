@@ -389,14 +389,13 @@ fn shell_result_readable_on_next_turn() {
 }
 
 /// G2: one tool execution must persist one row in the table #787 designates.
-/// The destination is not named yet — inventing a table name is forbidden.
 fn designated_tool_execution_log_table() -> Option<&'static str> {
-    None
+    Some("tool_logs")
 }
 
 #[test]
 fn tool_execution_writes_one_persistent_row() {
-    let (_core, _web, port, _db) = boot_mock("tool_then_reply");
+    let (_core, _web, port, db) = boot_mock("tool_then_reply");
     assert!(
         post_until_history_contains(
             port,
@@ -409,10 +408,26 @@ fn tool_execution_writes_one_persistent_row() {
         get_history(port)
     );
     let table = designated_tool_execution_log_table();
-    assert!(
-        table.is_some(),
-        "tool-execution-log table is not designated by #787"
+    assert_eq!(
+        table,
+        Some("tool_logs"),
+        "tool-execution-log table is designated by #787"
     );
+    let table = table.expect("designated");
+    let conn = rusqlite::Connection::open(&db).expect("open db after tool_then_reply");
+    let count: i64 = conn
+        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+        .expect("count designated tool log table");
+    assert_eq!(count, 1, "one tool execution writes one {table} row");
+    let (tool_name, outcome): (String, String) = conn
+        .query_row(
+            &format!("SELECT tool_name, outcome FROM {table}"),
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("read designated tool log row");
+    assert_eq!(tool_name, "core-child-list");
+    assert_eq!(outcome, "done");
 }
 
 /// A4-shape (#786): Owner-direct NO_REPLY-only delivers the constant NOTICE.

@@ -192,6 +192,21 @@ async fn empty_command_allowlist_denies_everything_with_reason() {
         "理由が判る: {}",
         settles[0]
     );
+    let failed = bg_activities(&h)
+        .into_iter()
+        .find(|act| act.end_reason.as_deref() == Some("failed"))
+        .expect("拒否は背景活動として決着する");
+    let offload = h
+        .sys
+        .store()
+        .read_offload(a, failed.id)
+        .unwrap()
+        .expect("失敗理由は offload に残る");
+    assert!(
+        offload.body.contains("許可されていない"),
+        "read_offload が拒否理由を含む: {}",
+        offload.body
+    );
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
