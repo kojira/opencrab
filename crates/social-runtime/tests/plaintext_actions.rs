@@ -1228,3 +1228,108 @@ async fn empty_and_seq_progress_fall_back_to_verbatim_say() {
     );
     assert!(d[0].2.verb.is_none(), "アクションではない（verb なし）");
 }
+
+// #796: QC 形（PROGRESS 行 + reply 行 + 末尾空行）は公開 Spoke ちょうど 1 本。空 Spoke は作らない。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn progress_reply_trailing_blank_is_one_public_spoke() {
+    let h = build();
+    let (place, _a) = place_with_gate(
+        &h,
+        &[EffectKind::Say],
+        vec![action("reply", EffectKind::Say)],
+    );
+    h.eng.push(Step::say_done(
+        "PROGRESS::読み込み中\n\nreply:1:実行結果は以下の通りです。\n",
+    ));
+    h.sys
+        .deliver_event(
+            &GateName::new("web"),
+            inbound("room:main", "npubX", "やあ", "note1"),
+        )
+        .unwrap();
+    settle().await;
+
+    let delivered: Vec<_> =
+        h.tx.all()
+            .into_iter()
+            .filter(|(_, _, e)| e.kind == EffectKind::Say)
+            .collect();
+    assert_eq!(delivered.len(), 1, "公開 say は 1 本: {delivered:?}");
+    assert_eq!(
+        delivered[0].2.text.as_deref(),
+        Some("実行結果は以下の通りです。")
+    );
+    assert!(
+        delivered
+            .iter()
+            .all(|(_, _, e)| e.text.as_deref().is_some_and(|t| !t.trim().is_empty())),
+        "空／空白の配送は無い: {delivered:?}"
+    );
+
+    let last = h.sys.store().latest_seq(place).unwrap();
+    let log = h.sys.store().read_range(place, 0, last).unwrap();
+    let spokes: Vec<_> = log.iter().filter(|e| e.kind == EventKind::Spoke).collect();
+    assert_eq!(spokes.len(), 1, "公開 Spoke はちょうど 1: {spokes:?}");
+    assert_eq!(
+        spokes[0].content.text.as_deref(),
+        Some("実行結果は以下の通りです。")
+    );
+    assert!(
+        spokes.iter().all(|e| e
+            .content
+            .text
+            .as_deref()
+            .is_some_and(|t| !t.trim().is_empty())),
+        "空 Spoke は無い: {spokes:?}"
+    );
+
+    let recs = h.sys.store().turn_records(place).unwrap();
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0].end_reason, "done", "ターンは失敗にしない");
+    assert_eq!(
+        recs[0].failure_detail.as_deref(),
+        Some(EMPTY_SAY_DROPPED_NOTE),
+        "破棄した事実をターン記録に残す"
+    );
+}
+
+// #796: 空白のみの残余 say は公開 Spoke 0 本。破棄した事実だけをターン記録に残す。
+// 推論全体が空（#719）ではない——PROGRESS が非空なので interpret まで届く。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn whitespace_only_remainder_is_zero_spokes_and_note() {
+    let h = build();
+    let (place, _a) = place_with_gate(
+        &h,
+        &[EffectKind::Say],
+        vec![action("reply", EffectKind::Say)],
+    );
+    h.eng.push(Step::say_done("PROGRESS::作業中\n   \n\t"));
+    h.sys
+        .deliver_event(
+            &GateName::new("web"),
+            inbound("room:main", "npubX", "やあ", "note1"),
+        )
+        .unwrap();
+    settle().await;
+
+    assert!(
+        h.tx.all().iter().all(|(_, _, e)| e.kind != EffectKind::Say),
+        "空白のみ残余は配送しない: {:?}",
+        h.tx.all()
+    );
+
+    let last = h.sys.store().latest_seq(place).unwrap();
+    let log = h.sys.store().read_range(place, 0, last).unwrap();
+    assert!(
+        log.iter().all(|e| e.kind != EventKind::Spoke),
+        "空白のみ残余は Spoke を生まない: {log:?}"
+    );
+
+    let recs = h.sys.store().turn_records(place).unwrap();
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0].end_reason, "done", "#719 の空推論失敗にはしない");
+    assert_eq!(
+        recs[0].failure_detail.as_deref(),
+        Some(EMPTY_SAY_DROPPED_NOTE)
+    );
+}
