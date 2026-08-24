@@ -16,8 +16,10 @@ pub const VOICE_CONFIG_B64_ENV: &str = "OPENCRAB_VOICE_CONFIG_B64";
 pub const OWNER_AGENT_ID_ENV: &str = "OPENCRAB_GATE_OWNER_AGENT_ID";
 
 pub use operations::{
-    join_success_json, leave_success_json, plan_discord_operation, voice_caller_from_role,
-    DiscordOpDeny, DiscordOpPlan,
+    add_reaction_success_json, create_channel_success_json, create_webhook_success_json,
+    join_success_json, leave_success_json, list_channels_success_json, list_guilds_success_json,
+    plan_discord_operation, send_file_success_json, voice_caller_from_role, ChannelPolicy,
+    DiscordOpDeny, DiscordOpPlan, ListedChannel, ListedGuild,
 };
 pub use voice_join::{
     evaluate_join_voice, evaluate_leave_voice, parse_vc_channel_id, voice_caller_allowed,

@@ -50,6 +50,8 @@ pub enum DiscordOpDeny {
     UnknownName(String),
     Voice(VoiceJoinDeny),
     BadArgs(&'static str),
+    /// §8.1: channel→place が複数。policy は推測しない。
+    PolicyAmbiguous,
 }
 
 impl DiscordOpDeny {
@@ -58,8 +60,37 @@ impl DiscordOpDeny {
             Self::UnknownName(name) => format!("undeclared gate operation: {name}"),
             Self::Voice(deny) => deny.message().to_string(),
             Self::BadArgs(message) => (*message).to_string(),
+            Self::PolicyAmbiguous => "policy_ambiguous".to_string(),
         }
     }
+}
+
+/// 本体 `discord_ops` list_guilds 行。`member_count` は常に null。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListedGuild {
+    pub id: String,
+    pub name: String,
+}
+
+/// 本体 list_channels 行 + §8.1 policy join 入力。text 以外は envelope が落とす。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListedChannel {
+    pub id: String,
+    pub name: String,
+    pub is_text: bool,
+    pub policy: ChannelPolicy,
+}
+
+/// §1.3 / §8.1: 0件=hard default、1件=本体3値、複数=`policy_ambiguous`。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChannelPolicy {
+    HardDefault,
+    Resolved {
+        readable: bool,
+        writable: bool,
+        whitelisted: bool,
+    },
+    Ambiguous,
 }
 
 /// standing / grant role の wire → 本体 GatewayCaller 相当。
@@ -191,6 +222,110 @@ pub fn leave_success_json() -> Value {
     json!({"status": "left"})
 }
 
+/// 本体 `execute_list_guilds` data。
+pub fn list_guilds_success_json(guilds: &[ListedGuild]) -> Value {
+    let list: Vec<Value> = guilds
+        .iter()
+        .map(|guild| {
+            json!({
+                "id": guild.id,
+                "name": guild.name,
+                "member_count": Value::Null,
+            })
+        })
+        .collect();
+    let count = list.len();
+    json!({"guilds": list, "count": count})
+}
+
+/// 本体 `execute_list_channels` data + §8.1 `policy_ambiguous`。
+pub fn list_channels_success_json(
+    guild_id: &str,
+    channels: &[ListedChannel],
+) -> Result<Value, DiscordOpDeny> {
+    let mut list = Vec::new();
+    for channel in channels {
+        if !channel.is_text {
+            continue;
+        }
+        let (readable, writable, whitelisted) = match channel.policy {
+            ChannelPolicy::Ambiguous => return Err(DiscordOpDeny::PolicyAmbiguous),
+            ChannelPolicy::HardDefault => (true, true, false),
+            ChannelPolicy::Resolved {
+                readable,
+                writable,
+                whitelisted,
+            } => (readable, writable, whitelisted),
+        };
+        list.push(json!({
+            "id": channel.id,
+            "name": channel.name,
+            "kind": "text",
+            "readable": readable,
+            "writable": writable,
+            "whitelisted": whitelisted,
+        }));
+    }
+    let count = list.len();
+    Ok(json!({
+        "guild_id": guild_id,
+        "channels": list,
+        "count": count,
+    }))
+}
+
+/// 本体 `execute_discord_create_channel` data。
+pub fn create_channel_success_json(
+    id: &str,
+    name: &str,
+    guild_id: &str,
+    parent_id: Option<&str>,
+) -> Value {
+    json!({
+        "id": id,
+        "name": name,
+        "guild_id": guild_id,
+        "parent_id": parent_id,
+        "url": format!("https://discord.com/channels/{guild_id}/{id}"),
+        "message": format!("チャンネル {name} を作成しました"),
+    })
+}
+
+/// 本体 `execute_discord_create_webhook` data。
+pub fn create_webhook_success_json(
+    channel_id: &str,
+    webhook_id: &str,
+    name: &str,
+    url: &str,
+) -> Value {
+    json!({
+        "channel_id": channel_id,
+        "webhook_id": webhook_id,
+        "name": name,
+        "url": url,
+        "message": "webhookを作成しました。このurlをspawn_subtask.webhook.urlに渡せます。",
+    })
+}
+
+/// 本体 `execute_discord_add_reaction` data。
+pub fn add_reaction_success_json(channel_id: &str, message_id: &str, emoji: &str) -> Value {
+    json!({
+        "channel_id": channel_id,
+        "message_id": message_id,
+        "emoji": emoji,
+        "message": format!("リアクション {emoji} を追加しました"),
+    })
+}
+
+/// 本体 `execute_send_file` data。
+pub fn send_file_success_json(channel_id: &str, file: &str) -> Value {
+    json!({
+        "channel_id": channel_id,
+        "file": file,
+        "message": format!("ファイル {file} を送信しました"),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,5 +413,109 @@ mod tests {
         );
         assert_eq!(voice_caller_from_role(Some("agent")), VoiceCaller::Other);
         assert_eq!(voice_caller_from_role(None), VoiceCaller::Other);
+    }
+
+    fn object_keys(value: &Value) -> Vec<&str> {
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        keys
+    }
+
+    #[test]
+    fn non_join_envelopes_use_body_keys() {
+        let guilds = list_guilds_success_json(&[ListedGuild {
+            id: "1".into(),
+            name: "g".into(),
+        }]);
+        assert_eq!(object_keys(&guilds), ["count", "guilds"]);
+        assert_eq!(
+            object_keys(&guilds["guilds"][0]),
+            ["id", "member_count", "name"]
+        );
+
+        let hard = list_channels_success_json(
+            "11",
+            &[
+                ListedChannel {
+                    id: "21".into(),
+                    name: "general".into(),
+                    is_text: true,
+                    policy: ChannelPolicy::HardDefault,
+                },
+                ListedChannel {
+                    id: "22".into(),
+                    name: "voice".into(),
+                    is_text: false,
+                    policy: ChannelPolicy::HardDefault,
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(object_keys(&hard), ["channels", "count", "guild_id"]);
+        assert_eq!(
+            object_keys(&hard["channels"][0]),
+            ["id", "kind", "name", "readable", "whitelisted", "writable"]
+        );
+        assert_eq!(hard["channels"][0]["kind"], "text");
+        assert_eq!(hard["count"], 1);
+
+        let resolved = list_channels_success_json(
+            "11",
+            &[ListedChannel {
+                id: "21".into(),
+                name: "general".into(),
+                is_text: true,
+                policy: ChannelPolicy::Resolved {
+                    readable: false,
+                    writable: true,
+                    whitelisted: true,
+                },
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            object_keys(&resolved["channels"][0]),
+            ["id", "kind", "name", "readable", "whitelisted", "writable"]
+        );
+
+        let ambiguous = list_channels_success_json(
+            "11",
+            &[ListedChannel {
+                id: "21".into(),
+                name: "general".into(),
+                is_text: true,
+                policy: ChannelPolicy::Ambiguous,
+            }],
+        )
+        .unwrap_err();
+        assert_eq!(ambiguous, DiscordOpDeny::PolicyAmbiguous);
+        assert_eq!(ambiguous.message(), "policy_ambiguous");
+
+        let created = create_channel_success_json("31", "room", "11", None);
+        assert_eq!(
+            object_keys(&created),
+            ["guild_id", "id", "message", "name", "parent_id", "url"]
+        );
+        assert_eq!(created["url"], "https://discord.com/channels/11/31");
+
+        let webhook = create_webhook_success_json("21", "41", "hook", "https://example.invalid/w");
+        assert_eq!(
+            object_keys(&webhook),
+            ["channel_id", "message", "name", "url", "webhook_id"]
+        );
+
+        let reaction = add_reaction_success_json("21", "51", "👍");
+        assert_eq!(
+            object_keys(&reaction),
+            ["channel_id", "emoji", "message", "message_id"]
+        );
+
+        let file = send_file_success_json("21", "a.png");
+        assert_eq!(object_keys(&file), ["channel_id", "file", "message"]);
     }
 }

@@ -3,11 +3,14 @@
 //! 子は runner が exec する。token は `OPENCRAB_GATE_TOKEN`。argv にも log にも出さない。
 
 use opencrab_discord_gate::{
-    address_kind_from_channel_type, exclude_self_author, join_success_json, leave_success_json,
-    map_message_create, plan_discord_operation, protocol2_failed, protocol2_hello, protocol2_ready,
+    add_reaction_success_json, address_kind_from_channel_type, create_channel_success_json,
+    create_webhook_success_json, exclude_self_author, join_success_json, leave_success_json,
+    list_channels_success_json, list_guilds_success_json, map_message_create,
+    plan_discord_operation, protocol2_failed, protocol2_hello, protocol2_ready,
     read_boot_config_from_env, resolve_discord_discovery, said_event_to_wire,
-    try_build_voice_providers, voice_caller_from_role, ChannelFacts, DiscordOpPlan, DiscoveryError,
-    MessageCreateInput, SaidEvent, VoiceSessionManager,
+    send_file_success_json, try_build_voice_providers, voice_caller_from_role, ChannelFacts,
+    ChannelPolicy, DiscordOpPlan, DiscoveryError, ListedChannel, ListedGuild, MessageCreateInput,
+    SaidEvent, VoiceSessionManager,
 };
 use opencrab_port::GateInstanceId;
 use serde_json::{json, Value};
@@ -474,18 +477,14 @@ async fn apply_discord_op(
                 .get_guilds(None, None)
                 .await
                 .map_err(|error| format!("サーバー一覧の取得に失敗: {error}"))?;
-            let list: Vec<Value> = guilds
+            let list: Vec<ListedGuild> = guilds
                 .into_iter()
-                .map(|guild| {
-                    json!({
-                        "id": guild.id.to_string(),
-                        "name": guild.name,
-                        "member_count": Value::Null,
-                    })
+                .map(|guild| ListedGuild {
+                    id: guild.id.to_string(),
+                    name: guild.name,
                 })
                 .collect();
-            let count = list.len();
-            Ok(json!({"guilds": list, "count": count}))
+            Ok(list_guilds_success_json(&list))
         }
         DiscordOpPlan::ListChannels { guild_id } => {
             let guild = serenity::model::id::GuildId::new(guild_id);
@@ -493,17 +492,16 @@ async fn apply_discord_op(
                 .get_channels(guild)
                 .await
                 .map_err(|error| format!("チャンネル一覧の取得に失敗: {error}"))?;
-            let list: Vec<Value> = channels
+            let list: Vec<ListedChannel> = channels
                 .into_iter()
-                .map(|channel| {
-                    json!({
-                        "id": channel.id.to_string(),
-                        "name": channel.name,
-                        "type": format!("{:?}", channel.kind),
-                    })
+                .map(|channel| ListedChannel {
+                    id: channel.id.to_string(),
+                    name: channel.name,
+                    is_text: channel.kind == ChannelType::Text,
+                    policy: ChannelPolicy::HardDefault,
                 })
                 .collect();
-            Ok(json!({"channels": list, "count": list.len()}))
+            list_channels_success_json(&guild_id.to_string(), &list).map_err(|deny| deny.message())
         }
         DiscordOpPlan::CreateChannel {
             guild_id,
@@ -524,21 +522,29 @@ async fn apply_discord_op(
                 .await
                 .map_err(|error| format!("チャンネル作成に失敗: {error}"))?;
             let _ = reason;
-            Ok(json!({
-                "id": channel.id.to_string(),
-                "name": channel.name,
-                "guild_id": channel.guild_id.to_string(),
-            }))
+            let channel_id = channel.id.to_string();
+            let parent_id = channel.parent_id.map(|parent| parent.to_string());
+            Ok(create_channel_success_json(
+                &channel_id,
+                &channel.name,
+                &channel.guild_id.to_string(),
+                parent_id.as_deref(),
+            ))
         }
         DiscordOpPlan::CreateWebhook { channel_id, name } => {
             let webhook = ChannelId::new(channel_id)
-                .create_webhook(http, CreateWebhook::new(name))
+                .create_webhook(http, CreateWebhook::new(&name))
                 .await
                 .map_err(|error| format!("webhook 作成に失敗: {error}"))?;
             let url = webhook
                 .url()
                 .map_err(|error| format!("webhook URL の取得に失敗: {error}"))?;
-            Ok(json!({"id": webhook.id.to_string(), "url": url}))
+            Ok(create_webhook_success_json(
+                &channel_id.to_string(),
+                &webhook.id.to_string(),
+                webhook.name.as_deref().unwrap_or(&name),
+                &url,
+            ))
         }
         DiscordOpPlan::AddReaction {
             channel_id,
@@ -562,11 +568,11 @@ async fn apply_discord_op(
                 .create_reaction(http, MessageId::new(message_id), reaction)
                 .await
                 .map_err(|error| format!("リアクションの追加に失敗: {error}"))?;
-            Ok(json!({
-                "channel_id": channel_id.to_string(),
-                "message_id": message_id.to_string(),
-                "emoji": emoji,
-            }))
+            Ok(add_reaction_success_json(
+                &channel_id.to_string(),
+                &message_id.to_string(),
+                &emoji,
+            ))
         }
         DiscordOpPlan::SendFile {
             channel_id,
@@ -604,18 +610,28 @@ async fn apply_discord_op(
             let mut attachment = CreateAttachment::path(&canonical)
                 .await
                 .map_err(|error| format!("添付の作成に失敗: {error}"))?;
-            if let Some(filename) = filename {
-                attachment.filename = filename;
-            }
+            let display_name = if let Some(filename) = filename {
+                attachment.filename = filename.clone();
+                filename
+            } else {
+                canonical
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("file")
+                    .to_string()
+            };
             let mut message = CreateMessage::new().add_file(attachment);
             if !caption.is_empty() {
                 message = message.content(caption);
             }
-            let sent = ChannelId::new(channel_id)
+            ChannelId::new(channel_id)
                 .send_message(http, message)
                 .await
                 .map_err(|error| format!("ファイル送信に失敗: {error}"))?;
-            Ok(json!({"message_id": sent.id.to_string()}))
+            Ok(send_file_success_json(
+                &channel_id.to_string(),
+                &display_name,
+            ))
         }
         DiscordOpPlan::JoinVoice(plan) => {
             let voice = voice.ok_or_else(|| {
