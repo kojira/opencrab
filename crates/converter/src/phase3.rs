@@ -622,7 +622,7 @@ fn assemble_curated_memories(
 struct ParsedCuratedMemory {
     subject_id: i64,
     body: String,
-    written_at: i64,
+    written_at: Option<i64>,
 }
 
 fn parse_curated_memory(
@@ -634,8 +634,28 @@ fn parse_curated_memory(
     Ok(ParsedCuratedMemory {
         subject_id: required_subject(table, row, "agent_id", agents)?,
         body: required_text(table, row, "content")?,
-        written_at: required_time(table, row, "created_at")?,
+        written_at: curated_memory_written_at(table, row)?,
     })
+}
+
+/// DESIGN-782: byte-exact empty `created_at` is unrecorded (SQL NULL).
+/// Non-empty parse success is nanos. Non-empty parse failure stays raw.
+/// updated_at / now / captured-at / 0 are not substitutes.
+fn curated_memory_written_at(
+    table: &SourceTable,
+    row: &SourceRow,
+) -> std::result::Result<Option<i64>, &'static str> {
+    match table.value(row, "created_at") {
+        Some(SqliteValue::Text(value)) if value.is_empty() => Ok(None),
+        Some(SqliteValue::Text(value)) => {
+            let text = std::str::from_utf8(value).map_err(|_| "parse-utc-nanos-v1:invalid_utf8")?;
+            parse_utc_nanos(text)
+                .map(Some)
+                .ok_or("parse-utc-nanos-v1:invalid_timestamp")
+        }
+        Some(_) => Err("parse-utc-nanos-v1:noncanonical_storage"),
+        None => Err("parse-utc-nanos-v1:missing_column"),
+    }
 }
 
 fn nullable_time(

@@ -522,6 +522,7 @@ pub struct LlmLogStatRow {
 /// 記憶の 1 件（記憶とワーカー §01）。主体・本文・由来（場＋連番範囲）・書かれた時刻・
 /// 最後に読まれた時刻。まだ読まれていなければ `last_read_at` は None。
 /// 由来三列はすべて有るかすべて無い。移行行は由来未記録で None（数値を捏造しない）。
+/// `written_at` は remember() が now を書く。移行行の空 created_at は None（未記録。数値を捏造しない）。
 #[derive(Clone, Debug)]
 pub struct MemoryRow {
     pub id: i64,
@@ -530,7 +531,7 @@ pub struct MemoryRow {
     pub origin_place: Option<PlaceId>,
     pub origin_from_seq: Option<Seq>,
     pub origin_to_seq: Option<Seq>,
-    pub written_at: i64,
+    pub written_at: Option<i64>,
     pub last_read_at: Option<i64>,
 }
 
@@ -968,7 +969,8 @@ const SCHEMA: &str = r#"
             -- 由来 = どの場の、どの連番範囲から書かれたか——ログは書き換わらないので（§03）、この 2 値
             -- （場＋範囲）からその記憶が生まれた会話をいつでも完全に再現できる（引き継ぎと同じ仕掛け・
             -- 中身を複製しない）。新規 remember() は三値必須。移行行は三列 NULL＝由来未記録
-            -- （捏造しない。CHECK で全 NULL または全 NOT NULL）。書かれた時刻・最後に読まれた時刻は
+            -- （捏造しない。CHECK で全 NULL または全 NOT NULL）。書かれた時刻は壁時計。
+            -- 移行行の空 created_at＝written_at NULL＝未記録。最後に読まれた時刻は
             -- 壁時計（プロセスを跨いで意味を持つ）。
             CREATE TABLE IF NOT EXISTS memories(
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -977,7 +979,7 @@ const SCHEMA: &str = r#"
               origin_place INTEGER,
               origin_from_seq INTEGER,
               origin_to_seq INTEGER,
-              written_at INTEGER NOT NULL,
+              written_at INTEGER,
               last_read_at INTEGER,
               CHECK (
                 (origin_place IS NULL AND origin_from_seq IS NULL AND origin_to_seq IS NULL)
@@ -1384,6 +1386,7 @@ pub fn apply_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA)?;
     apply_shared_table_additions(conn)?;
     migrate_memories_origin_nullability(conn)?;
+    migrate_memories_written_at_nullability(conn)?;
     Ok(())
 }
 
@@ -1414,6 +1417,7 @@ fn apply_shared_table_additions(conn: &Connection) -> Result<()> {
 fn migrate(conn: &Connection) -> Result<()> {
     migrate_memberships(conn)?;
     migrate_memories_origin_nullability(conn)?;
+    migrate_memories_written_at_nullability(conn)?;
     if !column_exists(conn, "turn_records", "failure_detail")? {
         conn.execute(
             "ALTER TABLE turn_records ADD COLUMN failure_detail TEXT",
@@ -1544,7 +1548,7 @@ fn migrate_memories_origin_nullability(conn: &Connection) -> Result<()> {
                    origin_place INTEGER,
                    origin_from_seq INTEGER,
                    origin_to_seq INTEGER,
-                   written_at INTEGER NOT NULL,
+                   written_at INTEGER,
                    last_read_at INTEGER,
                    CHECK (
                      (origin_place IS NULL AND origin_from_seq IS NULL AND origin_to_seq IS NULL)
@@ -1589,6 +1593,64 @@ fn memories_origin_not_null_flags(conn: &Connection) -> Result<Vec<bool>> {
                 })
         })
         .collect()
+}
+
+/// 既存 DB の `memories.written_at` を NULL 可にする（DESIGN-782）。CREATE TABLE IF NOT EXISTS は
+/// 既存表の NOT NULL を落とさないので、既知の written_at NOT NULL 形だけを行を落とさず組み替える。
+/// 既存行の時刻は写す（0 / now / captured-at で埋めない）。すでに NULL 可なら何もしない。
+fn migrate_memories_written_at_nullability(conn: &Connection) -> Result<()> {
+    if !table_exists(conn, "memories")? {
+        return Ok(());
+    }
+    match memories_written_at_not_null(conn)? {
+        false => Ok(()),
+        true => {
+            conn.execute_batch(
+                "ALTER TABLE memories RENAME TO memories_before_written_at_nullable;
+                 CREATE TABLE memories(
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   subject_id INTEGER NOT NULL,
+                   body TEXT NOT NULL,
+                   origin_place INTEGER,
+                   origin_from_seq INTEGER,
+                   origin_to_seq INTEGER,
+                   written_at INTEGER,
+                   last_read_at INTEGER,
+                   CHECK (
+                     (origin_place IS NULL AND origin_from_seq IS NULL AND origin_to_seq IS NULL)
+                     OR
+                     (origin_place IS NOT NULL AND origin_from_seq IS NOT NULL AND origin_to_seq IS NOT NULL)
+                   )
+                 );
+                 INSERT INTO memories(
+                   id,subject_id,body,origin_place,origin_from_seq,origin_to_seq,written_at,last_read_at
+                 )
+                 SELECT id,subject_id,body,origin_place,origin_from_seq,origin_to_seq,written_at,last_read_at
+                 FROM memories_before_written_at_nullable;
+                 DROP TABLE memories_before_written_at_nullable;",
+            )?;
+            Ok(())
+        }
+    }
+}
+
+fn memories_written_at_not_null(conn: &Connection) -> Result<bool> {
+    let mut statement = conn.prepare("PRAGMA table_info(memories)")?;
+    let columns = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(3)? != 0))
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    drop(statement);
+    columns
+        .iter()
+        .find(|(column, _)| column == "written_at")
+        .map(|(_, not_null)| *not_null)
+        .ok_or_else(|| {
+            rusqlite::Error::ToSqlConversionFailure(
+                "unknown memories written_at schema: missing written_at".into(),
+            )
+        })
 }
 
 /// `CREATE TABLE IF NOT EXISTS` does not update a table created by the pre-#750 store. Rebuild the
@@ -8224,6 +8286,87 @@ mod tests {
         assert_eq!(rows[0].origin_place, None);
         assert_eq!(rows[0].origin_from_seq, None);
         assert_eq!(rows[0].origin_to_seq, None);
+    }
+
+    #[test]
+    fn memories_written_at_nullability_migrate_preserves_rows_and_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE memories(
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               subject_id INTEGER NOT NULL,
+               body TEXT NOT NULL,
+               origin_place INTEGER,
+               origin_from_seq INTEGER,
+               origin_to_seq INTEGER,
+               written_at INTEGER NOT NULL,
+               last_read_at INTEGER,
+               CHECK (
+                 (origin_place IS NULL AND origin_from_seq IS NULL AND origin_to_seq IS NULL)
+                 OR
+                 (origin_place IS NOT NULL AND origin_from_seq IS NOT NULL AND origin_to_seq IS NOT NULL)
+               )
+             );
+             INSERT INTO memories(
+               subject_id,body,origin_place,origin_from_seq,origin_to_seq,written_at,last_read_at
+             ) VALUES(1,'kept',7,2,4,100,NULL);",
+        )
+        .unwrap();
+
+        migrate_memories_written_at_nullability(&conn).unwrap();
+        migrate_memories_written_at_nullability(&conn).unwrap();
+
+        assert!(
+            !memories_written_at_not_null(&conn).unwrap(),
+            "written_at must be nullable after additive migrate"
+        );
+        let kept: (i64, Option<i64>, String) = conn
+            .query_row(
+                "SELECT subject_id,written_at,body FROM memories",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(kept, (1, Some(100), "kept".into()));
+
+        conn.execute(
+            "INSERT INTO memories(subject_id,body,origin_place,origin_from_seq,origin_to_seq,written_at,last_read_at)
+             VALUES(1,'unrecorded',NULL,NULL,NULL,NULL,NULL)",
+            [],
+        )
+        .unwrap();
+        let nulls: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE written_at IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(nulls, 1);
+    }
+
+    #[test]
+    fn map_memory_reads_null_written_at_as_none_and_recall_finds_it() {
+        let store = Store::new_in_memory().unwrap();
+        let subject = store
+            .create_subject(SubjectKind::Agent, "A", "A", "engine", Standing::Trusted, 0)
+            .unwrap();
+        store
+            .c()
+            .execute(
+                "INSERT INTO memories(subject_id,body,origin_place,origin_from_seq,origin_to_seq,written_at,last_read_at)
+                 VALUES(?1,'no time',NULL,NULL,NULL,NULL,NULL)",
+                params![subject],
+            )
+            .unwrap();
+        let rows = store.memories_newest_first(subject).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].body, "no time");
+        assert_eq!(rows[0].written_at, None);
+        let recalled = store.recall(subject, "no time", 10, 1).unwrap();
+        assert_eq!(recalled.len(), 1);
+        assert_eq!(recalled[0].body, "no time");
+        assert_eq!(recalled[0].written_at, None);
     }
 
     // 表示名（name）は人格本文（persona）と別列として往復する（同一性と人格の分離・統括裁定）。
