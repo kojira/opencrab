@@ -1,0 +1,7 @@
+# Known-red ledger (TEST-DESIGN §4.1). Assertions stay at the real pass shape.
+# P0 initial entries that still fail. A4 (#786), A9 (#787), and F1 (#784) pass
+# on this branch, so they must not appear here (stale PASS = red).
+
+[[xfail]]
+issue = 787
+test = "web_e2e_mock::tool_execution_writes_one_persistent_row"

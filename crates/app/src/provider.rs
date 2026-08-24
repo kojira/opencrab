@@ -47,6 +47,8 @@ enum MockScript {
     ToolThenReply,
     PlaintextToolSettledReply,
     ClockBatch,
+    AnswerDirect,
+    ShellThenRead,
 }
 
 pub const MOCK_MODEL: &str = "mock";
@@ -78,6 +80,8 @@ impl MockEngine {
             "tool_then_reply" => MockScript::ToolThenReply,
             "plaintext_tool_settled_reply" => MockScript::PlaintextToolSettledReply,
             "clock_batch" => MockScript::ClockBatch,
+            "answer_direct" => MockScript::AnswerDirect,
+            "shell_then_read" => MockScript::ShellThenRead,
             other => return Err(format!("unknown OPENCRAB_MOCK_LLM_SCRIPT: {other}")),
         };
         Ok(Self { script })
@@ -87,7 +91,10 @@ impl MockEngine {
 #[async_trait::async_trait]
 impl Engine for MockEngine {
     fn emits_tool_calls(&self) -> bool {
-        !matches!(self.script, MockScript::PlaintextToolSettledReply)
+        !matches!(
+            self.script,
+            MockScript::PlaintextToolSettledReply | MockScript::ShellThenRead
+        )
     }
 
     fn model(&self) -> &str {
@@ -208,6 +215,26 @@ impl Engine for MockEngine {
                     Err(EngineError(
                         "mock clock script received an unknown turn".to_string(),
                     ))
+                }
+            }
+            MockScript::AnswerDirect => Ok(say("synthetic-direct-answer")),
+            MockScript::ShellThenRead => {
+                let settled = ctx.rendered.contains("=== 決着の対応 ===");
+                if !settled {
+                    return Ok(say(r#"core-shell::{"argv":["date"]}"#));
+                }
+                let result = ctx
+                    .rendered
+                    .split("結果:")
+                    .nth(1)
+                    .map(str::trim)
+                    .filter(|body| !body.is_empty());
+                match result {
+                    Some(body) => Ok(say(&format!("synthetic-shell-result {body}"))),
+                    None => Err(EngineError(
+                        "mock shell_then_read settled turn did not receive the tool result"
+                            .to_string(),
+                    )),
                 }
             }
         }
@@ -1611,6 +1638,39 @@ mod tests {
         };
         let batched = clock.infer(&batched_ctx, &chunks).await.unwrap();
         assert_eq!(only_say(&batched), "mock batched pair");
+
+        let answer_direct = MockEngine {
+            script: MockScript::AnswerDirect,
+        };
+        let direct = answer_direct.infer(&ctx, &chunks).await.unwrap();
+        assert_eq!(only_say(&direct), "synthetic-direct-answer");
+        assert!(
+            !only_say(&direct).contains("NO_REPLY"),
+            "answer_direct must never emit NO_REPLY"
+        );
+
+        let shell = MockEngine {
+            script: MockScript::ShellThenRead,
+        };
+        assert!(!shell.emits_tool_calls());
+        let first_shell = shell.infer(&ctx, &chunks).await.unwrap();
+        assert_eq!(only_say(&first_shell), r#"core-shell::{"argv":["date"]}"#);
+        let settled_shell_ctx = Context {
+            rendered: "=== 決着の対応 ===\n活動 #2\n発端入力: #1..#1\n受理ツール: core-shell args={\"argv\":[\"date\"]}\n結果:\nMon Aug 24 01:00:00 UTC 2026\n"
+                .to_string(),
+            ..Context::default()
+        };
+        let second_shell = shell.infer(&settled_shell_ctx, &chunks).await.unwrap();
+        assert!(
+            only_say(&second_shell).contains("synthetic-shell-result"),
+            "second turn must recite the result: {}",
+            only_say(&second_shell)
+        );
+        assert!(
+            only_say(&second_shell).contains("Mon Aug 24 01:00:00 UTC 2026"),
+            "second turn must include the Settled body: {}",
+            only_say(&second_shell)
+        );
     }
 
     fn only_error(deltas: Vec<Delta>) -> String {
