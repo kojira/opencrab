@@ -261,6 +261,51 @@ pub fn llm_log_read_only(path: impl AsRef<std::path::Path>, id: &str) -> Result<
     .optional()
 }
 
+/// 稼働中の core を所有せずに、直近の tool ログを新しい順に引く（#787・読み口。全 agent 横断）。
+pub fn recent_tool_logs_read_only(
+    path: impl AsRef<std::path::Path>,
+    limit: i64,
+) -> Result<Vec<ToolLogRow>> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {TOOL_LOG_COLS} FROM tool_logs ORDER BY created_at DESC, id DESC LIMIT ?1"
+    ))?;
+    let rows = stmt
+        .query_map(params![limit], map_tool_log)?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// 稼働中の core を所有せずに、あるエージェント（subject）の tool ログを新しい順に引く。
+pub fn list_tool_logs_read_only(
+    path: impl AsRef<std::path::Path>,
+    agent_id: &str,
+    limit: i64,
+) -> Result<Vec<ToolLogRow>> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {TOOL_LOG_COLS} FROM tool_logs WHERE agent_id=?1 ORDER BY created_at DESC, id DESC LIMIT ?2"
+    ))?;
+    let rows = stmt
+        .query_map(params![agent_id, limit], map_tool_log)?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// 稼働中の core を所有せずに、1 件の tool ログを id で引く（#787・読み口の詳細）。
+pub fn tool_log_read_only(
+    path: impl AsRef<std::path::Path>,
+    id: i64,
+) -> Result<Option<ToolLogRow>> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.query_row(
+        &format!("SELECT {TOOL_LOG_COLS} FROM tool_logs WHERE id=?1"),
+        params![id],
+        map_tool_log,
+    )
+    .optional()
+}
+
 pub fn gate_launch_read_only(
     path: impl AsRef<std::path::Path>,
     instance: &GateInstanceId,
@@ -504,6 +549,47 @@ pub struct LlmLogRow {
     pub subject_id: Option<SubjectId>,
 }
 
+/// 1 回の tool 実行の記録（#787・oc2 新表。本体に同名なし）。1 実行 = 1 INSERT（UPDATE しない）。
+/// キー対応は #766 と同じ: `agent_id`←subject・`session_id`←place。`args_json` は受理後の JSON
+/// （`settled_provenance.accepted_tool_args_json` と同バイト）。`result_text` は生テキスト
+/// （成功=stdout(+stderr)、失敗=理由）。秘密は載せない。キー名マスクは足さない。
+#[derive(Clone, Debug)]
+pub struct NewToolLog {
+    pub agent_id: String,
+    pub session_id: Option<String>,
+    pub tool_name: String,
+    pub args_json: String,
+    pub outcome: String,
+    pub result_text: String,
+    pub started_at: Option<String>,
+    pub created_at: String,
+    pub latency_ms: Option<i64>,
+    pub turn_record_id: Option<i64>,
+    pub activity_id: Option<i64>,
+    pub iteration: Option<i64>,
+    pub place_id: Option<PlaceId>,
+    pub subject_id: Option<SubjectId>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ToolLogRow {
+    pub id: i64,
+    pub agent_id: String,
+    pub session_id: Option<String>,
+    pub tool_name: String,
+    pub args_json: String,
+    pub outcome: String,
+    pub result_text: String,
+    pub started_at: Option<String>,
+    pub created_at: String,
+    pub latency_ms: Option<i64>,
+    pub turn_record_id: Option<i64>,
+    pub activity_id: Option<i64>,
+    pub iteration: Option<i64>,
+    pub place_id: Option<PlaceId>,
+    pub subject_id: Option<SubjectId>,
+}
+
 /// LLM ログの日次統計（#766）。本体 opencrab の `LlmLogStatRow` と同型（ダッシュボードの stats 表示・
 /// `/llm-logs/stats` レスポンスと一致させる）。
 #[derive(Clone, Debug)]
@@ -521,15 +607,17 @@ pub struct LlmLogStatRow {
 
 /// 記憶の 1 件（記憶とワーカー §01）。主体・本文・由来（場＋連番範囲）・書かれた時刻・
 /// 最後に読まれた時刻。まだ読まれていなければ `last_read_at` は None。
+/// 由来三列はすべて有るかすべて無い。移行行は由来未記録で None（数値を捏造しない）。
+/// `written_at` は remember() が now を書く。移行行の空 created_at は None（未記録。数値を捏造しない）。
 #[derive(Clone, Debug)]
 pub struct MemoryRow {
     pub id: i64,
     pub subject: SubjectId,
     pub body: String,
-    pub origin_place: PlaceId,
-    pub origin_from_seq: Seq,
-    pub origin_to_seq: Seq,
-    pub written_at: i64,
+    pub origin_place: Option<PlaceId>,
+    pub origin_from_seq: Option<Seq>,
+    pub origin_to_seq: Option<Seq>,
+    pub written_at: Option<i64>,
     pub last_read_at: Option<i64>,
 }
 
@@ -945,6 +1033,31 @@ const SCHEMA: &str = r#"
             -- テーブル（連結列が未 ALTER）で SCHEMA が先に走っても壊れないよう、
             -- apply_shared_table_additions が連結列を足した後に作る（ここでは作らない）。
 
+            -- tool 実行の永続ログ（#787）。oc2 新表（本体に同名なし。memory_sessions / agent_logs
+            -- は流用しない）。1 実行 = 1 INSERT。Phase S は空のまま作り、runtime が埋める。
+            -- outcome は done|failed|refused|deadline|stopped。result_text は生テキスト
+            -- （JSON エンベロープにしない。キー名マスクを足さない）。
+            CREATE TABLE IF NOT EXISTS tool_logs(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              agent_id TEXT NOT NULL,
+              session_id TEXT,
+              tool_name TEXT NOT NULL,
+              args_json TEXT NOT NULL,
+              outcome TEXT NOT NULL,
+              result_text TEXT NOT NULL DEFAULT '',
+              started_at TEXT,
+              created_at TEXT DEFAULT (datetime('now')),
+              latency_ms INTEGER,
+              turn_record_id INTEGER,
+              activity_id INTEGER,
+              iteration INTEGER,
+              place_id INTEGER,
+              subject_id INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_tool_logs_created ON tool_logs(agent_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_tool_logs_turn ON tool_logs(turn_record_id);
+            CREATE INDEX IF NOT EXISTS idx_tool_logs_activity ON tool_logs(activity_id);
+
             CREATE TABLE IF NOT EXISTS schedule(
               place_id INTEGER NOT NULL,
               reason TEXT NOT NULL,
@@ -966,16 +1079,24 @@ const SCHEMA: &str = r#"
             -- （§00「共有した分だけ人格が薄まる」）。構造を持たせない（種別・タグ・重要度を切らない・§01）。
             -- 由来 = どの場の、どの連番範囲から書かれたか——ログは書き換わらないので（§03）、この 2 値
             -- （場＋範囲）からその記憶が生まれた会話をいつでも完全に再現できる（引き継ぎと同じ仕掛け・
-            -- 中身を複製しない）。書かれた時刻・最後に読まれた時刻は壁時計（プロセスを跨いで意味を持つ）。
+            -- 中身を複製しない）。新規 remember() は三値必須。移行行は三列 NULL＝由来未記録
+            -- （捏造しない。CHECK で全 NULL または全 NOT NULL）。書かれた時刻は壁時計。
+            -- 移行行の空 created_at＝written_at NULL＝未記録。最後に読まれた時刻は
+            -- 壁時計（プロセスを跨いで意味を持つ）。
             CREATE TABLE IF NOT EXISTS memories(
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               subject_id INTEGER NOT NULL,
               body TEXT NOT NULL,
-              origin_place INTEGER NOT NULL,
-              origin_from_seq INTEGER NOT NULL,
-              origin_to_seq INTEGER NOT NULL,
-              written_at INTEGER NOT NULL,
-              last_read_at INTEGER
+              origin_place INTEGER,
+              origin_from_seq INTEGER,
+              origin_to_seq INTEGER,
+              written_at INTEGER,
+              last_read_at INTEGER,
+              CHECK (
+                (origin_place IS NULL AND origin_from_seq IS NULL AND origin_to_seq IS NULL)
+                OR
+                (origin_place IS NOT NULL AND origin_from_seq IS NOT NULL AND origin_to_seq IS NOT NULL)
+              )
             );
 
             -- 背景活動の大きな結果の退避（常時切り離し・案 A）。本体 opencrab の offload は
@@ -1375,6 +1496,8 @@ const SCHEMA: &str = r#"
 pub fn apply_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA)?;
     apply_shared_table_additions(conn)?;
+    migrate_memories_origin_nullability(conn)?;
+    migrate_memories_written_at_nullability(conn)?;
     Ok(())
 }
 
@@ -1404,6 +1527,8 @@ fn apply_shared_table_additions(conn: &Connection) -> Result<()> {
 /// （PRAGMA で確認するので、エラー文字列に依存しない）。新規 DB は SCHEMA 側で既に列を持つ。
 fn migrate(conn: &Connection) -> Result<()> {
     migrate_memberships(conn)?;
+    migrate_memories_origin_nullability(conn)?;
+    migrate_memories_written_at_nullability(conn)?;
     if !column_exists(conn, "turn_records", "failure_detail")? {
         conn.execute(
             "ALTER TABLE turn_records ADD COLUMN failure_detail TEXT",
@@ -1457,6 +1582,29 @@ fn migrate(conn: &Connection) -> Result<()> {
     )?;
     //   2-3) oc2 連結列と idx_llm_logs_turn（列依存）は共有表の列挙追加。
     apply_shared_table_additions(conn)?;
+    // tool 実行ログ（#787）。oc2 新表。既存 DB には無ければ作る（Phase S 空・runtime が埋める）。
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS tool_logs(
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           agent_id TEXT NOT NULL,
+           session_id TEXT,
+           tool_name TEXT NOT NULL,
+           args_json TEXT NOT NULL,
+           outcome TEXT NOT NULL,
+           result_text TEXT NOT NULL DEFAULT '',
+           started_at TEXT,
+           created_at TEXT DEFAULT (datetime('now')),
+           latency_ms INTEGER,
+           turn_record_id INTEGER,
+           activity_id INTEGER,
+           iteration INTEGER,
+           place_id INTEGER,
+           subject_id INTEGER
+         );
+         CREATE INDEX IF NOT EXISTS idx_tool_logs_created ON tool_logs(agent_id, created_at DESC);
+         CREATE INDEX IF NOT EXISTS idx_tool_logs_turn ON tool_logs(turn_record_id);
+         CREATE INDEX IF NOT EXISTS idx_tool_logs_activity ON tool_logs(activity_id);",
+    )?;
     let provenance_columns = [
         ("origin_from_exclusive", "INTEGER"),
         ("origin_to_inclusive", "INTEGER"),
@@ -1512,6 +1660,131 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute("UPDATE subjects SET name = persona WHERE name = ''", [])?;
     }
     Ok(())
+}
+
+/// 既存 DB の `memories.origin_*` を NULL 可にする（DESIGN-782）。CREATE TABLE IF NOT EXISTS は
+/// 既存表の NOT NULL を落とさないので、既知の三列 NOT NULL 形だけを行を落とさず組み替える。
+/// 既存行の origin 値は写す（0 埋めしない）。すでに三列 NULL 可なら何もしない。
+fn migrate_memories_origin_nullability(conn: &Connection) -> Result<()> {
+    if !table_exists(conn, "memories")? {
+        return Ok(());
+    }
+    let flags = memories_origin_not_null_flags(conn)?;
+    match flags.as_slice() {
+        [false, false, false] => Ok(()),
+        [true, true, true] => {
+            conn.execute_batch(
+                "ALTER TABLE memories RENAME TO memories_before_origin_nullable;
+                 CREATE TABLE memories(
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   subject_id INTEGER NOT NULL,
+                   body TEXT NOT NULL,
+                   origin_place INTEGER,
+                   origin_from_seq INTEGER,
+                   origin_to_seq INTEGER,
+                   written_at INTEGER,
+                   last_read_at INTEGER,
+                   CHECK (
+                     (origin_place IS NULL AND origin_from_seq IS NULL AND origin_to_seq IS NULL)
+                     OR
+                     (origin_place IS NOT NULL AND origin_from_seq IS NOT NULL AND origin_to_seq IS NOT NULL)
+                   )
+                 );
+                 INSERT INTO memories(
+                   id,subject_id,body,origin_place,origin_from_seq,origin_to_seq,written_at,last_read_at
+                 )
+                 SELECT id,subject_id,body,origin_place,origin_from_seq,origin_to_seq,written_at,last_read_at
+                 FROM memories_before_origin_nullable;
+                 DROP TABLE memories_before_origin_nullable;",
+            )?;
+            Ok(())
+        }
+        _ => Err(rusqlite::Error::ToSqlConversionFailure(
+            format!("unknown memories origin schema: not_null={flags:?}").into(),
+        )),
+    }
+}
+
+fn memories_origin_not_null_flags(conn: &Connection) -> Result<Vec<bool>> {
+    let mut statement = conn.prepare("PRAGMA table_info(memories)")?;
+    let columns = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(3)? != 0))
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    drop(statement);
+    ["origin_place", "origin_from_seq", "origin_to_seq"]
+        .into_iter()
+        .map(|name| {
+            columns
+                .iter()
+                .find(|(column, _)| column == name)
+                .map(|(_, not_null)| *not_null)
+                .ok_or_else(|| {
+                    rusqlite::Error::ToSqlConversionFailure(
+                        format!("unknown memories origin schema: missing {name}").into(),
+                    )
+                })
+        })
+        .collect()
+}
+
+/// 既存 DB の `memories.written_at` を NULL 可にする（DESIGN-782）。CREATE TABLE IF NOT EXISTS は
+/// 既存表の NOT NULL を落とさないので、既知の written_at NOT NULL 形だけを行を落とさず組み替える。
+/// 既存行の時刻は写す（0 / now / captured-at で埋めない）。すでに NULL 可なら何もしない。
+fn migrate_memories_written_at_nullability(conn: &Connection) -> Result<()> {
+    if !table_exists(conn, "memories")? {
+        return Ok(());
+    }
+    match memories_written_at_not_null(conn)? {
+        false => Ok(()),
+        true => {
+            conn.execute_batch(
+                "ALTER TABLE memories RENAME TO memories_before_written_at_nullable;
+                 CREATE TABLE memories(
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   subject_id INTEGER NOT NULL,
+                   body TEXT NOT NULL,
+                   origin_place INTEGER,
+                   origin_from_seq INTEGER,
+                   origin_to_seq INTEGER,
+                   written_at INTEGER,
+                   last_read_at INTEGER,
+                   CHECK (
+                     (origin_place IS NULL AND origin_from_seq IS NULL AND origin_to_seq IS NULL)
+                     OR
+                     (origin_place IS NOT NULL AND origin_from_seq IS NOT NULL AND origin_to_seq IS NOT NULL)
+                   )
+                 );
+                 INSERT INTO memories(
+                   id,subject_id,body,origin_place,origin_from_seq,origin_to_seq,written_at,last_read_at
+                 )
+                 SELECT id,subject_id,body,origin_place,origin_from_seq,origin_to_seq,written_at,last_read_at
+                 FROM memories_before_written_at_nullable;
+                 DROP TABLE memories_before_written_at_nullable;",
+            )?;
+            Ok(())
+        }
+    }
+}
+
+fn memories_written_at_not_null(conn: &Connection) -> Result<bool> {
+    let mut statement = conn.prepare("PRAGMA table_info(memories)")?;
+    let columns = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(3)? != 0))
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    drop(statement);
+    columns
+        .iter()
+        .find(|(column, _)| column == "written_at")
+        .map(|(_, not_null)| *not_null)
+        .ok_or_else(|| {
+            rusqlite::Error::ToSqlConversionFailure(
+                "unknown memories written_at schema: missing written_at".into(),
+            )
+        })
 }
 
 /// `CREATE TABLE IF NOT EXISTS` does not update a table created by the pre-#750 store. Rebuild the
@@ -4504,6 +4777,67 @@ impl Store {
         .optional()
     }
 
+    /// 1 回の tool 実行を記録する（#787）。書き込みの失敗は握り潰さず呼び手へ返す（fail loud）。
+    pub fn write_tool_log(&self, r: &NewToolLog) -> Result<i64> {
+        let c = self.c();
+        c.execute(
+            "INSERT INTO tool_logs(agent_id,session_id,tool_name,args_json,outcome,result_text,started_at,created_at,latency_ms,turn_record_id,activity_id,iteration,place_id,subject_id)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+            params![
+                r.agent_id, r.session_id, r.tool_name, r.args_json, r.outcome, r.result_text,
+                r.started_at, r.created_at, r.latency_ms, r.turn_record_id, r.activity_id,
+                r.iteration, r.place_id, r.subject_id
+            ],
+        )?;
+        Ok(c.last_insert_rowid())
+    }
+
+    /// あるエージェント（subject）の tool ログを新しい順に引く。
+    pub fn list_tool_logs(&self, agent_id: &str, limit: i64) -> Result<Vec<ToolLogRow>> {
+        let c = self.c();
+        let mut stmt = c.prepare(&format!(
+            "SELECT {TOOL_LOG_COLS} FROM tool_logs WHERE agent_id=?1 ORDER BY created_at DESC, id DESC LIMIT ?2"
+        ))?;
+        let rows = stmt
+            .query_map(params![agent_id, limit], map_tool_log)?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// 直近の tool ログを新しい順に引く（全 agent 横断・CLI 読み口の入口）。
+    pub fn recent_tool_logs(&self, limit: i64) -> Result<Vec<ToolLogRow>> {
+        let c = self.c();
+        let mut stmt = c.prepare(&format!(
+            "SELECT {TOOL_LOG_COLS} FROM tool_logs ORDER BY created_at DESC, id DESC LIMIT ?1"
+        ))?;
+        let rows = stmt
+            .query_map(params![limit], map_tool_log)?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// 1 件の tool ログを id で引く（詳細表示）。
+    pub fn tool_log(&self, id: i64) -> Result<Option<ToolLogRow>> {
+        let c = self.c();
+        c.query_row(
+            &format!("SELECT {TOOL_LOG_COLS} FROM tool_logs WHERE id=?1"),
+            params![id],
+            map_tool_log,
+        )
+        .optional()
+    }
+
+    /// ターン活動（`turn_records.activity_id`）から turn 行の id を引く（#787・切り離し settle の紐付け）。
+    pub fn turn_record_id_for_activity(&self, activity: ActivityId) -> Result<Option<i64>> {
+        self.c()
+            .query_row(
+                "SELECT id FROM turn_records WHERE activity_id=?1",
+                params![activity],
+                |r| r.get(0),
+            )
+            .optional()
+    }
+
     /// エージェント（subject）の日次 LLM 統計（本体 API `/llm-logs/stats` と同形・#537 の julianday 比較を継承）。
     pub fn llm_logs_stats(&self, agent_id: &str, days: i64) -> Result<Vec<LlmLogStatRow>> {
         let c = self.c();
@@ -5370,6 +5704,29 @@ fn map_llm_log(r: &rusqlite::Row<'_>) -> rusqlite::Result<LlmLogRow> {
         iteration: r.get(20)?,
         place_id: r.get(21)?,
         subject_id: r.get(22)?,
+    })
+}
+
+/// tool_logs の列並び（SELECT と map_tool_log で共有・#787）。
+const TOOL_LOG_COLS: &str = "id,agent_id,session_id,tool_name,args_json,outcome,result_text,started_at,created_at,latency_ms,turn_record_id,activity_id,iteration,place_id,subject_id";
+
+fn map_tool_log(r: &rusqlite::Row<'_>) -> rusqlite::Result<ToolLogRow> {
+    Ok(ToolLogRow {
+        id: r.get(0)?,
+        agent_id: r.get(1)?,
+        session_id: r.get(2)?,
+        tool_name: r.get(3)?,
+        args_json: r.get(4)?,
+        outcome: r.get(5)?,
+        result_text: r.get(6)?,
+        started_at: r.get(7)?,
+        created_at: r.get(8)?,
+        latency_ms: r.get(9)?,
+        turn_record_id: r.get(10)?,
+        activity_id: r.get(11)?,
+        iteration: r.get(12)?,
+        place_id: r.get(13)?,
+        subject_id: r.get(14)?,
     })
 }
 
@@ -7033,6 +7390,66 @@ mod tests {
         assert_eq!(stats[0].error_count, 0);
     }
 
+    // tool 実行ログ（#787・oc2 新表）: エージェント単位・id 単体・read-only で引け、migrate は冪等。
+    #[test]
+    fn tool_logs_roundtrip_list_show_and_read_only() {
+        let path = store_fixture_path("tool-logs");
+        let _ = std::fs::remove_file(&path);
+        let s = Store::open(&path).unwrap();
+        {
+            let c = s.c();
+            migrate(&c).unwrap();
+            assert!(table_exists(&c, "tool_logs").unwrap());
+        }
+        let mk = |name: &str, outcome: &str, result: &str| NewToolLog {
+            agent_id: "7".into(),
+            session_id: Some("3".into()),
+            tool_name: name.into(),
+            args_json: "{}".into(),
+            outcome: outcome.into(),
+            result_text: result.into(),
+            started_at: Some("2026-08-24T00:00:00Z".into()),
+            created_at: "2026-08-24T00:00:00Z".into(),
+            latency_ms: Some(4),
+            turn_record_id: Some(100),
+            activity_id: None,
+            iteration: Some(1),
+            place_id: Some(3),
+            subject_id: Some(7),
+        };
+        let id1 = s
+            .write_tool_log(&mk("core-child-list", "done", "子は無い"))
+            .unwrap();
+        let id2 = s
+            .write_tool_log(&mk(
+                "core-shell",
+                "refused",
+                "コマンド «ls» は許可されていない",
+            ))
+            .unwrap();
+
+        let by_agent = s.list_tool_logs("7", 10).unwrap();
+        assert_eq!(by_agent.len(), 2);
+        assert!(by_agent.iter().all(|r| r.agent_id == "7"));
+        assert!(s.list_tool_logs("999", 10).unwrap().is_empty());
+
+        let one = s.tool_log(id1).unwrap().expect("引ける");
+        assert_eq!(one.tool_name, "core-child-list");
+        assert_eq!(one.outcome, "done");
+        assert_eq!(one.result_text, "子は無い");
+        assert_eq!(one.args_json, "{}");
+        assert!(s.tool_log(id2 + 99).unwrap().is_none());
+
+        let listed = list_tool_logs_read_only(&path, "7", 10).unwrap();
+        assert_eq!(listed.len(), 2);
+        let shown = tool_log_read_only(&path, id2).unwrap().expect("read-only");
+        assert_eq!(shown.outcome, "refused");
+        assert!(shown.result_text.contains("許可されていない"));
+        let recent = recent_tool_logs_read_only(&path, 1).unwrap();
+        assert_eq!(recent.len(), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
     // 本番 in-place 移行の帰結（AGREED §2.11）: 本体 opencrab の llm_logs が**既に存在する** DB に対して
     // migrate を当てると、本体列は保たれたまま oc2 連結列だけが ALTER で足され、全列 INSERT が通る。
     // 今の CREATE TABLE IF NOT EXISTS だけだと既存テーブルに no-op → 連結列が無く INSERT が落ちる、を防ぐ。
@@ -8060,6 +8477,174 @@ mod tests {
             !column_exists(&conn, "activities", "accepted_tool_args_json").unwrap(),
             "unknown format must not be completed as though it were legacy"
         );
+    }
+
+    #[test]
+    fn memories_origin_nullability_migrate_preserves_rows_and_rejects_partial_null() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE memories(
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               subject_id INTEGER NOT NULL,
+               body TEXT NOT NULL,
+               origin_place INTEGER NOT NULL,
+               origin_from_seq INTEGER NOT NULL,
+               origin_to_seq INTEGER NOT NULL,
+               written_at INTEGER NOT NULL,
+               last_read_at INTEGER
+             );
+             INSERT INTO memories(
+               subject_id,body,origin_place,origin_from_seq,origin_to_seq,written_at,last_read_at
+             ) VALUES(1,'kept',7,2,4,100,NULL);",
+        )
+        .unwrap();
+
+        migrate_memories_origin_nullability(&conn).unwrap();
+        migrate_memories_origin_nullability(&conn).unwrap();
+
+        let flags = memories_origin_not_null_flags(&conn).unwrap();
+        assert_eq!(flags, vec![false, false, false]);
+        let kept: (i64, Option<i64>, Option<i64>, Option<i64>, String) = conn
+            .query_row(
+                "SELECT subject_id,origin_place,origin_from_seq,origin_to_seq,body FROM memories",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(kept, (1, Some(7), Some(2), Some(4), "kept".into()));
+
+        conn.execute(
+            "INSERT INTO memories(subject_id,body,origin_place,origin_from_seq,origin_to_seq,written_at,last_read_at)
+             VALUES(1,'migrated',NULL,NULL,NULL,200,NULL)",
+            [],
+        )
+        .unwrap();
+        let nulls: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE origin_place IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(nulls, 1);
+
+        let partial = conn.execute(
+            "INSERT INTO memories(subject_id,body,origin_place,origin_from_seq,origin_to_seq,written_at,last_read_at)
+             VALUES(1,'partial',7,NULL,NULL,300,NULL)",
+            [],
+        );
+        assert!(partial.is_err(), "CHECK must reject partial origin NULL");
+    }
+
+    #[test]
+    fn map_memory_reads_null_origin_as_none() {
+        let store = Store::new_in_memory().unwrap();
+        let subject = store
+            .create_subject(SubjectKind::Agent, "A", "A", "engine", Standing::Trusted, 0)
+            .unwrap();
+        store
+            .c()
+            .execute(
+                "INSERT INTO memories(subject_id,body,origin_place,origin_from_seq,origin_to_seq,written_at,last_read_at)
+                 VALUES(?1,'no origin',NULL,NULL,NULL,10,NULL)",
+                params![subject],
+            )
+            .unwrap();
+        let rows = store.memories_newest_first(subject).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].body, "no origin");
+        assert_eq!(rows[0].origin_place, None);
+        assert_eq!(rows[0].origin_from_seq, None);
+        assert_eq!(rows[0].origin_to_seq, None);
+    }
+
+    #[test]
+    fn memories_written_at_nullability_migrate_preserves_rows_and_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE memories(
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               subject_id INTEGER NOT NULL,
+               body TEXT NOT NULL,
+               origin_place INTEGER,
+               origin_from_seq INTEGER,
+               origin_to_seq INTEGER,
+               written_at INTEGER NOT NULL,
+               last_read_at INTEGER,
+               CHECK (
+                 (origin_place IS NULL AND origin_from_seq IS NULL AND origin_to_seq IS NULL)
+                 OR
+                 (origin_place IS NOT NULL AND origin_from_seq IS NOT NULL AND origin_to_seq IS NOT NULL)
+               )
+             );
+             INSERT INTO memories(
+               subject_id,body,origin_place,origin_from_seq,origin_to_seq,written_at,last_read_at
+             ) VALUES(1,'kept',7,2,4,100,NULL);",
+        )
+        .unwrap();
+
+        migrate_memories_written_at_nullability(&conn).unwrap();
+        migrate_memories_written_at_nullability(&conn).unwrap();
+
+        assert!(
+            !memories_written_at_not_null(&conn).unwrap(),
+            "written_at must be nullable after additive migrate"
+        );
+        let kept: (i64, Option<i64>, String) = conn
+            .query_row(
+                "SELECT subject_id,written_at,body FROM memories",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(kept, (1, Some(100), "kept".into()));
+
+        conn.execute(
+            "INSERT INTO memories(subject_id,body,origin_place,origin_from_seq,origin_to_seq,written_at,last_read_at)
+             VALUES(1,'unrecorded',NULL,NULL,NULL,NULL,NULL)",
+            [],
+        )
+        .unwrap();
+        let nulls: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE written_at IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(nulls, 1);
+    }
+
+    #[test]
+    fn map_memory_reads_null_written_at_as_none_and_recall_finds_it() {
+        let store = Store::new_in_memory().unwrap();
+        let subject = store
+            .create_subject(SubjectKind::Agent, "A", "A", "engine", Standing::Trusted, 0)
+            .unwrap();
+        store
+            .c()
+            .execute(
+                "INSERT INTO memories(subject_id,body,origin_place,origin_from_seq,origin_to_seq,written_at,last_read_at)
+                 VALUES(?1,'no time',NULL,NULL,NULL,NULL,NULL)",
+                params![subject],
+            )
+            .unwrap();
+        let rows = store.memories_newest_first(subject).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].body, "no time");
+        assert_eq!(rows[0].written_at, None);
+        let recalled = store.recall(subject, "no time", 10, 1).unwrap();
+        assert_eq!(recalled.len(), 1);
+        assert_eq!(recalled[0].body, "no time");
+        assert_eq!(recalled[0].written_at, None);
     }
 
     // 表示名（name）は人格本文（persona）と別列として往復する（同一性と人格の分離・統括裁定）。

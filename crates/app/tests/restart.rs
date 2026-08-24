@@ -331,7 +331,10 @@ async fn assert_background_interruption_recovery(
         context.contains("synthetic background request"),
         "{context}"
     );
-    assert!(context.contains(&format!("活動 #{activity}")), "{context}");
+    assert!(
+        context.contains(&format!("活動 activity={activity}")),
+        "{context}"
+    );
     assert!(
         context.contains("受理ツール: synthetic-background-tool args={\"mode\":\"bounded\"}"),
         "{context}"

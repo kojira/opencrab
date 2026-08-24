@@ -15,7 +15,7 @@ pub use tokens::O200kCounter;
 use opencrab_port::*;
 use opencrab_store::{
     ActivityInterruption, BackgroundProvenance, BackgroundSettlement, Ingest, NewBackgroundOffload,
-    NewEvent, NewTurnRecord, Store,
+    NewEvent, NewToolLog, NewTurnRecord, Store,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
@@ -142,6 +142,10 @@ pub const THROTTLE_HINT: &str =
 /// 漏らさない fail-closed な制御語で、裸の `NO_REPLY::` も同義として受理する。
 pub const NO_REPLY: &str = "NO_REPLY";
 
+/// Owner 即応ターンが NO_REPLY のみのとき、沈黙を埋める定数 Spoke（#786 / DESIGN-786）。
+/// モデル地の文は `withheld_text` のまま公開しない。
+pub const OWNER_DIRECT_NO_REPLY_NOTICE: &str = "（発話なし）";
+
 /// 平文アクション文法の 2 つ目の core 共通語（設計）。`PROGRESS::<文>` 行——「いま何をしているかを
 /// 短く伝える」進捗の揮発表示。**say でもイベントでもない**: 場のログに追記せず、activity progress 通知
 /// として結ばれた全チャネルへ揮発配送し、走行中ターンの activities.label を更新する（記録は activities に
@@ -192,6 +196,21 @@ struct LlmObs {
     requested_at: Option<String>,
     latency_ms: i64,
     is_bot_iteration: bool,
+}
+
+/// 1 回の tool 実行の観測（#787）。`turn_record_id` 未確定なら `open_turns` に積み、
+/// `write_turn_record` の直後に flush。ターン終了後の settle は `detached_from` から turn を引いて即 INSERT。
+struct ToolObs {
+    tool_name: String,
+    args_json: String,
+    outcome: String,
+    result_text: String,
+    started_at: Option<String>,
+    latency_ms: Option<i64>,
+    activity_id: Option<ActivityId>,
+    iteration: Option<i64>,
+    place: PlaceId,
+    subject: SubjectId,
 }
 
 /// ダッシュボードが読む 1 メッセージ（ChatMessage 同型）を組む。
@@ -672,6 +691,20 @@ impl SettleOutcome<'_> {
             SettleOutcome::Stopped => "stopped",
         }
     }
+
+    fn tool_log_outcome(&self) -> &'static str {
+        self.reason()
+    }
+
+    fn tool_log_text(&self) -> String {
+        match self {
+            SettleOutcome::Done(body) | SettleOutcome::Failed(body) => (*body).to_string(),
+            SettleOutcome::Deadline => {
+                "実行の上限に達して中断した（勝手に再実行しない）".to_string()
+            }
+            SettleOutcome::Stopped => "停止した".to_string(),
+        }
+    }
 }
 
 /// その出来事が主体 `s` 自身の発話か（自己ループ防止の共有規則・§5.5「宛先の計算から著者を除く」）。
@@ -964,6 +997,8 @@ struct Inner {
     /// 元栓で捨てた件数（揮発・デバッグ用のカウンタ止まり・DESIGN-attention §1）。毎行ログはフラッド時に
     /// 費用になるので残さない——数えるだけ。記録にも文脈にも残らない。
     fire_drops: AtomicU64,
+    /// ターン活動ごとの未 flush な tool 観測（#787）。turn_record_id が確定するまでここに積む。
+    open_turns: StdMutex<HashMap<ActivityId, Vec<ToolObs>>>,
 }
 
 #[derive(Clone)]
@@ -1060,6 +1095,7 @@ impl System {
             // 源が届いた時点で `Some` になり、以降は許可集合で絞る（設定必須ではなく源が起点）。
             fire_allow: StdMutex::new(None),
             fire_drops: AtomicU64::new(0),
+            open_turns: StdMutex::new(HashMap::new()),
         }))
     }
 
@@ -2701,6 +2737,9 @@ impl System {
         let mut tool_lines_acc: Option<String> = None;
         // NO_REPLY を見たら end_reason を no_reply にする（ターンが通常完了で終わるとき）。
         let mut no_reply_seen = false;
+        // A4（#786）: 受理 tool / 確定した非 Say をループで積む。新概念にしない。
+        let mut accepted_any_tool = false;
+        let mut confirmed_nonsay = false;
         // 散文 say はターンの NO_REPLY 判定が確定するまで外へ出さない。別 Say や後続反復で sentinel が
         // 現れても、同じターンの散文を一部だけ先に公開しないための turn-level buffer。
         let mut pending_prose: Vec<EffectSpec> = vec![];
@@ -2966,6 +3005,9 @@ impl System {
                     };
                     to_confirm.extend(interp.actions); // 明示アクションは NO_REPLY に影響されず発火
                     tool_budget = tool_budget.saturating_sub(interp.tools.len()); // 受理したぶん予算を減らす
+                    if !interp.tools.is_empty() || !interp.tool_lines.is_empty() {
+                        accepted_any_tool = true;
+                    }
                     plaintext_tools.extend(interp.tools); // 平文ツール行のツール（下で決着イベント化）
                                                           // 受理したツール行を逐語でターン記録へ残す（黙って消さない・平文ツール行の設計）。
                                                           // NO_REPLY の有無に関わらず記録する（受理した事実は残す）。
@@ -3019,7 +3061,12 @@ impl System {
             for e in to_confirm {
                 match self.authorize_effect(place, subject, &e) {
                     Ok(a) => match self.confirm(&slot, subject, a) {
-                        Some(c) => self.enqueue_delivery(c), // 確定した効果だけが配送へ（§08）
+                        Some(c) => {
+                            if e.kind != EffectKind::Say {
+                                confirmed_nonsay = true;
+                            }
+                            self.enqueue_delivery(c); // 確定した効果だけが配送へ（§08）
+                        }
                         None => {
                             // ログへの書き込みが失敗 → 効果は確定しない。ターンは失敗で終わる。
                             // それでも記録は書く（下の後始末で必ず書かれる・§08）。
@@ -3059,6 +3106,7 @@ impl System {
             for c in out.tool_calls {
                 match self.authorize_tool(place, subject, &c, owner_follow_up, true) {
                     Ok(a) => {
+                        accepted_any_tool = true;
                         // ネイティブ経路: must_settle=false（core は同期・現状不変）。
                         let r = self
                             .invoke_or_detach(act, place, subject, a, false, origin_input)
@@ -3143,6 +3191,32 @@ impl System {
         } else {
             end_reason
         };
+        // A4（#786）: owner-direct かつ NO_REPLY のみなら定数 Spoke を 1 本。withheld_text は公開しない。
+        let owner_direct = owner_follow_up && matches!(reason, TurnReason::Immediate(_));
+        let no_reply_only = no_reply_seen && !accepted_any_tool && !confirmed_nonsay;
+        let end_reason = if owner_direct && no_reply_only {
+            match self.authorize_effect(
+                place,
+                subject,
+                &EffectSpec::say(OWNER_DIRECT_NO_REPLY_NOTICE),
+            ) {
+                Ok(a) => match self.confirm(&slot, subject, a) {
+                    Some(c) => {
+                        self.enqueue_delivery(c);
+                        let withheld_chars =
+                            withheld_text.as_deref().map_or(0, |t| t.chars().count());
+                        eprintln!(
+                            "opencrab-social-runtime: owner_direct NO_REPLY-only; withheld {withheld_chars} chars; notice delivered"
+                        );
+                        end_reason
+                    }
+                    None => "failed",
+                },
+                Err(_) => "failed",
+            }
+        } else {
+            end_reason
+        };
         if !matches!(end_reason, "done" | "no_reply") {
             eprintln!(
                 "opencrab-social-runtime: turn ended unsuccessfully (place={place}, subject={subject}, reason={end_reason}, detail={})",
@@ -3176,6 +3250,7 @@ impl System {
             .store
             .write_turn_record(&rec)
             .expect("turn record must be written");
+        self.flush_tool_obs(act, turn_id, iterations);
 
         // 反復ごとの文脈の観測を残す（§10）。予算を決めるのに一番必要な「後の反復での切り詰め」を欠かさない。
         for o in &ctx_obs {
@@ -3296,6 +3371,11 @@ impl System {
         let to_inclusive = group.last().map_or(read, |ev| ev.seq);
         let mut standing = Standing::Unknown;
         for ev in &group {
+            // 自分の発話は区切りにしない（first_standing_group と同じ）。A4 NOTICE など
+            // この主体の Spoke を未読に残しても origin standing を上書きしない。
+            if ev.author_subject == Some(subject) {
+                continue;
+            }
             if let Some(found) = self.event_standing(ev)? {
                 standing = found;
                 break;
@@ -3464,7 +3544,7 @@ impl System {
                 )
                 .map_err(|_| Busy)?;
             prefix.push_str("=== 決着の対応 ===\n");
-            prefix.push_str(&format!("活動 #{}\n", provenance.activity));
+            prefix.push_str(&format!("活動 activity={}\n", provenance.activity));
             if origins.is_empty() {
                 prefix.push_str("発端入力: なし\n");
             } else {
@@ -4832,6 +4912,169 @@ impl System {
         }
     }
 
+    fn tool_args_json(args: &serde_json::Value) -> String {
+        serde_json::to_string(args).expect("serde_json::Value must serialize")
+    }
+
+    fn record_tool_obs(&self, turn_act: ActivityId, obs: ToolObs) {
+        let mut open = self.0.open_turns.lock().unwrap();
+        if let Some(turn_id) = self
+            .0
+            .store
+            .turn_record_id_for_activity(turn_act)
+            .expect("turn lookup for tool log")
+        {
+            drop(open);
+            self.write_tool_log_now(turn_id, obs);
+        } else {
+            open.entry(turn_act).or_default().push(obs);
+        }
+    }
+
+    fn flush_tool_obs(&self, turn_act: ActivityId, turn_id: i64, iteration: i64) {
+        let obs = {
+            let mut open = self.0.open_turns.lock().unwrap();
+            open.remove(&turn_act).unwrap_or_default()
+        };
+        for mut o in obs {
+            if o.iteration.is_none() {
+                o.iteration = Some(iteration);
+            }
+            self.write_tool_log_now(turn_id, o);
+        }
+    }
+
+    fn write_tool_log_now(&self, turn_id: i64, o: ToolObs) {
+        let created_at = o
+            .started_at
+            .clone()
+            .unwrap_or_else(|| rfc3339_from_wall_nanos(self.now_wall_nanos()).unwrap_or_default());
+        self.0
+            .store
+            .write_tool_log(&NewToolLog {
+                agent_id: o.subject.to_string(),
+                session_id: Some(o.place.to_string()),
+                tool_name: o.tool_name,
+                args_json: o.args_json,
+                outcome: o.outcome,
+                result_text: o.result_text,
+                started_at: o.started_at,
+                created_at,
+                latency_ms: o.latency_ms,
+                turn_record_id: Some(turn_id),
+                activity_id: o.activity_id,
+                iteration: o.iteration,
+                place_id: Some(o.place),
+                subject_id: Some(o.subject),
+            })
+            .expect("tool log must be written");
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn observe_sync_tool(
+        &self,
+        turn_act: ActivityId,
+        place: PlaceId,
+        subject: SubjectId,
+        call: &ToolCallSpec,
+        result: &ToolResult,
+        started_at: Option<String>,
+        latency_ms: i64,
+    ) {
+        let (outcome, result_text) = match result {
+            ToolResult::Done(s) => ("done", s.clone()),
+            ToolResult::Looked(parts) => {
+                let text: String = parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        Part::Text(t) => Some(t.as_str()),
+                        Part::ImageBytes { .. } => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                ("done", text)
+            }
+            ToolResult::Failed(s) => ("failed", s.clone()),
+            ToolResult::Refused(r) => ("refused", r.as_str().to_string()),
+            ToolResult::MovedToBackground(_) => return,
+        };
+        self.record_tool_obs(
+            turn_act,
+            ToolObs {
+                tool_name: call.name.clone(),
+                args_json: Self::tool_args_json(&call.args),
+                outcome: outcome.into(),
+                result_text,
+                started_at,
+                latency_ms: Some(latency_ms),
+                activity_id: None,
+                iteration: None,
+                place,
+                subject,
+            },
+        );
+    }
+
+    fn observe_refused(
+        &self,
+        turn_act: ActivityId,
+        place: PlaceId,
+        subject: SubjectId,
+        call: &ToolCallSpec,
+        reason: &str,
+        started_at: Option<String>,
+    ) {
+        self.record_tool_obs(
+            turn_act,
+            ToolObs {
+                tool_name: call.name.clone(),
+                args_json: Self::tool_args_json(&call.args),
+                outcome: "refused".into(),
+                result_text: reason.to_string(),
+                started_at,
+                latency_ms: Some(0),
+                activity_id: None,
+                iteration: None,
+                place,
+                subject,
+            },
+        );
+    }
+
+    fn record_detached_tool_log(&self, bg: ActivityId, tool_outcome: &str, result_text: &str) {
+        let row = self
+            .0
+            .store
+            .get_activity(bg)
+            .expect("activity for tool log")
+            .expect("activity must exist");
+        let parent = row
+            .detached_from
+            .expect("detached tool activity must have detached_from");
+        let p = row
+            .provenance
+            .as_ref()
+            .expect("background tool activity must have provenance");
+        let tool_name = p.tool_name.clone();
+        let args_json = Self::tool_args_json(&p.tool_args);
+        let latency_ms = (self.now_nanos() - row.started_at) / 1_000_000;
+        self.record_tool_obs(
+            parent,
+            ToolObs {
+                tool_name,
+                args_json,
+                outcome: tool_outcome.to_string(),
+                result_text: result_text.to_string(),
+                started_at: rfc3339_from_wall_nanos(self.now_wall_nanos()),
+                latency_ms: Some(latency_ms.max(0)),
+                activity_id: Some(bg),
+                iteration: None,
+                place: row.place,
+                subject: row.subject,
+            },
+        );
+    }
+
     // ---- 常時切り離し（詳細§07）----
 
     /// ツールの呼び出し。core ツールは同じターンの中で走らせて結果を返す（速く・副作用が小さい）。
@@ -4875,8 +5118,14 @@ impl System {
             core_tool,
             Some(authority::CoreTool::Look | authority::CoreTool::Read)
         ) {
+            let started_at = rfc3339_from_wall_nanos(self.now_wall_nanos());
+            let started = self.now_nanos();
             let r = self.run_fetch_tool(place, subject, &call).await;
+            let latency_ms = (self.now_nanos() - started) / 1_000_000;
             if !must_settle {
+                self.observe_sync_tool(
+                    parent_act, place, subject, &call, &r, started_at, latency_ms,
+                );
                 return r;
             }
             let Some(provenance) = provenance.as_ref() else {
@@ -4908,8 +5157,14 @@ impl System {
         // ゲートツールと同じ**背景枝**（切り離し・退避・停止・上限）に載る。他の core ツールは従来どおり同期。
         let is_shell = core_tool == Some(authority::CoreTool::Shell);
         if authority::is_core_tool(&call.name) && !is_shell {
+            let started_at = rfc3339_from_wall_nanos(self.now_wall_nanos());
+            let started = self.now_nanos();
             let r = self.run_core_tool(place, subject, &call);
+            let latency_ms = (self.now_nanos() - started) / 1_000_000;
             if !must_settle {
+                self.observe_sync_tool(
+                    parent_act, place, subject, &call, &r, started_at, latency_ms,
+                );
                 return r; // ネイティブ経路: core は同期で返す（現状不変）。
             }
             let Some(provenance) = provenance.as_ref() else {
@@ -5024,6 +5279,15 @@ impl System {
                         content,
                     )
                     .await;
+            } else {
+                self.observe_refused(
+                    parent_act,
+                    place,
+                    subject,
+                    &call,
+                    RefusedReason::BackgroundFull.as_str(),
+                    rfc3339_from_wall_nanos(self.now_wall_nanos()),
+                );
             }
             return ToolResult::Refused(RefusedReason::BackgroundFull);
         }
@@ -5182,7 +5446,16 @@ impl System {
                     Some(provenance),
                 )
                 .await;
-            self.settle_background(bg, SettleOutcome::Failed(&reason));
+            self.settle_background_logged(bg, SettleOutcome::Failed(&reason), "refused");
+        } else {
+            self.observe_refused(
+                parent_act,
+                place,
+                subject,
+                call,
+                &reason,
+                rfc3339_from_wall_nanos(self.now_wall_nanos()),
+            );
         }
         ToolResult::Failed(reason)
     }
@@ -5240,6 +5513,12 @@ impl System {
     /// store の 1 transaction で確定する。core-bg-stop（停止）と自然完走／上限の競合、および commit 後の
     /// 再実行は、store が最初に確定した 1 結果へ収束させる。
     fn settle_background(&self, bg: ActivityId, outcome: SettleOutcome) {
+        let tool_outcome = outcome.tool_log_outcome();
+        self.settle_background_logged(bg, outcome, tool_outcome);
+    }
+
+    fn settle_background_logged(&self, bg: ActivityId, outcome: SettleOutcome, tool_outcome: &str) {
+        let result_text = outcome.tool_log_text();
         let reason = outcome.reason();
         let (content, offload) = self.settle_content(bg, outcome);
         let result = self
@@ -5258,6 +5537,7 @@ impl System {
         // store 上は既に決着済みなので同じ後始末へ収束する。
         self.0.bg_tasks.lock().unwrap().remove(&bg);
         if let BackgroundSettlement::Appended { place, seq } = result {
+            self.record_detached_tool_log(bg, tool_outcome, &result_text);
             self.notify_activity_ended(bg, place);
             // 決着は既にログ済み。発火の再判定が一時的に引けなくても、次の pump/startup が拾う（§02）。
             let _ = self.on_append(place, seq);
@@ -5273,17 +5553,18 @@ impl System {
     ) -> (String, Option<NewBackgroundOffload>) {
         match outcome {
             SettleOutcome::Deadline => (
-                format!("活動 #{bg} は実行の上限に達して中断した（勝手に再実行しない）"),
+                format!("活動 activity={bg} は実行の上限に達して中断した（勝手に再実行しない）"),
                 None,
             ),
-            SettleOutcome::Stopped => (format!("活動 #{bg} を停止した"), None),
+            SettleOutcome::Stopped => (format!("活動 activity={bg} を停止した"), None),
             SettleOutcome::Done(body) => self.settle_result_content(bg, true, body),
             SettleOutcome::Failed(body) => self.settle_result_content(bg, false, body),
         }
     }
 
-    /// 成功/失敗の結果本文を決着本文へ写す。inline 上限を超えたら、store が決着と同じ transaction で
-    /// 保存する offload を返す。保存に失敗すれば activity 終端を含む transaction 全体が失敗する。
+    /// 成功/失敗の結果本文を決着本文へ写す。失敗は必ず offload を作る（`clamp_body`）。
+    /// 小さい失敗の Settled 本文は現状どおり `{head}:\n{body}`（A9 mock / shell.rs を壊さない）。
+    /// 大きい結果は現行 notice + offload。成功の小結果は inline only。
     fn settle_result_content(
         &self,
         bg: ActivityId,
@@ -5291,19 +5572,36 @@ impl System {
         body: &str,
     ) -> (String, Option<NewBackgroundOffload>) {
         let head = if ok {
-            format!("活動 #{bg} が完了した（成功）")
+            format!("活動 activity={bg} が完了した（成功）")
         } else {
-            format!("活動 #{bg} が失敗した")
+            format!("活動 activity={bg} が失敗した")
         };
-        if !offload::exceeds_limit(self.0.counter.as_ref(), body) {
-            // 小さい結果は本文そのまま（識別子つきの生テキスト）。
+        if ok && !offload::exceeds_limit(self.0.counter.as_ref(), body) {
             if body.is_empty() {
                 return (format!("{head}（出力なし）"), None);
             }
             return (format!("{head}:\n{body}"), None);
         }
-        // 大きい結果は store 背番号へ退避し、案内＋読み方レシピだけ載せる（本文は 1 バイトも載せない）。
-        let (saved, truncated) = offload::clamp_body(body);
+        let offload_src = if !ok && body.is_empty() {
+            head.as_str()
+        } else {
+            body
+        };
+        let (saved, truncated) = offload::clamp_body(offload_src);
+        if !ok && !offload::exceeds_limit(self.0.counter.as_ref(), body) {
+            let settled = if body.is_empty() {
+                format!("{head}（出力なし）")
+            } else {
+                format!("{head}:\n{body}")
+            };
+            return (
+                settled,
+                Some(NewBackgroundOffload {
+                    body: saved,
+                    truncated,
+                }),
+            );
+        }
         (
             offload::settle_notice(bg, ok, &saved, truncated, self.0.counter.as_ref()),
             Some(NewBackgroundOffload {
@@ -5778,7 +6076,11 @@ impl System {
                     ToolResult::Done(
                         mine.iter()
                             .map(|act| {
-                                format!("#{} {}", act.id, act.label.clone().unwrap_or_default())
+                                format!(
+                                    "activity={} {}",
+                                    act.id,
+                                    act.label.clone().unwrap_or_default()
+                                )
                             })
                             .collect::<Vec<_>>()
                             .join("\n"),
@@ -6343,12 +6645,18 @@ fn effect_requires_target(k: EffectKind) -> bool {
 
 /// 記憶 1 件を探索結果として見せる（記憶とワーカー §03「必要なら探して取る」の取り出し）。
 /// 由来（場＋連番範囲）を添える——そこからその会話を辿れる。索引は本文を短く出すが、こちらは
-/// 明示的に取り出したものなので本文をそのまま返す。
+/// 明示的に取り出したものなので本文をそのまま返す。由来が無い移行行は数値を書かない。
 fn render_memory(m: &opencrab_store::MemoryRow) -> String {
-    format!(
-        "#{}（由来: 場{} {}-{}）: {}",
-        m.id, m.origin_place, m.origin_from_seq, m.origin_to_seq, m.body
-    )
+    match (m.origin_place, m.origin_from_seq, m.origin_to_seq) {
+        (Some(place), Some(from), Some(to)) => {
+            format!("#{}（由来: 場{} {}-{}）: {}", m.id, place, from, to, m.body)
+        }
+        (None, None, None) => format!("#{}（由来なし）: {}", m.id, m.body),
+        _ => panic!(
+            "memories origin must be all present or all absent; got place={:?} from={:?} to={:?}",
+            m.origin_place, m.origin_from_seq, m.origin_to_seq
+        ),
+    }
 }
 
 /// 場の枠づけ（core 由来・1 文）。persona 本文の後・文法前文の前に置く（system の②）。

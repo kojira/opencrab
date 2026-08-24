@@ -130,10 +130,10 @@ fn rewrite_keeps_origin_and_forget_removes() {
     assert_eq!(m.body, "畳んだ要約", "本文は差し替わる");
     assert_eq!(
         (m.origin_place, m.origin_from_seq, m.origin_to_seq),
-        (p, 5, 9),
+        (Some(p), Some(5), Some(9)),
         "由来は残る"
     );
-    assert_eq!(m.written_at, 100, "書かれた時刻は残る");
+    assert_eq!(m.written_at, Some(100), "書かれた時刻は残る");
 
     assert!(s.forget(a, id).unwrap(), "忘れられる");
     assert!(s.memories_newest_first(a).unwrap().is_empty(), "消えた");
@@ -177,14 +177,18 @@ async fn memory_origin_reproduces_the_conversation() {
     let mems = h.sys.store().memories_newest_first(a).unwrap();
     assert_eq!(mems.len(), 1, "覚えた記憶が 1 件");
     let m = &mems[0];
-    assert_eq!(m.origin_place, p);
-    assert_eq!((m.origin_from_seq, m.origin_to_seq), (1, 3));
+    assert_eq!(m.origin_place, Some(p));
+    assert_eq!((m.origin_from_seq, m.origin_to_seq), (Some(1), Some(3)));
 
     // 2 値（場＋範囲）からログを読み直すと、生まれた会話に完全に戻る。
     let reproduced = h
         .sys
         .store()
-        .read_range(m.origin_place, m.origin_from_seq - 1, m.origin_to_seq)
+        .read_range(
+            m.origin_place.expect("remembered origin place"),
+            m.origin_from_seq.expect("remembered origin from") - 1,
+            m.origin_to_seq.expect("remembered origin to"),
+        )
         .unwrap();
     assert_eq!(
         reproduced

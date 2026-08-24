@@ -18,6 +18,9 @@ pub(crate) fn assemble_phase3(
     assemble_webhooks(source, target, agents, provenance, raw, report)?;
     assemble_model_observations(source, target, agents, provenance, raw, report)?;
     assemble_tasks(source, target, agents, provenance, raw, report)?;
+    assemble_cron_schedules(source, target, agents, provenance, raw, report)?;
+    assemble_allowed_commands(source, target, agents, provenance, raw, report)?;
+    assemble_curated_memories(source, target, agents, provenance, raw, report)?;
     Ok(())
 }
 
@@ -389,6 +392,288 @@ fn parse_task(
         state: required_text(table, row, "status")?,
         updated_at: required_time(table, row, "updated_at")?,
     })
+}
+
+fn assemble_cron_schedules(
+    source: &Connection,
+    target: &Transaction<'_>,
+    agents: &BTreeMap<String, i64>,
+    provenance: &MigrationProvenance,
+    raw: &mut RawCollector<'_, '_>,
+    report: &mut ConversionReport,
+) -> Result<()> {
+    if !SourceTable::exists(source, "agent_schedules")? {
+        return Ok(());
+    }
+    let table = SourceTable::load_schema(source, "agent_schedules")?;
+    table.require_exact_columns(&[
+        "id",
+        "agent_id",
+        "session_id",
+        "cron_expr",
+        "timezone",
+        "message",
+        "enabled",
+        "anchor_at",
+        "last_fired_at",
+        "created_at",
+        "updated_at",
+    ])?;
+    let mut accounting = ClassAccounting::streaming(table.name, "cron_schedule", BTreeMap::new());
+    let mut rows = 0_u64;
+    table.for_each_row(source, "id", |row| {
+        let mut row_accounting = accounting.start_streamed_row(&table, row);
+        match parse_cron_schedule(&table, row, agents, target) {
+            Ok(parsed) => {
+                let id = next_integer_id(target, "schedules")?;
+                target.execute(
+                    "INSERT INTO schedules(
+                       id,owner_subject_id,place_id,kind,expression,timezone,interval_secs,
+                       anchor_at,enabled,instruction,instruction_revision,next_fire,
+                       last_fired_at,source_record_key,created_at,updated_at
+                     ) VALUES(?1,?2,?3,'cron',?4,?5,NULL,?6,?7,?8,1,NULL,?9,?10,?11,?12)",
+                    params![
+                        id,
+                        parsed.owner_subject_id,
+                        parsed.place_id,
+                        parsed.expression,
+                        parsed.timezone,
+                        parsed.anchor_at,
+                        parsed.enabled,
+                        parsed.instruction,
+                        parsed.last_fired_at,
+                        parsed.source_record_key,
+                        parsed.created_at,
+                        parsed.updated_at,
+                    ],
+                )?;
+                provenance.write(target, "schedules", &integer_key(id), &table, row)?;
+                rows += 1;
+                row_accounting.canonical();
+            }
+            Err(reason) => {
+                raw.add(&table, row, reason)?;
+                row_accounting.raw();
+            }
+        }
+        accounting.finish_streamed_row(row_accounting)
+    })?;
+    accounting.physical_rows = BTreeMap::from([("schedules".into(), rows)]);
+    report.classes.push(accounting);
+    Ok(())
+}
+
+struct ParsedCronSchedule {
+    owner_subject_id: i64,
+    place_id: i64,
+    expression: String,
+    timezone: String,
+    anchor_at: Option<i64>,
+    enabled: i64,
+    instruction: String,
+    last_fired_at: Option<i64>,
+    source_record_key: i64,
+    created_at: i64,
+    updated_at: i64,
+}
+
+fn parse_cron_schedule(
+    table: &SourceTable,
+    row: &SourceRow,
+    agents: &BTreeMap<String, i64>,
+    target: &Transaction<'_>,
+) -> std::result::Result<ParsedCronSchedule, &'static str> {
+    let source_record_key = table
+        .integer(row, "id")
+        .ok_or("assemble-cron-schedule-v1:null_or_non_integer_id")?;
+    Ok(ParsedCronSchedule {
+        owner_subject_id: required_subject(table, row, "agent_id", agents)?,
+        place_id: required_place(table, row, "session_id", target)?,
+        expression: required_text(table, row, "cron_expr")?,
+        timezone: required_text(table, row, "timezone")?,
+        anchor_at: nullable_time(table, row, "anchor_at")?,
+        enabled: required_bool(table, row, "enabled")?,
+        instruction: required_text(table, row, "message")?,
+        last_fired_at: nullable_time(table, row, "last_fired_at")?,
+        source_record_key,
+        created_at: required_time(table, row, "created_at")?,
+        updated_at: required_time(table, row, "updated_at")?,
+    })
+}
+
+fn assemble_allowed_commands(
+    source: &Connection,
+    target: &Transaction<'_>,
+    agents: &BTreeMap<String, i64>,
+    provenance: &MigrationProvenance,
+    raw: &mut RawCollector<'_, '_>,
+    report: &mut ConversionReport,
+) -> Result<()> {
+    if !SourceTable::exists(source, "agent_allowed_commands")? {
+        return Ok(());
+    }
+    let table = SourceTable::load_schema(source, "agent_allowed_commands")?;
+    table.require_exact_columns(&["id", "agent_id", "command", "added_by", "added_at"])?;
+    let mut accounting = ClassAccounting::streaming(table.name, "allowed_command", BTreeMap::new());
+    let mut rows = 0_u64;
+    table.for_each_row(source, "rowid", |row| {
+        let mut row_accounting = accounting.start_streamed_row(&table, row);
+        match parse_allowed_command(&table, row, agents) {
+            Ok(parsed) => {
+                target.execute(
+                    "INSERT INTO subject_allowed_commands(subject_id,command) VALUES(?1,?2)",
+                    params![parsed.subject_id, parsed.command],
+                )?;
+                provenance.write(
+                    target,
+                    "subject_allowed_commands",
+                    &composite_allowed_command_key(parsed.subject_id, &parsed.command),
+                    &table,
+                    row,
+                )?;
+                rows += 1;
+                row_accounting.canonical();
+            }
+            Err(reason) => {
+                raw.add(&table, row, reason)?;
+                row_accounting.raw();
+            }
+        }
+        accounting.finish_streamed_row(row_accounting)
+    })?;
+    accounting.physical_rows = BTreeMap::from([("subject_allowed_commands".into(), rows)]);
+    report.classes.push(accounting);
+    Ok(())
+}
+
+struct ParsedAllowedCommand {
+    subject_id: i64,
+    command: String,
+}
+
+fn parse_allowed_command(
+    table: &SourceTable,
+    row: &SourceRow,
+    agents: &BTreeMap<String, i64>,
+) -> std::result::Result<ParsedAllowedCommand, &'static str> {
+    Ok(ParsedAllowedCommand {
+        subject_id: required_subject(table, row, "agent_id", agents)?,
+        command: required_text(table, row, "command")?,
+    })
+}
+
+fn composite_allowed_command_key(subject_id: i64, command: &str) -> Vec<u8> {
+    let mut key = integer_key(subject_id);
+    key.push(0);
+    key.extend_from_slice(command.as_bytes());
+    key
+}
+
+fn assemble_curated_memories(
+    source: &Connection,
+    target: &Transaction<'_>,
+    agents: &BTreeMap<String, i64>,
+    provenance: &MigrationProvenance,
+    raw: &mut RawCollector<'_, '_>,
+    report: &mut ConversionReport,
+) -> Result<()> {
+    if !SourceTable::exists(source, "memory_curated")? {
+        return Ok(());
+    }
+    let table = SourceTable::load_schema(source, "memory_curated")?;
+    table.require_exact_columns(&[
+        "id",
+        "agent_id",
+        "category",
+        "content",
+        "updated_at",
+        "created_at",
+    ])?;
+    let mut accounting = ClassAccounting::streaming(table.name, "curated_memory", BTreeMap::new());
+    let mut rows = 0_u64;
+    table.for_each_row(source, "id COLLATE BINARY,rowid", |row| {
+        let mut row_accounting = accounting.start_streamed_row(&table, row);
+        match parse_curated_memory(&table, row, agents) {
+            Ok(parsed) => {
+                let id = next_integer_id(target, "memories")?;
+                target.execute(
+                    "INSERT INTO memories(
+                       id,subject_id,body,origin_place,origin_from_seq,origin_to_seq,
+                       written_at,last_read_at
+                     ) VALUES(?1,?2,?3,NULL,NULL,NULL,?4,NULL)",
+                    params![id, parsed.subject_id, parsed.body, parsed.written_at],
+                )?;
+                provenance.write(target, "memories", &integer_key(id), &table, row)?;
+                rows += 1;
+                row_accounting.canonical();
+            }
+            Err(reason) => {
+                raw.add(&table, row, reason)?;
+                row_accounting.raw();
+            }
+        }
+        accounting.finish_streamed_row(row_accounting)
+    })?;
+    accounting.physical_rows = BTreeMap::from([("memories".into(), rows)]);
+    report.classes.push(accounting);
+    Ok(())
+}
+
+struct ParsedCuratedMemory {
+    subject_id: i64,
+    body: String,
+    written_at: Option<i64>,
+}
+
+fn parse_curated_memory(
+    table: &SourceTable,
+    row: &SourceRow,
+    agents: &BTreeMap<String, i64>,
+) -> std::result::Result<ParsedCuratedMemory, &'static str> {
+    let _id = required_text(table, row, "id")?;
+    Ok(ParsedCuratedMemory {
+        subject_id: required_subject(table, row, "agent_id", agents)?,
+        body: required_text(table, row, "content")?,
+        written_at: curated_memory_written_at(table, row)?,
+    })
+}
+
+/// DESIGN-782: byte-exact empty `created_at` is unrecorded (SQL NULL).
+/// Non-empty parse success is nanos. Non-empty parse failure stays raw.
+/// updated_at / now / captured-at / 0 are not substitutes.
+fn curated_memory_written_at(
+    table: &SourceTable,
+    row: &SourceRow,
+) -> std::result::Result<Option<i64>, &'static str> {
+    match table.value(row, "created_at") {
+        Some(SqliteValue::Text(value)) if value.is_empty() => Ok(None),
+        Some(SqliteValue::Text(value)) => {
+            let text = std::str::from_utf8(value).map_err(|_| "parse-utc-nanos-v1:invalid_utf8")?;
+            parse_utc_nanos(text)
+                .map(Some)
+                .ok_or("parse-utc-nanos-v1:invalid_timestamp")
+        }
+        Some(_) => Err("parse-utc-nanos-v1:noncanonical_storage"),
+        None => Err("parse-utc-nanos-v1:missing_column"),
+    }
+}
+
+fn nullable_time(
+    table: &SourceTable,
+    row: &SourceRow,
+    column: &str,
+) -> std::result::Result<Option<i64>, &'static str> {
+    match table.value(row, column) {
+        Some(SqliteValue::Null) => Ok(None),
+        Some(SqliteValue::Text(value)) => {
+            let text = std::str::from_utf8(value).map_err(|_| "parse-utc-nanos-v1:invalid_utf8")?;
+            parse_utc_nanos(text)
+                .map(Some)
+                .ok_or("parse-utc-nanos-v1:invalid_timestamp")
+        }
+        Some(_) => Err("parse-utc-nanos-v1:noncanonical_storage"),
+        None => Err("parse-utc-nanos-v1:missing_column"),
+    }
 }
 
 fn optional_place(
