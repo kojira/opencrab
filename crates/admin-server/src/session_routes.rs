@@ -105,14 +105,6 @@ fn create_err(error: PlaceCreateLegacyError) -> (StatusCode, Json<Value>) {
                 "participant_id": id,
             })),
         ),
-        PlaceCreateLegacyError::DuplicateParticipant(id) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": "unresolved_participant",
-                "detail": format!("duplicate participant: {id}"),
-                "participant_id": id,
-            })),
-        ),
         PlaceCreateLegacyError::Store(e) => store_err(e),
     }
 }
@@ -316,6 +308,35 @@ mod contract {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert_eq!(body["error"], "unresolved_participant");
         assert_eq!(body["participant_id"], "99");
+    }
+
+    #[tokio::test]
+    async fn duplicate_participant_ids_are_200_and_deduped() {
+        let (state, agent) =
+            create_ada(state_from_store(Store::new_in_memory().expect("store"))).await;
+        let (status, body) = call(
+            state.clone(),
+            "POST",
+            "/api/sessions",
+            Some(json!({
+                "theme": "dup",
+                "participant_ids": [agent, agent]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let id = body["id"].as_str().expect("id string");
+        assert_eq!(body, json!({"id": id}));
+
+        let (status, listed) = call(state, "GET", "/api/sessions", None).await;
+        assert_eq!(status, StatusCode::OK, "{listed}");
+        let row = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == id)
+            .unwrap();
+        assert_eq!(row["participant_ids_json"], json!([agent]).to_string());
     }
 
     #[tokio::test]

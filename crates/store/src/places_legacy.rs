@@ -15,7 +15,6 @@ const MENTOR_PROVENANCE: &[u8] = br#"{"kind":"mentor"}"#;
 #[derive(Debug)]
 pub enum PlaceCreateLegacyError {
     UnresolvedParticipant(String),
-    DuplicateParticipant(String),
     Store(rusqlite::Error),
 }
 
@@ -29,7 +28,6 @@ impl std::fmt::Display for PlaceCreateLegacyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnresolvedParticipant(id) => write!(f, "unresolved participant: {id}"),
-            Self::DuplicateParticipant(id) => write!(f, "duplicate participant: {id}"),
             Self::Store(error) => write!(f, "{error}"),
         }
     }
@@ -91,7 +89,7 @@ fn resolve_participants(
             return Err(PlaceCreateLegacyError::UnresolvedParticipant(raw.clone()));
         }
         if subjects.contains(&id) {
-            return Err(PlaceCreateLegacyError::DuplicateParticipant(raw.clone()));
+            continue;
         }
         subjects.push(id);
     }
@@ -307,6 +305,27 @@ mod tests {
             slug,
             PlaceCreateLegacyError::UnresolvedParticipant(id) if id == "not-an-id"
         ));
+    }
+
+    #[test]
+    fn duplicate_participant_ids_are_deduped() {
+        let store = Store::new_in_memory().unwrap();
+        let (a, b) = fixture_subjects(&store);
+        let place = store
+            .place_create_legacy(
+                &PlaceCreateLegacy {
+                    theme: "dup-theme".into(),
+                    mode: None,
+                    participant_ids: vec![a.to_string(), b.to_string(), a.to_string()],
+                    max_turns: None,
+                },
+                23,
+            )
+            .unwrap();
+        let members = store.members(place).unwrap();
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[0].subject, a.min(b));
+        assert_eq!(members[1].subject, a.max(b));
     }
 
     #[test]
