@@ -133,7 +133,7 @@ fn rewrite_keeps_origin_and_forget_removes() {
         (Some(p), Some(5), Some(9)),
         "由来は残る"
     );
-    assert_eq!(m.written_at, 100, "書かれた時刻は残る");
+    assert_eq!(m.written_at, Some(100), "書かれた時刻は残る");
 
     assert!(s.forget(a, id).unwrap(), "忘れられる");
     assert!(s.memories_newest_first(a).unwrap().is_empty(), "消えた");

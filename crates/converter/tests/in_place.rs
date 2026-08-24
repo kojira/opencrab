@@ -870,7 +870,8 @@ fn curated_memories_land_in_store_memories_with_null_origin_and_raw_class() {
            ('mem-z','agent-canonical','long_term','later body','2024-01-06 00:00:00','2024-01-06 00:00:00'),
            ('mem-a','agent-canonical','daily','earlier body','2024-01-05 00:00:00','2024-01-05 00:00:00'),
            ('mem-orphan','1000000000000005','daily','orphan body','2024-01-05 00:00:00','2024-01-05 00:00:00'),
-           ('mem-empty-time','agent-canonical','scratch','no time','2024-01-05 00:00:00','');",
+           ('mem-empty-time','agent-canonical','scratch','no time','2024-01-05 00:00:00',''),
+           ('mem-bad-time','agent-canonical','notes','bad time','2024-01-05 00:00:00','not-a-timestamp');",
     )
     .unwrap();
     drop(conn);
@@ -890,11 +891,11 @@ fn curated_memories_land_in_store_memories_with_null_origin_and_raw_class() {
             class.source_table == "memory_curated" && class.logical_class == "curated_memory"
         })
         .expect("curated_memory class");
-    assert_eq!(curated.source_rows, 4);
-    assert_eq!(curated.canonical_outcomes, 2);
+    assert_eq!(curated.source_rows, 5);
+    assert_eq!(curated.canonical_outcomes, 3);
     assert_eq!(curated.raw_outcomes, 2);
     assert_eq!(curated.dropped_outcomes, 0);
-    assert_eq!(curated.physical_rows.get("memories").copied(), Some(2));
+    assert_eq!(curated.physical_rows.get("memories").copied(), Some(3));
 
     let conn = Connection::open(&db).unwrap();
     let mut statement = conn
@@ -912,57 +913,87 @@ fn curated_memories_land_in_store_memories_with_null_origin_and_raw_class() {
                 row.get::<_, Option<i64>>(3)?,
                 row.get::<_, Option<i64>>(4)?,
                 row.get::<_, Option<i64>>(5)?,
-                row.get::<_, i64>(6)?,
+                row.get::<_, Option<i64>>(6)?,
                 row.get::<_, Option<i64>>(7)?,
             ))
         })
         .unwrap()
         .collect::<std::result::Result<Vec<_>, _>>()
         .unwrap();
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 3);
     assert_eq!(rows[0].0, 1, "dense id follows source id TEXT byte order");
     assert_eq!(rows[0].2, "earlier body");
     assert_eq!(rows[0].3, None);
     assert_eq!(rows[0].4, None);
     assert_eq!(rows[0].5, None);
-    assert!(rows[0].6 > 0, "written_at must parse created_at");
+    assert!(
+        rows[0].6.is_some_and(|nanos| nanos > 0),
+        "written_at must parse created_at"
+    );
     assert_eq!(rows[0].7, None);
     assert_eq!(rows[1].0, 2);
-    assert_eq!(rows[1].2, "later body");
+    assert_eq!(rows[1].2, "no time");
     assert_eq!(rows[1].3, None);
     assert_eq!(rows[1].4, None);
     assert_eq!(rows[1].5, None);
+    assert_eq!(
+        rows[1].6, None,
+        "empty created_at writes written_at SQL NULL"
+    );
     assert_eq!(rows[1].7, None);
-    assert_eq!(rows[0].1, rows[1].1, "both canonical rows share the owner");
+    assert_eq!(rows[2].0, 3);
+    assert_eq!(rows[2].2, "later body");
+    assert_eq!(rows[2].3, None);
+    assert_eq!(rows[2].4, None);
+    assert_eq!(rows[2].5, None);
+    assert_eq!(rows[2].7, None);
+    assert_eq!(rows[0].1, rows[1].1, "canonical rows share the owner");
+    assert_eq!(rows[0].1, rows[2].1, "canonical rows share the owner");
 
-    let raw_reasons: Vec<String> = conn
+    let raw_rows: Vec<(Vec<u8>, String)> = conn
         .prepare(
-            "SELECT reason FROM legacy_unowned_source_rows
+            "SELECT source_key,reason FROM legacy_unowned_source_rows
              WHERE source_table='memory_curated' ORDER BY source_key",
         )
         .unwrap()
-        .query_map([], |row| row.get(0))
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
         .unwrap()
         .collect::<std::result::Result<Vec<_>, _>>()
         .unwrap();
-    assert_eq!(raw_reasons.len(), 2);
+    assert_eq!(raw_rows.len(), 2);
+    let key_has =
+        |key: &[u8], needle: &[u8]| key.windows(needle.len()).any(|window| window == needle);
     assert!(
-        raw_reasons
-            .iter()
-            .any(|reason| reason.contains("unresolved_agent")),
-        "orphan agent_id must be raw: {raw_reasons:?}"
+        raw_rows.iter().any(|(key, reason)| {
+            key_has(key, b"mem-orphan") && reason.contains("unresolved_agent")
+        }),
+        "orphan agent_id must be raw: {raw_rows:?}"
     );
     assert!(
-        raw_reasons
+        raw_rows.iter().any(|(key, reason)| {
+            key_has(key, b"mem-bad-time") && reason.contains("invalid_timestamp")
+        }),
+        "malformed non-empty created_at must be raw: {raw_rows:?}"
+    );
+    assert!(
+        !raw_rows
             .iter()
-            .any(|reason| reason.contains("invalid_timestamp")),
-        "empty created_at must be raw: {raw_reasons:?}"
+            .any(|(key, _)| key_has(key, b"mem-empty-time")),
+        "empty created_at must not be raw: {raw_rows:?}"
     );
 
+    drop(statement);
     let leftover: i64 = conn
         .query_row("SELECT COUNT(*) FROM memory_curated", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(leftover, 4, "source rows must stay; never drop");
+    assert_eq!(leftover, 5, "source rows must stay; never drop");
+    drop(conn);
+
+    let store = opencrab_store::Store::open(&db).unwrap();
+    let recalled = store.recall(rows[1].1, "no time", 10, 1).unwrap();
+    assert_eq!(recalled.len(), 1);
+    assert_eq!(recalled[0].body, "no time");
+    assert_eq!(recalled[0].written_at, None);
 }
 
 fn write_inputs(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
