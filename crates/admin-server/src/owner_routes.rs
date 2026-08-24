@@ -7,6 +7,7 @@ use axum::{
     routing::get,
     Json, Router,
 };
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -47,6 +48,38 @@ fn parse_agent(id: &str) -> ApiResult<i64> {
                 "error": "bad_id",
                 "detail": "id は整数（subject/place の内部 ID）である必要があります",
             })),
+        )
+    })
+}
+
+/// このルートがまだ適用しないフィールドが JSON に含まれていたら 501。部分適用して ok を返さない。
+fn reject_unapplied_fields(body: &Value, fields: &[&str]) -> ApiResult<()> {
+    let present: Vec<&str> = fields
+        .iter()
+        .copied()
+        .filter(|name| body.get(*name).is_some())
+        .collect();
+    if present.is_empty() {
+        return Ok(());
+    }
+    Err((
+        StatusCode::NOT_IMPLEMENTED,
+        Json(json!({
+            "error": "unimplemented",
+            "detail": format!(
+                "this route does not yet apply {}: see roadmap #772",
+                present.join(", ")
+            ),
+            "fields": present,
+        })),
+    ))
+}
+
+fn decode_body<T: DeserializeOwned>(body: Value) -> ApiResult<T> {
+    serde_json::from_value(body).map_err(|e| {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "bad_request", "detail": e.to_string() })),
         )
     })
 }
@@ -304,8 +337,6 @@ fn npub_from_hex(hex: &str) -> String {
 
 #[derive(Debug, Deserialize)]
 pub struct PutDiscordBody {
-    #[allow(dead_code)]
-    pub bot_token: String,
     pub owner_discord_id: Option<String>,
 }
 
@@ -373,8 +404,10 @@ async fn get_discord(
 async fn put_discord(
     State(st): State<AdminState>,
     Path(id): Path<String>,
-    Json(req): Json<PutDiscordBody>,
+    Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
+    reject_unapplied_fields(&body, &["bot_token"])?;
+    let req: PutDiscordBody = decode_body(body)?;
     let agent = parse_agent(&id)?;
     ensure_agent(&st, agent)?;
     let instance = st
@@ -487,8 +520,10 @@ async fn get_nostr(State(st): State<AdminState>, Path(id): Path<String>) -> ApiR
 async fn put_nostr(
     State(st): State<AdminState>,
     Path(id): Path<String>,
-    Json(req): Json<PutNostrBody>,
+    Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
+    reject_unapplied_fields(&body, &["secret_key", "relays", "enabled"])?;
+    let req: PutNostrBody = decode_body(body)?;
     let agent = parse_agent(&id)?;
     ensure_agent(&st, agent)?;
     let owner = normalize_owner_pubkey_input(req.owner_pubkey.as_deref())?;
@@ -620,7 +655,7 @@ mod contract {
             state.clone(),
             "PUT",
             &format!("/api/agents/{agent}/discord"),
-            Some(json!({"bot_token": "synthetic-token"})),
+            Some(json!({})),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -641,7 +676,6 @@ mod contract {
             "PUT",
             &format!("/api/agents/{agent}/discord"),
             Some(json!({
-                "bot_token": "synthetic-token",
                 "owner_discord_id": "  owner-1  "
             })),
         )
@@ -661,7 +695,6 @@ mod contract {
             "PUT",
             &format!("/api/agents/{agent}/discord"),
             Some(json!({
-                "bot_token": "synthetic-token",
                 "owner_discord_id": ""
             })),
         )
@@ -691,7 +724,6 @@ mod contract {
             "PUT",
             &format!("/api/agents/{agent}/discord"),
             Some(json!({
-                "bot_token": "synthetic-token",
                 "owner_discord_id": "owner-2"
             })),
         )
@@ -741,11 +773,6 @@ mod contract {
             "PUT",
             &format!("/api/agents/{agent}/nostr"),
             Some(json!({
-                "enabled": false,
-                "relays": [],
-                "authors": [],
-                "keywords": [],
-                "kinds": [],
                 "owner_pubkey": "not-a-key"
             })),
         )
@@ -757,11 +784,6 @@ mod contract {
             "PUT",
             &format!("/api/agents/{agent}/nostr"),
             Some(json!({
-                "enabled": true,
-                "relays": [],
-                "authors": [],
-                "keywords": [],
-                "kinds": [],
                 "owner_pubkey": npub
             })),
         )
@@ -781,13 +803,7 @@ mod contract {
             state.clone(),
             "PUT",
             &format!("/api/agents/{agent}/nostr"),
-            Some(json!({
-                "enabled": true,
-                "relays": [],
-                "authors": [],
-                "keywords": [],
-                "kinds": []
-            })),
+            Some(json!({})),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -805,17 +821,66 @@ mod contract {
             "PUT",
             &format!("/api/agents/{agent}/nostr"),
             Some(json!({
-                "enabled": true,
-                "relays": [],
-                "authors": [],
-                "keywords": [],
-                "kinds": [],
                 "owner_pubkey": ""
             })),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
         let (_, got) = call(state, "GET", &format!("/api/agents/{agent}/nostr"), None).await;
+        assert_eq!(got["owner_pubkey"], "");
+    }
+
+    #[tokio::test]
+    async fn put_rejects_unapplied_fields_without_partial_write() {
+        let store = Store::new_in_memory().expect("store");
+        let agent = seed_agent(&store);
+        let state = state_from_store(store);
+
+        let (status, body) = call(
+            state.clone(),
+            "PUT",
+            &format!("/api/agents/{agent}/discord"),
+            Some(json!({
+                "bot_token": "synthetic-token",
+                "owner_discord_id": "should-not-apply"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
+        assert_eq!(body["error"], "unimplemented");
+        assert!(body["detail"].as_str().unwrap_or("").contains("bot_token"));
+        assert!(body["detail"].as_str().unwrap_or("").contains("#772"));
+        let (_, got) = call(
+            state.clone(),
+            "GET",
+            &format!("/api/agents/{agent}/discord"),
+            None,
+        )
+        .await;
+        assert_eq!(got["configured"], false, "{got}");
+
+        let hex = "22".repeat(32);
+        let (status, body) = call(
+            state.clone(),
+            "PUT",
+            &format!("/api/agents/{agent}/nostr"),
+            Some(json!({
+                "secret_key": "nsec1notapplied",
+                "relays": ["wss://relay.example"],
+                "enabled": true,
+                "owner_pubkey": hex
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
+        assert_eq!(body["error"], "unimplemented");
+        let detail = body["detail"].as_str().unwrap_or("");
+        assert!(detail.contains("secret_key"), "{detail}");
+        assert!(detail.contains("relays"), "{detail}");
+        assert!(detail.contains("enabled"), "{detail}");
+        assert!(detail.contains("#772"), "{detail}");
+        let (_, got) = call(state, "GET", &format!("/api/agents/{agent}/nostr"), None).await;
+        assert_eq!(got["configured"], false, "{got}");
         assert_eq!(got["owner_pubkey"], "");
     }
 }
