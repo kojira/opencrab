@@ -396,9 +396,10 @@ fn answer_then_no_reply_delivers_substantive_body() {
 }
 
 /// A9-shape (#787): a detached shell that fails must speak the failure reason next turn.
+/// Public GET of the settle line is not the agent path — core-bg-read reads the offload.
 #[test]
 fn shell_failure_reason_readable_on_next_turn() {
-    let (_core, _web, port, _db) = boot_mock_with_shell_fail();
+    let (_core, _web, port, db) = boot_mock_with_shell_fail();
     assert!(
         post_until_history_contains(
             port,
@@ -413,10 +414,46 @@ fn shell_failure_reason_readable_on_next_turn() {
     let history = get_history(port);
     assert!(
         history.contains("許可されていない"),
-        "next turn must be able to read the shell failure reason: {history}"
+        "failure reason text must reach the public reply: {history}"
     );
     assert!(
         history.contains("\"kind\":\"agent\""),
         "failure recovery must produce an agent utterance: {history}"
+    );
+
+    let store = Store::open(&db).expect("open store after failed shell");
+    let place = find_room_place(&store, "room:main").expect("room:main after failed shell");
+    let agent = find_agent(&store, place).expect("web-agent after failed shell");
+    let failed: Vec<_> = store
+        .all_activities()
+        .expect("list activities")
+        .into_iter()
+        .filter(|a| {
+            a.subject == agent
+                && a.end_reason.as_deref() == Some("failed")
+                && a.provenance
+                    .as_ref()
+                    .is_some_and(|p| p.tool_name == "core-shell")
+        })
+        .collect();
+    assert!(
+        !failed.is_empty(),
+        "detached shell must leave a failed background activity"
+    );
+    let via_bg_read = failed.iter().find_map(|activity| {
+        store
+            .read_offload(agent, activity.id)
+            .ok()
+            .flatten()
+            .filter(|row| row.body.contains("許可されていない"))
+            .map(|row| row.body)
+    });
+    assert!(
+        via_bg_read.is_some(),
+        "failure reason must be retrievable via core-bg-read (offload): activities={ids:?}",
+        ids = failed
+            .iter()
+            .map(|a| (a.id, a.label.clone(), a.end_reason.clone()))
+            .collect::<Vec<_>>()
     );
 }

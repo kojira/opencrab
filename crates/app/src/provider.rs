@@ -256,7 +256,7 @@ impl Engine for MockEngine {
                     .map(str::trim)
                     .filter(|body| !body.is_empty());
                 match result {
-                    Some(body) => Ok(say(&format!("synthetic-shell-failure {body}\nNO_REPLY"))),
+                    Some(body) => Ok(say(&format!("synthetic-shell-failure {body}"))),
                     None => Err(EngineError(
                         "mock shell_fail_then_read settled turn did not receive the failure reason"
                             .to_string(),
@@ -1735,8 +1735,8 @@ mod tests {
             only_say(&second_fail)
         );
         assert!(
-            only_say(&second_fail).contains("NO_REPLY"),
-            "settled failure turn matches the QC silent shape: {}",
+            !only_say(&second_fail).contains("NO_REPLY"),
+            "settled failure turn must reply like shell_then_read: {}",
             only_say(&second_fail)
         );
     }
