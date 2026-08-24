@@ -399,19 +399,25 @@ async fn protocol2_requires_ready_and_membership_read_never_hits_store() {
         opencrab_port::GateInstanceId::parse("018f0000-0000-7000-8000-000000000001".to_string())
             .unwrap();
     let kind = GateName::new("discord");
+    let owner = h.sys.create_subject(
+        SubjectKind::Agent,
+        "discord-owner",
+        "p",
+        opencrab_port::Standing::Trusted,
+    );
     h.sys
         .store()
         .install_gate_instance_revision(
             &instance,
             &kind,
             "synthetic",
-            None,
+            Some(owner),
             1,
             true,
             OriginScope::KindAddress,
             IngressDiscovery::Membership,
             "gate-config/discord/v1",
-            &[],
+            br#"{"agent_ids":[],"owner_external_id":"owner-1","self_external_id":"bot-1"}"#,
             1,
         )
         .unwrap();
@@ -463,6 +469,44 @@ async fn protocol2_requires_ready_and_membership_read_never_hits_store() {
         })
         .await
     );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn discord_gate_hello_shape_is_accepted() {
+    let h = build();
+    let instance =
+        GateInstanceId::parse("018f0000-0000-7000-8000-000000000051".to_string()).unwrap();
+    let kind = GateName::new("discord");
+    let owner = h.sys.create_subject(
+        SubjectKind::Agent,
+        "discord-hello",
+        "p",
+        opencrab_port::Standing::Trusted,
+    );
+    h.sys
+        .store()
+        .install_gate_instance_revision(
+            &instance,
+            &kind,
+            "dedicated:discord:Zg",
+            Some(owner),
+            1,
+            true,
+            OriginScope::KindAddress,
+            IngressDiscovery::Membership,
+            "gate-config/discord/v1",
+            br#"{"agent_ids":[],"owner_external_id":"owner-1","self_external_id":"bot-1"}"#,
+            1,
+        )
+        .unwrap();
+    let gate = TestGate::connect(&h.plugd);
+    gate.send(json!({
+        "id":"hello-1","m":"hello","protocol":2,"kind_id":"discord",
+        "instance_id":instance.as_str(),"revision":1,"origin_scope":"kind_address",
+        "address_form":"[0-9]+","ingress_discovery":"membership",
+        "tools":[],"effects":["say","react","ui"],"capabilities":[],"actions":[]
+    }));
+    assert!(gate.wait_for(|log| has_reply_ok(log, "hello-1")).await);
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]

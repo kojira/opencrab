@@ -11,6 +11,14 @@ use std::sync::{Arc, Mutex};
 
 pub type Result<T> = std::result::Result<T, rusqlite::Error>;
 
+mod discord;
+mod observe;
+pub use discord::{
+    discord_launch_decisions_on, discord_launch_decisions_read_only, upsert_discord_kind_on,
+    DiscordLaunchDecision,
+};
+pub use observe::{LabelUpdate, ObserveGateAddress, ObserveRequest};
+
 #[derive(Debug)]
 pub enum GateConnectionStartError {
     InstanceUnknown,
@@ -2112,7 +2120,7 @@ fn deterministic_id(locator: &str) -> String {
     uuid_v5(locator)
 }
 
-fn runtime_uuid_v7(now_nanos: i64, locator: &str) -> String {
+pub(crate) fn runtime_uuid_v7(now_nanos: i64, locator: &str) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -2131,7 +2139,7 @@ fn runtime_uuid_v7(now_nanos: i64, locator: &str) -> String {
     )
 }
 
-fn sha256(bytes: &[u8]) -> Vec<u8> {
+pub(crate) fn sha256(bytes: &[u8]) -> Vec<u8> {
     Sha256::digest(bytes).to_vec()
 }
 
@@ -2270,7 +2278,7 @@ fn set_subject_route_on(
     Ok(())
 }
 
-fn reconcile_subject_routes_on(
+pub(crate) fn reconcile_subject_routes_on(
     conn: &Connection,
     subject: SubjectId,
     place: PlaceId,
@@ -2949,7 +2957,7 @@ impl Store {
         })
     }
 
-    fn c(&self) -> std::sync::MutexGuard<'_, Connection> {
+    pub(crate) fn c(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().unwrap()
     }
 

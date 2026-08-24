@@ -288,6 +288,9 @@ impl Host {
             ),
             None => System::new(store, engine, tool_host, shell_host, notifier, counter, cfg),
         };
+        sys.store()
+            .upsert_discord_kind()
+            .expect("upsert discord kind declaration");
         plugd.attach_system(sys.clone());
         sys.attach_transport(Arc::new(plugd.clone()) as Arc<dyn opencrab_port::Transport>);
         // URL の中身取得の口（DESIGN-images §3）。core-look / core-read が使う。本番は reqwest。
