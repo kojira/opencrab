@@ -147,6 +147,10 @@ pub const NO_REPLY: &str = "NO_REPLY";
 /// モデル地の文は `withheld_text` のまま公開しない。
 pub const OWNER_DIRECT_NO_REPLY_NOTICE: &str = "（発話なし）";
 
+/// 平文解釈が空／空白のみの残余 say を破棄したときのターン記録（#796）。
+/// 公開 Spoke にはしない。観測用に `failure_detail` へ残し、ターンは失敗にしない。
+pub const EMPTY_SAY_DROPPED_NOTE: &str = "empty_say_dropped: whitespace-only remainder discarded";
+
 /// 平文アクション文法の 2 つ目の core 共通語（設計）。`PROGRESS::<文>` 行——「いま何をしているかを
 /// 短く伝える」進捗の揮発表示。**say でもイベントでもない**: 場のログに追記せず、activity progress 通知
 /// として結ばれた全チャネルへ揮発配送し、走行中ターンの activities.label を更新する（記録は activities に
@@ -436,8 +440,11 @@ struct Interpreted {
     tools: Vec<Authorized<ToolCallSpec>>,
     /// 受理したツール行の逐語（ターン記録の tool_lines へ残す・黙って消さない）。
     tool_lines: Vec<String>,
-    /// 残余 say の本文（地の文と、不成立 3 段の行を逐語で残したもの）。空なら None。
+    /// 残余 say の本文（地の文と、不成立 3 段の行を逐語で残したもの）。空または空白のみなら None
+    /// （公開 Spoke にしない・#796）。破棄したら `dropped_empty_remainder`。
     remainder: Option<String>,
+    /// 残余が空または空白のみだったので破棄した（#796）。公開には出さず、呼び手がログ／ターン記録へ残す。
+    dropped_empty_remainder: bool,
     /// NO_REPLY sentinel を見た（残余 say を配送しない印）。明示アクション行は影響を受けず発火する。
     no_reply: bool,
     /// PROGRESS 制御行（`PROGRESS::<文>`）で見た進捗文言を出現順に集めたもの（進捗の揮発表示）。
@@ -3065,6 +3072,15 @@ impl System {
                             None => tool_lines_acc = Some(tl),
                         }
                     }
+                    if interp.dropped_empty_remainder {
+                        eprintln!(
+                            "opencrab-social-runtime: dropped empty/whitespace-only say remainder (place={place}, subject={subject})"
+                        );
+                        append_recorded_text(
+                            &mut failure_detail,
+                            EMPTY_SAY_DROPPED_NOTE.to_string(),
+                        );
+                    }
                     if interp.no_reply {
                         eprintln!(
                             "opencrab-social-runtime: NO_REPLY sentinel detected; withholding public text (place={place}, subject={subject})"
@@ -4397,6 +4413,7 @@ impl System {
     ///      オーナー裁定）。**効果を作る前に core で捌く**ので turn を失敗させない。
     ///
     /// いずれの段も「残す＝残余 say として場のログに載る」ことが記録であって、別の記録機構は足さない。
+    /// 例外は空／空白のみの残余（#796）: 公開 Spoke にせず破棄し、呼び手がログ／ターン記録へ理由を残す。
     ///
     /// `tool_budget` は**この呼び出しで受理できる平文ツール行の残り数**（`plaintext_tools_per_turn` から
     /// 反復ごとに配分）。使い切った後の実行可能候補は段2 へ倒す（暴走ターンの歯止め）。呼び手は受理した
@@ -4557,11 +4574,19 @@ impl System {
         } else {
             Some(remainder_lines.join("\n"))
         };
+        // 空／空白のみの残余は公開 Spoke にしない（#796）。逐語で残す対象は「中身のある行」であり、
+        // 末尾空行や空白だけのセグメントを場へ出す理由は無い。破棄した事実は flag で呼び手へ渡す
+        // （握り潰さず、ログ／ターン記録側で fail loud）。推論全体が空なのはここより前の #719。
+        let (remainder, dropped_empty_remainder) = match remainder {
+            Some(rem) if rem.trim().is_empty() => (None, true),
+            other => (other, false),
+        };
         Ok(Interpreted {
             actions,
             tools,
             tool_lines,
             remainder,
+            dropped_empty_remainder,
             no_reply,
             progress_labels,
         })

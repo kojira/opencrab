@@ -523,3 +523,52 @@ fn shell_failure_reason_readable_on_next_turn() {
             .collect::<Vec<_>>()
     );
 }
+
+fn agent_messages(history: &str) -> Vec<(String, String)> {
+    let body = serde_json::from_str::<serde_json::Value>(history).unwrap_or_default();
+    body.get("messages")
+        .and_then(|m| m.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|m| m.get("kind").and_then(|k| k.as_str()) == Some("agent"))
+        .map(|m| {
+            (
+                m.get("text")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                m.get("kind")
+                    .and_then(|k| k.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            )
+        })
+        .collect()
+}
+
+/// #796: mock が末尾空セグメントを出しても GET に空メッセージは出ない。
+#[test]
+fn trailing_empty_segment_is_not_a_public_message() {
+    let (_core, _web, port, _db) = boot_mock("progress_reply_trailing_empty");
+    assert!(
+        post_until_history_contains(
+            port,
+            "test-owner",
+            "synthetic qc empty-say probe",
+            "synthetic-qc-reply",
+            TIMEOUT
+        ),
+        "GET must contain the public reply body: {}",
+        get_history(port)
+    );
+    let history = get_history(port);
+    let agents = agent_messages(&history);
+    assert!(
+        agents.iter().any(|(text, _)| text == "synthetic-qc-reply"),
+        "public agent body must be the reply content: {history}"
+    );
+    assert!(
+        agents.iter().all(|(text, _)| !text.trim().is_empty()),
+        "GET must not contain an empty agent message: {history}"
+    );
+}

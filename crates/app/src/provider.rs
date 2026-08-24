@@ -51,6 +51,8 @@ enum MockScript {
     ShellThenRead,
     AnswerThenNoReply,
     ShellFailThenRead,
+    /// QC 形（#796）: PROGRESS + reply + 末尾空セグメント。空 Spoke を公開しないことの検査用。
+    ProgressReplyTrailingEmpty,
 }
 
 pub const MOCK_MODEL: &str = "mock";
@@ -86,6 +88,7 @@ impl MockEngine {
             "shell_then_read" => MockScript::ShellThenRead,
             "answer_then_no_reply" => MockScript::AnswerThenNoReply,
             "shell_fail_then_read" => MockScript::ShellFailThenRead,
+            "progress_reply_trailing_empty" => MockScript::ProgressReplyTrailingEmpty,
             other => return Err(format!("unknown OPENCRAB_MOCK_LLM_SCRIPT: {other}")),
         };
         Ok(Self { script })
@@ -262,6 +265,9 @@ impl Engine for MockEngine {
                             .to_string(),
                     )),
                 }
+            }
+            MockScript::ProgressReplyTrailingEmpty => {
+                Ok(say("PROGRESS::読み込み中\n\nreply:1:synthetic-qc-reply\n"))
             }
         }
     }
@@ -1738,6 +1744,19 @@ mod tests {
             !only_say(&second_fail).contains("NO_REPLY"),
             "settled failure turn must reply like shell_then_read: {}",
             only_say(&second_fail)
+        );
+
+        let trailing = MockEngine {
+            script: MockScript::ProgressReplyTrailingEmpty,
+        };
+        let trailing_out = trailing.infer(&ctx, &chunks).await.unwrap();
+        assert_eq!(
+            only_say(&trailing_out),
+            "PROGRESS::読み込み中\n\nreply:1:synthetic-qc-reply\n"
+        );
+        assert!(
+            only_say(&trailing_out).ends_with('\n'),
+            "trailing empty segment must be present in the raw script body"
         );
     }
 
