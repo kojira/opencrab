@@ -12,8 +12,8 @@ use opencrab_plugd::Plugd;
 use opencrab_port::{
     ActivityKindTag, AttachmentKind, Content, EffectKind, EffectSpec, EventKind, GateInstanceId,
     GateName, GateRoute, IngressDiscovery, Notice, Notifier as _Notifier, OriginScope,
-    OutgoingEffect, Property, Role, RoutePurpose, SubjectKind, ToolCallSpec, ToolHost, Transport,
-    TransportDeliveryResult,
+    OutgoingEffect, Property, Role, RoutePurpose, Standing, SubjectKind, ToolCallSpec, ToolHost,
+    Transport, TransportDeliveryResult,
 };
 use opencrab_social_runtime::{Config, Policy, System};
 use opencrab_store::{NewEvent, Store};
@@ -614,6 +614,7 @@ async fn protocol2_malformed_failed_response_and_protocol_matrix_is_strict() {
                             name: "synthetic-op".into(),
                             args: json!({}),
                         },
+                        Standing::Owner,
                     )
                     .await
             });
@@ -678,6 +679,7 @@ async fn failed_connection_cannot_send_or_remove_its_replacement() {
                     name: "synthetic-op".into(),
                     args: json!({}),
                 },
+                Standing::Owner,
             )
             .await
             .unwrap_err();
@@ -732,6 +734,7 @@ async fn failed_connection_cannot_send_or_remove_its_replacement() {
                     name: "synthetic-op".into(),
                     args: json!({}),
                 },
+                Standing::Owner,
             )
             .await
             .unwrap(),

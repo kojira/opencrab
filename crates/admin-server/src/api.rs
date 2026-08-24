@@ -29,7 +29,7 @@ use crate::schedule_cron::schedule_next_fire_at;
 pub struct AdminState {
     /// oc2 の新テーブル（subjects/places/events/turn_records/memories）を読む観測者。
     pub store: Arc<Store>,
-    /// 本体 DB スキーマ（正本・AGREED §2.11）の旧テーブルを読む観測者。読み取り専用で開く。
+    /// 本体 DB スキーマ（正本・AGREED §2.11）の旧テーブル。D25 は voice_config_override へ書く。
     pub db: Arc<Db>,
     /// 文脈予算 = context_window × compaction_ratio。model-pricing 応答に載せる server-global 値。
     pub compaction_ratio: f64,
@@ -821,10 +821,7 @@ pub fn create_router(state: AdminState) -> Router {
             "/api/llm/acp/diagnostics",
             unimpl("diagnostics: runtime が範囲外"),
         )
-        .route(
-            "/api/voice/config",
-            unimpl("voice config: 旧テーブル未移行・runtime 範囲外"),
-        )
+        .merge(crate::voice_routes::voice_config_routes())
         .route(
             "/api/agents/{id}/workspace",
             unimpl("workspace: ファイル面が範囲外"),

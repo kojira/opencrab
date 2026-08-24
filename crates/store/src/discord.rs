@@ -7,6 +7,21 @@ use rusqlite::{params, Connection};
 const DISCORD_KIND: &str = "discord";
 const TOKEN_NAME: &str = "discord_bot_token";
 
+/// DESIGN-DISCORD-GATE §8.1 + voice join/leave（DESIGN-VOICE-DELTA slice 4）。
+/// 接続中か否かで変えない。hello `tools` と同じ 8 名。
+pub fn declared_discord_operations() -> &'static [&'static str] {
+    &[
+        "discord_list_guilds",
+        "discord_list_channels",
+        "discord_create_channel",
+        "discord_create_webhook",
+        "discord_add_reaction",
+        "discord_send_file",
+        "join_voice_channel",
+        "leave_voice_channel",
+    ]
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiscordLaunchDecision {
     pub instance_id: GateInstanceId,
@@ -91,6 +106,23 @@ mod tests {
 
     fn discord_kind() -> GateKindId {
         GateKindId::parse("discord".to_string()).unwrap()
+    }
+
+    #[test]
+    fn declared_discord_operations_are_the_six_gate_ops_plus_join_leave() {
+        assert_eq!(
+            declared_discord_operations(),
+            [
+                "discord_list_guilds",
+                "discord_list_channels",
+                "discord_create_channel",
+                "discord_create_webhook",
+                "discord_add_reaction",
+                "discord_send_file",
+                "join_voice_channel",
+                "leave_voice_channel",
+            ]
+        );
     }
 
     #[test]

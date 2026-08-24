@@ -16,6 +16,7 @@
 mod api;
 mod owner_routes;
 mod schedule_cron;
+mod voice_routes;
 
 use std::sync::Arc;
 
@@ -60,14 +61,11 @@ async fn main() -> std::io::Result<()> {
     let store = Store::open_read_write_no_recover(&db_path).unwrap_or_else(|e| {
         panic!("DB（store）を開けませんでした（{db_path}）: {e}");
     });
-    // 旧テーブル（本体 DB スキーマ・正本）を読む。**Store::open を使わず** SQLite を read-only で
-    // 直接開き、opencrab-db の Db でラップする（from_connection は schema 初期化をしない＝DB を書かない）。
-    let ro_conn =
-        rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .unwrap_or_else(|e| {
-                panic!("DB（db）を読み取り専用で開けませんでした（{db_path}）: {e}")
-            });
-    let db = Db::from_connection(ro_conn);
+    // 旧テーブル（本体 DB スキーマ・正本）。schema 初期化はしない。
+    // D25 は `voice_config_override`（B 単独の家）へ書くので RW。他経路は読み取りのまま。
+    let db_conn = rusqlite::Connection::open(&db_path)
+        .unwrap_or_else(|e| panic!("DB（db）を開けませんでした（{db_path}）: {e}"));
+    let db = Db::from_connection(db_conn);
 
     let state = api::AdminState {
         store: Arc::new(store),

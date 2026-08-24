@@ -1411,6 +1411,7 @@ impl ToolHost for Plugd {
         &self,
         route: &GateRoute,
         call: &ToolCallSpec,
+        standing: Standing,
     ) -> Result<String, ToolError> {
         let conn = self.conn_for_instance(&route.instance_id).ok_or_else(|| {
             ToolError(format!(
@@ -1422,6 +1423,16 @@ impl ToolHost for Plugd {
         req.insert("m".into(), "tool".into());
         req.insert("name".into(), call.name.clone().into());
         req.insert("args".into(), call.args.clone());
+        req.insert("address".into(), route.address.clone().into());
+        req.insert(
+            "caller".into(),
+            match standing {
+                Standing::Owner => "owner",
+                Standing::Trusted => "trusted",
+                Standing::Unknown => "other",
+            }
+            .into(),
+        );
         let (id, rx) = match conn.issue_for_route(route, req) {
             Ok(request) => request,
             Err(RouteIssueError::NotReady) => {

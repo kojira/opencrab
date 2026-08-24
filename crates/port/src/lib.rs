@@ -659,6 +659,7 @@ pub trait ToolHost: Send + Sync {
         &self,
         route: &GateRoute,
         call: &ToolCallSpec,
+        standing: Standing,
     ) -> Result<String, ToolError>;
 }
 

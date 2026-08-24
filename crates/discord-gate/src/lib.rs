@@ -1,5 +1,6 @@
 //! Discord adapter: protocol-2 変換と discovery。core/store は使わない。
 
+mod operations;
 mod voice_join;
 mod voice_pipeline;
 mod voice_session;
@@ -14,6 +15,12 @@ use serenity::model::channel::ChannelType;
 pub const VOICE_CONFIG_B64_ENV: &str = "OPENCRAB_VOICE_CONFIG_B64";
 pub const OWNER_AGENT_ID_ENV: &str = "OPENCRAB_GATE_OWNER_AGENT_ID";
 
+pub use operations::{
+    add_reaction_success_json, create_channel_success_json, create_webhook_success_json,
+    join_success_json, leave_success_json, list_channels_success_json, list_guilds_success_json,
+    plan_discord_operation, send_file_success_json, voice_caller_from_role, ChannelPolicy,
+    DiscordOpDeny, DiscordOpPlan, ListedChannel, ListedGuild,
+};
 pub use voice_join::{
     evaluate_join_voice, evaluate_leave_voice, parse_vc_channel_id, voice_caller_allowed,
     JoinVoicePlan, VoiceCaller, VoiceJoinDeny,
@@ -142,6 +149,119 @@ pub fn discovery_to_wire(discovery: &MembershipDiscovery) -> Value {
     Value::Object(object)
 }
 
+/// store `declared_discord_operations()` と同じ 8 名（hello と route を一致させる）。
+pub fn declared_discord_operations() -> &'static [&'static str] {
+    &[
+        "discord_list_guilds",
+        "discord_list_channels",
+        "discord_create_channel",
+        "discord_create_webhook",
+        "discord_add_reaction",
+        "discord_send_file",
+        "join_voice_channel",
+        "leave_voice_channel",
+    ]
+}
+
+/// 本体 `gateway_actions/mod.rs` の公開 schema を hello `tools` へ載せる。
+pub fn declared_discord_tool_defs() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "discord_list_guilds",
+            "description": "Botが参加しているDiscordサーバー（guild）の一覧を取得する。返り値の各サーバーの `id` フィールド（数値文字列）を、他のアクションの `guild_id` パラメータとして使用すること。",
+            "params": {"type": "object", "properties": {}, "required": []}
+        }),
+        json!({
+            "name": "discord_list_channels",
+            "description": "指定サーバーのテキストチャンネル一覧と、各チャンネルの現在のreadable/writable/whitelisted設定を取得する。チャンネルの `id` フィールドを discord_channel_config の channel_id として使用すること。guild_id は discord_list_guilds で取得した数値IDを指定。",
+            "params": {
+                "type": "object",
+                "properties": {
+                    "guild_id": {
+                        "type": "string",
+                        "description": "対象サーバーの数値ID（discord_list_guildsの結果から取得）。サーバー名ではなくIDを指定すること。"
+                    }
+                },
+                "required": ["guild_id"]
+            }
+        }),
+        json!({
+            "name": "discord_create_channel",
+            "description": "指定したDiscordサーバー（guild）に新しいテキストチャンネルを作成する。Botには対象サーバーのManage Channels権限が必要。guild_idは必須で、discord_list_guildsで取得した数値IDを指定すること（このレイヤーではデフォルトサーバーを解決できないため省略不可）。返り値のurlでチャンネルを開ける。",
+            "params": {
+                "type": "object",
+                "properties": {
+                    "guild_id": {
+                        "type": "string",
+                        "description": "チャンネルを作成する対象サーバーの数値ID（discord_list_guildsの結果から取得）。必須。サーバー名ではなくIDを指定すること。"
+                    },
+                    "name": {"type": "string", "description": "作成するチャンネル名。2〜100文字。"},
+                    "parent_id": {"type": "string", "description": "親カテゴリの数値ID（省略可）。指定するとそのカテゴリ配下に作成される。"},
+                    "topic": {"type": "string", "description": "チャンネルトピック（省略可・0〜1024文字）。"},
+                    "reason": {"type": "string", "description": "Discord監査ログ（Audit Log）に記録する理由（省略時: opencrab discord_create_channel）。"}
+                },
+                "required": ["guild_id", "name"]
+            }
+        }),
+        json!({
+            "name": "discord_create_webhook",
+            "description": "指定したDiscordテキストチャンネルにwebhookを作成し、spawn_subtask.webhook.urlに渡せるURLを返す。Botには対象チャンネルのManage Webhooks権限が必要。返り値のurlは秘密トークンを含むため公開しないこと。",
+            "params": {
+                "type": "object",
+                "properties": {
+                    "channel_id": {"type": "string", "description": "webhookを作成するDiscordチャンネルの数値ID。"},
+                    "name": {"type": "string", "description": "webhook名（省略時: opencrab-subtask）。2〜80文字。"}
+                },
+                "required": ["channel_id"]
+            }
+        }),
+        json!({
+            "name": "discord_add_reaction",
+            "description": "Discordメッセージにリアクション（絵文字）を追加する。Unicode絵文字（例: ⚡）またはカスタム絵文字（name:id形式）を指定できる。テキストで返すほどでもない反応は、これでリアクションだけ付けて応答本文を NO_REPLY にしてよい。",
+            "params": {
+                "type": "object",
+                "properties": {
+                    "channel_id": {"type": "string", "description": "メッセージが存在するチャンネルの数値ID。"},
+                    "message_id": {"type": "string", "description": "リアクションを付けるメッセージの数値ID。現在処理中のメッセージのIDを使う場合はコンテキストから取得すること。"},
+                    "emoji": {"type": "string", "description": "Unicode絵文字（例: ⚡、👍）またはカスタム絵文字（形式: 絵文字名:数値ID、例: parrot:123456789012345）。Unicode絵文字の場合はそのまま文字列を渡す。"}
+                },
+                "required": ["channel_id", "message_id", "emoji"]
+            }
+        }),
+        json!({
+            "name": "discord_send_file",
+            "description": "Discordチャンネルにファイル（画像等）をアップロードして送信する。ファイルパスはワークスペース内のパスのみ指定可能（パストラバーサル防止）。25MBサイズ制限あり。",
+            "params": {
+                "type": "object",
+                "required": ["channel_id", "file_path"],
+                "properties": {
+                    "channel_id": {"type": "string", "description": "送信先DiscordチャンネルのID（数値文字列）。現在のチャンネルIDはシステムプロンプトの[Discord context]セクションに`channel_id=XXXX`として記載されている。ユーザーIDやBotIDではなくチャンネルIDを指定すること。"},
+                    "file_path": {"type": "string", "description": "送信するファイルのパス（ワークスペース相対パスまたは絶対パス）"},
+                    "caption": {"type": "string", "description": "ファイルに添付するテキストキャプション（省略可）"},
+                    "filename": {"type": "string", "description": "Discord上で表示されるファイル名（省略時は元のファイル名）"}
+                }
+            }
+        }),
+        json!({
+            "name": "join_voice_channel",
+            "description": "ボイスチャンネル（VC）に参加して音声対話を開始する。参加後、VC内の発話はユーザーごとに文字起こしされてこのチャンネルの会話として届き、返信は自動で読み上げられる。owner/trusted_userの依頼時のみ使用可。",
+            "params": {
+                "type": "object",
+                "properties": {
+                    "channel_id": {"type": "string", "description": "参加するボイスチャンネルのID（数値文字列）"},
+                    "text_channel_id": {"type": "string", "description": "文字起こしの注入先テキストチャンネルID（省略時はこの会話のチャンネル）"}
+                },
+                "required": ["channel_id"]
+            }
+        }),
+        json!({
+            "name": "leave_voice_channel",
+            "description": "現在参加中のボイスチャンネルから退出する。owner/trusted_userの依頼時のみ使用可。",
+            "params": {"type": "object", "properties": {}, "required": []}
+        }),
+    ]
+}
+
 pub fn protocol2_hello(instance_id: &GateInstanceId, revision: u64) -> Value {
     json!({
         "id": "hello-1",
@@ -153,7 +273,7 @@ pub fn protocol2_hello(instance_id: &GateInstanceId, revision: u64) -> Value {
         "origin_scope": ORIGIN_SCOPE,
         "address_form": ADDRESS_FORM,
         "ingress_discovery": INGRESS_DISCOVERY,
-        "tools": [],
+        "tools": declared_discord_tool_defs(),
         "effects": ["say", "react", "ui"],
         "capabilities": [],
         "actions": []
@@ -441,7 +561,16 @@ mod tests {
         assert_eq!(hello["ingress_discovery"], "membership");
         assert_eq!(hello["origin_scope"], "kind_address");
         assert_eq!(hello["effects"], json!(["say", "react", "ui"]));
-        assert_eq!(hello["tools"], json!([]));
+        let names: Vec<&str> = hello["tools"]
+            .as_array()
+            .expect("hello.tools")
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("name"))
+            .collect();
+        assert_eq!(names, declared_discord_operations());
+        assert_eq!(names.len(), 8);
+        assert!(names.contains(&"join_voice_channel"));
+        assert!(names.contains(&"leave_voice_channel"));
     }
 
     #[test]

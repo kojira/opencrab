@@ -3,16 +3,21 @@
 //! 子は runner が exec する。token は `OPENCRAB_GATE_TOKEN`。argv にも log にも出さない。
 
 use opencrab_discord_gate::{
-    address_kind_from_channel_type, exclude_self_author, map_message_create, protocol2_failed,
-    protocol2_hello, protocol2_ready, read_boot_config_from_env, resolve_discord_discovery,
-    said_event_to_wire, try_build_voice_providers, ChannelFacts, DiscoveryError,
-    MessageCreateInput, SaidEvent, VoiceSessionManager,
+    add_reaction_success_json, address_kind_from_channel_type, create_channel_success_json,
+    create_webhook_success_json, exclude_self_author, join_success_json, leave_success_json,
+    list_channels_success_json, list_guilds_success_json, map_message_create,
+    plan_discord_operation, protocol2_failed, protocol2_hello, protocol2_ready,
+    read_boot_config_from_env, resolve_discord_discovery, said_event_to_wire,
+    send_file_success_json, try_build_voice_providers, voice_caller_from_role, ChannelFacts,
+    ChannelPolicy, DiscordOpPlan, DiscoveryError, ListedChannel, ListedGuild, MessageCreateInput,
+    SaidEvent, VoiceSessionManager,
 };
 use opencrab_port::GateInstanceId;
 use serde_json::{json, Value};
 use serenity::all::{
-    Channel, ChannelId, ChannelType, Context, CreateMessage, EditMessage, EventHandler,
-    GatewayIntents, Http, Message, MessageId, ReactionType, Ready,
+    Channel, ChannelId, ChannelType, Context, CreateAttachment, CreateChannel, CreateMessage,
+    CreateWebhook, EditMessage, EventHandler, GatewayIntents, Http, Message, MessageId,
+    ReactionType, Ready,
 };
 use serenity::async_trait;
 use std::collections::HashMap;
@@ -320,6 +325,7 @@ async fn apply_effect(
 struct Incoming {
     hello_epoch: oneshot::Sender<u64>,
     effects: mpsc::UnboundedSender<Value>,
+    tools: mpsc::UnboundedSender<Value>,
 }
 
 async fn read_core(
@@ -377,10 +383,7 @@ async fn read_core(
                 }
                 Some("activity") => {}
                 Some("tool") => {
-                    let id = object.get("id").and_then(Value::as_str).unwrap_or("");
-                    core.send_line(
-                        &json!({"id": id, "err": {"code": "unknown_message", "at": "tool"}}),
-                    );
+                    let _ = incoming.tools.send(value);
                 }
                 _ => {}
             }
@@ -450,6 +453,276 @@ async fn effect_worker(
     }
 }
 
+fn tool_ok(result: Value) -> Value {
+    json!({"result": result.to_string()})
+}
+
+async fn session_guild_from_http(http: &Http, address: &str) -> Option<String> {
+    let channel_id = address.parse::<u64>().ok()?;
+    match http.get_channel(ChannelId::new(channel_id)).await {
+        Ok(Channel::Guild(channel)) => Some(channel.guild_id.to_string()),
+        _ => None,
+    }
+}
+
+async fn apply_discord_op(
+    http: &Http,
+    voice: Option<&Arc<VoiceSessionManager>>,
+    owner_agent_id: Option<&str>,
+    plan: DiscordOpPlan,
+) -> Result<Value, String> {
+    match plan {
+        DiscordOpPlan::ListGuilds => {
+            let guilds = http
+                .get_guilds(None, None)
+                .await
+                .map_err(|error| format!("サーバー一覧の取得に失敗: {error}"))?;
+            let list: Vec<ListedGuild> = guilds
+                .into_iter()
+                .map(|guild| ListedGuild {
+                    id: guild.id.to_string(),
+                    name: guild.name,
+                })
+                .collect();
+            Ok(list_guilds_success_json(&list))
+        }
+        DiscordOpPlan::ListChannels { guild_id } => {
+            let guild = serenity::model::id::GuildId::new(guild_id);
+            let channels = http
+                .get_channels(guild)
+                .await
+                .map_err(|error| format!("チャンネル一覧の取得に失敗: {error}"))?;
+            let list: Vec<ListedChannel> = channels
+                .into_iter()
+                .map(|channel| ListedChannel {
+                    id: channel.id.to_string(),
+                    name: channel.name,
+                    is_text: channel.kind == ChannelType::Text,
+                    policy: ChannelPolicy::HardDefault,
+                })
+                .collect();
+            list_channels_success_json(&guild_id.to_string(), &list).map_err(|deny| deny.message())
+        }
+        DiscordOpPlan::CreateChannel {
+            guild_id,
+            name,
+            parent_id,
+            topic,
+            reason,
+        } => {
+            let mut builder = CreateChannel::new(name.clone()).kind(ChannelType::Text);
+            if let Some(parent_id) = parent_id {
+                builder = builder.category(serenity::model::id::ChannelId::new(parent_id));
+            }
+            if let Some(topic) = topic {
+                builder = builder.topic(topic);
+            }
+            let channel = serenity::model::id::GuildId::new(guild_id)
+                .create_channel(http, builder)
+                .await
+                .map_err(|error| format!("チャンネル作成に失敗: {error}"))?;
+            let _ = reason;
+            let channel_id = channel.id.to_string();
+            let parent_id = channel.parent_id.map(|parent| parent.to_string());
+            Ok(create_channel_success_json(
+                &channel_id,
+                &channel.name,
+                &channel.guild_id.to_string(),
+                parent_id.as_deref(),
+            ))
+        }
+        DiscordOpPlan::CreateWebhook { channel_id, name } => {
+            let webhook = ChannelId::new(channel_id)
+                .create_webhook(http, CreateWebhook::new(&name))
+                .await
+                .map_err(|error| format!("webhook 作成に失敗: {error}"))?;
+            let url = webhook
+                .url()
+                .map_err(|error| format!("webhook URL の取得に失敗: {error}"))?;
+            Ok(create_webhook_success_json(
+                &channel_id.to_string(),
+                &webhook.id.to_string(),
+                webhook.name.as_deref().unwrap_or(&name),
+                &url,
+            ))
+        }
+        DiscordOpPlan::AddReaction {
+            channel_id,
+            message_id,
+            emoji,
+        } => {
+            let reaction = if let Some((name, id)) = emoji.split_once(':') {
+                if let Ok(emoji_id) = id.parse::<u64>() {
+                    ReactionType::Custom {
+                        animated: false,
+                        id: serenity::model::id::EmojiId::new(emoji_id),
+                        name: Some(name.to_string()),
+                    }
+                } else {
+                    ReactionType::Unicode(emoji.clone())
+                }
+            } else {
+                ReactionType::Unicode(emoji.clone())
+            };
+            ChannelId::new(channel_id)
+                .create_reaction(http, MessageId::new(message_id), reaction)
+                .await
+                .map_err(|error| format!("リアクションの追加に失敗: {error}"))?;
+            Ok(add_reaction_success_json(
+                &channel_id.to_string(),
+                &message_id.to_string(),
+                &emoji,
+            ))
+        }
+        DiscordOpPlan::SendFile {
+            channel_id,
+            file_path,
+            caption,
+            filename,
+        } => {
+            let workspace = std::env::var("OPENCRAB_WORKSPACE")
+                .map_err(|_| "discord_send_file requires OPENCRAB_WORKSPACE".to_string())?;
+            let root = std::path::PathBuf::from(workspace)
+                .canonicalize()
+                .map_err(|error| format!("ワークスペースのパス解決に失敗: {error}"))?;
+            let abs = if std::path::Path::new(&file_path).is_absolute() {
+                std::path::PathBuf::from(&file_path)
+            } else {
+                root.join(&file_path)
+            };
+            let canonical = abs
+                .canonicalize()
+                .map_err(|error| format!("ファイルが見つかりません: {file_path}: {error}"))?;
+            if !canonical.starts_with(&root) {
+                return Err(format!(
+                    "ワークスペース外のファイルは送信できません: {file_path}"
+                ));
+            }
+            let meta = tokio::fs::metadata(&canonical)
+                .await
+                .map_err(|error| format!("ファイル情報の取得に失敗: {error}"))?;
+            if meta.len() > 25 * 1024 * 1024 {
+                return Err(format!(
+                    "ファイルサイズが25MB制限を超えています: {}bytes",
+                    meta.len()
+                ));
+            }
+            let mut attachment = CreateAttachment::path(&canonical)
+                .await
+                .map_err(|error| format!("添付の作成に失敗: {error}"))?;
+            let display_name = if let Some(filename) = filename {
+                attachment.filename = filename.clone();
+                filename
+            } else {
+                canonical
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("file")
+                    .to_string()
+            };
+            let mut message = CreateMessage::new().add_file(attachment);
+            if !caption.is_empty() {
+                message = message.content(caption);
+            }
+            ChannelId::new(channel_id)
+                .send_message(http, message)
+                .await
+                .map_err(|error| format!("ファイル送信に失敗: {error}"))?;
+            Ok(send_file_success_json(
+                &channel_id.to_string(),
+                &display_name,
+            ))
+        }
+        DiscordOpPlan::JoinVoice(plan) => {
+            let voice = voice.ok_or_else(|| {
+                "voice 機能が無効です（config.toml の [voice] enabled = true が必要）".to_string()
+            })?;
+            let agent = owner_agent_id.unwrap_or("");
+            voice
+                .join(
+                    plan.guild_id,
+                    plan.vc_channel_id,
+                    Some(plan.text_channel_id.clone()),
+                    agent,
+                )
+                .await
+                .map_err(|error| format!("VC 参加に失敗: {error:#}"))?;
+            Ok(join_success_json(&plan))
+        }
+        DiscordOpPlan::LeaveVoice { guild_id } => {
+            let voice = voice.ok_or_else(|| "voice 機能が無効です".to_string())?;
+            voice
+                .leave(guild_id)
+                .await
+                .map_err(|error| format!("VC 退出に失敗: {error:#}"))?;
+            Ok(leave_success_json())
+        }
+    }
+}
+
+async fn tool_worker(
+    core: Arc<CoreLink>,
+    http: Option<Arc<Http>>,
+    voice: Option<Arc<VoiceSessionManager>>,
+    owner_agent_id: Option<String>,
+    mut rx: mpsc::UnboundedReceiver<Value>,
+) {
+    while let Some(value) = rx.recv().await {
+        let id = value
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if !core.active.load(Ordering::SeqCst) {
+            core.send_line(&json!({"id": id, "err": {"code": "instance_not_ready", "at": "tool"}}));
+            continue;
+        }
+        let Some(http) = http.as_ref() else {
+            core.send_line(&json!({"id": id, "err": {"code": "instance_not_ready", "at": "tool"}}));
+            continue;
+        };
+        let name = value.get("name").and_then(Value::as_str).unwrap_or("");
+        let args = value.get("args").cloned().unwrap_or(json!({}));
+        let address = value.get("address").and_then(Value::as_str);
+        let caller = voice_caller_from_role(value.get("caller").and_then(Value::as_str));
+        let session_text = args
+            .get("text_channel_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .or(address);
+        let session_guild = match value.get("guild_id").and_then(Value::as_str) {
+            Some(guild) if !guild.is_empty() => Some(guild.to_string()),
+            _ => match address {
+                Some(address) => session_guild_from_http(http, address).await,
+                None => None,
+            },
+        };
+        match plan_discord_operation(
+            name,
+            &args,
+            &caller,
+            voice.is_some(),
+            session_guild.as_deref(),
+            session_text,
+        ) {
+            Ok(plan) => {
+                match apply_discord_op(http, voice.as_ref(), owner_agent_id.as_deref(), plan).await
+                {
+                    Ok(result) => core.send_line(&json!({"id": id, "ok": tool_ok(result)})),
+                    Err(error) => core.send_line(&json!({
+                        "id": id,
+                        "err": {"code": "failed", "at": "tool", "detail": error}
+                    })),
+                }
+            }
+            Err(deny) => core.send_line(&json!({
+                "id": id,
+                "err": {"code": "failed", "at": "tool", "detail": deny.message()}
+            })),
+        }
+    }
+}
+
 async fn voice_said_worker(core: Arc<CoreLink>, mut rx: mpsc::UnboundedReceiver<SaidEvent>) {
     while let Some(event) = rx.recv().await {
         if !core.active.load(Ordering::SeqCst) {
@@ -468,6 +741,7 @@ async fn connect_core(
 ) -> (
     Arc<CoreLink>,
     oneshot::Receiver<u64>,
+    mpsc::UnboundedReceiver<Value>,
     mpsc::UnboundedReceiver<Value>,
 ) {
     let stream = loop {
@@ -492,16 +766,18 @@ async fn connect_core(
     let core = CoreLink::new(out_tx);
     let (hello_tx, hello_rx) = oneshot::channel();
     let (effect_tx, effect_rx) = mpsc::unbounded_channel();
+    let (tool_tx, tool_rx) = mpsc::unbounded_channel();
     tokio::spawn(read_core(
         read_half,
         core.clone(),
         Incoming {
             hello_epoch: hello_tx,
             effects: effect_tx,
+            tools: tool_tx,
         },
     ));
     core.send_line(&protocol2_hello(instance, revision));
-    (core, hello_rx, effect_rx)
+    (core, hello_rx, effect_rx, tool_rx)
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -509,7 +785,7 @@ async fn main() {
     let boot = read_boot_config_from_env(|name| std::env::var(name).ok()).unwrap_or_else(|error| {
         panic!("{error}");
     });
-    let (core, hello_rx, effect_rx) =
+    let (core, hello_rx, effect_rx, tool_rx) =
         connect_core(&boot.socket, &boot.instance_id, boot.revision).await;
     let epoch = hello_rx
         .await
@@ -518,6 +794,7 @@ async fn main() {
         .unwrap_or_else(|| panic!("core rejected discord hello"));
     if let Some(code) = boot.boot_error {
         tokio::spawn(effect_worker(core.clone(), None, None, None, effect_rx));
+        tokio::spawn(tool_worker(core.clone(), None, None, None, tool_rx));
         core.send_line(&protocol2_failed("failed-1", epoch, &code));
         tokio::time::sleep(Duration::from_millis(100)).await;
         return;
@@ -529,6 +806,7 @@ async fn main() {
     let http = Http::new(&token);
     if let Err(error) = http.get_current_user().await {
         tokio::spawn(effect_worker(core.clone(), None, None, None, effect_rx));
+        tokio::spawn(tool_worker(core.clone(), None, None, None, tool_rx));
         core.send_line(&protocol2_failed(
             "failed-1",
             epoch,
@@ -573,10 +851,17 @@ async fn main() {
     tokio::spawn(voice_said_worker(core.clone(), voice_rx));
     tokio::spawn(effect_worker(
         core.clone(),
+        Some(http_for_effects.clone()),
+        voice.clone(),
+        boot.owner_agent_id.clone(),
+        effect_rx,
+    ));
+    tokio::spawn(tool_worker(
+        core.clone(),
         Some(http_for_effects),
         voice,
         boot.owner_agent_id.clone(),
-        effect_rx,
+        tool_rx,
     ));
     tokio::spawn(async move {
         if let Err(error) = client.start().await {
