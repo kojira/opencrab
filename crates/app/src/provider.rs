@@ -57,6 +57,8 @@ enum MockScript {
     ShellThenBgReadBeforeSettle,
     /// QC 形（#796）: PROGRESS + reply + 末尾空セグメント。空 Spoke を公開しないことの検査用。
     ProgressReplyTrailingEmpty,
+    /// #815: 同一ターン継続。1 回目はツール呼び出しを text で書き done=false。native tool_calls は出さない。
+    TextThenContinue,
 }
 
 pub const MOCK_MODEL: &str = "mock";
@@ -140,6 +142,7 @@ impl MockEngine {
             "shell_offload_then_read" => MockScript::ShellOffloadThenRead,
             "shell_then_bg_read_before_settle" => MockScript::ShellThenBgReadBeforeSettle,
             "progress_reply_trailing_empty" => MockScript::ProgressReplyTrailingEmpty,
+            "text_then_continue" => MockScript::TextThenContinue,
             other => return Err(format!("unknown OPENCRAB_MOCK_LLM_SCRIPT: {other}")),
         };
         Ok(Self { script })
@@ -417,6 +420,22 @@ impl Engine for MockEngine {
             }
             MockScript::ProgressReplyTrailingEmpty => {
                 Ok(say("PROGRESS::読み込み中\n\nreply:1:synthetic-qc-reply\n"))
+            }
+            MockScript::TextThenContinue => {
+                // QC 形（#815）: ツール呼び出しを text として書いたあと、同一ターンで継続する。
+                // 未宣言 verb なので実行せず地の文のまま（決着ターンを起こさない）。
+                let continued = ctx
+                    .history
+                    .iter()
+                    .any(|message| message.role == MsgRole::Assistant);
+                if !continued {
+                    return Ok(InferOutput {
+                        effects: vec![EffectSpec::say("nosuchtool::{}\n")],
+                        tool_calls: vec![],
+                        done: false,
+                    });
+                }
+                Ok(say("mock continued after text tool"))
             }
         }
     }
@@ -2009,6 +2028,24 @@ mod tests {
             only_say(&trailing_out).ends_with('\n'),
             "trailing empty segment must be present in the raw script body"
         );
+
+        let text_cont = MockEngine {
+            script: MockScript::TextThenContinue,
+        };
+        let first_text = text_cont.infer(&ctx, &chunks).await.unwrap();
+        assert!(!first_text.done);
+        assert!(first_text.tool_calls.is_empty());
+        assert_eq!(only_say(&first_text), "nosuchtool::{}\n");
+        let continued_ctx = Context {
+            history: vec![opencrab_port::Message {
+                role: MsgRole::Assistant,
+                content: vec![Block::Text("nosuchtool::{}\n".to_string())],
+            }],
+            ..Context::default()
+        };
+        let second_text = text_cont.infer(&continued_ctx, &chunks).await.unwrap();
+        assert!(second_text.done);
+        assert_eq!(only_say(&second_text), "mock continued after text tool");
     }
 
     fn only_error(deltas: Vec<Delta>) -> String {

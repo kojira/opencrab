@@ -158,6 +158,10 @@ pub const EMPTY_SAY_DROPPED_NOTE: &str = "empty_say_dropped: whitespace-only rem
 /// 出す）。3 つ目の共通語が来たら、この 2 つを小さな表にまとめる（今は 2 語なので分岐で足りる）。
 pub const PROGRESS: &str = "PROGRESS";
 
+/// 同一ターン継続で history が assistant 末尾のとき、LLM payload にだけ挟む内部 user（#815）。
+/// 公開発言にもアクション文法の解釈にも載せない。Claude Sonnet 5 系は assistant 末尾（prefill）を 400 にする。
+pub const CONTINUE_TURN: &str = "[系: 継続]";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TurnReason {
     /// 即応を起こした実際の event。Background 結果の元発端は、この seq に結びついた provenance から引く。
@@ -267,6 +271,19 @@ fn build_prompt_json(ctx: &Context, model: Option<&str>) -> String {
         }
     }
     req.to_string()
+}
+
+/// ターン内会話を LLM へ渡す形へ写す。assistant 末尾なら継続を促す内部 user を挟む（#815）。
+/// ループ側の `history`（公開解釈の対象ではないが、モデル応答の忠実な積み）は変えない。
+fn history_for_llm(history: &[Message]) -> Vec<Message> {
+    let mut out = history.to_vec();
+    if matches!(out.last().map(|m| m.role), Some(MsgRole::Assistant)) {
+        out.push(Message {
+            role: MsgRole::User,
+            content: vec![Block::Text(CONTINUE_TURN.to_string())],
+        });
+    }
+    out
 }
 
 /// ターン内会話の 1 メッセージを、ダッシュボードの ChatMessage 列へ展開する（#766）。テキストと
@@ -2911,12 +2928,13 @@ impl System {
             }
             // 反復ごとに文脈を組み直さず、積んだ会話を渡す（増えた分だけ足す・§05）。
             // system はターン跨ぎで一定——反復ごとに同じものを渡す（キャッシュ prefix になる）。
+            // assistant 末尾の継続は payload にだけ内部 user を挟む（公開会話は変えない・#815）。
             let ctx = Context {
                 place: base_ctx.place,
                 subject: base_ctx.subject,
                 system: base_ctx.system.clone(),
                 rendered: base_ctx.rendered.clone(),
-                history: history.clone(),
+                history: history_for_llm(&history),
                 ctx_from_seq: base_ctx.ctx_from_seq,
                 ctx_to_seq: base_ctx.ctx_to_seq,
                 skipped_from_seq: base_ctx.skipped_from_seq,
@@ -2933,7 +2951,8 @@ impl System {
             // この反復で実際に infer へ渡す文脈を観測する（トークン数・切り詰めの有無と範囲・§10）。
             // トークン数は「最初の文脈＋積んだ会話」の大きさ（反復ごとに増える）。切り詰めは最初の組み立てのもの。
             let counter = &self.0.counter;
-            let hist_tokens: usize = history
+            let hist_tokens: usize = ctx
+                .history
                 .iter()
                 .flat_map(|m| &m.content)
                 .map(|b| match b {

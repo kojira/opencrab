@@ -808,6 +808,68 @@ fn agent_messages(history: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// #815: 同一ターン継続で LLM へ送る messages が assistant 末尾（prefill）にならない。
+#[test]
+fn continuation_llm_messages_do_not_end_with_assistant() {
+    let (_core, _web, port, db) = boot_mock("text_then_continue");
+    assert!(
+        post_until_history_contains(
+            port,
+            "synthetic",
+            "synthetic text-tool continue probe",
+            "mock continued after text tool",
+            TIMEOUT
+        ),
+        "continuation must produce the second-iteration reply: {}",
+        get_history(port)
+    );
+    let history = get_history(port);
+    let agents = agent_messages(&history);
+    assert!(
+        agents
+            .iter()
+            .any(|(text, _)| text == "mock continued after text tool"),
+        "public reply must stay the continued body: {history}"
+    );
+    assert!(
+        agents
+            .iter()
+            .any(|(text, _)| text.contains("nosuchtool::{}")),
+        "first-iteration tool-as-text must remain public prose: {history}"
+    );
+
+    let conn = rusqlite::Connection::open(&db).expect("open db after text_then_continue");
+    let mut stmt = conn
+        .prepare("SELECT iteration, prompt FROM llm_logs ORDER BY iteration")
+        .expect("prepare llm_logs");
+    let rows: Vec<(i64, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .expect("query llm_logs")
+        .map(|r| r.expect("llm_logs row"))
+        .collect();
+    assert!(
+        rows.len() >= 2,
+        "continuation must call LLM at least twice: {rows:?}"
+    );
+    for (iteration, prompt) in &rows {
+        let body: serde_json::Value =
+            serde_json::from_str(prompt).expect("llm_logs.prompt is JSON");
+        let messages = body
+            .get("messages")
+            .and_then(|m| m.as_array())
+            .expect("prompt messages");
+        let last_role = messages
+            .last()
+            .and_then(|m| m.get("role"))
+            .and_then(|r| r.as_str());
+        assert_ne!(
+            last_role,
+            Some("assistant"),
+            "iteration {iteration} must not send assistant-ending (prefill) messages: {prompt}"
+        );
+    }
+}
+
 /// #796: mock が末尾空セグメントを出しても GET に空メッセージは出ない。
 #[test]
 fn trailing_empty_segment_is_not_a_public_message() {
