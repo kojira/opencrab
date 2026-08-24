@@ -25,6 +25,7 @@ store は owner ID 日次書き込みのため **RW・no-recover** で開く（`
 - `soul_presets`（B 表）の list/create/delete/apply。Apply は SubjectPatch で persona 合成を書く。
 - Skills（台帳 `skills`）の GET/POST/PUT/toggle/archive/restore/seed-standard。unused は 501。
 - curated DELETE は `forget`。memory index / daily-log-index の WRITE は B 表（#770 と同じ subject→旧 agent_id UUID。未解決・表不在は 501）。GET status/tree は 501。
+- `POST /api/sessions` は `PlaceCreateLegacy`（`{theme,mode?,participant_ids,max_turns?}` → `{id}`。未解決 participant は 400。重複 participant_ids は畳んで 200）。`POST /api/sessions/{id}/mentor` は `PrivateJournalAppendMentor`（`{content}` → `{id}`。events に載せない）。`POST /api/sessions/{id}/messages` は 501。値つき未復元キーは 501。
 
 ## ビルドと起動
 

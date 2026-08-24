@@ -754,6 +754,7 @@ pub fn create_router(state: AdminState) -> Router {
         .route("/api/sessions", get(list_sessions))
         .route("/api/sessions/{id}", get(get_session))
         .route("/api/sessions/{id}/logs", get(list_session_logs))
+        .merge(crate::session_routes::session_write_routes())
         .route("/api/agents/{id}/memory/curated", get(list_curated_memory))
         // --- 旧テーブルの読み取り（本体 DB スキーマが正本・§2.11）。opencrab-db 経由で配線。
         //     現 oc2 DB には旧テーブルが無いので db_read が 501（未移行）を返す＝偽装しない。 ---

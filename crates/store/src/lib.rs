@@ -16,6 +16,7 @@ mod discord;
 mod memory_index;
 mod observe;
 mod owner_identity;
+mod places_legacy;
 mod skills;
 mod soul_presets;
 mod subjects;
@@ -32,6 +33,7 @@ pub use observe::{LabelUpdate, ObserveGateAddress, ObserveRequest};
 pub use owner_identity::{
     GateOwnerProjection, OwnerExternalChange, OwnerIdentityError, OwnerPrincipalOutcome,
 };
+pub use places_legacy::{PlaceCreateLegacy, PlaceCreateLegacyError, PrivateJournalError};
 pub use skills::{SkillCommandError, SkillCreate, SkillPatch, SkillSeedResult, SkillView};
 pub use soul_presets::{SoulPreset, SoulPresetError};
 pub use subjects::{
@@ -1598,6 +1600,17 @@ const SCHEMA: &str = r#"
               updated_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_soul_presets_agent ON soul_presets(agent_id);
+            -- PrivateJournalAppendMentor の家。C2 の agent-private journal（events に載せない）。
+            -- converter も IF NOT EXISTS。旧表名ではない（INV-2）。
+            CREATE TABLE IF NOT EXISTS private_journal(
+              journal_id INTEGER NOT NULL PRIMARY KEY,
+              owner_subject_id INTEGER NOT NULL,
+              place_id INTEGER NOT NULL,
+              anchor_seq INTEGER NOT NULL,
+              content BLOB NOT NULL,
+              created_at INTEGER NOT NULL,
+              provenance BLOB NOT NULL
+            );
             "#;
 
 /// Phase S schema application for in-place migration (#771).
