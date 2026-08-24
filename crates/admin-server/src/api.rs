@@ -746,6 +746,8 @@ pub fn create_router(state: AdminState) -> Router {
         .route("/api/agents", get(list_agents))
         .route("/api/agents/{id}", get(get_agent))
         .merge(crate::agent_routes::agent_write_routes())
+        .merge(crate::skill_routes::skill_write_routes())
+        .merge(crate::memory_routes::memory_write_routes())
         .route("/api/sessions", get(list_sessions))
         .route("/api/sessions/{id}", get(get_session))
         .route("/api/sessions/{id}/logs", get(list_session_logs))
@@ -768,11 +770,10 @@ pub fn create_router(state: AdminState) -> Router {
             "/api/agents/{id}/sleep-logs",
             unimpl("sleep-logs: 旧テーブル未移行（統合 DB 待ち）"),
         )
-        // --- oc2 に概念が無い ---
-        .route("/api/agents/{id}/skills", unimpl("skills: oc2 に概念なし"))
+        // --- skills unused は本スライス対象外（GET list/CRUD は skill_write_routes） ---
         .route(
             "/api/agents/{id}/skills/unused",
-            unimpl("skills: oc2 に概念なし"),
+            unimpl("skills unused: unrestored subroute"),
         )
         .route(
             "/api/agents/{id}/analytics",
@@ -786,14 +787,10 @@ pub fn create_router(state: AdminState) -> Router {
             "/api/agents/{id}/co-agents",
             unimpl("co-agents: oc2 に概念なし"),
         )
-        // --- memory index（curated 本体は上でリダイレクト済み。索引系は未実装） ---
-        .route(
-            "/api/agents/{id}/memory/index",
-            unimpl("memory index: oc2 未実装（curated 本体は /memory/curated で提供）"),
-        )
+        // --- memory index GET status/tree は本スライス対象外（WRITE は memory_write_routes） ---
         .route(
             "/api/agents/{id}/memory/index/tree",
-            unimpl("memory index: oc2 未実装"),
+            unimpl("memory index tree: unrestored subroute"),
         )
         .route(
             "/api/agents/{id}/daily-log-index/status",

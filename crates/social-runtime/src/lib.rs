@@ -3740,6 +3740,8 @@ impl System {
                 s.push('\n');
             }
             s.push('\n');
+            // ①′ skill 索引（本体 process.rs:227-239）。caller=Agent だけ visible_to_agent。
+            s.push_str(&self.skills_index(subject, &unread)?);
             // ② 場の枠づけ（core 由来・1 文）。
             s.push_str(PLACE_FRAMING);
             s.push('\n');
@@ -3791,6 +3793,51 @@ impl System {
             // build_context は既定で絞らない。
             throttle: None,
         })
+    }
+
+    /// 本体 `process.rs:156-166,227-239`: active かつ非 archive の索引（名前+説明）。
+    /// caller=Agent（Human の Owner/Trusted 以外）は `visible_to_agent` だけ。空なら見出しも出さない。
+    fn skills_index(
+        &self,
+        subject: SubjectId,
+        unread: &[opencrab_store::EventRow],
+    ) -> Result<String, Busy> {
+        let mut skills = self
+            .0
+            .store
+            .skill_list(subject, true, false)
+            .map_err(|_| Busy)?;
+        if self.skill_caller_is_agent(unread)? {
+            skills.retain(|skill| skill.visible_to_agent);
+        }
+        if skills.is_empty() {
+            return Ok(String::new());
+        }
+        let list: Vec<String> = skills
+            .iter()
+            .map(|skill| format!("- {}: {}", skill.name, skill.description))
+            .collect();
+        Ok(format!(
+            "Your skills (index only — call read_skill(name) to get a skill's full body):\n{}\n\n",
+            list.join("\n")
+        ))
+    }
+
+    fn skill_caller_is_agent(&self, unread: &[opencrab_store::EventRow]) -> Result<bool, Busy> {
+        for ev in unread {
+            let Some(id) = ev.author_subject else {
+                continue;
+            };
+            let Some(author) = self.0.store.get_subject(id).map_err(|_| Busy)? else {
+                continue;
+            };
+            if author.kind == SubjectKind::Human
+                && matches!(author.standing, Standing::Owner | Standing::Trusted)
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// この主体の記憶の索引を組む（記憶とワーカー §03）。全文の集まりは載せない——載せると
