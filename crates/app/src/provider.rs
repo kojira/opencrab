@@ -53,6 +53,8 @@ enum MockScript {
     ShellFailThenRead,
     /// #810: 成功の大きい結果を退避したあと、後続ターンで core-bg-read する実形。
     ShellOffloadThenRead,
+    /// #810 QC 形: 同一ターン反復で、切り離し直後（settle 前）に core-bg-read する。
+    ShellThenBgReadBeforeSettle,
     /// QC 形（#796）: PROGRESS + reply + 末尾空セグメント。空 Spoke を公開しないことの検査用。
     ProgressReplyTrailingEmpty,
 }
@@ -63,13 +65,45 @@ const OFFLOAD_MARKER_LINE: &str = "OFFLOAD-LINE-0000-XXXXXXXXXXXXXXXXXXXXXXXX";
 
 /// 退避案内の読み方レシピから activity を取る（`core-bg-read（activity=N・…）`）。
 fn activity_id_from_offload_notice(rendered: &str) -> Option<i64> {
-    const MARK: &str = "core-bg-read（activity=";
-    let rest = rendered.split(MARK).nth(1)?;
+    digits_after(rendered, "core-bg-read（activity=")
+}
+
+/// 同一ターンの切り離し通知から activity を取る（`背景へ移した（活動 N）`）。
+fn activity_id_from_detached_notice(text: &str) -> Option<i64> {
+    digits_after(text, "背景へ移した（活動 ")
+}
+
+fn digits_after(text: &str, mark: &str) -> Option<i64> {
+    let rest = text.split(mark).nth(1)?;
     let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
     if digits.is_empty() {
         return None;
     }
     digits.parse().ok()
+}
+
+fn tool_result_texts(ctx: &Context) -> Vec<(String, bool)> {
+    ctx.history
+        .iter()
+        .flat_map(|message| {
+            message.content.iter().filter_map(|block| match block {
+                Block::ToolResult {
+                    content, is_error, ..
+                } => {
+                    let text: String = content
+                        .iter()
+                        .filter_map(|part| match part {
+                            Part::Text(t) => Some(t.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("");
+                    Some((text, *is_error))
+                }
+                _ => None,
+            })
+        })
+        .collect()
 }
 
 /// Provider-level deterministic engine for process E2E tests and offline deployments.
@@ -104,6 +138,7 @@ impl MockEngine {
             "answer_then_no_reply" => MockScript::AnswerThenNoReply,
             "shell_fail_then_read" => MockScript::ShellFailThenRead,
             "shell_offload_then_read" => MockScript::ShellOffloadThenRead,
+            "shell_then_bg_read_before_settle" => MockScript::ShellThenBgReadBeforeSettle,
             "progress_reply_trailing_empty" => MockScript::ProgressReplyTrailingEmpty,
             other => return Err(format!("unknown OPENCRAB_MOCK_LLM_SCRIPT: {other}")),
         };
@@ -332,6 +367,50 @@ impl Engine for MockEngine {
                                 "BEGIN{for(i=0;i<500;i++) printf \"OFFLOAD-LINE-%04d-XXXXXXXXXXXXXXXXXXXXXXXX\\n\", i}"
                             ]
                         }),
+                    }],
+                    done: false,
+                })
+            }
+            MockScript::ShellThenBgReadBeforeSettle => {
+                // QC 形（#810）: 同一ターン反復。detach の tool_result を見て、settle を待たずに
+                // core-bg-read する。公開本文は読みの実メッセージ（走行中／畳み込み誤り）を復唱する。
+                if let Some(body) =
+                    tool_result_texts(ctx)
+                        .into_iter()
+                        .find_map(|(text, is_error)| {
+                            if is_error
+                                && (text.contains("まだ決着していない")
+                                    || text.contains("あなたの活動ではない")
+                                    || text.contains("退避されていない"))
+                            {
+                                Some(text)
+                            } else {
+                                None
+                            }
+                        })
+                {
+                    return Ok(say(&format!("synthetic-inprogress-read {body}")));
+                }
+                if let Some(activity) = tool_result_texts(ctx)
+                    .iter()
+                    .find_map(|(text, _)| activity_id_from_detached_notice(text))
+                {
+                    return Ok(InferOutput {
+                        effects: vec![],
+                        tool_calls: vec![ToolCallSpec {
+                            id: "mock-bg-read-before-settle".to_string(),
+                            name: "core-bg-read".to_string(),
+                            args: serde_json::json!({ "activity": activity }),
+                        }],
+                        done: false,
+                    });
+                }
+                Ok(InferOutput {
+                    effects: vec![],
+                    tool_calls: vec![ToolCallSpec {
+                        id: "mock-shell-before-settle".to_string(),
+                        name: "core-shell".to_string(),
+                        args: serde_json::json!({ "argv": ["sleep", "30"] }),
                     }],
                     done: false,
                 })
@@ -1859,6 +1938,63 @@ mod tests {
             only_say(&third_offload).contains(OFFLOAD_MARKER_LINE),
             "third turn must include the offload marker: {}",
             only_say(&third_offload)
+        );
+
+        let inprogress = MockEngine {
+            script: MockScript::ShellThenBgReadBeforeSettle,
+        };
+        assert!(inprogress.emits_tool_calls());
+        let first_inprogress = inprogress.infer(&ctx, &chunks).await.unwrap();
+        assert_eq!(first_inprogress.tool_calls.len(), 1);
+        assert_eq!(first_inprogress.tool_calls[0].name, "core-shell");
+        assert_eq!(
+            first_inprogress.tool_calls[0].args,
+            serde_json::json!({ "argv": ["sleep", "30"] })
+        );
+        let detached_ctx = Context {
+            history: vec![opencrab_port::Message {
+                role: MsgRole::User,
+                content: vec![Block::ToolResult {
+                    tool_use_id: "mock-shell-before-settle".to_string(),
+                    content: vec![Part::text("背景へ移した（活動 20）")],
+                    is_error: false,
+                }],
+            }],
+            ..Context::default()
+        };
+        let second_inprogress = inprogress.infer(&detached_ctx, &chunks).await.unwrap();
+        assert_eq!(second_inprogress.tool_calls.len(), 1);
+        assert_eq!(second_inprogress.tool_calls[0].name, "core-bg-read");
+        assert_eq!(
+            second_inprogress.tool_calls[0].args,
+            serde_json::json!({ "activity": 20 })
+        );
+        let read_inprogress_ctx = Context {
+            history: vec![opencrab_port::Message {
+                role: MsgRole::User,
+                content: vec![Block::ToolResult {
+                    tool_use_id: "mock-bg-read-before-settle".to_string(),
+                    content: vec![Part::text(
+                        "失敗: 活動 #20 はまだ決着していない（退避は決着後）",
+                    )],
+                    is_error: true,
+                }],
+            }],
+            ..Context::default()
+        };
+        let third_inprogress = inprogress
+            .infer(&read_inprogress_ctx, &chunks)
+            .await
+            .unwrap();
+        assert!(
+            only_say(&third_inprogress).contains("synthetic-inprogress-read"),
+            "same-turn read must recite the in-progress state: {}",
+            only_say(&third_inprogress)
+        );
+        assert!(
+            only_say(&third_inprogress).contains("まだ決着していない"),
+            "same-turn read must include the in-progress message: {}",
+            only_say(&third_inprogress)
         );
 
         let trailing = MockEngine {

@@ -473,6 +473,95 @@ async fn bg_read_of_running_activity_says_not_settled() {
     );
 }
 
+// #810 [issue-later]: 他者の活動は「あなたの活動ではない」（未退避と畳まない）。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn bg_read_of_others_activity_says_not_yours() {
+    let h = build();
+    let (place, a, o) = place_with(&h, Standing::Trusted);
+    h.sys.allow_tool(a, "core-shell");
+    let foreign = h
+        .sys
+        .store()
+        .start_activity(
+            place,
+            o,
+            ActivityKindTag::Background,
+            Some("foreign"),
+            0,
+            0,
+            None,
+        )
+        .expect("other subject's background");
+
+    h.eng.push(Step::say_done(&format!(
+        "core-bg-read::{{\"activity\":{foreign}}}"
+    )));
+    h.eng.push(Step::no_reply());
+    wake_external(&h, "w12");
+    settle().await;
+
+    let settles = settle_texts(&h, place);
+    assert!(
+        settles
+            .iter()
+            .any(|s| s.contains("あなたの活動ではない") && s.contains(&format!("#{foreign}"))),
+        "他者の活動は所有拒否: {settles:?}"
+    );
+    assert!(
+        !settles
+            .iter()
+            .any(|s| s.contains("あなたの活動ではない／退避されていない")),
+        "他者を未退避と混ぜない: {settles:?}"
+    );
+}
+
+// #810 [issue-later]: 決着済みで退避なしは「退避されていない」（所有拒否と畳まない）。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn bg_read_of_settled_activity_without_offload_says_not_offloaded() {
+    let h = build();
+    let (place, a, _o) = place_with(&h, Standing::Trusted);
+    h.sys.allow_tool(a, "core-shell");
+    h.sys.allow_command(a, "echo");
+    h.shell.set_output("ok");
+
+    h.eng
+        .push(Step::say_done("core-shell::{\"argv\":[\"echo\",\"ok\"]}"));
+    h.eng.push(Step::no_reply());
+    wake_external(&h, "w13");
+    settle().await;
+
+    let done = bg_activities(&h)
+        .into_iter()
+        .find(|b| b.end_reason.as_deref() == Some("done"))
+        .expect("settled small shell");
+    assert!(
+        h.sys.store().read_offload(a, done.id).unwrap().is_none(),
+        "small result is not offloaded"
+    );
+
+    h.eng.push(Step::say_done(&format!(
+        "core-bg-read::{{\"activity\":{}}}",
+        done.id
+    )));
+    h.eng.push(Step::no_reply());
+    wake_external(&h, "w14");
+    settle().await;
+
+    let settles = settle_texts(&h, place);
+    assert!(
+        settles
+            .iter()
+            .any(|s| s.contains("退避されていない") && s.contains(&format!("#{}", done.id))),
+        "決着済みで退避なしは未退避と返す: {settles:?}"
+    );
+    assert!(
+        !settles
+            .iter()
+            .any(|s| s.contains("あなたの活動ではない／退避されていない")),
+        "未退避を所有拒否と混ぜない: {settles:?}"
+    );
+}
+
 // ---- core-allow-command（owner-only・OwnerFollowUp）----
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
