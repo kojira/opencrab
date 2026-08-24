@@ -356,7 +356,10 @@ async fn list_curated_memory(
 /// まだ無い（未移行）・subject が無い・対応する旧 agent が無い場合は `None` を返し、呼び手が 501
 /// で明示する（偽の空を返さない）。統合スキーマに subjects.public_id（旧 UUID）が入ったら、
 /// name 結合を public_id 結合へ差し替える（issue-later）。
-fn resolve_legacy_agent_id(st: &AdminState, subject_id: i64) -> ApiResult<Option<String>> {
+pub(crate) fn resolve_legacy_agent_id(
+    st: &AdminState,
+    subject_id: i64,
+) -> ApiResult<Option<String>> {
     let Some(subject) = st.store.get_subject(subject_id).map_err(store_err)? else {
         return Ok(None);
     };
@@ -376,7 +379,7 @@ fn resolve_legacy_agent_id(st: &AdminState, subject_id: i64) -> ApiResult<Option
 }
 
 /// subject→旧 agent_id を解決できないときの明示 501（偽の空配列を返さない）。
-fn unresolved_agent() -> (StatusCode, Json<serde_json::Value>) {
+pub(crate) fn unresolved_agent() -> (StatusCode, Json<serde_json::Value>) {
     (
         StatusCode::NOT_IMPLEMENTED,
         Json(json!({

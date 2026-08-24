@@ -1598,45 +1598,6 @@ const SCHEMA: &str = r#"
               updated_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_soul_presets_agent ON soul_presets(agent_id);
-            -- B 単独の家（DESIGN-DB-MIGRATION: memory_index_* / daily_log_index）。
-            CREATE TABLE IF NOT EXISTS memory_index_nodes (
-              id TEXT PRIMARY KEY,
-              agent_id TEXT NOT NULL,
-              parent_id TEXT REFERENCES memory_index_nodes(id) ON DELETE CASCADE,
-              node_type TEXT NOT NULL CHECK (node_type IN ('root','period','session','topic','daily','hourly','weekly','monthly','yearly','category','meta','unit')),
-              source_type TEXT NOT NULL DEFAULT 'session_log',
-              title TEXT NOT NULL,
-              summary TEXT NOT NULL,
-              start_log_id INTEGER,
-              end_log_id INTEGER,
-              source_session_id TEXT,
-              date_from TEXT,
-              date_to TEXT,
-              depth INTEGER NOT NULL DEFAULT 0,
-              child_count INTEGER NOT NULL DEFAULT 0,
-              token_count INTEGER NOT NULL DEFAULT 0,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL,
-              short_id TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_mem_idx_agent ON memory_index_nodes(agent_id);
-            CREATE TABLE IF NOT EXISTS memory_index_watermark (
-              agent_id TEXT PRIMARY KEY,
-              last_indexed_log_id INTEGER NOT NULL DEFAULT 0,
-              last_indexed_at TEXT NOT NULL,
-              total_nodes INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE TABLE IF NOT EXISTS daily_log_index_watermark (
-              agent_id TEXT NOT NULL PRIMARY KEY,
-              last_indexed_date TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS agent_memory_index_config (
-              agent_id TEXT PRIMARY KEY,
-              batch_size INTEGER NOT NULL DEFAULT 50,
-              threshold INTEGER NOT NULL DEFAULT 20,
-              updated_at TEXT NOT NULL
-            );
             "#;
 
 /// Phase S schema application for in-place migration (#771).

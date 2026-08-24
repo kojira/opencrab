@@ -3,7 +3,6 @@
 //! 要約できないときは fail loud（0 件成功で取り繕わない）。
 
 use crate::Store;
-use opencrab_port::SubjectId;
 use rusqlite::{params, OptionalExtension};
 
 pub const BATCH_SIZE_MIN: i64 = 10;
@@ -53,10 +52,6 @@ pub struct MemoryIndexMergeResult {
     pub topics_deleted: i64,
 }
 
-fn agent_key(subject: SubjectId) -> String {
-    subject.to_string()
-}
-
 fn table_exists(conn: &rusqlite::Connection, table: &str) -> crate::Result<bool> {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
@@ -70,11 +65,7 @@ fn count_eq(conn: &rusqlite::Connection, sql: &str, agent: &str) -> crate::Resul
 }
 
 impl Store {
-    pub fn memory_index_clear(
-        &self,
-        subject: SubjectId,
-    ) -> std::result::Result<(), MemoryIndexError> {
-        let agent = agent_key(subject);
+    pub fn memory_index_clear(&self, agent: &str) -> std::result::Result<(), MemoryIndexError> {
         let mut conn = self.c();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         tx.execute(
@@ -97,17 +88,16 @@ impl Store {
 
     pub fn memory_index_policy_update(
         &self,
-        subject: SubjectId,
+        agent: &str,
         batch_size: Option<i64>,
         threshold: Option<i64>,
         now: i64,
     ) -> std::result::Result<MemoryIndexConfig, MemoryIndexError> {
-        let agent = agent_key(subject);
         let conn = self.c();
         let current = conn
             .query_row(
                 "SELECT batch_size,threshold FROM agent_memory_index_config WHERE agent_id=?1",
-                params![&agent],
+                params![agent],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
             )
             .optional()?;
@@ -122,10 +112,10 @@ impl Store {
                batch_size=excluded.batch_size,
                threshold=excluded.threshold,
                updated_at=excluded.updated_at",
-            params![&agent, batch_size, threshold, &updated_at],
+            params![agent, batch_size, threshold, &updated_at],
         )?;
         Ok(MemoryIndexConfig {
-            agent_id: agent,
+            agent_id: agent.to_string(),
             batch_size,
             threshold,
             updated_at,
@@ -134,15 +124,19 @@ impl Store {
 
     pub fn memory_index_build(
         &self,
-        subject: SubjectId,
+        agent: &str,
     ) -> std::result::Result<MemoryIndexBuildResult, MemoryIndexError> {
-        let agent = agent_key(subject);
         let conn = self.c();
+        count_eq(
+            &conn,
+            "SELECT COUNT(*) FROM memory_index_nodes WHERE agent_id=?1",
+            agent,
+        )?;
         if table_exists(&conn, "session_logs")? {
             let pending = count_eq(
                 &conn,
                 "SELECT COUNT(*) FROM session_logs WHERE agent_id=?1",
-                &agent,
+                agent,
             )?;
             if pending > 0 {
                 return Err(MemoryIndexError::LlmRequired(
@@ -158,13 +152,13 @@ impl Store {
 
     pub fn memory_index_rebuild(
         &self,
-        subject: SubjectId,
+        agent: &str,
     ) -> std::result::Result<MemoryIndexBuildResult, MemoryIndexError> {
-        self.memory_index_clear(subject)?;
-        match self.memory_index_build(subject) {
+        self.memory_index_clear(agent)?;
+        match self.memory_index_build(agent) {
             Ok(result) => Ok(result),
             Err(error) => {
-                let _ = self.memory_index_clear(subject);
+                let _ = self.memory_index_clear(agent);
                 Err(error)
             }
         }
@@ -172,14 +166,13 @@ impl Store {
 
     pub fn memory_index_merge(
         &self,
-        subject: SubjectId,
+        agent: &str,
     ) -> std::result::Result<MemoryIndexMergeResult, MemoryIndexError> {
-        let agent = agent_key(subject);
         let conn = self.c();
         let topics = count_eq(
             &conn,
             "SELECT COUNT(*) FROM memory_index_nodes WHERE agent_id=?1 AND node_type='topic'",
-            &agent,
+            agent,
         )?;
         if topics > 0 {
             return Err(MemoryIndexError::LlmRequired(
@@ -195,32 +188,33 @@ impl Store {
 
     pub fn daily_log_index_rebuild(
         &self,
-        subject: SubjectId,
+        agent: &str,
     ) -> std::result::Result<(), MemoryIndexError> {
-        self.daily_log_require_no_pending(subject)?;
+        self.daily_log_require_no_pending(agent)?;
         Ok(())
     }
 
-    pub fn daily_log_index_run(
-        &self,
-        subject: SubjectId,
-    ) -> std::result::Result<(), MemoryIndexError> {
-        self.daily_log_require_no_pending(subject)?;
+    pub fn daily_log_index_run(&self, agent: &str) -> std::result::Result<(), MemoryIndexError> {
+        self.daily_log_require_no_pending(agent)?;
         Ok(())
     }
 
     fn daily_log_require_no_pending(
         &self,
-        subject: SubjectId,
+        agent: &str,
     ) -> std::result::Result<(), MemoryIndexError> {
-        let agent = agent_key(subject);
         let conn = self.c();
+        count_eq(
+            &conn,
+            "SELECT COUNT(*) FROM daily_log_index_watermark WHERE agent_id=?1",
+            agent,
+        )?;
         if table_exists(&conn, "memory_curated")? {
             let pending = count_eq(
                 &conn,
                 "SELECT COUNT(*) FROM memory_curated
                  WHERE agent_id=?1 AND category LIKE 'daily_log/%'",
-                &agent,
+                agent,
             )?;
             if pending > 0 {
                 return Err(MemoryIndexError::LlmRequired(
@@ -235,34 +229,60 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opencrab_port::{Standing, SubjectKind};
 
-    fn store_with_agent() -> (Store, SubjectId) {
-        let store = Store::new_in_memory().unwrap();
-        let id = store
-            .create_subject(
-                SubjectKind::Agent,
-                "Ada",
-                "You are Ada.",
-                "engine",
-                Standing::Trusted,
-                1,
+    const LEGACY: &str = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+
+    fn install_b_tables(store: &Store) {
+        store
+            .c()
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS memory_index_nodes (
+                   id TEXT PRIMARY KEY,
+                   agent_id TEXT NOT NULL,
+                   parent_id TEXT,
+                   node_type TEXT NOT NULL,
+                   title TEXT NOT NULL,
+                   summary TEXT NOT NULL,
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS memory_index_watermark (
+                   agent_id TEXT PRIMARY KEY,
+                   last_indexed_log_id INTEGER NOT NULL DEFAULT 0,
+                   last_indexed_at TEXT NOT NULL,
+                   total_nodes INTEGER NOT NULL DEFAULT 0
+                 );
+                 CREATE TABLE IF NOT EXISTS daily_log_index_watermark (
+                   agent_id TEXT NOT NULL PRIMARY KEY,
+                   last_indexed_date TEXT NOT NULL,
+                   updated_at TEXT NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS agent_memory_index_config (
+                   agent_id TEXT PRIMARY KEY,
+                   batch_size INTEGER NOT NULL DEFAULT 50,
+                   threshold INTEGER NOT NULL DEFAULT 20,
+                   updated_at TEXT NOT NULL
+                 );",
             )
             .unwrap();
-        (store, id)
+    }
+
+    fn store_with_b_tables() -> Store {
+        let store = Store::new_in_memory().unwrap();
+        install_b_tables(&store);
+        store
     }
 
     #[test]
     fn clear_deletes_index_rows_and_watermark() {
-        let (store, owner) = store_with_agent();
-        let agent = owner.to_string();
+        let store = store_with_b_tables();
         store
             .c()
             .execute(
                 "INSERT INTO memory_index_nodes(
                    id,agent_id,node_type,title,summary,created_at,updated_at
                  ) VALUES('n1',?1,'root','root','s','t','t')",
-                params![&agent],
+                params![LEGACY],
             )
             .unwrap();
         store
@@ -270,15 +290,15 @@ mod tests {
             .execute(
                 "INSERT INTO memory_index_watermark(agent_id,last_indexed_log_id,last_indexed_at,total_nodes)
                  VALUES(?1,3,'t',1)",
-                params![&agent],
+                params![LEGACY],
             )
             .unwrap();
-        store.memory_index_clear(owner).unwrap();
+        store.memory_index_clear(LEGACY).unwrap();
         let nodes: i64 = store
             .c()
             .query_row(
                 "SELECT COUNT(*) FROM memory_index_nodes WHERE agent_id=?1",
-                params![&agent],
+                params![LEGACY],
                 |row| row.get(0),
             )
             .unwrap();
@@ -286,7 +306,7 @@ mod tests {
             .c()
             .query_row(
                 "SELECT COUNT(*) FROM memory_index_watermark WHERE agent_id=?1",
-                params![&agent],
+                params![LEGACY],
                 |row| row.get(0),
             )
             .unwrap();
@@ -295,20 +315,30 @@ mod tests {
     }
 
     #[test]
-    fn policy_update_omits_keep_and_clamps() {
-        let (store, owner) = store_with_agent();
+    fn policy_update_writes_under_legacy_uuid() {
+        let store = store_with_b_tables();
         let first = store
-            .memory_index_policy_update(owner, Some(80), None, 10)
+            .memory_index_policy_update(LEGACY, Some(80), None, 10)
             .unwrap();
+        assert_eq!(first.agent_id, LEGACY);
         assert_eq!(first.batch_size, 80);
         assert_eq!(first.threshold, THRESHOLD_DEFAULT);
+        let stored: String = store
+            .c()
+            .query_row(
+                "SELECT agent_id FROM agent_memory_index_config WHERE agent_id=?1",
+                params![LEGACY],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, LEGACY);
         let second = store
-            .memory_index_policy_update(owner, Some(3), Some(1), 11)
+            .memory_index_policy_update(LEGACY, Some(3), Some(1), 11)
             .unwrap();
         assert_eq!(second.batch_size, BATCH_SIZE_MIN);
         assert_eq!(second.threshold, THRESHOLD_MIN);
         let third = store
-            .memory_index_policy_update(owner, None, None, 12)
+            .memory_index_policy_update(LEGACY, None, None, 12)
             .unwrap();
         assert_eq!(third.batch_size, BATCH_SIZE_MIN);
         assert_eq!(third.threshold, THRESHOLD_MIN);
@@ -316,8 +346,8 @@ mod tests {
 
     #[test]
     fn empty_store_build_merge_daily_are_zero() {
-        let (store, owner) = store_with_agent();
-        let built = store.memory_index_build(owner).unwrap();
+        let store = store_with_b_tables();
+        let built = store.memory_index_build(LEGACY).unwrap();
         assert_eq!(
             built,
             MemoryIndexBuildResult {
@@ -325,27 +355,38 @@ mod tests {
                 logs_indexed: 0
             }
         );
-        let rebuilt = store.memory_index_rebuild(owner).unwrap();
+        let rebuilt = store.memory_index_rebuild(LEGACY).unwrap();
         assert_eq!(rebuilt.logs_indexed, 0);
-        let merged = store.memory_index_merge(owner).unwrap();
+        let merged = store.memory_index_merge(LEGACY).unwrap();
         assert_eq!(merged.topics_merged, 0);
-        store.daily_log_index_run(owner).unwrap();
-        store.daily_log_index_rebuild(owner).unwrap();
+        store.daily_log_index_run(LEGACY).unwrap();
+        store.daily_log_index_rebuild(LEGACY).unwrap();
     }
 
     #[test]
     fn merge_with_topics_fails_loud_without_llm() {
-        let (store, owner) = store_with_agent();
+        let store = store_with_b_tables();
         store
             .c()
             .execute(
                 "INSERT INTO memory_index_nodes(
                    id,agent_id,node_type,title,summary,created_at,updated_at
                  ) VALUES('t1',?1,'topic','t','s','t','t')",
-                params![owner.to_string()],
+                params![LEGACY],
             )
             .unwrap();
-        let err = store.memory_index_merge(owner).err().unwrap();
+        let err = store.memory_index_merge(LEGACY).err().unwrap();
         assert!(matches!(err, MemoryIndexError::LlmRequired(_)));
+    }
+
+    #[test]
+    fn absent_b_tables_fail_loud() {
+        let store = Store::new_in_memory().unwrap();
+        let err = store.memory_index_clear(LEGACY).err().unwrap();
+        assert!(err.to_string().contains("no such table"));
+        let err = store.memory_index_build(LEGACY).err().unwrap();
+        assert!(err.to_string().contains("no such table"));
+        let err = store.daily_log_index_run(LEGACY).err().unwrap();
+        assert!(err.to_string().contains("no such table"));
     }
 }

@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 
 use opencrab_store::MemoryIndexError;
 
-use crate::api::{AdminState, ApiResult};
+use crate::api::{resolve_legacy_agent_id, unresolved_agent, AdminState, ApiResult};
 
 fn now_ns() -> i64 {
     SystemTime::now()
@@ -48,10 +48,21 @@ fn parse_entry(id: &str) -> ApiResult<i64> {
 }
 
 fn store_err(e: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({ "error": "store_error", "detail": e.to_string() })),
-    )
+    let msg = e.to_string();
+    if msg.contains("no such table") || msg.contains("no such column") {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({
+                "error": "unimplemented",
+                "detail": format!("正本スキーマ（本体 DB）へ未移行です（migration 待ち）: {msg}"),
+            })),
+        )
+    } else {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "store_error", "detail": msg })),
+        )
+    }
 }
 
 fn index_err(error: MemoryIndexError) -> (StatusCode, Json<Value>) {
@@ -62,6 +73,11 @@ fn index_err(error: MemoryIndexError) -> (StatusCode, Json<Value>) {
         ),
         MemoryIndexError::Store(error) => store_err(error),
     }
+}
+
+fn resolve_agent(st: &AdminState, id: &str) -> ApiResult<String> {
+    let sid = parse_agent(id)?;
+    resolve_legacy_agent_id(st, sid)?.ok_or_else(unresolved_agent)
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,8 +103,8 @@ async fn trigger_memory_index_build(
     State(st): State<AdminState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let agent = parse_agent(&id)?;
-    match st.store.memory_index_build(agent) {
+    let agent = resolve_agent(&st, &id)?;
+    match st.store.memory_index_build(&agent) {
         Ok(result) => Ok(Json(json!({
             "ok": true,
             "nodes_created": result.nodes_created,
@@ -102,8 +118,8 @@ async fn delete_memory_index(
     State(st): State<AdminState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let agent = parse_agent(&id)?;
-    match st.store.memory_index_clear(agent) {
+    let agent = resolve_agent(&st, &id)?;
+    match st.store.memory_index_clear(&agent) {
         Ok(()) => Ok(Json(json!({
             "ok": true,
             "message": "Index deleted",
@@ -117,10 +133,10 @@ async fn update_memory_index_config(
     Path(id): Path<String>,
     Json(req): Json<UpdateMemoryIndexConfigRequest>,
 ) -> ApiResult<Json<Value>> {
-    let agent = parse_agent(&id)?;
+    let agent = resolve_agent(&st, &id)?;
     match st
         .store
-        .memory_index_policy_update(agent, req.batch_size, req.threshold, now_ns())
+        .memory_index_policy_update(&agent, req.batch_size, req.threshold, now_ns())
     {
         Ok(config) => Ok(Json(json!({
             "ok": true,
@@ -139,8 +155,8 @@ async fn rebuild_memory_index(
     State(st): State<AdminState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let agent = parse_agent(&id)?;
-    match st.store.memory_index_rebuild(agent) {
+    let agent = resolve_agent(&st, &id)?;
+    match st.store.memory_index_rebuild(&agent) {
         Ok(result) => Ok(Json(json!({
             "ok": true,
             "nodes_created": result.nodes_created,
@@ -154,8 +170,8 @@ async fn merge_memory_index_topics(
     State(st): State<AdminState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let agent = parse_agent(&id)?;
-    match st.store.memory_index_merge(agent) {
+    let agent = resolve_agent(&st, &id)?;
+    match st.store.memory_index_merge(&agent) {
         Ok(result) => Ok(Json(json!({
             "ok": true,
             "periods_processed": result.periods_processed,
@@ -170,8 +186,8 @@ async fn daily_log_rebuild(
     State(st): State<AdminState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let agent = parse_agent(&id)?;
-    match st.store.daily_log_index_rebuild(agent) {
+    let agent = resolve_agent(&st, &id)?;
+    match st.store.daily_log_index_rebuild(&agent) {
         Ok(()) => Ok(Json(json!({ "status": "started" }))),
         Err(error) => Err(index_err(error)),
     }
@@ -181,8 +197,8 @@ async fn daily_log_run(
     State(st): State<AdminState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let agent = parse_agent(&id)?;
-    match st.store.daily_log_index_run(agent) {
+    let agent = resolve_agent(&st, &id)?;
+    match st.store.daily_log_index_run(&agent) {
         Ok(()) => Ok(Json(json!({ "status": "started" }))),
         Err(error) => Err(index_err(error)),
     }
@@ -241,16 +257,81 @@ mod contract {
     use std::sync::Arc;
     use tower::ServiceExt;
 
+    const LEGACY_UUID: &str = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+
     fn dummy_db() -> Arc<Db> {
         Arc::new(Db::from_connection(
             rusqlite::Connection::open_in_memory().expect("memory db"),
         ))
     }
 
+    fn body_db_with_agent(name: &str, uuid: &str) -> Arc<Db> {
+        let conn = rusqlite::Connection::open_in_memory().expect("memory db");
+        conn.execute_batch(&format!(
+            "CREATE TABLE agents (agent_id TEXT PRIMARY KEY, name TEXT NOT NULL);
+             INSERT INTO agents(agent_id, name) VALUES ('{uuid}', '{name}');"
+        ))
+        .expect("agents");
+        Arc::new(Db::from_connection(conn))
+    }
+
+    fn store_with_b_tables() -> Store {
+        let uri = format!(
+            "file:opencrab-mem-b-{}-{}?mode=memory&cache=shared",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let store = Store::open(&uri).expect("store");
+        rusqlite::Connection::open(&uri)
+            .expect("side")
+            .execute_batch(
+                "CREATE TABLE memory_index_nodes (
+                   id TEXT PRIMARY KEY,
+                   agent_id TEXT NOT NULL,
+                   parent_id TEXT,
+                   node_type TEXT NOT NULL,
+                   title TEXT NOT NULL,
+                   summary TEXT NOT NULL,
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL
+                 );
+                 CREATE TABLE memory_index_watermark (
+                   agent_id TEXT PRIMARY KEY,
+                   last_indexed_log_id INTEGER NOT NULL DEFAULT 0,
+                   last_indexed_at TEXT NOT NULL,
+                   total_nodes INTEGER NOT NULL DEFAULT 0
+                 );
+                 CREATE TABLE daily_log_index_watermark (
+                   agent_id TEXT NOT NULL PRIMARY KEY,
+                   last_indexed_date TEXT NOT NULL,
+                   updated_at TEXT NOT NULL
+                 );
+                 CREATE TABLE agent_memory_index_config (
+                   agent_id TEXT PRIMARY KEY,
+                   batch_size INTEGER NOT NULL DEFAULT 50,
+                   threshold INTEGER NOT NULL DEFAULT 20,
+                   updated_at TEXT NOT NULL
+                 );",
+            )
+            .expect("b tables");
+        store
+    }
+
     fn state_from_store(store: Store) -> AdminState {
         AdminState {
             store: Arc::new(store),
             db: dummy_db(),
+            compaction_ratio: 0.5,
+        }
+    }
+
+    fn state_resolved(store: Store) -> AdminState {
+        AdminState {
+            store: Arc::new(store),
+            db: body_db_with_agent("Ada", LEGACY_UUID),
             compaction_ratio: 0.5,
         }
     }
@@ -318,17 +399,21 @@ mod contract {
         assert_eq!(body, json!({"deleted": false, "error": "Not found"}));
     }
 
-    #[tokio::test]
-    async fn memory_index_b_table_envelopes() {
-        let state = state_from_store(Store::new_in_memory().expect("store"));
-        let (_, created) = call(
+    async fn create_ada(state: AdminState) -> (AdminState, String) {
+        let (status, created) = call(
             state.clone(),
             "POST",
             "/api/agents",
             Some(json!({"name":"Ada","persona_name":"Helper"})),
         )
         .await;
-        let id = created["id"].as_str().unwrap().to_string();
+        assert_eq!(status, StatusCode::OK, "{created}");
+        (state, created["id"].as_str().unwrap().to_string())
+    }
+
+    #[tokio::test]
+    async fn memory_index_writes_land_under_legacy_uuid() {
+        let (state, id) = create_ada(state_resolved(store_with_b_tables())).await;
 
         let (status, body) = call(
             state.clone(),
@@ -339,6 +424,8 @@ mod contract {
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["ok"], true);
+        assert_eq!(body["config"]["agent_id"], LEGACY_UUID);
+        assert_ne!(body["config"]["agent_id"], id);
         assert_eq!(body["config"]["batch_size"], 80);
         assert_eq!(body["config"]["threshold"], 20);
 
@@ -413,5 +500,58 @@ mod contract {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
+    }
+
+    #[tokio::test]
+    async fn memory_index_absent_tables_are_501() {
+        let (state, id) = create_ada(state_resolved(Store::new_in_memory().expect("store"))).await;
+        for (method, uri, body) in [
+            (
+                "PUT",
+                format!("/api/agents/{id}/memory/index/config"),
+                Some(json!({"batch_size": 80})),
+            ),
+            ("POST", format!("/api/agents/{id}/memory/index"), None),
+            ("DELETE", format!("/api/agents/{id}/memory/index"), None),
+            (
+                "POST",
+                format!("/api/agents/{id}/memory/index/rebuild"),
+                None,
+            ),
+            ("POST", format!("/api/agents/{id}/memory/index/merge"), None),
+            (
+                "POST",
+                format!("/api/agents/{id}/daily-log-index/run"),
+                None,
+            ),
+            (
+                "POST",
+                format!("/api/agents/{id}/daily-log-index/rebuild"),
+                None,
+            ),
+        ] {
+            let (status, body) = call(state.clone(), method, &uri, body).await;
+            assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{method} {uri} {body}");
+            assert_eq!(body["error"], "unimplemented");
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_index_unresolved_agent_is_501() {
+        let (state, id) =
+            create_ada(state_from_store(Store::new_in_memory().expect("store"))).await;
+        let (status, body) = call(
+            state,
+            "PUT",
+            &format!("/api/agents/{id}/memory/index/config"),
+            Some(json!({"batch_size": 80})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
+        assert_eq!(body["error"], "unimplemented");
+        assert!(
+            body["detail"].as_str().unwrap().contains("旧 agent_id"),
+            "{body}"
+        );
     }
 }
