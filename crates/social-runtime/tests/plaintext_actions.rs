@@ -173,6 +173,7 @@ fn inbound(address: &str, author: &str, text: &str, origin: &str) -> GateEvent {
         origin: Some(origin.into()),
         attachments: vec![],
         discovery: None,
+        metadata: serde_json::json!({}),
     }
 }
 

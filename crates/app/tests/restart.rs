@@ -188,6 +188,7 @@ async fn assert_background_interruption_recovery(
                     target: None,
                     for_subject: None,
                     attachments: vec![],
+                    metadata: serde_json::json!({}),
                 },
                 1,
             )
@@ -460,6 +461,7 @@ async fn legacy_interrupted_background_upgrades_without_duplicate_recovery() {
                     target: None,
                     for_subject: Some(subject),
                     attachments: vec![],
+                    metadata: serde_json::json!({}),
                 },
                 2,
             )

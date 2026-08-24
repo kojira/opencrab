@@ -116,6 +116,7 @@ fn inbound(author_external: &str, text: &str, nonce: &str) -> GateEvent {
         origin: Some(format!("note-{nonce}")),
         attachments: vec![],
         discovery: None,
+        metadata: serde_json::json!({}),
     }
 }
 

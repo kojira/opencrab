@@ -1872,6 +1872,7 @@ async fn read_serializes_core_internal_marker() {
                     target: None,
                     for_subject: None,
                     attachments: vec![],
+                    metadata: serde_json::json!({}),
                 },
                 index as i64,
             )
@@ -2020,6 +2021,13 @@ async fn said_with_discord_voice_metadata_is_accepted() {
         g.wait_for(|l| has_reply_ok(l, "e-voice")).await,
         "discord_voice metadata は unknown_field ではない: {:?}",
         g.log()
+    );
+    let ev = h.sys.store().get_event(place, 1).unwrap().unwrap();
+    assert_eq!(
+        ev.metadata.get("source").and_then(|v| v.as_str()),
+        Some("discord_voice"),
+        "voice-origin marker is visible core-side: {:?}",
+        ev.metadata
     );
     assert!(!g.is_disconnected());
 }

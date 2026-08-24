@@ -71,6 +71,8 @@ pub struct NewEvent {
     /// この出来事に付いた添付（DESIGN-images §1）。記録するのは URL（参照）だけ——中身は保存しない。
     /// 既定 `[]`（添付なしは従来どおり・後方互換）。
     pub attachments: Vec<Attachment>,
+    /// 線の `metadata`。無ければ空オブジェクト。voice STT は `source=discord_voice`。
+    pub metadata: serde_json::Value,
 }
 
 /// `append_incoming` の結果（詳細§04）。畳んだか、新しく積んだか。
@@ -119,6 +121,8 @@ pub struct EventRow {
     pub created_at: i64,
     /// この出来事に付いた添付（DESIGN-images §1）。描画で「存在と番地」を出し、core-look が番地から引く。
     pub attachments: Vec<Attachment>,
+    /// 線の `metadata`。無ければ空オブジェクト。voice STT は `source=discord_voice`。
+    pub metadata: serde_json::Value,
 }
 
 #[derive(Clone, Debug)]
@@ -719,23 +723,37 @@ fn atag_from(s: &str) -> rusqlite::Result<ActivityKindTag> {
     })
 }
 
-fn content_to_json(c: &Content) -> String {
-    serde_json::json!({ "text": c.text, "symbol": c.symbol }).to_string()
+fn content_to_json(c: &Content, metadata: &serde_json::Value) -> String {
+    let mut body = serde_json::json!({ "text": c.text, "symbol": c.symbol });
+    if let Some(obj) = metadata.as_object() {
+        if !obj.is_empty() {
+            body["metadata"] = metadata.clone();
+        }
+    }
+    body.to_string()
 }
 /// 壊れた JSON を空の Content へ倒さない。読めなければ変換の失敗（§15）。
-fn content_from_json(s: &str) -> rusqlite::Result<Content> {
+fn content_from_json(s: &str) -> rusqlite::Result<(Content, serde_json::Value)> {
     let v: serde_json::Value =
         serde_json::from_str(s).map_err(|_| decode_err("content json", s))?;
-    Ok(Content {
-        text: v
-            .get("text")
-            .and_then(|x| x.as_str())
-            .map(|x| x.to_string()),
-        symbol: v
-            .get("symbol")
-            .and_then(|x| x.as_str())
-            .map(|x| x.to_string()),
-    })
+    let metadata = match v.get("metadata") {
+        None => serde_json::json!({}),
+        Some(m) if m.is_object() => m.clone(),
+        Some(_) => return Err(decode_err("content metadata (not object)", s)),
+    };
+    Ok((
+        Content {
+            text: v
+                .get("text")
+                .and_then(|x| x.as_str())
+                .map(|x| x.to_string()),
+            symbol: v
+                .get("symbol")
+                .and_then(|x| x.as_str())
+                .map(|x| x.to_string()),
+        },
+        metadata,
+    ))
 }
 /// 添付を JSON 配列へ（DESIGN-images §1）。`kind` は wire 名、`origin_author` は由来作者（§5・任意）。
 fn attachments_to_json(a: &[Attachment]) -> String {
@@ -3569,7 +3587,7 @@ impl Store {
                 ev.kind.as_str(),
                 ev.author_subject,
                 ev.author_external,
-                content_to_json(&ev.content),
+                content_to_json(&ev.content, &ev.metadata),
                 mentions_to_json(&ev.mentions),
                 ev.reply_to,
                 ev.target,
@@ -3680,7 +3698,7 @@ impl Store {
             params![
                 activity.place,
                 seq,
-                content_to_json(&Content::text(content)),
+                content_to_json(&Content::text(content), &serde_json::json!({})),
                 reply_to,
                 activity.subject,
                 event_created_at,
@@ -3818,7 +3836,7 @@ impl Store {
             params![
                 activity.place,
                 seq,
-                content_to_json(&Content::text(content)),
+                content_to_json(&Content::text(content), &serde_json::json!({})),
                 reply_to,
                 activity.subject,
                 event_created_at,
@@ -3907,7 +3925,7 @@ impl Store {
                 ev.kind.as_str(),
                 ev.author_subject,
                 ev.author_external,
-                content_to_json(&ev.content),
+                content_to_json(&ev.content, &ev.metadata),
                 mentions_to_json(&ev.mentions),
                 ev.reply_to,
                 ev.target,
@@ -3958,7 +3976,7 @@ impl Store {
         tx.execute(
             "INSERT INTO events(place_id,seq,kind,author_subject_id,author_external_id,content_json,mentions_json,reply_to_seq,target_seq,for_subject_id,created_at,attachments_json)
              VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
-            params![place,seq,ev.kind.as_str(),ev.author_subject,ev.author_external,content_to_json(&ev.content),mentions_to_json(&ev.mentions),ev.reply_to,ev.target,ev.for_subject,now,attachments_to_json(&ev.attachments)],
+            params![place,seq,ev.kind.as_str(),ev.author_subject,ev.author_external,content_to_json(&ev.content, &ev.metadata),mentions_to_json(&ev.mentions),ev.reply_to,ev.target,ev.for_subject,now,attachments_to_json(&ev.attachments)],
         )?;
         tx.execute(
             "INSERT INTO external_refs(place_id,seq,instance_id,binding_id,external_id,direction)
@@ -4010,7 +4028,7 @@ impl Store {
                 ev.kind.as_str(),
                 ev.author_subject,
                 ev.author_external,
-                content_to_json(&ev.content),
+                content_to_json(&ev.content, &ev.metadata),
                 mentions_to_json(&ev.mentions),
                 ev.reply_to,
                 ev.target,
@@ -4047,7 +4065,7 @@ impl Store {
         tx.execute(
             "INSERT INTO events(place_id,seq,kind,author_subject_id,author_external_id,content_json,mentions_json,reply_to_seq,target_seq,for_subject_id,created_at,attachments_json)
              VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
-            params![place,seq,ev.kind.as_str(),ev.author_subject,ev.author_external,content_to_json(&ev.content),mentions_to_json(&ev.mentions),ev.reply_to,ev.target,ev.for_subject,now,attachments_to_json(&ev.attachments)],
+            params![place,seq,ev.kind.as_str(),ev.author_subject,ev.author_external,content_to_json(&ev.content, &ev.metadata),mentions_to_json(&ev.mentions),ev.reply_to,ev.target,ev.for_subject,now,attachments_to_json(&ev.attachments)],
         )?;
         for route in routes {
             let delivery_id = runtime_uuid_v7(
@@ -5638,19 +5656,21 @@ fn map_event(r: &rusqlite::Row<'_>) -> rusqlite::Result<EventRow> {
             format!("unknown event kind: {kind_s}").into(),
         )
     })?;
+    let (content, metadata) = content_from_json(&r.get::<_, String>(5)?)?;
     Ok(EventRow {
         place: r.get(0)?,
         seq: r.get(1)?,
         kind,
         author_subject: r.get(3)?,
         author_external: r.get(4)?,
-        content: content_from_json(&r.get::<_, String>(5)?)?,
         mentions: mentions_from_json(&r.get::<_, String>(6)?)?,
         reply_to: r.get(7)?,
         target: r.get(8)?,
         for_subject: r.get(9)?,
         created_at: r.get(10)?,
         attachments: attachments_from_json(&r.get::<_, String>(11)?)?,
+        content,
+        metadata,
     })
 }
 
@@ -5924,6 +5944,7 @@ mod tests {
             target: None,
             for_subject: None,
             attachments: vec![],
+            metadata: serde_json::json!({}),
         }
     }
 

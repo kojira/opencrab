@@ -2302,6 +2302,7 @@ async fn read_log_rounds_limit_to_the_cap() {
             target: None,
             for_subject: None,
             attachments: vec![],
+            metadata: serde_json::json!({}),
         };
         h.sys.store().append(place, &ne, i).unwrap();
     }
@@ -2378,6 +2379,7 @@ async fn read_log_marks_internal_events_without_deleting_them() {
                     target: None,
                     for_subject: None,
                     attachments: vec![],
+                    metadata: serde_json::json!({}),
                 },
                 index as i64,
             )
@@ -2510,6 +2512,7 @@ async fn read_log_author_display_uses_name_not_persona() {
         target: None,
         for_subject: None,
         attachments: vec![],
+        metadata: serde_json::json!({}),
     };
     h.sys.store().append(place, &ne, 1).unwrap();
 

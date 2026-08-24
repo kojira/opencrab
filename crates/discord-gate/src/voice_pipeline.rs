@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use opencrab_port::MembershipDiscovery;
 use opencrab_voice::audio::{downmix_48k_stereo_to_16k_mono, pcm_to_wav, rms, SpeechSegmenter};
 use opencrab_voice::SttProvider;
+use tracing::warn;
 
 use crate::{map_voice_transcript, SaidEvent};
 
@@ -77,7 +78,17 @@ pub async fn transcribe_segment_to_said(
         return None;
     }
     let wav = pcm_to_wav(&mono, 16_000, 1);
-    let text = stt.transcribe(&wav, language).await.ok()?;
+    let text = match stt.transcribe(&wav, language).await {
+        Ok(text) => text,
+        Err(error) => {
+            warn!(
+                speaker_user_id = target.speaker_user_id,
+                error = %error,
+                "STT failed"
+            );
+            return None;
+        }
+    };
     map_voice_transcript(
         target.text_channel_id,
         target.author_id,
@@ -381,6 +392,36 @@ mod tests {
             .await
             .is_none(),
             "own voice must be excluded"
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_pipeline_stt_failure_continues_without_said() {
+        let (url, _) = spawn_http_mock(
+            "500 Internal Server Error",
+            "application/json",
+            br#"{"error":"upstream"}"#.to_vec(),
+        )
+        .await;
+        let stt = OpenAiSttProvider::new(Some(url), "whisper-1".into(), "sk-test".into());
+        let pcm = vec![3000i16; 1920 * 50];
+        assert!(
+            transcribe_segment_to_said(
+                &stt,
+                Some("ja"),
+                &pcm,
+                VoiceTranscriptTarget {
+                    text_channel_id: "10",
+                    author_id: "200",
+                    author_display: Some("bob"),
+                    discovery: discovery(),
+                    self_user_id: Some(100),
+                    speaker_user_id: 200,
+                },
+            )
+            .await
+            .is_none(),
+            "STT failure must continue without said"
         );
     }
 
