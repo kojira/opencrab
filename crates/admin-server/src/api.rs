@@ -10,13 +10,13 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, MethodRouter},
     Json, Router,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use opencrab_db::{queries, Db};
@@ -531,6 +531,182 @@ async fn list_schedules(
     })))
 }
 
+// ---- llm_logs / tool_logs（#772 A・本体封筒。writer は agent_id に subject 十進を書く） ----
+
+/// 本体 API `/llm-logs` の 1 行。フロント（AgentLlmLogs.tsx）が読む列だけを載せる。
+#[derive(Serialize)]
+struct LlmLogDto {
+    id: String,
+    agent_id: String,
+    session_id: Option<String>,
+    model: Option<String>,
+    prompt: String,
+    response: String,
+    tool_calls: Option<String>,
+    latency_ms: Option<i64>,
+    prompt_tokens: Option<i64>,
+    completion_tokens: Option<i64>,
+    total_tokens: Option<i64>,
+    error_code: Option<String>,
+    error_body: Option<String>,
+    requested_at: Option<String>,
+    trigger_message_id: Option<String>,
+    is_bot_iteration: bool,
+    cache_read_tokens: Option<i64>,
+    cache_creation_tokens: Option<i64>,
+    created_at: String,
+}
+
+impl From<opencrab_store::LlmLogRow> for LlmLogDto {
+    fn from(r: opencrab_store::LlmLogRow) -> Self {
+        Self {
+            id: r.id,
+            agent_id: r.agent_id,
+            session_id: r.session_id,
+            model: r.model,
+            prompt: r.prompt,
+            response: r.response,
+            tool_calls: r.tool_calls,
+            latency_ms: r.latency_ms,
+            prompt_tokens: r.prompt_tokens,
+            completion_tokens: r.completion_tokens,
+            total_tokens: r.total_tokens,
+            error_code: r.error_code,
+            error_body: r.error_body,
+            requested_at: r.requested_at,
+            trigger_message_id: r.trigger_message_id,
+            is_bot_iteration: r.is_bot_iteration,
+            cache_read_tokens: r.cache_read_tokens,
+            cache_creation_tokens: r.cache_creation_tokens,
+            created_at: r.created_at,
+        }
+    }
+}
+
+/// 本体 API `/llm-logs/stats` の日次行。
+#[derive(Serialize)]
+struct LlmLogStatDto {
+    date: String,
+    count: i64,
+    total_tokens: i64,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    avg_latency_ms: f64,
+    error_count: i64,
+    cache_read_tokens: i64,
+    cache_creation_tokens: i64,
+}
+
+impl From<opencrab_store::LlmLogStatRow> for LlmLogStatDto {
+    fn from(r: opencrab_store::LlmLogStatRow) -> Self {
+        Self {
+            date: r.date,
+            count: r.count,
+            total_tokens: r.total_tokens,
+            prompt_tokens: r.prompt_tokens,
+            completion_tokens: r.completion_tokens,
+            avg_latency_ms: r.avg_latency_ms,
+            error_count: r.error_count,
+            cache_read_tokens: r.cache_read_tokens,
+            cache_creation_tokens: r.cache_creation_tokens,
+        }
+    }
+}
+
+/// tool_logs の 1 行（#787）。フロントページは未着手。観測に必要な列だけ。
+#[derive(Serialize)]
+struct ToolLogDto {
+    id: i64,
+    agent_id: String,
+    session_id: Option<String>,
+    tool_name: String,
+    args_json: String,
+    outcome: String,
+    result_text: String,
+    started_at: Option<String>,
+    created_at: String,
+    latency_ms: Option<i64>,
+    turn_record_id: Option<i64>,
+    activity_id: Option<i64>,
+    iteration: Option<i64>,
+}
+
+impl From<opencrab_store::ToolLogRow> for ToolLogDto {
+    fn from(r: opencrab_store::ToolLogRow) -> Self {
+        Self {
+            id: r.id,
+            agent_id: r.agent_id,
+            session_id: r.session_id,
+            tool_name: r.tool_name,
+            args_json: r.args_json,
+            outcome: r.outcome,
+            result_text: r.result_text,
+            started_at: r.started_at,
+            created_at: r.created_at,
+            latency_ms: r.latency_ms,
+            turn_record_id: r.turn_record_id,
+            activity_id: r.activity_id,
+            iteration: r.iteration,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct LimitQuery {
+    limit: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct DaysQuery {
+    days: Option<i64>,
+}
+
+fn positive_or(n: Option<i64>, default: i64) -> i64 {
+    n.filter(|v| *v > 0).unwrap_or(default)
+}
+
+/// GET /api/agents/{id}/llm-logs — 本体封筒（配列）。agent_id は path の subject 十進。
+async fn list_llm_logs(
+    State(st): State<AdminState>,
+    Path(id): Path<String>,
+    Query(q): Query<LimitQuery>,
+) -> ApiResult<Json<Vec<LlmLogDto>>> {
+    let sid: i64 = id.parse().map_err(|_| bad_id())?;
+    let rows = db_read(
+        st.store
+            .list_llm_logs(&sid.to_string(), positive_or(q.limit, 20)),
+    )?;
+    Ok(Json(rows.into_iter().map(LlmLogDto::from).collect()))
+}
+
+/// GET /api/agents/{id}/llm-logs/stats — 本体封筒（日次配列・既定 30 日）。
+async fn llm_logs_stats(
+    State(st): State<AdminState>,
+    Path(id): Path<String>,
+    Query(q): Query<DaysQuery>,
+) -> ApiResult<Json<Vec<LlmLogStatDto>>> {
+    let sid: i64 = id.parse().map_err(|_| bad_id())?;
+    let rows = db_read(
+        st.store
+            .llm_logs_stats(&sid.to_string(), positive_or(q.days, 30)),
+    )?;
+    Ok(Json(rows.into_iter().map(LlmLogStatDto::from).collect()))
+}
+
+/// GET /api/agents/{id}/tool-logs — tool_logs を新しい順で返す（本体 llm-logs と同型の配列）。
+async fn list_tool_logs(
+    State(st): State<AdminState>,
+    Path(id): Path<String>,
+    Query(q): Query<LimitQuery>,
+) -> ApiResult<Json<Vec<ToolLogDto>>> {
+    let sid: i64 = id.parse().map_err(|_| bad_id())?;
+    let rows = db_read(
+        st.store
+            .list_tool_logs(&sid.to_string(), positive_or(q.limit, 20)),
+    )?;
+    Ok(Json(rows.into_iter().map(ToolLogDto::from).collect()))
+}
+
 // ---- 未実装（偽装しない・501 で理由を明示） ----
 
 /// GET だけを載せ、理由文つきの 501 を返す MethodRouter を作る。
@@ -576,19 +752,14 @@ pub fn create_router(state: AdminState) -> Router {
             get(list_allowed_commands),
         )
         .route("/api/llm/model-pricing", get(list_model_pricing))
+        // --- llm_logs / tool_logs（#772 A・store の読み取り。表が無いときだけ 501） ---
+        .route("/api/agents/{id}/llm-logs", get(list_llm_logs))
+        .route("/api/agents/{id}/llm-logs/stats", get(llm_logs_stats))
+        .route("/api/agents/{id}/tool-logs", get(list_tool_logs))
         // --- まだ未配線の旧テーブル系（統合 DB / 後続で配線） ---
         .route(
             "/api/agents/{id}/sleep-logs",
             unimpl("sleep-logs: 旧テーブル未移行（統合 DB 待ち）"),
-        )
-        // --- #766 待ち（LLM ログ保存を実装中・読み側は二重実装しない） ---
-        .route(
-            "/api/agents/{id}/llm-logs",
-            unimpl("llm-logs: #766（保存）実装待ち"),
-        )
-        .route(
-            "/api/agents/{id}/llm-logs/stats",
-            unimpl("llm-logs/stats: #766（保存）実装待ち"),
         )
         // --- oc2 に概念が無い ---
         .route("/api/agents/{id}/skills", unimpl("skills: oc2 に概念なし"))
@@ -691,4 +862,214 @@ pub fn create_router(state: AdminState) -> Router {
             unimpl("system log-level: runtime が範囲外"),
         )
         .with_state(state)
+}
+
+#[cfg(test)]
+mod api_contract {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use opencrab_port::Standing;
+    use opencrab_store::{NewLlmLog, NewToolLog, Store};
+    use tower::ServiceExt;
+
+    fn now_rfc3339() -> String {
+        chrono::Utc::now().to_rfc3339()
+    }
+
+    fn dummy_db() -> Arc<Db> {
+        Arc::new(Db::from_connection(
+            rusqlite::Connection::open_in_memory().expect("memory db"),
+        ))
+    }
+
+    fn state_from_store(store: Store) -> AdminState {
+        AdminState {
+            store: Arc::new(store),
+            db: dummy_db(),
+            compaction_ratio: 0.5,
+        }
+    }
+
+    fn seed_logs(store: &Store) -> i64 {
+        let agent = store
+            .create_subject(
+                SubjectKind::Agent,
+                "A",
+                "persona",
+                "engine",
+                Standing::Trusted,
+                0,
+            )
+            .expect("subject");
+        let ts = now_rfc3339();
+        store
+            .write_llm_log(&NewLlmLog {
+                id: format!("{agent}-1"),
+                agent_id: agent.to_string(),
+                session_id: Some("3".into()),
+                model: Some("scripted".into()),
+                prompt: r#"{"model":"scripted","messages":[{"role":"user","content":"hi"}]}"#
+                    .into(),
+                response: r#"{"content":"yo","tool_calls":[],"finish_reason":"stop","usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}"#.into(),
+                tool_calls: None,
+                latency_ms: Some(12),
+                prompt_tokens: Some(2),
+                completion_tokens: Some(1),
+                total_tokens: Some(3),
+                error_code: None,
+                error_body: None,
+                requested_at: Some(ts.clone()),
+                trigger_message_id: Some("9".into()),
+                is_bot_iteration: false,
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+                created_at: ts.clone(),
+                turn_record_id: None,
+                iteration: Some(1),
+                place_id: Some(3),
+                subject_id: Some(agent),
+            })
+            .expect("llm log");
+        store
+            .write_tool_log(&NewToolLog {
+                agent_id: agent.to_string(),
+                session_id: Some("3".into()),
+                tool_name: "core-recall".into(),
+                args_json: "{}".into(),
+                outcome: "done".into(),
+                result_text: "ok".into(),
+                started_at: Some(ts.clone()),
+                created_at: ts,
+                latency_ms: Some(4),
+                turn_record_id: None,
+                activity_id: None,
+                iteration: Some(1),
+                place_id: Some(3),
+                subject_id: Some(agent),
+            })
+            .expect("tool log");
+        agent
+    }
+
+    async fn get_json(state: AdminState, uri: &str) -> (StatusCode, serde_json::Value) {
+        let response = create_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        let status = response.status();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, value)
+    }
+
+    /// TEST-DESIGN D22: GET /api/agents/{id}/llm-logs は 200 + 本体封筒。
+    #[tokio::test]
+    async fn llm_logs_list_is_200_body_envelope() {
+        let store = Store::new_in_memory().expect("store");
+        let agent = seed_logs(&store);
+        let (status, body) = get_json(
+            state_from_store(store),
+            &format!("/api/agents/{agent}/llm-logs"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let row = body
+            .as_array()
+            .expect("list envelope")
+            .first()
+            .expect("one row");
+        assert_eq!(row["agent_id"], agent.to_string());
+        assert_eq!(row["prompt_tokens"], 2);
+        assert_eq!(row["completion_tokens"], 1);
+        assert!(row["created_at"].as_str().is_some());
+        assert!(row["prompt"].as_str().unwrap().contains("messages"));
+    }
+
+    /// TEST-DESIGN D22: GET /api/agents/{id}/llm-logs/stats は 200 + 日次配列。
+    #[tokio::test]
+    async fn llm_logs_stats_is_200_body_envelope() {
+        let store = Store::new_in_memory().expect("store");
+        let agent = seed_logs(&store);
+        let (status, body) = get_json(
+            state_from_store(store),
+            &format!("/api/agents/{agent}/llm-logs/stats"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let row = body
+            .as_array()
+            .expect("stats envelope")
+            .first()
+            .expect("one day");
+        assert_eq!(row["count"], 1);
+        assert_eq!(row["prompt_tokens"], 2);
+        assert_eq!(row["completion_tokens"], 1);
+        assert!(row["date"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn tool_logs_list_is_200() {
+        let store = Store::new_in_memory().expect("store");
+        let agent = seed_logs(&store);
+        let (status, body) = get_json(
+            state_from_store(store),
+            &format!("/api/agents/{agent}/tool-logs"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let row = body
+            .as_array()
+            .expect("tool-logs envelope")
+            .first()
+            .expect("one row");
+        assert_eq!(row["agent_id"], agent.to_string());
+        assert_eq!(row["tool_name"], "core-recall");
+        assert_eq!(row["outcome"], "done");
+        assert_eq!(row["result_text"], "ok");
+    }
+
+    #[tokio::test]
+    async fn llm_logs_absent_table_is_501() {
+        let path = std::env::temp_dir().join(format!(
+            "opencrab-admin-llm-logs-absent-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        rusqlite::Connection::open(&path).expect("empty sqlite");
+        let store = Store::open_read_only(&path).expect("ro");
+        let db = Arc::new(Db::from_connection(
+            rusqlite::Connection::open_with_flags(
+                &path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("ro db"),
+        ));
+        let (status, body) = get_json(
+            AdminState {
+                store: Arc::new(store),
+                db,
+                compaction_ratio: 0.5,
+            },
+            "/api/agents/1/llm-logs",
+        )
+        .await;
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
+        assert_eq!(body["error"], "unimplemented");
+    }
 }
