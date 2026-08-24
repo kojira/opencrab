@@ -15,8 +15,8 @@ mod discord;
 mod observe;
 mod owner_identity;
 pub use discord::{
-    discord_launch_decisions_on, discord_launch_decisions_read_only, upsert_discord_kind_on,
-    DiscordLaunchDecision,
+    declared_discord_operations, discord_launch_decisions_on, discord_launch_decisions_read_only,
+    upsert_discord_kind_on, DiscordLaunchDecision,
 };
 pub use observe::{LabelUpdate, ObserveGateAddress, ObserveRequest};
 pub use owner_identity::{

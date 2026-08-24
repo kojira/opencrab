@@ -1839,6 +1839,7 @@ dependencies = [
  "opencrab-db",
  "opencrab-port",
  "opencrab-store",
+ "opencrab-voice",
  "rusqlite",
  "serde",
  "serde_json",

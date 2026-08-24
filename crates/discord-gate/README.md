@@ -10,7 +10,8 @@
 - ingress は Message Create → `said`。VC STT 成功も同じ `said`（`metadata.source=discord_voice`、origin 無し）。新 EventKind は無い。
 - discovery は v15 §2.2。intents は `GUILDS | GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT | GUILD_VOICE_STATES`。
 - effect は `say` / `react` / `ui`。`say` のあと、voice 活性 place なら TTS（`maybe_speak`）。`ui create` の renderer はこの slice に無いので fail loud。
-- join/leave の権限評価（権限 → voice 有無 → guild fail-closed）は子の中にある。hello `tools` はまだ `[]`（slice 4 で宣言する）。
+- join/leave は gate operation。hello `tools` と `DeclaredDiscordOperations()` は 8 件（§8.1 の 6 + `join_voice_channel` / `leave_voice_channel`）。
+- `m: tool` は plugd の現行経路（`address` + `caller`）。権限は grant/standing → `VoiceCaller`。songbird join/leave は子の中。
 - `read` は送らない。bind / unbind は受け取っても membership では core が送らない。
 
 ## 起動

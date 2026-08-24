@@ -28,6 +28,7 @@ opencrab-store = { path = "../store" }
 opencrab-port = { path = "../port" }
 # 本体 DB スキーマ（正本・AGREED §2.11）の queries と Db ハンドル。旧テーブル系の読み取りに使う。
 opencrab-db = { path = "../db" }
+opencrab-voice = { path = "../voice" }
 
 [dev-dependencies]
 tower = { workspace = true, features = ["util"] }

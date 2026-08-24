@@ -5173,6 +5173,9 @@ impl System {
         origin: Option<OriginInput>,
     ) -> ToolResult {
         let call = a.into_inner();
+        let standing = origin
+            .map(|origin| origin.standing)
+            .unwrap_or(Standing::Unknown);
         let provenance = origin.map(|origin| BackgroundProvenance {
             origin_from_exclusive: origin.from_exclusive,
             origin_to_inclusive: origin.to_inclusive,
@@ -5453,12 +5456,13 @@ impl System {
             None => {
                 let host = self.0.tool_host.clone();
                 let callc = call.clone();
-                let task = match tool_route {
-                    Some(route) => {
-                        tokio::spawn(async move { host.invoke_route(&route, &callc).await })
-                    }
-                    None => unreachable!("non-shell tools require a canonical route"),
-                };
+                let task =
+                    match tool_route {
+                        Some(route) => tokio::spawn(async move {
+                            host.invoke_route(&route, &callc, standing).await
+                        }),
+                        None => unreachable!("non-shell tools require a canonical route"),
+                    };
                 (task, call.name.clone())
             }
         };

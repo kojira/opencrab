@@ -384,6 +384,7 @@ impl ToolHost for ScriptedToolHost {
         &self,
         _route: &GateRoute,
         call: &ToolCallSpec,
+        _standing: Standing,
     ) -> Result<String, ToolError> {
         self.invokes.lock().unwrap().push(call.name.clone());
         self.args

@@ -1,6 +1,9 @@
 //! `ObserveGateAddress`（DESIGN-DISCORD-GATE v15 §1.2）。runtime が transform を呼ばない。
 
-use crate::{reconcile_subject_routes_on, runtime_uuid_v7, sha256, Result, Store};
+use crate::{
+    declared_discord_operations, reconcile_subject_routes_on, runtime_uuid_v7, sha256, Result,
+    Store,
+};
 use opencrab_port::{AddressKind, GateInstanceId, GateKindId, PlaceId, RoutePurpose, SubjectId};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::{json, Value};
@@ -9,14 +12,6 @@ const KIND: &str = "discord";
 const SOURCE_SYSTEM: &str = "discord";
 const BINDING_SCHEMA: &str = "gate-binding/discord/v1";
 const CONFIG_SCHEMA: &str = "gate-config/discord/v1";
-const DECLARED_OPS: [&str; 6] = [
-    "discord_list_guilds",
-    "discord_list_channels",
-    "discord_create_channel",
-    "discord_create_webhook",
-    "discord_add_reaction",
-    "discord_send_file",
-];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LabelUpdate {
@@ -447,7 +442,7 @@ fn derive_purposes(
     if heartbeat_enabled(tx, subject, place)? {
         purposes.push(RoutePurpose::timed());
     }
-    for name in DECLARED_OPS {
+    for name in declared_discord_operations() {
         if tool_visible(tx, subject, place, name)? {
             purposes.push(RoutePurpose::tool(name).map_err(|_| rusqlite::Error::InvalidQuery)?);
         }
