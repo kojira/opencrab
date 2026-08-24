@@ -753,6 +753,24 @@ fn subject_cwd(subject: SubjectId) -> String {
     format!("subject-{subject}")
 }
 
+/// ツール引数の整数。LLM は `20` も `"20"` も `20.0` も送り得るので、JSON の型差で activity を捨てない。
+/// 整数にならない値は activity ではない（store 障害の握り潰しではない）。
+#[allow(clippy::disallowed_methods)]
+fn json_i64(v: &serde_json::Value) -> Option<i64> {
+    if let Some(i) = v.as_i64() {
+        return Some(i);
+    }
+    if let Some(u) = v.as_u64() {
+        return i64::try_from(u).ok();
+    }
+    if let Some(f) = v.as_f64() {
+        if f.is_finite() && f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+            return Some(f as i64);
+        }
+    }
+    v.as_str().and_then(|s| s.parse().ok())
+}
+
 impl ToolResult {
     /// tool_result ブロックの**マルチパート**中身と is_error（§05 / DESIGN-images §4）。呼び出しの id で
     /// 対にするので道具名は入れない。失敗・断りは is_error=true（Anthropic の tool_result はこれでエラーを
@@ -6198,10 +6216,11 @@ impl System {
                 self.settle_background(bg, SettleOutcome::Stopped);
                 ToolResult::Done(format!("活動 #{bg} を停止した"))
             }
-            // 背景の活動の退避結果を行範囲で読む（§07/§06）。**自分の退避だけ**（store が subject で絞る）。
+            // 背景の活動の退避結果を行範囲で読む（§07/§06）。**自分の退避だけ**。
+            // 所有は activity 行で判定し、退避は activity の所有者で引く（ターン主体と所有者を混ぜない）。
             // 返り値は必ず inline 上限未満（offload の天井が構造的に守る）。activity は必須、行指定は任意。
             authority::CoreTool::BgRead => {
-                let bg = match call.args.get("activity").and_then(|x| x.as_i64()) {
+                let bg = match call.args.get("activity").and_then(json_i64) {
                     Some(i) => i,
                     None => return ToolResult::Failed("core-bg-read には activity が要る".into()),
                 };
@@ -6210,27 +6229,38 @@ impl System {
                 let start_line = call
                     .args
                     .get("start_line")
-                    .and_then(|x| x.as_i64())
+                    .and_then(json_i64)
                     .unwrap_or(1)
                     .max(1) as usize;
                 let line_count = call
                     .args
                     .get("line_count")
-                    .and_then(|x| x.as_i64())
+                    .and_then(json_i64)
                     .unwrap_or(BG_READ_DEFAULT_LINES)
                     .max(1) as usize;
-                match self.0.store.read_offload(subject, bg) {
-                    Ok(Some(row)) => {
+                let row = match self.0.store.get_activity(bg) {
+                    Ok(Some(r)) => r,
+                    Ok(None) => return ToolResult::Failed(format!("活動 #{bg} は無い")),
+                    Err(e) => return ToolResult::Failed(format!("活動を引けなかった: {e}")),
+                };
+                if row.subject != subject {
+                    return ToolResult::Failed(format!("活動 #{bg} はあなたの活動ではない"));
+                }
+                match self.0.store.read_offload(row.subject, bg) {
+                    Ok(Some(off)) => {
                         let slice = offload::read_lines(
                             self.0.counter.as_ref(),
-                            &row.body,
+                            &off.body,
                             start_line,
                             line_count,
                         );
                         ToolResult::Done(offload::render_slice(bg, &slice))
                     }
+                    Ok(None) if row.ended_at.is_none() => ToolResult::Failed(format!(
+                        "活動 #{bg} はまだ決着していない（退避は決着後）"
+                    )),
                     Ok(None) => ToolResult::Failed(format!(
-                        "活動 #{bg} の退避結果は無い（あなたの活動ではない／退避されていない）"
+                        "活動 #{bg} の退避結果は無い（退避されていない）"
                     )),
                     Err(e) => ToolResult::Failed(format!("退避を読めなかった: {e}")),
                 }

@@ -215,7 +215,8 @@ impl CoreTool {
             }
             CoreTool::BgList => {
                 "自分が切り離した背景の活動（走行中）の一覧と識別子を見る。暴走した活動を見つけて止めるのに使う。引数なし。\
-                 activity は core-bg-list の activity=N。場の番号（子 #N）や出来事の連番ではない。"
+                 activity は core-bg-list の activity=N。場の番号（子 #N）や出来事の連番ではない。\
+                 決着して退避された本文は core-bg-read で読む（start_line 既定 1・line_count 既定 200。範囲は start_line と line_count で指定）。"
             }
             CoreTool::BgStop => {
                 "自分の背景の活動を止める。暴走したツールを殺す手段（勝手に再実行はしない）。自分の活動だけ。\
@@ -223,7 +224,9 @@ impl CoreTool {
             }
             CoreTool::BgRead => {
                 "背景の活動の退避された結果を行範囲で読む。大きい結果は決着時に退避され、これで必要な分だけ手に取る。\
-                 返り値は必ず inline 上限未満に収まる。自分の退避だけ。引数 activity（識別子）・start_line（任意, 既定 1）・line_count（任意）。\
+                 返り値は必ず inline 上限未満に収まる。自分の退避だけ。引数 activity（識別子）・\
+                 start_line（任意, 既定 1・1 始まり）・line_count（任意, 既定 200）。\
+                 範囲は start_line と line_count で指定する（欠けても既定で先頭 200 行）。\
                  activity は core-bg-list の activity=N。場の番号（子 #N）や出来事の連番ではない。"
             }
             CoreTool::Shell => {
