@@ -11,6 +11,11 @@ DB は常に**読み取り専用**で開く（書き系は Phase 1 の範囲外�
   memory→memories）は **oc2 store の新テーブル**を読み、旧ダッシュボードの JSON 形へ写す（フロント無改変）。
 - それ以外（schedules / trusted-users / allowed-commands / model-pricing 等）は**本体 DB スキーマ
   （正本）の旧テーブル**を `opencrab-db` の queries で読む。旧 `crates/server` のハンドラを移植したもの。
+- `llm_logs` / `tool_logs`（#772 A）は store の読み取り（`list_llm_logs` / `llm_logs_stats` /
+  `list_tool_logs`）。writer は `agent_id` に **subject の十進文字列**を書くので、path `{id}` を
+  そのままキーにする（旧 `agents` 表への name 結合はしない）。レスポンスは本体封筒
+  （list/stats 配列。`prompt_tokens` / `completion_tokens` / `created_at`）。表が無いときだけ 501。
+  `GET /api/agents/{id}/tool-logs` は JSON のみ（フロントページは未着手）。
 - 正本スキーマへ**未移行**のテーブル・列は、偽の空配列を返さず **501** で明示する（migration 側の責務）。
   データ実体の無い機能（skills / soul presets / analytics 等）も 501。
 - 書き系メソッドはルートに載せない（axum が **405** を返す＝偽の成功を作らない）。
