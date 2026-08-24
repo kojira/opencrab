@@ -1,4 +1,4 @@
-//! 管理面（ダッシュボード）の読み取り API + owner ID 書き系復元。
+//! 管理面（ダッシュボード）の読み取り API + agents/owner 書き系復元。
 //!
 //! ここは配送と整形だけを担う（AGREED §2.9）。データの判断・クエリは store 側に置き、
 //! この面は store の型付き読み取り／owner コマンドを呼んで、旧ダッシュボードの JSON 形へ写すだけ。
@@ -204,25 +204,31 @@ async fn list_agents(State(st): State<AdminState>) -> ApiResult<Json<Vec<AgentSu
     Ok(Json(out))
 }
 
-/// GET /api/agents/{id} — subject を旧 AgentDetail の平坦形へ。無ければ null（旧挙動）。
+/// GET /api/agents/{id} — subject + profile を旧 AgentDetail の平坦形へ。無ければ null（旧挙動）。
 async fn get_agent(
     State(st): State<AdminState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let sid: i64 = id.parse().map_err(|_| bad_id())?;
-    let Some(s) = st.store.get_subject(sid).map_err(store_err)? else {
+    let view = st.store.subject_dashboard_view(sid).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "store_error", "detail": e.to_string() })),
+        )
+    })?;
+    let Some(view) = view else {
         return Ok(Json(serde_json::Value::Null));
     };
     let detail = AgentDetail {
-        id: s.id.to_string(),
-        name: s.name.clone(),
+        id: view.id.to_string(),
+        name: view.name,
         job_title: None,
         organization: None,
         image_url: None,
-        persona_name: None,
-        personality: None,
-        instructions: s.persona,
-        model: Some(s.turn_runner),
+        persona_name: view.persona_name,
+        personality: view.personality,
+        instructions: view.instructions,
+        model: view.model,
         reasoning_effort: None,
         web_search: None,
         metadata_json: None,
@@ -739,6 +745,7 @@ pub fn create_router(state: AdminState) -> Router {
         // --- 実データのあるリダイレクト（oc2 store の新テーブル） ---
         .route("/api/agents", get(list_agents))
         .route("/api/agents/{id}", get(get_agent))
+        .merge(crate::agent_routes::agent_write_routes())
         .route("/api/sessions", get(list_sessions))
         .route("/api/sessions/{id}", get(get_session))
         .route("/api/sessions/{id}/logs", get(list_session_logs))
@@ -766,10 +773,6 @@ pub fn create_router(state: AdminState) -> Router {
         .route(
             "/api/agents/{id}/skills/unused",
             unimpl("skills: oc2 に概念なし"),
-        )
-        .route(
-            "/api/agents/{id}/soul/presets",
-            unimpl("soul presets: oc2 に概念なし"),
         )
         .route(
             "/api/agents/{id}/analytics",

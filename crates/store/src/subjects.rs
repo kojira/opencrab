@@ -53,6 +53,17 @@ pub struct SubjectPatch {
     pub model: Option<String>,
 }
 
+/// GET /api/agents/{id} が読む適用済み欄。未復元欄は handler が null のまま出す。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubjectDashboardView {
+    pub id: SubjectId,
+    pub name: String,
+    pub persona_name: Option<String>,
+    pub personality: Option<String>,
+    pub instructions: String,
+    pub model: Option<String>,
+}
+
 /// 本体 `process.rs:241-257`: `You are {name} ({persona_name}).` + 非空 personality + 非空 Instructions。
 pub fn compose_subject_persona(
     name: &str,
@@ -210,8 +221,10 @@ fn apply_model_row(tx: &Transaction<'_>, id: SubjectId, model: Option<&str>) -> 
 }
 
 fn tombstone_owned_discord(tx: &Transaction<'_>, id: SubjectId, now: i64) -> crate::Result<()> {
+    // body `delete_agent` は `agent_discord_config` だけを消す。nostr instance は止めない。
     let mut stmt = tx.prepare(
-        "SELECT instance_id FROM gate_instances WHERE owner_subject_id=?1 ORDER BY instance_id",
+        "SELECT instance_id FROM gate_instances
+         WHERE owner_subject_id=?1 AND kind_id='discord' ORDER BY instance_id",
     )?;
     let instances = stmt
         .query_map(params![id], |row| row.get::<_, String>(0))?
@@ -395,11 +408,8 @@ impl Store {
     ) -> std::result::Result<bool, SubjectCommandError> {
         let mut conn = self.c();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // body `delete_agent` は agents 行の有無にかかわらず ancillary 4 family を続ける。
         let deleted = tx.execute("DELETE FROM subjects WHERE id=?1", params![id])?;
-        if deleted == 0 {
-            tx.commit()?;
-            return Ok(false);
-        }
         tx.execute(
             "DELETE FROM soul_presets WHERE agent_id=?1",
             params![id.to_string()],
@@ -408,7 +418,61 @@ impl Store {
         tx.execute("DELETE FROM memories WHERE subject_id=?1", params![id])?;
         tombstone_owned_discord(&tx, id, now)?;
         tx.commit()?;
-        Ok(true)
+        Ok(deleted > 0)
+    }
+
+    pub fn subject_dashboard_view(
+        &self,
+        id: SubjectId,
+    ) -> std::result::Result<Option<SubjectDashboardView>, SubjectCommandError> {
+        let conn = self.c();
+        let Some(name) = conn
+            .query_row(
+                "SELECT name FROM subjects WHERE id=?1",
+                params![id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let profile = conn
+            .query_row(
+                "SELECT persona_name,persona,instructions FROM subject_profiles
+                 WHERE subject_id=?1 AND revision=1",
+                params![id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let model = conn
+            .query_row(
+                "SELECT model_alias FROM subject_runtime_configs
+                 WHERE subject_id=?1 AND revision=1",
+                params![id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        let (persona_name, personality, instructions) = match profile {
+            Some((persona_name, personality, instructions)) => {
+                (Some(persona_name), personality, instructions)
+            }
+            None => (None, None, String::new()),
+        };
+        Ok(Some(SubjectDashboardView {
+            id,
+            name,
+            persona_name,
+            personality,
+            instructions,
+            model,
+        }))
     }
 }
 
@@ -911,6 +975,142 @@ mod tests {
                 gone
             ),
             1
+        );
+    }
+
+    fn install_owned_gate(
+        store: &Store,
+        owner: SubjectId,
+        kind: &str,
+        instance: &str,
+        label: &str,
+    ) {
+        let instance = GateInstanceId::parse(instance.to_string()).unwrap();
+        let kind_id = GateKindId::parse(kind.to_string()).unwrap();
+        let schema = format!("gate-config/{kind}/v1");
+        let config = serde_json::to_vec(&json!({
+            "agent_ids": [],
+            "legacy_updated_at": "",
+            "owner_external_id": "",
+            "self_external_id": null,
+        }))
+        .unwrap();
+        store
+            .install_gate_instance_revision(
+                &instance,
+                &kind_id,
+                label,
+                Some(owner),
+                1,
+                true,
+                OriginScope::KindAddress,
+                IngressDiscovery::Membership,
+                &schema,
+                &config,
+                12,
+            )
+            .unwrap();
+    }
+
+    fn active_present(store: &Store, instance: &str) -> i64 {
+        store
+            .c()
+            .query_row(
+                "SELECT r.present FROM gate_instances gi
+                 JOIN gate_instance_revisions r
+                   ON r.instance_id=gi.instance_id AND r.revision=gi.active_revision
+                 WHERE gi.instance_id=?1",
+                params![instance],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn subject_delete_tombstones_discord_only() {
+        let store = store();
+        let gone = store.subject_create(None, "Gone", "G", 11).unwrap();
+        install_owned_gate(
+            &store,
+            gone,
+            "discord",
+            "018f8020-0000-7000-8000-000000000011",
+            "dedicated:discord:gone",
+        );
+        install_owned_gate(
+            &store,
+            gone,
+            "nostr",
+            "018f8020-0000-7000-8000-000000000012",
+            "dedicated:nostr:gone",
+        );
+
+        assert!(store.subject_delete(gone, 40).unwrap());
+        assert_eq!(
+            active_present(&store, "018f8020-0000-7000-8000-000000000011"),
+            0
+        );
+        assert_eq!(
+            active_present(&store, "018f8020-0000-7000-8000-000000000012"),
+            1
+        );
+    }
+
+    #[test]
+    fn subject_delete_cleans_ancillaries_when_subject_absent() {
+        let store = store();
+        let missing: SubjectId = 99;
+        insert_skill(&store, missing, "skill-orphan");
+        store
+            .c()
+            .execute(
+                "INSERT INTO memories(subject_id,body,written_at) VALUES(?1,'orphan-mem',1)",
+                params![missing],
+            )
+            .unwrap();
+        store
+            .c()
+            .execute(
+                "INSERT INTO soul_presets(id,agent_id,preset_name,persona_name,created_at,updated_at)
+                 VALUES('p-orphan',?1,'po','n','t','t')",
+                params![missing.to_string()],
+            )
+            .unwrap();
+        install_owned_gate(
+            &store,
+            missing,
+            "discord",
+            "018f8020-0000-7000-8000-000000000099",
+            "dedicated:discord:orphan",
+        );
+
+        assert!(!store.subject_delete(missing, 50).unwrap());
+        assert_eq!(
+            count_bound(
+                &store,
+                "SELECT COUNT(*) FROM skills WHERE owner_subject_id=?1",
+                missing
+            ),
+            0
+        );
+        assert_eq!(
+            count_bound(
+                &store,
+                "SELECT COUNT(*) FROM memories WHERE subject_id=?1",
+                missing
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                &store,
+                "SELECT COUNT(*) FROM soul_presets WHERE agent_id='99'"
+            ),
+            0
+        );
+        assert_eq!(
+            active_present(&store, "018f8020-0000-7000-8000-000000000099"),
+            0
         );
     }
 }

@@ -13,6 +13,7 @@
 //!   http_port    = env OPENCRAB_ADMIN_PORT / 8787
 //!   web_dist_dir = env OPENCRAB_ADMIN_WEB_DIST / "web/dist"（`pnpm build` の出力）
 
+mod agent_routes;
 mod api;
 mod owner_routes;
 mod schedule_cron;

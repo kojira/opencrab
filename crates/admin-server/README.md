@@ -19,7 +19,10 @@ store は owner ID 日次書き込みのため **RW・no-recover** で開く（`
   `GET /api/agents/{id}/tool-logs` は JSON のみ（フロントページは未着手）。
 - 正本スキーマへ**未移行**のテーブル・列は、偽の空配列を返さず **501** で明示する（migration 側の責務）。
   データ実体の無い機能（skills / soul presets / analytics 等）も 501。
-- Discord / Nostr owner ID（`GET/PUT/PATCH/DELETE /api/agents/{id}/discord`、`GET/PUT/DELETE /api/agents/{id}/nostr`）は本体 wire を復元する（DESIGN-OWNER-IDENTITY）。それ以外の書き系はルートに載せない（axum が **405**）。
+- Discord / Nostr owner ID（`GET/PUT/PATCH/DELETE /api/agents/{id}/discord`、`GET/PUT/DELETE /api/agents/{id}/nostr`）は本体 wire を復元する（DESIGN-OWNER-IDENTITY）。
+- Agents CRUD（`POST /api/agents`、`PUT/PATCH/DELETE /api/agents/{id}`）は slice-1 Subject* コマンド。PATCH の JSON null は未提供。未復元欄は値つき明示だけ 501。
+- `POST /api/agents/{id}/messages` は `AgentDirectMessage`（place 保証 + said）のあと Spoke を待って本体封筒を返す。不在 agent は 404。
+- `soul_presets`（B 表）の list/create/delete/apply。Apply は SubjectPatch で persona 合成を書く。
 
 ## ビルドと起動
 

@@ -11,10 +11,13 @@ use std::sync::{Arc, Mutex};
 
 pub type Result<T> = std::result::Result<T, rusqlite::Error>;
 
+mod direct_message;
 mod discord;
 mod observe;
 mod owner_identity;
+mod soul_presets;
 mod subjects;
+pub use direct_message::{AgentDirectMessage, REST_SESSION_PREFIX};
 pub use discord::{
     declared_discord_operations, discord_launch_decisions_on, discord_launch_decisions_read_only,
     upsert_discord_kind_on, DiscordLaunchDecision,
@@ -23,7 +26,11 @@ pub use observe::{LabelUpdate, ObserveGateAddress, ObserveRequest};
 pub use owner_identity::{
     GateOwnerProjection, OwnerExternalChange, OwnerIdentityError, OwnerPrincipalOutcome,
 };
-pub use subjects::{compose_subject_persona, SubjectCommandError, SubjectPatch, SubjectReplace};
+pub use soul_presets::{SoulPreset, SoulPresetError};
+pub use subjects::{
+    compose_subject_persona, SubjectCommandError, SubjectDashboardView, SubjectPatch,
+    SubjectReplace,
+};
 
 #[derive(Debug)]
 pub enum GateConnectionStartError {
@@ -1545,6 +1552,45 @@ const SCHEMA: &str = r#"
               created_at INTEGER NOT NULL,
               updated_at INTEGER NOT NULL
             );
+            -- SubjectCreate/Replace/Patch の移行所有表（converter も IF NOT EXISTS）。
+            CREATE TABLE IF NOT EXISTS subject_profiles(
+              subject_id INTEGER NOT NULL,
+              revision INTEGER NOT NULL,
+              persona_name TEXT NOT NULL,
+              persona TEXT,
+              instructions TEXT NOT NULL,
+              default_heartbeat_instructions TEXT NOT NULL,
+              job_title TEXT,
+              organization TEXT,
+              image_url TEXT,
+              metadata TEXT,
+              updated_at INTEGER NOT NULL,
+              PRIMARY KEY(subject_id,revision)
+            );
+            CREATE TABLE IF NOT EXISTS subject_runtime_configs(
+              subject_id INTEGER NOT NULL,
+              revision INTEGER NOT NULL,
+              created_at INTEGER NOT NULL,
+              model_alias TEXT,
+              reasoning_effort TEXT,
+              web_search_enabled INTEGER,
+              history_policy TEXT NOT NULL,
+              output_policy TEXT NOT NULL,
+              model_route_id TEXT,
+              source_config BLOB,
+              PRIMARY KEY(subject_id,revision)
+            );
+            -- soul_presets は llm_logs と同型の canonical-in-place（DESIGN-DB-MIGRATION §12.7）。
+            CREATE TABLE IF NOT EXISTS soul_presets(
+              id TEXT PRIMARY KEY,
+              agent_id TEXT NOT NULL,
+              preset_name TEXT NOT NULL,
+              persona_name TEXT NOT NULL,
+              custom_traits_json TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_soul_presets_agent ON soul_presets(agent_id);
             "#;
 
 /// Phase S schema application for in-place migration (#771).
