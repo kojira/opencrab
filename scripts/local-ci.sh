@@ -8,6 +8,9 @@ cd "$root"
 export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}"
 export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
 
+echo "==> rustc --version"
+rustc --version
+
 echo "==> cargo fmt --all -- --check"
 cargo fmt --all -- --check
 

@@ -1,0 +1,6 @@
+# Keep the local rustup toolchain on the same version CI installs
+# (.github/workflows/ci.yml uses dtolnay/rust-toolchain@1.98.0).
+# Bump this file and the workflow together when raising the version.
+[toolchain]
+channel = "1.98.0"
+components = ["rustfmt", "clippy"]

@@ -12,11 +12,11 @@ pub(crate) fn parse_utc_nanos(input: &str) -> Option<i64> {
         return None;
     }
     let year = digits(bytes, 0, 4)? as i64;
-    let month = digits(bytes, 5, 2)? as u32;
-    let day = digits(bytes, 8, 2)? as u32;
-    let hour = digits(bytes, 11, 2)? as u32;
-    let minute = digits(bytes, 14, 2)? as u32;
-    let second = digits(bytes, 17, 2)? as u32;
+    let month = digits(bytes, 5, 2)?;
+    let day = digits(bytes, 8, 2)?;
+    let hour = digits(bytes, 11, 2)?;
+    let minute = digits(bytes, 14, 2)?;
+    let second = digits(bytes, 17, 2)?;
     if year == 0
         || !(1..=12).contains(&month)
         || day == 0
