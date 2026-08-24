@@ -1,7 +1,8 @@
 use crate::Result;
 use rusqlite::Connection;
 
-/// Migration-owned tables that store SCHEMA does not create (DESIGN-DB-MIGRATION §12 Q1).
+/// Migration-owned tables. `subject_profiles` / `subject_runtime_configs` /
+/// `private_journal` は store SCHEMA にもある（runtime writer）。IF NOT EXISTS。
 pub(crate) fn create_migration_owned_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"

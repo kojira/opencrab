@@ -8,6 +8,8 @@
 - `memory_index_clear` / `memory_index_policy_update` / `memory_index_build` / `memory_index_rebuild` / `memory_index_merge` / `daily_log_index_rebuild` / `daily_log_index_run` — B 表 `memory_index_*`。キーは旧 agent_id UUID。表が無いと Store エラー。LLM が要る構築は未索引データがあると fail loud。
 - `forget` — curated DELETE（`memories` を subject+id で消す）。
 - `agent_direct_message` — place 保証 + said 注入。
+- `place_create_legacy` — dashboard `POST /api/sessions`。places + place_source_refs + memberships。未解決 participant はエラー。旧 `sessions` 不書。
+- `private_journal_append_mentor` — dashboard `POST /api/sessions/{id}/mentor`。`private_journal` へ 1 行。events に載せない（C2）。
 
 - `upsert_discord_kind` — `kind_id=discord, protocol_major=2, origin_scope=kind_address, ingress_discovery=membership`
 - `discord_launch_decisions` / `discord_launch_decisions_read_only` — present && enabled。secret 値は読まず、dedicated かつ非空だけ `start=true`。`shared:*` は token 非空でも `start=false`（v15 §8 未実装・#793）

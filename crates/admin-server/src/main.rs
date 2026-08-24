@@ -18,6 +18,7 @@ mod api;
 mod memory_routes;
 mod owner_routes;
 mod schedule_cron;
+mod session_routes;
 mod skill_routes;
 mod voice_routes;
 
