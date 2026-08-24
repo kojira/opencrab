@@ -1,6 +1,7 @@
 //! Binary spawn smoke for lifecycle states (TEST-DESIGN F1 / F2 / F3).
 
 use opencrab_converter::{migrate_in_place, IN_PLACE_MIGRATION_ID};
+use opencrab_store::Store;
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -217,5 +218,56 @@ fn legacy_nonempty_without_marker_refuses() {
     assert!(
         stderr.contains("NeedsManualMigration") || stderr.contains("legacy tables are non-empty"),
         "refusal body must identify NeedsManualMigration; stderr={stderr}"
+    );
+}
+
+/// F-shape (#784): a used new-structure DB (rows in events/subjects, no
+/// schema_migration_state) must serve. Today `legacy_tables_nonempty` refuses.
+#[test]
+fn used_new_structure_db_without_marker_serves() {
+    let socket = scratch("used-new.sock");
+    let db = scratch("used-new.db");
+    let _ = std::fs::remove_file(&socket);
+    let _ = std::fs::remove_file(&db);
+    {
+        let store = Store::open(&db).expect("create used new-structure store");
+        drop(store);
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO subjects(kind,name,persona,turn_runner,standing,created_at)
+             VALUES('human','synthetic-used','','engine','owner',1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events(place_id,seq,kind,content_json,mentions_json,created_at,attachments_json)
+             VALUES(1,1,'said','{\"text\":\"synthetic-used-event\",\"symbol\":null}','[]',1,'[]')",
+            [],
+        )
+        .unwrap();
+        conn.execute("DROP TABLE schema_migration_state", [])
+            .unwrap();
+        let subjects: i64 = conn
+            .query_row("SELECT COUNT(*) FROM subjects", [], |row| row.get(0))
+            .unwrap();
+        let events: i64 = conn
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+            .unwrap();
+        assert!(subjects > 0 && events > 0, "used new-structure rows");
+        let marker_table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='schema_migration_state'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(marker_table, 0, "schema_migration_state must be absent");
+    }
+    let mut spawned = spawn_runtime(&socket, &db);
+    let listening = wait_listen_or_exit(&mut spawned, TIMEOUT);
+    assert!(
+        listening,
+        "used new-structure DB without marker must serve; stderr={}",
+        spawned.stderr
     );
 }

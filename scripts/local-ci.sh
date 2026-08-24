@@ -23,7 +23,7 @@ trap 'rm -f "$test_log" "$test_json"' EXIT
 
 echo "==> cargo test --workspace --all-features"
 set +e
-cargo test --workspace --all-features 2>&1 | tee "$test_log"
+cargo test --workspace --all-features --no-fail-fast 2>&1 | tee "$test_log"
 test_rc="${PIPESTATUS[0]}"
 set -e
 
@@ -147,6 +147,8 @@ for item in results:
 
 for idx, entry in enumerate(ledger):
     hits = [item for item in results if names_match(item, entry["test"])]
+    if not hits:
+        red.append(f"xfail test not run: {entry['test']} (#{entry['issue']})")
     if any(item["status"] == "ok" for item in hits) and not any(item["status"] == "FAILED" for item in hits):
         red.append(f"stale xfail PASS: {entry['test']} (#{entry['issue']})")
     state = issue_state(entry["issue"])

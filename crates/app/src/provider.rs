@@ -49,6 +49,8 @@ enum MockScript {
     ClockBatch,
     AnswerDirect,
     ShellThenRead,
+    AnswerThenNoReply,
+    ShellFailThenRead,
 }
 
 pub const MOCK_MODEL: &str = "mock";
@@ -82,6 +84,8 @@ impl MockEngine {
             "clock_batch" => MockScript::ClockBatch,
             "answer_direct" => MockScript::AnswerDirect,
             "shell_then_read" => MockScript::ShellThenRead,
+            "answer_then_no_reply" => MockScript::AnswerThenNoReply,
+            "shell_fail_then_read" => MockScript::ShellFailThenRead,
             other => return Err(format!("unknown OPENCRAB_MOCK_LLM_SCRIPT: {other}")),
         };
         Ok(Self { script })
@@ -93,7 +97,9 @@ impl Engine for MockEngine {
     fn emits_tool_calls(&self) -> bool {
         !matches!(
             self.script,
-            MockScript::PlaintextToolSettledReply | MockScript::ShellThenRead
+            MockScript::PlaintextToolSettledReply
+                | MockScript::ShellThenRead
+                | MockScript::ShellFailThenRead
         )
     }
 
@@ -233,6 +239,26 @@ impl Engine for MockEngine {
                     Some(body) => Ok(say(&format!("synthetic-shell-result {body}"))),
                     None => Err(EngineError(
                         "mock shell_then_read settled turn did not receive the tool result"
+                            .to_string(),
+                    )),
+                }
+            }
+            MockScript::AnswerThenNoReply => Ok(say("synthetic-mixed-answer\nNO_REPLY")),
+            MockScript::ShellFailThenRead => {
+                let settled = ctx.rendered.contains("=== 決着の対応 ===");
+                if !settled {
+                    return Ok(say(r#"core-shell::{"argv":["ls"]}"#));
+                }
+                let result = ctx
+                    .rendered
+                    .split("結果:")
+                    .nth(1)
+                    .map(str::trim)
+                    .filter(|body| !body.is_empty());
+                match result {
+                    Some(body) => Ok(say(&format!("synthetic-shell-failure {body}\nNO_REPLY"))),
+                    None => Err(EngineError(
+                        "mock shell_fail_then_read settled turn did not receive the failure reason"
                             .to_string(),
                     )),
                 }
@@ -1670,6 +1696,48 @@ mod tests {
             only_say(&second_shell).contains("Mon Aug 24 01:00:00 UTC 2026"),
             "second turn must include the Settled body: {}",
             only_say(&second_shell)
+        );
+
+        let mixed = MockEngine {
+            script: MockScript::AnswerThenNoReply,
+        };
+        let mixed_out = mixed.infer(&ctx, &chunks).await.unwrap();
+        assert_eq!(only_say(&mixed_out), "synthetic-mixed-answer\nNO_REPLY");
+        assert!(
+            only_say(&mixed_out).contains("synthetic-mixed-answer"),
+            "answer_then_no_reply must emit the substantive body"
+        );
+        assert!(
+            only_say(&mixed_out).contains("NO_REPLY"),
+            "answer_then_no_reply must emit the NO_REPLY sentinel"
+        );
+
+        let shell_fail = MockEngine {
+            script: MockScript::ShellFailThenRead,
+        };
+        assert!(!shell_fail.emits_tool_calls());
+        let first_fail = shell_fail.infer(&ctx, &chunks).await.unwrap();
+        assert_eq!(only_say(&first_fail), r#"core-shell::{"argv":["ls"]}"#);
+        let settled_fail_ctx = Context {
+            rendered: "=== 決着の対応 ===\n活動 #2\n発端入力: #1..#1\n受理ツール: core-shell args={\"argv\":[\"ls\"]}\n結果:\nコマンド «ls» は許可されていない\n"
+                .to_string(),
+            ..Context::default()
+        };
+        let second_fail = shell_fail.infer(&settled_fail_ctx, &chunks).await.unwrap();
+        assert!(
+            only_say(&second_fail).contains("synthetic-shell-failure"),
+            "second turn must recite the failure: {}",
+            only_say(&second_fail)
+        );
+        assert!(
+            only_say(&second_fail).contains("許可されていない"),
+            "second turn must include the failure reason: {}",
+            only_say(&second_fail)
+        );
+        assert!(
+            only_say(&second_fail).contains("NO_REPLY"),
+            "settled failure turn matches the QC silent shape: {}",
+            only_say(&second_fail)
         );
     }
 

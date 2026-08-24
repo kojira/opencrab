@@ -246,6 +246,27 @@ fn boot_mock_with_shell() -> (Proc, Proc, u16, PathBuf) {
     (core, web, port, db)
 }
 
+fn boot_mock_with_shell_fail() -> (Proc, Proc, u16, PathBuf) {
+    let socket = scratch("s.sock");
+    let db = scratch("core.db");
+    let _ = std::fs::remove_file(&socket);
+    let _ = std::fs::remove_file(&db);
+    let port = free_port();
+    {
+        let core = spawn_core(&socket, &db, "shell_fail_then_read");
+        let start = Instant::now();
+        while !db.exists() && start.elapsed() < TIMEOUT {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        std::thread::sleep(Duration::from_millis(400));
+        drop(core);
+    }
+    seed_owner_and_shell(&db);
+    let core = spawn_core(&socket, &db, "shell_fail_then_read");
+    let web = spawn_web(&socket, port);
+    (core, web, port, db)
+}
+
 /// B1: web × MockEngine round trip. Echo is forbidden.
 #[test]
 fn web_round_trip_with_mock_reply() {
@@ -342,5 +363,60 @@ fn tool_execution_writes_one_persistent_row() {
     assert!(
         table.is_some(),
         "tool-execution-log table is not designated by #787"
+    );
+}
+
+/// A4-shape (#786): substantive body + NO_REPLY must still be a public agent body.
+/// NO_REPLY-only (withheld body) is FAIL.
+#[test]
+fn answer_then_no_reply_delivers_substantive_body() {
+    let (_core, _web, port, _db) = boot_mock("answer_then_no_reply");
+    assert!(
+        post_until_history_contains(
+            port,
+            "test-owner",
+            "synthetic direct question: what is two plus two?",
+            "synthetic-mixed-answer",
+            TIMEOUT
+        ),
+        "GET must contain the substantive public body: {}",
+        get_history(port)
+    );
+    let history = get_history(port);
+    assert!(
+        history.contains("\"kind\":\"agent\""),
+        "mixed NO_REPLY turn must produce an agent utterance: {history}"
+    );
+    let agent_only_noreply =
+        history.contains("NO_REPLY") && !history.contains("synthetic-mixed-answer");
+    assert!(
+        !agent_only_noreply,
+        "NO_REPLY-only is FAIL for a direct question: {history}"
+    );
+}
+
+/// A9-shape (#787): a detached shell that fails must speak the failure reason next turn.
+#[test]
+fn shell_failure_reason_readable_on_next_turn() {
+    let (_core, _web, port, _db) = boot_mock_with_shell_fail();
+    assert!(
+        post_until_history_contains(
+            port,
+            "test-owner",
+            "synthetic shell request: run ls",
+            "synthetic-shell-failure",
+            Duration::from_secs(20)
+        ),
+        "2nd turn must recite the shell failure reason: {}",
+        get_history(port)
+    );
+    let history = get_history(port);
+    assert!(
+        history.contains("許可されていない"),
+        "next turn must be able to read the shell failure reason: {history}"
+    );
+    assert!(
+        history.contains("\"kind\":\"agent\""),
+        "failure recovery must produce an agent utterance: {history}"
     );
 }
