@@ -6343,12 +6343,18 @@ fn effect_requires_target(k: EffectKind) -> bool {
 
 /// 記憶 1 件を探索結果として見せる（記憶とワーカー §03「必要なら探して取る」の取り出し）。
 /// 由来（場＋連番範囲）を添える——そこからその会話を辿れる。索引は本文を短く出すが、こちらは
-/// 明示的に取り出したものなので本文をそのまま返す。
+/// 明示的に取り出したものなので本文をそのまま返す。由来が無い移行行は数値を書かない。
 fn render_memory(m: &opencrab_store::MemoryRow) -> String {
-    format!(
-        "#{}（由来: 場{} {}-{}）: {}",
-        m.id, m.origin_place, m.origin_from_seq, m.origin_to_seq, m.body
-    )
+    match (m.origin_place, m.origin_from_seq, m.origin_to_seq) {
+        (Some(place), Some(from), Some(to)) => {
+            format!("#{}（由来: 場{} {}-{}）: {}", m.id, place, from, to, m.body)
+        }
+        (None, None, None) => format!("#{}（由来なし）: {}", m.id, m.body),
+        _ => panic!(
+            "memories origin must be all present or all absent; got place={:?} from={:?} to={:?}",
+            m.origin_place, m.origin_from_seq, m.origin_to_seq
+        ),
+    }
 }
 
 /// 場の枠づけ（core 由来・1 文）。persona 本文の後・文法前文の前に置く（system の②）。

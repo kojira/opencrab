@@ -20,6 +20,7 @@ pub(crate) fn assemble_phase3(
     assemble_tasks(source, target, agents, provenance, raw, report)?;
     assemble_cron_schedules(source, target, agents, provenance, raw, report)?;
     assemble_allowed_commands(source, target, agents, provenance, raw, report)?;
+    assemble_curated_memories(source, target, agents, provenance, raw, report)?;
     Ok(())
 }
 
@@ -566,6 +567,75 @@ fn composite_allowed_command_key(subject_id: i64, command: &str) -> Vec<u8> {
     key.push(0);
     key.extend_from_slice(command.as_bytes());
     key
+}
+
+fn assemble_curated_memories(
+    source: &Connection,
+    target: &Transaction<'_>,
+    agents: &BTreeMap<String, i64>,
+    provenance: &MigrationProvenance,
+    raw: &mut RawCollector<'_, '_>,
+    report: &mut ConversionReport,
+) -> Result<()> {
+    if !SourceTable::exists(source, "memory_curated")? {
+        return Ok(());
+    }
+    let table = SourceTable::load_schema(source, "memory_curated")?;
+    table.require_exact_columns(&[
+        "id",
+        "agent_id",
+        "category",
+        "content",
+        "updated_at",
+        "created_at",
+    ])?;
+    let mut accounting = ClassAccounting::streaming(table.name, "curated_memory", BTreeMap::new());
+    let mut rows = 0_u64;
+    table.for_each_row(source, "id COLLATE BINARY,rowid", |row| {
+        let mut row_accounting = accounting.start_streamed_row(&table, row);
+        match parse_curated_memory(&table, row, agents) {
+            Ok(parsed) => {
+                let id = next_integer_id(target, "memories")?;
+                target.execute(
+                    "INSERT INTO memories(
+                       id,subject_id,body,origin_place,origin_from_seq,origin_to_seq,
+                       written_at,last_read_at
+                     ) VALUES(?1,?2,?3,NULL,NULL,NULL,?4,NULL)",
+                    params![id, parsed.subject_id, parsed.body, parsed.written_at],
+                )?;
+                provenance.write(target, "memories", &integer_key(id), &table, row)?;
+                rows += 1;
+                row_accounting.canonical();
+            }
+            Err(reason) => {
+                raw.add(&table, row, reason)?;
+                row_accounting.raw();
+            }
+        }
+        accounting.finish_streamed_row(row_accounting)
+    })?;
+    accounting.physical_rows = BTreeMap::from([("memories".into(), rows)]);
+    report.classes.push(accounting);
+    Ok(())
+}
+
+struct ParsedCuratedMemory {
+    subject_id: i64,
+    body: String,
+    written_at: i64,
+}
+
+fn parse_curated_memory(
+    table: &SourceTable,
+    row: &SourceRow,
+    agents: &BTreeMap<String, i64>,
+) -> std::result::Result<ParsedCuratedMemory, &'static str> {
+    let _id = required_text(table, row, "id")?;
+    Ok(ParsedCuratedMemory {
+        subject_id: required_subject(table, row, "agent_id", agents)?,
+        body: required_text(table, row, "content")?,
+        written_at: required_time(table, row, "created_at")?,
+    })
 }
 
 fn nullable_time(
