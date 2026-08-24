@@ -10,9 +10,18 @@ Operator path for a non-empty legacy database:
 2. Run `opencrab-converter --db <opencrab.db> --config <default.toml> --environment <effective.env> --captured-at <utc-nanos>`.
 3. A present `schema_migration_state.inplace-v1` marker fails loud. Re-run only on a pristine copy.
 
-App startup (`ensure_migrated`) is a no-op when the marker is present. A non-empty legacy
-database without the marker fails loud and does not serve. A fresh database (legacy tables
-empty or absent) runs `migrate_in_place` in place.
+App startup (`ensure_migrated`) is decoupled from conversion. It looks only at
+body-legacy sentinel tables (`agents`, `sessions`, `skills` — names the old
+implementation had that store SCHEMA does not), by existence, not row counts:
+
+- sentinel present and no `inplace-v1` marker → fail loud
+  (`this is a legacy-implementation DB; run the migration`) and do not serve
+- sentinel present and marker present → boot (migrated body DB)
+- no sentinel → boot. No marker is required; converter is not invoked;
+  `migrate_in_place` does not run on the startup path
+
+The marker is a record written by this command. A second run still fails loud
+when `schema_migration_state.inplace-v1` is already present.
 
 The environment snapshot must contain resolved assignment values. A `$` on a non-comment,
 non-blank line fails loud when `migrate_in_place` loads that snapshot (the CLI already
