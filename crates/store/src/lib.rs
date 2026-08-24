@@ -13,8 +13,10 @@ pub type Result<T> = std::result::Result<T, rusqlite::Error>;
 
 mod direct_message;
 mod discord;
+mod memory_index;
 mod observe;
 mod owner_identity;
+mod skills;
 mod soul_presets;
 mod subjects;
 pub use direct_message::{AgentDirectMessage, REST_SESSION_PREFIX};
@@ -22,10 +24,15 @@ pub use discord::{
     declared_discord_operations, discord_launch_decisions_on, discord_launch_decisions_read_only,
     upsert_discord_kind_on, DiscordLaunchDecision,
 };
+pub use memory_index::{
+    MemoryIndexBuildResult, MemoryIndexConfig, MemoryIndexError, MemoryIndexMergeResult,
+    BATCH_SIZE_DEFAULT, BATCH_SIZE_MIN, THRESHOLD_DEFAULT, THRESHOLD_MIN,
+};
 pub use observe::{LabelUpdate, ObserveGateAddress, ObserveRequest};
 pub use owner_identity::{
     GateOwnerProjection, OwnerExternalChange, OwnerIdentityError, OwnerPrincipalOutcome,
 };
+pub use skills::{SkillCommandError, SkillCreate, SkillPatch, SkillSeedResult, SkillView};
 pub use soul_presets::{SoulPreset, SoulPresetError};
 pub use subjects::{
     compose_subject_persona, SubjectCommandError, SubjectDashboardView, SubjectPatch,

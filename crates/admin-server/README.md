@@ -18,11 +18,13 @@ store は owner ID 日次書き込みのため **RW・no-recover** で開く（`
   （list/stats 配列。`prompt_tokens` / `completion_tokens` / `created_at`）。表が無いときだけ 501。
   `GET /api/agents/{id}/tool-logs` は JSON のみ（フロントページは未着手）。
 - 正本スキーマへ**未移行**のテーブル・列は、偽の空配列を返さず **501** で明示する（migration 側の責務）。
-  データ実体の無い機能（skills / soul presets / analytics 等）も 501。
+  未復元 subroute（skills unused / memory index GET status・tree / analytics 等）も 501。
 - Discord / Nostr owner ID（`GET/PUT/PATCH/DELETE /api/agents/{id}/discord`、`GET/PUT/DELETE /api/agents/{id}/nostr`）は本体 wire を復元する（DESIGN-OWNER-IDENTITY）。
 - Agents CRUD（`POST /api/agents`、`PUT/PATCH/DELETE /api/agents/{id}`）は slice-1 Subject* コマンド。PATCH の JSON null は未提供。未復元欄は値つき明示だけ 501。
 - `POST /api/agents/{id}/messages` は `AgentDirectMessage`（place 保証 + said）のあと Spoke を待って本体封筒を返す。不在 agent は 404。
 - `soul_presets`（B 表）の list/create/delete/apply。Apply は SubjectPatch で persona 合成を書く。
+- Skills（台帳 `skills`）の GET/POST/PUT/toggle/archive/restore/seed-standard。unused は 501。
+- curated DELETE は `forget`。memory index / daily-log-index の WRITE は B 表（#770 と同じ subject→旧 agent_id UUID。未解決・表不在は 501）。GET status/tree は 501。
 
 ## ビルドと起動
 

@@ -15,8 +15,10 @@
 
 mod agent_routes;
 mod api;
+mod memory_routes;
 mod owner_routes;
 mod schedule_cron;
+mod skill_routes;
 mod voice_routes;
 
 use std::sync::Arc;
