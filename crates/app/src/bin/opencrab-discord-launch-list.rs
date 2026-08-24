@@ -27,6 +27,11 @@ fn main() {
     for row in rows {
         if row.start {
             println!("{}", row.instance_id);
+        } else if row.label.starts_with("shared:") {
+            eprintln!(
+                "instance {} label={} shared instance requires §8 multi-agent routing - not yet implemented, tracked in #793",
+                row.instance_id, row.label
+            );
         } else {
             eprintln!(
                 "instance {} label={} token 未設定につき未起動",

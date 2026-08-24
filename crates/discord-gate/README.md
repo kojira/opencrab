@@ -13,4 +13,4 @@
 
 ## 起動
 
-launcher が `present && enabled && secret 非空` の discord instance を列挙し、`opencrab-gate-runner <db> <uuid> <sock> opencrab-discord-gate` を exec する。secret 空は 1 行ログして未起動。token は argv / log に出さない。
+launcher が `present && enabled && secret 非空` の **dedicated** discord instance を列挙し、`opencrab-gate-runner <db> <uuid> <sock> opencrab-discord-gate` を exec する。secret 空は 1 行ログして未起動。`shared:*` は token 非空でも起動拒否し、§8 未実装を #793 で追跡する。token は argv / log に出さない。

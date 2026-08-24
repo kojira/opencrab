@@ -28,7 +28,8 @@ pub fn upsert_discord_kind_on(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// present && enabled の discord instance。secret 非空だけ start=true。値は SELECT しない。
+/// present && enabled の discord instance。dedicated かつ secret 非空だけ start=true。
+/// `shared:*` は token 非空でも start=false（v15 §8 未実装）。値は SELECT しない。
 pub fn discord_launch_decisions_on(conn: &Connection) -> Result<Vec<DiscordLaunchDecision>> {
     let mut stmt = conn.prepare(
         "SELECT gi.instance_id, gi.label,
@@ -50,12 +51,13 @@ pub fn discord_launch_decisions_on(conn: &Connection) -> Result<Vec<DiscordLaunc
     })?;
     let mut out = Vec::new();
     for row in rows {
-        let (instance, label, start) = row?;
+        let (instance, label, token_present) = row?;
+        let shared = label.starts_with("shared:");
         out.push(DiscordLaunchDecision {
             instance_id: GateInstanceId::parse(instance)
                 .map_err(|_| rusqlite::Error::InvalidQuery)?,
             label,
-            start: start != 0,
+            start: token_present != 0 && !shared,
         });
     }
     Ok(out)
@@ -119,7 +121,7 @@ mod tests {
     }
 
     #[test]
-    fn launch_decisions_require_nonempty_secret_not_label_kind() {
+    fn launch_decisions_start_dedicated_with_token_refuse_shared() {
         let store = Store::new_in_memory().unwrap();
         store.upsert_discord_kind().unwrap();
         let dedicated =
@@ -235,7 +237,7 @@ mod tests {
                 DiscordLaunchDecision {
                     instance_id: shared,
                     label: "shared:discord".into(),
-                    start: true,
+                    start: false,
                 },
                 DiscordLaunchDecision {
                     instance_id: empty,
