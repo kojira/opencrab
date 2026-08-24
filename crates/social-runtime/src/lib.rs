@@ -2012,6 +2012,7 @@ impl System {
             // 添付はゲートが拾えたものを素通しで記録する（DESIGN-images §1・判断しない）。由来作者も
             // そのまま持ち越す（§5 の取得判定で core が信頼リストと突き合わせる）。
             attachments: ev.attachments.clone(),
+            metadata: ev.metadata.clone(),
         };
         // 外界識別子つきは **1 tx で**畳み・採番・追記・ref(in) 記録まで（詳細§04）。冪等は表の
         // UNIQUE(place, gate, external_id) が守る——上の fast-path をすり抜けた並行の同一 origin でも、
@@ -2181,6 +2182,7 @@ impl System {
             for_subject: None,
             // Incoming（テスト・内部経路）は添付を運ばない（外来の添付は deliver_event 経由）。
             attachments: vec![],
+            metadata: serde_json::json!({}),
         };
         let seq = self
             .0
@@ -4682,6 +4684,7 @@ impl System {
             for_subject: None,
             // 自分の効果（発話・反応など）には添付を付けない（DESIGN-images §1 は外来の添付だけを扱う）。
             attachments: vec![],
+            metadata: serde_json::json!({}),
         };
         // ログと deliveries(pending) を 1 tx で。書き込み失敗を握り潰さない（書けなければ確定しない・§08）。
         let seq = match self.0.store.append_with_delivery_routes(

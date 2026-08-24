@@ -5,7 +5,8 @@
 use opencrab_discord_gate::{
     address_kind_from_channel_type, exclude_self_author, map_message_create, protocol2_failed,
     protocol2_hello, protocol2_ready, read_boot_config_from_env, resolve_discord_discovery,
-    said_event_to_wire, ChannelFacts, DiscoveryError, MessageCreateInput,
+    said_event_to_wire, try_build_voice_providers, ChannelFacts, DiscoveryError,
+    MessageCreateInput, SaidEvent, VoiceSessionManager,
 };
 use opencrab_port::GateInstanceId;
 use serde_json::{json, Value};
@@ -241,6 +242,8 @@ async fn apply_effect(
     kind: &str,
     payload: &Value,
     target: Option<&str>,
+    voice: Option<&Arc<VoiceSessionManager>>,
+    speaker: Option<&str>,
 ) -> Result<Option<String>, String> {
     let channel = ChannelId::new(
         address
@@ -257,6 +260,9 @@ async fn apply_effect(
                 .send_message(http, CreateMessage::new().content(text))
                 .await
                 .map_err(|error| format!("discord say rejected: {error}"))?;
+            if let (Some(voice), Some(speaker)) = (voice, speaker) {
+                voice.maybe_speak(address, speaker, text);
+            }
             Ok(Some(sent.id.to_string()))
         }
         "react" => {
@@ -385,6 +391,8 @@ async fn read_core(
 async fn effect_worker(
     core: Arc<CoreLink>,
     http: Option<Arc<Http>>,
+    voice: Option<Arc<VoiceSessionManager>>,
+    owner_agent_id: Option<String>,
     mut rx: mpsc::UnboundedReceiver<Value>,
 ) {
     while let Some(value) = rx.recv().await {
@@ -409,7 +417,22 @@ async fn effect_worker(
         let kind = value.get("kind").and_then(Value::as_str).unwrap_or("");
         let payload = value.get("payload").cloned().unwrap_or(json!({}));
         let target = value.get("target").and_then(Value::as_str);
-        match apply_effect(http, address, kind, &payload, target).await {
+        let speaker = payload
+            .get("speaker")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| owner_agent_id.clone());
+        match apply_effect(
+            http,
+            address,
+            kind,
+            &payload,
+            target,
+            voice.as_ref(),
+            speaker.as_deref(),
+        )
+        .await
+        {
             Ok(origin) => {
                 let mut ok = serde_json::Map::new();
                 ok.insert("delivered".into(), true.into());
@@ -423,6 +446,17 @@ async fn effect_worker(
                     &json!({"id": id, "err": {"code": "failed", "at": "effect", "detail": error}}),
                 );
             }
+        }
+    }
+}
+
+async fn voice_said_worker(core: Arc<CoreLink>, mut rx: mpsc::UnboundedReceiver<SaidEvent>) {
+    while let Some(event) = rx.recv().await {
+        if !core.active.load(Ordering::SeqCst) {
+            continue;
+        }
+        if let Err(error) = core.request(said_event_to_wire("event", &event)).await {
+            eprintln!("opencrab-discord-gate: voice said rejected: {error}");
         }
     }
 }
@@ -483,7 +517,7 @@ async fn main() {
         .filter(|epoch| *epoch > 0)
         .unwrap_or_else(|| panic!("core rejected discord hello"));
     if let Some(code) = boot.boot_error {
-        tokio::spawn(effect_worker(core.clone(), None, effect_rx));
+        tokio::spawn(effect_worker(core.clone(), None, None, None, effect_rx));
         core.send_line(&protocol2_failed("failed-1", epoch, &code));
         tokio::time::sleep(Duration::from_millis(100)).await;
         return;
@@ -494,7 +528,7 @@ async fn main() {
         .unwrap_or_else(|| panic!("OPENCRAB_GATE_TOKEN is required after a successful hello"));
     let http = Http::new(&token);
     if let Err(error) = http.get_current_user().await {
-        tokio::spawn(effect_worker(core.clone(), None, effect_rx));
+        tokio::spawn(effect_worker(core.clone(), None, None, None, effect_rx));
         core.send_line(&protocol2_failed(
             "failed-1",
             epoch,
@@ -507,7 +541,11 @@ async fn main() {
     let intents = GatewayIntents::GUILDS
         | GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::DIRECT_MESSAGES
-        | GatewayIntents::MESSAGE_CONTENT;
+        | GatewayIntents::MESSAGE_CONTENT
+        | GatewayIntents::GUILD_VOICE_STATES;
+    let songbird = songbird::Songbird::serenity_from_config(
+        songbird::Config::default().decode_mode(songbird::driver::DecodeMode::Decode),
+    );
     let (ready_tx, ready_rx) = oneshot::channel();
     let handler = Handler {
         core: core.clone(),
@@ -516,12 +554,28 @@ async fn main() {
     };
     let mut client = serenity::Client::builder(&token, intents)
         .event_handler(handler)
+        .voice_manager_arc(songbird.clone())
         .await
         .unwrap_or_else(|error| panic!("discord client build failed: {error}"));
     let http_for_effects = client.http.clone();
+    let (voice_tx, voice_rx) = mpsc::unbounded_channel();
+    let voice = try_build_voice_providers(&boot.voice_config).map(|(stt, tts)| {
+        VoiceSessionManager::new(
+            songbird,
+            stt,
+            tts,
+            boot.voice_config.tts.clone(),
+            boot.voice_config.stt.language.clone(),
+            voice_tx,
+            http_for_effects.clone(),
+        )
+    });
+    tokio::spawn(voice_said_worker(core.clone(), voice_rx));
     tokio::spawn(effect_worker(
         core.clone(),
         Some(http_for_effects),
+        voice,
+        boot.owner_agent_id.clone(),
         effect_rx,
     ));
     tokio::spawn(async move {

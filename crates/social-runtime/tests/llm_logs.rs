@@ -71,6 +71,7 @@ fn said_event(text: &str, origin: &str) -> GateEvent {
         origin: Some(origin.to_string()),
         attachments: vec![],
         discovery: None,
+        metadata: serde_json::json!({}),
     }
 }
 

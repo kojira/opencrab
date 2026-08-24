@@ -1025,6 +1025,8 @@ pub struct GateEvent {
     pub attachments: Vec<Attachment>,
     /// Membership-driven discovery metadata. Protocol-1 prebound gates always use `None`.
     pub discovery: Option<MembershipDiscovery>,
+    /// 線の `metadata`。無ければ空オブジェクト。voice STT は `source=discord_voice`。
+    pub metadata: serde_json::Value,
 }
 
 #[cfg(test)]

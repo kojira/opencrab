@@ -195,6 +195,7 @@ fn inbound(address: &str, author: &str, text: &str, origin: &str) -> GateEvent {
         origin: Some(origin.into()),
         attachments: vec![],
         discovery: None,
+        metadata: serde_json::json!({}),
     }
 }
 
@@ -404,6 +405,7 @@ async fn settled_restores_the_full_origin_range_for_a_b_in_one_turn() {
                     target: None,
                     for_subject: None,
                     attachments: vec![],
+                    metadata: serde_json::json!({}),
                 },
                 now,
             )
@@ -483,6 +485,7 @@ async fn settled_with_different_origins_chain_tools_to_their_own_requests() {
                 target: None,
                 for_subject: None,
                 attachments: vec![],
+                metadata: serde_json::json!({}),
             },
             1,
         )
@@ -502,6 +505,7 @@ async fn settled_with_different_origins_chain_tools_to_their_own_requests() {
                 target: None,
                 for_subject: None,
                 attachments: vec![],
+                metadata: serde_json::json!({}),
             },
             2,
         )

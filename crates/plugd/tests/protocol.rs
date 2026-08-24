@@ -1872,6 +1872,7 @@ async fn read_serializes_core_internal_marker() {
                     target: None,
                     for_subject: None,
                     attachments: vec![],
+                    metadata: serde_json::json!({}),
                 },
                 index as i64,
             )
@@ -1997,6 +1998,37 @@ async fn drop_unknown_field() {
         g.log()
     );
     // 接続は生きている（err は切断ではない）。
+    assert!(!g.is_disconnected());
+}
+
+// voice STT の said は kind を増やさず metadata.source=discord_voice を載せる。未知欄ではない。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn said_with_discord_voice_metadata_is_accepted() {
+    let h = build();
+    let g = TestGate::connect(&h.plugd);
+    g.hello_ok("nostr", "filter:.+", json!([]), json!([]), json!([]))
+        .await;
+    let place = h
+        .sys
+        .create_place(Some("p"), None, &Policy::default(), None);
+    h.sys.bind_place(place, "nostr", "filter:x").await.unwrap();
+    g.send(json!({
+        "id":"e-voice","m":"event","kind":"said","address":"filter:x",
+        "author":{"id":"u"},"content":{"text":"声です"},
+        "metadata":{"source":"discord_voice"}
+    }));
+    assert!(
+        g.wait_for(|l| has_reply_ok(l, "e-voice")).await,
+        "discord_voice metadata は unknown_field ではない: {:?}",
+        g.log()
+    );
+    let ev = h.sys.store().get_event(place, 1).unwrap().unwrap();
+    assert_eq!(
+        ev.metadata.get("source").and_then(|v| v.as_str()),
+        Some("discord_voice"),
+        "voice-origin marker is visible core-side: {:?}",
+        ev.metadata
+    );
     assert!(!g.is_disconnected());
 }
 

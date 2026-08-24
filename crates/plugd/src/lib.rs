@@ -800,6 +800,7 @@ impl Plugd {
             "action",
             "attachments",
             "discovery",
+            "metadata",
         ];
         if let Some(bad) = unknown_field(obj, ALLOWED) {
             return Err(WireErr::at("unknown_field", &format!("event.{bad}")));
@@ -930,6 +931,13 @@ impl Plugd {
             }
             IngressDiscovery::Membership => Some(parse_membership_discovery(obj)?),
         };
+        let metadata = match obj.get("metadata") {
+            None => serde_json::json!({}),
+            Some(v) => v
+                .as_object()
+                .map(|_| v.clone())
+                .ok_or_else(|| WireErr::at("unknown_field", "event.metadata"))?,
+        };
         let ev = GateEvent {
             kind,
             address,
@@ -942,6 +950,7 @@ impl Plugd {
             origin,
             attachments,
             discovery,
+            metadata,
         };
         match self.sys().deliver_gate_event(&gate, ev) {
             // Some(seq)=追記/畳み・None=元栓で捨てた（DESIGN-attention §1・呼び手が seq null で ack）。

@@ -16,8 +16,14 @@ path = "src/lib.rs"
 
 [dependencies]
 opencrab-port = { path = "../port" }
+opencrab-voice = { path = "../voice" }
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "net", "io-util"] }
+serde = { workspace = true }
 serde_json = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+dashmap = "6"
 serenity = { version = "0.12.5", default-features = false, features = [
     "client",
     "gateway",
@@ -25,4 +31,19 @@ serenity = { version = "0.12.5", default-features = false, features = [
     "cache",
     "http",
     "rustls_backend",
+    "voice",
 ] }
+songbird = { version = "0.4", default-features = false, features = [
+    "serenity",
+    "driver",
+    "gateway",
+    "receive",
+    "rustls",
+    "builtin-queue",
+] }
+# songbird の WAV 再生用。本体 voice_session と同じ。
+symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm"] }
+base64 = "0.22"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

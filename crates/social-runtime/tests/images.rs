@@ -114,6 +114,7 @@ fn said_with(
             })
             .collect(),
         discovery: None,
+        metadata: serde_json::json!({}),
     }
 }
 
