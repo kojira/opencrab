@@ -15,7 +15,7 @@ pub(crate) fn parse_canonical_uuid(input: &str) -> Option<[u8; 16]> {
         return None;
     }
     let mut bytes = [0_u8; 16];
-    for (index, pair) in compact.chunks_exact(2).enumerate() {
+    for (index, pair) in compact.as_chunks::<2>().0.iter().enumerate() {
         bytes[index] = hex_digit(pair[0])?.checked_mul(16)? + hex_digit(pair[1])?;
     }
     Some(bytes)
