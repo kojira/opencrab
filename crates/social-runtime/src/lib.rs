@@ -142,6 +142,10 @@ pub const THROTTLE_HINT: &str =
 /// 漏らさない fail-closed な制御語で、裸の `NO_REPLY::` も同義として受理する。
 pub const NO_REPLY: &str = "NO_REPLY";
 
+/// Owner 即応ターンが NO_REPLY のみのとき、沈黙を埋める定数 Spoke（#786 / DESIGN-786）。
+/// モデル地の文は `withheld_text` のまま公開しない。
+pub const OWNER_DIRECT_NO_REPLY_NOTICE: &str = "（発話なし）";
+
 /// 平文アクション文法の 2 つ目の core 共通語（設計）。`PROGRESS::<文>` 行——「いま何をしているかを
 /// 短く伝える」進捗の揮発表示。**say でもイベントでもない**: 場のログに追記せず、activity progress 通知
 /// として結ばれた全チャネルへ揮発配送し、走行中ターンの activities.label を更新する（記録は activities に
@@ -2701,6 +2705,9 @@ impl System {
         let mut tool_lines_acc: Option<String> = None;
         // NO_REPLY を見たら end_reason を no_reply にする（ターンが通常完了で終わるとき）。
         let mut no_reply_seen = false;
+        // A4（#786）: 受理 tool / 確定した非 Say をループで積む。新概念にしない。
+        let mut accepted_any_tool = false;
+        let mut confirmed_nonsay = false;
         // 散文 say はターンの NO_REPLY 判定が確定するまで外へ出さない。別 Say や後続反復で sentinel が
         // 現れても、同じターンの散文を一部だけ先に公開しないための turn-level buffer。
         let mut pending_prose: Vec<EffectSpec> = vec![];
@@ -2966,6 +2973,9 @@ impl System {
                     };
                     to_confirm.extend(interp.actions); // 明示アクションは NO_REPLY に影響されず発火
                     tool_budget = tool_budget.saturating_sub(interp.tools.len()); // 受理したぶん予算を減らす
+                    if !interp.tools.is_empty() || !interp.tool_lines.is_empty() {
+                        accepted_any_tool = true;
+                    }
                     plaintext_tools.extend(interp.tools); // 平文ツール行のツール（下で決着イベント化）
                                                           // 受理したツール行を逐語でターン記録へ残す（黙って消さない・平文ツール行の設計）。
                                                           // NO_REPLY の有無に関わらず記録する（受理した事実は残す）。
@@ -3019,7 +3029,12 @@ impl System {
             for e in to_confirm {
                 match self.authorize_effect(place, subject, &e) {
                     Ok(a) => match self.confirm(&slot, subject, a) {
-                        Some(c) => self.enqueue_delivery(c), // 確定した効果だけが配送へ（§08）
+                        Some(c) => {
+                            if e.kind != EffectKind::Say {
+                                confirmed_nonsay = true;
+                            }
+                            self.enqueue_delivery(c); // 確定した効果だけが配送へ（§08）
+                        }
                         None => {
                             // ログへの書き込みが失敗 → 効果は確定しない。ターンは失敗で終わる。
                             // それでも記録は書く（下の後始末で必ず書かれる・§08）。
@@ -3059,6 +3074,7 @@ impl System {
             for c in out.tool_calls {
                 match self.authorize_tool(place, subject, &c, owner_follow_up, true) {
                     Ok(a) => {
+                        accepted_any_tool = true;
                         // ネイティブ経路: must_settle=false（core は同期・現状不変）。
                         let r = self
                             .invoke_or_detach(act, place, subject, a, false, origin_input)
@@ -3140,6 +3156,32 @@ impl System {
         // 失敗・中断・上限などの終わり方が優先する（それらはそのまま残す——なぜ止まったかの方が重要）。
         let end_reason = if no_reply_seen && end_reason == "done" {
             "no_reply"
+        } else {
+            end_reason
+        };
+        // A4（#786）: owner-direct かつ NO_REPLY のみなら定数 Spoke を 1 本。withheld_text は公開しない。
+        let owner_direct = owner_follow_up && matches!(reason, TurnReason::Immediate(_));
+        let no_reply_only = no_reply_seen && !accepted_any_tool && !confirmed_nonsay;
+        let end_reason = if owner_direct && no_reply_only {
+            match self.authorize_effect(
+                place,
+                subject,
+                &EffectSpec::say(OWNER_DIRECT_NO_REPLY_NOTICE),
+            ) {
+                Ok(a) => match self.confirm(&slot, subject, a) {
+                    Some(c) => {
+                        self.enqueue_delivery(c);
+                        let withheld_chars =
+                            withheld_text.as_deref().map_or(0, |t| t.chars().count());
+                        eprintln!(
+                            "opencrab-social-runtime: owner_direct NO_REPLY-only; withheld {withheld_chars} chars; notice delivered"
+                        );
+                        end_reason
+                    }
+                    None => "failed",
+                },
+                Err(_) => "failed",
+            }
         } else {
             end_reason
         };
@@ -3296,6 +3338,11 @@ impl System {
         let to_inclusive = group.last().map_or(read, |ev| ev.seq);
         let mut standing = Standing::Unknown;
         for ev in &group {
+            // 自分の発話は区切りにしない（first_standing_group と同じ）。A4 NOTICE など
+            // この主体の Spoke を未読に残しても origin standing を上書きしない。
+            if ev.author_subject == Some(subject) {
+                continue;
+            }
             if let Some(found) = self.event_standing(ev)? {
                 standing = found;
                 break;

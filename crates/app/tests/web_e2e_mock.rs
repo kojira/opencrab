@@ -4,6 +4,7 @@
 //! and a known OPENCRAB_MOCK_LLM_SCRIPT.
 
 use opencrab_port::{GateName, Role, Standing, SubjectKind};
+use opencrab_social_runtime::OWNER_DIRECT_NO_REPLY_NOTICE;
 use opencrab_store::Store;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -178,6 +179,32 @@ fn find_agent(store: &Store, place: i64) -> Option<i64> {
     None
 }
 
+fn seed_owner(db: &Path) {
+    let store = Store::open(db).expect("open store to seed owner");
+    let place = find_room_place(&store, "room:main").expect("room:main after first boot");
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos() as i64;
+    let owner = store
+        .create_subject(
+            SubjectKind::Human,
+            "test-owner",
+            "",
+            "engine",
+            Standing::Owner,
+            now,
+        )
+        .expect("create owner");
+    store
+        .add_identity(owner, &GateName::new("web"), "test-owner")
+        .expect("bind test-owner identity");
+    store
+        .join(place, owner, Role::Participant, 0, now)
+        .expect("join owner");
+    drop(store);
+}
+
 fn seed_owner_and_shell(db: &Path) {
     let store = Store::open(db).expect("open store to seed owner and shell grants");
     let place = find_room_place(&store, "room:main").expect("room:main after first boot");
@@ -220,6 +247,28 @@ fn boot_mock(script: &str) -> (Proc, Proc, u16, PathBuf) {
         socket.display()
     );
     let port = free_port();
+    let core = spawn_core(&socket, &db, script);
+    let web = spawn_web(&socket, port);
+    (core, web, port, db)
+}
+
+/// A4 系: `test-owner` を Owner seed（`seed_owner_and_shell` と同型）。
+fn boot_mock_with_owner(script: &str) -> (Proc, Proc, u16, PathBuf) {
+    let socket = scratch("s.sock");
+    let db = scratch("core.db");
+    let _ = std::fs::remove_file(&socket);
+    let _ = std::fs::remove_file(&db);
+    let port = free_port();
+    {
+        let core = spawn_core(&socket, &db, script);
+        let start = Instant::now();
+        while !db.exists() && start.elapsed() < TIMEOUT {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        std::thread::sleep(Duration::from_millis(400));
+        drop(core);
+    }
+    seed_owner(&db);
     let core = spawn_core(&socket, &db, script);
     let web = spawn_web(&socket, port);
     (core, web, port, db)
@@ -366,20 +415,20 @@ fn tool_execution_writes_one_persistent_row() {
     );
 }
 
-/// A4-shape (#786): substantive body + NO_REPLY must still be a public agent body.
-/// NO_REPLY-only (withheld body) is FAIL.
+/// A4-shape (#786): Owner-direct NO_REPLY-only delivers the constant NOTICE.
+/// Script body (`synthetic-mixed-answer`) appearing publicly is FAIL.
 #[test]
 fn answer_then_no_reply_delivers_substantive_body() {
-    let (_core, _web, port, _db) = boot_mock("answer_then_no_reply");
+    let (_core, _web, port, _db) = boot_mock_with_owner("answer_then_no_reply");
     assert!(
         post_until_history_contains(
             port,
             "test-owner",
             "synthetic direct question: what is two plus two?",
-            "synthetic-mixed-answer",
+            OWNER_DIRECT_NO_REPLY_NOTICE,
             TIMEOUT
         ),
-        "GET must contain the substantive public body: {}",
+        "GET must contain the owner-direct NO_REPLY notice: {}",
         get_history(port)
     );
     let history = get_history(port);
@@ -387,11 +436,13 @@ fn answer_then_no_reply_delivers_substantive_body() {
         history.contains("\"kind\":\"agent\""),
         "mixed NO_REPLY turn must produce an agent utterance: {history}"
     );
-    let agent_only_noreply =
-        history.contains("NO_REPLY") && !history.contains("synthetic-mixed-answer");
     assert!(
-        !agent_only_noreply,
-        "NO_REPLY-only is FAIL for a direct question: {history}"
+        history.contains(OWNER_DIRECT_NO_REPLY_NOTICE),
+        "public Spoke must be the constant notice: {history}"
+    );
+    assert!(
+        !history.contains("synthetic-mixed-answer"),
+        "script body must not appear publicly: {history}"
     );
 }
 

@@ -197,6 +197,14 @@ fn place_with_gate(
     (place, a)
 }
 
+/// Owner identity は `attention.rs:79-81` と同型。
+fn seed_owner(h: &Harness, external: &str) {
+    let owner = h
+        .sys
+        .create_subject(SubjectKind::Human, "O", "O", Standing::Owner);
+    h.sys.add_identity(owner, "web", external);
+}
+
 // 1. アクションを 1 つも含まない本文は、単一の say（target None・全チャネル broadcast）になる。
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn plain_text_becomes_single_untargeted_say() {
@@ -937,6 +945,150 @@ async fn no_reply_lookalikes_are_delivered_as_ordinary_prose() {
             .all(|record| record.end_reason == "done" && record.withheld_text.is_none()),
         "lookalike は no_reply にしない"
     );
+}
+
+// 13f. #786: Owner + 地の文 + NO_REPLY → Spoke は NOTICE のみ。ログに地の文なし。withheld 残。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn owner_prose_no_reply_delivers_notice_only() {
+    let h = build();
+    let (place, _a) = place_with_gate(&h, &[EffectKind::Say], vec![]);
+    seed_owner(&h, "ownerpk");
+    h.eng.push(Step::say_done("秘密の独り言\nNO_REPLY"));
+    h.sys
+        .deliver_event(
+            &GateName::new("web"),
+            inbound("room:main", "ownerpk", "ねえ", "note1"),
+        )
+        .unwrap();
+    settle().await;
+
+    let delivered: Vec<String> =
+        h.tx.all()
+            .into_iter()
+            .filter_map(|(_, _, effect)| effect.text)
+            .collect();
+    assert_eq!(
+        delivered,
+        vec![OWNER_DIRECT_NO_REPLY_NOTICE.to_string()],
+        "Spoke は NOTICE のみ: {delivered:?}"
+    );
+
+    let latest = h.sys.store().latest_seq(place).unwrap();
+    let evs = h.sys.store().read_range(place, 0, latest).unwrap();
+    assert!(
+        evs.iter()
+            .all(|e| e.content.text.as_deref() != Some("秘密の独り言")),
+        "ログに地の文なし"
+    );
+    assert!(
+        evs.iter().any(|e| {
+            e.kind == EventKind::Spoke
+                && e.content.text.as_deref() == Some(OWNER_DIRECT_NO_REPLY_NOTICE)
+        }),
+        "NOTICE が Spoke として残る"
+    );
+
+    let recs = h.sys.store().turn_records(place).unwrap();
+    assert_eq!(recs[0].end_reason, "no_reply");
+    assert_eq!(
+        recs[0].withheld_text.as_deref(),
+        Some("秘密の独り言"),
+        "withheld はモデル地の文のまま"
+    );
+}
+
+// 13g. #786: Owner + bare NO_REPLY → NOTICE。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn owner_bare_no_reply_delivers_notice() {
+    let h = build();
+    let (place, _a) = place_with_gate(&h, &[EffectKind::Say], vec![]);
+    seed_owner(&h, "ownerpk");
+    h.eng.push(Step::say_done("NO_REPLY"));
+    h.sys
+        .deliver_event(
+            &GateName::new("web"),
+            inbound("room:main", "ownerpk", "ねえ", "note1"),
+        )
+        .unwrap();
+    settle().await;
+
+    let delivered: Vec<String> =
+        h.tx.all()
+            .into_iter()
+            .filter_map(|(_, _, effect)| effect.text)
+            .collect();
+    assert_eq!(
+        delivered,
+        vec![OWNER_DIRECT_NO_REPLY_NOTICE.to_string()],
+        "bare NO_REPLY も NOTICE: {delivered:?}"
+    );
+    let recs = h.sys.store().turn_records(place).unwrap();
+    assert_eq!(recs[0].end_reason, "no_reply");
+    assert!(recs[0].withheld_text.is_none(), "保留する地の文は無い");
+}
+
+// 13h. #786: Owner + tool 行 + NO_REPLY → 0 通知（A3 / settle 待ち）。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn owner_tool_line_no_reply_delivers_no_notice() {
+    let h = build();
+    let (place, _a) = place_with_gate(&h, &[EffectKind::Say], vec![]);
+    seed_owner(&h, "ownerpk");
+    h.eng.push(Step::say_done("core-child-list::{}\nNO_REPLY"));
+    h.eng.push(Step::say_done("synthetic-settle"));
+    h.sys
+        .deliver_event(
+            &GateName::new("web"),
+            inbound("room:main", "ownerpk", "子を見て", "note1"),
+        )
+        .unwrap();
+    settle().await;
+
+    let notices: Vec<_> =
+        h.tx.all()
+            .into_iter()
+            .filter(|(_, _, effect)| effect.text.as_deref() == Some(OWNER_DIRECT_NO_REPLY_NOTICE))
+            .collect();
+    assert!(
+        notices.is_empty(),
+        "tool 行 + NO_REPLY は A3（0 通知）: {notices:?}"
+    );
+    let recs = h.sys.store().turn_records(place).unwrap();
+    let first = recs
+        .iter()
+        .find(|r| r.end_reason == "no_reply")
+        .expect("no_reply のターン");
+    assert!(
+        first
+            .tool_lines
+            .as_deref()
+            .is_some_and(|lines| lines.contains("core-child-list::{}")),
+        "受理した tool 行が残る: {:?}",
+        first.tool_lines
+    );
+}
+
+// 13i. #786: 非 Owner + 地の文 + NO_REPLY → A3 のまま 0 配送。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn non_owner_prose_no_reply_delivers_nothing() {
+    let h = build();
+    let (place, _a) = place_with_gate(&h, &[EffectKind::Say], vec![]);
+    h.eng.push(Step::say_done("秘密の独り言\nNO_REPLY"));
+    h.sys
+        .deliver_event(
+            &GateName::new("web"),
+            inbound("room:main", "npubX", "ねえ", "note1"),
+        )
+        .unwrap();
+    settle().await;
+
+    assert!(
+        h.tx.all().is_empty(),
+        "非 Owner は A3 のまま 0 配送: {:?}",
+        h.tx.all()
+    );
+    let recs = h.sys.store().turn_records(place).unwrap();
+    assert_eq!(recs[0].end_reason, "no_reply");
+    assert_eq!(recs[0].withheld_text.as_deref(), Some("秘密の独り言"));
 }
 
 // 14. メニュー描画: 文脈に NO_REPLY が最初に無条件注入され、宣言されたアクションがテンプレートで
