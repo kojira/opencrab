@@ -20,6 +20,11 @@ path = "src/bin/opencrab-gate-status.rs"
 name = "opencrab-llm-logs"
 path = "src/bin/opencrab-llm-logs.rs"
 
+# tool 実行ログの読み口（#787）。読み取り専用。list / show のみ（stats は作らない）。
+[[bin]]
+name = "opencrab-tool-logs"
+path = "src/bin/opencrab-tool-logs.rs"
+
 [[bin]]
 name = "opencrab-gate-runner"
 path = "src/bin/opencrab-gate-runner.rs"

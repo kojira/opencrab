@@ -261,6 +261,51 @@ pub fn llm_log_read_only(path: impl AsRef<std::path::Path>, id: &str) -> Result<
     .optional()
 }
 
+/// 稼働中の core を所有せずに、直近の tool ログを新しい順に引く（#787・読み口。全 agent 横断）。
+pub fn recent_tool_logs_read_only(
+    path: impl AsRef<std::path::Path>,
+    limit: i64,
+) -> Result<Vec<ToolLogRow>> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {TOOL_LOG_COLS} FROM tool_logs ORDER BY created_at DESC, id DESC LIMIT ?1"
+    ))?;
+    let rows = stmt
+        .query_map(params![limit], map_tool_log)?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// 稼働中の core を所有せずに、あるエージェント（subject）の tool ログを新しい順に引く。
+pub fn list_tool_logs_read_only(
+    path: impl AsRef<std::path::Path>,
+    agent_id: &str,
+    limit: i64,
+) -> Result<Vec<ToolLogRow>> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {TOOL_LOG_COLS} FROM tool_logs WHERE agent_id=?1 ORDER BY created_at DESC, id DESC LIMIT ?2"
+    ))?;
+    let rows = stmt
+        .query_map(params![agent_id, limit], map_tool_log)?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// 稼働中の core を所有せずに、1 件の tool ログを id で引く（#787・読み口の詳細）。
+pub fn tool_log_read_only(
+    path: impl AsRef<std::path::Path>,
+    id: i64,
+) -> Result<Option<ToolLogRow>> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.query_row(
+        &format!("SELECT {TOOL_LOG_COLS} FROM tool_logs WHERE id=?1"),
+        params![id],
+        map_tool_log,
+    )
+    .optional()
+}
+
 pub fn gate_launch_read_only(
     path: impl AsRef<std::path::Path>,
     instance: &GateInstanceId,
@@ -499,6 +544,47 @@ pub struct LlmLogRow {
     pub cache_creation_tokens: Option<i64>,
     pub created_at: String,
     pub turn_record_id: Option<i64>,
+    pub iteration: Option<i64>,
+    pub place_id: Option<PlaceId>,
+    pub subject_id: Option<SubjectId>,
+}
+
+/// 1 回の tool 実行の記録（#787・oc2 新表。本体に同名なし）。1 実行 = 1 INSERT（UPDATE しない）。
+/// キー対応は #766 と同じ: `agent_id`←subject・`session_id`←place。`args_json` は受理後の JSON
+/// （`settled_provenance.accepted_tool_args_json` と同バイト）。`result_text` は生テキスト
+/// （成功=stdout(+stderr)、失敗=理由）。秘密は載せない。キー名マスクは足さない。
+#[derive(Clone, Debug)]
+pub struct NewToolLog {
+    pub agent_id: String,
+    pub session_id: Option<String>,
+    pub tool_name: String,
+    pub args_json: String,
+    pub outcome: String,
+    pub result_text: String,
+    pub started_at: Option<String>,
+    pub created_at: String,
+    pub latency_ms: Option<i64>,
+    pub turn_record_id: Option<i64>,
+    pub activity_id: Option<i64>,
+    pub iteration: Option<i64>,
+    pub place_id: Option<PlaceId>,
+    pub subject_id: Option<SubjectId>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ToolLogRow {
+    pub id: i64,
+    pub agent_id: String,
+    pub session_id: Option<String>,
+    pub tool_name: String,
+    pub args_json: String,
+    pub outcome: String,
+    pub result_text: String,
+    pub started_at: Option<String>,
+    pub created_at: String,
+    pub latency_ms: Option<i64>,
+    pub turn_record_id: Option<i64>,
+    pub activity_id: Option<i64>,
     pub iteration: Option<i64>,
     pub place_id: Option<PlaceId>,
     pub subject_id: Option<SubjectId>,
@@ -946,6 +1032,31 @@ const SCHEMA: &str = r#"
             -- idx_llm_logs_turn は oc2 連結列（turn_record_id/iteration）依存。本体由来の既存
             -- テーブル（連結列が未 ALTER）で SCHEMA が先に走っても壊れないよう、
             -- apply_shared_table_additions が連結列を足した後に作る（ここでは作らない）。
+
+            -- tool 実行の永続ログ（#787）。oc2 新表（本体に同名なし。memory_sessions / agent_logs
+            -- は流用しない）。1 実行 = 1 INSERT。Phase S は空のまま作り、runtime が埋める。
+            -- outcome は done|failed|refused|deadline|stopped。result_text は生テキスト
+            -- （JSON エンベロープにしない。キー名マスクを足さない）。
+            CREATE TABLE IF NOT EXISTS tool_logs(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              agent_id TEXT NOT NULL,
+              session_id TEXT,
+              tool_name TEXT NOT NULL,
+              args_json TEXT NOT NULL,
+              outcome TEXT NOT NULL,
+              result_text TEXT NOT NULL DEFAULT '',
+              started_at TEXT,
+              created_at TEXT DEFAULT (datetime('now')),
+              latency_ms INTEGER,
+              turn_record_id INTEGER,
+              activity_id INTEGER,
+              iteration INTEGER,
+              place_id INTEGER,
+              subject_id INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_tool_logs_created ON tool_logs(agent_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_tool_logs_turn ON tool_logs(turn_record_id);
+            CREATE INDEX IF NOT EXISTS idx_tool_logs_activity ON tool_logs(activity_id);
 
             CREATE TABLE IF NOT EXISTS schedule(
               place_id INTEGER NOT NULL,
@@ -1471,6 +1582,29 @@ fn migrate(conn: &Connection) -> Result<()> {
     )?;
     //   2-3) oc2 連結列と idx_llm_logs_turn（列依存）は共有表の列挙追加。
     apply_shared_table_additions(conn)?;
+    // tool 実行ログ（#787）。oc2 新表。既存 DB には無ければ作る（Phase S 空・runtime が埋める）。
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS tool_logs(
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           agent_id TEXT NOT NULL,
+           session_id TEXT,
+           tool_name TEXT NOT NULL,
+           args_json TEXT NOT NULL,
+           outcome TEXT NOT NULL,
+           result_text TEXT NOT NULL DEFAULT '',
+           started_at TEXT,
+           created_at TEXT DEFAULT (datetime('now')),
+           latency_ms INTEGER,
+           turn_record_id INTEGER,
+           activity_id INTEGER,
+           iteration INTEGER,
+           place_id INTEGER,
+           subject_id INTEGER
+         );
+         CREATE INDEX IF NOT EXISTS idx_tool_logs_created ON tool_logs(agent_id, created_at DESC);
+         CREATE INDEX IF NOT EXISTS idx_tool_logs_turn ON tool_logs(turn_record_id);
+         CREATE INDEX IF NOT EXISTS idx_tool_logs_activity ON tool_logs(activity_id);",
+    )?;
     let provenance_columns = [
         ("origin_from_exclusive", "INTEGER"),
         ("origin_to_inclusive", "INTEGER"),
@@ -4643,6 +4777,67 @@ impl Store {
         .optional()
     }
 
+    /// 1 回の tool 実行を記録する（#787）。書き込みの失敗は握り潰さず呼び手へ返す（fail loud）。
+    pub fn write_tool_log(&self, r: &NewToolLog) -> Result<i64> {
+        let c = self.c();
+        c.execute(
+            "INSERT INTO tool_logs(agent_id,session_id,tool_name,args_json,outcome,result_text,started_at,created_at,latency_ms,turn_record_id,activity_id,iteration,place_id,subject_id)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+            params![
+                r.agent_id, r.session_id, r.tool_name, r.args_json, r.outcome, r.result_text,
+                r.started_at, r.created_at, r.latency_ms, r.turn_record_id, r.activity_id,
+                r.iteration, r.place_id, r.subject_id
+            ],
+        )?;
+        Ok(c.last_insert_rowid())
+    }
+
+    /// あるエージェント（subject）の tool ログを新しい順に引く。
+    pub fn list_tool_logs(&self, agent_id: &str, limit: i64) -> Result<Vec<ToolLogRow>> {
+        let c = self.c();
+        let mut stmt = c.prepare(&format!(
+            "SELECT {TOOL_LOG_COLS} FROM tool_logs WHERE agent_id=?1 ORDER BY created_at DESC, id DESC LIMIT ?2"
+        ))?;
+        let rows = stmt
+            .query_map(params![agent_id, limit], map_tool_log)?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// 直近の tool ログを新しい順に引く（全 agent 横断・CLI 読み口の入口）。
+    pub fn recent_tool_logs(&self, limit: i64) -> Result<Vec<ToolLogRow>> {
+        let c = self.c();
+        let mut stmt = c.prepare(&format!(
+            "SELECT {TOOL_LOG_COLS} FROM tool_logs ORDER BY created_at DESC, id DESC LIMIT ?1"
+        ))?;
+        let rows = stmt
+            .query_map(params![limit], map_tool_log)?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// 1 件の tool ログを id で引く（詳細表示）。
+    pub fn tool_log(&self, id: i64) -> Result<Option<ToolLogRow>> {
+        let c = self.c();
+        c.query_row(
+            &format!("SELECT {TOOL_LOG_COLS} FROM tool_logs WHERE id=?1"),
+            params![id],
+            map_tool_log,
+        )
+        .optional()
+    }
+
+    /// ターン活動（`turn_records.activity_id`）から turn 行の id を引く（#787・切り離し settle の紐付け）。
+    pub fn turn_record_id_for_activity(&self, activity: ActivityId) -> Result<Option<i64>> {
+        self.c()
+            .query_row(
+                "SELECT id FROM turn_records WHERE activity_id=?1",
+                params![activity],
+                |r| r.get(0),
+            )
+            .optional()
+    }
+
     /// エージェント（subject）の日次 LLM 統計（本体 API `/llm-logs/stats` と同形・#537 の julianday 比較を継承）。
     pub fn llm_logs_stats(&self, agent_id: &str, days: i64) -> Result<Vec<LlmLogStatRow>> {
         let c = self.c();
@@ -5509,6 +5704,29 @@ fn map_llm_log(r: &rusqlite::Row<'_>) -> rusqlite::Result<LlmLogRow> {
         iteration: r.get(20)?,
         place_id: r.get(21)?,
         subject_id: r.get(22)?,
+    })
+}
+
+/// tool_logs の列並び（SELECT と map_tool_log で共有・#787）。
+const TOOL_LOG_COLS: &str = "id,agent_id,session_id,tool_name,args_json,outcome,result_text,started_at,created_at,latency_ms,turn_record_id,activity_id,iteration,place_id,subject_id";
+
+fn map_tool_log(r: &rusqlite::Row<'_>) -> rusqlite::Result<ToolLogRow> {
+    Ok(ToolLogRow {
+        id: r.get(0)?,
+        agent_id: r.get(1)?,
+        session_id: r.get(2)?,
+        tool_name: r.get(3)?,
+        args_json: r.get(4)?,
+        outcome: r.get(5)?,
+        result_text: r.get(6)?,
+        started_at: r.get(7)?,
+        created_at: r.get(8)?,
+        latency_ms: r.get(9)?,
+        turn_record_id: r.get(10)?,
+        activity_id: r.get(11)?,
+        iteration: r.get(12)?,
+        place_id: r.get(13)?,
+        subject_id: r.get(14)?,
     })
 }
 
@@ -7170,6 +7388,66 @@ mod tests {
         assert_eq!(stats[0].total_tokens, 40);
         assert_eq!(stats[0].prompt_tokens, 30);
         assert_eq!(stats[0].error_count, 0);
+    }
+
+    // tool 実行ログ（#787・oc2 新表）: エージェント単位・id 単体・read-only で引け、migrate は冪等。
+    #[test]
+    fn tool_logs_roundtrip_list_show_and_read_only() {
+        let path = store_fixture_path("tool-logs");
+        let _ = std::fs::remove_file(&path);
+        let s = Store::open(&path).unwrap();
+        {
+            let c = s.c();
+            migrate(&c).unwrap();
+            assert!(table_exists(&c, "tool_logs").unwrap());
+        }
+        let mk = |name: &str, outcome: &str, result: &str| NewToolLog {
+            agent_id: "7".into(),
+            session_id: Some("3".into()),
+            tool_name: name.into(),
+            args_json: "{}".into(),
+            outcome: outcome.into(),
+            result_text: result.into(),
+            started_at: Some("2026-08-24T00:00:00Z".into()),
+            created_at: "2026-08-24T00:00:00Z".into(),
+            latency_ms: Some(4),
+            turn_record_id: Some(100),
+            activity_id: None,
+            iteration: Some(1),
+            place_id: Some(3),
+            subject_id: Some(7),
+        };
+        let id1 = s
+            .write_tool_log(&mk("core-child-list", "done", "子は無い"))
+            .unwrap();
+        let id2 = s
+            .write_tool_log(&mk(
+                "core-shell",
+                "refused",
+                "コマンド «ls» は許可されていない",
+            ))
+            .unwrap();
+
+        let by_agent = s.list_tool_logs("7", 10).unwrap();
+        assert_eq!(by_agent.len(), 2);
+        assert!(by_agent.iter().all(|r| r.agent_id == "7"));
+        assert!(s.list_tool_logs("999", 10).unwrap().is_empty());
+
+        let one = s.tool_log(id1).unwrap().expect("引ける");
+        assert_eq!(one.tool_name, "core-child-list");
+        assert_eq!(one.outcome, "done");
+        assert_eq!(one.result_text, "子は無い");
+        assert_eq!(one.args_json, "{}");
+        assert!(s.tool_log(id2 + 99).unwrap().is_none());
+
+        let listed = list_tool_logs_read_only(&path, "7", 10).unwrap();
+        assert_eq!(listed.len(), 2);
+        let shown = tool_log_read_only(&path, id2).unwrap().expect("read-only");
+        assert_eq!(shown.outcome, "refused");
+        assert!(shown.result_text.contains("許可されていない"));
+        let recent = recent_tool_logs_read_only(&path, 1).unwrap();
+        assert_eq!(recent.len(), 1);
+        let _ = std::fs::remove_file(&path);
     }
 
     // 本番 in-place 移行の帰結（AGREED §2.11）: 本体 opencrab の llm_logs が**既に存在する** DB に対して
