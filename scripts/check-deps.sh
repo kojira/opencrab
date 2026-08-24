@@ -48,8 +48,9 @@ assert_absent \
 
 # 旧 runtime package が workspace/lockfile に再び現れないことを固定する。
 # db は AGREED §2.11 で本体スキーマが正本に戻ったため除外（2026-08-24 統括裁定）。
-# R4 の残りの目的（旧 runtime エンジンの並行実装防止）は維持する——それ以外の 12 package は禁止のまま。
-legacy='opencrab-(core|llm|llm-types|gateway|actions|discord|nostr|web-gateway|mcp|server|cli|voice)'
+# voice はオーナー復元裁定（2026-08-24 17:28）で経路ごと完全復元するため除外（並行旧 runtime ではない）。
+# R4 の残りの目的（旧 runtime エンジンの並行実装防止）は維持する——それ以外の 11 package は禁止のまま。
+legacy='opencrab-(core|llm|llm-types|gateway|actions|discord|nostr|web-gateway|mcp|server|cli)'
 workspace_packages="$(cargo metadata --no-deps --format-version 1 \
   | tr ',' '\n' \
   | sed -nE 's/.*"name":"([^"]+)".*/\1/p')"

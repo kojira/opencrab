@@ -13,6 +13,7 @@ members = [
     "crates/discord-gate",
     "crates/db",
     "crates/admin-server",
+    "crates/voice",
 ]
 
 [workspace.lints.clippy]
