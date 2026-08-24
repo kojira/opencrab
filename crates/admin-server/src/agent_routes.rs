@@ -1,4 +1,4 @@
-//! Agents CRUD / soul_presets / a2a messages（DESIGN-DASHBOARD-P2 SLICE 2–3）。
+//! Agents CRUD / soul_presets（SLICE 2–3）と a2a messages（SLICE 7）。
 //! handler は extract → store コマンド 1 回 → 本体封筒。SQL は書かない。
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -13,11 +13,10 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use opencrab_db::queries::{self, TrustedUserPermission, TRUSTED_PLATFORM_REST};
-use opencrab_port::{EventKind, SubjectKind};
-use opencrab_store::{SubjectCommandError, SubjectPatch, SubjectReplace};
+use opencrab_port::EventKind;
+use opencrab_store::{AgentDirectMessageError, SubjectCommandError, SubjectPatch, SubjectReplace};
 
-use crate::api::{AdminState, ApiResult};
+use crate::api::{resolve_legacy_agent_id, AdminState, ApiResult};
 
 const UNAPPLIED_FIELDS: &[&str] = &[
     "job_title",
@@ -65,6 +64,15 @@ fn subject_err(error: SubjectCommandError) -> (StatusCode, Json<Value>) {
             })),
         ),
         SubjectCommandError::Store(e) => store_err(e),
+    }
+}
+
+fn dm_err(error: AgentDirectMessageError) -> (StatusCode, Json<Value>) {
+    match error {
+        AgentDirectMessageError::Store(e) => store_err(e),
+        AgentDirectMessageError::UnknownPermission(permission) => {
+            store_err(format!("unknown trusted_users.permission: {permission}"))
+        }
     }
 }
 
@@ -234,20 +242,6 @@ async fn delete_agent(
     Ok(Json(json!({ "deleted": deleted })))
 }
 
-fn caller_type(st: &AdminState, agent: i64, user_id: &str) -> &'static str {
-    let Ok(conn) = st.db.lock() else {
-        return "agent";
-    };
-    match queries::get_trusted_user(&conn, TRUSTED_PLATFORM_REST, user_id, &agent.to_string()) {
-        Some(row) => match row.permission {
-            TrustedUserPermission::Owner => "owner",
-            TrustedUserPermission::CoAgent => "co_agent",
-            TrustedUserPermission::User => "trusted_user",
-        },
-        None => "agent",
-    }
-}
-
 async fn wait_spoke(st: &AdminState, place: i64, after: i64) -> ApiResult<String> {
     loop {
         let last = st.store.latest_seq(place).map_err(store_err)?;
@@ -270,31 +264,27 @@ async fn send_agent_message(
     Json(req): Json<SendAgentMessageRequest>,
 ) -> ApiResult<Json<Value>> {
     let agent = parse_agent(&id)?;
-    match st.store.get_subject(agent).map_err(store_err)? {
-        Some(row) if row.kind == SubjectKind::Agent => {}
-        _ => {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(json!({ "error": "not_found", "detail": "agent がありません" })),
-            ));
-        }
-    }
-    let user_id = req.user_id.trim();
-    let caller_type = caller_type(&st, agent, user_id);
+    let legacy_id = resolve_legacy_agent_id(&st, agent)?;
     let Some(out) = st
         .store
-        .agent_direct_message(agent, user_id, &req.content, now_ns())
-        .map_err(subject_err)?
+        .agent_direct_message(
+            agent,
+            req.user_id.trim(),
+            &req.content,
+            legacy_id.as_deref(),
+            now_ns(),
+        )
+        .map_err(dm_err)?
     else {
         return Err((
             StatusCode::NOT_FOUND,
-            Json(json!({ "error": "not_found", "detail": "agent がありません" })),
+            Json(json!({ "error": format!("agent not found: {id}") })),
         ));
     };
     let content = wait_spoke(&st, out.place_id, out.said_seq).await?;
     Ok(Json(json!({
         "session_id": out.session_id,
-        "caller_type": caller_type,
+        "caller_type": out.caller_type,
         "responses": [{
             "agent_id": id,
             "content": content,
@@ -399,7 +389,7 @@ mod contract {
     use http_body_util::BodyExt;
     use opencrab_db::Db;
     use opencrab_port::{
-        Content, GateInstanceId, GateKindId, IngressDiscovery, OriginScope, Standing,
+        Content, GateInstanceId, GateKindId, IngressDiscovery, OriginScope, Standing, SubjectKind,
     };
     use opencrab_store::{NewEvent, Store};
     use std::sync::Arc;
@@ -585,7 +575,7 @@ mod contract {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
-        assert_eq!(body["error"], "not_found");
+        assert_eq!(body["error"], "agent not found: 99");
     }
 
     #[tokio::test]

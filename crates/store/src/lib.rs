@@ -20,7 +20,7 @@ mod places_legacy;
 mod skills;
 mod soul_presets;
 mod subjects;
-pub use direct_message::{AgentDirectMessage, REST_SESSION_PREFIX};
+pub use direct_message::{AgentDirectMessage, AgentDirectMessageError, REST_SESSION_PREFIX};
 pub use discord::{
     declared_discord_operations, discord_launch_decisions_on, discord_launch_decisions_read_only,
     upsert_discord_kind_on, DiscordLaunchDecision,
