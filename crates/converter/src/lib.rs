@@ -3747,6 +3747,9 @@ pub fn migrate_in_place_with(
         "webhook_endpoints",
         "model_observations",
         "tasks",
+        "schedules",
+        "subject_allowed_commands",
+        "memories",
         "schema_migration_state",
     ] {
         let count = transaction.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {

@@ -626,6 +626,345 @@ fn malformed_non_null_history_metadata_fails_loud() {
     }
 }
 
+#[test]
+fn cron_schedules_land_in_store_schedules_with_dense_ids_and_raw_class() {
+    const ORPHAN_AGENT_ID: &str = "1000000000000003";
+    let temporary = tempfile::tempdir().unwrap();
+    let db = temporary.path().join("source.db");
+    let conn = Connection::open(&db).unwrap();
+    opencrab_db::schema::initialize(&conn).unwrap();
+    conn.execute_batch(
+        "INSERT INTO agents(
+           agent_id,name,persona_name,personality,instructions,heartbeat_instructions,
+           model,created_at,updated_at
+         ) VALUES(
+           'agent-canonical','Agent C','persona-c','kind','do work','hb',
+           'openai:synthetic-model','2024-01-01 00:00:00','2024-01-01 00:00:00'
+         );
+         INSERT INTO model_pricing(
+           provider,model,input_price_per_1m,output_price_per_1m,context_window,updated_at
+         ) VALUES('openai','synthetic-model',1,2,128000,'2024-01-01 00:00:00');
+         INSERT INTO sessions(
+           id,mode,theme,phase,turn_number,status,participant_ids_json,facilitator_id,
+           done_count,max_turns,metadata_json,created_at,updated_at
+         ) VALUES(
+           'sess-canonical','facilitated','Cron Session','divergent',0,'active',
+           '[\"agent-canonical\"]','agent-canonical',0,NULL,NULL,
+           '2024-01-05 00:00:00','2024-01-05 00:00:00'
+         );
+         INSERT INTO agent_schedules(
+           id,agent_id,session_id,cron_expr,timezone,message,enabled,anchor_at,
+           last_fired_at,created_at,updated_at
+         ) VALUES
+           (10,'agent-canonical','sess-canonical','0 9 * * *','Asia/Tokyo','morning',1,NULL,NULL,
+            '2024-01-05 00:00:00','2024-01-05 00:00:00'),
+           (2,'agent-canonical','sess-canonical','0 18 * * *','UTC','evening',0,
+            '2024-01-04 00:00:00','2024-01-04 12:00:00',
+            '2024-01-05 00:00:00','2024-01-05 00:00:00'),
+           (3,'1000000000000003','sess-canonical','0 0 * * *','UTC','orphan',1,NULL,NULL,
+            '2024-01-05 00:00:00','2024-01-05 00:00:00'),
+           (4,'agent-canonical','sess-missing','0 1 * * *','UTC','no-place',1,NULL,NULL,
+            '2024-01-05 00:00:00','2024-01-05 00:00:00');",
+    )
+    .unwrap();
+    drop(conn);
+
+    let report = run_migrate(&db);
+    assert!(
+        report
+            .classes
+            .iter()
+            .all(|class| class.exact_one_violations == 0),
+        "accounting must balance"
+    );
+    let cron = report
+        .classes
+        .iter()
+        .find(|class| {
+            class.source_table == "agent_schedules" && class.logical_class == "cron_schedule"
+        })
+        .expect("cron_schedule class");
+    assert_eq!(cron.source_rows, 4);
+    assert_eq!(cron.canonical_outcomes, 2);
+    assert_eq!(cron.raw_outcomes, 2);
+    assert_eq!(cron.dropped_outcomes, 0);
+    assert_eq!(cron.physical_rows.get("schedules").copied(), Some(2));
+
+    let conn = Connection::open(&db).unwrap();
+    let mut statement = conn
+        .prepare(
+            "SELECT id,kind,expression,timezone,instruction,instruction_revision,
+                    enabled,interval_secs,next_fire,source_record_key,anchor_at,last_fired_at
+             FROM schedules ORDER BY id",
+        )
+        .unwrap();
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, Option<i64>>(7)?,
+                row.get::<_, Option<i64>>(8)?,
+                row.get::<_, Option<i64>>(9)?,
+                row.get::<_, Option<i64>>(10)?,
+                row.get::<_, Option<i64>>(11)?,
+            ))
+        })
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].0, 1, "dense id follows source id INTEGER order");
+    assert_eq!(rows[0].1, "cron");
+    assert_eq!(rows[0].2, "0 18 * * *");
+    assert_eq!(rows[0].3, "UTC");
+    assert_eq!(rows[0].4, "evening");
+    assert_eq!(rows[0].5, 1);
+    assert_eq!(rows[0].6, 0);
+    assert_eq!(rows[0].7, None);
+    assert_eq!(rows[0].8, None);
+    assert_eq!(rows[0].9, Some(2));
+    assert!(rows[0].10.is_some(), "non-NULL anchor_at must parse");
+    assert!(rows[0].11.is_some(), "non-NULL last_fired_at must parse");
+    assert_eq!(rows[1].0, 2);
+    assert_eq!(rows[1].2, "0 9 * * *");
+    assert_eq!(rows[1].9, Some(10));
+    assert_eq!(rows[1].10, None);
+    assert_eq!(rows[1].11, None);
+
+    let raw_reasons: Vec<String> = conn
+        .prepare(
+            "SELECT reason FROM legacy_unowned_source_rows
+             WHERE source_table='agent_schedules' ORDER BY source_key",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(raw_reasons.len(), 2);
+    assert!(
+        raw_reasons
+            .iter()
+            .any(|reason| reason.contains("unresolved_agent")),
+        "orphan agent_id must be raw: {raw_reasons:?}"
+    );
+    assert!(
+        raw_reasons
+            .iter()
+            .any(|reason| reason.contains("unresolved_place")),
+        "missing session must be raw: {raw_reasons:?}"
+    );
+
+    let orphan_named: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM subjects WHERE name=?1 OR persona=?1",
+            [ORPHAN_AGENT_ID],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        orphan_named, 0,
+        "unresolved schedule owner must not become a subject"
+    );
+}
+
+#[test]
+fn allowed_commands_land_in_subject_allowed_commands_with_raw_unresolved() {
+    let temporary = tempfile::tempdir().unwrap();
+    let db = temporary.path().join("source.db");
+    let conn = Connection::open(&db).unwrap();
+    opencrab_db::schema::initialize(&conn).unwrap();
+    conn.execute_batch(
+        "INSERT INTO agents(
+           agent_id,name,persona_name,personality,instructions,heartbeat_instructions,
+           model,created_at,updated_at
+         ) VALUES(
+           'agent-canonical','Agent C','persona-c','kind','do work','hb',
+           'openai:synthetic-model','2024-01-01 00:00:00','2024-01-01 00:00:00'
+         );
+         INSERT INTO model_pricing(
+           provider,model,input_price_per_1m,output_price_per_1m,context_window,updated_at
+         ) VALUES('openai','synthetic-model',1,2,128000,'2024-01-01 00:00:00');
+         INSERT INTO agent_allowed_commands(id,agent_id,command,added_by,added_at) VALUES
+           ('cmd-1','agent-canonical','git','owner','2024-01-05 00:00:00'),
+           ('cmd-2','agent-canonical','ls','owner','2024-01-05 00:00:00'),
+           ('cmd-orphan','1000000000000004','rm','owner','2024-01-05 00:00:00');",
+    )
+    .unwrap();
+    drop(conn);
+
+    let report = run_migrate(&db);
+    assert!(
+        report
+            .classes
+            .iter()
+            .all(|class| class.exact_one_violations == 0),
+        "accounting must balance"
+    );
+    let allowed = report
+        .classes
+        .iter()
+        .find(|class| {
+            class.source_table == "agent_allowed_commands"
+                && class.logical_class == "allowed_command"
+        })
+        .expect("allowed_command class");
+    assert_eq!(allowed.source_rows, 3);
+    assert_eq!(allowed.canonical_outcomes, 2);
+    assert_eq!(allowed.raw_outcomes, 1);
+    assert_eq!(allowed.dropped_outcomes, 0);
+    assert_eq!(
+        allowed
+            .physical_rows
+            .get("subject_allowed_commands")
+            .copied(),
+        Some(2)
+    );
+
+    let conn = Connection::open(&db).unwrap();
+    let mut commands: Vec<String> = conn
+        .prepare("SELECT command FROM subject_allowed_commands ORDER BY command")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    commands.sort();
+    assert_eq!(commands, vec!["git".to_string(), "ls".to_string()]);
+
+    let raw: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM legacy_unowned_source_rows
+             WHERE source_table='agent_allowed_commands'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(raw, 1);
+}
+
+#[test]
+fn curated_memories_land_in_store_memories_with_null_origin_and_raw_class() {
+    let temporary = tempfile::tempdir().unwrap();
+    let db = temporary.path().join("source.db");
+    let conn = Connection::open(&db).unwrap();
+    opencrab_db::schema::initialize(&conn).unwrap();
+    conn.execute_batch(
+        "INSERT INTO agents(
+           agent_id,name,persona_name,personality,instructions,heartbeat_instructions,
+           model,created_at,updated_at
+         ) VALUES(
+           'agent-canonical','Agent C','persona-c','kind','do work','hb',
+           'openai:synthetic-model','2024-01-01 00:00:00','2024-01-01 00:00:00'
+         );
+         INSERT INTO model_pricing(
+           provider,model,input_price_per_1m,output_price_per_1m,context_window,updated_at
+         ) VALUES('openai','synthetic-model',1,2,128000,'2024-01-01 00:00:00');
+         INSERT INTO memory_curated(id,agent_id,category,content,updated_at,created_at) VALUES
+           ('mem-z','agent-canonical','long_term','later body','2024-01-06 00:00:00','2024-01-06 00:00:00'),
+           ('mem-a','agent-canonical','daily','earlier body','2024-01-05 00:00:00','2024-01-05 00:00:00'),
+           ('mem-orphan','1000000000000005','daily','orphan body','2024-01-05 00:00:00','2024-01-05 00:00:00'),
+           ('mem-empty-time','agent-canonical','scratch','no time','2024-01-05 00:00:00','');",
+    )
+    .unwrap();
+    drop(conn);
+
+    let report = run_migrate(&db);
+    assert!(
+        report
+            .classes
+            .iter()
+            .all(|class| class.exact_one_violations == 0),
+        "accounting must balance"
+    );
+    let curated = report
+        .classes
+        .iter()
+        .find(|class| {
+            class.source_table == "memory_curated" && class.logical_class == "curated_memory"
+        })
+        .expect("curated_memory class");
+    assert_eq!(curated.source_rows, 4);
+    assert_eq!(curated.canonical_outcomes, 2);
+    assert_eq!(curated.raw_outcomes, 2);
+    assert_eq!(curated.dropped_outcomes, 0);
+    assert_eq!(curated.physical_rows.get("memories").copied(), Some(2));
+
+    let conn = Connection::open(&db).unwrap();
+    let mut statement = conn
+        .prepare(
+            "SELECT id,subject_id,body,origin_place,origin_from_seq,origin_to_seq,written_at,last_read_at
+             FROM memories ORDER BY id",
+        )
+        .unwrap();
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, Option<i64>>(7)?,
+            ))
+        })
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].0, 1, "dense id follows source id TEXT byte order");
+    assert_eq!(rows[0].2, "earlier body");
+    assert_eq!(rows[0].3, None);
+    assert_eq!(rows[0].4, None);
+    assert_eq!(rows[0].5, None);
+    assert!(rows[0].6 > 0, "written_at must parse created_at");
+    assert_eq!(rows[0].7, None);
+    assert_eq!(rows[1].0, 2);
+    assert_eq!(rows[1].2, "later body");
+    assert_eq!(rows[1].3, None);
+    assert_eq!(rows[1].4, None);
+    assert_eq!(rows[1].5, None);
+    assert_eq!(rows[1].7, None);
+    assert_eq!(rows[0].1, rows[1].1, "both canonical rows share the owner");
+
+    let raw_reasons: Vec<String> = conn
+        .prepare(
+            "SELECT reason FROM legacy_unowned_source_rows
+             WHERE source_table='memory_curated' ORDER BY source_key",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(raw_reasons.len(), 2);
+    assert!(
+        raw_reasons
+            .iter()
+            .any(|reason| reason.contains("unresolved_agent")),
+        "orphan agent_id must be raw: {raw_reasons:?}"
+    );
+    assert!(
+        raw_reasons
+            .iter()
+            .any(|reason| reason.contains("invalid_timestamp")),
+        "empty created_at must be raw: {raw_reasons:?}"
+    );
+
+    let leftover: i64 = conn
+        .query_row("SELECT COUNT(*) FROM memory_curated", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(leftover, 4, "source rows must stay; never drop");
+}
+
 fn write_inputs(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
     let config = dir.join("empty.toml");
     let environment = dir.join("empty.env");
