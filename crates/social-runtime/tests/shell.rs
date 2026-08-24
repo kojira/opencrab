@@ -384,6 +384,184 @@ async fn shell_detaches_settles_offloads_and_is_read_by_bg_read() {
     );
 }
 
+// #810: 後続ターンの core-bg-read は activity が JSON 文字列でも読める（LLM が数値を文字列で渡す形）。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn bg_read_accepts_string_activity_id_after_success_offload() {
+    let h = build();
+    let (place, a, _o) = place_with(&h, Standing::Trusted);
+    h.sys.allow_tool(a, "core-shell");
+    h.sys.allow_command(a, "cat");
+    let big: String = (0..200)
+        .map(|i| format!("line-{i:04}-xxxxxxxxxxxxxxxxxxxx"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(big.len() > 2_500, "退避されるだけの大きさ");
+    h.shell.set_output(&big);
+
+    h.eng.push(Step::say_done(
+        "core-shell::{\"argv\":[\"cat\",\"big.txt\"]}",
+    ));
+    h.eng.push(Step::no_reply());
+    wake_external(&h, "w8");
+    settle().await;
+
+    let bg_id = bg_activities(&h)
+        .into_iter()
+        .find(|b| {
+            b.label
+                .as_deref()
+                .map(|l| l.starts_with("shell:"))
+                .unwrap_or(false)
+        })
+        .expect("shell background")
+        .id;
+
+    h.eng.push(Step::say_done(&format!(
+        "core-bg-read::{{\"activity\":\"{bg_id}\",\"start_line\":1,\"line_count\":5}}"
+    )));
+    h.eng.push(Step::no_reply());
+    wake_external(&h, "w9");
+    settle().await;
+
+    let settles = settle_texts(&h, place);
+    assert!(
+        settles.iter().any(|s| s.contains("line-0000")),
+        "文字列 activity でも退避の先頭を返す: {settles:?}"
+    );
+}
+
+// #810: 走っている活動を読むと「無い」ではなく「まだ決着していない」と返す。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn bg_read_of_running_activity_says_not_settled() {
+    let h = build();
+    let (place, a, _o) = place_with(&h, Standing::Trusted);
+    h.sys.allow_tool(a, "core-shell");
+    h.sys.allow_command(a, "sleep");
+    h.shell.set_slow(std::time::Duration::from_secs(20), "");
+
+    h.eng
+        .push(Step::say_done("core-shell::{\"argv\":[\"sleep\",\"20\"]}"));
+    // 遅い shell はここでは決着しないので、決着ターン用の no_reply は積まない。
+    wake_external(&h, "w10");
+    settle().await;
+
+    let running = bg_activities(&h)
+        .into_iter()
+        .find(|b| b.end_reason.is_none())
+        .expect("running shell");
+
+    h.eng.push(Step::say_done(&format!(
+        "core-bg-read::{{\"activity\":{}}}",
+        running.id
+    )));
+    h.eng.push(Step::no_reply());
+    wake_external(&h, "w11");
+    settle().await;
+
+    let settles = settle_texts(&h, place);
+    assert!(
+        settles
+            .iter()
+            .any(|s| s.contains("まだ決着していない") && s.contains(&format!("#{}", running.id))),
+        "走行中は決着前と返す: {settles:?}"
+    );
+    assert!(
+        !settles
+            .iter()
+            .any(|s| s.contains("あなたの活動ではない／退避されていない")),
+        "走行中を所有/未退避と混ぜない: {settles:?}"
+    );
+}
+
+// #810 [issue-later]: 他者の活動は「あなたの活動ではない」（未退避と畳まない）。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn bg_read_of_others_activity_says_not_yours() {
+    let h = build();
+    let (place, a, o) = place_with(&h, Standing::Trusted);
+    h.sys.allow_tool(a, "core-shell");
+    let foreign = h
+        .sys
+        .store()
+        .start_activity(
+            place,
+            o,
+            ActivityKindTag::Background,
+            Some("foreign"),
+            0,
+            0,
+            None,
+        )
+        .expect("other subject's background");
+
+    h.eng.push(Step::say_done(&format!(
+        "core-bg-read::{{\"activity\":{foreign}}}"
+    )));
+    h.eng.push(Step::no_reply());
+    wake_external(&h, "w12");
+    settle().await;
+
+    let settles = settle_texts(&h, place);
+    assert!(
+        settles
+            .iter()
+            .any(|s| s.contains("あなたの活動ではない") && s.contains(&format!("#{foreign}"))),
+        "他者の活動は所有拒否: {settles:?}"
+    );
+    assert!(
+        !settles
+            .iter()
+            .any(|s| s.contains("あなたの活動ではない／退避されていない")),
+        "他者を未退避と混ぜない: {settles:?}"
+    );
+}
+
+// #810 [issue-later]: 決着済みで退避なしは「退避されていない」（所有拒否と畳まない）。
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn bg_read_of_settled_activity_without_offload_says_not_offloaded() {
+    let h = build();
+    let (place, a, _o) = place_with(&h, Standing::Trusted);
+    h.sys.allow_tool(a, "core-shell");
+    h.sys.allow_command(a, "echo");
+    h.shell.set_output("ok");
+
+    h.eng
+        .push(Step::say_done("core-shell::{\"argv\":[\"echo\",\"ok\"]}"));
+    h.eng.push(Step::no_reply());
+    wake_external(&h, "w13");
+    settle().await;
+
+    let done = bg_activities(&h)
+        .into_iter()
+        .find(|b| b.end_reason.as_deref() == Some("done"))
+        .expect("settled small shell");
+    assert!(
+        h.sys.store().read_offload(a, done.id).unwrap().is_none(),
+        "small result is not offloaded"
+    );
+
+    h.eng.push(Step::say_done(&format!(
+        "core-bg-read::{{\"activity\":{}}}",
+        done.id
+    )));
+    h.eng.push(Step::no_reply());
+    wake_external(&h, "w14");
+    settle().await;
+
+    let settles = settle_texts(&h, place);
+    assert!(
+        settles
+            .iter()
+            .any(|s| s.contains("退避されていない") && s.contains(&format!("#{}", done.id))),
+        "決着済みで退避なしは未退避と返す: {settles:?}"
+    );
+    assert!(
+        !settles
+            .iter()
+            .any(|s| s.contains("あなたの活動ではない／退避されていない")),
+        "未退避を所有拒否と混ぜない: {settles:?}"
+    );
+}
+
 // ---- core-allow-command（owner-only・OwnerFollowUp）----
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]

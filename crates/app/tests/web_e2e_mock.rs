@@ -295,6 +295,151 @@ fn boot_mock_with_shell() -> (Proc, Proc, u16, PathBuf) {
     (core, web, port, db)
 }
 
+fn seed_owner_and_awk(db: &Path) {
+    let store = Store::open(db).expect("open store to seed owner and awk grant");
+    let place = find_room_place(&store, "room:main").expect("room:main after first boot");
+    let agent = find_agent(&store, place).expect("web-agent after first boot");
+    store
+        .allow_tool(agent, "core-shell")
+        .expect("allow core-shell");
+    store.allow_command(agent, "awk").expect("allow awk");
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos() as i64;
+    let owner = store
+        .create_subject(
+            SubjectKind::Human,
+            "test-owner",
+            "",
+            "engine",
+            Standing::Owner,
+            now,
+        )
+        .expect("create owner");
+    store
+        .add_identity(owner, &GateName::new("web"), "test-owner")
+        .expect("bind test-owner identity");
+    store
+        .join(place, owner, Role::Participant, 0, now)
+        .expect("join owner");
+    drop(store);
+}
+
+fn spawn_core_with_shell_root(socket: &Path, db: &Path, script: &str, shell_root: &Path) -> Proc {
+    let child = Command::new(env!("CARGO_BIN_EXE_opencrab-social-runtime"))
+        .arg(socket)
+        .arg(db)
+        .arg("room:main")
+        .env("OPENCRAB_LLM_PROVIDER", "mock")
+        .env("OPENCRAB_MOCK_LLM_SCRIPT", script)
+        .env("OPENCRAB_SHELL_ROOT", shell_root)
+        .env_remove("OPENCRAB_PLACES")
+        .env_remove("OPENCRAB_TEST_CLOCK_SOCKET")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn opencrab-social-runtime");
+    let mut proc = Proc(child);
+    if let Some(stderr) = proc.0.stderr.take() {
+        std::thread::spawn(move || {
+            for line in
+                std::io::BufRead::lines(std::io::BufReader::new(stderr)).map_while(Result::ok)
+            {
+                eprintln!("[core] {line}");
+            }
+        });
+    }
+    proc
+}
+
+fn seed_owner_and_sleep(db: &Path) {
+    let store = Store::open(db).expect("open store to seed owner and sleep grant");
+    let place = find_room_place(&store, "room:main").expect("room:main after first boot");
+    let agent = find_agent(&store, place).expect("web-agent after first boot");
+    store
+        .allow_tool(agent, "core-shell")
+        .expect("allow core-shell");
+    store.allow_command(agent, "sleep").expect("allow sleep");
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos() as i64;
+    let owner = store
+        .create_subject(
+            SubjectKind::Human,
+            "test-owner",
+            "",
+            "engine",
+            Standing::Owner,
+            now,
+        )
+        .expect("create owner");
+    store
+        .add_identity(owner, &GateName::new("web"), "test-owner")
+        .expect("bind test-owner identity");
+    store
+        .join(place, owner, Role::Participant, 0, now)
+        .expect("join owner");
+    drop(store);
+}
+
+fn boot_mock_with_shell_inprogress() -> (Proc, Proc, u16, PathBuf) {
+    let socket = scratch("s.sock");
+    let db = scratch("core.db");
+    let shell_root = scratch("shell");
+    let _ = std::fs::remove_file(&socket);
+    let _ = std::fs::remove_file(&db);
+    std::fs::create_dir_all(&shell_root).expect("shell root");
+    let port = free_port();
+    {
+        let core = spawn_core_with_shell_root(
+            &socket,
+            &db,
+            "shell_then_bg_read_before_settle",
+            &shell_root,
+        );
+        let start = Instant::now();
+        while !db.exists() && start.elapsed() < TIMEOUT {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        std::thread::sleep(Duration::from_millis(400));
+        drop(core);
+    }
+    seed_owner_and_sleep(&db);
+    let core = spawn_core_with_shell_root(
+        &socket,
+        &db,
+        "shell_then_bg_read_before_settle",
+        &shell_root,
+    );
+    let web = spawn_web(&socket, port);
+    (core, web, port, db)
+}
+
+fn boot_mock_with_shell_offload() -> (Proc, Proc, u16, PathBuf) {
+    let socket = scratch("s.sock");
+    let db = scratch("core.db");
+    let shell_root = scratch("shell");
+    let _ = std::fs::remove_file(&socket);
+    let _ = std::fs::remove_file(&db);
+    std::fs::create_dir_all(&shell_root).expect("shell root");
+    let port = free_port();
+    {
+        let core = spawn_core_with_shell_root(&socket, &db, "shell_offload_then_read", &shell_root);
+        let start = Instant::now();
+        while !db.exists() && start.elapsed() < TIMEOUT {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        std::thread::sleep(Duration::from_millis(400));
+        drop(core);
+    }
+    seed_owner_and_awk(&db);
+    let core = spawn_core_with_shell_root(&socket, &db, "shell_offload_then_read", &shell_root);
+    let web = spawn_web(&socket, port);
+    (core, web, port, db)
+}
+
 fn boot_mock_with_shell_fail() -> (Proc, Proc, u16, PathBuf) {
     let socket = scratch("s.sock");
     let db = scratch("core.db");
@@ -518,6 +663,123 @@ fn shell_failure_reason_readable_on_next_turn() {
         via_bg_read.is_some(),
         "failure reason must be retrievable via core-bg-read (offload): activities={ids:?}",
         ids = failed
+            .iter()
+            .map(|a| (a.id, a.label.clone(), a.end_reason.clone()))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// A9-shape (#810 QC): same-turn core-bg-read before the detached shell settles
+/// must report the in-progress state, not the conflated absent/not-yours message.
+#[test]
+fn shell_inprogress_read_same_turn_says_not_settled() {
+    let (_core, _web, port, db) = boot_mock_with_shell_inprogress();
+    assert!(
+        post_until_history_contains(
+            port,
+            "test-owner",
+            "synthetic shell request: start a long job and read it immediately",
+            "synthetic-inprogress-read",
+            Duration::from_secs(20)
+        ),
+        "same-turn read must recite the in-progress state: {}",
+        get_history(port)
+    );
+    let history = get_history(port);
+    assert!(
+        history.contains("まだ決着していない"),
+        "running activity must be reported as not settled: {history}"
+    );
+    assert!(
+        !history.contains("あなたの活動ではない／退避されていない"),
+        "running activity must not be folded into absent/not-yours: {history}"
+    );
+    assert!(
+        history.contains("\"kind\":\"agent\""),
+        "in-progress read must produce an agent utterance: {history}"
+    );
+
+    let store = Store::open(&db).expect("open store after in-progress read");
+    let place = find_room_place(&store, "room:main").expect("room:main after in-progress read");
+    let agent = find_agent(&store, place).expect("web-agent after in-progress read");
+    let running: Vec<_> = store
+        .all_activities()
+        .expect("list activities")
+        .into_iter()
+        .filter(|a| {
+            a.subject == agent
+                && a.end_reason.is_none()
+                && a.provenance
+                    .as_ref()
+                    .is_some_and(|p| p.tool_name == "core-shell")
+        })
+        .collect();
+    assert!(
+        !running.is_empty(),
+        "detached shell must still be running when the same-turn read is recited"
+    );
+}
+
+/// A9-shape (#810): a detached shell that succeeds and is offloaded must be readable
+/// from a subsequent turn via core-bg-read (the live QC shape).
+#[test]
+fn shell_success_offload_readable_on_later_turn() {
+    let (_core, _web, port, db) = boot_mock_with_shell_offload();
+    assert!(
+        post_until_history_contains(
+            port,
+            "test-owner",
+            "synthetic shell request: emit a large result",
+            "synthetic-offload-read",
+            Duration::from_secs(30)
+        ),
+        "later turn must recite the offload via core-bg-read: {}",
+        get_history(port)
+    );
+    let history = get_history(port);
+    assert!(
+        history.contains("OFFLOAD-LINE-0000-XXXXXXXXXXXXXXXXXXXXXXXX"),
+        "offload marker must reach the public reply: {history}"
+    );
+    assert!(
+        history.contains("\"kind\":\"agent\""),
+        "offload recovery must produce an agent utterance: {history}"
+    );
+
+    let store = Store::open(&db).expect("open store after offloaded shell");
+    let place = find_room_place(&store, "room:main").expect("room:main after offloaded shell");
+    let agent = find_agent(&store, place).expect("web-agent after offloaded shell");
+    let done: Vec<_> = store
+        .all_activities()
+        .expect("list activities")
+        .into_iter()
+        .filter(|a| {
+            a.subject == agent
+                && a.end_reason.as_deref() == Some("done")
+                && a.provenance
+                    .as_ref()
+                    .is_some_and(|p| p.tool_name == "core-shell")
+        })
+        .collect();
+    assert!(
+        !done.is_empty(),
+        "detached shell must leave a done background activity"
+    );
+    let via_bg_read = done.iter().find_map(|activity| {
+        store
+            .read_offload(agent, activity.id)
+            .ok()
+            .flatten()
+            .filter(|row| {
+                row.body
+                    .contains("OFFLOAD-LINE-0000-XXXXXXXXXXXXXXXXXXXXXXXX")
+            })
+            .map(|row| row.body)
+    });
+    assert!(
+        via_bg_read.is_some(),
+        "success body must be retrievable via core-bg-read (offload): activities={ids:?}",
+        ids = done
             .iter()
             .map(|a| (a.id, a.label.clone(), a.end_reason.clone()))
             .collect::<Vec<_>>()

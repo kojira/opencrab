@@ -51,11 +51,60 @@ enum MockScript {
     ShellThenRead,
     AnswerThenNoReply,
     ShellFailThenRead,
+    /// #810: 成功の大きい結果を退避したあと、後続ターンで core-bg-read する実形。
+    ShellOffloadThenRead,
+    /// #810 QC 形: 同一ターン反復で、切り離し直後（settle 前）に core-bg-read する。
+    ShellThenBgReadBeforeSettle,
     /// QC 形（#796）: PROGRESS + reply + 末尾空セグメント。空 Spoke を公開しないことの検査用。
     ProgressReplyTrailingEmpty,
 }
 
 pub const MOCK_MODEL: &str = "mock";
+
+const OFFLOAD_MARKER_LINE: &str = "OFFLOAD-LINE-0000-XXXXXXXXXXXXXXXXXXXXXXXX";
+
+/// 退避案内の読み方レシピから activity を取る（`core-bg-read（activity=N・…）`）。
+fn activity_id_from_offload_notice(rendered: &str) -> Option<i64> {
+    digits_after(rendered, "core-bg-read（activity=")
+}
+
+/// 同一ターンの切り離し通知から activity を取る（`背景へ移した（活動 N）`）。
+fn activity_id_from_detached_notice(text: &str) -> Option<i64> {
+    digits_after(text, "背景へ移した（活動 ")
+}
+
+fn digits_after(text: &str, mark: &str) -> Option<i64> {
+    let rest = text.split(mark).nth(1)?;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+fn tool_result_texts(ctx: &Context) -> Vec<(String, bool)> {
+    ctx.history
+        .iter()
+        .flat_map(|message| {
+            message.content.iter().filter_map(|block| match block {
+                Block::ToolResult {
+                    content, is_error, ..
+                } => {
+                    let text: String = content
+                        .iter()
+                        .filter_map(|part| match part {
+                            Part::Text(t) => Some(t.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("");
+                    Some((text, *is_error))
+                }
+                _ => None,
+            })
+        })
+        .collect()
+}
 
 /// Provider-level deterministic engine for process E2E tests and offline deployments.
 pub struct MockEngine {
@@ -88,6 +137,8 @@ impl MockEngine {
             "shell_then_read" => MockScript::ShellThenRead,
             "answer_then_no_reply" => MockScript::AnswerThenNoReply,
             "shell_fail_then_read" => MockScript::ShellFailThenRead,
+            "shell_offload_then_read" => MockScript::ShellOffloadThenRead,
+            "shell_then_bg_read_before_settle" => MockScript::ShellThenBgReadBeforeSettle,
             "progress_reply_trailing_empty" => MockScript::ProgressReplyTrailingEmpty,
             other => return Err(format!("unknown OPENCRAB_MOCK_LLM_SCRIPT: {other}")),
         };
@@ -265,6 +316,104 @@ impl Engine for MockEngine {
                             .to_string(),
                     )),
                 }
+            }
+            MockScript::ShellOffloadThenRead => {
+                // 実形（#810 / QC）: native tool。ターン N で大きい shell を切り離し、
+                // settle 後の後続ターンが core-bg-read {"activity":N} だけを呼ぶ（行指定なし＝既定）。
+                // 同じターンの tool_result（背景へ移した）では読まない。
+                if ctx.history.iter().any(|message| {
+                    message.content.iter().any(|block| match block {
+                        Block::ToolResult {
+                            content, is_error, ..
+                        } => {
+                            !*is_error
+                                && content.iter().any(|part| match part {
+                                    Part::Text(t) => t.contains(OFFLOAD_MARKER_LINE),
+                                    _ => false,
+                                })
+                        }
+                        _ => false,
+                    })
+                }) {
+                    return Ok(say(&format!(
+                        "synthetic-offload-read {OFFLOAD_MARKER_LINE}"
+                    )));
+                }
+                if ctx.rendered.contains("=== 決着の対応 ===") {
+                    let Some(activity) = activity_id_from_offload_notice(&ctx.rendered) else {
+                        return Err(EngineError(
+                            "mock shell_offload_then_read settled turn did not receive an offload recipe"
+                                .to_string(),
+                        ));
+                    };
+                    return Ok(InferOutput {
+                        effects: vec![],
+                        tool_calls: vec![ToolCallSpec {
+                            id: "mock-bg-read".to_string(),
+                            name: "core-bg-read".to_string(),
+                            args: serde_json::json!({ "activity": activity }),
+                        }],
+                        done: false,
+                    });
+                }
+                Ok(InferOutput {
+                    effects: vec![],
+                    tool_calls: vec![ToolCallSpec {
+                        id: "mock-shell-offload".to_string(),
+                        name: "core-shell".to_string(),
+                        args: serde_json::json!({
+                            "argv": [
+                                "awk",
+                                "BEGIN{for(i=0;i<500;i++) printf \"OFFLOAD-LINE-%04d-XXXXXXXXXXXXXXXXXXXXXXXX\\n\", i}"
+                            ]
+                        }),
+                    }],
+                    done: false,
+                })
+            }
+            MockScript::ShellThenBgReadBeforeSettle => {
+                // QC 形（#810）: 同一ターン反復。detach の tool_result を見て、settle を待たずに
+                // core-bg-read する。公開本文は読みの実メッセージ（走行中／畳み込み誤り）を復唱する。
+                if let Some(body) =
+                    tool_result_texts(ctx)
+                        .into_iter()
+                        .find_map(|(text, is_error)| {
+                            if is_error
+                                && (text.contains("まだ決着していない")
+                                    || text.contains("あなたの活動ではない")
+                                    || text.contains("退避されていない"))
+                            {
+                                Some(text)
+                            } else {
+                                None
+                            }
+                        })
+                {
+                    return Ok(say(&format!("synthetic-inprogress-read {body}")));
+                }
+                if let Some(activity) = tool_result_texts(ctx)
+                    .iter()
+                    .find_map(|(text, _)| activity_id_from_detached_notice(text))
+                {
+                    return Ok(InferOutput {
+                        effects: vec![],
+                        tool_calls: vec![ToolCallSpec {
+                            id: "mock-bg-read-before-settle".to_string(),
+                            name: "core-bg-read".to_string(),
+                            args: serde_json::json!({ "activity": activity }),
+                        }],
+                        done: false,
+                    });
+                }
+                Ok(InferOutput {
+                    effects: vec![],
+                    tool_calls: vec![ToolCallSpec {
+                        id: "mock-shell-before-settle".to_string(),
+                        name: "core-shell".to_string(),
+                        args: serde_json::json!({ "argv": ["sleep", "30"] }),
+                    }],
+                    done: false,
+                })
             }
             MockScript::ProgressReplyTrailingEmpty => {
                 Ok(say("PROGRESS::読み込み中\n\nreply:1:synthetic-qc-reply\n"))
@@ -1744,6 +1893,108 @@ mod tests {
             !only_say(&second_fail).contains("NO_REPLY"),
             "settled failure turn must reply like shell_then_read: {}",
             only_say(&second_fail)
+        );
+
+        let offload = MockEngine {
+            script: MockScript::ShellOffloadThenRead,
+        };
+        assert!(offload.emits_tool_calls());
+        let first_offload = offload.infer(&ctx, &chunks).await.unwrap();
+        assert_eq!(first_offload.tool_calls.len(), 1);
+        assert_eq!(first_offload.tool_calls[0].name, "core-shell");
+        let settled_offload_ctx = Context {
+            rendered: "=== 決着の対応 ===\n活動 activity=20\n受理ツール: core-shell args={\"argv\":[\"awk\"]}\n結果:\n活動 #20 が完了した（成功）。結果が大きいので退避した。読むには core-bg-read（activity=20・start_line・line_count）を呼ぶ。\n"
+                .to_string(),
+            ..Context::default()
+        };
+        let second_offload = offload.infer(&settled_offload_ctx, &chunks).await.unwrap();
+        assert_eq!(second_offload.tool_calls.len(), 1);
+        assert_eq!(second_offload.tool_calls[0].name, "core-bg-read");
+        assert_eq!(
+            second_offload.tool_calls[0].args,
+            serde_json::json!({ "activity": 20 })
+        );
+        let read_ctx = Context {
+            rendered: settled_offload_ctx.rendered.clone(),
+            history: vec![opencrab_port::Message {
+                role: MsgRole::User,
+                content: vec![Block::ToolResult {
+                    tool_use_id: "mock-bg-read".to_string(),
+                    content: vec![Part::text(format!(
+                        "活動 #20 の退避 1〜5 行目（全 500 行）:\n{OFFLOAD_MARKER_LINE}\n"
+                    ))],
+                    is_error: false,
+                }],
+            }],
+            ..Context::default()
+        };
+        let third_offload = offload.infer(&read_ctx, &chunks).await.unwrap();
+        assert!(
+            only_say(&third_offload).contains("synthetic-offload-read"),
+            "third turn must recite the offload slice: {}",
+            only_say(&third_offload)
+        );
+        assert!(
+            only_say(&third_offload).contains(OFFLOAD_MARKER_LINE),
+            "third turn must include the offload marker: {}",
+            only_say(&third_offload)
+        );
+
+        let inprogress = MockEngine {
+            script: MockScript::ShellThenBgReadBeforeSettle,
+        };
+        assert!(inprogress.emits_tool_calls());
+        let first_inprogress = inprogress.infer(&ctx, &chunks).await.unwrap();
+        assert_eq!(first_inprogress.tool_calls.len(), 1);
+        assert_eq!(first_inprogress.tool_calls[0].name, "core-shell");
+        assert_eq!(
+            first_inprogress.tool_calls[0].args,
+            serde_json::json!({ "argv": ["sleep", "30"] })
+        );
+        let detached_ctx = Context {
+            history: vec![opencrab_port::Message {
+                role: MsgRole::User,
+                content: vec![Block::ToolResult {
+                    tool_use_id: "mock-shell-before-settle".to_string(),
+                    content: vec![Part::text("背景へ移した（活動 20）")],
+                    is_error: false,
+                }],
+            }],
+            ..Context::default()
+        };
+        let second_inprogress = inprogress.infer(&detached_ctx, &chunks).await.unwrap();
+        assert_eq!(second_inprogress.tool_calls.len(), 1);
+        assert_eq!(second_inprogress.tool_calls[0].name, "core-bg-read");
+        assert_eq!(
+            second_inprogress.tool_calls[0].args,
+            serde_json::json!({ "activity": 20 })
+        );
+        let read_inprogress_ctx = Context {
+            history: vec![opencrab_port::Message {
+                role: MsgRole::User,
+                content: vec![Block::ToolResult {
+                    tool_use_id: "mock-bg-read-before-settle".to_string(),
+                    content: vec![Part::text(
+                        "失敗: 活動 #20 はまだ決着していない（退避は決着後）",
+                    )],
+                    is_error: true,
+                }],
+            }],
+            ..Context::default()
+        };
+        let third_inprogress = inprogress
+            .infer(&read_inprogress_ctx, &chunks)
+            .await
+            .unwrap();
+        assert!(
+            only_say(&third_inprogress).contains("synthetic-inprogress-read"),
+            "same-turn read must recite the in-progress state: {}",
+            only_say(&third_inprogress)
+        );
+        assert!(
+            only_say(&third_inprogress).contains("まだ決着していない"),
+            "same-turn read must include the in-progress message: {}",
+            only_say(&third_inprogress)
         );
 
         let trailing = MockEngine {
