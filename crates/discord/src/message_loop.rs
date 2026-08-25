@@ -27,9 +27,9 @@ use tracing::{debug, error, info, warn};
 
 use crate::gateway::DiscordGateway;
 use opencrab_actions::{
-    admit_inbound_agent, admit_inbound_message, plan_record_only_flags, prepare_session_inbound,
-    run_session_turn, start_session_turn, InboundAgentDrop, InboundMessageDrop, NormalizedInbound,
-    SessionLocks, TranscriptSource,
+    delivery_effect, plan_inbound, plan_inbound_flush, prepare_session_inbound, run_session_turn,
+    start_session_turn, DeliveryEffect, InboundAgentDrop, InboundMessageDrop, NormalizedInbound,
+    NormalizedInboundEvent, SessionLocks, TranscriptSource,
 };
 use opencrab_core::a2ui::UiRenderer;
 use opencrab_gateway::IncomingMessage;
@@ -574,24 +574,23 @@ pub async fn run_discord_loop<T: AgentRunner>(
                 // owner→co_agent は同権限にならず別グループになる。ここでのグループ分けは
                 // trust_level が揃った場合の挙動で、#489 が直れば owner 等価(=2)として合流する。
                 // 誰か（caller / trust_level）と「何本の run にするか」は core。
-                // ゲートは束ねた列を渡し、分割後の本数・各 caller は現行と同一（Q13）。
-                let levels: Vec<u8> = messages
-                    .iter()
-                    .map(|m| {
-                        state
-                            .resolve_caller(&m.sender.id, &agent_ids, &owner_discord_id)
-                            .trust_level()
-                    })
-                    .collect();
+                // ゲートは生識別子の列だけを渡し、分割後の本数・各 caller は現行と同一（Q13）。
+                let sender_ids: Vec<&str> = messages.iter().map(|m| m.sender.id.as_str()).collect();
                 let has_content: Vec<bool> = messages.iter().map(incoming_has_content).collect();
-                let record_only_flags = plan_record_only_flags(&levels, &has_content);
-                let groups = opencrab_actions::consecutive_trust_groups(&levels);
+                let flush = plan_inbound_flush(
+                    &state,
+                    &sender_ids,
+                    &has_content,
+                    &agent_ids,
+                    &owner_discord_id,
+                );
+                let record_only_flags = flush.record_only_flags;
 
                 if messages.len() > 1 {
                     info!(
                         channel = %key,
                         messages = messages.len(),
-                        groups = groups.len(),
+                        groups = flush.group_count,
                         "Debounced (channel): recording all, running once per consecutive-privilege group"
                     );
                 }
@@ -664,7 +663,7 @@ async fn process_incoming_message<T: AgentRunner>(
     let is_dm = guild_id.is_empty();
 
     // #40: 専用（per-agent）ゲートウェイが稼働中のエージェントは共有ループでは処理しない。
-    // ここでリストごと絞るのは、後段の trust 判定（dm_allowed_any / resolve_caller）にも
+    // ここでリストごと絞るのは、後段の core inbound（plan_inbound）にも
     // スキップ対象エージェントの trusted_users を混入させないため。専用ゲートウェイが
     // 停止/起動失敗していれば絞られず、共有側がフォールバックとして処理を続ける。
     let agent_ids: Vec<String> = if skip_agents_with_dedicated_gateway {
@@ -690,25 +689,28 @@ async fn process_incoming_message<T: AgentRunner>(
         agent_ids
     };
 
-    // DM 事前ゲート（落とす/通す）は core。信頼の計算は runner（server）。
-    if let Err(InboundMessageDrop::DmNotTrusted) = admit_inbound_message(
-        is_dm,
-        state.dm_allowed_any(&incoming.sender.id, &agent_ids, &owner_discord_id),
-    ) {
-        // #419: 破棄は正しい動作だが debug だと運用ログ（INFO）に出ず「無言・エラー
-        // なし」の切り分けが難しい。設定による破棄を 1 行 INFO で残す（宛先ごとに間引き）。
-        let key = format!("dm_gate:{}", incoming.sender.id);
-        if should_emit_drop_log(&DROP_LOG_LAST, &key, Instant::now(), DROP_LOG_THROTTLE) {
-            info!(
-                sender = %incoming.sender.id,
-                reason = "dm_sender_not_trusted",
-                "受信DMを破棄: 設定によりどのエージェントも送信者を信頼していない"
-            );
+    // 誰か・権限は core の inbound 1 口。ゲートは生識別子だけ渡す。
+    let inbound_event = NormalizedInboundEvent {
+        sender_id: &incoming.sender.id,
+        channel_id: &channel_id_str,
+        guild_id: &guild_id,
+    };
+    let plan = match plan_inbound(&state, &inbound_event, &owner_discord_id, &agent_ids) {
+        Ok(plan) => plan,
+        Err(InboundMessageDrop::DmNotTrusted) => {
+            // #419: 破棄は正しい動作だが debug だと運用ログ（INFO）に出ず「無言・エラー
+            // なし」の切り分けが難しい。設定による破棄を 1 行 INFO で残す（宛先ごとに間引き）。
+            let key = format!("dm_gate:{}", incoming.sender.id);
+            if should_emit_drop_log(&DROP_LOG_LAST, &key, Instant::now(), DROP_LOG_THROTTLE) {
+                info!(
+                    sender = %incoming.sender.id,
+                    reason = "dm_sender_not_trusted",
+                    "受信DMを破棄: 設定によりどのエージェントも送信者を信頼していない"
+                );
+            }
+            return;
         }
-        return;
-    }
-
-    // Channel whitelist check はエージェントごとに行う（agent loop 内）
+    };
 
     debug!(
         user = %incoming.sender.name,
@@ -722,7 +724,7 @@ async fn process_incoming_message<T: AgentRunner>(
         return;
     }
 
-    let caller = state.resolve_caller(&incoming.sender.id, &agent_ids, &owner_discord_id);
+    let caller = plan.caller.clone();
 
     let discord_message_id = incoming
         .metadata
@@ -737,13 +739,9 @@ async fn process_incoming_message<T: AgentRunner>(
     let mut reaction_added = false;
 
     for agent_id in &agent_ids {
-        match admit_inbound_agent(
-            is_dm,
-            state.dm_allowed(&incoming.sender.id, agent_id, &owner_discord_id),
-            state.is_channel_whitelisted_for_agent(&channel_id_str, agent_id),
-        ) {
-            Ok(()) => {}
-            Err(InboundAgentDrop::ChannelNotWhitelisted) => {
+        match plan.agent_drop(agent_id) {
+            None => {}
+            Some(InboundAgentDrop::ChannelNotWhitelisted) => {
                 // #419: 設定によるチャンネル破棄を 1 行 INFO で残す（宛先ごとに間引き）。
                 let key = format!("chan_wl:{agent_id}:{channel_id_str}");
                 if should_emit_drop_log(&DROP_LOG_LAST, &key, Instant::now(), DROP_LOG_THROTTLE) {
@@ -756,7 +754,7 @@ async fn process_incoming_message<T: AgentRunner>(
                 }
                 continue;
             }
-            Err(InboundAgentDrop::DmNotTrustedForAgent) => {
+            Some(InboundAgentDrop::DmNotTrustedForAgent) => {
                 // #419: 設定による DM 破棄を 1 行 INFO で残す（宛先ごとに間引き）。
                 let key = format!("dm_trust:{}:{}", agent_id, incoming.sender.id);
                 if should_emit_drop_log(&DROP_LOG_LAST, &key, Instant::now(), DROP_LOG_THROTTLE) {
@@ -851,7 +849,7 @@ async fn process_incoming_message<T: AgentRunner>(
         // 行う。これにより、割り込みメッセージが直前の推論完了前に走って履歴が不整合に
         // なり、同じ内容を二重回答する問題を防ぐ。
 
-        // #352: 本ターンの caller（resolve_caller の結果）で index を絞る。
+        // #352: 本ターンの caller（core の inbound 1 口が解決）で index を絞る。
         let (base_prompt, agent_name) = state.build_agent_context(agent_id, &caller);
         let system_prompt = format!(
             "{}\n\n{}",
@@ -1041,23 +1039,24 @@ async fn process_incoming_message<T: AgentRunner>(
             .await
             {
 
-                // #431: 「発言終わり」リアクションの可否を result を move する前に確定する。
+                // #431: 「発言終わり」リアクションの可否を effect を move する前に確定する。
                 // 「発話したか」は最終応答テキストではなく、このターンで on_response_text が
                 // 送信タスクを起こした回数で見る（run_agent_response は既に完了しているので
                 // 発火は出揃っている。送信タスク自体の完了待ちは下の detach 側で行う）。
                 // 反復途中で喋って最終応答が NO_REPLY のターンを取りこぼさないため。
+                let effect = delivery_effect(result);
                 let posted =
                     reply_send_seq_spawn.load(std::sync::atomic::Ordering::SeqCst) > 0;
                 // このターンが「次の行動」を起こしたか（自動 dispatch / 明示 spawn_subtask）。
                 let started_subtask =
                     subtask_starts_spawn.load(std::sync::atomic::Ordering::SeqCst) > 0;
-                let eos_qualifies = end_of_speech_qualifies(&result, posted, started_subtask);
+                let eos_qualifies = end_of_speech_qualifies(&effect, posted, started_subtask);
 
                 // #665: run から戻り、最終応答の処理・配送（記録／NO_REPLY 可視化）へ入る段。反復途中の
                 // 配送は on_response_text の detach spawn（別途 warn ログあり）で、ここは最終応答の後始末。
                 debug!(agent_id = %agent_id_spawn, session_id = %session_id_spawn, stage = "reply", "turn: 応答処理・配送 開始（入）");
                 handle_agent_response(
-                    result,
+                    effect,
                     &agent_id_spawn,
                     &session_id_spawn,
                     channel_id,
@@ -1107,7 +1106,7 @@ async fn process_incoming_message<T: AgentRunner>(
 /// `message_id` は元のユーザー投稿の Discord ID（空なら付与をスキップ）。
 #[allow(clippy::too_many_arguments)]
 async fn handle_agent_response<T: AgentRunner, G: ReactionAdder>(
-    result: anyhow::Result<opencrab_core::EngineResult>,
+    effect: DeliveryEffect,
     agent_id: &str,
     session_id: &str,
     channel_id: u64,
@@ -1116,41 +1115,40 @@ async fn handle_agent_response<T: AgentRunner, G: ReactionAdder>(
     gateway: &G,
     message_id: &str,
 ) {
-    match result {
-        Ok(engine_result) if !engine_result.response.is_empty() => {
-            if engine_result.response.trim() == "NO_REPLY" {
-                debug!(agent_id = %agent_id, "Agent returned NO_REPLY");
-                state.record_agent_no_reply(agent_id, session_id);
-                // 黙ったことを投稿者に見せる（#317）。失敗しても応答処理は続けない
-                // ＝ NO_REPLY のまま終わるのは変わらない。
-                add_reaction_non_fatal(
-                    gateway,
-                    channel_id,
-                    channel_id_str,
-                    message_id,
-                    NO_REPLY_EMOJI,
-                )
-                .await;
-                return;
-            }
+    match effect {
+        DeliveryEffect::NoReply => {
+            debug!(agent_id = %agent_id, "Agent returned NO_REPLY");
+            state.record_agent_no_reply(agent_id, session_id);
+            // 黙ったことを投稿者に見せる（#317）。失敗しても応答処理は続けない
+            // ＝ NO_REPLY のまま終わるのは変わらない。
+            add_reaction_non_fatal(
+                gateway,
+                channel_id,
+                channel_id_str,
+                message_id,
+                NO_REPLY_EMOJI,
+            )
+            .await;
+        }
+        DeliveryEffect::Text {
+            body,
+            tool_calls_made,
+            ..
+        } => {
             state.record_outbound_reply(
                 opencrab_actions::TranscriptSource::Discord,
                 &opencrab_actions::OutboundReplyRecord {
                     agent_id,
                     session_id,
                     channel_id: Some(channel_id_str),
-                    text: &engine_result.response,
-                    context: Some(opencrab_actions::AgentReplyContext::Direct {
-                        tool_calls_made: engine_result.tool_calls_made,
-                    }),
+                    text: &body,
+                    context: Some(opencrab_actions::AgentReplyContext::Direct { tool_calls_made }),
                 },
             );
         }
-        Ok(_) => debug!(agent_id = %agent_id, "Agent produced empty response"),
-        // {:#} で anyhow のコンテキストチェーン全体を出す（プロバイダの生エラーを
-        // 握りつぶさない）。Display（%e）だと最外側の要約しか出ない。
-        Err(e) => {
-            error!(agent_id = %agent_id, error = format!("{e:#}"), "SkillEngine failed");
+        DeliveryEffect::Empty => debug!(agent_id = %agent_id, "Agent produced empty response"),
+        DeliveryEffect::Failed { error } => {
+            error!(agent_id = %agent_id, error = %error, "SkillEngine failed");
             // #668: ターンが失敗したことを、トリガー投稿への ❌ リアクションだけで可視化する。
             // **エラー本文はチャンネルへ出さない**（複数エージェントが居るチャンネルで互いの
             // エラー文に反応し合う無限ループを防ぐ。詳細はログ＝#665 の計装と llm_logs が持つ）。
@@ -1258,22 +1256,22 @@ async fn process_subtask_completed<T: AgentRunner>(
     else {
         return;
     };
-    match run_result {
-        Ok(engine_result) if !engine_result.response.is_empty() => {
-            if engine_result.response.trim() == "NO_REPLY" {
-                state.record_agent_no_reply(&agent_id, &session_id);
-                return;
-            }
+    match delivery_effect(run_result) {
+        DeliveryEffect::NoReply => {
+            state.record_agent_no_reply(&agent_id, &session_id);
+        }
+        DeliveryEffect::Text {
+            body,
+            stopped_by_limit,
+            ..
+        } => {
             if !is_dm && !state.is_channel_writable(&channel_id_str) {
                 return;
             }
-            let sent_id = match gateway
-                .send_to_channel(channel_id, &engine_result.response)
-                .await
-            {
+            let sent_id = match gateway.send_to_channel(channel_id, &body).await {
                 Ok(id) => {
                     if let Some(v) = &voice {
-                        v.maybe_speak(&channel_id_str, &agent_id, &engine_result.response);
+                        v.maybe_speak(&channel_id_str, &agent_id, &body);
                     }
                     id
                 }
@@ -1288,7 +1286,7 @@ async fn process_subtask_completed<T: AgentRunner>(
                     agent_id: &agent_id,
                     session_id: &session_id,
                     channel_id: Some(&channel_id_str),
-                    text: &engine_result.response,
+                    text: &body,
                     context: Some(opencrab_actions::AgentReplyContext::SubtaskCompleted),
                 },
             );
@@ -1296,7 +1294,7 @@ async fn process_subtask_completed<T: AgentRunner>(
             // 投稿できたなら「発言終わり」を付ける。判定は通常経路と同じゲートへ寄せる。
             // この経路は 1 応答 1 送信なので `posted` = 送信 id の有無。付与失敗は non-fatal。
             if end_of_speech_qualifies_ok(
-                &engine_result,
+                stopped_by_limit,
                 sent_id.is_some(),
                 subtask_starts.load(std::sync::atomic::Ordering::SeqCst) > 0,
             ) {
@@ -1434,27 +1432,27 @@ async fn process_timed_fire<T: AgentRunner>(
 
     // 記録（配送は on_response_text が済ませているので送信はしない）。最終応答が NO_REPLY 以外なら
     // 通常ターンと同じ record_outbound_reply。沈黙は無記録（上記 doc）。
-    match result {
-        Ok(engine_result) => {
-            let text = engine_result.response.trim();
-            if !text.is_empty() && text != "NO_REPLY" {
-                state.record_outbound_reply(
-                    opencrab_actions::TranscriptSource::Discord,
-                    &opencrab_actions::OutboundReplyRecord {
-                        agent_id: &agent_id,
-                        session_id: &session_id,
-                        channel_id: Some(&channel_id_str),
-                        text: &engine_result.response,
-                        context: Some(opencrab_actions::AgentReplyContext::Direct {
-                            tool_calls_made: engine_result.tool_calls_made,
-                        }),
-                    },
-                );
-            }
+    match delivery_effect(result) {
+        DeliveryEffect::Text {
+            body,
+            tool_calls_made,
+            ..
+        } => {
+            state.record_outbound_reply(
+                opencrab_actions::TranscriptSource::Discord,
+                &opencrab_actions::OutboundReplyRecord {
+                    agent_id: &agent_id,
+                    session_id: &session_id,
+                    channel_id: Some(&channel_id_str),
+                    text: &body,
+                    context: Some(opencrab_actions::AgentReplyContext::Direct { tool_calls_made }),
+                },
+            );
         }
-        Err(e) => {
-            error!(agent_id = %agent_id, error = format!("{e:#}"), "TimedFire turn failed");
+        DeliveryEffect::Failed { error } => {
+            error!(agent_id = %agent_id, error = %error, "TimedFire turn failed");
         }
+        DeliveryEffect::NoReply | DeliveryEffect::Empty => {}
     }
 }
 
@@ -1786,19 +1784,19 @@ async fn process_interaction_response<T: AgentRunner>(
     else {
         return;
     };
-    match run_result {
-        Ok(engine_result) if !engine_result.response.is_empty() => {
-            if engine_result.response.trim() == "NO_REPLY" {
-                state.record_agent_no_reply(&agent_id, &session_id);
-                return;
-            }
+    match delivery_effect(run_result) {
+        DeliveryEffect::NoReply => {
+            state.record_agent_no_reply(&agent_id, &session_id);
+        }
+        DeliveryEffect::Text {
+            body,
+            stopped_by_limit,
+            ..
+        } => {
             if !is_dm && !state.is_channel_writable(&channel_id_str) {
                 return;
             }
-            let sent_id = match gateway
-                .send_to_channel(channel_id, &engine_result.response)
-                .await
-            {
+            let sent_id = match gateway.send_to_channel(channel_id, &body).await {
                 Ok(id) => id,
                 Err(e) => {
                     error!("Interaction response Discord send failed: {e}");
@@ -1811,7 +1809,7 @@ async fn process_interaction_response<T: AgentRunner>(
                     agent_id: &agent_id,
                     session_id: &session_id,
                     channel_id: Some(&channel_id_str),
-                    text: &engine_result.response,
+                    text: &body,
                     context: Some(opencrab_actions::AgentReplyContext::InteractionResponse {
                         interaction_id: &interaction_id,
                     }),
@@ -1821,7 +1819,7 @@ async fn process_interaction_response<T: AgentRunner>(
             // 投稿できたなら「発言終わり」を付ける。判定は通常経路と同じゲートへ寄せる。
             // この経路は 1 応答 1 送信なので `posted` = 送信 id の有無。付与失敗は non-fatal。
             if end_of_speech_qualifies_ok(
-                &engine_result,
+                stopped_by_limit,
                 sent_id.is_some(),
                 subtask_starts.load(std::sync::atomic::Ordering::SeqCst) > 0,
             ) {
@@ -2045,23 +2043,20 @@ const FAILED_EMOJI: &str = "❌";
 /// 実送信を試みた回数（`reply_send_seq > 0`）、subtask/interaction 経路では送信 id
 /// （`sent_id.is_some()`）。実送信を試みたが失敗して id が採れなかった場合は、この関数は
 /// `true` を返すが、実際の付与は呼び出し側の「最後の投稿 id が Some か」で最終的に弾かれる。
-fn end_of_speech_qualifies(
-    result: &anyhow::Result<opencrab_core::EngineResult>,
-    posted: bool,
-    started_subtask: bool,
-) -> bool {
-    matches!(result.as_ref(), Ok(r) if end_of_speech_qualifies_ok(r, posted, started_subtask))
+fn end_of_speech_qualifies(effect: &DeliveryEffect, posted: bool, started_subtask: bool) -> bool {
+    match effect {
+        DeliveryEffect::Failed { .. } => false,
+        DeliveryEffect::Text {
+            stopped_by_limit, ..
+        } => end_of_speech_qualifies_ok(*stopped_by_limit, posted, started_subtask),
+        DeliveryEffect::NoReply | DeliveryEffect::Empty => posted && !started_subtask,
+    }
 }
 
-/// [`end_of_speech_qualifies`] の `Ok` 側だけを取り出したもの。subtask 完了 /
-/// interaction 応答の経路は `EngineResult` を先に取り出しているため、判定を
-/// 共有するにはこの形が要る（`Err` は match の別腕で落ちている）。
-fn end_of_speech_qualifies_ok(
-    result: &opencrab_core::EngineResult,
-    posted: bool,
-    started_subtask: bool,
-) -> bool {
-    !result.stopped_by_limit && posted && !started_subtask
+/// [`end_of_speech_qualifies`] の Text 側だけを取り出したもの。subtask 完了 /
+/// interaction 応答の経路は本文配送のあとで判定するため、この形が要る。
+fn end_of_speech_qualifies_ok(stopped_by_limit: bool, posted: bool, started_subtask: bool) -> bool {
+    !stopped_by_limit && posted && !started_subtask
 }
 
 /// リアクションを付ける対象の message_id を解析する。
@@ -2135,6 +2130,7 @@ mod tests {
         should_alert_inbound_stalled, should_emit_drop_log, FAILED_EMOJI, NO_REPLY_EMOJI,
         RECV_FAILURES_BEFORE_ALERT, RECV_RETRY_BASE, RECV_RETRY_MAX, SEEN_EMOJI, SPOKE_EMOJI,
     };
+    use opencrab_actions::delivery_effect;
     use std::collections::HashMap;
     use std::sync::Mutex;
     use tokio::time::{Duration, Instant};
@@ -2149,6 +2145,10 @@ mod tests {
             stopped_by_limit,
             xml_fallback_parses: 0,
         }
+    }
+
+    fn mk_effect(response: &str, stopped_by_limit: bool) -> opencrab_actions::DeliveryEffect {
+        delivery_effect(Ok(mk_result(response, stopped_by_limit)))
     }
 
     /// #431: 「発言終わり」の絵文字は既存の 2 種と衝突しない（区別できないと意味がない）。
@@ -2174,7 +2174,7 @@ mod tests {
     fn end_of_speech_marks_only_natural_completed_replies() {
         // 発話して自然終了・subtask を起こしていない → 対象
         assert!(end_of_speech_qualifies(
-            &Ok(mk_result("言い終わったよ", false)),
+            &mk_effect("言い終わったよ", false),
             true,
             false
         ));
@@ -2186,16 +2186,12 @@ mod tests {
     #[test]
     fn end_of_speech_marks_turn_that_spoke_then_ended_with_no_reply() {
         assert!(end_of_speech_qualifies(
-            &Ok(mk_result("NO_REPLY", false)),
+            &mk_effect("NO_REPLY", false),
             true,
             false
         ));
         // 最終応答が空で終わるターン（ツール実行だけして締める）も同じ。
-        assert!(end_of_speech_qualifies(
-            &Ok(mk_result("", false)),
-            true,
-            false
-        ));
+        assert!(end_of_speech_qualifies(&mk_effect("", false), true, false));
     }
 
     /// #431: 付けない経路を網羅する（恒真回避 — 各除外条件を個別に踏む）。
@@ -2204,29 +2200,29 @@ mod tests {
         // 発話ゼロ（全反復 NO_REPLY / 非 writable で送信に至らず）→ 付けない。
         // 逆流防止: 実投稿が無いターンには最終応答が何であれ付かない。
         assert!(!end_of_speech_qualifies(
-            &Ok(mk_result("NO_REPLY", false)),
+            &mk_effect("NO_REPLY", false),
             false,
             false
         ));
         assert!(!end_of_speech_qualifies(
-            &Ok(mk_result("", false)),
+            &mk_effect("", false),
             false,
             false
         ));
         assert!(!end_of_speech_qualifies(
-            &Ok(mk_result("送れなかった本文", false)),
+            &mk_effect("送れなかった本文", false),
             false,
             false
         ));
         // 反復上限で打ち切り（自然終了でない）→ 発話していても付けない
         assert!(!end_of_speech_qualifies(
-            &Ok(mk_result("途中まで", true)),
+            &mk_effect("途中まで", true),
             true,
             false
         ));
         // エラー / タイムアウト終了 → 付けない
         assert!(!end_of_speech_qualifies(
-            &Err(anyhow::anyhow!("boom")),
+            &delivery_effect(Err(anyhow::anyhow!("boom"))),
             true,
             false
         ));
@@ -2245,28 +2241,20 @@ mod tests {
     fn end_of_speech_excludes_turn_that_started_a_subtask() {
         // 「調べますね」と喋ってから掘削を投げたターン。
         assert!(!end_of_speech_qualifies(
-            &Ok(mk_result("調べますね", false)),
+            &mk_effect("調べますね", false),
             true,
             true
         ));
         // subtask 完了 resume / interaction 経路の `Ok` 側ゲートも同じ規則に従う。
         // resume ターンがさらに subtask を投げたら、その resume にも付けず次へ委ねる。
-        assert!(!end_of_speech_qualifies_ok(
-            &mk_result("もう少し掘る", false),
-            true,
-            true
-        ));
+        assert!(!end_of_speech_qualifies_ok(false, true, true));
         // 回帰: subtask を起こしていない自然終了は従来どおり対象。
         assert!(end_of_speech_qualifies(
-            &Ok(mk_result("言い終わったよ", false)),
+            &mk_effect("言い終わったよ", false),
             true,
             false
         ));
-        assert!(end_of_speech_qualifies_ok(
-            &mk_result("言い終わったよ", false),
-            true,
-            false
-        ));
+        assert!(end_of_speech_qualifies_ok(false, true, false));
     }
 
     /// #419: フィルタ破棄 INFO は宛先ごとに間引く。初回は出し、窓の内側では抑制し、

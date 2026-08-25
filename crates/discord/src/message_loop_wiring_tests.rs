@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::gateway::DiscordGateway;
 use opencrab_actions::subtask::SubtaskRegistry;
-use opencrab_actions::{CallerIdentity, RunRequest, SessionLocks};
+use opencrab_actions::{delivery_effect, CallerIdentity, RunRequest, SessionLocks};
 use opencrab_core::EngineResult;
 use opencrab_gateway::{IncomingMessage, MessageContent, MessageSource, Sender};
 
@@ -286,20 +286,7 @@ impl opencrab_actions::AgentRuntime for FakeRunner {
     }
 }
 
-impl crate::AgentRunner for FakeRunner {
-    fn db(&self) -> &opencrab_db::Db {
-        &self.db
-    }
-
-    fn workspace_base(&self) -> &str {
-        "/nonexistent/workspace/{agent_id}"
-    }
-
-    fn is_channel_writable(&self, _channel_id: &str) -> bool {
-        // 空応答なので送信判定までは来ないが、来ても書き込まない側に倒す。
-        false
-    }
-
+impl opencrab_actions::InboundIdentity for FakeRunner {
     fn is_channel_whitelisted_for_agent(&self, _channel_id: &str, _agent_id: &str) -> bool {
         true
     }
@@ -331,6 +318,21 @@ impl crate::AgentRunner for FakeRunner {
         } else {
             CallerIdentity::TrustedUser
         }
+    }
+}
+
+impl crate::AgentRunner for FakeRunner {
+    fn db(&self) -> &opencrab_db::Db {
+        &self.db
+    }
+
+    fn workspace_base(&self) -> &str {
+        "/nonexistent/workspace/{agent_id}"
+    }
+
+    fn is_channel_writable(&self, _channel_id: &str) -> bool {
+        // 空応答なので送信判定までは来ないが、来ても書き込まない側に倒す。
+        false
     }
 
     fn list_enabled_discord_configs(&self) -> Vec<opencrab_db::queries::AgentDiscordConfigRow> {
@@ -932,7 +934,7 @@ async fn no_reply_reaction_calls(response: &str, message_id: &str) -> Vec<(u64, 
     let gateway = FakeReactionGateway::default();
 
     super::handle_agent_response(
-        Ok(engine_result(response)),
+        delivery_effect(Ok(engine_result(response))),
         "crab",
         "discord-crab-111-222",
         222,
@@ -990,7 +992,7 @@ async fn failure_reaction_calls(message_id: &str) -> Vec<(u64, u64, String)> {
     let gateway = FakeReactionGateway::default();
 
     super::handle_agent_response(
-        Err(anyhow::anyhow!("upstream provider exploded")),
+        delivery_effect(Err(anyhow::anyhow!("upstream provider exploded"))),
         "crab",
         "discord-crab-111-222",
         222,

@@ -46,9 +46,10 @@ pub use channel_config::apply_discord_channel_config;
 pub use dispatcher::ActionDispatcher;
 pub use run_request::{LiveInboundScope, RunRequest};
 pub use session_inbound::{
-    admit_inbound_agent, admit_inbound_message, consecutive_trust_groups, plan_record_only_flags,
-    prepare_session_inbound, run_session_turn, start_session_turn, InboundAgentDrop,
-    InboundMessageDrop, NormalizedInbound,
+    consecutive_trust_groups, delivery_effect, plan_inbound, plan_inbound_flush,
+    plan_record_only_flags, prepare_session_inbound, run_session_turn, start_session_turn,
+    DeliveryEffect, FlushPlan, InboundAgentDrop, InboundIdentity, InboundMessageDrop, InboundPlan,
+    NormalizedInbound, NormalizedInboundEvent,
 };
 pub use session_runtime::{SessionLocks, SessionRuntime};
 pub use subtask::{

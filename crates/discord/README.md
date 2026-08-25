@@ -9,7 +9,7 @@ Discord ゲート。載せ替え工程 4-a 以降、**配送専用**。
 ## 残すもの（配送）
 
 - 受信（serenity）→ core へ正規化イベントを渡す
-- core の決定（本文 / NO_REPLY / A2UI 構造）の送信
+- core の決定（本文 / NO_REPLY / A2UI 構造 / リアクション）の送信
 - 2 秒デバウンス（形＋時刻。権限分割は core）
 - Discord API ツール（list_guilds/channels、reaction、webhook/channel 作成、send_file、voice join/leave）
 - スノーフレーク ID の数値→文字列正規化（`normalize_id_args`）
@@ -20,15 +20,18 @@ Discord ゲート。載せ替え工程 4-a 以降、**配送専用**。
 
 | 判断 | 入口 |
 |---|---|
-| trust_level による run 分割 | `plan_record_only_flags` / `consecutive_trust_groups` |
-| DM / whitelist の落とす・通す | `admit_inbound_message` / `admit_inbound_agent` |
+| caller 解決・DM 許可・ホワイトリスト | `plan_inbound` |
+| trust_level による run 分割 | `plan_inbound_flush` |
+| ターン結果の配送形 | `delivery_effect` |
 | セッション確保 + inbound 記録 | `prepare_session_inbound` |
 | ターン起動 | `start_session_turn` / `run_session_turn` |
 | `discord_channel_config` の DB 書き | `apply_discord_channel_config`（definitions と execute 受け口はここ） |
 
-信頼の**計算**（`resolve_caller` / `dm_allowed*`）は `AgentRunner`（server）のまま。
-core は計算結果を受けて決定する。`SystemGatewayActions` に `discord_channel_config`
-は出さない（web / Nostr へ波及させない）。
+ゲートは生識別子（user / channel / guild）だけを core へ渡す。
+`resolve_caller` / `dm_allowed*` / `is_channel_whitelisted` の計算本体は
+`InboundIdentity`（server 実装）のまま。呼ぶのは core。
+`SystemGatewayActions` に `discord_channel_config` は出さない
+（web / Nostr へ波及させない）。
 
 ## 関連
 

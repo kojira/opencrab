@@ -11,24 +11,7 @@
 use crate::AppState;
 use opencrab_db::queries::TrustedUserPermission;
 
-impl opencrab_discord::AgentRunner for AppState {
-    fn db(&self) -> &opencrab_db::Db {
-        &self.db
-    }
-
-    fn workspace_base(&self) -> &str {
-        &self.workspace_base
-    }
-
-    // ---- 判定（#43） ----
-
-    fn is_channel_writable(&self, channel_id: &str) -> bool {
-        self.db
-            .lock()
-            .map(|conn| opencrab_db::queries::is_channel_writable(&conn, channel_id))
-            .unwrap_or(false)
-    }
-
+impl opencrab_actions::InboundIdentity for AppState {
     fn is_channel_whitelisted_for_agent(&self, channel_id: &str, agent_id: &str) -> bool {
         self.db
             .lock()
@@ -151,6 +134,25 @@ impl opencrab_discord::AgentRunner for AppState {
             None => opencrab_actions::CallerIdentity::Agent,
         }
     }
+}
+
+impl opencrab_discord::AgentRunner for AppState {
+    fn db(&self) -> &opencrab_db::Db {
+        &self.db
+    }
+
+    fn workspace_base(&self) -> &str {
+        &self.workspace_base
+    }
+
+    // ---- 判定（#43） ----
+
+    fn is_channel_writable(&self, channel_id: &str) -> bool {
+        self.db
+            .lock()
+            .map(|conn| opencrab_db::queries::is_channel_writable(&conn, channel_id))
+            .unwrap_or(false)
+    }
 
     // ---- per-agent ゲートウェイ（#40） ----
 
@@ -194,8 +196,7 @@ impl opencrab_discord::AgentRunner for AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opencrab_actions::CallerIdentity;
-    use opencrab_discord::AgentRunner;
+    use opencrab_actions::{CallerIdentity, InboundIdentity};
 
     /// 最小構成の `AppState`（in-memory DB、LLM プロバイダ 0 件）。
     /// `resolve_caller` の owner 判定は DB とプロバイダに依存しないので十分。

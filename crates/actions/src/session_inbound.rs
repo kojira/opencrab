@@ -1,16 +1,35 @@
 //! セッション inbound の集約口（載せ替え §3）。
 //!
 //! ゲートは正規化した受信（本文・送信者の生識別子・対象 session_id）だけを渡す。
-//! ここで「誰か・権限・セッション確保・記録・ターン起動」を決める。
-//! 配送（送信・描画・typing・webhook）はゲートに残す。
+//! 誰か・権限は [`plan_inbound`] / [`plan_inbound_flush`] の 1 口で決める。
+//! 配送（送信・描画・typing・webhook）はゲートに残す。core が返すのは
+//! [`DeliveryEffect`]。
 //!
 //! SkillEngine / conversation の実装は触らない。ゲートが直呼びしていた
 //! [`crate::AgentRuntime`] の入口を、このモジュール 1 箇所へ集める。
 
 use crate::agent_runtime::AgentRuntime;
 use crate::transcript::{InboundMessageRecord, TranscriptSource};
+use crate::CallerIdentity;
 use crate::RunRequest;
 use opencrab_core::EngineResult;
+
+/// 誰か・権限の照会口。計算本体（DB）は runner 実装。落とす/通すは
+/// [`plan_inbound`] / [`plan_inbound_flush`] が決める。
+pub trait InboundIdentity: Send + Sync {
+    fn resolve_caller(
+        &self,
+        sender_id: &str,
+        agent_ids: &[String],
+        owner_id: &str,
+    ) -> CallerIdentity;
+
+    fn dm_allowed_any(&self, sender_id: &str, agent_ids: &[String], owner_id: &str) -> bool;
+
+    fn dm_allowed(&self, sender_id: &str, agent_id: &str, owner_id: &str) -> bool;
+
+    fn is_channel_whitelisted_for_agent(&self, channel_id: &str, agent_id: &str) -> bool;
+}
 
 /// ゲートが core に渡す正規化済み受信 1 件。
 ///
@@ -60,10 +79,80 @@ pub enum InboundAgentDrop {
     ChannelNotWhitelisted,
 }
 
+/// ゲートが inbound 1 口へ渡す正規化イベント（生識別子のみ。権限の真偽は載せない）。
+#[derive(Debug, Clone, Copy)]
+pub struct NormalizedInboundEvent<'a> {
+    pub sender_id: &'a str,
+    pub channel_id: &'a str,
+    /// 空なら DM。
+    pub guild_id: &'a str,
+}
+
+/// [`plan_inbound`] が通したときの結果。caller と、各 agent の落とす/通す。
+#[derive(Debug, Clone)]
+pub struct InboundPlan {
+    pub caller: CallerIdentity,
+    pub admitted_agent_ids: Vec<String>,
+    pub agent_drops: Vec<(String, InboundAgentDrop)>,
+}
+
+impl InboundPlan {
+    pub fn agent_drop(&self, agent_id: &str) -> Option<InboundAgentDrop> {
+        self.agent_drops
+            .iter()
+            .find(|(id, _)| id == agent_id)
+            .map(|(_, reason)| *reason)
+    }
+}
+
+/// デバウンスフラッシュ時の分割（Q13）。flags とグループ数。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlushPlan {
+    pub record_only_flags: Vec<bool>,
+    pub group_count: usize,
+}
+
+/// 配送 effect（§3.4）。ゲートはこれを既存の送信・リアクションで出す。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeliveryEffect {
+    Text {
+        body: String,
+        stopped_by_limit: bool,
+        tool_calls_made: usize,
+    },
+    NoReply,
+    Empty,
+    Failed {
+        error: String,
+    },
+}
+
+/// `EngineResult` を §3.4 の配送 effect に写す。判定はここだけ。
+pub fn delivery_effect(result: anyhow::Result<EngineResult>) -> DeliveryEffect {
+    match result {
+        Ok(er) if !er.response.is_empty() => {
+            if er.response.trim() == "NO_REPLY" {
+                DeliveryEffect::NoReply
+            } else {
+                DeliveryEffect::Text {
+                    body: er.response,
+                    stopped_by_limit: er.stopped_by_limit,
+                    tool_calls_made: er.tool_calls_made,
+                }
+            }
+        }
+        Ok(_) => DeliveryEffect::Empty,
+        Err(e) => DeliveryEffect::Failed {
+            error: format!("{e:#}"),
+        },
+    }
+}
+
 /// DM の事前ゲート（「いずれかのエージェントが信頼していれば通す」）。
 ///
-/// `dm_allowed_any` の**結果**を受け、落とす/通すをここで決める。非 DM は常に通す。
-/// 誰を信頼するかの計算（DB）は runner 実装（server）側。
+/// [`plan_inbound`] が [`InboundIdentity::dm_allowed_any`] の結果を渡す。非 DM は常に通す。
+///
+/// ゲートは呼ばない。[`plan_inbound`] が内部で使う。
 pub fn admit_inbound_message(is_dm: bool, dm_allowed_any: bool) -> Result<(), InboundMessageDrop> {
     if is_dm && !dm_allowed_any {
         Err(InboundMessageDrop::DmNotTrusted)
@@ -73,6 +162,8 @@ pub fn admit_inbound_message(is_dm: bool, dm_allowed_any: bool) -> Result<(), In
 }
 
 /// エージェント個別の権限ゲート（DM 個別信頼 / チャンネル whitelist）。
+///
+/// ゲートは呼ばない。[`plan_inbound`] が内部で使う。
 pub fn admit_inbound_agent(
     is_dm: bool,
     dm_allowed: bool,
@@ -88,6 +179,62 @@ pub fn admit_inbound_agent(
         return Err(InboundAgentDrop::ChannelNotWhitelisted);
     }
     Ok(())
+}
+
+/// inbound 1 口。ゲートは生識別子の正規化イベントだけを渡す。
+///
+/// caller 解決・DM 許可・ホワイトリスト判定はここで行う。
+pub fn plan_inbound<I: InboundIdentity>(
+    identity: &I,
+    event: &NormalizedInboundEvent<'_>,
+    owner_id: &str,
+    agent_ids: &[String],
+) -> Result<InboundPlan, InboundMessageDrop> {
+    let is_dm = event.guild_id.is_empty();
+    admit_inbound_message(
+        is_dm,
+        identity.dm_allowed_any(event.sender_id, agent_ids, owner_id),
+    )?;
+    let caller = identity.resolve_caller(event.sender_id, agent_ids, owner_id);
+    let mut admitted_agent_ids = Vec::new();
+    let mut agent_drops = Vec::new();
+    for agent_id in agent_ids {
+        match admit_inbound_agent(
+            is_dm,
+            identity.dm_allowed(event.sender_id, agent_id, owner_id),
+            identity.is_channel_whitelisted_for_agent(event.channel_id, agent_id),
+        ) {
+            Ok(()) => admitted_agent_ids.push(agent_id.clone()),
+            Err(reason) => agent_drops.push((agent_id.clone(), reason)),
+        }
+    }
+    Ok(InboundPlan {
+        caller,
+        admitted_agent_ids,
+        agent_drops,
+    })
+}
+
+/// デバウンスフラッシュの分割 1 口。ゲートは送信者の生識別子列だけを渡す。
+pub fn plan_inbound_flush<I: InboundIdentity>(
+    identity: &I,
+    sender_ids: &[&str],
+    has_content: &[bool],
+    agent_ids: &[String],
+    owner_id: &str,
+) -> FlushPlan {
+    let levels: Vec<u8> = sender_ids
+        .iter()
+        .map(|id| {
+            identity
+                .resolve_caller(id, agent_ids, owner_id)
+                .trust_level()
+        })
+        .collect();
+    FlushPlan {
+        record_only_flags: plan_record_only_flags(&levels, has_content),
+        group_count: consecutive_trust_groups(&levels).len(),
+    }
 }
 
 /// 連続した同一 trust_level の並びを `(開始 index, 長さ)` に切る。
@@ -111,8 +258,8 @@ pub fn consecutive_trust_groups(levels: &[u8]) -> Vec<(usize, usize)> {
 /// グループごとに「内容のある最後」だけ run トリガー、他は record-only。
 ///
 /// `true` = 記録だけ（run しない）。現行フラッシュの `record_only_flags` と同一。
-/// `levels` と `has_content` の長さが違うときは空を返す（呼ばれ方を変えないための
-/// 防御ではなく、テストで長さ不一致を落とす）。
+/// `levels` と `has_content` の長さが違うときは panic する（呼ばれ方の契約。
+/// 長さ不一致はバグなので黙って空を返さない）。
 pub fn plan_record_only_flags(levels: &[u8], has_content: &[bool]) -> Vec<bool> {
     if levels.len() != has_content.len() {
         panic!(
@@ -296,5 +443,161 @@ mod tests {
         );
         assert!(admit_inbound_agent(true, true, false).is_ok());
         assert!(admit_inbound_agent(false, false, true).is_ok());
+    }
+
+    struct MockIdentity {
+        dm_any: bool,
+        dm: bool,
+        wl: bool,
+        caller: CallerIdentity,
+    }
+
+    impl InboundIdentity for MockIdentity {
+        fn resolve_caller(
+            &self,
+            _sender_id: &str,
+            _agent_ids: &[String],
+            _owner_id: &str,
+        ) -> CallerIdentity {
+            self.caller.clone()
+        }
+        fn dm_allowed_any(&self, _sender_id: &str, _agent_ids: &[String], _owner_id: &str) -> bool {
+            self.dm_any
+        }
+        fn dm_allowed(&self, _sender_id: &str, _agent_id: &str, _owner_id: &str) -> bool {
+            self.dm
+        }
+        fn is_channel_whitelisted_for_agent(&self, _channel_id: &str, _agent_id: &str) -> bool {
+            self.wl
+        }
+    }
+
+    fn event<'a>(sender: &'a str, channel: &'a str, guild: &'a str) -> NormalizedInboundEvent<'a> {
+        NormalizedInboundEvent {
+            sender_id: sender,
+            channel_id: channel,
+            guild_id: guild,
+        }
+    }
+
+    #[test]
+    fn plan_inbound_drops_untrusted_dm_at_message_gate() {
+        let id = MockIdentity {
+            dm_any: false,
+            dm: false,
+            wl: true,
+            caller: CallerIdentity::Agent,
+        };
+        assert_eq!(
+            plan_inbound(&id, &event("u1", "ch", ""), "owner", &["a".into()]).unwrap_err(),
+            InboundMessageDrop::DmNotTrusted
+        );
+    }
+
+    #[test]
+    fn plan_inbound_admits_and_resolves_caller() {
+        let id = MockIdentity {
+            dm_any: true,
+            dm: true,
+            wl: true,
+            caller: CallerIdentity::Owner,
+        };
+        let plan = plan_inbound(&id, &event("u1", "ch", "g1"), "owner", &["a".into()]).unwrap();
+        assert_eq!(plan.caller, CallerIdentity::Owner);
+        assert_eq!(plan.admitted_agent_ids, vec!["a".to_string()]);
+        assert!(plan.agent_drops.is_empty());
+    }
+
+    #[test]
+    fn plan_inbound_drops_untrusted_dm_per_agent() {
+        let id = MockIdentity {
+            dm_any: true,
+            dm: false,
+            wl: true,
+            caller: CallerIdentity::TrustedUser,
+        };
+        let plan = plan_inbound(&id, &event("u1", "ch", ""), "owner", &["a".into()]).unwrap();
+        assert_eq!(
+            plan.agent_drop("a"),
+            Some(InboundAgentDrop::DmNotTrustedForAgent)
+        );
+        assert!(plan.admitted_agent_ids.is_empty());
+    }
+
+    #[test]
+    fn plan_inbound_drops_non_whitelisted_channel() {
+        let id = MockIdentity {
+            dm_any: false,
+            dm: false,
+            wl: false,
+            caller: CallerIdentity::Agent,
+        };
+        let plan = plan_inbound(&id, &event("u1", "ch", "g1"), "owner", &["a".into()]).unwrap();
+        assert_eq!(
+            plan.agent_drop("a"),
+            Some(InboundAgentDrop::ChannelNotWhitelisted)
+        );
+        assert!(plan.admitted_agent_ids.is_empty());
+    }
+
+    #[test]
+    fn plan_inbound_flush_matches_record_only_flags() {
+        let id = MockIdentity {
+            dm_any: true,
+            dm: true,
+            wl: true,
+            caller: CallerIdentity::TrustedUser,
+        };
+        let flush = plan_inbound_flush(
+            &id,
+            &["u1", "u2", "u3"],
+            &[true, true, false],
+            &["a".into()],
+            "owner",
+        );
+        assert_eq!(
+            flush.record_only_flags,
+            plan_record_only_flags(&[1, 1, 1], &[true, true, false])
+        );
+        assert_eq!(flush.group_count, 1);
+    }
+
+    #[test]
+    fn delivery_effect_maps_engine_result() {
+        let text = EngineResult {
+            response: "hello".into(),
+            iterations: 1,
+            tool_calls_made: 2,
+            stopped_by_limit: false,
+            xml_fallback_parses: 0,
+        };
+        assert_eq!(
+            delivery_effect(Ok(text)),
+            DeliveryEffect::Text {
+                body: "hello".into(),
+                stopped_by_limit: false,
+                tool_calls_made: 2,
+            }
+        );
+        let no_reply = EngineResult {
+            response: "NO_REPLY".into(),
+            iterations: 1,
+            tool_calls_made: 0,
+            stopped_by_limit: false,
+            xml_fallback_parses: 0,
+        };
+        assert_eq!(delivery_effect(Ok(no_reply)), DeliveryEffect::NoReply);
+        let empty = EngineResult {
+            response: String::new(),
+            iterations: 0,
+            tool_calls_made: 0,
+            stopped_by_limit: false,
+            xml_fallback_parses: 0,
+        };
+        assert_eq!(delivery_effect(Ok(empty)), DeliveryEffect::Empty);
+        match delivery_effect(Err(anyhow::anyhow!("boom"))) {
+            DeliveryEffect::Failed { error } => assert!(error.contains("boom"), "{error}"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
     }
 }

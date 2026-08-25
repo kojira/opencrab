@@ -6,12 +6,13 @@
 ## セッション inbound（`session_inbound`）
 
 ゲートは正規化受信（本文・送信者の生識別子・対象 `session_id`）だけを渡す。
+誰か・権限は inbound 1 口が決める。返すのは配送 effect。
 
 | 関数 | 決めること |
 |---|---|
-| `admit_inbound_message` | DM 事前ゲート（落とす/通す） |
-| `admit_inbound_agent` | 個別 DM / チャンネル whitelist |
-| `consecutive_trust_groups` / `plan_record_only_flags` | trust_level 分割。本数と caller は現行同一（Q13） |
+| `plan_inbound` | caller 解決・DM 許可・ホワイトリスト。落とす/通す |
+| `plan_inbound_flush` | trust_level 分割。本数と caller は現行同一（Q13） |
+| `delivery_effect` | ターン結果 → 本文 / NO_REPLY / Empty / Failed |
 | `prepare_session_inbound` | `ensure_session` + inbound 記録（ロック前・#284） |
 | `start_session_turn` | 受信フック + 会話構築 + run |
 | `run_session_turn` | resume / 継続（フックなし） |
