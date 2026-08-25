@@ -269,6 +269,25 @@ impl opencrab_nostr::NostrAgentRunner for AppState {
     fn agent_workspace_root(&self, agent_id: &str) -> Option<std::path::PathBuf> {
         opencrab_core::workspace::resolve_agent_workspace(&self.workspace_base, agent_id).ok()
     }
+
+    fn list_session_watches_for_agent(
+        &self,
+        agent_id: &str,
+    ) -> anyhow::Result<Vec<opencrab_db::queries::SessionWatchRow>> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session_watches: DB ロックが poison"))?;
+        opencrab_db::queries::list_session_watches_for_agent(&conn, agent_id)
+    }
+
+    fn get_session_policy_json(&self, session_id: &str) -> anyhow::Result<Option<String>> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("policy_json: DB ロックが poison"))?;
+        opencrab_db::queries::get_session_policy_json(&conn, session_id)
+    }
 }
 
 /// 転記 1 通を **1 回** POST する（fire-and-forget）。

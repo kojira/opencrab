@@ -589,6 +589,24 @@
         "source": "opencrab_server::nostr_routes"
       },
       {
+        "activation": "cfg(feature = \"nostr\")",
+        "methods": [
+          "GET",
+          "POST"
+        ],
+        "path": "/api/agents/{id}/nostr/watches",
+        "source": "opencrab_server::nostr_routes"
+      },
+      {
+        "activation": "cfg(feature = \"nostr\")",
+        "methods": [
+          "DELETE",
+          "PUT"
+        ],
+        "path": "/api/agents/{id}/nostr/watches/{watch_id}",
+        "source": "opencrab_server::nostr_routes"
+      },
+      {
         "activation": "always",
         "methods": [
           "GET",

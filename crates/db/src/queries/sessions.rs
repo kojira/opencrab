@@ -89,6 +89,23 @@ pub fn count_sessions_for_agent(conn: &Connection, agent_id: &str) -> Result<i64
     )?)
 }
 
+/// 場ポリシー（`sessions.policy_json`）。`SessionRow` / 外形 API には載せない。
+///
+/// 行が無ければ `None`。DEFAULT `'{}'` は「未設定」＝現行挙動（RULINGS Q2）。
+/// 欠けたクラスをここで補完しない。
+pub fn get_session_policy_json(conn: &Connection, session_id: &str) -> Result<Option<String>> {
+    let result = conn.query_row(
+        "SELECT policy_json FROM sessions WHERE id = ?1",
+        params![session_id],
+        |row| row.get(0),
+    );
+    match result {
+        Ok(json) => Ok(Some(json)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
 pub fn get_session(conn: &Connection, session_id: &str) -> Result<Option<SessionRow>> {
     let result = conn.query_row(
         "SELECT id, mode, theme, phase, turn_number, status, participant_ids_json, facilitator_id, done_count, max_turns, metadata_json
@@ -202,4 +219,38 @@ pub fn insert_heartbeat_log(
         params![agent_id, decision, result_json, Utc::now().to_rfc3339()],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod policy_json_tests {
+    use super::*;
+
+    #[test]
+    fn new_session_policy_json_is_empty_object() {
+        let conn = crate::init_memory().unwrap();
+        insert_session(
+            &conn,
+            &SessionRow {
+                id: "nostr-a".into(),
+                mode: "nostr".into(),
+                theme: "Nostr".into(),
+                phase: "active".into(),
+                turn_number: 0,
+                status: "active".into(),
+                participant_ids_json: "[]".into(),
+                facilitator_id: None,
+                done_count: 0,
+                max_turns: None,
+                metadata_json: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            get_session_policy_json(&conn, "nostr-a")
+                .unwrap()
+                .as_deref(),
+            Some("{}")
+        );
+        assert_eq!(get_session_policy_json(&conn, "missing").unwrap(), None);
+    }
 }

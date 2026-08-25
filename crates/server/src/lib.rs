@@ -433,6 +433,8 @@ macro_rules! nostr_production_routes {
         $apply!($target, "/api/agents/{id}/nostr/start", post => api::nostr::start_nostr_gateway);
         $apply!($target, "/api/agents/{id}/nostr/stop", post => api::nostr::stop_nostr_gateway);
         $apply!($target, "/api/agents/{id}/nostr-relay", get => api::nostr_relay::get_nostr_relay_config, put => api::nostr_relay::update_nostr_relay_config);
+        $apply!($target, "/api/agents/{id}/nostr/watches", get => api::session_watches::list_session_watches, post => api::session_watches::create_session_watch);
+        $apply!($target, "/api/agents/{id}/nostr/watches/{watch_id}", put => api::session_watches::update_session_watch, delete => api::session_watches::delete_session_watch);
     };
 }
 

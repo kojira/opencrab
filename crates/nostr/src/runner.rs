@@ -143,4 +143,13 @@ pub trait NostrAgentRunner: AgentRuntime {
     /// 受信ループから同期で呼ぶ（DB も I/O も伴わない純粋なパス解決）。#551 と同じく
     /// 「`workspace_root` を持たない受信側ではなく runner に解決させる」判断に従う。
     fn agent_workspace_root(&self, agent_id: &str) -> Option<std::path::PathBuf>;
+
+    /// この agent の接続で実行する `session_watches`。読めなければ `Err`（空に化けさせない）。
+    fn list_session_watches_for_agent(
+        &self,
+        agent_id: &str,
+    ) -> anyhow::Result<Vec<opencrab_db::queries::SessionWatchRow>>;
+
+    /// `sessions.policy_json`。行が無ければ `Ok(None)`。読めなければ `Err`。
+    fn get_session_policy_json(&self, session_id: &str) -> anyhow::Result<Option<String>>;
 }

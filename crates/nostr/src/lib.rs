@@ -35,6 +35,7 @@ pub mod sink;
 #[cfg(test)]
 mod test_support;
 pub mod text_delivery;
+pub mod watch;
 
 pub use actions::NostrGatewayActions;
 pub use cli::{

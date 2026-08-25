@@ -45,8 +45,13 @@ use crate::config::NostrConfig;
 use crate::event::{parse_watch_line, NostrEvent};
 use crate::identity::NostrIdentityAdmin;
 use crate::runner::NostrAgentRunner;
-use crate::session::{nostr_session_id, NostrSessionRuntime};
+use crate::session::{nostr_session_id, NostrSessionRuntime, NOSTR_SESSION_PREFIX};
 use crate::sink::NostrResponder;
+use crate::watch::{
+    admit_watch_item, apply_watch_effect, classify_watch_event, evaluate_watch_item,
+    prepare_watch_inbound, recorded_watch_text, run_watch_turn, watch_bundle_prompt_suffix,
+    watch_prompt_suffix, watch_subscribe_config, TimelineBundle, WatchForward,
+};
 
 /// watch ループが握る self_pubkey の共有セル（identity 切替で更新可能）。
 type SelfPubkey = Arc<RwLock<String>>;
@@ -80,6 +85,15 @@ impl AllowSources {
             || self.owner.contains(author_key)
             || self.co_agents.contains(author_key)
             || self.trusted_users.contains(author_key)
+    }
+
+    fn as_watch_allow(&self) -> opencrab_actions::WatchAllowSets<'_> {
+        opencrab_actions::WatchAllowSets {
+            followees: &self.followees,
+            owner: &self.owner,
+            co_agents: &self.co_agents,
+            trusted_users: &self.trusted_users,
+        }
     }
 }
 
@@ -740,6 +754,487 @@ async fn run_nostr_loop<R: NostrAgentRunner + Clone>(
     }
 }
 
+/// 現行 `nostr-{agent}` ループと `session_watches` 購読を同じ gateway handle の下で走らせる。
+///
+/// 既定場に watch 行があるときは現行ループを起動しない（その場は新機構）。
+/// watch が 0 なら現行ループだけ（挙動不変）。
+#[allow(clippy::too_many_arguments)]
+async fn run_agent_inbound_loops<R: NostrAgentRunner + Clone + 'static>(
+    runner: R,
+    cli: NostaroCli,
+    agent_id: String,
+    config: NostrConfig,
+    self_pubkey: SelfPubkey,
+    allow: AllowGate,
+    admin: Arc<dyn NostrIdentityAdmin>,
+    runtime: Arc<NostrSessionRuntime>,
+    timed_fire_router: Arc<opencrab_actions::TimedFireRouter>,
+    watches: Vec<opencrab_db::queries::SessionWatchRow>,
+    skip_default_loop: bool,
+) {
+    let mut set = tokio::task::JoinSet::new();
+    if !skip_default_loop {
+        let runner_c = runner.clone();
+        let cli_c = cli.clone();
+        let agent = agent_id.clone();
+        let config_c = config.clone();
+        let self_pk = self_pubkey.clone();
+        let allow_c = allow.clone();
+        let admin_c = admin.clone();
+        let runtime_c = runtime.clone();
+        let router = timed_fire_router.clone();
+        set.spawn(async move {
+            run_nostr_loop(
+                runner_c, cli_c, agent, config_c, self_pk, allow_c, admin_c, runtime_c, router,
+            )
+            .await;
+        });
+    }
+    for watch in watches {
+        let runner_c = runner.clone();
+        let cli_c = cli.clone();
+        let agent = agent_id.clone();
+        let relays = config.effective_relays();
+        let self_pk = self_pubkey.clone();
+        let allow_c = allow.clone();
+        let admin_c = admin.clone();
+        let runtime_c = runtime.clone();
+        set.spawn(async move {
+            run_session_watch_loop(
+                runner_c, cli_c, agent, relays, watch, self_pk, allow_c, admin_c, runtime_c,
+            )
+            .await;
+        });
+    }
+    while set.join_next().await.is_some() {}
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_session_watch_loop<R: NostrAgentRunner + Clone>(
+    runner: R,
+    cli: NostaroCli,
+    agent_id: String,
+    relays: Vec<String>,
+    watch: opencrab_db::queries::SessionWatchRow,
+    self_pubkey: SelfPubkey,
+    allow: AllowGate,
+    admin: Arc<dyn NostrIdentityAdmin>,
+    runtime: Arc<NostrSessionRuntime>,
+) {
+    let dropped = Arc::new(AtomicU64::new(0));
+    let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_RESPONSES));
+    let queues = Arc::new(SessionQueues::new(SESSION_QUEUE_CAPACITY));
+    let bundle = Arc::new(Mutex::new(TimelineBundle::default()));
+    let debounce = Arc::new(Mutex::new(Vec::<NostrEvent>::new()));
+    loop {
+        match run_session_watch_once(
+            &runner,
+            &cli,
+            &agent_id,
+            &relays,
+            &watch,
+            &self_pubkey,
+            &allow,
+            &dropped,
+            &admin,
+            &runtime,
+            &permits,
+            &queues,
+            &bundle,
+            &debounce,
+        )
+        .await
+        {
+            Ok(()) => warn!(
+                agent_id,
+                watch_id = watch.id,
+                "session watch exited; restarting after backoff"
+            ),
+            Err(e) => error!(
+                agent_id,
+                watch_id = watch.id,
+                error = %e,
+                "session watch error; restarting after backoff"
+            ),
+        }
+        tokio::time::sleep(WATCH_RESTART_DELAY).await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_session_watch_once<R: NostrAgentRunner + Clone>(
+    runner: &R,
+    cli: &NostaroCli,
+    agent_id: &str,
+    relays: &[String],
+    watch: &opencrab_db::queries::SessionWatchRow,
+    self_pubkey: &SelfPubkey,
+    allow: &AllowGate,
+    dropped: &Arc<AtomicU64>,
+    admin: &Arc<dyn NostrIdentityAdmin>,
+    runtime: &Arc<NostrSessionRuntime>,
+    permits: &Arc<Semaphore>,
+    queues: &Arc<SessionQueues>,
+    bundle: &Arc<Mutex<TimelineBundle>>,
+    debounce: &Arc<Mutex<Vec<NostrEvent>>>,
+) -> anyhow::Result<()> {
+    let config = watch_subscribe_config(watch, relays.to_vec())?;
+    let interval = Duration::from_secs(watch.interval_secs as u64);
+    let mut cmd = cli.build_watch_command(agent_id, &config)?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("failed to spawn `nostaro watch` for session_watches: {e}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("nostaro watch produced no stdout handle"))?;
+    let mut lines = BufReader::new(stdout).lines();
+    let mut seen = SeenEvents::new(512);
+    let mut refresh = tokio::time::interval_at(
+        tokio::time::Instant::now() + ALLOW_REFRESH_INTERVAL,
+        ALLOW_REFRESH_INTERVAL,
+    );
+    refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut flush = tokio::time::interval(interval);
+    flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    info!(
+        agent_id,
+        session_id = %watch.session_id,
+        watch_id = watch.id,
+        interval_secs = watch.interval_secs,
+        "session watch subscribed"
+    );
+    loop {
+        tokio::select! {
+            biased;
+            line = lines.next_line() => {
+                let Some(line) = line? else { break };
+                let Some(event) = parse_watch_line(&line) else { continue };
+                if *self_pubkey.read().unwrap() == event.pubkey {
+                    continue;
+                }
+                if !seen.check_and_insert(&event.id) {
+                    continue;
+                }
+                handle_watch_event(
+                    runner, cli, agent_id, watch, &config, self_pubkey, allow, dropped,
+                    admin, runtime, permits, queues, bundle, debounce, event,
+                )
+                .await;
+            }
+            _ = flush.tick() => {
+                flush_watch_buffers(
+                    runner, cli, agent_id, watch, allow, admin, runtime, permits, queues,
+                    bundle, debounce,
+                )
+                .await;
+            }
+            _ = refresh.tick() => {
+                spawn_allow_refresh(runner.clone(), cli.clone(), agent_id.to_string(), allow.clone());
+            }
+        }
+    }
+    let _ = child.wait().await;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_watch_event<R: NostrAgentRunner>(
+    runner: &R,
+    cli: &NostaroCli,
+    agent_id: &str,
+    watch: &opencrab_db::queries::SessionWatchRow,
+    config: &NostrConfig,
+    self_pubkey: &SelfPubkey,
+    allow: &AllowGate,
+    dropped: &Arc<AtomicU64>,
+    admin: &Arc<dyn NostrIdentityAdmin>,
+    runtime: &Arc<NostrSessionRuntime>,
+    permits: &Arc<Semaphore>,
+    queues: &Arc<SessionQueues>,
+    bundle: &Arc<Mutex<TimelineBundle>>,
+    debounce: &Arc<Mutex<Vec<NostrEvent>>>,
+    event: NostrEvent,
+) {
+    let self_pk = self_pubkey.read().unwrap().clone();
+    match classify_watch_event(&event, &self_pk, config.watches_beyond_self_mentions()) {
+        WatchForward::Discard => {}
+        WatchForward::Bundle { .. } => {
+            bundle.lock().unwrap().push(event);
+        }
+        WatchForward::Immediate { label } => {
+            let sources = allow.read().unwrap();
+            let allow_sets = sources.as_watch_allow();
+            match admit_watch_item(
+                runner,
+                agent_id,
+                &watch.session_id,
+                &event.pubkey,
+                &allow_sets,
+            ) {
+                Err(opencrab_actions::WatchInboundDrop::NotAllowed) => {
+                    dropped.fetch_add(1, AtomicOrdering::Relaxed);
+                }
+                Err(_) => {
+                    dropped.fetch_add(1, AtomicOrdering::Relaxed);
+                }
+                Ok(caller) => {
+                    drop(sources);
+                    if !prepare_and_maybe_relay(runner, agent_id, &watch.session_id, &event) {
+                        return;
+                    }
+                    let policy = match runner.get_session_policy_json(&watch.session_id) {
+                        Ok(Some(p)) => p,
+                        Ok(None) => {
+                            error!(session_id = %watch.session_id, "policy_json を読めない（session が無い）");
+                            return;
+                        }
+                        Err(e) => {
+                            error!(session_id = %watch.session_id, error = %e, "policy_json 読み失敗");
+                            return;
+                        }
+                    };
+                    let sources = allow.read().unwrap();
+                    let decision = match evaluate_watch_item(
+                        &policy,
+                        &event.pubkey,
+                        &caller,
+                        label,
+                        watch.interval_secs as u64,
+                        &sources.owner,
+                        &sources.followees,
+                    ) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            error!(error = %e, "watch policy 判定失敗");
+                            return;
+                        }
+                    };
+                    drop(sources);
+                    match decision {
+                        opencrab_actions::WatchTurnDecision::Immediate => {
+                            enqueue_watch_turn(
+                                runner,
+                                cli,
+                                agent_id,
+                                &watch.session_id,
+                                admin,
+                                runtime,
+                                permits,
+                                queues,
+                                event,
+                                label,
+                                caller,
+                            );
+                        }
+                        opencrab_actions::WatchTurnDecision::Debounce { .. } => {
+                            debounce.lock().unwrap().push(event);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn flush_watch_buffers<R: NostrAgentRunner>(
+    runner: &R,
+    cli: &NostaroCli,
+    agent_id: &str,
+    watch: &opencrab_db::queries::SessionWatchRow,
+    allow: &AllowGate,
+    admin: &Arc<dyn NostrIdentityAdmin>,
+    runtime: &Arc<NostrSessionRuntime>,
+    permits: &Arc<Semaphore>,
+    queues: &Arc<SessionQueues>,
+    bundle: &Arc<Mutex<TimelineBundle>>,
+    debounce: &Arc<Mutex<Vec<NostrEvent>>>,
+) {
+    let bundled = bundle.lock().unwrap().take();
+    if !bundled.is_empty() {
+        flush_event_group(
+            runner,
+            cli,
+            agent_id,
+            &watch.session_id,
+            allow,
+            admin,
+            runtime,
+            permits,
+            queues,
+            bundled,
+            true,
+        );
+    }
+    let held = std::mem::take(&mut *debounce.lock().unwrap());
+    if !held.is_empty() {
+        flush_event_group(
+            runner,
+            cli,
+            agent_id,
+            &watch.session_id,
+            allow,
+            admin,
+            runtime,
+            permits,
+            queues,
+            held,
+            false,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flush_event_group<R: NostrAgentRunner>(
+    runner: &R,
+    cli: &NostaroCli,
+    agent_id: &str,
+    session_id: &str,
+    allow: &AllowGate,
+    admin: &Arc<dyn NostrIdentityAdmin>,
+    runtime: &Arc<NostrSessionRuntime>,
+    permits: &Arc<Semaphore>,
+    queues: &Arc<SessionQueues>,
+    events: Vec<NostrEvent>,
+    timeline: bool,
+) {
+    let sources = allow.read().unwrap();
+    let allow_sets = sources.as_watch_allow();
+    let mut kept = Vec::new();
+    for event in events {
+        if admit_watch_item(runner, agent_id, session_id, &event.pubkey, &allow_sets).is_ok()
+            && prepare_and_maybe_relay(runner, agent_id, session_id, &event)
+        {
+            kept.push(event);
+        }
+    }
+    drop(sources);
+    let Some(last) = kept.last().cloned() else {
+        return;
+    };
+    let caller = runner.resolve_nostr_caller(agent_id, &last.pubkey);
+    let label = if timeline {
+        "タイムライン"
+    } else {
+        crate::watch::watch_kind_label(&last)
+    };
+    let suffix = if timeline {
+        watch_bundle_prompt_suffix(&kept)
+    } else {
+        watch_prompt_suffix(&last, label)
+    };
+    enqueue_watch_turn_with_suffix(
+        runner, cli, agent_id, session_id, admin, runtime, permits, queues, last, caller, suffix,
+    );
+}
+
+fn prepare_and_maybe_relay<R: NostrAgentRunner>(
+    runner: &R,
+    agent_id: &str,
+    session_id: &str,
+    event: &NostrEvent,
+) -> bool {
+    let recorded = recorded_watch_text(runner, agent_id, session_id, event);
+    let ok = prepare_watch_inbound(runner, session_id, agent_id, event, &recorded);
+    if !ok {
+        tracing::error!(
+            session_id,
+            agent_id,
+            "failed to persist a watch inbound; skip turn"
+        );
+        return false;
+    }
+    if let Some(target) = runner.resolve_nostr_relay_target(agent_id) {
+        let relay_text = format!(
+            "[Nostr / {kind}] {author}\n{body}",
+            kind = event.inbound_kind_label(),
+            author = event.author_label(),
+            body = event.inbound_text(),
+        );
+        runner.relay_inbound_notification(&target, relay_text);
+    }
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn enqueue_watch_turn<R: NostrAgentRunner>(
+    runner: &R,
+    cli: &NostaroCli,
+    agent_id: &str,
+    session_id: &str,
+    admin: &Arc<dyn NostrIdentityAdmin>,
+    runtime: &Arc<NostrSessionRuntime>,
+    permits: &Arc<Semaphore>,
+    queues: &Arc<SessionQueues>,
+    event: NostrEvent,
+    label: &str,
+    caller: opencrab_actions::CallerIdentity,
+) {
+    let suffix = watch_prompt_suffix(&event, label);
+    enqueue_watch_turn_with_suffix(
+        runner, cli, agent_id, session_id, admin, runtime, permits, queues, event, caller, suffix,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn enqueue_watch_turn_with_suffix<R: NostrAgentRunner>(
+    runner: &R,
+    cli: &NostaroCli,
+    agent_id: &str,
+    session_id: &str,
+    admin: &Arc<dyn NostrIdentityAdmin>,
+    runtime: &Arc<NostrSessionRuntime>,
+    permits: &Arc<Semaphore>,
+    queues: &Arc<SessionQueues>,
+    event: NostrEvent,
+    caller: opencrab_actions::CallerIdentity,
+    prompt_suffix: String,
+) {
+    let responder_runner = runner.clone();
+    let cli = cli.clone();
+    let admin = admin.clone();
+    let runtime = runtime.clone();
+    let agent = agent_id.to_string();
+    let sid = session_id.to_string();
+    let reply_target = event.reply_target().to_string();
+    let event_id = event.id.clone();
+    let author_label = event.author_label();
+    let inbound_text = recorded_watch_text(runner, agent_id, session_id, &event);
+    let job: ResponseJob = Box::pin(async move {
+        let inbound = opencrab_actions::NormalizedInbound {
+            session_id: &sid,
+            agent_id: &agent,
+            sender_id: &event.pubkey,
+            sender_name: &author_label,
+            avatar_url: None,
+            channel_id: None,
+            pubkey: Some(&event.pubkey),
+            text: &inbound_text,
+            image_urls: &[],
+            external_id: &event_id,
+        };
+        let effect = runtime
+            .run_serialized(&sid, async {
+                run_watch_turn(
+                    &responder_runner,
+                    &cli,
+                    &admin,
+                    &runtime,
+                    &inbound,
+                    caller,
+                    &reply_target,
+                    &prompt_suffix,
+                    Some(&event_id),
+                )
+                .await
+            })
+            .await;
+        apply_watch_effect(&responder_runner, &agent, &sid, &reply_target, &effect);
+    });
+    queues.enqueue(agent_id, session_id, permits, job);
+}
+
 /// #698: 元栓の許可集合を構築する。フォロイー（relay 由来 / `fetch_following`）＋ owner /
 /// co_agent / trusted_users（DB 由来 / `nostr_gate_allow_keys`）を [`follow_key`] で正規化して
 /// 1 つの [`AllowSources`] に合成する。
@@ -1317,6 +1812,22 @@ async fn spawn_agent_gateway<R: NostrAgentRunner>(
         }
     }
 
+    let watches = runner
+        .list_session_watches_for_agent(agent_id)
+        .map_err(|e| anyhow::anyhow!("session_watches を読めない: {e:#}"))?;
+    let relays = config.effective_relays();
+    for w in &watches {
+        if !w.session_id.starts_with(NOSTR_SESSION_PREFIX) {
+            anyhow::bail!(
+                "session_watches.id={} の session_id が nostr- 系ではない（Q-B）",
+                w.id
+            );
+        }
+        watch_subscribe_config(w, relays.clone())?;
+    }
+    let default_sid = nostr_session_id(agent_id);
+    let skip_default_loop = watches.iter().any(|w| w.session_id == default_sid);
+
     let runner_c = runner.clone();
     let cli_c = cli.clone();
     let agent = agent_id.to_string();
@@ -1336,7 +1847,7 @@ async fn spawn_agent_gateway<R: NostrAgentRunner>(
         .insert(agent_id.to_string(), admin.clone());
     let runtime_c = runtime.clone();
     let handle = tokio::spawn(async move {
-        run_nostr_loop(
+        run_agent_inbound_loops(
             runner_c,
             cli_c,
             agent,
@@ -1346,6 +1857,8 @@ async fn spawn_agent_gateway<R: NostrAgentRunner>(
             admin,
             runtime_c,
             timed_fire_router,
+            watches,
+            skip_default_loop,
         )
         .await;
     });
@@ -1821,6 +2334,17 @@ mod tests {
 
         fn agent_workspace_root(&self, _agent_id: &str) -> Option<std::path::PathBuf> {
             self.workspace_root.clone()
+        }
+
+        fn list_session_watches_for_agent(
+            &self,
+            _agent_id: &str,
+        ) -> anyhow::Result<Vec<opencrab_db::queries::SessionWatchRow>> {
+            Ok(Vec::new())
+        }
+
+        fn get_session_policy_json(&self, _session_id: &str) -> anyhow::Result<Option<String>> {
+            Ok(Some("{}".to_string()))
         }
     }
 

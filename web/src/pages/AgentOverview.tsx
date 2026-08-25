@@ -19,8 +19,12 @@ import {
   generateNostrKey,
   getNostrRelayConfig,
   updateNostrRelayConfig,
+  listSessionWatches,
+  createSessionWatch,
+  deleteSessionWatch,
   type NostrConfigDto,
   type NostrRelayConfigDto,
+  type SessionWatchDto,
 } from '../api/nostr';
 import {
   listMcpServers,
@@ -841,6 +845,12 @@ function NostrSection({ agentId }: { agentId: string }) {
   const [enabled, setEnabled] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [watches, setWatches] = useState<SessionWatchDto[]>([]);
+  const [watchSessionId, setWatchSessionId] = useState('');
+  const [watchInterval, setWatchInterval] = useState('');
+  const [watchAuthors, setWatchAuthors] = useState('');
+  const [watchKeywords, setWatchKeywords] = useState('');
+  const [watchKinds, setWatchKinds] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -853,6 +863,13 @@ function NostrSection({ agentId }: { agentId: string }) {
       setEnabled(c.enabled);
     } catch {
       setCfg(null);
+      return;
+    }
+    try {
+      const listed = await listSessionWatches(agentId);
+      setWatches(listed.watches);
+    } catch (e) {
+      setMessage(String(e));
     }
   }, [agentId]);
 
@@ -920,6 +937,56 @@ function NostrSection({ agentId }: { agentId: string }) {
       setVanityPrefix('');
       setSecretKey('');
       setMessage(t('agentDetail.nostrGenerated', { npub: res.npub }));
+      await load();
+    } catch (e) {
+      setMessage(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const addWatch = async () => {
+    const interval = Number.parseInt(watchInterval.trim(), 10);
+    if (watchSessionId.trim() === '') {
+      setMessage(t('agentDetail.nostrWatchSessionRequired'));
+      return;
+    }
+    if (!Number.isInteger(interval) || interval <= 0) {
+      setMessage(t('agentDetail.nostrWatchIntervalRequired'));
+      return;
+    }
+    setSaving(true);
+    setMessage(null);
+    try {
+      await createSessionWatch(agentId, {
+        session_id: watchSessionId.trim(),
+        interval_secs: interval,
+        filter: {
+          authors: splitList(watchAuthors),
+          keywords: splitList(watchKeywords),
+          kinds: splitList(watchKinds)
+            .map((k) => parseInt(k, 10))
+            .filter((n) => !Number.isNaN(n)),
+        },
+      });
+      setWatchSessionId('');
+      setWatchInterval('');
+      setWatchAuthors('');
+      setWatchKeywords('');
+      setWatchKinds('');
+      await load();
+    } catch (e) {
+      setMessage(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const removeWatch = async (watchId: number) => {
+    setSaving(true);
+    setMessage(null);
+    try {
+      await deleteSessionWatch(agentId, watchId);
       await load();
     } catch (e) {
       setMessage(String(e));
@@ -1020,6 +1087,81 @@ function NostrSection({ agentId }: { agentId: string }) {
           </div>
         </div>
         <p className="text-body-sm text-on-surface-variant">{t('agentDetail.nostrFilterHint')}</p>
+        <div className="border-t border-outline-variant/40 pt-3 space-y-2">
+          <h3 className="text-label-lg">{t('agentDetail.nostrWatches')}</h3>
+          <p className="text-body-sm text-on-surface-variant">{t('agentDetail.nostrWatchesDesc')}</p>
+          {watches.length > 0 && (
+            <ul className="space-y-1 text-body-sm">
+              {watches.map((w) => (
+                <li key={w.id} className="flex flex-wrap items-center gap-2">
+                  <span>
+                    {w.session_id} / {w.interval_secs}s
+                  </span>
+                  <button
+                    type="button"
+                    className="btn-text text-error"
+                    disabled={saving}
+                    onClick={() => void removeWatch(w.id)}
+                  >
+                    {t('common.delete')}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="text-label-lg text-on-surface-variant block mb-1">
+                {t('agentDetail.nostrWatchSession')}
+              </label>
+              <input
+                className="input w-full"
+                placeholder={`nostr-${agentId}`}
+                value={watchSessionId}
+                onChange={(e) => setWatchSessionId(e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="text-label-lg text-on-surface-variant block mb-1">
+                {t('agentDetail.nostrWatchInterval')}
+              </label>
+              <input
+                className="input w-full"
+                inputMode="numeric"
+                value={watchInterval}
+                onChange={(e) => setWatchInterval(e.target.value)}
+              />
+            </div>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <input
+              className="input w-full"
+              placeholder={t('agentDetail.nostrAuthors')}
+              value={watchAuthors}
+              onChange={(e) => setWatchAuthors(e.target.value)}
+            />
+            <input
+              className="input w-full"
+              placeholder={t('agentDetail.nostrKeywords')}
+              value={watchKeywords}
+              onChange={(e) => setWatchKeywords(e.target.value)}
+            />
+            <input
+              className="input w-full"
+              placeholder={t('agentDetail.nostrKinds')}
+              value={watchKinds}
+              onChange={(e) => setWatchKinds(e.target.value)}
+            />
+          </div>
+          <button
+            type="button"
+            className="btn-outlined"
+            disabled={saving}
+            onClick={() => void addWatch()}
+          >
+            {t('agentDetail.nostrWatchAdd')}
+          </button>
+        </div>
         <div className="flex flex-wrap gap-2">
           <button
             type="button"

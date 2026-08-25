@@ -28,6 +28,7 @@ pub mod workspace;
 pub mod channel_config;
 pub mod run_request;
 pub mod session_inbound;
+pub mod session_watch_policy;
 
 pub use a2ui::{send_ui, send_ui_definition};
 pub use agent_gateway::{
@@ -53,6 +54,12 @@ pub use session_inbound::{
     PrepareSessionInboundError, SessionInboundWrite,
 };
 pub use session_runtime::{SessionLocks, SessionRuntime};
+pub use session_watch_policy::{
+    caller_policy_key, decide_watch_turn, parse_session_watch_policy, plan_watch_inbound,
+    watch_author_standing, ClassPolicy, SessionPolicyError, SessionWatchPolicy, WatchAllowSets,
+    WatchAuthorStanding, WatchInboundDrop, WatchTurnDecision, AGREED_IMMEDIATE_KINDS,
+    POLICY_CLASS_KEYS, WATCH_KIND_LABELS,
+};
 pub use subtask::{
     cancel_subtask, default_non_dispatch_tools, dispatch_settled, steer_subtask, CancelOutcome,
     NoopCompletionSink, SettleKind, SharedExecutor, SpawnedSubtask, SteerOutcome,

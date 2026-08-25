@@ -606,6 +606,17 @@ mod tests {
             Vec::new()
         }
 
+        fn list_session_watches_for_agent(
+            &self,
+            _agent_id: &str,
+        ) -> anyhow::Result<Vec<opencrab_db::queries::SessionWatchRow>> {
+            Ok(Vec::new())
+        }
+
+        fn get_session_policy_json(&self, _session_id: &str) -> anyhow::Result<Option<String>> {
+            Ok(Some("{}".to_string()))
+        }
+
         fn get_nostr_config(&self, _agent_id: &str) -> Option<AgentNostrConfigRow> {
             None
         }

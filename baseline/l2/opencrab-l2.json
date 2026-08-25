@@ -21,15 +21,15 @@
   "coverage": {
     "claim": "Only nonempty observations satisfying their facet predicate are fixed by this artifact; every uncollected or not_applicable entry is an explicit non-claim.",
     "http_facets": {
-      "effects_observed": 45,
+      "effects_observed": 46,
       "effects_uncollected": 0,
       "not_applicable": 3,
       "uncollected": 34,
-      "valid_rejections": 34
+      "valid_rejections": 36
     },
     "http_observed_status_classes": {
-      "2xx": 136,
-      "4xx": 39,
+      "2xx": 139,
+      "4xx": 44,
       "5xx": 4
     },
     "tool_effects_observed": 50,
@@ -4908,6 +4908,345 @@
           "status": 200
         },
         "selection": "normal_or_local_precondition_branch"
+      },
+      {
+        "effect": null,
+        "name": "get___api_agents_id_nostr_watches__normal",
+        "request": {
+          "body": null,
+          "method": "GET",
+          "uri": "/api/agents/baseline-agent/nostr/watches"
+        },
+        "response": {
+          "body": {
+            "watches": []
+          },
+          "headers": [
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "access-control-expose-headers",
+              "value": "*"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "vary",
+              "value": "origin, access-control-request-method, access-control-request-headers"
+            }
+          ],
+          "status": 200
+        },
+        "selection": "normal_or_local_precondition_branch"
+      },
+      {
+        "name": "get___api_agents_id_nostr_watches__reject_or_absent",
+        "request": {
+          "body_utf8": null,
+          "method": "GET",
+          "uri": "/api/agents/baseline-missing/nostr/watches"
+        },
+        "response": {
+          "body": {
+            "watches": []
+          },
+          "headers": [
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "access-control-expose-headers",
+              "value": "*"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "vary",
+              "value": "origin, access-control-request-method, access-control-request-headers"
+            }
+          ],
+          "status": 200
+        },
+        "selection": "resource_absence_or_empty_state"
+      },
+      {
+        "effect": {
+          "after": {
+            "body": {
+              "watches": [
+                {
+                  "agent_id": "baseline-agent",
+                  "created_at": "<timestamp>",
+                  "filter": {},
+                  "id": 1,
+                  "interval_secs": 60,
+                  "session_id": "nostr-baseline-agent"
+                }
+              ]
+            },
+            "headers": [
+              {
+                "name": "access-control-allow-origin",
+                "value": "*"
+              },
+              {
+                "name": "access-control-expose-headers",
+                "value": "*"
+              },
+              {
+                "name": "content-type",
+                "value": "application/json"
+              },
+              {
+                "name": "vary",
+                "value": "origin, access-control-request-method, access-control-request-headers"
+              }
+            ],
+            "status": 200
+          },
+          "before": {
+            "body": {
+              "watches": []
+            },
+            "headers": [
+              {
+                "name": "access-control-allow-origin",
+                "value": "*"
+              },
+              {
+                "name": "access-control-expose-headers",
+                "value": "*"
+              },
+              {
+                "name": "content-type",
+                "value": "application/json"
+              },
+              {
+                "name": "vary",
+                "value": "origin, access-control-request-method, access-control-request-headers"
+              }
+            ],
+            "status": 200
+          },
+          "observer": {
+            "body": null,
+            "db_query": null,
+            "method": "GET",
+            "path": "/api/agents/{id}/nostr/watches"
+          },
+          "status": "observed"
+        },
+        "name": "post___api_agents_id_nostr_watches__normal",
+        "request": {
+          "body": {
+            "filter": {},
+            "interval_secs": 60,
+            "session_id": "nostr-baseline-agent"
+          },
+          "method": "POST",
+          "uri": "/api/agents/baseline-agent/nostr/watches"
+        },
+        "response": {
+          "body": {
+            "created": true,
+            "watch": {
+              "agent_id": "baseline-agent",
+              "created_at": "<timestamp>",
+              "filter": {},
+              "id": 1,
+              "interval_secs": 60,
+              "session_id": "nostr-baseline-agent"
+            }
+          },
+          "headers": [
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "access-control-expose-headers",
+              "value": "*"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "vary",
+              "value": "origin, access-control-request-method, access-control-request-headers"
+            }
+          ],
+          "status": 200
+        },
+        "selection": "normal_or_local_precondition_branch"
+      },
+      {
+        "name": "post___api_agents_id_nostr_watches__reject_or_absent",
+        "request": {
+          "body_utf8": "{",
+          "method": "POST",
+          "uri": "/api/agents/baseline-agent/nostr/watches"
+        },
+        "response": {
+          "body": "Failed to parse the request body as JSON: EOF while parsing an object at line 1 column 1",
+          "headers": [
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "access-control-expose-headers",
+              "value": "*"
+            },
+            {
+              "name": "content-type",
+              "value": "text/plain; charset=utf-8"
+            },
+            {
+              "name": "vary",
+              "value": "origin, access-control-request-method, access-control-request-headers"
+            }
+          ],
+          "status": 400
+        },
+        "selection": "malformed_json_rejection"
+      },
+      {
+        "effect": null,
+        "name": "delete___api_agents_id_nostr_watches_watch_id__normal",
+        "request": {
+          "body": null,
+          "method": "DELETE",
+          "uri": "/api/agents/baseline-agent/nostr/watches/1"
+        },
+        "response": {
+          "body": "watch が無い",
+          "headers": [
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "access-control-expose-headers",
+              "value": "*"
+            },
+            {
+              "name": "content-type",
+              "value": "text/plain; charset=utf-8"
+            },
+            {
+              "name": "vary",
+              "value": "origin, access-control-request-method, access-control-request-headers"
+            }
+          ],
+          "status": 404
+        },
+        "selection": "normal_or_local_precondition_branch"
+      },
+      {
+        "name": "delete___api_agents_id_nostr_watches_watch_id__reject_or_absent",
+        "request": {
+          "body_utf8": null,
+          "method": "DELETE",
+          "uri": "/api/agents/baseline-missing/nostr/watches/999999"
+        },
+        "response": {
+          "body": "watch が無い",
+          "headers": [
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "access-control-expose-headers",
+              "value": "*"
+            },
+            {
+              "name": "content-type",
+              "value": "text/plain; charset=utf-8"
+            },
+            {
+              "name": "vary",
+              "value": "origin, access-control-request-method, access-control-request-headers"
+            }
+          ],
+          "status": 404
+        },
+        "selection": "resource_absence_or_empty_state"
+      },
+      {
+        "effect": null,
+        "name": "put___api_agents_id_nostr_watches_watch_id__normal",
+        "request": {
+          "body": {
+            "filter": {},
+            "interval_secs": 120,
+            "session_id": "nostr-baseline-agent"
+          },
+          "method": "PUT",
+          "uri": "/api/agents/baseline-agent/nostr/watches/1"
+        },
+        "response": {
+          "body": "watch が無い",
+          "headers": [
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "access-control-expose-headers",
+              "value": "*"
+            },
+            {
+              "name": "content-type",
+              "value": "text/plain; charset=utf-8"
+            },
+            {
+              "name": "vary",
+              "value": "origin, access-control-request-method, access-control-request-headers"
+            }
+          ],
+          "status": 404
+        },
+        "selection": "normal_or_local_precondition_branch"
+      },
+      {
+        "name": "put___api_agents_id_nostr_watches_watch_id__reject_or_absent",
+        "request": {
+          "body_utf8": "{",
+          "method": "PUT",
+          "uri": "/api/agents/baseline-agent/nostr/watches/1"
+        },
+        "response": {
+          "body": "Failed to parse the request body as JSON: EOF while parsing an object at line 1 column 1",
+          "headers": [
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "access-control-expose-headers",
+              "value": "*"
+            },
+            {
+              "name": "content-type",
+              "value": "text/plain; charset=utf-8"
+            },
+            {
+              "name": "vary",
+              "value": "origin, access-control-request-method, access-control-request-headers"
+            }
+          ],
+          "status": 400
+        },
+        "selection": "malformed_json_rejection"
       },
       {
         "effect": null,
@@ -10225,7 +10564,7 @@
         "selection": "resource_absence_or_empty_state"
       }
     ],
-    "source_route_count": 80,
+    "source_route_count": 82,
     "uncollected": [
       {
         "branch": "normal",
@@ -10728,6 +11067,10 @@
           "method": "GET",
           "path": "/api/agents/{id}/nostr"
         },
+        "DELETE /api/agents/{id}/nostr/watches/{watch_id}": {
+          "method": "GET",
+          "path": "/api/agents/{id}/nostr/watches"
+        },
         "DELETE /api/agents/{id}/soul/presets/{preset_id}": {
           "method": "GET",
           "path": "/api/agents/{id}/soul/presets"
@@ -10783,6 +11126,10 @@
         "POST /api/agents/{id}/nostr/stop": {
           "method": "GET",
           "path": "/api/agents/{id}/nostr"
+        },
+        "POST /api/agents/{id}/nostr/watches": {
+          "method": "GET",
+          "path": "/api/agents/{id}/nostr/watches"
         },
         "POST /api/agents/{id}/schedules": {
           "method": "GET",
@@ -10855,6 +11202,10 @@
           "method": "GET",
           "path": "/api/agents/{id}/nostr-relay"
         },
+        "PUT /api/agents/{id}/nostr/watches/{watch_id}": {
+          "method": "GET",
+          "path": "/api/agents/{id}/nostr/watches"
+        },
         "PUT /api/agents/{id}/skills/{skill_id}": {
           "method": "GET",
           "path": "/api/agents/{id}/skills"
@@ -10912,6 +11263,11 @@
         "POST /api/agents/{id}/memory/search": {
           "limit": 10,
           "query": "baseline"
+        },
+        "POST /api/agents/{id}/nostr/watches": {
+          "filter": {},
+          "interval_secs": 60,
+          "session_id": "nostr-baseline-agent"
         },
         "POST /api/agents/{id}/schedules": {
           "cron_expr": "0 1 * * *",
@@ -10998,6 +11354,11 @@
         },
         "PUT /api/agents/{id}/nostr-relay": {
           "enabled": false
+        },
+        "PUT /api/agents/{id}/nostr/watches/{watch_id}": {
+          "filter": {},
+          "interval_secs": 120,
+          "session_id": "nostr-baseline-agent"
         },
         "PUT /api/agents/{id}/skills/{skill_id}": {
           "description": "baseline",
@@ -11110,6 +11471,10 @@
         "user_id": {
           "missing": "baseline-missing",
           "normal": "baseline-trusted-row"
+        },
+        "watch_id": {
+          "missing": "999999",
+          "normal": "1"
         }
       },
       "query_suffixes": {
