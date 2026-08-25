@@ -639,4 +639,141 @@ mod tests {
             "送信側が全滅したらストリームは終了する（keep-alive で居座らない）"
         );
     }
+
+    /// 載せ替え 4-b の挙動固定（移設前に green → 移設後も同一アサート）。
+    ///
+    /// HTTP `POST .../web/send` 1 本で、応答本文・SSE イベント列・session_logs
+    /// （ユーザ発話 + 応答転記）・run 本数を同時に見る。個別テストを弱めない。
+    async fn recv_sse(rx: &mut tokio::sync::broadcast::Receiver<String>) -> serde_json::Value {
+        let payload = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+            .await
+            .expect("SSE へ配送されない")
+            .expect("SSE チャンネルが閉じた");
+        serde_json::from_str(&payload).expect("SSE payload が JSON でない")
+    }
+
+    #[tokio::test]
+    async fn transplant_4b_locks_send_body_sse_logs_and_run_count() {
+        let runner = FakeRunner::new("こんにちは").with_caller(CallerIdentity::Owner);
+        let sid = web_session_id("a", "c1");
+        let mut rx = runner.web_gateway().subscribe(&sid);
+
+        let (status, body) = call(&runner, send_request("a", inbound("hi"))).await;
+        assert_eq!(status, StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_str(&body).expect("JSON でない");
+        assert_eq!(v["session_id"], sid);
+        assert_eq!(v["caller_type"], "owner");
+        assert_eq!(v["response"], "こんにちは");
+
+        let ev = recv_sse(&mut rx).await;
+        assert_eq!(ev["kind"], "direct");
+        assert_eq!(ev["agent_id"], "a");
+        assert_eq!(ev["content"], "こんにちは");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), rx.recv())
+                .await
+                .is_err(),
+            "成功応答のあと余分な SSE が流れた"
+        );
+
+        assert_eq!(runner.runs().len(), 1, "run 本数");
+        assert_eq!(runner.runs()[0].session_id, sid);
+        assert_eq!(runner.runs()[0].caller, CallerIdentity::Owner);
+
+        let messages = runner.user_messages();
+        assert_eq!(messages.len(), 1, "session_logs ユーザ発話");
+        assert_eq!(messages[0].agent_id, "a");
+        assert_eq!(messages[0].session_id, sid);
+        assert_eq!(messages[0].user_id, DEFAULT_WEB_USER_ID);
+        assert_eq!(messages[0].content, "hi");
+
+        let replies = runner.replies();
+        assert_eq!(replies.len(), 1, "session_logs 応答転記");
+        assert_eq!(replies[0].agent_id, "a");
+        assert_eq!(replies[0].session_id, sid);
+        assert_eq!(replies[0].text, "こんにちは");
+    }
+
+    #[tokio::test]
+    async fn transplant_4b_locks_no_reply_is_silent() {
+        for response in ["NO_REPLY", "   "] {
+            let runner = FakeRunner::new(response);
+            let sid = web_session_id("a", "c1");
+            let mut rx = runner.web_gateway().subscribe(&sid);
+
+            let (status, body) = call(&runner, send_request("a", inbound("hi"))).await;
+            assert_eq!(status, StatusCode::OK, "{response:?}");
+            let v: serde_json::Value = serde_json::from_str(&body).expect("JSON でない");
+            assert!(v["response"].is_null(), "{response:?} は本文を返さない: {body}");
+            assert_eq!(v["session_id"], sid);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(80), rx.recv())
+                    .await
+                    .is_err(),
+                "{response:?} は SSE 配送しない"
+            );
+            assert_eq!(runner.runs().len(), 1, "{response:?} でもターンは 1 本");
+            assert_eq!(runner.user_messages().len(), 1, "{response:?} でも発話は記録");
+            assert!(
+                runner.replies().is_empty(),
+                "{response:?} は応答を転記しない"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn transplant_4b_locks_failure_sse_error_event() {
+        let runner = FakeRunner::failing("boom");
+        let sid = web_session_id("a", "c1");
+        let mut rx = runner.web_gateway().subscribe(&sid);
+
+        let (status, body) = call(&runner, send_request("a", inbound("hi"))).await;
+        assert_eq!(status, StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_str(&body).expect("JSON でない");
+        assert!(v["response"].is_null(), "失敗時の HTTP 本文は response:null");
+        assert_eq!(v["session_id"], sid);
+
+        let ev = recv_sse(&mut rx).await;
+        assert_eq!(ev["kind"], "error");
+        assert_eq!(ev["agent_id"], "a");
+        let content = ev["content"].as_str().expect("content が文字列でない");
+        assert!(
+            content.contains("boom"),
+            "error SSE に原因が出る: {content}"
+        );
+        assert!(
+            content.contains("(error:"),
+            "失敗 SSE の外形は `(error: …)`: {content}"
+        );
+
+        assert_eq!(runner.runs().len(), 1);
+        assert_eq!(runner.user_messages().len(), 1);
+        assert!(runner.replies().is_empty(), "失敗は応答を転記しない");
+    }
+
+    #[tokio::test]
+    async fn transplant_4b_locks_two_sends_are_two_runs() {
+        let runner = FakeRunner::new("ok").with_caller(CallerIdentity::TrustedUser);
+        let sid = web_session_id("a", "c1");
+        let mut rx = runner.web_gateway().subscribe(&sid);
+
+        for content in ["first", "second"] {
+            let (status, body) = call(&runner, send_request("a", inbound(content))).await;
+            assert_eq!(status, StatusCode::OK);
+            let v: serde_json::Value = serde_json::from_str(&body).expect("JSON でない");
+            assert_eq!(v["response"], "ok");
+            assert_eq!(v["caller_type"], "trusted_user");
+            let ev = recv_sse(&mut rx).await;
+            assert_eq!(ev["kind"], "direct");
+            assert_eq!(ev["content"], "ok");
+        }
+
+        assert_eq!(runner.runs().len(), 2, "送信 2 回 = run 2 本");
+        assert_eq!(runner.user_messages().len(), 2);
+        assert_eq!(runner.user_messages()[0].content, "first");
+        assert_eq!(runner.user_messages()[1].content, "second");
+        assert_eq!(runner.replies().len(), 2);
+        assert_eq!(runner.replies()[0].session_id, sid);
+        assert_eq!(runner.replies()[1].session_id, sid);
+    }
 }
