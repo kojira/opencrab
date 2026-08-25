@@ -231,6 +231,45 @@ CREATE TABLE IF NOT EXISTS task_progress (
 CREATE INDEX IF NOT EXISTS idx_task_progress_task ON task_progress(task_id);
 "#;
 
+/// 場に紐づく Nostr 購読（1 場 N 行 / 載せ替え工程 3・v43）。
+///
+/// `SCHEMA_SQL` 側の同名ブロックと文面を揃えること（新規 DB は SCHEMA_SQL、
+/// 既存 DB は v43 で同じ形に収束する）。
+pub(super) const SESSION_WATCHES_SQL: &str = "
+CREATE TABLE IF NOT EXISTS session_watches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    interval_secs INTEGER NOT NULL,
+    filter_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    CHECK (interval_secs > 0)
+);
+CREATE INDEX IF NOT EXISTS idx_session_watches_session ON session_watches(session_id);
+";
+
+/// ツール 1 実行 = 1 行（載せ替え工程 3・v43）。
+///
+/// `SCHEMA_SQL` 側の同名ブロックと文面を揃えること。
+pub(super) const TOOL_LOGS_SQL: &str = "
+CREATE TABLE IF NOT EXISTS tool_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT NOT NULL,
+    session_id TEXT,
+    tool_name TEXT NOT NULL,
+    args_json TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    result_text TEXT NOT NULL DEFAULT '',
+    started_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    latency_ms INTEGER,
+    iteration INTEGER,
+    CHECK (outcome IN ('done', 'failed', 'refused', 'deadline', 'stopped'))
+);
+CREATE INDEX IF NOT EXISTS idx_tool_logs_agent ON tool_logs(agent_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tool_logs_session ON tool_logs(session_id);
+";
+
 /// 新規インストール用のスキーマ定義（全て `CREATE ... IF NOT EXISTS`）。
 ///
 /// 注意: baseline 済みの既存DB（`user_version >= 1`）では、この `SCHEMA_SQL` は
@@ -474,7 +513,7 @@ CREATE INDEX IF NOT EXISTS idx_heartbeat_instr_audit_agent
     ON heartbeat_instructions_audit(agent_id, created_at DESC);
 
 -- ============================================
--- セッション状態
+-- セッション状態（場＝この行。id の値は場 ID。列名は session のまま）
 -- ============================================
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
@@ -489,7 +528,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     max_turns INTEGER,
     metadata_json TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    -- 場ポリシー（権限毎デバウンス・即応する inbound 種別）。場＝この行。
+    -- DEFAULT '{}' は「未設定」= 現行挙動を維持。
+    policy_json TEXT NOT NULL DEFAULT '{}'
 );
 
 -- ============================================
@@ -925,4 +967,44 @@ CREATE TABLE IF NOT EXISTS task_progress (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_task_progress_task ON task_progress(task_id);
+
+-- ============================================
+-- SESSION WATCHES: 場に紐づく Nostr 購読（1 場 N 行）
+-- ============================================
+-- 行がある場だけ新機構（束ね / 即時転送の分岐）が効く。
+-- 既存 nostr-{agent} は行ゼロのまま → 現行 agent_nostr_config watch を維持。
+-- interval_secs は必須（DEFAULT 無し）。未設定の INSERT は SQL が拒否する。
+-- リレー・鍵は agent_nostr_config（接続の家）。本表は購読条件だけ。
+CREATE TABLE IF NOT EXISTS session_watches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    interval_secs INTEGER NOT NULL,
+    filter_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    CHECK (interval_secs > 0)
+);
+CREATE INDEX IF NOT EXISTS idx_session_watches_session ON session_watches(session_id);
+
+-- ============================================
+-- TOOL LOGS: ツール 1 実行 = 1 行（独立表。memory_sessions / llm_logs.tool_calls は残す）
+-- ============================================
+-- 書くのは core（SkillEngine / ActionDispatcher）。ゲートは書かない。
+-- outcome は本設計の語彙。oc2 を正本にはしない。
+CREATE TABLE IF NOT EXISTS tool_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT NOT NULL,
+    session_id TEXT,
+    tool_name TEXT NOT NULL,
+    args_json TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    result_text TEXT NOT NULL DEFAULT '',
+    started_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    latency_ms INTEGER,
+    iteration INTEGER,
+    CHECK (outcome IN ('done', 'failed', 'refused', 'deadline', 'stopped'))
+);
+CREATE INDEX IF NOT EXISTS idx_tool_logs_agent ON tool_logs(agent_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tool_logs_session ON tool_logs(session_id);
 "#;

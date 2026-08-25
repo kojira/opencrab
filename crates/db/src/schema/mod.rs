@@ -6,7 +6,7 @@ use sql::{
     AGENT_HEARTBEAT_CONFIG_SQL, AGENT_MCP_CONFIG_SQL, AGENT_NOSTR_CONFIG_SQL,
     AGENT_NOSTR_RELAY_CONFIG_SQL, AGENT_SCHEDULES_SQL, MEMORY_CATEGORY_MEMBERS_MM_SQL,
     MEMORY_CATEGORY_MEMBERS_SQL, PROVIDER_SETTINGS_SQL, SCHEMA_SQL, SESSION_HEARTBEAT_CONFIG_SQL,
-    SKILL_USAGE_LOG_SQL, TASK_LEDGER_SQL,
+    SESSION_WATCHES_SQL, SKILL_USAGE_LOG_SQL, TASK_LEDGER_SQL, TOOL_LOGS_SQL,
 };
 
 /// スキーマのバージョン管理は `PRAGMA user_version` で行う。
@@ -1805,6 +1805,31 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 43,
+        description:
+            "sessions に policy_json を足し、session_watches / tool_logs を新設する（載せ替え工程 3）",
+        // **場＝セッション（同一概念）。表はそのまま・データ移動ゼロ。**
+        // 場の属性は `sessions.policy_json`（DEFAULT '{}' = 現行挙動維持）。
+        // agent_sessions には列を足さない。新表は watch 定義と tool_logs だけ。
+        //
+        // ## やってよいことだけ
+        //   1. `ALTER TABLE sessions ADD COLUMN policy_json …`（列が無ければ）
+        //   2. `CREATE TABLE IF NOT EXISTS session_watches` / `tool_logs`
+        //   3. 同じ TX 内で構造不変アサート（失敗なら ROLLBACK）
+        //
+        // ## やってはいけないこと
+        //   INSERT INTO 既存表、既存行の UPDATE、DROP、列改名、VIEW、places / memberships。
+        //
+        // ## 冪等性（#349/#475 の轍を踏まない）
+        // 新規 DB は SCHEMA_SQL 側で列と 2 表を持つので、`column_exists` / `IF NOT EXISTS`
+        // で no-op。既存 DB（v42）でのみ ALTER が走る。DDL のみ・既存行は触らない。
+        //
+        // ## 切り戻し（古いバイナリへ戻すとき）
+        // 列と表は残して版番号だけ戻せばよい（古いバイナリは読まない）:
+        //   BEGIN; PRAGMA user_version = 42; COMMIT;
+        up: migrate_v43_transplant_schema,
+    },
 ];
 
 /// このバイナリが知る最新スキーマバージョン。
@@ -1928,6 +1953,70 @@ fn migrate_v38_align_schedule_vocab(conn: &Connection) -> rusqlite::Result<()> {
     // 2. next_run_at を撤去（照会時算出に寄せる＝stale フリー。列はキャッシュに過ぎない）。
     if column_exists(conn, "agent_schedules", "next_run_at")? {
         conn.execute_batch("ALTER TABLE agent_schedules DROP COLUMN next_run_at;")?;
+    }
+    Ok(())
+}
+
+/// v43: 場の属性列と watch / tool_logs を足すだけ（データ移動ゼロ）。
+fn migrate_v43_transplant_schema(conn: &Connection) -> rusqlite::Result<()> {
+    if !column_exists(conn, "sessions", "policy_json")? {
+        conn.execute_batch(
+            "ALTER TABLE sessions ADD COLUMN policy_json TEXT NOT NULL DEFAULT '{}'",
+        )?;
+    }
+    conn.execute_batch(SESSION_WATCHES_SQL)?;
+    conn.execute_batch(TOOL_LOGS_SQL)?;
+    assert_v43_invariants(conn)
+}
+
+fn migration_err(msg: &str) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+        Some(msg.to_string()),
+    )
+}
+
+/// 同じ TX 内の構造不変（設計 §1.6 / §5.2 の TX 内で閉じるもの）。
+/// 既存全行のダイジェスト比較は rehearsal スクリプト側（本番起動で全表 SCAN しない）。
+fn assert_v43_invariants(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "sessions")? {
+        return Err(migration_err("v43: sessions が消えた"));
+    }
+    if !table_exists(conn, "agent_sessions")? {
+        return Err(migration_err("v43: agent_sessions が消えた"));
+    }
+    if table_exists(conn, "places")? {
+        return Err(migration_err("v43: places が作られた"));
+    }
+    if table_exists(conn, "memberships")? {
+        return Err(migration_err("v43: memberships が作られた"));
+    }
+    let view_sessions: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='view' AND name='sessions'",
+        [],
+        |r| r.get(0),
+    )?;
+    if view_sessions > 0 {
+        return Err(migration_err("v43: VIEW sessions が作られた"));
+    }
+    if !column_exists(conn, "sessions", "policy_json")? {
+        return Err(migration_err("v43: sessions.policy_json が無い"));
+    }
+    let non_default_policy: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sessions WHERE policy_json IS NULL OR policy_json != '{}'",
+        [],
+        |r| r.get(0),
+    )?;
+    if non_default_policy > 0 {
+        return Err(migration_err("v43: sessions.policy_json が '{}' 以外"));
+    }
+    let tool_n: i64 = conn.query_row("SELECT COUNT(*) FROM tool_logs", [], |r| r.get(0))?;
+    if tool_n != 0 {
+        return Err(migration_err("v43: tool_logs が空でない"));
+    }
+    let watch_n: i64 = conn.query_row("SELECT COUNT(*) FROM session_watches", [], |r| r.get(0))?;
+    if watch_n != 0 {
+        return Err(migration_err("v43: session_watches が空でない"));
     }
     Ok(())
 }
