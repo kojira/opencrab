@@ -28,7 +28,7 @@
       "valid_rejections": 36
     },
     "http_observed_status_classes": {
-      "2xx": 139,
+      "2xx": 141,
       "4xx": 44,
       "5xx": 4
     },
@@ -6932,6 +6932,69 @@
       },
       {
         "effect": null,
+        "name": "get___api_agents_id_tool-logs__normal",
+        "request": {
+          "body": null,
+          "method": "GET",
+          "uri": "/api/agents/baseline-agent/tool-logs"
+        },
+        "response": {
+          "body": [],
+          "headers": [
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "access-control-expose-headers",
+              "value": "*"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "vary",
+              "value": "origin, access-control-request-method, access-control-request-headers"
+            }
+          ],
+          "status": 200
+        },
+        "selection": "normal_or_local_precondition_branch"
+      },
+      {
+        "name": "get___api_agents_id_tool-logs__reject_or_absent",
+        "request": {
+          "body_utf8": null,
+          "method": "GET",
+          "uri": "/api/agents/baseline-missing/tool-logs"
+        },
+        "response": {
+          "body": [],
+          "headers": [
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "access-control-expose-headers",
+              "value": "*"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "vary",
+              "value": "origin, access-control-request-method, access-control-request-headers"
+            }
+          ],
+          "status": 200
+        },
+        "selection": "resource_absence_or_empty_state"
+      },
+      {
+        "effect": null,
         "name": "get___api_agents_id_trusted-users__normal",
         "request": {
           "body": null,
@@ -10564,7 +10627,7 @@
         "selection": "resource_absence_or_empty_state"
       }
     ],
-    "source_route_count": 82,
+    "source_route_count": 83,
     "uncollected": [
       {
         "branch": "normal",

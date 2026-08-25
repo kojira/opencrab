@@ -25,6 +25,7 @@ pub mod setup;
 pub mod skills;
 pub mod sleep;
 pub mod system;
+pub mod tool_logs;
 pub mod trusted_users;
 pub mod workspace;
 

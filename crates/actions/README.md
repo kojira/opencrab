@@ -41,6 +41,12 @@ Nostr の `session_watches` 付きセッションだけ。ゲートは形（即�
 
 露出（`definitions`）は Discord ゲートに残す。`SystemGatewayActions` には出さない。
 
+## tool_logs（`BridgedExecutor`）
+
+ツール実行が返った直後に 1 実行 1 行を書く。ゲートは書かない。
+`outcome` は `done` / `failed` / `refused`（現行経路で出る 3 態）。
+返り値と `memory_sessions` の既存記録は変えない。
+
 ## 関連
 
 - [opencrab-discord](../discord/README.md)

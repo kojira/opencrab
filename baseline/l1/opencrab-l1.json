@@ -266,7 +266,7 @@
     ]
   },
   "http": {
-    "route_count": 80,
+    "route_count": 83,
     "routes": [
       {
         "activation": "always",
@@ -703,6 +703,14 @@
           "POST"
         ],
         "path": "/api/agents/{id}/soul/presets/{preset_id}/apply",
+        "source": "opencrab_server::create_router"
+      },
+      {
+        "activation": "always",
+        "methods": [
+          "GET"
+        ],
+        "path": "/api/agents/{id}/tool-logs",
         "source": "opencrab_server::create_router"
       },
       {

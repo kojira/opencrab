@@ -258,6 +258,101 @@ async fn test_engine_learn_from_experience() {
     assert_eq!(skills[0].source_type, "experience");
 }
 
+/// 載せ替え工程 5-b: SkillEngine 経由でも done / failed / refused が tool_logs 1 行になる。
+#[tokio::test]
+async fn test_engine_tool_logs_done_failed_refused() {
+    let (_dir, executor, db) = setup_with_data();
+    let llm = MockLlm::new(vec![
+        resp(
+            None,
+            vec![tc(
+                "tc-1",
+                "search_my_history",
+                serde_json::json!({"query": "Rust"}),
+            )],
+        ),
+        resp(
+            None,
+            vec![tc("tc-2", "nonexistent_tool", serde_json::json!({}))],
+        ),
+        resp(Some("searched then failed".to_string()), vec![]),
+    ]);
+    let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+    let result = engine
+        .run("You are a test agent", "search then fail", "mock-model")
+        .await
+        .unwrap();
+    assert_eq!(result.tool_calls_made, 2);
+    assert!(!result.stopped_by_limit);
+
+    let rows = {
+        let conn = db.lock().unwrap();
+        opencrab_db::queries::list_tool_logs(&conn, "agent-1", 20).unwrap()
+    };
+    assert_eq!(rows.len(), 2, "1 実行 1 行");
+    let done = rows
+        .iter()
+        .find(|r| r.tool_name == "search_my_history")
+        .expect("done 行");
+    assert_eq!(done.outcome, "done");
+    assert_eq!(done.session_id.as_deref(), Some("session-1"));
+    assert!(done.args_json.contains("Rust"));
+    let failed = rows
+        .iter()
+        .find(|r| r.tool_name == "nonexistent_tool")
+        .expect("failed 行");
+    assert_eq!(failed.outcome, "failed");
+    assert!(failed.result_text.contains("Unknown action"));
+
+    let conn = opencrab_db::init_memory().unwrap();
+    let db2 = opencrab_db::Db::from_connection(conn);
+    let dir2 = tempfile::TempDir::new().unwrap();
+    let ws = opencrab_core::workspace::Workspace::from_root(dir2.path()).unwrap();
+    let ctx = ActionContext {
+        caller: CallerIdentity::Agent,
+        agent_id: "agent-1".to_string(),
+        agent_name: "Test Agent".to_string(),
+        session_id: Some("session-1".to_string()),
+        db: db2.clone(),
+        workspace: Arc::new(ws),
+        last_metrics_id: Arc::new(Mutex::new(None)),
+        model_override: Arc::new(Mutex::new(None)),
+        current_purpose: Arc::new(Mutex::new("conversation".to_string())),
+        runtime_info: Arc::new(Mutex::new(opencrab_actions::RuntimeInfo {
+            default_model: "mock:test-model".to_string(),
+            active_model: None,
+            available_providers: vec!["mock".to_string()],
+            gateway: "test".to_string(),
+        })),
+    };
+    let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx);
+    let llm = MockLlm::new(vec![
+        resp(
+            None,
+            vec![tc(
+                "tc-1",
+                "execute_shell",
+                serde_json::json!({"command": "echo hi"}),
+            )],
+        ),
+        resp(Some("refused".to_string()), vec![]),
+    ]);
+    let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+    let result = engine
+        .run("You are a test agent", "run shell", "mock-model")
+        .await
+        .unwrap();
+    assert_eq!(result.tool_calls_made, 1);
+    let rows = {
+        let conn = db2.lock().unwrap();
+        opencrab_db::queries::list_tool_logs(&conn, "agent-1", 20).unwrap()
+    };
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].outcome, "refused");
+    assert_eq!(rows[0].tool_name, "execute_shell");
+    assert_eq!(rows[0].session_id.as_deref(), Some("session-1"));
+}
+
 /// BridgedExecutor.list_tools() returns all registered actions.
 #[tokio::test]
 async fn test_engine_lists_all_tools() {

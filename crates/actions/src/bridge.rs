@@ -933,7 +933,17 @@ impl BridgedExecutor {
         tool_call_id: Option<&str>,
     ) -> CoreActionResult {
         let Some(sink) = self.tool_event_sink.clone() else {
-            return self.dispatch_inner(name, args).await;
+            let started_at = chrono::Utc::now().to_rfc3339();
+            let start = std::time::Instant::now();
+            let result = self.dispatch_inner(name, args).await;
+            self.write_tool_log(
+                name,
+                args,
+                &result,
+                &started_at,
+                start.elapsed().as_millis() as i64,
+            );
+            return result;
         };
         // 相関 ID: LLM 由来 ID があれば伝播、無ければ合成（同 start/terminal で一致）。
         let synthetic;
@@ -996,7 +1006,67 @@ impl BridgedExecutor {
             result: Some(sink_result),
             error: result.error.as_deref(),
         });
+        self.write_tool_log(name, args, &result, &started_at, duration_ms as i64);
         result
+    }
+
+    /// ツール 1 実行を `tool_logs` へ 1 行書く（載せ替え工程 5-b）。
+    ///
+    /// 成否に関わらず必ず書く。INSERT 失敗は握り潰さない（fail-loud）。
+    /// 返り値・`memory_sessions` / sink は変えない。
+    fn write_tool_log(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        result: &CoreActionResult,
+        started_at: &str,
+        latency_ms: i64,
+    ) {
+        let outcome = tool_log_outcome(result);
+        let result_text = tool_log_result_text(result);
+        let conn = self
+            .context
+            .db
+            .lock()
+            .unwrap_or_else(|e| panic!("tool_logs: db lock poisoned: {e}"));
+        opencrab_db::queries::insert_tool_log(
+            &conn,
+            &opencrab_db::queries::ToolLogWrite {
+                agent_id: self.context.agent_id.clone(),
+                session_id: self.context.session_id.clone(),
+                tool_name: name.to_string(),
+                args_json: args.to_string(),
+                outcome: outcome.to_string(),
+                result_text,
+                started_at: Some(started_at.to_string()),
+                latency_ms: Some(latency_ms),
+                iteration: None,
+            },
+        )
+        .unwrap_or_else(|e| panic!("tool_logs insert failed: {e:#}"));
+    }
+}
+
+/// `tool_logs.outcome` への写像。未知の第 4 態を発明しない。
+fn tool_log_outcome(result: &CoreActionResult) -> &'static str {
+    if result.success {
+        "done"
+    } else if is_rejection(result.error.as_deref()) {
+        "refused"
+    } else {
+        "failed"
+    }
+}
+
+/// 結果の要約。成功は data、失敗は error。空には落とさない（無いときだけ空文字）。
+fn tool_log_result_text(result: &CoreActionResult) -> String {
+    if result.success {
+        match &result.data {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        }
+    } else {
+        result.error.clone().unwrap_or_default()
     }
 }
 
@@ -3534,5 +3604,149 @@ mod tests {
                 "撤去したはずのマスク痕跡が付いている"
             );
         }
+    }
+
+    fn test_context_with_db(
+        caller: CallerIdentity,
+    ) -> (tempfile::TempDir, ActionContext, opencrab_db::Db) {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let dir = tempfile::TempDir::new().unwrap();
+        let ws = opencrab_core::workspace::Workspace::from_root(dir.path()).unwrap();
+        let ctx = ActionContext {
+            caller,
+            agent_id: "agent-1".to_string(),
+            agent_name: "Test Agent".to_string(),
+            session_id: Some("session-1".to_string()),
+            db: db.clone(),
+            workspace: std::sync::Arc::new(ws),
+            last_metrics_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            model_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            current_purpose: std::sync::Arc::new(std::sync::Mutex::new("conversation".to_string())),
+            runtime_info: std::sync::Arc::new(std::sync::Mutex::new(crate::RuntimeInfo {
+                default_model: "mock:test-model".to_string(),
+                active_model: None,
+                available_providers: vec!["mock".to_string()],
+                gateway: "test".to_string(),
+            })),
+        };
+        (dir, ctx, db)
+    }
+
+    fn memory_session_count(db: &opencrab_db::Db) -> i64 {
+        let conn = db.lock().unwrap();
+        conn.query_row("SELECT COUNT(*) FROM memory_sessions", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// 載せ替え工程 5-b: 成功 / 失敗 / refused が tool_logs 1 行になり、
+    /// 返り値と memory_sessions は変わらない。
+    #[tokio::test]
+    async fn tool_logs_records_done_failed_refused() {
+        let (_dir, ctx, db) = test_context_with_db(CallerIdentity::Owner);
+        let before = memory_session_count(&db);
+        let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx);
+
+        let done = executor
+            .execute("generate_inner_voice", &json!({"thought": "hi"}))
+            .await;
+        assert!(done.success, "成功経路の返り値は不変: {done:?}");
+
+        let failed = executor.execute("nonexistent_tool", &json!({"x": 1})).await;
+        assert!(!failed.success);
+        assert!(
+            failed.error.as_deref().unwrap().contains("Unknown action"),
+            "失敗の返り値は不変: {failed:?}"
+        );
+
+        let rows = {
+            let conn = db.lock().unwrap();
+            opencrab_db::queries::list_tool_logs(&conn, "agent-1", 20).unwrap()
+        };
+        assert_eq!(rows.len(), 2, "1 実行 1 行");
+        let done_row = rows
+            .iter()
+            .find(|r| r.tool_name == "generate_inner_voice")
+            .expect("done 行");
+        assert_eq!(done_row.outcome, "done");
+        assert_eq!(done_row.session_id.as_deref(), Some("session-1"));
+        assert_eq!(done_row.agent_id, "agent-1");
+        assert!(done_row.args_json.contains("thought"));
+        assert!(done_row.latency_ms.is_some());
+        assert!(done_row.started_at.is_some());
+
+        let failed_row = rows
+            .iter()
+            .find(|r| r.tool_name == "nonexistent_tool")
+            .expect("failed 行");
+        assert_eq!(failed_row.outcome, "failed");
+        assert!(
+            failed_row.result_text.contains("Unknown action"),
+            "失敗も 1 行: {}",
+            failed_row.result_text
+        );
+
+        let after = memory_session_count(&db);
+        assert!(
+            after >= before,
+            "memory_sessions は減らさない（既存記録は不変）: before={before} after={after}"
+        );
+        let inner_voice = {
+            let conn = db.lock().unwrap();
+            opencrab_db::queries::list_session_logs_by_session(&conn, "session-1")
+                .unwrap()
+                .into_iter()
+                .filter(|l| l.log_type == "inner_voice")
+                .count()
+        };
+        assert_eq!(
+            inner_voice, 1,
+            "generate_inner_voice の既存 session_logs 記録は残る"
+        );
+
+        let (_dir2, ctx2, db2) = test_context_with_db(CallerIdentity::Agent);
+        let before2 = memory_session_count(&db2);
+        let exec2 = BridgedExecutor::new(ActionDispatcher::new(), ctx2);
+        let refused = exec2
+            .execute("execute_shell", &json!({"command": "echo hi"}))
+            .await;
+        assert!(!refused.success);
+        assert!(
+            is_rejection(refused.error.as_deref()),
+            "refused の返り値は不変: {refused:?}"
+        );
+        let rows2 = {
+            let conn = db2.lock().unwrap();
+            opencrab_db::queries::list_tool_logs(&conn, "agent-1", 20).unwrap()
+        };
+        assert_eq!(rows2.len(), 1);
+        assert_eq!(rows2[0].outcome, "refused");
+        assert_eq!(rows2[0].tool_name, "execute_shell");
+        assert_eq!(rows2[0].session_id.as_deref(), Some("session-1"));
+        assert_eq!(memory_session_count(&db2), before2);
+    }
+
+    #[tokio::test]
+    async fn tool_logs_writes_when_sink_is_present() {
+        let (_dir, ctx, db) = test_context_with_db(CallerIdentity::Owner);
+        let sink = Arc::new(RecordingSink {
+            events: Mutex::new(Vec::new()),
+        });
+        let executor =
+            BridgedExecutor::new(ActionDispatcher::new(), ctx).with_tool_event_sink(sink.clone());
+        let r = executor
+            .execute("generate_inner_voice", &json!({"thought": "hi"}))
+            .await;
+        assert!(r.success);
+        let evs = sink.events.lock().unwrap();
+        assert_eq!(evs.len(), 2);
+        assert_eq!(evs[0].1, "started");
+        assert_eq!(evs[1].1, "completed");
+        let rows = {
+            let conn = db.lock().unwrap();
+            opencrab_db::queries::list_tool_logs(&conn, "agent-1", 20).unwrap()
+        };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].outcome, "done");
     }
 }

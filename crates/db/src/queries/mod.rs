@@ -30,6 +30,7 @@ mod sessions;
 mod skills;
 mod sync_state;
 mod task_ledger;
+mod tool_logs;
 mod trusted_users;
 mod webhook_config;
 
@@ -59,6 +60,7 @@ pub use sessions::*;
 pub use skills::*;
 pub use sync_state::*;
 pub use task_ledger::*;
+pub use tool_logs::*;
 pub use trusted_users::*;
 pub use webhook_config::*;
 

@@ -92,6 +92,8 @@ Base URL: `http://localhost:3000`
 | **LLM Logs** | | |
 | GET | `/api/agents/{id}/llm-logs` | List LLM call logs |
 | GET | `/api/agents/{id}/llm-logs/stats` | LLM log statistics (30d) |
+| **Tool Logs** | | |
+| GET | `/api/agents/{id}/tool-logs` | List tool execution logs |
 | **Import** | | |
 | POST | `/api/import/scan` | Scan workspace directory |
 | POST | `/api/import/execute` | Execute workspace import |
@@ -2149,6 +2151,58 @@ GET /api/agents/550e8400-.../llm-logs?limit=5
   "cache_read_tokens": 0,
   "cache_creation_tokens": 0,
   "created_at": "2026-03-25T10:00:01Z"
+}]
+```
+
+---
+
+### GET /api/agents/{id}/tool-logs
+
+**目的**: エージェントのツール 1 実行 1 行ログを取得する（llm-logs と同型。stats は無い）
+
+**Query Parameters**
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| limit | number | ❌ | 最大件数 (default: `20`) |
+
+**Response**: ToolLogRow[]
+
+| Field | Type | Description |
+|-------|------|-------------|
+| id | number | ログ ID |
+| agent_id | string | エージェント ID |
+| session_id | string \| null | セッション ID |
+| tool_name | string | ツール名 |
+| args_json | string | 引数 JSON |
+| outcome | string | `done` / `failed` / `refused` / `deadline` / `stopped` |
+| result_text | string | 結果要約 |
+| started_at | ISO8601 \| null | 開始時刻 |
+| created_at | string | 作成日時 |
+| latency_ms | number \| null | レイテンシ (ms) |
+| iteration | number \| null | 反復番号 |
+
+**Example Request**
+
+```
+GET /api/agents/550e8400-.../tool-logs?limit=5
+```
+
+**Example Response**
+
+```json
+[{
+  "id": 1,
+  "agent_id": "550e8400-e29b-41d4-a716-446655440000",
+  "session_id": "session-1",
+  "tool_name": "search_my_history",
+  "args_json": "{\"query\":\"Rust\"}",
+  "outcome": "done",
+  "result_text": "{\"hits\":1}",
+  "started_at": "2026-08-25T00:00:00Z",
+  "created_at": "2026-08-25 00:00:00",
+  "latency_ms": 12,
+  "iteration": null
 }]
 ```
 
