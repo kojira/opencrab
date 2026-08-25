@@ -10,7 +10,9 @@
 //! ここが持つのは HTTP の抽出とレスポンス整形だけで、session_id 規約・直列化・
 //! SSE 配送・非ブロック dispatch の実体は [`crate::gateway`] / [`crate::respond`] にある。
 //! 誰か・権限は core の [`plan_inbound`](opencrab_actions::plan_inbound) 1 口。
-//! セッション用意・DB 記録は [`WebAgentRunner`] 越し（行の形は web 現行のまま）。
+//! セッション確保 + inbound 記録は
+//! [`prepare_session_inbound_write`](opencrab_actions::prepare_session_inbound_write)
+//! （行の形は web 現行のまま。`TranscriptSource` は使わない）。
 //!
 //! **#177 の保証**: 応答生成の本体（`crate::respond` の `run_and_deliver`）は兄弟
 //! モジュールの private 項目なのでここからは到達できない。ハンドラが呼べるのは
@@ -28,11 +30,14 @@ use axum::{
 use futures::Stream;
 use serde::Deserialize;
 
-use opencrab_actions::{plan_inbound, NormalizedInboundEvent};
+use opencrab_actions::{
+    plan_inbound, prepare_session_inbound_write, NormalizedInbound, NormalizedInboundEvent,
+    PrepareSessionInboundError,
+};
 
 use crate::gateway::{caller_type_label, web_session_id};
 use crate::respond::{run_and_deliver_serialized, WebTurnOutcome};
-use crate::runner::{WebAgentRunner, WebInboundIdentity, WEB_INBOUND_GUILD};
+use crate::runner::{WebAgentRunner, WebInboundIdentity, WebSessionWrite, WEB_INBOUND_GUILD};
 
 /// Production router と read-only inventory が共有するルート宣言。
 ///
@@ -158,19 +163,28 @@ pub async fn send_web_message<R: WebAgentRunner>(
     let caller = plan.caller;
     let caller_type = caller_type_label(&caller);
 
-    // 2. セッションを用意する（無ければ作成）。
-    if let Err(e) = state.ensure_web_session(&session_id, &id) {
-        return Json(serde_json::json!({"error": format!("Failed to create session: {e}")}))
-            .into_response();
+    // 2. セッション確保 + inbound 記録は core。ゲートは正規化受信だけ渡す。
+    let inbound = NormalizedInbound {
+        session_id: &session_id,
+        agent_id: &id,
+        sender_id: &user_id,
+        sender_name: "",
+        avatar_url: None,
+        channel_id: None,
+        pubkey: None,
+        text: &req.content,
+        image_urls: &[],
+        external_id: "",
+    };
+    if let Err(e) = prepare_session_inbound_write(&WebSessionWrite::new(&state), &inbound) {
+        let error = match e {
+            PrepareSessionInboundError::Ensure(e) => format!("Failed to create session: {e}"),
+            PrepareSessionInboundError::Record(e) => format!("Failed to log message: {e}"),
+        };
+        return Json(serde_json::json!({"error": error})).into_response();
     }
 
-    // 3. ユーザ発話を DB へ記録する（応答生成は DB から会話を再構築する）。
-    if let Err(e) = state.record_user_message(&id, &session_id, &user_id, &req.content) {
-        return Json(serde_json::json!({"error": format!("Failed to log message: {e}")}))
-            .into_response();
-    }
-
-    // 4. LLM プロバイダの可用性チェック。
+    // 3. LLM プロバイダの可用性チェック。
     if !state.has_llm_providers() {
         return Json(serde_json::json!({
             "session_id": session_id,
@@ -181,7 +195,7 @@ pub async fn send_web_message<R: WebAgentRunner>(
         .into_response();
     }
 
-    // 5. 実行して直接応答を返す（SSE へも push 済み）。per-session 直列化は
+    // 4. 実行して直接応答を返す（SSE へも push 済み）。per-session 直列化は
     //    `run_and_deliver_serialized` の内側に閉じている（呼び忘れが起こらない）。
     //    ランタイム（SSE チャンネル + ロック）は runner から引かれるため、inbound と
     //    完了 sink が別のランタイムを掴む余地は無い。存在確認もこの入口で 1 度だけ行われる。
@@ -420,7 +434,8 @@ mod tests {
     /// **ユーザ ID の正規化がハンドラ経路で効いていること**。
     ///
     /// 正規化関数の単体テストだけでは、ハンドラが正規化を通さなくなっても検出できない。
-    /// 認可判定（`plan_inbound` → `resolve_caller`）と DB 記録（`record_user_message`）の
+    /// 認可判定（`plan_inbound` → `resolve_caller`）と DB 記録
+    /// （`prepare_session_inbound_write` → `record_user_message`）の
     /// 両方へ同じ正規化済みの値が渡ることを観測する。
     #[tokio::test]
     async fn handler_normalizes_the_user_id_before_authorization_and_recording() {

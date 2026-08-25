@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use opencrab_actions::{AgentRuntime, CallerIdentity, InboundIdentity};
+use opencrab_actions::{AgentRuntime, CallerIdentity, InboundIdentity, SessionInboundWrite};
 
 use crate::gateway::WebGateway;
 
@@ -119,6 +119,32 @@ pub trait WebAgentRunner: AgentRuntime {
     /// 到達性）の前提である。runner から引く形にしておけば、呼び出し側が別のランタイムを
     /// 渡してしまう余地が無くなる。
     fn web_gateway(&self) -> &Arc<WebGateway>;
+}
+
+/// [`SessionInboundWrite`] の web 側。行の形は [`WebAgentRunner`] のまま。
+pub struct WebSessionWrite<'a, R: WebAgentRunner>(&'a R);
+
+impl<'a, R: WebAgentRunner> WebSessionWrite<'a, R> {
+    pub fn new(runner: &'a R) -> Self {
+        Self(runner)
+    }
+}
+
+impl<R: WebAgentRunner> SessionInboundWrite for WebSessionWrite<'_, R> {
+    fn ensure_web_session(&self, session_id: &str, agent_id: &str) -> Result<()> {
+        self.0.ensure_web_session(session_id, agent_id)
+    }
+
+    fn record_user_message(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        user_id: &str,
+        content: &str,
+    ) -> Result<()> {
+        self.0
+            .record_user_message(agent_id, session_id, user_id, content)
+    }
 }
 
 #[cfg(test)]

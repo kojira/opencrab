@@ -47,9 +47,10 @@ pub use dispatcher::ActionDispatcher;
 pub use run_request::{LiveInboundScope, RunRequest};
 pub use session_inbound::{
     consecutive_trust_groups, delivery_effect, plan_inbound, plan_inbound_flush,
-    plan_record_only_flags, prepare_session_inbound, run_session_turn, start_session_turn,
-    DeliveryEffect, FlushPlan, InboundAgentDrop, InboundIdentity, InboundMessageDrop, InboundPlan,
-    NormalizedInbound, NormalizedInboundEvent,
+    plan_record_only_flags, prepare_session_inbound, prepare_session_inbound_write,
+    run_session_turn, start_session_turn, DeliveryEffect, FlushPlan, InboundAgentDrop,
+    InboundIdentity, InboundMessageDrop, InboundPlan, NormalizedInbound, NormalizedInboundEvent,
+    PrepareSessionInboundError, SessionInboundWrite,
 };
 pub use session_runtime::{SessionLocks, SessionRuntime};
 pub use subtask::{

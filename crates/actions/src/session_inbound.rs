@@ -280,6 +280,27 @@ pub fn plan_record_only_flags(levels: &[u8], has_content: &[bool]) -> Vec<bool> 
     record_only
 }
 
+/// 確保 + inbound 記録の失敗。順序は ensure → record（[`prepare_session_inbound`] と同一）。
+#[derive(Debug)]
+pub enum PrepareSessionInboundError {
+    Ensure(anyhow::Error),
+    Record(anyhow::Error),
+}
+
+/// web の確保・記録口。行の形は実装側が持つ（`TranscriptSource` は使わない）。
+///
+/// [`prepare_session_inbound`] と同じ順序（ensure → record、ロック前・#284）。
+pub trait SessionInboundWrite {
+    fn ensure_web_session(&self, session_id: &str, agent_id: &str) -> anyhow::Result<()>;
+    fn record_user_message(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        user_id: &str,
+        content: &str,
+    ) -> anyhow::Result<()>;
+}
+
 /// セッション確保 + inbound 記録（セッションロックより前・#284）。
 ///
 /// `true` = 記録できた。ゲートは `false` を無視せずエスカレーションする。
@@ -301,6 +322,27 @@ pub fn prepare_session_inbound<R: AgentRuntime>(
         mode,
     );
     runtime.record_inbound_message(source, &inbound.as_record())
+}
+
+/// [`prepare_session_inbound`] と同じ口（ensure → record）。web はこちら。
+///
+/// 行の形は [`SessionInboundWrite`]（`session_logs` 現行形。`TranscriptSource` は使わない）。
+pub fn prepare_session_inbound_write<W: SessionInboundWrite>(
+    writer: &W,
+    inbound: &NormalizedInbound<'_>,
+) -> Result<(), PrepareSessionInboundError> {
+    writer
+        .ensure_web_session(inbound.session_id, inbound.agent_id)
+        .map_err(PrepareSessionInboundError::Ensure)?;
+    writer
+        .record_user_message(
+            inbound.agent_id,
+            inbound.session_id,
+            inbound.sender_id,
+            inbound.text,
+        )
+        .map_err(PrepareSessionInboundError::Record)?;
+    Ok(())
 }
 
 /// inbound ターン起動（直列ロック内）。受信フック + 会話構築 + `run_agent_response`。
@@ -602,5 +644,113 @@ mod tests {
             DeliveryEffect::Failed { error } => assert!(error.contains("boom"), "{error}"),
             other => panic!("expected Failed, got {other:?}"),
         }
+    }
+
+    struct WriteSpy {
+        ensure_err: Option<String>,
+        record_err: Option<String>,
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl SessionInboundWrite for WriteSpy {
+        fn ensure_web_session(&self, session_id: &str, agent_id: &str) -> anyhow::Result<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("ensure:{session_id}:{agent_id}"));
+            match &self.ensure_err {
+                Some(msg) => Err(anyhow::anyhow!(msg.clone())),
+                None => Ok(()),
+            }
+        }
+        fn record_user_message(
+            &self,
+            agent_id: &str,
+            session_id: &str,
+            user_id: &str,
+            content: &str,
+        ) -> anyhow::Result<()> {
+            self.calls.lock().unwrap().push(format!(
+                "record:{agent_id}:{session_id}:{user_id}:{content}"
+            ));
+            match &self.record_err {
+                Some(msg) => Err(anyhow::anyhow!(msg.clone())),
+                None => Ok(()),
+            }
+        }
+    }
+
+    fn web_inbound<'a>(
+        session_id: &'a str,
+        agent_id: &'a str,
+        sender_id: &'a str,
+        text: &'a str,
+    ) -> NormalizedInbound<'a> {
+        NormalizedInbound {
+            session_id,
+            agent_id,
+            sender_id,
+            sender_name: "",
+            avatar_url: None,
+            channel_id: None,
+            pubkey: None,
+            text,
+            image_urls: &[],
+            external_id: "",
+        }
+    }
+
+    /// ensure → record の順。本文・識別子は渡した inbound のまま。
+    #[test]
+    fn prepare_session_inbound_write_ensures_then_records() {
+        let spy = WriteSpy {
+            ensure_err: None,
+            record_err: None,
+            calls: std::sync::Mutex::new(Vec::new()),
+        };
+        let inbound = web_inbound("web-a-c1", "a", "alice", "hi");
+        prepare_session_inbound_write(&spy, &inbound).expect("ensure+record は成功する");
+        assert_eq!(
+            *spy.calls.lock().unwrap(),
+            vec![
+                "ensure:web-a-c1:a".to_string(),
+                "record:a:web-a-c1:alice:hi".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn prepare_session_inbound_write_ensure_failure_skips_record() {
+        let spy = WriteSpy {
+            ensure_err: Some("disk full".into()),
+            record_err: None,
+            calls: std::sync::Mutex::new(Vec::new()),
+        };
+        match prepare_session_inbound_write(&spy, &web_inbound("s", "a", "u", "hi")) {
+            Err(PrepareSessionInboundError::Ensure(e)) => {
+                assert!(e.to_string().contains("disk full"), "{e:#}");
+            }
+            other => panic!("expected Ensure, got {other:?}"),
+        }
+        assert_eq!(*spy.calls.lock().unwrap(), vec!["ensure:s:a".to_string()]);
+    }
+
+    #[test]
+    fn prepare_session_inbound_write_record_failure_is_distinct() {
+        let spy = WriteSpy {
+            ensure_err: None,
+            record_err: Some("locked".into()),
+            calls: std::sync::Mutex::new(Vec::new()),
+        };
+        match prepare_session_inbound_write(&spy, &web_inbound("s", "a", "u", "hi")) {
+            Err(PrepareSessionInboundError::Record(e)) => {
+                assert!(e.to_string().contains("locked"), "{e:#}");
+            }
+            other => panic!("expected Record, got {other:?}"),
+        }
+        assert_eq!(
+            *spy.calls.lock().unwrap(),
+            vec!["ensure:s:a".to_string(), "record:a:s:u:hi".to_string()]
+        );
     }
 }
