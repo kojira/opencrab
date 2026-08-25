@@ -1,7 +1,7 @@
 //! DiscordゲートウェイアクションのGatewayActions実装
 //!
-//! Discord管理操作（サーバー一覧、チャンネル一覧、チャンネル設定）を
-//! ゲートウェイ固有アクションとして提供する。
+//! Discord API を叩く配送（一覧・リアクション・webhook・ファイル・voice）を提供する。
+//! チャンネル設定の書き込み判断は core（`apply_discord_channel_config`）。
 
 use std::borrow::Cow;
 use std::path::PathBuf;
@@ -512,6 +512,7 @@ impl GatewayActions for DiscordGatewayActions {
         match name {
             "discord_list_guilds" => self.execute_list_guilds().await,
             "discord_list_channels" => self.execute_list_channels(args, ctx).await,
+            // 書き込み判断は core（`apply_discord_channel_config`）。ここは委譲だけ。
             "discord_channel_config" => self.execute_discord_channel_config(args, ctx),
             "discord_add_reaction" => self.execute_discord_add_reaction(args).await,
             "discord_create_webhook" => self.execute_discord_create_webhook(args).await,

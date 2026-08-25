@@ -10,8 +10,11 @@ opencrab は [serenity](https://github.com/serenity-rs/serenity) を使用して
 
 | crate | 役割 |
 |---|---|
-| `opencrab-gateway` | `DiscordGateway` の実装、`GatewayActions` 抽象、共通メッセージ型（低レイヤー） |
-| `opencrab-discord` | メインループ、マネージャー、エージェントツール（高レイヤー） |
+| `opencrab-gateway` | `GatewayActions` 抽象と共通メッセージ型（ポート。具象 SDK は持たない） |
+| `opencrab-discord` | 受信・送信・描画・webhook・typing・form_modal（配送専用。判断は core） |
+| `opencrab-actions` | セッション inbound の集約口（権限・確保・記録・ターン起動・`discord_channel_config` 書き込み） |
+
+載せ替え工程 4-a 以降、Discord ゲートは配送だけを持つ。誰か・権限・セッション確保・ターン起動・チャンネル設定の書き込みは `opencrab-actions` が決める。`session_id` の書式と表は変えない。
 
 ## 設定
 
@@ -184,7 +187,7 @@ Bot が参加しているサーバーの一覧を取得する。
 
 ### discord_channel_config
 
-チャンネルの `readable` / `writable` 設定を変更する。
+チャンネルの `readable` / `writable` 設定を変更する。ツール定義と execute の受け口は Discord ゲートに残る。DB 書き込み自体は core（`apply_discord_channel_config`）。web / Nostr のゲートには出さない。
 
 **使用例**: エージェントが自ら「このチャンネルは監視不要」と判断して `readable = false` に設定するなど、自律的なチャンネル管理が可能。
 
@@ -194,12 +197,14 @@ Discord メッセージはチャンネルごとに自動的にセッションに
 
 ### セッション ID の形式
 
+書式は変えない。エージェント ID を含む（`message_loop` の `discord-{agent}-{guild}-{channel}`）。
+
 | 種別 | 形式 | 例 |
 |---|---|---|
-| サーバーチャンネル | `discord-{guild_id}-{channel_id}` | `discord-123456-789012` |
-| DM | `discord--{channel_id}` | `discord--345678` |
+| サーバーチャンネル | `discord-{agent_id}-{guild_id}-{channel_id}` | `discord-crab-111-222` |
+| DM | `discord-{agent_id}--{channel_id}` | `discord-crab--222` |
 
-同じチャンネルでの会話は同一セッションとして継続的に管理される。
+同じチャンネルでの会話は同一セッションとして継続的に管理される。確保と inbound 記録は core（`prepare_session_inbound`）。
 
 ## Per-Agent Bot（DiscordGatewayManager）
 
@@ -248,12 +253,10 @@ IncomingMessage 生成
 run_discord_loop() (opencrab-discord)
     │
     ├── チャンネル readable チェック → false ならスキップ
+    ├── 正規化受信を core へ渡す（権限・確保・記録・ターン）
     │
     ▼
-エージェント処理
-    │
-    ▼
-応答テキスト
+core の決定（本文 / NO_REPLY / A2UI）
     │
     ├── チャンネル writable チェック → false なら送信しない
     │

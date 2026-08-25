@@ -25,7 +25,9 @@ pub mod transcript;
 pub mod webhook_target;
 pub mod workspace;
 
+pub mod channel_config;
 pub mod run_request;
+pub mod session_inbound;
 
 pub use a2ui::{send_ui, send_ui_definition};
 pub use agent_gateway::{
@@ -40,8 +42,14 @@ pub use bridge::{
     CORE_DISPATCHABLE_ACTIONS, CORE_INLINE_ACTIONS, MCP_TOOL_PREFIX, OWNER_ONLY_ACTIONS,
     REJECTION_CODE_PREFIX, TRUSTED_ONLY_ACTIONS,
 };
+pub use channel_config::apply_discord_channel_config;
 pub use dispatcher::ActionDispatcher;
 pub use run_request::{LiveInboundScope, RunRequest};
+pub use session_inbound::{
+    admit_inbound_agent, admit_inbound_message, consecutive_trust_groups, plan_record_only_flags,
+    prepare_session_inbound, run_session_turn, start_session_turn, InboundAgentDrop,
+    InboundMessageDrop, NormalizedInbound,
+};
 pub use session_runtime::{SessionLocks, SessionRuntime};
 pub use subtask::{
     cancel_subtask, default_non_dispatch_tools, dispatch_settled, steer_subtask, CancelOutcome,

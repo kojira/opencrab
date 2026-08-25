@@ -27,8 +27,8 @@ use opencrab_core::EngineResult;
 use opencrab_gateway::{IncomingMessage, MessageContent, MessageSource, Sender};
 
 use super::{
-    consecutive_groups, create_event_channel, debounce_window_key, incoming_has_content,
-    process_incoming_message, process_interaction_response, process_subtask_completed,
+    create_event_channel, debounce_window_key, incoming_has_content, process_incoming_message,
+    process_interaction_response, process_subtask_completed,
 };
 
 /// `run_agent_response` の観測 1 件。
@@ -1249,7 +1249,7 @@ async fn debounced_window_records_every_message_but_runs_once() {
 
 /// #556: デバウンス**バッファ**のキーは **channel だけ**（権限では割らない）。同一 channel は
 /// 送信者・権限が何であれ同じバッファ、別 channel は別バッファ。権限による run 分割は
-/// フラッシュ時のグループ化（`consecutive_groups`）で行うので、キー自体は caller を見ない。
+/// フラッシュ時のグループ化（`consecutive_trust_groups`）で行うので、キー自体は caller を見ない。
 #[test]
 fn debounce_window_key_is_channel_only() {
     let a = discord_msg("222", "owner-1", "hi");
@@ -1276,7 +1276,7 @@ fn debounce_window_key_is_channel_only() {
 /// run 回数 = グループ数。
 #[test]
 fn flush_groups_consecutive_same_privilege() {
-    use opencrab_actions::CallerIdentity;
+    use opencrab_actions::{consecutive_trust_groups, CallerIdentity};
     let owner = CallerIdentity::Owner;
     let co_agent = CallerIdentity::CoAgent {
         agent_id: "agent-a".to_string(),
@@ -1289,25 +1289,25 @@ fn flush_groups_consecutive_same_privilege() {
 
     // A(owner) → D(外部) → B(co_agent) = [2,0,2] → [A][D][B] = 3 グループ（run 3 回）。
     assert_eq!(
-        consecutive_groups(&levels(&[&owner, &external, &co_agent])),
+        consecutive_trust_groups(&levels(&[&owner, &external, &co_agent])),
         vec![(0, 1), (1, 1), (2, 1)],
         "owner→外部→co_agent は権限が 2,0,2 と交互なので 3 グループ"
     );
     // A(owner) → B(co_agent) → D(外部) = [2,2,0] → [A,B][D] = 2 グループ（run 2 回）。
     assert_eq!(
-        consecutive_groups(&levels(&[&owner, &co_agent, &external])),
+        consecutive_trust_groups(&levels(&[&owner, &co_agent, &external])),
         vec![(0, 2), (2, 1)],
         "owner→co_agent は同権限(2)で合流、外部(0)は別グループ"
     );
     // A(owner) → A(owner) = [2,2] → [A,A] = 1 グループ（run 1 回）。
     assert_eq!(
-        consecutive_groups(&levels(&[&owner, &owner])),
+        consecutive_trust_groups(&levels(&[&owner, &owner])),
         vec![(0, 2)],
         "同一 owner 連続は 1 グループ"
     );
     // D(外部) → D(外部) → A(owner) = [0,0,2] → [D,D][A] = 2 グループ（run 2 回）。
     assert_eq!(
-        consecutive_groups(&levels(&[&external, &external, &owner])),
+        consecutive_trust_groups(&levels(&[&external, &external, &owner])),
         vec![(0, 2), (2, 1)],
         "外部連続は 1 グループ、owner は別グループ"
     );
