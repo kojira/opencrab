@@ -119,6 +119,7 @@ pub enum DeliveryEffect {
         body: String,
         stopped_by_limit: bool,
         tool_calls_made: usize,
+        iterations: usize,
     },
     NoReply,
     Empty,
@@ -138,6 +139,7 @@ pub fn delivery_effect(result: anyhow::Result<EngineResult>) -> DeliveryEffect {
                     body: er.response,
                     stopped_by_limit: er.stopped_by_limit,
                     tool_calls_made: er.tool_calls_made,
+                    iterations: er.iterations,
                 }
             }
         }
@@ -577,6 +579,7 @@ mod tests {
                 body: "hello".into(),
                 stopped_by_limit: false,
                 tool_calls_made: 2,
+                iterations: 1,
             }
         );
         let no_reply = EngineResult {

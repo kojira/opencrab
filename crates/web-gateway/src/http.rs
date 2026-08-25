@@ -9,7 +9,8 @@
 //!
 //! ここが持つのは HTTP の抽出とレスポンス整形だけで、session_id 規約・直列化・
 //! SSE 配送・非ブロック dispatch の実体は [`crate::gateway`] / [`crate::respond`] にある。
-//! 認可判定・セッション用意・DB 記録は [`WebAgentRunner`] 越しに呼ぶ。
+//! 誰か・権限は core の [`plan_inbound`](opencrab_actions::plan_inbound) 1 口。
+//! セッション用意・DB 記録は [`WebAgentRunner`] 越し（行の形は web 現行のまま）。
 //!
 //! **#177 の保証**: 応答生成の本体（`crate::respond` の `run_and_deliver`）は兄弟
 //! モジュールの private 項目なのでここからは到達できない。ハンドラが呼べるのは
@@ -27,9 +28,11 @@ use axum::{
 use futures::Stream;
 use serde::Deserialize;
 
+use opencrab_actions::{plan_inbound, NormalizedInboundEvent};
+
 use crate::gateway::{caller_type_label, web_session_id};
 use crate::respond::{run_and_deliver_serialized, WebTurnOutcome};
-use crate::runner::WebAgentRunner;
+use crate::runner::{WebAgentRunner, WebInboundIdentity, WEB_INBOUND_GUILD};
 
 /// Production router と read-only inventory が共有するルート宣言。
 ///
@@ -106,9 +109,10 @@ pub const DEFAULT_WEB_USER_ID: &str = "web-user";
 /// （session_logs の speaker_id にもそのまま入る）ため、空白のみの場合も含めて
 /// 既定の web ユーザとして扱う。
 ///
-/// owner 判定そのものは [`WebAgentRunner::resolve_caller`] の実装側（`crates/server`
-/// の `is_owner_id` / #164）に委ねる。前後の空白はここで落としておき、認可・
-/// セッションキー・speaker_id すべてで同じ値を使う。正規化とその owner 判定の
+/// owner 判定そのものは core の [`plan_inbound`](opencrab_actions::plan_inbound) が
+/// [`WebInboundIdentity`] 越しに [`WebAgentRunner::resolve_caller`] を呼んで行う
+/// （`crates/server` の `is_owner_id` / #164）。前後の空白はここで落としておき、
+/// 認可・セッションキー・speaker_id すべてで同じ値を使う。正規化とその owner 判定の
 /// 噛み合わせは server 側にテストがある。
 ///
 /// **公開契約ではない**: [`DEFAULT_WEB_USER_ID`] と同じく、`pub` なのは server 側の
@@ -138,8 +142,20 @@ pub async fn send_web_message<R: WebAgentRunner>(
     // 存在しないエージェントの弾き出し（#632）は `run_and_deliver_serialized`（web の
     // 唯一の公開ターン入口）が担う。ここでは `AgentNotFound` を 404 に写像する（下の match）。
 
-    // 1. 認可: trusted_users から caller を導出する。
-    let caller = state.resolve_caller(&id, &user_id);
+    // 1. 誰か・権限は core の inbound 1 口。ゲートは生識別子だけ渡す。
+    let inbound_event = NormalizedInboundEvent {
+        sender_id: &user_id,
+        channel_id: "",
+        guild_id: WEB_INBOUND_GUILD,
+    };
+    let plan = plan_inbound(
+        &WebInboundIdentity::new(&state),
+        &inbound_event,
+        "",
+        std::slice::from_ref(&id),
+    )
+    .expect("web inbound は DM ではない（WEB_INBOUND_GUILD が非空）");
+    let caller = plan.caller;
     let caller_type = caller_type_label(&caller);
 
     // 2. セッションを用意する（無ければ作成）。
@@ -370,7 +386,8 @@ mod tests {
         }
     }
 
-    /// レスポンスの `caller_type` は [`WebAgentRunner::resolve_caller`] の返り値由来であること。
+    /// レスポンスの `caller_type` は core の `plan_inbound` が
+    /// [`WebAgentRunner::resolve_caller`] から決めた値であること。
     ///
     /// 呼び出し元判定を捨てて固定値（例: 常に owner）を返す変異はここで落ちる。
     #[tokio::test]
@@ -403,8 +420,8 @@ mod tests {
     /// **ユーザ ID の正規化がハンドラ経路で効いていること**。
     ///
     /// 正規化関数の単体テストだけでは、ハンドラが正規化を通さなくなっても検出できない。
-    /// 認可判定（`resolve_caller`）と DB 記録（`record_user_message`）の両方へ
-    /// 同じ正規化済みの値が渡ることを観測する。
+    /// 認可判定（`plan_inbound` → `resolve_caller`）と DB 記録（`record_user_message`）の
+    /// 両方へ同じ正規化済みの値が渡ることを観測する。
     #[tokio::test]
     async fn handler_normalizes_the_user_id_before_authorization_and_recording() {
         let cases = [
@@ -704,7 +721,10 @@ mod tests {
             let (status, body) = call(&runner, send_request("a", inbound("hi"))).await;
             assert_eq!(status, StatusCode::OK, "{response:?}");
             let v: serde_json::Value = serde_json::from_str(&body).expect("JSON でない");
-            assert!(v["response"].is_null(), "{response:?} は本文を返さない: {body}");
+            assert!(
+                v["response"].is_null(),
+                "{response:?} は本文を返さない: {body}"
+            );
             assert_eq!(v["session_id"], sid);
             assert!(
                 tokio::time::timeout(Duration::from_millis(80), rx.recv())
@@ -713,7 +733,11 @@ mod tests {
                 "{response:?} は SSE 配送しない"
             );
             assert_eq!(runner.runs().len(), 1, "{response:?} でもターンは 1 本");
-            assert_eq!(runner.user_messages().len(), 1, "{response:?} でも発話は記録");
+            assert_eq!(
+                runner.user_messages().len(),
+                1,
+                "{response:?} でも発話は記録"
+            );
             assert!(
                 runner.replies().is_empty(),
                 "{response:?} は応答を転記しない"
@@ -730,7 +754,10 @@ mod tests {
         let (status, body) = call(&runner, send_request("a", inbound("hi"))).await;
         assert_eq!(status, StatusCode::OK);
         let v: serde_json::Value = serde_json::from_str(&body).expect("JSON でない");
-        assert!(v["response"].is_null(), "失敗時の HTTP 本文は response:null");
+        assert!(
+            v["response"].is_null(),
+            "失敗時の HTTP 本文は response:null"
+        );
         assert_eq!(v["session_id"], sid);
 
         let ev = recv_sse(&mut rx).await;

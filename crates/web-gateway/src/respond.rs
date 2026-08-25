@@ -16,7 +16,10 @@
 
 use std::sync::Arc;
 
-use opencrab_actions::{CallerIdentity, RunRequest, SubtaskCompletionSink};
+use opencrab_actions::{
+    delivery_effect, run_session_turn, CallerIdentity, DeliveryEffect, RunRequest,
+    SubtaskCompletionSink,
+};
 use opencrab_core::runtime_context::prepend_runtime_context;
 
 use crate::gateway::{WebEvent, WEB_SESSION_THEME};
@@ -87,8 +90,9 @@ pub async fn run_and_deliver_serialized<R: WebAgentRunner>(
     WebTurnOutcome::Ran(runner.web_gateway().run_serialized(session_id, fut).await)
 }
 
-/// 会話を DB から構築 → `run_agent_response`（非ブロック dispatch 付き）→ 応答を
-/// DB 保存 ＋ SSE 配送する共通経路。inbound と subtask resume の双方が使う。
+/// ターン起動は core の [`run_session_turn`](opencrab_actions::run_session_turn)。
+/// 配送形は [`delivery_effect`](opencrab_actions::delivery_effect)。ゲートは
+/// DB 保存 ＋ SSE 配送だけを行う。inbound と subtask resume の双方が使う。
 ///
 /// 返り値: 配送した応答本文（NO_REPLY / 空 / エラー時は None）。
 ///
@@ -111,61 +115,59 @@ async fn run_and_deliver<R: WebAgentRunner>(
         system_prompt = format!("{system_prompt}\n\n{suffix}");
     }
 
-    // 2. 会話文字列（DB から再構築 = 二重回答不変の要）。
-    let budget = runner.context_budget_tokens(agent_id);
-    let conversation = match runner.build_conversation_string(session_id, agent_id, budget) {
-        Ok(raw) => prepend_runtime_context(&raw, WEB_SESSION_THEME),
-        Err(e) => {
-            tracing::error!(session_id = %session_id, "web run: build_conversation_string failed: {e}");
-            return None;
-        }
-    };
-
-    // 3. 非ブロック dispatch（S3a）を有効化して実行。sink / registry は session 共有。
+    // 2. ターン起動は core（会話構築 + run）。web は inbound フックを足さない
+    //    （移設前どおり。`start_session_turn` にすると peer review 回収が新しく走る）。
     let registry = gateway.registry_for(session_id);
     let sink: Arc<dyn SubtaskCompletionSink> = Arc::new(WebCompletionSink::new(runner.clone()));
-    let run_req = RunRequest::new(
-        agent_id,
-        &agent_name,
+    let result = run_session_turn(
+        runner,
         session_id,
-        &system_prompt,
-        &conversation,
-        "web",
-        caller,
-    )
-    .with_dispatch(Some(registry), sink);
-
-    let result = runner.run_agent_response(run_req).await;
-
-    // 4. 応答の保存 ＋ SSE 配送。
-    match result {
-        Ok(er) if !er.response.trim().is_empty() && er.response.trim() != "NO_REPLY" => {
-            runner.record_agent_reply(
+        agent_id,
+        |raw| prepend_runtime_context(raw, WEB_SESSION_THEME),
+        |conversation| {
+            RunRequest::new(
                 agent_id,
+                &agent_name,
                 session_id,
-                &er.response,
-                er.iterations,
-                er.tool_calls_made,
-            );
+                &system_prompt,
+                &conversation,
+                "web",
+                caller,
+            )
+            .with_dispatch(Some(registry), sink)
+        },
+    )
+    .await?;
+
+    // 3. 配送形は core。SSE / 転記はゲート。空白のみは移設前どおり沈黙
+    //    （`delivery_effect` は非空なら Text。web は trim 空を配送しない）。
+    match delivery_effect(result) {
+        DeliveryEffect::Text {
+            body,
+            tool_calls_made,
+            iterations,
+            ..
+        } if !body.trim().is_empty() => {
+            runner.record_agent_reply(agent_id, session_id, &body, iterations, tool_calls_made);
             gateway.publish(
                 session_id,
                 &WebEvent {
                     kind: kind.to_string(),
                     agent_id: agent_id.to_string(),
-                    content: er.response.clone(),
+                    content: body.clone(),
                 },
             );
-            Some(er.response)
+            Some(body)
         }
-        Ok(_) => None, // NO_REPLY / 空: 配送しない。
-        Err(e) => {
-            tracing::error!(agent_id = %agent_id, session_id = %session_id, error = format!("{e:#}"), "web run: agent response failed");
+        DeliveryEffect::NoReply | DeliveryEffect::Empty | DeliveryEffect::Text { .. } => None,
+        DeliveryEffect::Failed { error } => {
+            tracing::error!(agent_id = %agent_id, session_id = %session_id, error = %error, "web run: agent response failed");
             gateway.publish(
                 session_id,
                 &WebEvent {
                     kind: "error".to_string(),
                     agent_id: agent_id.to_string(),
-                    content: format!("(error: {e})"),
+                    content: format!("(error: {error})"),
                 },
             );
             None
