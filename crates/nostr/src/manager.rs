@@ -825,7 +825,42 @@ async fn run_session_watch_loop<R: NostrAgentRunner + Clone>(
     let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_RESPONSES));
     let queues = Arc::new(SessionQueues::new(SESSION_QUEUE_CAPACITY));
     let bundle = Arc::new(Mutex::new(TimelineBundle::default()));
-    let debounce = Arc::new(Mutex::new(opencrab_actions::PrivilegeDebounce::default()));
+    let privilege = opencrab_actions::PrivilegeFire::new({
+        let runner = runner.clone();
+        let cli = cli.clone();
+        let agent = agent_id.clone();
+        let session_id = watch.session_id.clone();
+        let allow = allow.clone();
+        let admin = admin.clone();
+        let runtime = runtime.clone();
+        let permits = permits.clone();
+        let queues = queues.clone();
+        move |held: Vec<(NostrEvent, opencrab_actions::CallerIdentity)>| {
+            let runner = runner.clone();
+            let cli = cli.clone();
+            let agent = agent.clone();
+            let session_id = session_id.clone();
+            let allow = allow.clone();
+            let admin = admin.clone();
+            let runtime = runtime.clone();
+            let permits = permits.clone();
+            let queues = queues.clone();
+            async move {
+                fire_privilege_held(
+                    &runner,
+                    &cli,
+                    &agent,
+                    &session_id,
+                    &allow,
+                    &admin,
+                    &runtime,
+                    &permits,
+                    &queues,
+                    held,
+                );
+            }
+        }
+    });
     loop {
         match run_session_watch_once(
             &runner,
@@ -841,7 +876,7 @@ async fn run_session_watch_loop<R: NostrAgentRunner + Clone>(
             &permits,
             &queues,
             &bundle,
-            &debounce,
+            &privilege,
         )
         .await
         {
@@ -876,7 +911,7 @@ async fn run_session_watch_once<R: NostrAgentRunner + Clone>(
     permits: &Arc<Semaphore>,
     queues: &Arc<SessionQueues>,
     bundle: &Arc<Mutex<TimelineBundle>>,
-    debounce: &Arc<Mutex<opencrab_actions::PrivilegeDebounce<NostrEvent>>>,
+    privilege: &opencrab_actions::PrivilegeFire<NostrEvent>,
 ) -> anyhow::Result<()> {
     let config = watch_subscribe_config(watch, relays.to_vec())?;
     let interval = Duration::from_secs(watch.interval_secs as u64);
@@ -905,7 +940,6 @@ async fn run_session_watch_once<R: NostrAgentRunner + Clone>(
         "session watch subscribed"
     );
     loop {
-        let debounce_due = debounce.lock().unwrap().next_due();
         tokio::select! {
             biased;
             line = lines.next_line() => {
@@ -919,7 +953,7 @@ async fn run_session_watch_once<R: NostrAgentRunner + Clone>(
                 }
                 handle_watch_event(
                     runner, cli, agent_id, watch, &config, self_pubkey, allow, dropped,
-                    admin, runtime, permits, queues, bundle, debounce, event,
+                    admin, runtime, permits, queues, bundle, privilege, event,
                 )
                 .await;
             }
@@ -927,18 +961,6 @@ async fn run_session_watch_once<R: NostrAgentRunner + Clone>(
                 flush_timeline_bundle(
                     runner, cli, agent_id, watch, allow, admin, runtime, permits, queues,
                     bundle,
-                )
-                .await;
-            }
-            _ = async {
-                match debounce_due {
-                    Some(due) => tokio::time::sleep_until(due).await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                flush_debounce_ready(
-                    runner, cli, agent_id, watch, allow, admin, runtime, permits, queues,
-                    debounce,
                 )
                 .await;
             }
@@ -966,7 +988,7 @@ async fn handle_watch_event<R: NostrAgentRunner>(
     permits: &Arc<Semaphore>,
     queues: &Arc<SessionQueues>,
     bundle: &Arc<Mutex<TimelineBundle>>,
-    debounce: &Arc<Mutex<opencrab_actions::PrivilegeDebounce<NostrEvent>>>,
+    privilege: &opencrab_actions::PrivilegeFire<NostrEvent>,
     event: NostrEvent,
 ) {
     let self_pk = self_pubkey.read().unwrap().clone();
@@ -989,8 +1011,6 @@ async fn handle_watch_event<R: NostrAgentRunner>(
             };
             let sources = allow.read().unwrap();
             let allow_sets = sources.as_watch_allow();
-            let now = tokio::time::Instant::now();
-            let mut debounce_g = debounce.lock().unwrap();
             let hold_event = event.clone();
             let mut held = false;
             let mut admitted = false;
@@ -1007,7 +1027,7 @@ async fn handle_watch_event<R: NostrAgentRunner>(
                     allow: allow_sets,
                     owner: &sources.owner,
                     followees: &sources.followees,
-                    debounce: Some((&mut *debounce_g, now)),
+                    privilege: Some(privilege),
                 }),
                 |_| {
                     held = true;
@@ -1016,7 +1036,6 @@ async fn handle_watch_event<R: NostrAgentRunner>(
                 |_, _| admitted = true,
                 |_, adm| run_caller = Some(adm.caller.clone()),
             );
-            drop(debounce_g);
             drop(sources);
             if let Err(e) = result {
                 error!(error = %e, "watch inbound 失敗");
@@ -1084,40 +1103,39 @@ async fn flush_timeline_bundle<R: NostrAgentRunner>(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn flush_debounce_ready<R: NostrAgentRunner>(
+fn fire_privilege_held<R: NostrAgentRunner>(
     runner: &R,
     cli: &NostaroCli,
     agent_id: &str,
-    watch: &opencrab_db::queries::SessionWatchRow,
+    session_id: &str,
     allow: &AllowGate,
     admin: &Arc<dyn NostrIdentityAdmin>,
     runtime: &Arc<NostrSessionRuntime>,
     permits: &Arc<Semaphore>,
     queues: &Arc<SessionQueues>,
-    debounce: &Arc<Mutex<opencrab_actions::PrivilegeDebounce<NostrEvent>>>,
+    held: Vec<(NostrEvent, opencrab_actions::CallerIdentity)>,
 ) {
-    let groups = debounce
-        .lock()
-        .unwrap()
-        .take_ready(tokio::time::Instant::now());
-    for (_interval, held) in groups {
-        if held.is_empty() {
+    if held.is_empty() {
+        return;
+    }
+    let sources = allow.read().unwrap();
+    let mut prepared = vec![false; held.len()];
+    for (i, (event, _)) in held.iter().enumerate() {
+        if !sources.is_allowed(&crate::pubkey::follow_key(&event.pubkey)) {
             continue;
         }
-        flush_event_group(
-            runner,
-            cli,
-            agent_id,
-            &watch.session_id,
-            allow,
-            admin,
-            runtime,
-            permits,
-            queues,
-            held,
-            false,
-        );
+        prepared[i] = prepare_and_maybe_relay(runner, agent_id, session_id, event);
     }
+    drop(sources);
+    let last = held.len() - 1;
+    if !prepared[last] {
+        return;
+    }
+    let (event, caller) = held[last].clone();
+    let label = crate::watch::watch_kind_label(&event);
+    enqueue_watch_turn(
+        runner, cli, agent_id, session_id, admin, runtime, permits, queues, event, label, caller,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1165,7 +1183,7 @@ fn flush_event_group<R: NostrAgentRunner>(
             allow: allow_sets,
             owner: &empty_set,
             followees: &empty_set,
-            debounce: None,
+            privilege: None,
         }),
         |_| unreachable!("watch flush は権限デバウンスしない"),
         |i, _| {

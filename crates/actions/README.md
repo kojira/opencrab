@@ -7,12 +7,15 @@
 
 ゲートは正規化受信（本文・送信者の生識別子・対象 `session_id`）の束を
 [`accept_inbound`] へ 1 回投げる。誰か・権限・standing・権限デバウンス・
-trust 分割は core が決める。返すのは配送 effect（ターンした件）。
+trust 分割は core が決める。権限デバウンスのバッファと時限は
+[`PrivilegeFire`] が持つ（ゲートは `next_due` も保留も見ない）。
+返すのは配送 effect（ターンした件）。
 Discord と web が同じ入口を使う（web 専用の別経路は無い）。
 
 | 関数 | 決めること |
 |---|---|
-| `accept_inbound` | 唯一の入り口。caller・DM/whitelist・#698 許可・standing・権限デバウンス・Q13 分割。`on_admitted` / `on_run` を呼ぶ |
+| `accept_inbound` | 唯一の入り口。caller・DM/whitelist・#698 許可・standing・権限デバウンス・Q13 分割。`on_admitted` / `on_run` を呼ぶ。抱えた件は `PrivilegeFire` が時限発火 |
+| `PrivilegeFire` | 権限デバウンスの内部バッファと tokio 時限タスク。間隔到達でターン起動クロージャを呼ぶ |
 | `delivery_effect` | ターン結果 → 本文 / NO_REPLY / Empty / Failed |
 | `prepare_session_inbound` | `ensure_session` + inbound 記録（ロック前・#284）。Discord / `TranscriptSource` |
 | `prepare_session_inbound_write` | 同じ順序（ensure → record）。web は行の形が現行 `session_logs`（`TranscriptSource` は使わない） |

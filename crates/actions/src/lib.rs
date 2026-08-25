@@ -51,7 +51,7 @@ pub use session_inbound::{
     prepare_session_inbound, prepare_session_inbound_write, run_session_turn, start_session_turn,
     AdmittedInbound, DeliveryEffect, InboundAgentDrop, InboundDrop, InboundLookups,
     InboundMessageDrop, InboundWork, NormalizedInbound, NormalizedInboundEvent,
-    PrepareSessionInboundError, PrivilegeDebounce, WatchAccept,
+    PrepareSessionInboundError, PrivilegeFire, WatchAccept,
 };
 pub use session_runtime::{SessionLocks, SessionRuntime};
 pub use session_watch_policy::{

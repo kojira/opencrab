@@ -2,7 +2,7 @@
 //!
 //! ゲートはイベントの形だけを見る（誰かを見ない）。
 //! 対話系は即時転送、タイムラインは `interval_secs` で束ねて core の inbound 1 口へ。
-//! 権限毎デバウンスは core 内部バッファ（[`opencrab_actions::PrivilegeDebounce`]）。
+//! 権限毎デバウンスは core の [`opencrab_actions::PrivilegeFire`]（バッファと時限）。
 //! 既存 `inbound_kind_label` は変えない（現行 `nostr-{agent}` のラベルを維持）。
 
 use std::sync::Arc;
@@ -182,7 +182,7 @@ impl TimelineBundle {
 ///
 /// Discord の DM / whitelist は見ない（#698 の許可集合が決める）。
 #[allow(clippy::too_many_arguments)]
-pub fn accept_watch_events<R: NostrAgentRunner, T>(
+pub fn accept_watch_events<R: NostrAgentRunner, T: Send + 'static>(
     runner: &R,
     agent_id: &str,
     session_id: &str,
@@ -410,8 +410,8 @@ mod tests {
     use std::time::Duration;
 
     use opencrab_actions::{
-        accept_inbound, InboundLookups, InboundWork, PrivilegeDebounce, WatchAccept,
-        WatchAllowSets, AGREED_IMMEDIATE_KINDS,
+        accept_inbound, InboundLookups, InboundWork, PrivilegeFire, WatchAccept, WatchAllowSets,
+        AGREED_IMMEDIATE_KINDS,
     };
 
     fn ev(kind: u32, tags: Vec<Vec<String>>) -> NostrEvent {
@@ -588,15 +588,37 @@ mod tests {
         callers: std::collections::HashMap<String, CallerIdentity>,
         allow_extra: HashSet<String>,
         bundle: TimelineBundle,
-        debounce: PrivilegeDebounce<NostrEvent>,
-        pub turns: Vec<String>,
+        privilege: PrivilegeFire<NostrEvent>,
+        pub turns: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
         pub dropped: Vec<String>,
-        pub prepares: Vec<String>,
-        pub relays: Vec<String>,
+        pub prepares: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        pub relays: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     }
 
     impl MockE2E {
         fn new() -> Self {
+            let turns = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let prepares = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let relays = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let t = turns.clone();
+            let p = prepares.clone();
+            let r = relays.clone();
+            let privilege = PrivilegeFire::new(move |held: Vec<(NostrEvent, CallerIdentity)>| {
+                let t = t.clone();
+                let p = p.clone();
+                let r = r.clone();
+                async move {
+                    let mut ids = Vec::new();
+                    for (e, _) in &held {
+                        p.lock().unwrap().push(e.id.clone());
+                        r.lock().unwrap().push(e.id.clone());
+                        ids.push(format!("{}:{}", watch_kind_label(e), e.id));
+                    }
+                    t.lock()
+                        .unwrap()
+                        .push(format!("debounce:{}", ids.join(",")));
+                }
+            });
             Self {
                 self_pk: SELF.into(),
                 beyond: true,
@@ -607,17 +629,33 @@ mod tests {
                 callers: std::collections::HashMap::new(),
                 allow_extra: HashSet::new(),
                 bundle: TimelineBundle::default(),
-                debounce: PrivilegeDebounce::default(),
-                turns: Vec::new(),
+                privilege,
+                turns,
                 dropped: Vec::new(),
-                prepares: Vec::new(),
-                relays: Vec::new(),
+                prepares,
+                relays,
             }
         }
 
-        fn prepare(&mut self, event: &NostrEvent) {
-            self.prepares.push(event.id.clone());
-            self.relays.push(event.id.clone());
+        fn turns(&self) -> Vec<String> {
+            self.turns.lock().unwrap().clone()
+        }
+
+        fn prepares(&self) -> Vec<String> {
+            self.prepares.lock().unwrap().clone()
+        }
+
+        fn relays(&self) -> Vec<String> {
+            self.relays.lock().unwrap().clone()
+        }
+
+        fn prepare(&self, event: &NostrEvent) {
+            self.prepares.lock().unwrap().push(event.id.clone());
+            self.relays.lock().unwrap().push(event.id.clone());
+        }
+
+        fn record_turn(&self, turn: String) {
+            self.turns.lock().unwrap().push(turn);
         }
 
         fn feed(&mut self, event: NostrEvent) {
@@ -660,7 +698,6 @@ mod tests {
                         kind_label: label,
                         author_key: &key,
                     };
-                    let now = tokio::time::Instant::now();
                     let mut held = false;
                     let mut admitted = false;
                     let ev_hold = event.clone();
@@ -675,7 +712,7 @@ mod tests {
                             allow,
                             owner: &self.owner,
                             followees: &self.followees,
-                            debounce: Some((&mut self.debounce, now)),
+                            privilege: Some(&self.privilege),
                         }),
                         |_| {
                             held = true;
@@ -690,7 +727,7 @@ mod tests {
                     }
                     if admitted {
                         self.prepare(&event);
-                        self.turns.push(format!("immediate:{label}:{}", event.id));
+                        self.record_turn(format!("immediate:{label}:{}", event.id));
                         return;
                     }
                     self.dropped.push(format!("allow:{}", event.id));
@@ -707,40 +744,25 @@ mod tests {
                 self.prepare(e);
             }
             let ids: Vec<_> = evs.iter().map(|e| e.id.as_str()).collect();
-            self.turns.push(format!("bundle:{}", ids.join(",")));
-        }
-
-        fn flush_debounce(&mut self) {
-            let groups = self.debounce.take_all();
-            if groups.is_empty() {
-                return;
-            }
-            let mut ids = Vec::new();
-            for (interval, evs) in groups {
-                for e in &evs {
-                    self.prepare(e);
-                    ids.push(format!("{}:{}:{interval}", watch_kind_label(e), e.id));
-                }
-            }
-            self.turns.push(format!("debounce:{}", ids.join(",")));
+            self.record_turn(format!("bundle:{}", ids.join(",")));
         }
     }
 
-    #[test]
-    fn e2e_bundle_fire() {
+    #[tokio::test]
+    async fn e2e_bundle_fire() {
         let mut h = MockE2E::new();
         h.feed(ev(1, vec![vec!["p".into(), "cc".repeat(32)]]));
         let mut e2 = ev(1, vec![]);
         e2.id = "id2".into();
         h.feed(e2);
-        assert!(h.turns.is_empty(), "束ねは flush まで発火しない");
+        assert!(h.turns().is_empty(), "束ねは flush まで発火しない");
         assert_eq!(h.bundle.len(), 2);
         h.flush_bundle();
-        assert_eq!(h.turns, vec!["bundle:id1,id2".to_string()]);
+        assert_eq!(h.turns(), vec!["bundle:id1,id2".to_string()]);
     }
 
-    #[test]
-    fn e2e_immediate_transfer_owner_reply() {
+    #[tokio::test(start_paused = true)]
+    async fn e2e_immediate_transfer_owner_reply() {
         let mut h = MockE2E::new();
         let owner_pk = "aa".repeat(32);
         h.owner.insert(follow_key(&owner_pk));
@@ -753,50 +775,61 @@ mod tests {
             ],
         );
         h.feed(reply);
-        assert_eq!(h.turns, vec!["immediate:リプライ:id1".to_string()]);
-        assert_eq!(h.prepares, vec!["id1".to_string()]);
-        assert_eq!(h.relays, vec!["id1".to_string()]);
+        assert_eq!(h.turns(), vec!["immediate:リプライ:id1".to_string()]);
+        assert_eq!(h.prepares(), vec!["id1".to_string()]);
+        assert_eq!(h.relays(), vec!["id1".to_string()]);
         assert!(h.bundle.is_empty());
-        h.flush_debounce();
+        tokio::time::advance(Duration::from_secs(60)).await;
         h.flush_bundle();
         assert_eq!(
-            h.prepares,
+            h.prepares(),
             vec!["id1".to_string()],
-            "即時は handle 時のみ prepare（flush で二重にしない）"
+            "即時は handle 時のみ prepare（時限発火で二重にしない）"
         );
-        assert_eq!(h.relays, vec!["id1".to_string()]);
+        assert_eq!(h.relays(), vec!["id1".to_string()]);
         assert!(AGREED_IMMEDIATE_KINDS.contains(&"リプライ"));
     }
 
-    #[test]
-    fn e2e_policy_owner_repost_debounces_on_empty_policy() {
+    #[tokio::test(start_paused = true)]
+    async fn e2e_policy_owner_repost_debounces_on_empty_policy() {
         let mut h = MockE2E::new();
         let owner_pk = "aa".repeat(32);
         h.owner.insert(follow_key(&owner_pk));
         h.callers.insert(owner_pk.clone(), CallerIdentity::Owner);
         h.feed(ev(6, vec![]));
-        assert!(h.turns.is_empty());
-        assert_eq!(h.debounce.len(), 1);
-        assert_eq!(h.debounce.intervals(), vec![60]);
-        assert!(h.prepares.is_empty(), "束ね経路は handle で prepare しない");
-        assert!(h.relays.is_empty());
-        h.flush_debounce();
-        assert_eq!(h.turns, vec!["debounce:リポスト:id1:60".to_string()]);
-        assert_eq!(h.prepares, vec!["id1".to_string()]);
-        assert_eq!(h.relays, vec!["id1".to_string()]);
+        assert!(h.turns().is_empty());
+        assert!(
+            h.prepares().is_empty(),
+            "束ね経路は handle で prepare しない"
+        );
+        assert!(h.relays().is_empty());
+        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if !h.turns().is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("watch 間隔で権限デバウンスが発火する");
+        assert_eq!(h.turns(), vec!["debounce:リポスト:id1".to_string()]);
+        assert_eq!(h.prepares(), vec!["id1".to_string()]);
+        assert_eq!(h.relays(), vec!["id1".to_string()]);
     }
 
-    #[test]
-    fn e2e_policy_unallowed_is_dropped() {
+    #[tokio::test]
+    async fn e2e_policy_unallowed_is_dropped() {
         let mut h = MockE2E::new();
         h.feed(ev(7, vec![]));
         assert_eq!(h.dropped, vec!["allow:id1".to_string()]);
-        assert!(h.turns.is_empty());
-        assert!(h.prepares.is_empty());
+        assert!(h.turns().is_empty());
+        assert!(h.prepares().is_empty());
     }
 
-    #[test]
-    fn e2e_policy_debounce_uses_class_interval_not_watch_interval() {
+    #[tokio::test(start_paused = true)]
+    async fn e2e_policy_debounce_uses_class_interval_not_watch_interval() {
         let mut h = MockE2E::new();
         h.interval = 60;
         h.policy = serde_json::json!({
@@ -810,40 +843,27 @@ mod tests {
         h.allow_extra.insert(follow_key(&author));
         h.callers.insert(author, CallerIdentity::Agent);
         h.feed(ev(6, vec![]));
-        assert!(h.turns.is_empty());
-        assert_eq!(
-            h.debounce.intervals(),
-            vec![300],
-            "core が返した権限毎間隔を捨てない"
+        assert!(h.turns().is_empty());
+        assert!(h.prepares().is_empty());
+        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            h.turns().is_empty(),
+            "watch interval 60s では発火しない（権限間隔 300s）"
         );
-        assert_ne!(h.debounce.intervals(), vec![h.interval]);
-        assert!(h.prepares.is_empty());
-        h.flush_debounce();
-        assert_eq!(h.turns, vec!["debounce:リポスト:id1:300".to_string()]);
-        assert_eq!(h.prepares, vec!["id1".to_string()]);
-        assert_eq!(h.relays, vec!["id1".to_string()]);
-    }
-
-    #[test]
-    fn debounce_hold_flushes_each_privilege_interval() {
-        let mut hold = PrivilegeDebounce::default();
-        let now = tokio::time::Instant::now();
-        let mut fast = ev(6, vec![]);
-        fast.id = "fast".into();
-        let mut slow = ev(6, vec![]);
-        slow.id = "slow".into();
-        hold.push(fast, 30, now);
-        hold.push(slow, 300, now);
-        assert_eq!(hold.intervals(), vec![30, 300]);
-        let at_watch = hold.take_ready(now + Duration::from_secs(60));
-        assert_eq!(at_watch.len(), 1);
-        assert_eq!(at_watch[0].0, 30);
-        assert_eq!(at_watch[0].1[0].id, "fast");
-        assert_eq!(hold.intervals(), vec![300]);
-        let later = hold.take_ready(now + Duration::from_secs(300));
-        assert_eq!(later.len(), 1);
-        assert_eq!(later[0].0, 300);
-        assert_eq!(later[0].1[0].id, "slow");
-        assert!(hold.is_empty());
+        tokio::time::advance(Duration::from_secs(240)).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if !h.turns().is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("権限間隔 300s で発火する");
+        assert_eq!(h.turns(), vec!["debounce:リポスト:id1".to_string()]);
+        assert_eq!(h.prepares(), vec!["id1".to_string()]);
+        assert_eq!(h.relays(), vec!["id1".to_string()]);
     }
 }

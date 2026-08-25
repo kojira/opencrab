@@ -2,13 +2,16 @@
 //!
 //! ゲートは正規化した受信（本文・送信者の生識別子・対象 session_id）の束を
 //! [`accept_inbound`] へ 1 回投げる。誰か・権限・standing・権限デバウンス・
-//! trust 分割・record_only はここが決める。配送（送信・描画・typing・webhook）
-//! はゲートに残す。core が返すのは [`DeliveryEffect`]（ターンした件）。
+//! trust 分割・record_only はここが決める。権限デバウンスのバッファと時限は
+//! [`PrivilegeFire`] が持つ。配送（送信・描画・typing・webhook）はゲートに残す。
+//! core が返すのは [`DeliveryEffect`]（ターンした件）。
 //!
 //! SkillEngine / conversation の実装は触らない。ゲートが直呼びしていた
 //! [`crate::AgentRuntime`] の入口を、このモジュール 1 箇所へ集める。
 
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::agent_runtime::AgentRuntime;
@@ -101,8 +104,8 @@ pub struct WatchAccept<'a, T> {
     pub allow: WatchAllowSets<'a>,
     pub owner: &'a std::collections::HashSet<String>,
     pub followees: &'a std::collections::HashSet<String>,
-    /// `Some` = 対話系の即時転送（権限デバウンスしうる）。`None` = 束 flush（抱えない）。
-    pub debounce: Option<(&'a mut PrivilegeDebounce<T>, tokio::time::Instant)>,
+    /// `Some` = 対話系（core が権限デバウンスし時限発火）。`None` = 機械束ね flush（抱えない）。
+    pub privilege: Option<&'a PrivilegeFire<T>>,
 }
 
 /// 通した 1 件。ゲートはこれを見て配送（👀 / ログ）する。ターン対象は `on_run` だけ。
@@ -140,9 +143,9 @@ impl std::fmt::Display for InboundDrop {
 
 impl std::error::Error for InboundDrop {}
 
-/// 権限毎デバウンス（core 内部バッファ）。ゲートは `next_due` で起きるだけ。
+/// 権限毎デバウンスの内部バッファ。タイマーは [`PrivilegeFire`] が持つ。
 #[derive(Debug)]
-pub struct PrivilegeDebounce<T> {
+struct PrivilegeDebounce<T> {
     buckets: BTreeMap<u64, PrivilegeBucket<T>>,
 }
 
@@ -161,7 +164,7 @@ impl<T> Default for PrivilegeDebounce<T> {
 }
 
 impl<T> PrivilegeDebounce<T> {
-    pub fn push(&mut self, item: T, interval_secs: u64, now: tokio::time::Instant) {
+    fn push(&mut self, item: T, interval_secs: u64, now: tokio::time::Instant) {
         self.buckets
             .entry(interval_secs)
             .or_insert_with(|| PrivilegeBucket {
@@ -172,15 +175,16 @@ impl<T> PrivilegeDebounce<T> {
             .push(item);
     }
 
-    pub fn next_due(&self) -> Option<tokio::time::Instant> {
+    fn next_due(&self) -> Option<tokio::time::Instant> {
         self.buckets.values().map(|b| b.due).min()
     }
 
-    pub fn intervals(&self) -> Vec<u64> {
+    #[cfg(test)]
+    fn intervals(&self) -> Vec<u64> {
         self.buckets.keys().copied().collect()
     }
 
-    pub fn take_ready(&mut self, now: tokio::time::Instant) -> Vec<(u64, Vec<T>)> {
+    fn take_ready(&mut self, now: tokio::time::Instant) -> Vec<(u64, Vec<T>)> {
         let keys: Vec<u64> = self
             .buckets
             .iter()
@@ -192,19 +196,118 @@ impl<T> PrivilegeDebounce<T> {
             .collect()
     }
 
-    pub fn take_all(&mut self) -> Vec<(u64, Vec<T>)> {
-        std::mem::take(&mut self.buckets)
-            .into_iter()
-            .map(|(k, b)| (k, b.items))
-            .collect()
-    }
-
-    pub fn is_empty(&self) -> bool {
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
         self.buckets.is_empty()
     }
 
-    pub fn len(&self) -> usize {
+    #[cfg(test)]
+    fn len(&self) -> usize {
         self.buckets.values().map(|b| b.items.len()).sum()
+    }
+}
+
+struct PrivilegeHeld<T> {
+    item: T,
+    caller: CallerIdentity,
+}
+
+struct PrivilegeFireInner<T> {
+    buf: Mutex<PrivilegeDebounce<PrivilegeHeld<T>>>,
+    notify: tokio::sync::Notify,
+    abort: Mutex<Option<tokio::task::AbortHandle>>,
+}
+
+impl<T> Drop for PrivilegeFireInner<T> {
+    fn drop(&mut self) {
+        if let Some(handle) = self.abort.lock().unwrap().take() {
+            handle.abort();
+        }
+    }
+}
+
+/// 権限デバウンスの core 側ランタイム。バッファと時限タスクを内包する。
+///
+/// ゲートは寿命を合わせ、時限到達で渡すクロージャ（ターン起動）だけを渡す。
+/// `next_due` / 保留 / 間隔はゲートに出さない。
+pub struct PrivilegeFire<T> {
+    inner: Arc<PrivilegeFireInner<T>>,
+}
+
+impl<T> Clone for PrivilegeFire<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<T: Send + 'static> PrivilegeFire<T> {
+    /// `on_due` は間隔到達時に core が呼ぶ。再 `accept_inbound` ではない。
+    pub fn new<F, Fut>(on_due: F) -> Self
+    where
+        F: Fn(Vec<(T, CallerIdentity)>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let inner = Arc::new(PrivilegeFireInner {
+            buf: Mutex::new(PrivilegeDebounce::default()),
+            notify: tokio::sync::Notify::new(),
+            abort: Mutex::new(None),
+        });
+        let on_due = Arc::new(on_due);
+        let worker = Arc::clone(&inner);
+        let handle = tokio::spawn(async move {
+            loop {
+                let due = worker.buf.lock().unwrap().next_due();
+                match due {
+                    None => worker.notify.notified().await,
+                    Some(at) => {
+                        tokio::select! {
+                            _ = tokio::time::sleep_until(at) => {
+                                let groups = worker
+                                    .buf
+                                    .lock()
+                                    .unwrap()
+                                    .take_ready(tokio::time::Instant::now());
+                                for (_interval, held) in groups {
+                                    let items: Vec<(T, CallerIdentity)> = held
+                                        .into_iter()
+                                        .map(|h| (h.item, h.caller))
+                                        .collect();
+                                    if !items.is_empty() {
+                                        on_due(items).await;
+                                    }
+                                }
+                            }
+                            _ = worker.notify.notified() => {}
+                        }
+                    }
+                }
+            }
+        });
+        *inner.abort.lock().unwrap() = Some(handle.abort_handle());
+        Self { inner }
+    }
+
+    fn hold(&self, item: T, caller: CallerIdentity, interval_secs: u64) {
+        self.inner.buf.lock().unwrap().push(
+            PrivilegeHeld { item, caller },
+            interval_secs,
+            tokio::time::Instant::now(),
+        );
+        self.inner.notify.notify_one();
+    }
+}
+
+impl<T> PrivilegeFire<T> {
+    #[cfg(test)]
+    fn held_intervals(&self) -> Vec<u64> {
+        self.inner.buf.lock().unwrap().intervals()
+    }
+
+    #[cfg(test)]
+    fn held_len(&self) -> usize {
+        self.inner.buf.lock().unwrap().len()
     }
 }
 
@@ -251,7 +354,7 @@ pub fn delivery_effect(result: anyhow::Result<EngineResult>) -> DeliveryEffect {
 /// [`accept_inbound`] が [`InboundLookups::dm_allowed_any`] の結果を渡す。非 DM は常に通す。
 ///
 /// ゲートは呼ばない。[`accept_inbound`] が内部で使う。
-pub fn admit_inbound_message(is_dm: bool, dm_allowed_any: bool) -> Result<(), InboundMessageDrop> {
+fn admit_inbound_message(is_dm: bool, dm_allowed_any: bool) -> Result<(), InboundMessageDrop> {
     if is_dm && !dm_allowed_any {
         Err(InboundMessageDrop::DmNotTrusted)
     } else {
@@ -262,7 +365,7 @@ pub fn admit_inbound_message(is_dm: bool, dm_allowed_any: bool) -> Result<(), In
 /// エージェント個別の権限ゲート（DM 個別信頼 / チャンネル whitelist）。
 ///
 /// ゲートは呼ばない。[`accept_inbound`] が内部で使う。
-pub fn admit_inbound_agent(
+fn admit_inbound_agent(
     is_dm: bool,
     dm_allowed: bool,
     channel_whitelisted: bool,
@@ -313,17 +416,18 @@ fn admit_one(
 /// 唯一の inbound 入り口。ゲートは正規化イベントの束を 1 回投げる。
 ///
 /// - 対話系（`watch` 無し）: trust 分割（Q13）。`on_admitted` は通した件、`on_run` はトリガー。
-/// - watch 即時（`debounce` あり）: 許可集合・standing・権限デバウンス。抱えた件は callback しない。
-/// - watch 束 flush（`debounce` 無し）: 許可集合。通した最後だけ `on_run`。
+/// - watch 即時（`privilege` あり）: 許可集合・standing・権限デバウンス。抱えた件は
+///   [`PrivilegeFire`] が時限発火する（callback しない）。
+/// - watch 束 flush（`privilege` 無し）: 許可集合。通した最後だけ `on_run`。
 ///
 /// `take_hold` は権限デバウンスに抱えるときだけ呼ばれる。
 #[allow(clippy::too_many_arguments)]
-pub fn accept_inbound<T>(
+pub fn accept_inbound<T: Send + 'static>(
     items: &[InboundWork<'_>],
     owner_id: &str,
     agent_ids: &[String],
     lookups: &InboundLookups<'_>,
-    mut watch: Option<WatchAccept<'_, T>>,
+    watch: Option<WatchAccept<'_, T>>,
     mut take_hold: impl FnMut(usize) -> T,
     mut on_admitted: impl FnMut(usize, &AdmittedInbound),
     mut on_run: impl FnMut(usize, &AdmittedInbound),
@@ -352,8 +456,8 @@ pub fn accept_inbound<T>(
             }
         };
         trust_at[i] = Some(plan.caller.trust_level());
-        if let Some(w) = watch.as_mut() {
-            if let Some((buf, now)) = w.debounce.as_mut() {
+        if let Some(w) = watch.as_ref() {
+            if let Some(fire) = w.privilege {
                 let standing = watch_author_standing(item.author_key, w.owner, w.followees);
                 let hold = watch_hold_interval_secs(
                     w.policy_json,
@@ -364,7 +468,7 @@ pub fn accept_inbound<T>(
                 )
                 .map_err(InboundDrop::Policy)?;
                 if let Some(secs) = hold {
-                    buf.push(take_hold(i), secs, *now);
+                    fire.hold(take_hold(i), plan.caller.clone(), secs);
                     continue;
                 }
             }
@@ -372,7 +476,7 @@ pub fn accept_inbound<T>(
         admitted.push((i, plan));
     }
 
-    let run_flags = if watch.as_ref().is_some_and(|w| w.debounce.is_none()) {
+    let run_flags = if watch.as_ref().is_some_and(|w| w.privilege.is_none()) {
         let mut flags = vec![false; admitted.len()];
         if let Some(last) = flags.last_mut() {
             *last = true;
@@ -938,8 +1042,8 @@ mod tests {
         assert_eq!(runs, vec![1], "同権限 3 通の内容あり最後だけ run");
     }
 
-    #[test]
-    fn accept_inbound_watch_holds_non_immediate() {
+    #[tokio::test]
+    async fn accept_inbound_watch_holds_non_immediate() {
         let caller = CallerIdentity::Owner;
         let resolve = |_: &str, _: &[String], _: &str| caller.clone();
         let lookups = InboundLookups {
@@ -957,8 +1061,7 @@ mod tests {
             co_agents: &empty,
             trusted_users: &empty,
         };
-        let mut debounce = PrivilegeDebounce::default();
-        let now = tokio::time::Instant::now();
+        let fire = PrivilegeFire::new(|_items: Vec<(usize, CallerIdentity)>| async {});
         let work = InboundWork {
             event: NormalizedInboundEvent {
                 sender_id: "aa",
@@ -983,7 +1086,7 @@ mod tests {
                 allow,
                 owner: &owner,
                 followees: &followees,
-                debounce: Some((&mut debounce, now)),
+                privilege: Some(&fire),
             }),
             |i| {
                 held.push(i);
@@ -996,8 +1099,8 @@ mod tests {
         assert_eq!(held, vec![0]);
         assert!(admitted.is_empty());
         assert!(runs.is_empty());
-        assert_eq!(debounce.intervals(), vec![60]);
-        assert_eq!(debounce.len(), 1);
+        assert_eq!(fire.held_intervals(), vec![60]);
+        assert_eq!(fire.held_len(), 1);
     }
 
     #[test]
@@ -1017,5 +1120,34 @@ mod tests {
         assert_eq!(later[0].0, 300);
         assert_eq!(later[0].1, vec!["slow"]);
         assert!(hold.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn privilege_fire_emits_each_interval() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let fire = PrivilegeFire::new(move |items: Vec<(String, CallerIdentity)>| {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(items);
+            }
+        });
+        fire.hold("fast".into(), CallerIdentity::Owner, 30);
+        fire.hold("slow".into(), CallerIdentity::Agent, 300);
+        tokio::time::advance(Duration::from_secs(30)).await;
+        let first = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("30s で fast が発火する")
+            .expect("channel open");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].0, "fast");
+        assert_eq!(fire.held_intervals(), vec![300]);
+        tokio::time::advance(Duration::from_secs(270)).await;
+        let later = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("300s で slow が発火する")
+            .expect("channel open");
+        assert_eq!(later.len(), 1);
+        assert_eq!(later[0].0, "slow");
+        assert_eq!(fire.held_len(), 0);
     }
 }
