@@ -50,7 +50,7 @@ use crate::sink::NostrResponder;
 use crate::watch::{
     admit_watch_item, apply_watch_effect, classify_watch_event, evaluate_watch_item,
     prepare_watch_inbound, recorded_watch_text, run_watch_turn, watch_bundle_prompt_suffix,
-    watch_prompt_suffix, watch_subscribe_config, TimelineBundle, WatchForward,
+    watch_prompt_suffix, watch_subscribe_config, DebounceHold, TimelineBundle, WatchForward,
 };
 
 /// watch ループが握る self_pubkey の共有セル（identity 切替で更新可能）。
@@ -756,7 +756,7 @@ async fn run_nostr_loop<R: NostrAgentRunner + Clone>(
 
 /// 現行 `nostr-{agent}` ループと `session_watches` 購読を同じ gateway handle の下で走らせる。
 ///
-/// 既定場に watch 行があるときは現行ループを起動しない（その場は新機構）。
+/// 既定セッションに watch 行があるときは現行ループを起動しない（そのセッションは新機構）。
 /// watch が 0 なら現行ループだけ（挙動不変）。
 #[allow(clippy::too_many_arguments)]
 async fn run_agent_inbound_loops<R: NostrAgentRunner + Clone + 'static>(
@@ -825,7 +825,7 @@ async fn run_session_watch_loop<R: NostrAgentRunner + Clone>(
     let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_RESPONSES));
     let queues = Arc::new(SessionQueues::new(SESSION_QUEUE_CAPACITY));
     let bundle = Arc::new(Mutex::new(TimelineBundle::default()));
-    let debounce = Arc::new(Mutex::new(Vec::<NostrEvent>::new()));
+    let debounce = Arc::new(Mutex::new(DebounceHold::default()));
     loop {
         match run_session_watch_once(
             &runner,
@@ -876,7 +876,7 @@ async fn run_session_watch_once<R: NostrAgentRunner + Clone>(
     permits: &Arc<Semaphore>,
     queues: &Arc<SessionQueues>,
     bundle: &Arc<Mutex<TimelineBundle>>,
-    debounce: &Arc<Mutex<Vec<NostrEvent>>>,
+    debounce: &Arc<Mutex<DebounceHold>>,
 ) -> anyhow::Result<()> {
     let config = watch_subscribe_config(watch, relays.to_vec())?;
     let interval = Duration::from_secs(watch.interval_secs as u64);
@@ -905,6 +905,7 @@ async fn run_session_watch_once<R: NostrAgentRunner + Clone>(
         "session watch subscribed"
     );
     loop {
+        let debounce_due = debounce.lock().unwrap().next_due();
         tokio::select! {
             biased;
             line = lines.next_line() => {
@@ -923,9 +924,21 @@ async fn run_session_watch_once<R: NostrAgentRunner + Clone>(
                 .await;
             }
             _ = flush.tick() => {
-                flush_watch_buffers(
+                flush_timeline_bundle(
                     runner, cli, agent_id, watch, allow, admin, runtime, permits, queues,
-                    bundle, debounce,
+                    bundle,
+                )
+                .await;
+            }
+            _ = async {
+                match debounce_due {
+                    Some(due) => tokio::time::sleep_until(due).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                flush_debounce_ready(
+                    runner, cli, agent_id, watch, allow, admin, runtime, permits, queues,
+                    debounce,
                 )
                 .await;
             }
@@ -953,7 +966,7 @@ async fn handle_watch_event<R: NostrAgentRunner>(
     permits: &Arc<Semaphore>,
     queues: &Arc<SessionQueues>,
     bundle: &Arc<Mutex<TimelineBundle>>,
-    debounce: &Arc<Mutex<Vec<NostrEvent>>>,
+    debounce: &Arc<Mutex<DebounceHold>>,
     event: NostrEvent,
 ) {
     let self_pk = self_pubkey.read().unwrap().clone();
@@ -980,9 +993,6 @@ async fn handle_watch_event<R: NostrAgentRunner>(
                 }
                 Ok(caller) => {
                     drop(sources);
-                    if !prepare_and_maybe_relay(runner, agent_id, &watch.session_id, &event) {
-                        return;
-                    }
                     let policy = match runner.get_session_policy_json(&watch.session_id) {
                         Ok(Some(p)) => p,
                         Ok(None) => {
@@ -1013,6 +1023,10 @@ async fn handle_watch_event<R: NostrAgentRunner>(
                     drop(sources);
                     match decision {
                         opencrab_actions::WatchTurnDecision::Immediate => {
+                            if !prepare_and_maybe_relay(runner, agent_id, &watch.session_id, &event)
+                            {
+                                return;
+                            }
                             enqueue_watch_turn(
                                 runner,
                                 cli,
@@ -1027,8 +1041,8 @@ async fn handle_watch_event<R: NostrAgentRunner>(
                                 caller,
                             );
                         }
-                        opencrab_actions::WatchTurnDecision::Debounce { .. } => {
-                            debounce.lock().unwrap().push(event);
+                        opencrab_actions::WatchTurnDecision::Debounce { interval_secs } => {
+                            debounce.lock().unwrap().push(event, interval_secs);
                         }
                     }
                 }
@@ -1038,7 +1052,7 @@ async fn handle_watch_event<R: NostrAgentRunner>(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn flush_watch_buffers<R: NostrAgentRunner>(
+async fn flush_timeline_bundle<R: NostrAgentRunner>(
     runner: &R,
     cli: &NostaroCli,
     agent_id: &str,
@@ -1049,26 +1063,47 @@ async fn flush_watch_buffers<R: NostrAgentRunner>(
     permits: &Arc<Semaphore>,
     queues: &Arc<SessionQueues>,
     bundle: &Arc<Mutex<TimelineBundle>>,
-    debounce: &Arc<Mutex<Vec<NostrEvent>>>,
 ) {
     let bundled = bundle.lock().unwrap().take();
-    if !bundled.is_empty() {
-        flush_event_group(
-            runner,
-            cli,
-            agent_id,
-            &watch.session_id,
-            allow,
-            admin,
-            runtime,
-            permits,
-            queues,
-            bundled,
-            true,
-        );
+    if bundled.is_empty() {
+        return;
     }
-    let held = std::mem::take(&mut *debounce.lock().unwrap());
-    if !held.is_empty() {
+    flush_event_group(
+        runner,
+        cli,
+        agent_id,
+        &watch.session_id,
+        allow,
+        admin,
+        runtime,
+        permits,
+        queues,
+        bundled,
+        true,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn flush_debounce_ready<R: NostrAgentRunner>(
+    runner: &R,
+    cli: &NostaroCli,
+    agent_id: &str,
+    watch: &opencrab_db::queries::SessionWatchRow,
+    allow: &AllowGate,
+    admin: &Arc<dyn NostrIdentityAdmin>,
+    runtime: &Arc<NostrSessionRuntime>,
+    permits: &Arc<Semaphore>,
+    queues: &Arc<SessionQueues>,
+    debounce: &Arc<Mutex<DebounceHold>>,
+) {
+    let groups = debounce
+        .lock()
+        .unwrap()
+        .take_ready(tokio::time::Instant::now());
+    for (_interval, held) in groups {
+        if held.is_empty() {
+            continue;
+        }
         flush_event_group(
             runner,
             cli,

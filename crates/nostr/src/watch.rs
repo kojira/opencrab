@@ -1,11 +1,13 @@
-//! 場の `session_watches` を実行する新機構（載せ替え工程 5-a / §4）。
+//! セッションの `session_watches` を実行する新機構（載せ替え工程 5-a / §4）。
 //!
 //! ゲートはイベントの形だけを見る（誰かを見ない）。
 //! 対話系は即時転送、タイムラインは `interval_secs` で束ねて core の inbound 1 口へ。
+//! core が `Debounce { interval_secs }` を返したら、その間隔で flush する（権限毎）。
 //! 既存 `inbound_kind_label` は変えない（現行 `nostr-{agent}` のラベルを維持）。
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use opencrab_actions::{
     decide_watch_turn, delivery_effect, plan_watch_inbound, prepare_session_inbound,
@@ -76,6 +78,15 @@ fn has_e_tag(event: &NostrEvent) -> bool {
         .any(|t| t.first().map(|s| s == "e").unwrap_or(false))
 }
 
+/// e タグが当人（自 pubkey）を指すか。1 欄目または後続欄（NIP-22 の pubkey）を見る。
+pub fn e_tag_is_self(event: &NostrEvent, self_pubkey: &str) -> bool {
+    let self_key = follow_key(self_pubkey);
+    event.tags.iter().any(|t| {
+        t.first().map(|s| s == "e").unwrap_or(false)
+            && t.iter().skip(1).any(|v| follow_key(v) == self_key)
+    })
+}
+
 /// watch 経路の機械的ラベル（現行 `inbound_kind_label` とは別。リポストを足す）。
 pub fn watch_kind_label(event: &NostrEvent) -> &'static str {
     if event.is_dm() {
@@ -117,7 +128,8 @@ pub fn classify_watch_event(
     }
     let to_self = p_tag_is_self(event, self_pubkey);
     if event.kind == 30023 {
-        return if to_self {
+        // Q15: 長文は束ね側。e/p が当人宛なら即時。
+        return if to_self || e_tag_is_self(event, self_pubkey) {
             WatchForward::Immediate { label: "長文" }
         } else {
             WatchForward::Bundle { label: "長文" }
@@ -166,6 +178,72 @@ impl TimelineBundle {
 
     pub fn len(&self) -> usize {
         self.events.len()
+    }
+}
+
+/// core が返した権限毎間隔で抱える対話系（`Debounce { interval_secs }`）。
+///
+/// 同じ間隔の件は 1 つの窓に入る。flush 期限は最初の 1 件が入った瞬間 + その間隔。
+#[derive(Debug, Default)]
+pub struct DebounceHold {
+    buckets: BTreeMap<u64, DebounceBucket>,
+}
+
+#[derive(Debug)]
+struct DebounceBucket {
+    events: Vec<NostrEvent>,
+    due: tokio::time::Instant,
+}
+
+impl DebounceHold {
+    pub fn push(&mut self, event: NostrEvent, interval_secs: u64) {
+        self.push_at(event, interval_secs, tokio::time::Instant::now());
+    }
+
+    pub fn push_at(&mut self, event: NostrEvent, interval_secs: u64, now: tokio::time::Instant) {
+        self.buckets
+            .entry(interval_secs)
+            .or_insert_with(|| DebounceBucket {
+                events: Vec::new(),
+                due: now + Duration::from_secs(interval_secs),
+            })
+            .events
+            .push(event);
+    }
+
+    pub fn next_due(&self) -> Option<tokio::time::Instant> {
+        self.buckets.values().map(|b| b.due).min()
+    }
+
+    pub fn intervals(&self) -> Vec<u64> {
+        self.buckets.keys().copied().collect()
+    }
+
+    pub fn take_ready(&mut self, now: tokio::time::Instant) -> Vec<(u64, Vec<NostrEvent>)> {
+        let keys: Vec<u64> = self
+            .buckets
+            .iter()
+            .filter(|(_, b)| b.due <= now)
+            .map(|(&k, _)| k)
+            .collect();
+        keys.into_iter()
+            .filter_map(|k| self.buckets.remove(&k).map(|b| (k, b.events)))
+            .collect()
+    }
+
+    pub fn take_all(&mut self) -> Vec<(u64, Vec<NostrEvent>)> {
+        std::mem::take(&mut self.buckets)
+            .into_iter()
+            .map(|(k, b)| (k, b.events))
+            .collect()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buckets.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.buckets.values().map(|b| b.events.len()).sum()
     }
 }
 
@@ -491,6 +569,31 @@ mod tests {
             classify_watch_event(&ev(30023, p_self), SELF, true),
             WatchForward::Immediate { label: "長文" }
         );
+        assert_eq!(
+            classify_watch_event(
+                &ev(30023, vec![vec!["e".into(), SELF.to_string()]]),
+                SELF,
+                true
+            ),
+            WatchForward::Immediate { label: "長文" }
+        );
+        assert_eq!(
+            classify_watch_event(
+                &ev(
+                    30023,
+                    vec![vec![
+                        "e".into(),
+                        "noteid".into(),
+                        String::new(),
+                        "reply".into(),
+                        SELF.to_string()
+                    ]]
+                ),
+                SELF,
+                true
+            ),
+            WatchForward::Immediate { label: "長文" }
+        );
     }
 
     #[test]
@@ -504,6 +607,14 @@ mod tests {
         );
         assert_eq!(
             classify_watch_event(&ev(30023, vec![]), SELF, true),
+            WatchForward::Bundle { label: "長文" }
+        );
+        assert_eq!(
+            classify_watch_event(
+                &ev(30023, vec![vec!["e".into(), "cc".repeat(32)]]),
+                SELF,
+                true
+            ),
             WatchForward::Bundle { label: "長文" }
         );
         let dm = ev(4, vec![]);
@@ -566,9 +677,11 @@ mod tests {
         callers: std::collections::HashMap<String, CallerIdentity>,
         allow_extra: HashSet<String>,
         bundle: TimelineBundle,
-        debounce: Vec<(String, &'static str)>,
+        debounce: DebounceHold,
         pub turns: Vec<String>,
         pub dropped: Vec<String>,
+        pub prepares: Vec<String>,
+        pub relays: Vec<String>,
     }
 
     impl MockE2E {
@@ -583,10 +696,17 @@ mod tests {
                 callers: std::collections::HashMap::new(),
                 allow_extra: HashSet::new(),
                 bundle: TimelineBundle::default(),
-                debounce: Vec::new(),
+                debounce: DebounceHold::default(),
                 turns: Vec::new(),
                 dropped: Vec::new(),
+                prepares: Vec::new(),
+                relays: Vec::new(),
             }
+        }
+
+        fn prepare(&mut self, event: &NostrEvent) {
+            self.prepares.push(event.id.clone());
+            self.relays.push(event.id.clone());
         }
 
         fn feed(&mut self, event: NostrEvent) {
@@ -624,10 +744,11 @@ mod tests {
                             .unwrap();
                     match d {
                         WatchTurnDecision::Immediate => {
+                            self.prepare(&event);
                             self.turns.push(format!("immediate:{label}:{}", event.id));
                         }
-                        WatchTurnDecision::Debounce { .. } => {
-                            self.debounce.push((event.id, label));
+                        WatchTurnDecision::Debounce { interval_secs } => {
+                            self.debounce.push(event, interval_secs);
                         }
                     }
                 }
@@ -639,19 +760,25 @@ mod tests {
             if evs.is_empty() {
                 return;
             }
+            for e in &evs {
+                self.prepare(e);
+            }
             let ids: Vec<_> = evs.iter().map(|e| e.id.as_str()).collect();
             self.turns.push(format!("bundle:{}", ids.join(",")));
         }
 
         fn flush_debounce(&mut self) {
-            if self.debounce.is_empty() {
+            let groups = self.debounce.take_all();
+            if groups.is_empty() {
                 return;
             }
-            let ids: Vec<_> = self
-                .debounce
-                .drain(..)
-                .map(|(id, label)| format!("{label}:{id}"))
-                .collect();
+            let mut ids = Vec::new();
+            for (interval, evs) in groups {
+                for e in &evs {
+                    self.prepare(e);
+                    ids.push(format!("{}:{}:{interval}", watch_kind_label(e), e.id));
+                }
+            }
             self.turns.push(format!("debounce:{}", ids.join(",")));
         }
     }
@@ -684,7 +811,17 @@ mod tests {
         );
         h.feed(reply);
         assert_eq!(h.turns, vec!["immediate:リプライ:id1".to_string()]);
+        assert_eq!(h.prepares, vec!["id1".to_string()]);
+        assert_eq!(h.relays, vec!["id1".to_string()]);
         assert!(h.bundle.is_empty());
+        h.flush_debounce();
+        h.flush_bundle();
+        assert_eq!(
+            h.prepares,
+            vec!["id1".to_string()],
+            "即時は handle 時のみ prepare（flush で二重にしない）"
+        );
+        assert_eq!(h.relays, vec!["id1".to_string()]);
         assert!(AGREED_IMMEDIATE_KINDS.contains(&"リプライ"));
     }
 
@@ -697,8 +834,13 @@ mod tests {
         h.feed(ev(6, vec![]));
         assert!(h.turns.is_empty());
         assert_eq!(h.debounce.len(), 1);
+        assert_eq!(h.debounce.intervals(), vec![60]);
+        assert!(h.prepares.is_empty(), "束ね経路は handle で prepare しない");
+        assert!(h.relays.is_empty());
         h.flush_debounce();
-        assert_eq!(h.turns, vec!["debounce:リポスト:id1".to_string()]);
+        assert_eq!(h.turns, vec!["debounce:リポスト:id1:60".to_string()]);
+        assert_eq!(h.prepares, vec!["id1".to_string()]);
+        assert_eq!(h.relays, vec!["id1".to_string()]);
     }
 
     #[test]
@@ -707,5 +849,58 @@ mod tests {
         h.feed(ev(7, vec![]));
         assert_eq!(h.dropped, vec!["allow:id1".to_string()]);
         assert!(h.turns.is_empty());
+        assert!(h.prepares.is_empty());
+    }
+
+    #[test]
+    fn e2e_policy_debounce_uses_class_interval_not_watch_interval() {
+        let mut h = MockE2E::new();
+        h.interval = 60;
+        h.policy = serde_json::json!({
+            "Owner": { "debounce_secs": 0, "immediate": ["リプライ"] },
+            "CoAgent": { "debounce_secs": 0, "immediate": ["リプライ"] },
+            "TrustedUser": { "debounce_secs": 120, "immediate": [] },
+            "Agent": { "debounce_secs": 300, "immediate": [] },
+        })
+        .to_string();
+        let author = "aa".repeat(32);
+        h.allow_extra.insert(follow_key(&author));
+        h.callers.insert(author, CallerIdentity::Agent);
+        h.feed(ev(6, vec![]));
+        assert!(h.turns.is_empty());
+        assert_eq!(
+            h.debounce.intervals(),
+            vec![300],
+            "core が返した権限毎間隔を捨てない"
+        );
+        assert_ne!(h.debounce.intervals(), vec![h.interval]);
+        assert!(h.prepares.is_empty());
+        h.flush_debounce();
+        assert_eq!(h.turns, vec!["debounce:リポスト:id1:300".to_string()]);
+        assert_eq!(h.prepares, vec!["id1".to_string()]);
+        assert_eq!(h.relays, vec!["id1".to_string()]);
+    }
+
+    #[test]
+    fn debounce_hold_flushes_each_privilege_interval() {
+        let mut hold = DebounceHold::default();
+        let now = tokio::time::Instant::now();
+        let mut fast = ev(6, vec![]);
+        fast.id = "fast".into();
+        let mut slow = ev(6, vec![]);
+        slow.id = "slow".into();
+        hold.push_at(fast, 30, now);
+        hold.push_at(slow, 300, now);
+        assert_eq!(hold.intervals(), vec![30, 300]);
+        let at_watch = hold.take_ready(now + Duration::from_secs(60));
+        assert_eq!(at_watch.len(), 1);
+        assert_eq!(at_watch[0].0, 30);
+        assert_eq!(at_watch[0].1[0].id, "fast");
+        assert_eq!(hold.intervals(), vec![300]);
+        let later = hold.take_ready(now + Duration::from_secs(300));
+        assert_eq!(later.len(), 1);
+        assert_eq!(later[0].0, 300);
+        assert_eq!(later[0].1[0].id, "slow");
+        assert!(hold.is_empty());
     }
 }

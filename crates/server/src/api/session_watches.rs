@@ -234,7 +234,7 @@ mod tests {
             }),
         )
         .await
-        .expect_err("discord 場は拒否");
+        .expect_err("discord セッションは拒否");
         assert_eq!(discord.0, StatusCode::BAD_REQUEST);
 
         let created = create_session_watch(

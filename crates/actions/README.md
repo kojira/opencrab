@@ -29,7 +29,7 @@ Nostr の `session_watches` 付きセッションだけ。ゲートは形（即�
 | 関数 | 決めること |
 |---|---|
 | `plan_watch_inbound` | `#698` 許可集合 + `plan_inbound`（同じ口） |
-| `decide_watch_turn` | `'{}'` なら AGREED（オーナー npub / フォロイーのリプライ・メンション・リアクション）。非空は 4 クラス必須 |
+| `decide_watch_turn` | `'{}'` なら AGREED（オーナー npub / フォロイーのリプライ・メンション・リアクション）。非空は 4 クラス必須。`Debounce { interval_secs }` は権限毎間隔（ゲートは捨てずその秒で flush） |
 | `watch_author_standing` | owner / followee / other。co_agent は other（即応を拡張しない） |
 
 `interval_secs` の既定は持たない。0 は拒否。

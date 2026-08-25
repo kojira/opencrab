@@ -89,7 +89,7 @@ pub fn count_sessions_for_agent(conn: &Connection, agent_id: &str) -> Result<i64
     )?)
 }
 
-/// 場ポリシー（`sessions.policy_json`）。`SessionRow` / 外形 API には載せない。
+/// セッションポリシー（`sessions.policy_json`）。`SessionRow` / 外形 API には載せない。
 ///
 /// 行が無ければ `None`。DEFAULT `'{}'` は「未設定」＝現行挙動（RULINGS Q2）。
 /// 欠けたクラスをここで補完しない。

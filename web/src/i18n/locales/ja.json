@@ -275,7 +275,7 @@
   "agentDetail.nostrKinds": "kind（カンマ区切り、既定 1）",
   "agentDetail.nostrFilterHint": "author / keyword は「自分宛（メンション・リプライ）」に追加で拾う条件です。空にすると自分宛のみを受信します。",
   "agentDetail.nostrWatches": "セッション watch",
-  "agentDetail.nostrWatchesDesc": "nostr- 系セッションに紐づく購読。interval（秒）は必須。未設定の場は従来どおり即時です。",
+  "agentDetail.nostrWatchesDesc": "nostr- 系セッションに紐づく購読。interval（秒）は必須。未設定のセッションは従来どおり即時です。",
   "agentDetail.nostrWatchSession": "セッション ID（nostr- で始める）",
   "agentDetail.nostrWatchInterval": "束ね間隔（秒・必須）",
   "agentDetail.nostrWatchAdd": "watch を追加",
