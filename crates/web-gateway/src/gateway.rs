@@ -27,7 +27,7 @@ pub fn web_session_id(agent_id: &str, conversation_id: &str) -> String {
 
 /// 呼び出し元種別の表示名（HTTP レスポンスの `caller_type`）。
 ///
-/// 権限判定そのものは core の [`plan_inbound`](opencrab_actions::plan_inbound) が行う。
+/// 権限判定そのものは core の [`accept_inbound`](opencrab_actions::accept_inbound) が行う。
 /// ここはその結果をレスポンス用の文字列にするだけの純関数。
 pub fn caller_type_label(caller: &CallerIdentity) -> &'static str {
     match caller {

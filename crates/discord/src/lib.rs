@@ -76,7 +76,7 @@ pub use renderer::DiscordRenderer;
 /// ゲートウェイの語彙を含まないメソッド（応答生成・会話履歴・トークン予算・
 /// セッション/インタラクション管理）は [`opencrab_actions::AgentRuntime`] が持つ（#156 S1）。
 /// ここには Discord の語彙（チャンネル・DM・per-agent ゲートウェイ）を含むものだけを残す。
-pub trait AgentRunner: opencrab_actions::AgentRuntime + opencrab_actions::InboundIdentity {
+pub trait AgentRunner: opencrab_actions::AgentRuntime {
     /// Access the shared database connection.
     ///
     /// **構築専用**（DiscordGatewayActions 等のコンポーネント配線のみに使う）。
@@ -96,8 +96,19 @@ pub trait AgentRunner: opencrab_actions::AgentRuntime + opencrab_actions::Inboun
     /// チャンネルが書き込み可か。DB 不可時は fail-closed（false）。
     fn is_channel_writable(&self, channel_id: &str) -> bool;
 
-    // 誰か・権限（resolve_caller / dm_allowed* / whitelist）は
-    // [`opencrab_actions::InboundIdentity`]。ゲートは呼ばない。
+    // 誰か・権限の計算本体。ゲートは [`opencrab_actions::accept_inbound`] に渡すだけ。
+    fn resolve_caller(
+        &self,
+        sender_id: &str,
+        agent_ids: &[String],
+        owner_id: &str,
+    ) -> opencrab_actions::CallerIdentity;
+
+    fn dm_allowed_any(&self, sender_id: &str, agent_ids: &[String], owner_id: &str) -> bool;
+
+    fn dm_allowed(&self, sender_id: &str, agent_id: &str, owner_id: &str) -> bool;
+
+    fn is_channel_whitelisted_for_agent(&self, channel_id: &str, agent_id: &str) -> bool;
 
     // ---- per-agent ゲートウェイ（#40） ----
 

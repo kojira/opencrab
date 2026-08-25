@@ -1,35 +1,24 @@
 //! セッション inbound の集約口（載せ替え §3）。
 //!
-//! ゲートは正規化した受信（本文・送信者の生識別子・対象 session_id）だけを渡す。
-//! 誰か・権限は [`plan_inbound`] / [`plan_inbound_flush`] の 1 口で決める。
-//! 配送（送信・描画・typing・webhook）はゲートに残す。core が返すのは
-//! [`DeliveryEffect`]。
+//! ゲートは正規化した受信（本文・送信者の生識別子・対象 session_id）の束を
+//! [`accept_inbound`] へ 1 回投げる。誰か・権限・standing・権限デバウンス・
+//! trust 分割・record_only はここが決める。配送（送信・描画・typing・webhook）
+//! はゲートに残す。core が返すのは [`DeliveryEffect`]（ターンした件）。
 //!
 //! SkillEngine / conversation の実装は触らない。ゲートが直呼びしていた
 //! [`crate::AgentRuntime`] の入口を、このモジュール 1 箇所へ集める。
 
+use std::collections::BTreeMap;
+use std::time::Duration;
+
 use crate::agent_runtime::AgentRuntime;
+use crate::session_watch_policy::{
+    watch_author_standing, watch_hold_interval_secs, SessionPolicyError, WatchAllowSets,
+};
 use crate::transcript::{InboundMessageRecord, TranscriptSource};
 use crate::CallerIdentity;
 use crate::RunRequest;
 use opencrab_core::EngineResult;
-
-/// 誰か・権限の照会口。計算本体（DB）は runner 実装。落とす/通すは
-/// [`plan_inbound`] / [`plan_inbound_flush`] が決める。
-pub trait InboundIdentity: Send + Sync {
-    fn resolve_caller(
-        &self,
-        sender_id: &str,
-        agent_ids: &[String],
-        owner_id: &str,
-    ) -> CallerIdentity;
-
-    fn dm_allowed_any(&self, sender_id: &str, agent_ids: &[String], owner_id: &str) -> bool;
-
-    fn dm_allowed(&self, sender_id: &str, agent_id: &str, owner_id: &str) -> bool;
-
-    fn is_channel_whitelisted_for_agent(&self, channel_id: &str, agent_id: &str) -> bool;
-}
 
 /// ゲートが core に渡す正規化済み受信 1 件。
 ///
@@ -88,15 +77,43 @@ pub struct NormalizedInboundEvent<'a> {
     pub guild_id: &'a str,
 }
 
-/// [`plan_inbound`] が通したときの結果。caller と、各 agent の落とす/通す。
+/// 誰か・権限の照会。3 アダプタ型は置かない。計算本体は runner の関数を渡す。
+pub struct InboundLookups<'a> {
+    pub resolve_caller: &'a dyn Fn(&str, &[String], &str) -> CallerIdentity,
+    pub dm_allowed_any: &'a dyn Fn(&str, &[String], &str) -> bool,
+    pub dm_allowed: &'a dyn Fn(&str, &str, &str) -> bool,
+    pub channel_whitelisted: &'a dyn Fn(&str, &str) -> bool,
+}
+
+/// [`accept_inbound`] が 1 件分として受ける正規化イベント。
+#[derive(Debug, Clone, Copy)]
+pub struct InboundWork<'a> {
+    pub event: NormalizedInboundEvent<'a>,
+    pub has_content: bool,
+    pub kind_label: &'a str,
+    pub author_key: &'a str,
+}
+
+/// watch 束の追加材料。無ければ対話系（discord / web）。
+pub struct WatchAccept<'a, T> {
+    pub policy_json: &'a str,
+    pub interval_secs: u64,
+    pub allow: WatchAllowSets<'a>,
+    pub owner: &'a std::collections::HashSet<String>,
+    pub followees: &'a std::collections::HashSet<String>,
+    /// `Some` = 対話系の即時転送（権限デバウンスしうる）。`None` = 束 flush（抱えない）。
+    pub debounce: Option<(&'a mut PrivilegeDebounce<T>, tokio::time::Instant)>,
+}
+
+/// 通した 1 件。ゲートはこれを見て配送（👀 / ログ）する。ターン対象は `on_run` だけ。
 #[derive(Debug, Clone)]
-pub struct InboundPlan {
+pub struct AdmittedInbound {
     pub caller: CallerIdentity,
     pub admitted_agent_ids: Vec<String>,
     pub agent_drops: Vec<(String, InboundAgentDrop)>,
 }
 
-impl InboundPlan {
+impl AdmittedInbound {
     pub fn agent_drop(&self, agent_id: &str) -> Option<InboundAgentDrop> {
         self.agent_drops
             .iter()
@@ -105,11 +122,90 @@ impl InboundPlan {
     }
 }
 
-/// デバウンスフラッシュ時の分割（Q13）。flags とグループ数。
+/// 束全体を落とす理由（1 件の対話系で DM 不信頼のときだけ）。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FlushPlan {
-    pub record_only_flags: Vec<bool>,
-    pub group_count: usize,
+pub enum InboundDrop {
+    Message(InboundMessageDrop),
+    Policy(SessionPolicyError),
+}
+
+impl std::fmt::Display for InboundDrop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Message(d) => write!(f, "{d:?}"),
+            Self::Policy(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for InboundDrop {}
+
+/// 権限毎デバウンス（core 内部バッファ）。ゲートは `next_due` で起きるだけ。
+#[derive(Debug)]
+pub struct PrivilegeDebounce<T> {
+    buckets: BTreeMap<u64, PrivilegeBucket<T>>,
+}
+
+#[derive(Debug)]
+struct PrivilegeBucket<T> {
+    items: Vec<T>,
+    due: tokio::time::Instant,
+}
+
+impl<T> Default for PrivilegeDebounce<T> {
+    fn default() -> Self {
+        Self {
+            buckets: BTreeMap::new(),
+        }
+    }
+}
+
+impl<T> PrivilegeDebounce<T> {
+    pub fn push(&mut self, item: T, interval_secs: u64, now: tokio::time::Instant) {
+        self.buckets
+            .entry(interval_secs)
+            .or_insert_with(|| PrivilegeBucket {
+                items: Vec::new(),
+                due: now + Duration::from_secs(interval_secs),
+            })
+            .items
+            .push(item);
+    }
+
+    pub fn next_due(&self) -> Option<tokio::time::Instant> {
+        self.buckets.values().map(|b| b.due).min()
+    }
+
+    pub fn intervals(&self) -> Vec<u64> {
+        self.buckets.keys().copied().collect()
+    }
+
+    pub fn take_ready(&mut self, now: tokio::time::Instant) -> Vec<(u64, Vec<T>)> {
+        let keys: Vec<u64> = self
+            .buckets
+            .iter()
+            .filter(|(_, b)| b.due <= now)
+            .map(|(&k, _)| k)
+            .collect();
+        keys.into_iter()
+            .filter_map(|k| self.buckets.remove(&k).map(|b| (k, b.items)))
+            .collect()
+    }
+
+    pub fn take_all(&mut self) -> Vec<(u64, Vec<T>)> {
+        std::mem::take(&mut self.buckets)
+            .into_iter()
+            .map(|(k, b)| (k, b.items))
+            .collect()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buckets.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.buckets.values().map(|b| b.items.len()).sum()
+    }
 }
 
 /// 配送 effect（§3.4）。ゲートはこれを既存の送信・リアクションで出す。
@@ -152,9 +248,9 @@ pub fn delivery_effect(result: anyhow::Result<EngineResult>) -> DeliveryEffect {
 
 /// DM の事前ゲート（「いずれかのエージェントが信頼していれば通す」）。
 ///
-/// [`plan_inbound`] が [`InboundIdentity::dm_allowed_any`] の結果を渡す。非 DM は常に通す。
+/// [`accept_inbound`] が [`InboundLookups::dm_allowed_any`] の結果を渡す。非 DM は常に通す。
 ///
-/// ゲートは呼ばない。[`plan_inbound`] が内部で使う。
+/// ゲートは呼ばない。[`accept_inbound`] が内部で使う。
 pub fn admit_inbound_message(is_dm: bool, dm_allowed_any: bool) -> Result<(), InboundMessageDrop> {
     if is_dm && !dm_allowed_any {
         Err(InboundMessageDrop::DmNotTrusted)
@@ -165,7 +261,7 @@ pub fn admit_inbound_message(is_dm: bool, dm_allowed_any: bool) -> Result<(), In
 
 /// エージェント個別の権限ゲート（DM 個別信頼 / チャンネル whitelist）。
 ///
-/// ゲートは呼ばない。[`plan_inbound`] が内部で使う。
+/// ゲートは呼ばない。[`accept_inbound`] が内部で使う。
 pub fn admit_inbound_agent(
     is_dm: bool,
     dm_allowed: bool,
@@ -183,60 +279,124 @@ pub fn admit_inbound_agent(
     Ok(())
 }
 
-/// inbound 1 口。ゲートは生識別子の正規化イベントだけを渡す。
-///
-/// caller 解決・DM 許可・ホワイトリスト判定はここで行う。
-pub fn plan_inbound<I: InboundIdentity>(
-    identity: &I,
+fn admit_one(
+    lookups: &InboundLookups<'_>,
     event: &NormalizedInboundEvent<'_>,
     owner_id: &str,
     agent_ids: &[String],
-) -> Result<InboundPlan, InboundMessageDrop> {
+) -> Result<AdmittedInbound, InboundMessageDrop> {
     let is_dm = event.guild_id.is_empty();
     admit_inbound_message(
         is_dm,
-        identity.dm_allowed_any(event.sender_id, agent_ids, owner_id),
+        (lookups.dm_allowed_any)(event.sender_id, agent_ids, owner_id),
     )?;
-    let caller = identity.resolve_caller(event.sender_id, agent_ids, owner_id);
+    let caller = (lookups.resolve_caller)(event.sender_id, agent_ids, owner_id);
     let mut admitted_agent_ids = Vec::new();
     let mut agent_drops = Vec::new();
     for agent_id in agent_ids {
         match admit_inbound_agent(
             is_dm,
-            identity.dm_allowed(event.sender_id, agent_id, owner_id),
-            identity.is_channel_whitelisted_for_agent(event.channel_id, agent_id),
+            (lookups.dm_allowed)(event.sender_id, agent_id, owner_id),
+            (lookups.channel_whitelisted)(event.channel_id, agent_id),
         ) {
             Ok(()) => admitted_agent_ids.push(agent_id.clone()),
             Err(reason) => agent_drops.push((agent_id.clone(), reason)),
         }
     }
-    Ok(InboundPlan {
+    Ok(AdmittedInbound {
         caller,
         admitted_agent_ids,
         agent_drops,
     })
 }
 
-/// デバウンスフラッシュの分割 1 口。ゲートは送信者の生識別子列だけを渡す。
-pub fn plan_inbound_flush<I: InboundIdentity>(
-    identity: &I,
-    sender_ids: &[&str],
-    has_content: &[bool],
-    agent_ids: &[String],
+/// 唯一の inbound 入り口。ゲートは正規化イベントの束を 1 回投げる。
+///
+/// - 対話系（`watch` 無し）: trust 分割（Q13）。`on_admitted` は通した件、`on_run` はトリガー。
+/// - watch 即時（`debounce` あり）: 許可集合・standing・権限デバウンス。抱えた件は callback しない。
+/// - watch 束 flush（`debounce` 無し）: 許可集合。通した最後だけ `on_run`。
+///
+/// `take_hold` は権限デバウンスに抱えるときだけ呼ばれる。
+#[allow(clippy::too_many_arguments)]
+pub fn accept_inbound<T>(
+    items: &[InboundWork<'_>],
     owner_id: &str,
-) -> FlushPlan {
-    let levels: Vec<u8> = sender_ids
-        .iter()
-        .map(|id| {
-            identity
-                .resolve_caller(id, agent_ids, owner_id)
-                .trust_level()
-        })
-        .collect();
-    FlushPlan {
-        record_only_flags: plan_record_only_flags(&levels, has_content),
-        group_count: consecutive_trust_groups(&levels).len(),
+    agent_ids: &[String],
+    lookups: &InboundLookups<'_>,
+    mut watch: Option<WatchAccept<'_, T>>,
+    mut take_hold: impl FnMut(usize) -> T,
+    mut on_admitted: impl FnMut(usize, &AdmittedInbound),
+    mut on_run: impl FnMut(usize, &AdmittedInbound),
+) -> Result<(), InboundDrop> {
+    let mut admitted: Vec<(usize, AdmittedInbound)> = Vec::new();
+    let mut trust_at: Vec<Option<u8>> = vec![None; items.len()];
+    for (i, item) in items.iter().enumerate() {
+        if let Some(w) = watch.as_ref() {
+            if !w.allow.is_allowed(item.author_key) {
+                continue;
+            }
+        }
+        let plan = match admit_one(lookups, &item.event, owner_id, agent_ids) {
+            Ok(p) => p,
+            Err(drop) => {
+                if items.len() == 1 && watch.is_none() {
+                    return Err(InboundDrop::Message(drop));
+                }
+                if watch.is_none() {
+                    trust_at[i] = Some(
+                        (lookups.resolve_caller)(item.event.sender_id, agent_ids, owner_id)
+                            .trust_level(),
+                    );
+                }
+                continue;
+            }
+        };
+        trust_at[i] = Some(plan.caller.trust_level());
+        if let Some(w) = watch.as_mut() {
+            if let Some((buf, now)) = w.debounce.as_mut() {
+                let standing = watch_author_standing(item.author_key, w.owner, w.followees);
+                let hold = watch_hold_interval_secs(
+                    w.policy_json,
+                    standing,
+                    &plan.caller,
+                    item.kind_label,
+                    w.interval_secs,
+                )
+                .map_err(InboundDrop::Policy)?;
+                if let Some(secs) = hold {
+                    buf.push(take_hold(i), secs, *now);
+                    continue;
+                }
+            }
+        }
+        admitted.push((i, plan));
     }
+
+    let run_flags = if watch.as_ref().is_some_and(|w| w.debounce.is_none()) {
+        let mut flags = vec![false; admitted.len()];
+        if let Some(last) = flags.last_mut() {
+            *last = true;
+        }
+        flags
+    } else if watch.is_none() {
+        let levels: Vec<u8> = trust_at
+            .iter()
+            .map(|t| t.expect("対話系の全件は admit または DM drop で trust を書いている"))
+            .collect();
+        let has_content: Vec<bool> = items.iter().map(|item| item.has_content).collect();
+        let record_only = plan_record_only_flags(&levels, &has_content);
+        admitted.iter().map(|(i, _)| !record_only[*i]).collect()
+    } else {
+        vec![true; admitted.len()]
+    };
+
+    for (j, (i, adm)) in admitted.iter().enumerate() {
+        on_admitted(*i, adm);
+        if run_flags[j] {
+            on_run(*i, adm);
+        }
+    }
+    Ok(())
 }
 
 /// 連続した同一 trust_level の並びを `(開始 index, 長さ)` に切る。
@@ -287,20 +447,6 @@ pub enum PrepareSessionInboundError {
     Record(anyhow::Error),
 }
 
-/// web の確保・記録口。行の形は実装側が持つ（`TranscriptSource` は使わない）。
-///
-/// [`prepare_session_inbound`] と同じ順序（ensure → record、ロック前・#284）。
-pub trait SessionInboundWrite {
-    fn ensure_web_session(&self, session_id: &str, agent_id: &str) -> anyhow::Result<()>;
-    fn record_user_message(
-        &self,
-        agent_id: &str,
-        session_id: &str,
-        user_id: &str,
-        content: &str,
-    ) -> anyhow::Result<()>;
-}
-
 /// セッション確保 + inbound 記録（セッションロックより前・#284）。
 ///
 /// `true` = 記録できた。ゲートは `false` を無視せずエスカレーションする。
@@ -326,22 +472,20 @@ pub fn prepare_session_inbound<R: AgentRuntime>(
 
 /// [`prepare_session_inbound`] と同じ口（ensure → record）。web はこちら。
 ///
-/// 行の形は [`SessionInboundWrite`]（`session_logs` 現行形。`TranscriptSource` は使わない）。
-pub fn prepare_session_inbound_write<W: SessionInboundWrite>(
-    writer: &W,
+/// 行の形は呼び出し側（`session_logs` 現行形。`TranscriptSource` は使わない）。
+pub fn prepare_session_inbound_write(
     inbound: &NormalizedInbound<'_>,
+    ensure: impl FnOnce(&str, &str) -> anyhow::Result<()>,
+    record: impl FnOnce(&str, &str, &str, &str) -> anyhow::Result<()>,
 ) -> Result<(), PrepareSessionInboundError> {
-    writer
-        .ensure_web_session(inbound.session_id, inbound.agent_id)
-        .map_err(PrepareSessionInboundError::Ensure)?;
-    writer
-        .record_user_message(
-            inbound.agent_id,
-            inbound.session_id,
-            inbound.sender_id,
-            inbound.text,
-        )
-        .map_err(PrepareSessionInboundError::Record)?;
+    ensure(inbound.session_id, inbound.agent_id).map_err(PrepareSessionInboundError::Ensure)?;
+    record(
+        inbound.agent_id,
+        inbound.session_id,
+        inbound.sender_id,
+        inbound.text,
+    )
+    .map_err(PrepareSessionInboundError::Record)?;
     Ok(())
 }
 
@@ -489,33 +633,6 @@ mod tests {
         assert!(admit_inbound_agent(false, false, true).is_ok());
     }
 
-    struct MockIdentity {
-        dm_any: bool,
-        dm: bool,
-        wl: bool,
-        caller: CallerIdentity,
-    }
-
-    impl InboundIdentity for MockIdentity {
-        fn resolve_caller(
-            &self,
-            _sender_id: &str,
-            _agent_ids: &[String],
-            _owner_id: &str,
-        ) -> CallerIdentity {
-            self.caller.clone()
-        }
-        fn dm_allowed_any(&self, _sender_id: &str, _agent_ids: &[String], _owner_id: &str) -> bool {
-            self.dm_any
-        }
-        fn dm_allowed(&self, _sender_id: &str, _agent_id: &str, _owner_id: &str) -> bool {
-            self.dm
-        }
-        fn is_channel_whitelisted_for_agent(&self, _channel_id: &str, _agent_id: &str) -> bool {
-            self.wl
-        }
-    }
-
     fn event<'a>(sender: &'a str, channel: &'a str, guild: &'a str) -> NormalizedInboundEvent<'a> {
         NormalizedInboundEvent {
             sender_id: sender,
@@ -524,43 +641,62 @@ mod tests {
         }
     }
 
-    #[test]
-    fn plan_inbound_drops_untrusted_dm_at_message_gate() {
-        let id = MockIdentity {
-            dm_any: false,
-            dm: false,
-            wl: true,
-            caller: CallerIdentity::Agent,
-        };
-        assert_eq!(
-            plan_inbound(&id, &event("u1", "ch", ""), "owner", &["a".into()]).unwrap_err(),
-            InboundMessageDrop::DmNotTrusted
-        );
+    fn work<'a>(sender: &'a str, channel: &'a str, guild: &'a str) -> InboundWork<'a> {
+        InboundWork {
+            event: event(sender, channel, guild),
+            has_content: true,
+            kind_label: "",
+            author_key: sender,
+        }
+    }
+
+    fn accept_one(
+        lookups: &InboundLookups<'_>,
+        item: InboundWork<'_>,
+        owner: &str,
+        agents: &[String],
+    ) -> Result<AdmittedInbound, InboundDrop> {
+        let mut out = None;
+        accept_inbound::<()>(
+            &[item],
+            owner,
+            agents,
+            lookups,
+            None,
+            |_| (),
+            |_, adm| out = Some(adm.clone()),
+            |_, _| {},
+        )?;
+        Ok(out.expect("通した件は on_admitted される"))
     }
 
     #[test]
-    fn plan_inbound_admits_and_resolves_caller() {
-        let id = MockIdentity {
-            dm_any: true,
-            dm: true,
-            wl: true,
-            caller: CallerIdentity::Owner,
+    fn accept_inbound_admits_and_resolves_caller() {
+        let caller = CallerIdentity::Owner;
+        let resolve = |_: &str, _: &[String], _: &str| caller.clone();
+        let lookups = InboundLookups {
+            resolve_caller: &resolve,
+            dm_allowed_any: &|_, _, _| true,
+            dm_allowed: &|_, _, _| true,
+            channel_whitelisted: &|_, _| true,
         };
-        let plan = plan_inbound(&id, &event("u1", "ch", "g1"), "owner", &["a".into()]).unwrap();
+        let plan = accept_one(&lookups, work("u1", "ch", "g1"), "owner", &["a".into()]).unwrap();
         assert_eq!(plan.caller, CallerIdentity::Owner);
         assert_eq!(plan.admitted_agent_ids, vec!["a".to_string()]);
         assert!(plan.agent_drops.is_empty());
     }
 
     #[test]
-    fn plan_inbound_drops_untrusted_dm_per_agent() {
-        let id = MockIdentity {
-            dm_any: true,
-            dm: false,
-            wl: true,
-            caller: CallerIdentity::TrustedUser,
+    fn accept_inbound_drops_untrusted_dm_per_agent() {
+        let caller = CallerIdentity::TrustedUser;
+        let resolve = |_: &str, _: &[String], _: &str| caller.clone();
+        let lookups = InboundLookups {
+            resolve_caller: &resolve,
+            dm_allowed_any: &|_, _, _| true,
+            dm_allowed: &|_, _, _| false,
+            channel_whitelisted: &|_, _| true,
         };
-        let plan = plan_inbound(&id, &event("u1", "ch", ""), "owner", &["a".into()]).unwrap();
+        let plan = accept_one(&lookups, work("u1", "ch", ""), "owner", &["a".into()]).unwrap();
         assert_eq!(
             plan.agent_drop("a"),
             Some(InboundAgentDrop::DmNotTrustedForAgent)
@@ -569,41 +705,21 @@ mod tests {
     }
 
     #[test]
-    fn plan_inbound_drops_non_whitelisted_channel() {
-        let id = MockIdentity {
-            dm_any: false,
-            dm: false,
-            wl: false,
-            caller: CallerIdentity::Agent,
+    fn accept_inbound_drops_non_whitelisted_channel() {
+        let caller = CallerIdentity::Agent;
+        let resolve = |_: &str, _: &[String], _: &str| caller.clone();
+        let lookups = InboundLookups {
+            resolve_caller: &resolve,
+            dm_allowed_any: &|_, _, _| false,
+            dm_allowed: &|_, _, _| false,
+            channel_whitelisted: &|_, _| false,
         };
-        let plan = plan_inbound(&id, &event("u1", "ch", "g1"), "owner", &["a".into()]).unwrap();
+        let plan = accept_one(&lookups, work("u1", "ch", "g1"), "owner", &["a".into()]).unwrap();
         assert_eq!(
             plan.agent_drop("a"),
             Some(InboundAgentDrop::ChannelNotWhitelisted)
         );
         assert!(plan.admitted_agent_ids.is_empty());
-    }
-
-    #[test]
-    fn plan_inbound_flush_matches_record_only_flags() {
-        let id = MockIdentity {
-            dm_any: true,
-            dm: true,
-            wl: true,
-            caller: CallerIdentity::TrustedUser,
-        };
-        let flush = plan_inbound_flush(
-            &id,
-            &["u1", "u2", "u3"],
-            &[true, true, false],
-            &["a".into()],
-            "owner",
-        );
-        assert_eq!(
-            flush.record_only_flags,
-            plan_record_only_flags(&[1, 1, 1], &[true, true, false])
-        );
-        assert_eq!(flush.group_count, 1);
     }
 
     #[test]
@@ -646,40 +762,6 @@ mod tests {
         }
     }
 
-    struct WriteSpy {
-        ensure_err: Option<String>,
-        record_err: Option<String>,
-        calls: std::sync::Mutex<Vec<String>>,
-    }
-
-    impl SessionInboundWrite for WriteSpy {
-        fn ensure_web_session(&self, session_id: &str, agent_id: &str) -> anyhow::Result<()> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(format!("ensure:{session_id}:{agent_id}"));
-            match &self.ensure_err {
-                Some(msg) => Err(anyhow::anyhow!(msg.clone())),
-                None => Ok(()),
-            }
-        }
-        fn record_user_message(
-            &self,
-            agent_id: &str,
-            session_id: &str,
-            user_id: &str,
-            content: &str,
-        ) -> anyhow::Result<()> {
-            self.calls.lock().unwrap().push(format!(
-                "record:{agent_id}:{session_id}:{user_id}:{content}"
-            ));
-            match &self.record_err {
-                Some(msg) => Err(anyhow::anyhow!(msg.clone())),
-                None => Ok(()),
-            }
-        }
-    }
-
     fn web_inbound<'a>(
         session_id: &'a str,
         agent_id: &'a str,
@@ -703,15 +785,25 @@ mod tests {
     /// ensure → record の順。本文・識別子は渡した inbound のまま。
     #[test]
     fn prepare_session_inbound_write_ensures_then_records() {
-        let spy = WriteSpy {
-            ensure_err: None,
-            record_err: None,
-            calls: std::sync::Mutex::new(Vec::new()),
-        };
+        let calls = std::sync::Mutex::new(Vec::new());
         let inbound = web_inbound("web-a-c1", "a", "alice", "hi");
-        prepare_session_inbound_write(&spy, &inbound).expect("ensure+record は成功する");
+        prepare_session_inbound_write(
+            &inbound,
+            |sid, aid| {
+                calls.lock().unwrap().push(format!("ensure:{sid}:{aid}"));
+                Ok(())
+            },
+            |aid, sid, uid, content| {
+                calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("record:{aid}:{sid}:{uid}:{content}"));
+                Ok(())
+            },
+        )
+        .expect("ensure+record は成功する");
         assert_eq!(
-            *spy.calls.lock().unwrap(),
+            *calls.lock().unwrap(),
             vec![
                 "ensure:web-a-c1:a".to_string(),
                 "record:a:web-a-c1:alice:hi".to_string(),
@@ -721,36 +813,209 @@ mod tests {
 
     #[test]
     fn prepare_session_inbound_write_ensure_failure_skips_record() {
-        let spy = WriteSpy {
-            ensure_err: Some("disk full".into()),
-            record_err: None,
-            calls: std::sync::Mutex::new(Vec::new()),
-        };
-        match prepare_session_inbound_write(&spy, &web_inbound("s", "a", "u", "hi")) {
+        let calls = std::sync::Mutex::new(Vec::new());
+        match prepare_session_inbound_write(
+            &web_inbound("s", "a", "u", "hi"),
+            |sid, aid| {
+                calls.lock().unwrap().push(format!("ensure:{sid}:{aid}"));
+                Err(anyhow::anyhow!("disk full"))
+            },
+            |_, _, _, _| {
+                calls.lock().unwrap().push("record".into());
+                Ok(())
+            },
+        ) {
             Err(PrepareSessionInboundError::Ensure(e)) => {
                 assert!(e.to_string().contains("disk full"), "{e:#}");
             }
             other => panic!("expected Ensure, got {other:?}"),
         }
-        assert_eq!(*spy.calls.lock().unwrap(), vec!["ensure:s:a".to_string()]);
+        assert_eq!(*calls.lock().unwrap(), vec!["ensure:s:a".to_string()]);
     }
 
     #[test]
     fn prepare_session_inbound_write_record_failure_is_distinct() {
-        let spy = WriteSpy {
-            ensure_err: None,
-            record_err: Some("locked".into()),
-            calls: std::sync::Mutex::new(Vec::new()),
-        };
-        match prepare_session_inbound_write(&spy, &web_inbound("s", "a", "u", "hi")) {
+        let calls = std::sync::Mutex::new(Vec::new());
+        match prepare_session_inbound_write(
+            &web_inbound("s", "a", "u", "hi"),
+            |sid, aid| {
+                calls.lock().unwrap().push(format!("ensure:{sid}:{aid}"));
+                Ok(())
+            },
+            |aid, sid, uid, content| {
+                calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("record:{aid}:{sid}:{uid}:{content}"));
+                Err(anyhow::anyhow!("locked"))
+            },
+        ) {
             Err(PrepareSessionInboundError::Record(e)) => {
                 assert!(e.to_string().contains("locked"), "{e:#}");
             }
             other => panic!("expected Record, got {other:?}"),
         }
         assert_eq!(
-            *spy.calls.lock().unwrap(),
+            *calls.lock().unwrap(),
             vec!["ensure:s:a".to_string(), "record:a:s:u:hi".to_string()]
         );
+    }
+
+    #[test]
+    fn accept_inbound_drops_untrusted_dm_for_single_item() {
+        let caller = CallerIdentity::Agent;
+        let resolve = |_: &str, _: &[String], _: &str| caller.clone();
+        let lookups = InboundLookups {
+            resolve_caller: &resolve,
+            dm_allowed_any: &|_, _, _| false,
+            dm_allowed: &|_, _, _| false,
+            channel_whitelisted: &|_, _| true,
+        };
+        let work = InboundWork {
+            event: event("u1", "ch", ""),
+            has_content: true,
+            kind_label: "メンション",
+            author_key: "u1",
+        };
+        let err = accept_inbound::<()>(
+            &[work],
+            "owner",
+            &["a".into()],
+            &lookups,
+            None,
+            |_| (),
+            |_, _| {},
+            |_, _| {},
+        )
+        .unwrap_err();
+        assert_eq!(err, InboundDrop::Message(InboundMessageDrop::DmNotTrusted));
+    }
+
+    #[test]
+    fn accept_inbound_session_split_runs_latest_with_content() {
+        let caller = CallerIdentity::TrustedUser;
+        let resolve = |_: &str, _: &[String], _: &str| caller.clone();
+        let lookups = InboundLookups {
+            resolve_caller: &resolve,
+            dm_allowed_any: &|_, _, _| true,
+            dm_allowed: &|_, _, _| true,
+            channel_whitelisted: &|_, _| true,
+        };
+        let items = [
+            InboundWork {
+                event: event("u1", "ch", "g1"),
+                has_content: true,
+                kind_label: "",
+                author_key: "u1",
+            },
+            InboundWork {
+                event: event("u2", "ch", "g1"),
+                has_content: true,
+                kind_label: "",
+                author_key: "u2",
+            },
+            InboundWork {
+                event: event("u3", "ch", "g1"),
+                has_content: false,
+                kind_label: "",
+                author_key: "u3",
+            },
+        ];
+        let mut admitted = Vec::new();
+        let mut runs = Vec::new();
+        accept_inbound::<()>(
+            &items,
+            "owner",
+            &["a".into()],
+            &lookups,
+            None,
+            |_| (),
+            |i, _| admitted.push(i),
+            |i, _| runs.push(i),
+        )
+        .unwrap();
+        assert_eq!(admitted, vec![0, 1, 2]);
+        assert_eq!(runs, vec![1], "同権限 3 通の内容あり最後だけ run");
+    }
+
+    #[test]
+    fn accept_inbound_watch_holds_non_immediate() {
+        let caller = CallerIdentity::Owner;
+        let resolve = |_: &str, _: &[String], _: &str| caller.clone();
+        let lookups = InboundLookups {
+            resolve_caller: &resolve,
+            dm_allowed_any: &|_, _, _| true,
+            dm_allowed: &|_, _, _| true,
+            channel_whitelisted: &|_, _| true,
+        };
+        let owner = std::collections::HashSet::from(["aa".to_string()]);
+        let followees = std::collections::HashSet::new();
+        let empty = std::collections::HashSet::new();
+        let allow = WatchAllowSets {
+            followees: &followees,
+            owner: &owner,
+            co_agents: &empty,
+            trusted_users: &empty,
+        };
+        let mut debounce = PrivilegeDebounce::default();
+        let now = tokio::time::Instant::now();
+        let work = InboundWork {
+            event: NormalizedInboundEvent {
+                sender_id: "aa",
+                channel_id: "nostr-a",
+                guild_id: "nostr",
+            },
+            has_content: true,
+            kind_label: "リポスト",
+            author_key: "aa",
+        };
+        let mut held = Vec::new();
+        let mut admitted = Vec::new();
+        let mut runs = Vec::new();
+        accept_inbound(
+            &[work],
+            "",
+            &["a".into()],
+            &lookups,
+            Some(WatchAccept {
+                policy_json: "{}",
+                interval_secs: 60,
+                allow,
+                owner: &owner,
+                followees: &followees,
+                debounce: Some((&mut debounce, now)),
+            }),
+            |i| {
+                held.push(i);
+                i
+            },
+            |i, _| admitted.push(i),
+            |i, _| runs.push(i),
+        )
+        .unwrap();
+        assert_eq!(held, vec![0]);
+        assert!(admitted.is_empty());
+        assert!(runs.is_empty());
+        assert_eq!(debounce.intervals(), vec![60]);
+        assert_eq!(debounce.len(), 1);
+    }
+
+    #[test]
+    fn privilege_debounce_flushes_each_interval() {
+        let mut hold = PrivilegeDebounce::default();
+        let now = tokio::time::Instant::now();
+        hold.push("fast", 30, now);
+        hold.push("slow", 300, now);
+        assert_eq!(hold.intervals(), vec![30, 300]);
+        let at_watch = hold.take_ready(now + Duration::from_secs(60));
+        assert_eq!(at_watch.len(), 1);
+        assert_eq!(at_watch[0].0, 30);
+        assert_eq!(at_watch[0].1, vec!["fast"]);
+        assert_eq!(hold.intervals(), vec![300]);
+        let later = hold.take_ready(now + Duration::from_secs(300));
+        assert_eq!(later.len(), 1);
+        assert_eq!(later[0].0, 300);
+        assert_eq!(later[0].1, vec!["slow"]);
+        assert!(hold.is_empty());
     }
 }

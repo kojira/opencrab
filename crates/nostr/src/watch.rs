@@ -2,18 +2,15 @@
 //!
 //! ゲートはイベントの形だけを見る（誰かを見ない）。
 //! 対話系は即時転送、タイムラインは `interval_secs` で束ねて core の inbound 1 口へ。
-//! core が `Debounce { interval_secs }` を返したら、その間隔で flush する（権限毎）。
+//! 権限毎デバウンスは core 内部バッファ（[`opencrab_actions::PrivilegeDebounce`]）。
 //! 既存 `inbound_kind_label` は変えない（現行 `nostr-{agent}` のラベルを維持）。
 
-use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
 
 use opencrab_actions::{
-    decide_watch_turn, delivery_effect, plan_watch_inbound, prepare_session_inbound,
-    start_session_turn, watch_author_standing, CallerIdentity, DeliveryEffect, InboundIdentity,
-    NormalizedInbound, NormalizedInboundEvent, RunRequest, WatchAllowSets, WatchInboundDrop,
-    WatchTurnDecision,
+    accept_inbound, delivery_effect, prepare_session_inbound, start_session_turn, CallerIdentity,
+    DeliveryEffect, InboundDrop, InboundLookups, InboundWork, NormalizedInbound,
+    NormalizedInboundEvent, RunRequest, WatchAccept,
 };
 use opencrab_db::queries::SessionWatchRow;
 use opencrab_gateway::GatewayActions;
@@ -181,147 +178,55 @@ impl TimelineBundle {
     }
 }
 
-/// core が返した権限毎間隔で抱える対話系（`Debounce { interval_secs }`）。
+/// watch イベントの束を core の inbound 1 口へ投げる。
 ///
-/// 同じ間隔の件は 1 つの窓に入る。flush 期限は最初の 1 件が入った瞬間 + その間隔。
-#[derive(Debug, Default)]
-pub struct DebounceHold {
-    buckets: BTreeMap<u64, DebounceBucket>,
-}
-
-#[derive(Debug)]
-struct DebounceBucket {
-    events: Vec<NostrEvent>,
-    due: tokio::time::Instant,
-}
-
-impl DebounceHold {
-    pub fn push(&mut self, event: NostrEvent, interval_secs: u64) {
-        self.push_at(event, interval_secs, tokio::time::Instant::now());
-    }
-
-    pub fn push_at(&mut self, event: NostrEvent, interval_secs: u64, now: tokio::time::Instant) {
-        self.buckets
-            .entry(interval_secs)
-            .or_insert_with(|| DebounceBucket {
-                events: Vec::new(),
-                due: now + Duration::from_secs(interval_secs),
-            })
-            .events
-            .push(event);
-    }
-
-    pub fn next_due(&self) -> Option<tokio::time::Instant> {
-        self.buckets.values().map(|b| b.due).min()
-    }
-
-    pub fn intervals(&self) -> Vec<u64> {
-        self.buckets.keys().copied().collect()
-    }
-
-    pub fn take_ready(&mut self, now: tokio::time::Instant) -> Vec<(u64, Vec<NostrEvent>)> {
-        let keys: Vec<u64> = self
-            .buckets
-            .iter()
-            .filter(|(_, b)| b.due <= now)
-            .map(|(&k, _)| k)
-            .collect();
-        keys.into_iter()
-            .filter_map(|k| self.buckets.remove(&k).map(|b| (k, b.events)))
-            .collect()
-    }
-
-    pub fn take_all(&mut self) -> Vec<(u64, Vec<NostrEvent>)> {
-        std::mem::take(&mut self.buckets)
-            .into_iter()
-            .map(|(k, b)| (k, b.events))
-            .collect()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.buckets.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.buckets.values().map(|b| b.events.len()).sum()
-    }
-}
-
-/// Nostr watch 用の [`InboundIdentity`]。Discord の DM / whitelist は適用しない
-/// （#698 と `plan_watch_inbound` が許可を決める）。
-pub struct NostrWatchIdentity<'a, R: NostrAgentRunner> {
-    pub runner: &'a R,
-    pub agent_id: &'a str,
-}
-
-impl<R: NostrAgentRunner> InboundIdentity for NostrWatchIdentity<'_, R> {
-    fn resolve_caller(
-        &self,
-        sender_id: &str,
-        _agent_ids: &[String],
-        _owner_id: &str,
-    ) -> CallerIdentity {
-        self.runner.resolve_nostr_caller(self.agent_id, sender_id)
-    }
-
-    fn dm_allowed_any(&self, _sender_id: &str, _agent_ids: &[String], _owner_id: &str) -> bool {
-        true
-    }
-
-    fn dm_allowed(&self, _sender_id: &str, _agent_id: &str, _owner_id: &str) -> bool {
-        true
-    }
-
-    fn is_channel_whitelisted_for_agent(&self, _channel_id: &str, _agent_id: &str) -> bool {
-        true
-    }
-}
-
-/// core が 1 件を即応するか。ゲートは呼ばない。
-pub fn evaluate_watch_item(
-    policy_json: &str,
-    author_pubkey: &str,
-    caller: &CallerIdentity,
-    kind_label: &str,
-    watch_interval_secs: u64,
-    owner: &HashSet<String>,
-    followees: &HashSet<String>,
-) -> anyhow::Result<WatchTurnDecision> {
-    let author_key = follow_key(author_pubkey);
-    let standing = watch_author_standing(&author_key, owner, followees);
-    decide_watch_turn(
-        policy_json,
-        standing,
-        caller,
-        kind_label,
-        watch_interval_secs,
-    )
-    .map_err(|e| anyhow::anyhow!("{e}"))
-}
-
-/// 許可集合と inbound 1 口。落とす / 通す / caller。
-pub fn admit_watch_item<R: NostrAgentRunner>(
+/// Discord の DM / whitelist は見ない（#698 の許可集合が決める）。
+#[allow(clippy::too_many_arguments)]
+pub fn accept_watch_events<R: NostrAgentRunner, T>(
     runner: &R,
     agent_id: &str,
     session_id: &str,
-    author_pubkey: &str,
-    allow: &WatchAllowSets<'_>,
-) -> Result<CallerIdentity, WatchInboundDrop> {
-    let identity = NostrWatchIdentity { runner, agent_id };
-    let event = NormalizedInboundEvent {
-        sender_id: author_pubkey,
-        channel_id: session_id,
-        guild_id: "nostr",
+    events: &[NostrEvent],
+    labels: &[&str],
+    watch: Option<WatchAccept<'_, T>>,
+    take_hold: impl FnMut(usize) -> T,
+    on_admitted: impl FnMut(usize, &opencrab_actions::AdmittedInbound),
+    on_run: impl FnMut(usize, &opencrab_actions::AdmittedInbound),
+) -> Result<(), InboundDrop> {
+    debug_assert_eq!(events.len(), labels.len());
+    let keys: Vec<String> = events.iter().map(|e| follow_key(&e.pubkey)).collect();
+    let works: Vec<InboundWork<'_>> = events
+        .iter()
+        .enumerate()
+        .map(|(i, e)| InboundWork {
+            event: NormalizedInboundEvent {
+                sender_id: &e.pubkey,
+                channel_id: session_id,
+                guild_id: "nostr",
+            },
+            has_content: true,
+            kind_label: labels[i],
+            author_key: &keys[i],
+        })
+        .collect();
+    let resolve =
+        |sender: &str, _: &[String], _: &str| runner.resolve_nostr_caller(agent_id, sender);
+    let lookups = InboundLookups {
+        resolve_caller: &resolve,
+        dm_allowed_any: &|_, _, _| true,
+        dm_allowed: &|_, _, _| true,
+        channel_whitelisted: &|_, _| true,
     };
-    let plan = plan_watch_inbound(
-        &identity,
-        &event,
+    accept_inbound(
+        &works,
         "",
         &[agent_id.to_string()],
-        &follow_key(author_pubkey),
-        allow,
-    )?;
-    Ok(plan.caller)
+        &lookups,
+        watch,
+        take_hold,
+        on_admitted,
+        on_run,
+    )
 }
 
 /// watch ターンを inbound 口で起動し、配送 effect を返す。
@@ -501,7 +406,13 @@ pub fn watch_bundle_prompt_suffix(events: &[NostrEvent]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opencrab_actions::AGREED_IMMEDIATE_KINDS;
+    use std::collections::HashSet;
+    use std::time::Duration;
+
+    use opencrab_actions::{
+        accept_inbound, InboundLookups, InboundWork, PrivilegeDebounce, WatchAccept,
+        WatchAllowSets, AGREED_IMMEDIATE_KINDS,
+    };
 
     fn ev(kind: u32, tags: Vec<Vec<String>>) -> NostrEvent {
         NostrEvent {
@@ -677,7 +588,7 @@ mod tests {
         callers: std::collections::HashMap<String, CallerIdentity>,
         allow_extra: HashSet<String>,
         bundle: TimelineBundle,
-        debounce: DebounceHold,
+        debounce: PrivilegeDebounce<NostrEvent>,
         pub turns: Vec<String>,
         pub dropped: Vec<String>,
         pub prepares: Vec<String>,
@@ -696,7 +607,7 @@ mod tests {
                 callers: std::collections::HashMap::new(),
                 allow_extra: HashSet::new(),
                 bundle: TimelineBundle::default(),
-                debounce: DebounceHold::default(),
+                debounce: PrivilegeDebounce::default(),
                 turns: Vec::new(),
                 dropped: Vec::new(),
                 prepares: Vec::new(),
@@ -720,37 +631,69 @@ mod tests {
                 }
                 WatchForward::Immediate { label } => {
                     let key = follow_key(&event.pubkey);
-                    let allow_followees = &self.followees;
-                    let allow_owner = &self.owner;
-                    let empty = HashSet::new();
-                    let allow = WatchAllowSets {
-                        followees: allow_followees,
-                        owner: allow_owner,
-                        co_agents: &empty,
-                        trusted_users: &self.allow_extra,
-                    };
-                    if !allow.is_allowed(&key) {
-                        self.dropped.push(format!("allow:{}", event.id));
-                        return;
-                    }
                     let caller = self
                         .callers
                         .get(&event.pubkey)
                         .cloned()
                         .unwrap_or(CallerIdentity::Agent);
-                    let standing = watch_author_standing(&key, &self.owner, &self.followees);
-                    let d =
-                        decide_watch_turn(&self.policy, standing, &caller, label, self.interval)
-                            .unwrap();
-                    match d {
-                        WatchTurnDecision::Immediate => {
-                            self.prepare(&event);
-                            self.turns.push(format!("immediate:{label}:{}", event.id));
-                        }
-                        WatchTurnDecision::Debounce { interval_secs } => {
-                            self.debounce.push(event, interval_secs);
-                        }
+                    let resolve = |_: &str, _: &[String], _: &str| caller.clone();
+                    let lookups = InboundLookups {
+                        resolve_caller: &resolve,
+                        dm_allowed_any: &|_, _, _| true,
+                        dm_allowed: &|_, _, _| true,
+                        channel_whitelisted: &|_, _| true,
+                    };
+                    let empty = HashSet::new();
+                    let allow = WatchAllowSets {
+                        followees: &self.followees,
+                        owner: &self.owner,
+                        co_agents: &empty,
+                        trusted_users: &self.allow_extra,
+                    };
+                    let work = InboundWork {
+                        event: NormalizedInboundEvent {
+                            sender_id: &event.pubkey,
+                            channel_id: "nostr-a",
+                            guild_id: "nostr",
+                        },
+                        has_content: true,
+                        kind_label: label,
+                        author_key: &key,
+                    };
+                    let now = tokio::time::Instant::now();
+                    let mut held = false;
+                    let mut admitted = false;
+                    let ev_hold = event.clone();
+                    accept_inbound(
+                        &[work],
+                        "",
+                        &["a".into()],
+                        &lookups,
+                        Some(WatchAccept {
+                            policy_json: &self.policy,
+                            interval_secs: self.interval,
+                            allow,
+                            owner: &self.owner,
+                            followees: &self.followees,
+                            debounce: Some((&mut self.debounce, now)),
+                        }),
+                        |_| {
+                            held = true;
+                            ev_hold.clone()
+                        },
+                        |_, _| admitted = true,
+                        |_, _| {},
+                    )
+                    .unwrap();
+                    if held {
+                        return;
                     }
+                    if admitted {
+                        self.prepare(&event);
+                        self.turns.push(format!("immediate:{label}:{}", event.id));
+                        return;
+                    }
+                    self.dropped.push(format!("allow:{}", event.id));
                 }
             }
         }
@@ -883,14 +826,14 @@ mod tests {
 
     #[test]
     fn debounce_hold_flushes_each_privilege_interval() {
-        let mut hold = DebounceHold::default();
+        let mut hold = PrivilegeDebounce::default();
         let now = tokio::time::Instant::now();
         let mut fast = ev(6, vec![]);
         fast.id = "fast".into();
         let mut slow = ev(6, vec![]);
         slow.id = "slow".into();
-        hold.push_at(fast, 30, now);
-        hold.push_at(slow, 300, now);
+        hold.push(fast, 30, now);
+        hold.push(slow, 300, now);
         assert_eq!(hold.intervals(), vec![30, 300]);
         let at_watch = hold.take_ready(now + Duration::from_secs(60));
         assert_eq!(at_watch.len(), 1);

@@ -27,9 +27,9 @@ use tracing::{debug, error, info, warn};
 
 use crate::gateway::DiscordGateway;
 use opencrab_actions::{
-    delivery_effect, plan_inbound, plan_inbound_flush, prepare_session_inbound, run_session_turn,
-    start_session_turn, DeliveryEffect, InboundAgentDrop, InboundMessageDrop, NormalizedInbound,
-    NormalizedInboundEvent, SessionLocks, TranscriptSource,
+    accept_inbound, delivery_effect, prepare_session_inbound, run_session_turn, start_session_turn,
+    AdmittedInbound, DeliveryEffect, InboundAgentDrop, InboundLookups, InboundMessageDrop,
+    InboundWork, NormalizedInbound, NormalizedInboundEvent, SessionLocks, TranscriptSource,
 };
 use opencrab_core::a2ui::UiRenderer;
 use opencrab_gateway::IncomingMessage;
@@ -574,30 +574,93 @@ pub async fn run_discord_loop<T: AgentRunner>(
                 // owner→co_agent は同権限にならず別グループになる。ここでのグループ分けは
                 // trust_level が揃った場合の挙動で、#489 が直れば owner 等価(=2)として合流する。
                 // 誰か（caller / trust_level）と「何本の run にするか」は core。
-                // ゲートは生識別子の列だけを渡し、分割後の本数・各 caller は現行と同一（Q13）。
-                let sender_ids: Vec<&str> = messages.iter().map(|m| m.sender.id.as_str()).collect();
-                let has_content: Vec<bool> = messages.iter().map(incoming_has_content).collect();
-                let flush = plan_inbound_flush(
-                    &state,
-                    &sender_ids,
-                    &has_content,
-                    &agent_ids,
-                    &owner_discord_id,
-                );
-                let record_only_flags = flush.record_only_flags;
+                // 束を 1 回投げ、分割〜record_only〜ターン対象は accept_inbound が決める（Q13）。
+                let channel_ids: Vec<(String, String)> = messages
+                    .iter()
+                    .map(|m| match &m.source {
+                        opencrab_gateway::MessageSource::Discord {
+                            guild_id,
+                            channel_id,
+                        } => (guild_id.clone(), channel_id.clone()),
+                        _ => (String::new(), String::new()),
+                    })
+                    .collect();
+                let mut admitted: Vec<Option<AdmittedInbound>> = vec![None; messages.len()];
+                let mut run_at = vec![false; messages.len()];
+                let accept_err = {
+                    let works: Vec<InboundWork<'_>> = messages
+                        .iter()
+                        .enumerate()
+                        .map(|(i, m)| {
+                            let (guild, ch) = &channel_ids[i];
+                            InboundWork {
+                                event: NormalizedInboundEvent {
+                                    sender_id: &m.sender.id,
+                                    channel_id: ch,
+                                    guild_id: guild,
+                                },
+                                has_content: incoming_has_content(m),
+                                kind_label: "",
+                                author_key: &m.sender.id,
+                            }
+                        })
+                        .collect();
+                    let resolve = |s: &str, a: &[String], o: &str| state.resolve_caller(s, a, o);
+                    let dm_any = |s: &str, a: &[String], o: &str| state.dm_allowed_any(s, a, o);
+                    let dm = |s: &str, a: &str, o: &str| state.dm_allowed(s, a, o);
+                    let wl = |c: &str, a: &str| state.is_channel_whitelisted_for_agent(c, a);
+                    let lookups = InboundLookups {
+                        resolve_caller: &resolve,
+                        dm_allowed_any: &dm_any,
+                        dm_allowed: &dm,
+                        channel_whitelisted: &wl,
+                    };
+                    accept_inbound::<()>(
+                        &works,
+                        &owner_discord_id,
+                        &agent_ids,
+                        &lookups,
+                        None,
+                        |_| (),
+                        |i, adm| admitted[i] = Some(adm.clone()),
+                        |i, _| run_at[i] = true,
+                    )
+                };
+                if let Err(e) = accept_err {
+                    if matches!(
+                        e,
+                        opencrab_actions::InboundDrop::Message(InboundMessageDrop::DmNotTrusted)
+                    ) {
+                        let key = format!("dm_gate:{}", messages[0].sender.id);
+                        if should_emit_drop_log(
+                            &DROP_LOG_LAST,
+                            &key,
+                            Instant::now(),
+                            DROP_LOG_THROTTLE,
+                        ) {
+                            info!(
+                                sender = %messages[0].sender.id,
+                                reason = "dm_sender_not_trusted",
+                                "受信DMを破棄: 設定によりどのエージェントも送信者を信頼していない"
+                            );
+                        }
+                    }
+                    continue;
+                }
 
                 if messages.len() > 1 {
                     info!(
                         channel = %key,
                         messages = messages.len(),
-                        groups = flush.group_count,
+                        groups = run_at.iter().filter(|r| **r).count(),
                         "Debounced (channel): recording all, running once per consecutive-privilege group"
                     );
                 }
 
                 for (i, msg) in messages.into_iter().enumerate() {
-                    // トリガー以外は record-only（記録と 👀 まで。run は起こさない）。
-                    let record_only = record_only_flags[i];
+                    let Some(plan) = admitted[i].clone() else {
+                        continue;
+                    };
                     process_incoming_message(
                         msg,
                         gateway.clone(),
@@ -610,7 +673,8 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         voice.clone(),
                         event_tx.clone(),
                         subtask_registry.clone(),
-                        record_only,
+                        !run_at[i],
+                        Some(plan),
                     )
                     .await;
                 }
@@ -641,6 +705,7 @@ async fn process_incoming_message<T: AgentRunner>(
     // 合流したメッセージのうち、run トリガーでないものに使う。各メッセージを正しい送信者で
     // 個別に会話ログへ残しつつ、run は窓につき 1 回だけにするための分岐。
     record_only: bool,
+    preplanned: Option<AdmittedInbound>,
 ) {
     let (text, image_urls) = extract_discord_content(&incoming.content);
     if text.is_empty() && image_urls.is_empty() {
@@ -663,7 +728,7 @@ async fn process_incoming_message<T: AgentRunner>(
     let is_dm = guild_id.is_empty();
 
     // #40: 専用（per-agent）ゲートウェイが稼働中のエージェントは共有ループでは処理しない。
-    // ここでリストごと絞るのは、後段の core inbound（plan_inbound）にも
+    // ここでリストごと絞るのは、後段の core inbound（accept_inbound）にも
     // スキップ対象エージェントの trusted_users を混入させないため。専用ゲートウェイが
     // 停止/起動失敗していれば絞られず、共有側がフォールバックとして処理を続ける。
     let agent_ids: Vec<String> = if skip_agents_with_dedicated_gateway {
@@ -689,26 +754,62 @@ async fn process_incoming_message<T: AgentRunner>(
         agent_ids
     };
 
-    // 誰か・権限は core の inbound 1 口。ゲートは生識別子だけ渡す。
+    // 誰か・権限は core の inbound 1 口。flush 経路は束を既に投げ済み。
     let inbound_event = NormalizedInboundEvent {
         sender_id: &incoming.sender.id,
         channel_id: &channel_id_str,
         guild_id: &guild_id,
     };
-    let plan = match plan_inbound(&state, &inbound_event, &owner_discord_id, &agent_ids) {
-        Ok(plan) => plan,
-        Err(InboundMessageDrop::DmNotTrusted) => {
-            // #419: 破棄は正しい動作だが debug だと運用ログ（INFO）に出ず「無言・エラー
-            // なし」の切り分けが難しい。設定による破棄を 1 行 INFO で残す（宛先ごとに間引き）。
-            let key = format!("dm_gate:{}", incoming.sender.id);
-            if should_emit_drop_log(&DROP_LOG_LAST, &key, Instant::now(), DROP_LOG_THROTTLE) {
-                info!(
-                    sender = %incoming.sender.id,
-                    reason = "dm_sender_not_trusted",
-                    "受信DMを破棄: 設定によりどのエージェントも送信者を信頼していない"
-                );
+    let plan = if let Some(pre) = preplanned {
+        pre
+    } else {
+        let work = InboundWork {
+            event: inbound_event,
+            has_content: true,
+            kind_label: "",
+            author_key: &incoming.sender.id,
+        };
+        let mut admitted = None;
+        let accept_err = {
+            let resolve = |s: &str, a: &[String], o: &str| state.resolve_caller(s, a, o);
+            let dm_any = |s: &str, a: &[String], o: &str| state.dm_allowed_any(s, a, o);
+            let dm = |s: &str, a: &str, o: &str| state.dm_allowed(s, a, o);
+            let wl = |c: &str, a: &str| state.is_channel_whitelisted_for_agent(c, a);
+            let lookups = InboundLookups {
+                resolve_caller: &resolve,
+                dm_allowed_any: &dm_any,
+                dm_allowed: &dm,
+                channel_whitelisted: &wl,
+            };
+            accept_inbound::<()>(
+                &[work],
+                &owner_discord_id,
+                &agent_ids,
+                &lookups,
+                None,
+                |_| (),
+                |_, adm| admitted = Some(adm.clone()),
+                |_, _| {},
+            )
+        };
+        match accept_err {
+            Ok(()) => admitted.expect("1 件の対話系は通るか Message drop"),
+            Err(opencrab_actions::InboundDrop::Message(InboundMessageDrop::DmNotTrusted)) => {
+                // #419: 破棄は正しい動作だが debug だと運用ログ（INFO）に出ず「無言・エラー
+                // なし」の切り分けが難しい。設定による破棄を 1 行 INFO で残す（宛先ごとに間引き）。
+                let key = format!("dm_gate:{}", incoming.sender.id);
+                if should_emit_drop_log(&DROP_LOG_LAST, &key, Instant::now(), DROP_LOG_THROTTLE) {
+                    info!(
+                        sender = %incoming.sender.id,
+                        reason = "dm_sender_not_trusted",
+                        "受信DMを破棄: 設定によりどのエージェントも送信者を信頼していない"
+                    );
+                }
+                return;
             }
-            return;
+            Err(e) => {
+                unreachable!("watch 無しの対話系で Policy は出ない: {e}");
+            }
         }
     };
 

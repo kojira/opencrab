@@ -1,7 +1,8 @@
 //! セッション watch ポリシー（載せ替え工程 5-a / §4.6）。
 //!
 //! ゲートはイベントの形だけを見て即時転送 / 束ねする。「誰か」と
-//! 即応 / 権限毎デバウンスはここ（core）が決める。
+//! 即応 / 権限毎デバウンスは [`crate::session_inbound::accept_inbound`] が決める。
+//! このモジュールはポリシーの読み取りと、core 内部の間隔計算だけを持つ。
 //!
 //! `policy_json == '{}'` の実行時は AGREED 逐語:
 //! オーナー npub とフォロイーのリプライ / メンション / リアクションには即反応。
@@ -10,9 +11,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::session_inbound::{
-    plan_inbound, InboundIdentity, InboundMessageDrop, InboundPlan, NormalizedInboundEvent,
-};
 use crate::CallerIdentity;
 
 /// ゲートが付ける機械的種別ラベルの閉集合（§1.2.1）。
@@ -31,13 +29,6 @@ pub enum WatchAuthorStanding {
     Owner,
     Followee,
     Other,
-}
-
-/// ポリシー判定の結果。間隔は秒。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WatchTurnDecision {
-    Immediate,
-    Debounce { interval_secs: u64 },
 }
 
 /// `policy_json` の読み取り / 形の誤り。欠けたクラスを補完しない。
@@ -188,88 +179,52 @@ fn parse_class_policy(
     })
 }
 
-/// 即応するか / 何秒デバウンスするかを決める（core）。
+/// 権限デバウンスの秒。`None` は即応。ゲートは呼ばない（`accept_inbound` が内部で使う）。
 ///
 /// `watch_interval_secs` は watch 行の必須間隔。`'{}'` の非即応側に使う。
 /// 0 をここに渡さない（呼び出し側が watch 行を読めないなら起動エラー）。
-pub fn decide_watch_turn(
+pub(crate) fn watch_hold_interval_secs(
     policy_json: &str,
     standing: WatchAuthorStanding,
     caller: &CallerIdentity,
     kind_label: &str,
     watch_interval_secs: u64,
-) -> Result<WatchTurnDecision, SessionPolicyError> {
+) -> Result<Option<u64>, SessionPolicyError> {
     if watch_interval_secs == 0 {
         return Err(SessionPolicyError::InvalidDebounce(
             "watch interval_secs が 0（既定値は使わない）".into(),
         ));
     }
     match parse_session_watch_policy(policy_json)? {
-        None => Ok(decide_agreed_default(
-            standing,
-            kind_label,
-            watch_interval_secs,
-        )),
+        None => Ok(agreed_hold_secs(standing, kind_label, watch_interval_secs)),
         Some(policy) => {
             let key = caller_policy_key(caller);
             let class = policy
                 .classes
                 .get(key)
                 .ok_or_else(|| SessionPolicyError::MissingClass(key.to_string()))?;
-            if class.immediate.contains(kind_label) {
-                return Ok(WatchTurnDecision::Immediate);
+            if class.immediate.contains(kind_label) || class.debounce_secs == 0 {
+                return Ok(None);
             }
-            if class.debounce_secs == 0 {
-                return Ok(WatchTurnDecision::Immediate);
-            }
-            Ok(WatchTurnDecision::Debounce {
-                interval_secs: class.debounce_secs,
-            })
+            Ok(Some(class.debounce_secs))
         }
     }
 }
 
-fn decide_agreed_default(
+fn agreed_hold_secs(
     standing: WatchAuthorStanding,
     kind_label: &str,
     watch_interval_secs: u64,
-) -> WatchTurnDecision {
+) -> Option<u64> {
     let agreed_who = matches!(
         standing,
         WatchAuthorStanding::Owner | WatchAuthorStanding::Followee
     );
     if agreed_who && AGREED_IMMEDIATE_KINDS.contains(&kind_label) {
-        WatchTurnDecision::Immediate
+        None
     } else {
-        WatchTurnDecision::Debounce {
-            interval_secs: watch_interval_secs,
-        }
+        Some(watch_interval_secs)
     }
-}
-
-/// watch inbound の plan。`plan_inbound`（4-a/4-b と同じ口）で caller を決める。
-///
-/// #698 許可集合外は `Err(InboundMessageDrop)` 相当として `None` の許可落ちを返す。
-/// Discord の DM 事前ゲートとは別（Nostr DM はゲートが破棄済み）。
-pub fn plan_watch_inbound<I: InboundIdentity>(
-    identity: &I,
-    event: &NormalizedInboundEvent<'_>,
-    owner_id: &str,
-    agent_ids: &[String],
-    author_key: &str,
-    allow: &WatchAllowSets<'_>,
-) -> Result<InboundPlan, WatchInboundDrop> {
-    if !allow.is_allowed(author_key) {
-        return Err(WatchInboundDrop::NotAllowed);
-    }
-    plan_inbound(identity, event, owner_id, agent_ids).map_err(WatchInboundDrop::Inbound)
-}
-
-/// watch 経路で落とす理由。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WatchInboundDrop {
-    NotAllowed,
-    Inbound(InboundMessageDrop),
 }
 
 #[cfg(test)]
@@ -293,7 +248,7 @@ mod tests {
     fn empty_policy_agreed_immediate_for_owner_and_followee() {
         for kind in AGREED_IMMEDIATE_KINDS {
             assert_eq!(
-                decide_watch_turn(
+                watch_hold_interval_secs(
                     "{}",
                     WatchAuthorStanding::Owner,
                     &CallerIdentity::Owner,
@@ -301,11 +256,11 @@ mod tests {
                     60
                 )
                 .unwrap(),
-                WatchTurnDecision::Immediate,
+                None,
                 "owner {kind}"
             );
             assert_eq!(
-                decide_watch_turn(
+                watch_hold_interval_secs(
                     "{}",
                     WatchAuthorStanding::Followee,
                     &CallerIdentity::Agent,
@@ -313,7 +268,7 @@ mod tests {
                     60
                 )
                 .unwrap(),
-                WatchTurnDecision::Immediate,
+                None,
                 "followee {kind}"
             );
         }
@@ -322,7 +277,7 @@ mod tests {
     #[test]
     fn empty_policy_repost_is_not_immediate() {
         assert_eq!(
-            decide_watch_turn(
+            watch_hold_interval_secs(
                 "{}",
                 WatchAuthorStanding::Owner,
                 &CallerIdentity::Owner,
@@ -330,10 +285,10 @@ mod tests {
                 90
             )
             .unwrap(),
-            WatchTurnDecision::Debounce { interval_secs: 90 }
+            Some(90)
         );
         assert_eq!(
-            decide_watch_turn(
+            watch_hold_interval_secs(
                 "{}",
                 WatchAuthorStanding::Followee,
                 &CallerIdentity::Agent,
@@ -341,7 +296,7 @@ mod tests {
                 90
             )
             .unwrap(),
-            WatchTurnDecision::Debounce { interval_secs: 90 }
+            Some(90)
         );
     }
 
@@ -352,7 +307,7 @@ mod tests {
             WatchAuthorStanding::Other
         );
         assert_eq!(
-            decide_watch_turn(
+            watch_hold_interval_secs(
                 "{}",
                 WatchAuthorStanding::Other,
                 &CallerIdentity::CoAgent {
@@ -362,14 +317,14 @@ mod tests {
                 60
             )
             .unwrap(),
-            WatchTurnDecision::Debounce { interval_secs: 60 }
+            Some(60)
         );
     }
 
     #[test]
     fn empty_policy_trusted_and_stranger_debounce() {
         assert_eq!(
-            decide_watch_turn(
+            watch_hold_interval_secs(
                 "{}",
                 WatchAuthorStanding::Other,
                 &CallerIdentity::TrustedUser,
@@ -377,10 +332,10 @@ mod tests {
                 120
             )
             .unwrap(),
-            WatchTurnDecision::Debounce { interval_secs: 120 }
+            Some(120)
         );
         assert_eq!(
-            decide_watch_turn(
+            watch_hold_interval_secs(
                 "{}",
                 WatchAuthorStanding::Other,
                 &CallerIdentity::Agent,
@@ -388,13 +343,13 @@ mod tests {
                 120
             )
             .unwrap(),
-            WatchTurnDecision::Debounce { interval_secs: 120 }
+            Some(120)
         );
     }
 
     #[test]
     fn empty_policy_rejects_zero_interval() {
-        let err = decide_watch_turn(
+        let err = watch_hold_interval_secs(
             "{}",
             WatchAuthorStanding::Other,
             &CallerIdentity::Agent,
@@ -453,7 +408,7 @@ mod tests {
     fn nonempty_policy_uses_class_immediate_and_debounce() {
         let json = full_policy(&["リプライ", "リポスト"], 300);
         assert_eq!(
-            decide_watch_turn(
+            watch_hold_interval_secs(
                 &json,
                 WatchAuthorStanding::Owner,
                 &CallerIdentity::Owner,
@@ -461,10 +416,10 @@ mod tests {
                 60
             )
             .unwrap(),
-            WatchTurnDecision::Immediate
+            None
         );
         assert_eq!(
-            decide_watch_turn(
+            watch_hold_interval_secs(
                 &json,
                 WatchAuthorStanding::Other,
                 &CallerIdentity::Agent,
@@ -472,11 +427,11 @@ mod tests {
                 60
             )
             .unwrap(),
-            WatchTurnDecision::Debounce { interval_secs: 300 }
+            Some(300)
         );
         // debounce_secs=0 かつ immediate 外 → 待ち 0 = 即応（値を発明しない）
         assert_eq!(
-            decide_watch_turn(
+            watch_hold_interval_secs(
                 &json,
                 WatchAuthorStanding::Owner,
                 &CallerIdentity::Owner,
@@ -484,7 +439,7 @@ mod tests {
                 60
             )
             .unwrap(),
-            WatchTurnDecision::Immediate
+            None
         );
     }
 
@@ -515,56 +470,5 @@ mod tests {
         assert!(sets.is_allowed("c1"));
         assert!(sets.is_allowed("t1"));
         assert!(!sets.is_allowed("stranger"));
-    }
-
-    struct MockIdentity {
-        caller: CallerIdentity,
-    }
-
-    impl InboundIdentity for MockIdentity {
-        fn resolve_caller(
-            &self,
-            _sender_id: &str,
-            _agent_ids: &[String],
-            _owner_id: &str,
-        ) -> CallerIdentity {
-            self.caller.clone()
-        }
-        fn dm_allowed_any(&self, _s: &str, _a: &[String], _o: &str) -> bool {
-            true
-        }
-        fn dm_allowed(&self, _s: &str, _a: &str, _o: &str) -> bool {
-            true
-        }
-        fn is_channel_whitelisted_for_agent(&self, _c: &str, _a: &str) -> bool {
-            true
-        }
-    }
-
-    #[test]
-    fn plan_watch_inbound_uses_plan_inbound_and_allow() {
-        let followees = followees(&["auth"]);
-        let empty = HashSet::new();
-        let allow = WatchAllowSets {
-            followees: &followees,
-            owner: &empty,
-            co_agents: &empty,
-            trusted_users: &empty,
-        };
-        let id = MockIdentity {
-            caller: CallerIdentity::Agent,
-        };
-        let ev = NormalizedInboundEvent {
-            sender_id: "auth",
-            channel_id: "nostr-a",
-            guild_id: "nostr",
-        };
-        let plan = plan_watch_inbound(&id, &ev, "owner", &["a".into()], "auth", &allow).unwrap();
-        assert_eq!(plan.caller, CallerIdentity::Agent);
-        assert_eq!(plan.admitted_agent_ids, vec!["a".to_string()]);
-        assert_eq!(
-            plan_watch_inbound(&id, &ev, "owner", &["a".into()], "stranger", &allow).unwrap_err(),
-            WatchInboundDrop::NotAllowed
-        );
     }
 }

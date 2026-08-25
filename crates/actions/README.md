@@ -5,17 +5,17 @@
 
 ## セッション inbound（`session_inbound`）
 
-ゲートは正規化受信（本文・送信者の生識別子・対象 `session_id`）だけを渡す。
-誰か・権限は inbound 1 口が決める。返すのは配送 effect。
+ゲートは正規化受信（本文・送信者の生識別子・対象 `session_id`）の束を
+[`accept_inbound`] へ 1 回投げる。誰か・権限・standing・権限デバウンス・
+trust 分割は core が決める。返すのは配送 effect（ターンした件）。
 Discord と web が同じ入口を使う（web 専用の別経路は無い）。
 
 | 関数 | 決めること |
 |---|---|
-| `plan_inbound` | caller 解決・DM 許可・ホワイトリスト。落とす/通す |
-| `plan_inbound_flush` | trust_level 分割。本数と caller は現行同一（Q13） |
+| `accept_inbound` | 唯一の入り口。caller・DM/whitelist・#698 許可・standing・権限デバウンス・Q13 分割。`on_admitted` / `on_run` を呼ぶ |
 | `delivery_effect` | ターン結果 → 本文 / NO_REPLY / Empty / Failed |
 | `prepare_session_inbound` | `ensure_session` + inbound 記録（ロック前・#284）。Discord / `TranscriptSource` |
-| `prepare_session_inbound_write` | 同じ順序（ensure → record）。web は `SessionInboundWrite` 越し（行の形は現行 `session_logs`。`TranscriptSource` は使わない） |
+| `prepare_session_inbound_write` | 同じ順序（ensure → record）。web は行の形が現行 `session_logs`（`TranscriptSource` は使わない） |
 | `start_session_turn` | 受信フック + 会話構築 + run |
 | `run_session_turn` | resume / 継続（フックなし） |
 
@@ -24,12 +24,11 @@ Discord と web が同じ入口を使う（web 専用の別経路は無い）。
 ## セッション watch ポリシー（`session_watch_policy`）
 
 Nostr の `session_watches` 付きセッションだけ。ゲートは形（即時転送 / 束ね）だけを見る。
-誰か・即応・権限毎デバウンスはここが決める。
+誰か・即応・権限毎デバウンスは `accept_inbound` が決める。
 
 | 関数 | 決めること |
 |---|---|
-| `plan_watch_inbound` | `#698` 許可集合 + `plan_inbound`（同じ口） |
-| `decide_watch_turn` | `'{}'` なら AGREED（オーナー npub / フォロイーのリプライ・メンション・リアクション）。非空は 4 クラス必須。`Debounce { interval_secs }` は権限毎間隔（ゲートは捨てずその秒で flush） |
+| `parse_session_watch_policy` | `'{}'` は未設定。非空は 4 クラス必須 |
 | `watch_author_standing` | owner / followee / other。co_agent は other（即応を拡張しない） |
 
 `interval_secs` の既定は持たない。0 は拒否。

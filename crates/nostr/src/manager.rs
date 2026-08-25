@@ -48,9 +48,9 @@ use crate::runner::NostrAgentRunner;
 use crate::session::{nostr_session_id, NostrSessionRuntime, NOSTR_SESSION_PREFIX};
 use crate::sink::NostrResponder;
 use crate::watch::{
-    admit_watch_item, apply_watch_effect, classify_watch_event, evaluate_watch_item,
-    prepare_watch_inbound, recorded_watch_text, run_watch_turn, watch_bundle_prompt_suffix,
-    watch_prompt_suffix, watch_subscribe_config, DebounceHold, TimelineBundle, WatchForward,
+    accept_watch_events, apply_watch_effect, classify_watch_event, prepare_watch_inbound,
+    recorded_watch_text, run_watch_turn, watch_bundle_prompt_suffix, watch_prompt_suffix,
+    watch_subscribe_config, TimelineBundle, WatchForward,
 };
 
 /// watch ループが握る self_pubkey の共有セル（identity 切替で更新可能）。
@@ -825,7 +825,7 @@ async fn run_session_watch_loop<R: NostrAgentRunner + Clone>(
     let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_RESPONSES));
     let queues = Arc::new(SessionQueues::new(SESSION_QUEUE_CAPACITY));
     let bundle = Arc::new(Mutex::new(TimelineBundle::default()));
-    let debounce = Arc::new(Mutex::new(DebounceHold::default()));
+    let debounce = Arc::new(Mutex::new(opencrab_actions::PrivilegeDebounce::default()));
     loop {
         match run_session_watch_once(
             &runner,
@@ -876,7 +876,7 @@ async fn run_session_watch_once<R: NostrAgentRunner + Clone>(
     permits: &Arc<Semaphore>,
     queues: &Arc<SessionQueues>,
     bundle: &Arc<Mutex<TimelineBundle>>,
-    debounce: &Arc<Mutex<DebounceHold>>,
+    debounce: &Arc<Mutex<opencrab_actions::PrivilegeDebounce<NostrEvent>>>,
 ) -> anyhow::Result<()> {
     let config = watch_subscribe_config(watch, relays.to_vec())?;
     let interval = Duration::from_secs(watch.interval_secs as u64);
@@ -966,7 +966,7 @@ async fn handle_watch_event<R: NostrAgentRunner>(
     permits: &Arc<Semaphore>,
     queues: &Arc<SessionQueues>,
     bundle: &Arc<Mutex<TimelineBundle>>,
-    debounce: &Arc<Mutex<DebounceHold>>,
+    debounce: &Arc<Mutex<opencrab_actions::PrivilegeDebounce<NostrEvent>>>,
     event: NostrEvent,
 ) {
     let self_pk = self_pubkey.read().unwrap().clone();
@@ -976,76 +976,76 @@ async fn handle_watch_event<R: NostrAgentRunner>(
             bundle.lock().unwrap().push(event);
         }
         WatchForward::Immediate { label } => {
+            let policy = match runner.get_session_policy_json(&watch.session_id) {
+                Ok(Some(p)) => p,
+                Ok(None) => {
+                    error!(session_id = %watch.session_id, "policy_json を読めない（session が無い）");
+                    return;
+                }
+                Err(e) => {
+                    error!(session_id = %watch.session_id, error = %e, "policy_json 読み失敗");
+                    return;
+                }
+            };
             let sources = allow.read().unwrap();
             let allow_sets = sources.as_watch_allow();
-            match admit_watch_item(
+            let now = tokio::time::Instant::now();
+            let mut debounce_g = debounce.lock().unwrap();
+            let hold_event = event.clone();
+            let mut held = false;
+            let mut admitted = false;
+            let mut run_caller = None;
+            let result = accept_watch_events(
                 runner,
                 agent_id,
                 &watch.session_id,
-                &event.pubkey,
-                &allow_sets,
-            ) {
-                Err(opencrab_actions::WatchInboundDrop::NotAllowed) => {
-                    dropped.fetch_add(1, AtomicOrdering::Relaxed);
-                }
-                Err(_) => {
-                    dropped.fetch_add(1, AtomicOrdering::Relaxed);
-                }
-                Ok(caller) => {
-                    drop(sources);
-                    let policy = match runner.get_session_policy_json(&watch.session_id) {
-                        Ok(Some(p)) => p,
-                        Ok(None) => {
-                            error!(session_id = %watch.session_id, "policy_json を読めない（session が無い）");
-                            return;
-                        }
-                        Err(e) => {
-                            error!(session_id = %watch.session_id, error = %e, "policy_json 読み失敗");
-                            return;
-                        }
-                    };
-                    let sources = allow.read().unwrap();
-                    let decision = match evaluate_watch_item(
-                        &policy,
-                        &event.pubkey,
-                        &caller,
-                        label,
-                        watch.interval_secs as u64,
-                        &sources.owner,
-                        &sources.followees,
-                    ) {
-                        Ok(d) => d,
-                        Err(e) => {
-                            error!(error = %e, "watch policy 判定失敗");
-                            return;
-                        }
-                    };
-                    drop(sources);
-                    match decision {
-                        opencrab_actions::WatchTurnDecision::Immediate => {
-                            if !prepare_and_maybe_relay(runner, agent_id, &watch.session_id, &event)
-                            {
-                                return;
-                            }
-                            enqueue_watch_turn(
-                                runner,
-                                cli,
-                                agent_id,
-                                &watch.session_id,
-                                admin,
-                                runtime,
-                                permits,
-                                queues,
-                                event,
-                                label,
-                                caller,
-                            );
-                        }
-                        opencrab_actions::WatchTurnDecision::Debounce { interval_secs } => {
-                            debounce.lock().unwrap().push(event, interval_secs);
-                        }
-                    }
-                }
+                std::slice::from_ref(&event),
+                &[label],
+                Some(opencrab_actions::WatchAccept {
+                    policy_json: &policy,
+                    interval_secs: watch.interval_secs as u64,
+                    allow: allow_sets,
+                    owner: &sources.owner,
+                    followees: &sources.followees,
+                    debounce: Some((&mut *debounce_g, now)),
+                }),
+                |_| {
+                    held = true;
+                    hold_event.clone()
+                },
+                |_, _| admitted = true,
+                |_, adm| run_caller = Some(adm.caller.clone()),
+            );
+            drop(debounce_g);
+            drop(sources);
+            if let Err(e) = result {
+                error!(error = %e, "watch inbound 失敗");
+                return;
+            }
+            if held {
+                return;
+            }
+            if !admitted {
+                dropped.fetch_add(1, AtomicOrdering::Relaxed);
+                return;
+            }
+            if !prepare_and_maybe_relay(runner, agent_id, &watch.session_id, &event) {
+                return;
+            }
+            if let Some(caller) = run_caller {
+                enqueue_watch_turn(
+                    runner,
+                    cli,
+                    agent_id,
+                    &watch.session_id,
+                    admin,
+                    runtime,
+                    permits,
+                    queues,
+                    event,
+                    label,
+                    caller,
+                );
             }
         }
     }
@@ -1094,7 +1094,7 @@ async fn flush_debounce_ready<R: NostrAgentRunner>(
     runtime: &Arc<NostrSessionRuntime>,
     permits: &Arc<Semaphore>,
     queues: &Arc<SessionQueues>,
-    debounce: &Arc<Mutex<DebounceHold>>,
+    debounce: &Arc<Mutex<opencrab_actions::PrivilegeDebounce<NostrEvent>>>,
 ) {
     let groups = debounce
         .lock()
@@ -1134,26 +1134,64 @@ fn flush_event_group<R: NostrAgentRunner>(
     events: Vec<NostrEvent>,
     timeline: bool,
 ) {
+    if events.is_empty() {
+        return;
+    }
     let sources = allow.read().unwrap();
     let allow_sets = sources.as_watch_allow();
-    let mut kept = Vec::new();
-    for event in events {
-        if admit_watch_item(runner, agent_id, session_id, &event.pubkey, &allow_sets).is_ok()
-            && prepare_and_maybe_relay(runner, agent_id, session_id, &event)
-        {
-            kept.push(event);
-        }
-    }
+    let labels: Vec<&str> = events
+        .iter()
+        .map(|e| {
+            if timeline {
+                "タイムライン"
+            } else {
+                crate::watch::watch_kind_label(e)
+            }
+        })
+        .collect();
+    let empty_policy = "{}";
+    let empty_set = std::collections::HashSet::new();
+    let mut prepared: Vec<bool> = vec![false; events.len()];
+    let mut run_at: Option<(usize, opencrab_actions::CallerIdentity)> = None;
+    let result = accept_watch_events(
+        runner,
+        agent_id,
+        session_id,
+        &events,
+        &labels,
+        Some(opencrab_actions::WatchAccept {
+            policy_json: empty_policy,
+            interval_secs: 1,
+            allow: allow_sets,
+            owner: &empty_set,
+            followees: &empty_set,
+            debounce: None,
+        }),
+        |_| unreachable!("watch flush は権限デバウンスしない"),
+        |i, _| {
+            prepared[i] = prepare_and_maybe_relay(runner, agent_id, session_id, &events[i]);
+        },
+        |i, adm| run_at = Some((i, adm.caller.clone())),
+    );
     drop(sources);
-    let Some(last) = kept.last().cloned() else {
+    if let Err(e) = result {
+        error!(error = %e, "watch flush inbound 失敗");
+        return;
+    }
+    let Some((i, caller)) = run_at else {
         return;
     };
-    let caller = runner.resolve_nostr_caller(agent_id, &last.pubkey);
-    let label = if timeline {
-        "タイムライン"
-    } else {
-        crate::watch::watch_kind_label(&last)
-    };
+    if !prepared[i] {
+        return;
+    }
+    let kept: Vec<NostrEvent> = events
+        .iter()
+        .enumerate()
+        .filter(|(j, _)| prepared[*j])
+        .map(|(_, e)| e.clone())
+        .collect();
+    let last = events[i].clone();
+    let label = labels[i];
     let suffix = if timeline {
         watch_bundle_prompt_suffix(&kept)
     } else {

@@ -69,21 +69,6 @@ pub fn get_session_watch(conn: &Connection, id: i64) -> Result<Option<SessionWat
     }
 }
 
-/// 1 セッションの watch を id 順で返す。
-pub fn list_session_watches_for_session(
-    conn: &Connection,
-    session_id: &str,
-) -> Result<Vec<SessionWatchRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, session_id, agent_id, interval_secs, filter_json, created_at
-         FROM session_watches WHERE session_id = ?1 ORDER BY id",
-    )?;
-    let rows = stmt
-        .query_map(params![session_id], row_from_watch)?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    Ok(rows)
-}
-
 /// この agent の接続で実行する watch を id 順で返す。
 pub fn list_session_watches_for_agent(
     conn: &Connection,
@@ -97,16 +82,6 @@ pub fn list_session_watches_for_agent(
         .query_map(params![agent_id], row_from_watch)?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(rows)
-}
-
-/// そのセッションに watch が 1 本でもあるか（新機構の境界）。
-pub fn session_has_watches(conn: &Connection, session_id: &str) -> Result<bool> {
-    let n: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM session_watches WHERE session_id = ?1",
-        params![session_id],
-        |row| row.get(0),
-    )?;
-    Ok(n > 0)
 }
 
 /// watch 1 行を更新する。対象が無ければ `false`。
@@ -207,15 +182,10 @@ mod tests {
         assert_eq!(row.agent_id, "a");
         assert_eq!(row.interval_secs, 120);
         assert!(row.filter_json.contains("npub1x"));
-        assert!(session_has_watches(&conn, "nostr-a").unwrap());
-        assert!(!session_has_watches(&conn, "nostr-other").unwrap());
-        assert_eq!(
-            list_session_watches_for_session(&conn, "nostr-a")
-                .unwrap()
-                .len(),
-            1
-        );
         assert_eq!(list_session_watches_for_agent(&conn, "a").unwrap().len(), 1);
+        assert!(list_session_watches_for_agent(&conn, "other")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -232,10 +202,12 @@ mod tests {
         let conn = setup();
         insert_session_watch(&conn, "nostr-a", "a", 60, "{}").unwrap();
         insert_session_watch(&conn, "nostr-a", "b", 90, "{}").unwrap();
-        let rows = list_session_watches_for_session(&conn, "nostr-a").unwrap();
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].agent_id, "a");
-        assert_eq!(rows[1].agent_id, "b");
+        let rows_a = list_session_watches_for_agent(&conn, "a").unwrap();
+        let rows_b = list_session_watches_for_agent(&conn, "b").unwrap();
+        assert_eq!(rows_a.len(), 1);
+        assert_eq!(rows_b.len(), 1);
+        assert_eq!(rows_a[0].agent_id, "a");
+        assert_eq!(rows_b[0].agent_id, "b");
     }
 
     #[test]

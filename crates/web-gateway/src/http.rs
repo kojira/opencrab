@@ -9,7 +9,7 @@
 //!
 //! ここが持つのは HTTP の抽出とレスポンス整形だけで、session_id 規約・直列化・
 //! SSE 配送・非ブロック dispatch の実体は [`crate::gateway`] / [`crate::respond`] にある。
-//! 誰か・権限は core の [`plan_inbound`](opencrab_actions::plan_inbound) 1 口。
+//! 誰か・権限は core の [`accept_inbound`](opencrab_actions::accept_inbound) 1 口。
 //! セッション確保 + inbound 記録は
 //! [`prepare_session_inbound_write`](opencrab_actions::prepare_session_inbound_write)
 //! （行の形は web 現行のまま。`TranscriptSource` は使わない）。
@@ -31,13 +31,13 @@ use futures::Stream;
 use serde::Deserialize;
 
 use opencrab_actions::{
-    plan_inbound, prepare_session_inbound_write, NormalizedInbound, NormalizedInboundEvent,
-    PrepareSessionInboundError,
+    accept_inbound, prepare_session_inbound_write, InboundLookups, InboundWork, NormalizedInbound,
+    NormalizedInboundEvent, PrepareSessionInboundError,
 };
 
 use crate::gateway::{caller_type_label, web_session_id};
 use crate::respond::{run_and_deliver_serialized, WebTurnOutcome};
-use crate::runner::{WebAgentRunner, WebInboundIdentity, WebSessionWrite, WEB_INBOUND_GUILD};
+use crate::runner::{WebAgentRunner, WEB_INBOUND_GUILD};
 
 /// Production router と read-only inventory が共有するルート宣言。
 ///
@@ -114,8 +114,8 @@ pub const DEFAULT_WEB_USER_ID: &str = "web-user";
 /// （session_logs の speaker_id にもそのまま入る）ため、空白のみの場合も含めて
 /// 既定の web ユーザとして扱う。
 ///
-/// owner 判定そのものは core の [`plan_inbound`](opencrab_actions::plan_inbound) が
-/// [`WebInboundIdentity`] 越しに [`WebAgentRunner::resolve_caller`] を呼んで行う
+/// owner 判定そのものは core の [`accept_inbound`](opencrab_actions::accept_inbound) が
+/// [`WebAgentRunner::resolve_caller`] を呼んで行う
 /// （`crates/server` の `is_owner_id` / #164）。前後の空白はここで落としておき、
 /// 認可・セッションキー・speaker_id すべてで同じ値を使う。正規化とその owner 判定の
 /// 噛み合わせは server 側にテストがある。
@@ -148,19 +148,47 @@ pub async fn send_web_message<R: WebAgentRunner>(
     // 唯一の公開ターン入口）が担う。ここでは `AgentNotFound` を 404 に写像する（下の match）。
 
     // 1. 誰か・権限は core の inbound 1 口。ゲートは生識別子だけ渡す。
-    let inbound_event = NormalizedInboundEvent {
-        sender_id: &user_id,
-        channel_id: "",
-        guild_id: WEB_INBOUND_GUILD,
+    // InboundLookups の dyn Fn は Send でないので、await の前にブロックで落とす。
+    let caller = {
+        let inbound_event = NormalizedInboundEvent {
+            sender_id: &user_id,
+            channel_id: "",
+            guild_id: WEB_INBOUND_GUILD,
+        };
+        let work = InboundWork {
+            event: inbound_event,
+            has_content: true,
+            kind_label: "",
+            author_key: &user_id,
+        };
+        let resolve = |s: &str, a: &[String], _: &str| {
+            assert_eq!(
+                a.len(),
+                1,
+                "web inbound は path の agent 1 体（複数 agent の別経路を作らない）"
+            );
+            state.resolve_caller(&a[0], s)
+        };
+        let lookups = InboundLookups {
+            resolve_caller: &resolve,
+            dm_allowed_any: &|_, _, _| true,
+            dm_allowed: &|_, _, _| true,
+            channel_whitelisted: &|_, _| true,
+        };
+        let mut caller = None;
+        accept_inbound::<()>(
+            &[work],
+            "",
+            std::slice::from_ref(&id),
+            &lookups,
+            None,
+            |_| (),
+            |_, adm| caller = Some(adm.caller.clone()),
+            |_, _| {},
+        )
+        .expect("web inbound は DM ではない（WEB_INBOUND_GUILD が非空）");
+        caller.expect("web inbound は 1 件通る")
     };
-    let plan = plan_inbound(
-        &WebInboundIdentity::new(&state),
-        &inbound_event,
-        "",
-        std::slice::from_ref(&id),
-    )
-    .expect("web inbound は DM ではない（WEB_INBOUND_GUILD が非空）");
-    let caller = plan.caller;
     let caller_type = caller_type_label(&caller);
 
     // 2. セッション確保 + inbound 記録は core。ゲートは正規化受信だけ渡す。
@@ -176,7 +204,11 @@ pub async fn send_web_message<R: WebAgentRunner>(
         image_urls: &[],
         external_id: "",
     };
-    if let Err(e) = prepare_session_inbound_write(&WebSessionWrite::new(&state), &inbound) {
+    if let Err(e) = prepare_session_inbound_write(
+        &inbound,
+        |sid, aid| state.ensure_web_session(sid, aid),
+        |aid, sid, uid, content| state.record_user_message(aid, sid, uid, content),
+    ) {
         let error = match e {
             PrepareSessionInboundError::Ensure(e) => format!("Failed to create session: {e}"),
             PrepareSessionInboundError::Record(e) => format!("Failed to log message: {e}"),
@@ -400,7 +432,7 @@ mod tests {
         }
     }
 
-    /// レスポンスの `caller_type` は core の `plan_inbound` が
+    /// レスポンスの `caller_type` は core の `accept_inbound` が
     /// [`WebAgentRunner::resolve_caller`] から決めた値であること。
     ///
     /// 呼び出し元判定を捨てて固定値（例: 常に owner）を返す変異はここで落ちる。
@@ -434,7 +466,7 @@ mod tests {
     /// **ユーザ ID の正規化がハンドラ経路で効いていること**。
     ///
     /// 正規化関数の単体テストだけでは、ハンドラが正規化を通さなくなっても検出できない。
-    /// 認可判定（`plan_inbound` → `resolve_caller`）と DB 記録
+    /// 認可判定（`accept_inbound` → `resolve_caller`）と DB 記録
     /// （`prepare_session_inbound_write` → `record_user_message`）の
     /// 両方へ同じ正規化済みの値が渡ることを観測する。
     #[tokio::test]

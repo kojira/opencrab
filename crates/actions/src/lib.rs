@@ -47,18 +47,17 @@ pub use channel_config::apply_discord_channel_config;
 pub use dispatcher::ActionDispatcher;
 pub use run_request::{LiveInboundScope, RunRequest};
 pub use session_inbound::{
-    consecutive_trust_groups, delivery_effect, plan_inbound, plan_inbound_flush,
-    plan_record_only_flags, prepare_session_inbound, prepare_session_inbound_write,
-    run_session_turn, start_session_turn, DeliveryEffect, FlushPlan, InboundAgentDrop,
-    InboundIdentity, InboundMessageDrop, InboundPlan, NormalizedInbound, NormalizedInboundEvent,
-    PrepareSessionInboundError, SessionInboundWrite,
+    accept_inbound, consecutive_trust_groups, delivery_effect, plan_record_only_flags,
+    prepare_session_inbound, prepare_session_inbound_write, run_session_turn, start_session_turn,
+    AdmittedInbound, DeliveryEffect, InboundAgentDrop, InboundDrop, InboundLookups,
+    InboundMessageDrop, InboundWork, NormalizedInbound, NormalizedInboundEvent,
+    PrepareSessionInboundError, PrivilegeDebounce, WatchAccept,
 };
 pub use session_runtime::{SessionLocks, SessionRuntime};
 pub use session_watch_policy::{
-    caller_policy_key, decide_watch_turn, parse_session_watch_policy, plan_watch_inbound,
-    watch_author_standing, ClassPolicy, SessionPolicyError, SessionWatchPolicy, WatchAllowSets,
-    WatchAuthorStanding, WatchInboundDrop, WatchTurnDecision, AGREED_IMMEDIATE_KINDS,
-    POLICY_CLASS_KEYS, WATCH_KIND_LABELS,
+    caller_policy_key, parse_session_watch_policy, watch_author_standing, ClassPolicy,
+    SessionPolicyError, SessionWatchPolicy, WatchAllowSets, WatchAuthorStanding,
+    AGREED_IMMEDIATE_KINDS, POLICY_CLASS_KEYS, WATCH_KIND_LABELS,
 };
 pub use subtask::{
     cancel_subtask, default_non_dispatch_tools, dispatch_settled, steer_subtask, CancelOutcome,

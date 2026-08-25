@@ -17,7 +17,7 @@ Nostr ゲート。配送（購読・送信・passthrough）はここ。誰か・
 | DM kind 4/1059 | 破棄（#514） |
 | リプライ / メンション（e/p が当人）・リポスト 6/16・リアクション 7・長文 kind 30023（e/p が当人） | 即時 |
 | タイムライン（自分宛でない kind 1 / 長文） | `interval_secs` で束ねて inbound 1 口 |
-| 対話系を core が Debounce した件 | core が返した権限毎間隔で flush（即時なら handle 時のみ prepare、束ねなら flush 時のみ） |
+| 対話系を core が権限デバウンスした件 | core 内部バッファ（`PrivilegeDebounce`）。即時なら handle 時のみ prepare、束ねなら flush 時のみ |
 
 `interval_secs` は必須。既定値は無い。watch を置けるのは `nostr-` 系のみ（Q-B）。
 設定口は `GET/POST /api/agents/{id}/nostr/watches`。

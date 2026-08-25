@@ -11,8 +11,8 @@
 //! トレイトには DB 行の型を出さない — 会話の保存や認可判定の**結果**だけを受け取り、
 //! スキーマの変更がゲートウェイ層へ波及しないようにする。
 //!
-//! 載せ替え 4-b: 誰か・権限・場の確保・inbound 記録・ターン起動は core の inbound 1 口
-//! （`plan_inbound` / `prepare_session_inbound_write` / `run_session_turn` /
+//! 載せ替え 4-b: 誰か・権限・セッション確保・inbound 記録・ターン起動は core の inbound 1 口
+//! （`accept_inbound` / `prepare_session_inbound_write` / `run_session_turn` /
 //! `delivery_effect`）。ゲートに残るのは HTTP 受け・SSE 配送・受信の正規化・
 //! core の決定の送信。
 //!
@@ -59,5 +59,5 @@ pub use gateway::{
 };
 pub use http::{route_inventory, routes};
 pub use respond::{run_and_deliver_serialized, WebTurnOutcome};
-pub use runner::{WebAgentRunner, WebInboundIdentity, WEB_INBOUND_GUILD};
+pub use runner::{WebAgentRunner, WEB_INBOUND_GUILD};
 pub use sink::WebCompletionSink;

@@ -286,7 +286,20 @@ impl opencrab_actions::AgentRuntime for FakeRunner {
     }
 }
 
-impl opencrab_actions::InboundIdentity for FakeRunner {
+impl crate::AgentRunner for FakeRunner {
+    fn db(&self) -> &opencrab_db::Db {
+        &self.db
+    }
+
+    fn workspace_base(&self) -> &str {
+        "/nonexistent/workspace/{agent_id}"
+    }
+
+    fn is_channel_writable(&self, _channel_id: &str) -> bool {
+        // 空応答なので送信判定までは来ないが、来ても書き込まない側に倒す。
+        false
+    }
+
     fn is_channel_whitelisted_for_agent(&self, _channel_id: &str, _agent_id: &str) -> bool {
         true
     }
@@ -318,21 +331,6 @@ impl opencrab_actions::InboundIdentity for FakeRunner {
         } else {
             CallerIdentity::TrustedUser
         }
-    }
-}
-
-impl crate::AgentRunner for FakeRunner {
-    fn db(&self) -> &opencrab_db::Db {
-        &self.db
-    }
-
-    fn workspace_base(&self) -> &str {
-        "/nonexistent/workspace/{agent_id}"
-    }
-
-    fn is_channel_writable(&self, _channel_id: &str) -> bool {
-        // 空応答なので送信判定までは来ないが、来ても書き込まない側に倒す。
-        false
     }
 
     fn list_enabled_discord_configs(&self) -> Vec<opencrab_db::queries::AgentDiscordConfigRow> {
@@ -452,6 +450,7 @@ async fn inbound_run_carries_the_shared_registry_so_cancel_can_reach_it() {
         event_tx,
         registry.clone(),
         false,
+        None,
     )
     .await;
 
@@ -507,6 +506,7 @@ async fn inbound_run_carries_the_end_of_speech_subtask_counter() {
         event_tx,
         registry,
         false,
+        None,
     )
     .await;
 
@@ -597,6 +597,7 @@ async fn inbound_goes_through_the_shared_inbound_hook() {
         event_tx,
         registry,
         false,
+        None,
     )
     .await;
 
@@ -669,6 +670,7 @@ async fn inbound_message_is_recorded_before_the_session_lock_is_acquired() {
         event_tx,
         registry,
         false,
+        None,
     )
     .await;
 
@@ -736,6 +738,7 @@ fn failed_inbound_record_is_detected_not_swallowed() {
                 event_tx,
                 registry,
                 false,
+                None,
             )
             .await;
 
@@ -1103,6 +1106,7 @@ fn every_sender_gets_the_seen_reaction_including_other_bots() {
                 event_tx,
                 registry,
                 false,
+                None,
             )
             .await;
         });
@@ -1178,6 +1182,7 @@ async fn record_only_records_inbound_but_does_not_run() {
         event_tx,
         registry,
         true, // record_only
+        None,
     )
     .await;
 
@@ -1216,6 +1221,7 @@ async fn debounced_window_records_every_message_but_runs_once() {
         event_tx.clone(),
         registry.clone(),
         true, // 非トリガー（record-only）
+        None,
     )
     .await;
     process_incoming_message(
@@ -1231,6 +1237,7 @@ async fn debounced_window_records_every_message_but_runs_once() {
         event_tx,
         registry,
         false, // トリガー（run を起こす）
+        None,
     )
     .await;
 

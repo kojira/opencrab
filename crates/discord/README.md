@@ -20,16 +20,15 @@ Discord ゲート。載せ替え工程 4-a 以降、**配送専用**。
 
 | 判断 | 入口 |
 |---|---|
-| caller 解決・DM 許可・ホワイトリスト | `plan_inbound` |
-| trust_level による run 分割 | `plan_inbound_flush` |
+| caller 解決・DM 許可・ホワイトリスト・trust 分割 | `accept_inbound` |
 | ターン結果の配送形 | `delivery_effect` |
 | セッション確保 + inbound 記録 | `prepare_session_inbound` |
 | ターン起動 | `start_session_turn` / `run_session_turn` |
 | `discord_channel_config` の DB 書き | `apply_discord_channel_config`（definitions と execute 受け口はここ） |
 
-ゲートは生識別子（user / channel / guild）だけを core へ渡す。
+ゲートは生識別子（user / channel / guild）の束を `accept_inbound` へ 1 回渡す。
 `resolve_caller` / `dm_allowed*` / `is_channel_whitelisted` の計算本体は
-`InboundIdentity`（server 実装）のまま。呼ぶのは core。
+runner（server 実装）のまま。呼ぶのは core。
 `SystemGatewayActions` に `discord_channel_config` は出さない
 （web / Nostr へ波及させない）。
 
