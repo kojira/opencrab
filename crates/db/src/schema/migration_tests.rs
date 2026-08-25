@@ -4016,6 +4016,14 @@ fn existing_table_digests(conn: &Connection, skip_new: bool) -> BTreeMap<String,
     out
 }
 
+fn assert_user_tables_closed(conn: &Connection, expected_tables: &[String]) {
+    assert_eq!(
+        user_tables(conn),
+        expected_tables,
+        "user tables != expected closed set"
+    );
+}
+
 fn assert_v43_schema(conn: &Connection) {
     assert!(
         column_exists(conn, "sessions", "policy_json").unwrap(),
@@ -4028,11 +4036,6 @@ fn assert_v43_schema(conn: &Connection) {
     assert!(table_exists(conn, "tool_logs").unwrap(), "tool_logs が無い");
     assert!(table_exists(conn, "sessions").unwrap());
     assert!(table_exists(conn, "agent_sessions").unwrap());
-    assert!(!table_exists(conn, "places").unwrap(), "places が作られた");
-    assert!(
-        !table_exists(conn, "memberships").unwrap(),
-        "memberships が作られた"
-    );
     let view_n: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='view' AND name='sessions'",
@@ -4057,6 +4060,12 @@ fn v43_fresh_db_has_transplant_schema() {
     let conn = crate::init_memory().expect("init");
     assert_eq!(schema_version(&conn).unwrap(), 43);
     assert_eq!(schema_version(&conn).unwrap(), latest_version());
+    let pre = {
+        let tmp = crate::init_memory().expect("pre");
+        setup_pre_v43(&tmp);
+        user_tables(&tmp)
+    };
+    assert_user_tables_closed(&conn, &expected_v43_user_tables(&pre));
     assert_v43_schema(&conn);
     let cols = session_column_names(&conn);
     assert!(
@@ -4097,6 +4106,7 @@ fn v43_from_user_version_42_leaves_existing_rows_untouched() {
     )
     .unwrap();
 
+    let before_tables = user_tables(&conn);
     let before = existing_table_digests(&conn, false);
     let before_session: (String, String, i32, String, Option<String>) = conn
         .query_row(
@@ -4109,6 +4119,7 @@ fn v43_from_user_version_42_leaves_existing_rows_untouched() {
 
     run_migrations(&conn, MIGRATIONS).expect("v43 migration");
     assert_eq!(schema_version(&conn).unwrap(), latest_version());
+    assert_user_tables_closed(&conn, &expected_v43_user_tables(&before_tables));
     assert_v43_schema(&conn);
 
     let after = existing_table_digests(&conn, true);
@@ -4185,6 +4196,27 @@ fn v43_check_constraints_reject_invalid_rows() {
         [],
     )
     .expect("正の interval を拒否した");
+}
+
+/// session_watches は同一 session_id の複数行を許す（UNIQUE 無し）。
+#[test]
+fn v43_session_watches_allows_multiple_rows_per_session() {
+    let conn = crate::init_memory().expect("init");
+    conn.execute_batch(
+        "INSERT INTO session_watches (session_id, agent_id, interval_secs, filter_json, created_at)
+         VALUES
+           ('sess-a', 'ag-a', 300, '{}', '2026-01-01T00:00:00Z'),
+           ('sess-a', 'ag-a', 60, '{\"kinds\":[1]}', '2026-01-01T00:00:01Z');",
+    )
+    .expect("同一 session_id の複数行を拒否した");
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM session_watches WHERE session_id='sess-a'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 2);
 }
 
 /// SCHEMA_SQL 経路と v43 マイグレーション経路で新表の sqlite_master SQL が一致する。

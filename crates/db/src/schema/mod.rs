@@ -1809,8 +1809,8 @@ const MIGRATIONS: &[Migration] = &[
         version: 43,
         description:
             "sessions に policy_json を足し、session_watches / tool_logs を新設する（載せ替え工程 3）",
-        // **場＝セッション（同一概念）。表はそのまま・データ移動ゼロ。**
-        // 場の属性は `sessions.policy_json`（DEFAULT '{}' = 現行挙動維持）。
+        // 会話の単位はセッション。表はそのまま・データ移動ゼロ。
+        // 属性は `sessions.policy_json`（DEFAULT '{}' = 現行挙動維持）。
         // agent_sessions には列を足さない。新表は watch 定義と tool_logs だけ。
         //
         // ## やってよいことだけ
@@ -1819,7 +1819,8 @@ const MIGRATIONS: &[Migration] = &[
         //   3. 同じ TX 内で構造不変アサート（失敗なら ROLLBACK）
         //
         // ## やってはいけないこと
-        //   INSERT INTO 既存表、既存行の UPDATE、DROP、列改名、VIEW、places / memberships。
+        //   INSERT INTO 既存表、既存行の UPDATE、DROP、列改名、VIEW。
+        //   表集合は適用前 ∪ {session_watches, tool_logs} と一致。
         //
         // ## 冪等性（#349/#475 の轍を踏まない）
         // 新規 DB は SCHEMA_SQL 側で列と 2 表を持つので、`column_exists` / `IF NOT EXISTS`
@@ -1957,8 +1958,9 @@ fn migrate_v38_align_schedule_vocab(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// v43: 場の属性列と watch / tool_logs を足すだけ（データ移動ゼロ）。
+/// v43: sessions.policy_json と session_watches / tool_logs を足すだけ（データ移動ゼロ）。
 fn migrate_v43_transplant_schema(conn: &Connection) -> rusqlite::Result<()> {
+    let before_tables = user_table_names(conn)?;
     if !column_exists(conn, "sessions", "policy_json")? {
         conn.execute_batch(
             "ALTER TABLE sessions ADD COLUMN policy_json TEXT NOT NULL DEFAULT '{}'",
@@ -1966,7 +1968,7 @@ fn migrate_v43_transplant_schema(conn: &Connection) -> rusqlite::Result<()> {
     }
     conn.execute_batch(SESSION_WATCHES_SQL)?;
     conn.execute_batch(TOOL_LOGS_SQL)?;
-    assert_v43_invariants(conn)
+    assert_v43_invariants(conn, &before_tables)
 }
 
 fn migration_err(msg: &str) -> rusqlite::Error {
@@ -1976,20 +1978,44 @@ fn migration_err(msg: &str) -> rusqlite::Error {
     )
 }
 
+fn user_table_names(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT name FROM sqlite_master
+         WHERE type='table' AND name NOT LIKE 'sqlite_%'
+         ORDER BY name",
+    )?;
+    let names = stmt
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    Ok(names)
+}
+
+fn expected_v43_user_tables(before: &[String]) -> Vec<String> {
+    let mut expected = before.to_vec();
+    for name in ["session_watches", "tool_logs"] {
+        if !expected.iter().any(|t| t == name) {
+            expected.push(name.to_string());
+        }
+    }
+    expected.sort();
+    expected
+}
+
 /// 同じ TX 内の構造不変（設計 §1.6 / §5.2 の TX 内で閉じるもの）。
 /// 既存全行のダイジェスト比較は rehearsal スクリプト側（本番起動で全表 SCAN しない）。
-fn assert_v43_invariants(conn: &Connection) -> rusqlite::Result<()> {
+fn assert_v43_invariants(conn: &Connection, before_tables: &[String]) -> rusqlite::Result<()> {
+    let after = user_table_names(conn)?;
+    let expected = expected_v43_user_tables(before_tables);
+    if after != expected {
+        return Err(migration_err(&format!(
+            "v43: user tables != expected closed set (got {after:?}, expected {expected:?})"
+        )));
+    }
     if !table_exists(conn, "sessions")? {
         return Err(migration_err("v43: sessions が消えた"));
     }
     if !table_exists(conn, "agent_sessions")? {
         return Err(migration_err("v43: agent_sessions が消えた"));
-    }
-    if table_exists(conn, "places")? {
-        return Err(migration_err("v43: places が作られた"));
-    }
-    if table_exists(conn, "memberships")? {
-        return Err(migration_err("v43: memberships が作られた"));
     }
     let view_sessions: i64 = conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='view' AND name='sessions'",

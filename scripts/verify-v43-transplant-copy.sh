@@ -11,7 +11,7 @@
 #   - 既存全表の COUNT と既存列ダイジェストが適用前後で一致（sessions.policy_json は除外）
 #   - sessions.policy_json は全行 '{}'
 #   - tool_logs / session_watches は 0 行
-#   - sessions / agent_sessions が残る。places / memberships / VIEW sessions は作られない
+#   - 適用後の user tables は適用前 ∪ {session_watches, tool_logs} と一致。VIEW sessions は無い
 #   - 同一コピー 2 本で適用結果が一致。2 回目は no-op
 set -euo pipefail
 
@@ -99,11 +99,8 @@ def snapshot(path, skip_new):
             skip = ["policy_json"] if name == "sessions" else []
             tables[name] = table_digest(conn, name, skip)
         extra = {}
-        names = set(user_tables(conn))
-        extra["has_sessions"] = "sessions" in names
-        extra["has_agent_sessions"] = "agent_sessions" in names
-        extra["has_places"] = "places" in names
-        extra["has_memberships"] = "memberships" in names
+        names = user_tables(conn)
+        extra["user_tables"] = names
         extra["view_sessions"] = conn.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='view' AND name='sessions'"
         ).fetchone()[0]
@@ -210,11 +207,8 @@ def snapshot(path, skip_new):
             skip = ["policy_json"] if name == "sessions" else []
             tables[name] = table_digest(conn, name, skip)
         extra = {}
-        names = set(user_tables(conn))
-        extra["has_sessions"] = "sessions" in names
-        extra["has_agent_sessions"] = "agent_sessions" in names
-        extra["has_places"] = "places" in names
-        extra["has_memberships"] = "memberships" in names
+        names = user_tables(conn)
+        extra["user_tables"] = names
         extra["view_sessions"] = conn.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='view' AND name='sessions'"
         ).fetchone()[0]
@@ -258,10 +252,19 @@ if ea["tool_logs"] != 0:
     errors.append(f"tool_logs count={ea['tool_logs']}")
 if ea["session_watches"] != 0:
     errors.append(f"session_watches count={ea['session_watches']}")
-if not ea["has_sessions"] or not ea["has_agent_sessions"]:
+expected_tables = list(before["extra"]["user_tables"])
+for name in ("session_watches", "tool_logs"):
+    if name not in expected_tables:
+        expected_tables.append(name)
+expected_tables.sort()
+if ea["user_tables"] != expected_tables:
+    errors.append(
+        f"user tables != expected closed set got={ea['user_tables']} want={expected_tables}"
+    )
+if "sessions" not in ea["user_tables"] or "agent_sessions" not in ea["user_tables"]:
     errors.append("sessions / agent_sessions missing")
-if ea["has_places"] or ea["has_memberships"] or ea["view_sessions"]:
-    errors.append("places / memberships / VIEW sessions were created")
+if ea["view_sessions"]:
+    errors.append("VIEW sessions was created")
 
 if errors:
     print("v43 copy verification RED:")
@@ -274,6 +277,6 @@ print(f"  existing tables={len(after_a['tables'])} (diff zero)")
 print(f"  user_version={ea['user_version']}")
 print(f"  sessions.policy_json all '{{}}'")
 print(f"  tool_logs=0 session_watches=0")
-print("  places/memberships/VIEW sessions absent")
+print("  user tables match expected closed set")
 print("  two-copy apply (B twice) matched")
 PY

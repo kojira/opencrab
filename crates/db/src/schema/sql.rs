@@ -231,7 +231,7 @@ CREATE TABLE IF NOT EXISTS task_progress (
 CREATE INDEX IF NOT EXISTS idx_task_progress_task ON task_progress(task_id);
 "#;
 
-/// 場に紐づく Nostr 購読（1 場 N 行 / 載せ替え工程 3・v43）。
+/// セッションに紐づく Nostr 購読（1 セッション N 行 / 載せ替え工程 3・v43）。
 ///
 /// `SCHEMA_SQL` 側の同名ブロックと文面を揃えること（新規 DB は SCHEMA_SQL、
 /// 既存 DB は v43 で同じ形に収束する）。
@@ -513,7 +513,7 @@ CREATE INDEX IF NOT EXISTS idx_heartbeat_instr_audit_agent
     ON heartbeat_instructions_audit(agent_id, created_at DESC);
 
 -- ============================================
--- セッション状態（場＝この行。id の値は場 ID。列名は session のまま）
+-- セッション状態
 -- ============================================
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
@@ -529,7 +529,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     metadata_json TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    -- 場ポリシー（権限毎デバウンス・即応する inbound 種別）。場＝この行。
+    -- セッションのポリシー（権限毎デバウンス・即応する inbound 種別）。
     -- DEFAULT '{}' は「未設定」= 現行挙動を維持。
     policy_json TEXT NOT NULL DEFAULT '{}'
 );
@@ -969,9 +969,9 @@ CREATE TABLE IF NOT EXISTS task_progress (
 CREATE INDEX IF NOT EXISTS idx_task_progress_task ON task_progress(task_id);
 
 -- ============================================
--- SESSION WATCHES: 場に紐づく Nostr 購読（1 場 N 行）
+-- SESSION WATCHES: セッションに紐づく Nostr 購読（1 セッション N 行）
 -- ============================================
--- 行がある場だけ新機構（束ね / 即時転送の分岐）が効く。
+-- 行があるセッションだけ新機構（束ね / 即時転送の分岐）が効く。
 -- 既存 nostr-{agent} は行ゼロのまま → 現行 agent_nostr_config watch を維持。
 -- interval_secs は必須（DEFAULT 無し）。未設定の INSERT は SQL が拒否する。
 -- リレー・鍵は agent_nostr_config（接続の家）。本表は購読条件だけ。
