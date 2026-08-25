@@ -108,7 +108,8 @@ pub struct WatchAccept<'a, T> {
     pub privilege: Option<&'a PrivilegeFire<T>>,
 }
 
-/// 通した 1 件。ゲートはこれを見て配送（👀 / ログ）する。ターン対象は `on_run` だけ。
+/// 通した 1 件。ゲートはこれを見て配送（ログ）する。ターン対象は `on_run` だけ。
+/// ターンの文脈に含めた件は `on_run` の第 3 引数（読んだ事実。判定中間値ではない）。
 #[derive(Debug, Clone)]
 pub struct AdmittedInbound {
     pub caller: CallerIdentity,
@@ -244,6 +245,7 @@ impl<T> Clone for PrivilegeFire<T> {
 
 impl<T: Send + 'static> PrivilegeFire<T> {
     /// `on_due` は間隔到達時に core が呼ぶ。再 `accept_inbound` ではない。
+    /// 渡す件がそのターンの文脈（読んだ事実）。ゲートはここで 👀 を付ける。
     pub fn new<F, Fut>(on_due: F) -> Self
     where
         F: Fn(Vec<(T, CallerIdentity)>) -> Fut + Send + Sync + 'static,
@@ -416,9 +418,10 @@ fn admit_one(
 /// 唯一の inbound 入り口。ゲートは正規化イベントの束を 1 回投げる。
 ///
 /// - 対話系（`watch` 無し）: trust 分割（Q13）。`on_admitted` は通した件、`on_run` はトリガー。
+///   `on_run` の第 3 引数は、そのターンの文脈に含めた受信の元 index（record-only を含む）。
 /// - watch 即時（`privilege` あり）: 許可集合・standing・権限デバウンス。抱えた件は
-///   [`PrivilegeFire`] が時限発火する（callback しない）。
-/// - watch 束 flush（`privilege` 無し）: 許可集合。通した最後だけ `on_run`。
+///   [`PrivilegeFire`] が時限発火する（callback しない）。発火時の件が文脈。
+/// - watch 束 flush（`privilege` 無し）: 許可集合。通した最後だけ `on_run`（文脈は通した全件）。
 ///
 /// `take_hold` は権限デバウンスに抱えるときだけ呼ばれる。
 #[allow(clippy::too_many_arguments)]
@@ -430,7 +433,7 @@ pub fn accept_inbound<T: Send + 'static>(
     watch: Option<WatchAccept<'_, T>>,
     mut take_hold: impl FnMut(usize) -> T,
     mut on_admitted: impl FnMut(usize, &AdmittedInbound),
-    mut on_run: impl FnMut(usize, &AdmittedInbound),
+    mut on_run: impl FnMut(usize, &AdmittedInbound, &[usize]),
 ) -> Result<(), InboundDrop> {
     let mut admitted: Vec<(usize, AdmittedInbound)> = Vec::new();
     let mut trust_at: Vec<Option<u8>> = vec![None; items.len()];
@@ -497,10 +500,46 @@ pub fn accept_inbound<T: Send + 'static>(
     for (j, (i, adm)) in admitted.iter().enumerate() {
         on_admitted(*i, adm);
         if run_flags[j] {
-            on_run(*i, adm);
+            let read = turn_read_indices(*i, &admitted, watch.as_ref(), &trust_at);
+            on_run(*i, adm, &read);
         }
     }
     Ok(())
+}
+
+/// ターン 1 本の文脈に含める受信の元 index。
+///
+/// 対話系: トリガーと同じ連続同権限グループのうち、通した件（record-only 含む）。
+/// watch 束 flush: 通した全件。watch 即時: その 1 件。
+fn turn_read_indices<T>(
+    trigger: usize,
+    admitted: &[(usize, AdmittedInbound)],
+    watch: Option<&WatchAccept<'_, T>>,
+    trust_at: &[Option<u8>],
+) -> Vec<usize> {
+    if watch.is_some_and(|w| w.privilege.is_none()) {
+        return admitted.iter().map(|(i, _)| *i).collect();
+    }
+    if watch.is_some() {
+        return vec![trigger];
+    }
+    let levels: Vec<u8> = trust_at
+        .iter()
+        .map(|t| t.expect("対話系の全件は admit または DM drop で trust を書いている"))
+        .collect();
+    let groups = consecutive_trust_groups(&levels);
+    let Some(&(start, len)) = groups
+        .iter()
+        .find(|&&(s, l)| trigger >= s && trigger < s + l)
+    else {
+        return vec![trigger];
+    };
+    let end = start + len;
+    admitted
+        .iter()
+        .map(|(i, _)| *i)
+        .filter(|&i| i >= start && i < end)
+        .collect()
 }
 
 /// 連続した同一 trust_level の並びを `(開始 index, 長さ)` に切る。
@@ -769,7 +808,7 @@ mod tests {
             None,
             |_| (),
             |_, adm| out = Some(adm.clone()),
-            |_, _| {},
+            |_, _, _| {},
         )?;
         Ok(out.expect("通した件は on_admitted される"))
     }
@@ -989,7 +1028,7 @@ mod tests {
             None,
             |_| (),
             |_, _| {},
-            |_, _| {},
+            |_, _, _| {},
         )
         .unwrap_err();
         assert_eq!(err, InboundDrop::Message(InboundMessageDrop::DmNotTrusted));
@@ -1027,6 +1066,7 @@ mod tests {
         ];
         let mut admitted = Vec::new();
         let mut runs = Vec::new();
+        let mut reads = Vec::new();
         accept_inbound::<()>(
             &items,
             "owner",
@@ -1035,11 +1075,19 @@ mod tests {
             None,
             |_| (),
             |i, _| admitted.push(i),
-            |i, _| runs.push(i),
+            |i, _, read| {
+                runs.push(i);
+                reads.push(read.to_vec());
+            },
         )
         .unwrap();
         assert_eq!(admitted, vec![0, 1, 2]);
         assert_eq!(runs, vec![1], "同権限 3 通の内容あり最後だけ run");
+        assert_eq!(
+            reads,
+            vec![vec![0, 1, 2]],
+            "トリガーのターン文脈は同グループの通した全件（record-only 含む）"
+        );
     }
 
     #[tokio::test]
@@ -1093,7 +1141,7 @@ mod tests {
                 i
             },
             |i, _| admitted.push(i),
-            |i, _| runs.push(i),
+            |i, _, _| runs.push(i),
         )
         .unwrap();
         assert_eq!(held, vec![0]);
@@ -1149,5 +1197,92 @@ mod tests {
         assert_eq!(later.len(), 1);
         assert_eq!(later[0].0, "slow");
         assert_eq!(fire.held_len(), 0);
+    }
+
+    /// row 116-117: record-only は on_run されない。同グループのトリガーの read にだけ入る。
+    #[test]
+    fn accept_inbound_record_only_is_read_with_the_trigger_not_alone() {
+        let caller = CallerIdentity::TrustedUser;
+        let resolve = |_: &str, _: &[String], _: &str| caller.clone();
+        let lookups = InboundLookups {
+            resolve_caller: &resolve,
+            dm_allowed_any: &|_, _, _| true,
+            dm_allowed: &|_, _, _| true,
+            channel_whitelisted: &|_, _| true,
+        };
+        let items = [
+            InboundWork {
+                event: event("u1", "ch", "g1"),
+                has_content: true,
+                kind_label: "",
+                author_key: "u1",
+            },
+            InboundWork {
+                event: event("u2", "ch", "g1"),
+                has_content: true,
+                kind_label: "",
+                author_key: "u2",
+            },
+        ];
+        let mut runs = Vec::new();
+        let mut reads = Vec::new();
+        accept_inbound::<()>(
+            &items,
+            "owner",
+            &["a".into()],
+            &lookups,
+            None,
+            |_| (),
+            |_, _| {},
+            |i, _, read| {
+                runs.push(i);
+                reads.push(read.to_vec());
+            },
+        )
+        .unwrap();
+        assert_eq!(runs, vec![1], "内容あり最後だけがトリガー");
+        assert_eq!(
+            reads,
+            vec![vec![0, 1]],
+            "record-only の 0 もこのターンで読む"
+        );
+    }
+
+    /// row 116-117: チャンネル whitelist 落ちは agent_drop。メッセージは通るので
+    /// `on_run` の read には入る。👀 を付けないのはゲートが `agent_drop` を見たとき。
+    #[test]
+    fn accept_inbound_whitelist_drop_is_agent_drop_not_message_drop() {
+        let caller = CallerIdentity::Agent;
+        let resolve = |_: &str, _: &[String], _: &str| caller.clone();
+        let lookups = InboundLookups {
+            resolve_caller: &resolve,
+            dm_allowed_any: &|_, _, _| true,
+            dm_allowed: &|_, _, _| true,
+            channel_whitelisted: &|_, _| false,
+        };
+        let items = [InboundWork {
+            event: event("u1", "ch", "g1"),
+            has_content: true,
+            kind_label: "",
+            author_key: "u1",
+        }];
+        let mut plan = None;
+        accept_inbound::<()>(
+            &items,
+            "owner",
+            &["a".into()],
+            &lookups,
+            None,
+            |_| (),
+            |_, adm| plan = Some(adm.clone()),
+            |_, _, _| {},
+        )
+        .unwrap();
+        let plan = plan.expect("メッセージ自体は通る");
+        assert_eq!(
+            plan.agent_drop("a"),
+            Some(InboundAgentDrop::ChannelNotWhitelisted)
+        );
+        assert!(plan.admitted_agent_ids.is_empty());
     }
 }

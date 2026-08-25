@@ -29,6 +29,8 @@ Discord ゲート。載せ替え工程 4-a 以降、**配送専用**。
 ゲートは生識別子（user / channel / guild）の束を `accept_inbound` へ 1 回渡す。
 `resolve_caller` / `dm_allowed*` / `is_channel_whitelisted` の計算本体は
 runner（server 実装）のまま。呼ぶのは core。
+`on_run` の第 3 引数（そのターンの文脈に含めた受信）で 👀 を付ける。
+record-only は即時 👀 せず、読むターンが走った時に付ける。whitelist 落ちは付けない。
 `SystemGatewayActions` に `discord_channel_config` は出さない
 （web / Nostr へ波及させない）。
 

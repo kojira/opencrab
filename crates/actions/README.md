@@ -14,7 +14,7 @@ Discord と web が同じ入口を使う（web 専用の別経路は無い）。
 
 | 関数 | 決めること |
 |---|---|
-| `accept_inbound` | 唯一の入り口。caller・DM/whitelist・#698 許可・standing・権限デバウンス・Q13 分割。`on_admitted` / `on_run` を呼ぶ。抱えた件は `PrivilegeFire` が時限発火 |
+| `accept_inbound` | 唯一の入り口。caller・DM/whitelist・#698 許可・standing・権限デバウンス・Q13 分割。`on_admitted` / `on_run` を呼ぶ。`on_run` の第 3 引数はそのターンの文脈に含めた受信 index（読んだ事実。Discord 👀）。抱えた件は `PrivilegeFire` が時限発火（発火時の件が文脈） |
 | `PrivilegeFire` | 権限デバウンスの内部バッファと tokio 時限タスク。間隔到達でターン起動クロージャを呼ぶ |
 | `delivery_effect` | ターン結果 → 本文 / NO_REPLY / Empty / Failed |
 | `prepare_session_inbound` | `ensure_session` + inbound 記録（ロック前・#284）。Discord / `TranscriptSource` |

@@ -1034,7 +1034,7 @@ async fn handle_watch_event<R: NostrAgentRunner>(
                     hold_event.clone()
                 },
                 |_, _| admitted = true,
-                |_, adm| run_caller = Some(adm.caller.clone()),
+                |_, adm, _| run_caller = Some(adm.caller.clone()),
             );
             drop(sources);
             if let Err(e) = result {
@@ -1189,7 +1189,7 @@ fn flush_event_group<R: NostrAgentRunner>(
         |i, _| {
             prepared[i] = prepare_and_maybe_relay(runner, agent_id, session_id, &events[i]);
         },
-        |i, adm| run_at = Some((i, adm.caller.clone())),
+        |i, adm, _| run_at = Some((i, adm.caller.clone())),
     );
     drop(sources);
     if let Err(e) = result {

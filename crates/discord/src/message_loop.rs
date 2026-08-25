@@ -587,6 +587,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                     .collect();
                 let mut admitted: Vec<Option<AdmittedInbound>> = vec![None; messages.len()];
                 let mut run_at = vec![false; messages.len()];
+                let mut read_at = vec![false; messages.len()];
                 let accept_err = {
                     let works: Vec<InboundWork<'_>> = messages
                         .iter()
@@ -623,7 +624,12 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         None,
                         |_| (),
                         |i, adm| admitted[i] = Some(adm.clone()),
-                        |i, _| run_at[i] = true,
+                        |i, _, read| {
+                            run_at[i] = true;
+                            for &r in read {
+                                read_at[r] = true;
+                            }
+                        },
                     )
                 };
                 if let Err(e) = accept_err {
@@ -674,6 +680,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         event_tx.clone(),
                         subtask_registry.clone(),
                         !run_at[i],
+                        read_at[i],
                         Some(plan),
                     )
                     .await;
@@ -701,10 +708,12 @@ async fn process_incoming_message<T: AgentRunner>(
     voice: Option<std::sync::Arc<crate::voice_session::VoiceSessionManager>>,
     event_tx: mpsc::UnboundedSender<LoopEvent>,
     subtask_registry: opencrab_actions::subtask::SubtaskRegistry,
-    // #543: true なら**記録（と 👀）まで**で終え、推論（run）は起こさない。デバウンス窓で
+    // #543: true なら記録までで終え、推論（run）は起こさない。デバウンス窓で
     // 合流したメッセージのうち、run トリガーでないものに使う。各メッセージを正しい送信者で
     // 個別に会話ログへ残しつつ、run は窓につき 1 回だけにするための分岐。
+    // 👀 は record_only では付けない。ターン文脈に含まれたとき（`mark_seen`）に付ける。
     record_only: bool,
+    mark_seen: bool,
     preplanned: Option<AdmittedInbound>,
 ) {
     let (text, image_urls) = extract_discord_content(&incoming.content);
@@ -789,7 +798,7 @@ async fn process_incoming_message<T: AgentRunner>(
                 None,
                 |_| (),
                 |_, adm| admitted = Some(adm.clone()),
-                |_, _| {},
+                |_, _, _| {},
             )
         };
         match accept_err {
@@ -834,8 +843,8 @@ async fn process_incoming_message<T: AgentRunner>(
         .unwrap_or("")
         .to_string();
 
-    // 処理対象として確定したメッセージに付ける 👀 を**一度だけ**付与するためのフラグ。
-    // 複数エージェントが同じ投稿を処理しても 1 個で済ませる、それだけの役目。
+    // LLM がこの投稿を読んだ（ターン文脈に含めた）ときに付ける 👀 を**一度だけ**
+    // 付与するためのフラグ。複数エージェントが同じ投稿を処理しても 1 個で済ませる。
     // 送信者で付け外しはしない（自分自身の投稿は受信側 `is_own_message` で既に除外済み）。
     let mut reaction_added = false;
 
@@ -904,9 +913,10 @@ async fn process_incoming_message<T: AgentRunner>(
         }
         debug!(agent_id = %agent_id, session_id = %session_id, stage = "record_inbound", "turn: 受信記録 完了（出）");
 
-        // 処理対象として確定したので 👀 を付ける（DM whitelist / channel whitelist 通過後）。
-        // 失敗は非致命的。複数エージェントが同一投稿を処理しても一度だけ付与する。
-        if !reaction_added {
+        // LLM がこの投稿を読んだ（ターン文脈に含めた）ので 👀 を付ける。
+        // record-only 単体では付けない。whitelist 通過後。失敗は非致命的。
+        // 複数エージェントが同一投稿を処理しても一度だけ付与する。
+        if mark_seen && !reaction_added {
             add_reaction_non_fatal(
                 gateway.as_ref(),
                 channel_id,
@@ -918,9 +928,10 @@ async fn process_incoming_message<T: AgentRunner>(
             reaction_added = true;
         }
 
-        // #543: record-only パス（デバウンス窓の非トリガーメッセージ）は、記録と 👀 まで。
-        // typing / 推論（run）は起こさない。合流窓のトリガー 1 通だけが run を起こし、その run が
-        // DB から会話全体（この記録も含む）を読むので、情報は落ちず文脈には正しい帰属で入る。
+        // #543: record-only パス（デバウンス窓の非トリガーメッセージ）は記録まで。
+        // typing / 推論（run）は起こさない。👀 は上の `mark_seen`（読むターンが走った時）。
+        // 合流窓のトリガー 1 通だけが run を起こし、その run が DB から会話全体（この記録も含む）
+        // を読むので、情報は落ちず文脈には正しい帰属で入る。
         if record_only {
             continue;
         }
@@ -2053,7 +2064,7 @@ impl ReactionAdder for DiscordGateway {
 /// 元の投稿に Unicode 絵文字のリアクションを 1 個付ける（非致命的）。
 ///
 /// 使い分けは**絵文字だけ**で、手続きは共通:
-/// - 👀 = 処理対象として確定した（受け取った）
+/// - 👀 = LLM がこの投稿を読んだ（ターンの文脈に含めた）
 /// - 🤐 = エージェントが `NO_REPLY` を選んだ（読んで黙ると**決めた**）。
 ///   これが無いと投稿者からは「読んで黙った」のか「落ちて返せなかった」のか区別できない（#317）
 ///
@@ -2095,7 +2106,7 @@ async fn add_reaction_non_fatal<G: ReactionAdder>(
     }
 }
 
-/// 処理対象として確定した投稿に付ける「受け取った」の印。
+/// LLM が投稿を読んだ（ターン文脈に含めた）ときに付ける印。
 const SEEN_EMOJI: &str = "👀";
 
 /// エージェントが `NO_REPLY` を選んだことを示す印（#317）。
@@ -2105,7 +2116,7 @@ const NO_REPLY_EMOJI: &str = "🤐";
 /// ターンが自然終了したとき、自分が最後に投稿したメッセージに付ける「発言終わり」の印（#431）。
 ///
 /// 目的: 見ている人間が「まだ続きを書いているのか、言い終わったのか」を判別できる。
-/// 👀（受信）/🤐（黙ると決めた）と意味が衝突しない絵文字にする。付与対象も違い、
+/// 👀（読んだ）/🤐（黙ると決めた）と意味が衝突しない絵文字にする。付与対象も違い、
 /// これは**自分の投稿**に付く（👀/🤐 は受信したユーザー投稿に付く）。
 /// 既存の 2 種と同様ハードコード（設定項目は増やさない / #431 の判断）。
 const SPOKE_EMOJI: &str = "🏁";
@@ -2260,8 +2271,8 @@ mod tests {
         assert!(!SPOKE_EMOJI.is_empty());
     }
 
-    /// #668: 「失敗」の絵文字は他の 3 種すべてと衝突しない。受信（👀）や NO_REPLY（🤐）と
-    /// 同じだと「失敗した」のか「受け取った／黙った」のか区別できず可視化の意味が消える。
+    /// #668: 「失敗」の絵文字は他の 3 種すべてと衝突しない。読んだ（👀）や NO_REPLY（🤐）と
+    /// 同じだと「失敗した」のか「読んだ／黙った」のか区別できず可視化の意味が消える。
     #[test]
     fn failed_emoji_is_distinct_from_existing_reactions() {
         assert_ne!(FAILED_EMOJI, SEEN_EMOJI);

@@ -254,6 +254,7 @@ run_discord_loop() (opencrab-discord)
     │
     ├── チャンネル readable チェック → false ならスキップ
     ├── 正規化受信を core へ渡す（権限・確保・記録・ターン）
+    ├── 👀 はターン開始で読んだ件に付ける（record-only は即時ではない）
     │
     ▼
 core の決定（本文 / NO_REPLY / A2UI）

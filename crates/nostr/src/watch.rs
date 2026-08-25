@@ -191,7 +191,7 @@ pub fn accept_watch_events<R: NostrAgentRunner, T: Send + 'static>(
     watch: Option<WatchAccept<'_, T>>,
     take_hold: impl FnMut(usize) -> T,
     on_admitted: impl FnMut(usize, &opencrab_actions::AdmittedInbound),
-    on_run: impl FnMut(usize, &opencrab_actions::AdmittedInbound),
+    on_run: impl FnMut(usize, &opencrab_actions::AdmittedInbound, &[usize]),
 ) -> Result<(), InboundDrop> {
     debug_assert_eq!(events.len(), labels.len());
     let keys: Vec<String> = events.iter().map(|e| follow_key(&e.pubkey)).collect();
@@ -719,7 +719,7 @@ mod tests {
                             ev_hold.clone()
                         },
                         |_, _| admitted = true,
-                        |_, _| {},
+                        |_, _, _| {},
                     )
                     .unwrap();
                     if held {

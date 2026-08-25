@@ -184,7 +184,7 @@ pub async fn send_web_message<R: WebAgentRunner>(
             None,
             |_| (),
             |_, adm| caller = Some(adm.caller.clone()),
-            |_, _| {},
+            |_, _, _| {},
         )
         .expect("web inbound は DM ではない（WEB_INBOUND_GUILD が非空）");
         caller.expect("web inbound は 1 件通る")

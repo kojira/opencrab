@@ -84,6 +84,8 @@ struct FakeRunner {
     /// #588 Stage 2: 1 つだけ保持し `session_locks()` は毎回この clone を返す
     /// （trait の「プロセス全体で 1 実体を共有」契約を fake でも守る）。
     session_locks: std::sync::Arc<opencrab_actions::SessionLocks>,
+    /// チャンネル whitelist。row 116-117 の「落ちた件に 👀 なし」ピン用。
+    channel_whitelisted: bool,
 }
 
 impl FakeRunner {
@@ -96,6 +98,7 @@ impl FakeRunner {
             run_observed: Arc::new(tokio::sync::Notify::new()),
             db: opencrab_db::Db::memory().expect("in-memory DB"),
             session_locks: std::sync::Arc::new(opencrab_actions::SessionLocks::new()),
+            channel_whitelisted: true,
         }
     }
 
@@ -301,7 +304,7 @@ impl crate::AgentRunner for FakeRunner {
     }
 
     fn is_channel_whitelisted_for_agent(&self, _channel_id: &str, _agent_id: &str) -> bool {
-        true
+        self.channel_whitelisted
     }
 
     fn dm_allowed_any(
@@ -450,6 +453,7 @@ async fn inbound_run_carries_the_shared_registry_so_cancel_can_reach_it() {
         event_tx,
         registry.clone(),
         false,
+        true,
         None,
     )
     .await;
@@ -506,6 +510,7 @@ async fn inbound_run_carries_the_end_of_speech_subtask_counter() {
         event_tx,
         registry,
         false,
+        true,
         None,
     )
     .await;
@@ -597,6 +602,7 @@ async fn inbound_goes_through_the_shared_inbound_hook() {
         event_tx,
         registry,
         false,
+        true,
         None,
     )
     .await;
@@ -670,6 +676,7 @@ async fn inbound_message_is_recorded_before_the_session_lock_is_acquired() {
         event_tx,
         registry,
         false,
+        true,
         None,
     )
     .await;
@@ -738,6 +745,7 @@ fn failed_inbound_record_is_detected_not_swallowed() {
                 event_tx,
                 registry,
                 false,
+                true,
                 None,
             )
             .await;
@@ -970,7 +978,7 @@ async fn no_reply_marks_the_original_message_with_a_reaction() {
         calls[0].1, 1234567890123456789,
         "リアクション先のメッセージが違う"
     );
-    // 👀（受け取った）と同じ絵文字にすると 2 つの状態が区別できなくなる。
+    // 👀（読んだ）と同じ絵文字にすると 2 つの状態が区別できなくなる。
     assert_eq!(calls[0].2, "🤐", "NO_REPLY の絵文字が変わっている");
     assert_ne!(calls[0].2, "👀", "受信済みマークと同じ絵文字になっている");
 }
@@ -1058,10 +1066,10 @@ async fn no_reply_is_distinct_from_failure() {
 
 /// **どんな送信者の投稿にも 👀 が付く**（#317: bot を特別扱いしない）。
 ///
-/// 以前は `reaction_added` を「送信者が bot か」で初期化していたため、
-/// 他エージェントの投稿には 👀 が付かなかった（＝エージェント同士の会話で
-/// 「受け取った」が見えない）。無限ループを止めるのは**自分自身の投稿の除外**
-/// （`crate::gateway` の `is_own_message`）であって、
+/// 仕様変更（row 116-117）: 👀 は「処理対象として確定」ではなく
+/// **LLM が読んだ（ターン文脈に含めた）時点**。このピンはターンが走る経路なので
+/// 付与タイミングは新しい仕様でも同じ観測になる。bot 特別扱いをしないことも不変。
+/// 無限ループを止めるのは**自分自身の投稿の除外**（`is_own_message`）であって、
 /// bot フラグではない。
 ///
 /// 観測は warn ログで行う。ここは本物の `DiscordGateway`（`test-token`）なので
@@ -1106,6 +1114,7 @@ fn every_sender_gets_the_seen_reaction_including_other_bots() {
                 event_tx,
                 registry,
                 false,
+                true,
                 None,
             )
             .await;
@@ -1160,8 +1169,9 @@ fn discord_msg(channel: &str, sender: &str, text: &str) -> IncomingMessage {
     )
 }
 
-/// #543: record-only パスは記録（と 👀）まで済ませ、推論（run）は起こさない。合流窓の
-/// 非トリガーメッセージを「捨てずに記録だけする」ための土台。
+/// #543 + row 116-117: record-only パスは記録まで済ませ、推論（run）は起こさない。
+/// 👀 は読まれるまで付けない（仕様変更。弱化ではない）。合流窓の非トリガーを
+/// 「捨てずに記録だけする」土台。
 #[tokio::test]
 async fn record_only_records_inbound_but_does_not_run() {
     let (state, gateway, gateway_actions) = make_deps();
@@ -1181,7 +1191,8 @@ async fn record_only_records_inbound_but_does_not_run() {
         None,
         event_tx,
         registry,
-        true, // record_only
+        true,  // record_only
+        false, // 読むターンがまだ無いので 👀 なし
         None,
     )
     .await;
@@ -1194,6 +1205,128 @@ async fn record_only_records_inbound_but_does_not_run() {
     assert!(
         state.runs.lock().unwrap().is_empty(),
         "record_only なのに推論（run）が走った"
+    );
+}
+
+fn discord_msg_with_id(
+    channel: &str,
+    sender: &str,
+    text: &str,
+    message_id: &str,
+) -> IncomingMessage {
+    discord_msg(channel, sender, text).with_metadata(
+        "discord_message_id",
+        serde_json::Value::String(message_id.to_string()),
+    )
+}
+
+fn seen_reaction_logs(
+    incoming: IncomingMessage,
+    record_only: bool,
+    mark_seen: bool,
+    whitelisted: bool,
+) -> String {
+    crate::owner_warning::capture::captured_logs(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (mut state, gateway, gateway_actions) = make_deps();
+            state.channel_whitelisted = whitelisted;
+            let (event_tx, _event_rx) = create_event_channel();
+            let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
+            let session_locks = Arc::new(SessionLocks::new());
+            process_incoming_message(
+                incoming,
+                gateway,
+                state,
+                vec!["crab".to_string()],
+                gateway_actions,
+                "owner-1".to_string(),
+                session_locks,
+                false,
+                None,
+                event_tx,
+                registry,
+                record_only,
+                mark_seen,
+                None,
+            )
+            .await;
+        });
+    })
+}
+
+/// row 116-117 (a): record-only は読まれるまで 👀 なし。
+#[test]
+fn record_only_does_not_add_seen_until_read() {
+    let logs = seen_reaction_logs(
+        discord_msg_with_id("222", "user-1", "あとで読む", "1111111111111111111"),
+        true,
+        false,
+        true,
+    );
+    assert!(
+        !logs.contains("👀"),
+        "record-only なのに 👀 を付けようとしている: {logs}"
+    );
+}
+
+/// row 116-117 (b): ターン開始で読んだ分に 👀。record-only でも、文脈に含まれたら付く。
+#[test]
+fn record_only_gets_seen_when_included_in_a_turn() {
+    let logs = seen_reaction_logs(
+        discord_msg_with_id("222", "user-1", "合流分", "4444444444444444444"),
+        true,
+        true,
+        true,
+    );
+    assert!(
+        logs.contains("👀"),
+        "読むターンに含めた record-only に 👀 が無い: {logs}"
+    );
+    assert!(
+        logs.contains("4444444444444444444"),
+        "👀 の付与先が元の投稿になっていない: {logs}"
+    );
+}
+
+/// row 116-117 (b): ターン開始で読んだ分に 👀。
+#[test]
+fn turn_start_adds_seen_for_messages_in_context() {
+    let logs = seen_reaction_logs(
+        discord_msg_with_id("222", "user-1", "今読む", "2222222222222222222"),
+        false,
+        true,
+        true,
+    );
+    assert!(
+        logs.contains("👀"),
+        "ターン開始で読んだのに 👀 を付けていない: {logs}"
+    );
+    assert!(
+        logs.contains("Failed to add reaction"),
+        "リアクション付与を試みていない: {logs}"
+    );
+    assert!(
+        logs.contains("2222222222222222222"),
+        "👀 の付与先が元の投稿になっていない: {logs}"
+    );
+}
+
+/// row 116-117 (c): whitelist 落ちは従来どおり 👀 なし。
+#[test]
+fn whitelist_drop_does_not_add_seen() {
+    let logs = seen_reaction_logs(
+        discord_msg_with_id("222", "user-1", "対象外", "3333333333333333333"),
+        false,
+        true,
+        false,
+    );
+    assert!(
+        !logs.contains("👀"),
+        "whitelist 落ちなのに 👀 を付けようとしている: {logs}"
     );
 }
 
@@ -1220,7 +1353,8 @@ async fn debounced_window_records_every_message_but_runs_once() {
         None,
         event_tx.clone(),
         registry.clone(),
-        true, // 非トリガー（record-only）
+        true,  // 非トリガー（record-only）
+        false, // この呼び出し単体ではまだ読んでいない
         None,
     )
     .await;
@@ -1237,6 +1371,7 @@ async fn debounced_window_records_every_message_but_runs_once() {
         event_tx,
         registry,
         false, // トリガー（run を起こす）
+        true,  // このターンで読む
         None,
     )
     .await;

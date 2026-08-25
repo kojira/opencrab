@@ -116,7 +116,7 @@ mod tests {
                 caller = Some(adm.caller.clone());
                 admitted = adm.admitted_agent_ids.clone();
             },
-            |_, _| {},
+            |_, _, _| {},
         )
         .expect("web inbound は DM ではない");
         assert_eq!(caller, Some(CallerIdentity::Owner));

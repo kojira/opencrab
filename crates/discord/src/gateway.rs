@@ -214,7 +214,7 @@ impl DiscordGateway {
 
     /// 指定メッセージにUnicode絵文字のリアクションを付ける。
     ///
-    /// 受信メッセージを処理対象として認識したことを示す 👀 などに使う。
+    /// LLM が受信メッセージを読んだ（ターン文脈に含めた）ことを示す 👀 などに使う。
     /// 呼び出し側は失敗を非致命的に扱うこと（権限不足・削除済みメッセージ等で失敗しうる）。
     pub async fn add_reaction(&self, channel_id: u64, message_id: u64, emoji: &str) -> Result<()> {
         ChannelId::new(channel_id)
