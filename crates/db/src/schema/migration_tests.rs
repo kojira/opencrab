@@ -3424,7 +3424,7 @@ fn v37_backfill_preserves_firing_and_normalizes() {
     // session_heartbeat_config を触らないので、下の v37 backfill 検証（発火集合・正規化）は
     // そのまま成立する。新しい migration が session_heartbeat_config を触ったらこの guard を
     // 更新し、下の期待値を見直すこと。
-    assert_eq!(latest_version(), 43, "v43 が最新版であること");
+    assert_eq!(latest_version(), 44, "v44 が最新版であること");
 
     // 期待: 9 行 = step1(nostr-A) 1 + step2(A/201=0, C/202=1, D/222=1) 3 +
     //             step3(A,B,C,D,E の ch205 展開・全 enabled=0) 5。
@@ -4016,6 +4016,22 @@ fn existing_table_digests(conn: &Connection, skip_new: bool) -> BTreeMap<String,
     out
 }
 
+fn expected_v44_user_tables(before_v43: &[String]) -> Vec<String> {
+    let mut expected = expected_v43_user_tables(before_v43);
+    for name in [
+        "deliveries",
+        "external_origins",
+        "gate_bindings",
+        "gate_instances",
+    ] {
+        if !expected.iter().any(|t| t == name) {
+            expected.push(name.to_string());
+        }
+    }
+    expected.sort();
+    expected
+}
+
 fn assert_user_tables_closed(conn: &Connection, expected_tables: &[String]) {
     assert_eq!(
         user_tables(conn),
@@ -4058,14 +4074,13 @@ fn assert_v43_schema(conn: &Connection) {
 #[test]
 fn v43_fresh_db_has_transplant_schema() {
     let conn = crate::init_memory().expect("init");
-    assert_eq!(schema_version(&conn).unwrap(), 43);
     assert_eq!(schema_version(&conn).unwrap(), latest_version());
     let pre = {
         let tmp = crate::init_memory().expect("pre");
         setup_pre_v43(&tmp);
         user_tables(&tmp)
     };
-    assert_user_tables_closed(&conn, &expected_v43_user_tables(&pre));
+    assert_user_tables_closed(&conn, &expected_v44_user_tables(&pre));
     assert_v43_schema(&conn);
     let cols = session_column_names(&conn);
     assert!(
@@ -4117,9 +4132,9 @@ fn v43_from_user_version_42_leaves_existing_rows_untouched() {
         )
         .unwrap();
 
-    run_migrations(&conn, MIGRATIONS).expect("v43 migration");
+    run_migrations(&conn, MIGRATIONS).expect("v43+v44 migration");
     assert_eq!(schema_version(&conn).unwrap(), latest_version());
-    assert_user_tables_closed(&conn, &expected_v43_user_tables(&before_tables));
+    assert_user_tables_closed(&conn, &expected_v44_user_tables(&before_tables));
     assert_v43_schema(&conn);
 
     let after = existing_table_digests(&conn, true);
@@ -4153,13 +4168,11 @@ fn v43_from_user_version_42_leaves_existing_rows_untouched() {
         .unwrap();
     assert_eq!(done, 1);
 
-    conn.execute_batch("PRAGMA user_version = 42;").unwrap();
-    run_migrations(&conn, MIGRATIONS).expect("v43 rerun no-op");
-    assert_eq!(schema_version(&conn).unwrap(), 43);
+    assert_eq!(schema_version(&conn).unwrap(), 44);
     assert_eq!(
         existing_table_digests(&conn, true),
         after,
-        "冪等再実行で既存ダイジェストが動いた"
+        "v44 到達後に既存ダイジェストが動いた"
     );
 }
 
@@ -4244,8 +4257,8 @@ fn v43_schema_parity_fresh_vs_migrated() {
     initialize(&migrated).expect("re-migrate");
 
     assert_eq!(dump(&fresh), dump(&migrated));
-    assert_eq!(schema_version(&fresh).unwrap(), 43);
-    assert_eq!(schema_version(&migrated).unwrap(), 43);
+    assert_eq!(schema_version(&fresh).unwrap(), latest_version());
+    assert_eq!(schema_version(&migrated).unwrap(), latest_version());
 }
 
 /// 本番コピー検証スクリプトが呼ぶ適用口。env が無いときは何もしない。
@@ -4262,4 +4275,276 @@ fn apply_initialize_to_v43_copy_db() {
         "コピーの user_version が最新になっていない"
     );
     assert_v43_schema(&conn);
+}
+
+fn setup_pre_v44(conn: &Connection) {
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS deliveries;
+         DROP TABLE IF EXISTS external_origins;
+         DROP TABLE IF EXISTS gate_bindings;
+         DROP TABLE IF EXISTS gate_instances;
+         DROP TRIGGER IF EXISTS agents_subject_id_insert_guard;
+         DROP TRIGGER IF EXISTS agents_subject_id_assign;
+         DROP TRIGGER IF EXISTS agents_subject_id_update_guard;
+         DROP INDEX IF EXISTS idx_agents_subject_id;
+         ALTER TABLE agents DROP COLUMN subject_id;
+         PRAGMA user_version = 43;",
+    )
+    .unwrap();
+}
+
+fn gate_user_tables(conn: &Connection) -> Vec<String> {
+    user_tables(conn)
+        .into_iter()
+        .filter(|n| {
+            matches!(
+                n.as_str(),
+                "gate_instances" | "gate_bindings" | "external_origins" | "deliveries"
+            )
+        })
+        .collect()
+}
+
+fn assert_v44_schema(conn: &Connection) {
+    assert!(column_exists(conn, "agents", "subject_id").unwrap());
+    assert_eq!(
+        gate_user_tables(conn),
+        vec![
+            "deliveries".to_string(),
+            "external_origins".to_string(),
+            "gate_bindings".to_string(),
+            "gate_instances".to_string(),
+        ]
+    );
+    let idx: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type='index' AND name='idx_agents_subject_id'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(idx, 1);
+    let open_addr: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type='index' AND name='idx_gate_bindings_open_address'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(open_addr, 1);
+    for trigger in [
+        "agents_subject_id_insert_guard",
+        "agents_subject_id_assign",
+        "agents_subject_id_update_guard",
+    ] {
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name=?1",
+                [trigger],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "trigger {trigger} が無い");
+    }
+}
+
+/// §9.6: fresh DB と user_version 43 相当 DB の双方が v44 へ到達し、gate 表は exact 4 表。
+#[test]
+fn v44_fresh_and_user_version_43_reach_four_gate_tables() {
+    let fresh = crate::init_memory().expect("fresh");
+    assert_eq!(schema_version(&fresh).unwrap(), 44);
+    assert_v44_schema(&fresh);
+
+    let from_43 = crate::init_memory().expect("from43");
+    setup_pre_v44(&from_43);
+    assert_eq!(schema_version(&from_43).unwrap(), 43);
+    assert!(!column_exists(&from_43, "agents", "subject_id").unwrap());
+    assert!(gate_user_tables(&from_43).is_empty());
+
+    initialize(&from_43).expect("v44 from 43");
+    assert_eq!(schema_version(&from_43).unwrap(), 44);
+    assert_v44_schema(&from_43);
+}
+
+/// §9.6: subject backfill / 自動採番 / unique / positive guard。
+#[test]
+fn v44_agents_subject_id_backfill_assign_and_guards() {
+    let conn = crate::init_memory().expect("init");
+    setup_pre_v44(&conn);
+    conn.execute_batch(
+        "INSERT INTO agents (agent_id, name, persona_name) VALUES
+            ('z-agent', 'Z', 'pz'),
+            ('a-agent', 'A', 'pa');",
+    )
+    .unwrap();
+    initialize(&conn).expect("v44");
+
+    let rows: Vec<(String, i64)> = conn
+        .prepare("SELECT agent_id, subject_id FROM agents ORDER BY subject_id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![("a-agent".to_string(), 1), ("z-agent".to_string(), 2),]
+    );
+
+    conn.execute(
+        "INSERT INTO agents (agent_id, name, persona_name) VALUES ('n-agent', 'N', 'pn')",
+        [],
+    )
+    .unwrap();
+    let assigned: i64 = conn
+        .query_row(
+            "SELECT subject_id FROM agents WHERE agent_id='n-agent'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(assigned, 3);
+
+    let non_positive = conn.execute(
+        "INSERT INTO agents (agent_id, name, persona_name, subject_id)
+         VALUES ('bad', 'B', 'pb', 0)",
+        [],
+    );
+    assert!(non_positive.is_err(), "subject_id=0 を受け入れた");
+
+    let update_null = conn.execute(
+        "UPDATE agents SET subject_id = NULL WHERE agent_id='a-agent'",
+        [],
+    );
+    assert!(update_null.is_err(), "subject_id NULL 更新を受け入れた");
+
+    let dup = conn.execute(
+        "UPDATE agents SET subject_id = 1 WHERE agent_id='z-agent'",
+        [],
+    );
+    assert!(dup.is_err(), "subject_id unique が効いていない");
+}
+
+/// §9.6: 4 表の PK/FK/CHECK/partial unique。
+#[test]
+fn v44_gate_table_constraints() {
+    let conn = crate::init_memory().expect("init");
+    conn.execute(
+        "INSERT INTO agents (agent_id, name, persona_name) VALUES ('ag', 'A', 'p')",
+        [],
+    )
+    .unwrap();
+    let subject: i64 = conn
+        .query_row(
+            "SELECT subject_id FROM agents WHERE agent_id='ag'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+
+    let digest = "a".repeat(64);
+    conn.execute(
+        "INSERT INTO gate_instances (
+            instance_id, kind_id, subject_id, revision, enabled,
+            config_b64, config_digest, created_at, updated_at
+         ) VALUES ('inst-1', 'k', ?1, 1, 1, 'e30=', ?2, 1, 1)",
+        rusqlite::params![subject, digest],
+    )
+    .unwrap();
+
+    let empty_kind = conn.execute(
+        "INSERT INTO gate_instances (
+            instance_id, kind_id, subject_id, revision, enabled,
+            config_b64, config_digest, created_at, updated_at
+         ) VALUES ('inst-2', '', ?1, 1, 1, 'e30=', ?2, 1, 1)",
+        rusqlite::params![subject, digest],
+    );
+    assert!(empty_kind.is_err(), "空 kind_id を受け入れた");
+
+    conn.execute(
+        "INSERT INTO gate_bindings (binding_id, instance_id, address, created_at)
+         VALUES ('bind-1', 'inst-1', 'addr-a', 1)",
+        [],
+    )
+    .unwrap();
+    let dup_open = conn.execute(
+        "INSERT INTO gate_bindings (binding_id, instance_id, address, created_at)
+         VALUES ('bind-2', 'inst-1', 'addr-a', 2)",
+        [],
+    );
+    assert!(dup_open.is_err(), "open address unique が効いていない");
+
+    conn.execute(
+        "UPDATE gate_bindings SET closed_at = 3 WHERE binding_id='bind-1'",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO gate_bindings (binding_id, instance_id, address, created_at)
+         VALUES ('bind-2', 'inst-1', 'addr-a', 4)",
+        [],
+    )
+    .expect("closed 後の同 address を拒否した");
+
+    conn.execute(
+        "INSERT INTO external_origins (binding_id, origin, seq) VALUES ('bind-2', 'o1', 1)",
+        [],
+    )
+    .unwrap();
+    let dup_origin = conn.execute(
+        "INSERT INTO external_origins (binding_id, origin, seq) VALUES ('bind-2', 'o1', 2)",
+        [],
+    );
+    assert!(dup_origin.is_err(), "origin PK が効いていない");
+    let dup_seq = conn.execute(
+        "INSERT INTO external_origins (binding_id, origin, seq) VALUES ('bind-2', 'o2', 1)",
+        [],
+    );
+    assert!(dup_seq.is_err(), "seq unique が効いていない");
+
+    let bad_payload = conn.execute(
+        "INSERT INTO deliveries (
+            delivery_id, binding_id, payload_json, state, created_at, updated_at
+         ) VALUES ('d1', 'bind-2', '{\"text\":\"\"}', 'sending', 1, 1)",
+        [],
+    );
+    assert!(bad_payload.is_err(), "空 text payload を受け入れた");
+
+    conn.execute(
+        "INSERT INTO deliveries (
+            delivery_id, binding_id, payload_json, state, created_at, updated_at
+         ) VALUES ('d1', 'bind-2', '{\"text\":\"hi\"}', 'sending', 1, 1)",
+        [],
+    )
+    .unwrap();
+    let bad_failed = conn.execute(
+        "UPDATE deliveries SET state='failed', error='disconnect' WHERE delivery_id='d1'",
+        [],
+    );
+    assert!(bad_failed.is_err(), "failed に disconnect を受け入れた");
+}
+
+/// §9.6: migration 中の statement 失敗は全 rollback、user_version は 43 のまま。
+#[test]
+fn v44_statement_failure_rolls_back_and_keeps_user_version_43() {
+    let conn = crate::init_memory().expect("init");
+    setup_pre_v44(&conn);
+    conn.execute_batch("CREATE INDEX gate_instances ON agents(agent_id);")
+        .unwrap();
+    assert_eq!(schema_version(&conn).unwrap(), 43);
+
+    let err = initialize(&conn);
+    assert!(err.is_err(), "衝突 index があっても v44 が成功した");
+    assert_eq!(schema_version(&conn).unwrap(), 43);
+    assert!(
+        !column_exists(&conn, "agents", "subject_id").unwrap(),
+        "失敗したのに subject_id が残った"
+    );
+    assert!(
+        gate_user_tables(&conn).is_empty(),
+        "失敗したのに gate 表が残った: {:?}",
+        gate_user_tables(&conn)
+    );
 }

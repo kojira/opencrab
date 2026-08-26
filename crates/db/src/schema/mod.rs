@@ -1831,6 +1831,11 @@ const MIGRATIONS: &[Migration] = &[
         //   BEGIN; PRAGMA user_version = 42; COMMIT;
         up: migrate_v43_transplant_schema,
     },
+    Migration {
+        version: 44,
+        description: "agents.subject_id と external gate 4 表（V3 §6.1）",
+        up: migrate_v44_extgate,
+    },
 ];
 
 /// このバイナリが知る最新スキーマバージョン。
@@ -1969,6 +1974,98 @@ fn migrate_v43_transplant_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(SESSION_WATCHES_SQL)?;
     conn.execute_batch(TOOL_LOGS_SQL)?;
     assert_v43_invariants(conn, &before_tables)
+}
+
+/// v44: agents.subject_id と gate 4 表。文面は V3 §6.1。
+/// 既存テストが user_version を戻して再実行するため、適用済みなら no-op。
+fn migrate_v44_extgate(conn: &Connection) -> rusqlite::Result<()> {
+    if !column_exists(conn, "agents", "subject_id")? {
+        conn.execute_batch(
+            r#"
+ALTER TABLE agents ADD COLUMN subject_id INTEGER;
+
+WITH ranked AS (
+  SELECT agent_id, ROW_NUMBER() OVER (ORDER BY agent_id) AS n FROM agents
+)
+UPDATE agents
+SET subject_id = (SELECT n FROM ranked WHERE ranked.agent_id = agents.agent_id);
+"#,
+        )?;
+    }
+    conn.execute_batch(
+        r#"
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_subject_id ON agents(subject_id);
+
+CREATE TRIGGER IF NOT EXISTS agents_subject_id_insert_guard
+BEFORE INSERT ON agents
+WHEN NEW.subject_id IS NOT NULL AND NEW.subject_id <= 0
+BEGIN SELECT RAISE(ABORT, 'agents.subject_id must be positive'); END;
+
+CREATE TRIGGER IF NOT EXISTS agents_subject_id_assign
+AFTER INSERT ON agents
+WHEN NEW.subject_id IS NULL
+BEGIN
+  UPDATE agents
+  SET subject_id = (SELECT COALESCE(MAX(subject_id), 0) + 1 FROM agents WHERE agent_id <> NEW.agent_id)
+  WHERE agent_id = NEW.agent_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS agents_subject_id_update_guard
+BEFORE UPDATE OF subject_id ON agents
+WHEN NEW.subject_id IS NULL OR NEW.subject_id <= 0
+BEGIN SELECT RAISE(ABORT, 'agents.subject_id must be positive'); END;
+
+CREATE TABLE IF NOT EXISTS gate_instances (
+  instance_id   TEXT PRIMARY KEY,
+  kind_id       TEXT NOT NULL CHECK(length(kind_id) > 0),
+  subject_id    INTEGER NOT NULL REFERENCES agents(subject_id) ON DELETE RESTRICT,
+  revision      INTEGER NOT NULL CHECK(revision > 0),
+  enabled       INTEGER NOT NULL CHECK(enabled IN (0,1)),
+  config_b64    TEXT NOT NULL,
+  config_digest TEXT NOT NULL CHECK(length(config_digest) = 64),
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL,
+  deleted_at    INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS gate_bindings (
+  binding_id TEXT PRIMARY KEY,
+  instance_id TEXT NOT NULL REFERENCES gate_instances(instance_id) ON DELETE RESTRICT,
+  address TEXT NOT NULL CHECK(length(address) > 0),
+  created_at INTEGER NOT NULL,
+  closed_at INTEGER
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_gate_bindings_open_address
+ON gate_bindings(instance_id, address) WHERE closed_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS external_origins (
+  binding_id TEXT NOT NULL REFERENCES gate_bindings(binding_id) ON DELETE RESTRICT,
+  origin TEXT NOT NULL CHECK(length(origin) > 0),
+  seq INTEGER NOT NULL CHECK(seq > 0),
+  PRIMARY KEY(binding_id, origin),
+  UNIQUE(binding_id, seq)
+);
+
+CREATE TABLE IF NOT EXISTS deliveries (
+  delivery_id TEXT PRIMARY KEY,
+  binding_id TEXT NOT NULL REFERENCES gate_bindings(binding_id) ON DELETE RESTRICT,
+  payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
+  state TEXT NOT NULL CHECK(state IN ('sending','delivered','failed','indeterminate')),
+  error TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  CHECK(COALESCE(json_type(payload_json), '') = 'object'),
+  CHECK(COALESCE(json_type(payload_json, '$.text'), '') = 'text'),
+  CHECK(COALESCE(length(json_extract(payload_json, '$.text')), 0) > 0),
+  CHECK(
+    (state IN ('sending','delivered') AND error IS NULL) OR
+    (state = 'failed' AND error = 'external_rejected') OR
+    (state = 'indeterminate' AND error IN ('disconnect','stale sending recovered after restart'))
+  )
+);
+"#,
+    )
 }
 
 fn migration_err(msg: &str) -> rusqlite::Error {
