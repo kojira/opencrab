@@ -28,3 +28,4 @@ tokio = { workspace = true, features = ["test-util"] }
 tempfile = { workspace = true }
 tower = { workspace = true }
 http-body-util = "0.1"
+rusqlite = { workspace = true }

@@ -2329,6 +2329,7 @@ dependencies = [
  "axum",
  "futures",
  "http-body-util",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

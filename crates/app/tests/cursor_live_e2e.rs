@@ -161,7 +161,7 @@ fn find_room_place(store: &Store, address: &str) -> Option<i64> {
 }
 
 #[test]
-#[ignore = "requires cursor-agent CLI + auth (grok); makes 3 real API calls"]
+#[ignore = "protocol 1 web-gate crate was removed; protocol 2 real-process E2E is crates/web-gateway/tests/core_process_e2e.rs"]
 fn cursor_grok_reply_react_no_reply_over_real_socket() {
     let sock = scratch("s.sock");
     let db = scratch("core.db");
@@ -476,7 +476,7 @@ fn run_memory_roundtrip(model: &str, require_success: bool) {
 }
 
 #[test]
-#[ignore = "requires cursor-agent CLI + auth (grok); makes real API calls"]
+#[ignore = "protocol 1 web-gate crate was removed; protocol 2 real-process E2E is crates/web-gateway/tests/core_process_e2e.rs"]
 fn cursor_grok_memory_tool_line_roundtrip() {
     run_memory_roundtrip("cursor-grok-4.6-high", true);
 }
@@ -484,7 +484,7 @@ fn cursor_grok_memory_tool_line_roundtrip() {
 // Composer 2.5。context_window は保守運用値 128k で seed 済み（KNOWN_MODEL_CONTEXT_WINDOWS・
 // 公式未公開のため能力値ではない）。grok と同一ハーネスで記憶往復と漏れ（フェンス・解説文）を観測する。
 #[test]
-#[ignore = "requires cursor-agent CLI + auth (composer); makes real API calls"]
+#[ignore = "protocol 1 web-gate crate was removed; protocol 2 real-process E2E is crates/web-gateway/tests/core_process_e2e.rs"]
 fn cursor_composer_memory_tool_line_roundtrip() {
     // 成立を強制する（require_success=true・grok と同格へ昇格）。以前は composer 2.5 がツール行の引数を
     // `body=… from=… to=…`（CLI フラグ風）で書き、多フィールドの core-remember が段2（逐語で場へ漏出）へ

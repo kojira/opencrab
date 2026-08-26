@@ -164,7 +164,7 @@ async fn create_agent_with_personality(
 /// Alice sends a message → Bob (real LLM) generates a thoughtful response.
 /// Verifies the full pipeline: HTTP → send_message → SkillEngine → LLM → response.
 #[tokio::test]
-#[ignore]
+#[ignore = "old /sessions/{id}/messages withdrawn; protocol 2 E2E is web-gateway core_process_e2e"]
 async fn test_real_llm_basic_conversation() {
     let (app, _db) = create_real_llm_app();
 
@@ -231,7 +231,7 @@ async fn test_real_llm_basic_conversation() {
 /// The Learner agent's personality explicitly says to use `learn_from_experience`
 /// after receiving insights. This tests the full tool-calling flow with a real LLM.
 #[tokio::test]
-#[ignore]
+#[ignore = "old /sessions/{id}/messages withdrawn; protocol 2 E2E is web-gateway core_process_e2e"]
 async fn test_real_llm_agent_learns_and_creates_skill() {
     let (app, db) = create_real_llm_app();
 
@@ -330,7 +330,7 @@ async fn test_real_llm_agent_learns_and_creates_skill() {
 /// Two agents discuss over 3 rounds. After the discussion, the Reflector
 /// agent should use `reflect_and_learn` or `learn_from_experience` to capture insights.
 #[tokio::test]
-#[ignore]
+#[ignore = "old /sessions/{id}/messages withdrawn; protocol 2 E2E is web-gateway core_process_e2e"]
 async fn test_real_llm_multi_round_discussion_with_reflection() {
     let (app, db) = create_real_llm_app();
 
@@ -508,7 +508,7 @@ async fn test_real_llm_multi_round_discussion_with_reflection() {
 ///
 /// First seeds conversation history, then prompts the agent to search and learn.
 #[tokio::test]
-#[ignore]
+#[ignore = "old /sessions/{id}/messages withdrawn; protocol 2 E2E is web-gateway core_process_e2e"]
 async fn test_real_llm_search_history_and_create_skill() {
     let (app, db) = create_real_llm_app();
 
