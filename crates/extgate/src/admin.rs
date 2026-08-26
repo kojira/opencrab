@@ -155,7 +155,10 @@ fn instance_json(conn: &rusqlite::Connection, instance_id: &str) -> Result<Value
             }))
         },
     )
-    .map_err(|_| GateError::new(ErrorCode::InstanceUnknown))
+    .map_err(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => GateError::new(ErrorCode::InstanceUnknown),
+        _ => GateError::store(),
+    })
 }
 
 fn binding_json(conn: &rusqlite::Connection, binding_id: &str) -> Result<Value, GateError> {

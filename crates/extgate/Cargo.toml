@@ -22,6 +22,10 @@ opencrab-actions = { workspace = true }
 opencrab-core = { workspace = true }
 base64 = "0.22"
 
+[features]
+default = ["extgate-probe"]
+extgate-probe = []
+
 [dev-dependencies]
 tempfile = { workspace = true }
 tower = { workspace = true }

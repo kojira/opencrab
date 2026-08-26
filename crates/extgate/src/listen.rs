@@ -11,7 +11,7 @@ use rusqlite::{params, Connection, TransactionBehavior};
 use tokio::io::BufReader;
 use tokio::net::UnixListener;
 
-use crate::close::close_live;
+use crate::close::{close_all_lives, close_live};
 use crate::delivery::{mark_delivered, mark_failed, mark_indeterminate};
 use crate::error::{ErrorCode, GateError};
 use crate::ids::now_nanos;
@@ -33,10 +33,10 @@ enum ConnState {
     Running,
 }
 
-/// 空・相対・既存の非 socket は失敗。既存 socket は unlink。
-pub fn validate_listen_socket(raw: &str) -> Result<PathBuf, anyhow::Error> {
+/// 空は listen しない。相対・既存の非 socket は失敗。既存 socket は unlink。
+pub fn validate_listen_socket(raw: &str) -> Result<Option<PathBuf>, anyhow::Error> {
     if raw.is_empty() {
-        anyhow::bail!("gate.listen_socket is empty");
+        return Ok(None);
     }
     let path = Path::new(raw);
     if !path.is_absolute() {
@@ -49,7 +49,7 @@ pub fn validate_listen_socket(raw: &str) -> Result<PathBuf, anyhow::Error> {
         }
         std::fs::remove_file(path)?;
     }
-    Ok(path.to_path_buf())
+    Ok(Some(path.to_path_buf()))
 }
 
 /// HTTP/UDS より前に exact 1 回。
@@ -80,12 +80,21 @@ pub async fn serve_uds<R: AgentRuntime>(
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(SOCKET_MODE))?;
     loop {
         if state.is_halted() {
+            close_all_lives(&state, ErrorCode::Disconnect).await;
             anyhow::bail!("extgate listener halted");
         }
-        let (stream, _) = listener.accept().await?;
+        let accepted = tokio::select! {
+            _ = state.wait_until_halted() => {
+                close_all_lives(&state, ErrorCode::Disconnect).await;
+                anyhow::bail!("extgate listener halted");
+            }
+            accepted = listener.accept() => accepted,
+        };
         if state.is_halted() {
+            close_all_lives(&state, ErrorCode::Disconnect).await;
             anyhow::bail!("extgate listener halted");
         }
+        let (stream, _) = accepted?;
         let conn_state = Arc::clone(&state);
         let halt = Arc::clone(&state);
         let runtime = runtime.clone();
@@ -95,6 +104,7 @@ pub async fn serve_uds<R: AgentRuntime>(
         tokio::spawn(async move {
             if task.await.is_err() {
                 tracing::error!("extgate connection task panicked");
+                close_all_lives(&halt, ErrorCode::Disconnect).await;
                 halt.halt();
             }
         });
@@ -140,28 +150,7 @@ async fn handle_connection<R: AgentRuntime>(
             .await;
             return;
         }
-        Ok(Err(FrameError::BadRequest)) | Ok(Err(FrameError::Io)) => {
-            close_live(
-                &state,
-                None,
-                Some(identity),
-                ErrorCode::BadRequest,
-                None,
-                Some(&writer),
-            )
-            .await;
-            return;
-        }
-        Ok(Err(FrameError::Eof)) => {
-            close_live(
-                &state,
-                None,
-                Some(identity),
-                ErrorCode::Disconnect,
-                None,
-                None,
-            )
-            .await;
+        Ok(Err(FrameError::Eof)) | Ok(Err(FrameError::Io)) => {
             return;
         }
         Ok(Ok(bytes)) => {
@@ -182,6 +171,15 @@ async fn handle_connection<R: AgentRuntime>(
 
     loop {
         if state.is_halted() {
+            close_live(
+                &state,
+                instance_id.as_deref(),
+                Some(identity),
+                ErrorCode::Disconnect,
+                None,
+                None,
+            )
+            .await;
             return;
         }
         match read_frame(&mut reader).await {
@@ -191,18 +189,6 @@ async fn handle_connection<R: AgentRuntime>(
                     instance_id.as_deref(),
                     Some(identity),
                     ErrorCode::TooLarge,
-                    None,
-                    Some(&writer),
-                )
-                .await;
-                return;
-            }
-            Err(FrameError::BadRequest) => {
-                close_live(
-                    &state,
-                    instance_id.as_deref(),
-                    Some(identity),
-                    ErrorCode::BadRequest,
                     None,
                     Some(&writer),
                 )
@@ -418,6 +404,18 @@ async fn dispatch_frame<R: AgentRuntime>(ctx: &mut ConnCtx<'_, R>, bytes: &[u8])
                 .await;
                 return Err(());
             }
+            if code == ErrorCode::ResponseInvalid {
+                close_live(
+                    state,
+                    Some(inst),
+                    Some(identity),
+                    ErrorCode::ResponseInvalid,
+                    id.as_deref(),
+                    Some(writer),
+                )
+                .await;
+                return Err(());
+            }
             match id {
                 Some(id) => {
                     if write_json(writer, &err_frame(&id, code, None))
@@ -437,18 +435,7 @@ async fn dispatch_frame<R: AgentRuntime>(ctx: &mut ConnCtx<'_, R>, bytes: &[u8])
                     }
                     Ok(())
                 }
-                None => {
-                    close_live(
-                        state,
-                        Some(inst),
-                        Some(identity),
-                        ErrorCode::BadRequest,
-                        None,
-                        Some(writer),
-                    )
-                    .await;
-                    Err(())
-                }
+                None => Ok(()),
             }
         }
         (ConnState::Running, InboundMsg::Reverse { id, .. } | InboundMsg::Unknown { id, .. }) => {
@@ -472,18 +459,7 @@ async fn dispatch_frame<R: AgentRuntime>(ctx: &mut ConnCtx<'_, R>, bytes: &[u8])
                     }
                     Ok(())
                 }
-                None => {
-                    close_live(
-                        state,
-                        Some(inst),
-                        Some(identity),
-                        ErrorCode::BadRequest,
-                        None,
-                        Some(writer),
-                    )
-                    .await;
-                    Err(())
-                }
+                None => Ok(()),
             }
         }
     }
@@ -786,7 +762,9 @@ async fn handle_response(
                 }
                 if let Err(e) = mark_delivered(state, &delivery_id) {
                     tracing::error!(code = e.code.as_str(), "delivered write failed");
-                    state.halt();
+                    if let Err(ind) = mark_indeterminate(state, std::slice::from_ref(&delivery_id)) {
+                        tracing::error!(code = ind.code.as_str(), "indeterminate after delivered write failed");
+                    }
                     close_live(
                         state,
                         Some(instance_id),
@@ -796,12 +774,25 @@ async fn handle_response(
                         None,
                     )
                     .await;
+                    state.halt();
                     return Err(());
                 }
                 Ok(())
             } else if resp.code == Some(ErrorCode::ExternalRejected) {
                 if let Err(e) = mark_failed(state, &delivery_id) {
                     tracing::error!(code = e.code.as_str(), "failed write failed");
+                    if let Err(ind) = mark_indeterminate(state, std::slice::from_ref(&delivery_id)) {
+                        tracing::error!(code = ind.code.as_str(), "indeterminate after failed write failed");
+                    }
+                    close_live(
+                        state,
+                        Some(instance_id),
+                        Some(identity),
+                        ErrorCode::StoreError,
+                        None,
+                        None,
+                    )
+                    .await;
                     state.halt();
                     return Err(());
                 }

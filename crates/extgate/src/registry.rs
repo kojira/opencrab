@@ -1,7 +1,9 @@
 //! process-local live registry。startup は空。DB から復元しない。
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicU64};
+#[cfg(any(test, feature = "extgate-probe"))]
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
@@ -95,9 +97,17 @@ impl Registry {
             })
             .unwrap_or_default()
     }
+
+    pub fn identities(&self) -> Vec<(String, u64)> {
+        self.live
+            .iter()
+            .map(|(id, e)| (id.clone(), e.identity))
+            .collect()
+    }
 }
 
-/// conformance 用の計測と failure injection。本番は読まない。
+/// conformance 用の計測と failure injection。本番 state には載せない。
+#[cfg(any(test, feature = "extgate-probe"))]
 #[derive(Default)]
 pub struct GateProbe {
     pub accept_inbound_count: AtomicUsize,
@@ -117,7 +127,9 @@ pub struct ExtgateState {
     pub registry: Mutex<Registry>,
     pub token: OperatorToken,
     pub halt: AtomicBool,
+    halt_notify: tokio::sync::Notify,
     next_identity: AtomicU64,
+    #[cfg(any(test, feature = "extgate-probe"))]
     pub probe: GateProbe,
 }
 
@@ -128,7 +140,9 @@ impl ExtgateState {
             registry: Mutex::new(Registry::default()),
             token,
             halt: AtomicBool::new(false),
+            halt_notify: tokio::sync::Notify::new(),
             next_identity: AtomicU64::new(1),
+            #[cfg(any(test, feature = "extgate-probe"))]
             probe: GateProbe::default(),
         }
     }
@@ -137,7 +151,7 @@ impl ExtgateState {
         match self.registry.lock() {
             Ok(g) => Ok(g),
             Err(_) => {
-                self.halt.store(true, std::sync::atomic::Ordering::SeqCst);
+                self.halt();
                 Err(GateError::new(ErrorCode::StoreError))
             }
         }
@@ -150,9 +164,19 @@ impl ExtgateState {
 
     pub fn halt(&self) {
         self.halt.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.halt_notify.notify_waiters();
     }
 
     pub fn is_halted(&self) -> bool {
         self.halt.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub async fn wait_until_halted(&self) {
+        loop {
+            if self.is_halted() {
+                return;
+            }
+            self.halt_notify.notified().await;
+        }
     }
 }

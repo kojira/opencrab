@@ -1,5 +1,6 @@
 //! DeliveryEffect → reply + sending 同一 TX、その後 say 1 回。V3 §6.3 / §7.4。
 
+#[cfg(any(test, feature = "extgate-probe"))]
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -26,6 +27,15 @@ pub async fn apply_delivery_effect<R: AgentRuntime>(
         DeliveryEffect::Text { body, .. } => {
             if body.is_empty() {
                 tracing::error!("DeliveryEffect::Text body is empty; fail-loud");
+                crate::close::close_live(
+                    state,
+                    Some(instance_id),
+                    None,
+                    ErrorCode::Disconnect,
+                    None,
+                    None,
+                )
+                .await;
                 state.halt();
                 return;
             }
@@ -36,6 +46,15 @@ pub async fn apply_delivery_effect<R: AgentRuntime>(
                 }
                 tracing::error!(code = e.code.as_str(), "delivery failed");
                 if e.code == ErrorCode::StoreError {
+                    crate::close::close_live(
+                        state,
+                        Some(instance_id),
+                        None,
+                        ErrorCode::StoreError,
+                        None,
+                        None,
+                    )
+                    .await;
                     state.halt();
                 }
             }
@@ -94,6 +113,7 @@ async fn send_text(
                 return Err(GateError::store());
             }
         }
+        #[cfg(any(test, feature = "extgate-probe"))]
         if state.probe.fail_reply_log.load(Ordering::SeqCst) {
             let _ = tx.rollback();
             return Err(GateError::store());
@@ -115,6 +135,7 @@ async fn send_text(
             },
         )
         .map_err(|_| GateError::store())?;
+        #[cfg(any(test, feature = "extgate-probe"))]
         if state.probe.fail_delivery_insert.load(Ordering::SeqCst) {
             let _ = tx.rollback();
             return Err(GateError::store());
@@ -142,11 +163,12 @@ async fn send_text(
         );
     }
 
-    if state.probe.fail_say_write.load(Ordering::SeqCst)
-        || write_json(&writer, &say_frame(&delivery_id, binding_id, body))
-            .await
-            .is_err()
-    {
+    let write_err = write_json(&writer, &say_frame(&delivery_id, binding_id, body))
+        .await
+        .is_err();
+    #[cfg(any(test, feature = "extgate-probe"))]
+    let write_err = write_err || state.probe.fail_say_write.load(Ordering::SeqCst);
+    if write_err {
         mark_indeterminate(state, std::slice::from_ref(&delivery_id))?;
         crate::close::close_live(
             state,
@@ -208,19 +230,4 @@ pub fn mark_failed(state: &ExtgateState, delivery_id: &str) -> Result<(), GateEr
     )
     .map_err(|_| GateError::store())?;
     Ok(())
-}
-
-/// Binding DELETE 後の新規 delivery を止める。
-pub fn binding_is_closed(state: &ExtgateState, binding_id: &str) -> Result<bool, GateError> {
-    let conn = state.db.lock().map_err(|_| GateError::store())?;
-    match conn.query_row(
-        "SELECT closed_at FROM gate_bindings WHERE binding_id = ?1",
-        params![binding_id],
-        |r| r.get::<_, Option<i64>>(0),
-    ) {
-        Ok(Some(_)) => Ok(true),
-        Ok(None) => Ok(false),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(true),
-        Err(_) => Err(GateError::store()),
-    }
 }

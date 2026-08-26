@@ -14,7 +14,6 @@ pub const MAX_FRAME: usize = 1_048_576;
 #[derive(Debug)]
 pub enum FrameError {
     TooLarge,
-    BadRequest,
     Eof,
     Io,
 }
@@ -201,7 +200,14 @@ pub fn parse_inbound(obj: &Value) -> Result<InboundMsg, GateError> {
                 m,
             }),
         },
-        "ok" | "err" => Ok(InboundMsg::Response(parse_response(obj, &m)?)),
+        "ok" | "err" => match parse_response(obj, &m) {
+            Ok(resp) => Ok(InboundMsg::Response(resp)),
+            Err(_) => Ok(InboundMsg::Invalid {
+                id: opt_id(obj),
+                code: ErrorCode::ResponseInvalid,
+                m,
+            }),
+        },
         "bind" | "say" | "activity" => Ok(InboundMsg::Reverse {
             id: opt_id(obj),
             m,
@@ -311,9 +317,9 @@ fn parse_response(obj: &Value, m: &str) -> Result<WireResponse, GateError> {
         let code_raw = require_str(obj, "code")?;
         let code = ErrorCode::parse(&code_raw).ok_or_else(|| GateError::new(ErrorCode::BadRequest))?;
         let detail = match obj.get("detail") {
-            Some(Value::Null) | None => None,
+            Some(Value::Null) => None,
             Some(Value::String(s)) => Some(s.clone()),
-            Some(_) => return Err(GateError::new(ErrorCode::BadRequest)),
+            None | Some(_) => return Err(GateError::new(ErrorCode::BadRequest)),
         };
         Ok(WireResponse {
             id,

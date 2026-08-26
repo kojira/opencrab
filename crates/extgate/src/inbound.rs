@@ -1,6 +1,7 @@
 //! said → accept_inbound。V3 §6.2 / §7.2。
 
 use std::cell::Cell;
+#[cfg(any(test, feature = "extgate-probe"))]
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -73,6 +74,7 @@ pub fn process_said<R: AgentRuntime>(
         return Ok(SaidOutcome { seq: Some(seq) });
     }
 
+    #[cfg(any(test, feature = "extgate-probe"))]
     state
         .probe
         .accept_inbound_count
@@ -96,6 +98,7 @@ pub fn process_said<R: AgentRuntime>(
     }];
 
     let resolve = |sender: &str, agents: &[String], owner: &str| {
+        #[cfg(any(test, feature = "extgate-probe"))]
         state
             .probe
             .lookup_resolve_count
@@ -104,6 +107,7 @@ pub fn process_said<R: AgentRuntime>(
         resolve_caller(&tx, TRUSTED_PLATFORM_EXTGATE, &[sender], agent_id, owner)
     };
     let dm_any = |sender: &str, agents: &[String], owner: &str| {
+        #[cfg(any(test, feature = "extgate-probe"))]
         state
             .probe
             .lookup_dm_any_count
@@ -113,14 +117,18 @@ pub fn process_said<R: AgentRuntime>(
             .any(|agent_id| dm_allowed(&tx, sender, agent_id, owner))
     };
     let dm_one = |sender: &str, agent_id: &str, owner: &str| {
+        #[cfg(any(test, feature = "extgate-probe"))]
         state.probe.lookup_dm_count.fetch_add(1, Ordering::SeqCst);
         dm_allowed(&tx, sender, agent_id, owner)
     };
     let wl = |channel_id: &str, agent_id: &str| {
-        state.probe.lookup_wl_count.fetch_add(1, Ordering::SeqCst);
-        if let Ok(g) = state.probe.whitelist_override.lock() {
-            if let Some(v) = *g {
-                return v;
+        #[cfg(any(test, feature = "extgate-probe"))]
+        {
+            state.probe.lookup_wl_count.fetch_add(1, Ordering::SeqCst);
+            if let Ok(g) = state.probe.whitelist_override.lock() {
+                if let Some(v) = *g {
+                    return v;
+                }
             }
         }
         channel_whitelisted(&tx, agent_id, instance_id, channel_id)
@@ -391,6 +399,7 @@ fn enqueue_turn<R: AgentRuntime>(
     let origin = said.origin.clone();
     let owner_id = row.owner_id.clone();
     locks.spawn_serialized(session_id.clone(), async move {
+        #[cfg(any(test, feature = "extgate-probe"))]
         state
             .probe
             .start_session_turn_count
@@ -408,51 +417,81 @@ fn enqueue_turn<R: AgentRuntime>(
             Err(_) => CallerIdentity::Agent,
         };
         let (system, name) = runtime.build_agent_context(&agent_id, &caller);
-        let inbound = NormalizedInbound {
-            session_id: &session_id,
-            agent_id: &agent_id,
-            sender_id: &author_id,
-            sender_name: "",
-            avatar_url: None,
-            channel_id: Some(&address),
-            pubkey: None,
-            text: &text,
-            image_urls: &images,
-            external_id: &origin,
-        };
-        let turn = start_session_turn(
-            &runtime,
-            TranscriptSource::External,
-            &inbound,
-            |raw| raw.to_string(),
-            |conversation| {
-                RunRequest::new(
-                    agent_id.clone(),
-                    name.clone(),
-                    session_id.clone(),
-                    system.clone(),
-                    conversation,
-                    "extgate",
-                    caller.clone(),
+        let turn_res = {
+            let runtime = runtime.clone();
+            let session_id = session_id.clone();
+            let agent_id = agent_id.clone();
+            let author_id = author_id.clone();
+            let address = address.clone();
+            let text = text.clone();
+            let images = images.clone();
+            let origin = origin.clone();
+            tokio::spawn(async move {
+                let inbound = NormalizedInbound {
+                    session_id: &session_id,
+                    agent_id: &agent_id,
+                    sender_id: &author_id,
+                    sender_name: "",
+                    avatar_url: None,
+                    channel_id: Some(&address),
+                    pubkey: None,
+                    text: &text,
+                    image_urls: &images,
+                    external_id: &origin,
+                };
+                start_session_turn(
+                    &runtime,
+                    TranscriptSource::External,
+                    &inbound,
+                    |raw| raw.to_string(),
+                    |conversation| {
+                        RunRequest::new(
+                            agent_id.clone(),
+                            name.clone(),
+                            session_id.clone(),
+                            system.clone(),
+                            conversation,
+                            "extgate",
+                            caller.clone(),
+                        )
+                        .with_image_urls(images.clone())
+                    },
                 )
-                .with_image_urls(images.clone())
-            },
-        )
-        .await;
-        emit_activity(&state, &instance_id, &binding_id, &activity_id, "ended").await;
-        let effect = match turn {
-            Some(r) => delivery_effect(r),
-            None => opencrab_actions::DeliveryEffect::Empty,
+                .await
+            })
+            .await
         };
-        apply_delivery_effect(
-            &state,
-            &runtime,
-            &instance_id,
-            &binding_id,
-            &agent_id,
-            &session_id,
-            effect,
-        )
-        .await;
+        emit_activity(&state, &instance_id, &binding_id, &activity_id, "ended").await;
+        match turn_res {
+            Ok(turn) => {
+                let effect = match turn {
+                    Some(r) => delivery_effect(r),
+                    None => opencrab_actions::DeliveryEffect::Empty,
+                };
+                apply_delivery_effect(
+                    &state,
+                    &runtime,
+                    &instance_id,
+                    &binding_id,
+                    &agent_id,
+                    &session_id,
+                    effect,
+                )
+                .await;
+            }
+            Err(_) => {
+                tracing::error!("extgate turn task panicked");
+                crate::close::close_live(
+                    &state,
+                    Some(&instance_id),
+                    None,
+                    ErrorCode::Disconnect,
+                    None,
+                    None,
+                )
+                .await;
+                state.halt();
+            }
+        }
     });
 }

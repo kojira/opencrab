@@ -21,13 +21,18 @@ pub use listen::{recover_stale_deliveries, serve_uds, validate_listen_socket};
 pub use registry::{ExtgateState, Registry};
 
 use opencrab_actions::CallerIdentity;
+use opencrab_db::queries::{
+    get_trusted_user, is_trusted_co_agent, resolve_agent_by_discord_bot_user_id,
+    resolve_agent_by_nostr_self_pubkey, TrustedUserPermission, TRUSTED_PLATFORM_DISCORD,
+    TRUSTED_PLATFORM_NOSTR,
+};
 use rusqlite::Connection;
 
 /// server が `resolve_caller_identity_with_owner` を渡す。
 pub type ResolveCallerFn = fn(&Connection, &str, &[&str], &str, &str) -> CallerIdentity;
 
-/// query failure は Agent。owner 一致 → Owner、trusted → TrustedUser。
-pub fn resolve_caller_fail_closed(
+/// 本番と同じ 1 実装。owner → co_agent → trusted_user → Agent。
+pub fn resolve_caller_identity_with_owner(
     conn: &Connection,
     platform: &str,
     user_ids: &[&str],
@@ -40,11 +45,37 @@ pub fn resolve_caller_fail_closed(
     {
         return CallerIdentity::Owner;
     }
-    if user_ids
-        .iter()
-        .any(|uid| opencrab_db::queries::is_trusted_user(conn, platform, uid, agent_id))
-    {
-        return CallerIdentity::TrustedUser;
+    if let Some(co_uuid) = resolve_co_agent_uuid(
+        conn,
+        platform,
+        user_ids.first().copied().unwrap_or_default(),
+    ) {
+        if is_trusted_co_agent(conn, agent_id, &co_uuid).unwrap_or(false) {
+            return CallerIdentity::CoAgent { agent_id: co_uuid };
+        }
     }
-    CallerIdentity::Agent
+    let permission = user_ids.iter().find_map(|uid| {
+        get_trusted_user(conn, platform, uid, agent_id).map(|u| u.permission)
+    });
+    match permission {
+        Some(TrustedUserPermission::CoAgent) => CallerIdentity::CoAgent {
+            agent_id: user_ids.first().copied().unwrap_or_default().to_string(),
+        },
+        Some(TrustedUserPermission::Owner) | Some(TrustedUserPermission::User) => {
+            CallerIdentity::TrustedUser
+        }
+        None => CallerIdentity::Agent,
+    }
+}
+
+fn resolve_co_agent_uuid(
+    conn: &Connection,
+    platform: &str,
+    identifier: &str,
+) -> Option<String> {
+    match platform {
+        TRUSTED_PLATFORM_DISCORD => resolve_agent_by_discord_bot_user_id(conn, identifier),
+        TRUSTED_PLATFORM_NOSTR => resolve_agent_by_nostr_self_pubkey(conn, identifier),
+        _ => None,
+    }
 }

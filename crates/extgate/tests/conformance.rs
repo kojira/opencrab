@@ -15,7 +15,7 @@ use opencrab_actions::{
 use opencrab_core::EngineResult;
 use opencrab_db::queries::{AgentRow, TRUSTED_PLATFORM_EXTGATE};
 use opencrab_extgate::{
-    admin_router, now_nanos, recover_stale_deliveries, resolve_caller_fail_closed, serve_uds,
+    admin_router, now_nanos, recover_stale_deliveries, resolve_caller_identity_with_owner, serve_uds,
     session_id_for_binding, validate_listen_socket, ExtgateState, OperatorToken, UNAUTHORIZED_BODY,
 };
 use serde_json::{json, Value};
@@ -194,7 +194,7 @@ impl Harness {
         let rt = runtime.clone();
         let path = sock.clone();
         tokio::spawn(async move {
-            let _ = serve_uds(listen_state, rt, resolve_caller_fail_closed, path).await;
+            let _ = serve_uds(listen_state, rt, resolve_caller_identity_with_owner, path).await;
         });
         for _ in 0..200 {
             if sock.exists() {
@@ -426,10 +426,10 @@ async fn framing_max_size_ok_and_too_large_closes() {
     let mut huge = vec![b'x'; 1_048_577];
     huge[1_048_576] = b'\n';
     s2.write_all(&huge).await.unwrap();
-    let closed = read_frame_opt(&mut s2).await;
-    if let Some(v) = closed {
-        assert_eq!(v["code"], "too_large");
-    }
+    let closed = tokio::time::timeout(Duration::from_secs(2), read_frame(&mut s2))
+        .await
+        .expect("too_large frame did not arrive");
+    assert_eq!(closed["code"], "too_large");
 }
 
 #[tokio::test]
@@ -1372,14 +1372,14 @@ async fn e2e_omoikane_flow() {
 async fn hello_timeout_is_protocol_order() {
     let h = Harness::start().await;
     let mut s = h.connect().await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(10)).await;
     tokio::time::resume();
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    let v = read_frame_opt(&mut s).await;
-    if let Some(v) = v {
-        assert_eq!(v["code"], "protocol_order");
-    }
+    let v = tokio::time::timeout(Duration::from_secs(2), read_frame(&mut s))
+        .await
+        .expect("hello timeout frame did not arrive");
+    assert_eq!(v["code"], "protocol_order");
 }
 
 #[tokio::test]
@@ -1449,8 +1449,66 @@ async fn running_unknown_message_keeps_connection() {
 }
 
 #[tokio::test]
+async fn running_reverse_and_unknown_without_id_keep() {
+    let h = Harness::start().await;
+    let (mut s, _, binding_id) = ready_pair(&h).await;
+    write_frame(
+        &mut s,
+        &json!({
+            "m": "activity",
+            "binding_id": binding_id,
+            "activity_id": uuid(),
+            "state": "started"
+        }),
+    )
+    .await;
+    write_frame(&mut s, &json!({"m": "foo"})).await;
+    write_frame(
+        &mut s,
+        &json!({
+            "id": "s-keep",
+            "m": "said",
+            "binding_id": binding_id,
+            "origin": "after-keep",
+            "author_id": "u",
+            "text": "still",
+            "attachments": []
+        }),
+    )
+    .await;
+    let ok = read_said_response(&mut s, "s-keep").await;
+    assert_eq!(ok["m"], "ok");
+}
+
+#[tokio::test]
+async fn malformed_response_is_response_invalid_and_closes() {
+    let h = Harness::start().await;
+    let (mut s, instance_id, _) = ready_pair(&h).await;
+    write_frame(&mut s, &json!({"id": "ghost", "m": "ok", "seq": "bad"})).await;
+    let v = read_frame(&mut s).await;
+    assert_eq!(v["code"], "response_invalid");
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert!(!h.state.lock_registry().unwrap().is_live(&instance_id));
+}
+
+#[tokio::test]
+async fn err_without_detail_is_response_invalid() {
+    let h = Harness::start().await;
+    let (mut s, instance_id, _) = ready_pair(&h).await;
+    write_frame(
+        &mut s,
+        &json!({"id": "ghost", "m": "err", "code": "external_rejected"}),
+    )
+    .await;
+    let v = read_frame(&mut s).await;
+    assert_eq!(v["code"], "response_invalid");
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert!(!h.state.lock_registry().unwrap().is_live(&instance_id));
+}
+
+#[tokio::test]
 async fn listen_socket_rejects_relative_and_nonsocket() {
-    assert!(validate_listen_socket("").is_err());
+    assert_eq!(validate_listen_socket("").unwrap(), None);
     assert!(validate_listen_socket("relative/path.sock").is_err());
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("not-a-socket");

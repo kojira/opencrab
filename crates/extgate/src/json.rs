@@ -19,14 +19,6 @@ pub fn parse_object_no_dup(bytes: &[u8]) -> Result<Value, GateError> {
     Ok(value.0)
 }
 
-pub fn parse_value_no_dup(bytes: &[u8]) -> Result<Value, GateError> {
-    let mut de = serde_json::Deserializer::from_slice(bytes);
-    let value = NoDupValue::deserialize(&mut de).map_err(|_| GateError::new(ErrorCode::BadRequest))?;
-    de.end()
-        .map_err(|_| GateError::new(ErrorCode::BadRequest))?;
-    Ok(value.0)
-}
-
 struct NoDupValue(Value);
 
 impl<'de> Deserialize<'de> for NoDupValue {

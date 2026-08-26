@@ -15,13 +15,16 @@ pub async fn close_live(
     request_id: Option<&str>,
     writer: Option<&tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>,
 ) {
-    if let (Some(id), Some(w)) = (request_id, writer) {
-        let _ = write_json(w, &err_frame(id, reason, None)).await;
-    } else if let Some(w) = writer {
-        if request_id.is_none() {
-            tracing::error!(code = reason.as_str(), "gate close without request id");
+    if let Some(w) = writer {
+        match request_id {
+            Some(id) => {
+                let _ = write_json(w, &err_frame(id, reason, None)).await;
+            }
+            None => {
+                tracing::error!(code = reason.as_str(), "gate close without request id");
+                let _ = write_json(w, &err_frame(reason.as_str(), reason, None)).await;
+            }
         }
-        let _ = w;
     }
 
     let Some(instance_id) = instance_id else {
@@ -57,4 +60,23 @@ pub async fn close_live(
         state.halt();
     }
     let _ = writer;
+}
+
+/// halt 時に全 live の pending say を terminal 化する。
+pub async fn close_all_lives(state: &Arc<ExtgateState>, reason: ErrorCode) {
+    let targets = match state.lock_registry() {
+        Ok(reg) => reg.identities(),
+        Err(_) => return,
+    };
+    for (instance_id, identity) in targets {
+        close_live(
+            state,
+            Some(&instance_id),
+            Some(identity),
+            reason,
+            None,
+            None,
+        )
+        .await;
+    }
 }
