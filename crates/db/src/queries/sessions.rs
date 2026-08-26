@@ -165,50 +165,77 @@ pub fn get_session(conn: &Connection, session_id: &str) -> Result<Option<Session
 /// 開いている web binding があれば physical session ID（`extgate-{binding_id}`）。
 /// 同一 address に open が 2 件以上なら失敗する。
 pub fn open_web_physical_session(conn: &Connection, logical: &str) -> Result<Option<String>> {
+    Ok(open_web_binding(conn, logical)?.map(|b| format!("extgate-{}", b.binding_id)))
+}
+
+/// 開いている web binding の id と instance。同一 address に open が 2 件以上なら失敗する。
+pub struct OpenWebBinding {
+    pub binding_id: String,
+    pub instance_id: String,
+}
+
+pub fn open_web_binding(conn: &Connection, logical: &str) -> Result<Option<OpenWebBinding>> {
     let mut stmt = conn.prepare(
-        "SELECT 'extgate-' || b.binding_id
+        "SELECT b.binding_id, b.instance_id
          FROM gate_bindings b
          JOIN gate_instances i ON i.instance_id = b.instance_id
          WHERE b.address = ?1 AND b.closed_at IS NULL
            AND i.deleted_at IS NULL AND i.kind_id = 'web'",
     )?;
-    let ids: Vec<String> = stmt
-        .query_map([logical], |r| r.get(0))?
+    let rows: Vec<(String, String)> = stmt
+        .query_map([logical], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<std::result::Result<_, _>>()?;
-    match ids.as_slice() {
+    match rows.as_slice() {
         [] => Ok(None),
-        [id] => Ok(Some(id.clone())),
+        [(binding_id, instance_id)] => Ok(Some(OpenWebBinding {
+            binding_id: binding_id.clone(),
+            instance_id: instance_id.clone(),
+        })),
         _ => anyhow::bail!("multiple open web bindings for {logical}"),
     }
 }
 
-/// logical ID のまま、会話状態は physical、表示属性は alias。binding の有無を返す。
+/// logical ID のまま、会話状態は physical、表示属性は alias（無ければ physical）。
+/// binding の有無を返す。alias 行が無くても open binding だけで投影する。
 pub fn project_session_row(conn: &Connection, logical: &str) -> Result<Option<(SessionRow, bool)>> {
-    let Some(alias) = get_session(conn, logical)? else {
-        return Ok(None);
-    };
+    let alias = get_session(conn, logical)?;
     let Some(physical) = open_web_physical_session(conn, logical)? else {
-        return Ok(Some((alias, false)));
+        return Ok(alias.map(|row| (row, false)));
     };
     let Some(phys) = get_session(conn, &physical)? else {
         anyhow::bail!("open web binding for {logical} has no physical session {physical}");
     };
-    Ok(Some((
-        SessionRow {
+    let participants = list_session_participants(conn, &physical)?;
+    let participant_ids_json = serde_json::to_string(&participants)?;
+    let row = match alias {
+        Some(alias) => SessionRow {
             id: alias.id,
             mode: phys.mode,
             theme: alias.theme,
             phase: phys.phase,
             turn_number: phys.turn_number,
             status: phys.status,
-            participant_ids_json: phys.participant_ids_json,
+            participant_ids_json,
             facilitator_id: phys.facilitator_id,
             done_count: phys.done_count,
             max_turns: phys.max_turns,
             metadata_json: alias.metadata_json,
         },
-        true,
-    )))
+        None => SessionRow {
+            id: logical.to_string(),
+            mode: phys.mode,
+            theme: phys.theme,
+            phase: phys.phase,
+            turn_number: phys.turn_number,
+            status: phys.status,
+            participant_ids_json,
+            facilitator_id: phys.facilitator_id,
+            done_count: phys.done_count,
+            max_turns: phys.max_turns,
+            metadata_json: phys.metadata_json,
+        },
+    };
+    Ok(Some((row, true)))
 }
 
 pub struct SessionListItem {
@@ -232,39 +259,59 @@ pub fn list_sessions_page(
                     r.get(0)
                 })
                 .optional()?;
-            let Some(ts) = ts else {
-                anyhow::bail!("unknown session cursor {id}");
+            let ts = match ts {
+                Some(ts) => ts,
+                None => match open_web_physical_session(conn, id)? {
+                    Some(physical) => conn
+                        .query_row(
+                            "SELECT created_at FROM sessions WHERE id = ?1",
+                            [&physical],
+                            |r| r.get(0),
+                        )
+                        .optional()?
+                        .ok_or_else(|| anyhow::anyhow!("unknown session cursor {id}"))?,
+                    None => anyhow::bail!("unknown session cursor {id}"),
+                },
             };
             Some((ts, id.to_string()))
         }
     };
+    let listed = "SELECT id, mode, theme, phase, turn_number, status, participant_ids_json,
+                facilitator_id, done_count, max_turns, metadata_json, created_at
+         FROM (
+           SELECT s.id, s.mode, s.theme, s.phase, s.turn_number, s.status, s.participant_ids_json,
+                  s.facilitator_id, s.done_count, s.max_turns, s.metadata_json, s.created_at
+           FROM sessions s
+           WHERE NOT EXISTS (
+               SELECT 1 FROM gate_bindings b
+               JOIN gate_instances i ON i.instance_id = b.instance_id
+               WHERE b.closed_at IS NULL AND i.deleted_at IS NULL AND i.kind_id = 'web'
+                 AND s.id = ('extgate-' || b.binding_id)
+           )
+           UNION ALL
+           SELECT b.address, p.mode, p.theme, p.phase, p.turn_number, p.status, p.participant_ids_json,
+                  p.facilitator_id, p.done_count, p.max_turns, p.metadata_json, p.created_at
+           FROM gate_bindings b
+           JOIN gate_instances i ON i.instance_id = b.instance_id
+           JOIN sessions p ON p.id = ('extgate-' || b.binding_id)
+           WHERE b.closed_at IS NULL AND i.deleted_at IS NULL AND i.kind_id = 'web'
+             AND NOT EXISTS (SELECT 1 FROM sessions a WHERE a.id = b.address)
+         )";
     let sql = if cursor.is_some() {
-        "SELECT s.id, s.mode, s.theme, s.phase, s.turn_number, s.status, s.participant_ids_json,
-                s.facilitator_id, s.done_count, s.max_turns, s.metadata_json, s.created_at
-         FROM sessions s
-         WHERE NOT EXISTS (
-             SELECT 1 FROM gate_bindings b
-             JOIN gate_instances i ON i.instance_id = b.instance_id
-             WHERE b.closed_at IS NULL AND i.deleted_at IS NULL AND i.kind_id = 'web'
-               AND s.id = ('extgate-' || b.binding_id)
-         )
-         AND (s.created_at < ?1 OR (s.created_at = ?1 AND s.id < ?2))
-         ORDER BY s.created_at DESC, s.id DESC
+        format!(
+            "{listed}
+         WHERE created_at < ?1 OR (created_at = ?1 AND id < ?2)
+         ORDER BY created_at DESC, id DESC
          LIMIT ?3"
+        )
     } else {
-        "SELECT s.id, s.mode, s.theme, s.phase, s.turn_number, s.status, s.participant_ids_json,
-                s.facilitator_id, s.done_count, s.max_turns, s.metadata_json, s.created_at
-         FROM sessions s
-         WHERE NOT EXISTS (
-             SELECT 1 FROM gate_bindings b
-             JOIN gate_instances i ON i.instance_id = b.instance_id
-             WHERE b.closed_at IS NULL AND i.deleted_at IS NULL AND i.kind_id = 'web'
-               AND s.id = ('extgate-' || b.binding_id)
-         )
-         ORDER BY s.created_at DESC, s.id DESC
+        format!(
+            "{listed}
+         ORDER BY created_at DESC, id DESC
          LIMIT ?1"
+        )
     };
-    let mut stmt = conn.prepare(sql)?;
+    let mut stmt = conn.prepare(&sql)?;
     let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(SessionRow, String)> {
         Ok((
             SessionRow {
@@ -524,5 +571,42 @@ mod webgate_read_tests {
         assert_eq!(row.session.turn_number, 9);
         assert_eq!(row.session.phase, "convergent");
         assert_eq!(row.session.done_count, 2);
+    }
+
+    #[test]
+    fn project_and_list_binding_without_alias_row() {
+        let mut conn = crate::init_memory().unwrap();
+        agent(&conn, "a1");
+        let logical = "web-a1-c-new";
+        let binding = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+        let physical = session_id_for_binding(binding);
+        let subject: i64 = conn
+            .query_row(
+                "SELECT subject_id FROM agents WHERE agent_id = 'a1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let instance = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        conn.execute(
+            "INSERT INTO gate_instances
+             (instance_id, kind_id, subject_id, revision, enabled, config_b64, config_digest, created_at, updated_at)
+             VALUES (?1, 'web', ?2, 1, 1, 'e30=', '0000000000000000000000000000000000000000000000000000000000000000', 1, 1)",
+            rusqlite::params![instance, subject],
+        )
+        .unwrap();
+        let tx = conn.transaction().unwrap();
+        crate::queries::create_gate_binding_in_tx(&tx, binding, instance, logical, "Dinner", 1)
+            .unwrap();
+        tx.commit().unwrap();
+        let (row, bound) = project_session_row(&conn, logical).unwrap().unwrap();
+        assert!(bound);
+        assert_eq!(row.id, logical);
+        assert_eq!(row.theme, "Dinner");
+        assert_eq!(row.participant_ids_json, r#"["a1"]"#);
+        let page = list_sessions_page(&conn, 100, None).unwrap();
+        let ids: Vec<&str> = page.iter().map(|i| i.session.id.as_str()).collect();
+        assert!(ids.contains(&logical));
+        assert!(!ids.contains(&physical.as_str()));
     }
 }
