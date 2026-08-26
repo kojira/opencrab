@@ -52,7 +52,10 @@ fn normalize_name(raw: &str) -> Result<Option<String>, Fail> {
         return Ok(None);
     }
     if trimmed.contains('\n') || trimmed.contains('\r') {
-        return Err(json_err(StatusCode::BAD_REQUEST, "name must not contain newlines"));
+        return Err(json_err(
+            StatusCode::BAD_REQUEST,
+            "name must not contain newlines",
+        ));
     }
     if trimmed.chars().count() > 100 {
         return Err(json_err(
@@ -63,10 +66,7 @@ fn normalize_name(raw: &str) -> Result<Option<String>, Fail> {
     Ok(Some(trimmed))
 }
 
-fn resolve_web_instance(
-    conn: &rusqlite::Connection,
-    agent_id: &str,
-) -> Result<String, Fail> {
+fn resolve_web_instance(conn: &rusqlite::Connection, agent_id: &str) -> Result<String, Fail> {
     let subject: Option<i64> = conn
         .query_row(
             "SELECT subject_id FROM agents WHERE agent_id = ?1",
@@ -76,6 +76,7 @@ fn resolve_web_instance(
         .optional()
         .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     let Some(subject) = subject else {
+        // §7.3 手順 1: agent 解決失敗も instance 0 件と同じ 409。agent 専用 404 は置かない。
         return Err(json_err(StatusCode::CONFLICT, "web_instance_unavailable"));
     };
     if subject <= 0 {
@@ -159,7 +160,10 @@ pub async fn create_web_conversation(
     let instance_id = {
         let conn = match state.db.lock() {
             Ok(c) => c,
-            Err(_) => return json_err(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable").into_response(),
+            Err(_) => {
+                return json_err(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable")
+                    .into_response()
+            }
         };
         match resolve_web_instance(&conn, &agent_id) {
             Ok(id) => id,
@@ -173,24 +177,57 @@ pub async fn create_web_conversation(
     {
         let mut conn = match state.db.lock() {
             Ok(c) => c,
-            Err(_) => return json_err(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable").into_response(),
+            Err(_) => {
+                return json_err(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable")
+                    .into_response()
+            }
         };
-        if let Err(r) = persist_binding(&mut conn, &binding_id, &instance_id, &session_id, theme)
-        {
+        if let Err(r) = persist_binding(&mut conn, &binding_id, &instance_id, &session_id, theme) {
             return r.into_response();
         }
     }
     opencrab_extgate::race::park("after_commit").await;
 
-    let live = extgate
+    tracing::info!(instance_id = %instance_id, binding_id = %binding_id, "resolved instance");
+    let is_live = extgate
         .lock_registry()
         .map(|reg| reg.is_live(&instance_id))
         .unwrap_or(false);
-    if live {
+    tracing::info!(instance_id = %instance_id, is_live, "is_live");
+    let outcome =
         opencrab_extgate::enqueue_bind(&extgate, &instance_id, &binding_id, &session_id).await;
-        if opencrab_extgate::wait_bind_ack(&extgate, &instance_id, &binding_id, BIND_WAIT).await {
+    tracing::info!(
+        instance_id = %instance_id,
+        binding_id = %binding_id,
+        ?outcome,
+        enqueued = outcome.started_wait(),
+        "enqueue_bind"
+    );
+    tracing::info!(
+        instance_id = %instance_id,
+        binding_id = %binding_id,
+        write_ok = matches!(outcome, opencrab_extgate::EnqueueBindOutcome::Written),
+        "bind write"
+    );
+    if outcome.started_wait() {
+        let acked =
+            opencrab_extgate::wait_bind_ack(&extgate, &instance_id, &binding_id, BIND_WAIT).await;
+        tracing::info!(
+            instance_id = %instance_id,
+            binding_id = %binding_id,
+            acked,
+            "wait_bind_ack"
+        );
+        if acked {
             opencrab_extgate::race::park("before_http_ready").await;
-            return success(StatusCode::CREATED, &conversation_id, &session_id, &binding_id, &name, "ready");
+            return success(
+                StatusCode::CREATED,
+                &conversation_id,
+                &session_id,
+                &binding_id,
+                &name,
+                "ready",
+            );
         }
     }
     success(

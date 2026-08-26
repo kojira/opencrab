@@ -1,24 +1,32 @@
 //! 1 instance = 1 UDS connection。hello / bind ack / said / say / activity だけ。
+//! 切断後は指数 backoff で再接続し、hello 再送で open binding を replay する。
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
-use tokio::net::UnixStream;
 use tokio::net::unix::OwnedWriteHalf;
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::net::UnixStream;
+use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 use super::wire::{
-    Activity, Attachment, Bind, CoreMsg, FrameError, Say, WireResponse, err_frame, hello_frame,
-    ok_frame, parse_frame_bytes, read_frame, said_frame, say_text, write_json,
+    err_frame, hello_frame, ok_frame, parse_frame_bytes, read_frame, said_frame, say_text,
+    write_json, Activity, Attachment, Bind, CoreMsg, FrameError, Say, WireResponse,
 };
 
 const LIVE_QUEUE_CAP: usize = 32;
 /// said 応答の上限。V3 の hello 10s と同じクラス（said ack は LLM を待たない）。
 const SAID_TIMEOUT: Duration = Duration::from_secs(10);
+const RECONNECT_MIN: Duration = Duration::from_millis(200);
+const RECONNECT_MAX: Duration = Duration::from_secs(8);
+
+struct WriteOut {
+    tx: mpsc::UnboundedSender<Value>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LiveEvent {
@@ -104,21 +112,46 @@ impl LiveQueue {
 
 struct Inner {
     acknowledged: HashMap<String, String>,
+    remembered: HashMap<String, String>,
     pending_said: HashMap<String, PendingSaid>,
     pending_turn: HashMap<String, PendingTurn>,
     live: HashMap<String, LiveQueue>,
     closed: bool,
+    generation: u64,
 }
 
 pub struct InstanceClient {
     pub instance_id: String,
     pub author_id: String,
     inner: Mutex<Inner>,
-    write_tx: mpsc::UnboundedSender<Value>,
+    write: Mutex<WriteOut>,
+    closed_notify: Notify,
     req_seq: AtomicU64,
 }
 
 impl InstanceClient {
+    fn blank(instance_id: String, author_id: String) -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        drop(rx);
+        Self {
+            instance_id,
+            author_id,
+            inner: Mutex::new(Inner {
+                acknowledged: HashMap::new(),
+                remembered: HashMap::new(),
+                pending_said: HashMap::new(),
+                pending_turn: HashMap::new(),
+                live: HashMap::new(),
+                closed: true,
+                generation: 0,
+            }),
+            write: Mutex::new(WriteOut { tx }),
+            closed_notify: Notify::new(),
+            req_seq: AtomicU64::new(1),
+        }
+    }
+
+    /// 1 回だけ connect。切断後の再接続はしない（conformance 用）。
     pub async fn connect(
         socket: &std::path::Path,
         instance_id: String,
@@ -126,54 +159,35 @@ impl InstanceClient {
         author_id: String,
         config_digest: String,
     ) -> Result<Arc<Self>, FrameError> {
-        let stream = UnixStream::connect(socket)
-            .await
-            .map_err(|_| FrameError::Io)?;
-        let (reader, writer) = stream.into_split();
-        let (write_tx, write_rx) = mpsc::unbounded_channel();
-        let client = Arc::new(Self {
-            instance_id: instance_id.clone(),
-            author_id,
-            inner: Mutex::new(Inner {
-                acknowledged: HashMap::new(),
-                pending_said: HashMap::new(),
-                pending_turn: HashMap::new(),
-                live: HashMap::new(),
-                closed: false,
-            }),
-            write_tx,
-            req_seq: AtomicU64::new(1),
-        });
-        tokio::spawn(write_loop(writer, write_rx));
-        let hello_id = format!("hello:{}", client.instance_id);
-        client
-            .write_tx
-            .send(hello_frame(
-                &hello_id,
-                &instance_id,
-                revision,
-                &config_digest,
-            ))
-            .map_err(|_| FrameError::Io)?;
-        let (hello_tx, hello_rx) = oneshot::channel();
-        {
-            let mut inner = client.inner.lock().await;
-            inner.pending_said.insert(
-                hello_id,
-                PendingSaid {
-                    kind: PendingKind::Hello,
-                    reply: hello_tx,
-                },
-            );
-        }
-        tokio::spawn(read_loop(reader, client.clone()));
-        match hello_rx.await {
-            Ok(SaidOutcome::Accepted { .. }) | Ok(SaidOutcome::NotAdmitted) => {}
-            Ok(SaidOutcome::WireErr { .. }) | Ok(SaidOutcome::Disconnected) | Err(_) => {
-                return Err(FrameError::Io);
-            }
-        }
+        let client = Arc::new(Self::blank(instance_id, author_id));
+        attach(&client, socket, revision, &config_digest).await?;
         Ok(client)
+    }
+
+    /// HTTP を先に生かし、UDS は指数 backoff でつなぎ続ける。
+    pub fn spawn(
+        socket: PathBuf,
+        instance_id: String,
+        revision: u64,
+        author_id: String,
+        config_digest: String,
+    ) -> Arc<Self> {
+        let client = Arc::new(Self::blank(instance_id, author_id));
+        tokio::spawn(reconnect_loop(
+            client.clone(),
+            socket,
+            revision,
+            config_digest,
+        ));
+        client
+    }
+
+    pub async fn connection_live(&self) -> bool {
+        !self.inner.lock().await.closed
+    }
+
+    pub async fn remembered_binding(&self, address: &str) -> Option<String> {
+        self.inner.lock().await.remembered.get(address).cloned()
     }
 
     fn next_id(&self) -> String {
@@ -232,7 +246,13 @@ impl InstanceClient {
             );
         }
         let frame = said_frame(&id, &binding_id, origin, &self.author_id, text, attachments);
-        if self.write_tx.send(frame).is_err() {
+        tracing::info!(
+            instance_id = %self.instance_id,
+            binding_id = %binding_id,
+            origin,
+            "said"
+        );
+        if !send_frame(self, frame).await {
             let mut inner = self.inner.lock().await;
             inner.pending_turn.remove(&binding_id);
             inner.pending_said.remove(&id);
@@ -244,10 +264,16 @@ impl InstanceClient {
                     let mut inner = self.inner.lock().await;
                     inner.pending_turn.remove(&binding_id);
                 }
+                tracing::info!(
+                    instance_id = %self.instance_id,
+                    binding_id = %binding_id,
+                    "said ack"
+                );
                 Ok(outcome)
             }
             Ok(Err(_)) | Err(_) => {
-                close_all(self, "disconnect").await;
+                let generation = self.inner.lock().await.generation;
+                close_all(self, "disconnect", generation).await;
                 Ok(SaidOutcome::Disconnected)
             }
         }
@@ -257,7 +283,15 @@ impl InstanceClient {
         let rx = {
             let mut inner = self.inner.lock().await;
             if inner.closed {
-                return None;
+                if let Some(q) = inner.live.get_mut(address) {
+                    if let Some(ev) = q.subscribe() {
+                        return Some(ev);
+                    }
+                }
+                return Some(LiveEvent::Error {
+                    code: "disconnect".into(),
+                    detail: None,
+                });
             }
             if let Some(q) = inner.live.get_mut(address) {
                 if let Some(ev) = q.subscribe() {
@@ -276,6 +310,99 @@ impl InstanceClient {
     }
 }
 
+async fn send_frame(client: &InstanceClient, value: Value) -> bool {
+    client.write.lock().await.tx.send(value).is_ok()
+}
+
+async fn attach(
+    client: &Arc<InstanceClient>,
+    socket: &std::path::Path,
+    revision: u64,
+    config_digest: &str,
+) -> Result<(), FrameError> {
+    let stream = UnixStream::connect(socket)
+        .await
+        .map_err(|_| FrameError::Io)?;
+    let (reader, writer) = stream.into_split();
+    let (write_tx, write_rx) = mpsc::unbounded_channel();
+    let generation = {
+        let mut inner = client.inner.lock().await;
+        inner.generation = inner.generation.saturating_add(1);
+        inner.closed = false;
+        inner.acknowledged.clear();
+        inner.pending_said.clear();
+        inner.pending_turn.clear();
+        inner.live.clear();
+        inner.generation
+    };
+    *client.write.lock().await = WriteOut { tx: write_tx };
+    tokio::spawn(write_loop(writer, write_rx));
+    let hello_id = format!("hello:{}", client.instance_id);
+    if !send_frame(
+        client,
+        hello_frame(&hello_id, &client.instance_id, revision, config_digest),
+    )
+    .await
+    {
+        return Err(FrameError::Io);
+    }
+    let (hello_tx, hello_rx) = oneshot::channel();
+    {
+        let mut inner = client.inner.lock().await;
+        inner.pending_said.insert(
+            hello_id,
+            PendingSaid {
+                kind: PendingKind::Hello,
+                reply: hello_tx,
+            },
+        );
+    }
+    tokio::spawn(read_loop(reader, client.clone(), generation));
+    tracing::info!(instance_id = %client.instance_id, "hello");
+    match hello_rx.await {
+        Ok(SaidOutcome::Accepted { .. }) | Ok(SaidOutcome::NotAdmitted) => {
+            tracing::info!(instance_id = %client.instance_id, "hello ok");
+            Ok(())
+        }
+        Ok(SaidOutcome::WireErr { .. }) | Ok(SaidOutcome::Disconnected) | Err(_) => {
+            tracing::info!(instance_id = %client.instance_id, "hello failed");
+            Err(FrameError::Io)
+        }
+    }
+}
+
+async fn reconnect_loop(
+    client: Arc<InstanceClient>,
+    socket: PathBuf,
+    revision: u64,
+    config_digest: String,
+) {
+    let mut backoff = RECONNECT_MIN;
+    loop {
+        match attach(&client, &socket, revision, &config_digest).await {
+            Ok(()) => {
+                tracing::info!(instance_id = %client.instance_id, "uds connected");
+                backoff = RECONNECT_MIN;
+                let notified = client.closed_notify.notified();
+                if client.inner.lock().await.closed {
+                    tracing::info!(instance_id = %client.instance_id, "uds closed during hello");
+                } else {
+                    notified.await;
+                    tracing::info!(instance_id = %client.instance_id, "uds closed; reconnecting");
+                }
+            }
+            Err(_) => {
+                tracing::warn!(
+                    instance_id = %client.instance_id,
+                    "uds connect/hello failed"
+                );
+            }
+        }
+        tokio::time::sleep(backoff).await;
+        backoff = backoff.saturating_mul(2).min(RECONNECT_MAX);
+    }
+}
+
 async fn write_loop(mut writer: OwnedWriteHalf, mut rx: mpsc::UnboundedReceiver<Value>) {
     while let Some(value) = rx.recv().await {
         if write_json(&mut writer, &value).await.is_err() {
@@ -285,65 +412,67 @@ async fn write_loop(mut writer: OwnedWriteHalf, mut rx: mpsc::UnboundedReceiver<
     let _ = writer.shutdown().await;
 }
 
-async fn read_loop(mut reader: tokio::net::unix::OwnedReadHalf, client: Arc<InstanceClient>) {
+async fn read_loop(
+    mut reader: tokio::net::unix::OwnedReadHalf,
+    client: Arc<InstanceClient>,
+    generation: u64,
+) {
     loop {
         match read_frame(&mut reader).await {
             Ok(bytes) => match parse_frame_bytes(&bytes) {
                 Ok(msg) => {
-                    if handle_msg(&client, msg).await {
+                    if handle_msg(&client, msg, generation).await {
                         break;
                     }
                 }
                 Err(FrameError::BadRequest) | Err(FrameError::TooLarge) => {
-                    close_all(&client, "bad_request").await;
+                    close_all(&client, "bad_request", generation).await;
                     break;
                 }
                 Err(_) => {
-                    close_all(&client, "disconnect").await;
+                    close_all(&client, "disconnect", generation).await;
                     break;
                 }
             },
             Err(FrameError::TooLarge) => {
-                close_all(&client, "too_large").await;
+                close_all(&client, "too_large", generation).await;
                 break;
             }
             Err(_) => {
-                close_all(&client, "disconnect").await;
+                close_all(&client, "disconnect", generation).await;
                 break;
             }
         }
     }
 }
 
-async fn handle_msg(client: &InstanceClient, msg: CoreMsg) -> bool {
+async fn handle_msg(client: &InstanceClient, msg: CoreMsg, generation: u64) -> bool {
     match msg {
         CoreMsg::Bind(bind) => {
-            handle_bind(client, bind).await;
+            handle_bind(client, bind, generation).await;
             false
         }
-        CoreMsg::Say(say) => handle_say(client, say).await,
+        CoreMsg::Say(say) => handle_say(client, say, generation).await,
         CoreMsg::Activity(activity) => {
             handle_activity(client, activity).await;
             false
         }
         CoreMsg::Response(resp) => {
-            handle_response(client, resp).await;
+            handle_response(client, resp, generation).await;
             false
         }
         CoreMsg::Reverse { id, .. } | CoreMsg::Unknown { id, .. } => {
             if let Some(id) = id {
-                let _ = client
-                    .write_tx
-                    .send(err_frame(&id, "unknown_message", None));
+                let _ = send_frame(client, err_frame(&id, "unknown_message", None)).await;
             }
             false
         }
         CoreMsg::Invalid { id, code, .. } => {
             if let Some(id) = id {
-                let _ = client.write_tx.send(err_frame(&id, code, None));
+                let _ = send_frame(client, err_frame(&id, code, None)).await;
             }
             if code == "response_invalid" {
-                close_all(client, "response_invalid").await;
+                close_all(client, "response_invalid", generation).await;
                 return true;
             }
             false
@@ -351,7 +480,13 @@ async fn handle_msg(client: &InstanceClient, msg: CoreMsg) -> bool {
     }
 }
 
-async fn handle_bind(client: &InstanceClient, bind: Bind) {
+async fn handle_bind(client: &InstanceClient, bind: Bind, generation: u64) {
+    tracing::info!(
+        instance_id = %client.instance_id,
+        binding_id = %bind.binding_id,
+        address = %bind.address,
+        "bind"
+    );
     let mut inner = client.inner.lock().await;
     if inner.closed {
         return;
@@ -359,10 +494,13 @@ async fn handle_bind(client: &InstanceClient, bind: Bind) {
     if let Some(existing) = inner.acknowledged.get(&bind.address) {
         if existing != &bind.binding_id {
             drop(inner);
-            close_all(client, "binding_conflict").await;
+            close_all(client, "binding_conflict", generation).await;
             return;
         }
     }
+    inner
+        .remembered
+        .insert(bind.address.clone(), bind.binding_id.clone());
     inner
         .acknowledged
         .insert(bind.address.clone(), bind.binding_id);
@@ -370,14 +508,18 @@ async fn handle_bind(client: &InstanceClient, bind: Bind) {
         .live
         .entry(bind.address)
         .or_insert_with(LiveQueue::new);
-    let _ = client.write_tx.send(ok_frame(&bind.id));
+    drop(inner);
+    let _ = send_frame(client, ok_frame(&bind.id)).await;
 }
 
-async fn handle_say(client: &InstanceClient, say: Say) -> bool {
+async fn handle_say(client: &InstanceClient, say: Say, generation: u64) -> bool {
+    tracing::info!(
+        instance_id = %client.instance_id,
+        binding_id = %say.binding_id,
+        "say"
+    );
     let Some(text) = say_text(&say.payload).map(str::to_string) else {
-        let _ = client
-            .write_tx
-            .send(err_frame(&say.id, "external_rejected", None));
+        let _ = send_frame(client, err_frame(&say.id, "external_rejected", None)).await;
         return false;
     };
     let mut inner = client.inner.lock().await;
@@ -391,9 +533,7 @@ async fn handle_say(client: &InstanceClient, say: Say) -> bool {
         .map(|(a, _)| a.clone());
     let Some(address) = address else {
         drop(inner);
-        let _ = client
-            .write_tx
-            .send(err_frame(&say.id, "external_rejected", None));
+        let _ = send_frame(client, err_frame(&say.id, "external_rejected", None)).await;
         return false;
     };
     let q = inner
@@ -403,17 +543,15 @@ async fn handle_say(client: &InstanceClient, say: Say) -> bool {
     let accepted = q.try_push(LiveEvent::Message { text });
     if !accepted {
         drop(inner);
-        let _ = client
-            .write_tx
-            .send(err_frame(&say.id, "external_rejected", None));
+        let _ = send_frame(client, err_frame(&say.id, "external_rejected", None)).await;
         return false;
     }
     if let Some(turn) = inner.pending_turn.get_mut(&say.binding_id) {
         turn.saw_say = true;
     }
     drop(inner);
-    if client.write_tx.send(ok_frame(&say.id)).is_err() {
-        close_all(client, "disconnect").await;
+    if !send_frame(client, ok_frame(&say.id)).await {
+        close_all(client, "disconnect", generation).await;
         return true;
     }
     false
@@ -451,11 +589,11 @@ async fn handle_activity(client: &InstanceClient, activity: Activity) {
     }
 }
 
-async fn handle_response(client: &InstanceClient, resp: WireResponse) {
+async fn handle_response(client: &InstanceClient, resp: WireResponse, generation: u64) {
     let mut inner = client.inner.lock().await;
     let Some(pending) = inner.pending_said.remove(&resp.id) else {
         drop(inner);
-        close_all(client, "response_invalid").await;
+        close_all(client, "response_invalid", generation).await;
         return;
     };
     let outcome = match pending.kind {
@@ -469,7 +607,7 @@ async fn handle_response(client: &InstanceClient, resp: WireResponse) {
                 }
             } else {
                 drop(inner);
-                close_all(client, "response_invalid").await;
+                close_all(client, "response_invalid", generation).await;
                 return;
             }
         }
@@ -480,7 +618,7 @@ async fn handle_response(client: &InstanceClient, resp: WireResponse) {
                     Some(None) => SaidOutcome::NotAdmitted,
                     None => {
                         drop(inner);
-                        close_all(client, "response_invalid").await;
+                        close_all(client, "response_invalid", generation).await;
                         return;
                     }
                 }
@@ -495,12 +633,16 @@ async fn handle_response(client: &InstanceClient, resp: WireResponse) {
     let _ = pending.reply.send(outcome);
 }
 
-async fn close_all(client: &InstanceClient, code: &str) {
+async fn close_all(client: &InstanceClient, code: &str, generation: u64) {
     let mut inner = client.inner.lock().await;
-    if inner.closed {
+    if inner.closed || inner.generation != generation {
         return;
     }
     inner.closed = true;
+    let drained: Vec<(String, String)> = inner.acknowledged.drain().collect();
+    for (address, binding_id) in drained {
+        inner.remembered.insert(address, binding_id);
+    }
     for (_, pending) in inner.pending_said.drain() {
         let _ = pending.reply.send(SaidOutcome::Disconnected);
     }
@@ -513,4 +655,7 @@ async fn close_all(client: &InstanceClient, code: &str) {
         let _ = q.try_push(ev.clone());
         q.waiters.clear();
     }
+    drop(inner);
+    tracing::info!(instance_id = %client.instance_id, code, "close");
+    client.closed_notify.notify_waiters();
 }

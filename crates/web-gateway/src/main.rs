@@ -20,7 +20,8 @@ async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("opencrab_web_gateway=info".parse()?),
+                .add_directive("opencrab_web_gateway=info".parse()?)
+                .add_directive("web_gateway=info".parse()?),
         )
         .init();
 
@@ -34,16 +35,13 @@ async fn run() -> anyhow::Result<()> {
     let mut instances = Vec::new();
     for inst in &place.instances {
         let digest = config_digest(&inst.author_id);
-        let client = InstanceClient::connect(
-            &socket,
+        instances.push(InstanceClient::spawn(
+            socket.clone(),
             inst.instance_id.clone(),
             inst.revision,
             inst.author_id.clone(),
             digest,
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("hello failed for {}: {e:?}", inst.instance_id))?;
-        instances.push(client);
+        ));
     }
 
     let bind: std::net::SocketAddr = place.http_bind.parse()?;

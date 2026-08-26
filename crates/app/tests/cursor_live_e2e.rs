@@ -8,8 +8,9 @@
 //! 後に、必ず発話で返るターンを投げ、その発話が web 履歴に見えたら前の沈黙ターンも決着済みと分かる。DB は
 //! core を殺してから開く（走行中に権威へ同時アクセスしない）。
 //!
-//! CI に cursor-agent は無いので `#[ignore]`。走らせ方（cursor-agent 認証済みが前提・grok に 3 回叩く）:
-//!   cargo test -p opencrab-app --test cursor_live_e2e -- --ignored --nocapture
+//! protocol 1 の `web-gate` crate は削除済み。このファイルの HTTP 口（`/rooms/main/messages`）は
+//! 動かない。`#[ignore]` の理由は「CI に cursor-agent が無い」ではなく、経路自体が無いこと。
+//! protocol 2 の実プロセス E2E は `crates/web-gateway/tests/core_process_e2e.rs`。
 
 use opencrab_port::{EventKind, SubjectId, SubjectKind};
 use opencrab_store::Store;
@@ -186,7 +187,7 @@ fn cursor_grok_reply_react_no_reply_over_real_socket() {
         wait_history_contains(port, "[", Duration::from_secs(10))
             || get_history(port).is_empty()
             || wait_history_contains(port, "]", Duration::from_secs(5)),
-        "web-gate HTTP が起動しない"
+        "protocol 1 web-gate HTTP は削除済み"
     );
 
     // ---- ターン A: reply（スレッド付き配送）----
@@ -378,7 +379,7 @@ fn run_memory_roundtrip(model: &str, require_success: bool) {
         wait_history_contains(port, "[", Duration::from_secs(10))
             || get_history(port).is_empty()
             || wait_history_contains(port, "]", Duration::from_secs(5)),
-        "web-gate HTTP が起動しない"
+        "protocol 1 web-gate HTTP は削除済み"
     );
 
     // ---- ターン1: 覚える（期待: core-remember のツール行 → 決着）----

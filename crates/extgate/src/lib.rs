@@ -20,7 +20,7 @@ pub use error::{ErrorCode, GateError, UNAUTHORIZED_BODY};
 pub use ids::{now_nanos, session_id_for_binding};
 pub use listen::{
     enqueue_bind, recover_stale_deliveries, serve_uds, validate_listen_socket, wait_bind_ack,
-    web_binding_state,
+    web_binding_state, EnqueueBindOutcome,
 };
 pub use registry::{ExtgateState, Registry};
 

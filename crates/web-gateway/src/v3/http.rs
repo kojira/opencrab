@@ -5,16 +5,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use super::client::{InstanceClient, LiveEvent, PostRefuse, SaidOutcome};
 use super::json::parse_object_no_dup;
-use super::wire::{Attachment, parse_uuid};
+use super::wire::{parse_uuid, Attachment};
 
 const JSON_TYPE: &str = "application/json; charset=utf-8";
 
@@ -69,6 +69,27 @@ async fn find_client(state: &HttpState, address: &str) -> Result<Arc<InstanceCli
         1 => Ok(hits.remove(0)),
         _ => Err(FindClient::Ambiguous),
     }
+}
+
+async fn uds_disconnected(state: &HttpState, address: &str) -> bool {
+    let mut any_live = false;
+    for inst in &state.instances {
+        if inst.connection_live().await {
+            any_live = true;
+        }
+        if inst.remembered_binding(address).await.is_some() && !inst.connection_live().await {
+            return true;
+        }
+    }
+    !any_live && !state.instances.is_empty()
+}
+
+fn sse_error(code: &str) -> Response {
+    let ev = Event::default()
+        .event("gate_error")
+        .data(json!({"code": code, "detail": null}).to_string());
+    let stream = futures::stream::once(async move { Ok::<_, Infallible>(ev) });
+    Sse::new(stream).into_response()
 }
 
 enum FindClient {
@@ -146,7 +167,12 @@ async fn post_message(
     let client = match find_client(&state, &session_id).await {
         Ok(c) => c,
         Err(FindClient::None) => {
-            return json_error(StatusCode::SERVICE_UNAVAILABLE, "instance_not_ready", None);
+            let code = if uds_disconnected(&state, &session_id).await {
+                "disconnect"
+            } else {
+                "instance_not_ready"
+            };
+            return json_error(StatusCode::SERVICE_UNAVAILABLE, code, None);
         }
         Err(FindClient::Ambiguous) => {
             return json_error(StatusCode::CONFLICT, "binding_conflict", None);
@@ -197,6 +223,9 @@ async fn get_events(State(state): State<HttpState>, Path(session_id): Path<Strin
     let client = match find_client(&state, &session_id).await {
         Ok(c) => c,
         Err(FindClient::None) => {
+            if uds_disconnected(&state, &session_id).await {
+                return sse_error("disconnect");
+            }
             return json_error(StatusCode::SERVICE_UNAVAILABLE, "instance_not_ready", None);
         }
         Err(FindClient::Ambiguous) => {
