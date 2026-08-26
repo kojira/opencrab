@@ -613,6 +613,7 @@ fn trusted_platform_for(source: TranscriptSource) -> Option<&'static str> {
     match source {
         TranscriptSource::Discord => Some(opencrab_db::queries::TRUSTED_PLATFORM_DISCORD),
         TranscriptSource::Nostr => None,
+        TranscriptSource::External => None,
     }
 }
 
@@ -1032,11 +1033,16 @@ mod tests {
     /// 名簿側（[`REVIEWER_PLATFORM`]）の見直しを強制する。
     #[test]
     fn roster_platform_matches_the_harvestable_platforms() {
-        let all = [TranscriptSource::Discord, TranscriptSource::Nostr];
+        let all = [
+            TranscriptSource::Discord,
+            TranscriptSource::Nostr,
+            TranscriptSource::External,
+        ];
         for source in all {
             let expected = match source {
                 TranscriptSource::Discord => Some(REVIEWER_PLATFORM),
                 TranscriptSource::Nostr => None,
+                TranscriptSource::External => None,
             };
             assert_eq!(trusted_platform_for(source), expected, "{source:?}");
         }

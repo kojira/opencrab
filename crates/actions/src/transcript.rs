@@ -24,6 +24,8 @@ pub enum TranscriptSource {
     Discord,
     /// Nostr（`"nostr"` / `"nostr_response"`）。
     Nostr,
+    /// External gate（`"external"` / `"external_response"`）。
+    External,
 }
 
 impl TranscriptSource {
@@ -32,6 +34,7 @@ impl TranscriptSource {
         match self {
             Self::Discord => "discord",
             Self::Nostr => "nostr",
+            Self::External => "external",
         }
     }
 
@@ -40,6 +43,7 @@ impl TranscriptSource {
         match self {
             Self::Discord => "discord_response",
             Self::Nostr => "nostr_response",
+            Self::External => "external_response",
         }
     }
 }
@@ -126,5 +130,7 @@ mod tests {
         assert_eq!(TranscriptSource::Discord.reply(), "discord_response");
         assert_eq!(TranscriptSource::Nostr.inbound(), "nostr");
         assert_eq!(TranscriptSource::Nostr.reply(), "nostr_response");
+        assert_eq!(TranscriptSource::External.inbound(), "external");
+        assert_eq!(TranscriptSource::External.reply(), "external_response");
     }
 }
