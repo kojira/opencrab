@@ -77,7 +77,7 @@ regex = "1"
 memchr = "2"
 
 # Utils
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
 sha2 = "0.10"
 toml = "0.8"
 tempfile = "3"

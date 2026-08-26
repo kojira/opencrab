@@ -1,5 +1,6 @@
 use std::sync::{Arc, RwLock};
 
+use axum::Extension;
 use axum::Router;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -378,6 +379,7 @@ macro_rules! production_routes {
         $apply!($target, "/api/agents/{id}/daily-log-index/rebuild", post => api::daily_log_index::rebuild);
         $apply!($target, "/api/agents/{id}/daily-log-index/run", post => api::daily_log_index::run);
         $apply!($target, "/api/agents/{id}/memory/index/merge", post => api::agents::merge_memory_index_topics);
+        $apply!($target, "/api/agents/{agent_id}/web-conversations", post => api::web_conversations::create_web_conversation);
         $apply!($target, "/api/sessions", get => api::sessions::list_sessions, post => api::sessions::create_session);
         $apply!($target, "/api/sessions/{id}", get => api::sessions::get_session);
         $apply!($target, "/api/sessions/{id}/logs", get => api::sessions::list_session_logs);
@@ -526,6 +528,7 @@ pub fn create_router_with_gate(
     router
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
+        .layer(Extension(extgate.clone()))
         .with_state(state)
         .merge(opencrab_extgate::admin_router(extgate))
 }

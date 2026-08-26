@@ -817,6 +817,49 @@ async fn handle_response(
     }
 }
 
+/// 当該 binding が acknowledged になるまで待つ。live 消失は即 false。
+pub async fn wait_bind_ack(
+    state: &Arc<ExtgateState>,
+    instance_id: &str,
+    binding_id: &str,
+    timeout: Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        {
+            let Ok(reg) = state.lock_registry() else {
+                return false;
+            };
+            match reg.get(instance_id) {
+                Some(live) if live.acknowledged.contains(binding_id) => return true,
+                Some(_) => {}
+                None => return false,
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// open binding と registry から Web 投影の state を導出する。
+pub fn web_binding_state(reg: &crate::registry::Registry, instance_id: &str, binding_id: &str) -> &'static str {
+    match reg.get(instance_id) {
+        Some(live) if live.acknowledged.contains(binding_id) => "ready",
+        Some(live)
+            if live
+                .pending
+                .values()
+                .any(|p| p.binding_id() == Some(binding_id)) =>
+        {
+            "provisioning"
+        }
+        Some(_) => "provisioning",
+        None => "unavailable",
+    }
+}
+
 /// 新規 Binding PUT 後の bind exact 1。
 pub async fn enqueue_bind(state: &Arc<ExtgateState>, instance_id: &str, binding_id: &str, address: &str) {
     let (writer, identity) = {
@@ -840,6 +883,7 @@ pub async fn enqueue_bind(state: &Arc<ExtgateState>, instance_id: &str, binding_
         );
         (live.writer.clone(), live.identity)
     };
+    crate::race::park("after_pending").await;
     if write_json(&writer, &bind_frame(binding_id, address))
         .await
         .is_err()

@@ -27,6 +27,7 @@ pub mod sleep;
 pub mod system;
 pub mod tool_logs;
 pub mod trusted_users;
+pub mod web_conversations;
 pub mod workspace;
 
 /// `owner_discord_id` と呼び出し元 ID が一致するか判定する。

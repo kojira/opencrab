@@ -1,5 +1,7 @@
+use std::sync::Arc;
+
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -140,6 +142,7 @@ pub async fn create_session(
 
 pub async fn get_session(
     State(state): State<AppState>,
+    Extension(extgate): Extension<Arc<opencrab_extgate::ExtgateState>>,
     Path(id): Path<String>,
 ) -> Response {
     let conn = match state.db.lock() {
@@ -156,6 +159,36 @@ pub async fn get_session(
         Ok(Some((session, gateway_bound))) => {
             let mut value = serde_json::to_value(session).expect("SessionRow is serializable");
             value["gateway_bound"] = serde_json::json!(gateway_bound);
+            if gateway_bound {
+                match opencrab_db::queries::open_web_binding(&conn, &id) {
+                    Ok(Some(b)) => match extgate.lock_registry() {
+                        Ok(reg) => {
+                            value["web_binding_state"] = serde_json::json!(
+                                opencrab_extgate::web_binding_state(
+                                    &reg,
+                                    &b.instance_id,
+                                    &b.binding_id
+                                )
+                            );
+                        }
+                        Err(e) => {
+                            return (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(serde_json::json!({"error": e.code.as_str()})),
+                            )
+                                .into_response();
+                        }
+                    },
+                    Ok(None) => {}
+                    Err(e) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({"error": e.to_string()})),
+                        )
+                            .into_response();
+                    }
+                }
+            }
             Json(value).into_response()
         }
         Ok(None) => (

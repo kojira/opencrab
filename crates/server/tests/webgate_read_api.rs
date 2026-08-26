@@ -140,6 +140,7 @@ async fn get_session_projects_physical_state_with_gateway_bound() {
     assert_eq!(body["turn_number"], 9);
     assert_eq!(body["phase"], "convergent");
     assert_eq!(body["gateway_bound"], true);
+    assert_eq!(body["web_binding_state"], "unavailable");
 }
 
 #[tokio::test]
