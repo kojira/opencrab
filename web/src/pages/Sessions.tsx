@@ -1,35 +1,61 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { getSessions } from '../api/sessions';
 import type { SessionDto } from '../api/types';
 import SessionCard from '../components/ui/SessionCard';
 
+type LoadKind = 'idle' | 'loading' | 'loaded-empty' | 'loaded' | 'error';
+
 export default function Sessions() {
   const { t } = useTranslation();
-  const [sessions, setSessions] = useState<SessionDto[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [kind, setKind] = useState<LoadKind>('idle');
+  const [sessions, setSessions] = useState<SessionDto[]>([]);
+  const [error, setError] = useState('');
+  const [hasMore, setHasMore] = useState(false);
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'completed'>('all');
+  const abortRef = useRef<AbortController | null>(null);
+
+  const load = (reset: boolean) => {
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
+    if (reset) {
+      setKind('loading');
+      setSessions([]);
+    }
+    const before = reset || sessions.length === 0 ? undefined : sessions[sessions.length - 1]?.id;
+    getSessions({ signal: ac.signal, before: reset ? undefined : before })
+      .then((page) => {
+        if (ac.signal.aborted) return;
+        setSessions((cur) => (reset ? page : [...cur, ...page]));
+        setHasMore(page.length === 100);
+        const nextLen = reset ? page.length : sessions.length + page.length;
+        setKind(nextLen === 0 ? 'loaded-empty' : 'loaded');
+      })
+      .catch((e: Error) => {
+        if (ac.signal.aborted) return;
+        setError(e.message);
+        setKind('error');
+      });
+  };
 
   useEffect(() => {
-    getSessions()
-      .then(setSessions)
-      .catch((e: Error) => setError(e.message));
-  }, []);
+    load(true);
+    return () => abortRef.current?.abort();
+  }, [statusFilter]);
 
-  const filteredSessions = sessions
-    ? statusFilter === 'all'
-      ? sessions
-      : sessions.filter((s) => s.status === statusFilter)
-    : null;
+  const filtered =
+    statusFilter === 'all' ? sessions : sessions.filter((s) => s.status === statusFilter);
+  const visible = filtered.length > 200 ? filtered.slice(0, 200) : filtered;
 
   return (
     <div className="max-w-7xl mx-auto">
       <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
         <div className="flex items-center gap-3">
           <h1 className="page-title">{t('sessions.title')}</h1>
-          {filteredSessions !== null && (
+          {kind === 'loaded' && (
             <span className="badge-neutral text-label-sm">
-              {t('sessions.count', { count: filteredSessions.length })}
+              {t('sessions.count', { count: filtered.length })}
             </span>
           )}
         </div>
@@ -50,29 +76,37 @@ export default function Sessions() {
         </div>
       </div>
 
-      {error ? (
-        <div className="card-outlined border-error bg-error-container/30 p-4">
+      {kind === 'error' ? (
+        <div className="card-outlined border-error bg-error-container/30 p-4" role="alert">
           <div className="flex items-center gap-2">
             <span className="material-symbols-outlined text-error">error</span>
             <p className="text-body-lg text-error-on-container">
-              {t('common.error', { message: error })}
+              {t('common.error', { message: `GET /api/sessions: ${error}` })}
             </p>
+            <button type="button" className="btn-text" onClick={() => load(true)}>
+              {t('common.retry')}
+            </button>
           </div>
         </div>
-      ) : filteredSessions === null ? (
-        <div className="empty-state">
+      ) : kind === 'loading' ? (
+        <div className="empty-state" aria-busy="true">
           <p className="text-body-lg text-on-surface-variant">{t('common.loading')}</p>
         </div>
-      ) : filteredSessions.length === 0 ? (
+      ) : kind === 'loaded-empty' ? (
         <div className="empty-state">
           <span className="material-symbols-outlined empty-state-icon">forum</span>
           <p className="empty-state-text">{t('sessions.noSessions')}</p>
         </div>
       ) : (
         <div className="space-y-3">
-          {filteredSessions.map((session) => (
+          {visible.map((session) => (
             <SessionCard key={session.id} session={session} />
           ))}
+          {hasMore ? (
+            <button type="button" className="btn-text" onClick={() => load(false)}>
+              {t('sessions.loadMore')}
+            </button>
+          ) : null}
         </div>
       )}
     </div>

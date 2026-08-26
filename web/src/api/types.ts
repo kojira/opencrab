@@ -98,6 +98,7 @@ export interface SessionRow {
   done_count: number;
   max_turns: number | null;
   metadata_json: string | null;
+  gateway_bound?: boolean;
 }
 
 export interface SessionDto {
@@ -110,6 +111,7 @@ export interface SessionDto {
   participant_count: number;
   agent_ids: string[];
   metadata_json: string | null;
+  gateway_bound: boolean;
 }
 
 export interface SessionLogRow {

@@ -8,7 +8,7 @@ vi.mock('./client', () => ({
 }));
 
 import { api } from './client';
-import { getSessions, getSession } from './sessions';
+import { getSessions, getSession, sendWebMessage, conversationEventsUrl } from './sessions';
 import type { SessionRow } from './types';
 
 const mockedApi = vi.mocked(api);
@@ -44,6 +44,7 @@ describe('getSessions', () => {
       expect.objectContaining({ id: 's2', participant_count: 1 }),
     ]);
     expect(result[0]).not.toHaveProperty('participant_ids_json');
+    expect(mockedApi.get).toHaveBeenCalledWith('/sessions?limit=100', expect.anything());
   });
 
   it('handles invalid JSON in participant_ids_json gracefully', async () => {
@@ -74,6 +75,45 @@ describe('getSession', () => {
       participant_count: 4,
       agent_ids: ['a1', 'a2', 'a3', 'a4'],
       metadata_json: null,
+      gateway_bound: false,
     });
+  });
+});
+
+describe('sendWebMessage', () => {
+  it('posts exact body to the new gateway path', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 202,
+      json: async () => ({
+        client_message_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        origin: 'web:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        seq: 1,
+        state: 'accepted',
+      }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const accepted = await sendWebMessage(
+      'web-agent-1-conv',
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      'hello',
+    );
+
+    expect(accepted.state).toBe('accepted');
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/web-conversations/web-agent-1-conv/messages',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          client_message_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+          text: 'hello',
+          attachments: [],
+        }),
+      }),
+    );
+    expect(conversationEventsUrl('web-agent-1-conv')).toBe(
+      '/api/web-conversations/web-agent-1-conv/events',
+    );
+    vi.unstubAllGlobals();
   });
 });
