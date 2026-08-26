@@ -7,4 +7,4 @@
 | `check-no-private-identifiers.sh` | 公開リポジトリへ実在識別子が混入していないか |
 | `check-deps.sh` | クレート依存境界 |
 | `capture-baseline-l1.sh` / `capture-baseline-l2.sh` | baseline 採取 |
-| `webgate-provision` | operator 敷設。`OPENCRAB_GATE_OPERATOR_TOKEN` で agent GET → `subject_id`、Discord owner、instance/binding PUT。config bytes は byte-exact `{"author_id":<encoded-owner-id>}`。Bearer は gateway / browser へ渡さない |
+| `webgate-provision` | operator 敷設。Bearer は admin 6 operation だけ。agent GET / sessions GET には付けない。config bytes は byte-exact `{"author_id":<encoded-owner-id>}`。gateway / browser へは渡さない |

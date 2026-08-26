@@ -116,7 +116,7 @@ def main() -> None:
             q = "/api/sessions?limit=100"
             if before:
                 q += f"&before={before}"
-            _, listed = request("GET", f"{core}{q}", token)
+            _, listed = request("GET", f"{core}{q}", None)
             if not isinstance(listed, list):
                 die("GET /api/sessions must return an array")
             for row in listed:

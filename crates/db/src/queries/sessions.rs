@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::Utc;
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
 #[allow(unused_imports)]
@@ -228,11 +228,9 @@ pub fn list_sessions_page(
         None => None,
         Some(id) => {
             let ts: Option<String> = conn
-                .query_row(
-                    "SELECT created_at FROM sessions WHERE id = ?1",
-                    [id],
-                    |r| r.get(0),
-                )
+                .query_row("SELECT created_at FROM sessions WHERE id = ?1", [id], |r| {
+                    r.get(0)
+                })
                 .optional()?;
             let Some(ts) = ts else {
                 anyhow::bail!("unknown session cursor {id}");
@@ -306,6 +304,7 @@ pub fn list_sessions_page(
     Ok(out)
 }
 
+/// テスト専用。physical `extgate-*` を隠さない全件一覧。本番の読口は `list_sessions_page`。
 pub fn list_sessions(conn: &Connection) -> Result<Vec<SessionRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, mode, theme, phase, turn_number, status, participant_ids_json, facilitator_id, done_count, max_turns, metadata_json

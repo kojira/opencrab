@@ -8,7 +8,8 @@
 |---|---|
 | `open_web_physical_session` | 開いている web binding の physical ID。同一 address に 2 件なら失敗 |
 | `project_session_row` | logical ID 維持。表示属性は alias、会話状態は physical |
-| `list_sessions_page` | physical 行を除き logical 1 件。`limit` と `before`（直前ページ最後の id） |
+| `list_sessions_page` | physical 行を除き logical 1 件。`limit` と `before`（直前ページ最後の id）。本番の一覧入口 |
+| `list_sessions` | テスト専用。投影なし全件 |
 
 ## tool_logs（載せ替え工程 5-b）
 
