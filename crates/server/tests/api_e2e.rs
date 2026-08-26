@@ -218,9 +218,9 @@ async fn test_delete_agent() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(resp["deleted"], true);
 
-    // Verify gone
-    let (_, resp) = send_request(app, "GET", &format!("/api/agents/{agent_id}"), None).await;
-    assert!(resp.is_null());
+    // Verify gone — subject 写像 0 件は 404（空 body。旧 JSON null ではない）
+    let (status, _) = send_request(app, "GET", &format!("/api/agents/{agent_id}"), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -643,9 +643,9 @@ async fn test_agent_crud_full_cycle() {
     let found = agents.iter().any(|a| a["id"] == agent_id);
     assert!(!found, "Deleted agent should not appear in list");
 
-    // 9. Verify get returns null
-    let (_, resp) = send_request(app, "GET", &format!("/api/agents/{agent_id}"), None).await;
-    assert!(resp.is_null());
+    // 9. Verify get is 404
+    let (status, _) = send_request(app, "GET", &format!("/api/agents/{agent_id}"), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
