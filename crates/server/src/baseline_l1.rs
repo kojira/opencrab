@@ -17,7 +17,6 @@ pub fn capture_profile() -> Result<Value, String> {
     let missing_features = [
         (!cfg!(feature = "discord")).then_some("discord"),
         (!cfg!(feature = "nostr")).then_some("nostr"),
-        (!cfg!(feature = "web")).then_some("web"),
     ]
     .into_iter()
     .flatten()
@@ -31,7 +30,7 @@ pub fn capture_profile() -> Result<Value, String> {
     Ok(json!({
         "id": "full-production-surface-v1",
         "build": {
-            "required_cargo_features": ["discord", "nostr", "web"],
+            "required_cargo_features": ["discord", "nostr"],
             "selection": "the baseline-l1 Cargo feature enables this exact set; ambient feature unification is not used"
         },
         "runtime": {

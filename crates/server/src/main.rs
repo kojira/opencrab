@@ -258,8 +258,6 @@ async fn main() -> anyhow::Result<()> {
         // 受信を持つ transport の登録簿（#191 段階2 PR2）。空で作り、各マネージャの
         // 生成箇所から後で `register` する（内部可変なので生成順を変えずに済む）。
         gateways: Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
-        #[cfg(feature = "web")]
-        web_gateway: Arc::new(opencrab_web_gateway::WebGateway::new()),
         subtask_registries: Arc::new(opencrab_server::subtask_registries::SubtaskRegistries::new()),
         // #588 Stage 2: プロセス全体で 1 つの per-session 直列化ロック。heartbeat・scheduler・
         // Discord 受信ループ・Nostr ランタイムが同じ実体を共有し、同一セッションのターンを直列化する。
@@ -296,23 +294,6 @@ async fn main() -> anyhow::Result<()> {
     // 登録簿を反復する generic テストがすべてこれを呼ぶ）。散らすと本番へ足してテスト側への追記を
     // 忘れる隙ができ、prefix 衝突が本番でだけ顕在化しうる（#628 のブロッカー対応）。
     opencrab_server::register_production_descriptors(&state.timed_fire_router);
-
-    // #627 / #628 段階7: web の受け口（sink）も生存非依存で登録する。web には常駐ループが無く、
-    // Discord / Nostr のように「ループ起動時に sink を登録」できないので、ここで共有受け口として
-    // 1 度だけ登録する（web は外部接続を持たず常に立ち上がる＝隔離環境でもハートビートが届く）。
-    // sink は自分で `tokio::spawn` して per-session 直列化込みの入口を回す（`WebTimedFireSink`）。
-    // web は会話ゲートなので web feature の内側（PR-1B: web を外すと受け口は登録されない）。
-    #[cfg(feature = "web")]
-    {
-        state.timed_fire_router.register_shared(
-            opencrab_web_gateway::WEB_TIMED_FIRE_KIND,
-            std::sync::Arc::new(opencrab_web_gateway::WebTimedFireSink::new(state.clone())),
-        );
-        tracing::info!(
-            transport = opencrab_web_gateway::WEB_TIMED_FIRE_KIND,
-            "timed-fire: 受け口を登録（web・生存非依存）"
-        );
-    }
 
     // サブタスク lifecycle 通知の実装を配線する（#175 S4）。`spawn_subtask` は gateway
     // 非依存層にあるため、通知先の解決（DB の webhook 設定 + TOML の既定）だけを持つ

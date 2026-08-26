@@ -110,15 +110,29 @@ def main() -> None:
 
     sessions = list(args.session)
     if not sessions:
-        _, listed = request("GET", f"{core}/api/sessions", None)
-        if not isinstance(listed, list):
-            die("GET /api/sessions must return an array before pagination is used")
         prefix = f"web-{args.agent_id}-"
-        sessions = [
-            row["id"]
-            for row in listed
-            if isinstance(row, dict) and isinstance(row.get("id"), str) and row["id"].startswith(prefix) and row["id"] != prefix
-        ]
+        before = None
+        while True:
+            q = "/api/sessions?limit=100"
+            if before:
+                q += f"&before={before}"
+            _, listed = request("GET", f"{core}{q}", token)
+            if not isinstance(listed, list):
+                die("GET /api/sessions must return an array")
+            for row in listed:
+                if (
+                    isinstance(row, dict)
+                    and isinstance(row.get("id"), str)
+                    and row["id"].startswith(prefix)
+                    and row["id"] != prefix
+                ):
+                    sessions.append(row["id"])
+            if len(listed) < 100:
+                break
+            last = listed[-1]
+            if not isinstance(last, dict) or not isinstance(last.get("id"), str):
+                die("page item missing id")
+            before = last["id"]
 
     for logical in sessions:
         prefix = f"web-{args.agent_id}-"

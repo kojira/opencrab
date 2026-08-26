@@ -36,8 +36,6 @@ pub mod skill_consolidation;
 pub mod subtask_registries;
 pub mod subtask_spawn;
 pub mod system_actions;
-#[cfg(feature = "web")]
-pub mod web_runner_impl;
 pub mod webhook_targets;
 
 #[cfg(feature = "baseline-l1")]
@@ -149,10 +147,6 @@ pub struct AppState {
     /// **MCP は入れない。** `crates/mcp` は受信を持たず transport ではない（道具の
     /// 供給者で、注入は深さ 0 限定）。`mcp_manager` は名指しのまま残す。
     pub gateways: Arc<opencrab_actions::AgentGatewayRegistry>,
-    /// web gateway ランタイム（#154）: SSE 配送 / per-session 直列化 / dispatch registry。
-    /// 実体は独立クレート `opencrab-web-gateway`（#190）。
-    #[cfg(feature = "web")]
-    pub web_gateway: Arc<opencrab_web_gateway::WebGateway>,
     /// 非ブロック dispatch（#152 S3a）の subtask registry 置き場（#169）。
     /// 経路が定めるキーで貸し借りし、dispatcher と `cancel_subtask`（#161）が
     /// 同一 registry を見るようにする。
@@ -279,7 +273,7 @@ impl AppState {
 /// prefix 衝突・登録漏れを検出）が担う。この 1 本化は「登録関数への追加忘れ」を減らす方で、
 /// 両方あって初めて塞がる。
 #[cfg_attr(
-    not(any(feature = "discord", feature = "nostr", feature = "web")),
+    not(any(feature = "discord", feature = "nostr")),
     allow(unused_variables)
 )]
 pub fn register_production_descriptors(router: &opencrab_actions::TimedFireRouter) {
@@ -287,8 +281,6 @@ pub fn register_production_descriptors(router: &opencrab_actions::TimedFireRoute
     router.register_descriptor(Arc::new(opencrab_discord::DiscordFire));
     #[cfg(feature = "nostr")]
     router.register_descriptor(Arc::new(opencrab_nostr::NostrFire));
-    #[cfg(feature = "web")]
-    router.register_descriptor(Arc::new(opencrab_web_gateway::WebFire));
 }
 
 /// 最小構成の `AppState`（in-memory DB、LLM プロバイダ 0 件、gateway マネージャ無し）。
@@ -329,8 +321,6 @@ pub(crate) fn test_app_state() -> AppState {
         intake_wake: Arc::new(tokio::sync::Notify::new()),
         mcp_manager: None,
         gateways: Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
-        #[cfg(feature = "web")]
-        web_gateway: Arc::new(opencrab_web_gateway::WebGateway::new()),
         subtask_registries: Arc::new(subtask_registries::SubtaskRegistries::new()),
         session_locks: Arc::new(opencrab_actions::SessionLocks::new()),
         timed_fire_router: Arc::new(timed_fire_router),
@@ -390,10 +380,7 @@ macro_rules! production_routes {
         $apply!($target, "/api/agents/{id}/memory/index/merge", post => api::agents::merge_memory_index_topics);
         $apply!($target, "/api/sessions", get => api::sessions::list_sessions, post => api::sessions::create_session);
         $apply!($target, "/api/sessions/{id}", get => api::sessions::get_session);
-        $apply!($target, "/api/sessions/{id}/messages", post => api::sessions::send_message);
         $apply!($target, "/api/sessions/{id}/logs", get => api::sessions::list_session_logs);
-        $apply!($target, "/api/sessions/{id}/mentor", post => api::sessions::send_mentor_instruction);
-        $apply!($target, "/api/sessions/{id}/owner", post => api::sessions::send_owner_instruction);
         $apply!($target, "/api/agents/{id}/analytics", get => api::analytics::get_metrics_summary);
         $apply!($target, "/api/agents/{id}/analytics/detail", get => api::analytics::get_metrics_detail);
         $apply!($target, "/api/agents/{id}/workspace", get => api::workspace::list_workspace);
@@ -490,20 +477,6 @@ pub fn production_route_inventory() -> Vec<HttpRouteDescriptor> {
     production_routes!(describe_route, routes);
     #[cfg(feature = "nostr")]
     nostr_production_routes!(describe_nostr_route, routes);
-    #[cfg(feature = "web")]
-    routes.extend(
-        opencrab_web_gateway::route_inventory::<AppState>()
-            .into_iter()
-            .map(|(path, mut methods)| {
-                methods.sort();
-                HttpRouteDescriptor {
-                    path: path.to_string(),
-                    methods,
-                    activation: "cfg(feature = \"web\")".to_string(),
-                    source: "opencrab_web_gateway::routes".to_string(),
-                }
-            }),
-    );
     describe_gate_admin_routes(&mut routes);
     routes.sort_by(|a, b| a.path.cmp(&b.path));
     routes
@@ -549,10 +522,6 @@ pub fn create_router_with_gate(
         let mut nostr = Router::new();
         nostr_production_routes!(mount_route, nostr);
         router = router.merge(nostr);
-    }
-    #[cfg(feature = "web")]
-    {
-        router = router.merge(opencrab_web_gateway::routes::<AppState>());
     }
     router
         .layer(CorsLayer::permissive())

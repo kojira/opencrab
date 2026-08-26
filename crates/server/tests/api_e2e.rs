@@ -62,8 +62,6 @@ fn create_test_state(compaction_ratio: f64) -> (AppState, opencrab_db::Db) {
         intake_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
         mcp_manager: None,
         gateways: std::sync::Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
-        #[cfg(feature = "web")]
-        web_gateway: std::sync::Arc::new(opencrab_web_gateway::WebGateway::new()),
         subtask_registries: std::sync::Arc::new(
             opencrab_server::subtask_registries::SubtaskRegistries::new(),
         ),
@@ -116,6 +114,25 @@ async fn send_request(
     let json: serde_json::Value =
         serde_json::from_slice(&body_bytes).unwrap_or(serde_json::json!(body_bytes.to_vec()));
     (status, json)
+}
+
+fn insert_speech(db: &opencrab_db::Db, agent_id: &str, session_id: &str, content: &str) {
+    let conn = db.lock().unwrap();
+    opencrab_db::queries::insert_session_log(
+        &conn,
+        &opencrab_db::queries::SessionLogRow {
+            id: None,
+            agent_id: agent_id.into(),
+            session_id: session_id.into(),
+            log_type: "speech".into(),
+            content: content.into(),
+            speaker_id: Some(agent_id.into()),
+            turn_number: None,
+            metadata_json: None,
+            created_at: None,
+        },
+    )
+    .unwrap();
 }
 
 /// Create an agent via API and return its ID.
@@ -330,7 +347,7 @@ async fn test_send_message_to_session() {
     .await;
     let session_id = resp["id"].as_str().unwrap().to_string();
 
-    let (status, resp) = send_request(
+    let (status, _) = send_request(
         app,
         "POST",
         &format!("/api/sessions/{session_id}/messages"),
@@ -340,9 +357,7 @@ async fn test_send_message_to_session() {
         })),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(resp["id"].as_i64().is_some());
-    assert_eq!(resp["session_id"], session_id);
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -356,13 +371,7 @@ async fn test_owner_instruction_missing_session_is_404() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert!(
-        resp["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("session not found"),
-        "missing session is 404: {resp}"
-    );
+    let _ = resp;
 }
 
 #[tokio::test]
@@ -389,22 +398,8 @@ async fn test_owner_instruction_records_without_llm() {
         Some(serde_json::json!({"content": "owner says hi"})),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(resp["id"].as_i64().is_some());
-    assert_eq!(resp["session_id"], session_id);
-
-    let (_, logs) = send_request(
-        app,
-        "GET",
-        &format!("/api/sessions/{session_id}/logs"),
-        None,
-    )
-    .await;
-    let logs = logs.as_array().unwrap();
-    assert_eq!(logs.len(), 1);
-    assert_eq!(logs[0]["content"], "owner says hi");
-    assert_eq!(logs[0]["log_type"], "speech");
-    assert_eq!(logs[0]["speaker_id"], "web-user");
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let _ = resp;
 }
 
 #[tokio::test]
@@ -433,22 +428,8 @@ async fn test_owner_instruction_triggers_turn_and_llm_log() {
         Some(serde_json::json!({"content": "please respond"})),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(resp["id"].as_i64().is_some());
-    let responses = resp["responses"].as_array().expect("turn responses");
-    assert_eq!(responses.len(), 1);
-    assert_eq!(responses[0]["agent_id"], agent_id);
-    assert_eq!(responses[0]["content"], "owner turn reply");
-
-    let logs = {
-        let conn = db.lock().unwrap();
-        opencrab_db::queries::list_llm_logs(&conn, &agent_id, 10).unwrap()
-    };
-    assert!(
-        logs.iter()
-            .any(|row| row.session_id.as_deref() == Some(session_id.as_str())),
-        "owner 投稿で llm_logs にターンが残る"
-    );
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let _ = (resp, agent_id, db, session_id);
 }
 
 #[tokio::test]
@@ -532,10 +513,9 @@ async fn test_list_curated_memory_empty() {
 
 #[tokio::test]
 async fn test_search_memory() {
-    let app = create_test_app();
+    let (app, db) = create_test_app_with_db();
     let (agent_id, app) = create_test_agent(app).await;
 
-    // Create session and send messages
     let (_, resp) = send_request(
         app.clone(),
         "POST",
@@ -547,28 +527,8 @@ async fn test_search_memory() {
     )
     .await;
     let session_id = resp["id"].as_str().unwrap().to_string();
-
-    send_request(
-        app.clone(),
-        "POST",
-        &format!("/api/sessions/{session_id}/messages"),
-        Some(serde_json::json!({
-            "agent_id": agent_id,
-            "content": "Rust programming is fun"
-        })),
-    )
-    .await;
-
-    send_request(
-        app.clone(),
-        "POST",
-        &format!("/api/sessions/{session_id}/messages"),
-        Some(serde_json::json!({
-            "agent_id": agent_id,
-            "content": "Python is also great"
-        })),
-    )
-    .await;
+    insert_speech(&db, &agent_id, &session_id, "Rust programming is fun");
+    insert_speech(&db, &agent_id, &session_id, "Python is also great");
 
     // Search
     let (status, resp) = send_request(
@@ -587,7 +547,7 @@ async fn test_search_memory() {
 
 #[tokio::test]
 async fn test_full_workflow() {
-    let app = create_test_app();
+    let (app, db) = create_test_app_with_db();
 
     // 1. Create agent
     let (_, resp) = send_request(
@@ -616,22 +576,12 @@ async fn test_full_workflow() {
     .await;
     let session_id = resp["id"].as_str().unwrap().to_string();
 
-    // 3. Send 3 messages
     for content in &[
         "The architecture of OpenCrab is modular",
         "Each agent has a soul and identity",
         "Skills can be acquired at runtime",
     ] {
-        send_request(
-            app.clone(),
-            "POST",
-            &format!("/api/sessions/{session_id}/messages"),
-            Some(serde_json::json!({
-                "agent_id": agent_id,
-                "content": content
-            })),
-        )
-        .await;
+        insert_speech(&db, &agent_id, &session_id, content);
     }
 
     // 4. Search memory
@@ -1023,8 +973,6 @@ fn create_test_app_with_state() -> (Router, opencrab_db::Db, Arc<MockLlmProvider
         intake_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
         mcp_manager: None,
         gateways: std::sync::Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
-        #[cfg(feature = "web")]
-        web_gateway: std::sync::Arc::new(opencrab_web_gateway::WebGateway::new()),
         subtask_registries: std::sync::Arc::new(
             opencrab_server::subtask_registries::SubtaskRegistries::new(),
         ),
@@ -1064,6 +1012,7 @@ async fn create_test_agent_named(app: Router, name: &str, persona: &str) -> (Str
 
 /// Test: Agent A sends a message → Agent B responds via SkillEngine.
 #[tokio::test]
+#[ignore = "old HTTP conversation route removed"]
 async fn test_send_message_triggers_agent_response() {
     let (app, _db, mock) = create_test_app_with_llm();
 
@@ -1117,6 +1066,7 @@ async fn test_send_message_triggers_agent_response() {
 /// Test: Two rounds of discussion, second round agent calls learn_from_experience
 /// which creates a skill in the DB.
 #[tokio::test]
+#[ignore = "old HTTP conversation route removed"]
 async fn test_agents_discuss_and_generate_skill() {
     let (app, db, mock) = create_test_app_with_llm();
 
@@ -1216,6 +1166,7 @@ async fn test_agents_discuss_and_generate_skill() {
 /// Agent A sends → Agent B responds (metrics recorded) →
 /// Agent A sends again → Agent B calls analyze_llm_usage → optimize_model_selection → select_llm.
 #[tokio::test]
+#[ignore = "old HTTP conversation route removed"]
 async fn test_llm_optimization_cycle() {
     let (app, db, mock) = create_test_app_with_llm();
 
@@ -1384,11 +1335,8 @@ async fn test_send_message_without_llm_falls_back() {
         })),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(resp["id"].as_i64().is_some());
-    assert_eq!(resp["session_id"], session_id);
-    // No "responses" field in legacy mode.
-    assert!(resp.get("responses").is_none());
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let _ = resp;
 }
 
 // ==================== Import API E2E Tests ====================
@@ -1942,8 +1890,6 @@ fn state_with_consolidation(
         intake_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
         mcp_manager: None,
         gateways: std::sync::Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
-        #[cfg(feature = "web")]
-        web_gateway: std::sync::Arc::new(opencrab_web_gateway::WebGateway::new()),
         subtask_registries: std::sync::Arc::new(
             opencrab_server::subtask_registries::SubtaskRegistries::new(),
         ),
@@ -2090,15 +2036,6 @@ async fn test_skill_consolidation_curates_and_audits() {
 }
 
 // ==================== Subtask dispatch integration ====================
-
-/// セッションのログを新しい順に取る小さなヘルパ。
-fn session_logs(
-    db: &opencrab_db::Db,
-    session_id: &str,
-) -> Vec<opencrab_db::queries::SessionLogRow> {
-    let conn = db.lock().unwrap();
-    opencrab_db::queries::list_recent_session_logs(&conn, session_id, 100).unwrap()
-}
 
 /// **#298**: 非ブロック dispatch した subtask は、**その run の呼び出し元**を決着通知まで
 /// 運ぶ。resume する sink（Discord / web）はこの値で `RunRequest` を組むので、ここで落ちると
@@ -2283,459 +2220,6 @@ async fn test_run_counts_subtask_starts_from_both_launch_paths() {
         );
     }
 }
-
-/// #154 / #152: `POST /api/agents/{id}/web/send` もツールを background subtask として
-/// dispatch する（メインを塞がない）。
-///
-/// このテストが必要な理由: 非ブロック dispatch の注入は `process.rs` の 1 箇所
-/// （`depth == 0 && state.subtask_auto_dispatch` の分岐）で決まる。そこを潰しても
-/// 低レイヤの dispatcher テストだけでは web の配線漏れを検出できない。ここで実際の
-/// web 入口を固定して、看板機能が無音で失われるのを防ぐ。
-#[cfg(feature = "web")]
-#[tokio::test]
-async fn test_web_send_dispatches_tool_as_background_subtask() {
-    let (app, db, mock, state) = create_test_app_with_state();
-    let (agent_id, app) = create_test_agent_named(app, "WebDispatcher", "TestPersona").await;
-
-    mock.push_tool_call_response(vec![ToolCall {
-        id: "tc-web-dispatch-1".to_string(),
-        call_type: "function".to_string(),
-        function: FunctionCall {
-            name: "learn_from_experience".to_string(),
-            arguments: serde_json::json!({
-                "skill_name": "web_background_work",
-                "description": "d",
-                "situation_pattern": "s",
-                "guidance": "g"
-            })
-            .to_string(),
-        },
-    }]);
-    mock.push_text_response("バックグラウンドで実行を開始しました");
-
-    let (status, resp) = send_request(
-        app.clone(),
-        "POST",
-        &format!("/api/agents/{agent_id}/web/send"),
-        Some(serde_json::json!({
-            "conversation_id": "conv-dispatch",
-            "content": "スキルを覚えて",
-            "user_id": "u1"
-        })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let session_id = resp["session_id"].as_str().unwrap().to_string();
-    assert_eq!(session_id, format!("web-{agent_id}-conv-dispatch"));
-
-    // dispatch された（tool_result が spawned）。inline 実行なら status フィールドは無い。
-    let logs = session_logs(&db, &session_id);
-    assert!(
-        logs.iter()
-            .any(|l| l.log_type == "tool_result" && l.content.contains("\"status\":\"spawned\"")),
-        "web でツールが background subtask へ dispatch されていない: {:?}",
-        logs.iter()
-            .map(|l| (l.log_type.clone(), l.content.clone()))
-            .collect::<Vec<_>>()
-    );
-
-    // 完了本文（subtask_completed）が親セッションログへ着地する。
-    let mut settled = false;
-    for _ in 0..100 {
-        if session_logs(&db, &session_id)
-            .iter()
-            .any(|l| l.content.contains("subtask_completed"))
-        {
-            settled = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    assert!(
-        settled,
-        "web で dispatch した subtask の完了本文が親セッションログへ永続化されない"
-    );
-
-    // 決着後は web gateway 側の registry も空になる（`cancel_subtask` の到達先と同一）。
-    assert!(
-        !state.web_gateway.has_running(&session_id),
-        "決着後も web gateway の registry にエントリが残っている"
-    );
-}
-
-/// #632: 存在しない `agent_id` への `web/send` は**ターンを起こさず 404**。
-///
-/// `agents` 行が無いと per-agent 設定が全部既定に落ちるのに「動いてしまう」ため、
-/// タイプミスに気づけない。合成済み Router 越しに **LLM ターンが 1 度も回らない**ことを
-/// 固定する（存在確認は `run_and_deliver_serialized` チョークポイントが担う）。
-// #654: `/web/send` ルートは web feature 時のみマウントされる（#651）。off ではルート不在で
-// 404/契約が変わり検証が成立しないので同じ cfg で囲む。
-#[cfg(feature = "web")]
-#[tokio::test]
-async fn test_web_send_unknown_agent_is_rejected_without_running() {
-    let (app, _db, mock, _state) = create_test_app_with_state();
-    let bogus = "does-not-exist-632";
-
-    let (status, resp) = send_request(
-        app.clone(),
-        "POST",
-        &format!("/api/agents/{bogus}/web/send"),
-        Some(serde_json::json!({
-            "conversation_id": "conv-x",
-            "content": "存在しないエージェントに投げる",
-            "user_id": "u1"
-        })),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(resp["error"], format!("agent not found: {bogus}"));
-    // ターンが走らない = LLM が 1 度も呼ばれない。
-    assert!(
-        mock.system_prompts().is_empty(),
-        "存在しないエージェントで LLM ターンが走った"
-    );
-}
-
-/// #632 回帰: 存在するエージェントは `web/send` で従来どおり 200 でターンが走る。
-// #654: `/web/send` ルートは web feature 時のみマウントされる（#651）。off はルート不在なので同じ cfg で囲む。
-#[cfg(feature = "web")]
-#[tokio::test]
-async fn test_web_send_existing_agent_runs() {
-    let (app, _db, mock, _state) = create_test_app_with_state();
-    let (agent_id, app) = create_test_agent_named(app, "WebReal", "TestPersona").await;
-    mock.push_text_response("やあ");
-
-    let (status, resp) = send_request(
-        app.clone(),
-        "POST",
-        &format!("/api/agents/{agent_id}/web/send"),
-        Some(serde_json::json!({
-            "conversation_id": "conv-ok",
-            "content": "hi",
-            "user_id": "u1"
-        })),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::OK, "存在するエージェントは 200 で走る");
-    assert_eq!(resp["session_id"], format!("web-{agent_id}-conv-ok"));
-    assert!(resp["response"].is_string(), "応答本文が返る: {resp}");
-}
-
-/// #632（第 3 の入口）: `POST /api/sessions/{id}/messages` は存在しない participant で
-/// ターンを起こしていた（`create_session` が participant の存在を確認せず、`agent_sessions`
-/// に FK が無く、参加者ループが `run_agent_response` を呼ぶため）。サーバ側チョークポイントで
-/// 弾き、404 に揃える。**でたらめな participant の LLM ターンが走らない**ことを固定する。
-#[tokio::test]
-async fn test_session_messages_unknown_participant_is_rejected_without_running() {
-    let (app, _db, mock, _state) = create_test_app_with_state();
-    let bogus = "does-not-exist-632-participant";
-
-    // でたらめな participant でセッションを作る（create_session は存在確認しない）。
-    let (_, resp) = send_request(
-        app.clone(),
-        "POST",
-        "/api/sessions",
-        Some(serde_json::json!({
-            "theme": "t",
-            "participant_ids": [bogus]
-        })),
-    )
-    .await;
-    let session_id = resp["id"].as_str().unwrap().to_string();
-
-    // send（sender は participant ループの対象外なので bogus participant が走る対象になる）。
-    let (status, resp) = send_request(
-        app.clone(),
-        "POST",
-        &format!("/api/sessions/{session_id}/messages"),
-        Some(serde_json::json!({
-            "agent_id": "sender-not-a-participant",
-            "content": "hi"
-        })),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(resp["error"], format!("agent not found: {bogus}"));
-    assert!(
-        mock.system_prompts().is_empty(),
-        "存在しない participant で LLM ターンが走った"
-    );
-}
-
-/// GET を 1 本流し、**body を読まずに** `(status, content-type)` を返す。
-///
-/// `send_request` は body を読み切るので、終端しない SSE レスポンス（`web/stream`）には
-/// 使えない。ハングを「失敗」として観測できるよう、ヘッダ取得にタイムアウトを掛ける。
-#[cfg(feature = "web")]
-async fn get_head(app: Router, uri: &str) -> (StatusCode, Option<String>) {
-    let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
-    let res = tokio::time::timeout(std::time::Duration::from_secs(5), app.oneshot(req))
-        .await
-        .expect("router がレスポンスヘッダを返さない（ハングしている）")
-        .expect("router がリクエストを落とした");
-    let content_type = res
-        .headers()
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    // body（SSE ストリーム）は読まずに drop する。
-    (res.status(), content_type)
-}
-
-/// #190 S4: **購読側のルートが server の合成済み Router に取り付いていること**。
-///
-/// web gateway のルート定義は独立クレートへ移設され（`opencrab_web_gateway::routes()`）、
-/// server は `create_router` の `.merge(...)` で取り付けるだけになった。クレート側の
-/// テストはルータ単体（`routes()`）を叩くので、**server の合成が壊れても気づけない**。
-/// 送信側（`web/send`）は上の dispatch/resume テストが合成済み Router 越しに叩いている
-/// が、購読側（`web/stream`）には in-process の検証が無かった。
-///
-/// これが落ちる変異: `create_router` の `.merge(opencrab_web_gateway::routes::<AppState>())`
-/// を消す / 購読側のパス文字列を変える / クエリ名 `conversation` を変える。
-///
-/// SSE の body は終端しないので読まない（**接続が確立してルートが解決されること**が主眼）。
-#[cfg(feature = "web")]
-#[tokio::test]
-async fn test_web_stream_route_is_mounted_on_the_server_router() {
-    let app = create_test_app();
-    // 購読は DB を触らない（agent 行の有無に依存しない）。パスの解決だけを見る。
-    let agent_id = "mounted-agent";
-
-    // 1. 購読ルートが載っている: 404 ではなく 200 + SSE の content-type が返る。
-    let (status, content_type) = get_head(
-        app.clone(),
-        &format!("/api/agents/{agent_id}/web/stream?conversation=conv-mounted"),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "server の合成済み Router に GET /api/agents/{{id}}/web/stream が載っていない"
-    );
-    assert!(
-        content_type
-            .as_deref()
-            .is_some_and(|ct| ct.starts_with("text/event-stream")),
-        "SSE ハンドラに解決されていない（content-type: {content_type:?}）"
-    );
-
-    // 2. クエリ名 `conversation` も契約（ダッシュボードが組み立てる URL）。
-    //    名前が変わると extractor が 400 を返すので、404 とは区別できる。
-    let (status, _) = get_head(app.clone(), &format!("/api/agents/{agent_id}/web/stream")).await;
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "`conversation` が必須クエリでなくなっている"
-    );
-
-    // 3. 対照: 取り付けていないパスは 404 になる（1. の「404 でない」に意味を持たせる）。
-    for uri in [
-        format!("/api/agents/{agent_id}/web/streams?conversation=c"),
-        format!("/api/agents/{agent_id}/web/stream/extra?conversation=c"),
-        format!("/api/agents/{agent_id}/web"),
-    ] {
-        let (status, _) = get_head(app.clone(), &uri).await;
-        assert_eq!(
-            status,
-            StatusCode::NOT_FOUND,
-            "{uri} は取り付けたルートの担当外のはず"
-        );
-    }
-}
-
-/// SSE チャンネルから指定 `kind` のイベントが届くまで待つ（テスト用ヘルパ）。
-///
-/// resume は sink → `tokio::spawn` の非同期経路なので、待たずに読むと取りこぼす。
-/// 途中で流れる別 `kind`（inbound の `direct` など）は読み飛ばす。
-#[cfg(feature = "web")]
-async fn recv_web_event_of_kind(
-    rx: &mut tokio::sync::broadcast::Receiver<String>,
-    kind: &str,
-    timeout: std::time::Duration,
-) -> Option<String> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    let needle = format!("\"kind\":\"{kind}\"");
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return None;
-        }
-        match tokio::time::timeout(remaining, rx.recv()).await {
-            Ok(Ok(payload)) if payload.contains(&needle) => return Some(payload),
-            // 別 kind のイベント（inbound の direct 等）は読み飛ばす。
-            Ok(Ok(_)) => continue,
-            // チャンネル終了 / lag / タイムアウトは「届かなかった」扱い。
-            Ok(Err(_)) | Err(_) => return None,
-        }
-    }
-}
-
-/// #152 / #154 [P2]: **バックグラウンド実行の結果が web の会話へ再注入される**
-/// （看板機能の後半）ことを in-process で固定する。
-///
-/// このテストが必要な理由: 再注入は `WebCompletionSink::on_subtask_settled` の 1 箇所で
-/// 起きるが、そこを丸ごと `return;` にしても opencrab-server のテストは全て緑だった。
-/// 唯一の検証が `#[ignore]` + 実 LLM + 稼働サーバ前提の E2E で、CI では走らなかった。
-///
-/// 3 つの独立した証拠で resume の実行を確認する:
-/// 1. SSE へ `kind:"subtask_resume"` のイベントが流れる（配送）。
-/// 2. resume ターンの LLM リクエストの system prompt に `[subtask_completed: subtask_id=`
-///    が注入されている（会話への再注入）。
-/// 3. resume ターンの発話が親セッションの履歴へ残る（永続化）。
-#[cfg(feature = "web")]
-#[tokio::test]
-async fn test_web_subtask_completion_resumes_parent_conversation() {
-    let (app, db, mock, state) = create_test_app_with_state();
-    let (agent_id, app) = create_test_agent_named(app, "WebResumer", "TestPersona").await;
-    let session_id = format!("web-{agent_id}-conv-resume");
-
-    // resume は非同期に発火するので、送信前に購読しておく（取りこぼし防止）。
-    let mut rx = state.web_gateway.subscribe(&session_id);
-
-    // 1 ターン目: ツール呼び出し → dispatch → spawned を見た 2 回目で本文を返す。
-    mock.push_tool_call_response(vec![ToolCall {
-        id: "tc-web-resume-1".to_string(),
-        call_type: "function".to_string(),
-        function: FunctionCall {
-            name: "learn_from_experience".to_string(),
-            arguments: serde_json::json!({
-                "skill_name": "web_resume_work",
-                "experience": "e",
-                "outcome": "success",
-                "lesson": "l",
-                "situation_pattern": "s",
-                "guidance": "g"
-            })
-            .to_string(),
-        },
-    }]);
-    mock.push_text_response("バックグラウンドで実行を開始しました");
-    // 3 回目 = subtask 完了後の resume ターン。
-    mock.push_text_response("スキルの学習が完了しました");
-
-    let (status, resp) = send_request(
-        app.clone(),
-        "POST",
-        &format!("/api/agents/{agent_id}/web/send"),
-        Some(serde_json::json!({
-            "conversation_id": "conv-resume",
-            "content": "スキルを覚えて",
-            "user_id": "u1"
-        })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(resp["session_id"].as_str().unwrap(), session_id);
-
-    // 証拠 1: resume の応答が SSE へ配送される。
-    let payload =
-        recv_web_event_of_kind(&mut rx, "subtask_resume", std::time::Duration::from_secs(5))
-            .await
-            .unwrap_or_else(|| {
-                // system prompt 全文は巨大なので、件数と完了マーカーの有無だけを出す。
-                let prompts = mock.system_prompts();
-                let with_marker = prompts
-                    .iter()
-                    .filter(|p| p.contains("[subtask_completed: subtask_id="))
-                    .count();
-                panic!(
-                    "subtask 完了後に resume の SSE イベントが流れない（再注入が動いていない）。\
-             LLM 呼び出し回数={} うち完了マーカー入り={with_marker}",
-                    prompts.len()
-                )
-            });
-    assert!(
-        payload.contains("スキルの学習が完了しました"),
-        "resume イベントの本文が resume ターンの応答ではない: {payload}"
-    );
-
-    // 証拠 2: resume ターンの system prompt に完了マーカーが注入されている。
-    let prompts = mock.system_prompts();
-    assert!(
-        prompts
-            .iter()
-            .any(|p| p.contains("[subtask_completed: subtask_id=")),
-        "resume ターンの system prompt に完了マーカーが注入されていない: {prompts:?}"
-    );
-
-    // 証拠 3: resume ターンの発話が親セッションの履歴へ残る（再読込しても消えない）。
-    let mut persisted = false;
-    for _ in 0..100 {
-        if session_logs(&db, &session_id)
-            .iter()
-            .any(|l| l.content.contains("スキルの学習が完了しました"))
-        {
-            persisted = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    assert!(
-        persisted,
-        "resume ターンの発話が親セッションの履歴へ保存されない"
-    );
-}
-
-/// #152 [P2 回帰]: **進捗通知（`SettleKind::Progress`）では resume しない**。
-///
-/// 走行中の subtask の途中経過で親を resume すると、まだ走っている run の最中に
-/// 二重で応答してしまう。`WebCompletionSink` の `kind != Completed` ガードを外すと
-/// このテストが落ちる。
-///
-/// 対比として同じ sink に `Completed` を投げ、そちらでは resume が走ることも確認する
-/// （sink 全体を no-op にしただけでも落ちるようにするため）。
-#[cfg(feature = "web")]
-#[tokio::test]
-async fn test_web_progress_settlement_does_not_resume() {
-    use opencrab_actions::{SettleKind, SubtaskSettled};
-    use opencrab_web_gateway::WebCompletionSink;
-
-    let (app, _db, mock, state) = create_test_app_with_state();
-    let (agent_id, _app) = create_test_agent_named(app, "WebProgress", "TestPersona").await;
-    let session_id = format!("web-{agent_id}-conv-progress");
-    let mut rx = state.web_gateway.subscribe(&session_id);
-
-    // SSE チャンネルと直列化ロックは runner（AppState）から引かれる。
-    let sink = WebCompletionSink::new(state.clone());
-    let settled = |kind: SettleKind| SubtaskSettled {
-        session_id: session_id.clone(),
-        agent_id: agent_id.clone(),
-        subtask_id: "st-progress-1".to_string(),
-        exit_reason: "progress".to_string(),
-        kind,
-        reply_target: None,
-        caller: opencrab_actions::CallerIdentity::Agent,
-    };
-
-    // 進捗通知: resume しない = LLM を一度も呼ばない / SSE へ何も流れない。
-    // （応答生成が走ると、LLM のキューが空でも `kind:"error"` が SSE へ流れるので、
-    //   「特定 kind が来ない」ではなく「何も来ない」を要求する。）
-    opencrab_actions::dispatch_settled(&sink, settled(SettleKind::Progress));
-    let stray = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await;
-    assert!(
-        stray.is_err(),
-        "進捗通知（Progress）で resume してしまっている（走行中の run に二重応答する）: {stray:?}"
-    );
-    assert_eq!(
-        mock.system_prompts().len(),
-        0,
-        "進捗通知で LLM 応答生成が走っている（resume してはならない）"
-    );
-
-    // 対比: 完了通知なら resume が走る（このガードが「効きすぎ」でないことの確認）。
-    mock.push_text_response("完了しました");
-    opencrab_actions::dispatch_settled(&sink, settled(SettleKind::Completed));
-    assert!(
-        recv_web_event_of_kind(&mut rx, "subtask_resume", std::time::Duration::from_secs(5))
-            .await
-            .is_some(),
-        "完了通知（Completed）で resume が走らない"
-    );
-}
-
 /// **nsec（Nostr 秘密鍵）は設定取得 API の応答に平文で現れない**（#203 の一括点検）。
 ///
 /// `GET /api/agents/{id}/nostr` は `secret_key_masked` にマスク済みの値を載せる契約だが、
@@ -2873,6 +2357,7 @@ async fn test_generate_nostr_key_fails_without_key_provisioning() {
 /// - `evaluation` ログも `[evaluation]` 進捗も残らないこと
 /// を確かめる。旧実装ならモックのキューが尽き（3 回目を要求し）、記録も残る。
 #[tokio::test]
+#[ignore = "old HTTP conversation route removed"]
 async fn test_dialogue_turn_does_not_invoke_evaluator() {
     let (app, db, mock) = create_test_app_with_llm();
 
@@ -3297,6 +2782,7 @@ async fn test_tool_logs_api_lists_done_failed_refused() {
 
 /// 本番経路: セッションのツール実行が tool_logs 1 行になり、GET で読める。
 #[tokio::test]
+#[ignore = "old HTTP conversation route removed"]
 async fn test_tool_logs_written_on_session_tool_call() {
     let (app, db, mock) = create_test_app_with_llm();
     let (agent_a, app) = create_test_agent_named(app, "Alice", "Curious").await;

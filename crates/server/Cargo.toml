@@ -4,11 +4,10 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-default = ["discord", "nostr", "web"]
+default = ["discord", "nostr"]
 discord = ["dep:opencrab-discord"]
 nostr = ["dep:opencrab-nostr"]
-web = ["dep:opencrab-web-gateway"]
-baseline-l1 = ["discord", "nostr", "web"]
+baseline-l1 = ["discord", "nostr"]
 baseline-l2 = ["baseline-l1"]
 
 [[bin]]
@@ -45,7 +44,6 @@ opencrab-actions = { workspace = true }
 opencrab-db = { workspace = true }
 opencrab-extgate = { workspace = true }
 opencrab-nostr = { workspace = true, optional = true }
-opencrab-web-gateway = { workspace = true, optional = true }
 opencrab-mcp = { workspace = true }
 dotenvy = { workspace = true }
 toml = { workspace = true }

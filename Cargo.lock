@@ -2268,7 +2268,6 @@ dependencies = [
  "opencrab-mcp",
  "opencrab-nostr",
  "opencrab-voice",
- "opencrab-web-gateway",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",
@@ -2323,26 +2322,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "opencrab-web-gate"
-version = "0.2.17"
-dependencies = [
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "opencrab-web-gateway"
 version = "0.2.17"
 dependencies = [
  "anyhow",
- "async-trait",
  "axum",
- "dashmap 6.1.0",
  "futures",
  "http-body-util",
- "opencrab-actions",
- "opencrab-core",
- "rusqlite",
  "serde",
  "serde_json",
  "sha2",

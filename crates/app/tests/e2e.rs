@@ -55,20 +55,8 @@ fn spawn_core(sock: &Path, db: &Path) -> Proc {
     Proc(child)
 }
 
-fn spawn_web(sock: &Path, port: u16) -> Proc {
-    // `web-gate-e2e` は app 自身の bin（= web クレートの同じソース）。cargo が e2e の前に必ず
-    // 作り直すので、web-gate のコードを直したのに古いバイナリで緑、が起き得ない（#1）。
-    let web = PathBuf::from(env!("CARGO_BIN_EXE_web-gate-e2e"));
-    // web は記録を持たない（プロトコル§10）。状態ファイルの引数は無い——履歴は core の `read`（§02）で読む。
-    let child = Command::new(web)
-        .arg(sock)
-        .arg(port.to_string())
-        .arg(TOKEN)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn web-gate");
-    Proc(child)
+fn spawn_web(_sock: &Path, _port: u16) -> Proc {
+    panic!("protocol 1 web-gate crate was removed; this e2e is stopped");
 }
 
 /// 落として上げ直す。**先に殺してから**新しいのを上げる（旧プロセスが線を握ったまま
@@ -180,6 +168,7 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 #[test]
+#[ignore = "protocol 1 web-gate crate was removed"]
 fn end_to_end_over_real_socket_and_process() {
     let sock = scratch("s.sock");
     let db = scratch("core.db");

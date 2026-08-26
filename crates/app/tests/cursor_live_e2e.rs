@@ -58,17 +58,8 @@ fn spawn_core_cursor(sock: &Path, db: &Path, places_json: &Path) -> Proc {
     Proc(child)
 }
 
-fn spawn_web(sock: &Path, port: u16) -> Proc {
-    let web = PathBuf::from(env!("CARGO_BIN_EXE_web-gate-e2e"));
-    let child = Command::new(web)
-        .arg(sock)
-        .arg(port.to_string())
-        .arg(TOKEN)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn web-gate");
-    Proc(child)
+fn spawn_web(_sock: &Path, _port: u16) -> Proc {
+    panic!("protocol 1 web-gate crate was removed; this e2e is stopped");
 }
 
 fn free_port() -> u16 {

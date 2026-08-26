@@ -263,6 +263,45 @@ pub fn count_matching_session_logs(conn: &Connection, agent_id: &str, query: &st
     Ok(count)
 }
 
+/// 新しい側から `limit` 件。`before_id` があるときはそれより小さい id。返り値は id ASC。
+pub fn list_session_logs_page(
+    conn: &Connection,
+    session_id: &str,
+    limit: u32,
+    before_id: Option<i64>,
+) -> Result<Vec<SessionLogRow>> {
+    let sql = if before_id.is_some() {
+        "SELECT id, agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json, created_at
+         FROM memory_sessions WHERE session_id = ?1 AND id < ?2 ORDER BY id DESC LIMIT ?3"
+    } else {
+        "SELECT id, agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json, created_at
+         FROM memory_sessions WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2"
+    };
+    let mut stmt = conn.prepare(sql)?;
+    let map_row = |row: &rusqlite::Row<'_>| {
+        Ok(SessionLogRow {
+            id: row.get(0)?,
+            agent_id: row.get(1)?,
+            session_id: row.get(2)?,
+            log_type: row.get(3)?,
+            content: row.get(4)?,
+            speaker_id: row.get(5)?,
+            turn_number: row.get(6)?,
+            metadata_json: row.get(7)?,
+            created_at: row.get(8)?,
+        })
+    };
+    let mut rows: Vec<SessionLogRow> = if let Some(before) = before_id {
+        stmt.query_map(params![session_id, before, limit], map_row)?
+            .collect::<std::result::Result<_, _>>()?
+    } else {
+        stmt.query_map(params![session_id, limit], map_row)?
+            .collect::<std::result::Result<_, _>>()?
+    };
+    rows.reverse();
+    Ok(rows)
+}
+
 /// List all session logs for a given session, ordered by creation time.
 /// Used for building conversation history in send_message.
 pub fn list_session_logs_by_session(

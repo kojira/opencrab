@@ -11,18 +11,6 @@ path = "src/lib.rs"
 name = "opencrab-social-runtime"
 path = "src/bin/opencrab-social-runtime.rs"
 
-# e2e が必ず「いまの web-gate のコード」を動かすための保証（タスク #1）。
-# web-gate の本体は別クレート `web-gate`（core の型を使わない構造規律はそこで保たれる）。ここは
-# その**同じソース**を app 自身の bin として持つだけ。同一パッケージの bin なので cargo は
-# `CARGO_BIN_EXE_web-gate-e2e` を e2e に渡し、テスト前に**必ず再ビルドする** — `-p opencrab-app` の
-# ような絞り込みでも古いバイナリで緑にならない（兄弟クレートの bin は絞り込みでは作り直されない）。
-# 手順書の「先に build しろ」に依存しない（書き忘れが起き得ない）。
-# `test = false`: 同じソースの `#[cfg(test)]` を二重に走らせない（本体は `web-gate` クレートで走る）。
-[[bin]]
-name = "web-gate-e2e"
-path = "../web-gate/src/main.rs"
-test = false
-
 [dependencies]
 opencrab-port = { path = "../port" }
 opencrab-store = { path = "../store" }

@@ -47,7 +47,6 @@ fn capture_profile() -> Result<Value, String> {
     let missing_features = [
         (!cfg!(feature = "discord")).then_some("discord"),
         (!cfg!(feature = "nostr")).then_some("nostr"),
-        (!cfg!(feature = "web")).then_some("web"),
     ]
     .into_iter()
     .flatten()
@@ -66,7 +65,7 @@ fn capture_profile() -> Result<Value, String> {
     Ok(json!({
         "id": "full-production-surface-v1",
         "build": {
-            "required_cargo_features": ["discord", "nostr", "web"],
+            "required_cargo_features": ["discord", "nostr"],
             "selection": "the baseline-l2 Cargo feature enables baseline-l1 and its exact feature set; ambient feature unification is not used",
             "target_family": "unix"
         },
@@ -959,9 +958,6 @@ async fn collect_http(l1: &Value, catalog: &HttpScenarioCatalog) -> Result<Value
                         "bodyless route has no alternate classification: {key}"
                     ));
                 }
-            } else if method == "GET" && path == "/api/agents/{id}/web/stream" {
-                uncollected.push(json!({"name":format!("{stem}__reject_or_absent"),"method":method,"path":path,"branch":"resource_absence_or_empty_state","status":"uncollected","reason":"the production SSE contract does not terminate","level":"L3"}));
-                continue;
             } else {
                 (
                     concrete_uri(catalog, path, true)?,
@@ -2755,7 +2751,7 @@ mod tests {
         );
         assert_eq!(
             first["capture_profile"]["build"]["required_cargo_features"],
-            json!(["discord", "nostr", "web"])
+            json!(["discord", "nostr"])
         );
         let diagnostic_probe = |name: &str| {
             first["http"]["probes"]

@@ -22,13 +22,7 @@ use crate::AppState;
 /// 場所の呼称は transport 中立にする（#158 S2 と同方針）。
 pub const HEARTBEAT_NOSTR_CHANNEL_LABEL: &str = "（自律ハートビート）";
 
-/// web セッション宛ハートビートの**表示用 channel_name**（web 固有ラベル・#628 条件 D）。
-///
-/// [`channel_label`] の web 分岐が使う。web の会話は Discord のような外部チャンネル名を
-/// 持たないので、ダッシュボードの会話であることを示す呼称を充てる。
-pub const HEARTBEAT_WEB_CHANNEL_LABEL: &str = "（ダッシュボードの会話）";
-
-/// Discord / Nostr / web 以外の発火先宛ハートビートの**表示用 channel_name**（真に中立の
+/// Discord / Nostr 以外の発火先宛ハートビートの**表示用 channel_name**（真に中立の
 /// ラベル・#628 条件 D）。
 ///
 /// [`channel_label`] の `_` 分岐が使う。web 固有ラベルを流用すると 5 つ目の transport
@@ -43,9 +37,7 @@ pub const HEARTBEAT_NEUTRAL_CHANNEL_LABEL: &str = "（この会話）";
 /// （このモジュール）側に `target → 表示名` の小関数として残す。
 /// - **Discord**: db のチャンネル設定名（無ければ channel_id）。
 /// - **Nostr**: 固定ラベル [`HEARTBEAT_NOSTR_CHANNEL_LABEL`]。
-/// - **web**: web 固有ラベル [`HEARTBEAT_WEB_CHANNEL_LABEL`]（明示分岐）。
-/// - **その他**: 真に中立の [`HEARTBEAT_NEUTRAL_CHANNEL_LABEL`]（web 固有ラベルを流用しない。
-///   5 つ目の transport が来たら明示分岐を足すが、忘れても web を名乗る誤表示にはならない）。
+/// - **その他**: 真に中立の [`HEARTBEAT_NEUTRAL_CHANNEL_LABEL`]。
 fn channel_label(db: &opencrab_db::Db, target: &FireTarget, agent_id: &str) -> String {
     match target.kind {
         gateway_kinds::DISCORD => {
@@ -60,10 +52,6 @@ fn channel_label(db: &opencrab_db::Db, target: &FireTarget, agent_id: &str) -> S
                 .unwrap_or_else(|| target.channel_id.clone())
         }
         gateway_kinds::NOSTR => HEARTBEAT_NOSTR_CHANNEL_LABEL.to_string(),
-        // web は会話ゲート（PR-1B）。web feature を外した構成ではこの kind は発火先に
-        // ならないので明示分岐も落とし、中立ラベルへ倒れる（web を名乗る誤表示を避ける）。
-        #[cfg(feature = "web")]
-        opencrab_web_gateway::WEB_TIMED_FIRE_KIND => HEARTBEAT_WEB_CHANNEL_LABEL.to_string(),
         _ => HEARTBEAT_NEUTRAL_CHANNEL_LABEL.to_string(),
     }
 }

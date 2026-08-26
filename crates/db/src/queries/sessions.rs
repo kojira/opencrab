@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::Utc;
-use rusqlite::{params, Connection, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 
 #[allow(unused_imports)]
@@ -162,6 +162,150 @@ pub fn get_session(conn: &Connection, session_id: &str) -> Result<Option<Session
     }
 }
 
+/// 開いている web binding があれば physical session ID（`extgate-{binding_id}`）。
+/// 同一 address に open が 2 件以上なら失敗する。
+pub fn open_web_physical_session(conn: &Connection, logical: &str) -> Result<Option<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT 'extgate-' || b.binding_id
+         FROM gate_bindings b
+         JOIN gate_instances i ON i.instance_id = b.instance_id
+         WHERE b.address = ?1 AND b.closed_at IS NULL
+           AND i.deleted_at IS NULL AND i.kind_id = 'web'",
+    )?;
+    let ids: Vec<String> = stmt
+        .query_map([logical], |r| r.get(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    match ids.as_slice() {
+        [] => Ok(None),
+        [id] => Ok(Some(id.clone())),
+        _ => anyhow::bail!("multiple open web bindings for {logical}"),
+    }
+}
+
+/// logical ID のまま、会話状態は physical、表示属性は alias。binding の有無を返す。
+pub fn project_session_row(conn: &Connection, logical: &str) -> Result<Option<(SessionRow, bool)>> {
+    let Some(alias) = get_session(conn, logical)? else {
+        return Ok(None);
+    };
+    let Some(physical) = open_web_physical_session(conn, logical)? else {
+        return Ok(Some((alias, false)));
+    };
+    let Some(phys) = get_session(conn, &physical)? else {
+        anyhow::bail!("open web binding for {logical} has no physical session {physical}");
+    };
+    Ok(Some((
+        SessionRow {
+            id: alias.id,
+            mode: phys.mode,
+            theme: alias.theme,
+            phase: phys.phase,
+            turn_number: phys.turn_number,
+            status: phys.status,
+            participant_ids_json: phys.participant_ids_json,
+            facilitator_id: phys.facilitator_id,
+            done_count: phys.done_count,
+            max_turns: phys.max_turns,
+            metadata_json: alias.metadata_json,
+        },
+        true,
+    )))
+}
+
+pub struct SessionListItem {
+    pub session: SessionRow,
+    pub created_at: String,
+    pub gateway_bound: bool,
+}
+
+/// physical `extgate-*` の重複を除き、logical を 1 件返す。`created_at DESC, id DESC`。
+/// `before_id` は直前ページ最後の session id（その行の created_at で続きを切る）。
+pub fn list_sessions_page(
+    conn: &Connection,
+    limit: u32,
+    before_id: Option<&str>,
+) -> Result<Vec<SessionListItem>> {
+    let cursor: Option<(String, String)> = match before_id {
+        None => None,
+        Some(id) => {
+            let ts: Option<String> = conn
+                .query_row(
+                    "SELECT created_at FROM sessions WHERE id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(ts) = ts else {
+                anyhow::bail!("unknown session cursor {id}");
+            };
+            Some((ts, id.to_string()))
+        }
+    };
+    let sql = if cursor.is_some() {
+        "SELECT s.id, s.mode, s.theme, s.phase, s.turn_number, s.status, s.participant_ids_json,
+                s.facilitator_id, s.done_count, s.max_turns, s.metadata_json, s.created_at
+         FROM sessions s
+         WHERE NOT EXISTS (
+             SELECT 1 FROM gate_bindings b
+             JOIN gate_instances i ON i.instance_id = b.instance_id
+             WHERE b.closed_at IS NULL AND i.deleted_at IS NULL AND i.kind_id = 'web'
+               AND s.id = ('extgate-' || b.binding_id)
+         )
+         AND (s.created_at < ?1 OR (s.created_at = ?1 AND s.id < ?2))
+         ORDER BY s.created_at DESC, s.id DESC
+         LIMIT ?3"
+    } else {
+        "SELECT s.id, s.mode, s.theme, s.phase, s.turn_number, s.status, s.participant_ids_json,
+                s.facilitator_id, s.done_count, s.max_turns, s.metadata_json, s.created_at
+         FROM sessions s
+         WHERE NOT EXISTS (
+             SELECT 1 FROM gate_bindings b
+             JOIN gate_instances i ON i.instance_id = b.instance_id
+             WHERE b.closed_at IS NULL AND i.deleted_at IS NULL AND i.kind_id = 'web'
+               AND s.id = ('extgate-' || b.binding_id)
+         )
+         ORDER BY s.created_at DESC, s.id DESC
+         LIMIT ?1"
+    };
+    let mut stmt = conn.prepare(sql)?;
+    let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(SessionRow, String)> {
+        Ok((
+            SessionRow {
+                id: row.get(0)?,
+                mode: row.get(1)?,
+                theme: row.get(2)?,
+                phase: row.get(3)?,
+                turn_number: row.get(4)?,
+                status: row.get(5)?,
+                participant_ids_json: row.get(6)?,
+                facilitator_id: row.get(7)?,
+                done_count: row.get(8)?,
+                max_turns: row.get(9)?,
+                metadata_json: row.get(10)?,
+            },
+            row.get(11)?,
+        ))
+    };
+    let rows: Vec<(SessionRow, String)> = if let Some((ts, id)) = cursor {
+        stmt.query_map(params![ts, id, limit], map_row)?
+            .collect::<std::result::Result<_, _>>()?
+    } else {
+        stmt.query_map(params![limit], map_row)?
+            .collect::<std::result::Result<_, _>>()?
+    };
+    let mut out = Vec::with_capacity(rows.len());
+    for (row, created_at) in rows {
+        let Some((session, gateway_bound)) = project_session_row(conn, &row.id)? else {
+            anyhow::bail!("listed session {} has no row", row.id);
+        };
+        out.push(SessionListItem {
+            session,
+            created_at,
+            gateway_bound,
+        });
+    }
+    Ok(out)
+}
+
 pub fn list_sessions(conn: &Connection) -> Result<Vec<SessionRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, mode, theme, phase, turn_number, status, participant_ids_json, facilitator_id, done_count, max_turns, metadata_json
@@ -279,5 +423,107 @@ mod policy_json_tests {
             Some("{}")
         );
         assert_eq!(get_session_policy_json(&conn, "missing").unwrap(), None);
+    }
+}
+
+#[cfg(test)]
+mod webgate_read_tests {
+    use super::*;
+    use crate::webgate_transplant::session_id_for_binding;
+
+    fn agent(conn: &Connection, id: &str) {
+        crate::queries::upsert_agent(
+            conn,
+            &crate::queries::AgentRow {
+                agent_id: id.into(),
+                name: id.into(),
+                job_title: None,
+                organization: None,
+                image_url: None,
+                persona_name: "p".into(),
+                personality: None,
+                instructions: String::new(),
+                heartbeat_instructions: String::new(),
+                model: None,
+                reasoning_effort: None,
+                web_search: None,
+                metadata_json: None,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn list_sessions_page_hides_physical_and_projects_logical() {
+        let conn = crate::init_memory().unwrap();
+        agent(&conn, "a1");
+        let logical = "web-a1-c1";
+        insert_session(
+            &conn,
+            &SessionRow {
+                id: logical.into(),
+                mode: "web".into(),
+                theme: "legacy-theme".into(),
+                phase: "divergent".into(),
+                turn_number: 1,
+                status: "active".into(),
+                participant_ids_json: r#"["a1"]"#.into(),
+                facilitator_id: None,
+                done_count: 0,
+                max_turns: None,
+                metadata_json: Some(r#"{"keep":true}"#.into()),
+            },
+        )
+        .unwrap();
+        let binding = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        let physical = session_id_for_binding(binding);
+        let subject: i64 = conn
+            .query_row(
+                "SELECT subject_id FROM agents WHERE agent_id = 'a1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let instance = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        conn.execute(
+            "INSERT INTO gate_instances
+             (instance_id, kind_id, subject_id, revision, enabled, config_b64, config_digest, created_at, updated_at)
+             VALUES (?1, 'web', ?2, 1, 1, 'e30=', '0000000000000000000000000000000000000000000000000000000000000000', 1, 1)",
+            rusqlite::params![instance, subject],
+        )
+        .unwrap();
+        insert_session(
+            &conn,
+            &SessionRow {
+                id: physical.clone(),
+                mode: "extgate".into(),
+                theme: logical.into(),
+                phase: "convergent".into(),
+                turn_number: 9,
+                status: "active".into(),
+                participant_ids_json: r#"["a1"]"#.into(),
+                facilitator_id: None,
+                done_count: 2,
+                max_turns: None,
+                metadata_json: None,
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO gate_bindings (binding_id, instance_id, address, created_at)
+             VALUES (?1, ?2, ?3, 1)",
+            rusqlite::params![binding, instance, logical],
+        )
+        .unwrap();
+        let page = list_sessions_page(&conn, 100, None).unwrap();
+        let ids: Vec<&str> = page.iter().map(|i| i.session.id.as_str()).collect();
+        assert!(ids.contains(&logical));
+        assert!(!ids.contains(&physical.as_str()));
+        let row = page.iter().find(|i| i.session.id == logical).unwrap();
+        assert!(row.gateway_bound);
+        assert_eq!(row.session.theme, "legacy-theme");
+        assert_eq!(row.session.turn_number, 9);
+        assert_eq!(row.session.phase, "convergent");
+        assert_eq!(row.session.done_count, 2);
     }
 }

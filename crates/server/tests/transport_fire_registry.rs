@@ -29,7 +29,7 @@ fn registry() -> TimedFireRouter {
 // #654: 登録簿は feature 依存の descriptor（DiscordFire / NostrFire / WebFire・#651）だけで満ちる。
 // 全 feature off では登録簿が空で「1 つ以上を round-trip」が成立しない。少なくとも 1 つの transport
 // が入るときだけ意味を持つので、いずれかの feature がある構成に囲む（残る 2 test は空でも恒真）。
-#[cfg(any(feature = "discord", feature = "nostr", feature = "web"))]
+#[cfg(any(feature = "discord", feature = "nostr"))]
 #[test]
 fn every_descriptor_round_trips_through_the_registry() {
     let router = registry();

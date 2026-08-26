@@ -1,6 +1,6 @@
 //! web / Nostr の呼び出し元の権限判定（1 実装）。
 //!
-//! web ゲートウェイ（[`crate::web_runner_impl`]）は、Discord 設定の owner と突き合わせ、
+//! 旧 web 会話経路は Discord 設定の owner と突き合わせ、
 //! 一致しなければ信頼済みユーザーの表を `(経路, 識別子, エージェント)` で引く。
 //! 2 箇所に写経されていると片方だけ緩められる余地が残るので、ここに閉じる。判定本体は
 //! Nostr（#319）と共有する [`resolve_caller_identity_with_owner`] の**1 実装**で、
@@ -182,7 +182,7 @@ mod tests {
     // subscriber を作った瞬間にグローバルの最大レベルが WARN へ上がり（それまでは
     // OFF で誰も callsite へ到達しない）、**その直後から**、同じ callsite を踏む
     // 並行テスト（`legacy_discord_row_no_longer_grants_trust` /
-    // `no_warning_without_a_legacy_row` / `web_runner_impl` 側）が捕捉側より先に
+    // `no_warning_without_a_legacy_row` 側）が捕捉側より先に
     // 登録してしまう競合が開く。実測で 200 回中 16〜19 回、捕捉バッファが空になった。
     //
     // なのでプロセス全体で subscriber を 1 個だけ張る。以後どのスレッドが先に踏んでも

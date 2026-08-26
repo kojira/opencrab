@@ -2,6 +2,14 @@
 
 ドメイン別の行型と SQL。`mod.rs` から再輸出する。
 
+## sessions（webgate read 投影）
+
+| 関数 | 契約 |
+|---|---|
+| `open_web_physical_session` | 開いている web binding の physical ID。同一 address に 2 件なら失敗 |
+| `project_session_row` | logical ID 維持。表示属性は alias、会話状態は physical |
+| `list_sessions_page` | physical 行を除き logical 1 件。`limit` と `before`（直前ページ最後の id） |
+
 ## tool_logs（載せ替え工程 5-b）
 
 ツール 1 実行 = 1 行。書くのは core（`BridgedExecutor`）。ゲートは書かない。

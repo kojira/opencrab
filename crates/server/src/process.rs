@@ -714,7 +714,7 @@ fn format_steer_inbound(message: &str) -> String {
 /// 変動コンテキストを最後のuserメッセージに前置するヘルパー（実体は
 /// [`opencrab_core::runtime_context`] / #190 S2）。
 ///
-/// 純関数なので下位層へ移した。ゲートウェイ側のクレート（`opencrab-web-gateway` 等）が
+/// 純関数なので下位層へ移した。transport 側のクレートが
 /// `crates/server` を参照せずに使えるようにするため。既存の呼び出し元
 /// （`process::prepend_runtime_context(..)`）を変えずに済むよう再エクスポートを残す。
 pub use opencrab_core::runtime_context::prepend_runtime_context;
@@ -1181,8 +1181,8 @@ fn spawn_background_index_build(state: &AppState, agent_id: &str, effective_mode
 /// 実行対象の agent 行が `agents` に存在しないときのエラー（#632）。
 ///
 /// `run_agent_response` は**サーバ側の全ターン実行が通る唯一のチョークポイント**
-/// （`sessions::send_message`、scheduler / intake / sleep /
-/// subtask、そして web も production では `AppState::run_agent_response` 経由でここを通る）。
+/// （scheduler / intake / sleep / subtask、
+/// そして production では `AppState::run_agent_response` 経由でここを通る）。
 /// エージェント別テーブルには FK 制約が無く、存在しない agent_id でも per-agent 設定が
 /// 既定に落ちたまま「動いてしまう」。ここで 1 度だけ弾けば、入口ごとにチェックを
 /// 手でコピーする必要がなくなり、将来の入口も自動的に閉じる。
