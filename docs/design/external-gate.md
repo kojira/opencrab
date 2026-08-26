@@ -36,7 +36,7 @@
 
 ### 3.1 transport と frame
 
-- core は設定キー `gate.listen_socket` の Unix domain socket path を 1 本だけ listen する。このキーは V3 で新設する。空、欠落、相対 path、既存の非 socket path は起動失敗にする。
+- core は設定キー `gate.listen_socket` の Unix domain socket path を 1 本だけ listen する。このキーは V3 で新設する。**空・欠落は「listen しない」**（gateway 未使用でも core は起動する。startup recover は実行する）。非空のときだけ検証し、相対 path・既存の非 socket path は起動失敗にする。
 - socket file mode は `0660`。所有 user/group は配備設定で固定し、world-write は付けない。
 - frame は UTF-8 JSON object 1 個と LF 1 byte。LF を含め 1,048,576 byte 以下。
 - LF 到着前に上限を超えた入力は `too_large` として接続を close する。残りを読み捨てて同期回復しない。
@@ -203,7 +203,7 @@ Binding DELETE は row を close し、live registry の acknowledged/pending se
 
 ### 5.6 agent GET の subject_id
 
-既存 `GET /api/agents/{id}` の成功 JSON に positive i64 `subject_id` を追加する。この endpoint に extgate Bearer と extgate error envelopeを広げない。agent 行または subject 写像が 0 件なら 404、subject 候補が複数なら 409、exact 1 件だけ成功。最初の 1 件を暗黙採用しない。
+既存 `GET /api/agents/{id}` の成功 JSON に positive i64 `subject_id` を追加する。この endpoint に extgate Bearer と extgate error envelopeを広げない。`UNIQUE(subject_id)` を不変条件とし、agent 行または subject 写像が 0 件なら 404、exact 1 件なら 200 とする。
 
 ## 6. 永続モデル
 
@@ -450,7 +450,7 @@ conformance suite は少なくとも次を自動検証する。
 - live 中の Binding PUT/DELETE は成功し、DELETE 後の said と新規 delivery は止まる。
 - 6 operation 以外の旧 extgate admin path が router に存在しない。
 - Instance/Binding PUT の同値 200、非同値 conflict、open address unique、closed ID 非復活。
-- `GET /api/agents/{id}` の subject exact 0/1/複数が 404/200/409。成功 JSON に positive i64 が入る。
+- `GET /api/agents/{id}` の subject exact 0/1 が 404/200。成功 JSON に positive i64 が入る。
 
 ### 9.3 Bearer
 
@@ -511,7 +511,7 @@ conformance suite は少なくとも次を自動検証する。
 | prepared/sending と配送試行回数、期限、監査行 | reply と sending を同一 TX。say 1 回。成功/確定拒否/切断不明だけを残す。 |
 | gateway failure code の自由文字列 | bind は `bind_failed`、say は `external_rejected`。detail は nullable だが code を増やさない。 |
 | 添付の author 補助情報 | `Attachment={kind:"image",url:https}` だけ。core が `with_image_urls` へ渡す。 |
-| subject 解決口の約束 | 既存 agent GET に subject_id を追加し、0/複数を 404/409 にする。 |
+| subject 解決口の約束 | 既存 agent GET に subject_id を追加し、0 件を 404、1 件を 200 にする。`UNIQUE(subject_id)` により複数は到達不能。 |
 | hello/ready/failed の `connection_epoch` | wire から削除。応答照合は同一 socket の pending だけで行い、epoch は存在しない。G1 の epoch 送出を削除する。 |
 | catch-up wire（`catch_up` / `source_checkpoint` と CAS・single-flight） | wire・admin とも削除。過去分の再取得は行わない（gateway 内部のリプレイ機構は本契約の関知外）。 |
 | 旧会話 HTTP との並走案 | 旧会話 HTTP は再導入しない。external UDS E2E を完成条件にする。 |
