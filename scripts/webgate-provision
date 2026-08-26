@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""operator 敷設: agent GET → subject_id、Discord owner、instance/binding PUT。
+
+Bearer は OPENCRAB_GATE_OPERATOR_TOKEN のみ。gateway / browser へは渡さない。
+config bytes は byte-exact {"author_id":<json-string>}（空白・改行なし）。
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+import uuid
+
+DNS_NS = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+
+
+def die(msg: str) -> None:
+    print(msg, file=sys.stderr)
+    raise SystemExit(1)
+
+
+def request(method: str, url: str, token: str | None, body: bytes | None = None) -> tuple[int, object]:
+    headers = {"Accept": "application/json"}
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=body, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req) as resp:
+            raw = resp.read()
+            return resp.status, json.loads(raw.decode("utf-8")) if raw else None
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try:
+            parsed = json.loads(raw.decode("utf-8"))
+        except json.JSONDecodeError:
+            parsed = raw.decode("utf-8", "replace")
+        die(f"{method} {url} -> {e.code} {parsed}")
+
+
+def config_bytes(author_id: str) -> bytes:
+    return json.dumps({"author_id": author_id}, separators=(",", ":"), ensure_ascii=False).encode(
+        "utf-8"
+    )
+
+
+def instance_id_for(agent_id: str) -> str:
+    return str(uuid.uuid5(DNS_NS, f"opencrab:web:instance:{agent_id}"))
+
+
+def binding_id_for(logical: str) -> str:
+    return str(uuid.uuid5(DNS_NS, f"opencrab:web:binding:{logical}"))
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(description="Web gateway V3 instance/binding 敷設")
+    p.add_argument("--core", required=True, help="core HTTP origin, e.g. http://127.0.0.1:18789")
+    p.add_argument("--agent-id", required=True)
+    p.add_argument("--socket", required=True, help="absolute UDS path for gateway hello")
+    p.add_argument("--http-bind", default="127.0.0.1:8787")
+    p.add_argument("--placement", required=True, help="placement JSON path written for web-gateway")
+    p.add_argument(
+        "--session",
+        action="append",
+        default=[],
+        help="legacy logical session (web-{{agent}}-…). repeatable. omit to scan GET /api/sessions",
+    )
+    args = p.parse_args()
+    token = os.environ.get("OPENCRAB_GATE_OPERATOR_TOKEN")
+    if not token:
+        die("OPENCRAB_GATE_OPERATOR_TOKEN is empty or unset")
+
+    core = args.core.rstrip("/")
+    status, agent = request("GET", f"{core}/api/agents/{args.agent_id}", None)
+    if status != 200 or agent is None:
+        die(f"agent GET: expected 200 object, got {status} {agent}")
+    subject_id = agent.get("subject_id")
+    if not isinstance(subject_id, int) or subject_id <= 0:
+        die(f"subject_id missing or not positive i64: {subject_id}")
+
+    _, discord = request("GET", f"{core}/api/agents/{args.agent_id}/discord", None)
+    if not isinstance(discord, dict) or not discord.get("configured"):
+        die("discord config missing; owner ID cannot be resolved")
+    owner = discord.get("owner_discord_id")
+    if not isinstance(owner, str) or owner == "":
+        die("owner_discord_id is empty")
+
+    cfg = config_bytes(owner)
+    digest = hashlib.sha256(cfg).hexdigest()
+    inst = instance_id_for(args.agent_id)
+    put_body = json.dumps(
+        {
+            "kind_id": "web",
+            "subject_id": subject_id,
+            "enabled": True,
+            "config_b64": base64.standard_b64encode(cfg).decode("ascii"),
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    status, _ = request("PUT", f"{core}/api/gate-instances/{inst}", token, put_body)
+    if status not in (200, 201):
+        die(f"instance PUT -> {status}")
+
+    sessions = list(args.session)
+    if not sessions:
+        _, listed = request("GET", f"{core}/api/sessions", None)
+        if not isinstance(listed, list):
+            die("GET /api/sessions must return an array before pagination is used")
+        prefix = f"web-{args.agent_id}-"
+        sessions = [
+            row["id"]
+            for row in listed
+            if isinstance(row, dict) and isinstance(row.get("id"), str) and row["id"].startswith(prefix) and row["id"] != prefix
+        ]
+
+    for logical in sessions:
+        prefix = f"web-{args.agent_id}-"
+        if not logical.startswith(prefix) or logical == prefix:
+            die(f"session {logical} is not {prefix}*")
+        bid = binding_id_for(logical)
+        body = json.dumps(
+            {"instance_id": inst, "address": logical},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        status, _ = request("PUT", f"{core}/api/gate-bindings/{bid}", token, body)
+        if status not in (200, 201):
+            die(f"binding PUT {logical} -> {status}")
+
+    placement = {
+        "http_bind": args.http_bind,
+        "core_socket": args.socket,
+        "instances": [
+            {
+                "instance_id": inst,
+                "revision": 1,
+                "author_id": owner,
+            }
+        ],
+    }
+    with open(args.placement, "w", encoding="utf-8") as f:
+        json.dump(placement, f, separators=(",", ":"))
+        f.write("\n")
+    print(f"instance_id={inst}")
+    print(f"config_digest={digest}")
+    print(f"bindings={len(sessions)}")
+    print(f"placement={args.placement}")
+
+
+if __name__ == "__main__":
+    main()
