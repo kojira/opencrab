@@ -43,6 +43,7 @@ opencrab-llm-types = { workspace = true }
 opencrab-gateway = { workspace = true }
 opencrab-actions = { workspace = true }
 opencrab-db = { workspace = true }
+opencrab-extgate = { workspace = true }
 opencrab-nostr = { workspace = true, optional = true }
 opencrab-web-gateway = { workspace = true, optional = true }
 opencrab-mcp = { workspace = true }

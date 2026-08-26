@@ -158,6 +158,9 @@ port = 3000
 [database]
 path = "data/opencrab.db"
 
+[gate]
+listen_socket = "/tmp/opencrab-extgate.sock"
+
 # ===== ツール設定 =====
 [tools]
 enabled = true

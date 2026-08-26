@@ -1,5 +1,7 @@
 use axum::{
     extract::{Path, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -95,10 +97,47 @@ pub async fn create_agent(
 pub async fn get_agent(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Json<serde_json::Value> {
-    let conn = state.db.lock().unwrap();
-    let agent = opencrab_db::queries::get_agent(&conn, &id).unwrap();
-    Json(serde_json::to_value(agent).unwrap())
+) -> Response {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let agent = match opencrab_db::queries::get_agent(&conn, &id) {
+        Ok(Some(a)) => a,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let subject_id: Option<i64> = match conn.query_row(
+        "SELECT subject_id FROM agents WHERE agent_id = ?1",
+        [&id],
+        |r| r.get(0),
+    ) {
+        Ok(v) => v,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let Some(subject_id) = subject_id.filter(|v| *v > 0) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let count: i64 = match conn.query_row(
+        "SELECT COUNT(*) FROM agents WHERE subject_id = ?1",
+        [subject_id],
+        |r| r.get(0),
+    ) {
+        Ok(n) => n,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    match count {
+        0 => StatusCode::NOT_FOUND.into_response(),
+        1 => {
+            let mut value = serde_json::to_value(agent).unwrap();
+            value["subject_id"] = serde_json::json!(subject_id);
+            Json(value).into_response()
+        }
+        _ => StatusCode::CONFLICT.into_response(),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -802,5 +841,155 @@ pub async fn merge_memory_index_topics(
             "ok": false,
             "error": e.to_string(),
         })),
+    }
+}
+
+#[cfg(test)]
+mod extgate_v3_tests {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    use crate::{create_router, production_route_inventory, test_app_state};
+
+    #[tokio::test]
+    async fn get_agent_subject_zero_one_and_many() {
+        let state = test_app_state();
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::upsert_agent(
+                &conn,
+                &opencrab_db::queries::AgentRow {
+                    agent_id: "agent-one".into(),
+                    name: "One".into(),
+                    job_title: None,
+                    organization: None,
+                    image_url: None,
+                    persona_name: "p".into(),
+                    personality: None,
+                    instructions: String::new(),
+                    heartbeat_instructions: String::new(),
+                    model: None,
+                    reasoning_effort: None,
+                    web_search: None,
+                    metadata_json: None,
+                },
+            )
+            .unwrap();
+        }
+        let app = create_router(state.clone());
+        let missing = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/agents/no-such")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        let ok = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/agents/agent-one")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+        let body = ok.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let sid = v["subject_id"].as_i64().expect("subject_id");
+        assert!(sid > 0);
+
+        {
+            let conn = state.db.lock().unwrap();
+            // UNIQUE を落とすと gate_instances.subject_id の FK が親列要件を満たさない。
+            // 409 経路の再現だけなので、この接続で FK を切ってから重複 subject_id を作る。
+            conn.pragma_update(None, "foreign_keys", false).unwrap();
+            conn.execute("DROP INDEX IF EXISTS idx_agents_subject_id", [])
+                .unwrap();
+            opencrab_db::queries::upsert_agent(
+                &conn,
+                &opencrab_db::queries::AgentRow {
+                    agent_id: "agent-two".into(),
+                    name: "Two".into(),
+                    job_title: None,
+                    organization: None,
+                    image_url: None,
+                    persona_name: "p".into(),
+                    personality: None,
+                    instructions: String::new(),
+                    heartbeat_instructions: String::new(),
+                    model: None,
+                    reasoning_effort: None,
+                    web_search: None,
+                    metadata_json: None,
+                },
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE agents SET subject_id = ?1 WHERE agent_id = 'agent-two'",
+                [sid],
+            )
+            .unwrap();
+        }
+        let conflict = create_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/agents/agent-one")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn gate_admin_paths_are_exactly_six() {
+        let routes = production_route_inventory();
+        let gate: Vec<_> = routes
+            .iter()
+            .filter(|r| r.path.starts_with("/api/gate"))
+            .collect();
+        let paths: Vec<&str> = gate.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "/api/gate-bindings/{binding_id}",
+                "/api/gate-instances/{instance_id}",
+                "/api/gate-instances/{instance_id}/revisions",
+            ]
+        );
+        let methods: Vec<Vec<String>> = gate.iter().map(|r| r.methods.clone()).collect();
+        assert_eq!(
+            methods,
+            vec![
+                vec!["DELETE".to_string(), "PUT".to_string()],
+                vec!["DELETE".to_string(), "GET".to_string(), "PUT".to_string()],
+                vec!["POST".to_string()],
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn health_does_not_require_gate_bearer() {
+        let app = create_router(test_app_state());
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
     }
 }

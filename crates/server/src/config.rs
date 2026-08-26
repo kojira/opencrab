@@ -55,6 +55,15 @@ pub struct AppConfig {
     /// 外部イベント受信（webhook intake / issue #454）。既定は実質無効。
     #[serde(default)]
     pub intake: IntakeConfig,
+    /// External gate V3 UDS listen path。空・欠落は起動失敗。
+    #[serde(default)]
+    pub gate: GateConfig,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct GateConfig {
+    #[serde(default)]
+    pub listen_socket: String,
 }
 
 /// 古い `llm_logs` を zip へ書き出して DB から外す設定（#337）。

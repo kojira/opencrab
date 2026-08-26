@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use tracing_subscriber::EnvFilter;
 
 use opencrab_core::heartbeat::HeartbeatConfig;
-use opencrab_server::{config, create_router, AppState};
+use opencrab_server::{config, create_router_with_gate, AppState};
 use tokio::sync::watch;
 
 mod intake_process;
@@ -89,6 +89,19 @@ async fn main() -> anyhow::Result<()> {
 
     // DB初期化（本番はコネクションプール）
     let db = opencrab_db::Db::open(&cfg.database.path)?;
+    {
+        let mut conn = db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("db lock for extgate recover"))?;
+        opencrab_extgate::recover_stale_deliveries(&mut conn, opencrab_extgate::now_nanos())
+            .map_err(|e| anyhow::anyhow!("extgate recover failed: {}", e.code.as_str()))?;
+    }
+    let gate_token = opencrab_extgate::OperatorToken::take_from_env();
+    let gate_socket = opencrab_extgate::validate_listen_socket(&cfg.gate.listen_socket)?;
+    let extgate = Arc::new(opencrab_extgate::ExtgateState::new(
+        db.clone(),
+        gate_token,
+    ));
 
     // #620: マスターキーの要否は「Nostr が設定されているエージェントが 1 つ以上あるか」で
     // 決める（既存データから判定・新設定は足さない）。**プロセス全体は止めない**（Nostr を
@@ -784,7 +797,26 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    let app = create_router(state);
+    {
+        let listen_state = extgate.clone();
+        let runtime = state.clone();
+        let path = gate_socket;
+        tokio::spawn(async move {
+            if let Err(e) = opencrab_extgate::serve_uds(
+                listen_state,
+                runtime,
+                opencrab_server::caller_identity::resolve_caller_identity_with_owner,
+                path,
+            )
+            .await
+            {
+                tracing::error!(error = %e, "extgate listener halted");
+                std::process::exit(1);
+            }
+        });
+    }
+
+    let app = create_router_with_gate(state, extgate);
 
     let addr = format!("0.0.0.0:{}", cfg.gateway.rest.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;

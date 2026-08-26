@@ -215,6 +215,10 @@ port = 3000
 [database]
 path = "data/opencrab.db"
 
+[gate]
+# External gate V3 の Unix domain socket。空・相対 path は起動失敗。
+listen_socket = "/tmp/opencrab-extgate.sock"
+
 # 古い LLM ログの zip アーカイブ（#337）
 #
 # llm_logs は 1 行にプロンプト全文＋応答を丸ごと保存するため肥大しやすく（実測で DB の
