@@ -139,3 +139,73 @@ fn ui_call_sites_have_no_unknown_conversation_post() {
     );
     assert!(new_post >= 1, "UI send call-site for new POST is missing");
 }
+
+#[test]
+fn ui_has_exactly_one_create_web_conversation_client() {
+    let web_src = crate_root().join("../../web/src");
+    let mut files = Vec::new();
+    walk_ext(&web_src, "ts", &mut files);
+    walk_ext(&web_src, "tsx", &mut files);
+    let mut defs = Vec::new();
+    for path in &files {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.contains(".test.") {
+            continue;
+        }
+        let text = fs::read_to_string(path).unwrap();
+        if text.contains("export async function createWebConversation") {
+            defs.push(path.display().to_string());
+        }
+    }
+    assert_eq!(
+        defs,
+        vec![web_src.join("api/sessions.ts").display().to_string()],
+        "create client must be exactly one production function"
+    );
+}
+
+#[test]
+fn operator_bearer_is_absent_from_gateway_and_browser() {
+    let mut files = Vec::new();
+    walk_ext(&crate_root().join("../../web/src"), "ts", &mut files);
+    walk_ext(&crate_root().join("../../web/src"), "tsx", &mut files);
+    walk_rs(&crate_root().join("../web-gateway/src"), &mut files);
+    let mut hits = Vec::new();
+    for path in &files {
+        let text = fs::read_to_string(path).unwrap();
+        if text.contains("OPENCRAB_GATE_OPERATOR_TOKEN")
+            || text.contains("Authorization: Bearer")
+        {
+            hits.push(path.display().to_string());
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "operator Bearer leaked into gateway/browser:\n{}",
+        hits.join("\n")
+    );
+}
+
+#[test]
+fn withdrawn_posts_do_not_create_bindings() {
+    let sessions = fs::read_to_string(crate_root().join("src/api/sessions.rs")).unwrap();
+    assert!(
+        !sessions.contains("create_gate_binding_in_tx"),
+        "POST /api/sessions must not create a gate binding"
+    );
+    let mut gw = Vec::new();
+    walk_rs(&crate_root().join("../web-gateway/src"), &mut gw);
+    let mut hits = Vec::new();
+    for path in &gw {
+        let text = fs::read_to_string(path).unwrap();
+        if text.contains("create_gate_binding_in_tx") || text.contains("INSERT INTO gate_bindings")
+        {
+            hits.push(path.display().to_string());
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "gateway message POST must not create bindings:\n{}",
+        hits.join("\n")
+    );
+}
