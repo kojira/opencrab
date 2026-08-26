@@ -7,12 +7,12 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use opencrab_web_gateway::v3::client::InstanceClient;
-use opencrab_web_gateway::v3::http::{router, HttpState};
+use opencrab_web_gateway::v3::http::{HttpState, router};
 use opencrab_web_gateway::v3::wire::{
-    config_digest, hello_frame, ok_frame, parse_frame_bytes, read_frame, write_json, CoreMsg,
-    FrameError, MAX_FRAME,
+    CoreMsg, FrameError, MAX_FRAME, config_digest, hello_frame, ok_frame, parse_frame_bytes,
+    read_frame, write_json,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixListener;
 use tokio::sync::mpsc;
@@ -322,7 +322,8 @@ async fn conformance_frame_too_large_and_duplicate_close() {
     let hello_id = match hello {
         CoreMsg::Reverse { id, m } if m == "hello" => id.expect("id"),
         _ => {
-            let v: Value = serde_json::from_slice(hello_bytes.strip_suffix(b"\n").unwrap()).unwrap();
+            let v: Value =
+                serde_json::from_slice(hello_bytes.strip_suffix(b"\n").unwrap()).unwrap();
             v["id"].as_str().unwrap().to_string()
         }
     };
@@ -432,10 +433,7 @@ async fn conformance_http_post_202_not_admitted_busy_and_old_routes_404() {
     let vb: Value = serde_json::from_slice(&busy_body).unwrap();
     assert_eq!(vb["error"]["code"], "conversation_busy");
 
-    for uri in [
-        "/rooms/x/messages",
-        "/chat",
-    ] {
+    for uri in ["/rooms/x/messages", "/chat"] {
         let get = app
             .clone()
             .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
@@ -505,11 +503,38 @@ async fn conformance_disconnect_and_unacked_503() {
         .await
         .unwrap();
     assert!(
-        res.status() == StatusCode::SERVICE_UNAVAILABLE
-            || res.status() == StatusCode::BAD_GATEWAY,
+        res.status() == StatusCode::SERVICE_UNAVAILABLE || res.status() == StatusCode::BAD_GATEWAY,
         "{}",
         res.status()
     );
+}
+
+#[tokio::test]
+async fn bind_same_address_different_binding_closes() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("core.sock");
+    let mut mock = MockCore::spawn(sock.clone());
+    let connect = tokio::spawn(async move { connect_client(&sock).await });
+    hello_and_bind(&mut mock).await;
+    let client = connect.await.unwrap();
+    wait_bound(&client).await;
+    mock.send(&json!({
+        "id": "bind:other",
+        "m": "bind",
+        "binding_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "address": ADDRESS,
+    }))
+    .await;
+    let ev = tokio::time::timeout(Duration::from_secs(2), client.next_live(ADDRESS))
+        .await
+        .expect("live")
+        .expect("event");
+    match ev {
+        opencrab_web_gateway::v3::client::LiveEvent::Error { code, .. } => {
+            assert_eq!(code, "binding_conflict");
+        }
+        other => panic!("{other:?}"),
+    }
 }
 
 #[test]

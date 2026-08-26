@@ -1,35 +1,51 @@
 //! 1 instance = 1 UDS connection。hello / bind ack / said / say / activity だけ。
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
-use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::UnixStream;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::net::unix::OwnedWriteHalf;
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 use super::wire::{
-    err_frame, hello_frame, ok_frame, parse_frame_bytes, read_frame, said_frame, say_text,
-    write_json, Activity, Attachment, Bind, CoreMsg, FrameError, Say, WireResponse,
+    Activity, Attachment, Bind, CoreMsg, FrameError, Say, WireResponse, err_frame, hello_frame,
+    ok_frame, parse_frame_bytes, read_frame, said_frame, say_text, write_json,
 };
 
 const LIVE_QUEUE_CAP: usize = 32;
+/// said 応答の上限。V3 の hello 10s と同じクラス（said ack は LLM を待たない）。
+const SAID_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LiveEvent {
-    Message { text: String },
-    Activity { activity_id: String, state: String },
+    Message {
+        text: String,
+    },
+    Activity {
+        activity_id: String,
+        state: String,
+    },
     CompletedNoReply,
-    Error { code: String, detail: Option<String> },
+    Error {
+        code: String,
+        detail: Option<String>,
+    },
 }
 
 #[derive(Debug)]
 pub enum SaidOutcome {
-    Accepted { seq: i64 },
+    Accepted {
+        seq: i64,
+    },
     NotAdmitted,
-    WireErr { code: String, detail: Option<String> },
+    WireErr {
+        code: String,
+        detail: Option<String>,
+    },
     Disconnected,
 }
 
@@ -110,7 +126,9 @@ impl InstanceClient {
         author_id: String,
         config_digest: String,
     ) -> Result<Arc<Self>, FrameError> {
-        let stream = UnixStream::connect(socket).await.map_err(|_| FrameError::Io)?;
+        let stream = UnixStream::connect(socket)
+            .await
+            .map_err(|_| FrameError::Io)?;
         let (reader, writer) = stream.into_split();
         let (write_tx, write_rx) = mpsc::unbounded_channel();
         let client = Arc::new(Self {
@@ -213,31 +231,23 @@ impl InstanceClient {
                 },
             );
         }
-        let frame = said_frame(
-            &id,
-            &binding_id,
-            origin,
-            &self.author_id,
-            text,
-            attachments,
-        );
+        let frame = said_frame(&id, &binding_id, origin, &self.author_id, text, attachments);
         if self.write_tx.send(frame).is_err() {
             let mut inner = self.inner.lock().await;
             inner.pending_turn.remove(&binding_id);
             inner.pending_said.remove(&id);
             return Ok(SaidOutcome::Disconnected);
         }
-        match rx.await {
-            Ok(outcome) => {
+        match tokio::time::timeout(SAID_TIMEOUT, rx).await {
+            Ok(Ok(outcome)) => {
                 if !matches!(outcome, SaidOutcome::Accepted { .. }) {
                     let mut inner = self.inner.lock().await;
                     inner.pending_turn.remove(&binding_id);
                 }
                 Ok(outcome)
             }
-            Err(_) => {
-                let mut inner = self.inner.lock().await;
-                inner.pending_turn.remove(&binding_id);
+            Ok(Err(_)) | Err(_) => {
+                close_all(self, "disconnect").await;
                 Ok(SaidOutcome::Disconnected)
             }
         }
@@ -345,6 +355,13 @@ async fn handle_bind(client: &InstanceClient, bind: Bind) {
     let mut inner = client.inner.lock().await;
     if inner.closed {
         return;
+    }
+    if let Some(existing) = inner.acknowledged.get(&bind.address) {
+        if existing != &bind.binding_id {
+            drop(inner);
+            close_all(client, "binding_conflict").await;
+            return;
+        }
     }
     inner
         .acknowledged

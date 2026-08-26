@@ -5,16 +5,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{Path, State};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::client::{InstanceClient, LiveEvent, PostRefuse, SaidOutcome};
 use super::json::parse_object_no_dup;
-use super::wire::{parse_uuid, Attachment};
+use super::wire::{Attachment, parse_uuid};
 
 const JSON_TYPE: &str = "application/json; charset=utf-8";
 
@@ -45,29 +45,35 @@ async fn gone() -> Response {
 fn json_error(status: StatusCode, code: &str, detail: Option<&str>) -> Response {
     let body = json!({"error":{"code": code, "detail": detail}});
     let mut res = (status, Json(body)).into_response();
-    res.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static(JSON_TYPE),
-    );
+    res.headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(JSON_TYPE));
     res
 }
 
 fn json_state(status: StatusCode, body: Value) -> Response {
     let mut res = (status, Json(body)).into_response();
-    res.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static(JSON_TYPE),
-    );
+    res.headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(JSON_TYPE));
     res
 }
 
-async fn find_client(state: &HttpState, address: &str) -> Option<Arc<InstanceClient>> {
+async fn find_client(state: &HttpState, address: &str) -> Result<Arc<InstanceClient>, FindClient> {
+    let mut hits = Vec::new();
     for inst in &state.instances {
         if inst.binding_for_address(address).await.is_some() {
-            return Some(inst.clone());
+            hits.push(inst.clone());
         }
     }
-    None
+    match hits.len() {
+        0 => Err(FindClient::None),
+        1 => Ok(hits.remove(0)),
+        _ => Err(FindClient::Ambiguous),
+    }
+}
+
+enum FindClient {
+    None,
+    Ambiguous,
 }
 
 struct PostBody {
@@ -105,11 +111,17 @@ fn parse_attachments(value: Option<&Value>) -> Result<Vec<Attachment>, &'static 
     let mut out = Vec::with_capacity(items.len());
     for item in items {
         let obj = item.as_object().ok_or("bad_request")?;
-        let kind = obj.get("kind").and_then(Value::as_str).ok_or("bad_request")?;
+        let kind = obj
+            .get("kind")
+            .and_then(Value::as_str)
+            .ok_or("bad_request")?;
         if kind != "image" {
             return Err("bad_request");
         }
-        let url = obj.get("url").and_then(Value::as_str).ok_or("bad_request")?;
+        let url = obj
+            .get("url")
+            .and_then(Value::as_str)
+            .ok_or("bad_request")?;
         if !url.starts_with("https://") || url.len() <= "https://".len() {
             return Err("bad_request");
         }
@@ -131,24 +143,23 @@ async fn post_message(
         Err(code) => return json_error(StatusCode::BAD_REQUEST, code, None),
     };
     let origin = format!("web:{}", parsed.client_message_id);
-    let Some(client) = find_client(&state, &session_id).await else {
-        return json_error(StatusCode::SERVICE_UNAVAILABLE, "instance_not_ready", None);
+    let client = match find_client(&state, &session_id).await {
+        Ok(c) => c,
+        Err(FindClient::None) => {
+            return json_error(StatusCode::SERVICE_UNAVAILABLE, "instance_not_ready", None);
+        }
+        Err(FindClient::Ambiguous) => {
+            return json_error(StatusCode::CONFLICT, "binding_conflict", None);
+        }
     };
     match client
-        .post_said(
-            &session_id,
-            &origin,
-            &parsed.text,
-            &parsed.attachments,
-        )
+        .post_said(&session_id, &origin, &parsed.text, &parsed.attachments)
         .await
     {
         Err(PostRefuse::NotReady) => {
             json_error(StatusCode::SERVICE_UNAVAILABLE, "instance_not_ready", None)
         }
-        Err(PostRefuse::Busy) => {
-            json_error(StatusCode::CONFLICT, "conversation_busy", None)
-        }
+        Err(PostRefuse::Busy) => json_error(StatusCode::CONFLICT, "conversation_busy", None),
         Ok(SaidOutcome::Accepted { seq }) => json_state(
             StatusCode::ACCEPTED,
             json!({
@@ -158,10 +169,9 @@ async fn post_message(
                 "state": "accepted",
             }),
         ),
-        Ok(SaidOutcome::NotAdmitted) => json_state(
-            StatusCode::FORBIDDEN,
-            json!({"state": "not_admitted"}),
-        ),
+        Ok(SaidOutcome::NotAdmitted) => {
+            json_state(StatusCode::FORBIDDEN, json!({"state": "not_admitted"}))
+        }
         Ok(SaidOutcome::WireErr { code, detail }) => {
             json_error(wire_status(&code), &code, detail.as_deref())
         }
@@ -183,12 +193,15 @@ fn wire_status(code: &str) -> StatusCode {
     }
 }
 
-async fn get_events(
-    State(state): State<HttpState>,
-    Path(session_id): Path<String>,
-) -> Response {
-    let Some(client) = find_client(&state, &session_id).await else {
-        return json_error(StatusCode::SERVICE_UNAVAILABLE, "instance_not_ready", None);
+async fn get_events(State(state): State<HttpState>, Path(session_id): Path<String>) -> Response {
+    let client = match find_client(&state, &session_id).await {
+        Ok(c) => c,
+        Err(FindClient::None) => {
+            return json_error(StatusCode::SERVICE_UNAVAILABLE, "instance_not_ready", None);
+        }
+        Err(FindClient::Ambiguous) => {
+            return json_error(StatusCode::CONFLICT, "binding_conflict", None);
+        }
     };
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
@@ -225,14 +238,12 @@ fn live_to_event(ev: &LiveEvent) -> Option<Event> {
                 .event("activity")
                 .data(json!({"activity_id": activity_id, "state": state}).to_string()),
         ),
-        LiveEvent::CompletedNoReply => Some(
-            Event::default()
-                .event("completed_no_reply")
-                .data("{}"),
-        ),
+        LiveEvent::CompletedNoReply => {
+            Some(Event::default().event("completed_no_reply").data("{}"))
+        }
         LiveEvent::Error { code, detail } => Some(
             Event::default()
-                .event("error")
+                .event("gate_error")
                 .data(json!({"code": code, "detail": detail}).to_string()),
         ),
     }

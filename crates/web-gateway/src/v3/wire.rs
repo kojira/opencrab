@@ -1,9 +1,9 @@
 //! V3 §3 の frame と message。core crate の DTO は使わない。
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::json::{parse_object_no_dup, JsonError};
+use super::json::{JsonError, parse_object_no_dup};
 
 /// LF 込み上限。
 pub const MAX_FRAME: usize = 1_048_576;
@@ -52,12 +52,7 @@ pub async fn write_json<W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
-pub fn hello_frame(
-    id: &str,
-    instance_id: &str,
-    revision: u64,
-    config_digest: &str,
-) -> Value {
+pub fn hello_frame(id: &str, instance_id: &str, revision: u64, config_digest: &str) -> Value {
     json!({
         "id": id,
         "m": "hello",
@@ -142,9 +137,19 @@ pub enum CoreMsg {
     Say(Say),
     Activity(Activity),
     Response(WireResponse),
-    Reverse { id: Option<String>, m: String },
-    Unknown { id: Option<String>, m: String },
-    Invalid { id: Option<String>, code: &'static str, m: String },
+    Reverse {
+        id: Option<String>,
+        m: String,
+    },
+    Unknown {
+        id: Option<String>,
+        m: String,
+    },
+    Invalid {
+        id: Option<String>,
+        code: &'static str,
+        m: String,
+    },
 }
 
 pub fn parse_frame_bytes(bytes: &[u8]) -> Result<CoreMsg, FrameError> {
@@ -202,7 +207,8 @@ pub fn parse_digest(raw: &str) -> Result<String, FrameError> {
 }
 
 pub fn config_bytes(author_id: &str) -> Vec<u8> {
-    serde_json::to_vec(&json!({"author_id": author_id})).expect("author_id string is JSON-encodable")
+    serde_json::to_vec(&json!({"author_id": author_id}))
+        .expect("author_id string is JSON-encodable")
 }
 
 pub fn config_digest(author_id: &str) -> String {
@@ -265,14 +271,8 @@ fn parse_core_msg(obj: &Value) -> CoreMsg {
                 m,
             },
         },
-        "hello" | "said" => CoreMsg::Reverse {
-            id: opt_id(obj),
-            m,
-        },
-        _ => CoreMsg::Unknown {
-            id: opt_id(obj),
-            m,
-        },
+        "hello" | "said" => CoreMsg::Reverse { id: opt_id(obj), m },
+        _ => CoreMsg::Unknown { id: opt_id(obj), m },
     }
 }
 
@@ -290,10 +290,7 @@ fn parse_bind(obj: &Value) -> Result<Bind, FrameError> {
 fn parse_say(obj: &Value) -> Result<Say, FrameError> {
     let id = parse_request_id(&require_str(obj, "id")?)?;
     let binding_id = parse_uuid(&require_str(obj, "binding_id")?)?;
-    let payload = obj
-        .get("payload")
-        .cloned()
-        .ok_or(FrameError::BadRequest)?;
+    let payload = obj.get("payload").cloned().ok_or(FrameError::BadRequest)?;
     if !payload.is_object() {
         return Err(FrameError::BadRequest);
     }
@@ -398,10 +395,7 @@ mod tests {
 
     #[test]
     fn say_text_ignores_unknown_and_rejects_empty() {
-        assert_eq!(
-            say_text(&json!({"text":"hi","extra":1})),
-            Some("hi")
-        );
+        assert_eq!(say_text(&json!({"text":"hi","extra":1})), Some("hi"));
         assert_eq!(say_text(&json!({"text":""})), None);
         assert_eq!(say_text(&json!({})), None);
     }
@@ -409,9 +403,6 @@ mod tests {
     #[test]
     fn duplicate_member_is_bad_request() {
         let raw = br#"{"id":"1","m":"ok","id":"2"}"#;
-        assert_eq!(
-            parse_frame_bytes(raw).unwrap_err(),
-            FrameError::BadRequest
-        );
+        assert_eq!(parse_frame_bytes(raw).unwrap_err(), FrameError::BadRequest);
     }
 }
