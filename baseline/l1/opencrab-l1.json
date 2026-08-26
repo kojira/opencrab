@@ -3,8 +3,7 @@
     "build": {
       "required_cargo_features": [
         "discord",
-        "nostr",
-        "web"
+        "nostr"
       ],
       "selection": "the baseline-l1 Cargo feature enables this exact set; ambient feature unification is not used"
     },
@@ -133,20 +132,7 @@
         },
         "response": {
           "body_utf8": "",
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
+          "headers": [],
           "status": 404
         }
       },
@@ -266,7 +252,7 @@
     ]
   },
   "http": {
-    "route_count": 83,
+    "route_count": 82,
     "routes": [
       {
         "activation": "always",
@@ -732,22 +718,6 @@
         "source": "opencrab_server::create_router"
       },
       {
-        "activation": "cfg(feature = \"web\")",
-        "methods": [
-          "POST"
-        ],
-        "path": "/api/agents/{id}/web/send",
-        "source": "opencrab_web_gateway::routes"
-      },
-      {
-        "activation": "cfg(feature = \"web\")",
-        "methods": [
-          "GET"
-        ],
-        "path": "/api/agents/{id}/web/stream",
-        "source": "opencrab_web_gateway::routes"
-      },
-      {
         "activation": "always",
         "methods": [
           "GET"
@@ -762,6 +732,33 @@
           "PUT"
         ],
         "path": "/api/agents/{id}/workspace/{*path}",
+        "source": "opencrab_server::create_router"
+      },
+      {
+        "activation": "always",
+        "methods": [
+          "DELETE",
+          "PUT"
+        ],
+        "path": "/api/gate-bindings/{binding_id}",
+        "source": "opencrab_server::create_router"
+      },
+      {
+        "activation": "always",
+        "methods": [
+          "DELETE",
+          "GET",
+          "PUT"
+        ],
+        "path": "/api/gate-instances/{instance_id}",
+        "source": "opencrab_server::create_router"
+      },
+      {
+        "activation": "always",
+        "methods": [
+          "POST"
+        ],
+        "path": "/api/gate-instances/{instance_id}/revisions",
         "source": "opencrab_server::create_router"
       },
       {
@@ -909,22 +906,6 @@
           "GET"
         ],
         "path": "/api/sessions/{id}/logs",
-        "source": "opencrab_server::create_router"
-      },
-      {
-        "activation": "always",
-        "methods": [
-          "POST"
-        ],
-        "path": "/api/sessions/{id}/mentor",
-        "source": "opencrab_server::create_router"
-      },
-      {
-        "activation": "always",
-        "methods": [
-          "POST"
-        ],
-        "path": "/api/sessions/{id}/messages",
         "source": "opencrab_server::create_router"
       },
       {

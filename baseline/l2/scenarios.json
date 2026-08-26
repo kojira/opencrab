@@ -15,13 +15,13 @@
       "watch_id": {"normal":"1","missing":"999999"},
       "source": {"normal":"baseline-source","missing":"baseline-missing"},
       "name": {"normal":"baseline","missing":"baseline-missing"},
-      "*path": {"normal":"baseline.txt","missing":"baseline-missing.txt"}
+      "*path": {"normal":"baseline.txt","missing":"baseline-missing.txt"},
+      "instance_id": {"normal":"11111111-1111-4111-8111-111111111111","missing":"00000000-0000-4000-8000-000000000000"},
+      "binding_id": {"normal":"22222222-2222-4222-8222-222222222222","missing":"00000000-0000-4000-8000-000000000001"}
     },
     "path_overrides": {
       "/api/sessions/{id}": {"normal":"/api/sessions/baseline-session","missing":"/api/sessions/baseline-missing"},
-      "/api/sessions/{id}/messages": {"normal":"/api/sessions/baseline-session/messages","missing":"/api/sessions/baseline-missing/messages"},
       "/api/sessions/{id}/logs": {"normal":"/api/sessions/baseline-session/logs","missing":"/api/sessions/baseline-missing/logs"},
-      "/api/sessions/{id}/mentor": {"normal":"/api/sessions/baseline-session/mentor","missing":"/api/sessions/baseline-missing/mentor"},
       "/api/agents/{id}/skills/{skill_id}/restore": {"normal":"/api/agents/baseline-agent/skills/baseline-archived-skill/restore","missing":"/api/agents/baseline-agent/skills/baseline-missing/restore"}
     },
     "query_suffixes": {"/api/agents/{id}/import/sync/status":"?source_dir={collector_workspace}/import-source&include_daily_logs=false"},
@@ -58,11 +58,8 @@
       "PUT /api/llm/providers/{name}":{"enabled":false},
       "PATCH /api/schedules/{sid}":{"enabled":true},
       "POST /api/sessions":{"theme":"Baseline","participant_ids":[]},
-      "POST /api/sessions/{id}/mentor":{"content":"baseline"},
-      "POST /api/sessions/{id}/messages":{"agent_id":"baseline-agent","content":"baseline"},
       "PATCH /api/system/log-level":{"log_level":"debug"},
-      "PUT /api/voice/config":{},
-      "POST /api/agents/{id}/web/send":{"conversation_id":"baseline","content":"baseline"}
+      "PUT /api/voice/config":{}
     },
     "normal_uncollected_l3": {
       "POST /api/agents/{id}/discord/start":"would connect to Discord",
@@ -70,9 +67,11 @@
       "POST /api/agents/{id}/nostr/generate":"successful key generation requires the operator's nostaro executable",
       "POST /api/agents/{id}/mcp/{name}/test":"operator supplied subprocess",
       "POST /api/llm/providers/{name}/test":"provider network endpoint",
-      "POST /api/sessions/{id}/messages":"successful branch requires an LLM provider",
-      "POST /api/agents/{id}/web/send":"successful branch requires an LLM provider",
-      "GET /api/agents/{id}/web/stream":"successful response is an intentionally non-terminating SSE stream",
+      "PUT /api/gate-instances/{instance_id}":"operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN",
+      "DELETE /api/gate-instances/{instance_id}":"operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN",
+      "POST /api/gate-instances/{instance_id}/revisions":"operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN",
+      "PUT /api/gate-bindings/{binding_id}":"operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN",
+      "DELETE /api/gate-bindings/{binding_id}":"operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN",
       "POST /api/agents/{id}/daily-log-index/rebuild":"successful branch schedules LLM-backed indexing",
       "POST /api/agents/{id}/daily-log-index/run":"successful branch schedules LLM-backed indexing",
       "POST /api/agents/{id}/memory/index":"successful branch schedules LLM-backed indexing",
@@ -102,7 +101,10 @@
       "POST /api/agents/{id}/soul/presets/{preset_id}/apply":{"kind":"uncollected","reason":"bodyless action; a missing-resource branch is not yet proven by this catalog"},
       "POST /api/llm/providers/reload":{"kind":"not_applicable","reason":"bodyless global reload action has no request-body rejection facet"},
       "POST /api/llm/providers/{name}/test":{"kind":"uncollected","reason":"bodyless provider-network action; live provider success is L3"},
-      "POST /api/agents/{id}/import/sync":{"kind":"uncollected","reason":"bodyless operator-workspace action; operator source is outside L2"}
+      "POST /api/agents/{id}/import/sync":{"kind":"uncollected","reason":"bodyless operator-workspace action; operator source is outside L2"},
+      "PUT /api/gate-instances/{instance_id}":{"kind":"uncollected","reason":"operator Bearer admin; L2 does not hold the operator token"},
+      "POST /api/gate-instances/{instance_id}/revisions":{"kind":"uncollected","reason":"operator Bearer admin; L2 does not hold the operator token"},
+      "PUT /api/gate-bindings/{binding_id}":{"kind":"uncollected","reason":"operator Bearer admin; L2 does not hold the operator token"}
     },
     "mutation_postconditions": {
       "POST /api/agents":{"method":"GET","path":"/api/agents"},
@@ -151,7 +153,6 @@
       "PUT /api/llm/providers/{name}":{"method":"GET","path":"/api/llm/providers"},
       "POST /api/hooks/{source}":{"db_query":"agent_inbox"},
       "POST /api/sessions":{"method":"GET","path":"/api/sessions"},
-      "POST /api/sessions/{id}/mentor":{"method":"GET","path":"/api/sessions/{id}/logs"},
       "DELETE /api/voice/config":{"method":"GET","path":"/api/voice/config"},
       "PUT /api/voice/config":{"method":"GET","path":"/api/voice/config"}
     },

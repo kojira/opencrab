@@ -30,7 +30,7 @@ use crate::{create_router, process, test_app_state, AppState};
 
 const AGENT_ID: &str = "baseline-agent";
 const SESSION_ID: &str = "baseline-session";
-const TOOL_SESSION_ID: &str = "web-baseline-agent-conversation";
+const TOOL_SESSION_ID: &str = "nostr-baseline-agent";
 static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const COLLECTOR_WORKSPACE_TOKEN: &str = "{collector_workspace}";
 const FIXTURE_EXECUTABLE_NAME: &str = "baseline-command";

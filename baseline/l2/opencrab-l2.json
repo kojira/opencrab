@@ -3,8 +3,7 @@
     "build": {
       "required_cargo_features": [
         "discord",
-        "nostr",
-        "web"
+        "nostr"
       ],
       "selection": "the baseline-l2 Cargo feature enables baseline-l1 and its exact feature set; ambient feature unification is not used",
       "target_family": "unix"
@@ -21,15 +20,15 @@
   "coverage": {
     "claim": "Only nonempty observations satisfying their facet predicate are fixed by this artifact; every uncollected or not_applicable entry is an explicit non-claim.",
     "http_facets": {
-      "effects_observed": 46,
+      "effects_observed": 45,
       "effects_uncollected": 0,
       "not_applicable": 3,
-      "uncollected": 34,
-      "valid_rejections": 36
+      "uncollected": 38,
+      "valid_rejections": 33
     },
     "http_observed_status_classes": {
-      "2xx": 141,
-      "4xx": 44,
+      "2xx": 139,
+      "4xx": 46,
       "5xx": 4
     },
     "tool_effects_observed": 50,
@@ -421,6 +420,7 @@
             "persona_name": "Baseline",
             "personality": "deterministic",
             "reasoning_effort": null,
+            "subject_id": 1,
             "web_search": null
           },
           "headers": [
@@ -492,6 +492,7 @@
               "persona_name": "Baseline",
               "personality": "updated personality",
               "reasoning_effort": null,
+              "subject_id": 1,
               "web_search": null
             },
             "headers": [
@@ -528,6 +529,7 @@
               "persona_name": "Baseline",
               "personality": "deterministic",
               "reasoning_effort": null,
+              "subject_id": 1,
               "web_search": null
             },
             "headers": [
@@ -639,6 +641,7 @@
               "persona_name": "Updated",
               "personality": null,
               "reasoning_effort": null,
+              "subject_id": 1,
               "web_search": null
             },
             "headers": [
@@ -675,6 +678,7 @@
               "persona_name": "Baseline",
               "personality": "deterministic",
               "reasoning_effort": null,
+              "subject_id": 1,
               "web_search": null
             },
             "headers": [
@@ -6832,6 +6836,7 @@
               "persona_name": "Seed Persona",
               "personality": "{}",
               "reasoning_effort": null,
+              "subject_id": 1,
               "web_search": null
             },
             "headers": [
@@ -6868,6 +6873,7 @@
               "persona_name": "Baseline",
               "personality": "deterministic",
               "reasoning_effort": null,
+              "subject_id": 1,
               "web_search": null
             },
             "headers": [
@@ -7500,37 +7506,6 @@
         "selection": "malformed_json_rejection"
       },
       {
-        "name": "post___api_agents_id_web_send__reject_or_absent",
-        "request": {
-          "body_utf8": "{",
-          "method": "POST",
-          "uri": "/api/agents/baseline-agent/web/send"
-        },
-        "response": {
-          "body": "Failed to parse the request body as JSON: EOF while parsing an object at line 1 column 1",
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "text/plain; charset=utf-8"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 400
-        },
-        "selection": "malformed_json_rejection"
-      },
-      {
         "effect": null,
         "name": "get___api_agents_id_workspace__normal",
         "request": {
@@ -7801,6 +7776,103 @@
           "status": 400
         },
         "selection": "malformed_json_rejection"
+      },
+      {
+        "name": "delete___api_gate-bindings_binding_id__reject_or_absent",
+        "request": {
+          "body_utf8": null,
+          "method": "DELETE",
+          "uri": "/api/gate-bindings/00000000-0000-4000-8000-000000000001"
+        },
+        "response": {
+          "body": {
+            "error": {
+              "code": "unauthorized",
+              "detail": null
+            }
+          },
+          "headers": [
+            {
+              "name": "content-type",
+              "value": "application/json; charset=utf-8"
+            }
+          ],
+          "status": 401
+        },
+        "selection": "resource_absence_or_empty_state"
+      },
+      {
+        "name": "delete___api_gate-instances_instance_id__reject_or_absent",
+        "request": {
+          "body_utf8": null,
+          "method": "DELETE",
+          "uri": "/api/gate-instances/00000000-0000-4000-8000-000000000000"
+        },
+        "response": {
+          "body": {
+            "error": {
+              "code": "unauthorized",
+              "detail": null
+            }
+          },
+          "headers": [
+            {
+              "name": "content-type",
+              "value": "application/json; charset=utf-8"
+            }
+          ],
+          "status": 401
+        },
+        "selection": "resource_absence_or_empty_state"
+      },
+      {
+        "effect": null,
+        "name": "get___api_gate-instances_instance_id__normal",
+        "request": {
+          "body": null,
+          "method": "GET",
+          "uri": "/api/gate-instances/11111111-1111-4111-8111-111111111111"
+        },
+        "response": {
+          "body": {
+            "error": {
+              "code": "unauthorized",
+              "detail": null
+            }
+          },
+          "headers": [
+            {
+              "name": "content-type",
+              "value": "application/json; charset=utf-8"
+            }
+          ],
+          "status": 401
+        },
+        "selection": "normal_or_local_precondition_branch"
+      },
+      {
+        "name": "get___api_gate-instances_instance_id__reject_or_absent",
+        "request": {
+          "body_utf8": null,
+          "method": "GET",
+          "uri": "/api/gate-instances/00000000-0000-4000-8000-000000000000"
+        },
+        "response": {
+          "body": {
+            "error": {
+              "code": "unauthorized",
+              "detail": null
+            }
+          },
+          "headers": [
+            {
+              "name": "content-type",
+              "value": "application/json; charset=utf-8"
+            }
+          ],
+          "status": 401
+        },
+        "selection": "resource_absence_or_empty_state"
       },
       {
         "effect": null,
@@ -9637,6 +9709,7 @@
           "body": {
             "done_count": 0,
             "facilitator_id": null,
+            "gateway_bound": false,
             "id": "baseline-session",
             "max_turns": 1,
             "metadata_json": null,
@@ -9677,7 +9750,9 @@
           "uri": "/api/sessions/baseline-missing"
         },
         "response": {
-          "body": null,
+          "body": {
+            "error": "session not found: baseline-missing"
+          },
           "headers": [
             {
               "name": "access-control-allow-origin",
@@ -9696,7 +9771,7 @@
               "value": "origin, access-control-request-method, access-control-request-headers"
             }
           ],
-          "status": 200
+          "status": 404
         },
         "selection": "resource_absence_or_empty_state"
       },
@@ -9762,168 +9837,6 @@
           "status": 200
         },
         "selection": "resource_absence_or_empty_state"
-      },
-      {
-        "effect": {
-          "after": {
-            "body": [
-              {
-                "agent_id": "mentor",
-                "content": "baseline",
-                "created_at": "<timestamp>",
-                "id": 1,
-                "log_type": "system",
-                "metadata_json": null,
-                "session_id": "baseline-session",
-                "speaker_id": "mentor",
-                "turn_number": null
-              }
-            ],
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "before": {
-            "body": [],
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "observer": {
-            "body": null,
-            "db_query": null,
-            "method": "GET",
-            "path": "/api/sessions/{id}/logs"
-          },
-          "status": "observed"
-        },
-        "name": "post___api_sessions_id_mentor__normal",
-        "request": {
-          "body": {
-            "content": "baseline"
-          },
-          "method": "POST",
-          "uri": "/api/sessions/baseline-session/mentor"
-        },
-        "response": {
-          "body": {
-            "id": 1
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "normal_or_local_precondition_branch"
-      },
-      {
-        "name": "post___api_sessions_id_mentor__reject_or_absent",
-        "request": {
-          "body_utf8": "{",
-          "method": "POST",
-          "uri": "/api/sessions/baseline-session/mentor"
-        },
-        "response": {
-          "body": "Failed to parse the request body as JSON: EOF while parsing an object at line 1 column 1",
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "text/plain; charset=utf-8"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 400
-        },
-        "selection": "malformed_json_rejection"
-      },
-      {
-        "name": "post___api_sessions_id_messages__reject_or_absent",
-        "request": {
-          "body_utf8": "{",
-          "method": "POST",
-          "uri": "/api/sessions/baseline-session/messages"
-        },
-        "response": {
-          "body": "Failed to parse the request body as JSON: EOF while parsing an object at line 1 column 1",
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "text/plain; charset=utf-8"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 400
-        },
-        "selection": "malformed_json_rejection"
       },
       {
         "effect": null,
@@ -10627,7 +10540,7 @@
         "selection": "resource_absence_or_empty_state"
       }
     ],
-    "source_route_count": 83,
+    "source_route_count": 82,
     "uncollected": [
       {
         "branch": "normal",
@@ -10859,28 +10772,70 @@
       {
         "branch": "normal",
         "level": "L3",
-        "method": "POST",
-        "name": "post___api_agents_id_web_send__normal",
-        "path": "/api/agents/{id}/web/send",
-        "reason": "successful branch requires an LLM provider",
+        "method": "DELETE",
+        "name": "delete___api_gate-bindings_binding_id__normal",
+        "path": "/api/gate-bindings/{binding_id}",
+        "reason": "operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN",
         "status": "uncollected"
       },
       {
         "branch": "normal",
         "level": "L3",
-        "method": "GET",
-        "name": "get___api_agents_id_web_stream__normal",
-        "path": "/api/agents/{id}/web/stream",
-        "reason": "successful response is an intentionally non-terminating SSE stream",
+        "method": "PUT",
+        "name": "put___api_gate-bindings_binding_id__normal",
+        "path": "/api/gate-bindings/{binding_id}",
+        "reason": "operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN",
         "status": "uncollected"
       },
       {
-        "branch": "resource_absence_or_empty_state",
+        "branch": "input_rejection",
+        "method": "PUT",
+        "name": "put___api_gate-bindings_binding_id__reject_or_absent",
+        "path": "/api/gate-bindings/{binding_id}",
+        "reason": "operator Bearer admin; L2 does not hold the operator token",
+        "status": "uncollected"
+      },
+      {
+        "branch": "normal",
         "level": "L3",
-        "method": "GET",
-        "name": "get___api_agents_id_web_stream__reject_or_absent",
-        "path": "/api/agents/{id}/web/stream",
-        "reason": "the production SSE contract does not terminate",
+        "method": "DELETE",
+        "name": "delete___api_gate-instances_instance_id__normal",
+        "path": "/api/gate-instances/{instance_id}",
+        "reason": "operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN",
+        "status": "uncollected"
+      },
+      {
+        "branch": "normal",
+        "level": "L3",
+        "method": "PUT",
+        "name": "put___api_gate-instances_instance_id__normal",
+        "path": "/api/gate-instances/{instance_id}",
+        "reason": "operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN",
+        "status": "uncollected"
+      },
+      {
+        "branch": "input_rejection",
+        "method": "PUT",
+        "name": "put___api_gate-instances_instance_id__reject_or_absent",
+        "path": "/api/gate-instances/{instance_id}",
+        "reason": "operator Bearer admin; L2 does not hold the operator token",
+        "status": "uncollected"
+      },
+      {
+        "branch": "normal",
+        "level": "L3",
+        "method": "POST",
+        "name": "post___api_gate-instances_instance_id_revisions__normal",
+        "path": "/api/gate-instances/{instance_id}/revisions",
+        "reason": "operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN",
+        "status": "uncollected"
+      },
+      {
+        "branch": "input_rejection",
+        "method": "POST",
+        "name": "post___api_gate-instances_instance_id_revisions__reject_or_absent",
+        "path": "/api/gate-instances/{instance_id}/revisions",
+        "reason": "operator Bearer admin; L2 does not hold the operator token",
         "status": "uncollected"
       },
       {
@@ -10924,15 +10879,6 @@
         "name": "post___api_llm_providers_name_test__reject_or_absent",
         "path": "/api/llm/providers/{name}/test",
         "reason": "bodyless provider-network action; live provider success is L3",
-        "status": "uncollected"
-      },
-      {
-        "branch": "normal",
-        "level": "L3",
-        "method": "POST",
-        "name": "post___api_sessions_id_messages__normal",
-        "path": "/api/sessions/{id}/messages",
-        "reason": "successful branch requires an LLM provider",
         "status": "uncollected"
       },
       {
@@ -11083,6 +11029,10 @@
           "kind": "uncollected",
           "reason": "bodyless action; a missing-resource branch is not yet proven by this catalog"
         },
+        "POST /api/gate-instances/{instance_id}/revisions": {
+          "kind": "uncollected",
+          "reason": "operator Bearer admin; L2 does not hold the operator token"
+        },
         "POST /api/llm/providers/reload": {
           "kind": "not_applicable",
           "reason": "bodyless global reload action has no request-body rejection facet"
@@ -11090,6 +11040,14 @@
         "POST /api/llm/providers/{name}/test": {
           "kind": "uncollected",
           "reason": "bodyless provider-network action; live provider success is L3"
+        },
+        "PUT /api/gate-bindings/{binding_id}": {
+          "kind": "uncollected",
+          "reason": "operator Bearer admin; L2 does not hold the operator token"
+        },
+        "PUT /api/gate-instances/{instance_id}": {
+          "kind": "uncollected",
+          "reason": "operator Bearer admin; L2 does not hold the operator token"
         }
       },
       "expansion": "For every path×method in baseline/l1/opencrab-l1.json, capture a normal/local-precondition probe and an input-rejection or resource-absence probe. Normal branches that require an external credential, live service, LLM, or operator workspace are emitted as uncollected L3 entries.",
@@ -11233,10 +11191,6 @@
           "method": "GET",
           "path": "/api/sessions"
         },
-        "POST /api/sessions/{id}/mentor": {
-          "method": "GET",
-          "path": "/api/sessions/{id}/logs"
-        },
         "PUT /api/agents/{id}": {
           "method": "GET",
           "path": "/api/agents/{id}"
@@ -11358,10 +11312,6 @@
           "platform": "web",
           "user_id": "baseline-new-user"
         },
-        "POST /api/agents/{id}/web/send": {
-          "content": "baseline",
-          "conversation_id": "baseline"
-        },
         "POST /api/hooks/{source}": {
           "data": {
             "id": "baseline-event"
@@ -11377,13 +11327,6 @@
         "POST /api/sessions": {
           "participant_ids": [],
           "theme": "Baseline"
-        },
-        "POST /api/sessions/{id}/mentor": {
-          "content": "baseline"
-        },
-        "POST /api/sessions/{id}/messages": {
-          "agent_id": "baseline-agent",
-          "content": "baseline"
         },
         "PUT /api/agents/{id}": {
           "name": "Updated Baseline Agent",
@@ -11445,7 +11388,8 @@
         "PUT /api/voice/config": {}
       },
       "normal_uncollected_l3": {
-        "GET /api/agents/{id}/web/stream": "successful response is an intentionally non-terminating SSE stream",
+        "DELETE /api/gate-bindings/{binding_id}": "operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN",
+        "DELETE /api/gate-instances/{instance_id}": "operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN",
         "PATCH /api/system/log-level": "changes process-global tracing state and has no isolated production fixture",
         "POST /api/agents/{id}/daily-log-index/rebuild": "successful branch schedules LLM-backed indexing",
         "POST /api/agents/{id}/daily-log-index/run": "successful branch schedules LLM-backed indexing",
@@ -11458,11 +11402,12 @@
         "POST /api/agents/{id}/nostr/generate": "successful key generation requires the operator's nostaro executable",
         "POST /api/agents/{id}/nostr/start": "would connect to Nostr relays",
         "POST /api/agents/{id}/skills/seed-standard": "standard skill packaging differs between test and production compilation and is not a stable L2 fixture",
-        "POST /api/agents/{id}/web/send": "successful branch requires an LLM provider",
+        "POST /api/gate-instances/{instance_id}/revisions": "operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN",
         "POST /api/import/execute": "depends on an operator-selected external workspace",
         "POST /api/import/scan": "depends on an operator-selected external workspace",
         "POST /api/llm/providers/{name}/test": "provider network endpoint",
-        "POST /api/sessions/{id}/messages": "successful branch requires an LLM provider"
+        "PUT /api/gate-bindings/{binding_id}": "operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN",
+        "PUT /api/gate-instances/{instance_id}": "operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN"
       },
       "path_overrides": {
         "/api/agents/{id}/skills/{skill_id}/restore": {
@@ -11476,20 +11421,16 @@
         "/api/sessions/{id}/logs": {
           "missing": "/api/sessions/baseline-missing/logs",
           "normal": "/api/sessions/baseline-session/logs"
-        },
-        "/api/sessions/{id}/mentor": {
-          "missing": "/api/sessions/baseline-missing/mentor",
-          "normal": "/api/sessions/baseline-session/mentor"
-        },
-        "/api/sessions/{id}/messages": {
-          "missing": "/api/sessions/baseline-missing/messages",
-          "normal": "/api/sessions/baseline-session/messages"
         }
       },
       "path_parameters": {
         "*path": {
           "missing": "baseline-missing.txt",
           "normal": "baseline.txt"
+        },
+        "binding_id": {
+          "missing": "<uuid>",
+          "normal": "<uuid>"
         },
         "channel_id": {
           "missing": "baseline-missing",
@@ -11510,6 +11451,10 @@
         "id": {
           "missing": "baseline-missing",
           "normal": "baseline-agent"
+        },
+        "instance_id": {
+          "missing": "<uuid>",
+          "normal": "<uuid>"
         },
         "name": {
           "missing": "baseline-missing",
@@ -14860,6 +14805,7 @@
               "persona_name": "Baseline",
               "personality": "deterministic",
               "reasoning_effort": null,
+              "subject_id": 1,
               "web_search": null
             },
             "headers": [
@@ -14899,6 +14845,7 @@
               "persona_name": "Baseline",
               "personality": "baseline configured",
               "reasoning_effort": null,
+              "subject_id": 1,
               "web_search": null
             },
             "headers": [
@@ -15066,11 +15013,11 @@
                   "last_fired_at": null,
                   "message": "fixture schedule",
                   "next_fire_at": null,
-                  "session_id": "web-baseline-agent-conversation",
+                  "session_id": "nostr-baseline-agent",
                   "timezone": "UTC"
                 }
               ],
-              "session_id": "web-baseline-agent-conversation"
+              "session_id": "nostr-baseline-agent"
             },
             "error": null,
             "success": true
@@ -15082,7 +15029,7 @@
             "data": {
               "count": 0,
               "schedules": [],
-              "session_id": "web-baseline-agent-conversation"
+              "session_id": "nostr-baseline-agent"
             },
             "error": null,
             "success": true
@@ -15251,7 +15198,7 @@
               {
                 "content": "baseline thought",
                 "log_type": "inner_voice",
-                "session_id": "web-baseline-agent-conversation",
+                "session_id": "nostr-baseline-agent",
                 "speaker_id": "baseline-agent"
               }
             ]
@@ -15321,7 +15268,7 @@
             "max_interval_secs": 86400,
             "min_interval_secs": 300,
             "next_fire_at": null,
-            "session_id": "web-baseline-agent-conversation"
+            "session_id": "nostr-baseline-agent"
           },
           "error": null,
           "success": true
@@ -15350,7 +15297,7 @@
           "data": {
             "count": 0,
             "schedules": [],
-            "session_id": "web-baseline-agent-conversation"
+            "session_id": "nostr-baseline-agent"
           },
           "error": null,
           "success": true
@@ -17390,7 +17337,7 @@
               "max_interval_secs": 86400,
               "min_interval_secs": 300,
               "next_fire_at": null,
-              "session_id": "web-baseline-agent-conversation"
+              "session_id": "nostr-baseline-agent"
             },
             "error": null,
             "success": true
@@ -17411,7 +17358,7 @@
               "max_interval_secs": 86400,
               "min_interval_secs": 300,
               "next_fire_at": null,
-              "session_id": "web-baseline-agent-conversation"
+              "session_id": "nostr-baseline-agent"
             },
             "error": null,
             "success": true
@@ -17432,7 +17379,7 @@
             "max_interval_secs": 86400,
             "min_interval_secs": 300,
             "next_fire_at": null,
-            "session_id": "web-baseline-agent-conversation",
+            "session_id": "nostr-baseline-agent",
             "success": true
           },
           "error": null,
@@ -17499,7 +17446,7 @@
             "data": {
               "count": 0,
               "schedules": [],
-              "session_id": "web-baseline-agent-conversation"
+              "session_id": "nostr-baseline-agent"
             },
             "error": null,
             "success": true
@@ -17522,11 +17469,11 @@
                   "last_fired_at": null,
                   "message": "baseline schedule",
                   "next_fire_at": "<timestamp>",
-                  "session_id": "web-baseline-agent-conversation",
+                  "session_id": "nostr-baseline-agent",
                   "timezone": "UTC"
                 }
               ],
-              "session_id": "web-baseline-agent-conversation"
+              "session_id": "nostr-baseline-agent"
             },
             "error": null,
             "success": true
@@ -17546,7 +17493,7 @@
             "last_fired_at": null,
             "message": "baseline schedule",
             "next_fire_at": "<timestamp>",
-            "session_id": "web-baseline-agent-conversation",
+            "session_id": "nostr-baseline-agent",
             "success": true,
             "timezone": "UTC"
           },
@@ -18057,7 +18004,7 @@
                 "notes": "",
                 "personality": "",
                 "recent_behavior": "",
-                "session_id": "web-baseline-agent-conversation",
+                "session_id": "nostr-baseline-agent",
                 "target_id": "baseline-peer",
                 "target_name": "Baseline Peer"
               }
@@ -18097,6 +18044,7 @@
               "persona_name": "Baseline",
               "personality": "deterministic",
               "reasoning_effort": null,
+              "subject_id": 1,
               "web_search": null
             },
             "headers": [
@@ -18136,6 +18084,7 @@
               "persona_name": "Baseline",
               "personality": "deterministic",
               "reasoning_effort": null,
+              "subject_id": 1,
               "web_search": null
             },
             "headers": [
@@ -18416,11 +18365,11 @@
                   "last_fired_at": null,
                   "message": "fixture schedule",
                   "next_fire_at": null,
-                  "session_id": "web-baseline-agent-conversation",
+                  "session_id": "nostr-baseline-agent",
                   "timezone": "UTC"
                 }
               ],
-              "session_id": "web-baseline-agent-conversation"
+              "session_id": "nostr-baseline-agent"
             },
             "error": null,
             "success": true
@@ -18443,11 +18392,11 @@
                   "last_fired_at": null,
                   "message": "baseline schedule updated",
                   "next_fire_at": null,
-                  "session_id": "web-baseline-agent-conversation",
+                  "session_id": "nostr-baseline-agent",
                   "timezone": "UTC"
                 }
               ],
-              "session_id": "web-baseline-agent-conversation"
+              "session_id": "nostr-baseline-agent"
             },
             "error": null,
             "success": true
@@ -18467,7 +18416,7 @@
             "last_fired_at": null,
             "message": "baseline schedule updated",
             "next_fire_at": null,
-            "session_id": "web-baseline-agent-conversation",
+            "session_id": "nostr-baseline-agent",
             "success": true,
             "timezone": "UTC"
           },
@@ -18781,7 +18730,7 @@
         "effect": {
           "logs_after": 1,
           "logs_before": 0,
-          "session_id": "web-baseline-agent-conversation"
+          "session_id": "nostr-baseline-agent"
         },
         "result": {
           "data": {
