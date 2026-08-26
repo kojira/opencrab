@@ -124,6 +124,8 @@ pub const TRUSTED_PLATFORM_REST: &str = "rest";
 /// npub で登録された行も引けるよう、読み出し側（`crates/server` の Nostr の呼び出し元
 /// 解決）は hex と npub の両方の表現で引く。
 pub const TRUSTED_PLATFORM_NOSTR: &str = "nostr";
+/// external gate 受信の author 識別子の経路（V3 §7.2）。
+pub const TRUSTED_PLATFORM_EXTGATE: &str = "extgate";
 
 /// 登録 API が受け付ける識別子経路の全体。撤去済み REST の互換値も含む。
 ///
@@ -131,11 +133,12 @@ pub const TRUSTED_PLATFORM_NOSTR: &str = "nostr";
 /// 信頼されない）。
 /// 綴り間違いが「登録できたのに効かない」行として黙って残るのを防ぐため、
 /// 登録 API はこの集合で弾く（fail-closed 側の検証であって、認可の判定ではない）。
-pub const TRUSTED_PLATFORMS: [&str; 4] = [
+pub const TRUSTED_PLATFORMS: [&str; 5] = [
     TRUSTED_PLATFORM_DISCORD,
     TRUSTED_PLATFORM_WEB,
     TRUSTED_PLATFORM_REST,
     TRUSTED_PLATFORM_NOSTR,
+    TRUSTED_PLATFORM_EXTGATE,
 ];
 
 /// 登録 API で受け付ける経路（legacy `rest` を含む）として定義済みか。

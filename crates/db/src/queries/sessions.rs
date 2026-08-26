@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Transaction};
 use serde::{Deserialize, Serialize};
 
 #[allow(unused_imports)]
@@ -64,6 +64,33 @@ pub fn insert_session(conn: &Connection, session: &SessionRow) -> Result<()> {
         }
     }
     tx.commit()?;
+    Ok(())
+}
+
+/// Binding PUT 同一 TX 用。theme は binding address。他列は schema 既定値。
+pub fn insert_session_in_tx(
+    tx: &Transaction<'_>,
+    session_id: &str,
+    address: &str,
+    now_rfc3339: &str,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO sessions (id, theme, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+        params![session_id, address, now_rfc3339, now_rfc3339],
+    )?;
+    Ok(())
+}
+
+/// Binding PUT 同一 TX 用。membership は subject に対応する agent 1 行。
+pub fn insert_agent_session_in_tx(
+    tx: &Transaction<'_>,
+    agent_id: &str,
+    session_id: &str,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO agent_sessions (agent_id, session_id) VALUES (?1, ?2)",
+        params![agent_id, session_id],
+    )?;
     Ok(())
 }
 

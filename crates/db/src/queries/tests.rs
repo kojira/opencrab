@@ -221,6 +221,7 @@ fn known_platforms_are_read_paths_plus_legacy_rest() {
     assert!(is_known_trusted_platform(TRUSTED_PLATFORM_WEB));
     assert!(is_known_trusted_platform(TRUSTED_PLATFORM_REST));
     assert!(is_known_trusted_platform(TRUSTED_PLATFORM_NOSTR));
+    assert!(is_known_trusted_platform(TRUSTED_PLATFORM_EXTGATE));
     // 綴り間違い・未定義の経路は弾く（登録できても誰とも一致しない行になるため）。
     assert!(!is_known_trusted_platform("Discord"));
     assert!(!is_known_trusted_platform("Nostr"));
