@@ -1,0 +1,226 @@
+//! DeliveryEffect → reply + sending 同一 TX、その後 say 1 回。V3 §6.3 / §7.4。
+
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+
+use opencrab_actions::{AgentRuntime, DeliveryEffect, TranscriptSource};
+use opencrab_db::queries::{insert_session_log, SessionLogRow};
+use rusqlite::{params, TransactionBehavior};
+use uuid::Uuid;
+
+use crate::error::{ErrorCode, GateError};
+use crate::ids::now_nanos;
+use crate::protocol::{say_frame, write_json};
+use crate::registry::{ExtgateState, Pending};
+
+pub async fn apply_delivery_effect<R: AgentRuntime>(
+    state: &Arc<ExtgateState>,
+    runtime: &R,
+    instance_id: &str,
+    binding_id: &str,
+    agent_id: &str,
+    session_id: &str,
+    effect: DeliveryEffect,
+) {
+    match effect {
+        DeliveryEffect::Text { body, .. } => {
+            if body.is_empty() {
+                tracing::error!("DeliveryEffect::Text body is empty; fail-loud");
+                state.halt();
+                return;
+            }
+            if let Err(e) = send_text(state, instance_id, binding_id, agent_id, session_id, &body).await
+            {
+                if e.code == ErrorCode::NotConnected || e.code == ErrorCode::BindingClosed {
+                    return;
+                }
+                tracing::error!(code = e.code.as_str(), "delivery failed");
+                if e.code == ErrorCode::StoreError {
+                    state.halt();
+                }
+            }
+        }
+        DeliveryEffect::NoReply => {
+            runtime.record_agent_no_reply(agent_id, session_id);
+        }
+        DeliveryEffect::Empty | DeliveryEffect::Failed { .. } => {
+            if let DeliveryEffect::Failed { error } = &effect {
+                tracing::error!(error = %error, "session turn failed");
+            }
+        }
+    }
+}
+
+async fn send_text(
+    state: &Arc<ExtgateState>,
+    instance_id: &str,
+    binding_id: &str,
+    agent_id: &str,
+    session_id: &str,
+    body: &str,
+) -> Result<(), GateError> {
+    let writer = {
+        let reg = state.lock_registry()?;
+        let live = reg
+            .get(instance_id)
+            .ok_or_else(|| GateError::new(ErrorCode::NotConnected))?;
+        if !live.acknowledged.contains(binding_id) {
+            return Err(GateError::new(ErrorCode::NotConnected));
+        }
+        live.writer.clone()
+    };
+
+    let delivery_id = Uuid::new_v4().to_string();
+    let now = now_nanos();
+    let payload = serde_json::json!({"text": body}).to_string();
+    {
+        let mut conn = state.db.lock().map_err(|_| GateError::store())?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| GateError::store())?;
+        let open = tx.query_row(
+            "SELECT instance_id, closed_at FROM gate_bindings WHERE binding_id = ?1",
+            params![binding_id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?)),
+        );
+        match open {
+            Ok((inst, None)) if inst == instance_id => {}
+            Ok(_) => {
+                let _ = tx.rollback();
+                return Err(GateError::new(ErrorCode::BindingClosed));
+            }
+            Err(_) => {
+                let _ = tx.rollback();
+                return Err(GateError::store());
+            }
+        }
+        if state.probe.fail_reply_log.load(Ordering::SeqCst) {
+            let _ = tx.rollback();
+            return Err(GateError::store());
+        }
+        insert_session_log(
+            &tx,
+            &SessionLogRow {
+                id: None,
+                agent_id: agent_id.to_string(),
+                session_id: session_id.to_string(),
+                log_type: "speech".to_string(),
+                content: body.to_string(),
+                speaker_id: Some(agent_id.to_string()),
+                turn_number: None,
+                metadata_json: Some(
+                    serde_json::json!({"source": TranscriptSource::External.reply()}).to_string(),
+                ),
+                created_at: None,
+            },
+        )
+        .map_err(|_| GateError::store())?;
+        if state.probe.fail_delivery_insert.load(Ordering::SeqCst) {
+            let _ = tx.rollback();
+            return Err(GateError::store());
+        }
+        tx.execute(
+            "INSERT INTO deliveries (delivery_id, binding_id, payload_json, state, error, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'sending', NULL, ?4, ?4)",
+            params![delivery_id, binding_id, payload, now],
+        )
+        .map_err(|_| GateError::store())?;
+        tx.commit().map_err(|_| GateError::store())?;
+    }
+
+    {
+        let mut reg = state.lock_registry()?;
+        let Some(live) = reg.get_mut(instance_id) else {
+            mark_indeterminate(state, std::slice::from_ref(&delivery_id))?;
+            return Err(GateError::new(ErrorCode::Disconnect));
+        };
+        live.pending.insert(
+            delivery_id.clone(),
+            Pending::Say {
+                delivery_id: delivery_id.clone(),
+            },
+        );
+    }
+
+    if state.probe.fail_say_write.load(Ordering::SeqCst)
+        || write_json(&writer, &say_frame(&delivery_id, binding_id, body))
+            .await
+            .is_err()
+    {
+        mark_indeterminate(state, std::slice::from_ref(&delivery_id))?;
+        crate::close::close_live(
+            state,
+            Some(instance_id),
+            None,
+            ErrorCode::Disconnect,
+            None,
+            None,
+        )
+        .await;
+        return Err(GateError::new(ErrorCode::Disconnect));
+    }
+    Ok(())
+}
+
+pub fn mark_indeterminate(state: &ExtgateState, delivery_ids: &[String]) -> Result<(), GateError> {
+    if delivery_ids.is_empty() {
+        return Ok(());
+    }
+    let conn = state.db.lock().map_err(|_| GateError::store())?;
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|_| GateError::store())?;
+    let now = now_nanos();
+    for id in delivery_ids {
+        tx.execute(
+            "UPDATE deliveries
+             SET state = 'indeterminate', error = 'disconnect', updated_at = ?2
+             WHERE delivery_id = ?1 AND state = 'sending'",
+            params![id, now],
+        )
+        .map_err(|_| GateError::store())?;
+    }
+    tx.commit().map_err(|_| GateError::store())?;
+    Ok(())
+}
+
+pub fn mark_delivered(state: &ExtgateState, delivery_id: &str) -> Result<(), GateError> {
+    let conn = state.db.lock().map_err(|_| GateError::store())?;
+    let now = now_nanos();
+    conn.execute(
+        "UPDATE deliveries
+         SET state = 'delivered', error = NULL, updated_at = ?2
+         WHERE delivery_id = ?1 AND state = 'sending'",
+        params![delivery_id, now],
+    )
+    .map_err(|_| GateError::store())?;
+    Ok(())
+}
+
+pub fn mark_failed(state: &ExtgateState, delivery_id: &str) -> Result<(), GateError> {
+    let conn = state.db.lock().map_err(|_| GateError::store())?;
+    let now = now_nanos();
+    conn.execute(
+        "UPDATE deliveries
+         SET state = 'failed', error = 'external_rejected', updated_at = ?2
+         WHERE delivery_id = ?1 AND state = 'sending'",
+        params![delivery_id, now],
+    )
+    .map_err(|_| GateError::store())?;
+    Ok(())
+}
+
+/// Binding DELETE 後の新規 delivery を止める。
+pub fn binding_is_closed(state: &ExtgateState, binding_id: &str) -> Result<bool, GateError> {
+    let conn = state.db.lock().map_err(|_| GateError::store())?;
+    match conn.query_row(
+        "SELECT closed_at FROM gate_bindings WHERE binding_id = ?1",
+        params![binding_id],
+        |r| r.get::<_, Option<i64>>(0),
+    ) {
+        Ok(Some(_)) => Ok(true),
+        Ok(None) => Ok(false),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(true),
+        Err(_) => Err(GateError::store()),
+    }
+}

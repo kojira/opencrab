@@ -1,0 +1,32 @@
+[package]
+name = "opencrab-extgate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rusqlite = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+opencrab-db = { workspace = true }
+opencrab-actions = { workspace = true }
+opencrab-core = { workspace = true }
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tower = { workspace = true }
+http-body-util = "0.1"
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

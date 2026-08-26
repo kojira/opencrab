@@ -22,6 +22,7 @@ members = [
     "crates/app",
     "crates/web-gate",
     "crates/nostr-gate",
+    "crates/extgate",
 ]
 
 [workspace.lints.clippy]
@@ -96,6 +97,7 @@ opencrab-actions = { path = "crates/actions" }
 opencrab-db = { path = "crates/db" }
 opencrab-discord = { path = "crates/discord" }
 opencrab-nostr = { path = "crates/nostr" }
+opencrab-extgate = { path = "crates/extgate" }
 opencrab-web-gateway = { path = "crates/web-gateway" }
 opencrab-mcp = { path = "crates/mcp" }
 
