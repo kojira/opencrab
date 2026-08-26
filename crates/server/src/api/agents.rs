@@ -1,7 +1,5 @@
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
-    response::{IntoResponse, Response},
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -97,33 +95,21 @@ pub async fn create_agent(
 pub async fn get_agent(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Response {
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+) -> Json<serde_json::Value> {
+    let conn = state.db.lock().unwrap();
+    let Some(agent) = opencrab_db::queries::get_agent(&conn, &id).unwrap() else {
+        return Json(serde_json::Value::Null);
     };
-    let agent = match opencrab_db::queries::get_agent(&conn, &id) {
-        Ok(Some(a)) => a,
-        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
-    let subject_id: Option<i64> = match conn.query_row(
-        "SELECT subject_id FROM agents WHERE agent_id = ?1",
-        [&id],
-        |r| r.get(0),
-    ) {
-        Ok(v) => v,
-        Err(rusqlite::Error::QueryReturnedNoRows) => {
-            return StatusCode::NOT_FOUND.into_response();
-        }
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
-    let Some(subject_id) = subject_id.filter(|v| *v > 0) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
+    let subject_id: i64 = conn
+        .query_row(
+            "SELECT subject_id FROM agents WHERE agent_id = ?1",
+            [&id],
+            |r| r.get(0),
+        )
+        .unwrap();
     let mut value = serde_json::to_value(agent).unwrap();
     value["subject_id"] = serde_json::json!(subject_id);
-    Json(value).into_response()
+    Json(value)
 }
 
 #[derive(Debug, Deserialize)]
@@ -840,7 +826,7 @@ mod extgate_v3_tests {
     use crate::{create_router, production_route_inventory, test_app_state};
 
     #[tokio::test]
-    async fn get_agent_subject_zero_or_one() {
+    async fn get_agent_absent_is_200_null_existing_has_subject_id() {
         let state = test_app_state();
         {
             let conn = state.db.lock().unwrap();
@@ -875,7 +861,10 @@ mod extgate_v3_tests {
             )
             .await
             .unwrap();
-        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert_eq!(missing.status(), StatusCode::OK);
+        let missing_body = missing.into_body().collect().await.unwrap().to_bytes();
+        let missing_v: serde_json::Value = serde_json::from_slice(&missing_body).unwrap();
+        assert!(missing_v.is_null());
 
         let ok = app
             .clone()

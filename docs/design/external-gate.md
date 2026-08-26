@@ -203,7 +203,7 @@ Binding DELETE は row を close し、live registry の acknowledged/pending se
 
 ### 5.6 agent GET の subject_id
 
-既存 `GET /api/agents/{id}` の成功 JSON に positive i64 `subject_id` を追加する。この endpoint に extgate Bearer と extgate error envelopeを広げない。`UNIQUE(subject_id)` を不変条件とし、agent 行または subject 写像が 0 件なら 404、exact 1 件なら 200 とする。
+既存 `GET /api/agents/{id}` の成功 JSON に positive i64 `subject_id` を追加する。この endpoint に extgate Bearer と extgate error envelope を広げない。**外形は従来のまま: agent 不在は `200` JSON `null`**（omoikane の agentExists が依存する既存挙動・V3 §10 の約束どおり）。存在する agent は常に `subject_id` 付き `200`。v44 が `subject_id` を NOT NULL・UNIQUE で backfill するため「存在するのに写像 0/複数」は到達不能であり、**404/409 分岐は設けない**。
 
 ## 6. 永続モデル
 
@@ -450,7 +450,7 @@ conformance suite は少なくとも次を自動検証する。
 - live 中の Binding PUT/DELETE は成功し、DELETE 後の said と新規 delivery は止まる。
 - 6 operation 以外の旧 extgate admin path が router に存在しない。
 - Instance/Binding PUT の同値 200、非同値 conflict、open address unique、closed ID 非復活。
-- `GET /api/agents/{id}` の subject exact 0/1 が 404/200。成功 JSON に positive i64 が入る。
+- `GET /api/agents/{id}`: 不在 agent が 200 null・存在 agent の成功 JSON に positive i64 `subject_id` が入る。404/409 を返さない。
 
 ### 9.3 Bearer
 
@@ -511,7 +511,7 @@ conformance suite は少なくとも次を自動検証する。
 | prepared/sending と配送試行回数、期限、監査行 | reply と sending を同一 TX。say 1 回。成功/確定拒否/切断不明だけを残す。 |
 | gateway failure code の自由文字列 | bind は `bind_failed`、say は `external_rejected`。detail は nullable だが code を増やさない。 |
 | 添付の author 補助情報 | `Attachment={kind:"image",url:https}` だけ。core が `with_image_urls` へ渡す。 |
-| subject 解決口の約束 | 既存 agent GET に subject_id を追加し、0 件を 404、1 件を 200 にする。`UNIQUE(subject_id)` により複数は到達不能。 |
+| subject 解決口の約束 | 既存 agent GET に subject_id を追加。**不在は従来どおり 200 null**（外形不変）。NOT NULL/UNIQUE backfill により 404/409 分岐は設けない。 |
 | hello/ready/failed の `connection_epoch` | wire から削除。応答照合は同一 socket の pending だけで行い、epoch は存在しない。G1 の epoch 送出を削除する。 |
 | catch-up wire（`catch_up` / `source_checkpoint` と CAS・single-flight） | wire・admin とも削除。過去分の再取得は行わない（gateway 内部のリプレイ機構は本契約の関知外）。 |
 | 旧会話 HTTP との並走案 | 旧会話 HTTP は再導入しない。external UDS E2E を完成条件にする。 |
