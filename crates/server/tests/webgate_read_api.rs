@@ -128,6 +128,13 @@ async fn list_sessions_hides_physical_and_keeps_logical() {
         .collect();
     assert!(ids.contains(&logical.as_str()));
     assert!(!ids.contains(&physical.as_str()));
+    let row = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == logical)
+        .unwrap();
+    assert_eq!(row["agent_ids"], serde_json::json!(["a1"]));
 }
 
 #[tokio::test]
@@ -141,6 +148,7 @@ async fn get_session_projects_physical_state_with_gateway_bound() {
     assert_eq!(body["phase"], "convergent");
     assert_eq!(body["gateway_bound"], true);
     assert_eq!(body["web_binding_state"], "unavailable");
+    assert_eq!(body["agent_ids"], serde_json::json!(["a1"]));
 }
 
 #[tokio::test]
@@ -241,4 +249,104 @@ async fn list_sessions_honors_limit_and_before() {
     let arr2 = second.as_array().unwrap();
     assert_eq!(arr2.len(), 1);
     assert_ne!(arr2[0]["id"], before);
+}
+
+#[tokio::test]
+async fn list_and_detail_agent_ids_from_membership_sorted_updated_at() {
+    let mut conn = opencrab_db::init_memory().unwrap();
+    opencrab_db::queries::upsert_agent(
+        &conn,
+        &opencrab_db::queries::AgentRow {
+            agent_id: "a1".into(),
+            name: "a1".into(),
+            job_title: None,
+            organization: None,
+            image_url: None,
+            persona_name: "p".into(),
+            personality: None,
+            instructions: String::new(),
+            heartbeat_instructions: String::new(),
+            model: None,
+            reasoning_effort: None,
+            web_search: None,
+            metadata_json: None,
+        },
+    )
+    .unwrap();
+    opencrab_db::queries::insert_session(
+        &conn,
+        &opencrab_db::queries::SessionRow {
+            id: "intake-old".into(),
+            mode: "intake".into(),
+            theme: "mail".into(),
+            phase: "active".into(),
+            turn_number: 0,
+            status: "active".into(),
+            participant_ids_json: "[]".into(),
+            facilitator_id: None,
+            done_count: 0,
+            max_turns: None,
+            metadata_json: None,
+        },
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO agent_sessions (agent_id, session_id) VALUES ('a1', 'intake-old')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE sessions SET updated_at = '1999-01-01T00:00:00+00:00' WHERE id = 'intake-old'",
+        [],
+    )
+    .unwrap();
+    let subject: i64 = conn
+        .query_row(
+            "SELECT subject_id FROM agents WHERE agent_id = 'a1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let instance = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let binding = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    let logical = "web-a1-fresh";
+    conn.execute(
+        "INSERT INTO gate_instances
+         (instance_id, kind_id, subject_id, revision, enabled, config_b64, config_digest, created_at, updated_at)
+         VALUES (?1, 'web', ?2, 1, 1, 'e30=', '0000000000000000000000000000000000000000000000000000000000000000', 1, 1)",
+        rusqlite::params![instance, subject],
+    )
+    .unwrap();
+    {
+        let tx = conn.transaction().unwrap();
+        opencrab_db::queries::create_gate_binding_in_tx(
+            &tx, binding, instance, logical, logical, 1_700_000_000_000_000_000,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+    let physical = format!("extgate-{binding}");
+    let app = app_from_conn(conn);
+    let (status, body) = get(app.clone(), "/api/sessions").await;
+    assert_eq!(status, StatusCode::OK);
+    let ids: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec![logical, "intake-old"]);
+    assert_eq!(body[0]["agent_ids"], serde_json::json!(["a1"]));
+    assert_eq!(body[1]["agent_ids"], serde_json::json!(["a1"]));
+    assert!(!ids.contains(&physical.as_str()));
+
+    let (status, detail) = get(app.clone(), &format!("/api/sessions/{logical}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["agent_ids"], serde_json::json!(["a1"]));
+    assert_eq!(detail["gateway_bound"], true);
+
+    let (status, phys) = get(app, &format!("/api/sessions/{physical}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(phys["agent_ids"], serde_json::json!(["a1"]));
+    assert_eq!(phys["gateway_bound"], true);
 }

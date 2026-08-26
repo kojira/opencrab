@@ -12,10 +12,11 @@
 
 | 関数 | 契約 |
 |---|---|
-| `open_web_physical_session` | 開いている web binding の physical ID。同一 address に 2 件なら失敗 |
-| `open_web_binding` | 開いている web binding の binding_id / instance_id。同一 address に 2 件なら失敗 |
+| `open_web_physical_session` | 開いている web binding の physical ID。address または physical ID で解決。同一 session に 2 件なら失敗 |
+| `open_web_binding` | 開いている web binding の binding_id / instance_id。address または physical ID。同一 session に 2 件なら失敗 |
+| `effective_agent_ids` | `agent_sessions` を join した実効参加者。open web binding があれば physical の membership |
 | `project_session_row` | logical ID 維持。alias があれば表示属性は alias。無ければ physical。会話状態は physical。membership から participant を埋める |
-| `list_sessions_page` | physical 行を除き logical 1 件。alias の無い open web binding も含める。`limit` と `before` |
+| `list_sessions_page` | physical 行を除き logical 1 件。alias の無い open web binding も含める。各行に `agent_ids`。`updated_at DESC`。`limit` と `before` |
 | `list_sessions` | テスト専用。投影なし全件 |
 
 ## tool_logs（載せ替え工程 5-b）

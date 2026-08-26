@@ -90,7 +90,16 @@ pub async fn list_sessions(
     };
     match opencrab_db::queries::list_sessions_page(&conn, page_limit(q.limit), q.before.as_deref()) {
         Ok(items) => {
-            let rows: Vec<_> = items.into_iter().map(|i| i.session).collect();
+            let rows: Vec<serde_json::Value> = items
+                .into_iter()
+                .map(|i| {
+                    let mut value =
+                        serde_json::to_value(i.session).expect("SessionRow is serializable");
+                    value["gateway_bound"] = serde_json::json!(i.gateway_bound);
+                    value["agent_ids"] = serde_json::json!(i.agent_ids);
+                    value
+                })
+                .collect();
             Json(rows).into_response()
         }
         Err(e) => {
@@ -157,8 +166,19 @@ pub async fn get_session(
     };
     match opencrab_db::queries::project_session_row(&conn, &id) {
         Ok(Some((session, gateway_bound))) => {
+            let agent_ids = match opencrab_db::queries::effective_agent_ids(&conn, &id) {
+                Ok(ids) => ids,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({"error": e.to_string()})),
+                    )
+                        .into_response();
+                }
+            };
             let mut value = serde_json::to_value(session).expect("SessionRow is serializable");
             value["gateway_bound"] = serde_json::json!(gateway_bound);
+            value["agent_ids"] = serde_json::json!(agent_ids);
             if gateway_bound {
                 match opencrab_db::queries::open_web_binding(&conn, &id) {
                     Ok(Some(b)) => match extgate.lock_registry() {
