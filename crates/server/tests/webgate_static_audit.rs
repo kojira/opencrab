@@ -62,8 +62,80 @@ fn server_cargo_has_no_web_gateway_dependency() {
         !toml.contains("opencrab-web-gateway"),
         "server Cargo.toml still depends on opencrab-web-gateway"
     );
+    assert!(!toml.contains("web = "), "server still has a web feature");
+}
+
+const WITHDRAWN_CORE_CONVERSATION: &[&str] = &[
+    "/api/agents/{id}/web/send",
+    "/api/agents/{id}/web/stream",
+    "/api/sessions/{id}/owner",
+    "/api/sessions/{id}/messages",
+    "/api/sessions/{id}/mentor",
+];
+
+const UI_FORBIDDEN: &[&str] = &[
+    "/web/send",
+    "/web/stream",
+    "/sessions/${id}/owner",
+    "/sessions/${id}/mentor",
+    "/sessions/${id}/messages",
+    "/rooms/",
+];
+
+fn walk_ext(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.is_dir() {
+            walk_ext(&path, ext, out);
+        } else if path.extension().and_then(|n| n.to_str()) == Some(ext) {
+            out.push(path);
+        }
+    }
+}
+
+#[test]
+fn route_inventory_has_no_withdrawn_conversation_post() {
+    let routes = opencrab_server::production_route_inventory();
+    let mut hits = Vec::new();
+    for route in &routes {
+        if WITHDRAWN_CORE_CONVERSATION.contains(&route.path.as_str()) {
+            hits.push(format!("{} {}", route.methods.join(","), route.path));
+        }
+    }
     assert!(
-        !toml.contains("web = "),
-        "server still has a web feature"
+        hits.is_empty(),
+        "withdrawn conversation routes still in inventory:\n{}",
+        hits.join("\n")
     );
+}
+
+#[test]
+fn ui_call_sites_have_no_unknown_conversation_post() {
+    let web_src = crate_root().join("../../web/src");
+    let mut files = Vec::new();
+    walk_ext(&web_src, "ts", &mut files);
+    walk_ext(&web_src, "tsx", &mut files);
+    let mut hits = Vec::new();
+    let mut new_post = 0usize;
+    for path in &files {
+        let text = fs::read_to_string(path).unwrap();
+        if text.contains("/api/web-conversations/") && text.contains("POST") {
+            new_post += 1;
+        }
+        if text.contains("sendWebMessage") || text.contains("conversationEventsUrl") {
+            new_post += 1;
+        }
+        for pat in UI_FORBIDDEN {
+            if text.contains(pat) {
+                hits.push(format!("{}: {pat}", path.display()));
+            }
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "unknown/withdrawn conversation call-site:\n{}",
+        hits.join("\n")
+    );
+    assert!(new_post >= 1, "UI send call-site for new POST is missing");
 }
