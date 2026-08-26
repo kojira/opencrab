@@ -21,7 +21,68 @@ function toSessionDto(s: SessionRow): SessionDto {
     agent_ids: agentIds,
     metadata_json: s.metadata_json,
     gateway_bound: s.gateway_bound === true,
+    web_binding_state: s.web_binding_state,
   };
+}
+
+export type CreatedConversation = {
+  conversation_id: string;
+  session_id: string;
+  binding_id: string;
+  name: string | null;
+  state: 'ready' | 'provisioning';
+  httpStatus: 201 | 202;
+};
+
+export class ConversationCreateError extends Error {
+  readonly status: number;
+  readonly code: string;
+  constructor(status: number, code: string, message: string) {
+    super(message);
+    this.status = status;
+    this.code = code;
+  }
+}
+
+/** 新規 Web 会話の唯一の API client。browser は ID を採番しない。 */
+export async function createWebConversation(
+  agentId: string,
+  name?: string,
+): Promise<CreatedConversation> {
+  const res = await fetch(`/api/agents/${agentId}/web-conversations`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: name === undefined ? '{}' : JSON.stringify({ name }),
+  });
+  const body = (await res.json().catch(() => ({}))) as {
+    conversation_id?: string;
+    session_id?: string;
+    binding_id?: string;
+    name?: string | null;
+    state?: string;
+    error?: string | { code?: string };
+  };
+  if (
+    (res.status === 201 || res.status === 202) &&
+    (body.state === 'ready' || body.state === 'provisioning') &&
+    typeof body.conversation_id === 'string' &&
+    typeof body.session_id === 'string' &&
+    typeof body.binding_id === 'string'
+  ) {
+    return {
+      conversation_id: body.conversation_id,
+      session_id: body.session_id,
+      binding_id: body.binding_id,
+      name: body.name ?? null,
+      state: body.state,
+      httpStatus: res.status as 201 | 202,
+    };
+  }
+  const code =
+    typeof body.error === 'string'
+      ? body.error
+      : (body.error?.code ?? String(res.status));
+  throw new ConversationCreateError(res.status, code, code);
 }
 
 export async function getSessions(

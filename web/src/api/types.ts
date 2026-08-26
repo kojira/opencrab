@@ -99,6 +99,7 @@ export interface SessionRow {
   max_turns: number | null;
   metadata_json: string | null;
   gateway_bound?: boolean;
+  web_binding_state?: 'ready' | 'provisioning' | 'unavailable';
 }
 
 export interface SessionDto {
@@ -112,6 +113,7 @@ export interface SessionDto {
   agent_ids: string[];
   metadata_json: string | null;
   gateway_bound: boolean;
+  web_binding_state?: 'ready' | 'provisioning' | 'unavailable';
 }
 
 export interface SessionLogRow {

@@ -8,7 +8,14 @@ vi.mock('./client', () => ({
 }));
 
 import { api } from './client';
-import { getSessions, getSession, sendWebMessage, conversationEventsUrl } from './sessions';
+import {
+  getSessions,
+  getSession,
+  sendWebMessage,
+  conversationEventsUrl,
+  createWebConversation,
+} from './sessions';
+import { conversationTitle } from '../lib/conversationTitle';
 import type { SessionRow } from './types';
 
 const mockedApi = vi.mocked(api);
@@ -76,7 +83,57 @@ describe('getSession', () => {
       agent_ids: ['a1', 'a2', 'a3', 'a4'],
       metadata_json: null,
       gateway_bound: false,
+      web_binding_state: undefined,
     });
+  });
+});
+
+describe('createWebConversation', () => {
+  it('is the only create client and distinguishes 201 from 202', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 202,
+      json: async () => ({
+        conversation_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+        session_id: 'web-agent-1-cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+        binding_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        name: null,
+        state: 'provisioning',
+      }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const created = await createWebConversation('agent-1');
+
+    expect(created.httpStatus).toBe(202);
+    expect(created.state).toBe('provisioning');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/agents/agent-1/web-conversations',
+      expect.objectContaining({
+        method: 'POST',
+        body: '{}',
+      }),
+    );
+    vi.unstubAllGlobals();
+  });
+
+  it('rejects error bodies as ConversationCreateError', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      status: 409,
+      json: async () => ({ error: 'web_instance_unavailable' }),
+    }));
+    await expect(createWebConversation('agent-1', 'n')).rejects.toMatchObject({
+      status: 409,
+      code: 'web_instance_unavailable',
+    });
+    vi.unstubAllGlobals();
+  });
+});
+
+describe('conversationTitle', () => {
+  it('does not use the id as a display name', () => {
+    expect(conversationTitle('web-a-1', 'web-a-1', '新しい会話')).toBe('新しい会話');
+    expect(conversationTitle('web-a-1', 'Lunch', '新しい会話')).toBe('Lunch');
   });
 });
 

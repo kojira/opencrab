@@ -9,6 +9,10 @@ import {
   ConversationSendError,
 } from '../api/sessions';
 import type { SessionDto, SessionLogRow } from '../api/types';
+import { conversationTitle } from '../lib/conversationTitle';
+
+export const BINDING_POLL_MS = 1000;
+export const BINDING_POLL_MAX = 60;
 
 type LoadKind = 'idle' | 'loading' | 'loaded-empty' | 'loaded' | 'error';
 type SendPhase = 'idle' | 'submitting' | 'accepted' | 'responding';
@@ -158,6 +162,9 @@ export default function SessionDetail() {
   const [sendError, setSendError] = useState<string | null>(null);
   const [liveAgent, setLiveAgent] = useState<string | null>(null);
   const [noReply, setNoReply] = useState(false);
+  const [pollError, setPollError] = useState<string | null>(null);
+  const [pollTimedOut, setPollTimedOut] = useState(false);
+  const [pollNonce, setPollNonce] = useState(0);
   const abortRef = useRef<AbortController | null>(null);
   const sourceRef = useRef<EventSource | null>(null);
 
@@ -231,8 +238,41 @@ export default function SessionDetail() {
     };
   }, [id]);
 
+  const bound = session?.gateway_bound === true;
+  const ready = bound && session?.web_binding_state === 'ready';
+  const preparing = bound && session?.web_binding_state !== 'ready';
+
   useEffect(() => {
-    if (!id || sessionKind !== 'loaded' || logsKind === 'loading' || logsKind === 'idle') return;
+    if (!id || !preparing || pollTimedOut || pollError) return;
+    let cancelled = false;
+    let ticks = 0;
+    const timer = window.setInterval(() => {
+      ticks += 1;
+      if (ticks > BINDING_POLL_MAX) {
+        window.clearInterval(timer);
+        setPollTimedOut(true);
+        return;
+      }
+      getSession(id)
+        .then((s) => {
+          if (cancelled) return;
+          setSession(s);
+          setSessionKind('loaded');
+        })
+        .catch((e: Error) => {
+          if (cancelled) return;
+          window.clearInterval(timer);
+          setPollError(e.message);
+        });
+    }, BINDING_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [id, preparing, pollTimedOut, pollError, pollNonce]);
+
+  useEffect(() => {
+    if (!id || !ready || sessionKind !== 'loaded' || logsKind === 'loading' || logsKind === 'idle') return;
     sourceRef.current?.close();
     const es = new EventSource(conversationEventsUrl(id));
     sourceRef.current = es;
@@ -277,7 +317,7 @@ export default function SessionDetail() {
     return () => {
       es.close();
     };
-  }, [id, sessionKind, logsKind]);
+  }, [id, ready, sessionKind, logsKind]);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -324,7 +364,25 @@ export default function SessionDetail() {
           : 'badge-neutral'
     : '';
 
-  const bound = session?.gateway_bound === true;
+  const title = session
+    ? conversationTitle(session.id, session.theme, t('sessions.newConversation'))
+    : '';
+
+  const retryBindingPoll = () => {
+    setPollError(null);
+    setPollTimedOut(false);
+    setPollNonce((n) => n + 1);
+    if (id) {
+      getSession(id)
+        .then((s) => {
+          setSession(s);
+          setSessionKind('loaded');
+        })
+        .catch((e: Error) => {
+          setPollError(e.message);
+        });
+    }
+  };
 
   return (
     <div className="max-w-4xl mx-auto h-full flex flex-col">
@@ -343,7 +401,7 @@ export default function SessionDetail() {
                 <span className="text-sm hidden sm:inline">{t('sessions.backToList')}</span>
               </Link>
               <div className="min-w-0">
-                <h1 className="text-title-lg text-on-surface break-words">{session.theme}</h1>
+                <h1 className="text-title-lg text-on-surface break-words">{title}</h1>
                 <div className="flex items-center gap-2 flex-wrap text-body-sm text-on-surface-variant mt-0.5">
                   <span>{t('sessionDetail.mode', { value: session.mode })}</span>
                   <span>{t('sessionDetail.phase', { value: session.phase })}</span>
@@ -434,6 +492,28 @@ export default function SessionDetail() {
           <p className="text-body-lg text-on-surface-variant" role="status">
             {t('sessionDetail.unbound')}
           </p>
+        ) : preparing ? (
+          <div role="status">
+            <p className="text-body-lg text-on-surface-variant">
+              {t('sessionDetail.bindingPreparing')}
+            </p>
+            {pollTimedOut || pollError ? (
+              <div className="mt-2">
+                {pollError ? (
+                  <p className="text-body-sm text-error" role="alert">
+                    {t('common.error', { message: pollError })}
+                  </p>
+                ) : (
+                  <p className="text-body-sm text-on-surface-variant">
+                    {t('sessionDetail.bindingTimeout')}
+                  </p>
+                )}
+                <button type="button" className="btn-text" onClick={retryBindingPoll}>
+                  {t('common.retry')}
+                </button>
+              </div>
+            ) : null}
+          </div>
         ) : (
           <form className="flex gap-3" onSubmit={(e) => void submit(e)}>
             <input

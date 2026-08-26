@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { getSessions } from '../api/sessions';
 import type { SessionDto } from '../api/types';
 import { useAgentContext } from '../hooks/useAgentContext';
+import NewConversationButton from '../components/ui/NewConversationButton';
 import SessionCard from '../components/ui/SessionCard';
 
 type LoadKind = 'idle' | 'loading' | 'loaded-empty' | 'loaded' | 'error';
@@ -85,6 +86,9 @@ export default function AgentSessions() {
 
   return (
     <div className="space-y-3">
+      <div className="flex justify-end">
+        <NewConversationButton agentId={agentId} />
+      </div>
       {sessions.map((session) => (
         <SessionCard key={session.id} session={session} />
       ))}

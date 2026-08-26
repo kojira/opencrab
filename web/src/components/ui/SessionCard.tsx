@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { conversationTitle } from '../../lib/conversationTitle';
 import type { SessionDto } from '../../api/types';
 
 interface DiscordMetadata {
@@ -122,7 +123,7 @@ export default function SessionCard({ session }: { session: SessionDto }) {
           <div className="shrink-0">{sessionIcon}</div>
           <div className="min-w-0">
             <h3 className="text-title-sm text-on-surface group-hover:text-primary transition-colors truncate">
-              {session.theme}
+              {conversationTitle(session.id, session.theme, t('sessions.newConversation'))}
             </h3>
             <div className="flex items-center gap-3 text-body-sm text-on-surface-variant mt-0.5">
               <span className="flex items-center gap-1">

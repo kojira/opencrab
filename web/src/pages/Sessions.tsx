@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { getAgents } from '../api/agents';
 import { getSessions } from '../api/sessions';
-import type { SessionDto } from '../api/types';
+import type { AgentSummary, SessionDto } from '../api/types';
+import NewConversationButton from '../components/ui/NewConversationButton';
 import SessionCard from '../components/ui/SessionCard';
 
 type LoadKind = 'idle' | 'loading' | 'loaded-empty' | 'loaded' | 'error';
@@ -13,6 +15,8 @@ export default function Sessions() {
   const [error, setError] = useState('');
   const [hasMore, setHasMore] = useState(false);
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'completed'>('all');
+  const [agents, setAgents] = useState<AgentSummary[]>([]);
+  const [agentFilter, setAgentFilter] = useState('');
   const abortRef = useRef<AbortController | null>(null);
 
   const load = (reset: boolean) => {
@@ -44,6 +48,10 @@ export default function Sessions() {
     return () => abortRef.current?.abort();
   }, [statusFilter]);
 
+  useEffect(() => {
+    getAgents().then(setAgents).catch(() => setAgents([]));
+  }, []);
+
   const filtered =
     statusFilter === 'all' ? sessions : sessions.filter((s) => s.status === statusFilter);
 
@@ -59,6 +67,20 @@ export default function Sessions() {
           )}
         </div>
         <div className="flex items-center gap-2">
+          <select
+            className="input-outlined py-1.5"
+            value={agentFilter}
+            onChange={(e) => setAgentFilter(e.target.value)}
+            aria-label={t('common.selectAgent')}
+          >
+            <option value="">{t('common.selectAgentPlaceholder')}</option>
+            {agents.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name}
+              </option>
+            ))}
+          </select>
+          <NewConversationButton agentId={agentFilter || null} />
           {(['all', 'active', 'completed'] as const).map((f) => (
             <button
               key={f}
