@@ -52,8 +52,11 @@ export default function Sessions() {
     getAgents().then(setAgents).catch(() => setAgents([]));
   }, []);
 
-  const filtered =
-    statusFilter === 'all' ? sessions : sessions.filter((s) => s.status === statusFilter);
+  const filtered = sessions.filter((s) => {
+    if (statusFilter !== 'all' && s.status !== statusFilter) return false;
+    if (agentFilter && !s.agent_ids.includes(agentFilter)) return false;
+    return true;
+  });
 
   return (
     <div className="max-w-7xl mx-auto">

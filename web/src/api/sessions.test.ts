@@ -38,36 +38,41 @@ function makeRow(overrides: Partial<SessionRow> = {}): SessionRow {
 }
 
 describe('getSessions', () => {
-  it('converts participant_ids_json to participant_count', async () => {
+  it('uses server agent_ids for filter and count', async () => {
     mockedApi.get.mockResolvedValue([
-      makeRow({ id: 's1', participant_ids_json: '["a1","a2"]' }),
-      makeRow({ id: 's2', participant_ids_json: '["a1"]' }),
+      makeRow({ id: 's1', participant_ids_json: '[]', agent_ids: ['a1', 'a2'] }),
+      makeRow({ id: 's2', participant_ids_json: '["stale"]', agent_ids: ['a1'] }),
     ]);
 
     const result = await getSessions();
 
     expect(result).toEqual([
-      expect.objectContaining({ id: 's1', participant_count: 2 }),
-      expect.objectContaining({ id: 's2', participant_count: 1 }),
+      expect.objectContaining({ id: 's1', participant_count: 2, agent_ids: ['a1', 'a2'] }),
+      expect.objectContaining({ id: 's2', participant_count: 1, agent_ids: ['a1'] }),
     ]);
     expect(result[0]).not.toHaveProperty('participant_ids_json');
     expect(mockedApi.get).toHaveBeenCalledWith('/sessions?limit=100', expect.anything());
   });
 
-  it('handles invalid JSON in participant_ids_json gracefully', async () => {
+  it('treats missing agent_ids as empty membership', async () => {
     mockedApi.get.mockResolvedValue([
-      makeRow({ participant_ids_json: 'not-json' }),
+      makeRow({ participant_ids_json: '["a1","a2"]' }),
     ]);
 
     const result = await getSessions();
     expect(result[0].participant_count).toBe(0);
+    expect(result[0].agent_ids).toEqual([]);
   });
 });
 
 describe('getSession', () => {
   it('converts a single session row to DTO', async () => {
     mockedApi.get.mockResolvedValue(
-      makeRow({ id: 's5', participant_ids_json: '["a1","a2","a3","a4"]' }),
+      makeRow({
+        id: 's5',
+        participant_ids_json: '[]',
+        agent_ids: ['a1', 'a2', 'a3', 'a4'],
+      }),
     );
 
     const result = await getSession('s5');

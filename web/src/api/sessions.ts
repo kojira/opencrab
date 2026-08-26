@@ -4,12 +4,7 @@ import type { SessionRow, SessionDto, SessionLogRow } from './types';
 export type LoadKind = 'idle' | 'loading' | 'loaded-empty' | 'loaded' | 'error';
 
 function toSessionDto(s: SessionRow): SessionDto {
-  let agentIds: string[] = [];
-  try {
-    agentIds = JSON.parse(s.participant_ids_json);
-  } catch {
-    // ignore
-  }
+  const agentIds = Array.isArray(s.agent_ids) ? s.agent_ids : [];
   return {
     id: s.id,
     mode: s.mode,
@@ -108,6 +103,14 @@ export function getSessionLogs(
   q.set('limit', String(opts.limit ?? 100));
   if (opts.before) q.set('before', opts.before);
   return api.get<SessionLogRow[]>(`/sessions/${id}/logs?${q}`, { signal: opts.signal });
+}
+
+/** 非 web セッションの従来 owner 指示。web-conversation POST/SSE には使わない。 */
+export function sendOwnerInstruction(
+  sessionId: string,
+  content: string,
+): Promise<{ id: number }> {
+  return api.post(`/sessions/${sessionId}/owner`, { content });
 }
 
 export type SendAccepted = {

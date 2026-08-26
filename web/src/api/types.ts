@@ -98,6 +98,7 @@ export interface SessionRow {
   done_count: number;
   max_turns: number | null;
   metadata_json: string | null;
+  agent_ids?: string[];
   gateway_bound?: boolean;
   web_binding_state?: 'ready' | 'provisioning' | 'unavailable';
 }

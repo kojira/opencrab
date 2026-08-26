@@ -5,6 +5,7 @@ import {
   conversationEventsUrl,
   getSession,
   getSessionLogs,
+  sendOwnerInstruction,
   sendWebMessage,
   ConversationSendError,
 } from '../api/sessions';
@@ -238,9 +239,10 @@ export default function SessionDetail() {
     };
   }, [id]);
 
-  const bound = session?.gateway_bound === true;
-  const ready = bound && session?.web_binding_state === 'ready';
-  const preparing = bound && session?.web_binding_state !== 'ready';
+  // §4.3: open web binding の address または physical。server の gateway_bound がその写像。
+  const isWebConversation = session?.gateway_bound === true;
+  const ready = isWebConversation && session?.web_binding_state === 'ready';
+  const preparing = isWebConversation && session?.web_binding_state !== 'ready';
 
   useEffect(() => {
     if (!id || !preparing || pollTimedOut || pollError) return;
@@ -272,7 +274,7 @@ export default function SessionDetail() {
   }, [id, preparing, pollTimedOut, pollError, pollNonce]);
 
   useEffect(() => {
-    if (!id || !ready || sessionKind !== 'loaded' || logsKind === 'loading' || logsKind === 'idle') return;
+    if (!isWebConversation || !id || !ready || sessionKind !== 'loaded' || logsKind === 'loading' || logsKind === 'idle') return;
     sourceRef.current?.close();
     const es = new EventSource(conversationEventsUrl(id));
     sourceRef.current = es;
@@ -317,11 +319,25 @@ export default function SessionDetail() {
     return () => {
       es.close();
     };
-  }, [id, ready, sessionKind, logsKind]);
+  }, [id, isWebConversation, ready, sessionKind, logsKind]);
+
+  const submitOwner = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!id || !ownerInput.trim() || sendPhase === 'submitting') return;
+    const content = ownerInput.trim();
+    setOwnerInput('');
+    setSendError(null);
+    try {
+      await sendOwnerInstruction(id, content);
+      refreshTail(id);
+    } catch (err) {
+      setSendError((err as Error).message);
+    }
+  };
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!id || !ownerInput.trim() || sendPhase === 'submitting') return;
+    if (!isWebConversation || !id || !ownerInput.trim() || sendPhase === 'submitting') return;
     const text = ownerInput.trim();
     const clientId = pendingId ?? crypto.randomUUID().toLowerCase();
     setPendingId(clientId);
@@ -471,12 +487,19 @@ export default function SessionDetail() {
       {sendError ? (
         <ErrorPanel
           endpoint={
-            sendError === 'sse_disconnected'
-              ? 'GET /api/web-conversations/{session_id}/events'
-              : 'POST /api/web-conversations/{session_id}/messages'
+            !isWebConversation
+              ? 'POST /api/sessions/{id}/owner'
+              : sendError === 'sse_disconnected'
+                ? 'GET /api/web-conversations/{session_id}/events'
+                : 'POST /api/web-conversations/{session_id}/messages'
           }
           message={sendError}
           onRetry={() => {
+            if (!isWebConversation) {
+              setSendError(null);
+              if (id) loadSession(id);
+              return;
+            }
             if (sendError === 'sse_disconnected') {
               setSendError(null);
               if (id) loadSession(id);
@@ -487,50 +510,62 @@ export default function SessionDetail() {
         />
       ) : null}
 
-      <div className="card-elevated">
-        {!bound ? (
-          <p className="text-body-lg text-on-surface-variant" role="status">
-            {t('sessionDetail.unbound')}
-          </p>
-        ) : preparing ? (
-          <div role="status">
-            <p className="text-body-lg text-on-surface-variant">
-              {t('sessionDetail.bindingPreparing')}
-            </p>
-            {pollTimedOut || pollError ? (
-              <div className="mt-2">
-                {pollError ? (
-                  <p className="text-body-sm text-error" role="alert">
-                    {t('common.error', { message: pollError })}
-                  </p>
-                ) : (
-                  <p className="text-body-sm text-on-surface-variant">
-                    {t('sessionDetail.bindingTimeout')}
-                  </p>
-                )}
-                <button type="button" className="btn-text" onClick={retryBindingPoll}>
-                  {t('common.retry')}
-                </button>
-              </div>
-            ) : null}
-          </div>
-        ) : (
-          <form className="flex gap-3" onSubmit={(e) => void submit(e)}>
-            <input
-              type="text"
-              className="input-outlined flex-1"
-              placeholder={t('sessionDetail.ownerPlaceholder')}
-              value={ownerInput}
-              onChange={(e) => setOwnerInput(e.target.value)}
-              disabled={sendPhase === 'submitting'}
-            />
-            <button type="submit" className="btn-filled" disabled={sendPhase === 'submitting'}>
-              <span className="material-symbols-outlined text-xl">send</span>
-              {t('common.send')}
-            </button>
-          </form>
-        )}
-      </div>
+      {sessionKind === 'loaded' && session ? (
+        <div className="card-elevated">
+          {!isWebConversation ? (
+            <form className="flex gap-3" onSubmit={(e) => void submitOwner(e)}>
+              <input
+                type="text"
+                className="input-outlined flex-1"
+                placeholder={t('sessionDetail.ownerPlaceholder')}
+                value={ownerInput}
+                onChange={(e) => setOwnerInput(e.target.value)}
+              />
+              <button type="submit" className="btn-filled">
+                <span className="material-symbols-outlined text-xl">send</span>
+                {t('common.send')}
+              </button>
+            </form>
+          ) : preparing ? (
+            <div role="status">
+              <p className="text-body-lg text-on-surface-variant">
+                {t('sessionDetail.bindingPreparing')}
+              </p>
+              {pollTimedOut || pollError ? (
+                <div className="mt-2">
+                  {pollError ? (
+                    <p className="text-body-sm text-error" role="alert">
+                      {t('common.error', { message: pollError })}
+                    </p>
+                  ) : (
+                    <p className="text-body-sm text-on-surface-variant">
+                      {t('sessionDetail.bindingTimeout')}
+                    </p>
+                  )}
+                  <button type="button" className="btn-text" onClick={retryBindingPoll}>
+                    {t('common.retry')}
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <form className="flex gap-3" onSubmit={(e) => void submit(e)}>
+              <input
+                type="text"
+                className="input-outlined flex-1"
+                placeholder={t('sessionDetail.ownerPlaceholder')}
+                value={ownerInput}
+                onChange={(e) => setOwnerInput(e.target.value)}
+                disabled={sendPhase === 'submitting'}
+              />
+              <button type="submit" className="btn-filled" disabled={sendPhase === 'submitting'}>
+                <span className="material-symbols-outlined text-xl">send</span>
+                {t('common.send')}
+              </button>
+            </form>
+          )}
+        </div>
+      ) : null}
     </div>
   );
 }
