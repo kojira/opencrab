@@ -50,6 +50,7 @@ Base URL: `http://localhost:3000`
 | POST | `/api/sessions/{id}/messages` | Send message (triggers agent response) |
 | GET | `/api/sessions/{id}/logs` | Get session logs |
 | POST | `/api/sessions/{id}/mentor` | Insert mentor instruction |
+| POST | `/api/sessions/{id}/owner` | Owner instruction (record + turn) |
 | **Agent Schedules (#455)** | | |
 | GET | `/api/agents/{id}/schedules` | List schedules (each with computed `next_fire_at`) |
 | POST | `/api/agents/{id}/schedules` | Create schedule (cron/`@every`; validates cron/tz/session; 400 on invalid) |
@@ -1189,6 +1190,55 @@ issue #499）、`process_interval_secs` ごとのポーリングは取りこぼ�
 ```json
 {"id": 99}
 ```
+
+---
+
+### POST /api/sessions/{id}/owner
+
+**目的**: ダッシュボード SessionDetail からのオーナー指示。発言を `session_logs` に記録し、参加者のターンを起こす。
+
+判断は core の `accept_inbound` 1 口。記録は `prepare_session_inbound_write`。ターン起動は `run_session_turn`。UI（`web/src/api/sessions.ts` の `sendOwnerInstruction`）が叩く経路。
+
+`POST /api/sessions/{id}/mentor` とは別口。mentor は `log_type: "system"` の記録のみでターンは起こさない。
+
+**Request Body**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| content | string | ✅ | オーナー指示の内容 |
+
+**Example Request**
+
+```json
+{"content": "Please summarize the discussion so far."}
+```
+
+**Response**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| id | number | 作成されたログ DB ID |
+| session_id | string | セッション ID |
+| responses | array | 参加者ごとの応答（LLM 未設定時は無い） |
+
+**Example Response**
+
+```json
+{
+  "id": 100,
+  "session_id": "web-…-qc-human-check-1",
+  "responses": [
+    {
+      "agent_id": "…",
+      "agent_name": "…",
+      "content": "…",
+      "tool_calls_made": 0
+    }
+  ]
+}
+```
+
+セッションが無いときは **404**。参加者が無いときは **400**。
 
 ---
 

@@ -346,6 +346,112 @@ async fn test_send_message_to_session() {
 }
 
 #[tokio::test]
+async fn test_owner_instruction_missing_session_is_404() {
+    let app = create_test_app();
+    let (status, resp) = send_request(
+        app,
+        "POST",
+        "/api/sessions/no-such-session/owner",
+        Some(serde_json::json!({"content": "hello"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("session not found"),
+        "missing session is 404: {resp}"
+    );
+}
+
+#[tokio::test]
+async fn test_owner_instruction_records_without_llm() {
+    let app = create_test_app();
+    let (agent_id, app) = create_test_agent(app).await;
+
+    let (_, resp) = send_request(
+        app.clone(),
+        "POST",
+        "/api/sessions",
+        Some(serde_json::json!({
+            "theme": "Owner Record",
+            "participant_ids": [&agent_id]
+        })),
+    )
+    .await;
+    let session_id = resp["id"].as_str().unwrap().to_string();
+
+    let (status, resp) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/sessions/{session_id}/owner"),
+        Some(serde_json::json!({"content": "owner says hi"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(resp["id"].as_i64().is_some());
+    assert_eq!(resp["session_id"], session_id);
+
+    let (_, logs) = send_request(
+        app,
+        "GET",
+        &format!("/api/sessions/{session_id}/logs"),
+        None,
+    )
+    .await;
+    let logs = logs.as_array().unwrap();
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0]["content"], "owner says hi");
+    assert_eq!(logs[0]["log_type"], "speech");
+    assert_eq!(logs[0]["speaker_id"], "web-user");
+}
+
+#[tokio::test]
+async fn test_owner_instruction_triggers_turn_and_llm_log() {
+    let (app, db, mock) = create_test_app_with_llm();
+    let (agent_id, app) = create_test_agent(app).await;
+
+    let (_, resp) = send_request(
+        app.clone(),
+        "POST",
+        "/api/sessions",
+        Some(serde_json::json!({
+            "theme": "Owner Turn",
+            "participant_ids": [&agent_id]
+        })),
+    )
+    .await;
+    let session_id = resp["id"].as_str().unwrap().to_string();
+
+    mock.push_text_response("owner turn reply");
+
+    let (status, resp) = send_request(
+        app,
+        "POST",
+        &format!("/api/sessions/{session_id}/owner"),
+        Some(serde_json::json!({"content": "please respond"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(resp["id"].as_i64().is_some());
+    let responses = resp["responses"].as_array().expect("turn responses");
+    assert_eq!(responses.len(), 1);
+    assert_eq!(responses[0]["agent_id"], agent_id);
+    assert_eq!(responses[0]["content"], "owner turn reply");
+
+    let logs = {
+        let conn = db.lock().unwrap();
+        opencrab_db::queries::list_llm_logs(&conn, &agent_id, 10).unwrap()
+    };
+    assert!(
+        logs.iter()
+            .any(|row| row.session_id.as_deref() == Some(session_id.as_str())),
+        "owner 投稿で llm_logs にターンが残る"
+    );
+}
+
+#[tokio::test]
 async fn test_add_and_list_skills() {
     let app = create_test_app();
     let (agent_id, app) = create_test_agent(app).await;

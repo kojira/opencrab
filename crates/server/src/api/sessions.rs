@@ -4,11 +4,23 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use opencrab_actions::{
+    accept_inbound, prepare_session_inbound_write, run_session_turn, AgentRuntime, InboundLookups,
+    InboundWork, NormalizedInbound, NormalizedInboundEvent,
+    PrepareSessionInboundError, RunRequest,
+};
 use serde::Deserialize;
 
 use crate::process;
 use crate::process::AgentNotFound;
 use crate::AppState;
+
+/// web/send と同じ番兵。`accept_inbound` は `guild_id` が空のときだけ DM ゲートを見る。
+/// 値は `opencrab_web_gateway::WEB_INBOUND_GUILD` と一致させる。
+const OWNER_INBOUND_GUILD: &str = "web";
+/// SessionDetail は `user_id` を送らない。web/send 省略時と同じ主体。
+/// 値は `opencrab_web_gateway::DEFAULT_WEB_USER_ID` と一致させる。
+const OWNER_USER_ID: &str = "web-user";
 
 pub async fn list_session_logs(
     State(state): State<AppState>,
@@ -50,6 +62,253 @@ pub async fn send_mentor_instruction(
         }
     };
     Json(serde_json::json!({"id": log_id}))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OwnerInstructionRequest {
+    pub content: String,
+}
+
+/// Dashboard SessionDetail のオーナー指示（`POST /api/sessions/{id}/owner`）。
+///
+/// 判断は core の [`accept_inbound`] 1 口。記録は
+/// [`prepare_session_inbound_write`]。ターン起動は [`run_session_turn`]。
+/// ゲートは HTTP 抽出と配線だけ。
+pub async fn send_owner_instruction(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<OwnerInstructionRequest>,
+) -> Response {
+    let (session_theme, participant_ids) = {
+        let conn = match state.db.lock() {
+            Ok(conn) => conn,
+            Err(_) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": "database unavailable"})),
+                )
+                    .into_response();
+            }
+        };
+        let session = match opencrab_db::queries::get_session(&conn, &id) {
+            Ok(Some(session)) => session,
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": format!("session not found: {id}")})),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("failed to load session: {e}")})),
+                )
+                    .into_response();
+            }
+        };
+        let participant_ids = match opencrab_db::queries::list_session_participants(&conn, &id) {
+            Ok(ids) if !ids.is_empty() => ids,
+            Ok(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "session has no participants"})),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!("failed to load participants: {e}")
+                    })),
+                )
+                    .into_response();
+            }
+        };
+        (session.theme, participant_ids)
+    };
+
+    // InboundLookups の dyn Fn は Send でないので、await の前にブロックで落とす。
+    let (caller, admitted_ids, should_run) = {
+        let inbound_event = NormalizedInboundEvent {
+            sender_id: OWNER_USER_ID,
+            channel_id: "",
+            guild_id: OWNER_INBOUND_GUILD,
+        };
+        let work = InboundWork {
+            event: inbound_event,
+            has_content: !req.content.trim().is_empty(),
+            kind_label: "",
+            author_key: OWNER_USER_ID,
+        };
+        let resolve = |s: &str, a: &[String], _: &str| {
+            let agent_id = a
+                .first()
+                .expect("owner inbound は participants 確認後にだけ呼ぶ");
+            let conn = state.db.lock().unwrap();
+            crate::caller_identity::resolve_caller_identity(
+                &conn,
+                opencrab_db::queries::TRUSTED_PLATFORM_WEB,
+                s,
+                agent_id,
+            )
+        };
+        let lookups = InboundLookups {
+            resolve_caller: &resolve,
+            dm_allowed_any: &|_, _, _| true,
+            dm_allowed: &|_, _, _| true,
+            channel_whitelisted: &|_, _| true,
+        };
+        let mut caller = None;
+        let mut admitted_ids = Vec::new();
+        let mut should_run = false;
+        accept_inbound::<()>(
+            &[work],
+            "",
+            &participant_ids,
+            &lookups,
+            None,
+            |_| (),
+            |_, adm| {
+                caller = Some(adm.caller.clone());
+                admitted_ids = adm.admitted_agent_ids.clone();
+            },
+            |_, _, _| should_run = true,
+        )
+        .expect("owner inbound は DM ではない（OWNER_INBOUND_GUILD が非空）");
+        (
+            caller.expect("owner inbound は 1 件通る"),
+            admitted_ids,
+            should_run,
+        )
+    };
+
+    let record_agent_id = participant_ids[0].as_str();
+    let inbound = NormalizedInbound {
+        session_id: &id,
+        agent_id: record_agent_id,
+        sender_id: OWNER_USER_ID,
+        sender_name: "",
+        avatar_url: None,
+        channel_id: None,
+        pubkey: None,
+        text: &req.content,
+        image_urls: &[],
+        external_id: "",
+    };
+    let mut log_id = 0i64;
+    if let Err(e) = prepare_session_inbound_write(
+        &inbound,
+        |_, _| Ok(()),
+        |aid, sid, uid, content| {
+            let conn = state
+                .db
+                .lock()
+                .map_err(|e| anyhow::anyhow!("database unavailable: {e}"))?;
+            let log = opencrab_db::queries::SessionLogRow {
+                id: None,
+                agent_id: aid.to_string(),
+                session_id: sid.to_string(),
+                log_type: "speech".to_string(),
+                content: content.to_string(),
+                speaker_id: Some(uid.to_string()),
+                turn_number: None,
+                metadata_json: None,
+                created_at: None,
+            };
+            log_id = opencrab_db::queries::insert_session_log(&conn, &log)?;
+            Ok(())
+        },
+    ) {
+        let error = match e {
+            PrepareSessionInboundError::Ensure(e) => format!("Failed to create session: {e}"),
+            PrepareSessionInboundError::Record(e) => format!("Failed to log message: {e}"),
+        };
+        return Json(serde_json::json!({"error": error})).into_response();
+    }
+
+    if !should_run || state.llm_router.get().provider_names().is_empty() {
+        return Json(serde_json::json!({
+            "id": log_id,
+            "session_id": id,
+        }))
+        .into_response();
+    }
+
+    let mut responses = Vec::new();
+    for agent_id in &admitted_ids {
+        let (system_prompt, agent_name) = state.build_agent_context(agent_id, &caller);
+        let result = state
+            .session_locks
+            .run_serialized(
+                &id,
+                run_session_turn(
+                    &state,
+                    &id,
+                    agent_id,
+                    |raw| process::prepend_runtime_context(raw, &session_theme),
+                    |conversation| {
+                        RunRequest::new(
+                            agent_id,
+                            &agent_name,
+                            &id,
+                            &system_prompt,
+                            &conversation,
+                            "rest",
+                            caller.clone(),
+                        )
+                    },
+                ),
+            )
+            .await;
+
+        match result {
+            Some(Ok(engine_result)) => {
+                {
+                    let conn = state.db.lock().unwrap();
+                    crate::transcript::record_rest_agent_reply(
+                        &conn,
+                        agent_id,
+                        &id,
+                        &engine_result.response,
+                        engine_result.iterations,
+                        engine_result.tool_calls_made,
+                    );
+                }
+                responses.push(serde_json::json!({
+                    "agent_id": agent_id,
+                    "agent_name": agent_name,
+                    "content": engine_result.response,
+                    "tool_calls_made": engine_result.tool_calls_made,
+                }));
+            }
+            Some(Err(e)) => {
+                if let Some(nf) = e.downcast_ref::<AgentNotFound>() {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(serde_json::json!({"error": nf.to_string()})),
+                    )
+                        .into_response();
+                }
+                tracing::error!(agent_id = %agent_id, error = %e, "SkillEngine failed");
+                responses.push(serde_json::json!({
+                    "agent_id": agent_id,
+                    "agent_name": agent_name,
+                    "content": format!("(Error: {})", e),
+                    "tool_calls_made": 0,
+                }));
+            }
+            None => {}
+        }
+    }
+
+    Json(serde_json::json!({
+        "id": log_id,
+        "session_id": id,
+        "responses": responses,
+    }))
+    .into_response()
 }
 
 pub async fn list_sessions(

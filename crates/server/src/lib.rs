@@ -393,6 +393,7 @@ macro_rules! production_routes {
         $apply!($target, "/api/sessions/{id}/messages", post => api::sessions::send_message);
         $apply!($target, "/api/sessions/{id}/logs", get => api::sessions::list_session_logs);
         $apply!($target, "/api/sessions/{id}/mentor", post => api::sessions::send_mentor_instruction);
+        $apply!($target, "/api/sessions/{id}/owner", post => api::sessions::send_owner_instruction);
         $apply!($target, "/api/agents/{id}/analytics", get => api::analytics::get_metrics_summary);
         $apply!($target, "/api/agents/{id}/analytics/detail", get => api::analytics::get_metrics_detail);
         $apply!($target, "/api/agents/{id}/workspace", get => api::workspace::list_workspace);
