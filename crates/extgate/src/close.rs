@@ -16,14 +16,10 @@ pub async fn close_live(
     writer: Option<&tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>,
 ) {
     if let Some(w) = writer {
-        match request_id {
-            Some(id) => {
-                let _ = write_json(w, &err_frame(id, reason, None)).await;
-            }
-            None => {
-                tracing::error!(code = reason.as_str(), "gate close without request id");
-                let _ = write_json(w, &err_frame(reason.as_str(), reason, None)).await;
-            }
+        if let Some(id) = request_id {
+            let _ = write_json(w, &err_frame(id, reason, None)).await;
+        } else {
+            tracing::error!(code = reason.as_str(), "gate close without request id");
         }
     }
 

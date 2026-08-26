@@ -426,10 +426,15 @@ async fn framing_max_size_ok_and_too_large_closes() {
     let mut huge = vec![b'x'; 1_048_577];
     huge[1_048_576] = b'\n';
     s2.write_all(&huge).await.unwrap();
-    let closed = tokio::time::timeout(Duration::from_secs(2), read_frame(&mut s2))
+    let mut leftover = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), s2.read_to_end(&mut leftover))
         .await
-        .expect("too_large frame did not arrive");
-    assert_eq!(closed["code"], "too_large");
+        .expect("too_large did not close")
+        .expect("read after too_large");
+    assert!(
+        leftover.is_empty(),
+        "id 未抽出の too_large は err frame 0: {leftover:?}"
+    );
 }
 
 #[tokio::test]
@@ -1376,10 +1381,15 @@ async fn hello_timeout_is_protocol_order() {
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(10)).await;
     tokio::time::resume();
-    let v = tokio::time::timeout(Duration::from_secs(2), read_frame(&mut s))
+    let mut leftover = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), s.read_to_end(&mut leftover))
         .await
-        .expect("hello timeout frame did not arrive");
-    assert_eq!(v["code"], "protocol_order");
+        .expect("hello timeout did not close")
+        .expect("read after hello timeout");
+    assert!(
+        leftover.is_empty(),
+        "id 未抽出の hello timeout は err frame 0: {leftover:?}"
+    );
 }
 
 #[tokio::test]

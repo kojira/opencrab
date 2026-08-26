@@ -22,6 +22,7 @@ External gate V3 最小形。契約・設計・検収は `docs/design/external-g
 | `inbound.rs` | said → `accept_inbound` |
 | `delivery.rs` | `DeliveryEffect` → say 1 回 |
 | `listen.rs` | UDS listen と接続状態機械 |
+| `close.rs` | live close。request id 抽出済みなら err 1 回、未抽出は log のみ（wire 0） |
 
 ## 非目標
 
