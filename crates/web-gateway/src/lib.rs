@@ -49,6 +49,7 @@ pub mod http;
 pub mod respond;
 pub mod runner;
 pub mod sink;
+pub mod v3;
 
 #[cfg(test)]
 mod testing;

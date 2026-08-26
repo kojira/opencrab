@@ -1,33 +1,33 @@
-# opencrab-web-gateway
+# web-gateway
 
-ダッシュボード会話ゲート。載せ替え工程 4-b 以降、**配送専用**。
+Web 会話の独立 binary。HTTP/SSE を V3 protocol=2（UDS）へ変換するだけ。判断しない。Bearer を持たない。core crate の wire DTO に依存しない。
 
-会話の単位はセッションのまま。`session_id` は `web-{agent_id}-{conversation_id}`。
-書式も表も外形 API（`POST .../web/send` / `GET .../web/stream?conversation=`）も変えない。
+## 入口
 
-## 残すもの（配送）
+| method / path | 役割 |
+|---|---|
+| `POST /api/web-conversations/{session_id}/messages` | body exact `{client_message_id,text,attachments}` → V3 `said`。`202` は said ack まで |
+| `GET /api/web-conversations/{session_id}/events` | say / activity / `completed_no_reply` の SSE |
+| `GET\|POST /rooms/{room}/messages` | 404。alias しない |
+| `GET /chat` | 404。redirect しない |
 
-- HTTP 受け（`user_id` 正規化・JSON 応答）
-- 受信の正規化（生識別子を `NormalizedInboundEvent` / `NormalizedInbound` にする）
-- SSE（`subscribe` / `publish`）
-- core の決定（`DeliveryEffect`）の送信
-- `record_agent_reply`（行の形は現行のまま。Discord の `TranscriptSource` には載せない）
+`session_id` は binding address（legacy logical session と byte-equal）。未 ack は `503`。同一 binding の別 UUID は `409 conversation_busy`。`ok.seq=null` は `403 {state:"not_admitted"}`。
 
-## 移した判断（core = `opencrab-actions`）
+## 配置
 
-| 判断 | 元 | 先 |
-|---|---|---|
-| caller 解決（誰か・権限） | `http.rs` が `WebAgentRunner::resolve_caller` を直呼び | `accept_inbound`（計算本体は runner 実装） |
-| セッション確保 + inbound 記録 | `http.rs` が `ensure_web_session` / `record_user_message` を直呼び | `prepare_session_inbound_write`（行の形は現行 `session_logs`） |
-| ターン起動（文脈・run・NO_REPLY） | `respond.rs` が `build_conversation_string` / `run_agent_response` を直呼び | `run_session_turn` + `delivery_effect` |
+operator が書いた placement JSON を argv で渡す。
 
-ゲートは生識別子（正規化済み `user_id`）だけを core へ渡す。
-web は `accept_inbound` に載せる（別 inbound 口は作らない）。
-Discord 経路固定の identity アダプタは置かない。
+```text
+web-gateway /path/to/placement.json
+```
 
-voice / nostr は触らない。
+`http_bind` は loopback のみ。`core_socket` は絶対 path。instance ごとに UDS を 1 本。config bytes は byte-exact `{"author_id":<json-string>}`（空白なし）。digest は SHA-256 lowerhex。
+
+## 検収
+
+`cargo test -p opencrab-web-gateway --test conformance`
 
 ## 関連
 
-- [opencrab-actions](../actions/README.md)
-- [opencrab-discord](../discord/README.md)
+- 本設計: `DESIGN-WEBGATE.md`
+- 線の契約: `DESIGN-EXTGATE-V3.md`（変更しない）
