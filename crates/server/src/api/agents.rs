@@ -121,23 +121,9 @@ pub async fn get_agent(
     let Some(subject_id) = subject_id.filter(|v| *v > 0) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let count: i64 = match conn.query_row(
-        "SELECT COUNT(*) FROM agents WHERE subject_id = ?1",
-        [subject_id],
-        |r| r.get(0),
-    ) {
-        Ok(n) => n,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
-    match count {
-        0 => StatusCode::NOT_FOUND.into_response(),
-        1 => {
-            let mut value = serde_json::to_value(agent).unwrap();
-            value["subject_id"] = serde_json::json!(subject_id);
-            Json(value).into_response()
-        }
-        _ => StatusCode::CONFLICT.into_response(),
-    }
+    let mut value = serde_json::to_value(agent).unwrap();
+    value["subject_id"] = serde_json::json!(subject_id);
+    Json(value).into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -854,7 +840,7 @@ mod extgate_v3_tests {
     use crate::{create_router, production_route_inventory, test_app_state};
 
     #[tokio::test]
-    async fn get_agent_subject_zero_one_and_many() {
+    async fn get_agent_subject_zero_or_one() {
         let state = test_app_state();
         {
             let conn = state.db.lock().unwrap();
@@ -906,49 +892,6 @@ mod extgate_v3_tests {
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let sid = v["subject_id"].as_i64().expect("subject_id");
         assert!(sid > 0);
-
-        {
-            let conn = state.db.lock().unwrap();
-            // UNIQUE を落とすと gate_instances.subject_id の FK が親列要件を満たさない。
-            // 409 経路の再現だけなので、この接続で FK を切ってから重複 subject_id を作る。
-            conn.pragma_update(None, "foreign_keys", false).unwrap();
-            conn.execute("DROP INDEX IF EXISTS idx_agents_subject_id", [])
-                .unwrap();
-            opencrab_db::queries::upsert_agent(
-                &conn,
-                &opencrab_db::queries::AgentRow {
-                    agent_id: "agent-two".into(),
-                    name: "Two".into(),
-                    job_title: None,
-                    organization: None,
-                    image_url: None,
-                    persona_name: "p".into(),
-                    personality: None,
-                    instructions: String::new(),
-                    heartbeat_instructions: String::new(),
-                    model: None,
-                    reasoning_effort: None,
-                    web_search: None,
-                    metadata_json: None,
-                },
-            )
-            .unwrap();
-            conn.execute(
-                "UPDATE agents SET subject_id = ?1 WHERE agent_id = 'agent-two'",
-                [sid],
-            )
-            .unwrap();
-        }
-        let conflict = create_router(state)
-            .oneshot(
-                Request::builder()
-                    .uri("/api/agents/agent-one")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(conflict.status(), StatusCode::CONFLICT);
     }
 
     #[test]

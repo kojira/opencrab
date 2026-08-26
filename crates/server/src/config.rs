@@ -55,7 +55,7 @@ pub struct AppConfig {
     /// 外部イベント受信（webhook intake / issue #454）。既定は実質無効。
     #[serde(default)]
     pub intake: IntakeConfig,
-    /// External gate V3 UDS listen path。空・欠落は起動失敗。
+    /// External gate V3 UDS listen path。空・欠落は listen しない。
     #[serde(default)]
     pub gate: GateConfig,
 }

@@ -17,7 +17,6 @@
 //!   が旧経路の行の有無を**ログのためだけに**確認する（判定には一切使わない）。
 
 use opencrab_actions::CallerIdentity;
-use opencrab_db::queries::TrustedUserPermission;
 
 /// `(経路, 識別子, エージェント)` から呼び出し元の権限を導出する。
 ///
@@ -82,54 +81,9 @@ pub fn resolve_caller_identity_with_owner(
     agent_id: &str,
     owner_id: &str,
 ) -> CallerIdentity {
-    if user_ids
-        .iter()
-        .any(|uid| crate::api::is_owner_id(owner_id, uid))
-    {
-        return CallerIdentity::Owner;
-    }
-    // #485: co-agents API（`POST /api/agents/{id}/co-agents` → `trusted_co_agents` 表）で
-    // owner が明示的に登録した相手を **owner 等価の co_agent** へ解決する（配線）。owner 判定の
-    // 次・`trusted_users` 照合より**前**に置く: co_agent は owner 等価で trusted_user より強い
-    // ので、両方に該当する相手は co_agent を採る。
-    //
-    // **#489: 識別子空間の逆引き。** `trusted_co_agents` は agent UUID 対（agent_id ↔
-    // co_agent_id）で登録されるが、ここへ来る発言者は経路の生の識別子（Nostr pubkey / web の
-    // user_id）。生識別子をそのまま突き合わせても UUID 登録の行には一致しないので、
-    // まず [`resolve_co_agent_uuid`] で **発言者識別子 → agent UUID** を逆引きしてから
-    // `is_trusted_co_agent` を引く。逆引き表（各 agent の自己識別子）は**各 agent 自身の接続**
-    // からしか書かれないので、ここで得た UUID は「その識別子の持ち主」であることが接続で担保
-    // される。逆引きできなければ co_agent にはしない（fail-closed）。生識別子での直接突合は
-    // 撤去した（経路をまたぐ広い一致になり、UUID 対という本来の意味とずれる。経路スコープ付きで
-    // 生識別子を信頼したい場合は下の `trusted_users(permission='co-agent')` を使う）。
-    //
-    // なお `trusted_co_agents.allowed_actions` は**権限判定に使っていない**。#485 の方針
-    // （co_agent は owner 等価）と絞り込みは正面から矛盾するため、co-agents API 側で非空の
-    // `allowed_actions` を受け付けないようにした（#490）。列は互換のため残すが、この表で
-    // 解決した co_agent は列の中身によらず owner 等価になる。
-    if let Some(co_uuid) = resolve_co_agent_uuid(
-        conn,
-        platform,
-        user_ids.first().copied().unwrap_or_default(),
-    ) {
-        if opencrab_db::queries::is_trusted_co_agent(conn, agent_id, &co_uuid).unwrap_or(false) {
-            // 名乗る識別子は解決済みの agent UUID（co_agent の本来の身元）。
-            return CallerIdentity::CoAgent { agent_id: co_uuid };
-        }
-    }
-    let permission = user_ids.iter().find_map(|uid| {
-        opencrab_db::queries::get_trusted_user(conn, platform, uid, agent_id).map(|u| u.permission)
-    });
-    match permission {
-        Some(TrustedUserPermission::CoAgent) => CallerIdentity::CoAgent {
-            // どの表記で登録されていても、名乗る識別子は先頭（正規化済みの表現）で揃える。
-            agent_id: user_ids.first().copied().unwrap_or_default().to_string(),
-        },
-        Some(TrustedUserPermission::Owner) | Some(TrustedUserPermission::User) => {
-            CallerIdentity::TrustedUser
-        }
-        None => CallerIdentity::Agent,
-    }
+    opencrab_extgate::resolve_caller_identity_with_owner(
+        conn, platform, user_ids, agent_id, owner_id,
+    )
 }
 
 /// 発言者の生の識別子（経路依存）から、その識別子を**自分のもの**として接続した agent の
@@ -209,7 +163,9 @@ pub fn warn_legacy_row_no_longer_read(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opencrab_db::queries::{TRUSTED_PLATFORM_DISCORD, TRUSTED_PLATFORM_WEB};
+    use opencrab_db::queries::{
+        TrustedUserPermission, TRUSTED_PLATFORM_DISCORD, TRUSTED_PLATFORM_WEB,
+    };
     use std::cell::RefCell;
     use std::io;
     use std::sync::{Arc, Mutex, Once};

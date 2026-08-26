@@ -797,10 +797,9 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    {
+    if let Some(path) = gate_socket {
         let listen_state = extgate.clone();
         let runtime = state.clone();
-        let path = gate_socket;
         tokio::spawn(async move {
             if let Err(e) = opencrab_extgate::serve_uds(
                 listen_state,
