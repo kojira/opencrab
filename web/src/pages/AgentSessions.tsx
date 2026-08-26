@@ -13,19 +13,30 @@ export default function AgentSessions() {
   const [kind, setKind] = useState<LoadKind>('idle');
   const [sessions, setSessions] = useState<SessionDto[]>([]);
   const [error, setError] = useState('');
+  const [hasMore, setHasMore] = useState(false);
+  const [cursor, setCursor] = useState<string | undefined>();
   const abortRef = useRef<AbortController | null>(null);
 
-  const load = () => {
+  const load = (reset: boolean) => {
     abortRef.current?.abort();
     const ac = new AbortController();
     abortRef.current = ac;
-    setKind('loading');
-    getSessions({ signal: ac.signal })
-      .then((all) => {
+    if (reset) {
+      setKind('loading');
+      setSessions([]);
+      setCursor(undefined);
+    }
+    getSessions({ signal: ac.signal, before: reset ? undefined : cursor })
+      .then((page) => {
         if (ac.signal.aborted) return;
-        const mine = all.filter((s) => s.agent_ids.includes(agentId));
-        setSessions(mine);
-        setKind(mine.length === 0 ? 'loaded-empty' : 'loaded');
+        const mine = page.filter((s) => s.agent_ids.includes(agentId));
+        setSessions((cur) => (reset ? mine : [...cur, ...mine]));
+        setHasMore(page.length === 100);
+        if (page.length > 0) {
+          setCursor(page[page.length - 1]?.id);
+        }
+        const nextLen = reset ? mine.length : sessions.length + mine.length;
+        setKind(nextLen === 0 && page.length < 100 ? 'loaded-empty' : 'loaded');
       })
       .catch((e: Error) => {
         if (ac.signal.aborted) return;
@@ -35,7 +46,7 @@ export default function AgentSessions() {
   };
 
   useEffect(() => {
-    load();
+    load(true);
     return () => abortRef.current?.abort();
   }, [agentId]);
 
@@ -47,7 +58,7 @@ export default function AgentSessions() {
           <p className="text-body-lg text-error-on-container">
             {t('common.error', { message: `GET /api/sessions: ${error}` })}
           </p>
-          <button type="button" className="btn-text" onClick={load}>
+          <button type="button" className="btn-text" onClick={() => load(true)}>
             {t('common.retry')}
           </button>
         </div>
@@ -77,6 +88,11 @@ export default function AgentSessions() {
       {sessions.map((session) => (
         <SessionCard key={session.id} session={session} />
       ))}
+      {hasMore ? (
+        <button type="button" className="btn-text" onClick={() => load(false)}>
+          {t('sessions.loadMore')}
+        </button>
+      ) : null}
     </div>
   );
 }

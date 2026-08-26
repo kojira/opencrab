@@ -46,7 +46,6 @@ export default function Sessions() {
 
   const filtered =
     statusFilter === 'all' ? sessions : sessions.filter((s) => s.status === statusFilter);
-  const visible = filtered.length > 200 ? filtered.slice(0, 200) : filtered;
 
   return (
     <div className="max-w-7xl mx-auto">
@@ -99,7 +98,7 @@ export default function Sessions() {
         </div>
       ) : (
         <div className="space-y-3">
-          {visible.map((session) => (
+          {filtered.map((session) => (
             <SessionCard key={session.id} session={session} />
           ))}
           {hasMore ? (

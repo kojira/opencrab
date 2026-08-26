@@ -193,23 +193,33 @@ export default function SessionDetail() {
   };
 
   const refreshTail = (sessionId: string) => {
-    getSessionLogs(sessionId).then((rows) => {
-      setLogs(rows);
-      setHasOlder(rows.length === 100);
-      setLogsKind(rows.length === 0 ? 'loaded-empty' : 'loaded');
-      setLiveAgent(null);
-      setPendingText('');
-      setPendingId(null);
-    });
+    getSessionLogs(sessionId)
+      .then((rows) => {
+        setLogs(rows);
+        setHasOlder(rows.length === 100);
+        setLogsKind(rows.length === 0 ? 'loaded-empty' : 'loaded');
+        setLiveAgent(null);
+        setPendingText('');
+        setPendingId(null);
+      })
+      .catch((e: Error) => {
+        setLogsError(e.message);
+        setLogsKind('error');
+      });
   };
 
   const loadOlder = () => {
     if (!id || logs.length === 0 || logs[0].id == null) return;
     const ac = new AbortController();
-    getSessionLogs(id, { before: String(logs[0].id), signal: ac.signal }).then((older) => {
-      setLogs((cur) => [...older, ...cur]);
-      setHasOlder(older.length === 100);
-    });
+    getSessionLogs(id, { before: String(logs[0].id), signal: ac.signal })
+      .then((older) => {
+        setLogs((cur) => [...older, ...cur]);
+        setHasOlder(older.length === 100);
+      })
+      .catch((e: Error) => {
+        setLogsError(e.message);
+        setLogsKind('error');
+      });
   };
 
   useEffect(() => {
@@ -254,17 +264,16 @@ export default function SessionDetail() {
       setNoReply(true);
       refreshTail(id);
     });
-    es.addEventListener('error', (ev) => {
-      try {
-        const data = JSON.parse((ev as MessageEvent).data || '{}') as { code?: string };
-        if (data.code) {
-          setSendError(data.code);
-          setSendPhase('idle');
-        }
-      } catch {
-        // EventSource 接続断。プロトコル error ではない。
-      }
+    es.addEventListener('gate_error', (ev) => {
+      const data = JSON.parse((ev as MessageEvent).data || '{}') as { code?: string };
+      setSendError(data.code ?? 'gate_error');
+      setSendPhase('idle');
     });
+    es.onerror = () => {
+      es.close();
+      setSendError('sse_disconnected');
+      setSendPhase('idle');
+    };
     return () => {
       es.close();
     };
@@ -315,7 +324,6 @@ export default function SessionDetail() {
           : 'badge-neutral'
     : '';
 
-  const visibleLogs = logs.length > 200 ? logs.slice(logs.length - 200) : logs;
   const bound = session?.gateway_bound === true;
 
   return (
@@ -367,7 +375,7 @@ export default function SessionDetail() {
                 {t('sessions.loadMore')}
               </button>
             ) : null}
-            {visibleLogs.map((log) => (
+            {logs.map((log) => (
               <SessionLogItem
                 key={log.id}
                 logType={log.log_type}
@@ -404,9 +412,20 @@ export default function SessionDetail() {
 
       {sendError ? (
         <ErrorPanel
-          endpoint="POST /api/web-conversations/{session_id}/messages"
+          endpoint={
+            sendError === 'sse_disconnected'
+              ? 'GET /api/web-conversations/{session_id}/events'
+              : 'POST /api/web-conversations/{session_id}/messages'
+          }
           message={sendError}
-          onRetry={() => void retrySend()}
+          onRetry={() => {
+            if (sendError === 'sse_disconnected') {
+              setSendError(null);
+              if (id) loadSession(id);
+              return;
+            }
+            void retrySend();
+          }}
         />
       ) : null}
 
