@@ -8,13 +8,11 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::Router;
-use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
 
 use crate::error::{ErrorCode, GateError, JSON_CONTENT_TYPE};
-use crate::ids::{
-    config_digest, decode_config_b64, now_nanos, parse_uuid, session_id_for_binding,
-};
+use crate::ids::{config_digest, decode_config_b64, now_nanos, parse_uuid};
 use crate::json::parse_object_no_dup;
 use crate::listen::enqueue_bind;
 use crate::registry::ExtgateState;
@@ -466,7 +464,6 @@ async fn put_binding_inner(
     let instance_id = parse_uuid(&require_string(&obj, "instance_id")?)?;
     let address = require_string(&obj, "address")?;
     let now = now_nanos();
-    let now_rfc = chrono::Utc::now().to_rfc3339();
 
     let body = {
     let mut conn = state.db.lock().map_err(|_| GateError::store())?;
@@ -491,7 +488,7 @@ async fn put_binding_inner(
     if !enabled {
         return Err(GateError::new(ErrorCode::InstanceDisabled));
     }
-    let agent_id = agent_for_subject(&conn, subject_id)?;
+    let _agent_id = agent_for_subject(&conn, subject_id)?;
 
     let existing = conn
         .query_row(
@@ -533,34 +530,25 @@ async fn put_binding_inner(
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| GateError::store())?;
-    let session_id = session_id_for_binding(&binding_id);
-    opencrab_db::queries::insert_session_in_tx(&tx, &session_id, &address, &now_rfc)
-        .map_err(|_| GateError::store())?;
-    opencrab_db::queries::insert_agent_session_in_tx(&tx, &agent_id, &session_id)
-        .map_err(|_| GateError::store())?;
-    insert_binding_row(&tx, &binding_id, &instance_id, &address, now)?;
+    opencrab_db::queries::create_gate_binding_in_tx(
+        &tx,
+        &binding_id,
+        &instance_id,
+        &address,
+        &address,
+        now,
+    )
+    .map_err(|_| GateError::store())?;
+    if opencrab_db::queries::injected_commit_failure() {
+        let _ = tx.rollback();
+        return Err(GateError::store());
+    }
     tx.commit().map_err(|_| GateError::store())?;
     binding_json(&conn, &binding_id)?
     };
 
     enqueue_bind(state, &instance_id, &binding_id, &address).await;
     Ok(json_ok(StatusCode::CREATED, body))
-}
-
-fn insert_binding_row(
-    tx: &Transaction<'_>,
-    binding_id: &str,
-    instance_id: &str,
-    address: &str,
-    now: i64,
-) -> Result<(), GateError> {
-    tx.execute(
-        "INSERT INTO gate_bindings (binding_id, instance_id, address, created_at, closed_at)
-         VALUES (?1, ?2, ?3, ?4, NULL)",
-        params![binding_id, instance_id, address, now],
-    )
-    .map_err(|_| GateError::store())?;
-    Ok(())
 }
 
 async fn delete_binding(

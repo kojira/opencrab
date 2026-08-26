@@ -2,13 +2,20 @@
 
 ドメイン別の行型と SQL。`mod.rs` から再輸出する。
 
+## gate_binding
+
+| 関数 | 契約 |
+|---|---|
+| `create_gate_binding_in_tx` | physical session・sole membership・open binding を 1 TX。theme は呼び出し側が渡す。commit は呼び出し側。V3 Binding PUT と Web 会話作成の唯一の書込口 |
+
 ## sessions（webgate read 投影）
 
 | 関数 | 契約 |
 |---|---|
 | `open_web_physical_session` | 開いている web binding の physical ID。同一 address に 2 件なら失敗 |
-| `project_session_row` | logical ID 維持。表示属性は alias、会話状態は physical |
-| `list_sessions_page` | physical 行を除き logical 1 件。`limit` と `before`（直前ページ最後の id）。本番の一覧入口 |
+| `open_web_binding` | 開いている web binding の binding_id / instance_id。同一 address に 2 件なら失敗 |
+| `project_session_row` | logical ID 維持。alias があれば表示属性は alias。無ければ physical。会話状態は physical。membership から participant を埋める |
+| `list_sessions_page` | physical 行を除き logical 1 件。alias の無い open web binding も含める。`limit` と `before` |
 | `list_sessions` | テスト専用。投影なし全件 |
 
 ## tool_logs（載せ替え工程 5-b）
