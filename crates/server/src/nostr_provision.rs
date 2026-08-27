@@ -118,7 +118,7 @@ pub fn provision_nostr_gate(
     Ok(plans)
 }
 
-/// instance 行だけ敷く（Binding PUT はしない）。`v3_shadow` の hello 用。
+/// instance 行だけ敷く（Binding PUT はしない）。`v3_shadow` / `v3` の instance 準備。
 pub fn provision_nostr_instance(
     conn: &mut Connection,
     agent_id: &str,

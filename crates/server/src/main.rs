@@ -738,7 +738,7 @@ async fn main() -> anyhow::Result<()> {
         let db_for_provision = state.db.clone();
         let db_for_instance = state.db.clone();
         let db_for_revise = state.db.clone();
-        let mut manager_builder = opencrab_nostr::NostrGatewayManager::new(
+        let manager_builder = opencrab_nostr::NostrGatewayManager::new(
             state.clone(),
             state.timed_fire_router.clone(),
         )
@@ -784,9 +784,6 @@ async fn main() -> anyhow::Result<()> {
                 opencrab_extgate::now_nanos(),
             )
         }));
-        if let Some(path) = &gate_socket {
-            manager_builder = manager_builder.with_shadow_socket(path.clone());
-        }
         let manager: opencrab_server::SharedNostrManager = Arc::new(manager_builder);
         let store = manager.allow_store().clone();
         let store_sets = store.clone();

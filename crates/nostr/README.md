@@ -16,9 +16,9 @@ default / watch Immediate とも同一口で `accept_inbound` exact 1 回。`rou
 
 - `v3`: instance/binding を敷設し、旧ループは止めて TimedFire と allow-set 300 秒更新だけ残す。
   identity 切替は停止→revision +1→再起動（hot swap しない）。
-- `v3_shadow`: 旧ループを回す。instance 行だけ敷き、本番 UDS へ hello 前までつなぐ。
-  Binding PUT / said / say はしない。同一 JSONL を legacy / gateway の両 parser と分類で照合する
-  （DM は legacy Discard / gateway Immediate を一致扱い）。
+- `v3_shadow`: 旧ループを回す。instance 行だけ敷く。本番 UDS への接続・hello・bind ack・
+  live 占有はしない。Binding PUT / said / say はしない。同一 JSONL を legacy / gateway の
+  両 parser と分類でメモリ内照合する（DM は legacy Discard / gateway Immediate を一致扱い）。
 
 ## binding（`binding.rs`）
 

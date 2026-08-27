@@ -27,7 +27,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -124,7 +123,7 @@ pub type NostrProvisionFn = Arc<
         + Sync,
 >;
 
-/// instance 行だけ敷く（shadow hello）。戻りは revision。
+/// instance 行だけ敷く（Binding PUT なし）。戻りは revision。
 pub type NostrInstanceFn = Arc<
     dyn Fn(
             &str,
@@ -163,8 +162,6 @@ pub struct NostrGatewayManager<R: NostrAgentRunner> {
     instance_provisioner: Option<NostrInstanceFn>,
     /// V3 identity 切替の revision 更新。
     reviser: Option<NostrReviseFn>,
-    /// `v3_shadow` の本番 UDS。hello 前までつなぐ。
-    shadow_socket: Option<PathBuf>,
 }
 
 impl<R: NostrAgentRunner> NostrGatewayManager<R> {
@@ -188,7 +185,6 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
             provisioner: None,
             instance_provisioner: None,
             reviser: None,
-            shadow_socket: None,
         }
     }
 
@@ -214,11 +210,6 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
 
     pub fn with_reviser(mut self, reviser: NostrReviseFn) -> Self {
         self.reviser = Some(reviser);
-        self
-    }
-
-    pub fn with_shadow_socket(mut self, socket: PathBuf) -> Self {
-        self.shadow_socket = Some(socket);
         self
     }
 
@@ -257,7 +248,6 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
             self.provisioner.clone(),
             self.instance_provisioner.clone(),
             self.reviser.clone(),
-            self.shadow_socket.clone(),
         )
         .await
     }
@@ -299,7 +289,6 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
             provisioner: self.provisioner.clone(),
             instance_provisioner: self.instance_provisioner.clone(),
             reviser: self.reviser.clone(),
-            shadow_socket: self.shadow_socket.clone(),
         })
     }
 
@@ -1883,7 +1872,6 @@ struct V3IdentityRestart<R: NostrAgentRunner> {
     provisioner: Option<NostrProvisionFn>,
     instance_provisioner: Option<NostrInstanceFn>,
     reviser: Option<NostrReviseFn>,
-    shadow_socket: Option<PathBuf>,
 }
 
 impl<R: NostrAgentRunner> V3IdentityRestart<R> {
@@ -1928,7 +1916,6 @@ impl<R: NostrAgentRunner> V3IdentityRestart<R> {
             self.provisioner.clone(),
             self.instance_provisioner.clone(),
             self.reviser.clone(),
-            self.shadow_socket.clone(),
         )
         .await
     }
@@ -2057,7 +2044,6 @@ async fn spawn_agent_gateway<R: NostrAgentRunner>(
     provisioner: Option<NostrProvisionFn>,
     instance_provisioner: Option<NostrInstanceFn>,
     reviser: Option<NostrReviseFn>,
-    shadow_socket: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     // 資格情報のガード（#191 段階2 PR3）。DB の secret_key（#620 以降は暗号文 `enc:v1:…`）が
     // 空 / 空白だけなら鍵未設定なので、materialize（config 書き出し）や `pubkey` 取得より
@@ -2169,27 +2155,11 @@ async fn spawn_agent_gateway<R: NostrAgentRunner>(
         };
         provision(agent_id, &self_pubkey, &config, &watches)?;
     }
-    let mut shadow_hold = None;
     if ingress.shadows_only() {
         let Some(provision) = instance_provisioner.as_ref() else {
             anyhow::bail!("nostr_ingress=v3_shadow なのに instance provisioner が無い");
         };
-        let Some(socket) = shadow_socket.clone() else {
-            anyhow::bail!("nostr_ingress=v3_shadow なのに core_socket が無い");
-        };
-        let revision = provision(agent_id, &self_pubkey, &config, &watches)?;
-        let bytes = crate::instance_config_bytes(&self_pubkey, &config, &watches)?;
-        let digest = crate::shadow::config_digest(&bytes);
-        shadow_hold = Some(
-            crate::shadow::connect_hello(
-                socket,
-                crate::nostr_instance_id(agent_id),
-                revision,
-                self_pubkey.clone(),
-                digest,
-            )
-            .await?,
-        );
+        provision(agent_id, &self_pubkey, &config, &watches)?;
     }
 
     let runner_c = runner.clone();
@@ -2210,7 +2180,6 @@ async fn spawn_agent_gateway<R: NostrAgentRunner>(
             provisioner: provisioner.clone(),
             instance_provisioner: instance_provisioner.clone(),
             reviser: reviser.clone(),
-            shadow_socket: shadow_socket.clone(),
         })
     });
     let admin: Arc<dyn NostrIdentityAdmin> = Arc::new(LoopIdentityAdmin {
@@ -2227,7 +2196,6 @@ async fn spawn_agent_gateway<R: NostrAgentRunner>(
     let runtime_c = runtime.clone();
     let shadows = ingress.shadows_only();
     let handle = tokio::spawn(async move {
-        let _shadow_hold = shadow_hold;
         if ingress.runs_legacy_loops() {
             run_agent_inbound_loops(
                 runner_c,
@@ -2293,7 +2261,6 @@ pub struct NostrIdentityProvisioner<R: NostrAgentRunner> {
     provisioner: Option<NostrProvisionFn>,
     instance_provisioner: Option<NostrInstanceFn>,
     reviser: Option<NostrReviseFn>,
-    shadow_socket: Option<PathBuf>,
 }
 
 impl<R: NostrAgentRunner> NostrIdentityProvisioner<R> {
@@ -2380,7 +2347,6 @@ impl<R: NostrAgentRunner> opencrab_actions::GatewayIdentityProvisioning
             self.provisioner.clone(),
             self.instance_provisioner.clone(),
             self.reviser.clone(),
-            self.shadow_socket.clone(),
         )
         .await?;
 
@@ -4260,6 +4226,58 @@ mod tests {
             "起動 + 切替 + 再起動で self_pubkey を 3 回書く"
         );
         assert!(mgr.is_running(agent), "再起動後も稼働する");
+
+        mgr.stop_agent_gateway(agent).await;
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+    }
+
+    /// v3_shadow は本番 UDS の listen 前でも legacy ループを立てる。
+    /// 照合は parse/分類のメモリ内だけ。UDS hello / bind ack / live 占有はしない。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn v3_shadow_starts_legacy_before_uds_listen() {
+        let agent = "agent-shadow-before-listen";
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+
+        let existing = AgentNostrConfigRow {
+            agent_id: agent.to_string(),
+            secret_key: "nsec1old".to_string(),
+            relays_json: r#"["wss://yabu.me"]"#.to_string(),
+            filter_json: r#"{"keywords":["opencrab"]}"#.to_string(),
+            enabled: true,
+        };
+        let runner = SlowRunner::new(Duration::from_millis(1)).with_preset_config(existing);
+        let (_fake, cli) =
+            fake_nostaro("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789");
+        let provisioned = Arc::new(AtomicUsize::new(0));
+        let count = provisioned.clone();
+        let mgr = NostrGatewayManager::new(runner, test_router())
+            .with_cli(cli)
+            .with_ingress(NostrIngress::V3Shadow)
+            .with_instance_provisioner(Arc::new(move |_, _, _, _| {
+                count.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(1)
+            }));
+
+        let configured = crate::config::NostrConfig {
+            relays: vec!["wss://yabu.me".to_string()],
+            filter: crate::config::NostrFilter {
+                authors: vec![],
+                keywords: vec!["opencrab".to_string()],
+                kinds: vec![],
+            },
+        };
+        mgr.start_agent_gateway(agent, "nsec1old", configured)
+            .await
+            .unwrap();
+        assert!(
+            mgr.is_running(agent),
+            "listen 前でも v3_shadow は legacy を立てる"
+        );
+        assert_eq!(
+            provisioned.load(AtomicOrdering::SeqCst),
+            1,
+            "instance 行は敷く（UDS hello はしない）"
+        );
 
         mgr.stop_agent_gateway(agent).await;
         let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());

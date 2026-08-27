@@ -32,7 +32,7 @@ impl NostrIngress {
         matches!(self, Self::Legacy | Self::V3Shadow)
     }
 
-    /// instance 行を DB に敷設する（hello に必要。binding は含まない）。
+    /// instance 行を DB に敷設する（binding は含まない）。
     pub fn provisions_instance(self) -> bool {
         matches!(self, Self::V3 | Self::V3Shadow)
     }
@@ -42,7 +42,7 @@ impl NostrIngress {
         matches!(self, Self::V3)
     }
 
-    /// Binding PUT / said / say を行わない shadow。hello 前までと watch 照合だけ。
+    /// Binding PUT / said / say を行わない shadow。parse/分類のメモリ内照合だけ。
     pub fn shadows_only(self) -> bool {
         matches!(self, Self::V3Shadow)
     }

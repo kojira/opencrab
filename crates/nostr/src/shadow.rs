@@ -1,17 +1,13 @@
-//! `v3_shadow`: 本番 UDS へ hello 前までつなぎ、watch parse/分類を gateway と照合する。
+//! `v3_shadow`: watch parse/分類を gateway とメモリ内で照合する。
 //!
 //! Binding PUT / said / say は行わない（DESIGN-NOSTRGATE §7.2）。
+//! 本番 UDS への接続・hello・bind ack・live 占有はしない。
 
-use std::path::PathBuf;
-use std::sync::Arc;
-
-use anyhow::Context;
-use opencrab_gate_client::client::InstanceClient;
 use opencrab_nostr_gateway::map::{
     classify_route, parse_watch_line as parse_gateway_line, Lane, Route, WatchEvent,
 };
 use sha2::{Digest, Sha256};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::event::{parse_watch_line, NostrEvent};
 use crate::watch::{classify_watch_event, WatchForward};
@@ -29,22 +25,6 @@ fn hex_lower(bytes: &[u8]) -> String {
         out.push(HEX[(b & 0x0f) as usize] as char);
     }
     out
-}
-
-/// 本番 socket へ hello までつなぐ。切断後の再接続はしない。
-pub async fn connect_hello(
-    socket: PathBuf,
-    instance_id: String,
-    revision: u64,
-    self_pubkey: String,
-    digest: String,
-) -> anyhow::Result<Arc<InstanceClient>> {
-    let client = InstanceClient::connect(&socket, instance_id, revision, self_pubkey, digest)
-        .await
-        .map_err(|_| anyhow::anyhow!("v3_shadow hello が失敗した"))
-        .context("v3_shadow 本番接続")?;
-    info!("v3_shadow hello connected");
-    Ok(client)
 }
 
 /// 同一 JSONL 行を legacy / gateway の両 parser で読み、食い違いを残す。
