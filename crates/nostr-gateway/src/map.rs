@@ -98,7 +98,13 @@ pub fn parse_watch_line(line: &str) -> Option<WatchEvent> {
     if !t.starts_with('{') {
         return None;
     }
-    serde_json::from_str::<WatchEvent>(t).ok()
+    match serde_json::from_str::<WatchEvent>(t) {
+        Ok(event) => Some(event),
+        Err(error) => {
+            tracing::warn!(%error, "watch jsonl object dropped");
+            None
+        }
+    }
 }
 
 pub fn normalize_author_id(pubkey: &str) -> Option<String> {
@@ -113,7 +119,12 @@ pub fn decisive_origin(lane: &Lane, event_id: &str) -> String {
     format!("nostr:event:v1:{}:{event_id}", lane.origin_token())
 }
 
-pub fn classify_route(event: &WatchEvent, self_pubkey: &str, beyond_self: bool, lane: &Lane) -> Route {
+pub fn classify_route(
+    event: &WatchEvent,
+    self_pubkey: &str,
+    beyond_self: bool,
+    lane: &Lane,
+) -> Route {
     if matches!(lane.kind, LaneKind::Default) {
         return Route::Default;
     }
@@ -155,7 +166,15 @@ pub fn map_event(
     };
     let origin = decisive_origin(lane, &event_id);
     let history = history_text(event);
-    let anchor = v1_anchor(event, self_pubkey, beyond_self, lane, route, &event_id, bundle);
+    let anchor = v1_anchor(
+        event,
+        self_pubkey,
+        beyond_self,
+        lane,
+        route,
+        &event_id,
+        bundle,
+    );
     Some(SaidMap {
         origin,
         author_id,
@@ -261,7 +280,7 @@ fn history_text(event: &WatchEvent) -> String {
 fn v1_anchor(
     event: &WatchEvent,
     self_pubkey: &str,
-    _beyond_cfg: bool,
+    beyond_cfg: bool,
     lane: &Lane,
     route: Route,
     event_id: &str,
@@ -269,7 +288,7 @@ fn v1_anchor(
 ) -> String {
     let p_self = p_tag_is_self(event, self_pubkey);
     let mut obj = Map::new();
-    obj.insert("beyond_self".into(), json!(!p_self));
+    obj.insert("beyond_self".into(), json!(beyond_cfg));
     obj.insert(
         "bundle_id".into(),
         bundle
@@ -293,10 +312,7 @@ fn v1_anchor(
         "watch_id".into(),
         lane.watch_id().map(|id| json!(id)).unwrap_or(Value::Null),
     );
-    format!(
-        "[NOSTRGATE/V1 {}]",
-        Value::Object(obj)
-    )
+    format!("[NOSTRGATE/V1 {}]", Value::Object(obj))
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
@@ -360,7 +376,10 @@ mod tests {
             "22".repeat(32)
         );
         assert_eq!(mapped.text, expected);
-        assert_eq!(mapped.origin, format!("nostr:event:v1:watch:17:{}", "aa".repeat(32)));
+        assert_eq!(
+            mapped.origin,
+            format!("nostr:event:v1:watch:17:{}", "aa".repeat(32))
+        );
         assert_eq!(mapped.author_id, "22".repeat(32));
         assert_eq!(mapped.route, Route::Immediate);
     }
@@ -407,6 +426,18 @@ mod tests {
         let mut event = ev(1, vec![]);
         event.pubkey = "not-a-key".into();
         assert!(map_event(&event, &self_pk(), false, &Lane::default_lane(), None).is_none());
+    }
+
+    #[test]
+    fn beyond_self_uses_watch_config_not_p_self() {
+        let self_pk = self_pk();
+        let event = ev(1, vec![]);
+        let mapped = map_event(&event, &self_pk, false, &Lane::watch(17), None).unwrap();
+        assert!(mapped.text.contains("\"beyond_self\":false"));
+        assert!(mapped.text.contains("\"p_self\":false"));
+        let mapped = map_event(&event, &self_pk, true, &Lane::watch(17), None).unwrap();
+        assert!(mapped.text.contains("\"beyond_self\":true"));
+        assert!(mapped.text.contains("\"p_self\":false"));
     }
 
     #[test]

@@ -1,16 +1,19 @@
 //! process-local live registry。startup は空。DB から復元しない。
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::path::PathBuf;
 #[cfg(any(test, feature = "extgate-probe"))]
 use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
+use opencrab_actions::{PrivilegeFire, WatchAllowSets};
 use opencrab_db::Db;
 use tokio::net::unix::OwnedWriteHalf;
 
 use crate::bearer::OperatorToken;
+use crate::delivery_mode::DeliveryMode;
 use crate::error::{ErrorCode, GateError};
 
 /// hello 済みで未 close の接続。
@@ -125,6 +128,45 @@ pub struct GateProbe {
 /// kind_id=nostr の said を record 前に判定する。不正アンカーは `Err(bad_request)`。
 pub type NostrSaidAdmit =
     Arc<dyn Fn(&str, &str, &str) -> Result<NostrSaidDecision, GateError> + Send + Sync>;
+pub type NostrWorkspaceFn = Arc<dyn Fn(&str) -> Option<PathBuf> + Send + Sync>;
+pub type NostrRelayFn = Arc<dyn Fn(&str, String) + Send + Sync>;
+pub type NostrWatchSetsFn = Arc<dyn Fn(&str) -> Option<NostrWatchSets> + Send + Sync>;
+
+#[derive(Debug, Clone, Default)]
+pub struct NostrWatchSets {
+    pub followees: HashSet<String>,
+    pub owner: HashSet<String>,
+    pub co_agents: HashSet<String>,
+    pub trusted_users: HashSet<String>,
+}
+
+impl NostrWatchSets {
+    pub fn as_watch_allow(&self) -> WatchAllowSets<'_> {
+        WatchAllowSets {
+            followees: &self.followees,
+            owner: &self.owner,
+            co_agents: &self.co_agents,
+            trusted_users: &self.trusted_users,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NostrHeldTurn {
+    pub session_id: String,
+    pub instance_id: String,
+    pub agent_id: String,
+    pub binding_id: String,
+    pub origin: String,
+    pub author_id: String,
+    pub text: String,
+    pub images: Vec<String>,
+    pub address: String,
+    pub owner_id: String,
+    pub kind_id: String,
+    pub delivery_mode: DeliveryMode,
+    pub prompt_suffix: String,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NostrSaidDecision {
@@ -144,6 +186,10 @@ pub struct ExtgateState {
     halt_notify: tokio::sync::Notify,
     next_identity: AtomicU64,
     nostr_said_admit: Mutex<Option<NostrSaidAdmit>>,
+    nostr_workspace: Mutex<Option<NostrWorkspaceFn>>,
+    nostr_relay: Mutex<Option<NostrRelayFn>>,
+    nostr_watch_sets: Mutex<Option<NostrWatchSetsFn>>,
+    nostr_privilege: Mutex<HashMap<i64, PrivilegeFire<NostrHeldTurn>>>,
     #[cfg(any(test, feature = "extgate-probe"))]
     pub probe: GateProbe,
 }
@@ -158,6 +204,10 @@ impl ExtgateState {
             halt_notify: tokio::sync::Notify::new(),
             next_identity: AtomicU64::new(1),
             nostr_said_admit: Mutex::new(None),
+            nostr_workspace: Mutex::new(None),
+            nostr_relay: Mutex::new(None),
+            nostr_watch_sets: Mutex::new(None),
+            nostr_privilege: Mutex::new(HashMap::new()),
             #[cfg(any(test, feature = "extgate-probe"))]
             probe: GateProbe::default(),
         }
@@ -165,6 +215,50 @@ impl ExtgateState {
 
     pub fn set_nostr_said_admit(&self, admit: NostrSaidAdmit) {
         *self.nostr_said_admit.lock().expect("nostr admit") = Some(admit);
+    }
+
+    pub fn set_nostr_workspace(&self, workspace: NostrWorkspaceFn) {
+        *self.nostr_workspace.lock().expect("nostr workspace") = Some(workspace);
+    }
+
+    pub fn set_nostr_relay(&self, relay: NostrRelayFn) {
+        *self.nostr_relay.lock().expect("nostr relay") = Some(relay);
+    }
+
+    pub fn set_nostr_watch_sets(&self, sets: NostrWatchSetsFn) {
+        *self.nostr_watch_sets.lock().expect("nostr watch sets") = Some(sets);
+    }
+
+    pub fn nostr_workspace_root(&self, agent_id: &str) -> Option<PathBuf> {
+        let hook = self.nostr_workspace.lock().ok()?.clone();
+        hook.and_then(|h| h(agent_id))
+    }
+
+    pub fn relay_nostr_inbound(&self, agent_id: &str, text: String) {
+        let hook = match self.nostr_relay.lock() {
+            Ok(g) => g.clone(),
+            Err(_) => return,
+        };
+        if let Some(hook) = hook {
+            hook(agent_id, text);
+        }
+    }
+
+    pub fn nostr_watch_sets_for(&self, agent_id: &str) -> Option<NostrWatchSets> {
+        let hook = self.nostr_watch_sets.lock().ok()?.clone();
+        hook.and_then(|h| h(agent_id))
+    }
+
+    pub fn privilege_for(
+        &self,
+        watch_id: i64,
+        make: impl FnOnce() -> PrivilegeFire<NostrHeldTurn>,
+    ) -> Result<PrivilegeFire<NostrHeldTurn>, GateError> {
+        let mut g = self
+            .nostr_privilege
+            .lock()
+            .map_err(|_| GateError::store())?;
+        Ok(g.entry(watch_id).or_insert_with(make).clone())
     }
 
     pub fn admit_nostr_said(

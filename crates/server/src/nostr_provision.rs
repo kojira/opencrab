@@ -5,7 +5,8 @@ use opencrab_db::queries::{
     create_gate_binding_in_tx, get_session, CreateGateBindingError, SessionWatchRow,
 };
 use opencrab_nostr::{
-    instance_config_bytes, nostr_instance_id, plan_session_bindings, NostrConfig, SessionBindingPlan,
+    instance_config_bytes, nostr_instance_id, plan_session_bindings, NostrConfig,
+    SessionBindingPlan,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
@@ -117,6 +118,99 @@ pub fn provision_nostr_gate(
     Ok(plans)
 }
 
+/// instance 行だけ敷く（Binding PUT はしない）。`v3_shadow` の hello 用。
+pub fn provision_nostr_instance(
+    conn: &mut Connection,
+    agent_id: &str,
+    self_pubkey: &str,
+    config: &NostrConfig,
+    watches: &[SessionWatchRow],
+    now: i64,
+) -> Result<u64> {
+    upsert_nostr_instance(conn, agent_id, self_pubkey, config, watches, now, false)
+}
+
+/// 停止後の identity 切替用。config を書き revision を +1 する。
+pub fn revise_nostr_gate(
+    conn: &mut Connection,
+    agent_id: &str,
+    self_pubkey: &str,
+    config: &NostrConfig,
+    watches: &[SessionWatchRow],
+    now: i64,
+) -> Result<u64> {
+    upsert_nostr_instance(conn, agent_id, self_pubkey, config, watches, now, true)
+}
+
+fn upsert_nostr_instance(
+    conn: &mut Connection,
+    agent_id: &str,
+    self_pubkey: &str,
+    config: &NostrConfig,
+    watches: &[SessionWatchRow],
+    now: i64,
+    bump_revision: bool,
+) -> Result<u64> {
+    let instance_id = nostr_instance_id(agent_id);
+    let config_bytes = instance_config_bytes(self_pubkey, config, watches)?;
+    let config_b64 = opencrab_extgate::encode_config_b64(&config_bytes);
+    let digest = opencrab_extgate::config_digest(&config_bytes);
+    let subject_id: i64 = conn
+        .query_row(
+            "SELECT subject_id FROM agents WHERE agent_id = ?1",
+            params![agent_id],
+            |r| r.get(0),
+        )
+        .with_context(|| format!("agent {agent_id} の subject_id が無い"))?;
+
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let existing = tx
+        .query_row(
+            "SELECT kind_id, subject_id, deleted_at, revision FROM gate_instances WHERE instance_id = ?1",
+            params![instance_id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, Option<i64>>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    let revision = match existing {
+        Some((_, _, Some(_), _)) => bail!("nostr instance {instance_id} は削除済み"),
+        Some((kind, subject, None, _)) if kind != "nostr" || subject != subject_id => {
+            bail!("nostr instance {instance_id} が別 kind/subject で存在する")
+        }
+        Some((_, _, None, rev)) => {
+            let new_rev = if bump_revision { rev + 1 } else { rev };
+            tx.execute(
+                "UPDATE gate_instances
+                 SET config_b64 = ?2, config_digest = ?3, revision = ?4, updated_at = ?5
+                 WHERE instance_id = ?1",
+                params![instance_id, config_b64, digest, new_rev, now],
+            )?;
+            u64::try_from(new_rev).context("revision")?
+        }
+        None => {
+            if bump_revision {
+                bail!("nostr instance {instance_id} が無いので revision を上げられない");
+            }
+            tx.execute(
+                "INSERT INTO gate_instances (
+                    instance_id, kind_id, subject_id, revision, enabled,
+                    config_b64, config_digest, created_at, updated_at, deleted_at
+                 ) VALUES (?1, 'nostr', ?2, 1, 1, ?3, ?4, ?5, ?5, NULL)",
+                params![instance_id, subject_id, config_b64, digest, now],
+            )?;
+            1
+        }
+    };
+    tx.commit()?;
+    Ok(revision)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,7 +281,52 @@ mod tests {
             relays: vec!["wss://yabu.me".into()],
             filter: opencrab_nostr::NostrFilter::default(),
         };
-        let err = provision_nostr_gate(&mut conn, "a1", &"aa".repeat(32), &cfg, &[], 1).unwrap_err();
+        let err =
+            provision_nostr_gate(&mut conn, "a1", &"aa".repeat(32), &cfg, &[], 1).unwrap_err();
         assert!(err.to_string().contains("session"));
+    }
+
+    #[test]
+    fn instance_only_does_not_put_binding() {
+        let mut conn = opencrab_db::init_memory().unwrap();
+        seed_agent(&conn);
+        let cfg = NostrConfig {
+            relays: vec!["wss://yabu.me".into()],
+            filter: opencrab_nostr::NostrFilter::default(),
+        };
+        provision_nostr_instance(&mut conn, "a1", &"aa".repeat(32), &cfg, &[], 1).unwrap();
+        let bindings: i64 = conn
+            .query_row("SELECT COUNT(*) FROM gate_bindings", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(bindings, 0);
+        let rev: i64 = conn
+            .query_row(
+                "SELECT revision FROM gate_instances WHERE instance_id = ?1",
+                params![nostr_instance_id("a1")],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rev, 1);
+    }
+
+    #[test]
+    fn revise_bumps_revision() {
+        let mut conn = opencrab_db::init_memory().unwrap();
+        seed_agent(&conn);
+        let cfg = NostrConfig {
+            relays: vec!["wss://yabu.me".into()],
+            filter: opencrab_nostr::NostrFilter::default(),
+        };
+        provision_nostr_instance(&mut conn, "a1", &"aa".repeat(32), &cfg, &[], 1).unwrap();
+        let rev = revise_nostr_gate(&mut conn, "a1", &"bb".repeat(32), &cfg, &[], 2).unwrap();
+        assert_eq!(rev, 2);
+        let stored: i64 = conn
+            .query_row(
+                "SELECT revision FROM gate_instances WHERE instance_id = ?1",
+                params![nostr_instance_id("a1")],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, 2);
     }
 }

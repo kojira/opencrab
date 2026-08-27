@@ -7,29 +7,30 @@ use std::sync::Arc;
 
 use opencrab_actions::{
     accept_inbound, delivery_effect, start_session_turn, AgentRuntime, CallerIdentity,
-    InboundLookups, InboundWork, NormalizedInbound, NormalizedInboundEvent, RunRequest,
-    TranscriptSource, WatchAccept,
+    InboundLookups, InboundWork, LiveInboundScope, NormalizedInbound, NormalizedInboundEvent,
+    PrivilegeFire, RunRequest, TranscriptSource, WatchAccept,
 };
 use opencrab_db::queries::{
     get_agent_discord_config, get_agent_nostr_owner_pubkey, get_session_policy_json,
-    get_session_watch, insert_session_log, is_trusted_user, SessionLogRow, TRUSTED_PLATFORM_EXTGATE,
-    TRUSTED_PLATFORM_NOSTR,
+    get_session_watch, insert_session_log, is_trusted_user, SessionLogRow,
+    TRUSTED_PLATFORM_EXTGATE, TRUSTED_PLATFORM_NOSTR,
 };
 use rusqlite::{params, Connection, Transaction, TransactionBehavior};
 
 use crate::delivery::apply_delivery_effect;
 use crate::delivery_mode::{adjust_inbound_effect, DeliveryMode};
-use crate::listen::emit_activity;
 use crate::error::{ErrorCode, GateError};
 use crate::ids::decode_config_b64;
+use crate::listen::emit_activity;
 use crate::protocol::Said;
-use crate::registry::{ExtgateState, NostrSaidDecision};
+use crate::registry::{ExtgateState, NostrHeldTurn, NostrSaidDecision, NostrWatchSets};
 use crate::ResolveCallerFn;
 
 pub struct SaidOutcome {
     pub seq: Option<i64>,
 }
 
+#[derive(Clone)]
 struct OriginRow {
     instance_id: String,
     kind_id: String,
@@ -86,17 +87,14 @@ pub fn process_said<R: AgentRuntime>(
     let recorded = Cell::new(false);
     let record_failed = Cell::new(false);
     let run_after = Cell::new(false);
-    let session_id = match opencrab_db::queries::canonical_session_id(
-        &tx,
-        &said.binding_id,
-        &row.address,
-    ) {
-        Ok(Some(id)) => id,
-        Ok(None) | Err(_) => {
-            let _ = tx.rollback();
-            return Err(GateError::store());
-        }
-    };
+    let session_id =
+        match opencrab_db::queries::canonical_session_id(&tx, &said.binding_id, &row.address) {
+            Ok(Some(id)) => id,
+            Ok(None) | Err(_) => {
+                let _ = tx.rollback();
+                return Err(GateError::store());
+            }
+        };
     let mut nostr_watch: Option<(i64, bool)> = None;
     if row.kind_id == "nostr" {
         match state.admit_nostr_said(&row.agent_id, &said.author_id, &said.text)? {
@@ -178,7 +176,6 @@ pub fn process_said<R: AgentRuntime>(
         channel_whitelisted: &wl,
     };
 
-    let empty_set = std::collections::HashSet::new();
     let watch_row = match nostr_watch {
         Some((id, true)) => match get_session_watch(&tx, id) {
             Ok(Some(w)) if w.session_id == row.address => Some(w),
@@ -199,19 +196,46 @@ pub fn process_said<R: AgentRuntime>(
         },
         None => String::new(),
     };
+    let watch_sets = if watch_row.is_some() {
+        match state.nostr_watch_sets_for(&row.agent_id) {
+            Some(sets) => sets,
+            None => {
+                let _ = tx.rollback();
+                return Err(GateError::store());
+            }
+        }
+    } else {
+        NostrWatchSets::default()
+    };
+    let fire = match &watch_row {
+        Some(w) => Some(state.privilege_for(w.id, || {
+            let state = Arc::clone(state);
+            let runtime = runtime.clone();
+            PrivilegeFire::new(move |held: Vec<(NostrHeldTurn, CallerIdentity)>| {
+                let state = Arc::clone(&state);
+                let runtime = runtime.clone();
+                async move {
+                    fire_held_turns(state, runtime, resolve_caller, held);
+                }
+            })
+        })?),
+        None => None,
+    };
     let watch_accept = watch_row.as_ref().map(|w| WatchAccept {
         policy_json: policy.as_str(),
         interval_secs: w.interval_secs as u64,
-        allow: opencrab_actions::WatchAllowSets {
-            followees: &empty_set,
-            owner: &empty_set,
-            co_agents: &empty_set,
-            trusted_users: &empty_set,
-        },
-        owner: &empty_set,
-        followees: &empty_set,
-        privilege: None,
+        allow: watch_sets.as_watch_allow(),
+        owner: &watch_sets.owner,
+        followees: &watch_sets.followees,
+        privilege: fire.as_ref(),
     });
+    let recorded_text = recorded_said_text(state, &row, said, &session_id);
+    let prompt_suffix = if row.kind_id == "nostr" {
+        nostr_prompt_suffix(&said.author_id, &said.text)
+    } else {
+        String::new()
+    };
+    let held = Cell::new(false);
 
     let accept = accept_inbound(
         &work,
@@ -219,10 +243,32 @@ pub fn process_said<R: AgentRuntime>(
         &agent_ids,
         &lookups,
         watch_accept,
-        |_| (),
+        |_| {
+            held.set(true);
+            if record_inbound(&tx, &session_id, &row, said, &recorded_text).is_ok() {
+                recorded.set(true);
+            } else {
+                record_failed.set(true);
+            }
+            NostrHeldTurn {
+                session_id: session_id.clone(),
+                instance_id: row.instance_id.clone(),
+                agent_id: row.agent_id.clone(),
+                binding_id: said.binding_id.clone(),
+                origin: said.origin.clone(),
+                author_id: said.author_id.clone(),
+                text: said.text.clone(),
+                images: said.attachments.clone(),
+                address: row.address.clone(),
+                owner_id: row.owner_id.clone(),
+                kind_id: row.kind_id.clone(),
+                delivery_mode: row.delivery_mode,
+                prompt_suffix: prompt_suffix.clone(),
+            }
+        },
         |_, admitted| {
             if admitted.admitted_agent_ids.contains(&row.agent_id) {
-                match record_inbound(&tx, &session_id, &row, said) {
+                match record_inbound(&tx, &session_id, &row, said, &recorded_text) {
                     Ok(()) => recorded.set(true),
                     Err(_) => record_failed.set(true),
                 }
@@ -262,7 +308,11 @@ pub fn process_said<R: AgentRuntime>(
     tx.commit().map_err(|_| GateError::store())?;
     drop(conn);
 
-    if run_after.get() {
+    if row.kind_id == "nostr" {
+        fire_nostr_relay(state, &row, said);
+    }
+
+    if run_after.get() && !held.get() {
         enqueue_turn(
             Arc::clone(state),
             runtime.clone(),
@@ -270,6 +320,7 @@ pub fn process_said<R: AgentRuntime>(
             &row,
             said,
             &session_id,
+            &prompt_suffix,
         );
     }
 
@@ -354,7 +405,7 @@ fn load_origin_row(
                 return Ok(None);
             }
             let owner_id = if kind_id == "nostr" {
-                get_agent_nostr_owner_pubkey(tx, &agent_id).unwrap_or_default()
+                get_agent_nostr_owner_pubkey(tx, &agent_id).map_err(|_| GateError::store())?
             } else {
                 get_agent_discord_config(tx, &agent_id)
                     .ok()
@@ -363,8 +414,9 @@ fn load_origin_row(
                     .unwrap_or_default()
             };
             let config_bytes = decode_config_b64(&config_b64)?;
-            let delivery_mode = crate::delivery_mode::delivery_mode_from_config_bytes(&config_bytes)
-                .map_err(|_| GateError::new(ErrorCode::BadRequest))?;
+            let delivery_mode =
+                crate::delivery_mode::delivery_mode_from_config_bytes(&config_bytes)
+                    .map_err(|_| GateError::new(ErrorCode::BadRequest))?;
             Ok(Some(OriginRow {
                 instance_id: inst,
                 kind_id,
@@ -407,6 +459,7 @@ fn record_inbound(
     session_id: &str,
     row: &OriginRow,
     said: &Said,
+    content: &str,
 ) -> Result<(), GateError> {
     let mut meta = serde_json::json!({
         "source": TranscriptSource::External.inbound(),
@@ -423,7 +476,7 @@ fn record_inbound(
             agent_id: row.agent_id.clone(),
             session_id: session_id.to_string(),
             log_type: "speech".to_string(),
-            content: said.text.clone(),
+            content: content.to_string(),
             speaker_id: Some(said.author_id.clone()),
             turn_number: None,
             metadata_json: Some(meta.to_string()),
@@ -468,6 +521,7 @@ fn enqueue_turn<R: AgentRuntime>(
     row: &OriginRow,
     said: &Said,
     session_id: &str,
+    prompt_suffix: &str,
 ) {
     let locks = runtime.session_locks();
     let session_id = session_id.to_string();
@@ -482,6 +536,7 @@ fn enqueue_turn<R: AgentRuntime>(
     let owner_id = row.owner_id.clone();
     let kind_id = row.kind_id.clone();
     let delivery_mode = row.delivery_mode;
+    let prompt_suffix = prompt_suffix.to_string();
     locks.spawn_serialized(session_id.clone(), async move {
         #[cfg(any(test, feature = "extgate-probe"))]
         state
@@ -505,6 +560,11 @@ fn enqueue_turn<R: AgentRuntime>(
             Err(_) => CallerIdentity::Agent,
         };
         let (system, name) = runtime.build_agent_context(&agent_id, &caller);
+        let system = if prompt_suffix.is_empty() {
+            system
+        } else {
+            format!("{system}\n\n{prompt_suffix}")
+        };
         let turn_res = {
             let runtime = runtime.clone();
             let session_id = session_id.clone();
@@ -538,7 +598,7 @@ fn enqueue_turn<R: AgentRuntime>(
                     &inbound,
                     |raw| raw.to_string(),
                     |conversation| {
-                        RunRequest::new(
+                        let mut req = RunRequest::new(
                             agent_id.clone(),
                             name.clone(),
                             session_id.clone(),
@@ -547,7 +607,13 @@ fn enqueue_turn<R: AgentRuntime>(
                             "extgate",
                             caller.clone(),
                         )
-                        .with_image_urls(images.clone())
+                        .with_image_urls(images.clone());
+                        if kind_id == "nostr" {
+                            req = req.with_live_inbound_scope(LiveInboundScope::OnlySpeaker(
+                                author_id.clone(),
+                            ));
+                        }
+                        req
                     },
                 )
                 .await
@@ -588,4 +654,192 @@ fn enqueue_turn<R: AgentRuntime>(
             }
         }
     });
+}
+
+fn fire_held_turns<R: AgentRuntime>(
+    state: Arc<ExtgateState>,
+    runtime: R,
+    resolve_caller: ResolveCallerFn,
+    held: Vec<(NostrHeldTurn, CallerIdentity)>,
+) {
+    let Some((last, _)) = held.last() else {
+        return;
+    };
+    let said = Said {
+        id: String::new(),
+        binding_id: last.binding_id.clone(),
+        origin: last.origin.clone(),
+        author_id: last.author_id.clone(),
+        text: last.text.clone(),
+        attachments: last.images.clone(),
+    };
+    let row = OriginRow {
+        instance_id: last.instance_id.clone(),
+        kind_id: last.kind_id.clone(),
+        address: last.address.clone(),
+        agent_id: last.agent_id.clone(),
+        owner_id: last.owner_id.clone(),
+        delivery_mode: last.delivery_mode,
+    };
+    enqueue_turn(
+        state,
+        runtime,
+        resolve_caller,
+        &row,
+        &said,
+        &last.session_id,
+        &last.prompt_suffix,
+    );
+}
+
+fn fire_nostr_relay(state: &ExtgateState, row: &OriginRow, said: &Said) {
+    let body = nostr_renderer_body(&said.text);
+    let (_, label, _, _) = nostr_renderer_meta(&said.author_id, &said.text);
+    let author = nostr_author_label(&said.author_id);
+    let text = format!("[Nostr / {label}] {author}\n{body}");
+    state.relay_nostr_inbound(&row.agent_id, text);
+}
+
+fn recorded_said_text(
+    state: &ExtgateState,
+    row: &OriginRow,
+    said: &Said,
+    session_id: &str,
+) -> String {
+    if row.kind_id != "nostr" {
+        return said.text.clone();
+    }
+    let renderer = nostr_renderer_body(&said.text);
+    opencrab_actions::sanitize_tool_result_for_log(
+        "nostr_inbound",
+        renderer,
+        session_id,
+        &said.origin,
+        state.nostr_workspace_root(&row.agent_id).as_deref(),
+    )
+}
+
+const V1_PREFIX: &str = "[NOSTRGATE/V1 ";
+
+fn nostr_renderer_body(text: &str) -> &str {
+    let Some(first) = text.lines().next() else {
+        return text;
+    };
+    if first.starts_with(V1_PREFIX) {
+        let rest = text.get(first.len()..).unwrap_or("");
+        return rest.strip_prefix('\n').unwrap_or(rest);
+    }
+    text
+}
+
+fn nostr_prompt_suffix(author_id: &str, text: &str) -> String {
+    let (kind, label, author_key, target) = nostr_renderer_meta(author_id, text);
+    let author = nostr_author_label(author_id);
+    format!(
+        "[Nostr] {author} さんの投稿への応答です。\n\
+         - 送信者: {author_key}（pubkey={pubkey}）\n\
+         - 対象ノート: {target}\n\
+         - 種別: kind:{kind}（{label}）\n\
+         返信するなら nostr_reply(target=\"{target}\") を使ってください（target は返信先ノート）。\
+         種別的に本文返信が不自然なもの（リアクション等）や、返信不要なら \
+         NO_REPLY とだけ答えてください。",
+        pubkey = author_id,
+    )
+}
+
+fn nostr_author_label(author_id: &str) -> String {
+    let short: String = author_id.chars().take(12).collect();
+    format!("{short}…")
+}
+
+fn nostr_renderer_meta(author_id: &str, text: &str) -> (u32, &'static str, String, String) {
+    let renderer = nostr_renderer_body(text);
+    if let Some(meta) = parse_renderer_line(renderer) {
+        return meta;
+    }
+    let (kind, event_id) =
+        parse_v1_kind_and_event(text).expect("admitted nostr said has a V1 anchor");
+    (
+        kind,
+        nostr_kind_label(kind),
+        author_id.to_string(),
+        event_id,
+    )
+}
+
+fn parse_renderer_line(renderer: &str) -> Option<(u32, &'static str, String, String)> {
+    let line = renderer.lines().last()?;
+    let rest = line.strip_prefix("[Nostr kind:")?;
+    let inner = rest.strip_suffix(']')?;
+    let (kind_s, rest) = inner.split_once(' ')?;
+    let kind: u32 = kind_s.parse().ok()?;
+    let (label_from, target) = rest.split_once(" target=")?;
+    let (label, author_key) = label_from.split_once(" from=")?;
+    Some((
+        kind,
+        nostr_kind_from_label(label),
+        author_key.to_string(),
+        target.to_string(),
+    ))
+}
+
+fn parse_v1_kind_and_event(text: &str) -> Option<(u32, String)> {
+    let line = text.lines().next()?.trim();
+    let rest = line.strip_prefix(V1_PREFIX)?;
+    let json = rest.strip_suffix(']')?;
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let kind = value.get("kind")?.as_u64()? as u32;
+    let event_id = value.get("event_id")?.as_str()?.to_string();
+    Some((kind, event_id))
+}
+
+fn nostr_kind_from_label(label: &str) -> &'static str {
+    match label {
+        "DM" => "DM",
+        "リアクション" => "リアクション",
+        "長文" => "長文",
+        "リプライ" => "リプライ",
+        "リポスト" => "リポスト",
+        _ => "メンション",
+    }
+}
+
+fn nostr_kind_label(kind: u32) -> &'static str {
+    match kind {
+        4 | 1059 => "DM",
+        7 => "リアクション",
+        6 | 16 => "リポスト",
+        30023 => "長文",
+        _ => "メンション",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn renderer_body_strips_v1_line() {
+        let text =
+            "[NOSTRGATE/V1 {\"kind\":1}]\nhello\n[Nostr kind:1 リプライ from=aa target=note1x]";
+        assert_eq!(
+            nostr_renderer_body(text),
+            "hello\n[Nostr kind:1 リプライ from=aa target=note1x]"
+        );
+    }
+
+    #[test]
+    fn prompt_suffix_is_verbatim() {
+        let pk = "aa".repeat(32);
+        let text = format!(
+            "[NOSTRGATE/V1 {{\"kind\":1,\"event_id\":\"{}\"}}]\nhello\n[Nostr kind:1 リプライ from=npub1x target=note1abc]",
+            "bb".repeat(32)
+        );
+        let suffix = nostr_prompt_suffix(&pk, &text);
+        assert!(suffix.contains("nostr_reply(target=\"note1abc\")"));
+        assert!(suffix.contains("kind:1（リプライ）"));
+        assert!(suffix.contains("NO_REPLY"));
+        assert!(suffix.contains("pubkey="));
+        assert!(suffix.contains("npub1x"));
+    }
 }

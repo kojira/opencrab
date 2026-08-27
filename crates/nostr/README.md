@@ -12,8 +12,13 @@ default / watch Immediate とも同一口で `accept_inbound` exact 1 回。`rou
 ## 段階移行（`ingress.rs`）
 
 `gate.nostr_ingress` = `legacy`（既定）| `v3_shadow` | `v3`。未知値は起動失敗。
-旧 in-process ループは削除しない。`v3` のときだけ instance/binding を敷設し、旧ループは止めて
-TimedFire と allow-set 300 秒更新だけ残す。
+旧 in-process ループは削除しない。
+
+- `v3`: instance/binding を敷設し、旧ループは止めて TimedFire と allow-set 300 秒更新だけ残す。
+  identity 切替は停止→revision +1→再起動（hot swap しない）。
+- `v3_shadow`: 旧ループを回す。instance 行だけ敷き、本番 UDS へ hello 前までつなぐ。
+  Binding PUT / said / say はしない。同一 JSONL を legacy / gateway の両 parser と分類で照合する
+  （DM は legacy Discard / gateway Immediate を一致扱い）。
 
 ## binding（`binding.rs`）
 

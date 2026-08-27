@@ -15,18 +15,21 @@ pub mod race;
 pub mod registry;
 
 pub use admin::admin_router;
-pub use inbound::channel_whitelisted;
 pub use bearer::OperatorToken;
-pub use error::{ErrorCode, GateError, UNAUTHORIZED_BODY};
 pub use delivery_mode::{
     adjust_inbound_effect, delivery_mode_from_config_bytes, dispatches_v3_say, DeliveryMode,
 };
+pub use error::{ErrorCode, GateError, UNAUTHORIZED_BODY};
 pub use ids::{config_digest, encode_config_b64, now_nanos, session_id_for_binding};
+pub use inbound::channel_whitelisted;
 pub use listen::{
     enqueue_bind, recover_stale_deliveries, serve_uds, validate_listen_socket, wait_bind_ack,
     web_binding_state, EnqueueBindOutcome,
 };
-pub use registry::{ExtgateState, NostrSaidAdmit, NostrSaidDecision, Registry};
+pub use registry::{
+    ExtgateState, NostrHeldTurn, NostrRelayFn, NostrSaidAdmit, NostrSaidDecision, NostrWatchSets,
+    NostrWatchSetsFn, NostrWorkspaceFn, Registry,
+};
 
 use opencrab_actions::CallerIdentity;
 use opencrab_db::queries::{
@@ -62,9 +65,9 @@ pub fn resolve_caller_identity_with_owner(
             return CallerIdentity::CoAgent { agent_id: co_uuid };
         }
     }
-    let permission = user_ids.iter().find_map(|uid| {
-        get_trusted_user(conn, platform, uid, agent_id).map(|u| u.permission)
-    });
+    let permission = user_ids
+        .iter()
+        .find_map(|uid| get_trusted_user(conn, platform, uid, agent_id).map(|u| u.permission));
     match permission {
         Some(TrustedUserPermission::CoAgent) => CallerIdentity::CoAgent {
             agent_id: user_ids.first().copied().unwrap_or_default().to_string(),
@@ -76,11 +79,7 @@ pub fn resolve_caller_identity_with_owner(
     }
 }
 
-fn resolve_co_agent_uuid(
-    conn: &Connection,
-    platform: &str,
-    identifier: &str,
-) -> Option<String> {
+fn resolve_co_agent_uuid(conn: &Connection, platform: &str, identifier: &str) -> Option<String> {
     match platform {
         TRUSTED_PLATFORM_DISCORD => resolve_agent_by_discord_bot_user_id(conn, identifier),
         TRUSTED_PLATFORM_NOSTR => resolve_agent_by_nostr_self_pubkey(conn, identifier),

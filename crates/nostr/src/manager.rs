@@ -27,6 +27,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -44,11 +45,11 @@ use crate::adapter::{
     accept_nostr_inbound, pre_record_drop, AllowSetStore, AllowSources, DropReason,
 };
 use crate::binding::skip_default_loop;
-use crate::ingress::NostrIngress;
 use crate::cli::NostaroCli;
 use crate::config::NostrConfig;
 use crate::event::{parse_watch_line, NostrEvent};
 use crate::identity::NostrIdentityAdmin;
+use crate::ingress::NostrIngress;
 use crate::runner::NostrAgentRunner;
 use crate::session::{nostr_session_id, NostrSessionRuntime, NOSTR_SESSION_PREFIX};
 use crate::sink::NostrResponder;
@@ -123,6 +124,21 @@ pub type NostrProvisionFn = Arc<
         + Sync,
 >;
 
+/// instance 行だけ敷く（shadow hello）。戻りは revision。
+pub type NostrInstanceFn = Arc<
+    dyn Fn(
+            &str,
+            &str,
+            &NostrConfig,
+            &[opencrab_db::queries::SessionWatchRow],
+        ) -> anyhow::Result<u64>
+        + Send
+        + Sync,
+>;
+
+/// 停止後の identity 切替。config を書き revision を +1 する。
+pub type NostrReviseFn = NostrInstanceFn;
+
 pub struct NostrGatewayManager<R: NostrAgentRunner> {
     // std RwLock: is_running を同期メソッドにするため。ガードは await を跨がない。
     gateways: GatewayMap,
@@ -143,6 +159,12 @@ pub struct NostrGatewayManager<R: NostrAgentRunner> {
     allow_store: AllowSetStore,
     /// V3 のときだけ呼ぶ binding 敷設。
     provisioner: Option<NostrProvisionFn>,
+    /// `v3_shadow` の instance 行（Binding PUT なし）。
+    instance_provisioner: Option<NostrInstanceFn>,
+    /// V3 identity 切替の revision 更新。
+    reviser: Option<NostrReviseFn>,
+    /// `v3_shadow` の本番 UDS。hello 前までつなぐ。
+    shadow_socket: Option<PathBuf>,
 }
 
 impl<R: NostrAgentRunner> NostrGatewayManager<R> {
@@ -164,6 +186,9 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
             ingress: NostrIngress::Legacy,
             allow_store: AllowSetStore::default(),
             provisioner: None,
+            instance_provisioner: None,
+            reviser: None,
+            shadow_socket: None,
         }
     }
 
@@ -179,6 +204,21 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
 
     pub fn with_provisioner(mut self, provisioner: NostrProvisionFn) -> Self {
         self.provisioner = Some(provisioner);
+        self
+    }
+
+    pub fn with_instance_provisioner(mut self, provisioner: NostrInstanceFn) -> Self {
+        self.instance_provisioner = Some(provisioner);
+        self
+    }
+
+    pub fn with_reviser(mut self, reviser: NostrReviseFn) -> Self {
+        self.reviser = Some(reviser);
+        self
+    }
+
+    pub fn with_shadow_socket(mut self, socket: PathBuf) -> Self {
+        self.shadow_socket = Some(socket);
         self
     }
 
@@ -215,6 +255,9 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
             self.ingress,
             self.allow_store.clone(),
             self.provisioner.clone(),
+            self.instance_provisioner.clone(),
+            self.reviser.clone(),
+            self.shadow_socket.clone(),
         )
         .await
     }
@@ -241,7 +284,8 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
     /// 生成鍵の採用（identity 切替）capability を返す（#264）。
     ///
     /// `gateways` / `admins` の**同じ登録簿**（Arc）を共有する実体を返すので、採用時の
-    /// bootstrap 起動・稼働中判定・ホットスワップが本体と一貫する。
+    /// bootstrap 起動・稼働中判定・（legacy の）ホットスワップ /（v3 の停止→revision→再起動）
+    /// が本体と一貫する。
     pub fn identity_provisioner(&self) -> Arc<NostrIdentityProvisioner<R>> {
         Arc::new(NostrIdentityProvisioner {
             gateways: self.gateways.clone(),
@@ -253,6 +297,9 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
             ingress: self.ingress,
             allow_store: self.allow_store.clone(),
             provisioner: self.provisioner.clone(),
+            instance_provisioner: self.instance_provisioner.clone(),
+            reviser: self.reviser.clone(),
+            shadow_socket: self.shadow_socket.clone(),
         })
     }
 
@@ -372,8 +419,9 @@ impl<R: NostrAgentRunner> opencrab_actions::AgentGatewayLifecycle for NostrGatew
     /// 生成鍵の採用（identity 切替）capability（#264）。
     ///
     /// server-own の `nostr_switch_identity` がここから引く。稼働の有無を必要としない
-    /// （未稼働なら bootstrap 起動＝接続、稼働中ならホットスワップ）ので、`key_provisioning`
-    /// と同じく `is_running` に関わらず常に `Some` を返す。
+    /// （未稼働なら bootstrap 起動＝接続、稼働中なら legacy はホットスワップ・v3 は
+    /// 停止→revision→再起動）ので、`key_provisioning` と同じく `is_running` に関わらず
+    /// 常に `Some` を返す。
     fn identity_provisioning(
         &self,
     ) -> Option<Arc<dyn opencrab_actions::GatewayIdentityProvisioning>> {
@@ -705,6 +753,7 @@ async fn run_nostr_loop<R: NostrAgentRunner + Clone>(
     runtime: Arc<NostrSessionRuntime>,
     // #588 TimedFire / #603: 時刻発火の受け口を登録する登録簿（**必須**）。
     timed_fire_router: Arc<opencrab_actions::TimedFireRouter>,
+    shadows: bool,
 ) {
     let mut seen = SeenEvents::new(512);
     // #698: 元栓で捨てた件数の**揮発カウンタ**（プロセス寿命ぶん・永続しない）。毎行ログは
@@ -749,6 +798,7 @@ async fn run_nostr_loop<R: NostrAgentRunner + Clone>(
             &permits,
             &queues,
             &mut seen,
+            shadows,
         )
         .await
         {
@@ -777,6 +827,7 @@ async fn run_agent_inbound_loops<R: NostrAgentRunner + Clone + 'static>(
     timed_fire_router: Arc<opencrab_actions::TimedFireRouter>,
     watches: Vec<opencrab_db::queries::SessionWatchRow>,
     skip_default_loop: bool,
+    shadows: bool,
 ) {
     let mut set = tokio::task::JoinSet::new();
     if !skip_default_loop {
@@ -793,7 +844,7 @@ async fn run_agent_inbound_loops<R: NostrAgentRunner + Clone + 'static>(
         set.spawn(async move {
             run_nostr_loop(
                 runner_c, cli_c, agent, config_c, self_pk, allow_c, store_c, admin_c, runtime_c,
-                router,
+                router, shadows,
             )
             .await;
         });
@@ -811,7 +862,7 @@ async fn run_agent_inbound_loops<R: NostrAgentRunner + Clone + 'static>(
         set.spawn(async move {
             run_session_watch_loop(
                 runner_c, cli_c, agent, relays, watch, self_pk, allow_c, store_c, admin_c,
-                runtime_c,
+                runtime_c, shadows,
             )
             .await;
         });
@@ -875,6 +926,7 @@ async fn run_session_watch_loop<R: NostrAgentRunner + Clone>(
     store: AllowSetStore,
     admin: Arc<dyn NostrIdentityAdmin>,
     runtime: Arc<NostrSessionRuntime>,
+    shadows: bool,
 ) {
     let dropped = Arc::new(AtomicU64::new(0));
     let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_RESPONSES));
@@ -933,6 +985,7 @@ async fn run_session_watch_loop<R: NostrAgentRunner + Clone>(
             &queues,
             &bundle,
             &privilege,
+            shadows,
         )
         .await
         {
@@ -969,6 +1022,7 @@ async fn run_session_watch_once<R: NostrAgentRunner + Clone>(
     queues: &Arc<SessionQueues>,
     bundle: &Arc<Mutex<TimelineBundle>>,
     privilege: &opencrab_actions::PrivilegeFire<NostrEvent>,
+    shadows: bool,
 ) -> anyhow::Result<()> {
     let config = watch_subscribe_config(watch, relays.to_vec())?;
     let interval = Duration::from_secs(watch.interval_secs as u64);
@@ -1001,7 +1055,19 @@ async fn run_session_watch_once<R: NostrAgentRunner + Clone>(
             biased;
             line = lines.next_line() => {
                 let Some(line) = line? else { break };
+                if shadows {
+                    crate::shadow::compare_parse(&line);
+                }
                 let Some(event) = parse_watch_line(&line) else { continue };
+                if shadows {
+                    let self_pk = self_pubkey.read().unwrap().clone();
+                    crate::shadow::compare_classify(
+                        &event,
+                        &self_pk,
+                        config.watches_beyond_self_mentions(),
+                        Some(watch.id),
+                    );
+                }
                 if *self_pubkey.read().unwrap() == event.pubkey {
                     continue;
                 }
@@ -1078,12 +1144,7 @@ async fn handle_watch_event<R: NostrAgentRunner>(
             let mut held = false;
             let mut admitted = false;
             let mut run_caller = None;
-            let owner_id = sources
-                .owner
-                .iter()
-                .next()
-                .cloned()
-                .unwrap_or_default();
+            let owner_id = sources.owner.iter().next().cloned().unwrap_or_default();
             let resolve =
                 |sender: &str, _: &[String], _: &str| runner.resolve_nostr_caller(agent_id, sender);
             let dm_any = |sender: &str, _: &[String], owner: &str| sender == owner;
@@ -1511,6 +1572,7 @@ async fn run_watch_once<R: NostrAgentRunner + Clone>(
     permits: &Arc<Semaphore>,
     queues: &Arc<SessionQueues>,
     seen: &mut SeenEvents,
+    shadows: bool,
 ) -> anyhow::Result<()> {
     let mut cmd = cli.build_watch_command(agent_id, config)?;
     let mut child = cmd.spawn().map_err(|e| {
@@ -1549,9 +1611,20 @@ async fn run_watch_once<R: NostrAgentRunner + Clone>(
             }
         };
         let Some(line) = line else { break };
+        if shadows {
+            crate::shadow::compare_parse(&line);
+        }
         let Some(event) = parse_watch_line(&line) else {
             continue;
         };
+        if shadows {
+            crate::shadow::compare_classify(
+                &event,
+                &self_pubkey.read().unwrap(),
+                config.watches_beyond_self_mentions(),
+                None,
+            );
+        }
         // 自分の投稿はスキップ（自己返信ループ防止）。identity 切替に追従するため
         // 共有セルから毎回読む。
         if *self_pubkey.read().unwrap() == event.pubkey {
@@ -1566,8 +1639,7 @@ async fn run_watch_once<R: NostrAgentRunner + Clone>(
         // 同期呼び出し（await 無し）。応答生成は session キューの consumer が引き取る。
         let self_pk = self_pubkey.read().unwrap().clone();
         handle_event(
-            runner, cli, agent_id, &self_pk, allow, dropped, admin, runtime, permits, queues,
-            event,
+            runner, cli, agent_id, &self_pk, allow, dropped, admin, runtime, permits, queues, event,
         )
         .await;
     }
@@ -1627,17 +1699,13 @@ async fn handle_event<R: NostrAgentRunner>(
         None => {}
     }
     let session_id = nostr_session_id(agent_id);
-    let owner_id = sources
-        .owner
-        .iter()
-        .next()
-        .cloned()
-        .unwrap_or_default();
+    let owner_id = sources.owner.iter().next().cloned().unwrap_or_default();
     drop(sources);
 
     let mut admitted = false;
     let mut run_caller = None;
-    let resolve = |sender: &str, _: &[String], _: &str| runner.resolve_nostr_caller(agent_id, sender);
+    let resolve =
+        |sender: &str, _: &[String], _: &str| runner.resolve_nostr_caller(agent_id, sender);
     let dm_any = |sender: &str, _: &[String], owner: &str| sender == owner;
     let dm_one = |sender: &str, _: &str, owner: &str| sender == owner;
     let sid = session_id.clone();
@@ -1802,13 +1870,78 @@ async fn handle_event<R: NostrAgentRunner>(
     queues.enqueue(agent_id, &session_id, permits, job);
 }
 
+/// V3 の identity 切替: 鍵更新のあと gateway を停止→revision→再起動する。
+struct V3IdentityRestart<R: NostrAgentRunner> {
+    gateways: GatewayMap,
+    admins: AdminMap,
+    runner: R,
+    cli: NostaroCli,
+    runtime: Arc<NostrSessionRuntime>,
+    timed_fire_router: Arc<opencrab_actions::TimedFireRouter>,
+    ingress: NostrIngress,
+    allow_store: AllowSetStore,
+    provisioner: Option<NostrProvisionFn>,
+    instance_provisioner: Option<NostrInstanceFn>,
+    reviser: Option<NostrReviseFn>,
+    shadow_socket: Option<PathBuf>,
+}
+
+impl<R: NostrAgentRunner> V3IdentityRestart<R> {
+    async fn after_switch(
+        &self,
+        agent_id: &str,
+        secret_key: &str,
+        self_pubkey: &str,
+    ) -> anyhow::Result<()> {
+        stop_gateway(
+            &self.gateways,
+            &self.admins,
+            &self.timed_fire_router,
+            &self.allow_store,
+            agent_id,
+        );
+        let row = self
+            .runner
+            .get_nostr_config(agent_id)
+            .ok_or_else(|| anyhow::anyhow!("Nostr 設定が無いので revision を上げられない"))?;
+        let config = crate::config_from_row(&row);
+        let watches = self
+            .runner
+            .list_session_watches_for_agent(agent_id)
+            .map_err(|e| anyhow::anyhow!("session_watches を読めない: {e:#}"))?;
+        let Some(revise) = self.reviser.as_ref() else {
+            anyhow::bail!("nostr_ingress=v3 なのに reviser が無い");
+        };
+        revise(agent_id, self_pubkey, &config, &watches)?;
+        spawn_agent_gateway(
+            &self.gateways,
+            &self.admins,
+            &self.runner,
+            &self.cli,
+            &self.runtime,
+            agent_id,
+            secret_key,
+            config,
+            self.timed_fire_router.clone(),
+            self.ingress,
+            self.allow_store.clone(),
+            self.provisioner.clone(),
+            self.instance_provisioner.clone(),
+            self.reviser.clone(),
+            self.shadow_socket.clone(),
+        )
+        .await
+    }
+}
+
 /// watch ループが握る identity 切替の実体。runner（DB）+ cli + self_pubkey セルを capture し、
-/// 生成鍵を本鍵に採用する。**watch プロセスは再起動しない**（鍵非依存）。self_pubkey セルを
-/// 新 pubkey へ更新するだけで、以後の自己スキップが新 identity に追従する。
+/// 生成鍵を本鍵に採用する。legacy は self_pubkey セル更新のみ（watch 無停止）。
+/// v3 は鍵更新のあと停止→revision→再起動する。
 struct LoopIdentityAdmin<R: NostrAgentRunner> {
     runner: R,
     cli: NostaroCli,
     self_pubkey: SelfPubkey,
+    v3_restart: Option<Arc<V3IdentityRestart<R>>>,
 }
 
 #[async_trait::async_trait]
@@ -1873,6 +2006,9 @@ impl<R: NostrAgentRunner> NostrIdentityAdmin for LoopIdentityAdmin<R> {
                 warn!(agent_id, "#489: identity 切替後の自 pubkey を正規化できず逆引き表を更新しなかった（co_agent は次回起動まで stale・fail-closed）");
             }
         }
+        if let Some(restart) = &self.v3_restart {
+            restart.after_switch(agent_id, &nsec, &new_pubkey).await?;
+        }
         Ok(npub.to_string())
     }
 }
@@ -1919,6 +2055,9 @@ async fn spawn_agent_gateway<R: NostrAgentRunner>(
     ingress: NostrIngress,
     allow_store: AllowSetStore,
     provisioner: Option<NostrProvisionFn>,
+    instance_provisioner: Option<NostrInstanceFn>,
+    reviser: Option<NostrReviseFn>,
+    shadow_socket: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     // 資格情報のガード（#191 段階2 PR3）。DB の secret_key（#620 以降は暗号文 `enc:v1:…`）が
     // 空 / 空白だけなら鍵未設定なので、materialize（config 書き出し）や `pubkey` 取得より
@@ -2030,18 +2169,55 @@ async fn spawn_agent_gateway<R: NostrAgentRunner>(
         };
         provision(agent_id, &self_pubkey, &config, &watches)?;
     }
+    let mut shadow_hold = None;
+    if ingress.shadows_only() {
+        let Some(provision) = instance_provisioner.as_ref() else {
+            anyhow::bail!("nostr_ingress=v3_shadow なのに instance provisioner が無い");
+        };
+        let Some(socket) = shadow_socket.clone() else {
+            anyhow::bail!("nostr_ingress=v3_shadow なのに core_socket が無い");
+        };
+        let revision = provision(agent_id, &self_pubkey, &config, &watches)?;
+        let bytes = crate::instance_config_bytes(&self_pubkey, &config, &watches)?;
+        let digest = crate::shadow::config_digest(&bytes);
+        shadow_hold = Some(
+            crate::shadow::connect_hello(
+                socket,
+                crate::nostr_instance_id(agent_id),
+                revision,
+                self_pubkey.clone(),
+                digest,
+            )
+            .await?,
+        );
+    }
 
     let runner_c = runner.clone();
     let cli_c = cli.clone();
     let agent = agent_id.to_string();
-    // self_pubkey は共有セル。identity 切替（本鍵採用）時に新 pubkey へ更新できる
-    // ようにする（watch は鍵非依存なのでプロセス再起動不要）。
+    // self_pubkey は共有セル。legacy の identity 切替はセル更新。v3 は停止→再起動。
     let self_pubkey_cell = Arc::new(RwLock::new(self_pubkey));
-    // identity 切替の実体（runner+cli+セルを capture）。稼働中の採用（ホットスワップ）で使う。
+    let v3_restart = (ingress == NostrIngress::V3).then(|| {
+        Arc::new(V3IdentityRestart {
+            gateways: gateways.clone(),
+            admins: admins.clone(),
+            runner: runner_c.clone(),
+            cli: cli_c.clone(),
+            runtime: runtime.clone(),
+            timed_fire_router: timed_fire_router.clone(),
+            ingress,
+            allow_store: allow_store.clone(),
+            provisioner: provisioner.clone(),
+            instance_provisioner: instance_provisioner.clone(),
+            reviser: reviser.clone(),
+            shadow_socket: shadow_socket.clone(),
+        })
+    });
     let admin: Arc<dyn NostrIdentityAdmin> = Arc::new(LoopIdentityAdmin {
         runner: runner_c.clone(),
         cli: cli_c.clone(),
         self_pubkey: self_pubkey_cell.clone(),
+        v3_restart,
     });
     // 採用 admin を登録簿へ（handle と同時に入れる＝稼働中の判定と生死が揃う）。
     admins
@@ -2049,7 +2225,9 @@ async fn spawn_agent_gateway<R: NostrAgentRunner>(
         .unwrap()
         .insert(agent_id.to_string(), admin.clone());
     let runtime_c = runtime.clone();
+    let shadows = ingress.shadows_only();
     let handle = tokio::spawn(async move {
+        let _shadow_hold = shadow_hold;
         if ingress.runs_legacy_loops() {
             run_agent_inbound_loops(
                 runner_c,
@@ -2064,6 +2242,7 @@ async fn spawn_agent_gateway<R: NostrAgentRunner>(
                 timed_fire_router,
                 watches,
                 skip_default_loop,
+                shadows,
             )
             .await;
         } else {
@@ -2093,8 +2272,8 @@ async fn spawn_agent_gateway<R: NostrAgentRunner>(
 /// 生成鍵の採用（identity 切替）capability の実体（#264）。
 ///
 /// マネージャと**同じ登録簿**（`gateways` / `admins` の Arc）を共有する。判定は 2 モード:
-/// - **稼働中** → per-agent admin で in-place ホットスワップ（self_pubkey セル更新・再接続
-///   なし）。既存挙動をそのまま維持する。
+/// - **稼働中 + legacy/shadow** → per-agent admin で in-place ホットスワップ。
+/// - **稼働中 + v3** → 鍵更新のあと停止→revision→再起動。
 /// - **未稼働（自己ブートストラップ）** → `agent_nostr_config` に鍵・リレー・**空フィルタ**
 ///   （＝nostaro の mention-only 既定に委ねて自分宛のみ / #271）を enabled=false で書き、
 ///   [`spawn_agent_gateway`] で起動＝接続、
@@ -2112,6 +2291,9 @@ pub struct NostrIdentityProvisioner<R: NostrAgentRunner> {
     ingress: NostrIngress,
     allow_store: AllowSetStore,
     provisioner: Option<NostrProvisionFn>,
+    instance_provisioner: Option<NostrInstanceFn>,
+    reviser: Option<NostrReviseFn>,
+    shadow_socket: Option<PathBuf>,
 }
 
 impl<R: NostrAgentRunner> NostrIdentityProvisioner<R> {
@@ -2158,7 +2340,7 @@ impl<R: NostrAgentRunner> opencrab_actions::GatewayIdentityProvisioning
     for NostrIdentityProvisioner<R>
 {
     async fn adopt_identity(&self, agent_id: &str, npub: &str) -> anyhow::Result<String> {
-        // 稼働中なら既存のホットスワップ経路（self_pubkey セルを in-place 更新・再接続なし）。
+        // 稼働中: legacy はホットスワップ、v3 は admin 内で停止→revision→再起動。
         let running_admin = self.admins.read().unwrap().get(agent_id).cloned();
         if let Some(admin) = running_admin {
             return admin.adopt_generated_identity(agent_id, npub).await;
@@ -2196,6 +2378,9 @@ impl<R: NostrAgentRunner> opencrab_actions::GatewayIdentityProvisioning
             self.ingress,
             self.allow_store.clone(),
             self.provisioner.clone(),
+            self.instance_provisioner.clone(),
+            self.reviser.clone(),
+            self.shadow_socket.clone(),
         )
         .await?;
 
@@ -3982,6 +4167,99 @@ mod tests {
             mgr.is_running(agent),
             "ホットスワップは再接続しない（稼働継続）"
         );
+
+        mgr.stop_agent_gateway(agent).await;
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+    }
+
+    /// v3 の稼働中採用はホットスワップせず、停止→revision→再起動する。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn adopt_identity_v3_stops_revises_and_restarts() {
+        use opencrab_actions::GatewayIdentityProvisioning;
+
+        let agent = "agent-v3-revise-13";
+        let npub_new = "npub1v3revisenew";
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+
+        let existing = AgentNostrConfigRow {
+            agent_id: agent.to_string(),
+            secret_key: "nsec1old".to_string(),
+            relays_json: r#"["wss://yabu.me"]"#.to_string(),
+            filter_json: r#"{"keywords":["opencrab"]}"#.to_string(),
+            enabled: true,
+        };
+        let runner = SlowRunner::new(Duration::from_millis(1)).with_preset_config(existing);
+        let pubkey_upper = "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789";
+        let pubkey_lower = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let (_fake, cli) = fake_nostaro(pubkey_upper);
+        let revise_calls = Arc::new(AtomicUsize::new(0));
+        let revise_count = revise_calls.clone();
+        let mgr = NostrGatewayManager::new(runner.clone(), test_router())
+            .with_cli(cli)
+            .with_ingress(NostrIngress::V3)
+            .with_provisioner(Arc::new(|_, _, _, _| Ok(())))
+            .with_reviser(Arc::new(move |_, _, _, _| {
+                revise_count.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(2)
+            }));
+
+        let configured = crate::config::NostrConfig {
+            relays: vec!["wss://yabu.me".to_string()],
+            filter: crate::config::NostrFilter {
+                authors: vec![],
+                keywords: vec!["opencrab".to_string()],
+                kinds: vec![],
+            },
+        };
+        mgr.start_agent_gateway(agent, "nsec1old", configured)
+            .await
+            .unwrap();
+        assert!(mgr.is_running(agent));
+
+        NostaroCli::new()
+            .save_generated_key(
+                agent,
+                &crate::cli::GeneratedKey {
+                    nsec: "nsec1newv3".to_string(),
+                    npub: npub_new.to_string(),
+                    pubkey: "y".to_string(),
+                },
+            )
+            .unwrap();
+
+        let adopted = mgr
+            .identity_provisioner()
+            .adopt_identity(agent, npub_new)
+            .await
+            .unwrap();
+        assert_eq!(adopted, npub_new);
+        assert_eq!(
+            revise_calls.load(AtomicOrdering::SeqCst),
+            1,
+            "v3 切替は revision を 1 回上げる"
+        );
+        assert!(
+            runner.upserted.lock().unwrap().is_empty(),
+            "稼働中 v3 は bootstrap upsert しない"
+        );
+        assert!(
+            runner.enabled_calls.lock().unwrap().is_empty(),
+            "稼働中 v3 は enabled を触らない"
+        );
+        assert_eq!(
+            *runner.secret_sets.lock().unwrap(),
+            vec!["nsec1newv3".to_string()]
+        );
+        assert_eq!(
+            *runner.self_pubkey_sets.lock().unwrap(),
+            vec![
+                pubkey_lower.to_string(),
+                pubkey_lower.to_string(),
+                pubkey_lower.to_string()
+            ],
+            "起動 + 切替 + 再起動で self_pubkey を 3 回書く"
+        );
+        assert!(mgr.is_running(agent), "再起動後も稼働する");
 
         mgr.stop_agent_gateway(agent).await;
         let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());

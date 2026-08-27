@@ -20,6 +20,9 @@ opencrab-core.workspace = true
 opencrab-gateway.workspace = true
 opencrab-actions.workspace = true
 opencrab-db.workspace = true
+opencrab-nostr-gateway.workspace = true
+opencrab-gate-client.workspace = true
+sha2.workspace = true
 uuid.workspace = true
 # #620: 復号済み鍵材料を drop 時にゼロ埋めして保持する。
 zeroize = "1"

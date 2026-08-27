@@ -66,14 +66,13 @@ async fn main() -> anyhow::Result<()> {
     cfg.warn_if_legacy_webhook_masked();
 
     #[cfg(feature = "nostr")]
-    let nostr_ingress = opencrab_nostr::NostrIngress::parse(&cfg.gate.nostr_ingress).ok_or_else(
-        || {
+    let nostr_ingress =
+        opencrab_nostr::NostrIngress::parse(&cfg.gate.nostr_ingress).ok_or_else(|| {
             anyhow::anyhow!(
                 "gate.nostr_ingress は legacy|v3_shadow|v3（欠落=legacy）。得た値: {:?}",
                 cfg.gate.nostr_ingress
             )
-        },
-    )?;
+        })?;
 
     // #620: Nostr の at-rest 暗号化マスターキーを **load_config 直後・全 tokio::spawn より前**に
     // env から読み、**即 remove_var** する。以降 spawn される execute_shell は inherit_env=true で
@@ -108,10 +107,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let gate_token = opencrab_extgate::OperatorToken::take_from_env();
     let gate_socket = opencrab_extgate::validate_listen_socket(&cfg.gate.listen_socket)?;
-    let extgate = Arc::new(opencrab_extgate::ExtgateState::new(
-        db.clone(),
-        gate_token,
-    ));
+    let extgate = Arc::new(opencrab_extgate::ExtgateState::new(db.clone(), gate_token));
 
     // #620: マスターキーの要否は「Nostr が設定されているエージェントが 1 つ以上あるか」で
     // 決める（既存データから判定・新設定は足さない）。**プロセス全体は止めない**（Nostr を
@@ -740,29 +736,60 @@ async fn main() -> anyhow::Result<()> {
         // #588 TimedFire / #603: 時刻発火の受け口レジストリは `new` の必須引数（Discord と同型・
         // per-agent→共有の解決はルータが行う）。忘れるとコンパイルエラーになる。
         let db_for_provision = state.db.clone();
-        let manager: opencrab_server::SharedNostrManager = Arc::new(
-            opencrab_nostr::NostrGatewayManager::new(
-                state.clone(),
-                state.timed_fire_router.clone(),
+        let db_for_instance = state.db.clone();
+        let db_for_revise = state.db.clone();
+        let mut manager_builder = opencrab_nostr::NostrGatewayManager::new(
+            state.clone(),
+            state.timed_fire_router.clone(),
+        )
+        .with_cli(cli)
+        .with_ingress(nostr_ingress)
+        .with_provisioner(Arc::new(move |agent_id, self_pk, config, watches| {
+            let mut conn = db_for_provision
+                .lock()
+                .map_err(|_| anyhow::anyhow!("db lock for nostr provision"))?;
+            opencrab_server::nostr_provision::provision_nostr_gate(
+                &mut conn,
+                agent_id,
+                self_pk,
+                config,
+                watches,
+                opencrab_extgate::now_nanos(),
+            )?;
+            Ok(())
+        }))
+        .with_instance_provisioner(Arc::new(move |agent_id, self_pk, config, watches| {
+            let mut conn = db_for_instance
+                .lock()
+                .map_err(|_| anyhow::anyhow!("db lock for nostr instance"))?;
+            opencrab_server::nostr_provision::provision_nostr_instance(
+                &mut conn,
+                agent_id,
+                self_pk,
+                config,
+                watches,
+                opencrab_extgate::now_nanos(),
             )
-            .with_cli(cli)
-            .with_ingress(nostr_ingress)
-            .with_provisioner(Arc::new(move |agent_id, self_pk, config, watches| {
-                let mut conn = db_for_provision
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("db lock for nostr provision"))?;
-                opencrab_server::nostr_provision::provision_nostr_gate(
-                    &mut conn,
-                    agent_id,
-                    self_pk,
-                    config,
-                    watches,
-                    opencrab_extgate::now_nanos(),
-                )?;
-                Ok(())
-            })),
-        );
+        }))
+        .with_reviser(Arc::new(move |agent_id, self_pk, config, watches| {
+            let mut conn = db_for_revise
+                .lock()
+                .map_err(|_| anyhow::anyhow!("db lock for nostr revise"))?;
+            opencrab_server::nostr_provision::revise_nostr_gate(
+                &mut conn,
+                agent_id,
+                self_pk,
+                config,
+                watches,
+                opencrab_extgate::now_nanos(),
+            )
+        }));
+        if let Some(path) = &gate_socket {
+            manager_builder = manager_builder.with_shadow_socket(path.clone());
+        }
+        let manager: opencrab_server::SharedNostrManager = Arc::new(manager_builder);
         let store = manager.allow_store().clone();
+        let store_sets = store.clone();
         extgate.set_nostr_said_admit(Arc::new(move |agent_id, author_id, text| {
             use opencrab_extgate::{ErrorCode, GateError, NostrSaidDecision};
             use opencrab_nostr::{admit_nostr_said, AdmitSaidError, IngressRoute};
@@ -780,6 +807,27 @@ async fn main() -> anyhow::Result<()> {
                     immediate: anchor.route == IngressRoute::Immediate,
                     bundle: anchor.route == IngressRoute::Bundle,
                 }),
+            }
+        }));
+        extgate.set_nostr_watch_sets(Arc::new(move |agent_id| {
+            store_sets
+                .get_allow(agent_id)
+                .map(|allow| opencrab_extgate::NostrWatchSets {
+                    followees: allow.followees,
+                    owner: allow.owner,
+                    co_agents: allow.co_agents,
+                    trusted_users: allow.trusted_users,
+                })
+        }));
+        let workspace_base = state.workspace_base.clone();
+        extgate.set_nostr_workspace(Arc::new(move |agent_id| {
+            opencrab_core::workspace::resolve_agent_workspace(&workspace_base, agent_id).ok()
+        }));
+        let relay_runner = state.clone();
+        extgate.set_nostr_relay(Arc::new(move |agent_id, text| {
+            use opencrab_nostr::NostrAgentRunner;
+            if let Some(target) = relay_runner.resolve_nostr_relay_target(agent_id) {
+                relay_runner.relay_inbound_notification(&target, text);
             }
         }));
         // 共通操作も transport 固有の操作（nostaro の鍵生成 = `key_provisioning`）も

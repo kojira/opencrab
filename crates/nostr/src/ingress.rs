@@ -32,12 +32,17 @@ impl NostrIngress {
         matches!(self, Self::Legacy | Self::V3Shadow)
     }
 
-    /// instance/binding を DB に敷設する。
+    /// instance 行を DB に敷設する（hello に必要。binding は含まない）。
+    pub fn provisions_instance(self) -> bool {
+        matches!(self, Self::V3 | Self::V3Shadow)
+    }
+
+    /// instance と Binding PUT を敷設する。
     pub fn provisions_binding(self) -> bool {
         matches!(self, Self::V3)
     }
 
-    /// Binding PUT / said / say を行わない shadow。
+    /// Binding PUT / said / say を行わない shadow。hello 前までと watch 照合だけ。
     pub fn shadows_only(self) -> bool {
         matches!(self, Self::V3Shadow)
     }
@@ -53,6 +58,7 @@ mod tests {
         assert_eq!(NostrIngress::parse(""), Some(NostrIngress::Legacy));
         assert_eq!(NostrIngress::parse("legacy"), Some(NostrIngress::Legacy));
         assert!(NostrIngress::Legacy.runs_legacy_loops());
+        assert!(!NostrIngress::Legacy.provisions_instance());
         assert!(!NostrIngress::Legacy.provisions_binding());
         assert!(!NostrIngress::Legacy.shadows_only());
     }
@@ -62,6 +68,7 @@ mod tests {
         let m = NostrIngress::parse("v3").unwrap();
         assert_eq!(m, NostrIngress::V3);
         assert!(!m.runs_legacy_loops());
+        assert!(m.provisions_instance());
         assert!(m.provisions_binding());
         assert!(!m.shadows_only());
     }
@@ -70,6 +77,7 @@ mod tests {
     fn v3_shadow_keeps_legacy_and_skips_binding_put() {
         let m = NostrIngress::parse("v3_shadow").unwrap();
         assert!(m.runs_legacy_loops());
+        assert!(m.provisions_instance());
         assert!(!m.provisions_binding());
         assert!(m.shadows_only());
     }

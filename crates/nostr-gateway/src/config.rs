@@ -45,6 +45,14 @@ pub struct WatchPlacement {
     pub interval_secs: i64,
     #[serde(default)]
     pub filter: WatchFilter,
+    #[serde(default)]
+    pub filter_json: Option<WatchFilter>,
+}
+
+impl WatchPlacement {
+    pub fn effective_filter(&self) -> &WatchFilter {
+        self.filter_json.as_ref().unwrap_or(&self.filter)
+    }
 }
 
 const DM_KINDS: &[u32] = &[4, 1059];
@@ -119,7 +127,10 @@ fn validate_instance_config(cfg: &InstanceConfig) -> anyhow::Result<()> {
     }
     for watch in &cfg.watches {
         if watch.interval_secs <= 0 {
-            anyhow::bail!("watch {} interval_secs must be a positive integer", watch.id);
+            anyhow::bail!(
+                "watch {} interval_secs must be a positive integer",
+                watch.id
+            );
         }
     }
     Ok(())
@@ -153,10 +164,7 @@ pub fn parse_uuid(raw: &str) -> anyhow::Result<String> {
 }
 
 fn is_hex_pubkey(raw: &str) -> bool {
-    raw.len() == 64
-        && raw
-            .bytes()
-            .all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+    raw.len() == 64 && raw.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
@@ -194,11 +202,13 @@ mod tests {
                 address: "nostr-a1".into(),
                 config_b64: {
                     use base64::Engine;
-                    base64::engine::general_purpose::STANDARD
-                        .encode(serde_json::to_vec(&serde_json::json!({
+                    base64::engine::general_purpose::STANDARD.encode(
+                        serde_json::to_vec(&serde_json::json!({
                             "relays": ["wss://example.invalid"],
                             "self_pubkey": "aa".repeat(32),
-                        })).unwrap())
+                        }))
+                        .unwrap(),
+                    )
                 },
             }],
         };
@@ -220,5 +230,29 @@ mod tests {
             ..WatchFilter::default()
         };
         assert_eq!(effective_kinds(&f), vec![1, 7]);
+    }
+
+    #[test]
+    fn watch_filter_json_is_the_effective_filter() {
+        let cfg: InstanceConfig = serde_json::from_value(serde_json::json!({
+            "relays": ["wss://example.invalid"],
+            "self_pubkey": "aa".repeat(32),
+            "watches": [{
+                "id": 17,
+                "interval_secs": 30,
+                "session_id": "nostr-a1",
+                "filter_json": {
+                    "authors": ["npub1watched"],
+                    "keywords": ["opencrab"],
+                    "kinds": [1, 7]
+                }
+            }]
+        }))
+        .unwrap();
+        let watch = &cfg.watches[0];
+        assert_eq!(watch.effective_filter().authors, vec!["npub1watched"]);
+        assert_eq!(watch.effective_filter().keywords, vec!["opencrab"]);
+        assert_eq!(watch.effective_filter().kinds, vec![1, 7]);
+        assert!(watches_beyond_self(watch.effective_filter()));
     }
 }

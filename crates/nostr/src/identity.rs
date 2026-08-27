@@ -12,7 +12,7 @@ pub trait NostrIdentityAdmin: Send + Sync {
     /// `generated-keys/<npub>.nsec` の鍵を本鍵に採用する。
     ///
     /// DB の secret_key を更新し、config.toml を新鍵で再生成（0600）し、自己返信スキップ用の
-    /// self_pubkey を新 pubkey へ更新する（watch プロセスは鍵非依存なので再起動不要）。
+    /// self_pubkey を新 pubkey へ更新する。legacy は watch 無停止。v3 は停止→revision→再起動。
     /// 成功時は採用した npub を返す。秘密鍵は返さない。
     async fn adopt_generated_identity(&self, agent_id: &str, npub: &str) -> anyhow::Result<String>;
 }
