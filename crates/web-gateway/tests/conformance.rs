@@ -137,6 +137,13 @@ struct Session {
     _dir: tempfile::TempDir,
 }
 
+fn sut_path() -> PathBuf {
+    match std::env::var_os("OPENCRAB_CONFORMANCE_SUT") {
+        Some(p) => PathBuf::from(p),
+        None => PathBuf::from(env!("CARGO_BIN_EXE_web-gateway")),
+    }
+}
+
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/fixtures")
 }
@@ -255,7 +262,7 @@ impl Session {
         });
         let place_path = dir.path().join("placement.json");
         std::fs::write(&place_path, serde_json::to_vec(&placement).unwrap()).unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_web-gateway"))
+        let child = Command::new(sut_path())
             .arg(&place_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

@@ -27,7 +27,7 @@ web-gateway /path/to/placement.json
 
 ## 検収
 
-共通 process conformance（SUT は `web-gateway` binary。`argv[1]=placement.json`。ready は `http_bind` listen のみ）:
+共通 process conformance（SUT は `OPENCRAB_CONFORMANCE_SUT`、未設定時は `web-gateway` binary。`argv[1]=placement.json`。ready は `http_bind` listen のみ）:
 
 `cargo test -p opencrab-web-gateway --test conformance`
 

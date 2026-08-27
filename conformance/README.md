@@ -1,6 +1,6 @@
 # process conformance
 
-DESIGN-SAMPLES-NODE.md §1。SUT は `argv[1]=placement.json` の executable。harness は一時 UDS の mock core と実 TCP の HTTP/SSE だけで駆動する。
+DESIGN-SAMPLES-NODE.md §1。SUT は `argv[1]=placement.json` の executable。既定は Rust `web-gateway`。差し替えは `OPENCRAB_CONFORMANCE_SUT` だけ。harness は一時 UDS の mock core と実 TCP の HTTP/SSE だけで駆動する。言語名分岐・skip・片側 golden は置かない。
 
 ## 起動 ABI
 
