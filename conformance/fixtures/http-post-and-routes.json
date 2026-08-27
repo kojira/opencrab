@@ -1,0 +1,68 @@
+{
+  "name": "http-post-and-routes",
+  "prelude": "hello_bind",
+  "steps": [
+    {
+      "op": "http_post_async",
+      "id": "nullseq",
+      "path": "/api/web-conversations/web-agent-conv/messages",
+      "body": {
+        "client_message_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "text": "hello",
+        "attachments": []
+      }
+    },
+    { "op": "uds_recv", "id": "said_null", "expect": { "m": "said" } },
+    { "op": "uds_send", "frame": { "id": "$said_null.id", "m": "ok", "seq": null } },
+    { "op": "http_await", "id": "nullseq", "status": 403, "body": { "state": "not_admitted" } },
+    {
+      "op": "http_post_async",
+      "id": "okseq",
+      "path": "/api/web-conversations/web-agent-conv/messages",
+      "body": {
+        "client_message_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "text": "hello",
+        "attachments": []
+      }
+    },
+    {
+      "op": "uds_recv",
+      "id": "said_ok",
+      "expect": {
+        "m": "said",
+        "origin": "web:cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+      }
+    },
+    { "op": "uds_send", "frame": { "id": "$said_ok.id", "m": "ok", "seq": 7 } },
+    {
+      "op": "http_await",
+      "id": "okseq",
+      "status": 202,
+      "body": {
+        "state": "accepted",
+        "seq": 7,
+        "origin": "web:cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "client_message_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+      }
+    },
+    {
+      "op": "http_post",
+      "path": "/api/web-conversations/web-agent-conv/messages",
+      "body": {
+        "client_message_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        "text": "busy",
+        "attachments": []
+      },
+      "status": 409,
+      "body_expect": { "error": { "code": "conversation_busy" } }
+    },
+    { "op": "http_get", "path": "/rooms/x/messages", "status": 404 },
+    { "op": "http_get", "path": "/chat", "status": 404 },
+    {
+      "op": "http_post",
+      "path": "/rooms/x/messages",
+      "body": {},
+      "status": 404
+    }
+  ]
+}

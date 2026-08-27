@@ -1,0 +1,18 @@
+{
+  "name": "frame-too-large",
+  "prelude": "hello_bind",
+  "steps": [
+    {
+      "op": "sse_open",
+      "id": "ev",
+      "path": "/api/web-conversations/web-agent-conv/events"
+    },
+    { "op": "uds_send_oversized", "byte": 120, "count": 1048576, "nl": true },
+    {
+      "op": "sse_recv",
+      "id": "ev",
+      "event": "gate_error",
+      "data": { "code": "too_large" }
+    }
+  ]
+}

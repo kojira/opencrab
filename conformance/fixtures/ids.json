@@ -1,0 +1,15 @@
+{
+  "instance_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "binding_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  "address": "web-agent-conv",
+  "author_id": "owner-1",
+  "revision": 1,
+  "config_digest": "3b354e0c676677f4ab5735bc9f8eb2fbb2c74df34e5d54d3b4fd88165b542672",
+  "client_message_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  "origin": "web:cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  "busy_client_message_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+  "say_id_ok": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+  "say_id_empty": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+  "activity_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+  "other_binding_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+}

@@ -1,0 +1,54 @@
+{
+  "name": "say-three-results",
+  "prelude": "hello_bind",
+  "steps": [
+    {
+      "op": "sse_open",
+      "id": "ev",
+      "path": "/api/web-conversations/web-agent-conv/events"
+    },
+    {
+      "op": "uds_send",
+      "frame": {
+        "id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "m": "say",
+        "binding_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "payload": { "text": "reply", "ignored": true }
+      }
+    },
+    {
+      "op": "uds_recv",
+      "expect": { "m": "ok", "id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd" }
+    },
+    {
+      "op": "sse_recv",
+      "id": "ev",
+      "event": "message",
+      "data": { "text": "reply" }
+    },
+    {
+      "op": "uds_send",
+      "frame": {
+        "id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "m": "say",
+        "binding_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "payload": { "text": "" }
+      }
+    },
+    {
+      "op": "uds_recv",
+      "expect": {
+        "m": "err",
+        "id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "code": "external_rejected"
+      }
+    },
+    { "op": "uds_close" },
+    {
+      "op": "sse_recv",
+      "id": "ev",
+      "event": "gate_error",
+      "data": { "code": "disconnect" }
+    }
+  ]
+}

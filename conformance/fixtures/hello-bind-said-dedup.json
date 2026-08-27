@@ -1,0 +1,69 @@
+{
+  "name": "hello-bind-said-dedup",
+  "prelude": "hello_bind",
+  "steps": [
+    {
+      "op": "http_post_async",
+      "id": "p1",
+      "path": "/api/web-conversations/web-agent-conv/messages",
+      "body": {
+        "client_message_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "text": "hello",
+        "attachments": []
+      }
+    },
+    {
+      "op": "uds_recv",
+      "id": "said1",
+      "expect": {
+        "m": "said",
+        "origin": "web:cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "author_id": "owner-1",
+        "binding_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+      }
+    },
+    {
+      "op": "uds_send",
+      "frame": { "id": "$said1.id", "m": "ok", "seq": 1 }
+    },
+    {
+      "op": "http_await",
+      "id": "p1",
+      "status": 202,
+      "body": {
+        "state": "accepted",
+        "seq": 1,
+        "origin": "web:cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "client_message_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+      }
+    },
+    {
+      "op": "http_post_async",
+      "id": "p2",
+      "path": "/api/web-conversations/web-agent-conv/messages",
+      "body": {
+        "client_message_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "text": "hello",
+        "attachments": []
+      }
+    },
+    {
+      "op": "uds_recv",
+      "id": "said2",
+      "expect": {
+        "m": "said",
+        "origin": "web:cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+      }
+    },
+    {
+      "op": "uds_send",
+      "frame": { "id": "$said2.id", "m": "ok", "seq": 1 }
+    },
+    {
+      "op": "http_await",
+      "id": "p2",
+      "status": 202,
+      "body": { "state": "accepted", "seq": 1 }
+    }
+  ]
+}

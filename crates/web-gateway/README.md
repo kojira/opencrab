@@ -27,7 +27,15 @@ web-gateway /path/to/placement.json
 
 ## 検収
 
+共通 process conformance（SUT は `web-gateway` binary。`argv[1]=placement.json`。ready は `http_bind` listen のみ）:
+
 `cargo test -p opencrab-web-gateway --test conformance`
+
+fixture はリポジトリ直下 `conformance/fixtures/`。SUT 名分岐・実装別 skip・片側 golden は置かない。
+
+frame parser と in-process HTTP は rust-unit に分離し、共通 conformance の合格数に算入しない:
+
+`cargo test -p opencrab-web-gateway --test rust-unit`
 
 実 core 結合: `cargo test -p opencrab-web-gateway --test core_process_e2e --test web_conversation_create_e2e`
 
