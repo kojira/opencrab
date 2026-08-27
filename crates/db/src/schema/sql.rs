@@ -687,8 +687,8 @@ CREATE INDEX IF NOT EXISTS idx_trusted_co_agents_agent ON trusted_co_agents(agen
 -- ============================================
 -- 信頼済みユーザー（経路ごとの識別子空間）
 -- ============================================
--- 旧名は `trusted_discord_users` / `discord_user_id`。web と当時の direct-message REST も
--- 同じ表を使っていたので #159 (v17) で改名した。旧DBは v17 の RENAME で追従する。
+-- 旧名は `trusted_discord_users` / `discord_user_id`。Discord 以外の経路（web / rest）も
+-- 同じ表を使うので #159 (v17) で改名した。旧DBは v17 の RENAME で追従する。
 CREATE TABLE IF NOT EXISTS trusted_users (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,

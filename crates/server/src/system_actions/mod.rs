@@ -35,7 +35,7 @@ pub struct SystemGatewayActions {
     state: AppState,
     /// transport 固有の gateway（Discord/Nostr 等）。自分が扱わないツールを委譲する。
     inner: Option<Arc<dyn GatewayActions>>,
-    /// auto-dispatch した走行中 subtask の共有 registry（#161）。web/Nostr でも
+    /// auto-dispatch した走行中 subtask の共有 registry（#161）。web/Nostr/REST でも
     /// `cancel_subtask` を露出するため server-neutral 層に配線する。`run_agent_response`
     /// が dispatcher へ渡すものと同一 Arc（Discord では gateway_actions の registry とも
     /// 同一）。`None` の場合は走行中 subtask が無く cancel は not found を返す。
@@ -43,7 +43,8 @@ pub struct SystemGatewayActions {
     /// 停止（`cancel_subtask`）を通知する完了 sink（この run の `RunRequest` と同一）。
     ///
     /// 停止は `on_subtask_cancelled`（既定は no-op）で通知するため resume は起きない。
-    /// 停止時に追加の状態整合が必要な経路は、この通知を受けて後処理を行う。
+    /// REST のように「最後の subtask の決着でセッションを完了にする」経路は、この通知
+    /// を受けて `sessions.status` の整合を取る（無いと永久 `active` のまま残る）。
     completion_sink: Option<Arc<dyn SubtaskCompletionSink>>,
     /// transport が提供する A2UI 描画面（#156 S3）。`inner` から 1 度だけ引く。
     ///
@@ -450,7 +451,7 @@ impl SystemGatewayActions {
                 }),
             },
             // 実行中の subtask を停止するツール（#161）。Discord gateway 実装だけに
-            // あった cancel_subtask を server-neutral 層へ露出し、web/Nostr でも
+            // あった cancel_subtask を server-neutral 層へ露出し、web/Nostr/REST でも
             // 自動 dispatch された subtask を停止できるようにする。認可（親セッション/
             // owner 限定）は共有 registry を引く実体（cancel_subtask）が担う。
             // サブタスクの起動（#175 S4）。Discord gateway 実装だけにあった

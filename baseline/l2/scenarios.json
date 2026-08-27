@@ -38,6 +38,7 @@
       "PUT /api/agents/{id}/memory/index/config":{"batch_size":17},
       "POST /api/agents/{id}/memory/index/merge":{"source_topic_id":"missing-a","target_topic_id":"missing-b"},
       "POST /api/agents/{id}/memory/search":{"query":"baseline","limit":10},
+      "POST /api/agents/{id}/messages":{"content":"baseline","user_id":"baseline-user"},
       "PUT /api/agents/{id}/nostr":{"enabled":false},
       "PUT /api/agents/{id}/nostr-relay":{"enabled":false},
       "POST /api/agents/{id}/schedules":{"session_id":"nostr-baseline-agent","cron_expr":"0 1 * * *","timezone":"Asia/Tokyo","message":"baseline","enabled":false},
@@ -145,6 +146,7 @@
       "PUT /api/llm/providers/{name}":{"method":"GET","path":"/api/llm/providers"},
       "POST /api/hooks/{source}":{"db_query":"agent_inbox"},
       "POST /api/sessions":{"method":"GET","path":"/api/sessions"},
+      "POST /api/agents/{id}/messages":{"method":"GET","path":"/api/sessions"},
       "POST /api/sessions/{id}/mentor":{"method":"GET","path":"/api/sessions/{id}/logs"},
       "DELETE /api/voice/config":{"method":"GET","path":"/api/voice/config"},
       "PUT /api/voice/config":{"method":"GET","path":"/api/voice/config"}

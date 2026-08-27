@@ -346,10 +346,12 @@ impl<T: AgentRunner> opencrab_actions::AgentGatewayLifecycle for DiscordGatewayM
     /// 稼働中の per-agent ゲートウェイの HTTP クライアントからツール実行の実体を組む
     /// （capability / #191 段階2 PR4）。稼働していなければ `None`。
     ///
-    /// A2UI の描画面と owner を**付けない**のは意図的な差で、
+    /// 組み立ては REST 経路（`POST /api/agents/{id}/messages`）が手前でやっていたものを
+    /// **そのまま**移設したもの。A2UI の描画面と owner を**付けない**のは移設前と同じで、
     /// 意図的な差である: それらは受信ループが持つ per-connection の状態
     /// （`start_agent_gateway` が作る保留対話の登録簿・イベント送信口）に紐づいており、
-    /// 接続の外から組み直すと**別の登録簿**を指してしまう。
+    /// 接続の外から組み直すと**別の登録簿**を指してしまう。ここで足すと REST 経由で
+    /// 開いた対話に誰も応答できなくなる。
     fn gateway_actions_for(
         &self,
         agent_id: &str,
