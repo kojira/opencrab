@@ -23,7 +23,7 @@ pub struct TrustedUserDto {
     pub created_by: String,
     pub created_at: String,
     pub display_name: String,
-    /// `user_id` がどの経路の識別子か（`discord` / `web` / legacy `rest`, #159）。
+    /// `user_id` がどの経路の識別子か（`discord` / `web` / `rest`, #159）。
     ///
     /// **応答に出す**: 互換読みの撤去後は「どの経路の行か」が権限そのものを決めるため、
     /// 一覧に出ていないと運用者は「登録したのに効かない」行を見分けられない。
@@ -60,7 +60,7 @@ pub struct AddTrustedUserRequest {
     pub permission: Option<String>,
     /// ロスター表示用の名前（ピアレビュアー一覧等）。省略時は空。
     pub display_name: Option<String>,
-    /// `user_id` がどの経路の識別子か（`discord` / `web` / legacy `rest`, #159）。
+    /// `user_id` がどの経路の識別子か（`discord` / `web` / `rest`, #159）。
     ///
     /// **省略時は `discord`**（#214 以前からの登録リクエストがそのまま動く）。
     pub platform: Option<String>,
@@ -69,8 +69,8 @@ pub struct AddTrustedUserRequest {
 /// 信頼済みユーザーを 1 件登録する。
 ///
 /// `platform` で識別子空間を選ぶ（#159）。省略時は従来どおり `discord`。ダッシュボード
-/// 利用者は `web` で登録する。`rest` は撤去済みの direct-message REST に属する既存行との
-/// 互換のため受け付ける（互換読みの撤去後、他経路の行はその経路の権限を与えない）。
+/// 利用者は `web`、`POST /api/agents/{id}/messages` の利用者は `rest` で登録する
+/// （互換読みの撤去後、他経路の行はその経路の権限を与えない）。
 ///
 /// 未定義の経路は 400 で弾く（登録できても誰とも一致しない行になり、「登録したのに
 /// 効かない」が黙って残るため）。一意制約 `(user_id, agent_id)` の衝突は 409
@@ -98,7 +98,7 @@ pub async fn add_trusted_user(
     // その信頼ユーザーが読み出しで一致しない。正規化できない値は保存せず 400
     // （設定できたように見えて永久に誰とも一致しない行を作らせない）。入口 `configure_nostr`
     // / REST の owner_pubkey と同じ扱いで、新しい制約ではなく既存の入口正規化の網羅。
-    // 他の値（discord / web / legacy rest）の識別子は素通し（挙動を変えない）。
+    // 他経路（discord / web / rest）の識別子は素通し（挙動を変えない）。
     // PR-1B: 公開鍵の正規化は Nostr クレートの実装なので nostr feature の内側。nostr を
     // 外した構成では `platform='nostr'` の信頼ユーザーは正規化できないため**受け付けず
     // 400 で拒否**する（丸めず・素通しの平文保存もしない＝暗黙のフォールバックを作らない）。
@@ -275,7 +275,7 @@ mod tests {
         .is_some());
     }
 
-    /// 経路を指定すればその経路の行になる。legacy `rest` も既存行との互換用に受け付ける。
+    /// 経路を指定すればその経路の行になる（互換読みの撤去後、これが唯一の登録手段）。
     #[tokio::test]
     async fn platform_is_taken_from_the_request() {
         let state = crate::test_app_state();

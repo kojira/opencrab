@@ -1,13 +1,13 @@
-//! web / Nostr の呼び出し元の権限判定（1 実装）。
+//! web / REST / Nostr の呼び出し元の権限判定（1 実装）。
 //!
-//! 旧 web 会話経路は Discord 設定の owner と突き合わせ、
+//! 旧 web 会話経路と REST（[`crate::api::agents_messages`]）は Discord 設定の owner と突き合わせ、
 //! 一致しなければ信頼済みユーザーの表を `(経路, 識別子, エージェント)` で引く。
 //! 2 箇所に写経されていると片方だけ緩められる余地が残るので、ここに閉じる。判定本体は
 //! Nostr（#319）と共有する [`resolve_caller_identity_with_owner`] の**1 実装**で、
 //! [`resolve_caller_identity`] は Discord 設定の owner を取り出してそこへ委譲するだけ。
 //!
 //! ## 動かしてはいけない線
-//! - **owner の判定に使う設定は Discord の owner のまま**（web 専用の owner を
+//! - **owner の判定に使う設定は Discord の owner のまま**（web / REST 専用の owner を
 //!   新設しない）。最小権限固定の経路に認可の判定を新設すると、そこが権限の昇格経路になる。
 //! - **fail-closed**: DB を引けない・オーナー未設定は最小権限（`Agent`）へ倒れる
 //!   （空のオーナー識別子は誰とも一致しない — [`opencrab_core::owner::is_owner_id`]）。

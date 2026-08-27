@@ -1222,9 +1222,9 @@ const MIGRATIONS: &[Migration] = &[
         //   - `crates/server/src/memory_organize.rs` … `sleep-organize-{agent_id}-{unix_ts}`
         // sleep のもう 1 つのラン（`skill_consolidation`）は素の LLM 1 コールで session を
         // 持たない（`llm_logs.session_id` は `None`）ため生ログを書かず、対象外。
-        // 対話・heartbeat・subtask・nostr・web と、撤去済み direct-message REST の既存
-        // session_id はいずれも別の接頭辞（`discord-` / `heartbeat-` / `subtask-` /
-        // `nostr-` / `web-` / legacy `agent-msg-`）で、`sleep-` で始まるものは無い。
+        // 対話・heartbeat・subtask・nostr・web・REST の session_id はいずれも別の接頭辞
+        // （`discord-` / `heartbeat-` / `subtask-` / `nostr-` / `web-` / `agent-msg-`）で、
+        // `sleep-` で始まるものは無い。
         //
         // ## FTS も同じ rowid 集合で消す
         // `memory_sessions_fts` は本体と手動同期する通常の fts5（外部コンテンツではない）。

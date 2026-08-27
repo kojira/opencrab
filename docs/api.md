@@ -51,6 +51,8 @@ Base URL: `http://localhost:3000`
 | GET | `/api/sessions/{id}/logs` | Get session logs |
 | POST | `/api/sessions/{id}/mentor` | Insert mentor instruction |
 | POST | `/api/sessions/{id}/owner` | Owner instruction (record + turn) |
+| **Agent Messages** | | |
+| POST | `/api/agents/{id}/messages` | Send direct message to agent |
 | **Agent Schedules (#455)** | | |
 | GET | `/api/agents/{id}/schedules` | List schedules (each with computed `next_fire_at`) |
 | POST | `/api/agents/{id}/schedules` | Create schedule (cron/`@every`; validates cron/tz/session; 400 on invalid) |
@@ -1239,6 +1241,98 @@ issue #499）、`process_interval_secs` ごとのポーリングは取りこぼ�
 ```
 
 セッションが無いときは **404**。参加者が無いときは **400**。
+
+---
+
+## Agent Messages
+
+### POST /api/agents/{id}/messages
+
+**目的**: エージェントに直接メッセージを送信して応答を得る（セッション ID を自動管理）
+
+セッション ID は `agent-msg-{agent_id}-{user_id}` の形式で自動生成・再利用される。会話履歴は保持される。
+
+`user_id` はハンドラ入口で 1 回だけ前後の空白を除去され（trim）、以降の権限判定・セッション ID・`speaker_id` すべてで同じ正規化済みの値が使われる。つまり `" 123 "` と `"123"` は同じセッション・同じ送信者として扱われる。
+
+**存在しないエージェントは 404**（#632）: `agents` テーブルに `{id}` の行が無ければ、**ターンを起こさず** **`404 Not Found`**（`{"error": "agent not found: {id}"}`）を返す。行が無いと per-agent 設定（`heartbeat_instructions` / `model` / `persona` 等）が全部既定に落ちるのに「動いてしまう」ため、タイプミスに気づけないのを防ぐ。存在確認はサーバ側ターン実行の単一チョークポイント（`process::run_agent_response`）で 1 度だけ行う。判定はエージェント行の有無のみで、**無効・停止中のエージェントの扱いは変えない**。（弾かれる前にセッション行や送信メッセージのログが書かれることはあるが、ターンは走らない。）
+
+**ツール実行は非ブロック（background subtask）**
+
+この経路は非ブロック dispatch を配線している。エージェントが返したツール呼び出しは、同一 assistant メッセージ分をまとめて 1 つの background subtask として dispatch され、**HTTP 応答はその完了を待たずに返る**。
+
+- **ツールの実行結果は応答本文に含まれない**。`responses[].content` はツールを呼ぶと決めた時点のエージェント発話であり、「ツール結果を踏まえた最終応答」ではない。
+- **一部のツールは従来どおり inline 実行**され、その結果は同じターンの応答本文に反映される。inline に留めるのは「背景化すると壊れるもの」で、分類の考え方は次のとおり:
+  - **配送系**（送信・投稿・返信・UI 提示）、**同ターンで戻り値を使うもの**（生成した ID / URL をそのターンで使う）、**run 内の共有状態を書くもの**（実行中モデルの切り替え等）、**純粋な読み取りで即答すべきもの**（一覧・検索）、そして **dispatch 自体の制御系**（`spawn_subtask` / `cancel_subtask` / `report_progress`）。
+  - inline 集合は**ツールの供給源ごとに別々に存在する** — 共通アクション群 / サーバ内蔵の設定ツール群 / Discord / Nostr の 4 つ。数十個規模で増減するため、ここでは列挙しない（列挙すると必ず実装と乖離する）。
+  - **MCP ツール（`mcp__*`）は既定で inline**。運用者が繋いだ外部ツールの性質を静的に判定できないため、安全側に倒している。
+  - 逆に、**明示的に dispatch 対象へ回されるものもある**（長時間処理。例: `nostr_generate_key` の vanity 鍵探索）。
+  - **正確な一覧の権威はコード**（`crates/actions/src/bridge.rs` の inline 集合 / dispatch 可集合の定数対）。分類基準の解説は `docs/DESIGN.md` §4.4「非ブロックツール実行」を参照。
+- dispatch は最上位ターンのみ。`spawn_subtask` で建てたサブエンジンの中は全ツール inline 実行。
+- **完了結果の取得**は `GET /api/sessions/{id}/logs`（`session_id` はレスポンスの `session_id`）。この経路の完了 sink は「保存のみ」で、結果を再注入して LLM を回し直す（resume）ことはしない。保存された完了本文は次回 POST 時の会話履歴として文脈に載る。
+- **`sessions.status` を「走行中かどうか」の判定に使わないこと**。この経路がセッション行を `active` にするのは**初回作成時だけ**で、`active` に戻す経路が無い。挙動は次のようになる:
+  - **1 通目**: 走行中の subtask がある間は `active` のままで、最後の subtask が決着（完了 / 停止）した時点で `completed` になる。決着前にサーバが停止すれば `active` のまま残る。
+  - **2 通目以降**: セッション行は既に `completed` なので、subtask が走行中でも `completed` と読める。つまり `completed` は「もう走っていない」ことを意味しない。
+  - 完了の観測には `sessions.status` ではなく `GET /api/sessions/{id}/logs` の `subtask_completed` を使うこと（上記「完了結果の取得」）。
+- background subtask はバッチ全体で既定 1,800 秒のタイムアウトを持つ（超過時は `exit_reason="timeout"` として決着する）。走行中の subtask はエージェントの `cancel_subtask` で停止できる（registry はセッション単位で共有されるため、後続リクエストからも到達できる）。
+
+**Request Body**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| content | string | ✅ | メッセージ本文 |
+| user_id | string | ✅ | 送信者の ID（Discord ユーザー ID または エージェント ID）。前後の空白は除去される |
+
+**Caller 権限の決定ロジック**（`trusted_users` は **`platform="rest"` の行だけ**を引く。
+`discord` の行では信頼されない — [Trusted Users](#trusted-users) の移行の注記を参照）:
+- `user_id` が `trusted_users` テーブルに `co-agent` 権限で登録されている → `CoAgent`
+- `user_id` が `trusted_users` テーブルに登録されている → `TrustedUser`
+- `user_id` がエージェントの Discord オーナー ID と一致する → `Owner`（比較は前後の空白を無視する。オーナー ID が空文字/空白のみ＝未設定なら誰とも一致しない）
+- それ以外 → `Agent`
+
+**Example Request**
+
+```json
+{"content": "What's the weather today?", "user_id": "123456789012345678"}
+```
+
+**Response**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| session_id | string | セッション ID |
+| caller_type | string | `"owner"` \| `"trusted_user"` \| `"co_agent"` \| `"agent"` |
+| responses | object[] | エージェントの応答 |
+
+**responses 要素**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| agent_id | UUID | エージェント ID |
+| content | string | 応答内容 |
+
+**Example Response**
+
+```json
+{
+  "session_id": "agent-msg-550e8400-...-123456789012345678",
+  "caller_type": "owner",
+  "responses": [{
+    "agent_id": "550e8400-e29b-41d4-a716-446655440000",
+    "content": "I don't have real-time weather access, but I can help with other things!"
+  }]
+}
+```
+
+**Error Response** (no LLM provider)
+
+```json
+{
+  "session_id": "agent-msg-...",
+  "caller_type": "agent",
+  "responses": [],
+  "error": "No LLM providers available"
+}
+```
 
 ---
 

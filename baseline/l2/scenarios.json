@@ -29,6 +29,7 @@
     "normal_bodies": {
       "POST /api/agents":{"name":"Created Baseline Agent","persona_name":"Created"},
       "POST /api/agents/{agent_id}/web-conversations":{},
+      "POST /api/agents/{id}/messages":{"content":"baseline","user_id":"baseline-user"},
       "PUT /api/agents/{id}":{"name":"Updated Baseline Agent","persona_name":"Updated"},
       "PATCH /api/agents/{id}":{"personality":"updated personality"},
       "POST /api/agents/{id}/allowed-commands":{"command":"printf"},
@@ -155,6 +156,7 @@
       "PUT /api/llm/providers/{name}":{"method":"GET","path":"/api/llm/providers"},
       "POST /api/hooks/{source}":{"db_query":"agent_inbox"},
       "POST /api/sessions":{"method":"GET","path":"/api/sessions"},
+      "POST /api/agents/{id}/messages":{"method":"GET","path":"/api/sessions"},
       "DELETE /api/voice/config":{"method":"GET","path":"/api/voice/config"},
       "PUT /api/voice/config":{"method":"GET","path":"/api/voice/config"}
     },
