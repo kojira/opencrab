@@ -518,3 +518,7 @@ conformance suite は少なくとも次を自動検証する。
 | 組み込みゲートも同じ process 境界へ移す案 | Discord/web/voice は現行 process 配置を維持する。 |
 
 再交渉の合格は、omoikane 側の wire/admin client と本体 conformance の双方が本書の field、response `m`、同seq、6 operation、3 delivery result を同じ fixture で通すことである。
+
+## V3.5 改訂（2026-08-27・オーナー承認）: Binding PUT の session 再利用例外
+
+Binding PUT で指定 address が既存 session の id と byte 一致する場合、新 session を insert せず既存 session を binding に割り当てる（kind 非依存の一般規則）。一致しない場合は従来どおり `session_id_for_binding(binding_id)` で新設。既存 session を「別の」binding へ流用しない原則は維持する（同一 address への再 PUT は §5 の規則どおり）。動機: 組み込みゲート載せ替えで既存会話をデータ移行なしで引き継ぐため（DESIGN-NOSTRGATE §5）。同 transaction で subject に対応する sole agent membership と、別 open binding による占有を検査し、不一致・複数・占有は `binding_conflict` で全 rollback する。

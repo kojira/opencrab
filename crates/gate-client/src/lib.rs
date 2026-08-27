@@ -3,3 +3,5 @@
 pub mod client;
 pub mod json;
 pub mod wire;
+
+pub use client::SayPolicy;

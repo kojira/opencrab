@@ -10,6 +10,7 @@ members = [
     "crates/discord",
     "crates/nostr",
     "crates/web-gateway",
+    "crates/nostr-gateway",
     "crates/gate-client",
     "crates/mcp",
     "crates/server",
@@ -99,6 +100,7 @@ opencrab-discord = { path = "crates/discord" }
 opencrab-nostr = { path = "crates/nostr" }
 opencrab-extgate = { path = "crates/extgate", default-features = false }
 opencrab-web-gateway = { path = "crates/web-gateway" }
+opencrab-nostr-gateway = { path = "crates/nostr-gateway" }
 opencrab-gate-client = { path = "crates/gate-client" }
 opencrab-mcp = { path = "crates/mcp" }
 

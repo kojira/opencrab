@@ -6,7 +6,8 @@
 
 | 関数 | 契約 |
 |---|---|
-| `create_gate_binding_in_tx` | physical session・sole membership・open binding を 1 TX。theme は呼び出し側が渡す。commit は呼び出し側。V3 Binding PUT と Web 会話作成の唯一の書込口 |
+| `create_gate_binding_in_tx` | physical session・sole membership・open binding を 1 TX。theme は呼び出し側が渡す。commit は呼び出し側。V3 Binding PUT と Web 会話作成の唯一の書込口。V3.5: address が既存 session id と byte 一致なら新 session を作らず再利用。membership 不一致・複数・他 open binding の占有は `CreateGateBindingError::Conflict` |
+| `canonical_session_id` | physical `extgate-{binding_id}` があればそれ、無ければ address と id が一致する再利用 session。どちらも無ければ None |
 
 ## sessions（webgate read 投影）
 

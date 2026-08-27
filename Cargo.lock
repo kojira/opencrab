@@ -2229,6 +2229,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "opencrab-nostr-gateway"
+version = "0.2.17"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "opencrab-gate-client",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "opencrab-plugd"
 version = "0.2.17"
 dependencies = [

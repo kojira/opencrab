@@ -63,6 +63,13 @@ pub enum PostRefuse {
     Busy,
 }
 
+/// core からの `say` をどう扱うか。Web は live queue へ受理、Nostr 第1段は投稿能力が無いので拒否する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SayPolicy {
+    AcceptToLiveQueue,
+    RejectExternal,
+}
+
 enum PendingKind {
     Hello,
     Said,
@@ -123,6 +130,7 @@ struct Inner {
 pub struct InstanceClient {
     pub instance_id: String,
     pub author_id: String,
+    say_policy: SayPolicy,
     inner: Mutex<Inner>,
     write: Mutex<WriteOut>,
     closed_notify: Notify,
@@ -130,12 +138,13 @@ pub struct InstanceClient {
 }
 
 impl InstanceClient {
-    fn blank(instance_id: String, author_id: String) -> Self {
+    fn blank(instance_id: String, author_id: String, say_policy: SayPolicy) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         drop(rx);
         Self {
             instance_id,
             author_id,
+            say_policy,
             inner: Mutex::new(Inner {
                 acknowledged: HashMap::new(),
                 remembered: HashMap::new(),
@@ -159,7 +168,11 @@ impl InstanceClient {
         author_id: String,
         config_digest: String,
     ) -> Result<Arc<Self>, FrameError> {
-        let client = Arc::new(Self::blank(instance_id, author_id));
+        let client = Arc::new(Self::blank(
+            instance_id,
+            author_id,
+            SayPolicy::AcceptToLiveQueue,
+        ));
         attach(&client, socket, revision, &config_digest).await?;
         Ok(client)
     }
@@ -172,7 +185,25 @@ impl InstanceClient {
         author_id: String,
         config_digest: String,
     ) -> Arc<Self> {
-        let client = Arc::new(Self::blank(instance_id, author_id));
+        Self::spawn_with_say_policy(
+            socket,
+            instance_id,
+            revision,
+            author_id,
+            config_digest,
+            SayPolicy::AcceptToLiveQueue,
+        )
+    }
+
+    pub fn spawn_with_say_policy(
+        socket: PathBuf,
+        instance_id: String,
+        revision: u64,
+        author_id: String,
+        config_digest: String,
+        say_policy: SayPolicy,
+    ) -> Arc<Self> {
+        let client = Arc::new(Self::blank(instance_id, author_id, say_policy));
         tokio::spawn(reconnect_loop(
             client.clone(),
             socket,
@@ -207,6 +238,18 @@ impl InstanceClient {
         &self,
         address: &str,
         origin: &str,
+        text: &str,
+        attachments: &[Attachment],
+    ) -> Result<SaidOutcome, PostRefuse> {
+        self.post_said_with_author(address, origin, &self.author_id, text, attachments)
+            .await
+    }
+
+    pub async fn post_said_with_author(
+        &self,
+        address: &str,
+        origin: &str,
+        author_id: &str,
         text: &str,
         attachments: &[Attachment],
     ) -> Result<SaidOutcome, PostRefuse> {
@@ -245,7 +288,7 @@ impl InstanceClient {
                 },
             );
         }
-        let frame = said_frame(&id, &binding_id, origin, &self.author_id, text, attachments);
+        let frame = said_frame(&id, &binding_id, origin, author_id, text, attachments);
         tracing::info!(
             instance_id = %self.instance_id,
             binding_id = %binding_id,
@@ -518,6 +561,10 @@ async fn handle_say(client: &InstanceClient, say: Say, generation: u64) -> bool 
         binding_id = %say.binding_id,
         "say"
     );
+    if client.say_policy == SayPolicy::RejectExternal {
+        let _ = send_frame(client, err_frame(&say.id, "external_rejected", None)).await;
+        return false;
+    }
     let Some(text) = say_text(&say.payload).map(str::to_string) else {
         let _ = send_frame(client, err_frame(&say.id, "external_rejected", None)).await;
         return false;

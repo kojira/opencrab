@@ -4,6 +4,7 @@ pub mod admin;
 pub mod bearer;
 pub mod close;
 pub mod delivery;
+pub mod delivery_mode;
 pub mod error;
 pub mod ids;
 pub mod inbound;
@@ -17,6 +18,9 @@ pub use admin::admin_router;
 pub use inbound::channel_whitelisted;
 pub use bearer::OperatorToken;
 pub use error::{ErrorCode, GateError, UNAUTHORIZED_BODY};
+pub use delivery_mode::{
+    adjust_inbound_effect, delivery_mode_from_config_bytes, dispatches_v3_say, DeliveryMode,
+};
 pub use ids::{now_nanos, session_id_for_binding};
 pub use listen::{
     enqueue_bind, recover_stale_deliveries, serve_uds, validate_listen_socket, wait_bind_ack,

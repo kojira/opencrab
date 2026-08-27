@@ -538,7 +538,12 @@ async fn put_binding_inner(
         &address,
         now,
     )
-    .map_err(|_| GateError::store())?;
+    .map_err(|e| match e {
+        opencrab_db::queries::CreateGateBindingError::Conflict => {
+            GateError::new(ErrorCode::BindingConflict)
+        }
+        opencrab_db::queries::CreateGateBindingError::Store(_) => GateError::store(),
+    })?;
     if opencrab_db::queries::injected_commit_failure() {
         let _ = tx.rollback();
         return Err(GateError::store());

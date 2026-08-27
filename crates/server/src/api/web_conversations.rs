@@ -129,7 +129,14 @@ fn persist_binding(
         opencrab_extgate::now_nanos(),
     ) {
         let _ = tx.rollback();
-        return Err(json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()));
+        return Err(match e {
+            opencrab_db::queries::CreateGateBindingError::Conflict => {
+                json_err(StatusCode::CONFLICT, "binding_conflict")
+            }
+            opencrab_db::queries::CreateGateBindingError::Store(err) => {
+                json_err(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string())
+            }
+        });
     }
     if opencrab_db::queries::injected_commit_failure() {
         let _ = tx.rollback();

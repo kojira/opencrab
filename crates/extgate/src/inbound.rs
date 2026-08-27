@@ -17,9 +17,10 @@ use opencrab_db::queries::{
 use rusqlite::{params, Connection, Transaction, TransactionBehavior};
 
 use crate::delivery::apply_delivery_effect;
+use crate::delivery_mode::{adjust_inbound_effect, DeliveryMode};
 use crate::listen::emit_activity;
 use crate::error::{ErrorCode, GateError};
-use crate::ids::session_id_for_binding;
+use crate::ids::decode_config_b64;
 use crate::protocol::Said;
 use crate::registry::ExtgateState;
 use crate::ResolveCallerFn;
@@ -34,6 +35,7 @@ struct OriginRow {
     address: String,
     agent_id: String,
     owner_id: String,
+    delivery_mode: DeliveryMode,
 }
 
 pub fn process_said<R: AgentRuntime>(
@@ -83,7 +85,17 @@ pub fn process_said<R: AgentRuntime>(
     let recorded = Cell::new(false);
     let record_failed = Cell::new(false);
     let run_after = Cell::new(false);
-    let session_id = session_id_for_binding(&said.binding_id);
+    let session_id = match opencrab_db::queries::canonical_session_id(
+        &tx,
+        &said.binding_id,
+        &row.address,
+    ) {
+        Ok(Some(id)) => id,
+        Ok(None) | Err(_) => {
+            let _ = tx.rollback();
+            return Err(GateError::store());
+        }
+    };
     let agent_ids = [row.agent_id.clone()];
     let event = NormalizedInboundEvent {
         sender_id: said.author_id.as_str(),
@@ -256,7 +268,7 @@ fn load_origin_row(
     binding_id: &str,
 ) -> Result<Option<OriginRow>, GateError> {
     let result = tx.query_row(
-        "SELECT b.instance_id, i.kind_id, b.address, a.agent_id, b.closed_at
+        "SELECT b.instance_id, i.kind_id, b.address, a.agent_id, b.closed_at, i.config_b64
          FROM gate_bindings b
          JOIN gate_instances i ON i.instance_id = b.instance_id
          JOIN agents a ON a.subject_id = i.subject_id
@@ -269,13 +281,14 @@ fn load_origin_row(
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
                 r.get::<_, Option<i64>>(4)?,
+                r.get::<_, String>(5)?,
             ))
         },
     );
     match result {
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(_) => Err(GateError::store()),
-        Ok((inst, kind_id, address, agent_id, closed)) => {
+        Ok((inst, kind_id, address, agent_id, closed, config_b64)) => {
             if inst != instance_id || closed.is_some() {
                 return Ok(None);
             }
@@ -284,12 +297,16 @@ fn load_origin_row(
                 .flatten()
                 .map(|c| c.owner_discord_id)
                 .unwrap_or_default();
+            let config_bytes = decode_config_b64(&config_b64)?;
+            let delivery_mode = crate::delivery_mode::delivery_mode_from_config_bytes(&config_bytes)
+                .map_err(|_| GateError::new(ErrorCode::BadRequest))?;
             Ok(Some(OriginRow {
                 instance_id: inst,
                 kind_id,
                 address,
                 agent_id,
                 owner_id,
+                delivery_mode,
             }))
         }
     }
@@ -398,6 +415,7 @@ fn enqueue_turn<R: AgentRuntime>(
     let address = row.address.clone();
     let origin = said.origin.clone();
     let owner_id = row.owner_id.clone();
+    let delivery_mode = row.delivery_mode;
     locks.spawn_serialized(session_id.clone(), async move {
         #[cfg(any(test, feature = "extgate-probe"))]
         state
@@ -468,6 +486,7 @@ fn enqueue_turn<R: AgentRuntime>(
                     Some(r) => delivery_effect(r),
                     None => opencrab_actions::DeliveryEffect::Empty,
                 };
+                let effect = adjust_inbound_effect(delivery_mode, effect);
                 apply_delivery_effect(
                     &state,
                     &runtime,
