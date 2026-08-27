@@ -17,6 +17,10 @@ function toSessionDto(s: SessionRow): SessionDto {
     metadata_json: s.metadata_json,
     gateway_bound: s.gateway_bound === true,
     web_binding_state: s.web_binding_state,
+    binding_address:
+      typeof s.binding_address === 'string' && s.binding_address.length > 0
+        ? s.binding_address
+        : undefined,
   };
 }
 

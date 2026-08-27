@@ -183,6 +183,7 @@ pub async fn get_session(
                 match opencrab_db::queries::open_web_binding(&conn, &id) {
                     Ok(Some(b)) => match extgate.lock_registry() {
                         Ok(reg) => {
+                            value["binding_address"] = serde_json::json!(b.address);
                             value["web_binding_state"] = serde_json::json!(
                                 opencrab_extgate::web_binding_state(
                                     &reg,

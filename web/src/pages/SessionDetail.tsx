@@ -11,6 +11,7 @@ import {
 } from '../api/sessions';
 import type { SessionDto, SessionLogRow } from '../api/types';
 import { conversationTitle } from '../lib/conversationTitle';
+import { uuidV4 } from '../lib/uuid';
 
 export const BINDING_POLL_MS = 1000;
 export const BINDING_POLL_MAX = 60;
@@ -240,7 +241,9 @@ export default function SessionDetail() {
   }, [id]);
 
   // §4.3: open web binding の address または physical。server の gateway_bound がその写像。
+  // gateway 呼び出しの正は GET 応答の binding_address。URL / ID 形式から推測しない。
   const isWebConversation = session?.gateway_bound === true;
+  const gatewaySessionId = session?.binding_address;
   const ready = isWebConversation && session?.web_binding_state === 'ready';
   const preparing = isWebConversation && session?.web_binding_state !== 'ready';
 
@@ -274,9 +277,9 @@ export default function SessionDetail() {
   }, [id, preparing, pollTimedOut, pollError, pollNonce]);
 
   useEffect(() => {
-    if (!isWebConversation || !id || !ready || sessionKind !== 'loaded' || logsKind === 'loading' || logsKind === 'idle') return;
+    if (!id || !isWebConversation || !gatewaySessionId || !ready || sessionKind !== 'loaded' || logsKind === 'loading' || logsKind === 'idle') return;
     sourceRef.current?.close();
-    const es = new EventSource(conversationEventsUrl(id));
+    const es = new EventSource(conversationEventsUrl(gatewaySessionId));
     sourceRef.current = es;
     es.addEventListener('activity', (ev) => {
       const data = JSON.parse((ev as MessageEvent).data) as { state?: string };
@@ -319,7 +322,7 @@ export default function SessionDetail() {
     return () => {
       es.close();
     };
-  }, [id, isWebConversation, ready, sessionKind, logsKind]);
+  }, [id, gatewaySessionId, isWebConversation, ready, sessionKind, logsKind]);
 
   const submitOwner = async (e: FormEvent) => {
     e.preventDefault();
@@ -337,16 +340,19 @@ export default function SessionDetail() {
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!isWebConversation || !id || !ownerInput.trim() || sendPhase === 'submitting') return;
+    if (!isWebConversation || !ownerInput.trim() || sendPhase === 'submitting') return;
     const text = ownerInput.trim();
-    const clientId = pendingId ?? crypto.randomUUID().toLowerCase();
-    setPendingId(clientId);
-    setPendingText(text);
-    setSendPhase('submitting');
-    setSendError(null);
-    setNoReply(false);
     try {
-      await sendWebMessage(id, clientId, text);
+      if (!gatewaySessionId) {
+        throw new Error('binding_address_missing');
+      }
+      const clientId = pendingId ?? uuidV4();
+      setPendingId(clientId);
+      setPendingText(text);
+      setSendPhase('submitting');
+      setSendError(null);
+      setNoReply(false);
+      await sendWebMessage(gatewaySessionId, clientId, text);
       setSendPhase('accepted');
       setOwnerInput('');
     } catch (err) {
@@ -357,11 +363,14 @@ export default function SessionDetail() {
   };
 
   const retrySend = async () => {
-    if (!id || !pendingId || !pendingText) return;
-    setSendPhase('submitting');
-    setSendError(null);
+    if (!pendingId || !pendingText) return;
     try {
-      await sendWebMessage(id, pendingId, pendingText);
+      if (!gatewaySessionId) {
+        throw new Error('binding_address_missing');
+      }
+      setSendPhase('submitting');
+      setSendError(null);
+      await sendWebMessage(gatewaySessionId, pendingId, pendingText);
       setSendPhase('accepted');
     } catch (err) {
       const code = err instanceof ConversationSendError ? err.code : (err as Error).message;

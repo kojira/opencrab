@@ -148,7 +148,17 @@ async fn get_session_projects_physical_state_with_gateway_bound() {
     assert_eq!(body["phase"], "convergent");
     assert_eq!(body["gateway_bound"], true);
     assert_eq!(body["web_binding_state"], "unavailable");
+    assert_eq!(body["binding_address"], logical);
     assert_eq!(body["agent_ids"], serde_json::json!(["a1"]));
+}
+
+#[tokio::test]
+async fn get_session_by_physical_id_exposes_binding_address() {
+    let (app, logical, physical) = seeded();
+    let (status, body) = get(app, &format!("/api/sessions/{physical}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["binding_address"], logical);
+    assert_eq!(body["gateway_bound"], true);
 }
 
 #[tokio::test]
@@ -349,4 +359,5 @@ async fn list_and_detail_agent_ids_from_membership_sorted_updated_at() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(phys["agent_ids"], serde_json::json!(["a1"]));
     assert_eq!(phys["gateway_bound"], true);
+    assert_eq!(phys["binding_address"], logical);
 }

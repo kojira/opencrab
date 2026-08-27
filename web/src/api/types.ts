@@ -101,6 +101,8 @@ export interface SessionRow {
   agent_ids?: string[];
   gateway_bound?: boolean;
   web_binding_state?: 'ready' | 'provisioning' | 'unavailable';
+  /** open web binding の address（論理 session_id）。gateway 呼び出しの正。 */
+  binding_address?: string;
 }
 
 export interface SessionDto {
@@ -115,6 +117,8 @@ export interface SessionDto {
   metadata_json: string | null;
   gateway_bound: boolean;
   web_binding_state?: 'ready' | 'provisioning' | 'unavailable';
+  /** open web binding の address（論理 session_id）。gateway 呼び出しの正。 */
+  binding_address?: string;
 }
 
 export interface SessionLogRow {

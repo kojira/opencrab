@@ -89,7 +89,23 @@ describe('getSession', () => {
       metadata_json: null,
       gateway_bound: false,
       web_binding_state: undefined,
+      binding_address: undefined,
     });
+  });
+
+  it('passes through server binding_address and does not invent one', async () => {
+    mockedApi.get.mockResolvedValue(
+      makeRow({
+        id: 'extgate-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        gateway_bound: true,
+        web_binding_state: 'ready',
+        binding_address: 'web-a1-c1',
+        agent_ids: ['a1'],
+      }),
+    );
+    const result = await getSession('extgate-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
+    expect(result.binding_address).toBe('web-a1-c1');
+    expect(result.id).toBe('extgate-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
   });
 });
 

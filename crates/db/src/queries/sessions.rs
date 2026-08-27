@@ -173,24 +173,26 @@ pub fn open_web_physical_session(conn: &Connection, session_id: &str) -> Result<
 pub struct OpenWebBinding {
     pub binding_id: String,
     pub instance_id: String,
+    pub address: String,
 }
 
 pub fn open_web_binding(conn: &Connection, session_id: &str) -> Result<Option<OpenWebBinding>> {
     let mut stmt = conn.prepare(
-        "SELECT b.binding_id, b.instance_id
+        "SELECT b.binding_id, b.instance_id, b.address
          FROM gate_bindings b
          JOIN gate_instances i ON i.instance_id = b.instance_id
          WHERE b.closed_at IS NULL AND i.deleted_at IS NULL AND i.kind_id = 'web'
            AND (b.address = ?1 OR ('extgate-' || b.binding_id) = ?1)",
     )?;
-    let rows: Vec<(String, String)> = stmt
-        .query_map([session_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+    let rows: Vec<(String, String, String)> = stmt
+        .query_map([session_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<std::result::Result<_, _>>()?;
     match rows.as_slice() {
         [] => Ok(None),
-        [(binding_id, instance_id)] => Ok(Some(OpenWebBinding {
+        [(binding_id, instance_id, address)] => Ok(Some(OpenWebBinding {
             binding_id: binding_id.clone(),
             instance_id: instance_id.clone(),
+            address: address.clone(),
         })),
         _ => anyhow::bail!("multiple open web bindings for {session_id}"),
     }
@@ -754,6 +756,8 @@ mod webgate_read_tests {
         let by_phys = open_web_binding(&conn, &physical).unwrap().unwrap();
         assert_eq!(by_addr.binding_id, binding);
         assert_eq!(by_phys.binding_id, binding);
+        assert_eq!(by_addr.address, logical);
+        assert_eq!(by_phys.address, logical);
         assert_eq!(effective_agent_ids(&conn, &physical).unwrap(), vec!["a1"]);
     }
 }
