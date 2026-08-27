@@ -17,6 +17,9 @@ node_modules/
 # vitest などのローカルキャッシュ
 .vite/
 web/dist/
+web/test-results/
+web/playwright-report/
+web/blob-report/
 .server.pid
 .web.pid
 .server.log

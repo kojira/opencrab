@@ -252,7 +252,7 @@
     ]
   },
   "http": {
-    "route_count": 82,
+    "route_count": 83,
     "routes": [
       {
         "activation": "always",
@@ -261,6 +261,14 @@
           "POST"
         ],
         "path": "/api/agents",
+        "source": "opencrab_server::create_router"
+      },
+      {
+        "activation": "always",
+        "methods": [
+          "POST"
+        ],
+        "path": "/api/agents/{agent_id}/web-conversations",
         "source": "opencrab_server::create_router"
       },
       {

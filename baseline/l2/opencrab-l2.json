@@ -24,11 +24,11 @@
       "effects_uncollected": 0,
       "not_applicable": 3,
       "uncollected": 38,
-      "valid_rejections": 33
+      "valid_rejections": 34
     },
     "http_observed_status_classes": {
       "2xx": 139,
-      "4xx": 46,
+      "4xx": 48,
       "5xx": 4
     },
     "tool_effects_observed": 50,
@@ -259,6 +259,73 @@
             {
               "name": "content-type",
               "value": "text/plain; charset=utf-8"
+            },
+            {
+              "name": "vary",
+              "value": "origin, access-control-request-method, access-control-request-headers"
+            }
+          ],
+          "status": 400
+        },
+        "selection": "malformed_json_rejection"
+      },
+      {
+        "effect": null,
+        "name": "post___api_agents_agent_id_web-conversations__normal",
+        "request": {
+          "body": {},
+          "method": "POST",
+          "uri": "/api/agents/baseline-agent/web-conversations"
+        },
+        "response": {
+          "body": {
+            "error": "web_instance_unavailable"
+          },
+          "headers": [
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "access-control-expose-headers",
+              "value": "*"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "vary",
+              "value": "origin, access-control-request-method, access-control-request-headers"
+            }
+          ],
+          "status": 409
+        },
+        "selection": "normal_or_local_precondition_branch"
+      },
+      {
+        "name": "post___api_agents_agent_id_web-conversations__reject_or_absent",
+        "request": {
+          "body_utf8": "{",
+          "method": "POST",
+          "uri": "/api/agents/baseline-agent/web-conversations"
+        },
+        "response": {
+          "body": {
+            "error": "invalid json"
+          },
+          "headers": [
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "access-control-expose-headers",
+              "value": "*"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
             },
             {
               "name": "vary",
@@ -9456,8 +9523,12 @@
         "response": {
           "body": [
             {
+              "agent_ids": [
+                "baseline-agent"
+              ],
               "done_count": 0,
               "facilitator_id": null,
+              "gateway_bound": false,
               "id": "baseline-session",
               "max_turns": 1,
               "metadata_json": null,
@@ -9501,8 +9572,12 @@
         "response": {
           "body": [
             {
+              "agent_ids": [
+                "baseline-agent"
+              ],
               "done_count": 0,
               "facilitator_id": null,
+              "gateway_bound": false,
               "id": "baseline-session",
               "max_turns": 1,
               "metadata_json": null,
@@ -9541,8 +9616,10 @@
           "after": {
             "body": [
               {
+                "agent_ids": [],
                 "done_count": 0,
                 "facilitator_id": null,
+                "gateway_bound": false,
                 "id": "<uuid>",
                 "max_turns": null,
                 "metadata_json": null,
@@ -9554,8 +9631,12 @@
                 "turn_number": 0
               },
               {
+                "agent_ids": [
+                  "baseline-agent"
+                ],
                 "done_count": 0,
                 "facilitator_id": null,
+                "gateway_bound": false,
                 "id": "baseline-session",
                 "max_turns": 1,
                 "metadata_json": null,
@@ -9590,8 +9671,12 @@
           "before": {
             "body": [
               {
+                "agent_ids": [
+                  "baseline-agent"
+                ],
                 "done_count": 0,
                 "facilitator_id": null,
+                "gateway_bound": false,
                 "id": "baseline-session",
                 "max_turns": 1,
                 "metadata_json": null,
@@ -9707,6 +9792,9 @@
         },
         "response": {
           "body": {
+            "agent_ids": [
+              "baseline-agent"
+            ],
             "done_count": 0,
             "facilitator_id": null,
             "gateway_bound": false,
@@ -10540,7 +10628,7 @@
         "selection": "resource_absence_or_empty_state"
       }
     ],
-    "source_route_count": 82,
+    "source_route_count": 83,
     "uncollected": [
       {
         "branch": "normal",
@@ -11264,6 +11352,7 @@
           "name": "Created Baseline Agent",
           "persona_name": "Created"
         },
+        "POST /api/agents/{agent_id}/web-conversations": {},
         "POST /api/agents/{id}/allowed-commands": {
           "command": "printf"
         },
@@ -11427,6 +11516,10 @@
         "*path": {
           "missing": "baseline-missing.txt",
           "normal": "baseline.txt"
+        },
+        "agent_id": {
+          "missing": "baseline-missing",
+          "normal": "baseline-agent"
         },
         "binding_id": {
           "missing": "<uuid>",
