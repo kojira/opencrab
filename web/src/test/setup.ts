@@ -1,6 +1,31 @@
 import '@testing-library/jest-dom';
 import { vi } from 'vitest';
 
+Object.defineProperty(window, 'matchMedia', {
+  writable: true,
+  configurable: true,
+  value: (query: string) => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    dispatchEvent: vi.fn(),
+  }),
+});
+
+Element.prototype.scrollTo = function scrollTo(arg?: ScrollToOptions | number, y?: number) {
+  if (typeof arg === 'number') {
+    this.scrollLeft = arg;
+    this.scrollTop = y ?? 0;
+    return;
+  }
+  if (arg && typeof arg === 'object') {
+    if (arg.left != null) this.scrollLeft = arg.left;
+    if (arg.top != null) this.scrollTop = arg.top;
+  }
+};
+
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: (key: string, opts?: Record<string, unknown>) => {

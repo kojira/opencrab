@@ -11,6 +11,11 @@ import {
 } from '../api/sessions';
 import type { SessionDto, SessionLogRow } from '../api/types';
 import { conversationTitle } from '../lib/conversationTitle';
+import {
+  distanceFromBottomPx,
+  logScrollBehavior,
+  shouldFollowLogTail,
+} from '../lib/logScroll';
 import { uuidV4 } from '../lib/uuid';
 
 export const BINDING_POLL_MS = 1000;
@@ -169,6 +174,10 @@ export default function SessionDetail() {
   const [pollNonce, setPollNonce] = useState(0);
   const abortRef = useRef<AbortController | null>(null);
   const sourceRef = useRef<EventSource | null>(null);
+  const logListRef = useRef<HTMLDivElement>(null);
+  const pinToBottomRef = useRef(true);
+  const forceToBottomRef = useRef(false);
+  const ignoreLogScrollRef = useRef(false);
 
   const loadSession = (sessionId: string) => {
     abortRef.current?.abort();
@@ -324,6 +333,61 @@ export default function SessionDetail() {
     };
   }, [id, gatewaySessionId, isWebConversation, ready, sessionKind, logsKind]);
 
+  const onLogScroll = () => {
+    if (ignoreLogScrollRef.current) return;
+    const el = logListRef.current;
+    if (!el) return;
+    pinToBottomRef.current = shouldFollowLogTail({
+      forceToBottom: false,
+      distanceFromBottomPx: distanceFromBottomPx(el.scrollTop, el.clientHeight, el.scrollHeight),
+    });
+  };
+
+  const scrollLogToBottom = () => {
+    const el = logListRef.current;
+    if (!el) return;
+    ignoreLogScrollRef.current = true;
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    el.scrollTo({
+      top: el.scrollHeight,
+      behavior: logScrollBehavior(reduced),
+    });
+    if (
+      shouldFollowLogTail({
+        forceToBottom: false,
+        distanceFromBottomPx: distanceFromBottomPx(el.scrollTop, el.clientHeight, el.scrollHeight),
+      })
+    ) {
+      ignoreLogScrollRef.current = false;
+      pinToBottomRef.current = true;
+      return;
+    }
+    el.addEventListener(
+      'scrollend',
+      () => {
+        ignoreLogScrollRef.current = false;
+        pinToBottomRef.current = true;
+      },
+      { once: true },
+    );
+  };
+
+  useEffect(() => {
+    const force = forceToBottomRef.current;
+    if (force) {
+      forceToBottomRef.current = false;
+      pinToBottomRef.current = true;
+    }
+    if (
+      shouldFollowLogTail({
+        forceToBottom: force,
+        distanceFromBottomPx: pinToBottomRef.current ? 0 : Number.POSITIVE_INFINITY,
+      })
+    ) {
+      scrollLogToBottom();
+    }
+  }, [logs, pendingText, liveAgent, sendPhase, noReply, logsKind]);
+
   const submitOwner = async (e: FormEvent) => {
     e.preventDefault();
     if (!id || !ownerInput.trim() || sendPhase === 'submitting') return;
@@ -347,6 +411,7 @@ export default function SessionDetail() {
         throw new Error('binding_address_missing');
       }
       const clientId = pendingId ?? uuidV4();
+      forceToBottomRef.current = true;
       setPendingId(clientId);
       setPendingText(text);
       setSendPhase('submitting');
@@ -439,7 +504,12 @@ export default function SessionDetail() {
         </div>
       ) : null}
 
-      <div className="flex-1 overflow-y-auto space-y-2 mb-4">
+      <div
+        ref={logListRef}
+        data-testid="session-log-list"
+        className="flex-1 overflow-y-auto space-y-2 mb-4"
+        onScroll={onLogScroll}
+      >
         {logsKind === 'loading' ? (
           <div className="empty-state" aria-busy="true">
             <p className="text-body-lg text-on-surface-variant">{t('sessionDetail.loadingLogs')}</p>
@@ -491,6 +561,7 @@ export default function SessionDetail() {
             ) : null}
           </>
         ) : null}
+        <div data-testid="session-log-tail" />
       </div>
 
       {sendError ? (

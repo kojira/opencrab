@@ -29,4 +29,10 @@ test('plain HTTP: new conversation → send → pending → SSE reply', async ({
   await expect(page.locator('[aria-live="polite"]').first()).toBeVisible();
 
   await expect(page.getByText(REPLY)).toBeVisible({ timeout: 40_000 });
+  await expect(page.getByText(REPLY)).toBeInViewport();
+  await expect(page.getByTestId('session-log-tail')).toBeInViewport();
+  const leftoverPx = await page.getByTestId('session-log-list').evaluate((el) => {
+    return el.scrollHeight - el.scrollTop - el.clientHeight;
+  });
+  expect(leftoverPx, `log tail leftover px=${leftoverPx}`).toBeLessThanOrEqual(80);
 });

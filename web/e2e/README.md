@@ -2,7 +2,7 @@
 
 DESIGN-WEBGATE §7.4a の必須層。jsdom/vitest の代替ではない。
 
-実 `opencrab-server` + 実 UDS + 実 `web-gateway` + `vite` ビルド済み UI を **平文 HTTP** で立て、ヘッドレス Chromium で「新しい会話ボタン→作成→入力→送信→pending 表示→SSE 返話表示」を 1 本通す。LLM は mock。平文で走ること自体が仕様（secure context 前提 API の混入検出）。
+実 `opencrab-server` + 実 UDS + 実 `web-gateway` + `vite` ビルド済み UI を **平文 HTTP** で立て、ヘッドレス Chromium で「新しい会話ボタン→作成→入力→送信→pending 表示→SSE 返話表示→返話後にログ最下部が可視」を 1 本通す。LLM は mock。平文で走ること自体が仕様（secure context 前提 API の混入検出）。
 
 | ファイル | 役割 |
 |---|---|
