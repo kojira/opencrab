@@ -798,11 +798,13 @@ async fn main() -> anyhow::Result<()> {
             };
             match admit_nostr_said(text, author_id, &self_pk, &allow) {
                 Err(AdmitSaidError::BadAnchor) => Err(GateError::new(ErrorCode::BadRequest)),
-                Err(AdmitSaidError::Drop(_)) => Ok(NostrSaidDecision::Drop),
+                Err(AdmitSaidError::Drop { anchor, .. }) => Ok(NostrSaidDecision::Drop {
+                    bundle: nostr_bundle_from_anchor(&anchor)?,
+                }),
                 Ok(anchor) => Ok(NostrSaidDecision::Accept {
                     watch_id: anchor.watch_id,
                     immediate: anchor.route == IngressRoute::Immediate,
-                    bundle: anchor.route == IngressRoute::Bundle,
+                    bundle: nostr_bundle_from_anchor(&anchor)?,
                 }),
             }
         }));
@@ -895,6 +897,31 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+#[cfg(feature = "nostr")]
+fn nostr_bundle_from_anchor(
+    anchor: &opencrab_nostr::V1Anchor,
+) -> Result<Option<opencrab_extgate::NostrBundleAdmit>, opencrab_extgate::GateError> {
+    use opencrab_extgate::{ErrorCode, GateError, NostrBundleAdmit};
+    use opencrab_nostr::IngressRoute;
+    if anchor.route != IngressRoute::Bundle {
+        return Ok(None);
+    }
+    match (
+        anchor.bundle_id.clone(),
+        anchor.index,
+        anchor.count,
+        anchor.origins.clone(),
+    ) {
+        (Some(bundle_id), Some(index), Some(count), Some(origins)) => Ok(Some(NostrBundleAdmit {
+            bundle_id,
+            index,
+            count,
+            origins,
+        })),
+        _ => Err(GateError::new(ErrorCode::BadRequest)),
+    }
 }
 
 /// #620: マスターキー欠落/不正で Nostr を起動できないことを**起動ログに埋もれない形**で知らせる。

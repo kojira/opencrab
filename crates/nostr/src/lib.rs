@@ -44,9 +44,9 @@ pub mod watch;
 
 pub use actions::NostrGatewayActions;
 pub use adapter::{
-    accept_nostr_inbound, admit_nostr_said, history_body_without_anchor, parse_v1_anchor,
-    pre_record_drop, transport_route, AdmitSaidError, AllowSetStore, AllowSources, DropReason,
-    IngressRoute, V1Anchor,
+    accept_nostr_inbound, admit_nostr_said, history_body_without_anchor, parse_bundle_origins,
+    parse_inbound_anchor, parse_v1_anchor, pre_record_drop, transport_route, AdmitSaidError,
+    AllowSetStore, AllowSources, DropReason, IngressRoute, V1Anchor,
 };
 pub use binding::{
     nostr_binding_id, nostr_instance_id, plan_session_bindings, skip_default_loop,

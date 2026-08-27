@@ -91,6 +91,7 @@ pub struct BundlePlace {
     pub bundle_id: String,
     pub index: u32,
     pub count: u32,
+    pub origins: Vec<String>,
 }
 
 pub fn parse_watch_line(line: &str) -> Option<WatchEvent> {
@@ -175,12 +176,27 @@ pub fn map_event(
         &event_id,
         bundle,
     );
+    let text = match bundle {
+        Some(place) => {
+            format!(
+                "{anchor}\n{}\n{history}",
+                bundle_members_line(&place.origins)
+            )
+        }
+        None => format!("{anchor}\n{history}"),
+    };
     Some(SaidMap {
         origin,
         author_id,
-        text: format!("{anchor}\n{history}"),
+        text,
         route,
     })
+}
+
+/// coordinator が最初の非重複 member で全 origin を照合するための第2行。
+pub fn bundle_members_line(origins: &[String]) -> String {
+    let values = origins.iter().cloned().map(Value::String).collect();
+    format!("[NOSTRBUNDLE/V1 {}]", Value::Array(values))
 }
 
 pub fn bundle_id(binding_id: &str, watch_id: i64, event_ids: &[String]) -> String {
@@ -449,10 +465,15 @@ mod tests {
         assert_ne!(bid, bundle_id("bind-2", 17, &ids));
         let self_pk = self_pk();
         let event = ev(1, vec![]);
+        let origins = vec![
+            decisive_origin(&Lane::watch(17), &ids[0]),
+            decisive_origin(&Lane::watch(17), &ids[1]),
+        ];
         let place = BundlePlace {
             bundle_id: bid.clone(),
             index: 1,
             count: 2,
+            origins: origins.clone(),
         };
         let mapped = map_event(&event, &self_pk, true, &Lane::watch(17), Some(&place)).unwrap();
         assert_eq!(mapped.route, Route::Bundle);
@@ -460,5 +481,9 @@ mod tests {
         assert!(mapped.text.contains("\"index\":1"));
         assert!(mapped.text.contains("\"count\":2"));
         assert!(mapped.text.contains("\"route\":\"bundle\""));
+        let members = bundle_members_line(&origins);
+        assert!(mapped.text.contains(&members));
+        let lines: Vec<&str> = mapped.text.lines().collect();
+        assert_eq!(lines[1], members);
     }
 }

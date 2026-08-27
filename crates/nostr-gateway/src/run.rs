@@ -307,11 +307,17 @@ async fn flush_bundle(
     }
     let bundle = bundle_id(&binding_id, watch_id, &ids);
     let count = events.len() as u32;
+    let lane_for_origin = Lane::watch(watch_id);
+    let origins: Vec<String> = ids
+        .iter()
+        .map(|id| crate::map::decisive_origin(&lane_for_origin, id))
+        .collect();
     for (i, event) in events.iter().enumerate() {
         let place = BundlePlace {
             bundle_id: bundle.clone(),
             index: (i as u32) + 1,
             count,
+            origins: origins.clone(),
         };
         send_mapped(
             client,

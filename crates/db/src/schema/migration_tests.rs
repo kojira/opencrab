@@ -3424,7 +3424,7 @@ fn v37_backfill_preserves_firing_and_normalizes() {
     // session_heartbeat_config を触らないので、下の v37 backfill 検証（発火集合・正規化）は
     // そのまま成立する。新しい migration が session_heartbeat_config を触ったらこの guard を
     // 更新し、下の期待値を見直すこと。
-    assert_eq!(latest_version(), 44, "v44 が最新版であること");
+    assert_eq!(latest_version(), 45, "v45 が最新版であること");
 
     // 期待: 9 行 = step1(nostr-A) 1 + step2(A/201=0, C/202=1, D/222=1) 3 +
     //             step3(A,B,C,D,E の ch205 展開・全 enabled=0) 5。
@@ -4032,6 +4032,15 @@ fn expected_v44_user_tables(before_v43: &[String]) -> Vec<String> {
     expected
 }
 
+fn expected_v45_user_tables(before_v43: &[String]) -> Vec<String> {
+    let mut expected = expected_v44_user_tables(before_v43);
+    if !expected.iter().any(|t| t == "nostr_bundle_state") {
+        expected.push("nostr_bundle_state".to_string());
+    }
+    expected.sort();
+    expected
+}
+
 fn assert_user_tables_closed(conn: &Connection, expected_tables: &[String]) {
     assert_eq!(
         user_tables(conn),
@@ -4080,7 +4089,7 @@ fn v43_fresh_db_has_transplant_schema() {
         setup_pre_v43(&tmp);
         user_tables(&tmp)
     };
-    assert_user_tables_closed(&conn, &expected_v44_user_tables(&pre));
+    assert_user_tables_closed(&conn, &expected_v45_user_tables(&pre));
     assert_v43_schema(&conn);
     let cols = session_column_names(&conn);
     assert!(
@@ -4132,9 +4141,9 @@ fn v43_from_user_version_42_leaves_existing_rows_untouched() {
         )
         .unwrap();
 
-    run_migrations(&conn, MIGRATIONS).expect("v43+v44 migration");
+    run_migrations(&conn, MIGRATIONS).expect("v43+v45 migration");
     assert_eq!(schema_version(&conn).unwrap(), latest_version());
-    assert_user_tables_closed(&conn, &expected_v44_user_tables(&before_tables));
+    assert_user_tables_closed(&conn, &expected_v45_user_tables(&before_tables));
     assert_v43_schema(&conn);
 
     let after = existing_table_digests(&conn, true);
@@ -4168,11 +4177,11 @@ fn v43_from_user_version_42_leaves_existing_rows_untouched() {
         .unwrap();
     assert_eq!(done, 1);
 
-    assert_eq!(schema_version(&conn).unwrap(), 44);
+    assert_eq!(schema_version(&conn).unwrap(), 45);
     assert_eq!(
         existing_table_digests(&conn, true),
         after,
-        "v44 到達後に既存ダイジェストが動いた"
+        "v45 到達後に既存ダイジェストが動いた"
     );
 }
 
@@ -4354,7 +4363,7 @@ fn assert_v44_schema(conn: &Connection) {
 #[test]
 fn v44_fresh_and_user_version_43_reach_four_gate_tables() {
     let fresh = crate::init_memory().expect("fresh");
-    assert_eq!(schema_version(&fresh).unwrap(), 44);
+    assert_eq!(schema_version(&fresh).unwrap(), 45);
     assert_v44_schema(&fresh);
 
     let from_43 = crate::init_memory().expect("from43");
@@ -4364,7 +4373,7 @@ fn v44_fresh_and_user_version_43_reach_four_gate_tables() {
     assert!(gate_user_tables(&from_43).is_empty());
 
     initialize(&from_43).expect("v44 from 43");
-    assert_eq!(schema_version(&from_43).unwrap(), 44);
+    assert_eq!(schema_version(&from_43).unwrap(), 45);
     assert_v44_schema(&from_43);
 }
 
@@ -4547,4 +4556,82 @@ fn v44_statement_failure_rolls_back_and_keeps_user_version_43() {
         "失敗したのに gate 表が残った: {:?}",
         gate_user_tables(&conn)
     );
+}
+
+fn setup_pre_v45(conn: &Connection) {
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS nostr_bundle_state;
+         PRAGMA user_version = 44;",
+    )
+    .unwrap();
+}
+
+fn assert_v45_schema(conn: &Connection) {
+    assert_v44_schema(conn);
+    assert!(
+        table_exists(conn, "nostr_bundle_state").unwrap(),
+        "nostr_bundle_state が無い"
+    );
+    assert_eq!(
+        gate_user_tables(conn),
+        vec![
+            "deliveries".to_string(),
+            "external_origins".to_string(),
+            "gate_bindings".to_string(),
+            "gate_instances".to_string(),
+        ],
+        "V3 4表の集合が変わった"
+    );
+}
+
+#[test]
+fn v45_fresh_and_user_version_44_reach_bundle_state() {
+    let fresh = crate::init_memory().expect("fresh");
+    assert_eq!(schema_version(&fresh).unwrap(), 45);
+    assert_v45_schema(&fresh);
+
+    let from_44 = crate::init_memory().expect("from44");
+    setup_pre_v45(&from_44);
+    assert_eq!(schema_version(&from_44).unwrap(), 44);
+    assert!(!table_exists(&from_44, "nostr_bundle_state").unwrap());
+
+    initialize(&from_44).expect("v45 from 44");
+    assert_eq!(schema_version(&from_44).unwrap(), 45);
+    assert_v45_schema(&from_44);
+}
+
+#[test]
+fn v45_rerun_is_noop() {
+    let conn = crate::init_memory().expect("init");
+    setup_pre_v45(&conn);
+    initialize(&conn).expect("v45");
+    initialize(&conn).expect("v45 rerun");
+    assert_eq!(schema_version(&conn).unwrap(), 45);
+    assert_v45_schema(&conn);
+}
+
+#[test]
+fn v45_bundle_state_pk_and_completed_check() {
+    let conn = crate::init_memory().expect("init");
+    conn.execute(
+        "INSERT INTO nostr_bundle_state
+            (binding_id, bundle_id, manifest_json, received_bits, new_admitted_bits, completed)
+         VALUES ('b1', 'id1', '[\"o1\"]', '0', '0', 0)",
+        [],
+    )
+    .unwrap();
+    let dup = conn.execute(
+        "INSERT INTO nostr_bundle_state
+            (binding_id, bundle_id, manifest_json, received_bits, new_admitted_bits, completed)
+         VALUES ('b1', 'id1', '[\"o2\"]', '1', '1', 1)",
+        [],
+    );
+    assert!(dup.is_err(), "PRIMARY KEY が効いていない");
+    let bad = conn.execute(
+        "INSERT INTO nostr_bundle_state
+            (binding_id, bundle_id, manifest_json, received_bits, new_admitted_bits, completed)
+         VALUES ('b1', 'id2', '[\"o1\"]', '0', '0', 2)",
+        [],
+    );
+    assert!(bad.is_err(), "completed 2 を受け入れた");
 }

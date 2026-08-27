@@ -1836,6 +1836,22 @@ const MIGRATIONS: &[Migration] = &[
         description: "agents.subject_id と external gate 4 表（V3 §6.1）",
         up: migrate_v44_extgate,
     },
+    Migration {
+        version: 45,
+        description: "nostr_bundle_state（Nostr Bundle coordinator。V3 4表に含めない）",
+        // 新規 DB は SCHEMA_SQL 側で表を持つので IF NOT EXISTS で no-op。
+        // 既存 DB（v44）でのみ CREATE が走る。DDL のみ・既存行は触らない。
+        //
+        // ## やってよいことだけ
+        //   CREATE TABLE IF NOT EXISTS nostr_bundle_state
+        //
+        // ## やってはいけないこと
+        //   V3 4表への列追加、wire/admin 契約の変更、既存行の UPDATE/DROP。
+        //
+        // ## 切り戻し
+        //   BEGIN; PRAGMA user_version = 44; COMMIT;
+        up: migrate_v45_nostr_bundle_state,
+    },
 ];
 
 /// このバイナリが知る最新スキーマバージョン。
@@ -2063,6 +2079,22 @@ CREATE TABLE IF NOT EXISTS deliveries (
     (state = 'failed' AND error = 'external_rejected') OR
     (state = 'indeterminate' AND error IN ('disconnect','stale sending recovered after restart'))
   )
+);
+"#,
+    )
+}
+
+fn migrate_v45_nostr_bundle_state(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+CREATE TABLE IF NOT EXISTS nostr_bundle_state (
+    binding_id TEXT NOT NULL,
+    bundle_id TEXT NOT NULL,
+    manifest_json TEXT NOT NULL,
+    received_bits TEXT NOT NULL,
+    new_admitted_bits TEXT NOT NULL,
+    completed INTEGER NOT NULL CHECK(completed IN (0,1)),
+    PRIMARY KEY(binding_id, bundle_id)
 );
 "#,
     )

@@ -2,6 +2,7 @@
 
 pub mod admin;
 pub mod bearer;
+pub mod bundle;
 pub mod close;
 pub mod delivery;
 pub mod delivery_mode;
@@ -16,6 +17,7 @@ pub mod registry;
 
 pub use admin::admin_router;
 pub use bearer::OperatorToken;
+pub use bundle::NostrBundleAdmit;
 pub use delivery_mode::{
     adjust_inbound_effect, delivery_mode_from_config_bytes, dispatches_v3_say, DeliveryMode,
 };

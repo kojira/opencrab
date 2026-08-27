@@ -13,6 +13,7 @@ use opencrab_db::Db;
 use tokio::net::unix::OwnedWriteHalf;
 
 use crate::bearer::OperatorToken;
+use crate::bundle::NostrBundleAdmit;
 use crate::delivery_mode::DeliveryMode;
 use crate::error::{ErrorCode, GateError};
 
@@ -168,13 +169,15 @@ pub struct NostrHeldTurn {
     pub prompt_suffix: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NostrSaidDecision {
-    Drop,
+    Drop {
+        bundle: Option<NostrBundleAdmit>,
+    },
     Accept {
         watch_id: Option<i64>,
         immediate: bool,
-        bundle: bool,
+        bundle: Option<NostrBundleAdmit>,
     },
 }
 

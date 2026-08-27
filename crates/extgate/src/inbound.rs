@@ -17,6 +17,7 @@ use opencrab_db::queries::{
 };
 use rusqlite::{params, Connection, Transaction, TransactionBehavior};
 
+use crate::bundle::{apply_bundle_member, BundleApply, NostrBundleAdmit};
 use crate::delivery::apply_delivery_effect;
 use crate::delivery_mode::{adjust_inbound_effect, DeliveryMode};
 use crate::error::{ErrorCode, GateError};
@@ -95,25 +96,44 @@ pub fn process_said<R: AgentRuntime>(
                 return Err(GateError::store());
             }
         };
+    let ctx = BundleCtx {
+        state,
+        runtime,
+        resolve_caller,
+        row: &row,
+        said,
+        session_id: &session_id,
+    };
     let mut nostr_watch: Option<(i64, bool)> = None;
+    let mut bundle_admit: Option<NostrBundleAdmit> = None;
+    let mut bundle_dropped = false;
     if row.kind_id == "nostr" {
         match state.admit_nostr_said(&row.agent_id, &said.author_id, &said.text)? {
-            NostrSaidDecision::Drop => {
+            NostrSaidDecision::Drop { bundle: None } => {
                 tx.commit().map_err(|_| GateError::store())?;
                 return Ok(SaidOutcome { seq: None });
             }
-            NostrSaidDecision::Accept { bundle: true, .. } => {
-                let _ = tx.rollback();
-                return Err(GateError::store());
+            NostrSaidDecision::Drop { bundle: Some(b) } => {
+                bundle_admit = Some(b);
+                bundle_dropped = true;
             }
             NostrSaidDecision::Accept {
                 watch_id,
                 immediate,
-                bundle: false,
+                bundle,
             } => {
+                bundle_admit = bundle;
                 nostr_watch = watch_id.map(|id| (id, immediate));
             }
         }
+    }
+    if bundle_dropped {
+        let Some(admit) = bundle_admit.as_ref() else {
+            let _ = tx.rollback();
+            return Err(GateError::store());
+        };
+        let applied = apply_bundle_member(&tx, &said.binding_id, admit, false)?;
+        return finish_bundle(tx, &ctx, applied, None);
     }
     let agent_ids = [row.agent_id.clone()];
     let event = NormalizedInboundEvent {
@@ -177,14 +197,14 @@ pub fn process_said<R: AgentRuntime>(
     };
 
     let watch_row = match nostr_watch {
-        Some((id, true)) => match get_session_watch(&tx, id) {
+        Some((id, _)) => match get_session_watch(&tx, id) {
             Ok(Some(w)) if w.session_id == row.address => Some(w),
             Ok(_) | Err(_) => {
                 let _ = tx.rollback();
                 return Err(GateError::store());
             }
         },
-        _ => None,
+        None => None,
     };
     let policy = match &watch_row {
         Some(w) => match get_session_policy_json(&tx, &w.session_id) {
@@ -207,19 +227,22 @@ pub fn process_said<R: AgentRuntime>(
     } else {
         NostrWatchSets::default()
     };
-    let fire = match &watch_row {
-        Some(w) => Some(state.privilege_for(w.id, || {
-            let state = Arc::clone(state);
-            let runtime = runtime.clone();
-            PrivilegeFire::new(move |held: Vec<(NostrHeldTurn, CallerIdentity)>| {
-                let state = Arc::clone(&state);
+    let fire = match &nostr_watch {
+        Some((_, true)) => {
+            let w = watch_row.as_ref().ok_or_else(GateError::store)?;
+            Some(state.privilege_for(w.id, || {
+                let state = Arc::clone(state);
                 let runtime = runtime.clone();
-                async move {
-                    fire_held_turns(state, runtime, resolve_caller, held);
-                }
-            })
-        })?),
-        None => None,
+                PrivilegeFire::new(move |held: Vec<(NostrHeldTurn, CallerIdentity)>| {
+                    let state = Arc::clone(&state);
+                    let runtime = runtime.clone();
+                    async move {
+                        fire_held_turns(state, runtime, resolve_caller, held);
+                    }
+                })
+            })?)
+        }
+        _ => None,
     };
     let watch_accept = watch_row.as_ref().map(|w| WatchAccept {
         policy_json: policy.as_str(),
@@ -275,6 +298,9 @@ pub fn process_said<R: AgentRuntime>(
             }
         },
         |_, admitted, _read| {
+            if bundle_admit.is_some() {
+                return;
+            }
             if recorded.get() && admitted.admitted_agent_ids.contains(&row.agent_id) {
                 run_after.set(true);
             }
@@ -289,22 +315,27 @@ pub fn process_said<R: AgentRuntime>(
     match accept {
         Ok(()) => {}
         Err(_) => {
-            tx.commit().map_err(|_| GateError::store())?;
-            return Ok(SaidOutcome { seq: None });
+            return conclude_unrecorded_bundle(tx, &ctx, bundle_admit.as_ref());
         }
     }
 
     if !recorded.get() {
-        tx.commit().map_err(|_| GateError::store())?;
-        return Ok(SaidOutcome { seq: None });
+        return conclude_unrecorded_bundle(tx, &ctx, bundle_admit.as_ref());
     }
 
+    let bundle_applied = match bundle_admit.as_ref() {
+        Some(admit) => Some(apply_bundle_member(&tx, &said.binding_id, admit, true)?),
+        None => None,
+    };
     let seq = next_seq(&tx, &said.binding_id)?;
     tx.execute(
         "INSERT INTO external_origins (binding_id, origin, seq) VALUES (?1, ?2, ?3)",
         params![said.binding_id, said.origin, seq],
     )
     .map_err(|_| GateError::store())?;
+    if let Some(applied) = bundle_applied {
+        return finish_bundle(tx, &ctx, applied, Some(seq));
+    }
     tx.commit().map_err(|_| GateError::store())?;
     drop(conn);
 
@@ -325,6 +356,109 @@ pub fn process_said<R: AgentRuntime>(
     }
 
     Ok(SaidOutcome { seq: Some(seq) })
+}
+
+struct BundleCtx<'a, R> {
+    state: &'a Arc<ExtgateState>,
+    runtime: &'a R,
+    resolve_caller: ResolveCallerFn,
+    row: &'a OriginRow,
+    said: &'a Said,
+    session_id: &'a str,
+}
+
+fn conclude_unrecorded_bundle<R: AgentRuntime>(
+    tx: Transaction<'_>,
+    ctx: &BundleCtx<'_, R>,
+    bundle: Option<&NostrBundleAdmit>,
+) -> Result<SaidOutcome, GateError> {
+    let Some(admit) = bundle else {
+        tx.commit().map_err(|_| GateError::store())?;
+        return Ok(SaidOutcome { seq: None });
+    };
+    let applied = apply_bundle_member(&tx, &ctx.said.binding_id, admit, false)?;
+    finish_bundle(tx, ctx, applied, None)
+}
+
+fn finish_bundle<R: AgentRuntime>(
+    tx: Transaction<'_>,
+    ctx: &BundleCtx<'_, R>,
+    applied: BundleApply,
+    seq: Option<i64>,
+) -> Result<SaidOutcome, GateError> {
+    let pending = if applied.enqueue {
+        let origin = applied
+            .trigger_origin
+            .as_deref()
+            .ok_or_else(GateError::store)?;
+        let trigger = load_bundle_trigger(&tx, ctx.session_id, origin)?;
+        Some((trigger, origin.to_string(), applied.new_admitted))
+    } else {
+        None
+    };
+    tx.commit().map_err(|_| GateError::store())?;
+    if seq.is_some() {
+        fire_nostr_relay(ctx.state, ctx.row, ctx.said);
+    }
+    if let Some((trigger, origin, n)) = pending {
+        let suffix = bundle_prompt_suffix(n);
+        let trigger_said = Said {
+            id: String::new(),
+            binding_id: ctx.said.binding_id.clone(),
+            origin,
+            author_id: trigger.0,
+            text: trigger.1,
+            attachments: trigger.2,
+        };
+        enqueue_turn(
+            Arc::clone(ctx.state),
+            ctx.runtime.clone(),
+            ctx.resolve_caller,
+            ctx.row,
+            &trigger_said,
+            ctx.session_id,
+            &suffix,
+        );
+    }
+    Ok(SaidOutcome { seq })
+}
+
+fn load_bundle_trigger(
+    tx: &Transaction<'_>,
+    session_id: &str,
+    origin: &str,
+) -> Result<(String, String, Vec<String>), GateError> {
+    match tx.query_row(
+        "SELECT speaker_id, content, metadata_json FROM memory_sessions
+         WHERE session_id = ?1 AND json_extract(metadata_json, '$.external_origin') = ?2
+         ORDER BY id DESC LIMIT 1",
+        params![session_id, origin],
+        |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        },
+    ) {
+        Ok((speaker, content, meta)) => {
+            let images = meta
+                .as_deref()
+                .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+                .and_then(|v| v.get("image_urls").cloned())
+                .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
+                .unwrap_or_default();
+            Ok((speaker.unwrap_or_default(), content, images))
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) | Err(_) => Err(GateError::store()),
+    }
+}
+
+fn bundle_prompt_suffix(count: u32) -> String {
+    format!(
+        "[Nostr] タイムライン watch の束ね（{count} 件）です。窓内を 1 ターンの文脈に載せています。\
+         返信するなら最後の対象ノートへ nostr_reply を使ってください。不要なら NO_REPLY とだけ答えてください。"
+    )
 }
 
 fn binding_said_error(
@@ -468,6 +602,9 @@ fn record_inbound(
     });
     if !said.attachments.is_empty() {
         meta["image_urls"] = serde_json::json!(said.attachments);
+    }
+    if row.kind_id == "nostr" {
+        meta["external_origin"] = serde_json::json!(said.origin);
     }
     insert_session_log(
         tx,
@@ -721,15 +858,25 @@ fn recorded_said_text(
 
 const V1_PREFIX: &str = "[NOSTRGATE/V1 ";
 
+const BUNDLE_PREFIX: &str = "[NOSTRBUNDLE/V1 ";
+
 fn nostr_renderer_body(text: &str) -> &str {
     let Some(first) = text.lines().next() else {
         return text;
     };
-    if first.starts_with(V1_PREFIX) {
-        let rest = text.get(first.len()..).unwrap_or("");
-        return rest.strip_prefix('\n').unwrap_or(rest);
+    if !first.starts_with(V1_PREFIX) {
+        return text;
     }
-    text
+    let rest = text.get(first.len()..).unwrap_or("");
+    let rest = rest.strip_prefix('\n').unwrap_or(rest);
+    let Some(second) = rest.lines().next() else {
+        return rest;
+    };
+    if second.starts_with(BUNDLE_PREFIX) {
+        let after = rest.get(second.len()..).unwrap_or("");
+        return after.strip_prefix('\n').unwrap_or(after);
+    }
+    rest
 }
 
 fn nostr_prompt_suffix(author_id: &str, text: &str) -> String {
@@ -826,6 +973,12 @@ mod tests {
             nostr_renderer_body(text),
             "hello\n[Nostr kind:1 リプライ from=aa target=note1x]"
         );
+    }
+
+    #[test]
+    fn renderer_body_strips_bundle_members_line() {
+        let text = "[NOSTRGATE/V1 {\"kind\":1}]\n[NOSTRBUNDLE/V1 [\"o1\"]]\nhello";
+        assert_eq!(nostr_renderer_body(text), "hello");
     }
 
     #[test]

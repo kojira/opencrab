@@ -168,6 +168,8 @@ pub struct V1Anchor {
     pub p_self: bool,
     pub route: IngressRoute,
     pub watch_id: Option<i64>,
+    /// Bundle 第2行の index 順 origin。V1 JSON には無い。
+    pub origins: Option<Vec<String>>,
 }
 
 pub fn parse_v1_anchor(text: &str) -> Option<V1Anchor> {
@@ -233,26 +235,95 @@ pub fn parse_v1_anchor(text: &str) -> Option<V1Anchor> {
         p_self: bool_field("p_self")?,
         route,
         watch_id: opt_i64("watch_id")?,
+        origins: None,
     })
 }
+
+const BUNDLE_PREFIX: &str = "[NOSTRBUNDLE/V1 ";
 
 /// 本文から JSON アンカー行を除いた renderer 生本文。
 pub fn history_body_without_anchor(text: &str) -> &str {
     let Some(first) = text.lines().next() else {
         return text;
     };
-    if first.starts_with(V1_PREFIX) {
-        let rest = text.get(first.len()..).unwrap_or("");
-        return rest.strip_prefix('\n').unwrap_or(rest);
+    if !first.starts_with(V1_PREFIX) {
+        return text;
     }
-    text
+    let rest = text.get(first.len()..).unwrap_or("");
+    let rest = rest.strip_prefix('\n').unwrap_or(rest);
+    let Some(second) = rest.lines().next() else {
+        return rest;
+    };
+    if second.starts_with(BUNDLE_PREFIX) {
+        let after = rest.get(second.len()..).unwrap_or("");
+        return after.strip_prefix('\n').unwrap_or(after);
+    }
+    rest
+}
+
+/// Bundle 第2行の origin 列。無ければ `None`。
+pub fn parse_bundle_origins(text: &str) -> Option<Vec<String>> {
+    let mut lines = text.lines();
+    let first = lines.next()?;
+    if !first.starts_with(V1_PREFIX) {
+        return None;
+    }
+    let second = lines.next()?;
+    let rest = second.strip_prefix(BUNDLE_PREFIX)?;
+    let json = rest.strip_suffix(']')?;
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let arr = value.as_array()?;
+    let mut origins = Vec::with_capacity(arr.len());
+    for item in arr {
+        let s = item.as_str()?;
+        if s.is_empty() {
+            return None;
+        }
+        origins.push(s.to_string());
+    }
+    Some(origins)
+}
+
+/// V1 + Bundle 第2行を検証する。不正は `None`。
+pub fn parse_inbound_anchor(text: &str) -> Option<V1Anchor> {
+    let mut anchor = parse_v1_anchor(text)?;
+    match anchor.route {
+        IngressRoute::Bundle => {
+            let origins = parse_bundle_origins(text)?;
+            let count = anchor.count?;
+            let index = anchor.index?;
+            let watch_id = anchor.watch_id?;
+            let bundle_id = anchor.bundle_id.as_deref()?;
+            if bundle_id.is_empty() || count == 0 || origins.len() != count as usize {
+                return None;
+            }
+            if index < 1 || index as usize > origins.len() {
+                return None;
+            }
+            let expected = format!("nostr:event:v1:watch:{watch_id}:{}", anchor.event_id);
+            if origins[index as usize - 1] != expected {
+                return None;
+            }
+            anchor.origins = Some(origins);
+            Some(anchor)
+        }
+        _ => {
+            if parse_bundle_origins(text).is_some() {
+                return None;
+            }
+            Some(anchor)
+        }
+    }
 }
 
 /// V3 said を record 前に落とす理由。不正アンカーは `BadAnchor`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdmitSaidError {
     BadAnchor,
-    Drop(DropReason),
+    Drop {
+        reason: DropReason,
+        anchor: V1Anchor,
+    },
 }
 
 /// 版付きアンカーを検証し、DM / 自己投稿 / allow-set を record 前に落とす。
@@ -264,17 +335,26 @@ pub fn admit_nostr_said(
     self_pubkey: &str,
     allow: &AllowSources,
 ) -> Result<V1Anchor, AdmitSaidError> {
-    let Some(anchor) = parse_v1_anchor(text) else {
+    let Some(anchor) = parse_inbound_anchor(text) else {
         return Err(AdmitSaidError::BadAnchor);
     };
     if matches!(anchor.kind, 4 | 1059) {
-        return Err(AdmitSaidError::Drop(DropReason::Dm));
+        return Err(AdmitSaidError::Drop {
+            reason: DropReason::Dm,
+            anchor,
+        });
     }
     if author_id == self_pubkey {
-        return Err(AdmitSaidError::Drop(DropReason::SelfPost));
+        return Err(AdmitSaidError::Drop {
+            reason: DropReason::SelfPost,
+            anchor,
+        });
     }
     if !allow.is_allowed(&follow_key(author_id)) {
-        return Err(AdmitSaidError::Drop(DropReason::AllowSet));
+        return Err(AdmitSaidError::Drop {
+            reason: DropReason::AllowSet,
+            anchor,
+        });
     }
     Ok(anchor)
 }
@@ -302,7 +382,10 @@ impl AllowSetStore {
     }
 
     pub fn remove(&self, agent_id: &str) {
-        self.allow.write().expect("allow-set store").remove(agent_id);
+        self.allow
+            .write()
+            .expect("allow-set store")
+            .remove(agent_id);
         self.selves
             .write()
             .expect("allow-set store")
@@ -310,7 +393,11 @@ impl AllowSetStore {
     }
 
     pub fn get_allow(&self, agent_id: &str) -> Option<AllowSources> {
-        self.allow.read().expect("allow-set store").get(agent_id).cloned()
+        self.allow
+            .read()
+            .expect("allow-set store")
+            .get(agent_id)
+            .cloned()
     }
 
     pub fn self_pubkey(&self, agent_id: &str) -> Option<String> {
@@ -552,22 +639,86 @@ mod tests {
     fn admit_said_drops_dm_self_and_unallowed_before_record() {
         let allow = allow_other();
         let dm = v1_line(4, "immediate");
-        assert_eq!(
+        assert!(matches!(
             admit_nostr_said(&dm, OTHER, SELF, &allow),
-            Err(AdmitSaidError::Drop(DropReason::Dm))
-        );
+            Err(AdmitSaidError::Drop {
+                reason: DropReason::Dm,
+                ..
+            })
+        ));
         let note = v1_line(1, "default");
-        assert_eq!(
+        assert!(matches!(
             admit_nostr_said(&note, SELF, SELF, &allow),
-            Err(AdmitSaidError::Drop(DropReason::SelfPost))
-        );
-        assert_eq!(
+            Err(AdmitSaidError::Drop {
+                reason: DropReason::SelfPost,
+                ..
+            })
+        ));
+        assert!(matches!(
             admit_nostr_said(&note, &"dd".repeat(32), SELF, &allow),
-            Err(AdmitSaidError::Drop(DropReason::AllowSet))
-        );
+            Err(AdmitSaidError::Drop {
+                reason: DropReason::AllowSet,
+                ..
+            })
+        ));
         assert!(admit_nostr_said(&note, OTHER, SELF, &allow).is_ok());
         assert_eq!(
             admit_nostr_said("not-an-anchor", OTHER, SELF, &allow),
+            Err(AdmitSaidError::BadAnchor)
+        );
+    }
+
+    fn bundle_said(ids: &[&str], index: u32) -> String {
+        let watch = 17;
+        let origins: Vec<String> = ids
+            .iter()
+            .map(|id| format!("nostr:event:v1:watch:{watch}:{id}"))
+            .collect();
+        let event_id = ids[(index - 1) as usize];
+        let members = serde_json::Value::Array(
+            origins
+                .iter()
+                .cloned()
+                .map(serde_json::Value::String)
+                .collect(),
+        );
+        format!(
+            "[NOSTRGATE/V1 {{\"beyond_self\":false,\"bundle_id\":\"{}\",\"count\":{},\"event_id\":\"{event_id}\",\"has_e\":false,\"index\":{index},\"kind\":1,\"p_self\":false,\"route\":\"bundle\",\"watch_id\":{watch}}}]\n[NOSTRBUNDLE/V1 {members}]\nhello\n[Nostr kind:1 メンション from=aa target=note1x]",
+            "cc".repeat(32),
+            ids.len(),
+        )
+    }
+
+    #[test]
+    fn inbound_anchor_requires_bundle_members_line() {
+        let id1 = "aa".repeat(32);
+        let id2 = "bb".repeat(32);
+        let text = bundle_said(&[&id1, &id2], 1);
+        let parsed = parse_inbound_anchor(&text).unwrap();
+        assert_eq!(parsed.route, IngressRoute::Bundle);
+        assert_eq!(parsed.index, Some(1));
+        assert_eq!(parsed.count, Some(2));
+        assert_eq!(
+            parsed.origins.as_deref(),
+            Some(
+                [
+                    format!("nostr:event:v1:watch:17:{id1}"),
+                    format!("nostr:event:v1:watch:17:{id2}")
+                ]
+                .as_slice()
+            )
+        );
+        assert_eq!(
+            history_body_without_anchor(&text),
+            "hello\n[Nostr kind:1 メンション from=aa target=note1x]"
+        );
+        let no_members = format!(
+            "[NOSTRGATE/V1 {{\"beyond_self\":false,\"bundle_id\":\"{}\",\"count\":2,\"event_id\":\"{id1}\",\"has_e\":false,\"index\":1,\"kind\":1,\"p_self\":false,\"route\":\"bundle\",\"watch_id\":17}}]\nhello",
+            "cc".repeat(32)
+        );
+        assert!(parse_inbound_anchor(&no_members).is_none());
+        assert_eq!(
+            admit_nostr_said(&no_members, OTHER, SELF, &allow_other()),
             Err(AdmitSaidError::BadAnchor)
         );
     }
@@ -577,7 +728,10 @@ mod tests {
         let store = AllowSetStore::default();
         store.replace_allow("a1", allow_other());
         store.set_self_pubkey("a1", SELF.to_string());
-        assert!(store.get_allow("a1").unwrap().is_allowed(&follow_key(OTHER)));
+        assert!(store
+            .get_allow("a1")
+            .unwrap()
+            .is_allowed(&follow_key(OTHER)));
         assert_eq!(store.self_pubkey("a1").as_deref(), Some(SELF));
         store.remove("a1");
         assert!(store.get_allow("a1").is_none());

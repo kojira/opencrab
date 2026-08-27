@@ -1007,4 +1007,17 @@ CREATE TABLE IF NOT EXISTS tool_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_tool_logs_agent ON tool_logs(agent_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_tool_logs_session ON tool_logs(session_id);
+
+-- ============================================
+-- NOSTR BUNDLE STATE: V3 TimelineBundle の core coordinator（V3 4表に含めない）
+-- ============================================
+CREATE TABLE IF NOT EXISTS nostr_bundle_state (
+    binding_id TEXT NOT NULL,
+    bundle_id TEXT NOT NULL,
+    manifest_json TEXT NOT NULL,
+    received_bits TEXT NOT NULL,
+    new_admitted_bits TEXT NOT NULL,
+    completed INTEGER NOT NULL CHECK(completed IN (0,1)),
+    PRIMARY KEY(binding_id, bundle_id)
+);
 "#;

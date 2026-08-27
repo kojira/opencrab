@@ -18,3 +18,16 @@
 表集合は期待一覧（適用前 ∪ `session_watches` / `tool_logs`）と一致させる。
 
 本番コピー検証: `scripts/verify-v43-transplant-copy.sh`（`OPENCRAB_REHEARSAL_DB`、sqlite3 `.backup` のみでソースを読む）。
+
+## v45（Nostr Bundle coordinator）
+
+V3 の 4 表・wire/admin 契約には足さない。Nostr 固有表 `nostr_bundle_state` だけを所有する。
+
+| 列 | 内容 |
+|---|---|
+| `binding_id`, `bundle_id` | PRIMARY KEY |
+| `manifest_json` | index 順の member origin |
+| `received_bits` / `new_admitted_bits` | 長さ = count の `0`/`1` 列 |
+| `completed` | `0`/`1` |
+
+既存 DB は番号付き migration、新規 DB は `SCHEMA_SQL`。両方に同じ `CREATE TABLE IF NOT EXISTS`。

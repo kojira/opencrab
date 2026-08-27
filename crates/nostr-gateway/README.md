@@ -25,6 +25,7 @@ watch の有効フィルタは `filter_json`。アンカー `beyond_self` は wa
 
 - origin: `nostr:event:v1:{lane}:{event_id}`。`lane` は `default` または `watch:{id}`
 - 本文先頭: 版付きアンカー `[NOSTRGATE/V1 {…}]`（key 順固定）
+- Bundle の次行: `[NOSTRBUNDLE/V1 [origin…]]`（index 順。coordinator が最初の非重複 member で全 origin を照合する）
 - その下: 採取 §3 の履歴本文 renderer
 - kind 4/1059 が現れたら `route=immediate`（Discard は core）
 - 受信した `say` は投稿せず `external_rejected`
