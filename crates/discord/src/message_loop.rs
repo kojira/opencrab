@@ -1048,9 +1048,17 @@ async fn process_incoming_message<T: AgentRunner>(
             // #665: 会話履歴の構築（直列ロック取得後・run_agent_response の手前）。ここで詰まると
             // LLM リクエスト前の宙吊りになる。入と、既存の ok/failed 行を出として stage で束ねる。
             debug!(agent_id = %agent_id_spawn, session_id = %session_id_spawn, stage = "context_build", "turn: 文脈構築 開始（入）");
-            let conversation = match state_spawn
-                .context_budget_tokens(&agent_id_spawn, &session_id_spawn)
-            {
+            let runtime_text = prepend_runtime_context_discord(
+                "",
+                "Discord conversation",
+                &discord_message_id_spawn,
+            );
+            let conversation = match state_spawn.context_budget_tokens(
+                &agent_id_spawn,
+                &session_id_spawn,
+                &system_prompt_spawn,
+                &runtime_text,
+            ) {
                 Err(e) => {
                     tracing::error!(
                         session_id = %session_id_spawn,
@@ -1065,6 +1073,8 @@ async fn process_incoming_message<T: AgentRunner>(
                     &session_id_spawn,
                     &agent_id_spawn,
                     budget,
+                    &system_prompt_spawn,
+                    &runtime_text,
                 ) {
                 Ok(raw) => {
                     // #272 P1: 履歴が痩せた/欠けたときの切り分け用。会話文字列の中身は
@@ -1315,8 +1325,20 @@ async fn process_subtask_completed<T: AgentRunner>(
     // #665: 文脈構築（直列ロック取得後・run_agent_response 手前）。ここで詰まると LLM リクエスト前の
     // 宙吊りになる。入と出で挟む（時刻発火・subtask 完了 resume・interaction 応答の各ターン入口で共通）。
     debug!(agent_id = %agent_id, session_id = %session_id, stage = "context_build", "turn: 文脈構築 開始（入）");
-    let conversation_raw = match state.context_budget_tokens(&agent_id, &session_id) {
-        Ok(budget) => match state.build_conversation_string(&session_id, &agent_id, budget) {
+    let runtime_text = prepend_runtime_context_discord("", "Discord conversation", "");
+    let conversation_raw = match state.context_budget_tokens(
+        &agent_id,
+        &session_id,
+        &system_prompt,
+        &runtime_text,
+    ) {
+        Ok(budget) => match state.build_conversation_string(
+            &session_id,
+            &agent_id,
+            budget,
+            &system_prompt,
+            &runtime_text,
+        ) {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!(session_id = %session_id, agent_id = %agent_id, "build_conversation_string failed: {e}");
@@ -1480,8 +1502,20 @@ async fn process_timed_fire<T: AgentRunner>(
     // #665: 文脈構築（直列ロック取得後・run_agent_response 手前）。ここで詰まると LLM リクエスト前の
     // 宙吊りになる。入と出で挟む（時刻発火・subtask 完了 resume・interaction 応答の各ターン入口で共通）。
     debug!(agent_id = %agent_id, session_id = %session_id, stage = "context_build", "turn: 文脈構築 開始（入）");
-    let conversation_raw = match state.context_budget_tokens(&agent_id, &session_id) {
-        Ok(budget) => match state.build_conversation_string(&session_id, &agent_id, budget) {
+    let runtime_text = prepend_runtime_context_discord("", "Discord conversation", "");
+    let conversation_raw = match state.context_budget_tokens(
+        &agent_id,
+        &session_id,
+        &system_prompt,
+        &runtime_text,
+    ) {
+        Ok(budget) => match state.build_conversation_string(
+            &session_id,
+            &agent_id,
+            budget,
+            &system_prompt,
+            &runtime_text,
+        ) {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!(session_id = %session_id, agent_id = %agent_id, "build_conversation_string failed: {e}");
@@ -1887,8 +1921,20 @@ async fn process_interaction_response<T: AgentRunner>(
     // #665: 文脈構築（直列ロック取得後・run_agent_response 手前）。ここで詰まると LLM リクエスト前の
     // 宙吊りになる。入と出で挟む（時刻発火・subtask 完了 resume・interaction 応答の各ターン入口で共通）。
     debug!(agent_id = %agent_id, session_id = %session_id, stage = "context_build", "turn: 文脈構築 開始（入）");
-    let conversation_raw = match state.context_budget_tokens(&agent_id, &session_id) {
-        Ok(budget) => match state.build_conversation_string(&session_id, &agent_id, budget) {
+    let runtime_text = prepend_runtime_context_discord("", "Discord conversation", "");
+    let conversation_raw = match state.context_budget_tokens(
+        &agent_id,
+        &session_id,
+        &system_prompt,
+        &runtime_text,
+    ) {
+        Ok(budget) => match state.build_conversation_string(
+            &session_id,
+            &agent_id,
+            budget,
+            &system_prompt,
+            &runtime_text,
+        ) {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!(session_id = %session_id, agent_id = %agent_id, "build_conversation_string failed: {e}");

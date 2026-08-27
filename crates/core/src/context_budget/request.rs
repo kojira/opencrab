@@ -198,6 +198,58 @@ mod tests {
         assert_eq!(err.name(), CONTEXT_BUDGET_EXHAUSTED);
     }
 
+    /// request 前 functions 超過も `apply_line_items` 経由なら、一意名 + 全費目が Display に載る。
+    #[test]
+    fn resolve_request_envelope_functions_over_cap_keeps_full_line_items() {
+        let policy = ContextBudgetPolicy {
+            functions_token_cap: 50,
+            ..ContextBudgetPolicy::default()
+        };
+        let water = compute_water_levels(200_000, 1_000, &policy).unwrap();
+        let err = resolve_request_envelope(
+            water,
+            MeasuredLineItems {
+                system: 11,
+                runtime_context: 22,
+                functions: 51,
+                memory_index: 7,
+                memory_index_entry_count: 1,
+                conversation: 0,
+            },
+            &policy,
+            "run_agent_response",
+        )
+        .unwrap_err();
+        assert_eq!(err.name(), CONTEXT_BUDGET_EXHAUSTED);
+        let display = err.to_string();
+        assert!(display.starts_with(CONTEXT_BUDGET_EXHAUSTED), "{display}");
+        assert!(display.contains("input_high="), "{display}");
+        assert!(display.contains("system=11"), "{display}");
+        assert!(display.contains("runtime_context=22"), "{display}");
+        assert!(display.contains("functions=51"), "{display}");
+        assert!(display.contains("output_reserve=1000"), "{display}");
+        assert!(display.contains("memory_index=7"), "{display}");
+        match err {
+            ContextBudgetError::Exhausted {
+                input_high,
+                system,
+                runtime_context,
+                functions,
+                output_reserve,
+                memory_index,
+                ..
+            } => {
+                assert_eq!(input_high, water.input_high);
+                assert_eq!(system, 11);
+                assert_eq!(runtime_context, 22);
+                assert_eq!(functions, 51);
+                assert_eq!(output_reserve, 1_000);
+                assert_eq!(memory_index, 7);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
     #[test]
     fn measure_functions_tokens_counts_serialized_defs() {
         let defs = vec![FunctionDefinition {

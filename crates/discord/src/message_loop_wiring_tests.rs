@@ -193,6 +193,8 @@ impl opencrab_actions::AgentRuntime for FakeRunner {
         _session_id: &str,
         _agent_id: &str,
         _budget: usize,
+        _system_prompt: &str,
+        _runtime_context_text: &str,
     ) -> anyhow::Result<String> {
         Ok("conversation".to_string())
     }
@@ -201,6 +203,8 @@ impl opencrab_actions::AgentRuntime for FakeRunner {
         &self,
         _agent_id: &str,
         _session_id: &str,
+        _system_prompt: &str,
+        _runtime_context_text: &str,
     ) -> Result<usize, opencrab_core::context_budget::ContextBudgetError> {
         Ok(1000)
     }

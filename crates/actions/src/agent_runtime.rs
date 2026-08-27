@@ -58,20 +58,27 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
     /// セッションの会話履歴文字列（コンパクション込み）を組み立てる。
     ///
     /// 二重回答を防ぐ要: resume は完了本文を sink で運ばず、DB から会話を再構築する。
+    /// `system_prompt` / `runtime_context_text` はこのターンの実 request と一致させる。
     fn build_conversation_string(
         &self,
         session_id: &str,
         agent_id: &str,
         context_budget_tokens: usize,
+        system_prompt: &str,
+        runtime_context_text: &str,
     ) -> Result<String>;
 
     /// 会話車線のトークン予算（`apply_line_items` の `conversation_high`）。
     ///
-    /// 失敗は既定予算へ落とさず、一意名（超過は `context_budget_exhausted`）で返す。
+    /// `system_prompt` / `runtime_context_text` はこのターンの実 request と一致させる
+    /// （caller 差・discord 行・Nostr の非前置を含む）。失敗は既定予算へ落とさず、
+    /// 一意名（超過は `context_budget_exhausted`）で返す。
     fn context_budget_tokens(
         &self,
         agent_id: &str,
         session_id: &str,
+        system_prompt: &str,
+        runtime_context_text: &str,
     ) -> std::result::Result<usize, opencrab_core::context_budget::ContextBudgetError>;
 
     /// LLM プロバイダが 1 つ以上使えるか（未設定なら実行せずに返す）。

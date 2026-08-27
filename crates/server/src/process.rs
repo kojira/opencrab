@@ -526,12 +526,13 @@ pub fn include_memory_index(env: &ContextBudgetEnvelope) -> bool {
 }
 
 /// 各 request 前: 実 `list_tools` で functions cap と `fixed >= input_high` を検査する。
+///
+/// functions 超過も `apply_line_items` 経由にする（一意名 + 全費目 Display + 観測行）。
 pub fn ensure_request_functions_budget(
     args: RequestEnvelopeArgs<'_>,
     tools: &[opencrab_core::FunctionDefinition],
 ) -> Result<ContextBudgetEnvelope, ContextBudgetError> {
     let functions_tokens = measure_functions_tokens(tools)?;
-    ensure_functions_within_cap(functions_tokens, args.policy.functions_token_cap)?;
     resolve_agent_request_envelope(RequestEnvelopeArgs {
         functions_tokens,
         ..args
@@ -1626,12 +1627,9 @@ pub async fn run_agent_response(
                 .db
                 .lock()
                 .map_err(|e| anyhow::anyhow!("db lock poisoned: {e}"))?;
-            let theme = opencrab_db::queries::get_session(&conn, session_id)
-                .ok()
-                .flatten()
-                .map(|s| s.theme)
-                .unwrap_or_default();
-            let runtime_text = prepend_runtime_context("", &theme);
+            let conversation_text = conversation_override.as_deref().unwrap_or(conversation);
+            let runtime_text =
+                opencrab_core::runtime_context::runtime_context_prefix(conversation_text);
             if let Err(e) = ensure_request_functions_budget(
                 RequestEnvelopeArgs {
                     conn: &conn,
@@ -1640,7 +1638,7 @@ pub async fn run_agent_response(
                     default_model: &state.default_model,
                     policy: &state.context_budget_policy(),
                     system_prompt,
-                    runtime_context_text: &runtime_text,
+                    runtime_context_text: runtime_text,
                     functions_tokens: 0,
                     entrypoint: "run_agent_response",
                 },

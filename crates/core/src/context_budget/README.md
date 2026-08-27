@@ -28,7 +28,9 @@ conversation_low  = input_low.saturating_sub(fixed)
 
 `fixed >= input_high` と functions 超過は唯一のエラー名 `context_budget_exhausted`。空履歴で続行しない。
 
-入口（REST / sessions / scheduler / process / AgentRuntime）は `resolve_agent_request_envelope` → `apply_line_items` だけを通す。会話組立へ渡すのは `conversation_high`。MI 判定は `apply_line_items` に一本化し、観測行は `from_envelope`。各 request 前（`run_agent_response`）は実 `list_tools` で functions cap と `fixed >= input_high` を再検査する。
+入口（REST / sessions / scheduler / process / AgentRuntime）は `resolve_agent_request_envelope` → `apply_line_items` だけを通す。会話組立へ渡すのは `conversation_high`。MI 判定は `apply_line_items` に一本化し、観測行は `from_envelope`。各 request 前（`run_agent_response`）は実 `list_tools` で functions cap と `fixed >= input_high` を再検査する。functions 超過も早期 `ensure_functions_within_cap` では止めず、同じ経路で一意名 + 全費目 Display + `context_budget_check` を出す。
+
+AgentRuntime 系（Discord / Web / Nostr）の envelope は、Owner 固定や汎用 prepend ではなく、そのターンの実 system / runtime（Nostr は runtime 空）を測る。request 前の runtime は会話先頭の実 `[Context]` 前置を使う。
 
 ## Memory Index / functions
 

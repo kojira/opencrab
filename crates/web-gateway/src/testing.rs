@@ -94,6 +94,8 @@ pub struct FakeRunner {
     /// `Some` なら `record_user_message` がこのメッセージで失敗する。
     record_user_message_error: Option<String>,
     runs: Arc<Mutex<Vec<RunObservation>>>,
+    /// envelope に渡した実 system / runtime（組立時の費目と request を一致させる契約）。
+    envelope_calls: Arc<Mutex<Vec<(String, String)>>>,
     replies: Arc<Mutex<Vec<ReplyObservation>>>,
     user_messages: Arc<Mutex<Vec<UserMessageObservation>>>,
     caller_lookups: Arc<Mutex<Vec<CallerLookup>>>,
@@ -126,6 +128,7 @@ impl FakeRunner {
             ensure_session_error: None,
             record_user_message_error: None,
             runs: Arc::new(Mutex::new(Vec::new())),
+            envelope_calls: Arc::new(Mutex::new(Vec::new())),
             replies: Arc::new(Mutex::new(Vec::new())),
             user_messages: Arc::new(Mutex::new(Vec::new())),
             caller_lookups: Arc::new(Mutex::new(Vec::new())),
@@ -180,6 +183,10 @@ impl FakeRunner {
 
     pub fn runs(&self) -> Vec<RunObservation> {
         self.runs.lock().unwrap().clone()
+    }
+
+    pub fn envelope_calls(&self) -> Vec<(String, String)> {
+        self.envelope_calls.lock().unwrap().clone()
     }
 
     pub fn replies(&self) -> Vec<ReplyObservation> {
@@ -237,7 +244,13 @@ impl AgentRuntime for FakeRunner {
         _session_id: &str,
         _agent_id: &str,
         _context_budget_tokens: usize,
+        system_prompt: &str,
+        runtime_context_text: &str,
     ) -> Result<String> {
+        self.envelope_calls
+            .lock()
+            .unwrap()
+            .push((system_prompt.to_string(), runtime_context_text.to_string()));
         Ok("conversation".to_string())
     }
 
@@ -245,7 +258,13 @@ impl AgentRuntime for FakeRunner {
         &self,
         _agent_id: &str,
         _session_id: &str,
+        system_prompt: &str,
+        runtime_context_text: &str,
     ) -> Result<usize, opencrab_core::context_budget::ContextBudgetError> {
+        self.envelope_calls
+            .lock()
+            .unwrap()
+            .push((system_prompt.to_string(), runtime_context_text.to_string()));
         Ok(1000)
     }
 

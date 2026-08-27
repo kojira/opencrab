@@ -112,19 +112,27 @@ async fn run_and_deliver<R: WebAgentRunner>(
     }
 
     // 2. 会話文字列（DB から再構築 = 二重回答不変の要）。
-    let budget = match runner.context_budget_tokens(agent_id, session_id) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::error!(
-                session_id = %session_id,
-                error_name = e.name(),
-                "web run: {name}: {e}",
-                name = e.name()
-            );
-            return None;
-        }
-    };
-    let conversation = match runner.build_conversation_string(session_id, agent_id, budget) {
+    let runtime_text = prepend_runtime_context("", WEB_SESSION_THEME);
+    let budget =
+        match runner.context_budget_tokens(agent_id, session_id, &system_prompt, &runtime_text) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!(
+                    session_id = %session_id,
+                    error_name = e.name(),
+                    "web run: {name}: {e}",
+                    name = e.name()
+                );
+                return None;
+            }
+        };
+    let conversation = match runner.build_conversation_string(
+        session_id,
+        agent_id,
+        budget,
+        &system_prompt,
+        &runtime_text,
+    ) {
         Ok(raw) => prepend_runtime_context(&raw, WEB_SESSION_THEME),
         Err(e) => {
             tracing::error!(session_id = %session_id, "web run: build_conversation_string failed: {e}");
@@ -348,6 +356,35 @@ mod tests {
         assert!(runner.runs()[0]
             .system_prompt
             .contains("[subtask_completed: subtask_id=st-1"));
+    }
+
+    /// envelope に渡す system / runtime は、同じターンの実 request と一致する。
+    #[tokio::test]
+    async fn envelope_uses_actual_system_and_runtime() {
+        let runner = FakeRunner::new("ok");
+        let sid = web_session_id("a", "envelope");
+        run_and_deliver_serialized(
+            &runner,
+            "a",
+            &sid,
+            CallerIdentity::TrustedUser,
+            Some("[subtask_completed: subtask_id=st-1, exit_reason=completed]"),
+            "subtask_resume",
+        )
+        .await;
+        let calls = runner.envelope_calls();
+        assert!(
+            !calls.is_empty(),
+            "context_budget_tokens / build_conversation_string が実 prompt を受け取る"
+        );
+        let run = &runner.runs()[0];
+        for (system, runtime) in &calls {
+            assert_eq!(system, &run.system_prompt);
+            assert!(runtime.starts_with("[Context]\n"), "{runtime}");
+            assert!(runtime.contains(WEB_SESSION_THEME), "{runtime}");
+        }
+        assert!(run.conversation.starts_with("[Context]\n"));
+        assert!(run.conversation.contains(WEB_SESSION_THEME));
     }
 
     /// **run に載る登録簿は、停止処理が引くものと同一の Arc でなければならない**。

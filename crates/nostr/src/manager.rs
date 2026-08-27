@@ -1664,6 +1664,8 @@ mod tests {
             _session_id: &str,
             _agent_id: &str,
             _budget: usize,
+            _system_prompt: &str,
+            _runtime_context_text: &str,
         ) -> anyhow::Result<String> {
             Ok("conversation".to_string())
         }
@@ -1672,6 +1674,8 @@ mod tests {
             &self,
             _agent_id: &str,
             _session_id: &str,
+            _system_prompt: &str,
+            _runtime_context_text: &str,
         ) -> Result<usize, opencrab_core::context_budget::ContextBudgetError> {
             Ok(1000)
         }
