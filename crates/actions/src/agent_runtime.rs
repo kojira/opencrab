@@ -65,10 +65,14 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
         context_budget_tokens: usize,
     ) -> Result<String>;
 
-    /// 会話コンテキストのトークン予算（有効モデルの context window × 比率）。
+    /// 会話車線のトークン予算（`apply_line_items` の `conversation_high`）。
     ///
-    /// `agent_id` の per-agent モデルに応じた pricing を参照する。
-    fn context_budget_tokens(&self, agent_id: &str) -> usize;
+    /// 失敗は既定予算へ落とさず、一意名（超過は `context_budget_exhausted`）で返す。
+    fn context_budget_tokens(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+    ) -> std::result::Result<usize, opencrab_core::context_budget::ContextBudgetError>;
 
     /// LLM プロバイダが 1 つ以上使えるか（未設定なら実行せずに返す）。
     fn has_llm_providers(&self) -> bool;

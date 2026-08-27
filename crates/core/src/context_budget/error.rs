@@ -17,6 +17,11 @@ pub enum ContextBudgetError {
     MissingMaxOutputTokens(String),
     #[error("failed to look up model_pricing for \"{spec}\": {cause}")]
     LookupFailed { spec: String, cause: String },
+    #[error("non-positive water inputs: window={window} output_reserve={output_reserve}")]
+    NonPositiveWater {
+        window: usize,
+        output_reserve: usize,
+    },
     #[error(
         "{CONTEXT_BUDGET_EXHAUSTED}: reason={reason:?} input_high={input_high} \
          mandatory_fixed={mandatory_fixed} fixed={fixed} system={system} \
@@ -44,6 +49,7 @@ impl ContextBudgetError {
             Self::MissingContextWindow(_) => "model_context_window_missing",
             Self::MissingMaxOutputTokens(_) => "model_max_output_tokens_missing",
             Self::LookupFailed { .. } => "model_pricing_lookup_failed",
+            Self::NonPositiveWater { .. } => "non_positive_water_inputs",
             Self::Exhausted { .. } => CONTEXT_BUDGET_EXHAUSTED,
         }
     }

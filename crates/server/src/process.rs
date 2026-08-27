@@ -490,15 +490,53 @@ fn peer_reviewers_section(conn: &rusqlite::Connection, agent_id: &str) -> String
 // 既存の呼び出し元（`process::build_conversation_string` 等）のパスを保つため再エクスポート
 // する（doc に理由を明記した `subtask_registries` と同じ手）。
 pub use opencrab_core::context_budget::{
-    check_agent_model_change, compute_context_budget, ensure_model_context_window_registered,
-    ensure_model_max_output_tokens_registered, ensure_startup_budget_inputs,
-    model_context_window_missing_message, normalize_model_spec, resolve_model_max_output_tokens,
-    resolve_water_levels, split_llm_model_spec, ContextBudgetError, ContextBudgetPolicy,
-    DEFAULT_MEMORY_INDEX_TOKEN_CAP,
+    check_agent_model_change, compute_context_budget, ensure_functions_within_cap,
+    ensure_model_context_window_registered, ensure_model_max_output_tokens_registered,
+    ensure_startup_budget_inputs, measure_functions_tokens, model_context_window_missing_message,
+    normalize_model_spec, resolve_agent_request_envelope, resolve_model_max_output_tokens,
+    resolve_water_levels, split_llm_model_spec, ContextBudgetEnvelope, ContextBudgetError,
+    ContextBudgetPolicy, MemoryIndexDecision, RequestEnvelopeArgs, DEFAULT_MEMORY_INDEX_TOKEN_CAP,
 };
 pub use opencrab_core::conversation::{
-    build_conversation_string, build_conversation_string_with_memory_index_cap,
+    build_conversation_string, build_conversation_string_with_memory_index,
 };
+
+/// 入口共通: コア dispatcher の tool schema を 1 回測る。gateway / MCP は
+/// [`ensure_request_functions_budget`] が実 `list_tools` で再検査する。
+pub fn core_functions_tokens() -> Result<usize, ContextBudgetError> {
+    let defs: Vec<opencrab_core::FunctionDefinition> = opencrab_actions::ActionDispatcher::new()
+        .get_definitions(&[])
+        .into_iter()
+        .map(|d| opencrab_core::FunctionDefinition {
+            name: d.name,
+            description: if d.description.is_empty() {
+                None
+            } else {
+                Some(d.description)
+            },
+            parameters: d.parameters,
+        })
+        .collect();
+    measure_functions_tokens(&defs)
+}
+
+/// Memory Index を載せるか。判定は envelope 側だけが持つ。
+pub fn include_memory_index(env: &ContextBudgetEnvelope) -> bool {
+    matches!(env.memory_index_decision, MemoryIndexDecision::Inject)
+}
+
+/// 各 request 前: 実 `list_tools` で functions cap と `fixed >= input_high` を検査する。
+pub fn ensure_request_functions_budget(
+    args: RequestEnvelopeArgs<'_>,
+    tools: &[opencrab_core::FunctionDefinition],
+) -> Result<ContextBudgetEnvelope, ContextBudgetError> {
+    let functions_tokens = measure_functions_tokens(tools)?;
+    ensure_functions_within_cap(functions_tokens, args.policy.functions_token_cap)?;
+    resolve_agent_request_envelope(RequestEnvelopeArgs {
+        functions_tokens,
+        ..args
+    })
+}
 // `format_single_log` は `format_live_inbound`（本番経路）が使うので常時取り込む。
 pub(crate) use opencrab_core::conversation::format_single_log;
 // 以下はテストだけが参照する（本番コードは使わない）。cfg(test) で本番ビルドの
@@ -1582,6 +1620,35 @@ pub async fn run_agent_response(
             stage = "engine",
             "turn: エンジン実行 開始（入）"
         );
+        {
+            let tools = executor.list_tools();
+            let conn = state
+                .db
+                .lock()
+                .map_err(|e| anyhow::anyhow!("db lock poisoned: {e}"))?;
+            let theme = opencrab_db::queries::get_session(&conn, session_id)
+                .ok()
+                .flatten()
+                .map(|s| s.theme)
+                .unwrap_or_default();
+            let runtime_text = prepend_runtime_context("", &theme);
+            if let Err(e) = ensure_request_functions_budget(
+                RequestEnvelopeArgs {
+                    conn: &conn,
+                    agent_id,
+                    session_id,
+                    default_model: &state.default_model,
+                    policy: &state.context_budget_policy(),
+                    system_prompt,
+                    runtime_context_text: &runtime_text,
+                    functions_tokens: 0,
+                    entrypoint: "run_agent_response",
+                },
+                &tools,
+            ) {
+                return Err(anyhow::anyhow!("{e}"));
+            }
+        }
         let result = engine
             .run_with_model_override(
                 system_prompt,
@@ -1843,35 +1910,68 @@ fn prepare_loop_restart(
     // 呼び出し元が付けていた [Context] 前置（日時 / テーマ / Discord message_id）も
     // ここで再現する（無いと run-2 が現在日時を失い、message_id 依存のゲートウェイ
     // 操作ができなくなる）。
-    let (prov, mdl) = {
-        let eff =
-            opencrab_db::queries::effective_model_for_agent(&conn, agent_id, &state.default_model)
-                .unwrap_or_else(|_| state.default_model.clone());
-        let (p, m) = split_llm_model_spec(&eff);
-        (p.to_string(), m.to_string())
+    let (system_prompt, _) =
+        build_agent_context(&conn, agent_id, &opencrab_actions::CallerIdentity::Owner);
+    let theme = opencrab_db::queries::get_session(&conn, session_id)
+        .ok()
+        .flatten()
+        .map(|s| s.theme)
+        .unwrap_or_default();
+    let runtime_text = match trigger_message_id {
+        Some(message_id) if !message_id.is_empty() => {
+            prepend_runtime_context_discord("", &theme, message_id)
+        }
+        _ => prepend_runtime_context("", &theme),
     };
-    let budget = match resolve_water_levels(&conn, &prov, &mdl, &state.context_budget_policy()) {
-        Ok(w) => w.input_high,
+    let functions_tokens = match core_functions_tokens() {
+        Ok(n) => n,
         Err(e) => {
             tracing::warn!(
                 session_id = %session_id,
-                "loop restart aborted (context budget fail-loud): {e}"
+                error_name = e.name(),
+                "loop restart aborted ({name}): {e}",
+                name = e.name()
+            );
+            return None;
+        }
+    };
+    let env = match resolve_agent_request_envelope(RequestEnvelopeArgs {
+        conn: &conn,
+        agent_id,
+        session_id,
+        default_model: &state.default_model,
+        policy: &state.context_budget_policy(),
+        system_prompt: &system_prompt,
+        runtime_context_text: &runtime_text,
+        functions_tokens,
+        entrypoint: "process_loop_restart",
+    }) {
+        Ok(env) => env,
+        Err(e) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error_name = e.name(),
+                "loop restart aborted ({name}): {e}",
+                name = e.name()
             );
             let _ = opencrab_db::queries::insert_task_progress(
                 &conn,
                 task.id,
                 "progress",
-                "[restart] 文脈予算を解決できないため自動再実行を中止した（予算は未消費）。",
+                &format!(
+                    "[restart] {} のため自動再実行を中止した（予算は未消費）。",
+                    e.name()
+                ),
             );
             return None;
         }
     };
-    let rebuilt = match build_conversation_string_with_memory_index_cap(
+    let rebuilt = match build_conversation_string_with_memory_index(
         &conn,
         session_id,
         agent_id,
-        budget,
-        state.llm_config.memory_index_token_cap,
+        env.conversation_high,
+        include_memory_index(&env),
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -1888,11 +1988,6 @@ fn prepare_loop_restart(
             return None;
         }
     };
-    let theme = opencrab_db::queries::get_session(&conn, session_id)
-        .ok()
-        .flatten()
-        .map(|s| s.theme)
-        .unwrap_or_default();
     let rebuilt = match trigger_message_id {
         Some(message_id) if !message_id.is_empty() => {
             prepend_runtime_context_discord(&rebuilt, &theme, message_id)

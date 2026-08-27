@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn check_record_has_entrypoint_items_water_before_after_action_reason() {
-        let water = compute_water_levels(200_000, 1_000, &ContextBudgetPolicy::default());
+        let water = compute_water_levels(200_000, 1_000, &ContextBudgetPolicy::default()).unwrap();
         let env = apply_line_items(
             water,
             MeasuredLineItems {

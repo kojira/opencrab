@@ -37,13 +37,19 @@ impl TokenLedger {
         self.record_tokens(key, measure_item_tokens(text))
     }
 
-    /// 既に測った token 数をキャッシュして加算する。
+    /// 既に測った token 数をキャッシュする。同一キーは上書きし、合計を差し替えて二重加算しない。
     pub fn record_tokens(&mut self, key: impl Into<String>, tokens: usize) -> usize {
+        let key = key.into();
+        if let Some(item) = self.items.iter_mut().find(|item| item.key == key) {
+            self.total = self
+                .total
+                .saturating_sub(item.tokens)
+                .saturating_add(tokens);
+            item.tokens = tokens;
+            return tokens;
+        }
         self.total = self.total.saturating_add(tokens);
-        self.items.push(LedgerItem {
-            key: key.into(),
-            tokens,
-        });
+        self.items.push(LedgerItem { key, tokens });
         tokens
     }
 
@@ -83,6 +89,20 @@ mod tests {
     }
 
     #[test]
+    fn record_same_key_replaces_instead_of_double_count() {
+        let mut ledger = TokenLedger::new();
+        ledger.record_tokens("a", 10);
+        ledger.record_tokens("a", 7);
+        assert_eq!(ledger.total(), 7);
+        assert_eq!(ledger.items().len(), 1);
+        assert_eq!(ledger.items()[0].tokens, 7);
+        ledger.record_tokens("b", 3);
+        ledger.record_tokens("a", 4);
+        assert_eq!(ledger.total(), 7);
+        assert_eq!(ledger.items().len(), 2);
+    }
+
+    #[test]
     fn huge_item_limit_uses_windowed_predicate() {
         let huge = "word ".repeat(20_000);
         assert!(huge.len() > BOUNDED_TOKENIZE_WINDOW);
@@ -98,7 +118,7 @@ mod tests {
     fn totals_match_add_subtract_property() {
         let mut seed = 7_u64;
         let mut next = || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            seed = seed.wrapping_mul(0x5851F42D4C957F2D).wrapping_add(1);
             (seed % 4_000) as usize
         };
         let mut ledger = TokenLedger::new();

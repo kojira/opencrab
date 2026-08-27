@@ -131,7 +131,19 @@ impl<R: NostrAgentRunner> NostrResponder<R> {
 
         // #665: 会話履歴の構築（DB からターンの文脈を組む）。この後 run_agent_response（engine）へ渡す。
         // ここが重い/詰まると LLM リクエスト前で止まる（llm_logs に行が出ない宙吊りの前段）。入と出を出す。
-        let budget = self.runner.context_budget_tokens(agent_id);
+        let budget = match self.runner.context_budget_tokens(agent_id, session_id) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!(
+                    agent_id,
+                    session_id,
+                    error_name = e.name(),
+                    "{name}: {e}",
+                    name = e.name()
+                );
+                return None;
+            }
+        };
         debug!(
             agent_id,
             session_id,
@@ -508,8 +520,12 @@ mod tests {
             Ok("conversation".to_string())
         }
 
-        fn context_budget_tokens(&self, _agent_id: &str) -> usize {
-            1000
+        fn context_budget_tokens(
+            &self,
+            _agent_id: &str,
+            _session_id: &str,
+        ) -> Result<usize, opencrab_core::context_budget::ContextBudgetError> {
+            Ok(1000)
         }
 
         fn has_llm_providers(&self) -> bool {

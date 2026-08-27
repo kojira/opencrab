@@ -241,8 +241,12 @@ impl AgentRuntime for FakeRunner {
         Ok("conversation".to_string())
     }
 
-    fn context_budget_tokens(&self, _agent_id: &str) -> usize {
-        1000
+    fn context_budget_tokens(
+        &self,
+        _agent_id: &str,
+        _session_id: &str,
+    ) -> Result<usize, opencrab_core::context_budget::ContextBudgetError> {
+        Ok(1000)
     }
 
     fn has_llm_providers(&self) -> bool {

@@ -28,10 +28,12 @@ conversation_low  = input_low.saturating_sub(fixed)
 
 `fixed >= input_high` と functions 超過は唯一のエラー名 `context_budget_exhausted`。空履歴で続行しない。
 
+入口（REST / sessions / scheduler / process / AgentRuntime）は `resolve_agent_request_envelope` → `apply_line_items` だけを通す。会話組立へ渡すのは `conversation_high`。MI 判定は `apply_line_items` に一本化し、観測行は `from_envelope`。各 request 前（`run_agent_response`）は実 `list_tools` で functions cap と `fixed >= input_high` を再検査する。
+
 ## Memory Index / functions
 
 - Memory Index は専用 cap と残予算の双方に収まるときだけ全量注入する。収まらなければ部分切り詰めせず丸ごと省略し、件数と token 数を `context_budget_check` に残す。
-- functions は縮約しない。登録時と各 request 前の `ensure_functions_within_cap` で上限を見る。
+- functions は縮約しない。登録時と各 request 前の `ensure_functions_within_cap` / `apply_line_items` で上限を見る。
 
 ## 計測
 

@@ -112,7 +112,18 @@ async fn run_and_deliver<R: WebAgentRunner>(
     }
 
     // 2. 会話文字列（DB から再構築 = 二重回答不変の要）。
-    let budget = runner.context_budget_tokens(agent_id);
+    let budget = match runner.context_budget_tokens(agent_id, session_id) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!(
+                session_id = %session_id,
+                error_name = e.name(),
+                "web run: {name}: {e}",
+                name = e.name()
+            );
+            return None;
+        }
+    };
     let conversation = match runner.build_conversation_string(session_id, agent_id, budget) {
         Ok(raw) => prepend_runtime_context(&raw, WEB_SESSION_THEME),
         Err(e) => {

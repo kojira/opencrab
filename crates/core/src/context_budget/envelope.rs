@@ -142,20 +142,28 @@ fn floor_ratio(window: usize, ratio: f64) -> usize {
 }
 
 /// `W` と `A` と比から二水位を合成する。chatgpt 特例は持たない。
+///
+/// `window == 0` または `output_reserve == 0` は既定へ落とさず fail-loud。
 pub fn compute_water_levels(
     window: usize,
     output_reserve: usize,
     policy: &ContextBudgetPolicy,
-) -> WaterLevels {
+) -> Result<WaterLevels, ContextBudgetError> {
+    if window == 0 || output_reserve == 0 {
+        return Err(ContextBudgetError::NonPositiveWater {
+            window,
+            output_reserve,
+        });
+    }
     let input_high = floor_ratio(window, policy.input_high_ratio).min(policy.absolute_cap_a);
     let input_low = floor_ratio(window, policy.input_low_ratio).min(policy.absolute_cap_a / 2);
-    WaterLevels {
+    Ok(WaterLevels {
         window,
         absolute_cap_a: policy.absolute_cap_a,
         input_high,
         input_low,
         output_reserve,
-    }
+    })
 }
 
 /// Memory Index は専用 cap と残予算の双方に収まるときだけ全量注入する。
@@ -304,13 +312,13 @@ mod tests {
         assert_eq!(p.input_low_ratio, 0.25);
 
         // W=200_000: 比は 100_000 / 50_000、A が勝つ。
-        let w = compute_water_levels(200_000, 4_096, &p);
+        let w = compute_water_levels(200_000, 4_096, &p).unwrap();
         assert_eq!(w.input_high, 80_000);
         assert_eq!(w.input_low, 40_000);
         assert_eq!(w.output_reserve, 4_096);
 
         // W=100_000: 比が A より小さい。
-        let w = compute_water_levels(100_000, 4_096, &p);
+        let w = compute_water_levels(100_000, 4_096, &p).unwrap();
         assert_eq!(w.input_high, 50_000);
         assert_eq!(w.input_low, 25_000);
     }
@@ -319,15 +327,15 @@ mod tests {
     fn water_levels_boundaries_around_a() {
         let p = policy_with_a(80_000);
         // floor(160_000 * 0.50) = 80_000 == A
-        let eq = compute_water_levels(160_000, 1, &p);
+        let eq = compute_water_levels(160_000, 1, &p).unwrap();
         assert_eq!(eq.input_high, 80_000);
         assert_eq!(eq.input_low, 40_000);
         // floor(160_002 * 0.50) = 80_001 > A
-        let over = compute_water_levels(160_002, 1, &p);
+        let over = compute_water_levels(160_002, 1, &p).unwrap();
         assert_eq!(over.input_high, 80_000);
         assert_eq!(over.input_low, 40_000);
         // floor(159_998 * 0.50) = 79_999 < A
-        let under = compute_water_levels(159_998, 1, &p);
+        let under = compute_water_levels(159_998, 1, &p).unwrap();
         assert_eq!(under.input_high, 79_999);
         assert_eq!(under.input_low, 39_999);
     }
@@ -336,15 +344,36 @@ mod tests {
     fn water_levels_floor_fraction() {
         let p = policy_with_a(80_000);
         // floor(5 * 0.50) = 2, floor(5 * 0.25) = 1
-        let w = compute_water_levels(5, 1, &p);
+        let w = compute_water_levels(5, 1, &p).unwrap();
         assert_eq!(w.input_high, 2);
         assert_eq!(w.input_low, 1);
     }
 
     #[test]
+    fn water_levels_reject_zero_window_or_reserve() {
+        let p = ContextBudgetPolicy::default();
+        let err = compute_water_levels(0, 4_096, &p).unwrap_err();
+        assert!(matches!(
+            err,
+            ContextBudgetError::NonPositiveWater {
+                window: 0,
+                output_reserve: 4_096
+            }
+        ));
+        let err = compute_water_levels(100_000, 0, &p).unwrap_err();
+        assert!(matches!(
+            err,
+            ContextBudgetError::NonPositiveWater {
+                window: 100_000,
+                output_reserve: 0
+            }
+        ));
+    }
+
+    #[test]
     fn chatgpt_catalog_window_uses_a_not_305k() {
         let p = ContextBudgetPolicy::default();
-        let w = compute_water_levels(1_050_000, 4_096, &p);
+        let w = compute_water_levels(1_050_000, 4_096, &p).unwrap();
         assert_eq!(w.input_high, DEFAULT_ABSOLUTE_CAP_A);
         assert_ne!(w.input_high, 305_000);
         assert!(w.input_high < 85_000);
@@ -352,7 +381,7 @@ mod tests {
 
     #[test]
     fn apply_injects_memory_index_when_under_both_caps() {
-        let water = compute_water_levels(200_000, 4_000, &ContextBudgetPolicy::default());
+        let water = compute_water_levels(200_000, 4_000, &ContextBudgetPolicy::default()).unwrap();
         let env = apply_line_items(
             water,
             MeasuredLineItems {
@@ -385,7 +414,7 @@ mod tests {
 
     #[test]
     fn memory_index_omitted_entirely_when_over_dedicated_cap() {
-        let water = compute_water_levels(200_000, 1_000, &ContextBudgetPolicy::default());
+        let water = compute_water_levels(200_000, 1_000, &ContextBudgetPolicy::default()).unwrap();
         let env = apply_line_items(
             water,
             MeasuredLineItems {
@@ -417,7 +446,7 @@ mod tests {
             memory_index_token_cap: 4_000,
             ..ContextBudgetPolicy::default()
         };
-        let water = compute_water_levels(10_000, 100, &policy);
+        let water = compute_water_levels(10_000, 100, &policy).unwrap();
         // input_high = min(5000, 1000) = 1000
         // mandatory = 200+50+100+100 = 450, remaining = 550
         let env = apply_line_items(
@@ -452,7 +481,7 @@ mod tests {
             absolute_cap_a: 1_000,
             ..ContextBudgetPolicy::default()
         };
-        let water = compute_water_levels(10_000, 400, &policy);
+        let water = compute_water_levels(10_000, 400, &policy).unwrap();
         // input_high = 1000, mandatory = 300+100+200+400 = 1000
         let err = apply_line_items(
             water,
@@ -491,7 +520,7 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.name(), CONTEXT_BUDGET_EXHAUSTED);
-        let water = compute_water_levels(200_000, 1_000, &ContextBudgetPolicy::default());
+        let water = compute_water_levels(200_000, 1_000, &ContextBudgetPolicy::default()).unwrap();
         let err = apply_line_items(
             water,
             MeasuredLineItems {
@@ -513,7 +542,7 @@ mod tests {
     fn line_item_totals_match_property() {
         let mut seed = 0xC0FFEE_u64;
         let mut next = |mod_n: u64| -> usize {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            seed = seed.wrapping_mul(0x5851F42D4C957F2D).wrapping_add(1);
             (seed % mod_n) as usize
         };
         for _ in 0..256 {
@@ -525,7 +554,7 @@ mod tests {
             };
             let window = 20_000 + next(200_000);
             let reserve = 1 + next(2_000);
-            let water = compute_water_levels(window, reserve, &policy);
+            let water = compute_water_levels(window, reserve, &policy).unwrap();
             let measured = MeasuredLineItems {
                 system: next(3_000),
                 runtime_context: next(500),
@@ -592,7 +621,7 @@ mod tests {
         let mut points = Vec::new();
         for prompt in (60_000..=110_000).step_by(5_000) {
             points.push(prompt);
-            let water = compute_water_levels(1_050_000, 4_096, &policy);
+            let water = compute_water_levels(1_050_000, 4_096, &policy).unwrap();
             assert_eq!(water.input_high, DEFAULT_ABSOLUTE_CAP_A);
             assert_ne!(water.input_high, 305_000);
         }

@@ -203,31 +203,49 @@ pub async fn send_message(
         // Build conversation history from session logs.
         let conversation = {
             let conn = state.db.lock().unwrap();
-            let eff = opencrab_db::queries::effective_model_for_agent(
-                &conn,
-                agent_id,
-                &state.default_model,
-            )
-            .unwrap_or_else(|_| state.default_model.clone());
-            let (prov, mdl) = process::split_llm_model_spec(&eff);
-            let budget = match process::resolve_water_levels(
-                &conn,
-                prov,
-                mdl,
-                &state.context_budget_policy(),
-            ) {
-                Ok(w) => w.input_high,
+            let runtime_text = process::prepend_runtime_context("", &session_theme);
+            let functions_tokens = match process::core_functions_tokens() {
+                Ok(n) => n,
                 Err(e) => {
-                    tracing::error!(agent_id = %agent_id, session_id = %id, "context budget fail-loud: {e}");
+                    tracing::error!(
+                        agent_id = %agent_id,
+                        session_id = %id,
+                        error_name = e.name(),
+                        "{name}: {e}",
+                        name = e.name()
+                    );
                     continue;
                 }
             };
-            let raw = match process::build_conversation_string_with_memory_index_cap(
+            let env = match process::resolve_agent_request_envelope(process::RequestEnvelopeArgs {
+                conn: &conn,
+                agent_id,
+                session_id: &id,
+                default_model: &state.default_model,
+                policy: &state.context_budget_policy(),
+                system_prompt: &system_prompt,
+                runtime_context_text: &runtime_text,
+                functions_tokens,
+                entrypoint: "sessions",
+            }) {
+                Ok(env) => env,
+                Err(e) => {
+                    tracing::error!(
+                        agent_id = %agent_id,
+                        session_id = %id,
+                        error_name = e.name(),
+                        "{name}: {e}",
+                        name = e.name()
+                    );
+                    continue;
+                }
+            };
+            let raw = match process::build_conversation_string_with_memory_index(
                 &conn,
                 &id,
                 agent_id,
-                budget,
-                state.llm_config.memory_index_token_cap,
+                env.conversation_high,
+                process::include_memory_index(&env),
             ) {
                 Ok(s) => s,
                 Err(e) => {

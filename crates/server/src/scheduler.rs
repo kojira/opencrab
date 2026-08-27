@@ -307,32 +307,51 @@ fn build_scheduled_context(
     let conn = state.db.lock().ok()?;
     let (base_prompt, agent_name) =
         opencrab_server::process::build_agent_context(&conn, agent_id, &CallerIdentity::Owner);
-    let eff =
-        opencrab_db::queries::effective_model_for_agent(&conn, agent_id, &state.default_model)
-            .unwrap_or_else(|_| state.default_model.clone());
-    let (prov, mdl) = opencrab_server::process::split_llm_model_spec(&eff);
-    let budget = match opencrab_server::process::resolve_water_levels(
-        &conn,
-        prov,
-        mdl,
-        &state.context_budget_policy(),
-    ) {
-        Ok(w) => w.input_high,
+    let runtime_text = opencrab_server::process::prepend_runtime_context("", runtime_context);
+    let functions_tokens = match opencrab_server::process::core_functions_tokens() {
+        Ok(n) => n,
         Err(e) => {
             tracing::error!(
                 agent_id,
                 session_id,
-                "scheduler: context budget fail-loud: {e}"
+                error_name = e.name(),
+                "scheduler: {name}: {e}",
+                name = e.name()
             );
             return None;
         }
     };
-    let raw = match opencrab_server::process::build_conversation_string_with_memory_index_cap(
+    let env = match opencrab_server::process::resolve_agent_request_envelope(
+        opencrab_server::process::RequestEnvelopeArgs {
+            conn: &conn,
+            agent_id,
+            session_id,
+            default_model: &state.default_model,
+            policy: &state.context_budget_policy(),
+            system_prompt: &base_prompt,
+            runtime_context_text: &runtime_text,
+            functions_tokens,
+            entrypoint: "scheduler",
+        },
+    ) {
+        Ok(env) => env,
+        Err(e) => {
+            tracing::error!(
+                agent_id,
+                session_id,
+                error_name = e.name(),
+                "scheduler: {name}: {e}",
+                name = e.name()
+            );
+            return None;
+        }
+    };
+    let raw = match opencrab_server::process::build_conversation_string_with_memory_index(
         &conn,
         session_id,
         agent_id,
-        budget,
-        state.llm_config.memory_index_token_cap,
+        env.conversation_high,
+        opencrab_server::process::include_memory_index(&env),
     ) {
         Ok(s) => s,
         Err(e) => {

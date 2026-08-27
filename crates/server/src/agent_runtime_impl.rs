@@ -36,27 +36,65 @@ impl AgentRuntime for AppState {
         &self,
         session_id: &str,
         agent_id: &str,
-        context_budget_tokens: usize,
+        _context_budget_tokens: usize,
     ) -> anyhow::Result<String> {
         let conn = self.db.lock().unwrap();
-        process::build_conversation_string_with_memory_index_cap(
+        let (system_prompt, _) =
+            process::build_agent_context(&conn, agent_id, &opencrab_actions::CallerIdentity::Owner);
+        let theme = opencrab_db::queries::get_session(&conn, session_id)
+            .ok()
+            .flatten()
+            .map(|s| s.theme)
+            .unwrap_or_default();
+        let runtime_text = process::prepend_runtime_context("", &theme);
+        let functions_tokens = process::core_functions_tokens()?;
+        let env = process::resolve_agent_request_envelope(process::RequestEnvelopeArgs {
+            conn: &conn,
+            agent_id,
+            session_id,
+            default_model: &self.default_model,
+            policy: &self.context_budget_policy(),
+            system_prompt: &system_prompt,
+            runtime_context_text: &runtime_text,
+            functions_tokens,
+            entrypoint: "agent_runtime",
+        })?;
+        process::build_conversation_string_with_memory_index(
             &conn,
             session_id,
             agent_id,
-            context_budget_tokens,
-            self.llm_config.memory_index_token_cap,
+            env.conversation_high,
+            process::include_memory_index(&env),
         )
     }
 
-    fn context_budget_tokens(&self, agent_id: &str) -> usize {
+    fn context_budget_tokens(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+    ) -> Result<usize, opencrab_core::context_budget::ContextBudgetError> {
         let conn = self.db.lock().unwrap();
-        let eff =
-            opencrab_db::queries::effective_model_for_agent(&conn, agent_id, &self.default_model)
-                .unwrap_or_else(|_| self.default_model.clone());
-        let (prov, mdl) = process::split_llm_model_spec(&eff);
-        process::resolve_water_levels(&conn, prov, mdl, &self.context_budget_policy())
-            .map(|w| w.input_high)
-            .unwrap_or_else(|e| panic!("context budget fail-loud: {e}"))
+        let (system_prompt, _) =
+            process::build_agent_context(&conn, agent_id, &opencrab_actions::CallerIdentity::Owner);
+        let theme = opencrab_db::queries::get_session(&conn, session_id)
+            .ok()
+            .flatten()
+            .map(|s| s.theme)
+            .unwrap_or_default();
+        let runtime_text = process::prepend_runtime_context("", &theme);
+        let functions_tokens = process::core_functions_tokens()?;
+        let env = process::resolve_agent_request_envelope(process::RequestEnvelopeArgs {
+            conn: &conn,
+            agent_id,
+            session_id,
+            default_model: &self.default_model,
+            policy: &self.context_budget_policy(),
+            system_prompt: &system_prompt,
+            runtime_context_text: &runtime_text,
+            functions_tokens,
+            entrypoint: "agent_runtime",
+        })?;
+        Ok(env.conversation_high)
     }
 
     fn has_llm_providers(&self) -> bool {

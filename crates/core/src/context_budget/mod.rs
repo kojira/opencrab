@@ -8,6 +8,7 @@ mod envelope;
 mod error;
 mod ledger;
 mod observe;
+mod request;
 
 pub use envelope::{
     apply_line_items, compute_water_levels, decide_memory_index, ensure_functions_within_cap,
@@ -20,6 +21,10 @@ pub use error::{ContextBudgetError, CONTEXT_BUDGET_EXHAUSTED};
 pub use ledger::{LedgerItem, TokenLedger};
 pub use observe::{
     emit_context_budget_check, exhausted_check, BudgetCheckAction, ContextBudgetCheck,
+};
+pub use request::{
+    measure_functions_tokens, measure_memory_index, resolve_agent_request_envelope,
+    resolve_request_envelope, RequestEnvelopeArgs,
 };
 
 /// `provider:model` 形式（またはモデル名のみ）を pricing 参照用に分割する。
@@ -228,7 +233,7 @@ pub fn resolve_water_levels(
     policy: &ContextBudgetPolicy,
 ) -> Result<WaterLevels, ContextBudgetError> {
     let (window, output_reserve) = resolve_model_budget_inputs(conn, provider, model)?;
-    Ok(compute_water_levels(window, output_reserve, policy))
+    compute_water_levels(window, output_reserve, policy)
 }
 
 /// 呼び出し元が使う `input_high`（`min(floor(W * ratio), A)`）。
