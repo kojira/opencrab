@@ -21,6 +21,7 @@ async fn run() -> anyhow::Result<()> {
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive("opencrab_web_gateway=info".parse()?)
+                .add_directive("opencrab_gate_client=info".parse()?)
                 .add_directive("web_gateway=info".parse()?),
         )
         .init();

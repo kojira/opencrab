@@ -2120,6 +2120,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "opencrab-gate-client"
+version = "0.2.17"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "opencrab-gateway"
 version = "0.2.17"
 dependencies = [
@@ -2329,6 +2341,7 @@ dependencies = [
  "axum",
  "futures",
  "http-body-util",
+ "opencrab-gate-client",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",

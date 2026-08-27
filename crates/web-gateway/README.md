@@ -13,7 +13,7 @@ Web 会話の独立 binary。HTTP/SSE を V3 protocol=2（UDS）へ変換する�
 
 `session_id` は binding address（legacy logical session と byte-equal）。未 ack は `503`。同一 address を複数 instance が ack したら `409 binding_conflict`。同一 binding の別 UUID は `409 conversation_busy`。`ok.seq=null` は `403 {state:"not_admitted"}`。said 応答は 10 秒で打ち切り、`disconnect` 相当で pending を落とす。wire close の SSE は `event: gate_error`（ブラウザ予約の `error` とぶつからない）。同一 address への後勝ち bind は上書きせず接続を閉じる。
 
-UDS 切断後も HTTP listen は落とさない。指数 backoff（200ms…8s）で再接続し、hello 再送で open binding を replay する。切断中の message POST は `503 disconnect`、events は SSE `gate_error`（code=`disconnect`）。tracing filter は `opencrab_web_gateway` と binary 名 `web_gateway` の両方。hello / bind / said / say / close を info に残す。
+UDS 切断後も HTTP listen は落とさない。指数 backoff（200ms…8s）で再接続し、hello 再送で open binding を replay する。切断中の message POST は `503 disconnect`、events は SSE `gate_error`（code=`disconnect`）。tracing filter は `opencrab_web_gateway` / `opencrab_gate_client` と binary 名 `web_gateway`。hello / bind / said / say / close を info に残す。V3 client / wire / json は `opencrab-gate-client` を使う。
 
 ## 配置
 

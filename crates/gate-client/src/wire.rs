@@ -1,9 +1,9 @@
 //! V3 §3 の frame と message。core crate の DTO は使わない。
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::json::{JsonError, parse_object_no_dup};
+use super::json::{parse_object_no_dup, JsonError};
 
 /// LF 込み上限。
 pub const MAX_FRAME: usize = 1_048_576;

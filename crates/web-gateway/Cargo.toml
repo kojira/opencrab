@@ -18,6 +18,7 @@ axum.workspace = true
 futures.workspace = true
 uuid.workspace = true
 sha2.workspace = true
+opencrab-gate-client.workspace = true
 
 [[bin]]
 name = "web-gateway"

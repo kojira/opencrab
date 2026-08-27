@@ -10,6 +10,7 @@ members = [
     "crates/discord",
     "crates/nostr",
     "crates/web-gateway",
+    "crates/gate-client",
     "crates/mcp",
     "crates/server",
     "crates/cli",
@@ -98,6 +99,7 @@ opencrab-discord = { path = "crates/discord" }
 opencrab-nostr = { path = "crates/nostr" }
 opencrab-extgate = { path = "crates/extgate", default-features = false }
 opencrab-web-gateway = { path = "crates/web-gateway" }
+opencrab-gate-client = { path = "crates/gate-client" }
 opencrab-mcp = { path = "crates/mcp" }
 
 # 開発ビルド高速化: デバッグ情報を減らしてリンク時間とバイナリサイズを削減。
