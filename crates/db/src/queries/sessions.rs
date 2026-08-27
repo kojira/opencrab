@@ -169,13 +169,16 @@ pub fn open_web_physical_session(conn: &Connection, session_id: &str) -> Result<
     Ok(open_web_binding(conn, session_id)?.map(|b| format!("extgate-{}", b.binding_id)))
 }
 
-/// 開いている web binding の id と instance。同一 session に open が 2 件以上なら失敗する。
+/// 開いている web binding の `binding_id` / `instance_id` / `address`。
+/// `session_id` は binding address でも physical ID でもよい（§3 / §4.3）。
+/// 同一 session に open が 2 件以上なら失敗する。
 pub struct OpenWebBinding {
     pub binding_id: String,
     pub instance_id: String,
     pub address: String,
 }
 
+/// 開いている web binding を address または physical session ID で解決する。
 pub fn open_web_binding(conn: &Connection, session_id: &str) -> Result<Option<OpenWebBinding>> {
     let mut stmt = conn.prepare(
         "SELECT b.binding_id, b.instance_id, b.address

@@ -8,11 +8,16 @@ const WEB_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 
 const harness = await startHarness();
 process.env.E2E_ORIGIN = harness.origin;
+process.env.E2E_HOST = harness.host ?? 'qc-e2e.test';
 
 const child = spawn('npx', ['playwright', 'test'], {
   cwd: WEB_ROOT,
   stdio: 'inherit',
-  env: { ...process.env, E2E_ORIGIN: harness.origin },
+  env: {
+    ...process.env,
+    E2E_ORIGIN: harness.origin,
+    E2E_HOST: process.env.E2E_HOST,
+  },
 });
 
 const shutdown = async (code) => {

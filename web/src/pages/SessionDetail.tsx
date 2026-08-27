@@ -12,6 +12,7 @@ import {
 import type { SessionDto, SessionLogRow } from '../api/types';
 import { conversationTitle } from '../lib/conversationTitle';
 import {
+  LOG_SCROLLEND_TIMEOUT_MS,
   distanceFromBottomPx,
   logScrollBehavior,
   shouldFollowLogTail,
@@ -115,7 +116,11 @@ function SessionLogItem({
         {speakerDisplay}
         <div className="flex items-center gap-2">
           {pending ? (
-            <span className="material-symbols-outlined text-sm animate-spin" aria-live="polite">
+            <span
+              className="material-symbols-outlined text-sm animate-spin"
+              aria-live="polite"
+              data-testid="session-pending-spinner"
+            >
               progress_activity
             </span>
           ) : null}
@@ -178,6 +183,7 @@ export default function SessionDetail() {
   const pinToBottomRef = useRef(true);
   const forceToBottomRef = useRef(false);
   const ignoreLogScrollRef = useRef(false);
+  const scrollUnlockRef = useRef<(() => void) | null>(null);
 
   const loadSession = (sessionId: string) => {
     abortRef.current?.abort();
@@ -246,6 +252,8 @@ export default function SessionDetail() {
     return () => {
       abortRef.current?.abort();
       sourceRef.current?.close();
+      scrollUnlockRef.current?.();
+      scrollUnlockRef.current = null;
     };
   }, [id]);
 
@@ -346,30 +354,45 @@ export default function SessionDetail() {
   const scrollLogToBottom = () => {
     const el = logListRef.current;
     if (!el) return;
+    scrollUnlockRef.current?.();
+    scrollUnlockRef.current = null;
     ignoreLogScrollRef.current = true;
     const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     el.scrollTo({
       top: el.scrollHeight,
       behavior: logScrollBehavior(reduced),
     });
+    const unlock = () => {
+      ignoreLogScrollRef.current = false;
+      pinToBottomRef.current = true;
+    };
     if (
       shouldFollowLogTail({
         forceToBottom: false,
         distanceFromBottomPx: distanceFromBottomPx(el.scrollTop, el.clientHeight, el.scrollHeight),
       })
     ) {
-      ignoreLogScrollRef.current = false;
-      pinToBottomRef.current = true;
+      unlock();
       return;
     }
-    el.addEventListener(
-      'scrollend',
-      () => {
-        ignoreLogScrollRef.current = false;
-        pinToBottomRef.current = true;
-      },
-      { once: true },
-    );
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      window.clearTimeout(timer);
+      el.removeEventListener('scrollend', finish);
+      if (scrollUnlockRef.current === cancel) scrollUnlockRef.current = null;
+      unlock();
+    };
+    const timer = window.setTimeout(finish, LOG_SCROLLEND_TIMEOUT_MS);
+    el.addEventListener('scrollend', finish);
+    const cancel = () => {
+      if (finished) return;
+      finished = true;
+      window.clearTimeout(timer);
+      el.removeEventListener('scrollend', finish);
+    };
+    scrollUnlockRef.current = cancel;
   };
 
   useEffect(() => {
@@ -475,7 +498,7 @@ export default function SessionDetail() {
   };
 
   return (
-    <div className="max-w-4xl mx-auto h-full flex flex-col">
+    <div className="max-w-4xl mx-auto h-full min-h-0 flex flex-col">
       {sessionKind === 'loading' ? (
         <div className="card-elevated mb-4" aria-busy="true">
           <p className="text-body-lg text-on-surface-variant">{t('sessionDetail.loadingSession')}</p>
@@ -507,7 +530,7 @@ export default function SessionDetail() {
       <div
         ref={logListRef}
         data-testid="session-log-list"
-        className="flex-1 overflow-y-auto space-y-2 mb-4"
+        className="flex-1 min-h-0 overflow-y-auto space-y-2 mb-4"
         onScroll={onLogScroll}
       >
         {logsKind === 'loading' ? (

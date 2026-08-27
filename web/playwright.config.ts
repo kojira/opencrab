@@ -1,6 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
 
 const origin = process.env.E2E_ORIGIN ?? '';
+const host = process.env.E2E_HOST ?? 'qc-e2e.test';
 
 export default defineConfig({
   testDir: './e2e',
@@ -18,6 +19,9 @@ export default defineConfig({
     headless: true,
     ignoreHTTPSErrors: false,
     trace: 'off',
+    launchOptions: {
+      args: [`--host-resolver-rules=MAP ${host} 127.0.0.1`],
+    },
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
 });

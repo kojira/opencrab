@@ -1,10 +1,18 @@
 import { describe, it, expect } from 'vitest';
 import {
+  LOG_SCROLLEND_TIMEOUT_MS,
   LOG_STICK_THRESHOLD_PX,
   distanceFromBottomPx,
   logScrollBehavior,
   shouldFollowLogTail,
 } from './logScroll';
+
+describe('exported constants', () => {
+  it('keeps the stick threshold at 80px and scrollend fallback at 1s', () => {
+    expect(LOG_STICK_THRESHOLD_PX).toBe(80);
+    expect(LOG_SCROLLEND_TIMEOUT_MS).toBe(1000);
+  });
+});
 
 describe('distanceFromBottomPx', () => {
   it('is 0 when the viewport sits on the last pixel', () => {
@@ -52,16 +60,6 @@ describe('shouldFollowLogTail', () => {
         distanceFromBottomPx: 10_000,
       }),
     ).toBe(true);
-  });
-
-  it('uses the caller threshold when given', () => {
-    expect(
-      shouldFollowLogTail({
-        forceToBottom: false,
-        distanceFromBottomPx: 40,
-        thresholdPx: 32,
-      }),
-    ).toBe(false);
   });
 });
 

@@ -1,5 +1,5 @@
 /** DESIGN-WEBGATE §7.4a: 実 core + 実 UDS + 実 gateway + ビルド済み UI を平文 HTTP で立てる。 */
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   createReadStream,
   createWriteStream,
@@ -24,6 +24,8 @@ export const INSTANCE = '11111111-1111-4111-8111-111111111111';
 export const TOKEN = 'e2e-operator-token';
 export const REPLY = 'e2e-reply-from-mock';
 export const CONFIG_B64 = 'eyJhdXRob3JfaWQiOiJlMmUtb3duZXIifQ==';
+export const E2E_HOST = 'qc-e2e.test';
+export const OVERFLOW_SEED = 40;
 
 function targetDir() {
   return process.env.CARGO_TARGET_DIR || path.join(REPO_ROOT, 'target');
@@ -268,9 +270,60 @@ function proxyTo(req, res, port) {
   req.pipe(up);
 }
 
-function startOrigin({ uiPort, corePort, gwPort, distDir }) {
+function seedOverflowLogs(dbPath, sessionId, count) {
+  const rows = [];
+  for (let i = 0; i < count; i += 1) {
+    const content = `overflow-seed-${String(i).padStart(3, '0')}`;
+    const created = `2026-08-27T00:00:00.${String(i).padStart(3, '0')}Z`;
+    rows.push(
+      `INSERT INTO memory_sessions (agent_id, session_id, log_type, content, speaker_id, turn_number, created_at) VALUES ('${AGENT}', '${sessionId}', 'speech', '${content}', 'seed', ${i}, '${created}');`,
+    );
+  }
+  const sql = `PRAGMA busy_timeout=5000;\nBEGIN;\n${rows.join('\n')}\nCOMMIT;\n`;
+  const r = spawnSync('sqlite3', [dbPath], { input: sql, encoding: 'utf8' });
+  if (r.status !== 0) {
+    throw new Error(`seed logs failed: ${r.stderr || r.stdout}`);
+  }
+}
+
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      try {
+        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'));
+      } catch (err) {
+        reject(err);
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+function startOrigin({ uiPort, corePort, gwPort, distDir, dbPath }) {
   const server = http.createServer((req, res) => {
     const url = req.url ?? '/';
+    if (url === '/__e2e/seed-logs' && req.method === 'POST') {
+      void readJsonBody(req)
+        .then((body) => {
+          const sessionId = typeof body.session_id === 'string' ? body.session_id : '';
+          const count = Number(body.count ?? OVERFLOW_SEED);
+          if (!/^extgate-[0-9a-f-]{36}$/.test(sessionId) || !Number.isInteger(count) || count < 1) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'invalid seed' }));
+            return;
+          }
+          seedOverflowLogs(dbPath, sessionId, count);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ seeded: count, session_id: sessionId }));
+        })
+        .catch((err) => {
+          res.writeHead(500, { 'Content-Type': 'text/plain' });
+          res.end(String(err.message));
+        });
+      return;
+    }
     if (url.startsWith('/api/web-conversations')) {
       proxyTo(req, res, gwPort);
       return;
@@ -436,17 +489,19 @@ export async function startHarness() {
     corePort,
     gwPort,
     distDir: path.join(WEB_ROOT, 'dist'),
+    dbPath: db,
   });
   servers.push(origin);
-  const originUrl = `http://127.0.0.1:${uiPort}`;
-  if (!originUrl.startsWith('http://')) {
-    throw new Error(`origin is not plain HTTP: ${originUrl}`);
+  const originUrl = `http://${E2E_HOST}:${uiPort}`;
+  if (!originUrl.startsWith('http://') || originUrl.includes('127.0.0.1') || originUrl.includes('localhost')) {
+    throw new Error(`origin must be non-loopback plain HTTP: ${originUrl}`);
   }
 
-  console.log(`[e2e harness] origin=${originUrl} core=${corePort} gateway=${gwPort} llm=${llmPort}`);
+  console.log(`[e2e harness] origin=${originUrl} host=${E2E_HOST} core=${corePort} gateway=${gwPort} llm=${llmPort}`);
 
   return {
     origin: originUrl,
+    host: E2E_HOST,
     corePort,
     gwPort,
     root,
