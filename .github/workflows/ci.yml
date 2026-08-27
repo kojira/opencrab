@@ -79,6 +79,38 @@ jobs:
       - name: Dependency boundary checks
         run: bash scripts/check-deps.sh
 
+  # DESIGN-SAMPLES-NODE.md §5: sample は workspace build の必須対象ではないが、
+  # merge CI の共通 conformance 行列には必須。既定 SUT は Rust binary。
+  # Node 列は OPENCRAB_CONFORMANCE_SUT で path だけ差し替える（言語名分岐なし）。
+  # Node の exact version は samples/node/.node-version（22.19.0）。
+  conformance:
+    name: Conformance (Rust / Node / static audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.98.0
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: samples/node/.node-version
+
+      - name: samples/node static audit
+        run: bash scripts/check-samples-node.sh
+
+      - name: Conformance (Rust SUT)
+        run: cargo test -p opencrab-web-gateway --test conformance --all-features
+
+      - name: Conformance (Node SUT)
+        env:
+          OPENCRAB_CONFORMANCE_SUT: ${{ github.workspace }}/samples/node/web-gateway/web-gateway.js
+        run: cargo test -p opencrab-web-gateway --test conformance --all-features
+
   web:
     name: Web (typecheck / build / test)
     runs-on: ubuntu-latest

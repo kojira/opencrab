@@ -6,5 +6,6 @@
 | `verify-v43-transplant-copy.sh` | 載せ替え工程 3。本番 DB を sqlite3 `.backup`（読取）でコピーし、v43 適用前後の既存全表全行 diff ゼロを機械確認する。ソースパスは `OPENCRAB_REHEARSAL_DB`（リポジトリに書かない）。作業コピーは `TMPDIR` 下（7GB 級を 3 本置くので空き容量に注意） |
 | `check-no-private-identifiers.sh` | 公開リポジトリへ実在識別子が混入していないか |
 | `check-deps.sh` | クレート依存境界 |
+| `check-samples-node.sh` | samples/node の runtime dependency 0 / Rust import 0 / Bearer 0 / 旧 route 実装 0（DESIGN-SAMPLES-NODE §5） |
 | `capture-baseline-l1.sh` / `capture-baseline-l2.sh` | baseline 採取 |
 | `webgate-provision` | operator 敷設。Bearer は admin 6 operation だけ。agent GET / sessions GET には付けない。config bytes は byte-exact `{"author_id":<encoded-owner-id>}`。gateway / browser へは渡さない |

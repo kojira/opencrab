@@ -1,6 +1,8 @@
 # process conformance
 
-DESIGN-SAMPLES-NODE.md §1。SUT は `argv[1]=placement.json` の executable。既定は Rust `web-gateway`。差し替えは `OPENCRAB_CONFORMANCE_SUT` だけ。harness は一時 UDS の mock core と実 TCP の HTTP/SSE だけで駆動する。言語名分岐・skip・片側 golden は置かない。
+DESIGN-SAMPLES-NODE.md §1 / §5。SUT は `argv[1]=placement.json` の executable。既定は Rust `web-gateway`。差し替えは `OPENCRAB_CONFORMANCE_SUT` だけ。harness は一時 UDS の mock core と実 TCP の HTTP/SSE だけで駆動する。言語名分岐・skip・片側 golden は置かない。
+
+merge CI（`.github/workflows/ci.yml` の `conformance` job）は Rust SUT 列と Node SUT 列を同じ fixture で走らせ、`scripts/check-samples-node.sh` で runtime dependency 0 / Rust import 0 / Bearer 0 / 旧 route 実装 0 を static audit する。Node の exact version は `samples/node/.node-version`。
 
 ## 起動 ABI
 

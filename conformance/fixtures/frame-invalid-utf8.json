@@ -7,7 +7,7 @@
       "id": "ev",
       "path": "/api/web-conversations/web-agent-conv/events"
     },
-    { "op": "uds_send_hex", "hex": "7b226d223a226f6b227dff0a" },
+    { "op": "uds_send_hex", "hex": "7b226d223a226f6b222c2278223a22ff227d0a" },
     {
       "op": "sse_recv",
       "id": "ev",

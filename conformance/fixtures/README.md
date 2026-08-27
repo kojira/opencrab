@@ -1,6 +1,6 @@
 # fixtures
 
-言語非依存の mock-core 手順と正規化期待値。Rust / 後続 Node が同じファイルを読む。
+言語非依存の mock-core 手順と正規化期待値。Rust / Node が同じファイルを読む。
 
 ## ファイル
 
@@ -13,7 +13,7 @@
 | `frame-too-large.json` | LF 込み 1,048,577 byte で close |
 | `frame-exact-1mib.json` | LF 込み 1,048,576 byte 丁度の成功 |
 | `frame-no-lf-overflow.json` | LF 未着のまま上限超過で close |
-| `frame-invalid-utf8.json` | invalid UTF-8 で close |
+| `frame-invalid-utf8.json` | 妥当な JSON 文字列中の invalid UTF-8 で close |
 | `frame-non-object.json` | 非 object JSON で close |
 | `frame-duplicate.json` | duplicate member で close |
 | `live-queue-overflow.json` | live queue 容量 32 超過で external_rejected |

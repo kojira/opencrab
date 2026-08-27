@@ -506,11 +506,7 @@ async fn rust_unit_disconnect_and_unacked_503() {
         )
         .await
         .unwrap();
-    assert!(
-        res.status() == StatusCode::SERVICE_UNAVAILABLE || res.status() == StatusCode::BAD_GATEWAY,
-        "{}",
-        res.status()
-    );
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test]

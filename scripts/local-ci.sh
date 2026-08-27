@@ -37,6 +37,16 @@ bash scripts/check-no-private-identifiers.sh
 echo "==> scripts/check-deps.sh"
 bash scripts/check-deps.sh
 
+echo "==> scripts/check-samples-node.sh"
+bash scripts/check-samples-node.sh
+
+echo "==> conformance (Rust SUT)"
+cargo test -p opencrab-web-gateway --test conformance --all-features
+
+echo "==> conformance (Node SUT)"
+OPENCRAB_CONFORMANCE_SUT="$root/samples/node/web-gateway/web-gateway.js" \
+  cargo test -p opencrab-web-gateway --test conformance --all-features
+
 echo "==> web: npm ci && npm run build && npm test"
 (
   cd web

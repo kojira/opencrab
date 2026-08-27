@@ -449,12 +449,22 @@ function createWriteQueue(socket) {
   return q;
 }
 
+class ConnectHelloError extends Error {
+  constructor(message, code) {
+    super(message);
+    this.name = "ConnectHelloError";
+    if (code) {
+      this.code = code;
+    }
+  }
+}
+
 function connectUds(path) {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection({ path });
     const onErr = (err) => {
       socket.destroy();
-      reject(err);
+      reject(new ConnectHelloError(err.message, err.code));
     };
     socket.once("error", onErr);
     socket.once("connect", () => {
@@ -483,7 +493,7 @@ function attach(client, socketPath, revision, digest) {
     if (!sendFrame(client, helloFrame(helloId, client.instanceId, revision, digest))) {
       inner.closed = true;
       socket.destroy();
-      return Promise.reject(new Error("hello write"));
+      return Promise.reject(new ConnectHelloError("hello write"));
     }
     attachReader(socket, client, generation);
     return helloOutcome.then((outcome) => {
@@ -493,7 +503,7 @@ function attach(client, socketPath, revision, digest) {
       }
       console.error(`hello failed instance=${client.instanceId}`);
       socket.destroy();
-      throw new Error("hello failed");
+      throw new ConnectHelloError("hello failed");
     });
   });
 }
@@ -513,7 +523,10 @@ function spawn(socketPath, instanceId, revision, authorId, digest) {
           await waitClosed(client);
           console.error(`uds closed; reconnecting instance=${client.instanceId}`);
         }
-      } catch {
+      } catch (err) {
+        if (!(err instanceof ConnectHelloError)) {
+          throw err;
+        }
         console.error(`uds connect/hello failed instance=${client.instanceId}`);
       }
       await new Promise((r) => setTimeout(r, backoff));
