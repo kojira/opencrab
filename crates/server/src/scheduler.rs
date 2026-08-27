@@ -311,10 +311,28 @@ fn build_scheduled_context(
         opencrab_db::queries::effective_model_for_agent(&conn, agent_id, &state.default_model)
             .unwrap_or_else(|_| state.default_model.clone());
     let (prov, mdl) = opencrab_server::process::split_llm_model_spec(&eff);
-    let budget =
-        opencrab_server::process::compute_context_budget(&conn, prov, mdl, state.compaction_ratio);
-    let raw = match opencrab_server::process::build_conversation_string(
-        &conn, session_id, agent_id, budget,
+    let budget = match opencrab_server::process::resolve_water_levels(
+        &conn,
+        prov,
+        mdl,
+        &state.context_budget_policy(),
+    ) {
+        Ok(w) => w.input_high,
+        Err(e) => {
+            tracing::error!(
+                agent_id,
+                session_id,
+                "scheduler: context budget fail-loud: {e}"
+            );
+            return None;
+        }
+    };
+    let raw = match opencrab_server::process::build_conversation_string_with_memory_index_cap(
+        &conn,
+        session_id,
+        agent_id,
+        budget,
+        state.llm_config.memory_index_token_cap,
     ) {
         Ok(s) => s,
         Err(e) => {

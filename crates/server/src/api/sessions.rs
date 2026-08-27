@@ -210,8 +210,25 @@ pub async fn send_message(
             )
             .unwrap_or_else(|_| state.default_model.clone());
             let (prov, mdl) = process::split_llm_model_spec(&eff);
-            let budget = process::compute_context_budget(&conn, prov, mdl, state.compaction_ratio);
-            let raw = match process::build_conversation_string(&conn, &id, agent_id, budget) {
+            let budget = match process::resolve_water_levels(
+                &conn,
+                prov,
+                mdl,
+                &state.context_budget_policy(),
+            ) {
+                Ok(w) => w.input_high,
+                Err(e) => {
+                    tracing::error!(agent_id = %agent_id, session_id = %id, "context budget fail-loud: {e}");
+                    continue;
+                }
+            };
+            let raw = match process::build_conversation_string_with_memory_index_cap(
+                &conn,
+                &id,
+                agent_id,
+                budget,
+                state.llm_config.memory_index_token_cap,
+            ) {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::error!(agent_id = %agent_id, session_id = %id, "build_conversation_string failed: {e}");

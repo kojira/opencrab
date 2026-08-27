@@ -68,12 +68,13 @@ async fn run_rest_continuation(
     let agent_id = ev.agent_id.clone();
 
     // 文脈は DB から組み直す（完了本文は `settle_completed` が永続化済み・RFC §1.3）。
-    let (system_prompt, conversation) = {
+    // 予算や会話組立に失敗しても既定予算へは落とさず、セッション整合だけは行う。
+    let built = (|| {
         let conn = match state.db.lock() {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(session_id = %session_id, error = %e, "rest continuation: db lock poisoned");
-                return;
+                return None;
             }
         };
         let (sp, _name) = process::build_agent_context(&conn, &agent_id, &ev.caller);
@@ -81,15 +82,36 @@ async fn run_rest_continuation(
             opencrab_db::queries::effective_model_for_agent(&conn, &agent_id, &state.default_model)
                 .unwrap_or_else(|_| state.default_model.clone());
         let (prov, mdl) = process::split_llm_model_spec(&eff);
-        let budget = process::compute_context_budget(&conn, prov, mdl, state.compaction_ratio);
-        let raw = match process::build_conversation_string(&conn, &session_id, &agent_id, budget) {
+        let budget = match process::resolve_water_levels(
+            &conn,
+            prov,
+            mdl,
+            &state.context_budget_policy(),
+        ) {
+            Ok(w) => w.input_high,
+            Err(e) => {
+                tracing::warn!(session_id = %session_id, error = %e, "rest continuation: context budget fail-loud");
+                return None;
+            }
+        };
+        let raw = match process::build_conversation_string_with_memory_index_cap(
+            &conn,
+            &session_id,
+            &agent_id,
+            budget,
+            state.llm_config.memory_index_token_cap,
+        ) {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(session_id = %session_id, error = %e, "rest continuation: failed to build conversation");
-                return;
+                return None;
             }
         };
-        (sp, process::prepend_runtime_context(&raw, "direct_message"))
+        Some((sp, process::prepend_runtime_context(&raw, "direct_message")))
+    })();
+    let Some((system_prompt, conversation)) = built else {
+        complete_session_if_idle(&state.db, &session_id, &registry);
+        return;
     };
 
     // 継続であることを生成点で伝える（web / Nostr の `resume_prompt_suffix` と同じ型）。
@@ -366,8 +388,23 @@ pub async fn send_agent_message(
         let eff = opencrab_db::queries::effective_model_for_agent(&conn, &id, &state.default_model)
             .unwrap_or_else(|_| state.default_model.clone());
         let (prov, mdl) = process::split_llm_model_spec(&eff);
-        let budget = process::compute_context_budget(&conn, prov, mdl, state.compaction_ratio);
-        let raw = match process::build_conversation_string(&conn, &session_id, &id, budget) {
+        let budget =
+            match process::resolve_water_levels(&conn, prov, mdl, &state.context_budget_policy()) {
+                Ok(w) => w.input_high,
+                Err(e) => {
+                    return Json(
+                        serde_json::json!({"error": format!("context budget fail-loud: {e}")}),
+                    )
+                    .into_response();
+                }
+            };
+        let raw = match process::build_conversation_string_with_memory_index_cap(
+            &conn,
+            &session_id,
+            &id,
+            budget,
+            state.llm_config.memory_index_token_cap,
+        ) {
             Ok(s) => s,
             Err(e) => {
                 return Json(

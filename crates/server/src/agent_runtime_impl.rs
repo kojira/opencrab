@@ -39,7 +39,13 @@ impl AgentRuntime for AppState {
         context_budget_tokens: usize,
     ) -> anyhow::Result<String> {
         let conn = self.db.lock().unwrap();
-        process::build_conversation_string(&conn, session_id, agent_id, context_budget_tokens)
+        process::build_conversation_string_with_memory_index_cap(
+            &conn,
+            session_id,
+            agent_id,
+            context_budget_tokens,
+            self.llm_config.memory_index_token_cap,
+        )
     }
 
     fn context_budget_tokens(&self, agent_id: &str) -> usize {
@@ -48,7 +54,9 @@ impl AgentRuntime for AppState {
             opencrab_db::queries::effective_model_for_agent(&conn, agent_id, &self.default_model)
                 .unwrap_or_else(|_| self.default_model.clone());
         let (prov, mdl) = process::split_llm_model_spec(&eff);
-        process::compute_context_budget(&conn, prov, mdl, self.compaction_ratio)
+        process::resolve_water_levels(&conn, prov, mdl, &self.context_budget_policy())
+            .map(|w| w.input_high)
+            .unwrap_or_else(|e| panic!("context budget fail-loud: {e}"))
     }
 
     fn has_llm_providers(&self) -> bool {

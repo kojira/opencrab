@@ -282,6 +282,15 @@ async fn main() -> anyhow::Result<()> {
     // `register_production_descriptors` だけ（main.rs / test_app_state / scheduler の test_router /
     // 登録簿を反復する generic テストがすべてこれを呼ぶ）。散らすと本番へ足してテスト側への追記を
     // 忘れる隙ができ、prefix 衝突が本番でだけ顕在化しうる（#628 のブロッカー対応）。
+    {
+        let conn = state
+            .db
+            .lock()
+            .map_err(|e| anyhow::anyhow!("db lock failed at startup budget check: {e}"))?;
+        opencrab_server::process::ensure_startup_budget_inputs(&conn, &state.default_model)
+            .map_err(|e| anyhow::anyhow!("context budget fail-loud at startup: {e}"))?;
+    }
+
     opencrab_server::register_production_descriptors(&state.timed_fire_router);
 
     // #627 / #628 段階7: web の受け口（sink）も生存非依存で登録する。web には常駐ループが無く、

@@ -491,10 +491,14 @@ fn peer_reviewers_section(conn: &rusqlite::Connection, agent_id: &str) -> String
 // する（doc に理由を明記した `subtask_registries` と同じ手）。
 pub use opencrab_core::context_budget::{
     check_agent_model_change, compute_context_budget, ensure_model_context_window_registered,
+    ensure_model_max_output_tokens_registered, ensure_startup_budget_inputs,
     model_context_window_missing_message, normalize_model_spec, resolve_model_max_output_tokens,
-    split_llm_model_spec,
+    resolve_water_levels, split_llm_model_spec, ContextBudgetError, ContextBudgetPolicy,
+    DEFAULT_MEMORY_INDEX_TOKEN_CAP,
 };
-pub use opencrab_core::conversation::build_conversation_string;
+pub use opencrab_core::conversation::{
+    build_conversation_string, build_conversation_string_with_memory_index_cap,
+};
 // `format_single_log` は `format_live_inbound`（本番経路）が使うので常時取り込む。
 pub(crate) use opencrab_core::conversation::format_single_log;
 // 以下はテストだけが参照する（本番コードは使わない）。cfg(test) で本番ビルドの
@@ -1846,8 +1850,29 @@ fn prepare_loop_restart(
         let (p, m) = split_llm_model_spec(&eff);
         (p.to_string(), m.to_string())
     };
-    let budget = compute_context_budget(&conn, &prov, &mdl, state.compaction_ratio);
-    let rebuilt = match build_conversation_string(&conn, session_id, agent_id, budget) {
+    let budget = match resolve_water_levels(&conn, &prov, &mdl, &state.context_budget_policy()) {
+        Ok(w) => w.input_high,
+        Err(e) => {
+            tracing::warn!(
+                session_id = %session_id,
+                "loop restart aborted (context budget fail-loud): {e}"
+            );
+            let _ = opencrab_db::queries::insert_task_progress(
+                &conn,
+                task.id,
+                "progress",
+                "[restart] 文脈予算を解決できないため自動再実行を中止した（予算は未消費）。",
+            );
+            return None;
+        }
+    };
+    let rebuilt = match build_conversation_string_with_memory_index_cap(
+        &conn,
+        session_id,
+        agent_id,
+        budget,
+        state.llm_config.memory_index_token_cap,
+    ) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(

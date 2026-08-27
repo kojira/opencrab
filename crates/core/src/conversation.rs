@@ -6,6 +6,10 @@
 //! 依存しないため core に置く（#518 手順 3〜4）。呼び出し元は `server::process`
 //! （既存パスを保つ再エクスポート）。
 
+use crate::context_budget::{
+    decide_memory_index, emit_context_budget_check, BudgetCheckAction, ContextBudgetCheck,
+    LineItems, MemoryIndexDecision, DEFAULT_MEMORY_INDEX_TOKEN_CAP,
+};
 use crate::tokens::estimate_tokens;
 
 /// コンパクション時に最低限保持する最近のログ件数。
@@ -48,8 +52,30 @@ pub fn build_conversation_string(
     agent_id: &str,
     context_budget_tokens: usize,
 ) -> Result<String, anyhow::Error> {
-    let prefix_sections =
-        build_context_prefix_sections(conn, session_id, agent_id, context_budget_tokens);
+    build_conversation_string_with_memory_index_cap(
+        conn,
+        session_id,
+        agent_id,
+        context_budget_tokens,
+        DEFAULT_MEMORY_INDEX_TOKEN_CAP,
+    )
+}
+
+/// [`build_conversation_string`] と同じだが、Memory Index の専用 cap を明示する（#826-A）。
+pub fn build_conversation_string_with_memory_index_cap(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    agent_id: &str,
+    context_budget_tokens: usize,
+    memory_index_cap: usize,
+) -> Result<String, anyhow::Error> {
+    let prefix_sections = build_context_prefix_sections(
+        conn,
+        session_id,
+        agent_id,
+        context_budget_tokens,
+        memory_index_cap,
+    );
 
     let mut inner_budget = context_budget_tokens;
     for section in &prefix_sections {
@@ -89,6 +115,7 @@ fn build_context_prefix_sections(
     session_id: &str,
     agent_id: &str,
     context_budget_tokens: usize,
+    memory_index_cap: usize,
 ) -> Vec<String> {
     // タスク台帳（前向きワーキング状態）を会話の先頭に前置する。
     // system prompt 側は 1h キャッシュされるため、毎ターン変わる台帳状態はここに置く。
@@ -121,21 +148,38 @@ fn build_context_prefix_sections(
                 None
             }
         };
-    // 予算比ガード: セクションはフルサイズで ~2.5k tokens（日本語 ≈0.7 tok/char）に
-    // なりうる。小さいコンテキスト予算（小型モデル）では会話本文を圧迫するため、
-    // 予算の 1/4 を超えるなら注入しない（100k 級の既定予算では常に通る）。
+    // 専用 cap と残予算の双方に収まるときだけ全量注入する。部分切り詰めはしない（#826-A）。
     let memory_index_section = memory_index_section.filter(|s| {
         let cost = estimate_tokens(s);
-        if cost * 4 > context_budget_tokens {
-            tracing::debug!(
-                session_id = %session_id,
-                section_tokens = cost,
-                budget = context_budget_tokens,
-                "skipping [Memory Index] section: exceeds 1/4 of context budget"
-            );
-            false
-        } else {
-            true
+        let entry_count = s
+            .lines()
+            .skip(1)
+            .filter(|line| !line.trim().is_empty())
+            .count();
+        match decide_memory_index(cost, memory_index_cap, context_budget_tokens) {
+            MemoryIndexDecision::Inject => true,
+            MemoryIndexDecision::Omit { reason } => {
+                let check = ContextBudgetCheck {
+                    entrypoint: "build_conversation_string".to_string(),
+                    items: LineItems {
+                        memory_index: 0,
+                        conversation: context_budget_tokens,
+                        ..LineItems::default()
+                    },
+                    input_high: context_budget_tokens,
+                    input_low: 0,
+                    conversation_high: context_budget_tokens,
+                    conversation_low: 0,
+                    before_tokens: cost,
+                    after_tokens: 0,
+                    action: BudgetCheckAction::OmitMemoryIndex,
+                    reason: format!(
+                        "memory_index_omitted reason={reason:?} entries={entry_count} tokens={cost}"
+                    ),
+                };
+                emit_context_budget_check(&check);
+                false
+            }
         }
     });
 
@@ -1225,7 +1269,7 @@ mod format_log_tests {
 
 #[cfg(test)]
 mod memory_index_section_injection_tests {
-    use super::build_conversation_string;
+    use super::{build_conversation_string, build_conversation_string_with_memory_index_cap};
 
     fn mk_node(
         id: &str,
@@ -1350,12 +1394,27 @@ mod memory_index_section_injection_tests {
 
     #[test]
     fn tiny_budget_skips_section() {
-        // 予算比ガード: セクションが予算の 1/4 を超えるなら注入しない（小型モデル保護）
+        // 残予算に収まらなければ丸ごと省略（部分切り詰めなし）。
         let conn = opencrab_db::init_memory().unwrap();
         seed_index(&conn);
         seed_logs(&conn, 3);
-        let out = build_conversation_string(&conn, "cur-sess", "a1", 100).unwrap();
+        let out = build_conversation_string(&conn, "cur-sess", "a1", 1).unwrap();
         assert!(!out.contains("[Memory Index]"));
+        assert!(!out.contains("5月は逆引き辞書を設計した。"));
+    }
+
+    #[test]
+    fn dedicated_cap_omits_memory_index_entirely() {
+        let conn = opencrab_db::init_memory().unwrap();
+        seed_index(&conn);
+        seed_logs(&conn, 3);
+        // 会話予算は十分だが専用 cap が 1 token。余りを流用せず丸ごと省略する。
+        let out =
+            build_conversation_string_with_memory_index_cap(&conn, "cur-sess", "a1", 100_000, 1)
+                .unwrap();
+        assert!(!out.contains("[Memory Index]"));
+        assert!(!out.contains("5月は逆引き辞書を設計した。"));
+        assert!(out.contains("メッセージ 2 の内容"));
     }
 
     #[test]
