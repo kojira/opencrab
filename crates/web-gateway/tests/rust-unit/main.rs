@@ -346,18 +346,18 @@ async fn rust_unit_frame_too_large_and_duplicate_close() {
     .await
     .unwrap();
     let _ = read_frame(&mut reader).await;
+    let client = connect.await.unwrap();
+    wait_bound(&client).await;
 
     let mut huge = vec![b'x'; MAX_FRAME];
     huge.push(b'\n');
     writer.write_all(&huge).await.unwrap();
-    let client = connect.await.unwrap();
-    wait_bound(&client).await;
     let ev = tokio::time::timeout(Duration::from_secs(2), client.next_live(ADDRESS))
         .await
         .unwrap();
     match ev {
         Some(opencrab_web_gateway::v3::client::LiveEvent::Error { code, .. }) => {
-            assert!(code == "too_large" || code == "bad_request" || code == "disconnect");
+            assert_eq!(code, "too_large");
         }
         other => panic!("{other:?}"),
     }

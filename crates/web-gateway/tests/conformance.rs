@@ -148,11 +148,54 @@ fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/fixtures")
 }
 
+fn fixture_names() -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(fixtures_dir())
+        .expect("fixtures dir")
+        .filter_map(|e| {
+            let name = e.ok()?.file_name().into_string().ok()?;
+            name.strip_suffix(".json")
+                .filter(|n| *n != "ids")
+                .map(str::to_string)
+        })
+        .collect();
+    names.sort();
+    names
+}
+
 fn load_json(path: &Path) -> Value {
     serde_json::from_str(&std::fs::read_to_string(path).expect("read fixture")).expect("json")
 }
 
+fn decode_hex(s: &str) -> Vec<u8> {
+    let compact: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(compact.len().is_multiple_of(2), "hex length");
+    (0..compact.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&compact[i..i + 2], 16).expect("hex"))
+        .collect()
+}
+
+fn padded_say_frame(id: &str, binding_id: &str, frame_size: usize) -> Vec<u8> {
+    let prefix = format!(
+        "{{\"id\":\"{id}\",\"m\":\"say\",\"binding_id\":\"{binding_id}\",\"payload\":{{\"text\":\""
+    );
+    let suffix = "\"}}\n";
+    let overhead = prefix.len() + suffix.len();
+    assert!(
+        frame_size >= overhead,
+        "frame_size {frame_size} < overhead {overhead}"
+    );
+    let pad = frame_size - overhead;
+    let mut raw = Vec::with_capacity(frame_size);
+    raw.extend_from_slice(prefix.as_bytes());
+    raw.resize(prefix.len() + pad, b'a');
+    raw.extend_from_slice(suffix.as_bytes());
+    assert_eq!(raw.len(), frame_size);
+    raw
+}
+
 fn free_port() -> u16 {
+    // 既知 TOCTOU: :0 採番のあと drop して同じ port を SUT に渡す。対策しない。flaky になったら対処する。
     StdTcp::bind("127.0.0.1:0")
         .expect("port")
         .local_addr()
@@ -463,6 +506,41 @@ impl Session {
                 let utf8 = step["utf8"].as_str().unwrap();
                 self.mock.send_raw(utf8.as_bytes()).await;
             }
+            "uds_send_hex" => {
+                let hex = step["hex"].as_str().unwrap();
+                self.mock.send_raw(&decode_hex(hex)).await;
+            }
+            "uds_send_padded_say" => {
+                let id = step["id"].as_str().unwrap();
+                let binding_id = step["binding_id"].as_str().unwrap();
+                let frame_size = usize::try_from(step["frame_size"].as_u64().unwrap()).unwrap();
+                self.mock
+                    .send_raw(&padded_say_frame(id, binding_id, frame_size))
+                    .await;
+            }
+            "uds_send_says" => {
+                let count = usize::try_from(step["count"].as_u64().unwrap()).unwrap();
+                let binding_id = step["binding_id"].as_str().unwrap();
+                let prefix = step["id_prefix"].as_str().unwrap();
+                let expect_ok = step["expect_ok"].as_bool().unwrap_or(true);
+                for i in 0..count {
+                    let id = format!("{prefix}{i}");
+                    let frame = json!({
+                        "id": id,
+                        "m": "say",
+                        "binding_id": binding_id,
+                        "payload": {"text": format!("m{i}")},
+                    });
+                    self.mock.send(&frame).await;
+                    if expect_ok {
+                        let got = self.mock.recv().await;
+                        assert!(
+                            subset(&json!({"m": "ok", "id": id}), &got),
+                            "say ok {id} {got}"
+                        );
+                    }
+                }
+            }
             "uds_send_oversized" => {
                 let byte = u8::try_from(step["byte"].as_u64().unwrap()).unwrap();
                 let count = usize::try_from(step["count"].as_u64().unwrap()).unwrap();
@@ -471,6 +549,14 @@ impl Session {
                     raw.push(b'\n');
                 }
                 self.mock.send_raw(&raw).await;
+            }
+            "uds_idle" => {
+                let wait = Duration::from_millis(step["ms"].as_u64().unwrap_or(100));
+                tokio::time::sleep(wait).await;
+                assert!(
+                    self.mock.incoming.try_recv().is_err(),
+                    "unexpected uds frame while idle"
+                );
             }
             "uds_close" => self.mock.close_current().await,
             "uds_unlisten" => self.mock.unlisten(),
@@ -499,7 +585,11 @@ async fn run_named(name: &str) {
     let dir = fixtures_dir();
     let ids = load_json(&dir.join("ids.json"));
     let fixture = load_json(&dir.join(format!("{name}.json")));
-    assert_eq!(fixture["name"].as_str().unwrap(), name);
+    assert_eq!(
+        fixture["name"].as_str().unwrap(),
+        name,
+        "fixture name field"
+    );
     let mut session = Session::start(&ids).await;
     session
         .prelude(fixture["prelude"].as_str().unwrap(), &ids)
@@ -510,46 +600,8 @@ async fn run_named(name: &str) {
 }
 
 #[tokio::test]
-async fn hello_bind_said_dedup() {
-    run_named("hello-bind-said-dedup").await;
-}
-
-#[tokio::test]
-async fn say_three_results() {
-    run_named("say-three-results").await;
-}
-
-#[tokio::test]
-async fn activity() {
-    run_named("activity").await;
-}
-
-#[tokio::test]
-async fn frame_too_large() {
-    run_named("frame-too-large").await;
-}
-
-#[tokio::test]
-async fn frame_duplicate() {
-    run_named("frame-duplicate").await;
-}
-
-#[tokio::test]
-async fn http_post_and_routes() {
-    run_named("http-post-and-routes").await;
-}
-
-#[tokio::test]
-async fn disconnect_unacked() {
-    run_named("disconnect-unacked").await;
-}
-
-#[tokio::test]
-async fn bind_conflict() {
-    run_named("bind-conflict").await;
-}
-
-#[tokio::test]
-async fn reconnect() {
-    run_named("reconnect").await;
+async fn fixtures() {
+    for name in fixture_names() {
+        run_named(&name).await;
+    }
 }

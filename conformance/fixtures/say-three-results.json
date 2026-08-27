@@ -43,12 +43,16 @@
         "code": "external_rejected"
       }
     },
-    { "op": "uds_close" },
+    {
+      "op": "uds_send_raw",
+      "utf8": "{\"id\":\"unknown-response-id\",\"m\":\"ok\"}\n{\"id\":\"11111111-1111-4111-8111-111111111111\",\"m\":\"say\",\"binding_id\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"payload\":{\"text\":\"maybe\"}}\n"
+    },
     {
       "op": "sse_recv",
       "id": "ev",
       "event": "gate_error",
-      "data": { "code": "disconnect" }
-    }
+      "data": { "code": "response_invalid" }
+    },
+    { "op": "uds_idle", "ms": 100 }
   ]
 }

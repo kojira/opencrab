@@ -1,7 +1,5 @@
-//! DESIGN-SAMPLES-NODE §1.3: 正典未定値を source から機械採取する。
-//! 採取値は golden にしない。出力は追記要求であり、期待値の凍結ではない。
-
-use std::path::PathBuf;
+//! WEBGATE §8 固定値を source から機械確認する。
+//! 採取は完了済み。テストは外部ファイルを書かない。採取値は golden にしない。
 
 const CLIENT_SRC: &str = include_str!("../../src/v3/client.rs");
 const HTTP_SRC: &str = include_str!("../../src/v3/http.rs");
@@ -96,8 +94,8 @@ pub fn render_report() -> String {
     let rev = source_revision();
     let rows = harvest();
     let mut out = String::new();
-    out.push_str("# 正典未定値（機械採取・追記要求）\n\n");
-    out.push_str("DESIGN-SAMPLES-NODE.md §1.3。承認前の Rust 値を正典または golden にしない。\n\n");
+    out.push_str("# WEBGATE §8 固定値（機械確認）\n\n");
+    out.push_str("採取は完了済み。値は WEBGATE §8 が正典。golden にしない。\n\n");
     out.push_str(&format!("- source revision: `{rev}`\n"));
     out.push_str("- 採取対象 crate: `opencrab-web-gateway`\n\n");
     out.push_str("| 項目 | symbol | 採取値 | source |\n");
@@ -116,11 +114,6 @@ pub fn render_report() -> String {
             row.symbol, row.value, row.source_path
         ));
     }
-    out.push_str("\n## 正典追記要求\n\n");
-    out.push_str("- WEBGATE: live queue の容量と overflow 境界\n");
-    out.push_str("- WEBGATE: SSE error event 名と data shape\n");
-    out.push_str("- WEBGATE: said 待ち timeout と HTTP/UDS 終端\n");
-    out.push_str("- WEBGATE: reconnect 初期値、増加則、上限、reset 条件\n");
     out
 }
 
@@ -132,8 +125,4 @@ fn harvest_canon_pending_values_prints() {
     assert!(report.contains("SAID_TIMEOUT"), "{report}");
     assert!(report.contains("RECONNECT_MIN"), "{report}");
     assert!(report.contains("RECONNECT_MAX"), "{report}");
-    let dest = PathBuf::from("/Volumes/2TB/openclaw/.claude-scratch/oc2-design/canon-pending-values.md");
-    std::fs::write(&dest, &report).unwrap_or_else(|e| {
-        panic!("write {}: {e}", dest.display());
-    });
 }

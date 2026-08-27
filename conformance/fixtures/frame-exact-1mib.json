@@ -1,0 +1,26 @@
+{
+  "name": "frame-exact-1mib",
+  "prelude": "hello_bind",
+  "steps": [
+    {
+      "op": "sse_open",
+      "id": "ev",
+      "path": "/api/web-conversations/web-agent-conv/events"
+    },
+    {
+      "op": "uds_send_padded_say",
+      "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "binding_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "frame_size": 1048576
+    },
+    {
+      "op": "uds_recv",
+      "expect": { "m": "ok", "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }
+    },
+    {
+      "op": "sse_recv",
+      "id": "ev",
+      "event": "message"
+    }
+  ]
+}
