@@ -43,6 +43,11 @@ pub fn decode_config_b64(config_b64: &str) -> Result<Vec<u8>, GateError> {
         .map_err(|_| GateError::new(ErrorCode::BadRequest))
 }
 
+pub fn encode_config_b64(bytes: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
 pub fn config_digest(config_bytes: &[u8]) -> String {
     let hash = Sha256::digest(config_bytes);
     hex_lower(&hash)

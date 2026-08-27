@@ -64,6 +64,9 @@ pub struct AppConfig {
 pub struct GateConfig {
     #[serde(default)]
     pub listen_socket: String,
+    /// DESIGN-NOSTRGATE §6: `legacy` | `v3_shadow` | `v3`。欠落・空は `legacy`。
+    #[serde(default)]
+    pub nostr_ingress: String,
 }
 
 /// 古い `llm_logs` を zip へ書き出して DB から外す設定（#337）。

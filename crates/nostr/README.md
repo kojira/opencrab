@@ -3,9 +3,26 @@
 Nostr ゲート。配送（購読・送信・passthrough）はここ。誰か・即応は core
 （`opencrab-actions` の `session_inbound` / `session_watch_policy`）。
 
+## core adapter（`adapter.rs`）
+
+元栓（allow-set・DM・自己投稿）を `accept_inbound` の記録 callback 前に評価する。
+default / watch Immediate とも同一口で `accept_inbound` exact 1 回。`route` は輸送の正
+（再分類しない）。V3 said は `admit_nostr_said`（不正アンカーは拒否・記録 0）。
+
+## 段階移行（`ingress.rs`）
+
+`gate.nostr_ingress` = `legacy`（既定）| `v3_shadow` | `v3`。未知値は起動失敗。
+旧 in-process ループは削除しない。`v3` のときだけ instance/binding を敷設し、旧ループは止めて
+TimedFire と allow-set 300 秒更新だけ残す。
+
+## binding（`binding.rs`）
+
+address = 既存 session_id。`nostr-{agent}` に watch があれば default lane なし。
+1 session N watch は 1 binding + N lane（id ASC）。
+
 ## 現行 `nostr-{agent}`
 
-`session_watches` が 0 行なら従来どおり。`handle_event` は即時。ラベルは
+`session_watches` が 0 行なら従来どおり。`handle_event` は adapter 経由の即時。ラベルは
 `inbound_kind_label`（リポスト種別は足さない）。
 
 ## 新機構（`session_watches`）

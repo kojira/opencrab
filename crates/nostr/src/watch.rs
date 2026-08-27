@@ -211,15 +211,26 @@ pub fn accept_watch_events<R: NostrAgentRunner, T: Send + 'static>(
         .collect();
     let resolve =
         |sender: &str, _: &[String], _: &str| runner.resolve_nostr_caller(agent_id, sender);
+    let sid = session_id.to_string();
+    let dm_any = |sender: &str, _: &[String], owner: &str| sender == owner;
+    let dm_one = |sender: &str, _: &str, owner: &str| sender == owner;
+    let wl = move |channel: &str, aid: &str| {
+        channel == sid || channel == crate::session::nostr_session_id(aid)
+    };
+    let owner_owned = watch
+        .as_ref()
+        .and_then(|w| w.owner.iter().next())
+        .cloned()
+        .unwrap_or_default();
     let lookups = InboundLookups {
         resolve_caller: &resolve,
-        dm_allowed_any: &|_, _, _| true,
-        dm_allowed: &|_, _, _| true,
-        channel_whitelisted: &|_, _| true,
+        dm_allowed_any: &dm_any,
+        dm_allowed: &dm_one,
+        channel_whitelisted: &wl,
     };
     accept_inbound(
         &works,
-        "",
+        &owner_owned,
         &[agent_id.to_string()],
         &lookups,
         watch,

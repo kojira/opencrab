@@ -122,6 +122,20 @@ pub struct GateProbe {
     pub whitelist_override: Mutex<Option<bool>>,
 }
 
+/// kind_id=nostr の said を record 前に判定する。不正アンカーは `Err(bad_request)`。
+pub type NostrSaidAdmit =
+    Arc<dyn Fn(&str, &str, &str) -> Result<NostrSaidDecision, GateError> + Send + Sync>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NostrSaidDecision {
+    Drop,
+    Accept {
+        watch_id: Option<i64>,
+        immediate: bool,
+        bundle: bool,
+    },
+}
+
 pub struct ExtgateState {
     pub db: Db,
     pub registry: Mutex<Registry>,
@@ -129,6 +143,7 @@ pub struct ExtgateState {
     pub halt: AtomicBool,
     halt_notify: tokio::sync::Notify,
     next_identity: AtomicU64,
+    nostr_said_admit: Mutex<Option<NostrSaidAdmit>>,
     #[cfg(any(test, feature = "extgate-probe"))]
     pub probe: GateProbe,
 }
@@ -142,9 +157,31 @@ impl ExtgateState {
             halt: AtomicBool::new(false),
             halt_notify: tokio::sync::Notify::new(),
             next_identity: AtomicU64::new(1),
+            nostr_said_admit: Mutex::new(None),
             #[cfg(any(test, feature = "extgate-probe"))]
             probe: GateProbe::default(),
         }
+    }
+
+    pub fn set_nostr_said_admit(&self, admit: NostrSaidAdmit) {
+        *self.nostr_said_admit.lock().expect("nostr admit") = Some(admit);
+    }
+
+    pub fn admit_nostr_said(
+        &self,
+        agent_id: &str,
+        author_id: &str,
+        text: &str,
+    ) -> Result<NostrSaidDecision, GateError> {
+        let hook = self
+            .nostr_said_admit
+            .lock()
+            .map_err(|_| GateError::store())?
+            .clone();
+        let Some(hook) = hook else {
+            return Err(GateError::new(ErrorCode::BadRequest));
+        };
+        hook(agent_id, author_id, text)
     }
 
     pub fn lock_registry(&self) -> Result<MutexGuard<'_, Registry>, GateError> {

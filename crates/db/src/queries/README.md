@@ -2,6 +2,12 @@
 
 ドメイン別の行型と SQL。`mod.rs` から再輸出する。
 
+## nostr instance 敷設
+
+Nostr の instance/binding 書き込みは `crates/server/src/nostr_provision.rs`。
+`create_gate_binding_in_tx` を使い、address=既存 session_id で V3.5 reuse する。
+session 不在・membership 不一致は fail-loud。
+
 ## gate_binding
 
 | 関数 | 契約 |

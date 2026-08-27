@@ -40,6 +40,11 @@ use tracing::{debug, error, info, warn};
 
 use anyhow::Context;
 
+use crate::adapter::{
+    accept_nostr_inbound, pre_record_drop, AllowSetStore, AllowSources, DropReason,
+};
+use crate::binding::skip_default_loop;
+use crate::ingress::NostrIngress;
 use crate::cli::NostaroCli;
 use crate::config::NostrConfig;
 use crate::event::{parse_watch_line, NostrEvent};
@@ -56,48 +61,9 @@ use crate::watch::{
 /// watch ループが握る self_pubkey の共有セル（identity 切替で更新可能）。
 type SelfPubkey = Arc<RwLock<String>>;
 
-/// 元栓（#698）の**許可源をまとめたメモリ集合**。名前付きの源から許可集合を合成する。
+/// 元栓の許可集合の共有セル。判定本体は [`crate::adapter::AllowSources`]。
 ///
-/// ゲート（[`handle_event`]）は [`Self::is_allowed`] を呼ぶだけで、**DB も relay も触らない**
-/// （ホットパスはパース＋メモリ照合のみ）。各集合は [`crate::pubkey::follow_key`] で 64 桁小文字
-/// hex へ寄せた照合キー。中身の更新（DB / relay 読み）は**更新経路だけ**が行う
-/// （[`build_allow_sources`] → [`AllowGate`] の差し替え）。
-///
-/// **源を増やしてもここへ 1 つ足すだけ**（2 つ目以降の源が来ても耐える形）。判定の権威は
-/// この core 側にあり、購読フィルタ等の線より前の絞り込みは多層防御に過ぎない。
-#[derive(Debug, Default, Clone)]
-struct AllowSources {
-    /// フォロイー（自分の kind:3 フォローリスト / relay 由来）。
-    followees: HashSet<String>,
-    /// owner（`agent_nostr_config.owner_pubkey` / DB 由来）。
-    owner: HashSet<String>,
-    /// owner 等価の co_agent（self_pubkey / DB 由来 / #485 #489）。
-    co_agents: HashSet<String>,
-    /// `platform='nostr'` の trusted_users（owner が明示登録した信頼 / DB 由来）。
-    trusted_users: HashSet<String>,
-}
-
-impl AllowSources {
-    /// `author_key`（follow_key 済み）が**いずれかの許可源**に属せば通す。源を足すときは
-    /// ここへ 1 行 OR を追加するだけ（ハードコードの boolean を散らさない・単一の判定点）。
-    fn is_allowed(&self, author_key: &str) -> bool {
-        self.followees.contains(author_key)
-            || self.owner.contains(author_key)
-            || self.co_agents.contains(author_key)
-            || self.trusted_users.contains(author_key)
-    }
-
-    fn as_watch_allow(&self) -> opencrab_actions::WatchAllowSets<'_> {
-        opencrab_actions::WatchAllowSets {
-            followees: &self.followees,
-            owner: &self.owner,
-            co_agents: &self.co_agents,
-            trusted_users: &self.trusted_users,
-        }
-    }
-}
-
-/// 元栓の許可集合の共有セル。`self_pubkey` と同じく watch ループが握り、kind:3 差し替えや
+/// `self_pubkey` と同じく watch ループが握り、kind:3 差し替えや
 /// trusted_users / owner / co_agent の更新へ追従するため**定期更新でこのセルを差し替える**
 /// （[`run_watch_once`] の更新経路）。ゲート判定はこのセルを読むだけ。
 type AllowGate = Arc<RwLock<AllowSources>>;
@@ -150,6 +116,13 @@ type GatewayMap = Arc<RwLock<HashMap<String, JoinHandle<()>>>>;
 /// この admin で in-place ホットスワップ、無ければ bootstrap 起動」を判定するのに使う。
 type AdminMap = Arc<RwLock<HashMap<String, Arc<dyn NostrIdentityAdmin>>>>;
 
+/// V3 の instance/binding 敷設。session 不在・membership 不一致は fail-loud。
+pub type NostrProvisionFn = Arc<
+    dyn Fn(&str, &str, &NostrConfig, &[opencrab_db::queries::SessionWatchRow]) -> anyhow::Result<()>
+        + Send
+        + Sync,
+>;
+
 pub struct NostrGatewayManager<R: NostrAgentRunner> {
     // std RwLock: is_running を同期メソッドにするため。ガードは await を跨がない。
     gateways: GatewayMap,
@@ -164,6 +137,12 @@ pub struct NostrGatewayManager<R: NostrAgentRunner> {
     /// #588 TimedFire / #603: 時刻発火の受け口を登録する登録簿（**必須**・`new` の引数）。
     /// Option + builder だと配線し忘れてもコンパイルが通り、実際 #602 で忘れて本番が止まった。
     timed_fire_router: Arc<opencrab_actions::TimedFireRouter>,
+    /// 段階移行フラグ。既定は旧 in-process ループ。
+    ingress: NostrIngress,
+    /// 元栓の共有ストア。V3 said も同じ判断を読む。
+    allow_store: AllowSetStore,
+    /// V3 のときだけ呼ぶ binding 敷設。
+    provisioner: Option<NostrProvisionFn>,
 }
 
 impl<R: NostrAgentRunner> NostrGatewayManager<R> {
@@ -182,12 +161,29 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
             cli: NostaroCli::new(),
             runtime,
             timed_fire_router,
+            ingress: NostrIngress::Legacy,
+            allow_store: AllowSetStore::default(),
+            provisioner: None,
         }
     }
 
     pub fn with_cli(mut self, cli: NostaroCli) -> Self {
         self.cli = cli;
         self
+    }
+
+    pub fn with_ingress(mut self, ingress: NostrIngress) -> Self {
+        self.ingress = ingress;
+        self
+    }
+
+    pub fn with_provisioner(mut self, provisioner: NostrProvisionFn) -> Self {
+        self.provisioner = Some(provisioner);
+        self
+    }
+
+    pub fn allow_store(&self) -> &AllowSetStore {
+        &self.allow_store
     }
 
     /// per-session ランタイム（直列化ロック + dispatch registry）。
@@ -216,6 +212,9 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
             secret_key,
             config,
             self.timed_fire_router.clone(),
+            self.ingress,
+            self.allow_store.clone(),
+            self.provisioner.clone(),
         )
         .await
     }
@@ -225,6 +224,7 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
             &self.gateways,
             &self.admins,
             &self.timed_fire_router,
+            &self.allow_store,
             agent_id,
         );
     }
@@ -250,6 +250,9 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
             cli: self.cli.clone(),
             runtime: self.runtime.clone(),
             timed_fire_router: self.timed_fire_router.clone(),
+            ingress: self.ingress,
+            allow_store: self.allow_store.clone(),
+            provisioner: self.provisioner.clone(),
         })
     }
 
@@ -697,6 +700,7 @@ async fn run_nostr_loop<R: NostrAgentRunner + Clone>(
     // #698 元栓: 許可集合（フォロイー ∪ owner ∪ co_agent ∪ trusted_users）。ゲートが読み、
     // watch ループが定期更新でこのセルを差し替える。
     allow: AllowGate,
+    store: AllowSetStore,
     admin: Arc<dyn NostrIdentityAdmin>,
     runtime: Arc<NostrSessionRuntime>,
     // #588 TimedFire / #603: 時刻発火の受け口を登録する登録簿（**必須**）。
@@ -738,6 +742,7 @@ async fn run_nostr_loop<R: NostrAgentRunner + Clone>(
             &config,
             &self_pubkey,
             &allow,
+            &store,
             &dropped,
             &admin,
             &runtime,
@@ -766,6 +771,7 @@ async fn run_agent_inbound_loops<R: NostrAgentRunner + Clone + 'static>(
     config: NostrConfig,
     self_pubkey: SelfPubkey,
     allow: AllowGate,
+    store: AllowSetStore,
     admin: Arc<dyn NostrIdentityAdmin>,
     runtime: Arc<NostrSessionRuntime>,
     timed_fire_router: Arc<opencrab_actions::TimedFireRouter>,
@@ -780,12 +786,14 @@ async fn run_agent_inbound_loops<R: NostrAgentRunner + Clone + 'static>(
         let config_c = config.clone();
         let self_pk = self_pubkey.clone();
         let allow_c = allow.clone();
+        let store_c = store.clone();
         let admin_c = admin.clone();
         let runtime_c = runtime.clone();
         let router = timed_fire_router.clone();
         set.spawn(async move {
             run_nostr_loop(
-                runner_c, cli_c, agent, config_c, self_pk, allow_c, admin_c, runtime_c, router,
+                runner_c, cli_c, agent, config_c, self_pk, allow_c, store_c, admin_c, runtime_c,
+                router,
             )
             .await;
         });
@@ -797,16 +805,62 @@ async fn run_agent_inbound_loops<R: NostrAgentRunner + Clone + 'static>(
         let relays = config.effective_relays();
         let self_pk = self_pubkey.clone();
         let allow_c = allow.clone();
+        let store_c = store.clone();
         let admin_c = admin.clone();
         let runtime_c = runtime.clone();
         set.spawn(async move {
             run_session_watch_loop(
-                runner_c, cli_c, agent, relays, watch, self_pk, allow_c, admin_c, runtime_c,
+                runner_c, cli_c, agent, relays, watch, self_pk, allow_c, store_c, admin_c,
+                runtime_c,
             )
             .await;
         });
     }
     while set.join_next().await.is_some() {}
+}
+
+/// V3: 旧 in-process 購読は起動しない。TimedFire 受け口と元栓 300 秒更新だけ残す。
+///
+/// Binding PUT / said は gateway 側。core 側は時刻発火と allow-set の権威を維持する。
+#[allow(clippy::too_many_arguments)]
+async fn run_v3_core_keep_alive<R: NostrAgentRunner + Clone>(
+    runner: R,
+    cli: NostaroCli,
+    agent_id: String,
+    _self_pubkey: SelfPubkey,
+    allow: AllowGate,
+    store: AllowSetStore,
+    admin: Arc<dyn NostrIdentityAdmin>,
+    runtime: Arc<NostrSessionRuntime>,
+    timed_fire_router: Arc<opencrab_actions::TimedFireRouter>,
+) {
+    let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_RESPONSES));
+    let queues = Arc::new(SessionQueues::new(SESSION_QUEUE_CAPACITY));
+    timed_fire_router.register_per_agent(
+        opencrab_actions::gateway_kinds::NOSTR,
+        &agent_id,
+        Arc::new(NostrTimedFireSink {
+            runner: runner.clone(),
+            cli: cli.clone(),
+            runtime: runtime.clone(),
+            admin: admin.clone(),
+            queues: queues.clone(),
+            permits: permits.clone(),
+        }),
+    );
+    info!(
+        agent_id = %agent_id,
+        transport = "nostr",
+        "timed-fire: 受け口を登録（V3 core keep-alive）"
+    );
+    let mut ticker = tokio::time::interval_at(
+        tokio::time::Instant::now() + ALLOW_REFRESH_INTERVAL,
+        ALLOW_REFRESH_INTERVAL,
+    );
+    loop {
+        ticker.tick().await;
+        refresh_allow_once(&runner, &cli, &agent_id, &allow, &store).await;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -818,6 +872,7 @@ async fn run_session_watch_loop<R: NostrAgentRunner + Clone>(
     watch: opencrab_db::queries::SessionWatchRow,
     self_pubkey: SelfPubkey,
     allow: AllowGate,
+    store: AllowSetStore,
     admin: Arc<dyn NostrIdentityAdmin>,
     runtime: Arc<NostrSessionRuntime>,
 ) {
@@ -870,6 +925,7 @@ async fn run_session_watch_loop<R: NostrAgentRunner + Clone>(
             &watch,
             &self_pubkey,
             &allow,
+            &store,
             &dropped,
             &admin,
             &runtime,
@@ -905,6 +961,7 @@ async fn run_session_watch_once<R: NostrAgentRunner + Clone>(
     watch: &opencrab_db::queries::SessionWatchRow,
     self_pubkey: &SelfPubkey,
     allow: &AllowGate,
+    store: &AllowSetStore,
     dropped: &Arc<AtomicU64>,
     admin: &Arc<dyn NostrIdentityAdmin>,
     runtime: &Arc<NostrSessionRuntime>,
@@ -965,7 +1022,7 @@ async fn run_session_watch_once<R: NostrAgentRunner + Clone>(
                 .await;
             }
             _ = refresh.tick() => {
-                spawn_allow_refresh(runner.clone(), cli.clone(), agent_id.to_string(), allow.clone());
+                spawn_allow_refresh(runner.clone(), cli.clone(), agent_id.to_string(), allow.clone(), store.clone());
             }
         }
     }
@@ -998,6 +1055,12 @@ async fn handle_watch_event<R: NostrAgentRunner>(
             bundle.lock().unwrap().push(event);
         }
         WatchForward::Immediate { label } => {
+            if let Some(reason) = pre_record_drop(&event, &self_pk, &allow.read().unwrap()) {
+                if matches!(reason, DropReason::AllowSet) {
+                    dropped.fetch_add(1, AtomicOrdering::Relaxed);
+                }
+                return;
+            }
             let policy = match runner.get_session_policy_json(&watch.session_id) {
                 Ok(Some(p)) => p,
                 Ok(None) => {
@@ -1015,12 +1078,33 @@ async fn handle_watch_event<R: NostrAgentRunner>(
             let mut held = false;
             let mut admitted = false;
             let mut run_caller = None;
-            let result = accept_watch_events(
-                runner,
+            let owner_id = sources
+                .owner
+                .iter()
+                .next()
+                .cloned()
+                .unwrap_or_default();
+            let resolve =
+                |sender: &str, _: &[String], _: &str| runner.resolve_nostr_caller(agent_id, sender);
+            let dm_any = |sender: &str, _: &[String], owner: &str| sender == owner;
+            let dm_one = |sender: &str, _: &str, owner: &str| sender == owner;
+            let sid = watch.session_id.clone();
+            let wl = move |channel: &str, aid: &str| {
+                channel == sid || channel == crate::session::nostr_session_id(aid)
+            };
+            let lookups = opencrab_actions::InboundLookups {
+                resolve_caller: &resolve,
+                dm_allowed_any: &dm_any,
+                dm_allowed: &dm_one,
+                channel_whitelisted: &wl,
+            };
+            let result = accept_nostr_inbound(
+                &event,
                 agent_id,
                 &watch.session_id,
-                std::slice::from_ref(&event),
-                &[label],
+                &owner_id,
+                label,
+                &lookups,
                 Some(opencrab_actions::WatchAccept {
                     policy_json: &policy,
                     interval_secs: watch.interval_secs as u64,
@@ -1372,6 +1456,7 @@ async fn refresh_allow_once<R: NostrAgentRunner>(
     cli: &NostaroCli,
     agent_id: &str,
     allow: &AllowGate,
+    store: &AllowSetStore,
 ) {
     match build_allow_sources(runner, cli, agent_id).await {
         Ok(next) => {
@@ -1381,7 +1466,8 @@ async fn refresh_allow_once<R: NostrAgentRunner>(
                 next.co_agents.len(),
                 next.trusted_users.len(),
             );
-            *allow.write().unwrap() = next;
+            *allow.write().unwrap() = next.clone();
+            store.replace_allow(agent_id, next);
             debug!(agent_id = %agent_id, followees = f, owner = o, co_agents = c, trusted_users = t, "nostr: 元栓の許可集合を更新（#698）");
         }
         Err(e) => {
@@ -1401,9 +1487,10 @@ fn spawn_allow_refresh<R: NostrAgentRunner + Clone>(
     cli: NostaroCli,
     agent_id: String,
     allow: AllowGate,
+    store: AllowSetStore,
 ) {
     tokio::spawn(async move {
-        refresh_allow_once(&runner, &cli, &agent_id, &allow).await;
+        refresh_allow_once(&runner, &cli, &agent_id, &allow, &store).await;
     });
 }
 
@@ -1417,6 +1504,7 @@ async fn run_watch_once<R: NostrAgentRunner + Clone>(
     self_pubkey: &SelfPubkey,
     // #698 元栓: 許可集合セルと、捨てた件数の揮発カウンタ。
     allow: &AllowGate,
+    store: &AllowSetStore,
     dropped: &Arc<AtomicU64>,
     admin: &Arc<dyn NostrIdentityAdmin>,
     runtime: &Arc<NostrSessionRuntime>,
@@ -1451,7 +1539,7 @@ async fn run_watch_once<R: NostrAgentRunner + Clone>(
             biased;
             line = lines.next_line() => line?,
             _ = refresh.tick() => {
-                spawn_allow_refresh(runner.clone(), cli.clone(), agent_id.to_string(), allow.clone());
+                spawn_allow_refresh(runner.clone(), cli.clone(), agent_id.to_string(), allow.clone(), store.clone());
                 // 揮発カウンタの累計を節目で 1 行だけ可視化（毎行は出さない / #698）。
                 let total = dropped.load(AtomicOrdering::Relaxed);
                 if total > 0 {
@@ -1476,8 +1564,10 @@ async fn run_watch_once<R: NostrAgentRunner + Clone>(
             continue;
         }
         // 同期呼び出し（await 無し）。応答生成は session キューの consumer が引き取る。
+        let self_pk = self_pubkey.read().unwrap().clone();
         handle_event(
-            runner, cli, agent_id, allow, dropped, admin, runtime, permits, queues, event,
+            runner, cli, agent_id, &self_pk, allow, dropped, admin, runtime, permits, queues,
+            event,
         )
         .await;
     }
@@ -1508,6 +1598,7 @@ async fn handle_event<R: NostrAgentRunner>(
     runner: &R,
     cli: &NostaroCli,
     agent_id: &str,
+    self_pubkey: &str,
     // #698 元栓: 許可集合セルと、捨てた件数の揮発カウンタ。
     allow: &AllowGate,
     dropped: &Arc<AtomicU64>,
@@ -1517,62 +1608,70 @@ async fn handle_event<R: NostrAgentRunner>(
     queues: &Arc<SessionQueues>,
     event: NostrEvent,
 ) {
-    // #514: DM（kind:4 NIP-04 / kind:1059 NIP-17 gift wrap）は**一切扱わない**。
-    // 会話へ入れず・応答せず・記録もせず、公開リプライへフォールバックもしない。
-    // 暗号化 DM は「今は安全」でも秘密鍵が漏れた時点で過去に遡って全部読めるため、
-    // 「暗号化されているから private を書いてよい」という誤った安心を前提ごと無くす
-    // （オーナー決定）。この drop は購読除外（`effective_kinds` が DM を外す）が
-    // 破られても効く最終防壁で、`is_dm()` が DM の唯一の判定源（[`opencrab_nostr::DM_KINDS`]）。
-    //
-    // 公開リプライへ回さないのが要点: 以前 DM に kind:1 の公開リプライで返す事故があった
-    // （復号できておらず中身は漏れなかったが、復号が直れば DM 本文が公開タイムラインに
-    // 出ていた）。ここで return するので応答生成（＝返信 publish）自体が起きない。
-    // 黙って捨てると届いていたことすら分からないので、送信者 pubkey と kind を INFO で残す。
-    if event.is_dm() {
-        info!(
-            agent_id,
-            sender = %event.pubkey,
-            kind = event.kind,
-            "nostr: dropping DM (kind 4/1059 are not handled — receive discarded, no reply; #514)"
-        );
-        return;
+    let sources = allow.read().unwrap();
+    match pre_record_drop(&event, self_pubkey, &sources) {
+        Some(DropReason::Dm) => {
+            info!(
+                agent_id,
+                sender = %event.pubkey,
+                kind = event.kind,
+                "nostr: dropping DM (kind 4/1059 are not handled — receive discarded, no reply; #514)"
+            );
+            return;
+        }
+        Some(DropReason::SelfPost) => return,
+        Some(DropReason::AllowSet) => {
+            dropped.fetch_add(1, AtomicOrdering::Relaxed);
+            return;
+        }
+        None => {}
     }
+    let session_id = nostr_session_id(agent_id);
+    let owner_id = sources
+        .owner
+        .iter()
+        .next()
+        .cloned()
+        .unwrap_or_default();
+    drop(sources);
 
-    // #698 元栓: **許可集合（フォロイー ∪ owner ∪ co_agent ∪ trusted_users）以外の作者の
-    // イベントは、着火も記録もさせずここで捨てる**（store 書き込みの前）。オーナー裁定
-    // （2026-08-19）:「未信頼の作者の出来事ではターンを着火させない」。反復・ターン数の予算方式は
-    // 「着火した時点で負け」なので採らず、この元栓で入り口を閉じる。
-    //
-    // - 捨てるのは **record より前**（会話履歴にも転記にも応答生成にも一切入らない）。
-    // - 毎行ログはフラッド時に費用になるので残さない。捨てた数は揮発カウンタ（`dropped`）まで。
-    // - 判定の**権威はこの core 側**にある（購読フィルタで線より前に落とせても、最終判定はここ）。
-    // - **ホットパスは純メモリ**: 未許可 1 件あたりの費用はパース＋メモリ集合の照合だけ
-    //   （`AllowSources::is_allowed`）。owner / co_agent / trusted_users の照合材料も follow_set と
-    //   同じ「メモリ集合＋定期更新」に載っており（[`build_allow_sources`]）、`resolve_nostr_caller`
-    //   の DB 往復は**ドロップ前に走らない**。DB を引くのは更新経路と、通過した相手の精密な権限
-    //   解決（下）だけ。
-    //
-    // 許可源（`is_allowed` が OR で合成する名前付きの源。源を足すときは `AllowSources` へ 1 つ）:
-    // - **フォロイー**（自分の kind:3）／ **owner**（`agent_nostr_config.owner_pubkey`）／
-    //   **co_agent**（owner 等価。self_pubkey 逆引き）／ **trusted_users**（owner が明示登録した信頼・
-    //   platform=nostr）。取得できないときに全通しへ倒すフォールバックは持たない（起動中止／
-    //   前回値保持で fail-loud）。
-    let author_key = crate::pubkey::follow_key(&event.pubkey);
-    if !allow.read().unwrap().is_allowed(&author_key) {
+    let mut admitted = false;
+    let mut run_caller = None;
+    let resolve = |sender: &str, _: &[String], _: &str| runner.resolve_nostr_caller(agent_id, sender);
+    let dm_any = |sender: &str, _: &[String], owner: &str| sender == owner;
+    let dm_one = |sender: &str, _: &str, owner: &str| sender == owner;
+    let sid = session_id.clone();
+    let wl = move |channel: &str, aid: &str| channel == sid || channel == nostr_session_id(aid);
+    let lookups = opencrab_actions::InboundLookups {
+        resolve_caller: &resolve,
+        dm_allowed_any: &dm_any,
+        dm_allowed: &dm_one,
+        channel_whitelisted: &wl,
+    };
+    let accept = accept_nostr_inbound::<()>(
+        &event,
+        agent_id,
+        &session_id,
+        &owner_id,
+        event.inbound_kind_label(),
+        &lookups,
+        None,
+        |_| (),
+        |_, _| admitted = true,
+        |_, adm, _| run_caller = Some(adm.caller.clone()),
+    );
+    if accept.is_err() || !admitted {
         dropped.fetch_add(1, AtomicOrdering::Relaxed);
         return;
     }
-
-    // ここへ来た＝許可された作者（フラッドではない）。**通過した相手だけ**、精密な呼び出し元を
-    // 解決する（#319。同期 DB 読み / await しない）。owner/co_agent/trusted_user/agent の区別は
-    // 下の応答 job の権限判定に使う。ドロップは上のメモリ照合で済んでいるので、この DB 往復は
-    // ホットパスに乗らない。
-    let caller = runner.resolve_nostr_caller(agent_id, &event.pubkey);
+    let caller = match run_caller {
+        Some(c) => c,
+        None => return,
+    };
 
     // agent 単位のセッション（**1 エージェント = 1 会話** / #323）。誰から来た受信も
     // ここへ落ちるので、エージェントは自分の発言も含めて 1 本の履歴として読める。
     // 誰の発言かは下の `sender_id`（= 相手の pubkey）が担う。
-    let session_id = nostr_session_id(agent_id);
 
     // 会話履歴・転記に載せる本文（#282）。本文だけを記録していたため、次ターン以降の
     // エージェントは author の npub も note id も kind も参照できなかった（nostaro 本体
@@ -1783,11 +1882,13 @@ fn stop_gateway(
     gateways: &GatewayMap,
     admins: &AdminMap,
     timed_fire_router: &Arc<opencrab_actions::TimedFireRouter>,
+    allow_store: &AllowSetStore,
     agent_id: &str,
 ) {
     let handle = gateways.write().unwrap().remove(agent_id);
     // 採用 admin も一緒に外す（gateways と生死を揃える＝停止後に稼働中と誤判定させない）。
     admins.write().unwrap().remove(agent_id);
+    allow_store.remove(agent_id);
     // #588 TimedFire: 死んだループへ発火が消えないよう受け口を解除する。Nostr は共有ゲートウェイが
     // 無い（per-agent のみ）ので、解除しないと停止後の時刻発火が宛先なく捨てられる（#603: 必須）。
     timed_fire_router.unregister_per_agent(opencrab_actions::gateway_kinds::NOSTR, agent_id);
@@ -1815,6 +1916,9 @@ async fn spawn_agent_gateway<R: NostrAgentRunner>(
     secret_key: &str,
     config: NostrConfig,
     timed_fire_router: Arc<opencrab_actions::TimedFireRouter>,
+    ingress: NostrIngress,
+    allow_store: AllowSetStore,
+    provisioner: Option<NostrProvisionFn>,
 ) -> anyhow::Result<()> {
     // 資格情報のガード（#191 段階2 PR3）。DB の secret_key（#620 以降は暗号文 `enc:v1:…`）が
     // 空 / 空白だけなら鍵未設定なので、materialize（config 書き出し）や `pubkey` 取得より
@@ -1839,7 +1943,7 @@ async fn spawn_agent_gateway<R: NostrAgentRunner>(
     // 洪水を防ぐ不変条件は `NostaroCli::build_watch_command` が持つ（`--no-mention-only` を
     // 渡さない / `--match=any` を明示する）。どちらもテストで固定している。
 
-    stop_gateway(gateways, admins, &timed_fire_router, agent_id);
+    stop_gateway(gateways, admins, &timed_fire_router, &allow_store, agent_id);
 
     // #620: config は**鍵行なし**（relays のみ）。鍵は base_command が env で注入する。
     NostaroCli::materialize_config(agent_id, &config.effective_relays(), None)?;
@@ -1882,6 +1986,8 @@ async fn spawn_agent_gateway<R: NostrAgentRunner>(
         trusted_users = allow_sources.trusted_users.len(),
         "nostr: 元栓の許可集合を構築（フォロイー ∪ owner ∪ co_agent ∪ trusted_users / #698）"
     );
+    allow_store.replace_allow(agent_id, allow_sources.clone());
+    allow_store.set_self_pubkey(agent_id, self_pubkey.clone());
     let allow: AllowGate = Arc::new(RwLock::new(allow_sources));
 
     // #489: 自 pubkey を co_agent 逆引き表（`agent_nostr_config.self_pubkey`）へ書き戻す。
@@ -1917,7 +2023,13 @@ async fn spawn_agent_gateway<R: NostrAgentRunner>(
         watch_subscribe_config(w, relays.clone())?;
     }
     let default_sid = nostr_session_id(agent_id);
-    let skip_default_loop = watches.iter().any(|w| w.session_id == default_sid);
+    let skip_default_loop = skip_default_loop(&watches, &default_sid);
+    if ingress.provisions_binding() {
+        let Some(provision) = provisioner.as_ref() else {
+            anyhow::bail!("nostr_ingress=v3 なのに binding provisioner が無い");
+        };
+        provision(agent_id, &self_pubkey, &config, &watches)?;
+    }
 
     let runner_c = runner.clone();
     let cli_c = cli.clone();
@@ -1938,20 +2050,36 @@ async fn spawn_agent_gateway<R: NostrAgentRunner>(
         .insert(agent_id.to_string(), admin.clone());
     let runtime_c = runtime.clone();
     let handle = tokio::spawn(async move {
-        run_agent_inbound_loops(
-            runner_c,
-            cli_c,
-            agent,
-            config,
-            self_pubkey_cell,
-            allow,
-            admin,
-            runtime_c,
-            timed_fire_router,
-            watches,
-            skip_default_loop,
-        )
-        .await;
+        if ingress.runs_legacy_loops() {
+            run_agent_inbound_loops(
+                runner_c,
+                cli_c,
+                agent,
+                config,
+                self_pubkey_cell,
+                allow,
+                allow_store,
+                admin,
+                runtime_c,
+                timed_fire_router,
+                watches,
+                skip_default_loop,
+            )
+            .await;
+        } else {
+            run_v3_core_keep_alive(
+                runner_c,
+                cli_c,
+                agent,
+                self_pubkey_cell,
+                allow,
+                allow_store,
+                admin,
+                runtime_c,
+                timed_fire_router,
+            )
+            .await;
+        }
     });
 
     gateways
@@ -1981,6 +2109,9 @@ pub struct NostrIdentityProvisioner<R: NostrAgentRunner> {
     /// #588 TimedFire / #603: 採用時 bootstrap 起動でも時刻発火の受け口を登録する（本体と同じ
     /// 登録簿・**必須**）。
     timed_fire_router: Arc<opencrab_actions::TimedFireRouter>,
+    ingress: NostrIngress,
+    allow_store: AllowSetStore,
+    provisioner: Option<NostrProvisionFn>,
 }
 
 impl<R: NostrAgentRunner> NostrIdentityProvisioner<R> {
@@ -2062,6 +2193,9 @@ impl<R: NostrAgentRunner> opencrab_actions::GatewayIdentityProvisioning
             &nsec,
             config,
             self.timed_fire_router.clone(),
+            self.ingress,
+            self.allow_store.clone(),
+            self.provisioner.clone(),
         )
         .await?;
 
@@ -2562,6 +2696,7 @@ mod tests {
                 &self.runner,
                 &self.cli,
                 agent_id,
+                "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
                 &self.allow,
                 &self.dropped,
                 &self.admin,
@@ -2806,7 +2941,7 @@ mod tests {
         prev.owner.insert(crate::pubkey::follow_key(OWNER_PK));
         let allow: AllowGate = Arc::new(RwLock::new(prev));
 
-        refresh_allow_once(&runner, &cli, agent, &allow).await;
+        refresh_allow_once(&runner, &cli, agent, &allow, &AllowSetStore::default()).await;
 
         // DB エラーで build_allow_sources が Err → セルは前回のまま（owner が消えていない）。
         assert!(

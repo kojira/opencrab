@@ -19,7 +19,7 @@ External gate V3 最小形。契約・設計・検収は `docs/design/external-g
 | `registry.rs` | live 接続の process-local 表。`GateProbe` は `#[cfg]` 隔離 |
 | `admin.rs` | 6 operation |
 | `protocol.rs` | frame と message の読写 |
-| `inbound.rs` | said → `accept_inbound`。session は `canonical_session_id`（V3.5 reuse）。`delivery_mode` を turn 完了で読む |
+| `inbound.rs` | said → `accept_inbound`。session は `canonical_session_id`（V3.5 reuse）。`delivery_mode` を turn 完了で読む。`kind_id=nostr` は record 前に `NostrSaidAdmit`（V1 アンカー・DM/自己/allow-set）。owner は `owner_pubkey`、caller は platform `nostr`。watch Immediate は `WatchAccept`。Bundle said は coordinator 未敷設のため store_error |
 | `delivery.rs` | `DeliveryEffect` → say 1 回 |
 | `delivery_mode.rs` | optional `delivery_mode`（欠落=`say`）。`tool_driven` は inbound Text を NoReply にし、自発の V3 say を渡さない。`kind_id` では分岐しない |
 | `listen.rs` | UDS listen と接続状態機械。`enqueue_bind` は lock 失敗・未 live を warn（fail-quiet 禁止）。`web_binding_state` は ack=`ready` / pending=`provisioning` / それ以外=`unavailable`。`wait_bind_ack` は live 消失理由を残す |

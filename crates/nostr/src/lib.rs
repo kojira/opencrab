@@ -20,14 +20,18 @@
 //! nostaro 側の JSON watch インターフェース契約は `docs/nostaro-interface.md`。
 
 pub mod actions;
+pub mod adapter;
+pub mod binding;
 pub mod cli;
 pub mod config;
 pub mod event;
 pub mod fire_descriptor;
+pub mod ingress;
 pub mod identity;
 pub mod key_provisioning;
 pub mod manager;
 pub mod passthrough;
+pub mod provision;
 pub mod pubkey;
 pub mod runner;
 pub mod session;
@@ -38,6 +42,15 @@ pub mod text_delivery;
 pub mod watch;
 
 pub use actions::NostrGatewayActions;
+pub use adapter::{
+    accept_nostr_inbound, admit_nostr_said, history_body_without_anchor, parse_v1_anchor,
+    pre_record_drop, transport_route, AdmitSaidError, AllowSetStore, AllowSources, DropReason,
+    IngressRoute, V1Anchor,
+};
+pub use binding::{
+    nostr_binding_id, nostr_instance_id, plan_session_bindings, skip_default_loop,
+    BindingPlanError, SessionBindingPlan,
+};
 pub use cli::{
     db_main_key_provider, validate_vanity_prefix, GeneratedKey, MainKeyProvider, MasterKey,
     NostaroCli, MAX_VANITY_PREFIX_LEN,
@@ -45,10 +58,12 @@ pub use cli::{
 pub use config::{config_from_row, NostrConfig, NostrFilter, DEFAULT_RELAYS};
 pub use event::{parse_watch_line, NostrEvent, DM_KINDS};
 pub use fire_descriptor::NostrFire;
+pub use ingress::NostrIngress;
 pub use identity::NostrIdentityAdmin;
 pub use key_provisioning::NostrKeyProvisioning;
-pub use manager::NostrGatewayManager;
+pub use manager::{NostrGatewayManager, NostrProvisionFn};
 pub use passthrough::NostrPassthrough;
+pub use provision::{instance_config_bytes, instance_config_value};
 pub use pubkey::{normalize_pubkey, to_npub};
 pub use runner::{NostrAgentRunner, NostrGateAllowKeys};
 pub use session::{nostr_session_id, NostrSessionRuntime, NOSTR_SESSION_PREFIX};

@@ -21,12 +21,12 @@ pub use error::{ErrorCode, GateError, UNAUTHORIZED_BODY};
 pub use delivery_mode::{
     adjust_inbound_effect, delivery_mode_from_config_bytes, dispatches_v3_say, DeliveryMode,
 };
-pub use ids::{now_nanos, session_id_for_binding};
+pub use ids::{config_digest, encode_config_b64, now_nanos, session_id_for_binding};
 pub use listen::{
     enqueue_bind, recover_stale_deliveries, serve_uds, validate_listen_socket, wait_bind_ack,
     web_binding_state, EnqueueBindOutcome,
 };
-pub use registry::{ExtgateState, Registry};
+pub use registry::{ExtgateState, NostrSaidAdmit, NostrSaidDecision, Registry};
 
 use opencrab_actions::CallerIdentity;
 use opencrab_db::queries::{

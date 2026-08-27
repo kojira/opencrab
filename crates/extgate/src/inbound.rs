@@ -8,11 +8,12 @@ use std::sync::Arc;
 use opencrab_actions::{
     accept_inbound, delivery_effect, start_session_turn, AgentRuntime, CallerIdentity,
     InboundLookups, InboundWork, NormalizedInbound, NormalizedInboundEvent, RunRequest,
-    TranscriptSource,
+    TranscriptSource, WatchAccept,
 };
 use opencrab_db::queries::{
-    get_agent_discord_config, insert_session_log, is_trusted_user, SessionLogRow,
-    TRUSTED_PLATFORM_EXTGATE,
+    get_agent_discord_config, get_agent_nostr_owner_pubkey, get_session_policy_json,
+    get_session_watch, insert_session_log, is_trusted_user, SessionLogRow, TRUSTED_PLATFORM_EXTGATE,
+    TRUSTED_PLATFORM_NOSTR,
 };
 use rusqlite::{params, Connection, Transaction, TransactionBehavior};
 
@@ -22,7 +23,7 @@ use crate::listen::emit_activity;
 use crate::error::{ErrorCode, GateError};
 use crate::ids::decode_config_b64;
 use crate::protocol::Said;
-use crate::registry::ExtgateState;
+use crate::registry::{ExtgateState, NostrSaidDecision};
 use crate::ResolveCallerFn;
 
 pub struct SaidOutcome {
@@ -96,6 +97,26 @@ pub fn process_said<R: AgentRuntime>(
             return Err(GateError::store());
         }
     };
+    let mut nostr_watch: Option<(i64, bool)> = None;
+    if row.kind_id == "nostr" {
+        match state.admit_nostr_said(&row.agent_id, &said.author_id, &said.text)? {
+            NostrSaidDecision::Drop => {
+                tx.commit().map_err(|_| GateError::store())?;
+                return Ok(SaidOutcome { seq: None });
+            }
+            NostrSaidDecision::Accept { bundle: true, .. } => {
+                let _ = tx.rollback();
+                return Err(GateError::store());
+            }
+            NostrSaidDecision::Accept {
+                watch_id,
+                immediate,
+                bundle: false,
+            } => {
+                nostr_watch = watch_id.map(|id| (id, immediate));
+            }
+        }
+    }
     let agent_ids = [row.agent_id.clone()];
     let event = NormalizedInboundEvent {
         sender_id: said.author_id.as_str(),
@@ -116,7 +137,12 @@ pub fn process_said<R: AgentRuntime>(
             .lookup_resolve_count
             .fetch_add(1, Ordering::SeqCst);
         let agent_id = agents.first().map(String::as_str).unwrap_or("");
-        resolve_caller(&tx, TRUSTED_PLATFORM_EXTGATE, &[sender], agent_id, owner)
+        let platform = if row.kind_id == "nostr" {
+            TRUSTED_PLATFORM_NOSTR
+        } else {
+            TRUSTED_PLATFORM_EXTGATE
+        };
+        resolve_caller(&tx, platform, &[sender], agent_id, owner)
     };
     let dm_any = |sender: &str, agents: &[String], owner: &str| {
         #[cfg(any(test, feature = "extgate-probe"))]
@@ -152,12 +178,47 @@ pub fn process_said<R: AgentRuntime>(
         channel_whitelisted: &wl,
     };
 
+    let empty_set = std::collections::HashSet::new();
+    let watch_row = match nostr_watch {
+        Some((id, true)) => match get_session_watch(&tx, id) {
+            Ok(Some(w)) if w.session_id == row.address => Some(w),
+            Ok(_) | Err(_) => {
+                let _ = tx.rollback();
+                return Err(GateError::store());
+            }
+        },
+        _ => None,
+    };
+    let policy = match &watch_row {
+        Some(w) => match get_session_policy_json(&tx, &w.session_id) {
+            Ok(Some(p)) => p,
+            Ok(None) | Err(_) => {
+                let _ = tx.rollback();
+                return Err(GateError::store());
+            }
+        },
+        None => String::new(),
+    };
+    let watch_accept = watch_row.as_ref().map(|w| WatchAccept {
+        policy_json: policy.as_str(),
+        interval_secs: w.interval_secs as u64,
+        allow: opencrab_actions::WatchAllowSets {
+            followees: &empty_set,
+            owner: &empty_set,
+            co_agents: &empty_set,
+            trusted_users: &empty_set,
+        },
+        owner: &empty_set,
+        followees: &empty_set,
+        privilege: None,
+    });
+
     let accept = accept_inbound(
         &work,
         &row.owner_id,
         &agent_ids,
         &lookups,
-        None,
+        watch_accept,
         |_| (),
         |_, admitted| {
             if admitted.admitted_agent_ids.contains(&row.agent_id) {
@@ -292,11 +353,15 @@ fn load_origin_row(
             if inst != instance_id || closed.is_some() {
                 return Ok(None);
             }
-            let owner_id = get_agent_discord_config(tx, &agent_id)
-                .ok()
-                .flatten()
-                .map(|c| c.owner_discord_id)
-                .unwrap_or_default();
+            let owner_id = if kind_id == "nostr" {
+                get_agent_nostr_owner_pubkey(tx, &agent_id).unwrap_or_default()
+            } else {
+                get_agent_discord_config(tx, &agent_id)
+                    .ok()
+                    .flatten()
+                    .map(|c| c.owner_discord_id)
+                    .unwrap_or_default()
+            };
             let config_bytes = decode_config_b64(&config_b64)?;
             let delivery_mode = crate::delivery_mode::delivery_mode_from_config_bytes(&config_bytes)
                 .map_err(|_| GateError::new(ErrorCode::BadRequest))?;
@@ -415,6 +480,7 @@ fn enqueue_turn<R: AgentRuntime>(
     let address = row.address.clone();
     let origin = said.origin.clone();
     let owner_id = row.owner_id.clone();
+    let kind_id = row.kind_id.clone();
     let delivery_mode = row.delivery_mode;
     locks.spawn_serialized(session_id.clone(), async move {
         #[cfg(any(test, feature = "extgate-probe"))]
@@ -427,7 +493,11 @@ fn enqueue_turn<R: AgentRuntime>(
         let caller = match state.db.lock() {
             Ok(conn) => resolve_caller(
                 &conn,
-                TRUSTED_PLATFORM_EXTGATE,
+                if kind_id == "nostr" {
+                    TRUSTED_PLATFORM_NOSTR
+                } else {
+                    TRUSTED_PLATFORM_EXTGATE
+                },
                 &[author_id.as_str()],
                 &agent_id,
                 &owner_id,
@@ -444,6 +514,7 @@ fn enqueue_turn<R: AgentRuntime>(
             let text = text.clone();
             let images = images.clone();
             let origin = origin.clone();
+            let kind_id = kind_id.clone();
             tokio::spawn(async move {
                 let inbound = NormalizedInbound {
                     session_id: &session_id,
@@ -452,7 +523,11 @@ fn enqueue_turn<R: AgentRuntime>(
                     sender_name: "",
                     avatar_url: None,
                     channel_id: Some(&address),
-                    pubkey: None,
+                    pubkey: if kind_id == "nostr" {
+                        Some(author_id.as_str())
+                    } else {
+                        None
+                    },
                     text: &text,
                     image_urls: &images,
                     external_id: &origin,

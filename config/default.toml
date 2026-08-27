@@ -218,6 +218,9 @@ path = "data/opencrab.db"
 [gate]
 # External gate V3 の Unix domain socket。空・相対 path は起動失敗。
 listen_socket = "/tmp/opencrab-extgate.sock"
+# Nostr inbound の段階移行（DESIGN-NOSTRGATE §6）。legacy | v3_shadow | v3。既定=legacy。
+# 旧 in-process ループは削除しない。未知値は起動失敗。
+nostr_ingress = "legacy"
 
 # 古い LLM ログの zip アーカイブ（#337）
 #

@@ -65,6 +65,16 @@ async fn main() -> anyhow::Result<()> {
     // 挙動（新キー優先 / 空 url は無効）は意図したものなので変えず、気づけるようにだけする。
     cfg.warn_if_legacy_webhook_masked();
 
+    #[cfg(feature = "nostr")]
+    let nostr_ingress = opencrab_nostr::NostrIngress::parse(&cfg.gate.nostr_ingress).ok_or_else(
+        || {
+            anyhow::anyhow!(
+                "gate.nostr_ingress は legacy|v3_shadow|v3（欠落=legacy）。得た値: {:?}",
+                cfg.gate.nostr_ingress
+            )
+        },
+    )?;
+
     // #620: Nostr の at-rest 暗号化マスターキーを **load_config 直後・全 tokio::spawn より前**に
     // env から読み、**即 remove_var** する。以降 spawn される execute_shell は inherit_env=true で
     // `std::env::vars()` を子へコピーする（crates/actions/src/tools/shell.rs）ので、ここで消せば
@@ -729,13 +739,49 @@ async fn main() -> anyhow::Result<()> {
             .with_main_key_provider(provider);
         // #588 TimedFire / #603: 時刻発火の受け口レジストリは `new` の必須引数（Discord と同型・
         // per-agent→共有の解決はルータが行う）。忘れるとコンパイルエラーになる。
+        let db_for_provision = state.db.clone();
         let manager: opencrab_server::SharedNostrManager = Arc::new(
             opencrab_nostr::NostrGatewayManager::new(
                 state.clone(),
                 state.timed_fire_router.clone(),
             )
-            .with_cli(cli),
+            .with_cli(cli)
+            .with_ingress(nostr_ingress)
+            .with_provisioner(Arc::new(move |agent_id, self_pk, config, watches| {
+                let mut conn = db_for_provision
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("db lock for nostr provision"))?;
+                opencrab_server::nostr_provision::provision_nostr_gate(
+                    &mut conn,
+                    agent_id,
+                    self_pk,
+                    config,
+                    watches,
+                    opencrab_extgate::now_nanos(),
+                )?;
+                Ok(())
+            })),
         );
+        let store = manager.allow_store().clone();
+        extgate.set_nostr_said_admit(Arc::new(move |agent_id, author_id, text| {
+            use opencrab_extgate::{ErrorCode, GateError, NostrSaidDecision};
+            use opencrab_nostr::{admit_nostr_said, AdmitSaidError, IngressRoute};
+            let Some(allow) = store.get_allow(agent_id) else {
+                return Err(GateError::store());
+            };
+            let Some(self_pk) = store.self_pubkey(agent_id) else {
+                return Err(GateError::store());
+            };
+            match admit_nostr_said(text, author_id, &self_pk, &allow) {
+                Err(AdmitSaidError::BadAnchor) => Err(GateError::new(ErrorCode::BadRequest)),
+                Err(AdmitSaidError::Drop(_)) => Ok(NostrSaidDecision::Drop),
+                Ok(anchor) => Ok(NostrSaidDecision::Accept {
+                    watch_id: anchor.watch_id,
+                    immediate: anchor.route == IngressRoute::Immediate,
+                    bundle: anchor.route == IngressRoute::Bundle,
+                }),
+            }
+        }));
         // 共通操作も transport 固有の操作（nostaro の鍵生成 = `key_provisioning`）も
         // この登録簿から引く（#191 段階2 PR3・PR4）。名指しフィールドは無い。
         state.gateways.register(manager);
