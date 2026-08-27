@@ -5,9 +5,10 @@
 //! ならない。使い捨ての `DashMap` を毎回作ると、走行中 subtask を追跡しているのに
 //! `cancel_subtask` からは常に not found になり、停止できない。
 //!
-//! そこで登場するのがこの構造体で、経路が定めるキーごとに registry を貸し出し、
-//! 同じキーには**常に同じ Arc** を返す。長寿命の runtime が 1 つ保持し、inbound と
-//! 完了 resume を跨いでも registry が失われないようにする。
+//! そこで登場するのがこの構造体で、キー（REST は session_id / heartbeat は agent_id）
+//! ごとに registry を貸し出し、同じキーには**常に同じ Arc** を返す。`AppState` が
+//! 1 つ保持し、REST ハンドラ（リクエスト毎に生成される）や heartbeat コールバック
+//! （設定変更で作り直される）が跨っても registry が失われないようにする。
 //!
 //! エントリの GC は行わない。キーの母数は「エージェント × 会話相手」で有界であり、
 //! 決着後は中身が空の `DashMap` が残るだけ（web gateway の registries も同様）。
@@ -28,6 +29,8 @@ use crate::subtask::SubtaskRegistry;
 /// キー単位に `SubtaskRegistry` を貸し出す共有ストア。
 ///
 /// キーの意味は経路が決める:
+/// - REST（`POST /api/agents/{id}/messages`）: session_id（`agent-msg-{agent}-{user}`）。
+///   1 セッションの走行中 subtask をまとめ、session の `status` 整合にも使う。
 /// - web / Nostr: session_id（`web-...` / `nostr-{agent}`）。inbound と完了 resume で
 ///   同一 registry を共有する（Nostr は #323 で agent 単位の 1 本）。
 /// - heartbeat: agent_id。tick / チャンネルを跨いで同一 registry を共有し、
@@ -71,14 +74,14 @@ mod tests {
     #[tokio::test]
     async fn same_key_yields_same_registry() {
         let registries = SubtaskRegistries::new();
-        let a = registries.registry_for("web-x-conv1");
-        let b = registries.registry_for("web-x-conv1");
+        let a = registries.registry_for("agent-msg-x-u1");
+        let b = registries.registry_for("agent-msg-x-u1");
         assert!(
             Arc::ptr_eq(&a, &b),
             "同一キーでは同じ registry を共有しなければならない"
         );
         // 片方への登録が他方から見える。
-        a.insert("st-1".to_string(), fake_subtask("web-x-conv1"));
+        a.insert("st-1".to_string(), fake_subtask("agent-msg-x-u1"));
         assert!(b.contains_key("st-1"));
         b.get("st-1").unwrap().abort_handle.abort();
     }
@@ -87,13 +90,13 @@ mod tests {
     #[tokio::test]
     async fn different_keys_are_isolated() {
         let registries = SubtaskRegistries::new();
-        let a = registries.registry_for("web-x-conv1");
-        let b = registries.registry_for("web-x-conv2");
+        let a = registries.registry_for("agent-msg-x-u1");
+        let b = registries.registry_for("agent-msg-x-u2");
         assert!(!Arc::ptr_eq(&a, &b));
-        a.insert("st-1".to_string(), fake_subtask("web-x-conv1"));
+        a.insert("st-1".to_string(), fake_subtask("agent-msg-x-u1"));
         assert!(!b.contains_key("st-1"));
-        assert!(registries.has_running("web-x-conv1"));
-        assert!(!registries.has_running("web-x-conv2"));
+        assert!(registries.has_running("agent-msg-x-u1"));
+        assert!(!registries.has_running("agent-msg-x-u2"));
         a.get("st-1").unwrap().abort_handle.abort();
     }
 

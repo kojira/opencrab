@@ -113,7 +113,7 @@ fn definitions_dedup_keeps_single_nostr_generate_key() {
 }
 
 /// Regression guard for #161: cancel_subtask must be an *own* (server-neutral)
-/// definition so web / Nostr — not just Discord — expose the tool to
+/// definition so web / Nostr / REST — not just Discord — expose the tool to
 /// stop auto-dispatched subtasks. If it is removed from own_definitions the
 /// tool disappears on every non-Discord transport again — that is the bug this
 /// guards against.
@@ -1210,7 +1210,7 @@ async fn report_progress_requires_message() {
 #[tokio::test(start_paused = true)]
 async fn report_progress_records_but_does_not_notify_without_sink() {
     let state = crate::test_app_state();
-    let registry = registry_with("st-1", "subtask-st-1", "web-parent-1");
+    let registry = registry_with("st-1", "subtask-st-1", "rest-parent-1");
     let actions = SystemGatewayActions::new(state.clone(), None, Some(registry), None);
 
     let r = actions
@@ -1224,13 +1224,13 @@ async fn report_progress_records_but_does_not_notify_without_sink() {
     assert_eq!(r.data.unwrap()["notified"], json!(false));
     // 記録は残る。
     assert_eq!(
-        progress_messages(&state, "web-parent-1"),
+        progress_messages(&state, "rest-parent-1"),
         vec!["no sink here".to_string()]
     );
     // デバウンスタスクを起動していない＝世代カウンタも進んでいない。
     tokio::time::sleep(PROGRESS_DEBOUNCE_DELAY + Duration::from_secs(1)).await;
     assert!(
-        !state.progress_debounce.claim_latest("web-parent-1", 1),
+        !state.progress_debounce.claim_latest("rest-parent-1", 1),
         "受け口未配線ではデバウンス世代を消費しない"
     );
 }
@@ -2549,14 +2549,14 @@ async fn generic_management_tools_are_not_delegated_to_inner() {
     );
 }
 
-/// **transport gateway が inner に居てもグローバル設定へ漏れないことの固定**。
+/// **transport gateway が inner に居ても（REST + Discord 構成）漏れないことの固定**。
 ///
 /// このテストは**旧 `hot_reload_reaches_the_shared_config_even_with_a_transport_inner`
 /// の反転**である。旧テストは「inner が居てもグローバル設定に反映される」ことを
 /// 不変条件として固定していたが、それは #202 の漏れそのものだった。
 ///
-/// 経緯（#197 との関係）: 旧 REST 会話経路は Discord が有効な
-/// とき `SystemGatewayActions { inner: Some(DiscordGatewayActions) }` を組んでいた。移設前は
+/// 経緯（#197 との関係）: REST（`crate::api::agents_messages`）は Discord が有効な
+/// とき `SystemGatewayActions { inner: Some(DiscordGatewayActions) }` を組む。移設前は
 /// その Discord gateway へ `Arc::new(RwLock::new(state.tools_config.read().clone()))`
 /// ＝**使い捨てのコピー**を渡していた。そのおかげで REST 経路は**偶然この漏れが
 /// 無かった**。素朴に移設すると共有実体へ届いて漏れる側に揃ってしまうため、同じ
@@ -2568,7 +2568,7 @@ async fn generic_management_tools_are_not_delegated_to_inner() {
 #[tokio::test]
 async fn add_allowed_command_does_not_leak_to_the_global_config_with_a_transport_inner() {
     let state = state_with_shell(&[]);
-    // transport gateway が inner に居る構成。
+    // REST + Discord 相当: transport gateway が inner に居る構成。
     let inner = Arc::new(RecordingInner::new(&["discord_send_file"]));
     let actions = SystemGatewayActions::new(
         state.clone(),
@@ -3203,8 +3203,8 @@ async fn cancel_subtask_notifies_the_run_notifier() {
     );
 }
 
-/// **停止も完了 sink（`on_subtask_cancelled`）へ通知する**（#184）。委譲していた頃の
-/// Discord 経路はこれを落としていた。
+/// **停止も完了 sink（`on_subtask_cancelled`）へ通知する**（#184 / REST の永久 active
+/// バグ）。委譲していた頃の Discord 経路はこれを落としていた。
 #[tokio::test]
 async fn cancel_subtask_notifies_the_completion_sink() {
     #[derive(Default)]

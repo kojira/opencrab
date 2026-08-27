@@ -680,7 +680,12 @@ async fn test_delete_nonexistent_agent() {
     assert_eq!(resp["deleted"], false);
 }
 
-// ==================== Discord owner normalization ====================
+// ==================== Caller identity (owner) via handler ====================
+//
+// `is_owner_id` の単体テストだけでは、実際のハンドラがそれを通っている保証が
+// 無い（判定を素朴な `==` に戻しても単体テストは緑のまま）。ここでは
+// `POST /api/agents/{id}/messages` を実際に叩いて caller 判定を検証する。
+// LLM プロバイダは 0 件なのでハンドラは早期 return し、`caller_type` を JSON で返す。
 
 /// per-agent Discord 設定を保存する（owner を明示指定）。
 async fn set_agent_owner(app: Router, agent_id: &str, owner_discord_id: &str) -> Router {
@@ -697,6 +702,90 @@ async fn set_agent_owner(app: Router, agent_id: &str, owner_discord_id: &str) ->
     assert_eq!(status, StatusCode::OK);
     assert_eq!(resp["ok"], true, "discord config must be saved: {resp}");
     app
+}
+
+/// `POST /api/agents/{id}/messages` を叩いて `caller_type` を返す。
+async fn caller_type_for(app: Router, agent_id: &str, user_id: &str) -> (Router, String) {
+    let (status, resp) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/messages"),
+        Some(serde_json::json!({
+            "content": "hello",
+            "user_id": user_id,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let caller_type = resp["caller_type"]
+        .as_str()
+        .unwrap_or_else(|| panic!("response must carry caller_type: {resp}"))
+        .to_string();
+    (app, caller_type)
+}
+
+/// owner 未設定（per-agent Discord 設定の owner が空文字）のとき、空の `user_id`
+/// で呼んでも Owner 権限にならない。
+#[tokio::test]
+async fn test_empty_user_id_is_not_owner_when_owner_unset() {
+    let app = create_test_app();
+    let (agent_id, app) = create_test_agent(app).await;
+    let app = set_agent_owner(app, &agent_id, "").await;
+
+    let (_app, caller_type) = caller_type_for(app, &agent_id, "").await;
+    assert_ne!(
+        caller_type, "owner",
+        "empty user_id must not be promoted to owner when owner is unset"
+    );
+    assert_eq!(caller_type, "agent");
+}
+
+/// 空白のみの owner を保存しても owner は「未設定」のままで、空白のみの `user_id`
+/// で呼んでも Owner 権限にならない。
+///
+/// PUT の入口 trim により `" "` は `""` として保存されるため、これは「空 owner」の
+/// 検証になる（空白のまま保存された**レガシー行**の経路は
+/// `test_legacy_whitespace_only_owner_row_matches_nobody` が受け持つ）。
+#[tokio::test]
+async fn test_whitespace_user_id_is_not_owner_when_owner_blank() {
+    let app = create_test_app();
+    let (agent_id, app) = create_test_agent(app).await;
+    let app = set_agent_owner(app, &agent_id, " ").await;
+
+    let (_app, caller_type) = caller_type_for(app, &agent_id, " ").await;
+    assert_ne!(
+        caller_type, "owner",
+        "whitespace-only owner must be treated as unset"
+    );
+    assert_eq!(caller_type, "agent");
+}
+
+/// 正のコントロール: owner を設定すれば、その `user_id` はハンドラ経路で
+/// Owner として認識される（ガードが過剰に効いて owner を落としていない）。
+#[tokio::test]
+async fn test_configured_owner_is_recognized_through_handler() {
+    let app = create_test_app();
+    let (agent_id, app) = create_test_agent(app).await;
+    let app = set_agent_owner(app, &agent_id, "123456789012345678").await;
+
+    let (_app, caller_type) = caller_type_for(app, &agent_id, "123456789012345678").await;
+    assert_eq!(caller_type, "owner");
+}
+
+/// 負のコントロール: owner 設定済みでも、**別の** `user_id` は Owner にならない
+/// （ガードが過少に振れて誰でも owner になっていない）。
+#[tokio::test]
+async fn test_other_user_is_not_owner_when_owner_configured() {
+    let app = create_test_app();
+    let (agent_id, app) = create_test_agent(app).await;
+    let app = set_agent_owner(app, &agent_id, "123456789012345678").await;
+
+    let (_app, caller_type) = caller_type_for(app, &agent_id, "987654321098765432").await;
+    assert_ne!(
+        caller_type, "owner",
+        "a different user_id must not be recognized as owner"
+    );
+    assert_eq!(caller_type, "agent");
 }
 
 /// `PUT /api/agents/{id}/discord` は owner を trim して保存する。
@@ -720,6 +809,10 @@ async fn test_owner_discord_id_is_trimmed_on_save() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(resp["owner_discord_id"], "123456789012345678");
+
+    // ハンドラ経路でも trim 済みの ID が owner として通る。
+    let (_app, caller_type) = caller_type_for(app, &agent_id, "123456789012345678").await;
+    assert_eq!(caller_type, "owner");
 }
 
 /// `PATCH /api/agents/{id}/discord` も owner を trim して保存する。
@@ -759,6 +852,104 @@ async fn test_owner_discord_id_is_trimmed_on_patch() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(resp["owner_discord_id"], "987654321098765432");
+
+    // ハンドラ経路でも新しい owner が通り、置き換えられた古い owner は通らない。
+    let (app, caller_type) = caller_type_for(app, &agent_id, "987654321098765432").await;
+    assert_eq!(caller_type, "owner");
+    let (_app, caller_type) = caller_type_for(app, &agent_id, "123456789012345678").await;
+    assert_ne!(
+        caller_type, "owner",
+        "replaced owner must lose owner rights"
+    );
+}
+
+/// レガシー行（入口 trim を入れる前に空白付きで保存された `owner_discord_id`）でも
+/// ハンドラ経路の owner 判定が成立する。
+///
+/// 入口の正規化は新規保存にしか効かないので、既存 DB の行は空白付きのまま残る。
+/// API を経由せず DB に直接書いてその状態を再現する。
+#[tokio::test]
+async fn test_legacy_padded_owner_row_is_still_recognized() {
+    let (app, db) = create_test_app_with_db();
+    let (agent_id, app) = create_test_agent(app).await;
+    let app = set_agent_owner(app, &agent_id, "123456789012345678").await;
+
+    {
+        let conn = db.lock().unwrap();
+        assert!(opencrab_db::queries::patch_agent_discord_config(
+            &conn,
+            &agent_id,
+            None,
+            Some("  123456789012345678\n"),
+        )
+        .unwrap());
+    }
+
+    let (app, caller_type) = caller_type_for(app, &agent_id, "123456789012345678").await;
+    assert_eq!(
+        caller_type, "owner",
+        "padded legacy owner row must still match the owner"
+    );
+    // 別 ID は当然 owner ではない（trim 比較が緩みすぎていない）。
+    let (_app, caller_type) = caller_type_for(app, &agent_id, "987654321098765432").await;
+    assert_ne!(caller_type, "owner");
+}
+
+/// レガシー行の owner が空白のみなら「未設定」として扱い、誰も owner に昇格させない。
+#[tokio::test]
+async fn test_legacy_whitespace_only_owner_row_matches_nobody() {
+    let (app, db) = create_test_app_with_db();
+    let (agent_id, app) = create_test_agent(app).await;
+    let app = set_agent_owner(app, &agent_id, "123456789012345678").await;
+
+    {
+        let conn = db.lock().unwrap();
+        assert!(opencrab_db::queries::patch_agent_discord_config(
+            &conn,
+            &agent_id,
+            None,
+            Some(" \t\n")
+        )
+        .unwrap());
+    }
+
+    let mut app = app;
+    for user_id in [" \t\n", " ", "", "123456789012345678"] {
+        let (next, caller_type) = caller_type_for(app, &agent_id, user_id).await;
+        app = next;
+        assert_ne!(
+            caller_type, "owner",
+            "whitespace-only legacy owner must match nobody (user_id={user_id:?})"
+        );
+    }
+}
+
+/// `user_id` の前後空白はハンドラ入口で 1 回だけ正規化され、認可・セッションキー・
+/// `speaker_id` すべてで同じ値が使われる（owner にはなれるのに別セッションに
+/// 記録される、という非対称を作らない）。
+#[tokio::test]
+async fn test_user_id_is_trimmed_consistently() {
+    let app = create_test_app();
+    let (agent_id, app) = create_test_agent(app).await;
+    let app = set_agent_owner(app, &agent_id, "123456789012345678").await;
+
+    let (status, resp) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/messages"),
+        Some(serde_json::json!({
+            "content": "hello",
+            "user_id": "  123456789012345678 ",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resp["caller_type"], "owner");
+    assert_eq!(
+        resp["session_id"],
+        format!("agent-msg-{agent_id}-123456789012345678"),
+        "session id must use the trimmed user_id: {resp}"
+    );
 }
 
 // ==================== MockLlmProvider ====================
@@ -1982,15 +2173,117 @@ async fn test_skill_consolidation_curates_and_audits() {
     assert!(last.is_some() && last.as_deref() != Some("2020-01-01T00:00:00+00:00"));
 }
 
-// ==================== Subtask dispatch integration ====================
+// ==================== #169: REST の非ブロック dispatch ====================
 
-/// セッションのログを新しい順に取る小さなヘルパ。
+/// REST セッションのログを新しい順に取る小さなヘルパ。
 fn session_logs(
     db: &opencrab_db::Db,
     session_id: &str,
 ) -> Vec<opencrab_db::queries::SessionLogRow> {
     let conn = db.lock().unwrap();
     opencrab_db::queries::list_recent_session_logs(&conn, session_id, 100).unwrap()
+}
+
+fn session_status(db: &opencrab_db::Db, session_id: &str) -> Option<String> {
+    let conn = db.lock().unwrap();
+    opencrab_db::queries::get_session(&conn, session_id)
+        .ok()
+        .flatten()
+        .map(|s| s.status)
+}
+
+/// 即完了しない fake subtask を registry へ登録する（走行中 subtask の代役）。
+fn insert_running_subtask(
+    registry: &opencrab_actions::SubtaskRegistry,
+    subtask_id: &str,
+    parent_session_id: &str,
+    agent_id: &str,
+) -> tokio::task::JoinHandle<()> {
+    let handle = tokio::spawn(std::future::pending::<()>());
+    registry.insert(
+        subtask_id.to_string(),
+        opencrab_actions::SpawnedSubtask {
+            abort_handle: handle.abort_handle(),
+            session_id: format!("subtask-{subtask_id}"),
+            parent_session_id: parent_session_id.to_string(),
+            agent_id: agent_id.to_string(),
+            label: "long job".to_string(),
+            tool_name: "spawn_subtask".to_string(),
+            started_at: std::time::Instant::now(),
+            reply_target: None,
+            caller: opencrab_actions::CallerIdentity::Agent,
+            lifecycle: opencrab_actions::SubtaskLifecycle::new(),
+            steerable: false,
+        },
+    );
+    handle
+}
+
+/// #169: `POST /api/agents/{id}/messages` はツールを background subtask として dispatch する
+/// （メインを塞がない）。ツール結果は inline の `{"success":...}` ではなく
+/// `{"status":"spawned"}` になり、完了本文は親セッションログへ着地する（取得口 = セッションログ）。
+#[tokio::test]
+async fn test_rest_message_dispatches_tool_as_background_subtask() {
+    let (app, db, mock, state) = create_test_app_with_state();
+    let (agent_id, app) = create_test_agent_named(app, "Dispatcher", "TestPersona").await;
+
+    mock.push_tool_call_response(vec![ToolCall {
+        id: "tc-dispatch-1".to_string(),
+        call_type: "function".to_string(),
+        function: FunctionCall {
+            name: "learn_from_experience".to_string(),
+            arguments: serde_json::json!({
+                "skill_name": "background_work",
+                "description": "d",
+                "situation_pattern": "s",
+                "guidance": "g"
+            })
+            .to_string(),
+        },
+    }]);
+    mock.push_text_response("バックグラウンドで実行を開始しました");
+
+    let (status, resp) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/messages"),
+        Some(serde_json::json!({"content": "スキルを覚えて", "user_id": "u1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let session_id = resp["session_id"].as_str().unwrap().to_string();
+    assert_eq!(session_id, format!("agent-msg-{agent_id}-u1"));
+
+    // dispatch された（tool_result が spawned）。inline 実行なら status フィールドは無い。
+    let logs = session_logs(&db, &session_id);
+    assert!(
+        logs.iter()
+            .any(|l| l.log_type == "tool_result" && l.content.contains("\"status\":\"spawned\"")),
+        "REST でツールが background subtask へ dispatch されていない: {:?}",
+        logs.iter()
+            .map(|l| (l.log_type.clone(), l.content.clone()))
+            .collect::<Vec<_>>()
+    );
+
+    // 完了本文（subtask_completed）が親セッションログへ着地する = REST の取得口。
+    let mut settled = false;
+    for _ in 0..100 {
+        if session_logs(&db, &session_id)
+            .iter()
+            .any(|l| l.content.contains("subtask_completed"))
+        {
+            settled = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        settled,
+        "dispatch した subtask の完了本文が親セッションログへ永続化されない"
+    );
+
+    // 決着後は registry が空（settle_completed が除去する）。
+    assert!(!state.subtask_registries.has_running(&session_id));
 }
 
 /// **#298**: 非ブロック dispatch した subtask は、**その run の呼び出し元**を決着通知まで
@@ -2025,7 +2318,7 @@ async fn test_dispatched_subtask_carries_the_run_caller_to_settlement() {
     ] {
         let (app, _db, mock, state) = create_test_app_with_state();
         let (agent_id, _app) = create_test_agent_named(app, "DispatchCaller", "TestPersona").await;
-        let session_id = format!("web-{agent_id}-u298");
+        let session_id = format!("agent-msg-{agent_id}-u298");
 
         mock.push_tool_call_response(vec![ToolCall {
             id: "tc-298".to_string(),
@@ -2051,7 +2344,7 @@ async fn test_dispatched_subtask_carries_the_run_caller_to_settlement() {
             &session_id,
             "system",
             "user: スキルを覚えて",
-            "web",
+            "rest",
             caller.clone(),
         )
         .with_dispatch(
@@ -2133,7 +2426,7 @@ async fn test_run_counts_subtask_starts_from_both_launch_paths() {
     for (tool_name, args) in cases {
         let (app, _db, mock, state) = create_test_app_with_state();
         let (agent_id, _app) = create_test_agent_named(app, "StartCounter", "TestPersona").await;
-        let session_id = format!("web-{agent_id}-u431");
+        let session_id = format!("agent-msg-{agent_id}-u431");
 
         mock.push_tool_call_response(vec![ToolCall {
             id: "tc-431".to_string(),
@@ -2155,7 +2448,7 @@ async fn test_run_counts_subtask_starts_from_both_launch_paths() {
             &session_id,
             "system",
             "user: ログを調べて",
-            "web",
+            "rest",
             opencrab_actions::CallerIdentity::Owner,
         )
         .with_dispatch(
@@ -2182,8 +2475,8 @@ async fn test_run_counts_subtask_starts_from_both_launch_paths() {
 ///
 /// このテストが必要な理由: 非ブロック dispatch の注入は `process.rs` の 1 箇所
 /// （`depth == 0 && state.subtask_auto_dispatch` の分岐）で決まる。そこを潰しても
-/// 低レイヤの dispatcher テストだけでは web の配線漏れを検出できない。ここで実際の
-/// web 入口を固定して、看板機能が無音で失われるのを防ぐ。
+/// 従来は REST のテスト 1 本しか落ちず、web / Discord / Nostr / heartbeat は全緑
+/// だった。web の配線をここで固定して、看板機能が無音で失われるのを防ぐ。
 #[cfg(feature = "web")]
 #[tokio::test]
 async fn test_web_send_dispatches_tool_as_background_subtask() {
@@ -2316,6 +2609,49 @@ async fn test_web_send_existing_agent_runs() {
     assert!(resp["response"].is_string(), "応答本文が返る: {resp}");
 }
 
+/// #632: 存在しない `agent_id` への REST `POST /api/agents/{id}/messages` も同じ穴を
+/// 持っていた。サーバ側チョークポイント（`process::run_agent_response`）で弾き、404 に揃える。
+#[tokio::test]
+async fn test_rest_messages_unknown_agent_is_rejected_without_running() {
+    let (app, _db, mock, _state) = create_test_app_with_state();
+    let bogus = "does-not-exist-632-rest";
+
+    let (status, resp) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{bogus}/messages"),
+        Some(serde_json::json!({ "content": "hi", "user_id": "u1" })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(resp["error"], format!("agent not found: {bogus}"));
+    assert!(
+        mock.system_prompts().is_empty(),
+        "存在しないエージェントで LLM ターンが走った"
+    );
+}
+
+/// #632 回帰: 存在するエージェントは REST `POST /messages` で従来どおり 200 で走る。
+#[tokio::test]
+async fn test_rest_messages_existing_agent_runs() {
+    let (app, _db, mock, _state) = create_test_app_with_state();
+    let (agent_id, app) = create_test_agent_named(app, "RestReal", "TestPersona").await;
+    mock.push_text_response("やあ");
+
+    let (status, resp) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/messages"),
+        Some(serde_json::json!({ "content": "hi", "user_id": "u1" })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "存在するエージェントは 200 で走る");
+    assert_eq!(resp["session_id"], format!("agent-msg-{agent_id}-u1"));
+    assert!(resp["responses"].is_array(), "応答配列が返る: {resp}");
+}
+
 /// #632（第 3 の入口）: `POST /api/sessions/{id}/messages` は存在しない participant で
 /// ターンを起こしていた（`create_session` が participant の存在を確認せず、`agent_sessions`
 /// に FK が無く、参加者ループが `run_agent_response` を呼ぶため）。サーバ側チョークポイントで
@@ -2355,6 +2691,179 @@ async fn test_session_messages_unknown_participant_is_rejected_without_running()
     assert!(
         mock.system_prompts().is_empty(),
         "存在しない participant で LLM ターンが走った"
+    );
+}
+
+// ==================== #640: REST ターンの直列化 ====================
+
+/// `chat_completion` の中に同時に何本の run が居たかを観測する LLM プロバイダ。
+///
+/// `hold` の間 sleep して重なりの窓を作る。REST の `run_agent_response` が共有ロック
+/// （`state.session_locks.run_serialized`）を通っていれば、同一セッションの run は重ならず
+/// `max_in_flight` は 1 を超えない。別セッションは重なり 2 以上になりうる。web の
+/// `same_session_serializes` / `different_sessions_run_concurrently` と同型の観測。
+struct SerializationProbe {
+    in_flight: std::sync::atomic::AtomicUsize,
+    max_in_flight: std::sync::atomic::AtomicUsize,
+    hold: std::time::Duration,
+}
+
+impl SerializationProbe {
+    fn new(hold: std::time::Duration) -> Self {
+        Self {
+            in_flight: std::sync::atomic::AtomicUsize::new(0),
+            max_in_flight: std::sync::atomic::AtomicUsize::new(0),
+            hold,
+        }
+    }
+
+    fn max(&self) -> usize {
+        self.max_in_flight.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for SerializationProbe {
+    fn name(&self) -> &str {
+        "mock"
+    }
+
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+
+    async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        use std::sync::atomic::Ordering;
+        let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_in_flight.fetch_max(now, Ordering::SeqCst);
+        tokio::time::sleep(self.hold).await;
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        Ok(ChatResponse {
+            id: uuid::Uuid::new_v4().to_string(),
+            model: "mock-model".to_string(),
+            choices: vec![Choice {
+                index: 0,
+                message: Message::assistant("ok"),
+                finish_reason: Some(FinishReason::Stop),
+            }],
+            usage: Usage::default(),
+            created: 0,
+        })
+    }
+}
+
+/// `SerializationProbe` を既定プロバイダに仕込んだ app を作る。既定モデル `mock:test` が
+/// probe（`name()=="mock"`）へ解決する。
+fn create_probe_app(
+    hold: std::time::Duration,
+) -> (Router, opencrab_db::Db, Arc<SerializationProbe>) {
+    let (mut state, db) = create_test_state(0.5);
+    let probe = Arc::new(SerializationProbe::new(hold));
+    let mut router = LlmRouter::new();
+    router.add_provider(probe.clone() as Arc<dyn LlmProvider>);
+    router.set_default_provider("mock");
+    state.llm_router = opencrab_server::SharedLlmRouter::new(router);
+    // #703: 既定モデル `mock:test` を `model_pricing` に登録する。#676 で「出力上限が未登録の
+    // モデルは fail loud」になったため、登録が無いと run が LLM へ届く前に止まり、probe が
+    // 1 度も呼ばれない（HTTP は 200 のままで、本文にエラー文字列が入るだけなので気づけない）。
+    // このヘルパを使うテストは**直列化**を見るものなので、モデル解決で落ちてはいけない。
+    {
+        let conn = db.lock().unwrap();
+        opencrab_db::queries::upsert_model_pricing(
+            &conn,
+            &opencrab_db::queries::ModelPricingRow {
+                provider: "mock".to_string(),
+                model: "test".to_string(),
+                input_price_per_1m: 0.0,
+                output_price_per_1m: 0.0,
+                context_window: Some(200_000),
+                max_output_tokens: Some(4_096),
+            },
+        )
+        .expect("probe 用モデルの登録");
+    }
+    (opencrab_server::create_router(state), db, probe)
+}
+
+/// #640: 同一セッション（同じ agent_id + user_id）への並行 2 POST は直列に走る
+/// （`run_agent_response` の中で同時に走っている run が 1 を超えない）。
+#[tokio::test]
+async fn test_rest_agent_messages_serialize_same_session() {
+    let (app, _db, probe) = create_probe_app(std::time::Duration::from_millis(150));
+    let (agent_id, app) = create_test_agent_named(app, "SerialRest", "TestPersona").await;
+
+    let a1 = app.clone();
+    let id1 = agent_id.clone();
+    let h1 = tokio::spawn(async move {
+        send_request(
+            a1,
+            "POST",
+            &format!("/api/agents/{id1}/messages"),
+            Some(serde_json::json!({"content": "m1", "user_id": "u1"})),
+        )
+        .await
+    });
+    let a2 = app.clone();
+    let id2 = agent_id.clone();
+    let h2 = tokio::spawn(async move {
+        send_request(
+            a2,
+            "POST",
+            &format!("/api/agents/{id2}/messages"),
+            Some(serde_json::json!({"content": "m2", "user_id": "u1"})),
+        )
+        .await
+    });
+
+    let (s1, _) = h1.await.unwrap();
+    let (s2, _) = h2.await.unwrap();
+    assert_eq!(s1, StatusCode::OK);
+    assert_eq!(s2, StatusCode::OK);
+    assert_eq!(
+        probe.max(),
+        1,
+        "同一セッションへの並行 POST の run が重なった（直列化が効いていない）"
+    );
+}
+
+/// #640: 別セッション（別 user_id）への並行 POST は従来どおり並行に走る
+/// （ロックの粒度は session_id 単位。無関係なセッションを詰まらせない）。
+#[tokio::test]
+async fn test_rest_agent_messages_run_concurrently_across_sessions() {
+    let (app, _db, probe) = create_probe_app(std::time::Duration::from_millis(300));
+    let (agent_id, app) = create_test_agent_named(app, "ConcurrentRest", "TestPersona").await;
+
+    let a1 = app.clone();
+    let id1 = agent_id.clone();
+    let h1 = tokio::spawn(async move {
+        send_request(
+            a1,
+            "POST",
+            &format!("/api/agents/{id1}/messages"),
+            Some(serde_json::json!({"content": "m1", "user_id": "userA"})),
+        )
+        .await
+    });
+    let a2 = app.clone();
+    let id2 = agent_id.clone();
+    let h2 = tokio::spawn(async move {
+        send_request(
+            a2,
+            "POST",
+            &format!("/api/agents/{id2}/messages"),
+            Some(serde_json::json!({"content": "m2", "user_id": "userB"})),
+        )
+        .await
+    });
+
+    let (s1, _) = h1.await.unwrap();
+    let (s2, _) = h2.await.unwrap();
+    assert_eq!(s1, StatusCode::OK);
+    assert_eq!(s2, StatusCode::OK);
+    assert_eq!(
+        probe.max(),
+        2,
+        "別セッションへの並行 POST が直列化された（粒度が session ではなく global になっている）"
     );
 }
 
@@ -2626,6 +3135,422 @@ async fn test_web_progress_settlement_does_not_resume() {
             .await
             .is_some(),
         "完了通知（Completed）で resume が走らない"
+    );
+}
+
+/// #169: registry が `AppState` 経由で共有されるため、REST から `cancel_subtask` が
+/// 走行中 subtask に到達できる（使い捨て registry では常に not found だった）。
+#[tokio::test]
+async fn test_rest_cancel_subtask_reaches_shared_registry() {
+    let (app, db, mock, state) = create_test_app_with_state();
+    let (agent_id, app) = create_test_agent_named(app, "Canceller", "TestPersona").await;
+    let session_id = format!("agent-msg-{agent_id}-u1");
+
+    // ハンドラが使うのと同一の registry（AppState 保持）へ走行中 subtask を登録する。
+    let registry = state.subtask_registries.registry_for(&session_id);
+    let handle = insert_running_subtask(&registry, "st-rest-1", &session_id, &agent_id);
+
+    mock.push_tool_call_response(vec![ToolCall {
+        id: "tc-cancel-1".to_string(),
+        call_type: "function".to_string(),
+        function: FunctionCall {
+            name: "cancel_subtask".to_string(),
+            arguments: serde_json::json!({"subtask_id": "st-rest-1"}).to_string(),
+        },
+    }]);
+    mock.push_text_response("止めました");
+
+    let (status, _resp) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/messages"),
+        Some(serde_json::json!({"content": "さっきのを止めて", "user_id": "u1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // 停止が到達した: registry から除去され、タスクが abort されている。
+    assert!(
+        !registry.contains_key("st-rest-1"),
+        "cancel_subtask が共有 registry に到達していない（not found）"
+    );
+    assert!(handle.await.unwrap_err().is_cancelled());
+
+    let logs = session_logs(&db, &session_id);
+    assert!(
+        logs.iter().any(|l| l.log_type == "tool_cancelled"),
+        "親セッションログに tool_cancelled が記録されない"
+    );
+    assert!(
+        !logs
+            .iter()
+            .any(|l| l.log_type == "tool_result" && l.content.contains("not found")),
+        "cancel_subtask が not found を返している: {:?}",
+        logs.iter()
+            .filter(|l| l.log_type == "tool_result")
+            .map(|l| l.content.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+// ================================================================================
+// #203 / #184: REST + Discord の実配線で「最後の走行中 subtask の停止」がセッションを
+// 完了させることの e2e 固定（実際に起きていた不具合の再発防止）。
+//
+// #204 より前の壊れ方: 合成層（`SystemGatewayActions`）が「inner が `cancel_subtask` を
+// 定義していれば inner へ委譲」していたため、Discord が有効だと停止が Discord 実装へ
+// 流れ、REST の完了受け口（`RestCompletionSink::on_subtask_cancelled`）が**一度も
+// 呼ばれず**、セッションが永久に `active` のまま残っていた。#204 で委譲を撤去したが、
+// 「transport gateway が inner として配線された構成」を実際に作るテストが無かったため、
+// 配線全体（共有 registry → 停止の実体 → 停止 sink → `sessions.status`）が繋がって
+// いることは読解でしか裏付けられていなかった。
+//
+// ## なぜ HTTP エンドポイントを叩かないのか
+//
+// `send_agent_message` は run のあとに必ず `complete_session_if_idle`（registry が空なら
+// `completed`）を通す。つまり **sink が一度も呼ばれなくても、同じリクエストの終わりで
+// セッションは `completed` になる** = HTTP 層の観測ではこの不具合を検知できない
+// （旧実装でも緑になる）。そこで停止ターンだけはハンドラ step 9 と同一の `RunRequest`
+// （REST の sink + 共有 registry + transport gateway を inner）を組んで
+// `process::run_agent_response` を直接呼び、完了が **停止 sink 経由でだけ**起きることを
+// 観測する。実ネットワークには出ない（`DiscordGatewayActions::from_token` が内部で
+// 組む Http クライアントは接続しない）。
+// ================================================================================
+
+/// 「走行中 subtask を 1 本抱えた REST セッション」を作り、`inner` を transport gateway
+/// として配線した run から `cancel_subtask` を呼ぶ。
+///
+/// 返り値は [`CancelObservation`]（assert は呼び出し側が行う）。
+///
+/// `make_inner` はハンドラと同じ材料（共有 DB / workspace_base）から transport gateway を
+/// 組むためのファクトリ。本番（`send_agent_message` step 6）と同じく `state.db` を渡す。
+#[cfg(feature = "discord")]
+async fn cancel_last_subtask_in_rest_run_with_inner(
+    make_inner: impl FnOnce(opencrab_db::Db, String) -> Arc<dyn opencrab_gateway::GatewayActions>,
+) -> CancelObservation {
+    let (app, db, mock, state) = create_test_app_with_state();
+    let (agent_id, app) = create_test_agent_named(app, "DiscordWired", "TestPersona").await;
+    let session_id = format!("agent-msg-{agent_id}-u1");
+
+    // 1. 走行中 subtask を共有 registry へ入れた状態で HTTP を 1 回通し、sessions 行を
+    //    作りつつ `active` のまま残す（= 本番の「dispatch 済みでまだ走っている」状態）。
+    let registry = state.subtask_registries.registry_for(&session_id);
+    let handle = insert_running_subtask(&registry, "st-dw-1", &session_id, &agent_id);
+    mock.push_text_response("走らせています");
+    let (status, _) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/messages"),
+        Some(serde_json::json!({"content": "長いのをやって", "user_id": "u1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        session_status(&db, &session_id).as_deref(),
+        Some("active"),
+        "前提が崩れている: 走行中 subtask があるのに session が active でない"
+    );
+
+    // 2. 停止ターン。`send_agent_message` step 9 と同一の RunRequest を組む。
+    mock.push_tool_call_response(vec![ToolCall {
+        id: "tc-cancel-dw".to_string(),
+        call_type: "function".to_string(),
+        function: FunctionCall {
+            name: "cancel_subtask".to_string(),
+            arguments: serde_json::json!({"subtask_id": "st-dw-1"}).to_string(),
+        },
+    }]);
+    mock.push_text_response("止めました");
+
+    let sink: Arc<dyn opencrab_actions::SubtaskCompletionSink> =
+        Arc::new(opencrab_server::api::agents_messages::RestCompletionSink {
+            db: db.clone(),
+            registry: registry.clone(),
+            state: state.clone(),
+            agent_name: "DiscordWired".to_string(),
+        });
+    let run_req = opencrab_actions::RunRequest::new(
+        &agent_id,
+        "DiscordWired",
+        &session_id,
+        "system",
+        "user: さっきのを止めて",
+        "rest",
+        opencrab_actions::CallerIdentity::Agent,
+    )
+    .with_dispatch(Some(registry.clone()), sink)
+    .with_gateway_actions(make_inner(db.clone(), state.workspace_base.clone()));
+    opencrab_server::process::run_agent_response(&state, run_req)
+        .await
+        .expect("停止ターンの run が失敗した");
+
+    // 観測だけして返す（assert は呼び出し側。症状 = `sessions.status` を先に主張させたい）。
+    let removed_from_registry = !registry.contains_key("st-dw-1");
+    let aborted = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+        .await
+        .map(|r| r.unwrap_err().is_cancelled())
+        .unwrap_or(false);
+    CancelObservation {
+        session_status: session_status(&db, &session_id),
+        removed_from_registry,
+        aborted,
+    }
+}
+
+/// [`cancel_last_subtask_in_rest_run_with_inner`] の観測結果。
+#[cfg(feature = "discord")]
+struct CancelObservation {
+    /// 停止後の親セッションの `sessions.status`（本題。`completed` でなければ #184 の再発）。
+    session_status: Option<String>,
+    /// 共有 registry から当該 subtask が外れたか。
+    removed_from_registry: bool,
+    /// subtask のタスクが実際に abort されたか。
+    aborted: bool,
+}
+
+/// **#184 の実害バグの e2e 固定**: Discord の gateway actions を実際に inner として
+/// 配線した REST の run で最後の走行中 subtask を停止すると、セッションが `completed`
+/// になる（停止 sink が発火する唯一の経路）。
+///
+/// 落ちるとき: 合成層が停止を own で処理しなくなったとき（inner へ委譲する / own の
+/// 分岐から sink 通知が抜けるなど）。Discord は #204 以降 `cancel_subtask` を定義しない
+/// ので、委譲すれば `Unknown action` になり sink は呼ばれない。
+#[cfg(feature = "discord")]
+#[tokio::test]
+async fn test_rest_cancel_completes_session_with_discord_gateway_wired() {
+    let obs = cancel_last_subtask_in_rest_run_with_inner(|db, workspace_base| {
+        // 接続しない（Http クライアントを組むだけ）。Discord API は一度も叩かない。
+        // serenity の型は discord クレート内（from_token）に閉じる。
+        Arc::new(opencrab_discord::DiscordGatewayActions::from_token(
+            "dummy-token",
+            db,
+            workspace_base,
+            None,
+        ))
+    })
+    .await;
+    assert_eq!(
+        obs.session_status.as_deref(),
+        Some("completed"),
+        "REST + Discord 配線で最後の走行中 subtask を停止したのにセッションが completed に\
+         ならない（RestCompletionSink::on_subtask_cancelled が呼ばれていない = #184 の再発）"
+    );
+    assert!(
+        obs.removed_from_registry,
+        "停止が共有 registry に到達していない（not found のまま）"
+    );
+    assert!(obs.aborted, "停止したのに subtask が abort されていない");
+}
+
+/// **#204 前の構成そのものの再現**: inner（Discord 相当）が `cancel_subtask` を**同名で
+/// 定義していても**、停止は own が処理してセッションが `completed` になる。
+///
+/// 落ちるとき: 合成層の停止を `report_progress` と同じ「inner が定義していれば委譲」
+/// パターンに戻したとき。委譲先は sink を触らないので、セッションは `active` のまま残る
+/// （= #184 で報告された永久 active そのもの）。
+#[cfg(feature = "discord")]
+#[tokio::test]
+async fn test_rest_cancel_completes_session_even_if_inner_defines_cancel_subtask() {
+    /// 実際の Discord gateway actions に「`cancel_subtask` の定義と実装」を足した inner。
+    /// #204 で撤去した旧 Discord 実装と同じ形（sink を触らずに成功を返す）。
+    struct CancelDefiningInner {
+        discord: opencrab_discord::DiscordGatewayActions,
+        cancel_calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl opencrab_gateway::GatewayActions for CancelDefiningInner {
+        fn definitions(&self) -> Vec<opencrab_gateway::GatewayActionDef> {
+            let mut defs = self.discord.definitions();
+            defs.push(opencrab_gateway::GatewayActionDef {
+                name: "cancel_subtask".to_string(),
+                class: opencrab_gateway::ToolClass {
+                    dispatch: opencrab_gateway::DispatchMode::Inline,
+                    sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
+                    sharing: opencrab_gateway::ToolSharing::AgentBound,
+                },
+                description: "discord cancel (旧実装相当)".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {"subtask_id": {"type": "string"}},
+                    "required": ["subtask_id"]
+                }),
+            });
+            defs
+        }
+
+        async fn execute(
+            &self,
+            name: &str,
+            args: &serde_json::Value,
+            ctx: &opencrab_gateway::GatewayCallContext,
+        ) -> opencrab_gateway::GatewayActionResult {
+            if name == "cancel_subtask" {
+                self.cancel_calls
+                    .lock()
+                    .unwrap()
+                    .push(args["subtask_id"].as_str().unwrap_or("?").to_string());
+                // 旧 Discord 実装は完了 sink を知らない = セッション整合を取らない。
+                return opencrab_gateway::GatewayActionResult {
+                    success: true,
+                    data: Some(serde_json::json!({"cancelled": true, "reached_inner": true})),
+                    error: None,
+                };
+            }
+            self.discord.execute(name, args, ctx).await
+        }
+    }
+
+    let cancel_calls = Arc::new(Mutex::new(Vec::new()));
+    let recorded = cancel_calls.clone();
+    let obs = cancel_last_subtask_in_rest_run_with_inner(move |db, workspace_base| {
+        Arc::new(CancelDefiningInner {
+            discord: opencrab_discord::DiscordGatewayActions::from_token(
+                "dummy-token",
+                db,
+                workspace_base,
+                None,
+            ),
+            cancel_calls: recorded,
+        })
+    })
+    .await;
+
+    let delegated = cancel_calls.lock().unwrap().clone();
+    assert_eq!(
+        obs.session_status.as_deref(),
+        Some("completed"),
+        "inner が cancel_subtask を定義していると停止 sink が落ちてセッションが永久 active に\
+         なる（#184 の再発 / 委譲パターンへの逆戻り）。inner へ届いた停止: {delegated:?}"
+    );
+    assert!(
+        delegated.is_empty(),
+        "cancel_subtask が inner へ委譲されている（own が処理しなければ sink が発火しない）: {delegated:?}"
+    );
+    assert!(
+        obs.removed_from_registry,
+        "停止が共有 registry に到達していない（not found のまま）"
+    );
+    assert!(obs.aborted, "停止したのに subtask が abort されていない");
+}
+
+/// #169: 走行中 subtask があるあいだは session を `completed` にしない。
+#[tokio::test]
+async fn test_rest_session_stays_active_while_subtask_runs() {
+    let (app, db, mock, state) = create_test_app_with_state();
+    let (agent_id, app) = create_test_agent_named(app, "Runner", "TestPersona").await;
+    let session_id = format!("agent-msg-{agent_id}-u1");
+
+    let registry = state.subtask_registries.registry_for(&session_id);
+    let handle = insert_running_subtask(&registry, "st-running", &session_id, &agent_id);
+
+    mock.push_text_response("走らせています");
+    let (status, _) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/messages"),
+        Some(serde_json::json!({"content": "進捗どう", "user_id": "u1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    assert_eq!(
+        session_status(&db, &session_id).as_deref(),
+        Some("active"),
+        "走行中 subtask があるのに session が completed になっている"
+    );
+    handle.abort();
+}
+
+/// #169 非退行: 走行中 subtask が無ければ従来どおり応答後に `completed` になる。
+#[tokio::test]
+async fn test_rest_session_completed_when_no_subtask_runs() {
+    let (app, db, mock, _state) = create_test_app_with_state();
+    let (agent_id, app) = create_test_agent_named(app, "Plain", "TestPersona").await;
+    let session_id = format!("agent-msg-{agent_id}-u1");
+
+    mock.push_text_response("できました");
+    let (status, _) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/messages"),
+        Some(serde_json::json!({"content": "やって", "user_id": "u1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        session_status(&db, &session_id).as_deref(),
+        Some("completed")
+    );
+}
+
+/// #169: 最後の subtask が決着した時点で `RestCompletionSink` が session を完了させる
+/// （走行中は active のままなので、誰かが最後に完了させないと永久 active になる）。
+#[tokio::test]
+async fn test_rest_sink_completes_session_after_last_subtask_settles() {
+    let (app, db, mock, state) = create_test_app_with_state();
+    let (agent_id, app) = create_test_agent_named(app, "Sinker", "TestPersona").await;
+
+    mock.push_tool_call_response(vec![ToolCall {
+        id: "tc-sink-1".to_string(),
+        call_type: "function".to_string(),
+        function: FunctionCall {
+            name: "learn_from_experience".to_string(),
+            arguments: serde_json::json!({
+                "skill_name": "sink_check",
+                "description": "d",
+                "situation_pattern": "s",
+                "guidance": "g"
+            })
+            .to_string(),
+        },
+    }]);
+    mock.push_text_response("開始しました");
+    // #638: subtask の決着が**継続ターン**を起こすようになったので、その 1 本分の応答も要る
+    // （以前は REST だけ継続しなかったため 2 本で足りていた）。継続ターンが終わってから
+    // `sessions.status` の整合が行われる。本文は #631 の最小再現（`HELLO_631` を返させる）に
+    // 合わせ、**継続ターンの応答だと一意に分かる文言**にする——下でセッションログに
+    // この本文が残ることを assert し、「継続が走った」だけでなく「結果が読める」ことまで留める。
+    mock.push_text_response("HELLO_631 を確認しました");
+
+    let (status, resp) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/messages"),
+        Some(serde_json::json!({"content": "覚えて", "user_id": "u1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let session_id = resp["session_id"].as_str().unwrap().to_string();
+
+    let mut completed = false;
+    for _ in 0..100 {
+        if session_status(&db, &session_id).as_deref() == Some("completed") {
+            completed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        completed,
+        "全 subtask 決着後も session が completed にならない"
+    );
+    assert!(!state.subtask_registries.has_running(&session_id));
+
+    // #638/#631 の実症状の錠前: 継続ターンの**本文がセッションログに残る**こと。
+    //
+    // status が completed になるだけでは「継続が走った」までしか言えない。#631 で利用者が
+    // 困っていたのは「subtask の結果を受けた続きの発話が返ってこない」ことなので、その発話が
+    // `GET /api/sessions/{id}/logs` の源（memory_sessions）へ永続化されるところまで留める。
+    // 継続を削るとこの assert が落ちる（`mock` の 3 本目が消費されないため文言も現れない）。
+    let logs = {
+        let conn = db.lock().unwrap();
+        opencrab_db::queries::list_session_logs_by_session(&conn, &session_id).unwrap()
+    };
+    assert!(
+        logs.iter().any(|l| l.content.contains("HELLO_631")),
+        "継続ターンの応答がセッションログに残っていない（#631: 結果を受けた続きが読めない）: {:?}",
+        logs.iter().map(|l| l.content.as_str()).collect::<Vec<_>>()
     );
 }
 

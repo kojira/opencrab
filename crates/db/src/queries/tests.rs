@@ -147,7 +147,7 @@ fn trust_does_not_cross_platforms() {
     // Discord 経路に "42" を登録する。
     add_trusted(&conn, TRUSTED_PLATFORM_DISCORD, "row-d", "42", "a1");
     assert!(is_trusted_user(&conn, TRUSTED_PLATFORM_DISCORD, "42", "a1"));
-    // 同じ文字列を web / legacy REST の識別子として登録しても、その経路では信頼されない。
+    // 同じ文字列を web / REST の識別子として名乗っても、その経路では信頼されない。
     assert!(!is_trusted_user(&conn, TRUSTED_PLATFORM_WEB, "42", "a1"));
     assert!(!is_trusted_user(&conn, TRUSTED_PLATFORM_REST, "42", "a1"));
     assert!(get_trusted_user(&conn, TRUSTED_PLATFORM_WEB, "42", "a1").is_none());
@@ -189,9 +189,8 @@ fn trusted_user_count_is_scoped_by_platform() {
 
 /// 互換読みの撤去（#159）で**何が変わったか**を明示する。
 ///
-/// 互換読みの撤去前: 従来経路（`discord`）の行しか無いユーザーも web と当時の
-/// direct-message REST で信頼されていた。
-/// 互換読みの撤去後: 自経路の行が無ければ引けない = そのユーザーは権限を失う。
+/// 撤去前: 従来経路（`discord`）の行しか無いユーザーも web / REST で信頼されていた。
+/// 撤去後: 自経路の行が無ければ引けない = そのユーザーは web / REST で権限を失う。
 /// ここが緑のままなら、互換読みが別名で復活していないということ。
 #[test]
 fn legacy_discord_rows_no_longer_grant_trust_on_other_platforms() {
@@ -200,7 +199,7 @@ fn legacy_discord_rows_no_longer_grant_trust_on_other_platforms() {
 
     // 従来経路の行は自経路（discord）でだけ効く。
     assert!(get_trusted_user(&conn, TRUSTED_PLATFORM_DISCORD, "42", "a1").is_some());
-    // web / legacy REST では同じ識別子を引けない（＝移行前のユーザーは信頼を失う）。
+    // web / REST から同じ識別子で来ても引けない（＝移行前のユーザーは信頼を失う）。
     assert!(get_trusted_user(&conn, TRUSTED_PLATFORM_WEB, "42", "a1").is_none());
     assert!(get_trusted_user(&conn, TRUSTED_PLATFORM_REST, "42", "a1").is_none());
 
@@ -211,12 +210,12 @@ fn legacy_discord_rows_no_longer_grant_trust_on_other_platforms() {
     assert!(get_trusted_user(&conn, TRUSTED_PLATFORM_DISCORD, "dash-user", "a1").is_none());
 }
 
-/// 登録 API が現行の読み出し経路と legacy `rest` の互換値だけを受け付ける。
+/// 登録 API が受け付ける経路の集合＝読み出し側が引く経路の集合。
 ///
 /// `nostr` は #319 で読み出し側（Nostr 受信ターンの呼び出し元解決）が引くように
-/// なったので、登録 API も受け付ける。`rest` は既存行との互換用で、読み出し経路はない。
+/// なったので、登録 API も受け付ける。
 #[test]
-fn known_platforms_are_read_paths_plus_legacy_rest() {
+fn known_platforms_are_exactly_the_read_paths() {
     assert!(is_known_trusted_platform(TRUSTED_PLATFORM_DISCORD));
     assert!(is_known_trusted_platform(TRUSTED_PLATFORM_WEB));
     assert!(is_known_trusted_platform(TRUSTED_PLATFORM_REST));

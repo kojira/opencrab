@@ -1181,7 +1181,7 @@ fn spawn_background_index_build(state: &AppState, agent_id: &str, effective_mode
 /// 実行対象の agent 行が `agents` に存在しないときのエラー（#632）。
 ///
 /// `run_agent_response` は**サーバ側の全ターン実行が通る唯一のチョークポイント**
-/// （`sessions::send_message`、scheduler / intake / sleep /
+/// （REST `agents_messages` / `sessions::send_message`、scheduler / intake / sleep /
 /// subtask、そして web も production では `AppState::run_agent_response` 経由でここを通る）。
 /// エージェント別テーブルには FK 制約が無く、存在しない agent_id でも per-agent 設定が
 /// 既定に落ちたまま「動いてしまう」。ここで 1 度だけ弾けば、入口ごとにチェックを

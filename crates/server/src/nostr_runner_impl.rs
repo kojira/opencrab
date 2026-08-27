@@ -33,7 +33,7 @@ fn encrypt_at_rest(
 /// トレイト実装からロックを剥がしただけの純粋な関数にしてある（`AppState` を組まずに
 /// 実 DB で検証できるようにするため）。
 ///
-/// 判定そのものは web と同じ 1 実装
+/// 判定そのものは web / REST と同じ 1 実装
 /// （[`crate::caller_identity::resolve_caller_identity_with_owner`]）に委譲する。
 /// ここが持つのは **Nostr 固有の 2 点**だけ:
 ///
@@ -137,7 +137,7 @@ pub(crate) fn nostr_gate_allow_keys_from_db(
 impl opencrab_nostr::NostrAgentRunner for AppState {
     /// 受信イベントの発言者から呼び出し元の権限を決める（#319）。
     ///
-    /// 判定そのものは web と同じ 1 実装
+    /// 判定そのものは web / REST と同じ 1 実装
     /// （[`crate::caller_identity::resolve_caller_identity_with_owner`]）に委譲する。
     /// ここが持つのは **Nostr 固有の 2 点**だけ:
     ///
