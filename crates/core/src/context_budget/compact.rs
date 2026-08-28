@@ -251,7 +251,7 @@ pub fn compact_to_low_water(
         }
     }
 
-    kept.sort_by(|a, b| a.log_id.cmp(&b.log_id));
+    kept.sort_by_key(|a| a.log_id);
 
     let text = join_kept(&cp_text, checkpoint_empty, &kept);
     CompactOutcome {
