@@ -29,6 +29,7 @@ struct SaidMetrics {
     store_error: AtomicU64,
     bad_request: AtomicU64,
     queue_full: AtomicU64,
+    bundle_discarded: AtomicU64,
 }
 
 pub fn spawn_instance(
@@ -181,9 +182,12 @@ fn spawn_lane(
         LaneKind::Default => false,
         LaneKind::Watch { .. } => watches_beyond_self(&filter),
     };
-    let interval = watch
-        .as_ref()
-        .map(|w| Duration::from_secs(w.interval_secs as u64));
+    let flush = watch.as_ref().map(|w| {
+        (
+            Duration::from_secs(w.interval_secs as u64),
+            w.max_items as usize,
+        )
+    });
     tokio::spawn(async move {
         let pending = Arc::new(tokio::sync::Mutex::new(Vec::<WatchEvent>::new()));
         let watch_fut = async {
@@ -219,7 +223,7 @@ fn spawn_lane(
             .await;
         };
         let flush_fut = async {
-            let Some(interval) = interval else {
+            let Some((interval, max_items)) = flush else {
                 std::future::pending::<()>().await;
                 return;
             };
@@ -235,6 +239,7 @@ fn spawn_lane(
                     beyond,
                     &pending,
                     &metrics,
+                    max_items,
                 )
                 .await;
             }
@@ -281,6 +286,39 @@ async fn handle_line(
     .await;
 }
 
+struct BundleWindow {
+    events: Vec<WatchEvent>,
+    discarded: usize,
+}
+
+/// interval 内のイベントを created_at / id 順に並べ、新しい方から `max_items` 件残す。
+fn take_bundle_window(mut events: Vec<WatchEvent>, max_items: usize) -> BundleWindow {
+    events.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+    let discarded = events.len().saturating_sub(max_items);
+    if discarded > 0 {
+        events.drain(..discarded);
+    }
+    BundleWindow { events, discarded }
+}
+
+fn record_bundle_discarded(metrics: &SaidMetrics, discarded: usize, kept: usize, max_items: usize) {
+    if discarded == 0 {
+        return;
+    }
+    let n = metrics
+        .bundle_discarded
+        .fetch_add(discarded as u64, Ordering::Relaxed)
+        + discarded as u64;
+    tracing::warn!(
+        discarded,
+        kept,
+        max_items,
+        bundle_discarded = n,
+        "bundle trimmed; older items dropped"
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn flush_bundle(
     client: &InstanceClient,
     address: &str,
@@ -289,15 +327,18 @@ async fn flush_bundle(
     beyond: bool,
     pending: &tokio::sync::Mutex<Vec<WatchEvent>>,
     metrics: &SaidMetrics,
+    max_items: usize,
 ) {
-    let mut events = {
+    let events = {
         let mut g = pending.lock().await;
         std::mem::take(&mut *g)
     };
     if events.is_empty() {
         return;
     }
-    events.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+    let window = take_bundle_window(events, max_items);
+    record_bundle_discarded(metrics, window.discarded, window.events.len(), max_items);
+    let events = window.events;
     let Some(watch_id) = lane.watch_id() else {
         tracing::warn!("bundle dropped; default lane has no watch_id");
         return;
@@ -435,6 +476,7 @@ mod tests {
             watches: vec![WatchPlacement {
                 id: 3,
                 interval_secs: 120,
+                max_items: crate::config::DEFAULT_BUNDLE_MAX_ITEMS,
                 filter: WatchFilter {
                     authors: vec!["npub1watched".into()],
                     ..WatchFilter::default()
@@ -524,5 +566,142 @@ mod tests {
         record_said_outcome(&metrics, "o4", &SaidOutcome::NotAdmitted);
         assert_eq!(metrics.store_error.load(Ordering::Relaxed), 2);
         assert_eq!(metrics.bad_request.load(Ordering::Relaxed), 1);
+    }
+
+    fn hex_id(n: u8) -> String {
+        format!("{n:02x}").repeat(32)
+    }
+
+    fn timeline_event(n: u8, created_at: i64) -> WatchEvent {
+        WatchEvent {
+            id: hex_id(n),
+            pubkey: hex_id(0xaa),
+            npub: None,
+            note_id: None,
+            created_at,
+            kind: 1,
+            content: format!("e{n}"),
+            tags: vec![],
+        }
+    }
+
+    fn prepared_manifest(watch_id: i64, events: &[WatchEvent]) -> (String, Vec<String>, u32) {
+        let ids: Vec<String> = events
+            .iter()
+            .map(|e| crate::map::normalize_author_id(&e.id).expect("hex id"))
+            .collect();
+        let lane = Lane::watch(watch_id);
+        let origins: Vec<String> = ids
+            .iter()
+            .map(|id| crate::map::decisive_origin(&lane, id))
+            .collect();
+        (
+            bundle_id("bind-1", watch_id, &ids),
+            origins,
+            events.len() as u32,
+        )
+    }
+
+    #[test]
+    fn bundle_window_keeps_all_when_at_or_under_max() {
+        let events = vec![
+            timeline_event(2, 20),
+            timeline_event(1, 10),
+            timeline_event(3, 30),
+        ];
+        let window = take_bundle_window(events, 50);
+        assert_eq!(window.discarded, 0);
+        assert_eq!(
+            window
+                .events
+                .iter()
+                .map(|e| e.created_at)
+                .collect::<Vec<_>>(),
+            vec![10, 20, 30]
+        );
+    }
+
+    #[test]
+    fn bundle_window_keeps_newest_50_when_over_max() {
+        let mut events: Vec<WatchEvent> = (1u8..=60)
+            .map(|n| timeline_event(n, i64::from(n)))
+            .collect();
+        events.reverse();
+        let window = take_bundle_window(events, 50);
+        assert_eq!(window.discarded, 10);
+        assert_eq!(window.events.len(), 50);
+        let kept: Vec<i64> = window.events.iter().map(|e| e.created_at).collect();
+        assert_eq!(kept.first().copied(), Some(11));
+        assert_eq!(kept.last().copied(), Some(60));
+        assert_eq!(kept, (11..=60).collect::<Vec<i64>>());
+    }
+
+    #[test]
+    fn bundle_discarded_count_is_recorded() {
+        let metrics = SaidMetrics::default();
+        let events: Vec<WatchEvent> = (1u8..=60)
+            .map(|n| timeline_event(n, i64::from(n)))
+            .collect();
+        let window = take_bundle_window(events, 50);
+        record_bundle_discarded(&metrics, window.discarded, window.events.len(), 50);
+        assert_eq!(metrics.bundle_discarded.load(Ordering::Relaxed), 10);
+        record_bundle_discarded(&metrics, 3, 50, 50);
+        assert_eq!(metrics.bundle_discarded.load(Ordering::Relaxed), 13);
+        record_bundle_discarded(&metrics, 0, 2, 50);
+        assert_eq!(metrics.bundle_discarded.load(Ordering::Relaxed), 13);
+    }
+
+    #[test]
+    fn capped_bundle_manifest_matches_coordinator_contract() {
+        let events: Vec<WatchEvent> = (1u8..=60)
+            .map(|n| timeline_event(n, i64::from(n)))
+            .collect();
+        let window = take_bundle_window(events, 50);
+        let (bundle, origins, count) = prepared_manifest(17, &window.events);
+        assert_eq!(count, 50);
+        assert_eq!(origins.len(), count as usize);
+        let dropped = timeline_event(1, 1);
+        let dropped_origin = crate::map::decisive_origin(&Lane::watch(17), &dropped.id);
+        assert!(
+            !origins.contains(&dropped_origin),
+            "discarded origin must not enter manifest"
+        );
+        let kept_ids: Vec<String> = window
+            .events
+            .iter()
+            .map(|e| crate::map::normalize_author_id(&e.id).unwrap())
+            .collect();
+        assert_eq!(bundle, bundle_id("bind-1", 17, &kept_ids));
+        let all_ids: Vec<String> = (1u8..=60)
+            .map(|n| crate::map::normalize_author_id(&hex_id(n)).unwrap())
+            .collect();
+        assert_ne!(
+            bundle,
+            bundle_id("bind-1", 17, &all_ids),
+            "bundle_id must not include discarded ids"
+        );
+        for (i, event) in window.events.iter().enumerate() {
+            let place = BundlePlace {
+                bundle_id: bundle.clone(),
+                index: (i as u32) + 1,
+                count,
+                origins: origins.clone(),
+            };
+            assert!(place.index >= 1 && (place.index as usize) <= origins.len());
+            assert_eq!(place.origins.len(), place.count as usize);
+            let mapped = map_event(
+                event,
+                &"11".repeat(32),
+                true,
+                &Lane::watch(17),
+                Some(&place),
+            )
+            .expect("map");
+            assert!(mapped
+                .text
+                .contains(&crate::map::bundle_members_line(&origins)));
+            assert!(mapped.text.contains(&format!("\"count\":{count}")));
+            assert!(!mapped.text.contains(&dropped_origin));
+        }
     }
 }

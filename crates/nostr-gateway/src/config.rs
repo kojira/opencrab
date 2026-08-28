@@ -45,10 +45,20 @@ pub struct WatchFilter {
     pub npub: Option<String>,
 }
 
+/// タイムライン束ねの上限件数。省略時はこの値。
+pub const DEFAULT_BUNDLE_MAX_ITEMS: i64 = 50;
+
+fn default_max_items() -> i64 {
+    DEFAULT_BUNDLE_MAX_ITEMS
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct WatchPlacement {
     pub id: i64,
     pub interval_secs: i64,
+    /// 1 interval で束ねる上限。省略時は [`DEFAULT_BUNDLE_MAX_ITEMS`]。
+    #[serde(default = "default_max_items")]
+    pub max_items: i64,
     #[serde(default)]
     pub filter: WatchFilter,
     #[serde(default)]
@@ -146,6 +156,9 @@ fn validate_instance_config(cfg: &InstanceConfig) -> anyhow::Result<()> {
                 "watch {} interval_secs must be a positive integer",
                 watch.id
             );
+        }
+        if watch.max_items <= 0 {
+            anyhow::bail!("watch {} max_items must be a positive integer", watch.id);
         }
     }
     Ok(())
@@ -296,7 +309,60 @@ mod tests {
         assert_eq!(watch.effective_filter().authors, vec!["npub1watched"]);
         assert_eq!(watch.effective_filter().keywords, vec!["opencrab"]);
         assert_eq!(watch.effective_filter().kinds, vec![1, 7]);
+        assert_eq!(watch.max_items, DEFAULT_BUNDLE_MAX_ITEMS);
         assert!(watches_beyond_self(watch.effective_filter()));
+    }
+
+    #[test]
+    fn omitted_max_items_defaults_to_50() {
+        let cfg: InstanceConfig = serde_json::from_value(serde_json::json!({
+            "relays": ["wss://example.invalid"],
+            "self_pubkey": "aa".repeat(32),
+            "name": "crab",
+            "watches": [{
+                "id": 1,
+                "interval_secs": 30,
+                "filter_json": { "authors": ["npub1watched"] }
+            }]
+        }))
+        .unwrap();
+        assert_eq!(cfg.watches[0].max_items, 50);
+        validate_instance_config(&cfg).unwrap();
+    }
+
+    #[test]
+    fn explicit_max_items_is_kept() {
+        let cfg: InstanceConfig = serde_json::from_value(serde_json::json!({
+            "relays": ["wss://example.invalid"],
+            "self_pubkey": "aa".repeat(32),
+            "name": "crab",
+            "watches": [{
+                "id": 1,
+                "interval_secs": 30,
+                "max_items": 10,
+                "filter_json": { "authors": ["npub1watched"] }
+            }]
+        }))
+        .unwrap();
+        assert_eq!(cfg.watches[0].max_items, 10);
+        validate_instance_config(&cfg).unwrap();
+    }
+
+    #[test]
+    fn non_positive_max_items_is_fail_loud() {
+        let mut cfg = sample_config();
+        cfg.watches.push(WatchPlacement {
+            id: 1,
+            interval_secs: 30,
+            max_items: 0,
+            filter: WatchFilter::default(),
+            filter_json: None,
+        });
+        let err = validate_instance_config(&cfg).unwrap_err();
+        assert!(err.to_string().contains("max_items"), "{err}");
+        cfg.watches[0].max_items = -1;
+        let err = validate_instance_config(&cfg).unwrap_err();
+        assert!(err.to_string().contains("max_items"), "{err}");
     }
 
     #[test]

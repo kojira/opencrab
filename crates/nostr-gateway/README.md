@@ -21,6 +21,7 @@ default(メンション)車線は常設。watch は追加車線。同じ `addres
 watch child は bind ack の後にだけ起動する。切断で child を止め、読取済み未送信は破棄して再送しない。
 `SaidOutcome` は Accepted / NotAdmitted / Disconnected / WireErr を記録し、`store_error` / `bad_request` はカウンタに残す。turn 実行中の said は core の session queue 32 に積む。`PostRefuse::Busy`（`said refused; binding busy`）はキュー満杯の応答にだけ使う。
 watch の有効フィルタは `filter_json`。アンカー `beyond_self` は watch 設定値（`!p_self` の代用はしない）。
+タイムライン車線の Bundle は `interval_secs` ごとに flush する。`max_items` は 1 周期の上限件数（省略時 50）。超過分は新しい方から `max_items` 件を残し、古い分は捨てる。捨てた件数は warn と `bundle_discarded` カウンタに残す（会話本文には出さない）。manifest / `bundle_id` / `count` / `[NOSTRBUNDLE/V1 …]` は残した分だけ。
 
 ## 写像
 
