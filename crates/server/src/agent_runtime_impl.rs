@@ -72,11 +72,12 @@ impl AgentRuntime for AppState {
             system_prompt,
             runtime_context_text,
         )?;
-        process::build_conversation_string_with_memory_index(
+        process::build_conversation_string_with_waters(
             &conn,
             session_id,
             agent_id,
             env.conversation_high,
+            env.conversation_low,
             process::include_memory_index(&env),
         )
     }

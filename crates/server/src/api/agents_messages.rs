@@ -113,11 +113,12 @@ async fn run_rest_continuation(
                 return None;
             }
         };
-        let raw = match process::build_conversation_string_with_memory_index(
+        let raw = match process::build_conversation_string_with_waters(
             &conn,
             &session_id,
             &agent_id,
             env.conversation_high,
+            env.conversation_low,
             process::include_memory_index(&env),
         ) {
             Ok(c) => c,
@@ -427,11 +428,12 @@ pub async fn send_agent_message(
                 return Json(serde_json::json!({"error": e.to_string()})).into_response();
             }
         };
-        let raw = match process::build_conversation_string_with_memory_index(
+        let raw = match process::build_conversation_string_with_waters(
             &conn,
             &session_id,
             &id,
             env.conversation_high,
+            env.conversation_low,
             process::include_memory_index(&env),
         ) {
             Ok(s) => s,

@@ -393,6 +393,8 @@ pub fn build_agent_context(
          then `retrieve_memory_nodes` on a hit to read the original logs\n\
          \n\
          These tools let you access your full history even after compaction.\n\
+         When your working position changes, call update_context_checkpoint with \
+         {{confirmed, position, next}} so the arrival point survives compaction.\n\
          \n\
          ## Task Ledger\n\
          \n\
@@ -499,6 +501,7 @@ pub use opencrab_core::context_budget::{
 };
 pub use opencrab_core::conversation::{
     build_conversation_string, build_conversation_string_with_memory_index,
+    build_conversation_string_with_waters,
 };
 
 /// 入口共通: コア dispatcher の tool schema を 1 回測る。gateway / MCP は
@@ -523,6 +526,32 @@ pub fn core_functions_tokens() -> Result<usize, ContextBudgetError> {
 /// Memory Index を載せるか。判定は envelope 側だけが持つ。
 pub fn include_memory_index(env: &ContextBudgetEnvelope) -> bool {
     matches!(env.memory_index_decision, MemoryIndexDecision::Inject)
+}
+
+/// ターン終了直後の正時: 派生スナップショットを行追加する（#826-B）。
+fn persist_turn_end_snapshot(
+    state: &AppState,
+    session_id: &str,
+    agent_id: &str,
+    conversation_high: usize,
+    conversation_low: usize,
+) -> anyhow::Result<()> {
+    let conn = state
+        .db
+        .lock()
+        .map_err(|e| anyhow::anyhow!("db lock poisoned: {e}"))?;
+    let assembled =
+        opencrab_core::context_budget::assemble_from_snapshot(&conn, session_id, agent_id)?;
+    let mut gov =
+        opencrab_core::context_budget::TurnGovernor::new(conversation_high, conversation_low);
+    gov.finish_turn(
+        &conn,
+        session_id,
+        &assembled.items,
+        &assembled.checkpoint,
+        assembled.through_log_id,
+    )?;
+    Ok(())
 }
 
 /// 各 request 前: 実 `list_tools` で functions cap と `fixed >= input_high` を検査する。
@@ -1610,6 +1639,8 @@ pub async fn run_agent_response(
     // 保持される。既定無効（agent.loop_restart_enabled）。
     let mut conversation_override: Option<String> = None;
     let mut restarts_this_call: i64 = 0;
+    #[allow(unused_assignments)]
+    let mut last_waters: Option<(usize, usize)> = None;
     let result = loop {
         // #665: engine（LLM ループ本体）へ入る。文脈構築はここまでに終わっており、この後は LLM 呼び出しと
         // ツール往復。engine 内の debug 行は下の `.instrument(turn_span)` で turn_id 等を継承する。
@@ -1630,7 +1661,7 @@ pub async fn run_agent_response(
             let conversation_text = conversation_override.as_deref().unwrap_or(conversation);
             let runtime_text =
                 opencrab_core::runtime_context::runtime_context_prefix(conversation_text);
-            if let Err(e) = ensure_request_functions_budget(
+            match ensure_request_functions_budget(
                 RequestEnvelopeArgs {
                     conn: &conn,
                     agent_id,
@@ -1644,7 +1675,11 @@ pub async fn run_agent_response(
                 },
                 &tools,
             ) {
-                return Err(anyhow::anyhow!("{e}"));
+                Ok(env) => {
+                    engine.set_conversation_waters(env.conversation_high, env.conversation_low);
+                    last_waters = Some((env.conversation_high, env.conversation_low));
+                }
+                Err(e) => return Err(anyhow::anyhow!("{e}")),
             }
         }
         let result = engine
@@ -1728,6 +1763,9 @@ pub async fn run_agent_response(
     // sub-engine の内部 run では走らせない（旧 `execute_spawn_subtask` の sub-engine は
     // どちらも持たなかった。サブタスクごとに LLM 支出が増えるのを避ける）。
     if depth == 0 {
+        if let Some((high, low)) = last_waters {
+            persist_turn_end_snapshot(state, session_id, agent_id, high, low)?;
+        }
         spawn_background_index_build(state, agent_id, &effective_model);
         if let Ok(ref engine_result) = result {
             record_used_skills(state, agent_id, session_id, &engine_result.response);
@@ -1964,11 +2002,12 @@ fn prepare_loop_restart(
             return None;
         }
     };
-    let rebuilt = match build_conversation_string_with_memory_index(
+    let rebuilt = match build_conversation_string_with_waters(
         &conn,
         session_id,
         agent_id,
         env.conversation_high,
+        env.conversation_low,
         include_memory_index(&env),
     ) {
         Ok(c) => c,
@@ -2537,10 +2576,6 @@ mod recent_user_speech_guarantee_tests {
 
         let out = build_conversation_string(&conn, SESSION, AGENT, 400).unwrap();
         assert!(
-            out.contains("[Past context summary"),
-            "テストの前提が崩れている（コンパクション経路に入っていない）: {out}"
-        );
-        assert!(
             out.contains("つらい"),
             "要約境界より前のユーザー発言が混ぜ戻されていない: {out}"
         );
@@ -2858,6 +2893,10 @@ mod no_forced_reply_tests {
             build_agent_context(&conn, "a1", &opencrab_actions::CallerIdentity::Owner);
 
         assert!(prompt.contains("## Silent Reply"), "prompt:\n{prompt}");
+        assert!(
+            prompt.contains("update_context_checkpoint"),
+            "checkpoint 更新義務の 1 行が無い:\n{prompt}"
+        );
 
         // ループ防止は内容ベースで残る。
         assert!(

@@ -297,6 +297,22 @@ CREATE INDEX IF NOT EXISTS idx_memory_sessions_session ON memory_sessions(agent_
 CREATE INDEX IF NOT EXISTS idx_memory_sessions_session_type ON memory_sessions(session_id, log_type, id);
 
 -- ============================================
+-- 会話圧縮の派生スナップショット（#826-B）
+-- session 単位。正本（memory_sessions）は変えず、行追加のみ。
+-- {session_id, compacted_conversation, through_log_id, token_count}
+-- ============================================
+CREATE TABLE IF NOT EXISTS conversation_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    compacted_conversation TEXT NOT NULL,
+    through_log_id INTEGER NOT NULL,
+    token_count INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_conversation_snapshots_session
+    ON conversation_snapshots(session_id, id);
+
+-- ============================================
 -- MEMORY: FTS5全文検索
 -- ============================================
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_sessions_fts USING fts5(

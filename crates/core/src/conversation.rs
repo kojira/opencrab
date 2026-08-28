@@ -6,9 +6,12 @@
 //! 依存しないため core に置く（#518 手順 3〜4）。呼び出し元は `server::process`
 //! （既存パスを保つ再エクスポート）。
 
+use crate::context_budget::{assemble_from_snapshot, compact_to_low_water};
 use crate::tokens::estimate_tokens;
 
 /// コンパクション時に最低限保持する最近のログ件数。
+/// 旧 `fit_logs_to_budget` 経路（対比テスト用）だけが参照する。
+#[allow(dead_code)]
 const RECENT_MIN_LOGS: usize = 10;
 /// コンパクション時に**必ず**保持する直近ユーザー発言の件数（#284）。
 ///
@@ -24,7 +27,7 @@ const RECENT_MIN_LOGS: usize = 10;
 pub const RECENT_MIN_USER_SPEECHES: usize = 5;
 
 /// 会話履歴が空のときに `build_conversation_inner` が返すマーカー（#691 の判定にも使う）。
-const NO_MESSAGES_MARKER: &str = "No messages yet.";
+pub const NO_MESSAGES_MARKER: &str = "No messages yet.";
 
 /// 応答直前に会話履歴の末尾へ置く出力指示（#691）。
 ///
@@ -65,10 +68,29 @@ pub fn build_conversation_string_with_memory_index(
     context_budget_tokens: usize,
     include_memory_index: bool,
 ) -> Result<String, anyhow::Error> {
+    build_conversation_string_with_waters(
+        conn,
+        session_id,
+        agent_id,
+        context_budget_tokens,
+        context_budget_tokens / 2,
+        include_memory_index,
+    )
+}
+
+/// 二水位を明示して会話を組む（#826-B）。開始は組立と検査。高水位超過のときだけ刈る。
+pub fn build_conversation_string_with_waters(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    agent_id: &str,
+    conversation_high: usize,
+    conversation_low: usize,
+    include_memory_index: bool,
+) -> Result<String, anyhow::Error> {
     let prefix = build_context_prefix_sections(conn, session_id, agent_id, include_memory_index);
 
     // conversation_high から引くのは会話車線（台帳・人物像）。MI は fixed 済み。
-    let mut inner_budget = context_budget_tokens;
+    let mut inner_budget = conversation_high;
     for section in prefix.billed() {
         inner_budget = inner_budget.saturating_sub(estimate_tokens(section));
     }
@@ -81,7 +103,9 @@ pub fn build_conversation_string_with_memory_index(
     // 数十トークン過剰に確保するだけで実害はない（空履歴は "No messages yet." のみ）。
     let directive_cost = estimate_tokens(RESPONSE_ONLY_DIRECTIVE) + estimate_tokens("\n\n");
     inner_budget = inner_budget.saturating_sub(directive_cost);
-    let inner = build_conversation_inner(conn, session_id, agent_id, inner_budget)?;
+    let prefix_cost = conversation_high.saturating_sub(inner_budget);
+    let inner_low = conversation_low.saturating_sub(prefix_cost);
+    let inner = build_conversation_inner(conn, session_id, agent_id, inner_budget, inner_low)?;
 
     // #691: 履歴が空（真似る対象が無い）ときは出力指示を付けない。
     let history_is_empty = inner == NO_MESSAGES_MARKER;
@@ -190,75 +214,36 @@ fn build_context_prefix_sections(
 }
 
 /// 会話文字列本体の構築（タスク台帳の前置は `build_conversation_string` 側で行う）。
+///
+/// 開始時はスナップショット＋差分の組立と検査だけ。高水位超過のときだけ低水位まで刈る。
+/// 現行の開始時 `fit_logs_to_budget` は走らせない。
 fn build_conversation_inner(
     conn: &rusqlite::Connection,
     session_id: &str,
     agent_id: &str,
-    context_budget_tokens: usize,
+    conversation_high: usize,
+    conversation_low: usize,
 ) -> Result<String, anyhow::Error> {
-    // まず全文を試す
-    let full = build_full_conversation(conn, session_id);
-    if full == "No messages yet." {
-        return Ok(full);
+    let assembled = assemble_from_snapshot(conn, session_id, agent_id)?;
+    if assembled.text == NO_MESSAGES_MARKER {
+        return Ok(assembled.text);
     }
-
-    // 全文が予算内ならそのまま返す
-    if estimate_tokens(&full) <= context_budget_tokens {
-        return Ok(full);
+    if assembled.tokens <= conversation_high {
+        return Ok(assembled.text);
     }
-
-    // 予算超過 → コンパクション
-    // memory_index の topic 要約を取得
-    let topics = match opencrab_db::queries::get_topic_nodes_for_session(conn, agent_id, session_id)
-    {
-        Ok(t) => t,
-        Err(e) => {
-            return Err(anyhow::anyhow!(
-                "Failed to get topic nodes for session {session_id}: {e}"
-            ));
-        }
-    };
-
-    if topics.is_empty() {
-        // フォールバック: 要約がない → ヘッダ 1 行 + 予算駆動の直近ウィンドウ（#609 / #610）。
-        // 圧縮パスと同じ `build_recent_window` を使う（全ログを `fit_logs_to_budget` へ渡す）。
-        let header = "[Note: Earlier messages were omitted due to context length. Showing most recent messages.]\n\n";
-        let recent_text = build_recent_window(
-            conn,
-            session_id,
-            agent_id,
-            context_budget_tokens.saturating_sub(estimate_tokens(header)),
-        );
-        return Ok(format!("{header}{recent_text}"));
-    }
-
-    // [Past context summary] セクション構築（予算の 30% 以内 / 新しい方を残す。#406）
-    let summary_section = build_past_context_summary_section(
-        &topics,
-        context_budget_tokens / PAST_SUMMARY_BUDGET_DEN * PAST_SUMMARY_BUDGET_NUM,
+    let outcome = compact_to_low_water(
+        &assembled.items,
+        &assembled.checkpoint,
+        conversation_high,
+        conversation_low,
     );
-
-    // 要約が落ちた（予算が極小）ときは先頭の空行を作らない。
-    let recent_header = if summary_section.is_empty() {
-        "[Recent conversation]\n"
-    } else {
-        "\n\n[Recent conversation]\n"
-    };
-    let overhead_tokens = estimate_tokens(&summary_section) + estimate_tokens(recent_header);
-
-    // 直近ウィンドウは**予算だけ**で組む（#609 / #610 レビュー①②）。要約は 30% で頭打ちなので、
-    // 直近会話には常に 50% 以上（ヘッダぶんを除いて ~70%）が残る（#406）。セッションの全ログを
-    // `build_recent_window` へ渡し、`fit_logs_to_budget` が末尾から予算いっぱいまで詰める。
-    // 落ちた分は `fit_logs_to_budget` の省略マーカーが告知する（`fit` に全件が渡るので、渡る前に
-    // 対象外になって黙って消える行が存在しない）。索引済み領域と内容が重複してもよい。
-    let recent_text = build_recent_window(
-        conn,
-        session_id,
-        agent_id,
-        context_budget_tokens.saturating_sub(overhead_tokens),
-    );
-
-    Ok(format!("{summary_section}{recent_header}{recent_text}"))
+    if outcome.exhausted {
+        return Err(anyhow::anyhow!(
+            "{}: conversation tokens after inviolable lanes exceed input_high",
+            crate::context_budget::CONTEXT_BUDGET_EXHAUSTED
+        ));
+    }
+    Ok(outcome.text)
 }
 
 /// `[Past context summary]` に割く文脈予算の割合（分子／分母 = 30%）。
@@ -280,11 +265,14 @@ fn build_conversation_inner(
 /// する。ここで全体予算の 30% を基準にすると、渡された予算を要約が丸ごと食い潰して
 /// **上の症状がそのまま再現する**。渡された予算に対する割合にすることで、
 /// 「実会話を優先し、ハートビート履歴は下限だけ」というオーナー決定とも向きが揃う。
+#[allow(dead_code)]
 const PAST_SUMMARY_BUDGET_NUM: usize = 3;
+#[allow(dead_code)]
 const PAST_SUMMARY_BUDGET_DEN: usize = 10;
 
 /// `[Past context summary]` のヘッダ。**予算判定にはこのヘッダぶんも含める**
 /// （セクション全体で 30% に収める）。
+#[allow(dead_code)]
 const PAST_SUMMARY_HEADER: &str =
     "[Past context summary (use retrieve_memory_nodes with short_id to recall details)]\n";
 
@@ -323,6 +311,7 @@ pub fn past_summary_omitted_notice(dropped: usize) -> String {
 /// `db.lock()` を握ったまま呼ばれ（`main.rs` の会話構築）、本番の最大セッションは
 /// topic 2,450 件 / title+summary 248,884 文字あるのに実際に残るのは 29 件なので、
 /// 全件を tiktoken に通すのは丸ごと無駄になる。直近ログに窓を入れたのと同じ理由（#405 / #406 レビュー）。
+#[allow(dead_code)]
 fn build_past_context_summary_section(
     topics: &[opencrab_db::queries::IndexNodeRow],
     budget_tokens: usize,
@@ -738,7 +727,7 @@ fn is_heartbeat_prompt_scaffolding(log: &opencrab_db::queries::SessionLogRow) ->
 /// 会話履歴には不要。新規ターンはそもそも書かない（`scheduler.rs`）が、既存 DB に積まれた分
 /// （本番で 192 件）は DB を書き換えず読み出し側でここが落とす。subtask 完了本文
 /// （`system` かつ `speaker_id=None`, #404 / #405）は `speaker_id` で区別して残す。
-fn retain_conversation_logs(
+pub fn retain_conversation_logs(
     logs: Vec<opencrab_db::queries::SessionLogRow>,
 ) -> Vec<opencrab_db::queries::SessionLogRow> {
     logs.into_iter()
@@ -747,6 +736,7 @@ fn retain_conversation_logs(
         .collect()
 }
 
+#[allow(dead_code)]
 fn build_full_conversation(conn: &rusqlite::Connection, session_id: &str) -> String {
     let logs = match opencrab_db::queries::list_session_logs_by_session(conn, session_id) {
         Ok(l) => retain_conversation_logs(l),
@@ -783,6 +773,7 @@ fn build_full_conversation(conn: &rusqlite::Connection, session_id: &str) -> Str
 /// `fit_logs_to_budget` の必須枠（`RECENT_MIN_USER_SPEECHES`）が拾う。
 ///
 /// 圧縮パス（topic 要約あり）と topic 無しフォールバックの両方がこの 1 本を共有する。
+#[allow(dead_code)]
 fn build_recent_window(
     conn: &rusqlite::Connection,
     session_id: &str,
@@ -804,6 +795,7 @@ fn build_recent_window(
 /// 飛び地としての生発言（文脈も応答有無も分からないユーザー発言）は載せないが、
 /// 「何かがあった」ことは伝わるべきなので、落とした件数と期間（先頭〜末尾の
 /// タイムスタンプ差）を書く。表記は従来の英語マーカーに揃える。
+#[allow(dead_code)]
 fn format_omission_marker(omitted: &[opencrab_db::queries::SessionLogRow]) -> String {
     let count = omitted.len();
     let noun = if count == 1 { "message" } else { "messages" };
@@ -819,6 +811,7 @@ fn format_omission_marker(omitted: &[opencrab_db::queries::SessionLogRow]) -> St
 ///
 /// ログは時系列順なので `first` が最古・`last` が最新。どちらかの `created_at` が
 /// 無い／パースできなければ `None`（マーカーは件数だけになる）。
+#[allow(dead_code)]
 fn omission_span_label(omitted: &[opencrab_db::queries::SessionLogRow]) -> Option<String> {
     let parse = |log: &opencrab_db::queries::SessionLogRow| {
         log.created_at
@@ -857,6 +850,7 @@ fn omission_span_label(omitted: &[opencrab_db::queries::SessionLogRow]) -> Optio
 /// 保証が本番経路で丸ごと no-op だった（当時の該当 4,490 件すべてが `==`）。#377 で
 /// 受信行は `agent_id`＝受信側 / `speaker_id`＝送信者 に直ったので列は縮退しなくなったが、
 /// **述語は引き続き `speaker_id` と `agent_id` 引数で比べる**（行の `agent_id` 列は無関係）。
+#[allow(dead_code)]
 fn is_user_speech(log: &opencrab_db::queries::SessionLogRow, agent_id: &str) -> bool {
     log.log_type == "speech" && log.speaker_id.as_deref().is_some_and(|s| s != agent_id)
 }
@@ -874,7 +868,8 @@ fn is_user_speech(log: &opencrab_db::queries::SessionLogRow, agent_id: &str) -> 
 /// **一番新しいユーザー発言 1 件だけは飛び地でも必ず載せる**（＝「今の指示」）。
 /// それより古い飛び地は落とし、件数と期間を書いた省略マーカーに集約する
 /// （[`format_omission_marker`]）。枠取り自体は残すので #284 の届き方は変わらない。
-fn fit_logs_to_budget(
+#[allow(dead_code)]
+pub(crate) fn fit_logs_to_budget(
     logs: &[opencrab_db::queries::SessionLogRow],
     agent_id: &str,
     budget_tokens: usize,
@@ -975,6 +970,7 @@ fn fit_logs_to_budget(
     out
 }
 
+#[allow(dead_code)]
 fn format_logs(logs: &[opencrab_db::queries::SessionLogRow]) -> String {
     logs.iter()
         .map(format_single_log)
@@ -1418,14 +1414,10 @@ mod memory_index_section_injection_tests {
             }
         );
         let include = matches!(env.memory_index_decision, MemoryIndexDecision::Inject);
-        let out = build_conversation_string_with_memory_index(
-            &conn,
-            "cur-sess",
-            "a1",
-            env.conversation_high,
-            include,
-        )
-        .unwrap();
+        // MI 省略が主題。会話車線の高水位は envelope の 20 tok ではなく十分確保する。
+        let out =
+            build_conversation_string_with_memory_index(&conn, "cur-sess", "a1", 100_000, include)
+                .unwrap();
         assert!(!out.contains("[Memory Index]"));
         assert!(!out.contains("5月は逆引き辞書を設計した。"));
     }
@@ -1489,22 +1481,17 @@ mod memory_index_section_injection_tests {
             [],
         )
         .unwrap();
-        // Memory Index は専用 cap 判定（apply_line_items）済みとして通し、
-        // 会話本文はコンパクションを強制する中間サイズの予算
+        // Memory Index は専用 cap 判定（apply_line_items）済みとして通す。
+        // 826-B で現行セッション topic の [Past context summary] は廃止。
         let out = build_conversation_string(&conn, "cur-sess", "a1", 900).unwrap();
         assert_eq!(out.matches("[Memory Index]").count(), 1);
-        assert_eq!(out.matches("[Past context summary").count(), 1);
-        // 現セッション topic は Past context summary 側のみ、他セッション topic は
-        // Memory Index 側のみ（short_id 集合が素）
-        assert_eq!(out.matches("[t-cur]").count(), 1);
+        assert!(!out.contains("[Past context summary"));
+        // 他セッション topic は Memory Index 側のみ。現セッション topic はどちらにも出ない。
+        assert!(!out.contains("[t-cur]"));
         assert_eq!(out.matches("[t-other]").count(), 1);
         let mi_pos = out.find("[Memory Index]").unwrap();
-        let pcs_pos = out.find("[Past context summary").unwrap();
-        let tcur_pos = out.find("[t-cur]").unwrap();
         let tother_pos = out.find("[t-other]").unwrap();
-        assert!(mi_pos < pcs_pos);
-        assert!(tother_pos > mi_pos && tother_pos < pcs_pos);
-        assert!(tcur_pos > pcs_pos);
+        assert!(tother_pos > mi_pos);
     }
 }
 
@@ -1516,8 +1503,8 @@ mod memory_index_section_injection_tests {
 #[cfg(test)]
 mod past_summary_budget_tests {
     use super::{
-        build_conversation_string, estimate_tokens, PAST_SUMMARY_BUDGET_DEN,
-        PAST_SUMMARY_BUDGET_NUM,
+        build_conversation_string, build_past_context_summary_section, estimate_tokens,
+        PAST_SUMMARY_BUDGET_DEN, PAST_SUMMARY_BUDGET_NUM,
     };
 
     const AGENT: &str = "a1";
@@ -1589,50 +1576,32 @@ mod past_summary_budget_tests {
         }
     }
 
-    /// 出力から 1 セクションぶん（見出しから次の見出しの直前まで）を切り出す。
-    fn section<'a>(out: &'a str, marker: &str) -> &'a str {
-        let start = out
-            .find(marker)
-            .unwrap_or_else(|| panic!("{marker} が出力に無い: {out}"));
-        let rest = &out[start..];
-        let end = [
-            "[Channel conversation]",
-            "[Past context summary",
-            "[Recent conversation]",
-        ]
-        .iter()
-        .filter_map(|m| rest[1..].find(m).map(|i| i + 1))
-        .min()
-        .unwrap_or(rest.len());
-        // セクション間の区切り（`parts.join("\n\n")`）は次のセクション側の予算で
-        // 数えられているので、ここでは落とす。
-        rest[..end].trim_end()
+    fn topic_rows(conn: &rusqlite::Connection) -> Vec<opencrab_db::queries::IndexNodeRow> {
+        opencrab_db::queries::get_topic_nodes_for_session(conn, AGENT, SESSION).unwrap()
     }
 
-    /// 出力から `[Past context summary]` セクション（ヘッダ込み）だけを切り出す。
-    fn summary_section(out: &str) -> &str {
-        section(out, "[Past context summary")
+    fn built_summary(conn: &rusqlite::Connection, budget: usize) -> String {
+        build_past_context_summary_section(&topic_rows(conn), budget)
     }
 
     /// topic が数千件あっても、セクションは予算の 30% を超えない。
+    ///
+    /// 826-B で本番組立からは外したので、ヘルパーを直接叩く。
     #[test]
     fn past_summary_stays_within_thirty_percent_of_the_budget() {
         let conn = opencrab_db::init_memory().unwrap();
-        seed_logs(&conn, 400);
         seed_topics(&conn, 2_000);
 
         const BUDGET: usize = 4_000;
-        let out = build_conversation_string(&conn, SESSION, AGENT, BUDGET).unwrap();
         let cap = BUDGET / PAST_SUMMARY_BUDGET_DEN * PAST_SUMMARY_BUDGET_NUM;
-        let used = estimate_tokens(summary_section(out.as_str()));
+        let section = built_summary(&conn, cap);
+        let used = estimate_tokens(&section);
         assert!(
             used <= cap,
             "[Past context summary] が予算の 30% ({cap}) を超えた: {used} トークン"
         );
-        // 上限が無かった頃はここが数万トークンだった。空回りしていないこと（＝実際に
-        // 切り詰めが起きて、全件連結にはなっていないこと）も同時に見る。
         assert!(
-            !out.contains("TOPIC-000"),
+            !section.contains("TOPIC-000"),
             "2,000 件が全件載っている（切り詰めが起きていない）"
         );
     }
@@ -1645,11 +1614,9 @@ mod past_summary_budget_tests {
     #[test]
     fn past_summary_keeps_the_newest_topics_and_drops_the_oldest() {
         let conn = opencrab_db::init_memory().unwrap();
-        seed_logs(&conn, 400);
         seed_topics(&conn, 100);
 
-        let out = build_conversation_string(&conn, SESSION, AGENT, 4_000).unwrap();
-        let section = summary_section(out.as_str());
+        let section = built_summary(&conn, 1_200);
         assert!(
             section.contains("TOPIC-099"),
             "最新の topic が落ちている: {section}"
@@ -1672,11 +1639,9 @@ mod past_summary_budget_tests {
     #[test]
     fn past_summary_reports_how_many_were_omitted() {
         let conn = opencrab_db::init_memory().unwrap();
-        seed_logs(&conn, 400);
         seed_topics(&conn, 100);
 
-        let out = build_conversation_string(&conn, SESSION, AGENT, 4_000).unwrap();
-        let section = summary_section(out.as_str());
+        let section = built_summary(&conn, 1_200);
         assert!(
             section.contains("older topic summaries were omitted"),
             "落としたことが伝わっていない: {section}"
@@ -1713,13 +1678,9 @@ mod past_summary_budget_tests {
     #[test]
     fn past_summary_emits_no_notice_when_all_topics_fit() {
         let conn = opencrab_db::init_memory().unwrap();
-        // 全文が 4,000 を超えるだけのログを置く（＝コンパクションを起こす）。
-        seed_logs(&conn, 400);
-        // topic は 3 件だけ。30% 枠（1,200 トークン）に余裕で全件収まる。
         seed_topics(&conn, 3);
 
-        let out = build_conversation_string(&conn, SESSION, AGENT, 4_000).unwrap();
-        let section = summary_section(out.as_str());
+        let section = built_summary(&conn, 4_000);
 
         // 全 topic が [Past context summary] に出る。
         for i in 0..3 {
@@ -1750,16 +1711,11 @@ mod past_summary_budget_tests {
 
         const BUDGET: usize = 4_000;
         let out = build_conversation_string(&conn, SESSION, AGENT, BUDGET).unwrap();
-        let recent = &out[out
-            .find("[Recent conversation]")
-            .unwrap_or_else(|| panic!("直近会話セクションが無い: {out}"))..];
-        let used = estimate_tokens(recent);
         assert!(
-            used * 2 >= BUDGET,
-            "直近会話が予算の 50% ({}) に届いていない: {used} トークン",
-            BUDGET / 2
+            out.contains("[old_history_summary]") || out.contains("[context_checkpoint]"),
+            "二水位圧縮の印が無い: {out}"
         );
-        // 合計が予算を超えないこと（本 issue の本体）。
+        assert!(out.contains("log line 399"), "直近ログが落ちている: {out}");
         assert!(
             estimate_tokens(&out) <= BUDGET,
             "プロンプト全体が予算 {BUDGET} を超えた: {} トークン",
@@ -1778,14 +1734,18 @@ mod past_summary_budget_tests {
         seed_topics(&conn, 50);
 
         for budget in 0..=3 {
-            let out = build_conversation_string(&conn, SESSION, AGENT, budget).unwrap();
-            assert!(!out.is_empty(), "budget={budget} で空文字になった");
-            // 予算に告知すら入らないのでセクションごと落ちる。直近ログの下限
-            // （RECENT_MIN_LOGS）は引き続き効く。
-            assert!(
-                out.contains("log line 19"),
-                "budget={budget} で直近ログの下限が効いていない: {out}"
-            );
+            match build_conversation_string(&conn, SESSION, AGENT, budget) {
+                Ok(out) => {
+                    assert!(!out.is_empty(), "budget={budget} で空文字になった");
+                }
+                Err(e) => {
+                    let msg = format!("{e}");
+                    assert!(
+                        msg.contains(crate::context_budget::CONTEXT_BUDGET_EXHAUSTED),
+                        "budget={budget} は exhausted 以外: {msg}"
+                    );
+                }
+            }
         }
     }
 }
@@ -1800,7 +1760,7 @@ mod past_summary_budget_tests {
 #[cfg(test)]
 mod budget_driven_recent_window_tests {
     use super::{
-        build_conversation_string, build_recent_window, retain_conversation_logs, RECENT_MIN_LOGS,
+        build_conversation_string, build_recent_window, estimate_tokens, retain_conversation_logs,
     };
 
     const AGENT: &str = "a1";
@@ -1901,28 +1861,18 @@ mod budget_driven_recent_window_tests {
         const BUDGET: usize = 2_000;
         let out = build_conversation_string(&conn, SESSION, AGENT, BUDGET).unwrap();
 
-        // 前提: topic 要約ありのコンパクション経路に入っている。
         assert!(
-            out.contains("[Past context summary"),
-            "コンパクション経路に入っていない（テストの前提が崩れている）: {out}"
+            out.contains("[old_history_summary]") || out.contains("[context_checkpoint]"),
+            "二水位圧縮の印が無い: {out}"
         );
-        // 直近ウィンドウが存在する。
-        let recent = &out[out
-            .find("[Recent conversation]")
-            .unwrap_or_else(|| panic!("直近会話セクションが無い: {out}"))..];
-
-        // 索引が末尾に張り付いていても、下限（10 件）へ縮退せず予算ぶんが載る。
-        let raw_count = recent.matches("recent log line").count();
         assert!(
-            raw_count >= 40,
-            "直近 raw が予算ぶん載っていない（索引の進み具合で縮退している疑い）: \
-             {raw_count} 件 (RECENT_MIN_LOGS={RECENT_MIN_LOGS}): {recent}"
+            out.contains(&format!("recent log line {}", N - 1)),
+            "最新行が載っていない: {out}"
         );
-        // 「直近 10 件」より深いログまで届いている（旧実装では末尾 10 件=190..199 しか
-        // 載らず、これは落ちる）。
         assert!(
-            recent.contains("recent log line 160"),
-            "予算があるのに深いログまで届いていない（末尾 10 件で頭打ち）: {recent}"
+            estimate_tokens(&out) <= BUDGET,
+            "出力が予算 {BUDGET} を超えた: {} トークン",
+            estimate_tokens(&out)
         );
     }
 
@@ -2034,10 +1984,6 @@ mod budget_driven_recent_window_tests {
 
         let out = build_conversation_string(&conn, SESSION, AGENT, 400).unwrap();
         assert!(
-            out.contains("[Past context summary"),
-            "テストの前提: コンパクション経路に入ること: {out}"
-        );
-        assert!(
             out.contains("この指示は消えてはいけない"),
             "一番新しいユーザー発言が押し出された（#284 が壊れた）: {out}"
         );
@@ -2055,25 +2001,22 @@ mod budget_driven_recent_window_tests {
         seed_logs(&conn, N); // topic は置かない → 切り詰めフォールバック
         const BUDGET: usize = 2_000;
         let out = build_conversation_string(&conn, SESSION, AGENT, BUDGET).unwrap();
-        // 前提: topic 無しの切り詰めフォールバック（要約は出ない / ヘッダは出る）。
         assert!(
             !out.contains("[Past context summary"),
-            "切り詰め経路になっていない: {out}"
+            "廃止した topic 要約が出ている: {out}"
         );
         assert!(
-            out.contains("[Note: Earlier messages were omitted"),
+            out.contains("[old_history_summary]"),
             "コンパクションが起きていない（マーカー無し）: {out}"
         );
-        // 予算駆動: 下限 10 件ではなく予算ぶん（>=40 件）が載る。
-        let raw_count = out.matches("recent log line").count();
-        assert!(
-            raw_count >= 40,
-            "予算があるのに下限件数へ縮退している: {raw_count} 件 (RECENT_MIN_LOGS={RECENT_MIN_LOGS})"
-        );
-        // 一番新しい行は必ず載る。
         assert!(
             out.contains(&format!("recent log line {}", N - 1)),
             "最新行が載っていない: {out}"
+        );
+        assert!(
+            estimate_tokens(&out) <= BUDGET,
+            "出力が予算 {BUDGET} を超えた: {} トークン",
+            estimate_tokens(&out)
         );
     }
 }
@@ -2146,15 +2089,12 @@ mod budget_fit_recovery_guard_tests {
         const BUDGET: usize = 4_000;
 
         let out = build_conversation_string(&conn, SESSION, AGENT, BUDGET).unwrap();
-        // 前提: topic 無しの切り詰めフォールバックに入っている。
         assert!(
             !out.contains("[Past context summary"),
-            "topic 要約が出ている＝切り詰め経路のテストになっていない: {out}"
+            "廃止した topic 要約が出ている: {out}"
         );
-        // コンパクションが実際に起きた（＝古いメッセージが落ちた）ことの印。これが無ければ
-        // 全文がそのまま出ており、予算頭打ちを検証できていない。
         assert!(
-            out.contains("[Note: Earlier messages were omitted"),
+            out.contains("[old_history_summary]"),
             "切り詰めの注記が無い＝コンパクションが起きていない: {out}"
         );
         let toks = estimate_tokens(&out);
@@ -2185,8 +2125,8 @@ mod budget_fit_recovery_guard_tests {
         for budget in [2_000usize, 4_000, 6_000, 8_000, 10_000, 20_000] {
             let out = build_conversation_string(&conn, SESSION, AGENT, budget).unwrap();
             assert!(
-                out.contains("[Note: Earlier messages were omitted"),
-                "budget={budget} でコンパクションが起きていない（マーカー計上を検証できない）: {out}"
+                out.contains("[old_history_summary]"),
+                "budget={budget} でコンパクションが起きていない: {out}"
             );
             let toks = estimate_tokens(&out);
             assert!(
@@ -2406,10 +2346,6 @@ mod evaluation_not_in_conversation_tests {
         .unwrap();
 
         let out = build_conversation_string(&conn, SESSION, AGENT, 300).unwrap();
-        assert!(
-            out.contains("[Past context summary"),
-            "テストの前提: コンパクション経路に入ること: {out}"
-        );
         assert!(
             !out.contains("[evaluation]"),
             "コンパクション経路で evaluation 行が残っている: {out}"

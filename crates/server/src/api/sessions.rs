@@ -240,11 +240,12 @@ pub async fn send_message(
                     continue;
                 }
             };
-            let raw = match process::build_conversation_string_with_memory_index(
+            let raw = match process::build_conversation_string_with_waters(
                 &conn,
                 &id,
                 agent_id,
                 env.conversation_high,
+                env.conversation_low,
                 process::include_memory_index(&env),
             ) {
                 Ok(s) => s,

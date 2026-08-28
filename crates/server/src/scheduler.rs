@@ -346,11 +346,12 @@ fn build_scheduled_context(
             return None;
         }
     };
-    let raw = match opencrab_server::process::build_conversation_string_with_memory_index(
+    let raw = match opencrab_server::process::build_conversation_string_with_waters(
         &conn,
         session_id,
         agent_id,
         env.conversation_high,
+        env.conversation_low,
         opencrab_server::process::include_memory_index(&env),
     ) {
         Ok(s) => s,

@@ -223,6 +223,106 @@ impl Action for DeclareDoneAction {
     }
 }
 
+/// 到達点チェックポイントの明示更新（#825 / #826-B）。
+pub struct UpdateContextCheckpointAction;
+
+#[async_trait]
+impl Action for UpdateContextCheckpointAction {
+    fn name(&self) -> &str {
+        "update_context_checkpoint"
+    }
+
+    fn description(&self) -> &str {
+        "到達点チェックポイントを更新する。schema は {confirmed, position, next}。1000 token を超える更新は失敗し、旧値を残す。"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": ["confirmed", "position", "next"],
+            "properties": {
+                "confirmed": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "確認済みの到達点"
+                },
+                "position": {
+                    "type": "string",
+                    "description": "いまの位置"
+                },
+                "next": {
+                    "type": "string",
+                    "description": "次にすること"
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, args: &serde_json::Value, ctx: &ActionContext) -> ActionResult {
+        let Some(session_id) = ctx.session_id.as_deref() else {
+            return ActionResult::error("session_id is required");
+        };
+        let confirmed = match args["confirmed"].as_array() {
+            Some(arr) => arr
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect::<Vec<_>>(),
+            None => return ActionResult::error("confirmed is required"),
+        };
+        let Some(position) = args["position"].as_str() else {
+            return ActionResult::error("position is required");
+        };
+        let Some(next) = args["next"].as_str() else {
+            return ActionResult::error("next is required");
+        };
+        let incoming = opencrab_core::context_budget::ContextCheckpoint {
+            confirmed,
+            position: position.to_string(),
+            next: next.to_string(),
+        };
+        let Ok(conn) = ctx.db.lock() else {
+            return ActionResult::error("db lock failed");
+        };
+        let previous = opencrab_db::queries::list_session_logs_by_session(&conn, session_id)
+            .ok()
+            .and_then(|logs| {
+                logs.iter().rev().find_map(|log| {
+                    if log.log_type == "system" {
+                        opencrab_core::context_budget::parse_checkpoint_event(&log.content)
+                    } else {
+                        None
+                    }
+                })
+            });
+        match opencrab_core::context_budget::apply_explicit_checkpoint(previous.as_ref(), incoming)
+        {
+            Ok(cp) => {
+                let log = opencrab_db::queries::SessionLogRow {
+                    id: None,
+                    agent_id: ctx.agent_id.clone(),
+                    session_id: session_id.to_string(),
+                    log_type: "system".to_string(),
+                    content: opencrab_core::context_budget::checkpoint_event_body(&cp),
+                    speaker_id: Some(ctx.agent_id.clone()),
+                    turn_number: None,
+                    metadata_json: None,
+                    created_at: None,
+                };
+                if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
+                    return ActionResult::error(&format!("failed to persist checkpoint: {e}"));
+                }
+                ActionResult::success(json!({
+                    "updated": true,
+                    "confirmed": cp.confirmed,
+                    "position": cp.position,
+                    "next": cp.next,
+                }))
+            }
+            Err(reason) => ActionResult::error(reason),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,5 +360,67 @@ mod tests {
             .execute(&json!({"reason": "done"}), &ctx)
             .await;
         assert!(result.success);
+    }
+
+    #[tokio::test]
+    async fn update_context_checkpoint_writes_typed_event() {
+        let (_dir, ctx) = test_context();
+        let result = UpdateContextCheckpointAction
+            .execute(
+                &json!({
+                    "confirmed": ["step-1"],
+                    "position": "waiting",
+                    "next": "confirm"
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(result.success, "{:?}", result.error);
+        let conn = ctx.db.lock().unwrap();
+        let logs = opencrab_db::queries::list_session_logs_by_session(&conn, "session-1").unwrap();
+        let body = logs
+            .iter()
+            .find(|l| l.log_type == "system")
+            .expect("system event");
+        let parsed = opencrab_core::context_budget::parse_checkpoint_event(&body.content).unwrap();
+        assert_eq!(parsed.position, "waiting");
+        assert_eq!(parsed.next, "confirm");
+        assert_eq!(parsed.confirmed, vec!["step-1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn update_context_checkpoint_oversize_keeps_old() {
+        let (_dir, ctx) = test_context();
+        let ok = UpdateContextCheckpointAction
+            .execute(
+                &json!({
+                    "confirmed": ["ok"],
+                    "position": "here",
+                    "next": "there"
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(ok.success);
+        let huge = UpdateContextCheckpointAction
+            .execute(
+                &json!({
+                    "confirmed": ["x".repeat(8_000)],
+                    "position": "p",
+                    "next": "n"
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(!huge.success);
+        assert_eq!(huge.error.as_deref(), Some("checkpoint_oversize"));
+        let conn = ctx.db.lock().unwrap();
+        let logs = opencrab_db::queries::list_session_logs_by_session(&conn, "session-1").unwrap();
+        let events: Vec<_> = logs
+            .iter()
+            .filter_map(|l| opencrab_core::context_budget::parse_checkpoint_event(&l.content))
+            .collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].position, "here");
     }
 }

@@ -1,8 +1,8 @@
-# context_budget（#826-A: envelope と観測基盤）
+# context_budget（#826-A envelope / #826-B turn governor）
 
-正典はリポジトリ外の `DESIGN-CONTEXT-BUDGET.md`。このディレクトリは 826-A の実装境界だけを書く。826-B（ターン統御・スナップショット・車線・checkpoint）は扱わない。
+正典はリポジトリ外の `DESIGN-CONTEXT-BUDGET.md` と `context-budget-rulings-v1.md`。このディレクトリは実装境界だけを書く。
 
-## 水位
+## 水位（826-A）
 
 ```text
 input_high = min(floor(W * 0.50), A)
@@ -28,9 +28,18 @@ conversation_low  = input_low.saturating_sub(fixed)
 
 `fixed >= input_high` と functions 超過は唯一のエラー名 `context_budget_exhausted`。空履歴で続行しない。
 
-入口（REST / sessions / scheduler / process / AgentRuntime）は `resolve_agent_request_envelope` → `apply_line_items` だけを通す。会話組立へ渡すのは `conversation_high`。MI 判定は `apply_line_items` に一本化し、観測行は `from_envelope`。各 request 前（`run_agent_response`）は実 `list_tools` で functions cap と `fixed >= input_high` を再検査する。functions 超過も早期 `ensure_functions_within_cap` では止めず、同じ経路で一意名 + 全費目 Display + `context_budget_check` を出す。
+入口（REST / sessions / scheduler / process / AgentRuntime）は `resolve_agent_request_envelope` → `apply_line_items` だけを通す。会話組立へ渡すのは `conversation_high` と `conversation_low`（`build_conversation_string_with_waters`）。MI 判定は `apply_line_items` に一本化し、観測行は `from_envelope`。各 request 前（`run_agent_response`）は実 `list_tools` で functions cap と `fixed >= input_high` を再検査する。
 
-AgentRuntime 系（Discord / Web / Nostr）の envelope は、Owner 固定や汎用 prepend ではなく、そのターンの実 system / runtime（Nostr は runtime 空）を測る。request 前の runtime は会話先頭の実 `[Context]` 前置を使う。
+## ターン統御（826-B）
+
+圧縮の正時はターン終了直後。`TurnGovernor::finish_turn` が派生スナップショット（`conversation_snapshots`: compacted 会話 + `through_log_id`）を行追加する。DB 正本は不変。
+
+- ターン開始: `assemble_from_snapshot`（スナップショット + 水位印より後の差分）と総量検査だけ。開始時 `fit_logs_to_budget` は走らせない。開始時に高水位を越えた場合だけ途中超過と同じ圧縮を許す。
+- ターン途中: SkillEngine の各 append で `TokenLedger` 合計だけを更新し、高水位超過のときだけ合成 user 文字列を低水位まで刈る。全文再 encode はしない。
+- 二水位: `tokens > conversation_high` で発火し、低水位まで落とす。ちょうど high は非発火。
+- 車線順: 到達点チェックポイント不可侵 → 直近逐語（`must_keep` のユーザー発言を先） → エコー参照化 → 古い履歴要約。固定割合にはしない。現行 topic 30% は本番組立から外した。
+
+到達点チェックポイント（#825）: schema `{confirmed[], position, next}`、上限 1000 token。`update_context_checkpoint` の明示更新を優先し、無ければ直近 assistant speech を逐語コピー（要約しない）。過大更新は旧値を残して `checkpoint_oversize`。圧縮後は選ばれた一件を一度だけ再注入。空なら空 marker と `checkpoint_empty`。
 
 ## Memory Index / functions
 
@@ -44,6 +53,10 @@ AgentRuntime 系（Discord / Web / Nostr）の envelope は、Owner 固定や汎
 ## 観測
 
 `context_budget_check`（tracing target 同名）に entrypoint・費目・水位・before/after・action/reason を出す。
+
+## 必須テスト（mock LLM のみ）
+
+`core_process_e2e.rs`。(a) 高水位超過→低水位まで削減の数値アサート（境界値込み）。(b) 発火点 3 態のイベント順。(c) 到達点生存の新旧対比。(d) 連続投稿のヒステリシス。
 
 ## 劣化帯 harness
 
