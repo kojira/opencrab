@@ -23,7 +23,7 @@ pub struct InstanceConfig {
     #[serde(default)]
     pub filter: WatchFilter,
     pub self_pubkey: String,
-    /// エージェント表示名。あればメンション車線の keyword に足す。
+    /// エージェント表示名。メンション車線の keyword。空なら fail-loud。
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
@@ -124,6 +124,15 @@ fn validate_instance_config(cfg: &InstanceConfig) -> anyhow::Result<()> {
     if !is_hex_pubkey(&cfg.self_pubkey) {
         anyhow::bail!("self_pubkey must be 64 lowercase hex");
     }
+    if cfg
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .is_none()
+    {
+        anyhow::bail!("name must be nonempty");
+    }
     match cfg.delivery_mode.as_deref() {
         None | Some("say") | Some("tool_driven") => {}
         Some(_) => anyhow::bail!("delivery_mode must be say or tool_driven"),
@@ -159,11 +168,10 @@ pub fn watches_beyond_self(filter: &WatchFilter) -> bool {
 
 /// メンション車線（default lane）の購読フィルタ。
 ///
-/// instance の filter を土台に、`self_pubkey` と任意の `name` を keyword として足す。
-/// 条件ゼロの `--match=any` 空網を防ぐ。
+/// instance の filter を土台に、`name` を keyword として無条件で足す。
+/// hex pubkey は本文 substring にならないので入れない。p タグは nostaro 既定。
 pub fn mention_lane_filter(cfg: &InstanceConfig) -> WatchFilter {
     let mut filter = cfg.filter.clone();
-    push_keyword_once(&mut filter.keywords, &cfg.self_pubkey);
     if let Some(name) = cfg.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
         push_keyword_once(&mut filter.keywords, name);
     }
@@ -208,7 +216,7 @@ mod tests {
             relays: vec!["wss://example.invalid".into()],
             filter: WatchFilter::default(),
             self_pubkey: "aa".repeat(32),
-            name: None,
+            name: Some("crab".into()),
             watches: vec![],
             delivery_mode: Some("tool_driven".into()),
         }
@@ -229,6 +237,7 @@ mod tests {
                         serde_json::to_vec(&serde_json::json!({
                             "relays": ["wss://example.invalid"],
                             "self_pubkey": "aa".repeat(32),
+                            "name": "crab",
                         }))
                         .unwrap(),
                     )
@@ -260,6 +269,7 @@ mod tests {
         let cfg: InstanceConfig = serde_json::from_value(serde_json::json!({
             "relays": ["wss://example.invalid"],
             "self_pubkey": "aa".repeat(32),
+            "name": "crab",
             "watches": [{
                 "id": 17,
                 "interval_secs": 30,
@@ -280,23 +290,26 @@ mod tests {
     }
 
     #[test]
-    fn mention_lane_filter_adds_self_pubkey_and_name() {
-        let mut cfg = sample_config();
-        cfg.name = Some("crab".into());
+    fn mention_lane_filter_adds_name_not_hex() {
+        let cfg = sample_config();
         let filter = mention_lane_filter(&cfg);
-        assert_eq!(
-            filter.keywords,
-            vec![cfg.self_pubkey.clone(), "crab".into()]
+        assert_eq!(filter.keywords, vec!["crab".to_string()]);
+        assert!(
+            !filter.keywords.contains(&cfg.self_pubkey),
+            "hex pubkey must not be a keyword: {:?}",
+            filter.keywords
         );
         assert!(!watches_beyond_self(&cfg.filter));
     }
 
     #[test]
-    fn mention_lane_filter_skips_blank_name_and_duplicates() {
+    fn empty_name_is_fail_loud() {
         let mut cfg = sample_config();
-        cfg.filter.keywords = vec![cfg.self_pubkey.clone()];
         cfg.name = Some("   ".into());
-        let filter = mention_lane_filter(&cfg);
-        assert_eq!(filter.keywords, vec![cfg.self_pubkey.clone()]);
+        let err = validate_instance_config(&cfg).unwrap_err();
+        assert!(err.to_string().contains("name"), "{err}");
+        cfg.name = None;
+        let err = validate_instance_config(&cfg).unwrap_err();
+        assert!(err.to_string().contains("name"), "{err}");
     }
 }

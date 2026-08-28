@@ -450,12 +450,16 @@ mod tests {
         let mention_args = plan_watch_args(&cfg.relays, &planned[0].filter);
         assert_eq!(mention_args[0], "watch");
         assert!(
-            mention_args.contains(&format!("--keyword={self_pk}")),
-            "self_pubkey keyword missing: {mention_args:?}"
-        );
-        assert!(
             mention_args.contains(&"--keyword=crab".to_string()),
             "name keyword missing: {mention_args:?}"
+        );
+        assert!(
+            !mention_args.contains(&format!("--keyword={self_pk}")),
+            "hex pubkey must not be a keyword: {mention_args:?}"
+        );
+        assert!(
+            !mention_args.iter().any(|a| a.starts_with("--npub")),
+            "p-tag is nostaro default; do not pass --npub: {mention_args:?}"
         );
         assert!(
             !mention_args.iter().any(|a| a.starts_with("--author=")),
@@ -465,7 +469,7 @@ mod tests {
             .iter()
             .filter(|a| a.starts_with("--keyword="))
             .count();
-        assert_eq!(keyword_count, 2, "{mention_args:?}");
+        assert_eq!(keyword_count, 1, "{mention_args:?}");
         assert_eq!(planned[1].lane, Lane::watch(3));
         let watch_args = plan_watch_args(&cfg.relays, &planned[1].filter);
         assert!(

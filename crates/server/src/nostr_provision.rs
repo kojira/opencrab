@@ -21,7 +21,8 @@ pub fn provision_nostr_gate(
 ) -> Result<Vec<SessionBindingPlan>> {
     let plans = plan_session_bindings(agent_id, watches)?;
     let instance_id = nostr_instance_id(agent_id);
-    let config_bytes = instance_config_bytes(self_pubkey, config, watches)?;
+    let name = agent_name(conn, agent_id)?;
+    let config_bytes = instance_config_bytes(self_pubkey, &name, config, watches)?;
     let config_b64 = opencrab_extgate::encode_config_b64(&config_bytes);
     let digest = opencrab_extgate::config_digest(&config_bytes);
 
@@ -152,7 +153,8 @@ fn upsert_nostr_instance(
     bump_revision: bool,
 ) -> Result<u64> {
     let instance_id = nostr_instance_id(agent_id);
-    let config_bytes = instance_config_bytes(self_pubkey, config, watches)?;
+    let name = agent_name(conn, agent_id)?;
+    let config_bytes = instance_config_bytes(self_pubkey, &name, config, watches)?;
     let config_b64 = opencrab_extgate::encode_config_b64(&config_bytes);
     let digest = opencrab_extgate::config_digest(&config_bytes);
     let subject_id: i64 = conn
@@ -209,6 +211,15 @@ fn upsert_nostr_instance(
     };
     tx.commit()?;
     Ok(revision)
+}
+
+fn agent_name(conn: &Connection, agent_id: &str) -> Result<String> {
+    conn.query_row(
+        "SELECT name FROM agents WHERE agent_id = ?1",
+        params![agent_id],
+        |r| r.get(0),
+    )
+    .with_context(|| format!("agent {agent_id} の name が無い"))
 }
 
 #[cfg(test)]
@@ -328,5 +339,60 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stored, 2);
+    }
+
+    #[test]
+    fn instance_config_includes_agent_name() {
+        let mut conn = opencrab_db::init_memory().unwrap();
+        seed_agent(&conn);
+        let cfg = NostrConfig {
+            relays: vec!["wss://yabu.me".into()],
+            filter: opencrab_nostr::NostrFilter::default(),
+        };
+        provision_nostr_instance(&mut conn, "a1", &"aa".repeat(32), &cfg, &[], 1).unwrap();
+        let config_b64: String = conn
+            .query_row(
+                "SELECT config_b64 FROM gate_instances WHERE instance_id = ?1",
+                params![nostr_instance_id("a1")],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let bytes = opencrab_extgate::ids::decode_config_b64(&config_b64).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["name"], "a1");
+    }
+
+    #[test]
+    fn empty_agent_name_is_fail_loud() {
+        let mut conn = opencrab_db::init_memory().unwrap();
+        upsert_agent(
+            &conn,
+            &AgentRow {
+                agent_id: "a1".into(),
+                name: "   ".into(),
+                job_title: None,
+                organization: None,
+                image_url: None,
+                persona_name: "p".into(),
+                personality: None,
+                instructions: String::new(),
+                heartbeat_instructions: String::new(),
+                model: None,
+                reasoning_effort: None,
+                web_search: None,
+                metadata_json: None,
+            },
+        )
+        .unwrap();
+        let cfg = NostrConfig {
+            relays: vec!["wss://yabu.me".into()],
+            filter: opencrab_nostr::NostrFilter::default(),
+        };
+        let err =
+            provision_nostr_instance(&mut conn, "a1", &"aa".repeat(32), &cfg, &[], 1).unwrap_err();
+        assert!(
+            err.to_string().contains("agents.name"),
+            "empty name must fail-loud: {err}"
+        );
     }
 }
