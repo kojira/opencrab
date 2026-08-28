@@ -679,6 +679,12 @@ impl BridgedExecutor {
                 Some(description)
             }
         };
+        let available_providers = self
+            .context
+            .runtime_info
+            .lock()
+            .map(|info| info.available_providers.clone())
+            .unwrap_or_default();
         let mut tools: Vec<EffectiveToolDefinition> = self
             .dispatcher
             .get_definitions(&[])
@@ -688,11 +694,18 @@ impl BridgedExecutor {
             })
             .map(|definition| {
                 let class = self.tool_class_index.get(&definition.name).copied();
+                let (description, parameters) = if definition.name == "select_llm" {
+                    let (desc, params) =
+                        crate::llm_selection::select_llm_schema(&available_providers);
+                    (opt_desc(desc), params)
+                } else {
+                    (opt_desc(definition.description), definition.parameters)
+                };
                 EffectiveToolDefinition {
                     definition: FunctionDefinition {
                         name: definition.name,
-                        description: opt_desc(definition.description),
-                        parameters: definition.parameters,
+                        description,
+                        parameters,
                     },
                     class,
                     slot: ToolSlot::Dispatcher,
@@ -1537,6 +1550,30 @@ mod tests {
         // ディスパッチャーのアクションのみ
         assert!(!tools.is_empty());
         assert!(tools.iter().all(|t| t.name != "gw_action_a"));
+    }
+
+    /// (a) 実行時の select_llm 定義は RuntimeInfo の登録済みプロバイダだけを出す。
+    #[test]
+    fn select_llm_tool_schema_omits_unregistered_providers() {
+        let (_dir, ctx) = test_context();
+        let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx);
+        let tool = executor
+            .list_tools()
+            .into_iter()
+            .find(|t| t.name == "select_llm")
+            .expect("select_llm");
+        let desc = tool.description.unwrap_or_default();
+        let params = tool.parameters.to_string();
+        assert!(desc.contains("mock"), "{desc}");
+        assert!(
+            !desc.contains("openai"),
+            "未登録 openai が説明に出ている: {desc}"
+        );
+        assert!(params.contains("mock"), "{params}");
+        assert!(
+            !params.contains("openai"),
+            "未登録 openai がパラメータに出ている: {params}"
+        );
     }
 
     #[test]

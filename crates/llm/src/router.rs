@@ -105,6 +105,44 @@ impl LlmRouter {
         self.providers.keys().map(|s| s.as_str()).collect()
     }
 
+    /// エージェントに見せてよいモデル指定。登録済みプロバイダへ解決できるエイリアスと、
+    /// その `provider:model` 先だけを返す。未登録プロバイダを指すエイリアスは出さない。
+    pub fn configured_model_choices(&self) -> Vec<String> {
+        let mut choices = Vec::new();
+        for (alias, target) in &self.model_mapping {
+            if let Ok((provider, _)) = self.parse_provider_model(target) {
+                if self.providers.contains_key(&provider) {
+                    choices.push(alias.clone());
+                    if !choices.iter().any(|c| c == target) {
+                        choices.push(target.clone());
+                    }
+                }
+            }
+        }
+        choices.sort();
+        choices.dedup();
+        choices
+    }
+
+    /// `spec`（エイリアスまたは `provider:model`）の解決先プロバイダが登録済みか。
+    /// 未登録なら理由つきで拒否する（実行前の fail-loud）。
+    pub fn ensure_model_configured(&self, spec: &str) -> Result<()> {
+        let spec = spec.trim();
+        if spec.is_empty() {
+            anyhow::bail!("model spec is empty");
+        }
+        let (provider, _model) = self.resolve_model(spec)?;
+        if self.providers.contains_key(&provider) {
+            return Ok(());
+        }
+        let mut registered: Vec<&str> = self.provider_names();
+        registered.sort_unstable();
+        anyhow::bail!(
+            "未登録の LLM プロバイダ '{provider}' は使えません（指定: {spec}）。構成済み: [{}]",
+            registered.join(", ")
+        )
+    }
+
     /// Resolve a model alias.
     /// Returns (provider_name, model_name).
     /// If the input contains ":", it's treated as "provider:model".
@@ -726,5 +764,63 @@ mod tests {
         assert_eq!(names.len(), 2);
         assert!(names.contains(&"openai"));
         assert!(names.contains(&"anthropic"));
+    }
+
+    /// (a) 未登録プロバイダは選択肢に出ない。登録済みエイリアスとその解決先だけが出る。
+    #[test]
+    fn configured_model_choices_omit_unregistered_providers() {
+        let mut router = LlmRouter::new();
+        router.add_provider(Arc::new(MockProvider::new("hermit", false)));
+        router.add_model_mapping("smart", "hermit:claude-sonnet");
+        router.add_model_mapping("local", "ollama:llama3");
+        router.add_model_mapping("openai_alias", "openai:codex");
+
+        let choices = router.configured_model_choices();
+        assert!(
+            choices.contains(&"smart".to_string()),
+            "登録済みエイリアスが出ない: {choices:?}"
+        );
+        assert!(
+            choices.contains(&"hermit:claude-sonnet".to_string()),
+            "登録済みの解決先が出ない: {choices:?}"
+        );
+        assert!(
+            !choices.iter().any(|c| c.contains("openai")),
+            "未登録プロバイダ openai が選択肢に出ている: {choices:?}"
+        );
+        assert!(
+            !choices.iter().any(|c| c.contains("ollama") || c == "local"),
+            "未登録プロバイダ ollama が選択肢に出ている: {choices:?}"
+        );
+    }
+
+    /// (b) 未登録プロバイダを強制指定したら選択時に拒否する。
+    #[test]
+    fn ensure_model_configured_rejects_unregistered_provider() {
+        let mut router = LlmRouter::new();
+        router.add_provider(Arc::new(MockProvider::new("hermit", false)));
+
+        let err = router
+            .ensure_model_configured("openai:codex")
+            .expect_err("未登録 openai を通してはいけない");
+        let msg = format!("{err}");
+        assert!(msg.contains("openai"), "{msg}");
+        assert!(msg.contains("openai:codex"), "{msg}");
+        assert!(msg.contains("hermit"), "構成済み一覧が無い: {msg}");
+    }
+
+    /// (c) 登録済みプロバイダ / そのエイリアスは通る。
+    #[test]
+    fn ensure_model_configured_accepts_registered() {
+        let mut router = LlmRouter::new();
+        router.add_provider(Arc::new(MockProvider::new("hermit", false)));
+        router.add_model_mapping("smart", "hermit:claude-sonnet");
+
+        router
+            .ensure_model_configured("hermit:claude-sonnet")
+            .expect("登録済み provider:model を拒否してはいけない");
+        router
+            .ensure_model_configured("smart")
+            .expect("登録済みエイリアスを拒否してはいけない");
     }
 }
