@@ -19,7 +19,7 @@ External gate V3 最小形。契約・設計・検収は `docs/design/external-g
 | `registry.rs` | live 接続の process-local 表。`GateProbe` は `#[cfg]` 隔離 |
 | `admin.rs` | 6 operation |
 | `protocol.rs` | frame と message の読写 |
-| `inbound.rs` | said → `accept_inbound`。session は `canonical_session_id`（V3.5 reuse）。`delivery_mode` を turn 完了で読む。`kind_id=nostr` は record 前に `NostrSaidAdmit`（V1 アンカー・DM/自己/allow-set）。owner 読取失敗は store_error。record 前に renderer 本文を `sanitize_tool_result_for_log`。record 後に renderer 生本文を転記。`prompt_suffix` は watch と同文面。turn は `OnlySpeaker`。watch Immediate は `WatchAccept(privilege=Some)`。Bundle は `WatchAccept(privilege=None)` + `NostrBundleCoordinator`（member 記録・on_run 抑止・全 receipt 後に turn 0/1） |
+| `inbound.rs` | said → `accept_inbound`。session は `canonical_session_id`（V3.5 reuse）。`delivery_mode` を turn 完了で読む。`kind_id=nostr` は record 前に `NostrSaidAdmit`（V1 アンカー・DM/自己/allow-set）。owner 読取失敗は store_error。record 前に renderer 本文を `sanitize_tool_result_for_log`。record 後に renderer 生本文を転記。`prompt_suffix` は watch と同文面。turn は `OnlySpeaker`。watch Immediate は `WatchAccept(privilege=Some)`。Bundle は `WatchAccept(privilege=None)` + `NostrBundleCoordinator`（member 記録・on_run 抑止・全 receipt 後に turn 0/1）。gateway は Bundle member を `post_said_receipt` で送る（占有を ack までに限り、後続 member を Busy で落とさない） |
 | `bundle.rs` | `nostr_bundle_state` の insert/update。最初の非重複 member で manifest 全 origin を `external_origins` と照合し old receipt を先に立てる。重複 origin path は呼ばない。manifest 不一致は store_error |
 | `delivery.rs` | `DeliveryEffect` → say 1 回 |
 | `delivery_mode.rs` | optional `delivery_mode`（欠落=`say`）。`tool_driven` は inbound Text を NoReply にし、自発の V3 say を渡さない。`kind_id` では分岐しない |

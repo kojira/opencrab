@@ -31,6 +31,7 @@ tempfile = { workspace = true }
 tower = { workspace = true }
 http-body-util = "0.1"
 tokio = { workspace = true, features = ["test-util"] }
+opencrab-gate-client = { workspace = true }
 
 [lints]
 workspace = true

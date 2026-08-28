@@ -348,16 +348,28 @@ async fn send_mapped(
         tracing::warn!(id = %event.id, "said dropped; author or event id is not hex");
         return;
     };
-    match client
-        .post_said_with_author(
-            address,
-            &mapped.origin,
-            &mapped.author_id,
-            &mapped.text,
-            &[],
-        )
-        .await
-    {
+    let post = if bundle.is_some() {
+        client
+            .post_said_receipt(
+                address,
+                &mapped.origin,
+                &mapped.author_id,
+                &mapped.text,
+                &[],
+            )
+            .await
+    } else {
+        client
+            .post_said_with_author(
+                address,
+                &mapped.origin,
+                &mapped.author_id,
+                &mapped.text,
+                &[],
+            )
+            .await
+    };
+    match post {
         Ok(outcome) => record_said_outcome(metrics, &mapped.origin, &outcome),
         Err(PostRefuse::NotReady) => {
             tracing::info!(origin = %mapped.origin, "said dropped; binding not ready");

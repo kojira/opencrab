@@ -253,6 +253,35 @@ impl InstanceClient {
         text: &str,
         attachments: &[Attachment],
     ) -> Result<SaidOutcome, PostRefuse> {
+        self.post_said_inner(address, origin, author_id, text, attachments, true)
+            .await
+    }
+
+    /// Bundle member 用。ack までだけ binding を占有する。
+    ///
+    /// Accepted のあと turn が始まらない（coordinator が全 receipt 待ち）ときに
+    /// 次の origin を送れる。ターン中の占有は activity started が立てる。
+    pub async fn post_said_receipt(
+        &self,
+        address: &str,
+        origin: &str,
+        author_id: &str,
+        text: &str,
+        attachments: &[Attachment],
+    ) -> Result<SaidOutcome, PostRefuse> {
+        self.post_said_inner(address, origin, author_id, text, attachments, false)
+            .await
+    }
+
+    async fn post_said_inner(
+        &self,
+        address: &str,
+        origin: &str,
+        author_id: &str,
+        text: &str,
+        attachments: &[Attachment],
+        occupy_until_turn_ends: bool,
+    ) -> Result<SaidOutcome, PostRefuse> {
         let binding_id = {
             let mut inner = self.inner.lock().await;
             if inner.closed {
@@ -303,7 +332,7 @@ impl InstanceClient {
         }
         match tokio::time::timeout(SAID_TIMEOUT, rx).await {
             Ok(Ok(outcome)) => {
-                if !matches!(outcome, SaidOutcome::Accepted { .. }) {
+                if !occupy_until_turn_ends || !matches!(outcome, SaidOutcome::Accepted { .. }) {
                     let mut inner = self.inner.lock().await;
                     inner.pending_turn.remove(&binding_id);
                 }
@@ -625,7 +654,15 @@ async fn handle_activity(client: &InstanceClient, activity: Activity) {
         activity_id: activity.activity_id,
         state: activity.state.clone(),
     });
-    if activity.state == "ended" {
+    if activity.state == "started" {
+        inner
+            .pending_turn
+            .entry(activity.binding_id.clone())
+            .or_insert_with(|| PendingTurn {
+                saw_say: false,
+                origin: String::new(),
+            });
+    } else if activity.state == "ended" {
         if let Some(turn) = inner.pending_turn.remove(&activity.binding_id) {
             if !turn.saw_say {
                 if let Some(q) = inner.live.get_mut(&address) {
