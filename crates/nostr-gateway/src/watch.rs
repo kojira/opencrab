@@ -19,6 +19,9 @@ pub fn plan_watch_args(relays: &[String], filter: &WatchFilter) -> Vec<String> {
         "--json".to_string(),
         "--match=any".to_string(),
     ];
+    if let Some(npub) = &filter.npub {
+        args.push(format!("--npub={npub}"));
+    }
     for relay in relays {
         args.push(format!("--relay={relay}"));
     }
@@ -35,7 +38,7 @@ pub fn plan_watch_args(relays: &[String], filter: &WatchFilter) -> Vec<String> {
 }
 
 /// メンション車線（default lane）の nostaro argv。
-/// `name` が `--keyword` として必ず乗る。hex pubkey は付けない。`--npub` も付けない。
+/// `name` が `--keyword`、`self_pubkey` が `--npub`（p タグ対象）。hex は keyword にしない。
 pub fn plan_mention_lane_args(relays: &[String], cfg: &InstanceConfig) -> Vec<String> {
     plan_watch_args(relays, &mention_lane_filter(cfg))
 }
@@ -184,15 +187,17 @@ mod tests {
             "name keyword missing: {args:?}"
         );
         assert!(
+            args.contains(&format!("--npub={self_pk}")),
+            "p-tag target missing: {args:?}"
+        );
+        assert!(
             !args.contains(&format!("--keyword={self_pk}")),
             "hex pubkey must not be a keyword: {args:?}"
         );
         let keyword_count = args.iter().filter(|a| a.starts_with("--keyword=")).count();
         assert_eq!(keyword_count, 1, "{args:?}");
-        assert!(
-            !args.iter().any(|a| a.starts_with("--npub")),
-            "p-tag is nostaro default; do not pass --npub: {args:?}"
-        );
+        assert!(args.contains(&"--kind=1".to_string()), "{args:?}");
+        assert!(args.contains(&"--kind=7".to_string()), "{args:?}");
         assert!(
             !args.iter().any(|a| a.starts_with("--no-mention-only")),
             "{args:?}"
@@ -215,6 +220,12 @@ mod tests {
             args.contains(&"--keyword=くらぶ".to_string()),
             "条件ゼロの空網: {args:?}"
         );
+        assert!(
+            args.contains(&format!("--npub={self_pk}")),
+            "p-tag target missing: {args:?}"
+        );
+        assert!(args.contains(&"--kind=1".to_string()), "{args:?}");
+        assert!(args.contains(&"--kind=7".to_string()), "{args:?}");
         assert!(
             !args.contains(&format!("--keyword={self_pk}")),
             "hex pubkey must not be a keyword: {args:?}"

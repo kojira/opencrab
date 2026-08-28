@@ -454,12 +454,20 @@ mod tests {
             "name keyword missing: {mention_args:?}"
         );
         assert!(
+            mention_args.contains(&format!("--npub={self_pk}")),
+            "p-tag target missing: {mention_args:?}"
+        );
+        assert!(
             !mention_args.contains(&format!("--keyword={self_pk}")),
             "hex pubkey must not be a keyword: {mention_args:?}"
         );
         assert!(
-            !mention_args.iter().any(|a| a.starts_with("--npub")),
-            "p-tag is nostaro default; do not pass --npub: {mention_args:?}"
+            mention_args.contains(&"--kind=1".to_string()),
+            "{mention_args:?}"
+        );
+        assert!(
+            mention_args.contains(&"--kind=7".to_string()),
+            "{mention_args:?}"
         );
         assert!(
             !mention_args.iter().any(|a| a.starts_with("--author=")),
@@ -479,6 +487,10 @@ mod tests {
         assert!(
             !watch_args.iter().any(|a| a.starts_with("--keyword=")),
             "timeline lane must not inherit mention keywords: {watch_args:?}"
+        );
+        assert!(
+            !watch_args.iter().any(|a| a.starts_with("--npub=")),
+            "timeline lane must not inherit mention npub: {watch_args:?}"
         );
     }
 

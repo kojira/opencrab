@@ -40,6 +40,9 @@ pub struct WatchFilter {
     pub keywords: Vec<String>,
     #[serde(default)]
     pub kinds: Vec<u32>,
+    /// メンション車線だけが入れる nostaro `--npub`（p タグ対象）。config JSON からは来ない。
+    #[serde(default, skip)]
+    pub npub: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -169,12 +172,19 @@ pub fn watches_beyond_self(filter: &WatchFilter) -> bool {
 /// メンション車線（default lane）の購読フィルタ。
 ///
 /// instance の filter を土台に、`name` を keyword として無条件で足す。
-/// hex pubkey は本文 substring にならないので入れない。p タグは nostaro 既定。
+/// hex pubkey は本文 substring にならないので入れない。
+/// p タグ対象は `self_pubkey`（`--npub`）。kind は 1 と 7 を必ず含める。
 pub fn mention_lane_filter(cfg: &InstanceConfig) -> WatchFilter {
     let mut filter = cfg.filter.clone();
     if let Some(name) = cfg.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
         push_keyword_once(&mut filter.keywords, name);
     }
+    for kind in [1u32, 7] {
+        if !filter.kinds.contains(&kind) {
+            filter.kinds.push(kind);
+        }
+    }
+    filter.npub = Some(cfg.self_pubkey.clone());
     filter
 }
 
@@ -299,6 +309,9 @@ mod tests {
             "hex pubkey must not be a keyword: {:?}",
             filter.keywords
         );
+        assert_eq!(filter.npub.as_deref(), Some(cfg.self_pubkey.as_str()));
+        assert!(filter.kinds.contains(&1), "{:?}", filter.kinds);
+        assert!(filter.kinds.contains(&7), "{:?}", filter.kinds);
         assert!(!watches_beyond_self(&cfg.filter));
     }
 
