@@ -255,6 +255,17 @@ pub fn disconnected_heartbeat_config_rx(
 }
 
 impl AppState {
+    /// #826-A: 設定から費目別水位政策を組む。入口固有の再計算はしない。
+    pub fn context_budget_policy(&self) -> opencrab_core::context_budget::ContextBudgetPolicy {
+        opencrab_core::context_budget::ContextBudgetPolicy {
+            input_high_ratio: self.compaction_ratio,
+            input_low_ratio: self.llm_config.input_low_ratio,
+            absolute_cap_a: self.llm_config.absolute_input_cap,
+            memory_index_token_cap: self.llm_config.memory_index_token_cap,
+            functions_token_cap: self.llm_config.functions_token_cap,
+        }
+    }
+
     /// サブタスク lifecycle 通知の実装を返す（未設定なら何もしない Noop）。
     pub fn subtask_lifecycle_notifier(
         &self,

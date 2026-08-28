@@ -208,6 +208,8 @@ pub const CORE_INLINE_ACTIONS: &[&str] = &[
     //     書き込みを background 化すると雑音が増えるだけ。
     "update_impression",
     "save_model_insight",
+    // (3) 同ターン結果依存: 到達点チェックポイント。圧縮後の再注入が同ターンの続きに効く。
+    "update_context_checkpoint",
     // (6) タグ操作（#359 / #313 段階2）。整理ラン（段階3）の中で「topic を読む → タグを
     //     決める → 付ける/外す/統合する」という短い書き込みループを回す。結果（新設できたか /
     //     何件付け替えたか）を同ターンで見て次の操作を決めるので background 化しない。短時間の
