@@ -109,6 +109,30 @@ async fn wait_until_unbound(client: &InstanceClient, address: &str) {
     }
 }
 
+/// default(メンション)車線は常設。watch は追加車線。
+struct LaneSpawn {
+    lane: Lane,
+    filter: WatchFilter,
+    watch: Option<WatchPlacement>,
+}
+
+fn plan_lane_spawns(cfg: &InstanceConfig) -> Vec<LaneSpawn> {
+    let mut planned = Vec::with_capacity(1 + cfg.watches.len());
+    planned.push(LaneSpawn {
+        lane: Lane::default_lane(),
+        filter: mention_lane_filter(cfg),
+        watch: None,
+    });
+    for watch in &cfg.watches {
+        planned.push(LaneSpawn {
+            lane: Lane::watch(watch.id),
+            filter: watch.effective_filter().clone(),
+            watch: Some(watch.clone()),
+        });
+    }
+    planned
+}
+
 fn start_lanes(
     client: Arc<InstanceClient>,
     address: String,
@@ -118,34 +142,17 @@ fn start_lanes(
     metrics: Arc<SaidMetrics>,
     cancel: Arc<Notify>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
-    if cfg.watches.is_empty() {
-        let filter = mention_lane_filter(&cfg);
-        return vec![spawn_lane(
-            client,
-            address,
-            Lane::default_lane(),
-            cfg.relays,
-            filter,
-            cfg.self_pubkey,
-            None,
-            secret,
-            nostaro_bin,
-            metrics,
-            cancel,
-        )];
-    }
-    cfg.watches
+    plan_lane_spawns(&cfg)
         .into_iter()
-        .map(|watch| {
-            let filter = watch.effective_filter().clone();
+        .map(|planned| {
             spawn_lane(
                 client.clone(),
                 address.clone(),
-                Lane::watch(watch.id),
+                planned.lane,
                 cfg.relays.clone(),
-                filter,
+                planned.filter,
                 cfg.self_pubkey.clone(),
-                Some(watch),
+                planned.watch,
                 secret.clone(),
                 nostaro_bin.clone(),
                 metrics.clone(),
@@ -413,6 +420,61 @@ fn record_said_outcome(metrics: &SaidMetrics, origin: &str, outcome: &SaidOutcom
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::watch::plan_watch_args;
+
+    #[test]
+    fn watches_present_still_spawns_mention_keyword_lane() {
+        let self_pk = "aa".repeat(32);
+        let cfg = InstanceConfig {
+            relays: vec!["wss://example.invalid".into()],
+            filter: WatchFilter::default(),
+            self_pubkey: self_pk.clone(),
+            name: Some("crab".into()),
+            watches: vec![WatchPlacement {
+                id: 3,
+                interval_secs: 120,
+                filter: WatchFilter {
+                    authors: vec!["npub1watched".into()],
+                    ..WatchFilter::default()
+                },
+                filter_json: None,
+            }],
+            delivery_mode: None,
+        };
+        let planned = plan_lane_spawns(&cfg);
+        assert_eq!(planned.len(), 2, "mention + watch");
+        assert_eq!(planned[0].lane, Lane::default_lane());
+        assert!(planned[0].watch.is_none());
+        let mention_args = plan_watch_args(&cfg.relays, &planned[0].filter);
+        assert_eq!(mention_args[0], "watch");
+        assert!(
+            mention_args.contains(&format!("--keyword={self_pk}")),
+            "self_pubkey keyword missing: {mention_args:?}"
+        );
+        assert!(
+            mention_args.contains(&"--keyword=crab".to_string()),
+            "name keyword missing: {mention_args:?}"
+        );
+        assert!(
+            !mention_args.iter().any(|a| a.starts_with("--author=")),
+            "mention lane must not take watch authors: {mention_args:?}"
+        );
+        let keyword_count = mention_args
+            .iter()
+            .filter(|a| a.starts_with("--keyword="))
+            .count();
+        assert_eq!(keyword_count, 2, "{mention_args:?}");
+        assert_eq!(planned[1].lane, Lane::watch(3));
+        let watch_args = plan_watch_args(&cfg.relays, &planned[1].filter);
+        assert!(
+            watch_args.contains(&"--author=npub1watched".to_string()),
+            "{watch_args:?}"
+        );
+        assert!(
+            !watch_args.iter().any(|a| a.starts_with("--keyword=")),
+            "timeline lane must not inherit mention keywords: {watch_args:?}"
+        );
+    }
 
     #[test]
     fn store_error_and_bad_request_are_counted() {

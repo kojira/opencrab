@@ -16,7 +16,7 @@ argv は placement JSON 1 個だけ。HTTP listen はしない（ready=listen �
 
 `http_bind` は置かない。`core_socket` は絶対 path。`nostaro_bin` は nonempty。instance ごとに UDS 1 本。`config_b64` の decode バイトが hello `config_digest` の源。canonical config は relays / filter / self_pubkey / watches と optional `delivery_mode` / `name`。秘密を含めない。
 
-watches が空なら default lane（メンション即応車線）1 本。1 件以上なら default なしで各行が 1 lane。同じ `address` の binding 1 枚を共有する。
+default(メンション)車線は常設。watch は追加車線。同じ `address` の binding 1 枚を共有する。
 メンション車線の nostaro argv は `--match=any` に加え、instance config の `self_pubkey`（と `name` があれば名前）を `--keyword` として付ける。条件ゼロの空網にはしない。この車線の said は `route=immediate`（束ね待ちしない）。`beyond_self` は false。
 watch child は bind ack の後にだけ起動する。切断で child を止め、読取済み未送信は破棄して再送しない。
 `SaidOutcome` は Accepted / NotAdmitted / Disconnected / WireErr を記録し、`store_error` / `bad_request` はカウンタに残す。

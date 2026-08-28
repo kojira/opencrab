@@ -7,4 +7,4 @@
 | `map.rs` | JSONL → said。origin `nostr:event:v1:{lane}:{event_id}` と版付きアンカー。default lane は `route=immediate` |
 | `watch.rs` | nostaro watch spawn。EOF 再購読 5s。鍵は child env のみ。メンション車線 argv は `plan_mention_lane_args` |
 | `secret.rs` | `NOSTARO_SECRET_KEY` の take + remove_var |
-| `run.rs` | UDS client（say=`external_rejected`）。bind ack 後に lane 起動。SaidOutcome を観測 |
+| `run.rs` | UDS client（say=`external_rejected`）。bind ack 後に lane 起動。メンション車線は常設、watch は追加。SaidOutcome を観測 |
