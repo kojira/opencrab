@@ -60,6 +60,7 @@ pub enum SaidOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PostRefuse {
     NotReady,
+    /// セッションキュー満杯。turn 実行中だけでは拒否しない。
     Busy,
 }
 
@@ -82,7 +83,6 @@ struct PendingSaid {
 
 struct PendingTurn {
     saw_say: bool,
-    origin: String,
 }
 
 struct LiveQueue {
@@ -257,10 +257,10 @@ impl InstanceClient {
             .await
     }
 
-    /// Bundle member 用。ack までだけ binding を占有する。
+    /// Bundle member 用。ack までだけ `pending_turn` を残す。
     ///
     /// Accepted のあと turn が始まらない（coordinator が全 receipt 待ち）ときに
-    /// 次の origin を送れる。ターン中の占有は activity started が立てる。
+    /// 次の origin を送れる。ターン中の `CompletedNoReply` 追跡は activity started が立てる。
     pub async fn post_said_receipt(
         &self,
         address: &str,
@@ -290,17 +290,10 @@ impl InstanceClient {
             let Some(binding_id) = inner.acknowledged.get(address).cloned() else {
                 return Err(PostRefuse::NotReady);
             };
-            if let Some(turn) = inner.pending_turn.get(&binding_id) {
-                if turn.origin != origin {
-                    return Err(PostRefuse::Busy);
-                }
-            } else {
+            if inner.pending_turn.get(&binding_id).is_none() {
                 inner.pending_turn.insert(
                     binding_id.clone(),
-                    PendingTurn {
-                        saw_say: false,
-                        origin: origin.to_string(),
-                    },
+                    PendingTurn { saw_say: false },
                 );
             }
             binding_id
@@ -658,10 +651,7 @@ async fn handle_activity(client: &InstanceClient, activity: Activity) {
         inner
             .pending_turn
             .entry(activity.binding_id.clone())
-            .or_insert_with(|| PendingTurn {
-                saw_say: false,
-                origin: String::new(),
-            });
+            .or_insert_with(|| PendingTurn { saw_say: false });
     } else if activity.state == "ended" {
         if let Some(turn) = inner.pending_turn.remove(&activity.binding_id) {
             if !turn.saw_say {

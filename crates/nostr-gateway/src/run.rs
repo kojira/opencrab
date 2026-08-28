@@ -28,6 +28,7 @@ const BIND_POLL: Duration = Duration::from_millis(50);
 struct SaidMetrics {
     store_error: AtomicU64,
     bad_request: AtomicU64,
+    queue_full: AtomicU64,
 }
 
 pub fn spawn_instance(
@@ -387,7 +388,8 @@ async fn send_mapped(
             tracing::info!(origin = %mapped.origin, "said dropped; binding not ready");
         }
         Err(PostRefuse::Busy) => {
-            tracing::info!(origin = %mapped.origin, "said refused; binding busy");
+            let n = metrics.queue_full.fetch_add(1, Ordering::Relaxed) + 1;
+            tracing::info!(origin = %mapped.origin, queue_full = n, "said refused; binding busy");
         }
     }
 }

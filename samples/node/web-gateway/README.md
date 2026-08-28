@@ -23,7 +23,7 @@ ready は `http_bind` への listen 成立だけ。config / listen failure は l
 
 | method / path | 役割 |
 |---|---|
-| `POST /api/web-conversations/{session_id}/messages` | `{client_message_id,text,attachments}` → V3 `said`。202 は said ack まで |
+| `POST /api/web-conversations/{session_id}/messages` | `{client_message_id,text,attachments}` → V3 `said`。202 は said ack まで。turn 実行中の別 UUID も送る。`409 conversation_busy` はキュー満杯の Busy だけ |
 | `GET /api/web-conversations/{session_id}/events` | say / activity / `completed_no_reply` / `gate_error` |
 | `GET\|POST /rooms/{room}/messages` | 404 |
 | `GET /chat` | 404 |

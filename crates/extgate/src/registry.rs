@@ -16,6 +16,7 @@ use crate::bearer::OperatorToken;
 use crate::bundle::NostrBundleAdmit;
 use crate::delivery_mode::DeliveryMode;
 use crate::error::{ErrorCode, GateError};
+use crate::turn_queue::SessionTurnQueues;
 
 /// hello 済みで未 close の接続。
 pub struct LiveEntry {
@@ -124,6 +125,7 @@ pub struct GateProbe {
     pub fail_delivery_insert: AtomicBool,
     pub fail_say_write: AtomicBool,
     pub whitelist_override: Mutex<Option<bool>>,
+    pub turn_queue_dropped: AtomicUsize,
 }
 
 /// kind_id=nostr の said を record 前に判定する。不正アンカーは `Err(bad_request)`。
@@ -193,6 +195,7 @@ pub struct ExtgateState {
     nostr_relay: Mutex<Option<NostrRelayFn>>,
     nostr_watch_sets: Mutex<Option<NostrWatchSetsFn>>,
     nostr_privilege: Mutex<HashMap<i64, PrivilegeFire<NostrHeldTurn>>>,
+    pub turn_queues: Arc<SessionTurnQueues>,
     #[cfg(any(test, feature = "extgate-probe"))]
     pub probe: GateProbe,
 }
@@ -211,6 +214,7 @@ impl ExtgateState {
             nostr_relay: Mutex::new(None),
             nostr_watch_sets: Mutex::new(None),
             nostr_privilege: Mutex::new(HashMap::new()),
+            turn_queues: Arc::new(SessionTurnQueues::new()),
             #[cfg(any(test, feature = "extgate-probe"))]
             probe: GateProbe::default(),
         }

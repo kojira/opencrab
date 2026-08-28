@@ -19,14 +19,14 @@ argv は placement JSON 1 個だけ。HTTP listen はしない（ready=listen �
 default(メンション)車線は常設。watch は追加車線。同じ `address` の binding 1 枚を共有する。
 メンション車線の nostaro argv は `--match=any` に加え、instance config の `self_pubkey`（と `name` があれば名前）を `--keyword` として付ける。条件ゼロの空網にはしない。この車線の said は `route=immediate`（束ね待ちしない）。`beyond_self` は false。
 watch child は bind ack の後にだけ起動する。切断で child を止め、読取済み未送信は破棄して再送しない。
-`SaidOutcome` は Accepted / NotAdmitted / Disconnected / WireErr を記録し、`store_error` / `bad_request` はカウンタに残す。
+`SaidOutcome` は Accepted / NotAdmitted / Disconnected / WireErr を記録し、`store_error` / `bad_request` はカウンタに残す。turn 実行中の said は core の session queue 32 に積む。`PostRefuse::Busy`（`said refused; binding busy`）はキュー満杯の応答にだけ使う。
 watch の有効フィルタは `filter_json`。アンカー `beyond_self` は watch 設定値（`!p_self` の代用はしない）。
 
 ## 写像
 
 - origin: `nostr:event:v1:{lane}:{event_id}`。`lane` は `default` または `watch:{id}`
 - 本文先頭: 版付きアンカー `[NOSTRGATE/V1 {…}]`（key 順固定）
-- Bundle の次行: `[NOSTRBUNDLE/V1 [origin…]]`（index 順。coordinator が最初の非重複 member で全 origin を照合する）。flush の各 member は `post_said_receipt`（Accepted 後も次 origin を送る。`post_said` の pending_turn では後続が Busy になる）
+- Bundle の次行: `[NOSTRBUNDLE/V1 [origin…]]`（index 順。coordinator が最初の非重複 member で全 origin を照合する）。flush の各 member は `post_said_receipt`（Accepted 後も次 origin を送る）
 - その下: 採取 §3 の履歴本文 renderer
 - kind 4/1059 が現れたら `route=immediate`（Discard は core）
 - 受信した `say` は投稿せず `external_rejected`

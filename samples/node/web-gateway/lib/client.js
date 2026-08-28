@@ -154,13 +154,8 @@ function postSaid(client, address, origin, text, attachments) {
   if (!bindingId) {
     return Promise.resolve({ refuse: "not_ready" });
   }
-  const turn = inner.pendingTurn.get(bindingId);
-  if (turn) {
-    if (turn.origin !== origin) {
-      return Promise.resolve({ refuse: "busy" });
-    }
-  } else {
-    inner.pendingTurn.set(bindingId, { sawSay: false, origin });
+  if (!inner.pendingTurn.get(bindingId)) {
+    inner.pendingTurn.set(bindingId, { sawSay: false });
   }
   const id = nextId(client);
   const outcome = new Promise((resolve) => {

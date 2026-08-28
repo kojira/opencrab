@@ -336,6 +336,22 @@ pub fn process_said<R: AgentRuntime>(
     if let Some(applied) = bundle_applied {
         return finish_bundle(tx, &ctx, applied, Some(seq));
     }
+    let enqueue = run_after.get() && !held.get();
+    if enqueue && !state.turn_queues.has_room(&session_id) {
+        let dropped = state.turn_queues.note_dropped();
+        let _ = tx.rollback();
+        #[cfg(any(test, feature = "extgate-probe"))]
+        state
+            .probe
+            .turn_queue_dropped
+            .fetch_add(1, Ordering::SeqCst);
+        tracing::warn!(
+            session_id,
+            dropped_total = dropped,
+            "extgate: session turn queue full; said rejected"
+        );
+        return Ok(SaidOutcome { seq: None });
+    }
     tx.commit().map_err(|_| GateError::store())?;
     drop(conn);
 
@@ -343,7 +359,7 @@ pub fn process_said<R: AgentRuntime>(
         fire_nostr_relay(state, &row, said);
     }
 
-    if run_after.get() && !held.get() {
+    if enqueue {
         enqueue_turn(
             Arc::clone(state),
             runtime.clone(),
@@ -396,9 +412,24 @@ fn finish_bundle<R: AgentRuntime>(
     } else {
         None
     };
+    let drop_turn = pending.is_some() && !ctx.state.turn_queues.has_room(ctx.session_id);
     tx.commit().map_err(|_| GateError::store())?;
     if seq.is_some() {
         fire_nostr_relay(ctx.state, ctx.row, ctx.said);
+    }
+    if drop_turn {
+        let dropped = ctx.state.turn_queues.note_dropped();
+        #[cfg(any(test, feature = "extgate-probe"))]
+        ctx.state
+            .probe
+            .turn_queue_dropped
+            .fetch_add(1, Ordering::SeqCst);
+        tracing::warn!(
+            session_id = ctx.session_id,
+            dropped_total = dropped,
+            "extgate: session turn queue full; bundle turn dropped"
+        );
+        return Ok(SaidOutcome { seq });
     }
     if let Some((trigger, origin, n)) = pending {
         let suffix = bundle_prompt_suffix(n);
@@ -674,7 +705,19 @@ fn enqueue_turn<R: AgentRuntime>(
     let kind_id = row.kind_id.clone();
     let delivery_mode = row.delivery_mode;
     let prompt_suffix = prompt_suffix.to_string();
-    locks.spawn_serialized(session_id.clone(), async move {
+    if !state.turn_queues.try_reserve(&session_id) {
+        #[cfg(any(test, feature = "extgate-probe"))]
+        state
+            .probe
+            .turn_queue_dropped
+            .fetch_add(1, Ordering::SeqCst);
+        return;
+    }
+    let queues = Arc::clone(&state.turn_queues);
+    let session_key = session_id.clone();
+    queues.submit(&session_key, async move {
+        let lock_id = session_id.clone();
+        locks.run_serialized(&lock_id, async move {
         #[cfg(any(test, feature = "extgate-probe"))]
         state
             .probe
@@ -790,6 +833,8 @@ fn enqueue_turn<R: AgentRuntime>(
                 state.halt();
             }
         }
+        })
+        .await;
     });
 }
 

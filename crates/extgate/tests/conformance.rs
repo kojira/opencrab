@@ -23,6 +23,7 @@ use opencrab_gate_client::client::{InstanceClient, SaidOutcome};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+use tokio::sync::{oneshot, Notify};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -34,6 +35,8 @@ struct TestRuntime {
     locks: Arc<SessionLocks>,
     reply: Arc<Mutex<String>>,
     turns: Arc<AtomicUsize>,
+    hold_rx: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+    turn_entered: Arc<Notify>,
 }
 
 impl TestRuntime {
@@ -43,6 +46,8 @@ impl TestRuntime {
             locks: Arc::new(SessionLocks::new()),
             reply: Arc::new(Mutex::new("hello from agent".into())),
             turns: Arc::new(AtomicUsize::new(0)),
+            hold_rx: Arc::new(Mutex::new(None)),
+            turn_entered: Arc::new(Notify::new()),
         }
     }
 }
@@ -50,6 +55,11 @@ impl TestRuntime {
 #[async_trait]
 impl AgentRuntime for TestRuntime {
     async fn run_agent_response(&self, _req: RunRequest) -> anyhow::Result<EngineResult> {
+        self.turn_entered.notify_waiters();
+        let hold = self.hold_rx.lock().unwrap().take();
+        if let Some(rx) = hold {
+            let _ = rx.await;
+        }
         self.turns.fetch_add(1, Ordering::SeqCst);
         Ok(EngineResult {
             response: self.reply.lock().unwrap().clone(),
@@ -2078,4 +2088,145 @@ async fn watch_bundle_records_then_fires_turn_after_interval() {
         h.runtime.turns.load(Ordering::SeqCst) > before_turns,
         "all receipts enqueue a turn"
     );
+}
+
+async fn wait_client_bound(client: &InstanceClient, address: &str, binding_id: &str) {
+    for _ in 0..80 {
+        if client.binding_for_address(address).await.as_deref() == Some(binding_id) {
+            return;
+        }
+        tokio::time::advance(Duration::from_millis(5)).await;
+    }
+    panic!("bind ack");
+}
+
+fn session_log_count(h: &Harness, session_id: &str) -> i64 {
+    let conn = h.state.db.lock().unwrap();
+    conn.query_row(
+        "SELECT COUNT(*) FROM memory_sessions WHERE session_id = ?1",
+        [session_id],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+/// turn 実行中に届いた said が消えず、turn 終了後に処理される。
+#[tokio::test(start_paused = true)]
+async fn said_during_turn_is_recorded_and_runs_after() {
+    let h = Harness::start().await;
+    let instance_id = uuid();
+    let binding_id = uuid();
+    put_instance(&h, &instance_id, true).await;
+    put_binding(&h, &binding_id, &instance_id, "chan-1").await;
+    let session_id = format!("extgate-{binding_id}");
+    let (release_tx, release_rx) = oneshot::channel();
+    *h.runtime.hold_rx.lock().unwrap() = Some(release_rx);
+
+    let client = InstanceClient::connect(
+        &h.sock,
+        instance_id,
+        1,
+        "u1".into(),
+        config_digest(),
+    )
+    .await
+    .expect("connect");
+    wait_client_bound(&client, "chan-1", &binding_id).await;
+
+    let entered = h.runtime.turn_entered.notified();
+    tokio::pin!(entered);
+    let first = client
+        .post_said("chan-1", "origin-1", "first", &[])
+        .await
+        .unwrap_or_else(|e| panic!("first refuse {e:?}"));
+    assert!(
+        matches!(first, SaidOutcome::Accepted { seq: 1 }),
+        "{first:?}"
+    );
+    for _ in 0..80 {
+        tokio::select! {
+            _ = &mut entered => break,
+            _ = async {
+                tokio::time::advance(Duration::from_millis(5)).await;
+            } => {}
+        }
+    }
+
+    let second = client
+        .post_said("chan-1", "origin-2", "second-during-turn", &[])
+        .await
+        .unwrap_or_else(|e| panic!("second refuse {e:?}"));
+    assert!(
+        matches!(second, SaidOutcome::Accepted { seq: 2 }),
+        "said during turn must be accepted, got {second:?}"
+    );
+    assert_eq!(session_log_count(&h, &session_id), 2);
+    assert_eq!(
+        h.runtime.turns.load(Ordering::SeqCst),
+        0,
+        "second turn waits"
+    );
+
+    release_tx.send(()).unwrap();
+    for _ in 0..80 {
+        if h.runtime.turns.load(Ordering::SeqCst) >= 2 {
+            break;
+        }
+        tokio::time::advance(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        h.runtime.turns.load(Ordering::SeqCst),
+        2,
+        "queued said runs after the held turn"
+    );
+}
+
+/// キュー満杯は seq=null で拒否し、履歴に残さない。
+#[tokio::test]
+async fn session_queue_overflow_is_seq_null_and_counted() {
+    let h = Harness::start().await;
+    let (mut s, _, binding_id) = ready_pair(&h).await;
+    let session_id = format!("extgate-{binding_id}");
+    let (release_tx, release_rx) = oneshot::channel();
+    *h.runtime.hold_rx.lock().unwrap() = Some(release_rx);
+
+    for i in 0..32 {
+        let id = format!("s{i}");
+        write_frame(
+            &mut s,
+            &json!({
+                "id": id,
+                "m": "said",
+                "binding_id": binding_id,
+                "origin": format!("o-{i}"),
+                "author_id": "u1",
+                "text": format!("m{i}"),
+                "attachments": []
+            }),
+        )
+        .await;
+        let v = read_said_response(&mut s, &id).await;
+        assert_eq!(v["m"], "ok", "said {i} {v}");
+        assert_eq!(v["seq"], i + 1, "said {i} {v}");
+    }
+    write_frame(
+        &mut s,
+        &json!({
+            "id": "sover",
+            "m": "said",
+            "binding_id": binding_id,
+            "origin": "o-overflow",
+            "author_id": "u1",
+            "text": "too-many",
+            "attachments": []
+        }),
+    )
+    .await;
+    let overflow = read_said_response(&mut s, "sover").await;
+    assert_eq!(overflow["m"], "ok");
+    assert!(overflow["seq"].is_null(), "{overflow}");
+    assert_eq!(session_log_count(&h, &session_id), 32);
+    assert!(h.state.turn_queues.dropped() >= 1);
+    assert!(h.state.probe.turn_queue_dropped.load(Ordering::SeqCst) >= 1);
+    let _ = release_tx.send(());
 }

@@ -46,15 +46,34 @@
       }
     },
     {
-      "op": "http_post",
+      "op": "http_post_async",
+      "id": "during",
       "path": "/api/web-conversations/web-agent-conv/messages",
       "body": {
         "client_message_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
-        "text": "busy",
+        "text": "during-turn",
         "attachments": []
-      },
-      "status": 409,
-      "body_expect": { "error": { "code": "conversation_busy" } }
+      }
+    },
+    {
+      "op": "uds_recv",
+      "id": "said_during",
+      "expect": {
+        "m": "said",
+        "origin": "web:ffffffff-ffff-4fff-8fff-ffffffffffff"
+      }
+    },
+    { "op": "uds_send", "frame": { "id": "$said_during.id", "m": "ok", "seq": 8 } },
+    {
+      "op": "http_await",
+      "id": "during",
+      "status": 202,
+      "body": {
+        "state": "accepted",
+        "seq": 8,
+        "origin": "web:ffffffff-ffff-4fff-8fff-ffffffffffff",
+        "client_message_id": "ffffffff-ffff-4fff-8fff-ffffffffffff"
+      }
     },
     { "op": "http_get", "path": "/rooms/x/messages", "status": 404 },
     { "op": "http_get", "path": "/chat", "status": 404 },

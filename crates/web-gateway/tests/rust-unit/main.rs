@@ -413,29 +413,41 @@ async fn rust_unit_http_post_202_not_admitted_busy_and_old_routes_404() {
     assert_eq!(v["origin"], origin());
     assert_eq!(v["client_message_id"], CLIENT_MSG);
 
-    let busy = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/web-conversations/{ADDRESS}/messages"))
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::to_vec(&json!({
-                        "client_message_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
-                        "text": "busy",
-                        "attachments": []
-                    }))
+    let during = {
+        let app = app.clone();
+        tokio::spawn(async move {
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/web-conversations/{ADDRESS}/messages"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "client_message_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+                            "text": "during-turn",
+                            "attachments": []
+                        }))
+                        .unwrap(),
+                    ))
                     .unwrap(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(busy.status(), StatusCode::CONFLICT);
-    let busy_body = busy.into_body().collect().await.unwrap().to_bytes();
-    let vb: Value = serde_json::from_slice(&busy_body).unwrap();
-    assert_eq!(vb["error"]["code"], "conversation_busy");
+            )
+            .await
+        })
+    };
+    let said_during = mock.recv().await;
+    assert_eq!(said_during["m"], "said");
+    assert_eq!(
+        said_during["origin"],
+        "web:ffffffff-ffff-4fff-8fff-ffffffffffff"
+    );
+    mock.send(&json!({"id": said_during["id"], "m": "ok", "seq": 8}))
+        .await;
+    let res_during = during.await.unwrap().unwrap();
+    assert_eq!(res_during.status(), StatusCode::ACCEPTED);
+    let body_during = res_during.into_body().collect().await.unwrap().to_bytes();
+    let vd: Value = serde_json::from_slice(&body_during).unwrap();
+    assert_eq!(vd["state"], "accepted");
+    assert_eq!(vd["seq"], 8);
 
     for uri in ["/rooms/x/messages", "/chat"] {
         let get = app

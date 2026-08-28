@@ -14,6 +14,7 @@ pub mod listen;
 pub mod protocol;
 pub mod race;
 pub mod registry;
+pub mod turn_queue;
 
 pub use admin::admin_router;
 pub use bearer::OperatorToken;
