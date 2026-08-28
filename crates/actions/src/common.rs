@@ -283,17 +283,19 @@ impl Action for UpdateContextCheckpointAction {
         let Ok(conn) = ctx.db.lock() else {
             return ActionResult::error("db lock failed");
         };
-        let previous = opencrab_db::queries::list_session_logs_by_session(&conn, session_id)
-            .ok()
-            .and_then(|logs| {
-                logs.iter().rev().find_map(|log| {
-                    if log.log_type == "system" {
-                        opencrab_core::context_budget::parse_checkpoint_event(&log.content)
-                    } else {
-                        None
-                    }
-                })
-            });
+        let logs = match opencrab_db::queries::list_session_logs_by_session(&conn, session_id) {
+            Ok(logs) => logs,
+            Err(e) => {
+                return ActionResult::error(&format!("failed to read previous checkpoint: {e}"))
+            }
+        };
+        let previous = logs.iter().rev().find_map(|log| {
+            if log.log_type == "system" {
+                opencrab_core::context_budget::parse_checkpoint_event(&log.content)
+            } else {
+                None
+            }
+        });
         match opencrab_core::context_budget::apply_explicit_checkpoint(previous.as_ref(), incoming)
         {
             Ok(cp) => {
@@ -318,7 +320,7 @@ impl Action for UpdateContextCheckpointAction {
                     "next": cp.next,
                 }))
             }
-            Err(reason) => ActionResult::error(reason),
+            Err(reason) => ActionResult::error(reason.as_str()),
         }
     }
 }

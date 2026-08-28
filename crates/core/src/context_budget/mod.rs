@@ -20,8 +20,8 @@ pub use checkpoint::{
     ContextCheckpoint, CHECKPOINT_EMPTY_MARKER, CHECKPOINT_EVENT_TYPE, CHECKPOINT_TOKEN_CAP,
 };
 pub use compact::{
-    argument_reference, compact_to_low_water, should_compact, CompactItem, CompactLane,
-    CompactOutcome, CompactPhase,
+    argument_reference, compact_to_low_water, group_items, should_compact, CompactItem,
+    CompactLane, CompactOutcome, CompactPhase, ExchangeGroup,
 };
 pub use envelope::{
     apply_line_items, compute_water_levels, decide_memory_index, ensure_functions_within_cap,
@@ -32,8 +32,8 @@ pub use envelope::{
 };
 pub use error::{ContextBudgetError, CONTEXT_BUDGET_EXHAUSTED};
 pub use governor::{
-    apply_explicit_checkpoint, assemble_from_snapshot, items_from_logs, AssembledConversation,
-    GovernorEvent, TurnGovernor,
+    apply_explicit_checkpoint, assemble_from_snapshot, items_from_logs, take_governor_events,
+    AssembledConversation, CheckpointApplyError, GovernorEvent, TurnGovernor,
 };
 pub use ledger::{LedgerItem, TokenLedger};
 pub use observe::{

@@ -1,4 +1,4 @@
-//! 826-B 必須 4 点（mock LLM のみ）。SkillEngine の MockLlm 基盤で回す。
+//! 826-B 必須 4 点（mock LLM のみ）。SkillEngine の MockLlm 基盤と本番組立/終了経路で回す。
 
 use super::checkpoint::{
     checkpoint_event_body, select_checkpoint_lane, ContextCheckpoint, CHECKPOINT_EMPTY_MARKER,
@@ -6,9 +6,12 @@ use super::checkpoint::{
 use super::compact::{
     compact_to_low_water, should_compact, CompactItem, CompactLane, CompactPhase,
 };
-use super::governor::{items_from_logs, GovernorEvent, TurnGovernor};
-use crate::conversation::fit_logs_to_budget;
+use super::governor::{
+    assemble_from_snapshot, items_from_logs, take_governor_events, GovernorEvent, TurnGovernor,
+};
+use crate::conversation::{build_conversation_string_with_waters, fit_logs_to_budget};
 use crate::engine::{ActionExecutor, ActionResult, ChatRequest, SkillEngine};
+use crate::tokens::estimate_tokens;
 use crate::{LlmClient, ToolCall};
 use async_trait::async_trait;
 use opencrab_llm_types::{
@@ -29,6 +32,7 @@ fn compact_item(key: &str, tokens: usize, lane: CompactLane, log_id: Option<i64>
         lane,
         log_id,
         must_keep: false,
+        group_id: None,
     }
 }
 
@@ -54,7 +58,27 @@ fn insert_speech(
     out
 }
 
-fn insert_tool_pair(conn: &rusqlite::Connection, i: usize) {
+fn insert_checkpoint(conn: &rusqlite::Connection) {
+    let cp = ContextCheckpoint {
+        confirmed: vec!["step-17".into()],
+        position: CHECKPOINT_NEEDLE.into(),
+        next: "finish".into(),
+    };
+    let ev = opencrab_db::queries::SessionLogRow {
+        id: None,
+        agent_id: AGENT.into(),
+        session_id: SESSION.into(),
+        log_type: "system".into(),
+        content: checkpoint_event_body(&cp),
+        speaker_id: Some(AGENT.into()),
+        turn_number: None,
+        metadata_json: None,
+        created_at: None,
+    };
+    opencrab_db::queries::insert_session_log(conn, &ev).unwrap();
+}
+
+fn insert_tool_pair(conn: &rusqlite::Connection, i: usize, pad: &str) {
     let call = opencrab_db::queries::SessionLogRow {
         id: None,
         agent_id: AGENT.into(),
@@ -69,7 +93,7 @@ fn insert_tool_pair(conn: &rusqlite::Connection, i: usize) {
                     "id": format!("tc-{i}"),
                     "function": {
                         "name": "confirm_step",
-                        "arguments": format!("{{\"n\":{i},\"pad\":\"{}\"}}", "x".repeat(80))
+                        "arguments": format!("{{\"n\":{i},\"pad\":\"{pad}\"}}")
                     }
                 }]).to_string()
             })
@@ -83,7 +107,7 @@ fn insert_tool_pair(conn: &rusqlite::Connection, i: usize) {
         agent_id: AGENT.into(),
         session_id: SESSION.into(),
         log_type: "tool_result".into(),
-        content: format!("{{\"success\":true,\"data\":\"{}\"}}", "y".repeat(80)),
+        content: format!("{{\"success\":true,\"data\":\"{pad}\"}}"),
         speaker_id: Some(AGENT.into()),
         turn_number: None,
         metadata_json: Some(
@@ -95,7 +119,42 @@ fn insert_tool_pair(conn: &rusqlite::Connection, i: usize) {
     opencrab_db::queries::insert_session_log(conn, &result).unwrap();
 }
 
-/// (a) 高水位超過→低水位まで削減の数値アサート（境界値込み）
+fn seed_over_high(conn: &rusqlite::Connection) {
+    insert_speech(conn, "owner", "最初の指示");
+    insert_speech(conn, AGENT, CHECKPOINT_NEEDLE);
+    insert_checkpoint(conn);
+    let blob = "hist ".repeat(2_000);
+    for i in 0..30 {
+        insert_speech(conn, "owner", &format!("turn-{i} {blob}"));
+    }
+    let pad = "pad ".repeat(80);
+    for i in 0..46 {
+        insert_tool_pair(conn, i, &pad);
+    }
+}
+
+fn text_over_tokens(min_tokens: usize) -> String {
+    let s = "word ".repeat(min_tokens.saturating_add(64));
+    assert!(
+        estimate_tokens(&s) > min_tokens,
+        "fixture tokens={} が {min_tokens} 以下",
+        estimate_tokens(&s)
+    );
+    s
+}
+
+fn compact_fired_phases(events: &[GovernorEvent]) -> Vec<CompactPhase> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            GovernorEvent::CompactFired { phase, .. } => Some(*phase),
+            _ => None,
+        })
+        .collect()
+}
+
+/// (a) 高水位超過→低水位まで削減の数値アサート（境界値込み）。
+/// compact_to_low_water が本番圧縮器。SkillEngine も同じ水位で発火することを見る。
 #[test]
 fn a_high_water_cut_to_low_with_boundaries() {
     let empty = select_checkpoint_lane(None, None);
@@ -129,71 +188,105 @@ fn a_high_water_cut_to_low_with_boundaries() {
     assert!(cut.reduction() >= 25_001, "reduction={}", cut.reduction());
 }
 
-/// (b) 発火点 3 態をイベント順で
+#[tokio::test]
+async fn a_skill_engine_mid_turn_fires_at_45001() {
+    let pad = text_over_tokens(HIGH);
+    assert!(estimate_tokens(&pad) > HIGH);
+    let _ = take_governor_events();
+    let mut engine = SkillEngine::new(
+        Box::new(OnceTextLlm { text: "ok".into() }),
+        Box::new(LoopingExecutor),
+        3,
+    );
+    engine.set_conversation_waters(HIGH, LOW);
+    let result = engine.run("system", &pad, "mock").await.unwrap();
+    assert_eq!(result.response, "ok");
+    let fired = compact_fired_phases(&take_governor_events());
+    assert!(
+        fired.contains(&CompactPhase::MidTurn),
+        "SkillEngine 本番 append 境界で 45,001 相当が発火する: {fired:?}"
+    );
+}
+
+/// (b) 本番経路の発火点をイベント順で観測する。
+/// 終了直後に走る / 次の開始時には走らない / 途中超過で走る。
 #[test]
 fn b_fire_points_event_order() {
     let conn = opencrab_db::init_memory().unwrap();
-    insert_speech(&conn, "owner", "start");
-    let items: Vec<CompactItem> = (0..46)
-        .map(|i| compact_item(&format!("u{i}"), 1_000, CompactLane::OldHistory, Some(i)))
-        .collect();
-    let cp = select_checkpoint_lane(None, Some("assistant kept"));
-    let mut gov = TurnGovernor::new(HIGH, LOW);
+    seed_over_high(&conn);
+    let _ = take_governor_events();
 
-    let end = gov.finish_turn(&conn, SESSION, &items, &cp, 46).unwrap();
-    assert!(end.fired);
-
-    let assembled = super::assemble_from_snapshot(&conn, SESSION, AGENT).unwrap();
-    gov.inspect_turn_start(assembled.tokens);
-
-    let mut ledger = crate::context_budget::TokenLedger::new();
-    for i in 0..46 {
-        ledger.record_tokens(format!("mid{i}"), 1_000);
-    }
-    ledger.record_tokens("burst", 1);
-    let mid_items: Vec<CompactItem> = (0..46)
-        .map(|i| {
-            compact_item(
-                &format!("m{i}"),
-                1_000,
-                CompactLane::OldHistory,
-                Some(100 + i),
-            )
-        })
-        .collect();
-    let mid = gov
-        .inspect_append(&ledger, &mid_items, &cp)
-        .expect("途中超過では走る");
-    assert!(mid.fired);
-
-    let fired: Vec<CompactPhase> = gov
-        .events()
-        .iter()
-        .filter_map(|e| match e {
-            GovernorEvent::CompactFired { phase, .. } => Some(*phase),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        fired,
-        vec![CompactPhase::TurnEnd, CompactPhase::MidTurn],
-        "イベント順: {fired:?} / all={:?}",
-        gov.events()
+    let assembled = assemble_from_snapshot(&conn, SESSION, AGENT).unwrap();
+    assert!(
+        assembled.tokens > HIGH,
+        "終了圧縮の前提: assembled={} が高水位以下",
+        assembled.tokens
     );
-    assert!(gov.events().iter().any(|e| matches!(
-        e,
-        GovernorEvent::Inspect {
-            phase: CompactPhase::TurnStart,
-            ..
-        }
-    )));
-    assert!(!gov.events().iter().any(|e| matches!(
-        e,
-        GovernorEvent::CompactFired {
-            phase: CompactPhase::TurnStart,
-            ..
-        }
-    )));
+    let mut gov = TurnGovernor::new(HIGH, LOW);
+    let end = gov
+        .finish_turn(
+            &conn,
+            SESSION,
+            &assembled.items,
+            &assembled.checkpoint,
+            assembled.through_log_id,
+            &assembled.text,
+        )
+        .unwrap();
+    assert!(end.fired, "終了直後の本番 finish_turn が発火する");
+
+    let started = build_conversation_string_with_waters(&conn, SESSION, AGENT, HIGH, LOW, false)
+        .expect("開始組立");
+    assert!(!started.is_empty(), "開始組立が空: {started}");
+
+    let pad = text_over_tokens(HIGH);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let mut engine = SkillEngine::new(
+            Box::new(OnceTextLlm { text: "ok".into() }),
+            Box::new(LoopingExecutor),
+            3,
+        );
+        engine.set_conversation_waters(HIGH, LOW);
+        engine.run("system", &pad, "mock").await.unwrap();
+    });
+
+    let events = take_governor_events();
+    let fired = compact_fired_phases(&events);
+    assert!(
+        fired.contains(&CompactPhase::TurnEnd),
+        "終了直後に走る: {fired:?} / {events:?}"
+    );
+    assert!(
+        !fired.contains(&CompactPhase::TurnStart),
+        "開始時には走らない: {fired:?} / {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            GovernorEvent::Inspect {
+                phase: CompactPhase::TurnStart,
+                ..
+            }
+        )),
+        "開始は検査する: {events:?}"
+    );
+    assert!(
+        fired.contains(&CompactPhase::MidTurn),
+        "途中超過で走る: {fired:?} / {events:?}"
+    );
+    let end_pos = fired
+        .iter()
+        .position(|p| *p == CompactPhase::TurnEnd)
+        .unwrap();
+    let mid_pos = fired
+        .iter()
+        .position(|p| *p == CompactPhase::MidTurn)
+        .unwrap();
+    assert!(end_pos < mid_pos, "終了が先、途中が後: {fired:?}");
 }
 
 /// 「チェックポイントが見えなければ確認をやり直す」mock。
@@ -214,6 +307,17 @@ impl LlmClient for CheckpointSeekingLlm {
         }
         *self.confirms.lock().unwrap() += 1;
         Ok(tool_resp("confirm_step"))
+    }
+}
+
+struct OnceTextLlm {
+    text: String,
+}
+
+#[async_trait]
+impl LlmClient for OnceTextLlm {
+    async fn chat(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        Ok(text_resp(&self.text))
     }
 }
 
@@ -298,32 +402,11 @@ async fn run_seek(conversation: &str) -> (String, usize, usize) {
     (result.response, result.iterations, n)
 }
 
-/// (c) 到達点生存の新旧対比
+/// (c) 到達点生存の新旧対比。新側は高水位を超えて圧縮が起き、針が 1 回だけ残る。
 #[tokio::test]
 async fn c_checkpoint_survival_old_loops_new_oneshot() {
     let conn = opencrab_db::init_memory().unwrap();
-    insert_speech(&conn, "owner", "最初の指示");
-    insert_speech(&conn, AGENT, CHECKPOINT_NEEDLE);
-    let cp = ContextCheckpoint {
-        confirmed: vec!["step-17".into()],
-        position: CHECKPOINT_NEEDLE.into(),
-        next: "finish".into(),
-    };
-    let ev = opencrab_db::queries::SessionLogRow {
-        id: None,
-        agent_id: AGENT.into(),
-        session_id: SESSION.into(),
-        log_type: "system".into(),
-        content: checkpoint_event_body(&cp),
-        speaker_id: Some(AGENT.into()),
-        turn_number: None,
-        metadata_json: None,
-        created_at: None,
-    };
-    opencrab_db::queries::insert_session_log(&conn, &ev).unwrap();
-    for i in 0..46 {
-        insert_tool_pair(&conn, i);
-    }
+    seed_over_high(&conn);
     let logs = opencrab_db::queries::list_session_logs_by_session(&conn, SESSION).unwrap();
     let retained = crate::conversation::retain_conversation_logs(logs);
 
@@ -334,68 +417,83 @@ async fn c_checkpoint_survival_old_loops_new_oneshot() {
     );
     let (old_resp, old_iters, old_confirms) = run_seek(&old_text).await;
     assert!(
-        old_iters > 1 || old_confirms > 0,
+        old_iters > 1 && old_confirms > 0,
         "旧実装は確認をやり直してループする: resp={old_resp} iters={old_iters} confirms={old_confirms}"
     );
 
     let (items, lane) = items_from_logs(&conn, SESSION, AGENT, &retained).unwrap();
+    let before: usize = items.iter().map(|i| i.tokens).sum::<usize>() + lane.tokens();
     assert!(
-        lane.render().contains(CHECKPOINT_NEEDLE)
-            || matches!(lane, crate::context_budget::CheckpointLane::Explicit(_))
+        before > HIGH,
+        "新側は高水位を超える fixture: before={before}"
     );
     let new_out = compact_to_low_water(&items, &lane, HIGH, LOW);
+    assert!(new_out.fired, "新側は圧縮を跨ぐ: before={before}");
     assert!(
-        new_out.text.contains(CHECKPOINT_NEEDLE)
-            || new_out.text.contains("step-17")
-            || new_out.text.contains("[context_checkpoint]"),
-        "新実装は到達点を再注入する: {}",
+        new_out.after_tokens <= LOW || new_out.low_water_unreachable,
+        "圧縮後 after={}",
+        new_out.after_tokens
+    );
+    let hits = new_out.text.matches(CHECKPOINT_NEEDLE).count();
+    assert_eq!(
+        hits, 1,
+        "到達点は byte-exact で一度だけ: hits={hits} text={}",
         new_out.text
     );
-    assert!(!new_out.text.contains(CHECKPOINT_EMPTY_MARKER) || new_out.text.contains("step-17"));
+    assert!(!new_out.text.contains(CHECKPOINT_EMPTY_MARKER));
     let (new_resp, new_iters, new_confirms) = run_seek(&new_out.text).await;
     assert_eq!(new_resp, "確認完了");
     assert_eq!(new_iters, 1, "新実装は 1 発完了");
     assert_eq!(new_confirms, 0, "確認のやり直しはしない");
 }
 
-/// (d) 連続投稿しても圧縮が毎回発火しない
+/// (d) 連続投稿しても圧縮が毎回発火しない。実際の finish_turn 回数で数える。
 #[test]
 fn d_hysteresis_consecutive_posts_do_not_refire() {
-    let empty = select_checkpoint_lane(None, None);
-    let mut items: Vec<CompactItem> = (0..46)
-        .map(|i| compact_item(&format!("p{i}"), 1_000, CompactLane::OldHistory, Some(i)))
-        .collect();
-    let first = compact_to_low_water(&items, &empty, HIGH, LOW);
-    assert!(first.fired);
-    assert!(first.after_tokens <= LOW);
+    let conn = opencrab_db::init_memory().unwrap();
+    seed_over_high(&conn);
+    let _ = take_governor_events();
 
-    let mut fires = 1usize;
+    let assembled = assemble_from_snapshot(&conn, SESSION, AGENT).unwrap();
+    let mut gov = TurnGovernor::new(HIGH, LOW);
+    let first = gov
+        .finish_turn(
+            &conn,
+            SESSION,
+            &assembled.items,
+            &assembled.checkpoint,
+            assembled.through_log_id,
+            &assembled.text,
+        )
+        .unwrap();
+    assert!(first.fired, "最初の投稿で圧縮する");
+    assert!(first.after_tokens <= LOW || first.low_water_unreachable);
+
     for n in 0..5 {
-        items.push(compact_item(
-            &format!("post{n}"),
-            80,
-            CompactLane::RecentVerbatim,
-            Some(200 + n),
-        ));
-        let kept: Vec<CompactItem> = items
-            .iter()
-            .rev()
-            .take(20)
-            .cloned()
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        let mut after_cut = first.after_tokens;
-        after_cut += 80;
+        insert_speech(&conn, "owner", &format!("post-{n} {}", "z".repeat(80)));
+        let assembled = assemble_from_snapshot(&conn, SESSION, AGENT).unwrap();
+        let mut gov = TurnGovernor::new(HIGH, LOW);
+        let again = gov
+            .finish_turn(
+                &conn,
+                SESSION,
+                &assembled.items,
+                &assembled.checkpoint,
+                assembled.through_log_id,
+                &assembled.text,
+            )
+            .unwrap();
         assert!(
-            !should_compact(after_cut, HIGH),
-            "低水位へ戻った後の連続投稿 {n} で高水位を再超過した"
+            !again.fired,
+            "低水位へ戻った後の連続投稿 {n} で再発火: tokens={}",
+            assembled.tokens
         );
-        let again = compact_to_low_water(&kept, &empty, HIGH, LOW);
-        if again.fired {
-            fires += 1;
-        }
     }
-    assert_eq!(fires, 1, "ヒステリシスが効かず毎回発火した");
+
+    let fires = compact_fired_phases(&take_governor_events());
+    assert_eq!(
+        fires,
+        vec![CompactPhase::TurnEnd],
+        "ヒステリシスが効かず毎回発火した: {fires:?}"
+    );
 }

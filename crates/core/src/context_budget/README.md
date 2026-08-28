@@ -32,14 +32,19 @@ conversation_low  = input_low.saturating_sub(fixed)
 
 ## ターン統御（826-B）
 
-圧縮の正時はターン終了直後。`TurnGovernor::finish_turn` が派生スナップショット（`conversation_snapshots`: compacted 会話 + `through_log_id`）を行追加する。DB 正本は不変。
+圧縮の正時はターン終了直後の**背景**処理。`run_agent_response` は `tokio::spawn` で `finish_turn` を投げ、利用者の待ち時間に乗せない。`TurnGovernor::finish_turn` が派生スナップショット（`conversation_snapshots`: compacted 会話 + `through_log_id`）を行追加する。DB 正本は不変。
 
-- ターン開始: `assemble_from_snapshot`（スナップショット + 水位印より後の差分）と総量検査だけ。開始時 `fit_logs_to_budget` は走らせない。開始時に高水位を越えた場合だけ途中超過と同じ圧縮を許す。
-- ターン途中: SkillEngine の各 append で `TokenLedger` 合計だけを更新し、高水位超過のときだけ合成 user 文字列を低水位まで刈る。全文再 encode はしない。
+- ターン開始: `assemble_from_snapshot`（スナップショット + 水位印より後の差分）と `inspect_turn_start`。開始時 `fit_logs_to_budget` は走らせない。高水位超過のときだけ `compact_start_if_over`（途中超過と同じ `compact_to_low_water`）。
+- ターン途中: SkillEngine の各 append で `TokenLedger` 合計だけを更新し、高水位超過のときだけ合成 user 文字列を低水位まで刈る。チェックポイントは user 本文 / 直近 speech から取る。実行前に各 tool の result cap 合計を予約し、収まらなければ先に刈る。それでも駄目なら副作用 tool を開始せず `context_budget_exhausted`。
 - 二水位: `tokens > conversation_high` で発火し、低水位まで落とす。ちょうど high は非発火。
-- 車線順: 到達点チェックポイント不可侵 → 直近逐語（`must_keep` のユーザー発言を先） → エコー参照化 → 古い履歴要約。固定割合にはしない。現行 topic 30% は本番組立から外した。
+- 車線順: 到達点チェックポイント不可侵 → 直近逐語 → エコー参照化 → 古い履歴要約。新しい echo が古い逐語を押し出さない。`ExchangeGroup`（assistant said + 対応 tool call/result）は原子的。
+- スナップショット: 非発火時も `assembled.text`（snap+差分の全文）を書く。`items` / checkpoint は正本の全ログから取る。persist 後も継続ターンで刈れる。
 
-到達点チェックポイント（#825）: schema `{confirmed[], position, next}`、上限 1000 token。`update_context_checkpoint` の明示更新を優先し、無ければ直近 assistant speech を逐語コピー（要約しない）。過大更新は旧値を残して `checkpoint_oversize`。圧縮後は選ばれた一件を一度だけ再注入。空なら空 marker と `checkpoint_empty`。
+到達点チェックポイント（#825）: schema `{confirmed[], position, next}`、上限 1000 token。`update_context_checkpoint` の明示更新を優先し、無ければ直近 assistant speech を逐語コピー（ヘッダを足さない）。過大更新は旧値を残して `checkpoint_oversize`。圧縮後は選ばれた一件を一度だけ再注入。空なら空 marker と `checkpoint_empty`。
+
+完了済み `tool_call.arguments` の read 経路は `{ref,digest,bytes}` の有効 JSON。未決着 call は全文。DB の `metadata.tool_calls_json` は変えない。
+
+発火観測: 本番経路は `take_governor_events` に `Inspect` / `CompactFired` を積む。
 
 ## Memory Index / functions
 
@@ -56,8 +61,8 @@ conversation_low  = input_low.saturating_sub(fixed)
 
 ## 必須テスト（mock LLM のみ）
 
-`core_process_e2e.rs`。(a) 高水位超過→低水位まで削減の数値アサート（境界値込み）。(b) 発火点 3 態のイベント順。(c) 到達点生存の新旧対比。(d) 連続投稿のヒステリシス。
+`core_process_e2e.rs`。(a) 高水位超過→低水位まで削減の数値アサート（境界値込み）と SkillEngine 発火。(b) 本番経路（`finish_turn` / `build_conversation_string_with_waters` / SkillEngine append）の発火点 3 態。(c) 到達点生存の新旧対比（新側は高水位を超えて圧縮し、針は 1 回）。(d) 連続 `finish_turn` の実圧縮回数でヒステリシス。
 
 ## 劣化帯 harness
 
-`60_000..=110_000` を 5,000 刻みで走査する mock harness を置く。実 LLM は呼ばない。選ばれる `input_high` が 305,000 にならないことと A が勝つことを固定する。実測較正は 826-C。
+`60_000..=110_000` を 5,000 刻みで走査する。各点の `prompt` は conversation 費目として envelope に載せる。実 LLM は呼ばない。選ばれる `input_high` が 305,000 にならないことと A が勝つことを固定する。実測較正は 826-C。

@@ -550,8 +550,38 @@ fn persist_turn_end_snapshot(
         &assembled.items,
         &assembled.checkpoint,
         assembled.through_log_id,
+        &assembled.text,
     )?;
     Ok(())
+}
+
+/// 利用者の待ち時間に乗せない。失敗は応答をひっくり返さない（正時の失敗は次開始の超過検査で見える）。
+fn spawn_background_turn_end_snapshot(
+    state: &AppState,
+    session_id: &str,
+    agent_id: &str,
+    conversation_high: usize,
+    conversation_low: usize,
+) {
+    let state = state.clone();
+    let session_id = session_id.to_string();
+    let agent_id = agent_id.to_string();
+    tokio::spawn(async move {
+        if let Err(e) = persist_turn_end_snapshot(
+            &state,
+            &session_id,
+            &agent_id,
+            conversation_high,
+            conversation_low,
+        ) {
+            tracing::error!(
+                target: "context_budget_check",
+                session_id = %session_id,
+                error = %e,
+                "turn-end snapshot persist failed"
+            );
+        }
+    });
 }
 
 /// 各 request 前: 実 `list_tools` で functions cap と `fixed >= input_high` を検査する。
@@ -1764,7 +1794,7 @@ pub async fn run_agent_response(
     // どちらも持たなかった。サブタスクごとに LLM 支出が増えるのを避ける）。
     if depth == 0 {
         if let Some((high, low)) = last_waters {
-            persist_turn_end_snapshot(state, session_id, agent_id, high, low)?;
+            spawn_background_turn_end_snapshot(state, session_id, agent_id, high, low);
         }
         spawn_background_index_build(state, agent_id, &effective_model);
         if let Ok(ref engine_result) = result {

@@ -716,6 +716,14 @@ impl SkillEngine {
                         None => (&tool_calls[..], &tool_calls[..0]),
                     };
 
+                reserve_result_caps(
+                    &mut turn_gov,
+                    &mut turn_ledger,
+                    &mut messages,
+                    inline_calls,
+                    dispatch_calls,
+                )?;
+
                 for tool_call in inline_calls {
                     total_tool_calls += 1;
                     let tool_name = &tool_call.function.name;
@@ -885,32 +893,132 @@ fn message_plain_text(msg: &Message) -> String {
     }
 }
 
+fn split_user_blocks(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for line in text.lines() {
+        let new_block = line.starts_with('[')
+            && line.contains("]:")
+            && !line.starts_with("[tool_call]")
+            && !line.starts_with("[tool_result]")
+            && !line.starts_with("[context_checkpoint")
+            && !line.starts_with("[old_history_summary]")
+            && !line.starts_with("[echo]");
+        if new_block && !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push('\n');
+        }
+        cur.push_str(line);
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out.into_iter()
+        .filter(|b| {
+            let t = b.trim();
+            !t.is_empty()
+                && t != crate::context_budget::CHECKPOINT_EMPTY_MARKER
+                && !t.starts_with("[context_checkpoint]")
+        })
+        .collect()
+}
+
+fn extract_explicit_checkpoint(text: &str) -> Option<crate::context_budget::ContextCheckpoint> {
+    let idx = text.find("[context_checkpoint]")?;
+    let after = text[idx + "[context_checkpoint]".len()..].trim_start();
+    let start = after.find('{')?;
+    let slice = &after[start..];
+    let mut depth = 0i32;
+    let mut end = None;
+    for (i, c) in slice.char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(i + 1);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    serde_json::from_str(&slice[..end?]).ok()
+}
+
+fn last_assistant_speech(messages: &[Message]) -> Option<String> {
+    messages.iter().rev().find_map(|m| {
+        if m.role != Role::Assistant {
+            return None;
+        }
+        let t = message_plain_text(m);
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
+        }
+    })
+}
+
+fn checkpoint_from_messages(messages: &[Message]) -> crate::context_budget::CheckpointLane {
+    let user = messages.get(1).map(message_plain_text).unwrap_or_default();
+    let explicit = extract_explicit_checkpoint(&user);
+    crate::context_budget::select_checkpoint_lane(
+        explicit.as_ref(),
+        last_assistant_speech(messages).as_deref(),
+    )
+}
+
 fn user_line_items(messages: &[Message]) -> Vec<crate::context_budget::CompactItem> {
     use crate::context_budget::{CompactItem, CompactLane, TokenLedger};
     let Some(user) = messages.get(1) else {
         return Vec::new();
     };
     let text = message_plain_text(user);
-    let lines: Vec<&str> = text.split('\n').collect();
-    let tail = lines.len().saturating_sub(8);
+    let blocks = split_user_blocks(&text);
+    let tail = blocks.len().saturating_sub(8);
     let mut ledger = TokenLedger::new();
-    lines
+    let mut gid = 1u64;
+    let mut last_tool_gid: Option<u64> = None;
+    blocks
         .into_iter()
         .enumerate()
-        .map(|(i, line)| {
+        .map(|(i, block)| {
+            let is_tool = block.contains("[tool_call]") || block.contains("[tool_result]");
+            let group_id = if is_tool {
+                match last_tool_gid {
+                    Some(g) => g,
+                    None => {
+                        let g = gid;
+                        gid += 1;
+                        last_tool_gid = Some(g);
+                        g
+                    }
+                }
+            } else {
+                last_tool_gid = None;
+                let g = gid;
+                gid += 1;
+                g
+            };
             let key = format!("user:{i}");
-            let tokens = ledger.record(&key, line);
+            let tokens = ledger.record(&key, &block);
             CompactItem {
                 key,
                 tokens,
-                text: line.to_string(),
+                text: block,
                 lane: if i >= tail {
                     CompactLane::RecentVerbatim
+                } else if is_tool {
+                    CompactLane::Echoable
                 } else {
                     CompactLane::OldHistory
                 },
                 log_id: Some(i as i64),
-                must_keep: false,
+                must_keep: i >= tail,
+                group_id: Some(group_id),
             }
         })
         .collect()
@@ -932,7 +1040,7 @@ fn apply_turn_budget(
         .unwrap_or(0);
     let other = ledger.total().saturating_sub(user_tokens);
     let items = user_line_items(messages);
-    let checkpoint = crate::context_budget::select_checkpoint_lane(None, None);
+    let checkpoint = checkpoint_from_messages(messages);
     let Some(outcome) = gov.compact_user_on_append(ledger.total(), &items, &checkpoint, other)
     else {
         return Ok(());
@@ -948,6 +1056,43 @@ fn apply_turn_budget(
             user.content = Some(MessageContent::Text(outcome.text.clone()));
         }
         ledger.record_tokens("user", outcome.after_tokens);
+    }
+    Ok(())
+}
+
+/// 実行前に各 result cap の合計を予約する。収まらなければ先に刈り、それでも駄目なら
+/// 副作用 tool を一件も開始せず止める。
+fn reserve_result_caps(
+    gov: &mut Option<crate::context_budget::TurnGovernor>,
+    ledger: &mut crate::context_budget::TokenLedger,
+    messages: &mut [Message],
+    inline_calls: &[ToolCall],
+    dispatch_calls: &[ToolCall],
+) -> Result<(), anyhow::Error> {
+    let reserved: usize = inline_calls
+        .iter()
+        .chain(dispatch_calls.iter())
+        .map(|tc| crate::tool_result_log::inline_limit_for_tool(&tc.function.name))
+        .sum();
+    let high = match gov.as_ref() {
+        Some(g) => g.conversation_high,
+        None => return Ok(()),
+    };
+    let projected = ledger.total().saturating_add(reserved);
+    if !crate::context_budget::should_compact(projected, high) {
+        return Ok(());
+    }
+    apply_turn_budget(gov, ledger, messages)?;
+    let high = match gov.as_ref() {
+        Some(g) => g.conversation_high,
+        None => return Ok(()),
+    };
+    let projected = ledger.total().saturating_add(reserved);
+    if crate::context_budget::should_compact(projected, high) {
+        return Err(anyhow::anyhow!(
+            "{}: cannot reserve tool result caps without exceeding input_high",
+            crate::context_budget::CONTEXT_BUDGET_EXHAUSTED
+        ));
     }
     Ok(())
 }

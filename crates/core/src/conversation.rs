@@ -6,7 +6,9 @@
 //! 依存しないため core に置く（#518 手順 3〜4）。呼び出し元は `server::process`
 //! （既存パスを保つ再エクスポート）。
 
-use crate::context_budget::{assemble_from_snapshot, compact_to_low_water};
+use crate::context_budget::{
+    argument_reference, assemble_from_snapshot, TurnGovernor, CONTEXT_BUDGET_EXHAUSTED,
+};
 use crate::tokens::estimate_tokens;
 
 /// コンパクション時に最低限保持する最近のログ件数。
@@ -228,19 +230,15 @@ fn build_conversation_inner(
     if assembled.text == NO_MESSAGES_MARKER {
         return Ok(assembled.text);
     }
-    if assembled.tokens <= conversation_high {
+    let mut gov = TurnGovernor::new(conversation_high, conversation_low);
+    let Some(outcome) =
+        gov.compact_start_if_over(assembled.tokens, &assembled.items, &assembled.checkpoint)
+    else {
         return Ok(assembled.text);
-    }
-    let outcome = compact_to_low_water(
-        &assembled.items,
-        &assembled.checkpoint,
-        conversation_high,
-        conversation_low,
-    );
+    };
     if outcome.exhausted {
         return Err(anyhow::anyhow!(
-            "{}: conversation tokens after inviolable lanes exceed input_high",
-            crate::context_budget::CONTEXT_BUDGET_EXHAUSTED
+            "{CONTEXT_BUDGET_EXHAUSTED}: conversation tokens after inviolable lanes exceed input_high"
         ));
     }
     Ok(outcome.text)
@@ -979,6 +977,15 @@ fn format_logs(logs: &[opencrab_db::queries::SessionLogRow]) -> String {
 }
 
 pub fn format_single_log(log: &opencrab_db::queries::SessionLogRow) -> String {
+    format_single_log_with_echo(log, None)
+}
+
+/// 完了済み tool_call の arguments を `{ref,digest,bytes}` に置換して読む。
+/// 未決着 call は `completed_ids` に無いので全文のまま。
+pub fn format_single_log_with_echo(
+    log: &opencrab_db::queries::SessionLogRow,
+    completed_ids: Option<&std::collections::HashSet<String>>,
+) -> String {
     let ts = log
         .created_at
         .as_deref()
@@ -1025,6 +1032,12 @@ pub fn format_single_log(log: &opencrab_db::queries::SessionLogRow) -> String {
                                                 .unwrap_or_default();
                                             (name, args)
                                         };
+                                        let args =
+                                            if completed_ids.is_some_and(|set| set.contains(id)) {
+                                                argument_reference(log.id.unwrap_or(0), &args)
+                                            } else {
+                                                args
+                                            };
                                         Some(format!("[id={}]: {}({})", id, name, args))
                                     })
                                     .collect();
@@ -1156,7 +1169,7 @@ fn format_subtask_completed(value: &serde_json::Value, raw_content: &str, ts: &s
 
 #[cfg(test)]
 mod format_log_tests {
-    use super::format_single_log;
+    use super::{format_single_log, format_single_log_with_echo};
     use opencrab_db::queries::SessionLogRow;
 
     fn tool_call_log(tool_calls_json: &str) -> SessionLogRow {
@@ -1208,6 +1221,34 @@ mod format_log_tests {
             "legacy tool name must render: {out}"
         );
         assert!(out.contains("tc-9"), "legacy tool id must render: {out}");
+    }
+
+    #[test]
+    fn completed_tool_call_arguments_become_ref_digest_bytes() {
+        let tcj = serde_json::json!([{
+            "id": "tc-1",
+            "type": "function",
+            "function": { "name": "search", "arguments": "{\"q\":\"rust\"}" }
+        }])
+        .to_string();
+        let mut log = tool_call_log(&tcj);
+        log.id = Some(42);
+        let mut done = std::collections::HashSet::new();
+        done.insert("tc-1".into());
+        let out = format_single_log_with_echo(&log, Some(&done));
+        assert!(out.contains("search"), "{out}");
+        assert!(out.contains(r#""ref":"log:42""#), "{out}");
+        assert!(out.contains(r#""digest""#), "{out}");
+        assert!(out.contains(r#""bytes""#), "{out}");
+        assert!(
+            !out.contains(r#"{"q":"rust"}"#),
+            "完了済み arguments は全文を残さない: {out}"
+        );
+        let unresolved = format_single_log_with_echo(&log, Some(&std::collections::HashSet::new()));
+        assert!(
+            unresolved.contains(r#"{"q":"rust"}"#),
+            "未決着 call は全文: {unresolved}"
+        );
     }
 
     /// [#323] 1 つのセッションに複数の相手の発言が混ざっても、**誰の発言かが分かる**。

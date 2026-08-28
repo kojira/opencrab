@@ -1,7 +1,11 @@
 //! ターン統御（#826-B）。
 //!
-//! 圧縮の正時はターン終了直後。開始は組立と検査のみ。途中は超過時だけ刈る。
-//! 派生スナップショットは行追加のみ。
+//! 圧縮の正時はターン終了直後。開始は組立と検査のみ（超過だけ途中扱い）。
+//! 途中は超過時だけ刈る。派生スナップショットは行追加のみ。
+//! 本番経路はすべてここを通り、発火は [`take_governor_events`] で観測できる。
+
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 
 use rusqlite::Connection;
 
@@ -13,9 +17,13 @@ use super::compact::{
     compact_to_low_water, should_compact, CompactItem, CompactLane, CompactOutcome, CompactPhase,
 };
 use super::ledger::TokenLedger;
-use crate::conversation::format_single_log;
+use crate::conversation::format_single_log_with_echo;
 
-/// 統御が出すイベント。テストはこれの順を見る。
+thread_local! {
+    static EVENT_SINK: RefCell<Vec<GovernorEvent>> = const { RefCell::new(Vec::new()) };
+}
+
+/// 統御が出すイベント。本番経路がここへ積む。テストはこれの順を見る。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GovernorEvent {
     Inspect {
@@ -33,6 +41,15 @@ pub enum GovernorEvent {
     },
     CheckpointEmpty,
     LowWaterUnreachable,
+}
+
+/// テストが本番発火点の順を取る。取るたびに空になる。
+pub fn take_governor_events() -> Vec<GovernorEvent> {
+    EVENT_SINK.with(|s| std::mem::take(&mut *s.borrow_mut()))
+}
+
+fn emit(ev: GovernorEvent) {
+    EVENT_SINK.with(|s| s.borrow_mut().push(ev));
 }
 
 /// 1 セッションのターン統御。
@@ -56,26 +73,27 @@ impl TurnGovernor {
         &self.events
     }
 
+    fn push(&mut self, ev: GovernorEvent) {
+        emit(ev.clone());
+        self.events.push(ev);
+    }
+
     /// ターン開始: 組立結果を検査するだけ。ここでは刈らない。
     pub fn inspect_turn_start(&mut self, tokens: usize) {
-        self.events.push(GovernorEvent::Inspect {
+        self.push(GovernorEvent::Inspect {
             phase: CompactPhase::TurnStart,
             tokens,
         });
     }
 
-    /// append 境界: 台帳合計だけを見て、超過なら刈る。
-    pub fn inspect_append(
+    /// 開始時に高水位を越えていたときだけ、途中超過と同じ圧縮を走らせる。
+    pub fn compact_start_if_over(
         &mut self,
-        ledger: &TokenLedger,
+        tokens: usize,
         items: &[CompactItem],
         checkpoint: &CheckpointLane,
     ) -> Option<CompactOutcome> {
-        let tokens = ledger.total();
-        self.events.push(GovernorEvent::Inspect {
-            phase: CompactPhase::MidTurn,
-            tokens,
-        });
+        self.inspect_turn_start(tokens);
         if !should_compact(tokens, self.conversation_high) {
             return None;
         }
@@ -92,7 +110,7 @@ impl TurnGovernor {
         checkpoint: &CheckpointLane,
         other_tokens: usize,
     ) -> Option<CompactOutcome> {
-        self.events.push(GovernorEvent::Inspect {
+        self.push(GovernorEvent::Inspect {
             phase: CompactPhase::MidTurn,
             tokens: ledger_total,
         });
@@ -102,7 +120,7 @@ impl TurnGovernor {
         let high = self.conversation_high.saturating_sub(other_tokens);
         let low = self.conversation_low.saturating_sub(other_tokens);
         let outcome = compact_to_low_water(user_items, checkpoint, high, low);
-        self.events.push(GovernorEvent::CompactFired {
+        self.push(GovernorEvent::CompactFired {
             phase: CompactPhase::MidTurn,
             before: ledger_total,
             after: other_tokens.saturating_add(outcome.after_tokens),
@@ -111,6 +129,9 @@ impl TurnGovernor {
     }
 
     /// ターン終了直後の正時。超過していれば刈り、スナップショットを追記する。
+    ///
+    /// 非発火時は `assembled_text`（スナップショット＋差分の全文）を書く。
+    /// 差分 items だけを書いて履歴を捨てない。
     pub fn finish_turn(
         &mut self,
         conn: &Connection,
@@ -118,22 +139,19 @@ impl TurnGovernor {
         items: &[CompactItem],
         checkpoint: &CheckpointLane,
         through_log_id: i64,
+        assembled_text: &str,
     ) -> Result<CompactOutcome, anyhow::Error> {
-        let before = items.iter().map(|i| i.tokens).sum::<usize>() + checkpoint.tokens();
+        let before = crate::tokens::estimate_tokens(assembled_text);
         let outcome = if should_compact(before, self.conversation_high) {
-            self.fire(CompactPhase::TurnEnd, items, checkpoint)
+            let mut fired = self.fire(CompactPhase::TurnEnd, items, checkpoint);
+            fired.before_tokens = before;
+            fired
         } else {
             CompactOutcome {
                 fired: false,
                 before_tokens: before,
                 after_tokens: before,
-                text: compact_to_low_water(
-                    items,
-                    checkpoint,
-                    self.conversation_high,
-                    self.conversation_low,
-                )
-                .text,
+                text: assembled_text.to_string(),
                 through_log_id: Some(through_log_id),
                 checkpoint_empty: checkpoint.is_empty(),
                 low_water_unreachable: false,
@@ -141,7 +159,7 @@ impl TurnGovernor {
             }
         };
         if outcome.checkpoint_empty {
-            self.events.push(GovernorEvent::CheckpointEmpty);
+            self.push(GovernorEvent::CheckpointEmpty);
             tracing::info!(
                 target: "context_budget_check",
                 session_id,
@@ -150,7 +168,7 @@ impl TurnGovernor {
             );
         }
         if outcome.low_water_unreachable {
-            self.events.push(GovernorEvent::LowWaterUnreachable);
+            self.push(GovernorEvent::LowWaterUnreachable);
         }
         persist_snapshot(
             conn,
@@ -159,7 +177,7 @@ impl TurnGovernor {
             through_log_id,
             outcome.after_tokens,
         )?;
-        self.events.push(GovernorEvent::SnapshotWritten {
+        self.push(GovernorEvent::SnapshotWritten {
             through_log_id,
             token_count: outcome.after_tokens,
         });
@@ -178,7 +196,7 @@ impl TurnGovernor {
             self.conversation_high,
             self.conversation_low,
         );
-        self.events.push(GovernorEvent::CompactFired {
+        self.push(GovernorEvent::CompactFired {
             phase,
             before: outcome.before_tokens,
             after: outcome.after_tokens,
@@ -188,6 +206,8 @@ impl TurnGovernor {
 }
 
 /// スナップショット＋水位印より後の差分を組み立てる。開始時 compact はしない。
+///
+/// `items` / `checkpoint` は正本の全ログから作る。水位印より前の到達点も見える。
 pub fn assemble_from_snapshot(
     conn: &Connection,
     session_id: &str,
@@ -201,9 +221,13 @@ pub fn assemble_from_snapshot(
         None => opencrab_db::queries::list_session_logs_by_session(conn, session_id)?,
     };
     let logs = crate::conversation::retain_conversation_logs(logs);
+    let all = crate::conversation::retain_conversation_logs(
+        opencrab_db::queries::list_session_logs_by_session(conn, session_id)?,
+    );
+    let completed_for_read = completed_tool_call_ids(&all);
     let delta = logs
         .iter()
-        .map(format_single_log)
+        .map(|l| format_single_log_with_echo(l, Some(&completed_for_read)))
         .collect::<Vec<_>>()
         .join("\n");
     let text = match &snap {
@@ -220,7 +244,7 @@ pub fn assemble_from_snapshot(
         .find_map(|l| l.id)
         .or_else(|| snap.as_ref().map(|s| s.through_log_id))
         .unwrap_or(0);
-    let (items, checkpoint) = items_from_logs(conn, session_id, agent_id, &logs)?;
+    let (items, checkpoint) = items_from_logs(conn, session_id, agent_id, &all)?;
     Ok(AssembledConversation {
         text,
         tokens: ledger.total(),
@@ -243,6 +267,8 @@ pub struct AssembledConversation {
 }
 
 /// 正本ログから車線付き単位とチェックポイントを作る。各行は 1 回だけ測る。
+///
+/// tool_call と対応 result は同じ [`super::compact::ExchangeGroup`] になる。
 pub fn items_from_logs(
     conn: &Connection,
     session_id: &str,
@@ -271,7 +297,7 @@ pub fn items_from_logs(
     });
     let checkpoint = select_checkpoint_lane(explicit.as_ref(), assistant);
 
-    let newest_user: Vec<usize> = all
+    let newest_user: HashSet<usize> = all
         .iter()
         .enumerate()
         .rev()
@@ -283,33 +309,170 @@ pub fn items_from_logs(
         .collect();
     let recent_tail = all.len().saturating_sub(8);
 
+    let completed_ids = completed_tool_call_ids(&all);
+    let groups = partition_exchange_groups(&all, agent_id);
+
     let mut items = Vec::new();
     let mut ledger = TokenLedger::new();
-    for (i, log) in all.iter().enumerate() {
-        if log.log_type == "system" && parse_checkpoint_event(&log.content).is_some() {
-            continue;
+    for (gid, idxs) in groups {
+        let unresolved = group_is_unresolved(&all, &idxs, &completed_ids);
+        let in_recent = idxs
+            .iter()
+            .any(|&i| newest_user.contains(&i) || i >= recent_tail);
+        for i in idxs {
+            let log = &all[i];
+            if log.log_type == "system" && parse_checkpoint_event(&log.content).is_some() {
+                continue;
+            }
+            let text = format_single_log_with_echo(log, Some(&completed_ids));
+            let key = format!("log:{}", log.id.unwrap_or(i as i64));
+            let tokens = ledger.record(&key, &text);
+            let must_keep = newest_user.contains(&i) || unresolved;
+            let lane = if must_keep || in_recent {
+                CompactLane::RecentVerbatim
+            } else if log.log_type == "tool_call" || log.log_type == "tool_result" {
+                CompactLane::Echoable
+            } else {
+                CompactLane::OldHistory
+            };
+            items.push(CompactItem {
+                key,
+                tokens,
+                text,
+                lane,
+                log_id: log.id,
+                must_keep,
+                group_id: Some(gid),
+            });
         }
-        let text = format_single_log(log);
-        let key = format!("log:{}", log.id.unwrap_or(i as i64));
-        let tokens = ledger.record(&key, &text);
-        let lane = if newest_user.contains(&i) || i >= recent_tail {
-            CompactLane::RecentVerbatim
-        } else if log.log_type == "tool_call" || log.log_type == "tool_result" {
-            CompactLane::Echoable
-        } else {
-            CompactLane::OldHistory
-        };
-        items.push(CompactItem {
-            key,
-            tokens,
-            text,
-            lane,
-            log_id: log.id,
-            must_keep: newest_user.contains(&i),
-        });
     }
     let _ = CHECKPOINT_EVENT_TYPE;
     Ok((items, checkpoint))
+}
+
+fn completed_tool_call_ids(logs: &[opencrab_db::queries::SessionLogRow]) -> HashSet<String> {
+    logs.iter()
+        .filter(|l| l.log_type == "tool_result" || l.log_type == "tool_cancelled")
+        .filter_map(|l| tool_call_id_from_meta(l.metadata_json.as_deref()))
+        .collect()
+}
+
+fn tool_call_id_from_meta(meta: Option<&str>) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(meta?).ok()?;
+    v.get("tool_call_id")
+        .and_then(|x| x.as_str())
+        .map(ToOwned::to_owned)
+}
+
+fn tool_call_ids_from_log(log: &opencrab_db::queries::SessionLogRow) -> Vec<String> {
+    let Some(meta) = log.metadata_json.as_deref() else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(meta) else {
+        return Vec::new();
+    };
+    let Some(raw) = v.get("tool_calls_json").and_then(|x| x.as_str()) else {
+        return Vec::new();
+    };
+    let Ok(arr) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return Vec::new();
+    };
+    arr.as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    item.get("id")
+                        .and_then(|id| id.as_str())
+                        .map(ToOwned::to_owned)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn group_is_unresolved(
+    logs: &[opencrab_db::queries::SessionLogRow],
+    idxs: &[usize],
+    completed: &HashSet<String>,
+) -> bool {
+    idxs.iter().any(|&i| {
+        logs[i].log_type == "tool_call"
+            && tool_call_ids_from_log(&logs[i])
+                .iter()
+                .any(|id| !completed.contains(id))
+    })
+}
+
+/// assistant said + 直後の tool_call/result を 1 group にする。user speech は単独 group。
+fn partition_exchange_groups(
+    logs: &[opencrab_db::queries::SessionLogRow],
+    agent_id: &str,
+) -> Vec<(u64, Vec<usize>)> {
+    let mut call_to_group: HashMap<String, u64> = HashMap::new();
+    let mut groups: Vec<(u64, Vec<usize>)> = Vec::new();
+    let mut open_group: Option<u64> = None;
+    let mut next_id = 1u64;
+
+    for (i, log) in logs.iter().enumerate() {
+        if log.log_type == "system" && parse_checkpoint_event(&log.content).is_some() {
+            continue;
+        }
+        let is_user =
+            log.log_type == "speech" && log.speaker_id.as_deref().is_some_and(|s| s != agent_id);
+        let is_assistant = log.log_type == "speech" && log.speaker_id.as_deref() == Some(agent_id);
+
+        if is_user {
+            let gid = next_id;
+            next_id += 1;
+            groups.push((gid, vec![i]));
+            open_group = None;
+            continue;
+        }
+        if is_assistant {
+            let gid = next_id;
+            next_id += 1;
+            groups.push((gid, vec![i]));
+            open_group = Some(gid);
+            continue;
+        }
+        if log.log_type == "tool_call" {
+            let gid = open_group.unwrap_or_else(|| {
+                let g = next_id;
+                next_id += 1;
+                groups.push((g, Vec::new()));
+                open_group = Some(g);
+                g
+            });
+            if let Some((_, idxs)) = groups.iter_mut().find(|(id, _)| *id == gid) {
+                idxs.push(i);
+            }
+            for cid in tool_call_ids_from_log(log) {
+                call_to_group.insert(cid, gid);
+            }
+            continue;
+        }
+        if log.log_type == "tool_result" || log.log_type == "tool_cancelled" {
+            let gid = tool_call_id_from_meta(log.metadata_json.as_deref())
+                .and_then(|id| call_to_group.get(&id).copied())
+                .or(open_group)
+                .unwrap_or_else(|| {
+                    let g = next_id;
+                    next_id += 1;
+                    groups.push((g, Vec::new()));
+                    g
+                });
+            if let Some((_, idxs)) = groups.iter_mut().find(|(id, _)| *id == gid) {
+                idxs.push(i);
+            }
+            continue;
+        }
+        let gid = next_id;
+        next_id += 1;
+        groups.push((gid, vec![i]));
+        open_group = None;
+    }
+    groups
 }
 
 fn persist_snapshot(
@@ -334,10 +497,25 @@ fn persist_snapshot(
 pub fn apply_explicit_checkpoint(
     previous: Option<&ContextCheckpoint>,
     incoming: ContextCheckpoint,
-) -> Result<ContextCheckpoint, &'static str> {
+) -> Result<ContextCheckpoint, CheckpointApplyError> {
     if incoming.exceeds_cap() {
-        return Err("checkpoint_oversize");
+        return Err(CheckpointApplyError::Oversize {
+            kept: previous.cloned(),
+        });
     }
-    let _ = previous;
     Ok(incoming)
+}
+
+/// 明示チェックポイント適用の失敗。過大時は `kept` が旧値。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckpointApplyError {
+    Oversize { kept: Option<ContextCheckpoint> },
+}
+
+impl CheckpointApplyError {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Oversize { .. } => "checkpoint_oversize",
+        }
+    }
 }

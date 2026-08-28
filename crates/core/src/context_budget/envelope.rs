@@ -615,18 +615,41 @@ mod tests {
     }
 
     /// 826-C 用の劣化帯走査点を固定する。実 LLM は呼ばない。305K clamp は選ばれない。
+    /// `prompt` 増分は conversation 費目として envelope に載せる（窓だけの繰り返しではない）。
     #[test]
     fn degradation_band_harness_selects_a_not_305k() {
         let policy = ContextBudgetPolicy::default();
         let mut points = Vec::new();
+        let mut seen_conversation = Vec::new();
         for prompt in (60_000..=110_000).step_by(5_000) {
             points.push(prompt);
             let water = compute_water_levels(1_050_000, 4_096, &policy).unwrap();
             assert_eq!(water.input_high, DEFAULT_ABSOLUTE_CAP_A);
             assert_ne!(water.input_high, 305_000);
+            let env = apply_line_items(
+                water,
+                MeasuredLineItems {
+                    system: 500,
+                    runtime_context: 100,
+                    functions: 1_000,
+                    memory_index: 0,
+                    memory_index_entry_count: 0,
+                    conversation: prompt,
+                },
+                &policy,
+            )
+            .expect("固定費は A より小さい");
+            assert_eq!(
+                env.items.conversation, prompt,
+                "prompt 増分が水位合成に載る"
+            );
+            assert_eq!(env.water.input_high, DEFAULT_ABSOLUTE_CAP_A);
+            seen_conversation.push(env.items.conversation);
         }
         assert_eq!(points.len(), 11);
         assert_eq!(points[0], 60_000);
         assert_eq!(*points.last().unwrap(), 110_000);
+        assert_eq!(seen_conversation, points);
+        assert!(seen_conversation.windows(2).all(|w| w[1] == w[0] + 5_000));
     }
 }

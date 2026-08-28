@@ -56,9 +56,7 @@ impl CheckpointLane {
                 "[context_checkpoint]\n{}",
                 serde_json::to_string_pretty(cp).unwrap_or_else(|_| cp.to_canonical_json())
             ),
-            Self::AssistantSpeech { text } => {
-                format!("[context_checkpoint]\n{text}")
-            }
+            Self::AssistantSpeech { text } => text.clone(),
             Self::Empty => CHECKPOINT_EMPTY_MARKER.to_string(),
         }
     }
@@ -161,7 +159,7 @@ mod tests {
             CheckpointLane::AssistantSpeech { text } => assert_eq!(text, speech),
             other => panic!("逐語コピーであるべき: {other:?}"),
         }
-        assert!(lane.render().contains(speech));
+        assert_eq!(lane.render(), speech, "speech はヘッダ無しの逐語コピー");
         assert_eq!(select_checkpoint_lane(None, None), CheckpointLane::Empty);
         assert_eq!(CheckpointLane::Empty.render(), CHECKPOINT_EMPTY_MARKER);
     }
