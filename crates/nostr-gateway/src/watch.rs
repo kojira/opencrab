@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
-use crate::config::{effective_kinds, WatchFilter};
+use crate::config::{effective_kinds, mention_lane_filter, InstanceConfig, WatchFilter};
 use crate::secret::SECRET_ENV;
 
 pub const RESUBSCRIBE: Duration = Duration::from_secs(5);
@@ -32,6 +32,12 @@ pub fn plan_watch_args(relays: &[String], filter: &WatchFilter) -> Vec<String> {
         args.push(format!("--kind={kind}"));
     }
     args
+}
+
+/// メンション車線（default lane）の nostaro argv。
+/// `self_pubkey`（と名前があれば名前）が `--keyword` として必ず乗る。
+pub fn plan_mention_lane_args(relays: &[String], cfg: &InstanceConfig) -> Vec<String> {
+    plan_watch_args(relays, &mention_lane_filter(cfg))
 }
 
 pub fn build_watch_command(
@@ -156,5 +162,55 @@ mod tests {
         assert!(!argv_line.contains(secret), "{argv_line}");
         assert_eq!(env_line, format!("ENV:{secret}"));
         assert!(std::env::var(SECRET_ENV).is_err());
+    }
+
+    #[test]
+    fn mention_lane_spawn_argv_has_mention_keywords() {
+        let self_pk = "aa".repeat(32);
+        let cfg = InstanceConfig {
+            relays: vec!["wss://example.invalid".into()],
+            filter: WatchFilter::default(),
+            self_pubkey: self_pk.clone(),
+            name: Some("crab".into()),
+            watches: vec![],
+            delivery_mode: None,
+        };
+        let args = plan_mention_lane_args(&cfg.relays, &cfg);
+        assert_eq!(args[0], "watch");
+        assert!(args.contains(&"--json".to_string()), "{args:?}");
+        assert!(args.contains(&"--match=any".to_string()), "{args:?}");
+        assert!(
+            args.contains(&format!("--keyword={self_pk}")),
+            "self_pubkey keyword missing: {args:?}"
+        );
+        assert!(
+            args.contains(&"--keyword=crab".to_string()),
+            "name keyword missing: {args:?}"
+        );
+        let keyword_count = args.iter().filter(|a| a.starts_with("--keyword=")).count();
+        assert_eq!(keyword_count, 2, "{args:?}");
+        assert!(
+            !args.iter().any(|a| a.starts_with("--no-mention-only")),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn mention_lane_spawn_argv_never_empty_net() {
+        let self_pk = "bb".repeat(32);
+        let cfg = InstanceConfig {
+            relays: vec!["wss://example.invalid".into()],
+            filter: WatchFilter::default(),
+            self_pubkey: self_pk.clone(),
+            name: None,
+            watches: vec![],
+            delivery_mode: None,
+        };
+        let args = plan_mention_lane_args(&cfg.relays, &cfg);
+        assert!(
+            args.iter().any(|a| a.starts_with("--keyword=")),
+            "条件ゼロの空網: {args:?}"
+        );
+        assert!(args.contains(&format!("--keyword={self_pk}")), "{args:?}");
     }
 }

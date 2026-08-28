@@ -20,7 +20,8 @@ Bundle は V1 の次行 `[NOSTRBUNDLE/V1 [origin…]]` を検証し、core `nost
   identity 切替は停止→revision +1→再起動（hot swap しない）。
 - `v3_shadow`: 旧ループを回す。instance 行だけ敷く。本番 UDS への接続・hello・bind ack・
   live 占有はしない。Binding PUT / said / say はしない。同一 JSONL を legacy / gateway の
-  両 parser と分類でメモリ内照合する（DM は legacy Discard / gateway Immediate を一致扱い）。
+  両 parser と分類でメモリ内照合する（default lane は gateway Immediate。DM は
+  legacy Discard / gateway Immediate を一致扱い）。
 
 ## binding（`binding.rs`）
 

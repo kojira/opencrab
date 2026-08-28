@@ -23,6 +23,9 @@ pub struct InstanceConfig {
     #[serde(default)]
     pub filter: WatchFilter,
     pub self_pubkey: String,
+    /// エージェント表示名。あればメンション車線の keyword に足す。
+    #[serde(default)]
+    pub name: Option<String>,
     #[serde(default)]
     pub watches: Vec<WatchPlacement>,
     #[serde(default)]
@@ -154,6 +157,25 @@ pub fn watches_beyond_self(filter: &WatchFilter) -> bool {
     !filter.authors.is_empty() || !filter.keywords.is_empty()
 }
 
+/// メンション車線（default lane）の購読フィルタ。
+///
+/// instance の filter を土台に、`self_pubkey` と任意の `name` を keyword として足す。
+/// 条件ゼロの `--match=any` 空網を防ぐ。
+pub fn mention_lane_filter(cfg: &InstanceConfig) -> WatchFilter {
+    let mut filter = cfg.filter.clone();
+    push_keyword_once(&mut filter.keywords, &cfg.self_pubkey);
+    if let Some(name) = cfg.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+        push_keyword_once(&mut filter.keywords, name);
+    }
+    filter
+}
+
+fn push_keyword_once(keywords: &mut Vec<String>, keyword: &str) {
+    if !keywords.iter().any(|k| k == keyword) {
+        keywords.push(keyword.to_string());
+    }
+}
+
 pub fn parse_uuid(raw: &str) -> anyhow::Result<String> {
     let parsed = uuid::Uuid::parse_str(raw)?;
     let canonical = parsed.to_string();
@@ -186,6 +208,7 @@ mod tests {
             relays: vec!["wss://example.invalid".into()],
             filter: WatchFilter::default(),
             self_pubkey: "aa".repeat(32),
+            name: None,
             watches: vec![],
             delivery_mode: Some("tool_driven".into()),
         }
@@ -254,5 +277,26 @@ mod tests {
         assert_eq!(watch.effective_filter().keywords, vec!["opencrab"]);
         assert_eq!(watch.effective_filter().kinds, vec![1, 7]);
         assert!(watches_beyond_self(watch.effective_filter()));
+    }
+
+    #[test]
+    fn mention_lane_filter_adds_self_pubkey_and_name() {
+        let mut cfg = sample_config();
+        cfg.name = Some("crab".into());
+        let filter = mention_lane_filter(&cfg);
+        assert_eq!(
+            filter.keywords,
+            vec![cfg.self_pubkey.clone(), "crab".into()]
+        );
+        assert!(!watches_beyond_self(&cfg.filter));
+    }
+
+    #[test]
+    fn mention_lane_filter_skips_blank_name_and_duplicates() {
+        let mut cfg = sample_config();
+        cfg.filter.keywords = vec![cfg.self_pubkey.clone()];
+        cfg.name = Some("   ".into());
+        let filter = mention_lane_filter(&cfg);
+        assert_eq!(filter.keywords, vec![cfg.self_pubkey.clone()]);
     }
 }

@@ -13,11 +13,12 @@ use opencrab_gate_client::SayPolicy;
 use tokio::sync::Notify;
 
 use crate::config::{
-    config_digest, parse_instance_config, watches_beyond_self, InstanceConfig, InstancePlacement,
-    WatchFilter, WatchPlacement,
+    config_digest, mention_lane_filter, parse_instance_config, watches_beyond_self, InstanceConfig,
+    InstancePlacement, WatchFilter, WatchPlacement,
 };
 use crate::map::{
-    bundle_id, classify_route, map_event, parse_watch_line, BundlePlace, Lane, Route, WatchEvent,
+    bundle_id, classify_route, map_event, parse_watch_line, BundlePlace, Lane, LaneKind, Route,
+    WatchEvent,
 };
 use crate::watch::{run_watch_loop, RESUBSCRIBE};
 
@@ -118,12 +119,13 @@ fn start_lanes(
     cancel: Arc<Notify>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     if cfg.watches.is_empty() {
+        let filter = mention_lane_filter(&cfg);
         return vec![spawn_lane(
             client,
             address,
             Lane::default_lane(),
             cfg.relays,
-            cfg.filter,
+            filter,
             cfg.self_pubkey,
             None,
             secret,
@@ -167,7 +169,10 @@ fn spawn_lane(
     metrics: Arc<SaidMetrics>,
     cancel: Arc<Notify>,
 ) -> tokio::task::JoinHandle<()> {
-    let beyond = watches_beyond_self(&filter);
+    let beyond = match lane.kind {
+        LaneKind::Default => false,
+        LaneKind::Watch { .. } => watches_beyond_self(&filter),
+    };
     let interval = watch
         .as_ref()
         .map(|w| Duration::from_secs(w.interval_secs as u64));

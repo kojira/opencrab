@@ -59,8 +59,8 @@ fn parse_fields_match(a: &NostrEvent, b: &WatchEvent) -> bool {
 
 /// legacy `classify_watch_event` と gateway `classify_route` を同じ event で照合する。
 ///
-/// default lane は gateway が常に `Route::Default`。watch の DM は legacy Discard /
-/// gateway Immediate（設計どおり一致扱い）。
+/// default lane（メンション即応車線）は gateway が常に `Route::Immediate`。
+/// watch の DM は legacy Discard / gateway Immediate（設計どおり一致扱い）。
 pub fn compare_classify(
     event: &NostrEvent,
     self_pubkey: &str,
@@ -74,8 +74,8 @@ pub fn compare_classify(
     };
     let gateway = classify_route(&gw_event, self_pubkey, beyond_self, &lane);
     if watch_id.is_none() {
-        if gateway == Route::Default {
-            debug!(event_id = %event.id, "v3_shadow classify agree (default)");
+        if gateway == Route::Immediate {
+            debug!(event_id = %event.id, "v3_shadow classify agree (mention immediate)");
         } else {
             warn!(event_id = %event.id, ?gateway, "v3_shadow classify mismatch (default lane)");
         }
@@ -167,7 +167,7 @@ mod tests {
     }
 
     #[test]
-    fn default_lane_is_always_default() {
+    fn default_lane_is_always_immediate() {
         let self_pk = "aa".repeat(32);
         let event = ev(1, vec![vec!["p".into(), self_pk.clone()]]);
         let gw = classify_route(
@@ -176,7 +176,7 @@ mod tests {
             false,
             &Lane::default_lane(),
         );
-        assert_eq!(gw, Route::Default);
+        assert_eq!(gw, Route::Immediate);
     }
 
     #[test]

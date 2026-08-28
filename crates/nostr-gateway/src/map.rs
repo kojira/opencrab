@@ -127,7 +127,7 @@ pub fn classify_route(
     lane: &Lane,
 ) -> Route {
     if matches!(lane.kind, LaneKind::Default) {
-        return Route::Default;
+        return Route::Immediate;
     }
     if event.kind == 4 || event.kind == 1059 {
         return Route::Immediate;
@@ -401,12 +401,13 @@ mod tests {
     }
 
     #[test]
-    fn default_lane_route_is_default() {
+    fn mention_lane_said_is_immediate() {
         let self_pk = self_pk();
         let event = ev(1, vec![vec!["p".into(), self_pk.clone()]]);
         let mapped = map_event(&event, &self_pk, false, &Lane::default_lane(), None).unwrap();
-        assert_eq!(mapped.route, Route::Default);
-        assert!(mapped.text.contains("\"route\":\"default\""));
+        assert_eq!(mapped.route, Route::Immediate);
+        assert!(mapped.text.contains("\"route\":\"immediate\""));
+        assert!(!mapped.text.contains("\"route\":\"bundle\""));
         assert!(mapped.text.contains("\"watch_id\":null"));
         assert_eq!(
             mapped.origin,
