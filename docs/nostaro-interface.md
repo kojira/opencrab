@@ -124,6 +124,11 @@ OpenCrab のツール（`nostr_*`）は既存 CLI を呼ぶだけ。改造不要
 > `event -k 4` で DM kind を生発行できる理論上の迂回は残るが、DM として機能させるには
 > 暗号化まで自前でイベントを組む必要があり実用的でない（受容）。「便利な暗号化 DM」の
 > 経路である `dm` の deny は維持する。
+>
+> **2026-08-30 オーナー裁定: `nostr_run post` / `reply` は拒否**。gateway がある世界で
+> 投稿・返信を nostaro passthrough から行うのはトークンの無駄で、gateway の存在意義に反する。
+> 投稿・返信は通常の返話（say）一本。`react` / `repost` / `zap` / `profile` / `upload` /
+> `get` / `timeline` / `search` 等は触らない（gateway に代替経路が無いものを塞ぐと外形が減る）。
 
 成功時 exit 0・stdout に結果（投稿なら note id / upload なら URL）を出す前提。
 

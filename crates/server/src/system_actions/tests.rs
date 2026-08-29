@@ -5337,6 +5337,32 @@ fn nostr_run_description_documents_the_global_timeline() {
     }
 }
 
+/// 投稿・返信は say 一本。description に post/reply の例を残すとモデルが試して
+/// トークンを無駄にするので、例から外し、say へ誘導する一文を固定する。
+#[cfg(feature = "nostr")]
+#[test]
+fn nostr_run_description_sends_post_reply_to_say() {
+    let defs = SystemGatewayActions::own_definitions();
+    let d = defs.iter().find(|d| d.name == "nostr_run").unwrap();
+    assert!(
+        !d.description.contains("例: post / reply"),
+        "description から post/reply の例を外すこと:\n{}",
+        d.description
+    );
+    assert!(
+        d.description.contains("say") && d.description.contains("post / reply"),
+        "投稿・返信は say で行う旨が description に無い:\n{}",
+        d.description
+    );
+    let sub = d.parameters["properties"]["subcommand"]["description"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        sub.contains("post") && sub.contains("reply"),
+        "subcommand の不可一覧に post/reply が無い: {sub}"
+    );
+}
+
 /// caller=Agent（Nostr 受信ターン / 非オーナー相手の会話ターン）でも `nostr_run` は
 /// 使える。heartbeat tick は caller=Owner なので元から対象外（`crates/server/src/main.rs`）。
 ///
@@ -5450,7 +5476,7 @@ async fn nostr_run_validates_args() {
     assert!(rec.calls.lock().unwrap().is_empty());
 }
 
-/// capability のエラー（未 materialize / init/watch/relay/dm 拒否 / nostaro 失敗）はそのまま
+/// capability のエラー（未 materialize / init/watch/relay/dm/post/reply 拒否 / nostaro 失敗）はそのまま
 /// `nostr_run 失敗:` として伝播する（マスク済みメッセージ）。
 // #654: nostr_run は nostr feature 依存（#651）。off ではツールが無いので同じ cfg で囲む。
 #[cfg(feature = "nostr")]

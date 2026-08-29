@@ -394,27 +394,29 @@ impl SystemGatewayActions {
                 }),
             },
             // 薄い nostaro passthrough（#268）。server-own で、caller による制限は持たない
-            // （#303 で `TRUSTED_ONLY_ACTIONS` から外した）。投稿・返信・kind:0 プロフィール
-            // 設定・チャンネル・取得など nostaro が持つ操作を**すべて**、あらゆるターン
-            // （Nostr 受信ターン = caller=Agent を含む）から使えるようにする（既存の inner
-            // `nostr_post`/`reply` は Nostr 受信ターン用にそのまま残る）。opencrab が守るのは
-            // 「鍵のエージェント間混同防止（config は ctx.agent_id 固定）」と「nsec 隠蔽」の
-            // 2 点だけで、Nostr 仕様の判断は nostaro に委ねる（非劣化）。`init`（鍵作成/上書き）・
-            // `watch`（無制限受信）・`relay`（config.toml⇔DB desync で揮発）に加え、#514 で
-            // `dm`（DM 送信）を拒否する。`event`（任意 kind publish）は #699 のオーナー裁定で
-            // 許可（暗号化を自前で組まない限り DM としては機能しない＝実用迂回にならない）。
+            // （#303 で `TRUSTED_ONLY_ACTIONS` から外した）。kind:0 プロフィール設定・
+            // チャンネル・取得など nostaro が持つ操作を、あらゆるターン（Nostr 受信ターン =
+            // caller=Agent を含む）から使えるようにする。投稿・返信は通常の返話（say）一本
+            // （`post` / `reply` は拒否）。opencrab が守るのは「鍵のエージェント間混同防止
+            // （config は ctx.agent_id 固定）」と「nsec 隠蔽」の 2 点だけで、Nostr 仕様の
+            // 判断は nostaro に委ねる（非劣化）。`init`（鍵作成/上書き）・`watch`（無制限受信）・
+            // `relay`（config.toml⇔DB desync で揮発）に加え、#514 で `dm`（DM 送信）、
+            // 投稿/返信（post/reply）を拒否する。`event`（任意 kind publish）は #699 の
+            // オーナー裁定で許可（暗号化を自前で組まない限り DM としては機能しない＝実用
+            // 迂回にならない）。
             #[cfg(feature = "nostr")]
             GatewayActionDef {
                 name: "nostr_run".to_string(),
                 class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "Nostr CLI（nostaro）を薄く passthrough 実行する。`subcommand` に \
-                              nostaro のサブコマンド（例: post / reply / zap / upload / \
+                              nostaro のサブコマンド（例: zap / upload / \
                               react / repost / follow / unfollow / profile / channel / get / timeline / \
                               search / decode / pubkey など）を、`args` にそのサブコマンドの\
                               フラグと値を**1 要素ずつ**配列で渡す（例: subcommand=\"profile\", \
                               args=[\"--name\",\"…\",\"--about\",\"…\"] でプロフィール(kind:0)を設定）。\
-                              投稿・プロフィール(kind:0)設定・チャンネル・取得など nostaro が持つ操作を\
-                              使える。署名は**あなた自身の採用済み Nostr 鍵**で行われ、秘密鍵(nsec)は\
+                              プロフィール(kind:0)設定・チャンネル・取得など nostaro が持つ操作を\
+                              使える。**投稿・返信は通常の返話（say）で行う**（post / reply はこのツールから不可）。\
+                              署名は**あなた自身の採用済み Nostr 鍵**で行われ、秘密鍵(nsec)は\
                               扱わない・見えない。鍵の作成/採用は nostr_generate_key / \
                               nostr_switch_identity を使うこと（init は不可）。受信の常時監視（watch）は\
                               ここからは起動できない。リレー設定は opencrab 側（configure_nostr / \
@@ -439,7 +441,7 @@ impl SystemGatewayActions {
                     "properties": {
                         "subcommand": {
                             "type": "string",
-                            "description": "nostaro のサブコマンド（init/watch/relay/dm は不可）。"
+                            "description": "nostaro のサブコマンド（init/watch/relay/dm/post/reply は不可）。"
                         },
                         "args": {
                             "type": "array",
@@ -1237,7 +1239,7 @@ impl SystemGatewayActions {
     ///
     /// 稼働中（登録済み）の Nostr transport の passthrough capability
     /// （[`opencrab_actions::GatewayNostrPassthrough`]）へ委譲する。config は常に
-    /// `ctx.agent_id` のもの（鍵混同防止）。`init`/`watch`/`relay` の拒否・`--config` 上書きの封じ・
+    /// `ctx.agent_id` のもの（鍵混同防止）。`init`/`watch`/`relay`/`dm`/`post`/`reply` の拒否・`--config` 上書きの封じ・
     /// 未 materialize（鍵未採用）の明示エラー・nsec マスクは capability の内側
     /// （`NostaroCli::run_passthrough`）で行う。呼び出し側はここで subcommand と args を
     /// 取り出して渡すだけ。

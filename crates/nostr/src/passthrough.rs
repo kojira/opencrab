@@ -7,7 +7,7 @@
 //! NOSTR を引いて capability があれば使う」形で書けるようにする（`NostrKeyProvisioning`
 //! と同型）。
 //!
-//! deny（`init`/`watch`/`relay`）・config 固定（`agent_id` のもの）・未 materialize の明示エラー・
+//! deny（`init`/`watch`/`relay`/`dm`/`post`/`reply`）・config 固定（`agent_id` のもの）・未 materialize の明示エラー・
 //! nsec マスクといった安全ガードは [`NostaroCli::run_passthrough`] の内側に閉じる。マネージャ
 //! が持つ [`NostaroCli`] を clone して渡すので `binary_path` / timeout をそのまま継承する。
 

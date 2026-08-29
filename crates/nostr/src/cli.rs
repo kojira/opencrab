@@ -571,6 +571,10 @@ impl NostaroCli {
     ///   だけでは `nostr_run dm send` から通ってしまう（passthrough は inner ツール名を
     ///   隠しても能力は塞げない / #306）ので、送信のもう一方の経路であるここも塞ぐ。
     ///   `nostr_run dm ...` は拒否される。private な話は Discord の DM か指定チャンネルへ。
+    /// - `post` / `reply`（オーナー裁定 2026-08-30）: gateway がある世界で投稿・返信を
+    ///   nostaro passthrough から行うのはトークンの無駄で、gateway の存在意義に反する。
+    ///   投稿・返信は通常の返話（say）一本。`react` / `repost` / `zap` / `profile` /
+    ///   `upload` / `get` / `timeline` / `search` 等は gateway に代替経路が無いので触らない。
     /// - `event` は**許可**（#699・オーナー裁定 2026-08-19）: 任意 kind の publish は
     ///   パブリックチャット作成（kind:40）・投稿（kind:42）など正当用途があり、塞ぐ不自由が
     ///   利益を上回っていた。`event -k 4` で DM kind を生発行できる理論上の迂回は残るが、
@@ -581,7 +585,7 @@ impl NostaroCli {
     /// これ以外のサブコマンドは**そのまま nostaro に委ねる**（Nostr 仕様の判断は
     /// opencrab で再実装せず nostaro に委譲する＝非劣化）。
     pub const PASSTHROUGH_DENIED_SUBCOMMANDS: &'static [&'static str] =
-        &["init", "watch", "relay", "dm"];
+        &["init", "watch", "relay", "dm", "post", "reply"];
 
     /// nostaro サブコマンドを**薄く passthrough 実行**する（#268）。
     ///
@@ -593,7 +597,7 @@ impl NostaroCli {
     /// 2. **nsec 隠蔽**: agent は nsec を引数に持たない前提に加え、`init` を拒否して鍵の
     ///    作成/上書きを塞ぎ、stdout / エラー出力の双方を [`mask_secrets`] に通す。
     ///
-    /// `init`/`watch`/`relay`/`dm` は拒否し、それ以外（event 含む）は素通しする。config.toml 未
+    /// `init`/`watch`/`relay`/`dm`/`post`/`reply` は拒否し、それ以外（event 含む）は素通しする。config.toml 未
     /// materialize（鍵未採用）なら nostaro を spawn せず明示エラーを返す。
     pub async fn run_passthrough(
         &self,
@@ -606,10 +610,16 @@ impl NostaroCli {
             anyhow::bail!("subcommand が空です");
         }
         // deny: 鍵の作成/上書き（init）・無制限受信（watch）・リレー編集（relay）・
-        // DM 送信（dm / #514）。event（任意 kind publish）は #699 のオーナー裁定で許可。
-        // relay は config.toml だけ書き換えて DB(agent_nostr_config) と desync し次の
-        // gateway start / switch_identity で揮発するため塞ぐ。
+        // DM 送信（dm / #514）・投稿/返信（post/reply・say 一本）。event（任意 kind
+        // publish）は #699 のオーナー裁定で許可。relay は config.toml だけ書き換えて
+        // DB(agent_nostr_config) と desync し次の gateway start / switch_identity で
+        // 揮発するため塞ぐ。
         if Self::PASSTHROUGH_DENIED_SUBCOMMANDS.contains(&sub) {
+            if matches!(sub, "post" | "reply") {
+                anyhow::bail!(
+                    "nostr_run では '{sub}' は実行できません。投稿・返信は通常の返話（say）で行われる。このツールからは不可"
+                );
+            }
             anyhow::bail!(
                 "nostr_run では '{sub}' は実行できません（init は nostr_generate_key / \
                  nostr_switch_identity に、watch はゲートウェイ管理に閉じています。リレー設定は \
@@ -1863,14 +1873,14 @@ mod tests {
         NostaroCli::materialize_config(agent, &["wss://relay.test".to_string()], None).unwrap();
     }
 
-    /// `init` / `watch` / `relay` / `dm` は materialize の有無に関わらず**拒否**
-    /// （鍵管理・受信・リレー設定・DM 送信は passthrough の外）。deny
+    /// `init` / `watch` / `relay` / `dm` / `post` / `reply` は materialize の有無に関わらず**拒否**
+    /// （鍵管理・受信・リレー設定・DM 送信・投稿/返信は passthrough の外）。deny
     /// チェックは config 存在チェックより手前なので nostaro を spawn しない。`relay` は
     /// config.toml だけ書き換わって DB と desync し次の gateway start / switch_identity で
     /// 揮発するため塞ぐ（configure_nostr / ダッシュボードの DB 経路に閉じる）。`dm`（#514）は
     /// `nostr_dm` ツール撤去だけでは `nostr_run dm send` から通ってしまう送信のもう一方の
-    /// 経路を塞ぐ。`event` は #699（オーナー裁定）で許可に転じた——deny に残っていない
-    /// ことも下の許可テストで固定する。
+    /// 経路を塞ぐ。`post` / `reply` は通常の返話（say）へ誘導する。`event` は #699
+    /// （オーナー裁定）で許可に転じた——deny に残っていないことも下の許可テストで固定する。
     #[cfg(unix)]
     #[tokio::test]
     async fn passthrough_denies_init_watch_relay_and_dm() {
@@ -1878,7 +1888,7 @@ mod tests {
         materialize_for(agent);
         let (_d, cli) = fake_echo_nostaro();
 
-        for sub in ["init", "watch", "relay", "dm"] {
+        for sub in ["init", "watch", "relay", "dm", "post", "reply"] {
             let r = cli.run_passthrough(agent, sub, &[]).await;
             assert!(r.is_err(), "{sub} は拒否されるべき");
             let msg = r.unwrap_err().to_string();
@@ -1904,6 +1914,18 @@ mod tests {
             msg.contains("Discord"),
             "dm の拒否理由に代替（Discord）への誘導を含めること: {msg}"
         );
+        // 投稿・返信は say へ誘導する（モデルが次に正しい行動を取れる形）。
+        for sub in ["post", "reply"] {
+            let msg = cli
+                .run_passthrough(agent, sub, &["hi".to_string()])
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(
+                msg.contains("say"),
+                "{sub} の拒否理由に say への誘導を含めること: {msg}"
+            );
+        }
         // #699（オーナー裁定）: event は許可——任意 kind の publish（例: kind:40 の
         // パブリックチャット作成）が nostaro へ素通しになることを固定する。
         let out = cli
@@ -1923,6 +1945,17 @@ mod tests {
             out.contains("event") && out.contains("40"),
             "event と kind が nostaro へ verbatim に渡ること: {out}"
         );
+        // 許可 subcommand（profile / get）は従来どおり nostaro へ素通しする。
+        for sub in ["profile", "get"] {
+            let out = cli
+                .run_passthrough(agent, sub, &[])
+                .await
+                .unwrap_or_else(|e| panic!("{sub} は許可されるべき: {e}"));
+            assert!(
+                out.contains(sub),
+                "{sub} が nostaro へ verbatim に渡ること: {out}"
+            );
+        }
         let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
     }
 
@@ -1935,7 +1968,7 @@ mod tests {
         let (_d, cli) = fake_echo_nostaro();
 
         let r = cli
-            .run_passthrough(agent, "post", &["hi".to_string()])
+            .run_passthrough(agent, "profile", &["--name".to_string(), "x".to_string()])
             .await;
         assert!(r.is_err());
         let msg = r.unwrap_err().to_string();

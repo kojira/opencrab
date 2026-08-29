@@ -322,8 +322,9 @@ is what keeps an inbound Nostr note from talking the agent into swapping its own
 `nostr_switch_identity` is unreachable from a `caller=Agent` turn, and the passthrough refuses
 `init`, so neither adopting nor minting-over a key is possible from inbound. It does **not** bound
 what an inbound turn can send or spend, and it is not meant to: `nostr_run` carries no caller gate
-(#303) and the passthrough denies `init`, `watch`, `relay` and — since #514 — `dm`,
-so `nostr_run zap` still goes through while `nostr_run dm` is refused. Gating the
+(#303) and the passthrough denies `init`, `watch`, `relay`, `dm` (#514), and
+`post` / `reply` (owner ruling 2026-08-30: posting and replies go through say),
+so `nostr_run zap` still goes through while `nostr_run dm` / `post` / `reply` are refused. Gating the
 inner `nostr_zap` / `nostr_dm` only changed which tool names got listed, so #306 dropped that
 gate rather than adding a matching one to the passthrough — the consistency is taken in the
 direction of fewer constraints, and whether to send a zap is the agent's own call.
@@ -375,11 +376,12 @@ arguments straight through, so once the agent has adopted a key (no `config.toml
 passthrough — the tool errors out instead of spawning nostaro), whatever nostaro can do the agent
 can do: arbitrary-kind `event`,
 `profile` (kind:0), NIP-28 `channel` creation and posting, `upload`, `react`, `repost`,
-`follow`, `get` / `timeline` / `search`, and so on. Only three subcommands are denied —
+`follow`, `get` / `timeline` / `search`, and so on. Denied subcommands are
 `init` (key creation/overwrite, which belongs to the tools above), `watch` (unbounded inbound,
-which belongs to the gateway) and `relay` (it would edit `config.toml` only, desyncing from the
-DB that owns relay settings and silently evaporating on the next gateway start). Everything else
-is passed through unexamined.
+which belongs to the gateway), `relay` (it would edit `config.toml` only, desyncing from the
+DB that owns relay settings and silently evaporating on the next gateway start), `dm` (#514),
+and `post` / `reply` (posting and replies go through ordinary say, not this passthrough).
+Everything else is passed through unexamined.
 
 What OpenCrab guarantees about that passthrough is deliberately just two things:
 
