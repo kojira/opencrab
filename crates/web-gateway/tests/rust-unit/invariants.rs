@@ -37,8 +37,8 @@ fn harness_discovers_fixtures_by_directory_scan() {
 
 #[test]
 fn fixture_name_field_matches_filename() {
-    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../conformance/fixtures");
+    let dir =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/fixtures");
     for entry in std::fs::read_dir(&dir).unwrap() {
         let path = entry.unwrap().path();
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
@@ -49,11 +49,6 @@ fn fixture_name_field_matches_filename() {
         }
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(
-            v["name"].as_str().unwrap(),
-            stem,
-            "{}",
-            path.display()
-        );
+        assert_eq!(v["name"].as_str().unwrap(), stem, "{}", path.display());
     }
 }

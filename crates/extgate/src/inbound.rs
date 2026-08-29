@@ -717,128 +717,129 @@ fn enqueue_turn<R: AgentRuntime>(
     let session_key = session_id.clone();
     queues.submit(&session_key, async move {
         let lock_id = session_id.clone();
-        locks.run_serialized(&lock_id, async move {
-        #[cfg(any(test, feature = "extgate-probe"))]
-        state
-            .probe
-            .start_session_turn_count
-            .fetch_add(1, Ordering::SeqCst);
-        let activity_id = uuid::Uuid::new_v4().to_string();
-        emit_activity(&state, &instance_id, &binding_id, &activity_id, "started").await;
-        let caller = match state.db.lock() {
-            Ok(conn) => resolve_caller(
-                &conn,
-                if kind_id == "nostr" {
-                    TRUSTED_PLATFORM_NOSTR
-                } else {
-                    TRUSTED_PLATFORM_EXTGATE
-                },
-                &[author_id.as_str()],
-                &agent_id,
-                &owner_id,
-            ),
-            Err(_) => CallerIdentity::Agent,
-        };
-        let (system, name) = runtime.build_agent_context(&agent_id, &caller);
-        let system = if prompt_suffix.is_empty() {
-            system
-        } else {
-            format!("{system}\n\n{prompt_suffix}")
-        };
-        let turn_res = {
-            let runtime = runtime.clone();
-            let session_id = session_id.clone();
-            let agent_id = agent_id.clone();
-            let author_id = author_id.clone();
-            let address = address.clone();
-            let text = text.clone();
-            let images = images.clone();
-            let origin = origin.clone();
-            let kind_id = kind_id.clone();
-            tokio::spawn(async move {
-                let inbound = NormalizedInbound {
-                    session_id: &session_id,
-                    agent_id: &agent_id,
-                    sender_id: &author_id,
-                    sender_name: "",
-                    avatar_url: None,
-                    channel_id: Some(&address),
-                    pubkey: if kind_id == "nostr" {
-                        Some(author_id.as_str())
-                    } else {
-                        None
-                    },
-                    text: &text,
-                    image_urls: &images,
-                    external_id: &origin,
-                };
-                start_session_turn(
-                    &runtime,
-                    TranscriptSource::External,
-                    &inbound,
-                    &system,
-                    // extgate は会話へ runtime context を前置しない（wrap は素通し）。
-                    // 予算計上もそれに合わせて空文字（実 request と一致させる契約）。
-                    "",
-                    |raw| raw.to_string(),
-                    |conversation| {
-                        let mut req = RunRequest::new(
-                            agent_id.clone(),
-                            name.clone(),
-                            session_id.clone(),
-                            system.clone(),
-                            conversation,
-                            "extgate",
-                            caller.clone(),
-                        )
-                        .with_image_urls(images.clone());
+        locks
+            .run_serialized(&lock_id, async move {
+                #[cfg(any(test, feature = "extgate-probe"))]
+                state
+                    .probe
+                    .start_session_turn_count
+                    .fetch_add(1, Ordering::SeqCst);
+                let activity_id = uuid::Uuid::new_v4().to_string();
+                emit_activity(&state, &instance_id, &binding_id, &activity_id, "started").await;
+                let caller = match state.db.lock() {
+                    Ok(conn) => resolve_caller(
+                        &conn,
                         if kind_id == "nostr" {
-                            req = req.with_live_inbound_scope(LiveInboundScope::OnlySpeaker(
-                                author_id.clone(),
-                            ));
-                        }
-                        req
-                    },
-                )
-                .await
-            })
-            .await
-        };
-        emit_activity(&state, &instance_id, &binding_id, &activity_id, "ended").await;
-        match turn_res {
-            Ok(turn) => {
-                let effect = match turn {
-                    Some(r) => delivery_effect(r),
-                    None => opencrab_actions::DeliveryEffect::Empty,
+                            TRUSTED_PLATFORM_NOSTR
+                        } else {
+                            TRUSTED_PLATFORM_EXTGATE
+                        },
+                        &[author_id.as_str()],
+                        &agent_id,
+                        &owner_id,
+                    ),
+                    Err(_) => CallerIdentity::Agent,
                 };
-                let effect = adjust_inbound_effect(delivery_mode, effect);
-                apply_delivery_effect(
-                    &state,
-                    &runtime,
-                    &instance_id,
-                    &binding_id,
-                    &agent_id,
-                    &session_id,
-                    effect,
-                )
-                .await;
-            }
-            Err(_) => {
-                tracing::error!("extgate turn task panicked");
-                crate::close::close_live(
-                    &state,
-                    Some(&instance_id),
-                    None,
-                    ErrorCode::Disconnect,
-                    None,
-                    None,
-                )
-                .await;
-                state.halt();
-            }
-        }
-        })
-        .await;
+                let (system, name) = runtime.build_agent_context(&agent_id, &caller);
+                let system = if prompt_suffix.is_empty() {
+                    system
+                } else {
+                    format!("{system}\n\n{prompt_suffix}")
+                };
+                let turn_res = {
+                    let runtime = runtime.clone();
+                    let session_id = session_id.clone();
+                    let agent_id = agent_id.clone();
+                    let author_id = author_id.clone();
+                    let address = address.clone();
+                    let text = text.clone();
+                    let images = images.clone();
+                    let origin = origin.clone();
+                    let kind_id = kind_id.clone();
+                    tokio::spawn(async move {
+                        let inbound = NormalizedInbound {
+                            session_id: &session_id,
+                            agent_id: &agent_id,
+                            sender_id: &author_id,
+                            sender_name: "",
+                            avatar_url: None,
+                            channel_id: Some(&address),
+                            pubkey: if kind_id == "nostr" {
+                                Some(author_id.as_str())
+                            } else {
+                                None
+                            },
+                            text: &text,
+                            image_urls: &images,
+                            external_id: &origin,
+                        };
+                        start_session_turn(
+                            &runtime,
+                            TranscriptSource::External,
+                            &inbound,
+                            &system,
+                            // extgate は会話へ runtime context を前置しない（wrap は素通し）。
+                            // 予算計上もそれに合わせて空文字（実 request と一致させる契約）。
+                            "",
+                            |raw| raw.to_string(),
+                            |conversation| {
+                                let mut req = RunRequest::new(
+                                    agent_id.clone(),
+                                    name.clone(),
+                                    session_id.clone(),
+                                    system.clone(),
+                                    conversation,
+                                    "extgate",
+                                    caller.clone(),
+                                )
+                                .with_image_urls(images.clone());
+                                if kind_id == "nostr" {
+                                    req = req.with_live_inbound_scope(
+                                        LiveInboundScope::OnlySpeaker(author_id.clone()),
+                                    );
+                                }
+                                req
+                            },
+                        )
+                        .await
+                    })
+                    .await
+                };
+                emit_activity(&state, &instance_id, &binding_id, &activity_id, "ended").await;
+                match turn_res {
+                    Ok(turn) => {
+                        let effect = match turn {
+                            Some(r) => delivery_effect(r),
+                            None => opencrab_actions::DeliveryEffect::Empty,
+                        };
+                        let effect = adjust_inbound_effect(delivery_mode, effect);
+                        apply_delivery_effect(
+                            &state,
+                            &runtime,
+                            &instance_id,
+                            &binding_id,
+                            &agent_id,
+                            &session_id,
+                            effect,
+                        )
+                        .await;
+                    }
+                    Err(_) => {
+                        tracing::error!("extgate turn task panicked");
+                        crate::close::close_live(
+                            &state,
+                            Some(&instance_id),
+                            None,
+                            ErrorCode::Disconnect,
+                            None,
+                            None,
+                        )
+                        .await;
+                        state.halt();
+                    }
+                }
+            })
+            .await;
     });
 }
 

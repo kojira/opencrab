@@ -2130,15 +2130,9 @@ async fn said_during_turn_is_recorded_and_runs_after() {
     let (release_tx, release_rx) = oneshot::channel();
     *h.runtime.hold_rx.lock().unwrap() = Some(release_rx);
 
-    let client = InstanceClient::connect(
-        &h.sock,
-        instance_id,
-        1,
-        "u1".into(),
-        config_digest(),
-    )
-    .await
-    .expect("connect");
+    let client = InstanceClient::connect(&h.sock, instance_id, 1, "u1".into(), config_digest())
+        .await
+        .expect("connect");
     wait_client_bound(&client, "chan-1", &binding_id).await;
 
     let entered = h.runtime.turn_entered.notified();

@@ -96,10 +96,7 @@ mod tests {
             adjust_inbound_effect(DeliveryMode::ToolDriven, text.clone()),
             DeliveryEffect::NoReply
         );
-        assert_eq!(
-            adjust_inbound_effect(DeliveryMode::Say, text.clone()),
-            text
-        );
+        assert_eq!(adjust_inbound_effect(DeliveryMode::Say, text.clone()), text);
         assert_eq!(
             adjust_inbound_effect(DeliveryMode::ToolDriven, DeliveryEffect::NoReply),
             DeliveryEffect::NoReply
@@ -111,13 +108,9 @@ mod tests {
         assert_eq!(
             adjust_inbound_effect(
                 DeliveryMode::ToolDriven,
-                DeliveryEffect::Failed {
-                    error: "x".into()
-                }
+                DeliveryEffect::Failed { error: "x".into() }
             ),
-            DeliveryEffect::Failed {
-                error: "x".into()
-            }
+            DeliveryEffect::Failed { error: "x".into() }
         );
     }
 

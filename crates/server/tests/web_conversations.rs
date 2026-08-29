@@ -170,10 +170,7 @@ fn binding_insert_only_lives_in_create_gate_binding_in_tx() {
         walk_rs(&path, &mut files);
         for file in files {
             let text = std::fs::read_to_string(&file).unwrap();
-            let prod = text
-                .split("#[cfg(test)]")
-                .next()
-                .unwrap_or(&text);
+            let prod = text.split("#[cfg(test)]").next().unwrap_or(&text);
             if prod.contains("INSERT INTO gate_bindings") {
                 hits.push(file.display().to_string());
             }
@@ -216,13 +213,20 @@ async fn empty_body_and_name_succeed_as_202_without_live_gateway() {
     assert_eq!(st, StatusCode::ACCEPTED, "{body}");
     assert_eq!(body["state"], "provisioning");
     assert!(body["name"].is_null());
-    assert_eq!(body["session_id"], format!("web-{AGENT}-{}", body["conversation_id"].as_str().unwrap()));
+    assert_eq!(
+        body["session_id"],
+        format!("web-{AGENT}-{}", body["conversation_id"].as_str().unwrap())
+    );
     let cid = body["conversation_id"].as_str().unwrap();
     assert_eq!(cid, cid.to_lowercase());
     Uuid::parse_str(cid).unwrap();
     let expected_binding = Uuid::new_v5(
         &Uuid::NAMESPACE_DNS,
-        format!("opencrab:web:binding:{}", body["session_id"].as_str().unwrap()).as_bytes(),
+        format!(
+            "opencrab:web:binding:{}",
+            body["session_id"].as_str().unwrap()
+        )
+        .as_bytes(),
     )
     .to_string();
     assert_eq!(body["binding_id"], expected_binding);

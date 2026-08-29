@@ -261,8 +261,15 @@ mod tests {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .unwrap();
-        create_gate_binding_in_tx(&tx, binding, &instance, address, "My Name", 1_700_000_000_000_000_000)
-            .unwrap();
+        create_gate_binding_in_tx(
+            &tx,
+            binding,
+            &instance,
+            address,
+            "My Name",
+            1_700_000_000_000_000_000,
+        )
+        .unwrap();
         tx.commit().unwrap();
         assert_eq!(counts(&conn), (1, 1, 1));
         let row = get_session(&conn, &format!("extgate-{binding}"))

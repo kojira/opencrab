@@ -18,9 +18,7 @@ pub enum FrameError {
     Io,
 }
 
-pub async fn read_frame<R: AsyncReadExt + Unpin>(
-    reader: &mut R,
-) -> Result<Vec<u8>, FrameError> {
+pub async fn read_frame<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Vec<u8>, FrameError> {
     let mut buf = Vec::new();
     loop {
         let mut byte = [0u8; 1];
@@ -135,8 +133,14 @@ pub enum InboundMsg {
     Hello(Hello),
     Said(Said),
     Response(WireResponse),
-    Reverse { id: Option<String>, m: String },
-    Unknown { id: Option<String>, m: String },
+    Reverse {
+        id: Option<String>,
+        m: String,
+    },
+    Unknown {
+        id: Option<String>,
+        m: String,
+    },
     Invalid {
         id: Option<String>,
         code: ErrorCode,
@@ -146,7 +150,8 @@ pub enum InboundMsg {
 
 pub fn parse_frame_bytes(bytes: &[u8]) -> Result<InboundMsg, GateError> {
     let without_lf = bytes.strip_suffix(b"\n").unwrap_or(bytes);
-    let text = std::str::from_utf8(without_lf).map_err(|_| GateError::new(ErrorCode::BadRequest))?;
+    let text =
+        std::str::from_utf8(without_lf).map_err(|_| GateError::new(ErrorCode::BadRequest))?;
     let obj = parse_object_no_dup(text.as_bytes())?;
     parse_inbound(&obj)
 }
@@ -208,14 +213,8 @@ pub fn parse_inbound(obj: &Value) -> Result<InboundMsg, GateError> {
                 m,
             }),
         },
-        "bind" | "say" | "activity" => Ok(InboundMsg::Reverse {
-            id: opt_id(obj),
-            m,
-        }),
-        _ => Ok(InboundMsg::Unknown {
-            id: opt_id(obj),
-            m,
-        }),
+        "bind" | "say" | "activity" => Ok(InboundMsg::Reverse { id: opt_id(obj), m }),
+        _ => Ok(InboundMsg::Unknown { id: opt_id(obj), m }),
     }
 }
 
@@ -315,7 +314,8 @@ fn parse_response(obj: &Value, m: &str) -> Result<WireResponse, GateError> {
         })
     } else {
         let code_raw = require_str(obj, "code")?;
-        let code = ErrorCode::parse(&code_raw).ok_or_else(|| GateError::new(ErrorCode::BadRequest))?;
+        let code =
+            ErrorCode::parse(&code_raw).ok_or_else(|| GateError::new(ErrorCode::BadRequest))?;
         let detail = match obj.get("detail") {
             Some(Value::Null) => None,
             Some(Value::String(s)) => Some(s.clone()),

@@ -132,10 +132,7 @@ mod tests {
                 .join("src")
                 .join("queries")
                 .join("heartbeat.rs"),
-            crates_dir
-                .join("nostr-gateway")
-                .join("src")
-                .join("map.rs"),
+            crates_dir.join("nostr-gateway").join("src").join("map.rs"),
         ];
 
         let mut offenders = Vec::new();

@@ -291,10 +291,9 @@ impl InstanceClient {
                 return Err(PostRefuse::NotReady);
             };
             if inner.pending_turn.get(&binding_id).is_none() {
-                inner.pending_turn.insert(
-                    binding_id.clone(),
-                    PendingTurn { saw_say: false },
-                );
+                inner
+                    .pending_turn
+                    .insert(binding_id.clone(), PendingTurn { saw_say: false });
             }
             binding_id
         };
