@@ -93,6 +93,19 @@ pub const TOOL_RESULT_TOKEN_LIMIT: usize = 2_500;
 /// （`conversation.rs` の参照化）ので、積み上がらない。
 pub const READ_TOOL_RESULT_TOKEN_LIMIT: usize = 30_000;
 
+/// `ws_read` が `line_count` 省略時に返す行数。`crates/actions` の `WS_READ_DEFAULT_LINES` と同一。
+///
+/// #707: [`READ_TOOL_RESULT_TOKEN_LIMIT`] は「この行数が 1 回で入る」ための値。
+pub const WS_READ_DEFAULT_LINES: usize = 2_000;
+
+/// `ws_read` 結果 JSON の封筒（keys / path / 標識）用余白。
+/// 本文天井は [`RANGE_CONTENT_TOKEN_CEILING`]。新しい定数ではなく既存の −400。
+pub const WS_READ_ENVELOPE_TOKENS: usize = 400;
+
+/// 行範囲読みで返す本文のトークン上限（`READ_TOOL_RESULT_TOKEN_LIMIT - 400`）。
+pub const RANGE_CONTENT_TOKEN_CEILING: usize =
+    READ_TOOL_RESULT_TOKEN_LIMIT - WS_READ_ENVELOPE_TOKENS;
+
 /// このツール結果に適用する inline 上限（#707）。
 ///
 /// 分ける軸は「出力量を**誰が決めたか**」。エージェントが行範囲を指定した読みは自分で量を
@@ -104,6 +117,40 @@ pub fn inline_limit_for_tool(tool_name: &str) -> usize {
     } else {
         TOOL_RESULT_TOKEN_LIMIT
     }
+}
+
+/// 実行前に予約する result 枠。args から実要求が読めるときだけ按分し、読めない読みは 30k。
+///
+/// `ws_read` の本文は [`RANGE_CONTENT_TOKEN_CEILING`] で頭打ち、行数は `line_count`
+/// （省略時 [`WS_READ_DEFAULT_LINES`]）。予約は「30k が 2000 行用」という既存比を行数に
+/// 掛け、封筒 [`WS_READ_ENVELOPE_TOKENS`] を足す。1 行 2000 文字のバイト上界を積むと
+/// `line_count >= 4` で常に 30k に張り付き、実要求按分にならない。
+///
+/// `search_my_history` はヒット件数 `limit` を受けても、本文トークンは
+/// `TOOL_RESULT_TOKEN_LIMIT * 8/10` で頭打ち（件数では小さくならない）。見積もり不能として
+/// [`inline_limit_for_tool`]（2,500）のまま。
+///
+/// sanitizer の退避判定は引き続き [`inline_limit_for_tool`]。予約を下回る結果は素通りし、
+/// 予約を上回る病的な行でも 30k で退避される。予約を sanitizer より小さくしても、
+/// 実結果が 30k を超えて会話を壊すことはない。
+pub fn reserve_tokens_for_tool(tool_name: &str, arguments: &serde_json::Value) -> usize {
+    match tool_name {
+        "ws_read" => reserve_ws_read(arguments),
+        _ => inline_limit_for_tool(tool_name),
+    }
+}
+
+fn reserve_ws_read(arguments: &serde_json::Value) -> usize {
+    let line_count = arguments
+        .get("line_count")
+        .and_then(|v| v.as_u64())
+        .map(|n| (n as usize).max(1))
+        .unwrap_or(WS_READ_DEFAULT_LINES);
+    let body = RANGE_CONTENT_TOKEN_CEILING
+        .saturating_mul(line_count)
+        .div_ceil(WS_READ_DEFAULT_LINES);
+    body.saturating_add(WS_READ_ENVELOPE_TOKENS)
+        .min(READ_TOOL_RESULT_TOKEN_LIMIT)
 }
 
 /// **「読み」の唯一の定義**（#707）。もう一度呼べば同じものが得られ、副作用が無いツール。
@@ -608,6 +655,50 @@ mod tests {
             assert!(!is_read_tool(t));
             assert_eq!(inline_limit_for_tool(t), TOOL_RESULT_TOKEN_LIMIT);
         }
+    }
+
+    #[test]
+    fn reserve_ws_read_scales_with_line_count_and_caps_at_read_limit() {
+        let small = reserve_tokens_for_tool(
+            "ws_read",
+            &serde_json::json!({"path": "a.txt", "line_count": 120}),
+        );
+        assert!(
+            small < READ_TOOL_RESULT_TOKEN_LIMIT,
+            "line_count=120 は 30k より小さい: {small}"
+        );
+        assert_eq!(
+            small,
+            RANGE_CONTENT_TOKEN_CEILING
+                .saturating_mul(120)
+                .div_ceil(WS_READ_DEFAULT_LINES)
+                .saturating_add(WS_READ_ENVELOPE_TOKENS)
+        );
+
+        let omitted = reserve_tokens_for_tool("ws_read", &serde_json::json!({"path": "a.txt"}));
+        assert_eq!(omitted, READ_TOOL_RESULT_TOKEN_LIMIT);
+
+        let huge = reserve_tokens_for_tool(
+            "ws_read",
+            &serde_json::json!({"path": "a.txt", "line_count": 8_000}),
+        );
+        assert_eq!(huge, READ_TOOL_RESULT_TOKEN_LIMIT);
+    }
+
+    #[test]
+    fn reserve_unestimable_read_and_non_read_keep_inline_limit() {
+        assert_eq!(
+            reserve_tokens_for_tool("ws_list", &serde_json::json!({"path": "."})),
+            READ_TOOL_RESULT_TOKEN_LIMIT
+        );
+        assert_eq!(
+            reserve_tokens_for_tool("search_my_history", &serde_json::json!({"limit": 10})),
+            TOOL_RESULT_TOKEN_LIMIT
+        );
+        assert_eq!(
+            reserve_tokens_for_tool("execute_shell", &serde_json::json!({})),
+            TOOL_RESULT_TOKEN_LIMIT
+        );
     }
 
     #[test]

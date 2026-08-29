@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use opencrab_core::tool_result_log::READ_TOOL_RESULT_TOKEN_LIMIT;
+use opencrab_core::tool_result_log::{
+    RANGE_CONTENT_TOKEN_CEILING, READ_TOOL_RESULT_TOKEN_LIMIT, WS_READ_DEFAULT_LINES,
+};
 use serde_json::json;
 
 use crate::traits::{Action, ActionContext, ActionResult, SideEffect};
@@ -158,12 +160,6 @@ fn compute_ws_read(
     Ok(out)
 }
 
-/// 行範囲読みで返す本文のトークン上限。結果 JSON 全体（本文＋メタ情報の封筒）が inline 上限
-/// [`TOOL_RESULT_TOKEN_LIMIT`] を超えて再退避される（#564 の自己ループ）ことを構造的に防ぐため、
-/// 封筒ぶんの余白を引いた保守値にする。封筒は keys＋数値＋`path`＋標識で実測数百トークン以内
-/// なので、余裕を持って 400 引く。
-const RANGE_CONTENT_TOKEN_CEILING: usize = READ_TOOL_RESULT_TOKEN_LIMIT - 400;
-
 /// 行範囲読みで 1 行あたりに返す最大文字数（`char` 数）。超える行は切って ` …⟨+M文字⟩` を付ける。
 ///
 /// 単位は**文字数**。テキストを扱うので文字で切れば境界補正が要らない（`chars().take(n)` で済む）。
@@ -173,14 +169,6 @@ const RANGE_CONTENT_TOKEN_CEILING: usize = READ_TOOL_RESULT_TOKEN_LIMIT - 400;
 /// 収めるための逆算値で、天井が上がったので外れる（2,000 × 4 = 8,000 < 29,600 なので、最悪
 /// 密度でも単一行が天井に収まる性質は保つ＝最低 1 行保証）。
 const WS_READ_MAX_LINE_CHARS: usize = 2_000;
-
-/// `line_count` 省略時に返す行数（#707）。**Claude Code の Read と同じ 2,000 行**。
-///
-/// 以前は省略時に**全文**を返していた。全文が上限を超えると `sanitize_tool_result` が中身を
-/// 別ファイルへ複製して退避するため、読むたびに `workspace/tmp` が増えていた（本番実測:
-/// 4,255 ファイル・270MB）。**元がファイルなのだから複製に意味が無い**（オーナー指摘）。
-/// 省略時も 1 ページ目として返せば退避は起きず、参照は**元のファイル名がそのまま**使える。
-const WS_READ_DEFAULT_LINES: usize = 2_000;
 
 pub struct WsWriteAction;
 

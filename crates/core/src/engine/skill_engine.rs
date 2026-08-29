@@ -1043,7 +1043,9 @@ fn reserve_result_caps(
     let reserved: usize = inline_calls
         .iter()
         .chain(dispatch_calls.iter())
-        .map(|tc| crate::tool_result_log::inline_limit_for_tool(&tc.function.name))
+        .map(|tc| {
+            crate::tool_result_log::reserve_tokens_for_tool(&tc.function.name, &tc.arguments_json())
+        })
         .sum();
     let high = match gov.as_ref() {
         Some(g) => g.conversation_high,
@@ -1209,6 +1211,262 @@ mod tests {
             reserved,
             high
         );
+    }
+
+    fn reserved_for(calls: &[ToolCall]) -> usize {
+        calls
+            .iter()
+            .map(|tc| {
+                crate::tool_result_log::reserve_tokens_for_tool(
+                    &tc.function.name,
+                    &tc.arguments_json(),
+                )
+            })
+            .sum()
+    }
+
+    fn try_reserve(
+        conversation: &str,
+        calls: &[ToolCall],
+        high: usize,
+        low: usize,
+    ) -> Result<usize, String> {
+        let mut messages = vec![
+            sys_msg(),
+            Message {
+                role: Role::User,
+                content: Some(MessageContent::Text(conversation.into())),
+                name: None,
+                function_call: None,
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        ];
+        let conv = crate::tokens::estimate_tokens(conversation);
+        let mut ledger = crate::context_budget::TokenLedger::new();
+        ledger.record_tokens("user", conv);
+        let mut gov = Some(crate::context_budget::TurnGovernor::new(high, low));
+        reserve_result_caps(&mut gov, &mut ledger, &mut messages, calls, &[])
+            .map(|()| ledger.total())
+            .map_err(|e| e.to_string())
+    }
+
+    fn must_keep_tokens(conversation: &str) -> usize {
+        let messages = vec![
+            sys_msg(),
+            Message {
+                role: Role::User,
+                content: Some(MessageContent::Text(conversation.into())),
+                name: None,
+                function_call: None,
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        ];
+        user_line_items(&messages)
+            .iter()
+            .filter(|i| i.must_keep)
+            .map(|i| i.tokens)
+            .sum()
+    }
+
+    /// QC 19:05:42。ws_read line_count=120 ×2 + search_my_history が 30k×3 予約だと死ぬ。
+    #[test]
+    fn reserve_qc_two_small_ws_reads_and_search_passes() {
+        let calls = vec![
+            tc(
+                "r1",
+                "ws_read",
+                serde_json::json!({"path": "a.txt", "line_count": 120}),
+            ),
+            tc(
+                "r2",
+                "ws_read",
+                serde_json::json!({"path": "b.txt", "line_count": 120}),
+            ),
+            tc(
+                "s1",
+                "search_my_history",
+                serde_json::json!({"query": "天気", "limit": 10}),
+            ),
+        ];
+        let reserved = reserved_for(&calls);
+        assert!(
+            reserved < 3 * crate::tool_result_log::READ_TOOL_RESULT_TOKEN_LIMIT,
+            "実要求ベースなら 90k 未満: reserved={reserved}"
+        );
+        let old = 2 * crate::tool_result_log::READ_TOOL_RESULT_TOKEN_LIMIT
+            + crate::tool_result_log::inline_limit_for_tool("search_my_history");
+        let conv = "word ".repeat(18_000);
+        let conv_tokens = crate::tokens::estimate_tokens(&conv);
+        let high = 71_000;
+        assert!(
+            conv_tokens + old > high,
+            "修正前は exhausted (conv={conv_tokens} old_reserved={old} high={high})"
+        );
+        assert!(
+            conv_tokens + reserved <= high,
+            "修正後は圧縮なしで通る (conv={conv_tokens} reserved={reserved} high={high})"
+        );
+        let after = try_reserve(&conv, &calls, high, high / 2).expect("QC 実測ケースは通る");
+        assert!(after + reserved <= high);
+    }
+
+    /// 予約モデルの代表境界。fail-loud は「不可侵 + 予約が high に入らない」ときだけ。
+    #[test]
+    fn reserve_model_boundary_matrix() {
+        let high = 71_000usize;
+        let low = 31_000usize;
+        let small_conv = "hello";
+        let compactible = {
+            let m = compactible_user(40, 300);
+            message_plain_text(&m)
+        };
+        let inviolable = {
+            let mut t = String::new();
+            for i in 0..5 {
+                t.push_str(&format!("[owner{i}] [2026-08-30 00:00:0{i}]:\n"));
+                t.push_str(&"word ".repeat(4_000));
+                t.push('\n');
+            }
+            t
+        };
+
+        struct Case {
+            name: &'static str,
+            conv: String,
+            calls: Vec<ToolCall>,
+        }
+        let ws_small = |id: &str| {
+            tc(
+                id,
+                "ws_read",
+                serde_json::json!({"path": "f.txt", "line_count": 120}),
+            )
+        };
+        let ws_large = |id: &str| {
+            tc(
+                id,
+                "ws_read",
+                serde_json::json!({"path": "f.txt", "line_count": 2_000}),
+            )
+        };
+        let unread = |id: &str| tc(id, "ws_list", serde_json::json!({"path": "."}));
+        let write = |id: &str| {
+            tc(
+                id,
+                "ws_write",
+                serde_json::json!({"path": "x", "content": "y"}),
+            )
+        };
+
+        let cases = [
+            Case {
+                name: "small-conv + 1 small ws_read",
+                conv: small_conv.into(),
+                calls: vec![ws_small("1")],
+            },
+            Case {
+                name: "small-conv + 1 large ws_read",
+                conv: small_conv.into(),
+                calls: vec![ws_large("1")],
+            },
+            Case {
+                name: "small-conv + 1 unestimable read (30k)",
+                conv: small_conv.into(),
+                calls: vec![unread("1")],
+            },
+            Case {
+                name: "small-conv + 1 non-read (2.5k)",
+                conv: small_conv.into(),
+                calls: vec![write("1")],
+            },
+            Case {
+                name: "compactible + 1 large ws_read",
+                conv: compactible.clone(),
+                calls: vec![ws_large("1")],
+            },
+            Case {
+                name: "compactible + QC trio",
+                conv: compactible.clone(),
+                calls: vec![
+                    ws_small("1"),
+                    ws_small("2"),
+                    tc(
+                        "3",
+                        "search_my_history",
+                        serde_json::json!({"query": "q", "limit": 10}),
+                    ),
+                ],
+            },
+            Case {
+                name: "compactible + 3 unestimable reads (90k)",
+                conv: compactible.clone(),
+                calls: vec![unread("1"), unread("2"), unread("3")],
+            },
+            Case {
+                name: "inviolable + 1 small ws_read",
+                conv: inviolable.clone(),
+                calls: vec![ws_small("1")],
+            },
+            Case {
+                name: "inviolable + 3 unestimable reads",
+                conv: inviolable.clone(),
+                calls: vec![unread("1"), unread("2"), unread("3")],
+            },
+            Case {
+                name: "small-conv + 5 mixed",
+                conv: small_conv.into(),
+                calls: vec![
+                    ws_small("1"),
+                    ws_large("2"),
+                    unread("3"),
+                    write("4"),
+                    write("5"),
+                ],
+            },
+        ];
+
+        for case in &cases {
+            let reserved = reserved_for(&case.calls);
+            let conv_tokens = crate::tokens::estimate_tokens(&case.conv);
+            let inviolable_tokens = must_keep_tokens(&case.conv);
+            let cannot_fit = inviolable_tokens.saturating_add(reserved) > high;
+            let result = try_reserve(&case.conv, &case.calls, high, low);
+            if cannot_fit {
+                assert!(
+                    result.is_err(),
+                    "{}: 不可侵({}) + 予約({}) > high({}) なのに通った conv={}",
+                    case.name,
+                    inviolable_tokens,
+                    reserved,
+                    high,
+                    conv_tokens
+                );
+                assert!(
+                    result
+                        .unwrap_err()
+                        .contains(crate::context_budget::CONTEXT_BUDGET_EXHAUSTED),
+                    "{}: fail-loud 名が違う",
+                    case.name
+                );
+            } else {
+                let after = result.unwrap_or_else(|e| {
+                    panic!(
+                        "{}: 不可侵({}) + 予約({}) <= high({}) なのに死んだ: {e} conv={}",
+                        case.name, inviolable_tokens, reserved, high, conv_tokens
+                    )
+                });
+                assert!(
+                    after + reserved <= high,
+                    "{}: 圧縮後も収まっていない after={} reserved={} high={}",
+                    case.name,
+                    after,
+                    reserved,
+                    high
+                );
+            }
+        }
     }
 
     #[test]
