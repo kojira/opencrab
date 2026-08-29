@@ -224,6 +224,10 @@ impl opencrab_actions::AgentRuntime for FakeRunner {
         self.session_locks.clone()
     }
 
+    fn subtask_registry_for(&self, session_id: &str) -> opencrab_actions::SubtaskRegistry {
+        opencrab_actions::SubtaskRegistries::new().registry_for(session_id)
+    }
+
     fn record_agent_no_reply(&self, _agent_id: &str, _session_id: &str) {}
 
     fn record_inbound_message(

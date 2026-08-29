@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use opencrab_actions::{
     accept_inbound, delivery_effect, start_session_turn, AgentRuntime, CallerIdentity,
-    InboundLookups, InboundWork, LiveInboundScope, NormalizedInbound, NormalizedInboundEvent,
-    PrivilegeFire, RunRequest, TranscriptSource, WatchAccept,
+    InboundLookups, InboundWork, NormalizedInbound, NormalizedInboundEvent, PrivilegeFire,
+    RunRequest, SubtaskCompletionSink, TranscriptSource, WatchAccept,
 };
 use opencrab_db::queries::{
     get_agent_discord_config, get_agent_nostr_owner_pubkey, get_session_policy_json,
@@ -18,6 +18,7 @@ use opencrab_db::queries::{
 use rusqlite::{params, Connection, Transaction, TransactionBehavior};
 
 use crate::bundle::{apply_bundle_member, BundleApply, NostrBundleAdmit};
+use crate::completion::{v3_attach_dispatch, ExtgateCompletionSink};
 use crate::delivery::apply_delivery_effect;
 use crate::delivery_mode::{adjust_inbound_effect, DeliveryMode};
 use crate::error::{ErrorCode, GateError};
@@ -756,6 +757,10 @@ fn enqueue_turn<R: AgentRuntime>(
                     let images = images.clone();
                     let origin = origin.clone();
                     let kind_id = kind_id.clone();
+                    let state = Arc::clone(&state);
+                    let instance_id = instance_id.clone();
+                    let binding_id = binding_id.clone();
+                    let prompt_suffix = prompt_suffix.clone();
                     tokio::spawn(async move {
                         let inbound = NormalizedInbound {
                             session_id: &session_id,
@@ -773,6 +778,20 @@ fn enqueue_turn<R: AgentRuntime>(
                             image_urls: &images,
                             external_id: &origin,
                         };
+                        let registry = runtime.subtask_registry_for(&session_id);
+                        let sink: Arc<dyn SubtaskCompletionSink> =
+                            Arc::new(ExtgateCompletionSink {
+                                state,
+                                runtime: runtime.clone(),
+                                instance_id,
+                                binding_id,
+                                agent_id: agent_id.clone(),
+                                session_id: session_id.clone(),
+                                kind_id: kind_id.clone(),
+                                author_id: author_id.clone(),
+                                delivery_mode,
+                                prompt_suffix,
+                            });
                         start_session_turn(
                             &runtime,
                             TranscriptSource::External,
@@ -783,22 +802,22 @@ fn enqueue_turn<R: AgentRuntime>(
                             "",
                             |raw| raw.to_string(),
                             |conversation| {
-                                let mut req = RunRequest::new(
-                                    agent_id.clone(),
-                                    name.clone(),
-                                    session_id.clone(),
-                                    system.clone(),
-                                    conversation,
-                                    "extgate",
-                                    caller.clone(),
+                                v3_attach_dispatch(
+                                    RunRequest::new(
+                                        agent_id.clone(),
+                                        name.clone(),
+                                        session_id.clone(),
+                                        system.clone(),
+                                        conversation,
+                                        "extgate",
+                                        caller.clone(),
+                                    )
+                                    .with_image_urls(images.clone()),
+                                    &kind_id,
+                                    author_id.clone(),
+                                    registry.clone(),
+                                    Arc::clone(&sink),
                                 )
-                                .with_image_urls(images.clone());
-                                if kind_id == "nostr" {
-                                    req = req.with_live_inbound_scope(
-                                        LiveInboundScope::OnlySpeaker(author_id.clone()),
-                                    );
-                                }
-                                req
                             },
                         )
                         .await
