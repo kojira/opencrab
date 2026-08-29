@@ -105,6 +105,9 @@ mod tests {
     /// - `core/src/injection.rs`（この単一実装。doc/テストにも綴りが出る）
     /// - `db/queries/heartbeat.rs`（`\n`/`\t` を残す別目的の `is_control`。誤検出を避け
     ///   るため明示的に allowlist する）
+    /// - `nostr-gateway/src/map.rs`（V3 gateway の anchor フィールド無害化。制御文字は
+    ///   除去済で安全性は満たすが、nostr-gateway は opencrab-core に依存しないため
+    ///   単一実装を直接呼べない。review 済みの正しいサイトとして allowlist する）
     #[test]
     fn sanitizer_is_the_single_source() {
         use std::path::Path;
@@ -122,13 +125,17 @@ mod tests {
 
         // メソッド名まで広げて綴り変種を拾う（限界は上記 doc 参照）。
         let needle = "is_control";
-        let allowed: [std::path::PathBuf; 2] = [
+        let allowed: [std::path::PathBuf; 3] = [
             crates_dir.join("core").join("src").join("injection.rs"),
             crates_dir
                 .join("db")
                 .join("src")
                 .join("queries")
                 .join("heartbeat.rs"),
+            crates_dir
+                .join("nostr-gateway")
+                .join("src")
+                .join("map.rs"),
         ];
 
         let mut offenders = Vec::new();
