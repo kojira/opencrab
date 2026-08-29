@@ -27,7 +27,7 @@ pub const REST_SESSION_PREFIX: &str = "agent-msg-";
 ///
 /// 完了本文は `settle_completed` が親セッションログへ永続化済み（RFC §1.3）なので、
 /// 取得は `GET /api/sessions/{id}/logs` で足りる。ここで LLM を回して結果を再注入
-/// （web の `WebCompletionSink` 相当）はしない:
+/// （web-gateway の完了 sink 相当）はしない:
 /// - REST は request/response で live push 先を持たない。完了本文は次の POST の
 ///   `build_conversation_string` で自然に文脈へ載る（heartbeat の「次 tick 拾い」と同じ方式）。
 ///
