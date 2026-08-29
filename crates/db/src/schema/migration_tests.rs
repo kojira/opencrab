@@ -4003,7 +4003,7 @@ fn table_digest(conn: &Connection, table: &str, skip_cols: &[&str]) -> (i64, Str
         .unwrap();
     for row in rows {
         let cells = row.unwrap();
-        for (name, value) in selected.iter().zip(cells.into_iter()) {
+        for (name, value) in selected.iter().zip(cells) {
             hasher.update(name.as_bytes());
             hasher.update([0u8]);
             hasher.update(cell_canon(value).as_bytes());
