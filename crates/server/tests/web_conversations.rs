@@ -13,6 +13,18 @@ use tokio::net::UnixStream;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+/// #829: 実ゲートウェイ（UDS）を起こす bind 系テストと、プロセスグローバルな
+/// `set_binding_tx_fail` を触るテストは**並列で走らせない**。並列だと gateway 同士の
+/// リソース競合や、fail 注入のグローバル状態が他テストへ漏れて hang / flake する
+/// （単一スレッドでは 12/12 安定）。ガードは await を跨いで保持するため、std の Mutex
+/// （`await_holding_lock` に触れ、multi-thread runtime では危険）ではなく非同期用の
+/// `tokio::sync::Mutex` を使う。poison も無い。
+static BIND_TESTS_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn bind_serial() -> tokio::sync::MutexGuard<'static, ()> {
+    BIND_TESTS_SERIAL.lock().await
+}
+
 const AGENT: &str = "webagent";
 const CONFIG_B64: &str = "e30=";
 const CONFIG_DIGEST: &str = "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a";
@@ -206,6 +218,7 @@ fn walk_rs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
 
 #[tokio::test]
 async fn empty_body_and_name_succeed_as_202_without_live_gateway() {
+    let _bind_serial = bind_serial().await;
     let conn = opencrab_db::init_memory().unwrap();
     seed_agent_instance(&conn);
     let (app, _, _) = app_from_conn(conn);
@@ -238,6 +251,7 @@ async fn empty_body_and_name_succeed_as_202_without_live_gateway() {
 
 #[tokio::test]
 async fn caller_specified_ids_are_rejected() {
+    let _bind_serial = bind_serial().await;
     let conn = opencrab_db::init_memory().unwrap();
     seed_agent_instance(&conn);
     let (app, _, _) = app_from_conn(conn);
@@ -255,6 +269,7 @@ async fn caller_specified_ids_are_rejected() {
 
 #[tokio::test]
 async fn name_newline_and_over_100_scalars_are_400() {
+    let _bind_serial = bind_serial().await;
     let conn = opencrab_db::init_memory().unwrap();
     seed_agent_instance(&conn);
     let (app, _, _) = app_from_conn(conn);
@@ -270,6 +285,7 @@ async fn name_newline_and_over_100_scalars_are_400() {
 
 #[tokio::test]
 async fn missing_or_duplicate_instance_is_409_write_zero() {
+    let _bind_serial = bind_serial().await;
     let conn = opencrab_db::init_memory().unwrap();
     opencrab_db::queries::upsert_agent(
         &conn,
@@ -304,6 +320,7 @@ async fn missing_or_duplicate_instance_is_409_write_zero() {
 
 #[tokio::test]
 async fn tx_failure_injection_leaves_zero_writes() {
+    let _bind_serial = bind_serial().await;
     let conn = opencrab_db::init_memory().unwrap();
     seed_agent_instance(&conn);
     let db_path_counts = {
@@ -337,6 +354,7 @@ async fn tx_failure_injection_leaves_zero_writes() {
 
 #[tokio::test]
 async fn admin_put_and_create_share_one_store_command() {
+    let _bind_serial = bind_serial().await;
     let conn = opencrab_db::init_memory().unwrap();
     seed_agent_instance(&conn);
     let (app, _, state) = app_from_conn(conn);
@@ -365,6 +383,7 @@ async fn admin_put_and_create_share_one_store_command() {
 
 #[tokio::test]
 async fn disconnected_create_is_202_and_detail_is_not_ready() {
+    let _bind_serial = bind_serial().await;
     let conn = opencrab_db::init_memory().unwrap();
     seed_agent_instance(&conn);
     let (app, _, _) = app_from_conn(conn);
@@ -405,6 +424,7 @@ async fn read_frame(s: &mut UnixStream) -> Value {
 
 #[tokio::test]
 async fn live_gateway_create_returns_201_ready() {
+    let _bind_serial = bind_serial().await;
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("gate.sock");
     let conn = opencrab_db::init_memory().unwrap();
@@ -475,6 +495,7 @@ async fn live_gateway_create_returns_201_ready() {
 
 #[tokio::test]
 async fn socket_close_during_bind_keeps_binding_and_returns_202() {
+    let _bind_serial = bind_serial().await;
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("gate.sock");
     let conn = opencrab_db::init_memory().unwrap();
@@ -528,6 +549,7 @@ async fn socket_close_during_bind_keeps_binding_and_returns_202() {
 
 #[tokio::test]
 async fn race_barriers_keep_single_binding_and_single_bind() {
+    let _bind_serial = bind_serial().await;
     opencrab_extgate::race::disarm_all();
     opencrab_extgate::race::arm("after_commit");
     let dir = tempfile::tempdir().unwrap();
