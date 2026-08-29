@@ -1,19 +1,17 @@
 //! 二水位圧縮（#826-B）。
 //!
 //! 高水位超過でだけ刈り、低水位まで落とす。車線は字句順の優先:
-//! 到達点チェックポイント不可侵 → 直近逐語 → エコー参照化 → 古い履歴の要約。
+//! 直近逐語 → エコー参照化 → 古い履歴の要約。
 //! 合計は [`crate::context_budget::TokenLedger`] の加減算だけを使い、全文再 encode しない。
 //! assistant の said と同一応答の tool calls / results は [`ExchangeGroup`] として原子的に扱う。
 
 use sha2::{Digest, Sha256};
 
-use super::checkpoint::{CheckpointLane, CHECKPOINT_EMPTY_MARKER};
 use super::ledger::TokenLedger;
 
 /// 圧縮車線。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompactLane {
-    Checkpoint,
     RecentVerbatim,
     Echoable,
     OldHistory,
@@ -53,9 +51,8 @@ impl ExchangeGroup {
             return CompactLane::RecentVerbatim;
         }
         self.items
-            .iter()
+            .first()
             .map(|i| i.lane)
-            .find(|l| *l != CompactLane::Checkpoint)
             .unwrap_or(CompactLane::OldHistory)
     }
 
@@ -84,7 +81,6 @@ pub struct CompactOutcome {
     pub after_tokens: usize,
     pub text: String,
     pub through_log_id: Option<i64>,
-    pub checkpoint_empty: bool,
     pub low_water_unreachable: bool,
     pub exhausted: bool,
 }
@@ -139,11 +135,10 @@ pub fn group_items(items: &[CompactItem]) -> Vec<ExchangeGroup> {
 
 /// 高水位超過なら低水位まで刈る。超過していなければ入力をそのまま返す。
 ///
-/// 刈る順は車線優先: 到達点 → 直近逐語 → エコー参照化 → 古い要約。
+/// 刈る順は車線優先: 直近逐語 → エコー参照化 → 古い要約。
 /// 新しい echo が古い逐語を押し出さない。[`ExchangeGroup`] はまとめて残すか落とす。
 pub fn compact_to_low_water(
     items: &[CompactItem],
-    checkpoint: &CheckpointLane,
     conversation_high: usize,
     conversation_low: usize,
 ) -> CompactOutcome {
@@ -157,37 +152,16 @@ pub fn compact_to_low_water(
             fired: false,
             before_tokens: before,
             after_tokens: before,
-            text: join_items(items, checkpoint, false),
+            text: join_items(items),
             through_log_id: items.iter().rev().find_map(|i| i.log_id),
-            checkpoint_empty: checkpoint.is_empty(),
             low_water_unreachable: false,
             exhausted: false,
         };
     }
 
-    let cp_text = checkpoint.render();
-    let cp_tokens = checkpoint.tokens();
-    let checkpoint_empty = checkpoint.is_empty();
-
-    if cp_tokens > conversation_high {
-        return CompactOutcome {
-            fired: true,
-            before_tokens: before,
-            after_tokens: cp_tokens,
-            text: cp_text,
-            through_log_id: items.iter().rev().find_map(|i| i.log_id),
-            checkpoint_empty,
-            low_water_unreachable: false,
-            exhausted: true,
-        };
-    }
-
-    let mut used = cp_tokens;
+    let mut used = 0usize;
+    let mut remaining_budget = conversation_low;
     let mut low_water_unreachable = false;
-    if used > conversation_low {
-        low_water_unreachable = true;
-    }
-    let mut remaining_budget = conversation_low.saturating_sub(used);
 
     let groups = group_items(items);
     let mut kept: Vec<CompactItem> = Vec::new();
@@ -236,10 +210,6 @@ pub fn compact_to_low_water(
         if claimed.contains(&g.id) {
             continue;
         }
-        if g.lane() == CompactLane::Checkpoint {
-            claimed.insert(g.id);
-            continue;
-        }
         dropped.push(g);
         claimed.insert(g.id);
     }
@@ -256,14 +226,12 @@ pub fn compact_to_low_water(
         low_water_unreachable = true;
     }
 
-    let text = join_kept(&cp_text, checkpoint_empty, &kept);
     CompactOutcome {
         fired: true,
         before_tokens: before,
         after_tokens: used,
-        text,
+        text: join_kept(&kept),
         through_log_id: items.iter().rev().find_map(|i| i.log_id),
-        checkpoint_empty,
         low_water_unreachable,
         exhausted: false,
     }
@@ -375,32 +343,19 @@ fn old_history_summary(dropped: usize, budget: usize) -> CompactItem {
     }
 }
 
-fn join_items(items: &[CompactItem], checkpoint: &CheckpointLane, inject: bool) -> String {
-    let mut parts = Vec::new();
-    if inject || !checkpoint.is_empty() {
-        parts.push(checkpoint.render());
-    } else if checkpoint.is_empty() {
-        parts.push(CHECKPOINT_EMPTY_MARKER.to_string());
-    }
-    for item in items {
-        if item.lane != CompactLane::Checkpoint {
-            parts.push(item.text.clone());
-        }
-    }
-    parts.join("\n")
+fn join_items(items: &[CompactItem]) -> String {
+    items
+        .iter()
+        .map(|item| item.text.clone())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
-fn join_kept(cp_text: &str, checkpoint_empty: bool, kept: &[CompactItem]) -> String {
-    let mut parts = Vec::new();
-    if checkpoint_empty {
-        parts.push(CHECKPOINT_EMPTY_MARKER.to_string());
-    } else {
-        parts.push(cp_text.to_string());
-    }
-    for item in kept {
-        parts.push(item.text.clone());
-    }
-    parts.join("\n")
+fn join_kept(kept: &[CompactItem]) -> String {
+    kept.iter()
+        .map(|item| item.text.clone())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// 完了済み tool_call.arguments を `{ref,digest,bytes}` の JSON へ置換する。
@@ -417,7 +372,6 @@ pub fn argument_reference(log_id: i64, arguments: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context_budget::checkpoint::select_checkpoint_lane;
 
     fn item_at(key: &str, tokens: usize, lane: CompactLane, log_id: i64) -> CompactItem {
         CompactItem {
@@ -435,18 +389,17 @@ mod tests {
     fn high_exactly_does_not_fire_and_over_cuts_to_low() {
         let high = 45_000;
         let low = 20_000;
-        let empty = select_checkpoint_lane(None, None);
         let at_high: Vec<CompactItem> = (0..45)
             .map(|i| item_at(&format!("h{i}"), 1_000, CompactLane::RecentVerbatim, i))
             .collect();
-        let stay = compact_to_low_water(&at_high, &empty, high, low);
+        let stay = compact_to_low_water(&at_high, high, low);
         assert!(!stay.fired, "45,000 ちょうどは非発火");
         assert_eq!(stay.before_tokens, 45_000);
         assert_eq!(stay.after_tokens, 45_000);
 
         let mut over = at_high;
         over.push(item_at("extra", 1, CompactLane::OldHistory, 45));
-        let cut = compact_to_low_water(&over, &empty, high, low);
+        let cut = compact_to_low_water(&over, high, low);
         assert!(cut.fired, "45,001 は発火");
         assert_eq!(cut.before_tokens, 45_001);
         assert!(
@@ -463,12 +416,11 @@ mod tests {
 
     #[test]
     fn lane_priority_keeps_verbatim_over_newer_echo() {
-        let empty = select_checkpoint_lane(None, None);
         let items = vec![
             item_at("old_said", 80, CompactLane::RecentVerbatim, 1),
             item_at("new_echo", 80, CompactLane::Echoable, 99),
         ];
-        let out = compact_to_low_water(&items, &empty, 100, 90);
+        let out = compact_to_low_water(&items, 100, 90);
         assert!(out.fired);
         assert!(
             out.text.contains("[old_said:80]"),
@@ -496,7 +448,6 @@ mod tests {
 
     #[test]
     fn exchange_group_is_atomic() {
-        let empty = select_checkpoint_lane(None, None);
         let items = vec![
             CompactItem {
                 key: "call".into(),
@@ -518,7 +469,7 @@ mod tests {
             },
             item_at("keep_me", 50, CompactLane::RecentVerbatim, 10),
         ];
-        let out = compact_to_low_water(&items, &empty, 80, 60);
+        let out = compact_to_low_water(&items, 80, 60);
         assert!(out.fired);
         let has_call = out.text.contains("[call]");
         let has_result = out.text.contains("[result]");
@@ -532,9 +483,8 @@ mod tests {
 
     #[test]
     fn echo_is_valid_ref_digest_bytes_json() {
-        let empty = select_checkpoint_lane(None, None);
         let items = vec![item_at("tool", 5_000, CompactLane::Echoable, 12)];
-        let out = compact_to_low_water(&items, &empty, 100, 80);
+        let out = compact_to_low_water(&items, 100, 80);
         assert!(out.fired);
         let json_line = out
             .text
@@ -554,7 +504,6 @@ mod tests {
     /// user 車線の残量が 0 でも must_keep（直近ユーザー発話）は残る。
     #[test]
     fn must_keep_survives_zero_remaining_budget() {
-        let empty = select_checkpoint_lane(None, None);
         let items = vec![
             CompactItem {
                 key: "origin".into(),
@@ -567,7 +516,7 @@ mod tests {
             },
             item_at("old", 80, CompactLane::OldHistory, 0),
         ];
-        let out = compact_to_low_water(&items, &empty, 10, 0);
+        let out = compact_to_low_water(&items, 10, 0);
         assert!(out.fired);
         assert!(
             out.text.contains("東京！"),

@@ -1,28 +1,25 @@
 //! 826-B 必須 4 点（mock LLM のみ）。SkillEngine の MockLlm 基盤と本番組立/終了経路で回す。
 
-use super::checkpoint::{
-    checkpoint_event_body, select_checkpoint_lane, ContextCheckpoint, CHECKPOINT_EMPTY_MARKER,
-};
 use super::compact::{
     compact_to_low_water, should_compact, CompactItem, CompactLane, CompactPhase,
 };
 use super::governor::{
     assemble_from_snapshot, items_from_logs, take_governor_events, GovernorEvent, TurnGovernor,
 };
-use crate::conversation::{build_conversation_string_with_waters, fit_logs_to_budget};
+use crate::conversation::build_conversation_string_with_waters;
 use crate::engine::{ActionExecutor, ActionResult, ChatRequest, SkillEngine};
 use crate::tokens::estimate_tokens;
-use crate::{LlmClient, ToolCall};
+use crate::LlmClient;
 use async_trait::async_trait;
 use opencrab_llm_types::{
-    ChatResponse, Choice, FunctionCall, FunctionDefinition, Message, MessageContent, Role, Usage,
+    ChatResponse, Choice, FunctionDefinition, Message, MessageContent, Role, Usage,
 };
 
 const HIGH: usize = 45_000;
 const LOW: usize = 20_000;
 const AGENT: &str = "agent-1";
 const SESSION: &str = "sess-826b";
-const CHECKPOINT_NEEDLE: &str = "到達点:確認済み-step-17";
+const ORIGIN_UTTERANCE: &str = "発端: 大きなタスクを完了せよ";
 
 fn compact_item(key: &str, tokens: usize, lane: CompactLane, log_id: Option<i64>) -> CompactItem {
     CompactItem {
@@ -56,26 +53,6 @@ fn insert_speech(
     let mut out = row;
     out.id = Some(id);
     out
-}
-
-fn insert_checkpoint(conn: &rusqlite::Connection) {
-    let cp = ContextCheckpoint {
-        confirmed: vec!["step-17".into()],
-        position: CHECKPOINT_NEEDLE.into(),
-        next: "finish".into(),
-    };
-    let ev = opencrab_db::queries::SessionLogRow {
-        id: None,
-        agent_id: AGENT.into(),
-        session_id: SESSION.into(),
-        log_type: "system".into(),
-        content: checkpoint_event_body(&cp),
-        speaker_id: Some(AGENT.into()),
-        turn_number: None,
-        metadata_json: None,
-        created_at: None,
-    };
-    opencrab_db::queries::insert_session_log(conn, &ev).unwrap();
 }
 
 fn insert_tool_pair(conn: &rusqlite::Connection, i: usize, pad: &str) {
@@ -120,9 +97,8 @@ fn insert_tool_pair(conn: &rusqlite::Connection, i: usize, pad: &str) {
 }
 
 fn seed_over_high(conn: &rusqlite::Connection) {
-    insert_speech(conn, "owner", "最初の指示");
-    insert_speech(conn, AGENT, CHECKPOINT_NEEDLE);
-    insert_checkpoint(conn);
+    insert_speech(conn, "owner", ORIGIN_UTTERANCE);
+    insert_speech(conn, AGENT, "着手した");
     let blob = "hist ".repeat(2_000);
     for i in 0..30 {
         insert_speech(conn, "owner", &format!("turn-{i} {blob}"));
@@ -131,6 +107,28 @@ fn seed_over_high(conn: &rusqlite::Connection) {
     for i in 0..46 {
         insert_tool_pair(conn, i, &pad);
     }
+}
+
+/// 発端 1 + 直近 4 の user speech（must_keep 5）と 46 往復の tool。user を増やさないので発端が窓に残る。
+fn seed_long_task_with_recent_speech(conn: &rusqlite::Connection) -> Vec<String> {
+    insert_speech(conn, "owner", ORIGIN_UTTERANCE);
+    insert_speech(conn, AGENT, "着手した");
+    let blob = "hist ".repeat(2_000);
+    for i in 0..30 {
+        insert_speech(conn, AGENT, &format!("old-ack-{i} {blob}"));
+    }
+    let pad = "pad ".repeat(80);
+    for i in 0..46 {
+        insert_tool_pair(conn, i, &pad);
+    }
+    let mut recent = Vec::new();
+    for i in 1..=4 {
+        let text = format!("到達点-speech-{i}");
+        insert_speech(conn, "owner", &text);
+        recent.push(text);
+        insert_speech(conn, AGENT, &format!("ack-speech-{i}"));
+    }
+    recent
 }
 
 fn text_over_tokens(min_tokens: usize) -> String {
@@ -153,11 +151,23 @@ fn compact_fired_phases(events: &[GovernorEvent]) -> Vec<CompactPhase> {
         .collect()
 }
 
+fn assert_verbatim_window(text: &str, recent: &[String]) {
+    assert!(
+        text.contains(ORIGIN_UTTERANCE),
+        "発端 user 発話が落ちた: {text}"
+    );
+    for needle in recent {
+        assert!(
+            text.contains(needle),
+            "must_keep speech が落ちた ({needle}): {text}"
+        );
+    }
+}
+
 /// (a) 高水位超過→低水位まで削減の数値アサート（境界値込み）。
 /// compact_to_low_water が本番圧縮器。SkillEngine も同じ水位で発火することを見る。
 #[test]
 fn a_high_water_cut_to_low_with_boundaries() {
-    let empty = select_checkpoint_lane(None, None);
     let at_high: Vec<CompactItem> = (0..45)
         .map(|i| {
             compact_item(
@@ -169,7 +179,7 @@ fn a_high_water_cut_to_low_with_boundaries() {
         })
         .collect();
     assert!(!should_compact(45_000, HIGH));
-    let stay = compact_to_low_water(&at_high, &empty, HIGH, LOW);
+    let stay = compact_to_low_water(&at_high, HIGH, LOW);
     assert!(!stay.fired);
     assert_eq!(stay.before_tokens, 45_000);
     assert_eq!(stay.after_tokens, 45_000);
@@ -177,7 +187,7 @@ fn a_high_water_cut_to_low_with_boundaries() {
     let mut over = at_high;
     over.push(compact_item("over", 1, CompactLane::OldHistory, Some(45)));
     assert!(should_compact(45_001, HIGH));
-    let cut = compact_to_low_water(&over, &empty, HIGH, LOW);
+    let cut = compact_to_low_water(&over, HIGH, LOW);
     assert!(cut.fired);
     assert_eq!(cut.before_tokens, 45_001);
     assert!(
@@ -228,7 +238,6 @@ fn b_fire_points_event_order() {
             &conn,
             SESSION,
             &assembled.items,
-            &assembled.checkpoint,
             assembled.through_log_id,
             &assembled.text,
         )
@@ -289,27 +298,6 @@ fn b_fire_points_event_order() {
     assert!(end_pos < mid_pos, "終了が先、途中が後: {fired:?}");
 }
 
-/// 「チェックポイントが見えなければ確認をやり直す」mock。
-struct CheckpointSeekingLlm {
-    needle: String,
-    confirms: std::sync::Arc<std::sync::Mutex<usize>>,
-}
-
-#[async_trait]
-impl LlmClient for CheckpointSeekingLlm {
-    async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
-        let visible = request.messages.iter().any(|m| match &m.content {
-            Some(MessageContent::Text(t)) => t.contains(&self.needle),
-            _ => false,
-        });
-        if visible {
-            return Ok(text_resp("確認完了"));
-        }
-        *self.confirms.lock().unwrap() += 1;
-        Ok(tool_resp("confirm_step"))
-    }
-}
-
 struct OnceTextLlm {
     text: String,
 }
@@ -362,89 +350,41 @@ fn text_resp(text: &str) -> ChatResponse {
     }
 }
 
-fn tool_resp(name: &str) -> ChatResponse {
-    ChatResponse {
-        id: String::new(),
-        model: String::new(),
-        choices: vec![Choice {
-            index: 0,
-            message: Message {
-                role: Role::Assistant,
-                content: None,
-                name: None,
-                function_call: None,
-                tool_calls: Some(vec![ToolCall {
-                    id: "c1".into(),
-                    call_type: "function".into(),
-                    function: FunctionCall {
-                        name: name.into(),
-                        arguments: "{}".into(),
-                    },
-                }]),
-                tool_call_id: None,
-            },
-            finish_reason: None,
-        }],
-        usage: Usage::default(),
-        created: 0,
-    }
-}
-
-async fn run_seek(conversation: &str) -> (String, usize, usize) {
-    let confirms = std::sync::Arc::new(std::sync::Mutex::new(0usize));
-    let llm = CheckpointSeekingLlm {
-        needle: CHECKPOINT_NEEDLE.into(),
-        confirms: confirms.clone(),
-    };
-    let engine = SkillEngine::new(Box::new(llm), Box::new(LoopingExecutor), 8);
-    let result = engine.run("system", conversation, "mock").await.unwrap();
-    let n = *confirms.lock().unwrap();
-    (result.response, result.iterations, n)
-}
-
-/// (c) 到達点生存の新旧対比。新側は高水位を超えて圧縮が起き、針が 1 回だけ残る。
-#[tokio::test]
-async fn c_checkpoint_survival_old_loops_new_oneshot() {
+/// (c) 46 往復級の長タスクを checkpoint 無しで圧縮しても、発端と直近 5 speech が残る。
+#[test]
+fn c_verbatim_window_keeps_origin_and_recent_speech_without_checkpoint() {
     let conn = opencrab_db::init_memory().unwrap();
-    seed_over_high(&conn);
+    let recent = seed_long_task_with_recent_speech(&conn);
     let logs = opencrab_db::queries::list_session_logs_by_session(&conn, SESSION).unwrap();
     let retained = crate::conversation::retain_conversation_logs(logs);
 
-    let old_text = fit_logs_to_budget(&retained, AGENT, 1_200);
-    assert!(
-        !old_text.contains(CHECKPOINT_NEEDLE),
-        "旧実装は中間到達点を落とす前提: {old_text}"
-    );
-    let (old_resp, old_iters, old_confirms) = run_seek(&old_text).await;
-    assert!(
-        old_iters > 1 && old_confirms > 0,
-        "旧実装は確認をやり直してループする: resp={old_resp} iters={old_iters} confirms={old_confirms}"
-    );
-
-    let (items, lane) = items_from_logs(&conn, SESSION, AGENT, &retained).unwrap();
-    let before: usize = items.iter().map(|i| i.tokens).sum::<usize>() + lane.tokens();
+    let items = items_from_logs(&conn, SESSION, AGENT, &retained).unwrap();
+    let before: usize = items.iter().map(|i| i.tokens).sum();
     assert!(
         before > HIGH,
-        "新側は高水位を超える fixture: before={before}"
+        "長タスク fixture が高水位を超えること: before={before}"
     );
-    let new_out = compact_to_low_water(&items, &lane, HIGH, LOW);
-    assert!(new_out.fired, "新側は圧縮を跨ぐ: before={before}");
-    assert!(
-        new_out.after_tokens <= LOW || new_out.low_water_unreachable,
-        "圧縮後 after={}",
-        new_out.after_tokens
-    );
-    let hits = new_out.text.matches(CHECKPOINT_NEEDLE).count();
-    assert_eq!(
-        hits, 1,
-        "到達点は byte-exact で一度だけ: hits={hits} text={}",
-        new_out.text
-    );
-    assert!(!new_out.text.contains(CHECKPOINT_EMPTY_MARKER));
-    let (new_resp, new_iters, new_confirms) = run_seek(&new_out.text).await;
-    assert_eq!(new_resp, "確認完了");
-    assert_eq!(new_iters, 1, "新実装は 1 発完了");
-    assert_eq!(new_confirms, 0, "確認のやり直しはしない");
+    let compacted = compact_to_low_water(&items, HIGH, LOW);
+    assert!(compacted.fired, "圧縮が発火すること: before={before}");
+    assert_verbatim_window(&compacted.text, &recent);
+
+    let assembled = assemble_from_snapshot(&conn, SESSION, AGENT).unwrap();
+    let mut gov = TurnGovernor::new(HIGH, LOW);
+    let finished = gov
+        .finish_turn(
+            &conn,
+            SESSION,
+            &assembled.items,
+            assembled.through_log_id,
+            &assembled.text,
+        )
+        .unwrap();
+    assert!(finished.fired, "本番 finish_turn でも圧縮する");
+    assert_verbatim_window(&finished.text, &recent);
+
+    let started = build_conversation_string_with_waters(&conn, SESSION, AGENT, HIGH, LOW, false)
+        .expect("圧縮後の開始組立");
+    assert_verbatim_window(&started, &recent);
 }
 
 /// (d) 連続投稿しても圧縮が毎回発火しない。実際の finish_turn 回数で数える。
@@ -461,7 +401,6 @@ fn d_hysteresis_consecutive_posts_do_not_refire() {
             &conn,
             SESSION,
             &assembled.items,
-            &assembled.checkpoint,
             assembled.through_log_id,
             &assembled.text,
         )
@@ -478,7 +417,6 @@ fn d_hysteresis_consecutive_posts_do_not_refire() {
                 &conn,
                 SESSION,
                 &assembled.items,
-                &assembled.checkpoint,
                 assembled.through_log_id,
                 &assembled.text,
             )
@@ -496,4 +434,55 @@ fn d_hysteresis_consecutive_posts_do_not_refire() {
         vec![CompactPhase::TurnEnd],
         "ヒステリシスが効かず毎回発火した: {fires:?}"
     );
+}
+
+/// 撤去の完全性。SQLite WAL の `wal_checkpoint` など別物は対象外。
+#[test]
+fn context_arrival_point_mechanism_is_gone() {
+    let tool = format!("{}_{}", "update_context", "checkpoint");
+    let marker = format!("{}_{}", "context", "checkpoint");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("workspace root");
+    let mut hits = Vec::new();
+    walk_for_needles(&root, &[&tool, &marker], &mut hits);
+    assert!(
+        hits.is_empty(),
+        "到達点チェックポイント参照が残っている:\n{}",
+        hits.join("\n")
+    );
+}
+
+fn walk_for_needles(dir: &std::path::Path, needles: &[&str], hits: &mut Vec<String>) {
+    const SKIP: &[&str] = &["target", ".git", "node_modules"];
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if SKIP.iter().any(|s| name == *s) {
+            continue;
+        }
+        if path.is_dir() {
+            walk_for_needles(&path, needles, hits);
+            continue;
+        }
+        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+            continue;
+        };
+        if !matches!(ext, "rs" | "md" | "json" | "toml" | "ts" | "tsx" | "js") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for needle in needles {
+            if text.contains(needle) {
+                hits.push(format!("{}: {needle}", path.display()));
+            }
+        }
+    }
 }

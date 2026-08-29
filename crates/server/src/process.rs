@@ -393,8 +393,6 @@ pub fn build_agent_context(
          then `retrieve_memory_nodes` on a hit to read the original logs\n\
          \n\
          These tools let you access your full history even after compaction.\n\
-         When your working position changes, call update_context_checkpoint with \
-         {{confirmed, position, next}} so the arrival point survives compaction.\n\
          \n\
          ## Task Ledger\n\
          \n\
@@ -548,7 +546,6 @@ fn persist_turn_end_snapshot(
         &conn,
         session_id,
         &assembled.items,
-        &assembled.checkpoint,
         assembled.through_log_id,
         &assembled.text,
     )?;
@@ -2923,10 +2920,6 @@ mod no_forced_reply_tests {
             build_agent_context(&conn, "a1", &opencrab_actions::CallerIdentity::Owner);
 
         assert!(prompt.contains("## Silent Reply"), "prompt:\n{prompt}");
-        assert!(
-            prompt.contains("update_context_checkpoint"),
-            "checkpoint 更新義務の 1 行が無い:\n{prompt}"
-        );
 
         // ループ防止は内容ベースで残る。
         assert!(

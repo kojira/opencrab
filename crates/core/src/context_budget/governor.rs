@@ -9,10 +9,6 @@ use std::collections::{HashMap, HashSet};
 
 use rusqlite::Connection;
 
-use super::checkpoint::{
-    parse_checkpoint_event, select_checkpoint_lane, CheckpointLane, ContextCheckpoint,
-    CHECKPOINT_EVENT_TYPE,
-};
 use super::compact::{
     compact_to_low_water, should_compact, CompactItem, CompactLane, CompactOutcome, CompactPhase,
 };
@@ -39,7 +35,6 @@ pub enum GovernorEvent {
         through_log_id: i64,
         token_count: usize,
     },
-    CheckpointEmpty,
     LowWaterUnreachable,
 }
 
@@ -91,13 +86,12 @@ impl TurnGovernor {
         &mut self,
         tokens: usize,
         items: &[CompactItem],
-        checkpoint: &CheckpointLane,
     ) -> Option<CompactOutcome> {
         self.inspect_turn_start(tokens);
         if !should_compact(tokens, self.conversation_high) {
             return None;
         }
-        Some(self.fire(CompactPhase::MidTurn, items, checkpoint))
+        Some(self.fire(CompactPhase::MidTurn, items))
     }
 
     /// append 後の総量が高水位を超えたとき、合成 user 文字列だけを低水位まで刈る。
@@ -107,7 +101,6 @@ impl TurnGovernor {
         &mut self,
         ledger_total: usize,
         user_items: &[CompactItem],
-        checkpoint: &CheckpointLane,
         other_tokens: usize,
     ) -> Option<CompactOutcome> {
         self.push(GovernorEvent::Inspect {
@@ -119,7 +112,7 @@ impl TurnGovernor {
         }
         let high = self.conversation_high.saturating_sub(other_tokens);
         let low = self.conversation_low.saturating_sub(other_tokens);
-        let outcome = compact_to_low_water(user_items, checkpoint, high, low);
+        let outcome = compact_to_low_water(user_items, high, low);
         self.push(GovernorEvent::CompactFired {
             phase: CompactPhase::MidTurn,
             before: ledger_total,
@@ -137,13 +130,12 @@ impl TurnGovernor {
         conn: &Connection,
         session_id: &str,
         items: &[CompactItem],
-        checkpoint: &CheckpointLane,
         through_log_id: i64,
         assembled_text: &str,
     ) -> Result<CompactOutcome, anyhow::Error> {
         let before = crate::tokens::estimate_tokens(assembled_text);
         let outcome = if should_compact(before, self.conversation_high) {
-            let mut fired = self.fire(CompactPhase::TurnEnd, items, checkpoint);
+            let mut fired = self.fire(CompactPhase::TurnEnd, items);
             fired.before_tokens = before;
             fired
         } else {
@@ -153,20 +145,10 @@ impl TurnGovernor {
                 after_tokens: before,
                 text: assembled_text.to_string(),
                 through_log_id: Some(through_log_id),
-                checkpoint_empty: checkpoint.is_empty(),
                 low_water_unreachable: false,
                 exhausted: false,
             }
         };
-        if outcome.checkpoint_empty {
-            self.push(GovernorEvent::CheckpointEmpty);
-            tracing::info!(
-                target: "context_budget_check",
-                session_id,
-                reason = "checkpoint_empty",
-                "context_checkpoint empty after compact"
-            );
-        }
         if outcome.low_water_unreachable {
             self.push(GovernorEvent::LowWaterUnreachable);
         }
@@ -184,18 +166,8 @@ impl TurnGovernor {
         Ok(outcome)
     }
 
-    fn fire(
-        &mut self,
-        phase: CompactPhase,
-        items: &[CompactItem],
-        checkpoint: &CheckpointLane,
-    ) -> CompactOutcome {
-        let outcome = compact_to_low_water(
-            items,
-            checkpoint,
-            self.conversation_high,
-            self.conversation_low,
-        );
+    fn fire(&mut self, phase: CompactPhase, items: &[CompactItem]) -> CompactOutcome {
+        let outcome = compact_to_low_water(items, self.conversation_high, self.conversation_low);
         self.push(GovernorEvent::CompactFired {
             phase,
             before: outcome.before_tokens,
@@ -207,7 +179,7 @@ impl TurnGovernor {
 
 /// スナップショット＋水位印より後の差分を組み立てる。開始時 compact はしない。
 ///
-/// `items` / `checkpoint` は正本の全ログから作る。水位印より前の到達点も見える。
+/// `items` は正本の全ログから作る。
 pub fn assemble_from_snapshot(
     conn: &Connection,
     session_id: &str,
@@ -244,13 +216,12 @@ pub fn assemble_from_snapshot(
         .find_map(|l| l.id)
         .or_else(|| snap.as_ref().map(|s| s.through_log_id))
         .unwrap_or(0);
-    let (items, checkpoint) = items_from_logs(conn, session_id, agent_id, &all)?;
+    let items = items_from_logs(conn, session_id, agent_id, &all)?;
     Ok(AssembledConversation {
         text,
         tokens: ledger.total(),
         through_log_id: through,
         items,
-        checkpoint,
         ledger,
     })
 }
@@ -262,11 +233,10 @@ pub struct AssembledConversation {
     pub tokens: usize,
     pub through_log_id: i64,
     pub items: Vec<CompactItem>,
-    pub checkpoint: CheckpointLane,
     pub ledger: TokenLedger,
 }
 
-/// 正本ログから車線付き単位とチェックポイントを作る。各行は 1 回だけ測る。
+/// 正本ログから車線付き単位を作る。各行は 1 回だけ測る。
 ///
 /// tool_call と対応 result は同じ [`super::compact::ExchangeGroup`] になる。
 pub fn items_from_logs(
@@ -274,28 +244,13 @@ pub fn items_from_logs(
     session_id: &str,
     agent_id: &str,
     logs: &[opencrab_db::queries::SessionLogRow],
-) -> Result<(Vec<CompactItem>, CheckpointLane), anyhow::Error> {
+) -> Result<Vec<CompactItem>, anyhow::Error> {
     let all = if logs.is_empty() {
         let raw = opencrab_db::queries::list_session_logs_by_session(conn, session_id)?;
         crate::conversation::retain_conversation_logs(raw)
     } else {
         logs.to_vec()
     };
-    let explicit = all.iter().rev().find_map(|log| {
-        if log.log_type == "system" {
-            parse_checkpoint_event(&log.content)
-        } else {
-            None
-        }
-    });
-    let assistant = all.iter().rev().find_map(|log| {
-        if log.log_type == "speech" && log.speaker_id.as_deref() == Some(agent_id) {
-            Some(log.content.as_str())
-        } else {
-            None
-        }
-    });
-    let checkpoint = select_checkpoint_lane(explicit.as_ref(), assistant);
 
     let newest_user: HashSet<usize> = all
         .iter()
@@ -321,9 +276,6 @@ pub fn items_from_logs(
             .any(|&i| newest_user.contains(&i) || i >= recent_tail);
         for i in idxs {
             let log = &all[i];
-            if log.log_type == "system" && parse_checkpoint_event(&log.content).is_some() {
-                continue;
-            }
             let text = format_single_log_with_echo(log, Some(&completed_ids));
             let key = format!("log:{}", log.id.unwrap_or(i as i64));
             let tokens = ledger.record(&key, &text);
@@ -346,8 +298,7 @@ pub fn items_from_logs(
             });
         }
     }
-    let _ = CHECKPOINT_EVENT_TYPE;
-    Ok((items, checkpoint))
+    Ok(items)
 }
 
 fn completed_tool_call_ids(logs: &[opencrab_db::queries::SessionLogRow]) -> HashSet<String> {
@@ -415,9 +366,6 @@ fn partition_exchange_groups(
     let mut next_id = 1u64;
 
     for (i, log) in logs.iter().enumerate() {
-        if log.log_type == "system" && parse_checkpoint_event(&log.content).is_some() {
-            continue;
-        }
         let is_user =
             log.log_type == "speech" && log.speaker_id.as_deref().is_some_and(|s| s != agent_id);
         let is_assistant = log.log_type == "speech" && log.speaker_id.as_deref() == Some(agent_id);
@@ -491,31 +439,4 @@ fn persist_snapshot(
         created_at: None,
     };
     opencrab_db::queries::insert_conversation_snapshot(conn, &row)
-}
-
-/// 過大な明示更新は旧値を残して失敗させる。
-pub fn apply_explicit_checkpoint(
-    previous: Option<&ContextCheckpoint>,
-    incoming: ContextCheckpoint,
-) -> Result<ContextCheckpoint, CheckpointApplyError> {
-    if incoming.exceeds_cap() {
-        return Err(CheckpointApplyError::Oversize {
-            kept: previous.cloned(),
-        });
-    }
-    Ok(incoming)
-}
-
-/// 明示チェックポイント適用の失敗。過大時は `kept` が旧値。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CheckpointApplyError {
-    Oversize { kept: Option<ContextCheckpoint> },
-}
-
-impl CheckpointApplyError {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Oversize { .. } => "checkpoint_oversize",
-        }
-    }
 }

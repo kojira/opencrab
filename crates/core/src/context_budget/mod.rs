@@ -4,7 +4,6 @@
 //! 既定へ落とさず fail-loud する。水位は `min(floor(W * 比), A)`。chatgpt 305K 特例と
 //! 100K 隠れフォールバックは置かない。
 
-mod checkpoint;
 mod compact;
 #[cfg(test)]
 mod core_process_e2e;
@@ -15,10 +14,6 @@ mod ledger;
 mod observe;
 mod request;
 
-pub use checkpoint::{
-    checkpoint_event_body, parse_checkpoint_event, select_checkpoint_lane, CheckpointLane,
-    ContextCheckpoint, CHECKPOINT_EMPTY_MARKER, CHECKPOINT_EVENT_TYPE, CHECKPOINT_TOKEN_CAP,
-};
 pub use compact::{
     argument_reference, compact_to_low_water, group_items, should_compact, CompactItem,
     CompactLane, CompactOutcome, CompactPhase, ExchangeGroup,
@@ -32,8 +27,8 @@ pub use envelope::{
 };
 pub use error::{ContextBudgetError, CONTEXT_BUDGET_EXHAUSTED};
 pub use governor::{
-    apply_explicit_checkpoint, assemble_from_snapshot, items_from_logs, take_governor_events,
-    AssembledConversation, CheckpointApplyError, GovernorEvent, TurnGovernor,
+    assemble_from_snapshot, items_from_logs, take_governor_events, AssembledConversation,
+    GovernorEvent, TurnGovernor,
 };
 pub use ledger::{LedgerItem, TokenLedger};
 pub use observe::{
