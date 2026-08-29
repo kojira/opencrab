@@ -902,7 +902,6 @@ fn split_user_blocks(text: &str) -> Vec<String> {
             && !line.starts_with("[tool_call]")
             && !line.starts_with("[tool_result]")
             && !line.starts_with("[id=")
-            && !line.starts_with("[context_checkpoint")
             && !line.starts_with("[old_history_summary]")
             && !line.starts_with("[echo]");
         if new_block && !cur.is_empty() {
@@ -916,60 +915,7 @@ fn split_user_blocks(text: &str) -> Vec<String> {
     if !cur.is_empty() {
         out.push(cur);
     }
-    out.into_iter()
-        .filter(|b| {
-            let t = b.trim();
-            !t.is_empty()
-                && t != crate::context_budget::CHECKPOINT_EMPTY_MARKER
-                && !t.starts_with("[context_checkpoint]")
-        })
-        .collect()
-}
-
-fn extract_explicit_checkpoint(text: &str) -> Option<crate::context_budget::ContextCheckpoint> {
-    let idx = text.find("[context_checkpoint]")?;
-    let after = text[idx + "[context_checkpoint]".len()..].trim_start();
-    let start = after.find('{')?;
-    let slice = &after[start..];
-    let mut depth = 0i32;
-    let mut end = None;
-    for (i, c) in slice.char_indices() {
-        match c {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    end = Some(i + 1);
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    serde_json::from_str(&slice[..end?]).ok()
-}
-
-fn last_assistant_speech(messages: &[Message]) -> Option<String> {
-    messages.iter().rev().find_map(|m| {
-        if m.role != Role::Assistant {
-            return None;
-        }
-        let t = message_plain_text(m);
-        if t.is_empty() {
-            None
-        } else {
-            Some(t)
-        }
-    })
-}
-
-fn checkpoint_from_messages(messages: &[Message]) -> crate::context_budget::CheckpointLane {
-    let user = messages.get(1).map(message_plain_text).unwrap_or_default();
-    let explicit = extract_explicit_checkpoint(&user);
-    crate::context_budget::select_checkpoint_lane(
-        explicit.as_ref(),
-        last_assistant_speech(messages).as_deref(),
-    )
+    out.into_iter().filter(|b| !b.trim().is_empty()).collect()
 }
 
 fn is_toolish_user_block(block: &str) -> bool {
@@ -1065,13 +1011,9 @@ fn apply_turn_budget(
         .saturating_sub(user_tokens)
         .saturating_add(reserved);
     let items = user_line_items(messages);
-    let checkpoint = checkpoint_from_messages(messages);
-    let Some(outcome) = gov.compact_user_on_append(
-        ledger.total().saturating_add(reserved),
-        &items,
-        &checkpoint,
-        other,
-    ) else {
+    let Some(outcome) =
+        gov.compact_user_on_append(ledger.total().saturating_add(reserved), &items, other)
+    else {
         return Ok(());
     };
     if outcome.exhausted {

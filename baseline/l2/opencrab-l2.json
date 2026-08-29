@@ -31,7 +31,7 @@
       "4xx": 49,
       "5xx": 4
     },
-    "tool_effects_observed": 51,
+    "tool_effects_observed": 50,
     "tool_success_uncollected_count": 21
   },
   "http": {
@@ -11804,7 +11804,6 @@
         "summarize_and_save",
         "generate_inner_voice",
         "update_impression",
-        "update_context_checkpoint",
         "learn_from_experience",
         "learn_from_peer",
         "reflect_and_learn",
@@ -12070,12 +12069,6 @@
         "untag_topic": {
           "arguments": null,
           "db_query": "memory_index_state"
-        },
-        "update_context_checkpoint": {
-          "arguments": null,
-          "expect_status": 200,
-          "method": "GET",
-          "uri": "/api/sessions/nostr-baseline-agent/logs"
         },
         "update_heartbeat_instructions": {
           "arguments": {
@@ -12440,13 +12433,6 @@
         "untag_topic": {
           "tag": "Baseline Tag",
           "topic_id": "t1"
-        },
-        "update_context_checkpoint": {
-          "confirmed": [
-            "baseline-step"
-          ],
-          "next": "baseline next",
-          "position": "baseline position"
         },
         "update_heartbeat_instructions": {
           "instructions": "baseline heartbeat updated",
@@ -13403,20 +13389,6 @@
           "success": false
         },
         "tool": "untag_topic"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "confirmed",
-          "position",
-          "next"
-        ],
-        "result": {
-          "data": null,
-          "error": "confirmed is required",
-          "success": false
-        },
-        "tool": "update_context_checkpoint"
       },
       {
         "arguments": {},
@@ -18239,92 +18211,6 @@
       },
       {
         "arguments": {
-          "confirmed": [
-            "baseline-step"
-          ],
-          "next": "baseline next",
-          "position": "baseline position"
-        },
-        "postcondition": {
-          "arguments": null,
-          "before": {
-            "body": [],
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "db_query": null,
-          "expect_success": false,
-          "method": "GET",
-          "observed": {
-            "body": [
-              {
-                "agent_id": "baseline-agent",
-                "content": "{\"confirmed\":[\"baseline-step\"],\"next\":\"baseline next\",\"position\":\"baseline position\",\"type\":\"context_checkpoint\"}",
-                "created_at": "<timestamp>",
-                "id": 3,
-                "log_type": "system",
-                "metadata_json": null,
-                "session_id": "nostr-baseline-agent",
-                "speaker_id": "baseline-agent",
-                "turn_number": null
-              }
-            ],
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "tool": null,
-          "uri": "/api/sessions/nostr-baseline-agent/logs"
-        },
-        "result": {
-          "data": {
-            "confirmed": [
-              "baseline-step"
-            ],
-            "next": "baseline next",
-            "position": "baseline position",
-            "updated": true
-          },
-          "error": null,
-          "success": true
-        },
-        "tool": "update_context_checkpoint"
-      },
-      {
-        "arguments": {
           "instructions": "baseline heartbeat updated",
           "reason": "compatibility capture",
           "scope": "agent"
@@ -19599,7 +19485,6 @@
           "survey_my_history",
           "tag_topic",
           "untag_topic",
-          "update_context_checkpoint",
           "update_heartbeat_instructions",
           "update_impression",
           "update_instructions",
@@ -19709,7 +19594,6 @@
           "survey_my_history",
           "tag_topic",
           "untag_topic",
-          "update_context_checkpoint",
           "update_heartbeat_instructions",
           "update_impression",
           "update_instructions",
@@ -19811,7 +19695,6 @@
           "survey_my_history",
           "tag_topic",
           "untag_topic",
-          "update_context_checkpoint",
           "update_heartbeat_instructions",
           "update_impression",
           "update_instructions",
@@ -19909,7 +19792,6 @@
           "survey_my_history",
           "tag_topic",
           "untag_topic",
-          "update_context_checkpoint",
           "update_heartbeat_instructions",
           "update_impression",
           "update_instructions",
@@ -19998,7 +19880,6 @@
           "survey_my_history",
           "tag_topic",
           "untag_topic",
-          "update_context_checkpoint",
           "update_impression",
           "update_memory_core",
           "update_memory_index_config",
@@ -20045,7 +19926,6 @@
           "spawn_subtask",
           "steer_subtask",
           "summarize_and_save",
-          "update_context_checkpoint",
           "update_impression",
           "update_task_contract"
         ]
@@ -20098,7 +19978,6 @@
           "survey_my_history",
           "tag_topic",
           "untag_topic",
-          "update_context_checkpoint",
           "update_impression",
           "update_instructions",
           "update_memory_core",
@@ -20159,7 +20038,6 @@
           "survey_my_history",
           "tag_topic",
           "untag_topic",
-          "update_context_checkpoint",
           "update_impression",
           "update_instructions",
           "update_memory_core",
@@ -20253,7 +20131,6 @@
           "survey_my_history",
           "tag_topic",
           "untag_topic",
-          "update_context_checkpoint",
           "update_heartbeat_instructions",
           "update_impression",
           "update_instructions",
@@ -20328,7 +20205,6 @@
           "spawn_subtask",
           "steer_subtask",
           "summarize_and_save",
-          "update_context_checkpoint",
           "update_impression",
           "update_task_contract"
         ]

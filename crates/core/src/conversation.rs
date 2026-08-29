@@ -231,9 +231,7 @@ fn build_conversation_inner(
         return Ok(assembled.text);
     }
     let mut gov = TurnGovernor::new(conversation_high, conversation_low);
-    let Some(outcome) =
-        gov.compact_start_if_over(assembled.tokens, &assembled.items, &assembled.checkpoint)
-    else {
+    let Some(outcome) = gov.compact_start_if_over(assembled.tokens, &assembled.items) else {
         return Ok(assembled.text);
     };
     if outcome.exhausted {
@@ -1753,7 +1751,7 @@ mod past_summary_budget_tests {
         const BUDGET: usize = 4_000;
         let out = build_conversation_string(&conn, SESSION, AGENT, BUDGET).unwrap();
         assert!(
-            out.contains("[old_history_summary]") || out.contains("[context_checkpoint]"),
+            out.contains("[old_history_summary]"),
             "二水位圧縮の印が無い: {out}"
         );
         assert!(out.contains("log line 399"), "直近ログが落ちている: {out}");
@@ -1903,7 +1901,7 @@ mod budget_driven_recent_window_tests {
         let out = build_conversation_string(&conn, SESSION, AGENT, BUDGET).unwrap();
 
         assert!(
-            out.contains("[old_history_summary]") || out.contains("[context_checkpoint]"),
+            out.contains("[old_history_summary]"),
             "二水位圧縮の印が無い: {out}"
         );
         assert!(
