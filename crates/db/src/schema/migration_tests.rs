@@ -858,23 +858,6 @@ fn model_pricing_max_output_tokens_backfill_migration_v42() {
     );
 }
 
-/// v43（#826-B）: 会話圧縮の派生スナップショット表。正本は触らず、既存 DB へ表だけ足す。
-#[test]
-fn conversation_snapshots_migration_v43() {
-    let conn = crate::init_memory().expect("init");
-    conn.execute_batch("DROP TABLE IF EXISTS conversation_snapshots; PRAGMA user_version = 42;")
-        .unwrap();
-    assert!(!table_exists(&conn, "conversation_snapshots").unwrap());
-
-    run_migrations(&conn, MIGRATIONS).expect("v43 migration");
-    assert_eq!(schema_version(&conn).unwrap(), latest_version());
-    assert!(table_exists(&conn, "conversation_snapshots").unwrap());
-
-    conn.execute_batch("PRAGMA user_version = 42;").unwrap();
-    run_migrations(&conn, MIGRATIONS).expect("v43 rerun no-op");
-    assert!(table_exists(&conn, "conversation_snapshots").unwrap());
-}
-
 /// v19: Nostr 受信転記先の表が増えるだけで、既存の Nostr 設定
 /// （`agent_nostr_config`）の行は 1 つも動かない（#252 段階 A）。冪等でもある。
 #[test]
@@ -3435,11 +3418,11 @@ fn v37_backfill_preserves_firing_and_normalizes() {
 
     initialize(&conn).expect("apply v37");
     assert_eq!(schema_version(&conn).unwrap(), latest_version());
-    // v43（#826-B の conversation_snapshots）が最新。v38..v43 とも
+    // v42（#676 の model_pricing.max_output_tokens 追加）が最新。v38..v42 とも
     // session_heartbeat_config を触らないので、下の v37 backfill 検証（発火集合・正規化）は
     // そのまま成立する。新しい migration が session_heartbeat_config を触ったらこの guard を
     // 更新し、下の期待値を見直すこと。
-    assert_eq!(latest_version(), 43, "v43 が最新版であること");
+    assert_eq!(latest_version(), 42, "v42 が最新版であること");
 
     // 期待: 9 行 = step1(nostr-A) 1 + step2(A/201=0, C/202=1, D/222=1) 3 +
     //             step3(A,B,C,D,E の ch205 展開・全 enabled=0) 5。

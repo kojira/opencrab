@@ -1805,27 +1805,6 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
-    Migration {
-        version: 43,
-        description:
-            "会話圧縮の派生スナップショット表を追加する（#826-B）。正本は変えず行追加のみ",
-        // 派生表。正本 memory_sessions は触らない。既存 DB へ CREATE IF NOT EXISTS。
-        // 切り戻し: BEGIN; PRAGMA user_version = 42; COMMIT;（表は残してよい。古いバイナリは読まない）
-        up: |conn| {
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS conversation_snapshots (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id TEXT NOT NULL,
-                    compacted_conversation TEXT NOT NULL,
-                    through_log_id INTEGER NOT NULL,
-                    token_count INTEGER NOT NULL,
-                    created_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_conversation_snapshots_session
-                    ON conversation_snapshots(session_id, id);",
-            )
-        },
-    },
 ];
 
 /// このバイナリが知る最新スキーマバージョン。

@@ -641,18 +641,6 @@ mod tests {
             },
         )
         .unwrap();
-        opencrab_db::queries::upsert_model_pricing(
-            &conn,
-            &opencrab_db::queries::ModelPricingRow {
-                provider: "mock".to_string(),
-                model: "test".to_string(),
-                input_price_per_1m: 0.0,
-                output_price_per_1m: 0.0,
-                context_window: Some(200_000),
-                max_output_tokens: Some(4_096),
-            },
-        )
-        .expect("test model_pricing for envelope");
     }
 
     /// `mock:test` を解決できる `AppState`（Discord を一切通さない = web / REST 相当）。

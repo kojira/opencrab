@@ -37,8 +37,7 @@ fn validate_reloaded_config(
         return Ok(());
     }
     let conn = db.lock().map_err(|e| format!("db lock failed: {e}"))?;
-    crate::process::ensure_model_context_window_registered(&conn, &spec)?;
-    crate::process::ensure_model_max_output_tokens_registered(&conn, &spec)
+    crate::process::ensure_model_context_window_registered(&conn, &spec)
 }
 
 /// Start a background file watcher on the config directory.
@@ -177,7 +176,7 @@ mod reload_validation_tests {
                     input_price_per_1m: 0.0,
                     output_price_per_1m: 0.0,
                     context_window: window,
-                    max_output_tokens: Some(4_096),
+                    max_output_tokens: None,
                 },
             )
             .unwrap();

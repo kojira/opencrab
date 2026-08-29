@@ -307,52 +307,14 @@ fn build_scheduled_context(
     let conn = state.db.lock().ok()?;
     let (base_prompt, agent_name) =
         opencrab_server::process::build_agent_context(&conn, agent_id, &CallerIdentity::Owner);
-    let runtime_text = opencrab_server::process::prepend_runtime_context("", runtime_context);
-    let functions_tokens = match opencrab_server::process::core_functions_tokens() {
-        Ok(n) => n,
-        Err(e) => {
-            tracing::error!(
-                agent_id,
-                session_id,
-                error_name = e.name(),
-                "scheduler: {name}: {e}",
-                name = e.name()
-            );
-            return None;
-        }
-    };
-    let env = match opencrab_server::process::resolve_agent_request_envelope(
-        opencrab_server::process::RequestEnvelopeArgs {
-            conn: &conn,
-            agent_id,
-            session_id,
-            default_model: &state.default_model,
-            policy: &state.context_budget_policy(),
-            system_prompt: &base_prompt,
-            runtime_context_text: &runtime_text,
-            functions_tokens,
-            entrypoint: "scheduler",
-        },
-    ) {
-        Ok(env) => env,
-        Err(e) => {
-            tracing::error!(
-                agent_id,
-                session_id,
-                error_name = e.name(),
-                "scheduler: {name}: {e}",
-                name = e.name()
-            );
-            return None;
-        }
-    };
-    let raw = match opencrab_server::process::build_conversation_string_with_waters(
-        &conn,
-        session_id,
-        agent_id,
-        env.conversation_high,
-        env.conversation_low,
-        opencrab_server::process::include_memory_index(&env),
+    let eff =
+        opencrab_db::queries::effective_model_for_agent(&conn, agent_id, &state.default_model)
+            .unwrap_or_else(|_| state.default_model.clone());
+    let (prov, mdl) = opencrab_server::process::split_llm_model_spec(&eff);
+    let budget =
+        opencrab_server::process::compute_context_budget(&conn, prov, mdl, state.compaction_ratio);
+    let raw = match opencrab_server::process::build_conversation_string(
+        &conn, session_id, agent_id, budget,
     ) {
         Ok(s) => s,
         Err(e) => {

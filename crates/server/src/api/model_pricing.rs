@@ -1,10 +1,9 @@
 //! モデル単価とコンテキスト長の登録 API（#412）。
 //!
-//! `model_pricing` は文脈予算の `W`（`context_window`）と出力予約
-//! （`max_output_tokens`）の唯一の出所だが、`upsert_model_pricing` の呼び出し元が
-//! テストしか無く、**行を入れる手段が存在しなかった**。入れる手段が無いので誰も入れず、
-//! 空でも既定値で黙って動くので誰も困らない ——「気づけない壊れ方」がここで固定されていた。
-//! 826-A では無 / NULL / 0 を既定へ落とさず fail-loud する。
+//! `model_pricing` は文脈予算（`context_window × compaction_ratio`）の唯一の出所
+//! だが、`upsert_model_pricing` の呼び出し元がテストしか無く、**行を入れる手段が
+//! 存在しなかった**。入れる手段が無いので誰も入れず、空でも既定値で黙って動くので
+//! 誰も困らない ——「気づけない壊れ方」がここで固定されていた。
 //!
 //! ここが投入経路。モデルを設定する側（`PUT`/`PATCH /api/agents/{id}`、
 //! `configure_self` ツール、config の `[llm] default_model`）は、この API で登録済みの
@@ -43,8 +42,10 @@ pub async fn list_model_pricing(
         .map_err(|e| bad(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let rows = opencrab_db::queries::list_model_pricing(&conn)
         .map_err(|e| bad(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    // 水位は min(floor(W × compaction_ratio), A)。W は行ごとの生値、比と A は
-    // server-global なので、掛け算に必要な片方として比を同じレスポンスに載せる（#484 / #826-A）。
+    // 文脈予算 = context_window × compaction_ratio。context_window は行ごとの生値
+    // だが compaction_ratio は server-global の単一値なので、掛け算に必要なもう片方
+    // として同じレスポンスに載せる。これが無いとフロントは実効予算を出せず、
+    // 「context_window が小さすぎる」異常に気づけない（#484）。
     Ok(Json(json!({
         "models": rows,
         "compaction_ratio": state.compaction_ratio,

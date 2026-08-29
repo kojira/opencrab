@@ -28,26 +28,9 @@ fn create_test_app_with_db() -> (Router, opencrab_db::Db) {
 /// 既定ヘルパと同じ `AppState` を組むが、`compaction_ratio` だけ引数で差し替える。
 /// compaction_ratio を state から読んでいる経路（例: model_pricing 一覧 API）を
 /// 恒真にならない値で検証するために使う。
-fn register_mock_pricing(db: &opencrab_db::Db, provider: &str, model: &str) {
-    let conn = db.lock().unwrap();
-    opencrab_db::queries::upsert_model_pricing(
-        &conn,
-        &opencrab_db::queries::ModelPricingRow {
-            provider: provider.to_string(),
-            model: model.to_string(),
-            input_price_per_1m: 0.0,
-            output_price_per_1m: 0.0,
-            context_window: Some(200_000),
-            max_output_tokens: Some(4_096),
-        },
-    )
-    .expect("test model_pricing");
-}
-
 fn create_test_state(compaction_ratio: f64) -> (AppState, opencrab_db::Db) {
     let conn = opencrab_db::init_memory().unwrap();
     let db = opencrab_db::Db::from_connection(conn);
-    register_mock_pricing(&db, "mock", "test");
     let state = AppState {
         db: db.clone(),
         llm_router: opencrab_server::SharedLlmRouter::new(LlmRouter::new()),
@@ -194,11 +177,8 @@ async fn test_model_pricing_list_exposes_compaction_ratio() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["compaction_ratio"].as_f64(), Some(0.375));
     let models = body["models"].as_array().unwrap();
-    let luna = models
-        .iter()
-        .find(|m| m["model"] == "gpt-5.6-luna")
-        .expect("inserted chatgpt row");
-    assert_eq!(luna["context_window"].as_i64(), Some(400_000));
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0]["context_window"].as_i64(), Some(400_000));
 }
 
 #[tokio::test]
@@ -1097,7 +1077,6 @@ fn create_test_app_with_state() -> (Router, opencrab_db::Db, Arc<MockLlmProvider
     router.add_provider(mock.clone() as Arc<dyn LlmProvider>);
     router.set_default_provider("mock");
 
-    register_mock_pricing(&db, "mock", "gpt-4o");
     let state = AppState {
         db: db.clone(),
         llm_router: opencrab_server::SharedLlmRouter::new(router),
@@ -2020,7 +1999,6 @@ fn state_with_consolidation(
     let mut router = LlmRouter::new();
     router.add_provider(mock as Arc<dyn LlmProvider>);
     router.set_default_provider("mock");
-    register_mock_pricing(&db, "mock", "gpt-4o");
     AppState {
         db,
         llm_router: opencrab_server::SharedLlmRouter::new(router),
@@ -3832,11 +3810,9 @@ async fn test_model_pricing_put_then_list() {
     let (status, resp) = send_request(app, "GET", "/api/llm/model-pricing", None).await;
     assert_eq!(status, StatusCode::OK);
     let models = resp["models"].as_array().unwrap();
-    let row = models
-        .iter()
-        .find(|m| m["provider"] == "testprov" && m["model"] == "testmodel")
-        .expect("PUT した行");
-    assert_eq!(row["context_window"], 200000);
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0]["provider"], "testprov");
+    assert_eq!(models[0]["context_window"], 200000);
 }
 
 /// `context_window` こそが登録の目的なので、0 以下は受け付けない。
@@ -3855,12 +3831,9 @@ async fn test_model_pricing_rejects_non_positive_context_window() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
-    // 弾いた以上、その行は作られていない。
+    // 弾いた以上、行は作られていない。
     let (_, resp) = send_request(app, "GET", "/api/llm/model-pricing", None).await;
-    let models = resp["models"].as_array().unwrap();
-    assert!(models
-        .iter()
-        .all(|m| !(m["provider"] == "testprov" && m["model"] == "testmodel")));
+    assert!(resp["models"].as_array().unwrap().is_empty());
 }
 
 async fn register_model(app: Router, provider: &str, model: &str, window: i64) {
