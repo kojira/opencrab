@@ -4231,7 +4231,7 @@ fn v43_from_user_version_42_leaves_existing_rows_untouched() {
         .unwrap();
     assert_eq!(done, 1);
 
-    assert_eq!(schema_version(&conn).unwrap(), 45);
+    assert_eq!(schema_version(&conn).unwrap(), latest_version());
     assert_eq!(
         existing_table_digests(&conn, true),
         after,
@@ -4417,7 +4417,7 @@ fn assert_v44_schema(conn: &Connection) {
 #[test]
 fn v44_fresh_and_user_version_43_reach_four_gate_tables() {
     let fresh = crate::init_memory().expect("fresh");
-    assert_eq!(schema_version(&fresh).unwrap(), 45);
+    assert_eq!(schema_version(&fresh).unwrap(), latest_version());
     assert_v44_schema(&fresh);
 
     let from_43 = crate::init_memory().expect("from43");
@@ -4427,7 +4427,7 @@ fn v44_fresh_and_user_version_43_reach_four_gate_tables() {
     assert!(gate_user_tables(&from_43).is_empty());
 
     initialize(&from_43).expect("v44 from 43");
-    assert_eq!(schema_version(&from_43).unwrap(), 45);
+    assert_eq!(schema_version(&from_43).unwrap(), latest_version());
     assert_v44_schema(&from_43);
 }
 
@@ -4641,7 +4641,7 @@ fn assert_v45_schema(conn: &Connection) {
 #[test]
 fn v45_fresh_and_user_version_44_reach_bundle_state() {
     let fresh = crate::init_memory().expect("fresh");
-    assert_eq!(schema_version(&fresh).unwrap(), 45);
+    assert_eq!(schema_version(&fresh).unwrap(), latest_version());
     assert_v45_schema(&fresh);
 
     let from_44 = crate::init_memory().expect("from44");
@@ -4650,7 +4650,7 @@ fn v45_fresh_and_user_version_44_reach_bundle_state() {
     assert!(!table_exists(&from_44, "nostr_bundle_state").unwrap());
 
     initialize(&from_44).expect("v45 from 44");
-    assert_eq!(schema_version(&from_44).unwrap(), 45);
+    assert_eq!(schema_version(&from_44).unwrap(), latest_version());
     assert_v45_schema(&from_44);
 }
 
@@ -4660,7 +4660,7 @@ fn v45_rerun_is_noop() {
     setup_pre_v45(&conn);
     initialize(&conn).expect("v45");
     initialize(&conn).expect("v45 rerun");
-    assert_eq!(schema_version(&conn).unwrap(), 45);
+    assert_eq!(schema_version(&conn).unwrap(), latest_version());
     assert_v45_schema(&conn);
 }
 
