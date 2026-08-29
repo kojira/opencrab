@@ -1852,7 +1852,71 @@ const MIGRATIONS: &[Migration] = &[
         //   BEGIN; PRAGMA user_version = 44; COMMIT;
         up: migrate_v45_nostr_bundle_state,
     },
+    Migration {
+        version: 46,
+        description:
+            "会話圧縮の派生スナップショット表を追加する（#826-B）。正本は変えず行追加のみ",
+        // 派生表。正本 memory_sessions は触らない。既存 DB へ CREATE IF NOT EXISTS。
+        // #826 では v43 だったが、transplant の v43-45（載せ替え工程）と番号衝突するため
+        // 統合時に v46 へ採番し直した。既存 transplant DB（user_version=45）は次回起動で
+        // これだけを適用する。切り戻し: BEGIN; PRAGMA user_version = 45; COMMIT;（表は残してよい）
+        up: |conn| {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS conversation_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    compacted_conversation TEXT NOT NULL,
+                    through_log_id INTEGER NOT NULL,
+                    token_count INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_conversation_snapshots_session
+                    ON conversation_snapshots(session_id, id);",
+            )
+        },
+    },
+    Migration {
+        version: 47,
+        description:
+            "v43(載せ替え)を版番号衝突で飛ばした DB 向けの自己修復。policy_json/session_watches/tool_logs を冪等に再保証",
+        // ## なぜ要るか（#826 統合の副作用）
+        // 予算 main ビルドは conversation_snapshots を **v43** でスタンプした。その DB を
+        // 統合後バイナリで開くと user_version=43 なので、`run_migrations` の `version > current`
+        // 判定で **v43（載せ替え: policy_json / session_watches / tool_logs）が永久にスキップ**
+        // される（v44/v45 は 43 より大きいので走るが、v43 だけは二度と走らない）。表と列が
+        // 欠けたまま起動が通り、後続クエリで `no such table/column` に落ちる。外部運用者の DB は
+        // こちらから触れないので、コード側で塞ぐ。
+        //
+        // ## 収束（どのスタンプ列でも最終状態が一致する）
+        //   - v42 以下 / 新規 DB: v43 が objects を作る → ここは column_exists / IF NOT EXISTS で no-op。
+        //   - **v43（予算 main 由来）: v43 がスキップされる → ここで policy_json/session_watches/tool_logs を作る。**
+        //   - v45（transplant 由来。例: くらぶ）: v43 適用済み → no-op。
+        //   衝突するのは版 43 だけ（44/45 は transplant 専用番号で衝突せず、必要なら常に走る）ので、
+        //   subject_id / extgate 4 表 / nostr_bundle_state は修復不要。ここは v43 の 3 物件に限定する。
+        //
+        // ## v43 本体を再呼び出ししない理由
+        // `migrate_v43_transplant_schema` 末尾の `assert_v43_invariants` は **v42→v43 の遷移専用**で、
+        // 「差分は {session_watches, tool_logs} のみ・policy_json は全行 '{}'・両表は空」を仮定する。
+        // 稼働中の v45 DB（policy_json に非既定値・両表に行あり）で再実行すると assert が落ちる。
+        // よって修復は **存在保証だけ**を行い、assert はしない。DDL は同じ SQL 定数を使う。
+        //
+        // 切り戻し: BEGIN; PRAGMA user_version = 46; COMMIT;（列・表は残してよい）
+        up: migrate_v47_repair_v43_objects,
+    },
 ];
+
+/// v47: v43 を版番号衝突でスキップした DB のための冪等な存在保証（assert なし）。
+/// 詳細は上の Migration コメント参照。
+fn migrate_v47_repair_v43_objects(conn: &Connection) -> rusqlite::Result<()> {
+    if !column_exists(conn, "sessions", "policy_json")? {
+        conn.execute_batch(
+            "ALTER TABLE sessions ADD COLUMN policy_json TEXT NOT NULL DEFAULT '{}'",
+        )?;
+    }
+    conn.execute_batch(SESSION_WATCHES_SQL)?;
+    conn.execute_batch(TOOL_LOGS_SQL)?;
+    Ok(())
+}
 
 /// このバイナリが知る最新スキーマバージョン。
 #[cfg(test)]

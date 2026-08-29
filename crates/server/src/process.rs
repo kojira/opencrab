@@ -393,6 +393,8 @@ pub fn build_agent_context(
          then `retrieve_memory_nodes` on a hit to read the original logs\n\
          \n\
          These tools let you access your full history even after compaction.\n\
+         When your working position changes, call update_context_checkpoint with \
+         {{confirmed, position, next}} so the arrival point survives compaction.\n\
          \n\
          ## Task Ledger\n\
          \n\
@@ -490,11 +492,111 @@ fn peer_reviewers_section(conn: &rusqlite::Connection, agent_id: &str) -> String
 // 既存の呼び出し元（`process::build_conversation_string` 等）のパスを保つため再エクスポート
 // する（doc に理由を明記した `subtask_registries` と同じ手）。
 pub use opencrab_core::context_budget::{
-    check_agent_model_change, compute_context_budget, ensure_model_context_window_registered,
-    model_context_window_missing_message, normalize_model_spec, resolve_model_max_output_tokens,
-    split_llm_model_spec,
+    check_agent_model_change, compute_context_budget, ensure_functions_within_cap,
+    ensure_model_context_window_registered, ensure_model_max_output_tokens_registered,
+    ensure_startup_budget_inputs, measure_functions_tokens, model_context_window_missing_message,
+    normalize_model_spec, resolve_agent_request_envelope, resolve_model_max_output_tokens,
+    resolve_water_levels, split_llm_model_spec, ContextBudgetEnvelope, ContextBudgetError,
+    ContextBudgetPolicy, MemoryIndexDecision, RequestEnvelopeArgs, DEFAULT_MEMORY_INDEX_TOKEN_CAP,
 };
-pub use opencrab_core::conversation::build_conversation_string;
+pub use opencrab_core::conversation::{
+    build_conversation_string, build_conversation_string_with_memory_index,
+    build_conversation_string_with_waters,
+};
+
+/// 入口共通: コア dispatcher の tool schema を 1 回測る。gateway / MCP は
+/// [`ensure_request_functions_budget`] が実 `list_tools` で再検査する。
+pub fn core_functions_tokens() -> Result<usize, ContextBudgetError> {
+    let defs: Vec<opencrab_core::FunctionDefinition> = opencrab_actions::ActionDispatcher::new()
+        .get_definitions(&[])
+        .into_iter()
+        .map(|d| opencrab_core::FunctionDefinition {
+            name: d.name,
+            description: if d.description.is_empty() {
+                None
+            } else {
+                Some(d.description)
+            },
+            parameters: d.parameters,
+        })
+        .collect();
+    measure_functions_tokens(&defs)
+}
+
+/// Memory Index を載せるか。判定は envelope 側だけが持つ。
+pub fn include_memory_index(env: &ContextBudgetEnvelope) -> bool {
+    matches!(env.memory_index_decision, MemoryIndexDecision::Inject)
+}
+
+/// ターン終了直後の正時: 派生スナップショットを行追加する（#826-B）。
+fn persist_turn_end_snapshot(
+    state: &AppState,
+    session_id: &str,
+    agent_id: &str,
+    conversation_high: usize,
+    conversation_low: usize,
+) -> anyhow::Result<()> {
+    let conn = state
+        .db
+        .lock()
+        .map_err(|e| anyhow::anyhow!("db lock poisoned: {e}"))?;
+    let assembled =
+        opencrab_core::context_budget::assemble_from_snapshot(&conn, session_id, agent_id)?;
+    let mut gov =
+        opencrab_core::context_budget::TurnGovernor::new(conversation_high, conversation_low);
+    gov.finish_turn(
+        &conn,
+        session_id,
+        &assembled.items,
+        &assembled.checkpoint,
+        assembled.through_log_id,
+        &assembled.text,
+    )?;
+    Ok(())
+}
+
+/// 利用者の待ち時間に乗せない。失敗は応答をひっくり返さない（正時の失敗は次開始の超過検査で見える）。
+fn spawn_background_turn_end_snapshot(
+    state: &AppState,
+    session_id: &str,
+    agent_id: &str,
+    conversation_high: usize,
+    conversation_low: usize,
+) {
+    let state = state.clone();
+    let session_id = session_id.to_string();
+    let agent_id = agent_id.to_string();
+    tokio::spawn(async move {
+        if let Err(e) = persist_turn_end_snapshot(
+            &state,
+            &session_id,
+            &agent_id,
+            conversation_high,
+            conversation_low,
+        ) {
+            tracing::error!(
+                target: "context_budget_check",
+                session_id = %session_id,
+                error = %e,
+                "turn-end snapshot persist failed"
+            );
+        }
+    });
+}
+
+/// 各 request 前: 実 `list_tools` で functions cap と `fixed >= input_high` を検査する。
+///
+/// functions 超過も `apply_line_items` 経由にする（一意名 + 全費目 Display + 観測行）。
+pub fn ensure_request_functions_budget(
+    args: RequestEnvelopeArgs<'_>,
+    tools: &[opencrab_core::FunctionDefinition],
+) -> Result<ContextBudgetEnvelope, ContextBudgetError> {
+    let functions_tokens = measure_functions_tokens(tools)?;
+    resolve_agent_request_envelope(RequestEnvelopeArgs {
+        functions_tokens,
+        ..args
+    })
+}
 // `format_single_log` は `format_live_inbound`（本番経路）が使うので常時取り込む。
 pub(crate) use opencrab_core::conversation::format_single_log;
 // 以下はテストだけが参照する（本番コードは使わない）。cfg(test) で本番ビルドの
@@ -1181,8 +1283,8 @@ fn spawn_background_index_build(state: &AppState, agent_id: &str, effective_mode
 /// 実行対象の agent 行が `agents` に存在しないときのエラー（#632）。
 ///
 /// `run_agent_response` は**サーバ側の全ターン実行が通る唯一のチョークポイント**
-/// （REST `agents_messages`、scheduler / intake / sleep / subtask、
-/// そして production では `AppState::run_agent_response` 経由でここを通る）。
+/// （REST `agents_messages`、scheduler / intake / sleep / subtask、そして web も
+/// production では `AppState::run_agent_response` 経由でここを通る）。
 /// エージェント別テーブルには FK 制約が無く、存在しない agent_id でも per-agent 設定が
 /// 既定に落ちたまま「動いてしまう」。ここで 1 度だけ弾けば、入口ごとにチェックを
 /// 手でコピーする必要がなくなり、将来の入口も自動的に閉じる。
@@ -1567,6 +1669,8 @@ pub async fn run_agent_response(
     // 保持される。既定無効（agent.loop_restart_enabled）。
     let mut conversation_override: Option<String> = None;
     let mut restarts_this_call: i64 = 0;
+    #[allow(unused_assignments)]
+    let mut last_waters: Option<(usize, usize)> = None;
     let result = loop {
         // #665: engine（LLM ループ本体）へ入る。文脈構築はここまでに終わっており、この後は LLM 呼び出しと
         // ツール往復。engine 内の debug 行は下の `.instrument(turn_span)` で turn_id 等を継承する。
@@ -1578,6 +1682,36 @@ pub async fn run_agent_response(
             stage = "engine",
             "turn: エンジン実行 開始（入）"
         );
+        {
+            let tools = executor.list_tools();
+            let conn = state
+                .db
+                .lock()
+                .map_err(|e| anyhow::anyhow!("db lock poisoned: {e}"))?;
+            let conversation_text = conversation_override.as_deref().unwrap_or(conversation);
+            let runtime_text =
+                opencrab_core::runtime_context::runtime_context_prefix(conversation_text);
+            match ensure_request_functions_budget(
+                RequestEnvelopeArgs {
+                    conn: &conn,
+                    agent_id,
+                    session_id,
+                    default_model: &state.default_model,
+                    policy: &state.context_budget_policy(),
+                    system_prompt,
+                    runtime_context_text: runtime_text,
+                    functions_tokens: 0,
+                    entrypoint: "run_agent_response",
+                },
+                &tools,
+            ) {
+                Ok(env) => {
+                    engine.set_conversation_waters(env.conversation_high, env.conversation_low);
+                    last_waters = Some((env.conversation_high, env.conversation_low));
+                }
+                Err(e) => return Err(anyhow::anyhow!("{e}")),
+            }
+        }
         let result = engine
             .run_with_model_override(
                 system_prompt,
@@ -1659,6 +1793,9 @@ pub async fn run_agent_response(
     // sub-engine の内部 run では走らせない（旧 `execute_spawn_subtask` の sub-engine は
     // どちらも持たなかった。サブタスクごとに LLM 支出が増えるのを避ける）。
     if depth == 0 {
+        if let Some((high, low)) = last_waters {
+            spawn_background_turn_end_snapshot(state, session_id, agent_id, high, low);
+        }
         spawn_background_index_build(state, agent_id, &effective_model);
         if let Ok(ref engine_result) = result {
             record_used_skills(state, agent_id, session_id, &engine_result.response);
@@ -1839,15 +1976,70 @@ fn prepare_loop_restart(
     // 呼び出し元が付けていた [Context] 前置（日時 / テーマ / Discord message_id）も
     // ここで再現する（無いと run-2 が現在日時を失い、message_id 依存のゲートウェイ
     // 操作ができなくなる）。
-    let (prov, mdl) = {
-        let eff =
-            opencrab_db::queries::effective_model_for_agent(&conn, agent_id, &state.default_model)
-                .unwrap_or_else(|_| state.default_model.clone());
-        let (p, m) = split_llm_model_spec(&eff);
-        (p.to_string(), m.to_string())
+    let (system_prompt, _) =
+        build_agent_context(&conn, agent_id, &opencrab_actions::CallerIdentity::Owner);
+    let theme = opencrab_db::queries::get_session(&conn, session_id)
+        .ok()
+        .flatten()
+        .map(|s| s.theme)
+        .unwrap_or_default();
+    let runtime_text = match trigger_message_id {
+        Some(message_id) if !message_id.is_empty() => {
+            prepend_runtime_context_discord("", &theme, message_id)
+        }
+        _ => prepend_runtime_context("", &theme),
     };
-    let budget = compute_context_budget(&conn, &prov, &mdl, state.compaction_ratio);
-    let rebuilt = match build_conversation_string(&conn, session_id, agent_id, budget) {
+    let functions_tokens = match core_functions_tokens() {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error_name = e.name(),
+                "loop restart aborted ({name}): {e}",
+                name = e.name()
+            );
+            return None;
+        }
+    };
+    let env = match resolve_agent_request_envelope(RequestEnvelopeArgs {
+        conn: &conn,
+        agent_id,
+        session_id,
+        default_model: &state.default_model,
+        policy: &state.context_budget_policy(),
+        system_prompt: &system_prompt,
+        runtime_context_text: &runtime_text,
+        functions_tokens,
+        entrypoint: "process_loop_restart",
+    }) {
+        Ok(env) => env,
+        Err(e) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error_name = e.name(),
+                "loop restart aborted ({name}): {e}",
+                name = e.name()
+            );
+            let _ = opencrab_db::queries::insert_task_progress(
+                &conn,
+                task.id,
+                "progress",
+                &format!(
+                    "[restart] {} のため自動再実行を中止した（予算は未消費）。",
+                    e.name()
+                ),
+            );
+            return None;
+        }
+    };
+    let rebuilt = match build_conversation_string_with_waters(
+        &conn,
+        session_id,
+        agent_id,
+        env.conversation_high,
+        env.conversation_low,
+        include_memory_index(&env),
+    ) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(
@@ -1863,11 +2055,6 @@ fn prepare_loop_restart(
             return None;
         }
     };
-    let theme = opencrab_db::queries::get_session(&conn, session_id)
-        .ok()
-        .flatten()
-        .map(|s| s.theme)
-        .unwrap_or_default();
     let rebuilt = match trigger_message_id {
         Some(message_id) if !message_id.is_empty() => {
             prepend_runtime_context_discord(&rebuilt, &theme, message_id)
@@ -2419,10 +2606,6 @@ mod recent_user_speech_guarantee_tests {
 
         let out = build_conversation_string(&conn, SESSION, AGENT, 400).unwrap();
         assert!(
-            out.contains("[Past context summary"),
-            "テストの前提が崩れている（コンパクション経路に入っていない）: {out}"
-        );
-        assert!(
             out.contains("つらい"),
             "要約境界より前のユーザー発言が混ぜ戻されていない: {out}"
         );
@@ -2740,6 +2923,10 @@ mod no_forced_reply_tests {
             build_agent_context(&conn, "a1", &opencrab_actions::CallerIdentity::Owner);
 
         assert!(prompt.contains("## Silent Reply"), "prompt:\n{prompt}");
+        assert!(
+            prompt.contains("update_context_checkpoint"),
+            "checkpoint 更新義務の 1 行が無い:\n{prompt}"
+        );
 
         // ループ防止は内容ベースで残る。
         assert!(

@@ -776,6 +776,10 @@ fn enqueue_turn<R: AgentRuntime>(
                     &runtime,
                     TranscriptSource::External,
                     &inbound,
+                    &system,
+                    // extgate は会話へ runtime context を前置しない（wrap は素通し）。
+                    // 予算計上もそれに合わせて空文字（実 request と一致させる契約）。
+                    "",
                     |raw| raw.to_string(),
                     |conversation| {
                         let mut req = RunRequest::new(

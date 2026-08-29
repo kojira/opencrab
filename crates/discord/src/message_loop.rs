@@ -1106,6 +1106,9 @@ async fn process_incoming_message<T: AgentRunner>(
                 &state_spawn,
                 TranscriptSource::Discord,
                 &inbound,
+                &system_prompt_spawn,
+                // 予算計上は wrap が前置する runtime context と一致させる（同じ theme / message_id）。
+                &prepend_runtime_context_discord("", "Discord conversation", &discord_message_id_spawn),
                 |raw| {
                     debug!(
                         session_id = %session_id_spawn,
@@ -1338,6 +1341,8 @@ async fn process_subtask_completed<T: AgentRunner>(
         &state,
         &session_id,
         &agent_id,
+        &system_prompt,
+        &prepend_runtime_context_discord("", "Discord conversation", ""),
         |raw| {
             debug!(agent_id = %agent_id, session_id = %session_id, conversation_len = raw.len(), stage = "context_build", "turn: 文脈構築 完了（出）");
             prepend_runtime_context_discord(raw, "Discord conversation", "")
@@ -1511,6 +1516,8 @@ async fn process_timed_fire<T: AgentRunner>(
         &state,
         &session_id,
         &agent_id,
+        &system_prompt,
+        &prepend_runtime_context_discord("", "Discord conversation", ""),
         |raw| {
             debug!(agent_id = %agent_id, session_id = %session_id, conversation_len = raw.len(), stage = "context_build", "turn: 文脈構築 完了（出）");
             prepend_runtime_context_discord(raw, "Discord conversation", "")
@@ -1873,6 +1880,8 @@ async fn process_interaction_response<T: AgentRunner>(
         &state,
         &session_id,
         &agent_id,
+        &system_prompt,
+        &prepend_runtime_context_discord("", "Discord conversation", ""),
         |raw| {
             debug!(agent_id = %agent_id, session_id = %session_id, conversation_len = raw.len(), stage = "context_build", "turn: 文脈構築 完了（出）");
             prepend_runtime_context_discord(raw, "Discord conversation", "")

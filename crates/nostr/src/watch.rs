@@ -261,19 +261,23 @@ pub async fn run_watch_turn<R: NostrAgentRunner>(
     let reply_target = reply_target.to_string();
     let prompt_suffix = prompt_suffix.to_string();
     let trigger = trigger_message_id.map(str::to_string);
+    // 予算計上（fail-loud）は実 request と同じ system_prompt で行う必要があるため、
+    // closure の外で先に組む。nostr は会話へ runtime context を前置しない（wrap は素通し）。
+    let (base_prompt, agent_name) = runner.build_agent_context(&agent_id, &caller);
+    let system_prompt = format!("{base_prompt}\n\n{prompt_suffix}");
     let result = start_session_turn(
         runner,
         opencrab_actions::TranscriptSource::Nostr,
         inbound,
+        &system_prompt,
+        "",
         |raw| raw.to_string(),
         |conversation| {
-            let (base_prompt, agent_name) = runner.build_agent_context(&agent_id, &caller);
-            let system_prompt = format!("{base_prompt}\n\n{prompt_suffix}");
             let mut req = RunRequest::new(
                 &agent_id,
                 &agent_name,
                 &session_id,
-                system_prompt,
+                system_prompt.clone(),
                 conversation,
                 "nostr",
                 caller.clone(),

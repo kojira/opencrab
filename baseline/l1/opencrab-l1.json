@@ -3503,7 +3503,7 @@
             "sharing": "agent_bound",
             "sub_engine": "not_exposed"
           },
-          "description": "タスクに応じて使用するLLMモデルを切り替える。provider:model形式（例: openai:gpt-4o-mini）またはエイリアス（fast, smart等）で指定。",
+          "description": "タスクに応じて使用するLLMモデルを切り替える。provider:model 形式またはエイリアスで指定。構成済みプロバイダ: （構成済みプロバイダなし）。未登録のプロバイダは拒否される。",
           "input_schema": {
             "properties": {
               "duration": {
@@ -3511,7 +3511,7 @@
                 "type": "string"
               },
               "model_alias": {
-                "description": "使用するモデル（provider:model形式またはエイリアス。例: openai:gpt-4o-mini, openrouter:openai/gpt-4o-mini, fast, smart）",
+                "description": "使用するモデル（provider:model またはエイリアス）。構成済みプロバイダ: （構成済みプロバイダなし）",
                 "type": "string"
               },
               "purpose": {
@@ -4171,6 +4171,48 @@
             "depth_capped": false,
             "owner_only": false,
             "trusted_only": true
+          }
+        },
+        {
+          "activation": "always",
+          "classification": {
+            "collection_status": "observed",
+            "dispatch": "inline",
+            "sharing": "agent_bound",
+            "sub_engine": "not_exposed"
+          },
+          "description": "到達点チェックポイントを更新する。schema は {confirmed, position, next}。1000 token を超える更新は失敗し、旧値を残す。",
+          "input_schema": {
+            "properties": {
+              "confirmed": {
+                "description": "確認済みの到達点",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "next": {
+                "description": "次にすること",
+                "type": "string"
+              },
+              "position": {
+                "description": "いまの位置",
+                "type": "string"
+              }
+            },
+            "required": [
+              "confirmed",
+              "position",
+              "next"
+            ],
+            "type": "object"
+          },
+          "name": "update_context_checkpoint",
+          "origin": "dispatcher",
+          "visibility": {
+            "depth_capped": false,
+            "owner_only": false,
+            "trusted_only": false
           }
         },
         {
@@ -6906,7 +6948,7 @@
             "sharing": "agent_bound",
             "sub_engine": "not_exposed"
           },
-          "description": "タスクに応じて使用するLLMモデルを切り替える。provider:model形式（例: openai:gpt-4o-mini）またはエイリアス（fast, smart等）で指定。",
+          "description": "タスクに応じて使用するLLMモデルを切り替える。provider:model 形式またはエイリアスで指定。構成済みプロバイダ: （構成済みプロバイダなし）。未登録のプロバイダは拒否される。",
           "input_schema": {
             "properties": {
               "duration": {
@@ -6914,7 +6956,7 @@
                 "type": "string"
               },
               "model_alias": {
-                "description": "使用するモデル（provider:model形式またはエイリアス。例: openai:gpt-4o-mini, openrouter:openai/gpt-4o-mini, fast, smart）",
+                "description": "使用するモデル（provider:model またはエイリアス）。構成済みプロバイダ: （構成済みプロバイダなし）",
                 "type": "string"
               },
               "purpose": {
@@ -7425,6 +7467,48 @@
             "depth_capped": false,
             "owner_only": false,
             "trusted_only": true
+          }
+        },
+        {
+          "activation": "always",
+          "classification": {
+            "collection_status": "observed",
+            "dispatch": "inline",
+            "sharing": "agent_bound",
+            "sub_engine": "not_exposed"
+          },
+          "description": "到達点チェックポイントを更新する。schema は {confirmed, position, next}。1000 token を超える更新は失敗し、旧値を残す。",
+          "input_schema": {
+            "properties": {
+              "confirmed": {
+                "description": "確認済みの到達点",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "next": {
+                "description": "次にすること",
+                "type": "string"
+              },
+              "position": {
+                "description": "いまの位置",
+                "type": "string"
+              }
+            },
+            "required": [
+              "confirmed",
+              "position",
+              "next"
+            ],
+            "type": "object"
+          },
+          "name": "update_context_checkpoint",
+          "origin": "dispatcher",
+          "visibility": {
+            "depth_capped": false,
+            "owner_only": false,
+            "trusted_only": false
           }
         },
         {
@@ -10014,7 +10098,7 @@
             "sharing": "agent_bound",
             "sub_engine": "not_exposed"
           },
-          "description": "タスクに応じて使用するLLMモデルを切り替える。provider:model形式（例: openai:gpt-4o-mini）またはエイリアス（fast, smart等）で指定。",
+          "description": "タスクに応じて使用するLLMモデルを切り替える。provider:model 形式またはエイリアスで指定。構成済みプロバイダ: （構成済みプロバイダなし）。未登録のプロバイダは拒否される。",
           "input_schema": {
             "properties": {
               "duration": {
@@ -10022,7 +10106,7 @@
                 "type": "string"
               },
               "model_alias": {
-                "description": "使用するモデル（provider:model形式またはエイリアス。例: openai:gpt-4o-mini, openrouter:openai/gpt-4o-mini, fast, smart）",
+                "description": "使用するモデル（provider:model またはエイリアス）。構成済みプロバイダ: （構成済みプロバイダなし）",
                 "type": "string"
               },
               "purpose": {
@@ -10533,6 +10617,48 @@
             "depth_capped": false,
             "owner_only": false,
             "trusted_only": true
+          }
+        },
+        {
+          "activation": "always",
+          "classification": {
+            "collection_status": "observed",
+            "dispatch": "inline",
+            "sharing": "agent_bound",
+            "sub_engine": "not_exposed"
+          },
+          "description": "到達点チェックポイントを更新する。schema は {confirmed, position, next}。1000 token を超える更新は失敗し、旧値を残す。",
+          "input_schema": {
+            "properties": {
+              "confirmed": {
+                "description": "確認済みの到達点",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "next": {
+                "description": "次にすること",
+                "type": "string"
+              },
+              "position": {
+                "description": "いまの位置",
+                "type": "string"
+              }
+            },
+            "required": [
+              "confirmed",
+              "position",
+              "next"
+            ],
+            "type": "object"
+          },
+          "name": "update_context_checkpoint",
+          "origin": "dispatcher",
+          "visibility": {
+            "depth_capped": false,
+            "owner_only": false,
+            "trusted_only": false
           }
         },
         {

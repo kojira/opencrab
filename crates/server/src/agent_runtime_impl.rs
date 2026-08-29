@@ -14,6 +14,29 @@ use opencrab_actions::AgentRuntime;
 use crate::process;
 use crate::AppState;
 
+/// 呼び出し側が渡した実 system / runtime で envelope を解く（Owner 固定や汎用 prepend はしない）。
+fn resolve_runtime_envelope(
+    state: &AppState,
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    session_id: &str,
+    system_prompt: &str,
+    runtime_context_text: &str,
+) -> Result<process::ContextBudgetEnvelope, opencrab_core::context_budget::ContextBudgetError> {
+    let functions_tokens = process::core_functions_tokens()?;
+    process::resolve_agent_request_envelope(process::RequestEnvelopeArgs {
+        conn,
+        agent_id,
+        session_id,
+        default_model: &state.default_model,
+        policy: &state.context_budget_policy(),
+        system_prompt,
+        runtime_context_text,
+        functions_tokens,
+        entrypoint: "agent_runtime",
+    })
+}
+
 #[async_trait]
 impl AgentRuntime for AppState {
     async fn run_agent_response(
@@ -36,19 +59,46 @@ impl AgentRuntime for AppState {
         &self,
         session_id: &str,
         agent_id: &str,
-        context_budget_tokens: usize,
+        _context_budget_tokens: usize,
+        system_prompt: &str,
+        runtime_context_text: &str,
     ) -> anyhow::Result<String> {
         let conn = self.db.lock().unwrap();
-        process::build_conversation_string(&conn, session_id, agent_id, context_budget_tokens)
+        let env = resolve_runtime_envelope(
+            self,
+            &conn,
+            agent_id,
+            session_id,
+            system_prompt,
+            runtime_context_text,
+        )?;
+        process::build_conversation_string_with_waters(
+            &conn,
+            session_id,
+            agent_id,
+            env.conversation_high,
+            env.conversation_low,
+            process::include_memory_index(&env),
+        )
     }
 
-    fn context_budget_tokens(&self, agent_id: &str) -> usize {
+    fn context_budget_tokens(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        system_prompt: &str,
+        runtime_context_text: &str,
+    ) -> Result<usize, opencrab_core::context_budget::ContextBudgetError> {
         let conn = self.db.lock().unwrap();
-        let eff =
-            opencrab_db::queries::effective_model_for_agent(&conn, agent_id, &self.default_model)
-                .unwrap_or_else(|_| self.default_model.clone());
-        let (prov, mdl) = process::split_llm_model_spec(&eff);
-        process::compute_context_budget(&conn, prov, mdl, self.compaction_ratio)
+        let env = resolve_runtime_envelope(
+            self,
+            &conn,
+            agent_id,
+            session_id,
+            system_prompt,
+            runtime_context_text,
+        )?;
+        Ok(env.conversation_high)
     }
 
     fn has_llm_providers(&self) -> bool {

@@ -77,11 +77,19 @@ impl AgentRuntime for TestRuntime {
         _session_id: &str,
         _agent_id: &str,
         _budget: usize,
+        _system_prompt: &str,
+        _runtime_context_text: &str,
     ) -> anyhow::Result<String> {
         Ok(String::new())
     }
-    fn context_budget_tokens(&self, _agent_id: &str) -> usize {
-        1024
+    fn context_budget_tokens(
+        &self,
+        _agent_id: &str,
+        _session_id: &str,
+        _system_prompt: &str,
+        _runtime_context_text: &str,
+    ) -> std::result::Result<usize, opencrab_core::context_budget::ContextBudgetError> {
+        Ok(1024)
     }
     fn has_llm_providers(&self) -> bool {
         true

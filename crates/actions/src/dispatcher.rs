@@ -31,6 +31,7 @@ impl ActionDispatcher {
         dispatcher.register(Arc::new(UpdateImpressionAction));
         dispatcher.register(Arc::new(DeclareDoneAction));
         dispatcher.register(Arc::new(GetSystemInfoAction));
+        dispatcher.register(Arc::new(UpdateContextCheckpointAction));
 
         // ワークスペースアクション登録
         dispatcher.register(Arc::new(WsReadAction));
