@@ -1098,6 +1098,24 @@ impl LlmProvider for MockLlmProvider {
 
 // ==================== LLM-integrated helpers ====================
 
+/// #826: 予算 envelope の fail-loud を満たすため、テスト mock モデルの
+/// `context_window` / `max_output_tokens` を `model_pricing` に登録する。
+fn register_mock_model_pricing(db: &opencrab_db::Db, provider: &str, model: &str) {
+    let conn = db.lock().unwrap();
+    opencrab_db::queries::upsert_model_pricing(
+        &conn,
+        &opencrab_db::queries::ModelPricingRow {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            input_price_per_1m: 0.0,
+            output_price_per_1m: 0.0,
+            context_window: Some(200_000),
+            max_output_tokens: Some(4_096),
+        },
+    )
+    .expect("test model_pricing");
+}
+
 /// Create test app with a MockLlmProvider registered in the LlmRouter.
 /// Returns (Router, opencrab_db::Db, Arc<MockLlmProvider>).
 fn create_test_app_with_llm() -> (Router, opencrab_db::Db, Arc<MockLlmProvider>) {
@@ -1110,6 +1128,9 @@ fn create_test_app_with_llm() -> (Router, opencrab_db::Db, Arc<MockLlmProvider>)
 fn create_test_app_with_state() -> (Router, opencrab_db::Db, Arc<MockLlmProvider>, AppState) {
     let conn = opencrab_db::init_memory().unwrap();
     let db = opencrab_db::Db::from_connection(conn);
+    // #826: 予算 envelope は fail-loud。既定 mock モデルの context_window / max_output_tokens を
+    // model_pricing に登録しておかないと、ターンを回すテストが予算計算で弾かれる。
+    register_mock_model_pricing(&db, "mock", "gpt-4o");
 
     let mock = Arc::new(MockLlmProvider::new());
     let mut router = LlmRouter::new();
@@ -2033,6 +2054,8 @@ fn state_with_consolidation(
     mock: Arc<MockLlmProvider>,
     cfg: opencrab_server::config::SkillConsolidationConfig,
 ) -> AppState {
+    // #826: 予算 fail-loud のため既定 mock モデルを登録（呼び出し側の db は未登録のことがある）。
+    register_mock_model_pricing(&db, "mock", "gpt-4o");
     let mut router = LlmRouter::new();
     router.add_provider(mock as Arc<dyn LlmProvider>);
     router.set_default_provider("mock");
