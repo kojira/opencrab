@@ -342,6 +342,35 @@ fn send_said_turn_say_sse_over_real_processes() {
     let gw_port = free_port();
     write_server_config(root.path(), &db, &sock, core_port, mock.port);
 
+    // #826: core は起動時 `ensure_startup_budget_inputs` で既定モデルの `model_pricing`
+    // （context_window / max_output_tokens）を要求する（fail-loud）。DB 実体は core が作るが、
+    // その前にここでスキーマを作り e2e-mock を seed しておかないと core が起動時に落ちて
+    // HTTP が上がらない。後段の PUT /api/llm/model-pricing はこの経路では冪等な再登録。
+    {
+        let conn =
+            opencrab_db::init_connection(db.to_str().unwrap()).expect("init db schema for seed");
+        opencrab_db::queries::upsert_model_pricing(
+            &conn,
+            &opencrab_db::queries::ModelPricingRow {
+                provider: "openai".into(),
+                model: "e2e-mock".into(),
+                input_price_per_1m: 0.0,
+                output_price_per_1m: 0.0,
+                // #826 の予算 envelope はツール定義など mandatory_fixed（実測 ~9.6k）を input_high
+                // （context_window × compaction_ratio）に収める必要がある。8192 では収まらず
+                // context_budget_exhausted で turn が止まるため、実運用寄りの大きさにする。
+                context_window: Some(200_000),
+                max_output_tokens: Some(1024),
+            },
+        )
+        .expect("seed model_pricing for startup budget check");
+        // WAL を畳んで -wal を残さず閉じる。残すと直後に core が r2d2 プールで開く際に
+        // "database is locked" を busy_timeout いっぱいリトライして起動が数十秒遅れ、
+        // wait_http がタイムアウトする。core は開く際に自分で WAL へ戻す。
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;")
+            .expect("checkpoint seed db");
+    }
+
     let core_log = root.path().join("core.log");
     let core_out = std::fs::File::create(&core_log).unwrap();
     let core_err = core_out.try_clone().unwrap();
@@ -390,7 +419,7 @@ fn send_said_turn_say_sse_over_real_processes() {
         "PUT",
         "/api/llm/model-pricing",
         None,
-        Some(r#"{"provider":"openai","model":"e2e-mock","context_window":8192,"max_output_tokens":1024}"#),
+        Some(r#"{"provider":"openai","model":"e2e-mock","context_window":200000,"max_output_tokens":1024}"#),
         Duration::from_secs(5),
     )
     .expect("model pricing");
