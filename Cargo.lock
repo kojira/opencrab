@@ -2362,6 +2362,7 @@ dependencies = [
  "axum",
  "futures",
  "http-body-util",
+ "opencrab-db",
  "opencrab-gate-client",
  "reqwest 0.12.28",
  "rusqlite",
