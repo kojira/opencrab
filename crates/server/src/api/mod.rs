@@ -1,5 +1,4 @@
 pub mod agents;
-pub mod agents_messages;
 pub mod allowed_commands;
 pub mod analytics;
 pub mod channel_configs;

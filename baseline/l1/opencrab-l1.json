@@ -266,7 +266,7 @@
     ]
   },
   "http": {
-    "route_count": 81,
+    "route_count": 80,
     "routes": [
       {
         "activation": "always",
@@ -543,14 +543,6 @@
           "POST"
         ],
         "path": "/api/agents/{id}/memory/search",
-        "source": "opencrab_server::create_router"
-      },
-      {
-        "activation": "always",
-        "methods": [
-          "POST"
-        ],
-        "path": "/api/agents/{id}/messages",
         "source": "opencrab_server::create_router"
       },
       {
@@ -4162,48 +4154,6 @@
           "activation": "always",
           "classification": {
             "collection_status": "observed",
-            "dispatch": "inline",
-            "sharing": "agent_bound",
-            "sub_engine": "not_exposed"
-          },
-          "description": "到達点チェックポイントを更新する。schema は {confirmed, position, next}。1000 token を超える更新は失敗し、旧値を残す。",
-          "input_schema": {
-            "properties": {
-              "confirmed": {
-                "description": "確認済みの到達点",
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
-              "next": {
-                "description": "次にすること",
-                "type": "string"
-              },
-              "position": {
-                "description": "いまの位置",
-                "type": "string"
-              }
-            },
-            "required": [
-              "confirmed",
-              "position",
-              "next"
-            ],
-            "type": "object"
-          },
-          "name": "update_context_checkpoint",
-          "origin": "dispatcher",
-          "visibility": {
-            "depth_capped": false,
-            "owner_only": false,
-            "trusted_only": false
-          }
-        },
-        {
-          "activation": "always",
-          "classification": {
-            "collection_status": "observed",
             "dispatch": "dispatchable",
             "sharing": "agent_bound",
             "sub_engine": "not_exposed"
@@ -7458,48 +7408,6 @@
           "activation": "always",
           "classification": {
             "collection_status": "observed",
-            "dispatch": "inline",
-            "sharing": "agent_bound",
-            "sub_engine": "not_exposed"
-          },
-          "description": "到達点チェックポイントを更新する。schema は {confirmed, position, next}。1000 token を超える更新は失敗し、旧値を残す。",
-          "input_schema": {
-            "properties": {
-              "confirmed": {
-                "description": "確認済みの到達点",
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
-              "next": {
-                "description": "次にすること",
-                "type": "string"
-              },
-              "position": {
-                "description": "いまの位置",
-                "type": "string"
-              }
-            },
-            "required": [
-              "confirmed",
-              "position",
-              "next"
-            ],
-            "type": "object"
-          },
-          "name": "update_context_checkpoint",
-          "origin": "dispatcher",
-          "visibility": {
-            "depth_capped": false,
-            "owner_only": false,
-            "trusted_only": false
-          }
-        },
-        {
-          "activation": "always",
-          "classification": {
-            "collection_status": "observed",
             "dispatch": "dispatchable",
             "sharing": "agent_bound",
             "sub_engine": "not_exposed"
@@ -10602,48 +10510,6 @@
             "depth_capped": false,
             "owner_only": false,
             "trusted_only": true
-          }
-        },
-        {
-          "activation": "always",
-          "classification": {
-            "collection_status": "observed",
-            "dispatch": "inline",
-            "sharing": "agent_bound",
-            "sub_engine": "not_exposed"
-          },
-          "description": "到達点チェックポイントを更新する。schema は {confirmed, position, next}。1000 token を超える更新は失敗し、旧値を残す。",
-          "input_schema": {
-            "properties": {
-              "confirmed": {
-                "description": "確認済みの到達点",
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
-              "next": {
-                "description": "次にすること",
-                "type": "string"
-              },
-              "position": {
-                "description": "いまの位置",
-                "type": "string"
-              }
-            },
-            "required": [
-              "confirmed",
-              "position",
-              "next"
-            ],
-            "type": "object"
-          },
-          "name": "update_context_checkpoint",
-          "origin": "dispatcher",
-          "visibility": {
-            "depth_capped": false,
-            "owner_only": false,
-            "trusted_only": false
           }
         },
         {

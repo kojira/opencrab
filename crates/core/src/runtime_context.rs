@@ -18,20 +18,6 @@ pub fn prepend_runtime_context(user_message: &str, session_theme: &str) -> Strin
     )
 }
 
-/// 実会話に載っている `[Context]` 前置だけを返す。無い（Nostr 等）ときは空。
-///
-/// envelope の runtime 費目は、再生成したダミー前置ではなくこの実測値を使う。
-pub fn runtime_context_prefix(conversation: &str) -> &str {
-    const HEAD: &str = "[Context]\n";
-    let Some(after) = conversation.strip_prefix(HEAD) else {
-        return "";
-    };
-    match after.find("\n\n") {
-        Some(i) => &conversation[..HEAD.len() + i + 2],
-        None => "",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -51,29 +37,5 @@ mod tests {
     fn empty_message_keeps_header() {
         let out = prepend_runtime_context("", "theme");
         assert!(out.contains("Current discussion topic: theme"));
-    }
-
-    #[test]
-    fn runtime_context_prefix_matches_prepended_header() {
-        let out = prepend_runtime_context("こんにちは", "web_conversation");
-        let prefix = runtime_context_prefix(&out);
-        assert!(prefix.starts_with("[Context]\n"));
-        assert!(prefix.contains("Current discussion topic: web_conversation\n\n"));
-        assert!(!prefix.contains("こんにちは"));
-        assert_eq!(format!("{prefix}こんにちは"), out);
-    }
-
-    #[test]
-    fn runtime_context_prefix_empty_when_not_prepended() {
-        assert_eq!(runtime_context_prefix("just conversation"), "");
-        assert_eq!(runtime_context_prefix(""), "");
-    }
-
-    #[test]
-    fn runtime_context_prefix_keeps_discord_message_id_line() {
-        let conversation = "[Context]\nCurrent date and time: t\nCurrent discussion topic: Discord conversation\nDiscord message_id: 42\n\nbody";
-        let prefix = runtime_context_prefix(conversation);
-        assert!(prefix.contains("Discord message_id: 42\n\n"));
-        assert!(!prefix.contains("body"));
     }
 }

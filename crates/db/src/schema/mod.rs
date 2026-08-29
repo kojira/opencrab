@@ -1222,9 +1222,9 @@ const MIGRATIONS: &[Migration] = &[
         //   - `crates/server/src/memory_organize.rs` … `sleep-organize-{agent_id}-{unix_ts}`
         // sleep のもう 1 つのラン（`skill_consolidation`）は素の LLM 1 コールで session を
         // 持たない（`llm_logs.session_id` は `None`）ため生ログを書かず、対象外。
-        // 対話・heartbeat・subtask・nostr・web・REST の session_id はいずれも別の接頭辞
-        // （`discord-` / `heartbeat-` / `subtask-` / `nostr-` / `web-` / `agent-msg-`）で、
-        // `sleep-` で始まるものは無い。
+        // 対話・heartbeat・subtask・nostr・web と、撤去済み direct-message REST の既存
+        // session_id はいずれも別の接頭辞（`discord-` / `heartbeat-` / `subtask-` /
+        // `nostr-` / `web-` / legacy `agent-msg-`）で、`sleep-` で始まるものは無い。
         //
         // ## FTS も同じ rowid 集合で消す
         // `memory_sessions_fts` は本体と手動同期する通常の fts5（外部コンテンツではない）。
@@ -1803,27 +1803,6 @@ const MIGRATIONS: &[Migration] = &[
                 [],
             )?;
             Ok(())
-        },
-    },
-    Migration {
-        version: 43,
-        description:
-            "会話圧縮の派生スナップショット表を追加する（#826-B）。正本は変えず行追加のみ",
-        // 派生表。正本 memory_sessions は触らない。既存 DB へ CREATE IF NOT EXISTS。
-        // 切り戻し: BEGIN; PRAGMA user_version = 42; COMMIT;（表は残してよい。古いバイナリは読まない）
-        up: |conn| {
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS conversation_snapshots (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id TEXT NOT NULL,
-                    compacted_conversation TEXT NOT NULL,
-                    through_log_id INTEGER NOT NULL,
-                    token_count INTEGER NOT NULL,
-                    created_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_conversation_snapshots_session
-                    ON conversation_snapshots(session_id, id);",
-            )
         },
     },
 ];

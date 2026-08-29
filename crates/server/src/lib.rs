@@ -154,8 +154,8 @@ pub struct AppState {
     #[cfg(feature = "web")]
     pub web_gateway: Arc<opencrab_web_gateway::WebGateway>,
     /// 非ブロック dispatch（#152 S3a）の subtask registry 置き場（#169）。
-    /// REST は session_id キー、heartbeat は agent_id キーで貸し借りし、
-    /// dispatcher と `cancel_subtask`（#161）が同一 registry を見るようにする。
+    /// 経路が定めるキーで貸し借りし、dispatcher と `cancel_subtask`（#161）が
+    /// 同一 registry を見るようにする。
     pub subtask_registries: Arc<subtask_registries::SubtaskRegistries>,
     /// プロセス全体で 1 つの per-session 直列化ロック表（#588 Stage 2）。
     ///
@@ -255,17 +255,6 @@ pub fn disconnected_heartbeat_config_rx(
 }
 
 impl AppState {
-    /// #826-A: 設定から費目別水位政策を組む。入口固有の再計算はしない。
-    pub fn context_budget_policy(&self) -> opencrab_core::context_budget::ContextBudgetPolicy {
-        opencrab_core::context_budget::ContextBudgetPolicy {
-            input_high_ratio: self.compaction_ratio,
-            input_low_ratio: self.llm_config.input_low_ratio,
-            absolute_cap_a: self.llm_config.absolute_input_cap,
-            memory_index_token_cap: self.llm_config.memory_index_token_cap,
-            functions_token_cap: self.llm_config.functions_token_cap,
-        }
-    }
-
     /// サブタスク lifecycle 通知の実装を返す（未設定なら何もしない Noop）。
     pub fn subtask_lifecycle_notifier(
         &self,
@@ -399,7 +388,6 @@ macro_rules! production_routes {
         $apply!($target, "/api/agents/{id}/daily-log-index/rebuild", post => api::daily_log_index::rebuild);
         $apply!($target, "/api/agents/{id}/daily-log-index/run", post => api::daily_log_index::run);
         $apply!($target, "/api/agents/{id}/memory/index/merge", post => api::agents::merge_memory_index_topics);
-        $apply!($target, "/api/agents/{id}/messages", post => api::agents_messages::send_agent_message);
         $apply!($target, "/api/sessions", get => api::sessions::list_sessions, post => api::sessions::create_session);
         $apply!($target, "/api/sessions/{id}", get => api::sessions::get_session);
         $apply!($target, "/api/sessions/{id}/messages", post => api::sessions::send_message);

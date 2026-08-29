@@ -51,21 +51,6 @@ pub fn estimate_tokens(s: &str) -> usize {
 /// （[`tokens_reach_limit`] の false-negative 無し保証を参照）。
 pub const BOUNDED_TOKENIZE_WINDOW: usize = 2 * 1024;
 
-/// `s[start..]` の次の tokenize 窓（文字境界へ丸めた終端）を返す。
-///
-/// 窓の末尾がマルチバイト文字を割らないよう、次の文字境界まで伸ばす（`s.len()` は
-/// 常に境界なので、この分岐に入るのは末尾未満のときだけ＝必ず前進する）。
-fn next_tokenize_window(s: &str, start: usize) -> Option<(usize, usize)> {
-    if start >= s.len() {
-        return None;
-    }
-    let mut end = (start + BOUNDED_TOKENIZE_WINDOW).min(s.len());
-    while end < s.len() && !s.is_char_boundary(end) {
-        end += 1;
-    }
-    Some((start, end))
-}
-
 /// `s` のトークン数が `limit` **以上**か否かを、**全体をトークナイズせずに**判定する（#576）。
 ///
 /// 先頭から [`BOUNDED_TOKENIZE_WINDOW`] バイトずつ（文字境界へ丸め）encode し、累計が
@@ -89,33 +74,20 @@ pub fn tokens_reach_limit(s: &str, limit: usize) -> bool {
     }
     let mut total = 0usize;
     let mut start = 0usize;
-    while let Some((from, to)) = next_tokenize_window(s, start) {
-        total += estimate_tokens(&s[from..to]);
+    while start < s.len() {
+        let mut end = (start + BOUNDED_TOKENIZE_WINDOW).min(s.len());
+        // 窓の末尾がマルチバイト文字を割らないよう、次の文字境界まで伸ばす（`s.len()` は
+        // 常に境界なので、この分岐に入るのは末尾未満のときだけ＝必ず前進する）。
+        while end < s.len() && !s.is_char_boundary(end) {
+            end += 1;
+        }
+        total += estimate_tokens(&s[start..end]);
         if total >= limit {
             return true;
         }
-        start = to;
+        start = end;
     }
     false
-}
-
-/// 費目 1 件の token 数を **1 回だけ**測る（#826-A）。
-///
-/// [`BOUNDED_TOKENIZE_WINDOW`] 以下は正確な [`estimate_tokens`]。超える入力は窓で刻んで
-/// 合算し、全文一括 encode による O(n²) を禁止する。窓境界の BPE 分断でわずかに上振れ
-/// しうる（[`tokens_reach_limit`] と同じ安全側）。上限判定そのものは
-/// [`tokens_reach_limit`] を使う（達した時点で打ち切る）。
-pub fn measure_item_tokens(s: &str) -> usize {
-    if s.len() <= BOUNDED_TOKENIZE_WINDOW {
-        return estimate_tokens(s);
-    }
-    let mut total = 0usize;
-    let mut start = 0usize;
-    while let Some((from, to)) = next_tokenize_window(s, start) {
-        total += estimate_tokens(&s[from..to]);
-        start = to;
-    }
-    total
 }
 
 /// 巨大入力でトークナイズが O(n²) 級に膨らむのを避けるための、**全体トークン数の概算**（#576）。
@@ -234,23 +206,6 @@ mod tests {
         assert!(
             est as f64 >= exact as f64 * 0.8 && est as f64 <= exact as f64 * 1.2,
             "est={est} exact={exact}"
-        );
-    }
-
-    /// 窓以下は正確。窓超えは全文一括 encode せず、窓合算（安全側＝正確値以上）になる。
-    #[test]
-    fn measure_item_tokens_is_exact_under_window_and_safe_over() {
-        let small = "日本語のテキストです。".repeat(10);
-        assert!(small.len() <= BOUNDED_TOKENIZE_WINDOW);
-        assert_eq!(measure_item_tokens(&small), estimate_tokens(&small));
-
-        let big = "word ".repeat(20_000);
-        assert!(big.len() > BOUNDED_TOKENIZE_WINDOW);
-        let measured = measure_item_tokens(&big);
-        let exact = estimate_tokens(&big);
-        assert!(
-            measured >= exact,
-            "windowed count must not under-count: measured={measured} exact={exact}"
         );
     }
 }
