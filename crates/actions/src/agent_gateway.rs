@@ -303,8 +303,8 @@ pub trait AgentGatewayLifecycle: Send + Sync + 'static {
     /// （capability / #191 段階2 PR4）。
     ///
     /// 稼働中の接続を持つ transport だけが `Some` を返す（接続が無ければツールは
-    /// 実行できない）。REST 経由の会話は「専用ゲートウェイが稼働していればその
-    /// transport のツールも使える」という既存の挙動をこれで表す。
+    /// 実行できない）。呼び出し元が transport のツール実体を組み込むための共通の
+    /// capability accessor である。
     ///
     /// `agent_id` を取るのは、実体が**エージェント単位の接続**だから
     /// （[`GatewayActions::a2ui_surface`] のような接続 1 本に紐づく accessor と違い、

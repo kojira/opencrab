@@ -30,8 +30,8 @@ use crate::traits::CallerIdentity;
 /// （`crates/discord/src/gateway_actions/subtask_engine.rs` の `timeout_secs`）。
 ///
 /// これが無いと、ハングするツール（応答しないネットワーク・終わらないコマンド）が
-/// registry に永久滞留し、`exit_reason="timeout"` が到達不能になる（REST は
-/// `sessions.status` が永久 `active`、依頼が無言で消える）。
+/// registry に永久滞留し、`exit_reason="timeout"` が到達不能になる（依頼が無言で
+/// 消え、走行中として残り続ける）。
 pub const DEFAULT_DISPATCH_TIMEOUT_SECS: u64 = 1800;
 
 /// subtask が settle（決着）したときの種別。
@@ -198,9 +198,9 @@ pub struct SubtaskSettled {
 /// ランタイムは `Arc<dyn SubtaskCompletionSink>` を保持し、**DB 永続化の後に**
 /// `on_subtask_settled` を呼ぶだけで、`LoopEvent` を知らない。sink 実装が
 /// 「resume ＋ その gateway の配送口」を担う（Discord=`send_to_channel` /
-/// Nostr=`reply` / REST=保存して取得 / heartbeat=次 tick 拾い or 保存）。
+/// Nostr=`reply` / web=SSE / heartbeat=次 tick 拾い or 保存）。
 pub trait SubtaskCompletionSink: Send + Sync {
-    /// この transport が持つ**親セッション ID の接頭辞**（例 `discord-` / `web-` / `agent-msg-`）。
+    /// この transport が持つ**親セッション ID の接頭辞**（例 `discord-` / `web-`）。
     ///
     /// 継続を起こすかの判断（[`dispatch_settled`]）が使う。sink は spawn 時に transport ごとへ
     /// 選ばれるが、ネストした subtask（`subtask-*`）や heartbeat（`heartbeat-*`）の決着が同じ
@@ -209,7 +209,7 @@ pub trait SubtaskCompletionSink: Send + Sync {
     /// **既定実装を与えない**（#638）。新しい transport を足したとき、コンパイラがここで止める。
     ///
     /// **接頭辞は transport 間で互いに素であること**（現状 `discord-` / `web-` / `nostr-` /
-    /// `agent-msg-` / `heartbeat-` / `subtask-` は重ならない）。重なると、判断
+    /// `heartbeat-` / `subtask-` は重ならない）。重なると、判断
     /// （[`dispatch_settled`]）が親セッションを取り違えて継続を誤配送する——コンパイラは
     /// ここを強制できないので、transport を足すときに既存の接頭辞と衝突しないことを確かめる。
     fn session_prefix(&self) -> &'static str;
@@ -217,7 +217,7 @@ pub trait SubtaskCompletionSink: Send + Sync {
     /// **進捗（[`SettleKind::Progress`]）も継続として配送するか**（Discord だけ `true`）。
     ///
     /// `report_progress` のデバウンス発火が「進捗実況」としてメインエンジンを呼び直す Discord
-    /// 固有の機能。web / Nostr / REST は完了だけを配送する（進捗で resume すると、まだ走って
+    /// 固有の機能。web / Nostr は完了だけを配送する（進捗で resume すると、まだ走って
     /// いる run の途中で二重に応答してしまう）。**transport ごとに違うのはここだけ**なので、
     /// 判断ではなく**性質**として名乗らせる（#638）。
     ///
@@ -229,7 +229,7 @@ pub trait SubtaskCompletionSink: Send + Sync {
     /// ここへ来た時点で「継続を起こす」判断は [`dispatch_settled`] が済ませている——kind の
     /// 検査も、親セッションが自分のものかの検査も、**実装側でやり直さない**。実装がするのは
     /// 「自分の口で継続ターンを回して結果を届ける」ことだけ（Discord=イベントループへ /
-    /// web=SSE / Nostr=セッションへ転記 / REST=セッションログへ永続化）。
+    /// web=SSE / Nostr=セッションへ転記）。
     ///
     /// **既定実装を与えない**（#638）。継続を実装し忘れた transport はコンパイルが通らない。
     fn deliver_continuation(&self, ev: SubtaskSettled);
@@ -239,7 +239,7 @@ pub trait SubtaskCompletionSink: Send + Sync {
     /// **完了経路とは別メソッド**にしてある。停止は「resume して返信する」イベント
     /// ではなく、`on_subtask_settled` に流すと resume する sink（Discord / web /
     /// Nostr）が「止めたのに返信する」ことになる。既定実装は debug ログのみで、
-    /// 停止で状態整合が必要な sink（REST の `sessions.status`）だけが override する。
+    /// 停止時に追加の状態整合が必要な sink だけが override する。
     ///
     /// これにより「停止の到達性」が `cancel_subtask` の 1 箇所に閉じる（各経路が
     /// cancel 後に個別に後始末する必要がない）。
@@ -257,10 +257,8 @@ pub trait SubtaskCompletionSink: Send + Sync {
 /// **継続ターンを起こすかどうかの判断（#638・唯一の実装）**。
 ///
 /// 以前は transport ごとの sink が同じ判断をそれぞれ書いていた（Discord / web / Nostr の 3 本）。
-/// 同型実装が 3 つあると「3 箇所とも直さないと直らない」うえ、実際に不一致が生まれていた——
-/// **REST には継続そのものが無く**（`POST /api/agents/{id}/messages` で subtask を投げると、
-/// 完了が届いても続きが走らない / #631 の実測）、web / Nostr は完了 1 本ごとに継続するのに
-/// REST だけ「未完がゼロのとき」というゲートを持っていた。判断をここへ集約し、transport は
+/// 同型実装が 3 つあると「3 箇所とも直さないと直らない」うえ、実際に不一致が生まれていた。
+/// 判断をここへ集約し、transport は
 /// [`SubtaskCompletionSink::deliver_continuation`]（配送）と
 /// [`SubtaskCompletionSink::forwards_progress`]（性質）だけを答える。
 ///
@@ -597,7 +595,7 @@ pub enum CancelOutcome {
 
 /// 走行中 subtask を停止する中核処理（gateway 非依存 / #161・#157 S2）。
 ///
-/// web / Nostr / REST など Discord 以外の transport でも `cancel_subtask` ツールを
+/// web / Nostr など Discord 以外の transport でも `cancel_subtask` ツールを
 /// 露出できるよう、認可・abort・registry 除去・親ログ記録・lifecycle 通知を
 /// server-neutral 層へ集約する。**停止の実装はこの 1 関数だけ**で、transport 固有の
 /// 実装は持たない（#157 S2 で Discord 実装を撤去し、その固有の後始末をここへ取り込んだ）。
@@ -639,8 +637,8 @@ pub enum CancelOutcome {
 /// 逆に settle が先に主張していた場合は停止できないので `NotFound` を返す
 /// （その subtask は通常完了として通知される）。
 ///
-/// `sink` を渡すと停止も 1 箇所から通知でき、経路側（REST の `sessions.status` 等）が
-/// cancel 後に個別に整合を取る必要がなくなる。既定実装は debug ログのみなので、
+/// `sink` を渡すと停止も 1 箇所から通知でき、経路側が cancel 後に個別に整合を取る
+/// 必要がなくなる。既定実装は debug ログのみなので、
 /// resume する sink（Discord / web / Nostr）の挙動は変わらない。
 #[allow(clippy::too_many_arguments)]
 pub fn cancel_subtask(
@@ -749,8 +747,8 @@ pub fn cancel_subtask(
             }
 
             // 停止を sink へ通知する（完了経路とは別メソッド = resume しない）。
-            // これで「最後の subtask が cancel されたのに誰もセッションを完了に
-            // しない」（REST が永久 active）が起きない。
+            // これで「最後の subtask が cancel されたのに経路側の後処理が走らない」
+            // 状態を防ぐ。
             if let Some(sink) = sink {
                 sink.on_subtask_cancelled(SubtaskSettled {
                     session_id: parent,
@@ -1335,7 +1333,7 @@ impl ToolDispatcher for SubtaskToolDispatcher {
             // **逐次実行**（並行にしない）: LLM が並べた順序に依存関係があり得る。
             for call in &calls_owned {
                 // panic を settle へ変換する（catch しないと task が unwind して
-                // settle を通らず、registry に死骸が残り REST は永久 active になる）。
+                // settle を通らず、registry に死骸が残る）。
                 let fut = std::panic::AssertUnwindSafe(executor.execute_with_id(
                     &call.tool_name,
                     &call.args,
@@ -1589,12 +1587,11 @@ mod tests {
         }
     }
 
-    /// **完了は transport に関わらず継続する**（#638 の中心）。接頭辞だけ違う 4 つの
-    /// transport（discord / web / nostr / agent-msg）で、同じ判断が同じ結果になる。
-    /// 以前は sink ごとに判断が書かれていて **REST にだけ継続が無かった**（#631 の実測）。
+    /// **完了は transport に関わらず継続する**（#638 の中心）。接頭辞だけ違う 3 つの
+    /// transport（discord / web / nostr）で、同じ判断が同じ結果になる。
     #[test]
     fn completion_continues_on_every_transport() {
-        for prefix in ["discord-", "web-", "nostr-", "agent-msg-"] {
+        for prefix in ["discord-", "web-", "nostr-"] {
             let sink = ProbeSink::new(prefix, false);
             let sid = format!("{prefix}agent-x");
             dispatch_settled(&sink, probe_ev(&sid, SettleKind::Completed));
@@ -1607,7 +1604,7 @@ mod tests {
     }
 
     /// **進捗は `forwards_progress()` が true の transport にだけ**配送される
-    /// （Discord の進捗実況。web / Nostr / REST は完了だけ）。判断は 1 箇所で、
+    /// （Discord の進捗実況。web / Nostr は完了だけ）。判断は 1 箇所で、
     /// transport は性質を名乗るだけ。
     #[test]
     fn progress_follows_the_transport_property_only() {
@@ -3285,15 +3282,14 @@ mod tests {
     }
 
     /// [P1 回帰] cancel は完了経路ではなく `on_subtask_cancelled` を通り、
-    /// `exit_reason="cancelled"` / `kind=Cancelled` で通知される
-    /// （REST が最後の subtask 停止でセッションを完了にできる）。
+    /// `exit_reason="cancelled"` / `kind=Cancelled` で通知される。
     #[tokio::test]
     async fn cancel_notifies_sink_without_completion() {
         let conn = opencrab_db::init_memory().unwrap();
         let db = opencrab_db::Db::from_connection(conn);
         let registry: SubtaskRegistry = Arc::new(DashMap::new());
         let sink = RecordingSink::default();
-        let parent = "agent-msg-agent-a-u1";
+        let parent = "web-agent-a-conv1";
         let handle = insert_fake_subtask(&registry, "st-1", parent);
 
         let outcome = cancel_subtask(
@@ -3737,7 +3733,7 @@ mod tests {
     }
 
     /// [P1 回帰] ツールが panic しても `exit_reason="error"` で settle され、
-    /// registry に死骸が残らない（REST が永久 active にならない）。
+    /// registry に死骸が残らない。
     #[tokio::test]
     async fn dispatch_panic_settles_as_error() {
         struct PanicExecutor;

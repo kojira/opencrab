@@ -143,7 +143,7 @@ pub fn record_outbound_reply(
     );
 }
 
-/// REST 経由のエージェント応答（sessions.rs / agents_messages.rs 共通の形）。
+/// セッション管理 REST 経由のエージェント応答。
 ///
 /// ゲートウェイ経由の応答と違い `source` を持たない（統合前からそう）。
 pub fn record_rest_agent_reply(

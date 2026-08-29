@@ -96,18 +96,18 @@ pub fn delete_trusted_co_agent(
 // ---- 経路（identity platform, #214） ----
 //
 // 信頼済みユーザーの表は元々「Discord のユーザー識別子」ひとつの平坦な空間だった。
-// web / REST は自分の側のユーザー識別子で同じ表を引いていたため、識別子が一致すると
-// 信頼が経路をまたいで引き継がれていた。`platform` 列を足し、認可の読み出しは
-// `(platform, user_id, agent_id)` で引く。
+// web と当時の direct-message REST は自分の側のユーザー識別子で同じ表を引いていたため、
+// 識別子が一致すると信頼が経路をまたいで引き継がれていた。`platform` 列を足し、認可の
+// 読み出しは `(platform, user_id, agent_id)` で引く。
 //
 // 表名 `trusted_discord_users` / 列名 `discord_user_id` は #159 で `trusted_users` /
 // `user_id` に改名した（マイグレーション v17。Discord は `platform` の値のひとつでしかない）。
 //
 // 互換読み（自経路の行が無ければ従来の `discord` 経路も見る暫定のフォールバック）は
 // #159 で撤去した。登録 API が経路を受け取れるようになった（`POST /api/agents/{id}/
-// trusted-users` の `platform`）ため、web / REST のユーザーは自経路の行として登録する。
-// **経路ごとの行を持たない既存の web / REST ユーザーはこの時点で信頼を失う**（緩む方向
-// ではなく機能が止まる方向）。移行手順は `docs/api.md` の Trusted Users を参照。
+// trusted-users` の `platform`）ため、web と当時の direct-message REST のユーザーは自経路の
+// 行として登録する。**経路ごとの行を持たない既存ユーザーはこの時点で信頼を失う**（緩む
+// 方向ではなく機能が止まる方向）。移行手順は `docs/api.md` の Trusted Users を参照。
 //
 // **#159 に残っている作業**:
 // - 一意制約 `(user_id, agent_id)` → `(platform, user_id, agent_id)`（表の再構築＝非可逆）
@@ -116,7 +116,7 @@ pub fn delete_trusted_co_agent(
 pub const TRUSTED_PLATFORM_DISCORD: &str = "discord";
 /// ダッシュボード（web ゲートウェイ）が申告するユーザー識別子の経路。
 pub const TRUSTED_PLATFORM_WEB: &str = "web";
-/// REST `POST /api/agents/{id}/messages` が申告するユーザー識別子の経路。
+/// 撤去済みの direct-message REST が使用していた識別子の経路（既存行の互換用）。
 pub const TRUSTED_PLATFORM_REST: &str = "rest";
 /// Nostr 受信イベントの著者 pubkey の経路（#319）。
 ///
@@ -125,9 +125,10 @@ pub const TRUSTED_PLATFORM_REST: &str = "rest";
 /// 解決）は hex と npub の両方の表現で引く。
 pub const TRUSTED_PLATFORM_NOSTR: &str = "nostr";
 
-/// 読み出し側が実際に引く経路の全体。登録 API の検証に使う。
+/// 登録 API が受け付ける識別子経路の全体。撤去済み REST の互換値も含む。
 ///
-/// 未知の経路の行は**どの読み出しとも一致しない**（登録しても誰も信頼されない）。
+/// `rest` 以外の未知の経路の行は**どの読み出しとも一致しない**（登録しても誰も
+/// 信頼されない）。
 /// 綴り間違いが「登録できたのに効かない」行として黙って残るのを防ぐため、
 /// 登録 API はこの集合で弾く（fail-closed 側の検証であって、認可の判定ではない）。
 pub const TRUSTED_PLATFORMS: [&str; 4] = [
@@ -137,7 +138,7 @@ pub const TRUSTED_PLATFORMS: [&str; 4] = [
     TRUSTED_PLATFORM_NOSTR,
 ];
 
-/// 読み出し側が引く経路として定義済みか。
+/// 登録 API で受け付ける経路（legacy `rest` を含む）として定義済みか。
 pub fn is_known_trusted_platform(platform: &str) -> bool {
     TRUSTED_PLATFORMS.contains(&platform)
 }

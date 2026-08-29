@@ -266,7 +266,7 @@
     ]
   },
   "http": {
-    "route_count": 81,
+    "route_count": 80,
     "routes": [
       {
         "activation": "always",
@@ -543,14 +543,6 @@
           "POST"
         ],
         "path": "/api/agents/{id}/memory/search",
-        "source": "opencrab_server::create_router"
-      },
-      {
-        "activation": "always",
-        "methods": [
-          "POST"
-        ],
-        "path": "/api/agents/{id}/messages",
         "source": "opencrab_server::create_router"
       },
       {

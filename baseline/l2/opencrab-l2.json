@@ -21,15 +21,15 @@
   "coverage": {
     "claim": "Only nonempty observations satisfying their facet predicate are fixed by this artifact; every uncollected or not_applicable entry is an explicit non-claim.",
     "http_facets": {
-      "effects_observed": 46,
+      "effects_observed": 45,
       "effects_uncollected": 0,
       "not_applicable": 3,
       "uncollected": 34,
-      "valid_rejections": 35
+      "valid_rejections": 34
     },
     "http_observed_status_classes": {
-      "2xx": 137,
-      "4xx": 40,
+      "2xx": 136,
+      "4xx": 39,
       "5xx": 4
     },
     "tool_effects_observed": 50,
@@ -4163,170 +4163,6 @@
           "body_utf8": "{",
           "method": "POST",
           "uri": "/api/agents/baseline-agent/memory/search"
-        },
-        "response": {
-          "body": "Failed to parse the request body as JSON: EOF while parsing an object at line 1 column 1",
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "text/plain; charset=utf-8"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 400
-        },
-        "selection": "malformed_json_rejection"
-      },
-      {
-        "effect": {
-          "after": {
-            "body": [
-              {
-                "done_count": 0,
-                "facilitator_id": null,
-                "id": "agent-msg-baseline-agent-baseline-user",
-                "max_turns": null,
-                "metadata_json": null,
-                "mode": "autonomous",
-                "participant_ids_json": "[\"baseline-agent\"]",
-                "phase": "divergent",
-                "status": "active",
-                "theme": "direct_message",
-                "turn_number": 0
-              },
-              {
-                "done_count": 0,
-                "facilitator_id": null,
-                "id": "baseline-session",
-                "max_turns": 1,
-                "metadata_json": null,
-                "mode": "baseline",
-                "participant_ids_json": "[\"baseline-agent\"]",
-                "phase": "active",
-                "status": "active",
-                "theme": "Compatibility",
-                "turn_number": 0
-              }
-            ],
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "before": {
-            "body": [
-              {
-                "done_count": 0,
-                "facilitator_id": null,
-                "id": "baseline-session",
-                "max_turns": 1,
-                "metadata_json": null,
-                "mode": "baseline",
-                "participant_ids_json": "[\"baseline-agent\"]",
-                "phase": "active",
-                "status": "active",
-                "theme": "Compatibility",
-                "turn_number": 0
-              }
-            ],
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "observer": {
-            "body": null,
-            "db_query": null,
-            "method": "GET",
-            "path": "/api/sessions"
-          },
-          "status": "observed"
-        },
-        "name": "post___api_agents_id_messages__normal",
-        "request": {
-          "body": {
-            "content": "baseline",
-            "user_id": "baseline-user"
-          },
-          "method": "POST",
-          "uri": "/api/agents/baseline-agent/messages"
-        },
-        "response": {
-          "body": {
-            "caller_type": "agent",
-            "error": "No LLM providers available",
-            "responses": [],
-            "session_id": "agent-msg-baseline-agent-baseline-user"
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "normal_or_local_precondition_branch"
-      },
-      {
-        "name": "post___api_agents_id_messages__reject_or_absent",
-        "request": {
-          "body_utf8": "{",
-          "method": "POST",
-          "uri": "/api/agents/baseline-agent/messages"
         },
         "response": {
           "body": "Failed to parse the request body as JSON: EOF while parsing an object at line 1 column 1",
@@ -10389,7 +10225,7 @@
         "selection": "resource_absence_or_empty_state"
       }
     ],
-    "source_route_count": 81,
+    "source_route_count": 80,
     "uncollected": [
       {
         "branch": "normal",
@@ -10944,10 +10780,6 @@
           "method": "GET",
           "path": "/api/agents/{id}/mcp"
         },
-        "POST /api/agents/{id}/messages": {
-          "method": "GET",
-          "path": "/api/sessions"
-        },
         "POST /api/agents/{id}/nostr/stop": {
           "method": "GET",
           "path": "/api/agents/{id}/nostr"
@@ -11080,10 +10912,6 @@
         "POST /api/agents/{id}/memory/search": {
           "limit": 10,
           "query": "baseline"
-        },
-        "POST /api/agents/{id}/messages": {
-          "content": "baseline",
-          "user_id": "baseline-user"
         },
         "POST /api/agents/{id}/schedules": {
           "cron_expr": "0 1 * * *",
