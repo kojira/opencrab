@@ -136,6 +136,28 @@ fn free_port() -> u16 {
         .port()
 }
 
+/// core 生存中に `deliveries.state='delivered'` を待つ。SSE 到達だけでは足りない。
+fn wait_delivered_count(db: &Path, timeout: Duration) -> i64 {
+    let start = Instant::now();
+    let mut last = 0;
+    while start.elapsed() < timeout {
+        if let Ok(conn) = Connection::open(db) {
+            last = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM deliveries WHERE state = 'delivered'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            if last >= 1 {
+                return last;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    last
+}
+
 fn write_server_config(root: &Path, db: &Path, sock: &Path, http_port: u16, llm_port: u16) {
     let cfg_dir = root.join("config");
     std::fs::create_dir_all(&cfg_dir).unwrap();
@@ -588,6 +610,9 @@ fn send_said_turn_say_sse_over_real_processes() {
         panic!("SSE did not confirm say: {sse}\n{extra}\n--- core stderr ---\n{tail}");
     }
 
+    // SSE は live queue 投入時点で届く。ok ack → mark_delivered は後続なので、
+    // プロセスを先に殺すと state='sending' のまま delivered=0 になる。
+    let delivered = wait_delivered_count(&db, Duration::from_secs(5));
     drop(gw);
     drop(core);
     let conn = Connection::open(&db).expect("open db after stop");
@@ -615,14 +640,14 @@ fn send_said_turn_say_sse_over_real_processes() {
         )
         .unwrap();
     assert_eq!(reply, 1, "reply log");
-    let delivered: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM deliveries WHERE state = 'delivered'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(delivered, 1, "deliveries");
+    let states: Vec<(String, i64)> = conn
+        .prepare("SELECT state, COUNT(*) FROM deliveries GROUP BY state")
+        .unwrap()
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(delivered, 1, "deliveries {states:?}");
     let sources: Vec<String> = conn
         .prepare("SELECT metadata_json FROM memory_sessions WHERE session_id = ?1")
         .unwrap()
