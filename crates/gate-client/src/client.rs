@@ -290,7 +290,7 @@ impl InstanceClient {
             let Some(binding_id) = inner.acknowledged.get(address).cloned() else {
                 return Err(PostRefuse::NotReady);
             };
-            if inner.pending_turn.get(&binding_id).is_none() {
+            if !inner.pending_turn.contains_key(&binding_id) {
                 inner
                     .pending_turn
                     .insert(binding_id.clone(), PendingTurn { saw_say: false });
