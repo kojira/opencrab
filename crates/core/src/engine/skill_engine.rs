@@ -901,6 +901,7 @@ fn split_user_blocks(text: &str) -> Vec<String> {
             && line.contains("]:")
             && !line.starts_with("[tool_call]")
             && !line.starts_with("[tool_result]")
+            && !line.starts_with("[id=")
             && !line.starts_with("[context_checkpoint")
             && !line.starts_with("[old_history_summary]")
             && !line.starts_with("[echo]");
@@ -971,6 +972,13 @@ fn checkpoint_from_messages(messages: &[Message]) -> crate::context_budget::Chec
     )
 }
 
+fn is_toolish_user_block(block: &str) -> bool {
+    block.contains("[tool_call]")
+        || block.contains("[tool_result]")
+        || block.contains("[system:")
+        || block.contains("[subtask_completed")
+}
+
 fn user_line_items(messages: &[Message]) -> Vec<crate::context_budget::CompactItem> {
     use crate::context_budget::{CompactItem, CompactLane, TokenLedger};
     let Some(user) = messages.get(1) else {
@@ -979,6 +987,14 @@ fn user_line_items(messages: &[Message]) -> Vec<crate::context_budget::CompactIt
     let text = message_plain_text(user);
     let blocks = split_user_blocks(&text);
     let tail = blocks.len().saturating_sub(8);
+    let newest_speech: std::collections::HashSet<usize> = blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| !is_toolish_user_block(b))
+        .map(|(i, _)| i)
+        .rev()
+        .take(5)
+        .collect();
     let mut ledger = TokenLedger::new();
     let mut gid = 1u64;
     let mut last_tool_gid: Option<u64> = None;
@@ -986,7 +1002,7 @@ fn user_line_items(messages: &[Message]) -> Vec<crate::context_budget::CompactIt
         .into_iter()
         .enumerate()
         .map(|(i, block)| {
-            let is_tool = block.contains("[tool_call]") || block.contains("[tool_result]");
+            let is_tool = is_toolish_user_block(&block);
             let group_id = if is_tool {
                 match last_tool_gid {
                     Some(g) => g,
@@ -1005,11 +1021,12 @@ fn user_line_items(messages: &[Message]) -> Vec<crate::context_budget::CompactIt
             };
             let key = format!("user:{i}");
             let tokens = ledger.record(&key, &block);
+            let keep_speech = newest_speech.contains(&i);
             CompactItem {
                 key,
                 tokens,
                 text: block,
-                lane: if i >= tail {
+                lane: if keep_speech || (i >= tail && !is_tool) {
                     CompactLane::RecentVerbatim
                 } else if is_tool {
                     CompactLane::Echoable
@@ -1017,7 +1034,7 @@ fn user_line_items(messages: &[Message]) -> Vec<crate::context_budget::CompactIt
                     CompactLane::OldHistory
                 },
                 log_id: Some(i as i64),
-                must_keep: i >= tail,
+                must_keep: keep_speech,
                 group_id: Some(group_id),
             }
         })
@@ -1249,6 +1266,177 @@ mod tests {
             ledger.total(),
             reserved,
             high
+        );
+    }
+
+    #[test]
+    fn user_line_items_marks_newest_speech_must_keep_not_trailing_tools() {
+        let text = "[owner] [2026-08-30 17:57:20]:\n東京！\n\
+                    [agent] [2026-08-30 17:57:54]:\n[tool_call]:\n[id=c1]: execute_shell({})\n\
+                    [system: subtask_completed] [2026-08-30 17:58:08]:\n{\"exit_reason\":\"completed\"}\n";
+        let messages = vec![
+            sys_msg(),
+            Message {
+                role: Role::User,
+                content: Some(MessageContent::Text(text.into())),
+                name: None,
+                function_call: None,
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        ];
+        let items = user_line_items(&messages);
+        let origin = items
+            .iter()
+            .find(|i| i.text.contains("東京！"))
+            .expect("origin block");
+        assert!(origin.must_keep, "発端 speech が must_keep: {items:#?}");
+        assert!(items
+            .iter()
+            .any(|i| i.text.contains("[tool_call]") && !i.must_keep));
+
+        let mut long = String::new();
+        for i in 0..30 {
+            long.push_str(&format!("[old{i}] [2026-08-01 00:00:00]:\n"));
+            long.push_str(&"word ".repeat(250));
+            long.push('\n');
+        }
+        long.push_str("[owner] [2026-08-30 17:57:00]:\n明日の天気教えて\n");
+        long.push_str("[agent] [2026-08-30 17:57:10]:\nどこの地域？\n");
+        long.push_str("[owner] [2026-08-30 17:57:20]:\n東京！\n");
+        for i in 0..10 {
+            long.push_str(&format!(
+                "[agent] [2026-08-30 17:57:{i:02}]:\n[tool_call]:\n[id=c{i}]: execute_shell({{}})\n"
+            ));
+            long.push_str(&format!(
+                "[system: subtask_completed] [2026-08-30 17:58:{i:02}]:\n{{\"exit_reason\":\"completed\"}}\n"
+            ));
+        }
+        let long_msgs = vec![
+            sys_msg(),
+            Message {
+                role: Role::User,
+                content: Some(MessageContent::Text(long)),
+                name: None,
+                function_call: None,
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        ];
+        let long_items = user_line_items(&long_msgs);
+        let origin = long_items
+            .iter()
+            .find(|i| i.text.contains("東京！"))
+            .expect("origin in long conversation");
+        assert!(
+            origin.must_keep,
+            "長い会話でも発端は must_keep: keep={} lane={:?} idx-ish={}",
+            origin.must_keep,
+            origin.lane,
+            origin.log_id.unwrap_or(-1)
+        );
+    }
+
+    /// QC: ツール決着を消費するイテレーション（is_bot_iteration=1）のプロンプトから
+    /// 発端 user 発話が消える。会話は初回 LLM には載るが、続く ws_read の 30k 予約で
+    /// mid-turn compact が user 車線を 0 にし、must_keep ごと落としていた。
+    #[tokio::test]
+    async fn settlement_iteration_prompt_keeps_originating_user_utterance() {
+        use std::sync::{Arc, Mutex};
+
+        const ORIGIN: &str = "東京！";
+        let mut conversation = String::new();
+        for i in 0..30 {
+            conversation.push_str(&format!("[old{i}] [2026-08-01 00:00:00]:\n"));
+            conversation.push_str(&"word ".repeat(250));
+            conversation.push('\n');
+        }
+        conversation.push_str("[owner] [2026-08-30 17:57:00]:\n明日の天気教えて\n");
+        conversation.push_str("[agent] [2026-08-30 17:57:10]:\nどこの地域？\n");
+        conversation.push_str(&format!("[owner] [2026-08-30 17:57:20]:\n{ORIGIN}\n"));
+        // 発端の後にツール残骸を十分置き、末尾 8 ブロックだけ must_keep では
+        // 「東京！」が OldHistory になる（auto_dispatch 決着ターンの実形）。
+        for i in 0..10 {
+            conversation.push_str(&format!(
+                "[agent] [2026-08-30 17:57:{i:02}]:\n[tool_call]:\n[id=c{i}]: execute_shell({{}})\n"
+            ));
+            conversation.push_str(&format!(
+                "[system: subtask_completed] [2026-08-30 17:58:{i:02}]:\n{{\"exit_reason\":\"completed\"}}\n"
+            ));
+        }
+        conversation.push_str("[subtask_completed: subtask_id=st-1, exit_reason=completed]\n");
+
+        let conv = crate::tokens::estimate_tokens(&conversation);
+        let reserved = crate::tool_result_log::READ_TOOL_RESULT_TOKEN_LIMIT;
+        let high = reserved.saturating_add(4_000);
+        let low = high / 2;
+        assert!(
+            conv < high,
+            "初回は圧縮せず会話が載る (conv={conv} high={high})"
+        );
+        assert!(
+            conv + reserved > high,
+            "ws_read 予約で高水位超過になること (conv={conv} reserved={reserved} high={high})"
+        );
+
+        struct CapturingLlm {
+            responses: Mutex<Vec<ChatResponse>>,
+            captured: Arc<Mutex<Vec<Vec<Message>>>>,
+        }
+        #[async_trait]
+        impl LlmClient for CapturingLlm {
+            async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+                self.captured.lock().unwrap().push(request.messages.clone());
+                let mut responses = self.responses.lock().unwrap();
+                if responses.is_empty() {
+                    anyhow::bail!("no more mock responses");
+                }
+                Ok(responses.remove(0))
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(Vec::<Vec<Message>>::new()));
+        let llm = CapturingLlm {
+            responses: Mutex::new(vec![
+                tool_call_response(vec![tc(
+                    "tc-read",
+                    "ws_read",
+                    serde_json::json!({"path": "weather.txt"}),
+                )]),
+                text_response("NO_REPLY"),
+            ]),
+            captured: captured.clone(),
+        };
+        let executor = MockExecutor::new().add_result(
+            "ws_read",
+            ActionResult {
+                success: true,
+                data: serde_json::json!({"content": "Tokyo: sunny"}),
+                error: None,
+            },
+        );
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+        engine.set_conversation_waters(high, low);
+
+        let result = engine
+            .run("system", &conversation, "test-model")
+            .await
+            .expect("turn should complete");
+        assert_eq!(result.iterations, 2);
+
+        let calls = captured.lock().unwrap();
+        assert_eq!(calls.len(), 2, "初回 + 決着消費の 2 回");
+        let first_user = message_plain_text(&calls[0][1]);
+        assert!(
+            first_user.contains(ORIGIN),
+            "初回プロンプトには発端がある: {}",
+            first_user.chars().rev().take(200).collect::<String>()
+        );
+        let settle_user = message_plain_text(&calls[1][1]);
+        assert!(
+            settle_user.contains(ORIGIN),
+            "決着イテレーションのプロンプトに発端 user 発話が残ること。実際の末尾: {}",
+            settle_user.chars().rev().take(400).collect::<String>()
         );
     }
 

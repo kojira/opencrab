@@ -252,6 +252,9 @@ pub fn compact_to_low_water(
     }
 
     kept.sort_by_key(|a| a.log_id);
+    if used > conversation_low {
+        low_water_unreachable = true;
+    }
 
     let text = join_kept(&cp_text, checkpoint_empty, &kept);
     CompactOutcome {
@@ -312,6 +315,12 @@ fn take_lane<'a>(
             } else {
                 dropped.push(g);
             }
+        } else if g.must_keep() {
+            // 直近ユーザー発話は残量が 0 でも落とさない。tool 予約が user 車線を
+            // 食い潰したとき、質問本文まで消えるのを防ぐ。
+            *remaining_budget = 0;
+            *used += g.tokens();
+            kept.extend(g.items.iter().cloned());
         } else if g.tokens() <= *remaining_budget {
             *remaining_budget -= g.tokens();
             *used += g.tokens();
@@ -540,5 +549,31 @@ mod tests {
             .contains("log:"));
         assert!(v.get("digest").is_some());
         assert!(v.get("bytes").is_some());
+    }
+
+    /// user 車線の残量が 0 でも must_keep（直近ユーザー発話）は残る。
+    #[test]
+    fn must_keep_survives_zero_remaining_budget() {
+        let empty = select_checkpoint_lane(None, None);
+        let items = vec![
+            CompactItem {
+                key: "origin".into(),
+                tokens: 20,
+                text: "[owner]: 東京！".into(),
+                lane: CompactLane::RecentVerbatim,
+                log_id: Some(1),
+                must_keep: true,
+                group_id: Some(1),
+            },
+            item_at("old", 80, CompactLane::OldHistory, 0),
+        ];
+        let out = compact_to_low_water(&items, &empty, 10, 0);
+        assert!(out.fired);
+        assert!(
+            out.text.contains("東京！"),
+            "残量 0 でも発端は残る: {}",
+            out.text
+        );
+        assert!(out.low_water_unreachable);
     }
 }
