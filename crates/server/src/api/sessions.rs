@@ -74,10 +74,7 @@ pub async fn list_session_logs(
     }
 }
 
-pub async fn list_sessions(
-    State(state): State<AppState>,
-    Query(q): Query<PageQuery>,
-) -> Response {
+pub async fn list_sessions(State(state): State<AppState>, Query(q): Query<PageQuery>) -> Response {
     let conn = match state.db.lock() {
         Ok(conn) => conn,
         Err(_) => {
@@ -88,7 +85,8 @@ pub async fn list_sessions(
                 .into_response();
         }
     };
-    match opencrab_db::queries::list_sessions_page(&conn, page_limit(q.limit), q.before.as_deref()) {
+    match opencrab_db::queries::list_sessions_page(&conn, page_limit(q.limit), q.before.as_deref())
+    {
         Ok(items) => {
             let rows: Vec<serde_json::Value> = items
                 .into_iter()
@@ -184,13 +182,12 @@ pub async fn get_session(
                     Ok(Some(b)) => match extgate.lock_registry() {
                         Ok(reg) => {
                             value["binding_address"] = serde_json::json!(b.address);
-                            value["web_binding_state"] = serde_json::json!(
-                                opencrab_extgate::web_binding_state(
+                            value["web_binding_state"] =
+                                serde_json::json!(opencrab_extgate::web_binding_state(
                                     &reg,
                                     &b.instance_id,
                                     &b.binding_id
-                                )
-                            );
+                                ));
                         }
                         Err(e) => {
                             return (

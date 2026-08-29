@@ -388,7 +388,14 @@ async fn dispatch_frame<R: AgentRuntime>(ctx: &mut ConnCtx<'_, R>, bytes: &[u8])
             }
         }
         (ConnState::Running, InboundMsg::Response(resp)) => {
-            handle_response(state, writer, instance_id.as_deref().unwrap(), identity, resp).await
+            handle_response(
+                state,
+                writer,
+                instance_id.as_deref().unwrap(),
+                identity,
+                resp,
+            )
+            .await
         }
         (ConnState::Running, InboundMsg::Invalid { id, code, m }) => {
             let inst = instance_id.as_deref().unwrap();
@@ -574,7 +581,12 @@ async fn handle_hello(
             .await;
             return Err(());
         }
-        spawn_bind_timeout(Arc::clone(state), hello.instance_id.clone(), binding_id.clone(), identity);
+        spawn_bind_timeout(
+            Arc::clone(state),
+            hello.instance_id.clone(),
+            binding_id.clone(),
+            identity,
+        );
     }
     Ok(hello.instance_id)
 }
@@ -645,7 +657,10 @@ fn inspect_instance(db: &opencrab_db::Db, instance_id: &str) -> Result<InstanceS
     }
 }
 
-fn open_bindings(db: &opencrab_db::Db, instance_id: &str) -> Result<Vec<(String, String)>, GateError> {
+fn open_bindings(
+    db: &opencrab_db::Db,
+    instance_id: &str,
+) -> Result<Vec<(String, String)>, GateError> {
     let conn = db.lock().map_err(|_| GateError::store())?;
     let mut stmt = conn
         .prepare(
@@ -746,7 +761,10 @@ async fn handle_response(
             if resp.ok {
                 if resp.seq.is_some() {
                     if let Err(e) = mark_indeterminate(state, &[delivery_id]) {
-                        tracing::error!(code = e.code.as_str(), "indeterminate after invalid say ok");
+                        tracing::error!(
+                            code = e.code.as_str(),
+                            "indeterminate after invalid say ok"
+                        );
                         state.halt();
                     }
                     close_live(
@@ -762,8 +780,12 @@ async fn handle_response(
                 }
                 if let Err(e) = mark_delivered(state, &delivery_id) {
                     tracing::error!(code = e.code.as_str(), "delivered write failed");
-                    if let Err(ind) = mark_indeterminate(state, std::slice::from_ref(&delivery_id)) {
-                        tracing::error!(code = ind.code.as_str(), "indeterminate after delivered write failed");
+                    if let Err(ind) = mark_indeterminate(state, std::slice::from_ref(&delivery_id))
+                    {
+                        tracing::error!(
+                            code = ind.code.as_str(),
+                            "indeterminate after delivered write failed"
+                        );
                     }
                     close_live(
                         state,
@@ -781,8 +803,12 @@ async fn handle_response(
             } else if resp.code == Some(ErrorCode::ExternalRejected) {
                 if let Err(e) = mark_failed(state, &delivery_id) {
                     tracing::error!(code = e.code.as_str(), "failed write failed");
-                    if let Err(ind) = mark_indeterminate(state, std::slice::from_ref(&delivery_id)) {
-                        tracing::error!(code = ind.code.as_str(), "indeterminate after failed write failed");
+                    if let Err(ind) = mark_indeterminate(state, std::slice::from_ref(&delivery_id))
+                    {
+                        tracing::error!(
+                            code = ind.code.as_str(),
+                            "indeterminate after failed write failed"
+                        );
                     }
                     close_live(
                         state,
@@ -799,7 +825,10 @@ async fn handle_response(
                 Ok(())
             } else {
                 if let Err(e) = mark_indeterminate(state, &[delivery_id]) {
-                    tracing::error!(code = e.code.as_str(), "indeterminate after invalid say err");
+                    tracing::error!(
+                        code = e.code.as_str(),
+                        "indeterminate after invalid say err"
+                    );
                     state.halt();
                 }
                 close_live(
@@ -858,7 +887,11 @@ pub async fn wait_bind_ack(
 
 /// open binding と registry から Web 投影の state を導出する。
 /// pending 待ちだけが provisioning。live 不在・enqueue 未実行は unavailable。
-pub fn web_binding_state(reg: &crate::registry::Registry, instance_id: &str, binding_id: &str) -> &'static str {
+pub fn web_binding_state(
+    reg: &crate::registry::Registry,
+    instance_id: &str,
+    binding_id: &str,
+) -> &'static str {
     match reg.get(instance_id) {
         Some(live) if live.acknowledged.contains(binding_id) => "ready",
         Some(live)
@@ -912,11 +945,7 @@ pub async fn enqueue_bind(
             }
         };
         let Some(live) = reg.get_mut(instance_id) else {
-            tracing::warn!(
-                instance_id,
-                binding_id,
-                "enqueue_bind: instance not live"
-            );
+            tracing::warn!(instance_id, binding_id, "enqueue_bind: instance not live");
             return EnqueueBindOutcome::NotLive;
         };
         let req_id = crate::ids::bind_request_id(binding_id);

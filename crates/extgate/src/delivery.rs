@@ -39,7 +39,8 @@ pub async fn apply_delivery_effect<R: AgentRuntime>(
                 state.halt();
                 return;
             }
-            if let Err(e) = send_text(state, instance_id, binding_id, agent_id, session_id, &body).await
+            if let Err(e) =
+                send_text(state, instance_id, binding_id, agent_id, session_id, &body).await
             {
                 if e.code == ErrorCode::NotConnected || e.code == ErrorCode::BindingClosed {
                     return;

@@ -10,7 +10,8 @@ use crate::error::{ErrorCode, GateError};
 
 pub fn parse_object_no_dup(bytes: &[u8]) -> Result<Value, GateError> {
     let mut de = serde_json::Deserializer::from_slice(bytes);
-    let value = NoDupValue::deserialize(&mut de).map_err(|_| GateError::new(ErrorCode::BadRequest))?;
+    let value =
+        NoDupValue::deserialize(&mut de).map_err(|_| GateError::new(ErrorCode::BadRequest))?;
     de.end()
         .map_err(|_| GateError::new(ErrorCode::BadRequest))?;
     if !value.0.is_object() {

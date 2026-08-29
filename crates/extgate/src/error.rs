@@ -105,9 +105,9 @@ impl ErrorCode {
         Some(match self {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::BadRequest => StatusCode::BAD_REQUEST,
-            Self::SubjectUnknown
-            | Self::InstanceUnknown
-            | Self::BindingUnknown => StatusCode::NOT_FOUND,
+            Self::SubjectUnknown | Self::InstanceUnknown | Self::BindingUnknown => {
+                StatusCode::NOT_FOUND
+            }
             Self::InstanceConflict
             | Self::RevisionConflict
             | Self::InstanceDisabled

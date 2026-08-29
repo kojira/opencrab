@@ -80,6 +80,9 @@ pub struct SkillEngine {
     /// engine まで来ない）。この値で頭打ちになった応答は finish_reason=Length で戻り、
     /// run ループがターンを失敗させる。
     max_output_tokens: Option<u32>,
+    /// 会話車線の二水位（#826-B）。未設定なら途中圧縮しない（テスト / sub-engine）。
+    conversation_high: Option<usize>,
+    conversation_low: Option<usize>,
 }
 
 /// LLM へ返す tool_result の退避先設定（#284）。
@@ -112,7 +115,16 @@ impl SkillEngine {
             tool_result_offload: None,
             live_inbound: None,
             max_output_tokens: None,
+            conversation_high: None,
+            conversation_low: None,
         }
+    }
+
+    /// ターン内 append 境界の二水位。設定すると TokenLedger 合計だけで超過判定し、
+    /// 超えたときだけ合成 user 文字列を低水位まで刈る。
+    pub fn set_conversation_waters(&mut self, high: usize, low: usize) {
+        self.conversation_high = Some(high);
+        self.conversation_low = Some(low);
     }
 
     /// 各 ChatRequest に載せる出力トークン上限を設定する（#676）。使用モデルの実能力値を
@@ -328,6 +340,18 @@ impl SkillEngine {
             },
         ];
 
+        let mut turn_ledger = crate::context_budget::TokenLedger::new();
+        turn_ledger.record("system", system_context);
+        turn_ledger.record("user", user_message);
+        let mut turn_gov = match (self.conversation_high, self.conversation_low) {
+            (Some(h), Some(l)) => {
+                let mut gov = crate::context_budget::TurnGovernor::new(h, l);
+                gov.inspect_turn_start(turn_ledger.total());
+                Some(gov)
+            }
+            _ => None,
+        };
+
         let mut iterations = 0;
         let mut total_tool_calls = 0;
         let mut xml_fallback_parses = 0;
@@ -377,15 +401,17 @@ impl SkillEngine {
                         );
                         messages.push(Message {
                             role: Role::User,
-                            content: Some(MessageContent::Text(text)),
+                            content: Some(MessageContent::Text(text.clone())),
                             name: None,
                             function_call: None,
                             tool_calls: None,
                             tool_call_id: None,
                         });
+                        turn_ledger.record(format!("live:{}", messages.len()), &text);
                     }
                 }
             }
+            apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
 
             // Check for dynamic model override.
             let model = model_override
@@ -598,6 +624,11 @@ impl SkillEngine {
                     tool_calls: Some(tool_calls.clone()),
                     tool_call_id: None,
                 });
+                turn_ledger.record(
+                    format!("asst:{}", messages.len()),
+                    content.as_deref().unwrap_or(""),
+                );
+                apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
 
                 // Notify on_tool_call callbacks.
                 if !self.on_tool_call.is_empty() {
@@ -685,6 +716,14 @@ impl SkillEngine {
                         None => (&tool_calls[..], &tool_calls[..0]),
                     };
 
+                reserve_result_caps(
+                    &mut turn_gov,
+                    &mut turn_ledger,
+                    &mut messages,
+                    inline_calls,
+                    dispatch_calls,
+                )?;
+
                 for tool_call in inline_calls {
                     total_tool_calls += 1;
                     let tool_name = &tool_call.function.name;
@@ -705,6 +744,8 @@ impl SkillEngine {
                         let result_json = serde_json::to_string(&denied)
                             .unwrap_or_else(|_| r#"{"error": "Permission denied"}"#.to_string());
                         messages.push(Message::tool(tool_call.id.clone(), result_json.clone()));
+                        turn_ledger.record(format!("tool:{}", messages.len()), &result_json);
+                        apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
 
                         // Notify on_tool_result callbacks for denied action.
                         for cb in &self.on_tool_result {
@@ -749,6 +790,8 @@ impl SkillEngine {
                     let result_json = self.cap_tool_result(tool_name, &tool_call.id, result_json);
 
                     messages.push(Message::tool(tool_call.id.clone(), result_json.clone()));
+                    turn_ledger.record(format!("tool:{}", messages.len()), &result_json);
+                    apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
 
                     // Notify on_tool_result callbacks.
                     for cb in &self.on_tool_result {
@@ -794,6 +837,8 @@ impl SkillEngine {
                         let result_json = serde_json::to_string(&spawned)
                             .unwrap_or_else(|_| r#"{"status":"spawned"}"#.to_string());
                         messages.push(Message::tool(tool_call.id.clone(), result_json.clone()));
+                        turn_ledger.record(format!("tool:{}", messages.len()), &result_json);
+                        apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
                         for cb in &self.on_tool_result {
                             cb(
                                 tool_call.id.clone(),
@@ -831,6 +876,237 @@ impl SkillEngine {
             });
         }
     }
+}
+
+fn message_plain_text(msg: &Message) -> String {
+    match &msg.content {
+        Some(MessageContent::Text(t)) => t.clone(),
+        Some(MessageContent::Multi(parts)) => parts
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Some(MessageContent::Image { .. }) | None => String::new(),
+    }
+}
+
+fn split_user_blocks(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for line in text.lines() {
+        let new_block = line.starts_with('[')
+            && line.contains("]:")
+            && !line.starts_with("[tool_call]")
+            && !line.starts_with("[tool_result]")
+            && !line.starts_with("[context_checkpoint")
+            && !line.starts_with("[old_history_summary]")
+            && !line.starts_with("[echo]");
+        if new_block && !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push('\n');
+        }
+        cur.push_str(line);
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out.into_iter()
+        .filter(|b| {
+            let t = b.trim();
+            !t.is_empty()
+                && t != crate::context_budget::CHECKPOINT_EMPTY_MARKER
+                && !t.starts_with("[context_checkpoint]")
+        })
+        .collect()
+}
+
+fn extract_explicit_checkpoint(text: &str) -> Option<crate::context_budget::ContextCheckpoint> {
+    let idx = text.find("[context_checkpoint]")?;
+    let after = text[idx + "[context_checkpoint]".len()..].trim_start();
+    let start = after.find('{')?;
+    let slice = &after[start..];
+    let mut depth = 0i32;
+    let mut end = None;
+    for (i, c) in slice.char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(i + 1);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    serde_json::from_str(&slice[..end?]).ok()
+}
+
+fn last_assistant_speech(messages: &[Message]) -> Option<String> {
+    messages.iter().rev().find_map(|m| {
+        if m.role != Role::Assistant {
+            return None;
+        }
+        let t = message_plain_text(m);
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
+        }
+    })
+}
+
+fn checkpoint_from_messages(messages: &[Message]) -> crate::context_budget::CheckpointLane {
+    let user = messages.get(1).map(message_plain_text).unwrap_or_default();
+    let explicit = extract_explicit_checkpoint(&user);
+    crate::context_budget::select_checkpoint_lane(
+        explicit.as_ref(),
+        last_assistant_speech(messages).as_deref(),
+    )
+}
+
+fn user_line_items(messages: &[Message]) -> Vec<crate::context_budget::CompactItem> {
+    use crate::context_budget::{CompactItem, CompactLane, TokenLedger};
+    let Some(user) = messages.get(1) else {
+        return Vec::new();
+    };
+    let text = message_plain_text(user);
+    let blocks = split_user_blocks(&text);
+    let tail = blocks.len().saturating_sub(8);
+    let mut ledger = TokenLedger::new();
+    let mut gid = 1u64;
+    let mut last_tool_gid: Option<u64> = None;
+    blocks
+        .into_iter()
+        .enumerate()
+        .map(|(i, block)| {
+            let is_tool = block.contains("[tool_call]") || block.contains("[tool_result]");
+            let group_id = if is_tool {
+                match last_tool_gid {
+                    Some(g) => g,
+                    None => {
+                        let g = gid;
+                        gid += 1;
+                        last_tool_gid = Some(g);
+                        g
+                    }
+                }
+            } else {
+                last_tool_gid = None;
+                let g = gid;
+                gid += 1;
+                g
+            };
+            let key = format!("user:{i}");
+            let tokens = ledger.record(&key, &block);
+            CompactItem {
+                key,
+                tokens,
+                text: block,
+                lane: if i >= tail {
+                    CompactLane::RecentVerbatim
+                } else if is_tool {
+                    CompactLane::Echoable
+                } else {
+                    CompactLane::OldHistory
+                },
+                log_id: Some(i as i64),
+                must_keep: i >= tail,
+                group_id: Some(group_id),
+            }
+        })
+        .collect()
+}
+
+fn apply_turn_budget(
+    gov: &mut Option<crate::context_budget::TurnGovernor>,
+    ledger: &mut crate::context_budget::TokenLedger,
+    messages: &mut [Message],
+    reserved: usize,
+) -> Result<(), anyhow::Error> {
+    let Some(gov) = gov.as_mut() else {
+        return Ok(());
+    };
+    let user_tokens = ledger
+        .items()
+        .iter()
+        .find(|i| i.key == "user")
+        .map(|i| i.tokens)
+        .unwrap_or(0);
+    // `reserved`（このターンで予約するツール result 枠）は会話の外にある固定費として扱う。
+    // 会話単体は高水位未満でも、予約を足して超えるなら、その分だけ会話を余計に刈って
+    // 予約枠を空ける（DESIGN-CONTEXT-BUDGET line 55: 収まらなければ低水位まで圧縮）。
+    // これを渡さないと、予約が原因の超過で圧縮が一度も発火しない（#826 のメンション死）。
+    let other = ledger
+        .total()
+        .saturating_sub(user_tokens)
+        .saturating_add(reserved);
+    let items = user_line_items(messages);
+    let checkpoint = checkpoint_from_messages(messages);
+    let Some(outcome) = gov.compact_user_on_append(
+        ledger.total().saturating_add(reserved),
+        &items,
+        &checkpoint,
+        other,
+    ) else {
+        return Ok(());
+    };
+    if outcome.exhausted {
+        return Err(anyhow::anyhow!(
+            "{}: mid-turn compact cannot fit inviolable lanes",
+            crate::context_budget::CONTEXT_BUDGET_EXHAUSTED
+        ));
+    }
+    if outcome.fired {
+        if let Some(user) = messages.get_mut(1) {
+            user.content = Some(MessageContent::Text(outcome.text.clone()));
+        }
+        ledger.record_tokens("user", outcome.after_tokens);
+    }
+    Ok(())
+}
+
+/// 実行前に各 result cap の合計を予約する。収まらなければ先に刈り、それでも駄目なら
+/// 副作用 tool を一件も開始せず止める。
+fn reserve_result_caps(
+    gov: &mut Option<crate::context_budget::TurnGovernor>,
+    ledger: &mut crate::context_budget::TokenLedger,
+    messages: &mut [Message],
+    inline_calls: &[ToolCall],
+    dispatch_calls: &[ToolCall],
+) -> Result<(), anyhow::Error> {
+    let reserved: usize = inline_calls
+        .iter()
+        .chain(dispatch_calls.iter())
+        .map(|tc| crate::tool_result_log::inline_limit_for_tool(&tc.function.name))
+        .sum();
+    let high = match gov.as_ref() {
+        Some(g) => g.conversation_high,
+        None => return Ok(()),
+    };
+    let projected = ledger.total().saturating_add(reserved);
+    if !crate::context_budget::should_compact(projected, high) {
+        return Ok(());
+    }
+    apply_turn_budget(gov, ledger, messages, reserved)?;
+    let high = match gov.as_ref() {
+        Some(g) => g.conversation_high,
+        None => return Ok(()),
+    };
+    let projected = ledger.total().saturating_add(reserved);
+    if crate::context_budget::should_compact(projected, high) {
+        return Err(anyhow::anyhow!(
+            "{}: cannot reserve tool result caps without exceeding input_high",
+            crate::context_budget::CONTEXT_BUDGET_EXHAUSTED
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -886,6 +1162,94 @@ mod tests {
 
     fn tool_call_response(calls: Vec<ToolCall>) -> ChatResponse {
         resp(None, calls)
+    }
+
+    /// 圧縮可能な user message（先頭 OldHistory / 末尾 8 ブロックは RecentVerbatim）を組む。
+    fn compactible_user(blocks: usize, words_per_block: usize) -> Message {
+        let mut text = String::new();
+        for i in 0..blocks {
+            text.push_str(&format!("[s{i}]:\n"));
+            text.push_str(&"word ".repeat(words_per_block));
+            text.push('\n');
+        }
+        Message {
+            role: Role::User,
+            content: Some(MessageContent::Text(text)),
+            name: None,
+            function_call: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    fn sys_msg() -> Message {
+        Message {
+            role: Role::System,
+            content: Some(MessageContent::Text("sys".into())),
+            name: None,
+            function_call: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    /// #826 メンション死の回帰ガード。テスト網の穴＝「ツール枠予約 × 水位」の交差点。
+    ///
+    /// DESIGN-CONTEXT-BUDGET.md line 55: provider 呼出し前に各 result cap の合計を予約し、
+    /// **収まらなければ古い完了済み group を低水位まで圧縮**し、それでも収まらなければ副作用 tool を
+    /// 一件も開始せず停止する。
+    ///
+    /// 会話単体は高水位「未満」だが、ツール枠予約を足すと超過する。会話に圧縮可能な OldHistory が
+    /// 十分あり「低水位 + 予約 ≤ 高水位」なら、圧縮を発火して turn を通すべき。
+    ///
+    /// 現状は `apply_turn_budget` が `reserved` を圧縮判定へ渡さず、`compact_user_on_append` が
+    /// 「会話単体 < 高水位」で None（圧縮せず）を返すため、`context_budget_exhausted:
+    /// cannot reserve tool result caps` で即死する。→ このテストが赤くなり、直す場所を指す。
+    #[test]
+    fn reserve_result_caps_compacts_old_groups_when_reservation_overflows() {
+        let mut messages = vec![sys_msg(), compactible_user(40, 300)];
+        let user_text = message_plain_text(&messages[1]);
+        let conv = crate::tokens::estimate_tokens(&user_text);
+
+        // 水位は会話量から導く（固定トークン数に依存しない）。
+        let high = conv + 500;
+        let low = conv / 2;
+        let mut gov = Some(crate::context_budget::TurnGovernor::new(high, low));
+
+        let mut ledger = crate::context_budget::TokenLedger::new();
+        ledger.record_tokens("user", conv);
+
+        // 非 read tool 1 本 → reserved = TOOL_RESULT_TOKEN_LIMIT(2500)。READ は 30000。
+        let reserved = crate::tool_result_log::inline_limit_for_tool("side_effect_tool");
+        assert!(
+            conv < high,
+            "前提: 会話は高水位未満 (conv={conv} high={high})"
+        );
+        assert!(
+            conv + reserved > high,
+            "前提: 会話 + 予約 が高水位超 (conv={conv} reserved={reserved} high={high})"
+        );
+        assert!(
+            low + reserved <= high,
+            "前提: 低水位まで圧縮すれば予約が収まる=通るべき (low={low} reserved={reserved} high={high})"
+        );
+
+        let calls = vec![tc("c1", "side_effect_tool", serde_json::json!({}))];
+        let res = reserve_result_caps(&mut gov, &mut ledger, &mut messages, &calls, &[]);
+
+        assert!(
+            res.is_ok(),
+            "会話 + 予約 が高水位を超えても、圧縮可能なら古い group を低水位まで刈って turn を通すべき\
+             （DESIGN-CONTEXT-BUDGET line 55）。実際のエラー: {:?}",
+            res.err().map(|e| e.to_string())
+        );
+        assert!(
+            ledger.total() + reserved <= high,
+            "圧縮後は 会話({}) + 予約({}) が高水位({}) に収まること",
+            ledger.total(),
+            reserved,
+            high
+        );
     }
 
     struct MockLlm {

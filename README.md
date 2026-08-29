@@ -245,7 +245,7 @@ The ActionDispatcher registers these actions, invokable by agents during convers
 
 | Category | Actions | Description |
 |----------|---------|-------------|
-| **Common** | `generate_inner_voice`, `update_impression`, `declare_done`, `get_system_info` | Core session control and self-narration |
+| **Common** | `generate_inner_voice`, `update_impression`, `declare_done`, `get_system_info`, `update_context_checkpoint` | Core session control, self-narration, and arrival-point checkpoint |
 | **Workspace** | `ws_read`, `ws_write`, `ws_edit`, `ws_list`, `ws_delete`, `ws_mkdir` | Sandboxed per-agent file operations |
 | **Learning** | `learn_from_experience`, `learn_from_peer`, `reflect_and_learn` | Self-improvement through experience and reflection |
 | **Skills** | `create_my_skill`, `retire_my_skill`, `restore_my_skill`, `read_skill` | Self-created skill lifecycle |

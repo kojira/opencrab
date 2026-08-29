@@ -1852,6 +1852,29 @@ const MIGRATIONS: &[Migration] = &[
         //   BEGIN; PRAGMA user_version = 44; COMMIT;
         up: migrate_v45_nostr_bundle_state,
     },
+    Migration {
+        version: 46,
+        description:
+            "会話圧縮の派生スナップショット表を追加する（#826-B）。正本は変えず行追加のみ",
+        // 派生表。正本 memory_sessions は触らない。既存 DB へ CREATE IF NOT EXISTS。
+        // #826 では v43 だったが、transplant の v43-45（載せ替え工程）と番号衝突するため
+        // 統合時に v46 へ採番し直した。既存 transplant DB（user_version=45）は次回起動で
+        // これだけを適用する。切り戻し: BEGIN; PRAGMA user_version = 45; COMMIT;（表は残してよい）
+        up: |conn| {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS conversation_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    compacted_conversation TEXT NOT NULL,
+                    through_log_id INTEGER NOT NULL,
+                    token_count INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_conversation_snapshots_session
+                    ON conversation_snapshots(session_id, id);",
+            )
+        },
+    },
 ];
 
 /// このバイナリが知る最新スキーマバージョン。

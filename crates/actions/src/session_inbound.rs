@@ -640,6 +640,8 @@ pub async fn start_session_turn<R, Wrap, Build>(
     runtime: &R,
     source: TranscriptSource,
     inbound: &NormalizedInbound<'_>,
+    system_prompt: &str,
+    runtime_context_text: &str,
     wrap_conversation: Wrap,
     build_run: Build,
 ) -> Option<anyhow::Result<EngineResult>>
@@ -653,6 +655,8 @@ where
         runtime,
         inbound.session_id,
         inbound.agent_id,
+        system_prompt,
+        runtime_context_text,
         wrap_conversation,
         build_run,
     )
@@ -666,6 +670,8 @@ pub async fn run_session_turn<R, Wrap, Build>(
     runtime: &R,
     session_id: &str,
     agent_id: &str,
+    system_prompt: &str,
+    runtime_context_text: &str,
     wrap_conversation: Wrap,
     build_run: Build,
 ) -> Option<anyhow::Result<EngineResult>>
@@ -674,8 +680,34 @@ where
     Wrap: FnOnce(&str) -> String,
     Build: FnOnce(String) -> RunRequest,
 {
-    let budget = runtime.context_budget_tokens(agent_id);
-    let raw = match runtime.build_conversation_string(session_id, agent_id, budget) {
+    // #826: fail-loud 予算。既定へは落とさず、一意名（超過は `context_budget_exhausted`）で
+    // ログしてこのターンを run しない（`None`）。`system_prompt` / `runtime_context_text` は
+    // `wrap_conversation` が前置する実 request と一致させること（呼び出し側の契約）。
+    let budget = match runtime.context_budget_tokens(
+        agent_id,
+        session_id,
+        system_prompt,
+        runtime_context_text,
+    ) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!(
+                session_id = %session_id,
+                agent_id = %agent_id,
+                error_name = e.name(),
+                "{name}: {e}",
+                name = e.name()
+            );
+            return None;
+        }
+    };
+    let raw = match runtime.build_conversation_string(
+        session_id,
+        agent_id,
+        budget,
+        system_prompt,
+        runtime_context_text,
+    ) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(

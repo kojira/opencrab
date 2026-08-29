@@ -31,3 +31,6 @@ tower = { workspace = true }
 http-body-util = "0.1"
 rusqlite = { workspace = true }
 reqwest = { workspace = true }
+# #826 の起動時予算チェック（ensure_startup_budget_inputs）を満たすため、実プロセス E2E が
+# core 起動前に DB スキーマを作り既定モデルの model_pricing を seed する（下の test 参照）。
+opencrab-db = { workspace = true }

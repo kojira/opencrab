@@ -8,8 +8,11 @@ const DNS_NS: uuid::Uuid = uuid::Uuid::NAMESPACE_DNS;
 
 /// `kind_id="nostr"` の instance ID。
 pub fn nostr_instance_id(agent_id: &str) -> String {
-    uuid::Uuid::new_v5(&DNS_NS, format!("opencrab:nostr:instance:{agent_id}").as_bytes())
-        .to_string()
+    uuid::Uuid::new_v5(
+        &DNS_NS,
+        format!("opencrab:nostr:instance:{agent_id}").as_bytes(),
+    )
+    .to_string()
 }
 
 /// address は既存 session_id と byte-equal。
@@ -88,7 +91,10 @@ impl std::fmt::Display for BindingPlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotNostrSession { watch_id } => {
-                write!(f, "session_watches.id={watch_id} の session_id が nostr- 系ではない")
+                write!(
+                    f,
+                    "session_watches.id={watch_id} の session_id が nostr- 系ではない"
+                )
             }
             Self::NonPositiveInterval { watch_id } => {
                 write!(
@@ -147,10 +153,7 @@ mod tests {
 
     #[test]
     fn default_session_watches_skip_default_lane_and_share_one_binding() {
-        let watches = vec![
-            watch(17, "nostr-a1", 60),
-            watch(3, "nostr-a1", 30),
-        ];
+        let watches = vec![watch(17, "nostr-a1", 60), watch(3, "nostr-a1", 30)];
         let plans = plan_session_bindings("a1", &watches).unwrap();
         assert_eq!(plans.len(), 1);
         assert!(plans[0].skip_default_lane);
@@ -177,12 +180,18 @@ mod tests {
     #[test]
     fn non_nostr_session_is_fail_loud() {
         let err = plan_session_bindings("a1", &[watch(1, "discord-x", 10)]).unwrap_err();
-        assert!(matches!(err, BindingPlanError::NotNostrSession { watch_id: 1 }));
+        assert!(matches!(
+            err,
+            BindingPlanError::NotNostrSession { watch_id: 1 }
+        ));
     }
 
     #[test]
     fn non_positive_interval_is_fail_loud() {
         let err = plan_session_bindings("a1", &[watch(9, "nostr-a1", 0)]).unwrap_err();
-        assert!(matches!(err, BindingPlanError::NonPositiveInterval { watch_id: 9 }));
+        assert!(matches!(
+            err,
+            BindingPlanError::NonPositiveInterval { watch_id: 9 }
+        ));
     }
 }
