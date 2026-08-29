@@ -3,11 +3,14 @@
 //! ```text
 //! input_high = min(floor(W * 0.50), A)
 //! input_low  = min(floor(W * 0.25), floor(A / 2))
-//! mandatory_fixed = system + runtime_context + functions + output_reserve
+//! mandatory_fixed = system + runtime_context + functions
 //! fixed = mandatory_fixed + injected_memory_index
 //! conversation_high = input_high.saturating_sub(fixed)
 //! conversation_low  = input_low.saturating_sub(fixed)
 //! ```
+//!
+//! `output_reserve` は入力予算と別軸。会話水位からは引かない。
+//! 物理窓ガードは `実入力 + output_reserve <= W`（[`LineItems::total_with_reserve`]）。
 //!
 //! A の較正前初期値は 85–90K 劣化開始点より安全側の 80,000。chatgpt 305K 特例は置かない。
 
@@ -113,6 +116,8 @@ pub enum MemoryIndexOmitReason {
 pub enum BudgetExhaustReason {
     MandatoryFixedExceedsInputHigh,
     FunctionsExceedCap,
+    /// 実入力 + `output_reserve` が物理窓 `W` を超えた。
+    InputPlusReserveExceedsWindow,
 }
 
 /// 費目別予算の合成結果。
@@ -223,8 +228,7 @@ pub fn apply_line_items(
         let mandatory_fixed = measured
             .system
             .saturating_add(measured.runtime_context)
-            .saturating_add(measured.functions)
-            .saturating_add(water.output_reserve);
+            .saturating_add(measured.functions);
         return Err(ContextBudgetError::exhausted(
             BudgetExhaustReason::FunctionsExceedCap,
             water.input_high,
@@ -237,8 +241,7 @@ pub fn apply_line_items(
     let mandatory_fixed = measured
         .system
         .saturating_add(measured.runtime_context)
-        .saturating_add(measured.functions)
-        .saturating_add(water.output_reserve);
+        .saturating_add(measured.functions);
     if mandatory_fixed >= water.input_high {
         return Err(ContextBudgetError::exhausted(
             BudgetExhaustReason::MandatoryFixedExceedsInputHigh,
@@ -278,6 +281,16 @@ pub fn apply_line_items(
         memory_index: injected_memory_index,
         conversation: measured.conversation,
     };
+    if items.total_with_reserve() > water.window {
+        return Err(ContextBudgetError::exhausted(
+            BudgetExhaustReason::InputPlusReserveExceedsWindow,
+            water.input_high,
+            water.input_low,
+            &items,
+            mandatory_fixed,
+            fixed,
+        ));
+    }
     Ok(ContextBudgetEnvelope {
         water,
         items,
@@ -397,7 +410,7 @@ mod tests {
         .unwrap();
         assert_eq!(env.memory_index_decision, MemoryIndexDecision::Inject);
         assert_eq!(env.injected_memory_index, 500);
-        assert_eq!(env.mandatory_fixed, 1_000 + 200 + 3_000 + 4_000);
+        assert_eq!(env.mandatory_fixed, 1_000 + 200 + 3_000);
         assert_eq!(env.fixed, env.mandatory_fixed + 500);
         assert_eq!(env.conversation_high, water.input_high - env.fixed);
         assert_eq!(env.conversation_low, water.input_low - env.fixed);
@@ -448,14 +461,14 @@ mod tests {
         };
         let water = compute_water_levels(10_000, 100, &policy).unwrap();
         // input_high = min(5000, 1000) = 1000
-        // mandatory = 200+50+100+100 = 450, remaining = 550
+        // mandatory = 200+50+100 = 350, remaining = 650
         let env = apply_line_items(
             water,
             MeasuredLineItems {
                 system: 200,
                 runtime_context: 50,
                 functions: 100,
-                memory_index: 550,
+                memory_index: 650,
                 memory_index_entry_count: 3,
                 conversation: 10,
             },
@@ -482,12 +495,12 @@ mod tests {
             ..ContextBudgetPolicy::default()
         };
         let water = compute_water_levels(10_000, 400, &policy).unwrap();
-        // input_high = 1000, mandatory = 300+100+200+400 = 1000
+        // input_high = 1000, mandatory = 500+300+200 = 1000（output_reserve は含めない）
         let err = apply_line_items(
             water,
             MeasuredLineItems {
-                system: 300,
-                runtime_context: 100,
+                system: 500,
+                runtime_context: 300,
                 functions: 200,
                 memory_index: 0,
                 memory_index_entry_count: 0,
@@ -566,13 +579,12 @@ mod tests {
             let mandatory = measured
                 .system
                 .saturating_add(measured.runtime_context)
-                .saturating_add(measured.functions)
-                .saturating_add(reserve);
+                .saturating_add(measured.functions);
             match apply_line_items(water, measured, &policy) {
                 Ok(env) => {
                     assert_eq!(
                         env.mandatory_fixed,
-                        measured.system + measured.runtime_context + measured.functions + reserve
+                        measured.system + measured.runtime_context + measured.functions
                     );
                     assert_eq!(env.fixed, env.mandatory_fixed + env.injected_memory_index);
                     assert_eq!(
@@ -593,6 +605,7 @@ mod tests {
                             + env.items.output_reserve
                     );
                     assert!(env.fixed < env.water.input_high);
+                    assert!(env.items.total_with_reserve() <= env.water.window);
                     match env.memory_index_decision {
                         MemoryIndexDecision::Inject => {
                             assert_eq!(env.injected_memory_index, measured.memory_index);
@@ -605,9 +618,23 @@ mod tests {
                 }
                 Err(err) => {
                     assert_eq!(err.name(), CONTEXT_BUDGET_EXHAUSTED);
+                    let remaining = water.input_high.saturating_sub(mandatory);
+                    let injected = match decide_memory_index(
+                        measured.memory_index,
+                        policy.memory_index_token_cap,
+                        remaining,
+                    ) {
+                        MemoryIndexDecision::Inject => measured.memory_index,
+                        MemoryIndexDecision::Omit { .. } => 0,
+                    };
+                    let physical = mandatory
+                        .saturating_add(injected)
+                        .saturating_add(measured.conversation)
+                        .saturating_add(reserve);
                     assert!(
                         measured.functions > policy.functions_token_cap
                             || mandatory >= water.input_high
+                            || physical > water.window
                     );
                 }
             }
@@ -651,5 +678,73 @@ mod tests {
         assert_eq!(*points.last().unwrap(), 110_000);
         assert_eq!(seen_conversation, points);
         assert!(seen_conversation.windows(2).all(|w| w[1] == w[0] + 5_000));
+    }
+
+    /// 出力予約は入力予算と別軸。reserve を増やしても conversation_high は減らない。
+    /// 350k 窓・A=80k・固定費 9k なら conversation_high=71k。会話 27k+READ 予約 30k が収まる。
+    #[test]
+    fn conversation_high_does_not_shrink_when_output_reserve_grows() {
+        let policy = ContextBudgetPolicy::default();
+        let measured = MeasuredLineItems {
+            system: 5_000,
+            runtime_context: 1_000,
+            functions: 3_000,
+            memory_index: 0,
+            memory_index_entry_count: 0,
+            conversation: 27_000,
+        };
+        let small = apply_line_items(
+            compute_water_levels(350_000, 1_000, &policy).unwrap(),
+            measured,
+            &policy,
+        )
+        .unwrap();
+        let large = apply_line_items(
+            compute_water_levels(350_000, 32_000, &policy).unwrap(),
+            measured,
+            &policy,
+        )
+        .unwrap();
+        assert_eq!(small.water.input_high, DEFAULT_ABSOLUTE_CAP_A);
+        assert_eq!(large.water.input_high, DEFAULT_ABSOLUTE_CAP_A);
+        assert_eq!(small.conversation_high, large.conversation_high);
+        assert_eq!(
+            large.conversation_high,
+            large.water.input_high - (5_000 + 1_000 + 3_000)
+        );
+        assert_eq!(large.conversation_high, 71_000);
+        assert!(
+            27_000 + 30_000 <= large.conversation_high,
+            "会話 27k + READ 予約 30k が圧縮なしで通ること"
+        );
+    }
+
+    /// 小窓で 実入力 + output_reserve が物理窓を超えたら fail-loud。
+    #[test]
+    fn small_window_fails_loud_when_input_plus_reserve_exceeds_window() {
+        let policy = ContextBudgetPolicy::default();
+        // W=8_000 → input_high=4_000。実入力 500 + reserve 7_800 = 8_300 > 8_000。
+        let water = compute_water_levels(8_000, 7_800, &policy).unwrap();
+        assert_eq!(water.input_high, 4_000);
+        let err = apply_line_items(
+            water,
+            MeasuredLineItems {
+                system: 400,
+                runtime_context: 50,
+                functions: 50,
+                memory_index: 0,
+                memory_index_entry_count: 0,
+                conversation: 0,
+            },
+            &policy,
+        )
+        .unwrap_err();
+        assert_eq!(err.name(), CONTEXT_BUDGET_EXHAUSTED);
+        match err {
+            ContextBudgetError::Exhausted { reason, .. } => {
+                assert_eq!(reason, BudgetExhaustReason::InputPlusReserveExceedsWindow);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }

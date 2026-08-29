@@ -8,11 +8,13 @@
 input_high = min(floor(W * 0.50), A)
 input_low  = min(floor(W * 0.25), floor(A / 2))
 output_reserve = model_pricing.max_output_tokens
-mandatory_fixed = system + runtime_context + functions + output_reserve
+mandatory_fixed = system + runtime_context + functions
 fixed = mandatory_fixed + injected_memory_index
 conversation_high = input_high.saturating_sub(fixed)
 conversation_low  = input_low.saturating_sub(fixed)
 ```
+
+`output_reserve` は入力予算と別軸なので `mandatory_fixed` に足さない。物理窓ガードは `実入力 + output_reserve <= W`。超えたら `context_budget_exhausted`。
 
 較正前の初期値:
 
@@ -26,7 +28,7 @@ conversation_low  = input_low.saturating_sub(fixed)
 
 `W` は `model_pricing.context_window`。無 / NULL / 0 と予約の無 / NULL / 0 は既定へ落とさず、起動時と解決時に fail-loud。chatgpt 305K 特例と 100K 隠れフォールバックは置かない。全 provider が同じ `min(比例水位, A)` を通る。
 
-`fixed >= input_high` と functions 超過は唯一のエラー名 `context_budget_exhausted`。空履歴で続行しない。
+`fixed >= input_high`、functions 超過、`実入力 + output_reserve > W` は唯一のエラー名 `context_budget_exhausted`。空履歴で続行しない。
 
 入口（REST / sessions / scheduler / process / AgentRuntime）は `resolve_agent_request_envelope` → `apply_line_items` だけを通す。会話組立へ渡すのは `conversation_high` と `conversation_low`（`build_conversation_string_with_waters`）。MI 判定は `apply_line_items` に一本化し、観測行は `from_envelope`。各 request 前（`run_agent_response`）は実 `list_tools` で functions cap と `fixed >= input_high` を再検査する。
 

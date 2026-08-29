@@ -184,8 +184,8 @@ mod tests {
         let err = resolve_request_envelope(
             water,
             MeasuredLineItems {
-                system: 300,
-                runtime_context: 100,
+                system: 500,
+                runtime_context: 300,
                 functions: 200,
                 memory_index: 0,
                 memory_index_entry_count: 0,
