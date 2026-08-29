@@ -345,6 +345,30 @@ fn spawn_core(root: &Path) -> Proc {
 
 fn seed_core(root: &Path, db: &Path, sock: &Path, core_port: u16, llm_port: u16) -> Proc {
     write_server_config(root, db, sock, core_port, llm_port);
+    // #826: core は起動時 `ensure_startup_budget_inputs`（fail-loud）で既定モデルの
+    // `model_pricing` を要求する。DB 実体は core が作るが、その前にここで schema を作り
+    // e2e-mock を seed しておかないと core が起動時に落ちて HTTP が上がらない（30s タイムアウト）。
+    // context_window は予算 envelope の mandatory_fixed（ツール ~7.1k 等）を input_high に収める
+    // ため 200000（8192 では context_budget_exhausted）。seed 接続の WAL を畳んでから閉じ、直後の
+    // core 側 r2d2 プールが "database is locked" をリトライして起動が遅れるのを防ぐ。
+    {
+        let conn =
+            opencrab_db::init_connection(db.to_str().unwrap()).expect("init db schema for seed");
+        opencrab_db::queries::upsert_model_pricing(
+            &conn,
+            &opencrab_db::queries::ModelPricingRow {
+                provider: "openai".into(),
+                model: "e2e-mock".into(),
+                input_price_per_1m: 0.0,
+                output_price_per_1m: 0.0,
+                context_window: Some(200_000),
+                max_output_tokens: Some(1024),
+            },
+        )
+        .expect("seed model_pricing for startup budget check");
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;")
+            .expect("checkpoint seed db");
+    }
     let core = spawn_core(root);
     assert!(
         wait_http(core_port, "/health", Duration::from_secs(30)),
@@ -374,7 +398,7 @@ fn seed_core(root: &Path, db: &Path, sock: &Path, core_port: u16, llm_port: u16)
         "PUT",
         "/api/llm/model-pricing",
         None,
-        Some(r#"{"provider":"openai","model":"e2e-mock","context_window":8192,"max_output_tokens":1024}"#),
+        Some(r#"{"provider":"openai","model":"e2e-mock","context_window":200000,"max_output_tokens":1024}"#),
         Duration::from_secs(5),
     )
     .expect("model pricing");
