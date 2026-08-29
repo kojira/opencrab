@@ -167,13 +167,19 @@ impl SkillEngine {
 
     /// LLM へ返す直前の tool_result にトークン上限を効かせる（#284 / #294）。
     ///
+    /// 上限は `min(ツール別上限, 残り会話枠)`。超えたら既存の spool-with-stub。
     /// **これを通さずに `Message::tool` へ積んではいけない。** 素通りさせると
     /// 1 件の巨大な結果（実例: 76,661 バイトのフォロー一覧）がプロンプトを占有し、
     /// 同ターンのユーザー発言が 1 件も載らなくなる。
-    /// 永続化側（`on_tool_result` → `sanitize_tool_result_for_log`）と同じ上限・
-    /// 同じ退避先を使うので、同ターンで見える本文と次ターンに再注入される本文が
-    /// 一致する。
-    fn cap_tool_result(&self, tool_name: &str, tool_call_id: &str, result_json: String) -> String {
+    /// 永続化側（`on_tool_result` → `sanitize_tool_result_for_log`）と同じ退避先を使うので、
+    /// 同ターンで見える本文と次ターンに再注入される本文が一致する。
+    fn cap_tool_result(
+        &self,
+        tool_name: &str,
+        tool_call_id: &str,
+        result_json: String,
+        remaining: Option<usize>,
+    ) -> String {
         // 上限判定は `sanitize_tool_result_for_llm` 側が持つ（トークン数で測るため
         // ここでバイト数の早期 return を二重に置くと物差しがズレる）。
         let (session_id, workspace_root) = match &self.tool_result_offload {
@@ -181,12 +187,13 @@ impl SkillEngine {
             // 退避先未設定（sub-engine / テスト）でも上限は必ず効かせる。
             None => ("session", None),
         };
-        let capped = crate::tool_result_log::sanitize_tool_result_for_llm(
+        let capped = crate::tool_result_log::sanitize_tool_result_for_append(
             tool_name,
             &result_json,
             session_id,
             tool_call_id,
             workspace_root,
+            remaining,
         );
         if capped != result_json {
             tracing::warn!(
@@ -716,14 +723,6 @@ impl SkillEngine {
                         None => (&tool_calls[..], &tool_calls[..0]),
                     };
 
-                reserve_result_caps(
-                    &mut turn_gov,
-                    &mut turn_ledger,
-                    &mut messages,
-                    inline_calls,
-                    dispatch_calls,
-                )?;
-
                 for tool_call in inline_calls {
                     total_tool_calls += 1;
                     let tool_name = &tool_call.function.name;
@@ -787,7 +786,21 @@ impl SkillEngine {
                     // #284: LLM へ返す前に上限を効かせる。以降（messages / callback）は
                     // すべてこの capped 本文を使い、同ターンのプロンプトと DB に残る
                     // 本文を一致させる。
-                    let result_json = self.cap_tool_result(tool_name, &tool_call.id, result_json);
+                    let result_json = seat_tool_result(
+                        &mut turn_gov,
+                        &mut turn_ledger,
+                        &mut messages,
+                        tool_name,
+                        &result_json,
+                        |remaining| {
+                            self.cap_tool_result(
+                                tool_name,
+                                &tool_call.id,
+                                result_json.clone(),
+                                remaining,
+                            )
+                        },
+                    )?;
 
                     messages.push(Message::tool(tool_call.id.clone(), result_json.clone()));
                     turn_ledger.record(format!("tool:{}", messages.len()), &result_json);
@@ -1002,10 +1015,9 @@ fn apply_turn_budget(
         .find(|i| i.key == "user")
         .map(|i| i.tokens)
         .unwrap_or(0);
-    // `reserved`（このターンで予約するツール result 枠）は会話の外にある固定費として扱う。
-    // 会話単体は高水位未満でも、予約を足して超えるなら、その分だけ会話を余計に刈って
-    // 予約枠を空ける（DESIGN-CONTEXT-BUDGET line 55: 収まらなければ低水位まで圧縮）。
-    // これを渡さないと、予約が原因の超過で圧縮が一度も発火しない（#826 のメンション死）。
+    // `reserved` は「これから載せる本文」の見積り。会話単体は高水位未満でも、
+    // 本文を足すと超えるなら先に刈って残り枠を空ける。収まらなくてもここでは
+    // 止めない（結果は残り枠へ切り詰めて必ず載せる）。
     let other = ledger
         .total()
         .saturating_sub(user_tokens)
@@ -1016,12 +1028,6 @@ fn apply_turn_budget(
     else {
         return Ok(());
     };
-    if outcome.exhausted {
-        return Err(anyhow::anyhow!(
-            "{}: mid-turn compact cannot fit inviolable lanes",
-            crate::context_budget::CONTEXT_BUDGET_EXHAUSTED
-        ));
-    }
     if outcome.fired {
         if let Some(user) = messages.get_mut(1) {
             user.content = Some(MessageContent::Text(outcome.text.clone()));
@@ -1031,41 +1037,39 @@ fn apply_turn_budget(
     Ok(())
 }
 
-/// 実行前に各 result cap の合計を予約する。収まらなければ先に刈り、それでも駄目なら
-/// 副作用 tool を一件も開始せず止める。
-fn reserve_result_caps(
+fn remaining_conversation(
+    gov: &Option<crate::context_budget::TurnGovernor>,
+    ledger: &crate::context_budget::TokenLedger,
+) -> Option<usize> {
+    gov.as_ref()
+        .map(|g| g.conversation_high.saturating_sub(ledger.total()))
+}
+
+fn result_exceeds_limit(result_json: &str, limit: usize) -> bool {
+    result_json.len() >= limit && crate::tokens::tokens_reach_limit(result_json, limit)
+}
+
+/// 結果を載せる前に必要なら圧縮し、残り枠へ切り詰めた本文を返す。turn は止めない。
+fn seat_tool_result(
     gov: &mut Option<crate::context_budget::TurnGovernor>,
     ledger: &mut crate::context_budget::TokenLedger,
     messages: &mut [Message],
-    inline_calls: &[ToolCall],
-    dispatch_calls: &[ToolCall],
-) -> Result<(), anyhow::Error> {
-    let reserved: usize = inline_calls
-        .iter()
-        .chain(dispatch_calls.iter())
-        .map(|tc| crate::tool_result_log::inline_limit_for_tool(&tc.function.name))
-        .sum();
-    let high = match gov.as_ref() {
-        Some(g) => g.conversation_high,
-        None => return Ok(()),
-    };
-    let projected = ledger.total().saturating_add(reserved);
-    if !crate::context_budget::should_compact(projected, high) {
-        return Ok(());
+    tool_name: &str,
+    result_json: &str,
+    cap: impl FnOnce(Option<usize>) -> String,
+) -> Result<String, anyhow::Error> {
+    apply_turn_budget(gov, ledger, messages, 0)?;
+    let remaining = remaining_conversation(gov, ledger);
+    let tentative = crate::tool_result_log::append_limit_for_tool(tool_name, remaining);
+    if result_exceeds_limit(result_json, tentative) {
+        apply_turn_budget(
+            gov,
+            ledger,
+            messages,
+            crate::tool_result_log::inline_limit_for_tool(tool_name),
+        )?;
     }
-    apply_turn_budget(gov, ledger, messages, reserved)?;
-    let high = match gov.as_ref() {
-        Some(g) => g.conversation_high,
-        None => return Ok(()),
-    };
-    let projected = ledger.total().saturating_add(reserved);
-    if crate::context_budget::should_compact(projected, high) {
-        return Err(anyhow::anyhow!(
-            "{}: cannot reserve tool result caps without exceeding input_high",
-            crate::context_budget::CONTEXT_BUDGET_EXHAUSTED
-        ));
-    }
-    Ok(())
+    Ok(cap(remaining_conversation(gov, ledger)))
 }
 
 #[cfg(test)]
@@ -1152,63 +1156,196 @@ mod tests {
         }
     }
 
-    /// #826 メンション死の回帰ガード。テスト網の穴＝「ツール枠予約 × 水位」の交差点。
-    ///
-    /// DESIGN-CONTEXT-BUDGET.md line 55: provider 呼出し前に各 result cap の合計を予約し、
-    /// **収まらなければ古い完了済み group を低水位まで圧縮**し、それでも収まらなければ副作用 tool を
-    /// 一件も開始せず停止する。
-    ///
-    /// 会話単体は高水位「未満」だが、ツール枠予約を足すと超過する。会話に圧縮可能な OldHistory が
-    /// 十分あり「低水位 + 予約 ≤ 高水位」なら、圧縮を発火して turn を通すべき。
-    ///
-    /// 現状は `apply_turn_budget` が `reserved` を圧縮判定へ渡さず、`compact_user_on_append` が
-    /// 「会話単体 < 高水位」で None（圧縮せず）を返すため、`context_budget_exhausted:
-    /// cannot reserve tool result caps` で即死する。→ このテストが赤くなり、直す場所を指す。
-    #[test]
-    fn reserve_result_caps_compacts_old_groups_when_reservation_overflows() {
-        let mut messages = vec![sys_msg(), compactible_user(40, 300)];
-        let user_text = message_plain_text(&messages[1]);
-        let conv = crate::tokens::estimate_tokens(&user_text);
+    fn user_from(text: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: Some(MessageContent::Text(text.into())),
+            name: None,
+            function_call: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
 
-        // 水位は会話量から導く（固定トークン数に依存しない）。
-        let high = conv + 500;
-        let low = conv / 2;
-        let mut gov = Some(crate::context_budget::TurnGovernor::new(high, low));
+    fn json_of_words(n: usize) -> String {
+        format!(r#"{{"data":"{}"}}"#, "word ".repeat(n))
+    }
 
+    /// 結果を 1 件ずつ seat → append。予約しない。失敗しても turn は死なない（Ok）。
+    fn seat_batch(
+        conversation: &str,
+        results: &[(&str, String)],
+        high: usize,
+        low: usize,
+    ) -> Result<Vec<String>, String> {
+        let mut messages = vec![sys_msg(), user_from(conversation)];
+        let conv = crate::tokens::estimate_tokens(conversation);
         let mut ledger = crate::context_budget::TokenLedger::new();
         ledger.record_tokens("user", conv);
+        let mut gov = Some(crate::context_budget::TurnGovernor::new(high, low));
+        let mut out = Vec::new();
+        for (i, (name, body)) in results.iter().enumerate() {
+            let capped = seat_tool_result(
+                &mut gov,
+                &mut ledger,
+                &mut messages,
+                name,
+                body,
+                |remaining| {
+                    crate::tool_result_log::sanitize_tool_result_for_append(
+                        name,
+                        body,
+                        "sess",
+                        &format!("tc{i}"),
+                        None,
+                        remaining,
+                    )
+                },
+            )
+            .map_err(|e| e.to_string())?;
+            messages.push(Message::tool(format!("tc{i}"), capped.clone()));
+            ledger.record(format!("tool:{}", messages.len()), &capped);
+            apply_turn_budget(&mut gov, &mut ledger, &mut messages, 0)
+                .map_err(|e| e.to_string())?;
+            out.push(capped);
+        }
+        Ok(out)
+    }
 
-        // 非 read tool 1 本 → reserved = TOOL_RESULT_TOKEN_LIMIT(2500)。READ は 30000。
-        let reserved = crate::tool_result_log::inline_limit_for_tool("side_effect_tool");
+    /// QC 19:05:42。ws_read×2 + search を会話 18k に載せる。予約はせず、全文が入る。
+    #[test]
+    fn qc_two_small_ws_reads_and_search_fit_without_truncation() {
+        let high = 71_000usize;
+        let low = 31_000usize;
+        let conv = "word ".repeat(18_000);
+        let read = json_of_words(1_800);
+        let search = json_of_words(400);
         assert!(
-            conv < high,
-            "前提: 会話は高水位未満 (conv={conv} high={high})"
+            crate::tokens::estimate_tokens(&read) < 3_000,
+            "QC の 120 行相当は数千トークン"
         );
-        assert!(
-            conv + reserved > high,
-            "前提: 会話 + 予約 が高水位超 (conv={conv} reserved={reserved} high={high})"
-        );
-        assert!(
-            low + reserved <= high,
-            "前提: 低水位まで圧縮すれば予約が収まる=通るべき (low={low} reserved={reserved} high={high})"
-        );
+        let seated = seat_batch(
+            &conv,
+            &[
+                ("ws_read", read.clone()),
+                ("ws_read", read.clone()),
+                ("search_my_history", search.clone()),
+            ],
+            high,
+            low,
+        )
+        .expect("ツール結果が理由で turn は死なない");
+        assert_eq!(seated[0], read, "1 本目 ws_read は切り詰めない");
+        assert_eq!(seated[1], read, "2 本目 ws_read は切り詰めない");
+        assert_eq!(seated[2], search, "search は切り詰めない");
+    }
 
-        let calls = vec![tc("c1", "side_effect_tool", serde_json::json!({}))];
-        let res = reserve_result_caps(&mut gov, &mut ledger, &mut messages, &calls, &[]);
+    /// 予約モデル撤廃後の代表境界。どんな構成でも turn は死なず、足りなければスタブ。
+    #[test]
+    fn append_model_boundary_matrix() {
+        let high = 71_000usize;
+        let low = 31_000usize;
+        let small_conv = "hello";
+        let compactible = message_plain_text(&compactible_user(40, 300));
+        let mut inviolable = String::new();
+        for i in 0..5 {
+            inviolable.push_str(&format!("[owner{i}] [2026-08-30 00:00:0{i}]:\n"));
+            inviolable.push_str(&"word ".repeat(4_000));
+            inviolable.push('\n');
+        }
+        let small_read = json_of_words(1_800);
+        let large_read = json_of_words(28_000);
+        let unread = json_of_words(28_000);
+        let write = json_of_words(2_000);
 
-        assert!(
-            res.is_ok(),
-            "会話 + 予約 が高水位を超えても、圧縮可能なら古い group を低水位まで刈って turn を通すべき\
-             （DESIGN-CONTEXT-BUDGET line 55）。実際のエラー: {:?}",
-            res.err().map(|e| e.to_string())
-        );
-        assert!(
-            ledger.total() + reserved <= high,
-            "圧縮後は 会話({}) + 予約({}) が高水位({}) に収まること",
-            ledger.total(),
-            reserved,
-            high
-        );
+        struct Case {
+            name: &'static str,
+            conv: String,
+            results: Vec<(&'static str, String)>,
+        }
+        let cases = [
+            Case {
+                name: "small-conv + 1 small ws_read",
+                conv: small_conv.into(),
+                results: vec![("ws_read", small_read.clone())],
+            },
+            Case {
+                name: "small-conv + 1 large ws_read",
+                conv: small_conv.into(),
+                results: vec![("ws_read", large_read.clone())],
+            },
+            Case {
+                name: "small-conv + 1 unestimable read",
+                conv: small_conv.into(),
+                results: vec![("ws_list", unread.clone())],
+            },
+            Case {
+                name: "small-conv + 1 non-read",
+                conv: small_conv.into(),
+                results: vec![("ws_write", write.clone())],
+            },
+            Case {
+                name: "compactible + 1 large ws_read",
+                conv: compactible.clone(),
+                results: vec![("ws_read", large_read.clone())],
+            },
+            Case {
+                name: "compactible + QC trio",
+                conv: compactible.clone(),
+                results: vec![
+                    ("ws_read", small_read.clone()),
+                    ("ws_read", small_read.clone()),
+                    ("search_my_history", json_of_words(400)),
+                ],
+            },
+            Case {
+                name: "compactible + 3 large reads",
+                conv: compactible.clone(),
+                results: vec![
+                    ("ws_list", unread.clone()),
+                    ("ws_list", unread.clone()),
+                    ("ws_list", unread.clone()),
+                ],
+            },
+            Case {
+                name: "inviolable + 1 small ws_read",
+                conv: inviolable.clone(),
+                results: vec![("ws_read", small_read.clone())],
+            },
+            Case {
+                name: "inviolable + 3 large reads",
+                conv: inviolable.clone(),
+                results: vec![
+                    ("ws_list", unread.clone()),
+                    ("ws_list", unread.clone()),
+                    ("ws_list", unread.clone()),
+                ],
+            },
+            Case {
+                name: "small-conv + 5 mixed",
+                conv: small_conv.into(),
+                results: vec![
+                    ("ws_read", small_read),
+                    ("ws_read", large_read),
+                    ("ws_list", unread),
+                    ("ws_write", write.clone()),
+                    ("ws_write", write),
+                ],
+            },
+        ];
+
+        for case in &cases {
+            let seated = seat_batch(&case.conv, &case.results, high, low)
+                .unwrap_or_else(|e| panic!("{}: ツール結果で turn が死んだ: {e}", case.name));
+            assert_eq!(seated.len(), case.results.len(), "{}", case.name);
+            for (i, capped) in seated.iter().enumerate() {
+                assert!(
+                    !capped.is_empty(),
+                    "{}: result[{i}] が空（切り詰め済みかスタブが載ること）",
+                    case.name
+                );
+            }
+        }
     }
 
     #[test]
@@ -1279,9 +1416,8 @@ mod tests {
         );
     }
 
-    /// QC: ツール決着を消費するイテレーション（is_bot_iteration=1）のプロンプトから
-    /// 発端 user 発話が消える。会話は初回 LLM には載るが、続く ws_read の 30k 予約で
-    /// mid-turn compact が user 車線を 0 にし、must_keep ごと落としていた。
+    /// QC: ツール決着を消費するイテレーションのプロンプトから発端 user 発話が消える。
+    /// 圧縮しても must_keep の発端は残す。
     #[tokio::test]
     async fn settlement_iteration_prompt_keeps_originating_user_utterance() {
         use std::sync::{Arc, Mutex};

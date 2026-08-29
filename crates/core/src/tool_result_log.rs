@@ -106,6 +106,17 @@ pub fn inline_limit_for_tool(tool_name: &str) -> usize {
     }
 }
 
+/// append 時の inline 上限。ツール別上限と、そのときの残り会話枠の小さい方。
+///
+/// `remaining` が `None` のときは水位が無い（テスト / 水位未設定）のでツール別上限だけ。
+/// `Some(0)` は枠が無いので 0。sanitizer は 0 なら必ずスタブに倒す。
+pub fn append_limit_for_tool(tool_name: &str, remaining: Option<usize>) -> usize {
+    match remaining {
+        Some(left) => inline_limit_for_tool(tool_name).min(left),
+        None => inline_limit_for_tool(tool_name),
+    }
+}
+
 /// **「読み」の唯一の定義**（#707）。もう一度呼べば同じものが得られ、副作用が無いツール。
 ///
 /// この 1 つの述語を、性質の違う 2 つの判断が**両方**参照する:
@@ -497,15 +508,14 @@ fn oversized_notice(orig_bytes: usize, body: &str, saved: Option<&OffloadResult>
 /// `tool_name` は呼び出し元の意図表示・将来の per-tool 方針のために残す。#620 で nsec キー名
 /// マスクは撤去したので、ここが行うのはサイズ上限と退避だけ。
 fn sanitize_tool_result(
-    tool_name: &str,
+    _tool_name: &str,
     result_json: &str,
     session_id: &str,
     tool_call_id: &str,
     workspace_root: Option<&Path>,
+    limit: usize,
 ) -> String {
-    // #707: 上限は**ツールで分ける**（`tool_name` は「将来の per-tool 方針のために残す」と
-    // 書かれたまま捨てられていた引数。ここで初めて使う）。
-    let limit = inline_limit_for_tool(tool_name);
+    // 上限は呼び出し側が [`append_limit_for_tool`] / [`inline_limit_for_tool`] で決めて渡す。
     // #620: 旧来の nsec キー名マスク（`redact_secrets_in_result`）は撤去した（守るものが
     // 無い / 鍵は at-rest 暗号化と env 注入で扱う）。ここはサイズ上限と退避だけを行う。
     if !exceeds_limit(result_json, limit) {
@@ -553,6 +563,26 @@ pub fn sanitize_tool_result_for_log(
         session_id,
         tool_call_id,
         workspace_root,
+        inline_limit_for_tool(tool_name),
+    )
+}
+
+/// append 時: ツール別上限と残り会話枠の小さい方へ切り詰める。超えたら既存スタブ。
+pub fn sanitize_tool_result_for_append(
+    tool_name: &str,
+    result_json: &str,
+    session_id: &str,
+    tool_call_id: &str,
+    workspace_root: Option<&Path>,
+    remaining: Option<usize>,
+) -> String {
+    sanitize_tool_result(
+        tool_name,
+        result_json,
+        session_id,
+        tool_call_id,
+        workspace_root,
+        append_limit_for_tool(tool_name, remaining),
     )
 }
 
@@ -589,6 +619,7 @@ pub fn sanitize_tool_result_for_llm(
         session_id,
         tool_call_id,
         workspace_root,
+        inline_limit_for_tool(tool_name),
     )
 }
 
@@ -608,6 +639,48 @@ mod tests {
             assert!(!is_read_tool(t));
             assert_eq!(inline_limit_for_tool(t), TOOL_RESULT_TOKEN_LIMIT);
         }
+        assert_eq!(
+            append_limit_for_tool("ws_read", Some(1_000)),
+            1_000,
+            "残り枠がツール上限より狭いときは残り枠"
+        );
+        assert_eq!(
+            append_limit_for_tool("ws_read", Some(80_000)),
+            READ_TOOL_RESULT_TOKEN_LIMIT,
+            "残り枠が広いときはツール上限"
+        );
+        assert_eq!(append_limit_for_tool("ws_read", Some(0)), 0);
+        assert_eq!(
+            append_limit_for_tool("ws_read", None),
+            READ_TOOL_RESULT_TOKEN_LIMIT
+        );
+    }
+
+    #[test]
+    fn remaining_budget_below_result_spools_stub() {
+        let json = format!(r#"{{"data":"{}"}}"#, "word ".repeat(800));
+        assert!(
+            crate::tokens::estimate_tokens(&json) > 200,
+            "前提: 本文は残り枠より大きい"
+        );
+        let dir = tempfile::TempDir::new().unwrap();
+        let out = sanitize_tool_result_for_append(
+            "ws_read",
+            &json,
+            "sess",
+            "tc-rem",
+            Some(dir.path()),
+            Some(200),
+        );
+        assert_ne!(out, json);
+        assert!(
+            out.contains("Tool result withheld"),
+            "残り枠不足はスタブ: {out}"
+        );
+        assert!(
+            out.contains("start_line") && out.contains("line_count"),
+            "スタブは狭めて読み直せる導線を残す: {out}"
+        );
     }
 
     #[test]

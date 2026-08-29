@@ -37,7 +37,7 @@ conversation_low  = input_low.saturating_sub(fixed)
 圧縮の正時はターン終了直後の**背景**処理。`run_agent_response` は `tokio::spawn` で `finish_turn` を投げ、利用者の待ち時間に乗せない。`TurnGovernor::finish_turn` が派生スナップショット（`conversation_snapshots`: compacted 会話 + `through_log_id`）を行追加する。DB 正本は不変。
 
 - ターン開始: `assemble_from_snapshot`（スナップショット + 水位印より後の差分）と `inspect_turn_start`。開始時 `fit_logs_to_budget` は走らせない。高水位超過のときだけ `compact_start_if_over`（途中超過と同じ `compact_to_low_water`）。
-- ターン途中: SkillEngine の各 append で `TokenLedger` 合計だけを更新し、高水位超過のときだけ合成 user 文字列を低水位まで刈る。実行前に各 tool の result cap 合計を予約し、収まらなければ先に刈る。それでも駄目なら副作用 tool を開始せず `context_budget_exhausted`。
+- ターン途中: SkillEngine の各 append で `TokenLedger` 合計だけを更新し、高水位超過のときだけ合成 user 文字列を低水位まで刈る。ツール結果は事前予約しない。append 時に `min(ツール別上限, 残り会話枠)` へ切り詰め、超えたら既存の spool-with-stub を載せる。ツール結果が理由で turn は死なない。`context_budget_exhausted` は未登録モデル等の設定・データ誤りと、物理窓 `実入力 + output_reserve > W` だけ。
 - 二水位: `tokens > conversation_high` で発火し、低水位まで落とす。ちょうど high は非発火。
 - 車線順: 直近逐語（must_keep の発話を優先） → エコー参照化 → 古い履歴要約。新しい echo が古い逐語を押し出さない。`ExchangeGroup`（assistant said + 対応 tool call/result）は原子的。
 - スナップショット: 非発火時も `assembled.text`（snap+差分の全文）を書く。`items` は正本の全ログから取る。persist 後も継続ターンで刈れる。
