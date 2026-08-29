@@ -879,42 +879,6 @@ fn conversation_snapshots_migration_v46() {
     assert!(table_exists(&conn, "conversation_snapshots").unwrap());
 }
 
-/// v47（#826 統合の自己修復）: 予算 main ビルドが conversation_snapshots を **v43** で
-/// スタンプした DB を模す。統合後は v43（載せ替え）が版番号衝突でスキップされ、
-/// policy_json / session_watches / tool_logs が欠けたままになる。v47 がそれを塞ぎ、
-/// 全物件が揃った状態へ収束することを検証する。
-#[test]
-fn v43_stamped_db_is_self_healed_by_v47() {
-    let conn = crate::init_memory().expect("init");
-    // 予算 main 由来 DB の再現: v43 の 3 物件を落とし、user_version を 43 に戻す。
-    // （conversation_snapshots は予算 main が v43 で作るので残す。）
-    conn.execute_batch(
-        "DROP TABLE session_watches;
-         DROP TABLE tool_logs;
-         ALTER TABLE sessions DROP COLUMN policy_json;
-         PRAGMA user_version = 43;",
-    )
-    .unwrap();
-    assert!(!table_exists(&conn, "session_watches").unwrap());
-    assert!(!table_exists(&conn, "tool_logs").unwrap());
-    assert!(!column_exists(&conn, "sessions", "policy_json").unwrap());
-
-    // 統合後バイナリの起動を模す。run_migrations は v43 を version>43 で弾き、
-    // v44,45,46,47 を適用する。欠けた 3 物件は v47 が塞ぐ。
-    run_migrations(&conn, MIGRATIONS).expect("v43-stamped DB migrates without error");
-    assert_eq!(schema_version(&conn).unwrap(), latest_version());
-    assert!(table_exists(&conn, "session_watches").unwrap());
-    assert!(table_exists(&conn, "tool_logs").unwrap());
-    assert!(column_exists(&conn, "sessions", "policy_json").unwrap());
-
-    // 再実行は no-op（冪等）。
-    conn.execute_batch("PRAGMA user_version = 43;").unwrap();
-    run_migrations(&conn, MIGRATIONS).expect("v47 rerun no-op");
-    assert!(table_exists(&conn, "session_watches").unwrap());
-    assert!(table_exists(&conn, "tool_logs").unwrap());
-    assert!(column_exists(&conn, "sessions", "policy_json").unwrap());
-}
-
 /// v19: Nostr 受信転記先の表が増えるだけで、既存の Nostr 設定
 /// （`agent_nostr_config`）の行は 1 つも動かない（#252 段階 A）。冪等でもある。
 #[test]
@@ -3475,10 +3439,11 @@ fn v37_backfill_preserves_firing_and_normalizes() {
 
     initialize(&conn).expect("apply v37");
     assert_eq!(schema_version(&conn).unwrap(), latest_version());
-    // v47（v43 スキップ DB の自己修復）が最新。v38..v47 とも session_heartbeat_config を
-    // 触らないので、下の v37 backfill 検証（発火集合・正規化）はそのまま成立する。新しい
-    // migration が session_heartbeat_config を触ったらこの guard を更新し、下の期待値を見直すこと。
-    assert_eq!(latest_version(), 47, "v47 が最新版であること");
+    // v46（#826-B の conversation_snapshots。載せ替え v43-45 との番号衝突を避け v46 へ採番）が
+    // 最新。v38..v46 とも session_heartbeat_config を触らないので、下の v37 backfill 検証（発火
+    // 集合・正規化）はそのまま成立する。新しい migration が session_heartbeat_config を触ったら
+    // この guard を更新し、下の期待値を見直すこと。
+    assert_eq!(latest_version(), 46, "v46 が最新版であること");
 
     // 期待: 9 行 = step1(nostr-A) 1 + step2(A/201=0, C/202=1, D/222=1) 3 +
     //             step3(A,B,C,D,E の ch205 展開・全 enabled=0) 5。
