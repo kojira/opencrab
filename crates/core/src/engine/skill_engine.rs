@@ -411,7 +411,7 @@ impl SkillEngine {
                     }
                 }
             }
-            apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages)?;
+            apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
 
             // Check for dynamic model override.
             let model = model_override
@@ -628,7 +628,7 @@ impl SkillEngine {
                     format!("asst:{}", messages.len()),
                     content.as_deref().unwrap_or(""),
                 );
-                apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages)?;
+                apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
 
                 // Notify on_tool_call callbacks.
                 if !self.on_tool_call.is_empty() {
@@ -745,7 +745,7 @@ impl SkillEngine {
                             .unwrap_or_else(|_| r#"{"error": "Permission denied"}"#.to_string());
                         messages.push(Message::tool(tool_call.id.clone(), result_json.clone()));
                         turn_ledger.record(format!("tool:{}", messages.len()), &result_json);
-                        apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages)?;
+                        apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
 
                         // Notify on_tool_result callbacks for denied action.
                         for cb in &self.on_tool_result {
@@ -791,7 +791,7 @@ impl SkillEngine {
 
                     messages.push(Message::tool(tool_call.id.clone(), result_json.clone()));
                     turn_ledger.record(format!("tool:{}", messages.len()), &result_json);
-                    apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages)?;
+                    apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
 
                     // Notify on_tool_result callbacks.
                     for cb in &self.on_tool_result {
@@ -838,7 +838,7 @@ impl SkillEngine {
                             .unwrap_or_else(|_| r#"{"status":"spawned"}"#.to_string());
                         messages.push(Message::tool(tool_call.id.clone(), result_json.clone()));
                         turn_ledger.record(format!("tool:{}", messages.len()), &result_json);
-                        apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages)?;
+                        apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
                         for cb in &self.on_tool_result {
                             cb(
                                 tool_call.id.clone(),
@@ -1028,6 +1028,7 @@ fn apply_turn_budget(
     gov: &mut Option<crate::context_budget::TurnGovernor>,
     ledger: &mut crate::context_budget::TokenLedger,
     messages: &mut [Message],
+    reserved: usize,
 ) -> Result<(), anyhow::Error> {
     let Some(gov) = gov.as_mut() else {
         return Ok(());
@@ -1038,11 +1039,22 @@ fn apply_turn_budget(
         .find(|i| i.key == "user")
         .map(|i| i.tokens)
         .unwrap_or(0);
-    let other = ledger.total().saturating_sub(user_tokens);
+    // `reserved`（このターンで予約するツール result 枠）は会話の外にある固定費として扱う。
+    // 会話単体は高水位未満でも、予約を足して超えるなら、その分だけ会話を余計に刈って
+    // 予約枠を空ける（DESIGN-CONTEXT-BUDGET line 55: 収まらなければ低水位まで圧縮）。
+    // これを渡さないと、予約が原因の超過で圧縮が一度も発火しない（#826 のメンション死）。
+    let other = ledger
+        .total()
+        .saturating_sub(user_tokens)
+        .saturating_add(reserved);
     let items = user_line_items(messages);
     let checkpoint = checkpoint_from_messages(messages);
-    let Some(outcome) = gov.compact_user_on_append(ledger.total(), &items, &checkpoint, other)
-    else {
+    let Some(outcome) = gov.compact_user_on_append(
+        ledger.total().saturating_add(reserved),
+        &items,
+        &checkpoint,
+        other,
+    ) else {
         return Ok(());
     };
     if outcome.exhausted {
@@ -1082,7 +1094,7 @@ fn reserve_result_caps(
     if !crate::context_budget::should_compact(projected, high) {
         return Ok(());
     }
-    apply_turn_budget(gov, ledger, messages)?;
+    apply_turn_budget(gov, ledger, messages, reserved)?;
     let high = match gov.as_ref() {
         Some(g) => g.conversation_high,
         None => return Ok(()),
@@ -1150,6 +1162,94 @@ mod tests {
 
     fn tool_call_response(calls: Vec<ToolCall>) -> ChatResponse {
         resp(None, calls)
+    }
+
+    /// 圧縮可能な user message（先頭 OldHistory / 末尾 8 ブロックは RecentVerbatim）を組む。
+    fn compactible_user(blocks: usize, words_per_block: usize) -> Message {
+        let mut text = String::new();
+        for i in 0..blocks {
+            text.push_str(&format!("[s{i}]:\n"));
+            text.push_str(&"word ".repeat(words_per_block));
+            text.push('\n');
+        }
+        Message {
+            role: Role::User,
+            content: Some(MessageContent::Text(text)),
+            name: None,
+            function_call: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    fn sys_msg() -> Message {
+        Message {
+            role: Role::System,
+            content: Some(MessageContent::Text("sys".into())),
+            name: None,
+            function_call: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    /// #826 メンション死の回帰ガード。テスト網の穴＝「ツール枠予約 × 水位」の交差点。
+    ///
+    /// DESIGN-CONTEXT-BUDGET.md line 55: provider 呼出し前に各 result cap の合計を予約し、
+    /// **収まらなければ古い完了済み group を低水位まで圧縮**し、それでも収まらなければ副作用 tool を
+    /// 一件も開始せず停止する。
+    ///
+    /// 会話単体は高水位「未満」だが、ツール枠予約を足すと超過する。会話に圧縮可能な OldHistory が
+    /// 十分あり「低水位 + 予約 ≤ 高水位」なら、圧縮を発火して turn を通すべき。
+    ///
+    /// 現状は `apply_turn_budget` が `reserved` を圧縮判定へ渡さず、`compact_user_on_append` が
+    /// 「会話単体 < 高水位」で None（圧縮せず）を返すため、`context_budget_exhausted:
+    /// cannot reserve tool result caps` で即死する。→ このテストが赤くなり、直す場所を指す。
+    #[test]
+    fn reserve_result_caps_compacts_old_groups_when_reservation_overflows() {
+        let mut messages = vec![sys_msg(), compactible_user(40, 300)];
+        let user_text = message_plain_text(&messages[1]);
+        let conv = crate::tokens::estimate_tokens(&user_text);
+
+        // 水位は会話量から導く（固定トークン数に依存しない）。
+        let high = conv + 500;
+        let low = conv / 2;
+        let mut gov = Some(crate::context_budget::TurnGovernor::new(high, low));
+
+        let mut ledger = crate::context_budget::TokenLedger::new();
+        ledger.record_tokens("user", conv);
+
+        // 非 read tool 1 本 → reserved = TOOL_RESULT_TOKEN_LIMIT(2500)。READ は 30000。
+        let reserved = crate::tool_result_log::inline_limit_for_tool("side_effect_tool");
+        assert!(
+            conv < high,
+            "前提: 会話は高水位未満 (conv={conv} high={high})"
+        );
+        assert!(
+            conv + reserved > high,
+            "前提: 会話 + 予約 が高水位超 (conv={conv} reserved={reserved} high={high})"
+        );
+        assert!(
+            low + reserved <= high,
+            "前提: 低水位まで圧縮すれば予約が収まる=通るべき (low={low} reserved={reserved} high={high})"
+        );
+
+        let calls = vec![tc("c1", "side_effect_tool", serde_json::json!({}))];
+        let res = reserve_result_caps(&mut gov, &mut ledger, &mut messages, &calls, &[]);
+
+        assert!(
+            res.is_ok(),
+            "会話 + 予約 が高水位を超えても、圧縮可能なら古い group を低水位まで刈って turn を通すべき\
+             （DESIGN-CONTEXT-BUDGET line 55）。実際のエラー: {:?}",
+            res.err().map(|e| e.to_string())
+        );
+        assert!(
+            ledger.total() + reserved <= high,
+            "圧縮後は 会話({}) + 予約({}) が高水位({}) に収まること",
+            ledger.total(),
+            reserved,
+            high
+        );
     }
 
     struct MockLlm {
