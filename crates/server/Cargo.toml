@@ -66,6 +66,8 @@ croner = "3.0.1"
 chrono-tz = "0.10.4"
 
 [dev-dependencies]
+# QC ハーネス E2E（qc_harness_e2e）が nostr gateway の provision 形を組むため。
+opencrab-nostr = { workspace = true }
 tempfile = { workspace = true }
 # 進捗デバウンス（3 秒）のテストで仮想時計を進めるため（`#[tokio::test(start_paused)]`）。
 tokio = { workspace = true, features = ["test-util"] }
