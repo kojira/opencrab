@@ -175,9 +175,12 @@ async fn send_text(
         );
     }
 
-    let write_err = write_json(&writer, &say_frame(&delivery_id, binding_id, body, reply_target))
-        .await
-        .is_err();
+    let write_err = write_json(
+        &writer,
+        &say_frame(&delivery_id, binding_id, body, reply_target),
+    )
+    .await
+    .is_err();
     #[cfg(any(test, feature = "extgate-probe"))]
     let write_err = write_err || state.probe.fail_say_write.load(Ordering::SeqCst);
     if write_err {
