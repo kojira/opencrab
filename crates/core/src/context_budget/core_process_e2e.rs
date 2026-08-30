@@ -436,6 +436,313 @@ fn d_hysteresis_consecutive_posts_do_not_refire() {
     );
 }
 
+/// row295 実測再現: 旧形式の会話 snapshot blob（§9A/refs 描画経路を通らず連結される）に
+/// legacy メタ行・生識別子が残り、新形式 delta と混在する。assemble_from_snapshot が read 時に
+/// blob 部も剥がすことを固定する（追修1 が単一ログ描画だけに効いて中間 blob に届かなかった穴）。
+///
+/// メタ行の transport ラベルは本番では固有名だが、剥がしは汎用マーカー ` kind:<数字>` で行うため、
+/// core のテストは R7 境界（no_gate_identifiers）を守り中立ラベル `[inbound kind:… ]` で同じ経路を突く。
+#[test]
+fn legacy_snapshot_blob_is_stripped_on_assembly() {
+    let conn = opencrab_db::init_memory().unwrap();
+    let legacy_pubkey = "9f".repeat(32); // 旧話者行の生 64hex（u 番号化されていない）
+    let npub = format!("npub1{}", "q".repeat(58));
+    let note = format!("note1{}", "p".repeat(58));
+    // 旧レンダリング済み blob: 旧話者行 + legacy メタ行（from=/target= 付き）。
+    let legacy_blob = format!(
+        "[{legacy_pubkey}] [2026-08-30 06:06:45]:\nこんにちは、みなさん\n[inbound kind:1 メンション from={npub} target={note}]"
+    );
+    let snap = opencrab_db::queries::ConversationSnapshotRow {
+        id: None,
+        session_id: SESSION.into(),
+        compacted_conversation: legacy_blob,
+        through_log_id: 0,
+        token_count: 100,
+        created_at: None,
+    };
+    opencrab_db::queries::insert_conversation_snapshot(&conn, &snap).unwrap();
+    // snapshot 以降の新規行（delta）。§9A/refs 経路で描画され新形式ラベル行を含む。
+    let delta = opencrab_db::queries::SessionLogRow {
+        id: None,
+        agent_id: AGENT.into(),
+        session_id: SESSION.into(),
+        log_type: "speech".into(),
+        content: "やあ\n[inbound kind:1 メンション]".into(),
+        speaker_id: Some("pk_new".into()),
+        turn_number: None,
+        metadata_json: Some(
+            serde_json::json!({"external_origin": "ext:event:v1:default:E9"}).to_string(),
+        ),
+        created_at: None,
+    };
+    opencrab_db::queries::insert_session_log(&conn, &delta).unwrap();
+
+    let assembled = assemble_from_snapshot(&conn, SESSION, AGENT).unwrap();
+    let text = &assembled.text;
+    // メタ行・生 ID は blob 部・delta 部とも消える。
+    assert!(
+        !text.contains("[inbound kind:"),
+        "種別ラベル行が残存: {text}"
+    );
+    assert!(
+        !text.contains(&npub) && !text.contains(&note),
+        "生 bech32 が残存: {text}"
+    );
+    assert!(
+        !text.contains(&legacy_pubkey),
+        "旧話者行の生 64hex が残存: {text}"
+    );
+    // 本文は blob・delta とも残る。
+    assert!(
+        text.contains("こんにちは、みなさん"),
+        "blob 本文が落ちた: {text}"
+    );
+    assert!(text.contains("やあ"), "delta 本文が落ちた: {text}");
+}
+
+/// row295 item4 実測再現: 並行バッチ（execute_shell×2）が 1 subtask として detach され、call ごとに
+/// 同一 subtask_id の spawn 受理 tool_result を重複記録する。assemble が初出だけ表示することを固定。
+#[test]
+fn parallel_spawn_ack_is_rendered_once() {
+    let conn = opencrab_db::init_memory().unwrap();
+    // 実 DB と同じ flat 形（data 包み無し・status/subtask_id が top-level）。
+    let content = r#"{"label":"execute_shell([...]), execute_shell([\"60\"])","status":"spawned","subtask_id":"dup-sub-1","tool":"execute_shell"}"#;
+    for tcid in ["call-a", "call-b"] {
+        let row = opencrab_db::queries::SessionLogRow {
+            id: None,
+            agent_id: AGENT.into(),
+            session_id: SESSION.into(),
+            log_type: "tool_result".into(),
+            content: content.into(),
+            speaker_id: Some(AGENT.into()),
+            turn_number: None,
+            metadata_json: Some(
+                serde_json::json!({"tool_call_id": tcid, "tool_name": "execute_shell"}).to_string(),
+            ),
+            created_at: None,
+        };
+        opencrab_db::queries::insert_session_log(&conn, &row).unwrap();
+    }
+    let assembled = assemble_from_snapshot(&conn, SESSION, AGENT).unwrap();
+    // row318: spawn 受理は subtask_id を **描画時に** s 番号へ短縮する（生 id を出さない）。
+    // dedup（初出のみ）は据え置きなので s 番号は 1 回だけ出る。
+    assert_eq!(
+        assembled.text.matches("subtask s1 を起動").count(),
+        1,
+        "spawn 受理が s 番号で 1 回だけ出ない（二重表示 or 未短縮）: {}",
+        assembled.text
+    );
+    assert!(
+        !assembled.text.contains("dup-sub-1"),
+        "生 subtask_id が残存: {}",
+        assembled.text
+    );
+    assert!(
+        !assembled.text.contains("spawned"),
+        "定型 status 語が残存: {}",
+        assembled.text
+    );
+}
+
+/// `8-4-4-4-12` hex（UUID 正規表現）の出現数を数える（依存を足さない手書きスキャナ）。
+fn count_uuids(s: &str) -> usize {
+    let b = s.as_bytes();
+    let groups = [8usize, 4, 4, 4, 12];
+    let mut count = 0;
+    let mut i = 0;
+    while i < b.len() {
+        let mut pos = i;
+        let mut ok = true;
+        for (gi, &g) in groups.iter().enumerate() {
+            if gi > 0 {
+                if b.get(pos) != Some(&b'-') {
+                    ok = false;
+                    break;
+                }
+                pos += 1;
+            }
+            for _ in 0..g {
+                match b.get(pos) {
+                    Some(c) if c.is_ascii_hexdigit() => pos += 1,
+                    _ => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if !ok {
+                break;
+            }
+        }
+        if ok {
+            count += 1;
+            i = pos;
+        } else {
+            i += 1;
+        }
+    }
+    count
+}
+
+/// row318 完了固定: tool_call（自分）・spawn 受理・凍結 snapshot の**全描画経路**で、描画時に短縮形
+/// （[くらぶ]/s 番号/<id…>）を出し、最終会話文字列に生の長識別子（UUID / ダッシュ無し 32hex）が
+/// **1 個も**現れないことを固定する。検知器 [`leaked_identifier_in_delta`] も最終文字列で None
+/// （＝描画器が短縮形を出し損ねていない）。
+#[test]
+fn final_conversation_has_zero_raw_identifiers_across_all_render_paths() {
+    let conn = opencrab_db::init_memory().unwrap();
+    let agent_uuid = "33196264-5908-4f04-b24a-efd7aa6d2014";
+    // 自分の表示名を引けるよう agents に登録（build_conversation_refs が get_agent→name）。
+    opencrab_db::queries::upsert_agent(
+        &conn,
+        &opencrab_db::queries::AgentRow {
+            agent_id: agent_uuid.into(),
+            name: "くらぶ".into(),
+            job_title: None,
+            organization: None,
+            image_url: None,
+            persona_name: "くらぶ".into(),
+            personality: None,
+            instructions: String::new(),
+            heartbeat_instructions: String::new(),
+            model: None,
+            reasoning_effort: None,
+            web_search: None,
+            metadata_json: None,
+        },
+    )
+    .unwrap();
+
+    // 凍結 snapshot blob（旧描画テキスト・refs 経路を通らない）にダッシュ無し 32hex を仕込む。
+    let hex32 = "abcdef0123456789abcdef0123456789"; // 32hex
+    let snap = opencrab_db::queries::ConversationSnapshotRow {
+        id: None,
+        session_id: SESSION.into(),
+        compacted_conversation: format!("[くらぶ][2026-08-31 15:00:00]:\n凍結参照 {hex32} を見た"),
+        through_log_id: 0,
+        token_count: 50,
+        created_at: None,
+    };
+    opencrab_db::queries::insert_conversation_snapshot(&conn, &snap).unwrap();
+
+    // delta1: tool_call（話者＝自分の agent UUID）。描画器が [くらぶ] を出すべき。
+    let tool_call = opencrab_db::queries::SessionLogRow {
+        id: None,
+        agent_id: agent_uuid.into(),
+        session_id: SESSION.into(),
+        log_type: "tool_call".into(),
+        content: "call".into(),
+        speaker_id: Some(agent_uuid.into()),
+        turn_number: None,
+        metadata_json: Some(
+            serde_json::json!({
+                "tool_calls_json": serde_json::json!([{
+                    "id": "tc-1",
+                    "function": {"name": "spawn_subtask", "arguments": "{\"prompt\":\"調べて\"}"}
+                }])
+                .to_string()
+            })
+            .to_string(),
+        ),
+        created_at: None,
+    };
+    opencrab_db::queries::insert_session_log(&conn, &tool_call).unwrap();
+
+    // delta2: spawn 受理 tool_result（生 subtask UUID）。描画器が s 番号を出すべき。
+    let spawn_ack = opencrab_db::queries::SessionLogRow {
+        id: None,
+        agent_id: agent_uuid.into(),
+        session_id: SESSION.into(),
+        log_type: "tool_result".into(),
+        content: r#"{"status":"spawned","subtask_id":"df1bc106-960c-45e3-b69c-ff493b133afc","tool":"spawn_subtask"}"#
+            .into(),
+        speaker_id: Some(agent_uuid.into()),
+        turn_number: None,
+        metadata_json: Some(
+            serde_json::json!({"tool_call_id": "tc-1", "tool_name": "spawn_subtask"}).to_string(),
+        ),
+        created_at: None,
+    };
+    opencrab_db::queries::insert_session_log(&conn, &spawn_ack).unwrap();
+
+    let assembled = assemble_from_snapshot(&conn, SESSION, agent_uuid).unwrap();
+    let text = &assembled.text;
+
+    // 完了条件: 最終会話文字列に UUID が 0 個。
+    assert_eq!(count_uuids(text), 0, "生 UUID が残存: {text}");
+    // ダッシュ無し 32hex も 0 個（snapshot 経路の残存3）。
+    assert!(!text.contains(hex32), "ダッシュ無し 32hex が残存: {text}");
+    // 自分の tool_call 話者行は名前（<uuid…> プレースホルダでも生 UUID でもない）。
+    assert!(
+        text.contains("[くらぶ]"),
+        "自分の話者行が名前でない: {text}"
+    );
+    assert!(
+        !text.contains(agent_uuid),
+        "自分の生 agent UUID が残存: {text}"
+    );
+    // spawn 受理は s 番号で描画（生 subtask UUID を出さない）。
+    assert!(
+        text.contains("subtask s1 を起動"),
+        "spawn 受理が s 番号で描画されていない: {text}"
+    );
+    assert!(!text.contains("df1bc106"), "生 subtask UUID が残存: {text}");
+    // 検知器: 最終文字列に生識別子の取りこぼしなし（描画器が全経路で短縮形を出した）。
+    assert!(
+        crate::conversation::leaked_identifier_in_delta(text).is_none(),
+        "検知器が生識別子を検出（描画器バグ・短縮形が出ていない）: {text}"
+    );
+}
+
+/// row318 実データ漏れ（検知器が本番で捕捉・log_id 106342/107076）: 過去の nostr_run 失敗の
+/// tool_result 本文（エラーテキスト）に生 64hex（"Event not found: <64hex>"）が混じる。失敗本文は
+/// 握り潰し防止で丸ごと残す（要約しない）が、表示は生識別子を短縮する。エラーの意味は残す。
+#[test]
+fn tool_result_failure_body_elides_raw_hex_but_keeps_error_text() {
+    let conn = opencrab_db::init_memory().unwrap();
+    let event_hex = format!("7be6255f{}", "a".repeat(56)); // 64hex（ダッシュ無し）
+    let content = format!(
+        r#"{{"success":false,"data":null,"error":"nostr_run failed: Event not found: {event_hex}"}}"#
+    );
+    let row = opencrab_db::queries::SessionLogRow {
+        id: None,
+        agent_id: AGENT.into(),
+        session_id: SESSION.into(),
+        log_type: "tool_result".into(),
+        content,
+        speaker_id: Some(AGENT.into()),
+        turn_number: None,
+        metadata_json: Some(
+            serde_json::json!({"tool_call_id": "tc-x", "tool_name": "nostr_run"}).to_string(),
+        ),
+        created_at: None,
+    };
+    opencrab_db::queries::insert_session_log(&conn, &row).unwrap();
+
+    let assembled = assemble_from_snapshot(&conn, SESSION, AGENT).unwrap();
+    let text = &assembled.text;
+    // 生 64hex は消える（短縮形へ）。
+    assert_eq!(count_uuids(text), 0, "UUID が残存: {text}");
+    assert!(
+        !text.contains(&event_hex),
+        "失敗本文の生 64hex が残存: {text}"
+    );
+    assert!(
+        text.contains("<id…>"),
+        "生 hex が短縮形になっていない: {text}"
+    );
+    // エラーの意味は残す（握り潰さない）。
+    assert!(
+        text.contains("Event not found"),
+        "エラーの意味が消えた: {text}"
+    );
+    // 検知器も沈黙（描画時に短縮済み）。
+    assert!(
+        crate::conversation::leaked_identifier_in_delta(text).is_none(),
+        "検知器が生識別子を検出（描画器バグ）: {text}"
+    );
+}
+
 /// 撤去の完全性。SQLite WAL の `wal_checkpoint` など別物は対象外。
 #[test]
 fn context_arrival_point_mechanism_is_gone() {
