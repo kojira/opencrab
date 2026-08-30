@@ -16,13 +16,30 @@ use crate::config::{
     config_digest, mention_lane_filter, parse_instance_config, watches_beyond_self, InstanceConfig,
     InstancePlacement, WatchFilter, WatchPlacement,
 };
+use crate::dedup::SeenEvents;
 use crate::map::{
-    bundle_id, classify_route, map_event, parse_watch_line, BundlePlace, Lane, LaneKind, Route,
-    WatchEvent,
+    bundle_id, classify_route, map_event, normalize_author_id, parse_watch_line, BundlePlace, Lane,
+    LaneKind, Route, WatchEvent,
 };
 use crate::watch::{run_watch_loop, RESUBSCRIBE};
 
 const BIND_POLL: Duration = Duration::from_millis(50);
+
+/// 車線をまたぐ dedup TTL の下限。最大 watch interval を上回れないと、即時送出した
+/// メンションと interval 後に flush される bundle の間で取りこぼす。
+const DEDUP_TTL_FLOOR: Duration = Duration::from_secs(600);
+
+/// 最大 watch interval の 2 倍と下限の大きい方＋余裕。bundle flush 窓を確実に跨ぐ。
+fn dedup_ttl(cfg: &InstanceConfig) -> Duration {
+    let max_interval = cfg
+        .watches
+        .iter()
+        .map(|w| w.interval_secs as u64)
+        .max()
+        .unwrap_or(0);
+    let by_interval = Duration::from_secs(max_interval.saturating_mul(2).saturating_add(60));
+    by_interval.max(DEDUP_TTL_FLOOR)
+}
 
 #[derive(Default)]
 struct SaidMetrics {
@@ -30,6 +47,7 @@ struct SaidMetrics {
     bad_request: AtomicU64,
     queue_full: AtomicU64,
     bundle_discarded: AtomicU64,
+    deduped: AtomicU64,
 }
 
 pub fn spawn_instance(
@@ -50,6 +68,8 @@ pub fn spawn_instance(
         SayPolicy::RejectExternal,
     );
     let metrics = Arc::new(SaidMetrics::default());
+    // 車線をまたぐ said dedup は instance 単位で共有する（全 default/watch 車線が同じセット）。
+    let seen = Arc::new(SeenEvents::new(dedup_ttl(&cfg)));
     supervise_lanes(
         client.clone(),
         place.address.clone(),
@@ -57,10 +77,12 @@ pub fn spawn_instance(
         secret,
         nostaro_bin,
         metrics,
+        seen,
     );
     Ok(client)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn supervise_lanes(
     client: Arc<InstanceClient>,
     address: String,
@@ -68,6 +90,7 @@ fn supervise_lanes(
     secret: Option<Arc<String>>,
     nostaro_bin: PathBuf,
     metrics: Arc<SaidMetrics>,
+    seen: Arc<SeenEvents>,
 ) {
     tokio::spawn(async move {
         loop {
@@ -81,6 +104,7 @@ fn supervise_lanes(
                 secret.clone(),
                 nostaro_bin.clone(),
                 metrics.clone(),
+                seen.clone(),
                 cancel.clone(),
             );
             wait_until_unbound(&client, &address).await;
@@ -135,6 +159,7 @@ fn plan_lane_spawns(cfg: &InstanceConfig) -> Vec<LaneSpawn> {
     planned
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_lanes(
     client: Arc<InstanceClient>,
     address: String,
@@ -142,6 +167,7 @@ fn start_lanes(
     secret: Option<Arc<String>>,
     nostaro_bin: PathBuf,
     metrics: Arc<SaidMetrics>,
+    seen: Arc<SeenEvents>,
     cancel: Arc<Notify>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     plan_lane_spawns(&cfg)
@@ -158,6 +184,7 @@ fn start_lanes(
                 secret.clone(),
                 nostaro_bin.clone(),
                 metrics.clone(),
+                seen.clone(),
                 cancel.clone(),
             )
         })
@@ -176,6 +203,7 @@ fn spawn_lane(
     secret: Option<Arc<String>>,
     nostaro_bin: PathBuf,
     metrics: Arc<SaidMetrics>,
+    seen: Arc<SeenEvents>,
     cancel: Arc<Notify>,
 ) -> tokio::task::JoinHandle<()> {
     let beyond = match lane.kind {
@@ -198,6 +226,7 @@ fn spawn_lane(
                 let lane = lane.clone();
                 let self_pubkey = self_pubkey.clone();
                 let metrics = metrics.clone();
+                let seen = seen.clone();
                 move |line| {
                     let pending = pending.clone();
                     let client = client.clone();
@@ -205,6 +234,7 @@ fn spawn_lane(
                     let lane = lane.clone();
                     let self_pubkey = self_pubkey.clone();
                     let metrics = metrics.clone();
+                    let seen = seen.clone();
                     tokio::spawn(async move {
                         handle_line(
                             &client,
@@ -214,6 +244,7 @@ fn spawn_lane(
                             beyond,
                             &pending,
                             &metrics,
+                            &seen,
                             line,
                         )
                         .await;
@@ -239,6 +270,7 @@ fn spawn_lane(
                     beyond,
                     &pending,
                     &metrics,
+                    &seen,
                     max_items,
                 )
                 .await;
@@ -263,6 +295,7 @@ async fn handle_line(
     beyond: bool,
     pending: &tokio::sync::Mutex<Vec<WatchEvent>>,
     metrics: &SaidMetrics,
+    seen: &SeenEvents,
     line: String,
 ) {
     let Some(event) = parse_watch_line(&line) else {
@@ -270,7 +303,12 @@ async fn handle_line(
     };
     let route = classify_route(&event, self_pubkey, beyond, lane);
     if route == Route::Bundle {
+        // bundle は flush 時に dedup する（manifest の count/origins を一貫させるため）。
         pending.lock().await.push(event);
+        return;
+    }
+    // 即時送出はここで event_id を握る。別車線が先に握っていたら二重 said を避ける。
+    if !claim_or_skip(seen, metrics, &event.id) {
         return;
     }
     send_mapped(
@@ -284,6 +322,21 @@ async fn handle_line(
         metrics,
     )
     .await;
+}
+
+/// event_id を握れたら `true`。hex 化できる id のみ dedup 対象（それ以外は send_mapped が落とす）。
+/// 既に握られていたら dedup メトリクスを上げて `false` を返す。
+fn claim_or_skip(seen: &SeenEvents, metrics: &SaidMetrics, raw_event_id: &str) -> bool {
+    let Some(event_id) = normalize_author_id(raw_event_id) else {
+        // 非 hex は dedup キーにできない。send_mapped 側の map_event が落とす。
+        return true;
+    };
+    if seen.claim(&event_id) {
+        return true;
+    }
+    let n = metrics.deduped.fetch_add(1, Ordering::Relaxed) + 1;
+    tracing::info!(event_id = %event_id, deduped = n, "said skipped; event already handled by another lane");
+    false
 }
 
 struct BundleWindow {
@@ -327,6 +380,7 @@ async fn flush_bundle(
     beyond: bool,
     pending: &tokio::sync::Mutex<Vec<WatchEvent>>,
     metrics: &SaidMetrics,
+    seen: &SeenEvents,
     max_items: usize,
 ) {
     let events = {
@@ -338,7 +392,16 @@ async fn flush_bundle(
     }
     let window = take_bundle_window(events, max_items);
     record_bundle_discarded(metrics, window.discarded, window.events.len(), max_items);
-    let events = window.events;
+    // 別車線（default 即時など）が既に送ったイベントを manifest 構築の前に除く。
+    // ここで削ると bundle_id / origins / count が実送信分と一致する。
+    let events: Vec<WatchEvent> = window
+        .events
+        .into_iter()
+        .filter(|e| claim_or_skip(seen, metrics, &e.id))
+        .collect();
+    if events.is_empty() {
+        return;
+    }
     let Some(watch_id) = lane.watch_id() else {
         tracing::warn!("bundle dropped; default lane has no watch_id");
         return;
@@ -533,6 +596,56 @@ mod tests {
         assert!(
             !watch_args.iter().any(|a| a.starts_with("--npub=")),
             "timeline lane must not inherit mention npub: {watch_args:?}"
+        );
+    }
+
+    #[test]
+    fn claim_or_skip_dedups_hex_ids_and_counts() {
+        let metrics = SaidMetrics::default();
+        let seen = SeenEvents::new(Duration::from_secs(600));
+        let id = "aa".repeat(32);
+        assert!(claim_or_skip(&seen, &metrics, &id), "初回は送る");
+        assert!(!claim_or_skip(&seen, &metrics, &id), "二度目は重複で落とす");
+        assert_eq!(metrics.deduped.load(Ordering::Relaxed), 1);
+        // 別 event_id は独立に送れる。
+        assert!(claim_or_skip(&seen, &metrics, &"bb".repeat(32)));
+        assert_eq!(metrics.deduped.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn claim_or_skip_passes_non_hex_without_dedup() {
+        let metrics = SaidMetrics::default();
+        let seen = SeenEvents::new(Duration::from_secs(600));
+        // 非 hex は dedup キーにできないので常に通す（下流 map_event が落とす）。
+        assert!(claim_or_skip(&seen, &metrics, "not-hex"));
+        assert!(claim_or_skip(&seen, &metrics, "not-hex"));
+        assert_eq!(metrics.deduped.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn dedup_ttl_covers_max_watch_interval() {
+        let mut cfg = InstanceConfig {
+            relays: vec!["wss://example.invalid".into()],
+            filter: WatchFilter::default(),
+            self_pubkey: "aa".repeat(32),
+            name: None,
+            watches: vec![],
+            delivery_mode: None,
+        };
+        // watch 無しは下限。
+        assert_eq!(dedup_ttl(&cfg), DEDUP_TTL_FLOOR);
+        // 大きい interval は 2 倍＋余裕で下限を超える。
+        cfg.watches = vec![WatchPlacement {
+            id: 1,
+            interval_secs: 3600,
+            max_items: crate::config::DEFAULT_BUNDLE_MAX_ITEMS,
+            filter: WatchFilter::default(),
+            filter_json: None,
+        }];
+        let ttl = dedup_ttl(&cfg);
+        assert!(
+            ttl >= Duration::from_secs(3600 * 2),
+            "TTL は最大 interval の 2 倍以上: {ttl:?}"
         );
     }
 
