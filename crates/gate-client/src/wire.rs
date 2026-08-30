@@ -63,6 +63,21 @@ pub fn hello_frame(id: &str, instance_id: &str, revision: u64, config_digest: &s
     })
 }
 
+/// 能力宣言つき hello（DI 拡張 §3.1）。`operations` が None なら従来の hello（能力ゼロ）。
+pub fn hello_frame_with_operations(
+    id: &str,
+    instance_id: &str,
+    revision: u64,
+    config_digest: &str,
+    operations: Option<&Value>,
+) -> Value {
+    let mut frame = hello_frame(id, instance_id, revision, config_digest);
+    if let Some(ops) = operations {
+        frame["operations"] = ops.clone();
+    }
+    frame
+}
+
 pub fn said_frame(
     id: &str,
     binding_id: &str,
@@ -84,6 +99,11 @@ pub fn said_frame(
 
 pub fn ok_frame(id: &str) -> Value {
     json!({"id": id, "m": "ok"})
+}
+
+/// invoke 成功応答（DI 拡張 §5.1）。`result` は opaque JSON-value（null 含む）。
+pub fn invoke_ok_frame(id: &str, result: &Value) -> Value {
+    json!({"id": id, "m": "ok", "result": result})
 }
 
 pub fn err_frame(id: &str, code: &str, detail: Option<&str>) -> Value {
@@ -122,6 +142,17 @@ pub struct Activity {
     pub state: String,
 }
 
+/// core→gate invoke（DI 拡張 §5.1）。`id`=call_id。第一段は callback 無しなので
+/// `context.continuation_id` は常に null。payload は opaque JSON-value。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Invoke {
+    pub id: String,
+    pub binding_id: String,
+    pub operation: String,
+    pub continuation_id: Option<String>,
+    pub payload: Value,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WireResponse {
     pub id: String,
@@ -136,6 +167,7 @@ pub enum CoreMsg {
     Bind(Bind),
     Say(Say),
     Activity(Activity),
+    Invoke(Invoke),
     Response(WireResponse),
     Reverse {
         id: Option<String>,
@@ -263,6 +295,14 @@ fn parse_core_msg(obj: &Value) -> CoreMsg {
                 m,
             },
         },
+        "invoke" => match parse_invoke(obj) {
+            Ok(i) => CoreMsg::Invoke(i),
+            Err(_) => CoreMsg::Invalid {
+                id: opt_id(obj),
+                code: "bad_request",
+                m,
+            },
+        },
         "ok" | "err" => match parse_response(obj, &m) {
             Ok(resp) => CoreMsg::Response(resp),
             Err(_) => CoreMsg::Invalid {
@@ -297,6 +337,30 @@ fn parse_say(obj: &Value) -> Result<Say, FrameError> {
     Ok(Say {
         id,
         binding_id,
+        payload,
+    })
+}
+
+fn parse_invoke(obj: &Value) -> Result<Invoke, FrameError> {
+    let id = parse_request_id(&require_str(obj, "id")?)?;
+    let binding_id = parse_uuid(&require_str(obj, "binding_id")?)?;
+    let operation = nonempty_str(obj, "operation")?;
+    let payload = obj.get("payload").cloned().ok_or(FrameError::BadRequest)?;
+    // context.continuation_id は第一段では常に null（callback 無し）。
+    let continuation_id = match obj.get("context") {
+        None | Some(Value::Null) => None,
+        Some(Value::Object(ctx)) => match ctx.get("continuation_id") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) => Some(parse_uuid(s)?),
+            Some(_) => return Err(FrameError::BadRequest),
+        },
+        Some(_) => return Err(FrameError::BadRequest),
+    };
+    Ok(Invoke {
+        id,
+        binding_id,
+        operation,
+        continuation_id,
         payload,
     })
 }
@@ -427,5 +491,53 @@ mod tests {
     fn duplicate_member_is_bad_request() {
         let raw = br#"{"id":"1","m":"ok","id":"2"}"#;
         assert_eq!(parse_frame_bytes(raw).unwrap_err(), FrameError::BadRequest);
+    }
+
+    #[test]
+    fn parse_invoke_ok() {
+        let raw = br#"{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","m":"invoke","binding_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","operation":"reply","context":{"continuation_id":null},"payload":{"event":"e7","text":"hi"}}"#;
+        match parse_frame_bytes(raw).unwrap() {
+            CoreMsg::Invoke(i) => {
+                assert_eq!(i.id, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+                assert_eq!(i.binding_id, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+                assert_eq!(i.operation, "reply");
+                assert_eq!(i.continuation_id, None);
+                assert_eq!(i.payload, json!({"event":"e7","text":"hi"}));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_invoke_missing_payload_is_bad_request() {
+        let raw = br#"{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","m":"invoke","binding_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","operation":"reply","context":{"continuation_id":null}}"#;
+        match parse_frame_bytes(raw).unwrap() {
+            CoreMsg::Invalid { code, .. } => assert_eq!(code, "bad_request"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn invoke_ok_frame_carries_result() {
+        assert_eq!(
+            invoke_ok_frame("call-1", &json!({"ok":true})),
+            json!({"id":"call-1","m":"ok","result":{"ok":true}})
+        );
+        // JSON null は合法な result。
+        assert_eq!(
+            invoke_ok_frame("call-1", &Value::Null),
+            json!({"id":"call-1","m":"ok","result":null})
+        );
+    }
+
+    #[test]
+    fn hello_with_operations_optional() {
+        // None は従来の hello（operations field なし＝能力ゼロ）。
+        let plain = hello_frame_with_operations("h", "iid", 1, &"a".repeat(64), None);
+        assert!(plain.get("operations").is_none());
+        // Some は operations を載せる。
+        let ops = json!([{"name":"reply"}]);
+        let withops = hello_frame_with_operations("h", "iid", 1, &"a".repeat(64), Some(&ops));
+        assert_eq!(withops["operations"], ops);
     }
 }

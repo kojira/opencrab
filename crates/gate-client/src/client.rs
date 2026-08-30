@@ -15,7 +15,8 @@ use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 use super::wire::{
     err_frame, hello_frame, ok_frame, parse_frame_bytes, read_frame, said_frame, say_reply_target,
-    say_text, write_json, Activity, Attachment, Bind, CoreMsg, FrameError, Say, WireResponse,
+    say_text, write_json, Activity, Attachment, Bind, CoreMsg, FrameError, Invoke, Say,
+    WireResponse,
 };
 
 const LIVE_QUEUE_CAP: usize = 32;
@@ -551,6 +552,10 @@ async fn handle_msg(client: &InstanceClient, msg: CoreMsg, generation: u64) -> b
             handle_activity(client, activity).await;
             false
         }
+        CoreMsg::Invoke(inv) => {
+            handle_invoke(client, inv).await;
+            false
+        }
         CoreMsg::Response(resp) => {
             handle_response(client, resp, generation).await;
             false
@@ -572,6 +577,19 @@ async fn handle_msg(client: &InstanceClient, msg: CoreMsg, generation: u64) -> b
             false
         }
     }
+}
+
+async fn handle_invoke(client: &InstanceClient, inv: Invoke) {
+    tracing::info!(
+        instance_id = %client.instance_id,
+        binding_id = %inv.binding_id,
+        operation = %inv.operation,
+        "invoke"
+    );
+    // DI 能力宣言つき gateway は invoke_handler を呼んで ok(result)/err を返す（後続増分で配線）。
+    // 現段は能力未配線なので、未宣言 operation として fail-closed で operation_unknown を返す
+    // （外部 I/O 0・§5.1）。正常な core は宣言のある operation にしか invoke を送らない。
+    let _ = send_frame(client, err_frame(&inv.id, "operation_unknown", None)).await;
 }
 
 async fn handle_bind(client: &InstanceClient, bind: Bind, generation: u64) {
