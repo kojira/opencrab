@@ -53,8 +53,8 @@ struct SaidMetrics {
     say_posted: AtomicU64,
     /// say 投稿が失敗した回数（nostaro 非ゼロ / spawn 失敗 / timeout）。
     say_post_failed: AtomicU64,
-    /// 返信先が無い（bundle/曖昧）ため投稿しなかった say の回数（エアリプは nostr_post が担う）。
-    bundle_say_dropped: AtomicU64,
+    /// 返信先が無い（bundle/曖昧）say を新規ノート（standalone）として publish した回数（row292）。
+    say_posted_standalone: AtomicU64,
 }
 
 pub fn spawn_instance(
@@ -154,7 +154,8 @@ fn supervise_lanes(
 }
 
 /// core からの say を live queue から取り出し、発端イベントへの e-tag reply として nostaro で
-/// 投稿する。返信先が無い（bundle/曖昧）say は投稿しない（Dropped・エアリプは nostr_post）。
+/// 投稿する。返信先があれば e-tag reply、無ければ（bundle/曖昧）新規ノート（standalone post）で
+/// publish する（row292/#843: drop しない）。
 fn spawn_say_consumer(
     client: Arc<InstanceClient>,
     address: String,
@@ -181,12 +182,15 @@ fn spawn_say_consumer(
                             let n = metrics.say_posted.fetch_add(1, Ordering::Relaxed) + 1;
                             tracing::info!(address = %address, say_posted = n, "say posted as reply");
                         }
-                        SayDelivery::Dropped => {
-                            let n = metrics.bundle_say_dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                        SayDelivery::PostedStandalone => {
+                            let n = metrics
+                                .say_posted_standalone
+                                .fetch_add(1, Ordering::Relaxed)
+                                + 1;
                             tracing::info!(
                                 address = %address,
-                                bundle_say_dropped = n,
-                                "say dropped; no single reply target (use nostr_post for エアリプ)"
+                                say_posted_standalone = n,
+                                "say posted as standalone (no single reply target)"
                             );
                         }
                         SayDelivery::Failed(e) => {

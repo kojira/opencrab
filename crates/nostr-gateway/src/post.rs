@@ -20,10 +20,11 @@ const POST_TIMEOUT: Duration = Duration::from_secs(30);
 /// say の投稿結果。
 #[derive(Debug, PartialEq, Eq)]
 pub enum SayDelivery {
-    /// e-tag reply として投稿した。
+    /// 発端イベントへの e-tag reply として投稿した（単一メンション）。
     Posted,
-    /// 返信先が無い（bundle/曖昧）ため投稿しなかった。エアリプは nostr_post が担う。
-    Dropped,
+    /// 返信先が無い（bundle/曖昧）ため新規ノート（standalone）として publish した（row292/#843:
+    /// drop せず必ず出す）。
+    PostedStandalone,
     /// 投稿を試みたが失敗（nostaro 非ゼロ / spawn 失敗 / timeout）。
     Failed(String),
 }
@@ -108,6 +109,8 @@ fn build_post_command(bin: &Path, argv: &[String], secret: Option<&str>) -> Comm
 
 /// say を配送する（DI-16: 常に新規 post = standalone）。返信は DI `reply` 操作が担うので、
 /// say に reply target を暗黙設定しない。`reply_origin` は wire 互換のため受けるが使わない。
+/// row292/#843 の「返信先が無い say も drop せず publish」は、常に standalone post とする
+/// 本設計で完全に満たされる（drop は発生しない）。結果は観測性のため `PostedStandalone` を返す。
 pub async fn deliver_say(
     nostaro_bin: &Path,
     config_path: &Path,
@@ -118,7 +121,7 @@ pub async fn deliver_say(
     let argv = post_argv(config_path, text);
     let mut cmd = build_post_command(nostaro_bin, &argv, secret);
     match tokio::time::timeout(POST_TIMEOUT, cmd.output()).await {
-        Ok(Ok(out)) if out.status.success() => SayDelivery::Posted,
+        Ok(Ok(out)) if out.status.success() => SayDelivery::PostedStandalone,
         Ok(Ok(out)) => {
             let stderr = redact_secrets(String::from_utf8_lossy(&out.stderr).trim());
             SayDelivery::Failed(format!(
@@ -195,6 +198,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn no_target_say_is_published_as_standalone_post() {
+        // reply_origin=None（bundle/曖昧）は drop せず standalone post で publish（row292/#843）。
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-nostaro");
+        let out_file = dir.path().join("invoked.txt");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf 'ARGV:%s\\n' \"$*\" > '{}'\nexit 0\n",
+                out_file.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut p = std::fs::metadata(&script).unwrap().permissions();
+            p.set_mode(0o755);
+            std::fs::set_permissions(&script, p).unwrap();
+        }
+        let cfg = dir.path().join("cfg.toml");
+        write_relays_config(&cfg, &["wss://x.example".into()]).unwrap();
+        let got = deliver_say(&script, &cfg, Some("nsec1fakekey"), None, "エアリプ本文").await;
+        assert_eq!(got, SayDelivery::PostedStandalone);
+        let recorded = std::fs::read_to_string(&out_file).unwrap();
+        assert!(
+            recorded.contains("post"),
+            "post subcommand で無い: {recorded}"
+        );
+        assert!(
+            recorded.contains("エアリプ本文"),
+            "本文が渡っていない: {recorded}"
+        );
+        assert!(
+            !recorded.contains("reply"),
+            "reply にしてはならない: {recorded}"
+        );
+    }
+
+    #[tokio::test]
     async fn say_invokes_nostaro_post_with_env_secret() {
         // 実 relay 不要のモック nostaro。argv と env を控えて 0 exit する。
         let dir = tempfile::tempdir().unwrap();
@@ -220,7 +263,7 @@ mod tests {
         // DI-16: say は常に standalone post。reply_origin を渡しても post になる（reply にしない）。
         let origin = format!("nostr:event:v1:default:{}", "bb".repeat(32));
         let got = deliver_say(&script, &cfg, Some("nsec1fakekey"), Some(origin), "やあ").await;
-        assert_eq!(got, SayDelivery::Posted);
+        assert_eq!(got, SayDelivery::PostedStandalone);
         let recorded = std::fs::read_to_string(&out_file).unwrap();
         assert!(recorded.contains("post"), "post subcommand: {recorded}");
         assert!(!recorded.contains("reply"), "reply にしない: {recorded}");
