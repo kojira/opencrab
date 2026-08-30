@@ -230,8 +230,7 @@ pub fn assemble_from_snapshot(
     // 新形式（既に §9A）には無影響。次の finish_turn で剥がし済みが再永続化され snapshot は自己治癒する。
     let text = match &snap {
         Some(s) => {
-            let base =
-                crate::conversation::strip_inbound_meta_for_display(&s.compacted_conversation);
+            let base = crate::conversation::strip_frozen_snapshot(&s.compacted_conversation);
             if delta.is_empty() {
                 base
             } else {

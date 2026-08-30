@@ -1225,19 +1225,129 @@ fn truncate_body(content: &str, limit: usize) -> String {
 /// （`context_budget::governor::assemble_from_snapshot`）。行単位で処理するので、単一ログ本文にも
 /// 複数行の snapshot blob にも同じ規則で効く。
 pub(crate) fn strip_inbound_meta_for_display(content: &str) -> String {
+    strip_meta_lines(content, elide_raw_identifiers)
+}
+
+/// 凍結 snapshot blob 専用の掃除（row295d）。単一ログ経路（[`strip_inbound_meta_for_display`]）に
+/// 加えて、旧レンダリング由来の legacy 識別子—UUID（subtask/session）・`call_…`（tool call id）・
+/// `"digest":"…"`（モデル不要な内部整合値）—も除去/短縮する。新形式（既に §9A・c/s 番号・→log:N）
+/// には該当パターンが無いので無影響。単一ログの note 本文へは適用しない（利用者本文の過剰除去を避ける）。
+pub(crate) fn strip_frozen_snapshot(content: &str) -> String {
+    strip_meta_lines(content, |line| {
+        elide_raw_identifiers(&clean_legacy_ids(line))
+    })
+}
+
+/// メタ行を落とし、残る各行に `per_line` を適用し、末尾空行を畳む共通ルーチン。
+fn strip_meta_lines(content: &str, per_line: impl Fn(&str) -> String) -> String {
     let mut lines: Vec<String> = Vec::new();
     for line in content.split('\n') {
         // メタ行（`[… kind:1 …]`）を落とす（新形 / 旧 from=/target= 付きの両方）。
         if is_inbound_meta_line(line.trim()) {
             continue;
         }
-        lines.push(elide_raw_identifiers(line));
+        lines.push(per_line(line));
     }
     // メタ行を落とした跡の末尾空行を畳む。
     while lines.last().is_some_and(|s| s.trim().is_empty()) {
         lines.pop();
     }
     lines.join("\n")
+}
+
+/// snapshot blob の legacy 識別子（UUID / `call_…` / `"digest":"…"`）を除去/短縮する（row295d）。
+fn clean_legacy_ids(line: &str) -> String {
+    let line = elide_uuids(line);
+    let line = elide_call_ids(&line);
+    elide_digest_values(&line)
+}
+
+/// UUID（`8-4-4-4-12` hex）を `<uuid…>` へ。64hex（ダッシュ無し）はここでは当たらず elide_raw が担う。
+fn elide_uuids(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if let Some(len) = uuid_len_at(&bytes[i..]) {
+            out.push_str("<uuid…>");
+            i += len;
+        } else {
+            let ch = line[i..].chars().next().expect("char boundary");
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+/// 位置 0 から UUID（`8-4-4-4-12` hex）なら消費バイト長（36）を返す。前後境界も見る。
+fn uuid_len_at(b: &[u8]) -> Option<usize> {
+    let groups = [8usize, 4, 4, 4, 12];
+    let mut pos = 0;
+    for (gi, &g) in groups.iter().enumerate() {
+        if gi > 0 {
+            if b.get(pos) != Some(&b'-') {
+                return None;
+            }
+            pos += 1;
+        }
+        for _ in 0..g {
+            match b.get(pos) {
+                Some(c) if c.is_ascii_hexdigit() => pos += 1,
+                _ => return None,
+            }
+        }
+    }
+    // 直後が hex/英数/ダッシュなら、より長いトークンの一部＝UUID ではない。
+    if matches!(b.get(pos), Some(c) if c.is_ascii_alphanumeric() || *c == b'-') {
+        return None;
+    }
+    Some(pos)
+}
+
+/// `call_<英数16+>`（tool call id）を `<call…>` へ短縮。
+fn elide_call_ids(line: &str) -> String {
+    const NEEDLE: &str = "call_";
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(pos) = rest.find(NEEDLE) {
+        out.push_str(&rest[..pos]);
+        let after = &rest[pos + NEEDLE.len()..];
+        let n = after
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .count();
+        if n >= 16 {
+            out.push_str("<call…>");
+            rest = &after[n..];
+        } else {
+            out.push_str(NEEDLE);
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `"digest":"<hex>"` の値を `…` へ（モデル不要な内部整合値・row295d）。
+fn elide_digest_values(line: &str) -> String {
+    const NEEDLE: &str = "\"digest\":\"";
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(pos) = rest.find(NEEDLE) {
+        out.push_str(&rest[..pos + NEEDLE.len()]);
+        let after = &rest[pos + NEEDLE.len()..];
+        let end = after.find('"').unwrap_or(after.len());
+        let val = &after[..end];
+        if !val.is_empty() && val.bytes().all(|b| b.is_ascii_hexdigit()) {
+            out.push('…');
+        } else {
+            out.push_str(val);
+        }
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// `[… kind:<数字> …]` 形の受信メタ行か（transport 非依存の汎用判定）。
@@ -3987,6 +4097,37 @@ mod render_refs_tests {
             out.contains("(reply→e1)"),
             "対象が e 番号解決されない: {out}"
         );
+    }
+
+    // row295d: 凍結 snapshot blob の UUID / call_ / digest hex を除去・短縮する。
+    #[test]
+    fn frozen_snapshot_elides_uuid_call_and_digest() {
+        let blob = "[me][2026-08-30 06:06:45]:\n[tool_call]:\n[c1]: execute_shell({\"ref\":\"log:1\",\"digest\":\"15e51315716f5bc7\",\"bytes\":116})\ncall_XH2Y1M9nLDkUzHxvC3J2RLCb → spawned subtask df58ec83-960c-45e3-b69c-ff493b133afc";
+        let out = strip_frozen_snapshot(blob);
+        assert!(
+            !out.contains("df58ec83-960c-45e3-b69c-ff493b133afc"),
+            "UUID 残存: {out}"
+        );
+        assert!(out.contains("<uuid…>"), "{out}");
+        assert!(
+            !out.contains("call_XH2Y1M9nLDkUzHxvC3J2RLCb"),
+            "call_ 残存: {out}"
+        );
+        assert!(out.contains("<call…>"), "{out}");
+        assert!(!out.contains("15e51315716f5bc7"), "digest hex 残存: {out}");
+        assert!(
+            out.contains("\"digest\":\"…\""),
+            "digest 短縮形が無い: {out}"
+        );
+        // 新形式（→log 参照・c 番号）は保持。
+        assert!(out.contains("log:1") && out.contains("[c1]"), "{out}");
+    }
+
+    // 単一ログ経路（per-log）は UUID/call_/digest を触らない（利用者本文の過剰除去を避ける）。
+    #[test]
+    fn per_log_strip_leaves_uuid_untouched() {
+        let body = "予約番号は df58ec83-960c-45e3-b69c-ff493b133afc です";
+        assert_eq!(strip_inbound_meta_for_display(body), body);
     }
 
     // row295b: subtask_completed は s 番号ヘッダ＋result 本文のみ（生 UUID/定型 field を出さない）。
