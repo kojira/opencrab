@@ -50,6 +50,15 @@ impl SeenEvents {
         true
     }
 
+    /// 握った claim を解除する（送出が accepted にならなかったとき）。これで別車線の copy が
+    /// 取りこぼされず後追いで届く（claim-after-accept 相当・#839 NIT の実害化対策）。
+    pub fn release(&self, event_id: &str) {
+        self.map
+            .lock()
+            .expect("seen-events mutex poisoned")
+            .remove(event_id);
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.map.lock().unwrap().len()
@@ -79,6 +88,16 @@ mod tests {
         );
         // TTL 経過後は再び握れる（掃除される）。
         assert!(seen.claim_at("aa", t0 + Duration::from_millis(20)));
+    }
+
+    #[test]
+    fn released_claim_can_be_reclaimed_by_other_lane() {
+        // 送出失敗で claim を解除すると、別車線 copy が後追いで握れる（取りこぼし防止）。
+        let seen = SeenEvents::new(Duration::from_secs(600));
+        assert!(seen.claim("aa"), "初回は握れる");
+        assert!(!seen.claim("aa"), "解除前は重複");
+        seen.release("aa");
+        assert!(seen.claim("aa"), "解除後は別車線が握れる");
     }
 
     #[test]
