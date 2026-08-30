@@ -49,6 +49,8 @@ struct SaidMetrics {
     queue_full: AtomicU64,
     bundle_discarded: AtomicU64,
     deduped: AtomicU64,
+    /// watch 車線が自分宛て #p を default 車線へ譲って捨てた回数（QC #10 対策・Defect A）。
+    lane_deferred: AtomicU64,
     /// say → nostaro reply を投稿できた回数。
     say_posted: AtomicU64,
     /// say 投稿が失敗した回数（nostaro 非ゼロ / spawn 失敗 / timeout）。
@@ -390,6 +392,19 @@ async fn handle_line(
     let Some(event) = parse_watch_line(&line) else {
         return;
     };
+    // Defect A（QC #10）: 自分宛て #p メンション/リプライは default(mention) 車線が `--npub` で
+    // 必ず即時に拾う。watch 車線が同じイベントを先に握っても、ここで default 車線へ譲って捨てる。
+    // これで owner がフォロイーにも含まれるときのレースで watch origin に取り込まれ、権限デバウンスへ
+    // 降格する取りこぼしを防ぐ（default 車線の即時処理へ一本化する）。
+    if should_defer_to_default_lane(lane, &event, self_pubkey) {
+        let n = metrics.lane_deferred.fetch_add(1, Ordering::Relaxed) + 1;
+        tracing::debug!(
+            id = %event.id,
+            lane_deferred = n,
+            "watch lane defers self-mention to default lane"
+        );
+        return;
+    }
     let route = classify_route(&event, self_pubkey, beyond, lane);
     if route == Route::Bundle {
         // bundle は flush 時に dedup する（manifest の count/origins を一貫させるため）。
@@ -417,6 +432,17 @@ async fn handle_line(
             seen.release(&id);
         }
     }
+}
+
+/// Defect A（QC #10）: watch(timeline) 車線が受けたイベントを default(mention) 車線へ譲るか。
+///
+/// 自分宛て `#p` のメンション/リプライは、default 車線が `mention_lane_filter` の `--npub` で必ず即時に
+/// 拾う。owner がフォロイーにも含まれると同じイベントが両車線へ届き、watch 車線が先に握ると watch origin
+/// で取り込まれて権限デバウンスへ降格する（即応の取りこぼし）。watch 車線側をここで捨てて default 車線の
+/// 即時処理へ一本化する。default 車線・自分宛てでないイベントは対象外。
+fn should_defer_to_default_lane(lane: &Lane, event: &WatchEvent, self_pubkey: &str) -> bool {
+    matches!(lane.kind, LaneKind::Watch { .. })
+        && crate::map::is_self_p_tag_mention(event, self_pubkey)
 }
 
 /// event_id を握れたら `true`。hex 化できる id のみ dedup 対象（それ以外は send_mapped が落とす）。
@@ -728,6 +754,53 @@ mod tests {
         assert!(claim_or_skip(&seen, &metrics, "not-hex"));
         assert!(claim_or_skip(&seen, &metrics, "not-hex"));
         assert_eq!(metrics.deduped.load(Ordering::Relaxed), 0);
+    }
+
+    fn watch_event(kind: u32, tags: Vec<Vec<String>>) -> WatchEvent {
+        WatchEvent {
+            id: "aa".repeat(32),
+            pubkey: "22".repeat(32),
+            npub: None,
+            note_id: Some("note1abc".into()),
+            created_at: 1,
+            kind,
+            content: "hi".into(),
+            tags,
+        }
+    }
+
+    // Defect A（QC #10）: watch 車線は自分宛て #p を default 車線へ譲る。default 車線と
+    // 他人宛て/#p 無しは譲らない。
+    #[test]
+    fn watch_lane_defers_self_p_tag_only() {
+        let self_pk = "11".repeat(32);
+        let self_mention = watch_event(1, vec![vec!["p".into(), self_pk.clone()]]);
+        // watch 車線 × 自分宛て → 譲る（default 車線の即時処理へ一本化）。
+        assert!(should_defer_to_default_lane(
+            &Lane::watch(4),
+            &self_mention,
+            &self_pk
+        ));
+        // default 車線は決して譲らない（自分がここで即時処理する）。
+        assert!(!should_defer_to_default_lane(
+            &Lane::default_lane(),
+            &self_mention,
+            &self_pk
+        ));
+        // watch 車線 × 他人宛て → 譲らない（timeline の担当）。
+        let other = watch_event(1, vec![vec!["p".into(), "99".repeat(32)]]);
+        assert!(!should_defer_to_default_lane(
+            &Lane::watch(4),
+            &other,
+            &self_pk
+        ));
+        // watch 車線 × #p 無しリプライ → 譲らない（default 車線の --npub では拾えない）。
+        let e_only = watch_event(1, vec![vec!["e".into(), "bb".repeat(32)]]);
+        assert!(!should_defer_to_default_lane(
+            &Lane::watch(4),
+            &e_only,
+            &self_pk
+        ));
     }
 
     #[test]
