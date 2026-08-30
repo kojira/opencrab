@@ -152,6 +152,17 @@ pub fn classify_route(
     Route::Bundle
 }
 
+/// 自分（self_pubkey）への `#p` タグを持つイベントか。
+///
+/// default(mention) 車線は `mention_lane_filter` の `--npub`（self への #p）で、こうしたイベントを
+/// **必ず**拾って即時処理する。watch(timeline) 車線が同じイベントを先に握っても、自分宛て `#p` は
+/// default 車線へ即時処理を譲る（`run::handle_line` で watch 車線側を捨てる）ための判定。owner が
+/// フォロイーにも含まれると、owner のメンション/リプライが両車線に届いてレースになり、watch 車線が
+/// 勝つと watch origin で取り込まれて権限デバウンスへ降格する取りこぼし（QC #10）が起きるのを防ぐ。
+pub fn is_self_p_tag_mention(event: &WatchEvent, self_pubkey: &str) -> bool {
+    p_tag_is_self(event, self_pubkey)
+}
+
 pub fn map_event(
     event: &WatchEvent,
     self_pubkey: &str,
@@ -398,6 +409,20 @@ mod tests {
         );
         assert_eq!(mapped.author_id, "22".repeat(32));
         assert_eq!(mapped.route, Route::Immediate);
+    }
+
+    #[test]
+    fn is_self_p_tag_mention_matches_only_self_p_tag() {
+        let self_pk = self_pk();
+        // 自分宛て #p → true（default 車線へ譲る対象）。
+        let to_self = ev(1, vec![vec!["p".into(), self_pk.clone()]]);
+        assert!(is_self_p_tag_mention(&to_self, &self_pk));
+        // 他人宛て #p → false（watch 車線が扱う）。
+        let to_other = ev(1, vec![vec!["p".into(), "99".repeat(32)]]);
+        assert!(!is_self_p_tag_mention(&to_other, &self_pk));
+        // #p なし → false。
+        let no_p = ev(1, vec![vec!["e".into(), "bb".repeat(32)]]);
+        assert!(!is_self_p_tag_mention(&no_p, &self_pk));
     }
 
     #[test]
