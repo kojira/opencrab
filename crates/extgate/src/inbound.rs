@@ -369,6 +369,7 @@ pub fn process_said<R: AgentRuntime>(
             said,
             &session_id,
             &prompt_suffix,
+            true, // 単一メンション: 発端 said の origin へ返信
         );
     }
 
@@ -450,6 +451,7 @@ fn finish_bundle<R: AgentRuntime>(
             &trigger_said,
             ctx.session_id,
             &suffix,
+            false, // bundle: 単一返信先が無い（gateway drop・エアリプは nostr_post）
         );
     }
     Ok(SaidOutcome { seq })
@@ -691,6 +693,10 @@ fn enqueue_turn<R: AgentRuntime>(
     said: &Said,
     session_id: &str,
     prompt_suffix: &str,
+    // 単一メンション turn は発端 said の origin へ返信（say payload の reply_target に載せる）。
+    // bundle turn は単一返信先が無いので false（gateway は drop・エアリプは nostr_post）。
+    // gateway 側の pending_turn 相関は activity ended が say より先に届き消えるため当てにしない。
+    reply_to_origin: bool,
 ) {
     let locks = runtime.session_locks();
     let session_id = session_id.to_string();
@@ -706,6 +712,12 @@ fn enqueue_turn<R: AgentRuntime>(
     let kind_id = row.kind_id.clone();
     let delivery_mode = row.delivery_mode;
     let prompt_suffix = prompt_suffix.to_string();
+    // say の返信先（発端イベント origin）。単一メンションのみ。bundle は None。
+    let reply_target: Option<String> = if reply_to_origin {
+        Some(origin.clone())
+    } else {
+        None
+    };
     if !state.turn_queues.try_reserve(&session_id) {
         #[cfg(any(test, feature = "extgate-probe"))]
         state
@@ -812,7 +824,11 @@ fn enqueue_turn<R: AgentRuntime>(
                                         "extgate",
                                         caller.clone(),
                                     )
-                                    .with_image_urls(images.clone()),
+                                    .with_image_urls(images.clone())
+                                    // 発端イベントの origin を subtask へ引き継ぐ。subtask 完了時の
+                                    // resume ターンの say がこの origin へ返信できるようにする
+                                    // （settlement→SubtaskSettled.reply_target 経由）。
+                                    .with_reply_target(origin.clone()),
                                     &kind_id,
                                     author_id.clone(),
                                     registry.clone(),
@@ -832,6 +848,9 @@ fn enqueue_turn<R: AgentRuntime>(
                             None => opencrab_actions::DeliveryEffect::Empty,
                         };
                         let effect = adjust_inbound_effect(delivery_mode, effect);
+                        // 単一メンションは発端 origin を say payload に明示（gateway が e-tag reply）。
+                        // bundle は None（gateway drop・エアリプは nostr_post）。gateway の
+                        // pending_turn 相関は activity ended が say より先に届き消えるため使わない。
                         apply_delivery_effect(
                             &state,
                             &runtime,
@@ -840,6 +859,7 @@ fn enqueue_turn<R: AgentRuntime>(
                             &agent_id,
                             &session_id,
                             effect,
+                            reply_target.as_deref(),
                         )
                         .await;
                     }
@@ -895,6 +915,7 @@ fn fire_held_turns<R: AgentRuntime>(
         &said,
         &last.session_id,
         &last.prompt_suffix,
+        true, // 保留していた単一メンション: 発端 said の origin へ返信
     );
 }
 

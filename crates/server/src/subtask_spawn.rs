@@ -386,8 +386,10 @@ pub async fn spawn_subtask(
             label,
             tool_name: "spawn_subtask".to_string(),
             started_at: started_instant,
-            // 明示 spawn の返信先は親セッションから復元する（sink 側の責務 / #167）。
-            reply_target: None,
+            // 親ターンの返信先（発端イベントの origin）を引き継ぐ。決着→resume ターンの say が
+            // この origin へ e-tag reply できるようにする（gateway は session_id から返信先を
+            // 復元できないため）。ctx.reply_target は RunRequest.reply_target と同じ不透明 token。
+            reply_target: ctx.reply_target.clone(),
             // 親ターンの呼び出し元を保持する（#298）。sub-engine の実行 caller
             // （上の `parent_caller`）と同一の値で、決着後に**親会話を resume** する
             // sink も元の権限で再開する。ここで落とすと、オーナー発のターンが subtask

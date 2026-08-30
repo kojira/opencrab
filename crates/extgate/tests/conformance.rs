@@ -1151,7 +1151,13 @@ async fn delivery_ok_rejected_and_disconnect() {
         }
     }
     let say = saw_say.expect("say");
-    assert_eq!(say["payload"], json!({"text": "hello from agent"}));
+    // 単一メンション turn の say は発端 said の origin を reply_target に載せる（gateway が
+    // e-tag reply する。gateway の pending_turn 相関は activity ended が say より先に届き
+    // 消えるため、返信先は payload で明示する）。
+    assert_eq!(
+        say["payload"],
+        json!({"text": "hello from agent", "reply_target": "d1"})
+    );
     assert!(!say["payload"]["text"].as_str().unwrap().is_empty());
     write_frame(&mut s, &json!({"id": say["id"], "m": "ok"})).await;
     tokio::time::sleep(Duration::from_millis(50)).await;

@@ -101,6 +101,10 @@ async fn resume_v3_turn<R: AgentRuntime>(sink: ExtgateCompletionSink<R>, ev: Sub
     locks
         .run_serialized(&session_id, async move {
             let caller = ev.caller.clone();
+            // 発端イベントの origin（subtask spawn 時に捕捉し settlement で持ち回った返信先）。
+            // resume ターンの say はこれへ e-tag reply する（gateway は said を送っていないので
+            // pending_turn では返信先を導けない）。次の subtask にも引き継ぐ（連鎖 resume）。
+            let reply_target = ev.reply_target.clone();
             let (system, name) = sink.runtime.build_agent_context(&sink.agent_id, &caller);
             let system = if sink.prompt_suffix.is_empty() {
                 system
@@ -119,16 +123,22 @@ async fn resume_v3_turn<R: AgentRuntime>(sink: ExtgateCompletionSink<R>, ev: Sub
                 "",
                 |raw| raw.to_string(),
                 |conversation| {
+                    let mut req = RunRequest::new(
+                        sink.agent_id.clone(),
+                        name.clone(),
+                        sink.session_id.clone(),
+                        system.clone(),
+                        conversation,
+                        "extgate",
+                        caller.clone(),
+                    );
+                    // 連鎖: この resume が更に subtask を spawn したら、その完了 say も
+                    // 同じ発端 origin へ返せるよう reply_target を引き継ぐ。
+                    if let Some(rt) = reply_target.clone() {
+                        req = req.with_reply_target(rt);
+                    }
                     v3_attach_dispatch(
-                        RunRequest::new(
-                            sink.agent_id.clone(),
-                            name.clone(),
-                            sink.session_id.clone(),
-                            system.clone(),
-                            conversation,
-                            "extgate",
-                            caller.clone(),
-                        ),
+                        req,
                         &kind_id,
                         author_id.clone(),
                         registry.clone(),
@@ -150,6 +160,7 @@ async fn resume_v3_turn<R: AgentRuntime>(sink: ExtgateCompletionSink<R>, ev: Sub
                 &sink.agent_id,
                 &sink.session_id,
                 effect,
+                reply_target.as_deref(),
             )
             .await;
         })
