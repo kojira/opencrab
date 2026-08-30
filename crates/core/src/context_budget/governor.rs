@@ -180,6 +180,20 @@ impl TurnGovernor {
 /// スナップショット＋水位印より後の差分を組み立てる。開始時 compact はしない。
 ///
 /// `items` は正本の全ログから作る。
+/// refs を作り、自分の表示名（agents.name）を引いて設定する（row295c: 自分行を UUID でなく
+/// 名前で出す）。名前引きに失敗しても refs は使える（speaker_label が agent_id へフォールバック）。
+fn build_conversation_refs(
+    conn: &Connection,
+    logs: &[opencrab_db::queries::SessionLogRow],
+    agent_id: &str,
+) -> crate::conversation::ConversationRefs {
+    let mut refs = crate::conversation::ConversationRefs::build(logs, agent_id);
+    if let Ok(Some(agent)) = opencrab_db::queries::get_agent(conn, agent_id) {
+        refs.set_agent_name(agent.name);
+    }
+    refs
+}
+
 pub fn assemble_from_snapshot(
     conn: &Connection,
     session_id: &str,
@@ -198,15 +212,31 @@ pub fn assemble_from_snapshot(
     );
     let completed_for_read = completed_tool_call_ids(&all);
     // §9A: u/e/c 短縮参照は全履歴の初出順で採番し、snapshot 境界を跨いでも安定させる。
-    let refs = crate::conversation::ConversationRefs::build(&all, agent_id);
+    let refs = build_conversation_refs(conn, &all, agent_id);
+    // 並行バッチの spawn 受理（同一 subtask を call ごとに重複記録）は初出だけ残す（row295 item4）。
+    let mut seen_spawns = std::collections::HashSet::new();
     let delta = logs
         .iter()
+        .filter(|l| match crate::conversation::spawn_ack_subtask_id(l) {
+            Some(sid) => seen_spawns.insert(sid),
+            None => true,
+        })
         .map(|l| format_single_log_with_echo(l, Some(&completed_for_read), Some(&refs)))
         .collect::<Vec<_>>()
         .join("\n");
+    // #826 snapshot は旧レンダリング済みテキストの blob で、§9A/refs 描画経路を通らずそのまま
+    // 連結される。read 時に表示剥がし（メタ行除去・生識別子短縮）を適用して legacy 残存を消す。
+    // 触るのは派生キャッシュの読み出しだけで正本 session_logs は書き換えない。剥がしは冪等なので
+    // 新形式（既に §9A）には無影響。次の finish_turn で剥がし済みが再永続化され snapshot は自己治癒する。
     let text = match &snap {
-        Some(s) if delta.is_empty() => s.compacted_conversation.clone(),
-        Some(s) => format!("{}\n{delta}", s.compacted_conversation),
+        Some(s) => {
+            let base = crate::conversation::strip_frozen_snapshot(&s.compacted_conversation);
+            if delta.is_empty() {
+                base
+            } else {
+                format!("{base}\n{delta}")
+            }
+        }
         None if delta.is_empty() => crate::conversation::NO_MESSAGES_MARKER.to_string(),
         None => delta,
     };
@@ -267,11 +297,14 @@ pub fn items_from_logs(
     let recent_tail = all.len().saturating_sub(8);
 
     let completed_ids = completed_tool_call_ids(&all);
-    let refs = crate::conversation::ConversationRefs::build(&all, agent_id);
+    let refs = build_conversation_refs(conn, &all, agent_id);
     let groups = partition_exchange_groups(&all, agent_id);
 
     let mut items = Vec::new();
     let mut ledger = TokenLedger::new();
+    // 並行バッチの spawn 受理（同一 subtask を重複記録）は初出だけ items に載せる（row295 item4）。
+    // これで圧縮発火時の snapshot にも二重表示が残らない。
+    let mut seen_spawns = HashSet::new();
     for (gid, idxs) in groups {
         let unresolved = group_is_unresolved(&all, &idxs, &completed_ids);
         let in_recent = idxs
@@ -279,6 +312,11 @@ pub fn items_from_logs(
             .any(|&i| newest_user.contains(&i) || i >= recent_tail);
         for i in idxs {
             let log = &all[i];
+            if let Some(sid) = crate::conversation::spawn_ack_subtask_id(log) {
+                if !seen_spawns.insert(sid) {
+                    continue;
+                }
+            }
             let text = format_single_log_with_echo(log, Some(&completed_ids), Some(&refs));
             let key = format!("log:{}", log.id.unwrap_or(i as i64));
             let tokens = ledger.record(&key, &text);

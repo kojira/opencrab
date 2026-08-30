@@ -145,7 +145,11 @@ pub fn process_said<R: AgentRuntime>(
     let work = [InboundWork {
         event,
         has_content: !said.text.is_empty() || !said.attachments.is_empty(),
-        kind_label: "said",
+        // Defect B（QC #10）: watch 車線経由の said は accept_inbound の権限デバウンス判定
+        // （watch_hold_interval_secs / AGREED_IMMEDIATE_KINDS）で kind ラベルを見る。ここを一律
+        // "said" にすると owner/followee のメンション・リプライ・リアクションでも即時扱いにならず
+        // interval 分だけ保留される。実 nostr kind からラベルを導出して即応判定を機能させる。
+        kind_label: inbound_kind_label(&row, said),
         author_key: said.author_id.as_str(),
     }];
 
@@ -451,7 +455,7 @@ fn finish_bundle<R: AgentRuntime>(
             &trigger_said,
             ctx.session_id,
             &suffix,
-            false, // bundle: 単一返信先が無い（gateway drop・エアリプは素の本文=say(standalone)）
+            false, // bundle: 単一返信先が無い（gateway が standalone post で publish・row292）
         );
     }
     Ok(SaidOutcome { seq })
@@ -641,6 +645,11 @@ fn record_inbound(
     }
     if row.kind_id == "nostr" {
         meta["external_origin"] = serde_json::json!(said.origin);
+        // 返信/リアクション/リポストの対象 event_id を記録（row295c 6b）。会話表示が
+        // `(reply→e番号)` を解決するのに使う。旧行は未記録＝表示側が `→外部` フォールバック。
+        if let Some(reply_to) = parse_v1_reply_to(&said.text) {
+            meta["reply_target"] = serde_json::json!(reply_to);
+        }
     }
     insert_session_log(
         tx,
@@ -697,7 +706,7 @@ fn enqueue_turn<R: AgentRuntime>(
     session_id: &str,
     prompt_suffix: &str,
     // 単一メンション turn は発端 said の origin へ返信（say payload の reply_target に載せる）。
-    // bundle turn は単一返信先が無いので false（gateway は drop・エアリプは素の本文=say(standalone)）。
+    // bundle turn は単一返信先が無いので false（gateway が standalone post で publish・row292）。
     // gateway 側の pending_turn 相関は activity ended が say より先に届き消えるため当てにしない。
     reply_to_origin: bool,
 ) {
@@ -869,7 +878,7 @@ fn enqueue_turn<R: AgentRuntime>(
                         };
                         let effect = adjust_inbound_effect(delivery_mode, effect);
                         // 単一メンションは発端 origin を say payload に明示（gateway が e-tag reply）。
-                        // bundle は None（gateway drop・エアリプは素の本文=say(standalone)）。gateway の
+                        // bundle は None（gateway が standalone post で publish・row292）。gateway の
                         // pending_turn 相関は activity ended が say より先に届き消えるため使わない。
                         apply_delivery_effect(
                             &state,
@@ -989,6 +998,20 @@ fn nostr_renderer_body(text: &str) -> &str {
     rest
 }
 
+/// accept_inbound へ渡す kind ラベル。nostr は実 kind から導出し（メンション/リプライ/リアクション/
+/// リポスト/長文/DM）、それ以外の transport は従来どおり "said"。
+///
+/// watch 車線経由の said は `accept_inbound` の権限デバウンス（`watch_hold_interval_secs` →
+/// `AGREED_IMMEDIATE_KINDS`）でこのラベルを見る。"said" 固定だと owner/followee のメンション・
+/// リプライ・リアクションでも即応にならず保留される（QC #10・Defect B）。
+fn inbound_kind_label(row: &OriginRow, said: &Said) -> &'static str {
+    if row.kind_id != "nostr" {
+        return "said";
+    }
+    let (_, label) = nostr_renderer_meta(&said.author_id, &said.text);
+    label
+}
+
 fn nostr_prompt_suffix(author_id: &str, text: &str) -> String {
     // §9A / DI-16 / row292: 普通の投稿は本文をそのまま書く（standalone publish・post 関数はない）。
     // 返信は明示 reply(e番号, 本文)、リアクションは reaction(e番号)、リポストは repost(e番号)。
@@ -1039,6 +1062,19 @@ fn parse_v1_kind_and_event(text: &str) -> Option<(u32, String)> {
     Some((kind, event_id))
 }
 
+/// V1 anchor の `reply_to`（対象ノート event_id・null/欠落は None）。row295c 6b。
+fn parse_v1_reply_to(text: &str) -> Option<String> {
+    let line = text.lines().next()?.trim();
+    let rest = line.strip_prefix(V1_PREFIX)?;
+    let json = rest.strip_suffix(']')?;
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    value
+        .get("reply_to")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 fn nostr_kind_from_label(label: &str) -> &'static str {
     match label {
         "DM" => "DM",
@@ -1063,6 +1099,23 @@ fn nostr_kind_label(kind: u32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_v1_reply_to_reads_target_and_ignores_null() {
+        let with = format!(
+            "[NOSTRGATE/V1 {{\"event_id\":\"{}\",\"kind\":1,\"reply_to\":\"{}\"}}]\nhi\n[Nostr kind:1 リプライ]",
+            "aa".repeat(32),
+            "bb".repeat(32),
+        );
+        assert_eq!(
+            parse_v1_reply_to(&with).as_deref(),
+            Some("bb".repeat(32).as_str())
+        );
+        // null / 欠落は None。
+        let without = "[NOSTRGATE/V1 {\"event_id\":\"x\",\"kind\":1,\"reply_to\":null}]\nhi";
+        assert_eq!(parse_v1_reply_to(without), None);
+        assert_eq!(parse_v1_reply_to("[NOSTRGATE/V1 {\"kind\":1}]\nhi"), None);
+    }
 
     #[test]
     fn renderer_body_strips_v1_line() {
