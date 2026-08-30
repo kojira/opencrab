@@ -145,7 +145,11 @@ pub fn process_said<R: AgentRuntime>(
     let work = [InboundWork {
         event,
         has_content: !said.text.is_empty() || !said.attachments.is_empty(),
-        kind_label: "said",
+        // Defect B（QC #10）: watch 車線経由の said は accept_inbound の権限デバウンス判定
+        // （watch_hold_interval_secs / AGREED_IMMEDIATE_KINDS）で kind ラベルを見る。ここを一律
+        // "said" にすると owner/followee のメンション・リプライ・リアクションでも即時扱いにならず
+        // interval 分だけ保留される。実 nostr kind からラベルを導出して即応判定を機能させる。
+        kind_label: inbound_kind_label(&row, said),
         author_key: said.author_id.as_str(),
     }];
 
@@ -971,6 +975,20 @@ fn nostr_renderer_body(text: &str) -> &str {
     rest
 }
 
+/// accept_inbound へ渡す kind ラベル。nostr は実 kind から導出し（メンション/リプライ/リアクション/
+/// リポスト/長文/DM）、それ以外の transport は従来どおり "said"。
+///
+/// watch 車線経由の said は `accept_inbound` の権限デバウンス（`watch_hold_interval_secs` →
+/// `AGREED_IMMEDIATE_KINDS`）でこのラベルを見る。"said" 固定だと owner/followee のメンション・
+/// リプライ・リアクションでも即応にならず保留される（QC #10・Defect B）。
+fn inbound_kind_label(row: &OriginRow, said: &Said) -> &'static str {
+    if row.kind_id != "nostr" {
+        return "said";
+    }
+    let (_, label) = nostr_renderer_meta(&said.author_id, &said.text);
+    label
+}
+
 fn nostr_prompt_suffix(author_id: &str, text: &str) -> String {
     // §9A / row296: pubkey= と対象ノートの生 ID をプロンプトから排除し短縮する。
     // 返信は発端投稿へ自動配送されるので LLM は対象 ID を指定しない。
@@ -981,7 +999,9 @@ fn nostr_prompt_suffix(author_id: &str, text: &str) -> String {
          - 種別: kind:{kind}（{label}）\n\
          返信する内容をそのまま本文で書いてください（あなたの応答はこの投稿への返信として\
          自動で投稿されます）。種別的に本文返信が不自然なもの（リアクション等）や、返信不要なら \
-         NO_REPLY とだけ答えてください。",
+         NO_REPLY とだけ答えてください。\n\
+         会話に未処理の依頼が複数あるときは、いずれかだけで済ませず全て処理してから返してください\
+         （必要なツールは並行して spawn してかまいません）。",
     )
 }
 
