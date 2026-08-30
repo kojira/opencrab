@@ -32,7 +32,7 @@
       "5xx": 4
     },
     "tool_effects_observed": 50,
-    "tool_success_uncollected_count": 21
+    "tool_success_uncollected_count": 16
   },
   "http": {
     "probes": [
@@ -12512,12 +12512,7 @@
         "join_voice_channel": "Requires a live Discord gateway and joins a remote voice channel.",
         "leave_voice_channel": "Requires a live Discord gateway and leaves a remote voice channel.",
         "nostr_generate_key": "Requires the operator's nostaro executable and writes key material outside the temporary workspace.",
-        "nostr_post": "Requires an adopted Nostr identity and publishes to live relays.",
-        "nostr_reply": "Requires an adopted Nostr identity and publishes to live relays.",
-        "nostr_run": "Requires an adopted identity, operator nostaro executable, and potentially live relay/service I/O.",
         "nostr_switch_identity": "Requires a generated key and configured Nostr transport capability; successful adoption may start a live relay connection.",
-        "nostr_upload": "Requires an adopted Nostr identity and uploads to a live external service.",
-        "nostr_zap": "Requires an adopted Nostr identity and performs a live external payment flow.",
         "request_peer_review": "Success delivers a message through the active transport. A local fake delivery would not fix live delivery behavior.",
         "run_my_heartbeat": "Successful manual fire runs an actual agent turn through a configured transport and LLM provider.",
         "send_ui": "Requires a live Discord gateway and sends remote UI components."
@@ -12977,43 +12972,6 @@
       {
         "arguments": {},
         "required_by_observed_schema": [
-          "text"
-        ],
-        "result": {
-          "data": null,
-          "error": "text パラメータが必要です",
-          "success": false
-        },
-        "tool": "nostr_post"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "target",
-          "text"
-        ],
-        "result": {
-          "data": null,
-          "error": "target と text パラメータが必要です",
-          "success": false
-        },
-        "tool": "nostr_reply"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "subcommand"
-        ],
-        "result": {
-          "data": null,
-          "error": "subcommand パラメータが必要です",
-          "success": false
-        },
-        "tool": "nostr_run"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
           "npub"
         ],
         "result": {
@@ -13022,31 +12980,6 @@
           "success": false
         },
         "tool": "nostr_switch_identity"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "path"
-        ],
-        "result": {
-          "data": null,
-          "error": "path パラメータが必要です",
-          "success": false
-        },
-        "tool": "nostr_upload"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "recipient",
-          "amount"
-        ],
-        "result": {
-          "data": null,
-          "error": "recipient パラメータが必要です",
-          "success": false
-        },
-        "tool": "nostr_zap"
       },
       {
         "arguments": {},
@@ -19346,39 +19279,9 @@
       },
       {
         "facet": "success",
-        "reason": "Requires an adopted Nostr identity and publishes to live relays.",
-        "status": "uncollected",
-        "tool": "nostr_post"
-      },
-      {
-        "facet": "success",
-        "reason": "Requires an adopted Nostr identity and publishes to live relays.",
-        "status": "uncollected",
-        "tool": "nostr_reply"
-      },
-      {
-        "facet": "success",
-        "reason": "Requires an adopted identity, operator nostaro executable, and potentially live relay/service I/O.",
-        "status": "uncollected",
-        "tool": "nostr_run"
-      },
-      {
-        "facet": "success",
         "reason": "Requires a generated key and configured Nostr transport capability; successful adoption may start a live relay connection.",
         "status": "uncollected",
         "tool": "nostr_switch_identity"
-      },
-      {
-        "facet": "success",
-        "reason": "Requires an adopted Nostr identity and uploads to a live external service.",
-        "status": "uncollected",
-        "tool": "nostr_upload"
-      },
-      {
-        "facet": "success",
-        "reason": "Requires an adopted Nostr identity and performs a live external payment flow.",
-        "status": "uncollected",
-        "tool": "nostr_zap"
       },
       {
         "facet": "success",
@@ -19448,7 +19351,6 @@
           "merge_tags",
           "nostr_generate_key",
           "nostr_list_keys",
-          "nostr_run",
           "nostr_switch_identity",
           "open_task",
           "plan_next_memory_window",
@@ -19556,7 +19458,6 @@
           "merge_tags",
           "nostr_generate_key",
           "nostr_list_keys",
-          "nostr_run",
           "nostr_switch_identity",
           "open_task",
           "plan_next_memory_window",
@@ -19654,12 +19555,7 @@
           "merge_tags",
           "nostr_generate_key",
           "nostr_list_keys",
-          "nostr_post",
-          "nostr_reply",
-          "nostr_run",
           "nostr_switch_identity",
-          "nostr_upload",
-          "nostr_zap",
           "open_task",
           "plan_next_memory_window",
           "read_heartbeat_instructions",
@@ -19755,7 +19651,6 @@
           "merge_tags",
           "nostr_generate_key",
           "nostr_list_keys",
-          "nostr_run",
           "nostr_switch_identity",
           "open_task",
           "plan_next_memory_window",
@@ -19845,7 +19740,6 @@
           "merge_tags",
           "nostr_generate_key",
           "nostr_list_keys",
-          "nostr_run",
           "nostr_switch_identity",
           "open_task",
           "plan_next_memory_window",
@@ -19908,7 +19802,6 @@
           "get_task",
           "mcp__public_local__echo",
           "nostr_generate_key",
-          "nostr_run",
           "open_task",
           "read_skill",
           "rebuild_memory_index",
@@ -20094,7 +19987,6 @@
           "merge_tags",
           "nostr_generate_key",
           "nostr_list_keys",
-          "nostr_run",
           "nostr_switch_identity",
           "open_task",
           "plan_next_memory_window",
@@ -20187,7 +20079,6 @@
           "get_task",
           "mcp__public_local__echo",
           "nostr_generate_key",
-          "nostr_run",
           "open_task",
           "read_skill",
           "rebuild_memory_index",
