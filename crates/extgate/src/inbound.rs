@@ -488,7 +488,8 @@ fn load_bundle_trigger(
 fn bundle_prompt_suffix(count: u32) -> String {
     format!(
         "[Nostr] タイムライン watch の束ね（{count} 件）です。窓内を 1 ターンの文脈に載せています。\
-         返信するなら最後の対象ノートへ nostr_reply を使ってください。不要なら NO_REPLY とだけ答えてください。"
+         心が動いた投稿にはエアリプ（nostr_post による独立投稿）で触れてよい（特定ノートへの返信には\
+         なりません）。反応不要なら NO_REPLY とだけ答えてください。"
     )
 }
 
@@ -932,8 +933,8 @@ fn nostr_prompt_suffix(author_id: &str, text: &str) -> String {
          - 送信者: {author_key}（pubkey={pubkey}）\n\
          - 対象ノート: {target}\n\
          - 種別: kind:{kind}（{label}）\n\
-         返信するなら nostr_reply(target=\"{target}\") を使ってください（target は返信先ノート）。\
-         種別的に本文返信が不自然なもの（リアクション等）や、返信不要なら \
+         返信する内容をそのまま本文で書いてください（あなたの応答はこの対象ノートへの返信として\
+         自動で投稿されます）。種別的に本文返信が不自然なもの（リアクション等）や、返信不要なら \
          NO_REPLY とだけ答えてください。",
         pubkey = author_id,
     )
@@ -1034,7 +1035,12 @@ mod tests {
             "bb".repeat(32)
         );
         let suffix = nostr_prompt_suffix(&pk, &text);
-        assert!(suffix.contains("nostr_reply(target=\"note1abc\")"));
+        // nostr_reply 露出撤去（返信は say 一本 / #840）: プロンプトに nostr_reply を出さない。
+        assert!(!suffix.contains("nostr_reply"));
+        // 対象ノート（target）自体は文脈行として残る。
+        assert!(suffix.contains("note1abc"));
+        // 返信は本文をそのまま書かせる say ベースの文言になっている。
+        assert!(suffix.contains("そのまま本文で書いて"));
         assert!(suffix.contains("kind:1（リプライ）"));
         assert!(suffix.contains("NO_REPLY"));
         assert!(suffix.contains("pubkey="));

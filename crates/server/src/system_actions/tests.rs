@@ -5267,208 +5267,58 @@ fn register_fake_nostr(state: &AppState, fail: bool) -> Arc<RecordingPassthrough
     passthrough
 }
 
-/// `nostr_run` は own（全ターンで露出）で、caller による制限を持たない（#303）。
-/// 分類は inline（同ターンで結果を使う / 送信は送ること自体が応答）。
-// #654: nostr_run 定義は nostr feature 依存（#651）。off では own に無いので同じ cfg で囲む。
-#[cfg(feature = "nostr")]
-#[test]
-fn nostr_run_is_own_unrestricted_and_inline() {
+/// `nostr_run`（薄い nostaro passthrough / #268）は**そもそも使えないように**撤去した
+/// （オーナー裁定）。own 定義に無く、名前指定で呼んでも fail-close で拒否される。
+///
+/// 返信は core の say 一本（gateway が対象ノートへの nostaro reply として投稿する / #840）、
+/// 独立投稿は nostr_post。ここは feature の有無に依らず「露出されない」ことを固定する。
+#[tokio::test]
+async fn nostr_run_is_unexposed_and_fail_closes() {
     let names: Vec<String> = SystemGatewayActions::own_definitions()
         .into_iter()
         .map(|d| d.name)
         .collect();
     assert!(
-        names.contains(&"nostr_run".to_string()),
-        "nostr_run は own 定義（全ターンで露出）でなければならない"
+        !names.contains(&"nostr_run".to_string()),
+        "nostr_run は露出撤去したので own 定義に無いこと"
     );
-    let policy = opencrab_actions::tool_policy("nostr_run");
-    assert!(
-        !policy.trusted_only,
-        "nostr_run に trusted ゲートを付けない"
-    );
-    assert!(!policy.owner_only, "nostr_run に owner ゲートを付けない");
-    // 分類は inline（dispatch 対象外）。権威は定義の `class.dispatch` 属性。
-    let class = SystemGatewayActions::own_definitions()
-        .into_iter()
-        .find(|d| d.name == "nostr_run")
-        .expect("nostr_run が own_definitions() に無い")
-        .class;
-    assert_eq!(
-        class.dispatch,
-        opencrab_gateway::DispatchMode::Inline,
-        "nostr_run は inline（同ターン結果依存 / 配送系）"
-    );
-}
 
-/// description は **グローバルタイムラインの取り方**を書いてある（#312）。
-///
-/// `nostr_run` は subcommand しか検査せず args は素通しなので、`timeline --global` は
-/// 実装を 1 行も足さずに使える。**にもかかわらず使われなかった**のは、description に
-/// 書いていなかったからで、実測では約 5.5 時間の `nostr_run` 36 件のうち 26 件が
-/// `timeline`（＝フォロー基準の同じ範囲を取り直していた）だった。description は LLM が
-/// ツールの使い方を知る唯一の手がかりなので、ここが消えると「機能はあるのに誰も使わない」
-/// 状態へ黙って戻る。
-///
-/// 素の `timeline` との違いも要求する。「`timeline` を叩けばフォロー外も見える」という
-/// 誤解こそが 26 回の空振りの原因なので、`--global` の名前だけ書いても効かない。
-///
-/// needle は表現をそのまま拾うので、description を言い換えるときは needle も一緒に直す
-/// （守りたいのは文字列ではなく「グローバルの取り方が書いてある」ことの方）。
-// #654: nostr_run 定義は nostr feature 依存（#651）。off では description が無いので同じ cfg で囲む。
-#[cfg(feature = "nostr")]
-#[test]
-fn nostr_run_description_documents_the_global_timeline() {
-    let defs = SystemGatewayActions::own_definitions();
-    let d = defs.iter().find(|d| d.name == "nostr_run").unwrap();
-    for needle in [
-        // グローバルの取り方そのもの。
-        "timeline --global",
-        // 素の timeline がフォロー基準であること（違いの明示）。
-        "フォロー基準",
-        // 件数が多いときの逃がし先。
-        "--out-format json",
-    ] {
-        assert!(
-            d.description.contains(needle),
-            "nostr_run の description から「{needle}」が消えている\
-                 （グローバルタイムラインの取り方は description にしか書けない / #312）:\n{}",
-            d.description
-        );
-    }
-}
-
-/// caller=Agent（Nostr 受信ターン / 非オーナー相手の会話ターン）でも `nostr_run` は
-/// 使える。heartbeat tick は caller=Owner なので元から対象外（`crates/server/src/main.rs`）。
-///
-/// ここを塞ぐと「Nostr 上で自律的に活動する」という目的そのものが成立しない。
-/// opencrab が担保するのは ①鍵の混同防止 ②nsec の隠蔽 の 2 点だけで、
-/// どちらも caller による露出制限を必要としない（#303）。
-///
-/// ゲートを実際に通す検証は crate 内部の `policy_allows` を呼べる
-/// `opencrab_actions` 側（`nostr_run_passes_the_gate_for_agent_caller`）が持つ。
-/// ここは権限リストの写像（`tool_policy`）だけを固定する。
-#[test]
-fn nostr_run_is_available_to_agent_caller() {
-    assert!(
-        !opencrab_actions::TRUSTED_ONLY_ACTIONS.contains(&"nostr_run"),
-        "nostr_run を TRUSTED_ONLY_ACTIONS へ戻さない"
-    );
-    assert!(
-        !opencrab_actions::OWNER_ONLY_ACTIONS.contains(&"nostr_run"),
-        "nostr_run を OWNER_ONLY_ACTIONS へ入れない"
-    );
-}
-
-/// 稼働中（登録済み）の Nostr passthrough capability へ、ctx.agent_id・subcommand・args
-/// をそのまま委譲する。
-///
-/// caller は **`Agent`**（Nostr 受信ターン相当）で回す（#303）。ハンドラ内に後日
-/// typed な caller gate を足されたらここで落ちる。
-// #654: nostr_run は nostr feature 依存（#651）。off ではツールが無いので同じ cfg で囲む。
-#[cfg(feature = "nostr")]
-#[tokio::test]
-async fn nostr_run_delegates_to_capability() {
-    let state = crate::test_app_state();
-    let rec = register_fake_nostr(&state, false);
-    let actions = SystemGatewayActions::new(state, None, None, None);
-    let ctx = GatewayCallContext::new(GatewayCaller::Agent, "agent-268");
-
-    // 委譲プラミングの検証（agent_id 固定・args そのまま渡る）。subcommand は読み取り系
-    // （timeline）にする（実 deny は NostaroCli::run_passthrough 側で、ここは fake
-    // capability なので deny を経由しない。`event` は #699 で許可済み）。
-    let r = actions
-        .execute(
-            "nostr_run",
-            &json!({
-                "subcommand": "timeline",
-                "args": ["--limit", "5", "hello; rm -rf /"]
-            }),
-            &ctx,
-        )
-        .await;
-    assert!(r.success, "error: {:?}", r.error);
-    assert_eq!(r.data.unwrap()["result"], "ran timeline");
-
-    let calls = rec.calls.lock().unwrap();
-    assert_eq!(calls.len(), 1);
-    let (agent, sub, args) = &calls[0];
-    assert_eq!(agent, "agent-268", "config は常に ctx.agent_id のもの");
-    assert_eq!(sub, "timeline");
-    assert_eq!(
-        args,
-        &vec![
-            "--limit".to_string(),
-            "5".to_string(),
-            "hello; rm -rf /".to_string()
-        ],
-        "args は 1 要素ずつそのまま渡る（注入されない）"
-    );
-}
-
-/// Nostr 未構成（capability 未登録）なら明示エラー（inner へ黙って落とさない）。
-// #654: nostr_run は nostr feature 依存（#651）。off ではツールが無いので同じ cfg で囲む。
-#[cfg(feature = "nostr")]
-#[tokio::test]
-async fn nostr_run_errors_when_nostr_not_configured() {
+    // 名前指定で呼んでも fail-close（黙って成功に見せない）。gateway 未登録でも拒否理由は
+    // 「未構成」ではなく「撤去」であること（fail-close が passthrough を引く前に効く）。
     let state = crate::test_app_state();
     let actions = SystemGatewayActions::new(state, None, None, None);
     let ctx = GatewayCallContext::new(GatewayCaller::Owner, "agent-x");
     let r = actions
         .execute("nostr_run", &json!({"subcommand": "post"}), &ctx)
         .await;
-    assert!(!r.success);
-    assert!(r.error.unwrap().contains("Nostr"));
+    assert!(!r.success, "nostr_run は成功してはいけない");
+    let msg = r.error.unwrap();
+    assert!(msg.contains("撤去"), "拒否理由に「撤去」を含む: {msg}");
 }
 
-/// subcommand 欠落・args 非文字列は capability を呼ばず即エラー。
-// #654: nostr_run は nostr feature 依存（#651）。off ではツールが無いので同じ cfg で囲む。
+/// fail-close は passthrough capability が登録されていても**委譲しない**（#268 の委譲配線が
+/// 生き残って露出撤去が骨抜きにならないことの回帰）。
+// #654: fake passthrough helper（register_fake_nostr 等）は nostr feature 依存なので同じ cfg で囲む。
 #[cfg(feature = "nostr")]
 #[tokio::test]
-async fn nostr_run_validates_args() {
+async fn nostr_run_does_not_delegate_even_with_passthrough() {
     let state = crate::test_app_state();
     let rec = register_fake_nostr(&state, false);
     let actions = SystemGatewayActions::new(state, None, None, None);
-    let ctx = GatewayCallContext::new(GatewayCaller::Owner, "agent-x");
-
-    // subcommand 無し。
-    let r = actions.execute("nostr_run", &json!({}), &ctx).await;
-    assert!(!r.success);
-    assert!(r.error.unwrap().contains("subcommand"));
-
-    // args に非文字列（数値）。
+    // caller=Agent（Nostr 受信ターン相当）でも通らない。
+    let ctx = GatewayCallContext::new(GatewayCaller::Agent, "agent-268");
     let r = actions
         .execute(
             "nostr_run",
-            &json!({"subcommand": "event", "args": ["--kind", 0]}),
+            &json!({"subcommand": "timeline", "args": ["--limit", "5"]}),
             &ctx,
         )
         .await;
-    assert!(!r.success);
-    assert!(r.error.unwrap().contains("文字列"));
-
-    // どちらも capability を呼んでいない。
-    assert!(rec.calls.lock().unwrap().is_empty());
-}
-
-/// capability のエラー（未 materialize / init/watch/relay/dm 拒否 / nostaro 失敗）はそのまま
-/// `nostr_run 失敗:` として伝播する（マスク済みメッセージ）。
-// #654: nostr_run は nostr feature 依存（#651）。off ではツールが無いので同じ cfg で囲む。
-#[cfg(feature = "nostr")]
-#[tokio::test]
-async fn nostr_run_propagates_capability_error() {
-    let state = crate::test_app_state();
-    register_fake_nostr(&state, true);
-    let actions = SystemGatewayActions::new(state, None, None, None);
-    let ctx = GatewayCallContext::new(GatewayCaller::Owner, "agent-x");
-    let r = actions
-        .execute(
-            "nostr_run",
-            &json!({"subcommand": "post", "args": ["hi"]}),
-            &ctx,
-        )
-        .await;
-    assert!(!r.success);
-    let msg = r.error.unwrap();
-    assert!(msg.contains("nostr_run 失敗"), "got: {msg}");
-    assert!(msg.contains("passthrough boom"), "got: {msg}");
+    assert!(!r.success, "露出撤去した nostr_run は passthrough があっても拒否される");
+    assert!(r.error.unwrap().contains("撤去"));
+    // capability は一度も呼ばれていない（委譲していない）。
+    assert!(
+        rec.calls.lock().unwrap().is_empty(),
+        "fail-close なのに passthrough capability が呼ばれている（委譲配線が生き残っている）"
+    );
 }
