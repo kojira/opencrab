@@ -65,8 +65,10 @@ pub fn post_config_path(socket: &Path, instance_id: &str) -> PathBuf {
 /// relays だけの nostaro config を書く（**秘密鍵は書かない**・env 注入）。
 pub fn write_relays_config(path: &Path, relays: &[String]) -> std::io::Result<()> {
     // TOML の string 配列は JSON と同じ書式（"..." とエスケープ）なので serde_json で安全に組む。
+    // nostaro の config は relays と default_relays の両方が必須（欠けると TOML parse error で
+    // reply が落ちる）。default_relays は relays と同じ集合を入れる。
     let arr = serde_json::to_string(relays).unwrap_or_else(|_| "[]".to_string());
-    std::fs::write(path, format!("relays = {arr}\n"))
+    std::fs::write(path, format!("relays = {arr}\ndefault_relays = {arr}\n"))
 }
 
 /// nsec 等の秘密を潰す（ログ用。config に鍵は載せていないが env 経由の万一の漏れを塞ぐ）。
@@ -189,7 +191,10 @@ mod tests {
         let path = dir.path().join("cfg.toml");
         write_relays_config(&path, &["wss://x.example".into(), "wss://r.example".into()]).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(body, "relays = [\"wss://x.example\",\"wss://r.example\"]\n");
+        assert_eq!(
+            body,
+            "relays = [\"wss://x.example\",\"wss://r.example\"]\ndefault_relays = [\"wss://x.example\",\"wss://r.example\"]\n"
+        );
         assert!(!body.contains("secret"), "config に鍵行を書かない");
     }
 
