@@ -1252,9 +1252,15 @@ pub(crate) fn strip_inbound_meta_for_display(content: &str) -> String {
 /// `"digest":"…"`（モデル不要な内部整合値）—も除去/短縮する。新形式（既に §9A・c/s 番号・→log:N）
 /// には該当パターンが無いので無影響。単一ログの note 本文へは適用しない（利用者本文の過剰除去を避ける）。
 pub(crate) fn strip_frozen_snapshot(content: &str) -> String {
-    strip_meta_lines(content, |line| {
-        elide_raw_identifiers(&clean_legacy_ids(line))
-    })
+    strip_meta_lines(content, scrub_identifiers_for_display)
+}
+
+/// 生の長識別子（UUID / `call_…` / `"digest":"…"` / bech32 / 32hex 以上）を短縮形へ落とす共通変換。
+/// **single source**: 凍結 snapshot の per-line 掃除・検知器・tool_result 本文表示（失敗本文の生 hex
+/// を含む）が同じ規則を共有する（[[single-source-of-truth-no-parallel-paths]]）。char 単位なので
+/// 単一行にも複数行本文にも同じく効く。会話に載る短縮参照（u/e/c/s 番号・`→log:N`）や普通の語は不変。
+pub(crate) fn scrub_identifiers_for_display(text: &str) -> String {
+    elide_raw_identifiers(&clean_legacy_ids(text))
 }
 
 /// **検知器**（row318）: 新規 delta 描画行に生の長識別子（UUID / `call_…` / bech32 / 32hex 以上 /
@@ -1264,7 +1270,7 @@ pub(crate) fn strip_frozen_snapshot(content: &str) -> String {
 /// プレースホルダを出さない）。正しく描画できていれば常に `None`。
 pub(crate) fn leaked_identifier_in_delta(rendered: &str) -> Option<String> {
     for line in rendered.split('\n') {
-        if elide_raw_identifiers(&clean_legacy_ids(line)) != line {
+        if scrub_identifiers_for_display(line) != line {
             return Some(line.to_string());
         }
     }
@@ -1652,12 +1658,15 @@ pub fn format_single_log_with_echo(
                     "[tool_result]{ts}:\n[{call_ref}]: {tool_name} → subtask {sref} を起動（本文は会話に残していない）"
                 );
             }
+            // 失敗本文（握り潰し防止で丸ごと残す）にも生の長識別子が混じる（例: nostr_run 失敗の
+            // "Event not found: <64hex>"）。本文表示は生識別子を短縮形へ落とす（row318・検知器が
+            // 実データで捕捉した漏れ経路）。要約参照（読み/一覧/成功）には長物が無いので無影響。
             format!(
                 "[tool_result]{}:\n[{}]: {} → {}",
                 ts,
                 call_ref,
                 tool_name,
-                result_reference(tool_name, &log.content)
+                scrub_identifiers_for_display(&result_reference(tool_name, &log.content))
             )
         }
         "tool_cancelled" => {

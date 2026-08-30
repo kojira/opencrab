@@ -694,6 +694,52 @@ fn final_conversation_has_zero_raw_identifiers_across_all_render_paths() {
     );
 }
 
+/// row318 実データ漏れ（検知器が本番で捕捉・log_id 106342/107076）: 過去の nostr_run 失敗の
+/// tool_result 本文（エラーテキスト）に生 64hex（"Event not found: <64hex>"）が混じる。失敗本文は
+/// 握り潰し防止で丸ごと残す（要約しない）が、表示は生識別子を短縮する。エラーの意味は残す。
+#[test]
+fn tool_result_failure_body_elides_raw_hex_but_keeps_error_text() {
+    let conn = opencrab_db::init_memory().unwrap();
+    let event_hex = format!("7be6255f{}", "a".repeat(56)); // 64hex（ダッシュ無し）
+    let content = format!(
+        r#"{{"success":false,"data":null,"error":"nostr_run failed: Event not found: {event_hex}"}}"#
+    );
+    let row = opencrab_db::queries::SessionLogRow {
+        id: None,
+        agent_id: AGENT.into(),
+        session_id: SESSION.into(),
+        log_type: "tool_result".into(),
+        content,
+        speaker_id: Some(AGENT.into()),
+        turn_number: None,
+        metadata_json: Some(
+            serde_json::json!({"tool_call_id": "tc-x", "tool_name": "nostr_run"}).to_string(),
+        ),
+        created_at: None,
+    };
+    opencrab_db::queries::insert_session_log(&conn, &row).unwrap();
+
+    let assembled = assemble_from_snapshot(&conn, SESSION, AGENT).unwrap();
+    let text = &assembled.text;
+    // 生 64hex は消える（短縮形へ）。
+    assert_eq!(count_uuids(text), 0, "UUID が残存: {text}");
+    assert!(
+        !text.contains(&event_hex),
+        "失敗本文の生 64hex が残存: {text}"
+    );
+    assert!(text.contains("<id…>"), "生 hex が短縮形になっていない: {text}");
+    // エラーの意味は残す（握り潰さない）。
+    assert!(
+        text.contains("Event not found"),
+        "エラーの意味が消えた: {text}"
+    );
+    // 検知器も沈黙（描画時に短縮済み）。
+    assert!(
+        crate::conversation::leaked_identifier_in_delta(text).is_none(),
+        "検知器が生識別子を検出（描画器バグ）: {text}"
+    );
+}
+
 /// 撤去の完全性。SQLite WAL の `wal_checkpoint` など別物は対象外。
 #[test]
 fn context_arrival_point_mechanism_is_gone() {
