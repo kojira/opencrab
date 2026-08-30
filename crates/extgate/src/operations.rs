@@ -18,8 +18,14 @@ const MAX_SCHEMA_NODES: usize = 1024;
 const MAX_STRING_LEN: usize = 16_384;
 
 /// JSON Schema 2020-12 subset の許可 keyword（DI-03）。これ以外は宣言不正。
-const ALLOWED_SCHEMA_KEYWORDS: &[&str] =
-    &["type", "required", "properties", "enum", "items", "description"];
+const ALLOWED_SCHEMA_KEYWORDS: &[&str] = &[
+    "type",
+    "required",
+    "properties",
+    "enum",
+    "items",
+    "description",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubEngine {
@@ -176,9 +182,7 @@ pub fn validate_operations(
     Ok(decls)
 }
 
-fn parse_declaration(
-    obj: &Map<String, Value>,
-) -> Result<GatewayOperationDeclaration, GateError> {
+fn parse_declaration(obj: &Map<String, Value>) -> Result<GatewayOperationDeclaration, GateError> {
     let name = match obj.get("name") {
         Some(Value::String(s)) if valid_name(s) => s.clone(),
         _ => return Err(invalid()),
