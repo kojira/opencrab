@@ -989,16 +989,17 @@ fn nostr_renderer_body(text: &str) -> &str {
 }
 
 fn nostr_prompt_suffix(author_id: &str, text: &str) -> String {
-    // §9A / row296: pubkey= と対象ノートの生 ID をプロンプトから排除し短縮する。
-    // 返信は発端投稿へ自動配送されるので LLM は対象 ID を指定しない。
+    // §9A / DI-16 / row292: 普通の投稿は本文をそのまま書く（standalone publish・post 関数はない）。
+    // 返信は明示 reply(e番号, 本文)、リアクションは reaction(e番号)、リポストは repost(e番号)。
+    // 生 ID（pubkey/note）はプロンプトへ出さない（会話は u/e/c 番号で参照する）。
     let (kind, label) = nostr_renderer_meta(author_id, text);
     let author = nostr_author_label(author_id);
     format!(
-        "[Nostr] {author} さんの投稿への応答です。\n\
-         - 種別: kind:{kind}（{label}）\n\
-         返信する内容をそのまま本文で書いてください（あなたの応答はこの投稿への返信として\
-         自動で投稿されます）。種別的に本文返信が不自然なもの（リアクション等）や、返信不要なら \
-         NO_REPLY とだけ答えてください。",
+        "[Nostr] {author} さんの投稿（kind:{kind}／{label}）への応答です。\n\
+         普通の投稿は本文をそのまま書いてください（新規ノートとして publish されます）。\n\
+         この投稿へ返信するなら reply(e番号, 本文)、リアクションは reaction(e番号)、\
+         リポストは repost(e番号) を使ってください。会話に出ている e番号 で対象を指定します。\n\
+         反応が不要なら NO_REPLY とだけ答えてください。",
     )
 }
 
@@ -1093,9 +1094,10 @@ mod tests {
         assert!(!suffix.contains("pubkey="));
         assert!(!suffix.contains(&pk));
         assert!(!suffix.contains("対象ノート"));
-        // 返信は本文をそのまま書かせる say ベースの文言になっている。
-        assert!(suffix.contains("そのまま本文で書いて"));
-        assert!(suffix.contains("kind:1（リプライ）"));
+        // §9A/DI-16: 普通の投稿は本文をそのまま書く（standalone）、返信は reply(e番号) 操作。
+        assert!(suffix.contains("本文をそのまま書いて"));
+        assert!(suffix.contains("reply(e番号"));
+        assert!(suffix.contains("kind:1"));
         assert!(suffix.contains("NO_REPLY"));
     }
 }

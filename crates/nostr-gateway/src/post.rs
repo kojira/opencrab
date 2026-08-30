@@ -41,15 +41,15 @@ pub fn event_id_from_origin(origin: &str) -> Option<String> {
     }
 }
 
-/// `nostaro --config <cfg> reply -- <target> <text>` の argv（鍵は env・argv に載せない）。
-/// `--` でオプション終端し、`-` 始まりの target/text も positional として渡す。
-pub fn reply_argv(config_path: &Path, target: &str, text: &str) -> Vec<String> {
+/// `nostaro --config <cfg> post -- <text>` の argv（鍵は env・argv に載せない）。
+/// DI-16: say は常に新規 post（standalone）。返信は DI `reply` 操作が担う。
+/// `--` でオプション終端し、`-` 始まりの text も positional として渡す。
+pub fn post_argv(config_path: &Path, text: &str) -> Vec<String> {
     vec![
         "--config".to_string(),
         config_path.to_string_lossy().into_owned(),
-        "reply".to_string(),
+        "post".to_string(),
         "--".to_string(),
-        target.to_string(),
         text.to_string(),
     ]
 }
@@ -93,7 +93,7 @@ fn redact_secrets(s: &str) -> String {
     out
 }
 
-fn build_reply_command(bin: &Path, argv: &[String], secret: Option<&str>) -> Command {
+fn build_post_command(bin: &Path, argv: &[String], secret: Option<&str>) -> Command {
     let mut cmd = Command::new(bin);
     cmd.args(argv)
         .stdin(Stdio::null())
@@ -106,36 +106,28 @@ fn build_reply_command(bin: &Path, argv: &[String], secret: Option<&str>) -> Com
     cmd
 }
 
-/// say を配送する。`reply_origin=None`（bundle/曖昧）は投稿しない（Dropped）。
-/// `Some(origin)` は origin の event_id へ e-tag reply する。
+/// say を配送する（DI-16: 常に新規 post = standalone）。返信は DI `reply` 操作が担うので、
+/// say に reply target を暗黙設定しない。`reply_origin` は wire 互換のため受けるが使わない。
 pub async fn deliver_say(
     nostaro_bin: &Path,
     config_path: &Path,
     secret: Option<&str>,
-    reply_origin: Option<String>,
+    _reply_origin: Option<String>,
     text: &str,
 ) -> SayDelivery {
-    let Some(origin) = reply_origin else {
-        // say は特定ノートへの返信専用。TL 束ね（単一返信先が無い）への自発反応は
-        // エアリプ（nostr_post）が担うので、gateway からは投稿しない。
-        return SayDelivery::Dropped;
-    };
-    let Some(target) = event_id_from_origin(&origin) else {
-        return SayDelivery::Failed(format!("origin から event_id を復元できない: {origin}"));
-    };
-    let argv = reply_argv(config_path, &target, text);
-    let mut cmd = build_reply_command(nostaro_bin, &argv, secret);
+    let argv = post_argv(config_path, text);
+    let mut cmd = build_post_command(nostaro_bin, &argv, secret);
     match tokio::time::timeout(POST_TIMEOUT, cmd.output()).await {
         Ok(Ok(out)) if out.status.success() => SayDelivery::Posted,
         Ok(Ok(out)) => {
             let stderr = redact_secrets(String::from_utf8_lossy(&out.stderr).trim());
             SayDelivery::Failed(format!(
-                "nostaro reply exit {:?}: {stderr}",
+                "nostaro post exit {:?}: {stderr}",
                 out.status.code()
             ))
         }
         Ok(Err(e)) => SayDelivery::Failed(format!("nostaro spawn 失敗: {e}")),
-        Err(_) => SayDelivery::Failed(format!("nostaro reply timeout {}s", POST_TIMEOUT.as_secs())),
+        Err(_) => SayDelivery::Failed(format!("nostaro post timeout {}s", POST_TIMEOUT.as_secs())),
     }
 }
 
@@ -167,16 +159,15 @@ mod tests {
     }
 
     #[test]
-    fn reply_argv_terminates_options_and_orders_target_text() {
-        let argv = reply_argv(Path::new("/x/cfg.toml"), "aa", "-hello");
+    fn post_argv_terminates_options() {
+        let argv = post_argv(Path::new("/x/cfg.toml"), "-hello");
         assert_eq!(
             argv,
             vec![
                 "--config".to_string(),
                 "/x/cfg.toml".to_string(),
-                "reply".to_string(),
+                "post".to_string(),
                 "--".to_string(),
-                "aa".to_string(),
                 "-hello".to_string(),
             ]
         );
@@ -204,21 +195,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bundle_origin_say_is_dropped_not_posted() {
-        // reply_origin=None は投稿せず Dropped（nostaro を spawn しない）。
-        let out = deliver_say(
-            Path::new("/nonexistent/nostaro"),
-            Path::new("/nonexistent/cfg.toml"),
-            None,
-            None,
-            "本文",
-        )
-        .await;
-        assert_eq!(out, SayDelivery::Dropped);
-    }
-
-    #[tokio::test]
-    async fn reply_invokes_nostaro_with_target_and_env_secret() {
+    async fn say_invokes_nostaro_post_with_env_secret() {
         // 実 relay 不要のモック nostaro。argv と env を控えて 0 exit する。
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fake-nostaro");
@@ -240,13 +217,13 @@ mod tests {
         }
         let cfg = dir.path().join("cfg.toml");
         write_relays_config(&cfg, &["wss://x.example".into()]).unwrap();
-        let id = "bb".repeat(32);
-        let origin = format!("nostr:event:v1:default:{id}");
+        // DI-16: say は常に standalone post。reply_origin を渡しても post になる（reply にしない）。
+        let origin = format!("nostr:event:v1:default:{}", "bb".repeat(32));
         let got = deliver_say(&script, &cfg, Some("nsec1fakekey"), Some(origin), "やあ").await;
         assert_eq!(got, SayDelivery::Posted);
         let recorded = std::fs::read_to_string(&out_file).unwrap();
-        assert!(recorded.contains("reply"), "{recorded}");
-        assert!(recorded.contains(&id), "target が渡っていない: {recorded}");
+        assert!(recorded.contains("post"), "post subcommand: {recorded}");
+        assert!(!recorded.contains("reply"), "reply にしない: {recorded}");
         assert!(recorded.contains("やあ"), "本文が渡っていない: {recorded}");
         assert!(
             recorded.contains("ENV:nsec1fakekey"),
@@ -254,7 +231,7 @@ mod tests {
         );
         assert!(
             !recorded.contains("--relay"),
-            "post/reply に --relay は無い（config の relays を使う）: {recorded}"
+            "post に --relay は無い（config の relays を使う）: {recorded}"
         );
     }
 
