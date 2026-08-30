@@ -31,6 +31,18 @@ use opencrab_actions::CallerIdentity;
 /// 撤去した互換読み（#214→#159）の手掛かりは、判定が最小権限（`Agent`）に落ちた
 /// ときだけ出す。`Agent` になるのは「owner でもなく自経路の行も無い」ときだけなので、
 /// これは旧実装の `None` 分岐（表 miss かつ非 owner）と同じ条件。
+///
+/// ## ⚠️ 認証済み識別子のみを渡すこと（#848）
+/// `user_id` には **認証済みチャネルが刻んだ識別子だけ**を渡す（Discord gateway の
+/// `sender_id`・Nostr の署名済み `author_pubkey` 等）。**自称値（REST リクエスト
+/// ボディの `user_id` など）を渡してはならない** — 平文の owner 識別子照合
+/// （[`opencrab_core::owner::is_owner_id`]）を通るため、owner 識別子を知る相手が
+/// 名乗るだけで `Owner` へ昇格できる #848 同型の権限昇格になる。REST 経路は
+/// 代わりに [`resolve_rest_caller_identity`] を使うこと。
+///
+/// なお現在この関数の**実行時呼び出し元は無い**（唯一の本番呼び出し元だった REST は
+/// #848 で [`resolve_rest_caller_identity`] へ移した）。将来 web 会話経路を再配線する
+/// ときのための共有ヘルパとして残しており、テストが上記の owner 昇格契約を固定する。
 pub fn resolve_caller_identity(
     conn: &rusqlite::Connection,
     platform: &str,
@@ -50,6 +62,60 @@ pub fn resolve_caller_identity(
         // ここへ落ちた＝この呼び出し元は信頼されない。互換読みの時代なら通っていた
         // かもしれないので、そのときだけ移行の手掛かりを出す（判定には使わない）。
         warn_legacy_row_no_longer_read(conn, platform, user_id, agent_id);
+    }
+    identity
+}
+
+/// REST 経路（`POST /api/agents/{id}/messages`）専用の呼び出し元判定（#848）。
+///
+/// **REST のボディ `user_id` は自称値**で、認証済みチャネルが刻む識別子ではない
+/// （Nostr の署名済み `author_pubkey`・Discord gateway の `sender_id` とは信頼度が違う）。
+/// これを平文の owner 識別子照合（[`opencrab_core::owner::is_owner_id`]）へそのまま通すと、
+/// owner 識別子を知る到達者がボディに書くだけで owner へ昇格できてしまう（#848）。owner 判定は
+/// 「認証済み識別子」経由のみに限定する、というのが本経路への裁定（案A）。
+///
+/// そこで REST では **owner 等価（`Owner` / `CoAgent`）へは一切昇格させない**:
+/// - owner 判定にオーナー識別子を渡さない（空 = 誰とも一致しない）。REST は「認証済みの
+///   owner 識別子」を持たないので、これは経路の実態に合った fail-closed。
+/// - `trusted_users` の `co-agent` 行に自称 `user_id` が一致しても、owner 等価
+///   （`execute_shell` 等の owner_only を開ける・#485）へは上げず、非 owner の `TrustedUser`
+///   へ据える（**塞ぐのは owner 昇格の範囲だけ**・over-fix しない）。
+///
+/// 非 owner（`TrustedUser` / `Agent`）は不変。`user_id` の表示・セッション分離
+/// （`agent-msg-{id}-{user_id}`）用途も不変。gateway 車線（Nostr の
+/// [`resolve_caller_identity_with_owner`] / Discord の
+/// [`crate::agent_runner_impl`]）の owner 判定は認証済み識別子を刻む正しい形なので、
+/// 本 PR では触らない。
+pub fn resolve_rest_caller_identity(
+    conn: &rusqlite::Connection,
+    user_id: &str,
+    agent_id: &str,
+) -> CallerIdentity {
+    // 認証済み owner 識別子を持たない経路なので owner_id は空を渡す
+    // （`is_owner_id` は空 owner を誰とも一致させない = Owner へは昇格しない）。
+    let identity = resolve_caller_identity_with_owner(
+        conn,
+        opencrab_db::queries::TRUSTED_PLATFORM_REST,
+        &[user_id],
+        agent_id,
+        "",
+    );
+    let identity = if identity.is_owner_equivalent() {
+        // owner_id が空なので `Owner` はここへ来ない。残る owner 等価は
+        // `trusted_users(permission='co-agent')` 由来の `CoAgent` のみ。自称 `user_id` で
+        // owner 等価へは上げず、非 owner の `TrustedUser` へ据える（owner 昇格だけを塞ぐ）。
+        CallerIdentity::TrustedUser
+    } else {
+        identity
+    };
+    if matches!(identity, CallerIdentity::Agent) {
+        // 互換読み撤去（#214→#159）の移行手掛かり。判定には使わない（既存挙動の維持）。
+        warn_legacy_row_no_longer_read(
+            conn,
+            opencrab_db::queries::TRUSTED_PLATFORM_REST,
+            user_id,
+            agent_id,
+        );
     }
     identity
 }
@@ -74,6 +140,14 @@ pub fn resolve_caller_identity(
 ///
 /// `user_ids` は同じ呼び出し元を指す**表記ゆれ違いの識別子**（Nostr なら hex と npub）。
 /// 先頭から順に引き、最初に見つかった行の権限を使う。先頭には正規化済みの表現を置くこと。
+///
+/// ## ⚠️ 認証済み識別子のみを渡すこと（#848）
+/// `user_ids` には **認証済みチャネルが刻んだ識別子だけ**を渡す。**自称値（REST リクエスト
+/// ボディの `user_id` 等）を渡してはならない** — `owner_id` と一致すれば `Owner` を返す
+/// ため、owner 識別子を知る相手が名乗るだけで `Owner` へ昇格できる #848 同型の権限昇格に
+/// なる。認証を持たない経路（REST）は owner 昇格を封じた [`resolve_rest_caller_identity`]
+/// を使うこと。認証済み識別子を渡す既存の呼び出し元は Nostr（署名済み `author_pubkey`。
+/// [`crate::nostr_runner_impl`]）のみ。
 pub fn resolve_caller_identity_with_owner(
     conn: &rusqlite::Connection,
     platform: &str,
@@ -164,7 +238,8 @@ pub fn warn_legacy_row_no_longer_read(
 mod tests {
     use super::*;
     use opencrab_db::queries::{
-        TrustedUserPermission, TRUSTED_PLATFORM_DISCORD, TRUSTED_PLATFORM_WEB,
+        TrustedUserPermission, TRUSTED_PLATFORM_DISCORD, TRUSTED_PLATFORM_REST,
+        TRUSTED_PLATFORM_WEB,
     };
     use std::cell::RefCell;
     use std::io;
@@ -460,6 +535,90 @@ mod tests {
         assert_eq!(
             resolve_caller_identity(&conn, TRUSTED_PLATFORM_WEB, "anyone", "agent-1"),
             CallerIdentity::Agent
+        );
+    }
+
+    // ---- #848: REST 経路（自称 user_id）は owner 等価へ昇格させない ----
+
+    /// [#848 回帰] REST のボディ `user_id` が設定済み owner の識別子と一致しても、owner へ
+    /// 昇格しない（自称値を平文照合して owner 専用アクションへ届かせない）。
+    #[test]
+    fn rest_body_user_id_matching_owner_is_not_promoted() {
+        let conn = opencrab_db::init_memory().unwrap();
+        set_discord_owner(&conn, "agent-1", "owner-id");
+        let identity = resolve_rest_caller_identity(&conn, "owner-id", "agent-1");
+        assert_eq!(
+            identity,
+            CallerIdentity::Agent,
+            "REST の自称 user_id が owner に昇格した（#848）"
+        );
+        assert!(
+            !identity.is_owner_equivalent(),
+            "REST は owner 等価（execute_shell 等 owner_only を開ける）になってはならない"
+        );
+    }
+
+    /// 前後空白付きの自称 owner 識別子でも昇格しない（trim 経路の抜けを塞ぐ）。
+    #[test]
+    fn rest_padded_owner_spoof_is_not_promoted() {
+        let conn = opencrab_db::init_memory().unwrap();
+        set_discord_owner(&conn, "agent-1", "owner-id");
+        assert_eq!(
+            resolve_rest_caller_identity(&conn, "  owner-id\n", "agent-1"),
+            CallerIdentity::Agent
+        );
+    }
+
+    /// owner 等価の唯一の残存経路（`trusted_users` の `co-agent` 行）に自称 `user_id` が
+    /// 一致しても、owner 等価（`CoAgent`）へは上げず非 owner の `TrustedUser` へ据える。
+    #[test]
+    fn rest_co_agent_row_is_capped_to_trusted_user() {
+        let conn = opencrab_db::init_memory().unwrap();
+        register(
+            &conn,
+            TRUSTED_PLATFORM_REST,
+            "rest-bot",
+            TrustedUserPermission::CoAgent,
+        );
+        let identity = resolve_rest_caller_identity(&conn, "rest-bot", "agent-1");
+        assert_eq!(
+            identity,
+            CallerIdentity::TrustedUser,
+            "REST の co-agent 行が owner 等価のまま通っている（#848 の owner 昇格範囲）"
+        );
+        assert!(!identity.is_owner_equivalent());
+    }
+
+    /// 非 owner の自経路 `trusted_users` 行は従来どおり（over-fix しない・正当な非 owner 発話）。
+    #[test]
+    fn rest_non_owner_trusted_row_is_unchanged() {
+        let conn = opencrab_db::init_memory().unwrap();
+        register(
+            &conn,
+            TRUSTED_PLATFORM_REST,
+            "rest-user",
+            TrustedUserPermission::User,
+        );
+        assert_eq!(
+            resolve_rest_caller_identity(&conn, "rest-user", "agent-1"),
+            CallerIdentity::TrustedUser
+        );
+        // 未登録の一般 REST ユーザーは最小権限。
+        assert_eq!(
+            resolve_rest_caller_identity(&conn, "some-visitor", "agent-1"),
+            CallerIdentity::Agent
+        );
+    }
+
+    /// 非退行: gateway/web 車線の共有判定（`resolve_caller_identity`）は owner を従来どおり
+    /// 昇格させる（本 PR は REST の入口だけを塞ぎ、共有 1 実装は不変）。
+    #[test]
+    fn shared_resolver_still_promotes_owner_for_non_rest_lane() {
+        let conn = opencrab_db::init_memory().unwrap();
+        set_discord_owner(&conn, "agent-1", "owner-id");
+        assert_eq!(
+            resolve_caller_identity(&conn, TRUSTED_PLATFORM_WEB, "owner-id", "agent-1"),
+            CallerIdentity::Owner
         );
     }
 }

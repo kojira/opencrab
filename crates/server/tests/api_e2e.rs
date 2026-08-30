@@ -812,16 +812,25 @@ async fn test_whitespace_user_id_is_not_owner_when_owner_blank() {
     assert_eq!(caller_type, "agent");
 }
 
-/// 正のコントロール: owner を設定すれば、その `user_id` はハンドラ経路で
-/// Owner として認識される（ガードが過剰に効いて owner を落としていない）。
+/// [#848 回帰] REST 経路（`POST /api/agents/{id}/messages`）はボディの `user_id` を
+/// **自称値**として扱い、それが設定済み owner の識別子と一致しても owner へ昇格させない。
+///
+/// 以前はここが `caller_type == "owner"` を期待していた（＝owner 識別子を知る到達者が
+/// ボディに書くだけで owner 専用アクション `execute_shell` 等へ届く信頼境界の穴・#848）。
+/// 案A（owner 判定は認証済み識別子のみ）に合わせ、REST では owner にならないことを固定する。
+/// gateway 車線（Nostr / Discord）の owner 判定は認証済み識別子を刻むため不変。
 #[tokio::test]
-async fn test_configured_owner_is_recognized_through_handler() {
+async fn test_rest_body_user_id_matching_owner_is_not_promoted() {
     let app = create_test_app();
     let (agent_id, app) = create_test_agent(app).await;
     let app = set_agent_owner(app, &agent_id, "123456789012345678").await;
 
     let (_app, caller_type) = caller_type_for(app, &agent_id, "123456789012345678").await;
-    assert_eq!(caller_type, "owner");
+    assert_ne!(
+        caller_type, "owner",
+        "REST の自称 user_id が owner に昇格した（#848）"
+    );
+    assert_eq!(caller_type, "agent");
 }
 
 /// 負のコントロール: owner 設定済みでも、**別の** `user_id` は Owner にならない
@@ -840,13 +849,14 @@ async fn test_other_user_is_not_owner_when_owner_configured() {
     assert_eq!(caller_type, "agent");
 }
 
-/// レガシー行（入口 trim を入れる前に空白付きで保存された `owner_discord_id`）でも
-/// ハンドラ経路の owner 判定が成立する。
+/// [#848 回帰] 空白付きで保存されたレガシー owner 行があっても、REST 経路では自称
+/// `user_id` を owner へ昇格させない。
 ///
-/// 入口の正規化は新規保存にしか効かないので、既存 DB の行は空白付きのまま残る。
-/// API を経由せず DB に直接書いてその状態を再現する。
+/// `is_owner_id` の trim 比較そのもの（レガシー行が padded でも一致する契約）は
+/// core の単体テストと共有 1 実装（`caller_identity` の web 車線テスト）が担保する。
+/// ここは **REST 経路が認証済み識別子でない自称値を owner にしない**ことだけを見る。
 #[tokio::test]
-async fn test_legacy_padded_owner_row_is_still_recognized() {
+async fn test_rest_padded_owner_row_body_is_not_promoted() {
     let (app, db) = create_test_app_with_db();
     let (agent_id, app) = create_test_agent(app).await;
     let app = set_agent_owner(app, &agent_id, "123456789012345678").await;
@@ -863,11 +873,12 @@ async fn test_legacy_padded_owner_row_is_still_recognized() {
     }
 
     let (app, caller_type) = caller_type_for(app, &agent_id, "123456789012345678").await;
-    assert_eq!(
+    assert_ne!(
         caller_type, "owner",
-        "padded legacy owner row must still match the owner"
+        "REST では padded owner 行に一致する自称 user_id でも owner にしない（#848）"
     );
-    // 別 ID は当然 owner ではない（trim 比較が緩みすぎていない）。
+    assert_eq!(caller_type, "agent");
+    // 別 ID も当然 owner ではない。
     let (_app, caller_type) = caller_type_for(app, &agent_id, "987654321098765432").await;
     assert_ne!(caller_type, "owner");
 }
@@ -901,9 +912,11 @@ async fn test_legacy_whitespace_only_owner_row_matches_nobody() {
     }
 }
 
-/// `user_id` の前後空白はハンドラ入口で 1 回だけ正規化され、認可・セッションキー・
-/// `speaker_id` すべてで同じ値が使われる（owner にはなれるのに別セッションに
-/// 記録される、という非対称を作らない）。
+/// `user_id` の前後空白はハンドラ入口で 1 回だけ正規化され、セッションキー・
+/// `speaker_id` で同じ値が使われる（同じ相手が空白差で別セッションに割れない）。
+///
+/// #848 以降 REST は自称 `user_id` を owner に昇格させないため `caller_type` は `agent`。
+/// このテストの主眼は owner 判定ではなく **trim の一貫性**（session_id が trim 済み値を使う）。
 #[tokio::test]
 async fn test_user_id_is_trimmed_consistently() {
     let app = create_test_app();
@@ -921,7 +934,8 @@ async fn test_user_id_is_trimmed_consistently() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(resp["caller_type"], "owner");
+    // REST の自称 user_id は owner にならない（#848）。trim 済みでも owner 昇格しない。
+    assert_eq!(resp["caller_type"], "agent");
     assert_eq!(
         resp["session_id"],
         format!("agent-msg-{agent_id}-123456789012345678"),
