@@ -221,7 +221,21 @@ pub fn assemble_from_snapshot(
             Some(sid) => seen_spawns.insert(sid),
             None => true,
         })
-        .map(|l| format_single_log_with_echo(l, Some(&completed_for_read), Some(&refs)))
+        .map(|l| {
+            let text = format_single_log_with_echo(l, Some(&completed_for_read), Some(&refs));
+            // row318 検知器: delta 描画に生識別子が残る＝描画器のバグ。fail-loud に WARN（本番では
+            // 短縮形が出ているはずなのでここは鳴らない）。凍結 snapshot blob はこの対象外。
+            if let Some(line) = crate::conversation::leaked_identifier_in_delta(&text) {
+                tracing::warn!(
+                    session_id,
+                    log_id = l.id.unwrap_or(0),
+                    log_type = %l.log_type,
+                    leaked = %line,
+                    "delta 描画に生識別子が残存（描画器バグ・短縮形が出ていない）"
+                );
+            }
+            text
+        })
         .collect::<Vec<_>>()
         .join("\n");
     // #826 snapshot は旧レンダリング済みテキストの blob で、§9A/refs 描画経路を通らずそのまま
@@ -318,6 +332,16 @@ pub fn items_from_logs(
                 }
             }
             let text = format_single_log_with_echo(log, Some(&completed_ids), Some(&refs));
+            // row318 検知器（items 経路も同じ描画器を通る）。
+            if let Some(line) = crate::conversation::leaked_identifier_in_delta(&text) {
+                tracing::warn!(
+                    session_id,
+                    log_id = log.id.unwrap_or(0),
+                    log_type = %log.log_type,
+                    leaked = %line,
+                    "items 描画に生識別子が残存（描画器バグ・短縮形が出ていない）"
+                );
+            }
             let key = format!("log:{}", log.id.unwrap_or(i as i64));
             let tokens = ledger.record(&key, &text);
             let must_keep = newest_user.contains(&i) || unresolved;

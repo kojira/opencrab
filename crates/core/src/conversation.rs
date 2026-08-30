@@ -1257,6 +1257,20 @@ pub(crate) fn strip_frozen_snapshot(content: &str) -> String {
     })
 }
 
+/// **検知器**（row318）: 新規 delta 描画行に生の長識別子（UUID / `call_…` / bech32 / 32hex 以上 /
+/// `"digest":"…"`）が残っていないかを見る。残っていれば「描画器が短縮形を出し損ねた＝バグ」なので
+/// その行を返す（呼び出し側が WARN する・fail-loud）。スクラブ（[`strip_frozen_snapshot`]）は凍結
+/// snapshot blob 専用で、delta 行はここで**置換せず検知だけ**する（本番に `<uuid…>` の無意味な
+/// プレースホルダを出さない）。正しく描画できていれば常に `None`。
+pub(crate) fn leaked_identifier_in_delta(rendered: &str) -> Option<String> {
+    for line in rendered.split('\n') {
+        if elide_raw_identifiers(&clean_legacy_ids(line)) != line {
+            return Some(line.to_string());
+        }
+    }
+    None
+}
+
 /// メタ行を落とし、残る各行に `per_line` を適用し、末尾空行を畳む共通ルーチン。
 fn strip_meta_lines(content: &str, per_line: impl Fn(&str) -> String) -> String {
     let mut lines: Vec<String> = Vec::new();
@@ -1463,8 +1477,9 @@ fn elide_identifier_token(tok: &str) -> String {
             }
         }
     }
-    // 64hex（pubkey/event_id 等）。短い hash を巻き込まないよう 40 桁以上に限る。
-    if tok.len() >= 40
+    // 生 hex 識別子（pubkey/event_id=64hex・ダッシュ無し UUID/subtask=32hex 等）。短い hash や
+    // git short-sha を巻き込まないよう 32 桁以上に限る（row318: 32hex 変種も長物ゼロの対象）。
+    if tok.len() >= 32
         && tok
             .chars()
             .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
@@ -1515,7 +1530,14 @@ pub fn format_single_log_with_echo(
             }
         },
         "tool_call" => {
-            let speaker = log.speaker_id.as_deref().unwrap_or(&log.agent_id);
+            // §9A.2 / row318: 自分の話者行も **描画時に** 名前（くらぶ）へ。生 speaker_id（agent UUID）を
+            // 文字列に入れる瞬間を作らない（後段スクラブで <uuid…> にしない）。refs 無し（単体表示）は
+            // 従来どおり生 speaker（テスト・live 注入）。
+            let raw_speaker = log.speaker_id.as_deref().unwrap_or(&log.agent_id);
+            let speaker = match refs {
+                Some(r) => r.speaker_label(raw_speaker),
+                None => raw_speaker.to_string(),
+            };
             if let Some(meta_json) = log.metadata_json.as_deref() {
                 if let Ok(meta) = serde_json::from_str::<serde_json::Value>(meta_json) {
                     // §9A.1 / row292: DI operation の call は arguments を verbatim 保持する
@@ -1618,6 +1640,18 @@ pub fn format_single_log_with_echo(
                 .and_then(|r| r.call_of(tool_call_id))
                 .map(|n| format!("c{n}"))
                 .unwrap_or_else(|| format!("id={tool_call_id}"));
+            // spawn 受理（`status=="spawned"`）は subtask_id を **描画時に** s 番号へ。生 UUID を
+            // 結果本文へ載せない（row295b/row318・result_reference は spawn 受理を success 封筒無しと
+            // 見て本文丸ごと返すため、ここで先に短縮形へ分岐する）。refs 無しは "subtask"。
+            if let Some(sid) = spawn_ack_subtask_id(log) {
+                let sref = refs
+                    .and_then(|r| r.subtask_of(&sid))
+                    .map(|n| format!("s{n}"))
+                    .unwrap_or_else(|| "subtask".to_string());
+                return format!(
+                    "[tool_result]{ts}:\n[{call_ref}]: {tool_name} → subtask {sref} を起動（本文は会話に残していない）"
+                );
+            }
             format!(
                 "[tool_result]{}:\n[{}]: {} → {}",
                 ts,
