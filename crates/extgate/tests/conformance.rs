@@ -2423,3 +2423,72 @@ async fn settlement_is_consumed_on_next_turn() {
         "決着結果が次 turn の会話に載ること: {resume_conv}"
     );
 }
+
+/// **#838 row284 の穴を塞ぐ本命**。決着を fake せず `settle_completed`（＝実経路の
+/// `dispatch_settled`）を通し、session_id が **`extgate-` 接頭辞でない再利用セッション**
+/// （Nostr は `canonical_session_id` が address = `nostr-<agent_id>` へフォールバックする）
+/// でも `ExtgateCompletionSink::deliver_continuation` → resume turn が起きることを検証する。
+///
+/// 旧実装は `dispatch_settled` が `ev.session_id.starts_with("extgate-")` で親判定していたため、
+/// `nostr-agent-1` は門前払いされ resume が一切起きなかった（このテストは turns==0 のまま落ちる）。
+/// 既存の `settlement_is_consumed_on_next_turn` は `extgate-{binding_id}` を使うため接頭辞判定を
+/// 素通りし、この穴を踏めていなかった。
+#[tokio::test]
+async fn settlement_on_reused_nostr_session_resumes() {
+    let h = Harness::start().await;
+    // 連結済みの instance/binding を用意する（Say 配送の送出先）。ただし決着させる親
+    // セッションは binding の canonical（extgate-…）ではなく、Nostr 再利用の address 形式。
+    let (_s, instance_id, binding_id) = ready_pair(&h).await;
+    let session_id = "nostr-agent-1".to_string();
+    assert!(
+        !session_id.starts_with("extgate-"),
+        "テスト前提: session が extgate- 接頭辞でないこと"
+    );
+
+    let sink = ExtgateCompletionSink {
+        state: Arc::clone(&h.state),
+        runtime: h.runtime.clone(),
+        instance_id,
+        binding_id,
+        agent_id: "agent-1".into(),
+        session_id: session_id.clone(),
+        kind_id: "nostr".into(),
+        author_id: "npub-u1".into(),
+        delivery_mode: DeliveryMode::Say,
+        prompt_suffix: String::new(),
+    };
+    settle_completed(
+        &h.runtime.subtask_registry_for(&session_id),
+        &h.state.db,
+        &sink,
+        SettleContext {
+            parent_session_id: session_id.clone(),
+            agent_id: "agent-1".into(),
+            subtask_id: "st-sleep".into(),
+            sub_session_id: String::new(),
+            exit_reason: "completed".into(),
+            lifecycle: SubtaskLifecycle::new(),
+        },
+        r#"{"ok":true,"slept":30}"#,
+    );
+
+    // resume turn が実際に走ること（旧実装なら guard に阻まれ turns は 0 のまま）。
+    wait_turns(&h, 1).await;
+    assert_eq!(
+        h.runtime.turns.load(Ordering::SeqCst),
+        1,
+        "nostr- 再利用セッションの決着でも resume turn が 1 回走ること"
+    );
+    let resume_conv = h
+        .runtime
+        .conversations
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        resume_conv.contains("subtask_completed") && resume_conv.contains("slept"),
+        "決着結果が resume turn の会話に載ること: {resume_conv}"
+    );
+}

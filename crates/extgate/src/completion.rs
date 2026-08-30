@@ -72,6 +72,17 @@ impl<R: AgentRuntime> SubtaskCompletionSink for ExtgateCompletionSink<R> {
         EXTGATE_SESSION_PREFIX
     }
 
+    /// 接頭辞ではなく **sink が実際に握る session** と等値比較する。
+    ///
+    /// extgate の session は `canonical_session_id` 由来で、Nostr の再利用セッションでは
+    /// binding（`extgate-<id>`）ではなく address（`nostr-<agent_id>`）になる。接頭辞
+    /// `extgate-` 前提の既定判定だと、その決着を全て門前払いして resume が起きなかった
+    /// （#838 row284）。この sink は spawn 時に握った `session_id` を保持しているので、
+    /// それと一致するかで判定すれば取り違えずに継続できる。
+    fn owns_parent_session(&self, session_id: &str) -> bool {
+        session_id == self.session_id
+    }
+
     fn forwards_progress(&self) -> bool {
         false
     }
