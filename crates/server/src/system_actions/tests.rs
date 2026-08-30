@@ -5314,7 +5314,10 @@ async fn nostr_run_does_not_delegate_even_with_passthrough() {
             &ctx,
         )
         .await;
-    assert!(!r.success, "露出撤去した nostr_run は passthrough があっても拒否される");
+    assert!(
+        !r.success,
+        "露出撤去した nostr_run は passthrough があっても拒否される"
+    );
     assert!(r.error.unwrap().contains("撤去"));
     // capability は一度も呼ばれていない（委譲していない）。
     assert!(
