@@ -31,6 +31,18 @@ use opencrab_actions::CallerIdentity;
 /// 撤去した互換読み（#214→#159）の手掛かりは、判定が最小権限（`Agent`）に落ちた
 /// ときだけ出す。`Agent` になるのは「owner でもなく自経路の行も無い」ときだけなので、
 /// これは旧実装の `None` 分岐（表 miss かつ非 owner）と同じ条件。
+///
+/// ## ⚠️ 認証済み識別子のみを渡すこと（#848）
+/// `user_id` には **認証済みチャネルが刻んだ識別子だけ**を渡す（Discord gateway の
+/// `sender_id`・Nostr の署名済み `author_pubkey` 等）。**自称値（REST リクエスト
+/// ボディの `user_id` など）を渡してはならない** — 平文の owner 識別子照合
+/// （[`opencrab_core::owner::is_owner_id`]）を通るため、owner 識別子を知る相手が
+/// 名乗るだけで `Owner` へ昇格できる #848 同型の権限昇格になる。REST 経路は
+/// 代わりに [`resolve_rest_caller_identity`] を使うこと。
+///
+/// なお現在この関数の**実行時呼び出し元は無い**（唯一の本番呼び出し元だった REST は
+/// #848 で [`resolve_rest_caller_identity`] へ移した）。将来 web 会話経路を再配線する
+/// ときのための共有ヘルパとして残しており、テストが上記の owner 昇格契約を固定する。
 pub fn resolve_caller_identity(
     conn: &rusqlite::Connection,
     platform: &str,
@@ -128,6 +140,14 @@ pub fn resolve_rest_caller_identity(
 ///
 /// `user_ids` は同じ呼び出し元を指す**表記ゆれ違いの識別子**（Nostr なら hex と npub）。
 /// 先頭から順に引き、最初に見つかった行の権限を使う。先頭には正規化済みの表現を置くこと。
+///
+/// ## ⚠️ 認証済み識別子のみを渡すこと（#848）
+/// `user_ids` には **認証済みチャネルが刻んだ識別子だけ**を渡す。**自称値（REST リクエスト
+/// ボディの `user_id` 等）を渡してはならない** — `owner_id` と一致すれば `Owner` を返す
+/// ため、owner 識別子を知る相手が名乗るだけで `Owner` へ昇格できる #848 同型の権限昇格に
+/// なる。認証を持たない経路（REST）は owner 昇格を封じた [`resolve_rest_caller_identity`]
+/// を使うこと。認証済み識別子を渡す既存の呼び出し元は Nostr（署名済み `author_pubkey`。
+/// [`crate::nostr_runner_impl`]）のみ。
 pub fn resolve_caller_identity_with_owner(
     conn: &rusqlite::Connection,
     platform: &str,
