@@ -1,8 +1,8 @@
 //! 既存 web セッション → `extgate-{binding_id}` への 14 store 一回移送。
 //! 件数/digest 不一致は中止。V3 wire は触らない。
 
-use anyhow::{Result, bail};
-use rusqlite::{Connection, OptionalExtension, params};
+use anyhow::{bail, Result};
+use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
@@ -804,7 +804,7 @@ pub fn transplant_all(conn: &Connection) -> Result<Vec<(String, TransplantOutcom
 mod tests {
     use super::*;
     use crate::init_memory;
-    use crate::queries::{SessionLogRow, SessionRow, insert_session, insert_session_log};
+    use crate::queries::{insert_session, insert_session_log, SessionLogRow, SessionRow};
 
     fn agent(conn: &Connection, id: &str) {
         crate::queries::upsert_agent(

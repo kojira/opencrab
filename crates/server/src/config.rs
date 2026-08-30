@@ -900,9 +900,21 @@ pub struct LlmConfig {
     pub fallback: FallbackConfig,
     #[serde(default)]
     pub aliases: HashMap<String, AliasConfig>,
-    /// 会話コンパクション比率: context_window のうち会話履歴に使う割合 (0.0-1.0)。
+    /// 高水位比: `input_high = min(floor(W * この比), A)`。既定 0.50。
     #[serde(default = "default_compaction_ratio")]
     pub compaction_ratio: f64,
+    /// 低水位比: `input_low = min(floor(W * この比), floor(A / 2))`。既定 0.25。
+    #[serde(default = "default_input_low_ratio")]
+    pub input_low_ratio: f64,
+    /// 絶対上限 A（token）。較正前は 80_000（85–90K 劣化開始点より安全側）。
+    #[serde(default = "default_absolute_input_cap")]
+    pub absolute_input_cap: usize,
+    /// Memory Index の個別上限（token）。会話の余りを暗黙に流用しない。
+    #[serde(default = "default_memory_index_token_cap")]
+    pub memory_index_token_cap: usize,
+    /// functions の個別上限（token）。縮約せず、超過は `context_budget_exhausted`。
+    #[serde(default = "default_functions_token_cap")]
+    pub functions_token_cap: usize,
 }
 
 impl Default for LlmConfig {
@@ -914,12 +926,32 @@ impl Default for LlmConfig {
             fallback: FallbackConfig::default(),
             aliases: HashMap::new(),
             compaction_ratio: default_compaction_ratio(),
+            input_low_ratio: default_input_low_ratio(),
+            absolute_input_cap: default_absolute_input_cap(),
+            memory_index_token_cap: default_memory_index_token_cap(),
+            functions_token_cap: default_functions_token_cap(),
         }
     }
 }
 
 fn default_compaction_ratio() -> f64 {
-    0.5
+    opencrab_core::context_budget::DEFAULT_INPUT_HIGH_RATIO
+}
+
+fn default_input_low_ratio() -> f64 {
+    opencrab_core::context_budget::DEFAULT_INPUT_LOW_RATIO
+}
+
+fn default_absolute_input_cap() -> usize {
+    opencrab_core::context_budget::DEFAULT_ABSOLUTE_CAP_A
+}
+
+fn default_memory_index_token_cap() -> usize {
+    opencrab_core::context_budget::DEFAULT_MEMORY_INDEX_TOKEN_CAP
+}
+
+fn default_functions_token_cap() -> usize {
+    opencrab_core::context_budget::DEFAULT_FUNCTIONS_TOKEN_CAP
 }
 
 fn default_provider() -> String {

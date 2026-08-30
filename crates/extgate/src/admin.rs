@@ -466,90 +466,90 @@ async fn put_binding_inner(
     let now = now_nanos();
 
     let body = {
-    let mut conn = state.db.lock().map_err(|_| GateError::store())?;
-    let inst = conn
-        .query_row(
-            "SELECT enabled, deleted_at, subject_id FROM gate_instances WHERE instance_id = ?1",
-            params![instance_id],
-            |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, Option<i64>>(1)?,
-                    r.get::<_, i64>(2)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(|_| GateError::store())?;
-    let (enabled, subject_id) = match inst {
-        None | Some((_, Some(_), _)) => return Err(GateError::new(ErrorCode::InstanceUnknown)),
-        Some((e, None, s)) => (e == 1, s),
-    };
-    if !enabled {
-        return Err(GateError::new(ErrorCode::InstanceDisabled));
-    }
-    let _agent_id = agent_for_subject(&conn, subject_id)?;
+        let mut conn = state.db.lock().map_err(|_| GateError::store())?;
+        let inst = conn
+            .query_row(
+                "SELECT enabled, deleted_at, subject_id FROM gate_instances WHERE instance_id = ?1",
+                params![instance_id],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, Option<i64>>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|_| GateError::store())?;
+        let (enabled, subject_id) = match inst {
+            None | Some((_, Some(_), _)) => return Err(GateError::new(ErrorCode::InstanceUnknown)),
+            Some((e, None, s)) => (e == 1, s),
+        };
+        if !enabled {
+            return Err(GateError::new(ErrorCode::InstanceDisabled));
+        }
+        let _agent_id = agent_for_subject(&conn, subject_id)?;
 
-    let existing = conn
-        .query_row(
-            "SELECT instance_id, address, closed_at FROM gate_bindings WHERE binding_id = ?1",
-            params![binding_id],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, Option<i64>>(2)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(|_| GateError::store())?;
-    match existing {
-        Some((_, _, Some(_))) => return Err(GateError::new(ErrorCode::BindingClosed)),
-        Some((inst, addr, None)) => {
-            if inst == instance_id && addr == address {
-                return Ok(json_ok(StatusCode::OK, binding_json(&conn, &binding_id)?));
+        let existing = conn
+            .query_row(
+                "SELECT instance_id, address, closed_at FROM gate_bindings WHERE binding_id = ?1",
+                params![binding_id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|_| GateError::store())?;
+        match existing {
+            Some((_, _, Some(_))) => return Err(GateError::new(ErrorCode::BindingClosed)),
+            Some((inst, addr, None)) => {
+                if inst == instance_id && addr == address {
+                    return Ok(json_ok(StatusCode::OK, binding_json(&conn, &binding_id)?));
+                }
+                return Err(GateError::new(ErrorCode::BindingConflict));
             }
-            return Err(GateError::new(ErrorCode::BindingConflict));
+            None => {}
         }
-        None => {}
-    }
 
-    let taken: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM gate_bindings
+        let taken: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM gate_bindings
              WHERE instance_id = ?1 AND address = ?2 AND closed_at IS NULL",
-            params![instance_id, address],
-            |r| r.get(0),
-        )
-        .map_err(|_| GateError::store())?;
-    if taken > 0 {
-        return Err(GateError::new(ErrorCode::AddressInUse));
-    }
-
-    let tx = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|_| GateError::store())?;
-    opencrab_db::queries::create_gate_binding_in_tx(
-        &tx,
-        &binding_id,
-        &instance_id,
-        &address,
-        &address,
-        now,
-    )
-    .map_err(|e| match e {
-        opencrab_db::queries::CreateGateBindingError::Conflict => {
-            GateError::new(ErrorCode::BindingConflict)
+                params![instance_id, address],
+                |r| r.get(0),
+            )
+            .map_err(|_| GateError::store())?;
+        if taken > 0 {
+            return Err(GateError::new(ErrorCode::AddressInUse));
         }
-        opencrab_db::queries::CreateGateBindingError::Store(_) => GateError::store(),
-    })?;
-    if opencrab_db::queries::injected_commit_failure() {
-        let _ = tx.rollback();
-        return Err(GateError::store());
-    }
-    tx.commit().map_err(|_| GateError::store())?;
-    binding_json(&conn, &binding_id)?
+
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| GateError::store())?;
+        opencrab_db::queries::create_gate_binding_in_tx(
+            &tx,
+            &binding_id,
+            &instance_id,
+            &address,
+            &address,
+            now,
+        )
+        .map_err(|e| match e {
+            opencrab_db::queries::CreateGateBindingError::Conflict => {
+                GateError::new(ErrorCode::BindingConflict)
+            }
+            opencrab_db::queries::CreateGateBindingError::Store(_) => GateError::store(),
+        })?;
+        if opencrab_db::queries::injected_commit_failure() {
+            let _ = tx.rollback();
+            return Err(GateError::store());
+        }
+        tx.commit().map_err(|_| GateError::store())?;
+        binding_json(&conn, &binding_id)?
     };
 
     enqueue_bind(state, &instance_id, &binding_id, &address).await;

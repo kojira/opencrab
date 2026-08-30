@@ -102,10 +102,7 @@ fn seeded() -> (axum::Router, String, String) {
 }
 
 async fn get(app: axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {
-    let req = Request::builder()
-        .uri(uri)
-        .body(Body::empty())
-        .unwrap();
+    let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
     let resp = app.oneshot(req).await.unwrap();
     let status = resp.status();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -330,7 +327,12 @@ async fn list_and_detail_agent_ids_from_membership_sorted_updated_at() {
     {
         let tx = conn.transaction().unwrap();
         opencrab_db::queries::create_gate_binding_in_tx(
-            &tx, binding, instance, logical, logical, 1_700_000_000_000_000_000,
+            &tx,
+            binding,
+            instance,
+            logical,
+            logical,
+            1_700_000_000_000_000_000,
         )
         .unwrap();
         tx.commit().unwrap();

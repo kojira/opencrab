@@ -104,7 +104,8 @@ mod tests {
                 .into(),
             created_at: "2026-01-01T00:00:00Z".into(),
         }];
-        let value = instance_config_value("aa".repeat(32).as_str(), "くらぶ", &cfg, &watches).unwrap();
+        let value =
+            instance_config_value("aa".repeat(32).as_str(), "くらぶ", &cfg, &watches).unwrap();
         assert_eq!(value["name"], "くらぶ");
         let filter = &value["watches"][0]["filter_json"];
         assert_eq!(filter["authors"][0], "npub1watched");
@@ -126,7 +127,8 @@ mod tests {
             filter_json: "[]".into(),
             created_at: "2026-01-01T00:00:00Z".into(),
         }];
-        let err = instance_config_value("aa".repeat(32).as_str(), "くらぶ", &cfg, &watches).unwrap_err();
+        let err =
+            instance_config_value("aa".repeat(32).as_str(), "くらぶ", &cfg, &watches).unwrap_err();
         assert!(err.to_string().contains("filter_json"));
     }
 

@@ -248,9 +248,7 @@ fn lookup(expr: &str, caps: &BTreeMap<String, Value>) -> Value {
         .get(root)
         .unwrap_or_else(|| panic!("missing capture {root}"));
     for key in parts {
-        cur = cur
-            .get(key)
-            .unwrap_or_else(|| panic!("missing {expr}"));
+        cur = cur.get(key).unwrap_or_else(|| panic!("missing {expr}"));
     }
     cur.clone()
 }
@@ -346,9 +344,7 @@ impl Session {
         });
         assert!(subset(&expect, &hello), "hello {hello} !~ {expect}");
         self.captures.insert("hello".into(), hello.clone());
-        self.mock
-            .send(&json!({"id": hello["id"], "m": "ok"}))
-            .await;
+        self.mock.send(&json!({"id": hello["id"], "m": "ok"})).await;
         if kind == "hello" {
             return;
         }
@@ -402,11 +398,7 @@ impl Session {
             .send()
             .await
             .expect("sse");
-        assert!(
-            resp.status().is_success(),
-            "sse status {}",
-            resp.status()
-        );
+        assert!(resp.status().is_success(), "sse status {}", resp.status());
         self.sse.insert(
             id.to_string(),
             SseConn {

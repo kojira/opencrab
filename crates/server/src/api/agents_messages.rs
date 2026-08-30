@@ -68,28 +68,77 @@ async fn run_rest_continuation(
     let agent_id = ev.agent_id.clone();
 
     // 文脈は DB から組み直す（完了本文は `settle_completed` が永続化済み・RFC §1.3）。
-    let (system_prompt, conversation) = {
+    // 予算失敗は既定へ落とさず、一意名を session_logs に残す。
+    let built = (|| -> Result<(String, String), (String, String)> {
         let conn = match state.db.lock() {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!(session_id = %session_id, error = %e, "rest continuation: db lock poisoned");
-                return;
+                return Err((
+                    "db_lock_poisoned".into(),
+                    format!("rest continuation: db lock poisoned: {e}"),
+                ));
             }
         };
         let (sp, _name) = process::build_agent_context(&conn, &agent_id, &ev.caller);
-        let eff =
-            opencrab_db::queries::effective_model_for_agent(&conn, &agent_id, &state.default_model)
-                .unwrap_or_else(|_| state.default_model.clone());
-        let (prov, mdl) = process::split_llm_model_spec(&eff);
-        let budget = process::compute_context_budget(&conn, prov, mdl, state.compaction_ratio);
-        let raw = match process::build_conversation_string(&conn, &session_id, &agent_id, budget) {
-            Ok(c) => c,
+        let runtime_text = process::prepend_runtime_context("", "direct_message");
+        let functions_tokens = match process::core_functions_tokens() {
+            Ok(n) => n,
             Err(e) => {
-                tracing::warn!(session_id = %session_id, error = %e, "rest continuation: failed to build conversation");
-                return;
+                return Err((e.name().to_string(), e.to_string()));
             }
         };
-        (sp, process::prepend_runtime_context(&raw, "direct_message"))
+        let env = match process::resolve_agent_request_envelope(process::RequestEnvelopeArgs {
+            conn: &conn,
+            agent_id: &agent_id,
+            session_id: &session_id,
+            default_model: &state.default_model,
+            policy: &state.context_budget_policy(),
+            system_prompt: &sp,
+            runtime_context_text: &runtime_text,
+            functions_tokens,
+            entrypoint: "rest_continuation",
+        }) {
+            Ok(env) => env,
+            Err(e) => {
+                return Err((e.name().to_string(), e.to_string()));
+            }
+        };
+        let raw = match process::build_conversation_string_with_waters(
+            &conn,
+            &session_id,
+            &agent_id,
+            env.conversation_high,
+            env.conversation_low,
+            process::include_memory_index(&env),
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                let name = if e
+                    .to_string()
+                    .contains(opencrab_core::context_budget::CONTEXT_BUDGET_EXHAUSTED)
+                {
+                    opencrab_core::context_budget::CONTEXT_BUDGET_EXHAUSTED.to_string()
+                } else {
+                    "conversation_build_failed".into()
+                };
+                return Err((name, e.to_string()));
+            }
+        };
+        Ok((sp, process::prepend_runtime_context(&raw, "direct_message")))
+    })();
+    let (system_prompt, conversation) = match built {
+        Ok(v) => v,
+        Err((error_name, detail)) => {
+            tracing::error!(
+                session_id = %session_id,
+                error_name = %error_name,
+                error = %detail,
+                "rest continuation stopped"
+            );
+            record_rest_continuation_error(&state.db, &agent_id, &session_id, &error_name, &detail);
+            complete_session_if_idle(&state.db, &session_id, &registry);
+            return;
+        }
     };
 
     // 継続であることを生成点で伝える（web / Nostr の `resume_prompt_suffix` と同じ型）。
@@ -223,6 +272,45 @@ fn mark_session_completed(db: &opencrab_db::Db, session_id: &str) {
 /// 走っていることがある。そこで `completed` にすると「完了したのに走行中」という
 /// 不整合になるため、走行中は `active` のまま残し、最後の subtask が決着した時点で
 /// `RestCompletionSink` が完了させる。
+fn record_rest_continuation_error(
+    db: &opencrab_db::Db,
+    agent_id: &str,
+    session_id: &str,
+    error_name: &str,
+    detail: &str,
+) {
+    let Ok(conn) = db.lock() else {
+        tracing::error!(
+            session_id = %session_id,
+            error_name,
+            "rest continuation: cannot persist named error (db lock poisoned)"
+        );
+        return;
+    };
+    let row = opencrab_db::queries::SessionLogRow {
+        id: None,
+        agent_id: agent_id.to_string(),
+        session_id: session_id.to_string(),
+        log_type: "system".to_string(),
+        content: format!("{error_name}: {detail}"),
+        speaker_id: Some(agent_id.to_string()),
+        turn_number: None,
+        metadata_json: Some(
+            serde_json::json!({ "error_name": error_name, "entrypoint": "rest_continuation" })
+                .to_string(),
+        ),
+        created_at: None,
+    };
+    if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &row) {
+        tracing::error!(
+            session_id = %session_id,
+            error_name,
+            error = %e,
+            "rest continuation: failed to persist named error"
+        );
+    }
+}
+
 fn complete_session_if_idle(db: &opencrab_db::Db, session_id: &str, registry: &SubtaskRegistry) {
     if !registry.is_empty() {
         tracing::debug!(
@@ -363,11 +451,37 @@ pub async fn send_agent_message(
     // 8. Build conversation string.
     let conversation = {
         let conn = state.db.lock().unwrap();
-        let eff = opencrab_db::queries::effective_model_for_agent(&conn, &id, &state.default_model)
-            .unwrap_or_else(|_| state.default_model.clone());
-        let (prov, mdl) = process::split_llm_model_spec(&eff);
-        let budget = process::compute_context_budget(&conn, prov, mdl, state.compaction_ratio);
-        let raw = match process::build_conversation_string(&conn, &session_id, &id, budget) {
+        let runtime_text = process::prepend_runtime_context("", "direct_message");
+        let functions_tokens = match process::core_functions_tokens() {
+            Ok(n) => n,
+            Err(e) => {
+                return Json(serde_json::json!({"error": e.to_string()})).into_response();
+            }
+        };
+        let env = match process::resolve_agent_request_envelope(process::RequestEnvelopeArgs {
+            conn: &conn,
+            agent_id: &id,
+            session_id: &session_id,
+            default_model: &state.default_model,
+            policy: &state.context_budget_policy(),
+            system_prompt: &system_prompt,
+            runtime_context_text: &runtime_text,
+            functions_tokens,
+            entrypoint: "rest",
+        }) {
+            Ok(env) => env,
+            Err(e) => {
+                return Json(serde_json::json!({"error": e.to_string()})).into_response();
+            }
+        };
+        let raw = match process::build_conversation_string_with_waters(
+            &conn,
+            &session_id,
+            &id,
+            env.conversation_high,
+            env.conversation_low,
+            process::include_memory_index(&env),
+        ) {
             Ok(s) => s,
             Err(e) => {
                 return Json(

@@ -173,9 +173,7 @@ fn operator_bearer_is_absent_from_gateway_and_browser() {
     let mut hits = Vec::new();
     for path in &files {
         let text = fs::read_to_string(path).unwrap();
-        if text.contains("OPENCRAB_GATE_OPERATOR_TOKEN")
-            || text.contains("Authorization: Bearer")
-        {
+        if text.contains("OPENCRAB_GATE_OPERATOR_TOKEN") || text.contains("Authorization: Bearer") {
             hits.push(path.display().to_string());
         }
     }

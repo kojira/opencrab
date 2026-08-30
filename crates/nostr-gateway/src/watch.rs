@@ -110,10 +110,7 @@ mod tests {
     #[test]
     fn args_never_contain_secret() {
         let secret = "nsec1verysecretvalue";
-        let args = plan_watch_args(
-            &["wss://example.invalid".into()],
-            &WatchFilter::default(),
-        );
+        let args = plan_watch_args(&["wss://example.invalid".into()], &WatchFilter::default());
         assert!(args.iter().all(|a| !a.contains(secret)));
         assert!(args.iter().all(|a| !a.contains("NOSTARO")));
         assert_eq!(args[0], "watch");

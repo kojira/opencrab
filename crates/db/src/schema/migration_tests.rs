@@ -860,6 +860,25 @@ fn model_pricing_max_output_tokens_backfill_migration_v42() {
     );
 }
 
+/// v46（#826-B）: 会話圧縮の派生スナップショット表。正本は触らず、既存 DB へ表だけ足す。
+/// 元は #826 で v43 だったが、載せ替え v43-45 との番号衝突を避け統合時に v46 へ採番。
+/// 既存 transplant DB（user_version=45）が次回起動で v46 だけを適用する経路をそのまま再現する。
+#[test]
+fn conversation_snapshots_migration_v46() {
+    let conn = crate::init_memory().expect("init");
+    conn.execute_batch("DROP TABLE IF EXISTS conversation_snapshots; PRAGMA user_version = 45;")
+        .unwrap();
+    assert!(!table_exists(&conn, "conversation_snapshots").unwrap());
+
+    run_migrations(&conn, MIGRATIONS).expect("v46 migration");
+    assert_eq!(schema_version(&conn).unwrap(), latest_version());
+    assert!(table_exists(&conn, "conversation_snapshots").unwrap());
+
+    conn.execute_batch("PRAGMA user_version = 45;").unwrap();
+    run_migrations(&conn, MIGRATIONS).expect("v46 rerun no-op");
+    assert!(table_exists(&conn, "conversation_snapshots").unwrap());
+}
+
 /// v19: Nostr 受信転記先の表が増えるだけで、既存の Nostr 設定
 /// （`agent_nostr_config`）の行は 1 つも動かない（#252 段階 A）。冪等でもある。
 #[test]
@@ -3420,11 +3439,11 @@ fn v37_backfill_preserves_firing_and_normalizes() {
 
     initialize(&conn).expect("apply v37");
     assert_eq!(schema_version(&conn).unwrap(), latest_version());
-    // v43（載せ替え: policy_json / session_watches / tool_logs）が最新。v38..v43 とも
-    // session_heartbeat_config を触らないので、下の v37 backfill 検証（発火集合・正規化）は
-    // そのまま成立する。新しい migration が session_heartbeat_config を触ったらこの guard を
-    // 更新し、下の期待値を見直すこと。
-    assert_eq!(latest_version(), 45, "v45 が最新版であること");
+    // v46（#826-B の conversation_snapshots。載せ替え v43-45 との番号衝突を避け v46 へ採番）が
+    // 最新。v38..v46 とも session_heartbeat_config を触らないので、下の v37 backfill 検証（発火
+    // 集合・正規化）はそのまま成立する。新しい migration が session_heartbeat_config を触ったら
+    // この guard を更新し、下の期待値を見直すこと。
+    assert_eq!(latest_version(), 46, "v46 が最新版であること");
 
     // 期待: 9 行 = step1(nostr-A) 1 + step2(A/201=0, C/202=1, D/222=1) 3 +
     //             step3(A,B,C,D,E の ch205 展開・全 enabled=0) 5。
@@ -3984,7 +4003,7 @@ fn table_digest(conn: &Connection, table: &str, skip_cols: &[&str]) -> (i64, Str
         .unwrap();
     for row in rows {
         let cells = row.unwrap();
-        for (name, value) in selected.iter().zip(cells.into_iter()) {
+        for (name, value) in selected.iter().zip(cells) {
             hasher.update(name.as_bytes());
             hasher.update([0u8]);
             hasher.update(cell_canon(value).as_bytes());
@@ -4177,7 +4196,7 @@ fn v43_from_user_version_42_leaves_existing_rows_untouched() {
         .unwrap();
     assert_eq!(done, 1);
 
-    assert_eq!(schema_version(&conn).unwrap(), 45);
+    assert_eq!(schema_version(&conn).unwrap(), latest_version());
     assert_eq!(
         existing_table_digests(&conn, true),
         after,
@@ -4363,7 +4382,7 @@ fn assert_v44_schema(conn: &Connection) {
 #[test]
 fn v44_fresh_and_user_version_43_reach_four_gate_tables() {
     let fresh = crate::init_memory().expect("fresh");
-    assert_eq!(schema_version(&fresh).unwrap(), 45);
+    assert_eq!(schema_version(&fresh).unwrap(), latest_version());
     assert_v44_schema(&fresh);
 
     let from_43 = crate::init_memory().expect("from43");
@@ -4373,7 +4392,7 @@ fn v44_fresh_and_user_version_43_reach_four_gate_tables() {
     assert!(gate_user_tables(&from_43).is_empty());
 
     initialize(&from_43).expect("v44 from 43");
-    assert_eq!(schema_version(&from_43).unwrap(), 45);
+    assert_eq!(schema_version(&from_43).unwrap(), latest_version());
     assert_v44_schema(&from_43);
 }
 
@@ -4587,7 +4606,7 @@ fn assert_v45_schema(conn: &Connection) {
 #[test]
 fn v45_fresh_and_user_version_44_reach_bundle_state() {
     let fresh = crate::init_memory().expect("fresh");
-    assert_eq!(schema_version(&fresh).unwrap(), 45);
+    assert_eq!(schema_version(&fresh).unwrap(), latest_version());
     assert_v45_schema(&fresh);
 
     let from_44 = crate::init_memory().expect("from44");
@@ -4596,7 +4615,7 @@ fn v45_fresh_and_user_version_44_reach_bundle_state() {
     assert!(!table_exists(&from_44, "nostr_bundle_state").unwrap());
 
     initialize(&from_44).expect("v45 from 44");
-    assert_eq!(schema_version(&from_44).unwrap(), 45);
+    assert_eq!(schema_version(&from_44).unwrap(), latest_version());
     assert_v45_schema(&from_44);
 }
 
@@ -4606,7 +4625,7 @@ fn v45_rerun_is_noop() {
     setup_pre_v45(&conn);
     initialize(&conn).expect("v45");
     initialize(&conn).expect("v45 rerun");
-    assert_eq!(schema_version(&conn).unwrap(), 45);
+    assert_eq!(schema_version(&conn).unwrap(), latest_version());
     assert_v45_schema(&conn);
 }
 
