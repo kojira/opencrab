@@ -1,6 +1,6 @@
 //! V3 §9 conformance。mock gateway が omoikane 役。
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -8,16 +8,18 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
+use opencrab_actions::subtask::{settle_completed, SettleContext};
 use opencrab_actions::{
     AgentRuntime, CallerIdentity, InboundMessageRecord, InteractionRecord, OutboundReplyRecord,
-    RunRequest, SessionLocks, TranscriptSource,
+    RunRequest, SessionLocks, SubtaskLifecycle, SubtaskRegistries, TranscriptSource,
 };
 use opencrab_core::EngineResult;
 use opencrab_db::queries::{AgentRow, SessionRow, TRUSTED_PLATFORM_EXTGATE};
+use opencrab_extgate::completion::ExtgateCompletionSink;
 use opencrab_extgate::{
     admin_router, now_nanos, recover_stale_deliveries, resolve_caller_identity_with_owner,
-    serve_uds, session_id_for_binding, validate_listen_socket, ExtgateState, NostrBundleAdmit,
-    NostrSaidDecision, NostrWatchSets, OperatorToken, UNAUTHORIZED_BODY,
+    serve_uds, session_id_for_binding, validate_listen_socket, DeliveryMode, ExtgateState,
+    NostrBundleAdmit, NostrSaidDecision, NostrWatchSets, OperatorToken, UNAUTHORIZED_BODY,
 };
 use opencrab_gate_client::client::{InstanceClient, SaidOutcome};
 use serde_json::{json, Value};
@@ -33,9 +35,14 @@ const TOKEN: &str = "operator-token";
 struct TestRuntime {
     db: opencrab_db::Db,
     locks: Arc<SessionLocks>,
+    registries: Arc<SubtaskRegistries>,
     reply: Arc<Mutex<String>>,
     turns: Arc<AtomicUsize>,
     hold_rx: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+    /// sink 未配線（旧 V3）のときだけ待つ。遅いツールの同期実行相当。
+    tool_hold_rx: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+    sink_seen: Arc<AtomicBool>,
+    conversations: Arc<Mutex<Vec<String>>>,
     turn_entered: Arc<Notify>,
 }
 
@@ -44,9 +51,13 @@ impl TestRuntime {
         Self {
             db,
             locks: Arc::new(SessionLocks::new()),
+            registries: Arc::new(SubtaskRegistries::new()),
             reply: Arc::new(Mutex::new("hello from agent".into())),
             turns: Arc::new(AtomicUsize::new(0)),
             hold_rx: Arc::new(Mutex::new(None)),
+            tool_hold_rx: Arc::new(Mutex::new(None)),
+            sink_seen: Arc::new(AtomicBool::new(false)),
+            conversations: Arc::new(Mutex::new(Vec::new())),
             turn_entered: Arc::new(Notify::new()),
         }
     }
@@ -54,8 +65,18 @@ impl TestRuntime {
 
 #[async_trait]
 impl AgentRuntime for TestRuntime {
-    async fn run_agent_response(&self, _req: RunRequest) -> anyhow::Result<EngineResult> {
+    async fn run_agent_response(&self, req: RunRequest) -> anyhow::Result<EngineResult> {
+        self.sink_seen
+            .store(req.completion_sink.is_some(), Ordering::SeqCst);
+        self.conversations.lock().unwrap().push(req.conversation);
         self.turn_entered.notify_waiters();
+        // 旧 V3（sink 無し）はツールを同期実行する。sink があれば detach 済みなので待たない。
+        if req.completion_sink.is_none() {
+            let tool_hold = self.tool_hold_rx.lock().unwrap().take();
+            if let Some(rx) = tool_hold {
+                let _ = rx.await;
+            }
+        }
         let hold = self.hold_rx.lock().unwrap().take();
         if let Some(rx) = hold {
             let _ = rx.await;
@@ -74,13 +95,19 @@ impl AgentRuntime for TestRuntime {
     }
     fn build_conversation_string(
         &self,
-        _session_id: &str,
+        session_id: &str,
         _agent_id: &str,
         _budget: usize,
         _system_prompt: &str,
         _runtime_context_text: &str,
     ) -> anyhow::Result<String> {
-        Ok(String::new())
+        let conn = self.db.lock().unwrap();
+        let rows = opencrab_db::queries::list_session_logs_by_session(&conn, session_id)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| format!("{}:{}", r.log_type, r.content))
+            .collect::<Vec<_>>()
+            .join("\n"))
     }
     fn context_budget_tokens(
         &self,
@@ -99,6 +126,9 @@ impl AgentRuntime for TestRuntime {
     }
     fn session_locks(&self) -> Arc<SessionLocks> {
         self.locks.clone()
+    }
+    fn subtask_registry_for(&self, session_id: &str) -> opencrab_actions::SubtaskRegistry {
+        self.registries.registry_for(session_id)
     }
     fn record_agent_no_reply(&self, agent_id: &str, session_id: &str) {
         let conn = self.db.lock().unwrap();
@@ -1121,7 +1151,13 @@ async fn delivery_ok_rejected_and_disconnect() {
         }
     }
     let say = saw_say.expect("say");
-    assert_eq!(say["payload"], json!({"text": "hello from agent"}));
+    // 単一メンション turn の say は発端 said の origin を reply_target に載せる（gateway が
+    // e-tag reply する。gateway の pending_turn 相関は activity ended が say より先に届き
+    // 消えるため、返信先は payload で明示する）。
+    assert_eq!(
+        say["payload"],
+        json!({"text": "hello from agent", "reply_target": "d1"})
+    );
     assert!(!say["payload"]["text"].as_str().unwrap().is_empty());
     write_frame(&mut s, &json!({"id": say["id"], "m": "ok"})).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -2231,4 +2267,234 @@ async fn session_queue_overflow_is_seq_null_and_counted() {
     assert!(h.state.turn_queues.dropped() >= 1);
     assert!(h.state.probe.turn_queue_dropped.load(Ordering::SeqCst) >= 1);
     let _ = release_tx.send(());
+}
+
+async fn wait_turns(h: &Harness, n: usize) {
+    let got = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if h.runtime.turns.load(Ordering::SeqCst) >= n {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        got.is_ok(),
+        "expected {n} turns, got {}",
+        h.runtime.turns.load(Ordering::SeqCst)
+    );
+}
+
+/// 遅いツール相当（`tool_hold`）を解放しなくても turn が終わる。
+/// 修正前は sink 無し → `tool_hold` を待つのでこのテストは赤。
+#[tokio::test]
+async fn v3_turn_returns_before_slow_tool_finishes() {
+    let h = Harness::start().await;
+    let (mut s, _, binding_id) = ready_pair(&h).await;
+    let (_tool_tx, tool_rx) = oneshot::channel();
+    *h.runtime.tool_hold_rx.lock().unwrap() = Some(tool_rx);
+
+    write_frame(
+        &mut s,
+        &json!({
+            "id": "slow1",
+            "m": "said",
+            "binding_id": binding_id,
+            "origin": "o-slow",
+            "author_id": "u1",
+            "text": "sleep 120 を実行して",
+            "attachments": []
+        }),
+    )
+    .await;
+    let v = read_said_response(&mut s, "slow1").await;
+    assert_eq!(v["m"], "ok", "{v}");
+
+    wait_turns(&h, 1).await;
+    assert!(
+        h.runtime.sink_seen.load(Ordering::SeqCst),
+        "V3 RunRequest に completion_sink が付いていること"
+    );
+    assert_eq!(h.runtime.turns.load(Ordering::SeqCst), 1);
+}
+
+/// ツール実行中（`tool_hold` 未解放）に届いた said が次の turn を起こせる。
+#[tokio::test]
+async fn said_during_detached_tool_starts_next_turn() {
+    let h = Harness::start().await;
+    let (mut s, _, binding_id) = ready_pair(&h).await;
+    let (_tool_tx, tool_rx) = oneshot::channel();
+    *h.runtime.tool_hold_rx.lock().unwrap() = Some(tool_rx);
+
+    write_frame(
+        &mut s,
+        &json!({
+            "id": "d1",
+            "m": "said",
+            "binding_id": binding_id,
+            "origin": "o-1",
+            "author_id": "u1",
+            "text": "sleep 120",
+            "attachments": []
+        }),
+    )
+    .await;
+    assert_eq!(read_said_response(&mut s, "d1").await["m"], "ok");
+    wait_turns(&h, 1).await;
+
+    write_frame(
+        &mut s,
+        &json!({
+            "id": "d2",
+            "m": "said",
+            "binding_id": binding_id,
+            "origin": "o-2",
+            "author_id": "u1",
+            "text": "追いメンション",
+            "attachments": []
+        }),
+    )
+    .await;
+    assert_eq!(read_said_response(&mut s, "d2").await["m"], "ok");
+    wait_turns(&h, 2).await;
+    assert_eq!(
+        h.runtime.turns.load(Ordering::SeqCst),
+        2,
+        "ツール完了を待たずに次 turn が走ること"
+    );
+}
+
+/// 決着本文は DB に着地したあと、resume の 1 turn で会話に載る。
+#[tokio::test]
+async fn settlement_is_consumed_on_next_turn() {
+    let h = Harness::start().await;
+    let (mut s, instance_id, binding_id) = ready_pair(&h).await;
+    let session_id = format!("extgate-{binding_id}");
+
+    write_frame(
+        &mut s,
+        &json!({
+            "id": "c1",
+            "m": "said",
+            "binding_id": binding_id,
+            "origin": "o-1",
+            "author_id": "u1",
+            "text": "sleep 120",
+            "attachments": []
+        }),
+    )
+    .await;
+    assert_eq!(read_said_response(&mut s, "c1").await["m"], "ok");
+    wait_turns(&h, 1).await;
+
+    let sink = ExtgateCompletionSink {
+        state: Arc::clone(&h.state),
+        runtime: h.runtime.clone(),
+        instance_id,
+        binding_id: binding_id.clone(),
+        agent_id: "agent-1".into(),
+        session_id: session_id.clone(),
+        kind_id: "discord".into(),
+        author_id: "u1".into(),
+        delivery_mode: DeliveryMode::Say,
+        prompt_suffix: String::new(),
+    };
+    settle_completed(
+        &h.runtime.subtask_registry_for(&session_id),
+        &h.state.db,
+        &sink,
+        SettleContext {
+            parent_session_id: session_id.clone(),
+            agent_id: "agent-1".into(),
+            subtask_id: "st-sleep".into(),
+            sub_session_id: String::new(),
+            exit_reason: "completed".into(),
+            lifecycle: SubtaskLifecycle::new(),
+        },
+        r#"{"ok":true,"slept":120}"#,
+    );
+    wait_turns(&h, 2).await;
+
+    let resume_conv = h
+        .runtime
+        .conversations
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        resume_conv.contains("subtask_completed") && resume_conv.contains("slept"),
+        "決着結果が次 turn の会話に載ること: {resume_conv}"
+    );
+}
+
+/// **#838 row284 の穴を塞ぐ本命**。決着を fake せず `settle_completed`（＝実経路の
+/// `dispatch_settled`）を通し、session_id が **`extgate-` 接頭辞でない再利用セッション**
+/// （Nostr は `canonical_session_id` が address = `nostr-<agent_id>` へフォールバックする）
+/// でも `ExtgateCompletionSink::deliver_continuation` → resume turn が起きることを検証する。
+///
+/// 旧実装は `dispatch_settled` が `ev.session_id.starts_with("extgate-")` で親判定していたため、
+/// `nostr-agent-1` は門前払いされ resume が一切起きなかった（このテストは turns==0 のまま落ちる）。
+/// 既存の `settlement_is_consumed_on_next_turn` は `extgate-{binding_id}` を使うため接頭辞判定を
+/// 素通りし、この穴を踏めていなかった。
+#[tokio::test]
+async fn settlement_on_reused_nostr_session_resumes() {
+    let h = Harness::start().await;
+    // 連結済みの instance/binding を用意する（Say 配送の送出先）。ただし決着させる親
+    // セッションは binding の canonical（extgate-…）ではなく、Nostr 再利用の address 形式。
+    let (_s, instance_id, binding_id) = ready_pair(&h).await;
+    let session_id = "nostr-agent-1".to_string();
+    assert!(
+        !session_id.starts_with("extgate-"),
+        "テスト前提: session が extgate- 接頭辞でないこと"
+    );
+
+    let sink = ExtgateCompletionSink {
+        state: Arc::clone(&h.state),
+        runtime: h.runtime.clone(),
+        instance_id,
+        binding_id,
+        agent_id: "agent-1".into(),
+        session_id: session_id.clone(),
+        kind_id: "nostr".into(),
+        author_id: "npub-u1".into(),
+        delivery_mode: DeliveryMode::Say,
+        prompt_suffix: String::new(),
+    };
+    settle_completed(
+        &h.runtime.subtask_registry_for(&session_id),
+        &h.state.db,
+        &sink,
+        SettleContext {
+            parent_session_id: session_id.clone(),
+            agent_id: "agent-1".into(),
+            subtask_id: "st-sleep".into(),
+            sub_session_id: String::new(),
+            exit_reason: "completed".into(),
+            lifecycle: SubtaskLifecycle::new(),
+        },
+        r#"{"ok":true,"slept":30}"#,
+    );
+
+    // resume turn が実際に走ること（旧実装なら guard に阻まれ turns は 0 のまま）。
+    wait_turns(&h, 1).await;
+    assert_eq!(
+        h.runtime.turns.load(Ordering::SeqCst),
+        1,
+        "nostr- 再利用セッションの決着でも resume turn が 1 回走ること"
+    );
+    let resume_conv = h
+        .runtime
+        .conversations
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        resume_conv.contains("subtask_completed") && resume_conv.contains("slept"),
+        "決着結果が resume turn の会話に載ること: {resume_conv}"
+    );
 }
