@@ -4,6 +4,7 @@ pub mod admin;
 pub mod bearer;
 pub mod bundle;
 pub mod close;
+pub mod completion;
 pub mod delivery;
 pub mod delivery_mode;
 pub mod error;

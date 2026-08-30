@@ -214,6 +214,20 @@ pub trait SubtaskCompletionSink: Send + Sync {
     /// ここを強制できないので、transport を足すときに既存の接頭辞と衝突しないことを確かめる。
     fn session_prefix(&self) -> &'static str;
 
+    /// この sink が握る**親セッションそのものか**（[`dispatch_settled`] が継続配送の可否に使う）。
+    ///
+    /// 既定は [`Self::session_prefix`] の接頭辞一致——大半の transport は「自分の接頭辞で始まる
+    /// session は自分のもの」で正しい（Discord / web / REST / heartbeat）。
+    ///
+    /// **接頭辞では自分の session を選り分けられない transport だけ** override する。extgate は
+    /// Nostr の再利用セッションを握るとき `canonical_session_id` が binding（`extgate-<id>`）では
+    /// なく address（`nostr-<agent_id>`）へフォールバックするため、接頭辞 `extgate-` では一致せず
+    /// **全決着を門前払い**していた（resume 不発 / #838 の row284）。この sink は spawn 時に
+    /// 握った実 session を保持しており、それと等値比較すれば取り違えなく判定できる。
+    fn owns_parent_session(&self, session_id: &str) -> bool {
+        session_id.starts_with(self.session_prefix())
+    }
+
     /// **進捗（[`SettleKind::Progress`]）も継続として配送するか**（Discord だけ `true`）。
     ///
     /// `report_progress` のデバウンス発火が「進捗実況」としてメインエンジンを呼び直す Discord
@@ -269,8 +283,9 @@ pub trait SubtaskCompletionSink: Send + Sync {
 ///    transport にだけ配送する（Discord の進捗実況）。それ以外（`Cancelled` 等）は配送しない
 ///    ——停止は [`SubtaskCompletionSink::on_subtask_cancelled`] の役目で、ここへ流すと
 ///    「止めたのに返信する」ことになる。
-/// 2. **親セッションが自分のものか**: `session_prefix()` で確かめる。ネストした subtask や
-///    heartbeat の決着が同じ sink を通り得るため（正常系なので debug に留める）。
+/// 2. **親セッションが自分のものか**: `owns_parent_session()` で確かめる（既定は
+///    `session_prefix()` の接頭辞一致・extgate だけ実 session と等値比較へ override）。
+///    ネストした subtask や heartbeat の決着が同じ sink を通り得るため（正常系なので debug に留める）。
 /// 3. 上を通ったら配送へ渡す。**「他に走行中の subtask があるか」は見ない**——複数 subtask の
 ///    ドリブルは実測で再現せず（3 本を順に走らせた結果、継続が全部拾って最後にまとめて答えた）、
 ///    未完ゼロを待つと「最後の 1 本が終わるまで何も返さない」ことになる（#638 の裁定）。
@@ -298,8 +313,9 @@ pub fn dispatch_settled(sink: &dyn SubtaskCompletionSink, ev: SubtaskSettled) {
             return;
         }
     }
-    if !ev.session_id.starts_with(sink.session_prefix()) {
-        // ネストした subtask（`subtask-*`）や heartbeat（`heartbeat-*`）の決着。正常系。
+    if !sink.owns_parent_session(&ev.session_id) {
+        // ネストした subtask（`subtask-*`）や heartbeat（`heartbeat-*`）の決着、または
+        // この sink が握っていない別セッションの決着。正常系。
         tracing::debug!(
             session_id = %ev.session_id,
             prefix = sink.session_prefix(),
