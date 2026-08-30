@@ -333,7 +333,11 @@ mod tests {
                 .append(true)
                 .open(&fixture)
                 .unwrap();
-            writeln!(f, "{{\"id\":\"cc\",\"pubkey\":\"p3\",\"created_at\":3,\"kind\":1}}").unwrap();
+            writeln!(
+                f,
+                "{{\"id\":\"cc\",\"pubkey\":\"p3\",\"created_at\":3,\"kind\":1}}"
+            )
+            .unwrap();
         }
         assert!(
             wait_until(|| got.lock().unwrap().len() == 3).await,

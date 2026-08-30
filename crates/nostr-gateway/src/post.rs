@@ -238,8 +238,15 @@ mod tests {
         }
         let cfg = dir.path().join("cfg.toml");
         write_relays_config(&cfg, &["wss://x.example".into()]).unwrap();
-        let got =
-            deliver_say(&script, &cfg, Some("nsec1fakekey"), None, "エアリプ本文", false).await;
+        let got = deliver_say(
+            &script,
+            &cfg,
+            Some("nsec1fakekey"),
+            None,
+            "エアリプ本文",
+            false,
+        )
+        .await;
         assert_eq!(got, SayDelivery::PostedStandalone);
         let recorded = std::fs::read_to_string(&out_file).unwrap();
         assert!(
@@ -281,8 +288,15 @@ mod tests {
         write_relays_config(&cfg, &["wss://x.example".into()]).unwrap();
         // DI-16: say は常に standalone post。reply_origin を渡しても post になる（reply にしない）。
         let origin = format!("nostr:event:v1:default:{}", "bb".repeat(32));
-        let got =
-            deliver_say(&script, &cfg, Some("nsec1fakekey"), Some(origin), "やあ", false).await;
+        let got = deliver_say(
+            &script,
+            &cfg,
+            Some("nsec1fakekey"),
+            Some(origin),
+            "やあ",
+            false,
+        )
+        .await;
         assert_eq!(got, SayDelivery::PostedStandalone);
         let recorded = std::fs::read_to_string(&out_file).unwrap();
         assert!(recorded.contains("post"), "post subcommand: {recorded}");

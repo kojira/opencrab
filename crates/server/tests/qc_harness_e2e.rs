@@ -200,7 +200,10 @@ impl FifoMock {
         }
     }
     fn push_text(&self, text: &str) {
-        self.responses.lock().unwrap().push_back(text_response(text));
+        self.responses
+            .lock()
+            .unwrap()
+            .push_back(text_response(text));
     }
     fn system_prompts(&self) -> Vec<String> {
         self.system_prompts.lock().unwrap().clone()
@@ -219,7 +222,10 @@ impl LlmProvider for FifoMock {
         Ok(vec![])
     }
     async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
-        self.system_prompts.lock().unwrap().push(system_of(&request));
+        self.system_prompts
+            .lock()
+            .unwrap()
+            .push(system_of(&request));
         self.responses
             .lock()
             .unwrap()
@@ -432,7 +438,10 @@ async fn start_core(provider: Arc<dyn LlmProvider>) -> Core {
         opencrab_db::queries::set_agent_nostr_owner_pubkey(&conn, AGENT_ID, &author_pk()).unwrap();
     }
 
-    let extgate = Arc::new(ExtgateState::new(db.clone(), OperatorToken::from_bytes(TOKEN)));
+    let extgate = Arc::new(ExtgateState::new(
+        db.clone(),
+        OperatorToken::from_bytes(TOKEN),
+    ));
 
     // nostr said の元栓。production（server main）と同じ `admit_nostr_said` を呼ぶ。
     // allow-set に author を入れ、self_pubkey は config と揃える。
@@ -474,7 +483,13 @@ async fn start_core(provider: Arc<dyn LlmProvider>) -> Core {
         let runtime = state.clone();
         let path = sock.clone();
         tokio::spawn(async move {
-            let _ = serve_uds(listen_state, runtime, resolve_caller_identity_with_owner, path).await;
+            let _ = serve_uds(
+                listen_state,
+                runtime,
+                resolve_caller_identity_with_owner,
+                path,
+            )
+            .await;
         });
     }
     for _ in 0..200 {
@@ -623,8 +638,7 @@ async fn scenario_a_mention_becomes_say() {
     let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
 
     let fixture = Fixture::new();
-    let (_client, _address, _session_id) =
-        wire_instance(&core, &fixture, nostr_config(None)).await;
+    let (_client, _address, _session_id) = wire_instance(&core, &fixture, nostr_config(None)).await;
 
     let event_id = "a1".repeat(32);
     fixture.append_line(&mention_event(&event_id, "QCA-MARK メンション本文"));
@@ -638,7 +652,11 @@ async fn scenario_a_mention_becomes_say() {
         })
         .await
     };
-    assert!(ok, "mention の say が dry-run に出ない: {:?}", captured(&buf));
+    assert!(
+        ok,
+        "mention の say が dry-run に出ない: {:?}",
+        captured(&buf)
+    );
 
     // 1 メンション = 1 ターン。
     assert_eq!(mock.system_prompts().len(), 1, "ターンが 1 本でない");
@@ -786,14 +804,16 @@ async fn scenario_main_second_request_not_blocked_during_long_op() {
     let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
 
     let fixture = Fixture::new();
-    let (_client, _address, session_id) =
-        wire_instance(&core, &fixture, nostr_config(None)).await;
+    let (_client, _address, session_id) = wire_instance(&core, &fixture, nostr_config(None)).await;
 
     let ev1 = "b1".repeat(32);
     let ev2 = "b2".repeat(32);
 
     // 1) 「長い処理して終わったら教えて」→ 即応 ack say(1) ＋ 背景サブタスク detach。
-    fixture.append_line(&mention_event(&ev1, &format!("{M_FIRST} 長い処理して終わったら教えて")));
+    fixture.append_line(&mention_event(
+        &ev1,
+        &format!("{M_FIRST} 長い処理して終わったら教えて"),
+    ));
 
     // say(1) が出る AND 背景サブタスクが走行中（held）になるまで待つ。
     let ack_ready = {
@@ -806,7 +826,10 @@ async fn scenario_main_second_request_not_blocked_during_long_op() {
         let sid = session_id.clone();
         wait_until(move || state.subtask_registries.has_running(&sid)).await
     };
-    assert!(running, "背景サブタスクが走行中にならない（detach/hold 失敗）");
+    assert!(
+        running,
+        "背景サブタスクが走行中にならない（detach/hold 失敗）"
+    );
 
     // 2) 走行中に第2依頼を投入 → ブロックされず即応 say(2)。
     fixture.append_line(&mention_event(&ev2, &format!("{M_SECOND} 2 足す 2 は?")));
