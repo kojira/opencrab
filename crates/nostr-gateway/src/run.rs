@@ -74,13 +74,23 @@ pub fn spawn_instance(
             post_config.display()
         )
     })?;
-    let client = InstanceClient::spawn_with_say_policy(
+    // DI 能力宣言（§9.2）と invoke handler を hello に載せて接続する。invoke は nostaro CLI 実行へ
+    // 写す（reply/reaction/repost/follow/unfollow/kind0/upload/resolve）。秘密鍵は env 注入のみ。
+    let invoke_handler: Arc<dyn opencrab_gate_client::InvokeHandler> =
+        Arc::new(crate::ops::NostrInvokeHandler::new(
+            nostaro_bin.clone(),
+            post_config.clone(),
+            secret.as_ref().map(|s| s.as_str().to_string()),
+        ));
+    let client = InstanceClient::spawn_with_operations(
         socket,
         place.instance_id.clone(),
         place.revision,
         cfg.self_pubkey.clone(),
         digest,
         SayPolicy::AcceptToLiveQueue,
+        Some(crate::ops::operation_declarations()),
+        invoke_handler,
     );
     let metrics = Arc::new(SaidMetrics::default());
     // 車線をまたぐ said dedup は instance 単位で共有する（全 default/watch 車線が同じセット）。

@@ -20,21 +20,21 @@ use super::wire::{
 };
 
 /// gateway が invoke を実行する handler（DI 拡張 §5）。短縮参照(uN/eN/cN)は core が origin/pubkey へ
-/// 解決済みで payload に入る。gateway は platform ID を導いて実行し、ok(result)/err を返す。
+/// 解決済みで payload に入る。gateway は platform ID を導いて実行し、三結果のいずれかを返す。
 #[async_trait::async_trait]
 pub trait InvokeHandler: Send + Sync {
-    async fn handle(
-        &self,
-        binding_id: &str,
-        operation: &str,
-        payload: &Value,
-    ) -> Result<Value, InvokeHandlerError>;
+    async fn handle(&self, binding_id: &str, operation: &str, payload: &Value) -> InvokeOutcome;
 }
 
-/// invoke の確定拒否。code は generic stable value（operation_rejected / operation_unknown）。
-pub struct InvokeHandlerError {
-    pub code: String,
-    pub detail: Option<String>,
+/// invoke の三結果（§5.3）。gateway 側の観測を core へ正しく伝える。
+pub enum InvokeOutcome {
+    /// 外部 API が受理したと確認した。result は opaque JSON（null 含む）。
+    Ok(Value),
+    /// 外部 I/O 0 または確定非受理。`operation_rejected` を返す。
+    Rejected,
+    /// 受理成否が不明（timeout 等）。応答を作らず接続を閉じ、core 側で indeterminate に
+    /// させる（不明を確定拒否へ捏造しない・§5.3）。
+    Indeterminate,
 }
 
 const LIVE_QUEUE_CAP: usize = 32;
@@ -619,10 +619,7 @@ async fn handle_msg(client: &InstanceClient, msg: CoreMsg, generation: u64) -> b
             handle_activity(client, activity).await;
             false
         }
-        CoreMsg::Invoke(inv) => {
-            handle_invoke(client, inv).await;
-            false
-        }
+        CoreMsg::Invoke(inv) => handle_invoke(client, inv, generation).await,
         CoreMsg::Response(resp) => {
             handle_response(client, resp, generation).await;
             false
@@ -646,26 +643,39 @@ async fn handle_msg(client: &InstanceClient, msg: CoreMsg, generation: u64) -> b
     }
 }
 
-async fn handle_invoke(client: &InstanceClient, inv: Invoke) {
+/// invoke を実行して応答する。戻り値は「接続を閉じるべきか」（Indeterminate のとき true）。
+async fn handle_invoke(client: &InstanceClient, inv: Invoke, generation: u64) -> bool {
     tracing::info!(
         instance_id = %client.instance_id,
         binding_id = %inv.binding_id,
         operation = %inv.operation,
         "invoke"
     );
-    // DI 能力宣言つき gateway は invoke_handler で実行し ok(result)/err を返す。handler 未配線
-    // （能力ゼロ）なら未宣言 operation として fail-closed で operation_unknown（外部 I/O 0・§5.1）。
-    let resp = match &client.invoke_handler {
-        Some(handler) => match handler
-            .handle(&inv.binding_id, &inv.operation, &inv.payload)
-            .await
-        {
-            Ok(result) => invoke_ok_frame(&inv.id, &result),
-            Err(e) => err_frame(&inv.id, &e.code, e.detail.as_deref()),
-        },
-        None => err_frame(&inv.id, "operation_unknown", None),
+    // handler 未配線（能力ゼロ）なら未宣言 operation として fail-closed で operation_unknown
+    // （外部 I/O 0・§5.1）。
+    let Some(handler) = &client.invoke_handler else {
+        let _ = send_frame(client, err_frame(&inv.id, "operation_unknown", None)).await;
+        return false;
     };
-    let _ = send_frame(client, resp).await;
+    match handler
+        .handle(&inv.binding_id, &inv.operation, &inv.payload)
+        .await
+    {
+        InvokeOutcome::Ok(result) => {
+            let _ = send_frame(client, invoke_ok_frame(&inv.id, &result)).await;
+            false
+        }
+        InvokeOutcome::Rejected => {
+            let _ = send_frame(client, err_frame(&inv.id, "operation_rejected", None)).await;
+            false
+        }
+        InvokeOutcome::Indeterminate => {
+            // 受理不明: 応答を作らず接続を閉じる。core は EOF を見て pending invoke を
+            // indeterminate/disconnect にする（§5.3・不明を確定拒否へ捏造しない）。
+            close_all(client, "invoke_indeterminate", generation).await;
+            true
+        }
+    }
 }
 
 async fn handle_bind(client: &InstanceClient, bind: Bind, generation: u64) {

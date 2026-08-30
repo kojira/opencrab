@@ -4,4 +4,4 @@ pub mod client;
 pub mod json;
 pub mod wire;
 
-pub use client::{InvokeHandler, InvokeHandlerError, SayPolicy};
+pub use client::{InvokeHandler, InvokeOutcome, SayPolicy};

@@ -17,6 +17,7 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 sha2.workspace = true
 base64 = "0.22"
+async-trait.workspace = true
 opencrab-gate-client.workspace = true
 
 [[bin]]
