@@ -168,6 +168,8 @@ pub struct V1Anchor {
     pub p_self: bool,
     pub route: IngressRoute,
     pub watch_id: Option<i64>,
+    /// 返信/リアクション/リポストの対象ノート event_id（row295c 6b）。省略/null は None。
+    pub reply_to: Option<String>,
     /// Bundle 第2行の index 順 origin。V1 JSON には無い。
     pub origins: Option<Vec<String>>,
 }
@@ -178,7 +180,8 @@ pub fn parse_v1_anchor(text: &str) -> Option<V1Anchor> {
     let json = rest.strip_suffix(']')?;
     let value: serde_json::Value = serde_json::from_str(json).ok()?;
     let obj = value.as_object()?;
-    const KEYS: [&str; 10] = [
+    // 必須 key（この 10 個は必ず在る）。
+    const REQUIRED: [&str; 10] = [
         "beyond_self",
         "bundle_id",
         "count",
@@ -190,11 +193,16 @@ pub fn parse_v1_anchor(text: &str) -> Option<V1Anchor> {
         "route",
         "watch_id",
     ];
-    if obj.len() != KEYS.len() {
-        return None;
-    }
-    for key in KEYS {
+    // 任意 key（在っても在らなくても可。新旧 gateway の互換のため）。row295c 6b で `reply_to` を追加。
+    const OPTIONAL: [&str; 1] = ["reply_to"];
+    for key in REQUIRED {
         if !obj.contains_key(key) {
+            return None;
+        }
+    }
+    // 未知 key は従来どおり拒否（REQUIRED/OPTIONAL 以外が 1 つでもあれば None）。
+    for key in obj.keys() {
+        if !REQUIRED.contains(&key.as_str()) && !OPTIONAL.contains(&key.as_str()) {
             return None;
         }
     }
@@ -235,6 +243,12 @@ pub fn parse_v1_anchor(text: &str) -> Option<V1Anchor> {
         p_self: bool_field("p_self")?,
         route,
         watch_id: opt_i64("watch_id")?,
+        // 省略時は None、null も None、string はそのまま（不正な型は None を返して anchor 全体を弾く）。
+        reply_to: match obj.get("reply_to") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(s)) => Some(s.clone()),
+            Some(_) => return None,
+        },
         origins: None,
     })
 }
@@ -322,7 +336,8 @@ pub enum AdmitSaidError {
     BadAnchor,
     Drop {
         reason: DropReason,
-        anchor: V1Anchor,
+        // Box 化して Err variant を小さく保つ（V1Anchor 肥大で result_large_err にならないよう）。
+        anchor: Box<V1Anchor>,
     },
 }
 
@@ -341,19 +356,19 @@ pub fn admit_nostr_said(
     if matches!(anchor.kind, 4 | 1059) {
         return Err(AdmitSaidError::Drop {
             reason: DropReason::Dm,
-            anchor,
+            anchor: Box::new(anchor),
         });
     }
     if author_id == self_pubkey {
         return Err(AdmitSaidError::Drop {
             reason: DropReason::SelfPost,
-            anchor,
+            anchor: Box::new(anchor),
         });
     }
     if !allow.is_allowed(&follow_key(author_id)) {
         return Err(AdmitSaidError::Drop {
             reason: DropReason::AllowSet,
-            anchor,
+            anchor: Box::new(anchor),
         });
     }
     Ok(anchor)
@@ -626,6 +641,34 @@ mod tests {
         assert_eq!(parsed.kind, 1);
         assert_eq!(parsed.event_id, "aa".repeat(32));
         assert_eq!(history_body_without_anchor(&line), "hello");
+    }
+
+    // row295c 6b: reply_to は任意 key。value/null/省略のいずれも受理し（bad_request 全滅の再現→修正の
+    // 対照）、不正な型や未知 key は従来どおり拒否する。
+    #[test]
+    fn v1_anchor_accepts_optional_reply_to() {
+        let target = "bb".repeat(32);
+        let with = format!(
+            "[NOSTRGATE/V1 {{\"beyond_self\":false,\"bundle_id\":null,\"count\":null,\"event_id\":\"{}\",\"has_e\":true,\"index\":null,\"kind\":1,\"p_self\":true,\"reply_to\":\"{target}\",\"route\":\"immediate\",\"watch_id\":null}}]\nhi",
+            "aa".repeat(32)
+        );
+        assert_eq!(
+            parse_v1_anchor(&with).unwrap().reply_to.as_deref(),
+            Some(target.as_str())
+        );
+        // null は None。
+        let null_rt = format!(
+            "[NOSTRGATE/V1 {{\"beyond_self\":false,\"bundle_id\":null,\"count\":null,\"event_id\":\"{}\",\"has_e\":true,\"index\":null,\"kind\":1,\"p_self\":true,\"reply_to\":null,\"route\":\"immediate\",\"watch_id\":null}}]\nhi",
+            "aa".repeat(32)
+        );
+        assert_eq!(parse_v1_anchor(&null_rt).unwrap().reply_to, None);
+        // 省略（旧 gateway・10 key）も受理（後方互換）。
+        let without = format!(
+            "[NOSTRGATE/V1 {{\"beyond_self\":false,\"bundle_id\":null,\"count\":null,\"event_id\":\"{}\",\"has_e\":true,\"index\":null,\"kind\":1,\"p_self\":true,\"route\":\"immediate\",\"watch_id\":null}}]\nhi",
+            "aa".repeat(32)
+        );
+        assert!(parse_v1_anchor(&without).is_some());
+        assert_eq!(parse_v1_anchor(&without).unwrap().reply_to, None);
     }
 
     fn v1_line(kind: u32, route: &str) -> String {
