@@ -685,6 +685,7 @@ pub fn channel_whitelisted(
     matches!(result, Ok(1))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn enqueue_turn<R: AgentRuntime>(
     state: Arc<ExtgateState>,
     runtime: R,
