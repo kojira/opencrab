@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use opencrab_actions::{
     accept_inbound, delivery_effect, start_session_turn, AgentRuntime, CallerIdentity,
-    InboundLookups, InboundWork, LiveInboundScope, NormalizedInbound, NormalizedInboundEvent,
-    PrivilegeFire, RunRequest, TranscriptSource, WatchAccept,
+    InboundLookups, InboundWork, NormalizedInbound, NormalizedInboundEvent, PrivilegeFire,
+    RunRequest, SubtaskCompletionSink, TranscriptSource, WatchAccept,
 };
 use opencrab_db::queries::{
     get_agent_discord_config, get_agent_nostr_owner_pubkey, get_session_policy_json,
@@ -18,6 +18,7 @@ use opencrab_db::queries::{
 use rusqlite::{params, Connection, Transaction, TransactionBehavior};
 
 use crate::bundle::{apply_bundle_member, BundleApply, NostrBundleAdmit};
+use crate::completion::{v3_attach_dispatch, ExtgateCompletionSink};
 use crate::delivery::apply_delivery_effect;
 use crate::delivery_mode::{adjust_inbound_effect, DeliveryMode};
 use crate::error::{ErrorCode, GateError};
@@ -368,6 +369,7 @@ pub fn process_said<R: AgentRuntime>(
             said,
             &session_id,
             &prompt_suffix,
+            true, // 単一メンション: 発端 said の origin へ返信
         );
     }
 
@@ -449,6 +451,7 @@ fn finish_bundle<R: AgentRuntime>(
             &trigger_said,
             ctx.session_id,
             &suffix,
+            false, // bundle: 単一返信先が無い（gateway drop・エアリプは nostr_post）
         );
     }
     Ok(SaidOutcome { seq })
@@ -682,6 +685,7 @@ pub fn channel_whitelisted(
     matches!(result, Ok(1))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn enqueue_turn<R: AgentRuntime>(
     state: Arc<ExtgateState>,
     runtime: R,
@@ -690,6 +694,10 @@ fn enqueue_turn<R: AgentRuntime>(
     said: &Said,
     session_id: &str,
     prompt_suffix: &str,
+    // 単一メンション turn は発端 said の origin へ返信（say payload の reply_target に載せる）。
+    // bundle turn は単一返信先が無いので false（gateway は drop・エアリプは nostr_post）。
+    // gateway 側の pending_turn 相関は activity ended が say より先に届き消えるため当てにしない。
+    reply_to_origin: bool,
 ) {
     let locks = runtime.session_locks();
     let session_id = session_id.to_string();
@@ -705,6 +713,12 @@ fn enqueue_turn<R: AgentRuntime>(
     let kind_id = row.kind_id.clone();
     let delivery_mode = row.delivery_mode;
     let prompt_suffix = prompt_suffix.to_string();
+    // say の返信先（発端イベント origin）。単一メンションのみ。bundle は None。
+    let reply_target: Option<String> = if reply_to_origin {
+        Some(origin.clone())
+    } else {
+        None
+    };
     if !state.turn_queues.try_reserve(&session_id) {
         #[cfg(any(test, feature = "extgate-probe"))]
         state
@@ -756,6 +770,10 @@ fn enqueue_turn<R: AgentRuntime>(
                     let images = images.clone();
                     let origin = origin.clone();
                     let kind_id = kind_id.clone();
+                    let state = Arc::clone(&state);
+                    let instance_id = instance_id.clone();
+                    let binding_id = binding_id.clone();
+                    let prompt_suffix = prompt_suffix.clone();
                     tokio::spawn(async move {
                         let inbound = NormalizedInbound {
                             session_id: &session_id,
@@ -773,6 +791,20 @@ fn enqueue_turn<R: AgentRuntime>(
                             image_urls: &images,
                             external_id: &origin,
                         };
+                        let registry = runtime.subtask_registry_for(&session_id);
+                        let sink: Arc<dyn SubtaskCompletionSink> =
+                            Arc::new(ExtgateCompletionSink {
+                                state,
+                                runtime: runtime.clone(),
+                                instance_id,
+                                binding_id,
+                                agent_id: agent_id.clone(),
+                                session_id: session_id.clone(),
+                                kind_id: kind_id.clone(),
+                                author_id: author_id.clone(),
+                                delivery_mode,
+                                prompt_suffix,
+                            });
                         start_session_turn(
                             &runtime,
                             TranscriptSource::External,
@@ -783,22 +815,26 @@ fn enqueue_turn<R: AgentRuntime>(
                             "",
                             |raw| raw.to_string(),
                             |conversation| {
-                                let mut req = RunRequest::new(
-                                    agent_id.clone(),
-                                    name.clone(),
-                                    session_id.clone(),
-                                    system.clone(),
-                                    conversation,
-                                    "extgate",
-                                    caller.clone(),
+                                v3_attach_dispatch(
+                                    RunRequest::new(
+                                        agent_id.clone(),
+                                        name.clone(),
+                                        session_id.clone(),
+                                        system.clone(),
+                                        conversation,
+                                        "extgate",
+                                        caller.clone(),
+                                    )
+                                    .with_image_urls(images.clone())
+                                    // 発端イベントの origin を subtask へ引き継ぐ。subtask 完了時の
+                                    // resume ターンの say がこの origin へ返信できるようにする
+                                    // （settlement→SubtaskSettled.reply_target 経由）。
+                                    .with_reply_target(origin.clone()),
+                                    &kind_id,
+                                    author_id.clone(),
+                                    registry.clone(),
+                                    Arc::clone(&sink),
                                 )
-                                .with_image_urls(images.clone());
-                                if kind_id == "nostr" {
-                                    req = req.with_live_inbound_scope(
-                                        LiveInboundScope::OnlySpeaker(author_id.clone()),
-                                    );
-                                }
-                                req
                             },
                         )
                         .await
@@ -813,8 +849,9 @@ fn enqueue_turn<R: AgentRuntime>(
                             None => opencrab_actions::DeliveryEffect::Empty,
                         };
                         let effect = adjust_inbound_effect(delivery_mode, effect);
-                        // 即時 inbound ターンの返信先は gateway 側の相関（直前に送った said の
-                        // origin）に委ねる（reply_target=None）。resume だけが発端 origin を明示。
+                        // 単一メンションは発端 origin を say payload に明示（gateway が e-tag reply）。
+                        // bundle は None（gateway drop・エアリプは nostr_post）。gateway の
+                        // pending_turn 相関は activity ended が say より先に届き消えるため使わない。
                         apply_delivery_effect(
                             &state,
                             &runtime,
@@ -823,7 +860,7 @@ fn enqueue_turn<R: AgentRuntime>(
                             &agent_id,
                             &session_id,
                             effect,
-                            None,
+                            reply_target.as_deref(),
                         )
                         .await;
                     }
@@ -879,6 +916,7 @@ fn fire_held_turns<R: AgentRuntime>(
         &said,
         &last.session_id,
         &last.prompt_suffix,
+        true, // 保留していた単一メンション: 発端 said の origin へ返信
     );
 }
 

@@ -2581,6 +2581,10 @@ mod tests {
             self.session_locks.clone()
         }
 
+        fn subtask_registry_for(&self, session_id: &str) -> opencrab_actions::SubtaskRegistry {
+            opencrab_actions::SubtaskRegistries::new().registry_for(session_id)
+        }
+
         fn ensure_session(&self, _s: &str, _a: &[String], _t: &str, _m: &str, _mode: &str) {}
 
         fn record_inbound_message(

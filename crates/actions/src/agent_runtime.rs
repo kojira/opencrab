@@ -110,6 +110,12 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
     /// `AppState` が 1 つだけ生成して保持し、全経路がその `Arc` を clone して共有する。
     fn session_locks(&self) -> std::sync::Arc<crate::SessionLocks>;
 
+    /// この session の dispatch registry（inbound と resume で同一 Arc）。
+    ///
+    /// `AppState.subtask_registries` の貸し出し。V3 が `with_dispatch` するとき
+    /// `cancel_subtask` と同じ Arc を見るために使う。新機構ではない。
+    fn subtask_registry_for(&self, session_id: &str) -> crate::SubtaskRegistry;
+
     /// NO_REPLY（沈黙の明示）を記録する（best-effort）。
     fn record_agent_no_reply(&self, agent_id: &str, session_id: &str);
 

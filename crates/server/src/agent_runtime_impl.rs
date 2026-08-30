@@ -122,6 +122,10 @@ impl AgentRuntime for AppState {
         self.session_locks.clone()
     }
 
+    fn subtask_registry_for(&self, session_id: &str) -> opencrab_actions::SubtaskRegistry {
+        self.subtask_registries.registry_for(session_id)
+    }
+
     fn record_agent_no_reply(&self, agent_id: &str, session_id: &str) {
         if let Ok(conn) = self.db.lock() {
             crate::transcript::record_agent_no_reply(&conn, agent_id, session_id);
