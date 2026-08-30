@@ -135,10 +135,7 @@ pub async fn deliver_say(
             ))
         }
         Ok(Err(e)) => SayDelivery::Failed(format!("nostaro spawn 失敗: {e}")),
-        Err(_) => SayDelivery::Failed(format!(
-            "nostaro reply timeout {}s",
-            POST_TIMEOUT.as_secs()
-        )),
+        Err(_) => SayDelivery::Failed(format!("nostaro reply timeout {}s", POST_TIMEOUT.as_secs())),
     }
 }
 
@@ -291,7 +288,10 @@ mod tests {
         match got {
             SayDelivery::Failed(msg) => {
                 assert!(msg.contains("exit"), "{msg}");
-                assert!(!msg.contains("nsec1leak0123"), "stderr の nsec が漏れている: {msg}");
+                assert!(
+                    !msg.contains("nsec1leak0123"),
+                    "stderr の nsec が漏れている: {msg}"
+                );
             }
             other => panic!("expected Failed, got {other:?}"),
         }

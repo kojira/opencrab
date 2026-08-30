@@ -417,7 +417,10 @@ mod tests {
         );
         // 欠落・空は None（gateway 側の相関に委ねる）。
         assert_eq!(say_reply_target(&json!({"text":"hi"})), None);
-        assert_eq!(say_reply_target(&json!({"text":"hi","reply_target":""})), None);
+        assert_eq!(
+            say_reply_target(&json!({"text":"hi","reply_target":""})),
+            None
+        );
     }
 
     #[test]

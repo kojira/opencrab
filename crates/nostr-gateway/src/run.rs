@@ -17,11 +17,11 @@ use crate::config::{
     InstancePlacement, WatchFilter, WatchPlacement,
 };
 use crate::dedup::SeenEvents;
-use crate::post::{self, SayDelivery};
 use crate::map::{
     bundle_id, classify_route, map_event, normalize_author_id, parse_watch_line, BundlePlace, Lane,
     LaneKind, Route, WatchEvent,
 };
+use crate::post::{self, SayDelivery};
 use crate::watch::{run_watch_loop, RESUBSCRIBE};
 
 const BIND_POLL: Duration = Duration::from_millis(50);
@@ -69,7 +69,10 @@ pub fn spawn_instance(
     // 返信本文を nostaro reply で投稿するための relays だけの config（鍵は env 注入・config に載せない）。
     let post_config = post::post_config_path(&socket, &place.instance_id);
     post::write_relays_config(&post_config, &cfg.relays).map_err(|e| {
-        anyhow::anyhow!("nostaro post config を書けない ({}): {e}", post_config.display())
+        anyhow::anyhow!(
+            "nostaro post config を書けない ({}): {e}",
+            post_config.display()
+        )
     })?;
     let client = InstanceClient::spawn_with_say_policy(
         socket,

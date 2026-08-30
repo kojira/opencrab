@@ -73,7 +73,10 @@ mod tests {
         let seen = SeenEvents::new(Duration::from_millis(10));
         let t0 = Instant::now();
         assert!(seen.claim_at("aa", t0));
-        assert!(!seen.claim_at("aa", t0 + Duration::from_millis(5)), "TTL 内は重複");
+        assert!(
+            !seen.claim_at("aa", t0 + Duration::from_millis(5)),
+            "TTL 内は重複"
+        );
         // TTL 経過後は再び握れる（掃除される）。
         assert!(seen.claim_at("aa", t0 + Duration::from_millis(20)));
     }
