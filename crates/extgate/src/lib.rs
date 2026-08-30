@@ -32,15 +32,14 @@ pub use listen::{
     enqueue_bind, recover_stale_deliveries, serve_uds, validate_listen_socket, wait_bind_ack,
     web_binding_state, EnqueueBindOutcome,
 };
-pub use operation_calls::{enqueue_invoke, recover_stale_calls};
+pub use operation_calls::{invoke_and_wait, recover_stale_calls, InvokeError};
 pub use operations::{
     declaration_digest, validate_operations, GatewayOperationDeclaration, OperationClass, Sharing,
     SubEngine,
 };
 pub use registry::{
     ExtgateState, NostrHeldTurn, NostrRelayFn, NostrSaidAdmit, NostrSaidDecision, NostrWatchSets,
-    NostrWatchSetsFn, NostrWorkspaceFn, OperationOutcome, OperationSettleFn, OperationSettlement,
-    Registry, ReservedToolNameFn,
+    NostrWatchSetsFn, NostrWorkspaceFn, OperationOutcome, Registry, ReservedToolNameFn,
 };
 
 use opencrab_actions::CallerIdentity;

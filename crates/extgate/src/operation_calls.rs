@@ -1,55 +1,81 @@
-//! generic operation call の永続と terminal 化（DI 拡張 §5 / §7 / §10.6）。
+//! generic operation call の永続と terminal 化（DI 拡張 §5 / §7 / §10.6・option B）。
 //!
 //! wire 層は operation/payload/result を opaque JSON として扱い、platform 意味を解釈しない。
-//! call を terminal 化した後、`state.fire_operation_settlement` で projection の
-//! settle_completed 経路へ決着を渡す（DI-08）。invoke の再送は 0 回。
+//! `invoke_and_wait` は背景 subtask（`SubtaskToolDispatcher` が spawn 済み）から呼ばれ、invoke を
+//! 送って wire 応答（handle_response）または close（indeterminate）を oneshot で await する。turn は
+//! 既に `{"status":"spawned",...}` で返っており（常時 detach）、この await は subtask 内なので detach を
+//! 壊さない。await 完了で execute() が戻り、既存 dispatch_batch が settle_completed を発火する（DI-08）。
+//! invoke の再送は 0 回。
 
 use std::sync::Arc;
 
 use rusqlite::{params, Connection, TransactionBehavior};
 use serde_json::Value;
+use tokio::sync::oneshot;
+use uuid::Uuid;
 
 use crate::error::{ErrorCode, GateError};
 use crate::ids::now_nanos;
 use crate::protocol::{invoke_frame, write_json};
-use crate::registry::{ExtgateState, OperationOutcome, OperationSettlement, Pending};
+use crate::registry::{ExtgateState, OperationOutcome, Pending};
 
-/// wire-side dispatch（§5.2 / §10.6）。call を `sending` で insert → commit → pending 登録
-/// → invoke を exact 1 回 write。projection の dispatcher とテストの双方から呼べる。
+/// invoke の確定結果としての失敗（§5.3）。code は generic stable value。
+#[derive(Debug, Clone)]
+pub struct InvokeError {
+    pub code: ErrorCode,
+    pub detail: Option<String>,
+}
+
+impl InvokeError {
+    fn new(code: ErrorCode) -> Self {
+        Self { code, detail: None }
+    }
+}
+
+/// 背景 subtask 内で呼ぶ（§5.2 / §10.6・option B）。call を `sending` で insert → commit →
+/// pending 登録 → invoke を exact 1 回 write → wire 応答 / close の terminal outcome を await する。
 ///
-/// commit 前は wire write 0。enqueue/write 失敗は call を `indeterminate/disconnect` にし、
-/// 決着を settle hook へ渡して connection を close する。
-pub async fn enqueue_invoke(
+/// - ok(result) → `Ok(result)`（result は opaque JSON。null 含む）。
+/// - err(operation_rejected) → `Err(operation_rejected)`。
+/// - write/EOF/protocol close/ack 不明 → `Err(disconnect)`（call は indeterminate）。
+///
+/// commit 前は wire write 0。宣言に無い operation は call/pending/wire 0 で `operation_unknown`。
+pub async fn invoke_and_wait(
     state: &Arc<ExtgateState>,
     instance_id: &str,
     binding_id: &str,
-    call_id: &str,
     operation: &str,
     payload: &Value,
-) -> Result<(), GateError> {
-    // §10.6 step 1: live + acknowledged binding を再検査。不成立なら call/pending/wire write 0。
+) -> Result<Value, InvokeError> {
+    // §10.6 step 1: live + acknowledged binding + live declaration を再検査。
     let writer = {
-        let reg = state.lock_registry()?;
+        let reg = state
+            .lock_registry()
+            .map_err(|_| InvokeError::new(ErrorCode::StoreError))?;
         let live = reg
             .get(instance_id)
-            .ok_or_else(|| GateError::new(ErrorCode::NotConnected))?;
+            .ok_or_else(|| InvokeError::new(ErrorCode::NotConnected))?;
         if !live.acknowledged.contains(binding_id) {
-            return Err(GateError::new(ErrorCode::NotConnected));
+            return Err(InvokeError::new(ErrorCode::NotConnected));
         }
-        // live declaration に無い operation は call/wire 0（§5.1）。
         if live.declaration(operation).is_none() {
-            return Err(GateError::new(ErrorCode::OperationUnknown));
+            return Err(InvokeError::new(ErrorCode::OperationUnknown));
         }
         live.writer.clone()
     };
 
+    let call_id = Uuid::new_v4().to_string();
     let now = now_nanos();
-    let payload_text = serde_json::to_string(payload).map_err(|_| GateError::store())?;
+    let payload_text =
+        serde_json::to_string(payload).map_err(|_| InvokeError::new(ErrorCode::StoreError))?;
     {
-        let mut conn = state.db.lock().map_err(|_| GateError::store())?;
+        let mut conn = state
+            .db
+            .lock()
+            .map_err(|_| InvokeError::new(ErrorCode::StoreError))?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|_| GateError::store())?;
+            .map_err(|_| InvokeError::new(ErrorCode::StoreError))?;
         let open = tx.query_row(
             "SELECT instance_id, closed_at FROM gate_bindings WHERE binding_id = ?1",
             params![binding_id],
@@ -59,11 +85,11 @@ pub async fn enqueue_invoke(
             Ok((inst, None)) if inst == instance_id => {}
             Ok(_) => {
                 let _ = tx.rollback();
-                return Err(GateError::new(ErrorCode::BindingClosed));
+                return Err(InvokeError::new(ErrorCode::BindingClosed));
             }
             Err(_) => {
                 let _ = tx.rollback();
-                return Err(GateError::store());
+                return Err(InvokeError::new(ErrorCode::StoreError));
             }
         }
         tx.execute(
@@ -72,48 +98,42 @@ pub async fn enqueue_invoke(
              VALUES (?1, ?2, ?3, ?4, NULL, 'sending', NULL, ?5, ?5)",
             params![call_id, binding_id, operation, payload_text, now],
         )
-        .map_err(|_| GateError::store())?;
-        tx.commit().map_err(|_| GateError::store())?;
+        .map_err(|_| InvokeError::new(ErrorCode::StoreError))?;
+        tx.commit()
+            .map_err(|_| InvokeError::new(ErrorCode::StoreError))?;
     }
 
-    // commit 後だけ pending map へ登録し、background writer へ invoke を渡す。
+    // commit 後だけ pending へ登録（terminal outcome を届ける oneshot 付き）。
+    let (reply_tx, reply_rx) = oneshot::channel();
     {
-        let mut reg = state.lock_registry()?;
+        let mut reg = state
+            .lock_registry()
+            .map_err(|_| InvokeError::new(ErrorCode::StoreError))?;
         let Some(live) = reg.get_mut(instance_id) else {
             drop(reg);
-            settle_call(
-                state,
-                call_id,
-                binding_id,
-                operation,
-                OperationOutcome::Indeterminate,
-            )?;
-            return Err(GateError::new(ErrorCode::Disconnect));
+            let _ = terminalize_call(state, &call_id, &OperationOutcome::Indeterminate);
+            return Err(InvokeError::new(ErrorCode::Disconnect));
         };
         live.pending.insert(
-            call_id.to_string(),
+            call_id.clone(),
             Pending::Invoke {
-                call_id: call_id.to_string(),
+                call_id: call_id.clone(),
                 binding_id: binding_id.to_string(),
                 operation: operation.to_string(),
+                reply: reply_tx,
             },
         );
     }
 
+    // background writer へ invoke を exact 1 回。失敗は connection close（pending invoke は
+    // close 側で indeterminate 化＋oneshot に Indeterminate 送出）。
     if write_json(
         &writer,
-        &invoke_frame(call_id, binding_id, operation, None, payload),
+        &invoke_frame(&call_id, binding_id, operation, None, payload),
     )
     .await
     .is_err()
     {
-        settle_call(
-            state,
-            call_id,
-            binding_id,
-            operation,
-            OperationOutcome::Indeterminate,
-        )?;
         crate::close::close_live(
             state,
             Some(instance_id),
@@ -123,109 +143,77 @@ pub async fn enqueue_invoke(
             None,
         )
         .await;
-        return Err(GateError::new(ErrorCode::Disconnect));
+        return Err(InvokeError::new(ErrorCode::Disconnect));
     }
-    Ok(())
+
+    match reply_rx.await {
+        Ok(OperationOutcome::Succeeded { result_json }) => {
+            Ok(serde_json::from_str(&result_json).unwrap_or(Value::Null))
+        }
+        Ok(OperationOutcome::Failed) => Err(InvokeError::new(ErrorCode::OperationRejected)),
+        Ok(OperationOutcome::Indeterminate) | Err(_) => {
+            Err(InvokeError::new(ErrorCode::Disconnect))
+        }
+    }
 }
 
-/// call を terminal 化し、決着を settle hook へ渡す（DI-08）。terminal 遷移は
-/// `sending→succeeded|failed|indeterminate` のみで、既に terminal の行は変えない。
-/// DB 失敗は success を捏造せず Err を返す（呼び出し側が close + halt）。
-pub fn settle_call(
+/// call を terminal 化する（§5.3）。DB のみ。terminal 遷移は
+/// `sending→succeeded|failed|indeterminate` で、既に terminal の行は変えない。
+/// 成功捏造を避けるため DB 失敗は Err を返す（呼び出し側が close + halt）。
+pub fn terminalize_call(
     state: &ExtgateState,
     call_id: &str,
-    binding_id: &str,
-    operation: &str,
-    outcome: OperationOutcome,
+    outcome: &OperationOutcome,
 ) -> Result<(), GateError> {
     let now = now_nanos();
-    let updated = {
-        let conn = state.db.lock().map_err(|_| GateError::store())?;
-        match &outcome {
-            OperationOutcome::Succeeded { result_json } => conn.execute(
-                "UPDATE gateway_operation_calls
-                 SET state = 'succeeded', result_json = ?2, error = NULL, updated_at = ?3
-                 WHERE call_id = ?1 AND state = 'sending'",
-                params![call_id, result_json, now],
-            ),
-            OperationOutcome::Failed => conn.execute(
-                "UPDATE gateway_operation_calls
-                 SET state = 'failed', result_json = NULL, error = 'operation_rejected', updated_at = ?2
-                 WHERE call_id = ?1 AND state = 'sending'",
-                params![call_id, now],
-            ),
-            OperationOutcome::Indeterminate => conn.execute(
-                "UPDATE gateway_operation_calls
-                 SET state = 'indeterminate', result_json = NULL, error = 'disconnect', updated_at = ?2
-                 WHERE call_id = ?1 AND state = 'sending'",
-                params![call_id, now],
-            ),
-        }
-        .map_err(|_| GateError::store())?
-    };
-    // 既に terminal（updated=0）の call は決着を重複発火しない。
-    if updated == 0 {
-        return Ok(());
+    let conn = state.db.lock().map_err(|_| GateError::store())?;
+    match outcome {
+        OperationOutcome::Succeeded { result_json } => conn.execute(
+            "UPDATE gateway_operation_calls
+             SET state = 'succeeded', result_json = ?2, error = NULL, updated_at = ?3
+             WHERE call_id = ?1 AND state = 'sending'",
+            params![call_id, result_json, now],
+        ),
+        OperationOutcome::Failed => conn.execute(
+            "UPDATE gateway_operation_calls
+             SET state = 'failed', result_json = NULL, error = 'operation_rejected', updated_at = ?2
+             WHERE call_id = ?1 AND state = 'sending'",
+            params![call_id, now],
+        ),
+        OperationOutcome::Indeterminate => conn.execute(
+            "UPDATE gateway_operation_calls
+             SET state = 'indeterminate', result_json = NULL, error = 'disconnect', updated_at = ?2
+             WHERE call_id = ?1 AND state = 'sending'",
+            params![call_id, now],
+        ),
     }
-    state.fire_operation_settlement(OperationSettlement {
-        call_id: call_id.to_string(),
-        binding_id: binding_id.to_string(),
-        operation: operation.to_string(),
-        outcome,
-    });
+    .map_err(|_| GateError::store())?;
     Ok(())
 }
 
-/// connection close で当該 pending invoke 群を `indeterminate/disconnect` にし、各決着を渡す。
-pub fn settle_calls_indeterminate(
+/// connection close で drain した pending invoke を `indeterminate/disconnect` にし、各 await へ
+/// Indeterminate を届ける。
+pub fn close_pending_invokes(
     state: &ExtgateState,
-    calls: &[(String, String, String)],
+    invokes: Vec<(String, oneshot::Sender<OperationOutcome>)>,
 ) {
-    for (call_id, binding_id, operation) in calls {
-        if let Err(e) = settle_call(
-            state,
-            call_id,
-            binding_id,
-            operation,
-            OperationOutcome::Indeterminate,
-        ) {
-            tracing::error!(code = e.code.as_str(), "operation call indeterminate failed");
+    for (call_id, reply) in invokes {
+        if let Err(e) = terminalize_call(state, &call_id, &OperationOutcome::Indeterminate) {
+            tracing::error!(
+                code = e.code.as_str(),
+                "operation call indeterminate failed"
+            );
         }
+        let _ = reply.send(OperationOutcome::Indeterminate);
     }
 }
 
-/// startup recover（§7.5）。HTTP/UDS より前に exact 1 回。残 `sending` を stale
-/// indeterminate にする。決着 handoff は projection（session 復元が要る）に委ねるため、
-/// ここでは DB terminal 化だけを行い、recover した call を返す。
-pub fn recover_stale_calls(
-    conn: &mut Connection,
-    now: i64,
-) -> Result<Vec<(String, String, String)>, GateError> {
+/// startup recover（§7.5）。HTTP/UDS より前に exact 1 回。残 `sending` を stale indeterminate に
+/// する。restart 後は in-memory subtask が無いので決着 handoff は行わず DB terminal 化のみ。
+pub fn recover_stale_calls(conn: &mut Connection, now: i64) -> Result<(), GateError> {
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| GateError::store())?;
-    let recovered: Vec<(String, String, String)> = {
-        let mut stmt = tx
-            .prepare(
-                "SELECT call_id, binding_id, operation
-                 FROM gateway_operation_calls WHERE state = 'sending'",
-            )
-            .map_err(|_| GateError::store())?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                ))
-            })
-            .map_err(|_| GateError::store())?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row.map_err(|_| GateError::store())?);
-        }
-        out
-    };
     tx.execute(
         "UPDATE gateway_operation_calls
          SET state = 'indeterminate',
@@ -236,5 +224,5 @@ pub fn recover_stale_calls(
     )
     .map_err(|_| GateError::store())?;
     tx.commit().map_err(|_| GateError::store())?;
-    Ok(recovered)
+    Ok(())
 }

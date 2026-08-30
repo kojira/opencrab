@@ -102,8 +102,13 @@ async fn main() -> anyhow::Result<()> {
         let mut conn = db
             .lock()
             .map_err(|_| anyhow::anyhow!("db lock for extgate recover"))?;
-        opencrab_extgate::recover_stale_deliveries(&mut conn, opencrab_extgate::now_nanos())
+        let now = opencrab_extgate::now_nanos();
+        opencrab_extgate::recover_stale_deliveries(&mut conn, now)
             .map_err(|e| anyhow::anyhow!("extgate recover failed: {}", e.code.as_str()))?;
+        // DI 拡張 §7.5: 残 sending の operation call も stale indeterminate にする（listener 前）。
+        opencrab_extgate::recover_stale_calls(&mut conn, now).map_err(|e| {
+            anyhow::anyhow!("extgate operation-call recover failed: {}", e.code.as_str())
+        })?;
     }
     let gate_token = opencrab_extgate::OperatorToken::take_from_env();
     let gate_socket = opencrab_extgate::validate_listen_socket(&cfg.gate.listen_socket)?;

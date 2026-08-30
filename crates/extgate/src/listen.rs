@@ -10,13 +10,14 @@ use opencrab_actions::AgentRuntime;
 use rusqlite::{params, Connection, TransactionBehavior};
 use tokio::io::BufReader;
 use tokio::net::UnixListener;
+use tokio::sync::oneshot;
 
 use crate::close::{close_all_lives, close_live};
 use crate::delivery::{mark_delivered, mark_failed, mark_indeterminate};
 use crate::error::{ErrorCode, GateError};
 use crate::ids::now_nanos;
 use crate::inbound::process_said;
-use crate::operation_calls::settle_call;
+use crate::operation_calls::terminalize_call;
 use crate::operations::{declaration_digest, validate_operations, GatewayOperationDeclaration};
 use crate::protocol::{
     activity_frame, bind_frame, err_frame, ok_frame, ok_said_frame, read_frame, write_json,
@@ -910,30 +911,17 @@ async fn handle_response(
                 Err(())
             }
         }
-        Pending::Invoke {
-            call_id,
-            binding_id,
-            operation,
-        } => {
-            handle_invoke_response(
-                state,
-                writer,
-                instance_id,
-                identity,
-                &resp,
-                &call_id,
-                &binding_id,
-                &operation,
-            )
-            .await
+        Pending::Invoke { call_id, reply, .. } => {
+            handle_invoke_response(state, writer, instance_id, identity, &resp, &call_id, reply)
+                .await
         }
     }
 }
 
-/// invoke 応答の terminal 化（§5.3 / §10.2）。ok は result を持ち seq を持たない。err は
-/// `operation_rejected` だけが failed で、他 code（operation_unknown 含む・DI-07 保留）は
+/// invoke 応答の terminal 化（§5.3 / §10.2・option B）。DB を terminal 化してから oneshot で
+/// 背景 subtask の `invoke_and_wait` へ outcome を届ける。ok は result を持ち seq を持たない。
+/// err は `operation_rejected` だけが failed で、他 code（operation_unknown 含む・DI-07 保留）は
 /// `operation_rejected` へ丸めず response_invalid + close とする。
-#[allow(clippy::too_many_arguments)]
 async fn handle_invoke_response(
     state: &Arc<ExtgateState>,
     writer: &Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>,
@@ -941,80 +929,38 @@ async fn handle_invoke_response(
     identity: u64,
     resp: &WireResponse,
     call_id: &str,
-    binding_id: &str,
-    operation: &str,
+    reply: oneshot::Sender<OperationOutcome>,
 ) -> Result<(), ()> {
-    // 無効 shape / 無効 code → response_invalid。call を indeterminate 化して close。
-    let invalidate = |state: &Arc<ExtgateState>| {
-        if let Err(e) = settle_call(
-            state,
-            call_id,
-            binding_id,
-            operation,
-            OperationOutcome::Indeterminate,
-        ) {
-            tracing::error!(code = e.code.as_str(), "indeterminate after invalid invoke response");
-            state.halt();
-        }
-    };
-
-    if resp.ok {
+    // 応答 shape/code から terminal outcome を決める（reply を移動する前に決定）。
+    let outcome: Option<OperationOutcome> = if resp.ok {
         // invoke ok は result present（null 含む）で seq を持たない（§10.2）。
         let good_shape = resp.seq.is_none() && resp.result.is_some();
-        let Some(result_value) = resp.result.as_ref().filter(|_| good_shape) else {
-            invalidate(state);
-            close_live(
-                state,
-                Some(instance_id),
-                Some(identity),
-                ErrorCode::ResponseInvalid,
-                Some(&resp.id),
-                Some(writer),
-            )
-            .await;
-            return Err(());
-        };
-        // JSON null は SQL NULL ではなく text 'null' として保存（§7.1）。
-        let result_json = serde_json::to_string(result_value).unwrap_or_else(|_| "null".to_string());
-        if let Err(e) = settle_call(
-            state,
-            call_id,
-            binding_id,
-            operation,
-            OperationOutcome::Succeeded { result_json },
-        ) {
-            tracing::error!(code = e.code.as_str(), "operation succeeded write failed");
-            close_live(
-                state,
-                Some(instance_id),
-                Some(identity),
-                ErrorCode::StoreError,
-                None,
-                None,
-            )
-            .await;
-            state.halt();
-            return Err(());
-        }
-        Ok(())
+        resp.result
+            .as_ref()
+            .filter(|_| good_shape)
+            .map(|result_value| {
+                // JSON null は SQL NULL ではなく text 'null' として保存（§7.1）。
+                let result_json =
+                    serde_json::to_string(result_value).unwrap_or_else(|_| "null".to_string());
+                OperationOutcome::Succeeded { result_json }
+            })
     } else if resp.code == Some(ErrorCode::OperationRejected) {
-        if let Err(e) = settle_call(state, call_id, binding_id, operation, OperationOutcome::Failed) {
-            tracing::error!(code = e.code.as_str(), "operation failed write failed");
-            close_live(
-                state,
-                Some(instance_id),
-                Some(identity),
-                ErrorCode::StoreError,
-                None,
-                None,
-            )
-            .await;
-            state.halt();
-            return Err(());
-        }
-        Ok(())
+        Some(OperationOutcome::Failed)
     } else {
-        invalidate(state);
+        // operation_rejected 以外（operation_unknown 含む・DI-07 保留）は丸めず response_invalid。
+        None
+    };
+
+    let Some(outcome) = outcome else {
+        // response-invalid: call を indeterminate 化し、await へ Indeterminate を届けて close。
+        if let Err(e) = terminalize_call(state, call_id, &OperationOutcome::Indeterminate) {
+            tracing::error!(
+                code = e.code.as_str(),
+                "indeterminate after invalid invoke response"
+            );
+            state.halt();
+        }
+        let _ = reply.send(OperationOutcome::Indeterminate);
         close_live(
             state,
             Some(instance_id),
@@ -1024,8 +970,30 @@ async fn handle_invoke_response(
             Some(writer),
         )
         .await;
-        Err(())
+        return Err(());
+    };
+
+    // terminal 化して outcome を届ける。DB 失敗は成功を捏造せず Indeterminate を届けて close+halt。
+    if let Err(e) = terminalize_call(state, call_id, &outcome) {
+        tracing::error!(
+            code = e.code.as_str(),
+            "operation call terminal write failed"
+        );
+        let _ = reply.send(OperationOutcome::Indeterminate);
+        close_live(
+            state,
+            Some(instance_id),
+            Some(identity),
+            ErrorCode::StoreError,
+            None,
+            None,
+        )
+        .await;
+        state.halt();
+        return Err(());
     }
+    let _ = reply.send(outcome);
+    Ok(())
 }
 
 /// 当該 binding が acknowledged になるまで待つ。live 消失は即 false（理由を残す）。

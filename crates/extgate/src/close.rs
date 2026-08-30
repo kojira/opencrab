@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use crate::delivery::mark_indeterminate;
 use crate::error::ErrorCode;
+use crate::operation_calls::close_pending_invokes;
 use crate::protocol::{err_frame, write_json};
-use crate::registry::ExtgateState;
+use crate::registry::{ExtgateState, Pending};
 
 pub async fn close_live(
     state: &Arc<ExtgateState>,
@@ -26,7 +27,7 @@ pub async fn close_live(
     let Some(instance_id) = instance_id else {
         return;
     };
-    let (says, writer) = {
+    let (says, invokes, writer) = {
         let mut reg = match state.lock_registry() {
             Ok(g) => g,
             Err(_) => {
@@ -44,17 +45,24 @@ pub async fn close_live(
         let Some(entry) = reg.remove_if_identity(instance_id, identity) else {
             return;
         };
-        let says: Vec<String> = entry
-            .pending
-            .values()
-            .filter_map(|p| p.delivery_id().map(str::to_string))
-            .collect();
-        (says, entry.writer)
+        // pending を drain し say / invoke を仕分ける（invoke の oneshot は所有権が要る）。
+        let mut says: Vec<String> = Vec::new();
+        let mut invokes = Vec::new();
+        for p in entry.pending.into_values() {
+            match p {
+                Pending::Say { delivery_id } => says.push(delivery_id),
+                Pending::Invoke { call_id, reply, .. } => invokes.push((call_id, reply)),
+                Pending::Bind { .. } => {}
+            }
+        }
+        (says, invokes, entry.writer)
     };
     if let Err(e) = mark_indeterminate(state, &says) {
         tracing::error!(code = e.code.as_str(), "pending say terminal write failed");
         state.halt();
     }
+    // pending invoke を indeterminate 化し、各 await へ Indeterminate を届ける（§7.4）。
+    close_pending_invokes(state, invokes);
     let _ = writer;
 }
 
