@@ -806,7 +806,12 @@ async fn main() -> anyhow::Result<()> {
                 return Err(GateError::store());
             };
             match admit_nostr_said(text, author_id, &self_pk, &allow) {
-                Err(AdmitSaidError::BadAnchor) => Err(GateError::new(ErrorCode::BadRequest)),
+                // 診断のため detail を載せる（本文/鍵/path は入れない・カテゴリのみ）。anchor の
+                // key 集合/型不整合（gateway↔core のバージョン齟齬など）を素早く切り分けられる。
+                Err(AdmitSaidError::BadAnchor) => Err(GateError::with_detail(
+                    ErrorCode::BadRequest,
+                    "nostr V1 anchor parse failed (unknown/missing key or bad type)",
+                )),
                 Err(AdmitSaidError::Drop { anchor, .. }) => Ok(NostrSaidDecision::Drop {
                     bundle: nostr_bundle_from_anchor(&anchor)?,
                 }),
