@@ -793,6 +793,18 @@ fn enqueue_turn<R: AgentRuntime>(
                             external_id: &origin,
                         };
                         let registry = runtime.subtask_registry_for(&session_id);
+                        // DI 拡張 §8: 宣言能力を GatewayActions として tool set へ投影する。宣言が
+                        // 無ければ None（従来挙動＝能力ゼロ）。state/instance_id/binding_id は直後に
+                        // sink へ move するのでここで作る。
+                        let ops_actions: Option<Arc<dyn opencrab_gateway::GatewayActions>> =
+                            crate::ops_projection::ExtgateOpsGatewayActions::for_binding(
+                                Arc::clone(&state),
+                                &instance_id,
+                                &binding_id,
+                                &session_id,
+                                &agent_id,
+                            )
+                            .map(|a| Arc::new(a) as Arc<dyn opencrab_gateway::GatewayActions>);
                         let sink: Arc<dyn SubtaskCompletionSink> =
                             Arc::new(ExtgateCompletionSink {
                                 state,
@@ -816,21 +828,26 @@ fn enqueue_turn<R: AgentRuntime>(
                             "",
                             |raw| raw.to_string(),
                             |conversation| {
+                                let mut req = RunRequest::new(
+                                    agent_id.clone(),
+                                    name.clone(),
+                                    session_id.clone(),
+                                    system.clone(),
+                                    conversation,
+                                    "extgate",
+                                    caller.clone(),
+                                )
+                                .with_image_urls(images.clone())
+                                // 発端イベントの origin を subtask へ引き継ぐ。subtask 完了時の
+                                // resume ターンの say がこの origin へ返信できるようにする
+                                // （settlement→SubtaskSettled.reply_target 経由）。
+                                .with_reply_target(origin.clone());
+                                // DI 拡張 §8: 宣言能力を tool set へ載せる（宣言があるときだけ）。
+                                if let Some(ga) = ops_actions.clone() {
+                                    req = req.with_gateway_actions(ga);
+                                }
                                 v3_attach_dispatch(
-                                    RunRequest::new(
-                                        agent_id.clone(),
-                                        name.clone(),
-                                        session_id.clone(),
-                                        system.clone(),
-                                        conversation,
-                                        "extgate",
-                                        caller.clone(),
-                                    )
-                                    .with_image_urls(images.clone())
-                                    // 発端イベントの origin を subtask へ引き継ぐ。subtask 完了時の
-                                    // resume ターンの say がこの origin へ返信できるようにする
-                                    // （settlement→SubtaskSettled.reply_target 経由）。
-                                    .with_reply_target(origin.clone()),
+                                    req,
                                     &kind_id,
                                     author_id.clone(),
                                     registry.clone(),

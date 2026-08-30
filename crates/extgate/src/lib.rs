@@ -14,6 +14,7 @@ pub mod json;
 pub mod listen;
 pub mod operation_calls;
 pub mod operations;
+pub mod ops_projection;
 pub mod protocol;
 pub mod race;
 pub mod registry;
@@ -37,6 +38,7 @@ pub use operations::{
     declaration_digest, validate_operations, GatewayOperationDeclaration, OperationClass, Sharing,
     SubEngine,
 };
+pub use ops_projection::ExtgateOpsGatewayActions;
 pub use registry::{
     ExtgateState, NostrHeldTurn, NostrRelayFn, NostrSaidAdmit, NostrSaidDecision, NostrWatchSets,
     NostrWatchSetsFn, NostrWorkspaceFn, OperationOutcome, Registry, ReservedToolNameFn,

@@ -1054,6 +1054,25 @@ impl ConversationRefs {
     fn call_of(&self, id: &str) -> Option<usize> {
         self.calls.get(id).copied()
     }
+
+    /// 短縮参照トークン（`uN` / `eN` / `cN`）を裏の実 ID へ逆引きする（§9A・DI 能力の引数解決）。
+    /// `uN`→話者 speaker_id（Nostr では pubkey）、`eN`→受信イベントの external_origin、
+    /// `cN`→tool_call id。汎用（platform 非依存）で、未知トークンや未割当番号は None。
+    pub fn resolve_short_ref(&self, token: &str) -> Option<String> {
+        let token = token.trim();
+        let mut chars = token.chars();
+        let prefix = chars.next()?;
+        let num: usize = chars.as_str().parse().ok()?;
+        let map = match prefix {
+            'u' => &self.speakers,
+            'e' => &self.events,
+            'c' => &self.calls,
+            _ => return None,
+        };
+        map.iter()
+            .find(|(_, &n)| n == num)
+            .map(|(id, _)| id.clone())
+    }
 }
 
 /// 受信イベントの external_origin（inbound 記録が metadata に載せる汎用 field）。

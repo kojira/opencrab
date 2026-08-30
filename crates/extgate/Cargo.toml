@@ -20,6 +20,7 @@ async-trait = { workspace = true }
 opencrab-db = { workspace = true }
 opencrab-actions = { workspace = true }
 opencrab-core = { workspace = true }
+opencrab-gateway = { workspace = true }
 base64 = "0.22"
 
 [features]

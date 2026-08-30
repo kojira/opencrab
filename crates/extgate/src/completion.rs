@@ -115,6 +115,17 @@ async fn resume_v3_turn<R: AgentRuntime>(sink: ExtgateCompletionSink<R>, ev: Sub
             let dispatch: Arc<dyn SubtaskCompletionSink> = Arc::new(sink.clone());
             let kind_id = sink.kind_id.clone();
             let author_id = sink.author_id.clone();
+            // DI 拡張 §8: resume ターンでも宣言能力を tool set へ載せる（連鎖して更に DI 操作を
+            // 呼べるように）。宣言が無ければ None。
+            let ops_actions: Option<Arc<dyn opencrab_gateway::GatewayActions>> =
+                crate::ops_projection::ExtgateOpsGatewayActions::for_binding(
+                    Arc::clone(&sink.state),
+                    &sink.instance_id,
+                    &sink.binding_id,
+                    &sink.session_id,
+                    &sink.agent_id,
+                )
+                .map(|a| Arc::new(a) as Arc<dyn opencrab_gateway::GatewayActions>);
             let turn = run_session_turn(
                 &sink.runtime,
                 &sink.session_id,
@@ -136,6 +147,9 @@ async fn resume_v3_turn<R: AgentRuntime>(sink: ExtgateCompletionSink<R>, ev: Sub
                     // 同じ発端 origin へ返せるよう reply_target を引き継ぐ。
                     if let Some(rt) = reply_target.clone() {
                         req = req.with_reply_target(rt);
+                    }
+                    if let Some(ga) = ops_actions.clone() {
+                        req = req.with_gateway_actions(ga);
                     }
                     v3_attach_dispatch(
                         req,
