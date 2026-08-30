@@ -1176,6 +1176,13 @@ pub fn format_single_log_with_echo(
             let speaker = log.speaker_id.as_deref().unwrap_or(&log.agent_id);
             if let Some(meta_json) = log.metadata_json.as_deref() {
                 if let Ok(meta) = serde_json::from_str::<serde_json::Value>(meta_json) {
+                    // §9A.1 / row292: DI operation の call は arguments を verbatim 保持する
+                    // （reply 本文が次ターンで消えない）。digest（argument_reference）から除外する。
+                    let preserve: std::collections::HashSet<&str> = meta
+                        .get("preserve_arg_call_ids")
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+                        .unwrap_or_default();
                     if let Some(tool_calls_json) =
                         meta.get("tool_calls_json").and_then(|v| v.as_str())
                     {
@@ -1206,12 +1213,14 @@ pub fn format_single_log_with_echo(
                                                 .unwrap_or_default();
                                             (name, args)
                                         };
-                                        let args =
-                                            if completed_ids.is_some_and(|set| set.contains(id)) {
-                                                argument_reference(log.id.unwrap_or(0), &args)
-                                            } else {
-                                                args
-                                            };
+                                        let args = if completed_ids
+                                            .is_some_and(|set| set.contains(id))
+                                            && !preserve.contains(id)
+                                        {
+                                            argument_reference(log.id.unwrap_or(0), &args)
+                                        } else {
+                                            args
+                                        };
                                         // §9A: call_id を c 番号へ短縮（call_ 生 ID を排除）。
                                         let call_ref = refs
                                             .and_then(|r| r.call_of(id))
@@ -3621,5 +3630,53 @@ mod render_refs_tests {
         let out = format_single_log_with_echo(&ev, None, None);
         // refs なしは従来の生表示（u/e 番号なし）。
         assert!(out.starts_with("[pk_a]"), "{out}");
+    }
+
+    /// §9A.1 / row292: DI operation（reply）の tool_call は完了後も arguments（本文）が
+    /// 会話へ verbatim 残る。nostr_run 時代の本文喪失の再発防止。preserve_arg_call_ids を
+    /// 付けない同一 call は従来どおり digest されて本文が消えることを対照で示す。
+    fn reply_tool_call(preserve: bool) -> SessionLogRow {
+        let tcj = serde_json::json!([{
+            "id": "call_reply1",
+            "function": {"name": "reply", "arguments": "{\"event\":\"e3\",\"text\":\"次ターンに残るべき本文\"}"}
+        }])
+        .to_string();
+        let meta = if preserve {
+            serde_json::json!({"tool_calls_json": tcj, "preserve_arg_call_ids": ["call_reply1"]})
+        } else {
+            serde_json::json!({ "tool_calls_json": tcj })
+        };
+        SessionLogRow {
+            id: Some(7),
+            agent_id: "me".into(),
+            session_id: "s".into(),
+            log_type: "tool_call".into(),
+            content: String::new(),
+            speaker_id: Some("me".into()),
+            turn_number: None,
+            metadata_json: Some(meta.to_string()),
+            created_at: None,
+        }
+    }
+
+    #[test]
+    fn di_reply_body_survives_digest_next_turn() {
+        // call は完了済み（次ターン相当）。
+        let completed: std::collections::HashSet<String> =
+            std::iter::once("call_reply1".to_string()).collect();
+
+        // preserve あり: 本文が残る（digest されない）。
+        let kept = format_single_log_with_echo(&reply_tool_call(true), Some(&completed), None);
+        assert!(
+            kept.contains("次ターンに残るべき本文"),
+            "DI reply 本文が次ターンで消えている: {kept}"
+        );
+
+        // 対照（preserve なし）: 従来どおり digest されて本文が消える。
+        let lost = format_single_log_with_echo(&reply_tool_call(false), Some(&completed), None);
+        assert!(
+            !lost.contains("次ターンに残るべき本文"),
+            "preserve なしなら digest で消えるはず（対照）: {lost}"
+        );
     }
 }
