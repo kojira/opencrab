@@ -355,7 +355,7 @@ SkillEngine
 | ゲートウェイ | 実体 | feature | 依存 | 説明 |
 |-------------|------|---------|------|------|
 | **Discord** | `opencrab-discord` の `DiscordGateway` + イベントループ | `discord` | `serenity` / `songbird`（`opencrab-discord` 経由） | Bot接続、メッセージ受信/送信、2000文字自動分割 |
-| **Nostr** | `opencrab-nostr` の `NostrGatewayManager` + nostaro passthrough | `nostr` | `opencrab-nostr`（at-rest 暗号のマスターキーもこの feature に束ねる） | per-agent 鍵の受信/送信、`configure_nostr` / `nostr_run` 等の会話ツール |
+| **Nostr** | `opencrab-nostr` の `NostrGatewayManager` + nostaro passthrough | `nostr` | `opencrab-nostr`（at-rest 暗号のマスターキーもこの feature に束ねる） | per-agent 鍵の受信/送信、`configure_nostr` / `nostr_post` 等の会話ツール（`nostr_run` は 2026-08-30 オーナー裁定で露出撤去・返信は core `say`） |
 | **Web** | `opencrab-web-gateway` の `WebGateway`（SSE 配送 / per-session 直列化） | `web` | `opencrab-web-gateway` | ダッシュボードからの会話 + SSE 配送 |
 | **REST（管理 API）** | `opencrab-server` の axum ハンドラ | （常設・feature なし） | なし | エージェント/設定/ログ/一覧/ダッシュボード配信。`opencrab-gateway` を経由せず、**どの会話ゲートを外しても残る**（§8） |
 
