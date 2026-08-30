@@ -2108,6 +2108,7 @@ dependencies = [
  "opencrab-core",
  "opencrab-db",
  "opencrab-gate-client",
+ "opencrab-gateway",
  "rusqlite",
  "serde",
  "serde_json",
