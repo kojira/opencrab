@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use opencrab_gate_client::client::{InstanceClient, PostRefuse, SaidOutcome};
+use opencrab_gate_client::client::{InstanceClient, LiveEvent, PostRefuse, SaidOutcome};
 use opencrab_gate_client::SayPolicy;
 use tokio::sync::Notify;
 
@@ -17,6 +17,7 @@ use crate::config::{
     InstancePlacement, WatchFilter, WatchPlacement,
 };
 use crate::dedup::SeenEvents;
+use crate::post::{self, SayDelivery};
 use crate::map::{
     bundle_id, classify_route, map_event, normalize_author_id, parse_watch_line, BundlePlace, Lane,
     LaneKind, Route, WatchEvent,
@@ -48,6 +49,12 @@ struct SaidMetrics {
     queue_full: AtomicU64,
     bundle_discarded: AtomicU64,
     deduped: AtomicU64,
+    /// say → nostaro reply を投稿できた回数。
+    say_posted: AtomicU64,
+    /// say 投稿が失敗した回数（nostaro 非ゼロ / spawn 失敗 / timeout）。
+    say_post_failed: AtomicU64,
+    /// 返信先が無い（bundle/曖昧）ため投稿しなかった say の回数（エアリプは nostr_post が担う）。
+    bundle_say_dropped: AtomicU64,
 }
 
 pub fn spawn_instance(
@@ -59,13 +66,18 @@ pub fn spawn_instance(
 ) -> anyhow::Result<Arc<InstanceClient>> {
     let cfg = parse_instance_config(config_bytes)?;
     let digest = config_digest(config_bytes);
+    // 返信本文を nostaro reply で投稿するための relays だけの config（鍵は env 注入・config に載せない）。
+    let post_config = post::post_config_path(&socket, &place.instance_id);
+    post::write_relays_config(&post_config, &cfg.relays).map_err(|e| {
+        anyhow::anyhow!("nostaro post config を書けない ({}): {e}", post_config.display())
+    })?;
     let client = InstanceClient::spawn_with_say_policy(
         socket,
         place.instance_id.clone(),
         place.revision,
         cfg.self_pubkey.clone(),
         digest,
-        SayPolicy::RejectExternal,
+        SayPolicy::AcceptToLiveQueue,
     );
     let metrics = Arc::new(SaidMetrics::default());
     // 車線をまたぐ said dedup は instance 単位で共有する（全 default/watch 車線が同じセット）。
@@ -76,6 +88,7 @@ pub fn spawn_instance(
         cfg,
         secret,
         nostaro_bin,
+        post_config,
         metrics,
         seen,
     );
@@ -89,6 +102,7 @@ fn supervise_lanes(
     cfg: InstanceConfig,
     secret: Option<Arc<String>>,
     nostaro_bin: PathBuf,
+    post_config: PathBuf,
     metrics: Arc<SaidMetrics>,
     seen: Arc<SeenEvents>,
 ) {
@@ -97,7 +111,7 @@ fn supervise_lanes(
             wait_until_bound(&client, &address).await;
             tracing::info!(address = %address, "bind ack; starting watch");
             let cancel = Arc::new(Notify::new());
-            let handles = start_lanes(
+            let mut handles = start_lanes(
                 client.clone(),
                 address.clone(),
                 cfg.clone(),
@@ -107,6 +121,15 @@ fn supervise_lanes(
                 seen.clone(),
                 cancel.clone(),
             );
+            // core からの say（返信本文）を消費して nostaro reply で投稿する consumer。
+            handles.push(spawn_say_consumer(
+                client.clone(),
+                address.clone(),
+                nostaro_bin.clone(),
+                post_config.clone(),
+                secret.clone(),
+                metrics.clone(),
+            ));
             wait_until_unbound(&client, &address).await;
             tracing::info!(address = %address, "binding lost; stopping watch");
             cancel.notify_waiters();
@@ -115,6 +138,59 @@ fn supervise_lanes(
             }
         }
     });
+}
+
+/// core からの say を live queue から取り出し、発端イベントへの e-tag reply として nostaro で
+/// 投稿する。返信先が無い（bundle/曖昧）say は投稿しない（Dropped・エアリプは nostr_post）。
+fn spawn_say_consumer(
+    client: Arc<InstanceClient>,
+    address: String,
+    nostaro_bin: PathBuf,
+    post_config: PathBuf,
+    secret: Option<Arc<String>>,
+    metrics: Arc<SaidMetrics>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match client.next_live(&address).await {
+                Some(LiveEvent::Message { text, reply_origin }) => {
+                    let secret_ref = secret.as_ref().map(|s| s.as_str());
+                    match post::deliver_say(
+                        &nostaro_bin,
+                        &post_config,
+                        secret_ref,
+                        reply_origin,
+                        &text,
+                    )
+                    .await
+                    {
+                        SayDelivery::Posted => {
+                            let n = metrics.say_posted.fetch_add(1, Ordering::Relaxed) + 1;
+                            tracing::info!(address = %address, say_posted = n, "say posted as reply");
+                        }
+                        SayDelivery::Dropped => {
+                            let n = metrics.bundle_say_dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                            tracing::info!(
+                                address = %address,
+                                bundle_say_dropped = n,
+                                "say dropped; no single reply target (use nostr_post for エアリプ)"
+                            );
+                        }
+                        SayDelivery::Failed(e) => {
+                            let n = metrics.say_post_failed.fetch_add(1, Ordering::Relaxed) + 1;
+                            tracing::warn!(address = %address, say_post_failed = n, error = %e, "say post failed");
+                        }
+                    }
+                }
+                // 切断。少し待って再試行（再接続後 next_live が再びブロックする）。
+                Some(LiveEvent::Error { .. }) | None => {
+                    tokio::time::sleep(BIND_POLL).await;
+                }
+                // Activity / CompletedNoReply は投稿対象ではない。
+                Some(_) => {}
+            }
+        }
+    })
 }
 
 async fn wait_until_bound(client: &InstanceClient, address: &str) {

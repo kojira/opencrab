@@ -257,7 +257,8 @@ async fn get_events(State(state): State<HttpState>, Path(session_id): Path<Strin
 
 fn live_to_event(ev: &LiveEvent) -> Option<Event> {
     match ev {
-        LiveEvent::Message { text } => Some(
+        // web SSE は返信先（reply_origin）を使わない（Nostr 固有の e-tag 用）。
+        LiveEvent::Message { text, .. } => Some(
             Event::default()
                 .event("message")
                 .data(json!({"text": text}).to_string()),

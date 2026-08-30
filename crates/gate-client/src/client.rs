@@ -32,6 +32,14 @@ struct WriteOut {
 pub enum LiveEvent {
     Message {
         text: String,
+        /// この say が**特定の inbound イベントへの返信**なら、その said の origin。
+        ///
+        /// 即時ターン（`occupy_until_turn_ends=true` の said 1 本）でだけ `Some`。bundle
+        /// ターン（複数 said・activity started 起源）や、同一ターンに複数の即時 said が
+        /// 相乗りした曖昧ケースでは `None`（＝単一の返信先が無い）。consumer（nostr-gateway）は
+        /// `Some` を e-tag reply、`None` を「返信先無し」として扱う。web など返信先を使わない
+        /// consumer は無視してよい。
+        reply_origin: Option<String>,
     },
     Activity {
         activity_id: String,
@@ -81,8 +89,20 @@ struct PendingSaid {
     reply: oneshot::Sender<SaidOutcome>,
 }
 
+/// 進行中ターンの返信先追跡。即時 said（`occupy_until_turn_ends`）が origin を刻む。
+#[derive(Clone)]
+enum ReplyOrigin {
+    /// まだ said を刻んでいない（bundle ターンは activity started で None のまま生成される）。
+    None,
+    /// 即時 said 1 本だけが握ったターン。その said の origin。
+    Single(String),
+    /// 同一ターンに複数の即時 said が相乗り。単一の返信先を決められない。
+    Ambiguous,
+}
+
 struct PendingTurn {
     saw_say: bool,
+    reply_origin: ReplyOrigin,
 }
 
 struct LiveQueue {
@@ -290,11 +310,20 @@ impl InstanceClient {
             let Some(binding_id) = inner.acknowledged.get(address).cloned() else {
                 return Err(PostRefuse::NotReady);
             };
-            if inner.pending_turn.get(&binding_id).is_none() {
-                inner.pending_turn.insert(
-                    binding_id.clone(),
-                    PendingTurn { saw_say: false },
-                );
+            let entry = inner
+                .pending_turn
+                .entry(binding_id.clone())
+                .or_insert_with(|| PendingTurn {
+                    saw_say: false,
+                    reply_origin: ReplyOrigin::None,
+                });
+            // 即時 said（ターン終了まで占有）だけが返信先を刻む。bundle receipt
+            // （occupy=false）は ack 後に pending_turn ごと消えるので刻まない。
+            if occupy_until_turn_ends {
+                entry.reply_origin = match &entry.reply_origin {
+                    ReplyOrigin::None => ReplyOrigin::Single(origin.to_string()),
+                    ReplyOrigin::Single(_) | ReplyOrigin::Ambiguous => ReplyOrigin::Ambiguous,
+                };
             }
             binding_id
         };
@@ -605,11 +634,19 @@ async fn handle_say(client: &InstanceClient, say: Say, generation: u64) -> bool 
         let _ = send_frame(client, err_frame(&say.id, "external_rejected", None)).await;
         return false;
     };
+    // 返信先は進行中ターンの pending_turn から取る（即時 said が刻んだ Single だけ Some）。
+    let reply_origin = match inner.pending_turn.get(&say.binding_id) {
+        Some(turn) => match &turn.reply_origin {
+            ReplyOrigin::Single(o) => Some(o.clone()),
+            ReplyOrigin::None | ReplyOrigin::Ambiguous => None,
+        },
+        None => None,
+    };
     let q = inner
         .live
         .entry(address.clone())
         .or_insert_with(LiveQueue::new);
-    let accepted = q.try_push(LiveEvent::Message { text });
+    let accepted = q.try_push(LiveEvent::Message { text, reply_origin });
     if !accepted {
         drop(inner);
         let _ = send_frame(client, err_frame(&say.id, "external_rejected", None)).await;
@@ -651,7 +688,10 @@ async fn handle_activity(client: &InstanceClient, activity: Activity) {
         inner
             .pending_turn
             .entry(activity.binding_id.clone())
-            .or_insert_with(|| PendingTurn { saw_say: false });
+            .or_insert_with(|| PendingTurn {
+                saw_say: false,
+                reply_origin: ReplyOrigin::None,
+            });
     } else if activity.state == "ended" {
         if let Some(turn) = inner.pending_turn.remove(&activity.binding_id) {
             if !turn.saw_say {
