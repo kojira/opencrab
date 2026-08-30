@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use opencrab_nostr_gateway::config::{decode_config_b64, Placement};
+use opencrab_nostr_gateway::harness::HarnessOverrides;
 use opencrab_nostr_gateway::run::spawn_instance;
 use opencrab_nostr_gateway::secret::take_watch_secret;
 
@@ -34,6 +35,8 @@ async fn run() -> anyhow::Result<()> {
     let place = Placement::load(&path)?;
     let socket = PathBuf::from(&place.core_socket);
     let nostaro_bin = PathBuf::from(&place.nostaro_bin);
+    // QC ハーネス差し替えは env からのみ（既定 OFF＝production 挙動）。
+    let overrides = HarnessOverrides::from_env();
 
     for inst in &place.instances {
         let bytes = decode_config_b64(&inst.config_b64)?;
@@ -43,6 +46,7 @@ async fn run() -> anyhow::Result<()> {
             &bytes,
             secret.clone(),
             nostaro_bin.clone(),
+            overrides.clone(),
         )?;
     }
 
