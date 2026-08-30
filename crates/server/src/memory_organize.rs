@@ -1431,10 +1431,11 @@ mod tests {
         let state = crate::test_app_state();
 
         // 眠っている間に外へ手が出る／状態を書き換えるツール（全スロットにまたがる）。
-        // #654: nostr_run / configure_nostr の定義は nostr feature 依存（#651）。off では定義が
-        // 無く「許可リスト無しでは届くはず」の対照が空論になるので、期待値も同じ cfg で組む
-        // （feature off でも他の外向きツールは全経路で塞がることを引き続き固定する）。
-        // nostr off では下の push が cfg で消え mut が不要になる（隠れる退行は無い）。
+        // nostr_run は露出撤去済み（返信は say 一本 / #840）なので外向きツール表からは外す
+        // （own 定義に無く「許可リスト無しでは届くはず」の対照が成り立たない）。
+        // #654: configure_nostr の定義は nostr feature 依存（#651）。off では定義が無く対照が
+        // 空論になるので、期待値も同じ cfg で組む（feature off でも他の外向きツールは全経路で
+        // 塞がることを引き続き固定する）。nostr off では下の push が cfg で消え mut が不要になる。
         #[cfg_attr(not(feature = "nostr"), allow(unused_mut))]
         let mut forbidden = vec![
             "execute_shell",          // dispatcher（config 駆動）
@@ -1449,7 +1450,6 @@ mod tests {
         ];
         #[cfg(feature = "nostr")]
         {
-            forbidden.push("nostr_run"); // gateway own（外向き投稿）
             forbidden.push("configure_nostr"); // gateway own
         }
         // 整理に要る読み取り・タグ・終了宣言。

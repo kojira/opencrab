@@ -1,4 +1,4 @@
-//! エージェントに露出する Nostr 送信ツール（`nostr_post` / `nostr_reply` /
+//! エージェントに露出する Nostr 送信ツール（`nostr_post` /
 //! `nostr_zap` / `nostr_upload`）。`GatewayActions` 実装なので
 //! `BridgedExecutor` がツール一覧にマージし、LLM から呼べる。
 //!
@@ -108,21 +108,12 @@ impl GatewayActions for NostrGatewayActions {
                     "required": ["text"]
                 }),
             },
-            GatewayActionDef {
-                name: "nostr_reply".to_string(),
-                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::ConversationBound },
-                description: "Nostr の特定ノートに返信する。target は受信イベントの note_id（note1...）または hex id。".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "target": {"type": "string", "description": "返信先ノートの note1.../hex id。"},
-                        "text": {"type": "string", "description": "返信本文。"},
-                        "from": from_param(),
-                    },
-                    "required": ["target", "text"]
-                }),
-            },
-            // #514: `nostr_dm` はここに**定義しない**（DM 送信は禁止）。DM は暗号化
+            // `nostr_reply` はここに**定義しない**（エージェント露出を撤去）。V3 の Nostr 受信
+            // ターンでは、エージェントは返信本文をそのまま応答本文に書き、gateway が core の
+            // say を対象ノートへの nostaro reply として投稿する（#840）。名前指定で呼ばれても
+            // 露出はされないので v3 では通らないが、legacy 防御として `execute` の
+            // `"nostr_reply"` アームだけは残す。
+            // #514: `nostr_dm` もここに**定義しない**（DM 送信は禁止）。DM は暗号化
             // されていても秘密鍵が漏れた時点で過去に遡って全部読めるため、その前提ごと
             // 無くす（オーナー決定）。定義から外すのでモデルはこのツールを見ない。万一
             // 名前指定で呼ばれても `execute` が fail-closed で拒否する。将来「やっぱり DM を
@@ -342,7 +333,6 @@ mod tests {
         let names: Vec<String> = a.definitions().into_iter().map(|d| d.name).collect();
         for expected in [
             "nostr_post",
-            "nostr_reply",
             "nostr_zap",
             "nostr_upload",
             "nostr_generate_key",
@@ -356,6 +346,11 @@ mod tests {
             !names.contains(&"nostr_dm".to_string()),
             "nostr_dm は #514 で撤去したので定義に無いこと"
         );
+        // nostr_reply はエージェント露出を撤去した（返信は say 一本 / #840）。
+        assert!(
+            !names.contains(&"nostr_reply".to_string()),
+            "nostr_reply は露出撤去したので定義に無いこと"
+        );
     }
 
     /// **分類属性の集合を固定する**（権威リストが消えた `dispatch` と `sharing` を「値を
@@ -364,9 +359,10 @@ mod tests {
     ///
     /// - **`Dispatchable` 集合 == {nostr_generate_key}**: vanity 探索は長時間なので
     ///   background 化する。他は全部配送系 / 同ターン結果依存で `Inline`。
-    /// - **`ConversationBound` 集合 == {nostr_reply}**: 会話固有の一時ハンドル（受信投稿の
-    ///   note id = `target`）を必須に取る唯一のツール。全ゲート横断では
-    ///   {discord_add_reaction, nostr_reply, send_ui}。
+    /// - **`ConversationBound` 集合 == {}**: 以前は `nostr_reply`（受信投稿の note id =
+    ///   `target` を必須に取る唯一のツール）が該当したが、露出撤去（返信は say 一本 / #840）
+    ///   で nostr ゲートの ConversationBound は空になった。全ゲート横断では
+    ///   {discord_add_reaction, send_ui}。
     #[test]
     fn nostr_tool_class_sets_are_fixed() {
         use opencrab_gateway::{DispatchMode, ToolSharing};
@@ -391,8 +387,8 @@ mod tests {
             .filter(|d| d.class.sharing == ToolSharing::ConversationBound)
             .map(|d| d.name.clone())
             .collect();
-        let expected: std::collections::BTreeSet<String> =
-            std::iter::once("nostr_reply".to_string()).collect();
+        // nostr_reply 露出撤去（返信は say 一本 / #840）で ConversationBound は空。
+        let expected: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         assert_eq!(
             conv_bound, expected,
             "nostr ゲートの ConversationBound 集合がずれている（sharing 属性の付け忘れ/誤り）"
@@ -556,10 +552,9 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} が nostr definitions() に無い"))
                 .class
         };
-        // 送信系（配送ツール）は inline。#514: nostr_dm は撤去済み。
+        // 送信系（配送ツール）は inline。#514: nostr_dm は撤去済み。nostr_reply は露出撤去済み（#840）。
         for name in [
             "nostr_post",
-            "nostr_reply",
             "nostr_zap",
             "nostr_upload",
             "nostr_switch_identity",

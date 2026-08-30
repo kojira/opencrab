@@ -282,7 +282,6 @@ only exist on that transport's turns.
 | **Heartbeat** | `update_heartbeat_instructions`, `read_heartbeat_instructions`, `get_my_heartbeat`, `set_my_heartbeat`, `run_my_heartbeat` | all turns (`crates/server/src/heartbeat_instructions.rs`, `agent_heartbeat.rs`) — channel-scoped instruction overrides only mean something on Discord, but the `*_my_heartbeat` pair (an agent's own enable flag and interval) applies anywhere; `run_my_heartbeat` (#599, owner/co_agent only) fires a heartbeat now without waiting, through the exact same path as a timed fire (`heartbeat_fire::run_one_heartbeat`), and does not update `last_fired_at` |
 | **Schedules (#455, #477)** | `get_my_schedules`, `set_my_schedule`, `update_my_schedule`, `delete_my_schedule` | all turns (`crates/server/src/agent_schedule.rs`) — an agent registers/reads/updates/deletes its own cron / `@every` schedules for the current session (fires a message into the session on the central scheduler); update/delete take an id from `get_my_schedules` and only touch rows that belong to the caller's own agent id and current session; not gated by `heartbeat_enabled` |
 | **Nostr identity** | `nostr_generate_key`, `nostr_list_keys`, `nostr_switch_identity` | all turns (`crates/server/src/system_actions.rs`) — bootstrap tools, exposed **before** any key exists (see [Nostr](#nostr)) |
-| **Nostr passthrough** | `nostr_run` | all turns (`crates/server/src/system_actions.rs`) — thin nostaro passthrough (see [Nostr](#nostr)) |
 | **Nostr relay target** | `get_my_nostr_relay`, `set_my_nostr_relay` | all turns (`crates/server/src/agent_nostr_relay.rs`) — where the agent's inbound Nostr events get mirrored (a Discord webhook URL); also editable from the dashboard |
 | **Nostr messaging** | `nostr_post`, `nostr_reply`, `nostr_zap`, `nostr_upload` | Nostr turns only (`crates/nostr`) — the reply path used while handling an inbound Nostr event; `nostr_zap` carried a trusted-only gate until #306 dropped it. **`nostr_dm` was removed by #514** (DM is not handled at all — receive discarded, send forbidden; see [Nostr](#nostr)) |
 | **Discord** | `discord_list_guilds`, `discord_list_channels`, `discord_channel_config`, `discord_add_reaction`, `discord_send_file`, `discord_create_channel` | Discord turns only (`crates/discord`) |
@@ -321,24 +320,18 @@ they are neither listed nor executable on a turn driven by an untrusted external
 is what keeps an inbound Nostr note from talking the agent into swapping its own key:
 `nostr_switch_identity` is unreachable from a `caller=Agent` turn, and the passthrough refuses
 `init`, so neither adopting nor minting-over a key is possible from inbound. It does **not** bound
-what an inbound turn can send or spend, and it is not meant to: `nostr_run` carries no caller gate
-(#303) and the passthrough denies `init`, `watch`, `relay` and — since #514 — `dm`,
-so `nostr_run zap` still goes through while `nostr_run dm` is refused. Gating the
-inner `nostr_zap` / `nostr_dm` only changed which tool names got listed, so #306 dropped that
-gate rather than adding a matching one to the passthrough — the consistency is taken in the
-direction of fewer constraints, and whether to send a zap is the agent's own call.
-**DM is the exception (#514):** `nostr_dm` was removed as a tool and `nostr_run dm` is denied
-in the passthrough, so the convenient encrypted-DM path is closed. An encrypted DM feels safe
+what an inbound turn can send or spend, and it is not meant to: whether to send a zap or a post is
+the agent's own call (gating the inner `nostr_zap` / `nostr_dm` only changed which tool names got
+listed, so #306 dropped that gate rather than adding a matching one). The generic
+`nostr_run` passthrough that once carried these operations was removed as an agent tool
+(owner ruling, see [Nostr](#nostr)); what remains exposed is `nostr_post` (standalone posts),
+`nostr_zap`, `nostr_upload`, and reply through the core `say` action (`kojira/opencrab#840`).
+**DM is forbidden (#514):** `nostr_dm` was removed as a tool and `dm` is denied in the passthrough
+machinery, so the convenient encrypted-DM path is closed. An encrypted DM feels safe
 now, but the day the secret key leaks, every past DM becomes readable — that false sense of
 "it's fine to put something private here" is removed at the root, not merely restricted to
 owners (a key leak defeats owner-only too). Private conversations belong on Discord DMs or a
 dedicated channel, not on Nostr.
-**`nostr_run event` is allowed (#699, owner ruling 2026-08-19):** arbitrary-kind publishing has
-legitimate uses (NIP-28 public chat creation kind:40, channel posts kind:42, custom kinds), and
-the inconvenience of the blanket deny outweighed its benefit. A theoretical DM bypass remains —
-`event -k 4` can publish a DM-kind event — but making it *function* as a DM requires hand-rolling
-the encryption into the event, which is impractical; the ruling accepts that residual and keeps
-the deny on `dm`, the path that actually does the encryption for you.
 `nostr_generate_key` is deliberately *not* gated: it only mints a key that nobody has
 adopted yet, and adopting one is what `nostr_switch_identity` gates. The single table is
 `crates/actions/src/bridge.rs` (`OWNER_ONLY_ACTIONS` / `TRUSTED_ONLY_ACTIONS`), consulted by both
@@ -370,18 +363,23 @@ No dashboard step and no restart in between. The private key is
 generated and stored server-side (mode 0600) and is never returned to the model; `nsec` is
 masked out of tool results and error strings.
 
-**`nostr_run` is a thin passthrough, not a wrapper.** It forwards a `nostaro` subcommand and its
-arguments straight through, so once the agent has adopted a key (no `config.toml` means no
-passthrough — the tool errors out instead of spawning nostaro), whatever nostaro can do the agent
-can do: arbitrary-kind `event`,
-`profile` (kind:0), NIP-28 `channel` creation and posting, `upload`, `react`, `repost`,
-`follow`, `get` / `timeline` / `search`, and so on. Only three subcommands are denied —
-`init` (key creation/overwrite, which belongs to the tools above), `watch` (unbounded inbound,
-which belongs to the gateway) and `relay` (it would edit `config.toml` only, desyncing from the
-DB that owns relay settings and silently evaporating on the next gateway start). Everything else
-is passed through unexamined.
+**`nostr_run` was removed as an agent tool (owner ruling).** The generic nostaro passthrough is no
+longer exposed to the model: replying is done through the single core `say` action (the gateway
+posts it as a `nostaro reply` to the target note, `kojira/opencrab#840`) and standalone posting
+through `nostr_post`. A name-specified `nostr_run` call fail-closes. The passthrough machinery
+itself (`NostaroCli::run_passthrough`, `GatewayNostrPassthrough`) is kept in the codebase — as a
+defence on other paths and for possible future use — but nothing wires an agent-facing tool to it.
 
-What OpenCrab guarantees about that passthrough is deliberately just two things:
+The remainder of this note describes that passthrough machinery as it still stands. It forwarded a
+`nostaro` subcommand and its arguments straight through, so whatever nostaro could do the agent
+could do: arbitrary-kind `event`, `profile` (kind:0), NIP-28 `channel` creation and posting,
+`upload`, `react`, `repost`, `follow`, `get` / `timeline` / `search`, and so on. Only a few
+subcommands were denied — `init` (key creation/overwrite, which belongs to the bootstrap tools),
+`watch` (unbounded inbound, which belongs to the gateway), `relay` (it would edit `config.toml`
+only, desyncing from the DB that owns relay settings) and, since #514, `dm`. Everything else was
+passed through unexamined.
+
+What OpenCrab guarantees about that passthrough machinery is deliberately just two things:
 
 1. **No key mix-up between agents** — the config is always the calling agent's
    (`--config` cannot be overridden through the arguments), and the command is built as
