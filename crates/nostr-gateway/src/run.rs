@@ -17,12 +17,13 @@ use crate::config::{
     InstancePlacement, WatchFilter, WatchPlacement,
 };
 use crate::dedup::SeenEvents;
+use crate::harness::HarnessOverrides;
 use crate::map::{
     bundle_id, classify_route, map_event, normalize_author_id, parse_watch_line, BundlePlace, Lane,
     LaneKind, Route, WatchEvent,
 };
 use crate::post::{self, SayDelivery};
-use crate::watch::{run_watch_loop, RESUBSCRIBE};
+use crate::watch::{run_fake_watch_once, run_watch_loop, RESUBSCRIBE};
 
 const BIND_POLL: Duration = Duration::from_millis(50);
 
@@ -65,7 +66,16 @@ pub fn spawn_instance(
     config_bytes: &[u8],
     secret: Option<Arc<String>>,
     nostaro_bin: PathBuf,
+    overrides: HarnessOverrides,
 ) -> anyhow::Result<Arc<InstanceClient>> {
+    if overrides.is_active() {
+        tracing::warn!(
+            fake_watch = ?overrides.fake_watch,
+            dry_run = overrides.dry_run,
+            instance = %place.instance_id,
+            "QC harness overrides ACTIVE — this is NOT a production path"
+        );
+    }
     let cfg = parse_instance_config(config_bytes)?;
     let digest = config_digest(config_bytes);
     // 返信本文を nostaro reply で投稿するための relays だけの config（鍵は env 注入・config に載せない）。
@@ -106,6 +116,7 @@ pub fn spawn_instance(
         post_config,
         metrics,
         seen,
+        overrides,
     );
     Ok(client)
 }
@@ -120,6 +131,7 @@ fn supervise_lanes(
     post_config: PathBuf,
     metrics: Arc<SaidMetrics>,
     seen: Arc<SeenEvents>,
+    overrides: HarnessOverrides,
 ) {
     tokio::spawn(async move {
         loop {
@@ -135,8 +147,9 @@ fn supervise_lanes(
                 metrics.clone(),
                 seen.clone(),
                 cancel.clone(),
+                overrides.fake_watch.clone(),
             );
-            // core からの say（返信本文）を消費して nostaro reply で投稿する consumer。
+            // core からの say（返信本文）を消費して nostaro post で publish する consumer。
             handles.push(spawn_say_consumer(
                 client.clone(),
                 address.clone(),
@@ -144,6 +157,7 @@ fn supervise_lanes(
                 post_config.clone(),
                 secret.clone(),
                 metrics.clone(),
+                overrides.dry_run,
             ));
             wait_until_unbound(&client, &address).await;
             tracing::info!(address = %address, "binding lost; stopping watch");
@@ -165,6 +179,7 @@ fn spawn_say_consumer(
     post_config: PathBuf,
     secret: Option<Arc<String>>,
     metrics: Arc<SaidMetrics>,
+    dry_run: bool,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -177,6 +192,7 @@ fn spawn_say_consumer(
                         secret_ref,
                         reply_origin,
                         &text,
+                        dry_run,
                     )
                     .await
                     {
@@ -264,6 +280,7 @@ fn start_lanes(
     metrics: Arc<SaidMetrics>,
     seen: Arc<SeenEvents>,
     cancel: Arc<Notify>,
+    fake_watch: Option<PathBuf>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     plan_lane_spawns(&cfg)
         .into_iter()
@@ -281,6 +298,7 @@ fn start_lanes(
                 metrics.clone(),
                 seen.clone(),
                 cancel.clone(),
+                fake_watch.clone(),
             )
         })
         .collect()
@@ -300,6 +318,7 @@ fn spawn_lane(
     metrics: Arc<SaidMetrics>,
     seen: Arc<SeenEvents>,
     cancel: Arc<Notify>,
+    fake_watch: Option<PathBuf>,
 ) -> tokio::task::JoinHandle<()> {
     let beyond = match lane.kind {
         LaneKind::Default => false,
@@ -313,8 +332,16 @@ fn spawn_lane(
     });
     tokio::spawn(async move {
         let pending = Arc::new(tokio::sync::Mutex::new(Vec::<WatchEvent>::new()));
-        let watch_fut = async {
-            run_watch_loop(nostaro_bin, relays, filter, secret, RESUBSCRIBE, {
+        // 1 行受信ごとに handle_line を回すコールバック（実 watch・偽 watch 共通）。
+        let on_line = {
+            let pending = pending.clone();
+            let client = client.clone();
+            let address = address.clone();
+            let lane = lane.clone();
+            let self_pubkey = self_pubkey.clone();
+            let metrics = metrics.clone();
+            let seen = seen.clone();
+            move |line: String| {
                 let pending = pending.clone();
                 let client = client.clone();
                 let address = address.clone();
@@ -322,31 +349,32 @@ fn spawn_lane(
                 let self_pubkey = self_pubkey.clone();
                 let metrics = metrics.clone();
                 let seen = seen.clone();
-                move |line| {
-                    let pending = pending.clone();
-                    let client = client.clone();
-                    let address = address.clone();
-                    let lane = lane.clone();
-                    let self_pubkey = self_pubkey.clone();
-                    let metrics = metrics.clone();
-                    let seen = seen.clone();
-                    tokio::spawn(async move {
-                        handle_line(
-                            &client,
-                            &address,
-                            &lane,
-                            &self_pubkey,
-                            beyond,
-                            &pending,
-                            &metrics,
-                            &seen,
-                            line,
-                        )
-                        .await;
-                    });
+                tokio::spawn(async move {
+                    handle_line(
+                        &client,
+                        &address,
+                        &lane,
+                        &self_pubkey,
+                        beyond,
+                        &pending,
+                        &metrics,
+                        &seen,
+                        line,
+                    )
+                    .await;
+                });
+            }
+        };
+        let watch_fut = async {
+            // QC ハーネス: fake_watch が指定されていれば nostaro を spawn せず fixture を流す。
+            // 指定が無ければ（production）従来どおり実 nostaro watch を回す。
+            if let Some(fixture) = fake_watch {
+                if let Err(e) = run_fake_watch_once(&fixture, on_line).await {
+                    tracing::error!(error = %e, "fake watch failed");
                 }
-            })
-            .await;
+            } else {
+                run_watch_loop(nostaro_bin, relays, filter, secret, RESUBSCRIBE, on_line).await;
+            }
         };
         let flush_fut = async {
             let Some((interval, max_items)) = flush else {

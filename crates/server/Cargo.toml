@@ -74,6 +74,10 @@ http-body-util = "0.1"
 hyper = "1"
 # #620: 移行/マスターキー検証テストで MasterKey（Arc<Zeroizing<[u8;32]>>）を組むため。
 zeroize = "1"
+# QC ハーネス E2E（qc_harness_e2e）: 実 nostr-gateway（spawn_instance）と gate-client を
+# 実 serve_uds 経由でつなぐオフライン E2E に使う。どちらも server へ依存しない（循環しない）。
+opencrab-nostr-gateway = { workspace = true }
+opencrab-gate-client = { workspace = true }
 
 [lints]
 workspace = true

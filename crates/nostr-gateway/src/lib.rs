@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod dedup;
+pub mod harness;
 pub mod map;
 pub mod ops;
 pub mod post;

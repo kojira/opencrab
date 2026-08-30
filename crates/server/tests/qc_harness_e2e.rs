@@ -1,0 +1,849 @@
+//! QC ハーネス E2E（Phase 2）。
+//!
+//! リレー・鍵・nostaro 子プロセス無しで、**実配線**を通す決定的オフライン E2E:
+//!   実 `serve_uds`（extgate core）＋ 実 `AppState`（mock LLM）
+//!     ⇕ 実 UDS ⇕
+//!   実 `spawn_instance`（nostr-gateway・fake_watch＋dry_run 両有効）
+//!
+//! 観測channel = dry-run の tracing ログ（target = `opencrab_nostrgate::dry_run`）。
+//! グローバル subscriber を 1 回だけ張り、各テストは注入した固有本文で絞る。
+//! 単一スレッド（`--test-threads=1`）前提。
+//!
+//! 注意（現行本線 DI-16 / row292）: say は常に standalone post として publish される
+//! （特定イベントへの e-tag 返信は DI `reply` 操作が担い、say 経路には返信先が無い）。
+//! よって観測は「standalone post の本文」で行い、返信先イベント id では相関しない。
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Once, OnceLock};
+use std::time::Duration;
+
+use axum::body::Body;
+use axum::http::{header, Request, StatusCode};
+use http_body_util::BodyExt;
+use tower::ServiceExt;
+
+use opencrab_llm::message::*;
+use opencrab_llm::router::LlmRouter;
+use opencrab_llm::traits::LlmProvider;
+use opencrab_server::AppState;
+
+use opencrab_extgate::{
+    admin_router, resolve_caller_identity_with_owner, serve_uds, ExtgateState, NostrSaidDecision,
+    NostrWatchSets, OperatorToken,
+};
+use opencrab_gate_client::client::InstanceClient;
+use opencrab_nostr_gateway::config::InstancePlacement;
+use opencrab_nostr_gateway::harness::HarnessOverrides;
+use opencrab_nostr_gateway::run::spawn_instance;
+
+use tracing_subscriber::layer::{Context, SubscriberExt};
+use tracing_subscriber::Layer;
+
+const TOKEN: &str = "operator-token-qc";
+const AGENT_ID: &str = "agent-qc";
+/// dry-run say を拾う tracing target（= `opencrab_nostr_gateway::post::DRY_RUN_LOG_TARGET`）。
+const DRY_RUN_TARGET: &str = "opencrab_nostrgate::dry_run";
+
+fn self_pk() -> String {
+    "11".repeat(32)
+}
+fn author_pk() -> String {
+    "22".repeat(32)
+}
+
+// ==================== 観測: dry-run say キャプチャ ====================
+
+#[derive(Clone, Debug, Default)]
+struct CapturedSay {
+    kind: String,
+    body: String,
+}
+
+static BUFFER: OnceLock<Arc<Mutex<Vec<CapturedSay>>>> = OnceLock::new();
+static INIT: Once = Once::new();
+
+/// グローバル subscriber を 1 回だけ張り、共有バッファを返す。
+///
+/// tracing の thread-local `with_default` は `tokio::spawn` の別スレッドへ伝播しないため、
+/// dry-run ログ（consumer タスクが別スレッドで吐く）を拾うにはグローバル default が必須。
+fn install_capture() -> Arc<Mutex<Vec<CapturedSay>>> {
+    let buf = BUFFER
+        .get_or_init(|| Arc::new(Mutex::new(Vec::new())))
+        .clone();
+    INIT.call_once(|| {
+        let layer = CaptureLayer { buf: buf.clone() };
+        let subscriber = tracing_subscriber::registry().with(layer);
+        // 既に別の default が張られていても壊さない（best-effort）。
+        let _ = tracing::subscriber::set_global_default(subscriber);
+    });
+    buf
+}
+
+struct CaptureLayer {
+    buf: Arc<Mutex<Vec<CapturedSay>>>,
+}
+
+#[derive(Default)]
+struct SayVisitor {
+    kind: Option<String>,
+    body: Option<String>,
+}
+
+impl SayVisitor {
+    fn set(&mut self, name: &str, value: String) {
+        match name {
+            "kind" => self.kind = Some(value),
+            "body" => self.body = Some(value),
+            _ => {}
+        }
+    }
+}
+
+impl tracing::field::Visit for SayVisitor {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.set(field.name(), value.to_string());
+    }
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        // deliver_say は body を `%`（Display）で出す。Debug ラッパの `{:?}` は Display
+        // 文字列そのまま（引用符なし）になる。
+        self.set(field.name(), format!("{value:?}"));
+    }
+}
+
+impl<S: tracing::Subscriber> Layer<S> for CaptureLayer {
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+        if event.metadata().target() != DRY_RUN_TARGET {
+            return;
+        }
+        let mut v = SayVisitor::default();
+        event.record(&mut v);
+        self.buf.lock().unwrap().push(CapturedSay {
+            kind: v.kind.unwrap_or_default(),
+            body: v.body.unwrap_or_default(),
+        });
+    }
+}
+
+fn captured(buf: &Arc<Mutex<Vec<CapturedSay>>>) -> Vec<CapturedSay> {
+    buf.lock().unwrap().clone()
+}
+
+/// 述語が真になるまで最大 ~5s ポーリングする。
+async fn wait_until(pred: impl Fn() -> bool) -> bool {
+    for _ in 0..250 {
+        if pred() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    pred()
+}
+
+fn body_index(buf: &Arc<Mutex<Vec<CapturedSay>>>, needle: &str) -> Option<usize> {
+    captured(buf).iter().position(|c| c.body.contains(needle))
+}
+
+// ==================== fixture ====================
+
+struct Fixture {
+    path: PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("watch.jsonl");
+        std::fs::write(&path, "").unwrap();
+        Self { path, _dir: dir }
+    }
+
+    fn append_line(&self, line: &str) {
+        use std::io::Write as _;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&self.path)
+            .unwrap();
+        writeln!(f, "{line}").unwrap();
+    }
+}
+
+/// 自分宛て `#p` の kind:1 メンション 1 行（WatchEvent JSONL）。`content` にルーティング用の
+/// マーカーを載せる（extgate は V1 アンカーを剥がした本文＝この content を会話へ記録する）。
+fn mention_event(id: &str, content: &str) -> String {
+    serde_json::json!({
+        "id": id,
+        "pubkey": author_pk(),
+        "npub": null,
+        "note_id": null,
+        "created_at": 1i64,
+        "kind": 1,
+        "content": content,
+        "tags": [["p", self_pk()]],
+    })
+    .to_string()
+}
+
+// ==================== FIFO mock（単発ターン用: (a)/(c)） ====================
+
+struct FifoMock {
+    responses: Mutex<std::collections::VecDeque<ChatResponse>>,
+    system_prompts: Mutex<Vec<String>>,
+}
+
+impl FifoMock {
+    fn new() -> Self {
+        Self {
+            responses: Mutex::new(std::collections::VecDeque::new()),
+            system_prompts: Mutex::new(Vec::new()),
+        }
+    }
+    fn push_text(&self, text: &str) {
+        self.responses.lock().unwrap().push_back(text_response(text));
+    }
+    fn system_prompts(&self) -> Vec<String> {
+        self.system_prompts.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for FifoMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        self.system_prompts.lock().unwrap().push(system_of(&request));
+        self.responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| anyhow::anyhow!("FifoMock: no more queued responses"))
+    }
+}
+
+// ==================== 共通 helpers ====================
+
+fn system_of(request: &ChatRequest) -> String {
+    request
+        .messages
+        .iter()
+        .filter(|m| m.role == Role::System)
+        .filter_map(|m| m.text_content())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 全メッセージ本文を連結（ルーティング用の会話マーカー検出に使う）。
+fn request_text(request: &ChatRequest) -> String {
+    request
+        .messages
+        .iter()
+        .filter_map(|m| m.text_content())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn has_tool_role(request: &ChatRequest) -> bool {
+    request.messages.iter().any(|m| m.role == Role::Tool)
+}
+
+fn text_response(text: &str) -> ChatResponse {
+    ChatResponse {
+        id: uuid::Uuid::new_v4().to_string(),
+        model: "mock-model".to_string(),
+        choices: vec![Choice {
+            index: 0,
+            message: Message::assistant(text),
+            finish_reason: Some(FinishReason::Stop),
+        }],
+        usage: Usage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        },
+        created: 0,
+    }
+}
+
+fn tool_call_response(name: &str, args: serde_json::Value) -> ChatResponse {
+    let msg = Message {
+        role: Role::Assistant,
+        content: None,
+        name: None,
+        function_call: None,
+        tool_calls: Some(vec![ToolCall {
+            id: format!("tc-{}", uuid::Uuid::new_v4()),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: name.to_string(),
+                arguments: args.to_string(),
+            },
+        }]),
+        tool_call_id: None,
+    };
+    ChatResponse {
+        id: uuid::Uuid::new_v4().to_string(),
+        model: "mock-model".to_string(),
+        choices: vec![Choice {
+            index: 0,
+            message: msg,
+            finish_reason: Some(FinishReason::ToolCalls),
+        }],
+        usage: Usage::default(),
+        created: 0,
+    }
+}
+
+/// mock モデルの予算 envelope を満たす（#826 fail-loud 対策）。
+fn register_mock_pricing(db: &opencrab_db::Db) {
+    let conn = db.lock().unwrap();
+    opencrab_db::queries::upsert_model_pricing(
+        &conn,
+        &opencrab_db::queries::ModelPricingRow {
+            provider: "mock".to_string(),
+            model: "gpt-4o".to_string(),
+            input_price_per_1m: 0.0,
+            output_price_per_1m: 0.0,
+            context_window: Some(200_000),
+            max_output_tokens: Some(4_096),
+        },
+    )
+    .expect("test model_pricing");
+}
+
+fn upsert_test_agent(db: &opencrab_db::Db) -> i64 {
+    let conn = db.lock().unwrap();
+    opencrab_db::queries::upsert_agent(
+        &conn,
+        &opencrab_db::queries::AgentRow {
+            agent_id: AGENT_ID.into(),
+            name: "QC".into(),
+            job_title: None,
+            organization: None,
+            image_url: None,
+            persona_name: "p".into(),
+            personality: None,
+            instructions: String::new(),
+            heartbeat_instructions: String::new(),
+            model: None,
+            reasoning_effort: None,
+            web_search: None,
+            metadata_json: None,
+        },
+    )
+    .unwrap();
+    conn.query_row(
+        "SELECT subject_id FROM agents WHERE agent_id = ?1",
+        [AGENT_ID],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+fn build_app_state(db: opencrab_db::Db, provider: Arc<dyn LlmProvider>) -> AppState {
+    let mut router = LlmRouter::new();
+    router.add_provider(provider);
+    router.set_default_provider("mock");
+    AppState {
+        db,
+        llm_router: opencrab_server::SharedLlmRouter::new(router),
+        llm_config: Arc::new(toml::from_str("").unwrap()),
+        subtask_auto_dispatch: true,
+        voice_config: Arc::new(Default::default()),
+        voice_runtime: Arc::new(std::sync::Mutex::new(None)),
+        workspace_base: std::env::temp_dir()
+            .join("opencrab_qc_harness")
+            .to_string_lossy()
+            .to_string(),
+        #[cfg(feature = "nostr")]
+        nostr_master_key: None,
+        default_model: "mock:gpt-4o".to_string(),
+        tools_config: Arc::new(std::sync::RwLock::new(
+            opencrab_actions::tools::ToolsConfig::default(),
+        )),
+        compaction_ratio: 0.5,
+        evaluator: opencrab_server::config::EvaluatorConfig::default(),
+        skill_consolidation: opencrab_server::config::SkillConsolidationConfig::default(),
+        category_maintenance: opencrab_server::config::CategoryMaintenanceConfig::default(),
+        memory_organize: opencrab_server::config::MemoryOrganizeConfig::default(),
+        memory_declare: opencrab_server::config::MemoryDeclareConfig::default(),
+        memory_condense: opencrab_server::config::MemoryCondenseConfig::default(),
+        loop_restart_enabled: false,
+        index_build_inflight: std::sync::Arc::new(dashmap::DashMap::new()),
+        intake: std::sync::Arc::new(Default::default()),
+        intake_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
+        mcp_manager: None,
+        gateways: std::sync::Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
+        subtask_registries: std::sync::Arc::new(
+            opencrab_server::subtask_registries::SubtaskRegistries::new(),
+        ),
+        session_locks: std::sync::Arc::new(opencrab_actions::SessionLocks::new()),
+        subtask_notifiers: std::sync::Arc::new(dashmap::DashMap::new()),
+        subtask_lifecycle_notifier: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        default_subtask_webhook: None,
+        heartbeat_limits: Default::default(),
+        scheduler_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
+        heartbeat_config_rx: opencrab_server::disconnected_heartbeat_config_rx(Default::default()),
+        timed_fire_router: std::sync::Arc::new(opencrab_actions::TimedFireRouter::new()),
+        progress_debounce: std::sync::Arc::new(
+            opencrab_server::subtask_registries::ProgressDebounce::new(),
+        ),
+    }
+}
+
+struct Core {
+    extgate: Arc<ExtgateState>,
+    state: AppState,
+    sock: PathBuf,
+    subject_id: i64,
+    _dir: tempfile::TempDir,
+    _ws: tempfile::TempDir,
+}
+
+/// 実 serve_uds core + 実 AppState runtime を UDS で立ち上げ、nostr admit/watch hooks を配線する。
+async fn start_core(provider: Arc<dyn LlmProvider>) -> Core {
+    let conn = opencrab_db::init_memory().unwrap();
+    let db = opencrab_db::Db::from_connection(conn);
+    register_mock_pricing(&db);
+    let subject_id = upsert_test_agent(&db);
+    // owner = 発端 author にして caller=Owner に解決させる（spawn_subtask 等を確実に使える）。
+    {
+        let conn = db.lock().unwrap();
+        opencrab_db::queries::upsert_agent_nostr_config(
+            &conn,
+            &opencrab_db::queries::AgentNostrConfigRow {
+                agent_id: AGENT_ID.into(),
+                secret_key: "nsec1placeholder".into(),
+                relays_json: "[]".into(),
+                filter_json: "{}".into(),
+                enabled: true,
+            },
+        )
+        .unwrap();
+        opencrab_db::queries::set_agent_nostr_owner_pubkey(&conn, AGENT_ID, &author_pk()).unwrap();
+    }
+
+    let extgate = Arc::new(ExtgateState::new(db.clone(), OperatorToken::from_bytes(TOKEN)));
+
+    // nostr said の元栓。production（server main）と同じ `admit_nostr_said` を呼ぶ。
+    // allow-set に author を入れ、self_pubkey は config と揃える。
+    let self_pk = self_pk();
+    let author = author_pk();
+    extgate.set_nostr_said_admit(Arc::new(move |_agent_id, author_id, text| {
+        use opencrab_extgate::{ErrorCode, GateError};
+        use opencrab_nostr::{admit_nostr_said, AdmitSaidError, AllowSources, IngressRoute};
+        let mut allow = AllowSources::default();
+        allow.owner.insert(author.clone());
+        match admit_nostr_said(text, author_id, &self_pk, &allow) {
+            Err(AdmitSaidError::BadAnchor) => Err(GateError::new(ErrorCode::BadRequest)),
+            Err(AdmitSaidError::Drop { .. }) => Ok(NostrSaidDecision::Drop { bundle: None }),
+            Ok(anchor) => Ok(NostrSaidDecision::Accept {
+                watch_id: anchor.watch_id,
+                immediate: anchor.route == IngressRoute::Immediate,
+                bundle: None,
+            }),
+        }
+    }));
+    let author_sets = author_pk();
+    extgate.set_nostr_watch_sets(Arc::new(move |_agent_id| {
+        let mut sets = NostrWatchSets::default();
+        sets.owner.insert(author_sets.clone());
+        Some(sets)
+    }));
+    let ws = tempfile::tempdir().unwrap();
+    let ws_path = ws.path().to_path_buf();
+    // workspace hook はサニタイズ退避先。TempDir は Core が保持して test 期間中は生かす。
+    extgate.set_nostr_workspace(Arc::new(move |_agent_id| Some(ws_path.clone())));
+    extgate.set_nostr_relay(Arc::new(|_agent_id, _text| {}));
+
+    let state = build_app_state(db.clone(), provider);
+
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("gate.sock");
+    {
+        let listen_state = Arc::clone(&extgate);
+        let runtime = state.clone();
+        let path = sock.clone();
+        tokio::spawn(async move {
+            let _ = serve_uds(listen_state, runtime, resolve_caller_identity_with_owner, path).await;
+        });
+    }
+    for _ in 0..200 {
+        if sock.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    Core {
+        extgate,
+        state,
+        sock,
+        subject_id,
+        _dir: dir,
+        _ws: ws,
+    }
+}
+
+async fn admin(core: &Core, req: Request<Body>) -> (StatusCode, Vec<u8>) {
+    let app = admin_router(Arc::clone(&core.extgate));
+    let res = app.oneshot(req).await.unwrap();
+    let status = res.status();
+    let body = res.into_body().collect().await.unwrap().to_bytes().to_vec();
+    (status, body)
+}
+
+async fn put_instance(core: &Core, instance_id: &str, config_b64: &str) {
+    let (st, body) = admin(
+        core,
+        Request::builder()
+            .method("PUT")
+            .uri(format!("/api/gate-instances/{instance_id}"))
+            .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "kind_id": "nostr",
+                    "subject_id": core.subject_id,
+                    "enabled": true,
+                    "config_b64": config_b64,
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        st == StatusCode::CREATED || st == StatusCode::OK,
+        "put_instance {st}: {}",
+        String::from_utf8_lossy(&body)
+    );
+}
+
+async fn put_binding(core: &Core, binding_id: &str, instance_id: &str, address: &str) {
+    let (st, body) = admin(
+        core,
+        Request::builder()
+            .method("PUT")
+            .uri(format!("/api/gate-bindings/{binding_id}"))
+            .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({"instance_id": instance_id, "address": address}).to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        st == StatusCode::CREATED || st == StatusCode::OK,
+        "put_binding {st}: {}",
+        String::from_utf8_lossy(&body)
+    );
+}
+
+/// instance + binding を登録し、`spawn_instance`（fake_watch＋dry_run）を起動して bind ack を待つ。
+/// 返り値の `session_id` は canonical（新規 address なら `extgate-{binding_id}`）。
+async fn wire_instance(
+    core: &Core,
+    fixture: &Fixture,
+    config_bytes: Vec<u8>,
+) -> (Arc<InstanceClient>, String, String) {
+    let instance_id = uuid::Uuid::new_v4().to_string();
+    let binding_id = uuid::Uuid::new_v4().to_string();
+    let address = format!("nostr-{AGENT_ID}");
+    let config_b64 = opencrab_extgate::encode_config_b64(&config_bytes);
+
+    put_instance(core, &instance_id, &config_b64).await;
+    put_binding(core, &binding_id, &instance_id, &address).await;
+
+    let place = InstancePlacement {
+        instance_id: instance_id.clone(),
+        revision: 1,
+        address: address.clone(),
+        config_b64,
+    };
+    let overrides = HarnessOverrides {
+        fake_watch: Some(fixture.path.clone()),
+        dry_run: true,
+    };
+    let client = spawn_instance(
+        core.sock.clone(),
+        &place,
+        &config_bytes,
+        None,
+        PathBuf::from("/nonexistent/nostaro"),
+        overrides,
+    )
+    .expect("spawn_instance");
+
+    // bind ack を待つ（watch lane はここから起動する）。
+    let mut bound = false;
+    for _ in 0..250 {
+        if client.binding_for_address(&address).await.is_some() {
+            bound = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(bound, "binding が ack されない");
+
+    let session_id = format!("extgate-{binding_id}");
+    (client, address, session_id)
+}
+
+fn nostr_config(watches: Option<serde_json::Value>) -> Vec<u8> {
+    let mut cfg = serde_json::json!({
+        "relays": ["wss://relay.invalid"],
+        "self_pubkey": self_pk(),
+        "name": "crab",
+        "delivery_mode": "say",
+    });
+    if let Some(w) = watches {
+        cfg["watches"] = w;
+    }
+    serde_json::to_vec(&cfg).unwrap()
+}
+
+// ==================== (a) mention → say（standalone post） ====================
+
+#[tokio::test]
+async fn scenario_a_mention_becomes_say() {
+    let buf = install_capture();
+    let mock = Arc::new(FifoMock::new());
+    mock.push_text("QCA-ACK 了解、やっておくね");
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let (_client, _address, _session_id) =
+        wire_instance(&core, &fixture, nostr_config(None)).await;
+
+    let event_id = "a1".repeat(32);
+    fixture.append_line(&mention_event(&event_id, "QCA-MARK メンション本文"));
+
+    let ok = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.body.contains("QCA-ACK") && c.kind == "standalone")
+        })
+        .await
+    };
+    assert!(ok, "mention の say が dry-run に出ない: {:?}", captured(&buf));
+
+    // 1 メンション = 1 ターン。
+    assert_eq!(mock.system_prompts().len(), 1, "ターンが 1 本でない");
+}
+
+// ==================== (c) 同一イベントが両車線 → said は 1 回だけ ====================
+
+#[tokio::test]
+async fn scenario_c_same_event_on_both_lanes_says_once() {
+    let buf = install_capture();
+    let mock = Arc::new(FifoMock::new());
+    mock.push_text("QCC-ACK ひとつだけ返すよ");
+    // 万一 2 ターン走ったら 2 本目が消費される。後段で system_prompts 数を見て 1 本を確かめる。
+    mock.push_text("QCC-EXTRA 余計な二本目");
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    // default(mention) 車線 + watch 車線。fake_watch は全車線へ同じ fixture を流すので、
+    // 同一行が両車線に届く。自分宛て #p メンションは watch 車線が default 車線へ譲る
+    // （Defect A / QC #10）。ネットで said は 1 回・ターンは 1 本・say は 1 通。
+    let watches = serde_json::json!([{
+        "id": 7,
+        "interval_secs": 3600,
+        "filter_json": { "authors": [author_pk()] }
+    }]);
+    let fixture = Fixture::new();
+    let (_client, _address, _session_id) =
+        wire_instance(&core, &fixture, nostr_config(Some(watches))).await;
+
+    let event_id = "c1".repeat(32);
+    fixture.append_line(&mention_event(&event_id, "QCC-MARK 両車線に届く本文"));
+
+    // say が出るまで待つ。
+    let ok = {
+        let buf = buf.clone();
+        wait_until(move || body_index(&buf, "QCC-ACK").is_some()).await
+    };
+    assert!(ok, "say が出ない: {:?}", captured(&buf));
+
+    // 2 本目が来ないことを確かめるための落ち着き時間（interval=3600s なので flush は無い）。
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let n_says = captured(&buf)
+        .iter()
+        .filter(|c| c.body.contains("QCC-ACK"))
+        .count();
+    assert_eq!(n_says, 1, "同一イベントで say が複数出た: {n_says}");
+    assert_eq!(
+        mock.system_prompts().len(),
+        1,
+        "ターンが 1 本でない（両車線で二重に走った）"
+    );
+}
+
+// ==================== (main) 長い処理中の第2依頼: 3 say が順に出る ====================
+
+// ルーティング用マーカー（会話へ現れる substring・互いに部分文字列にならないよう分離）。
+const M_FIRST: &str = "MARKER-ONE";
+const M_SECOND: &str = "MARKER-TWO";
+const M_SUBTASK: &str = "MARKER-SUB";
+// 応答本文（say として観測する。マーカーとも互いとも部分一致しない）。
+const B_ACK: &str = "ackbody-alpha 了解、長い処理を始めたよ";
+const B_SECOND: &str = "secondbody-beta 回答は 4 だよ";
+const B_COMPLETION: &str = "completionbody-gamma 長い処理おわったよ";
+const B_SUBTASK_RESULT: &str = "subresult-delta 内部結果";
+
+/// 内容ルーティング mock。指定ターンだけ `Notify` で待たせる（並行ターンが FIFO を奪い合わない）。
+struct RoutedMock {
+    released: Arc<AtomicBool>,
+    notify: Arc<tokio::sync::Notify>,
+}
+
+impl RoutedMock {
+    fn new() -> Self {
+        Self {
+            released: Arc::new(AtomicBool::new(false)),
+            notify: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+    fn release(&self) {
+        self.released.store(true, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for RoutedMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let text = request_text(&request);
+
+        // (E) subtask 決着後の resume ターン → 完了報告 say(3)。
+        // 注意: システムプロンプトにはツール解説として "subtask_completed" が常に含まれるため、
+        // それでは判定できない。決着で親ログに載る subtask 結果本文（会話に現れる）で判定する。
+        if text.contains(B_SUBTASK_RESULT) {
+            return Ok(text_response(B_COMPLETION));
+        }
+        // (B) 親ターン#1 の spawn_subtask 実行後（tool_result 有り）→ 即応 ack say(1)。
+        if has_tool_role(&request) {
+            return Ok(text_response(B_ACK));
+        }
+        // (D) 第2依頼のターン → 即応 say(2)。
+        if text.contains(M_SECOND) {
+            return Ok(text_response(B_SECOND));
+        }
+        // (A) 親ターン#1 の初回 → spawn_subtask を呼んで背景サブタスクを detach。
+        if text.contains(M_FIRST) {
+            return Ok(tool_call_response(
+                "spawn_subtask",
+                serde_json::json!({
+                    "task": format!("{M_SUBTASK} 長い処理を実行して"),
+                    "timeout_secs": 120,
+                }),
+            ));
+        }
+        // (C) 背景サブタスクの sub-run → テストが release するまでブロック（= 長い処理の走行中）。
+        if text.contains(M_SUBTASK) {
+            loop {
+                if self.released.load(Ordering::SeqCst) {
+                    break;
+                }
+                let waiter = self.notify.notified();
+                if self.released.load(Ordering::SeqCst) {
+                    break;
+                }
+                waiter.await;
+            }
+            return Ok(text_response(B_SUBTASK_RESULT));
+        }
+        Err(anyhow::anyhow!("RoutedMock: unrouted request: {text}"))
+    }
+}
+
+#[tokio::test]
+async fn scenario_main_second_request_not_blocked_during_long_op() {
+    let buf = install_capture();
+    let mock = Arc::new(RoutedMock::new());
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let (_client, _address, session_id) =
+        wire_instance(&core, &fixture, nostr_config(None)).await;
+
+    let ev1 = "b1".repeat(32);
+    let ev2 = "b2".repeat(32);
+
+    // 1) 「長い処理して終わったら教えて」→ 即応 ack say(1) ＋ 背景サブタスク detach。
+    fixture.append_line(&mention_event(&ev1, &format!("{M_FIRST} 長い処理して終わったら教えて")));
+
+    // say(1) が出る AND 背景サブタスクが走行中（held）になるまで待つ。
+    let ack_ready = {
+        let buf = buf.clone();
+        wait_until(move || body_index(&buf, B_ACK).is_some()).await
+    };
+    assert!(ack_ready, "ack say(1) が出ない: {:?}", captured(&buf));
+    let running = {
+        let state = core.state.clone();
+        let sid = session_id.clone();
+        wait_until(move || state.subtask_registries.has_running(&sid)).await
+    };
+    assert!(running, "背景サブタスクが走行中にならない（detach/hold 失敗）");
+
+    // 2) 走行中に第2依頼を投入 → ブロックされず即応 say(2)。
+    fixture.append_line(&mention_event(&ev2, &format!("{M_SECOND} 2 足す 2 は?")));
+    let second_ready = {
+        let buf = buf.clone();
+        wait_until(move || body_index(&buf, B_SECOND).is_some()).await
+    };
+    assert!(
+        second_ready,
+        "第2依頼が長い処理にブロックされている（say(2) 未達）: {:?}",
+        captured(&buf)
+    );
+    // この時点でサブタスクはまだ走行中（held）のはず。
+    assert!(
+        core.state.subtask_registries.has_running(&session_id),
+        "第2依頼処理中にサブタスクが既に終わっている（hold が効いていない）"
+    );
+
+    // 3) サブタスクを解放 → 決着 → resume → 完了報告 say(3)。
+    mock.release();
+    let completion_ready = {
+        let buf = buf.clone();
+        wait_until(move || body_index(&buf, B_COMPLETION).is_some()).await
+    };
+    assert!(
+        completion_ready,
+        "完了報告 say(3) が出ない: {:?}",
+        captured(&buf)
+    );
+
+    // 3 say が 1→2→3 の順で並ぶ（朝のバグ=第2依頼ブロックが無いことの再現）。
+    let i1 = body_index(&buf, B_ACK).expect("ack");
+    let i2 = body_index(&buf, B_SECOND).expect("second");
+    let i3 = body_index(&buf, B_COMPLETION).expect("completion");
+    assert!(
+        i1 < i2 && i2 < i3,
+        "say の順序が 1→2→3 でない: ack={i1} second={i2} completion={i3} / {:?}",
+        captured(&buf)
+    );
+}

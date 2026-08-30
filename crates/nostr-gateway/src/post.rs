@@ -17,6 +17,9 @@ use crate::secret::SECRET_ENV;
 
 const POST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// dry-run で say を残す tracing target。テスト・QC がこの target で本文・種別を拾う。
+pub const DRY_RUN_LOG_TARGET: &str = "opencrab_nostrgate::dry_run";
+
 /// say の投稿結果。
 #[derive(Debug, PartialEq, Eq)]
 pub enum SayDelivery {
@@ -111,13 +114,28 @@ fn build_post_command(bin: &Path, argv: &[String], secret: Option<&str>) -> Comm
 /// say に reply target を暗黙設定しない。`reply_origin` は wire 互換のため受けるが使わない。
 /// row292/#843 の「返信先が無い say も drop せず publish」は、常に standalone post とする
 /// 本設計で完全に満たされる（drop は発生しない）。結果は観測性のため `PostedStandalone` を返す。
+///
+/// `dry_run=true`（QC ハーネス）のときは publish せず、本文・種別を INFO ログに全文残して
+/// core へは成功 ack（`PostedStandalone`）を返す。nostaro も spawn しない。**dry_run=false は
+/// 従来どおり standalone post を発行する**。
 pub async fn deliver_say(
     nostaro_bin: &Path,
     config_path: &Path,
     secret: Option<&str>,
     _reply_origin: Option<String>,
     text: &str,
+    dry_run: bool,
 ) -> SayDelivery {
+    if dry_run {
+        // publish せず全文をログに残す（種別は常に standalone = DI-16）。
+        tracing::info!(
+            target: DRY_RUN_LOG_TARGET,
+            kind = "standalone",
+            body = %text,
+            "DRY_RUN say (not published; standalone post)"
+        );
+        return SayDelivery::PostedStandalone;
+    }
     let argv = post_argv(config_path, text);
     let mut cmd = build_post_command(nostaro_bin, &argv, secret);
     match tokio::time::timeout(POST_TIMEOUT, cmd.output()).await {
@@ -220,7 +238,8 @@ mod tests {
         }
         let cfg = dir.path().join("cfg.toml");
         write_relays_config(&cfg, &["wss://x.example".into()]).unwrap();
-        let got = deliver_say(&script, &cfg, Some("nsec1fakekey"), None, "エアリプ本文").await;
+        let got =
+            deliver_say(&script, &cfg, Some("nsec1fakekey"), None, "エアリプ本文", false).await;
         assert_eq!(got, SayDelivery::PostedStandalone);
         let recorded = std::fs::read_to_string(&out_file).unwrap();
         assert!(
@@ -262,7 +281,8 @@ mod tests {
         write_relays_config(&cfg, &["wss://x.example".into()]).unwrap();
         // DI-16: say は常に standalone post。reply_origin を渡しても post になる（reply にしない）。
         let origin = format!("nostr:event:v1:default:{}", "bb".repeat(32));
-        let got = deliver_say(&script, &cfg, Some("nsec1fakekey"), Some(origin), "やあ").await;
+        let got =
+            deliver_say(&script, &cfg, Some("nsec1fakekey"), Some(origin), "やあ", false).await;
         assert_eq!(got, SayDelivery::PostedStandalone);
         let recorded = std::fs::read_to_string(&out_file).unwrap();
         assert!(recorded.contains("post"), "post subcommand: {recorded}");
@@ -303,6 +323,7 @@ mod tests {
             Some("nsec1fakekey"),
             Some(format!("nostr:event:v1:default:{id}")),
             "t",
+            false,
         )
         .await;
         match got {
@@ -315,5 +336,20 @@ mod tests {
             }
             other => panic!("expected Failed, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn dry_run_acks_without_spawning() {
+        // dry_run は nostaro を spawn せず（存在しない bin/cfg でも）PostedStandalone を返す。
+        let got = deliver_say(
+            Path::new("/nonexistent/nostaro"),
+            Path::new("/nonexistent/cfg.toml"),
+            Some("nsec1fakekey"),
+            Some(format!("nostr:event:v1:default:{}", "dd".repeat(32))),
+            "了解、やっておくね",
+            true,
+        )
+        .await;
+        assert_eq!(got, SayDelivery::PostedStandalone, "dry_run は成功 ack");
     }
 }
