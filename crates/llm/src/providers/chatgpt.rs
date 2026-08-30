@@ -13,6 +13,14 @@ use crate::traits::{LlmProvider, ModelInfo};
 const CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api";
 const DEFAULT_MODEL: &str = "gpt-5.5";
 
+/// 「読んだが黙る」を表すプロジェクト全体のセンチネル（下流は `trim() == NO_REPLY` で判定）。
+/// #844: verbosity=medium だと 1 応答に message アイテムが複数（実測最大7・ほぼ同一）出て、
+/// 「返答→NO_REPLY→返答」のロールプレイ軌跡形を取ることがある。これを無区切り連結すると
+/// 下流の全文一致を素通りしてセンチネルが平文露出するため、parse_response で
+/// アイテム境界を保持し、非センチネルの先頭アイテムを採用する（全アイテムがセンチネルなら
+/// NO_REPLY を残す）。判定をこの集約直後の 1 箇所へ前倒しし、下流の全文一致は backstop に残す。
+const NO_REPLY_SENTINEL: &str = "NO_REPLY";
+
 /// OAuth トークンリフレッシュのエンドポイント（codex CLI と同じ）。
 const OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 /// codex CLI の公開 OAuth client_id（openai/codex リポジトリの定数と同一。
@@ -833,7 +841,11 @@ impl ChatGptProvider {
     // #676: pub —— chatgpt の SSE パース（incomplete→Length を含む）を server 側の
     // 「incomplete→ターン失敗」end-to-end テストから直接叩けるようにする（純パーサ）。
     pub fn parse_response(&self, sse_text: &str, model: &str) -> Result<ChatResponse> {
-        let mut content = String::new();
+        // #844: message アイテムごとのテキストを別々に集める。`current` が進行中アイテムの
+        // 蓄積で、アイテム境界（output_item.done）で `items` に確定する。無区切り連結せず
+        // アイテム境界を保持することで、下流でセンチネルが平文連結されるのを防ぐ。
+        let mut items: Vec<String> = Vec::new();
+        let mut current = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut id = String::new();
         let mut usage = Usage::default();
@@ -875,12 +887,18 @@ impl ChatGptProvider {
                 "response.output_text.delta" => {
                     if let Some(delta) = parsed["delta"].as_str() {
                         dbg_delta_event_count += 1;
-                        content.push_str(delta);
+                        current.push_str(delta);
                     }
                 }
                 "response.output_item.done" | "response.output_item.completed" => {
                     if let Some(call) = Self::parse_function_call_item(&parsed["item"]) {
                         tool_calls.push(call);
+                    }
+                    // #844: message アイテムの境界。蓄積テキストがあれば 1 アイテムとして
+                    // 確定し、次アイテムのテキストと無区切り連結されるのを断ち切る。
+                    // function_call / reasoning アイテムはテキストを積まないので current は空。
+                    if !current.is_empty() {
+                        items.push(std::mem::take(&mut current));
                     }
                 }
                 "response.completed" | "response.done" | "response.incomplete" => {
@@ -936,19 +954,41 @@ impl ChatGptProvider {
             current_event.clear();
         }
 
+        // #844: output_item.done が来ないまま終わる系（既存テストの delta のみ SSE 等）の
+        // 取りこぼしを防ぐ最終フラッシュ。1 アイテムだけの通常応答はここで確定する。
+        if !current.is_empty() {
+            items.push(std::mem::take(&mut current));
+        }
+
+        // #844: アイテム毎に NO_REPLY 判定し、非センチネル（trim 後 NO_REPLY 全文一致でない）
+        // かつ非空の先頭アイテムを採用する（実測で first が正解）。実体のあるアイテムが
+        // 無い場合、いずれかがセンチネルなら NO_REPLY を残し（下流の沈黙判定を活かす）、
+        // そうでなければ空応答（None）にする。単一アイテムの通常応答は従来と同じ結果になる。
+        let selected: Option<String> = match items
+            .iter()
+            .find(|t| {
+                let s = t.trim();
+                !s.is_empty() && s != NO_REPLY_SENTINEL
+            })
+            .cloned()
+        {
+            Some(text) => Some(text),
+            None if items.iter().any(|t| t.trim() == NO_REPLY_SENTINEL) => {
+                Some(NO_REPLY_SENTINEL.to_string())
+            }
+            None => None,
+        };
+
         tracing::warn!(
-            "chatgpt parse_response: data_lines={} delta_events={} content_bytes={} tool_calls={}",
+            "chatgpt parse_response: data_lines={} delta_events={} message_items={} selected_bytes={} tool_calls={}",
             dbg_data_line_count,
             dbg_delta_event_count,
-            content.len(),
+            items.len(),
+            selected.as_deref().map(str::len).unwrap_or(0),
             tool_calls.len(),
         );
 
-        let content = if content.is_empty() {
-            None
-        } else {
-            Some(MessageContent::Text(content))
-        };
+        let content = selected.map(MessageContent::Text);
         // #676（方針3）: 出力上限による打ち切りは tool_calls / content の有無より優先して
         // Length にする。切り捨てられた応答は tool_call JSON も本文も途中で切れており、最終回答
         // にもツール往復の一手にもしてはならない（エンジンがこの Length を見てターンを失敗させる）。
@@ -1957,6 +1997,137 @@ mod tests {
             other => panic!("expected Text content, got: {other:?}"),
         };
         assert_eq!(text, "Foo Bar");
+    }
+
+    /// #844: verbosity=medium で 1 応答に message アイテムが複数出て
+    /// 「本文A → NO_REPLY → 本文A」のロールプレイ軌跡形になる実測ケース。
+    /// 無区切り連結（"本文ANO_REPLY本文A"）せず、非センチネルの先頭アイテム "本文A" だけを採用する。
+    #[test]
+    fn test_parse_response_multi_message_items_skips_no_reply_sentinel() {
+        let provider = ChatGptProvider::new();
+        let sse = concat!(
+            // item1: 本文A
+            "event: response.output_item.added\n",
+            "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\",\"role\":\"assistant\"}}\n",
+            "\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"本文A\"}\n",
+            "\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\"}}\n",
+            "\n",
+            // item2: NO_REPLY（センチネル）
+            "event: response.output_item.added\n",
+            "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\",\"role\":\"assistant\"}}\n",
+            "\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"NO_REPLY\"}\n",
+            "\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\"}}\n",
+            "\n",
+            // item3: 本文A（逐語再掲）
+            "event: response.output_item.added\n",
+            "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\",\"role\":\"assistant\"}}\n",
+            "\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"本文A\"}\n",
+            "\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\"}}\n",
+            "\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r-844\",\"output\":[],",
+            "\"usage\":{\"input_tokens\":5,\"output_tokens\":6,\"total_tokens\":11}}}\n",
+            "\n",
+        );
+        let resp = provider
+            .parse_response(sse, "gpt-5.5")
+            .expect("parse failed");
+        let text = match &resp.choices[0].message.content {
+            Some(MessageContent::Text(t)) => t.as_str(),
+            other => panic!("expected Text content, got: {other:?}"),
+        };
+        assert_eq!(
+            text, "本文A",
+            "非センチネルの先頭アイテムだけを採用せず、NO_REPLY を連結して露出させている"
+        );
+    }
+
+    /// #844: 全アイテムがセンチネルなら NO_REPLY を残す（下流の全文一致で沈黙判定できるように）。
+    #[test]
+    fn test_parse_response_all_items_no_reply_preserves_sentinel() {
+        let provider = ChatGptProvider::new();
+        let sse = concat!(
+            "event: response.output_item.added\n",
+            "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\"}}\n",
+            "\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"NO_REPLY\"}\n",
+            "\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n",
+            "\n",
+            "event: response.output_item.added\n",
+            "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\"}}\n",
+            "\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"NO_REPLY\"}\n",
+            "\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n",
+            "\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r-844b\",\"output\":[],",
+            "\"usage\":{\"input_tokens\":3,\"output_tokens\":2,\"total_tokens\":5}}}\n",
+            "\n",
+        );
+        let resp = provider
+            .parse_response(sse, "gpt-5.5")
+            .expect("parse failed");
+        let text = match &resp.choices[0].message.content {
+            Some(MessageContent::Text(t)) => t.as_str(),
+            other => panic!("expected Text content, got: {other:?}"),
+        };
+        assert_eq!(text.trim(), "NO_REPLY");
+    }
+
+    /// #844: センチネルが先頭でも、後続の実体アイテムを採用する（NO_REPLY → 本文B）。
+    #[test]
+    fn test_parse_response_sentinel_first_picks_later_real_item() {
+        let provider = ChatGptProvider::new();
+        let sse = concat!(
+            "event: response.output_item.added\n",
+            "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\"}}\n",
+            "\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"NO_REPLY\"}\n",
+            "\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n",
+            "\n",
+            "event: response.output_item.added\n",
+            "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\"}}\n",
+            "\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"本文B\"}\n",
+            "\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n",
+            "\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r-844c\",\"output\":[],",
+            "\"usage\":{\"input_tokens\":3,\"output_tokens\":3,\"total_tokens\":6}}}\n",
+            "\n",
+        );
+        let resp = provider
+            .parse_response(sse, "gpt-5.5")
+            .expect("parse failed");
+        let text = match &resp.choices[0].message.content {
+            Some(MessageContent::Text(t)) => t.as_str(),
+            other => panic!("expected Text content, got: {other:?}"),
+        };
+        assert_eq!(text, "本文B");
     }
 
     #[test]
