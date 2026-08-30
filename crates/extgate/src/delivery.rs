@@ -14,6 +14,7 @@ use crate::ids::now_nanos;
 use crate::protocol::{say_frame, write_json};
 use crate::registry::{ExtgateState, Pending};
 
+#[allow(clippy::too_many_arguments)]
 pub async fn apply_delivery_effect<R: AgentRuntime>(
     state: &Arc<ExtgateState>,
     runtime: &R,
@@ -22,6 +23,7 @@ pub async fn apply_delivery_effect<R: AgentRuntime>(
     agent_id: &str,
     session_id: &str,
     effect: DeliveryEffect,
+    reply_target: Option<&str>,
 ) {
     match effect {
         DeliveryEffect::Text { body, .. } => {
@@ -39,7 +41,16 @@ pub async fn apply_delivery_effect<R: AgentRuntime>(
                 state.halt();
                 return;
             }
-            if let Err(e) = send_text(state, instance_id, binding_id, agent_id, session_id, &body).await
+            if let Err(e) = send_text(
+                state,
+                instance_id,
+                binding_id,
+                agent_id,
+                session_id,
+                &body,
+                reply_target,
+            )
+            .await
             {
                 if e.code == ErrorCode::NotConnected || e.code == ErrorCode::BindingClosed {
                     return;
@@ -77,6 +88,7 @@ async fn send_text(
     agent_id: &str,
     session_id: &str,
     body: &str,
+    reply_target: Option<&str>,
 ) -> Result<(), GateError> {
     let writer = {
         let reg = state.lock_registry()?;
@@ -163,7 +175,7 @@ async fn send_text(
         );
     }
 
-    let write_err = write_json(&writer, &say_frame(&delivery_id, binding_id, body))
+    let write_err = write_json(&writer, &say_frame(&delivery_id, binding_id, body, reply_target))
         .await
         .is_err();
     #[cfg(any(test, feature = "extgate-probe"))]

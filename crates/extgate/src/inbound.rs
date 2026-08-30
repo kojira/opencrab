@@ -808,6 +808,8 @@ fn enqueue_turn<R: AgentRuntime>(
                     None => opencrab_actions::DeliveryEffect::Empty,
                 };
                 let effect = adjust_inbound_effect(delivery_mode, effect);
+                // 即時 inbound ターンの返信先は gateway 側の相関（直前に送った said の origin）に
+                // 委ねる（reply_target=None）。resume ターンだけが発端 origin を明示する。
                 apply_delivery_effect(
                     &state,
                     &runtime,
@@ -816,6 +818,7 @@ fn enqueue_turn<R: AgentRuntime>(
                     &agent_id,
                     &session_id,
                     effect,
+                    None,
                 )
                 .await;
             }

@@ -84,12 +84,24 @@ pub fn bind_frame(binding_id: &str, address: &str) -> Value {
     })
 }
 
-pub fn say_frame(delivery_id: &str, binding_id: &str, body: &str) -> Value {
+/// say フレーム。`reply_target` を渡すと payload に載る（gateway が返信先を導けない
+/// resume ターン等で、発端イベントの origin を明示する）。省略時は gateway 側の相関
+/// （直前に送った said の origin）に委ねる。
+pub fn say_frame(
+    delivery_id: &str,
+    binding_id: &str,
+    body: &str,
+    reply_target: Option<&str>,
+) -> Value {
+    let mut payload = json!({ "text": body });
+    if let Some(target) = reply_target {
+        payload["reply_target"] = json!(target);
+    }
     json!({
         "id": delivery_id,
         "m": "say",
         "binding_id": binding_id,
-        "payload": {"text": body},
+        "payload": payload,
     })
 }
 

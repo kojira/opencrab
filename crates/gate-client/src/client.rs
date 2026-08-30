@@ -14,7 +14,8 @@ use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 use super::wire::{
-    err_frame, hello_frame, ok_frame, parse_frame_bytes, read_frame, said_frame, say_text,
+    err_frame, hello_frame, ok_frame, parse_frame_bytes, read_frame, said_frame, say_reply_target,
+    say_text,
     write_json, Activity, Attachment, Bind, CoreMsg, FrameError, Say, WireResponse,
 };
 
@@ -634,14 +635,17 @@ async fn handle_say(client: &InstanceClient, say: Say, generation: u64) -> bool 
         let _ = send_frame(client, err_frame(&say.id, "external_rejected", None)).await;
         return false;
     };
-    // 返信先は進行中ターンの pending_turn から取る（即時 said が刻んだ Single だけ Some）。
-    let reply_origin = match inner.pending_turn.get(&say.binding_id) {
-        Some(turn) => match &turn.reply_origin {
-            ReplyOrigin::Single(o) => Some(o.clone()),
-            ReplyOrigin::None | ReplyOrigin::Ambiguous => None,
-        },
-        None => None,
-    };
+    // 返信先: payload の明示 reply_target（送信側が載せた発端 origin・resume 等）を最優先。
+    // 無ければ進行中ターンの pending_turn（即時 said が刻んだ Single だけ Some）に委ねる。
+    let reply_origin = say_reply_target(&say.payload).map(str::to_string).or_else(|| {
+        match inner.pending_turn.get(&say.binding_id) {
+            Some(turn) => match &turn.reply_origin {
+                ReplyOrigin::Single(o) => Some(o.clone()),
+                ReplyOrigin::None | ReplyOrigin::Ambiguous => None,
+            },
+            None => None,
+        }
+    });
     let q = inner
         .live
         .entry(address.clone())
