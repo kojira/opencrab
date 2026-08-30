@@ -451,7 +451,7 @@ fn finish_bundle<R: AgentRuntime>(
             &trigger_said,
             ctx.session_id,
             &suffix,
-            false, // bundle: 単一返信先が無い（gateway drop・エアリプは nostr_post）
+            false, // bundle: 単一返信先が無い（gateway drop・エアリプは素の本文=say(standalone)）
         );
     }
     Ok(SaidOutcome { seq })
@@ -491,8 +491,9 @@ fn load_bundle_trigger(
 fn bundle_prompt_suffix(count: u32) -> String {
     format!(
         "[Nostr] タイムライン watch の束ね（{count} 件）です。窓内を 1 ターンの文脈に載せています。\
-         心が動いた投稿にはエアリプ（nostr_post による独立投稿）で触れてよい（特定ノートへの返信には\
-         なりません）。反応不要なら NO_REPLY とだけ答えてください。"
+         心が動いた投稿にはエアリプ（本文をそのまま書けば独立した新規投稿として publish されます・\
+         特定投稿への返信にはなりません）で触れてよい。特定の投稿に反応するなら reply(e番号, 本文)／\
+         reaction(e番号)／repost(e番号) を使ってください。反応不要なら NO_REPLY とだけ答えてください。"
     )
 }
 
@@ -696,7 +697,7 @@ fn enqueue_turn<R: AgentRuntime>(
     session_id: &str,
     prompt_suffix: &str,
     // 単一メンション turn は発端 said の origin へ返信（say payload の reply_target に載せる）。
-    // bundle turn は単一返信先が無いので false（gateway は drop・エアリプは nostr_post）。
+    // bundle turn は単一返信先が無いので false（gateway は drop・エアリプは素の本文=say(standalone)）。
     // gateway 側の pending_turn 相関は activity ended が say より先に届き消えるため当てにしない。
     reply_to_origin: bool,
 ) {
@@ -868,7 +869,7 @@ fn enqueue_turn<R: AgentRuntime>(
                         };
                         let effect = adjust_inbound_effect(delivery_mode, effect);
                         // 単一メンションは発端 origin を say payload に明示（gateway が e-tag reply）。
-                        // bundle は None（gateway drop・エアリプは nostr_post）。gateway の
+                        // bundle は None（gateway drop・エアリプは素の本文=say(standalone)）。gateway の
                         // pending_turn 相関は activity ended が say より先に届き消えるため使わない。
                         apply_delivery_effect(
                             &state,

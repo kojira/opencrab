@@ -18,6 +18,9 @@ const MAX_SCHEMA_NODES: usize = 1024;
 const MAX_STRING_LEN: usize = 16_384;
 
 /// JSON Schema 2020-12 subset の許可 keyword（DI-03）。これ以外は宣言不正。
+// DI-03 の subset + `format`（レビュー要望の generic 参照フィールド標示。core は `format` の値
+// 文字列を解釈せず、projection が "short-ref" 標示の field だけを短縮参照解決する。platform 語彙は
+// 持たない）。
 const ALLOWED_SCHEMA_KEYWORDS: &[&str] = &[
     "type",
     "required",
@@ -25,6 +28,7 @@ const ALLOWED_SCHEMA_KEYWORDS: &[&str] = &[
     "enum",
     "items",
     "description",
+    "format",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -312,7 +316,7 @@ fn validate_schema_node(node: &Value, depth: usize, nodes: &mut usize) -> Result
                 }
                 _ => return Err(invalid()),
             },
-            "description" => {
+            "description" | "format" => {
                 let s = value.as_str().ok_or_else(invalid)?;
                 if s.len() > MAX_STRING_LEN {
                     return Err(invalid());

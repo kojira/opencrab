@@ -37,12 +37,15 @@ pub fn operation_declarations() -> Value {
         })
     };
     let str_prop = |desc: &str| json!({"type": "string", "description": desc});
+    // 短縮参照フィールド（uN/eN/cN）。core はこの標示 field だけを実 ID へ解決する（レビュー要望）。
+    let ref_prop =
+        |desc: &str| json!({"type": "string", "description": desc, "format": "short-ref"});
     // 配列は name の UTF-8 昇順（follow < kind0 < reaction < reply < repost < resolve < unfollow < upload）。
     json!([
         decl(
             "follow",
             "指定ユーザーをフォローする。user に会話で見えている u番号を渡す。",
-            json!({"type": "object", "required": ["user"], "properties": {"user": str_prop("フォロー対象の短縮参照（例 u2）")}}),
+            json!({"type": "object", "required": ["user"], "properties": {"user": ref_prop("フォロー対象の短縮参照（例 u2）")}}),
             conv("not_exposed", "agent_bound"),
         ),
         decl(
@@ -60,7 +63,7 @@ pub fn operation_declarations() -> Value {
             "reaction",
             "イベントにリアクションする。event に会話の e番号、emoji に絵文字（省略可）。",
             json!({"type": "object", "required": ["event"], "properties": {
-                "event": str_prop("対象イベントの短縮参照（例 e7）"),
+                "event": ref_prop("対象イベントの短縮参照（例 e7）"),
                 "emoji": str_prop("リアクション絵文字（省略時は既定）")
             }}),
             conv("not_exposed", "conversation_bound"),
@@ -69,7 +72,7 @@ pub fn operation_declarations() -> Value {
             "reply",
             "イベントに返信する。event に会話の e番号、text に返信本文。",
             json!({"type": "object", "required": ["event", "text"], "properties": {
-                "event": str_prop("返信先イベントの短縮参照（例 e7）"),
+                "event": ref_prop("返信先イベントの短縮参照（例 e7）"),
                 "text": str_prop("返信本文")
             }}),
             conv("not_exposed", "conversation_bound"),
@@ -77,19 +80,19 @@ pub fn operation_declarations() -> Value {
         decl(
             "repost",
             "イベントをリポストする。event に会話の e番号。",
-            json!({"type": "object", "required": ["event"], "properties": {"event": str_prop("対象イベントの短縮参照（例 e7）")}}),
+            json!({"type": "object", "required": ["event"], "properties": {"event": ref_prop("対象イベントの短縮参照（例 e7）")}}),
             conv("not_exposed", "conversation_bound"),
         ),
         decl(
             "resolve",
             "u番号/e番号の完全な生JSONを取得する（会話で省略された全文の参照）。",
-            json!({"type": "object", "required": ["ref"], "properties": {"ref": str_prop("u番号またはe番号の短縮参照（例 u2 / e7）")}}),
+            json!({"type": "object", "required": ["ref"], "properties": {"ref": ref_prop("u番号またはe番号の短縮参照（例 u2 / e7）")}}),
             conv("not_exposed", "conversation_bound"),
         ),
         decl(
             "unfollow",
             "指定ユーザーのフォローを解除する。user に会話で見えている u番号を渡す。",
-            json!({"type": "object", "required": ["user"], "properties": {"user": str_prop("解除対象の短縮参照（例 u2）")}}),
+            json!({"type": "object", "required": ["user"], "properties": {"user": ref_prop("解除対象の短縮参照（例 u2）")}}),
             conv("not_exposed", "agent_bound"),
         ),
         decl(
@@ -124,7 +127,13 @@ impl NostrInvokeHandler {
         }
     }
 
-    async fn run(&self, argv: &[String]) -> Run {
+    /// `publishes=true` は relay/外部へ書く op（reply/reaction/repost/follow/unfollow/kind0/upload）。
+    /// nostaro の publish は「1 relay でも受理で Ok（exit 0）／全 relay 未受理で非ゼロ」（実確認:
+    /// client.rs check_publish_output は success 空でだけ bail）。よって非ゼロ=確定 publish なしだが、
+    /// 「どの relay も応答しなかった」場合は実際には保存された可能性が残る＝受理成否不明。二重投稿
+    /// 防止を優先し、write op の非ゼロは Indeterminate にする（§5.3・捏造しない）。read（resolve）は
+    /// 副作用が無いので非ゼロ=Rejected。spawn 失敗は外部 I/O 0 なので双方 Rejected。
+    async fn run(&self, argv: &[String], publishes: bool) -> Run {
         let mut cmd = Command::new(&self.nostaro_bin);
         cmd.arg("--config")
             .arg(&self.config_path)
@@ -140,12 +149,15 @@ impl NostrInvokeHandler {
             Ok(Ok(out)) if out.status.success() => {
                 Run::Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
             }
-            // nostaro が起動して非ゼロ終了 = 確定非受理（publish 前に失敗）。
             Ok(Ok(out)) => {
-                tracing::warn!(code = ?out.status.code(), "nostaro op rejected");
-                Run::Rejected
+                tracing::warn!(code = ?out.status.code(), publishes, "nostaro op non-zero exit");
+                if publishes {
+                    Run::Indeterminate
+                } else {
+                    Run::Rejected
+                }
             }
-            // spawn 失敗 = 外部 I/O 0（何も投稿していない）。
+            // spawn 失敗 = 外部 I/O 0（nostaro が起動していない=何も投稿していない）。
             Ok(Err(e)) => {
                 tracing::warn!(error = %e, "nostaro spawn failed");
                 Run::Rejected
@@ -271,7 +283,9 @@ impl InvokeHandler for NostrInvokeHandler {
             // 宣言外は正常な core からは来ない。fail-closed。
             _ => return InvokeOutcome::Rejected,
         };
-        run_to_outcome(self.run(&argv).await)
+        // resolve は read（副作用なし）。他は relay/外部へ書く（二重投稿防止のため非ゼロ=Indeterminate）。
+        let publishes = operation != "resolve";
+        run_to_outcome(self.run(&argv, publishes).await)
     }
 }
 

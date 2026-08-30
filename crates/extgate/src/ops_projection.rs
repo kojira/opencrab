@@ -59,12 +59,49 @@ impl ExtgateOpsGatewayActions {
 
     /// payload 内の短縮参照文字列（uN/eN/cN）を実 ID へ解決する（core 側・汎用）。会話ログから
     /// `ConversationRefs` を決定的に再構築して逆引きする。解決できない値はそのまま通す。
-    fn resolve_payload(&self, payload: &Value) -> Value {
+    /// 宣言 schema が `"format":"short-ref"` を付けた top-level field だけを短縮参照解決する
+    /// （全 string 無差別ではなく的を絞る・レビュー要望）。gateway が参照フィールドを標示し、core は
+    /// その field のみ ConversationRefs で解決する（platform 語彙なし・generic）。
+    fn resolve_payload(&self, operation: &str, payload: &Value) -> Value {
+        let fields = self.short_ref_fields(operation);
+        if fields.is_empty() {
+            return payload.clone();
+        }
+        let Value::Object(map) = payload else {
+            return payload.clone();
+        };
         let refs = match self.build_refs() {
             Some(r) => r,
             None => return payload.clone(),
         };
-        resolve_refs_in_value(payload, &refs)
+        let mut out = map.clone();
+        for field in &fields {
+            if let Some(Value::String(s)) = out.get(field) {
+                if let Some(id) = refs.resolve_short_ref(s) {
+                    out.insert(field.clone(), Value::String(id));
+                }
+            }
+        }
+        Value::Object(out)
+    }
+
+    /// 宣言 schema の top-level properties から `"format":"short-ref"` 標示の field 名を集める。
+    fn short_ref_fields(&self, operation: &str) -> Vec<String> {
+        self.declarations
+            .iter()
+            .find(|d| d.name == operation)
+            .and_then(|d| d.input_schema.get("properties"))
+            .and_then(|p| p.as_object())
+            .map(|props| {
+                props
+                    .iter()
+                    .filter(|(_, spec)| {
+                        spec.get("format").and_then(|f| f.as_str()) == Some("short-ref")
+                    })
+                    .map(|(k, _)| k.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn build_refs(&self) -> Option<ConversationRefs> {
@@ -88,40 +125,6 @@ fn map_sharing(s: Sharing) -> ToolSharing {
     match s {
         Sharing::AgentBound => ToolSharing::AgentBound,
         Sharing::ConversationBound => ToolSharing::ConversationBound,
-    }
-}
-
-/// `uN` / `eN` / `cN`（prefix + 数字）だけを短縮参照とみなす。
-fn is_short_ref(s: &str) -> bool {
-    let mut chars = s.chars();
-    let Some(prefix) = chars.next() else {
-        return false;
-    };
-    if !matches!(prefix, 'u' | 'e' | 'c') {
-        return false;
-    }
-    let rest = chars.as_str();
-    !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
-}
-
-fn resolve_refs_in_value(value: &Value, refs: &ConversationRefs) -> Value {
-    match value {
-        Value::String(s) if is_short_ref(s) => match refs.resolve_short_ref(s) {
-            Some(id) => Value::String(id),
-            None => value.clone(),
-        },
-        Value::Array(items) => Value::Array(
-            items
-                .iter()
-                .map(|v| resolve_refs_in_value(v, refs))
-                .collect(),
-        ),
-        Value::Object(map) => Value::Object(
-            map.iter()
-                .map(|(k, v)| (k.clone(), resolve_refs_in_value(v, refs)))
-                .collect(),
-        ),
-        _ => value.clone(),
     }
 }
 
@@ -160,7 +163,7 @@ impl GatewayActions for ExtgateOpsGatewayActions {
                 error: Some("operation_unknown".to_string()),
             };
         }
-        let payload = self.resolve_payload(args);
+        let payload = self.resolve_payload(name, args);
         // 背景 subtask 内での await（option B）: turn は既に spawned で返り detach 済み。
         match invoke_and_wait(
             &self.state,

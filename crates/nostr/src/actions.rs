@@ -157,20 +157,11 @@ impl GatewayActions for NostrGatewayActions {
                 "nostr_post は撤去されました。普通の投稿は応答本文をそのまま書いてください\
                  （自動で publish されます）。",
             ),
-            "nostr_reply" => {
-                let (Some(target), Some(text)) = (arg_str(args, "target"), arg_str(args, "text"))
-                else {
-                    return err("target と text パラメータが必要です");
-                };
-                match self
-                    .cli
-                    .reply(agent_id, target, text, arg_str(args, "from"))
-                    .await
-                {
-                    Ok(out) => ok(json!({"result": out})),
-                    Err(e) => err(format!("nostr_reply 失敗: {e}")),
-                }
-            }
+            // DI フェーズ1: 撤去済み（fail-closed）。返信は gateway 宣言 DI `reply(e番号, 本文)` へ
+            // 移行（#840 で露出撤去・publish する副経路は残さない）。
+            "nostr_reply" => err(
+                "nostr_reply は撤去されました。返信は reply(e番号, 本文) 操作を使ってください。",
+            ),
             // #514: DM 送信は禁止。定義から外しているのでモデルは通常ここへ来ないが、
             // 名前指定で呼ばれても fail-closed で拒否する（黙って成功に見せない）。
             "nostr_dm" => err(
