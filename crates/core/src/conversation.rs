@@ -1124,7 +1124,11 @@ fn truncate_body(content: &str, limit: usize) -> String {
 /// 種別ラベルは即時判定（受信側の内部処理）に使うが会話表示には不要（row294b: メンションと
 /// リプライは別物・表示にラベル不要）。core は transport を名指ししないので、行判定は汎用マーカー
 /// ` kind:<数字>` で行う（外部 origin の車線標識と同じく特定 SDK に依存しない）。
-fn strip_inbound_meta_for_display(content: &str) -> String {
+///
+/// #826 の会話 snapshot（旧レンダリング済み blob）にも read 時に適用するため crate 公開する
+/// （`context_budget::governor::assemble_from_snapshot`）。行単位で処理するので、単一ログ本文にも
+/// 複数行の snapshot blob にも同じ規則で効く。
+pub(crate) fn strip_inbound_meta_for_display(content: &str) -> String {
     let mut lines: Vec<String> = Vec::new();
     for line in content.split('\n') {
         // メタ行（`[… kind:1 …]`）を落とす（新形 / 旧 from=/target= 付きの両方）。

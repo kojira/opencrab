@@ -204,9 +204,20 @@ pub fn assemble_from_snapshot(
         .map(|l| format_single_log_with_echo(l, Some(&completed_for_read), Some(&refs)))
         .collect::<Vec<_>>()
         .join("\n");
+    // #826 snapshot は旧レンダリング済みテキストの blob で、§9A/refs 描画経路を通らずそのまま
+    // 連結される。read 時に表示剥がし（メタ行除去・生識別子短縮）を適用して legacy 残存を消す。
+    // 触るのは派生キャッシュの読み出しだけで正本 session_logs は書き換えない。剥がしは冪等なので
+    // 新形式（既に §9A）には無影響。次の finish_turn で剥がし済みが再永続化され snapshot は自己治癒する。
     let text = match &snap {
-        Some(s) if delta.is_empty() => s.compacted_conversation.clone(),
-        Some(s) => format!("{}\n{delta}", s.compacted_conversation),
+        Some(s) => {
+            let base =
+                crate::conversation::strip_inbound_meta_for_display(&s.compacted_conversation);
+            if delta.is_empty() {
+                base
+            } else {
+                format!("{base}\n{delta}")
+            }
+        }
         None if delta.is_empty() => crate::conversation::NO_MESSAGES_MARKER.to_string(),
         None => delta,
     };

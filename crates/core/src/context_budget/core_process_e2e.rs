@@ -436,6 +436,70 @@ fn d_hysteresis_consecutive_posts_do_not_refire() {
     );
 }
 
+/// row295 実測再現: 旧形式の会話 snapshot blob（§9A/refs 描画経路を通らず連結される）に
+/// legacy メタ行・生識別子が残り、新形式 delta と混在する。assemble_from_snapshot が read 時に
+/// blob 部も剥がすことを固定する（追修1 が単一ログ描画だけに効いて中間 blob に届かなかった穴）。
+///
+/// メタ行の transport ラベルは本番では固有名だが、剥がしは汎用マーカー ` kind:<数字>` で行うため、
+/// core のテストは R7 境界（no_gate_identifiers）を守り中立ラベル `[inbound kind:… ]` で同じ経路を突く。
+#[test]
+fn legacy_snapshot_blob_is_stripped_on_assembly() {
+    let conn = opencrab_db::init_memory().unwrap();
+    let legacy_pubkey = "9f".repeat(32); // 旧話者行の生 64hex（u 番号化されていない）
+    let npub = format!("npub1{}", "q".repeat(58));
+    let note = format!("note1{}", "p".repeat(58));
+    // 旧レンダリング済み blob: 旧話者行 + legacy メタ行（from=/target= 付き）。
+    let legacy_blob = format!(
+        "[{legacy_pubkey}] [2026-08-30 06:06:45]:\nこんにちは、みなさん\n[inbound kind:1 メンション from={npub} target={note}]"
+    );
+    let snap = opencrab_db::queries::ConversationSnapshotRow {
+        id: None,
+        session_id: SESSION.into(),
+        compacted_conversation: legacy_blob,
+        through_log_id: 0,
+        token_count: 100,
+        created_at: None,
+    };
+    opencrab_db::queries::insert_conversation_snapshot(&conn, &snap).unwrap();
+    // snapshot 以降の新規行（delta）。§9A/refs 経路で描画され新形式ラベル行を含む。
+    let delta = opencrab_db::queries::SessionLogRow {
+        id: None,
+        agent_id: AGENT.into(),
+        session_id: SESSION.into(),
+        log_type: "speech".into(),
+        content: "やあ\n[inbound kind:1 メンション]".into(),
+        speaker_id: Some("pk_new".into()),
+        turn_number: None,
+        metadata_json: Some(
+            serde_json::json!({"external_origin": "ext:event:v1:default:E9"}).to_string(),
+        ),
+        created_at: None,
+    };
+    opencrab_db::queries::insert_session_log(&conn, &delta).unwrap();
+
+    let assembled = assemble_from_snapshot(&conn, SESSION, AGENT).unwrap();
+    let text = &assembled.text;
+    // メタ行・生 ID は blob 部・delta 部とも消える。
+    assert!(
+        !text.contains("[inbound kind:"),
+        "種別ラベル行が残存: {text}"
+    );
+    assert!(
+        !text.contains(&npub) && !text.contains(&note),
+        "生 bech32 が残存: {text}"
+    );
+    assert!(
+        !text.contains(&legacy_pubkey),
+        "旧話者行の生 64hex が残存: {text}"
+    );
+    // 本文は blob・delta とも残る。
+    assert!(
+        text.contains("こんにちは、みなさん"),
+        "blob 本文が落ちた: {text}"
+    );
+    assert!(text.contains("やあ"), "delta 本文が落ちた: {text}");
+}
+
 /// 撤去の完全性。SQLite WAL の `wal_checkpoint` など別物は対象外。
 #[test]
 fn context_arrival_point_mechanism_is_gone() {
