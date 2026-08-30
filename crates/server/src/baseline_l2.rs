@@ -2608,15 +2608,18 @@ mod tests {
                 .count(),
             12
         );
+        // DI フェーズ1: 投稿・操作系の組み込み Nostr ツールは撤去した（能力宣言 DI へ移行・
+        // 普通の投稿は say）。組み込み tool surface には出ない（DI operation は runtime 宣言で
+        // 静的 surface に現れない）。
         assert_eq!(
             live_tools
                 .iter()
                 .filter(|name| matches!(
                     name.as_str(),
-                    "nostr_post" | "nostr_reply" | "nostr_upload" | "nostr_zap"
+                    "nostr_post" | "nostr_reply" | "nostr_upload" | "nostr_zap" | "nostr_run"
                 ))
                 .count(),
-            4
+            0
         );
     }
 

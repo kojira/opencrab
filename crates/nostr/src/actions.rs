@@ -1,4 +1,4 @@
-//! エージェントに露出する Nostr 送信ツール（`nostr_post` / `nostr_reply` /
+//! エージェントに露出する Nostr 送信ツール（`nostr_post` /
 //! `nostr_zap` / `nostr_upload`）。`GatewayActions` 実装なので
 //! `BridgedExecutor` がツール一覧にマージし、LLM から呼べる。
 //!
@@ -82,80 +82,20 @@ fn arg_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|s| !s.is_empty())
 }
 
-/// 送信系ツール共通の任意 `from` パラメータ定義（マルチ identity 投稿）。
-fn from_param() -> Value {
-    json!({
-        "type": "string",
-        "description": "任意。nostr_generate_key で生成した鍵の npub を指定すると、本鍵ではなく\
-                        その鍵で送信する（未指定なら本鍵で送信）。指定できるのは自分が生成した鍵のみ。"
-    })
-}
-
 #[async_trait]
 impl GatewayActions for NostrGatewayActions {
     fn definitions(&self) -> Vec<GatewayActionDef> {
         vec![
-            GatewayActionDef {
-                name: "nostr_post".to_string(),
-                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
-                description: "Nostr に新規ノート（kind:1）を投稿する。".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "text": {"type": "string", "description": "投稿本文。"},
-                        "from": from_param(),
-                    },
-                    "required": ["text"]
-                }),
-            },
-            GatewayActionDef {
-                name: "nostr_reply".to_string(),
-                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::ConversationBound },
-                description: "Nostr の特定ノートに返信する。target は受信イベントの note_id（note1...）または hex id。".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "target": {"type": "string", "description": "返信先ノートの note1.../hex id。"},
-                        "text": {"type": "string", "description": "返信本文。"},
-                        "from": from_param(),
-                    },
-                    "required": ["target", "text"]
-                }),
-            },
-            // #514: `nostr_dm` はここに**定義しない**（DM 送信は禁止）。DM は暗号化
-            // されていても秘密鍵が漏れた時点で過去に遡って全部読めるため、その前提ごと
-            // 無くす（オーナー決定）。定義から外すのでモデルはこのツールを見ない。万一
-            // 名前指定で呼ばれても `execute` が fail-closed で拒否する。将来「やっぱり DM を
-            // 使いたい」なら、この定義と `execute` の分岐、`PASSTHROUGH_DENIED_SUBCOMMANDS`
-            // の `dm`、`DM_KINDS` の受信破棄を戻せばよい（3 経路とも 1 か所ずつ）。
-            GatewayActionDef {
-                name: "nostr_zap".to_string(),
-                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
-                description: "Nostr で zap（Lightning 投げ銭）を送る。".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "recipient": {"type": "string", "description": "宛先の npub または hex pubkey。"},
-                        "amount": {"type": "integer", "description": "sats 単位の金額。"},
-                        "message": {"type": "string", "description": "zap コメント（任意）。"},
-                        "from": from_param(),
-                    },
-                    "required": ["recipient", "amount"]
-                }),
-            },
-            GatewayActionDef {
-                name: "nostr_upload".to_string(),
-                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
-                description: "ワークスペース内のファイルを Blossom にアップロードして URL を得る。".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "アップロードするファイルパス。"},
-                        "from": from_param(),
-                    },
-                    "required": ["path"]
-                }),
-            },
+            // DI フェーズ1（統括裁定 2026-08-30）: 投稿・操作系の組み込みツールは撤去した。
+            // - `nostr_post`: 普通の投稿は「final text をそのまま say」で publish する（§9A.1・
+            //   post 関数は存在しない）。deliver_say が reply target 無しを standalone post にする。
+            // - `nostr_reply`: gateway 宣言 DI `reply(event, text)` へ移行（#840 で露出撤去済み）。
+            // - `nostr_upload`: gateway 宣言 DI `upload(path)` へ移行。
+            // - `nostr_zap`: 撤去（実績0・TRUSTED_ONLY・DI 置換なし・統括裁定）。
+            // - `nostr_dm`: #514 で禁止済み。
+            // 鍵・設定管理（generate_key / list_keys / switch_identity / configure_nostr /
+            // get_my_nostr_relay / set_my_nostr_relay）は**残す**（インターフェース裁定の対象外・
+            // 代替なき外形減を避ける）。`execute` の撤去分アームは fail-closed で拒否する。
             GatewayActionDef {
                 name: "nostr_generate_key".to_string(),
                 class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Dispatchable, sub_engine: opencrab_gateway::SubEngineAccess::Allowed, sharing: opencrab_gateway::ToolSharing::AgentBound },
@@ -211,29 +151,17 @@ impl GatewayActions for NostrGatewayActions {
     ) -> GatewayActionResult {
         let agent_id = &ctx.agent_id;
         match name {
-            "nostr_post" => {
-                let Some(text) = arg_str(args, "text") else {
-                    return err("text パラメータが必要です");
-                };
-                match self.cli.post(agent_id, text, arg_str(args, "from")).await {
-                    Ok(out) => ok(json!({"result": out})),
-                    Err(e) => err(format!("nostr_post 失敗: {e}")),
-                }
-            }
-            "nostr_reply" => {
-                let (Some(target), Some(text)) = (arg_str(args, "target"), arg_str(args, "text"))
-                else {
-                    return err("target と text パラメータが必要です");
-                };
-                match self
-                    .cli
-                    .reply(agent_id, target, text, arg_str(args, "from"))
-                    .await
-                {
-                    Ok(out) => ok(json!({"result": out})),
-                    Err(e) => err(format!("nostr_reply 失敗: {e}")),
-                }
-            }
+            // DI フェーズ1: 撤去済み。普通の投稿は say（final text）で publish する（§9A.1）。
+            // 定義から外しているのでモデルは見ないが、名前指定は fail-closed で拒否する。
+            "nostr_post" => err(
+                "nostr_post は撤去されました。普通の投稿は応答本文をそのまま書いてください\
+                 （自動で publish されます）。",
+            ),
+            // DI フェーズ1: 撤去済み（fail-closed）。返信は gateway 宣言 DI `reply(e番号, 本文)` へ
+            // 移行（#840 で露出撤去・publish する副経路は残さない）。
+            "nostr_reply" => err(
+                "nostr_reply は撤去されました。返信は reply(e番号, 本文) 操作を使ってください。",
+            ),
             // #514: DM 送信は禁止。定義から外しているのでモデルは通常ここへ来ないが、
             // 名前指定で呼ばれても fail-closed で拒否する（黙って成功に見せない）。
             "nostr_dm" => err(
@@ -241,32 +169,13 @@ impl GatewayActions for NostrGatewayActions {
                  全部読めるため扱いません。private な話は Discord の DM か指定チャンネルを\
                  使ってください。",
             ),
-            "nostr_zap" => {
-                let Some(recipient) = arg_str(args, "recipient") else {
-                    return err("recipient パラメータが必要です");
-                };
-                let Some(amount) = args.get("amount").and_then(|v| v.as_u64()) else {
-                    return err("amount パラメータ（整数）が必要です");
-                };
-                let message = arg_str(args, "message");
-                match self
-                    .cli
-                    .zap(agent_id, recipient, amount, message, arg_str(args, "from"))
-                    .await
-                {
-                    Ok(out) => ok(json!({"result": out})),
-                    Err(e) => err(format!("nostr_zap 失敗: {e}")),
-                }
-            }
-            "nostr_upload" => {
-                let Some(path) = arg_str(args, "path") else {
-                    return err("path パラメータが必要です");
-                };
-                match self.cli.upload(agent_id, path, arg_str(args, "from")).await {
-                    Ok(url) => ok(json!({"url": url})),
-                    Err(e) => err(format!("nostr_upload 失敗: {e}")),
-                }
-            }
+            // DI フェーズ1: 撤去済み（fail-closed）。zap は DI 置換なし・撤去（統括裁定）。
+            // upload は gateway 宣言 DI `upload(path)` へ移行。
+            "nostr_zap" => err("nostr_zap は撤去されました。"),
+            "nostr_upload" => err(
+                "nostr_upload は撤去されました。ファイルアップロードは upload(path) 操作を\
+                 使ってください。",
+            ),
             "nostr_generate_key" => {
                 // prefix は任意。未指定/空ならランダム鍵。検証は cli.vanity 側で行う。
                 let prefix = arg_str(args, "prefix").unwrap_or("");
@@ -340,21 +249,30 @@ mod tests {
     fn test_definitions_cover_all_actions() {
         let a = NostrGatewayActions::new(NostaroCli::new());
         let names: Vec<String> = a.definitions().into_iter().map(|d| d.name).collect();
+        // DI フェーズ1: 鍵・設定管理のみ残す（投稿・操作系は撤去）。
         for expected in [
-            "nostr_post",
-            "nostr_reply",
-            "nostr_zap",
-            "nostr_upload",
             "nostr_generate_key",
             "nostr_list_keys",
             "nostr_switch_identity",
         ] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
         }
+        // 撤去済み（投稿・操作系）は定義に無い。
+        for retired in ["nostr_post", "nostr_zap", "nostr_upload"] {
+            assert!(
+                !names.contains(&retired.to_string()),
+                "{retired} は撤去したので定義に無いこと"
+            );
+        }
         // #514: nostr_dm は定義から外れている（DM 送信禁止）。
         assert!(
             !names.contains(&"nostr_dm".to_string()),
             "nostr_dm は #514 で撤去したので定義に無いこと"
+        );
+        // nostr_reply はエージェント露出を撤去した（返信は say 一本 / #840）。
+        assert!(
+            !names.contains(&"nostr_reply".to_string()),
+            "nostr_reply は露出撤去したので定義に無いこと"
         );
     }
 
@@ -364,9 +282,10 @@ mod tests {
     ///
     /// - **`Dispatchable` 集合 == {nostr_generate_key}**: vanity 探索は長時間なので
     ///   background 化する。他は全部配送系 / 同ターン結果依存で `Inline`。
-    /// - **`ConversationBound` 集合 == {nostr_reply}**: 会話固有の一時ハンドル（受信投稿の
-    ///   note id = `target`）を必須に取る唯一のツール。全ゲート横断では
-    ///   {discord_add_reaction, nostr_reply, send_ui}。
+    /// - **`ConversationBound` 集合 == {}**: 以前は `nostr_reply`（受信投稿の note id =
+    ///   `target` を必須に取る唯一のツール）が該当したが、露出撤去（返信は say 一本 / #840）
+    ///   で nostr ゲートの ConversationBound は空になった。全ゲート横断では
+    ///   {discord_add_reaction, send_ui}。
     #[test]
     fn nostr_tool_class_sets_are_fixed() {
         use opencrab_gateway::{DispatchMode, ToolSharing};
@@ -391,8 +310,8 @@ mod tests {
             .filter(|d| d.class.sharing == ToolSharing::ConversationBound)
             .map(|d| d.name.clone())
             .collect();
-        let expected: std::collections::BTreeSet<String> =
-            std::iter::once("nostr_reply".to_string()).collect();
+        // nostr_reply 露出撤去（返信は say 一本 / #840）で ConversationBound は空。
+        let expected: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         assert_eq!(
             conv_bound, expected,
             "nostr ゲートの ConversationBound 集合がずれている（sharing 属性の付け忘れ/誤り）"
@@ -556,15 +475,8 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} が nostr definitions() に無い"))
                 .class
         };
-        // 送信系（配送ツール）は inline。#514: nostr_dm は撤去済み。
-        for name in [
-            "nostr_post",
-            "nostr_reply",
-            "nostr_zap",
-            "nostr_upload",
-            "nostr_switch_identity",
-            "nostr_list_keys",
-        ] {
+        // 残存する同ターン依存ツールは inline（投稿・操作系は DI フェーズ1 で撤去済み）。
+        for name in ["nostr_switch_identity", "nostr_list_keys"] {
             assert_eq!(
                 class_of(name).dispatch,
                 DispatchMode::Inline,
@@ -604,18 +516,43 @@ mod tests {
     async fn test_missing_args_rejected_without_spawning() {
         let a = NostrGatewayActions::new(NostaroCli::new());
         let ctx = GatewayCallContext::for_agent("agent-1");
-        // text 欠落 → nostaro を spawn せず即エラー。
-        let r = a.execute("nostr_post", &json!({}), &ctx).await;
+        // npub 欠落 → nostaro を spawn せず即エラー（残存ツール）。
+        let r = a.execute("nostr_switch_identity", &json!({}), &ctx).await;
         assert!(!r.success);
-        assert!(r.error.unwrap().contains("text"));
-
-        let r = a
-            .execute("nostr_zap", &json!({"recipient": "npub1x"}), &ctx)
-            .await;
-        assert!(!r.success);
-        assert!(r.error.unwrap().contains("amount"));
+        assert!(r.error.unwrap().contains("npub"));
 
         let r = a.execute("unknown_x", &json!({}), &ctx).await;
         assert!(!r.success);
+    }
+
+    /// DI フェーズ1: 投稿・操作系の組み込みツールは撤去され、定義に出ず fail-closed で拒否される。
+    #[tokio::test]
+    async fn test_retired_posting_tools_are_removed_and_rejected() {
+        let a = NostrGatewayActions::new(NostaroCli::new());
+        let names: Vec<String> = a.definitions().into_iter().map(|d| d.name).collect();
+        for retired in ["nostr_post", "nostr_zap", "nostr_upload", "nostr_reply"] {
+            assert!(
+                !names.contains(&retired.to_string()),
+                "{retired} は定義に出てはいけない"
+            );
+        }
+        // 鍵・設定管理は残す。
+        for kept in [
+            "nostr_generate_key",
+            "nostr_list_keys",
+            "nostr_switch_identity",
+        ] {
+            assert!(names.contains(&kept.to_string()), "{kept} は残す");
+        }
+        let ctx = GatewayCallContext::for_agent("agent-retired");
+        // 名前指定は fail-closed（黙って成功に見せない）。
+        for (name, args) in [
+            ("nostr_post", json!({"text": "x"})),
+            ("nostr_zap", json!({"recipient": "npub1x", "amount": 1})),
+            ("nostr_upload", json!({"path": "x"})),
+        ] {
+            let r = a.execute(name, &args, &ctx).await;
+            assert!(!r.success, "{name} は成功してはいけない");
+        }
     }
 }

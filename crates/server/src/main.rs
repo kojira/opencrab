@@ -102,8 +102,13 @@ async fn main() -> anyhow::Result<()> {
         let mut conn = db
             .lock()
             .map_err(|_| anyhow::anyhow!("db lock for extgate recover"))?;
-        opencrab_extgate::recover_stale_deliveries(&mut conn, opencrab_extgate::now_nanos())
+        let now = opencrab_extgate::now_nanos();
+        opencrab_extgate::recover_stale_deliveries(&mut conn, now)
             .map_err(|e| anyhow::anyhow!("extgate recover failed: {}", e.code.as_str()))?;
+        // DI 拡張 §7.5: 残 sending の operation call も stale indeterminate にする（listener 前）。
+        opencrab_extgate::recover_stale_calls(&mut conn, now).map_err(|e| {
+            anyhow::anyhow!("extgate operation-call recover failed: {}", e.code.as_str())
+        })?;
     }
     let gate_token = opencrab_extgate::OperatorToken::take_from_env();
     let gate_socket = opencrab_extgate::validate_listen_socket(&cfg.gate.listen_socket)?;
@@ -806,7 +811,12 @@ async fn main() -> anyhow::Result<()> {
                 return Err(GateError::store());
             };
             match admit_nostr_said(text, author_id, &self_pk, &allow) {
-                Err(AdmitSaidError::BadAnchor) => Err(GateError::new(ErrorCode::BadRequest)),
+                // 診断のため detail を載せる（本文/鍵/path は入れない・カテゴリのみ）。anchor の
+                // key 集合/型不整合（gateway↔core のバージョン齟齬など）を素早く切り分けられる。
+                Err(AdmitSaidError::BadAnchor) => Err(GateError::with_detail(
+                    ErrorCode::BadRequest,
+                    "nostr V1 anchor parse failed (unknown/missing key or bad type)",
+                )),
                 Err(AdmitSaidError::Drop { anchor, .. }) => Ok(NostrSaidDecision::Drop {
                     bundle: nostr_bundle_from_anchor(&anchor)?,
                 }),

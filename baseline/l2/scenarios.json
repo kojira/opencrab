@@ -225,12 +225,7 @@
       "leave_voice_channel": "Requires a live Discord gateway and leaves a remote voice channel.",
       "send_ui": "Requires a live Discord gateway and sends remote UI components.",
       "nostr_generate_key": "Requires the operator's nostaro executable and writes key material outside the temporary workspace.",
-      "nostr_post": "Requires an adopted Nostr identity and publishes to live relays.",
-      "nostr_reply": "Requires an adopted Nostr identity and publishes to live relays.",
       "nostr_switch_identity": "Requires a generated key and configured Nostr transport capability; successful adoption may start a live relay connection.",
-      "nostr_run": "Requires an adopted identity, operator nostaro executable, and potentially live relay/service I/O.",
-      "nostr_upload": "Requires an adopted Nostr identity and uploads to a live external service.",
-      "nostr_zap": "Requires an adopted Nostr identity and performs a live external payment flow.",
       "run_my_heartbeat": "Successful manual fire runs an actual agent turn through a configured transport and LLM provider.",
       "request_peer_review": "Success delivers a message through the active transport. A local fake delivery would not fix live delivery behavior."
     },

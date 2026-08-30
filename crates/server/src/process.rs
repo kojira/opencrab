@@ -1008,6 +1008,10 @@ fn set_turn_log_callbacks(
     agent_id: String,
     session_id: String,
     tool_result_workspace: std::path::PathBuf,
+    // §9A.1 / row292: gateway 宣言 DI operation の tool_call は arguments を会話へ verbatim 保持
+    // する（reply 本文が次ターンで消えない）。ここに名前が入る call は digest から除外する。
+    // 名前は runtime の RunRequest.gateway_actions 由来で core に platform 語彙を持たない。
+    di_op_names: std::collections::HashSet<String>,
 ) {
     {
         let tc_db = db.clone();
@@ -1032,6 +1036,37 @@ fn set_turn_log_callbacks(
                         tracing::error!(agent_id = %tc_agent, session_id = %tc_session, "Failed to insert speech log (with tool_call): {e}");
                     }
                 }
+                // DI operation の call id を記録し、会話再構成で arguments を digest 除外する。
+                let preserve_ids: Vec<String> =
+                    serde_json::from_str::<serde_json::Value>(&tool_calls_json)
+                        .ok()
+                        .and_then(|v| {
+                            v.as_array().map(|items| {
+                                items
+                                    .iter()
+                                    .filter_map(|it| {
+                                        let id = it.get("id")?.as_str()?;
+                                        let name = it
+                                            .get("function")
+                                            .and_then(|f| f.get("name"))
+                                            .or_else(|| it.get("name"))
+                                            .and_then(|n| n.as_str())?;
+                                        di_op_names
+                                            .contains(name)
+                                            .then(|| id.to_string())
+                                    })
+                                    .collect()
+                            })
+                        })
+                        .unwrap_or_default();
+                let metadata = if preserve_ids.is_empty() {
+                    serde_json::json!({ "tool_calls_json": tool_calls_json })
+                } else {
+                    serde_json::json!({
+                        "tool_calls_json": tool_calls_json,
+                        "preserve_arg_call_ids": preserve_ids,
+                    })
+                };
                 let log = opencrab_db::queries::SessionLogRow {
                     id: None,
                     agent_id: tc_agent.clone(),
@@ -1040,9 +1075,7 @@ fn set_turn_log_callbacks(
                     content,
                     speaker_id: Some(tc_agent.clone()),
                     turn_number: None,
-                    metadata_json: Some(
-                        serde_json::json!({"tool_calls_json": tool_calls_json}).to_string(),
-                    ),
+                    metadata_json: Some(metadata.to_string()),
                     created_at: None,
                 };
                 if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
@@ -1646,12 +1679,20 @@ pub async fn run_agent_response(
     // LLM が見る文脈も変わらない（巨大結果の退避は上の `set_tool_result_offload` が担当していて、
     // この callback は永続化専用）。
     if req.persist_turn_logs {
+        // gateway 宣言 DI operation の名前（RunRequest.gateway_actions 由来・runtime・core に
+        // platform 語彙なし）。これらの tool_call は arguments を会話へ verbatim 保持する。
+        let di_op_names: std::collections::HashSet<String> = req
+            .gateway_actions
+            .as_ref()
+            .map(|ga| ga.definitions().into_iter().map(|d| d.name).collect())
+            .unwrap_or_default();
         set_turn_log_callbacks(
             &mut engine,
             state.db.clone(),
             agent_id.to_string(),
             session_id.to_string(),
             tool_result_workspace,
+            di_op_names,
         );
     }
 

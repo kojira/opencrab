@@ -975,14 +975,176 @@ fn format_logs(logs: &[opencrab_db::queries::SessionLogRow]) -> String {
 }
 
 pub fn format_single_log(log: &opencrab_db::queries::SessionLogRow) -> String {
-    format_single_log_with_echo(log, None)
+    format_single_log_with_echo(log, None, None)
+}
+
+/// 会話ローカルの短縮参照（§9A）。u=外部話者 / e=受信イベント / c=tool call。全順序ログの
+/// 初出順で採番する。写像は決定的（同じログ列 → 同じ番号）なので追加の永続や migration は
+/// 不要で、番号は不変（append-only ログの初出順が安定なため）。core の enum/DB/error に個別
+/// platform 語彙を足さず、log の汎用 field（speaker_id / external_origin / tool_call id）で採る。
+#[derive(Debug, Default, Clone)]
+pub struct ConversationRefs {
+    agent_id: String,
+    speakers: std::collections::HashMap<String, usize>,
+    events: std::collections::HashMap<String, usize>,
+    calls: std::collections::HashMap<String, usize>,
+}
+
+impl ConversationRefs {
+    /// 全順序ログから初出順で採番する。
+    pub fn build(logs: &[opencrab_db::queries::SessionLogRow], agent_id: &str) -> Self {
+        let mut refs = ConversationRefs {
+            agent_id: agent_id.to_string(),
+            ..Default::default()
+        };
+        for log in logs {
+            match log.log_type.as_str() {
+                "speech" => {
+                    if let Some(sp) = log.speaker_id.as_deref() {
+                        if sp != agent_id && !refs.speakers.contains_key(sp) {
+                            let n = refs.speakers.len() + 1;
+                            refs.speakers.insert(sp.to_string(), n);
+                        }
+                    }
+                    if let Some(origin) = external_origin_of(log) {
+                        if !refs.events.contains_key(&origin) {
+                            let n = refs.events.len() + 1;
+                            refs.events.insert(origin, n);
+                        }
+                    }
+                }
+                "tool_call" => {
+                    for id in tool_call_ids_of(log) {
+                        refs.assign_call(&id);
+                    }
+                }
+                "tool_result" | "tool_cancelled" => {
+                    if let Some(id) = tool_call_id_of_result(log) {
+                        refs.assign_call(&id);
+                    }
+                }
+                _ => {}
+            }
+        }
+        refs
+    }
+
+    fn assign_call(&mut self, id: &str) {
+        if !self.calls.contains_key(id) {
+            let n = self.calls.len() + 1;
+            self.calls.insert(id.to_string(), n);
+        }
+    }
+
+    /// 話者表示。自分は u 番号を付けず名前だけ（§9A.2・kind:0 名は後続スライス）。
+    fn speaker_label(&self, speaker: &str) -> String {
+        if speaker == self.agent_id {
+            speaker.to_string()
+        } else if let Some(n) = self.speakers.get(speaker) {
+            format!("u{n}")
+        } else {
+            speaker.to_string()
+        }
+    }
+
+    fn event_of(&self, log: &opencrab_db::queries::SessionLogRow) -> Option<usize> {
+        external_origin_of(log).and_then(|o| self.events.get(&o).copied())
+    }
+
+    fn call_of(&self, id: &str) -> Option<usize> {
+        self.calls.get(id).copied()
+    }
+
+    /// 短縮参照トークン（`uN` / `eN` / `cN`）を裏の実 ID へ逆引きする（§9A・DI 能力の引数解決）。
+    /// `uN`→話者 speaker_id（Nostr では pubkey）、`eN`→受信イベントの external_origin、
+    /// `cN`→tool_call id。汎用（platform 非依存）で、未知トークンや未割当番号は None。
+    pub fn resolve_short_ref(&self, token: &str) -> Option<String> {
+        let token = token.trim();
+        let mut chars = token.chars();
+        let prefix = chars.next()?;
+        let num: usize = chars.as_str().parse().ok()?;
+        let map = match prefix {
+            'u' => &self.speakers,
+            'e' => &self.events,
+            'c' => &self.calls,
+            _ => return None,
+        };
+        map.iter()
+            .find(|(_, &n)| n == num)
+            .map(|(id, _)| id.clone())
+    }
+}
+
+/// 受信イベントの external_origin（inbound 記録が metadata に載せる汎用 field）。
+fn external_origin_of(log: &opencrab_db::queries::SessionLogRow) -> Option<String> {
+    let meta: serde_json::Value = serde_json::from_str(log.metadata_json.as_deref()?).ok()?;
+    meta.get("external_origin")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+fn tool_call_id_of_result(log: &opencrab_db::queries::SessionLogRow) -> Option<String> {
+    let meta: serde_json::Value = serde_json::from_str(log.metadata_json.as_deref()?).ok()?;
+    meta.get("tool_call_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+fn tool_call_ids_of(log: &opencrab_db::queries::SessionLogRow) -> Vec<String> {
+    let Some(meta) = log
+        .metadata_json
+        .as_deref()
+        .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+    else {
+        return Vec::new();
+    };
+    let Some(tcj) = meta.get("tool_calls_json").and_then(|v| v.as_str()) else {
+        return Vec::new();
+    };
+    let Ok(calls) = serde_json::from_str::<serde_json::Value>(tcj) else {
+        return Vec::new();
+    };
+    calls
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|it| it.get("id").and_then(|v| v.as_str()).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 長文イベントの切り詰め閾値（§9A.5）。タイムライン束ね（watch 車線）は 200 字、
+/// 自分宛て（mention/reply 車線）は 2,000 字。origin は汎用 external_id の車線標識で判定する。
+/// self 発話（origin なし）は切り詰めない。
+fn render_limit(origin: Option<&str>) -> Option<usize> {
+    match origin {
+        Some(o) if o.contains(":watch:") => Some(200),
+        Some(_) => Some(2000),
+        None => None,
+    }
+}
+
+/// `limit` 字を超える本文を切り詰め、末尾に「…(全N字)」を付す（§9A.5）。resolve 案内は
+/// 能力実装スライスで追加する。N は元本文の全文字数。
+fn truncate_body(content: &str, limit: usize) -> String {
+    let total = content.chars().count();
+    if total <= limit {
+        return content.to_string();
+    }
+    let head: String = content.chars().take(limit).collect();
+    format!("{head}…(全{total}字)")
 }
 
 /// 完了済み tool_call の arguments を `{ref,digest,bytes}` に置換して読む。
-/// 未決着 call は `completed_ids` に無いので全文のまま。
+/// 未決着 call は `completed_ids` に無いので全文のまま。`refs` があれば §9A の短縮参照
+/// （u/e/c 番号・識別子排除・長文切り詰め）を適用する。None なら従来の生表示（単体整形・
+/// live inbound 注入・テスト）。
 pub fn format_single_log_with_echo(
     log: &opencrab_db::queries::SessionLogRow,
     completed_ids: Option<&std::collections::HashSet<String>>,
+    refs: Option<&ConversationRefs>,
 ) -> String {
     let ts = log
         .created_at
@@ -992,14 +1154,35 @@ pub fn format_single_log_with_echo(
         .unwrap_or_default();
 
     match log.log_type.as_str() {
-        "speech" => {
-            let speaker = log.speaker_id.as_deref().unwrap_or(&log.agent_id);
-            format!("[{}]{}:\n{}", speaker, ts, log.content)
-        }
+        "speech" => match refs {
+            Some(r) => {
+                let speaker = r.speaker_label(log.speaker_id.as_deref().unwrap_or(&log.agent_id));
+                let eref = r
+                    .event_of(log)
+                    .map(|n| format!(" e{n}"))
+                    .unwrap_or_default();
+                let content = match render_limit(external_origin_of(log).as_deref()) {
+                    Some(lim) => truncate_body(&log.content, lim),
+                    None => log.content.clone(),
+                };
+                format!("[{}]{}{}:\n{}", speaker, ts, eref, content)
+            }
+            None => {
+                let speaker = log.speaker_id.as_deref().unwrap_or(&log.agent_id);
+                format!("[{}]{}:\n{}", speaker, ts, log.content)
+            }
+        },
         "tool_call" => {
             let speaker = log.speaker_id.as_deref().unwrap_or(&log.agent_id);
             if let Some(meta_json) = log.metadata_json.as_deref() {
                 if let Ok(meta) = serde_json::from_str::<serde_json::Value>(meta_json) {
+                    // §9A.1 / row292: DI operation の call は arguments を verbatim 保持する
+                    // （reply 本文が次ターンで消えない）。digest（argument_reference）から除外する。
+                    let preserve: std::collections::HashSet<&str> = meta
+                        .get("preserve_arg_call_ids")
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+                        .unwrap_or_default();
                     if let Some(tool_calls_json) =
                         meta.get("tool_calls_json").and_then(|v| v.as_str())
                     {
@@ -1030,13 +1213,20 @@ pub fn format_single_log_with_echo(
                                                 .unwrap_or_default();
                                             (name, args)
                                         };
-                                        let args =
-                                            if completed_ids.is_some_and(|set| set.contains(id)) {
-                                                argument_reference(log.id.unwrap_or(0), &args)
-                                            } else {
-                                                args
-                                            };
-                                        Some(format!("[id={}]: {}({})", id, name, args))
+                                        let args = if completed_ids
+                                            .is_some_and(|set| set.contains(id))
+                                            && !preserve.contains(id)
+                                        {
+                                            argument_reference(log.id.unwrap_or(0), &args)
+                                        } else {
+                                            args
+                                        };
+                                        // §9A: call_id を c 番号へ短縮（call_ 生 ID を排除）。
+                                        let call_ref = refs
+                                            .and_then(|r| r.call_of(id))
+                                            .map(|n| format!("c{n}"))
+                                            .unwrap_or_else(|| format!("id={id}"));
+                                        Some(format!("[{}]: {}({})", call_ref, name, args))
                                     })
                                     .collect();
                                 if !call_lines.is_empty() {
@@ -1077,10 +1267,14 @@ pub fn format_single_log_with_echo(
             // 読みは**もう一度呼べば同じものが得られる**ので、会話には参照だけを残す。落とす
             // のは次のターン以降への持ち越しだけで、そのターンの中では従来どおり本文がモデル
             // へ渡る（ツール往復は会話再構成を通らない）。記録（DB）も完全なまま残す。
+            let call_ref = refs
+                .and_then(|r| r.call_of(tool_call_id))
+                .map(|n| format!("c{n}"))
+                .unwrap_or_else(|| format!("id={tool_call_id}"));
             format!(
-                "[tool_result]{}:\n[id={}]: {} → {}",
+                "[tool_result]{}:\n[{}]: {} → {}",
                 ts,
-                tool_call_id,
+                call_ref,
                 tool_name,
                 result_reference(tool_name, &log.content)
             )
@@ -1098,9 +1292,13 @@ pub fn format_single_log_with_echo(
                 .as_ref()
                 .and_then(|value| value.get("tool_name").and_then(|v| v.as_str()))
                 .unwrap_or("unknown");
+            let call_ref = refs
+                .and_then(|r| r.call_of(tool_call_id))
+                .map(|n| format!("c{n}"))
+                .unwrap_or_else(|| format!("id={tool_call_id}"));
             format!(
-                "[tool_cancelled]{}:\n[id={}]: {} がキャンセルされた\n{}",
-                ts, tool_call_id, tool_name, log.content
+                "[tool_cancelled]{}:\n[{}]: {} がキャンセルされた\n{}",
+                ts, call_ref, tool_name, log.content
             )
         }
         "system" => {
@@ -1233,7 +1431,7 @@ mod format_log_tests {
         log.id = Some(42);
         let mut done = std::collections::HashSet::new();
         done.insert("tc-1".into());
-        let out = format_single_log_with_echo(&log, Some(&done));
+        let out = format_single_log_with_echo(&log, Some(&done), None);
         assert!(out.contains("search"), "{out}");
         assert!(out.contains(r#""ref":"log:42""#), "{out}");
         assert!(out.contains(r#""digest""#), "{out}");
@@ -1242,7 +1440,8 @@ mod format_log_tests {
             !out.contains(r#"{"q":"rust"}"#),
             "完了済み arguments は全文を残さない: {out}"
         );
-        let unresolved = format_single_log_with_echo(&log, Some(&std::collections::HashSet::new()));
+        let unresolved =
+            format_single_log_with_echo(&log, Some(&std::collections::HashSet::new()), None);
         assert!(
             unresolved.contains(r#"{"q":"rust"}"#),
             "未決着 call は全文: {unresolved}"
@@ -3280,5 +3479,204 @@ mod subtask_completed_folding_tests {
                  運ぶ（握り潰さない）こと: {out:.80}"
             );
         }
+    }
+}
+
+/// §9A 会話レンダリング（u/e/c 短縮参照・識別子排除・長文切り詰め）の固定。
+#[cfg(test)]
+mod render_refs_tests {
+    use super::*;
+    use opencrab_db::queries::SessionLogRow;
+
+    fn speech(agent: &str, speaker: &str, text: &str, origin: Option<&str>) -> SessionLogRow {
+        SessionLogRow {
+            id: None,
+            agent_id: agent.to_string(),
+            session_id: "s".into(),
+            log_type: "speech".into(),
+            content: text.to_string(),
+            speaker_id: Some(speaker.to_string()),
+            turn_number: None,
+            metadata_json: origin.map(|o| serde_json::json!({ "external_origin": o }).to_string()),
+            created_at: None,
+        }
+    }
+
+    fn tool_call(agent: &str, ids: &[&str]) -> SessionLogRow {
+        let calls: Vec<serde_json::Value> = ids
+            .iter()
+            .map(|id| serde_json::json!({"id": id, "function": {"name": "reply", "arguments": "{}"}}))
+            .collect();
+        let tcj = serde_json::Value::Array(calls).to_string();
+        SessionLogRow {
+            id: Some(1),
+            agent_id: agent.to_string(),
+            session_id: "s".into(),
+            log_type: "tool_call".into(),
+            content: String::new(),
+            speaker_id: Some(agent.to_string()),
+            turn_number: None,
+            metadata_json: Some(serde_json::json!({ "tool_calls_json": tcj }).to_string()),
+            created_at: None,
+        }
+    }
+
+    fn tool_result(agent: &str, id: &str) -> SessionLogRow {
+        SessionLogRow {
+            id: Some(2),
+            agent_id: agent.to_string(),
+            session_id: "s".into(),
+            log_type: "tool_result".into(),
+            content: "ok".into(),
+            speaker_id: Some(agent.to_string()),
+            turn_number: None,
+            metadata_json: Some(
+                serde_json::json!({"tool_call_id": id, "tool_name": "reply"}).to_string(),
+            ),
+            created_at: None,
+        }
+    }
+
+    #[test]
+    fn speakers_numbered_by_first_appearance_self_has_no_u() {
+        let logs = vec![
+            speech("me", "pk_alice", "hi", Some("nostr:event:v1:default:e1")),
+            speech("me", "me", "hello", None),
+            speech("me", "pk_bob", "yo", Some("nostr:event:v1:default:e2")),
+            speech("me", "pk_alice", "again", Some("nostr:event:v1:default:e3")),
+        ];
+        let refs = ConversationRefs::build(&logs, "me");
+        assert_eq!(refs.speaker_label("pk_alice"), "u1");
+        assert_eq!(refs.speaker_label("pk_bob"), "u2");
+        // 自分は u 番号なし（生の agent_id のまま = 名前だけの位置づけ）。
+        assert_eq!(refs.speaker_label("me"), "me");
+        // 未知話者は生のまま。
+        assert_eq!(refs.speaker_label("pk_carol"), "pk_carol");
+    }
+
+    #[test]
+    fn events_numbered_per_origin_first_appearance() {
+        let logs = vec![
+            speech("me", "pk_a", "a", Some("nostr:event:v1:default:AAA")),
+            speech("me", "pk_b", "b", Some("nostr:event:v1:watch:7:BBB")),
+        ];
+        let refs = ConversationRefs::build(&logs, "me");
+        let a = format_single_log_with_echo(&logs[0], None, Some(&refs));
+        assert!(a.starts_with("[u1] e1:"), "{a}");
+        let b = format_single_log_with_echo(&logs[1], None, Some(&refs));
+        assert!(b.starts_with("[u2] e2:"), "{b}");
+        // 生 ID（npub/note/hex/origin）は会話へ出さない。
+        assert!(!a.contains("AAA") && !a.contains("nostr:event"));
+    }
+
+    #[test]
+    fn numbers_are_stable_when_new_logs_arrive() {
+        let mut logs = vec![speech("me", "pk_a", "a", Some("nostr:event:v1:default:X"))];
+        let first = ConversationRefs::build(&logs, "me");
+        assert_eq!(first.speaker_label("pk_a"), "u1");
+        logs.push(speech("me", "pk_b", "b", Some("nostr:event:v1:default:Y")));
+        let second = ConversationRefs::build(&logs, "me");
+        // 既存の番号は不変（初出順は append-only で安定）。
+        assert_eq!(second.speaker_label("pk_a"), "u1");
+        assert_eq!(second.speaker_label("pk_b"), "u2");
+    }
+
+    #[test]
+    fn tool_calls_and_results_share_c_numbers() {
+        let logs = vec![
+            tool_call("me", &["call_aaa", "call_bbb"]),
+            tool_result("me", "call_aaa"),
+        ];
+        let refs = ConversationRefs::build(&logs, "me");
+        let call_render = format_single_log_with_echo(&logs[0], None, Some(&refs));
+        assert!(call_render.contains("[c1]: reply("), "{call_render}");
+        assert!(call_render.contains("[c2]: reply("), "{call_render}");
+        assert!(!call_render.contains("call_aaa"));
+        let result_render = format_single_log_with_echo(&logs[1], None, Some(&refs));
+        assert!(result_render.contains("[c1]:"), "{result_render}");
+        assert!(!result_render.contains("call_aaa"));
+    }
+
+    #[test]
+    fn timeline_items_truncate_at_200_direct_at_2000() {
+        let long = "あ".repeat(5000);
+        let tl = speech("me", "pk_a", &long, Some("nostr:event:v1:watch:3:E"));
+        let refs = ConversationRefs::build(std::slice::from_ref(&tl), "me");
+        let out = format_single_log_with_echo(&tl, None, Some(&refs));
+        assert!(out.contains("…(全5000字)"), "{}", &out[..out.len().min(80)]);
+        // 200 字 + マーカー。元 5000 字は載らない。
+        assert!(out.chars().count() < 400);
+
+        let direct = speech("me", "pk_a", &long, Some("nostr:event:v1:default:E"));
+        let refs2 = ConversationRefs::build(std::slice::from_ref(&direct), "me");
+        let out2 = format_single_log_with_echo(&direct, None, Some(&refs2));
+        assert!(out2.contains("…(全5000字)"));
+        // 2000 字保持（自分宛て）。
+        assert!(out2.chars().count() > 2000);
+    }
+
+    #[test]
+    fn self_speech_is_not_truncated() {
+        let long = "x".repeat(5000);
+        let mine = speech("me", "me", &long, None);
+        let refs = ConversationRefs::build(std::slice::from_ref(&mine), "me");
+        let out = format_single_log_with_echo(&mine, None, Some(&refs));
+        assert!(!out.contains("…(全"));
+    }
+
+    #[test]
+    fn none_refs_keeps_legacy_rendering() {
+        let ev = speech("me", "pk_a", "hi", Some("nostr:event:v1:default:E"));
+        let out = format_single_log_with_echo(&ev, None, None);
+        // refs なしは従来の生表示（u/e 番号なし）。
+        assert!(out.starts_with("[pk_a]"), "{out}");
+    }
+
+    /// §9A.1 / row292: DI operation（reply）の tool_call は完了後も arguments（本文）が
+    /// 会話へ verbatim 残る。nostr_run 時代の本文喪失の再発防止。preserve_arg_call_ids を
+    /// 付けない同一 call は従来どおり digest されて本文が消えることを対照で示す。
+    fn reply_tool_call(preserve: bool) -> SessionLogRow {
+        let tcj = serde_json::json!([{
+            "id": "call_reply1",
+            "function": {"name": "reply", "arguments": "{\"event\":\"e3\",\"text\":\"次ターンに残るべき本文\"}"}
+        }])
+        .to_string();
+        let meta = if preserve {
+            serde_json::json!({"tool_calls_json": tcj, "preserve_arg_call_ids": ["call_reply1"]})
+        } else {
+            serde_json::json!({ "tool_calls_json": tcj })
+        };
+        SessionLogRow {
+            id: Some(7),
+            agent_id: "me".into(),
+            session_id: "s".into(),
+            log_type: "tool_call".into(),
+            content: String::new(),
+            speaker_id: Some("me".into()),
+            turn_number: None,
+            metadata_json: Some(meta.to_string()),
+            created_at: None,
+        }
+    }
+
+    #[test]
+    fn di_reply_body_survives_digest_next_turn() {
+        // call は完了済み（次ターン相当）。
+        let completed: std::collections::HashSet<String> =
+            std::iter::once("call_reply1".to_string()).collect();
+
+        // preserve あり: 本文が残る（digest されない）。
+        let kept = format_single_log_with_echo(&reply_tool_call(true), Some(&completed), None);
+        assert!(
+            kept.contains("次ターンに残るべき本文"),
+            "DI reply 本文が次ターンで消えている: {kept}"
+        );
+
+        // 対照（preserve なし）: 従来どおり digest されて本文が消える。
+        let lost = format_single_log_with_echo(&reply_tool_call(false), Some(&completed), None);
+        assert!(
+            !lost.contains("次ターンに残るべき本文"),
+            "preserve なしなら digest で消えるはず（対照）: {lost}"
+        );
     }
 }

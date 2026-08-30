@@ -1,4 +1,4 @@
-//! V3 §5.4 の 25 code。これ以外を追加しない。
+//! V3 §5.4 の 25 code + DI 拡張 §10.4 の 4 code = 29 code。これ以外を追加しない。
 
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -37,6 +37,11 @@ pub enum ErrorCode {
     NotConnected,
     ExternalRejected,
     Disconnect,
+    // DI 拡張 §10.4。いずれも generic code で platform 語彙を埋め込まない。
+    OperationDeclarationInvalid,
+    OperationDeclarationMismatch,
+    OperationUnknown,
+    OperationRejected,
 }
 
 impl ErrorCode {
@@ -67,6 +72,10 @@ impl ErrorCode {
             Self::NotConnected => "not_connected",
             Self::ExternalRejected => "external_rejected",
             Self::Disconnect => "disconnect",
+            Self::OperationDeclarationInvalid => "operation_declaration_invalid",
+            Self::OperationDeclarationMismatch => "operation_declaration_mismatch",
+            Self::OperationUnknown => "operation_unknown",
+            Self::OperationRejected => "operation_rejected",
         }
     }
 
@@ -97,6 +106,10 @@ impl ErrorCode {
             "not_connected" => Self::NotConnected,
             "external_rejected" => Self::ExternalRejected,
             "disconnect" => Self::Disconnect,
+            "operation_declaration_invalid" => Self::OperationDeclarationInvalid,
+            "operation_declaration_mismatch" => Self::OperationDeclarationMismatch,
+            "operation_unknown" => Self::OperationUnknown,
+            "operation_rejected" => Self::OperationRejected,
             _ => return None,
         })
     }
@@ -127,7 +140,11 @@ impl ErrorCode {
             | Self::BindFailed
             | Self::NotConnected
             | Self::ExternalRejected
-            | Self::Disconnect => return None,
+            | Self::Disconnect
+            | Self::OperationDeclarationInvalid
+            | Self::OperationDeclarationMismatch
+            | Self::OperationUnknown
+            | Self::OperationRejected => return None,
         })
     }
 }
@@ -153,6 +170,15 @@ impl GateError {
 
     pub fn store() -> Self {
         Self::new(ErrorCode::StoreError)
+    }
+
+    /// store 失敗を**サーバ側 ERROR ログ**に真因（rusqlite 等）付きで残し、`StoreError` を返す。
+    /// 無音の store 失敗（fail-loud 違反・said が store_error で全滅しても core ログに何も出ない
+    /// 事象）を塞ぐ。`detail` には SQL/path/token を載せない規約（上のコメント）なので、返す
+    /// `detail` は失敗地点を示す**固定カテゴリ名 `context`** だけにする（真因は ERROR ログ側だけに出す）。
+    pub fn store_logged(context: &'static str, cause: impl std::fmt::Display) -> Self {
+        tracing::error!(context, cause = %cause, "extgate said-store failure");
+        Self::with_detail(ErrorCode::StoreError, context)
     }
 
     pub fn to_json_bytes(&self) -> Vec<u8> {
@@ -188,5 +214,35 @@ impl IntoResponse for GateError {
             HeaderValue::from_static(JSON_CONTENT_TYPE),
         );
         res
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // fail-loud: store 失敗は StoreError を返しつつ、detail に「失敗地点カテゴリ」を載せる
+    // （真因の rusqlite エラーは ERROR ログ側だけ・SQL/path/token は detail に出さない）。
+    #[test]
+    fn store_logged_carries_category_detail_not_raw_cause() {
+        let err = GateError::store_logged("said.session_log_insert", "UNIQUE constraint failed: x");
+        assert_eq!(err.code, ErrorCode::StoreError);
+        assert_eq!(err.detail.as_deref(), Some("said.session_log_insert"));
+        // 生の rusqlite 文言（SQL 断片）は detail に漏らさない。
+        let json = String::from_utf8(err.to_json_bytes()).unwrap();
+        assert!(
+            !json.contains("UNIQUE constraint"),
+            "raw cause leaked: {json}"
+        );
+        assert!(json.contains("said.session_log_insert"), "{json}");
+        assert!(json.contains("store_error"), "{json}");
+    }
+
+    // 素の store() は従来どおり detail=None（既存契約を壊さない）。
+    #[test]
+    fn plain_store_has_null_detail() {
+        let err = GateError::store();
+        assert_eq!(err.code, ErrorCode::StoreError);
+        assert_eq!(err.detail, None);
     }
 }

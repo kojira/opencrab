@@ -479,7 +479,8 @@ mod tests {
             if !self.delay.is_zero() {
                 tokio::time::sleep(self.delay).await;
             }
-            // モデルが配送系ツールを inline 実行するケース（sent フラグを立てる経路）。
+            // DI フェーズ1: 組み込み nostr_reply は撤去済み（fail-closed）。legacy sink 経由の
+            // publish 副経路は残さない（返信は V3/DI reply 操作）。名前指定は成功しないこと。
             if let (Some(target), Some(ga)) =
                 (&self.explicit_reply_target, req.gateway_actions.as_ref())
             {
@@ -492,9 +493,8 @@ mod tests {
                     )
                     .await;
                 assert!(
-                    r.success,
-                    "fake nostaro での明示送信は成功する: {:?}",
-                    r.error
+                    !r.success,
+                    "撤去済み nostr_reply は fail-closed（publish 副経路を残さない）"
                 );
             }
             self.inflight.fetch_sub(1, AtomicOrdering::SeqCst);
@@ -1019,17 +1019,17 @@ mod tests {
             .await;
         assert_eq!(out.as_deref(), Some("本文"));
 
-        // エージェントが送った 1 通だけ。機構は reply_target（note1implicit）へ何も送らない。
+        // DI フェーズ1: legacy sink の組み込み publish ツール（nostr_post/reply）は撤去済み。
+        // 名前指定の nostr_reply は fail-closed で publish されず、機構も reply_target（implicit）へ
+        // 送らない → 何も publish されない（返信は V3/DI reply 操作が担う）。応答本文の転記は残る。
         let sent = fake.sent();
-        assert!(sent.contains("note1explicit"), "明示送信が届く: {sent}");
+        assert!(
+            !sent.contains("note1explicit"),
+            "撤去済み nostr_reply は publish しない: {sent}"
+        );
         assert!(
             !sent.contains("note1implicit"),
             "機構は reply_target へ暗黙返信しない: {sent}"
-        );
-        assert_eq!(
-            sent.lines().filter(|l| l.contains("reply")).count(),
-            1,
-            "送信はエージェントの 1 回だけ: {sent}"
         );
         // 応答本文の転記は行う（会話履歴の継続性）。
         let replies = runner.replies.lock().unwrap();

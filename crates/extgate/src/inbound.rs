@@ -61,10 +61,13 @@ pub fn process_said<R: AgentRuntime>(
         }
     }
 
-    let mut conn = state.db.lock().map_err(|_| GateError::store())?;
+    let mut conn = state
+        .db
+        .lock()
+        .map_err(|e| GateError::store_logged("said.db_lock", e))?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|_| GateError::store())?;
+        .map_err(|e| GateError::store_logged("said.tx_begin", e))?;
 
     let row = match load_origin_row(&tx, instance_id, &said.binding_id)? {
         Some(r) => r,
@@ -92,9 +95,19 @@ pub fn process_said<R: AgentRuntime>(
     let session_id =
         match opencrab_db::queries::canonical_session_id(&tx, &said.binding_id, &row.address) {
             Ok(Some(id)) => id,
-            Ok(None) | Err(_) => {
+            Ok(None) => {
                 let _ = tx.rollback();
-                return Err(GateError::store());
+                return Err(GateError::store_logged(
+                    "said.session_missing",
+                    format!(
+                        "no session for binding={} nor address={}",
+                        said.binding_id, row.address
+                    ),
+                ));
+            }
+            Err(e) => {
+                let _ = tx.rollback();
+                return Err(GateError::store_logged("said.session_lookup", e));
             }
         };
     let ctx = BundleCtx {
@@ -310,7 +323,12 @@ pub fn process_said<R: AgentRuntime>(
 
     if record_failed.get() {
         let _ = tx.rollback();
-        return Err(GateError::store());
+        // 真因（session log insert の rusqlite エラー）は record_inbound 内の store_logged が
+        // ERROR で出している。ここでは失敗地点カテゴリだけ detail に載せる。
+        return Err(GateError::with_detail(
+            ErrorCode::StoreError,
+            "said.record_inbound",
+        ));
     }
 
     match accept {
@@ -333,7 +351,7 @@ pub fn process_said<R: AgentRuntime>(
         "INSERT INTO external_origins (binding_id, origin, seq) VALUES (?1, ?2, ?3)",
         params![said.binding_id, said.origin, seq],
     )
-    .map_err(|_| GateError::store())?;
+    .map_err(|e| GateError::store_logged("said.external_origins_insert", e))?;
     if let Some(applied) = bundle_applied {
         return finish_bundle(tx, &ctx, applied, Some(seq));
     }
@@ -353,7 +371,8 @@ pub fn process_said<R: AgentRuntime>(
         );
         return Ok(SaidOutcome { seq: None });
     }
-    tx.commit().map_err(|_| GateError::store())?;
+    tx.commit()
+        .map_err(|e| GateError::store_logged("said.tx_commit", e))?;
     drop(conn);
 
     if row.kind_id == "nostr" {
@@ -451,7 +470,7 @@ fn finish_bundle<R: AgentRuntime>(
             &trigger_said,
             ctx.session_id,
             &suffix,
-            false, // bundle: 単一返信先が無い（gateway drop・エアリプは nostr_post）
+            false, // bundle: 単一返信先が無い（gateway drop・エアリプは素の本文=say(standalone)）
         );
     }
     Ok(SaidOutcome { seq })
@@ -491,7 +510,9 @@ fn load_bundle_trigger(
 fn bundle_prompt_suffix(count: u32) -> String {
     format!(
         "[Nostr] タイムライン watch の束ね（{count} 件）です。窓内を 1 ターンの文脈に載せています。\
-         返信するなら最後の対象ノートへ nostr_reply を使ってください。不要なら NO_REPLY とだけ答えてください。"
+         心が動いた投稿にはエアリプ（本文をそのまま書けば独立した新規投稿として publish されます・\
+         特定投稿への返信にはなりません）で触れてよい。特定の投稿に反応するなら reply(e番号, 本文)／\
+         reaction(e番号)／repost(e番号) を使ってください。反応不要なら NO_REPLY とだけ答えてください。"
     )
 }
 
@@ -619,7 +640,7 @@ fn next_seq(tx: &Transaction<'_>, binding_id: &str) -> Result<i64, GateError> {
         params![binding_id],
         |r| r.get(0),
     )
-    .map_err(|_| GateError::store())
+    .map_err(|e| GateError::store_logged("said.next_seq", e))
 }
 
 fn record_inbound(
@@ -654,7 +675,7 @@ fn record_inbound(
             created_at: None,
         },
     )
-    .map_err(|_| GateError::store())?;
+    .map_err(|e| GateError::store_logged("said.session_log_insert", e))?;
     Ok(())
 }
 
@@ -695,7 +716,7 @@ fn enqueue_turn<R: AgentRuntime>(
     session_id: &str,
     prompt_suffix: &str,
     // 単一メンション turn は発端 said の origin へ返信（say payload の reply_target に載せる）。
-    // bundle turn は単一返信先が無いので false（gateway は drop・エアリプは nostr_post）。
+    // bundle turn は単一返信先が無いので false（gateway は drop・エアリプは素の本文=say(standalone)）。
     // gateway 側の pending_turn 相関は activity ended が say より先に届き消えるため当てにしない。
     reply_to_origin: bool,
 ) {
@@ -792,6 +813,18 @@ fn enqueue_turn<R: AgentRuntime>(
                             external_id: &origin,
                         };
                         let registry = runtime.subtask_registry_for(&session_id);
+                        // DI 拡張 §8: 宣言能力を GatewayActions として tool set へ投影する。宣言が
+                        // 無ければ None（従来挙動＝能力ゼロ）。state/instance_id/binding_id は直後に
+                        // sink へ move するのでここで作る。
+                        let ops_actions: Option<Arc<dyn opencrab_gateway::GatewayActions>> =
+                            crate::ops_projection::ExtgateOpsGatewayActions::for_binding(
+                                Arc::clone(&state),
+                                &instance_id,
+                                &binding_id,
+                                &session_id,
+                                &agent_id,
+                            )
+                            .map(|a| Arc::new(a) as Arc<dyn opencrab_gateway::GatewayActions>);
                         let sink: Arc<dyn SubtaskCompletionSink> =
                             Arc::new(ExtgateCompletionSink {
                                 state,
@@ -815,21 +848,26 @@ fn enqueue_turn<R: AgentRuntime>(
                             "",
                             |raw| raw.to_string(),
                             |conversation| {
+                                let mut req = RunRequest::new(
+                                    agent_id.clone(),
+                                    name.clone(),
+                                    session_id.clone(),
+                                    system.clone(),
+                                    conversation,
+                                    "extgate",
+                                    caller.clone(),
+                                )
+                                .with_image_urls(images.clone())
+                                // 発端イベントの origin を subtask へ引き継ぐ。subtask 完了時の
+                                // resume ターンの say がこの origin へ返信できるようにする
+                                // （settlement→SubtaskSettled.reply_target 経由）。
+                                .with_reply_target(origin.clone());
+                                // DI 拡張 §8: 宣言能力を tool set へ載せる（宣言があるときだけ）。
+                                if let Some(ga) = ops_actions.clone() {
+                                    req = req.with_gateway_actions(ga);
+                                }
                                 v3_attach_dispatch(
-                                    RunRequest::new(
-                                        agent_id.clone(),
-                                        name.clone(),
-                                        session_id.clone(),
-                                        system.clone(),
-                                        conversation,
-                                        "extgate",
-                                        caller.clone(),
-                                    )
-                                    .with_image_urls(images.clone())
-                                    // 発端イベントの origin を subtask へ引き継ぐ。subtask 完了時の
-                                    // resume ターンの say がこの origin へ返信できるようにする
-                                    // （settlement→SubtaskSettled.reply_target 経由）。
-                                    .with_reply_target(origin.clone()),
+                                    req,
                                     &kind_id,
                                     author_id.clone(),
                                     registry.clone(),
@@ -850,7 +888,7 @@ fn enqueue_turn<R: AgentRuntime>(
                         };
                         let effect = adjust_inbound_effect(delivery_mode, effect);
                         // 単一メンションは発端 origin を say payload に明示（gateway が e-tag reply）。
-                        // bundle は None（gateway drop・エアリプは nostr_post）。gateway の
+                        // bundle は None（gateway drop・エアリプは素の本文=say(standalone)）。gateway の
                         // pending_turn 相関は activity ended が say より先に届き消えるため使わない。
                         apply_delivery_effect(
                             &state,
@@ -922,7 +960,7 @@ fn fire_held_turns<R: AgentRuntime>(
 
 fn fire_nostr_relay(state: &ExtgateState, row: &OriginRow, said: &Said) {
     let body = nostr_renderer_body(&said.text);
-    let (_, label, _, _) = nostr_renderer_meta(&said.author_id, &said.text);
+    let (_, label) = nostr_renderer_meta(&said.author_id, &said.text);
     let author = nostr_author_label(&said.author_id);
     let text = format!("[Nostr / {label}] {author}\n{body}");
     state.relay_nostr_inbound(&row.agent_id, text);
@@ -971,17 +1009,17 @@ fn nostr_renderer_body(text: &str) -> &str {
 }
 
 fn nostr_prompt_suffix(author_id: &str, text: &str) -> String {
-    let (kind, label, author_key, target) = nostr_renderer_meta(author_id, text);
+    // §9A / DI-16 / row292: 普通の投稿は本文をそのまま書く（standalone publish・post 関数はない）。
+    // 返信は明示 reply(e番号, 本文)、リアクションは reaction(e番号)、リポストは repost(e番号)。
+    // 生 ID（pubkey/note）はプロンプトへ出さない（会話は u/e/c 番号で参照する）。
+    let (kind, label) = nostr_renderer_meta(author_id, text);
     let author = nostr_author_label(author_id);
     format!(
-        "[Nostr] {author} さんの投稿への応答です。\n\
-         - 送信者: {author_key}（pubkey={pubkey}）\n\
-         - 対象ノート: {target}\n\
-         - 種別: kind:{kind}（{label}）\n\
-         返信するなら nostr_reply(target=\"{target}\") を使ってください（target は返信先ノート）。\
-         種別的に本文返信が不自然なもの（リアクション等）や、返信不要なら \
-         NO_REPLY とだけ答えてください。",
-        pubkey = author_id,
+        "[Nostr] {author} さんの投稿（kind:{kind}／{label}）への応答です。\n\
+         普通の投稿は本文をそのまま書いてください（新規ノートとして publish されます）。\n\
+         この投稿へ返信するなら reply(e番号, 本文)、リアクションは reaction(e番号)、\
+         リポストは repost(e番号) を使ってください。会話に出ている e番号 で対象を指定します。\n\
+         反応が不要なら NO_REPLY とだけ答えてください。",
     )
 }
 
@@ -990,35 +1028,24 @@ fn nostr_author_label(author_id: &str) -> String {
     format!("{short}…")
 }
 
-fn nostr_renderer_meta(author_id: &str, text: &str) -> (u32, &'static str, String, String) {
+fn nostr_renderer_meta(_author_id: &str, text: &str) -> (u32, &'static str) {
     let renderer = nostr_renderer_body(text);
     if let Some(meta) = parse_renderer_line(renderer) {
         return meta;
     }
-    let (kind, event_id) =
+    let (kind, _event_id) =
         parse_v1_kind_and_event(text).expect("admitted nostr said has a V1 anchor");
-    (
-        kind,
-        nostr_kind_label(kind),
-        author_id.to_string(),
-        event_id,
-    )
+    (kind, nostr_kind_label(kind))
 }
 
-fn parse_renderer_line(renderer: &str) -> Option<(u32, &'static str, String, String)> {
+/// history 行 `[Nostr kind:{kind} {label}]` から種別だけを取る（§9A.2 で from=/target= は撤去）。
+fn parse_renderer_line(renderer: &str) -> Option<(u32, &'static str)> {
     let line = renderer.lines().last()?;
     let rest = line.strip_prefix("[Nostr kind:")?;
     let inner = rest.strip_suffix(']')?;
-    let (kind_s, rest) = inner.split_once(' ')?;
+    let (kind_s, label) = inner.split_once(' ')?;
     let kind: u32 = kind_s.parse().ok()?;
-    let (label_from, target) = rest.split_once(" target=")?;
-    let (label, author_key) = label_from.split_once(" from=")?;
-    Some((
-        kind,
-        nostr_kind_from_label(label),
-        author_key.to_string(),
-        target.to_string(),
-    ))
+    Some((kind, nostr_kind_from_label(label)))
 }
 
 fn parse_v1_kind_and_event(text: &str) -> Option<(u32, String)> {
@@ -1073,17 +1100,24 @@ mod tests {
     }
 
     #[test]
-    fn prompt_suffix_is_verbatim() {
+    fn prompt_suffix_omits_raw_identifiers() {
         let pk = "aa".repeat(32);
         let text = format!(
-            "[NOSTRGATE/V1 {{\"kind\":1,\"event_id\":\"{}\"}}]\nhello\n[Nostr kind:1 リプライ from=npub1x target=note1abc]",
+            "[NOSTRGATE/V1 {{\"kind\":1,\"event_id\":\"{}\"}}]\nhello\n[Nostr kind:1 リプライ]",
             "bb".repeat(32)
         );
         let suffix = nostr_prompt_suffix(&pk, &text);
-        assert!(suffix.contains("nostr_reply(target=\"note1abc\")"));
-        assert!(suffix.contains("kind:1（リプライ）"));
+        // nostr_reply 露出撤去（返信は say 一本 / #840）: プロンプトに nostr_reply を出さない。
+        assert!(!suffix.contains("nostr_reply"));
+        // §9A / row296: 生 ID（対象ノート note1・pubkey hex）をプロンプトから排除する。
+        assert!(!suffix.contains("note1"));
+        assert!(!suffix.contains("pubkey="));
+        assert!(!suffix.contains(&pk));
+        assert!(!suffix.contains("対象ノート"));
+        // §9A/DI-16: 普通の投稿は本文をそのまま書く（standalone）、返信は reply(e番号) 操作。
+        assert!(suffix.contains("本文をそのまま書いて"));
+        assert!(suffix.contains("reply(e番号"));
+        assert!(suffix.contains("kind:1"));
         assert!(suffix.contains("NO_REPLY"));
-        assert!(suffix.contains("pubkey="));
-        assert!(suffix.contains("npub1x"));
     }
 }

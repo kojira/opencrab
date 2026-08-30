@@ -10,17 +10,20 @@ use opencrab_actions::AgentRuntime;
 use rusqlite::{params, Connection, TransactionBehavior};
 use tokio::io::BufReader;
 use tokio::net::UnixListener;
+use tokio::sync::oneshot;
 
 use crate::close::{close_all_lives, close_live};
 use crate::delivery::{mark_delivered, mark_failed, mark_indeterminate};
 use crate::error::{ErrorCode, GateError};
 use crate::ids::now_nanos;
 use crate::inbound::process_said;
+use crate::operation_calls::terminalize_call;
+use crate::operations::{declaration_digest, validate_operations, GatewayOperationDeclaration};
 use crate::protocol::{
     activity_frame, bind_frame, err_frame, ok_frame, ok_said_frame, read_frame, write_json,
     FrameError, InboundMsg, WireResponse,
 };
-use crate::registry::{ExtgateState, LiveEntry, Pending};
+use crate::registry::{ExtgateState, LiveEntry, OperationOutcome, Pending};
 use crate::ResolveCallerFn;
 
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
@@ -507,31 +510,44 @@ async fn handle_hello(
                 Ok(inspected) if inspected.config_digest != hello.config_digest => {
                     Err(ErrorCode::ConfigDigestMismatch)
                 }
-                Ok(_) => match open_bindings(&state.db, &hello.instance_id) {
-                    Err(_) => Err(ErrorCode::StoreError),
-                    Ok(bindings) => {
-                        let mut pending = std::collections::HashMap::new();
-                        let started = std::time::Instant::now();
-                        for (binding_id, _) in &bindings {
-                            pending.insert(
-                                crate::ids::bind_request_id(binding_id),
-                                Pending::Bind {
-                                    binding_id: binding_id.clone(),
-                                    started,
-                                },
-                            );
+                // 宣言検証と digest 照合を hello 検査と同じ lock 下で完了させる（§4.1）。
+                Ok(inspected) => match validate_hello_declarations(
+                    state,
+                    &hello.instance_id,
+                    &hello.operations,
+                    inspected.operation_declaration_digest,
+                ) {
+                    Err(code) => Err(code),
+                    Ok((declarations, declaration_digest)) => {
+                        match open_bindings(&state.db, &hello.instance_id) {
+                            Err(_) => Err(ErrorCode::StoreError),
+                            Ok(bindings) => {
+                                let mut pending = std::collections::HashMap::new();
+                                let started = std::time::Instant::now();
+                                for (binding_id, _) in &bindings {
+                                    pending.insert(
+                                        crate::ids::bind_request_id(binding_id),
+                                        Pending::Bind {
+                                            binding_id: binding_id.clone(),
+                                            started,
+                                        },
+                                    );
+                                }
+                                reg.insert(
+                                    hello.instance_id.clone(),
+                                    LiveEntry {
+                                        identity,
+                                        revision: hello.revision,
+                                        writer: Arc::clone(writer),
+                                        acknowledged: std::collections::HashSet::new(),
+                                        pending,
+                                        declarations: Arc::new(declarations),
+                                        declaration_digest,
+                                    },
+                                );
+                                Ok(bindings)
+                            }
                         }
-                        reg.insert(
-                            hello.instance_id.clone(),
-                            LiveEntry {
-                                identity,
-                                revision: hello.revision,
-                                writer: Arc::clone(writer),
-                                acknowledged: std::collections::HashSet::new(),
-                                pending,
-                            },
-                        );
-                        Ok(bindings)
                     }
                 },
             }
@@ -629,12 +645,14 @@ struct InstanceSnap {
     enabled: bool,
     revision: u64,
     config_digest: String,
+    /// 当該 instance に永続した宣言 digest（DI-04）。NULL = 当該 revision で未確立。
+    operation_declaration_digest: Option<String>,
 }
 
 fn inspect_instance(db: &opencrab_db::Db, instance_id: &str) -> Result<InstanceSnap, ErrorCode> {
     let conn = db.lock().map_err(|_| ErrorCode::StoreError)?;
     match conn.query_row(
-        "SELECT enabled, revision, config_digest, deleted_at
+        "SELECT enabled, revision, config_digest, deleted_at, operation_declaration_digest
          FROM gate_instances WHERE instance_id = ?1",
         params![instance_id],
         |r| {
@@ -643,18 +661,68 @@ fn inspect_instance(db: &opencrab_db::Db, instance_id: &str) -> Result<InstanceS
                 r.get::<_, i64>(1)?,
                 r.get::<_, String>(2)?,
                 r.get::<_, Option<i64>>(3)?,
+                r.get::<_, Option<String>>(4)?,
             ))
         },
     ) {
         Err(rusqlite::Error::QueryReturnedNoRows) => Err(ErrorCode::InstanceUnknown),
         Err(_) => Err(ErrorCode::StoreError),
-        Ok((_, _, _, Some(_))) => Err(ErrorCode::InstanceUnknown),
-        Ok((enabled, revision, digest, None)) => Ok(InstanceSnap {
+        Ok((_, _, _, Some(_), _)) => Err(ErrorCode::InstanceUnknown),
+        Ok((enabled, revision, digest, None, decl_digest)) => Ok(InstanceSnap {
             enabled: enabled == 1,
             revision: u64::try_from(revision).map_err(|_| ErrorCode::StoreError)?,
             config_digest: digest,
+            operation_declaration_digest: decl_digest,
         }),
     }
+}
+
+/// hello の宣言を検証し、永続 digest と照合する（DI-03/04）。first hello（当該 revision で
+/// 未確立）なら computed digest を永続して確立する。宣言変更は revision 更新を要する。
+///
+/// - reserved collision → `bad_request`（DI-03）
+/// - 他の宣言不正 → `operation_declaration_invalid`（DI-22）
+/// - 永続値と不一致 → `operation_declaration_mismatch`（DI-04）
+fn validate_hello_declarations(
+    state: &ExtgateState,
+    instance_id: &str,
+    operations: &Option<serde_json::Value>,
+    stored_digest: Option<String>,
+) -> Result<(Vec<GatewayOperationDeclaration>, String), ErrorCode> {
+    let decls = match operations {
+        Some(ops) => {
+            validate_operations(ops, &|n| state.is_reserved_tool_name(n)).map_err(|e| e.code)?
+        }
+        None => Vec::new(),
+    };
+    // 宣言 present（[] を含む）なら digest を計算。absent は「DI 宣言なし」で digest を持たない。
+    let computed = operations.as_ref().map(|_| declaration_digest(&decls));
+    match (stored_digest, computed) {
+        (None, None) => Ok((decls, String::new())),
+        (None, Some(d)) => {
+            store_declaration_digest(&state.db, instance_id, &d)?;
+            Ok((decls, d))
+        }
+        (Some(s), Some(d)) if s == d => Ok((decls, d)),
+        (Some(_), _) => Err(ErrorCode::OperationDeclarationMismatch),
+    }
+}
+
+/// first hello で確立した宣言 digest を永続する。既に確立済み（非 NULL）は上書きしない
+/// （idempotent・race-safe）。
+fn store_declaration_digest(
+    db: &opencrab_db::Db,
+    instance_id: &str,
+    digest: &str,
+) -> Result<(), ErrorCode> {
+    let conn = db.lock().map_err(|_| ErrorCode::StoreError)?;
+    conn.execute(
+        "UPDATE gate_instances SET operation_declaration_digest = ?2
+         WHERE instance_id = ?1 AND operation_declaration_digest IS NULL",
+        params![instance_id, digest],
+    )
+    .map_err(|_| ErrorCode::StoreError)?;
+    Ok(())
 }
 
 fn open_bindings(
@@ -843,7 +911,89 @@ async fn handle_response(
                 Err(())
             }
         }
+        Pending::Invoke { call_id, reply, .. } => {
+            handle_invoke_response(state, writer, instance_id, identity, &resp, &call_id, reply)
+                .await
+        }
     }
+}
+
+/// invoke 応答の terminal 化（§5.3 / §10.2・option B）。DB を terminal 化してから oneshot で
+/// 背景 subtask の `invoke_and_wait` へ outcome を届ける。ok は result を持ち seq を持たない。
+/// err は `operation_rejected` だけが failed で、他 code（operation_unknown 含む・DI-07 保留）は
+/// `operation_rejected` へ丸めず response_invalid + close とする。
+async fn handle_invoke_response(
+    state: &Arc<ExtgateState>,
+    writer: &Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>,
+    instance_id: &str,
+    identity: u64,
+    resp: &WireResponse,
+    call_id: &str,
+    reply: oneshot::Sender<OperationOutcome>,
+) -> Result<(), ()> {
+    // 応答 shape/code から terminal outcome を決める（reply を移動する前に決定）。
+    let outcome: Option<OperationOutcome> = if resp.ok {
+        // invoke ok は result present（null 含む）で seq を持たない（§10.2）。
+        let good_shape = resp.seq.is_none() && resp.result.is_some();
+        resp.result
+            .as_ref()
+            .filter(|_| good_shape)
+            .map(|result_value| {
+                // JSON null は SQL NULL ではなく text 'null' として保存（§7.1）。
+                let result_json =
+                    serde_json::to_string(result_value).unwrap_or_else(|_| "null".to_string());
+                OperationOutcome::Succeeded { result_json }
+            })
+    } else if resp.code == Some(ErrorCode::OperationRejected) {
+        Some(OperationOutcome::Failed)
+    } else {
+        // operation_rejected 以外（operation_unknown 含む・DI-07 保留）は丸めず response_invalid。
+        None
+    };
+
+    let Some(outcome) = outcome else {
+        // response-invalid: call を indeterminate 化し、await へ Indeterminate を届けて close。
+        if let Err(e) = terminalize_call(state, call_id, &OperationOutcome::Indeterminate) {
+            tracing::error!(
+                code = e.code.as_str(),
+                "indeterminate after invalid invoke response"
+            );
+            state.halt();
+        }
+        let _ = reply.send(OperationOutcome::Indeterminate);
+        close_live(
+            state,
+            Some(instance_id),
+            Some(identity),
+            ErrorCode::ResponseInvalid,
+            Some(&resp.id),
+            Some(writer),
+        )
+        .await;
+        return Err(());
+    };
+
+    // terminal 化して outcome を届ける。DB 失敗は成功を捏造せず Indeterminate を届けて close+halt。
+    if let Err(e) = terminalize_call(state, call_id, &outcome) {
+        tracing::error!(
+            code = e.code.as_str(),
+            "operation call terminal write failed"
+        );
+        let _ = reply.send(OperationOutcome::Indeterminate);
+        close_live(
+            state,
+            Some(instance_id),
+            Some(identity),
+            ErrorCode::StoreError,
+            None,
+            None,
+        )
+        .await;
+        state.halt();
+        return Err(());
+    }
+    let _ = reply.send(outcome);
+    Ok(())
 }
 
 /// 当該 binding が acknowledged になるまで待つ。live 消失は即 false（理由を残す）。

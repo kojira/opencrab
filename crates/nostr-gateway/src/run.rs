@@ -74,13 +74,23 @@ pub fn spawn_instance(
             post_config.display()
         )
     })?;
-    let client = InstanceClient::spawn_with_say_policy(
+    // DI 能力宣言（§9.2）と invoke handler を hello に載せて接続する。invoke は nostaro CLI 実行へ
+    // 写す（reply/reaction/repost/follow/unfollow/kind0/upload/resolve）。秘密鍵は env 注入のみ。
+    let invoke_handler: Arc<dyn opencrab_gate_client::InvokeHandler> =
+        Arc::new(crate::ops::NostrInvokeHandler::new(
+            nostaro_bin.clone(),
+            post_config.clone(),
+            secret.as_ref().map(|s| s.as_str().to_string()),
+        ));
+    let client = InstanceClient::spawn_with_operations(
         socket,
         place.instance_id.clone(),
         place.revision,
         cfg.self_pubkey.clone(),
         digest,
         SayPolicy::AcceptToLiveQueue,
+        Some(crate::ops::operation_declarations()),
+        invoke_handler,
     );
     let metrics = Arc::new(SaidMetrics::default());
     // 車線をまたぐ said dedup は instance 単位で共有する（全 default/watch 車線が同じセット）。
@@ -386,11 +396,12 @@ async fn handle_line(
         pending.lock().await.push(event);
         return;
     }
-    // 即時送出はここで event_id を握る。別車線が先に握っていたら二重 said を避ける。
+    // 即時送出はここで event_id を握る（二重 said 回避）。ただし core が Accepted しなければ
+    // claim を解除し、別車線 copy が後追いで届くようにする（claim-after-accept・#839 NIT の実害化対策）。
     if !claim_or_skip(seen, metrics, &event.id) {
         return;
     }
-    send_mapped(
+    let accepted = send_mapped(
         client,
         address,
         lane,
@@ -401,6 +412,11 @@ async fn handle_line(
         metrics,
     )
     .await;
+    if !accepted {
+        if let Some(id) = normalize_author_id(&event.id) {
+            seen.release(&id);
+        }
+    }
 }
 
 /// event_id を握れたら `true`。hex 化できる id のみ dedup 対象（それ以外は send_mapped が落とす）。
@@ -515,7 +531,7 @@ async fn flush_bundle(
             count,
             origins: origins.clone(),
         };
-        send_mapped(
+        let accepted = send_mapped(
             client,
             address,
             lane,
@@ -526,9 +542,17 @@ async fn flush_bundle(
             metrics,
         )
         .await;
+        if !accepted {
+            if let Some(id) = crate::map::normalize_author_id(&event.id) {
+                seen.release(&id);
+            }
+        }
     }
 }
 
+/// said を送る。`true` は core が **Accepted** した場合のみ（claim を保持してよい）。
+/// それ以外（WireErr=bad_request 等 / NotAdmitted / NotReady / Busy / map 失敗）は `false` を返し、
+/// 呼び出し側が claim を解除して別車線 copy の取りこぼしを防ぐ（claim-after-accept・#839 NIT）。
 #[allow(clippy::too_many_arguments)]
 async fn send_mapped(
     client: &InstanceClient,
@@ -539,10 +563,10 @@ async fn send_mapped(
     event: &WatchEvent,
     bundle: Option<&BundlePlace>,
     metrics: &SaidMetrics,
-) {
+) -> bool {
     let Some(mapped) = map_event(event, self_pubkey, beyond, lane, bundle) else {
         tracing::warn!(id = %event.id, "said dropped; author or event id is not hex");
-        return;
+        return false;
     };
     let post = if bundle.is_some() {
         client
@@ -566,13 +590,18 @@ async fn send_mapped(
             .await
     };
     match post {
-        Ok(outcome) => record_said_outcome(metrics, &mapped.origin, &outcome),
+        Ok(outcome) => {
+            record_said_outcome(metrics, &mapped.origin, &outcome);
+            matches!(outcome, SaidOutcome::Accepted { .. })
+        }
         Err(PostRefuse::NotReady) => {
             tracing::info!(origin = %mapped.origin, "said dropped; binding not ready");
+            false
         }
         Err(PostRefuse::Busy) => {
             let n = metrics.queue_full.fetch_add(1, Ordering::Relaxed) + 1;
             tracing::info!(origin = %mapped.origin, queue_full = n, "said refused; binding busy");
+            false
         }
     }
 }

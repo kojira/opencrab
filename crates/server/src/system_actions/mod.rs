@@ -393,63 +393,10 @@ impl SystemGatewayActions {
                     "required": ["npub"]
                 }),
             },
-            // 薄い nostaro passthrough（#268）。server-own で、caller による制限は持たない
-            // （#303 で `TRUSTED_ONLY_ACTIONS` から外した）。投稿・返信・kind:0 プロフィール
-            // 設定・チャンネル・取得など nostaro が持つ操作を**すべて**、あらゆるターン
-            // （Nostr 受信ターン = caller=Agent を含む）から使えるようにする（既存の inner
-            // `nostr_post`/`reply` は Nostr 受信ターン用にそのまま残る）。opencrab が守るのは
-            // 「鍵のエージェント間混同防止（config は ctx.agent_id 固定）」と「nsec 隠蔽」の
-            // 2 点だけで、Nostr 仕様の判断は nostaro に委ねる（非劣化）。`init`（鍵作成/上書き）・
-            // `watch`（無制限受信）・`relay`（config.toml⇔DB desync で揮発）に加え、#514 で
-            // `dm`（DM 送信）を拒否する。`event`（任意 kind publish）は #699 のオーナー裁定で
-            // 許可（暗号化を自前で組まない限り DM としては機能しない＝実用迂回にならない）。
-            #[cfg(feature = "nostr")]
-            GatewayActionDef {
-                name: "nostr_run".to_string(),
-                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
-                description: "Nostr CLI（nostaro）を薄く passthrough 実行する。`subcommand` に \
-                              nostaro のサブコマンド（例: post / reply / zap / upload / \
-                              react / repost / follow / unfollow / profile / channel / get / timeline / \
-                              search / decode / pubkey など）を、`args` にそのサブコマンドの\
-                              フラグと値を**1 要素ずつ**配列で渡す（例: subcommand=\"profile\", \
-                              args=[\"--name\",\"…\",\"--about\",\"…\"] でプロフィール(kind:0)を設定）。\
-                              投稿・プロフィール(kind:0)設定・チャンネル・取得など nostaro が持つ操作を\
-                              使える。署名は**あなた自身の採用済み Nostr 鍵**で行われ、秘密鍵(nsec)は\
-                              扱わない・見えない。鍵の作成/採用は nostr_generate_key / \
-                              nostr_switch_identity を使うこと（init は不可）。受信の常時監視（watch）は\
-                              ここからは起動できない。リレー設定は opencrab 側（configure_nostr / \
-                              ダッシュボード）で管理するため relay サブコマンドは不可。\
-                              **dm は不可**（#514: DM は扱わない。private な話は Discord の DM か\
-                              指定チャンネルで）。event は任意 kind の publish に使える（例: \
-                              subcommand=\"event\", args=[\"-k\",\"40\",\"-c\",\"…\"] で\
-                              パブリックチャット作成）。\
-                              まだ鍵を採用して\
-                              いない場合は先に nostr_switch_identity で採用すること。\
-                              `timeline` は**フォロー基準**（自分とフォロー中の相手のノートが対象で、\
-                              足りない分だけリレーから補われる）。フォローしていない人のノートを\
-                              含むリレー全体の新着を見るには `timeline --global` を使う\
-                              （件数が多くなるので `--out <相対パス> --out-format json` を併せて\
-                              渡せる。`--out-format` は `--out` とセットで指定する）。\
-                              `--file` / `--out` などに渡す相対パスは、ws_* / execute_shell と同じ\
-                              **あなた自身の workspace** が基準（ws_write で作ったファイルをそのまま\
-                              `--file <相対パス>` に渡せるし、`--out <相対パス>` の出力は ws_read で読める）。"
-                    .to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "subcommand": {
-                            "type": "string",
-                            "description": "nostaro のサブコマンド（init/watch/relay/dm は不可）。"
-                        },
-                        "args": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "サブコマンドの引数。フラグと値を 1 要素ずつ配列で渡す（省略可）。"
-                        }
-                    },
-                    "required": ["subcommand"]
-                }),
-            },
+            // `nostr_run`（薄い nostaro passthrough / #268）は**そもそも使えないように**定義から
+            // 撤去した（オーナー裁定）。返信は core の say 一本（gateway が対象ノートへの nostaro
+            // reply として投稿する / #840）、独立投稿は nostr_post を使う。dispatch では名前指定
+            // で来ても fail-close で拒否する（`self.nostr_run` は呼ばない・impl も削除済み）。
             // 実行中の subtask を停止するツール（#161）。Discord gateway 実装だけに
             // あった cancel_subtask を server-neutral 層へ露出し、web/Nostr/REST でも
             // 自動 dispatch された subtask を停止できるようにする。認可（親セッション/
@@ -1233,65 +1180,9 @@ impl SystemGatewayActions {
         }
     }
 
-    /// 薄い nostaro passthrough（#268）。server-own で caller 制限は持たない（#303）。
-    ///
-    /// 稼働中（登録済み）の Nostr transport の passthrough capability
-    /// （[`opencrab_actions::GatewayNostrPassthrough`]）へ委譲する。config は常に
-    /// `ctx.agent_id` のもの（鍵混同防止）。`init`/`watch`/`relay` の拒否・`--config` 上書きの封じ・
-    /// 未 materialize（鍵未採用）の明示エラー・nsec マスクは capability の内側
-    /// （`NostaroCli::run_passthrough`）で行う。呼び出し側はここで subcommand と args を
-    /// 取り出して渡すだけ。
-    #[cfg(feature = "nostr")]
-    async fn nostr_run(&self, args: &Value, ctx: &GatewayCallContext) -> GatewayActionResult {
-        let Some(subcommand) = args
-            .get("subcommand")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        else {
-            return err("subcommand パラメータが必要です".to_string());
-        };
-        // args は文字列配列（フラグと値を 1 要素ずつ）。省略可。非文字列要素は弾く
-        // （引数はそのまま argv になるので、数値等は文字列で渡させる）。
-        let sub_args: Vec<String> = match args.get("args") {
-            None | Some(Value::Null) => Vec::new(),
-            Some(Value::Array(items)) => {
-                let mut out = Vec::with_capacity(items.len());
-                for it in items {
-                    match it.as_str() {
-                        Some(s) => out.push(s.to_string()),
-                        None => {
-                            return err(
-                                "args の要素はすべて文字列で指定してください（数値も文字列で）"
-                                    .to_string(),
-                            )
-                        }
-                    }
-                }
-                out
-            }
-            Some(_) => return err("args は文字列の配列で指定してください".to_string()),
-        };
-        // Nostr transport の passthrough capability を引く。登録が無ければ Nostr 非対応構成。
-        let Some(passthrough) = self
-            .state
-            .gateways
-            .get(opencrab_actions::gateway_kinds::NOSTR)
-            .and_then(|gw| gw.nostr_passthrough())
-        else {
-            return err(
-                "この環境では Nostr passthrough は利用できません（Nostr 未構成）".to_string(),
-            );
-        };
-        match passthrough.run(&ctx.agent_id, subcommand, &sub_args).await {
-            Ok(out) => GatewayActionResult {
-                success: true,
-                data: Some(json!({ "result": out })),
-                error: None,
-            },
-            Err(e) => err(format!("nostr_run 失敗: {e}")),
-        }
-    }
+    // `nostr_run`（薄い nostaro passthrough / #268）の impl は撤去した（オーナー裁定）。定義から
+    // 外し dispatch も fail-close にしたので、この実体は不要。nostaro passthrough 機構そのもの
+    // （`NostaroCli::run_passthrough` / `GatewayNostrPassthrough`）は残置（他経路の防御・将来用）。
 
     /// 記憶インデックスの全再構築（#175 S4）。旧 Discord 実装
     /// （`DiscordGatewayActions::execute_rebuild_memory_index`・撤去済み）をそのまま
@@ -2250,10 +2141,13 @@ impl GatewayActions for SystemGatewayActions {
             // 設定で自動接続する。inner より先に own が処理する（#264）。
             #[cfg(feature = "nostr")]
             "nostr_switch_identity" => self.nostr_switch_identity(args, ctx).await,
-            // 薄い nostaro passthrough（#268）。稼働中の Nostr transport の passthrough
-            // capability へ委譲する。inner へは委譲しない（own が処理する）。
-            #[cfg(feature = "nostr")]
-            "nostr_run" => self.nostr_run(args, ctx).await,
+            // `nostr_run`（薄い nostaro passthrough / #268）は撤去した（オーナー裁定）。定義から
+            // 外したのでモデルは通常ここへ来ないが、名前指定で呼ばれても fail-close で拒否する
+            // （黙って成功に見せない・feature の有無に依らず塞ぐ）。返信は say、独立投稿は nostr_post。
+            "nostr_run" => err(
+                "nostr_run は撤去されました（返信は say、投稿は nostr_post を使ってください）"
+                    .to_string(),
+            ),
             // 記憶インデックスの全再構築（#175 S4）。inner へは委譲しない。
             "rebuild_memory_index" => self.rebuild_memory_index(ctx).await,
             // 汎用エージェント管理ツール（#157 S1）。Discord 側の実装は撤去済みなので

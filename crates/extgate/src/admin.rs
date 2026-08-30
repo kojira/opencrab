@@ -412,9 +412,12 @@ async fn post_revision_inner(
         }
         Some((rev, None)) => {
             let new_rev = rev + 1;
+            // DI-04: revision 更新で宣言 digest を未確立化（NULL）する。新 revision の初回 hello が
+            // その時点の宣言で digest を再確立する。宣言を変えたいときは revision を上げる、が正規手順。
             tx.execute(
                 "UPDATE gate_instances
-                 SET revision = ?2, enabled = ?3, config_b64 = ?4, config_digest = ?5, updated_at = ?6
+                 SET revision = ?2, enabled = ?3, config_b64 = ?4, config_digest = ?5,
+                     operation_declaration_digest = NULL, updated_at = ?6
                  WHERE instance_id = ?1",
                 params![
                     instance_id,

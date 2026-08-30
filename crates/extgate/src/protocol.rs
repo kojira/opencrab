@@ -103,6 +103,25 @@ pub fn say_frame(
     })
 }
 
+/// invoke フレーム（DI 拡張 §5.1）。`id=call_id`。第一段は callback 無しなので
+/// `context.continuation_id` は常に null。payload は opaque JSON-value。
+pub fn invoke_frame(
+    call_id: &str,
+    binding_id: &str,
+    operation: &str,
+    continuation_id: Option<&str>,
+    payload: &Value,
+) -> Value {
+    json!({
+        "id": call_id,
+        "m": "invoke",
+        "binding_id": binding_id,
+        "operation": operation,
+        "context": {"continuation_id": continuation_id},
+        "payload": payload,
+    })
+}
+
 pub fn activity_frame(binding_id: &str, activity_id: &str, state: &str) -> Value {
     json!({
         "m": "activity",
@@ -119,6 +138,9 @@ pub struct Hello {
     pub instance_id: String,
     pub revision: u64,
     pub config_digest: String,
+    /// DI 拡張 §3.1。optional。欠落=能力ゼロ（従来挙動・DI-23）。生の Value を持ち、
+    /// 検証は reserved 述語を持つ handle_hello で行う。present は `[]` も合法。
+    pub operations: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +158,8 @@ pub struct WireResponse {
     pub id: String,
     pub ok: bool,
     pub seq: Option<Option<i64>>,
+    /// invoke `ok` の `result`。None=field 欠落、Some(Value::Null)=合法な JSON null（§10.2）。
+    pub result: Option<Value>,
     pub code: Option<ErrorCode>,
     pub detail: Option<String>,
 }
@@ -239,12 +263,15 @@ fn parse_hello(obj: &Value) -> Result<Hello, GateError> {
         return Err(GateError::new(ErrorCode::BadRequest));
     }
     let config_digest = parse_digest(&require_str(obj, "config_digest")?)?;
+    // operations は optional。欠落=None（能力ゼロ）。present は生の Value を持ち越す。
+    let operations = obj.get("operations").cloned();
     Ok(Hello {
         id,
         protocol,
         instance_id,
         revision,
         config_digest,
+        operations,
     })
 }
 
@@ -317,10 +344,13 @@ fn parse_response(obj: &Value, m: &str) -> Result<WireResponse, GateError> {
             }
             Some(_) => return Err(GateError::new(ErrorCode::BadRequest)),
         };
+        // invoke `ok` の result。field 欠落=None、present は Value（null 含む）。
+        let result = obj.get("result").cloned();
         Ok(WireResponse {
             id,
             ok: true,
             seq,
+            result,
             code: None,
             detail: None,
         })
@@ -337,6 +367,7 @@ fn parse_response(obj: &Value, m: &str) -> Result<WireResponse, GateError> {
             id,
             ok: false,
             seq: None,
+            result: None,
             code: Some(code),
             detail,
         })
