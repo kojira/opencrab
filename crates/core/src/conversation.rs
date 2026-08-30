@@ -1118,6 +1118,91 @@ fn truncate_body(content: &str, limit: usize) -> String {
     format!("{head}…(全{total}字)")
 }
 
+/// 表示時の legacy メタ剥がし（§9A・row294b）。会話組み立て時のみ適用し、保存データは
+/// 書き換えない。受信転記の本文へ焼き込まれた種別ラベル行（`[… kind:N …]` 形。新形も旧
+/// `from=…/target=…` 付きも）を落とし、本文に残る生の長い識別子（bech32・64hex）を短縮する。
+/// 種別ラベルは即時判定（受信側の内部処理）に使うが会話表示には不要（row294b: メンションと
+/// リプライは別物・表示にラベル不要）。core は transport を名指ししないので、行判定は汎用マーカー
+/// ` kind:<数字>` で行う（外部 origin の車線標識と同じく特定 SDK に依存しない）。
+fn strip_inbound_meta_for_display(content: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for line in content.split('\n') {
+        // メタ行（`[… kind:1 …]`）を落とす（新形 / 旧 from=/target= 付きの両方）。
+        if is_inbound_meta_line(line.trim()) {
+            continue;
+        }
+        lines.push(elide_raw_identifiers(line));
+    }
+    // メタ行を落とした跡の末尾空行を畳む。
+    while lines.last().is_some_and(|s| s.trim().is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
+/// `[… kind:<数字> …]` 形の受信メタ行か（transport 非依存の汎用判定）。
+fn is_inbound_meta_line(trimmed: &str) -> bool {
+    const MARKER: &str = " kind:";
+    if !(trimmed.starts_with('[') && trimmed.ends_with(']')) {
+        return false;
+    }
+    match trimmed.find(MARKER) {
+        Some(idx) => trimmed[idx + MARKER.len()..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit()),
+        None => false,
+    }
+}
+
+/// 生の長い識別子の bech32 HRP。長い順に試す（`nprofile1` が `npub1` より先）。
+const BECH32_HRPS: &[&str] = &["nprofile1", "nevent1", "naddr1", "npub1", "note1", "nsec1"];
+
+/// 行内の生の長い識別子（bech32・64hex）を短縮する。英数の連続を 1 トークンとして境界で切り、
+/// 通常語や短い hash は温存する。
+fn elide_raw_identifiers(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut token = String::new();
+    for ch in line.chars() {
+        if ch.is_ascii_alphanumeric() {
+            token.push(ch);
+        } else {
+            if !token.is_empty() {
+                out.push_str(&elide_identifier_token(&token));
+                token.clear();
+            }
+            out.push(ch);
+        }
+    }
+    if !token.is_empty() {
+        out.push_str(&elide_identifier_token(&token));
+    }
+    out
+}
+
+fn elide_identifier_token(tok: &str) -> String {
+    for hrp in BECH32_HRPS {
+        if let Some(body) = tok.strip_prefix(hrp) {
+            if body.len() >= 30
+                && body
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+            {
+                return format!("<{}…>", hrp.trim_end_matches('1'));
+            }
+        }
+    }
+    // 64hex（pubkey/event_id 等）。短い hash を巻き込まないよう 40 桁以上に限る。
+    if tok.len() >= 40
+        && tok
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+    {
+        return "<id…>".to_string();
+    }
+    tok.to_string()
+}
+
 /// 完了済み tool_call の arguments を `{ref,digest,bytes}` に置換して読む。
 /// 未決着 call は `completed_ids` に無いので全文のまま。`refs` があれば §9A の短縮参照
 /// （u/e/c 番号・識別子排除・長文切り詰め）を適用する。None なら従来の生表示（単体整形・
@@ -1142,9 +1227,11 @@ pub fn format_single_log_with_echo(
                     .event_of(log)
                     .map(|n| format!(" e{n}"))
                     .unwrap_or_default();
+                // 表示時に legacy メタ行・生識別子を剥がしてから切り詰める（row294b・保存は不変）。
+                let cleaned = strip_inbound_meta_for_display(&log.content);
                 let content = match render_limit(external_origin_of(log).as_deref()) {
-                    Some(lim) => truncate_body(&log.content, lim),
-                    None => log.content.clone(),
+                    Some(lim) => truncate_body(&cleaned, lim),
+                    None => cleaned,
                 };
                 format!("[{}]{}{}:\n{}", speaker, ts, eref, content)
             }
@@ -3602,5 +3689,64 @@ mod render_refs_tests {
         let out = format_single_log_with_echo(&ev, None, None);
         // refs なしは従来の生表示（u/e 番号なし）。
         assert!(out.starts_with("[pk_a]"), "{out}");
+    }
+
+    // row294b 追修 1/2: 表示時に legacy メタ行・種別ラベル行・生識別子を剥がす。
+    #[test]
+    fn strips_legacy_meta_line_and_raw_ids_at_display() {
+        let npub = format!("npub1{}", "q".repeat(58));
+        let note = format!("note1{}", "p".repeat(58));
+        let body = format!("こんにちは\n[Nostr kind:1 メンション from={npub} target={note}]");
+        let ev = speech("me", "pk_a", &body, Some("nostr:event:v1:default:E"));
+        let refs = ConversationRefs::build(std::slice::from_ref(&ev), "me");
+        let out = format_single_log_with_echo(&ev, None, Some(&refs));
+        assert!(out.contains("こんにちは"), "本文は残す: {out}");
+        assert!(
+            !out.contains("[Nostr kind:"),
+            "種別ラベル行を出さない: {out}"
+        );
+        assert!(
+            !out.contains(&npub) && !out.contains(&note),
+            "生 ID を出さない: {out}"
+        );
+        assert!(!out.contains("from=") && !out.contains("target="), "{out}");
+    }
+
+    #[test]
+    fn strips_new_9a_label_line_at_display() {
+        // 新 §9A 形（from=/target= 無し）でもラベル行は表示に出さない。
+        let ev = speech(
+            "me",
+            "pk_a",
+            "やあ\n[Nostr kind:1 メンション]",
+            Some("nostr:event:v1:default:E"),
+        );
+        let refs = ConversationRefs::build(std::slice::from_ref(&ev), "me");
+        let out = format_single_log_with_echo(&ev, None, Some(&refs));
+        assert!(out.contains("やあ"), "{out}");
+        assert!(!out.contains("[Nostr kind:"), "{out}");
+        assert!(!out.contains("メンション"), "ラベル語も残さない: {out}");
+    }
+
+    #[test]
+    fn elides_bare_identifiers_in_body_but_keeps_short_hashes() {
+        let pubkey = "b".repeat(64); // 64hex
+        let body = format!("引用: npub1{} と {pubkey} と call_abc123", "q".repeat(58));
+        let ev = speech("me", "pk_a", &body, Some("nostr:event:v1:default:E"));
+        let refs = ConversationRefs::build(std::slice::from_ref(&ev), "me");
+        let out = format_single_log_with_echo(&ev, None, Some(&refs));
+        assert!(!out.contains(&pubkey), "64hex を短縮: {out}");
+        assert!(!out.contains("npub1qqq"), "bech32 を短縮: {out}");
+        assert!(out.contains("<npub…>") && out.contains("<id…>"), "{out}");
+        // 短い識別子（tool call の一部など）は温存する。
+        assert!(out.contains("call_abc123"), "短い hash は温存: {out}");
+    }
+
+    #[test]
+    fn strip_meta_is_display_only_not_stored() {
+        // strip はレンダリング専用。ログ本文（保存データ相当）は変更しない。
+        let body = "本文\n[Nostr kind:1 メンション]".to_string();
+        let ev = speech("me", "pk_a", &body, Some("nostr:event:v1:default:E"));
+        assert_eq!(ev.content, body, "保存データは書き換えない");
     }
 }
