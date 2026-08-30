@@ -230,7 +230,10 @@ mod tests {
         assert_eq!(err.detail.as_deref(), Some("said.session_log_insert"));
         // 生の rusqlite 文言（SQL 断片）は detail に漏らさない。
         let json = String::from_utf8(err.to_json_bytes()).unwrap();
-        assert!(!json.contains("UNIQUE constraint"), "raw cause leaked: {json}");
+        assert!(
+            !json.contains("UNIQUE constraint"),
+            "raw cause leaked: {json}"
+        );
         assert!(json.contains("said.session_log_insert"), "{json}");
         assert!(json.contains("store_error"), "{json}");
     }
