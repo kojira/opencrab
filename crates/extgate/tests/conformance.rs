@@ -17,9 +17,10 @@ use opencrab_core::EngineResult;
 use opencrab_db::queries::{AgentRow, SessionRow, TRUSTED_PLATFORM_EXTGATE};
 use opencrab_extgate::completion::ExtgateCompletionSink;
 use opencrab_extgate::{
-    admin_router, now_nanos, recover_stale_deliveries, resolve_caller_identity_with_owner,
-    serve_uds, session_id_for_binding, validate_listen_socket, DeliveryMode, ExtgateState,
-    NostrBundleAdmit, NostrSaidDecision, NostrWatchSets, OperatorToken, UNAUTHORIZED_BODY,
+    admin_router, invoke_and_wait, now_nanos, recover_stale_deliveries,
+    resolve_caller_identity_with_owner, serve_uds, session_id_for_binding, validate_listen_socket,
+    DeliveryMode, ExtgateState, NostrBundleAdmit, NostrSaidDecision, NostrWatchSets, OperatorToken,
+    UNAUTHORIZED_BODY,
 };
 use opencrab_gate_client::client::{InstanceClient, SaidOutcome};
 use serde_json::{json, Value};
@@ -2497,4 +2498,276 @@ async fn settlement_on_reused_nostr_session_resumes() {
         resume_conv.contains("subtask_completed") && resume_conv.contains("slept"),
         "決着結果が resume turn の会話に載ること: {resume_conv}"
     );
+}
+
+// ===== DI 拡張: 能力宣言 hello・digest・invoke 往復（§3/§5/§8・実経路） =====
+
+/// hello に載せる最小 operations（reply 1 件・§9.2 スキーマ形・name 昇順）。
+fn ops_reply() -> Value {
+    json!([{
+        "name": "reply",
+        "description": "reply to an event",
+        "input_schema": {"type": "object", "required": ["event", "text"],
+            "properties": {"event": {"type": "string"}, "text": {"type": "string"}}},
+        "output_schema": null,
+        "callback_schema": null,
+        "class": {"sub_engine": "not_exposed", "sharing": "conversation_bound"}
+    }])
+}
+
+async fn wait_acked(h: &Harness, instance_id: &str, binding_id: &str) {
+    for _ in 0..200 {
+        let acked = h
+            .state
+            .lock_registry()
+            .unwrap()
+            .get(instance_id)
+            .is_some_and(|e| e.acknowledged.contains(binding_id));
+        if acked {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("binding {binding_id} not acknowledged in time");
+}
+
+async fn hello_with_ops(
+    s: &mut UnixStream,
+    instance_id: &str,
+    revision: u64,
+    ops: &Value,
+) -> Value {
+    write_frame(
+        s,
+        &json!({
+            "id": "h1", "m": "hello", "protocol": 2, "instance_id": instance_id,
+            "revision": revision, "config_digest": config_digest(), "operations": ops,
+        }),
+    )
+    .await;
+    read_frame(s).await
+}
+
+/// hello + operations が受理され、instance に digest が永続する（§3.3/DI-04）。
+#[tokio::test]
+async fn di_hello_operations_accepted_and_digest_persisted() {
+    let h = Harness::start().await;
+    let instance_id = uuid();
+    put_instance(&h, &instance_id, true).await;
+    let mut s = h.connect().await;
+    let ok = hello_with_ops(&mut s, &instance_id, 1, &ops_reply()).await;
+    assert_eq!(ok["m"], "ok", "operations つき hello が受理される");
+    // digest が gate_instances に永続している。
+    let digest: Option<String> = h
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT operation_declaration_digest FROM gate_instances WHERE instance_id = ?1",
+            [&instance_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        digest.is_some_and(|d| d.len() == 64),
+        "宣言 digest が永続する"
+    );
+}
+
+/// 同一 revision で宣言 digest が変わった再接続は operation_declaration_mismatch（DI-04）。
+#[tokio::test]
+async fn di_hello_operations_digest_mismatch_on_reconnect() {
+    let h = Harness::start().await;
+    let instance_id = uuid();
+    put_instance(&h, &instance_id, true).await;
+    // 初回 hello で digest 確立。
+    let mut s1 = h.connect().await;
+    assert_eq!(
+        hello_with_ops(&mut s1, &instance_id, 1, &ops_reply()).await["m"],
+        "ok"
+    );
+    drop(s1);
+    // 別宣言（reaction 1 件）で同一 revision に再接続 → mismatch + close。
+    let other = json!([{
+        "name": "reaction", "description": "d",
+        "input_schema": {"type": "object"}, "output_schema": null, "callback_schema": null,
+        "class": {"sub_engine": "not_exposed", "sharing": "conversation_bound"}
+    }]);
+    let mut s2 = h.connect().await;
+    let resp = hello_with_ops(&mut s2, &instance_id, 1, &other).await;
+    assert_eq!(resp["m"], "err");
+    assert_eq!(resp["code"], "operation_declaration_mismatch");
+}
+
+/// 不正な宣言（非 sort）は operation_declaration_invalid + close（DI-22）。
+#[tokio::test]
+async fn di_hello_invalid_operations_rejected() {
+    let h = Harness::start().await;
+    let instance_id = uuid();
+    put_instance(&h, &instance_id, true).await;
+    // name 逆順（非 sort）。
+    let bad = json!([
+        {"name": "reply", "description": "d", "input_schema": {"type": "object"},
+         "output_schema": null, "callback_schema": null,
+         "class": {"sub_engine": "not_exposed", "sharing": "conversation_bound"}},
+        {"name": "follow", "description": "d", "input_schema": {"type": "object"},
+         "output_schema": null, "callback_schema": null,
+         "class": {"sub_engine": "not_exposed", "sharing": "agent_bound"}}
+    ]);
+    let mut s = h.connect().await;
+    let resp = hello_with_ops(&mut s, &instance_id, 1, &bad).await;
+    assert_eq!(resp["m"], "err");
+    assert_eq!(resp["code"], "operation_declaration_invalid");
+}
+
+/// invoke 往復（成功）: core invoke_and_wait → gateway ok(result) → Ok(result) + call succeeded。
+#[tokio::test]
+async fn di_invoke_round_trip_success() {
+    let h = Harness::start().await;
+    let instance_id = uuid();
+    let binding_id = uuid();
+    put_instance(&h, &instance_id, true).await;
+    put_binding(&h, &binding_id, &instance_id, "chan-di").await;
+    let mut s = h.connect().await;
+    assert_eq!(
+        hello_with_ops(&mut s, &instance_id, 1, &ops_reply()).await["m"],
+        "ok"
+    );
+    let acked = ack_bind(&mut s).await;
+    assert_eq!(acked, binding_id);
+    wait_acked(&h, &instance_id, &binding_id).await;
+
+    // core 側で invoke を発行（背景 subtask 相当）。
+    let state = Arc::clone(&h.state);
+    let inst = instance_id.clone();
+    let bind = binding_id.clone();
+    let call = tokio::spawn(async move {
+        invoke_and_wait(
+            &state,
+            &inst,
+            &bind,
+            "reply",
+            &json!({"event": "e1", "text": "hi"}),
+        )
+        .await
+    });
+
+    // gateway 側: invoke を受けて ok(result) を返す。
+    let invoke = read_until(&mut s, |v| v["m"] == "invoke").await;
+    assert_eq!(invoke["operation"], "reply");
+    assert_eq!(invoke["payload"]["text"], "hi");
+    let call_id = invoke["id"].as_str().unwrap().to_string();
+    write_frame(
+        &mut s,
+        &json!({"id": call_id, "m": "ok", "result": {"posted": true}}),
+    )
+    .await;
+
+    let out = tokio::time::timeout(Duration::from_secs(2), call)
+        .await
+        .expect("invoke_and_wait 完了")
+        .unwrap();
+    assert_eq!(out.unwrap(), json!({"posted": true}), "result が返る");
+    // call row が succeeded。
+    let state_str: String = h
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT state FROM gateway_operation_calls WHERE binding_id = ?1",
+            [&binding_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(state_str, "succeeded");
+}
+
+/// invoke 往復（確定拒否）: gateway err(operation_rejected) → Err + call failed。
+#[tokio::test]
+async fn di_invoke_round_trip_rejected() {
+    let h = Harness::start().await;
+    let instance_id = uuid();
+    let binding_id = uuid();
+    put_instance(&h, &instance_id, true).await;
+    put_binding(&h, &binding_id, &instance_id, "chan-di2").await;
+    let mut s = h.connect().await;
+    assert_eq!(
+        hello_with_ops(&mut s, &instance_id, 1, &ops_reply()).await["m"],
+        "ok"
+    );
+    assert_eq!(ack_bind(&mut s).await, binding_id);
+    wait_acked(&h, &instance_id, &binding_id).await;
+
+    let state = Arc::clone(&h.state);
+    let inst = instance_id.clone();
+    let bind = binding_id.clone();
+    let call = tokio::spawn(async move {
+        invoke_and_wait(
+            &state,
+            &inst,
+            &bind,
+            "reply",
+            &json!({"event": "e1", "text": "x"}),
+        )
+        .await
+    });
+    let invoke = read_until(&mut s, |v| v["m"] == "invoke").await;
+    let call_id = invoke["id"].as_str().unwrap().to_string();
+    write_frame(
+        &mut s,
+        &json!({"id": call_id, "m": "err", "code": "operation_rejected", "detail": null}),
+    )
+    .await;
+    let out = tokio::time::timeout(Duration::from_secs(2), call)
+        .await
+        .expect("完了")
+        .unwrap();
+    assert!(out.is_err(), "確定拒否は Err");
+    let state_str: String = h
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT state FROM gateway_operation_calls WHERE binding_id = ?1",
+            [&binding_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(state_str, "failed");
+}
+
+/// 宣言に無い operation の invoke は call/wire 0 で operation_unknown（§5.1）。
+#[tokio::test]
+async fn di_invoke_undeclared_operation_is_unknown() {
+    let h = Harness::start().await;
+    let instance_id = uuid();
+    let binding_id = uuid();
+    put_instance(&h, &instance_id, true).await;
+    put_binding(&h, &binding_id, &instance_id, "chan-di3").await;
+    let mut s = h.connect().await;
+    assert_eq!(
+        hello_with_ops(&mut s, &instance_id, 1, &ops_reply()).await["m"],
+        "ok"
+    );
+    assert_eq!(ack_bind(&mut s).await, binding_id);
+    wait_acked(&h, &instance_id, &binding_id).await;
+    // "repost" は宣言していない。
+    let out = invoke_and_wait(&h.state, &instance_id, &binding_id, "repost", &json!({})).await;
+    assert!(out.is_err(), "未宣言 operation は Err");
+    // call row は作られない。
+    let count: i64 = h
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM gateway_operation_calls WHERE binding_id = ?1",
+            [&binding_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0, "未宣言 invoke は call row 0");
 }
