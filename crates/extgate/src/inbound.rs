@@ -61,10 +61,13 @@ pub fn process_said<R: AgentRuntime>(
         }
     }
 
-    let mut conn = state.db.lock().map_err(|_| GateError::store())?;
+    let mut conn = state
+        .db
+        .lock()
+        .map_err(|e| GateError::store_logged("said.db_lock", e))?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|_| GateError::store())?;
+        .map_err(|e| GateError::store_logged("said.tx_begin", e))?;
 
     let row = match load_origin_row(&tx, instance_id, &said.binding_id)? {
         Some(r) => r,
@@ -92,9 +95,19 @@ pub fn process_said<R: AgentRuntime>(
     let session_id =
         match opencrab_db::queries::canonical_session_id(&tx, &said.binding_id, &row.address) {
             Ok(Some(id)) => id,
-            Ok(None) | Err(_) => {
+            Ok(None) => {
                 let _ = tx.rollback();
-                return Err(GateError::store());
+                return Err(GateError::store_logged(
+                    "said.session_missing",
+                    format!(
+                        "no session for binding={} nor address={}",
+                        said.binding_id, row.address
+                    ),
+                ));
+            }
+            Err(e) => {
+                let _ = tx.rollback();
+                return Err(GateError::store_logged("said.session_lookup", e));
             }
         };
     let ctx = BundleCtx {
@@ -310,7 +323,12 @@ pub fn process_said<R: AgentRuntime>(
 
     if record_failed.get() {
         let _ = tx.rollback();
-        return Err(GateError::store());
+        // 真因（session log insert の rusqlite エラー）は record_inbound 内の store_logged が
+        // ERROR で出している。ここでは失敗地点カテゴリだけ detail に載せる。
+        return Err(GateError::with_detail(
+            ErrorCode::StoreError,
+            "said.record_inbound",
+        ));
     }
 
     match accept {
@@ -333,7 +351,7 @@ pub fn process_said<R: AgentRuntime>(
         "INSERT INTO external_origins (binding_id, origin, seq) VALUES (?1, ?2, ?3)",
         params![said.binding_id, said.origin, seq],
     )
-    .map_err(|_| GateError::store())?;
+    .map_err(|e| GateError::store_logged("said.external_origins_insert", e))?;
     if let Some(applied) = bundle_applied {
         return finish_bundle(tx, &ctx, applied, Some(seq));
     }
@@ -353,7 +371,8 @@ pub fn process_said<R: AgentRuntime>(
         );
         return Ok(SaidOutcome { seq: None });
     }
-    tx.commit().map_err(|_| GateError::store())?;
+    tx.commit()
+        .map_err(|e| GateError::store_logged("said.tx_commit", e))?;
     drop(conn);
 
     if row.kind_id == "nostr" {
@@ -621,7 +640,7 @@ fn next_seq(tx: &Transaction<'_>, binding_id: &str) -> Result<i64, GateError> {
         params![binding_id],
         |r| r.get(0),
     )
-    .map_err(|_| GateError::store())
+    .map_err(|e| GateError::store_logged("said.next_seq", e))
 }
 
 fn record_inbound(
@@ -656,7 +675,7 @@ fn record_inbound(
             created_at: None,
         },
     )
-    .map_err(|_| GateError::store())?;
+    .map_err(|e| GateError::store_logged("said.session_log_insert", e))?;
     Ok(())
 }
 
