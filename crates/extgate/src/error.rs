@@ -1,4 +1,4 @@
-//! V3 §5.4 の 25 code。これ以外を追加しない。
+//! V3 §5.4 の 25 code + DI 拡張 §10.4 の 4 code = 29 code。これ以外を追加しない。
 
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -37,6 +37,11 @@ pub enum ErrorCode {
     NotConnected,
     ExternalRejected,
     Disconnect,
+    // DI 拡張 §10.4。いずれも generic code で platform 語彙を埋め込まない。
+    OperationDeclarationInvalid,
+    OperationDeclarationMismatch,
+    OperationUnknown,
+    OperationRejected,
 }
 
 impl ErrorCode {
@@ -67,6 +72,10 @@ impl ErrorCode {
             Self::NotConnected => "not_connected",
             Self::ExternalRejected => "external_rejected",
             Self::Disconnect => "disconnect",
+            Self::OperationDeclarationInvalid => "operation_declaration_invalid",
+            Self::OperationDeclarationMismatch => "operation_declaration_mismatch",
+            Self::OperationUnknown => "operation_unknown",
+            Self::OperationRejected => "operation_rejected",
         }
     }
 
@@ -97,6 +106,10 @@ impl ErrorCode {
             "not_connected" => Self::NotConnected,
             "external_rejected" => Self::ExternalRejected,
             "disconnect" => Self::Disconnect,
+            "operation_declaration_invalid" => Self::OperationDeclarationInvalid,
+            "operation_declaration_mismatch" => Self::OperationDeclarationMismatch,
+            "operation_unknown" => Self::OperationUnknown,
+            "operation_rejected" => Self::OperationRejected,
             _ => return None,
         })
     }
@@ -127,7 +140,11 @@ impl ErrorCode {
             | Self::BindFailed
             | Self::NotConnected
             | Self::ExternalRejected
-            | Self::Disconnect => return None,
+            | Self::Disconnect
+            | Self::OperationDeclarationInvalid
+            | Self::OperationDeclarationMismatch
+            | Self::OperationUnknown
+            | Self::OperationRejected => return None,
         })
     }
 }

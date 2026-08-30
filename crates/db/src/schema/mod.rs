@@ -1875,6 +1875,25 @@ const MIGRATIONS: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 47,
+        description:
+            "gateway 能力 DI: gateway_operation_calls 表 + gate_instances.operation_declaration_digest（DI 拡張 §10.5）",
+        // DI-13: transplant 系譜 v46 を base に後続 migration。generic な DI 表のみで、
+        // 個別 gateway 語彙の列・表・CHECK は足さない（§10.5）。callback の
+        // gateway_continuations はフェーズ 2 のため作らない。
+        //
+        // ## やってよいことだけ
+        //   CREATE TABLE IF NOT EXISTS gateway_operation_calls
+        //   ALTER TABLE gate_instances ADD COLUMN operation_declaration_digest（column_exists ガード）
+        //
+        // ## やってはいけないこと
+        //   V3 4表への破壊的変更、既存行の UPDATE/DROP、operation ごとの列・表。
+        //
+        // ## 切り戻し
+        //   BEGIN; PRAGMA user_version = 46; COMMIT;（表と列は残してよい）
+        up: migrate_v47_gateway_operations,
+    },
 ];
 
 /// このバイナリが知る最新スキーマバージョン。
@@ -2101,6 +2120,41 @@ CREATE TABLE IF NOT EXISTS deliveries (
     (state IN ('sending','delivered') AND error IS NULL) OR
     (state = 'failed' AND error = 'external_rejected') OR
     (state = 'indeterminate' AND error IN ('disconnect','stale sending recovered after restart'))
+  )
+);
+"#,
+    )
+}
+
+fn migrate_v47_gateway_operations(conn: &Connection) -> rusqlite::Result<()> {
+    // 宣言 digest は instance 単位で永続（DI-04）。同一 revision の再接続・restart 後も
+    // mismatch を拒否できるよう DB に持つ。NULL = 当該 revision で未確立。
+    if !column_exists(conn, "gate_instances", "operation_declaration_digest")? {
+        conn.execute_batch(
+            "ALTER TABLE gate_instances ADD COLUMN operation_declaration_digest TEXT",
+        )?;
+    }
+    // generic operation call。operation / payload / result は opaque 値で、operation ごとの
+    // 列・table・CHECK を足さない（§7.1）。成功時の JSON null は result_json='null'（SQL NULL
+    // ではない）。合法遷移は sending→succeeded|failed|indeterminate のみ。
+    conn.execute_batch(
+        r#"
+CREATE TABLE IF NOT EXISTS gateway_operation_calls (
+  call_id       TEXT PRIMARY KEY,
+  binding_id    TEXT NOT NULL REFERENCES gate_bindings(binding_id) ON DELETE RESTRICT,
+  operation     TEXT NOT NULL CHECK(length(operation) > 0),
+  payload_json  TEXT NOT NULL CHECK(json_valid(payload_json)),
+  result_json   TEXT CHECK(result_json IS NULL OR json_valid(result_json)),
+  state         TEXT NOT NULL CHECK(state IN ('sending','succeeded','failed','indeterminate')),
+  error         TEXT,
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL,
+  CHECK(
+    (state='sending' AND result_json IS NULL AND error IS NULL) OR
+    (state='succeeded' AND result_json IS NOT NULL AND error IS NULL) OR
+    (state='failed' AND result_json IS NULL AND error='operation_rejected') OR
+    (state='indeterminate' AND result_json IS NULL
+      AND error IN ('disconnect','stale sending recovered after restart'))
   )
 );
 "#,

@@ -12,6 +12,8 @@ pub mod ids;
 pub mod inbound;
 pub mod json;
 pub mod listen;
+pub mod operation_calls;
+pub mod operations;
 pub mod protocol;
 pub mod race;
 pub mod registry;
@@ -30,9 +32,15 @@ pub use listen::{
     enqueue_bind, recover_stale_deliveries, serve_uds, validate_listen_socket, wait_bind_ack,
     web_binding_state, EnqueueBindOutcome,
 };
+pub use operation_calls::{enqueue_invoke, recover_stale_calls};
+pub use operations::{
+    declaration_digest, validate_operations, GatewayOperationDeclaration, OperationClass, Sharing,
+    SubEngine,
+};
 pub use registry::{
     ExtgateState, NostrHeldTurn, NostrRelayFn, NostrSaidAdmit, NostrSaidDecision, NostrWatchSets,
-    NostrWatchSetsFn, NostrWorkspaceFn, Registry,
+    NostrWatchSetsFn, NostrWorkspaceFn, OperationOutcome, OperationSettleFn, OperationSettlement,
+    Registry, ReservedToolNameFn,
 };
 
 use opencrab_actions::CallerIdentity;

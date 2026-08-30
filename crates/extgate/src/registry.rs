@@ -16,6 +16,7 @@ use crate::bearer::OperatorToken;
 use crate::bundle::NostrBundleAdmit;
 use crate::delivery_mode::DeliveryMode;
 use crate::error::{ErrorCode, GateError};
+use crate::operations::GatewayOperationDeclaration;
 use crate::turn_queue::SessionTurnQueues;
 
 /// hello 済みで未 close の接続。
@@ -25,6 +26,18 @@ pub struct LiveEntry {
     pub writer: Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
     pub acknowledged: HashSet<String>,
     pub pending: HashMap<String, Pending>,
+    /// hello で宣言された immutable な能力 snapshot（DI 拡張 §4.1）。欠落=能力ゼロ。
+    pub declarations: Arc<Vec<GatewayOperationDeclaration>>,
+    /// 宣言配列の canonical digest（DI-04）。宣言なしは空 string。
+    pub declaration_digest: String,
+}
+
+impl LiveEntry {
+    /// 宣言済みかつ callback 有無を含めて operation を引く。core は operation 名で分岐しない
+    /// が、visibility/invoke 判定で live declaration に存在するかだけを generic に確かめる。
+    pub fn declaration(&self, operation: &str) -> Option<&GatewayOperationDeclaration> {
+        self.declarations.iter().find(|d| d.name == operation)
+    }
 }
 
 pub enum Pending {
@@ -34,6 +47,12 @@ pub enum Pending {
     },
     Say {
         delivery_id: String,
+    },
+    /// DI 拡張 §5.1。invoke 応答待ち。call_id は request `id` と byte-equal。
+    Invoke {
+        call_id: String,
+        binding_id: String,
+        operation: String,
     },
 }
 
@@ -46,9 +65,14 @@ impl Pending {
         matches!(self, Self::Say { .. })
     }
 
+    pub fn is_invoke(&self) -> bool {
+        matches!(self, Self::Invoke { .. })
+    }
+
     pub fn binding_id(&self) -> Option<&str> {
         match self {
             Self::Bind { binding_id, .. } => Some(binding_id),
+            Self::Invoke { binding_id, .. } => Some(binding_id),
             Self::Say { .. } => None,
         }
     }
@@ -56,7 +80,7 @@ impl Pending {
     pub fn delivery_id(&self) -> Option<&str> {
         match self {
             Self::Say { delivery_id } => Some(delivery_id),
-            Self::Bind { .. } => None,
+            Self::Bind { .. } | Self::Invoke { .. } => None,
         }
     }
 }
@@ -98,6 +122,26 @@ impl Registry {
                 e.pending
                     .values()
                     .filter_map(|p| p.delivery_id().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// close cleanup 用。当該 instance の pending invoke を (call_id, binding_id, operation) で返す。
+    pub fn pending_invokes(&self, instance_id: &str) -> Vec<(String, String, String)> {
+        self.live
+            .get(instance_id)
+            .map(|e| {
+                e.pending
+                    .values()
+                    .filter_map(|p| match p {
+                        Pending::Invoke {
+                            call_id,
+                            binding_id,
+                            operation,
+                        } => Some((call_id.clone(), binding_id.clone(), operation.clone())),
+                        _ => None,
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -183,6 +227,34 @@ pub enum NostrSaidDecision {
     },
 }
 
+/// invoke の三結果（DI 拡張 §5.3）。terminal 化後に settlement hook へ渡す。
+#[derive(Debug, Clone)]
+pub enum OperationOutcome {
+    /// gateway が `ok(result)` を返した。result は JSON text（JSON null は `"null"`）。
+    Succeeded { result_json: String },
+    /// gateway が `err(operation_rejected)` を返した。
+    Failed,
+    /// write/EOF/protocol close/ack 不明、または startup 残 sending。
+    Indeterminate,
+}
+
+/// 決着 handoff（DI-08）。call を terminal 化した後、projection が settle_completed 経路へ
+/// 渡すための generic envelope。core の wire 層は platform 意味を解釈しない。
+#[derive(Debug, Clone)]
+pub struct OperationSettlement {
+    pub call_id: String,
+    pub binding_id: String,
+    pub operation: String,
+    pub outcome: OperationOutcome,
+}
+
+/// projection が wire の settlement を既存 subtask settlement 経路へ橋渡しする hook。
+pub type OperationSettleFn = Arc<dyn Fn(OperationSettlement) + Send + Sync>;
+
+/// builtin / 既存 tool 名との collision 判定（DI-03 → bad_request）。projection が core の
+/// tool registry を渡す。未登録なら collision なしとして扱う（wire 単体テスト用）。
+pub type ReservedToolNameFn = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 pub struct ExtgateState {
     pub db: Db,
     pub registry: Mutex<Registry>,
@@ -195,6 +267,8 @@ pub struct ExtgateState {
     nostr_relay: Mutex<Option<NostrRelayFn>>,
     nostr_watch_sets: Mutex<Option<NostrWatchSetsFn>>,
     nostr_privilege: Mutex<HashMap<i64, PrivilegeFire<NostrHeldTurn>>>,
+    operation_settle: Mutex<Option<OperationSettleFn>>,
+    reserved_tool_name: Mutex<Option<ReservedToolNameFn>>,
     pub turn_queues: Arc<SessionTurnQueues>,
     #[cfg(any(test, feature = "extgate-probe"))]
     pub probe: GateProbe,
@@ -214,6 +288,8 @@ impl ExtgateState {
             nostr_relay: Mutex::new(None),
             nostr_watch_sets: Mutex::new(None),
             nostr_privilege: Mutex::new(HashMap::new()),
+            operation_settle: Mutex::new(None),
+            reserved_tool_name: Mutex::new(None),
             turn_queues: Arc::new(SessionTurnQueues::new()),
             #[cfg(any(test, feature = "extgate-probe"))]
             probe: GateProbe::default(),
@@ -234,6 +310,37 @@ impl ExtgateState {
 
     pub fn set_nostr_watch_sets(&self, sets: NostrWatchSetsFn) {
         *self.nostr_watch_sets.lock().expect("nostr watch sets") = Some(sets);
+    }
+
+    /// projection が invoke 決着を settle_completed 経路へ渡す hook を登録する。
+    pub fn set_operation_settle(&self, hook: OperationSettleFn) {
+        *self.operation_settle.lock().expect("operation settle") = Some(hook);
+    }
+
+    /// builtin / 既存 tool 名 collision 判定を登録する。
+    pub fn set_reserved_tool_name(&self, hook: ReservedToolNameFn) {
+        *self.reserved_tool_name.lock().expect("reserved tool name") = Some(hook);
+    }
+
+    /// name が builtin / 既存 tool と衝突するか。未登録なら false（wire 単体）。
+    pub fn is_reserved_tool_name(&self, name: &str) -> bool {
+        let hook = match self.reserved_tool_name.lock() {
+            Ok(g) => g.clone(),
+            Err(_) => return false,
+        };
+        hook.map(|h| h(name)).unwrap_or(false)
+    }
+
+    /// call terminal 化後の決着を projection へ渡す。未登録なら何もしない（wire 単体では
+    /// invoke は生成されないので到達しない）。
+    pub fn fire_operation_settlement(&self, settlement: OperationSettlement) {
+        let hook = match self.operation_settle.lock() {
+            Ok(g) => g.clone(),
+            Err(_) => return,
+        };
+        if let Some(hook) = hook {
+            hook(settlement);
+        }
     }
 
     pub fn nostr_workspace_root(&self, agent_id: &str) -> Option<PathBuf> {
