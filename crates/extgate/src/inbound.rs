@@ -158,7 +158,11 @@ pub fn process_said<R: AgentRuntime>(
     let work = [InboundWork {
         event,
         has_content: !said.text.is_empty() || !said.attachments.is_empty(),
-        kind_label: "said",
+        // Defect B（QC #10）: watch 車線経由の said は accept_inbound の権限デバウンス判定
+        // （watch_hold_interval_secs / AGREED_IMMEDIATE_KINDS）で kind ラベルを見る。ここを一律
+        // "said" にすると owner/followee のメンション・リプライ・リアクションでも即時扱いにならず
+        // interval 分だけ保留される。実 nostr kind からラベルを導出して即応判定を機能させる。
+        kind_label: inbound_kind_label(&row, said),
         author_key: said.author_id.as_str(),
     }];
 
@@ -1011,6 +1015,20 @@ fn nostr_renderer_body(text: &str) -> &str {
         return after.strip_prefix('\n').unwrap_or(after);
     }
     rest
+}
+
+/// accept_inbound へ渡す kind ラベル。nostr は実 kind から導出し（メンション/リプライ/リアクション/
+/// リポスト/長文/DM）、それ以外の transport は従来どおり "said"。
+///
+/// watch 車線経由の said は `accept_inbound` の権限デバウンス（`watch_hold_interval_secs` →
+/// `AGREED_IMMEDIATE_KINDS`）でこのラベルを見る。"said" 固定だと owner/followee のメンション・
+/// リプライ・リアクションでも即応にならず保留される（QC #10・Defect B）。
+fn inbound_kind_label(row: &OriginRow, said: &Said) -> &'static str {
+    if row.kind_id != "nostr" {
+        return "said";
+    }
+    let (_, label) = nostr_renderer_meta(&said.author_id, &said.text);
+    label
 }
 
 fn nostr_prompt_suffix(author_id: &str, text: &str) -> String {
