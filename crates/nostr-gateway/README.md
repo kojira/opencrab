@@ -26,6 +26,7 @@ watch の有効フィルタは `filter_json`。アンカー `beyond_self` は wa
 ## 写像
 
 - origin: `nostr:event:v1:{lane}:{event_id}`。`lane` は `default` または `watch:{id}`
+- **車線をまたぐ dedup**: 1 event_id は最初に握った車線だけが `said` する（instance 単位の TTL 付き seen セット）。あるイベントがメンション条件と watch 条件の両方に当たると default/watch の両車線が同じ event_id を吐くが、origin は車線名を含むため下流 gate では別メッセージになり会話重複・二重ターンを生む——そこを埋める。即時送出は送る直前に握り、bundle は flush の window 確定後・manifest 構築の前に握って落とす（`bundle_id`/`count`/`origins` を実送信分と一致させる）。gate の per-origin dedup は同一車線の再購読を潰すのでここは車線間だけを見る。TTL は最大 watch `interval_secs` の 2 倍以上（下限 600s）で、即時送出したメンションと interval 後に flush される bundle の窓を跨ぐ。落とした件数は `deduped` カウンタに残す
 - 本文先頭: 版付きアンカー `[NOSTRGATE/V1 {…}]`（key 順固定）
 - Bundle の次行: `[NOSTRBUNDLE/V1 [origin…]]`（index 順。coordinator が最初の非重複 member で全 origin を照合する）。flush の各 member は `post_said_receipt`（Accepted 後も次 origin を送る）
 - その下: 採取 §3 の履歴本文 renderer
