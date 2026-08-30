@@ -3439,11 +3439,11 @@ fn v37_backfill_preserves_firing_and_normalizes() {
 
     initialize(&conn).expect("apply v37");
     assert_eq!(schema_version(&conn).unwrap(), latest_version());
-    // v46（#826-B の conversation_snapshots。載せ替え v43-45 との番号衝突を避け v46 へ採番）が
-    // 最新。v38..v46 とも session_heartbeat_config を触らないので、下の v37 backfill 検証（発火
+    // v47（DI 拡張の gateway_operation_calls + gate_instances.operation_declaration_digest）が
+    // 最新。v38..v47 とも session_heartbeat_config を触らないので、下の v37 backfill 検証（発火
     // 集合・正規化）はそのまま成立する。新しい migration が session_heartbeat_config を触ったら
     // この guard を更新し、下の期待値を見直すこと。
-    assert_eq!(latest_version(), 46, "v46 が最新版であること");
+    assert_eq!(latest_version(), 47, "v47 が最新版であること");
 
     // 期待: 9 行 = step1(nostr-A) 1 + step2(A/201=0, C/202=1, D/222=1) 3 +
     //             step3(A,B,C,D,E の ch205 展開・全 enabled=0) 5。
