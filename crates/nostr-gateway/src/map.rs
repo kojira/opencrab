@@ -4,8 +4,6 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
-const MAX_ANCHOR_FIELD_CHARS: usize = 128;
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct WatchEvent {
     pub id: String,
@@ -259,32 +257,14 @@ fn inbound_kind_label(event: &WatchEvent) -> &'static str {
     "メンション"
 }
 
-fn sanitize_anchor_field(s: &str) -> String {
-    s.chars()
-        .filter(|c| !c.is_control())
-        .take(MAX_ANCHOR_FIELD_CHARS)
-        .collect()
-}
-
-fn reply_target(event: &WatchEvent) -> &str {
-    event.note_id.as_deref().unwrap_or(&event.id)
-}
-
-fn author_key(event: &WatchEvent) -> &str {
-    event
-        .npub
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&event.pubkey)
-}
-
 fn history_text(event: &WatchEvent) -> String {
+    // §9A.2: from=（話者 pubkey と同一の二重表記）と target=（say ベース返信は発端 origin へ
+    // 自動配送されるため LLM 指定不要）を会話へ出さない。種別ラベルだけ残す。npub/note/64hex
+    // の識別子は会話から排除する（トークン削減の主因）。
     let anchor = format!(
-        "[Nostr kind:{kind} {label} from={author} target={target}]",
+        "[Nostr kind:{kind} {label}]",
         kind = event.kind,
         label = inbound_kind_label(event),
-        author = sanitize_anchor_field(author_key(event)),
-        target = sanitize_anchor_field(reply_target(event)),
     );
     if event.content.trim().is_empty() {
         anchor
@@ -386,10 +366,10 @@ mod tests {
             ],
         );
         let mapped = map_event(&event, &self_pk, false, &Lane::watch(17), None).unwrap();
+        // §9A.2: history 行から from=/target= を撤去。種別ラベルだけ残る。
         let expected = format!(
-            "[NOSTRGATE/V1 {{\"beyond_self\":false,\"bundle_id\":null,\"count\":null,\"event_id\":\"{}\",\"has_e\":true,\"index\":null,\"kind\":1,\"p_self\":true,\"route\":\"immediate\",\"watch_id\":17}}]\nhello\n[Nostr kind:1 リプライ from={} target=note1abc]",
+            "[NOSTRGATE/V1 {{\"beyond_self\":false,\"bundle_id\":null,\"count\":null,\"event_id\":\"{}\",\"has_e\":true,\"index\":null,\"kind\":1,\"p_self\":true,\"route\":\"immediate\",\"watch_id\":17}}]\nhello\n[Nostr kind:1 リプライ]",
             "aa".repeat(32),
-            "22".repeat(32)
         );
         assert_eq!(mapped.text, expected);
         assert_eq!(
