@@ -975,6 +975,8 @@ pub struct ConversationRefs {
     agent_name: Option<String>,
     speakers: std::collections::HashMap<String, usize>,
     events: std::collections::HashMap<String, usize>,
+    /// event_id（origin 末尾の 64hex）→ e 番号。返信/リアクションの対象解決（row295c 6b）に使う。
+    event_ids: std::collections::HashMap<String, usize>,
     calls: std::collections::HashMap<String, usize>,
     /// subtask_id → s 番号（セッション局所・初出順）。spawn 受理と完了本文の両方から採る。
     subtasks: std::collections::HashMap<String, usize>,
@@ -999,6 +1001,11 @@ impl ConversationRefs {
                     if let Some(origin) = external_origin_of(log) {
                         if !refs.events.contains_key(&origin) {
                             let n = refs.events.len() + 1;
+                            // event_id（origin 末尾の 64hex）→ e 番号も引けるようにする（row295c 6b
+                            // の (reply→e番号) 解決）。origin lane が違っても event_id で照合する。
+                            if let Some(eid) = event_id_of_origin(&origin) {
+                                refs.event_ids.entry(eid).or_insert(n);
+                            }
                             refs.events.insert(origin, n);
                         }
                     }
@@ -1076,6 +1083,30 @@ impl ConversationRefs {
     fn subtask_of(&self, id: &str) -> Option<usize> {
         self.subtasks.get(id).copied()
     }
+
+    /// event_id → e 番号（会話内に無い＝未知は None → 表示側は `→外部`）。
+    fn event_num_by_id(&self, event_id: &str) -> Option<usize> {
+        self.event_ids.get(event_id).copied()
+    }
+}
+
+/// origin（`…:<lane>:<event_id>`）末尾の 64hex を取り出す。特定 SDK 名に依存しない。
+fn event_id_of_origin(origin: &str) -> Option<String> {
+    let last = origin.rsplit(':').next()?;
+    if last.len() == 64 && last.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Some(last.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
+/// 受信メタが記録する対象ノート event_id（`reply_target`・row295c 6b）。旧行は未記録＝None。
+fn reply_target_of(log: &opencrab_db::queries::SessionLogRow) -> Option<String> {
+    let meta: serde_json::Value = serde_json::from_str(log.metadata_json.as_deref()?).ok()?;
+    meta.get("reply_target")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// 完了本文（system・type=subtask_completed）の subtask_id。
@@ -1090,11 +1121,12 @@ fn subtask_id_of_system(log: &opencrab_db::queries::SessionLogRow) -> Option<Str
         .map(str::to_string)
 }
 
-/// spawn 受理の tool_result 本文 `{"data":{"subtask_id":…}}` の subtask_id。
+/// spawn 受理の tool_result 本文の subtask_id（flat `{"subtask_id":…}` / data 包み形の両対応）。
 fn subtask_id_of_tool_result(log: &opencrab_db::queries::SessionLogRow) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(&log.content).ok()?;
-    v.get("data")
-        .and_then(|d| d.get("subtask_id"))
+    let scope = v.get("data").unwrap_or(&v);
+    scope
+        .get("subtask_id")
         .and_then(|s| s.as_str())
         .filter(|s| !s.is_empty())
         .map(str::to_string)
@@ -1112,6 +1144,26 @@ fn tool_call_id_of_result(log: &opencrab_db::queries::SessionLogRow) -> Option<S
     let meta: serde_json::Value = serde_json::from_str(log.metadata_json.as_deref()?).ok()?;
     meta.get("tool_call_id")
         .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+/// spawn 受理 tool_result（`data.status=="spawned"` の subtask_id）。並行バッチは 1 つの subtask を
+/// call ごとに重複記録する（同一 subtask_id の spawn 受理が call 数だけ並ぶ）ので、表示では初出だけ
+/// 残し 2 件目以降を落とす（row295 item4・二重表示）。組み立て側が seen 集合で判定する。
+pub(crate) fn spawn_ack_subtask_id(log: &opencrab_db::queries::SessionLogRow) -> Option<String> {
+    if log.log_type != "tool_result" {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(&log.content).ok()?;
+    // spawn 受理は flat 形（`{"status":"spawned","subtask_id":…,"tool":…}`）。data 包み形にも一応対応。
+    let scope = v.get("data").unwrap_or(&v);
+    if scope.get("status").and_then(|s| s.as_str()) != Some("spawned") {
+        return None;
+    }
+    scope
+        .get("subtask_id")
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.is_empty())
         .map(str::to_string)
 }
 
@@ -1206,11 +1258,15 @@ fn is_inbound_meta_line(trimmed: &str) -> bool {
 /// 受信メタ行 `[… kind:N ラベル …]` から会話ヘッダの関係注記を作る（row295c）。
 ///
 /// kind ラベル全廃で「そもそもリアクション/リプライか」が失われた欠陥への対処。リプライ/
-/// リアクション/リポストだけ種別を残す（素の投稿・メンション・DM・長文は注記なし）。対象ノート
-/// (→e番号) は現状の受信転記に記録が無いため `→外部` の最小表記に留める（真の →e番号 は対象
-/// event_id を inbound metadata に記録するデータスライス後・報告参照）。
-fn inbound_relation_annotation(content: &str) -> Option<String> {
-    let label = content
+/// リアクション/リポストだけ種別を残す（素の投稿・メンション・DM・長文は注記なし）。対象ノートは
+/// 受信メタ `reply_target`（row295c 6b で記録）→ 会話内 e 番号へ解決。会話に無い（旧行の未記録・
+/// 窓外）対象は `→外部`。
+fn inbound_relation_annotation(
+    log: &opencrab_db::queries::SessionLogRow,
+    refs: &ConversationRefs,
+) -> Option<String> {
+    let label = log
+        .content
         .split('\n')
         .map(str::trim)
         .find(|l| is_inbound_meta_line(l))
@@ -1221,7 +1277,13 @@ fn inbound_relation_annotation(content: &str) -> Option<String> {
         "リポスト" => "repost",
         _ => return None,
     };
-    Some(format!("({relation}→外部)"))
+    // 対象ノートは受信メタの reply_target（row295c 6b）→ 会話内 e 番号。会話に無い（旧行の
+    // 未記録・窓外）対象は `→外部`。
+    let target = reply_target_of(log)
+        .and_then(|t| refs.event_num_by_id(&t))
+        .map(|n| format!("e{n}"))
+        .unwrap_or_else(|| "外部".to_string());
+    Some(format!("({relation}→{target})"))
 }
 
 /// `[… kind:<数字> <ラベル> …]` からラベル語だけを取り出す（新形も旧 from=/target= 付きも）。
@@ -1308,7 +1370,7 @@ pub fn format_single_log_with_echo(
                 // 「そもそもリアクションか」が失われた欠陥への対処。対象ノート(→e番号)は現状の
                 // 受信転記に記録が無いため `→外部` の最小表記（真の →e番号 は target 記録の
                 // データスライス後・報告参照）。素の投稿/メンションは注記なし。
-                let relation = inbound_relation_annotation(&log.content).unwrap_or_default();
+                let relation = inbound_relation_annotation(log, r).unwrap_or_default();
                 // 表示時に legacy メタ行・生識別子を剥がしてから切り詰める（row294b・保存は不変）。
                 let cleaned = strip_inbound_meta_for_display(&log.content);
                 let content = match render_limit(external_origin_of(log).as_deref()) {
@@ -3893,6 +3955,38 @@ mod render_refs_tests {
         assert!(o_reaction.contains("🫧"), "本文が残る: {o_reaction}");
         let o_plain = format_single_log_with_echo(&logs[2], None, Some(&refs));
         assert!(!o_plain.contains("→外部"), "素の投稿に注記なし: {o_plain}");
+    }
+
+    // row295c 6b: reply_target が記録されていれば会話内の e 番号へ解決する。
+    #[test]
+    fn reply_target_resolves_to_e_number_when_recorded() {
+        let target_id = "cc".repeat(32);
+        let target = speech(
+            "me",
+            "pk_a",
+            "元投稿",
+            Some(&format!("nostr:event:v1:default:{target_id}")),
+        );
+        let mut reply = speech(
+            "me",
+            "pk_b",
+            "そうだね\n[Nostr kind:1 リプライ]",
+            Some(&format!("nostr:event:v1:default:{}", "dd".repeat(32))),
+        );
+        reply.metadata_json = Some(
+            serde_json::json!({
+                "external_origin": format!("nostr:event:v1:default:{}", "dd".repeat(32)),
+                "reply_target": target_id,
+            })
+            .to_string(),
+        );
+        let logs = vec![target, reply];
+        let refs = ConversationRefs::build(&logs, "me");
+        let out = format_single_log_with_echo(&logs[1], None, Some(&refs));
+        assert!(
+            out.contains("(reply→e1)"),
+            "対象が e 番号解決されない: {out}"
+        );
     }
 
     // row295b: subtask_completed は s 番号ヘッダ＋result 本文のみ（生 UUID/定型 field を出さない）。

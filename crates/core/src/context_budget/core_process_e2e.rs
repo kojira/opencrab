@@ -500,6 +500,44 @@ fn legacy_snapshot_blob_is_stripped_on_assembly() {
     assert!(text.contains("やあ"), "delta 本文が落ちた: {text}");
 }
 
+/// row295 item4 実測再現: 並行バッチ（execute_shell×2）が 1 subtask として detach され、call ごとに
+/// 同一 subtask_id の spawn 受理 tool_result を重複記録する。assemble が初出だけ表示することを固定。
+#[test]
+fn parallel_spawn_ack_is_rendered_once() {
+    let conn = opencrab_db::init_memory().unwrap();
+    // 実 DB と同じ flat 形（data 包み無し・status/subtask_id が top-level）。
+    let content = r#"{"label":"execute_shell([...]), execute_shell([\"60\"])","status":"spawned","subtask_id":"dup-sub-1","tool":"execute_shell"}"#;
+    for tcid in ["call-a", "call-b"] {
+        let row = opencrab_db::queries::SessionLogRow {
+            id: None,
+            agent_id: AGENT.into(),
+            session_id: SESSION.into(),
+            log_type: "tool_result".into(),
+            content: content.into(),
+            speaker_id: Some(AGENT.into()),
+            turn_number: None,
+            metadata_json: Some(
+                serde_json::json!({"tool_call_id": tcid, "tool_name": "execute_shell"}).to_string(),
+            ),
+            created_at: None,
+        };
+        opencrab_db::queries::insert_session_log(&conn, &row).unwrap();
+    }
+    let assembled = assemble_from_snapshot(&conn, SESSION, AGENT).unwrap();
+    assert_eq!(
+        assembled.text.matches("dup-sub-1").count(),
+        1,
+        "並行バッチの spawn 受理が二重表示: {}",
+        assembled.text
+    );
+    assert_eq!(
+        assembled.text.matches("spawned").count(),
+        1,
+        "spawn 受理が二重表示: {}",
+        assembled.text
+    );
+}
+
 /// 撤去の完全性。SQLite WAL の `wal_checkpoint` など別物は対象外。
 #[test]
 fn context_arrival_point_mechanism_is_gone() {

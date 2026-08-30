@@ -213,8 +213,14 @@ pub fn assemble_from_snapshot(
     let completed_for_read = completed_tool_call_ids(&all);
     // §9A: u/e/c 短縮参照は全履歴の初出順で採番し、snapshot 境界を跨いでも安定させる。
     let refs = build_conversation_refs(conn, &all, agent_id);
+    // 並行バッチの spawn 受理（同一 subtask を call ごとに重複記録）は初出だけ残す（row295 item4）。
+    let mut seen_spawns = std::collections::HashSet::new();
     let delta = logs
         .iter()
+        .filter(|l| match crate::conversation::spawn_ack_subtask_id(l) {
+            Some(sid) => seen_spawns.insert(sid),
+            None => true,
+        })
         .map(|l| format_single_log_with_echo(l, Some(&completed_for_read), Some(&refs)))
         .collect::<Vec<_>>()
         .join("\n");
@@ -297,6 +303,9 @@ pub fn items_from_logs(
 
     let mut items = Vec::new();
     let mut ledger = TokenLedger::new();
+    // 並行バッチの spawn 受理（同一 subtask を重複記録）は初出だけ items に載せる（row295 item4）。
+    // これで圧縮発火時の snapshot にも二重表示が残らない。
+    let mut seen_spawns = HashSet::new();
     for (gid, idxs) in groups {
         let unresolved = group_is_unresolved(&all, &idxs, &completed_ids);
         let in_recent = idxs
@@ -304,6 +313,11 @@ pub fn items_from_logs(
             .any(|&i| newest_user.contains(&i) || i >= recent_tail);
         for i in idxs {
             let log = &all[i];
+            if let Some(sid) = crate::conversation::spawn_ack_subtask_id(log) {
+                if !seen_spawns.insert(sid) {
+                    continue;
+                }
+            }
             let text = format_single_log_with_echo(log, Some(&completed_ids), Some(&refs));
             let key = format!("log:{}", log.id.unwrap_or(i as i64));
             let tokens = ledger.record(&key, &text);

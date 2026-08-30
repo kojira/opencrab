@@ -314,12 +314,35 @@ fn v1_anchor(
     );
     obj.insert("kind".into(), json!(event.kind));
     obj.insert("p_self".into(), json!(p_self));
+    // 返信/リアクション/リポストが指す対象ノートの event_id（row295c 6b）。会話表示で
+    // `(reply→e番号)` を解決するため載せる。旧行（未記録）は表示側が `→外部` フォールバック。
+    obj.insert(
+        "reply_to".into(),
+        parent_event_id(event)
+            .map(|id| json!(id))
+            .unwrap_or(Value::Null),
+    );
     obj.insert("route".into(), json!(route.as_str()));
     obj.insert(
         "watch_id".into(),
         lane.watch_id().map(|id| json!(id)).unwrap_or(Value::Null),
     );
     format!("[NOSTRGATE/V1 {}]", Value::Object(obj))
+}
+
+/// 返信/リアクション/リポストが指す対象ノートの event_id（NIP-10: `reply` マーク優先・無ければ
+/// 最後の e タグ）。非 hex や e タグ無しは None。会話表示の `(reply→e番号)` 解決用（row295c 6b）。
+fn parent_event_id(event: &WatchEvent) -> Option<String> {
+    let e_tags: Vec<&Vec<String>> = event
+        .tags
+        .iter()
+        .filter(|t| t.first().map(|s| s == "e").unwrap_or(false))
+        .collect();
+    let chosen = e_tags
+        .iter()
+        .find(|t| t.get(3).map(|m| m == "reply").unwrap_or(false))
+        .or_else(|| e_tags.last())?;
+    chosen.get(1).and_then(|v| normalize_author_id(v))
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
@@ -379,8 +402,9 @@ mod tests {
         let mapped = map_event(&event, &self_pk, false, &Lane::watch(17), None).unwrap();
         // §9A.2: history 行から from=/target= を撤去。種別ラベルだけ残る。
         let expected = format!(
-            "[NOSTRGATE/V1 {{\"beyond_self\":false,\"bundle_id\":null,\"count\":null,\"event_id\":\"{}\",\"has_e\":true,\"index\":null,\"kind\":1,\"p_self\":true,\"route\":\"immediate\",\"watch_id\":17}}]\nhello\n[Nostr kind:1 リプライ]",
+            "[NOSTRGATE/V1 {{\"beyond_self\":false,\"bundle_id\":null,\"count\":null,\"event_id\":\"{}\",\"has_e\":true,\"index\":null,\"kind\":1,\"p_self\":true,\"reply_to\":\"{}\",\"route\":\"immediate\",\"watch_id\":17}}]\nhello\n[Nostr kind:1 リプライ]",
             "aa".repeat(32),
+            "bb".repeat(32),
         );
         assert_eq!(mapped.text, expected);
         assert_eq!(
@@ -389,6 +413,39 @@ mod tests {
         );
         assert_eq!(mapped.author_id, "22".repeat(32));
         assert_eq!(mapped.route, Route::Immediate);
+    }
+
+    #[test]
+    fn parent_event_id_prefers_reply_marker_else_last_e() {
+        // reply マーク優先。
+        let marked = ev(
+            1,
+            vec![
+                vec!["e".into(), "aa".repeat(32), String::new(), "root".into()],
+                vec!["e".into(), "bb".repeat(32), String::new(), "reply".into()],
+            ],
+        );
+        assert_eq!(
+            parent_event_id(&marked).as_deref(),
+            Some("bb".repeat(32).as_str())
+        );
+        // マーク無しは最後の e。
+        let unmarked = ev(
+            1,
+            vec![
+                vec!["e".into(), "aa".repeat(32)],
+                vec!["e".into(), "cc".repeat(32)],
+            ],
+        );
+        assert_eq!(
+            parent_event_id(&unmarked).as_deref(),
+            Some("cc".repeat(32).as_str())
+        );
+        // e タグ無しは None。
+        assert_eq!(
+            parent_event_id(&ev(1, vec![vec!["p".into(), "dd".repeat(32)]])),
+            None
+        );
     }
 
     #[test]

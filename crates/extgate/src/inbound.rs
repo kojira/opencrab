@@ -644,6 +644,11 @@ fn record_inbound(
     }
     if row.kind_id == "nostr" {
         meta["external_origin"] = serde_json::json!(said.origin);
+        // 返信/リアクション/リポストの対象 event_id を記録（row295c 6b）。会話表示が
+        // `(reply→e番号)` を解決するのに使う。旧行は未記録＝表示側が `→外部` フォールバック。
+        if let Some(reply_to) = parse_v1_reply_to(&said.text) {
+            meta["reply_target"] = serde_json::json!(reply_to);
+        }
     }
     insert_session_log(
         tx,
@@ -1040,6 +1045,19 @@ fn parse_v1_kind_and_event(text: &str) -> Option<(u32, String)> {
     Some((kind, event_id))
 }
 
+/// V1 anchor の `reply_to`（対象ノート event_id・null/欠落は None）。row295c 6b。
+fn parse_v1_reply_to(text: &str) -> Option<String> {
+    let line = text.lines().next()?.trim();
+    let rest = line.strip_prefix(V1_PREFIX)?;
+    let json = rest.strip_suffix(']')?;
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    value
+        .get("reply_to")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 fn nostr_kind_from_label(label: &str) -> &'static str {
     match label {
         "DM" => "DM",
@@ -1064,6 +1082,23 @@ fn nostr_kind_label(kind: u32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_v1_reply_to_reads_target_and_ignores_null() {
+        let with = format!(
+            "[NOSTRGATE/V1 {{\"event_id\":\"{}\",\"kind\":1,\"reply_to\":\"{}\"}}]\nhi\n[Nostr kind:1 リプライ]",
+            "aa".repeat(32),
+            "bb".repeat(32),
+        );
+        assert_eq!(
+            parse_v1_reply_to(&with).as_deref(),
+            Some("bb".repeat(32).as_str())
+        );
+        // null / 欠落は None。
+        let without = "[NOSTRGATE/V1 {\"event_id\":\"x\",\"kind\":1,\"reply_to\":null}]\nhi";
+        assert_eq!(parse_v1_reply_to(without), None);
+        assert_eq!(parse_v1_reply_to("[NOSTRGATE/V1 {\"kind\":1}]\nhi"), None);
+    }
 
     #[test]
     fn renderer_body_strips_v1_line() {
