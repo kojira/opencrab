@@ -180,6 +180,20 @@ impl TurnGovernor {
 /// スナップショット＋水位印より後の差分を組み立てる。開始時 compact はしない。
 ///
 /// `items` は正本の全ログから作る。
+/// refs を作り、自分の表示名（agents.name）を引いて設定する（row295c: 自分行を UUID でなく
+/// 名前で出す）。名前引きに失敗しても refs は使える（speaker_label が agent_id へフォールバック）。
+fn build_conversation_refs(
+    conn: &Connection,
+    logs: &[opencrab_db::queries::SessionLogRow],
+    agent_id: &str,
+) -> crate::conversation::ConversationRefs {
+    let mut refs = crate::conversation::ConversationRefs::build(logs, agent_id);
+    if let Ok(Some(agent)) = opencrab_db::queries::get_agent(conn, agent_id) {
+        refs.set_agent_name(agent.name);
+    }
+    refs
+}
+
 pub fn assemble_from_snapshot(
     conn: &Connection,
     session_id: &str,
@@ -198,7 +212,7 @@ pub fn assemble_from_snapshot(
     );
     let completed_for_read = completed_tool_call_ids(&all);
     // §9A: u/e/c 短縮参照は全履歴の初出順で採番し、snapshot 境界を跨いでも安定させる。
-    let refs = crate::conversation::ConversationRefs::build(&all, agent_id);
+    let refs = build_conversation_refs(conn, &all, agent_id);
     let delta = logs
         .iter()
         .map(|l| format_single_log_with_echo(l, Some(&completed_for_read), Some(&refs)))
@@ -278,7 +292,7 @@ pub fn items_from_logs(
     let recent_tail = all.len().saturating_sub(8);
 
     let completed_ids = completed_tool_call_ids(&all);
-    let refs = crate::conversation::ConversationRefs::build(&all, agent_id);
+    let refs = build_conversation_refs(conn, &all, agent_id);
     let groups = partition_exchange_groups(&all, agent_id);
 
     let mut items = Vec::new();

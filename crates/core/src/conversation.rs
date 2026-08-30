@@ -6,9 +6,7 @@
 //! 依存しないため core に置く（#518 手順 3〜4）。呼び出し元は `server::process`
 //! （既存パスを保つ再エクスポート）。
 
-use crate::context_budget::{
-    argument_reference, assemble_from_snapshot, TurnGovernor, CONTEXT_BUDGET_EXHAUSTED,
-};
+use crate::context_budget::{assemble_from_snapshot, TurnGovernor, CONTEXT_BUDGET_EXHAUSTED};
 use crate::tokens::estimate_tokens;
 
 /// コンパクション時に最低限保持する最近のログ件数。
@@ -571,12 +569,7 @@ fn build_result_reference(tool_name: &str, result_json: &str) -> String {
 /// 返すと生産者B と区別できず**畳まれる**。これは受容する: 長さ不変条件で小さい答えは残る／DB に全文が
 /// 残る／`session_id` ポインタも残る／本番実測で該当例は未発見。由来フィールドを生産者側へ足すのは
 /// スコープ外（別 issue）。将来この誤分類が実害化したときここから辿れるよう明記しておく。
-fn fold_subtask_completed(
-    exit_reason: &str,
-    session_id: &str,
-    subtask_id: &str,
-    result_str: &str,
-) -> String {
+fn fold_subtask_completed(exit_reason: &str, result_str: &str) -> String {
     // ゲート1（外側）: completed 以外は本文を丸ごと残す。timeout / error / stopped_by_limit は
     // 「プロセス完了＝clean」ではない。**completed を成功と読み替えない**ための belt——completed でも
     // 下のゲート2でさらに中身を見る（罠1）。
@@ -609,7 +602,7 @@ fn fold_subtask_completed(
             if signals_failure(&inner, d) {
                 return result_str.to_string();
             }
-            build_subtask_single_reference(subtask_id, session_id, d)
+            build_subtask_single_reference(d)
         }
         // 複数ツール（batch）: `[{"tool":…,"tool_call_id":…,"result":<value>}, …]`。
         serde_json::Value::Array(items) => {
@@ -618,7 +611,7 @@ fn fold_subtask_completed(
             if items.iter().any(batch_entry_signals_failure) {
                 return result_str.to_string();
             }
-            build_subtask_batch_reference(subtask_id, session_id, items.len(), result_str)
+            build_subtask_batch_reference(items.len(), result_str)
         }
         // 想定外の JSON（scalar 等）: 推測で捨てず残す（fail-safe）。
         _ => return result_str.to_string(),
@@ -628,21 +621,19 @@ fn fold_subtask_completed(
     shorter_of_reference_or_body(reference, result_str)
 }
 
-/// 監査の在り処（サブセッション）を指す共通の後置き（#713 決定A）。**再取得は約束しない**（罠3）——
+/// 監査の在り処を指す共通の後置き（#713 決定A）。**再取得は約束しない**（罠3）——
 /// `result` の read/list 文言（「もう一度 X で読む」）は切り離した subtask には嘘になる。全文が
-/// 記録（`memory_sessions` / `session_logs`）に残ることと、その在り処（`session_id`）だけ伝える。
-fn subtask_audit_suffix(session_id: &str) -> String {
-    format!("（本文は会話に残していない。全文は記録に残る: session={session_id}）")
+/// 記録（`memory_sessions` / `session_logs`）に残ることだけ伝える。生 session_id/subtask_id の
+/// UUID は会話に出さない（row295b・在り処はヘッダの s 番号が示す）。
+fn subtask_audit_suffix() -> String {
+    "（本文は会話に残していない・全文は記録に残る）".to_string()
 }
 
 /// 単一ツールの subtask 参照。`exit_code` があれば終了コードと出力規模、無ければ結果規模。
-/// ここへ来るのは `signals_failure` を通った成功だけなので終了コードは 0。
-fn build_subtask_single_reference(
-    subtask_id: &str,
-    session_id: &str,
-    d: &serde_json::Value,
-) -> String {
-    let suffix = subtask_audit_suffix(session_id);
+/// ここへ来るのは `signals_failure` を通った成功だけなので終了コードは 0。ヘッダが `[s{n} 完了]`
+/// を示すので本文は要約だけ（生 UUID を出さない）。
+fn build_subtask_single_reference(d: &serde_json::Value) -> String {
+    let suffix = subtask_audit_suffix();
     if let Some(code) = d.get("exit_code").and_then(|x| x.as_i64()) {
         // 非ゼロ終了は `signals_failure` が本文ごと残すので、ここへ来るのは成功（code==0）だけ。
         // 双子の `build_result_reference` と対称に tripwire を置き、不変条件が破れたら気づく。
@@ -661,7 +652,7 @@ fn build_subtask_single_reference(
             format!("・stderr {} 文字", err.chars().count())
         };
         return format!(
-            "サブタスク {subtask_id} 完了・終了コード {code}・出力 {} 文字{stderr_note}{suffix}",
+            "終了コード {code}・出力 {} 文字{stderr_note}{suffix}",
             out.chars().count(),
         );
     }
@@ -669,20 +660,15 @@ fn build_subtask_single_reference(
     let size = serde_json::to_string(d)
         .map(|t| t.chars().count())
         .unwrap_or(0);
-    format!("サブタスク {subtask_id} 完了・結果 {size} 文字{suffix}")
+    format!("結果 {size} 文字{suffix}")
 }
 
 /// batch（複数ツール）の subtask 参照。件数と合計規模（配列 JSON の文字数）を残す。
-fn build_subtask_batch_reference(
-    subtask_id: &str,
-    session_id: &str,
-    count: usize,
-    result_str: &str,
-) -> String {
+fn build_subtask_batch_reference(count: usize, result_str: &str) -> String {
     format!(
-        "サブタスク {subtask_id} 完了・{count} 件のツール結果・合計 {} 文字{}",
+        "{count} 件のツール結果・合計 {} 文字{}",
         result_str.chars().count(),
-        subtask_audit_suffix(session_id),
+        subtask_audit_suffix(),
     )
 }
 
@@ -985,9 +971,13 @@ pub fn format_single_log(log: &opencrab_db::queries::SessionLogRow) -> String {
 #[derive(Debug, Default, Clone)]
 pub struct ConversationRefs {
     agent_id: String,
+    /// 自分（agent_id）の表示名（agents.name）。空/未設定なら agent_id のまま。
+    agent_name: Option<String>,
     speakers: std::collections::HashMap<String, usize>,
     events: std::collections::HashMap<String, usize>,
     calls: std::collections::HashMap<String, usize>,
+    /// subtask_id → s 番号（セッション局所・初出順）。spawn 受理と完了本文の両方から採る。
+    subtasks: std::collections::HashMap<String, usize>,
 }
 
 impl ConversationRefs {
@@ -1022,11 +1012,29 @@ impl ConversationRefs {
                     if let Some(id) = tool_call_id_of_result(log) {
                         refs.assign_call(&id);
                     }
+                    // spawn 受理の tool_result 本文 `{"data":{"subtask_id":…}}` から採番（初出）。
+                    if let Some(sid) = subtask_id_of_tool_result(log) {
+                        refs.assign_subtask(&sid);
+                    }
+                }
+                "system" => {
+                    // 完了本文 `{"type":"subtask_completed","subtask_id":…}` からも採番。
+                    if let Some(sid) = subtask_id_of_system(log) {
+                        refs.assign_subtask(&sid);
+                    }
                 }
                 _ => {}
             }
         }
         refs
+    }
+
+    /// 自分の表示名を設定する（組み立て側が agents.name を引いて渡す）。空は無視。
+    pub fn set_agent_name(&mut self, name: impl Into<String>) {
+        let name = name.into();
+        if !name.is_empty() {
+            self.agent_name = Some(name);
+        }
     }
 
     fn assign_call(&mut self, id: &str) {
@@ -1036,10 +1044,19 @@ impl ConversationRefs {
         }
     }
 
-    /// 話者表示。自分は u 番号を付けず名前だけ（§9A.2・kind:0 名は後続スライス）。
+    fn assign_subtask(&mut self, id: &str) {
+        if !id.is_empty() && !self.subtasks.contains_key(id) {
+            let n = self.subtasks.len() + 1;
+            self.subtasks.insert(id.to_string(), n);
+        }
+    }
+
+    /// 話者表示。自分は名前だけ（§9A.2・生 UUID を出さない）、外部話者は u 番号。
     fn speaker_label(&self, speaker: &str) -> String {
         if speaker == self.agent_id {
-            speaker.to_string()
+            self.agent_name
+                .clone()
+                .unwrap_or_else(|| speaker.to_string())
         } else if let Some(n) = self.speakers.get(speaker) {
             format!("u{n}")
         } else {
@@ -1054,6 +1071,33 @@ impl ConversationRefs {
     fn call_of(&self, id: &str) -> Option<usize> {
         self.calls.get(id).copied()
     }
+
+    /// subtask_id → s 番号（未知は None）。
+    fn subtask_of(&self, id: &str) -> Option<usize> {
+        self.subtasks.get(id).copied()
+    }
+}
+
+/// 完了本文（system・type=subtask_completed）の subtask_id。
+fn subtask_id_of_system(log: &opencrab_db::queries::SessionLogRow) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(&log.content).ok()?;
+    if v.get("type").and_then(|t| t.as_str()) != Some("subtask_completed") {
+        return None;
+    }
+    v.get("subtask_id")
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// spawn 受理の tool_result 本文 `{"data":{"subtask_id":…}}` の subtask_id。
+fn subtask_id_of_tool_result(log: &opencrab_db::queries::SessionLogRow) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(&log.content).ok()?;
+    v.get("data")
+        .and_then(|d| d.get("subtask_id"))
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// 受信イベントの external_origin（inbound 記録が metadata に載せる汎用 field）。
@@ -1159,6 +1203,37 @@ fn is_inbound_meta_line(trimmed: &str) -> bool {
     }
 }
 
+/// 受信メタ行 `[… kind:N ラベル …]` から会話ヘッダの関係注記を作る（row295c）。
+///
+/// kind ラベル全廃で「そもそもリアクション/リプライか」が失われた欠陥への対処。リプライ/
+/// リアクション/リポストだけ種別を残す（素の投稿・メンション・DM・長文は注記なし）。対象ノート
+/// (→e番号) は現状の受信転記に記録が無いため `→外部` の最小表記に留める（真の →e番号 は対象
+/// event_id を inbound metadata に記録するデータスライス後・報告参照）。
+fn inbound_relation_annotation(content: &str) -> Option<String> {
+    let label = content
+        .split('\n')
+        .map(str::trim)
+        .find(|l| is_inbound_meta_line(l))
+        .and_then(meta_line_label)?;
+    let relation = match label {
+        "リプライ" => "reply",
+        "リアクション" => "reaction",
+        "リポスト" => "repost",
+        _ => return None,
+    };
+    Some(format!("({relation}→外部)"))
+}
+
+/// `[… kind:<数字> <ラベル> …]` からラベル語だけを取り出す（新形も旧 from=/target= 付きも）。
+fn meta_line_label(trimmed: &str) -> Option<&str> {
+    const MARKER: &str = " kind:";
+    let idx = trimmed.find(MARKER)?;
+    let after = trimmed[idx + MARKER.len()..].trim_start_matches(|c: char| c.is_ascii_digit());
+    let after = after.strip_prefix(' ')?;
+    let end = after.find([' ', ']']).unwrap_or(after.len());
+    Some(&after[..end])
+}
+
 /// 生の長い識別子の bech32 HRP。長い順に試す（`nprofile1` が `npub1` より先）。
 const BECH32_HRPS: &[&str] = &["nprofile1", "nevent1", "naddr1", "npub1", "note1", "nsec1"];
 
@@ -1220,24 +1295,27 @@ pub fn format_single_log_with_echo(
         .created_at
         .as_deref()
         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .map(|dt| dt.format(" [%Y-%m-%d %H:%M:%S]").to_string())
+        // 括弧間スペースを出さない（`[u5][時刻]e3575:` 形・行数×毎ターンで効く・row295b）。
+        .map(|dt| dt.format("[%Y-%m-%d %H:%M:%S]").to_string())
         .unwrap_or_default();
 
     match log.log_type.as_str() {
         "speech" => match refs {
             Some(r) => {
                 let speaker = r.speaker_label(log.speaker_id.as_deref().unwrap_or(&log.agent_id));
-                let eref = r
-                    .event_of(log)
-                    .map(|n| format!(" e{n}"))
-                    .unwrap_or_default();
+                let eref = r.event_of(log).map(|n| format!("e{n}")).unwrap_or_default();
+                // 関係注記（row295c）: リプライ/リアクション/リポストは種別を残す。ラベル全廃で
+                // 「そもそもリアクションか」が失われた欠陥への対処。対象ノート(→e番号)は現状の
+                // 受信転記に記録が無いため `→外部` の最小表記（真の →e番号 は target 記録の
+                // データスライス後・報告参照）。素の投稿/メンションは注記なし。
+                let relation = inbound_relation_annotation(&log.content).unwrap_or_default();
                 // 表示時に legacy メタ行・生識別子を剥がしてから切り詰める（row294b・保存は不変）。
                 let cleaned = strip_inbound_meta_for_display(&log.content);
                 let content = match render_limit(external_origin_of(log).as_deref()) {
                     Some(lim) => truncate_body(&cleaned, lim),
                     None => cleaned,
                 };
-                format!("[{}]{}{}:\n{}", speaker, ts, eref, content)
+                format!("[{speaker}]{ts}{eref}{relation}:\n{content}")
             }
             None => {
                 let speaker = log.speaker_id.as_deref().unwrap_or(&log.agent_id);
@@ -1278,9 +1356,12 @@ pub fn format_single_log_with_echo(
                                                 .unwrap_or_default();
                                             (name, args)
                                         };
+                                        // 完了済み call の引数は本文を持ち越さない。以前は
+                                        // {ref,digest,bytes} を出していたが digest はモデルに不要な
+                                        // 内部整合値なので出さず、log 参照だけ短く残す（row295b・#707）。
                                         let args =
                                             if completed_ids.is_some_and(|set| set.contains(id)) {
-                                                argument_reference(log.id.unwrap_or(0), &args)
+                                                format!("→log:{}", log.id.unwrap_or(0))
                                             } else {
                                                 args
                                             };
@@ -1372,7 +1453,7 @@ pub fn format_single_log_with_echo(
                     // pretty-print（範囲外・塊の証拠なし）。**厳密一致**で 1 type だけ分岐し、
                     // 他の type を巻き込まない（設計 Q2 #8）。
                     if kind == "subtask_completed" {
-                        return format_subtask_completed(&value, &log.content, &ts);
+                        return format_subtask_completed(&value, &log.content, &ts, refs);
                     }
                     let content = serde_json::to_string_pretty(&value)
                         .unwrap_or_else(|_| log.content.clone());
@@ -1393,23 +1474,22 @@ pub fn format_single_log_with_echo(
 /// `exit_reason`）はそのまま pretty-print する——監査の相関（起動応答との突き合わせ・記録の在り処）を
 /// 会話から消さない。畳めない形（失敗・散文・退避 notice 等）では `result` は原文のまま残るので、
 /// 表示は従来の pretty-print と一致する（挙動を変えるのは畳めたときだけ）。
-fn format_subtask_completed(value: &serde_json::Value, raw_content: &str, ts: &str) -> String {
-    let pretty = |v: &serde_json::Value| {
-        serde_json::to_string_pretty(v).unwrap_or_else(|_| raw_content.to_string())
-    };
-
+fn format_subtask_completed(
+    value: &serde_json::Value,
+    raw_content: &str,
+    ts: &str,
+    refs: Option<&ConversationRefs>,
+) -> String {
     // `result` は文字列（`settle_completed` が `result_text` を JSON 文字列として載せる）。
-    // 想定外に文字列でなければ触らず現状の pretty-print に委ねる（fail-safe）。
+    // 想定外に文字列でなければ触らず pretty-print に委ねる（fail-safe・稀）。
     let Some(result_str) = value.get("result").and_then(|v| v.as_str()) else {
-        return format!("[system: subtask_completed]{ts}:\n{}", pretty(value));
+        let pretty =
+            serde_json::to_string_pretty(value).unwrap_or_else(|_| raw_content.to_string());
+        return format!("[subtask 完了]{ts}:\n{pretty}");
     };
 
     let exit_reason = value
         .get("exit_reason")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let session_id = value
-        .get("session_id")
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let subtask_id = value
@@ -1417,13 +1497,16 @@ fn format_subtask_completed(value: &serde_json::Value, raw_content: &str, ts: &s
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let folded = fold_subtask_completed(exit_reason, session_id, subtask_id, result_str);
+    // subtask_id はセッション局所 s 番号へ（生 UUID を出さない・row295b）。refs 無し（単体表示）は
+    // 採番できないので "subtask"。session_id/exit_reason 等の定型 field は会話に出さない。
+    let label = refs
+        .and_then(|r| r.subtask_of(subtask_id))
+        .map(|n| format!("s{n}"))
+        .unwrap_or_else(|| "subtask".to_string());
 
-    let mut shown = value.clone();
-    if let Some(obj) = shown.as_object_mut() {
-        obj.insert("result".to_string(), serde_json::Value::String(folded));
-    }
-    format!("[system: subtask_completed]{ts}:\n{}", pretty(&shown))
+    // 本文は畳んだ result だけ（ツール結果 blob は要約・散文はそのまま・切り詰めは fold 内の不変条件）。
+    let body = fold_subtask_completed(exit_reason, result_str);
+    format!("[{label} 完了]{ts}:\n{body}")
 }
 
 #[cfg(test)]
@@ -1496,9 +1579,10 @@ mod format_log_tests {
         done.insert("tc-1".into());
         let out = format_single_log_with_echo(&log, Some(&done), None);
         assert!(out.contains("search"), "{out}");
-        assert!(out.contains(r#""ref":"log:42""#), "{out}");
-        assert!(out.contains(r#""digest""#), "{out}");
-        assert!(out.contains(r#""bytes""#), "{out}");
+        // 完了済み call は log 参照だけ（digest/bytes はモデルに不要なので出さない・row295b）。
+        assert!(out.contains("→log:42"), "{out}");
+        assert!(!out.contains("digest"), "digest は出さない: {out}");
+        assert!(!out.contains("bytes"), "bytes は出さない: {out}");
         assert!(
             !out.contains(r#"{"q":"rust"}"#),
             "完了済み arguments は全文を残さない: {out}"
@@ -3226,14 +3310,11 @@ mod subtask_completed_folding_tests {
         );
         assert!(o.contains("終了コード 0"), "終了コードが無い: {o}");
         assert!(o.contains("50000"), "出力規模が無い: {o}");
-        assert!(
-            o.contains("st-1"),
-            "起動応答と突き合わせる subtask_id が消えた: {o}"
-        );
-        assert!(
-            o.contains("session=subtask-st-1"),
-            "監査の在り処（session_id）が消えた: {o}"
-        );
+        // row295b: 生 UUID（subtask_id/session）は会話に出さない。在り処はヘッダの s 番号
+        // （refs 無しの単体表示では "subtask"）が示す。
+        assert!(o.contains("[subtask 完了]"), "完了ヘッダが無い: {o}");
+        assert!(!o.contains("st-1"), "生 subtask_id が残存: {o}");
+        assert!(!o.contains("session="), "生 session UUID が残存: {o}");
     }
 
     /// 1b. 正常終了でも stderr に大量に出るツール（cargo build の warning 等）の規模を数える
@@ -3394,16 +3475,18 @@ mod subtask_completed_folding_tests {
             "batch の本文が会話へ載っている: {o:.120}"
         );
         assert!(o.contains("2 件"), "件数が無い: {o}");
-        assert!(
-            o.contains("session=subtask-st-1"),
-            "監査の在り処が消えた: {o}"
-        );
+        assert!(o.contains("[subtask 完了]"), "完了ヘッダが無い: {o}");
+        assert!(!o.contains("session="), "生 session UUID が残存: {o}");
+        assert!(!o.contains("st-1"), "生 subtask_id が残存: {o}");
     }
 
     /// 9. 参照が本文以上に長くなる極小結果 → 本文を残す（長さ不変条件・#709 と共有）。
     #[test]
     fn tiny_results_are_never_expanded() {
-        let result = serde_json::json!({"success": true, "data": {"path": "x"}}).to_string();
+        // 参照より短い極小結果は本文を残す（長さ不変条件・#709 と共有）。参照文言が短くなった
+        // （row295b で生 UUID/接頭辞を落とした）ぶん閾値は下がるが、参照が本文以上なら本文を残す
+        // 不変条件は不変——空 data で確認する。
+        let result = serde_json::json!({"success": true, "data": {}}).to_string();
         let o = format_single_log(&subtask_completed_log("completed", &result));
         assert!(
             !o.contains("本文は会話に残していない"),
@@ -3625,9 +3708,9 @@ mod render_refs_tests {
         ];
         let refs = ConversationRefs::build(&logs, "me");
         let a = format_single_log_with_echo(&logs[0], None, Some(&refs));
-        assert!(a.starts_with("[u1] e1:"), "{a}");
+        assert!(a.starts_with("[u1]e1:"), "{a}");
         let b = format_single_log_with_echo(&logs[1], None, Some(&refs));
-        assert!(b.starts_with("[u2] e2:"), "{b}");
+        assert!(b.starts_with("[u2]e2:"), "{b}");
         // 生 ID（npub/note/hex/origin）は会話へ出さない。
         assert!(!a.contains("AAA") && !a.contains("nostr:event"));
     }
@@ -3752,5 +3835,98 @@ mod render_refs_tests {
         let body = "本文\n[Nostr kind:1 メンション]".to_string();
         let ev = speech("me", "pk_a", &body, Some("nostr:event:v1:default:E"));
         assert_eq!(ev.content, body, "保存データは書き換えない");
+    }
+
+    // row295c: 自分の話者行は UUID でなく名前（agents.name）。
+    #[test]
+    fn self_speaker_shows_name_not_uuid() {
+        let logs = vec![speech("agent-uuid-xyz", "agent-uuid-xyz", "やあ", None)];
+        let mut refs = ConversationRefs::build(&logs, "agent-uuid-xyz");
+        refs.set_agent_name("くらぶ");
+        let out = format_single_log_with_echo(&logs[0], None, Some(&refs));
+        assert!(out.starts_with("[くらぶ]"), "{out}");
+        assert!(!out.contains("agent-uuid-xyz"), "生 UUID が残存: {out}");
+    }
+
+    // row295b: 括弧間スペースを出さない（ts あり）。
+    #[test]
+    fn header_has_no_spaces_between_brackets() {
+        let mut ev = speech("me", "pk_a", "hi", Some("nostr:event:v1:default:E"));
+        ev.created_at = Some("2026-08-30T11:14:42+00:00".into());
+        let refs = ConversationRefs::build(std::slice::from_ref(&ev), "me");
+        let out = format_single_log_with_echo(&ev, None, Some(&refs));
+        assert!(out.starts_with("[u1][2026-08-30 11:14:42]e1:"), "{out}");
+        assert!(!out.contains("] ["), "括弧間スペース: {out}");
+    }
+
+    // row295c: リプライ/リアクション/リポストは関係注記を残す（素の投稿は注記なし）。
+    #[test]
+    fn reply_and_reaction_get_relation_annotation() {
+        let reply = speech(
+            "me",
+            "pk_a",
+            "そうだね\n[Nostr kind:1 リプライ]",
+            Some("nostr:event:v1:default:R"),
+        );
+        let reaction = speech(
+            "me",
+            "pk_a",
+            "🫧\n[Nostr kind:7 リアクション]",
+            Some("nostr:event:v1:default:X"),
+        );
+        let plain = speech(
+            "me",
+            "pk_a",
+            "こんにちは\n[Nostr kind:1 メンション]",
+            Some("nostr:event:v1:default:M"),
+        );
+        let logs = vec![reply, reaction, plain];
+        let refs = ConversationRefs::build(&logs, "me");
+        let o_reply = format_single_log_with_echo(&logs[0], None, Some(&refs));
+        assert!(o_reply.contains("(reply→外部):"), "{o_reply}");
+        assert!(
+            !o_reply.contains("[Nostr kind:"),
+            "ラベル行は出さない: {o_reply}"
+        );
+        let o_reaction = format_single_log_with_echo(&logs[1], None, Some(&refs));
+        assert!(o_reaction.contains("(reaction→外部):"), "{o_reaction}");
+        assert!(o_reaction.contains("🫧"), "本文が残る: {o_reaction}");
+        let o_plain = format_single_log_with_echo(&logs[2], None, Some(&refs));
+        assert!(!o_plain.contains("→外部"), "素の投稿に注記なし: {o_plain}");
+    }
+
+    // row295b: subtask_completed は s 番号ヘッダ＋result 本文のみ（生 UUID/定型 field を出さない）。
+    #[test]
+    fn subtask_completed_uses_s_number_not_uuid() {
+        let spawn = SessionLogRow {
+            id: Some(1),
+            agent_id: "me".into(),
+            session_id: "s".into(),
+            log_type: "tool_result".into(),
+            content: r#"{"success":true,"data":{"subtask_id":"sub-xyz-1","status":"spawned"}}"#
+                .into(),
+            speaker_id: Some("me".into()),
+            turn_number: None,
+            metadata_json: Some(r#"{"tool_call_id":"tc-1","tool_name":"spawn_subtask"}"#.into()),
+            created_at: None,
+        };
+        let done = SessionLogRow {
+            id: Some(2),
+            agent_id: "me".into(),
+            session_id: "s".into(),
+            log_type: "system".into(),
+            content: r#"{"type":"subtask_completed","subtask_id":"sub-xyz-1","session_id":"subtask-sub-xyz-1","exit_reason":"completed","result":"調査おわり"}"#.into(),
+            speaker_id: None,
+            turn_number: None,
+            metadata_json: None,
+            created_at: None,
+        };
+        let logs = vec![spawn, done];
+        let refs = ConversationRefs::build(&logs, "me");
+        let out = format_single_log_with_echo(&logs[1], None, Some(&refs));
+        assert!(out.contains("[s1 完了]"), "s 番号ヘッダが無い: {out}");
+        assert!(out.contains("調査おわり"), "result 本文が残る: {out}");
+        assert!(!out.contains("sub-xyz-1"), "生 UUID が残存: {out}");
+        assert!(!out.contains("exit_reason"), "定型 field が残存: {out}");
     }
 }
