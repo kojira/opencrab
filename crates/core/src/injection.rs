@@ -122,13 +122,17 @@ mod tests {
 
         // メソッド名まで広げて綴り変種を拾う（限界は上記 doc 参照）。
         let needle = "is_control";
-        let allowed: [std::path::PathBuf; 2] = [
+        let allowed: [std::path::PathBuf; 3] = [
             crates_dir.join("core").join("src").join("injection.rs"),
             crates_dir
                 .join("db")
                 .join("src")
                 .join("queries")
                 .join("heartbeat.rs"),
+            // nostr-gateway は core に依存しない設計（wire DTO 非依存）ため
+            // injection::sanitize_embedded_field を使えない。map.rs の
+            // sanitize_anchor_field は意図的な自前 is_control。allowlist で許可する。
+            crates_dir.join("nostr-gateway").join("src").join("map.rs"),
         ];
 
         let mut offenders = Vec::new();
