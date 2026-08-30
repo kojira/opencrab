@@ -1298,8 +1298,9 @@ fn uuid_len_at(b: &[u8]) -> Option<usize> {
             }
         }
     }
-    // 直後が hex/英数/ダッシュなら、より長いトークンの一部＝UUID ではない。
-    if matches!(b.get(pos), Some(c) if c.is_ascii_alphanumeric() || *c == b'-') {
+    // 直後が英数なら、より長い hex トークンの一部＝UUID ではない。ダッシュは許す
+    // （`nostr-<uuid>-<channel>` のような dashed session id 内に埋まった UUID も剥がす・row295d 変種）。
+    if matches!(b.get(pos), Some(c) if c.is_ascii_alphanumeric()) {
         return None;
     }
     Some(pos)
@@ -4121,6 +4122,20 @@ mod render_refs_tests {
         );
         // 新形式（→log 参照・c 番号）は保持。
         assert!(out.contains("log:1") && out.contains("[c1]"), "{out}");
+    }
+
+    // row295d 変種: dashed session id（`nostr-<uuid>-<channel>`）に埋まった UUID も剥がす。
+    #[test]
+    fn frozen_snapshot_elides_uuid_embedded_in_dashed_session_id() {
+        let blob = "session=nostr-33196264-5908-4f04-b24a-efd7aa6d2014-caldera へ完了";
+        let out = strip_frozen_snapshot(blob);
+        assert!(
+            !out.contains("33196264-5908-4f04-b24a-efd7aa6d2014"),
+            "埋め込み UUID 残存: {out}"
+        );
+        assert!(out.contains("<uuid…>"), "{out}");
+        // 周辺（session=nostr-…-caldera）は残ってよい（生 UUID だけ落とす）。
+        assert!(out.contains("caldera") && out.contains("完了"), "{out}");
     }
 
     // 単一ログ経路（per-log）は UUID/call_/digest を触らない（利用者本文の過剰除去を避ける）。

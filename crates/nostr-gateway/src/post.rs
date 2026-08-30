@@ -20,10 +20,11 @@ const POST_TIMEOUT: Duration = Duration::from_secs(30);
 /// say の投稿結果。
 #[derive(Debug, PartialEq, Eq)]
 pub enum SayDelivery {
-    /// e-tag reply として投稿した。
+    /// 発端イベントへの e-tag reply として投稿した（単一メンション）。
     Posted,
-    /// 返信先が無い（bundle/曖昧）ため投稿しなかった。エアリプは nostr_post が担う。
-    Dropped,
+    /// 返信先が無い（bundle/曖昧）ため新規ノート（standalone）として publish した（row292/#843:
+    /// drop せず必ず出す）。
+    PostedStandalone,
     /// 投稿を試みたが失敗（nostaro 非ゼロ / spawn 失敗 / timeout）。
     Failed(String),
 }
@@ -50,6 +51,18 @@ pub fn reply_argv(config_path: &Path, target: &str, text: &str) -> Vec<String> {
         "reply".to_string(),
         "--".to_string(),
         target.to_string(),
+        text.to_string(),
+    ]
+}
+
+/// `nostaro --config <cfg> post -- <text>` の argv（新規ノート・鍵は env・argv に載せない）。
+/// 返信先が特定できない say（bundle/曖昧）を drop せず publish するのに使う（row292/#843）。
+pub fn post_argv(config_path: &Path, text: &str) -> Vec<String> {
+    vec![
+        "--config".to_string(),
+        config_path.to_string_lossy().into_owned(),
+        "post".to_string(),
+        "--".to_string(),
         text.to_string(),
     ]
 }
@@ -93,7 +106,7 @@ fn redact_secrets(s: &str) -> String {
     out
 }
 
-fn build_reply_command(bin: &Path, argv: &[String], secret: Option<&str>) -> Command {
+fn build_nostaro_command(bin: &Path, argv: &[String], secret: Option<&str>) -> Command {
     let mut cmd = Command::new(bin);
     cmd.args(argv)
         .stdin(Stdio::null())
@@ -106,8 +119,9 @@ fn build_reply_command(bin: &Path, argv: &[String], secret: Option<&str>) -> Com
     cmd
 }
 
-/// say を配送する。`reply_origin=None`（bundle/曖昧）は投稿しない（Dropped）。
-/// `Some(origin)` は origin の event_id へ e-tag reply する。
+/// say を配送する。返信先（origin の event_id）が特定できれば e-tag reply、できなければ
+/// （bundle/曖昧）新規ノート（standalone post）として publish する（row292/#843: drop しない・
+/// 普通の投稿は本文をそのまま書くだけ）。
 pub async fn deliver_say(
     nostaro_bin: &Path,
     config_path: &Path,
@@ -115,27 +129,32 @@ pub async fn deliver_say(
     reply_origin: Option<String>,
     text: &str,
 ) -> SayDelivery {
-    let Some(origin) = reply_origin else {
-        // say は特定ノートへの返信専用。TL 束ね（単一返信先が無い）への自発反応は
-        // エアリプ（nostr_post）が担うので、gateway からは投稿しない。
-        return SayDelivery::Dropped;
+    let (argv, standalone) = match reply_origin.as_deref().and_then(event_id_from_origin) {
+        Some(target) => (reply_argv(config_path, &target, text), false),
+        None => (post_argv(config_path, text), true),
     };
-    let Some(target) = event_id_from_origin(&origin) else {
-        return SayDelivery::Failed(format!("origin から event_id を復元できない: {origin}"));
-    };
-    let argv = reply_argv(config_path, &target, text);
-    let mut cmd = build_reply_command(nostaro_bin, &argv, secret);
+    let verb = if standalone { "post" } else { "reply" };
+    let mut cmd = build_nostaro_command(nostaro_bin, &argv, secret);
     match tokio::time::timeout(POST_TIMEOUT, cmd.output()).await {
-        Ok(Ok(out)) if out.status.success() => SayDelivery::Posted,
+        Ok(Ok(out)) if out.status.success() => {
+            if standalone {
+                SayDelivery::PostedStandalone
+            } else {
+                SayDelivery::Posted
+            }
+        }
         Ok(Ok(out)) => {
             let stderr = redact_secrets(String::from_utf8_lossy(&out.stderr).trim());
             SayDelivery::Failed(format!(
-                "nostaro reply exit {:?}: {stderr}",
+                "nostaro {verb} exit {:?}: {stderr}",
                 out.status.code()
             ))
         }
-        Ok(Err(e)) => SayDelivery::Failed(format!("nostaro spawn 失敗: {e}")),
-        Err(_) => SayDelivery::Failed(format!("nostaro reply timeout {}s", POST_TIMEOUT.as_secs())),
+        Ok(Err(e)) => SayDelivery::Failed(format!("nostaro {verb} spawn 失敗: {e}")),
+        Err(_) => SayDelivery::Failed(format!(
+            "nostaro {verb} timeout {}s",
+            POST_TIMEOUT.as_secs()
+        )),
     }
 }
 
@@ -204,17 +223,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bundle_origin_say_is_dropped_not_posted() {
-        // reply_origin=None は投稿せず Dropped（nostaro を spawn しない）。
-        let out = deliver_say(
-            Path::new("/nonexistent/nostaro"),
-            Path::new("/nonexistent/cfg.toml"),
-            None,
-            None,
-            "本文",
+    async fn no_target_say_is_published_as_standalone_post() {
+        // reply_origin=None（bundle/曖昧）は drop せず standalone post で publish（row292/#843）。
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-nostaro");
+        let out_file = dir.path().join("invoked.txt");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf 'ARGV:%s\\n' \"$*\" > '{}'\nexit 0\n",
+                out_file.display()
+            ),
         )
-        .await;
-        assert_eq!(out, SayDelivery::Dropped);
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut p = std::fs::metadata(&script).unwrap().permissions();
+            p.set_mode(0o755);
+            std::fs::set_permissions(&script, p).unwrap();
+        }
+        let cfg = dir.path().join("cfg.toml");
+        write_relays_config(&cfg, &["wss://x.example".into()]).unwrap();
+        let got = deliver_say(&script, &cfg, Some("nsec1fakekey"), None, "エアリプ本文").await;
+        assert_eq!(got, SayDelivery::PostedStandalone);
+        let recorded = std::fs::read_to_string(&out_file).unwrap();
+        assert!(
+            recorded.contains("post"),
+            "post subcommand で無い: {recorded}"
+        );
+        assert!(
+            recorded.contains("エアリプ本文"),
+            "本文が渡っていない: {recorded}"
+        );
+        assert!(
+            !recorded.contains("reply"),
+            "reply にしてはならない: {recorded}"
+        );
     }
 
     #[tokio::test]
