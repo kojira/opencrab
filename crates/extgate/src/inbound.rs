@@ -923,7 +923,7 @@ fn fire_held_turns<R: AgentRuntime>(
 
 fn fire_nostr_relay(state: &ExtgateState, row: &OriginRow, said: &Said) {
     let body = nostr_renderer_body(&said.text);
-    let (_, label, _, _) = nostr_renderer_meta(&said.author_id, &said.text);
+    let (_, label) = nostr_renderer_meta(&said.author_id, &said.text);
     let author = nostr_author_label(&said.author_id);
     let text = format!("[Nostr / {label}] {author}\n{body}");
     state.relay_nostr_inbound(&row.agent_id, text);
@@ -972,17 +972,16 @@ fn nostr_renderer_body(text: &str) -> &str {
 }
 
 fn nostr_prompt_suffix(author_id: &str, text: &str) -> String {
-    let (kind, label, author_key, target) = nostr_renderer_meta(author_id, text);
+    // §9A / row296: pubkey= と対象ノートの生 ID をプロンプトから排除し短縮する。
+    // 返信は発端投稿へ自動配送されるので LLM は対象 ID を指定しない。
+    let (kind, label) = nostr_renderer_meta(author_id, text);
     let author = nostr_author_label(author_id);
     format!(
         "[Nostr] {author} さんの投稿への応答です。\n\
-         - 送信者: {author_key}（pubkey={pubkey}）\n\
-         - 対象ノート: {target}\n\
          - 種別: kind:{kind}（{label}）\n\
-         返信する内容をそのまま本文で書いてください（あなたの応答はこの対象ノートへの返信として\
+         返信する内容をそのまま本文で書いてください（あなたの応答はこの投稿への返信として\
          自動で投稿されます）。種別的に本文返信が不自然なもの（リアクション等）や、返信不要なら \
          NO_REPLY とだけ答えてください。",
-        pubkey = author_id,
     )
 }
 
@@ -991,35 +990,24 @@ fn nostr_author_label(author_id: &str) -> String {
     format!("{short}…")
 }
 
-fn nostr_renderer_meta(author_id: &str, text: &str) -> (u32, &'static str, String, String) {
+fn nostr_renderer_meta(_author_id: &str, text: &str) -> (u32, &'static str) {
     let renderer = nostr_renderer_body(text);
     if let Some(meta) = parse_renderer_line(renderer) {
         return meta;
     }
-    let (kind, event_id) =
+    let (kind, _event_id) =
         parse_v1_kind_and_event(text).expect("admitted nostr said has a V1 anchor");
-    (
-        kind,
-        nostr_kind_label(kind),
-        author_id.to_string(),
-        event_id,
-    )
+    (kind, nostr_kind_label(kind))
 }
 
-fn parse_renderer_line(renderer: &str) -> Option<(u32, &'static str, String, String)> {
+/// history 行 `[Nostr kind:{kind} {label}]` から種別だけを取る（§9A.2 で from=/target= は撤去）。
+fn parse_renderer_line(renderer: &str) -> Option<(u32, &'static str)> {
     let line = renderer.lines().last()?;
     let rest = line.strip_prefix("[Nostr kind:")?;
     let inner = rest.strip_suffix(']')?;
-    let (kind_s, rest) = inner.split_once(' ')?;
+    let (kind_s, label) = inner.split_once(' ')?;
     let kind: u32 = kind_s.parse().ok()?;
-    let (label_from, target) = rest.split_once(" target=")?;
-    let (label, author_key) = label_from.split_once(" from=")?;
-    Some((
-        kind,
-        nostr_kind_from_label(label),
-        author_key.to_string(),
-        target.to_string(),
-    ))
+    Some((kind, nostr_kind_from_label(label)))
 }
 
 fn parse_v1_kind_and_event(text: &str) -> Option<(u32, String)> {
@@ -1074,22 +1062,23 @@ mod tests {
     }
 
     #[test]
-    fn prompt_suffix_is_verbatim() {
+    fn prompt_suffix_omits_raw_identifiers() {
         let pk = "aa".repeat(32);
         let text = format!(
-            "[NOSTRGATE/V1 {{\"kind\":1,\"event_id\":\"{}\"}}]\nhello\n[Nostr kind:1 リプライ from=npub1x target=note1abc]",
+            "[NOSTRGATE/V1 {{\"kind\":1,\"event_id\":\"{}\"}}]\nhello\n[Nostr kind:1 リプライ]",
             "bb".repeat(32)
         );
         let suffix = nostr_prompt_suffix(&pk, &text);
         // nostr_reply 露出撤去（返信は say 一本 / #840）: プロンプトに nostr_reply を出さない。
         assert!(!suffix.contains("nostr_reply"));
-        // 対象ノート（target）自体は文脈行として残る。
-        assert!(suffix.contains("note1abc"));
+        // §9A / row296: 生 ID（対象ノート note1・pubkey hex）をプロンプトから排除する。
+        assert!(!suffix.contains("note1"));
+        assert!(!suffix.contains("pubkey="));
+        assert!(!suffix.contains(&pk));
+        assert!(!suffix.contains("対象ノート"));
         // 返信は本文をそのまま書かせる say ベースの文言になっている。
         assert!(suffix.contains("そのまま本文で書いて"));
         assert!(suffix.contains("kind:1（リプライ）"));
         assert!(suffix.contains("NO_REPLY"));
-        assert!(suffix.contains("pubkey="));
-        assert!(suffix.contains("npub1x"));
     }
 }

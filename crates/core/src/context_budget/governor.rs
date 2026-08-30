@@ -197,9 +197,11 @@ pub fn assemble_from_snapshot(
         opencrab_db::queries::list_session_logs_by_session(conn, session_id)?,
     );
     let completed_for_read = completed_tool_call_ids(&all);
+    // §9A: u/e/c 短縮参照は全履歴の初出順で採番し、snapshot 境界を跨いでも安定させる。
+    let refs = crate::conversation::ConversationRefs::build(&all, agent_id);
     let delta = logs
         .iter()
-        .map(|l| format_single_log_with_echo(l, Some(&completed_for_read)))
+        .map(|l| format_single_log_with_echo(l, Some(&completed_for_read), Some(&refs)))
         .collect::<Vec<_>>()
         .join("\n");
     let text = match &snap {
@@ -265,6 +267,7 @@ pub fn items_from_logs(
     let recent_tail = all.len().saturating_sub(8);
 
     let completed_ids = completed_tool_call_ids(&all);
+    let refs = crate::conversation::ConversationRefs::build(&all, agent_id);
     let groups = partition_exchange_groups(&all, agent_id);
 
     let mut items = Vec::new();
@@ -276,7 +279,7 @@ pub fn items_from_logs(
             .any(|&i| newest_user.contains(&i) || i >= recent_tail);
         for i in idxs {
             let log = &all[i];
-            let text = format_single_log_with_echo(log, Some(&completed_ids));
+            let text = format_single_log_with_echo(log, Some(&completed_ids), Some(&refs));
             let key = format!("log:{}", log.id.unwrap_or(i as i64));
             let tokens = ledger.record(&key, &text);
             let must_keep = newest_user.contains(&i) || unresolved;
