@@ -2125,6 +2125,7 @@ dependencies = [
 name = "opencrab-gate-client"
 version = "0.2.17"
 dependencies = [
+ "async-trait",
  "serde",
  "serde_json",
  "sha2",

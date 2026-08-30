@@ -14,10 +14,28 @@ use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 use super::wire::{
-    err_frame, hello_frame, ok_frame, parse_frame_bytes, read_frame, said_frame, say_reply_target,
-    say_text, write_json, Activity, Attachment, Bind, CoreMsg, FrameError, Invoke, Say,
-    WireResponse,
+    err_frame, hello_frame_with_operations, invoke_ok_frame, ok_frame, parse_frame_bytes,
+    read_frame, said_frame, say_reply_target, say_text, write_json, Activity, Attachment, Bind,
+    CoreMsg, FrameError, Invoke, Say, WireResponse,
 };
+
+/// gateway が invoke を実行する handler（DI 拡張 §5）。短縮参照(uN/eN/cN)は core が origin/pubkey へ
+/// 解決済みで payload に入る。gateway は platform ID を導いて実行し、ok(result)/err を返す。
+#[async_trait::async_trait]
+pub trait InvokeHandler: Send + Sync {
+    async fn handle(
+        &self,
+        binding_id: &str,
+        operation: &str,
+        payload: &Value,
+    ) -> Result<Value, InvokeHandlerError>;
+}
+
+/// invoke の確定拒否。code は generic stable value（operation_rejected / operation_unknown）。
+pub struct InvokeHandlerError {
+    pub code: String,
+    pub detail: Option<String>,
+}
 
 const LIVE_QUEUE_CAP: usize = 32;
 /// said 応答の上限。V3 の hello 10s と同じクラス（said ack は LLM を待たない）。
@@ -152,6 +170,10 @@ pub struct InstanceClient {
     pub instance_id: String,
     pub author_id: String,
     say_policy: SayPolicy,
+    /// DI 拡張 §3.1: hello に載せる能力宣言配列（None は従来の hello＝能力ゼロ）。
+    operations: Option<Value>,
+    /// DI 拡張 §5: invoke の実行 handler（None は operation_unknown を返す）。
+    invoke_handler: Option<Arc<dyn InvokeHandler>>,
     inner: Mutex<Inner>,
     write: Mutex<WriteOut>,
     closed_notify: Notify,
@@ -159,13 +181,21 @@ pub struct InstanceClient {
 }
 
 impl InstanceClient {
-    fn blank(instance_id: String, author_id: String, say_policy: SayPolicy) -> Self {
+    fn blank(
+        instance_id: String,
+        author_id: String,
+        say_policy: SayPolicy,
+        operations: Option<Value>,
+        invoke_handler: Option<Arc<dyn InvokeHandler>>,
+    ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         drop(rx);
         Self {
             instance_id,
             author_id,
             say_policy,
+            operations,
+            invoke_handler,
             inner: Mutex::new(Inner {
                 acknowledged: HashMap::new(),
                 remembered: HashMap::new(),
@@ -193,6 +223,8 @@ impl InstanceClient {
             instance_id,
             author_id,
             SayPolicy::AcceptToLiveQueue,
+            None,
+            None,
         ));
         attach(&client, socket, revision, &config_digest).await?;
         Ok(client)
@@ -224,7 +256,36 @@ impl InstanceClient {
         config_digest: String,
         say_policy: SayPolicy,
     ) -> Arc<Self> {
-        let client = Arc::new(Self::blank(instance_id, author_id, say_policy));
+        let client = Arc::new(Self::blank(instance_id, author_id, say_policy, None, None));
+        tokio::spawn(reconnect_loop(
+            client.clone(),
+            socket,
+            revision,
+            config_digest,
+        ));
+        client
+    }
+
+    /// DI 能力宣言つきで接続する（nostr-gateway 等）。`operations` を hello に載せ、invoke は
+    /// `invoke_handler` で実行する。従来の `spawn` は operations/handler なし（能力ゼロ）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_with_operations(
+        socket: PathBuf,
+        instance_id: String,
+        revision: u64,
+        author_id: String,
+        config_digest: String,
+        say_policy: SayPolicy,
+        operations: Option<Value>,
+        invoke_handler: Arc<dyn InvokeHandler>,
+    ) -> Arc<Self> {
+        let client = Arc::new(Self::blank(
+            instance_id,
+            author_id,
+            say_policy,
+            operations,
+            Some(invoke_handler),
+        ));
         tokio::spawn(reconnect_loop(
             client.clone(),
             socket,
@@ -435,7 +496,13 @@ async fn attach(
     let hello_id = format!("hello:{}", client.instance_id);
     if !send_frame(
         client,
-        hello_frame(&hello_id, &client.instance_id, revision, config_digest),
+        hello_frame_with_operations(
+            &hello_id,
+            &client.instance_id,
+            revision,
+            config_digest,
+            client.operations.as_ref(),
+        ),
     )
     .await
     {
@@ -586,10 +653,19 @@ async fn handle_invoke(client: &InstanceClient, inv: Invoke) {
         operation = %inv.operation,
         "invoke"
     );
-    // DI 能力宣言つき gateway は invoke_handler を呼んで ok(result)/err を返す（後続増分で配線）。
-    // 現段は能力未配線なので、未宣言 operation として fail-closed で operation_unknown を返す
-    // （外部 I/O 0・§5.1）。正常な core は宣言のある operation にしか invoke を送らない。
-    let _ = send_frame(client, err_frame(&inv.id, "operation_unknown", None)).await;
+    // DI 能力宣言つき gateway は invoke_handler で実行し ok(result)/err を返す。handler 未配線
+    // （能力ゼロ）なら未宣言 operation として fail-closed で operation_unknown（外部 I/O 0・§5.1）。
+    let resp = match &client.invoke_handler {
+        Some(handler) => match handler
+            .handle(&inv.binding_id, &inv.operation, &inv.payload)
+            .await
+        {
+            Ok(result) => invoke_ok_frame(&inv.id, &result),
+            Err(e) => err_frame(&inv.id, &e.code, e.detail.as_deref()),
+        },
+        None => err_frame(&inv.id, "operation_unknown", None),
+    };
+    let _ = send_frame(client, resp).await;
 }
 
 async fn handle_bind(client: &InstanceClient, bind: Bind, generation: u64) {
