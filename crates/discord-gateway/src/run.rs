@@ -10,13 +10,15 @@ use std::time::Duration;
 use opencrab_gate_client::client::{InstanceClient, LiveEvent, PostRefuse, SaidOutcome};
 use opencrab_gate_client::{InvokeHandler, SayPolicy};
 
-use crate::config::{config_digest, parse_instance_config, InstanceConfig, InstancePlacement};
+use crate::config::{
+    config_digest, parse_instance_config, InstanceConfig, InstancePlacement, SystemReactions,
+};
 use crate::harness::HarnessOverrides;
-use crate::map::{address_of, map_message, parse_address, parse_event_line};
+use crate::map::{address_of, map_message, parse_address, parse_event_line, parse_origin};
 use crate::ops::{operation_declarations, DiscordInvokeHandler};
 use crate::post::{deliver_say, SayDelivery};
 use crate::receive::{run_fake_events_once, run_serenity_receive, OnLine};
-use crate::transport::{DiscordTransport, DryRunTransport, SerenityTransport};
+use crate::transport::{DiscordTransport, DryRunTransport, SerenityTransport, TransportOutcome};
 
 const RETRY: Duration = Duration::from_millis(200);
 
@@ -88,6 +90,8 @@ fn supervise(
         client.clone(),
         cfg.agent_id.clone(),
         cfg.self_bot_id.clone(),
+        transport.clone(),
+        cfg.system_reactions.clone(),
     );
     tokio::spawn(async move {
         if let Some(fixture) = overrides.fake_events {
@@ -110,23 +114,68 @@ fn supervise(
             address,
             transport.clone(),
             cfg.agent_id.clone(),
+            cfg.system_reactions.clone(),
         );
     }
 }
 
-fn build_on_line(client: Arc<InstanceClient>, agent_id: String, self_bot_id: String) -> OnLine {
+fn build_on_line(
+    client: Arc<InstanceClient>,
+    agent_id: String,
+    self_bot_id: String,
+    transport: Arc<dyn DiscordTransport>,
+    reactions: SystemReactions,
+) -> OnLine {
     Arc::new(move |line: String| {
         let client = client.clone();
         let agent_id = agent_id.clone();
         let self_bot_id = self_bot_id.clone();
+        let transport = transport.clone();
+        let reactions = reactions.clone();
         tokio::spawn(async move {
-            handle_incoming(&client, &agent_id, &self_bot_id, &line).await;
+            handle_incoming(
+                &client,
+                &agent_id,
+                &self_bot_id,
+                &transport,
+                &reactions,
+                &line,
+            )
+            .await;
         });
     })
 }
 
+/// system reaction を発端メッセージへ best-effort で付ける（失敗は warn のみ・非致命）。
+/// legacy `add_reaction_non_fatal` と同じく、付与失敗が turn 処理を巻き込まないようにする。
+async fn react_system(transport: &Arc<dyn DiscordTransport>, origin: &str, emoji: &str) {
+    let Some((channel, message)) = parse_origin(origin) else {
+        tracing::debug!(%origin, "skip system reaction: origin not a discord anchor");
+        return;
+    };
+    match transport
+        .add_system_reaction(&channel, &message, emoji)
+        .await
+    {
+        TransportOutcome::Ok(_) => {}
+        TransportOutcome::Rejected => {
+            tracing::warn!(%origin, emoji, "system reaction rejected (non-fatal)")
+        }
+        TransportOutcome::Indeterminate => {
+            tracing::warn!(%origin, emoji, "system reaction outcome unknown (non-fatal)")
+        }
+    }
+}
+
 /// 受信 1 件を said へ。自分の投稿と非 ack channel は core へ送らない（§4.3・§5.1）。
-async fn handle_incoming(client: &InstanceClient, agent_id: &str, self_bot_id: &str, line: &str) {
+async fn handle_incoming(
+    client: &InstanceClient,
+    agent_id: &str,
+    self_bot_id: &str,
+    transport: &Arc<dyn DiscordTransport>,
+    reactions: &SystemReactions,
+    line: &str,
+) {
     let Some(msg) = parse_event_line(line) else {
         return;
     };
@@ -151,7 +200,9 @@ async fn handle_incoming(client: &InstanceClient, agent_id: &str, self_bot_id: &
         .await
     {
         Ok(SaidOutcome::Accepted { seq }) => {
-            tracing::info!(%address, seq, "said accepted")
+            tracing::info!(%address, seq, "said accepted");
+            // 👀: core が受理した = 処理対象として確定。発端メッセージへ受理サインを付ける。
+            react_system(transport, &mapped.origin, &reactions.accepted).await;
         }
         Ok(SaidOutcome::NotAdmitted) => tracing::info!(%address, "said not admitted"),
         Ok(SaidOutcome::Disconnected) => tracing::info!(%address, "said disconnected"),
@@ -168,22 +219,35 @@ fn spawn_say_consumer(
     address: String,
     transport: Arc<dyn DiscordTransport>,
     agent_id: String,
+    reactions: SystemReactions,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // address → channel snowflake（say はこの channel への通常投稿）。
         let channel = parse_address(&agent_id, &address).map(|(_, ch)| ch);
         loop {
             match client.next_live(&address).await {
-                Some(LiveEvent::Message { text, .. }) => {
-                    // DI-16: say は通常発言。reply_origin は使わない（明示 reply 能力が返信を担う）。
+                Some(LiveEvent::Message { text, reply_origin }) => {
+                    // DI-16: say は通常発言（reply target は暗黙設定しない）。ただし reply_origin が
+                    // 発端メッセージ（即時ターンの Single）を指すときは、その発端へ完了/失敗の
+                    // system reaction を付ける（🏁/❌）。bundle/曖昧（None）は付ける先が無いので付けない。
                     let Some(channel) = &channel else {
                         tracing::warn!(%address, "say dropped; address has no channel component");
                         continue;
                     };
                     match deliver_say(&transport, channel, &text).await {
-                        SayDelivery::Posted => tracing::info!(%address, "say posted"),
+                        SayDelivery::Posted => {
+                            tracing::info!(%address, "say posted");
+                            if let Some(origin) = &reply_origin {
+                                // 🏁: 発端メッセージへの返信を配送し終えた（完了サイン）。
+                                react_system(&transport, origin, &reactions.completed).await;
+                            }
+                        }
                         SayDelivery::Failed(e) => {
-                            tracing::warn!(%address, error = %e, "say post failed")
+                            tracing::warn!(%address, error = %e, "say post failed");
+                            if let Some(origin) = &reply_origin {
+                                // ❌: 発端メッセージへの返信配送が失敗した（失敗サイン）。
+                                react_system(&transport, origin, &reactions.failed).await;
+                            }
                         }
                     }
                 }
