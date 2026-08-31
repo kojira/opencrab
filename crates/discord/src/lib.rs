@@ -27,8 +27,9 @@ pub use gateway_actions::{spawn_activity_tool_event_sink, DiscordWebhookNotifier
 pub use manager::DiscordGatewayManager;
 pub use message_loop::run_discord_loop;
 pub use owner_warning::{
-    gateway_will_start, warn_if_agent_gateway_owner_unset, warn_if_shared_gateway_owner_unset,
-    warn_inbound_message_dropped, warn_inbound_stalled,
+    gateway_will_start, warn_discord_client_task_exited, warn_if_agent_gateway_owner_unset,
+    warn_if_shared_gateway_owner_unset, warn_inbound_message_dropped, warn_inbound_stalled,
+    warn_interaction_recv_stalled,
 };
 pub use renderer::DiscordRenderer;
 
