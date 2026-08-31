@@ -136,6 +136,16 @@ impl Registry {
             .map(|(id, e)| (id.clone(), e.identity))
             .collect()
     }
+
+    /// live かつ acknowledged binding を 1 件以上持つ instance_id 群（platform 非依存）。
+    /// 「専用 V3 gateway が実際に受信できる状態」を表す。二重受信防止 lever の liveness 判定に使う。
+    pub fn live_instances_with_ack(&self) -> Vec<String> {
+        self.live
+            .iter()
+            .filter(|(_, e)| !e.acknowledged.is_empty())
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
 }
 
 /// conformance 用の計測と failure injection。本番 state には載せない。
@@ -312,6 +322,39 @@ impl ExtgateState {
     pub fn nostr_watch_sets_for(&self, agent_id: &str) -> Option<NostrWatchSets> {
         let hook = self.nostr_watch_sets.lock().ok()?.clone();
         hook.and_then(|h| h(agent_id))
+    }
+
+    /// 専用 V3 gateway（`kind_id`）が当該 `agent_id` を実際に受信できる状態か（platform 非依存）。
+    ///
+    /// live かつ acknowledged binding を 1 件以上持つ instance のうち、`kind_id` が一致し subject が
+    /// この agent に対応するものがあれば true。DESIGN-DISCORD-GATE §8.1 の二重受信防止 lever
+    /// （共有 message_loop の `served_by_dedicated_gateway`）の liveness 側に使う汎用クエリで、
+    /// core に platform 語彙を持ち込まない（`kind_id` は runtime 値の引数）。
+    ///
+    /// registry / DB のロック失敗は false（fail-open。true に倒すと共有側が黙って引き下がって
+    /// 「どの gateway からも応答しない」を作りうるため、不明は共有側が続ける側へ倒す）。
+    pub fn agent_has_live_gateway(&self, agent_id: &str, kind_id: &str) -> bool {
+        let instances = match self.registry.lock() {
+            Ok(reg) => reg.live_instances_with_ack(),
+            Err(_) => return false,
+        };
+        if instances.is_empty() {
+            return false;
+        }
+        let conn = match self.db.lock() {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        instances.iter().any(|instance_id| {
+            conn.query_row(
+                "SELECT 1 FROM gate_instances i JOIN agents a ON a.subject_id = i.subject_id \
+                 WHERE i.instance_id = ?1 AND i.kind_id = ?2 AND a.agent_id = ?3 \
+                   AND i.deleted_at IS NULL",
+                rusqlite::params![instance_id, kind_id, agent_id],
+                |_| Ok(()),
+            )
+            .is_ok()
+        })
     }
 
     pub fn privilege_for(

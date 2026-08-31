@@ -2004,6 +2004,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "opencrab-discord-gateway"
+version = "0.2.17"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "opencrab-gate-client",
+ "serde",
+ "serde_json",
+ "serenity",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "opencrab-extgate"
 version = "0.2.17"
 dependencies = [
@@ -2018,10 +2037,13 @@ dependencies = [
  "opencrab-db",
  "opencrab-gate-client",
  "opencrab-gateway",
+ "proc-macro2",
+ "quote",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
+ "syn 2.0.116",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -2168,6 +2190,7 @@ dependencies = [
  "opencrab-core",
  "opencrab-db",
  "opencrab-discord",
+ "opencrab-discord-gateway",
  "opencrab-extgate",
  "opencrab-gate-client",
  "opencrab-gateway",

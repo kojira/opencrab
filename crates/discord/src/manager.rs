@@ -125,7 +125,14 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
                 }
             }
             Err(e) => {
-                error!(agent_id = %agent_id, error = %e, "#489: 自分の Discord user id を取得できず co_agent 逆引き表を更新できなかった（co_agent は fail-closed のまま）");
+                // #337: この `get_current_user`（`GET /users/@me`）は起動直後の最初の
+                // 実 REST 呼び出しなので、ここが認証エラー（401 相当 = 無効トークン等）で
+                // 落ちるなら、ゲートウェイの WebSocket 側も同じトークンで接続できず
+                // （4004）機能しない可能性が高い。#489 の best-effort 意図（co_agent 逆引きは
+                // 諦めて起動は続ける）は保つが、ERROR にその含意を明記して切り分けを助ける。
+                // 恒久的な接続死そのものは client タスク監視（gateway.rs #337）が
+                // `warn_discord_client_task_exited` で別途 fail-loud にする。
+                error!(agent_id = %agent_id, error = %e, "#489/#337: 自分の Discord user id を取得できず co_agent 逆引き表を更新できなかった（co_agent は fail-closed のまま）。これが認証エラー（401 = 無効トークン/権限不足）なら、ゲートウェイ接続自体も機能していない疑いが濃い。トークンと有効化 intent を確認せよ。");
             }
         }
 

@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serenity::all::{CreateActionRow, CreateModal};
@@ -5,7 +6,7 @@ use serenity::all::{CreateActionRow, CreateModal};
 use anyhow::{Context as AnyhowContext, Result};
 use async_trait::async_trait;
 use tokio::sync::{mpsc, Mutex};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use serenity::all::{
     ChannelId, Client, Context, CreateInteractionResponse, CreateInteractionResponseMessage,
@@ -90,6 +91,10 @@ pub struct DiscordGateway {
     tx: mpsc::Sender<IncomingMessage>,
     http: Arc<Http>,
     shard_manager: Mutex<Option<Arc<serenity::gateway::ShardManager>>>,
+    /// [`Self::shutdown`] が呼ばれたら真。client タスク終了時に「意図した停止」か
+    /// 「接続死（fail-loud すべき）」かを見分けるのに使う（#337）。監視タスクと
+    /// `shutdown` の両方から触るので `Arc<AtomicBool>`。
+    shutting_down: Arc<AtomicBool>,
     /// A2UIコンポーネントインタラクション受信チャンネル
     interaction_rx: Mutex<mpsc::Receiver<ComponentInteractionData>>,
     interaction_tx: mpsc::Sender<ComponentInteractionData>,
@@ -120,6 +125,7 @@ impl DiscordGateway {
             tx,
             http,
             shard_manager: Mutex::new(None),
+            shutting_down: Arc::new(AtomicBool::new(false)),
             interaction_rx: Mutex::new(interaction_rx),
             interaction_tx,
             form_modal_resolver,
@@ -139,8 +145,21 @@ impl DiscordGateway {
         self.voice.clone()
     }
 
+    /// client タスクの接続死検知を再武装する（#337 NIT-2）。
+    ///
+    /// 同一インスタンスを shutdown → 再 start した場合、`shutdown()` が立てた
+    /// `shutting_down` フラグをここで倒しておかないと、再 start 後に client タスクが
+    /// 接続死しても監視タスクが「意図した停止」と誤認して二度と鳴らなくなる（恒久沈黙）。
+    /// `start()` の冒頭で必ず呼ぶ。
+    fn rearm_client_death_detection(&self) {
+        self.shutting_down.store(false, Ordering::SeqCst);
+    }
+
     /// Bot接続を開始する（バックグラウンドタスクとして起動）
     pub async fn start(&self) -> Result<()> {
+        // #337 NIT-2: 前回 shutdown 分のフラグを倒し、接続死検知を再武装する。
+        self.rearm_client_death_detection();
+
         let intents = GatewayIntents::GUILD_MESSAGES
             | GatewayIntents::DIRECT_MESSAGES
             | GatewayIntents::MESSAGE_CONTENT
@@ -166,10 +185,28 @@ impl DiscordGateway {
             *sm = Some(shard_manager);
         }
 
+        // #337: client タスクの**終了そのもの**を監視して fail-loud にする。
+        //
+        // 以前は `if let Err(e) = client.start().await` で ERROR を 1 行出すだけで、
+        // タスクが終わっても（`Ok` 正常終了・`Err` 致命エラーどちらも）誰にも
+        // エスカレーションされなかった。致命エラー（4004 invalid token /
+        // 4014 disallowed intents など復旧不能）で接続が死んでも、受信転送側の
+        // stall 検知（message_loop の `warn_inbound_stalled`）は `recv()` が `Err` を
+        // 返すことが発火条件で、その `tx` は本構造体が保持しているため `Err` にならず、
+        // 「起動ログは出る → 以後メッセージが永久に来ない → 警告ゼロ」というサイレント
+        // 停止になっていた。タスクが終わったら接続は死んでいるので、ここで表面化させる。
+        //
+        // `shutdown()` 由来の意図した停止（`shutting_down` == true）では鳴らさない。
+        let shutting_down = self.shutting_down.clone();
         tokio::spawn(async move {
-            if let Err(e) = client.start().await {
-                error!("Discord client error: {e}");
-            }
+            let outcome = match client.start().await {
+                Ok(()) => "ok".to_string(),
+                Err(e) => format!("error: {e}"),
+            };
+            crate::owner_warning::warn_discord_client_task_exited(
+                shutting_down.load(Ordering::SeqCst),
+                &outcome,
+            );
         });
 
         info!("Discord gateway starting...");
@@ -249,6 +286,10 @@ impl DiscordGateway {
 
     /// Botをシャットダウンする
     pub async fn shutdown(&self) {
+        // #337: client タスクの終了を「意図した停止」と見分けさせるため、
+        // shutdown_all() で client.start() を返させる**前に**フラグを立てる。
+        // これで監視タスクは終了を検知しても fail-loud を鳴らさない。
+        self.shutting_down.store(true, Ordering::SeqCst);
         let sm = self.shard_manager.lock().await;
         if let Some(ref manager) = *sm {
             manager.shutdown_all().await;
@@ -955,6 +996,41 @@ mod tests {
         };
         let _modal = CreateModal::new(&spec.modal_custom_id, &spec.title)
             .components(spec.components.clone());
+    }
+
+    /// #337 NIT-2: 同一インスタンスを shutdown → 再 start しても接続死検知が鳴ること。
+    ///
+    /// リセットが無いと `shutdown()` が立てた `shutting_down` が残り、再 start 後に
+    /// client タスクが死んでも「意図した停止」と誤認して恒久沈黙する。`start()` 冒頭の
+    /// 再武装（`rearm_client_death_detection`）でその穴が塞がっていることを固定する。
+    #[tokio::test]
+    async fn restart_rearms_client_death_detection() {
+        let gw = DiscordGateway::new("test-token");
+        // 初期は「意図した停止」ではない → 接続死は鳴る状態。
+        assert!(!gw.shutting_down.load(Ordering::SeqCst));
+
+        // shutdown() で意図停止フラグが立ち、以後の client タスク終了は沈黙する
+        // （shard_manager は None なので実ネットワークには出ない）。
+        gw.shutdown().await;
+        assert!(gw.shutting_down.load(Ordering::SeqCst));
+        assert!(
+            !crate::owner_warning::warn_discord_client_task_exited(
+                gw.shutting_down.load(Ordering::SeqCst),
+                "ok"
+            ),
+            "shutdown 直後の終了は沈黙するはず"
+        );
+
+        // 再 start 冒頭の再武装で検知が戻り、接続死がまた鳴るようになる。
+        gw.rearm_client_death_detection();
+        assert!(!gw.shutting_down.load(Ordering::SeqCst));
+        assert!(
+            crate::owner_warning::warn_discord_client_task_exited(
+                gw.shutting_down.load(Ordering::SeqCst),
+                "error: Gateway closed: 4004"
+            ),
+            "再 start 後は接続死検知がまた鳴ること（恒久沈黙の穴が塞がっている）"
+        );
     }
 
     #[test]

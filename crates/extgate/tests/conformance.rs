@@ -456,6 +456,40 @@ fn err_code(body: &[u8]) -> String {
     v["error"]["code"].as_str().unwrap().to_string()
 }
 
+/// DESIGN-DISCORD-GATE §8.1 の二重受信防止 lever の liveness 側。live かつ acked binding を持つ
+/// instance の kind_id/agent を platform 非依存に照合する。DB enabled ではなく live registry が正。
+#[tokio::test]
+async fn agent_has_live_gateway_reflects_v3_liveness() {
+    let h = Harness::start().await;
+    // 生きた gateway が無いうちは false（共有側が処理を続ける）。
+    assert!(!h.state.agent_has_live_gateway("agent-1", "discord"));
+
+    // bind ack 済みの live gateway（kind=discord, agent=agent-1）を立てる。stream は保持する。
+    let (_s, _instance_id, _binding_id) = ready_pair(&h).await;
+    assert!(
+        h.state.agent_has_live_gateway("agent-1", "discord"),
+        "acked live discord gateway が true にならない"
+    );
+    // kind 違い・agent 違いは false（join が platform 非依存に効く）。
+    assert!(!h.state.agent_has_live_gateway("agent-1", "nostr"));
+    assert!(!h.state.agent_has_live_gateway("other-agent", "discord"));
+
+    // 切断すると live entry が消え false へ戻る（enabled フラグではなく生死で判定・#40）。
+    drop(_s);
+    let mut gone = false;
+    for _ in 0..100 {
+        if !h.state.agent_has_live_gateway("agent-1", "discord") {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        gone,
+        "切断後も live 扱いのまま（liveness が生死を反映しない）"
+    );
+}
+
 #[tokio::test]
 async fn framing_max_size_ok_and_too_large_closes() {
     let h = Harness::start().await;
@@ -2428,6 +2462,63 @@ async fn said_during_turn_is_recorded_and_runs_after() {
         h.runtime.turns.load(Ordering::SeqCst),
         2,
         "queued said runs after the held turn"
+    );
+}
+
+/// row318 / §9A 汎化の回帰固定: 非 nostr（ここでは discord）kind の said も session log の
+/// metadata に `external_origin` を記録し、汎用 `ConversationRefs` が platform 非依存に e番号 /
+/// u番号 を採番できる。旧実装は `record_inbound` が `kind_id == "nostr"` でだけ external_origin を
+/// 書いており、Discord 等に e番号が一切付かなかった（reply/reaction が e番号を解決できない）。
+/// その汎用機構への platform 名漏れ（DI 違反）を剥がした変更を固定する。
+#[tokio::test(start_paused = true)]
+async fn non_nostr_said_records_external_origin_for_e_numbering() {
+    let h = Harness::start().await;
+    let instance_id = uuid();
+    let binding_id = uuid();
+    // put_instance は kind_id = "discord"（= 非 nostr）で登録する。
+    put_instance(&h, &instance_id, true).await;
+    put_binding(&h, &binding_id, &instance_id, "chan-di").await;
+    let session_id = format!("extgate-{binding_id}");
+
+    let client = InstanceClient::connect(&h.sock, instance_id, 1, "u1".into(), config_digest())
+        .await
+        .expect("connect");
+    wait_client_bound(&client, "chan-di", &binding_id).await;
+
+    let origin = "discord:message:v1:100:200";
+    let out = client
+        .post_said("chan-di", origin, "こんにちは", &[])
+        .await
+        .unwrap_or_else(|e| panic!("said refuse {e:?}"));
+    assert!(matches!(out, SaidOutcome::Accepted { seq: 1 }), "{out:?}");
+
+    // 1) discord kind でも session log の metadata に external_origin が入る（回帰固定）。
+    let logs = {
+        let conn = h.state.db.lock().unwrap();
+        opencrab_db::queries::list_session_logs_by_session(&conn, &session_id).unwrap()
+    };
+    let speech = logs
+        .iter()
+        .find(|l| l.log_type == "speech" && l.speaker_id.as_deref() == Some("u1"))
+        .expect("inbound speech log");
+    let meta: serde_json::Value =
+        serde_json::from_str(speech.metadata_json.as_deref().expect("metadata_json")).unwrap();
+    assert_eq!(
+        meta["external_origin"], origin,
+        "非 nostr kind で external_origin が未記録: {meta}"
+    );
+
+    // 2) 汎用採番（core conversation.rs）が platform 非依存に e/u 番号を割り当てる（§9A）。
+    let refs = opencrab_core::conversation::ConversationRefs::build(&logs, "the-bot-agent");
+    assert_eq!(
+        refs.resolve_short_ref("e1").as_deref(),
+        Some(origin),
+        "e1 が origin へ解決できない（e番号未採番）"
+    );
+    assert_eq!(
+        refs.resolve_short_ref("u1").as_deref(),
+        Some("u1"),
+        "u1 が話者へ解決できない"
     );
 }
 

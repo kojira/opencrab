@@ -15,6 +15,7 @@ pub mod agent_schedule;
 pub mod api;
 pub mod caller_identity;
 pub mod config;
+pub mod dedicated_gateway;
 pub mod heartbeat_fire;
 pub mod heartbeat_instructions;
 pub mod hot_reload;

@@ -336,10 +336,19 @@ pub async fn run_discord_loop<T: AgentRunner>(
         let tx = event_tx.clone();
         let registry = registry.clone();
         let renderer_http = gateway.http().clone();
+        // #337: このタスクも recv エラーで**黙って死んではいけない**（受信転送 #284 と同型）。
+        // 以前は `recv_interaction()` が `Err` を返した時点で `break` して黙って終了し、
+        // 以後ボタン/セレクト/モーダルの応答が一切届かなくなっていた（誰も気づけない）。
+        // 受信転送側と同じく、指数バックオフで再試行しつつ、連続失敗が続いたら
+        // オーナーへエスカレーションする。閾値・バックオフは受信転送と同じ実装を共有する。
         tokio::spawn(async move {
+            let mut consecutive_failures: u32 = 0;
+            let mut last_ok = Instant::now();
             loop {
                 match gw.recv_interaction().await {
                     Ok(data) => {
+                        consecutive_failures = 0;
+                        last_ok = Instant::now();
                         handle_component_interaction(
                             data,
                             &registry,
@@ -349,8 +358,21 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         .await;
                     }
                     Err(e) => {
-                        error!("Discord interaction recv error: {e}");
-                        break;
+                        consecutive_failures += 1;
+                        let backoff = recv_retry_backoff(consecutive_failures);
+                        error!(
+                            failures = consecutive_failures,
+                            secs_since_last_ok = last_ok.elapsed().as_secs(),
+                            retry_in_ms = backoff.as_millis() as u64,
+                            "Discord interaction recv error: {e}"
+                        );
+                        if should_alert_inbound_stalled(consecutive_failures) {
+                            crate::owner_warning::warn_interaction_recv_stalled(
+                                consecutive_failures,
+                                last_ok.elapsed().as_secs(),
+                            );
+                        }
+                        tokio::time::sleep(backoff).await;
                     }
                 }
             }
