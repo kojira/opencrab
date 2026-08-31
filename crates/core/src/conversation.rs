@@ -1277,6 +1277,31 @@ pub(crate) fn leaked_identifier_in_delta(rendered: &str) -> Option<String> {
     None
 }
 
+/// **単一ログ描画**に対する漏れ検知（row318・#847）。検知器の目的は**描画器のバグ**を鳴らすこと
+/// ＝構造部分（話者行・tool_call・spawn ack など）に生の長識別子が残っていないかを見る。
+///
+/// speech の**本文**は利用者の自由記述で、表示時のスクラブは意図的に [`elide_raw_identifiers`] のみ
+/// （UUID / `call_…` / digest は保持・[`strip_inbound_meta_for_display`]）。この本文を full スクラブ
+/// 基準の [`leaked_identifier_in_delta`] で見ると、利用者が発話に UUID 等を書いた瞬間に、描画が
+/// 正しくても WARN が出る（#847 の偽陽性）。偽 WARN はアラート疲労で本物の描画器バグ WARN を
+/// マスクするので、speech は**構造ヘッダ行だけ**を検知対象にし、本文は見ない。描画形は
+/// `[話者]…:\n本文…` で、ヘッダ（話者/時刻/e番号/関係注記）に改行は無いため 1 行目がヘッダ。
+/// 他ログ（tool_call/tool_result/spawn ack）は全行が構造なので従来どおり全体を見る。
+///
+/// 「本物の描画器バグ（構造部分に生 ID が残る）は検知し続ける」を維持する: speech でもヘッダ行
+/// （話者行）は full スクラブ基準で見るので、名前引き失敗などで生 agent UUID が話者行へ漏れれば
+/// 従来どおり鳴る。
+pub(crate) fn leaked_identifier_in_render(
+    log: &opencrab_db::queries::SessionLogRow,
+    rendered: &str,
+) -> Option<String> {
+    if log.log_type == "speech" {
+        let header = rendered.split('\n').next().unwrap_or(rendered);
+        return leaked_identifier_in_delta(header);
+    }
+    leaked_identifier_in_delta(rendered)
+}
+
 /// メタ行を落とし、残る各行に `per_line` を適用し、末尾空行を畳む共通ルーチン。
 fn strip_meta_lines(content: &str, per_line: impl Fn(&str) -> String) -> String {
     let mut lines: Vec<String> = Vec::new();
@@ -1871,6 +1896,125 @@ mod format_log_tests {
         // 本文が同じでも行としては別物（発言者が潰れていない）。
         assert_ne!(alice, bob);
         assert_ne!(alice, agent);
+    }
+}
+
+/// #847: 漏れ検知器の偽陽性（利用者発話本文に UUID/call_id が含まれると描画が正しくても WARN）と、
+/// 真陽性（構造部分＝話者行・tool_call に生 ID が残る本物の描画器バグ）の維持を固定する。
+#[cfg(test)]
+mod detector_false_positive_847_tests {
+    use super::{
+        format_single_log_with_echo, leaked_identifier_in_delta, leaked_identifier_in_render,
+        ConversationRefs,
+    };
+    use opencrab_db::queries::SessionLogRow;
+
+    const AGENT: &str = "33196264-5908-4f04-b24a-efd7aa6d2014";
+    // `call_` の後ろ 16 桁以上の英数（scrub の elide_call_ids 閾値）。大小混在で elide_raw には
+    // 当たらない（＝speech 本文は保持され、full スクラブ基準の旧検知器だけが鳴る）。
+    const RAW_CALL: &str = "call_abcdef0123456789ABCDEF";
+
+    fn user_speech(content: &str) -> SessionLogRow {
+        SessionLogRow {
+            id: Some(1),
+            agent_id: AGENT.to_string(),
+            session_id: "s".to_string(),
+            log_type: "speech".to_string(),
+            content: content.to_string(),
+            speaker_id: Some("pubkey-user".to_string()),
+            turn_number: None,
+            metadata_json: None,
+            created_at: Some("2026-08-31T15:00:00Z".to_string()),
+        }
+    }
+
+    /// 偽陽性が消える: 利用者の発話本文に生 UUID / call_id が含まれても WARN は出ない。
+    /// 描画は本文を保持（elide_raw のみ・UUID/call_ は残す）しており描画は正しい。旧検知器
+    /// （本文込み・full スクラブ基準）なら鳴っていたことも同時に固定し、実際に偽陽性を潰したことを示す。
+    #[test]
+    fn user_speech_with_raw_identifiers_does_not_warn() {
+        let uuid = "df1bc106-960c-45e3-b69c-ff493b133afc";
+        let log = user_speech(&format!("この件は {uuid} と {RAW_CALL} を参照して"));
+        let refs = ConversationRefs::build(std::slice::from_ref(&log), AGENT);
+        let rendered = format_single_log_with_echo(&log, None, Some(&refs));
+
+        // 描画は本文をそのまま保持（描画は正しい）。
+        assert!(
+            rendered.contains(uuid),
+            "本文の UUID が保持されていない: {rendered}"
+        );
+        assert!(
+            rendered.contains(RAW_CALL),
+            "本文の call_id が保持されていない: {rendered}"
+        );
+        // 新検知器: 偽陽性なし。
+        assert!(
+            leaked_identifier_in_render(&log, &rendered).is_none(),
+            "利用者本文の生 ID で偽 WARN が出た: {rendered}"
+        );
+        // 回帰前提: 旧検知器（本文込み）なら鳴っていた＝これは本当の偽陽性だった。
+        assert!(
+            leaked_identifier_in_delta(&rendered).is_some(),
+            "回帰テストの前提が崩れた（旧検知器も沈黙）: {rendered}"
+        );
+    }
+
+    /// 真陽性は維持（話者行）: 自分の speech で表示名を引けない（set_agent_name なし＝get_agent 失敗相当）と
+    /// speaker_label が生 agent UUID へフォールバックし話者行へ載る。これは本物の描画器バグで検知し続ける。
+    #[test]
+    fn leaked_raw_uuid_in_speaker_header_still_warns() {
+        let log = SessionLogRow {
+            speaker_id: Some(AGENT.to_string()),
+            ..user_speech("本文はここ")
+        };
+        let refs = ConversationRefs::build(std::slice::from_ref(&log), AGENT);
+        let rendered = format_single_log_with_echo(&log, None, Some(&refs));
+        assert!(
+            rendered.contains(AGENT),
+            "前提: 話者行に生 agent UUID が載る: {rendered}"
+        );
+        assert!(
+            leaked_identifier_in_render(&log, &rendered).is_some(),
+            "話者行の生 UUID 漏れを検知しそこねた: {rendered}"
+        );
+    }
+
+    /// 真陽性は維持（tool_call）: refs.call_of が引けない（未採番）と `id=call_…` フォールバックで
+    /// 生 call_id が構造部分へ残る。speech 以外は全行が検知対象なので従来どおり鳴る。
+    #[test]
+    fn leaked_raw_call_id_in_tool_call_still_warns() {
+        let tool_call = SessionLogRow {
+            id: Some(2),
+            agent_id: AGENT.to_string(),
+            session_id: "s".to_string(),
+            log_type: "tool_call".to_string(),
+            content: "call".to_string(),
+            speaker_id: Some(AGENT.to_string()),
+            turn_number: None,
+            metadata_json: Some(
+                serde_json::json!({
+                    "tool_calls_json": serde_json::json!([{
+                        "id": RAW_CALL,
+                        "function": {"name": "spawn_subtask", "arguments": "{}"}
+                    }])
+                    .to_string()
+                })
+                .to_string(),
+            ),
+            created_at: Some("2026-08-31T15:00:00Z".to_string()),
+        };
+        // 空ログから refs を作る → この call は未採番 → `id=call_…` フォールバック。
+        let empty: [SessionLogRow; 0] = [];
+        let refs = ConversationRefs::build(&empty, AGENT);
+        let rendered = format_single_log_with_echo(&tool_call, None, Some(&refs));
+        assert!(
+            rendered.contains(RAW_CALL),
+            "前提: tool_call に生 call_id が載る: {rendered}"
+        );
+        assert!(
+            leaked_identifier_in_render(&tool_call, &rendered).is_some(),
+            "tool_call の生 call_id 漏れを検知しそこねた: {rendered}"
+        );
     }
 }
 

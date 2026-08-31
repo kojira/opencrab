@@ -225,7 +225,10 @@ pub fn assemble_from_snapshot(
             let text = format_single_log_with_echo(l, Some(&completed_for_read), Some(&refs));
             // row318 検知器: delta 描画に生識別子が残る＝描画器のバグ。fail-loud に WARN（本番では
             // 短縮形が出ているはずなのでここは鳴らない）。凍結 snapshot blob はこの対象外。
-            if let Some(line) = crate::conversation::leaked_identifier_in_delta(&text) {
+            // #847: speech 本文（利用者の自由記述・elide_raw のみで UUID/call_/digest は保持）は
+            // 検知対象から外す（構造ヘッダ行は引き続き見る）。full スクラブ基準で本文を見ると利用者が
+            // UUID 等を書いた瞬間に偽 WARN が出て、本物の描画器バグ WARN をマスクする。
+            if let Some(line) = crate::conversation::leaked_identifier_in_render(l, &text) {
                 tracing::warn!(
                     session_id,
                     log_id = l.id.unwrap_or(0),
@@ -332,8 +335,8 @@ pub fn items_from_logs(
                 }
             }
             let text = format_single_log_with_echo(log, Some(&completed_ids), Some(&refs));
-            // row318 検知器（items 経路も同じ描画器を通る）。
-            if let Some(line) = crate::conversation::leaked_identifier_in_delta(&text) {
+            // row318 検知器（items 経路も同じ描画器を通る）。#847: speech 本文は対象外（構造ヘッダは見る）。
+            if let Some(line) = crate::conversation::leaked_identifier_in_render(log, &text) {
                 tracing::warn!(
                     session_id,
                     log_id = log.id.unwrap_or(0),
