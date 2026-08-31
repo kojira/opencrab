@@ -4007,6 +4007,26 @@ mod render_refs_tests {
         assert!(out2.chars().count() > 2000);
     }
 
+    // 裁定 A（統一が正・2026-08-31）: §9A の切り詰め + e番号採番は platform 非依存で全 gateway kind に
+    // 適用する。web（非 nostr）受信も対象で、>2000 字は `…(全N字)` に切り詰められ eN が付く。
+    // external_origin を全 kind で記録する core 汎化（extgate inbound）の web 側の期待描画を固定し、
+    // 「web だけ切り詰め・採番されない」旧挙動へ退行しないことを保証する。
+    #[test]
+    fn web_origin_is_truncated_at_2000_and_e_numbered() {
+        let long = "あ".repeat(2500);
+        // web の外部 origin（watch でないので自分宛て相当の 2000 字閾値）。
+        let ev = speech("bot", "web-user-x", &long, Some("web:conv:v1:abc"));
+        let refs = ConversationRefs::build(std::slice::from_ref(&ev), "bot");
+        let out = format_single_log_with_echo(&ev, None, Some(&refs));
+        // e番号が付く（外部話者 u1・受信 e1）。
+        assert!(out.contains("e1"), "web 受信に e番号が付かない: {out}");
+        // 2000 字で切り詰め、末尾に全文字数マーカー。
+        assert!(out.contains("…(全2500字)"), "切り詰めマーカーが無い: {out}");
+        assert!(out.chars().count() < 2100, "2000 字に切り詰まっていない");
+        // 生 origin は会話へ出さない。
+        assert!(!out.contains("web:conv:v1:abc"), "生 origin 露出: {out}");
+    }
+
     #[test]
     fn self_speech_is_not_truncated() {
         let long = "x".repeat(5000);

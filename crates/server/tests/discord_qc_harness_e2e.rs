@@ -62,6 +62,8 @@ struct Captured {
     kind: String,
     body: String,
     emoji: String,
+    channel: String,
+    message: String,
 }
 
 static BUFFER: OnceLock<Arc<Mutex<Vec<Captured>>>> = OnceLock::new();
@@ -88,6 +90,8 @@ struct Visitor {
     kind: Option<String>,
     body: Option<String>,
     emoji: Option<String>,
+    channel: Option<String>,
+    message: Option<String>,
 }
 
 impl Visitor {
@@ -96,6 +100,8 @@ impl Visitor {
             "kind" => self.kind = Some(value),
             "body" => self.body = Some(value),
             "emoji" => self.emoji = Some(value),
+            "channel" => self.channel = Some(value),
+            "message" => self.message = Some(value),
             _ => {}
         }
     }
@@ -121,6 +127,8 @@ impl<S: tracing::Subscriber> Layer<S> for CaptureLayer {
             kind: v.kind.unwrap_or_default(),
             body: v.body.unwrap_or_default(),
             emoji: v.emoji.unwrap_or_default(),
+            channel: v.channel.unwrap_or_default(),
+            message: v.message.unwrap_or_default(),
         });
     }
 }
@@ -625,6 +633,10 @@ async fn scenario_b_reply_resolves_e_number_and_settles() {
         captured(&buf)
     );
     assert_eq!(count_kind(&buf, "reply"), 1, "reply が複数回 or 0 回: 自動再送 0");
+    // e1 が発端メッセージ（channel=600, message=701）へ正しく解決されている（誤解決検知）。
+    let reply = captured(&buf).into_iter().find(|c| c.kind == "reply").unwrap();
+    assert_eq!(reply.channel, CHANNEL, "reply 対象 channel が発端と不一致（e1 誤解決）");
+    assert_eq!(reply.message, "701", "reply 対象 message が発端と不一致（e1 誤解決）");
 }
 
 // ==================== (c) reaction(e1, emoji) の実 DI 経路 ====================
@@ -655,4 +667,8 @@ async fn scenario_c_reaction_resolves_e_number_and_settles() {
         captured(&buf)
     );
     assert_eq!(count_kind(&buf, "reaction"), 1, "reaction が複数回 or 0 回: 自動再送 0");
+    // e1 が発端メッセージ（channel=600, message=702）へ正しく解決されている（誤解決検知）。
+    let react = captured(&buf).into_iter().find(|c| c.kind == "reaction").unwrap();
+    assert_eq!(react.channel, CHANNEL, "reaction 対象 channel が発端と不一致（e1 誤解決）");
+    assert_eq!(react.message, "702", "reaction 対象 message が発端と不一致（e1 誤解決）");
 }
