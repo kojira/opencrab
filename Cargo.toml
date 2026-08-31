@@ -19,7 +19,6 @@ members = [
     "crates/port",
     "crates/store",
     "crates/engine",
-    "crates/social-runtime",
     "crates/nostr-gate",
     "crates/extgate",
 ]
