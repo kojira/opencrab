@@ -46,8 +46,8 @@ pub struct InstanceConfig {
 /// - `accepted`（👀）: said を core が受理した時点で発端メッセージへ付ける（受理サイン＝gateway の責務）。
 /// - `completed`（🏁）: 発端メッセージへの返信（say）を配送し終えた時点で付ける。
 /// - `failed`（❌）: 発端メッセージへの返信配送が失敗した時点で付ける。
-///
-/// NO_REPLY(🤐) は現状 wire（`CompletedNoReply`）が発端 origin を運ばないため未配線（後続スライス）。
+/// - `no_reply`（🤐）: ターンが沈黙（say 無し）で終えた時点で発端メッセージへ付ける
+///   （`CompletedNoReply` の reply_origin が Single のときだけ・裁定A で真の沈黙だけに立つ）。
 #[derive(Debug, Clone, Deserialize)]
 pub struct SystemReactions {
     #[serde(default = "default_accepted")]
@@ -56,6 +56,8 @@ pub struct SystemReactions {
     pub completed: String,
     #[serde(default = "default_failed")]
     pub failed: String,
+    #[serde(default = "default_no_reply")]
+    pub no_reply: String,
 }
 
 fn default_accepted() -> String {
@@ -67,6 +69,9 @@ fn default_completed() -> String {
 fn default_failed() -> String {
     "❌".to_string()
 }
+fn default_no_reply() -> String {
+    "🤐".to_string()
+}
 
 impl Default for SystemReactions {
     fn default() -> Self {
@@ -74,6 +79,7 @@ impl Default for SystemReactions {
             accepted: default_accepted(),
             completed: default_completed(),
             failed: default_failed(),
+            no_reply: default_no_reply(),
         }
     }
 }
@@ -159,6 +165,7 @@ fn validate_instance_config(cfg: &InstanceConfig) -> anyhow::Result<()> {
         ("accepted", &sr.accepted),
         ("completed", &sr.completed),
         ("failed", &sr.failed),
+        ("no_reply", &sr.no_reply),
     ] {
         if emoji.trim().is_empty() {
             anyhow::bail!("system_reactions.{label} must be a nonempty emoji");
@@ -270,18 +277,20 @@ mod tests {
         assert_eq!(cfg.system_reactions.accepted, "👀");
         assert_eq!(cfg.system_reactions.completed, "🏁");
         assert_eq!(cfg.system_reactions.failed, "❌");
+        assert_eq!(cfg.system_reactions.no_reply, "🤐");
     }
 
     #[test]
     fn system_reactions_can_be_overridden_via_profile_data() {
         let mut v = sample_config();
         v["system_reactions"] = serde_json::json!({
-            "accepted": "🫡", "completed": "✅", "failed": "💥",
+            "accepted": "🫡", "completed": "✅", "failed": "💥", "no_reply": "🙊",
         });
         let cfg = parse_instance_config(&serde_json::to_vec(&v).unwrap()).unwrap();
         assert_eq!(cfg.system_reactions.accepted, "🫡");
         assert_eq!(cfg.system_reactions.completed, "✅");
         assert_eq!(cfg.system_reactions.failed, "💥");
+        assert_eq!(cfg.system_reactions.no_reply, "🙊");
     }
 
     #[test]
@@ -293,6 +302,7 @@ mod tests {
         assert_eq!(cfg.system_reactions.accepted, "👀");
         assert_eq!(cfg.system_reactions.completed, "✅");
         assert_eq!(cfg.system_reactions.failed, "❌");
+        assert_eq!(cfg.system_reactions.no_reply, "🤐");
     }
 
     #[test]

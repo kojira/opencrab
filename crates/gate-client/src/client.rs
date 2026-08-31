@@ -64,7 +64,15 @@ pub enum LiveEvent {
         activity_id: String,
         state: String,
     },
-    CompletedNoReply,
+    CompletedNoReply {
+        /// 沈黙で終えたターン（say 無し）の発端 origin。即時ターン（`occupy_until_turn_ends`）が
+        /// 単独で握った said（`ReplyOrigin::Single`）だけ `Some`。bundle ターンや複数即時 said の
+        /// 相乗り（`None`/`Ambiguous`）では単一の発端を決められないので `None`。consumer は `Some` を
+        /// 「その発端メッセージが沈黙で終えた」サイン（Discord なら 🤐）に使い、`None` は無視してよい。
+        /// 裁定A（core が ended を say の後に出す）により、返信ターンでは saw_say=true のため
+        /// このイベントは立たず、真の沈黙ターンだけに立つ。
+        reply_origin: Option<String>,
+    },
     Error {
         code: String,
         detail: Option<String>,
@@ -802,8 +810,14 @@ async fn handle_activity(client: &InstanceClient, activity: Activity) {
     } else if activity.state == "ended" {
         if let Some(turn) = inner.pending_turn.remove(&activity.binding_id) {
             if !turn.saw_say {
+                // Message と同じ pending_turn.reply_origin を露出する（新フレームではなく既存追跡の
+                // surface）。Single だけ発端を運び、None/Ambiguous は単一発端無しとして None。
+                let reply_origin = match &turn.reply_origin {
+                    ReplyOrigin::Single(o) => Some(o.clone()),
+                    ReplyOrigin::None | ReplyOrigin::Ambiguous => None,
+                };
                 if let Some(q) = inner.live.get_mut(&address) {
-                    let _ = q.try_push(LiveEvent::CompletedNoReply);
+                    let _ = q.try_push(LiveEvent::CompletedNoReply { reply_origin });
                 }
             }
         }

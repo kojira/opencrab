@@ -200,6 +200,8 @@ impl RoutedMock {
 const M_SAY: &str = "SAYMARK";
 const M_REPLY: &str = "REPLYMARK";
 const M_REACT: &str = "REACTMARK";
+// 他マーカーの部分文字列にならない独立名（"NOREPLYMARK" は "REPLYMARK" を含み誤ルートする）。
+const M_NOREPLY: &str = "MUTEMARK";
 const B_SAY: &str = "saybody-alpha 通常発言だよ";
 const B_REPLY: &str = "replybody-beta 返信本文だよ";
 const EMOJI: &str = "👀";
@@ -231,6 +233,10 @@ impl LlmProvider for RoutedMock {
                     "reaction",
                     serde_json::json!({"event": "e1", "emoji": EMOJI}),
                 ));
+            }
+            if text.contains(M_NOREPLY) {
+                // 沈黙ターン: say も tool も出さず NO_REPLY だけ返す（core は say 0・ended のみ）。
+                return Ok(text_response("NO_REPLY"));
             }
             if text.contains(M_SAY) {
                 return Ok(text_response(B_SAY));
@@ -792,4 +798,65 @@ async fn scenario_d_system_reactions_accepted_and_completed() {
         })
         .count();
     assert_eq!(accepted_count, 1, "受理 👀 が複数回: {:?}", captured(&buf));
+
+    // 返信したターン（M_SAY）には 🤐 は付かない（裁定A: core が ended を say の後に出すので
+    // 返信ターンで CompletedNoReply が立たない）。
+    let noreply_on_703 = captured(&buf)
+        .iter()
+        .filter(|c| c.kind == "system_reaction" && c.emoji.contains("🤐") && c.message == "703")
+        .count();
+    assert_eq!(
+        noreply_on_703,
+        0,
+        "返信ターンに 🤐 が誤発火（core reorder が効いていない）: {:?}",
+        captured(&buf)
+    );
+}
+
+// ==================== (e) system reaction 🤐（NO_REPLY）の V3 経路 ====================
+
+#[tokio::test]
+async fn scenario_e_no_reply_gets_muted_reaction() {
+    let buf = install_capture();
+    let mock = Arc::new(RoutedMock::new());
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    // M_NOREPLY: turn は NO_REPLY（say 無し）。受理 👀 のあと、沈黙決着で 🤐 が発端へ付く。
+    fixture.append_message("704", &format!("{M_NOREPLY} これは黙って"));
+
+    // 🤐: 沈黙ターンの決着（CompletedNoReply・reply_origin=Single）で発端 704 へ付く。
+    let saw_muted = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf).iter().any(|c| {
+                c.kind == "system_reaction"
+                    && c.emoji.contains("🤐")
+                    && c.channel == CHANNEL
+                    && c.message == "704"
+            })
+        })
+        .await
+    };
+    assert!(
+        saw_muted,
+        "NO_REPLY 🤐（system_reaction）が発端メッセージに付かない: {:?}",
+        captured(&buf)
+    );
+
+    // 沈黙ターンには 🏁（完了）は付かない（返信を配送していない）。
+    let completed_on_704 = captured(&buf)
+        .iter()
+        .filter(|c| {
+            c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == "704"
+        })
+        .count();
+    assert_eq!(
+        completed_on_704,
+        0,
+        "NO_REPLY ターンに 🏁 が誤発火: {:?}",
+        captured(&buf)
+    );
 }
