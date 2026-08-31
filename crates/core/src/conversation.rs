@@ -1233,26 +1233,54 @@ fn truncate_body(content: &str, limit: usize) -> String {
     format!("{head}…(全{total}字)")
 }
 
-/// 表示時の legacy メタ剥がし（§9A・row294b）。会話組み立て時のみ適用し、保存データは
+/// 表示時の legacy メタ剥がし（§9A・row294b / row339）。会話組み立て時のみ適用し、保存データは
 /// 書き換えない。受信転記の本文へ焼き込まれた種別ラベル行（`[… kind:N …]` 形。新形も旧
-/// `from=…/target=…` 付きも）を落とし、本文に残る生の長い識別子（bech32・64hex）を短縮する。
-/// 種別ラベルは即時判定（受信側の内部処理）に使うが会話表示には不要（row294b: メンションと
-/// リプライは別物・表示にラベル不要）。core は transport を名指ししないので、行判定は汎用マーカー
-/// ` kind:<数字>` で行う（外部 origin の車線標識と同じく特定 SDK に依存しない）。
+/// `from=…/target=…` 付きも）を落とす。種別ラベルは即時判定（受信側の内部処理）に使うが会話
+/// 表示には不要（row294b: メンションとリプライは別物・表示にラベル不要）。core は transport を
+/// 名指ししないので、行判定は汎用マーカー ` kind:<数字>` で行う（外部 origin の車線標識と同じく
+/// 特定 SDK に依存しない）。
 ///
-/// #826 の会話 snapshot（旧レンダリング済み blob）にも read 時に適用するため crate 公開する
-/// （`context_budget::governor::assemble_from_snapshot`）。行単位で処理するので、単一ログ本文にも
-/// 複数行の snapshot blob にも同じ規則で効く。
+/// **本文（利用者・全話者の自由記述）はそのまま**（row339 裁定）。以前は残行に
+/// `elide_raw_identifiers` を掛け bech32/64hex を短縮していたが、本文の識別子改変は「相手の発言の
+/// 書き換え」＝情報破壊なので撤去した。識別子隠蔽は自前生成の構造部分（話者ラベル・u/e/c/s 参照・
+/// tool 表示・spawn ack 等）に限定する。落とすのは構造ラベル行だけで、本文中の UUID/npub/64hex は
+/// 原文のまま LLM へ渡す。長文の切り詰め（`…(全N字)`）は本文改変ではなく省略なので呼び出し側で維持。
 pub(crate) fn strip_inbound_meta_for_display(content: &str) -> String {
-    strip_meta_lines(content, elide_raw_identifiers)
+    strip_meta_lines(content, |line| line.to_string())
 }
 
 /// 凍結 snapshot blob 専用の掃除（row295d）。単一ログ経路（[`strip_inbound_meta_for_display`]）に
 /// 加えて、旧レンダリング由来の legacy 識別子—UUID（subtask/session）・`call_…`（tool call id）・
 /// `"digest":"…"`（モデル不要な内部整合値）—も除去/短縮する。新形式（既に §9A・c/s 番号・→log:N）
 /// には該当パターンが無いので無影響。単一ログの note 本文へは適用しない（利用者本文の過剰除去を避ける）。
+///
+/// row339: **マーカー無しの legacy blob 専用**。載せ替え前の歴史データは構造部分に生識別子が混在し
+/// flat text で本文と区別できないため full スクラブを維持する。新規に凍結する snapshot は生成元の
+/// 描画が既にクリーン（構造=u/e/c/s 短縮参照・本文=原文）なので [`FROZEN_SNAPSHOT_V2_MARKER`] を
+/// 付けてこのスクラブをスキップする（[`restore_frozen_snapshot`]）。世代ゲートで「本文原文」裁定が
+/// compaction 後も破れないようにする。
 pub(crate) fn strip_frozen_snapshot(content: &str) -> String {
     strip_meta_lines(content, scrub_identifiers_for_display)
+}
+
+/// row339: 新規に凍結する snapshot の先頭に付ける世代マーカー。制御文字始まりで実会話行
+/// （`[話者]…`）や legacy blob と衝突しない。付いていれば生成元がクリーンな §9A 描画だと分かる。
+pub(crate) const FROZEN_SNAPSHOT_V2_MARKER: &str = "\u{1}oc-snapshot-v2";
+
+/// 凍結時に [`FROZEN_SNAPSHOT_V2_MARKER`] を先頭付与する（永続化直前・[`persist_snapshot`]）。
+pub(crate) fn frozen_snapshot_with_marker(text: &str) -> String {
+    format!("{FROZEN_SNAPSHOT_V2_MARKER}\n{text}")
+}
+
+/// read 時に凍結 snapshot blob を世代ゲートして復元する（row339）。
+/// - v2（マーカー付き）: 生成元がクリーンなのでスクラブせず**本文原文のまま**復元する
+///   （本文中の UUID/npub/64hex を再マスクしない）。
+/// - legacy（マーカー無し・載せ替え前の歴史データ）: 従来どおり [`strip_frozen_snapshot`] でスクラブ。
+pub(crate) fn restore_frozen_snapshot(blob: &str) -> String {
+    match blob.strip_prefix(FROZEN_SNAPSHOT_V2_MARKER) {
+        Some(rest) => rest.strip_prefix('\n').unwrap_or(rest).to_string(),
+        None => strip_frozen_snapshot(blob),
+    }
 }
 
 /// 生の長識別子（UUID / `call_…` / `"digest":"…"` / bech32 / 32hex 以上）を短縮形へ落とす共通変換。
@@ -1280,11 +1308,11 @@ pub(crate) fn leaked_identifier_in_delta(rendered: &str) -> Option<String> {
 /// **単一ログ描画**に対する漏れ検知（row318・#847）。検知器の目的は**描画器のバグ**を鳴らすこと
 /// ＝構造部分（話者行・tool_call・spawn ack など）に生の長識別子が残っていないかを見る。
 ///
-/// speech の**本文**は利用者の自由記述で、表示時のスクラブは意図的に [`elide_raw_identifiers`] のみ
-/// （UUID / `call_…` / digest は保持・[`strip_inbound_meta_for_display`]）。この本文を full スクラブ
-/// 基準の [`leaked_identifier_in_delta`] で見ると、利用者が発話に UUID 等を書いた瞬間に、描画が
-/// 正しくても WARN が出る（#847 の偽陽性）。偽 WARN はアラート疲労で本物の描画器バグ WARN を
-/// マスクするので、speech は**構造ヘッダ行だけ**を検知対象にし、本文は見ない。描画形は
+/// speech の**本文**は利用者の自由記述で、表示時は**原文のまま**渡す（row339 裁定・本文の識別子
+/// 改変は相手の発言の書き換え＝情報破壊。構造ラベル行のみ落とす・[`strip_inbound_meta_for_display`]）。
+/// この本文を full スクラブ基準の [`leaked_identifier_in_delta`] で見ると、利用者が発話に UUID/npub/
+/// 64hex 等を書いた瞬間に、描画が正しくても WARN が出る（#847 の偽陽性）。偽 WARN はアラート疲労で
+/// 本物の描画器バグ WARN をマスクするので、speech は**構造ヘッダ行だけ**を検知対象にし、本文は見ない。描画形は
 /// `[話者]…:\n本文…` で、ヘッダ（話者/時刻/e番号/関係注記）に改行は無いため 1 行目がヘッダ。
 ///
 /// tool_call の**引数本文**（未決着 call / preserve_arg_call_ids の DI reply 本文）も同じ性質——
@@ -4355,18 +4383,24 @@ mod render_refs_tests {
         assert!(!out.contains("メンション"), "ラベル語も残さない: {out}");
     }
 
+    // row339: 発言本文（全話者・全 kind）の識別子は**原文のまま**渡す。本文の識別子改変は相手の
+    // 発言の書き換え＝情報破壊。以前は bech32/64hex を `<npub…>`/`<id…>` へ短縮していたが撤去した。
+    // 構造ラベル行の除去（`[… kind:N …]`）と長文切り詰めは不変（別テストで固定）。
     #[test]
-    fn elides_bare_identifiers_in_body_but_keeps_short_hashes() {
+    fn keeps_bare_identifiers_in_body_verbatim() {
         let pubkey = "b".repeat(64); // 64hex
-        let body = format!("引用: npub1{} と {pubkey} と call_abc123", "q".repeat(58));
+        let npub = format!("npub1{}", "q".repeat(58));
+        let body = format!("引用: {npub} と {pubkey} と call_abc123");
         let ev = speech("me", "pk_a", &body, Some("nostr:event:v1:default:E"));
         let refs = ConversationRefs::build(std::slice::from_ref(&ev), "me");
         let out = format_single_log_with_echo(&ev, None, Some(&refs));
-        assert!(!out.contains(&pubkey), "64hex を短縮: {out}");
-        assert!(!out.contains("npub1qqq"), "bech32 を短縮: {out}");
-        assert!(out.contains("<npub…>") && out.contains("<id…>"), "{out}");
-        // 短い識別子（tool call の一部など）は温存する。
-        assert!(out.contains("call_abc123"), "短い hash は温存: {out}");
+        assert!(out.contains(&pubkey), "64hex を原文のまま: {out}");
+        assert!(out.contains(&npub), "bech32 を原文のまま: {out}");
+        assert!(
+            !out.contains("<npub…>") && !out.contains("<id…>"),
+            "本文をマスクしていないこと: {out}"
+        );
+        assert!(out.contains("call_abc123"), "call_ も原文のまま: {out}");
     }
 
     #[test]
@@ -4510,6 +4544,52 @@ mod render_refs_tests {
     fn per_log_strip_leaves_uuid_untouched() {
         let body = "予約番号は df58ec83-960c-45e3-b69c-ff493b133afc です";
         assert_eq!(strip_inbound_meta_for_display(body), body);
+    }
+
+    // row339: v2 マーカー付き snapshot（新規凍結）は read 時にスクラブせず本文原文のまま復元する。
+    #[test]
+    fn restore_v2_snapshot_keeps_body_verbatim() {
+        let uuid = "df58ec83-960c-45e3-b69c-ff493b133afc";
+        let npub = format!("npub1{}", "q".repeat(58));
+        // 生成元は既にクリーン（構造=u/e 短縮参照・本文=原文）。
+        let clean = format!("[u1][2026-08-30 06:06:45]e1:\n予約 {uuid} と {npub}");
+        let blob = frozen_snapshot_with_marker(&clean);
+        let out = restore_frozen_snapshot(&blob);
+        assert_eq!(
+            out, clean,
+            "v2 は本文原文のまま復元（マーカーも除去）: {out}"
+        );
+        assert!(out.contains(uuid) && out.contains(&npub), "{out}");
+        assert!(
+            !out.contains("<uuid…>") && !out.contains("<npub…>"),
+            "v2 本文が再マスクされた: {out}"
+        );
+    }
+
+    // row339: マーカー無しの legacy blob（載せ替え前の歴史データ）は従来どおりスクラブする。
+    #[test]
+    fn restore_legacy_snapshot_still_scrubs() {
+        let blob = "session=nostr-33196264-5908-4f04-b24a-efd7aa6d2014-caldera へ完了";
+        let out = restore_frozen_snapshot(blob);
+        assert_eq!(
+            out,
+            strip_frozen_snapshot(blob),
+            "legacy は従来スクラブと同一経路"
+        );
+        assert!(
+            out.contains("<uuid…>"),
+            "legacy UUID がスクラブされない: {out}"
+        );
+    }
+
+    // row339: 凍結（マーカー付与）→復元の往復で本文が保存される（自己治癒ループの冪等性）。
+    #[test]
+    fn frozen_snapshot_marker_roundtrip_is_lossless() {
+        let clean = "[u1][2026-08-30 06:06:45]e1:\nrunId: e059e80f-960c-45e3-b69c-ff493b133afc";
+        assert_eq!(
+            restore_frozen_snapshot(&frozen_snapshot_with_marker(clean)),
+            clean
+        );
     }
 
     // row295b: subtask_completed は s 番号ヘッダ＋result 本文のみ（生 UUID/定型 field を出さない）。
