@@ -47,6 +47,28 @@ fn resolve_agent_id(conn: &rusqlite::Connection, agent_id: &str) -> String {
     agent_id.to_string()
 }
 
+/// discord-gateway 子 binary の解決順（DESIGN-DISCORD-GATE §0: 1 process = 1 agent）。
+/// 1. 環境変数 `OPENCRAB_DISCORD_GATEWAY_BIN`（明示指定・運用者が場所を固定できる）。
+/// 2. server 実行ファイルと同じディレクトリの `discord-gateway`（cargo の同一 target/ 配置）。
+/// 3. 上記が無ければ `discord-gateway`（PATH 解決に委ねる）。
+#[cfg(feature = "discord")]
+fn resolve_discord_gateway_bin() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("OPENCRAB_DISCORD_GATEWAY_BIN") {
+        if !p.trim().is_empty() {
+            return std::path::PathBuf::from(p);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let sibling = dir.join("discord-gateway");
+            if sibling.exists() {
+                return sibling;
+            }
+        }
+    }
+    std::path::PathBuf::from("discord-gateway")
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Load .env file if present
@@ -73,6 +95,17 @@ async fn main() -> anyhow::Result<()> {
                 cfg.gate.nostr_ingress
             )
         })?;
+
+    // Discord も同型（DESIGN-DISCORD-GATE §8.1）。未知値は起動失敗（fail-loud）。
+    #[cfg(feature = "discord")]
+    let discord_ingress =
+        opencrab_server::discord_provision::DiscordIngress::parse(&cfg.gate.discord_ingress)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "gate.discord_ingress は legacy|v3_shadow|v3（欠落=legacy）。得た値: {:?}",
+                    cfg.gate.discord_ingress
+                )
+            })?;
 
     // #620: Nostr の at-rest 暗号化マスターキーを **load_config 直後・全 tokio::spawn より前**に
     // env から読み、**即 remove_var** する。以降 spawn される execute_shell は inherit_env=true で
@@ -112,6 +145,12 @@ async fn main() -> anyhow::Result<()> {
     }
     let gate_token = opencrab_extgate::OperatorToken::take_from_env();
     let gate_socket = opencrab_extgate::validate_listen_socket(&cfg.gate.listen_socket)?;
+    // Discord V3 点火の placement.core_socket 用に、validate 済み path を文字列で控える
+    // （`gate_socket` は下の UDS listener ブロックで move されるため、ここで clone）。
+    #[cfg(feature = "discord")]
+    let gate_socket_for_discord: Option<String> = gate_socket
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned());
     let extgate = Arc::new(opencrab_extgate::ExtgateState::new(db.clone(), gate_token));
 
     // #620: マスターキーの要否は「Nostr が設定されているエージェントが 1 つ以上あるか」で
@@ -920,6 +959,88 @@ async fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         });
+    }
+
+    // Discord V3 点火（DESIGN-DISCORD-GATE §8.1）。legacy は何もしない（既存挙動＝spawn なし）。
+    // v3_shadow/v3 のとき、enabled な agent_discord_config 各体について instance（v3 は binding も）を
+    // 敷き、discord-gateway プロセスを起こす。**UDS listener を spawn した後**に行う（子が core socket へ
+    // 接続できるように。子側 InstanceClient は接続を再試行する）。
+    #[cfg(feature = "discord")]
+    if discord_ingress.provisions_instance() {
+        use anyhow::Context as _;
+        use opencrab_server::discord_provision::{ignite_discord_instances, DiscordPlacementPlan};
+
+        // placement.json（非秘密）の出力先。DB と同じボリューム（内蔵ディスクに置かない方針）。
+        let placement_dir = std::path::Path::new(&cfg.database.path)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("gate")
+            .join("discord");
+        // 子 binary の解決: env 上書き → server 実行ファイルの隣 → PATH の "discord-gateway"。
+        let bin = resolve_discord_gateway_bin();
+        let core_socket = gate_socket_for_discord.clone();
+
+        let spawn = move |plan: &DiscordPlacementPlan, bot_token: &str| -> anyhow::Result<()> {
+            let Some(core_socket) = core_socket.as_deref() else {
+                anyhow::bail!(
+                    "gate.listen_socket 未設定のため discord-gateway を起動できない（V3 は UDS 必須）"
+                );
+            };
+            // placement.json（秘密なし。bot token は載せない）。
+            let placement = serde_json::json!({
+                "core_socket": core_socket,
+                "instances": [{
+                    "instance_id": plan.instance_id,
+                    "revision": plan.revision,
+                    "addresses": plan.addresses,
+                    "config_b64": plan.config_b64,
+                }],
+            });
+            std::fs::create_dir_all(&placement_dir)
+                .with_context(|| format!("placement dir 作成失敗: {}", placement_dir.display()))?;
+            let path = placement_dir.join(format!("{}.json", plan.agent_id));
+            std::fs::write(&path, serde_json::to_vec_pretty(&placement)?)
+                .with_context(|| format!("placement 書き出し失敗: {}", path.display()))?;
+
+            // 子プロセス spawn。bot token は **子の env のみ**（親 env も argv も汚さない）。
+            let mut cmd = std::process::Command::new(&bin);
+            cmd.arg(&path);
+            cmd.env("DISCORD_BOT_TOKEN", bot_token);
+            let child = cmd
+                .spawn()
+                .with_context(|| format!("discord-gateway ({}) の spawn 失敗", bin.display()))?;
+            // 最小配線: detach（監視/再起動/shutdown は後続 issue）。子は core UDS へ自力で再接続する。
+            tracing::info!(
+                agent_id = %plan.agent_id,
+                pid = child.id(),
+                bin = %bin.display(),
+                "discord-gateway 子プロセス起動（token は env 注入）"
+            );
+            Ok(())
+        };
+
+        match state.db.lock() {
+            Ok(mut conn) => {
+                match ignite_discord_instances(
+                    &mut conn,
+                    discord_ingress,
+                    opencrab_extgate::now_nanos(),
+                    &spawn,
+                ) {
+                    Ok(report) => tracing::info!(
+                        ingress = discord_ingress.as_str(),
+                        provisioned = report.provisioned.len(),
+                        spawned = report.spawned.len(),
+                        skipped = report.skipped.len(),
+                        "discord V3 点火完了"
+                    ),
+                    Err(e) => {
+                        tracing::error!(error = %e, "discord V3 点火に失敗（起動は継続）")
+                    }
+                }
+            }
+            Err(_) => tracing::error!("discord V3 点火: db lock 取得失敗"),
+        }
     }
 
     let app = create_router_with_gate(state, extgate);

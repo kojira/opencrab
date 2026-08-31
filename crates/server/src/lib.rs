@@ -16,6 +16,8 @@ pub mod api;
 pub mod caller_identity;
 pub mod config;
 pub mod dedicated_gateway;
+#[cfg(feature = "discord")]
+pub mod discord_provision;
 pub mod heartbeat_fire;
 pub mod heartbeat_instructions;
 pub mod hot_reload;
