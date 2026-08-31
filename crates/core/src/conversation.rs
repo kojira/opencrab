@@ -1286,20 +1286,42 @@ pub(crate) fn leaked_identifier_in_delta(rendered: &str) -> Option<String> {
 /// 正しくても WARN が出る（#847 の偽陽性）。偽 WARN はアラート疲労で本物の描画器バグ WARN を
 /// マスクするので、speech は**構造ヘッダ行だけ**を検知対象にし、本文は見ない。描画形は
 /// `[話者]…:\n本文…` で、ヘッダ（話者/時刻/e番号/関係注記）に改行は無いため 1 行目がヘッダ。
-/// 他ログ（tool_call/tool_result/spawn ack）は全行が構造なので従来どおり全体を見る。
 ///
-/// 「本物の描画器バグ（構造部分に生 ID が残る）は検知し続ける」を維持する: speech でもヘッダ行
-/// （話者行）は full スクラブ基準で見るので、名前引き失敗などで生 agent UUID が話者行へ漏れれば
-/// 従来どおり鳴る。
+/// tool_call の**引数本文**（未決着 call / preserve_arg_call_ids の DI reply 本文）も同じ性質——
+/// 表示時にスクラブせず verbatim 保持する（reply 本文が次ターンで消えない・§9A.1/row292）ので、
+/// bech32/64hex を含む reply 引数で speech 本文と同種の偽陽性が出る（#847 follow-up）。call 行
+/// `[cN]: name(args)` の args（最初の `(` 以降）を外し、構造（話者行・call_ref `[cN]`/`[id=call_…]`・
+/// tool 名）だけを検知対象にする。tool_result/spawn ack は全行が構造（本文は既に短縮/s 番号）なので
+/// 従来どおり全体を見る。
+///
+/// 「本物の描画器バグ（構造部分に生 ID が残る）は検知し続ける」を維持する: speech のヘッダ行も
+/// tool_call の call_ref も full スクラブ基準で見るので、名前引き失敗の生 agent UUID・未採番の
+/// `id=call_…` フォールバックは従来どおり鳴る。引数本文を外しても真陽性は落ちない——描画器が短縮
+/// すべき生 ID は call_ref/subtask 参照側に出るのであって、元から verbatim 保持の引数本文内には無い。
 pub(crate) fn leaked_identifier_in_render(
     log: &opencrab_db::queries::SessionLogRow,
     rendered: &str,
 ) -> Option<String> {
-    if log.log_type == "speech" {
-        let header = rendered.split('\n').next().unwrap_or(rendered);
-        return leaked_identifier_in_delta(header);
+    match log.log_type.as_str() {
+        "speech" => {
+            let header = rendered.split('\n').next().unwrap_or(rendered);
+            leaked_identifier_in_delta(header)
+        }
+        "tool_call" => {
+            for line in rendered.split('\n') {
+                // call 行（`]: ` を含む）だけ args を外す。fallback 本文行など call 行以外は全文を見る。
+                let structural = match line.find("]: ").and(line.find('(')) {
+                    Some(open) => &line[..open],
+                    None => line,
+                };
+                if scrub_identifiers_for_display(structural) != structural {
+                    return Some(line.to_string());
+                }
+            }
+            None
+        }
+        _ => leaked_identifier_in_delta(rendered),
     }
-    leaked_identifier_in_delta(rendered)
 }
 
 /// メタ行を落とし、残る各行に `per_line` を適用し、末尾空行を畳む共通ルーチン。
@@ -2014,6 +2036,63 @@ mod detector_false_positive_847_tests {
         assert!(
             leaked_identifier_in_render(&tool_call, &rendered).is_some(),
             "tool_call の生 call_id 漏れを検知しそこねた: {rendered}"
+        );
+    }
+
+    /// #847 follow-up 偽陽性が消える: preserve_arg_call_ids の DI reply 引数本文（verbatim 保持）に
+    /// 生 64hex（返信先 event_id 等）が含まれても WARN は出ない。call_ref は c1（構造は clean）で
+    /// 引数本文だけに生 ID がある。旧検知器（引数込み・full スクラブ基準）なら鳴っていたことも固定。
+    #[test]
+    fn tool_call_preserved_verbatim_arg_body_does_not_warn() {
+        let event_hex = format!("7be6255f{}", "a".repeat(56)); // 64hex（返信先 event_id 相当）
+        let call_id = "call_reply00000000000000"; // 採番されるので call_ref は c1
+        let args = format!(r#"{{"reply_to":"{event_hex}","content":"はい"}}"#);
+        let tool_call = SessionLogRow {
+            id: Some(3),
+            agent_id: AGENT.to_string(),
+            session_id: "s".to_string(),
+            log_type: "tool_call".to_string(),
+            content: "call".to_string(),
+            speaker_id: Some(AGENT.to_string()),
+            turn_number: None,
+            metadata_json: Some(
+                serde_json::json!({
+                    // DI operation の call は arguments を verbatim 保持（§9A.1/row292）。
+                    "preserve_arg_call_ids": [call_id],
+                    "tool_calls_json": serde_json::json!([{
+                        "id": call_id,
+                        "function": {"name": "nostr_run", "arguments": args}
+                    }])
+                    .to_string()
+                })
+                .to_string(),
+            ),
+            created_at: Some("2026-08-31T15:00:00Z".to_string()),
+        };
+        // refs にこの call を採番させ（call_ref=c1）、自分の表示名も設定して話者行を clean にする
+        // （名前引き成功相当・話者行に生 agent UUID を出さない → 生 ID は引数本文だけに残る）。
+        let mut refs = ConversationRefs::build(std::slice::from_ref(&tool_call), AGENT);
+        refs.set_agent_name("くらぶ");
+        // completed かつ preserve → 引数は →log:N に畳まれず verbatim のまま（preserve 経路を厳密に通す）。
+        let mut completed = std::collections::HashSet::new();
+        completed.insert(call_id.to_string());
+        let rendered = format_single_log_with_echo(&tool_call, Some(&completed), Some(&refs));
+
+        // 構造は clean（call_ref は c1・生 call_id は出ない）、引数本文は verbatim 保持で生 64hex が残る。
+        assert!(rendered.contains("[c1]"), "call_ref が c1 でない: {rendered}");
+        assert!(
+            rendered.contains(&event_hex),
+            "preserve 引数本文が verbatim 保持されていない: {rendered}"
+        );
+        // 新検知器: 引数本文は対象外 → 偽陽性なし。
+        assert!(
+            leaked_identifier_in_render(&tool_call, &rendered).is_none(),
+            "preserve 引数本文の生 ID で偽 WARN が出た: {rendered}"
+        );
+        // 回帰前提: 旧検知器（引数込み）なら鳴っていた＝これは本当の偽陽性だった。
+        assert!(
+            leaked_identifier_in_delta(&rendered).is_some(),
+            "回帰テストの前提が崩れた（旧検知器も沈黙）: {rendered}"
         );
     }
 }
