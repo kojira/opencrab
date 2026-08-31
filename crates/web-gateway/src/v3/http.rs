@@ -268,7 +268,8 @@ fn live_to_event(ev: &LiveEvent) -> Option<Event> {
                 .event("activity")
                 .data(json!({"activity_id": activity_id, "state": state}).to_string()),
         ),
-        LiveEvent::CompletedNoReply => {
+        // web は返信先アンカーを使わないので reply_origin は無視する（SSE 外形は不変）。
+        LiveEvent::CompletedNoReply { .. } => {
             Some(Event::default().event("completed_no_reply").data("{}"))
         }
         LiveEvent::Error { code, detail } => Some(

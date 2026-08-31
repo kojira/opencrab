@@ -282,10 +282,18 @@ fn spawn_say_consumer(
                         }
                     }
                 }
+                Some(LiveEvent::CompletedNoReply { reply_origin }) => {
+                    // 🤐: ターンが沈黙（say 無し）で終えた。裁定A で core が ended を say の後に出す
+                    // ため、返信ターンでは立たず真の沈黙ターンだけに立つ。発端（即時ターンの Single）が
+                    // 分かるときだけその発端メッセージへ NO_REPLY サインを付ける（None は付けない）。
+                    if let Some(origin) = &reply_origin {
+                        react_system(&transport, origin, &reactions.no_reply).await;
+                    }
+                }
                 Some(LiveEvent::Error { .. }) | None => {
                     tokio::time::sleep(RETRY).await;
                 }
-                // Activity / CompletedNoReply は投稿対象ではない。
+                // Activity は投稿対象ではない。
                 Some(_) => {}
             }
         }

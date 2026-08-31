@@ -305,9 +305,12 @@ async fn rust_unit_activity_started_ended() {
         .await
         .unwrap()
         .unwrap();
+    // 即時 said（occupy）が単独で握ったターンなので、発端 origin を運ぶ（Single）。
     assert_eq!(
         none,
-        opencrab_web_gateway::v3::client::LiveEvent::CompletedNoReply
+        opencrab_web_gateway::v3::client::LiveEvent::CompletedNoReply {
+            reply_origin: Some(origin())
+        }
     );
 }
 
