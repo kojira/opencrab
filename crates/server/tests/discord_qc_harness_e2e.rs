@@ -756,7 +756,8 @@ async fn scenario_d_system_reactions_accepted_and_completed() {
     // （＝ kind="reaction" は 0・system reaction は kind="system_reaction" で分離観測）。
     fixture.append_message("703", &format!("{M_SAY} 受理と完了のサインを見たい"));
 
-    // 👀: said を core が受理した時点で発端メッセージ（channel=600, message=703）へ付く。
+    // 👀: LLM がこの発端メッセージをターン文脈に含めた（読んだ）時点＝activity started(origin) で
+    // 発端メッセージ（channel=600, message=703）へ付く（R2・受理/推論前では付けない）。
     let saw_accepted = {
         let buf = buf.clone();
         wait_until(move || {
