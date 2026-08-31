@@ -1233,18 +1233,20 @@ fn truncate_body(content: &str, limit: usize) -> String {
     format!("{head}…(全{total}字)")
 }
 
-/// 表示時の legacy メタ剥がし（§9A・row294b）。会話組み立て時のみ適用し、保存データは
+/// 表示時の legacy メタ剥がし（§9A・row294b / row339）。会話組み立て時のみ適用し、保存データは
 /// 書き換えない。受信転記の本文へ焼き込まれた種別ラベル行（`[… kind:N …]` 形。新形も旧
-/// `from=…/target=…` 付きも）を落とし、本文に残る生の長い識別子（bech32・64hex）を短縮する。
-/// 種別ラベルは即時判定（受信側の内部処理）に使うが会話表示には不要（row294b: メンションと
-/// リプライは別物・表示にラベル不要）。core は transport を名指ししないので、行判定は汎用マーカー
-/// ` kind:<数字>` で行う（外部 origin の車線標識と同じく特定 SDK に依存しない）。
+/// `from=…/target=…` 付きも）を落とす。種別ラベルは即時判定（受信側の内部処理）に使うが会話
+/// 表示には不要（row294b: メンションとリプライは別物・表示にラベル不要）。core は transport を
+/// 名指ししないので、行判定は汎用マーカー ` kind:<数字>` で行う（外部 origin の車線標識と同じく
+/// 特定 SDK に依存しない）。
 ///
-/// #826 の会話 snapshot（旧レンダリング済み blob）にも read 時に適用するため crate 公開する
-/// （`context_budget::governor::assemble_from_snapshot`）。行単位で処理するので、単一ログ本文にも
-/// 複数行の snapshot blob にも同じ規則で効く。
+/// **本文（利用者・全話者の自由記述）はそのまま**（row339 裁定）。以前は残行に
+/// `elide_raw_identifiers` を掛け bech32/64hex を短縮していたが、本文の識別子改変は「相手の発言の
+/// 書き換え」＝情報破壊なので撤去した。識別子隠蔽は自前生成の構造部分（話者ラベル・u/e/c/s 参照・
+/// tool 表示・spawn ack 等）に限定する。落とすのは構造ラベル行だけで、本文中の UUID/npub/64hex は
+/// 原文のまま LLM へ渡す。長文の切り詰め（`…(全N字)`）は本文改変ではなく省略なので呼び出し側で維持。
 pub(crate) fn strip_inbound_meta_for_display(content: &str) -> String {
-    strip_meta_lines(content, elide_raw_identifiers)
+    strip_meta_lines(content, |line| line.to_string())
 }
 
 /// 凍結 snapshot blob 専用の掃除（row295d）。単一ログ経路（[`strip_inbound_meta_for_display`]）に
@@ -1280,11 +1282,11 @@ pub(crate) fn leaked_identifier_in_delta(rendered: &str) -> Option<String> {
 /// **単一ログ描画**に対する漏れ検知（row318・#847）。検知器の目的は**描画器のバグ**を鳴らすこと
 /// ＝構造部分（話者行・tool_call・spawn ack など）に生の長識別子が残っていないかを見る。
 ///
-/// speech の**本文**は利用者の自由記述で、表示時のスクラブは意図的に [`elide_raw_identifiers`] のみ
-/// （UUID / `call_…` / digest は保持・[`strip_inbound_meta_for_display`]）。この本文を full スクラブ
-/// 基準の [`leaked_identifier_in_delta`] で見ると、利用者が発話に UUID 等を書いた瞬間に、描画が
-/// 正しくても WARN が出る（#847 の偽陽性）。偽 WARN はアラート疲労で本物の描画器バグ WARN を
-/// マスクするので、speech は**構造ヘッダ行だけ**を検知対象にし、本文は見ない。描画形は
+/// speech の**本文**は利用者の自由記述で、表示時は**原文のまま**渡す（row339 裁定・本文の識別子
+/// 改変は相手の発言の書き換え＝情報破壊。構造ラベル行のみ落とす・[`strip_inbound_meta_for_display`]）。
+/// この本文を full スクラブ基準の [`leaked_identifier_in_delta`] で見ると、利用者が発話に UUID/npub/
+/// 64hex 等を書いた瞬間に、描画が正しくても WARN が出る（#847 の偽陽性）。偽 WARN はアラート疲労で
+/// 本物の描画器バグ WARN をマスクするので、speech は**構造ヘッダ行だけ**を検知対象にし、本文は見ない。描画形は
 /// `[話者]…:\n本文…` で、ヘッダ（話者/時刻/e番号/関係注記）に改行は無いため 1 行目がヘッダ。
 ///
 /// tool_call の**引数本文**（未決着 call / preserve_arg_call_ids の DI reply 本文）も同じ性質——
@@ -4355,18 +4357,24 @@ mod render_refs_tests {
         assert!(!out.contains("メンション"), "ラベル語も残さない: {out}");
     }
 
+    // row339: 発言本文（全話者・全 kind）の識別子は**原文のまま**渡す。本文の識別子改変は相手の
+    // 発言の書き換え＝情報破壊。以前は bech32/64hex を `<npub…>`/`<id…>` へ短縮していたが撤去した。
+    // 構造ラベル行の除去（`[… kind:N …]`）と長文切り詰めは不変（別テストで固定）。
     #[test]
-    fn elides_bare_identifiers_in_body_but_keeps_short_hashes() {
+    fn keeps_bare_identifiers_in_body_verbatim() {
         let pubkey = "b".repeat(64); // 64hex
-        let body = format!("引用: npub1{} と {pubkey} と call_abc123", "q".repeat(58));
+        let npub = format!("npub1{}", "q".repeat(58));
+        let body = format!("引用: {npub} と {pubkey} と call_abc123");
         let ev = speech("me", "pk_a", &body, Some("nostr:event:v1:default:E"));
         let refs = ConversationRefs::build(std::slice::from_ref(&ev), "me");
         let out = format_single_log_with_echo(&ev, None, Some(&refs));
-        assert!(!out.contains(&pubkey), "64hex を短縮: {out}");
-        assert!(!out.contains("npub1qqq"), "bech32 を短縮: {out}");
-        assert!(out.contains("<npub…>") && out.contains("<id…>"), "{out}");
-        // 短い識別子（tool call の一部など）は温存する。
-        assert!(out.contains("call_abc123"), "短い hash は温存: {out}");
+        assert!(out.contains(&pubkey), "64hex を原文のまま: {out}");
+        assert!(out.contains(&npub), "bech32 を原文のまま: {out}");
+        assert!(
+            !out.contains("<npub…>") && !out.contains("<id…>"),
+            "本文をマスクしていないこと: {out}"
+        );
+        assert!(out.contains("call_abc123"), "call_ も原文のまま: {out}");
     }
 
     #[test]

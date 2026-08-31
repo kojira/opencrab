@@ -743,6 +743,44 @@ fn tool_result_failure_body_elides_raw_hex_but_keeps_error_text() {
     );
 }
 
+/// row339 裁定の回帰固定: 発言本文（利用者・他者の自由記述）の識別子は**原文のまま** LLM プロンプト
+/// （組立結果 = delta/live 描画経路）に現れる。QC 実弾で webhook 由来メッセージ本文の `runId:<UUID>`
+/// が会話レンダリングで `<uuid…>` へ置換されて渡っていた回帰を潰す。本文の識別子改変は相手の発言の
+/// 書き換え＝情報破壊。構造ラベル行の除去（`[… kind:N …]`）は不変。凍結 snapshot 経路（`strip_frozen_
+/// snapshot`）は本テスト対象外（snapshot 無し = delta のみで組む）。
+#[test]
+fn speech_body_identifiers_reach_llm_prompt_verbatim() {
+    let conn = opencrab_db::init_memory().unwrap();
+    let run_id = "e059e80f-960c-45e3-b69c-ff493b133afc"; // webhook 由来の runId（ダッシュ付き UUID）
+    let npub = format!("npub1{}", "q".repeat(58)); // 生 bech32
+    let event_hex = format!("7be6255f{}", "a".repeat(56)); // 64hex（ダッシュ無し）
+    // webhook 転記の本文（構造ラベル行付き）。ラベル行は落とすが本文の識別子は原文のまま。
+    let body =
+        format!("runId: {run_id}\n作者 {npub} / event {event_hex}\n[inbound kind:1 メンション]");
+    insert_speech(&conn, "webhook-user", &body);
+
+    let assembled = assemble_from_snapshot(&conn, SESSION, AGENT).unwrap();
+    let text = &assembled.text;
+
+    // 本文の識別子は原文のまま（マスクしない）。
+    assert!(text.contains(run_id), "本文の runId(UUID) が原文で残らない: {text}");
+    assert!(text.contains(&npub), "本文の npub が原文で残らない: {text}");
+    assert!(
+        text.contains(&event_hex),
+        "本文の 64hex が原文で残らない: {text}"
+    );
+    // 置換プレースホルダを一切出さない。
+    assert!(
+        !text.contains("<uuid…>") && !text.contains("<npub…>") && !text.contains("<id…>"),
+        "本文がマスクされている: {text}"
+    );
+    // 構造ラベル行は落とす（row294b・不変）。
+    assert!(
+        !text.contains("[inbound kind:"),
+        "構造ラベル行が残存: {text}"
+    );
+}
+
 /// 撤去の完全性。SQLite WAL の `wal_checkpoint` など別物は対象外。
 #[test]
 fn context_arrival_point_mechanism_is_gone() {
