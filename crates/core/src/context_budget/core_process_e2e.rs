@@ -754,7 +754,7 @@ fn speech_body_identifiers_reach_llm_prompt_verbatim() {
     let run_id = "e059e80f-960c-45e3-b69c-ff493b133afc"; // webhook 由来の runId（ダッシュ付き UUID）
     let npub = format!("npub1{}", "q".repeat(58)); // 生 bech32
     let event_hex = format!("7be6255f{}", "a".repeat(56)); // 64hex（ダッシュ無し）
-    // webhook 転記の本文（構造ラベル行付き）。ラベル行は落とすが本文の識別子は原文のまま。
+                                                           // webhook 転記の本文（構造ラベル行付き）。ラベル行は落とすが本文の識別子は原文のまま。
     let body =
         format!("runId: {run_id}\n作者 {npub} / event {event_hex}\n[inbound kind:1 メンション]");
     insert_speech(&conn, "webhook-user", &body);
@@ -763,7 +763,10 @@ fn speech_body_identifiers_reach_llm_prompt_verbatim() {
     let text = &assembled.text;
 
     // 本文の識別子は原文のまま（マスクしない）。
-    assert!(text.contains(run_id), "本文の runId(UUID) が原文で残らない: {text}");
+    assert!(
+        text.contains(run_id),
+        "本文の runId(UUID) が原文で残らない: {text}"
+    );
     assert!(text.contains(&npub), "本文の npub が原文で残らない: {text}");
     assert!(
         text.contains(&event_hex),
@@ -790,9 +793,13 @@ fn compaction_freeze_then_read_keeps_speech_body_identifiers_verbatim() {
     let conn = opencrab_db::init_memory().unwrap();
     let run_id = "e059e80f-960c-45e3-b69c-ff493b133afc"; // webhook 由来 runId（ダッシュ付き UUID）
     let npub = format!("npub1{}", "q".repeat(58)); // 生 bech32
-    // 高水位超えの履歴を積み、最後に識別子入りの発言（最新ユーザー＝RecentVerbatim で凍結後も残る）。
+                                                   // 高水位超えの履歴を積み、最後に識別子入りの発言（最新ユーザー＝RecentVerbatim で凍結後も残る）。
     seed_over_high(&conn);
-    insert_speech(&conn, "webhook-user", &format!("runId: {run_id} / 作者 {npub}"));
+    insert_speech(
+        &conn,
+        "webhook-user",
+        &format!("runId: {run_id} / 作者 {npub}"),
+    );
 
     // ターン終了 → compaction 発火 → snapshot 凍結（v2 マーカー付き）。
     let assembled = assemble_from_snapshot(&conn, SESSION, AGENT).unwrap();
@@ -806,7 +813,11 @@ fn compaction_freeze_then_read_keeps_speech_body_identifiers_verbatim() {
             &assembled.text,
         )
         .unwrap();
-    assert!(out.fired, "前提: compaction が発火する（after={})", out.after_tokens);
+    assert!(
+        out.fired,
+        "前提: compaction が発火する（after={})",
+        out.after_tokens
+    );
 
     // 凍結後の read: snapshot（v2）から本文原文が復元される（再マスクなし）。
     let reread = assemble_from_snapshot(&conn, SESSION, AGENT).unwrap();

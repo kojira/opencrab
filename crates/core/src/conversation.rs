@@ -4555,7 +4555,10 @@ mod render_refs_tests {
         let clean = format!("[u1][2026-08-30 06:06:45]e1:\n予約 {uuid} と {npub}");
         let blob = frozen_snapshot_with_marker(&clean);
         let out = restore_frozen_snapshot(&blob);
-        assert_eq!(out, clean, "v2 は本文原文のまま復元（マーカーも除去）: {out}");
+        assert_eq!(
+            out, clean,
+            "v2 は本文原文のまま復元（マーカーも除去）: {out}"
+        );
         assert!(out.contains(uuid) && out.contains(&npub), "{out}");
         assert!(
             !out.contains("<uuid…>") && !out.contains("<npub…>"),
@@ -4573,14 +4576,20 @@ mod render_refs_tests {
             strip_frozen_snapshot(blob),
             "legacy は従来スクラブと同一経路"
         );
-        assert!(out.contains("<uuid…>"), "legacy UUID がスクラブされない: {out}");
+        assert!(
+            out.contains("<uuid…>"),
+            "legacy UUID がスクラブされない: {out}"
+        );
     }
 
     // row339: 凍結（マーカー付与）→復元の往復で本文が保存される（自己治癒ループの冪等性）。
     #[test]
     fn frozen_snapshot_marker_roundtrip_is_lossless() {
         let clean = "[u1][2026-08-30 06:06:45]e1:\nrunId: e059e80f-960c-45e3-b69c-ff493b133afc";
-        assert_eq!(restore_frozen_snapshot(&frozen_snapshot_with_marker(clean)), clean);
+        assert_eq!(
+            restore_frozen_snapshot(&frozen_snapshot_with_marker(clean)),
+            clean
+        );
     }
 
     // row295b: subtask_completed は s 番号ヘッダ＋result 本文のみ（生 UUID/定型 field を出さない）。
