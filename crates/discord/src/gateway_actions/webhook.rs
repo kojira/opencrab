@@ -87,7 +87,10 @@ pub fn build_started_messages(meta: &LifecycleMeta, raw_task_text: &str) -> Vec<
         s.push_str("\ntask: ");
         s.push_str(raw_task_text);
     }
-    vec![build_message_with_optional_attachment(&s, "subtask-started")]
+    vec![build_message_with_optional_attachment(
+        &s,
+        "subtask-started",
+    )]
 }
 
 /// completed / failed / timed_out / aborted 用の簡潔なステータスメッセージ。
@@ -463,7 +466,13 @@ mod tests {
             long_started[0].content
         );
         // terminal: 既知ステータス + `_ => ℹ️` フォールバック（未知ステータス）。
-        for status in ["completed", "failed", "timed_out", "aborted", "unknown_status"] {
+        for status in [
+            "completed",
+            "failed",
+            "timed_out",
+            "aborted",
+            "unknown_status",
+        ] {
             let m = build_terminal_message(status, "r", "s", Some(1), "detail");
             assert!(
                 crate::gateway::content_is_subtask_lifecycle_payload(&m),
