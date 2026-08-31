@@ -775,7 +775,17 @@ fn enqueue_turn<R: AgentRuntime>(
                     .start_session_turn_count
                     .fetch_add(1, Ordering::SeqCst);
                 let activity_id = uuid::Uuid::new_v4().to_string();
-                emit_activity(&state, &instance_id, &binding_id, &activity_id, "started").await;
+                // R2(👀): started に発端 origin を載せる。gateway はこの時点で 👀 を付ける
+                // （record-only/held はここへ来ないので「読まれるまで付かない」が保たれる）。
+                emit_activity(
+                    &state,
+                    &instance_id,
+                    &binding_id,
+                    &activity_id,
+                    "started",
+                    Some(origin.as_str()),
+                )
+                .await;
                 let caller = match state.db.lock() {
                     Ok(conn) => resolve_caller(
                         &conn,
@@ -894,7 +904,15 @@ fn enqueue_turn<R: AgentRuntime>(
                     })
                     .await
                 };
-                emit_activity(&state, &instance_id, &binding_id, &activity_id, "ended").await;
+                emit_activity(
+                    &state,
+                    &instance_id,
+                    &binding_id,
+                    &activity_id,
+                    "ended",
+                    None,
+                )
+                .await;
                 match turn_res {
                     Ok(turn) => {
                         let effect = match turn {

@@ -86,12 +86,12 @@ fn supervise(
     overrides: HarnessOverrides,
 ) {
     // 受信ループ（1 本）: fixture か serenity。ack 済み binding の channel だけ said にする。
+    // 👀 は受信時ではなく say consumer 側（activity started）で付けるので、受信は transport/
+    // reactions を持たない（R2）。
     let on_line = build_on_line(
         client.clone(),
         cfg.agent_id.clone(),
         cfg.self_bot_id.clone(),
-        transport.clone(),
-        cfg.system_reactions.clone(),
     );
     tokio::spawn(async move {
         if let Some(fixture) = overrides.fake_events {
@@ -119,29 +119,13 @@ fn supervise(
     }
 }
 
-fn build_on_line(
-    client: Arc<InstanceClient>,
-    agent_id: String,
-    self_bot_id: String,
-    transport: Arc<dyn DiscordTransport>,
-    reactions: SystemReactions,
-) -> OnLine {
+fn build_on_line(client: Arc<InstanceClient>, agent_id: String, self_bot_id: String) -> OnLine {
     Arc::new(move |line: String| {
         let client = client.clone();
         let agent_id = agent_id.clone();
         let self_bot_id = self_bot_id.clone();
-        let transport = transport.clone();
-        let reactions = reactions.clone();
         tokio::spawn(async move {
-            handle_incoming(
-                &client,
-                &agent_id,
-                &self_bot_id,
-                &transport,
-                &reactions,
-                &line,
-            )
-            .await;
+            handle_incoming(&client, &agent_id, &self_bot_id, &line).await;
         });
     })
 }
@@ -168,14 +152,7 @@ async fn react_system(transport: &Arc<dyn DiscordTransport>, origin: &str, emoji
 }
 
 /// 受信 1 件を said へ。自分の投稿と非 ack channel は core へ送らない（§4.3・§5.1）。
-async fn handle_incoming(
-    client: &InstanceClient,
-    agent_id: &str,
-    self_bot_id: &str,
-    transport: &Arc<dyn DiscordTransport>,
-    reactions: &SystemReactions,
-    line: &str,
-) {
+async fn handle_incoming(client: &InstanceClient, agent_id: &str, self_bot_id: &str, line: &str) {
     let Some(msg) = parse_event_line(line) else {
         return;
     };
@@ -200,9 +177,10 @@ async fn handle_incoming(
         .await
     {
         Ok(SaidOutcome::Accepted { seq }) => {
+            // 👀 はここ（受理・推論前）では付けない。オーナー確定仕様: LLM がこのメッセージを
+            // ターン文脈に含めた（読んだ）時点で付ける。record-only は読まれるまで付けない。
+            // 実際の付与は say consumer が activity started(origin) を受けた時点で行う（R2）。
             tracing::info!(%address, seq, "said accepted");
-            // 👀: core が受理した = 処理対象として確定。発端メッセージへ受理サインを付ける。
-            react_system(transport, &mapped.origin, &reactions.accepted).await;
         }
         Ok(SaidOutcome::NotAdmitted) => tracing::info!(%address, "said not admitted"),
         Ok(SaidOutcome::Disconnected) => tracing::info!(%address, "said disconnected"),
@@ -251,10 +229,24 @@ fn spawn_say_consumer(
                         }
                     }
                 }
+                Some(LiveEvent::Activity { state, origin, .. }) => {
+                    // 👀: LLM がこの発端メッセージをターン文脈に含めた時点（started+origin）で付ける。
+                    // record-only/held は started へ来ないので「読まれるまで付かない」が保たれる（R2）。
+                    if state == "started" {
+                        if let Some(origin) = &origin {
+                            react_system(&transport, origin, &reactions.accepted).await;
+                        }
+                    }
+                }
+                Some(LiveEvent::TurnFailed { reply_origin }) => {
+                    // ❌: ターン失敗（エンジン/プロバイダ失敗）を発端メッセージへ可視化する（R3）。
+                    // エラー本文はチャンネルへ出さない（wire にも載っていない・#668）。
+                    react_system(&transport, &reply_origin, &reactions.failed).await;
+                }
                 Some(LiveEvent::Error { .. }) | None => {
                     tokio::time::sleep(RETRY).await;
                 }
-                // Activity / CompletedNoReply は投稿対象ではない。
+                // CompletedNoReply は投稿対象ではない（🤐 は #870 で別途配線）。
                 Some(_) => {}
             }
         }

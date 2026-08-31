@@ -16,7 +16,7 @@ use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 use super::wire::{
     err_frame, hello_frame_with_operations, invoke_ok_frame, ok_frame, parse_frame_bytes,
     read_frame, said_frame, say_reply_target, say_text, write_json, Activity, Attachment, Bind,
-    CoreMsg, FrameError, Invoke, Say, WireResponse,
+    CoreMsg, FrameError, Invoke, Say, TurnFailed, WireResponse,
 };
 
 /// gateway が invoke を実行する handler（DI 拡張 §5）。短縮参照(uN/eN/cN)は core が origin/pubkey へ
@@ -63,8 +63,16 @@ pub enum LiveEvent {
     Activity {
         activity_id: String,
         state: String,
+        /// R2(👀): started が読み取ったターン発端の origin（state="started" のときだけ Some）。
+        /// consumer（discord-gateway）は started+Some でこの origin へ 👀 を付ける。
+        origin: Option<String>,
     },
     CompletedNoReply,
+    /// R3(❌): ターン失敗（DeliveryEffect::Failed）。`reply_origin` は発端メッセージの origin。
+    /// consumer（discord-gateway）はこの origin へ ❌ を付ける。error 本文は運ばない。
+    TurnFailed {
+        reply_origin: String,
+    },
     Error {
         code: String,
         detail: Option<String>,
@@ -619,6 +627,10 @@ async fn handle_msg(client: &InstanceClient, msg: CoreMsg, generation: u64) -> b
             handle_activity(client, activity).await;
             false
         }
+        CoreMsg::TurnFailed(tf) => {
+            handle_turn_failed(client, tf).await;
+            false
+        }
         CoreMsg::Invoke(inv) => handle_invoke(client, inv, generation).await,
         CoreMsg::Response(resp) => {
             handle_response(client, resp, generation).await;
@@ -790,6 +802,7 @@ async fn handle_activity(client: &InstanceClient, activity: Activity) {
     let _ = q.try_push(LiveEvent::Activity {
         activity_id: activity.activity_id,
         state: activity.state.clone(),
+        origin: activity.origin.clone(),
     });
     if activity.state == "started" {
         inner
@@ -808,6 +821,27 @@ async fn handle_activity(client: &InstanceClient, activity: Activity) {
             }
         }
     }
+}
+
+/// R3(❌): core→gate のターン失敗通知を live queue へ載せる。binding_id→address を解決し、
+/// 未 ack binding は捨てる（handle_activity と同じ経路）。id を持たない通知なので応答は返さない。
+async fn handle_turn_failed(client: &InstanceClient, tf: TurnFailed) {
+    let mut inner = client.inner.lock().await;
+    if inner.closed {
+        return;
+    }
+    let address = inner
+        .acknowledged
+        .iter()
+        .find(|(_, bid)| *bid == &tf.binding_id)
+        .map(|(a, _)| a.clone());
+    let Some(address) = address else {
+        return;
+    };
+    let q = inner.live.entry(address).or_insert_with(LiveQueue::new);
+    let _ = q.try_push(LiveEvent::TurnFailed {
+        reply_origin: tf.origin,
+    });
 }
 
 async fn handle_response(client: &InstanceClient, resp: WireResponse, generation: u64) {

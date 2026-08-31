@@ -20,8 +20,8 @@ use crate::inbound::process_said;
 use crate::operation_calls::terminalize_call;
 use crate::operations::{declaration_digest, validate_operations, GatewayOperationDeclaration};
 use crate::protocol::{
-    activity_frame, bind_frame, err_frame, ok_frame, ok_said_frame, read_frame, write_json,
-    FrameError, InboundMsg, WireResponse,
+    activity_frame, bind_frame, err_frame, ok_frame, ok_said_frame, read_frame, turn_failed_frame,
+    write_json, FrameError, InboundMsg, WireResponse,
 };
 use crate::registry::{ExtgateState, LiveEntry, OperationOutcome, Pending};
 use crate::ResolveCallerFn;
@@ -1146,6 +1146,8 @@ pub async fn emit_activity(
     binding_id: &str,
     activity_id: &str,
     activity_state: &str,
+    // R2(👀): started が読み取るターン発端の origin。started のときだけ Some を渡す（ended は None）。
+    origin: Option<&str>,
 ) {
     let writer = {
         let Ok(reg) = state.lock_registry() else {
@@ -1161,9 +1163,32 @@ pub async fn emit_activity(
     };
     let _ = write_json(
         &writer,
-        &activity_frame(binding_id, activity_id, activity_state),
+        &activity_frame(binding_id, activity_id, activity_state, origin),
     )
     .await;
+}
+
+/// R3(❌): ターン失敗（DeliveryEffect::Failed）を発端 origin つきで gateway へ通知する。
+/// emit_activity と同じ writer 解決経路（未 ack binding は write 0）。応答は返らない。
+pub async fn emit_turn_failed(
+    state: &Arc<ExtgateState>,
+    instance_id: &str,
+    binding_id: &str,
+    origin: &str,
+) {
+    let writer = {
+        let Ok(reg) = state.lock_registry() else {
+            return;
+        };
+        let Some(live) = reg.get(instance_id) else {
+            return;
+        };
+        if !live.acknowledged.contains(binding_id) {
+            return;
+        }
+        live.writer.clone()
+    };
+    let _ = write_json(&writer, &turn_failed_frame(binding_id, origin)).await;
 }
 
 pub fn recover_now(conn: &mut Connection) -> Result<(), GateError> {

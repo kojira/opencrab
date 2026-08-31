@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::error::{ErrorCode, GateError};
 use crate::ids::now_nanos;
+use crate::listen::emit_turn_failed;
 use crate::protocol::{say_frame, write_json};
 use crate::registry::{ExtgateState, Pending};
 
@@ -76,6 +77,12 @@ pub async fn apply_delivery_effect<R: AgentRuntime>(
         DeliveryEffect::Empty | DeliveryEffect::Failed { .. } => {
             if let DeliveryEffect::Failed { error } = &effect {
                 tracing::error!(error = %error, "session turn failed");
+                // R3(❌): ターン失敗を発端 origin つきで gateway へ通知する（gateway が ❌ を付ける）。
+                // error 本文は wire に載せない（多エージェント相互反応ループ防止・#668）。単一メンション
+                // のみ reply_target=Some（bundle/曖昧は None＝付ける先が無いので通知しない）。
+                if let Some(origin) = reply_target {
+                    emit_turn_failed(state, instance_id, binding_id, origin).await;
+                }
             }
         }
     }

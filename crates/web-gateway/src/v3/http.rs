@@ -263,14 +263,18 @@ fn live_to_event(ev: &LiveEvent) -> Option<Event> {
                 .event("message")
                 .data(json!({"text": text}).to_string()),
         ),
-        LiveEvent::Activity { activity_id, state } => Some(
-            Event::default()
-                .event("activity")
-                .data(json!({"activity_id": activity_id, "state": state}).to_string()),
-        ),
+        LiveEvent::Activity {
+            activity_id,
+            state,
+            origin,
+        } => Some(Event::default().event("activity").data(
+            json!({"activity_id": activity_id, "state": state, "origin": origin}).to_string(),
+        )),
         LiveEvent::CompletedNoReply => {
             Some(Event::default().event("completed_no_reply").data("{}"))
         }
+        // R3: web SSE は失敗を通知イベントとして流す（reply_origin は Nostr 固有の e-tag 用途）。
+        LiveEvent::TurnFailed { .. } => Some(Event::default().event("turn_failed").data("{}")),
         LiveEvent::Error { code, detail } => Some(
             Event::default()
                 .event("gate_error")
