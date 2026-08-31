@@ -162,6 +162,8 @@ path = "data/opencrab.db"
 listen_socket = "/tmp/opencrab-extgate.sock"
 # Nostr inbound の段階移行（DESIGN-NOSTRGATE §6）。legacy | v3_shadow | v3。既定=legacy。
 nostr_ingress = "legacy"
+# Discord inbound の段階移行（DESIGN-DISCORD-GATE §8.1）。legacy | v3_shadow | v3。既定=legacy。
+discord_ingress = "legacy"
 
 # ===== ツール設定 =====
 [tools]

@@ -67,6 +67,10 @@ pub struct GateConfig {
     /// DESIGN-NOSTRGATE §6: `legacy` | `v3_shadow` | `v3`。欠落・空は `legacy`。
     #[serde(default)]
     pub nostr_ingress: String,
+    /// DESIGN-DISCORD-GATE §8.1: `legacy` | `v3_shadow` | `v3`。欠落・空は `legacy`。
+    /// `v3_shadow`/`v3` のとき起動時に discord-gateway プロセスを点火する（`discord_provision`）。
+    #[serde(default)]
+    pub discord_ingress: String,
 }
 
 /// 古い `llm_logs` を zip へ書き出して DB から外す設定（#337）。
