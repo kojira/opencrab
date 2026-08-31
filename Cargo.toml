@@ -21,7 +21,6 @@ members = [
     "crates/engine",
     "crates/social-runtime",
     "crates/plugd",
-    "crates/app",
     "crates/nostr-gate",
     "crates/extgate",
 ]
