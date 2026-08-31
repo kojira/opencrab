@@ -49,6 +49,10 @@ pub trait DiscordTransport: Send + Sync {
     async fn get_message(&self, channel_id: &str, message_id: &str) -> TransportOutcome;
     /// user の生 JSON 取得（resolve uN・読み取り）。
     async fn get_user(&self, user_id: &str) -> TransportOutcome;
+    /// typing インジケータを 1 回打つ（設計 §5.4）。Discord の typing は約 10 秒で失効するため、
+    /// keepalive が周期的に打ち直す。best-effort——失敗は turn/say/operation を壊さない（呼び側が
+    /// 三結果を握りつぶす）。dry-run では kind="typing" として観測できる。
+    async fn broadcast_typing(&self, channel_id: &str) -> TransportOutcome;
 }
 
 /// QC 用 dry-run transport。REST を叩かず種別・対象・本文を INFO ログに残し Ok を返す。
@@ -123,6 +127,9 @@ impl DiscordTransport for DryRunTransport {
     }
     async fn get_user(&self, user_id: &str) -> TransportOutcome {
         TransportOutcome::Ok(json!({"dry_run": true, "kind": "resolve", "user_id": user_id}))
+    }
+    async fn broadcast_typing(&self, channel_id: &str) -> TransportOutcome {
+        Self::log("typing", channel_id, "", "", "")
     }
 }
 
@@ -255,6 +262,18 @@ impl DiscordTransport for SerenityTransport {
             Err(_) => TransportOutcome::Rejected,
         }
     }
+
+    async fn broadcast_typing(&self, channel_id: &str) -> TransportOutcome {
+        let Some(ch) = channel(channel_id) else {
+            return TransportOutcome::Rejected;
+        };
+        // typing は書き込み系（POST /channels/{id}/typing）。失効前提の best-effort なので
+        // 三結果へ写しつつ、呼び側（keepalive）は結果を握りつぶして打ち直す。
+        match ch.broadcast_typing(&self.http).await {
+            Ok(()) => TransportOutcome::Ok(json!({"typing": true})),
+            Err(e) => classify_write_err(&e),
+        }
+    }
 }
 
 /// テスト用の記録 transport。say/reply の**呼び出し順・本文**を記録し、message_id を連番で返す。
@@ -262,6 +281,7 @@ impl DiscordTransport for SerenityTransport {
 #[cfg(test)]
 pub(crate) mod testfake {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     #[derive(Default)]
@@ -272,6 +292,8 @@ pub(crate) mod testfake {
         pub fail_at: Option<usize>,
         /// 失敗時に Rejected でなく Indeterminate を返す。
         pub indeterminate: bool,
+        /// broadcast_typing の呼び出し回数（keepalive の周期を検証するため say 列とは別に数える）。
+        pub typing_count: AtomicUsize,
     }
 
     impl RecordingTransport {
@@ -306,6 +328,10 @@ pub(crate) mod testfake {
                 .map(|(k, _)| k.clone())
                 .collect()
         }
+
+        pub(crate) fn typing_count(&self) -> usize {
+            self.typing_count.load(Ordering::SeqCst)
+        }
     }
 
     #[async_trait]
@@ -333,6 +359,10 @@ pub(crate) mod testfake {
         async fn get_user(&self, _u: &str) -> TransportOutcome {
             TransportOutcome::Rejected
         }
+        async fn broadcast_typing(&self, _channel_id: &str) -> TransportOutcome {
+            self.typing_count.fetch_add(1, Ordering::SeqCst);
+            TransportOutcome::Ok(json!({"typing": true}))
+        }
     }
 }
 
@@ -357,6 +387,11 @@ mod tests {
         ));
         assert!(matches!(
             t.add_system_reaction("100", "200", "👀").await,
+            TransportOutcome::Ok(_)
+        ));
+        // typing も dry-run で Ok（kind="typing" で観測できる。§5.4）。
+        assert!(matches!(
+            t.broadcast_typing("100").await,
             TransportOutcome::Ok(_)
         ));
     }

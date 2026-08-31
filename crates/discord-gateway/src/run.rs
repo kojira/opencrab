@@ -244,6 +244,10 @@ fn spawn_say_consumer(
     tokio::spawn(async move {
         // address → channel snowflake（say はこの channel への通常投稿）。
         let channel = parse_address(&agent_id, &address).map(|(_, ch)| ch);
+        // ターン進行中の typing keepalive（設計 §5.4）。activity started で起こし、ended で止める。
+        // 別タスクで打つのでこのループはブロックしない。ガードはこのループ寿命に束ねて保持し、
+        // consumer 終了時（＝プロセス終了時）にも drop されて止まる。
+        let mut typing: Option<crate::typing::TypingKeepalive> = None;
         loop {
             match client.next_live(&address).await {
                 Some(LiveEvent::Message { text, reply_origin }) => {
@@ -292,11 +296,25 @@ fn spawn_say_consumer(
                         react_system(&transport, origin, &reactions.no_reply).await;
                     }
                 }
+                Some(LiveEvent::Activity { state, .. }) => {
+                    // core の platform-neutral activity を typing 開始/keepalive/停止へ機械的に写す
+                    // （設計 §5.4）。started で keepalive を起こし、ended（裁定A で say 配送後に届く）
+                    // で止める。channel が無い address（say 不可）では typing も出さない。best-effort。
+                    if let Some(channel) = &channel {
+                        typing = crate::typing::apply_activity_state(
+                            typing,
+                            &state,
+                            &transport,
+                            channel,
+                            crate::typing::TYPING_REFRESH_INTERVAL,
+                        );
+                    }
+                }
                 Some(LiveEvent::Error { .. }) | None => {
+                    // ターンが壊れた/接続が切れた。進行中の typing を止める（打ちっぱなしにしない）。
+                    typing = None;
                     tokio::time::sleep(RETRY).await;
                 }
-                // Activity は投稿対象ではない。
-                Some(_) => {}
             }
         }
     })
