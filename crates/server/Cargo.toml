@@ -79,6 +79,9 @@ zeroize = "1"
 # QC ハーネス E2E（qc_harness_e2e）: 実 nostr-gateway（spawn_instance）と gate-client を
 # 実 serve_uds 経由でつなぐオフライン E2E に使う。どちらも server へ依存しない（循環しない）。
 opencrab-nostr-gateway = { workspace = true }
+# Discord gateway フェーズ1 のオフライン E2E（discord_qc_harness_e2e）: 実 discord-gateway
+# （spawn_instance・fake_events + dry_run）と gate-client を実 serve_uds でつなぐ。
+opencrab-discord-gateway = { workspace = true }
 opencrab-gate-client = { workspace = true }
 
 [lints]
