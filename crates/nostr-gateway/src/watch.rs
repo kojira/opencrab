@@ -183,6 +183,8 @@ mod tests {
 
     #[tokio::test]
     async fn child_receives_env_secret_not_argv() {
+        // 子 spawn は environ を読むので env 書換テストと直列化する（#868）。
+        let _env = crate::ENV_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fake-nostaro");
         std::fs::write(
