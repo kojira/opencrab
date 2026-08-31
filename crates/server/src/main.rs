@@ -360,7 +360,21 @@ async fn main() -> anyhow::Result<()> {
         // `gateway_actions_for`）もここから引く。`AppState` の名指しフィールドは無い。
         // 登録簿は `state` の clone 同士で同じ Arc を共有するので、ここで入れた分は
         // 既に clone 済みの state からも見える（#40 の二重処理防止がこれに依存する）。
-        state.gateways.register(manager.clone());
+        //
+        // DESIGN-DISCORD-GATE §8.1: 併存期は legacy manager の liveness に **V3 gateway process の
+        // liveness を OR** して登録する。共有 message_loop の `served_by_dedicated_gateway`
+        // （= 登録簿の is_running）が、legacy でも V3 でもどちらか稼働中なら対象 agent を除外し、
+        // 同一 channel での新旧二重応答を防ぐ。V3 liveness は core の live registry を正とする
+        // （DB enabled ではない・#40）。probe/DB ロック失敗は false へ倒れ、共有側が処理を続ける。
+        let extgate_for_v3 = extgate.clone();
+        let v3_aware = opencrab_server::dedicated_gateway::V3AwareGateway::new(
+            manager.clone(),
+            std::sync::Arc::new(move |agent_id: &str| {
+                extgate_for_v3
+                    .agent_has_live_gateway(agent_id, opencrab_actions::gateway_kinds::DISCORD)
+            }),
+        );
+        state.gateways.register(v3_aware);
 
         let discord_cfg = &cfg.gateway.discord;
 
