@@ -2079,7 +2079,10 @@ mod detector_false_positive_847_tests {
         let rendered = format_single_log_with_echo(&tool_call, Some(&completed), Some(&refs));
 
         // 構造は clean（call_ref は c1・生 call_id は出ない）、引数本文は verbatim 保持で生 64hex が残る。
-        assert!(rendered.contains("[c1]"), "call_ref が c1 でない: {rendered}");
+        assert!(
+            rendered.contains("[c1]"),
+            "call_ref が c1 でない: {rendered}"
+        );
         assert!(
             rendered.contains(&event_hex),
             "preserve 引数本文が verbatim 保持されていない: {rendered}"
