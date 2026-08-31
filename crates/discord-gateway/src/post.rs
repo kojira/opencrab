@@ -9,8 +9,10 @@ use crate::transport::{DiscordTransport, TransportOutcome};
 /// say の配送結果（観測性用）。
 #[derive(Debug, PartialEq, Eq)]
 pub enum SayDelivery {
-    /// channel へ通常投稿した（dry-run 含む）。
-    Posted,
+    /// channel へ通常投稿した（dry-run 含む）。`message_id` は投稿できた**自分のメッセージ**の
+    /// snowflake（transport の create_message 応答から得る）。🏁（完了サイン）はこの id へ付ける
+    /// ——発端ではなく自分の発言に付けるのが正（owner 裁定 row 345）。取得できなければ None。
+    Posted { message_id: Option<String> },
     /// 投稿失敗（確定拒否・不明どちらも会話配送の失敗として観測）。
     Failed(String),
 }
@@ -22,7 +24,15 @@ pub async fn deliver_say(
     text: &str,
 ) -> SayDelivery {
     match transport.create_message(channel_id, text).await {
-        TransportOutcome::Ok(_) => SayDelivery::Posted,
+        TransportOutcome::Ok(v) => {
+            // create_message は Ok に投稿できたメッセージ id を載せる（production=serenity 実 id・
+            // dry-run=合成 id）。🏁 の付け先（自分の投稿）に使う。
+            let message_id = v
+                .get("message_id")
+                .and_then(|m| m.as_str())
+                .map(str::to_string);
+            SayDelivery::Posted { message_id }
+        }
         TransportOutcome::Rejected => SayDelivery::Failed("rejected".into()),
         TransportOutcome::Indeterminate => SayDelivery::Failed("indeterminate".into()),
     }
@@ -34,8 +44,17 @@ mod tests {
     use crate::transport::DryRunTransport;
 
     #[tokio::test]
-    async fn dry_run_say_is_posted() {
+    async fn dry_run_say_is_posted_with_own_message_id() {
         let t: Arc<dyn DiscordTransport> = Arc::new(DryRunTransport);
-        assert_eq!(deliver_say(&t, "100", "hello").await, SayDelivery::Posted);
+        // dry-run でも自分の投稿 id を持つ（🏁 の付け先を QC が観測できるようにする）。
+        match deliver_say(&t, "100", "hello").await {
+            SayDelivery::Posted { message_id } => {
+                assert!(
+                    message_id.is_some(),
+                    "dry-run say は自分の message id を返す"
+                );
+            }
+            other => panic!("expected Posted, got {other:?}"),
+        }
     }
 }
