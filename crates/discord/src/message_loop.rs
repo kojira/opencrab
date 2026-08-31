@@ -36,6 +36,18 @@ use opencrab_gateway::IncomingMessage;
 
 use crate::AgentRunner;
 
+/// V3（専用）Discord gateway process の liveness を返す probe（`agent_id` → 受信中か）。
+///
+/// DESIGN-DISCORD-GATE §8.1 の二重受信防止 lever の per-agent legacy ループ側。実体は
+/// server 層で `ExtgateState::agent_has_live_gateway(agent, "discord")` を包む closure で、
+/// 判定は core の in-memory live registry を正とする（DB の enabled ではない）。
+/// probe/ロック失敗は **false**（＝退かない）へ倒れ、V3 が死んでいる/不明なら legacy が
+/// 処理を続けて外形を減らさない（#40 の `served_by_dedicated_gateway` と同じ fail-open 方向）。
+///
+/// `crate::server::dedicated_gateway::V3LivenessProbe`（V3AwareGateway 側）と同一の
+/// 具象型（型エイリアスは透過）なので、server 層は 1 本の closure を両者へ渡せる。
+pub type V3LivenessProbe = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 /// 同一(channel, sender)のメッセージをまとめるまでの待機時間。
 const DEBOUNCE_DELAY: Duration = Duration::from_secs(2);
 
@@ -264,6 +276,12 @@ pub async fn run_discord_loop<T: AgentRunner>(
     // フォールバックとして処理を続ける。per-agent ゲートウェイ自身のループ
     // （manager.rs）は必ず false（true にすると自分自身を skip してしまう）。
     skip_agents_with_dedicated_gateway: bool,
+    // per-agent（legacy）ループなら Some: 同じ agent を V3 gateway process が**実際に受信中**
+    // のときメッセージ処理をスキップする（DESIGN-DISCORD-GATE §8.1 — 二重受信防止）。判定は
+    // core の live registry 由来の probe（`V3LivenessProbe`）で、DB の enabled ではない。
+    // 共有（TOML）ループは `served_by_dedicated_gateway`（V3AwareGateway が V3 liveness を OR）で
+    // 既に V3 を除外するので、こちらは **None**（この lever は per-agent ループ専用・二重ゲート回避）。
+    v3_liveness: Option<V3LivenessProbe>,
     // VC 対話が有効なとき Some。エージェント返信を対応する VC で読み上げる。
     voice: Option<std::sync::Arc<crate::voice_session::VoiceSessionManager>>,
     // auto-dispatch した background subtask を載せる共有 registry（RFC #152 S3a / P0）。
@@ -698,6 +716,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         owner_discord_id.clone(),
                         session_locks.clone(),
                         skip_agents_with_dedicated_gateway,
+                        v3_liveness.clone(),
                         voice.clone(),
                         event_tx.clone(),
                         subtask_registry.clone(),
@@ -727,6 +746,7 @@ async fn process_incoming_message<T: AgentRunner>(
     owner_discord_id: String,
     session_locks: Arc<SessionLocks>,
     skip_agents_with_dedicated_gateway: bool,
+    v3_liveness: Option<V3LivenessProbe>,
     voice: Option<std::sync::Arc<crate::voice_session::VoiceSessionManager>>,
     event_tx: mpsc::UnboundedSender<LoopEvent>,
     subtask_registry: opencrab_actions::subtask::SubtaskRegistry,
@@ -770,6 +790,37 @@ async fn process_incoming_message<T: AgentRunner>(
                     debug!(
                         agent = %agent_id,
                         "Skipping agent on shared gateway: dedicated per-agent gateway is running"
+                    );
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
+        if filtered.is_empty() {
+            return;
+        }
+        filtered
+    } else {
+        agent_ids
+    };
+
+    // DESIGN-DISCORD-GATE §8.1: per-agent（legacy）ループは、同じ agent を V3 gateway process が
+    // **実際に受信中**なら退く（二重受信防止）。これが無いと legacy 車線が同一メッセージを
+    // 二重処理し、V3 が正しい返信を出す横で 👀→NO_REPLY→🤐 を付ける（本バグの症状）。
+    // 判定は probe（core の live registry 由来）で行い、DB の enabled ではない。probe が false
+    // （V3 死亡/未接続/ロック失敗）なら退かず legacy が処理を続けて外形を減らさない。
+    // 共有ループは `v3_liveness=None` で、上の `served_by_dedicated_gateway` が V3 を OR 済み
+    // （二重ゲート回避）。ここで agent 単位に絞るのは、#40 と同じく後段 core inbound の
+    // trusted_users にスキップ対象を混ぜないため。
+    let agent_ids: Vec<String> = if let Some(ref probe) = v3_liveness {
+        let filtered: Vec<String> = agent_ids
+            .into_iter()
+            .filter(|agent_id| {
+                if probe(agent_id) {
+                    debug!(
+                        agent = %agent_id,
+                        "Skipping agent on legacy per-agent gateway: live V3 gateway is receiving"
                     );
                     false
                 } else {

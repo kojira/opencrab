@@ -388,11 +388,25 @@ async fn main() -> anyhow::Result<()> {
         // 稼働中か」を参照できるよう、共有ゲートウェイへ渡す AppState clone より
         // **前に**生成して配線する。実際の復元は共有ゲートウェイ起動後に行う）。
         //
+        // DESIGN-DISCORD-GATE §8.1: V3 gateway process の liveness probe。core の live registry
+        // （`ExtgateState::agent_has_live_gateway`）を正とし、DB enabled ではない。probe/DB ロック
+        // 失敗は false（＝退かない）へ倒れる。この 1 本を (1) legacy per-agent ループの二重受信ゲート
+        // （manager が per-message で見る）と (2) 共有 message_loop 側の V3AwareGateway（is_running に
+        // OR）の**両方**へ渡す。両型は同一の具象型（`Arc<dyn Fn(&str)->bool + Send + Sync>`）。
+        let extgate_for_v3 = extgate.clone();
+        let v3_liveness: std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync> =
+            std::sync::Arc::new(move |agent_id: &str| {
+                extgate_for_v3
+                    .agent_has_live_gateway(agent_id, opencrab_actions::gateway_kinds::DISCORD)
+            });
+
         // #603: 時刻発火の受け口レジストリは `new` の**必須引数**。忘れるとコンパイルエラーに
         // なる（#602 は Option + builder の呼び忘れで Discord の発火が全 skip し本番が止まった）。
+        // v3_liveness も必須引数（DESIGN-DISCORD-GATE §8.1・二重受信防止・配線し忘れ＝本バグ再発）。
         let manager = Arc::new(opencrab_discord::DiscordGatewayManager::new(
             state.clone(),
             state.timed_fire_router.clone(),
+            v3_liveness.clone(),
         ));
         // 上位から見える唯一の入口はこの登録簿（#191 段階2 PR3・PR4）。共通操作
         // （起動 / 停止 / 生存確認）も transport 固有の操作（ツール実行の実体 =
@@ -405,13 +419,10 @@ async fn main() -> anyhow::Result<()> {
         // （= 登録簿の is_running）が、legacy でも V3 でもどちらか稼働中なら対象 agent を除外し、
         // 同一 channel での新旧二重応答を防ぐ。V3 liveness は core の live registry を正とする
         // （DB enabled ではない・#40）。probe/DB ロック失敗は false へ倒れ、共有側が処理を続ける。
-        let extgate_for_v3 = extgate.clone();
+        // 上で組んだ `v3_liveness` を使い回す（per-agent ゲートと同一 closure）。
         let v3_aware = opencrab_server::dedicated_gateway::V3AwareGateway::new(
             manager.clone(),
-            std::sync::Arc::new(move |agent_id: &str| {
-                extgate_for_v3
-                    .agent_has_live_gateway(agent_id, opencrab_actions::gateway_kinds::DISCORD)
-            }),
+            v3_liveness.clone(),
         );
         state.gateways.register(v3_aware);
 
@@ -578,6 +589,10 @@ async fn main() -> anyhow::Result<()> {
                         // 共有（TOML）ゲートウェイ: ランタイムに per-agent 設定が
                         // enable されたエージェントはメッセージ処理時にスキップ（#40）。
                         true,
+                        // V3 二重受信ゲートは per-agent ループ専用。共有側は上の
+                        // `served_by_dedicated_gateway`（V3AwareGateway が V3 liveness を OR）で
+                        // 既に V3 稼働 agent を除外済みなので None（二重ゲート回避・DESIGN-DISCORD-GATE §8.1）。
+                        None,
                         voice_manager,
                         subtask_registry_for_loop,
                     )
