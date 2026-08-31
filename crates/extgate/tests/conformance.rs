@@ -2431,6 +2431,63 @@ async fn said_during_turn_is_recorded_and_runs_after() {
     );
 }
 
+/// row318 / §9A 汎化の回帰固定: 非 nostr（ここでは discord）kind の said も session log の
+/// metadata に `external_origin` を記録し、汎用 `ConversationRefs` が platform 非依存に e番号 /
+/// u番号 を採番できる。旧実装は `record_inbound` が `kind_id == "nostr"` でだけ external_origin を
+/// 書いており、Discord 等に e番号が一切付かなかった（reply/reaction が e番号を解決できない）。
+/// その汎用機構への platform 名漏れ（DI 違反）を剥がした変更を固定する。
+#[tokio::test(start_paused = true)]
+async fn non_nostr_said_records_external_origin_for_e_numbering() {
+    let h = Harness::start().await;
+    let instance_id = uuid();
+    let binding_id = uuid();
+    // put_instance は kind_id = "discord"（= 非 nostr）で登録する。
+    put_instance(&h, &instance_id, true).await;
+    put_binding(&h, &binding_id, &instance_id, "chan-di").await;
+    let session_id = format!("extgate-{binding_id}");
+
+    let client = InstanceClient::connect(&h.sock, instance_id, 1, "u1".into(), config_digest())
+        .await
+        .expect("connect");
+    wait_client_bound(&client, "chan-di", &binding_id).await;
+
+    let origin = "discord:message:v1:100:200";
+    let out = client
+        .post_said("chan-di", origin, "こんにちは", &[])
+        .await
+        .unwrap_or_else(|e| panic!("said refuse {e:?}"));
+    assert!(matches!(out, SaidOutcome::Accepted { seq: 1 }), "{out:?}");
+
+    // 1) discord kind でも session log の metadata に external_origin が入る（回帰固定）。
+    let logs = {
+        let conn = h.state.db.lock().unwrap();
+        opencrab_db::queries::list_session_logs_by_session(&conn, &session_id).unwrap()
+    };
+    let speech = logs
+        .iter()
+        .find(|l| l.log_type == "speech" && l.speaker_id.as_deref() == Some("u1"))
+        .expect("inbound speech log");
+    let meta: serde_json::Value =
+        serde_json::from_str(speech.metadata_json.as_deref().expect("metadata_json")).unwrap();
+    assert_eq!(
+        meta["external_origin"], origin,
+        "非 nostr kind で external_origin が未記録: {meta}"
+    );
+
+    // 2) 汎用採番（core conversation.rs）が platform 非依存に e/u 番号を割り当てる（§9A）。
+    let refs = opencrab_core::conversation::ConversationRefs::build(&logs, "the-bot-agent");
+    assert_eq!(
+        refs.resolve_short_ref("e1").as_deref(),
+        Some(origin),
+        "e1 が origin へ解決できない（e番号未採番）"
+    );
+    assert_eq!(
+        refs.resolve_short_ref("u1").as_deref(),
+        Some("u1"),
+        "u1 が話者へ解決できない"
+    );
+}
+
 /// キュー満杯は seq=null で拒否し、履歴に残さない。
 #[tokio::test]
 async fn session_queue_overflow_is_seq_null_and_counted() {
