@@ -46,8 +46,19 @@ fn looks_like_token(s: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// env（`TOKEN_ENV`）を書き換えるテスト同士を直列化する。両テストとも set_var→
+    /// take_bot_token（remove_var）→assert という writer で、並列に走ると environ が
+    /// 競合して稀に取り違える（#868 と同型）。poison はテスト panic 耐性のため無視する
+    /// （`crates/server/src/config.rs` の `env_lock` と同じ流儀）。
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn take_removes_from_process_env() {
+        let _env = env_lock();
         std::env::set_var(TOKEN_ENV, "MT2.abcdef.ghijkl");
         let got = take_bot_token();
         assert_eq!(got.as_deref(), Some("MT2.abcdef.ghijkl"));
@@ -56,6 +67,7 @@ mod tests {
 
     #[test]
     fn empty_is_none_and_still_removed() {
+        let _env = env_lock();
         std::env::set_var(TOKEN_ENV, "");
         assert_eq!(take_bot_token(), None);
         assert!(std::env::var(TOKEN_ENV).is_err());

@@ -217,6 +217,8 @@ mod tests {
 
     #[tokio::test]
     async fn no_target_say_is_published_as_standalone_post() {
+        // 子 spawn は environ を読むので env 書換テストと直列化する（#868）。
+        let _env = crate::ENV_LOCK.lock().await;
         // reply_origin=None（bundle/曖昧）は drop せず standalone post で publish（row292/#843）。
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fake-nostaro");
@@ -265,6 +267,8 @@ mod tests {
 
     #[tokio::test]
     async fn say_invokes_nostaro_post_with_env_secret() {
+        // 子 spawn は environ を読むので env 書換テストと直列化する（#868 の flaky 本体）。
+        let _env = crate::ENV_LOCK.lock().await;
         // 実 relay 不要のモック nostaro。argv と env を控えて 0 exit する。
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fake-nostaro");
@@ -314,6 +318,8 @@ mod tests {
 
     #[tokio::test]
     async fn nonzero_exit_is_failed_and_redacted() {
+        // 子 spawn は environ を読むので env 書換テストと直列化する（#868）。
+        let _env = crate::ENV_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fake-nostaro-fail");
         std::fs::write(

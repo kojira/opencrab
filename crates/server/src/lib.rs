@@ -18,6 +18,8 @@ pub mod config;
 pub mod dedicated_gateway;
 #[cfg(feature = "discord")]
 pub mod discord_provision;
+#[cfg(feature = "discord")]
+pub mod discord_supervisor;
 pub mod heartbeat_fire;
 pub mod heartbeat_instructions;
 pub mod hot_reload;

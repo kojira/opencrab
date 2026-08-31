@@ -15,6 +15,8 @@ mod tests {
 
     #[test]
     fn take_removes_from_process_env() {
+        // env を書き換えるので、子 spawn テスト（post/watch）と直列化する（#868）。
+        let _env = crate::ENV_LOCK.blocking_lock();
         std::env::set_var(SECRET_ENV, "nsec1testsecret");
         let got = take_watch_secret();
         assert_eq!(got.as_deref(), Some("nsec1testsecret"));
