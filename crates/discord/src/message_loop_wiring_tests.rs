@@ -461,6 +461,7 @@ async fn inbound_run_carries_the_shared_registry_so_cancel_can_reach_it() {
         "owner-1".to_string(),
         session_locks,
         false,
+        None, // v3_liveness: このテストは V3 二重受信ゲートの対象外
         None,
         event_tx,
         registry.clone(),
@@ -484,6 +485,102 @@ async fn inbound_run_carries_the_shared_registry_so_cancel_can_reach_it() {
         has_sink,
         "inbound の run に完了 sink が無い（掘削の完了が再注入されない）"
     );
+}
+
+/// **per-agent（legacy）ループは、V3 gateway process が同じ agent を受信中なら退く**
+/// （DESIGN-DISCORD-GATE §8.1 の二重受信防止ゲート）。
+///
+/// これが無いと legacy 車線が V3 と並走して同一メッセージを二重処理する（実バグの症状:
+/// V3 が正しい返信を出す横で legacy が 👀→NO_REPLY→🤐 を付ける）。`served_by_dedicated_gateway`
+/// （legacy manager 自身の生死を OR）は per-agent ループ内では常に true になり使えないので、
+/// V3 liveness だけを見る専用 probe（`v3_liveness`）で判定する。probe が false（V3 死亡/未接続/
+/// ロック失敗）なら退かず処理を続ける＝外形を減らさない（fail-open）。ここは両方向を固定する。
+#[tokio::test]
+async fn per_agent_loop_defers_to_live_v3_gateway() {
+    // (1) V3 稼働中（probe=true）→ 退く: run も 受信記録 も起きない（V3 車線が処理する）。
+    {
+        let (state, gateway, gateway_actions) = make_deps();
+        let (event_tx, _event_rx) = create_event_channel();
+        let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
+        let session_locks = Arc::new(SessionLocks::new());
+        let incoming = IncomingMessage::new(
+            MessageSource::Discord {
+                guild_id: "111".to_string(),
+                channel_id: "222".to_string(),
+            },
+            MessageContent::Text("sleep 30して".to_string()),
+            Sender::new("user-1", "だれか"),
+        );
+        let v3_live: crate::message_loop::V3LivenessProbe = Arc::new(|_agent: &str| true);
+        process_incoming_message(
+            incoming,
+            gateway,
+            state.clone(),
+            vec!["crab".to_string()],
+            gateway_actions,
+            "owner-1".to_string(),
+            session_locks,
+            false,
+            Some(v3_live),
+            None, // voice
+            event_tx,
+            registry,
+            false,
+            true,
+            None,
+        )
+        .await;
+        // ゲートは accept_inbound より手前で早期 return するので、run も spawn されない。
+        assert!(
+            state.runs.lock().unwrap().is_empty(),
+            "V3 稼働中なのに legacy が run した（二重処理）"
+        );
+        assert!(
+            state.inbound_records.lock().unwrap().is_empty(),
+            "V3 稼働中なのに legacy が受信記録した（二重処理・二重記録）"
+        );
+    }
+
+    // (2) V3 死亡（probe=false）→ 退かず従来どおり処理: run が観測される（外形不減）。
+    {
+        let (state, gateway, gateway_actions) = make_deps();
+        let (event_tx, _event_rx) = create_event_channel();
+        let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
+        let session_locks = Arc::new(SessionLocks::new());
+        let incoming = IncomingMessage::new(
+            MessageSource::Discord {
+                guild_id: "111".to_string(),
+                channel_id: "222".to_string(),
+            },
+            MessageContent::Text("sleep 30して".to_string()),
+            Sender::new("user-1", "だれか"),
+        );
+        let v3_dead: crate::message_loop::V3LivenessProbe = Arc::new(|_agent: &str| false);
+        process_incoming_message(
+            incoming,
+            gateway,
+            state.clone(),
+            vec!["crab".to_string()],
+            gateway_actions,
+            "owner-1".to_string(),
+            session_locks,
+            false,
+            Some(v3_dead),
+            None, // voice
+            event_tx,
+            registry,
+            false,
+            true,
+            None,
+        )
+        .await;
+        state.wait_for_run().await;
+        assert_eq!(
+            state.runs.lock().unwrap().len(),
+            1,
+            "V3 死亡時に legacy が退いてしまった（外形減・誰も応答しない）"
+        );
+    }
 }
 
 /// **inbound の run は「発言終わり」🏁 判定用の subtask 起動カウンタを載せる**（#431）。
@@ -518,6 +615,7 @@ async fn inbound_run_carries_the_end_of_speech_subtask_counter() {
         "owner-1".to_string(),
         session_locks,
         false,
+        None, // v3_liveness: このテストは V3 二重受信ゲートの対象外
         None,
         event_tx,
         registry,
@@ -610,6 +708,7 @@ async fn inbound_goes_through_the_shared_inbound_hook() {
         "owner-1".to_string(),
         session_locks,
         false,
+        None, // v3_liveness: このテストは V3 二重受信ゲートの対象外
         None,
         event_tx,
         registry,
@@ -684,6 +783,7 @@ async fn inbound_message_is_recorded_before_the_session_lock_is_acquired() {
         "owner-1".to_string(),
         session_locks,
         false,
+        None, // v3_liveness: このテストは V3 二重受信ゲートの対象外
         None,
         event_tx,
         registry,
@@ -753,6 +853,7 @@ fn failed_inbound_record_is_detected_not_swallowed() {
                 "owner-1".to_string(),
                 session_locks,
                 false,
+                None, // v3_liveness: このテストは V3 二重受信ゲートの対象外
                 None,
                 event_tx,
                 registry,
@@ -1122,6 +1223,7 @@ fn every_sender_gets_the_seen_reaction_including_other_bots() {
                 "owner-1".to_string(),
                 session_locks,
                 false,
+                None, // v3_liveness: このテストは V3 二重受信ゲートの対象外
                 None,
                 event_tx,
                 registry,
@@ -1200,6 +1302,7 @@ async fn record_only_records_inbound_but_does_not_run() {
         "owner-1".to_string(),
         session_locks,
         false,
+        None, // v3_liveness: このテストは V3 二重受信ゲートの対象外
         None,
         event_tx,
         registry,
@@ -1258,6 +1361,7 @@ fn seen_reaction_logs(
                 "owner-1".to_string(),
                 session_locks,
                 false,
+                None, // v3_liveness: このテストは V3 二重受信ゲートの対象外
                 None,
                 event_tx,
                 registry,
@@ -1362,6 +1466,7 @@ async fn debounced_window_records_every_message_but_runs_once() {
         "owner-1".to_string(),
         session_locks.clone(),
         false,
+        None, // v3_liveness: このテストは V3 二重受信ゲートの対象外
         None,
         event_tx.clone(),
         registry.clone(),
@@ -1379,6 +1484,7 @@ async fn debounced_window_records_every_message_but_runs_once() {
         "owner-1".to_string(),
         session_locks,
         false,
+        None, // v3_liveness: このテストは V3 二重受信ゲートの対象外
         None,
         event_tx,
         registry,
@@ -1492,6 +1598,7 @@ async fn different_privilege_messages_split_into_separate_runs_through_the_loop(
         None,
         Some((tx.clone(), rx)),
         false,
+        None, // v3_liveness: このテストは V3 二重受信ゲートの対象外
         None,
         registry,
     ));
@@ -1585,6 +1692,7 @@ async fn debounce_flush_records_all_messages_and_runs_once_through_the_loop() {
         None,
         Some((tx.clone(), rx)),
         false,
+        None, // v3_liveness: このテストは V3 二重受信ゲートの対象外
         None,
         registry,
     ));

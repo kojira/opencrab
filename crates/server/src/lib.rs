@@ -601,6 +601,8 @@ mod gateway_registry_tests {
         let discord = Arc::new(opencrab_discord::DiscordGatewayManager::new(
             state.clone(),
             state.timed_fire_router.clone(),
+            // テストは V3 gateway を持たないので「常に非稼働」probe（legacy が退かない）。
+            std::sync::Arc::new(|_: &str| false),
         ));
         let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(
             state.clone(),
@@ -634,6 +636,8 @@ mod gateway_registry_tests {
         let discord = Arc::new(opencrab_discord::DiscordGatewayManager::new(
             state.clone(),
             state.timed_fire_router.clone(),
+            // テストは V3 gateway を持たないので「常に非稼働」probe（legacy が退かない）。
+            std::sync::Arc::new(|_: &str| false),
         ));
         state.gateways.register(discord);
         assert_eq!(
@@ -734,6 +738,8 @@ mod gateway_registry_tests {
         let discord = Arc::new(opencrab_discord::DiscordGatewayManager::new(
             state.clone(),
             state.timed_fire_router.clone(),
+            // テストは V3 gateway を持たないので「常に非稼働」probe（legacy が退かない）。
+            std::sync::Arc::new(|_: &str| false),
         ));
         state.gateways.register(discord);
 
@@ -788,6 +794,8 @@ mod gateway_registry_tests {
         let discord = Arc::new(opencrab_discord::DiscordGatewayManager::new(
             state.clone(),
             state.timed_fire_router.clone(),
+            // テストは V3 gateway を持たないので「常に非稼働」probe（legacy が退かない）。
+            std::sync::Arc::new(|_: &str| false),
         ));
         state.gateways.register(discord);
         // トークンはあるが enabled=0（「停止したはず」の設定）。
@@ -813,6 +821,8 @@ mod gateway_registry_tests {
         let discord = Arc::new(opencrab_discord::DiscordGatewayManager::new(
             state.clone(),
             state.timed_fire_router.clone(),
+            // テストは V3 gateway を持たないので「常に非稼働」probe（legacy が退かない）。
+            std::sync::Arc::new(|_: &str| false),
         ));
         state.gateways.register(discord);
         put_discord_config(&state, "crab", " \t\n", true);

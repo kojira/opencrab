@@ -57,17 +57,33 @@ pub struct DiscordGatewayManager<T: AgentRunner> {
     // **必須**（`new` の引数）にしてあるので配線し忘れが起きえない（#602 で忘れて本番が止まった。
     // Option + builder だと呼び忘れてもコンパイルが通ってしまう）。
     timed_fire_router: Arc<TimedFireRouter>,
+    // DESIGN-DISCORD-GATE §8.1: この legacy per-agent ループが「同じ agent を V3 gateway process が
+    // 実際に受信中か」を per-message で見て、受信中なら退く（二重受信防止）ための probe。
+    // **必須**（`new` の引数）にしてある。#603 と同じ理由で Option + builder にしない:
+    // これを配線し忘れると legacy 車線が V3 と並走し同一メッセージを二重処理する（本バグ）。
+    // probe が false（V3 死亡/未接続/ロック失敗）なら退かず legacy が処理を続け外形を減らさない。
+    v3_liveness: crate::message_loop::V3LivenessProbe,
 }
 
 impl<T: AgentRunner> DiscordGatewayManager<T> {
     /// `timed_fire_router` は**必須**。scheduler の時刻発火をこのマネージャの per-agent ループへ
     /// 届けるための受け口レジストリで、渡さないと発火が届かない（#603）。型で強制することで
     /// #602 のような「配線し忘れて黙って全 skip」を再発させない。
-    pub fn new(state: T, timed_fire_router: Arc<TimedFireRouter>) -> Self {
+    ///
+    /// `v3_liveness` も**必須**（DESIGN-DISCORD-GATE §8.1）: per-agent ループが V3 gateway process の
+    /// 生存を見て二重受信を避けるための probe。実体は server 層で
+    /// `ExtgateState::agent_has_live_gateway(agent, "discord")` を包む closure。配線し忘れを
+    /// 型で潰すため引数にしてある（忘れると legacy 車線が V3 と並走して二重処理する）。
+    pub fn new(
+        state: T,
+        timed_fire_router: Arc<TimedFireRouter>,
+        v3_liveness: crate::message_loop::V3LivenessProbe,
+    ) -> Self {
         Self {
             gateways: RwLock::new(HashMap::new()),
             state,
             timed_fire_router,
+            v3_liveness,
         }
     }
 
@@ -185,6 +201,7 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
         let loop_gateway = gateway.clone();
         let agent_ids = vec![agent_id.to_string()];
         let owner = owner_discord_id.to_string();
+        let loop_v3_liveness = self.v3_liveness.clone();
 
         let handle = tokio::spawn(async move {
             crate::run_discord_loop(
@@ -198,6 +215,11 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
                 // per-agent ゲートウェイは enabled な設定から起動される側なので
                 // 専用設定スキップは無効（true にすると自分自身を skip してしまう）。
                 false,
+                // DESIGN-DISCORD-GATE §8.1: ただし V3 gateway process が同じ agent を受信中なら退く
+                // （二重受信防止）。`served_by_dedicated_gateway`（legacy manager 自身の生死を OR）は
+                // ここでは常に true になり使えない（自分自身を skip してしまう）ので、V3 liveness だけを
+                // 見る専用 probe を渡す。V3 死亡時は false へ倒れ legacy が処理を続ける（外形不減）。
+                Some(loop_v3_liveness),
                 // VC 対話 v1 は共有（TOML）ゲートウェイのみ対応。per-agent 側は未配線。
                 None,
                 subtask_registry_for_loop,
