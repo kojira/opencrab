@@ -41,12 +41,7 @@ use syn::{Attribute, BinOp, Expr, ExprBinary, Lit, Meta};
 /// FORBIDDEN と揃える（`web` は webhook/website 等に部分一致するので入れない。`web`
 /// profile の platform 分岐は下の `kind_id == "web"` 検査が拾う）。
 const FORBIDDEN: &[&str] = &[
-    "discord",
-    "serenity",
-    "songbird",
-    "nostr",
-    "telegram",
-    "slack",
+    "discord", "serenity", "songbird", "nostr", "telegram", "slack",
 ];
 
 /// まだ generic 化できていない Nostr profile ファイル。`(相対パス, なぜ generic に
@@ -185,8 +180,10 @@ struct Finder {
 
 impl Finder {
     fn record(&mut self, kind: &str, text: &str, word: &str) {
-        self.violations
-            .push(format!("{}: {} \"{}\" に禁止語 \"{}\"", self.rel, kind, text, word));
+        self.violations.push(format!(
+            "{}: {} \"{}\" に禁止語 \"{}\"",
+            self.rel, kind, text, word
+        ));
     }
 
     /// 属性の生トークン列（`#[serde(rename = "...")]` 等）を走査する。
@@ -369,7 +366,10 @@ fn gateway_shared_layer_has_no_platform_branch() {
     collect_rs_files(&crates_dir.join("extgate/src"), &mut files);
     collect_rs_files(&crates_dir.join("gate-client/src"), &mut files);
     files.sort();
-    assert!(!files.is_empty(), "gateway 共有層の src に .rs が見つからない");
+    assert!(
+        !files.is_empty(),
+        "gateway 共有層の src に .rs が見つからない"
+    );
 
     // allowlist の各エントリが実在ファイルを指すことを保証（腐った allowlist を防ぐ）。
     for (rel, _why) in ALLOWLIST {
