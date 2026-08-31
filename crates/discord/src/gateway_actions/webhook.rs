@@ -67,25 +67,27 @@ pub struct DeliveryBatch {
 
 /// started 用のメッセージ列を組み立てる。
 ///
-/// 1 通目: メタ情報（label / runId / sessionKey / status / body 通数）
-/// 2 通目: raw task text 本体。長ければ**出だしのプレビュー + 全文添付**の 1 通に畳む
-/// （#293。従来の `part X/N` 連投はやめた）。task が空なら 2 通目は無い。
+/// 開始通知を **1 通・ヘッダ付き**で組む（`🟢 **subtask started**` + メタ + `task:` 本体）。
+///
+/// task 本体はインラインで畳み、長ければ**出だしのプレビュー + 全文添付**の 1 通にする
+/// （#293。従来の `part X/N` 連投はやめた・全文は添付にロスなく入る）。task が空なら
+/// `task:` 行は付かない。返り値は互換のため `Vec` だが常に 1 要素。
+///
+/// 以前は「メタ 1 通 + raw task text 本体 1 通」の 2 通で、本体はヘッダ無しだったため、
+/// 自己受信 drop（lifecycle payload 判定 = 本文 1 行目が `... **subtask <status>**` ヘッダ）を
+/// **すり抜けて幽霊ターンを 1 発起こし得た**。terminal / progress と同じ「1 通・ヘッダ付き」に
+/// 揃えることで headerless な lifecycle メッセージを構造的に無くす。プレビューは常にヘッダを
+/// 含む（ヘッダは短く、preview_chars 内に必ず収まる）ので、長文添付でも 1 行目はヘッダのまま。
 pub fn build_started_messages(meta: &LifecycleMeta, raw_task_text: &str) -> Vec<WebhookMessage> {
-    let body = if raw_task_text.is_empty() {
-        None
-    } else {
-        Some(build_message_with_optional_attachment(
-            raw_task_text,
-            "subtask-task",
-        ))
-    };
-    let mut msgs = Vec::with_capacity(2);
-    msgs.push(WebhookMessage::text(format!(
-        "🟢 **subtask started**\nlabel: `{}`\nrunId: `{}`\nsessionKey: `{}`\nstatus: `started`\nparts: {}",
-        meta.label, meta.run_id, meta.session_key, usize::from(body.is_some())
-    )));
-    msgs.extend(body);
-    msgs
+    let mut s = format!(
+        "🟢 **subtask started**\nlabel: `{}`\nrunId: `{}`\nsessionKey: `{}`\nstatus: `started`",
+        meta.label, meta.run_id, meta.session_key
+    );
+    if !raw_task_text.is_empty() {
+        s.push_str("\ntask: ");
+        s.push_str(raw_task_text);
+    }
+    vec![build_message_with_optional_attachment(&s, "subtask-started")]
 }
 
 /// completed / failed / timed_out / aborted 用の簡潔なステータスメッセージ。
@@ -444,13 +446,24 @@ mod tests {
     /// 静かに戻る。書式の出所であるこのモジュールで固定する。
     #[test]
     fn lifecycle_headers_are_recognized_by_self_receive_drop() {
+        // started: 短い task（インライン・添付なし）。
         let started = build_started_messages(&meta(), "task body");
         assert!(
             crate::gateway::content_is_subtask_lifecycle_payload(&started[0].content),
             "started ヘッダが drop 判定に一致しない: {:?}",
             started[0].content
         );
-        for status in ["completed", "failed", "timed_out", "aborted"] {
+        // started: 長い task（プレビュー + 添付の 1 通）。以前は本体が headerless の
+        // 別メッセージで判定をすり抜けていた退行を固定する。プレビュー 1 行目もヘッダ。
+        let long_started = build_started_messages(&meta(), &"x".repeat(5000));
+        assert_eq!(long_started.len(), 1, "started は 1 通に畳む");
+        assert!(
+            crate::gateway::content_is_subtask_lifecycle_payload(&long_started[0].content),
+            "長い started 本体が drop 判定に一致しない: {:?}",
+            long_started[0].content
+        );
+        // terminal: 既知ステータス + `_ => ℹ️` フォールバック（未知ステータス）。
+        for status in ["completed", "failed", "timed_out", "aborted", "unknown_status"] {
             let m = build_terminal_message(status, "r", "s", Some(1), "detail");
             assert!(
                 crate::gateway::content_is_subtask_lifecycle_payload(&m),
@@ -465,35 +478,40 @@ mod tests {
     }
 
     #[test]
-    fn test_build_started_messages_metadata_then_short_body_without_attachment() {
+    fn test_build_started_messages_single_headered_message_with_inline_task() {
         let msgs = build_started_messages(&meta(), "abcdef");
-        // metadata + 本体 1 通。短いので添付なし（従来どおり JSON 送信）。
-        assert_eq!(msgs.len(), 2);
-        assert!(msgs[0].content.contains("subtask started"));
+        // 1 通・ヘッダ付き。短いので添付なし（JSON 1 本）。task はインライン。
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].content.starts_with("🟢 **subtask started**"));
         assert!(msgs[0].content.contains("run1"));
         assert!(msgs[0].content.contains("sess1"));
-        assert!(msgs[0].content.contains("parts: 1"));
+        assert!(msgs[0].content.contains("task: abcdef"));
         assert!(!msgs[0].has_attachment());
-        assert_eq!(msgs[1].content, "abcdef");
-        assert!(!msgs[1].has_attachment());
+        // 自己受信 drop 判定（1 行目ヘッダ）に一致する。
+        assert!(crate::gateway::content_is_subtask_lifecycle_payload(
+            &msgs[0].content
+        ));
     }
 
     #[test]
-    fn test_build_started_messages_empty_task() {
+    fn test_build_started_messages_empty_task_has_no_task_line() {
         let msgs = build_started_messages(&meta(), "");
         assert_eq!(msgs.len(), 1);
-        assert!(msgs[0].content.contains("parts: 0"));
+        assert!(msgs[0].content.starts_with("🟢 **subtask started**"));
+        assert!(!msgs[0].content.contains("task:"));
+        assert!(crate::gateway::content_is_subtask_lifecycle_payload(
+            &msgs[0].content
+        ));
     }
 
-    /// #293: 長い task text は part X/N の連投にならず、
-    /// 「メタ情報 1 通 + プレビュー&添付 1 通」の **2 通**で出る。
+    /// #293 の性質を維持: 長い task text は part X/N 連投にならず、
+    /// 「プレビュー + 全文添付」の **1 通**（ヘッダ付き）で出る。1 行目は常にヘッダ。
     #[test]
     fn test_build_started_messages_long_task_becomes_single_attachment() {
         let long = "x".repeat(5000);
         let msgs = build_started_messages(&meta(), &long);
-        assert_eq!(msgs.len(), 2, "連投しない");
-        assert!(msgs[0].content.contains("parts: 1"));
-        let body = &msgs[1];
+        assert_eq!(msgs.len(), 1, "連投しない・1 通に畳む");
+        let body = &msgs[0];
         assert!(body.has_attachment());
         // 本文は Discord の 1 通上限に収まる。
         assert!(
@@ -502,10 +520,16 @@ mod tests {
             body.content.chars().count()
         );
         assert!(!body.content.starts_with("part 1/"));
-        // 添付本体は全文（ロスなし）。
-        assert_eq!(body.delivered_text(), long);
+        // プレビュー 1 行目はヘッダのまま → 長文添付でも自己受信 drop 判定に一致する。
+        assert!(body.content.starts_with("🟢 **subtask started**"));
+        assert!(crate::gateway::content_is_subtask_lifecycle_payload(
+            &body.content
+        ));
+        // 添付本体は全文（ヘッダ + メタ + task）をロスなく含む。
+        let delivered = body.delivered_text();
+        assert!(delivered.contains(&long), "task 全文が添付に入っていない");
         let att = body.attachment.as_ref().unwrap();
-        assert_eq!(att.filename, "subtask-task.txt");
+        assert_eq!(att.filename, "subtask-started.txt");
         assert_eq!(att.content_type, "text/plain; charset=utf-8");
     }
 

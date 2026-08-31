@@ -367,16 +367,20 @@ fn is_own_message(self_user_id: Option<u64>, author_id: u64) -> bool {
     self_user_id == Some(author_id)
 }
 
-/// 自分の subtask lifecycle webhook が投稿した「機械通知」か。
+/// subtask lifecycle webhook の「機械通知」投稿か（**自分のものに限らず**、同形式の
+/// lifecycle 通知全般を対象にする）。
 ///
 /// 背景（自己受信ループの芽）: subtask lifecycle webhook（#175 の opt-in）が
 /// **会話チャンネルへ**向いていると、`build_started_messages` /
 /// `build_terminal_message` / `build_progress_message` が出した生ペイロードが
 /// チャンネルに投稿される。その投稿者 id は **webhook の id** であって bot の
 /// user id ではないため、`is_own_message`（bot user id 一致のみ）を素通りして
-/// メッセージイベントとして受信され、自分の機械通知を会話として処理してしまう。
+/// メッセージイベントとして受信され、機械通知を会話として処理してしまう。
 ///
-/// 判定は 2 条件の AND に絞る:
+/// webhook id からは「自分が管理する webhook か」を（DB 照合なしには）判定できないため、
+/// ここでは**発信元を問わず**、この bot が出すのと同形式の lifecycle 通知を落とす。
+/// 会話に混ぜたくない機械通知という点で扱いは同じで、副作用も無害側（正当な会話は
+/// webhook 由来でない）に倒れる。判定は 2 条件の AND:
 /// - webhook 由来（`webhook_id` あり）。人間や他 bot の**通常発言**は `webhook_id` が
 ///   無いので、本文がたまたま `**subtask ` を含んでいても落とさない。
 /// - 本文の**先頭行**が lifecycle payload ヘッダ（`<emoji> **subtask <status>**`）。
@@ -385,7 +389,7 @@ fn is_own_message(self_user_id: Option<u64>, author_id: u64) -> bool {
 ///   webhook 投稿はこの形にならないので通す（正当な webhook 連携の外形を保つ）。
 ///
 /// activity webhook（`tool_call_*`）は別チャンネル前提の別機能なのでスコープ外。
-fn is_own_subtask_lifecycle_webhook(webhook_id: Option<u64>, content: &str) -> bool {
+fn is_subtask_lifecycle_webhook_post(webhook_id: Option<u64>, content: &str) -> bool {
     webhook_id.is_some() && content_is_subtask_lifecycle_payload(content)
 }
 
@@ -536,12 +540,12 @@ impl EventHandler for DiscordHandler {
             return;
         }
 
-        // 自分の subtask lifecycle webhook 投稿（機械通知）は会話として受信しない。
-        // webhook の投稿者 id は bot user id と異なるため上の is_own_message を素通りする。
-        // ここで webhook 由来 + lifecycle payload 形式のものだけを落とし、自己受信ループの
-        // 芽を断つ（人間/他ツールの正当な webhook 連携は通す）。log の前に落として、
-        // 自分の機械通知が「受信した」ように記録される QC 混乱の元も消す。
-        if is_own_subtask_lifecycle_webhook(msg.webhook_id.map(|id| id.get()), &msg.content) {
+        // subtask lifecycle webhook 投稿（機械通知）は会話として受信しない（自分のものに
+        // 限らず同形式のもの全般）。webhook の投稿者 id は bot user id と異なるため上の
+        // is_own_message を素通りする。webhook 由来 + lifecycle payload 形式のものだけを
+        // 落とし、自己受信ループの芽を断つ（人間/他ツールの正当な webhook 連携は通す）。
+        // log の前に落として、機械通知が「受信した」ように記録される QC 混乱の元も消す。
+        if is_subtask_lifecycle_webhook_post(msg.webhook_id.map(|id| id.get()), &msg.content) {
             return;
         }
 
@@ -1110,51 +1114,54 @@ mod tests {
         );
     }
 
-    /// 自分の subtask lifecycle webhook 投稿（機械通知）だけを落とし、通常の会話は通す。
+    /// subtask lifecycle webhook 投稿（機械通知）を落とし、通常の会話は通す。
     ///
     /// 自己受信ループの芽は「webhook の投稿者 id が bot user id と異なり
     /// `is_own_message` を素通りする」こと。webhook 由来 + lifecycle payload 形式の
-    /// AND でだけ落とす。
+    /// AND でだけ落とす（発信元は問わない = 同形式の lifecycle 通知全般）。
     #[test]
-    fn own_subtask_lifecycle_webhook_is_dropped_but_conversation_passes() {
+    fn subtask_lifecycle_webhook_post_is_dropped_but_conversation_passes() {
         // 実測ペイロード（QC スクショ）と同形の completed 通知。webhook 由来 → 落とす。
         let completed = "✅ **subtask completed**\nrunId: `e059e80f`\nsessionKey: `subtask-e059e80f`\nduration: 44996ms\nresult: I'll wait 60 seconds.";
         assert!(
-            is_own_subtask_lifecycle_webhook(Some(999), completed),
-            "自分の subtask 完了 webhook 投稿を受信してしまう（自己受信ループの芽）"
+            is_subtask_lifecycle_webhook_post(Some(999), completed),
+            "subtask 完了 webhook 投稿を受信してしまう（自己受信ループの芽）"
         );
-        // started / progress / failed / timed_out / aborted も同じヘッダトークンで落ちる。
+        // started（インライン task 付き）/ progress / failed / timed_out / aborted /
+        // ℹ️ フォールバックも同じヘッダトークンで落ちる。started は本体を別メッセージに
+        // 分けず 1 通ヘッダ付きなので、task 本文まで含めて落ちる（headerless 漏れが無い）。
         for header in [
-            "🟢 **subtask started**\nlabel: `job`",
+            "🟢 **subtask started**\nlabel: `job`\nrunId: `r`\nsessionKey: `s`\nstatus: `started`\ntask: sleep 60",
             "🔄 **subtask progress**\nrunId: `r`",
             "❌ **subtask failed**\nrunId: `r`",
             "⏱️ **subtask timed_out**\nrunId: `r`",
             "🛑 **subtask aborted**\nrunId: `r`",
+            "ℹ️ **subtask something**\nrunId: `r`",
         ] {
             assert!(
-                is_own_subtask_lifecycle_webhook(Some(999), header),
+                is_subtask_lifecycle_webhook_post(Some(999), header),
                 "lifecycle payload を落とせていない: {header:?}"
             );
         }
 
         // 人間/他 bot の通常発言は webhook_id が無い → たとえ `**subtask ` を含んでも通す。
         assert!(
-            !is_own_subtask_lifecycle_webhook(None, completed),
+            !is_subtask_lifecycle_webhook_post(None, completed),
             "通常発言（webhook 由来でない）を誤って落としている（会話が壊れる）"
         );
         assert!(
-            !is_own_subtask_lifecycle_webhook(None, "**subtask completed** どうだった？"),
+            !is_subtask_lifecycle_webhook_post(None, "**subtask completed** どうだった？"),
             "人間が payload を引用しただけの発言を落としている"
         );
 
         // 別種の正当な webhook 連携（人間側ツール等）は lifecycle 形式でない → 通す。
         assert!(
-            !is_own_subtask_lifecycle_webhook(Some(1234), "Deploy finished: v1.2.3 ✅"),
+            !is_subtask_lifecycle_webhook_post(Some(1234), "Deploy finished: v1.2.3 ✅"),
             "lifecycle 形式でない webhook 投稿まで落としている（正当な連携の外形減）"
         );
         // 本文中に `**subtask ` を引用しただけの別種 webhook（1 行目はヘッダでない）も通す。
         assert!(
-            !is_own_subtask_lifecycle_webhook(
+            !is_subtask_lifecycle_webhook_post(
                 Some(1234),
                 "CI report\nnote: contains **subtask ** wording"
             ),
