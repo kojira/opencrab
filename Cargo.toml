@@ -18,7 +18,6 @@ members = [
     "crates/voice",
     "crates/port",
     "crates/store",
-    "crates/engine",
     "crates/nostr-gate",
     "crates/extgate",
 ]
