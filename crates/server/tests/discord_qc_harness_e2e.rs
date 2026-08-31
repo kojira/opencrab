@@ -202,6 +202,19 @@ const M_REPLY: &str = "REPLYMARK";
 const M_REACT: &str = "REACTMARK";
 // 他マーカーの部分文字列にならない独立名（"NOREPLYMARK" は "REPLYMARK" を含み誤ルートする）。
 const M_NOREPLY: &str = "MUTEMARK";
+/// 長文 say を要求するマーカー。`SAYMARK` を部分文字列に含まないので M_SAY と衝突しない。
+const M_LONGSAY: &str = "LONGMARK";
+/// 長文 say の行数。各行に `LONGSAYLINE{n}` を含め、分割後も全チャンクを識別・再構成できる。
+const LONGSAY_LINES: usize = 200;
+
+/// 2000 字を確実に超える複数行本文（1 行ごとに一意トークンを持つ）。
+/// mock（送信元）とテスト（期待値）で同じ関数を使い、分割の再構成を厳密照合する。
+fn long_say_body() -> String {
+    (0..LONGSAY_LINES)
+        .map(|i| format!("LONGSAYLINE{i:03}-これは長文分割テストの行です"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 const B_SAY: &str = "saybody-alpha 通常発言だよ";
 const B_REPLY: &str = "replybody-beta 返信本文だよ";
 const EMOJI: &str = "👀";
@@ -237,6 +250,10 @@ impl LlmProvider for RoutedMock {
             if text.contains(M_NOREPLY) {
                 // 沈黙ターン: say も tool も出さず NO_REPLY だけ返す（core は say 0・ended のみ）。
                 return Ok(text_response("NO_REPLY"));
+            }
+            if text.contains(M_LONGSAY) {
+                // 2000 字超の say（turn は plain text で閉じるので resume ループしない）。
+                return Ok(text_response(&long_say_body()));
             }
             if text.contains(M_SAY) {
                 return Ok(text_response(B_SAY));
@@ -879,5 +896,66 @@ async fn scenario_e_no_reply_gets_muted_reaction() {
         0,
         "NO_REPLY ターンに 🏁 が誤発火: {:?}",
         captured(&buf)
+    );
+}
+
+// ==================== (f) 2000 字超 say は複数チャンクで逐次配送される ====================
+
+#[tokio::test]
+async fn scenario_f_long_say_is_split_into_multiple_chunks() {
+    let buf = install_capture();
+    let mock = Arc::new(RoutedMock::new());
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    let body = long_say_body();
+    assert!(
+        body.chars().count() > 2000,
+        "テスト前提: 本文は 2000 字超（{} 字）",
+        body.chars().count()
+    );
+    let last_token = format!("LONGSAYLINE{:03}", LONGSAY_LINES - 1);
+
+    fixture.append_message("704", &format!("{M_LONGSAY} 長文で返事して"));
+
+    // 逐次送信の完了＝最後の行トークンを含む say チャンクが dry-run に現れる。
+    let ok = {
+        let buf = buf.clone();
+        let last_token = last_token.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "say" && c.body.contains(&last_token))
+        })
+        .await
+    };
+    assert!(ok, "長文 say の最終チャンクが出ない: {:?}", captured(&buf));
+
+    // このシナリオの say チャンク（LONGSAYLINE を含む）を送信順に収集。
+    let chunks: Vec<String> = captured(&buf)
+        .into_iter()
+        .filter(|c| c.kind == "say" && c.body.contains("LONGSAYLINE"))
+        .map(|c| c.body)
+        .collect();
+
+    assert!(
+        chunks.len() >= 2,
+        "2000 字超 say が複数チャンクに分割されていない: {} チャンク",
+        chunks.len()
+    );
+    for c in &chunks {
+        assert!(
+            c.chars().count() <= 2000,
+            "チャンクが Discord 上限 2000 字を超過: {} 字",
+            c.chars().count()
+        );
+    }
+    // 順序保証・欠落なし: チャンクを改行連結すると原文へ戻る（行優先分割）。
+    assert_eq!(
+        chunks.join("\n"),
+        body,
+        "分割チャンクの連結が原文と不一致（順序 or 欠落）"
     );
 }

@@ -263,6 +263,8 @@ fn spawn_say_consumer(
                             if reply_origin.is_some() {
                                 if let Some(own) = &message_id {
                                     // 🏁: 自分が投稿した say へ「このターンはもう続きの処理をしない」。
+                                    // 分割投稿なら message_id は **最後のチャンク**（deliver_say が
+                                    // 返す）＝直近の自分の発言なので付け先が正しい。
                                     react_system_on(&transport, channel, own, &reactions.completed)
                                         .await;
                                 } else {

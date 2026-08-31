@@ -257,6 +257,85 @@ impl DiscordTransport for SerenityTransport {
     }
 }
 
+/// テスト用の記録 transport。say/reply の**呼び出し順・本文**を記録し、message_id を連番で返す。
+/// 分割の逐次送信・fail-fast・最後のチャンク id を、トークン/ネットワーク無しで検証するために使う。
+#[cfg(test)]
+pub(crate) mod testfake {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    pub(crate) struct RecordingTransport {
+        /// (kind, body) の呼び出し列。kind は "say"（create_message）/ "reply"（reply_message）。
+        pub calls: Mutex<Vec<(String, String)>>,
+        /// この index（0 始まり）の write を失敗させる。None なら全成功。
+        pub fail_at: Option<usize>,
+        /// 失敗時に Rejected でなく Indeterminate を返す。
+        pub indeterminate: bool,
+    }
+
+    impl RecordingTransport {
+        fn record_write(&self, kind: &str, body: &str) -> TransportOutcome {
+            let mut c = self.calls.lock().unwrap();
+            let idx = c.len();
+            c.push((kind.to_string(), body.to_string()));
+            if Some(idx) == self.fail_at {
+                return if self.indeterminate {
+                    TransportOutcome::Indeterminate
+                } else {
+                    TransportOutcome::Rejected
+                };
+            }
+            TransportOutcome::Ok(json!({ "message_id": (1000 + idx).to_string() }))
+        }
+
+        pub(crate) fn bodies(&self) -> Vec<String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, b)| b.clone())
+                .collect()
+        }
+
+        pub(crate) fn kinds(&self) -> Vec<String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(k, _)| k.clone())
+                .collect()
+        }
+    }
+
+    #[async_trait]
+    impl DiscordTransport for RecordingTransport {
+        async fn create_message(&self, _channel_id: &str, content: &str) -> TransportOutcome {
+            self.record_write("say", content)
+        }
+        async fn reply_message(
+            &self,
+            _channel_id: &str,
+            _message_id: &str,
+            content: &str,
+        ) -> TransportOutcome {
+            self.record_write("reply", content)
+        }
+        async fn add_reaction(&self, _c: &str, _m: &str, _e: &str) -> TransportOutcome {
+            TransportOutcome::Ok(json!({"reacted": true}))
+        }
+        async fn add_system_reaction(&self, _c: &str, _m: &str, _e: &str) -> TransportOutcome {
+            TransportOutcome::Ok(json!({"reacted": true}))
+        }
+        async fn get_message(&self, _c: &str, _m: &str) -> TransportOutcome {
+            TransportOutcome::Rejected
+        }
+        async fn get_user(&self, _u: &str) -> TransportOutcome {
+            TransportOutcome::Rejected
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
