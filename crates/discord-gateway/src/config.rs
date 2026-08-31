@@ -35,6 +35,47 @@ pub struct InstanceConfig {
     /// 配送モード（say | tool_driven）。
     #[serde(default)]
     pub delivery_mode: Option<String>,
+    /// system reaction（受理／完了／失敗）の絵文字。profile data（D17-12・instance config_b64）で
+    /// 上書きし、無ければ現行と同じ既定値（👀🏁❌）。core に Discord 語彙は足さない。
+    #[serde(default)]
+    pub system_reactions: SystemReactions,
+}
+
+/// gateway が自動付与する system reaction の絵文字集合（設計 v17 §6.3・D17-12）。
+///
+/// - `accepted`（👀）: said を core が受理した時点で発端メッセージへ付ける（受理サイン＝gateway の責務）。
+/// - `completed`（🏁）: 発端メッセージへの返信（say）を配送し終えた時点で付ける。
+/// - `failed`（❌）: 発端メッセージへの返信配送が失敗した時点で付ける。
+///
+/// NO_REPLY(🤐) は現状 wire（`CompletedNoReply`）が発端 origin を運ばないため未配線（後続スライス）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct SystemReactions {
+    #[serde(default = "default_accepted")]
+    pub accepted: String,
+    #[serde(default = "default_completed")]
+    pub completed: String,
+    #[serde(default = "default_failed")]
+    pub failed: String,
+}
+
+fn default_accepted() -> String {
+    "👀".to_string()
+}
+fn default_completed() -> String {
+    "🏁".to_string()
+}
+fn default_failed() -> String {
+    "❌".to_string()
+}
+
+impl Default for SystemReactions {
+    fn default() -> Self {
+        Self {
+            accepted: default_accepted(),
+            completed: default_completed(),
+            failed: default_failed(),
+        }
+    }
 }
 
 impl Placement {
@@ -112,6 +153,16 @@ fn validate_instance_config(cfg: &InstanceConfig) -> anyhow::Result<()> {
     match cfg.delivery_mode.as_deref() {
         None | Some("say") | Some("tool_driven") => {}
         Some(_) => anyhow::bail!("delivery_mode must be say or tool_driven"),
+    }
+    let sr = &cfg.system_reactions;
+    for (label, emoji) in [
+        ("accepted", &sr.accepted),
+        ("completed", &sr.completed),
+        ("failed", &sr.failed),
+    ] {
+        if emoji.trim().is_empty() {
+            anyhow::bail!("system_reactions.{label} must be a nonempty emoji");
+        }
     }
     Ok(())
 }
@@ -210,6 +261,45 @@ mod tests {
             }],
         };
         p.validate().unwrap();
+    }
+
+    #[test]
+    fn system_reactions_default_to_legacy_emojis() {
+        // config に system_reactions が無ければ現行既定（👀🏁❌）。
+        let cfg = parse_instance_config(&serde_json::to_vec(&sample_config()).unwrap()).unwrap();
+        assert_eq!(cfg.system_reactions.accepted, "👀");
+        assert_eq!(cfg.system_reactions.completed, "🏁");
+        assert_eq!(cfg.system_reactions.failed, "❌");
+    }
+
+    #[test]
+    fn system_reactions_can_be_overridden_via_profile_data() {
+        let mut v = sample_config();
+        v["system_reactions"] = serde_json::json!({
+            "accepted": "🫡", "completed": "✅", "failed": "💥",
+        });
+        let cfg = parse_instance_config(&serde_json::to_vec(&v).unwrap()).unwrap();
+        assert_eq!(cfg.system_reactions.accepted, "🫡");
+        assert_eq!(cfg.system_reactions.completed, "✅");
+        assert_eq!(cfg.system_reactions.failed, "💥");
+    }
+
+    #[test]
+    fn partial_system_reactions_fall_back_per_field() {
+        // 一部だけ指定 → 残りは既定。
+        let mut v = sample_config();
+        v["system_reactions"] = serde_json::json!({ "completed": "✅" });
+        let cfg = parse_instance_config(&serde_json::to_vec(&v).unwrap()).unwrap();
+        assert_eq!(cfg.system_reactions.accepted, "👀");
+        assert_eq!(cfg.system_reactions.completed, "✅");
+        assert_eq!(cfg.system_reactions.failed, "❌");
+    }
+
+    #[test]
+    fn empty_system_reaction_emoji_fails() {
+        let mut v = sample_config();
+        v["system_reactions"] = serde_json::json!({ "accepted": "" });
+        assert!(parse_instance_config(&serde_json::to_vec(&v).unwrap()).is_err());
     }
 
     #[test]

@@ -36,6 +36,15 @@ pub trait DiscordTransport: Send + Sync {
         message_id: &str,
         emoji: &str,
     ) -> TransportOutcome;
+    /// gateway 自動付与の system reaction（👀/🏁/❌）。production の REST は `add_reaction` と同一
+    /// （create_reaction は同一絵文字を冪等に扱う）。dry-run では観測用に kind を分ける（agent の
+    /// reaction DI と混同しないため）。
+    async fn add_system_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> TransportOutcome;
     /// message の生 JSON 取得（resolve eN・読み取り）。
     async fn get_message(&self, channel_id: &str, message_id: &str) -> TransportOutcome;
     /// user の生 JSON 取得（resolve uN・読み取り）。
@@ -82,6 +91,14 @@ impl DiscordTransport for DryRunTransport {
         emoji: &str,
     ) -> TransportOutcome {
         Self::log("reaction", channel_id, message_id, emoji, "")
+    }
+    async fn add_system_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> TransportOutcome {
+        Self::log("system_reaction", channel_id, message_id, emoji, "")
     }
     async fn get_message(&self, channel_id: &str, message_id: &str) -> TransportOutcome {
         // resolve は生 JSON を返す約束。dry-run は取得できないので短縮参照だけ返す。
@@ -188,6 +205,16 @@ impl DiscordTransport for SerenityTransport {
         }
     }
 
+    async fn add_system_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> TransportOutcome {
+        // production では agent reaction と同一 REST（create_reaction）。dry-run だけ kind を分ける。
+        self.add_reaction(channel_id, message_id, emoji).await
+    }
+
     async fn get_message(&self, channel_id: &str, message_id: &str) -> TransportOutcome {
         let (Some(ch), Some(mid)) = (channel(channel_id), message(message_id)) else {
             return TransportOutcome::Rejected;
@@ -233,6 +260,10 @@ mod tests {
         ));
         assert!(matches!(
             t.create_message("100", "hello").await,
+            TransportOutcome::Ok(_)
+        ));
+        assert!(matches!(
+            t.add_system_reaction("100", "200", "👀").await,
             TransportOutcome::Ok(_)
         ));
     }

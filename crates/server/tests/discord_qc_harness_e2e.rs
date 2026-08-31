@@ -714,3 +714,82 @@ async fn scenario_c_reaction_resolves_e_number_and_settles() {
         "reaction 対象 message が発端と不一致（e1 誤解決）"
     );
 }
+
+// ==================== (d) system reaction（👀 受理・🏁 完了）の V3 経路 ====================
+
+const SYS_ACCEPTED: &str = "👀";
+const SYS_COMPLETED: &str = "🏁";
+
+#[tokio::test]
+async fn scenario_d_system_reactions_accepted_and_completed() {
+    let buf = install_capture();
+    let mock = Arc::new(RoutedMock::new());
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    // M_SAY: turn は通常発言（say）を返す。agent の reaction DI は使わない
+    // （＝ kind="reaction" は 0・system reaction は kind="system_reaction" で分離観測）。
+    fixture.append_message("703", &format!("{M_SAY} 受理と完了のサインを見たい"));
+
+    // 👀: said を core が受理した時点で発端メッセージ（channel=600, message=703）へ付く。
+    let saw_accepted = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf).iter().any(|c| {
+                c.kind == "system_reaction"
+                    && c.emoji.contains(SYS_ACCEPTED)
+                    && c.channel == CHANNEL
+                    && c.message == "703"
+            })
+        })
+        .await
+    };
+    assert!(
+        saw_accepted,
+        "受理 👀（system_reaction）が発端メッセージに付かない: {:?}",
+        captured(&buf)
+    );
+
+    // 🏁: 発端への返信（say）を配送し終えた時点で発端メッセージへ付く。
+    let saw_completed = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf).iter().any(|c| {
+                c.kind == "system_reaction"
+                    && c.emoji.contains(SYS_COMPLETED)
+                    && c.channel == CHANNEL
+                    && c.message == "703"
+            })
+        })
+        .await
+    };
+    assert!(
+        saw_completed,
+        "完了 🏁（system_reaction）が発端メッセージに付かない: {:?}",
+        captured(&buf)
+    );
+
+    // agent の reaction DI（kind="reaction"）は 703 に対しては起きていない（system reaction を
+    // agent reaction と混同していない）。BUFFER は binary 内で共有なので発端 703 に絞って観測する。
+    let agent_reactions_on_703 = captured(&buf)
+        .iter()
+        .filter(|c| c.kind == "reaction" && c.message == "703")
+        .count();
+    assert_eq!(
+        agent_reactions_on_703,
+        0,
+        "M_SAY ターンで agent reaction が 703 に誤発火: {:?}",
+        captured(&buf)
+    );
+
+    // 受理 👀 は発端 1 メッセージにつき 1 回（自動再送 0）。
+    let accepted_count = captured(&buf)
+        .iter()
+        .filter(|c| {
+            c.kind == "system_reaction" && c.emoji.contains(SYS_ACCEPTED) && c.message == "703"
+        })
+        .count();
+    assert_eq!(accepted_count, 1, "受理 👀 が複数回: {:?}", captured(&buf));
+}
