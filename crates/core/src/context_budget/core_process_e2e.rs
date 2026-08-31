@@ -781,6 +781,55 @@ fn speech_body_identifiers_reach_llm_prompt_verbatim() {
     );
 }
 
+/// row339 残穴（compaction 後の再マスク）の回帰固定: 発言本文に識別子を含む会話を **compaction で
+/// 凍結 snapshot 化 → read 戻し** しても、本文の UUID/npub が原文のまま復元される（v2 マーカーで
+/// read 時 full スクラブをスキップ）。この一周がないと snapshot 読み戻しで本文が再マスクされ、
+/// 「本文原文」裁定が compaction 後に破れる。
+#[test]
+fn compaction_freeze_then_read_keeps_speech_body_identifiers_verbatim() {
+    let conn = opencrab_db::init_memory().unwrap();
+    let run_id = "e059e80f-960c-45e3-b69c-ff493b133afc"; // webhook 由来 runId（ダッシュ付き UUID）
+    let npub = format!("npub1{}", "q".repeat(58)); // 生 bech32
+    // 高水位超えの履歴を積み、最後に識別子入りの発言（最新ユーザー＝RecentVerbatim で凍結後も残る）。
+    seed_over_high(&conn);
+    insert_speech(&conn, "webhook-user", &format!("runId: {run_id} / 作者 {npub}"));
+
+    // ターン終了 → compaction 発火 → snapshot 凍結（v2 マーカー付き）。
+    let assembled = assemble_from_snapshot(&conn, SESSION, AGENT).unwrap();
+    let mut gov = TurnGovernor::new(HIGH, LOW);
+    let out = gov
+        .finish_turn(
+            &conn,
+            SESSION,
+            &assembled.items,
+            assembled.through_log_id,
+            &assembled.text,
+        )
+        .unwrap();
+    assert!(out.fired, "前提: compaction が発火する（after={})", out.after_tokens);
+
+    // 凍結後の read: snapshot（v2）から本文原文が復元される（再マスクなし）。
+    let reread = assemble_from_snapshot(&conn, SESSION, AGENT).unwrap();
+    let text = &reread.text;
+    assert!(
+        text.contains(run_id),
+        "凍結→read で本文 UUID が再マスクされた: {text}"
+    );
+    assert!(
+        text.contains(&npub),
+        "凍結→read で本文 npub が再マスクされた: {text}"
+    );
+    assert!(
+        !text.contains("<uuid…>") && !text.contains("<npub…>"),
+        "凍結→read で本文がマスクされた: {text}"
+    );
+    // 世代マーカーは LLM テキストへ漏れない（read で除去）。
+    assert!(
+        !text.contains(crate::conversation::FROZEN_SNAPSHOT_V2_MARKER),
+        "世代マーカーが会話テキストへ漏れた: {text}"
+    );
+}
+
 /// 撤去の完全性。SQLite WAL の `wal_checkpoint` など別物は対象外。
 #[test]
 fn context_arrival_point_mechanism_is_gone() {

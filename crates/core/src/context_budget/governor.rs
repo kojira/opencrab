@@ -241,13 +241,15 @@ pub fn assemble_from_snapshot(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    // #826 snapshot は旧レンダリング済みテキストの blob で、§9A/refs 描画経路を通らずそのまま
-    // 連結される。read 時に表示剥がし（メタ行除去・生識別子短縮）を適用して legacy 残存を消す。
-    // 触るのは派生キャッシュの読み出しだけで正本 session_logs は書き換えない。剥がしは冪等なので
-    // 新形式（既に §9A）には無影響。次の finish_turn で剥がし済みが再永続化され snapshot は自己治癒する。
+    // #826 snapshot は凍結済みテキストの blob で、§9A/refs 描画経路を通らずそのまま連結される。
+    // row339: 世代ゲートで復元する。新規凍結（v2 マーカー付き）は生成元が既にクリーン（構造=u/e/c/s・
+    // 本文=原文）なのでスクラブせず本文原文のまま復元する（本文の UUID/npub/64hex を再マスクしない＝
+    // compaction 後も「本文原文」裁定を守る）。マーカー無しの legacy blob（載せ替え前の歴史データ・
+    // 構造に生識別子混在）だけ従来どおり read 時スクラブする。触るのは派生キャッシュの読み出しだけで
+    // 正本 session_logs は書き換えない。次の finish_turn で v2 マーカー付きで再永続化され snapshot は自己治癒する。
     let text = match &snap {
         Some(s) => {
-            let base = crate::conversation::strip_frozen_snapshot(&s.compacted_conversation);
+            let base = crate::conversation::restore_frozen_snapshot(&s.compacted_conversation);
             if delta.is_empty() {
                 base
             } else {
@@ -498,10 +500,12 @@ fn persist_snapshot(
     through_log_id: i64,
     token_count: usize,
 ) -> Result<i64, anyhow::Error> {
+    // row339: 生成元の描画は既にクリーン（構造=u/e/c/s 短縮参照・本文=原文）。v2 マーカーを付けて
+    // read 時 full スクラブをスキップさせ、本文原文を compaction 後も保つ（[`restore_frozen_snapshot`]）。
     let row = opencrab_db::queries::ConversationSnapshotRow {
         id: None,
         session_id: session_id.to_string(),
-        compacted_conversation: compacted.to_string(),
+        compacted_conversation: crate::conversation::frozen_snapshot_with_marker(compacted),
         through_log_id,
         token_count: token_count as i64,
         created_at: None,

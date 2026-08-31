@@ -1253,8 +1253,34 @@ pub(crate) fn strip_inbound_meta_for_display(content: &str) -> String {
 /// 加えて、旧レンダリング由来の legacy 識別子—UUID（subtask/session）・`call_…`（tool call id）・
 /// `"digest":"…"`（モデル不要な内部整合値）—も除去/短縮する。新形式（既に §9A・c/s 番号・→log:N）
 /// には該当パターンが無いので無影響。単一ログの note 本文へは適用しない（利用者本文の過剰除去を避ける）。
+///
+/// row339: **マーカー無しの legacy blob 専用**。載せ替え前の歴史データは構造部分に生識別子が混在し
+/// flat text で本文と区別できないため full スクラブを維持する。新規に凍結する snapshot は生成元の
+/// 描画が既にクリーン（構造=u/e/c/s 短縮参照・本文=原文）なので [`FROZEN_SNAPSHOT_V2_MARKER`] を
+/// 付けてこのスクラブをスキップする（[`restore_frozen_snapshot`]）。世代ゲートで「本文原文」裁定が
+/// compaction 後も破れないようにする。
 pub(crate) fn strip_frozen_snapshot(content: &str) -> String {
     strip_meta_lines(content, scrub_identifiers_for_display)
+}
+
+/// row339: 新規に凍結する snapshot の先頭に付ける世代マーカー。制御文字始まりで実会話行
+/// （`[話者]…`）や legacy blob と衝突しない。付いていれば生成元がクリーンな §9A 描画だと分かる。
+pub(crate) const FROZEN_SNAPSHOT_V2_MARKER: &str = "\u{1}oc-snapshot-v2";
+
+/// 凍結時に [`FROZEN_SNAPSHOT_V2_MARKER`] を先頭付与する（永続化直前・[`persist_snapshot`]）。
+pub(crate) fn frozen_snapshot_with_marker(text: &str) -> String {
+    format!("{FROZEN_SNAPSHOT_V2_MARKER}\n{text}")
+}
+
+/// read 時に凍結 snapshot blob を世代ゲートして復元する（row339）。
+/// - v2（マーカー付き）: 生成元がクリーンなのでスクラブせず**本文原文のまま**復元する
+///   （本文中の UUID/npub/64hex を再マスクしない）。
+/// - legacy（マーカー無し・載せ替え前の歴史データ）: 従来どおり [`strip_frozen_snapshot`] でスクラブ。
+pub(crate) fn restore_frozen_snapshot(blob: &str) -> String {
+    match blob.strip_prefix(FROZEN_SNAPSHOT_V2_MARKER) {
+        Some(rest) => rest.strip_prefix('\n').unwrap_or(rest).to_string(),
+        None => strip_frozen_snapshot(blob),
+    }
 }
 
 /// 生の長識別子（UUID / `call_…` / `"digest":"…"` / bech32 / 32hex 以上）を短縮形へ落とす共通変換。
@@ -4518,6 +4544,43 @@ mod render_refs_tests {
     fn per_log_strip_leaves_uuid_untouched() {
         let body = "予約番号は df58ec83-960c-45e3-b69c-ff493b133afc です";
         assert_eq!(strip_inbound_meta_for_display(body), body);
+    }
+
+    // row339: v2 マーカー付き snapshot（新規凍結）は read 時にスクラブせず本文原文のまま復元する。
+    #[test]
+    fn restore_v2_snapshot_keeps_body_verbatim() {
+        let uuid = "df58ec83-960c-45e3-b69c-ff493b133afc";
+        let npub = format!("npub1{}", "q".repeat(58));
+        // 生成元は既にクリーン（構造=u/e 短縮参照・本文=原文）。
+        let clean = format!("[u1][2026-08-30 06:06:45]e1:\n予約 {uuid} と {npub}");
+        let blob = frozen_snapshot_with_marker(&clean);
+        let out = restore_frozen_snapshot(&blob);
+        assert_eq!(out, clean, "v2 は本文原文のまま復元（マーカーも除去）: {out}");
+        assert!(out.contains(uuid) && out.contains(&npub), "{out}");
+        assert!(
+            !out.contains("<uuid…>") && !out.contains("<npub…>"),
+            "v2 本文が再マスクされた: {out}"
+        );
+    }
+
+    // row339: マーカー無しの legacy blob（載せ替え前の歴史データ）は従来どおりスクラブする。
+    #[test]
+    fn restore_legacy_snapshot_still_scrubs() {
+        let blob = "session=nostr-33196264-5908-4f04-b24a-efd7aa6d2014-caldera へ完了";
+        let out = restore_frozen_snapshot(blob);
+        assert_eq!(
+            out,
+            strip_frozen_snapshot(blob),
+            "legacy は従来スクラブと同一経路"
+        );
+        assert!(out.contains("<uuid…>"), "legacy UUID がスクラブされない: {out}");
+    }
+
+    // row339: 凍結（マーカー付与）→復元の往復で本文が保存される（自己治癒ループの冪等性）。
+    #[test]
+    fn frozen_snapshot_marker_roundtrip_is_lossless() {
+        let clean = "[u1][2026-08-30 06:06:45]e1:\nrunId: e059e80f-960c-45e3-b69c-ff493b133afc";
+        assert_eq!(restore_frozen_snapshot(&frozen_snapshot_with_marker(clean)), clean);
     }
 
     // row295b: subtask_completed は s 番号ヘッダ＋result 本文のみ（生 UUID/定型 field を出さない）。
