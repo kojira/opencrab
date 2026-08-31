@@ -235,8 +235,10 @@ fn spawn_say_consumer(
                         continue;
                     };
                     match deliver_say(&transport, channel, &text).await {
-                        SayDelivery::Posted => {
-                            tracing::info!(%address, "say posted");
+                        SayDelivery::Posted { message_id } => {
+                            // message_id は分割時の**最後のチャンク**（dry-run は None）。
+                            // #872 の 🏁 付け先（最後のチャンク）と整合させるため保持・観測する。
+                            tracing::info!(%address, ?message_id, "say posted");
                             if let Some(origin) = &reply_origin {
                                 // 🏁: 発端メッセージへの返信を配送し終えた（完了サイン）。
                                 react_system(&transport, origin, &reactions.completed).await;
