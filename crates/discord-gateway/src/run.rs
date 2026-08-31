@@ -146,23 +146,43 @@ fn build_on_line(
     })
 }
 
-/// system reaction を発端メッセージへ best-effort で付ける（失敗は warn のみ・非致命）。
-/// legacy `add_reaction_non_fatal` と同じく、付与失敗が turn 処理を巻き込まないようにする。
+/// system reaction を発端メッセージ（origin anchor）へ best-effort で付ける。👀（受理）と
+/// ❌（配送失敗）はこちら——発端に付けるのが正（照合: 旧 message_loop も同じ側）。
 async fn react_system(transport: &Arc<dyn DiscordTransport>, origin: &str, emoji: &str) {
     let Some((channel, message)) = parse_origin(origin) else {
         tracing::debug!(%origin, "skip system reaction: origin not a discord anchor");
         return;
     };
-    match transport
-        .add_system_reaction(&channel, &message, emoji)
-        .await
-    {
+    react_system_on(transport, &channel, &message, emoji).await;
+}
+
+/// (channel, message) を直接指定して system reaction を付ける（失敗は warn のみ・非致命）。
+/// 🏁（完了）は**自分が投稿した say のメッセージ**へ付けるため、origin anchor ではなく
+/// transport の create_message 応答から得た自分の message id をここへ渡す（owner 裁定 row 345）。
+/// legacy `add_reaction_non_fatal` と同じく、付与失敗が turn 処理を巻き込まないようにする。
+async fn react_system_on(
+    transport: &Arc<dyn DiscordTransport>,
+    channel: &str,
+    message: &str,
+    emoji: &str,
+) {
+    match transport.add_system_reaction(channel, message, emoji).await {
         TransportOutcome::Ok(_) => {}
         TransportOutcome::Rejected => {
-            tracing::warn!(%origin, emoji, "system reaction rejected (non-fatal)")
+            tracing::warn!(
+                channel,
+                message,
+                emoji,
+                "system reaction rejected (non-fatal)"
+            )
         }
         TransportOutcome::Indeterminate => {
-            tracing::warn!(%origin, emoji, "system reaction outcome unknown (non-fatal)")
+            tracing::warn!(
+                channel,
+                message,
+                emoji,
+                "system reaction outcome unknown (non-fatal)"
+            )
         }
     }
 }
@@ -227,19 +247,30 @@ fn spawn_say_consumer(
         loop {
             match client.next_live(&address).await {
                 Some(LiveEvent::Message { text, reply_origin }) => {
-                    // DI-16: say は通常発言（reply target は暗黙設定しない）。ただし reply_origin が
-                    // 発端メッセージ（即時ターンの Single）を指すときは、その発端へ完了/失敗の
-                    // system reaction を付ける（🏁/❌）。bundle/曖昧（None）は付ける先が無いので付けない。
+                    // DI-16: say は通常発言（reply target は暗黙設定しない）。reply_origin が発端
+                    // メッセージ（即時ターンの Single）を指すときだけ system reaction を駆動する
+                    // （bundle/曖昧 None は対象外・#869 のゲート踏襲）。付け先は記号ごとに異なる:
+                    //   🏁 完了 → **自分が投稿した say のメッセージ**（owner 裁定 row 345・#869 の
+                    //             発端付けを是正。分割投稿ならこの say の id ＝ 直近の自分の発言）。
+                    //   ❌ 失敗 → 発端メッセージ（自分の発言は生まれていない・照合: 旧実装も発端）。
                     let Some(channel) = &channel else {
                         tracing::warn!(%address, "say dropped; address has no channel component");
                         continue;
                     };
                     match deliver_say(&transport, channel, &text).await {
-                        SayDelivery::Posted => {
+                        SayDelivery::Posted { message_id } => {
                             tracing::info!(%address, "say posted");
-                            if let Some(origin) = &reply_origin {
-                                // 🏁: 発端メッセージへの返信を配送し終えた（完了サイン）。
-                                react_system(&transport, origin, &reactions.completed).await;
+                            if reply_origin.is_some() {
+                                if let Some(own) = &message_id {
+                                    // 🏁: 自分が投稿した say へ「このターンはもう続きの処理をしない」。
+                                    react_system_on(&transport, channel, own, &reactions.completed)
+                                        .await;
+                                } else {
+                                    tracing::debug!(
+                                        %address,
+                                        "skip 🏁: posted say has no message id"
+                                    );
+                                }
                             }
                         }
                         SayDelivery::Failed(e) => {

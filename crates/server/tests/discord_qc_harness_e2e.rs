@@ -752,22 +752,43 @@ async fn scenario_d_system_reactions_accepted_and_completed() {
         captured(&buf)
     );
 
-    // 🏁: 発端への返信（say）を配送し終えた時点で発端メッセージへ付く。
-    let saw_completed = {
+    // 🏁: say を配送し終えた時点で「自分が投稿した say のメッセージ」へ付く（owner 裁定 row 345:
+    // 発端ではなく自分の発言に付ける）。say（kind="say"・自分の投稿）の message id と、同じ id に
+    // 付いた 🏁（system_reaction）を相関させて検証する。
+    let saw_completed_on_own = {
         let buf = buf.clone();
         wait_until(move || {
-            captured(&buf).iter().any(|c| {
+            let caps = captured(&buf);
+            // 自分が投稿した M_SAY ターンの say（本文が B_SAY を含む）の own message id 群。
+            let own_say_mids: Vec<String> = caps
+                .iter()
+                .filter(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(B_SAY))
+                .map(|c| c.message.clone())
+                .filter(|m| !m.is_empty())
+                .collect();
+            // その own message id に 🏁 が付いている。
+            caps.iter().any(|c| {
                 c.kind == "system_reaction"
                     && c.emoji.contains(SYS_COMPLETED)
                     && c.channel == CHANNEL
-                    && c.message == "703"
+                    && own_say_mids.contains(&c.message)
             })
         })
         .await
     };
     assert!(
-        saw_completed,
-        "完了 🏁（system_reaction）が発端メッセージに付かない: {:?}",
+        saw_completed_on_own,
+        "完了 🏁（system_reaction）が自分の say メッセージに付かない: {:?}",
+        captured(&buf)
+    );
+
+    // 付け先誤りの是正: 🏁 は発端メッセージ（703）には**付かない**。
+    let completed_on_origin = captured(&buf).iter().any(|c| {
+        c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == "703"
+    });
+    assert!(
+        !completed_on_origin,
+        "🏁 が発端メッセージ 703 に誤って付いている（#869 の付け先取り違え）: {:?}",
         captured(&buf)
     );
 
