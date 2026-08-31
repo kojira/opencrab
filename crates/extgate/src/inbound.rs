@@ -732,7 +732,8 @@ fn enqueue_turn<R: AgentRuntime>(
     prompt_suffix: &str,
     // 単一メンション turn は発端 said の origin へ返信（say payload の reply_target に載せる）。
     // bundle turn は単一返信先が無いので false（gateway が standalone post で publish・row292）。
-    // gateway 側の pending_turn 相関は activity ended が say より先に届き消えるため当てにしない。
+    // 返信先は say payload の明示 reply_target を正とする（裁定A で ended は say の後になったが、
+    // gateway の pending_turn 相関に依存させず明示値を主にする方針は据え置き）。
     reply_to_origin: bool,
 ) {
     let locks = runtime.session_locks();
@@ -894,7 +895,6 @@ fn enqueue_turn<R: AgentRuntime>(
                     })
                     .await
                 };
-                emit_activity(&state, &instance_id, &binding_id, &activity_id, "ended").await;
                 match turn_res {
                     Ok(turn) => {
                         let effect = match turn {
@@ -903,8 +903,7 @@ fn enqueue_turn<R: AgentRuntime>(
                         };
                         let effect = adjust_inbound_effect(delivery_mode, effect);
                         // 単一メンションは発端 origin を say payload に明示（gateway が e-tag reply）。
-                        // bundle は None（gateway が standalone post で publish・row292）。gateway の
-                        // pending_turn 相関は activity ended が say より先に届き消えるため使わない。
+                        // bundle は None（gateway が standalone post で publish・row292）。
                         apply_delivery_effect(
                             &state,
                             &runtime,
@@ -916,9 +915,19 @@ fn enqueue_turn<R: AgentRuntime>(
                             reply_target.as_deref(),
                         )
                         .await;
+                        // 決着（say/reply/no_reply）の配送**後**に activity ended を出す（統括裁定A
+                        // 2026-08-31）。これで say フレームが ended より先に gateway へ届き、返信ターンは
+                        // saw_say=true になってから ended を見るので、gate-client の CompletedNoReply が
+                        // 沈黙（say 無し）ターンだけに正しく立つ（返信ターンでの偽 CompletedNoReply を撤去）。
+                        emit_activity(&state, &instance_id, &binding_id, &activity_id, "ended")
+                            .await;
                     }
                     Err(_) => {
                         tracing::error!("extgate turn task panicked");
+                        // パニック時は決着を配送できない。turn 境界だけは通知してから close する
+                        // （沈黙ターンと同じく say 無しの ended＝CompletedNoReply 相当）。
+                        emit_activity(&state, &instance_id, &binding_id, &activity_id, "ended")
+                            .await;
                         crate::close::close_live(
                             &state,
                             Some(&instance_id),
