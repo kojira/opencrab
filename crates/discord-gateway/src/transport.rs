@@ -56,6 +56,17 @@ pub trait DiscordTransport: Send + Sync {
 /// ネットワーク無しで検証できる（Nostr の say dry-run を全能力へ広げた形）。
 pub struct DryRunTransport;
 
+/// dry-run で自分の投稿へ与える合成 message id の連番。production は serenity の実 id を返すが、
+/// dry-run でも「自分の投稿 id」を持たせることで 🏁（完了サイン）の付け先＝自分の発言を QC が
+/// 観測できる（発端ではなく自分の投稿に付くことの検証）。snowflake 形（大きめの 10進）にする。
+static DRY_RUN_MSG_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn next_dry_run_message_id() -> String {
+    const BASE: u64 = 9_000_000_000_000_000_000;
+    let n = DRY_RUN_MSG_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    (BASE + n).to_string()
+}
+
 impl DryRunTransport {
     fn log(kind: &str, channel: &str, message: &str, emoji: &str, body: &str) -> TransportOutcome {
         tracing::info!(
@@ -74,7 +85,10 @@ impl DryRunTransport {
 #[async_trait]
 impl DiscordTransport for DryRunTransport {
     async fn create_message(&self, channel_id: &str, content: &str) -> TransportOutcome {
-        Self::log("say", channel_id, "", "", content)
+        // 自分の投稿 id を合成し、say ログの message へ載せる（🏁 の付け先を QC が相関できる）。
+        let message_id = next_dry_run_message_id();
+        Self::log("say", channel_id, &message_id, "", content);
+        TransportOutcome::Ok(json!({"dry_run": true, "kind": "say", "message_id": message_id}))
     }
     async fn reply_message(
         &self,
