@@ -430,7 +430,10 @@ async fn start_core(provider: Arc<dyn LlmProvider>) -> Core {
         .unwrap();
     }
 
-    let extgate = Arc::new(ExtgateState::new(db.clone(), OperatorToken::from_bytes(TOKEN)));
+    let extgate = Arc::new(ExtgateState::new(
+        db.clone(),
+        OperatorToken::from_bytes(TOKEN),
+    ));
     let state = build_app_state(db.clone(), provider);
 
     let dir = tempfile::tempdir().unwrap();
@@ -440,7 +443,13 @@ async fn start_core(provider: Arc<dyn LlmProvider>) -> Core {
         let runtime = state.clone();
         let path = sock.clone();
         tokio::spawn(async move {
-            let _ = serve_uds(listen_state, runtime, resolve_caller_identity_with_owner, path).await;
+            let _ = serve_uds(
+                listen_state,
+                runtime,
+                resolve_caller_identity_with_owner,
+                path,
+            )
+            .await;
         });
     }
     for _ in 0..200 {
@@ -586,7 +595,11 @@ async fn scenario_a_message_becomes_say_and_conversation_has_e_number() {
         })
         .await
     };
-    assert!(ok, "message の say が dry-run に出ない: {:?}", captured(&buf));
+    assert!(
+        ok,
+        "message の say が dry-run に出ない: {:?}",
+        captured(&buf)
+    );
 
     // §9A: discord message が会話に e1 として現れる（core 汎化で discord kind に採番）。
     let saw_e1 = {
@@ -600,7 +613,10 @@ async fn scenario_a_message_becomes_say_and_conversation_has_e_number() {
     );
     // 生 snowflake（channel/message/author id）は会話へ出さない。
     for t in mock.request_texts() {
-        assert!(!t.contains("discord:message:v1:"), "生 origin が会話に露出: {t}");
+        assert!(
+            !t.contains("discord:message:v1:"),
+            "生 origin が会話に露出: {t}"
+        );
     }
 }
 
@@ -632,11 +648,24 @@ async fn scenario_b_reply_resolves_e_number_and_settles() {
         "reply の実 DI 経路が決着しない（e1 解決 or invoke or settle 失敗）: {:?}",
         captured(&buf)
     );
-    assert_eq!(count_kind(&buf, "reply"), 1, "reply が複数回 or 0 回: 自動再送 0");
+    assert_eq!(
+        count_kind(&buf, "reply"),
+        1,
+        "reply が複数回 or 0 回: 自動再送 0"
+    );
     // e1 が発端メッセージ（channel=600, message=701）へ正しく解決されている（誤解決検知）。
-    let reply = captured(&buf).into_iter().find(|c| c.kind == "reply").unwrap();
-    assert_eq!(reply.channel, CHANNEL, "reply 対象 channel が発端と不一致（e1 誤解決）");
-    assert_eq!(reply.message, "701", "reply 対象 message が発端と不一致（e1 誤解決）");
+    let reply = captured(&buf)
+        .into_iter()
+        .find(|c| c.kind == "reply")
+        .unwrap();
+    assert_eq!(
+        reply.channel, CHANNEL,
+        "reply 対象 channel が発端と不一致（e1 誤解決）"
+    );
+    assert_eq!(
+        reply.message, "701",
+        "reply 対象 message が発端と不一致（e1 誤解決）"
+    );
 }
 
 // ==================== (c) reaction(e1, emoji) の実 DI 経路 ====================
@@ -666,9 +695,22 @@ async fn scenario_c_reaction_resolves_e_number_and_settles() {
         "reaction の実 DI 経路が決着しない: {:?}",
         captured(&buf)
     );
-    assert_eq!(count_kind(&buf, "reaction"), 1, "reaction が複数回 or 0 回: 自動再送 0");
+    assert_eq!(
+        count_kind(&buf, "reaction"),
+        1,
+        "reaction が複数回 or 0 回: 自動再送 0"
+    );
     // e1 が発端メッセージ（channel=600, message=702）へ正しく解決されている（誤解決検知）。
-    let react = captured(&buf).into_iter().find(|c| c.kind == "reaction").unwrap();
-    assert_eq!(react.channel, CHANNEL, "reaction 対象 channel が発端と不一致（e1 誤解決）");
-    assert_eq!(react.message, "702", "reaction 対象 message が発端と不一致（e1 誤解決）");
+    let react = captured(&buf)
+        .into_iter()
+        .find(|c| c.kind == "reaction")
+        .unwrap();
+    assert_eq!(
+        react.channel, CHANNEL,
+        "reaction 対象 channel が発端と不一致（e1 誤解決）"
+    );
+    assert_eq!(
+        react.message, "702",
+        "reaction 対象 message が発端と不一致（e1 誤解決）"
+    );
 }

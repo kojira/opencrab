@@ -119,7 +119,13 @@ fn is_decimal(s: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn msg(id: &str, channel: &str, guild: Option<&str>, author: &str, content: &str) -> IncomingMessage {
+    fn msg(
+        id: &str,
+        channel: &str,
+        guild: Option<&str>,
+        author: &str,
+        content: &str,
+    ) -> IncomingMessage {
         IncomingMessage {
             id: id.into(),
             channel_id: channel.into(),
@@ -165,19 +171,28 @@ mod tests {
     fn map_excludes_only_self() {
         let self_bot = "111";
         // 自分の投稿は除外。
-        assert_eq!(map_message(&msg("1", "100", Some("500"), "111", "hi"), self_bot), None);
+        assert_eq!(
+            map_message(&msg("1", "100", Some("500"), "111", "hi"), self_bot),
+            None
+        );
         // 他人（他 bot 含む）は通す。author=Discord 認証済み sender を刻む。
         let mut m = msg("2", "100", Some("500"), "222", "hello");
         m.author.bot = true;
         let mapped = map_message(&m, self_bot).unwrap();
         assert_eq!(mapped.origin, "discord:message:v1:100:2");
-        assert_eq!(mapped.author_id, "222", "author は Discord 認証済み sender（#848）");
+        assert_eq!(
+            mapped.author_id, "222",
+            "author は Discord 認証済み sender（#848）"
+        );
         assert_eq!(mapped.text, "hello");
     }
 
     #[test]
     fn map_rejects_non_snowflake_ids() {
-        assert_eq!(map_message(&msg("x", "100", None, "222", "hi"), "111"), None);
+        assert_eq!(
+            map_message(&msg("x", "100", None, "222", "hi"), "111"),
+            None
+        );
         assert_eq!(map_message(&msg("1", "yy", None, "222", "hi"), "111"), None);
         assert_eq!(map_message(&msg("1", "100", None, "zz", "hi"), "111"), None);
     }

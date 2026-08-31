@@ -102,10 +102,17 @@ pub async fn run_serenity_receive(token: &str, on_line: OnLine) -> anyhow::Resul
     let mut client = Client::builder(token, intents)
         .event_handler(Forwarder { on_line })
         .await
-        .map_err(|e| anyhow::anyhow!("serenity client build failed: {}", crate::secret::redact_token(&e.to_string())))?;
-    client
-        .start()
-        .await
-        .map_err(|e| anyhow::anyhow!("serenity gateway ended: {}", crate::secret::redact_token(&e.to_string())))?;
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "serenity client build failed: {}",
+                crate::secret::redact_token(&e.to_string())
+            )
+        })?;
+    client.start().await.map_err(|e| {
+        anyhow::anyhow!(
+            "serenity gateway ended: {}",
+            crate::secret::redact_token(&e.to_string())
+        )
+    })?;
     Ok(())
 }

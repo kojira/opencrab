@@ -484,7 +484,10 @@ async fn agent_has_live_gateway_reflects_v3_liveness() {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert!(gone, "切断後も live 扱いのまま（liveness が生死を反映しない）");
+    assert!(
+        gone,
+        "切断後も live 扱いのまま（liveness が生死を反映しない）"
+    );
 }
 
 #[tokio::test]

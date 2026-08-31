@@ -170,7 +170,8 @@ mod tests {
         };
         p.validate().unwrap();
         // config には token フィールドが無い（あっても serde が無視する＝InstanceConfig に無い）。
-        let cfg = parse_instance_config(&decode_config_b64(&encode(&sample_config())).unwrap()).unwrap();
+        let cfg =
+            parse_instance_config(&decode_config_b64(&encode(&sample_config())).unwrap()).unwrap();
         assert_eq!(cfg.agent_id, "agent-x");
         assert_eq!(cfg.self_bot_id, "111111111111111111");
     }

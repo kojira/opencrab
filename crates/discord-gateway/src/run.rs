@@ -84,7 +84,11 @@ fn supervise(
     overrides: HarnessOverrides,
 ) {
     // 受信ループ（1 本）: fixture か serenity。ack 済み binding の channel だけ said にする。
-    let on_line = build_on_line(client.clone(), cfg.agent_id.clone(), cfg.self_bot_id.clone());
+    let on_line = build_on_line(
+        client.clone(),
+        cfg.agent_id.clone(),
+        cfg.self_bot_id.clone(),
+    );
     tokio::spawn(async move {
         if let Some(fixture) = overrides.fake_events {
             if let Err(e) = run_fake_events_once(&fixture, on_line).await {
@@ -122,12 +126,7 @@ fn build_on_line(client: Arc<InstanceClient>, agent_id: String, self_bot_id: Str
 }
 
 /// 受信 1 件を said へ。自分の投稿と非 ack channel は core へ送らない（§4.3・§5.1）。
-async fn handle_incoming(
-    client: &InstanceClient,
-    agent_id: &str,
-    self_bot_id: &str,
-    line: &str,
-) {
+async fn handle_incoming(client: &InstanceClient, agent_id: &str, self_bot_id: &str, line: &str) {
     let Some(msg) = parse_event_line(line) else {
         return;
     };
@@ -142,7 +141,13 @@ async fn handle_incoming(
         return;
     }
     match client
-        .post_said_with_author(&address, &mapped.origin, &mapped.author_id, &mapped.text, &[])
+        .post_said_with_author(
+            &address,
+            &mapped.origin,
+            &mapped.author_id,
+            &mapped.text,
+            &[],
+        )
         .await
     {
         Ok(SaidOutcome::Accepted { seq }) => {

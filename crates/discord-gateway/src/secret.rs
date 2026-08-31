@@ -36,7 +36,9 @@ fn looks_like_token(s: &str) -> bool {
     let parts: Vec<&str> = s.split('.').collect();
     parts.len() == 3
         && parts.iter().all(|p| {
-            p.len() >= 6 && p.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            p.len() >= 6
+                && p.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
         })
 }
 

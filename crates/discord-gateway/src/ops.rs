@@ -164,25 +164,33 @@ mod tests {
         let decls = operation_declarations();
         let arr = decls.as_array().unwrap();
         let reply = arr.iter().find(|d| d["name"] == "reply").unwrap();
-        assert_eq!(reply["input_schema"]["properties"]["event"]["format"], "short-ref");
+        assert_eq!(
+            reply["input_schema"]["properties"]["event"]["format"],
+            "short-ref"
+        );
         // text は生本文なので短縮参照ではない。
-        assert!(reply["input_schema"]["properties"]["text"].get("format").is_none());
+        assert!(reply["input_schema"]["properties"]["text"]
+            .get("format")
+            .is_none());
     }
 
     #[tokio::test]
     async fn missing_fields_are_rejected_without_io() {
         let h = DiscordInvokeHandler::new(Arc::new(DryRunTransport));
         assert!(matches!(
-            h.handle("b", "reply", &json!({"event": "discord:message:v1:1:2"})).await,
+            h.handle("b", "reply", &json!({"event": "discord:message:v1:1:2"}))
+                .await,
             InvokeOutcome::Rejected
         ));
         assert!(matches!(
-            h.handle("b", "reaction", &json!({"event": "discord:message:v1:1:2"})).await,
+            h.handle("b", "reaction", &json!({"event": "discord:message:v1:1:2"}))
+                .await,
             InvokeOutcome::Rejected
         ));
         // event が origin でない（未解決/不正）→ Rejected。
         assert!(matches!(
-            h.handle("b", "reply", &json!({"event": "e7", "text": "hi"})).await,
+            h.handle("b", "reply", &json!({"event": "e7", "text": "hi"}))
+                .await,
             InvokeOutcome::Rejected
         ));
         // 宣言外 operation は fail-closed。
@@ -196,16 +204,31 @@ mod tests {
     async fn valid_reply_reaction_resolve_reach_transport() {
         let h = DiscordInvokeHandler::new(Arc::new(DryRunTransport));
         assert!(matches!(
-            h.handle("b", "reply", &json!({"event": "discord:message:v1:100:200", "text": "hi"})).await,
+            h.handle(
+                "b",
+                "reply",
+                &json!({"event": "discord:message:v1:100:200", "text": "hi"})
+            )
+            .await,
             InvokeOutcome::Ok(_)
         ));
         assert!(matches!(
-            h.handle("b", "reaction", &json!({"event": "discord:message:v1:100:200", "emoji": "👍"})).await,
+            h.handle(
+                "b",
+                "reaction",
+                &json!({"event": "discord:message:v1:100:200", "emoji": "👍"})
+            )
+            .await,
             InvokeOutcome::Ok(_)
         ));
         // resolve eN（origin）。
         assert!(matches!(
-            h.handle("b", "resolve", &json!({"ref": "discord:message:v1:100:200"})).await,
+            h.handle(
+                "b",
+                "resolve",
+                &json!({"ref": "discord:message:v1:100:200"})
+            )
+            .await,
             InvokeOutcome::Ok(_)
         ));
         // resolve uN（snowflake）。

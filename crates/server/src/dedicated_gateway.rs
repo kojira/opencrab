@@ -127,7 +127,10 @@ mod tests {
         // 他メソッドは inner へ委譲。
         assert_eq!(deco.kind(), "discord");
         deco.start("x").await.unwrap();
-        assert!(inner.started.load(Ordering::SeqCst), "start が inner へ委譲される");
+        assert!(
+            inner.started.load(Ordering::SeqCst),
+            "start が inner へ委譲される"
+        );
     }
 
     #[tokio::test]

@@ -67,10 +67,20 @@ impl DiscordTransport for DryRunTransport {
     async fn create_message(&self, channel_id: &str, content: &str) -> TransportOutcome {
         Self::log("say", channel_id, "", "", content)
     }
-    async fn reply_message(&self, channel_id: &str, message_id: &str, content: &str) -> TransportOutcome {
+    async fn reply_message(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        content: &str,
+    ) -> TransportOutcome {
         Self::log("reply", channel_id, message_id, "", content)
     }
-    async fn add_reaction(&self, channel_id: &str, message_id: &str, emoji: &str) -> TransportOutcome {
+    async fn add_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> TransportOutcome {
         Self::log("reaction", channel_id, message_id, emoji, "")
     }
     async fn get_message(&self, channel_id: &str, message_id: &str) -> TransportOutcome {
@@ -142,7 +152,12 @@ impl DiscordTransport for SerenityTransport {
         }
     }
 
-    async fn reply_message(&self, channel_id: &str, message_id: &str, content: &str) -> TransportOutcome {
+    async fn reply_message(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        content: &str,
+    ) -> TransportOutcome {
         let (Some(ch), Some(mid)) = (channel(channel_id), message(message_id)) else {
             return TransportOutcome::Rejected;
         };
@@ -155,7 +170,12 @@ impl DiscordTransport for SerenityTransport {
         }
     }
 
-    async fn add_reaction(&self, channel_id: &str, message_id: &str, emoji: &str) -> TransportOutcome {
+    async fn add_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> TransportOutcome {
         let (Some(ch), Some(mid)) = (channel(channel_id), message(message_id)) else {
             return TransportOutcome::Rejected;
         };
