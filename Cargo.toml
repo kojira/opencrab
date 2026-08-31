@@ -16,7 +16,6 @@ members = [
     "crates/server",
     "crates/cli",
     "crates/voice",
-    "crates/port",
     "crates/extgate",
 ]
 
