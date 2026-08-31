@@ -437,6 +437,33 @@ mod tests {
         }
     }
 
+    /// ドリフト固定: 自己受信 drop の判定
+    /// （`crate::gateway::content_is_subtask_lifecycle_payload`）は、ここの
+    /// lifecycle payload builder の**実出力の 1 行目ヘッダ**に一致し続けなければならない。
+    /// ヘッダ書式を変えて判定側を更新し忘れると、自分の webhook 投稿の自己受信ループが
+    /// 静かに戻る。書式の出所であるこのモジュールで固定する。
+    #[test]
+    fn lifecycle_headers_are_recognized_by_self_receive_drop() {
+        let started = build_started_messages(&meta(), "task body");
+        assert!(
+            crate::gateway::content_is_subtask_lifecycle_payload(&started[0].content),
+            "started ヘッダが drop 判定に一致しない: {:?}",
+            started[0].content
+        );
+        for status in ["completed", "failed", "timed_out", "aborted"] {
+            let m = build_terminal_message(status, "r", "s", Some(1), "detail");
+            assert!(
+                crate::gateway::content_is_subtask_lifecycle_payload(&m),
+                "terminal({status}) ヘッダが drop 判定に一致しない: {m:?}"
+            );
+        }
+        let progress = build_progress_message("r", "s", "halfway");
+        assert!(
+            crate::gateway::content_is_subtask_lifecycle_payload(&progress),
+            "progress ヘッダが drop 判定に一致しない: {progress:?}"
+        );
+    }
+
     #[test]
     fn test_build_started_messages_metadata_then_short_body_without_attachment() {
         let msgs = build_started_messages(&meta(), "abcdef");
