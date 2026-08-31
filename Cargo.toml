@@ -20,7 +20,6 @@ members = [
     "crates/store",
     "crates/engine",
     "crates/social-runtime",
-    "crates/plugd",
     "crates/nostr-gate",
     "crates/extgate",
 ]
