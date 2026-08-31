@@ -980,10 +980,18 @@ async fn main() -> anyhow::Result<()> {
     // v3_shadow/v3 のとき、enabled な agent_discord_config 各体について instance（v3 は binding も）を
     // 敷き、discord-gateway プロセスを起こす。**UDS listener を spawn した後**に行う（子が core socket へ
     // 接続できるように。子側 InstanceClient は接続を再試行する）。
+    // #865: discord-gateway 子プロセスの監視/再起動/後始末（[`discord_supervisor`]）を配線する。
+    // shutdown 信号（SIGINT/SIGTERM）でこの `watch` を立てると、各 supervisor は再起動せず子を
+    // terminate する（孤児防止）。legacy（provisions_instance=false）のときは None のまま。
+    #[cfg(feature = "discord")]
+    let mut discord_shutdown_tx: Option<tokio::sync::watch::Sender<bool>> = None;
     #[cfg(feature = "discord")]
     if discord_ingress.provisions_instance() {
         use anyhow::Context as _;
         use opencrab_server::discord_provision::{ignite_discord_instances, DiscordPlacementPlan};
+        use opencrab_server::discord_supervisor::{
+            supervise, GatewayChildSpawner, SupervisorConfig,
+        };
 
         // placement.json（非秘密）の出力先。DB と同じボリューム（内蔵ディスクに置かない方針）。
         let placement_dir = std::path::Path::new(&cfg.database.path)
@@ -995,13 +1003,20 @@ async fn main() -> anyhow::Result<()> {
         let bin = resolve_discord_gateway_bin();
         let core_socket = gate_socket_for_discord.clone();
 
+        // supervisor 群の shutdown 信号。SIGINT/SIGTERM で `true` を送ると各 supervisor は再起動せず
+        // 子を terminate する。
+        let (sd_tx, sd_rx) = tokio::sync::watch::channel(false);
+        discord_shutdown_tx = Some(sd_tx);
+        let supervisor_cfg = SupervisorConfig::default();
+
         let spawn = move |plan: &DiscordPlacementPlan, bot_token: &str| -> anyhow::Result<()> {
             let Some(core_socket) = core_socket.as_deref() else {
                 anyhow::bail!(
                     "gate.listen_socket 未設定のため discord-gateway を起動できない（V3 は UDS 必須）"
                 );
             };
-            // placement.json（秘密なし。bot token は載せない）。
+            // placement.json（秘密なし。bot token は載せない）。再起動でも同じ file を再 exec するので
+            // ここで 1 度だけ書けばよい。
             let placement = serde_json::json!({
                 "core_socket": core_socket,
                 "instances": [{
@@ -1017,19 +1032,21 @@ async fn main() -> anyhow::Result<()> {
             std::fs::write(&path, serde_json::to_vec_pretty(&placement)?)
                 .with_context(|| format!("placement 書き出し失敗: {}", path.display()))?;
 
-            // 子プロセス spawn。bot token は **子の env のみ**（親 env も argv も汚さない）。
-            let mut cmd = std::process::Command::new(&bin);
-            cmd.arg(&path);
-            cmd.env("DISCORD_BOT_TOKEN", bot_token);
-            let child = cmd
-                .spawn()
-                .with_context(|| format!("discord-gateway ({}) の spawn 失敗", bin.display()))?;
-            // 最小配線: detach（監視/再起動/shutdown は後続 issue）。子は core UDS へ自力で再接続する。
+            // detach をやめ、監視付き supervisor を起こす。bot token は **子の env のみ**（親 env も
+            // argv も汚さない・ログにも出さない）で GatewayChildSpawner が注入する。supervisor は
+            // 子の終了検知・指数バックオフ再起動・shutdown 時の terminate を担う（#865）。子が死んで
+            // 再接続し直すと #866 の liveness probe が再び true になり legacy が退く（外形不減を維持）。
+            let spawner = std::sync::Arc::new(GatewayChildSpawner::new(
+                bin.clone(),
+                path,
+                bot_token.to_string(),
+                plan.agent_id.clone(),
+            ));
+            tokio::spawn(supervise(spawner, supervisor_cfg.clone(), sd_rx.clone()));
             tracing::info!(
                 agent_id = %plan.agent_id,
-                pid = child.id(),
                 bin = %bin.display(),
-                "discord-gateway 子プロセス起動（token は env 注入）"
+                "discord-gateway supervisor 起動（監視/再起動/後始末つき・token は env 注入）"
             );
             Ok(())
         };
@@ -1063,9 +1080,56 @@ async fn main() -> anyhow::Result<()> {
     let addr = format!("0.0.0.0:{}", cfg.gateway.rest.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("Server listening on {}", addr);
+
+    // #865: SIGINT/SIGTERM を受けたら axum を drain しつつ discord-gateway 子を terminate する
+    // （孤児プロセス防止）。signal が来なければ従来どおり serve は戻らない（挙動不変）。
+    #[cfg(feature = "discord")]
+    {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                wait_for_os_shutdown().await;
+                tracing::info!(
+                    "shutdown signal received: draining and terminating discord-gateway children"
+                );
+                if let Some(tx) = &discord_shutdown_tx {
+                    // 各 supervisor は再起動せず子を terminate する。
+                    let _ = tx.send(true);
+                    // supervisor が子を kill し切る猶予（kill_on_drop も backstop として併用）。
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                }
+            })
+            .await?;
+    }
+    #[cfg(not(feature = "discord"))]
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+/// SIGINT（Ctrl-C）または SIGTERM を待つ。graceful shutdown のトリガに使う。
+#[cfg(feature = "discord")]
+async fn wait_for_os_shutdown() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            Err(e) => {
+                // SIGTERM ハンドラを張れない場合でも Ctrl-C は拾えるようにする。
+                tracing::warn!(error = %e, "SIGTERM ハンドラを設置できない（Ctrl-C のみ待つ）");
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 #[cfg(feature = "nostr")]
