@@ -145,8 +145,21 @@ impl DiscordGateway {
         self.voice.clone()
     }
 
+    /// client タスクの接続死検知を再武装する（#337 NIT-2）。
+    ///
+    /// 同一インスタンスを shutdown → 再 start した場合、`shutdown()` が立てた
+    /// `shutting_down` フラグをここで倒しておかないと、再 start 後に client タスクが
+    /// 接続死しても監視タスクが「意図した停止」と誤認して二度と鳴らなくなる（恒久沈黙）。
+    /// `start()` の冒頭で必ず呼ぶ。
+    fn rearm_client_death_detection(&self) {
+        self.shutting_down.store(false, Ordering::SeqCst);
+    }
+
     /// Bot接続を開始する（バックグラウンドタスクとして起動）
     pub async fn start(&self) -> Result<()> {
+        // #337 NIT-2: 前回 shutdown 分のフラグを倒し、接続死検知を再武装する。
+        self.rearm_client_death_detection();
+
         let intents = GatewayIntents::GUILD_MESSAGES
             | GatewayIntents::DIRECT_MESSAGES
             | GatewayIntents::MESSAGE_CONTENT
@@ -983,6 +996,41 @@ mod tests {
         };
         let _modal = CreateModal::new(&spec.modal_custom_id, &spec.title)
             .components(spec.components.clone());
+    }
+
+    /// #337 NIT-2: 同一インスタンスを shutdown → 再 start しても接続死検知が鳴ること。
+    ///
+    /// リセットが無いと `shutdown()` が立てた `shutting_down` が残り、再 start 後に
+    /// client タスクが死んでも「意図した停止」と誤認して恒久沈黙する。`start()` 冒頭の
+    /// 再武装（`rearm_client_death_detection`）でその穴が塞がっていることを固定する。
+    #[tokio::test]
+    async fn restart_rearms_client_death_detection() {
+        let gw = DiscordGateway::new("test-token");
+        // 初期は「意図した停止」ではない → 接続死は鳴る状態。
+        assert!(!gw.shutting_down.load(Ordering::SeqCst));
+
+        // shutdown() で意図停止フラグが立ち、以後の client タスク終了は沈黙する
+        // （shard_manager は None なので実ネットワークには出ない）。
+        gw.shutdown().await;
+        assert!(gw.shutting_down.load(Ordering::SeqCst));
+        assert!(
+            !crate::owner_warning::warn_discord_client_task_exited(
+                gw.shutting_down.load(Ordering::SeqCst),
+                "ok"
+            ),
+            "shutdown 直後の終了は沈黙するはず"
+        );
+
+        // 再 start 冒頭の再武装で検知が戻り、接続死がまた鳴るようになる。
+        gw.rearm_client_death_detection();
+        assert!(!gw.shutting_down.load(Ordering::SeqCst));
+        assert!(
+            crate::owner_warning::warn_discord_client_task_exited(
+                gw.shutting_down.load(Ordering::SeqCst),
+                "error: Gateway closed: 4004"
+            ),
+            "再 start 後は接続死検知がまた鳴ること（恒久沈黙の穴が塞がっている）"
+        );
     }
 
     #[test]
