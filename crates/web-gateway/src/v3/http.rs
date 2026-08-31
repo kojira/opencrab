@@ -270,7 +270,8 @@ fn live_to_event(ev: &LiveEvent) -> Option<Event> {
         } => Some(Event::default().event("activity").data(
             json!({"activity_id": activity_id, "state": state, "origin": origin}).to_string(),
         )),
-        LiveEvent::CompletedNoReply => {
+        // web は返信先アンカーを使わないので reply_origin は無視する（SSE 外形は不変）。
+        LiveEvent::CompletedNoReply { .. } => {
             Some(Event::default().event("completed_no_reply").data("{}"))
         }
         // R3: web SSE は失敗を通知イベントとして流す（reply_origin は Nostr 固有の e-tag 用途）。

@@ -56,6 +56,17 @@ pub trait DiscordTransport: Send + Sync {
 /// ネットワーク無しで検証できる（Nostr の say dry-run を全能力へ広げた形）。
 pub struct DryRunTransport;
 
+/// dry-run で自分の投稿へ与える合成 message id の連番。production は serenity の実 id を返すが、
+/// dry-run でも「自分の投稿 id」を持たせることで 🏁（完了サイン）の付け先＝自分の発言を QC が
+/// 観測できる（発端ではなく自分の投稿に付くことの検証）。snowflake 形（大きめの 10進）にする。
+static DRY_RUN_MSG_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn next_dry_run_message_id() -> String {
+    const BASE: u64 = 9_000_000_000_000_000_000;
+    let n = DRY_RUN_MSG_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    (BASE + n).to_string()
+}
+
 impl DryRunTransport {
     fn log(kind: &str, channel: &str, message: &str, emoji: &str, body: &str) -> TransportOutcome {
         tracing::info!(
@@ -74,7 +85,10 @@ impl DryRunTransport {
 #[async_trait]
 impl DiscordTransport for DryRunTransport {
     async fn create_message(&self, channel_id: &str, content: &str) -> TransportOutcome {
-        Self::log("say", channel_id, "", "", content)
+        // 自分の投稿 id を合成し、say ログの message へ載せる（🏁 の付け先を QC が相関できる）。
+        let message_id = next_dry_run_message_id();
+        Self::log("say", channel_id, &message_id, "", content);
+        TransportOutcome::Ok(json!({"dry_run": true, "kind": "say", "message_id": message_id}))
     }
     async fn reply_message(
         &self,
@@ -239,6 +253,85 @@ impl DiscordTransport for SerenityTransport {
                 Err(_) => TransportOutcome::Rejected,
             },
             Err(_) => TransportOutcome::Rejected,
+        }
+    }
+}
+
+/// テスト用の記録 transport。say/reply の**呼び出し順・本文**を記録し、message_id を連番で返す。
+/// 分割の逐次送信・fail-fast・最後のチャンク id を、トークン/ネットワーク無しで検証するために使う。
+#[cfg(test)]
+pub(crate) mod testfake {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    pub(crate) struct RecordingTransport {
+        /// (kind, body) の呼び出し列。kind は "say"（create_message）/ "reply"（reply_message）。
+        pub calls: Mutex<Vec<(String, String)>>,
+        /// この index（0 始まり）の write を失敗させる。None なら全成功。
+        pub fail_at: Option<usize>,
+        /// 失敗時に Rejected でなく Indeterminate を返す。
+        pub indeterminate: bool,
+    }
+
+    impl RecordingTransport {
+        fn record_write(&self, kind: &str, body: &str) -> TransportOutcome {
+            let mut c = self.calls.lock().unwrap();
+            let idx = c.len();
+            c.push((kind.to_string(), body.to_string()));
+            if Some(idx) == self.fail_at {
+                return if self.indeterminate {
+                    TransportOutcome::Indeterminate
+                } else {
+                    TransportOutcome::Rejected
+                };
+            }
+            TransportOutcome::Ok(json!({ "message_id": (1000 + idx).to_string() }))
+        }
+
+        pub(crate) fn bodies(&self) -> Vec<String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, b)| b.clone())
+                .collect()
+        }
+
+        pub(crate) fn kinds(&self) -> Vec<String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(k, _)| k.clone())
+                .collect()
+        }
+    }
+
+    #[async_trait]
+    impl DiscordTransport for RecordingTransport {
+        async fn create_message(&self, _channel_id: &str, content: &str) -> TransportOutcome {
+            self.record_write("say", content)
+        }
+        async fn reply_message(
+            &self,
+            _channel_id: &str,
+            _message_id: &str,
+            content: &str,
+        ) -> TransportOutcome {
+            self.record_write("reply", content)
+        }
+        async fn add_reaction(&self, _c: &str, _m: &str, _e: &str) -> TransportOutcome {
+            TransportOutcome::Ok(json!({"reacted": true}))
+        }
+        async fn add_system_reaction(&self, _c: &str, _m: &str, _e: &str) -> TransportOutcome {
+            TransportOutcome::Ok(json!({"reacted": true}))
+        }
+        async fn get_message(&self, _c: &str, _m: &str) -> TransportOutcome {
+            TransportOutcome::Rejected
+        }
+        async fn get_user(&self, _u: &str) -> TransportOutcome {
+            TransportOutcome::Rejected
         }
     }
 }

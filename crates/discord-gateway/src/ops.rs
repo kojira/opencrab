@@ -91,6 +91,38 @@ fn to_invoke_outcome(out: TransportOutcome) -> InvokeOutcome {
     }
 }
 
+/// reply DI 本文を Discord 上限で分割して配送する。
+///
+/// 設計 §6.2 は reply の exact API payload / result shape を**要裁定・未確認**とするため、ここは
+/// 最小として delivery canon の「長文 chunk」を say と同じ規則（[`crate::post::split_for_discord`]）で
+/// 適用する。分割時は **先頭チャンクだけを reply（reference 付き）**、以降は同 channel の通常投稿として
+/// **発生順に逐次**送る。fail-fast（既送分はそのまま・以降送らない・自動再送 0）。返す result は say と
+/// 同じく**最後のチャンク**の outcome（message id）。※ 分割時に返す eN が「返信そのもの」ではなく
+/// 末尾の続きメッセージを指す点は要裁定（統括判断）。
+async fn deliver_reply(
+    transport: &Arc<dyn DiscordTransport>,
+    channel_id: &str,
+    message_id: &str,
+    text: &str,
+) -> TransportOutcome {
+    let mut last: Option<TransportOutcome> = None;
+    for (i, chunk) in crate::post::split_for_discord(text).into_iter().enumerate() {
+        let out = if i == 0 {
+            transport
+                .reply_message(channel_id, message_id, &chunk)
+                .await
+        } else {
+            transport.create_message(channel_id, &chunk).await
+        };
+        match out {
+            ok @ TransportOutcome::Ok(_) => last = Some(ok),
+            // fail-fast: Rejected / Indeterminate はそのまま返し以降のチャンクは送らない。
+            other => return other,
+        }
+    }
+    last.unwrap_or(TransportOutcome::Rejected)
+}
+
 #[async_trait]
 impl InvokeHandler for DiscordInvokeHandler {
     async fn handle(&self, _binding_id: &str, operation: &str, payload: &Value) -> InvokeOutcome {
@@ -104,7 +136,7 @@ impl InvokeHandler for DiscordInvokeHandler {
                 let Some((ch, msg)) = parse_origin(event) else {
                     return InvokeOutcome::Rejected;
                 };
-                to_invoke_outcome(self.transport.reply_message(&ch, &msg, text).await)
+                to_invoke_outcome(deliver_reply(&self.transport, &ch, &msg, text).await)
             }
             "reaction" => {
                 let (Some(event), Some(emoji)) =
@@ -241,5 +273,69 @@ mod tests {
             h.handle("b", "resolve", &json!({"ref": "garbage"})).await,
             InvokeOutcome::Rejected
         ));
+    }
+
+    #[tokio::test]
+    async fn short_reply_is_single_reply_call() {
+        use crate::transport::testfake::RecordingTransport;
+        let rec = Arc::new(RecordingTransport::default());
+        let out = deliver_reply(
+            &(rec.clone() as Arc<dyn DiscordTransport>),
+            "100",
+            "200",
+            "hi",
+        )
+        .await;
+        assert_eq!(rec.kinds(), vec!["reply"], "2000字以下は 1 通の reply");
+        assert!(matches!(out, TransportOutcome::Ok(_)));
+    }
+
+    #[tokio::test]
+    async fn long_reply_first_chunk_is_reply_rest_are_plain_and_last_id_returned() {
+        use crate::transport::testfake::RecordingTransport;
+        let rec = Arc::new(RecordingTransport::default());
+        // 2500 字 → 2 チャンク: [0]=reply(reference 付き) / [1]=通常投稿。
+        let out = deliver_reply(
+            &(rec.clone() as Arc<dyn DiscordTransport>),
+            "100",
+            "200",
+            &"あ".repeat(2500),
+        )
+        .await;
+
+        assert_eq!(
+            rec.kinds(),
+            vec!["reply", "say"],
+            "先頭のみ reply・以降は通常投稿"
+        );
+        let bodies = rec.bodies();
+        assert_eq!(bodies[0].chars().count(), 2000);
+        assert_eq!(bodies[1].chars().count(), 500);
+        assert_eq!(bodies.concat(), "あ".repeat(2500), "順序保証・欠落なし");
+        // 最後のチャンク（2 回目・連番 1001）の message_id を運ぶ。
+        match out {
+            TransportOutcome::Ok(v) => {
+                assert_eq!(v.get("message_id").and_then(|m| m.as_str()), Some("1001"))
+            }
+            _ => panic!("expected Ok outcome"),
+        }
+    }
+
+    #[tokio::test]
+    async fn long_reply_fail_fast_stops_on_mid_chunk_error() {
+        use crate::transport::testfake::RecordingTransport;
+        let rec = Arc::new(RecordingTransport {
+            fail_at: Some(1),
+            ..Default::default()
+        });
+        let out = deliver_reply(
+            &(rec.clone() as Arc<dyn DiscordTransport>),
+            "100",
+            "200",
+            &"い".repeat(5000),
+        )
+        .await;
+        assert!(matches!(out, TransportOutcome::Rejected));
+        assert_eq!(rec.bodies().len(), 2, "途中失敗で以降のチャンクは送らない");
     }
 }

@@ -1193,8 +1193,7 @@ async fn delivery_ok_rejected_and_disconnect() {
     }
     let say = saw_say.expect("say");
     // 単一メンション turn の say は発端 said の origin を reply_target に載せる（gateway が
-    // e-tag reply する。gateway の pending_turn 相関は activity ended が say より先に届き
-    // 消えるため、返信先は payload で明示する）。
+    // e-tag reply する。裁定A で ended は say の後になったが、返信先は payload で明示する方針）。
     assert_eq!(
         say["payload"],
         json!({"text": "hello from agent", "reply_target": "d1"})
@@ -1364,6 +1363,95 @@ async fn noreply_empty_failed_make_zero_say() {
         .query_row("SELECT COUNT(*) FROM deliveries", [], |r| r.get(0))
         .unwrap();
     assert_eq!(n, 0);
+}
+
+// 裁定A（2026-08-31）: 決着（say/no_reply）を配送した**後**に activity ended を出す。
+// 返信ターンでは say フレームが ended より先に届き、gate-client は saw_say=true を見てから
+// ended を処理するので、返信ターンで偽 CompletedNoReply が立たない（＝Discord の偽 🤐 撤去）。
+#[tokio::test]
+async fn reply_turn_emits_say_before_ended() {
+    let h = Harness::start().await;
+    let (mut s, _, binding_id) = ready_pair(&h).await;
+    write_frame(
+        &mut s,
+        &json!({
+            "id": "s1",
+            "m": "said",
+            "binding_id": binding_id,
+            "origin": "d1",
+            "author_id": "u1",
+            "text": "hi",
+            "attachments": []
+        }),
+    )
+    .await;
+    let _ = read_frame(&mut s).await; // said ok
+    let mut order: Vec<&str> = Vec::new();
+    for _ in 0..80 {
+        if let Some(v) = read_frame_opt(&mut s).await {
+            match v["m"].as_str() {
+                Some("say") => {
+                    order.push("say");
+                    write_frame(&mut s, &json!({"id": v["id"], "m": "ok"})).await;
+                }
+                Some("activity") if v["state"] == "ended" => order.push("ended"),
+                _ => {}
+            }
+        }
+        if order.contains(&"say") && order.contains(&"ended") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let say_idx = order.iter().position(|x| *x == "say").expect("say frame");
+    let ended_idx = order
+        .iter()
+        .position(|x| *x == "ended")
+        .expect("ended frame");
+    assert!(
+        say_idx < ended_idx,
+        "say は ended より先に届く（裁定A）: {order:?}"
+    );
+}
+
+// 沈黙（NO_REPLY）ターンは ended を出すが say は出さない。gate-client はこの ended で
+// saw_say=false を見て CompletedNoReply を正しく立てる（＝真の沈黙にだけ 🤐）。
+#[tokio::test]
+async fn no_reply_turn_emits_ended_without_say() {
+    let h = Harness::start().await;
+    let (mut s, _, binding_id) = ready_pair(&h).await;
+    *h.runtime.reply.lock().unwrap() = "NO_REPLY".into();
+    write_frame(
+        &mut s,
+        &json!({
+            "id": "s1",
+            "m": "said",
+            "binding_id": binding_id,
+            "origin": "nr",
+            "author_id": "u1",
+            "text": "hi",
+            "attachments": []
+        }),
+    )
+    .await;
+    let _ = read_frame(&mut s).await; // said ok
+    let mut saw_say = false;
+    let mut saw_ended = false;
+    for _ in 0..80 {
+        if let Some(v) = read_frame_opt(&mut s).await {
+            match v["m"].as_str() {
+                Some("say") => saw_say = true,
+                Some("activity") if v["state"] == "ended" => saw_ended = true,
+                _ => {}
+            }
+        }
+        if saw_ended {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(saw_ended, "沈黙ターンでも activity ended は出る");
+    assert!(!saw_say, "沈黙（NO_REPLY）ターンで say は出ない");
 }
 
 #[tokio::test]
