@@ -265,7 +265,7 @@ impl GatewayActions for DiscordGatewayActions {
             GatewayActionDef {
                 name: "discord_add_reaction".to_string(),
                 class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::Blocked, sharing: opencrab_gateway::ToolSharing::ConversationBound },
-                description: "Discordメッセージにリアクション（絵文字）を追加する。Unicode絵文字（例: ⚡）またはカスタム絵文字（name:id形式）を指定できる。テキストで返すほどでもない反応は、これでリアクションだけ付けて応答本文を NO_REPLY にしてよい。".to_string(),
+                description: "Discordメッセージにリアクション（絵文字）を追加する。Unicode絵文字（例: ⚡）またはカスタム絵文字（name:id形式）を指定できる。テキストで返すほどでもない反応は、これでリアクションだけ付けて応答本文を NO_REPLY にしてよい。複数のリアクションは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -777,6 +777,8 @@ mod tests {
             "「リアクションだけで応じてよい」が反転／消失している: {}",
             def.description
         );
+        assert!(def.description.contains("1回の応答"));
+        assert!(def.description.contains("呼び直す必要はない"));
     }
 
     #[test]

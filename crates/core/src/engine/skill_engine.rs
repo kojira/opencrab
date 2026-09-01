@@ -627,8 +627,44 @@ impl SkillEngine {
                 }
             }
 
-            // If there are tool calls, execute them and continue the loop.
+            // If there are tool calls, execute them. A generation containing only allowed
+            // utterance calls completes the turn without another LLM call; query/tool calls
+            // still produce tool results and continue the loop.
             if !tool_calls.is_empty() {
+                // 発話クラスだけで完結した生成は、普通の発話と同じく 1 生成で終了する（R7・
+                // row360 / #880）。照会/道具、または permission denied の発話が 1 つでもあれば
+                // provider の tool_call/tool_result 対を作って次の LLM 呼び出しへ進む。
+                let next_llm_call_needed = tool_calls.iter().any(|tc| {
+                    !self.is_utterance_tool(&tc.function.name)
+                        || !self.is_action_allowed(&tc.function.name)
+                });
+
+                if !next_llm_call_needed {
+                    for tool_call in &tool_calls {
+                        total_tool_calls += 1;
+                        let tool_name = &tool_call.function.name;
+                        let args = tool_call.arguments_json();
+                        let _ = self
+                            .executor
+                            .execute_with_id(tool_name, &args, &tool_call.id)
+                            .await;
+                        tracing::debug!(
+                            iteration = iterations,
+                            tool = %tool_name,
+                            id = %tool_call.id,
+                            stage = "utterance",
+                            "turn: 純発話生成を配送（1 生成で完結・機械行なし）"
+                        );
+                    }
+                    return Ok(EngineResult {
+                        response: content.unwrap_or_default(),
+                        iterations,
+                        tool_calls_made: total_tool_calls,
+                        stopped_by_limit: false,
+                        xml_fallback_parses,
+                    });
+                }
+
                 // Add the assistant message with tool calls (arguments already
                 // canonical Strings, so no Value->String conversion needed).
                 messages.push(Message {
@@ -650,11 +686,11 @@ impl SkillEngine {
                 // 発話クラス（reply/reaction/repost・§3.3.1 C6）の tool_call は**機械行を
                 // 永続しない**。発話の本文は配送経路が speech ログとして残す（本文＋関係注記）
                 // ので、ここで永続 tool_call 行から除外する。照会/道具クラスの call は従来どおり。
-                if !self.on_tool_call.is_empty() {
-                    let persisted: Vec<&ToolCall> = tool_calls
-                        .iter()
-                        .filter(|tc| !self.is_utterance_tool(&tc.function.name))
-                        .collect();
+                let persisted: Vec<&ToolCall> = tool_calls
+                    .iter()
+                    .filter(|tc| !self.is_utterance_tool(&tc.function.name))
+                    .collect();
+                if !persisted.is_empty() && !self.on_tool_call.is_empty() {
                     let calls_json = serde_json::to_string(&persisted).unwrap_or_default();
                     let assistant_content = content.clone().unwrap_or_default();
                     for cb in &self.on_tool_call {
@@ -778,12 +814,11 @@ impl SkillEngine {
                     // Value for the executor boundary (empty object on malformed).
                     let args = tool_call.arguments_json();
 
-                    // 発話クラス（撃ちっぱなし・§3.3.1 C3/C6）: inline 実行して配送するが、
-                    // subtask/settle/resume は起こさず、モデルへ領収書（tool_result 本文）を
-                    // 返さない。provider の tool_call/tool_result 対要求は**データを持たない
-                    // 最小 ack**で満たし（R7）、on_tool_result（永続機械行）は呼ばない。本文は
-                    // 配送経路が speech として永続する（C6）。失敗は say と同一経路で
-                    // gateway が turn_failed/❌・log に表面化する（C9・領収書は返さない）。
+                    // 照会/道具と混在した発話クラス（§3.3.1 C3/C6）: inline 配送するが、
+                    // subtask/settle/resume は起こさず、モデルへ領収書本文を返さない。次の LLM
+                    // 呼び出しが不可避な混在時だけ、provider の tool_call/tool_result 対要求を
+                    // データを持たない最小 ack で満たす（R7）。on_tool_result（永続機械行）は
+                    // 呼ばず、本文は配送経路が speech として永続する（C6）。
                     if self.is_utterance_tool(tool_name) {
                         let _ = self
                             .executor
@@ -1563,19 +1598,33 @@ mod tests {
 
     struct MockLlm {
         responses: std::sync::Mutex<Vec<ChatResponse>>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl MockLlm {
         fn new(responses: Vec<ChatResponse>) -> Self {
             Self {
                 responses: std::sync::Mutex::new(responses),
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             }
+        }
+
+        fn counting(responses: Vec<ChatResponse>) -> (Self, Arc<std::sync::atomic::AtomicUsize>) {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            (
+                Self {
+                    responses: std::sync::Mutex::new(responses),
+                    calls: calls.clone(),
+                },
+                calls,
+            )
         }
     }
 
     #[async_trait]
     impl LlmClient for MockLlm {
         async fn chat(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mut responses = self.responses.lock().unwrap();
             if responses.is_empty() {
                 anyhow::bail!("no more mock responses");
@@ -1586,16 +1635,22 @@ mod tests {
 
     struct MockExecutor {
         results: std::collections::HashMap<String, ActionResult>,
+        calls: Option<Arc<std::sync::Mutex<Vec<String>>>>,
     }
 
     impl MockExecutor {
         fn new() -> Self {
             Self {
                 results: std::collections::HashMap::new(),
+                calls: None,
             }
         }
         fn add_result(mut self, name: &str, result: ActionResult) -> Self {
             self.results.insert(name.to_string(), result);
+            self
+        }
+        fn with_call_log(mut self, calls: Arc<std::sync::Mutex<Vec<String>>>) -> Self {
+            self.calls = Some(calls);
             self
         }
     }
@@ -1603,6 +1658,9 @@ mod tests {
     #[async_trait]
     impl ActionExecutor for MockExecutor {
         async fn execute(&self, name: &str, _args: &Value) -> ActionResult {
+            if let Some(calls) = &self.calls {
+                calls.lock().unwrap().push(name.to_string());
+            }
             self.results.get(name).cloned().unwrap_or(ActionResult {
                 success: false,
                 data: serde_json::json!(null),
@@ -2204,7 +2262,10 @@ mod tests {
 
     impl crate::ToolDispatcher for RecordingDispatcher {
         fn should_dispatch(&self, tool_name: &str) -> bool {
-            !self.control.contains(tool_name)
+            !self.is_utterance(tool_name) && !self.control.contains(tool_name)
+        }
+        fn is_utterance(&self, tool_name: &str) -> bool {
+            matches!(tool_name, "reply" | "reaction")
         }
         fn dispatch_batch(&self, calls: &[crate::DispatchCall]) -> crate::DispatchOutcome {
             self.batches
@@ -2216,6 +2277,187 @@ mod tests {
                 label: names.join(", "),
             }
         }
+    }
+
+    fn successful_action_result() -> ActionResult {
+        ActionResult {
+            success: true,
+            data: serde_json::json!(null),
+            error: None,
+        }
+    }
+
+    /// #880: 複数 reply は 1 生成に並べた分をすべて配送し、ack 往復を起こさない。
+    #[tokio::test]
+    async fn utterance_reply_batch_completes_in_one_llm_call() {
+        use std::sync::atomic::Ordering;
+        use std::sync::{Arc, Mutex};
+
+        let (llm, chat_calls) = MockLlm::counting(vec![tool_call_response(vec![
+            tc("reply-1", "reply", serde_json::json!({"text": "one"})),
+            tc("reply-2", "reply", serde_json::json!({"text": "two"})),
+            tc("reply-3", "reply", serde_json::json!({"text": "three"})),
+        ])]);
+        let executor_calls = Arc::new(Mutex::new(Vec::new()));
+        let executor = MockExecutor::new()
+            .add_result("reply", successful_action_result())
+            .with_call_log(executor_calls.clone());
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+        engine.set_tool_dispatcher(Arc::new(RecordingDispatcher::new(&[])));
+        let tool_results = Arc::new(Mutex::new(Vec::new()));
+        let seen_results = tool_results.clone();
+        engine.add_on_tool_result(move |_id, _name, json, _err| {
+            seen_results.lock().unwrap().push(json);
+        });
+
+        let result = engine
+            .run("system", "3回に分けて返信して", "test-model")
+            .await;
+
+        let result = result.expect("純発話生成は空の resume 応答なしで完了する");
+        assert_eq!(
+            executor_calls.lock().unwrap().as_slice(),
+            &["reply", "reply", "reply"]
+        );
+        assert_eq!(
+            chat_calls.load(Ordering::SeqCst),
+            1,
+            "reply×3 は ack を積んで LLM を呼び直さない"
+        );
+        assert_eq!(result.iterations, 1);
+        assert_eq!(result.tool_calls_made, 3);
+        assert!(
+            tool_results.lock().unwrap().is_empty(),
+            "純発話の最小 ack は on_tool_result に流さない"
+        );
+    }
+
+    /// #880: reply と通常 content が同居しても、reply 配送後に content を最終応答として返す。
+    #[tokio::test]
+    async fn utterance_reply_with_content_completes_in_one_llm_call_without_machine_hooks() {
+        use std::sync::atomic::Ordering;
+        use std::sync::{Arc, Mutex};
+
+        const CONTENT: &str = "通常本文も同じ生成で返す";
+        let (llm, chat_calls) = MockLlm::counting(vec![resp(
+            Some(CONTENT),
+            vec![tc(
+                "reply-1",
+                "reply",
+                serde_json::json!({"text": "返信本文"}),
+            )],
+        )]);
+        let executor_calls = Arc::new(Mutex::new(Vec::new()));
+        let executor = MockExecutor::new()
+            .add_result("reply", successful_action_result())
+            .with_call_log(executor_calls.clone());
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+        engine.set_tool_dispatcher(Arc::new(RecordingDispatcher::new(&[])));
+        let tool_results = Arc::new(Mutex::new(Vec::new()));
+        let seen_results = tool_results.clone();
+        engine.add_on_tool_result(move |_id, _name, json, _err| {
+            seen_results.lock().unwrap().push(json);
+        });
+        let tool_calls = Arc::new(Mutex::new(Vec::new()));
+        let seen_calls = tool_calls.clone();
+        engine.add_on_tool_call(move |content, json| {
+            seen_calls.lock().unwrap().push((content, json));
+        });
+
+        let result = engine
+            .run("system", "返信して本文も添えて", "test-model")
+            .await
+            .expect("純発話生成は完了する");
+
+        assert_eq!(executor_calls.lock().unwrap().as_slice(), &["reply"]);
+        assert_eq!(chat_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(result.iterations, 1);
+        assert_eq!(result.response, CONTENT);
+        assert!(tool_results.lock().unwrap().is_empty());
+        assert!(
+            tool_calls.lock().unwrap().is_empty(),
+            "純発話は空 calls_json の機械行も残さない"
+        );
+    }
+
+    /// #880: 照会が混在すると次の LLM 呼び出しが必要なので、発話にも最小 ack を対で積む。
+    #[tokio::test]
+    async fn utterance_reply_mixed_with_resolve_keeps_ack_and_second_llm_call() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        struct CapturingCountingLlm {
+            responses: Mutex<Vec<ChatResponse>>,
+            calls: Arc<AtomicUsize>,
+            requests: Arc<Mutex<Vec<ChatRequest>>>,
+        }
+
+        #[async_trait]
+        impl LlmClient for CapturingCountingLlm {
+            async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.requests.lock().unwrap().push(request);
+                let mut responses = self.responses.lock().unwrap();
+                if responses.is_empty() {
+                    anyhow::bail!("no more mock responses");
+                }
+                Ok(responses.remove(0))
+            }
+        }
+
+        let chat_calls = Arc::new(AtomicUsize::new(0));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let llm = CapturingCountingLlm {
+            responses: Mutex::new(vec![
+                tool_call_response(vec![
+                    tc("reply-1", "reply", serde_json::json!({"text": "返信本文"})),
+                    tc("resolve-1", "resolve", serde_json::json!({"ref": "e1"})),
+                ]),
+                text_response("照会を開始しました"),
+            ]),
+            calls: chat_calls.clone(),
+            requests: requests.clone(),
+        };
+        let executor_calls = Arc::new(Mutex::new(Vec::new()));
+        let executor = MockExecutor::new()
+            .add_result("reply", successful_action_result())
+            .with_call_log(executor_calls.clone());
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+        let dispatcher = Arc::new(RecordingDispatcher::new(&[]));
+        engine.set_tool_dispatcher(dispatcher.clone());
+
+        let result = engine
+            .run("system", "返信してから全文を見て", "test-model")
+            .await
+            .expect("混在生成は tool_result を読んで完了する");
+
+        assert_eq!(executor_calls.lock().unwrap().as_slice(), &["reply"]);
+        assert_eq!(
+            dispatcher.dispatched.lock().unwrap().as_slice(),
+            &["resolve"]
+        );
+        assert_eq!(chat_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(result.iterations, 2);
+        let requests = requests.lock().unwrap();
+        let second_messages = &requests[1].messages;
+        assert!(
+            second_messages.iter().any(|message| {
+                message.role == Role::Tool
+                    && message.tool_call_id.as_deref() == Some("reply-1")
+                    && message.text_content() == Some("{}")
+            }),
+            "混在時は reply の最小 ack {{}} を次の LLM 呼び出しへ積む"
+        );
+        assert!(
+            second_messages.iter().any(|message| {
+                message.role == Role::Tool
+                    && message.tool_call_id.as_deref() == Some("resolve-1")
+                    && message
+                        .text_content()
+                        .is_some_and(|text| text.contains("\"status\":\"spawned\""))
+            }),
+            "resolve は従来どおり spawned マーカーを次の LLM 呼び出しへ積む"
+        );
     }
 
     /// dispatch 対象ツールは inline 実行（executor）されず、**同ターンで** spawned

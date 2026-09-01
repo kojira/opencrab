@@ -345,19 +345,28 @@ fn text_response(text: &str) -> ChatResponse {
 }
 
 fn tool_call_response(name: &str, args: serde_json::Value) -> ChatResponse {
+    tool_calls_response(vec![(name, args)])
+}
+
+fn tool_calls_response(calls: Vec<(&str, serde_json::Value)>) -> ChatResponse {
     let msg = Message {
         role: Role::Assistant,
         content: None,
         name: None,
         function_call: None,
-        tool_calls: Some(vec![ToolCall {
-            id: format!("tc-{}", uuid::Uuid::new_v4()),
-            call_type: "function".to_string(),
-            function: FunctionCall {
-                name: name.to_string(),
-                arguments: args.to_string(),
-            },
-        }]),
+        tool_calls: Some(
+            calls
+                .into_iter()
+                .map(|(name, args)| ToolCall {
+                    id: format!("tc-{}", uuid::Uuid::new_v4()),
+                    call_type: "function".to_string(),
+                    function: FunctionCall {
+                        name: name.to_string(),
+                        arguments: args.to_string(),
+                    },
+                })
+                .collect(),
+        ),
         tool_call_id: None,
     };
     ChatResponse {
@@ -1504,8 +1513,12 @@ async fn scenario_shell_big_output_offload_read_back_loop_closed() {
 
 const M_A3: &str = "A3REPLY-MARK";
 const B_A3: &str = "A3-返信本文だよ";
+const M_A3_THREE: &str = "A3-THREE-REPLIES-MARK";
+const B_A3_THREE: [&str; 3] = ["A3-返信その1", "A3-返信その2", "A3-返信その3"];
 
-struct A3Mock;
+struct A3Mock {
+    chat_calls: AtomicUsize,
+}
 
 #[async_trait::async_trait]
 impl LlmProvider for A3Mock {
@@ -1519,10 +1532,19 @@ impl LlmProvider for A3Mock {
         Ok(vec![])
     }
     async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        self.chat_calls.fetch_add(1, Ordering::SeqCst);
         let text = request_text(&request);
         // 発話 reply の最小 ack（tool role）を受けたら沈黙で閉じる（resume は起きない）。
         if has_tool_role(&request) {
             return Ok(text_response("NO_REPLY"));
+        }
+        if text.contains(M_A3_THREE) {
+            return Ok(tool_calls_response(
+                B_A3_THREE
+                    .iter()
+                    .map(|body| ("reply", serde_json::json!({"event": "e1", "text": body})))
+                    .collect(),
+            ));
         }
         if text.contains(M_A3) {
             return Ok(tool_call_response(
@@ -1537,7 +1559,9 @@ impl LlmProvider for A3Mock {
 #[tokio::test]
 async fn scenario_a3_reply_utterance_no_subtask_no_machine_lines() {
     let buf = install_capture();
-    let mock = Arc::new(A3Mock);
+    let mock = Arc::new(A3Mock {
+        chat_calls: AtomicUsize::new(0),
+    });
     let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
 
     let fixture = Fixture::new();
@@ -1565,12 +1589,20 @@ async fn scenario_a3_reply_utterance_no_subtask_no_machine_lines() {
         "発話 reply が subtask 化された（撃ちっぱなしでない）"
     );
     // reply は 1 回だけ（resume 復唱・自動再送ゼロ）。
-    let reply_count = captured(&buf).iter().filter(|c| c.kind == "reply").count();
+    let reply_count = captured(&buf)
+        .iter()
+        .filter(|c| c.kind == "reply" && c.body.contains(B_A3))
+        .count();
     assert_eq!(
         reply_count,
         1,
         "reply が複数回配送された（復唱）: {:?}",
         captured(&buf)
+    );
+    assert_eq!(
+        mock.chat_calls.load(Ordering::SeqCst),
+        1,
+        "発話 reply は最小 ack 往復を起こさず 1 生成で完了する"
     );
 
     // (ii) 機械行を残さない: session_logs に reply の tool_call/tool_result が無く、本文は speech で残る。
@@ -1592,6 +1624,73 @@ async fn scenario_a3_reply_utterance_no_subtask_no_machine_lines() {
         logs.iter()
             .any(|l| l.log_type == "speech" && l.content.contains(B_A3)),
         "reply 本文が speech として残っていない: {kinds:?}"
+    );
+}
+
+/// #880: reply×3 を 1 生成に並べ、3 通を配送して LLM 往復なしで完了する。
+#[tokio::test]
+async fn scenario_a3_three_replies_complete_in_one_llm_call_without_subtask() {
+    let buf = install_capture();
+    let mock = Arc::new(A3Mock {
+        chat_calls: AtomicUsize::new(0),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let (_client, _address, session_id) = wire_instance(&core, &fixture, nostr_config(None)).await;
+
+    let ev = "a4".repeat(32);
+    fixture.append_line(&mention_event(
+        &ev,
+        &format!("{M_A3_THREE} 3回に分けて返信して"),
+    ));
+
+    let delivered = {
+        let buf = buf.clone();
+        wait_until(move || {
+            B_A3_THREE.iter().all(|body| {
+                captured(&buf)
+                    .iter()
+                    .any(|captured| captured.kind == "reply" && captured.body.contains(body))
+            })
+        })
+        .await
+    };
+    assert!(
+        delivered,
+        "1 生成の reply×3 がすべて配送されない: {:?}",
+        captured(&buf)
+    );
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    for body in B_A3_THREE {
+        let count = captured(&buf)
+            .iter()
+            .filter(|captured| captured.kind == "reply" && captured.body.contains(body))
+            .count();
+        assert_eq!(count, 1, "reply 本文 {body} の配送回数が 1 でない");
+    }
+    assert_eq!(
+        mock.chat_calls.load(Ordering::SeqCst),
+        1,
+        "reply×3 は ack ごとの LLM 再呼び出しを起こさない"
+    );
+    assert!(
+        !core.state.subtask_registries.has_running(&session_id),
+        "reply×3 が subtask 化された"
+    );
+    let logs = {
+        let conn = core.extgate.db.lock().unwrap();
+        opencrab_db::queries::list_session_logs_by_session(&conn, &session_id).unwrap()
+    };
+    assert!(
+        !logs
+            .iter()
+            .any(|log| log.log_type == "tool_call" || log.log_type == "tool_result"),
+        "reply×3 が機械行を残した: {:?}",
+        logs.iter()
+            .map(|log| (&log.log_type, &log.content))
+            .collect::<Vec<_>>()
     );
 }
 

@@ -61,7 +61,7 @@ pub fn operation_declarations() -> Value {
         ),
         decl(
             "reaction",
-            "イベントにリアクションする。event に会話の e番号、emoji に絵文字（省略可）。",
+            "イベントにリアクションする。event に会話の e番号、emoji に絵文字（省略可）。複数のリアクションは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。",
             json!({"type": "object", "required": ["event"], "properties": {
                 "event": ref_prop("対象イベントの短縮参照（例 e7）"),
                 "emoji": str_prop("リアクション絵文字（省略時は既定）")
@@ -70,7 +70,7 @@ pub fn operation_declarations() -> Value {
         ),
         decl(
             "reply",
-            "イベントに返信する。event に会話の e番号、text に返信本文。",
+            "イベントに返信する。event に会話の e番号、text に返信本文。複数の返信は1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。",
             json!({"type": "object", "required": ["event", "text"], "properties": {
                 "event": ref_prop("返信先イベントの短縮参照（例 e7）"),
                 "text": str_prop("返信本文")
@@ -79,7 +79,7 @@ pub fn operation_declarations() -> Value {
         ),
         decl(
             "repost",
-            "イベントをリポストする。event に会話の e番号。",
+            "イベントをリポストする。event に会話の e番号。複数のリポストは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。",
             json!({"type": "object", "required": ["event"], "properties": {"event": ref_prop("対象イベントの短縮参照（例 e7）")}}),
             conv("not_exposed", "conversation_bound"),
         ),
@@ -348,6 +348,15 @@ mod tests {
         // 全 callback なし。
         for d in arr {
             assert!(d["callback_schema"].is_null(), "第一段は callback なし");
+        }
+        for name in ["reaction", "reply", "repost"] {
+            let description = arr
+                .iter()
+                .find(|d| d["name"] == name)
+                .and_then(|d| d["description"].as_str())
+                .unwrap();
+            assert!(description.contains("1回の応答"));
+            assert!(description.contains("呼び直す必要はない"));
         }
     }
 }
