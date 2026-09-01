@@ -1058,7 +1058,10 @@ async fn no_reply_reaction_calls(response: &str, message_id: &str) -> Vec<(u64, 
     let gateway = FakeReactionGateway::default();
 
     super::handle_agent_response(
-        delivery_effect(Ok(engine_result(response))),
+        delivery_effect(
+            Ok(engine_result(response)),
+            opencrab_actions::DeliveryContext::default(),
+        ),
         "crab",
         "discord-crab-111-222",
         222,
@@ -1116,7 +1119,10 @@ async fn failure_reaction_calls(message_id: &str) -> Vec<(u64, u64, String)> {
     let gateway = FakeReactionGateway::default();
 
     super::handle_agent_response(
-        delivery_effect(Err(anyhow::anyhow!("upstream provider exploded"))),
+        delivery_effect(
+            Err(anyhow::anyhow!("upstream provider exploded")),
+            opencrab_actions::DeliveryContext::default(),
+        ),
         "crab",
         "discord-crab-111-222",
         222,

@@ -10,6 +10,7 @@ pub mod llm_evaluation;
 pub mod llm_selection;
 pub mod memory_access;
 pub mod memory_units;
+pub mod no_reply;
 pub mod search;
 pub mod session_runtime;
 pub mod skill_management;
@@ -45,6 +46,10 @@ pub use bridge::{
 };
 pub use channel_config::apply_discord_channel_config;
 pub use dispatcher::ActionDispatcher;
+pub use no_reply::{
+    terminate_at_no_reply, DeliveryContext, NoReplyTermination, NO_REPLY_LOG_TARGET,
+    NO_REPLY_SENTINEL, NO_REPLY_TRAILING_DISCARDED_TAG,
+};
 pub use run_request::{LiveInboundScope, RunRequest};
 pub use session_inbound::{
     accept_inbound, consecutive_trust_groups, delivery_effect, plan_record_only_flags,

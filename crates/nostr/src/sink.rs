@@ -208,11 +208,23 @@ impl<R: NostrAgentRunner> NostrResponder<R> {
 
         match self.runner.run_agent_response(req).await {
             Ok(result) => {
-                let reply = result.response.trim().to_string();
-                if reply.is_empty() || reply == "NO_REPLY" {
+                // 第一柱: NO_REPLY 終端解釈で前段のみを転記する。後続ゴミは破棄し
+                // （非空なら破棄ログ）、前段が空なら沈黙。
+                let term = opencrab_actions::terminate_at_no_reply(&result.response);
+                term.log_trailing_discard(opencrab_actions::DeliveryContext {
+                    session_id,
+                    agent_id,
+                    origin: "nostr",
+                });
+                let Some(reply) = term
+                    .speech()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                else {
                     debug!(agent_id, session_id, "nostr: agent chose silence");
                     return None;
-                }
+                };
                 // 最終応答テキストを Nostr のセッションへ**無条件で**転記する（会話履歴の継続性）。
                 // 外界への配送はエージェントがツールで行う（機構は publish しない・#588）ので、返信先の
                 // 有無にかかわらずセッションに残す（オーナー指示「返信先がなくても Nostr のセッション上に

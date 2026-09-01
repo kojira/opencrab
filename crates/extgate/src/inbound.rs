@@ -908,7 +908,14 @@ fn enqueue_turn<R: AgentRuntime>(
                 match turn_res {
                     Ok(turn) => {
                         let effect = match turn {
-                            Some(r) => delivery_effect(r),
+                            Some(r) => delivery_effect(
+                                r,
+                                opencrab_actions::DeliveryContext {
+                                    session_id: &session_id,
+                                    agent_id: &agent_id,
+                                    origin: "extgate",
+                                },
+                            ),
                             None => opencrab_actions::DeliveryEffect::Empty,
                         };
                         let effect = adjust_inbound_effect(delivery_mode, effect);

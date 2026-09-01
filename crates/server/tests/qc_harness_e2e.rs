@@ -44,6 +44,8 @@ const TOKEN: &str = "operator-token-qc";
 const AGENT_ID: &str = "agent-qc";
 /// dry-run say を拾う tracing target（= `opencrab_nostr_gateway::post::DRY_RUN_LOG_TARGET`）。
 const DRY_RUN_TARGET: &str = "opencrab_nostrgate::dry_run";
+/// NO_REPLY 破棄ログを拾う tracing target（= `opencrab_actions::no_reply::NO_REPLY_LOG_TARGET`）。
+const NO_REPLY_TARGET: &str = "opencrab::no_reply";
 
 fn self_pk() -> String {
     "11".repeat(32)
@@ -60,7 +62,15 @@ struct CapturedSay {
     body: String,
 }
 
+/// NO_REPLY 破棄ログ（`no_reply_trailing_discarded` WARN）の観測。
+#[derive(Clone, Debug, Default)]
+struct CapturedDiscard {
+    discarded: String,
+    session_id: String,
+}
+
 static BUFFER: OnceLock<Arc<Mutex<Vec<CapturedSay>>>> = OnceLock::new();
+static DISCARD_BUFFER: OnceLock<Arc<Mutex<Vec<CapturedDiscard>>>> = OnceLock::new();
 static INIT: Once = Once::new();
 
 /// グローバル subscriber を 1 回だけ張り、共有バッファを返す。
@@ -71,8 +81,14 @@ fn install_capture() -> Arc<Mutex<Vec<CapturedSay>>> {
     let buf = BUFFER
         .get_or_init(|| Arc::new(Mutex::new(Vec::new())))
         .clone();
+    let discard = DISCARD_BUFFER
+        .get_or_init(|| Arc::new(Mutex::new(Vec::new())))
+        .clone();
     INIT.call_once(|| {
-        let layer = CaptureLayer { buf: buf.clone() };
+        let layer = CaptureLayer {
+            buf: buf.clone(),
+            discard,
+        };
         let subscriber = tracing_subscriber::registry().with(layer);
         // 既に別の default が張られていても壊さない（best-effort）。
         let _ = tracing::subscriber::set_global_default(subscriber);
@@ -80,8 +96,16 @@ fn install_capture() -> Arc<Mutex<Vec<CapturedSay>>> {
     buf
 }
 
+/// 破棄ログの共有バッファ（`install_capture` が張った後に読む）。
+fn discard_buffer() -> Arc<Mutex<Vec<CapturedDiscard>>> {
+    DISCARD_BUFFER
+        .get_or_init(|| Arc::new(Mutex::new(Vec::new())))
+        .clone()
+}
+
 struct CaptureLayer {
     buf: Arc<Mutex<Vec<CapturedSay>>>,
+    discard: Arc<Mutex<Vec<CapturedDiscard>>>,
 }
 
 #[derive(Default)]
@@ -111,21 +135,61 @@ impl tracing::field::Visit for SayVisitor {
     }
 }
 
+/// `no_reply_trailing_discarded` WARN の構造化フィールドを拾う。
+#[derive(Default)]
+struct DiscardVisitor {
+    discarded: Option<String>,
+    session_id: Option<String>,
+}
+
+impl DiscardVisitor {
+    fn set(&mut self, name: &str, value: String) {
+        match name {
+            "discarded" => self.discarded = Some(value),
+            "session_id" => self.session_id = Some(value),
+            _ => {}
+        }
+    }
+}
+
+impl tracing::field::Visit for DiscardVisitor {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.set(field.name(), value.to_string());
+    }
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.set(field.name(), format!("{value:?}"));
+    }
+}
+
 impl<S: tracing::Subscriber> Layer<S> for CaptureLayer {
     fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
-        if event.metadata().target() != DRY_RUN_TARGET {
-            return;
+        match event.metadata().target() {
+            DRY_RUN_TARGET => {
+                let mut v = SayVisitor::default();
+                event.record(&mut v);
+                self.buf.lock().unwrap().push(CapturedSay {
+                    kind: v.kind.unwrap_or_default(),
+                    body: v.body.unwrap_or_default(),
+                });
+            }
+            NO_REPLY_TARGET => {
+                let mut v = DiscardVisitor::default();
+                event.record(&mut v);
+                self.discard.lock().unwrap().push(CapturedDiscard {
+                    discarded: v.discarded.unwrap_or_default(),
+                    session_id: v.session_id.unwrap_or_default(),
+                });
+            }
+            _ => {}
         }
-        let mut v = SayVisitor::default();
-        event.record(&mut v);
-        self.buf.lock().unwrap().push(CapturedSay {
-            kind: v.kind.unwrap_or_default(),
-            body: v.body.unwrap_or_default(),
-        });
     }
 }
 
 fn captured(buf: &Arc<Mutex<Vec<CapturedSay>>>) -> Vec<CapturedSay> {
+    buf.lock().unwrap().clone()
+}
+
+fn discards(buf: &Arc<Mutex<Vec<CapturedDiscard>>>) -> Vec<CapturedDiscard> {
     buf.lock().unwrap().clone()
 }
 
@@ -660,6 +724,100 @@ async fn scenario_a_mention_becomes_say() {
 
     // 1 メンション = 1 ターン。
     assert_eq!(mock.system_prompts().len(), 1, "ターンが 1 本でない");
+}
+
+// ============ (A1/A1L) NO_REPLY 終端化 + 破棄ログ（第一柱・DESIGN-RESUME-SETTLE §3.1/§3.1.1）============
+
+/// mock 応答に `…本文… NO_REPLY …ゴミ…` を混入させたとき:
+/// (i) 配送 say の body に `NO_REPLY` もゴミも含まれず、前段本文だけで確定する（A1）
+/// (ii) 破棄ログ `no_reply_trailing_discarded` が 1 件出て破棄全文と session_id を持つ（A1L）
+/// (iii) 破棄テキストは wire（dry-run say）に一切現れない（§3.1.1(c)）
+#[tokio::test]
+async fn scenario_no_reply_terminates_and_logs_discard() {
+    // 互いに部分文字列にならない一意マーカー（グローバルバッファの他テスト混線を避ける）。
+    const KEEP: &str = "NRTERM-KEEP 本文はここまで";
+    const GARBAGE: &str = "NRTERM-GARBAGE 破棄されるゴミ";
+
+    let buf = install_capture();
+    let dbuf = discard_buffer();
+    let mock = Arc::new(FifoMock::new());
+    mock.push_text(&format!("{KEEP} NO_REPLY {GARBAGE}"));
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let (_client, _address, _session_id) = wire_instance(&core, &fixture, nostr_config(None)).await;
+
+    let event_id = "d1".repeat(32);
+    fixture.append_line(&mention_event(&event_id, "NRTERM-MARK メンション本文"));
+
+    // (i) 前段本文で say が確定するまで待つ。
+    let ok = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.body.contains("NRTERM-KEEP") && c.kind == "standalone")
+        })
+        .await
+    };
+    assert!(ok, "前段本文の say が出ない: {:?}", captured(&buf));
+
+    // (i) 該当 say の body に NO_REPLY もゴミも含まれない。
+    let says: Vec<_> = captured(&buf)
+        .into_iter()
+        .filter(|c| c.body.contains("NRTERM-KEEP"))
+        .collect();
+    for s in &says {
+        assert!(
+            !s.body.contains("NO_REPLY"),
+            "say body に NO_REPLY が混入: {:?}",
+            s
+        );
+        assert!(
+            !s.body.contains("NRTERM-GARBAGE"),
+            "say body に破棄テキストが混入: {:?}",
+            s
+        );
+    }
+
+    // (iii) 破棄テキストはどの dry-run say にも現れない（wire 非搭載）。
+    assert!(
+        captured(&buf)
+            .iter()
+            .all(|c| !c.body.contains("NRTERM-GARBAGE")),
+        "破棄テキストが wire(dry-run say) に現れた: {:?}",
+        captured(&buf)
+    );
+
+    // (ii) 破棄ログが 1 件出ており、破棄全文と session_id を持つ（A1L）。
+    let ok_discard = {
+        let dbuf = dbuf.clone();
+        wait_until(move || {
+            discards(&dbuf)
+                .iter()
+                .any(|d| d.discarded.contains("NRTERM-GARBAGE"))
+        })
+        .await
+    };
+    assert!(
+        ok_discard,
+        "破棄ログ(no_reply_trailing_discarded) が出ていない: {:?}",
+        discards(&dbuf)
+    );
+    let d = discards(&dbuf)
+        .into_iter()
+        .find(|d| d.discarded.contains("NRTERM-GARBAGE"))
+        .unwrap();
+    assert!(
+        d.discarded.contains("NO_REPLY"),
+        "破棄全文に NO_REPLY トークンが含まれない: {:?}",
+        d
+    );
+    assert!(
+        !d.session_id.is_empty(),
+        "破棄ログに session_id 相関キーが無い: {:?}",
+        d
+    );
 }
 
 // ==================== (c) 同一イベントが両車線 → said は 1 回だけ ====================
