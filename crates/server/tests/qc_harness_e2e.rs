@@ -14,7 +14,7 @@
 //! よって観測は「standalone post の本文」で行い、返信先イベント id では相関しない。
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Once, OnceLock};
 use std::time::Duration;
 
@@ -869,4 +869,142 @@ async fn scenario_main_second_request_not_blocked_during_long_op() {
         "say の順序が 1→2→3 でない: ack={i1} second={i2} completion={i3} / {:?}",
         captured(&buf)
     );
+}
+
+// ==================== (shell) execute_shell の stdout が resume 会話に現れる ====================
+//
+// くらぶ暴走の根因回帰。`execute_shell` は inline 集合に無いため常に背景 subtask 化され
+// （#152/#671）、その完了本文（＝ツール結果 JSON）は会話再構成で参照へ畳まれていた（#713）。
+// #713 の「同ターン内は本文がモデルに渡る」前提は inline ツールでのみ成立し、execute_shell は
+// 同ターン往復が無いので、畳むと stdout をどのターンでも読めず、モデルが出力を取り直そうと
+// 待機宣言を連投した（実機で確認）。修正で exit_code を持つ結果は畳まず stdout を会話へ残す。
+//
+// このハーネスは実配線（実 dispatch 判定 → 実 execute_shell = 実 echo → 実 settle_completed →
+// 実 resume）を通す。ピン: **resume ターンの会話（LLM リクエスト本文）に echo の stdout が現れる**
+// ——修正前はここで落ちる（参照へ畳まれ stdout が消える）。
+
+const M_SHELL: &str = "SHELLQC-MARK 東京の天気を調べて教えて";
+/// echo で実際に出力させる stdout。マーカーとも ack/done 本文とも部分一致しない。
+const SHELL_STDOUT: &str = "SHELLOUT-tenki 晴れ 28度 くもり所により雨";
+const B_SHELL_ACK: &str = "shellack-epsilon 調べてるよ、ちょっと待ってね";
+const B_SHELL_DONE: &str = "shelldone-zeta 東京は晴れ 28度だよ";
+
+/// execute_shell の段階応答 mock。全リクエスト本文を記録し、resume ターンの本文を surface する。
+struct ShellMock {
+    shell_emitted: AtomicBool,
+    shell_calls: AtomicUsize,
+    /// resume（決着後の再開ターン）で会話に渡された本文。ピンの検証対象。
+    resume_text: Mutex<Option<String>>,
+}
+
+impl ShellMock {
+    fn new() -> Self {
+        Self {
+            shell_emitted: AtomicBool::new(false),
+            shell_calls: AtomicUsize::new(0),
+            resume_text: Mutex::new(None),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for ShellMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let text = request_text(&request);
+
+        // (2) dispatch 直後の継続イテレーション（合成 "spawned" 結果 = tool role）→ ack say で
+        //     ターンを閉じる。ここで背景 subtask（echo）が走る。
+        if has_tool_role(&request) {
+            return Ok(text_response(B_SHELL_ACK));
+        }
+        // (1) 初回メンション（tool role 無し・最初の 1 回だけ）→ execute_shell を呼ぶ。
+        //     opencrab は execute_shell を inline 化しないので背景 subtask へ回る。
+        if !self.shell_emitted.swap(true, Ordering::SeqCst) {
+            self.shell_calls.fetch_add(1, Ordering::SeqCst);
+            return Ok(tool_call_response(
+                "execute_shell",
+                serde_json::json!({ "command": "echo", "args": [SHELL_STDOUT] }),
+            ));
+        }
+        // (3) subtask 決着後の resume ターン（tool role 無し・2 回目以降）→ 会話本文を捕まえて
+        //     完了報告 say で閉じる。**この text に echo の stdout が含まれていること**がピン。
+        *self.resume_text.lock().unwrap() = Some(text);
+        Ok(text_response(B_SHELL_DONE))
+    }
+}
+
+/// echo だけを許可した shell 有効の tools 設定。
+fn shell_enabled_tools_config() -> opencrab_actions::tools::ToolsConfig {
+    opencrab_actions::tools::ToolsConfig {
+        enabled: true,
+        shell: Some(opencrab_actions::tools::ShellToolConfig {
+            enabled: true,
+            allowed_commands: vec!["echo".to_string()],
+            ..Default::default()
+        }),
+    }
+}
+
+#[tokio::test]
+async fn scenario_shell_stdout_survives_into_resume_turn() {
+    let buf = install_capture();
+    let mock = Arc::new(ShellMock::new());
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    // execute_shell を実際に走らせるため shell を有効化（echo のみ許可）。tools_config は
+    // Arc<RwLock> 共有なので serve_uds へ渡った runtime にも即時反映される。
+    *core.state.tools_config.write().unwrap() = shell_enabled_tools_config();
+
+    let fixture = Fixture::new();
+    let (_client, _address, _session_id) = wire_instance(&core, &fixture, nostr_config(None)).await;
+
+    let ev = "d1".repeat(32);
+    fixture.append_line(&mention_event(&ev, M_SHELL));
+
+    // 決着後の完了報告 say が出るまで待つ（= resume ターンまで到達した）。
+    let done = {
+        let buf = buf.clone();
+        wait_until(move || body_index(&buf, B_SHELL_DONE).is_some()).await
+    };
+    assert!(
+        done,
+        "決着後の resume 完了報告が出ない（execute_shell の背景 subtask が resume まで到達しない）: {:?}",
+        captured(&buf)
+    );
+
+    // ピン: resume ターンの会話本文に echo の stdout が現れる（修正前はここで落ちる）。
+    let resume_text = mock
+        .resume_text
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("resume ターンが実行されていない");
+    assert!(
+        resume_text.contains(SHELL_STDOUT),
+        "resume 会話に execute_shell の stdout が無い（畳まれた＝くらぶ暴走の根因）。\n\
+         resume 本文（先頭 2000 字）: {:.2000}",
+        resume_text
+    );
+
+    // 行動系: execute_shell の dispatch はちょうど 1 回（再取得＝取り直しループをしていない）。
+    assert_eq!(
+        mock.shell_calls.load(Ordering::SeqCst),
+        1,
+        "execute_shell が複数回 dispatch された（取り直しループ）"
+    );
+    // ack say（「待ってね」相当）は高々 1 回（待機宣言を連投しない）。
+    let acks = captured(&buf)
+        .iter()
+        .filter(|c| c.body.contains(B_SHELL_ACK))
+        .count();
+    assert!(acks <= 1, "ack say（待機宣言）が連投された: {acks} 回");
 }
