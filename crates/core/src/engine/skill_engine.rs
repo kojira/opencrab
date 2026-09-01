@@ -789,8 +789,9 @@ impl SkillEngine {
                             .executor
                             .execute_with_id(tool_name, &args, &tool_call.id)
                             .await;
-                        // 最小 ack（データを持たない・22 bytes・capping 不要）。
-                        let ack = r#"{"status":"delivered"}"#.to_string();
+                        // 最小 ack（データを持たない空オブジェクト・capping 不要）。成功/失敗を
+                        // 名乗らない——失敗は say と同一経路で ❌/turn_failed に別途表面化する（C9）。
+                        let ack = "{}".to_string();
                         messages.push(Message::tool(tool_call.id.clone(), ack.clone()));
                         turn_ledger.record(format!("tool:{}", messages.len()), &ack);
                         apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;

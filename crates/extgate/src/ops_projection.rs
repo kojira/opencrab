@@ -256,4 +256,3 @@ fn event_id_from_origin(origin: &str) -> Option<String> {
         None
     }
 }
-

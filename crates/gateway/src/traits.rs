@@ -274,7 +274,11 @@ pub fn utterance_body(
 ) -> (String, String, Option<String>) {
     let s = |k: &str| payload.get(k).and_then(|v| v.as_str()).map(str::to_string);
     match operation {
-        "reply" => (s("text").unwrap_or_default(), "reply".to_string(), s("event")),
+        "reply" => (
+            s("text").unwrap_or_default(),
+            "reply".to_string(),
+            s("event"),
+        ),
         "reaction" => (
             s("emoji").unwrap_or_else(|| "+".to_string()),
             "reaction".to_string(),

@@ -989,7 +989,9 @@ async fn handle_utterance_response(
             return Err(());
         }
         Ok(())
-    } else if resp.code == Some(ErrorCode::ExternalRejected) {
+    } else if resp.code == Some(ErrorCode::OperationRejected) {
+        // 発話は wire 上 invoke frame で送るため、gateway の確定拒否は say の `external_rejected`
+        // ではなく invoke の `operation_rejected` で返る（gate-client handle_invoke）。
         if let Err(e) = mark_failed(state, delivery_id) {
             tracing::error!(code = e.code.as_str(), "utterance failed write failed");
             let _ = mark_indeterminate(state, std::slice::from_ref(&delivery_id.to_string()));

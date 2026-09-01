@@ -285,8 +285,11 @@ pub async fn invoke_utterance(
             let _ = crate::delivery::mark_indeterminate(state, std::slice::from_ref(&delivery_id));
             return Err(InvokeError::new(ErrorCode::Disconnect));
         };
+        // pending の key は wire frame の id（＝ `call_id`）に一致させる。handle_response は
+        // `resp.id` で引くため、invoke_frame の id と揃えないと応答が response_invalid になる
+        // （delivery_id は Pending::Utterance の中に持って deliveries 行を terminal 化する）。
         live.pending.insert(
-            delivery_id.clone(),
+            call_id.clone(),
             Pending::Utterance {
                 delivery_id: delivery_id.clone(),
                 binding_id: binding_id.to_string(),
