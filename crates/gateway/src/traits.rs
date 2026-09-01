@@ -229,6 +229,14 @@ pub struct ToolClass {
 }
 
 /// 非ブロック dispatch（RFC #152 の「バックグラウンド実行」）の分類。
+///
+/// **発話クラス（`Utterance`）の位置づけ（DESIGN-RESUME-SETTLE §3.3・第三柱・row353）**:
+/// `reply`/`reaction`/`repost` のような「発言の仕方」は道具ではなく**撃ちっぱなし**で、
+/// そもそも結果を読む必要が無い。従来はこれらも `Dispatchable` 固定で subtask 化され、
+/// 決着→resume を生んで空発話の復唱源になっていた。`Utterance` はこの第三の経路を表す:
+/// subtask 化も settle も resume も起こさず、配送（say と同型の crash-safe delivery）で
+/// 永続し、会話には機械行（tool_call/tool_result/sN）を残さず本文＋関係注記だけを残す。
+/// 分類は `Inline`/`Dispatchable` と排他（1 op は 1 経路）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DispatchMode {
     /// そのターン内で inline 実行する（配送系 / 同ターン結果依存 / 短時間書き込み /
@@ -236,6 +244,53 @@ pub enum DispatchMode {
     Inline,
     /// 非ブロックで dispatch してよい（長時間 or 同ターンで結果を使わない書き込み）。
     Dispatchable,
+    /// 発話クラス（撃ちっぱなし）。subtask/settle/resume を起こさず配送経路で永続する。
+    /// モデルへ領収書（tool_result 本文）を返さない（同ターンの provider 対は最小 ack）。
+    Utterance,
+}
+
+/// core 既知の**発話クラス** operation 名か（R3 統括裁定 (c)・第一段）。
+///
+/// `say`（最終応答＝既に撃ちっぱなし配送）と DI operation の `reply`/`reaction`/`repost`。
+/// `resolve` は結果を読む**照会クラス**なのでここに含めない（従来どおり Dispatchable）。
+/// `follow`/`unfollow`/`kind0`/`upload` 等の書き込み系も第一段では対象外（従来維持）。
+/// 将来の外部 DI gateway 拡張は宣言 field（additive）で自ら名乗れるが、その導出は
+/// 呼び出し側（`ops_projection`）が本関数へフォールバックする（DESIGN §3.3.1 C2）。
+pub fn is_known_utterance_op(name: &str) -> bool {
+    matches!(name, "say" | "reply" | "reaction" | "repost")
+}
+
+/// 発話 op の payload から `(永続する発話本文, 関係注記の種別, 対象参照)` を **core 既知名**で
+/// 導く（R3 (c)・DESIGN-RESUME-SETTLE §3.3.1 C5/C6）。
+///
+/// 既知名の field 規約（reply=text/event・reaction=emoji/event・repost=event）を第一段では直接
+/// 読む。未知の発話 op は best-effort（text/event or target を探し kind=op 名）。この関数と
+/// [`is_known_utterance_op`] が「core 既知名」の集約点であり、extgate の generic DI 中核
+/// （operations / operation_calls / ops_projection）には op 名リテラルを置かない
+/// （DI-18 / §11.6 の generic 性 audit を割らない）。
+pub fn utterance_body(
+    operation: &str,
+    payload: &serde_json::Value,
+) -> (String, String, Option<String>) {
+    let s = |k: &str| payload.get(k).and_then(|v| v.as_str()).map(str::to_string);
+    match operation {
+        "reply" => (
+            s("text").unwrap_or_default(),
+            "reply".to_string(),
+            s("event"),
+        ),
+        "reaction" => (
+            s("emoji").unwrap_or_else(|| "+".to_string()),
+            "reaction".to_string(),
+            s("event"),
+        ),
+        "repost" => (String::new(), "repost".to_string(), s("event")),
+        other => (
+            s("text").unwrap_or_default(),
+            other.to_string(),
+            s("event").or_else(|| s("target")),
+        ),
+    }
 }
 
 /// depth>=1 の sub-engine（`spawn_subtask` で起動した子）から見たツールの扱い。

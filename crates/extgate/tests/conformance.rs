@@ -3397,7 +3397,7 @@ async fn di_recover_stale_calls_marks_indeterminate() {
 /// dispatch_batch が settle する。dispatch→settle→resume の連鎖自体は
 /// settlement_is_consumed_on_next_turn 等で別途検収済み）。
 #[tokio::test]
-async fn di_projection_execute_invoke_settles() {
+async fn di_projection_reply_is_utterance_fire_and_forget() {
     let h = Harness::start().await;
     let instance_id = uuid();
     let binding_id = uuid();
@@ -3424,27 +3424,129 @@ async fn di_projection_execute_invoke_settles() {
     assert!(ops.definitions().iter().any(|d| d.name == "reply"));
 
     let ctx = GatewayCallContext::for_agent("agent-1");
-    let exec = async move {
-        ops.execute("reply", &json!({"event": "e1", "text": "やあ"}), &ctx)
-            .await
+    // 発話クラス化（§3.3.1 C5・row353）: reply は照会でなく発話クラス。execute は operation_call を
+    // 作らず delivery で永続し、await せず即 ack（success・data=None＝領収書を返さない）を返す。
+    // subtask/settle/resume は起こさない。wire への invoke は従来どおり送られる（gateway が publish）。
+    let result = ops
+        .execute("reply", &json!({"event": "e1", "text": "やあ"}), &ctx)
+        .await;
+    assert!(
+        result.success,
+        "発話 execute が成功する: {:?}",
+        result.error
+    );
+    assert_eq!(result.data, None, "発話は結果本文（領収書）を返さない");
+
+    // gateway 側は invoke を受け取る（配送は fire-and-forget で継続）。
+    let invoke = read_until(&mut s, |v| v["m"] == "invoke").await;
+    assert_eq!(invoke["operation"], "reply");
+    assert_eq!(invoke["payload"]["text"], "やあ");
+    let call_id = invoke["id"].as_str().unwrap().to_string();
+    // 応答 ok は deliveries 行を delivered 化するだけ（settle/resume を起こさない）。
+    write_frame(&mut s, &json!({"id": call_id, "m": "ok"})).await;
+
+    // 発話本文が speech として永続している（機械行なし・C6）。
+    let logs = {
+        let conn = h.state.db.lock().unwrap();
+        opencrab_db::queries::list_session_logs_by_session(&conn, &session_id).unwrap()
     };
-    let exec = tokio::spawn(exec);
-    // gateway 側: invoke を受けて ok(result) を返す。
+    assert!(
+        logs.iter()
+            .any(|l| l.log_type == "speech" && l.content == "やあ"),
+        "発話本文が speech として永続していない: {:?}",
+        logs.iter()
+            .map(|l| (&l.log_type, &l.content))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !logs
+            .iter()
+            .any(|l| l.log_type == "tool_call" || l.log_type == "tool_result"),
+        "発話 reply が機械行を残した"
+    );
+}
+
+/// 発話クラスの**失敗経路**（§3.3.1 C9・row353）: gateway が invoke を確定拒否
+/// （`operation_rejected`）したとき、(a) 発端 origin つき `turn_failed`（❌）が gateway へ emit され、
+/// (b) 発話本文の speech ログは残り（言ったことは消えない）、(c) モデルに領収書は返らない
+/// （execute は既に data=None で戻っている）。deliveries 行は `failed` へ落ちる。
+#[tokio::test]
+async fn di_projection_reply_utterance_rejection_emits_turn_failed_and_keeps_speech() {
+    let h = Harness::start().await;
+    let instance_id = uuid();
+    let binding_id = uuid();
+    put_instance(&h, &instance_id, true).await;
+    put_binding(&h, &binding_id, &instance_id, "chan-fail").await;
+    let mut s = h.connect().await;
+    assert_eq!(
+        hello_with_ops(&mut s, &instance_id, 1, &ops_reply()).await["m"],
+        "ok"
+    );
+    assert_eq!(ack_bind(&mut s).await, binding_id);
+    wait_acked(&h, &instance_id, &binding_id).await;
+
+    let session_id = session_id_for_binding(&binding_id);
+    let ops = ExtgateOpsGatewayActions::for_binding(
+        Arc::clone(&h.state),
+        &instance_id,
+        &binding_id,
+        &session_id,
+        "agent-1",
+    )
+    .expect("宣言があるので Some");
+
+    let ctx = GatewayCallContext::for_agent("agent-1");
+    // (c) 撃ちっぱなし: execute は即 success・data=None。拒否は後から wire で届く（領収書は返らない）。
+    let result = ops
+        .execute("reply", &json!({"event": "e1", "text": "だめでした"}), &ctx)
+        .await;
+    assert!(result.success, "execute は即成功で戻る: {:?}", result.error);
+    assert_eq!(result.data, None, "発話は結果本文（領収書）を返さない");
+
+    // gateway 側: invoke を受けて確定拒否（invoke の err は `operation_rejected`）。
     let invoke = read_until(&mut s, |v| v["m"] == "invoke").await;
     assert_eq!(invoke["operation"], "reply");
     let call_id = invoke["id"].as_str().unwrap().to_string();
     write_frame(
         &mut s,
-        &json!({"id": call_id, "m": "ok", "result": {"posted": true}}),
+        &json!({"id": call_id, "m": "err", "code": "operation_rejected", "detail": null}),
     )
     .await;
 
-    let result = tokio::time::timeout(Duration::from_secs(2), exec)
-        .await
-        .expect("execute 完了")
+    // (a) ❌: gateway は発端 origin つき turn_failed frame を受け取る（say と同一の失敗表面化）。
+    let tf = read_until(&mut s, |v| v["m"] == "turn_failed").await;
+    assert_eq!(
+        tf["origin"], "e1",
+        "turn_failed の発端 origin が発話の対象（reply_target）"
+    );
+
+    // (b) 発話本文の speech ログは残る（失敗でも「言った」ことは消さない）。
+    let logs = {
+        let conn = h.state.db.lock().unwrap();
+        opencrab_db::queries::list_session_logs_by_session(&conn, &session_id).unwrap()
+    };
+    assert!(
+        logs.iter()
+            .any(|l| l.log_type == "speech" && l.content == "だめでした"),
+        "失敗でも発話本文の speech が残る: {:?}",
+        logs.iter()
+            .map(|l| (&l.log_type, &l.content))
+            .collect::<Vec<_>>()
+    );
+
+    // deliveries は failed へ（indeterminate/delivered でない）。
+    let state_str: String = h
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT state FROM deliveries WHERE binding_id = ?1",
+            [&binding_id],
+            |r| r.get(0),
+        )
         .unwrap();
-    assert!(result.success, "execute が成功する: {:?}", result.error);
-    assert_eq!(result.data, Some(json!({"posted": true})));
+    assert_eq!(state_str, "failed", "拒否された発話 delivery は failed");
 }
 
 /// DI-18 / §11.6: 汎用 DI 機構のソースに個別 gateway operation 語彙が現れないことの static audit。

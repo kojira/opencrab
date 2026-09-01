@@ -93,6 +93,7 @@ pub fn spawn_instance(
             nostaro_bin.clone(),
             post_config.clone(),
             secret.as_ref().map(|s| s.as_str().to_string()),
+            overrides.dry_run,
         ));
     let client = InstanceClient::spawn_with_operations(
         socket,

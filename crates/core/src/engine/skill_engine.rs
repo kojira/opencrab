@@ -266,6 +266,14 @@ impl SkillEngine {
         }
     }
 
+    /// 発話クラス（撃ちっぱなし）のツールか（§3.3・第三柱）。dispatcher が権威で、
+    /// 未設定・非発話は `false`（従来ツール）。
+    fn is_utterance_tool(&self, name: &str) -> bool {
+        self.tool_dispatcher
+            .as_ref()
+            .is_some_and(|d| d.is_utterance(name))
+    }
+
     /// Build an ActionResult for a permission denied error.
     fn permission_denied(action_name: &str) -> ActionResult {
         ActionResult {
@@ -638,8 +646,16 @@ impl SkillEngine {
                 apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
 
                 // Notify on_tool_call callbacks.
+                //
+                // 発話クラス（reply/reaction/repost・§3.3.1 C6）の tool_call は**機械行を
+                // 永続しない**。発話の本文は配送経路が speech ログとして残す（本文＋関係注記）
+                // ので、ここで永続 tool_call 行から除外する。照会/道具クラスの call は従来どおり。
                 if !self.on_tool_call.is_empty() {
-                    let calls_json = serde_json::to_string(&tool_calls).unwrap_or_default();
+                    let persisted: Vec<&ToolCall> = tool_calls
+                        .iter()
+                        .filter(|tc| !self.is_utterance_tool(&tc.function.name))
+                        .collect();
+                    let calls_json = serde_json::to_string(&persisted).unwrap_or_default();
                     let assistant_content = content.clone().unwrap_or_default();
                     for cb in &self.on_tool_call {
                         cb(assistant_content.clone(), calls_json.clone());
@@ -761,6 +777,33 @@ impl SkillEngine {
                     // Canonical tool-call arguments are a JSON string; parse to a
                     // Value for the executor boundary (empty object on malformed).
                     let args = tool_call.arguments_json();
+
+                    // 発話クラス（撃ちっぱなし・§3.3.1 C3/C6）: inline 実行して配送するが、
+                    // subtask/settle/resume は起こさず、モデルへ領収書（tool_result 本文）を
+                    // 返さない。provider の tool_call/tool_result 対要求は**データを持たない
+                    // 最小 ack**で満たし（R7）、on_tool_result（永続機械行）は呼ばない。本文は
+                    // 配送経路が speech として永続する（C6）。失敗は say と同一経路で
+                    // gateway が turn_failed/❌・log に表面化する（C9・領収書は返さない）。
+                    if self.is_utterance_tool(tool_name) {
+                        let _ = self
+                            .executor
+                            .execute_with_id(tool_name, &args, &tool_call.id)
+                            .await;
+                        // 最小 ack（データを持たない空オブジェクト・capping 不要）。成功/失敗を
+                        // 名乗らない——失敗は say と同一経路で ❌/turn_failed に別途表面化する（C9）。
+                        let ack = "{}".to_string();
+                        messages.push(Message::tool(tool_call.id.clone(), ack.clone()));
+                        turn_ledger.record(format!("tool:{}", messages.len()), &ack);
+                        apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
+                        tracing::debug!(
+                            iteration = iterations,
+                            tool = %tool_name,
+                            id = %tool_call.id,
+                            stage = "utterance",
+                            "turn: 発話クラスを配送（撃ちっぱなし・機械行なし）"
+                        );
+                        continue;
+                    }
 
                     // ここを通るのは inline 実行対象（全体 inline、または混在バッチの
                     // inline 接頭辞）のみ。分割判定はバッチ単位でループ前に済んでいる（#671）。

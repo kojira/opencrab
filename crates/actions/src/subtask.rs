@@ -994,6 +994,9 @@ impl ActionExecutor for SharedExecutor {
     fn inline_tool_names(&self) -> HashSet<String> {
         self.0.inline_tool_names()
     }
+    fn utterance_tool_names(&self) -> HashSet<String> {
+        self.0.utterance_tool_names()
+    }
 }
 
 /// 既定で auto-dispatch **しない**（＝ inline 実行のまま）ツールのうち、**制御ツールと
@@ -1113,8 +1116,12 @@ pub struct SubtaskToolDispatcher {
     sink: Arc<dyn SubtaskCompletionSink>,
     agent_id: String,
     parent_session_id: String,
-    /// auto-dispatch しないツール名（既定 = `default_non_dispatch_tools()`）。
+    /// auto-dispatch しないツール名（既定 = `default_non_dispatch_tools()`）。発話クラスも
+    /// ここに含む（背景 subtask 化しない）。
     non_dispatch: HashSet<String>,
+    /// 発話クラス（撃ちっぱなし・§3.3.1 C4）のツール名。`is_utterance` の権威。
+    /// `non_dispatch` の部分集合で、engine が「inline だが撃ちっぱなし配送」を分ける。
+    utterance: HashSet<String>,
     /// dispatch した subtask に付与する gateway 不透明な返信ルーティング token
     /// （#167）。この dispatcher は 1 回の親ターンに紐づくため、inbound の返信先を
     /// そのまま全 dispatch へ引き継ぐ。`None` なら返信配送先の指定なし（Discord は
@@ -1150,6 +1157,7 @@ impl SubtaskToolDispatcher {
         // ＋ 制御ツール ＋ core inline）。`BridgedExecutor` が override し、それ以外の
         // executor は既定（空）＋ `default_non_dispatch_tools` 相当を返す。
         let non_dispatch = executor.inline_tool_names();
+        let utterance = executor.utterance_tool_names();
         Self {
             executor,
             registry,
@@ -1158,6 +1166,7 @@ impl SubtaskToolDispatcher {
             agent_id: agent_id.into(),
             parent_session_id: parent_session_id.into(),
             non_dispatch,
+            utterance,
             reply_target: None,
             caller: CallerIdentity::Agent,
             timeout: std::time::Duration::from_secs(DEFAULT_DISPATCH_TIMEOUT_SECS),
@@ -1309,6 +1318,10 @@ impl ToolDispatcher for SubtaskToolDispatcher {
             return false;
         }
         !self.non_dispatch.contains(tool_name)
+    }
+
+    fn is_utterance(&self, tool_name: &str) -> bool {
+        self.utterance.contains(tool_name)
     }
 
     fn dispatch_batch(&self, calls: &[DispatchCall]) -> DispatchOutcome {

@@ -911,10 +911,126 @@ async fn handle_response(
                 Err(())
             }
         }
+        Pending::Utterance {
+            delivery_id,
+            binding_id,
+            reply_target,
+        } => {
+            handle_utterance_response(
+                state,
+                writer,
+                instance_id,
+                identity,
+                &resp,
+                &delivery_id,
+                &binding_id,
+                reply_target.as_deref(),
+            )
+            .await
+        }
         Pending::Invoke { call_id, reply, .. } => {
             handle_invoke_response(state, writer, instance_id, identity, &resp, &call_id, reply)
                 .await
         }
+    }
+}
+
+/// 発話クラス（撃ちっぱなし・§3.3.1 C5/C9）の invoke 応答。`Say` と同型で deliveries を
+/// terminal 化する（operation_call も oneshot も無い＝settle/resume を起こさない）。失敗
+/// （external_rejected）だけ `turn_failed`/❌ で表面化し、モデルへ領収書は返さない。
+#[allow(clippy::too_many_arguments)]
+async fn handle_utterance_response(
+    state: &Arc<ExtgateState>,
+    writer: &Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>,
+    instance_id: &str,
+    identity: u64,
+    resp: &WireResponse,
+    delivery_id: &str,
+    binding_id: &str,
+    reply_target: Option<&str>,
+) -> Result<(), ()> {
+    if resp.ok {
+        // 発話配送 ok は結果本文を持たない（invoke ok は result 必須だが発話は読まない）。
+        // seq は持たない。seq 付き ok は response_invalid（say と同じ厳密さ）。
+        if resp.seq.is_some() {
+            if let Err(e) =
+                mark_indeterminate(state, std::slice::from_ref(&delivery_id.to_string()))
+            {
+                tracing::error!(
+                    code = e.code.as_str(),
+                    "indeterminate after invalid utterance ok"
+                );
+                state.halt();
+            }
+            close_live(
+                state,
+                Some(instance_id),
+                Some(identity),
+                ErrorCode::ResponseInvalid,
+                Some(&resp.id),
+                Some(writer),
+            )
+            .await;
+            return Err(());
+        }
+        if let Err(e) = mark_delivered(state, delivery_id) {
+            tracing::error!(code = e.code.as_str(), "utterance delivered write failed");
+            let _ = mark_indeterminate(state, std::slice::from_ref(&delivery_id.to_string()));
+            close_live(
+                state,
+                Some(instance_id),
+                None,
+                ErrorCode::StoreError,
+                None,
+                None,
+            )
+            .await;
+            state.halt();
+            return Err(());
+        }
+        Ok(())
+    } else if resp.code == Some(ErrorCode::OperationRejected) {
+        // 発話は wire 上 invoke frame で送るため、gateway の確定拒否は say の `external_rejected`
+        // ではなく invoke の `operation_rejected` で返る（gate-client handle_invoke）。
+        if let Err(e) = mark_failed(state, delivery_id) {
+            tracing::error!(code = e.code.as_str(), "utterance failed write failed");
+            let _ = mark_indeterminate(state, std::slice::from_ref(&delivery_id.to_string()));
+            close_live(
+                state,
+                Some(instance_id),
+                None,
+                ErrorCode::StoreError,
+                None,
+                None,
+            )
+            .await;
+            state.halt();
+            return Err(());
+        }
+        // C9: 発話失敗を発端 origin つきで gateway へ通知する（❌ を付ける）。error 本文は
+        // wire に載せない（#668）。単一メンションのみ Some（bundle/曖昧は None）。
+        if let Some(origin) = reply_target {
+            emit_turn_failed(state, instance_id, binding_id, origin).await;
+        }
+        Ok(())
+    } else {
+        if let Err(e) = mark_indeterminate(state, std::slice::from_ref(&delivery_id.to_string())) {
+            tracing::error!(
+                code = e.code.as_str(),
+                "indeterminate after invalid utterance err"
+            );
+            state.halt();
+        }
+        close_live(
+            state,
+            Some(instance_id),
+            Some(identity),
+            ErrorCode::ResponseInvalid,
+            Some(&resp.id),
+            Some(writer),
+        )
+        .await;
+        Err(())
     }
 }
 

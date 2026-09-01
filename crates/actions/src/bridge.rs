@@ -1112,13 +1112,30 @@ impl ActionExecutor for BridgedExecutor {
     /// （制御ツール ＋ core inline）と合わせて返す。gateway / MCP を注入していない executor
     /// でも制御ツールと core は必ず inline に残る（`default_non_dispatch_tools` が保証）。
     fn inline_tool_names(&self) -> std::collections::HashSet<String> {
+        use opencrab_gateway::DispatchMode;
         let mut set = crate::subtask::default_non_dispatch_tools();
         for (name, class) in &self.tool_class_index {
-            if class.dispatch == opencrab_gateway::DispatchMode::Inline {
+            // Inline も Utterance も背景 subtask 化しない（should_dispatch=false）。Utterance は
+            // inline 経路に載せつつ engine が `is_utterance` で撃ちっぱなし配送へ分岐する。
+            if matches!(
+                class.dispatch,
+                DispatchMode::Inline | DispatchMode::Utterance
+            ) {
                 set.insert(name.clone());
             }
         }
         set
+    }
+
+    /// 発話クラス（撃ちっぱなし・§3.3.1 C4）のツール名集合。索引から
+    /// `dispatch == Utterance` を集める。照会/道具クラスとはここで分離する。
+    fn utterance_tool_names(&self) -> std::collections::HashSet<String> {
+        use opencrab_gateway::DispatchMode;
+        self.tool_class_index
+            .iter()
+            .filter(|(_, class)| class.dispatch == DispatchMode::Utterance)
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 }
 
