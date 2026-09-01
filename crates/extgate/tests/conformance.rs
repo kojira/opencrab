@@ -3397,7 +3397,7 @@ async fn di_recover_stale_calls_marks_indeterminate() {
 /// dispatch_batch が settle する。dispatch→settle→resume の連鎖自体は
 /// settlement_is_consumed_on_next_turn 等で別途検収済み）。
 #[tokio::test]
-async fn di_projection_execute_invoke_settles() {
+async fn di_projection_reply_is_utterance_fire_and_forget() {
     let h = Harness::start().await;
     let instance_id = uuid();
     let binding_id = uuid();
@@ -3424,27 +3424,42 @@ async fn di_projection_execute_invoke_settles() {
     assert!(ops.definitions().iter().any(|d| d.name == "reply"));
 
     let ctx = GatewayCallContext::for_agent("agent-1");
-    let exec = async move {
-        ops.execute("reply", &json!({"event": "e1", "text": "やあ"}), &ctx)
-            .await
-    };
-    let exec = tokio::spawn(exec);
-    // gateway 側: invoke を受けて ok(result) を返す。
+    // 発話クラス化（§3.3.1 C5・row353）: reply は照会でなく発話クラス。execute は operation_call を
+    // 作らず delivery で永続し、await せず即 ack（success・data=None＝領収書を返さない）を返す。
+    // subtask/settle/resume は起こさない。wire への invoke は従来どおり送られる（gateway が publish）。
+    let result = ops
+        .execute("reply", &json!({"event": "e1", "text": "やあ"}), &ctx)
+        .await;
+    assert!(result.success, "発話 execute が成功する: {:?}", result.error);
+    assert_eq!(result.data, None, "発話は結果本文（領収書）を返さない");
+
+    // gateway 側は invoke を受け取る（配送は fire-and-forget で継続）。
     let invoke = read_until(&mut s, |v| v["m"] == "invoke").await;
     assert_eq!(invoke["operation"], "reply");
+    assert_eq!(invoke["payload"]["text"], "やあ");
     let call_id = invoke["id"].as_str().unwrap().to_string();
-    write_frame(
-        &mut s,
-        &json!({"id": call_id, "m": "ok", "result": {"posted": true}}),
-    )
-    .await;
+    // 応答 ok は deliveries 行を delivered 化するだけ（settle/resume を起こさない）。
+    write_frame(&mut s, &json!({"id": call_id, "m": "ok"})).await;
 
-    let result = tokio::time::timeout(Duration::from_secs(2), exec)
-        .await
-        .expect("execute 完了")
-        .unwrap();
-    assert!(result.success, "execute が成功する: {:?}", result.error);
-    assert_eq!(result.data, Some(json!({"posted": true})));
+    // 発話本文が speech として永続している（機械行なし・C6）。
+    let logs = {
+        let conn = h.state.db.lock().unwrap();
+        opencrab_db::queries::list_session_logs_by_session(&conn, &session_id).unwrap()
+    };
+    assert!(
+        logs.iter()
+            .any(|l| l.log_type == "speech" && l.content == "やあ"),
+        "発話本文が speech として永続していない: {:?}",
+        logs.iter()
+            .map(|l| (&l.log_type, &l.content))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !logs
+            .iter()
+            .any(|l| l.log_type == "tool_call" || l.log_type == "tool_result"),
+        "発話 reply が機械行を残した"
+    );
 }
 
 /// DI-18 / §11.6: 汎用 DI 機構のソースに個別 gateway operation 語彙が現れないことの static audit。

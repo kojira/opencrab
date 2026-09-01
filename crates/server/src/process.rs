@@ -1036,6 +1036,18 @@ fn set_turn_log_callbacks(
                         tracing::error!(agent_id = %tc_agent, session_id = %tc_session, "Failed to insert speech log (with tool_call): {e}");
                     }
                 }
+                // 発話クラス（reply/reaction/repost・§3.3.1 C6）は engine が tool_calls_json から
+                // 除外して渡す。除外の結果ツールが 1 つも残らない（空配列）ターンは、機械行
+                // （空の tool_call ログ）を残さない。発話本文は配送経路が speech として永続する。
+                let has_persistable_calls = serde_json::from_str::<serde_json::Value>(
+                    &tool_calls_json,
+                )
+                .ok()
+                .and_then(|v| v.as_array().map(|a| !a.is_empty()))
+                .unwrap_or(!tool_calls_json.trim().is_empty());
+                if !has_persistable_calls {
+                    return;
+                }
                 // DI operation の call id を記録し、会話再構成で arguments を digest 除外する。
                 let preserve_ids: Vec<String> =
                     serde_json::from_str::<serde_json::Value>(&tool_calls_json)

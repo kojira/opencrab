@@ -57,6 +57,16 @@ pub enum Pending {
         operation: String,
         reply: oneshot::Sender<OperationOutcome>,
     },
+    /// 発話クラス（撃ちっぱなし・DESIGN-RESUME-SETTLE §3.3・第三柱）の invoke 応答待ち。
+    /// `Say` と同型で operation_call を作らず deliveries 行だけを terminal 化する（settle/resume
+    /// を起こさない・oneshot を持たない）。失敗（external_rejected）は say と同じく
+    /// `turn_failed`/❌ で表面化し（C9）、`reply_target` はその発端 origin。
+    Utterance {
+        delivery_id: String,
+        binding_id: String,
+        /// ❌ を付ける発端 origin（単一メンションのみ Some・bundle/曖昧は None）。
+        reply_target: Option<String>,
+    },
 }
 
 impl Pending {
@@ -72,10 +82,15 @@ impl Pending {
         matches!(self, Self::Invoke { .. })
     }
 
+    pub fn is_utterance(&self) -> bool {
+        matches!(self, Self::Utterance { .. })
+    }
+
     pub fn binding_id(&self) -> Option<&str> {
         match self {
             Self::Bind { binding_id, .. } => Some(binding_id),
             Self::Invoke { binding_id, .. } => Some(binding_id),
+            Self::Utterance { binding_id, .. } => Some(binding_id),
             Self::Say { .. } => None,
         }
     }
@@ -83,6 +98,7 @@ impl Pending {
     pub fn delivery_id(&self) -> Option<&str> {
         match self {
             Self::Say { delivery_id } => Some(delivery_id),
+            Self::Utterance { delivery_id, .. } => Some(delivery_id),
             Self::Bind { .. } | Self::Invoke { .. } => None,
         }
     }

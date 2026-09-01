@@ -51,6 +51,9 @@ pub async fn close_live(
         for p in entry.pending.into_values() {
             match p {
                 Pending::Say { delivery_id } => says.push(delivery_id),
+                // 発話クラスは say と同じ deliveries 行なので同じ経路で indeterminate 化する
+                // （oneshot を持たない＝resume を起こさない）。
+                Pending::Utterance { delivery_id, .. } => says.push(delivery_id),
                 Pending::Invoke { call_id, reply, .. } => invokes.push((call_id, reply)),
                 Pending::Bind { .. } => {}
             }

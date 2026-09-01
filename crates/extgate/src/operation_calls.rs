@@ -157,6 +157,167 @@ pub async fn invoke_and_wait(
     }
 }
 
+/// 発話クラス（撃ちっぱなし・DESIGN-RESUME-SETTLE §3.3.1 C5）の invoke。
+///
+/// `invoke_and_wait` と違い **operation_call を作らず**、say と同型の crash-safe delivery で
+/// 永続する: 1 TX で発話本文を `speech` ログとして残し（本文＋関係注記のみ・機械行なし C6）、
+/// `deliveries` 行を `sending` で立て、commit 後に `Pending::Utterance` を登録して invoke を
+/// exact 1 回 write する。**await しない**（settle/resume を起こさない）。gateway 応答は
+/// `handle_response` が deliveries を terminal 化し、失敗のみ `turn_failed`/❌ で表面化する（C9）。
+///
+/// `speech_body` は永続する発話本文（本文や絵文字など・空可）。`utterance_kind` は関係注記の
+/// 種別（発話 op 名。既知名 → 本文/種別/対象の写像は `opencrab_gateway::utterance_body`）。
+/// `reply_target_id` は会話内 e 番号解決用の 64hex（metadata）、`reply_target_origin` は ❌ 付与用
+/// の発端 origin。
+#[allow(clippy::too_many_arguments)]
+pub async fn invoke_utterance(
+    state: &Arc<ExtgateState>,
+    instance_id: &str,
+    binding_id: &str,
+    agent_id: &str,
+    session_id: &str,
+    operation: &str,
+    payload: &Value,
+    speech_body: &str,
+    utterance_kind: &str,
+    reply_target_id: Option<&str>,
+    reply_target_origin: Option<&str>,
+) -> Result<(), InvokeError> {
+    // live + acknowledged binding + live declaration を再検査（invoke_and_wait と同じ）。
+    let writer = {
+        let reg = state
+            .lock_registry()
+            .map_err(|_| InvokeError::new(ErrorCode::StoreError))?;
+        let live = reg
+            .get(instance_id)
+            .ok_or_else(|| InvokeError::new(ErrorCode::NotConnected))?;
+        if !live.acknowledged.contains(binding_id) {
+            return Err(InvokeError::new(ErrorCode::NotConnected));
+        }
+        if live.declaration(operation).is_none() {
+            return Err(InvokeError::new(ErrorCode::OperationUnknown));
+        }
+        live.writer.clone()
+    };
+
+    let call_id = Uuid::new_v4().to_string();
+    let delivery_id = Uuid::new_v4().to_string();
+    let now = now_nanos();
+    // deliveries.payload_json は `{"text": ...}` 形が CHECK 制約（say と共用のテーブル）。発話本文を
+    // 載せる（wire への invoke は別途 invoke_frame で原 payload を送る・二重には持たない）。
+    let delivery_payload = serde_json::json!({ "text": speech_body }).to_string();
+    // 発話本文の関係注記用 metadata（C6: レンダリングは本文＋関係注記のみ）。
+    let mut speech_meta = serde_json::Map::new();
+    speech_meta.insert(
+        "source".to_string(),
+        Value::String(
+            opencrab_actions::TranscriptSource::External
+                .reply()
+                .to_string(),
+        ),
+    );
+    speech_meta.insert(
+        "utterance_kind".to_string(),
+        Value::String(utterance_kind.to_string()),
+    );
+    if let Some(t) = reply_target_id {
+        speech_meta.insert("reply_target".to_string(), Value::String(t.to_string()));
+    }
+    let speech_meta = Value::Object(speech_meta).to_string();
+
+    {
+        let mut conn = state
+            .db
+            .lock()
+            .map_err(|_| InvokeError::new(ErrorCode::StoreError))?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| InvokeError::new(ErrorCode::StoreError))?;
+        let open = tx.query_row(
+            "SELECT instance_id, closed_at FROM gate_bindings WHERE binding_id = ?1",
+            params![binding_id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?)),
+        );
+        match open {
+            Ok((inst, None)) if inst == instance_id => {}
+            Ok(_) => {
+                let _ = tx.rollback();
+                return Err(InvokeError::new(ErrorCode::BindingClosed));
+            }
+            Err(_) => {
+                let _ = tx.rollback();
+                return Err(InvokeError::new(ErrorCode::StoreError));
+            }
+        }
+        // 発話本文を speech として永続（撃ちっぱなしでも「言った」ことは残る＝復唱の抑止源）。
+        opencrab_db::queries::insert_session_log(
+            &tx,
+            &opencrab_db::queries::SessionLogRow {
+                id: None,
+                agent_id: agent_id.to_string(),
+                session_id: session_id.to_string(),
+                log_type: "speech".to_string(),
+                content: speech_body.to_string(),
+                speaker_id: Some(agent_id.to_string()),
+                turn_number: None,
+                metadata_json: Some(speech_meta),
+                created_at: None,
+            },
+        )
+        .map_err(|_| InvokeError::new(ErrorCode::StoreError))?;
+        tx.execute(
+            "INSERT INTO deliveries (delivery_id, binding_id, payload_json, state, error, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'sending', NULL, ?4, ?4)",
+            params![delivery_id, binding_id, delivery_payload, now],
+        )
+        .map_err(|_| InvokeError::new(ErrorCode::StoreError))?;
+        tx.commit()
+            .map_err(|_| InvokeError::new(ErrorCode::StoreError))?;
+    }
+
+    // commit 後だけ pending 登録（terminal は deliveries 行・oneshot 無し＝resume を起こさない）。
+    {
+        let mut reg = state
+            .lock_registry()
+            .map_err(|_| InvokeError::new(ErrorCode::StoreError))?;
+        let Some(live) = reg.get_mut(instance_id) else {
+            drop(reg);
+            let _ = crate::delivery::mark_indeterminate(state, std::slice::from_ref(&delivery_id));
+            return Err(InvokeError::new(ErrorCode::Disconnect));
+        };
+        live.pending.insert(
+            delivery_id.clone(),
+            Pending::Utterance {
+                delivery_id: delivery_id.clone(),
+                binding_id: binding_id.to_string(),
+                reply_target: reply_target_origin.map(str::to_string),
+            },
+        );
+    }
+
+    // invoke を exact 1 回 write（wire への invoke は従来どおり・gateway が publish）。
+    if write_json(
+        &writer,
+        &invoke_frame(&call_id, binding_id, operation, None, payload),
+    )
+    .await
+    .is_err()
+    {
+        let _ = crate::delivery::mark_indeterminate(state, std::slice::from_ref(&delivery_id));
+        crate::close::close_live(
+            state,
+            Some(instance_id),
+            None,
+            ErrorCode::Disconnect,
+            None,
+            None,
+        )
+        .await;
+        return Err(InvokeError::new(ErrorCode::Disconnect));
+    }
+    Ok(())
+}
+
 /// call を terminal 化する（§5.3）。DB のみ。terminal 遷移は
 /// `sending→succeeded|failed|indeterminate` で、既に terminal の行は変えない。
 /// 成功捏造を避けるため DB 失敗は Err を返す（呼び出し側が close + halt）。

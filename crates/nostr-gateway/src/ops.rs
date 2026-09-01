@@ -116,14 +116,24 @@ pub struct NostrInvokeHandler {
     nostaro_bin: PathBuf,
     config_path: PathBuf,
     secret: Option<String>,
+    /// QC ハーネス（dry-run）: publish 系 invoke（reply/reaction/repost/...）を nostaro を
+    /// spawn せず本文・種別を `DRY_RUN_LOG_TARGET` へ残して成功 ack する。read（resolve）は
+    /// 副作用が無いので dry-run でも通常経路（外部依存が無ければ Rejected）。
+    dry_run: bool,
 }
 
 impl NostrInvokeHandler {
-    pub fn new(nostaro_bin: PathBuf, config_path: PathBuf, secret: Option<String>) -> Self {
+    pub fn new(
+        nostaro_bin: PathBuf,
+        config_path: PathBuf,
+        secret: Option<String>,
+        dry_run: bool,
+    ) -> Self {
         Self {
             nostaro_bin,
             config_path,
             secret,
+            dry_run,
         }
     }
 
@@ -195,6 +205,30 @@ fn run_to_outcome(run: Run) -> InvokeOutcome {
 #[async_trait]
 impl InvokeHandler for NostrInvokeHandler {
     async fn handle(&self, _binding_id: &str, operation: &str, payload: &Value) -> InvokeOutcome {
+        // QC ハーネス（dry-run）: invoke を nostaro を spawn せず処理する。publish 系（発話
+        // reply/reaction/repost や書き込み）は本文・種別を残して成功 ack し、実配線 E2E で
+        // 配送を観測できる。read（resolve・照会クラス）は生 JSON 取得の代わりに短縮参照を
+        // 返し、settle→resume が結果を読む経路（DI-08 非回帰）を観測できる。
+        if self.dry_run {
+            if operation == "resolve" {
+                let reference = str_field(payload, "ref").unwrap_or_default();
+                return InvokeOutcome::Ok(
+                    json!({"dry_run": true, "kind": "resolve", "ref": reference}),
+                );
+            }
+            let body = match operation {
+                "reply" => str_field(payload, "text").unwrap_or_default(),
+                "reaction" => str_field(payload, "emoji").unwrap_or("+"),
+                _ => "",
+            };
+            tracing::info!(
+                target: crate::post::DRY_RUN_LOG_TARGET,
+                kind = operation,
+                body = %body,
+                "DRY_RUN invoke (not published)"
+            );
+            return InvokeOutcome::Ok(Value::Null);
+        }
         // 入力欠落・不正は確定拒否（外部 I/O 0）。argv は "--" でオプション終端して positional を渡す。
         let dash = || "--".to_string();
         let argv: Vec<String> = match operation {

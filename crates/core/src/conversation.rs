@@ -1544,6 +1544,30 @@ fn inbound_relation_annotation(
     Some(format!("({relation}→{target})"))
 }
 
+/// エージェント**自身の発話クラス** op（reply/reaction/repost）の speech ログに関係注記を付ける
+/// （DESIGN-RESUME-SETTLE §3.3.1 C6・発話クラス化）。撃ちっぱなし配送で永続した発話は
+/// tool_call/tool_result の機械行を持たず「本文＋関係注記」だけで残る。注記の種別は metadata の
+/// `utterance_kind`、対象ノートは `reply_target`（64hex）→ 会話内 e 番号（無ければ `→外部`）。
+/// 受信転記（`inbound_relation_annotation`）とは metadata 由来かで区別し、二重付与しない。
+fn outgoing_relation_annotation(
+    log: &opencrab_db::queries::SessionLogRow,
+    refs: &ConversationRefs,
+) -> Option<String> {
+    let meta: serde_json::Value = serde_json::from_str(log.metadata_json.as_deref()?).ok()?;
+    let kind = meta.get("utterance_kind").and_then(|v| v.as_str())?;
+    let relation = match kind {
+        "reply" => "reply",
+        "reaction" => "reaction",
+        "repost" => "repost",
+        _ => return None,
+    };
+    let target = reply_target_of(log)
+        .and_then(|t| refs.event_num_by_id(&t))
+        .map(|n| format!("e{n}"))
+        .unwrap_or_else(|| "外部".to_string());
+    Some(format!("({relation}→{target})"))
+}
+
 /// `[… kind:<数字> <ラベル> …]` からラベル語だけを取り出す（新形も旧 from=/target= 付きも）。
 fn meta_line_label(trimmed: &str) -> Option<&str> {
     const MARKER: &str = " kind:";
@@ -1629,7 +1653,9 @@ pub fn format_single_log_with_echo(
                 // 「そもそもリアクションか」が失われた欠陥への対処。対象ノート(→e番号)は現状の
                 // 受信転記に記録が無いため `→外部` の最小表記（真の →e番号 は target 記録の
                 // データスライス後・報告参照）。素の投稿/メンションは注記なし。
-                let relation = inbound_relation_annotation(log, r).unwrap_or_default();
+                let relation = inbound_relation_annotation(log, r)
+                    .or_else(|| outgoing_relation_annotation(log, r))
+                    .unwrap_or_default();
                 // 表示時に legacy メタ行・生識別子を剥がしてから切り詰める（row294b・保存は不変）。
                 let cleaned = strip_inbound_meta_for_display(&log.content);
                 let content = match render_limit(external_origin_of(log).as_deref()) {
@@ -4612,6 +4638,49 @@ mod render_refs_tests {
         assert!(o_reaction.contains("🫧"), "本文が残る: {o_reaction}");
         let o_plain = format_single_log_with_echo(&logs[2], None, Some(&refs));
         assert!(!o_plain.contains("→外部"), "素の投稿に注記なし: {o_plain}");
+    }
+
+    // C6（発話クラス化）: 自分の発話 op（reply/reaction/repost）は本文＋関係注記のみで残り、
+    // 機械行（[tool_call]/[tool_result]）を出さない。注記は metadata 由来（utterance_kind）。
+    #[test]
+    fn outgoing_utterance_renders_body_and_relation_without_machine_lines() {
+        let target_id = "ab".repeat(32);
+        let target = speech(
+            "me",
+            "pk_other",
+            "元の投稿",
+            Some(&format!("nostr:event:v1:default:{target_id}")),
+        );
+        let mut my_reply = speech("me", "me", "そうだね", None);
+        my_reply.metadata_json = Some(
+            serde_json::json!({
+                "source": "external_reply",
+                "utterance_kind": "reply",
+                "reply_target": target_id,
+            })
+            .to_string(),
+        );
+        let mut my_reaction = speech("me", "me", "🫧", None);
+        my_reaction.metadata_json = Some(
+            serde_json::json!({ "utterance_kind": "reaction", "reply_target": "ff".repeat(32) })
+                .to_string(),
+        );
+        let logs = vec![target, my_reply, my_reaction];
+        let refs = ConversationRefs::build(&logs, "me");
+        let o_reply = format_single_log_with_echo(&logs[1], None, Some(&refs));
+        assert!(
+            o_reply.contains("(reply→e1):"),
+            "対象は会話内 e1: {o_reply}"
+        );
+        assert!(o_reply.contains("そうだね"), "本文が残る: {o_reply}");
+        assert!(
+            !o_reply.contains("[tool_call]") && !o_reply.contains("[tool_result]"),
+            "機械行を出さない: {o_reply}"
+        );
+        let o_reaction = format_single_log_with_echo(&logs[2], None, Some(&refs));
+        // 対象 ff… は会話に無いので →外部。
+        assert!(o_reaction.contains("(reaction→外部):"), "{o_reaction}");
+        assert!(o_reaction.contains("🫧"), "本文が残る: {o_reaction}");
     }
 
     // row295c 6b: reply_target が記録されていれば会話内の e 番号へ解決する。

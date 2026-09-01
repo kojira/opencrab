@@ -55,6 +55,17 @@ pub trait ActionExecutor: Send + Sync {
     fn inline_tool_names(&self) -> std::collections::HashSet<String> {
         std::collections::HashSet::new()
     }
+
+    /// 発話クラス（撃ちっぱなし・§3.3・第三柱）のツール名集合。既定は空集合。
+    ///
+    /// `inline_tool_names` と同じく分類の権威はツール定義の属性
+    /// （`GatewayActionDef.class.dispatch == Utterance`）で、それを読める実装
+    /// （`BridgedExecutor`）だけが override する。発話クラスは `inline_tool_names` にも
+    /// 含める（＝ `should_dispatch` を偽にして背景 subtask 化しない）。ここで別に返すのは
+    /// エンジンが「inline だが撃ちっぱなし配送」を見分けるため（`ToolDispatcher::is_utterance`）。
+    fn utterance_tool_names(&self) -> std::collections::HashSet<String> {
+        std::collections::HashSet::new()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -103,6 +114,16 @@ pub trait ToolDispatcher: Send + Sync {
     /// （discord_send 等）、および run 内共有状態を書くツール（select_llm）は
     /// `false`（＝従来どおり同期実行）を返すことを想定する。
     fn should_dispatch(&self, tool_name: &str) -> bool;
+
+    /// このツールが**発話クラス**（撃ちっぱなし・DESIGN-RESUME-SETTLE §3.3・第三柱）か。
+    ///
+    /// `true` のツール（reply/reaction/repost）は subtask 化も settle も resume もせず、
+    /// **同ターンで inline 実行して配送**し、モデルへ領収書（tool_result 本文）を返さず
+    /// 会話に機械行も残さない。`should_dispatch` は発話クラスに対して `false`
+    /// （＝背景 subtask 化しない）を返すこと。既定は `false`（従来ツールは非発話）。
+    fn is_utterance(&self, _tool_name: &str) -> bool {
+        false
+    }
 
     /// **同一バッチのツール呼び出し群**を 1 本の background subtask として起動し、
     /// 同期的にマーカーを返す。

@@ -33,7 +33,7 @@ pub use listen::{
     enqueue_bind, recover_stale_deliveries, serve_uds, validate_listen_socket, wait_bind_ack,
     web_binding_state, EnqueueBindOutcome,
 };
-pub use operation_calls::{invoke_and_wait, recover_stale_calls, InvokeError};
+pub use operation_calls::{invoke_and_wait, invoke_utterance, recover_stale_calls, InvokeError};
 pub use operations::{
     declaration_digest, validate_operations, GatewayOperationDeclaration, OperationClass, Sharing,
     SubEngine,

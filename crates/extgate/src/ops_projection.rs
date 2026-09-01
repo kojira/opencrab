@@ -16,7 +16,7 @@ use opencrab_gateway::{
     SubEngineAccess, ToolClass, ToolSharing,
 };
 
-use crate::operation_calls::invoke_and_wait;
+use crate::operation_calls::{invoke_and_wait, invoke_utterance};
 use crate::operations::{GatewayOperationDeclaration, Sharing, SubEngine};
 use crate::registry::ExtgateState;
 
@@ -104,6 +104,23 @@ impl ExtgateOpsGatewayActions {
             .unwrap_or_default()
     }
 
+    /// この op が**発話クラス**（撃ちっぱなし・§3.3.1 C2）か。宣言 field（additive・R3 (a)）を
+    /// 優先し、無ければ core 既知名（R3 (c)）へフォールバックする。
+    fn is_utterance_op(&self, decl: &GatewayOperationDeclaration) -> bool {
+        decl.class
+            .utterance
+            .unwrap_or_else(|| opencrab_gateway::is_known_utterance_op(&decl.name))
+    }
+
+    /// 名前から発話クラス判定（execute 経路用。宣言 snapshot を引く）。
+    fn is_utterance_name(&self, name: &str) -> bool {
+        self.declarations
+            .iter()
+            .find(|d| d.name == name)
+            .map(|d| self.is_utterance_op(d))
+            .unwrap_or(false)
+    }
+
     fn build_refs(&self) -> Option<ConversationRefs> {
         let conn = self.state.db.lock().ok()?;
         let logs =
@@ -138,10 +155,16 @@ impl GatewayActions for ExtgateOpsGatewayActions {
                 description: d.description.clone(),
                 parameters: d.input_schema.clone(),
                 class: ToolClass {
-                    // DI-01: 常時 detach。これは core 内部の dispatch 配線であって、廃止した宣言
-                    // schema の `class.dispatch` field を復活させるものではない（宣言に dispatch は
-                    // なく、常時 detach は core 動作として保証される）。
-                    dispatch: DispatchMode::Dispatchable,
+                    // C1（発話クラス化・§3.3.1）: 従来は全 DI op を Dispatchable 固定していたが、
+                    // 発話クラス（撃ちっぱなしの発言 op）は subtask 化せず配送経路（Utterance）へ、
+                    // 照会/道具クラスは従来どおり Dispatchable（常時 detach）とする。分類は宣言
+                    // field（additive・R3 (a)）を優先し、無ければ core 既知名（R3 (c)・既知名の
+                    // 集約は `opencrab_gateway::is_known_utterance_op`）。
+                    dispatch: if self.is_utterance_op(d) {
+                        DispatchMode::Utterance
+                    } else {
+                        DispatchMode::Dispatchable
+                    },
                     sub_engine: map_sub_engine(d.class.sub_engine),
                     sharing: map_sharing(d.class.sharing),
                 },
@@ -164,7 +187,43 @@ impl GatewayActions for ExtgateOpsGatewayActions {
             };
         }
         let payload = self.resolve_payload(name, args);
-        // 背景 subtask 内での await（option B）: turn は既に spawned で返り detach 済み。
+
+        // 発話クラス（撃ちっぱなし・§3.3.1 C5）: operation_call を作らず delivery で crash-safe
+        // 永続し、await しない（settle/resume を起こさない）。モデルへは最小 ack（成功封筒・
+        // データなし）を返す——engine 側で機械行にせず本文だけ会話へ残す（C6）。
+        if self.is_utterance_name(name) {
+            let (body, kind, target_origin) = opencrab_gateway::utterance_body(name, &payload);
+            let target_id = target_origin.as_deref().and_then(event_id_from_origin);
+            return match invoke_utterance(
+                &self.state,
+                &self.instance_id,
+                &self.binding_id,
+                &self.agent_id,
+                &self.session_id,
+                name,
+                &payload,
+                &body,
+                &kind,
+                target_id.as_deref(),
+                target_origin.as_deref(),
+            )
+            .await
+            {
+                Ok(()) => GatewayActionResult {
+                    success: true,
+                    data: None,
+                    error: None,
+                },
+                Err(e) => GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(e.code.as_str().to_string()),
+                },
+            };
+        }
+
+        // 照会/道具クラス: 背景 subtask 内での await（option B）。turn は既に spawned で
+        // 返り detach 済み。
         match invoke_and_wait(
             &self.state,
             &self.instance_id,
@@ -187,3 +246,14 @@ impl GatewayActions for ExtgateOpsGatewayActions {
         }
     }
 }
+
+/// origin（`…:<lane>:<64hex>`）末尾の 64hex を取り出す（platform SDK 名に非依存）。
+fn event_id_from_origin(origin: &str) -> Option<String> {
+    let last = origin.rsplit(':').next()?;
+    if last.len() == 64 && last.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Some(last.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+

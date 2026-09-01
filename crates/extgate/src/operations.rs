@@ -84,6 +84,13 @@ impl Sharing {
 pub struct OperationClass {
     pub sub_engine: SubEngine,
     pub sharing: Sharing,
+    /// 発話クラスの**宣言による自己申告**（DESIGN-RESUME-SETTLE §3.3.1 C2・R3 (a)）。
+    /// 第一段の分類は core 既知名（`is_known_utterance_op`）が担い、この field は将来の外部
+    /// DI gateway 拡張に備えた additive な併設で、`None`（未宣言）は後方互換で無視される。
+    /// **digest には含めない**（`to_canonical_value` 参照）——既存 gateway の宣言 digest を
+    /// 変えず、分類は routing の便宜であって wire 契約の一部ではないため（sub_engine 等の
+    /// セキュリティ属性のみ digest 契約に残す）。
+    pub utterance: Option<bool>,
 }
 
 /// hello で宣言される 1 能力。immutable snapshot として live entry に保持する。
@@ -240,9 +247,13 @@ fn parse_class(value: Option<&Value>) -> Result<OperationClass, GateError> {
         .and_then(Value::as_str)
         .and_then(Sharing::parse)
         .ok_or_else(invalid)?;
+    // additive・後方互換: `utterance` は任意。bool 以外・欠落は None（core 既知名へフォール
+    // バック）。宣言不正にはしない（未知/欠落 field は無視の後方互換・§3.3.1 C2）。
+    let utterance = obj.get("utterance").and_then(Value::as_bool);
     Ok(OperationClass {
         sub_engine,
         sharing,
+        utterance,
     })
 }
 
