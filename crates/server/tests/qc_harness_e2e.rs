@@ -1009,6 +1009,125 @@ async fn scenario_shell_stdout_survives_into_resume_turn() {
     assert!(acks <= 1, "ack say（待機宣言）が連投された: {acks} 回");
 }
 
+// ========== (#880) exit_code 無しの dispatch ツールの結果本文が resume 会話に現れる ==========
+//
+// #877 の E2E（execute_shell の stdout が resume 会話に残る）を **exit_code 無しの dispatch ツール**
+// へ拡張した回帰（設計 §6 A2 の第二ケース）。`ws_write` は `CORE_DISPATCHABLE_ACTIONS` にあり
+// 常に背景 subtask 化される・戻り値に `exit_code` を持たない。#877 は exit_code を持つ結果だけ
+// 畳みを撤回したので、ws_write のような exit_code 無し dispatch ツールの結果本文は「結果 N 文字」へ
+// 畳まれ、切り離した subtask の結果を resume がどのターンでも読めず再 dispatch の燃料になっていた
+// （症状B）。#880 で exit_code の有無に関わらず本文（payload）を会話へ残す。
+//
+// このハーネスは実配線（実 dispatch 判定 → 実 ws_write → 実 settle_completed → 実 resume）を通す。
+// ピン: **resume ターンの会話本文に ws_write の payload（書いた path）が現れる**——修正前はここで
+// 落ちる（「結果 N 文字」へ畳まれ path が消える）。加えて再 dispatch 無し（有界）を固定する。
+
+/// mock agent が ws_write に渡す（＝結果 payload に現れる）path。ack/done 本文と部分一致しない。
+const WS_WRITE_PATH: &str = "wsqc-880-notes.md";
+const M_WSWRITE: &str = "WSWRITEQC-MARK 設計メモを保存して";
+const B_WSWRITE_ACK: &str = "wswriteack-eta 保存するね、ちょっと待ってて";
+const B_WSWRITE_DONE: &str = "wswritedone-theta 保存したよ";
+
+/// ws_write の段階応答 mock。resume ターンの会話本文を surface する。
+struct WsWriteMock {
+    emitted: AtomicBool,
+    calls: AtomicUsize,
+    resume_text: Mutex<Option<String>>,
+}
+
+impl WsWriteMock {
+    fn new() -> Self {
+        Self {
+            emitted: AtomicBool::new(false),
+            calls: AtomicUsize::new(0),
+            resume_text: Mutex::new(None),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for WsWriteMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let text = request_text(&request);
+        // (2) dispatch 直後の継続イテレーション（合成 "spawned" 結果 = tool role）→ ack say で閉じる。
+        if has_tool_role(&request) {
+            return Ok(text_response(B_WSWRITE_ACK));
+        }
+        // (1) 初回メンション → ws_write を呼ぶ（inline 化されないので背景 subtask へ回る）。
+        if !self.emitted.swap(true, Ordering::SeqCst) {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            return Ok(tool_call_response(
+                "ws_write",
+                serde_json::json!({ "path": WS_WRITE_PATH, "content": "# 設計メモ\n本文" }),
+            ));
+        }
+        // (3) 決着後の resume ターン → 会話本文を捕まえて完了報告 say で閉じる。
+        //     **この text に ws_write の path（payload）が含まれていること**がピン。
+        *self.resume_text.lock().unwrap() = Some(text);
+        Ok(text_response(B_WSWRITE_DONE))
+    }
+}
+
+#[tokio::test]
+async fn scenario_no_exit_code_dispatch_result_survives_into_resume_turn() {
+    let buf = install_capture();
+    let mock = Arc::new(WsWriteMock::new());
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let (_client, _address, _session_id) = wire_instance(&core, &fixture, nostr_config(None)).await;
+
+    let ev = "e1".repeat(32);
+    fixture.append_line(&mention_event(&ev, M_WSWRITE));
+
+    // 決着後の完了報告 say が出るまで待つ（= resume ターンまで到達した）。
+    let done = {
+        let buf = buf.clone();
+        wait_until(move || body_index(&buf, B_WSWRITE_DONE).is_some()).await
+    };
+    assert!(
+        done,
+        "決着後の resume 完了報告が出ない（ws_write の背景 subtask が resume まで到達しない）: {:?}",
+        captured(&buf)
+    );
+
+    // ピン: resume ターンの会話本文に ws_write の payload（書いた path）が現れる（修正前は畳まれて消える）。
+    let resume_text = mock
+        .resume_text
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("resume ターンが実行されていない");
+    assert!(
+        resume_text.contains(WS_WRITE_PATH),
+        "resume 会話に exit_code 無し dispatch ツール（ws_write）の結果本文が無い（畳まれた＝症状B の燃料）。\n\
+         resume 本文（先頭 2000 字）: {:.2000}",
+        resume_text
+    );
+
+    // 行動系: ws_write の dispatch はちょうど 1 回（結果を読めるので取り直しループをしない）。
+    assert_eq!(
+        mock.calls.load(Ordering::SeqCst),
+        1,
+        "ws_write が複数回 dispatch された（取り直しループ）"
+    );
+    // ack say（待機宣言）は高々 1 回（連投しない）。
+    let acks = captured(&buf)
+        .iter()
+        .filter(|c| c.body.contains(B_WSWRITE_ACK))
+        .count();
+    assert!(acks <= 1, "ack say（待機宣言）が連投された: {acks} 回");
+}
+
 // ============ (shell 大出力) offload → ws_read 読み戻し → 回答（再帰ループ閉包 E2E） ============
 //
 // #856 発見3 の回帰。#877 の E2E（小出力が resume 会話に verbatim で残る）を **大出力版**へ拡張し、
