@@ -915,4 +915,94 @@ mod tests {
         );
         ticker.abort();
     }
+
+    /// #856 発見3・作業1.1: **再帰ループ閉包の構造証明**（実 offload → 実 ws_read → 実 inline 判定）。
+    ///
+    /// 「大結果を畳む → レシピで読み戻す → その読み出しがまた畳まれて読めないループ」（#856
+    /// 発見3・八意本番で観測）が閉じていることを、トートロジーでない実チェーンで固定する:
+    ///
+    /// 1. `execute_shell` の大出力（offload 閾値 2,500 tok を大幅超過）を**実 sanitize**で退避
+    ///    → workspace/tmp へ実ファイル書き込み＋回収レシピ付き notice に化ける。
+    /// 2. notice のレシピどおり退避パスを**実 `ws_read`** で読み戻す（先頭ページ）。
+    /// 3. その ws_read 結果の封筒（`ActionResult` を production と同じく `serde_json` 直列化）を
+    ///    **実 `sanitize_tool_result_for_llm("ws_read", …)`** に通す → **再 offload されず verbatim**。
+    ///
+    /// これが「読み戻しがループしない」＝ ws_read が自分の出力を READ inline 上限
+    /// （[`READ_TOOL_RESULT_TOKEN_LIMIT`] = 30,000）以下に構造的にキャップする
+    /// （[`RANGE_CONTENT_TOKEN_CEILING`] = 上限 −400）ことの機械証明。
+    ///
+    /// 逆 revert（`RANGE_CONTENT_TOKEN_CEILING` を READ 上限以上へ／ws_read の自己キャップ撤去）で
+    /// この assert は FAIL する（ws_read 結果が再 offload され notice へ化ける）。
+    #[tokio::test]
+    async fn test_offload_then_ws_read_result_not_reoffloaded_loop_closed() {
+        use opencrab_core::tool_result_log::sanitize_tool_result_for_llm;
+
+        let (dir, ctx) = test_context();
+        let root = dir.path();
+
+        // (1) execute_shell の大出力（>2,500 tok）を模した結果封筒。行のある生テキストで、
+        // 退避本文はヘッダ無しの verbatim（exit_code==0 かつ stderr 空）になる。
+        // 各行は高密度（~150 文字 ≒ 40 tok）にして、返りページが **行数既定（2,000 行）ではなく
+        // トークン天井（[`RANGE_CONTENT_TOKEN_CEILING`]）で頭打ちになる**ようにする。こうすると
+        // 天井を revert（無効化）したとき返りが 2,000 行（≒ 8 万 tok）に膨らんで READ 上限を超え、
+        // ws_read 結果が再 offload されて (4) の assert が FAIL する（＝非トートロジー）。
+        const MARK: &str = "LOOPCLOSED-mark grep spiral payload row";
+        let line = "src/foo.rs:99:    let value = compute(argument, second_argument, third); \
+                    // dense row so the token ceiling binds before the 2000-line default cap";
+        let big_stdout: String = std::iter::once(MARK.to_string())
+            .chain(std::iter::repeat_n(line.to_string(), 5_000))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let shell_env = json!({
+            "success": true,
+            "data": { "stdout": big_stdout, "stderr": "", "exit_code": 0 }
+        })
+        .to_string();
+
+        // (2) 実 sanitize: 閾値超で workspace/tmp へ退避し notice へ差し替え。
+        let notice =
+            sanitize_tool_result_for_llm("execute_shell", &shell_env, "sessLC", "tcSh", Some(root));
+        assert!(
+            notice.contains("Tool result withheld"),
+            "大出力が offload されない（前提崩れ）: {notice:.200}"
+        );
+        // notice の ``written in full to `tmp/…txt``` から退避パスを取り出す（回収レシピの
+        // 複合トークン `grep -n <pattern> tmp/…` 等ではなく、単独の rel トークンを拾う）。
+        let rel = notice
+            .split('`')
+            .find(|t| t.starts_with("tmp/") && t.ends_with(".txt"))
+            .expect("notice に退避パス（tmp/…txt）が無い")
+            .to_string();
+
+        // (3) 実 ws_read でレシピどおり読み戻す（先頭ページ）。
+        let read = WsReadAction
+            .execute(&json!({ "path": rel, "start_line": 1 }), &ctx)
+            .await;
+        assert!(read.success, "退避ファイルを ws_read で読めない: {read:?}");
+        let content = read.data.as_ref().unwrap()["content"].as_str().unwrap();
+        assert!(
+            content.contains("LOOPCLOSED-mark"),
+            "読み戻した本文にマーカーが無い（実際に読めていない）: {content:.120}"
+        );
+        // 大出力なので 1 ページに収まらず続きがある（実 offload を実 ws_read でページ読みしている）。
+        assert_eq!(
+            read.data.as_ref().unwrap()["has_more"].as_bool(),
+            Some(true),
+            "5,000 行超の退避が 1 ページに収まる（前提崩れ＝実 offload を通していない）"
+        );
+
+        // (4) 実 inline 判定: ws_read 結果封筒（production と同じ直列化）を sanitize に通す →
+        //     再 offload されず verbatim。ここが閉包の要（読み戻しがループしない）。
+        let read_env = serde_json::to_string(&read).unwrap();
+        let after =
+            sanitize_tool_result_for_llm("ws_read", &read_env, "sessLC", "tcRead", Some(root));
+        assert_eq!(
+            after, read_env,
+            "ws_read 結果が再 offload された＝読み戻しがループする（#856 発見3 が閉じていない）"
+        );
+        assert!(
+            !after.contains("Tool result withheld"),
+            "ws_read 結果に offload notice が出た＝再 offload: {after:.200}"
+        );
+    }
 }

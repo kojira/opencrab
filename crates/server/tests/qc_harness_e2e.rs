@@ -1008,3 +1008,213 @@ async fn scenario_shell_stdout_survives_into_resume_turn() {
         .count();
     assert!(acks <= 1, "ack say（待機宣言）が連投された: {acks} 回");
 }
+
+// ============ (shell 大出力) offload → ws_read 読み戻し → 回答（再帰ループ閉包 E2E） ============
+//
+// #856 発見3 の回帰。#877 の E2E（小出力が resume 会話に verbatim で残る）を **大出力版**へ拡張し、
+// 「大結果を畳む→レシピで読み戻す→その読み出しがまた畳まれて読めないループ」が閉じていることを
+// 実配線で固定する:
+//
+//   execute_shell が大出力（>2,500 tok）を返す → 会話へ届く前に workspace/tmp へ offload され
+//   回収レシピ付き notice に化ける（#551）→ resume ターンで mock agent が notice の tmp パスを
+//   **実 ws_read**（inline）で読み戻す → 読めた本文で回答し、**同じ execute_shell を再実行しない**。
+//
+// ピン: (a) resume 会話に offload notice（tmp パス）が現れる、(b) mock が ws_read で読んだ本文に
+// 大出力のマーカーが含まれる、(c) execute_shell の dispatch はちょうど 1 回・ws_read も 1 回
+// （読み戻しが再 offload → 再 ws_read の無限ループになっていない）、(d) ack say は高々 1 回。
+
+/// resume 会話に載る offload notice のマーカー（大出力の先頭行）。ws_read で読み戻すと
+/// ws_read 結果の tool メッセージにこの文字列が現れる＝実際に読めている証拠。
+const BIG_OUT_MARK: &str = "BIGOUT-marker 東京の天気 晴れ 28度";
+const M_BIG_SHELL: &str = "BIGSHELLQC-MARK 大きな出力のコマンドを実行して結果を教えて";
+const B_BIG_ACK: &str = "bigack-eta 実行中、ちょっと待ってね";
+const B_BIG_DONE: &str = "bigdone-theta 読み終わった、東京は晴れ 28度だよ";
+
+/// echo に渡す大出力（>2,500 tok）。実改行を含む単一 arg なので echo がそのまま複数行で吐く。
+/// 先頭行に [`BIG_OUT_MARK`]。offload 閾値を確実に超える大きさにする。
+fn big_shell_payload() -> String {
+    let body =
+        "src/foo.rs:99:    let value = compute(argument, more, and_more); // dense output row";
+    std::iter::once(BIG_OUT_MARK.to_string())
+        .chain(std::iter::repeat_n(body.to_string(), 400))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Tool ロールのメッセージ本文を連結（合成 spawned 結果か ws_read 結果本文かの判別に使う）。
+fn tool_role_text(request: &ChatRequest) -> String {
+    request
+        .messages
+        .iter()
+        .filter(|m| m.role == Role::Tool)
+        .filter_map(|m| m.text_content())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 大出力 shell の段階応答 mock。offload notice を読み、レシピどおり ws_read で読み戻す。
+struct BigShellMock {
+    shell_emitted: AtomicBool,
+    ws_read_emitted: AtomicBool,
+    shell_calls: AtomicUsize,
+    ws_read_calls: AtomicUsize,
+    /// resume ターンで会話に渡された本文（offload notice を含むはず）。
+    resume_text: Mutex<Option<String>>,
+    /// ws_read が返した本文（マーカーを含むはず＝実際に読めた証拠）。
+    read_back_text: Mutex<Option<String>>,
+}
+
+impl BigShellMock {
+    fn new() -> Self {
+        Self {
+            shell_emitted: AtomicBool::new(false),
+            ws_read_emitted: AtomicBool::new(false),
+            shell_calls: AtomicUsize::new(0),
+            ws_read_calls: AtomicUsize::new(0),
+            resume_text: Mutex::new(None),
+            read_back_text: Mutex::new(None),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for BigShellMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let text = request_text(&request);
+
+        if has_tool_role(&request) {
+            let tool_text = tool_role_text(&request);
+            // ws_read の結果（マーカー入り本文）が返ってきた → 読めた本文で回答。
+            // **同じ execute_shell は再実行しない**（回答して閉じる）。
+            if tool_text.contains(BIG_OUT_MARK) {
+                *self.read_back_text.lock().unwrap() = Some(tool_text);
+                return Ok(text_response(B_BIG_DONE));
+            }
+            // それ以外（dispatch 直後の合成 `spawned` 結果）→ ack でターンを閉じる。
+            return Ok(text_response(B_BIG_ACK));
+        }
+
+        // (1) 初回メンション（tool role 無し・最初の 1 回）→ 大出力 execute_shell を呼ぶ。
+        if !self.shell_emitted.swap(true, Ordering::SeqCst) {
+            self.shell_calls.fetch_add(1, Ordering::SeqCst);
+            return Ok(tool_call_response(
+                "execute_shell",
+                serde_json::json!({ "command": "echo", "args": [big_shell_payload()] }),
+            ));
+        }
+
+        // (3) subtask 決着後の resume ターン（tool role 無し・2 回目）→ 会話の offload notice から
+        //     tmp パスを取り出し、**レシピどおり ws_read で読み戻す**（inline 実行）。
+        if !self.ws_read_emitted.swap(true, Ordering::SeqCst) {
+            *self.resume_text.lock().unwrap() = Some(text.clone());
+            // notice の単独 rel トークン（`tmp/…txt`）を拾う。回収レシピの複合トークン
+            // （`grep -n <pattern> tmp/…` 等）ではなく、backtick で囲われた素のパスを取る。
+            let rel = text
+                .split('`')
+                .find(|t| t.starts_with("tmp/") && t.ends_with(".txt"))
+                .unwrap_or("tmp/MISSING.txt")
+                .to_string();
+            self.ws_read_calls.fetch_add(1, Ordering::SeqCst);
+            return Ok(tool_call_response(
+                "ws_read",
+                serde_json::json!({ "path": rel, "start_line": 1 }),
+            ));
+        }
+
+        // フォールバック（想定外の追加ターン）→ 回答で閉じる。
+        Ok(text_response(B_BIG_DONE))
+    }
+}
+
+#[tokio::test]
+async fn scenario_shell_big_output_offload_read_back_loop_closed() {
+    let buf = install_capture();
+    let mock = Arc::new(BigShellMock::new());
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    // echo のみ許可（大出力 arg を吐かせる）。
+    *core.state.tools_config.write().unwrap() = shell_enabled_tools_config();
+
+    let fixture = Fixture::new();
+    let (_client, _address, _session_id) = wire_instance(&core, &fixture, nostr_config(None)).await;
+
+    let ev = "e2".repeat(32);
+    fixture.append_line(&mention_event(&ev, M_BIG_SHELL));
+
+    // 読み戻し後の完了報告 say が出るまで待つ（= offload→ws_read→回答まで到達した）。
+    let done = {
+        let buf = buf.clone();
+        wait_until(move || body_index(&buf, B_BIG_DONE).is_some()).await
+    };
+    assert!(
+        done,
+        "読み戻し後の完了報告が出ない（大出力の offload→ws_read→回答チェーンが閉じない）: {:?}",
+        captured(&buf)
+    );
+
+    // (a) resume 会話に offload notice（tmp パス）が現れる。
+    let resume_text = mock
+        .resume_text
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("resume ターンが実行されていない");
+    assert!(
+        resume_text.contains("Tool result withheld"),
+        "resume 会話に offload notice が無い（大出力が畳まれていない）:\n{:.600}",
+        resume_text
+    );
+    assert!(
+        resume_text.contains("tmp/") && resume_text.contains("ws_read"),
+        "notice に読める handle（tmp パス＋ws_read レシピ）が無い:\n{:.600}",
+        resume_text
+    );
+
+    // (b) mock が ws_read で読み戻した本文に大出力のマーカーがある（実際に読めている）。
+    let read_back = mock
+        .read_back_text
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("ws_read の結果ターンが実行されていない");
+    assert!(
+        read_back.contains(BIG_OUT_MARK),
+        "ws_read で読み戻した本文にマーカーが無い（回収レシピが機能していない）:\n{:.600}",
+        read_back
+    );
+    // 読み戻した ws_read 結果自体は再 offload されていない（notice ではなく実本文が来ている）。
+    assert!(
+        !read_back.contains("Tool result withheld"),
+        "ws_read 結果がまた offload された＝読み戻しがループする（#856 発見3 が閉じていない）:\n{:.600}",
+        read_back
+    );
+
+    // (c) execute_shell の dispatch はちょうど 1 回・ws_read もちょうど 1 回
+    //     （読み戻しが再 offload→再 ws_read の無限ループになっていない）。
+    assert_eq!(
+        mock.shell_calls.load(Ordering::SeqCst),
+        1,
+        "execute_shell が複数回 dispatch された（取り直しループ）"
+    );
+    assert_eq!(
+        mock.ws_read_calls.load(Ordering::SeqCst),
+        1,
+        "ws_read が複数回走った（読み戻しが再 offload→再 ws_read のループに入った）"
+    );
+
+    // (d) ack say（待機宣言）は高々 1 回。
+    let acks = captured(&buf)
+        .iter()
+        .filter(|c| c.body.contains(B_BIG_ACK))
+        .count();
+    assert!(acks <= 1, "ack say（待機宣言）が連投された: {acks} 回");
+}

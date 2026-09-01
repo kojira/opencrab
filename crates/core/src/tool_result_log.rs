@@ -423,14 +423,29 @@ fn format_hint(s: &str) -> Option<&'static str> {
 /// - `head -c 2000 <path>`: **バイト**で頭打ちにするので、トークン数 ≤ バイト数より必ず上限内。
 ///   `head -n`（行数）は 1 行が長いと超えるので**採らない**。`ws_read` を持たない caller
 ///   （`ws_read` は `OWNER_ONLY_ACTIONS`）には `head -c` が唯一の安全な導線なので残す。
+///
+/// #856 発見3（統括判定 (a)）: **`ws_read` 直読みを先頭に置き、`grep -n` は「特定の一致へ
+/// 飛ぶ」オプションとして後置する。** 旧文面は `grep -n <pattern>` 先行だったため、退避ファイルを
+/// 読むだけの一般ケースでも先に `grep` が走る。広いパターンだと grep 出力自体が 2,500 上限を
+/// 超えて `execute_shell` 経由で**もう一度退避される**（#856 発見3 の grep スパイラル）。無限
+/// ループにはならない（再退避も次の `ws_read` で読める）が 1 段余計に回る。`ws_read`
+/// （`start_line=1`）は行番号を必要とせず、`compute_ws_read` が返り値を構造的に inline 上限未満へ
+/// 抑える（[`RANGE_CONTENT_TOKEN_CEILING`] / `crates/actions/src/workspace.rs`）ので、直読みを
+/// 先頭にすればこの余計な 1 段が消える。`grep` は「行番号を得て特定箇所へ飛ぶ」用途に残すが、
+/// **退避ファイルへの grep は広いパターンだと再退避され得る**ことを文面で明示し、その場合も
+/// 生成された新しい退避ファイルを `ws_read` で読めば閉じることを示す（回復可能＝無限ループ
+/// でない）。substrings `grep -n <pattern> {rel}` / `head -c 2000 {rel}` は据え置き（回収導線
+/// の契約）。
 fn read_recipe(rel: &str) -> String {
     format!(
-        "To read it, run `grep -n <pattern> {rel}` to get matching line numbers, then call \
-         `ws_read` on that path with `start_line`/`line_count` (pass a grep line number as \
-         `start_line`, or `start_line=1` to read from the top); `ws_read` always keeps its \
-         output under the inline limit. If you have no `ws_read` tool, run `head -c 2000 {rel}` \
-         via execute_shell to read a bounded prefix (the byte cap keeps it under the limit). \
-         The saved body is line-oriented text whose line numbers line up with `ws_read`."
+        "To read it, call `ws_read` on that path with `start_line`/`line_count` (`start_line=1` \
+         reads from the top; `ws_read` always keeps its output under the inline limit and pages \
+         the rest via `has_more`/`next_line`, so reading it back never re-offloads). To jump to \
+         a specific match, run `grep -n <pattern> {rel}` first and pass a returned line number as \
+         `start_line` (a broad pattern may itself be offloaded; if so, just `ws_read` the new \
+         file it names). If you have no `ws_read` tool, run `head -c 2000 {rel}` via \
+         execute_shell for a bounded prefix. The saved body is line-oriented text whose line \
+         numbers line up with `ws_read`."
     )
 }
 
@@ -1540,6 +1555,95 @@ mod tests {
         assert!(
             out.contains("Do NOT re-run the same tool"),
             "ループ防止が無い: {out}"
+        );
+    }
+
+    /// #856 発見3・作業1.2: **`head -c 2000` の bound**。回収レシピの非 `ws_read` 導線は
+    /// `head -c 2000 <path>` で、その出力（≤ 2,000 バイト）を `execute_shell` 結果として
+    /// もう一度 sanitize に通しても**再 offload されず inline に残る**（＝読み戻しがループ
+    /// しない）ことを固定する。構造保証: トークン数 ≤ バイト数 ≤ 2,000 + 封筒数十バイト <
+    /// [`TOOL_RESULT_TOKEN_LIMIT`]（2,500）。逆 revert（バイト cap を 2,000 → 上限超へ）で FAIL。
+    #[test]
+    fn head_c_2000_output_stays_inline_no_reoffload() {
+        // head -c 2000 相当: ちょうど 2,000 バイトの stdout（最悪＝バイト cap ぴったり）。
+        let stdout = "x".repeat(2_000);
+        let env = serde_json::json!({
+            "success": true,
+            "data": { "stdout": stdout, "stderr": "", "exit_code": 0 }
+        })
+        .to_string();
+        // 封筒込みでも上限バイト未満であることを明示（tokens ≤ bytes < 2,500）。
+        assert!(
+            env.len() < TOOL_RESULT_TOKEN_LIMIT,
+            "head -c 2000 の封筒が上限バイトを超える（前提崩れ）: {} bytes",
+            env.len()
+        );
+        let dir = tempfile::TempDir::new().unwrap();
+        let out =
+            sanitize_tool_result_for_llm("execute_shell", &env, "sHC", "tHC", Some(dir.path()));
+        // inline に残る＝ sanitize は本文をそのまま返し、退避もしない。
+        assert_eq!(
+            out, env,
+            "head -c 2000 の出力が再 offload された（inline に残らない）"
+        );
+        assert!(
+            !out.contains("Tool result withheld"),
+            "head -c 2000 の出力に offload notice が出た＝再 offload: {out:.200}"
+        );
+        assert!(
+            !dir.path().join("tmp").exists(),
+            "head -c 2000 の小出力で退避ファイルが作られた（不要な offload）"
+        );
+    }
+
+    /// #856 発見3・作業2: **grep スパイラルが回復可能（無限ループでない）**の核レベル固定。
+    /// レシピ最初の `grep -n <pattern>` は `execute_shell` 経由で 2,500 上限にかかり、広い
+    /// パターンだと grep 出力自体が**再 offload**される（#856 発見3）。その再 offload が
+    /// **必ず新しい読める退避ハンドル（tmp パス＋ `ws_read` レシピ）を伴う**＝次の `ws_read`
+    /// で読めることを固定する。ハンドルの無い墓標を作らない限り再帰は必ず終端する（実際の
+    /// 読み戻しが inline に収まることは actions 側の loop-closed テストで実証）。
+    #[test]
+    fn reoffloaded_grep_output_always_carries_readable_handle() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // 広い grep がマッチを大量に返した想定の大出力（>2,500 tok・行のある生テキスト）。
+        let grep_out = "src/foo.rs:42:    let x = compute();\n".repeat(TOOL_RESULT_TOKEN_LIMIT);
+        let env = serde_json::json!({
+            "success": true,
+            "data": { "stdout": grep_out, "stderr": "", "exit_code": 0 }
+        })
+        .to_string();
+        let notice =
+            sanitize_tool_result_for_llm("execute_shell", &env, "sGREP", "tGREP", Some(dir.path()));
+        // 再 offload された（notice へ化けた）。
+        assert!(
+            notice.contains("Tool result withheld"),
+            "広い grep の大出力が offload されない（前提崩れ）: {notice:.200}"
+        );
+        // だが墓標ではない: 新しい退避ファイル（実在）＋ ws_read 回収レシピが必ず付く。
+        assert!(
+            dir.path().join("tmp/sGREP-tGREP.txt").exists(),
+            "再 offload で読める退避ファイルが作られていない: {notice}"
+        );
+        assert!(
+            notice.contains("tmp/sGREP-tGREP.txt") && notice.contains("ws_read"),
+            "再 offload の notice に読める handle（tmp パス＋ws_read）が無い＝墓標: {notice}"
+        );
+    }
+
+    /// #856 発見3・作業2(a): レシピは **`ws_read` 直読みを先頭に置き、`grep -n` を後置**する。
+    /// これで退避ファイルを読むだけの一般ケースが grep スパイラルを踏まない。逆 revert
+    /// （grep 先行へ戻す）でこのピンは FAIL する。
+    #[test]
+    fn recipe_leads_with_ws_read_before_grep() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let big = "row value\n".repeat(TOOL_RESULT_TOKEN_LIMIT);
+        let out =
+            sanitize_tool_result_for_llm("execute_shell", &big, "sRO", "tRO", Some(dir.path()));
+        let ws_at = out.find("ws_read").expect("ws_read 導線が無い");
+        let grep_at = out.find("grep -n <pattern>").expect("grep 導線が無い");
+        assert!(
+            ws_at < grep_at,
+            "ws_read 直読みが grep より先に来ていない（grep 先行のまま＝スパイラルを踏む）: {out}"
         );
     }
 }
