@@ -122,12 +122,33 @@ pub fn invoke_frame(
     })
 }
 
-pub fn activity_frame(binding_id: &str, activity_id: &str, state: &str) -> Value {
-    json!({
+pub fn activity_frame(
+    binding_id: &str,
+    activity_id: &str,
+    state: &str,
+    origin: Option<&str>,
+) -> Value {
+    let mut frame = json!({
         "m": "activity",
         "binding_id": binding_id,
         "activity_id": activity_id,
         "state": state,
+    });
+    // R2(👀): started が読み取ったターン発端の origin を additive に載せる。旧 gateway は
+    // 認識しない field を無視するので互換（DESIGN-EXTGATE-V3 §「認識しない field は無視」）。
+    if let Some(origin) = origin {
+        frame["origin"] = json!(origin);
+    }
+    frame
+}
+
+/// R3(❌): ターン失敗通知フレーム。id を持たない fire-and-forget 通知（activity と同型）。
+/// 未知フレームを ignore する準拠 gateway は write 0・keep で素通しする。error 本文は載せない。
+pub fn turn_failed_frame(binding_id: &str, origin: &str) -> Value {
+    json!({
+        "m": "turn_failed",
+        "binding_id": binding_id,
+        "origin": origin,
     })
 }
 
