@@ -449,6 +449,52 @@ fn signals_failure(v: &serde_json::Value, d: &serde_json::Value) -> bool {
     matches!(d.get("exit_code").and_then(|x| x.as_i64()), Some(code) if code != 0)
 }
 
+/// `exit_code` を持つツール結果（＝モデルが読んで次手を決めるコマンド出力・現状 `execute_shell`
+/// のみ）の参照を組む。**stdout 本文を畳まず、そのまま会話へ残す**。
+///
+/// なぜ畳まないか（くらぶ暴走の根因）: `execute_shell` は inline 集合に無いため常に背景 subtask
+/// 化され（#152/#671）、その完了本文は #713 で会話再構成時に参照へ畳まれていた。#713 の安全前提
+/// 「同ターン内は本文がモデルに渡る・落とすのは次ターン以降」は inline ツールでのみ成立する。
+/// `execute_shell` は同ターン往復が無いので、畳むと stdout をどのターンでも読めず、モデルは
+/// 出力を取り直そうとして待機宣言を連投する（本番実機で再現）。切り離した subtask の結果は
+/// 非冪等・再取得不能なので「もう一度実行して見る」も副作用ループの引き金＝誤り。だから
+/// **畳まずに残す**のが唯一正しい。
+///
+/// なぜ「畳み判定を封筒でなく stdout 実体で」やるか（統括の精緻化・欠陥2）: 旧経路は参照（畳んだ
+/// 要約）を作ってから [`shorter_of_reference_or_body`] で **JSON 封筒全体**（`{"success":…,
+/// "data":{…}}`）と長さを比べていた。37 字の stdout が封筒込みで 80 字に見え、要約（stdout を
+/// 含まない）の方が短い→要約が採用され stdout が消える、という測定ミスだった。ここは stdout
+/// **実体**を残すので、封筒との長さ比較を通っても——封筒は同じ stdout を丸ごと含む以上——stdout が
+/// 失われることはない。
+///
+/// なぜ切り詰めず・墓標も付けないか（欠陥3・取得ハンドルの無い墓標を作らない）: この関数へ **JSON で**
+/// 来る結果は必ず offload しきい値以下（`tool_result_log::sanitize_tool_result_for_log` が
+/// `inline_limit_for_tool` 超過分を会話へ届く前に workspace へ退避し、本文を**非 JSON の退避 notice**
+/// ——`ws_read`/`head -c` の回収レシピ＝実体のある resolve ハンドル付き——へ差し替える。#551）。その
+/// 退避 notice は [`fold_subtask_completed`] の非 JSON 分岐が**素通し**するのでここには来ない。
+/// つまり「大出力＝ハンドル付きで退避」は上流が既に担っており、ここへ来るのは会話に収まる小出力
+/// だけ＝丸ごと残して安全。したがってここで中途半端に切り詰めて「全文は記録に残る」とだけ書く
+/// **回収不能な墓標**は作らない（作る必要が無い）。
+///
+/// 非ゼロ終了は [`signals_failure`] が本文ごと残すので、ここへ来るのは成功（`exit_code==0`）だけ。
+/// stderr は成功時は付随情報（警告・進捗）が主で判断の主材料になりにくく、無制限に載せると嵩むので
+/// 規模だけ添える（失敗時＝非ゼロ終了は上流で stderr 本文ごと残る）。
+fn shell_output_reference(d: &serde_json::Value) -> String {
+    let code = d.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    debug_assert_eq!(
+        code, 0,
+        "非ゼロ終了は signals_failure が本文ごと残すはず（#709 の不変条件が破れている）"
+    );
+    let out = d.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
+    let err = d.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
+    let stderr_note = if err.is_empty() {
+        String::new()
+    } else {
+        format!("・stderr {} 文字", err.chars().count())
+    };
+    format!("終了コード {code}・出力: {out}{stderr_note}")
+}
+
 /// 会話へ残す参照本体を組む。長さの不変条件（参照が本文以上なら本文を残す）は入口の
 /// `result_reference` が掛けるので、ここでは形ごとの参照を作ることに集中する。
 fn build_result_reference(tool_name: &str, result_json: &str) -> String {
@@ -504,25 +550,15 @@ fn build_result_reference(tool_name: &str, result_json: &str) -> String {
         }
     }
 
-    // コマンド実行（成功のみ）: 終了コードと規模。非ゼロ終了は上の signals_failure が本文ごと
-    // 残しているので、ここへ来るのは成功したコマンドだけ——`cargo build` / `cargo test` /
-    // pytest / jest の失敗詳細（stderr にも stdout にも出る）はどちらも丸ごと残る。
-    if let Some(code) = d.get("exit_code").and_then(|x| x.as_i64()) {
-        debug_assert_eq!(
-            code, 0,
-            "非ゼロ終了は signals_failure が本文ごと残すはず（#709 の不変条件が破れている）"
-        );
-        let out = d.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
-        let err = d.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
-        return format!(
-            "終了コード 0・出力 {} 文字{}（本文は会話に残していない）",
-            out.chars().count(),
-            if err.is_empty() {
-                String::new()
-            } else {
-                format!("・stderr {} 文字", err.chars().count())
-            }
-        );
+    // コマンド実行（成功のみ・`exit_code` を持つのは現状 `execute_shell` だけ）: **stdout 本文を
+    // 畳まず会話へ残す**。モデルがこの出力を読んで次手を決めるツールで、opencrab では常に背景
+    // subtask 化される（#152/#671）ため同ターン往復が無く、畳むと stdout をどのターンでも読めず
+    // 待機宣言を連投する（くらぶ暴走の根因）。非ゼロ終了は上の signals_failure が本文ごと残すので
+    // ここへ来るのは成功したコマンドだけ——`cargo build` / `cargo test` / pytest / jest の失敗詳細
+    // （stderr にも stdout にも出る）は非ゼロ終了として丸ごと残る。判定・文言は subtask 側の
+    // `build_subtask_single_reference` と `shell_output_reference` で共有する。
+    if d.get("exit_code").is_some() {
+        return shell_output_reference(d);
     }
 
     // それ以外（記憶・検索・内なる声・mutation など）: 規模だけ残す。何を呼んだかは tool_name が示す。
@@ -629,38 +665,24 @@ fn subtask_audit_suffix() -> String {
     "（本文は会話に残していない・全文は記録に残る）".to_string()
 }
 
-/// 単一ツールの subtask 参照。`exit_code` があれば終了コードと出力規模、無ければ結果規模。
+/// 単一ツールの subtask 参照。`exit_code` があれば stdout 本文をそのまま残し（`execute_shell`
+/// 系＝モデルが読んで次手を決める出力・くらぶ暴走の根因修正）、無ければ結果規模だけ残す。
 /// ここへ来るのは `signals_failure` を通った成功だけなので終了コードは 0。ヘッダが `[s{n} 完了]`
-/// を示すので本文は要約だけ（生 UUID を出さない）。
+/// を示すので封筒の要点だけ（生 UUID を出さない）。
 fn build_subtask_single_reference(d: &serde_json::Value) -> String {
-    let suffix = subtask_audit_suffix();
-    if let Some(code) = d.get("exit_code").and_then(|x| x.as_i64()) {
-        // 非ゼロ終了は `signals_failure` が本文ごと残すので、ここへ来るのは成功（code==0）だけ。
-        // 双子の `build_result_reference` と対称に tripwire を置き、不変条件が破れたら気づく。
-        debug_assert_eq!(
-            code, 0,
-            "非ゼロ終了は signals_failure が本文ごと残すはず（#709 の不変条件が破れている）"
-        );
-        // stdout **と** stderr の両方を数える（統括レビュー指摘1）。cargo build の warning など
-        // 正常終了でも stderr へ大量に出るツールがあり、stdout だけだと「出力 0 文字」と事実と
-        // 違う表示になる。本文は落とすが、会話に残す唯一の数字は正しくする。
-        let out = d.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
-        let err = d.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
-        let stderr_note = if err.is_empty() {
-            String::new()
-        } else {
-            format!("・stderr {} 文字", err.chars().count())
-        };
-        return format!(
-            "終了コード {code}・出力 {} 文字{stderr_note}{suffix}",
-            out.chars().count(),
-        );
+    // `exit_code` を持つツール結果（現状 `execute_shell` だけ）は畳まず stdout 本文を残す。
+    // 判定・文言は `tool_result` 側の [`build_result_reference`] と [`shell_output_reference`] で
+    // 共有する（同じ形の判断を 2 箇所に書かない）。切り離した subtask は取り直せないので、畳むと
+    // stdout をどのターンでも読めなくなる（本番実機で待機宣言の連投＝くらぶ暴走を確認）。監査後置き
+    // （`subtask_audit_suffix`）は「本文は会話に残していない」と言うので、本文を残すここでは付けない。
+    if d.get("exit_code").is_some() {
+        return shell_output_reference(d);
     }
     // exit_code の無いツール結果は data の規模だけ残す（何を呼んだかは記録に残る）。
     let size = serde_json::to_string(d)
         .map(|t| t.chars().count())
         .unwrap_or(0);
-    format!("結果 {size} 文字{suffix}")
+    format!("結果 {size} 文字{}", subtask_audit_suffix())
 }
 
 /// batch（複数ツール）の subtask 参照。件数と合計規模（配列 JSON の文字数）を残す。
@@ -3555,14 +3577,17 @@ mod result_reference_tests {
         assert!(r.contains("続きあり"), "続きの有無が無い: {r}");
     }
 
-    /// #709 の中心: **コマンド実行の結果も**本文を持ち越さない。
+    /// くらぶ暴走の根因修正: **コマンド実行の stdout 本文を会話へ残す**（#709 の畳みを execute_shell
+    /// 系だけ撤回する）。
     ///
-    /// #707 は「読み直せないので落としたら失われる」として本文を残していたが、記録
-    /// （memory_sessions）には完全な本文が残るので失われない。エージェントBの tool_result 30 万文字の
-    /// うち execute_shell が 10 万で最大——ここを落とさないと沈黙は解けない。
+    /// #709 は shell 出力も参照へ畳んでいたが、`execute_shell` は常に背景 subtask 化され（#152/#671）
+    /// 同ターン往復が無いため、畳むと stdout をどのターンでも読めず、モデルが出力を取り直そうと待機
+    /// 宣言を連投した（本番実機で確認）。会話へ来る前に offload しきい値超過は退避 notice（resolve
+    /// ハンドル付き）へ差し替わる（#551）ので、`result_reference` へ JSON で来る shell 出力は会話に
+    /// 収まる小出力＝丸ごと残して安全。ここでは代表的な小 stdout が verbatim で残ることを固定する。
     #[test]
-    fn shell_results_also_leave_only_a_reference() {
-        let out = "x".repeat(50_000);
+    fn shell_results_keep_their_stdout_body() {
+        let out = "晴れ 28度 くもり所により雨";
         let result = serde_json::json!({
             "success": true,
             "data": {"exit_code": 0, "stdout": out, "stderr": ""}
@@ -3571,11 +3596,10 @@ mod result_reference_tests {
 
         let r = result_reference("execute_shell", &result);
         assert!(
-            !r.contains(&"x".repeat(100)),
-            "コマンド出力が会話へ載っている（#709 の状態に戻っている）: {r:.120}"
+            r.contains(out),
+            "コマンド出力が会話から消えた（畳まれた＝くらぶ暴走の根因が残っている）: {r}"
         );
         assert!(r.contains("終了コード 0"), "終了コードが無い: {r}");
-        assert!(r.contains("50000"), "出力の規模が無い: {r}");
     }
 
     /// #709 レビュー指摘: **コマンドの非ゼロ終了は stderr を本文で残す**。
@@ -3792,12 +3816,16 @@ mod subtask_completed_folding_tests {
         }
     }
 
-    /// 1. 単一ツール成功（execute_shell 大出力）→ 参照化され stdout 本文が会話に載らない。
-    ///    監査の相関（起動応答との突き合わせ）を残すため封筒（subtask_id / exit_reason）と
-    ///    記録の在り処（session=）も残る。
+    /// 1. 単一ツール成功（execute_shell）→ **stdout 本文が resume 会話へ残る**（くらぶ暴走の根因修正）。
+    ///    切り離した subtask は取り直せないので、畳むとモデルが stdout をどのターンでも読めない。監査の
+    ///    相関（起動応答との突き合わせ）は封筒（`[s{n} 完了]` ヘッダ）が残し、生 UUID は出さない。
+    ///
+    ///    ここは代表的な小 stdout で固定する。offload しきい値超過の大出力は会話へ来る前に退避 notice
+    ///    （resolve ハンドル付き）へ差し替わり（#551・下の `large_shell_output_folds_with_resolve_handle`）
+    ///    この経路には JSON で来ないので、ここへ来るのは会話に収まる小出力＝丸ごと残す。
     #[test]
-    fn single_tool_success_leaves_only_a_reference() {
-        let out = "x".repeat(50_000);
+    fn single_tool_success_keeps_stdout_in_conversation() {
+        let out = "晴れ 28度 くもり所により雨";
         let result = serde_json::json!({
             "success": true, "data": {"exit_code": 0, "stdout": out, "stderr": ""}
         })
@@ -3805,11 +3833,15 @@ mod subtask_completed_folding_tests {
 
         let o = format_single_log(&subtask_completed_log("completed", &result));
         assert!(
-            !o.contains(&"x".repeat(100)),
-            "stdout 本文が会話へ載っている（#709 の状態）: {o:.120}"
+            o.contains(out),
+            "stdout 本文が resume 会話に無い（畳まれた＝くらぶ暴走の根因が残っている）: {o}"
         );
         assert!(o.contains("終了コード 0"), "終了コードが無い: {o}");
-        assert!(o.contains("50000"), "出力規模が無い: {o}");
+        // 非冪等ツールに「もう一度実行して見る」と連想させない（副作用ループの引き金・欠陥3）。
+        assert!(
+            !o.contains("もう一度"),
+            "非冪等 subtask に再取得を約束: {o}"
+        );
         // row295b: 生 UUID（subtask_id/session）は会話に出さない。在り処はヘッダの s 番号
         // （refs 無しの単体表示では "subtask"）が示す。
         assert!(o.contains("[subtask 完了]"), "完了ヘッダが無い: {o}");
@@ -3817,10 +3849,11 @@ mod subtask_completed_folding_tests {
         assert!(!o.contains("session="), "生 session UUID が残存: {o}");
     }
 
-    /// 1b. 正常終了でも stderr に大量に出るツール（cargo build の warning 等）の規模を数える
-    ///     （#716 レビュー指摘1）。stdout が空でも「出力 0 文字」で終わらず stderr の規模を出す。
+    /// 1b. 成功時の stderr は本文を inline せず規模だけ添える（判断の主材料は stdout・嵩防止）。
+    ///     stdout が空でも stderr の規模は出す（stdout だけ数えて事実と違う表示にしない・#716 指摘1）。
+    ///     失敗（非ゼロ終了）時は上流で stderr 本文ごと残る（別テスト）。
     #[test]
-    fn single_tool_reference_counts_stderr_size() {
+    fn single_tool_success_stderr_shows_size_not_body() {
         let err = "warning: unused variable `x`\n".repeat(2_000);
         let result = serde_json::json!({
             "success": true,
@@ -3831,12 +3864,75 @@ mod subtask_completed_folding_tests {
         let o = format_single_log(&subtask_completed_log("completed", &result));
         assert!(
             !o.contains("warning: unused variable"),
-            "stderr 本文が会話へ載っている: {o:.120}"
+            "成功時の stderr 本文が会話へ載っている（嵩む）: {o:.120}"
         );
-        assert!(o.contains("出力 0 文字"), "stdout 規模が無い: {o}");
+        assert!(o.contains("終了コード 0"), "終了コードが無い: {o}");
         assert!(
             o.contains(&format!("stderr {} 文字", err.chars().count())),
-            "stderr の規模が数えられていない（stdout だけ数えて事実と違う表示）: {o}"
+            "stderr の規模が数えられていない: {o}"
+        );
+    }
+
+    /// 1c. **大出力は畳んでも取得ハンドル付き**（欠陥3・回収不能な墓標を作らない）。
+    ///
+    /// offload しきい値（`inline_limit_for_tool`）超過の shell 出力は、会話へ届く前に
+    /// `sanitize_tool_result_for_log` が workspace へ退避し、本文を**非 JSON の退避 notice**——
+    /// `grep -n`/`ws_read`/`head -c` の回収レシピ（＝実体のある resolve ハンドル）付き——へ差し替える。
+    /// その notice は `fold_subtask_completed` の非 JSON 分岐が素通しするので、resume 会話には
+    /// 「全文は記録に残る」だけの墓標ではなく**回収レシピと退避先パス**が現れ、退避ファイルには
+    /// 全文が入っている（＝モデルが実際に全文を回収できる）。「同じ引数で再実行するな」も明示され、
+    /// 非冪等ツールの再取得ループを誘発しない。
+    #[test]
+    fn large_shell_output_folds_with_resolve_handle() {
+        // offload しきい値（2,500 tok）を確実に超える大 stdout。回収検証用の marker を仕込む。
+        let out = "SHELL-BIG-MARKER 大きなコマンド出力の行\n".repeat(3_000);
+        let raw = serde_json::json!({
+            "success": true, "data": {"exit_code": 0, "stdout": out, "stderr": ""}
+        })
+        .to_string();
+
+        // 上流（settle_completed 相当）: workspace を与えて退避させ、完了本文を得る。
+        let ws = tempfile::tempdir().unwrap();
+        let sanitized = crate::tool_result_log::sanitize_tool_result_for_log(
+            "subtask_completed",
+            &raw,
+            "sess-big",
+            "call-big",
+            Some(ws.path()),
+        );
+        // 退避されている（=非 JSON notice に化けた）ことを確認。
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&sanitized).is_err(),
+            "大出力が退避されず JSON のまま（しきい値未達＝テスト前提が崩れた）: {sanitized:.200}"
+        );
+
+        let o = format_single_log(&subtask_completed_log("completed", &sanitized));
+
+        // (a) resolve ハンドル（回収レシピ）が会話に現れる——墓標ではない。
+        assert!(
+            o.contains("ws_read") || o.contains("head -c"),
+            "退避参照に resolve ハンドル（回収レシピ）が無い（墓標）: {o:.400}"
+        );
+        // (b) 非冪等ツールの再取得ループを誘発しない（「同じ引数で再実行するな」）。
+        assert!(
+            o.contains("Do NOT re-run the same tool with the same arguments"),
+            "再実行を戒める文言が無い（副作用ループの引き金）: {o:.400}"
+        );
+        // (c) その resolve で全文が取れる: 退避ファイルに全文（marker）が入っている。
+        let tmp = ws.path().join("tmp");
+        let saved: Vec<_> = std::fs::read_dir(&tmp)
+            .expect("退避先 tmp/ が作られていない")
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(
+            saved.len(),
+            1,
+            "退避ファイルがちょうど 1 つでない: {saved:?}"
+        );
+        let body = std::fs::read_to_string(saved[0].path()).unwrap();
+        assert!(
+            body.contains("SHELL-BIG-MARKER"),
+            "退避ファイルに全文が入っていない（resolve しても回収できない）"
         );
     }
 
