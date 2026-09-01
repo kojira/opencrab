@@ -624,6 +624,18 @@ async fn scenario_a_message_becomes_say_and_conversation_has_e_number() {
         captured(&buf)
     );
 
+    // §5.4 typing: activity started で gateway が typing を打つ（dry-run kind="typing"）。ターンが
+    // 走った（say が出た）＝ started/ended を観測しているので、typing keepalive が最低 1 回打つ。
+    let saw_typing = {
+        let buf = buf.clone();
+        wait_until(move || count_kind(&buf, "typing") >= 1).await
+    };
+    assert!(
+        saw_typing,
+        "typing（§5.4）が dry-run に出ない: {:?}",
+        captured(&buf)
+    );
+
     // §9A: discord message が会話に e1 として現れる（core 汎化で discord kind に採番）。
     let saw_e1 = {
         let reqs = mock.request_texts();
