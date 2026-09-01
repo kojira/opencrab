@@ -162,7 +162,14 @@ async fn resume_v3_turn<R: AgentRuntime>(sink: ExtgateCompletionSink<R>, ev: Sub
             )
             .await;
             let effect = match turn {
-                Some(r) => delivery_effect(r),
+                Some(r) => delivery_effect(
+                    r,
+                    opencrab_actions::DeliveryContext {
+                        session_id: &sink.session_id,
+                        agent_id: &sink.agent_id,
+                        origin: "extgate",
+                    },
+                ),
                 None => opencrab_actions::DeliveryEffect::Empty,
             };
             let effect = adjust_inbound_effect(sink.delivery_mode, effect);

@@ -1074,9 +1074,12 @@ async fn process_incoming_message<T: AgentRunner>(
                     text_preview = %text.chars().take(100).collect::<String>(),
                     "on_response_text callback invoked"
                 );
-                if text.is_empty() || text.trim() == "NO_REPLY" {
-                    return;
-                }
+                // 第一柱: NO_REPLY 終端解釈で前段のみ配送（空・単独 NO_REPLY はスキップ）。
+                // 破棄ログは最終応答を判定する delivery_effect が出す（反復途中での二重計上を避ける）。
+                let text = match opencrab_actions::terminate_at_no_reply(&text).speech() {
+                    Some(s) if !s.trim().is_empty() => s.to_string(),
+                    _ => return,
+                };
                 let writable =
                     is_dm_for_cb || state_for_cb.is_channel_writable(&channel_id_str_for_cb);
                 if !writable {
@@ -1232,7 +1235,14 @@ async fn process_incoming_message<T: AgentRunner>(
                 // 送信タスクを起こした回数で見る（run_agent_response は既に完了しているので
                 // 発火は出揃っている。送信タスク自体の完了待ちは下の detach 側で行う）。
                 // 反復途中で喋って最終応答が NO_REPLY のターンを取りこぼさないため。
-                let effect = delivery_effect(result);
+                let effect = delivery_effect(
+                    result,
+                    opencrab_actions::DeliveryContext {
+                        session_id: &session_id_spawn,
+                        agent_id: &agent_id_spawn,
+                        origin: "discord",
+                    },
+                );
                 let posted =
                     reply_send_seq_spawn.load(std::sync::atomic::Ordering::SeqCst) > 0;
                 // このターンが「次の行動」を起こしたか（自動 dispatch / 明示 spawn_subtask）。
@@ -1446,7 +1456,14 @@ async fn process_subtask_completed<T: AgentRunner>(
     else {
         return;
     };
-    match delivery_effect(run_result) {
+    match delivery_effect(
+        run_result,
+        opencrab_actions::DeliveryContext {
+            session_id: &session_id,
+            agent_id: &agent_id,
+            origin: "discord",
+        },
+    ) {
         DeliveryEffect::NoReply => {
             state.record_agent_no_reply(&agent_id, &session_id);
         }
@@ -1561,9 +1578,12 @@ async fn process_timed_fire<T: AgentRunner>(
         let channel_id_str = channel_id_str.clone();
         let agent_id = agent_id.clone();
         Arc::new(move |text: String| {
-            if text.is_empty() || text.trim() == "NO_REPLY" {
-                return;
-            }
+            // 第一柱: NO_REPLY 終端解釈で前段のみ配送（空・単独 NO_REPLY はスキップ）。
+            // 破棄ログは最終応答を判定する delivery_effect が出す（反復途中での二重計上を避ける）。
+            let text = match opencrab_actions::terminate_at_no_reply(&text).speech() {
+                Some(s) if !s.trim().is_empty() => s.to_string(),
+                _ => return,
+            };
             if !is_dm && !state.is_channel_writable(&channel_id_str) {
                 return;
             }
@@ -1624,7 +1644,14 @@ async fn process_timed_fire<T: AgentRunner>(
 
     // 記録（配送は on_response_text が済ませているので送信はしない）。最終応答が NO_REPLY 以外なら
     // 通常ターンと同じ record_outbound_reply。沈黙は無記録（上記 doc）。
-    match delivery_effect(result) {
+    match delivery_effect(
+        result,
+        opencrab_actions::DeliveryContext {
+            session_id: &session_id,
+            agent_id: &agent_id,
+            origin: "discord",
+        },
+    ) {
         DeliveryEffect::Text {
             body,
             tool_calls_made,
@@ -1978,7 +2005,14 @@ async fn process_interaction_response<T: AgentRunner>(
     else {
         return;
     };
-    match delivery_effect(run_result) {
+    match delivery_effect(
+        run_result,
+        opencrab_actions::DeliveryContext {
+            session_id: &session_id,
+            agent_id: &agent_id,
+            origin: "discord",
+        },
+    ) {
         DeliveryEffect::NoReply => {
             state.record_agent_no_reply(&agent_id, &session_id);
         }
@@ -2342,7 +2376,10 @@ mod tests {
     }
 
     fn mk_effect(response: &str, stopped_by_limit: bool) -> opencrab_actions::DeliveryEffect {
-        delivery_effect(Ok(mk_result(response, stopped_by_limit)))
+        delivery_effect(
+            Ok(mk_result(response, stopped_by_limit)),
+            opencrab_actions::DeliveryContext::default(),
+        )
     }
 
     /// #431: 「発言終わり」の絵文字は既存の 2 種と衝突しない（区別できないと意味がない）。
@@ -2416,7 +2453,10 @@ mod tests {
         ));
         // エラー / タイムアウト終了 → 付けない
         assert!(!end_of_speech_qualifies(
-            &delivery_effect(Err(anyhow::anyhow!("boom"))),
+            &delivery_effect(
+                Err(anyhow::anyhow!("boom")),
+                opencrab_actions::DeliveryContext::default()
+            ),
             true,
             false
         ));

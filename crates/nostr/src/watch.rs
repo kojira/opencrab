@@ -305,7 +305,14 @@ pub async fn run_watch_turn<R: NostrAgentRunner>(
     )
     .await;
     match result {
-        Some(r) => delivery_effect(r),
+        Some(r) => delivery_effect(
+            r,
+            opencrab_actions::DeliveryContext {
+                session_id: &session_id,
+                agent_id: &agent_id,
+                origin: "nostr",
+            },
+        ),
         None => DeliveryEffect::Empty,
     }
 }

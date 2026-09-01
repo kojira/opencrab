@@ -329,19 +329,27 @@ pub enum DeliveryEffect {
     },
 }
 
-/// `EngineResult` を §3.4 の配送 effect に写す。判定はここだけ。
-pub fn delivery_effect(result: anyhow::Result<EngineResult>) -> DeliveryEffect {
+/// `EngineResult` を §3.4 の配送 effect に写す。NO_REPLY 終端解釈（第一柱）はここに集約。
+///
+/// R4: `NO_REPLY` は**出現＝終端**。最初の `NO_REPLY` で発言を打ち切り、前段が空なら
+/// [`DeliveryEffect::NoReply`]、非空ならその前段のみを [`DeliveryEffect::Text`] にする。
+/// `NO_REPLY` の後に非空テキストが続いていた場合は `ctx` を相関キーに破棄ログ（§3.1.1）を残す。
+pub fn delivery_effect(
+    result: anyhow::Result<EngineResult>,
+    ctx: crate::no_reply::DeliveryContext<'_>,
+) -> DeliveryEffect {
     match result {
         Ok(er) if !er.response.is_empty() => {
-            if er.response.trim() == "NO_REPLY" {
-                DeliveryEffect::NoReply
-            } else {
-                DeliveryEffect::Text {
-                    body: er.response,
+            let term = crate::no_reply::terminate_at_no_reply(&er.response);
+            term.log_trailing_discard(ctx);
+            match term.speech() {
+                None => DeliveryEffect::NoReply,
+                Some(body) => DeliveryEffect::Text {
+                    body: body.to_string(),
                     stopped_by_limit: er.stopped_by_limit,
                     tool_calls_made: er.tool_calls_made,
                     iterations: er.iterations,
-                }
+                },
             }
         }
         Ok(_) => DeliveryEffect::Empty,
@@ -897,17 +905,21 @@ mod tests {
         assert!(plan.admitted_agent_ids.is_empty());
     }
 
-    #[test]
-    fn delivery_effect_maps_engine_result() {
-        let text = EngineResult {
-            response: "hello".into(),
+    fn er(response: &str) -> EngineResult {
+        EngineResult {
+            response: response.into(),
             iterations: 1,
             tool_calls_made: 2,
             stopped_by_limit: false,
             xml_fallback_parses: 0,
-        };
+        }
+    }
+
+    #[test]
+    fn delivery_effect_maps_engine_result() {
+        let ctx = crate::no_reply::DeliveryContext::default();
         assert_eq!(
-            delivery_effect(Ok(text)),
+            delivery_effect(Ok(er("hello")), ctx),
             DeliveryEffect::Text {
                 body: "hello".into(),
                 stopped_by_limit: false,
@@ -915,14 +927,10 @@ mod tests {
                 iterations: 1,
             }
         );
-        let no_reply = EngineResult {
-            response: "NO_REPLY".into(),
-            iterations: 1,
-            tool_calls_made: 0,
-            stopped_by_limit: false,
-            xml_fallback_parses: 0,
-        };
-        assert_eq!(delivery_effect(Ok(no_reply)), DeliveryEffect::NoReply);
+        assert_eq!(
+            delivery_effect(Ok(er("NO_REPLY")), ctx),
+            DeliveryEffect::NoReply
+        );
         let empty = EngineResult {
             response: String::new(),
             iterations: 0,
@@ -930,11 +938,31 @@ mod tests {
             stopped_by_limit: false,
             xml_fallback_parses: 0,
         };
-        assert_eq!(delivery_effect(Ok(empty)), DeliveryEffect::Empty);
-        match delivery_effect(Err(anyhow::anyhow!("boom"))) {
+        assert_eq!(delivery_effect(Ok(empty), ctx), DeliveryEffect::Empty);
+        match delivery_effect(Err(anyhow::anyhow!("boom")), ctx) {
             DeliveryEffect::Failed { error } => assert!(error.contains("boom"), "{error}"),
             other => panic!("expected Failed, got {other:?}"),
         }
+    }
+
+    /// A1（第一柱・終端化）: 本文 → NO_REPLY → ゴミ の応答は前段本文で確定し、
+    /// 配送 body に NO_REPLY もゴミも含めない。
+    #[test]
+    fn delivery_effect_terminates_at_no_reply() {
+        let ctx = crate::no_reply::DeliveryContext::default();
+        match delivery_effect(Ok(er("本文だけ話す NO_REPLY これはゴミ")), ctx) {
+            DeliveryEffect::Text { body, .. } => {
+                assert_eq!(body, "本文だけ話す");
+                assert!(!body.contains("NO_REPLY"), "body に NO_REPLY 混入: {body}");
+                assert!(!body.contains("ゴミ"), "body に破棄テキスト混入: {body}");
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+        // 前段なし + 後続あり → NoReply（発言はしない）。
+        assert_eq!(
+            delivery_effect(Ok(er("NO_REPLY 続くゴミ")), ctx),
+            DeliveryEffect::NoReply
+        );
     }
 
     fn web_inbound<'a>(
