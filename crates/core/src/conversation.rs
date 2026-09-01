@@ -647,7 +647,7 @@ fn fold_subtask_completed(exit_reason: &str, result_str: &str) -> String {
             if items.iter().any(batch_entry_signals_failure) {
                 return result_str.to_string();
             }
-            build_subtask_batch_reference(items.len(), result_str)
+            build_subtask_batch_reference(items)
         }
         // 想定外の JSON（scalar 等）: 推測で捨てず残す（fail-safe）。
         _ => return result_str.to_string(),
@@ -657,41 +657,52 @@ fn fold_subtask_completed(exit_reason: &str, result_str: &str) -> String {
     shorter_of_reference_or_body(reference, result_str)
 }
 
-/// 監査の在り処を指す共通の後置き（#713 決定A）。**再取得は約束しない**（罠3）——
-/// `result` の read/list 文言（「もう一度 X で読む」）は切り離した subtask には嘘になる。全文が
-/// 記録（`memory_sessions` / `session_logs`）に残ることだけ伝える。生 session_id/subtask_id の
-/// UUID は会話に出さない（row295b・在り処はヘッダの s 番号が示す）。
-fn subtask_audit_suffix() -> String {
-    "（本文は会話に残していない・全文は記録に残る）".to_string()
-}
-
-/// 単一ツールの subtask 参照。`exit_code` があれば stdout 本文をそのまま残し（`execute_shell`
-/// 系＝モデルが読んで次手を決める出力・くらぶ暴走の根因修正）、無ければ結果規模だけ残す。
-/// ここへ来るのは `signals_failure` を通った成功だけなので終了コードは 0。ヘッダが `[s{n} 完了]`
-/// を示すので封筒の要点だけ（生 UUID を出さない）。
+/// 単一 dispatch ツールの成功結果を resume 会話へ残す本文にする。ここへ来るのは
+/// `signals_failure` を通った成功だけなので終了コードは 0。ヘッダ `[s{n} 完了]` が在り処を示すので
+/// 生 UUID は出さない。
+///
+/// **#880: #877（exit_code 限定）を全 dispatch ツールへ拡張**。dispatch ツールは常に背景 subtask
+/// 化され（#152/#671）同ターン往復が無いので、結果本文を畳むと resume がどのターンでも読めず——
+/// 「済んだ」と読めないため——モデルが再 dispatch する（症状B・連投燃料）。だから exit_code の有無に
+/// 関わらず本文を会話へ残す:
+/// - `exit_code` あり（現状 `execute_shell`）→ stdout を素の形で（`shell_output_reference`・#877）。
+/// - `exit_code` 無し（`ws_write` / `learn_*` / `summarize_and_save` 等）→ `data` payload をそのまま。
+///
+/// **有界性**は上流 offload が担保する: `sanitize_tool_result_for_log`（`subtask.rs:1406/1478`）が
+/// inline 上限（`inline_limit_for_tool`）超過を会話へ届く前に workspace へ退避し、回収レシピ付きの
+/// **非 JSON 退避 notice** へ差し替える（`fold_subtask_completed` の非 JSON 分岐が素通し）。だから
+/// ここへ JSON で来るのは会話に収まる小結果だけ＝丸ごと残して安全（長い＝先頭+切り詰め+resolve
+/// レシピは上流が済ませている）。**封筒でなく payload で測る**: 返した payload は呼び出し元の
+/// [`shorter_of_reference_or_body`] が封筒（`{"success":…,"data":…}`）と比べ、payload の方が短いので
+/// payload が採られる。本文を残すので「本文は会話に残していない」の監査後置きは付けない（#877 が
+/// shell で外したのと同じ）。
 fn build_subtask_single_reference(d: &serde_json::Value) -> String {
-    // `exit_code` を持つツール結果（現状 `execute_shell` だけ）は畳まず stdout 本文を残す。
-    // 判定・文言は `tool_result` 側の [`build_result_reference`] と [`shell_output_reference`] で
-    // 共有する（同じ形の判断を 2 箇所に書かない）。切り離した subtask は取り直せないので、畳むと
-    // stdout をどのターンでも読めなくなる（本番実機で待機宣言の連投＝くらぶ暴走を確認）。監査後置き
-    // （`subtask_audit_suffix`）は「本文は会話に残していない」と言うので、本文を残すここでは付けない。
     if d.get("exit_code").is_some() {
         return shell_output_reference(d);
     }
-    // exit_code の無いツール結果は data の規模だけ残す（何を呼んだかは記録に残る）。
-    let size = serde_json::to_string(d)
-        .map(|t| t.chars().count())
-        .unwrap_or(0);
-    format!("結果 {size} 文字{}", subtask_audit_suffix())
+    // exit_code 無しの dispatch ツール結果は `data` payload をそのまま残す（#880）。
+    serde_json::to_string(d).unwrap_or_default()
 }
 
-/// batch（複数ツール）の subtask 参照。件数と合計規模（配列 JSON の文字数）を残す。
-fn build_subtask_batch_reference(count: usize, result_str: &str) -> String {
-    format!(
-        "{count} 件のツール結果・合計 {} 文字{}",
-        result_str.chars().count(),
-        subtask_audit_suffix(),
-    )
+/// batch（複数ツール）の成功結果。全要素成功のときだけここへ来る（どれか失敗なら上流で配列を
+/// 丸ごと保持）。**#880: 要素ごとに exit_code/payload 判定**して単一と同じ規則
+/// （[`build_subtask_single_reference`]）を掛け、tool 名を添えて本文を残す（畳むと resume が読めず
+/// 再 dispatch の燃料になる・症状B）。結合本文の上限超過は上流 offload（`subtask.rs:1478`）が退避
+/// notice 化済みなのでここは有界。長さ不変条件（呼び出し元の `shorter_of_reference_or_body`）で
+/// 配列本文以上に長くなるなら本文（配列）を残すので、どちらでも各要素の本文は会話に残る。
+fn build_subtask_batch_reference(items: &[serde_json::Value]) -> String {
+    let null = serde_json::Value::Null;
+    let mut out = format!("{} 件のツール結果", items.len());
+    for entry in items {
+        let tool = entry.get("tool").and_then(|x| x.as_str()).unwrap_or("?");
+        let d = entry
+            .get("result")
+            .and_then(|r| r.get("data"))
+            .unwrap_or(&null);
+        out.push('\n');
+        out.push_str(&format!("[{tool}] {}", build_subtask_single_reference(d)));
+    }
+    out
 }
 
 /// batch 要素（`{"tool":…,"tool_call_id":…,"result":<value>}`）が失敗を表すか。
@@ -4053,24 +4064,62 @@ mod subtask_completed_folding_tests {
         );
     }
 
-    /// 8. batch 全成功 → 「N 件のツール結果・合計 M 文字」参照。個々の stdout 本文は載らない。
+    /// 8. batch 全成功 → **各要素の本文を残す**（#880: 要素ごとに exit_code/payload 判定）。
+    ///    shell 要素は stdout を素の形で、exit_code 無しの要素（ws_write 等）は payload をそのまま。
+    ///    畳むと切り離した batch subtask の結果を resume がどのターンでも読めず再 dispatch の燃料に
+    ///    なる（症状B）。会話へ届く前に結合本文の上限超過は退避 notice へ差し替わる（#551/#878）ので
+    ///    JSON で来るのは会話に収まる小 batch＝丸ごと残して有界。
     #[test]
-    fn batch_all_success_becomes_a_count_reference() {
-        let big = "y".repeat(20_000);
+    fn batch_all_success_keeps_element_bodies() {
         let arr = serde_json::json!([
             {"tool":"execute_shell","tool_call_id":"c1",
-             "result":{"success":true,"data":{"exit_code":0,"stdout":big}}},
-            {"tool":"execute_shell","tool_call_id":"c2",
-             "result":{"success":true,"data":{"exit_code":0,"stdout":big}}}
+             "result":{"success":true,"data":{"exit_code":0,"stdout":"BATCH-SHELL-OUT 晴れ","stderr":""}}},
+            {"tool":"ws_write","tool_call_id":"c2",
+             "result":{"success":true,"data":{"path":"BATCH-WROTE/notes.md","written":true}}}
         ])
         .to_string();
 
         let o = format_single_log(&subtask_completed_log("completed", &arr));
+        // shell 要素: stdout が素の形で残る。
         assert!(
-            !o.contains(&"y".repeat(100)),
-            "batch の本文が会話へ載っている: {o:.120}"
+            o.contains("BATCH-SHELL-OUT 晴れ"),
+            "batch の shell stdout が畳まれた（再 dispatch 燃料が残る）: {o:.200}"
+        );
+        // exit_code 無しの要素: payload（path）が残る。
+        assert!(
+            o.contains("BATCH-WROTE/notes.md"),
+            "batch の exit_code 無し要素の本文が畳まれた: {o:.200}"
         );
         assert!(o.contains("2 件"), "件数が無い: {o}");
+        assert!(o.contains("[subtask 完了]"), "完了ヘッダが無い: {o}");
+        assert!(!o.contains("session="), "生 session UUID が残存: {o}");
+        assert!(!o.contains("st-1"), "生 subtask_id が残存: {o}");
+    }
+
+    /// 8b. **exit_code 無しの単一 dispatch ツール結果も本文を resume 会話へ残す**（#880 の核）。
+    ///
+    /// #877 は exit_code を持つ結果（execute_shell）だけ畳みを撤回したが、`ws_write` /
+    /// `learn_from_experience` / `summarize_and_save` 等の exit_code 無し dispatch ツールは
+    /// 「結果 N 文字」へ畳まれ、切り離した subtask の結果を resume がどのターンでも読めなかった
+    /// （症状B の連投燃料）。ここでは代表的な小 payload（ws_write の path）が resume 会話に残ること、
+    /// および畳みの墓標文言（「本文は会話に残していない」）が付かないことを固定する。
+    #[test]
+    fn single_tool_no_exit_code_keeps_its_payload() {
+        let result = serde_json::json!({
+            "success": true,
+            "data": {"path": "WROTE-MARKER/design.md", "written": true}
+        })
+        .to_string();
+
+        let o = format_single_log(&subtask_completed_log("completed", &result));
+        assert!(
+            o.contains("WROTE-MARKER/design.md"),
+            "exit_code 無し dispatch ツールの本文が resume 会話に無い（畳まれた＝症状B の燃料）: {o}"
+        );
+        assert!(
+            !o.contains("本文は会話に残していない"),
+            "本文を残すのに墓標文言が付いている: {o}"
+        );
         assert!(o.contains("[subtask 完了]"), "完了ヘッダが無い: {o}");
         assert!(!o.contains("session="), "生 session UUID が残存: {o}");
         assert!(!o.contains("st-1"), "生 subtask_id が残存: {o}");
