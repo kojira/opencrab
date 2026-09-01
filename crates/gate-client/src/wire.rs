@@ -140,6 +140,19 @@ pub struct Activity {
     pub binding_id: String,
     pub activity_id: String,
     pub state: String,
+    /// R2(👀): この started が読み取ったターン発端の origin。core は state="started" にだけ
+    /// 載せる（1-said-1-turn）。additive field（DESIGN-EXTGATE-V3 §「認識しない field は無視」）
+    /// なので、origin を送らない旧 core / これを見ない旧 gateway とも互換。ended・未載時は None。
+    pub origin: Option<String>,
+}
+
+/// R3(❌): core→gate のターン失敗通知（DeliveryEffect::Failed）。id を持たない fire-and-forget
+/// 通知（activity と同型）なので、未知フレームを ignore する準拠 gateway（外部 DI gateway 含む）は
+/// write 0・keep で素通しする。error 本文は載せない（多エージェント相互反応ループ防止・#668）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnFailed {
+    pub binding_id: String,
+    pub origin: String,
 }
 
 /// core→gate invoke（DI 拡張 §5.1）。`id`=call_id。第一段は callback 無しなので
@@ -167,6 +180,7 @@ pub enum CoreMsg {
     Bind(Bind),
     Say(Say),
     Activity(Activity),
+    TurnFailed(TurnFailed),
     Invoke(Invoke),
     Response(WireResponse),
     Reverse {
@@ -295,6 +309,14 @@ fn parse_core_msg(obj: &Value) -> CoreMsg {
                 m,
             },
         },
+        "turn_failed" => match parse_turn_failed(obj) {
+            Ok(t) => CoreMsg::TurnFailed(t),
+            Err(_) => CoreMsg::Invalid {
+                id: opt_id(obj),
+                code: "bad_request",
+                m,
+            },
+        },
         "invoke" => match parse_invoke(obj) {
             Ok(i) => CoreMsg::Invoke(i),
             Err(_) => CoreMsg::Invalid {
@@ -372,11 +394,24 @@ fn parse_activity(obj: &Value) -> Result<Activity, FrameError> {
     if state != "started" && state != "ended" {
         return Err(FrameError::BadRequest);
     }
+    // R2(👀): origin は optional。欠落=None（旧 core 互換）。present は nonempty string。
+    let origin = match obj.get("origin") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
+        Some(_) => return Err(FrameError::BadRequest),
+    };
     Ok(Activity {
         binding_id,
         activity_id,
         state,
+        origin,
     })
+}
+
+fn parse_turn_failed(obj: &Value) -> Result<TurnFailed, FrameError> {
+    let binding_id = parse_uuid(&require_str(obj, "binding_id")?)?;
+    let origin = nonempty_str(obj, "origin")?;
+    Ok(TurnFailed { binding_id, origin })
 }
 
 fn parse_response(obj: &Value, m: &str) -> Result<WireResponse, FrameError> {
@@ -513,6 +548,69 @@ mod tests {
         let raw = br#"{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","m":"invoke","binding_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","operation":"reply","context":{"continuation_id":null}}"#;
         match parse_frame_bytes(raw).unwrap() {
             CoreMsg::Invalid { code, .. } => assert_eq!(code, "bad_request"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // R2(👀): started は origin を運ぶ。
+    #[test]
+    fn parse_activity_started_carries_origin() {
+        let raw = br#"{"m":"activity","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","activity_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","state":"started","origin":"omo-1"}"#;
+        match parse_frame_bytes(raw).unwrap() {
+            CoreMsg::Activity(a) => {
+                assert_eq!(a.state, "started");
+                assert_eq!(a.origin.as_deref(), Some("omo-1"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // R2: origin 欠落（旧 core）は None（後方互換）。additive の未知 field も無視。
+    #[test]
+    fn parse_activity_without_origin_is_none() {
+        let raw = br#"{"m":"activity","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","activity_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","state":"ended","future_field":42}"#;
+        match parse_frame_bytes(raw).unwrap() {
+            CoreMsg::Activity(a) => {
+                assert_eq!(a.state, "ended");
+                assert_eq!(a.origin, None);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // R3(❌): turn_failed は binding_id + origin を運ぶ。error 本文（未知 field）は無視。
+    #[test]
+    fn parse_turn_failed_ok() {
+        let raw = br#"{"m":"turn_failed","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","origin":"boom-1","error":"leaked-should-be-ignored"}"#;
+        match parse_frame_bytes(raw).unwrap() {
+            CoreMsg::TurnFailed(t) => {
+                assert_eq!(t.binding_id, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+                assert_eq!(t.origin, "boom-1");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_turn_failed_missing_origin_is_bad_request() {
+        let raw = br#"{"m":"turn_failed","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}"#;
+        match parse_frame_bytes(raw).unwrap() {
+            CoreMsg::Invalid { code, .. } => assert_eq!(code, "bad_request"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // 後方互換: 未知 `m` かつ id 無しの core→gate 通知（turn_failed を知らない旧 gateway 相当）は
+    // Unknown に落ち、handle_msg で write 0・keep（close しない）。DESIGN-EXTGATE-V3 §「RUNNING の
+    // 未知 m は unknown_message・keep」。これが崩れると外部 DI gateway を壊すので固定する。
+    #[test]
+    fn unknown_noid_notification_is_ignorable_unknown() {
+        let raw = br#"{"m":"turn_failed_v99","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","origin":"x"}"#;
+        match parse_frame_bytes(raw).unwrap() {
+            CoreMsg::Unknown { id, m } => {
+                assert_eq!(id, None);
+                assert_eq!(m, "turn_failed_v99");
+            }
             other => panic!("{other:?}"),
         }
     }

@@ -84,8 +84,13 @@ impl AgentRuntime for TestRuntime {
             let _ = rx.await;
         }
         self.turns.fetch_add(1, Ordering::SeqCst);
+        let reply = self.reply.lock().unwrap().clone();
+        // R3(❌): "__FAIL__" 応答でエンジン失敗を模擬する（DeliveryEffect::Failed 経路）。
+        if reply == "__FAIL__" {
+            anyhow::bail!("simulated turn failure");
+        }
         Ok(EngineResult {
-            response: self.reply.lock().unwrap().clone(),
+            response: reply,
             iterations: 1,
             tool_calls_made: 0,
             stopped_by_limit: false,
@@ -1450,6 +1455,56 @@ async fn no_reply_turn_emits_ended_without_say() {
 }
 
 #[tokio::test]
+async fn turn_failed_emits_frame_with_origin() {
+    // R3(❌): エンジン/プロバイダ失敗（DeliveryEffect::Failed）で core→gate に turn_failed(origin)
+    // が届く（gateway が発端メッセージへ ❌ を付ける材料）。error 本文は wire に載らず、say は 0。
+    let h = Harness::start().await;
+    let (mut s, _, binding_id) = ready_pair(&h).await;
+    *h.runtime.reply.lock().unwrap() = "__FAIL__".into();
+    write_frame(
+        &mut s,
+        &json!({
+            "id": "s1",
+            "m": "said",
+            "binding_id": binding_id,
+            "origin": "boom-1",
+            "author_id": "u1",
+            "text": "hi",
+            "attachments": []
+        }),
+    )
+    .await;
+    let ok = read_frame(&mut s).await;
+    assert_eq!(ok["seq"], 1);
+    let mut turn_failed: Option<Value> = None;
+    let mut saw_say = false;
+    for _ in 0..80 {
+        if let Some(v) = read_frame_opt(&mut s).await {
+            match v["m"].as_str() {
+                Some("turn_failed") => turn_failed = Some(v),
+                Some("say") => saw_say = true,
+                _ => {}
+            }
+        }
+        if turn_failed.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let tf = turn_failed.expect("turn_failed frame must be emitted on turn failure");
+    assert_eq!(tf["origin"], "boom-1");
+    assert_eq!(tf["binding_id"], binding_id);
+    // error 本文は wire に載せない（多エージェント相互反応ループ防止・#668）。
+    assert!(tf.get("error").is_none() && tf.get("detail").is_none());
+    assert!(!saw_say);
+    let conn = h.state.db.lock().unwrap();
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM deliveries", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 0, "失敗ターンは say を出さない");
+}
+
+#[tokio::test]
 async fn startup_recover_stale_sending() {
     let db = opencrab_db::Db::memory().unwrap();
     {
@@ -1545,11 +1600,20 @@ async fn e2e_omoikane_flow() {
     let mut saw_started = false;
     let mut saw_ended = false;
     let mut saw_say = false;
+    // R2(👀): started は発端 origin を運び、ended は運ばない。
+    let mut started_origin: Option<String> = None;
+    let mut ended_had_origin = false;
     for _ in 0..80 {
         if let Some(v) = read_frame_opt(&mut s).await {
             match v["m"].as_str() {
-                Some("activity") if v["state"] == "started" => saw_started = true,
-                Some("activity") if v["state"] == "ended" => saw_ended = true,
+                Some("activity") if v["state"] == "started" => {
+                    saw_started = true;
+                    started_origin = v["origin"].as_str().map(str::to_string);
+                }
+                Some("activity") if v["state"] == "ended" => {
+                    saw_ended = true;
+                    ended_had_origin = !v["origin"].is_null();
+                }
                 Some("say") => {
                     assert_eq!(v["payload"]["text"], "hello from agent");
                     write_frame(&mut s, &json!({"id": v["id"], "m": "ok"})).await;
@@ -1564,6 +1628,9 @@ async fn e2e_omoikane_flow() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(saw_started && saw_ended && saw_say);
+    // R2: started(origin) が発端 said へ 👀 を配線するための情報。ended には載らない。
+    assert_eq!(started_origin.as_deref(), Some("omo-1"));
+    assert!(!ended_had_origin);
 }
 
 #[tokio::test]

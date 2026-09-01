@@ -776,7 +776,17 @@ fn enqueue_turn<R: AgentRuntime>(
                     .start_session_turn_count
                     .fetch_add(1, Ordering::SeqCst);
                 let activity_id = uuid::Uuid::new_v4().to_string();
-                emit_activity(&state, &instance_id, &binding_id, &activity_id, "started").await;
+                // R2(👀): started に発端 origin を載せる。gateway はこの時点で 👀 を付ける
+                // （record-only/held はここへ来ないので「読まれるまで付かない」が保たれる）。
+                emit_activity(
+                    &state,
+                    &instance_id,
+                    &binding_id,
+                    &activity_id,
+                    "started",
+                    Some(origin.as_str()),
+                )
+                .await;
                 let caller = match state.db.lock() {
                     Ok(conn) => resolve_caller(
                         &conn,
@@ -919,15 +929,29 @@ fn enqueue_turn<R: AgentRuntime>(
                         // 2026-08-31）。これで say フレームが ended より先に gateway へ届き、返信ターンは
                         // saw_say=true になってから ended を見るので、gate-client の CompletedNoReply が
                         // 沈黙（say 無し）ターンだけに正しく立つ（返信ターンでの偽 CompletedNoReply を撤去）。
-                        emit_activity(&state, &instance_id, &binding_id, &activity_id, "ended")
-                            .await;
+                        emit_activity(
+                            &state,
+                            &instance_id,
+                            &binding_id,
+                            &activity_id,
+                            "ended",
+                            None,
+                        )
+                        .await;
                     }
                     Err(_) => {
                         tracing::error!("extgate turn task panicked");
                         // パニック時は決着を配送できない。turn 境界だけは通知してから close する
                         // （沈黙ターンと同じく say 無しの ended＝CompletedNoReply 相当）。
-                        emit_activity(&state, &instance_id, &binding_id, &activity_id, "ended")
-                            .await;
+                        emit_activity(
+                            &state,
+                            &instance_id,
+                            &binding_id,
+                            &activity_id,
+                            "ended",
+                            None,
+                        )
+                        .await;
                         crate::close::close_live(
                             &state,
                             Some(&instance_id),
