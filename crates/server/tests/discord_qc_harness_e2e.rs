@@ -46,6 +46,8 @@ const TOKEN: &str = "operator-token-discord-qc";
 const AGENT_ID: &str = "agent-discord-qc";
 const GUILD: &str = "500";
 const CHANNEL: &str = "600";
+/// #915: typing 隔離テスト専用チャンネル（他テストは 600 のみ使う）。並列 CI でも typing を分離。
+const CHANNEL_TY: &str = "601";
 const SELF_BOT: &str = "111"; // bot 自身の user id（自分の投稿除外）。
 const AUTHOR: &str = "222"; // owner の Discord user id（generic admission で caller=Owner）。
 /// dry-run を拾う tracing target（= `opencrab_discord_gateway::transport::DRY_RUN_LOG_TARGET`）。
@@ -163,10 +165,15 @@ impl Fixture {
     }
 
     fn append_message(&self, id: &str, content: &str) {
+        self.append_message_ch(id, CHANNEL, content);
+    }
+
+    /// 指定チャンネルへ発端メッセージを積む（#915: typing 隔離テストが専用チャンネルを使う）。
+    fn append_message_ch(&self, id: &str, channel: &str, content: &str) {
         use std::io::Write as _;
         let line = serde_json::json!({
             "id": id,
-            "channel_id": CHANNEL,
+            "channel_id": channel,
             "guild_id": GUILD,
             "author": {"id": AUTHOR, "bot": false, "username": "owner"},
             "content": content,
@@ -676,8 +683,58 @@ async fn wire_instance(core: &Core, fixture: &Fixture) -> Arc<InstanceClient> {
     client
 }
 
+/// 指定チャンネルで instance+binding を張り gateway を起動する（#915: typing 隔離テスト用）。
+/// BUFFER は binary 内で共有・累積かつ CI は並列実行なので、typing（scope key を持たない capture）
+/// を他テストと分離するために、他テストが使わない専用チャンネルへ束ねる。
+async fn wire_instance_on_channel(
+    core: &Core,
+    fixture: &Fixture,
+    channel: &str,
+) -> Arc<InstanceClient> {
+    let instance_id = uuid::Uuid::new_v4().to_string();
+    let binding_id = uuid::Uuid::new_v4().to_string();
+    let config_bytes = discord_config();
+    let config_b64 = opencrab_extgate::encode_config_b64(&config_bytes);
+    let addr = format!("discord-{AGENT_ID}-{GUILD}-{channel}");
+
+    put_instance(core, &instance_id, &config_b64).await;
+    put_binding(core, &binding_id, &instance_id, &addr).await;
+
+    let place = InstancePlacement {
+        instance_id: instance_id.clone(),
+        revision: 1,
+        addresses: vec![addr.clone()],
+        config_b64,
+    };
+    let overrides = HarnessOverrides {
+        fake_events: Some(fixture.path.clone()),
+        dry_run: true,
+    };
+    let client = spawn_instance(core.sock.clone(), &place, &config_bytes, None, overrides)
+        .expect("spawn_instance");
+
+    let mut bound = false;
+    for _ in 0..250 {
+        if client.binding_for_address(&addr).await.is_some() {
+            bound = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(bound, "binding が ack されない（専用チャンネル {channel}）");
+    client
+}
+
 fn count_kind(buf: &Arc<Mutex<Vec<Captured>>>, kind: &str) -> usize {
     captured(buf).iter().filter(|c| c.kind == kind).count()
+}
+
+/// 指定チャンネルに限定した kind 別キャプチャ数（#915: typing を専用チャンネルで数える）。
+fn count_kind_on_channel(buf: &Arc<Mutex<Vec<Captured>>>, kind: &str, channel: &str) -> usize {
+    captured(buf)
+        .iter()
+        .filter(|c| c.kind == kind && c.channel == channel)
+        .count()
 }
 
 // ==================== (a) message → say ＋ §9A e番号 ====================
@@ -1911,9 +1968,15 @@ async fn scenario_915_typing_stops_after_turn_end() {
     let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
 
     let fixture = Fixture::new();
-    let _client = wire_instance(&core, &fixture).await;
+    // typing は capture に scope key（message）を持たず、CI は並列・BUFFER 共有なので、他テストが
+    // 使わない専用チャンネル（CHANNEL_TY）へ束ねて typing を隔離する。
+    let _client = wire_instance_on_channel(&core, &fixture, CHANNEL_TY).await;
 
-    fixture.append_message("9154", &format!("{M_SAY} 入力中がターン後に止まるか"));
+    fixture.append_message_ch(
+        "9154",
+        CHANNEL_TY,
+        &format!("{M_SAY} 入力中がターン後に止まるか"),
+    );
 
     // 最終 say（TY_SAY）の own id に 🏁 が付く＝activity ended を受けた（typing も ended で停止）まで待つ。
     let done = {
@@ -1921,7 +1984,7 @@ async fn scenario_915_typing_stops_after_turn_end() {
         wait_until(move || {
             let mid = captured(&buf)
                 .iter()
-                .find(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(TY_SAY))
+                .find(|c| c.kind == "say" && c.channel == CHANNEL_TY && c.body.contains(TY_SAY))
                 .map(|c| c.message.clone())
                 .filter(|m| !m.is_empty());
             match mid {
@@ -1941,11 +2004,12 @@ async fn scenario_915_typing_stops_after_turn_end() {
         captured(&buf)
     );
 
-    // ended 到達後の typing キャプチャ総数を基準化し、失効間隔（TYPING_REFRESH_INTERVAL=8 秒）を
-    // 跨いで待つ。停止していれば増分 0、停止漏れなら keepalive が 8 秒後に再送出して増える。
-    let before = count_kind(&buf, "typing");
+    // ended 到達後、専用チャンネルの typing キャプチャ数を基準化し、失効間隔
+    // （TYPING_REFRESH_INTERVAL=8 秒）を跨いで待つ。このチャンネルはこのターンだけが使うので、
+    // 停止していれば増分 0・停止漏れなら keepalive が 8 秒後に再送出して増える（並列でも堅牢）。
+    let before = count_kind_on_channel(&buf, "typing", CHANNEL_TY);
     tokio::time::sleep(Duration::from_millis(9000)).await;
-    let after = count_kind(&buf, "typing");
+    let after = count_kind_on_channel(&buf, "typing", CHANNEL_TY);
     assert_eq!(
         after, before,
         "activity ended 後に typing が再送出された（入力中が止まらない）: before={before} after={after}"
