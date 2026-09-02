@@ -1736,7 +1736,9 @@ mod tests {
             register_reviewer(&state).await;
             let task_id = seed_agent_and_task(&state);
 
-            // (2) 名簿にその表示名が載る（依頼側のプロンプトに出る / #218）
+            // (2) #920: 名簿は Peer Review 節ごと共有プロンプトから撤去された。表示名も ID も
+            //     プロンプトには出ない（reviewer 解決は list_co_agent_reviewers 経由で継続する
+            //     ため、依頼自体は下の (3) で reviewer=表示名 を渡して成立する）。
             let prompt = {
                 let conn = state.db.lock().unwrap();
                 crate::process::build_agent_context(
@@ -1747,8 +1749,8 @@ mod tests {
                 .0
             };
             assert!(
-                prompt.contains(&format!("- {REVIEWER_NAME}")),
-                "登録した協働エージェントが名簿に出ていない:\n{prompt}"
+                !prompt.contains(&format!("- {REVIEWER_NAME}")),
+                "#920: 名簿は共有プロンプトから撤去済み（表示名が残っている）:\n{prompt}"
             );
             assert!(
                 !prompt.contains(REVIEWER_ID),
