@@ -391,4 +391,213 @@ mod tests {
             "通知が無くても間隔満了（sleep ブランチ）で起きる安全網が残っているはず"
         );
     }
+
+    // ===== #898 §13.1 e: intake 起点のターンでも CONTINUE 途中発話が保存される =====
+    // DESIGN-TURN-CONTINUATION §13.1 e「scheduler / intake / heartbeat 起点のターン（ユーザー
+    // 発話なし）… 表の期待は同じ。CONTINUE も有効」。plain3（本文＋CONTINUE ×2 → 本文）で
+    // intake セッションに speech 3 件・LLM 3 回（intake は外部配送しないので観測は保存件数と
+    // LLM 回数）。現状は最終応答 1 件しか保存されない。
+
+    struct E13Mock {
+        responses:
+            std::sync::Mutex<std::collections::VecDeque<opencrab_llm::message::ChatResponse>>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl E13Mock {
+        fn new(texts: &[&str]) -> Self {
+            use opencrab_llm::message::{Choice, FinishReason, Message, Usage};
+            let mut q = std::collections::VecDeque::new();
+            for t in texts {
+                q.push_back(opencrab_llm::message::ChatResponse {
+                    id: "e13".to_string(),
+                    model: "mock-model".to_string(),
+                    choices: vec![Choice {
+                        index: 0,
+                        message: Message::assistant(*t),
+                        finish_reason: Some(FinishReason::Stop),
+                    }],
+                    usage: Usage {
+                        prompt_tokens: 1,
+                        completion_tokens: 1,
+                        total_tokens: 2,
+                        cache_read_input_tokens: 0,
+                        cache_creation_input_tokens: 0,
+                    },
+                    created: 0,
+                });
+            }
+            Self {
+                responses: std::sync::Mutex::new(q),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl opencrab_llm::traits::LlmProvider for E13Mock {
+        fn name(&self) -> &str {
+            "mock"
+        }
+        fn sends_max_output_tokens(&self) -> bool {
+            false
+        }
+        async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+            Ok(vec![])
+        }
+        async fn chat_completion(
+            &self,
+            _req: opencrab_llm::message::ChatRequest,
+        ) -> anyhow::Result<opencrab_llm::message::ChatResponse> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| anyhow::anyhow!("E13Mock: no more responses"))
+        }
+    }
+
+    fn intake_test_state(mock: std::sync::Arc<E13Mock>) -> AppState {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        {
+            let conn = db.lock().unwrap();
+            opencrab_db::queries::upsert_model_pricing(
+                &conn,
+                &opencrab_db::queries::ModelPricingRow {
+                    provider: "mock".to_string(),
+                    model: "gpt-4o".to_string(),
+                    input_price_per_1m: 0.0,
+                    output_price_per_1m: 0.0,
+                    context_window: Some(200_000),
+                    max_output_tokens: Some(4_096),
+                },
+            )
+            .unwrap();
+            opencrab_db::queries::upsert_agent(
+                &conn,
+                &opencrab_db::queries::AgentRow {
+                    agent_id: "agent_alpha".to_string(),
+                    name: "Alpha".to_string(),
+                    job_title: None,
+                    organization: None,
+                    image_url: None,
+                    persona_name: "p".to_string(),
+                    personality: None,
+                    instructions: String::new(),
+                    heartbeat_instructions: String::new(),
+                    model: None,
+                    reasoning_effort: None,
+                    web_search: None,
+                    metadata_json: None,
+                },
+            )
+            .unwrap();
+        }
+        let mut router = opencrab_llm::router::LlmRouter::new();
+        router.add_provider(mock as std::sync::Arc<dyn opencrab_llm::traits::LlmProvider>);
+        router.set_default_provider("mock");
+        let timed = opencrab_actions::TimedFireRouter::new();
+        opencrab_server::register_production_descriptors(&timed);
+        AppState {
+            db,
+            llm_router: opencrab_server::SharedLlmRouter::new(router),
+            llm_config: std::sync::Arc::new(toml::from_str("").unwrap()),
+            subtask_auto_dispatch: true,
+            voice_config: std::sync::Arc::new(Default::default()),
+            voice_runtime: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
+            #[cfg(feature = "nostr")]
+            nostr_master_key: None,
+            default_model: "mock:gpt-4o".to_string(),
+            tools_config: std::sync::Arc::new(std::sync::RwLock::new(
+                opencrab_actions::tools::ToolsConfig::default(),
+            )),
+            compaction_ratio: 0.5,
+            typed_history_enabled: false,
+            typed_history_drop_directive: false,
+            evaluator: opencrab_server::config::EvaluatorConfig::default(),
+            skill_consolidation: opencrab_server::config::SkillConsolidationConfig::default(),
+            category_maintenance: opencrab_server::config::CategoryMaintenanceConfig::default(),
+            memory_organize: opencrab_server::config::MemoryOrganizeConfig::default(),
+            memory_declare: opencrab_server::config::MemoryDeclareConfig::default(),
+            memory_condense: opencrab_server::config::MemoryCondenseConfig::default(),
+            loop_restart_enabled: false,
+            index_build_inflight: std::sync::Arc::new(dashmap::DashMap::new()),
+            intake: std::sync::Arc::new(Default::default()),
+            intake_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
+            mcp_manager: None,
+            gateways: std::sync::Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
+            subtask_registries: std::sync::Arc::new(
+                opencrab_server::subtask_registries::SubtaskRegistries::new(),
+            ),
+            session_locks: std::sync::Arc::new(opencrab_actions::SessionLocks::new()),
+            timed_fire_router: std::sync::Arc::new(timed),
+            progress_debounce: std::sync::Arc::new(
+                opencrab_server::subtask_registries::ProgressDebounce::new(),
+            ),
+            subtask_notifiers: std::sync::Arc::new(dashmap::DashMap::new()),
+            subtask_lifecycle_notifier: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            default_subtask_webhook: None,
+            heartbeat_limits: opencrab_server::config::HeartbeatLimits::default(),
+            scheduler_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
+            heartbeat_config_rx: opencrab_server::disconnected_heartbeat_config_rx(
+                opencrab_core::heartbeat::HeartbeatConfig::default(),
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn intake_continue_saves_each_intermediate_speech() {
+        let mock = std::sync::Arc::new(E13Mock::new(&[
+            "E13-1回目。まず一つ⚡\nCONTINUE",
+            "E13-2回目。次いこう⚡\nCONTINUE",
+            "E13-3回目。これで最後⚡",
+        ]));
+        let state = intake_test_state(mock.clone());
+
+        // 未処理の inbox イベントを 1 件積む（これが intake ターンの起点）。
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::enqueue_inbox_event(
+                &conn,
+                &opencrab_db::queries::InboxInsert {
+                    id: "ev-e13".to_string(),
+                    agent_id: "agent_alpha".to_string(),
+                    source: "sample-source".to_string(),
+                    event_type: "comment.created".to_string(),
+                    dedup_key: "comment.created:ev-e13".to_string(),
+                    payload_json: "{\"text\":\"3回に分けて\"}".to_string(),
+                },
+            )
+            .unwrap();
+        }
+
+        process_all_inboxes(&state).await;
+
+        let session_id = format!("{INTAKE_SESSION_PREFIX}agent_alpha");
+        let speeches: Vec<String> = {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::list_session_logs_by_session(&conn, &session_id)
+                .unwrap()
+                .into_iter()
+                .filter(|l| l.log_type == "speech" && l.content.contains("E13-"))
+                .map(|l| l.content)
+                .collect()
+        };
+        assert_eq!(
+            speeches.len(),
+            3,
+            "intake 起点でも途中発話が保存されるはず（現状は最終のみ）: {speeches:?}"
+        );
+        assert!(
+            speeches.iter().all(|s| !s.contains("CONTINUE")),
+            "保存された speech に CONTINUE 残留: {speeches:?}"
+        );
+        assert_eq!(mock.calls(), 3, "末尾 CONTINUE で LLM が 3 回呼ばれるはず");
+    }
 }

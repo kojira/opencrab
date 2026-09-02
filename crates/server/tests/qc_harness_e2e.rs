@@ -1773,3 +1773,138 @@ async fn scenario_n2_resolve_query_class_keeps_subtask_and_machine_line() {
     );
     let _ = &buf;
 }
+
+// ==================== (#898) CONTINUE 途中イテレーションの発話配送・保存 ====================
+//
+// DESIGN-TURN-CONTINUATION §11.1: 末尾 CONTINUE の生成は「残りの content を通常どおり配送・
+// 保存 → 次イテレーション」。reply を使わない純テキストを 3 分割（1回目 CONTINUE / 2回目
+// CONTINUE / 3回目）した場合、途中イテレーション（1回目・2回目）の発話も say として配送され、
+// memory_sessions に speech として保存されること。#895 は engine 側の on_response_text 発火を
+// モックで固定したが extgate V3 の実配線（apply_delivery_effect は最終 EngineResult.response
+// のみ配送）を通しておらず、途中発話が配送も保存もされずに落ちていた（#898 QC 実弾で確認）。
+
+/// マーカー（テスト間で共有される dry-run buffer / DB を絞る）。
+const C898_1: &str = "C898-1回目。まず一つ";
+const C898_2: &str = "C898-2回目。次いこう";
+const C898_3: &str = "C898-3回目。これで最後";
+
+#[tokio::test]
+async fn scenario_continue_intermediate_speech_delivered_and_saved() {
+    let buf = install_capture();
+    let mock = Arc::new(FifoMock::new());
+    // reply を使わない純テキスト 3 分割。末尾 CONTINUE で継続、3 回目は継続せず終了。
+    mock.push_text(&format!("{C898_1}\u{26a1}\nCONTINUE"));
+    mock.push_text(&format!("{C898_2}\u{26a1}\nCONTINUE"));
+    mock.push_text(&format!("{C898_3}\u{26a1}"));
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let (_client, _address, session_id) = wire_instance(&core, &fixture, nostr_config(None)).await;
+
+    let ev = "d8".repeat(32);
+    fixture.append_line(&mention_event(&ev, "3回に分けて投稿して reply使わずに"));
+
+    // (i) 3 分割の全 say が standalone post として配送される（途中発話 1回目/2回目も届く）。
+    let delivered = {
+        let buf = buf.clone();
+        wait_until(move || {
+            let says = captured(&buf);
+            let has = |needle: &str| {
+                says.iter()
+                    .any(|c| c.kind == "standalone" && c.body.contains(needle))
+            };
+            has(C898_1) && has(C898_2) && has(C898_3)
+        })
+        .await
+    };
+    assert!(
+        delivered,
+        "CONTINUE 途中イテレーションの発話が say 配送されない: {:?}",
+        captured(&buf)
+    );
+
+    // (ii) 配送された say の本文に CONTINUE マーカーが残らない（§11.6）。
+    let c898_says: Vec<CapturedSay> = captured(&buf)
+        .into_iter()
+        .filter(|c| c.body.contains("C898-"))
+        .collect();
+    assert!(
+        c898_says.iter().all(|c| !c.body.contains("CONTINUE")),
+        "say 本文に CONTINUE が残留した: {c898_says:?}"
+    );
+
+    // (iii) LLM は 3 回呼ばれる（末尾 CONTINUE が 2 回の追加イテレーションを起こす）。
+    assert_eq!(
+        mock.system_prompts().len(),
+        3,
+        "末尾 CONTINUE で LLM が 3 回呼ばれていない"
+    );
+
+    // (iv) memory_sessions に 3 件の speech が保存され、いずれにも CONTINUE が残らない。
+    let speeches: Vec<String> = {
+        let conn = core.extgate.db.lock().unwrap();
+        opencrab_db::queries::list_session_logs_by_session(&conn, &session_id)
+            .unwrap()
+            .into_iter()
+            .filter(|l| l.log_type == "speech" && l.content.contains("C898-"))
+            .map(|l| l.content)
+            .collect()
+    };
+    assert_eq!(
+        speeches.len(),
+        3,
+        "途中イテレーションの発話が memory_sessions に保存されていない: {speeches:?}"
+    );
+    assert!(
+        speeches.iter().all(|s| !s.contains("CONTINUE")),
+        "保存された speech に CONTINUE が残留した: {speeches:?}"
+    );
+}
+
+// ==================== (#898 §13.1 j) 途中配送失敗で継続を止める ====================
+//
+// DESIGN-TURN-CONTINUATION.md §13.1 j「途中イテレーションの投稿が配送失敗（ゲート error）→
+// 既存の発話失敗経路（❌/turn_failed）・継続は止める（失敗を隠して次に進まない）」。
+// 観測境界: LLM 呼び出し回数（継続が止まれば 1 回だけ・2/3 回目のイテレーションへ進まない）。
+
+const J898_1: &str = "J898-1回目。まず一つ";
+const J898_2: &str = "J898-2回目。次いこう";
+const J898_3: &str = "J898-3回目。これで最後";
+
+#[tokio::test]
+async fn scenario_continue_intermediate_delivery_failure_stops_continuation() {
+    let buf = install_capture();
+    let mock = Arc::new(FifoMock::new());
+    mock.push_text(&format!("{J898_1}\u{26a1}\nCONTINUE"));
+    mock.push_text(&format!("{J898_2}\u{26a1}\nCONTINUE"));
+    mock.push_text(&format!("{J898_3}\u{26a1}"));
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    // 途中発話（say）の配送をゲート error（disconnect）にする。
+    core.extgate
+        .probe
+        .fail_say_write
+        .store(true, Ordering::SeqCst);
+
+    let fixture = Fixture::new();
+    let (_client, _address, _session_id) = wire_instance(&core, &fixture, nostr_config(None)).await;
+
+    let ev = "e9".repeat(32);
+    fixture.append_line(&mention_event(&ev, "3回に分けて・途中で配送失敗"));
+
+    // 少なくとも 1 回目のイテレーションは走る。
+    let started = {
+        let mock = mock.clone();
+        wait_until(move || !mock.system_prompts().is_empty()).await
+    };
+    assert!(started, "最初のイテレーションすら走っていない");
+
+    // 追加イテレーションが走らないことを確認する猶予（走ってしまうなら継続を止めていない）。
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        mock.system_prompts().len(),
+        1,
+        "途中配送失敗後も継続してしまった（§13.1 j: 継続を止めていない）"
+    );
+    let _ = &buf;
+}

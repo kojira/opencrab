@@ -66,6 +66,9 @@ croner = "3.0.1"
 chrono-tz = "0.10.4"
 
 [dev-dependencies]
+# #898 §13.1 j: 途中配送失敗（GateProbe.fail_say_write）を qc_harness_e2e で注入するため。
+# dev-dependency なので通常/本番ビルドには probe（failure injection）は載らない。
+opencrab-extgate = { workspace = true, features = ["extgate-probe"] }
 # QC ハーネス E2E（qc_harness_e2e）が nostr gateway の provision 形を組むため。
 opencrab-nostr = { workspace = true }
 tempfile = { workspace = true }
