@@ -2935,6 +2935,33 @@ mod tests {
         assert_eq!(result.response, BODY, "途中出現は本文をそのまま残す");
     }
 
+    /// (f2) §11.7: 同一行に他の文字がある CONTINUE は継続マーカーではない（末尾行が単独で
+    /// ないため剥がさず・継続せず・本文そのまま）。chat 1。
+    #[tokio::test]
+    async fn continue_marker_f2_same_line_marker_not_continued() {
+        use std::sync::atomic::Ordering;
+
+        const BODY: &str = "確認して返信します CONTINUE";
+        let (llm, chat_calls) =
+            MockLlm::counting(vec![resp(Some(BODY), vec![]), text_response("二回目")]);
+        let executor = MockExecutor::new();
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+        engine.set_tool_dispatcher(Arc::new(RecordingDispatcher::new(&[])));
+
+        let result = engine
+            .run("system", "説明して", "test-model")
+            .await
+            .expect("同一行併記は継続せず最終応答になる");
+
+        assert_eq!(
+            chat_calls.load(Ordering::SeqCst),
+            1,
+            "最終行が CONTINUE 単独でなければ継続しない"
+        );
+        assert_eq!(result.iterations, 1);
+        assert_eq!(result.response, BODY, "同一行併記は本文そのまま（マーカー扱いしない）");
+    }
+
     /// (g) NO_REPLY＋CONTINUE 同時末尾 → NO_REPLY 優先で終端（継続しない・chat 1）。
     #[tokio::test]
     async fn continue_marker_g_no_reply_wins_over_continue() {

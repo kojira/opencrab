@@ -142,10 +142,12 @@ mod tests {
     }
 
     #[test]
-    fn tail_marker_after_space_is_stripped() {
+    fn same_line_marker_is_not_stripped() {
+        // §11.7: 継続は content の最終行が CONTINUE 単独の時だけ。同一行に他の文字が
+        // あれば継続マーカーではない（剥がさず本文のまま残す）。
         let m = strip_continue_marker("作業を続ける CONTINUE");
-        assert!(m.at_tail());
-        assert_eq!(m.kept(), "作業を続ける");
+        assert!(!m.at_tail(), "同一行併記は継続マーカーではない");
+        assert_eq!(m.kept(), "作業を続ける CONTINUE");
     }
 
     #[test]
