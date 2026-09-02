@@ -380,6 +380,15 @@ pub fn build_agent_context(
          2. If your last message already covers the same result → NO_REPLY\n\
          3. Only respond if you have genuinely NEW information to report\n\
          \n\
+         ## Continuing your turn\n\
+         \n\
+         Speaking is fire-and-forget: after a response that only speaks, you are NOT\n\
+         called again. If you want to keep working after speaking (look something up,\n\
+         post a second message, wait for a tool), end your response with `CONTINUE`\n\
+         on its own line — you will be called again in this same turn with your\n\
+         speech already delivered. Without `CONTINUE` and without a tool call, the\n\
+         turn ends. Never promise to reply \"later\".\n\
+         \n\
          ## Memory & Context\n\
          \n\
          Long conversations are automatically compacted. When this happens, older messages \
@@ -3056,6 +3065,40 @@ mod no_forced_reply_tests {
         assert!(
             !prompt.contains("他のBotが話している場合"),
             "peer-type silence condition still present:\n{prompt}"
+        );
+    }
+
+    /// #890 PR2（§11.2）: ターン継続マーカーの使い方を system prompt で明示する。
+    /// 「## Continuing your turn」見出しと CONTINUE の指示が入り、既存の Async Behavior 文
+    /// （ツール結果は後で届く）は残る。
+    #[test]
+    fn system_prompt_explains_continue_marker() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let (prompt, _name) =
+            build_agent_context(&conn, "a1", &opencrab_actions::CallerIdentity::Owner);
+
+        // 注: prompt の prose は各行末 `\n\` が文中に literal 改行を入れる house style の
+        // ため、assert は 1 行内に収まる断片で確認する（長い文全体を連続一致で見ない）。
+        assert!(
+            prompt.contains("## Continuing your turn"),
+            "継続マーカーの見出しが system prompt に無い:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("on its own line"),
+            "CONTINUE をその行単独で置く指示が無い:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("`CONTINUE`"),
+            "CONTINUE トークンの言及が無い:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("Never promise to reply"),
+            "「後で返す」を禁じる指示が無い:\n{prompt}"
+        );
+        // 既存の非同期説明（ツール結果は後で届く）は残す。
+        assert!(
+            prompt.contains("When you call a tool, the result arrives later"),
+            "既存の Async Behavior 文が失われている:\n{prompt}"
         );
     }
 }
