@@ -175,7 +175,6 @@ async fn resume_v3_turn<R: AgentRuntime>(sink: ExtgateCompletionSink<R>, ev: Sub
             let effect = adjust_inbound_effect(sink.delivery_mode, effect);
             apply_delivery_effect(
                 &sink.state,
-                &sink.runtime,
                 &sink.instance_id,
                 &sink.binding_id,
                 &sink.agent_id,

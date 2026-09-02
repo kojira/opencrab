@@ -177,15 +177,25 @@ async fn run_rest_continuation(
 
     match result {
         Ok(engine_result) => {
-            if let Ok(conn) = state.db.lock() {
-                crate::transcript::record_rest_agent_reply(
-                    &conn,
-                    &agent_id,
-                    &session_id,
-                    &engine_result.response,
-                    engine_result.iterations,
-                    engine_result.tool_calls_made,
-                );
+            // #899: 保存前に NO_REPLY 終端解釈。沈黙は speech を残さない。
+            if let Some(body) = opencrab_actions::visible_speech_after_markers(
+                &engine_result.response,
+                opencrab_actions::DeliveryContext {
+                    session_id: &session_id,
+                    agent_id: &agent_id,
+                    origin: "rest",
+                },
+            ) {
+                if let Ok(conn) = state.db.lock() {
+                    crate::transcript::record_rest_agent_reply(
+                        &conn,
+                        &agent_id,
+                        &session_id,
+                        &body,
+                        engine_result.iterations,
+                        engine_result.tool_calls_made,
+                    );
+                }
             }
         }
         Err(e) => {
@@ -565,14 +575,25 @@ pub async fn send_agent_message(
     // 10. Handle result.
     match result {
         Ok(engine_result) => {
-            // Log agent response.
-            {
+            // #899: 保存/返却前に NO_REPLY 終端解釈（配送層 3 箇所と同じ単一実装）を通す。
+            // 沈黙（前段が空）は speech を残さず responses も返さない。前段が本文なら本文のみ。
+            let speech = opencrab_actions::visible_speech_after_markers(
+                &engine_result.response,
+                opencrab_actions::DeliveryContext {
+                    session_id: &session_id,
+                    agent_id: &id,
+                    origin: "rest",
+                },
+            );
+
+            // Log agent response（沈黙でなければ本文のみ）。
+            if let Some(body) = &speech {
                 let conn = state.db.lock().unwrap();
                 crate::transcript::record_rest_agent_reply(
                     &conn,
                     &id,
                     &session_id,
-                    &engine_result.response,
+                    body,
                     engine_result.iterations,
                     engine_result.tool_calls_made,
                 );
@@ -582,7 +603,9 @@ pub async fn send_agent_message(
             // 最後の subtask 決着時に RestCompletionSink が完了させる）。
             complete_session_if_idle(&state.db, &session_id, &subtask_registry);
 
-            // #898 §13.1 d: 途中発話（順序保持）→ 最終応答 の順で responses に載せる。
+            // #898 §13.1 d: 途中発話（順序保持）→ 最終応答 の順で responses に載せる。途中発話は
+            // 本文ありのみ（空 CONTINUE はフック未発火）。最終は #899 の NO_REPLY 終端解釈で本文が
+            // あるときだけ載せる（沈黙は載せない）。
             let mut responses_json: Vec<serde_json::Value> = intermediate_speeches
                 .lock()
                 .map(|g| {
@@ -591,10 +614,12 @@ pub async fn send_agent_message(
                         .collect()
                 })
                 .unwrap_or_default();
-            responses_json.push(serde_json::json!({
-                "agent_id": id,
-                "content": engine_result.response,
-            }));
+            if let Some(body) = &speech {
+                responses_json.push(serde_json::json!({
+                    "agent_id": id,
+                    "content": body,
+                }));
+            }
             Json(serde_json::json!({
                 "session_id": session_id,
                 "caller_type": caller_type,

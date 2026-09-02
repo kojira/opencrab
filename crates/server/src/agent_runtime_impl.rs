@@ -126,12 +126,6 @@ impl AgentRuntime for AppState {
         self.subtask_registries.registry_for(session_id)
     }
 
-    fn record_agent_no_reply(&self, agent_id: &str, session_id: &str) {
-        if let Ok(conn) = self.db.lock() {
-            crate::transcript::record_agent_no_reply(&conn, agent_id, session_id);
-        }
-    }
-
     // ---- 転記（#42: 行の形は transcript モジュールが所有。#158 S3 で gateway 非依存に）
 
     /// #284 P0-3: ユーザー発言の記録だけは成否を返す（他の転記は best-effort のまま）。

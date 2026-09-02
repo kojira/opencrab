@@ -137,23 +137,6 @@ impl AgentRuntime for TestRuntime {
     fn subtask_registry_for(&self, session_id: &str) -> opencrab_actions::SubtaskRegistry {
         self.registries.registry_for(session_id)
     }
-    fn record_agent_no_reply(&self, agent_id: &str, session_id: &str) {
-        let conn = self.db.lock().unwrap();
-        let _ = opencrab_db::queries::insert_session_log(
-            &conn,
-            &opencrab_db::queries::SessionLogRow {
-                id: None,
-                agent_id: agent_id.to_string(),
-                session_id: session_id.to_string(),
-                log_type: "speech".to_string(),
-                content: "NO_REPLY".to_string(),
-                speaker_id: Some(agent_id.to_string()),
-                turn_number: None,
-                metadata_json: Some(r#"{"no_reply":true}"#.into()),
-                created_at: None,
-            },
-        );
-    }
     fn record_inbound_message(
         &self,
         _source: TranscriptSource,
@@ -2146,6 +2129,8 @@ async fn tool_driven_inbound_is_no_reply_without_say() {
         .query_row("SELECT COUNT(*) FROM deliveries", [], |r| r.get(0))
         .unwrap();
     assert_eq!(deliveries, 0);
+    // #899: 沈黙（NO_REPLY 終端）は speech として残さない。裸 NO_REPLY を永続すると
+    // conversation_typed が `assistant: 'NO_REPLY'` としてモデルへ再注入する。
     let no_reply: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM memory_sessions WHERE content = 'NO_REPLY'",
@@ -2153,7 +2138,10 @@ async fn tool_driven_inbound_is_no_reply_without_say() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(no_reply, 1);
+    assert_eq!(
+        no_reply, 0,
+        "沈黙ターンで NO_REPLY 行を永続してはならない（#899）"
+    );
 }
 
 #[tokio::test]

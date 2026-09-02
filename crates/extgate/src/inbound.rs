@@ -973,7 +973,6 @@ fn enqueue_turn<R: AgentRuntime>(
                         // bundle は None（gateway が standalone post で publish・row292）。
                         apply_delivery_effect(
                             &state,
-                            &runtime,
                             &instance_id,
                             &binding_id,
                             &agent_id,

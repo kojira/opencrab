@@ -116,9 +116,6 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
     /// `cancel_subtask` と同じ Arc を見るために使う。新機構ではない。
     fn subtask_registry_for(&self, session_id: &str) -> crate::SubtaskRegistry;
 
-    /// NO_REPLY（沈黙の明示）を記録する（best-effort）。
-    fn record_agent_no_reply(&self, agent_id: &str, session_id: &str);
-
     /// ゲートウェイから受信した発言をセッションログへ記録する。**記録できたら `true`**。
     ///
     /// 由来（`metadata_json` の `source`）は [`TranscriptSource`] で受ける。行の形は

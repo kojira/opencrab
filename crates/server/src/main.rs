@@ -9,6 +9,9 @@ use tokio::sync::watch;
 mod intake_process;
 mod scheduler;
 
+#[cfg(test)]
+mod bin_test_support;
+
 // #599: ハートビートの発火本体（`run_one_heartbeat`）と表示ラベル
 // `HEARTBEAT_NOSTR_CHANNEL_LABEL` は lib（`opencrab_server::heartbeat_fire`）へ移した。
 // scheduler（時刻発火）と `run_my_heartbeat`（手動発火）が同じ 1 つの関数を共有するため。

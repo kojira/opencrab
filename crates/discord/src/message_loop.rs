@@ -1324,7 +1324,7 @@ async fn handle_agent_response<T: AgentRunner, G: ReactionAdder>(
     match effect {
         DeliveryEffect::NoReply => {
             debug!(agent_id = %agent_id, "Agent returned NO_REPLY");
-            state.record_agent_no_reply(agent_id, session_id);
+            // #899: 沈黙は speech を残さない（裸 NO_REPLY を永続すると typed 履歴へ再注入される）。
             // 黙ったことを投稿者に見せる（#317）。失敗しても応答処理は続けない
             // ＝ NO_REPLY のまま終わるのは変わらない。
             add_reaction_non_fatal(
@@ -1473,7 +1473,7 @@ async fn process_subtask_completed<T: AgentRunner>(
         },
     ) {
         DeliveryEffect::NoReply => {
-            state.record_agent_no_reply(&agent_id, &session_id);
+            // #899: 沈黙は speech を残さない。
         }
         DeliveryEffect::Text {
             body,
@@ -2029,7 +2029,7 @@ async fn process_interaction_response<T: AgentRunner>(
         },
     ) {
         DeliveryEffect::NoReply => {
-            state.record_agent_no_reply(&agent_id, &session_id);
+            // #899: 沈黙は speech を残さない。
         }
         DeliveryEffect::Text {
             body,
