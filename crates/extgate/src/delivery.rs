@@ -88,6 +88,32 @@ pub async fn apply_delivery_effect<R: AgentRuntime>(
     }
 }
 
+/// #898 §12.2/§13.1: 末尾 CONTINUE で継続する途中イテレーションの発話を、最終応答と同じ
+/// 経路（[`send_text`] = say 配送＋memory_sessions speech 保存）で 1 件配送・保存する。
+/// engine の継続分岐フックがループ中に await し、`Err` は継続を止める（§13.1 j: 失敗を隠さない）。
+/// 呼び出し側（extgate inbound）が `delivery_mode` で say 抑止（ToolDriven）を判断してから呼ぶ。
+#[allow(clippy::too_many_arguments)]
+pub async fn deliver_intermediate_say(
+    state: &Arc<ExtgateState>,
+    instance_id: &str,
+    binding_id: &str,
+    agent_id: &str,
+    session_id: &str,
+    body: &str,
+    reply_target: Option<&str>,
+) -> Result<(), GateError> {
+    send_text(
+        state,
+        instance_id,
+        binding_id,
+        agent_id,
+        session_id,
+        body,
+        reply_target,
+    )
+    .await
+}
+
 async fn send_text(
     state: &Arc<ExtgateState>,
     instance_id: &str,

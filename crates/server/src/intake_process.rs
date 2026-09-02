@@ -186,6 +186,36 @@ async fn process_agent_inbox(state: &AppState, stored_agent_id: &str) {
         "intake",
         CallerIdentity::Owner,
     );
+    // #898 §13.1 e: 末尾 CONTINUE の途中発話も、次イテレーション前に intake セッションへ speech
+    // として保存する（intake は外部配送しないので保存のみ・§12.6 の NO_REPLY 非保存は継続分岐へ
+    // 入らないので対象外）。最終応答は下で保存する（従来どおり）。
+    let req = {
+        let hook_db = state.db.clone();
+        let hook_agent = resolved_agent_id.clone();
+        let hook_session = session_id.clone();
+        req.with_on_continuation_speech(std::sync::Arc::new(move |speech: String| {
+            let db = hook_db.clone();
+            let agent = hook_agent.clone();
+            let session = hook_session.clone();
+            Box::pin(async move {
+                if let Ok(conn) = db.lock() {
+                    let log = SessionLogRow {
+                        id: None,
+                        agent_id: agent.clone(),
+                        session_id: session,
+                        log_type: "speech".to_string(),
+                        content: speech,
+                        speaker_id: Some(agent),
+                        turn_number: None,
+                        metadata_json: None,
+                        created_at: None,
+                    };
+                    let _ = insert_session_log(&conn, &log);
+                }
+                Ok(())
+            })
+        }))
+    };
     match run_agent_response(state, req).await {
         Ok(result) => {
             // 応答を監査用に記録し、処理済みを刻む（Ok のときだけ / at-least-once）。

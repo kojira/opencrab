@@ -1692,6 +1692,12 @@ pub async fn run_agent_response(
         engine.set_on_response_text(move |text: String| cb(text));
     }
 
+    // #898: 継続分岐（末尾 CONTINUE の text-only イテレーション）の途中発話フックを転記する。
+    // core / actions で型は構造一致（配送・保存を await し、失敗は継続を止める）。
+    if let Some(cb) = req.on_continuation_speech {
+        engine.set_on_continuation_speech(cb);
+    }
+
     // sleep のメンテナンスラン（#393）はここを配線しない = 生ログ（`memory_sessions`）に
     // 1 行も書かない。整備作業のターンは本人の体験ではなく、記録すると次の宣言ランが
     // 「記憶を整理した」という記憶を作り始める。

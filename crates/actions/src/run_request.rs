@@ -13,6 +13,17 @@ use crate::subtask::{SubtaskCompletionSink, SubtaskRegistry};
 use crate::subtask_notify::SubtaskRunNotifier;
 use crate::traits::CallerIdentity;
 
+/// #898: 継続分岐の途中発話を配送・保存する非同期フック（core の同名型と一致させる）。
+/// 失敗（Err）は継続を止めてターンを失敗させる（§13.1 j）。
+pub type ContinuationSpeechHook = Arc<
+    dyn Fn(
+            String,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// 走行中注入（#289）の対象範囲（#323 / B2）。
 ///
 /// #289 の走行中注入はターン開始後に届いたユーザー発言を、走っているターンの入力へ
@@ -61,6 +72,11 @@ pub struct RunRequest {
     pub trigger_message_id: Option<String>,
     /// 応答テキスト確定時の即時コールバック（Discord への先行送信等）。
     pub on_response_text: Option<Arc<dyn Fn(String) + Send + Sync>>,
+    /// #898: 末尾 CONTINUE で継続する text-only イテレーションの途中発話を、次イテレーション前に
+    /// **ループ中で配送・保存する**非同期フック（§12.2/§13.1 j）。REST は responses への追加、
+    /// extgate V3 は途中発話配送、intake は保存を行い、配送失敗（Err）は継続を止めてターンを
+    /// 失敗させる。`on_response_text` は最終・text+tool でも発火するため区別できず流用不可。
+    pub on_continuation_speech: Option<ContinuationSpeechHook>,
     /// 自動 dispatch（非ブロック / RFC #152 S3a）の完了再注入 sink（gateway 別）。
     /// Some のとき `run_agent_response` は depth0 でメインエンジンへ dispatcher を
     /// 注入し、dispatch 対象ツールを background subtask 化する。None なら従来どおり
@@ -151,6 +167,7 @@ impl RunRequest {
             depth: 0,
             trigger_message_id: None,
             on_response_text: None,
+            on_continuation_speech: None,
             completion_sink: None,
             subtask_registry: None,
             reply_target: None,
@@ -184,6 +201,12 @@ impl RunRequest {
 
     pub fn with_on_response_text(mut self, cb: Arc<dyn Fn(String) + Send + Sync>) -> Self {
         self.on_response_text = Some(cb);
+        self
+    }
+
+    /// #898: 継続分岐専用の途中発話フック（配送・保存・失敗伝播）を設定する。
+    pub fn with_on_continuation_speech(mut self, cb: ContinuationSpeechHook) -> Self {
+        self.on_continuation_speech = Some(cb);
         self
     }
 

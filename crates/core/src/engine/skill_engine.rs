@@ -20,6 +20,14 @@ use opencrab_llm_types::{
 type LogCallback = Box<dyn Fn(&LlmCallLog) + Send + Sync>;
 /// ツール結果受信フック: (tool_call_id, tool_name, result_json, is_error)。
 type ToolResultHook = Arc<dyn Fn(String, String, String, bool) + Send + Sync>;
+/// #898: 継続分岐（末尾 CONTINUE の text-only イテレーション）で剥がした途中発話を
+/// **配送・保存する非同期フック**。配送はループ中に行い、失敗（Err）は継続を止める
+/// （§13.1 j: 失敗を隠して次に進まない）。REST/extgate/intake が各レーンの配線を渡す。
+type ContinuationSpeechHook = Arc<
+    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// The LLM-driven action loop engine.
 ///
@@ -45,6 +53,12 @@ pub struct SkillEngine {
     pub log_callback: Option<LogCallback>,
     /// Optional callback invoked with response text on every LLM reply.
     pub on_response_text: Option<Arc<dyn Fn(String) + Send + Sync>>,
+    /// #898: 末尾 CONTINUE で継続する text-only イテレーションで剥がした途中発話を
+    /// 配送・保存する非同期フック。`on_response_text` は最終応答・text+tool 併記でも
+    /// 発火するため区別できず流用不可（二重配送・二重保存を招く）。このフックは **継続分岐
+    /// （マーカー剥がし後・次イテレーション前）でのみ** 非空の本文で await され、Err なら
+    /// 継続を止めてターンを失敗させる（§13.1 j）。
+    pub on_continuation_speech: Option<ContinuationSpeechHook>,
     /// Callbacks invoked when the assistant produces tool calls: (assistant_content, tool_calls_json).
     ///
     /// **複数**持つ（#397）。購読者は独立している（subtask の進捗実況・session_logs への
@@ -109,6 +123,7 @@ impl SkillEngine {
             allowed_actions: None,
             log_callback: None,
             on_response_text: None,
+            on_continuation_speech: None,
             on_tool_call: Vec::new(),
             on_tool_result: Vec::new(),
             reasoning_effort: None,
@@ -245,6 +260,12 @@ impl SkillEngine {
     /// Set the on_response_text callback, invoked with response text on every LLM reply.
     pub fn set_on_response_text(&mut self, cb: impl Fn(String) + Send + Sync + 'static) {
         self.on_response_text = Some(Arc::new(cb));
+    }
+
+    /// #898: 継続分岐（末尾 CONTINUE の text-only イテレーション）専用の途中発話フックを設定する。
+    /// マーカー剥がし後・次イテレーション前に、非空の本文で await される。Err は継続を止める。
+    pub fn set_on_continuation_speech(&mut self, cb: ContinuationSpeechHook) {
+        self.on_continuation_speech = Some(cb);
     }
 
     /// Add an on_tool_call callback, invoked when the assistant produces tool calls.
@@ -1049,10 +1070,20 @@ impl SkillEngine {
 
             // #890 §11: 末尾 CONTINUE でこのターンを継続（ツール呼び出しが無い text-only 経路）。
             // 剥がし後の本文を assistant メッセージとして積み（マーカー除去済み・§11.6）、次イテレー
-            // ションへ。発話は on_response_text で配送済み（R7 の fire-and-forget）。本文が空
-            // （CONTINUE 単独）なら何も積まずに次イテレーションへ。上限は既存 max_iterations。
+            // ションへ。本文が空（CONTINUE 単独）なら何も積まずに次イテレーションへ。上限は既存
+            // max_iterations。
             if continue_requested {
                 if let Some(ref c) = content {
+                    // #898 §12.2/§13.1 j: 剥がし後の途中発話を、次イテレーション前に**ループ中で
+                    // 配送・保存する**（REST responses への追加 / extgate 途中発話配送 / memory_sessions
+                    // speech 保存 / intake 保存）。配送が失敗したら継続を止めてターンを失敗させる
+                    // （失敗を隠して次に進まない）。on_response_text は最終・text+tool でも発火する
+                    // ため区別できず流用しない（最終二重配送・text+tool 二重保存を避ける）。
+                    if let Some(ref cb) = self.on_continuation_speech {
+                        cb(c.clone()).await.map_err(|e| {
+                            anyhow::anyhow!("continuation speech delivery failed: {e:#}")
+                        })?;
+                    }
                     messages.push(Message {
                         role: Role::Assistant,
                         content: Some(MessageContent::Text(c.clone())),
