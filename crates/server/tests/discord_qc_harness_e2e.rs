@@ -18,6 +18,7 @@
 //! 非 nostr kind の said admission は generic 経路（whitelist + owner/dm）を通る（nostr hooks は張らない）。
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Once, OnceLock};
 use std::time::Duration;
 
@@ -184,12 +185,16 @@ impl Fixture {
 
 struct RoutedMock {
     reqs: Mutex<Vec<String>>,
+    /// §13 #14（M_REPLY_NR）の巡目カウンタ。1 巡目 reply、以降 NO_REPLY で締める
+    /// （DI op 後の has_tool_role が当てにならないため生成回数で分岐する）。
+    reply_nr_calls: AtomicUsize,
 }
 
 impl RoutedMock {
     fn new() -> Self {
         Self {
             reqs: Mutex::new(Vec::new()),
+            reply_nr_calls: AtomicUsize::new(0),
         }
     }
     fn request_texts(&self) -> Vec<String> {
@@ -217,6 +222,9 @@ fn long_say_body() -> String {
 }
 const B_SAY: &str = "saybody-alpha 通常発言だよ";
 const B_REPLY: &str = "replybody-beta 返信本文だよ";
+// §13 #14（reply×N＋NO_REPLY）用。他マーカーの部分文字列にならない独立名。
+const M_REPLY_NR: &str = "RPLNRMARK";
+const B_REPLY_NR: &str = "replybody-nr899 返信してから黙る";
 const EMOJI: &str = "👀";
 const FILLER: &str = "fillerbody-omega";
 
@@ -234,6 +242,20 @@ impl LlmProvider for RoutedMock {
     async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
         let text = request_text(&request);
         self.reqs.lock().unwrap().push(text.clone());
+        // §13 #14: reply×N＋NO_REPLY。1 巡目 = reply op ＋ 同一生成 content=NO_REPLY
+        //（process.rs on_tool_call の content-as-speech 経路も検証）。2 巡目以降 = 沈黙で締める。
+        if text.contains(M_REPLY_NR) {
+            let n = self.reply_nr_calls.fetch_add(1, Ordering::SeqCst);
+            return Ok(if n == 0 {
+                tool_call_response_with_content(
+                    "reply",
+                    serde_json::json!({"event": "e1", "text": B_REPLY_NR}),
+                    "NO_REPLY",
+                )
+            } else {
+                text_response("NO_REPLY")
+            });
+        }
         if !has_tool_role(&request) {
             if text.contains(M_REPLY) {
                 return Ok(tool_call_response(
@@ -297,6 +319,19 @@ fn text_response(text: &str) -> ChatResponse {
         },
         created: 0,
     }
+}
+
+/// tool_calls ＋ 同一生成の assistant content を持つ応答（process.rs on_tool_call の
+/// content-as-speech 経路を踏む。§13 #14 / #899）。
+fn tool_call_response_with_content(
+    name: &str,
+    args: serde_json::Value,
+    content: &str,
+) -> ChatResponse {
+    let mut resp = tool_call_response(name, args);
+    // content の型（Option<MessageContent>）差異を避けるため assistant() の content を流用。
+    resp.choices[0].message.content = Message::assistant(content).content;
+    resp
 }
 
 fn tool_call_response(name: &str, args: serde_json::Value) -> ChatResponse {
@@ -912,6 +947,95 @@ async fn scenario_e_no_reply_gets_muted_reaction() {
         "NO_REPLY ターンに 🏁 が誤発火: {:?}",
         captured(&buf)
     );
+
+    // #899 / §12.6: 沈黙決着で 🤐 は付くが、speech='NO_REPLY' の監査行は残さない。
+    // （裸 NO_REPLY を永続すると conversation_typed が assistant 'NO_REPLY' として再注入する。）
+    let no_reply_rows: i64 = {
+        let conn = core.extgate.db.lock().unwrap();
+        conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM memory_sessions WHERE log_type='speech' \
+                 AND speaker_id='{AGENT_ID}' AND content='NO_REPLY'"
+            ),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        no_reply_rows, 0,
+        "NO_REPLY のみのターンで speech='NO_REPLY' が保存された（#899・§12.6）: {no_reply_rows}"
+    );
+}
+
+// ==================== (g) reply×N＋NO_REPLY（§13 #14）: reply 保存・NO_REPLY 行なし・🤐なし ====================
+
+/// §13 #14: 発話 op（reply）を出したターンの末尾が NO_REPLY でも、reply は配送/保存され、
+/// 末尾 NO_REPLY は speech 行を足さない（#899）。発話があるので 🤐 は付かない。
+///
+/// | 観測点 | 期待 |
+/// |---|---|
+/// | reply 配送（dry-run kind=reply） | 1（本文 B_REPLY_NR） |
+/// | speech='NO_REPLY' 保存 | 0 |
+/// | 🤐（system_reaction）on 発端 | 0（発話ありターン） |
+///
+/// 現 tip で赤: 末尾 NO_REPLY が record_agent_no_reply で `content='NO_REPLY'` を保存する。
+#[tokio::test]
+async fn scenario_g_reply_then_no_reply_saves_reply_not_no_reply() {
+    let buf = install_capture();
+    let mock = Arc::new(RoutedMock::new());
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    // 705: 同一生成で reply op ＋ content=NO_REPLY を出し、2 巡目 NO_REPLY で締める。
+    fixture.append_message("705", &format!("{M_REPLY_NR} 返信してから黙って"));
+
+    // reply（一意本文）が配送されるまで待つ。on_tool_call の content 保存は reply 実行の
+    // **前**に走るので、この時点で（現 tip なら）NO_REPLY 行は既に書かれている。
+    let ok = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "reply" && c.body.contains(B_REPLY_NR))
+        })
+        .await
+    };
+    assert!(ok, "reply(705) が配送されない: {:?}", captured(&buf));
+
+    // reply は 1 回だけ（一意本文なので他テスト混線なし）。
+    let reply_count = captured(&buf)
+        .iter()
+        .filter(|c| c.kind == "reply" && c.body.contains(B_REPLY_NR))
+        .count();
+    assert_eq!(
+        reply_count,
+        1,
+        "reply が 1 回配送されていない（§13 #14）: {:?}",
+        captured(&buf)
+    );
+
+    // #899: reply があっても末尾 / 同一生成の NO_REPLY は speech='NO_REPLY' 行を足さない
+    //（on_tool_call の content 保存経路・配送層 NoReply の両方）。
+    let no_reply_rows: i64 = {
+        let conn = core.extgate.db.lock().unwrap();
+        conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM memory_sessions WHERE log_type='speech' \
+                 AND speaker_id='{AGENT_ID}' AND content='NO_REPLY'"
+            ),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        no_reply_rows, 0,
+        "reply×N＋NO_REPLY のターンで speech='NO_REPLY' が保存された（#899・§13 #14）: {no_reply_rows}"
+    );
+    // 注: 「発話ありターンに 🤐 を付けない」は既存 scenario_d が担保（本テストは #899 の保存側に集中）。
 }
 
 // ==================== (f) 2000 字超 say は複数チャンクで逐次配送される ====================

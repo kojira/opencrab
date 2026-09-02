@@ -286,6 +286,37 @@ fn truncate_chars(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
+    /// #899 / §12.6: intake 消化ターンの応答が NO_REPLY のみなら speech を保存しない
+    /// （生保存経路 `process_agent_inbox` も終端処理を通す）。現 tip で赤。
+    #[tokio::test]
+    async fn no_reply_only_intake_turn_persists_no_speech_899() {
+        let agent = "intake-agent-899";
+        let mock = std::sync::Arc::new(crate::bin_test_support::FixedTextMock::new("NO_REPLY"));
+        let state = crate::bin_test_support::app_state_with_agent(mock, agent);
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::enqueue_inbox_event(
+                &conn,
+                &opencrab_db::queries::InboxInsert {
+                    id: "ev-1".to_string(),
+                    agent_id: agent.to_string(),
+                    source: "test-source".to_string(),
+                    event_type: "comment.created".to_string(),
+                    dedup_key: "test-source:ev-1".to_string(),
+                    payload_json: "{\"text\":\"hi\"}".to_string(),
+                },
+            )
+            .unwrap();
+        }
+        process_agent_inbox(&state, agent).await;
+        let session_id = format!("{INTAKE_SESSION_PREFIX}{agent}");
+        assert_eq!(
+            crate::bin_test_support::count_no_reply_speech(&state, &session_id, agent),
+            0,
+            "intake で NO_REPLY のみが speech 保存された（#899・§12.6）"
+        );
+    }
+
     fn row(id: &str, source: &str, ev: &str, payload: &str) -> AgentInboxRow {
         AgentInboxRow {
             id: id.to_string(),

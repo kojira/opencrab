@@ -746,6 +746,27 @@ mod tests {
 
     const AGENT_UUID: &str = "11111111-1111-4111-8111-111111111111";
 
+    /// #899 / §12.6: schedule 発火ターンの応答が NO_REPLY のみなら speech を保存しない
+    /// （生保存経路 `run_one_schedule` も終端処理を通す）。現 tip で赤（生応答 "NO_REPLY" が
+    /// `content='NO_REPLY'` として保存される）。
+    #[tokio::test]
+    async fn no_reply_only_schedule_turn_persists_no_speech_899() {
+        let agent = "sched-agent-899";
+        let mock = std::sync::Arc::new(crate::bin_test_support::FixedTextMock::new("NO_REPLY"));
+        let state = crate::bin_test_support::app_state_with_agent(mock, agent);
+        let session_id = format!("schedule-{agent}");
+        let out = run_one_schedule(&state, agent, &session_id, "定時メッセージ").await;
+        assert!(
+            out.is_some(),
+            "schedule ターンが走らない（テスト前提の破綻）"
+        );
+        assert_eq!(
+            crate::bin_test_support::count_no_reply_speech(&state, &session_id, agent),
+            0,
+            "schedule で NO_REPLY のみが speech 保存された（#899・§12.6）"
+        );
+    }
+
     /// テスト用の登録簿: **本番と同じ源**（`register_production_descriptors`）で descriptor を
     /// 積む（#628）。本番へ transport を足せば scheduler テストの登録簿も自動で追随する
     /// （各所での register の散らしを避ける・ブロッカー対応）。rebuild_entries は登録簿へ
