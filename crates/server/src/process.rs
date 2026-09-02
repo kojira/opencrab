@@ -3058,6 +3058,30 @@ mod no_forced_reply_tests {
             "peer-type silence condition still present:\n{prompt}"
         );
     }
+
+    /// #890 PR2（§11.2）: ターン継続マーカーの使い方を system prompt で明示する。
+    /// 「## Continuing your turn」見出しと CONTINUE の指示が入り、既存の Async Behavior 文
+    /// （ツール結果は後で届く）は残る。
+    #[test]
+    fn system_prompt_explains_continue_marker() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let (prompt, _name) =
+            build_agent_context(&conn, "a1", &opencrab_actions::CallerIdentity::Owner);
+
+        assert!(
+            prompt.contains("## Continuing your turn"),
+            "継続マーカーの見出しが system prompt に無い:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("end your response with `CONTINUE` on its own line"),
+            "CONTINUE の使い方指示が無い:\n{prompt}"
+        );
+        // 既存の非同期説明（ツール結果は後で届く）は残す。
+        assert!(
+            prompt.contains("When you call a tool, the result arrives later"),
+            "既存の Async Behavior 文が失われている:\n{prompt}"
+        );
+    }
 }
 
 #[cfg(test)]
