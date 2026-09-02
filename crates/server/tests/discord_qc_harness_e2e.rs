@@ -2781,6 +2781,143 @@ async fn scenario_915_spawned_declaration_no_flag_resume_report_gets_flag() {
 }
 
 // ---------------------------------------------------------------------------
+// #915 / §13.3.1【別 session の subtask 進行中 → 本ターンの投稿に 🏁 0（エージェント単位 idle）】:
+// チャンネル A（session A）で subtask を起こし**保留**（決着させない）。その状態でチャンネル B
+// （session B）へ通常メッセージを送り say を投稿。エージェントに未決着 subtask があるので B の say は
+// idle でない＝🏁 0。現 tip は say 配送ごと（session を見ない）に 🏁 → B の say に付く → **赤**。
+// §13.3.1 案E（agent 単位）確定・§13.3.5 は agent-scope 集計を要ビルド検証と明記。
+// 専用チャンネル 602（spawner）/603（plain）で他テストと分離。
+// ---------------------------------------------------------------------------
+const CHANNEL_XA: &str = "602";
+const CHANNEL_XB: &str = "603";
+const M_XSPAWN: &str = "XSPAWNMARK";
+const M_XSUBTASK: &str = "XSSUBTASKMARK";
+const M_XPLAIN: &str = "XSPLAINMARK";
+const XS_DECL: &str = "xsdecl-Aの宣言投稿";
+const XS_PLAIN: &str = "xsplain-Bの通常発言";
+
+struct CrossSessionHoldMock {
+    release: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for CrossSessionHoldMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let text = request_text(&request);
+        // (C) 背景 subtask の sub-run: release されるまで**保留**（進行中を維持）。
+        if text.contains(M_XSUBTASK) {
+            while !self.release.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            return Ok(text_response("xs-subtask-done"));
+        }
+        // (D) チャンネル B の通常ターン: say を返す。
+        if text.contains(M_XPLAIN) {
+            return Ok(text_response(XS_PLAIN));
+        }
+        // (B) チャンネル A の spawn 後（tool_result 有り）: 宣言 say。
+        if has_tool_role(&request) {
+            return Ok(text_response(XS_DECL));
+        }
+        // (A) チャンネル A の初回: subtask を起こす。
+        if text.contains(M_XSPAWN) {
+            return Ok(tool_call_response(
+                "spawn_subtask",
+                serde_json::json!({
+                    "task": format!("{M_XSUBTASK} 長い処理"),
+                    "timeout_secs": 120,
+                }),
+            ));
+        }
+        Ok(text_response("xsfiller"))
+    }
+}
+
+#[tokio::test]
+async fn scenario_915_other_session_subtask_in_progress_no_flag() {
+    let buf = install_capture();
+    let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mock = Arc::new(CrossSessionHoldMock {
+        release: release.clone(),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    // チャンネル A（session A）: subtask を起こして保留。
+    let fixture_a = Fixture::new();
+    let _client_a = wire_instance_on_channel(&core, &fixture_a, CHANNEL_XA).await;
+    // チャンネル B（session B）: 通常ターン。
+    let fixture_b = Fixture::new();
+    let _client_b = wire_instance_on_channel(&core, &fixture_b, CHANNEL_XB).await;
+
+    fixture_a.append_message_ch("9210", CHANNEL_XA, &format!("{M_XSPAWN} 調べて"));
+
+    // A の宣言 say が出る＝subtask を起こして走行中（保留中）になったことの proxy。
+    let a_ready = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "say" && c.channel == CHANNEL_XA && c.body.contains(XS_DECL))
+        })
+        .await
+    };
+    assert!(
+        a_ready,
+        "A の宣言 say が出ない（subtask 未起動）: {:?}",
+        captured(&buf)
+    );
+
+    // subtask 保留中に B へ通常メッセージ → say を投稿。
+    fixture_b.append_message_ch("9211", CHANNEL_XB, &format!("{M_XPLAIN} 2 足す 2 は?"));
+    let b_ready = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "say" && c.channel == CHANNEL_XB && c.body.contains(XS_PLAIN))
+        })
+        .await
+    };
+    assert!(b_ready, "B の通常 say が出ない: {:?}", captured(&buf));
+    // 決着（🏁 付与）の猶予。この間 subtask は保留のまま（release していない）。
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let b_mid = captured(&buf)
+        .iter()
+        .find(|c| c.kind == "say" && c.channel == CHANNEL_XB && c.body.contains(XS_PLAIN))
+        .map(|c| c.message.clone())
+        .filter(|m| !m.is_empty())
+        .expect("B の say の message id");
+    let completed_on_b = captured(&buf)
+        .iter()
+        .filter(|c| {
+            c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == b_mid
+        })
+        .count();
+
+    // エージェントに未決着 subtask（session A）があるので、B の say には 🏁 を付けない（§13.3.1 案E）。
+    // 現 tip は say 配送ごとに付ける（session を見ない）ため B に付く → 赤。
+    assert_eq!(
+        completed_on_b,
+        0,
+        "🏁 が別 session の subtask 進行中に B の say へ誤付与（agent 単位 idle・§13.3.1）: {:?}",
+        captured(&buf)
+    );
+
+    // 後片付け: subtask を解放して held ループを終わらせる（タスクリーク回避）。
+    release.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+// ---------------------------------------------------------------------------
 // #915 typing【最終投稿後の入力中停止】: 発話ターンで activity ended を受けたら typing keepalive
 // が止まり、失効間隔（8 秒）を跨いでも typing の再送出が 0 であることを観測境界（dry-run
 // kind="typing" のキャプチャ増分）で確定する。単一スレッド実行なので、この待機中に typing が
