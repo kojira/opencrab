@@ -442,7 +442,7 @@ fn shorter_of_reference_or_body(reference: String, body: &str) -> String {
 /// `success` 判定だけでは捕まらない——両経路をここで見る。将来この不変条件を破る新ツール
 /// （`success: true` のまま data の中で失敗を表す等）が入ると失敗が catch-all で「結果 N 文字」へ
 /// 潰れて黙って消えるので、判定をここへ集約し `failures_are_never_summarized_as_success` で固定する。
-fn signals_failure(v: &serde_json::Value, d: &serde_json::Value) -> bool {
+pub(crate) fn signals_failure(v: &serde_json::Value, d: &serde_json::Value) -> bool {
     if v.get("success").and_then(|x| x.as_bool()) != Some(true) {
         return true;
     }
@@ -1104,7 +1104,7 @@ impl ConversationRefs {
         }
     }
 
-    fn event_of(&self, log: &opencrab_db::queries::SessionLogRow) -> Option<usize> {
+    pub(crate) fn event_of(&self, log: &opencrab_db::queries::SessionLogRow) -> Option<usize> {
         external_origin_of(log).and_then(|o| self.events.get(&o).copied())
     }
 
