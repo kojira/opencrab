@@ -18,28 +18,32 @@
 //! memory_sessions 保存件数/本文 ／ LLM 呼び出し回数・イテレーション数 ／
 //! 残留マーカー（NO_REPLY/CONTINUE）／ ゲート反応（🤐/❌）。
 //!
-//! QC core を汚さない: gate 経路は専用 instance/binding を毎回新規採番・agent は `e2e-test-bot`。
-//! のすたろう/くらぶの session には触れない。gate の admission は agent の discord owner を said
-//! author（`LIVE_OWNER`）に合わせ caller=Owner に解決させる。
+//! QC core を汚さない: gate 経路は専用 instance/binding を毎回新規採番・agent は env で指定する
+//! 専用テスト bot。のすたろう/くらぶの session には触れない。gate の admission は agent の discord
+//! owner を said author（`LIVE_OWNER_ID`）に合わせ caller=Owner に解決させる。
+//!
+//! 実在の識別子（agent id・owner id・snowflake 等）はソースに埋めない。すべて env で与える
+//! （既定値も置かない）。公開リポジトリの private-identifier 検査に通すため。
 //!
 //! `#[ignore]`（実 LLM 課金・稼働中 core 必須）。実行例:
 //!
 //! ```sh
 //! OPENCRAB_GATE_OPERATOR_TOKEN="$(cat .../secrets/qc-gate-operator-token)" \
 //!   LIVE_GATE_SOCK=".../runtime/gate.sock" \
+//!   LIVE_AGENT_ID="<agent id>" LIVE_OWNER_ID="<owner id>" \
 //!   LIVE_MODE=gate LIVE_SCENARIO=reply3 \
 //!   cargo test -p opencrab-server --test live_di_smoke -- --ignored --nocapture
 //! ```
 //!
-//! env（既定は localhost の QC 統合構成。環境固有の絶対パスはソースに埋めない）:
+//! env（識別子は既定値なしで**必須**。環境固有の絶対パスもソースに埋めない）:
+//! `LIVE_AGENT_ID`（対象 agent id・**必須**）、
+//! `LIVE_OWNER_ID`（said author / REST user_id・**必須**）、
 //! `OPENCRAB_GATE_OPERATOR_TOKEN`（gate admin Bearer・gate モードで**必須**）、
 //! `LIVE_GATE_SOCK`（gate UDS の絶対パス・gate モードで**必須**）、
 //! `LIVE_MODE`（gate | rest・既定 gate）、
 //! `LIVE_CORE_HTTP`（既定 http://127.0.0.1:18700）、
-//! `LIVE_AGENT`（既定 e2e-test-bot）、
 //! `LIVE_SCENARIO`（reply3 | plain3 | noreply | oneq | sleep60・既定 reply3）、
 //! `LIVE_PROMPT_FILE`（プロンプト差し替え・省略時はシナリオ既定文）、
-//! `LIVE_OWNER`（said author / REST user_id・既定 900000000000000001）、
 //! `LIVE_TIMEOUT_SECS`（ターン観測の上限秒・省略時 sleep60=150 / その他=60）。
 
 use std::collections::HashSet;
@@ -59,6 +63,14 @@ fn env_or(key: &str, default: &str) -> String {
         .ok()
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| default.to_string())
+}
+
+/// 既定値を持たない必須 env（実在の識別子はソースに埋めない）。未設定は分かりやすく panic。
+fn req_env(key: &str) -> String {
+    std::env::var(key)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| panic!("{key} が未設定（識別子は既定値なしの env 必須）"))
 }
 
 fn now_millis() -> u128 {
@@ -310,9 +322,10 @@ impl Observed {
 async fn live_di_smoke() {
     let base = env_or("LIVE_CORE_HTTP", "http://127.0.0.1:18700");
     let mode = env_or("LIVE_MODE", "gate");
-    let agent = env_or("LIVE_AGENT", "e2e-test-bot");
+    // 実在の識別子はソースに埋めない（既定値なしの env 必須・private-identifier 検査対策）。
+    let agent = req_env("LIVE_AGENT_ID");
+    let owner = req_env("LIVE_OWNER_ID");
     let scenario = scenario_for(&env_or("LIVE_SCENARIO", "reply3"));
-    let owner = env_or("LIVE_OWNER", "900000000000000001");
     // gate モードは admin Bearer 必須。rest モードは空でも可（REST は Bearer 不要）。
     let token = std::env::var("OPENCRAB_GATE_OPERATOR_TOKEN").unwrap_or_default();
     let timeout_secs: u64 = std::env::var("LIVE_TIMEOUT_SECS")
@@ -386,13 +399,17 @@ async fn run_gate(
     set_discord_owner_disabled(http, agent, owner).await;
 
     // 3) gate instance（kind=discord・delivery_mode=say）を新規採番して登録。
+    //    guild/channel/self_bot は**合成 fixture**（実 Discord の ID ではない・ルーティング用の
+    //    ダミー）。invoke は外部へ出ないので任意の合成値でよい。実在の識別子は使わない。
     let instance_id = uuid::Uuid::new_v4().to_string();
     let binding_id = uuid::Uuid::new_v4().to_string();
-    let channel = "600";
-    let address = format!("discord-{agent}-500-{channel}");
+    let guild = "500"; // 合成 fixture
+    let channel = "600"; // 合成 fixture
+    let self_bot_id = "111"; // 合成 fixture
+    let address = format!("discord-{agent}-{guild}-{channel}");
     let config_bytes = serde_json::to_vec(&json!({
         "agent_id": agent,
-        "self_bot_id": "111",
+        "self_bot_id": self_bot_id,
         "name": "di-smoke-harness",
         "delivery_mode": "say",
     }))
@@ -434,7 +451,7 @@ async fn run_gate(
         std::path::PathBuf::from(&sock),
         instance_id.clone(),
         1,
-        "111".to_string(),
+        self_bot_id.to_string(),
         config_digest,
         SayPolicy::AcceptToLiveQueue,
         Some(opencrab_discord_gateway::ops::operation_declarations()),
