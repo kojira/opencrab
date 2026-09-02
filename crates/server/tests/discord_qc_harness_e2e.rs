@@ -3501,4 +3501,21 @@ async fn scenario_918_resume_turn_continue_split_delivers_both() {
         own_speech_rows, 3,
         "自 speech 保存行が宣言 1＋報告 2 の 3 行でない（§13.4.2 手順 4）: {own_speech_rows}"
     );
+    // 残留 0（本文側）: 保存された自 speech の本文に CONTINUE が一切含まれない（§13.4.2 手順 3/5）。
+    let continue_in_saved: i64 = {
+        let conn = core.extgate.db.lock().unwrap();
+        conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM memory_sessions WHERE log_type='speech' \
+                 AND speaker_id='{AGENT_ID}' AND content LIKE '%CONTINUE%'"
+            ),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        continue_in_saved, 0,
+        "保存された自 speech 本文に CONTINUE が残留（§13.4.2 手順 3/5）: {continue_in_saved}"
+    );
 }
