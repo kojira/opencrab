@@ -295,6 +295,8 @@ async fn main() -> anyhow::Result<()> {
         tools_config: Arc::new(std::sync::RwLock::new(tools_cfg)),
         default_model,
         compaction_ratio: cfg.llm.compaction_ratio,
+        typed_history_enabled: cfg.conversation.typed_history,
+        typed_history_drop_directive: cfg.conversation.drop_response_directive,
         evaluator: cfg.evaluator.clone(),
         skill_consolidation: cfg.skill_consolidation.clone(),
         category_maintenance: cfg.category_maintenance.clone(),

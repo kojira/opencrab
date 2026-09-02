@@ -83,6 +83,8 @@ pub struct SkillEngine {
     /// 会話車線の二水位（#826-B）。未設定なら途中圧縮しない（テスト / sub-engine）。
     conversation_high: Option<usize>,
     conversation_low: Option<usize>,
+    /// PR2 (#884): 事前に組んだ typed 会話。Some のとき初期 messages を typed history から組む。
+    typed_conversation: Option<crate::conversation_typed::TypedConversation>,
 }
 
 /// LLM へ返す tool_result の退避先設定（#284）。
@@ -117,6 +119,7 @@ impl SkillEngine {
             max_output_tokens: None,
             conversation_high: None,
             conversation_low: None,
+            typed_conversation: None,
         }
     }
 
@@ -125,6 +128,14 @@ impl SkillEngine {
     pub fn set_conversation_waters(&mut self, high: usize, low: usize) {
         self.conversation_high = Some(high);
         self.conversation_low = Some(low);
+    }
+
+    /// #884 PR2: typed 会話を差し込む（None で flat 挙動へ戻す）。
+    pub fn set_typed_conversation(
+        &mut self,
+        tc: Option<crate::conversation_typed::TypedConversation>,
+    ) {
+        self.typed_conversation = tc;
     }
 
     /// 各 ChatRequest に載せる出力トークン上限を設定する（#676）。使用モデルの実能力値を
@@ -336,35 +347,103 @@ impl SkillEngine {
             MessageContent::Multi(parts)
         };
 
-        let mut messages = vec![
-            Message {
+        let mut messages = if let Some(tc) = self.typed_conversation.as_ref() {
+            // #884 PR2: System context に（keep 時のみ）出力指示を後置し、context/snapshot ブロックと
+            // typed history を順に並べる。現ターンのユーザー本文（テキスト）は typed history 末尾の
+            // UserSpeech に既に含まれるため二重に積まない。
+            let mut system = system_context.to_string();
+            // #884 PR2 §9.4-1: 省略ポリシー説明は安定文言なので system に 1 回だけ置く。
+            system.push_str("\n\n");
+            system.push_str(crate::conversation_typed::OMISSION_POLICY_NOTE);
+            if let Some(directive) = &tc.response_directive {
+                system.push_str("\n\n");
+                system.push_str(directive);
+            }
+            let mut msgs: Vec<Message> = Vec::with_capacity(tc.history.len() + 4);
+            msgs.push(Message {
                 role: Role::System,
-                content: Some(MessageContent::Text(system_context.to_string())),
+                content: Some(MessageContent::Text(system)),
                 name: None,
                 function_call: None,
                 tool_calls: None,
                 tool_call_id: None,
-            },
-            Message {
-                role: Role::User,
-                content: Some(user_content),
-                name: None,
-                function_call: None,
-                tool_calls: None,
-                tool_call_id: None,
-            },
-        ];
+            });
+            if let Some(cb) = &tc.context_block {
+                msgs.push(cb.clone());
+            }
+            if let Some(sb) = &tc.snapshot_base {
+                msgs.push(sb.clone());
+            }
+            msgs.extend(tc.history.iter().cloned());
+            // 画像は session_logs に無く typed history に載らないので、ある時だけ末尾に画像 User を足す。
+            if !image_urls.is_empty() {
+                let mut parts: Vec<ContentPart> = Vec::new();
+                for url in image_urls {
+                    parts.push(ContentPart::ImageUrl {
+                        image_url: ImageUrl {
+                            url: url.clone(),
+                            detail: Some("auto".to_string()),
+                        },
+                    });
+                }
+                msgs.push(Message {
+                    role: Role::User,
+                    content: Some(MessageContent::Multi(parts)),
+                    name: None,
+                    function_call: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                });
+            }
+            // 保険: typed 会話が実質空（履歴も context も snapshot も無い）のときだけ、現ターン本文を User として置く。
+            if tc.history.is_empty() && tc.context_block.is_none() && tc.snapshot_base.is_none() {
+                msgs.push(Message {
+                    role: Role::User,
+                    content: Some(user_content.clone()),
+                    name: None,
+                    function_call: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                });
+            }
+            msgs
+        } else {
+            vec![
+                Message {
+                    role: Role::System,
+                    content: Some(MessageContent::Text(system_context.to_string())),
+                    name: None,
+                    function_call: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+                Message {
+                    role: Role::User,
+                    content: Some(user_content),
+                    name: None,
+                    function_call: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+            ]
+        };
 
         let mut turn_ledger = crate::context_budget::TokenLedger::new();
         turn_ledger.record("system", system_context);
         turn_ledger.record("user", user_message);
-        let mut turn_gov = match (self.conversation_high, self.conversation_low) {
-            (Some(h), Some(l)) => {
-                let mut gov = crate::context_budget::TurnGovernor::new(h, l);
-                gov.inspect_turn_start(turn_ledger.total());
-                Some(gov)
+        let mut turn_gov = if self.typed_conversation.is_some() {
+            // #884 PR2: typed 経路はターン内圧縮を行わない（PR4 の governor 移行まで）。
+            // apply_turn_budget は messages[1] を flat 履歴前提で切り詰めるため typed では無効化する。
+            None
+        } else {
+            match (self.conversation_high, self.conversation_low) {
+                (Some(h), Some(l)) => {
+                    let mut gov = crate::context_budget::TurnGovernor::new(h, l);
+                    gov.inspect_turn_start(turn_ledger.total());
+                    Some(gov)
+                }
+                _ => None,
             }
-            _ => None,
         };
 
         let mut iterations = 0;
@@ -1687,6 +1766,105 @@ mod tests {
         assert_eq!(result.iterations, 1);
         assert_eq!(result.tool_calls_made, 0);
         assert!(!result.stopped_by_limit);
+    }
+
+    #[tokio::test]
+    async fn typed_conversation_uses_typed_history() {
+        use std::sync::Mutex;
+
+        struct CapturingLlm {
+            captured: Arc<Mutex<Vec<Vec<Message>>>>,
+        }
+
+        #[async_trait]
+        impl LlmClient for CapturingLlm {
+            async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+                self.captured.lock().unwrap().push(request.messages);
+                Ok(text_response("typed response"))
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let typed_call = tc(
+            "typed-call",
+            "test_tool",
+            serde_json::json!({"from": "typed"}),
+        );
+        let typed_conversation = crate::conversation_typed::TypedConversation {
+            context_block: None,
+            snapshot_base: None,
+            history: vec![
+                Message {
+                    role: Role::Assistant,
+                    content: None,
+                    name: None,
+                    function_call: None,
+                    tool_calls: Some(vec![typed_call]),
+                    tool_call_id: None,
+                },
+                Message::tool("typed-call", r#"{"result":"typed"}"#.to_string()),
+                Message {
+                    role: Role::User,
+                    content: Some(MessageContent::Text("typed current turn".to_string())),
+                    name: Some("owner".to_string()),
+                    function_call: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+            ],
+            response_directive: Some("typed response directive".to_string()),
+            wire_tokens: 0,
+            diagnostics: crate::conversation_typed::DeriveDiagnostics {
+                item_count: 3,
+                unpaired_call_count: 0,
+                opaque_event_count: 0,
+            },
+        };
+        let llm = CapturingLlm {
+            captured: captured.clone(),
+        };
+        let executor = MockExecutor::new();
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+        engine.set_conversation_waters(1, 0);
+        engine.set_typed_conversation(Some(typed_conversation));
+
+        let result = engine
+            .run("system context", "FLAT_HISTORY_SENTINEL", "test-model")
+            .await
+            .unwrap();
+        assert_eq!(result.response, "typed response");
+
+        let calls = captured.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let messages = &calls[0];
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0].role, Role::System);
+        // #884 §9.4-1: system は本文 + 省略ポリシー節 + （keep 時）出力指示 の順。
+        let system_text = message_plain_text(&messages[0]);
+        assert!(system_text.starts_with("system context"), "{system_text}");
+        assert!(
+            system_text.contains(crate::conversation_typed::OMISSION_POLICY_NOTE),
+            "省略ポリシー節が system に 1 回入る: {system_text}"
+        );
+        assert!(
+            system_text.ends_with("typed response directive"),
+            "出力指示は system 末尾: {system_text}"
+        );
+        assert_eq!(messages[1].role, Role::Assistant);
+        assert!(messages[1]
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| calls.iter().any(|call| call.id == "typed-call")));
+        assert_eq!(messages[2].role, Role::Tool);
+        assert_eq!(messages[2].tool_call_id.as_deref(), Some("typed-call"));
+        assert_eq!(messages[3].role, Role::User);
+        assert_eq!(message_plain_text(&messages[3]), "typed current turn");
+        assert!(
+            messages
+                .iter()
+                .all(|message| !message_plain_text(message).contains("FLAT_HISTORY_SENTINEL")),
+            "typed 経路に flat の履歴入り単一 User を積まない"
+        );
     }
 
     /// 出力上限で切り捨てられた応答（finish_reason=Length）を表す。`text` は切り捨て

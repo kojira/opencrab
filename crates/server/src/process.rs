@@ -1758,6 +1758,37 @@ pub async fn run_agent_response(
                 Ok(env) => {
                     engine.set_conversation_waters(env.conversation_high, env.conversation_low);
                     last_waters = Some((env.conversation_high, env.conversation_low));
+                    // #884 PR2: typed history flag が有効なら typed 会話を組んで差し込む。
+                    // 失敗時は flat へフォールバック（None）。
+                    if state.typed_history_enabled {
+                        match opencrab_core::conversation_typed::build_typed_conversation(
+                            &conn,
+                            session_id,
+                            agent_id,
+                            env.conversation_high,
+                            env.conversation_low,
+                            include_memory_index(&env),
+                            !state.typed_history_drop_directive,
+                        ) {
+                            Ok(tc) => {
+                                tracing::debug!(
+                                    session_id,
+                                    wire_tokens = tc.wire_tokens,
+                                    items = tc.diagnostics.item_count,
+                                    unpaired = tc.diagnostics.unpaired_call_count,
+                                    opaque = tc.diagnostics.opaque_event_count,
+                                    "typed history enabled: sending typed conversation"
+                                );
+                                engine.set_typed_conversation(Some(tc));
+                            }
+                            Err(e) => {
+                                tracing::warn!(session_id, %e, "typed conversation build failed; falling back to flat");
+                                engine.set_typed_conversation(None);
+                            }
+                        }
+                    } else {
+                        engine.set_typed_conversation(None);
+                    }
                 }
                 Err(e) => return Err(anyhow::anyhow!("{e}")),
             }

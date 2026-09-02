@@ -93,6 +93,8 @@ fn app_from_conn(
             opencrab_actions::tools::ToolsConfig::default(),
         )),
         compaction_ratio: 0.5,
+        typed_history_enabled: false,
+        typed_history_drop_directive: false,
         evaluator: opencrab_server::config::EvaluatorConfig::default(),
         skill_consolidation: opencrab_server::config::SkillConsolidationConfig::default(),
         category_maintenance: opencrab_server::config::CategoryMaintenanceConfig::default(),

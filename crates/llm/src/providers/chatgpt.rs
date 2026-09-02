@@ -1698,6 +1698,76 @@ mod tests {
     }
 
     #[test]
+    fn test_typed_history_past_turn_converts_to_function_call_items() {
+        let provider = ChatGptProvider::new();
+        let mut assistant = Message::assistant("");
+        assistant.content = None;
+        assistant.tool_calls = Some(vec![ToolCall {
+            id: "call_c253".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "execute_shell".to_string(),
+                arguments: r#"{"args":["60"],"command":"sleep","stdin":"","timeout_secs":90}"#
+                    .to_string(),
+            },
+        }]);
+        let request = ChatRequest::new(
+            "gpt-5.5",
+            vec![
+                Message::system("sys"),
+                Message::user("くらぶ、60秒sleepして終わったら教えて"),
+                assistant,
+                Message::tool(
+                    "call_c253",
+                    r#"{"status":"completed","exit_code":0,"stdout":""}"#,
+                ),
+                Message::user("終わった？"),
+            ],
+        );
+
+        let body = provider.build_request_body(&request, false);
+        let input = body["input"].as_array().expect("input must be an array");
+
+        assert_eq!(input.len(), 4);
+        assert_eq!(input[0]["role"], serde_json::json!("user"));
+        assert!(input[0]["content"]
+            .as_str()
+            .is_some_and(|text| text.contains("くらぶ、60秒sleepして終わったら教えて")));
+
+        assert_eq!(input[1]["type"], serde_json::json!("function_call"));
+        assert_eq!(input[1]["call_id"], serde_json::json!("call_c253"));
+        assert_eq!(input[1]["name"], serde_json::json!("execute_shell"));
+        let arguments = input[1]["arguments"]
+            .as_str()
+            .expect("function_call arguments must be a string");
+        assert!(arguments.contains("sleep"));
+        assert!(arguments.contains("60"));
+
+        assert_eq!(input[2]["type"], serde_json::json!("function_call_output"));
+        assert_eq!(input[2]["call_id"], serde_json::json!("call_c253"));
+        assert!(input[2]["output"]
+            .as_str()
+            .is_some_and(|output| output.contains("exit_code")));
+        assert!(
+            input[2].get("role").is_none(),
+            "function_call_output input items must not be role messages"
+        );
+
+        assert_eq!(input[3]["role"], serde_json::json!("user"));
+        assert_eq!(input[3]["content"], serde_json::json!("終わった？"));
+
+        fn contains_log_marker(value: &Value) -> bool {
+            match value {
+                Value::String(text) => text.contains("→log:"),
+                Value::Array(values) => values.iter().any(contains_log_marker),
+                Value::Object(map) => map.values().any(contains_log_marker),
+                _ => false,
+            }
+        }
+        assert!(!input.iter().any(contains_log_marker));
+    }
+
+    #[test]
     fn test_parse_response_tool_calls_from_completed_output() {
         let provider = ChatGptProvider::new();
         let sse = concat!(
