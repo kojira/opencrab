@@ -510,13 +510,9 @@ async fn handle_hello(
                 Ok(inspected) if inspected.config_digest != hello.config_digest => {
                     Err(ErrorCode::ConfigDigestMismatch)
                 }
-                // 宣言検証と digest 照合を hello 検査と同じ lock 下で完了させる（§4.1）。
-                Ok(inspected) => match validate_hello_declarations(
-                    state,
-                    &hello.instance_id,
-                    &hello.operations,
-                    inspected.operation_declaration_digest,
-                ) {
+                // 宣言検証を hello 検査と同じ lock 下で完了させる（§4.1）。永続 digest との
+                // 照合は撤去済み（#894）。
+                Ok(_) => match validate_hello_declarations(state, &hello.operations) {
                     Err(code) => Err(code),
                     Ok((declarations, declaration_digest)) => {
                         match open_bindings(&state.db, &hello.instance_id) {
@@ -556,6 +552,14 @@ async fn handle_hello(
     let bindings = match registered {
         Ok(b) => b,
         Err(code) => {
+            // fail-loud（#894）: hello 拒否は従来 err_frame を送るだけでサーバ側に理由が
+            // 残らなかった。理由コード＋instance_id を WARN し、config_digest 不一致等の
+            // 拒否を可視化する。
+            tracing::warn!(
+                instance_id = %hello.instance_id,
+                reason = code.as_str(),
+                "gate hello rejected"
+            );
             close_live(
                 state,
                 None,
@@ -645,14 +649,13 @@ struct InstanceSnap {
     enabled: bool,
     revision: u64,
     config_digest: String,
-    /// 当該 instance に永続した宣言 digest（DI-04）。NULL = 当該 revision で未確立。
-    operation_declaration_digest: Option<String>,
 }
 
 fn inspect_instance(db: &opencrab_db::Db, instance_id: &str) -> Result<InstanceSnap, ErrorCode> {
     let conn = db.lock().map_err(|_| ErrorCode::StoreError)?;
+    // operation_declaration_digest 列は残すが読まない（照合撤去・#894）。
     match conn.query_row(
-        "SELECT enabled, revision, config_digest, deleted_at, operation_declaration_digest
+        "SELECT enabled, revision, config_digest, deleted_at
          FROM gate_instances WHERE instance_id = ?1",
         params![instance_id],
         |r| {
@@ -661,33 +664,32 @@ fn inspect_instance(db: &opencrab_db::Db, instance_id: &str) -> Result<InstanceS
                 r.get::<_, i64>(1)?,
                 r.get::<_, String>(2)?,
                 r.get::<_, Option<i64>>(3)?,
-                r.get::<_, Option<String>>(4)?,
             ))
         },
     ) {
         Err(rusqlite::Error::QueryReturnedNoRows) => Err(ErrorCode::InstanceUnknown),
         Err(_) => Err(ErrorCode::StoreError),
-        Ok((_, _, _, Some(_), _)) => Err(ErrorCode::InstanceUnknown),
-        Ok((enabled, revision, digest, None, decl_digest)) => Ok(InstanceSnap {
+        Ok((_, _, _, Some(_))) => Err(ErrorCode::InstanceUnknown),
+        Ok((enabled, revision, digest, None)) => Ok(InstanceSnap {
             enabled: enabled == 1,
             revision: u64::try_from(revision).map_err(|_| ErrorCode::StoreError)?,
             config_digest: digest,
-            operation_declaration_digest: decl_digest,
         }),
     }
 }
 
-/// hello の宣言を検証し、永続 digest と照合する（DI-03/04）。first hello（当該 revision で
-/// 未確立）なら computed digest を永続して確立する。宣言変更は revision 更新を要する。
+/// hello の宣言を検証し、live snapshot 用の宣言配列と（informational な）canonical digest を返す
+/// （DI-03）。**永続 digest との照合・永続化は撤去した**（#894）。core は hello ごとに宣言を
+/// fresh parse して projection に使うので、永続照合は drift を防がず、宣言の説明文を編集する
+/// たびに既存 instance の hello を `operation_declaration_mismatch` で殺すだけだった。digest は
+/// live entry の情報用にだけ計算し、DB へは書かない（列は残すが未使用・revision/config_digest は
+/// 従来どおり照合する）。
 ///
 /// - reserved collision → `bad_request`（DI-03）
 /// - 他の宣言不正 → `operation_declaration_invalid`（DI-22）
-/// - 永続値と不一致 → `operation_declaration_mismatch`（DI-04）
 fn validate_hello_declarations(
     state: &ExtgateState,
-    instance_id: &str,
     operations: &Option<serde_json::Value>,
-    stored_digest: Option<String>,
 ) -> Result<(Vec<GatewayOperationDeclaration>, String), ErrorCode> {
     let decls = match operations {
         Some(ops) => {
@@ -695,34 +697,13 @@ fn validate_hello_declarations(
         }
         None => Vec::new(),
     };
-    // 宣言 present（[] を含む）なら digest を計算。absent は「DI 宣言なし」で digest を持たない。
-    let computed = operations.as_ref().map(|_| declaration_digest(&decls));
-    match (stored_digest, computed) {
-        (None, None) => Ok((decls, String::new())),
-        (None, Some(d)) => {
-            store_declaration_digest(&state.db, instance_id, &d)?;
-            Ok((decls, d))
-        }
-        (Some(s), Some(d)) if s == d => Ok((decls, d)),
-        (Some(_), _) => Err(ErrorCode::OperationDeclarationMismatch),
-    }
-}
-
-/// first hello で確立した宣言 digest を永続する。既に確立済み（非 NULL）は上書きしない
-/// （idempotent・race-safe）。
-fn store_declaration_digest(
-    db: &opencrab_db::Db,
-    instance_id: &str,
-    digest: &str,
-) -> Result<(), ErrorCode> {
-    let conn = db.lock().map_err(|_| ErrorCode::StoreError)?;
-    conn.execute(
-        "UPDATE gate_instances SET operation_declaration_digest = ?2
-         WHERE instance_id = ?1 AND operation_declaration_digest IS NULL",
-        params![instance_id, digest],
-    )
-    .map_err(|_| ErrorCode::StoreError)?;
-    Ok(())
+    // 宣言 present（[] を含む）なら informational digest を計算。absent は「DI 宣言なし」で空。
+    // 照合・永続化はしない（#894）。
+    let digest = operations
+        .as_ref()
+        .map(|_| declaration_digest(&decls))
+        .unwrap_or_default();
+    Ok((decls, digest))
 }
 
 fn open_bindings(
