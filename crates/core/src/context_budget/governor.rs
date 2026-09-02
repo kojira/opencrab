@@ -269,16 +269,28 @@ pub fn assemble_from_snapshot(
         .unwrap_or(0);
     let items = items_from_logs(conn, session_id, agent_id, &all)?;
     if std::env::var("OC_TYPED_SHADOW").is_ok() {
+        // #884 PR2 (PR1 レビュー追補): flat 側トークン（直上の assembled ledger）と typed の
+        // wire トークンを 1 行に併記し、§8.1 の比較記録を本番ログで取れるようにする。
+        let flat_tokens = ledger.total();
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let refs = build_conversation_refs(conn, &all, agent_id);
             let completed = completed_tool_call_ids(&all);
             let derived =
                 crate::conversation_typed::derive_items(&all, &refs, &completed, agent_id);
+            let assembled = crate::conversation_typed::assemble_typed_messages(&derived.items);
+            let wire: String = assembled
+                .history
+                .iter()
+                .filter_map(|message| serde_json::to_string(message).ok())
+                .collect();
+            let typed_wire_tokens = crate::tokens::estimate_tokens(&wire);
             tracing::debug!(
                 session_id,
                 typed_items = derived.diagnostics.item_count,
                 unpaired = derived.diagnostics.unpaired_call_count,
                 opaque = derived.diagnostics.opaque_event_count,
+                flat_tokens,
+                typed_wire_tokens,
                 "typed shadow (OC_TYPED_SHADOW)"
             );
         }));

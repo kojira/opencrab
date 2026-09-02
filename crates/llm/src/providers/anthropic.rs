@@ -700,6 +700,193 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_typed_history_past_turn_converts_to_tool_use_result_blocks() {
+        let provider = AnthropicProvider::new("k");
+        let mut assistant = Message::assistant("");
+        assistant.content = None;
+        assistant.tool_calls = Some(vec![ToolCall {
+            id: "call_c253".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "execute_shell".to_string(),
+                arguments: r#"{"args":["60"],"command":"sleep","stdin":"","timeout_secs":90}"#
+                    .to_string(),
+            },
+        }]);
+        let request = ChatRequest::new(
+            "claude-x",
+            vec![
+                Message::system("sys"),
+                Message::user("くらぶ、60秒sleepして終わったら教えて"),
+                assistant,
+                Message::tool(
+                    "call_c253",
+                    r#"{"status":"completed","exit_code":0,"stdout":""}"#,
+                ),
+                Message::user("終わった？"),
+            ],
+        )
+        .with_max_tokens(100);
+
+        let body = provider
+            .build_request_body(&request)
+            .expect("valid typed history builds a body");
+        let messages = body["messages"]
+            .as_array()
+            .expect("messages must be an array");
+
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0]["role"], serde_json::json!("user"));
+        assert_eq!(
+            messages[0]["content"],
+            serde_json::json!("くらぶ、60秒sleepして終わったら教えて")
+        );
+
+        assert_eq!(messages[1]["role"], serde_json::json!("assistant"));
+        let tool_use_blocks = messages[1]["content"]
+            .as_array()
+            .expect("assistant content must be blocks");
+        assert_eq!(tool_use_blocks.len(), 1);
+        assert_eq!(tool_use_blocks[0]["type"], serde_json::json!("tool_use"));
+        assert_eq!(tool_use_blocks[0]["id"], serde_json::json!("call_c253"));
+        assert_eq!(
+            tool_use_blocks[0]["name"],
+            serde_json::json!("execute_shell")
+        );
+        let tool_input = tool_use_blocks[0]["input"]
+            .as_object()
+            .expect("tool_use input must be an object");
+        assert_eq!(tool_input["command"], serde_json::json!("sleep"));
+
+        assert_eq!(messages[2]["role"], serde_json::json!("user"));
+        let tool_result_blocks = messages[2]["content"]
+            .as_array()
+            .expect("tool result content must be blocks");
+        assert_eq!(tool_result_blocks.len(), 1);
+        assert_eq!(
+            tool_result_blocks[0]["type"],
+            serde_json::json!("tool_result")
+        );
+        assert_eq!(
+            tool_result_blocks[0]["tool_use_id"],
+            serde_json::json!("call_c253")
+        );
+
+        assert_eq!(messages[3]["role"], serde_json::json!("user"));
+        assert_eq!(messages[3]["content"], serde_json::json!("終わった？"));
+
+        fn contains_log_marker(value: &Value) -> bool {
+            match value {
+                Value::String(text) => text.contains("→log:"),
+                Value::Array(values) => values.iter().any(contains_log_marker),
+                Value::Object(map) => map.values().any(contains_log_marker),
+                _ => false,
+            }
+        }
+        assert!(!messages.iter().any(contains_log_marker));
+    }
+
+    /// #884 PR2 並列呼び出し: 同一生成の並列 ToolCall（1 assistant に tool_calls×2）は
+    /// anthropic wire で `tool_use`×2 を 1 つの assistant message へ入れ、対応する連続
+    /// Role::Tool は `tool_result`×2 を 1 つの user message へ併合する（tool_use の
+    /// 連続や tool_result の分割で 400 を招かない）。core の集約
+    /// (`assemble_parallel_calls_grouped_into_one_assistant`) と対になる provider snapshot。
+    #[test]
+    fn parallel_tool_calls_become_two_tool_use_in_one_assistant_and_merged_tool_results() {
+        let provider = AnthropicProvider::new("k");
+        let mut assistant = Message::assistant("");
+        assistant.content = None;
+        assistant.tool_calls = Some(vec![
+            ToolCall {
+                id: "call_a".to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: "execute_shell".to_string(),
+                    arguments: r#"{"command":"echo","args":["a"]}"#.to_string(),
+                },
+            },
+            ToolCall {
+                id: "call_b".to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: "execute_shell".to_string(),
+                    arguments: r#"{"command":"echo","args":["b"]}"#.to_string(),
+                },
+            },
+        ]);
+        let request = ChatRequest::new(
+            "claude-x",
+            vec![
+                Message::system("sys"),
+                Message::user("並列で a と b を実行して"),
+                assistant,
+                Message::tool("call_a", r#"{"exit_code":0,"stdout":"a"}"#),
+                Message::tool("call_b", r#"{"exit_code":0,"stdout":"b"}"#),
+            ],
+        )
+        .with_max_tokens(100);
+
+        let body = provider
+            .build_request_body(&request)
+            .expect("valid parallel typed history builds a body");
+        let messages = body["messages"]
+            .as_array()
+            .expect("messages must be an array");
+
+        // user(発話) + assistant(tool_use×2) + user(tool_result×2 併合) の 3 本。
+        assert_eq!(messages.len(), 3, "並列 result は 1 user に併合され計 3 本");
+
+        // 1 本目: 発話。
+        assert_eq!(messages[0]["role"], serde_json::json!("user"));
+
+        // 2 本目: 1 つの assistant に tool_use が 2 個。
+        assert_eq!(messages[1]["role"], serde_json::json!("assistant"));
+        let tool_use_blocks = messages[1]["content"]
+            .as_array()
+            .expect("assistant content must be blocks");
+        assert_eq!(
+            tool_use_blocks.len(),
+            2,
+            "並列 2 呼び出しが 1 assistant に集約"
+        );
+        assert_eq!(tool_use_blocks[0]["type"], serde_json::json!("tool_use"));
+        assert_eq!(tool_use_blocks[0]["id"], serde_json::json!("call_a"));
+        assert_eq!(tool_use_blocks[1]["type"], serde_json::json!("tool_use"));
+        assert_eq!(tool_use_blocks[1]["id"], serde_json::json!("call_b"));
+
+        // 3 本目: 連続 Role::Tool が 1 user の tool_result×2 に併合。
+        assert_eq!(messages[2]["role"], serde_json::json!("user"));
+        let tool_result_blocks = messages[2]["content"]
+            .as_array()
+            .expect("tool result content must be blocks");
+        assert_eq!(
+            tool_result_blocks.len(),
+            2,
+            "連続 tool_result が 1 user に併合"
+        );
+        assert_eq!(
+            tool_result_blocks[0]["type"],
+            serde_json::json!("tool_result")
+        );
+        assert_eq!(
+            tool_result_blocks[0]["tool_use_id"],
+            serde_json::json!("call_a")
+        );
+        assert_eq!(
+            tool_result_blocks[1]["tool_use_id"],
+            serde_json::json!("call_b")
+        );
+
+        // assistant(tool_use) が連続しない（anthropic 400 の条件を作らない）。
+        for pair in messages.windows(2) {
+            assert!(
+                !(pair[0]["role"] == "assistant" && pair[1]["role"] == "assistant"),
+                "assistant が連続してはならない"
+            );
+        }
+    }
+
     /// リクエストを受けてから `delay` 待って 200 を返すモック（timeout 検証用）。
     async fn spawn_slow_mock(delay: Duration) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
