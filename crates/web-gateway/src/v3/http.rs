@@ -274,6 +274,8 @@ fn live_to_event(ev: &LiveEvent) -> Option<Event> {
         LiveEvent::CompletedNoReply { .. } => {
             Some(Event::default().event("completed_no_reply").data("{}"))
         }
+        // web には platform message id 対応表が無いため、Discord 用の完了対象は流さない。
+        LiveEvent::Completed { .. } => None,
         // R3: web SSE は失敗を通知イベントとして流す（reply_origin は Nostr 固有の e-tag 用途）。
         LiveEvent::TurnFailed { .. } => Some(Event::default().event("turn_failed").data("{}")),
         LiveEvent::Error { code, detail } => Some(

@@ -910,6 +910,8 @@ mod tests {
             iterations: 1,
             tool_calls_made: 2,
             stopped_by_limit: false,
+            last_posting_utterance_id: None,
+            last_generation_had_continuation_speech: false,
             xml_fallback_parses: 0,
         }
     }
@@ -935,6 +937,8 @@ mod tests {
             iterations: 0,
             tool_calls_made: 0,
             stopped_by_limit: false,
+            last_posting_utterance_id: None,
+            last_generation_had_continuation_speech: false,
             xml_fallback_parses: 0,
         };
         assert_eq!(delivery_effect(Ok(empty), ctx), DeliveryEffect::Empty);

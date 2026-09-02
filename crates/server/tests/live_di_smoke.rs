@@ -134,7 +134,13 @@ struct RecordingHandler {
 
 #[async_trait::async_trait]
 impl InvokeHandler for RecordingHandler {
-    async fn handle(&self, _binding_id: &str, operation: &str, payload: &Value) -> InvokeOutcome {
+    async fn handle(
+        &self,
+        _call_id: &str,
+        _binding_id: &str,
+        operation: &str,
+        payload: &Value,
+    ) -> InvokeOutcome {
         self.invokes.lock().unwrap().push(RecordedInvoke {
             operation: operation.to_string(),
             payload: payload.clone(),
@@ -533,6 +539,7 @@ async fn run_gate(
                     break;
                 }
             }
+            Ok(Some(LiveEvent::Completed { .. })) => {}
             Ok(Some(LiveEvent::TurnFailed { .. })) => {
                 turn_failed = true;
                 break;

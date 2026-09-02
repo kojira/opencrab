@@ -46,6 +46,8 @@ const TOKEN: &str = "operator-token-discord-qc";
 const AGENT_ID: &str = "agent-discord-qc";
 const GUILD: &str = "500";
 const CHANNEL: &str = "600";
+/// #915: typing 隔離テスト専用チャンネル（他テストは 600 のみ使う）。並列 CI でも typing を分離。
+const CHANNEL_TY: &str = "601";
 const SELF_BOT: &str = "111"; // bot 自身の user id（自分の投稿除外）。
 const AUTHOR: &str = "222"; // owner の Discord user id（generic admission で caller=Owner）。
 /// dry-run を拾う tracing target（= `opencrab_discord_gateway::transport::DRY_RUN_LOG_TARGET`）。
@@ -64,6 +66,9 @@ struct Captured {
     emoji: String,
     channel: String,
     message: String,
+    /// #915: reply の own 投稿 id（dry-run が合成・say の message id と同じ形）。reply 以外は空。
+    /// `message`（＝返信先 origin id）は従来どおり維持し、🏁 の相関はこの reply_id で行う。
+    reply_id: String,
 }
 
 static BUFFER: OnceLock<Arc<Mutex<Vec<Captured>>>> = OnceLock::new();
@@ -92,6 +97,7 @@ struct Visitor {
     emoji: Option<String>,
     channel: Option<String>,
     message: Option<String>,
+    reply_id: Option<String>,
 }
 
 impl Visitor {
@@ -102,6 +108,7 @@ impl Visitor {
             "emoji" => self.emoji = Some(value),
             "channel" => self.channel = Some(value),
             "message" => self.message = Some(value),
+            "reply_id" => self.reply_id = Some(value),
             _ => {}
         }
     }
@@ -129,6 +136,7 @@ impl<S: tracing::Subscriber> Layer<S> for CaptureLayer {
             emoji: v.emoji.unwrap_or_default(),
             channel: v.channel.unwrap_or_default(),
             message: v.message.unwrap_or_default(),
+            reply_id: v.reply_id.unwrap_or_default(),
         });
     }
 }
@@ -163,10 +171,15 @@ impl Fixture {
     }
 
     fn append_message(&self, id: &str, content: &str) {
+        self.append_message_ch(id, CHANNEL, content);
+    }
+
+    /// 指定チャンネルへ発端メッセージを積む（#915: typing 隔離テストが専用チャンネルを使う）。
+    fn append_message_ch(&self, id: &str, channel: &str, content: &str) {
         use std::io::Write as _;
         let line = serde_json::json!({
             "id": id,
-            "channel_id": CHANNEL,
+            "channel_id": channel,
             "guild_id": GUILD,
             "author": {"id": AUTHOR, "bot": false, "username": "owner"},
             "content": content,
@@ -216,6 +229,10 @@ fn long_say_body() -> String {
         .join("\n")
 }
 const B_SAY: &str = "saybody-alpha 通常発言だよ";
+// #915: scenario_d 専用の一意 say 本文。BUFFER は binary 内で共有・累積のため、B_SAY（他シナリオ
+// でも使う）だと own message id を count で pin できない。独立本文で scenario_d の say を隔離する。
+const M_SAY_D: &str = "SAYDMARK";
+const B_SAY_D: &str = "saydbody-delta 単発発言だよ（#915 scenario_d 専用）";
 const B_REPLY: &str = "replybody-beta 返信本文だよ";
 const EMOJI: &str = "👀";
 const FILLER: &str = "fillerbody-omega";
@@ -287,6 +304,9 @@ impl LlmProvider for RoutedMock {
             if text.contains(M_LONGSAY) {
                 // 2000 字超の say（turn は plain text で閉じるので resume ループしない）。
                 return Ok(text_response(&long_say_body()));
+            }
+            if text.contains(M_SAY_D) {
+                return Ok(text_response(B_SAY_D));
             }
             if text.contains(M_SAY) {
                 return Ok(text_response(B_SAY));
@@ -505,7 +525,21 @@ struct Core {
     extgate: Arc<ExtgateState>,
     sock: PathBuf,
     subject_id: i64,
+    /// #915: execute_shell を実走させる tools_config 等を per-test で触れるよう AppState を保持。
+    state: AppState,
     _dir: tempfile::TempDir,
+}
+
+/// #915: echo と sleep だけを許可した shell 有効 tools 設定（date 相当＝echo・sleep 相当＝sleep）。
+fn shell_enabled_tools_config() -> opencrab_actions::tools::ToolsConfig {
+    opencrab_actions::tools::ToolsConfig {
+        enabled: true,
+        shell: Some(opencrab_actions::tools::ShellToolConfig {
+            enabled: true,
+            allowed_commands: vec!["echo".to_string(), "sleep".to_string()],
+            ..Default::default()
+        }),
+    }
 }
 
 /// 実 serve_uds core + 実 AppState を UDS で立ち上げる。nostr hooks は張らない（discord は generic 経路）。
@@ -563,6 +597,7 @@ async fn start_core(provider: Arc<dyn LlmProvider>) -> Core {
         extgate,
         sock,
         subject_id,
+        state,
         _dir: dir,
     }
 }
@@ -669,8 +704,58 @@ async fn wire_instance(core: &Core, fixture: &Fixture) -> Arc<InstanceClient> {
     client
 }
 
+/// 指定チャンネルで instance+binding を張り gateway を起動する（#915: typing 隔離テスト用）。
+/// BUFFER は binary 内で共有・累積かつ CI は並列実行なので、typing（scope key を持たない capture）
+/// を他テストと分離するために、他テストが使わない専用チャンネルへ束ねる。
+async fn wire_instance_on_channel(
+    core: &Core,
+    fixture: &Fixture,
+    channel: &str,
+) -> Arc<InstanceClient> {
+    let instance_id = uuid::Uuid::new_v4().to_string();
+    let binding_id = uuid::Uuid::new_v4().to_string();
+    let config_bytes = discord_config();
+    let config_b64 = opencrab_extgate::encode_config_b64(&config_bytes);
+    let addr = format!("discord-{AGENT_ID}-{GUILD}-{channel}");
+
+    put_instance(core, &instance_id, &config_b64).await;
+    put_binding(core, &binding_id, &instance_id, &addr).await;
+
+    let place = InstancePlacement {
+        instance_id: instance_id.clone(),
+        revision: 1,
+        addresses: vec![addr.clone()],
+        config_b64,
+    };
+    let overrides = HarnessOverrides {
+        fake_events: Some(fixture.path.clone()),
+        dry_run: true,
+    };
+    let client = spawn_instance(core.sock.clone(), &place, &config_bytes, None, overrides)
+        .expect("spawn_instance");
+
+    let mut bound = false;
+    for _ in 0..250 {
+        if client.binding_for_address(&addr).await.is_some() {
+            bound = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(bound, "binding が ack されない（専用チャンネル {channel}）");
+    client
+}
+
 fn count_kind(buf: &Arc<Mutex<Vec<Captured>>>, kind: &str) -> usize {
     captured(buf).iter().filter(|c| c.kind == kind).count()
+}
+
+/// 指定チャンネルに限定した kind 別キャプチャ数（#915: typing を専用チャンネルで数える）。
+fn count_kind_on_channel(buf: &Arc<Mutex<Vec<Captured>>>, kind: &str, channel: &str) -> usize {
+    captured(buf)
+        .iter()
+        .filter(|c| c.kind == kind && c.channel == channel)
+        .count()
 }
 
 // ==================== (a) message → say ＋ §9A e番号 ====================
@@ -854,7 +939,7 @@ async fn scenario_d_system_reactions_accepted_and_completed() {
 
     // M_SAY: turn は通常発言（say）を返す。agent の reaction DI は使わない
     // （＝ kind="reaction" は 0・system reaction は kind="system_reaction" で分離観測）。
-    fixture.append_message("703", &format!("{M_SAY} 受理と完了のサインを見たい"));
+    fixture.append_message("703", &format!("{M_SAY_D} 受理と完了のサインを見たい"));
 
     // 👀: LLM がこの発端メッセージをターン文脈に含めた（読んだ）時点＝activity started(origin) で
     // 発端メッセージ（channel=600, message=703）へ付く（R2・受理/推論前では付けない）。
@@ -876,33 +961,56 @@ async fn scenario_d_system_reactions_accepted_and_completed() {
         captured(&buf)
     );
 
-    // 🏁: say を配送し終えた時点で「自分が投稿した say のメッセージ」へ付く（owner 裁定 row 345:
-    // 発端ではなく自分の発言に付ける）。say（kind="say"・自分の投稿）の message id と、同じ id に
-    // 付いた 🏁（system_reaction）を相関させて検証する。
-    let saw_completed_on_own = {
-        let buf = buf.clone();
+    // 🏁: DESIGN-TURN-CONTINUATION §13.2「activity ended を受けた時点で、そのターンで最後に
+    // 成功した自分の say メッセージに 1 件だけ」。単発 say ターンなので最後の投稿 ＝ この 1 件の say。
+    // §13.2 表 row 1（ターンが投稿で終わる → 最後の投稿に 1）。own message id で相関し、`any` では
+    // なく**総数 == 1**で pin する（say ごとに 🏁 を付ける実装なら総数が増える → 検知）。
+    let own_say_mids: Vec<String> = {
+        let wbuf = buf.clone();
+        // 最後の say（＝この単発 say）の own message id に 🏁 が付くまで待つ。
         wait_until(move || {
-            let caps = captured(&buf);
-            // 自分が投稿した M_SAY ターンの say（本文が B_SAY を含む）の own message id 群。
-            let own_say_mids: Vec<String> = caps
+            let caps = captured(&wbuf);
+            let mids: Vec<String> = caps
                 .iter()
-                .filter(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(B_SAY))
+                .filter(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(B_SAY_D))
                 .map(|c| c.message.clone())
                 .filter(|m| !m.is_empty())
                 .collect();
-            // その own message id に 🏁 が付いている。
-            caps.iter().any(|c| {
-                c.kind == "system_reaction"
-                    && c.emoji.contains(SYS_COMPLETED)
-                    && c.channel == CHANNEL
-                    && own_say_mids.contains(&c.message)
-            })
+            !mids.is_empty()
+                && caps.iter().any(|c| {
+                    c.kind == "system_reaction"
+                        && c.emoji.contains(SYS_COMPLETED)
+                        && c.channel == CHANNEL
+                        && mids.contains(&c.message)
+                })
         })
-        .await
+        .await;
+        captured(&buf)
+            .iter()
+            .filter(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(B_SAY_D))
+            .map(|c| c.message.clone())
+            .filter(|m| !m.is_empty())
+            .collect()
     };
-    assert!(
-        saw_completed_on_own,
-        "完了 🏁（system_reaction）が自分の say メッセージに付かない: {:?}",
+    assert_eq!(
+        own_say_mids.len(),
+        1,
+        "単発 say の own message id が 1 件でない: {:?}",
+        captured(&buf)
+    );
+    let completed_on_own = captured(&buf)
+        .iter()
+        .filter(|c| {
+            c.kind == "system_reaction"
+                && c.emoji.contains(SYS_COMPLETED)
+                && c.channel == CHANNEL
+                && own_say_mids.contains(&c.message)
+        })
+        .count();
+    assert_eq!(
+        completed_on_own,
+        1,
+        "完了 🏁 が自分の最後の say に 1 件で付かない（§13.2・ターン終了時のみ）: {:?}",
         captured(&buf)
     );
 
@@ -985,7 +1093,8 @@ async fn scenario_e_no_reply_gets_muted_reaction() {
         captured(&buf)
     );
 
-    // 沈黙ターンには 🏁（完了）は付かない（返信を配送していない）。
+    // §13.2 表 row 11/13（NO_REPLY のみ → 🏁 0・沈黙終了は 🤐）。沈黙ターンは自分の投稿が無い
+    // ので 🏁 は付かない。発端 704 への誤付与を総数 0 で pin する（この turn の自投稿 id は無い）。
     let completed_on_704 = captured(&buf)
         .iter()
         .filter(|c| {
@@ -995,7 +1104,7 @@ async fn scenario_e_no_reply_gets_muted_reaction() {
     assert_eq!(
         completed_on_704,
         0,
-        "NO_REPLY ターンに 🏁 が誤発火: {:?}",
+        "NO_REPLY ターンに 🏁 が誤発火（§13.2 row 11/13）: {:?}",
         captured(&buf)
     );
 
@@ -1543,6 +1652,1389 @@ async fn audit_s13_1c_continue_split_is_separate_discord_messages() {
 }
 
 // ---------------------------------------------------------------------------
+// #915【🏁 はターン終了時のみ・途中投稿には付けない】: 純 say の末尾 CONTINUE で 3 分割した
+// ターン（本文＋CONTINUE ×2 → 本文）で、🏁（完了サイン）は**最後の say メッセージ 1 件だけ**に
+// 付き、途中の 2 件には付かない。オーナー裁定（逐語）:「🏁を付けるのは次のターンがない時だけ
+// です」「続きがないことを知らせるものですよ」。
+//
+// 観測境界（dry-run capture）: kind="say" の各分割メッセージの own message id と、kind=
+// "system_reaction"・emoji=🏁 の付け先 message を相関する。現 tip は say 配送ごとに 🏁 を付ける
+// ため途中 2 件にも 🏁 が付く → 赤。修正後は activity ended で最後の say だけに付く → 緑。
+// LLM 3・say 配送 3・🏁 は最終 1 件のみ・途中 0 件・🤐 0（発話ありターン）。
+// ---------------------------------------------------------------------------
+const FC_1: &str = "flagcont-one 一通目";
+const FC_2: &str = "flagcont-two 二通目";
+const FC_3: &str = "flagcont-three 三通目";
+
+struct FlagContinueSplitMock {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for FlagContinueSplitMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(match n {
+            0 => text_response(&format!("{FC_1}\nCONTINUE")),
+            1 => text_response(&format!("{FC_2}\nCONTINUE")),
+            _ => text_response(FC_3),
+        })
+    }
+}
+
+#[tokio::test]
+async fn scenario_915_completed_flag_only_on_last_say_of_continue_split() {
+    use std::sync::atomic::Ordering;
+    let buf = install_capture();
+    let mock = Arc::new(FlagContinueSplitMock {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    fixture.append_message("915", "FCMARK 3回に分けて返信して reply使わずに");
+
+    // 最終メッセージ（FC_3）が say として出るまで待つ（= 3 イテレーションに到達・say 配送 3）。
+    let done = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(FC_3))
+        })
+        .await
+    };
+    assert!(done, "3 通目（最終 say）が出ない: {:?}", captured(&buf));
+
+    // 最終 say（FC_3）の own message id に 🏁 が付くまで待つ（決着＝activity ended で付与）。
+    // ヘルパ: 本文で分割 say を特定し own message id を返す（BUFFER は共有なので本文で scope）。
+    let mid_of = |body: &str| -> Option<String> {
+        captured(&buf)
+            .iter()
+            .find(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(body))
+            .map(|c| c.message.clone())
+            .filter(|m| !m.is_empty())
+    };
+    let saw_last_completed = {
+        let buf = buf.clone();
+        wait_until(move || {
+            let last_mid = captured(&buf)
+                .iter()
+                .find(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(FC_3))
+                .map(|c| c.message.clone())
+                .filter(|m| !m.is_empty());
+            match last_mid {
+                Some(mid) => captured(&buf).iter().any(|c| {
+                    c.kind == "system_reaction"
+                        && c.emoji.contains(SYS_COMPLETED)
+                        && c.message == mid
+                }),
+                None => false,
+            }
+        })
+        .await
+    };
+    assert!(
+        saw_last_completed,
+        "🏁 が最終 say（FC_3）に付かない: {:?}",
+        captured(&buf)
+    );
+    // 決着後、途中投稿の誤付与が無いことを確定するための猶予（バグ時は配送ごとに即付くので既に出ている）。
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let first_mid = mid_of(FC_1).expect("FC_1 say の message id");
+    let second_mid = mid_of(FC_2).expect("FC_2 say の message id");
+    let third_mid = mid_of(FC_3).expect("FC_3 say の message id");
+
+    let completed_on = |mid: &str| -> usize {
+        captured(&buf)
+            .iter()
+            .filter(|c| {
+                c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == mid
+            })
+            .count()
+    };
+
+    // 🏁 は最終 say（FC_3）1 件のみ。途中の 2 件（FC_1/FC_2）には付かない（現 tip は付く → 赤）。
+    assert_eq!(
+        completed_on(&first_mid),
+        0,
+        "🏁 が途中 say FC_1 に誤って付いている（ターン終了時のみの裁定違反）: {:?}",
+        captured(&buf)
+    );
+    assert_eq!(
+        completed_on(&second_mid),
+        0,
+        "🏁 が途中 say FC_2 に誤って付いている（ターン終了時のみの裁定違反）: {:?}",
+        captured(&buf)
+    );
+    assert_eq!(
+        completed_on(&third_mid),
+        1,
+        "🏁 が最終 say FC_3 に 1 件付かない: {:?}",
+        captured(&buf)
+    );
+
+    // ターン全体での 🏁 総数は 1（分割 3 メッセージ合計）。
+    let total_completed: usize = [&first_mid, &second_mid, &third_mid]
+        .iter()
+        .map(|m| completed_on(m))
+        .sum();
+    assert_eq!(
+        total_completed,
+        1,
+        "分割ターンの 🏁 総数が 1 でない（途中付与のバグ）: {:?}",
+        captured(&buf)
+    );
+
+    // 発話ありターンなので発端 915 に 🤐 は付かない（回帰）。
+    let muted_on_origin = captured(&buf)
+        .iter()
+        .filter(|c| c.kind == "system_reaction" && c.emoji.contains("🤐") && c.message == "915")
+        .count();
+    assert_eq!(
+        muted_on_origin,
+        0,
+        "発話ありターンに 🤐 が誤発火: {:?}",
+        captured(&buf)
+    );
+
+    // LLM 3・say 配送 3・CONTINUE 残留なし（回帰）。
+    assert_eq!(
+        mock.calls.load(Ordering::SeqCst),
+        3,
+        "CONTINUE 3 分割の LLM 呼び出しが 3 でない"
+    );
+    for m in [FC_1, FC_2, FC_3] {
+        let n = captured(&buf)
+            .iter()
+            .filter(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(m))
+            .count();
+        assert_eq!(n, 1, "分割 {m} の say が 1 通でない: {:?}", captured(&buf));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #915 / §13.2 表 row 8【reply → CONTINUE → say】: reply を配送してから CONTINUE で継続し、
+// 最終イテレーションで say を投稿するターン。🏁 はターン終了時（activity ended）の最後の投稿
+// ＝最終 say に **1 件だけ**。途中の reply には付けない（own say id で相関・count で pin）。
+// ---------------------------------------------------------------------------
+const RC_REPLY: &str = "rcreply-途中の返信本文";
+const RC_SAY: &str = "rcsay-最終の通常発言";
+
+struct ReplyThenContinueThenSayMock {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for ReplyThenContinueThenSayMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(match n {
+            // 1 生成目: reply（本文 RC_REPLY）＋末尾 CONTINUE（本文は空＝継続のみ）→ 進む。
+            0 => reply_with_content_response(RC_REPLY, "CONTINUE"),
+            // 2 生成目: 純 say（最終・CONTINUE なし）→ ターン終了。
+            _ => text_response(RC_SAY),
+        })
+    }
+}
+
+#[tokio::test]
+async fn scenario_915_reply_then_continue_then_say_flag_only_on_last_say() {
+    use std::sync::atomic::Ordering;
+    let buf = install_capture();
+    let mock = Arc::new(ReplyThenContinueThenSayMock {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    fixture.append_message("9153", &format!("{M_REPLY} からの CONTINUE で最後は say"));
+
+    // 最終 say（RC_SAY）の own message id に 🏁 が付くまで待つ（決着＝activity ended で付与）。
+    let saw_last_completed = {
+        let buf = buf.clone();
+        wait_until(move || {
+            let last_mid = captured(&buf)
+                .iter()
+                .find(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(RC_SAY))
+                .map(|c| c.message.clone())
+                .filter(|m| !m.is_empty());
+            match last_mid {
+                Some(mid) => captured(&buf).iter().any(|c| {
+                    c.kind == "system_reaction"
+                        && c.emoji.contains(SYS_COMPLETED)
+                        && c.message == mid
+                }),
+                None => false,
+            }
+        })
+        .await
+    };
+    assert!(
+        saw_last_completed,
+        "🏁 が最終 say（RC_SAY）に付かない: {:?}",
+        captured(&buf)
+    );
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let say_mid = captured(&buf)
+        .iter()
+        .find(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(RC_SAY))
+        .map(|c| c.message.clone())
+        .filter(|m| !m.is_empty())
+        .expect("RC_SAY say の message id");
+
+    // 🏁 は最終 say に 1 件のみ（§13.2 row 8）。
+    let completed_on_say = captured(&buf)
+        .iter()
+        .filter(|c| {
+            c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == say_mid
+        })
+        .count();
+    assert_eq!(
+        completed_on_say,
+        1,
+        "🏁 が最終 say に 1 件で付かない（§13.2 row 8）: {:?}",
+        captured(&buf)
+    );
+
+    // 途中の reply は配送された（kind="reply"・own reply_id あり）。
+    let reply_id = captured(&buf)
+        .iter()
+        .find(|c| c.kind == "reply" && c.body.contains(RC_REPLY))
+        .map(|c| c.reply_id.clone())
+        .filter(|m| !m.is_empty())
+        .expect("途中 reply の reply_id");
+    // §13.3.6 row 9（非ブロック指摘・DIRECTION-LOG 追加）: 途中 reply の reply_id には 🏁 0。
+    let completed_on_reply = captured(&buf)
+        .iter()
+        .filter(|c| {
+            c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == reply_id
+        })
+        .count();
+    assert_eq!(
+        completed_on_reply,
+        0,
+        "🏁 が途中 reply（reply_id）に誤付与（最終イテレーションの投稿のみ・§13.3.6 row 9）: {:?}",
+        captured(&buf)
+    );
+    // 発端 9153（reply 先）にも付けない。
+    let completed_on_origin = captured(&buf)
+        .iter()
+        .filter(|c| {
+            c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == "9153"
+        })
+        .count();
+    assert_eq!(
+        completed_on_origin,
+        0,
+        "🏁 が発端 9153（reply 先）に誤って付いている（§13.3.6）: {:?}",
+        captured(&buf)
+    );
+    // ターン全体で 🏁 は 1（最終 say のみ・途中 reply/発端は 0）。
+    let total = completed_on_say + completed_on_reply + completed_on_origin;
+    assert_eq!(
+        total,
+        1,
+        "reply→CONTINUE→say の 🏁 総数が 1 でない（§13.3.6 row 9）: {:?}",
+        captured(&buf)
+    );
+
+    // LLM 2 回（reply+CONTINUE → 最終 say）。
+    assert_eq!(
+        mock.calls.load(Ordering::SeqCst),
+        2,
+        "reply→CONTINUE→say の LLM 呼び出しが 2 でない"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #915 / §13.2・DIRECTION-LOG 446【say→CONTINUE→NO_REPLY で終わるターン】: 最終生成が NO_REPLY
+// （投稿なし）なので 🏁 は 0。途中の say（CONTINUE で進んだ投稿）にも付けない。発話があった
+// ターンなので 🤐 も 0。ルール: 🏁 は「ツール呼び出しも CONTINUE も含まない最終生成の自分の
+// 投稿」にだけ付く。最終生成に投稿が無ければ付けない。
+// ---------------------------------------------------------------------------
+// 本文中に "NO_REPLY"/"CONTINUE" の部分文字列を含めない（含めるとサニタイザに途中で切られ、
+// 継続ではなく本文＋末尾 NO_REPLY（row 12）扱いになる）。
+const SCN_SAY: &str = "scncont-途中で続ける本文だよ";
+
+struct SayContinueThenNoReplyMock {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for SayContinueThenNoReplyMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(match n {
+            // 1 生成目: 本文＋末尾 CONTINUE（途中の投稿・継続）。
+            0 => text_response(&format!("{SCN_SAY}\nCONTINUE")),
+            // 2 生成目: NO_REPLY（投稿なしで終端）。
+            _ => text_response("NO_REPLY"),
+        })
+    }
+}
+
+#[tokio::test]
+async fn scenario_915_say_continue_then_no_reply_gets_no_flag() {
+    use std::sync::atomic::Ordering;
+    let buf = install_capture();
+    let mock = Arc::new(SayContinueThenNoReplyMock {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    fixture.append_message("9160", "SCNMARK 続けてから最後は黙る");
+
+    // 途中 say（SCN_SAY）が配送されるまで待つ。
+    let delivered = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(SCN_SAY))
+        })
+        .await
+    };
+    assert!(
+        delivered,
+        "途中 say（SCN_SAY）が配送されない: {:?}",
+        captured(&buf)
+    );
+    // 最終 NO_REPLY 決着まで猶予（🏁/🤐 の付与はターン終了時）。
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let say_mid = captured(&buf)
+        .iter()
+        .find(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(SCN_SAY))
+        .map(|c| c.message.clone())
+        .filter(|m| !m.is_empty())
+        .expect("SCN_SAY say の message id");
+
+    // 🏁 は途中 say に付かない（最終生成は NO_REPLY＝投稿なし → 🏁 0）。現 tip は say 配送ごとに
+    // 付けるため途中 say に 🏁 が付く → 赤。
+    let completed_on_say = captured(&buf)
+        .iter()
+        .filter(|c| {
+            c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == say_mid
+        })
+        .count();
+    assert_eq!(
+        completed_on_say,
+        0,
+        "🏁 が途中 say に誤付与（最終 NO_REPLY のターンは 🏁 0・DIRECTION-LOG 446）: {:?}",
+        captured(&buf)
+    );
+    // 発端 9160 にも 🏁 は付かない。
+    let completed_on_origin = captured(&buf)
+        .iter()
+        .filter(|c| {
+            c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == "9160"
+        })
+        .count();
+    assert_eq!(
+        completed_on_origin,
+        0,
+        "🏁 が発端に誤付与: {:?}",
+        captured(&buf)
+    );
+
+    // 発話（途中 say）があったターンなので 🤐 も 0（沈黙終了ではない）。
+    let muted_on_origin = captured(&buf)
+        .iter()
+        .filter(|c| c.kind == "system_reaction" && c.emoji.contains("🤐") && c.message == "9160")
+        .count();
+    assert_eq!(
+        muted_on_origin,
+        0,
+        "🏁 発話ありターンに 🤐 が誤付与（say→CONTINUE→NO_REPLY は 🤐 0）: {:?}",
+        captured(&buf)
+    );
+
+    assert_eq!(
+        mock.calls.load(Ordering::SeqCst),
+        2,
+        "say→CONTINUE→NO_REPLY の LLM 呼び出しが 2 でない"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #915 / DIRECTION-LOG 446【reply→CONTINUE→reaction のみで終わるターン】: 最終生成が reaction のみ
+// （reaction は「投稿」ではない）なので 🏁 は 0。途中の reply（CONTINUE で進んだ投稿）にも付けない。
+// reply/reaction は invoke 経路で say consumer を通らないため現 tip でも 0（回帰ガード）。
+// ---------------------------------------------------------------------------
+const RR_REPLY: &str = "rrreply-途中の返信（最終は reaction のみ）";
+const RR_EMOJI: &str = "✅";
+
+struct ReplyContinueThenReactionMock {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for ReplyContinueThenReactionMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(match n {
+            // 1 生成目: reply（本文 RR_REPLY）＋末尾 CONTINUE（本文は空＝継続）→ 進む。
+            0 => reply_with_content_response(RR_REPLY, "CONTINUE"),
+            // 2 生成目: reaction のみ（投稿なしで終端）。
+            _ => tool_call_response(
+                "reaction",
+                serde_json::json!({"event": "e1", "emoji": RR_EMOJI}),
+            ),
+        })
+    }
+}
+
+#[tokio::test]
+async fn scenario_915_reply_continue_then_reaction_only_gets_no_flag() {
+    use std::sync::atomic::Ordering;
+    let buf = install_capture();
+    let mock = Arc::new(ReplyContinueThenReactionMock {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    fixture.append_message("9161", "RRMARK 返信してから最後はリアクションだけ");
+
+    // 最終 reaction（RR_EMOJI・発端 9161）が配送されるまで待つ。
+    let reacted = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "reaction" && c.emoji.contains(RR_EMOJI) && c.message == "9161")
+        })
+        .await
+    };
+    assert!(
+        reacted,
+        "最終 reaction が配送されない: {:?}",
+        captured(&buf)
+    );
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    // 途中 reply は配送された。
+    let reply_delivered = captured(&buf)
+        .iter()
+        .any(|c| c.kind == "reply" && c.body.contains(RR_REPLY));
+    assert!(
+        reply_delivered,
+        "途中 reply が配送されない: {:?}",
+        captured(&buf)
+    );
+
+    // 🏁 は 0（最終生成は reaction のみ＝投稿なし）。発端 9161 にも付かない。
+    let completed_on_origin = captured(&buf)
+        .iter()
+        .filter(|c| {
+            c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == "9161"
+        })
+        .count();
+    assert_eq!(
+        completed_on_origin,
+        0,
+        "🏁 が reaction 終端ターンに誤付与（最終生成 reaction のみ → 🏁 0）: {:?}",
+        captured(&buf)
+    );
+    // 発話ありターンなので 🤐 も 0。
+    let muted_on_origin = captured(&buf)
+        .iter()
+        .filter(|c| c.kind == "system_reaction" && c.emoji.contains("🤐") && c.message == "9161")
+        .count();
+    assert_eq!(muted_on_origin, 0, "🤐 が誤付与: {:?}", captured(&buf));
+
+    assert_eq!(
+        mock.calls.load(Ordering::SeqCst),
+        2,
+        "reply→CONTINUE→reaction の LLM 呼び出しが 2 でない"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #915 / §13.3.6 row 6【reply×N（本文なし・単一生成）→ 最後の reply に 1】: 1 生成で reply を 3 本
+// 出すターン。🏁 は最後の reply の own 投稿 id（reply_id）に 1・他 0・総数 1。reply は invoke 経路
+// なので現 tip は 🏁 0 → **赤**。相関は capture の `reply_id`（dry-run が合成した own 投稿 id）で行う
+// （`message`＝返信先 origin とは分離）。
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn scenario_915_reply3_flag_on_last_reply() {
+    let buf = install_capture();
+    let mock = Arc::new(RoutedMock::new());
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    fixture.append_message("9170", &format!("{M_REPLY3} 3 本まとめて返信して"));
+
+    // reply 3 本が配送されるまで待つ（各 reply は distinct な reply_id を持つ）。
+    let delivered = {
+        let buf = buf.clone();
+        wait_until(move || {
+            B_REPLY3.iter().all(|b| {
+                captured(&buf)
+                    .iter()
+                    .any(|c| c.kind == "reply" && c.body.contains(b) && !c.reply_id.is_empty())
+            })
+        })
+        .await
+    };
+    assert!(delivered, "reply×3 が配送されない: {:?}", captured(&buf));
+    // 決着（ended）まで猶予。🏁 はターン終了時付与。
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    // 各 reply の own 投稿 id（reply_id）を本文で引く。
+    let reply_id_of = |body: &str| -> Option<String> {
+        captured(&buf)
+            .iter()
+            .find(|c| c.kind == "reply" && c.body.contains(body))
+            .map(|c| c.reply_id.clone())
+            .filter(|m| !m.is_empty())
+    };
+    let last_reply_id = reply_id_of(B_REPLY3[2]).expect("最後の reply の reply_id");
+    let first_reply_id = reply_id_of(B_REPLY3[0]).expect("1 本目 reply の reply_id");
+    let second_reply_id = reply_id_of(B_REPLY3[1]).expect("2 本目 reply の reply_id");
+
+    let completed_on = |id: &str| -> usize {
+        captured(&buf)
+            .iter()
+            .filter(|c| {
+                c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == id
+            })
+            .count()
+    };
+
+    // 🏁 は最後の reply に 1・途中 2 本には 0（§13.3.6 row 6）。現 tip は reply に 🏁 0 → 赤。
+    assert_eq!(
+        completed_on(&last_reply_id),
+        1,
+        "🏁 が最後の reply に 1 件で付かない（§13.3.6 row 6・現 tip は reply に 🏁 0）: {:?}",
+        captured(&buf)
+    );
+    assert_eq!(
+        completed_on(&first_reply_id),
+        0,
+        "🏁 が 1 本目の reply に誤付与: {:?}",
+        captured(&buf)
+    );
+    assert_eq!(
+        completed_on(&second_reply_id),
+        0,
+        "🏁 が 2 本目の reply に誤付与: {:?}",
+        captured(&buf)
+    );
+    let total: usize = [&first_reply_id, &second_reply_id, &last_reply_id]
+        .iter()
+        .map(|id| completed_on(id))
+        .sum();
+    assert_eq!(
+        total,
+        1,
+        "reply×3 ターンの 🏁 総数が 1 でない: {:?}",
+        captured(&buf)
+    );
+
+    // 発端 9170 にも 🏁 は付かない（🏁 は自分の投稿へ）。
+    let on_origin = captured(&buf)
+        .iter()
+        .filter(|c| {
+            c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == "9170"
+        })
+        .count();
+    assert_eq!(on_origin, 0, "🏁 が発端に誤付与: {:?}", captured(&buf));
+}
+
+// ---------------------------------------------------------------------------
+// #915 / §13.3.6 row 14【reply×N + NO_REPLY（同一生成）→ 最後の reply に 1】: 1 生成で reply を 2 本
+// ＋本文 NO_REPLY。reply は配送され、最終応答は NO_REPLY（say なし）。🏁 は最後の reply の reply_id
+// に 1・他 0・総数 1。発話ありなので 🤐 0。reply は invoke 経路で現 tip は 🏁 0 → **赤**。
+// ---------------------------------------------------------------------------
+const RNR_1: &str = "rnr-返信1";
+const RNR_2: &str = "rnr-返信2（最後）";
+
+struct Reply2ThenNoReplyMock;
+
+#[async_trait::async_trait]
+impl LlmProvider for Reply2ThenNoReplyMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let mut resp = tool_calls_response(vec![
+            ("reply", serde_json::json!({"event": "e1", "text": RNR_1})),
+            ("reply", serde_json::json!({"event": "e1", "text": RNR_2})),
+        ]);
+        resp.choices[0].message.content = Some(MessageContent::Text("NO_REPLY".to_string()));
+        Ok(resp)
+    }
+}
+
+#[tokio::test]
+async fn scenario_915_reply2_then_no_reply_flag_on_last_reply() {
+    let buf = install_capture();
+    let mock = Arc::new(Reply2ThenNoReplyMock);
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    fixture.append_message("9180", "RNRMARK 2 本返信して最後は黙る");
+
+    let delivered = {
+        let buf = buf.clone();
+        wait_until(move || {
+            [RNR_1, RNR_2].iter().all(|b| {
+                captured(&buf)
+                    .iter()
+                    .any(|c| c.kind == "reply" && c.body.contains(b) && !c.reply_id.is_empty())
+            })
+        })
+        .await
+    };
+    assert!(delivered, "reply×2 が配送されない: {:?}", captured(&buf));
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let reply_id_of = |body: &str| -> Option<String> {
+        captured(&buf)
+            .iter()
+            .find(|c| c.kind == "reply" && c.body.contains(body))
+            .map(|c| c.reply_id.clone())
+            .filter(|m| !m.is_empty())
+    };
+    let last_id = reply_id_of(RNR_2).expect("最後の reply の reply_id");
+    let first_id = reply_id_of(RNR_1).expect("1 本目 reply の reply_id");
+    let completed_on = |id: &str| -> usize {
+        captured(&buf)
+            .iter()
+            .filter(|c| {
+                c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == id
+            })
+            .count()
+    };
+    assert_eq!(
+        completed_on(&last_id),
+        1,
+        "🏁 が最後の reply に 1 件で付かない（§13.3.6 row 14・現 tip は reply に 🏁 0）: {:?}",
+        captured(&buf)
+    );
+    assert_eq!(
+        completed_on(&first_id),
+        0,
+        "🏁 が 1 本目の reply に誤付与: {:?}",
+        captured(&buf)
+    );
+    // 発話（reply）ありなので発端 9180 に 🤐 は付かない。
+    let muted = captured(&buf)
+        .iter()
+        .filter(|c| c.kind == "system_reaction" && c.emoji.contains("🤐") && c.message == "9180")
+        .count();
+    assert_eq!(
+        muted,
+        0,
+        "reply ありターンに 🤐 が誤付与: {:?}",
+        captured(&buf)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #915 / §13.3.6 row 12【本文 + 末尾 NO_REPLY → 最終 say に 1】: 本文は配送され（NO_REPLY 以降は破棄）、
+// 最終生成の投稿＝その say。🏁 はその say に 1。現 tip も say に付く（回帰ガード）。
+// ---------------------------------------------------------------------------
+// 本文中に "NO_REPLY"/"CONTINUE" の部分文字列を含めない（サニタイザに途中で切られないため）。
+const BNR_SAY: &str = "bnrsay-末尾マーカーで黙る本文だよ";
+
+struct BodyThenTrailingNoReplyMock;
+
+#[async_trait::async_trait]
+impl LlmProvider for BodyThenTrailingNoReplyMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        Ok(text_response(&format!("{BNR_SAY}\nNO_REPLY")))
+    }
+}
+
+#[tokio::test]
+async fn scenario_915_body_then_trailing_no_reply_flag_on_say() {
+    let buf = install_capture();
+    let mock = Arc::new(BodyThenTrailingNoReplyMock);
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    fixture.append_message("9181", "BNRMARK 本文を出して末尾で黙る");
+
+    let say_completed = {
+        let buf = buf.clone();
+        wait_until(move || {
+            let mid = captured(&buf)
+                .iter()
+                .find(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(BNR_SAY))
+                .map(|c| c.message.clone())
+                .filter(|m| !m.is_empty());
+            match mid {
+                Some(mid) => captured(&buf).iter().any(|c| {
+                    c.kind == "system_reaction"
+                        && c.emoji.contains(SYS_COMPLETED)
+                        && c.message == mid
+                }),
+                None => false,
+            }
+        })
+        .await
+    };
+    assert!(
+        say_completed,
+        "本文 say＋🏁 が観測できない（本文が配送されないか 🏁 が付かない）: {:?}",
+        captured(&buf)
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let say_mid = captured(&buf)
+        .iter()
+        .find(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(BNR_SAY))
+        .map(|c| c.message.clone())
+        .filter(|m| !m.is_empty())
+        .expect("BNR_SAY say の message id");
+    let completed = captured(&buf)
+        .iter()
+        .filter(|c| {
+            c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == say_mid
+        })
+        .count();
+    assert_eq!(
+        completed,
+        1,
+        "🏁 が本文 say に 1 件で付かない（§13.3.6 row 12）: {:?}",
+        captured(&buf)
+    );
+    // 本文に NO_REPLY マーカーが残らない（回帰）。
+    assert!(
+        !captured(&buf)
+            .iter()
+            .any(|c| c.kind == "say" && c.body.contains("NO_REPLY")),
+        "say 本文に NO_REPLY が残留: {:?}",
+        captured(&buf)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #915 / §13.3.6 row 7【reply×N + 本文（同一生成）→ 到着順で最後の投稿に 1】: 1 生成で reply×2＋本文。
+// reply は invoke で先に配送、本文 say は最終応答として後に配送＝到着順で最後は say。🏁 はその say に
+// 1・reply には 0。現 tip も say に付く（回帰ガード）。
+// ---------------------------------------------------------------------------
+const R7_1: &str = "r7-返信1";
+const R7_2: &str = "r7-返信2";
+const R7_SAY: &str = "r7say-本文（到着順で最後）";
+
+struct Reply2PlusBodyMock;
+
+#[async_trait::async_trait]
+impl LlmProvider for Reply2PlusBodyMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let mut resp = tool_calls_response(vec![
+            ("reply", serde_json::json!({"event": "e1", "text": R7_1})),
+            ("reply", serde_json::json!({"event": "e1", "text": R7_2})),
+        ]);
+        resp.choices[0].message.content = Some(MessageContent::Text(R7_SAY.to_string()));
+        Ok(resp)
+    }
+}
+
+#[tokio::test]
+async fn scenario_915_reply2_plus_body_flag_on_last_post_say() {
+    let buf = install_capture();
+    let mock = Arc::new(Reply2PlusBodyMock);
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    fixture.append_message("9182", "R7MARK 2 本返信して本文も出して");
+
+    let say_completed = {
+        let buf = buf.clone();
+        wait_until(move || {
+            let mid = captured(&buf)
+                .iter()
+                .find(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(R7_SAY))
+                .map(|c| c.message.clone())
+                .filter(|m| !m.is_empty());
+            match mid {
+                Some(mid) => captured(&buf).iter().any(|c| {
+                    c.kind == "system_reaction"
+                        && c.emoji.contains(SYS_COMPLETED)
+                        && c.message == mid
+                }),
+                None => false,
+            }
+        })
+        .await
+    };
+    assert!(
+        say_completed,
+        "本文 say＋🏁 が観測できない: {:?}",
+        captured(&buf)
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let say_mid = captured(&buf)
+        .iter()
+        .find(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(R7_SAY))
+        .map(|c| c.message.clone())
+        .filter(|m| !m.is_empty())
+        .expect("R7_SAY say の message id");
+    let completed_on_say = captured(&buf)
+        .iter()
+        .filter(|c| {
+            c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == say_mid
+        })
+        .count();
+    assert_eq!(
+        completed_on_say,
+        1,
+        "🏁 が到着順で最後の投稿（say）に 1 件で付かない（§13.3.6 row 7）: {:?}",
+        captured(&buf)
+    );
+    // reply には 🏁 は付かない（最後の投稿は say）。
+    let reply_id_2 = captured(&buf)
+        .iter()
+        .find(|c| c.kind == "reply" && c.body.contains(R7_2))
+        .map(|c| c.reply_id.clone())
+        .filter(|m| !m.is_empty());
+    if let Some(rid) = reply_id_2 {
+        let on_reply = captured(&buf)
+            .iter()
+            .filter(|c| {
+                c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == rid
+            })
+            .count();
+        assert_eq!(
+            on_reply,
+            0,
+            "🏁 が reply に誤付与（最後の投稿は say のはず）: {:?}",
+            captured(&buf)
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #915 / §13.3.6 row 16【反復上限（max_iterations）到達 → 最後に配送した投稿に 1】: 常に
+// 「本文＋CONTINUE」を返し続けるターンは depth0 の上限（process.rs:1583・30）で打ち切られる。
+// 打ち切られた最終生成の最後の投稿（＝最後に配送した say）にだけ 🏁 1・他 0・総数 1。
+// 現 tip は say 配送ごとに 🏁 を付けるため全 say に付く → **赤**。上限は既存ハードコードを実走
+// （dry-run なので高速・test-only の上限注入は作らない・統括裁定）。
+// ---------------------------------------------------------------------------
+const ML_PREFIX: &str = "mlsay-iteration-";
+
+struct AlwaysContinueMock {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for AlwaysContinueMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // 常に「本文＋末尾 CONTINUE」で継続 → 上限まで回る。各本文は一意（buffer 順で最後を特定）。
+        Ok(text_response(&format!("{ML_PREFIX}{n:03}\nCONTINUE")))
+    }
+}
+
+#[tokio::test]
+async fn scenario_915_max_iterations_flag_only_on_last_delivered_say() {
+    use std::sync::atomic::Ordering;
+    let buf = install_capture();
+    let mock = Arc::new(AlwaysContinueMock {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    fixture.append_message("9190", "MLMARK ずっと続けて（上限まで）");
+
+    // 上限打ち切りまで走る。LLM 呼び出しが 30 回に達する（depth0 上限）まで待つ。
+    let looped = {
+        let mock = mock.clone();
+        wait_until(move || mock.calls.load(Ordering::SeqCst) >= 30).await
+    };
+    assert!(
+        looped,
+        "上限まで回らない（LLM calls={}）",
+        mock.calls.load(Ordering::SeqCst)
+    );
+    // 打ち切り後の決着（ended）猶予。
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    // このターンの mlsay say を buffer 順（配送順）で集める。最後の 1 つが「最後に配送した投稿」。
+    let ml_says: Vec<String> = captured(&buf)
+        .iter()
+        .filter(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(ML_PREFIX))
+        .map(|c| c.message.clone())
+        .filter(|m| !m.is_empty())
+        .collect();
+    assert!(
+        ml_says.len() >= 2,
+        "上限ケースの say が 2 通以上出ていない（実測 {}）: {:?}",
+        ml_says.len(),
+        captured(&buf)
+    );
+    let last_say = ml_says.last().unwrap().clone();
+
+    let completed_on = |id: &str| -> usize {
+        captured(&buf)
+            .iter()
+            .filter(|c| {
+                c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == id
+            })
+            .count()
+    };
+
+    // 🏁 は最後に配送した say に 1・総数 1（§13.3.6 row 16）。現 tip は全 say に付く → 赤。
+    assert_eq!(
+        completed_on(&last_say),
+        1,
+        "🏁 が最後に配送した say に 1 件で付かない（§13.3.6 row 16）: {:?}",
+        captured(&buf)
+    );
+    let total: usize = ml_says.iter().map(|id| completed_on(id)).sum();
+    assert_eq!(
+        total,
+        1,
+        "上限ターンの 🏁 総数が 1 でない（全 say に付いている）: mlsays={}, 🏁総数={}",
+        ml_says.len(),
+        total
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #915 / §13.3.6 row 10【本文＋query ツール（holding・spawn）→ 宣言 0 ／ resume 完了報告 → 1】:
+// **実物の execute_shell**（echo・即時決着＝date 相当）を呼ぶターン。execute_shell は inline 集合に
+// 無いので背景 subtask 化され（#152/#671）、dispatch 直後の継続で宣言（holding）say を投稿する。
+// subtask 決着（実 echo → settle）後の resume ターンで完了報告 say を投稿。🏁 は宣言 say には付かず
+// （進行中）、resume 報告 say に 1・総数 1。統括裁定: 照会クラス常時 detach なので「date 単独」も実機は
+// この execute_shell→spawned→resume 経路。現 tip は say 配送ごとに 🏁 → 宣言にも付く → **赤**（総数 2）。
+// 偽ツールは作らず、echo のみ許可した実 shell 設定で実走する。
+// ---------------------------------------------------------------------------
+const SP_ECHO: &str = "specho-shell-stdout-即時";
+const SP_DECL: &str = "spdecl-調べてるね（宣言・holding）";
+const SP_REPORT: &str = "spreport-結果はこうだった（完了報告投稿）";
+
+struct ShellSpawnResumeMock {
+    emitted: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for ShellSpawnResumeMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        // (2) dispatch 直後の継続（合成 "spawned" 結果＝tool role）→ 宣言 say（holding）でターンを閉じる。
+        if has_tool_role(&request) {
+            return Ok(text_response(SP_DECL));
+        }
+        // (1) 初回（tool role 無し・1 回だけ）→ 実 execute_shell（echo）を呼ぶ＝背景 subtask 化。
+        if !self.emitted.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return Ok(tool_call_response(
+                "execute_shell",
+                serde_json::json!({ "command": "echo", "args": [SP_ECHO] }),
+            ));
+        }
+        // (3) subtask 決着後の resume ターン（tool role 無し・2 回目以降）→ 完了報告 say。
+        Ok(text_response(SP_REPORT))
+    }
+}
+
+#[tokio::test]
+async fn scenario_915_spawned_declaration_no_flag_resume_report_gets_flag() {
+    let buf = install_capture();
+    let mock = Arc::new(ShellSpawnResumeMock {
+        emitted: std::sync::atomic::AtomicBool::new(false),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+    // echo を実走させるため shell を有効化（tools_config は Arc<RwLock> 共有で runtime に即反映）。
+    *core.state.tools_config.write().unwrap() = shell_enabled_tools_config();
+
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    fixture.append_message("9200", "SPSHELLMARK 調べて終わったら教えて");
+
+    // 宣言 say（SP_DECL）と resume 完了報告 say（SP_REPORT）が両方出るまで待つ。
+    let both = {
+        let buf = buf.clone();
+        wait_until(move || {
+            let caps = captured(&buf);
+            caps.iter()
+                .any(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(SP_DECL))
+                && caps
+                    .iter()
+                    .any(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(SP_REPORT))
+        })
+        .await
+    };
+    assert!(
+        both,
+        "宣言 say と resume 完了報告 say が揃わない（subtask/resume 未達）: {:?}",
+        captured(&buf)
+    );
+    // 決着後の 🏁 付与猶予。
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let mid_of = |body: &str| -> Option<String> {
+        captured(&buf)
+            .iter()
+            .find(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(body))
+            .map(|c| c.message.clone())
+            .filter(|m| !m.is_empty())
+    };
+    let decl_mid = mid_of(SP_DECL).expect("宣言 say の message id");
+    let report_mid = mid_of(SP_REPORT).expect("完了報告 say の message id");
+    let completed_on = |id: &str| -> usize {
+        captured(&buf)
+            .iter()
+            .filter(|c| {
+                c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == id
+            })
+            .count()
+    };
+
+    // 宣言 say には 🏁 は付かない（進行中＝subtask 未決着）。現 tip は付く → 赤。
+    assert_eq!(
+        completed_on(&decl_mid),
+        0,
+        "🏁 が spawned 宣言 say に誤付与（進行中は付けない・§13.3.6）: {:?}",
+        captured(&buf)
+    );
+    // resume 完了報告 say には 🏁 1。
+    assert_eq!(
+        completed_on(&report_mid),
+        1,
+        "🏁 が resume 完了報告 say に 1 件で付かない（§13.3.6・§13.3.4）: {:?}",
+        captured(&buf)
+    );
+    // 2 say（宣言・報告）合計で 🏁 は 1（宣言に付く現 tip は総数 2 → 赤）。
+    let total = completed_on(&decl_mid) + completed_on(&report_mid);
+    assert_eq!(
+        total,
+        1,
+        "spawned→resume の 🏁 総数が 1 でない（宣言に誤付与）: {:?}",
+        captured(&buf)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #915 / §13.3.1【別 session の subtask 進行中 → 本ターンの投稿に 🏁 0（エージェント単位 idle）】:
+// チャンネル A（session A）で subtask を起こし**保留**（決着させない）。その状態でチャンネル B
+// （session B）へ通常メッセージを送り say を投稿。エージェントに未決着 subtask があるので B の say は
+// idle でない＝🏁 0。現 tip は say 配送ごと（session を見ない）に 🏁 → B の say に付く → **赤**。
+// §13.3.1 案E（agent 単位）確定・§13.3.5 は agent-scope 集計を要ビルド検証と明記。
+// 専用チャンネル 602（spawner）/603（plain）で他テストと分離。
+// ---------------------------------------------------------------------------
+const CHANNEL_XA: &str = "602";
+const CHANNEL_XB: &str = "603";
+const M_XSPAWN: &str = "XSPAWNMARK";
+const M_XPLAIN: &str = "XSPLAINMARK";
+const XS_DECL: &str = "xsdecl-Aの宣言投稿";
+const XS_PLAIN: &str = "xsplain-Bの通常発言";
+
+struct ShellSleepCrossMock {
+    emitted: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for ShellSleepCrossMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let text = request_text(&request);
+        // (D) チャンネル B の通常ターン: say を返す。
+        if text.contains(M_XPLAIN) {
+            return Ok(text_response(XS_PLAIN));
+        }
+        // (B) チャンネル A の execute_shell 後（tool_result 有り）: 宣言 say（holding）。
+        if has_tool_role(&request) {
+            return Ok(text_response(XS_DECL));
+        }
+        // (A) チャンネル A の初回: 実 execute_shell（sleep＝遅延決着）で背景 subtask を起こし保留。
+        // emitted で 1 回だけ（resume ターンで再発行して無限ループしないため）。
+        if text.contains(M_XSPAWN) && !self.emitted.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Ok(tool_call_response(
+                "execute_shell",
+                serde_json::json!({ "command": "sleep", "args": ["8"] }),
+            ));
+        }
+        Ok(text_response("xsfiller"))
+    }
+}
+
+#[tokio::test]
+async fn scenario_915_other_session_subtask_in_progress_no_flag() {
+    let buf = install_capture();
+    let mock = Arc::new(ShellSleepCrossMock {
+        emitted: std::sync::atomic::AtomicBool::new(false),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+    // sleep を実走させるため shell を有効化（echo・sleep を許可）。
+    *core.state.tools_config.write().unwrap() = shell_enabled_tools_config();
+
+    // チャンネル A（session A）: execute_shell(sleep) で subtask を起こして保留。
+    let fixture_a = Fixture::new();
+    let _client_a = wire_instance_on_channel(&core, &fixture_a, CHANNEL_XA).await;
+    // チャンネル B（session B）: 通常ターン。
+    let fixture_b = Fixture::new();
+    let _client_b = wire_instance_on_channel(&core, &fixture_b, CHANNEL_XB).await;
+
+    fixture_a.append_message_ch("9210", CHANNEL_XA, &format!("{M_XSPAWN} 調べて"));
+
+    // A の宣言 say が出る＝subtask を起こして走行中（保留中）になったことの proxy。
+    let a_ready = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "say" && c.channel == CHANNEL_XA && c.body.contains(XS_DECL))
+        })
+        .await
+    };
+    assert!(
+        a_ready,
+        "A の宣言 say が出ない（subtask 未起動）: {:?}",
+        captured(&buf)
+    );
+
+    // subtask 保留中に B へ通常メッセージ → say を投稿。
+    fixture_b.append_message_ch("9211", CHANNEL_XB, &format!("{M_XPLAIN} 2 足す 2 は?"));
+    let b_ready = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "say" && c.channel == CHANNEL_XB && c.body.contains(XS_PLAIN))
+        })
+        .await
+    };
+    assert!(b_ready, "B の通常 say が出ない: {:?}", captured(&buf));
+    // false-red 防止（統括指摘）: B の 🏁 判定は B の activity ended（B の say 直後）で行われる。
+    // その時点で A の subtask（sleep 8）が走行中であることを明示確認する。走行中でなければ sleep 窓を
+    // 過ぎており、B が正しく 🏁 を得た（＝テスト前提崩れ）ので、assert ではなくこの確認で弾く。
+    assert!(
+        core.state
+            .subtask_registries
+            .has_running_for_agent(AGENT_ID),
+        "B 判定時点で A の subtask が走行中でない（sleep 窓を過ぎた・テスト前提崩れ）: {:?}",
+        captured(&buf)
+    );
+    // 決着（🏁 付与）の猶予。この間 subtask は sleep 8 で保留のまま。
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let b_mid = captured(&buf)
+        .iter()
+        .find(|c| c.kind == "say" && c.channel == CHANNEL_XB && c.body.contains(XS_PLAIN))
+        .map(|c| c.message.clone())
+        .filter(|m| !m.is_empty())
+        .expect("B の say の message id");
+    let completed_on_b = captured(&buf)
+        .iter()
+        .filter(|c| {
+            c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == b_mid
+        })
+        .count();
+
+    // エージェントに未決着 subtask（session A）があるので、B の say には 🏁 を付けない（§13.3.1 案E）。
+    // 現 tip は say 配送ごとに付ける（session を見ない）ため B に付く → 赤。
+    assert_eq!(
+        completed_on_b,
+        0,
+        "🏁 が別 session の subtask 進行中に B の say へ誤付与（agent 単位 idle・§13.3.1）: {:?}",
+        captured(&buf)
+    );
+    // sleep 3 は自然終了するので後片付け不要（B の判定はその窓の中で確定済み）。
+}
+
+// ---------------------------------------------------------------------------
+// #915 typing【最終投稿後の入力中停止】: 発話ターンで activity ended を受けたら typing keepalive
+// が止まり、失効間隔（8 秒）を跨いでも typing の再送出が 0 であることを観測境界（dry-run
+// kind="typing" のキャプチャ増分）で確定する。単一スレッド実行なので、この待機中に typing が
+// 増えるのはこのターンの keepalive だけ（他テストは走らない）。
+// ---------------------------------------------------------------------------
+const TY_SAY: &str = "tysay-入力中停止確認の本文";
+
+struct SingleSayThenIdleMock {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for SingleSayThenIdleMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(text_response(TY_SAY))
+    }
+}
+
+#[tokio::test]
+async fn scenario_915_typing_stops_after_turn_end() {
+    let buf = install_capture();
+    let mock = Arc::new(SingleSayThenIdleMock {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    // typing は capture に scope key（message）を持たず、CI は並列・BUFFER 共有なので、他テストが
+    // 使わない専用チャンネル（CHANNEL_TY）へ束ねて typing を隔離する。
+    let _client = wire_instance_on_channel(&core, &fixture, CHANNEL_TY).await;
+
+    fixture.append_message_ch(
+        "9154",
+        CHANNEL_TY,
+        &format!("{M_SAY} 入力中がターン後に止まるか"),
+    );
+
+    // 最終 say（TY_SAY）の own id に 🏁 が付く＝activity ended を受けた（typing も ended で停止）まで待つ。
+    let done = {
+        let buf = buf.clone();
+        wait_until(move || {
+            let mid = captured(&buf)
+                .iter()
+                .find(|c| c.kind == "say" && c.channel == CHANNEL_TY && c.body.contains(TY_SAY))
+                .map(|c| c.message.clone())
+                .filter(|m| !m.is_empty());
+            match mid {
+                Some(mid) => captured(&buf).iter().any(|c| {
+                    c.kind == "system_reaction"
+                        && c.emoji.contains(SYS_COMPLETED)
+                        && c.message == mid
+                }),
+                None => false,
+            }
+        })
+        .await
+    };
+    assert!(
+        done,
+        "最終 say＋🏁（＝ended 到達）が観測できない: {:?}",
+        captured(&buf)
+    );
+
+    // ended 到達後、専用チャンネルの typing キャプチャ数を基準化し、失効間隔
+    // （TYPING_REFRESH_INTERVAL=8 秒）を跨いで待つ。このチャンネルはこのターンだけが使うので、
+    // 停止していれば増分 0・停止漏れなら keepalive が 8 秒後に再送出して増える（並列でも堅牢）。
+    let before = count_kind_on_channel(&buf, "typing", CHANNEL_TY);
+    tokio::time::sleep(Duration::from_millis(9000)).await;
+    let after = count_kind_on_channel(&buf, "typing", CHANNEL_TY);
+    assert_eq!(
+        after, before,
+        "activity ended 後に typing が再送出された（入力中が止まらない）: before={before} after={after}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // §13.1 g【reaction のみ → #6 と同じ】: reaction のみ（say 0）のターン → reaction 配送・
 // 🤐 発端に付けない（発話がある）。現 tip: 最終本文空を沈黙とみなし 🤐 → 赤（#900 の reaction 版）。
 // §13 #6 の 🤐 契約を reaction で固定。
@@ -1618,6 +3110,21 @@ async fn audit_s13_1g_reaction_only_turn_gets_no_muted_reaction() {
         muted,
         0,
         "reaction があったターンに 🤐 が誤発火（#900・§13 #6 の reaction 版）: {:?}",
+        captured(&buf)
+    );
+
+    // §13.2: reaction のみのターンは自分の「投稿」が無い（reaction は発話 op だが say/reply の
+    // ような本文投稿ではない）ので 🏁 は付かない（発端 1309 への誤付与を総数 0 で pin）。
+    let completed_on_1309 = captured(&buf)
+        .iter()
+        .filter(|c| {
+            c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == "1309"
+        })
+        .count();
+    assert_eq!(
+        completed_on_1309,
+        0,
+        "reaction のみのターンに 🏁 が誤発火（§13.2）: {:?}",
         captured(&buf)
     );
     assert!(

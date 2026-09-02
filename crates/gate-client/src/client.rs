@@ -23,7 +23,13 @@ use super::wire::{
 /// 解決済みで payload に入る。gateway は platform ID を導いて実行し、三結果のいずれかを返す。
 #[async_trait::async_trait]
 pub trait InvokeHandler: Send + Sync {
-    async fn handle(&self, binding_id: &str, operation: &str, payload: &Value) -> InvokeOutcome;
+    async fn handle(
+        &self,
+        call_id: &str,
+        binding_id: &str,
+        operation: &str,
+        payload: &Value,
+    ) -> InvokeOutcome;
 
     /// この operation が**発話クラス**（reply/reaction/repost 等・ユーザーに見える発言）か。
     ///
@@ -61,6 +67,8 @@ struct WriteOut {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LiveEvent {
     Message {
+        /// core が say に載せた既存 delivery id。gateway は platform message id との対応に使う。
+        delivery_id: String,
         text: String,
         /// この say が**特定の inbound イベントへの返信**なら、その said の origin。
         ///
@@ -78,6 +86,8 @@ pub enum LiveEvent {
         /// consumer（discord-gateway）は started+Some でこの origin へ 👀 を付ける。
         origin: Option<String>,
     },
+    /// #915: activity ended で core が指定した完了サインの付け先（発話 id）。
+    Completed { target: String },
     CompletedNoReply {
         /// 沈黙で終えたターン（say 無し）の発端 origin。即時ターン（`occupy_until_turn_ends`）が
         /// 単独で握った said（`ReplyOrigin::Single`）だけ `Some`。bundle ターンや複数即時 said の
@@ -711,7 +721,7 @@ async fn handle_invoke(client: &InstanceClient, inv: Invoke, generation: u64) ->
         return false;
     };
     match handler
-        .handle(&inv.binding_id, &inv.operation, &inv.payload)
+        .handle(&inv.id, &inv.binding_id, &inv.operation, &inv.payload)
         .await
     {
         InvokeOutcome::Ok(result) => {
@@ -815,7 +825,11 @@ async fn handle_say(client: &InstanceClient, say: Say, generation: u64) -> bool 
         .live
         .entry(address.clone())
         .or_insert_with(LiveQueue::new);
-    let accepted = q.try_push(LiveEvent::Message { text, reply_origin });
+    let accepted = q.try_push(LiveEvent::Message {
+        delivery_id: say.id.clone(),
+        text,
+        reply_origin,
+    });
     if !accepted {
         drop(inner);
         let _ = send_frame(client, err_frame(&say.id, "external_rejected", None)).await;
@@ -863,6 +877,13 @@ async fn handle_activity(client: &InstanceClient, activity: Activity) {
                 reply_origin: ReplyOrigin::None,
             });
     } else if activity.state == "ended" {
+        if let Some(target) = activity.completed_target {
+            if let Some(q) = inner.live.get_mut(&address) {
+                let _ = q.try_push(LiveEvent::Completed { target });
+            }
+            inner.pending_turn.remove(&activity.binding_id);
+            return;
+        }
         if let Some(turn) = inner.pending_turn.remove(&activity.binding_id) {
             if !turn.saw_utterance {
                 // Message と同じ pending_turn.reply_origin を露出する（新フレームではなく既存追跡の
@@ -969,4 +990,64 @@ async fn close_all(client: &InstanceClient, code: &str, generation: u64) {
     drop(inner);
     tracing::info!(instance_id = %client.instance_id, code, "close");
     client.closed_notify.notify_waiters();
+}
+
+#[cfg(test)]
+mod completed_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn completed_target_and_completed_no_reply_are_exclusive() {
+        let client = InstanceClient::blank(
+            "instance".into(),
+            "author".into(),
+            SayPolicy::AcceptToLiveQueue,
+            None,
+            None,
+        );
+        {
+            let mut inner = client.inner.lock().await;
+            inner.closed = false;
+            inner
+                .acknowledged
+                .insert("address".into(), "binding".into());
+        }
+        handle_activity(
+            &client,
+            Activity {
+                binding_id: "binding".into(),
+                activity_id: "activity".into(),
+                state: "started".into(),
+                origin: None,
+                completed_target: None,
+            },
+        )
+        .await;
+        handle_activity(
+            &client,
+            Activity {
+                binding_id: "binding".into(),
+                activity_id: "activity".into(),
+                state: "ended".into(),
+                origin: None,
+                completed_target: Some("utterance".into()),
+            },
+        )
+        .await;
+
+        assert!(matches!(
+            client.next_live("address").await,
+            Some(LiveEvent::Activity { state, .. }) if state == "started"
+        ));
+        assert!(matches!(
+            client.next_live("address").await,
+            Some(LiveEvent::Activity { state, .. }) if state == "ended"
+        ));
+        assert_eq!(
+            client.next_live("address").await,
+            Some(LiveEvent::Completed {
+                target: "utterance".into()
+            })
+        );
+    }
 }

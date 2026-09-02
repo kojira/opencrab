@@ -176,7 +176,7 @@ impl GatewayActions for ExtgateOpsGatewayActions {
         &self,
         name: &str,
         args: &Value,
-        _ctx: &GatewayCallContext,
+        ctx: &GatewayCallContext,
     ) -> GatewayActionResult {
         // 宣言外は SystemGatewayActions から回ってこない想定だが fail-closed。
         if !self.declarations.iter().any(|d| d.name == name) {
@@ -206,6 +206,7 @@ impl GatewayActions for ExtgateOpsGatewayActions {
                 &kind,
                 target_id.as_deref(),
                 target_origin.as_deref(),
+                ctx.tool_call_id.as_deref(),
             )
             .await
             {

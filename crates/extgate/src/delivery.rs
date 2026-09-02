@@ -24,7 +24,7 @@ pub async fn apply_delivery_effect(
     session_id: &str,
     effect: DeliveryEffect,
     reply_target: Option<&str>,
-) {
+) -> Option<String> {
     match effect {
         DeliveryEffect::Text { body, .. } => {
             if body.is_empty() {
@@ -39,9 +39,9 @@ pub async fn apply_delivery_effect(
                 )
                 .await;
                 state.halt();
-                return;
+                return None;
             }
-            if let Err(e) = send_text(
+            match send_text(
                 state,
                 instance_id,
                 binding_id,
@@ -52,21 +52,24 @@ pub async fn apply_delivery_effect(
             )
             .await
             {
-                if e.code == ErrorCode::NotConnected || e.code == ErrorCode::BindingClosed {
-                    return;
-                }
-                tracing::error!(code = e.code.as_str(), "delivery failed");
-                if e.code == ErrorCode::StoreError {
-                    crate::close::close_live(
-                        state,
-                        Some(instance_id),
-                        None,
-                        ErrorCode::StoreError,
-                        None,
-                        None,
-                    )
-                    .await;
-                    state.halt();
+                Ok(delivery_id) => return Some(delivery_id),
+                Err(e) => {
+                    if e.code == ErrorCode::NotConnected || e.code == ErrorCode::BindingClosed {
+                        return None;
+                    }
+                    tracing::error!(code = e.code.as_str(), "delivery failed");
+                    if e.code == ErrorCode::StoreError {
+                        crate::close::close_live(
+                            state,
+                            Some(instance_id),
+                            None,
+                            ErrorCode::StoreError,
+                            None,
+                            None,
+                        )
+                        .await;
+                        state.halt();
+                    }
                 }
             }
         }
@@ -87,6 +90,7 @@ pub async fn apply_delivery_effect(
             }
         }
     }
+    None
 }
 
 /// #898 §12.2/§13.1: 末尾 CONTINUE で継続する途中イテレーションの発話を、最終応答と同じ
@@ -102,7 +106,7 @@ pub async fn deliver_intermediate_say(
     session_id: &str,
     body: &str,
     reply_target: Option<&str>,
-) -> Result<(), GateError> {
+) -> Result<String, GateError> {
     send_text(
         state,
         instance_id,
@@ -123,7 +127,7 @@ async fn send_text(
     session_id: &str,
     body: &str,
     reply_target: Option<&str>,
-) -> Result<(), GateError> {
+) -> Result<String, GateError> {
     let writer = {
         let reg = state.lock_registry()?;
         let live = reg
@@ -230,7 +234,7 @@ async fn send_text(
         .await;
         return Err(GateError::new(ErrorCode::Disconnect));
     }
-    Ok(())
+    Ok(delivery_id)
 }
 
 pub fn mark_indeterminate(state: &ExtgateState, delivery_ids: &[String]) -> Result<(), GateError> {

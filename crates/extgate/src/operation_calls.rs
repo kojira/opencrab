@@ -182,6 +182,9 @@ pub async fn invoke_utterance(
     utterance_kind: &str,
     reply_target_id: Option<&str>,
     reply_target_origin: Option<&str>,
+    // #915: engine の tool_call.id。発話 id を engine→invoke→gateway で一意に保つため、
+    // ある場合は invoke フレームの call_id に採用する（無ければ合成 uuid にフォールバック）。
+    provided_call_id: Option<&str>,
 ) -> Result<(), InvokeError> {
     // live + acknowledged binding + live declaration を再検査（invoke_and_wait と同じ）。
     let writer = {
@@ -200,7 +203,10 @@ pub async fn invoke_utterance(
         live.writer.clone()
     };
 
-    let call_id = Uuid::new_v4().to_string();
+    let call_id = provided_call_id
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
     let delivery_id = Uuid::new_v4().to_string();
     let now = now_nanos();
     // deliveries.payload_json は `{"text": ...}` 形が CHECK 制約（say と共用のテーブル）。発話本文を

@@ -100,7 +100,22 @@ impl DiscordTransport for DryRunTransport {
         message_id: &str,
         content: &str,
     ) -> TransportOutcome {
-        Self::log("reply", channel_id, message_id, "", content)
+        // #915: reply の own 投稿 id を合成する（production の serenity は API 応答の実 id を返す）。
+        // ログの `message` は従来どおり返信先 origin（既存 assert 維持）、own id は `reply_id` へ
+        // 分けて出す。返り値にも message_id（own id）を載せ、invoke Ok として core へ返る形にする
+        // （§13.3.2: reply の platform message id は invoke Ok で core へ返る）。
+        let own_id = next_dry_run_message_id();
+        tracing::info!(
+            target: DRY_RUN_LOG_TARGET,
+            kind = "reply",
+            channel = channel_id,
+            message = message_id,
+            reply_id = %own_id,
+            emoji = "",
+            body = %content,
+            "DRY_RUN discord op (not sent)"
+        );
+        TransportOutcome::Ok(json!({"dry_run": true, "kind": "reply", "message_id": own_id}))
     }
     async fn add_reaction(
         &self,

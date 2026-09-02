@@ -470,6 +470,10 @@ impl SkillEngine {
         let mut iterations = 0;
         let mut total_tool_calls = 0;
         let mut xml_fallback_parses = 0;
+        // #915: 各生成で最後に成功した投稿系 utterance-op の call_id。生成開始時にリセットし、
+        // 上限到達時だけ直前（打ち切られた最終生成）の値を保持して返す。
+        let mut last_posting_utterance_id: Option<String> = None;
+        let mut last_generation_had_continuation_speech = false;
         // #898 §13.1 a: 空 CONTINUE（本文なし・継続）の連続回数。3 連続で解析 warn を 1 行出す。
         let mut consecutive_empty_continue: usize = 0;
 
@@ -487,9 +491,13 @@ impl SkillEngine {
                     iterations,
                     tool_calls_made: total_tool_calls,
                     stopped_by_limit: true,
+                    last_posting_utterance_id,
+                    last_generation_had_continuation_speech,
                     xml_fallback_parses,
                 });
             }
+            last_posting_utterance_id = None;
+            last_generation_had_continuation_speech = false;
 
             // #289: 走行中に届いた新着ユーザー発言を、この呼び出しの入力へ足す。
             //
@@ -788,10 +796,13 @@ impl SkillEngine {
                         total_tool_calls += 1;
                         let tool_name = &tool_call.function.name;
                         let args = tool_call.arguments_json();
-                        let _ = self
+                        let result = self
                             .executor
                             .execute_with_id(tool_name, &args, &tool_call.id)
                             .await;
+                        if tool_name == "reply" && result.success {
+                            last_posting_utterance_id = Some(tool_call.id.clone());
+                        }
                         tracing::debug!(
                             iteration = iterations,
                             tool = %tool_name,
@@ -805,6 +816,8 @@ impl SkillEngine {
                         iterations,
                         tool_calls_made: total_tool_calls,
                         stopped_by_limit: false,
+                        last_posting_utterance_id,
+                        last_generation_had_continuation_speech,
                         xml_fallback_parses,
                     });
                 }
@@ -964,10 +977,13 @@ impl SkillEngine {
                     // データを持たない最小 ack で満たす（R7）。on_tool_result（永続機械行）は
                     // 呼ばず、本文は配送経路が speech として永続する（C6）。
                     if self.is_utterance_tool(tool_name) {
-                        let _ = self
+                        let result = self
                             .executor
                             .execute_with_id(tool_name, &args, &tool_call.id)
                             .await;
+                        if tool_name == "reply" && result.success {
+                            last_posting_utterance_id = Some(tool_call.id.clone());
+                        }
                         // 最小 ack（データを持たない空オブジェクト・capping 不要）。成功/失敗を
                         // 名乗らない——失敗は say と同一経路で ❌/turn_failed に別途表面化する（C9）。
                         let ack = "{}".to_string();
@@ -1094,6 +1110,7 @@ impl SkillEngine {
                 if continue_requested && !next_llm_call_needed {
                     if let Some(ref c) = content {
                         if !c.trim().is_empty() {
+                            last_generation_had_continuation_speech = true;
                             if let Some(ref cb) = self.on_continuation_speech {
                                 cb(c.clone()).await.map_err(|e| {
                                     anyhow::anyhow!("continuation speech delivery failed: {e:#}")
@@ -1117,6 +1134,7 @@ impl SkillEngine {
                     // speech 保存 / intake 保存）。配送が失敗したら継続を止めてターンを失敗させる
                     // （失敗を隠して次に進まない）。on_response_text は最終・text+tool でも発火する
                     // ため区別できず流用しない（最終二重配送・text+tool 二重保存を避ける）。
+                    last_generation_had_continuation_speech = true;
                     if let Some(ref cb) = self.on_continuation_speech {
                         cb(c.clone()).await.map_err(|e| {
                             anyhow::anyhow!("continuation speech delivery failed: {e:#}")
@@ -1155,6 +1173,8 @@ impl SkillEngine {
                 iterations,
                 tool_calls_made: total_tool_calls,
                 stopped_by_limit: false,
+                last_posting_utterance_id,
+                last_generation_had_continuation_speech,
                 xml_fallback_parses,
             });
         }
@@ -2617,6 +2637,11 @@ mod tests {
         );
         assert_eq!(result.iterations, 1);
         assert_eq!(result.tool_calls_made, 3);
+        assert_eq!(
+            result.last_posting_utterance_id.as_deref(),
+            Some("reply-3"),
+            "最終生成の最後の posting utterance call_id を surface する"
+        );
         assert!(
             tool_results.lock().unwrap().is_empty(),
             "純発話の最小 ack は on_tool_result に流さない"

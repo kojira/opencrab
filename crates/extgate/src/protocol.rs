@@ -127,6 +127,7 @@ pub fn activity_frame(
     activity_id: &str,
     state: &str,
     origin: Option<&str>,
+    completed_target: Option<&str>,
 ) -> Value {
     let mut frame = json!({
         "m": "activity",
@@ -138,6 +139,11 @@ pub fn activity_frame(
     // 認識しない field を無視するので互換（DESIGN-EXTGATE-V3 §「認識しない field は無視」）。
     if let Some(origin) = origin {
         frame["origin"] = json!(origin);
+    }
+    // #915: ended が完了サインを付ける発話 id を additive に指定する。発話 id は say の
+    // delivery_id / reply の call_id を流用し、無いときは field 自体を省略する。
+    if let Some(target) = completed_target {
+        frame["completed_target"] = json!(target);
     }
     frame
 }
@@ -392,5 +398,21 @@ fn parse_response(obj: &Value, m: &str) -> Result<WireResponse, GateError> {
             code: Some(code),
             detail,
         })
+    }
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use super::*;
+
+    #[test]
+    fn completed_target_is_additive_and_conditional() {
+        let ended = activity_frame("binding", "activity", "ended", None, Some("utterance"));
+        assert_eq!(ended["completed_target"], "utterance");
+        assert!(ended.get("origin").is_none());
+
+        let started = activity_frame("binding", "activity", "started", Some("origin"), None);
+        assert_eq!(started["origin"], "origin");
+        assert!(started.get("completed_target").is_none());
     }
 }

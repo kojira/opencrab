@@ -19,8 +19,8 @@ pub(crate) const DISCORD_MAX_CHARS: usize = 2000;
 pub enum SayDelivery {
     /// channel へ通常投稿した（dry-run 含む）。`message_id` は投稿できた**自分のメッセージ**の
     /// snowflake（transport の create_message 応答から得る）。**分割時は最後のチャンク**の id。
-    /// 🏁（完了サイン）はこの id へ付ける——発端ではなく自分の発言に付けるのが正（owner 裁定
-    /// row 345・#872）。取得できなければ None（dry-run は合成 id を返すので通常 Some）。
+    /// gateway はこの id を delivery_id との対応表へ登録し、activity ended 後に core がその
+    /// delivery_id を指定した場合だけ 🏁 を付ける。取得できなければ None。
     Posted { message_id: Option<String> },
     /// 投稿失敗（確定拒否・不明どちらも会話配送の失敗として観測）。
     Failed(String),
@@ -37,7 +37,7 @@ pub async fn deliver_say(
     text: &str,
 ) -> SayDelivery {
     // create_message の Ok は投稿できたメッセージ id を載せる（production=serenity 実 id・
-    // dry-run=合成 id）。分割時は最後の成功チャンクの id を 🏁 付け先として返す。
+    // dry-run=合成 id）。分割時は最後の成功チャンクの id を対応表へ返す。
     let mut last_id = None;
     for chunk in split_for_discord(text) {
         match transport.create_message(channel_id, &chunk).await {

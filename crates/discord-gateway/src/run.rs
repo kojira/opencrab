@@ -3,6 +3,7 @@
 //! Nostr gateway と違い timeline/bundle 車線は無い。1 channel = 1 binding、1 Message Create = 1 said。
 //! 受信は serenity（または fake fixture）を 1 本回し、ack 済み binding の channel だけ said にする。
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,7 +16,9 @@ use crate::config::{
 };
 use crate::harness::HarnessOverrides;
 use crate::map::{address_of, map_message, parse_address, parse_event_line, parse_origin};
-use crate::ops::{operation_declarations, DiscordInvokeHandler};
+use crate::ops::{
+    operation_declarations, targets_for, BindingDeliveryTargets, DiscordInvokeHandler,
+};
 use crate::post::{deliver_say, SayDelivery};
 use crate::receive::{run_fake_events_once, run_serenity_receive, OnLine};
 use crate::transport::{DiscordTransport, DryRunTransport, SerenityTransport, TransportOutcome};
@@ -52,8 +55,12 @@ pub fn spawn_instance(
         Arc::new(SerenityTransport::new(&token))
     };
 
-    let invoke_handler: Arc<dyn InvokeHandler> =
-        Arc::new(DiscordInvokeHandler::new(transport.clone()));
+    let delivery_targets: BindingDeliveryTargets =
+        Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let invoke_handler: Arc<dyn InvokeHandler> = Arc::new(DiscordInvokeHandler::with_targets(
+        transport.clone(),
+        Arc::clone(&delivery_targets),
+    ));
 
     let client = InstanceClient::spawn_with_operations(
         socket,
@@ -73,6 +80,7 @@ pub fn spawn_instance(
         transport,
         token,
         overrides,
+        delivery_targets,
     );
     Ok(client)
 }
@@ -84,6 +92,7 @@ fn supervise(
     transport: Arc<dyn DiscordTransport>,
     token: Option<Arc<String>>,
     overrides: HarnessOverrides,
+    delivery_targets: BindingDeliveryTargets,
 ) {
     // 受信ループ（1 本）: fixture か serenity。ack 済み binding の channel だけ said にする。
     // 👀 は受信時ではなく say consumer 側（activity started）で付けるので、受信は transport/
@@ -115,6 +124,7 @@ fn supervise(
             transport.clone(),
             cfg.agent_id.clone(),
             cfg.system_reactions.clone(),
+            Arc::clone(&delivery_targets),
         );
     }
 }
@@ -141,8 +151,8 @@ async fn react_system(transport: &Arc<dyn DiscordTransport>, origin: &str, emoji
 }
 
 /// (channel, message) を直接指定して system reaction を付ける（失敗は warn のみ・非致命）。
-/// 🏁（完了）は**自分が投稿した say のメッセージ**へ付けるため、origin anchor ではなく
-/// transport の create_message 応答から得た自分の message id をここへ渡す（owner 裁定 row 345）。
+/// 🏁（完了）は activity ended で core が指定した**最終生成の最後の投稿**へ付けるため、
+/// 発話 id の対応表から得た自分の message id をここへ渡す。
 /// legacy `add_reaction_non_fatal` と同じく、付与失敗が turn 処理を巻き込まないようにする。
 async fn react_system_on(
     transport: &Arc<dyn DiscordTransport>,
@@ -218,6 +228,7 @@ fn spawn_say_consumer(
     transport: Arc<dyn DiscordTransport>,
     agent_id: String,
     reactions: SystemReactions,
+    delivery_targets: BindingDeliveryTargets,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // address → channel snowflake（say はこの channel への通常投稿）。
@@ -228,13 +239,14 @@ fn spawn_say_consumer(
         let mut typing: Option<crate::typing::TypingKeepalive> = None;
         loop {
             match client.next_live(&address).await {
-                Some(LiveEvent::Message { text, reply_origin }) => {
-                    // DI-16: say は通常発言（reply target は暗黙設定しない）。reply_origin が発端
-                    // メッセージ（即時ターンの Single）を指すときだけ system reaction を駆動する
-                    // （bundle/曖昧 None は対象外・#869 のゲート踏襲）。付け先は記号ごとに異なる:
-                    //   🏁 完了 → **自分が投稿した say のメッセージ**（owner 裁定 row 345・#869 の
-                    //             発端付けを是正。分割投稿ならこの say の id ＝ 直近の自分の発言）。
-                    //   ❌ 失敗 → 発端メッセージ（自分の発言は生まれていない・照合: 旧実装も発端）。
+                Some(LiveEvent::Message {
+                    delivery_id,
+                    text,
+                    reply_origin,
+                }) => {
+                    // DI-16: say は通常発言（reply target は暗黙設定しない）。配送成功時は core の
+                    // delivery_id と Discord message id の対応だけを記録する。🏁 の判断・付与は
+                    // activity ended 起点の LiveEvent::Completed が担う。❌ は従来どおり発端へ付ける。
                     let Some(channel) = &channel else {
                         tracing::warn!(%address, "say dropped; address has no channel component");
                         continue;
@@ -242,19 +254,17 @@ fn spawn_say_consumer(
                     match deliver_say(&transport, channel, &text).await {
                         SayDelivery::Posted { message_id } => {
                             tracing::info!(%address, "say posted");
-                            if reply_origin.is_some() {
-                                if let Some(own) = &message_id {
-                                    // 🏁: 自分が投稿した say へ「このターンはもう続きの処理をしない」。
-                                    // 分割投稿なら message_id は **最後のチャンク**（deliver_say が
-                                    // 返す）＝直近の自分の発言なので付け先が正しい。
-                                    react_system_on(&transport, channel, own, &reactions.completed)
-                                        .await;
-                                } else {
-                                    tracing::debug!(
-                                        %address,
-                                        "skip 🏁: posted say has no message id"
-                                    );
+                            if let Some(own) = &message_id {
+                                if let Some(binding_id) = client.binding_for_address(&address).await
+                                {
+                                    targets_for(&delivery_targets, &binding_id)
+                                        .await
+                                        .lock()
+                                        .await
+                                        .insert(delivery_id, (channel.clone(), own.clone()));
                                 }
+                            } else {
+                                tracing::debug!(%address, "posted say has no message id");
                             }
                         }
                         SayDelivery::Failed(e) => {
@@ -285,6 +295,29 @@ fn spawn_say_consumer(
                             channel,
                             crate::typing::TYPING_REFRESH_INTERVAL,
                         );
+                    }
+                }
+                Some(LiveEvent::Completed { target }) => {
+                    let location =
+                        if let Some(binding_id) = client.binding_for_address(&address).await {
+                            targets_for(&delivery_targets, &binding_id)
+                                .await
+                                .lock()
+                                .await
+                                .remove(&target)
+                        } else {
+                            None
+                        };
+                    if let Some((target_channel, message)) = location {
+                        react_system_on(
+                            &transport,
+                            &target_channel,
+                            &message,
+                            &reactions.completed,
+                        )
+                        .await;
+                    } else {
+                        tracing::debug!(%address, %target, "skip 🏁: completed target not found");
                     }
                 }
                 Some(LiveEvent::CompletedNoReply { reply_origin }) => {

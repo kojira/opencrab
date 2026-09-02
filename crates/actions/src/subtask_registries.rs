@@ -64,6 +64,18 @@ impl SubtaskRegistries {
             .map(|r| !r.is_empty())
             .unwrap_or(false)
     }
+
+    /// #915: 全 registry を横断して、指定 agent の未決着 subtask が 1 つでもあるか。
+    ///
+    /// 進行中判定を **エージェント単位**（§13.3.1 案E）で行うため。key（session_id/agent_id）に
+    /// 依らず、登録されている `SpawnedSubtask.agent_id` で照合する。別 session（別 key）で走る
+    /// subtask も拾う。`settle_completed` は sink 発火前に registry から除去するので、これは
+    /// 「まだ決着していない subtask がエージェントに残っているか」を意味する。
+    pub fn has_running_for_agent(&self, agent_id: &str) -> bool {
+        self.registries
+            .iter()
+            .any(|reg| reg.value().iter().any(|st| st.value().agent_id == agent_id))
+    }
 }
 
 #[cfg(test)]
