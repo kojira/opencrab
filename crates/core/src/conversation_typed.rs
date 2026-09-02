@@ -1376,6 +1376,31 @@ mod tests {
     }
 
     #[test]
+    fn assemble_user_speech_does_not_set_message_name() {
+        // #892: 話者は renderer ラベル 1 行に含まれるため Message.name は残さない。
+        // name を残すと ChatGPT Responses API が input item の `name` を 400 で拒否する
+        // （Unknown parameter: 'input[N].name'）。DESIGN §9.4-2。
+        let item = TypedItem::UserSpeech {
+            event_ref: Some("e1".to_owned()),
+            speaker: USER.to_owned(),
+            timestamp: Some("2026-09-01T16:16:41+00:00".to_owned()),
+            content: "終わった？".to_owned(),
+            relation: None,
+        };
+        let assembled = super::assemble_typed_messages(&[item]);
+        assert_eq!(assembled.history.len(), 1);
+        let message = &assembled.history[0];
+        assert_eq!(message.role, Role::User);
+        assert_eq!(
+            message.name, None,
+            "UserSpeech は Message.name を設定しない（話者はラベル1行が正）"
+        );
+        // ラベルに話者が載っていることは維持する。
+        let text = message.text_content().expect("user speech has text");
+        assert!(text.contains(USER), "話者はラベルに含まれる: {text}");
+    }
+
+    #[test]
     fn assemble_pairs_unrecorded_call() {
         let item = TypedItem::ToolCall {
             call_id: "call_missing".to_owned(),

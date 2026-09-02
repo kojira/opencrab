@@ -1851,6 +1851,28 @@ mod tests {
     }
 
     #[test]
+    fn test_responses_input_drops_message_name() {
+        // #892: Responses API は input item の `name` を拒否する
+        // （400 Unknown parameter: 'input[N].name'）。Message.name が設定されていても
+        // wire の input item には name キーを出さない（防御）。
+        let provider = ChatGptProvider::new();
+        let mut user = Message::user("終わった？");
+        user.name = Some("owner".to_string());
+        let request = ChatRequest::new("gpt-5.5", vec![Message::system("sys"), user]);
+
+        let body = provider.build_request_body(&request, false);
+        let input = body["input"].as_array().expect("input must be an array");
+
+        assert_eq!(input.len(), 1, "system は input から除かれる");
+        assert_eq!(input[0]["role"], serde_json::json!("user"));
+        assert!(
+            input[0].get("name").is_none(),
+            "input item に name キーを出さない: {}",
+            input[0]
+        );
+    }
+
+    #[test]
     fn test_parse_response_tool_calls_from_completed_output() {
         let provider = ChatGptProvider::new();
         let sse = concat!(
