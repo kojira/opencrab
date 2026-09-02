@@ -220,6 +220,14 @@ const B_REPLY: &str = "replybody-beta 返信本文だよ";
 const EMOJI: &str = "👀";
 const FILLER: &str = "fillerbody-omega";
 
+// #900 追加マーカー（"REPLYMARK"/"MUTEMARK" 等を部分文字列に含めない独立名）。
+const M_REPLY3: &str = "REP3MARK"; // reply×3 in one（§13 #6・reply3-in-one）
+const M_REPLY_CONT: &str = "REPCONTMARK"; // reply＋末尾 CONTINUE（§13 #9）
+const M_REPLY_NR: &str = "REPSILENTMARK"; // reply＋NO_REPLY（§13 #14）
+const B_REPLY3: [&str; 3] = ["rep3-返信1", "rep3-返信2", "rep3-返信3"];
+const B_REPLY_CONT: &str = "repcont-返信本文";
+const B_REPLY_NR: &str = "repnr-返信本文";
+
 #[async_trait::async_trait]
 impl LlmProvider for RoutedMock {
     fn name(&self) -> &str {
@@ -234,7 +242,32 @@ impl LlmProvider for RoutedMock {
     async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
         let text = request_text(&request);
         self.reqs.lock().unwrap().push(text.clone());
+        // #900: reply＋末尾 CONTINUE の継続後（tool role あり）は最終 reply で自然終了する。
+        // has_tool_role でも先に判定する（継続イテレーションはツール ack を伴う）。
+        if text.contains(M_REPLY_CONT) && has_tool_role(&request) {
+            return Ok(tool_call_response(
+                "reply",
+                serde_json::json!({"event": "e1", "text": B_REPLY_CONT}),
+            ));
+        }
         if !has_tool_role(&request) {
+            // §13 #6: reply×3 を 1 生成に並べる（配送 3・LLM 1）。
+            if text.contains(M_REPLY3) {
+                return Ok(tool_calls_response(
+                    B_REPLY3
+                        .iter()
+                        .map(|b| ("reply", serde_json::json!({"event": "e1", "text": b})))
+                        .collect(),
+                ));
+            }
+            // §13 #9: reply＋末尾 CONTINUE（1 生成目・継続する）。
+            if text.contains(M_REPLY_CONT) {
+                return Ok(reply_with_content_response(B_REPLY_CONT, "CONTINUE"));
+            }
+            // §13 #14: reply＋NO_REPLY（発話ありの沈黙終端・reply は配送される）。
+            if text.contains(M_REPLY_NR) {
+                return Ok(reply_with_content_response(B_REPLY_NR, "NO_REPLY"));
+            }
             if text.contains(M_REPLY) {
                 return Ok(tool_call_response(
                     "reply",
@@ -326,6 +359,48 @@ fn tool_call_response(name: &str, args: serde_json::Value) -> ChatResponse {
         usage: Usage::default(),
         created: 0,
     }
+}
+
+/// 複数 tool_call を 1 生成に並べる（reply×N in one 用）。
+fn tool_calls_response(calls: Vec<(&str, serde_json::Value)>) -> ChatResponse {
+    let msg = Message {
+        role: Role::Assistant,
+        content: None,
+        name: None,
+        function_call: None,
+        tool_calls: Some(
+            calls
+                .into_iter()
+                .map(|(name, args)| ToolCall {
+                    id: format!("tc-{}", uuid::Uuid::new_v4()),
+                    call_type: "function".to_string(),
+                    function: FunctionCall {
+                        name: name.to_string(),
+                        arguments: args.to_string(),
+                    },
+                })
+                .collect(),
+        ),
+        tool_call_id: None,
+    };
+    ChatResponse {
+        id: uuid::Uuid::new_v4().to_string(),
+        model: "mock-model".to_string(),
+        choices: vec![Choice {
+            index: 0,
+            message: msg,
+            finish_reason: Some(FinishReason::ToolCalls),
+        }],
+        usage: Usage::default(),
+        created: 0,
+    }
+}
+
+/// reply tool_call と content を同一生成に載せる（reply＋本文/CONTINUE/NO_REPLY 併記用）。
+fn reply_with_content_response(text: &str, content: &str) -> ChatResponse {
+    let mut resp = tool_call_response("reply", serde_json::json!({"event": "e1", "text": text}));
+    resp.choices[0].message.content = Some(MessageContent::Text(content.to_string()));
+    resp
 }
 
 fn register_mock_pricing(db: &opencrab_db::Db) {
@@ -912,6 +987,157 @@ async fn scenario_e_no_reply_gets_muted_reaction() {
         "NO_REPLY ターンに 🏁 が誤発火: {:?}",
         captured(&buf)
     );
+}
+
+// ==================== (e2) reply（発話 invoke）ターンには 🤐 が付かない（#900） ====================
+//
+// #900: reply/reaction は say ではなく invoke で配送される。gate は「発話（say/reply/reaction）が
+// 1 つでもあれば沈黙ではない」と判定すべきで、reply しかしていないターンを最終本文空＝沈黙と解釈して
+// 🤐 を付けてはならない。reply 配送後、ターン決着（activity ended）で 🤐 が付くならその時点で出るので、
+// 🤐 の出現を bounded poll で待って「出ない」ことを確定する（バグ時は即座に 🤐 が出て RED）。
+#[tokio::test]
+async fn scenario_e2_reply_turn_does_not_get_muted_reaction() {
+    let buf = install_capture();
+    let mock = Arc::new(RoutedMock::new());
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    // 701: reply ターン（発話は invoke 経路・say 無し）。
+    fixture.append_message("701", &format!("{M_REPLY} これに返信して"));
+    let replied = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "reply" && c.body.contains(B_REPLY) && c.message == "701")
+        })
+        .await
+    };
+    assert!(replied, "reply が 701 へ配送されない: {:?}", captured(&buf));
+
+    // 701（reply ターン）に 🤐 が付かない。バグ時は決着で 🤐 が即座に出るので wait_until が true に
+    // なって RED。修正後は発話ありと判定されて 🤐 が出ず、poll は timeout して false（GREEN）。
+    let muted_on_701 = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf).iter().any(|c| {
+                c.kind == "system_reaction" && c.emoji.contains("🤐") && c.message == "701"
+            })
+        })
+        .await
+    };
+    assert!(
+        !muted_on_701,
+        "reply ターン(701)に 🤐 が誤発火（発話を沈黙扱いした）: {:?}",
+        captured(&buf)
+    );
+}
+
+/// 発端 origin に 🤐（system_reaction）が付いていないことを bounded poll で確定する共通ヘルパー。
+/// バグ時は決着で 🤐 が即座に出て poll が true→assert 失敗（RED）。修正後は 🤐 が出ず false（GREEN）。
+async fn assert_no_muted_on(buf: &Arc<Mutex<Vec<Captured>>>, message: &str) {
+    let b = buf.clone();
+    let m = message.to_string();
+    let muted = wait_until(move || {
+        captured(&b)
+            .iter()
+            .any(|c| c.kind == "system_reaction" && c.emoji.contains("🤐") && c.message == m)
+    })
+    .await;
+    assert!(
+        !muted,
+        "発話ありターン({message})に 🤐 が誤発火（発話を沈黙扱いした）: {:?}",
+        captured(buf)
+    );
+}
+
+// ==================== (e3) §13 #6: reply×3 in one ターンには 🤐 が付かない（#900） ====================
+#[tokio::test]
+async fn scenario_e3_reply3_in_one_turn_does_not_get_muted_reaction() {
+    let buf = install_capture();
+    let mock = Arc::new(RoutedMock::new());
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    fixture.append_message("706", &format!("{M_REPLY3} 3回に分けて返信して"));
+    let all_replied = {
+        let buf = buf.clone();
+        wait_until(move || {
+            B_REPLY3.iter().all(|b| {
+                captured(&buf)
+                    .iter()
+                    .any(|c| c.kind == "reply" && c.body.contains(b) && c.message == "706")
+            })
+        })
+        .await
+    };
+    assert!(
+        all_replied,
+        "reply×3 in one が全配送されない: {:?}",
+        captured(&buf)
+    );
+    // 発話（reply）が 3 つあったので沈黙ではない → 🤐 は付かない（§13 #6）。
+    assert_no_muted_on(&buf, "706").await;
+}
+
+// ==================== (e4) §13 #9: reply＋末尾 CONTINUE ターンには 🤐 が付かない（#900） ====================
+#[tokio::test]
+async fn scenario_e4_reply_then_continue_turn_does_not_get_muted_reaction() {
+    let buf = install_capture();
+    let mock = Arc::new(RoutedMock::new());
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    fixture.append_message("707", &format!("{M_REPLY_CONT} 返信して続けて"));
+    // 継続後の最終 reply も同じ 707 へ配送される（継続が起きた証拠）。少なくとも reply が届く。
+    let replied = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "reply" && c.body.contains(B_REPLY_CONT) && c.message == "707")
+        })
+        .await
+    };
+    assert!(
+        replied,
+        "reply＋CONTINUE ターンの reply が配送されない: {:?}",
+        captured(&buf)
+    );
+    // 発話（reply）があったので 🤐 は付かない（§13 #9）。
+    assert_no_muted_on(&buf, "707").await;
+}
+
+// ==================== (e5) §13 #14: reply＋NO_REPLY ターンには 🤐 が付かない（#900） ====================
+#[tokio::test]
+async fn scenario_e5_reply_then_no_reply_turn_does_not_get_muted_reaction() {
+    let buf = install_capture();
+    let mock = Arc::new(RoutedMock::new());
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    fixture.append_message("708", &format!("{M_REPLY_NR} 返信して黙って"));
+    let replied = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "reply" && c.body.contains(B_REPLY_NR) && c.message == "708")
+        })
+        .await
+    };
+    assert!(
+        replied,
+        "reply＋NO_REPLY ターンの reply が配送されない: {:?}",
+        captured(&buf)
+    );
+    // 最終本文は NO_REPLY だが、そのターンに reply（発話）があるので 🤐 は付かない（§13 #14）。
+    assert_no_muted_on(&buf, "708").await;
 }
 
 // ==================== (f) 2000 字超 say は複数チャンクで逐次配送される ====================
