@@ -61,7 +61,7 @@ pub fn operation_declarations() -> Value {
         ),
         decl(
             "reaction",
-            "イベントにリアクションする。event に会話の e番号、emoji に絵文字（省略可）。複数のリアクションは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。",
+            "イベントにリアクションする。event に会話の e番号、emoji に絵文字（省略可）。結果は返らない（撃ちっぱなし・再開はされない）。複数のリアクションは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。",
             json!({"type": "object", "required": ["event"], "properties": {
                 "event": ref_prop("対象イベントの短縮参照（例 e7）"),
                 "emoji": str_prop("リアクション絵文字（省略時は既定）")
@@ -70,7 +70,7 @@ pub fn operation_declarations() -> Value {
         ),
         decl(
             "reply",
-            "イベントに返信する。event に会話の e番号、text に返信本文。複数の返信は1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。",
+            "イベントに返信する。event に会話の e番号、text に返信本文。結果は返らない（撃ちっぱなし・再開はされない）。複数の返信は1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。",
             json!({"type": "object", "required": ["event", "text"], "properties": {
                 "event": ref_prop("返信先イベントの短縮参照（例 e7）"),
                 "text": str_prop("返信本文")
@@ -79,7 +79,7 @@ pub fn operation_declarations() -> Value {
         ),
         decl(
             "repost",
-            "イベントをリポストする。event に会話の e番号。複数のリポストは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。",
+            "イベントをリポストする。event に会話の e番号。結果は返らない（撃ちっぱなし・再開はされない）。複数のリポストは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。",
             json!({"type": "object", "required": ["event"], "properties": {"event": ref_prop("対象イベントの短縮参照（例 e7）")}}),
             conv("not_exposed", "conversation_bound"),
         ),
@@ -204,6 +204,12 @@ fn run_to_outcome(run: Run) -> InvokeOutcome {
 
 #[async_trait]
 impl InvokeHandler for NostrInvokeHandler {
+    // #900: reply/reaction/repost は発話クラス（ユーザーに見える発言）。follow/kind0/resolve/
+    // unfollow/upload は照会・操作クラスなので false（沈黙判定に影響させない）。
+    fn is_utterance(&self, operation: &str) -> bool {
+        matches!(operation, "reply" | "reaction" | "repost")
+    }
+
     async fn handle(&self, _binding_id: &str, operation: &str, payload: &Value) -> InvokeOutcome {
         // QC ハーネス（dry-run）: invoke を nostaro を spawn せず処理する。publish 系（発話
         // reply/reaction/repost や書き込み）は本文・種別を残して成功 ack し、実配線 E2E で
