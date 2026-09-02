@@ -821,6 +821,14 @@ fn enqueue_turn<R: AgentRuntime>(
                     let instance_id = instance_id.clone();
                     let binding_id = binding_id.clone();
                     let prompt_suffix = prompt_suffix.clone();
+                    // #898: 継続分岐の途中発話フック用クローン（state/instance/binding は直後に
+                    // sink へ move されるので、フック用に別クローンを先に確保する）。
+                    let hook_state = Arc::clone(&state);
+                    let hook_instance = instance_id.clone();
+                    let hook_binding = binding_id.clone();
+                    let hook_agent = agent_id.clone();
+                    let hook_session = session_id.clone();
+                    let hook_reply = reply_target.clone();
                     tokio::spawn(async move {
                         let inbound = NormalizedInbound {
                             session_id: &session_id,
@@ -887,7 +895,49 @@ fn enqueue_turn<R: AgentRuntime>(
                                 // 発端イベントの origin を subtask へ引き継ぐ。subtask 完了時の
                                 // resume ターンの say がこの origin へ返信できるようにする
                                 // （settlement→SubtaskSettled.reply_target 経由）。
-                                .with_reply_target(origin.clone());
+                                .with_reply_target(origin.clone())
+                                // #898 §12.2/§13.1 j: 末尾 CONTINUE の途中発話をループ中に配送・保存する。
+                                // 最終応答と同じ経路（send_text = say 配送＋speech 保存）を通し、Say モード
+                                // のみ配送（ToolDriven は say 抑止＝reply DI operation が配送を担う）。
+                                // 配送失敗（Err）は継続を止めてターンを失敗させる（失敗を隠さない）。
+                                .with_on_continuation_speech({
+                                    let hs = Arc::clone(&hook_state);
+                                    let hi = hook_instance.clone();
+                                    let hb = hook_binding.clone();
+                                    let ha = hook_agent.clone();
+                                    let hse = hook_session.clone();
+                                    let hr = hook_reply.clone();
+                                    let dm = delivery_mode;
+                                    Arc::new(move |speech: String| {
+                                        let hs = Arc::clone(&hs);
+                                        let hi = hi.clone();
+                                        let hb = hb.clone();
+                                        let ha = ha.clone();
+                                        let hse = hse.clone();
+                                        let hr = hr.clone();
+                                        Box::pin(async move {
+                                            if dm == DeliveryMode::Say {
+                                                crate::delivery::deliver_intermediate_say(
+                                                    &hs,
+                                                    &hi,
+                                                    &hb,
+                                                    &ha,
+                                                    &hse,
+                                                    &speech,
+                                                    hr.as_deref(),
+                                                )
+                                                .await
+                                                .map_err(|e| {
+                                                    anyhow::anyhow!(
+                                                        "extgate intermediate say failed: {}",
+                                                        e.code.as_str()
+                                                    )
+                                                })?;
+                                            }
+                                            Ok(())
+                                        })
+                                    })
+                                });
                                 // DI 拡張 §8: 宣言能力を tool set へ載せる（宣言があるときだけ）。
                                 if let Some(ga) = ops_actions.clone() {
                                     req = req.with_gateway_actions(ga);

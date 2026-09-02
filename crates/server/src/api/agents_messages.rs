@@ -529,6 +529,36 @@ pub async fn send_agent_message(
     if let Some(ga) = gateway_actions {
         run_req = run_req.with_gateway_actions(ga);
     }
+    // #898 §12.2/§13.1 d: 末尾 CONTINUE の途中発話を、次イテレーション前に responses へ 1 要素ずつ
+    // 追加（順序保持）し memory_sessions へ speech 保存する。REST は外部配送先が無いので「配送」＝
+    // responses への追加。フックはループ中に保存し、本文はバッファへ集めて run 後に responses の
+    // 前段へ積む（REST に配送失敗は無いので常に Ok）。
+    let intermediate_speeches: Arc<std::sync::Mutex<Vec<String>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    {
+        let hook_db = state.db.clone();
+        let hook_agent = id.clone();
+        let hook_session = session_id.clone();
+        let hook_buf = intermediate_speeches.clone();
+        run_req =
+            run_req.with_on_continuation_speech(std::sync::Arc::new(move |speech: String| {
+                let db = hook_db.clone();
+                let agent = hook_agent.clone();
+                let session = hook_session.clone();
+                let buf = hook_buf.clone();
+                Box::pin(async move {
+                    if let Ok(conn) = db.lock() {
+                        crate::transcript::record_rest_agent_reply(
+                            &conn, &agent, &session, &speech, 0, 0,
+                        );
+                    }
+                    if let Ok(mut g) = buf.lock() {
+                        g.push(speech);
+                    }
+                    Ok(())
+                })
+            }));
+    }
     // 同一セッションへの並行 POST を直列化する（#640）。web / Nostr / Discord / scheduler は
     // 既にこの共有ロック（`state.session_locks` は `AppState` 全体で 1 つ）を通っており、REST
     // だけが `run_agent_response` を直呼びしていた。これは判断ではなく配線漏れで、`State(state)`
@@ -573,14 +603,27 @@ pub async fn send_agent_message(
             // 最後の subtask 決着時に RestCompletionSink が完了させる）。
             complete_session_if_idle(&state.db, &session_id, &subtask_registry);
 
-            let responses = match &speech {
-                Some(body) => serde_json::json!([{ "agent_id": id, "content": body }]),
-                None => serde_json::json!([]),
-            };
+            // #898 §13.1 d: 途中発話（順序保持）→ 最終応答 の順で responses に載せる。途中発話は
+            // 本文ありのみ（空 CONTINUE はフック未発火）。最終は #899 の NO_REPLY 終端解釈で本文が
+            // あるときだけ載せる（沈黙は載せない）。
+            let mut responses_json: Vec<serde_json::Value> = intermediate_speeches
+                .lock()
+                .map(|g| {
+                    g.iter()
+                        .map(|body| serde_json::json!({"agent_id": id, "content": body}))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if let Some(body) = &speech {
+                responses_json.push(serde_json::json!({
+                    "agent_id": id,
+                    "content": body,
+                }));
+            }
             Json(serde_json::json!({
                 "session_id": session_id,
                 "caller_type": caller_type,
-                "responses": responses,
+                "responses": responses_json,
             }))
             .into_response()
         }
