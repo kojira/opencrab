@@ -2553,6 +2553,105 @@ async fn scenario_915_reply2_plus_body_flag_on_last_post_say() {
 }
 
 // ---------------------------------------------------------------------------
+// #915 / §13.3.6 row 16【反復上限（max_iterations）到達 → 最後に配送した投稿に 1】: 常に
+// 「本文＋CONTINUE」を返し続けるターンは depth0 の上限（process.rs:1583・30）で打ち切られる。
+// 打ち切られた最終生成の最後の投稿（＝最後に配送した say）にだけ 🏁 1・他 0・総数 1。
+// 現 tip は say 配送ごとに 🏁 を付けるため全 say に付く → **赤**。上限は既存ハードコードを実走
+// （dry-run なので高速・test-only の上限注入は作らない・統括裁定）。
+// ---------------------------------------------------------------------------
+const ML_PREFIX: &str = "mlsay-iteration-";
+
+struct AlwaysContinueMock {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for AlwaysContinueMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // 常に「本文＋末尾 CONTINUE」で継続 → 上限まで回る。各本文は一意（buffer 順で最後を特定）。
+        Ok(text_response(&format!("{ML_PREFIX}{n:03}\nCONTINUE")))
+    }
+}
+
+#[tokio::test]
+async fn scenario_915_max_iterations_flag_only_on_last_delivered_say() {
+    use std::sync::atomic::Ordering;
+    let buf = install_capture();
+    let mock = Arc::new(AlwaysContinueMock {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    fixture.append_message("9190", "MLMARK ずっと続けて（上限まで）");
+
+    // 上限打ち切りまで走る。LLM 呼び出しが 30 回に達する（depth0 上限）まで待つ。
+    let looped = {
+        let mock = mock.clone();
+        wait_until(move || mock.calls.load(Ordering::SeqCst) >= 30).await
+    };
+    assert!(
+        looped,
+        "上限まで回らない（LLM calls={}）",
+        mock.calls.load(Ordering::SeqCst)
+    );
+    // 打ち切り後の決着（ended）猶予。
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    // このターンの mlsay say を buffer 順（配送順）で集める。最後の 1 つが「最後に配送した投稿」。
+    let ml_says: Vec<String> = captured(&buf)
+        .iter()
+        .filter(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(ML_PREFIX))
+        .map(|c| c.message.clone())
+        .filter(|m| !m.is_empty())
+        .collect();
+    assert!(
+        ml_says.len() >= 2,
+        "上限ケースの say が 2 通以上出ていない（実測 {}）: {:?}",
+        ml_says.len(),
+        captured(&buf)
+    );
+    let last_say = ml_says.last().unwrap().clone();
+
+    let completed_on = |id: &str| -> usize {
+        captured(&buf)
+            .iter()
+            .filter(|c| {
+                c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == id
+            })
+            .count()
+    };
+
+    // 🏁 は最後に配送した say に 1・総数 1（§13.3.6 row 16）。現 tip は全 say に付く → 赤。
+    assert_eq!(
+        completed_on(&last_say),
+        1,
+        "🏁 が最後に配送した say に 1 件で付かない（§13.3.6 row 16）: {:?}",
+        captured(&buf)
+    );
+    let total: usize = ml_says.iter().map(|id| completed_on(id)).sum();
+    assert_eq!(
+        total,
+        1,
+        "上限ターンの 🏁 総数が 1 でない（全 say に付いている）: mlsays={}, 🏁総数={}",
+        ml_says.len(),
+        total
+    );
+}
+
+// ---------------------------------------------------------------------------
 // #915 typing【最終投稿後の入力中停止】: 発話ターンで activity ended を受けたら typing keepalive
 // が止まり、失効間隔（8 秒）を跨いでも typing の再送出が 0 であることを観測境界（dry-run
 // kind="typing" のキャプチャ増分）で確定する。単一スレッド実行なので、この待機中に typing が
