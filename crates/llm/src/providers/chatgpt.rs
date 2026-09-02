@@ -735,9 +735,9 @@ impl ChatGptProvider {
             if let Some(content) = Self::message_content_value(&msg.content) {
                 m["content"] = content;
             }
-            if let Some(ref name) = msg.name {
-                m["name"] = serde_json::json!(name);
-            }
+            // #892: Responses API は input item の `name` を受け付けない
+            // （400 Unknown parameter: 'input[N].name'）。話者は本文へ埋め込む方針のため
+            // Message.name は wire に出さない（防御）。
             input.push(m);
         }
 

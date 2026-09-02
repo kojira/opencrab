@@ -304,11 +304,13 @@ pub(crate) fn assemble_typed_messages(items: &[TypedItem]) -> AssembledTyped {
                 relation,
             } => {
                 // #884 PR2 §9.4-2: renderer 生成の固定ラベル 1 行 + 改行 + 本文。
+                // #892: 話者はラベル 1 行に含めるのが正で、Message.name は残さない。
+                // name を残すと ChatGPT Responses API が input item の `name` を 400 で拒否する。
                 let label = user_speech_label(speaker, timestamp, event_ref, relation);
                 Message {
                     role: Role::User,
                     content: Some(MessageContent::Text(format!("{label}\n{content}"))),
-                    name: Some(speaker.clone()),
+                    name: None,
                     function_call: None,
                     tool_calls: None,
                     tool_call_id: None,
