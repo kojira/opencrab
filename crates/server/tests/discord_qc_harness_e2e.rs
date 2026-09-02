@@ -1921,15 +1921,27 @@ async fn scenario_915_reply_then_continue_then_say_flag_only_on_last_say() {
         captured(&buf)
     );
 
-    // 途中の reply は配送された（kind="reply"）。reply には 🏁 を付けない（発端 9153 にも付けない）。
-    let reply_delivered = captured(&buf)
+    // 途中の reply は配送された（kind="reply"・own reply_id あり）。
+    let reply_id = captured(&buf)
         .iter()
-        .any(|c| c.kind == "reply" && c.body.contains(RC_REPLY));
-    assert!(
-        reply_delivered,
-        "途中 reply が配送されない: {:?}",
+        .find(|c| c.kind == "reply" && c.body.contains(RC_REPLY))
+        .map(|c| c.reply_id.clone())
+        .filter(|m| !m.is_empty())
+        .expect("途中 reply の reply_id");
+    // §13.3.6 row 9（非ブロック指摘・DIRECTION-LOG 追加）: 途中 reply の reply_id には 🏁 0。
+    let completed_on_reply = captured(&buf)
+        .iter()
+        .filter(|c| {
+            c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == reply_id
+        })
+        .count();
+    assert_eq!(
+        completed_on_reply,
+        0,
+        "🏁 が途中 reply（reply_id）に誤付与（最終イテレーションの投稿のみ・§13.3.6 row 9）: {:?}",
         captured(&buf)
     );
+    // 発端 9153（reply 先）にも付けない。
     let completed_on_origin = captured(&buf)
         .iter()
         .filter(|c| {
@@ -1939,7 +1951,15 @@ async fn scenario_915_reply_then_continue_then_say_flag_only_on_last_say() {
     assert_eq!(
         completed_on_origin,
         0,
-        "🏁 が発端 9153（reply 先）に誤って付いている（§13.2）: {:?}",
+        "🏁 が発端 9153（reply 先）に誤って付いている（§13.3.6）: {:?}",
+        captured(&buf)
+    );
+    // ターン全体で 🏁 は 1（最終 say のみ・途中 reply/発端は 0）。
+    let total = completed_on_say + completed_on_reply + completed_on_origin;
+    assert_eq!(
+        total,
+        1,
+        "reply→CONTINUE→say の 🏁 総数が 1 でない（§13.3.6 row 9）: {:?}",
         captured(&buf)
     );
 
