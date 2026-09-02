@@ -218,6 +218,14 @@ pub struct EngineResult {
     pub tool_calls_made: usize,
     /// Whether the engine stopped due to hitting the iteration limit.
     pub stopped_by_limit: bool,
+    /// #915: 最終生成で成功した投稿系 utterance-op の最後の call_id。
+    /// 現行の投稿系 operation は reply。reaction/repost/resolve は対象外。
+    #[serde(default)]
+    pub last_posting_utterance_id: Option<String>,
+    /// #915: 上限打ち切り時、打ち切られた最終生成が CONTINUE 本文を配送したか。
+    /// 配送側が保持する最後の say delivery_id を同じ生成の候補として選ぶための内部信号。
+    #[serde(default)]
+    pub last_generation_had_continuation_speech: bool,
     /// XML `<function_calls>` フォールバックで tool calls を復元した回数。
     /// harness 剪定の判断材料（native tool calling で不要になれば 0 になる）。
     #[serde(default)]

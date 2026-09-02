@@ -103,8 +103,9 @@ body(B_REPLY) に scope して自己完結させた。**共有バッファのハ
 3. **LLM 呼び出し回数/イテレーション** — mock カウンタ（`system_prompts().len()`／`AtomicUsize`）。
 4. **残留マーカー** — 配送本文・保存本文・**次プロンプト**（Assistant ロールメッセージ）に
    NO_REPLY/CONTINUE が無い。
-5. **ゲート反応** — 👀🏁🤐❌ の付与先（発端/自分の投稿）と回数。特に「発話が 1 つでもあった
-   ターンに 🤐 を付けない」を発端 message id 相関で（discord_qc のみ観測可）。
+5. **ゲート反応** — 👀🏁🤐❌ の付与先（発端/自分の投稿）と回数。🏁 は count=1、activity ended
+   起点、付け先は core が指定した最終生成の最後の投稿で pin する。あわせて「発話が 1 つでも
+   あったターンに 🤐 を付けない」を発端 message id 相関で確認する（discord_qc のみ観測可）。
 
 **アンチパターン**: エンジン層のモック配送コールバック発火だけで「配送された」と見なさない（§3 の ⚠）。
 実配線（`delivery_effect`→`apply_delivery_effect`→dry-run 配送・speech 保存・system reaction）を通す。

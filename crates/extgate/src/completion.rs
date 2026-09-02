@@ -13,6 +13,7 @@ use opencrab_actions::{
 
 use crate::delivery::apply_delivery_effect;
 use crate::delivery_mode::{adjust_inbound_effect, DeliveryMode};
+use crate::listen::emit_activity;
 use crate::registry::ExtgateState;
 
 /// `session_id_for_binding` と同じ接頭辞。`dispatch_settled` が親セッション判定に使う。
@@ -100,6 +101,17 @@ async fn resume_v3_turn<R: AgentRuntime>(sink: ExtgateCompletionSink<R>, ev: Sub
     let session_id = sink.session_id.clone();
     locks
         .run_serialized(&session_id, async move {
+            let activity_id = uuid::Uuid::new_v4().to_string();
+            emit_activity(
+                &sink.state,
+                &sink.instance_id,
+                &sink.binding_id,
+                &activity_id,
+                "started",
+                None,
+                None,
+            )
+            .await;
             let caller = ev.caller.clone();
             // 発端イベントの origin（subtask spawn 時に捕捉し settlement で持ち回った返信先）。
             // resume ターンの say はこれへ e-tag reply する（gateway は said を送っていないので
@@ -115,6 +127,8 @@ async fn resume_v3_turn<R: AgentRuntime>(sink: ExtgateCompletionSink<R>, ev: Sub
             let dispatch: Arc<dyn SubtaskCompletionSink> = Arc::new(sink.clone());
             let kind_id = sink.kind_id.clone();
             let author_id = sink.author_id.clone();
+            let subtask_starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let last_continuation_say = Arc::new(std::sync::Mutex::new(None::<String>));
             // DI 拡張 §8: resume ターンでも宣言能力を tool set へ載せる（連鎖して更に DI 操作を
             // 呼べるように）。宣言が無ければ None。
             let ops_actions: Option<Arc<dyn opencrab_gateway::GatewayActions>> =
@@ -142,7 +156,50 @@ async fn resume_v3_turn<R: AgentRuntime>(sink: ExtgateCompletionSink<R>, ev: Sub
                         conversation,
                         "extgate",
                         caller.clone(),
-                    );
+                    )
+                    .with_subtask_starts(Arc::clone(&subtask_starts))
+                    .with_on_continuation_speech({
+                        let state = Arc::clone(&sink.state);
+                        let instance_id = sink.instance_id.clone();
+                        let binding_id = sink.binding_id.clone();
+                        let agent_id = sink.agent_id.clone();
+                        let session_id = sink.session_id.clone();
+                        let reply_target = reply_target.clone();
+                        let latest = Arc::clone(&last_continuation_say);
+                        let delivery_mode = sink.delivery_mode;
+                        Arc::new(move |speech: String| {
+                            let state = Arc::clone(&state);
+                            let instance_id = instance_id.clone();
+                            let binding_id = binding_id.clone();
+                            let agent_id = agent_id.clone();
+                            let session_id = session_id.clone();
+                            let reply_target = reply_target.clone();
+                            let latest = Arc::clone(&latest);
+                            Box::pin(async move {
+                                if delivery_mode == DeliveryMode::Say {
+                                    let delivery_id = crate::delivery::deliver_intermediate_say(
+                                        &state,
+                                        &instance_id,
+                                        &binding_id,
+                                        &agent_id,
+                                        &session_id,
+                                        &speech,
+                                        reply_target.as_deref(),
+                                    )
+                                    .await
+                                    .map_err(|e| {
+                                        anyhow::anyhow!(
+                                            "extgate resume intermediate say failed: {}",
+                                            e.code.as_str()
+                                        )
+                                    })?;
+                                    *latest.lock().expect("continuation say id lock") =
+                                        Some(delivery_id);
+                                }
+                                Ok(())
+                            })
+                        })
+                    });
                     // 連鎖: この resume が更に subtask を spawn したら、その完了 say も
                     // 同じ発端 origin へ返せるよう reply_target を引き継ぐ。
                     if let Some(rt) = reply_target.clone() {
@@ -161,6 +218,15 @@ async fn resume_v3_turn<R: AgentRuntime>(sink: ExtgateCompletionSink<R>, ev: Sub
                 },
             )
             .await;
+            let engine_completion = turn.as_ref().and_then(|r| {
+                r.as_ref().ok().map(|er| {
+                    (
+                        er.last_posting_utterance_id.clone(),
+                        er.stopped_by_limit,
+                        er.last_generation_had_continuation_speech,
+                    )
+                })
+            });
             let effect = match turn {
                 Some(r) => delivery_effect(
                     r,
@@ -173,7 +239,7 @@ async fn resume_v3_turn<R: AgentRuntime>(sink: ExtgateCompletionSink<R>, ev: Sub
                 None => opencrab_actions::DeliveryEffect::Empty,
             };
             let effect = adjust_inbound_effect(sink.delivery_mode, effect);
-            apply_delivery_effect(
+            let final_say_id = apply_delivery_effect(
                 &sink.state,
                 &sink.instance_id,
                 &sink.binding_id,
@@ -181,6 +247,37 @@ async fn resume_v3_turn<R: AgentRuntime>(sink: ExtgateCompletionSink<R>, ev: Sub
                 &sink.session_id,
                 effect,
                 reply_target.as_deref(),
+            )
+            .await;
+            let started_subtask = subtask_starts.load(std::sync::atomic::Ordering::SeqCst) > 0;
+            // §13.3.1 案E: 進行中判定は agent 単位（別 session の未決着 subtask も含む）。
+            let agent_has_running = sink.runtime.has_running_subtask_for_agent(&sink.agent_id);
+            let completed_target = if started_subtask || agent_has_running {
+                None
+            } else {
+                engine_completion.and_then(|(last_reply, stopped_by_limit, final_had_speech)| {
+                    if stopped_by_limit {
+                        if final_had_speech {
+                            last_continuation_say
+                                .lock()
+                                .expect("continuation say id lock")
+                                .clone()
+                        } else {
+                            last_reply
+                        }
+                    } else {
+                        final_say_id.or(last_reply)
+                    }
+                })
+            };
+            emit_activity(
+                &sink.state,
+                &sink.instance_id,
+                &sink.binding_id,
+                &activity_id,
+                "ended",
+                None,
+                completed_target.as_deref(),
             )
             .await;
         })

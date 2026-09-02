@@ -785,6 +785,7 @@ fn enqueue_turn<R: AgentRuntime>(
                     &activity_id,
                     "started",
                     Some(origin.as_str()),
+                    None,
                 )
                 .await;
                 let caller = match state.db.lock() {
@@ -807,6 +808,8 @@ fn enqueue_turn<R: AgentRuntime>(
                 } else {
                     format!("{system}\n\n{prompt_suffix}")
                 };
+                let subtask_starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let last_continuation_say = Arc::new(std::sync::Mutex::new(None::<String>));
                 let turn_res = {
                     let runtime = runtime.clone();
                     let session_id = session_id.clone();
@@ -829,6 +832,8 @@ fn enqueue_turn<R: AgentRuntime>(
                     let hook_agent = agent_id.clone();
                     let hook_session = session_id.clone();
                     let hook_reply = reply_target.clone();
+                    let hook_subtask_starts = Arc::clone(&subtask_starts);
+                    let hook_last_continuation_say = Arc::clone(&last_continuation_say);
                     tokio::spawn(async move {
                         let inbound = NormalizedInbound {
                             session_id: &session_id,
@@ -896,6 +901,7 @@ fn enqueue_turn<R: AgentRuntime>(
                                 // resume ターンの say がこの origin へ返信できるようにする
                                 // （settlement→SubtaskSettled.reply_target 経由）。
                                 .with_reply_target(origin.clone())
+                                .with_subtask_starts(Arc::clone(&hook_subtask_starts))
                                 // #898 §12.2/§13.1 j: 末尾 CONTINUE の途中発話をループ中に配送・保存する。
                                 // 最終応答と同じ経路（send_text = say 配送＋speech 保存）を通し、Say モード
                                 // のみ配送（ToolDriven は say 抑止＝reply DI operation が配送を担う）。
@@ -908,6 +914,7 @@ fn enqueue_turn<R: AgentRuntime>(
                                     let hse = hook_session.clone();
                                     let hr = hook_reply.clone();
                                     let dm = delivery_mode;
+                                    let latest = Arc::clone(&hook_last_continuation_say);
                                     Arc::new(move |speech: String| {
                                         let hs = Arc::clone(&hs);
                                         let hi = hi.clone();
@@ -915,24 +922,28 @@ fn enqueue_turn<R: AgentRuntime>(
                                         let ha = ha.clone();
                                         let hse = hse.clone();
                                         let hr = hr.clone();
+                                        let latest = Arc::clone(&latest);
                                         Box::pin(async move {
                                             if dm == DeliveryMode::Say {
-                                                crate::delivery::deliver_intermediate_say(
-                                                    &hs,
-                                                    &hi,
-                                                    &hb,
-                                                    &ha,
-                                                    &hse,
-                                                    &speech,
-                                                    hr.as_deref(),
-                                                )
-                                                .await
-                                                .map_err(|e| {
-                                                    anyhow::anyhow!(
-                                                        "extgate intermediate say failed: {}",
-                                                        e.code.as_str()
+                                                let delivery_id =
+                                                    crate::delivery::deliver_intermediate_say(
+                                                        &hs,
+                                                        &hi,
+                                                        &hb,
+                                                        &ha,
+                                                        &hse,
+                                                        &speech,
+                                                        hr.as_deref(),
                                                     )
-                                                })?;
+                                                    .await
+                                                    .map_err(|e| {
+                                                        anyhow::anyhow!(
+                                                            "extgate intermediate say failed: {}",
+                                                            e.code.as_str()
+                                                        )
+                                                    })?;
+                                                *latest.lock().expect("continuation say id lock") =
+                                                    Some(delivery_id);
                                             }
                                             Ok(())
                                         })
@@ -957,6 +968,15 @@ fn enqueue_turn<R: AgentRuntime>(
                 };
                 match turn_res {
                     Ok(turn) => {
+                        let engine_completion = turn.as_ref().and_then(|r| {
+                            r.as_ref().ok().map(|er| {
+                                (
+                                    er.last_posting_utterance_id.clone(),
+                                    er.stopped_by_limit,
+                                    er.last_generation_had_continuation_speech,
+                                )
+                            })
+                        });
                         let effect = match turn {
                             Some(r) => delivery_effect(
                                 r,
@@ -971,7 +991,7 @@ fn enqueue_turn<R: AgentRuntime>(
                         let effect = adjust_inbound_effect(delivery_mode, effect);
                         // 単一メンションは発端 origin を say payload に明示（gateway が e-tag reply）。
                         // bundle は None（gateway が standalone post で publish・row292）。
-                        apply_delivery_effect(
+                        let final_say_id = apply_delivery_effect(
                             &state,
                             &instance_id,
                             &binding_id,
@@ -981,6 +1001,33 @@ fn enqueue_turn<R: AgentRuntime>(
                             reply_target.as_deref(),
                         )
                         .await;
+                        let started_subtask =
+                            subtask_starts.load(std::sync::atomic::Ordering::SeqCst) > 0;
+                        // §13.3.1 案E: 進行中判定は**エージェント単位**（別 session の未決着 subtask
+                        // も含む）。agent-scope は本 session の subtask も内包するので session-scope の
+                        // 上位互換。1 つでも走行中なら idle でない＝completed_target を送らない。
+                        let agent_has_running =
+                            runtime.has_running_subtask_for_agent(&agent_id);
+                        let completed_target = if started_subtask || agent_has_running {
+                            None
+                        } else {
+                            engine_completion.and_then(
+                                |(last_reply, stopped_by_limit, final_had_speech)| {
+                                    if stopped_by_limit {
+                                        if final_had_speech {
+                                            last_continuation_say
+                                                .lock()
+                                                .expect("continuation say id lock")
+                                                .clone()
+                                        } else {
+                                            last_reply
+                                        }
+                                    } else {
+                                        final_say_id.or(last_reply)
+                                    }
+                                },
+                            )
+                        };
                         // 決着（say/reply/no_reply）の配送**後**に activity ended を出す（統括裁定A
                         // 2026-08-31）。これで say フレームが ended より先に gateway へ届き、返信ターンは
                         // saw_say=true になってから ended を見るので、gate-client の CompletedNoReply が
@@ -992,6 +1039,7 @@ fn enqueue_turn<R: AgentRuntime>(
                             &activity_id,
                             "ended",
                             None,
+                            completed_target.as_deref(),
                         )
                         .await;
                     }
@@ -1005,6 +1053,7 @@ fn enqueue_turn<R: AgentRuntime>(
                             &binding_id,
                             &activity_id,
                             "ended",
+                            None,
                             None,
                         )
                         .await;

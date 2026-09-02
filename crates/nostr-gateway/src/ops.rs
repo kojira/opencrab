@@ -210,7 +210,13 @@ impl InvokeHandler for NostrInvokeHandler {
         matches!(operation, "reply" | "reaction" | "repost")
     }
 
-    async fn handle(&self, _binding_id: &str, operation: &str, payload: &Value) -> InvokeOutcome {
+    async fn handle(
+        &self,
+        _call_id: &str,
+        _binding_id: &str,
+        operation: &str,
+        payload: &Value,
+    ) -> InvokeOutcome {
         // QC ハーネス（dry-run）: invoke を nostaro を spawn せず処理する。publish 系（発話
         // reply/reaction/repost や書き込み）は本文・種別を残して成功 ack し、実配線 E2E で
         // 配送を観測できる。read（resolve・照会クラス）は生 JSON 取得の代わりに短縮参照を

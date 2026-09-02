@@ -1245,6 +1245,8 @@ pub async fn emit_activity(
     activity_state: &str,
     // R2(👀): started が読み取るターン発端の origin。started のときだけ Some を渡す（ended は None）。
     origin: Option<&str>,
+    // #915: ended で 🏁 を付ける say delivery_id / reply call_id。無ければ field を送らない。
+    completed_target: Option<&str>,
 ) {
     let writer = {
         let Ok(reg) = state.lock_registry() else {
@@ -1260,7 +1262,13 @@ pub async fn emit_activity(
     };
     let _ = write_json(
         &writer,
-        &activity_frame(binding_id, activity_id, activity_state, origin),
+        &activity_frame(
+            binding_id,
+            activity_id,
+            activity_state,
+            origin,
+            completed_target,
+        ),
     )
     .await;
 }

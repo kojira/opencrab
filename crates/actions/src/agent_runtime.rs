@@ -116,6 +116,14 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
     /// `cancel_subtask` と同じ Arc を見るために使う。新機構ではない。
     fn subtask_registry_for(&self, session_id: &str) -> crate::SubtaskRegistry;
 
+    /// #915: このエージェントに未決着 subtask が 1 つでもあるか（session を跨ぐ・agent 単位 idle
+    /// 判定・§13.3.1 案E）。🏁 は「エージェントがもう何もしていない」印なので、別 session で走る
+    /// subtask があるターンの投稿には付けない。既定は `false`（agent-scope 集計を持たないテスト
+    /// runtime 用）。実 runtime（AppState）は `subtask_registries.has_running_for_agent` を返す。
+    fn has_running_subtask_for_agent(&self, _agent_id: &str) -> bool {
+        false
+    }
+
     /// ゲートウェイから受信した発言をセッションログへ記録する。**記録できたら `true`**。
     ///
     /// 由来（`metadata_json` の `source`）は [`TranscriptSource`] で受ける。行の形は

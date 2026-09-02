@@ -101,6 +101,11 @@ pub struct GatewayCallContext {
     /// 既定 `None`（後方互換 — 宛先を明示するツール呼び出しは従来どおり動く）。
     /// `None` かつ引数も無い場合は空文字で送らず明示エラーにする（fail-closed）。
     pub reply_target: Option<String>,
+    /// #915: この実行を起こした engine の tool_call.id。発話クラス op（reply 等）を invoke する
+    /// とき、この id を invoke フレームの call_id に採用して「engine → invoke → gateway」で発話 id を
+    /// 一意に保つ（🏁 の付け先を core が completed_target で名指せるようにする）。既定 `None`
+    /// （後方互換 — id を持たない直接呼び出しは合成 uuid にフォールバック）。
+    pub tool_call_id: Option<String>,
 }
 
 impl std::fmt::Debug for GatewayCallContext {
@@ -128,6 +133,7 @@ impl GatewayCallContext {
             agent_id: agent_id.into(),
             root_gateway: None,
             reply_target: None,
+            tool_call_id: None,
         }
     }
 

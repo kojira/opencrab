@@ -126,6 +126,10 @@ impl AgentRuntime for AppState {
         self.subtask_registries.registry_for(session_id)
     }
 
+    fn has_running_subtask_for_agent(&self, agent_id: &str) -> bool {
+        self.subtask_registries.has_running_for_agent(agent_id)
+    }
+
     // ---- 転記（#42: 行の形は transcript モジュールが所有。#158 S3 で gateway 非依存に）
 
     /// #284 P0-3: ユーザー発言の記録だけは成否を返す（他の転記は best-effort のまま）。

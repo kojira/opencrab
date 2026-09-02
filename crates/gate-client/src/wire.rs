@@ -144,6 +144,9 @@ pub struct Activity {
     /// 載せる（1-said-1-turn）。additive field（DESIGN-EXTGATE-V3 §「認識しない field は無視」）
     /// なので、origin を送らない旧 core / これを見ない旧 gateway とも互換。ended・未載時は None。
     pub origin: Option<String>,
+    /// #915: ended で完了サインを付ける発話 id（say delivery_id / reply call_id）。
+    /// additive field なので旧 core の欠落は None。
+    pub completed_target: Option<String>,
 }
 
 /// R3(❌): core→gate のターン失敗通知（DeliveryEffect::Failed）。id を持たない fire-and-forget
@@ -400,11 +403,17 @@ fn parse_activity(obj: &Value) -> Result<Activity, FrameError> {
         Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
         Some(_) => return Err(FrameError::BadRequest),
     };
+    let completed_target = match obj.get("completed_target") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
+        Some(_) => return Err(FrameError::BadRequest),
+    };
     Ok(Activity {
         binding_id,
         activity_id,
         state,
         origin,
+        completed_target,
     })
 }
 
@@ -560,6 +569,7 @@ mod tests {
             CoreMsg::Activity(a) => {
                 assert_eq!(a.state, "started");
                 assert_eq!(a.origin.as_deref(), Some("omo-1"));
+                assert_eq!(a.completed_target, None);
             }
             other => panic!("{other:?}"),
         }
@@ -573,6 +583,23 @@ mod tests {
             CoreMsg::Activity(a) => {
                 assert_eq!(a.state, "ended");
                 assert_eq!(a.origin, None);
+                assert_eq!(a.completed_target, None);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_activity_ended_carries_completed_target() {
+        let raw = br#"{"m":"activity","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","activity_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","state":"ended","completed_target":"cccccccc-cccc-4ccc-8ccc-cccccccccccc"}"#;
+        match parse_frame_bytes(raw).unwrap() {
+            CoreMsg::Activity(a) => {
+                assert_eq!(a.state, "ended");
+                assert_eq!(a.origin, None);
+                assert_eq!(
+                    a.completed_target.as_deref(),
+                    Some("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+                );
             }
             other => panic!("{other:?}"),
         }

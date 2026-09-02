@@ -44,7 +44,7 @@ pub struct InstanceConfig {
 /// gateway が自動付与する system reaction の絵文字集合（設計 v17 §6.3・D17-12）。
 ///
 /// - `accepted`（👀）: said を core が受理した時点で発端メッセージへ付ける（受理サイン＝gateway の責務）。
-/// - `completed`（🏁）: 発端メッセージへの返信（say）を配送し終えた時点で付ける。
+/// - `completed`（🏁）: activity ended で core が指定した最終生成の最後の投稿へ 1 件付ける。
 /// - `failed`（❌）: 発端メッセージへの返信配送が失敗した時点で付ける。
 /// - `no_reply`（🤐）: ターンが沈黙（say 無し）で終えた時点で発端メッセージへ付ける
 ///   （`CompletedNoReply` の reply_origin が Single のときだけ・裁定A で真の沈黙だけに立つ）。

@@ -782,7 +782,10 @@ impl BridgedExecutor {
 
     /// dispatcher の CallerIdentity を gateway 境界の型付き caller に写像する。
     /// CoAgent の agent_id は保存する（旧 `__caller` 文字列注入では落ちていた）。
-    fn gateway_call_context(&self) -> opencrab_gateway::GatewayCallContext {
+    fn gateway_call_context(
+        &self,
+        tool_call_id: Option<&str>,
+    ) -> opencrab_gateway::GatewayCallContext {
         let caller = match &self.context.caller {
             crate::traits::CallerIdentity::Owner => opencrab_gateway::GatewayCaller::Owner,
             crate::traits::CallerIdentity::Agent => opencrab_gateway::GatewayCaller::Agent,
@@ -808,6 +811,10 @@ impl BridgedExecutor {
             // inbound の返信先を gateway 実装まで運ぶ（#158 S1）。宛先を引数で受ける
             // アクションが、引数省略時のフォールバックとして読む。
             reply_target: self.reply_target.clone(),
+            // #915: engine の tool_call.id を発話 op invoke の call_id へ伝播する。
+            tool_call_id: tool_call_id
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
         }
     }
 
@@ -848,7 +855,12 @@ impl BridgedExecutor {
 
     /// 実際のディスパッチ本体（dispatcher → gateway fallback）。
     /// instrumentation は `ActionExecutor::execute` 側で wrap する。
-    async fn dispatch_inner(&self, name: &str, args: &serde_json::Value) -> CoreActionResult {
+    async fn dispatch_inner(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        tool_call_id: Option<&str>,
+    ) -> CoreActionResult {
         // 可視性（list_tools）と同じポリシー表を実行時にも強制する（#45）。
         // 一覧から隠しただけでは、モデルが名前を記憶で呼んだ場合に素通しになる。
         let reject = |msg: String| CoreActionResult {
@@ -890,7 +902,7 @@ impl BridgedExecutor {
         // unknown を返す前に処理する（名前空間は dispatcher/gateway と重ならない）。
         if name.starts_with(MCP_TOOL_PREFIX) {
             if let Some(ref mcp) = self.mcp_actions {
-                let ctx = self.gateway_call_context();
+                let ctx = self.gateway_call_context(tool_call_id);
                 let r = mcp.execute(name, args, &ctx).await;
                 return CoreActionResult {
                     success: r.success,
@@ -914,7 +926,7 @@ impl BridgedExecutor {
         // Fallback to gateway actions.
         if let Some(ref gw) = self.gateway_actions {
             // 実行コンテキストは型付きで渡す。LLM 由来の args には混ぜない（#36）。
-            let ctx = self.gateway_call_context();
+            let ctx = self.gateway_call_context(tool_call_id);
             let gw_result = gw.execute(name, args, &ctx).await;
             return CoreActionResult {
                 success: gw_result.success,
@@ -948,7 +960,7 @@ impl BridgedExecutor {
         let Some(sink) = self.tool_event_sink.clone() else {
             let started_at = chrono::Utc::now().to_rfc3339();
             let start = std::time::Instant::now();
-            let result = self.dispatch_inner(name, args).await;
+            let result = self.dispatch_inner(name, args, tool_call_id).await;
             self.write_tool_log(
                 name,
                 args,
@@ -988,7 +1000,7 @@ impl BridgedExecutor {
             error: None,
         });
         let start = std::time::Instant::now();
-        let result = self.dispatch_inner(name, args).await;
+        let result = self.dispatch_inner(name, args, Some(call_id)).await;
         let duration_ms = start.elapsed().as_millis() as u64;
         let status = if result.success {
             ToolEventStatus::Completed
@@ -3180,7 +3192,7 @@ mod tests {
     async fn test_gateway_ctx_reply_target_none_by_default() {
         let (_dir, ctx) = test_context();
         let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx);
-        assert!(executor.gateway_call_context().reply_target.is_none());
+        assert!(executor.gateway_call_context(None).reply_target.is_none());
     }
 
     /// #158 S1: Nostr 経路（`RunRequest.reply_target` を載せる gateway）で、`process.rs`
@@ -3229,7 +3241,7 @@ mod tests {
         // 到達しないため、ここでは gateway_call_context() の生成結果を直接確認する。
         let (_dir, ctx) = test_context();
         let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx);
-        let call_ctx = executor.gateway_call_context();
+        let call_ctx = executor.gateway_call_context(None);
         assert!(
             call_ctx.root_gateway.is_none(),
             "no gateway_actions => root_gateway must stay None (backward compatible)"

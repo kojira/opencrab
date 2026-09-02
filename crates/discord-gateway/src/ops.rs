@@ -7,15 +7,35 @@
 //! 通常発言（say）は能力ではなく素の本文＝[`crate::post`]。system reaction と emoji 詳細スキーマは
 //! D17-05/D17-12（profile data）裁定後の後続スライス。
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use tokio::sync::Mutex;
 
 use opencrab_gate_client::{InvokeHandler, InvokeOutcome};
 
 use crate::map::parse_origin;
 use crate::transport::{DiscordTransport, TransportOutcome};
+
+/// #915: 1 binding 内の発話 id → Discord 投稿先。発話 id は既存の say delivery_id /
+/// reply call_id をそのまま使う。
+pub(crate) type DeliveryTargets = Arc<Mutex<HashMap<String, (String, String)>>>;
+/// 1 instance が複数 binding を持てるため、binding ごとの対応表を共有する。
+pub(crate) type BindingDeliveryTargets = Arc<Mutex<HashMap<String, DeliveryTargets>>>;
+
+pub(crate) async fn targets_for(
+    targets: &BindingDeliveryTargets,
+    binding_id: &str,
+) -> DeliveryTargets {
+    targets
+        .lock()
+        .await
+        .entry(binding_id.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(HashMap::new())))
+        .clone()
+}
 
 /// hello の `operations` 配列（§7.2・フェーズ1最小・name UTF-8 昇順）。
 pub fn operation_declarations() -> Value {
@@ -67,11 +87,22 @@ pub fn operation_declarations() -> Value {
 /// Discord の invoke handler。短縮参照解決済み payload を Discord REST（transport）へ写す。
 pub struct DiscordInvokeHandler {
     transport: Arc<dyn DiscordTransport>,
+    targets: BindingDeliveryTargets,
 }
 
 impl DiscordInvokeHandler {
     pub fn new(transport: Arc<dyn DiscordTransport>) -> Self {
-        Self { transport }
+        Self {
+            transport,
+            targets: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub(crate) fn with_targets(
+        transport: Arc<dyn DiscordTransport>,
+        targets: BindingDeliveryTargets,
+    ) -> Self {
+        Self { transport, targets }
     }
 }
 
@@ -130,7 +161,13 @@ impl InvokeHandler for DiscordInvokeHandler {
         matches!(operation, "reply" | "reaction")
     }
 
-    async fn handle(&self, _binding_id: &str, operation: &str, payload: &Value) -> InvokeOutcome {
+    async fn handle(
+        &self,
+        call_id: &str,
+        binding_id: &str,
+        operation: &str,
+        payload: &Value,
+    ) -> InvokeOutcome {
         match operation {
             "reply" => {
                 let (Some(event), Some(text)) =
@@ -141,7 +178,17 @@ impl InvokeHandler for DiscordInvokeHandler {
                 let Some((ch, msg)) = parse_origin(event) else {
                     return InvokeOutcome::Rejected;
                 };
-                to_invoke_outcome(deliver_reply(&self.transport, &ch, &msg, text).await)
+                let outcome = deliver_reply(&self.transport, &ch, &msg, text).await;
+                if let TransportOutcome::Ok(result) = &outcome {
+                    if let Some(message_id) = result.get("message_id").and_then(Value::as_str) {
+                        targets_for(&self.targets, binding_id)
+                            .await
+                            .lock()
+                            .await
+                            .insert(call_id.to_string(), (ch.clone(), message_id.to_string()));
+                    }
+                }
+                to_invoke_outcome(outcome)
             }
             "reaction" => {
                 let (Some(event), Some(emoji)) =
@@ -178,6 +225,10 @@ impl InvokeHandler for DiscordInvokeHandler {
 mod tests {
     use super::*;
     use crate::transport::DryRunTransport;
+
+    fn dry_run_handler() -> DiscordInvokeHandler {
+        DiscordInvokeHandler::new(Arc::new(DryRunTransport))
+    }
 
     #[test]
     fn declarations_are_sorted_and_three_callback_free() {
@@ -239,35 +290,46 @@ mod tests {
 
     #[tokio::test]
     async fn missing_fields_are_rejected_without_io() {
-        let h = DiscordInvokeHandler::new(Arc::new(DryRunTransport));
+        let h = dry_run_handler();
         assert!(matches!(
-            h.handle("b", "reply", &json!({"event": "discord:message:v1:1:2"}))
-                .await,
+            h.handle(
+                "c1",
+                "b",
+                "reply",
+                &json!({"event": "discord:message:v1:1:2"})
+            )
+            .await,
             InvokeOutcome::Rejected
         ));
         assert!(matches!(
-            h.handle("b", "reaction", &json!({"event": "discord:message:v1:1:2"}))
-                .await,
+            h.handle(
+                "c2",
+                "b",
+                "reaction",
+                &json!({"event": "discord:message:v1:1:2"})
+            )
+            .await,
             InvokeOutcome::Rejected
         ));
         // event が origin でない（未解決/不正）→ Rejected。
         assert!(matches!(
-            h.handle("b", "reply", &json!({"event": "e7", "text": "hi"}))
+            h.handle("c3", "b", "reply", &json!({"event": "e7", "text": "hi"}))
                 .await,
             InvokeOutcome::Rejected
         ));
         // 宣言外 operation は fail-closed。
         assert!(matches!(
-            h.handle("b", "delete", &json!({})).await,
+            h.handle("c4", "b", "delete", &json!({})).await,
             InvokeOutcome::Rejected
         ));
     }
 
     #[tokio::test]
     async fn valid_reply_reaction_resolve_reach_transport() {
-        let h = DiscordInvokeHandler::new(Arc::new(DryRunTransport));
+        let h = dry_run_handler();
         assert!(matches!(
             h.handle(
+                "c1",
                 "b",
                 "reply",
                 &json!({"event": "discord:message:v1:100:200", "text": "hi"})
@@ -277,6 +339,7 @@ mod tests {
         ));
         assert!(matches!(
             h.handle(
+                "c2",
                 "b",
                 "reaction",
                 &json!({"event": "discord:message:v1:100:200", "emoji": "👍"})
@@ -287,6 +350,7 @@ mod tests {
         // resolve eN（origin）。
         assert!(matches!(
             h.handle(
+                "c3",
                 "b",
                 "resolve",
                 &json!({"ref": "discord:message:v1:100:200"})
@@ -296,14 +360,45 @@ mod tests {
         ));
         // resolve uN（snowflake）。
         assert!(matches!(
-            h.handle("b", "resolve", &json!({"ref": "222"})).await,
+            h.handle("c4", "b", "resolve", &json!({"ref": "222"})).await,
             InvokeOutcome::Ok(_)
         ));
         // resolve が origin でも snowflake でもない → Rejected。
         assert!(matches!(
-            h.handle("b", "resolve", &json!({"ref": "garbage"})).await,
+            h.handle("c5", "b", "resolve", &json!({"ref": "garbage"}))
+                .await,
             InvokeOutcome::Rejected
         ));
+    }
+
+    #[tokio::test]
+    async fn only_successful_reply_registers_completed_target() {
+        let targets: BindingDeliveryTargets = Arc::new(Mutex::new(HashMap::new()));
+        let h = DiscordInvokeHandler::with_targets(Arc::new(DryRunTransport), Arc::clone(&targets));
+        assert!(matches!(
+            h.handle(
+                "reply-call",
+                "binding",
+                "reply",
+                &json!({"event": "discord:message:v1:100:200", "text": "hi"})
+            )
+            .await,
+            InvokeOutcome::Ok(_)
+        ));
+        assert!(matches!(
+            h.handle(
+                "reaction-call",
+                "binding",
+                "reaction",
+                &json!({"event": "discord:message:v1:100:200", "emoji": "👍"})
+            )
+            .await,
+            InvokeOutcome::Ok(_)
+        ));
+        let binding = targets_for(&targets, "binding").await;
+        let binding = binding.lock().await;
+        assert!(binding.contains_key("reply-call"));
+        assert!(!binding.contains_key("reaction-call"));
     }
 
     #[tokio::test]

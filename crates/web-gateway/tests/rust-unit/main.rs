@@ -219,6 +219,7 @@ async fn rust_unit_say_ok_external_rejected_close() {
     assert_eq!(
         ev,
         opencrab_web_gateway::v3::client::LiveEvent::Message {
+            delivery_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd".into(),
             text: "reply".into(),
             reply_origin: None,
         }

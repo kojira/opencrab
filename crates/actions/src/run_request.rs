@@ -138,8 +138,8 @@ pub struct RunRequest {
     /// 登録簿を後から覗く形にしないのは、run が返る前に決着した subtask が既に
     /// 除去されていて取りこぼす（＝まさに resume が来るケースを見落とす）ため。
     ///
-    /// `None`（既定）なら数えない。使うのは Discord の「発言終わり」判定だけで、
-    /// 他のゲートウェイは渡さない。
+    /// `None`（既定）なら数えない。Discord の legacy 経路と extgate の activity ended
+    /// `completed_target` 判定が、spawn を起こしたターンを idle と誤認しないために使う。
     pub subtask_starts: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 

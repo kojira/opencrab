@@ -1977,7 +1977,9 @@ async fn scenario_915_reply_then_continue_then_say_flag_only_on_last_say() {
 // ターンなので 🤐 も 0。ルール: 🏁 は「ツール呼び出しも CONTINUE も含まない最終生成の自分の
 // 投稿」にだけ付く。最終生成に投稿が無ければ付けない。
 // ---------------------------------------------------------------------------
-const SCN_SAY: &str = "scncont-途中の本文（最終は NO_REPLY）";
+// 本文中に "NO_REPLY"/"CONTINUE" の部分文字列を含めない（含めるとサニタイザに途中で切られ、
+// 継続ではなく本文＋末尾 NO_REPLY（row 12）扱いになる）。
+const SCN_SAY: &str = "scncont-途中で続ける本文だよ";
 
 struct SayContinueThenNoReplyMock {
     calls: std::sync::atomic::AtomicUsize,
@@ -2855,7 +2857,7 @@ impl LlmProvider for ShellSleepCrossMock {
         {
             return Ok(tool_call_response(
                 "execute_shell",
-                serde_json::json!({ "command": "sleep", "args": ["3"] }),
+                serde_json::json!({ "command": "sleep", "args": ["8"] }),
             ));
         }
         Ok(text_response("xsfiller"))
@@ -2909,7 +2911,17 @@ async fn scenario_915_other_session_subtask_in_progress_no_flag() {
         .await
     };
     assert!(b_ready, "B の通常 say が出ない: {:?}", captured(&buf));
-    // 決着（🏁 付与）の猶予。この間 subtask は保留のまま（release していない）。
+    // false-red 防止（統括指摘）: B の 🏁 判定は B の activity ended（B の say 直後）で行われる。
+    // その時点で A の subtask（sleep 8）が走行中であることを明示確認する。走行中でなければ sleep 窓を
+    // 過ぎており、B が正しく 🏁 を得た（＝テスト前提崩れ）ので、assert ではなくこの確認で弾く。
+    assert!(
+        core.state
+            .subtask_registries
+            .has_running_for_agent(AGENT_ID),
+        "B 判定時点で A の subtask が走行中でない（sleep 窓を過ぎた・テスト前提崩れ）: {:?}",
+        captured(&buf)
+    );
+    // 決着（🏁 付与）の猶予。この間 subtask は sleep 8 で保留のまま。
     tokio::time::sleep(Duration::from_millis(600)).await;
 
     let b_mid = captured(&buf)

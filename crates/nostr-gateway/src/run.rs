@@ -185,7 +185,9 @@ fn spawn_say_consumer(
     tokio::spawn(async move {
         loop {
             match client.next_live(&address).await {
-                Some(LiveEvent::Message { text, reply_origin }) => {
+                Some(LiveEvent::Message {
+                    text, reply_origin, ..
+                }) => {
                     let secret_ref = secret.as_ref().map(|s| s.as_str());
                     match post::deliver_say(
                         &nostaro_bin,

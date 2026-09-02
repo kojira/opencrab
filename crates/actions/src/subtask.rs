@@ -3242,8 +3242,8 @@ mod tests {
 
     /// #431: auto-dispatch が親ターンの subtask 起動カウンタを進める。
     ///
-    /// Discord の「発言終わり」🏁 はこの数が `0` かどうかだけで「次の行動を選ばずに
-    /// 終わったターンか」を判定する。ここが進まないと、掘削を投げたターンに 🏁 が付き
+    /// Discord legacy と extgate の 🏁 判定は、この数で「この run が subtask を起こしたか」を
+    /// 判定する（V3 はさらに未決着 subtask の有無も見る）。ここが進まないと、掘削を投げたターンに 🏁 が付き
     /// 『調べますね🏁』の数分後に続きが届く逆情報になる。
     #[tokio::test]
     async fn dispatch_counts_the_subtask_start_for_the_parent_turn() {
