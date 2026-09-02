@@ -470,6 +470,8 @@ impl SkillEngine {
         let mut iterations = 0;
         let mut total_tool_calls = 0;
         let mut xml_fallback_parses = 0;
+        // #898 §13.1 a: 空 CONTINUE（本文なし・継続）の連続回数。3 連続で解析 warn を 1 行出す。
+        let mut consecutive_empty_continue: usize = 0;
 
         loop {
             iterations += 1;
@@ -733,6 +735,21 @@ impl SkillEngine {
             }
             if let Some(new_content) = stripped_content {
                 content = new_content;
+            }
+
+            // #898 §13.1 a: 空 CONTINUE（本文なし・継続）の連鎖を数える。3 連続で解析 warn を 1 行
+            // 出す（停止はしない・上限は既存 max_iterations）。非空生成・非継続でリセットする。
+            if continue_requested && content.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                consecutive_empty_continue += 1;
+                if consecutive_empty_continue == 3 {
+                    tracing::warn!(
+                        target: crate::continue_marker::CONTINUE_LOG_TARGET,
+                        iteration = iterations,
+                        "空 CONTINUE 連続 3 回（解析用・停止しない・§13.1 a）"
+                    );
+                }
+            } else {
+                consecutive_empty_continue = 0;
             }
 
             // Fire on_response_text for every LLM reply that has non-empty text.
