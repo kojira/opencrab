@@ -47,8 +47,7 @@ pub use bridge::{
 };
 pub use channel_config::apply_discord_channel_config;
 pub use continue_marker::{
-    strip_continue_marker, visible_speech_after_markers, ContinueMarker, CONTINUE_LOG_TARGET,
-    CONTINUE_MIDTEXT_TAG, CONTINUE_SENTINEL,
+    strip_trailing_continue, visible_speech_after_markers, CONTINUE_LOG_TARGET, CONTINUE_SENTINEL,
 };
 pub use dispatcher::ActionDispatcher;
 pub use no_reply::{

@@ -690,26 +690,24 @@ impl SkillEngine {
                 }
             }
 
-            // #890 §11: 末尾 CONTINUE マーカーの検出と剥がし。末尾（空白除去後の最後の行/
-            // トークン）が CONTINUE なら「このターンを続ける意思」とみなし、剥がして次イテレー
-            // ションへ進む（継続を起こすのは text-only 経路のみ・下の最終応答分岐で `continue`）。
-            // ツール呼び出しと併記された場合はツール経路が優先し、マーカーは剥がすだけ。NO_REPLY
-            // が同居する場合は NO_REPLY 優先で終端する（継続しない・剥がしは配送層が担う）。末尾
-            // 以外の出現は剥がさず継続もしない（WARN は DeliveryContext を持つ配送層が出す）。
+            // #890 §11 / §11.7: content の最終行が CONTINUE 単独なら「このターンを続ける意思」と
+            // みなし、その行を剥がして次イテレーションへ進む（継続を起こすのは text-only 経路のみ・
+            // 下の最終応答分岐で `continue`）。ツール呼び出しと併記された場合はツール経路が優先し、
+            // マーカーは剥がすだけ。NO_REPLY が同居する場合は NO_REPLY 優先で終端する（継続しない・
+            // 剥がしは配送層が担う）。同一行併記・途中出現は継続もしない（WARN は配送層が出す）。
             // 剥がしは on_response_text 配送前・会話保存前に行う（§11.6: マーカーを残さない）。
             let mut continue_requested = false;
             let mut stripped_content: Option<Option<String>> = None;
             if let Some(c) = content.as_deref() {
-                let no_reply_terminates = c.contains(crate::continue_marker::NO_REPLY_SENTINEL);
-                let marker = crate::continue_marker::strip_continue_marker(c);
-                if marker.at_tail() && !no_reply_terminates {
-                    continue_requested = true;
-                    let kept = marker.into_kept();
-                    stripped_content = Some(if kept.trim().is_empty() {
-                        None
-                    } else {
-                        Some(kept)
-                    });
+                if !c.contains(crate::continue_marker::NO_REPLY_SENTINEL) {
+                    if let Some(body) = crate::continue_marker::strip_trailing_continue(c) {
+                        continue_requested = true;
+                        stripped_content = Some(if body.is_empty() {
+                            None
+                        } else {
+                            Some(body.to_string())
+                        });
+                    }
                 }
             }
             if let Some(new_content) = stripped_content {
@@ -2959,7 +2957,10 @@ mod tests {
             "最終行が CONTINUE 単独でなければ継続しない"
         );
         assert_eq!(result.iterations, 1);
-        assert_eq!(result.response, BODY, "同一行併記は本文そのまま（マーカー扱いしない）");
+        assert_eq!(
+            result.response, BODY,
+            "同一行併記は本文そのまま（マーカー扱いしない）"
+        );
     }
 
     /// (g) NO_REPLY＋CONTINUE 同時末尾 → NO_REPLY 優先で終端（継続しない・chat 1）。
@@ -3024,6 +3025,58 @@ mod tests {
         assert!(
             no_continue_in_requests(&requests.lock().unwrap()),
             "次イテレーションのプロンプト会話部分にマーカーが現れない"
+        );
+    }
+
+    /// (h-typed) §11.6 + #884 PR2: typed 経路（typed_conversation 有り・typed_history=true）でも
+    /// 保存前にマーカーが剥がされ、末尾 CONTINUE で継続し、次イテレーションの会話文字列に
+    /// CONTINUE が現れない。
+    #[tokio::test]
+    async fn continue_marker_h_typed_history_marker_absent() {
+        use std::sync::atomic::Ordering;
+
+        let (llm, chat_calls, requests) = MarkerCapturingLlm::new(vec![
+            resp(Some("感想を返すね⚡\nCONTINUE"), vec![]),
+            text_response("最終回答"),
+        ]);
+        let typed_conversation = crate::conversation_typed::TypedConversation {
+            context_block: None,
+            snapshot_base: None,
+            history: vec![Message {
+                role: Role::User,
+                content: Some(MessageContent::Text("typed current turn".to_string())),
+                name: Some("owner".to_string()),
+                function_call: None,
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            response_directive: Some("directive".to_string()),
+            wire_tokens: 0,
+            diagnostics: crate::conversation_typed::DeriveDiagnostics {
+                item_count: 1,
+                unpaired_call_count: 0,
+                opaque_event_count: 0,
+            },
+        };
+        let executor = MockExecutor::new();
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+        engine.set_conversation_waters(1, 0);
+        engine.set_typed_conversation(Some(typed_conversation));
+
+        let result = engine
+            .run("system", "FLAT_HISTORY_SENTINEL", "test-model")
+            .await
+            .expect("typed 経路でも継続後に最終応答へ到達する");
+
+        assert_eq!(
+            chat_calls.load(Ordering::SeqCst),
+            2,
+            "typed 経路でも末尾 CONTINUE で 2 回目が走る"
+        );
+        assert_eq!(result.response, "最終回答");
+        assert!(
+            no_continue_in_requests(&requests.lock().unwrap()),
+            "typed 経路でも会話文字列にマーカーが現れない（§11.6）"
         );
     }
 

@@ -43,10 +43,7 @@ pub mod workspace;
 // Re-export primary types for convenience.
 pub use agent::{Agent, AgentLlmConfig, AgentModels, ModelRef};
 pub use caller::CallerIdentity;
-pub use continue_marker::{
-    strip_continue_marker, ContinueMarker, CONTINUE_LOG_TARGET, CONTINUE_MIDTEXT_TAG,
-    CONTINUE_SENTINEL,
-};
+pub use continue_marker::{strip_trailing_continue, CONTINUE_LOG_TARGET, CONTINUE_SENTINEL};
 pub use engine::{
     ActionExecutor, ActionResult, ChatRequest, ChatResponse, DispatchCall, DispatchOutcome,
     EngineResult, FunctionDefinition, LiveInboundSource, LlmCallLog, LlmClient, SkillEngine,

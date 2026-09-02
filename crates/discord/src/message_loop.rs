@@ -1080,16 +1080,11 @@ async fn process_incoming_message<T: AgentRunner>(
                     Some(s) if !s.trim().is_empty() => s.to_string(),
                     _ => return,
                 };
-                // #890 §11: 末尾 CONTINUE マーカーを剥がす（継続判定は engine 済み・ここは表示
+                // #890 §11.7: 最終行 CONTINUE 単独を剥がす（継続判定は engine 済み・ここは表示
                 // 保護）。WARN は delivery_effect 側へ集約（反復途中での二重計上を避ける）。
-                let text = {
-                    let m = opencrab_actions::strip_continue_marker(&text);
-                    if m.at_tail() {
-                        m.into_kept()
-                    } else {
-                        text
-                    }
-                };
+                let text = opencrab_actions::strip_trailing_continue(&text)
+                    .map(str::to_string)
+                    .unwrap_or(text);
                 if text.trim().is_empty() {
                     return;
                 }
@@ -1597,15 +1592,10 @@ async fn process_timed_fire<T: AgentRunner>(
                 Some(s) if !s.trim().is_empty() => s.to_string(),
                 _ => return,
             };
-            // #890 §11: 末尾 CONTINUE マーカーを剥がす（継続判定は engine 済み・表示保護）。
-            let text = {
-                let m = opencrab_actions::strip_continue_marker(&text);
-                if m.at_tail() {
-                    m.into_kept()
-                } else {
-                    text
-                }
-            };
+            // #890 §11.7: 最終行 CONTINUE 単独を剥がす（継続判定は engine 済み・表示保護）。
+            let text = opencrab_actions::strip_trailing_continue(&text)
+                .map(str::to_string)
+                .unwrap_or(text);
             if text.trim().is_empty() {
                 return;
             }
