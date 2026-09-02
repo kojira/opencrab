@@ -3519,3 +3519,152 @@ async fn scenario_918_resume_turn_continue_split_delivers_both() {
         "保存された自 speech 本文に CONTINUE が残留（§13.4.2 手順 3/5）: {continue_in_saved}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #916 レビュー要修正の観測境界【本文＋末尾 NO_REPLY＋execute_shell の 1 生成 → NO_REPLY 前の
+// 本文だけ配送・保存 1・🤐 0】:
+//   1 生成 = content("本文\nNO_REPLY")＋execute_shell。NO_REPLY 終端解釈（単一実装 R4）で
+//   「NO_REPLY 前の本文」を holding として 1 件配送・保存する（NO_REPLY 以降は破棄・"NO_REPLY" の
+//   文字は配送も保存もしない）。発話ありターンなので発端に 🤐 は付かない。
+//   8d5f3ec5（`!content.contains(NO_REPLY)` の全か無かガード）では本文が holding 配送を見送られ、
+//   extgate は on_tool_call を配送に使わないため本文が**配送されず消えた**（保存だけ）→ 配送 count で赤。
+//   9ffa2488（terminate_at_no_reply(content).speech()）で NO_REPLY 前の本文が配送される → 緑。
+// ---------------------------------------------------------------------------
+const M_HNR: &str = "HOLDNRMARK";
+// 本文マーカーに "NO_REPLY" を含めない（R4 は最初の NO_REPLY で終端＝マーカー内に含むと自終端する）。
+const HNR_BODY: &str = "hnrbody-調べる本文（沈黙の前・holding）";
+const HNR_ECHO: &str = "hnr-echo-即時stdout";
+
+struct HoldingNoReplyShellMock {
+    emitted: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for HoldingNoReplyShellMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        // spawn ack（合成 spawned 結果＝tool role）・resume（決着後）はいずれも沈黙で閉じる。
+        if has_tool_role(&request) {
+            return Ok(text_response("NO_REPLY"));
+        }
+        // 初回のみ: content("本文\nNO_REPLY")＋execute_shell を同一生成で（holding＋末尾 NO_REPLY）。
+        if !self.emitted.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return Ok(shell_with_content_response(
+                &format!("{HNR_BODY}\nNO_REPLY"),
+                "echo",
+                &[HNR_ECHO],
+            ));
+        }
+        // resume ターン（決着後）: 沈黙（追加投稿・保存なし）。
+        Ok(text_response("NO_REPLY"))
+    }
+}
+
+#[tokio::test]
+async fn scenario_916_holding_body_before_no_reply_delivered() {
+    let buf = install_capture();
+    let mock = Arc::new(HoldingNoReplyShellMock {
+        emitted: std::sync::atomic::AtomicBool::new(false),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+    *core.state.tools_config.write().unwrap() = shell_enabled_tools_config();
+
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    fixture.append_message("9240", &format!("{M_HNR} 調べてから黙って"));
+
+    // NO_REPLY 前の本文（HNR_BODY）が holding として 1 件配送されるまで待つ。8d5f3ec5 は配送しない → 赤。
+    let delivered = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(HNR_BODY))
+        })
+        .await
+    };
+    assert!(
+        delivered,
+        "NO_REPLY 前の本文が holding として配送されない（8d5f3ec5 の全か無かガードで消える）: {:?}",
+        captured(&buf)
+    );
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    // 配送 1: NO_REPLY 前の本文だけが 1 件。
+    let body_say = captured(&buf)
+        .iter()
+        .filter(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(HNR_BODY))
+        .count();
+    assert_eq!(
+        body_say,
+        1,
+        "NO_REPLY 前の本文が 1 件配送されていない: {:?}",
+        captured(&buf)
+    );
+    // 残留 0: どの配送 say にも "NO_REPLY" の文字が出ない（終端以降は破棄）。
+    let noreply_say = captured(&buf)
+        .iter()
+        .filter(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains("NO_REPLY"))
+        .count();
+    assert_eq!(
+        noreply_say,
+        0,
+        "配送 say に NO_REPLY の文字が出た（終端以降は破棄のはず）: {:?}",
+        captured(&buf)
+    );
+
+    // 否定側: 発話ありターン（holding 本文を配送）なので発端 9240 に 🤐 は付かない。
+    let muted_on_origin = captured(&buf)
+        .iter()
+        .filter(|c| c.kind == "system_reaction" && c.emoji.contains("🤐") && c.message == "9240")
+        .count();
+    assert_eq!(
+        muted_on_origin,
+        0,
+        "本文を配送したターンに 🤐 が誤発火: {:?}",
+        captured(&buf)
+    );
+
+    // 保存 1: 自 speech は NO_REPLY 前の本文 1 行のみ（"NO_REPLY" 文字列は保存しない）。
+    let own_speech_rows: i64 = {
+        let conn = core.extgate.db.lock().unwrap();
+        conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM memory_sessions WHERE log_type='speech' \
+                 AND speaker_id='{AGENT_ID}'"
+            ),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        own_speech_rows, 1,
+        "自 speech 保存が NO_REPLY 前の本文 1 行でない: {own_speech_rows}"
+    );
+    let noreply_saved: i64 = {
+        let conn = core.extgate.db.lock().unwrap();
+        conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM memory_sessions WHERE log_type='speech' \
+                 AND speaker_id='{AGENT_ID}' AND content LIKE '%NO_REPLY%'"
+            ),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        noreply_saved, 0,
+        "保存 speech に NO_REPLY の文字が残留: {noreply_saved}"
+    );
+}
