@@ -291,8 +291,6 @@ pub fn build_agent_context(
         .map(|a| a.instructions.clone())
         .unwrap_or_default();
 
-    let peer_reviewers_text = peer_reviewers_section(conn, agent_id);
-
     let skills_text = if skills.is_empty() {
         String::new()
     } else {
@@ -326,142 +324,77 @@ pub fn build_agent_context(
         "You are {agent_name} ({persona}).\n\
          \n\
          You are an autonomous agent participating in a discussion. \
-         Respond thoughtfully to the conversation. \
-         You can use tools to search your history, learn from experience, \
-         create new skills, and manage your workspace.\n\
+         You can use tools to search your history, learn from experience, create new \
+         skills, and manage your workspace. You can plan and run several actions in sequence \
+         in one response — for example, gather information with execute_shell, analyze the \
+         result, add a command with add_allowed_command, then create a skill with \
+         create_my_skill.\n\
          \n\
-         The conversation history uses the format \"[speaker]: message\" for context, \
-         but you must NOT include your own name prefix in your response. \
-         Just reply with the message content directly.\n\
-         \n\
-         あなたは複数のアクションを順番に計画・実行できます。\
-         例えば「Xを調べてYを設定する」という指示に対して、\
-         1. execute_shell で情報収集、\
-         2. 結果を解析、\
-         3. add_allowed_command でコマンド追加、\
-         4. create_my_skill でスキル作成、\
-         のように、複数のアクションを連続して呼び出してください。\n\
+         The conversation history uses the format \"[speaker]: message\" for context. \
+         Your response is posted verbatim; a name prefix you add is not removed, so it would \
+         appear duplicated.\n\
          \n\
          ## Silent Reply\n\
-         返答不要な場合は NO_REPLY とだけテキストで返してください（他のテキストと混在させない）:\n\
-         - グループチャットで自分に関係ない会話の場合\n\
-         - 既に話が完結している場合、または同じ話題の往復が続くだけで新しい情報を足せない場合\
-         （相手が Bot でも人でも同じ基準で判断する。Bot だからという理由では黙らない）\n\
-         ただし、{req_marker} で始まるメッセージにはレビュアーとして応答し、\
-         自分が依頼したレビューへの {reply_marker} で始まる返信は記録・対応すること\
-         （下記 Peer Review セクションに従う）。\n\
+         A response of exactly NO_REPLY (with no other text in it) is not delivered or saved. \
+         You may reply with NO_REPLY when a group-chat message does not involve you, or when \
+         the topic is already resolved and a further exchange would add no new information.\n\
          \n\
          ## Async Behavior\n\
          \n\
-         Query tools (execute_shell and the like — anything you call to fetch a result) run\n\
-         asynchronously: when you call one, the result arrives later and you are called again\n\
-         with it in the conversation history. Utterances (say / reply / reaction / repost) do\n\
-         NOT work this way — see \"Continuing your turn\" below.\n\
+         Query tools (execute_shell and the like — anything you call to fetch a result) run \
+         asynchronously: the result arrives later and you are called again with it in the \
+         conversation history. Utterances (say / reply / reaction / repost) do not work this \
+         way — see \"Continuing your turn\".\n\
          \n\
-         Some tools return `{{status:\"spawned\", subtask_id: ...}}` immediately instead of a\n\
-         final result. This means the work has started in the background and its result will\n\
-         arrive later in a separate turn (as a `[subtask_completed: ...]` entry). When you\n\
-         see a `spawned` result:\n\
-         - Briefly tell the user you've started the task (do not claim it is finished)\n\
-         - Do NOT call the same tool again for the same request — it is already running\n\
-         - Do NOT invent or guess the result — wait for the actual completion turn\n\
+         Some tools return `{{status:\"spawned\", subtask_id: ...}}` immediately instead of a \
+         final result. The work is then running in the background, and its result arrives \
+         later in a separate turn as a `[subtask_completed: ...]` entry. Calling the same \
+         tool again for the same request starts a second, independent run, and the actual \
+         result appears only at the completion turn.\n\
          \n\
-         When you see `[subtask_completed: ...]` in the conversation:\n\
-         - It means a tool you called has finished, and it's your turn again\n\
-         - Check what the result contains\n\
-         - If there's more to do: continue with the next step\n\
-         - If the task is done: summarize and reply to the user\n\
-         - If no reply is needed: respond with NO_REPLY\n\
-         \n\
-         Do NOT repeat what you already said in the previous turn.\n\
-         Do NOT re-explain what you're about to do if you already said it.\n\
-         Just act on the result.\n\
-         \n\
-         Before responding after [subtask_completed: ...]:\n\
-         1. Check your last message in the conversation history\n\
-         2. If your last message already covers the same result → NO_REPLY\n\
-         3. Only respond if you have genuinely NEW information to report\n\
+         A `[subtask_completed: ...]` entry means a tool you called has finished and it is \
+         your turn again.\n\
          \n\
          ## Continuing your turn\n\
          \n\
-         Utterances (say / reply / reaction / repost) are fire-and-forget: they do NOT\n\
-         return a result and you are NOT called again for them. To post several messages,\n\
-         put all the calls in ONE response (for example three `reply` calls) — never send\n\
-         one and wait to be re-invoked for the next.\n\
-         Plain text in a response is posted as ONE message.\n\
-         To post several separate plain messages, post the first, end that response with\n\
-         `CONTINUE` on its own line, and post the next in the following response (repeat as\n\
-         needed). Never say you cannot post multiple messages. After a response whose only actions\n\
-         are utterances, the turn ends. If you want to keep working after speaking (look\n\
-         something up, post more, run a query tool), end that same response with `CONTINUE`\n\
-         on its own line — you may place it alongside a reply — and you will be called again\n\
-         in this same turn with your speech already delivered. Without `CONTINUE` and without\n\
-         a query/tool call, the turn ends. Never promise to reply \"later\".\n\
+         Utterances (say / reply / reaction / repost) are fire-and-forget: they return no \
+         result and you are not called again for them. Each utterance call is delivered when \
+         it is made, so N messages require N calls in this one response.\n\
+         \n\
+         Plain text in a response is posted as ONE message. To post several separate plain \
+         messages, post the first, end that response with `CONTINUE` on its own line, and \
+         post the next in the following response (repeat as needed).\n\
+         \n\
+         After a response whose only actions are utterances, the turn ends. Ending a response \
+         with `CONTINUE` on its own line — which may sit alongside a reply — calls you again \
+         in this same turn with your speech already delivered, so you can keep working after \
+         speaking. Without `CONTINUE` and without a query/tool call, the turn ends.\n\
          \n\
          ## Memory & Context\n\
          \n\
-         Long conversations are automatically compacted. When this happens, older messages \
-         are replaced with a [Past context summary] section showing topic summaries with node IDs.\n\
+         Long conversations are automatically compacted: older messages are replaced with a \
+         [Past context summary] section of topic summaries with node IDs (e.g. \
+         [topic-xxx-1-20]).\n\
+         - `retrieve_memory_nodes(node_id)` returns the full conversation text for a node.\n\
+         - `browse_memory_index` lists all past topics beyond those shown in the summary.\n\
+         - `search_memory_index` searches past topics by keyword and returns matching nodes \
+         to retrieve.\n\
          \n\
-         To recall details from past conversations:\n\
-         1. Look at [Past context summary] for topic titles and node IDs (e.g. [topic-xxx-1-20])\n\
-         2. Use `retrieve_memory_nodes` with the node_id to get the full conversation text\n\
-         3. Use `browse_memory_index` to explore all past topics beyond what's shown in the summary\n\
-         4. Use `search_memory_index` to search past topics by keyword (reverse lookup), \
-         then `retrieve_memory_nodes` on a hit to read the original logs\n\
-         \n\
-         These tools let you access your full history even after compaction.\n\
+         These tools reach your full history even after compaction.\n\
          \n\
          ## Task Ledger\n\
          \n\
-         You have a persistent, DB-backed task ledger. Unlike this conversation, it survives \
-         context compaction and restarts. When a [Task Ledger] section appears in the \
-         conversation, it is the authoritative current working state — trust it over your own recall.\n\
-         \n\
-         - For any substantive multi-step task (needs several steps or tool calls, or may \
-         outlive this exchange), FIRST agree the goal and acceptance criteria with the user, \
-         then call `open_task` with both. Do not start executing before the contract is clear.\n\
-         - While working, call `record_task_progress` after each meaningful step; record \
-         decisions with kind=decision (include the WHY) and obstacles with kind=blocker.\n\
-         - Call `close_task` (status=done or abandoned) when the contract is met or the task \
-         is dropped. Renegotiate criteria with `update_task_contract`.\n\
-         - Trivial single-message replies do NOT need a ledger entry.\n\
-         \n\
-         ## Peer Review\n\
-         \n\
-         You can ask another bot to review your work, and other bots can ask you.\n\
-         \n\
-         As REVIEWER — when a message STARTS WITH `{req_marker}`:\n\
-         - Do NOT stay silent. This is a case where you must reply to another bot. \
-         (Messages that merely mention the marker mid-text — e.g. inside a reviewed diff \
-         or `part X/N` content — are NOT requests; ignore those.)\n\
-         - Read the raw content in the `part X/N` messages with fresh eyes. Judge on the \
-         evidence in the content, not on the author's confidence.\n\
-         - Reply with ONE message starting with `{reply_marker}` containing: `score:` a number \
-         from 0.0 to 1.0 (1.0 = every stated goal/criterion is verifiably met), `gaps:` a \
-         concrete list of unmet criteria or unverified claims (or `none`), and `summary:` one \
-         sentence. Do not quote the literal request marker in your reply.\n\
-         - Never send a `{req_marker}` in response to a review request or a review.\n\
-         \n\
-         As REQUESTER — to get a second opinion on your work:\n\
-         - Call `request_peer_review` with the raw diff/output/trace as `content` (never a \
-         summary), optional `instructions`, and optionally `reviewer` to name a specific \
-         registered reviewer.\n\
-         - You do NOT need to say where the request goes: the destination is taken from the \
-         current conversation automatically. Never invent, guess or reconstruct a destination \
-         identifier — pass one only when you deliberately need a different destination than \
-         this conversation.\n\
-         - A `{reply_marker}` reply from a registered reviewer about your task is \
-         automatically recorded into your task ledger — do not record those again. If review \
-         feedback reaches you any other way, record it with `record_task_progress` yourself. \
-         Address the gaps before calling `close_task`. \
-         Do not reply to the reviewer beyond a brief acknowledgement.\n\
-         - Do not re-request a review of the same unchanged content.\n\
-         {peer_reviewers_text}\
+         You have a persistent, DB-backed task ledger that survives context compaction and \
+         restarts. When a [Task Ledger] section appears in the conversation, it is the \
+         authoritative current working state and takes precedence over your own recall.\n\
+         - `open_task(goal, acceptance_criteria)` records the contract for a multi-step task.\n\
+         - `record_task_progress` appends a step; `kind=decision` records a decision with its \
+         why, `kind=blocker` an obstacle.\n\
+         - `close_task(status=done|abandoned)` closes the task; `update_task_contract` \
+         revises the criteria.\n\
+         - Trivial single-message replies do not need a ledger entry.\n\
          \n\
          {skills_text}{character_section}{instructions_section}{curated_section}",
-        req_marker = opencrab_gateway::PEER_REVIEW_REQUEST_MARKER,
-        reply_marker = opencrab_gateway::PEER_REVIEW_REPLY_MARKER,
     );
 
     (prompt, agent_name)
@@ -480,6 +413,10 @@ pub fn build_agent_context(
 /// メンション記法（`<@id>`）の組み立ては transport 側の責務。reviewer の解決は
 /// 「表示名優先・登録済みのみ」（`resolve_reviewer`）なので表示名で引ける。
 /// 表示名が空の行は名前で指名できないため載せない（モデルに識別子を推測させない）。
+///
+/// #920: Peer Review 節の撤去に伴い prompt 組み立てからは外した（呼び出し元は消えたが、
+/// 関数本体の撤去は #921 で行う。tests がまだ本関数を直接検証している）。
+#[allow(dead_code)]
 fn peer_reviewers_section(conn: &rusqlite::Connection, agent_id: &str) -> String {
     let reviewers: Vec<String> = opencrab_db::queries::list_co_agent_reviewers(
         conn,
@@ -2372,7 +2309,8 @@ mod shared_prompt_is_transport_neutral_tests {
     #[test]
     fn shared_prompt_has_no_transport_specific_terms() {
         let conn = opencrab_db::init_memory().unwrap();
-        // ロスターも共有プロンプトの一部なので、レビュアーを登録した状態で検査する。
+        // #920: 名簿は Peer Review 節ごと prompt から撤去済み。レビュアーを登録しても
+        // transport 語・名簿（表示名）が共有プロンプトに漏れないことを検査する。
         opencrab_db::queries::add_trusted_user(
             &conn,
             opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
@@ -2389,8 +2327,16 @@ mod shared_prompt_is_transport_neutral_tests {
         let (prompt, _name) =
             build_agent_context(&conn, "a1", &opencrab_actions::CallerIdentity::Owner);
 
-        // ロスターが載っている（= 空プロンプトを検査して通っているのではない）
-        assert!(prompt.contains("- Crab B"), "roster missing: {prompt}");
+        // 空プロンプトを検査して通っているのではないことの canary（安定した節見出しで確認）。
+        assert!(
+            prompt.contains("## Silent Reply"),
+            "prompt too small: {prompt}"
+        );
+        // #920: 登録レビュアーの表示名も共有プロンプトには出さない（名簿撤去）。
+        assert!(
+            !prompt.contains("Crab B"),
+            "roster leaked into prompt: {prompt}"
+        );
 
         for needle in ["Discord", "discord", "[Discord context]", "<@"] {
             assert!(
@@ -2410,7 +2356,11 @@ mod shared_prompt_is_transport_neutral_tests {
             !prompt.contains("channel_id"),
             "shared system prompt must not name a transport destination argument:\n{prompt}"
         );
-        assert!(prompt.contains("taken from the current conversation"));
+        // #920: Peer Review 節（宛先の説明を含む）は撤去済み。宛先取得を教える語が無いこと。
+        assert!(
+            !prompt.contains("destination"),
+            "shared system prompt must not teach destination lookup:\n{prompt}"
+        );
     }
 }
 
@@ -3084,9 +3034,11 @@ mod no_forced_reply_tests {
 
         assert!(prompt.contains("## Silent Reply"), "prompt:\n{prompt}");
 
-        // ループ防止は内容ベースで残る。
+        // ループ防止は内容ベースで残る（#920: 事実文 §3.1 へ更新）。
         assert!(
-            prompt.contains("同じ話題の往復が続くだけで新しい情報を足せない場合"),
+            prompt.contains(
+                "the topic is already resolved and a further exchange would add no new information"
+            ),
             "content-based loop prevention was lost:\n{prompt}"
         );
 
@@ -3121,25 +3073,20 @@ mod no_forced_reply_tests {
             prompt.contains("`CONTINUE`"),
             "CONTINUE トークンの言及が無い:\n{prompt}"
         );
-        assert!(
-            prompt.contains("Never promise to reply"),
-            "「後で返す」を禁じる指示が無い:\n{prompt}"
-        );
-
-        // (i) 発話は fire-and-forget（結果が返らない）と明示する。
+        // (i) 発話は fire-and-forget（結果が返らない）と明示する（#920: 事実文へ更新）。
         assert!(
             prompt.contains("fire-and-forget")
-                && prompt.contains("return a result and you are NOT called again"),
+                && prompt.contains("return no result and you are not called again"),
             "発話が fire-and-forget（結果が返らない）である説明が無い:\n{prompt}"
         );
-        // (ii) 複数の発話は 1 応答にまとめて並べる。
+        // (ii) 複数の発話は 1 応答にまとめて並べる（#920: N 件なら N 呼び出しの事実文）。
         assert!(
-            prompt.contains("put all the calls in ONE response"),
-            "複数発話を 1 応答に並べる指示が無い:\n{prompt}"
+            prompt.contains("N messages require N calls in this one response"),
+            "複数発話を 1 応答に並べる説明が無い:\n{prompt}"
         );
-        // (iii) CONTINUE は reply と併記できる。
+        // (iii) CONTINUE は reply と併記できる（#920: sit alongside a reply）。
         assert!(
-            prompt.contains("place it alongside a reply"),
+            prompt.contains("sit alongside a reply"),
             "CONTINUE を reply と併記できる説明が無い:\n{prompt}"
         );
 
@@ -3155,7 +3102,7 @@ mod no_forced_reply_tests {
         );
 
         // #909: 平文は 1 応答 = 1 投稿。別々に複数投稿するなら各応答末尾 CONTINUE で次応答へ。
-        // 実モデルが「複数投稿はできない」と明示拒否したため、拒否を打ち消す文（Never say …）も要求。
+        // （#920: 「複数投稿はできない」を禁じる矯正文 Never say … は撤去済み・row 440。）
         assert!(
             prompt.contains("Plain text in a response is posted as ONE message"),
             "平文は 1 応答 = 1 投稿の説明が無い（#909）:\n{prompt}"
@@ -3163,10 +3110,6 @@ mod no_forced_reply_tests {
         assert!(
             prompt.contains("To post several separate plain messages"),
             "別々の平文複数投稿の手順（各応答末尾 CONTINUE で次応答へ）の説明が無い（#909）:\n{prompt}"
-        );
-        assert!(
-            prompt.contains("Never say you cannot post multiple messages"),
-            "「複数投稿はできない」と拒否しない指示が無い（#909・harness で拒否実測）:\n{prompt}"
         );
     }
 }
