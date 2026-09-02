@@ -16,8 +16,8 @@ use crate::no_reply::{terminate_at_no_reply, DeliveryContext};
 ///
 /// 1. `NO_REPLY` 終端解釈（第一柱・R4）。前段が空なら「沈黙」で `None`。
 /// 2. 残った発言本文の最終行が `CONTINUE` 単独なら剥がす（§11.7・継続判定は engine が済ませ、
-///    ここは表示保護）。最終行単独でない `CONTINUE`（同一行併記・途中出現）は剥がさず、解析用に
-///    WARN を残す。
+///    ここは表示保護）。**最終行以外に `CONTINUE` 単独行**があれば剥がさず、解析用に WARN を
+///    1 行残す（継続意図を途中に置いたまま書き続けた形の検出・§11.1）。
 ///
 /// `None` は沈黙（`NoReply`）。`Some` はユーザーへ出す本文。
 pub fn visible_speech_after_markers(raw: &str, ctx: DeliveryContext<'_>) -> Option<String> {
@@ -27,13 +27,19 @@ pub fn visible_speech_after_markers(raw: &str, ctx: DeliveryContext<'_>) -> Opti
     if let Some(body) = strip_trailing_continue(speech) {
         return Some(body.to_string());
     }
-    // 最終行単独でないのに CONTINUE が本文に残っていれば WARN（同一行併記・途中出現）。
-    if speech.contains(CONTINUE_SENTINEL) {
+    // 最終行以外に `CONTINUE` 単独行がある場合だけ解析用に WARN（剥がさない・継続しない）。
+    // strip が None なので最終行は CONTINUE 単独ではなく、ここで見つかる単独行は必ず非最終行。
+    if let Some(line) = speech
+        .trim_end()
+        .lines()
+        .position(|l| l.trim() == CONTINUE_SENTINEL)
+    {
         tracing::warn!(
             target: CONTINUE_LOG_TARGET,
             session_id = %ctx.session_id,
             agent_id = %ctx.agent_id,
             origin = %ctx.origin,
+            line = line + 1,
             "continue_marker_midtext"
         );
     }
