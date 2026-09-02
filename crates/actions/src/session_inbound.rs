@@ -965,6 +965,27 @@ mod tests {
         );
     }
 
+    /// #890 §11: 末尾 CONTINUE マーカーは配送 body に残さない（継続判定は engine が済ませ、
+    /// ここは表示保護）。途中出現は本文のまま残す。
+    #[test]
+    fn delivery_effect_strips_tail_continue_marker() {
+        let ctx = crate::no_reply::DeliveryContext::default();
+        match delivery_effect(Ok(er("確認して返すね⚡\nCONTINUE")), ctx) {
+            DeliveryEffect::Text { body, .. } => {
+                assert_eq!(body, "確認して返すね⚡");
+                assert!(!body.contains("CONTINUE"), "body に CONTINUE 混入: {body}");
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+        // 途中出現は剥がさない。
+        match delivery_effect(Ok(er("まず CONTINUE を確認します")), ctx) {
+            DeliveryEffect::Text { body, .. } => {
+                assert_eq!(body, "まず CONTINUE を確認します");
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
     fn web_inbound<'a>(
         session_id: &'a str,
         agent_id: &'a str,

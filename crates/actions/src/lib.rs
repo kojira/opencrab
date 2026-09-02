@@ -3,6 +3,7 @@ pub mod agent_gateway;
 pub mod agent_runtime;
 pub mod bridge;
 pub mod common;
+pub mod continue_marker;
 pub mod dispatcher;
 pub mod learning;
 pub mod llm_analysis;
@@ -45,6 +46,10 @@ pub use bridge::{
     REJECTION_CODE_PREFIX, TRUSTED_ONLY_ACTIONS,
 };
 pub use channel_config::apply_discord_channel_config;
+pub use continue_marker::{
+    strip_continue_marker, visible_speech_after_markers, ContinueMarker, CONTINUE_LOG_TARGET,
+    CONTINUE_MIDTEXT_TAG, CONTINUE_SENTINEL,
+};
 pub use dispatcher::ActionDispatcher;
 pub use no_reply::{
     terminate_at_no_reply, DeliveryContext, NoReplyTermination, NO_REPLY_LOG_TARGET,
