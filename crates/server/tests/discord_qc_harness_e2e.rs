@@ -1543,6 +1543,180 @@ async fn audit_s13_1c_continue_split_is_separate_discord_messages() {
 }
 
 // ---------------------------------------------------------------------------
+// #915【🏁 はターン終了時のみ・途中投稿には付けない】: 純 say の末尾 CONTINUE で 3 分割した
+// ターン（本文＋CONTINUE ×2 → 本文）で、🏁（完了サイン）は**最後の say メッセージ 1 件だけ**に
+// 付き、途中の 2 件には付かない。オーナー裁定（逐語）:「🏁を付けるのは次のターンがない時だけ
+// です」「続きがないことを知らせるものですよ」。
+//
+// 観測境界（dry-run capture）: kind="say" の各分割メッセージの own message id と、kind=
+// "system_reaction"・emoji=🏁 の付け先 message を相関する。現 tip は say 配送ごとに 🏁 を付ける
+// ため途中 2 件にも 🏁 が付く → 赤。修正後は activity ended で最後の say だけに付く → 緑。
+// LLM 3・say 配送 3・🏁 は最終 1 件のみ・途中 0 件・🤐 0（発話ありターン）。
+// ---------------------------------------------------------------------------
+const FC_1: &str = "flagcont-one 一通目";
+const FC_2: &str = "flagcont-two 二通目";
+const FC_3: &str = "flagcont-three 三通目";
+
+struct FlagContinueSplitMock {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for FlagContinueSplitMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(match n {
+            0 => text_response(&format!("{FC_1}\nCONTINUE")),
+            1 => text_response(&format!("{FC_2}\nCONTINUE")),
+            _ => text_response(FC_3),
+        })
+    }
+}
+
+#[tokio::test]
+async fn scenario_915_completed_flag_only_on_last_say_of_continue_split() {
+    use std::sync::atomic::Ordering;
+    let buf = install_capture();
+    let mock = Arc::new(FlagContinueSplitMock {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    fixture.append_message("915", "FCMARK 3回に分けて返信して reply使わずに");
+
+    // 最終メッセージ（FC_3）が say として出るまで待つ（= 3 イテレーションに到達・say 配送 3）。
+    let done = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(FC_3))
+        })
+        .await
+    };
+    assert!(done, "3 通目（最終 say）が出ない: {:?}", captured(&buf));
+
+    // 最終 say（FC_3）の own message id に 🏁 が付くまで待つ（決着＝activity ended で付与）。
+    // ヘルパ: 本文で分割 say を特定し own message id を返す（BUFFER は共有なので本文で scope）。
+    let mid_of = |body: &str| -> Option<String> {
+        captured(&buf)
+            .iter()
+            .find(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(body))
+            .map(|c| c.message.clone())
+            .filter(|m| !m.is_empty())
+    };
+    let saw_last_completed = {
+        let buf = buf.clone();
+        wait_until(move || {
+            let last_mid = captured(&buf)
+                .iter()
+                .find(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(FC_3))
+                .map(|c| c.message.clone())
+                .filter(|m| !m.is_empty());
+            match last_mid {
+                Some(mid) => captured(&buf).iter().any(|c| {
+                    c.kind == "system_reaction"
+                        && c.emoji.contains(SYS_COMPLETED)
+                        && c.message == mid
+                }),
+                None => false,
+            }
+        })
+        .await
+    };
+    assert!(
+        saw_last_completed,
+        "🏁 が最終 say（FC_3）に付かない: {:?}",
+        captured(&buf)
+    );
+    // 決着後、途中投稿の誤付与が無いことを確定するための猶予（バグ時は配送ごとに即付くので既に出ている）。
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let first_mid = mid_of(FC_1).expect("FC_1 say の message id");
+    let second_mid = mid_of(FC_2).expect("FC_2 say の message id");
+    let third_mid = mid_of(FC_3).expect("FC_3 say の message id");
+
+    let completed_on = |mid: &str| -> usize {
+        captured(&buf)
+            .iter()
+            .filter(|c| {
+                c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == mid
+            })
+            .count()
+    };
+
+    // 🏁 は最終 say（FC_3）1 件のみ。途中の 2 件（FC_1/FC_2）には付かない（現 tip は付く → 赤）。
+    assert_eq!(
+        completed_on(&first_mid),
+        0,
+        "🏁 が途中 say FC_1 に誤って付いている（ターン終了時のみの裁定違反）: {:?}",
+        captured(&buf)
+    );
+    assert_eq!(
+        completed_on(&second_mid),
+        0,
+        "🏁 が途中 say FC_2 に誤って付いている（ターン終了時のみの裁定違反）: {:?}",
+        captured(&buf)
+    );
+    assert_eq!(
+        completed_on(&third_mid),
+        1,
+        "🏁 が最終 say FC_3 に 1 件付かない: {:?}",
+        captured(&buf)
+    );
+
+    // ターン全体での 🏁 総数は 1（分割 3 メッセージ合計）。
+    let total_completed: usize = [&first_mid, &second_mid, &third_mid]
+        .iter()
+        .map(|m| completed_on(m))
+        .sum();
+    assert_eq!(
+        total_completed,
+        1,
+        "分割ターンの 🏁 総数が 1 でない（途中付与のバグ）: {:?}",
+        captured(&buf)
+    );
+
+    // 発話ありターンなので発端 915 に 🤐 は付かない（回帰）。
+    let muted_on_origin = captured(&buf)
+        .iter()
+        .filter(|c| c.kind == "system_reaction" && c.emoji.contains("🤐") && c.message == "915")
+        .count();
+    assert_eq!(
+        muted_on_origin,
+        0,
+        "発話ありターンに 🤐 が誤発火: {:?}",
+        captured(&buf)
+    );
+
+    // LLM 3・say 配送 3・CONTINUE 残留なし（回帰）。
+    assert_eq!(
+        mock.calls.load(Ordering::SeqCst),
+        3,
+        "CONTINUE 3 分割の LLM 呼び出しが 3 でない"
+    );
+    for m in [FC_1, FC_2, FC_3] {
+        let n = captured(&buf)
+            .iter()
+            .filter(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(m))
+            .count();
+        assert_eq!(n, 1, "分割 {m} の say が 1 通でない: {:?}", captured(&buf));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // §13.1 g【reaction のみ → #6 と同じ】: reaction のみ（say 0）のターン → reaction 配送・
 // 🤐 発端に付けない（発話がある）。現 tip: 最終本文空を沈黙とみなし 🤐 → 赤（#900 の reaction 版）。
 // §13 #6 の 🤐 契約を reaction で固定。
