@@ -259,8 +259,43 @@ pub(crate) fn assemble_typed_messages(items: &[TypedItem]) -> AssembledTyped {
     let mut history = Vec::with_capacity(items.len());
     let mut machine_block_count = 0;
 
-    for item in items {
-        let message = match item {
+    let mut index = 0;
+    while index < items.len() {
+        // #884 PR2: 同一生成の並列 ToolCall（間に speech/result を挟まない連続 ToolCall item）を
+        // 1 つの assistant message に複数 tool_calls として束ねる。1 呼び出し=別 assistant message に
+        // すると anthropic が assistant(tool_use) の連続を 400 で拒否するため（対応 ToolResult は
+        // 連続 Role::Tool になり anthropic 側の既存併合が効く）。
+        if matches!(items[index], TypedItem::ToolCall { .. }) {
+            let mut calls = Vec::new();
+            while let Some(TypedItem::ToolCall {
+                call_id,
+                tool_name,
+                arguments,
+                ..
+            }) = items.get(index)
+            {
+                calls.push(MessageToolCall {
+                    id: call_id.clone(),
+                    call_type: "function".to_owned(),
+                    function: FunctionCall {
+                        name: tool_name.clone(),
+                        arguments: serde_json::to_string(arguments)
+                            .unwrap_or_else(|_| arguments.to_string()),
+                    },
+                });
+                index += 1;
+            }
+            history.push(Message {
+                role: Role::Assistant,
+                content: None,
+                name: None,
+                function_call: None,
+                tool_calls: Some(calls),
+                tool_call_id: None,
+            });
+            continue;
+        }
+        let message = match &items[index] {
             TypedItem::UserSpeech {
                 event_ref,
                 speaker,
@@ -287,27 +322,8 @@ pub(crate) fn assemble_typed_messages(items: &[TypedItem]) -> AssembledTyped {
                 tool_calls: None,
                 tool_call_id: None,
             },
-            TypedItem::ToolCall {
-                call_id,
-                tool_name,
-                arguments,
-                ..
-            } => Message {
-                role: Role::Assistant,
-                content: None,
-                name: None,
-                function_call: None,
-                tool_calls: Some(vec![MessageToolCall {
-                    id: call_id.clone(),
-                    call_type: "function".to_owned(),
-                    function: FunctionCall {
-                        name: tool_name.clone(),
-                        arguments: serde_json::to_string(arguments)
-                            .unwrap_or_else(|_| arguments.to_string()),
-                    },
-                }]),
-                tool_call_id: None,
-            },
+            // ToolCall はループ先頭で束ねて処理済み。
+            TypedItem::ToolCall { .. } => unreachable!("ToolCall はループ先頭で処理する"),
             TypedItem::ToolResult { call_id, body, .. } => Message {
                 role: Role::Tool,
                 content: Some(MessageContent::Text(result_body_wire(body))),
@@ -344,6 +360,7 @@ pub(crate) fn assemble_typed_messages(items: &[TypedItem]) -> AssembledTyped {
             }
         };
         history.push(message);
+        index += 1;
     }
 
     let mut synthetic_result_count = 0;
@@ -1379,6 +1396,59 @@ mod tests {
             .text_content()
             .is_some_and(|content| content.contains("result_not_recorded")));
         assert_eq!(assembled.synthetic_result_count, 1);
+    }
+
+    // 同一生成の並列 ToolCall は 1 つの assistant message に複数 tool_calls として束ねる
+    // （anthropic の assistant(tool_use) 連続 400 回避）。対応 result は連続 Role::Tool。
+    #[test]
+    fn assemble_parallel_calls_grouped_into_one_assistant() {
+        let items = vec![
+            TypedItem::ToolCall {
+                call_id: "call_a".to_owned(),
+                tool_name: "execute_shell".to_owned(),
+                arguments: json!({"command": "echo", "args": ["a"]}),
+                state: ToolCallState::Completed,
+                timestamp: None,
+            },
+            TypedItem::ToolCall {
+                call_id: "call_b".to_owned(),
+                tool_name: "execute_shell".to_owned(),
+                arguments: json!({"command": "echo", "args": ["b"]}),
+                state: ToolCallState::Completed,
+                timestamp: None,
+            },
+            TypedItem::ToolResult {
+                call_id: "call_a".to_owned(),
+                tool_name: "execute_shell".to_owned(),
+                body: ResultBody::Inline(json!({"exit_code": 0, "stdout": "a"})),
+                state: ToolResultState::Completed,
+                timestamp: None,
+            },
+            TypedItem::ToolResult {
+                call_id: "call_b".to_owned(),
+                tool_name: "execute_shell".to_owned(),
+                body: ResultBody::Inline(json!({"exit_code": 0, "stdout": "b"})),
+                state: ToolResultState::Completed,
+                timestamp: None,
+            },
+        ];
+        let assembled = super::assemble_typed_messages(&items);
+        // assistant 1 本（tool_calls 2 個）＋ Tool 2 本＝計 3。合成 result は挿さらない。
+        assert_eq!(assembled.history.len(), 3);
+        assert_eq!(assembled.synthetic_result_count, 0);
+        let assistant = &assembled.history[0];
+        assert_eq!(assistant.role, Role::Assistant);
+        let calls = assistant.tool_calls.as_ref().expect("tool_calls");
+        assert_eq!(calls.len(), 2, "並列 2 呼び出しが 1 message に束ねられる");
+        assert_eq!(calls[0].id, "call_a");
+        assert_eq!(calls[1].id, "call_b");
+        assert_eq!(assembled.history[1].role, Role::Tool);
+        assert_eq!(assembled.history[2].role, Role::Tool);
+        // assistant(tool_use) が連続しない（anthropic 400 の条件を作らない）。
+        assert!(!matches!(
+            (&assembled.history[0].role, &assembled.history[1].role),
+            (Role::Assistant, Role::Assistant)
+        ));
     }
 
     // settle 前でも実行引数を構造のまま保持し、spawn 受理だけを Pending 結果として示す。

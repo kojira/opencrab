@@ -526,6 +526,13 @@ pub fn include_memory_index(env: &ContextBudgetEnvelope) -> bool {
     matches!(env.memory_index_decision, MemoryIndexDecision::Inject)
 }
 
+/// #884 PR2 hard cap: typed 側は PR2 では圧縮しないため、typed の wire トークンがモデルの
+/// 入力上限（`input_high`）を超えると provider が hard-fail する。超過なら typed を諦めて
+/// flat 経路（圧縮あり）へ落とす（§7 fallback）。
+pub(crate) fn typed_exceeds_input_budget(wire_tokens: usize, input_high: usize) -> bool {
+    wire_tokens > input_high
+}
+
 /// ターン終了直後の正時: 派生スナップショットを行追加する（#826-B）。
 fn persist_turn_end_snapshot(
     state: &AppState,
@@ -1770,6 +1777,23 @@ pub async fn run_agent_response(
                             include_memory_index(&env),
                             !state.typed_history_drop_directive,
                         ) {
+                            Ok(tc)
+                                if typed_exceeds_input_budget(
+                                    tc.wire_tokens,
+                                    env.water.input_high,
+                                ) =>
+                            {
+                                // #884 PR2 hard cap: PR2 は typed 側を圧縮しないため、typed の wire
+                                // トークンがモデルの入力上限（input_high）を超えると provider が
+                                // hard-fail する。その turn だけ flat 経路（圧縮あり）へ落とす（§7 fallback）。
+                                tracing::warn!(
+                                    session_id,
+                                    wire_tokens = tc.wire_tokens,
+                                    input_high = env.water.input_high,
+                                    "typed wire tokens exceed model input budget; falling back to flat for this turn"
+                                );
+                                engine.set_typed_conversation(None);
+                            }
                             Ok(tc) => {
                                 tracing::debug!(
                                     session_id,
@@ -2511,6 +2535,23 @@ mod curated_long_term_injection_tests {
             "空の agent_rules 見出しが出ている:\n{prompt}"
         );
         assert!(prompt.contains("## User Profile"));
+    }
+}
+
+#[cfg(test)]
+mod typed_hard_cap_tests {
+    use super::typed_exceeds_input_budget;
+
+    /// #884 PR2 hard cap: wire トークンが input_high を超えるときだけ flat へ落とす。
+    #[test]
+    fn typed_falls_back_only_above_input_budget() {
+        // 上限以下・ちょうど上限は typed を維持（false）。
+        assert!(!typed_exceeds_input_budget(0, 1000));
+        assert!(!typed_exceeds_input_budget(999, 1000));
+        assert!(!typed_exceeds_input_budget(1000, 1000));
+        // 上限超過は flat へフォールバック（true）。
+        assert!(typed_exceeds_input_budget(1001, 1000));
+        assert!(typed_exceeds_input_budget(50_000, 1000));
     }
 }
 

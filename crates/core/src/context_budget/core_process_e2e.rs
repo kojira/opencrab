@@ -894,7 +894,9 @@ fn walk_for_needles(dir: &std::path::Path, needles: &[&str], hits: &mut Vec<Stri
 
 // ==================== #884 PR2: typed 送信の回帰ハーネス + モデル視点ウォークスルー ====================
 
-const WALKTHROUGH_DIR: &str = "/Volumes/2TB/openclaw/.claude-scratch/opencrab/884-pr2-walkthrough";
+/// ウォークスルー成果物の出力先。**env `OC_WALKTHROUGH_DIR` が設定されたときだけ**書き出す
+/// （CI/他環境ではハードコードパスへ書かず no-op・テストの assert はファイル書き込みに依存しない）。
+const WALKTHROUGH_DIR_ENV: &str = "OC_WALKTHROUGH_DIR";
 
 /// 送信 messages を捕捉し LLM 呼び出し回数を数える mock。tool を出さない最終テキストを
 /// 返すので engine は 1 回で止まる（#885 の chat カウンタ流儀を core で再利用）。
@@ -996,12 +998,17 @@ fn seed_sleep60(conn: &rusqlite::Connection) {
 }
 
 fn write_walkthrough(name: &str, value: &serde_json::Value) {
-    let _ = std::fs::create_dir_all(WALKTHROUGH_DIR);
-    std::fs::write(
-        format!("{WALKTHROUGH_DIR}/{name}"),
-        serde_json::to_string_pretty(value).unwrap(),
-    )
-    .unwrap();
+    // env が無ければ何もしない（CI・他環境で panic しない・best-effort）。
+    let Ok(dir) = std::env::var(WALKTHROUGH_DIR_ENV) else {
+        return;
+    };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let _ = std::fs::write(
+        format!("{dir}/{name}"),
+        serde_json::to_string_pretty(value).unwrap_or_default(),
+    );
 }
 
 async fn capture_engine_messages(
@@ -1198,4 +1205,27 @@ fn typed_walkthrough_reply3_and_noreply() {
         "NO_REPLY: history は User のみ"
     );
     assert!(!tc2.history.iter().any(|m| m.role == Role::Assistant));
+}
+
+/// row368 の負の対照: flat 経路（flag off）は typed の判別基準を満たさない
+/// ——単一 User に tool_calls が無く、`→log:` の裸参照が残る。typed 検査が判別力を
+/// 持つこと（＝赤 demo の意味）を CI 上に恒久的に残す対照テスト。
+#[tokio::test]
+async fn flat_path_lacks_typed_structure_negative_control() {
+    let conn = opencrab_db::init_memory().unwrap();
+    seed_sleep60(&conn);
+    let flat =
+        build_conversation_string_with_waters(&conn, SESSION, AGENT, HIGH, LOW, false).unwrap();
+    let (msgs, _calls) = capture_engine_messages(None, &flat).await;
+    // flat は System + 単一 User の 2 本。
+    assert_eq!(msgs.len(), 2, "flat は System + 単一 User");
+    assert_eq!(msgs[1].role, Role::User);
+    // typed の判別基準（assistant.tool_calls）を満たさない。
+    assert!(
+        !msgs.iter().any(|m| m.tool_calls.is_some()),
+        "flat には tool_calls が無い"
+    );
+    // 症状 B: settle 後の引数は →log: の裸参照へ潰れている。
+    let json = serde_json::to_string(&msgs).unwrap();
+    assert!(json.contains("→log:"), "flat には →log: の裸参照が残る");
 }
