@@ -2816,6 +2816,116 @@ mod tests {
         );
     }
 
+    /// (b2・#900) 発話クラスツール（reply）のみ＋末尾 CONTINUE → 発話配送後に次イテレーション。
+    /// 純発話でも末尾 CONTINUE があれば R7 の 1 生成完結ではなく継続する（併記した CONTINUE を尊重）。
+    /// reply×1＋CONTINUE → reply×1＋CONTINUE → reply×1 で配送 3・LLM 3・CONTINUE は本文へ残さない。
+    #[tokio::test]
+    async fn continue_marker_b2_utterance_only_with_marker_runs_next_iteration() {
+        use std::sync::atomic::Ordering;
+        use std::sync::{Arc, Mutex};
+
+        let (llm, chat_calls) = MockLlm::counting(vec![
+            resp(
+                Some("CONTINUE"),
+                vec![tc("reply-1", "reply", serde_json::json!({"text": "one"}))],
+            ),
+            resp(
+                Some("CONTINUE"),
+                vec![tc("reply-2", "reply", serde_json::json!({"text": "two"}))],
+            ),
+            tool_call_response(vec![tc(
+                "reply-3",
+                "reply",
+                serde_json::json!({"text": "three"}),
+            )]),
+        ]);
+        let executor_calls = Arc::new(Mutex::new(Vec::new()));
+        let executor = MockExecutor::new()
+            .add_result("reply", successful_action_result())
+            .with_call_log(executor_calls.clone());
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+        engine.set_tool_dispatcher(Arc::new(RecordingDispatcher::new(&[])));
+        // 発話は on_response_text ではなく executor 経由で配送される（純発話・本文 None）。
+        // CONTINUE 単独 content は剥がされ空になるので say は 1 度も飛ばない。
+        let delivered: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let delivered_cb = delivered.clone();
+        engine.set_on_response_text(move |t: String| {
+            delivered_cb.lock().unwrap().push(t);
+        });
+
+        let result = engine
+            .run("system", "3回に分けて返信して", "test-model")
+            .await
+            .expect("純発話＋末尾 CONTINUE は次イテレーションで完了する");
+
+        assert_eq!(
+            chat_calls.load(Ordering::SeqCst),
+            3,
+            "reply＋CONTINUE は毎回 2 回目以降の LLM 呼び出しを起こす"
+        );
+        assert_eq!(result.iterations, 3);
+        assert_eq!(
+            executor_calls.lock().unwrap().as_slice(),
+            &["reply", "reply", "reply"],
+            "3 回の reply がすべて配送される"
+        );
+        // CONTINUE 単独 content は剥がされて say にならない（本文へ残らない）。
+        assert!(
+            delivered.lock().unwrap().is_empty(),
+            "CONTINUE 単独 content が say として配送された: {:?}",
+            delivered.lock().unwrap()
+        );
+    }
+
+    /// (#8・§13) reply×N＋本文＋末尾 CONTINUE → reply を配送しつつ本文を配送して継続、次生成で終了。
+    /// engine 契約の層で固定する（extgate の途中発話配送＝§12.2 は #898 の担当。ここは #900 が所有する
+    /// 「継続機構＋本文の on_response_text 配送」を isol[ate] する）。1 生成目 reply(R1)＋本文A＋CONTINUE
+    /// → on_response_text で本文A・executor で reply を配送し継続、2 生成目 本文B で自然終了。LLM 2。
+    #[tokio::test]
+    async fn continue_marker_reply_body_marker_delivers_body_and_reply_then_continues() {
+        use std::sync::atomic::Ordering;
+        use std::sync::{Arc, Mutex};
+
+        let (llm, chat_calls) = MockLlm::counting(vec![
+            resp(
+                Some("本文A\nCONTINUE"),
+                vec![tc("reply-1", "reply", serde_json::json!({"text": "R1"}))],
+            ),
+            text_response("本文B"),
+        ]);
+        let executor_calls = Arc::new(Mutex::new(Vec::new()));
+        let executor = MockExecutor::new()
+            .add_result("reply", successful_action_result())
+            .with_call_log(executor_calls.clone());
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+        engine.set_tool_dispatcher(Arc::new(RecordingDispatcher::new(&[])));
+        let delivered: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let delivered_cb = delivered.clone();
+        engine.set_on_response_text(move |t: String| {
+            delivered_cb.lock().unwrap().push(t);
+        });
+
+        let result = engine
+            .run("system", "返信しつつ続けて", "test-model")
+            .await
+            .expect("reply＋本文＋CONTINUE は次イテレーションで本文Bへ到達する");
+
+        assert_eq!(
+            chat_calls.load(Ordering::SeqCst),
+            2,
+            "reply＋本文＋末尾 CONTINUE が次イテレーションを起こさない（§13 #8=進む）"
+        );
+        assert_eq!(result.iterations, 2);
+        // 本文（マーカー剥がし後）は各イテレーションで on_response_text 配送される（本文A→本文B）。
+        assert_eq!(
+            delivered.lock().unwrap().as_slice(),
+            &["本文A".to_string(), "本文B".to_string()],
+            "本文A/本文B が順に配送されない（CONTINUE 残留 or 継続失敗）"
+        );
+        // reply は executor 経由で 1 度だけ配送される。
+        assert_eq!(executor_calls.lock().unwrap().as_slice(), &["reply"]);
+    }
+
     /// (c) CONTINUE＋query ツール併記 → ツール経路で 2 呼び出し・二重継続なし・マーカーは剥がす。
     #[tokio::test]
     async fn continue_marker_c_with_query_tool_uses_tool_path_no_double() {

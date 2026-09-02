@@ -3068,9 +3068,10 @@ mod no_forced_reply_tests {
         );
     }
 
-    /// #890 PR2（§11.2）: ターン継続マーカーの使い方を system prompt で明示する。
-    /// 「## Continuing your turn」見出しと CONTINUE の指示が入り、既存の Async Behavior 文
-    /// （ツール結果は後で届く）は残る。
+    /// #900 / #890 PR2（§11.2）: モデル向け契約を新アーキテクチャに合わせる。
+    /// 「result arrives later」はツール（query）起動の文脈にだけ現れ、発話は
+    /// (i) fire-and-forget（結果が返らない）・(ii) 複数は 1 応答に並べる・(iii) 末尾 CONTINUE で継続
+    /// （reply と併記可）、の 3 点を明示する。「## Continuing your turn」見出しと CONTINUE 指示も残る。
     #[test]
     fn system_prompt_explains_continue_marker() {
         let conn = opencrab_db::init_memory().unwrap();
@@ -3095,10 +3096,33 @@ mod no_forced_reply_tests {
             prompt.contains("Never promise to reply"),
             "「後で返す」を禁じる指示が無い:\n{prompt}"
         );
-        // 既存の非同期説明（ツール結果は後で届く）は残す。
+
+        // (i) 発話は fire-and-forget（結果が返らない）と明示する。
         assert!(
-            prompt.contains("When you call a tool, the result arrives later"),
-            "既存の Async Behavior 文が失われている:\n{prompt}"
+            prompt.contains("fire-and-forget")
+                && prompt.contains("return a result and you are NOT called again"),
+            "発話が fire-and-forget（結果が返らない）である説明が無い:\n{prompt}"
+        );
+        // (ii) 複数の発話は 1 応答にまとめて並べる。
+        assert!(
+            prompt.contains("put all the calls in ONE response"),
+            "複数発話を 1 応答に並べる指示が無い:\n{prompt}"
+        );
+        // (iii) CONTINUE は reply と併記できる。
+        assert!(
+            prompt.contains("place it alongside a reply"),
+            "CONTINUE を reply と併記できる説明が無い:\n{prompt}"
+        );
+
+        // 「result arrives later」はツール（query）起動の文脈にだけ現れる。旧「When you call a
+        // tool, the result arrives later」という発話も含む包括表現は撤去されていること。
+        assert!(
+            prompt.contains("the result arrives later and you are called again"),
+            "ツール結果が後で届く説明（query 文脈）が失われている:\n{prompt}"
+        );
+        assert!(
+            !prompt.contains("When you call a tool, the result arrives later"),
+            "旧・発話も含む包括的な非同期説明が残っている:\n{prompt}"
         );
     }
 }
