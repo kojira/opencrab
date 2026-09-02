@@ -190,18 +190,29 @@ async fn process_agent_inbox(state: &AppState, stored_agent_id: &str) {
         Ok(result) => {
             // 応答を監査用に記録し、処理済みを刻む（Ok のときだけ / at-least-once）。
             if let Ok(conn) = state.db.lock() {
-                let log = SessionLogRow {
-                    id: None,
-                    agent_id: resolved_agent_id.clone(),
-                    session_id: session_id.clone(),
-                    log_type: "speech".to_string(),
-                    content: result.response.clone(),
-                    speaker_id: Some(resolved_agent_id.clone()),
-                    turn_number: None,
-                    metadata_json: None,
-                    created_at: None,
-                };
-                let _ = insert_session_log(&conn, &log);
+                // #899 §12.6: 保存前に NO_REPLY 終端解釈（単一実装）を通す。沈黙は speech を
+                // 残さない（処理済みマークは沈黙でも刻む＝イベントは消化済み）。
+                if let Some(body) = opencrab_actions::visible_speech_after_markers(
+                    &result.response,
+                    opencrab_actions::DeliveryContext {
+                        session_id: &session_id,
+                        agent_id: &resolved_agent_id,
+                        origin: "intake",
+                    },
+                ) {
+                    let log = SessionLogRow {
+                        id: None,
+                        agent_id: resolved_agent_id.clone(),
+                        session_id: session_id.clone(),
+                        log_type: "speech".to_string(),
+                        content: body,
+                        speaker_id: Some(resolved_agent_id.clone()),
+                        turn_number: None,
+                        metadata_json: None,
+                        created_at: None,
+                    };
+                    let _ = insert_session_log(&conn, &log);
+                }
                 // 今回の会話に載せた分（budget 内）だけを処理済みにする。残りは次 tick。
                 for r in included_rows {
                     if let Err(e) = mark_inbox_processed(&conn, &r.id) {

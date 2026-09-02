@@ -1035,14 +1035,25 @@ fn set_turn_log_callbacks(
         let tc_session = session_id.clone();
         engine.add_on_tool_call(move |content: String, tool_calls_json: String| {
             if let Ok(conn) = tc_db.lock() {
-                // LLMがtext+tool_callsを同時に返した場合、textをspeechとして記録する
-                if !content.trim().is_empty() {
+                // LLMがtext+tool_callsを同時に返した場合、textをspeechとして記録する。
+                // #899 §12.6: 保存前に NO_REPLY 終端解釈（単一実装 visible_speech_after_markers）を
+                // 通す。沈黙（前段が空）は監査行を残さない（残すと conversation_typed が次ターンの
+                // typed 履歴へ assistant 'NO_REPLY' として再注入する）。
+                let visible = opencrab_actions::visible_speech_after_markers(
+                    &content,
+                    opencrab_actions::DeliveryContext {
+                        session_id: &tc_session,
+                        agent_id: &tc_agent,
+                        origin: "engine",
+                    },
+                );
+                if let Some(body) = visible {
                     let speech_log = opencrab_db::queries::SessionLogRow {
                         id: None,
                         agent_id: tc_agent.clone(),
                         session_id: tc_session.clone(),
                         log_type: "speech".to_string(),
-                        content: content.clone(),
+                        content: body,
                         speaker_id: Some(tc_agent.clone()),
                         turn_number: None,
                         metadata_json: None,

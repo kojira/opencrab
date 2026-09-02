@@ -2632,10 +2632,6 @@ mod tests {
             unimplemented!("nostr の fake は A2UI interaction を使わない")
         }
 
-        fn record_agent_no_reply(&self, _agent_id: &str, _session_id: &str) {
-            unimplemented!("nostr の fake は NO_REPLY 記録を使わない")
-        }
-
         fn session_theme(&self, _session_id: &str) -> Option<String> {
             unimplemented!("nostr の fake は session_theme を使わない")
         }

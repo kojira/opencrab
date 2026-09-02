@@ -491,24 +491,34 @@ async fn run_one_schedule(
     };
 
     // 後処理（schedule 固有）: 応答をセッションへ記録する（次ターンが文脈を失わないように・監査痕跡）。
-    if let Ok(conn) = db.lock() {
-        let log = opencrab_db::queries::SessionLogRow {
-            id: None,
-            agent_id: agent_id.to_string(),
-            session_id: session_id.to_string(),
-            log_type: "speech".to_string(),
-            content: engine_result.response.clone(),
-            speaker_id: Some(agent_id.to_string()),
-            turn_number: None,
-            metadata_json: None,
-            created_at: None,
-        };
-        if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
-            tracing::error!(
-                agent_id,
-                session_id,
-                "scheduler: schedule 応答の記録に失敗: {e}"
-            );
+    // #899 §12.6: 保存前に NO_REPLY 終端解釈（単一実装）を通す。沈黙は speech を残さない。
+    if let Some(body) = opencrab_actions::visible_speech_after_markers(
+        &engine_result.response,
+        opencrab_actions::DeliveryContext {
+            session_id,
+            agent_id,
+            origin: "schedule",
+        },
+    ) {
+        if let Ok(conn) = db.lock() {
+            let log = opencrab_db::queries::SessionLogRow {
+                id: None,
+                agent_id: agent_id.to_string(),
+                session_id: session_id.to_string(),
+                log_type: "speech".to_string(),
+                content: body,
+                speaker_id: Some(agent_id.to_string()),
+                turn_number: None,
+                metadata_json: None,
+                created_at: None,
+            };
+            if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
+                tracing::error!(
+                    agent_id,
+                    session_id,
+                    "scheduler: schedule 応答の記録に失敗: {e}"
+                );
+            }
         }
     }
     Some(())
