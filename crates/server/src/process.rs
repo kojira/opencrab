@@ -3149,6 +3149,17 @@ mod no_forced_reply_tests {
             !prompt.contains("When you call a tool, the result arrives later"),
             "旧・発話も含む包括的な非同期説明が残っている:\n{prompt}"
         );
+
+        // #909: 平文は 1 応答 = 1 投稿。別々に複数の平文を投稿するなら各応答末尾に CONTINUE。
+        // （reply×N in one response の対。実モデルが CONTINUE を使わず 1 投稿 3 段落で返した対策）。
+        assert!(
+            prompt.contains("Plain text in a response is posted as ONE message"),
+            "平文は 1 応答 = 1 投稿の説明が無い（#909）:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("To post several plain messages separately"),
+            "別々の平文投稿は各応答末尾 CONTINUE の説明が無い（#909）:\n{prompt}"
+        );
     }
 }
 
