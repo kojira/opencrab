@@ -33,6 +33,8 @@ tower = { workspace = true }
 http-body-util = "0.1"
 tokio = { workspace = true, features = ["test-util"] }
 opencrab-gate-client = { workspace = true }
+# #894: hello 拒否理由の fail-loud ログ（server WARN / client reason）を tracing capture で検証。
+tracing-subscriber = { workspace = true }
 # no_platform_branch テスト（#852）: gateway 共有層（extgate / gate-client の
 # production）を AST で走査し、platform 特化分岐（`kind_id == "<platform>"`）と
 # gate/SDK 固有の識別子・文字列が混ざっていないことを検査する。
