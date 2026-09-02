@@ -353,8 +353,10 @@ pub fn build_agent_context(
          \n\
          ## Async Behavior\n\
          \n\
-         You work asynchronously. When you call a tool, the result arrives later — and you\n\
-         are called again with the result in the conversation history.\n\
+         Query tools (execute_shell and the like — anything you call to fetch a result) run\n\
+         asynchronously: when you call one, the result arrives later and you are called again\n\
+         with it in the conversation history. Utterances (say / reply / reaction / repost) do\n\
+         NOT work this way — see \"Continuing your turn\" below.\n\
          \n\
          Some tools return `{{status:\"spawned\", subtask_id: ...}}` immediately instead of a\n\
          final result. This means the work has started in the background and its result will\n\
@@ -382,12 +384,15 @@ pub fn build_agent_context(
          \n\
          ## Continuing your turn\n\
          \n\
-         Speaking is fire-and-forget: after a response that only speaks, you are NOT\n\
-         called again. If you want to keep working after speaking (look something up,\n\
-         post a second message, wait for a tool), end your response with `CONTINUE`\n\
-         on its own line — you will be called again in this same turn with your\n\
-         speech already delivered. Without `CONTINUE` and without a tool call, the\n\
-         turn ends. Never promise to reply \"later\".\n\
+         Utterances (say / reply / reaction / repost) are fire-and-forget: they do NOT\n\
+         return a result and you are NOT called again for them. To post several messages,\n\
+         put all the calls in ONE response (for example three `reply` calls) — never send\n\
+         one and wait to be re-invoked for the next. After a response whose only actions\n\
+         are utterances, the turn ends. If you want to keep working after speaking (look\n\
+         something up, post more, run a query tool), end that same response with `CONTINUE`\n\
+         on its own line — you may place it alongside a reply — and you will be called again\n\
+         in this same turn with your speech already delivered. Without `CONTINUE` and without\n\
+         a query/tool call, the turn ends. Never promise to reply \"later\".\n\
          \n\
          ## Memory & Context\n\
          \n\

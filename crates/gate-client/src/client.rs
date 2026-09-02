@@ -24,6 +24,17 @@ use super::wire::{
 #[async_trait::async_trait]
 pub trait InvokeHandler: Send + Sync {
     async fn handle(&self, binding_id: &str, operation: &str, payload: &Value) -> InvokeOutcome;
+
+    /// この operation が**発話クラス**（reply/reaction/repost 等・ユーザーに見える発言）か。
+    ///
+    /// #900: 発話は say と同じく「そのターンで発話した」証跡になる。gateway 固有の operation
+    /// 名を知るのは handler なので、発話クラスの判定は handler が担う（gate-client は非依存）。
+    /// これが `true` の invoke が Ok で決着すると、ターンは沈黙ではなくなり `CompletedNoReply`
+    /// （Discord なら 🤐）を立てない。resolve/follow 等の照会・操作クラスは既定の `false`。
+    fn is_utterance(&self, operation: &str) -> bool {
+        let _ = operation;
+        false
+    }
 }
 
 /// invoke の三結果（§5.3）。gateway 側の観測を core へ正しく伝える。
@@ -72,7 +83,7 @@ pub enum LiveEvent {
         /// 単独で握った said（`ReplyOrigin::Single`）だけ `Some`。bundle ターンや複数即時 said の
         /// 相乗り（`None`/`Ambiguous`）では単一の発端を決められないので `None`。consumer は `Some` を
         /// 「その発端メッセージが沈黙で終えた」サイン（Discord なら 🤐）に使い、`None` は無視してよい。
-        /// 裁定A（core が ended を say の後に出す）により、返信ターンでは saw_say=true のため
+        /// 裁定A（core が ended を say の後に出す）により、返信ターンでは saw_utterance=true のため
         /// このイベントは立たず、真の沈黙ターンだけに立つ。
         reply_origin: Option<String>,
     },
@@ -134,7 +145,7 @@ enum ReplyOrigin {
 }
 
 struct PendingTurn {
-    saw_say: bool,
+    saw_utterance: bool,
     reply_origin: ReplyOrigin,
 }
 
@@ -390,7 +401,7 @@ impl InstanceClient {
                 .pending_turn
                 .entry(binding_id.clone())
                 .or_insert_with(|| PendingTurn {
-                    saw_say: false,
+                    saw_utterance: false,
                     reply_origin: ReplyOrigin::None,
                 });
             // 即時 said（ターン終了まで占有）だけが返信先を刻む。bundle receipt
@@ -704,6 +715,15 @@ async fn handle_invoke(client: &InstanceClient, inv: Invoke, generation: u64) ->
         .await
     {
         InvokeOutcome::Ok(result) => {
+            // #900: 発話クラス（reply/reaction/repost）の invoke が Ok で決着したら、進行中ターンを
+            // 「発話あり」に印づける。これで ended 時に沈黙（CompletedNoReply → 🤐）を立てない。
+            // 照会・操作クラス（resolve 等）は is_utterance=false なので印づけない（沈黙判定は不変）。
+            if handler.is_utterance(&inv.operation) {
+                let mut inner = client.inner.lock().await;
+                if let Some(turn) = inner.pending_turn.get_mut(&inv.binding_id) {
+                    turn.saw_utterance = true;
+                }
+            }
             let _ = send_frame(client, invoke_ok_frame(&inv.id, &result)).await;
             false
         }
@@ -802,7 +822,7 @@ async fn handle_say(client: &InstanceClient, say: Say, generation: u64) -> bool 
         return false;
     }
     if let Some(turn) = inner.pending_turn.get_mut(&say.binding_id) {
-        turn.saw_say = true;
+        turn.saw_utterance = true;
     }
     drop(inner);
     if !send_frame(client, ok_frame(&say.id)).await {
@@ -839,12 +859,12 @@ async fn handle_activity(client: &InstanceClient, activity: Activity) {
             .pending_turn
             .entry(activity.binding_id.clone())
             .or_insert_with(|| PendingTurn {
-                saw_say: false,
+                saw_utterance: false,
                 reply_origin: ReplyOrigin::None,
             });
     } else if activity.state == "ended" {
         if let Some(turn) = inner.pending_turn.remove(&activity.binding_id) {
-            if !turn.saw_say {
+            if !turn.saw_utterance {
                 // Message と同じ pending_turn.reply_origin を露出する（新フレームではなく既存追跡の
                 // surface）。Single だけ発端を運び、None/Ambiguous は単一発端無しとして None。
                 let reply_origin = match &turn.reply_origin {

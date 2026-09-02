@@ -742,7 +742,10 @@ impl SkillEngine {
                         || !self.is_action_allowed(&tc.function.name)
                 });
 
-                if !next_llm_call_needed {
+                // #900: 純発話でも末尾 CONTINUE が併記されていれば、発話を配送してから次イテレー
+                // ションへ進む（発話クラスのみ＋末尾 CONTINUE → 継続）。この場合は下の混在パスへ落とし、
+                // 各発話を最小 ack で満たして次の LLM 呼び出しを起こす（本文＝マーカー剥がし済みの content）。
+                if !next_llm_call_needed && !continue_requested {
                     for tool_call in &tool_calls {
                         total_tool_calls += 1;
                         let tool_name = &tool_call.function.name;
