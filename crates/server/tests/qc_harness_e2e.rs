@@ -2343,3 +2343,541 @@ async fn scenario_no_reply_only_is_not_persisted_extgate_899() {
         mock.system_prompts().len()
     );
 }
+
+// =====================================================================================
+// 監査ピン（test/harness-audit-outermost-pins・#898/#899/#900）
+//
+// 本セクションは「モック LLM ハーネスの最外層で配送回数・保存件数・LLM 回数・残留マーカー・
+// ゲート反応を pin していれば 2026-09-02 QC の劣化を赤で捕まえられた」ことを固定する赤テスト。
+// 現 tip（fabd6556）で **赤** になるべきで、各修正 PR がこれを緑にする。実装は行わない。
+//
+// 観測チャネル（このハーネスが提供するもの）:
+//   - 配送: dry-run say バッファ（`captured()` の CapturedSay{kind, body}）。kind は "standalone"
+//           /"reply"。回数は body マーカーで filter して count する。
+//   - 保存: session_logs（`list_session_logs_by_session`）の log_type=="speech" 行。
+//           エージェント自身の発話は speaker_id==AGENT_ID。
+//   - LLM 回数: mock 側のカウンタ（system_prompts().len() もしくは AtomicUsize）。
+//   - 残留マーカー: say body / speech content に "CONTINUE" / "NO_REPLY" が現れないこと。
+//   - 次ターン typed 履歴: 2 ターン目リクエストの Assistant ロールメッセージ本文。
+// =====================================================================================
+
+fn agent_speech_contents(core: &Core, session_id: &str) -> Vec<String> {
+    let conn = core.extgate.db.lock().unwrap();
+    opencrab_db::queries::list_session_logs_by_session(&conn, session_id)
+        .unwrap()
+        .into_iter()
+        .filter(|l| l.log_type == "speech" && l.speaker_id.as_deref() == Some(AGENT_ID))
+        .map(|l| l.content)
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// #898【DESIGN-TURN-CONTINUATION §13 #2（本文＋最終行 CONTINUE→進む）を 3 連鎖／ターン合計 plain3・
+// §13.1 b/c/d（1 イテレーション=1 投稿・順序保持）】: reply なし・CONTINUE で 3 分割 → 配送 3・保存 3・LLM 3・残留なし。
+//
+// 現 tip: 機構（CONTINUE 3 イテレーション）は動くが配送/保存は最終応答（er.response）だけを
+// 通すので「3回目」だけが say/speech に残る（配送 1・保存 1）。→ 赤。
+// 期待（設計 §11.1）: 途中イテレーションの発話も 1 回ずつ配送・保存される。
+// ---------------------------------------------------------------------------
+const AUD898_1: &str = "AUD898-ONE 監査一回目";
+const AUD898_2: &str = "AUD898-TWO 監査二回目";
+const AUD898_3: &str = "AUD898-THREE 監査三回目";
+
+#[tokio::test]
+async fn audit_898_continue_split_delivers_and_saves_each_iteration() {
+    let buf = install_capture();
+    let mock = Arc::new(FifoMock::new());
+    // 各生成の末尾に単独行 CONTINUE（最終だけ無し）。engine は剥がして次イテレーションへ。
+    mock.push_text(&format!("{AUD898_1}\nCONTINUE"));
+    mock.push_text(&format!("{AUD898_2}\nCONTINUE"));
+    mock.push_text(AUD898_3);
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let (_client, _address, session_id) = wire_instance(&core, &fixture, nostr_config(None)).await;
+
+    let ev = "8981".repeat(16);
+    fixture.append_line(&mention_event(
+        &ev,
+        "C898-MARK 3回に分けて投稿して reply使わずに",
+    ));
+
+    // 最終イテレーションの配送が出るまで待つ（= 3 イテレーションまで到達した）。
+    let done = {
+        let buf = buf.clone();
+        wait_until(move || body_index(&buf, AUD898_3).is_some()).await
+    };
+    assert!(
+        done,
+        "3回目の配送が出ない（CONTINUE 機構未到達）: {:?}",
+        captured(&buf)
+    );
+
+    // 途中イテレーションも配送されるだけの猶予（現 tip では出ないので落ち着き待ち）。
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    // 配送: 3 本すべてが standalone say として出る（現 tip は AUD898_3 のみ → 赤）。
+    for body in [AUD898_1, AUD898_2, AUD898_3] {
+        let n = captured(&buf)
+            .iter()
+            .filter(|c| c.kind == "standalone" && c.body.contains(body))
+            .count();
+        assert_eq!(
+            n,
+            1,
+            "途中発話 {body} の配送回数が 1 でない（#898: 途中イテレーションが配送されない）: {:?}",
+            captured(&buf)
+        );
+    }
+
+    // 保存: speech に 3 本すべてが残る（現 tip は AUD898_3 のみ → 赤）。
+    let saved = agent_speech_contents(&core, &session_id);
+    for body in [AUD898_1, AUD898_2, AUD898_3] {
+        assert!(
+            saved.iter().any(|s| s.contains(body)),
+            "途中発話 {body} が speech に保存されていない（#898）: {saved:?}"
+        );
+    }
+
+    // LLM 回数: 3 生成（機構は動くので base でも 3・回帰の下限固定）。
+    assert_eq!(
+        mock.system_prompts().len(),
+        3,
+        "CONTINUE 3 分割の LLM 呼び出しが 3 でない"
+    );
+
+    // 残留マーカー: この分割ターンの say / speech に CONTINUE が残らない（§11.6）。
+    // BUFFER は binary 全体で共有・累積するため、C898 マーカーを含む say に限定して判定する。
+    assert!(
+        captured(&buf)
+            .iter()
+            .filter(|c| [AUD898_1, AUD898_2, AUD898_3]
+                .iter()
+                .any(|m| c.body.contains(m)))
+            .all(|c| !c.body.contains("CONTINUE")),
+        "say body に CONTINUE が残留: {:?}",
+        captured(&buf)
+    );
+    assert!(
+        saved.iter().all(|s| !s.contains("CONTINUE")),
+        "speech content に CONTINUE が残留: {saved:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #899(a)【§13 #11（NO_REPLY のみ→配送0/保存0/DB にも書かない）nostr レーン・§13.1 i（typed on/off 同一期待）】:
+// NO_REPLY のみの応答 → 配送 0・保存 0・次ターン typed 履歴に assistant NO_REPLY なし。
+//
+// 現 tip: delivery_effect は NoReply（配送 0）だが apply_delivery_effect が
+// record_agent_no_reply を呼び "NO_REPLY" を speech 保存する → 次ターンの会話履歴に
+// assistant "NO_REPLY" として載る（合言葉の模倣温床）。→ 保存/履歴の pin で赤。
+// ---------------------------------------------------------------------------
+const M899_1: &str = "NR899-MARK-ONE これは黙って";
+const M899_2: &str = "NR899-MARK-TWO 次の依頼";
+const B899_TURN2: &str = "nr899-turn2-body 二ターン目の返事";
+
+struct NoReplyProbeMock {
+    calls: AtomicUsize,
+    turn2_assistant: Mutex<Option<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for NoReplyProbeMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let text = request_text(&request);
+        if text.contains(M899_2) {
+            // ターン 2: 履歴に載った Assistant ロールメッセージ本文を捕まえる。
+            let asst: Vec<String> = request
+                .messages
+                .iter()
+                .filter(|m| m.role == Role::Assistant)
+                .filter_map(|m| m.text_content().map(|s| s.to_string()))
+                .collect();
+            *self.turn2_assistant.lock().unwrap() = Some(asst);
+            return Ok(text_response(B899_TURN2));
+        }
+        // ターン 1（M899_1）と保険: NO_REPLY のみ。
+        Ok(text_response("NO_REPLY"))
+    }
+}
+
+#[tokio::test]
+async fn audit_899a_no_reply_only_not_delivered_not_saved_not_in_history() {
+    let buf = install_capture();
+    let mock = Arc::new(NoReplyProbeMock {
+        calls: AtomicUsize::new(0),
+        turn2_assistant: Mutex::new(None),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let (_client, _address, session_id) = wire_instance(&core, &fixture, nostr_config(None)).await;
+
+    // ターン 1: NO_REPLY のみ。
+    let ev1 = "8991".repeat(16);
+    fixture.append_line(&mention_event(&ev1, M899_1));
+
+    // ターン 1 の LLM 呼び出しが済むまで待ち、保存の猶予を置く。
+    let ran = {
+        let mock = mock.clone();
+        wait_until(move || mock.calls.load(Ordering::SeqCst) >= 1).await
+    };
+    assert!(ran, "ターン 1 の LLM 呼び出しが走らない");
+    // 決着（apply_delivery_effect → record_agent_no_reply）まで settle する猶予。CI の並列負荷でも
+    // 保存が済むよう長めに置く（DB は各テスト独立なので他テストとは干渉しない）。
+    tokio::time::sleep(Duration::from_millis(700)).await;
+
+    // 配送 0: NO_REPLY 本文は wire に出ない（沈黙）。BUFFER は binary 全体で共有・累積するため、
+    // 「standalone say の本文が NO_REPLY そのもの」に限定して判定する（他テストの本文への substring
+    // 誤検出を避ける）。#899 の配送バグはこの NO_REPLY 単体 say を出す。
+    assert!(
+        !captured(&buf)
+            .iter()
+            .any(|c| c.kind == "standalone" && c.body.trim() == "NO_REPLY"),
+        "NO_REPLY が say として配送された: {:?}",
+        captured(&buf)
+    );
+
+    // 保存 0: "NO_REPLY" の speech 行が残らない（現 tip は record_agent_no_reply で残る → 赤）。
+    let saved = agent_speech_contents(&core, &session_id);
+    assert!(
+        !saved
+            .iter()
+            .any(|s| s == "NO_REPLY" || s.contains("NO_REPLY")),
+        "NO_REPLY のみの応答が speech に保存された（#899）: {saved:?}"
+    );
+
+    // ターン 2: 履歴に NO_REPLY が載っていないことを確かめる。
+    let ev2 = "8992".repeat(16);
+    fixture.append_line(&mention_event(&ev2, M899_2));
+    let turn2_done = {
+        let buf = buf.clone();
+        wait_until(move || body_index(&buf, B899_TURN2).is_some()).await
+    };
+    assert!(turn2_done, "ターン 2 の配送が出ない: {:?}", captured(&buf));
+
+    let asst = mock
+        .turn2_assistant
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("ターン 2 が履歴を捕まえていない");
+    assert!(
+        !asst
+            .iter()
+            .any(|m| m.trim() == "NO_REPLY" || m.contains("NO_REPLY")),
+        "次ターンの typed 履歴に assistant NO_REPLY が載っている（#899）: {asst:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #899(b)【§13 #12（本文＋末尾 NO_REPLY→本文 1/保存 1・以降破棄）】: 本文 + NO_REPLY → 本文だけ配送 1・保存 1（NO_REPLY 混入なし）。
+// 非回帰の下限固定（現 tip でも緑のはず・NO_REPLY 剥がしが配送/保存両方に効く証拠）。
+// ---------------------------------------------------------------------------
+const B899B_KEEP: &str = "nr899b-keep 本文はここまで";
+
+#[tokio::test]
+async fn audit_899b_body_plus_no_reply_delivers_body_only_saved_once() {
+    let buf = install_capture();
+    let mock = Arc::new(FifoMock::new());
+    mock.push_text(&format!("{B899B_KEEP} NO_REPLY 破棄されるべき後段"));
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let (_client, _address, session_id) = wire_instance(&core, &fixture, nostr_config(None)).await;
+
+    let ev = "899b".repeat(16);
+    fixture.append_line(&mention_event(&ev, "NR899B-MARK 本文の後に沈黙"));
+
+    let done = {
+        let buf = buf.clone();
+        wait_until(move || body_index(&buf, B899B_KEEP).is_some()).await
+    };
+    assert!(done, "本文の配送が出ない: {:?}", captured(&buf));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // 配送 1・NO_REPLY 混入なし。
+    let says: Vec<_> = captured(&buf)
+        .into_iter()
+        .filter(|c| c.body.contains(B899B_KEEP))
+        .collect();
+    assert_eq!(says.len(), 1, "本文の配送回数が 1 でない: {says:?}");
+    assert!(
+        says.iter().all(|c| !c.body.contains("NO_REPLY")),
+        "配送本文に NO_REPLY が混入: {says:?}"
+    );
+
+    // 保存 1・NO_REPLY 混入なし。
+    let saved = agent_speech_contents(&core, &session_id);
+    let kept: Vec<_> = saved.iter().filter(|s| s.contains(B899B_KEEP)).collect();
+    assert_eq!(kept.len(), 1, "本文の保存件数が 1 でない: {saved:?}");
+    assert!(
+        !saved.iter().any(|s| s.contains("NO_REPLY")),
+        "speech に NO_REPLY が保存された: {saved:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #900(b)【§13 #9（reply×N＋CONTINUE のみ→reply N 配送・進む）／ターン合計 reply1＋CONTINUE ×2→reply1】:
+// reply×1 + 末尾 CONTINUE を 2 回、最後に reply×1 → 配送 3・LLM 3。
+//
+// 現 tip: 発話クラスのみの生成は `next_llm_call_needed=false` で即 return し、末尾 CONTINUE を
+// 無視する（continue_requested を tool_call 分岐が見ない）。→ reply 1 通・LLM 1 回で赤。
+// 期待: 発話のみ + 末尾 CONTINUE は「配送してから次イテレーション」。
+// ---------------------------------------------------------------------------
+const B900_1: &str = "b900-reply-one 一通目";
+const B900_2: &str = "b900-reply-two 二通目";
+const B900_3: &str = "b900-reply-three 三通目";
+
+fn reply_with_optional_continue(text: &str, cont: bool) -> ChatResponse {
+    let msg = Message {
+        role: Role::Assistant,
+        content: if cont {
+            Some(MessageContent::Text("CONTINUE".to_string()))
+        } else {
+            None
+        },
+        name: None,
+        function_call: None,
+        tool_calls: Some(vec![ToolCall {
+            id: format!("tc-{}", uuid::Uuid::new_v4()),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "reply".to_string(),
+                arguments: serde_json::json!({"event": "e1", "text": text}).to_string(),
+            },
+        }]),
+        tool_call_id: None,
+    };
+    ChatResponse {
+        id: uuid::Uuid::new_v4().to_string(),
+        model: "mock-model".to_string(),
+        choices: vec![Choice {
+            index: 0,
+            message: msg,
+            finish_reason: Some(FinishReason::ToolCalls),
+        }],
+        usage: Usage::default(),
+        created: 0,
+    }
+}
+
+struct ReplyContinueMock {
+    calls: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for ReplyContinueMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(match n {
+            0 => reply_with_optional_continue(B900_1, true),
+            1 => reply_with_optional_continue(B900_2, true),
+            _ => reply_with_optional_continue(B900_3, false),
+        })
+    }
+}
+
+#[tokio::test]
+async fn audit_900b_reply_plus_continue_delivers_three_over_three_llm_calls() {
+    let buf = install_capture();
+    let mock = Arc::new(ReplyContinueMock {
+        calls: AtomicUsize::new(0),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let (_client, _address, _session_id) = wire_instance(&core, &fixture, nostr_config(None)).await;
+
+    let ev = "900b".repeat(16);
+    fixture.append_line(&mention_event(&ev, "B900-MARK reply 3回に分けて"));
+
+    // 3 通目まで配送されるのを待つ（現 tip は 1 通目で止まる → タイムアウト後に赤 assert）。
+    let all_three = {
+        let buf = buf.clone();
+        wait_until(move || {
+            [B900_1, B900_2, B900_3].iter().all(|b| {
+                captured(&buf)
+                    .iter()
+                    .any(|c| c.kind == "reply" && c.body.contains(b))
+            })
+        })
+        .await
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // 配送 3: reply が 3 通（現 tip は 1 通で止まる → 赤）。
+    for b in [B900_1, B900_2, B900_3] {
+        let n = captured(&buf)
+            .iter()
+            .filter(|c| c.kind == "reply" && c.body.contains(b))
+            .count();
+        assert_eq!(
+            n,
+            1,
+            "reply {b} の配送回数が 1 でない（#900(b): 発話＋CONTINUE 継続が効かない）: {:?}",
+            captured(&buf)
+        );
+    }
+    assert!(
+        all_three,
+        "reply×3（発話＋CONTINUE 継続）が揃わない: {:?}",
+        captured(&buf)
+    );
+
+    // LLM 3 回（現 tip は 1 回で止まる → 赤）。
+    assert_eq!(
+        mock.calls.load(Ordering::SeqCst),
+        3,
+        "発話＋末尾 CONTINUE が次イテレーションを起こしていない（LLM 呼び出しが 3 でない）"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §13 #7【reply×N＋本文】: reply×2 と本文を 1 生成で並べる → 配送 reply2＋本文1・保存 3・
+// LLM 1・🤐 なし（発話がある）。発話 op と本文の同時配送＝発話クラス化（#883）の契約点。
+// 現 tip で緑なら**非回帰ピン**（発話＋本文の同時配送が壊れていないことを固定）。
+// ---------------------------------------------------------------------------
+const R7_REPLY_1: &str = "r7-reply-one 返信その1";
+const R7_REPLY_2: &str = "r7-reply-two 返信その2";
+const R7_BODY: &str = "r7-body-gamma まとめの本文だよ";
+
+fn replies_with_body(replies: &[&str], body: &str) -> ChatResponse {
+    let tool_calls: Vec<ToolCall> = replies
+        .iter()
+        .map(|text| ToolCall {
+            id: format!("tc-{}", uuid::Uuid::new_v4()),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "reply".to_string(),
+                arguments: serde_json::json!({"event": "e1", "text": text}).to_string(),
+            },
+        })
+        .collect();
+    let msg = Message {
+        role: Role::Assistant,
+        content: Some(MessageContent::Text(body.to_string())),
+        name: None,
+        function_call: None,
+        tool_calls: Some(tool_calls),
+        tool_call_id: None,
+    };
+    ChatResponse {
+        id: uuid::Uuid::new_v4().to_string(),
+        model: "mock-model".to_string(),
+        choices: vec![Choice {
+            index: 0,
+            message: msg,
+            finish_reason: Some(FinishReason::ToolCalls),
+        }],
+        usage: Usage::default(),
+        created: 0,
+    }
+}
+
+struct ReplyBodyMock {
+    calls: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for ReplyBodyMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(replies_with_body(&[R7_REPLY_1, R7_REPLY_2], R7_BODY))
+    }
+}
+
+#[tokio::test]
+async fn audit_s13_7_replies_plus_body_deliver_all_and_save_all() {
+    let buf = install_capture();
+    let mock = Arc::new(ReplyBodyMock {
+        calls: AtomicUsize::new(0),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let (_client, _address, session_id) = wire_instance(&core, &fixture, nostr_config(None)).await;
+
+    let ev = "1307".repeat(16);
+    fixture.append_line(&mention_event(&ev, "R7-MARK 2 回返信して最後にまとめて"));
+
+    // 本文 say（standalone）が出るまで待つ。
+    let done = {
+        let buf = buf.clone();
+        wait_until(move || body_index(&buf, R7_BODY).is_some()).await
+    };
+    assert!(done, "本文 say が出ない: {:?}", captured(&buf));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // 配送: reply2（kind=reply）＋本文1（kind=standalone）。
+    for r in [R7_REPLY_1, R7_REPLY_2] {
+        let n = captured(&buf)
+            .iter()
+            .filter(|c| c.kind == "reply" && c.body.contains(r))
+            .count();
+        assert_eq!(
+            n,
+            1,
+            "reply {r} の配送回数が 1 でない: {:?}",
+            captured(&buf)
+        );
+    }
+    let body_says = captured(&buf)
+        .iter()
+        .filter(|c| c.kind == "standalone" && c.body.contains(R7_BODY))
+        .count();
+    assert_eq!(
+        body_says,
+        1,
+        "本文 say の配送回数が 1 でない: {:?}",
+        captured(&buf)
+    );
+
+    // 保存: reply2 本文＋本文1 = 3 件（speech）。
+    let saved = agent_speech_contents(&core, &session_id);
+    for m in [R7_REPLY_1, R7_REPLY_2, R7_BODY] {
+        assert!(
+            saved.iter().any(|s| s.contains(m)),
+            "{m} が speech に保存されていない（reply＋本文の保存 N+1）: {saved:?}"
+        );
+    }
+
+    // LLM 1・subtask なし（1 生成で完結・撃ちっぱなし）。
+    assert_eq!(
+        mock.calls.load(Ordering::SeqCst),
+        1,
+        "reply×N＋本文は 1 生成で完結する"
+    );
+    assert!(
+        !core.state.subtask_registries.has_running(&session_id),
+        "reply×N＋本文が subtask 化された"
+    );
+}

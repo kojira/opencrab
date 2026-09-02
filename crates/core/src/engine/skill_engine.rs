@@ -3259,6 +3259,129 @@ mod tests {
         );
     }
 
+    /// §13.1 f【sub-engine(depth>0)でも CONTINUE 有効・sub-engine の max_iterations で上限】
+    /// sub-engine は退避先未設定・小さめ max の SkillEngine プロファイル。CONTINUE 機構は
+    /// 共有ループにあり depth で gate されないので継続は効き、上限は sub-engine の max_iterations。
+    /// 現 tip で緑（非回帰ピン）。
+    #[tokio::test]
+    async fn continue_marker_i_sub_engine_profile_continues_and_bounded() {
+        use std::sync::atomic::Ordering;
+
+        // (1) sub-engine プロファイル（退避先未設定・max=5）でも末尾 CONTINUE で継続する。
+        let (llm, chat_calls) = MockLlm::counting(vec![
+            resp(Some("下調べするね⚡\nCONTINUE"), vec![]),
+            text_response("完了"),
+        ]);
+        let mut sub = SkillEngine::new(Box::new(llm), Box::new(MockExecutor::new()), 5);
+        sub.set_tool_dispatcher(Arc::new(RecordingDispatcher::new(&[])));
+        let r = sub
+            .run("system", "go", "test-model")
+            .await
+            .expect("sub-engine でも末尾 CONTINUE は次イテレーションへ進む");
+        assert_eq!(
+            chat_calls.load(Ordering::SeqCst),
+            2,
+            "sub-engine でも末尾 CONTINUE で 2 回目が走る"
+        );
+        assert_eq!(r.response, "完了");
+
+        // (2) sub-engine の max_iterations（timeout と並ぶ上限の代表）で fail-loud 停止する。
+        let (llm2, chat2) =
+            MockLlm::counting(vec![text_response("CONTINUE"), text_response("CONTINUE")]);
+        let mut sub2 = SkillEngine::new(Box::new(llm2), Box::new(MockExecutor::new()), 2);
+        sub2.set_tool_dispatcher(Arc::new(RecordingDispatcher::new(&[])));
+        let r2 = sub2
+            .run("system", "go", "test-model")
+            .await
+            .expect("上限到達は Ok の打ち切り応答で返る");
+        assert!(
+            r2.stopped_by_limit,
+            "sub-engine の max_iterations でも CONTINUE 連鎖は上限停止する"
+        );
+        assert_eq!(
+            chat2.load(Ordering::SeqCst),
+            2,
+            "sub-engine max=2 で LLM 2 回"
+        );
+    }
+
+    /// §13.1 a【空 CONTINUE 連続 3 回で warn 1 行（停止しない・解析用）】
+    /// 現 tip: engine は空 CONTINUE 連鎖に対する解析 warn を出さない → CONTINUE_LOG_TARGET
+    /// イベント 0 で**赤**。実装は 3 連続空生成＋CONTINUE で
+    /// target=CONTINUE_LOG_TARGET("opencrab::continue_marker") に warn を 1 行出す
+    /// （停止しない・上限は既存 max_iterations）。捕捉はスレッドローカル subscriber なので
+    /// 専用 current-thread ランタイムを with_default の内側で回す（並列テストと非干渉）。
+    #[test]
+    fn continue_marker_j_empty_chain_warns_without_stopping() {
+        use crate::continue_marker::CONTINUE_LOG_TARGET;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        // 空 CONTINUE を 3 連続 → 本文で終端（max=10 未達・停止しないことを示す）。
+        let (llm, chat_calls) = MockLlm::counting(vec![
+            text_response("CONTINUE"),
+            text_response("CONTINUE"),
+            text_response("CONTINUE"),
+            text_response("まとめ本文"),
+        ]);
+
+        // CONTINUE_LOG_TARGET のイベントだけ数える最小 Subscriber（常時 enabled）。
+        struct TargetCounter {
+            hits: Arc<AtomicUsize>,
+        }
+        impl tracing::Subscriber for TargetCounter {
+            fn enabled(&self, _md: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                if event.metadata().target() == CONTINUE_LOG_TARGET {
+                    self.hits.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let subscriber = TargetCounter { hits: hits.clone() };
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(MockExecutor::new()), 10);
+        engine.set_tool_dispatcher(Arc::new(RecordingDispatcher::new(&[])));
+
+        let response = Mutex::new(String::new());
+        tracing::subscriber::with_default(subscriber, || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let r = engine
+                    .run("system", "続けて", "test-model")
+                    .await
+                    .expect("空 CONTINUE 連鎖は停止せず本文で終端する");
+                *response.lock().unwrap() = r.response;
+            });
+        });
+
+        // 停止しない: 本文まで到達し LLM を 4 回呼ぶ。
+        assert_eq!(
+            chat_calls.load(Ordering::SeqCst),
+            4,
+            "空 CONTINUE 連鎖でも停止せず本文まで進む（4 生成）"
+        );
+        assert_eq!(*response.lock().unwrap(), "まとめ本文");
+
+        // 解析用 warn が CONTINUE_LOG_TARGET に 1 行以上出る（現 tip は 0 → 赤）。
+        assert!(
+            hits.load(Ordering::SeqCst) >= 1,
+            "空 CONTINUE 連続 3 回の解析 warn が CONTINUE_LOG_TARGET に出ていない（§13.1 a）"
+        );
+    }
+
     /// dispatch 対象ツールは inline 実行（executor）されず、**同ターンで** spawned
     /// マーカーが tool_result として返り、次イテレーションでエージェントが継続すること。
     #[tokio::test]

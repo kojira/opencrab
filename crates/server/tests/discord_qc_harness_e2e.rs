@@ -760,15 +760,21 @@ async fn scenario_b_reply_resolves_e_number_and_settles() {
         "reply の実 DI 経路が決着しない（e1 解決 or invoke or settle 失敗）: {:?}",
         captured(&buf)
     );
+    // 発端 701 に限定して数える（BUFFER は binary 全体で共有・累積するため、他テストの reply
+    // 配送を数え込まないよう message で scope する。ハーネス棚卸し・相互汚染の是正）。
+    let replies_for_origin = captured(&buf)
+        .iter()
+        .filter(|c| c.kind == "reply" && c.message == "701")
+        .count();
     assert_eq!(
-        count_kind(&buf, "reply"),
-        1,
-        "reply が複数回 or 0 回: 自動再送 0"
+        replies_for_origin, 1,
+        "reply が複数回 or 0 回: 自動再送 0（発端 701 に限定）"
     );
     // e1 が発端メッセージ（channel=600, message=701）へ正しく解決されている（誤解決検知）。
+    // BUFFER は共有・累積のため、本テストの reply（body=B_REPLY）に限定して取り出す。
     let reply = captured(&buf)
         .into_iter()
-        .find(|c| c.kind == "reply")
+        .find(|c| c.kind == "reply" && c.body.contains(B_REPLY))
         .unwrap();
     assert_eq!(
         reply.channel, CHANNEL,
@@ -807,15 +813,20 @@ async fn scenario_c_reaction_resolves_e_number_and_settles() {
         "reaction の実 DI 経路が決着しない: {:?}",
         captured(&buf)
     );
+    // 発端 702 に限定して数える（BUFFER は共有・累積のため、他テストの reaction 配送を
+    // 数え込まないよう message で scope する。ハーネス棚卸し・相互汚染の是正）。
+    let reactions_for_origin = captured(&buf)
+        .iter()
+        .filter(|c| c.kind == "reaction" && c.message == "702")
+        .count();
     assert_eq!(
-        count_kind(&buf, "reaction"),
-        1,
-        "reaction が複数回 or 0 回: 自動再送 0"
+        reactions_for_origin, 1,
+        "reaction が複数回 or 0 回: 自動再送 0（発端 702 に限定）"
     );
     // e1 が発端メッセージ（channel=600, message=702）へ正しく解決されている（誤解決検知）。
     let react = captured(&buf)
         .into_iter()
-        .find(|c| c.kind == "reaction")
+        .find(|c| c.kind == "reaction" && c.message == "702")
         .unwrap();
     assert_eq!(
         react.channel, CHANNEL,
@@ -1287,5 +1298,330 @@ async fn scenario_f_long_say_is_split_into_multiple_chunks() {
         chunks.join("\n"),
         body,
         "分割チャンクの連結が原文と不一致（順序 or 欠落）"
+    );
+}
+
+// =====================================================================================
+// 監査ピン #900(a/c)【§13 #6（reply×N 本文なし→reply N 配送/保存 N/🤐 付けない）／ターン合計 reply3-in-one・
+// §13.1 g（reaction/repost のみも #6 と同じ）の reply 版】: reply×3-in-one（発話クラスのみのターン）→ 配送 3・LLM 1・🤐 なし。
+//
+// 現 tip: reply×3 は撃ちっぱなしで配送されるが、最終本文が空（say 0）のためゲートが沈黙と解釈し
+// CompletedNoReply → 🤐 を発端へ付ける（#883 発話クラス化の契約列挙漏れ）。→ 🤐 の pin で赤。
+// 期待: 発話（say/reply/reaction）が 1 つでもあったターンには 🤐 を付けない。
+//
+// 既存 scenario_a3_three_replies_...（qc_harness_e2e）は配送 3・LLM 1 を pin 済みだが 🤐 反応は
+// 観測していない。ここは discord ゲートの system reaction を観測できる唯一のハーネスなので
+// 「足りない観測点＝🤐 なし」だけを追加する。
+// =====================================================================================
+const M_AUDIT_REPLY3: &str = "AUDITREPLY3MARK";
+const B_R3_1: &str = "r3body-one 一通目だよ";
+const B_R3_2: &str = "r3body-two 二通目だよ";
+const B_R3_3: &str = "r3body-three 三通目だよ";
+
+struct ThreeReplyMock {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+fn three_reply_response() -> ChatResponse {
+    let tc = |text: &str| ToolCall {
+        id: format!("tc-{}", uuid::Uuid::new_v4()),
+        call_type: "function".to_string(),
+        function: FunctionCall {
+            name: "reply".to_string(),
+            arguments: serde_json::json!({"event": "e1", "text": text}).to_string(),
+        },
+    };
+    let msg = Message {
+        role: Role::Assistant,
+        content: None,
+        name: None,
+        function_call: None,
+        tool_calls: Some(vec![tc(B_R3_1), tc(B_R3_2), tc(B_R3_3)]),
+        tool_call_id: None,
+    };
+    ChatResponse {
+        id: uuid::Uuid::new_v4().to_string(),
+        model: "mock-model".to_string(),
+        choices: vec![Choice {
+            index: 0,
+            message: msg,
+            finish_reason: Some(FinishReason::ToolCalls),
+        }],
+        usage: Usage::default(),
+        created: 0,
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for ThreeReplyMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let text = request_text(&request);
+        if !has_tool_role(&request) && text.contains(M_AUDIT_REPLY3) {
+            return Ok(three_reply_response());
+        }
+        // 撃ちっぱなしなので追加ターンは来ないはずだが、保険で沈黙終端。
+        Ok(text_response("NO_REPLY"))
+    }
+}
+
+#[tokio::test]
+async fn audit_900c_utterance_only_reply_turn_gets_no_muted_reaction() {
+    use std::sync::atomic::Ordering;
+    let buf = install_capture();
+    let mock = Arc::new(ThreeReplyMock {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    fixture.append_message("900", &format!("{M_AUDIT_REPLY3} 3回に分けて返信して"));
+
+    // reply×3 がすべて配送されるまで待つ。
+    let delivered = {
+        let buf = buf.clone();
+        wait_until(move || {
+            [B_R3_1, B_R3_2, B_R3_3].iter().all(|b| {
+                captured(&buf)
+                    .iter()
+                    .any(|c| c.kind == "reply" && c.body.contains(b))
+            })
+        })
+        .await
+    };
+    assert!(delivered, "reply×3 が配送されない: {:?}", captured(&buf));
+
+    // 🤐 判定は決着時に立つので、決着の猶予を置く。
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // 配送 3: reply が 3 通。
+    for b in [B_R3_1, B_R3_2, B_R3_3] {
+        let n = captured(&buf)
+            .iter()
+            .filter(|c| c.kind == "reply" && c.body.contains(b))
+            .count();
+        assert_eq!(
+            n,
+            1,
+            "reply {b} の配送回数が 1 でない: {:?}",
+            captured(&buf)
+        );
+    }
+
+    // LLM 1 回（reply×3 は 1 生成に並ぶ・ack ごとの再呼び出しなし）。
+    assert_eq!(
+        mock.calls.load(Ordering::SeqCst),
+        1,
+        "reply×3 が 1 生成で完了していない（LLM 呼び出しが 1 でない）"
+    );
+
+    // 🤐 なし: 発話があったターンなので発端 900 に 🤐 は付かない（現 tip は付く → 赤）。
+    let muted_on_origin = captured(&buf)
+        .iter()
+        .filter(|c| c.kind == "system_reaction" && c.emoji.contains("🤐") && c.message == "900")
+        .count();
+    assert_eq!(
+        muted_on_origin,
+        0,
+        "発話（reply×3）があったターンに 🤐 が誤発火（#900: 発話クラスの契約列挙漏れ）: {:?}",
+        captured(&buf)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §13.1 c【Discord で 1 イテレーション = 1 メッセージ（結合/編集しない）】: 本文＋CONTINUE で
+// 3 分割 → Discord に 3 メッセージが別々に出る（#898 の discord レーン版）。
+// 現 tip: 配送層が最終応答（er.response）だけを say するので最後の 1 メッセージだけ → 赤。
+// §13 #2 を 3 連鎖／ターン合計 plain3 の Discord レーン。
+// ---------------------------------------------------------------------------
+const CC_1: &str = "CCsplit-one 一通目の本文";
+const CC_2: &str = "CCsplit-two 二通目の本文";
+const CC_3: &str = "CCsplit-three 三通目の本文";
+
+struct ContinueSplitMock {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for ContinueSplitMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(match n {
+            0 => text_response(&format!("{CC_1}\nCONTINUE")),
+            1 => text_response(&format!("{CC_2}\nCONTINUE")),
+            _ => text_response(CC_3),
+        })
+    }
+}
+
+#[tokio::test]
+async fn audit_s13_1c_continue_split_is_separate_discord_messages() {
+    use std::sync::atomic::Ordering;
+    let buf = install_capture();
+    let mock = Arc::new(ContinueSplitMock {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    fixture.append_message("1301", "CCMARK 3回に分けて投稿して reply使わずに");
+
+    // 最終メッセージ（CC_3）が出るまで待つ（= 3 イテレーションに到達）。
+    let done = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "say" && c.body.contains(CC_3))
+        })
+        .await
+    };
+    assert!(done, "3 通目（最終）が出ない: {:?}", captured(&buf));
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    // 各イテレーションが別々の 1 メッセージとして出る（現 tip は CC_3 のみ → 赤）。
+    for m in [CC_1, CC_2, CC_3] {
+        let n = captured(&buf)
+            .iter()
+            .filter(|c| c.kind == "say" && c.body.contains(m))
+            .count();
+        assert_eq!(
+            n,
+            1,
+            "分割 {m} の Discord メッセージが 1 通でない（#898 discord: 途中発話未配送）: {:?}",
+            captured(&buf)
+        );
+    }
+    // 結合していない: どの 1 メッセージも 2 マーカーを同時に含まない。
+    assert!(
+        captured(&buf).iter().filter(|c| c.kind == "say").all(|c| {
+            [CC_1, CC_2, CC_3]
+                .iter()
+                .filter(|m| c.body.contains(*m))
+                .count()
+                <= 1
+        }),
+        "分割メッセージが 1 通に結合された（1 イテレーション=1 メッセージに反する）: {:?}",
+        captured(&buf)
+    );
+    // LLM 3・残留 CONTINUE なし。
+    assert_eq!(
+        mock.calls.load(Ordering::SeqCst),
+        3,
+        "CONTINUE 3 分割の LLM 呼び出しが 3 でない"
+    );
+    assert!(
+        captured(&buf)
+            .iter()
+            .filter(|c| c.kind == "say" && [CC_1, CC_2, CC_3].iter().any(|m| c.body.contains(m)))
+            .all(|c| !c.body.contains("CONTINUE")),
+        "say に CONTINUE が残留: {:?}",
+        captured(&buf)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §13.1 g【reaction のみ → #6 と同じ】: reaction のみ（say 0）のターン → reaction 配送・
+// 🤐 発端に付けない（発話がある）。現 tip: 最終本文空を沈黙とみなし 🤐 → 赤（#900 の reaction 版）。
+// §13 #6 の 🤐 契約を reaction で固定。
+// ---------------------------------------------------------------------------
+const M_REACT_ONLY: &str = "REACTONLYMARK";
+const REACT_EMOJI: &str = "🎉";
+
+struct ReactionOnlyMock {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for ReactionOnlyMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if !has_tool_role(&request) && request_text(&request).contains(M_REACT_ONLY) {
+            return Ok(tool_call_response(
+                "reaction",
+                serde_json::json!({"event": "e1", "emoji": REACT_EMOJI}),
+            ));
+        }
+        Ok(text_response("NO_REPLY"))
+    }
+}
+
+#[tokio::test]
+async fn audit_s13_1g_reaction_only_turn_gets_no_muted_reaction() {
+    use std::sync::atomic::Ordering;
+    let buf = install_capture();
+    let mock = Arc::new(ReactionOnlyMock {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    fixture.append_message(
+        "1309",
+        &format!("{M_REACT_ONLY} これにリアクションだけして"),
+    );
+
+    // agent の reaction（kind=reaction）が発端 1309 に出るまで待つ。
+    let delivered = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "reaction" && c.message == "1309")
+        })
+        .await
+    };
+    assert!(delivered, "reaction が配送されない: {:?}", captured(&buf));
+
+    // 決着の猶予（🤐 判定は決着時）。
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // 🤐 なし: 発話（reaction）があったターンなので発端 1309 に 🤐 は付かない（現 tip は付く → 赤）。
+    let muted = captured(&buf)
+        .iter()
+        .filter(|c| c.kind == "system_reaction" && c.emoji.contains("🤐") && c.message == "1309")
+        .count();
+    assert_eq!(
+        muted,
+        0,
+        "reaction があったターンに 🤐 が誤発火（#900・§13 #6 の reaction 版）: {:?}",
+        captured(&buf)
+    );
+    assert!(
+        mock.calls.load(Ordering::SeqCst) >= 1,
+        "reaction ターンの LLM 呼び出しが走らない"
     );
 }
