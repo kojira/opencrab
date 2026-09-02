@@ -26,15 +26,16 @@
 //!
 //! ```sh
 //! OPENCRAB_GATE_OPERATOR_TOKEN="$(cat .../secrets/qc-gate-operator-token)" \
+//!   LIVE_GATE_SOCK=".../runtime/gate.sock" \
 //!   LIVE_MODE=gate LIVE_SCENARIO=reply3 \
 //!   cargo test -p opencrab-server --test live_di_smoke -- --ignored --nocapture
 //! ```
 //!
-//! env（全て任意・既定は QC 統合構成）:
+//! env（既定は localhost の QC 統合構成。環境固有の絶対パスはソースに埋めない）:
 //! `OPENCRAB_GATE_OPERATOR_TOKEN`（gate admin Bearer・gate モードで**必須**）、
+//! `LIVE_GATE_SOCK`（gate UDS の絶対パス・gate モードで**必須**）、
 //! `LIVE_MODE`（gate | rest・既定 gate）、
 //! `LIVE_CORE_HTTP`（既定 http://127.0.0.1:18700）、
-//! `LIVE_GATE_SOCK`（既定 QC runtime/gate.sock）、
 //! `LIVE_AGENT`（既定 e2e-test-bot）、
 //! `LIVE_SCENARIO`（reply3 | plain3 | noreply | oneq | sleep60・既定 reply3）、
 //! `LIVE_PROMPT_FILE`（プロンプト差し替え・省略時はシナリオ既定文）、
@@ -58,10 +59,6 @@ fn env_or(key: &str, default: &str) -> String {
         .ok()
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| default.to_string())
-}
-
-fn default_gate_sock() -> String {
-    "/Volumes/2TB/openclaw/.claude-scratch/qc-transplant/runtime/gate.sock".to_string()
 }
 
 fn now_millis() -> u128 {
@@ -184,6 +181,52 @@ impl Http {
         let text = resp.text().await.unwrap_or_default();
         (status, text)
     }
+
+    async fn patch_json(&self, path: &str, body: Value) -> (reqwest::StatusCode, Value) {
+        let resp = self
+            .client
+            .patch(format!("{}{}", self.base, path))
+            .bearer_auth(&self.token)
+            .json(&body)
+            .send()
+            .await
+            .expect("PATCH 失敗");
+        let status = resp.status();
+        let body: Value = resp.json().await.unwrap_or(Value::Null);
+        (status, body)
+    }
+}
+
+/// agent の discord owner を said author に合わせる。**config は enabled=false のまま owner だけ**
+/// 設定する（caller=Owner の解決は `inbound.rs` load_origin_row が owner_discord_id だけを見るので
+/// enabled は不要）。実 Discord gateway が起動し得る enabled=true を残さないため、既存行は PATCH
+/// （enabled を触らない）、無ければ PUT（唯一の作成経路・一時的に enabled=true）で作った上で、
+/// 最後に必ず `discord/stop` で enabled=false へ落とす。QC は discord subsystem 未登録なので stop
+/// は DB フラグを false にするだけ（実 gateway 停止は no-op）。
+async fn set_discord_owner_disabled(http: &Http, agent: &str, owner: &str) {
+    // 既存 config があれば PATCH で owner だけ更新（enabled は保存値のまま）。
+    let (st, body) = http
+        .patch_json(
+            &format!("/api/agents/{agent}/discord"),
+            json!({ "owner_discord_id": owner }),
+        )
+        .await;
+    let patched = st.is_success() && body.get("ok").and_then(|v| v.as_bool()) != Some(false);
+    if !patched {
+        // config 未作成。PUT は enabled=true 固定だが、唯一の作成経路。直後の stop で false へ戻す。
+        let (pst, pbody) = http
+            .put_json(
+                &format!("/api/agents/{agent}/discord"),
+                json!({"bot_token": "placeholder-not-used-by-v3", "owner_discord_id": owner}),
+            )
+            .await;
+        assert!(pst.is_success(), "PUT discord config = {pst}: {pbody}");
+    }
+    // enabled=false を保証する（実 Discord gateway が起動し得る経路を残さない）。
+    let (sst, sbody) = http
+        .post_json(&format!("/api/agents/{agent}/discord/stop"), json!({}))
+        .await;
+    assert!(sst.is_success(), "POST discord/stop = {sst}: {sbody}");
 }
 
 /// agent の llm-logs の id 集合（直近 50 件）。ターン前後の差分で呼び出し回数を測る。
@@ -322,7 +365,10 @@ async fn run_gate(
     scenario: &Scenario,
     timeout_secs: u64,
 ) -> Observed {
-    let sock = env_or("LIVE_GATE_SOCK", &default_gate_sock());
+    let sock = std::env::var("LIVE_GATE_SOCK")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .expect("gate モードは LIVE_GATE_SOCK（gate UDS の絶対パス）が必要（環境固有パスはソースに埋めない）");
     assert!(
         !http.token.is_empty(),
         "gate モードは OPENCRAB_GATE_OPERATOR_TOKEN（admin Bearer）が必要"
@@ -335,15 +381,9 @@ async fn run_gate(
         .as_i64()
         .unwrap_or_else(|| panic!("agent {agent} に subject_id が無い: {agent_json}"));
 
-    // 2) admission 用に agent の discord owner を said author に合わせる（enabled=true にされるが
-    //    QC は discord subsystem 未登録なので実 gateway は起動しない＝実 Discord へは出ない）。
-    let (st, body) = http
-        .put_json(
-            &format!("/api/agents/{agent}/discord"),
-            json!({"bot_token": "placeholder-not-used-by-v3", "owner_discord_id": owner}),
-        )
-        .await;
-    assert!(st.is_success(), "PUT discord config = {st}: {body}");
+    // 2) admission 用に agent の discord owner を said author に合わせる（config は enabled=false の
+    //    まま owner だけ設定・詳細は set_discord_owner_disabled の doc）。
+    set_discord_owner_disabled(http, agent, owner).await;
 
     // 3) gate instance（kind=discord・delivery_mode=say）を新規採番して登録。
     let instance_id = uuid::Uuid::new_v4().to_string();
