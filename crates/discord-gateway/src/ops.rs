@@ -40,7 +40,7 @@ pub fn operation_declarations() -> Value {
     json!([
         decl(
             "reaction",
-            "会話の e番号のメッセージに絵文字リアクションを付ける。event に e番号、emoji に絵文字。結果は返らない（撃ちっぱなし・再開はされない）。複数のリアクションは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。",
+            "会話の e番号のメッセージに絵文字リアクションを付ける。event に e番号、emoji に絵文字。結果は返らない（撃ちっぱなし・再開はされない）。複数のリアクションは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。This call returns nothing and you will NOT be invoked again after it. If you need N reactions, put N reaction calls in THIS response.",
             json!({"type": "object", "required": ["event", "emoji"], "properties": {
                 "event": ref_prop("対象メッセージの短縮参照（例 e7）"),
                 "emoji": str_prop("リアクション絵文字（例 👍）")
@@ -48,7 +48,7 @@ pub fn operation_declarations() -> Value {
         ),
         decl(
             "reply",
-            "会話の e番号のメッセージに返信する。event に e番号、text に返信本文。結果は返らない（撃ちっぱなし・再開はされない）。複数の返信は1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。",
+            "会話の e番号のメッセージに返信する。event に e番号、text に返信本文。結果は返らない（撃ちっぱなし・再開はされない）。複数の返信は1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。This call returns nothing and you will NOT be invoked again after it. If you need N replies, put N reply calls in THIS response.",
             json!({"type": "object", "required": ["event", "text"], "properties": {
                 "event": ref_prop("返信先メッセージの短縮参照（例 e7）"),
                 "text": str_prop("返信本文")
@@ -202,7 +202,24 @@ mod tests {
                 .unwrap();
             assert!(description.contains("1回の応答"));
             assert!(description.contains("呼び直す必要はない"));
+            // #913: reply×1 で止まる実モデルを、強い英文で「結果は返らない・再呼び出しされない」と明示。
+            assert!(
+                description.contains(
+                    "This call returns nothing and you will NOT be invoked again after it"
+                ),
+                "#913: {name} 説明文に強い fire-and-forget 英文が無い: {description}"
+            );
         }
+        // #913: reply は「N 件必要なら N 個をこの応答に並べる」を明示。
+        let reply_desc = arr
+            .iter()
+            .find(|d| d["name"] == "reply")
+            .and_then(|d| d["description"].as_str())
+            .unwrap();
+        assert!(
+            reply_desc.contains("put N reply calls in THIS response"),
+            "#913: reply 説明文に N 件並置の指示が無い: {reply_desc}"
+        );
     }
 
     #[test]
