@@ -1075,6 +1075,31 @@ impl MockLlmProvider {
         };
         self.responses.lock().unwrap().push_back(response);
     }
+
+    /// content（本文テキスト）と tool_calls を **同時に** 返す 1 生成。text+tool 併記で
+    /// on_tool_call フックが content つきで発火する経路を通す（#899 ガードの検証用）。
+    fn push_text_and_tool_call_response(&self, text: &str, tool_calls: Vec<ToolCall>) {
+        let msg = Message {
+            role: Role::Assistant,
+            content: Some(MessageContent::Text(text.to_string())),
+            name: None,
+            function_call: None,
+            tool_calls: Some(tool_calls),
+            tool_call_id: None,
+        };
+        let response = ChatResponse {
+            id: uuid::Uuid::new_v4().to_string(),
+            model: "mock-model".to_string(),
+            choices: vec![Choice {
+                index: 0,
+                message: msg,
+                finish_reason: Some(FinishReason::ToolCalls),
+            }],
+            usage: Usage::default(),
+            created: 0,
+        };
+        self.responses.lock().unwrap().push_back(response);
+    }
 }
 
 #[async_trait::async_trait]
@@ -4264,5 +4289,91 @@ async fn test_tool_only_generation_saves_no_empty_speech_899() {
     assert!(
         !empty_assistant,
         "typed 履歴に空の assistant が現れた（#899 回帰）"
+    );
+}
+
+/// #899 ガードの真の穴埋め（テストレビュー所見・非回帰）: **on_tool_call 経路**で content が
+/// **"NO_REPLY"（非空テキスト）** ＋ 照会/道具 tool_call を 1 生成で併記したとき、保存前の
+/// NO_REPLY 終端解釈（`visible_speech_after_markers`・#903 §12.6）が効き "NO_REPLY" speech を
+/// 残さない・次ターン typed 履歴にも現れないことを固定する。
+///
+/// 既存 `test_tool_only_generation_saves_no_empty_speech_899` は content=**空**のみを通すため、
+/// 旧 `!content.trim().is_empty()` filter でも通り、#903 の NO_REPLY 対応を区別しない（恒真）。
+/// 本テストは content="NO_REPLY"（非空）を通すので、ガードを旧 empty-only filter へ revert すると
+/// "NO_REPLY" が speech 保存され**赤になる**（現 tip では #903 ガードが効き緑）。
+#[tokio::test]
+async fn test_no_reply_text_with_tool_call_saves_no_speech_899_guard() {
+    let (app, db, mock, _state) = create_test_app_with_state();
+    let (agent_id, app) = create_test_agent_named(app, "NoReplyTool", "TestPersona").await;
+
+    // 1 巡目: content="NO_REPLY"（非空）＋ 非発話 tool_call を同時に返す（on_tool_call が
+    // content="NO_REPLY" で発火する）。2 巡目: 通常テキストで締める。
+    mock.push_text_and_tool_call_response(
+        "NO_REPLY",
+        vec![ToolCall {
+            id: "tc-nr-1".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "learn_from_experience".to_string(),
+                arguments: serde_json::json!({
+                    "skill_name": "x",
+                    "description": "d",
+                    "situation_pattern": "s",
+                    "guidance": "g"
+                })
+                .to_string(),
+            },
+        }],
+    );
+    mock.push_text_response("完了しました");
+
+    let (status, resp) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/messages"),
+        Some(serde_json::json!({"content": "覚えて", "user_id": "u10"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "messages 200 でない: {resp}");
+    let session_id = resp["session_id"].as_str().unwrap().to_string();
+
+    // on_tool_call 経路: content="NO_REPLY" の speech 行を残さない（#903 ガード）。
+    let no_reply_speech = session_logs(&db, &session_id)
+        .into_iter()
+        .filter(|l| {
+            l.log_type == "speech"
+                && l.speaker_id.as_deref() == Some(agent_id.as_str())
+                && l.content.contains("NO_REPLY")
+        })
+        .count();
+    assert_eq!(
+        no_reply_speech, 0,
+        "on_tool_call 経路で content=NO_REPLY が speech 保存された（#899 ガード revert）"
+    );
+
+    // 次ターンの typed 履歴に assistant 'NO_REPLY' が無い。
+    let history = {
+        let conn = db.lock().unwrap();
+        opencrab_core::conversation_typed::build_typed_conversation(
+            &conn,
+            &session_id,
+            &agent_id,
+            200_000,
+            100_000,
+            false,
+            false,
+        )
+        .unwrap()
+        .history
+    };
+    let has_no_reply_assistant = history.iter().any(|m| {
+        m.role == Role::Assistant
+            && m.text_content()
+                .map(|t| t.contains("NO_REPLY"))
+                .unwrap_or(false)
+    });
+    assert!(
+        !has_no_reply_assistant,
+        "typed 履歴に assistant 'NO_REPLY' が現れた（#899 ガード revert）"
     );
 }
