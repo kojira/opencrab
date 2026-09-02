@@ -2652,6 +2652,135 @@ async fn scenario_915_max_iterations_flag_only_on_last_delivered_say() {
 }
 
 // ---------------------------------------------------------------------------
+// #915 / §13.3.6【spawned 宣言ターン → 0 ／ resume 完了報告 → 1】: 親ターンで subtask を起こし
+// （進行中あり）、宣言 say を投稿。subtask 決着後の resume ターンで完了報告 say を投稿。
+// 🏁 は宣言 say には付かず（進行中）、resume の報告 say に 1・総数 1。
+// 統括裁定: 照会クラスは常時 detach なので「date 単独」も実機ではこの spawned→resume 経路。
+// 現 tip は say 配送ごとに 🏁 → 宣言 say にも付く → **赤**（総数 2）。
+// dispatch（registry＋completion_sink）は extgate で配線済み・spawn_subtask を実走。
+// ---------------------------------------------------------------------------
+const M_SPAWN: &str = "SPAWNMARK";
+const M_SUBTASK_TASK: &str = "SPSUBTASKMARK";
+const SP_DECL: &str = "spdecl-調べてくるね（宣言投稿）";
+const SP_RESULT: &str = "spresult-サブタスクの結果本文";
+const SP_REPORT: &str = "spreport-結果はこうだった（完了報告投稿）";
+
+struct SpawnResumeMock;
+
+#[async_trait::async_trait]
+impl LlmProvider for SpawnResumeMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let text = request_text(&request);
+        // (E) resume（決着後の再開ターン）: 親会話に subtask 結果本文が載る → 完了報告 say。
+        if text.contains(SP_RESULT) {
+            return Ok(text_response(SP_REPORT));
+        }
+        // (C) 背景 subtask の sub-run（depth>0・task プロンプト）: 即時に結果を返す（date 相当）。
+        if text.contains(M_SUBTASK_TASK) {
+            return Ok(text_response(SP_RESULT));
+        }
+        // (B) 親ターン#1 の spawn_subtask 実行後（tool_result 有り）: 宣言 say。
+        if has_tool_role(&request) {
+            return Ok(text_response(SP_DECL));
+        }
+        // (A) 親ターン#1 の初回: spawn_subtask を呼んで背景 subtask を detach。
+        if text.contains(M_SPAWN) {
+            return Ok(tool_call_response(
+                "spawn_subtask",
+                serde_json::json!({
+                    "task": format!("{M_SUBTASK_TASK} 調べて"),
+                    "timeout_secs": 120,
+                }),
+            ));
+        }
+        Ok(text_response("spfiller"))
+    }
+}
+
+#[tokio::test]
+async fn scenario_915_spawned_declaration_no_flag_resume_report_gets_flag() {
+    let buf = install_capture();
+    let mock = Arc::new(SpawnResumeMock);
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    fixture.append_message("9200", &format!("{M_SPAWN} 調べて終わったら教えて"));
+
+    // 宣言 say（SP_DECL）と resume 完了報告 say（SP_REPORT）が両方出るまで待つ。
+    let both = {
+        let buf = buf.clone();
+        wait_until(move || {
+            let caps = captured(&buf);
+            caps.iter()
+                .any(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(SP_DECL))
+                && caps
+                    .iter()
+                    .any(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(SP_REPORT))
+        })
+        .await
+    };
+    assert!(
+        both,
+        "宣言 say と resume 完了報告 say が揃わない（subtask/resume 未達）: {:?}",
+        captured(&buf)
+    );
+    // 決着後の 🏁 付与猶予。
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let mid_of = |body: &str| -> Option<String> {
+        captured(&buf)
+            .iter()
+            .find(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(body))
+            .map(|c| c.message.clone())
+            .filter(|m| !m.is_empty())
+    };
+    let decl_mid = mid_of(SP_DECL).expect("宣言 say の message id");
+    let report_mid = mid_of(SP_REPORT).expect("完了報告 say の message id");
+    let completed_on = |id: &str| -> usize {
+        captured(&buf)
+            .iter()
+            .filter(|c| {
+                c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == id
+            })
+            .count()
+    };
+
+    // 宣言 say には 🏁 は付かない（進行中＝subtask 未決着）。現 tip は付く → 赤。
+    assert_eq!(
+        completed_on(&decl_mid),
+        0,
+        "🏁 が spawned 宣言 say に誤付与（進行中は付けない・§13.3.6）: {:?}",
+        captured(&buf)
+    );
+    // resume 完了報告 say には 🏁 1。
+    assert_eq!(
+        completed_on(&report_mid),
+        1,
+        "🏁 が resume 完了報告 say に 1 件で付かない（§13.3.6・§13.3.4）: {:?}",
+        captured(&buf)
+    );
+    // 2 say（宣言・報告）合計で 🏁 は 1（宣言に付く現 tip は総数 2 → 赤）。
+    let total = completed_on(&decl_mid) + completed_on(&report_mid);
+    assert_eq!(
+        total,
+        1,
+        "spawned→resume の 🏁 総数が 1 でない（宣言に誤付与）: {:?}",
+        captured(&buf)
+    );
+}
+
+// ---------------------------------------------------------------------------
 // #915 typing【最終投稿後の入力中停止】: 発話ターンで activity ended を受けたら typing keepalive
 // が止まり、失効間隔（8 秒）を跨いでも typing の再送出が 0 であることを観測境界（dry-run
 // kind="typing" のキャプチャ増分）で確定する。単一スレッド実行なので、この待機中に typing が
