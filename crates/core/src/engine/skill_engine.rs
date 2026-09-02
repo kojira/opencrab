@@ -851,17 +851,18 @@ impl SkillEngine {
                 // 配送したら on_tool_call へは本文を渡さず二重保存を避ける（配送は保存と対）。フックが
                 // 無いレーン（旧 discord は on_response_text で反復配送・core 単体テストは配送なし）は
                 // 従来どおり on_tool_call が本文を保存する（挙動不変）。content は末尾 CONTINUE 剥がし済み。
-                // NO_REPLY を含む生成は沈黙終端（§11.1・NO_REPLY 優先）。holding として配送しない
-                // （剥がし・可視本文の保存判定は配送層の単一実装 visible_speech_after_markers に委ねる。
-                // core→actions 依存不可のためここでは NO_REPLY を含むなら holding 配送を見送るだけ）。
+                // 配送する holding 本文は NO_REPLY 終端解釈後の可視発言。判定は core 単一実装
+                // terminate_at_no_reply().speech()（配送層 visible_speech_after_markers と同じ 1 実装・
+                // 部分文字列の別判定を作らない・#916 レビュー）。content は末尾 CONTINUE 剥がし済み
+                // （§11.6）なので visible_speech_after_markers（NO_REPLY→CONTINUE 剥がし）と同一結果。
+                // 沈黙（可視本文なし・単独/行頭 NO_REPLY）は配送しない。
                 let mut holding_delivered = false;
                 if !persisted.is_empty() {
                     if let Some(c) = content.as_deref() {
-                        if !c.trim().is_empty()
-                            && !c.contains(crate::continue_marker::NO_REPLY_SENTINEL)
-                        {
+                        let term = crate::continue_marker::terminate_at_no_reply(c);
+                        if let Some(body) = term.speech().filter(|b| !b.trim().is_empty()) {
                             if let Some(ref cb) = self.on_continuation_speech {
-                                cb(c.to_string()).await.map_err(|e| {
+                                cb(body.to_string()).await.map_err(|e| {
                                     anyhow::anyhow!("holding speech delivery failed: {e:#}")
                                 })?;
                                 holding_delivered = true;
