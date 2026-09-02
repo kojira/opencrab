@@ -1,40 +1,47 @@
 //! 実モデル DI スモーク harness（#902）。
 //!
-//! 稼働中の QC core（実 LLM）に偽の V3 ゲートを外部ゲートとして bind し、指定エージェントへ
-//! 「ユーザー発話」を 1 件送って、そのターンで観測した4項目を標準出力に表で出す:
-//! ゲートに届いた op 呼び出し（reply / reaction / resolve …と本文）、最終本文（say）、
-//! LLM 呼び出し回数（llm-logs 差分）、CONTINUE / NO_REPLY の残留有無。オーナー無しで
-//! 発話クラス・CONTINUE・🤐(NO_REPLY) の実挙動を内部検証する。
+//! 稼働中の QC core（実 LLM）に対し、指定エージェントへ「ユーザー発話」を 1 件送って、その
+//! ターンの観測点をテンプレ §1（TEMPLATE-TDD-INSTRUCTION.md §1）の語彙で標準出力に表で出す。
+//! オーナー無しで発話クラス・CONTINUE・🤐(NO_REPLY) の実挙動を内部検証する。
 //!
-//! 偽ゲート実体は既存資産の再利用のみ:
-//! `opencrab_gate_client::client::InstanceClient::spawn_with_operations`（UDS 接続・hello・
-//! bind ack・said 送信・say/activity 受信・invoke ディスパッチ）と
-//! `opencrab_discord_gateway::ops::operation_declarations()`（reply/reaction/resolve の能力宣言）。
-//! kind は `discord`（nostr の allow-store / anchor に依存しない・generic admission）。invoke は
-//! 外部へ出さず本文・種別を記録して ok を返すだけ（実 Discord/Nostr へは一切送信しない）。
+//! 2 経路を同じ表形式で出せる（`LIVE_MODE`）:
+//! - `gate`（既定）: 偽の V3 ゲートを gate UDS に外部ゲートとして bind し、DI 発話 op（reply/
+//!   reaction）とゲート反応（🤐/❌）まで観測する。`gate-client` の
+//!   `InstanceClient::spawn_with_operations` と `discord-gateway::ops::operation_declarations()`
+//!   の再利用のみ。kind=discord（nostr allow-store/anchor 非依存・generic admission）。invoke は
+//!   外部へ出さず本文・種別を記録して ok を返すだけ（実 Discord/Nostr へ一切送信しない）。
+//! - `rest`: `POST /api/agents/{id}/messages` を叩き、同期応答の `responses` を観測する（DI 発話
+//!   op を持たない REST 経路。§5 内部スモークの plain3/noreply/1 問はこちら）。
 //!
-//! QC core を汚さない: 専用の gate instance / binding を毎回新規採番し、agent は `e2e-test-bot`。
-//! のすたろう/くらぶの session には触れない。admission のため agent の discord owner を `LIVE_OWNER`
-//! に設定し、said の author を同じ id にして caller=Owner に解決させる。
+//! テンプレ §1 の観測境界に対応する出力列:
+//! REST `responses` 件数/本文（rest）／ ゲート配送回数・本文（gate: op と say）／
+//! memory_sessions 保存件数/本文 ／ LLM 呼び出し回数・イテレーション数 ／
+//! 残留マーカー（NO_REPLY/CONTINUE）／ ゲート反応（🤐/❌）。
+//!
+//! QC core を汚さない: gate 経路は専用 instance/binding を毎回新規採番・agent は `e2e-test-bot`。
+//! のすたろう/くらぶの session には触れない。gate の admission は agent の discord owner を said
+//! author（`LIVE_OWNER`）に合わせ caller=Owner に解決させる。
 //!
 //! `#[ignore]`（実 LLM 課金・稼働中 core 必須）。実行例:
 //!
 //! ```sh
 //! OPENCRAB_GATE_OPERATOR_TOKEN="$(cat .../secrets/qc-gate-operator-token)" \
-//!   LIVE_SCENARIO=reply3 \
+//!   LIVE_MODE=gate LIVE_SCENARIO=reply3 \
 //!   cargo test -p opencrab-server --test live_di_smoke -- --ignored --nocapture
 //! ```
 //!
 //! env（全て任意・既定は QC 統合構成）:
-//! `OPENCRAB_GATE_OPERATOR_TOKEN`（gate admin Bearer・**必須**）、
+//! `OPENCRAB_GATE_OPERATOR_TOKEN`（gate admin Bearer・gate モードで**必須**）、
+//! `LIVE_MODE`（gate | rest・既定 gate）、
 //! `LIVE_CORE_HTTP`（既定 http://127.0.0.1:18700）、
 //! `LIVE_GATE_SOCK`（既定 QC runtime/gate.sock）、
 //! `LIVE_AGENT`（既定 e2e-test-bot）、
-//! `LIVE_SCENARIO`（reply3 | plain3 | noreply | sleep60・既定 reply3）、
+//! `LIVE_SCENARIO`（reply3 | plain3 | noreply | oneq | sleep60・既定 reply3）、
 //! `LIVE_PROMPT_FILE`（プロンプト差し替え・省略時はシナリオ既定文）、
-//! `LIVE_OWNER`（said author = agent discord owner・既定 900000000000000001）、
+//! `LIVE_OWNER`（said author / REST user_id・既定 900000000000000001）、
 //! `LIVE_TIMEOUT_SECS`（ターン観測の上限秒・省略時 sleep60=150 / その他=60）。
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -55,6 +62,13 @@ fn env_or(key: &str, default: &str) -> String {
 
 fn default_gate_sock() -> String {
     "/Volumes/2TB/openclaw/.claude-scratch/qc-transplant/runtime/gate.sock".to_string()
+}
+
+fn now_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
 }
 
 // ==================== シナリオ ====================
@@ -83,12 +97,17 @@ fn scenario_for(name: &str) -> Scenario {
             prompt: "（独り言・あなたへの依頼や質問ではありません。返事は不要です。）今日はいい天気ですね。",
             expect_resume: false,
         },
+        "oneq" => Scenario {
+            name: "oneq",
+            prompt: "1たす1はいくつですか。ひとことで答えてください。",
+            expect_resume: false,
+        },
         "sleep60" => Scenario {
             name: "sleep60",
             prompt: "60秒 sleep して、終わったらそのことを教えてください。",
             expect_resume: true,
         },
-        other => panic!("未知の LIVE_SCENARIO: {other}（reply3|plain3|noreply|sleep60）"),
+        other => panic!("未知の LIVE_SCENARIO: {other}（reply3|plain3|noreply|oneq|sleep60）"),
     }
 }
 
@@ -137,6 +156,20 @@ impl Http {
         (status, body)
     }
 
+    async fn post_json(&self, path: &str, body: Value) -> (reqwest::StatusCode, Value) {
+        let resp = self
+            .client
+            .post(format!("{}{}", self.base, path))
+            .bearer_auth(&self.token)
+            .json(&body)
+            .send()
+            .await
+            .expect("POST 失敗");
+        let status = resp.status();
+        let body: Value = resp.json().await.unwrap_or(Value::Null);
+        (status, body)
+    }
+
     /// admin API は Bearer 必須。REST（agents/*）は不要だが付けても無害。
     async fn put_json(&self, path: &str, body: Value) -> (reqwest::StatusCode, String) {
         let resp = self
@@ -153,11 +186,78 @@ impl Http {
     }
 }
 
-fn now_millis() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis()
+/// agent の llm-logs の id 集合（直近 50 件）。ターン前後の差分で呼び出し回数を測る。
+async fn llm_log_ids(http: &Http, agent: &str) -> HashSet<String> {
+    let (st, body) = http
+        .get_json(&format!("/api/agents/{agent}/llm-logs?limit=50"))
+        .await;
+    if !st.is_success() {
+        return HashSet::new();
+    }
+    body.as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| e.get("id").and_then(|v| v.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// memory_sessions 保存行（log_type, content）。`GET /api/sessions/{id}/logs`。
+async fn session_logs(http: &Http, session_id: &str) -> Vec<(String, String)> {
+    let (st, body) = http
+        .get_json(&format!("/api/sessions/{session_id}/logs?limit=50"))
+        .await;
+    if !st.is_success() {
+        return Vec::new();
+    }
+    body.as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|e| {
+                    let lt = e
+                        .get("log_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let c = e
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    (lt, c)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+// ==================== 観測結果 ====================
+
+#[derive(Default)]
+struct Observed {
+    /// gate: reply/reaction 等の invoke（op, 本文）。
+    gate_ops: Vec<(String, String)>,
+    /// gate: say（最終本文）。
+    gate_says: Vec<String>,
+    /// rest: `responses` の本文。
+    rest_responses: Vec<String>,
+    /// memory_sessions 保存行（log_type, content）。
+    saved: Vec<(String, String)>,
+    /// LLM 呼び出し回数（= 単一ターンではイテレーション数）。
+    llm_calls: usize,
+    /// gate: activity 遷移。
+    activities: Vec<String>,
+    completed_no_reply: bool,
+    turn_failed: bool,
+    /// 残留マーカー走査対象（say/reply/responses の全本文）。
+    fn_bodies: Vec<String>,
+}
+
+impl Observed {
+    fn residue(&self, needle: &str) -> bool {
+        self.fn_bodies.iter().any(|s| s.contains(needle))
+    }
 }
 
 // ==================== 本体 ====================
@@ -166,12 +266,12 @@ fn now_millis() -> u128 {
 #[ignore = "実 LLM 課金・稼働中 QC core（:18700）必須。手動で --ignored 実行する DI スモーク harness"]
 async fn live_di_smoke() {
     let base = env_or("LIVE_CORE_HTTP", "http://127.0.0.1:18700");
-    let sock = env_or("LIVE_GATE_SOCK", &default_gate_sock());
+    let mode = env_or("LIVE_MODE", "gate");
     let agent = env_or("LIVE_AGENT", "e2e-test-bot");
     let scenario = scenario_for(&env_or("LIVE_SCENARIO", "reply3"));
     let owner = env_or("LIVE_OWNER", "900000000000000001");
-    let token = std::env::var("OPENCRAB_GATE_OPERATOR_TOKEN")
-        .expect("OPENCRAB_GATE_OPERATOR_TOKEN 未設定（gate admin Bearer が必要）");
+    // gate モードは admin Bearer 必須。rest モードは空でも可（REST は Bearer 不要）。
+    let token = std::env::var("OPENCRAB_GATE_OPERATOR_TOKEN").unwrap_or_default();
     let timeout_secs: u64 = std::env::var("LIVE_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -191,6 +291,42 @@ async fn live_di_smoke() {
         base: base.clone(),
         token,
     };
+
+    let obs = match mode.as_str() {
+        "gate" => run_gate(&http, &agent, &owner, &prompt, &scenario, timeout_secs).await,
+        "rest" => run_rest(&http, &agent, &owner, &prompt).await,
+        other => panic!("未知の LIVE_MODE: {other}（gate|rest）"),
+    };
+
+    print_table(&mode, &scenario, &agent, &base, &prompt, &obs);
+
+    // 何も観測できなければ配線失敗として落とす（挙動の良否判定は人間 QC）。
+    let any = !obs.gate_ops.is_empty()
+        || !obs.gate_says.is_empty()
+        || !obs.rest_responses.is_empty()
+        || !obs.saved.is_empty()
+        || !obs.activities.is_empty()
+        || obs.llm_calls > 0;
+    assert!(
+        any,
+        "観測点が全て空（配線失敗・mode={mode}・timeout={timeout_secs}s）"
+    );
+}
+
+/// gate モード: 偽ゲートを bind して DI 発話 op / say / ゲート反応まで観測する。
+async fn run_gate(
+    http: &Http,
+    agent: &str,
+    owner: &str,
+    prompt: &str,
+    scenario: &Scenario,
+    timeout_secs: u64,
+) -> Observed {
+    let sock = env_or("LIVE_GATE_SOCK", &default_gate_sock());
+    assert!(
+        !http.token.is_empty(),
+        "gate モードは OPENCRAB_GATE_OPERATOR_TOKEN（admin Bearer）が必要"
+    );
 
     // 1) agent → subject_id。
     let (st, agent_json) = http.get_json(&format!("/api/agents/{agent}")).await;
@@ -212,9 +348,8 @@ async fn live_di_smoke() {
     // 3) gate instance（kind=discord・delivery_mode=say）を新規採番して登録。
     let instance_id = uuid::Uuid::new_v4().to_string();
     let binding_id = uuid::Uuid::new_v4().to_string();
-    let guild = "500";
     let channel = "600";
-    let address = format!("discord-{agent}-{guild}-{channel}");
+    let address = format!("discord-{agent}-500-{channel}");
     let config_bytes = serde_json::to_vec(&json!({
         "agent_id": agent,
         "self_bot_id": "111",
@@ -248,7 +383,7 @@ async fn live_di_smoke() {
     assert!(st.is_success(), "PUT gate-binding = {st}: {body}");
 
     // 5) LLM 呼び出し回数の基準（ターン前の llm-logs id 集合）。
-    let before_ids = llm_log_ids(&http, &agent).await;
+    let before_ids = llm_log_ids(http, agent).await;
 
     // 6) 偽ゲートを UDS 接続（discord 能力宣言つき）。invoke は記録して ok を返す。
     let invokes = Arc::new(Mutex::new(Vec::<RecordedInvoke>::new()));
@@ -284,7 +419,7 @@ async fn live_di_smoke() {
     let origin = format!("discord:message:v1:{channel}:{}", now_millis());
     let no_attachments: Vec<Attachment> = Vec::new();
     let said = client
-        .post_said_with_author(&address, &origin, &owner, &prompt, &no_attachments)
+        .post_said_with_author(&address, &origin, owner, prompt, &no_attachments)
         .await
         .expect("post_said（binding not ready?）");
     match &said {
@@ -292,8 +427,8 @@ async fn live_di_smoke() {
         other => panic!("said が admit されない: {other:?}（owner 設定 / admission を確認）"),
     }
 
-    // 8) ターンを観測する。say は LiveEvent::Message、reply/reaction は invoke（別記録）、
-    //    ターン終了は activity ended、沈黙終端は CompletedNoReply、失敗は TurnFailed。
+    // 8) ターンを観測する。say は Message、reply/reaction は invoke（別記録）、ターン終了は
+    //    activity ended、沈黙終端は CompletedNoReply、失敗は TurnFailed。
     let mut says: Vec<String> = Vec::new();
     let mut activities: Vec<String> = Vec::new();
     let mut completed_no_reply = false;
@@ -301,7 +436,6 @@ async fn live_di_smoke() {
     let mut ended_count = 0usize;
 
     let hard_deadline = Instant::now() + Duration::from_secs(timeout_secs);
-    // 最初の ended を見たあと、trailing（CompletedNoReply 等）を拾う猶予。
     let mut soft_deadline: Option<Instant> = None;
 
     loop {
@@ -322,7 +456,6 @@ async fn live_di_smoke() {
                 if state == "ended" {
                     ended_count += 1;
                     if !scenario.expect_resume {
-                        // trailing を 2 秒だけ拾って締める。
                         soft_deadline = Some(Instant::now() + Duration::from_secs(2));
                     } else if ended_count >= 2 {
                         break;
@@ -346,7 +479,6 @@ async fn live_di_smoke() {
             }
             Ok(None) => break,
             Err(_) => {
-                // per-event タイムアウト。ended 済みなら締め、未 ended なら継続（deadline まで）。
                 if ended_count >= 1 && !scenario.expect_resume {
                     break;
                 }
@@ -354,97 +486,163 @@ async fn live_di_smoke() {
         }
     }
 
-    // 9) LLM 呼び出し回数（ターン後 − 基準）。
-    let after_ids = llm_log_ids(&http, &agent).await;
+    // 9) LLM 差分・memory_sessions 保存・残留対象を集める。
+    let after_ids = llm_log_ids(http, agent).await;
     let llm_calls = after_ids
         .iter()
         .filter(|id| !before_ids.contains(*id))
         .count();
+    let session_id = opencrab_extgate::session_id_for_binding(&binding_id);
+    let saved = session_logs(http, &session_id).await;
 
-    // 10) CONTINUE / NO_REPLY 残留（say + reply 本文を走査）。
-    let recorded = invokes.lock().unwrap().clone();
-    let reply_texts: Vec<String> = recorded
+    let ops: Vec<(String, String)> = invokes
+        .lock()
+        .unwrap()
         .iter()
-        .filter_map(|inv| {
-            inv.payload
-                .get("text")
-                .and_then(|t| t.as_str())
-                .map(String::from)
+        .map(|inv| {
+            let body = match inv.operation.as_str() {
+                "reply" => inv.payload.get("text").and_then(|t| t.as_str()),
+                "reaction" => inv.payload.get("emoji").and_then(|t| t.as_str()),
+                _ => None,
+            }
+            .map(String::from)
+            .unwrap_or_else(|| inv.payload.to_string());
+            (inv.operation.clone(), body)
         })
         .collect();
-    let residue = |needle: &str| -> bool {
-        says.iter().any(|s| s.contains(needle)) || reply_texts.iter().any(|s| s.contains(needle))
-    };
-    let continue_residue = residue("CONTINUE");
-    let no_reply_residue = residue("NO_REPLY");
 
-    // ==================== 結果表 ====================
+    let mut fn_bodies: Vec<String> = says.clone();
+    fn_bodies.extend(ops.iter().map(|(_, b)| b.clone()));
+
+    Observed {
+        gate_ops: ops,
+        gate_says: says,
+        rest_responses: Vec::new(),
+        saved,
+        llm_calls,
+        activities,
+        completed_no_reply,
+        turn_failed,
+        fn_bodies,
+    }
+}
+
+/// rest モード: `POST /api/agents/{id}/messages` を叩き `responses` を観測する（DI op なし）。
+async fn run_rest(http: &Http, agent: &str, owner: &str, prompt: &str) -> Observed {
+    let before_ids = llm_log_ids(http, agent).await;
+
+    // REST セッションは `agent-msg-{agent}-{user_id}`。run 毎に user_id へ nonce を足して
+    // 新規セッションにし、memory_sessions 保存件数を「この 1 ターン分」に isolate する
+    // （同一 owner を使い回すと DM 会話が累積して保存件数が読みにくくなる）。
+    let user_id = format!("{owner}-{}", now_millis());
+
+    let (st, body) = http
+        .post_json(
+            &format!("/api/agents/{agent}/messages"),
+            json!({"content": prompt, "user_id": user_id}),
+        )
+        .await;
+    assert!(st.is_success(), "POST messages = {st}: {body}");
+
+    let rest_responses: Vec<String> = body
+        .get("responses")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|r| {
+                    // responses 要素は本文文字列 or {content:...} のどちらでも拾う。
+                    r.as_str()
+                        .map(String::from)
+                        .or_else(|| r.get("content").and_then(|c| c.as_str()).map(String::from))
+                        .unwrap_or_else(|| r.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let session_id = body
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_else(|| format!("agent-msg-{agent}-{user_id}"));
+
+    let after_ids = llm_log_ids(http, agent).await;
+    let llm_calls = after_ids
+        .iter()
+        .filter(|id| !before_ids.contains(*id))
+        .count();
+    let saved = session_logs(http, &session_id).await;
+
+    let fn_bodies = rest_responses.clone();
+    Observed {
+        rest_responses,
+        saved,
+        llm_calls,
+        fn_bodies,
+        ..Default::default()
+    }
+}
+
+/// テンプレ §1 の観測境界に沿った結果表。
+fn print_table(
+    mode: &str,
+    scenario: &Scenario,
+    agent: &str,
+    base: &str,
+    prompt: &str,
+    obs: &Observed,
+) {
     let sep = "=".repeat(72);
+    let sub = "-".repeat(72);
     println!("\n{sep}");
     println!(
-        "DI スモーク結果  scenario={}  agent={}  base={}",
-        scenario.name, agent, base
+        "DI スモーク結果  mode={}  scenario={}  agent={}  base={}",
+        mode, scenario.name, agent, base
     );
     println!("{sep}");
     println!("prompt:\n  {}", prompt.replace('\n', "\n  "));
-    println!("{}", "-".repeat(72));
+    println!("{sub}");
+    println!("観測点（TEMPLATE-TDD-INSTRUCTION.md §1）");
+    println!("{sub}");
+
+    if mode == "rest" {
+        println!("REST responses           : {} 件", obs.rest_responses.len());
+        for (i, r) in obs.rest_responses.iter().enumerate() {
+            println!("    [{i}] {r:?}");
+        }
+    } else {
+        println!(
+            "ゲート配送(op)           : {} 件（reply/reaction 等の invoke）",
+            obs.gate_ops.len()
+        );
+        for (i, (op, b)) in obs.gate_ops.iter().enumerate() {
+            println!("    [{i}] op={op:<9} body={b:?}");
+        }
+        println!("ゲート配送(say/最終本文) : {} 件", obs.gate_says.len());
+        for (i, s) in obs.gate_says.iter().enumerate() {
+            println!("    [{i}] {s:?}");
+        }
+    }
+    println!("memory_sessions 保存     : {} 件", obs.saved.len());
+    for (i, (lt, c)) in obs.saved.iter().enumerate() {
+        println!("    [{i}] type={lt:<8} {c:?}");
+    }
     println!(
-        "届いた op 呼び出し（ゲートに invoke されたもの）: {} 件",
-        recorded.len()
+        "LLM 呼び出し/イテレーション: {}（単一ターンでは = イテレーション数）",
+        obs.llm_calls
     );
-    for (i, inv) in recorded.iter().enumerate() {
-        let body = match inv.operation.as_str() {
-            "reply" => inv
-                .payload
-                .get("text")
-                .and_then(|t| t.as_str())
-                .unwrap_or("")
-                .to_string(),
-            "reaction" => inv
-                .payload
-                .get("emoji")
-                .and_then(|t| t.as_str())
-                .unwrap_or("")
-                .to_string(),
-            _ => inv.payload.to_string(),
-        };
-        println!("  [{i}] op={:<9} body={:?}", inv.operation, body);
+    println!(
+        "残留マーカー             : NO_REPLY={}  CONTINUE={}",
+        obs.residue("NO_REPLY"),
+        obs.residue("CONTINUE")
+    );
+    if mode == "gate" {
+        println!(
+            "ゲート反応               : activity={:?}  CompletedNoReply(🤐)={}  TurnFailed(❌)={}",
+            obs.activities, obs.completed_no_reply, obs.turn_failed
+        );
+    } else {
+        println!("ゲート反応               : n/a（REST 経路はゲート反応を持たない）");
     }
-    println!("{}", "-".repeat(72));
-    println!("最終本文（say / 通常発言）: {} 件", says.len());
-    for (i, s) in says.iter().enumerate() {
-        println!("  [{i}] {:?}", s);
-    }
-    println!("{}", "-".repeat(72));
-    println!("LLM 呼び出し回数（llm-logs 差分）: {}", llm_calls);
-    println!("activity 遷移: {:?}", activities);
-    println!("CompletedNoReply（沈黙終端）: {}", completed_no_reply);
-    println!("TurnFailed（ターン失敗）      : {}", turn_failed);
-    println!("CONTINUE 残留 : {}", continue_residue);
-    println!("NO_REPLY 残留 : {}", no_reply_residue);
     println!("{sep}\n");
-
-    // 観測できていれば harness としては成功（挙動の良否判定は人間 QC が読む）。
-    // ただし何も起きなかった（op も say も activity も 0）のは配線失敗として落とす。
-    assert!(
-        !recorded.is_empty() || !says.is_empty() || !activities.is_empty(),
-        "ターンで op も say も activity も観測できなかった（配線失敗・timeout={timeout_secs}s）"
-    );
-}
-
-/// agent の llm-logs の id 集合（直近 50 件）。ターン前後の差分で呼び出し回数を測る。
-async fn llm_log_ids(http: &Http, agent: &str) -> std::collections::HashSet<String> {
-    let (st, body) = http
-        .get_json(&format!("/api/agents/{agent}/llm-logs?limit=50"))
-        .await;
-    if !st.is_success() {
-        return std::collections::HashSet::new();
-    }
-    body.as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|e| e.get("id").and_then(|v| v.as_str()).map(String::from))
-                .collect()
-        })
-        .unwrap_or_default()
 }
