@@ -61,7 +61,7 @@ pub fn operation_declarations() -> Value {
         ),
         decl(
             "reaction",
-            "イベントにリアクションする。event に会話の e番号、emoji に絵文字（省略可）。結果は返らない（撃ちっぱなし・再開はされない）。複数のリアクションは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。This call returns nothing and you will NOT be invoked again after it. If you need N reactions, put N reaction calls in THIS response.",
+            "イベントにリアクションする。event に会話の e番号、emoji に絵文字（省略可）。結果は返らず、この呼び出しの後に再度呼び出されることはない（撃ちっぱなし・再開なし）。N 件のリアクションが必要なら、この 1 応答に N 個の reaction 呼び出しを置く。",
             json!({"type": "object", "required": ["event"], "properties": {
                 "event": ref_prop("対象イベントの短縮参照（例 e7）"),
                 "emoji": str_prop("リアクション絵文字（省略時は既定）")
@@ -70,7 +70,7 @@ pub fn operation_declarations() -> Value {
         ),
         decl(
             "reply",
-            "イベントに返信する。event に会話の e番号、text に返信本文。結果は返らない（撃ちっぱなし・再開はされない）。複数の返信は1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。This call returns nothing and you will NOT be invoked again after it. If you need N replies, put N reply calls in THIS response.",
+            "イベントに返信する。event に会話の e番号、text に返信本文。結果は返らず、この呼び出しの後に再度呼び出されることはない（撃ちっぱなし・再開なし）。N 件の返信が必要なら、この 1 応答に N 個の reply 呼び出しを置く。",
             json!({"type": "object", "required": ["event", "text"], "properties": {
                 "event": ref_prop("返信先イベントの短縮参照（例 e7）"),
                 "text": str_prop("返信本文")
@@ -79,7 +79,7 @@ pub fn operation_declarations() -> Value {
         ),
         decl(
             "repost",
-            "イベントをリポストする。event に会話の e番号。結果は返らない（撃ちっぱなし・再開はされない）。複数のリポストは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。This call returns nothing and you will NOT be invoked again after it. If you need N reposts, put N repost calls in THIS response.",
+            "イベントをリポストする。event に会話の e番号。結果は返らず、この呼び出しの後に再度呼び出されることはない（撃ちっぱなし・再開なし）。N 件のリポストが必要なら、この 1 応答に N 個の repost 呼び出しを置く。",
             json!({"type": "object", "required": ["event"], "properties": {"event": ref_prop("対象イベントの短縮参照（例 e7）")}}),
             conv("not_exposed", "conversation_bound"),
         ),
@@ -367,25 +367,92 @@ mod tests {
                 .find(|d| d["name"] == name)
                 .and_then(|d| d["description"].as_str())
                 .unwrap();
-            assert!(description.contains("1回の応答"));
-            assert!(description.contains("呼び直す必要はない"));
-            // #913: 強い英文で「結果は返らない・再呼び出しされない」を明示（reply×1 停止対策）。
+            // #920: 発話は fire-and-forget（結果は返らず再呼び出しされない）を事実文で明示。
             assert!(
                 description.contains(
-                    "This call returns nothing and you will NOT be invoked again after it"
+                    "結果は返らず、この呼び出しの後に再度呼び出されることはない（撃ちっぱなし・再開なし）。"
                 ),
-                "#913: {name} 説明文に強い fire-and-forget 英文が無い: {description}"
+                "#920: {name} 説明文に fire-and-forget の事実文が無い: {description}"
             );
         }
-        // #913: reply は「N 件必要なら N 個をこの応答に並べる」を明示。
+        // #920: reply は「N 件必要なら N 個をこの応答に置く」を事実文で明示。
         let reply_desc = arr
             .iter()
             .find(|d| d["name"] == "reply")
             .and_then(|d| d["description"].as_str())
             .unwrap();
         assert!(
-            reply_desc.contains("put N reply calls in THIS response"),
-            "#913: reply 説明文に N 件並置の指示が無い: {reply_desc}"
+            reply_desc.contains("N 個の reply 呼び出しを置く"),
+            "#920: reply 説明文に N 件並置の事実文が無い: {reply_desc}"
+        );
+    }
+
+    /// DESIGN-PROMPT-INVENTORY-2026-09-03 §1-4 受け入れ（TDD・赤先行）。
+    ///
+    /// 発話 op（reaction / reply / repost）の説明文を「命令・強英文」から「事実」へ書換
+    /// （§2B B4/B5 統合・§3.7）。観測境界は `operation_declarations()` の各 description
+    /// （ops_projection.rs:158 が verbatim 投影する実体）。旧命令断片は count==0、書換後の
+    /// 全文と一致で pin する。現 tip（9a6af850）では旧強英文が残るため **赤**。
+    ///
+    /// 期待文字列: reply は §3.7 逐語。reaction / repost は §2B「同型」規則で機械導出
+    /// （B1 維持＋固定 merge 文＋op 別 fact 文）。test-review で設計意図との一致を確認する。
+    #[test]
+    fn utterance_descriptions_are_factual_rewrite_red() {
+        let decls = operation_declarations();
+        let arr = decls.as_array().unwrap();
+        let desc = |name: &str| -> String {
+            arr.iter()
+                .find(|d| d["name"] == name)
+                .and_then(|d| d["description"].as_str())
+                .unwrap_or_else(|| panic!("op が無い: {name}"))
+                .to_string()
+        };
+
+        // 旧命令・強英文・旧 JP B3 は 0 件（否定側・count）。
+        for name in ["reaction", "reply", "repost"] {
+            let d = desc(name);
+            for frag in [
+                "This call returns nothing and you will NOT be invoked again after it",
+                "you will NOT be invoked again",
+                "結果は返らない（撃ちっぱなし・再開はされない）",
+                "1回の応答",
+                "呼び直す必要はない",
+            ] {
+                assert_eq!(
+                    d.matches(frag).count(),
+                    0,
+                    "{name}: 旧命令/強英文が残存: {frag:?}\n{d}"
+                );
+            }
+        }
+        for (name, old_n) in [
+            ("reaction", "put N reaction calls in THIS response"),
+            ("reply", "put N reply calls in THIS response"),
+            ("repost", "put N repost calls in THIS response"),
+        ] {
+            assert_eq!(
+                desc(name).matches(old_n).count(),
+                0,
+                "{name}: 旧 N 件並置命令が残存\n{}",
+                desc(name)
+            );
+        }
+
+        // 書換後の全文と一致（§2B 新文・事実形）。
+        assert_eq!(
+            desc("reaction"),
+            "イベントにリアクションする。event に会話の e番号、emoji に絵文字（省略可）。結果は返らず、この呼び出しの後に再度呼び出されることはない（撃ちっぱなし・再開なし）。N 件のリアクションが必要なら、この 1 応答に N 個の reaction 呼び出しを置く。",
+            "reaction 説明文が §2B 新文と一致しない"
+        );
+        assert_eq!(
+            desc("reply"),
+            "イベントに返信する。event に会話の e番号、text に返信本文。結果は返らず、この呼び出しの後に再度呼び出されることはない（撃ちっぱなし・再開なし）。N 件の返信が必要なら、この 1 応答に N 個の reply 呼び出しを置く。",
+            "reply 説明文が §2B 新文と一致しない"
+        );
+        assert_eq!(
+            desc("repost"),
+            "イベントをリポストする。event に会話の e番号。結果は返らず、この呼び出しの後に再度呼び出されることはない（撃ちっぱなし・再開なし）。N 件のリポストが必要なら、この 1 応答に N 個の repost 呼び出しを置く。",
+            "repost 説明文が §2B 新文と一致しない"
         );
     }
 }
