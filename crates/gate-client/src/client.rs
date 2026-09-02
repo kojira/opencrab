@@ -540,8 +540,32 @@ async fn attach(
             tracing::info!(instance_id = %client.instance_id, "hello ok");
             Ok(())
         }
-        Ok(SaidOutcome::WireErr { .. }) | Ok(SaidOutcome::Disconnected) | Err(_) => {
-            tracing::info!(instance_id = %client.instance_id, "hello failed");
+        // fail-loud（#894）: サーバの err_frame コードをそのまま報告する。従来は WireErr の
+        // code を捨て、後続 EOF を read_loop が `close_all("disconnect")` に潰していたため、
+        // 真因（config_digest_mismatch 等）が両側で不可視だった。
+        Ok(SaidOutcome::WireErr { code, detail }) => {
+            tracing::warn!(
+                instance_id = %client.instance_id,
+                reason = %code,
+                detail = ?detail,
+                "hello failed"
+            );
+            Err(FrameError::Io)
+        }
+        Ok(SaidOutcome::Disconnected) => {
+            tracing::warn!(
+                instance_id = %client.instance_id,
+                reason = "disconnect",
+                "hello failed"
+            );
+            Err(FrameError::Io)
+        }
+        Err(_) => {
+            tracing::warn!(
+                instance_id = %client.instance_id,
+                reason = "channel_closed",
+                "hello failed"
+            );
             Err(FrameError::Io)
         }
     }
