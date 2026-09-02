@@ -838,8 +838,6 @@ impl SkillEngine {
                 );
                 apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
 
-                // Notify on_tool_call callbacks.
-                //
                 // 発話クラス（reply/reaction/repost・§3.3.1 C6）の tool_call は**機械行を
                 // 永続しない**。発話の本文は配送経路が speech ログとして残す（本文＋関係注記）
                 // ので、ここで永続 tool_call 行から除外する。照会/道具クラスの call は従来どおり。
@@ -847,9 +845,42 @@ impl SkillEngine {
                     .iter()
                     .filter(|tc| !self.is_utterance_tool(&tc.function.name))
                     .collect();
+
+                // #916 §13 #10: 本文＋照会/道具（query/dispatch）クラスの生成の本文は「宣言（holding）」。
+                // 既存の中間発話配送フック（on_continuation_speech → 配送＋保存）で 1 件だけ配送・保存する。
+                // 配送したら on_tool_call へは本文を渡さず二重保存を避ける（配送は保存と対）。フックが
+                // 無いレーン（旧 discord は on_response_text で反復配送・core 単体テストは配送なし）は
+                // 従来どおり on_tool_call が本文を保存する（挙動不変）。content は末尾 CONTINUE 剥がし済み。
+                // 配送する holding 本文は NO_REPLY 終端解釈後の可視発言。判定は core 単一実装
+                // terminate_at_no_reply().speech()（配送層 visible_speech_after_markers と同じ 1 実装・
+                // 部分文字列の別判定を作らない・#916 レビュー）。content は末尾 CONTINUE 剥がし済み
+                // （§11.6）なので visible_speech_after_markers（NO_REPLY→CONTINUE 剥がし）と同一結果。
+                // 沈黙（可視本文なし・単独/行頭 NO_REPLY）は配送しない。
+                let mut holding_delivered = false;
+                if !persisted.is_empty() {
+                    if let Some(c) = content.as_deref() {
+                        let term = crate::continue_marker::terminate_at_no_reply(c);
+                        if let Some(body) = term.speech().filter(|b| !b.trim().is_empty()) {
+                            if let Some(ref cb) = self.on_continuation_speech {
+                                cb(body.to_string()).await.map_err(|e| {
+                                    anyhow::anyhow!("holding speech delivery failed: {e:#}")
+                                })?;
+                                holding_delivered = true;
+                            }
+                        }
+                    }
+                }
+
+                // Notify on_tool_call callbacks.
                 if !persisted.is_empty() && !self.on_tool_call.is_empty() {
                     let calls_json = serde_json::to_string(&persisted).unwrap_or_default();
-                    let assistant_content = content.clone().unwrap_or_default();
+                    // 配送済み holding は本文を渡さない（配送側が保存済み・二重保存回避）。未配送
+                    // （フック無しレーン）は従来どおり content を渡して on_tool_call が保存する。
+                    let assistant_content = if holding_delivered {
+                        String::new()
+                    } else {
+                        content.clone().unwrap_or_default()
+                    };
                     for cb in &self.on_tool_call {
                         cb(assistant_content.clone(), calls_json.clone());
                     }

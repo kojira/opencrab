@@ -22,7 +22,7 @@ use crate::no_reply::{terminate_at_no_reply, DeliveryContext};
 /// `None` は沈黙（`NoReply`）。`Some` はユーザーへ出す本文。
 pub fn visible_speech_after_markers(raw: &str, ctx: DeliveryContext<'_>) -> Option<String> {
     let term = terminate_at_no_reply(raw);
-    term.log_trailing_discard(ctx);
+    crate::no_reply::log_trailing_discard(&term, ctx);
     let speech = term.speech()?;
     if let Some(body) = strip_trailing_continue(speech) {
         return Some(body.to_string());

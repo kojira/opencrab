@@ -43,6 +43,82 @@ pub fn strip_trailing_continue(content: &str) -> Option<&str> {
     Some(trimmed[..last_line_start.saturating_sub(1)].trim_end())
 }
 
+/// `NO_REPLY` 終端解釈の結果（純粋・DESIGN-RESUME-SETTLE §3.1・R4「出現＝終端」）。
+///
+/// 正本は core（NO_REPLY / CONTINUE の両センチネルと判定を core が一元管理する・§11.5）。
+/// `opencrab_actions::{terminate_at_no_reply, NoReplyTermination}` はここを re-export し、配送層
+/// （`visible_speech_after_markers` / discord `on_response_text` / nostr 完了 sink）と engine の
+/// holding 配送・NO_REPLY 優先判定が**同じ 1 実装**を参照する（部分文字列の別実装を作らない）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoReplyTermination {
+    /// 終端前の全文（前段）。`NO_REPLY` が無ければ応答全文。前段が空なら空文字。
+    kept: String,
+    /// 破棄した全文（`NO_REPLY` トークンを含む終端以降）。`NO_REPLY` が無ければ `None`。
+    discarded: Option<String>,
+}
+
+/// 応答文字列を最初の `NO_REPLY` で終端解釈する（純粋・ログは出さない・R4「出現＝終端」）。
+///
+/// 判定はプロジェクト唯一の実装。`.find(NO_REPLY_SENTINEL)`＝文中引用も終端（R4）。呼び出し側が
+/// 部分文字列の別判定を書かず必ずここを通す（単一実装・#916 レビュー）。
+pub fn terminate_at_no_reply(response: &str) -> NoReplyTermination {
+    match response.find(NO_REPLY_SENTINEL) {
+        None => NoReplyTermination {
+            kept: response.to_string(),
+            discarded: None,
+        },
+        Some(idx) => NoReplyTermination {
+            // `NO_REPLY` はすべて ASCII なので `idx` はバイト境界。
+            kept: response[..idx].to_string(),
+            discarded: Some(response[idx..].to_string()),
+        },
+    }
+}
+
+impl NoReplyTermination {
+    /// 応答に `NO_REPLY` が現れたか（＝終端したか）。
+    pub fn terminated(&self) -> bool {
+        self.discarded.is_some()
+    }
+
+    /// 配送すべき発言本文。前段が空（沈黙）なら `None`。
+    ///
+    /// - `NO_REPLY` 無し: 応答全文をそのまま返す（原挙動保存・空白のみでも `Some`）。
+    /// - `NO_REPLY` 有り: 前段を前後空白除去し、空なら `None`（沈黙）。
+    pub fn speech(&self) -> Option<&str> {
+        match &self.discarded {
+            None => Some(&self.kept),
+            Some(_) => {
+                let s = self.kept.trim();
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s)
+                }
+            }
+        }
+    }
+
+    /// 破棄ログを出すべき破棄全文（`NO_REPLY` の後に非空テキストが続く場合だけ `Some`）。
+    ///
+    /// 単独 `NO_REPLY`・末尾 `NO_REPLY`（後続が空白のみ）は正常沈黙なので `None`。
+    pub fn trailing_discard(&self) -> Option<&str> {
+        let discarded = self.discarded.as_deref()?;
+        // discarded は必ず先頭が `NO_REPLY`。その後続を見る。
+        let after = &discarded[NO_REPLY_SENTINEL.len()..];
+        if after.trim().is_empty() {
+            None
+        } else {
+            Some(discarded)
+        }
+    }
+
+    /// 終端前の全文（配送層 `log_trailing_discard` の `kept_len` 用アクセサ）。
+    pub fn kept(&self) -> &str {
+        &self.kept
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,5 +174,59 @@ mod tests {
     #[test]
     fn substring_of_word_returns_none() {
         assert_eq!(strip_trailing_continue("これはDISCONTINUE"), None);
+    }
+
+    // ---- NO_REPLY 終端解釈（core 一元化・#916 で actions から移設） ----
+
+    #[test]
+    fn no_no_reply_keeps_full_text_verbatim() {
+        let t = terminate_at_no_reply("普通の本文\nです");
+        assert!(!t.terminated());
+        assert_eq!(t.speech(), Some("普通の本文\nです"));
+        assert_eq!(t.trailing_discard(), None);
+    }
+
+    #[test]
+    fn standalone_no_reply_is_silence_without_warn() {
+        let t = terminate_at_no_reply("NO_REPLY");
+        assert!(t.terminated());
+        assert_eq!(t.speech(), None);
+        assert_eq!(t.trailing_discard(), None);
+    }
+
+    #[test]
+    fn leading_body_then_no_reply_keeps_body_no_warn() {
+        let t = terminate_at_no_reply("本文だけ話す NO_REPLY");
+        assert_eq!(t.speech(), Some("本文だけ話す"));
+        assert_eq!(t.trailing_discard(), None);
+    }
+
+    #[test]
+    fn body_then_no_reply_then_trailing_cuts_and_warns() {
+        let t = terminate_at_no_reply("これは本文 NO_REPLY これはゴミ");
+        assert_eq!(t.speech(), Some("これは本文"));
+        assert_eq!(t.trailing_discard(), Some("NO_REPLY これはゴミ"));
+        assert_eq!(t.kept(), "これは本文 ");
+    }
+
+    #[test]
+    fn leading_no_reply_with_trailing_is_silence_but_warns() {
+        let t = terminate_at_no_reply("NO_REPLY まだ続くゴミ");
+        assert_eq!(t.speech(), None);
+        assert_eq!(t.trailing_discard(), Some("NO_REPLY まだ続くゴミ"));
+    }
+
+    #[test]
+    fn only_first_occurrence_terminates() {
+        let t = terminate_at_no_reply("A NO_REPLY B NO_REPLY C");
+        assert_eq!(t.speech(), Some("A"));
+        assert_eq!(t.trailing_discard(), Some("NO_REPLY B NO_REPLY C"));
+    }
+
+    #[test]
+    fn no_reply_midword_still_terminates_per_r4() {
+        let t = terminate_at_no_reply("説明: NO_REPLYという語について");
+        assert_eq!(t.speech(), Some("説明:"));
+        assert_eq!(t.trailing_discard(), Some("NO_REPLYという語について"));
     }
 }
