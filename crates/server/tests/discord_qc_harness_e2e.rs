@@ -66,6 +66,9 @@ struct Captured {
     emoji: String,
     channel: String,
     message: String,
+    /// #915: reply の own 投稿 id（dry-run が合成・say の message id と同じ形）。reply 以外は空。
+    /// `message`（＝返信先 origin id）は従来どおり維持し、🏁 の相関はこの reply_id で行う。
+    reply_id: String,
 }
 
 static BUFFER: OnceLock<Arc<Mutex<Vec<Captured>>>> = OnceLock::new();
@@ -94,6 +97,7 @@ struct Visitor {
     emoji: Option<String>,
     channel: Option<String>,
     message: Option<String>,
+    reply_id: Option<String>,
 }
 
 impl Visitor {
@@ -104,6 +108,7 @@ impl Visitor {
             "emoji" => self.emoji = Some(value),
             "channel" => self.channel = Some(value),
             "message" => self.message = Some(value),
+            "reply_id" => self.reply_id = Some(value),
             _ => {}
         }
     }
@@ -131,6 +136,7 @@ impl<S: tracing::Subscriber> Layer<S> for CaptureLayer {
             emoji: v.emoji.unwrap_or_default(),
             channel: v.channel.unwrap_or_default(),
             message: v.message.unwrap_or_default(),
+            reply_id: v.reply_id.unwrap_or_default(),
         });
     }
 }
@@ -2153,6 +2159,100 @@ async fn scenario_915_reply_continue_then_reaction_only_gets_no_flag() {
         2,
         "reply→CONTINUE→reaction の LLM 呼び出しが 2 でない"
     );
+}
+
+// ---------------------------------------------------------------------------
+// #915 / §13.3.6 row 6【reply×N（本文なし・単一生成）→ 最後の reply に 1】: 1 生成で reply を 3 本
+// 出すターン。🏁 は最後の reply の own 投稿 id（reply_id）に 1・他 0・総数 1。reply は invoke 経路
+// なので現 tip は 🏁 0 → **赤**。相関は capture の `reply_id`（dry-run が合成した own 投稿 id）で行う
+// （`message`＝返信先 origin とは分離）。
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn scenario_915_reply3_flag_on_last_reply() {
+    let buf = install_capture();
+    let mock = Arc::new(RoutedMock::new());
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    fixture.append_message("9170", &format!("{M_REPLY3} 3 本まとめて返信して"));
+
+    // reply 3 本が配送されるまで待つ（各 reply は distinct な reply_id を持つ）。
+    let delivered = {
+        let buf = buf.clone();
+        wait_until(move || {
+            B_REPLY3.iter().all(|b| {
+                captured(&buf)
+                    .iter()
+                    .any(|c| c.kind == "reply" && c.body.contains(b) && !c.reply_id.is_empty())
+            })
+        })
+        .await
+    };
+    assert!(delivered, "reply×3 が配送されない: {:?}", captured(&buf));
+    // 決着（ended）まで猶予。🏁 はターン終了時付与。
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    // 各 reply の own 投稿 id（reply_id）を本文で引く。
+    let reply_id_of = |body: &str| -> Option<String> {
+        captured(&buf)
+            .iter()
+            .find(|c| c.kind == "reply" && c.body.contains(body))
+            .map(|c| c.reply_id.clone())
+            .filter(|m| !m.is_empty())
+    };
+    let last_reply_id = reply_id_of(B_REPLY3[2]).expect("最後の reply の reply_id");
+    let first_reply_id = reply_id_of(B_REPLY3[0]).expect("1 本目 reply の reply_id");
+    let second_reply_id = reply_id_of(B_REPLY3[1]).expect("2 本目 reply の reply_id");
+
+    let completed_on = |id: &str| -> usize {
+        captured(&buf)
+            .iter()
+            .filter(|c| {
+                c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == id
+            })
+            .count()
+    };
+
+    // 🏁 は最後の reply に 1・途中 2 本には 0（§13.3.6 row 6）。現 tip は reply に 🏁 0 → 赤。
+    assert_eq!(
+        completed_on(&last_reply_id),
+        1,
+        "🏁 が最後の reply に 1 件で付かない（§13.3.6 row 6・現 tip は reply に 🏁 0）: {:?}",
+        captured(&buf)
+    );
+    assert_eq!(
+        completed_on(&first_reply_id),
+        0,
+        "🏁 が 1 本目の reply に誤付与: {:?}",
+        captured(&buf)
+    );
+    assert_eq!(
+        completed_on(&second_reply_id),
+        0,
+        "🏁 が 2 本目の reply に誤付与: {:?}",
+        captured(&buf)
+    );
+    let total: usize = [&first_reply_id, &second_reply_id, &last_reply_id]
+        .iter()
+        .map(|id| completed_on(id))
+        .sum();
+    assert_eq!(
+        total,
+        1,
+        "reply×3 ターンの 🏁 総数が 1 でない: {:?}",
+        captured(&buf)
+    );
+
+    // 発端 9170 にも 🏁 は付かない（🏁 は自分の投稿へ）。
+    let on_origin = captured(&buf)
+        .iter()
+        .filter(|c| {
+            c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == "9170"
+        })
+        .count();
+    assert_eq!(on_origin, 0, "🏁 が発端に誤付与: {:?}", captured(&buf));
 }
 
 // ---------------------------------------------------------------------------
