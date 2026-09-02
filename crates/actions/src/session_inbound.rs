@@ -340,12 +340,11 @@ pub fn delivery_effect(
 ) -> DeliveryEffect {
     match result {
         Ok(er) if !er.response.is_empty() => {
-            let term = crate::no_reply::terminate_at_no_reply(&er.response);
-            term.log_trailing_discard(ctx);
-            match term.speech() {
+            // NO_REPLY 終端（第一柱）→ CONTINUE 末尾剥がし（#890 §11）を 1 経路で確定。
+            match crate::continue_marker::visible_speech_after_markers(&er.response, ctx) {
                 None => DeliveryEffect::NoReply,
                 Some(body) => DeliveryEffect::Text {
-                    body: body.to_string(),
+                    body,
                     stopped_by_limit: er.stopped_by_limit,
                     tool_calls_made: er.tool_calls_made,
                     iterations: er.iterations,

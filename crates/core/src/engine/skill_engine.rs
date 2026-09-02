@@ -611,6 +611,32 @@ impl SkillEngine {
                 }
             }
 
+            // #890 §11: 末尾 CONTINUE マーカーの検出と剥がし。末尾（空白除去後の最後の行/
+            // トークン）が CONTINUE なら「このターンを続ける意思」とみなし、剥がして次イテレー
+            // ションへ進む（継続を起こすのは text-only 経路のみ・下の最終応答分岐で `continue`）。
+            // ツール呼び出しと併記された場合はツール経路が優先し、マーカーは剥がすだけ。NO_REPLY
+            // が同居する場合は NO_REPLY 優先で終端する（継続しない・剥がしは配送層が担う）。末尾
+            // 以外の出現は剥がさず継続もしない（WARN は DeliveryContext を持つ配送層が出す）。
+            // 剥がしは on_response_text 配送前・会話保存前に行う（§11.6: マーカーを残さない）。
+            let mut continue_requested = false;
+            let mut stripped_content: Option<Option<String>> = None;
+            if let Some(c) = content.as_deref() {
+                let no_reply_terminates = c.contains(crate::continue_marker::NO_REPLY_SENTINEL);
+                let marker = crate::continue_marker::strip_continue_marker(c);
+                if marker.at_tail() && !no_reply_terminates {
+                    continue_requested = true;
+                    let kept = marker.into_kept();
+                    stripped_content = Some(if kept.trim().is_empty() {
+                        None
+                    } else {
+                        Some(kept)
+                    });
+                }
+            }
+            if let Some(new_content) = stripped_content {
+                content = new_content;
+            }
+
             // Fire on_response_text for every LLM reply that has non-empty text.
             if let Some(ref text) = content {
                 if !text.trim().is_empty() {
@@ -941,6 +967,26 @@ impl SkillEngine {
                     }
                 }
 
+                continue;
+            }
+
+            // #890 §11: 末尾 CONTINUE でこのターンを継続（ツール呼び出しが無い text-only 経路）。
+            // 剥がし後の本文を assistant メッセージとして積み（マーカー除去済み・§11.6）、次イテレー
+            // ションへ。発話は on_response_text で配送済み（R7 の fire-and-forget）。本文が空
+            // （CONTINUE 単独）なら何も積まずに次イテレーションへ。上限は既存 max_iterations。
+            if continue_requested {
+                if let Some(ref c) = content {
+                    messages.push(Message {
+                        role: Role::Assistant,
+                        content: Some(MessageContent::Text(c.clone())),
+                        name: None,
+                        function_call: None,
+                        tool_calls: None,
+                        tool_call_id: None,
+                    });
+                    turn_ledger.record(format!("asst:{}", messages.len()), c);
+                    apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
+                }
                 continue;
             }
 

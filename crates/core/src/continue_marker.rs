@@ -1,6 +1,6 @@
 //! `CONTINUE` 継続マーカー（DESIGN-TURN-CONTINUATION §11・末尾マーカー方式・#890）。
 //!
-//! `CONTINUE` は [`crate::…`]（`NO_REPLY`）と対の制御トークン。生成 content の**末尾**
+//! `CONTINUE` は `NO_REPLY` と対の制御トークン。生成 content の**末尾**
 //! （末尾空白を除いた最後の行/トークン）にあれば「このターンで作業を続ける意思」を表す。
 //! エンジンはマーカーを剥がして次のイテレーションへ進み、剥がした本文だけを配送・保存する。
 //!
@@ -46,13 +46,34 @@ pub struct ContinueMarker {
 /// - 末尾以外に `CONTINUE` があれば剥がさず `midtext_offset=Some(pos)`（WARN 対象）。
 /// - どちらでもなければ入力そのまま。
 pub fn strip_continue_marker(content: &str) -> ContinueMarker {
-    // RED STUB（#890 PR1 赤テスト）: 実装は緑コミットで入れる。ここでは常に「マーカー無し」を
-    // 返すため、末尾/途中出現の各テストは assert で失敗する（＝赤）。
-    let _ = content;
-    ContinueMarker {
-        kept: content.to_string(),
-        at_tail: false,
-        midtext_offset: None,
+    // 末尾空白を除いた最後の行/トークンが `CONTINUE` か。単語密着（例 `DISCONTINUE`）は
+    // 末尾トークンではないので、直前が空白のときだけ末尾マーカーとみなす。
+    let trimmed_end = content.trim_end();
+    let is_tail = trimmed_end == CONTINUE_SENTINEL
+        || (trimmed_end.ends_with(CONTINUE_SENTINEL) && {
+            let prefix = &trimmed_end[..trimmed_end.len() - CONTINUE_SENTINEL.len()];
+            prefix
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_whitespace())
+        });
+    if is_tail {
+        let kept = trimmed_end[..trimmed_end.len() - CONTINUE_SENTINEL.len()]
+            .trim_end()
+            .to_string();
+        ContinueMarker {
+            kept,
+            at_tail: true,
+            midtext_offset: None,
+        }
+    } else {
+        // 末尾に無いなら剥がさない。どこかに出現していれば WARN 用に位置だけ拾う。
+        let midtext_offset = content.find(CONTINUE_SENTINEL);
+        ContinueMarker {
+            kept: content.to_string(),
+            at_tail: false,
+            midtext_offset,
+        }
     }
 }
 
