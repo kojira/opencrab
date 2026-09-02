@@ -98,7 +98,7 @@ fn scenario_for(name: &str) -> Scenario {
         },
         "plain3" => Scenario {
             name: "plain3",
-            prompt: "このメッセージに、reply（返信）操作は使わず、通常の発言を3回に分けて返してください。3つの短い発言に分けてください。",
+            prompt: "返信ツールを使わず、別々の投稿（メッセージ）として3回に分けて投稿して。1回目・2回目・3回目と番号を付けて。",
             expect_resume: false,
         },
         "noreply" => Scenario {
@@ -141,6 +141,14 @@ impl InvokeHandler for RecordingHandler {
         });
         // 外部 API へは出さず「受理した」を返す（dry-run 相当）。null result は §10.2 で合法。
         InvokeOutcome::Ok(Value::Null)
+    }
+
+    /// #900: 発話クラス（reply/reaction/repost/say）の判定。本番ゲート（DiscordInvokeHandler）と
+    /// パリティを取り、core 既知名を集約する `is_known_utterance_op` へ委ねる。これを実装しないと
+    /// 既定 false で、reply だけのターンが沈黙扱い（CompletedNoReply=🤐）になり harness artifact に
+    /// なる。utterance invoke が Ok で決着すると gate-client が saw_utterance を立て、🤐 を立てない。
+    fn is_utterance(&self, operation: &str) -> bool {
+        opencrab_gateway::is_known_utterance_op(operation)
     }
 }
 
