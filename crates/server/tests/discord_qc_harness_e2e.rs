@@ -216,6 +216,10 @@ fn long_say_body() -> String {
         .join("\n")
 }
 const B_SAY: &str = "saybody-alpha 通常発言だよ";
+// #915: scenario_d 専用の一意 say 本文。BUFFER は binary 内で共有・累積のため、B_SAY（他シナリオ
+// でも使う）だと own message id を count で pin できない。独立本文で scenario_d の say を隔離する。
+const M_SAY_D: &str = "SAYDMARK";
+const B_SAY_D: &str = "saydbody-delta 単発発言だよ（#915 scenario_d 専用）";
 const B_REPLY: &str = "replybody-beta 返信本文だよ";
 const EMOJI: &str = "👀";
 const FILLER: &str = "fillerbody-omega";
@@ -287,6 +291,9 @@ impl LlmProvider for RoutedMock {
             if text.contains(M_LONGSAY) {
                 // 2000 字超の say（turn は plain text で閉じるので resume ループしない）。
                 return Ok(text_response(&long_say_body()));
+            }
+            if text.contains(M_SAY_D) {
+                return Ok(text_response(B_SAY_D));
             }
             if text.contains(M_SAY) {
                 return Ok(text_response(B_SAY));
@@ -854,7 +861,7 @@ async fn scenario_d_system_reactions_accepted_and_completed() {
 
     // M_SAY: turn は通常発言（say）を返す。agent の reaction DI は使わない
     // （＝ kind="reaction" は 0・system reaction は kind="system_reaction" で分離観測）。
-    fixture.append_message("703", &format!("{M_SAY} 受理と完了のサインを見たい"));
+    fixture.append_message("703", &format!("{M_SAY_D} 受理と完了のサインを見たい"));
 
     // 👀: LLM がこの発端メッセージをターン文脈に含めた（読んだ）時点＝activity started(origin) で
     // 発端メッセージ（channel=600, message=703）へ付く（R2・受理/推論前では付けない）。
@@ -876,33 +883,56 @@ async fn scenario_d_system_reactions_accepted_and_completed() {
         captured(&buf)
     );
 
-    // 🏁: say を配送し終えた時点で「自分が投稿した say のメッセージ」へ付く（owner 裁定 row 345:
-    // 発端ではなく自分の発言に付ける）。say（kind="say"・自分の投稿）の message id と、同じ id に
-    // 付いた 🏁（system_reaction）を相関させて検証する。
-    let saw_completed_on_own = {
-        let buf = buf.clone();
+    // 🏁: DESIGN-TURN-CONTINUATION §13.2「activity ended を受けた時点で、そのターンで最後に
+    // 成功した自分の say メッセージに 1 件だけ」。単発 say ターンなので最後の投稿 ＝ この 1 件の say。
+    // §13.2 表 row 1（ターンが投稿で終わる → 最後の投稿に 1）。own message id で相関し、`any` では
+    // なく**総数 == 1**で pin する（say ごとに 🏁 を付ける実装なら総数が増える → 検知）。
+    let own_say_mids: Vec<String> = {
+        let wbuf = buf.clone();
+        // 最後の say（＝この単発 say）の own message id に 🏁 が付くまで待つ。
         wait_until(move || {
-            let caps = captured(&buf);
-            // 自分が投稿した M_SAY ターンの say（本文が B_SAY を含む）の own message id 群。
-            let own_say_mids: Vec<String> = caps
+            let caps = captured(&wbuf);
+            let mids: Vec<String> = caps
                 .iter()
-                .filter(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(B_SAY))
+                .filter(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(B_SAY_D))
                 .map(|c| c.message.clone())
                 .filter(|m| !m.is_empty())
                 .collect();
-            // その own message id に 🏁 が付いている。
-            caps.iter().any(|c| {
-                c.kind == "system_reaction"
-                    && c.emoji.contains(SYS_COMPLETED)
-                    && c.channel == CHANNEL
-                    && own_say_mids.contains(&c.message)
-            })
+            !mids.is_empty()
+                && caps.iter().any(|c| {
+                    c.kind == "system_reaction"
+                        && c.emoji.contains(SYS_COMPLETED)
+                        && c.channel == CHANNEL
+                        && mids.contains(&c.message)
+                })
         })
-        .await
+        .await;
+        captured(&buf)
+            .iter()
+            .filter(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(B_SAY_D))
+            .map(|c| c.message.clone())
+            .filter(|m| !m.is_empty())
+            .collect()
     };
-    assert!(
-        saw_completed_on_own,
-        "完了 🏁（system_reaction）が自分の say メッセージに付かない: {:?}",
+    assert_eq!(
+        own_say_mids.len(),
+        1,
+        "単発 say の own message id が 1 件でない: {:?}",
+        captured(&buf)
+    );
+    let completed_on_own = captured(&buf)
+        .iter()
+        .filter(|c| {
+            c.kind == "system_reaction"
+                && c.emoji.contains(SYS_COMPLETED)
+                && c.channel == CHANNEL
+                && own_say_mids.contains(&c.message)
+        })
+        .count();
+    assert_eq!(
+        completed_on_own,
+        1,
+        "完了 🏁 が自分の最後の say に 1 件で付かない（§13.2・ターン終了時のみ）: {:?}",
         captured(&buf)
     );
 
@@ -985,7 +1015,8 @@ async fn scenario_e_no_reply_gets_muted_reaction() {
         captured(&buf)
     );
 
-    // 沈黙ターンには 🏁（完了）は付かない（返信を配送していない）。
+    // §13.2 表 row 11/13（NO_REPLY のみ → 🏁 0・沈黙終了は 🤐）。沈黙ターンは自分の投稿が無い
+    // ので 🏁 は付かない。発端 704 への誤付与を総数 0 で pin する（この turn の自投稿 id は無い）。
     let completed_on_704 = captured(&buf)
         .iter()
         .filter(|c| {
@@ -995,7 +1026,7 @@ async fn scenario_e_no_reply_gets_muted_reaction() {
     assert_eq!(
         completed_on_704,
         0,
-        "NO_REPLY ターンに 🏁 が誤発火: {:?}",
+        "NO_REPLY ターンに 🏁 が誤発火（§13.2 row 11/13）: {:?}",
         captured(&buf)
     );
 
@@ -1717,6 +1748,211 @@ async fn scenario_915_completed_flag_only_on_last_say_of_continue_split() {
 }
 
 // ---------------------------------------------------------------------------
+// #915 / §13.2 表 row 8【reply → CONTINUE → say】: reply を配送してから CONTINUE で継続し、
+// 最終イテレーションで say を投稿するターン。🏁 はターン終了時（activity ended）の最後の投稿
+// ＝最終 say に **1 件だけ**。途中の reply には付けない（own say id で相関・count で pin）。
+// ---------------------------------------------------------------------------
+const RC_REPLY: &str = "rcreply-途中の返信本文";
+const RC_SAY: &str = "rcsay-最終の通常発言";
+
+struct ReplyThenContinueThenSayMock {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for ReplyThenContinueThenSayMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(match n {
+            // 1 生成目: reply（本文 RC_REPLY）＋末尾 CONTINUE（本文は空＝継続のみ）→ 進む。
+            0 => reply_with_content_response(RC_REPLY, "CONTINUE"),
+            // 2 生成目: 純 say（最終・CONTINUE なし）→ ターン終了。
+            _ => text_response(RC_SAY),
+        })
+    }
+}
+
+#[tokio::test]
+async fn scenario_915_reply_then_continue_then_say_flag_only_on_last_say() {
+    use std::sync::atomic::Ordering;
+    let buf = install_capture();
+    let mock = Arc::new(ReplyThenContinueThenSayMock {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    fixture.append_message("9153", &format!("{M_REPLY} からの CONTINUE で最後は say"));
+
+    // 最終 say（RC_SAY）の own message id に 🏁 が付くまで待つ（決着＝activity ended で付与）。
+    let saw_last_completed = {
+        let buf = buf.clone();
+        wait_until(move || {
+            let last_mid = captured(&buf)
+                .iter()
+                .find(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(RC_SAY))
+                .map(|c| c.message.clone())
+                .filter(|m| !m.is_empty());
+            match last_mid {
+                Some(mid) => captured(&buf).iter().any(|c| {
+                    c.kind == "system_reaction"
+                        && c.emoji.contains(SYS_COMPLETED)
+                        && c.message == mid
+                }),
+                None => false,
+            }
+        })
+        .await
+    };
+    assert!(
+        saw_last_completed,
+        "🏁 が最終 say（RC_SAY）に付かない: {:?}",
+        captured(&buf)
+    );
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let say_mid = captured(&buf)
+        .iter()
+        .find(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(RC_SAY))
+        .map(|c| c.message.clone())
+        .filter(|m| !m.is_empty())
+        .expect("RC_SAY say の message id");
+
+    // 🏁 は最終 say に 1 件のみ（§13.2 row 8）。
+    let completed_on_say = captured(&buf)
+        .iter()
+        .filter(|c| {
+            c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == say_mid
+        })
+        .count();
+    assert_eq!(
+        completed_on_say,
+        1,
+        "🏁 が最終 say に 1 件で付かない（§13.2 row 8）: {:?}",
+        captured(&buf)
+    );
+
+    // 途中の reply は配送された（kind="reply"）。reply には 🏁 を付けない（発端 9153 にも付けない）。
+    let reply_delivered = captured(&buf)
+        .iter()
+        .any(|c| c.kind == "reply" && c.body.contains(RC_REPLY));
+    assert!(
+        reply_delivered,
+        "途中 reply が配送されない: {:?}",
+        captured(&buf)
+    );
+    let completed_on_origin = captured(&buf)
+        .iter()
+        .filter(|c| {
+            c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == "9153"
+        })
+        .count();
+    assert_eq!(
+        completed_on_origin,
+        0,
+        "🏁 が発端 9153（reply 先）に誤って付いている（§13.2）: {:?}",
+        captured(&buf)
+    );
+
+    // LLM 2 回（reply+CONTINUE → 最終 say）。
+    assert_eq!(
+        mock.calls.load(Ordering::SeqCst),
+        2,
+        "reply→CONTINUE→say の LLM 呼び出しが 2 でない"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #915 typing【最終投稿後の入力中停止】: 発話ターンで activity ended を受けたら typing keepalive
+// が止まり、失効間隔（8 秒）を跨いでも typing の再送出が 0 であることを観測境界（dry-run
+// kind="typing" のキャプチャ増分）で確定する。単一スレッド実行なので、この待機中に typing が
+// 増えるのはこのターンの keepalive だけ（他テストは走らない）。
+// ---------------------------------------------------------------------------
+const TY_SAY: &str = "tysay-入力中停止確認の本文";
+
+struct SingleSayThenIdleMock {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for SingleSayThenIdleMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(text_response(TY_SAY))
+    }
+}
+
+#[tokio::test]
+async fn scenario_915_typing_stops_after_turn_end() {
+    let buf = install_capture();
+    let mock = Arc::new(SingleSayThenIdleMock {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    fixture.append_message("9154", &format!("{M_SAY} 入力中がターン後に止まるか"));
+
+    // 最終 say（TY_SAY）の own id に 🏁 が付く＝activity ended を受けた（typing も ended で停止）まで待つ。
+    let done = {
+        let buf = buf.clone();
+        wait_until(move || {
+            let mid = captured(&buf)
+                .iter()
+                .find(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(TY_SAY))
+                .map(|c| c.message.clone())
+                .filter(|m| !m.is_empty());
+            match mid {
+                Some(mid) => captured(&buf).iter().any(|c| {
+                    c.kind == "system_reaction"
+                        && c.emoji.contains(SYS_COMPLETED)
+                        && c.message == mid
+                }),
+                None => false,
+            }
+        })
+        .await
+    };
+    assert!(
+        done,
+        "最終 say＋🏁（＝ended 到達）が観測できない: {:?}",
+        captured(&buf)
+    );
+
+    // ended 到達後の typing キャプチャ総数を基準化し、失効間隔（TYPING_REFRESH_INTERVAL=8 秒）を
+    // 跨いで待つ。停止していれば増分 0、停止漏れなら keepalive が 8 秒後に再送出して増える。
+    let before = count_kind(&buf, "typing");
+    tokio::time::sleep(Duration::from_millis(9000)).await;
+    let after = count_kind(&buf, "typing");
+    assert_eq!(
+        after, before,
+        "activity ended 後に typing が再送出された（入力中が止まらない）: before={before} after={after}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // §13.1 g【reaction のみ → #6 と同じ】: reaction のみ（say 0）のターン → reaction 配送・
 // 🤐 発端に付けない（発話がある）。現 tip: 最終本文空を沈黙とみなし 🤐 → 赤（#900 の reaction 版）。
 // §13 #6 の 🤐 契約を reaction で固定。
@@ -1792,6 +2028,21 @@ async fn audit_s13_1g_reaction_only_turn_gets_no_muted_reaction() {
         muted,
         0,
         "reaction があったターンに 🤐 が誤発火（#900・§13 #6 の reaction 版）: {:?}",
+        captured(&buf)
+    );
+
+    // §13.2: reaction のみのターンは自分の「投稿」が無い（reaction は発話 op だが say/reply の
+    // ような本文投稿ではない）ので 🏁 は付かない（発端 1309 への誤付与を総数 0 で pin）。
+    let completed_on_1309 = captured(&buf)
+        .iter()
+        .filter(|c| {
+            c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == "1309"
+        })
+        .count();
+    assert_eq!(
+        completed_on_1309,
+        0,
+        "reaction のみのターンに 🏁 が誤発火（§13.2）: {:?}",
         captured(&buf)
     );
     assert!(
