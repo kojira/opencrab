@@ -4,7 +4,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use opencrab_actions::{AgentRuntime, DeliveryEffect, TranscriptSource};
+use opencrab_actions::{DeliveryEffect, TranscriptSource};
 use opencrab_db::queries::{insert_session_log, SessionLogRow};
 use rusqlite::{params, TransactionBehavior};
 use uuid::Uuid;
@@ -16,9 +16,8 @@ use crate::protocol::{say_frame, write_json};
 use crate::registry::{ExtgateState, Pending};
 
 #[allow(clippy::too_many_arguments)]
-pub async fn apply_delivery_effect<R: AgentRuntime>(
+pub async fn apply_delivery_effect(
     state: &Arc<ExtgateState>,
-    runtime: &R,
     instance_id: &str,
     binding_id: &str,
     agent_id: &str,
@@ -72,7 +71,9 @@ pub async fn apply_delivery_effect<R: AgentRuntime>(
             }
         }
         DeliveryEffect::NoReply => {
-            runtime.record_agent_no_reply(agent_id, session_id);
+            // #899: 沈黙（NO_REPLY 終端）は speech を残さない。裸 NO_REPLY を永続すると
+            // conversation_typed が `assistant: 'NO_REPLY'` としてモデルへ再注入する。
+            // 配送層は既に visible_speech_after_markers で沈黙判定済み。ここは何もしない。
         }
         DeliveryEffect::Empty | DeliveryEffect::Failed { .. } => {
             if let DeliveryEffect::Failed { error } = &effect {

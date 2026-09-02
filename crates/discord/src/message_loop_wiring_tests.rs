@@ -228,8 +228,6 @@ impl opencrab_actions::AgentRuntime for FakeRunner {
         opencrab_actions::SubtaskRegistries::new().registry_for(session_id)
     }
 
-    fn record_agent_no_reply(&self, _agent_id: &str, _session_id: &str) {}
-
     fn record_inbound_message(
         &self,
         _source: opencrab_actions::TranscriptSource,

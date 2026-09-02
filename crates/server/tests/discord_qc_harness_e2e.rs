@@ -987,6 +987,95 @@ async fn scenario_e_no_reply_gets_muted_reaction() {
         "NO_REPLY ターンに 🏁 が誤発火: {:?}",
         captured(&buf)
     );
+
+    // #899 / §12.6: 沈黙決着で 🤐 は付くが、speech='NO_REPLY' の監査行は残さない。
+    // （裸 NO_REPLY を永続すると conversation_typed が assistant 'NO_REPLY' として再注入する。）
+    let no_reply_rows: i64 = {
+        let conn = core.extgate.db.lock().unwrap();
+        conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM memory_sessions WHERE log_type='speech' \
+                 AND speaker_id='{AGENT_ID}' AND content='NO_REPLY'"
+            ),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        no_reply_rows, 0,
+        "NO_REPLY のみのターンで speech='NO_REPLY' が保存された（#899・§12.6）: {no_reply_rows}"
+    );
+}
+
+// ==================== (g) reply×N＋NO_REPLY（§13 #14）: reply 保存・NO_REPLY 行なし・🤐なし ====================
+
+/// §13 #14: 発話 op（reply）を出したターンの末尾が NO_REPLY でも、reply は配送/保存され、
+/// 末尾 NO_REPLY は speech 行を足さない（#899）。発話があるので 🤐 は付かない。
+///
+/// | 観測点 | 期待 |
+/// |---|---|
+/// | reply 配送（dry-run kind=reply） | 1（本文 B_REPLY_NR） |
+/// | speech='NO_REPLY' 保存 | 0 |
+/// | 🤐（system_reaction）on 発端 | 0（発話ありターン） |
+///
+/// 現 tip で赤: 末尾 NO_REPLY が record_agent_no_reply で `content='NO_REPLY'` を保存する。
+#[tokio::test]
+async fn scenario_g_reply_then_no_reply_saves_reply_not_no_reply() {
+    let buf = install_capture();
+    let mock = Arc::new(RoutedMock::new());
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    // 705: 同一生成で reply op ＋ content=NO_REPLY（#904 の M_REPLY_NR 契約）。
+    fixture.append_message("705", &format!("{M_REPLY_NR} 返信してから黙って"));
+
+    // reply（一意本文）が配送されるまで待つ。on_tool_call の content 保存は reply 実行の
+    // **前**に走るので、この時点で（現 tip なら）NO_REPLY 行は既に書かれている。
+    let ok = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "reply" && c.body.contains(B_REPLY_NR))
+        })
+        .await
+    };
+    assert!(ok, "reply(705) が配送されない: {:?}", captured(&buf));
+
+    // reply は 1 回だけ（一意本文なので他テスト混線なし）。
+    let reply_count = captured(&buf)
+        .iter()
+        .filter(|c| c.kind == "reply" && c.body.contains(B_REPLY_NR))
+        .count();
+    assert_eq!(
+        reply_count,
+        1,
+        "reply が 1 回配送されていない（§13 #14）: {:?}",
+        captured(&buf)
+    );
+
+    // #899: reply があっても末尾 / 同一生成の NO_REPLY は speech='NO_REPLY' 行を足さない
+    //（on_tool_call の content 保存経路・配送層 NoReply の両方）。
+    let no_reply_rows: i64 = {
+        let conn = core.extgate.db.lock().unwrap();
+        conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM memory_sessions WHERE log_type='speech' \
+                 AND speaker_id='{AGENT_ID}' AND content='NO_REPLY'"
+            ),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        no_reply_rows, 0,
+        "reply×N＋NO_REPLY のターンで speech='NO_REPLY' が保存された（#899・§13 #14）: {no_reply_rows}"
+    );
+    // 注: 「発話ありターンに 🤐 を付けない」は既存 scenario_d が担保（本テストは #899 の保存側に集中）。
 }
 
 // ==================== (e2) reply（発話 invoke）ターンには 🤐 が付かない（#900） ====================
