@@ -525,7 +525,21 @@ struct Core {
     extgate: Arc<ExtgateState>,
     sock: PathBuf,
     subject_id: i64,
+    /// #915: execute_shell を実走させる tools_config 等を per-test で触れるよう AppState を保持。
+    state: AppState,
     _dir: tempfile::TempDir,
+}
+
+/// #915: echo と sleep だけを許可した shell 有効 tools 設定（date 相当＝echo・sleep 相当＝sleep）。
+fn shell_enabled_tools_config() -> opencrab_actions::tools::ToolsConfig {
+    opencrab_actions::tools::ToolsConfig {
+        enabled: true,
+        shell: Some(opencrab_actions::tools::ShellToolConfig {
+            enabled: true,
+            allowed_commands: vec!["echo".to_string(), "sleep".to_string()],
+            ..Default::default()
+        }),
+    }
 }
 
 /// 実 serve_uds core + 実 AppState を UDS で立ち上げる。nostr hooks は張らない（discord は generic 経路）。
@@ -583,6 +597,7 @@ async fn start_core(provider: Arc<dyn LlmProvider>) -> Core {
         extgate,
         sock,
         subject_id,
+        state,
         _dir: dir,
     }
 }
@@ -2652,23 +2667,24 @@ async fn scenario_915_max_iterations_flag_only_on_last_delivered_say() {
 }
 
 // ---------------------------------------------------------------------------
-// #915 / §13.3.6【spawned 宣言ターン → 0 ／ resume 完了報告 → 1】: 親ターンで subtask を起こし
-// （進行中あり）、宣言 say を投稿。subtask 決着後の resume ターンで完了報告 say を投稿。
-// 🏁 は宣言 say には付かず（進行中）、resume の報告 say に 1・総数 1。
-// 統括裁定: 照会クラスは常時 detach なので「date 単独」も実機ではこの spawned→resume 経路。
-// 現 tip は say 配送ごとに 🏁 → 宣言 say にも付く → **赤**（総数 2）。
-// dispatch（registry＋completion_sink）は extgate で配線済み・spawn_subtask を実走。
+// #915 / §13.3.6 row 10【本文＋query ツール（holding・spawn）→ 宣言 0 ／ resume 完了報告 → 1】:
+// **実物の execute_shell**（echo・即時決着＝date 相当）を呼ぶターン。execute_shell は inline 集合に
+// 無いので背景 subtask 化され（#152/#671）、dispatch 直後の継続で宣言（holding）say を投稿する。
+// subtask 決着（実 echo → settle）後の resume ターンで完了報告 say を投稿。🏁 は宣言 say には付かず
+// （進行中）、resume 報告 say に 1・総数 1。統括裁定: 照会クラス常時 detach なので「date 単独」も実機は
+// この execute_shell→spawned→resume 経路。現 tip は say 配送ごとに 🏁 → 宣言にも付く → **赤**（総数 2）。
+// 偽ツールは作らず、echo のみ許可した実 shell 設定で実走する。
 // ---------------------------------------------------------------------------
-const M_SPAWN: &str = "SPAWNMARK";
-const M_SUBTASK_TASK: &str = "SPSUBTASKMARK";
-const SP_DECL: &str = "spdecl-調べてくるね（宣言投稿）";
-const SP_RESULT: &str = "spresult-サブタスクの結果本文";
+const SP_ECHO: &str = "specho-shell-stdout-即時";
+const SP_DECL: &str = "spdecl-調べてるね（宣言・holding）";
 const SP_REPORT: &str = "spreport-結果はこうだった（完了報告投稿）";
 
-struct SpawnResumeMock;
+struct ShellSpawnResumeMock {
+    emitted: std::sync::atomic::AtomicBool,
+}
 
 #[async_trait::async_trait]
-impl LlmProvider for SpawnResumeMock {
+impl LlmProvider for ShellSpawnResumeMock {
     fn name(&self) -> &str {
         "mock"
     }
@@ -2679,43 +2695,36 @@ impl LlmProvider for SpawnResumeMock {
         Ok(vec![])
     }
     async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
-        let text = request_text(&request);
-        // (E) resume（決着後の再開ターン）: 親会話に subtask 結果本文が載る → 完了報告 say。
-        if text.contains(SP_RESULT) {
-            return Ok(text_response(SP_REPORT));
-        }
-        // (C) 背景 subtask の sub-run（depth>0・task プロンプト）: 即時に結果を返す（date 相当）。
-        if text.contains(M_SUBTASK_TASK) {
-            return Ok(text_response(SP_RESULT));
-        }
-        // (B) 親ターン#1 の spawn_subtask 実行後（tool_result 有り）: 宣言 say。
+        // (2) dispatch 直後の継続（合成 "spawned" 結果＝tool role）→ 宣言 say（holding）でターンを閉じる。
         if has_tool_role(&request) {
             return Ok(text_response(SP_DECL));
         }
-        // (A) 親ターン#1 の初回: spawn_subtask を呼んで背景 subtask を detach。
-        if text.contains(M_SPAWN) {
+        // (1) 初回（tool role 無し・1 回だけ）→ 実 execute_shell（echo）を呼ぶ＝背景 subtask 化。
+        if !self.emitted.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return Ok(tool_call_response(
-                "spawn_subtask",
-                serde_json::json!({
-                    "task": format!("{M_SUBTASK_TASK} 調べて"),
-                    "timeout_secs": 120,
-                }),
+                "execute_shell",
+                serde_json::json!({ "command": "echo", "args": [SP_ECHO] }),
             ));
         }
-        Ok(text_response("spfiller"))
+        // (3) subtask 決着後の resume ターン（tool role 無し・2 回目以降）→ 完了報告 say。
+        Ok(text_response(SP_REPORT))
     }
 }
 
 #[tokio::test]
 async fn scenario_915_spawned_declaration_no_flag_resume_report_gets_flag() {
     let buf = install_capture();
-    let mock = Arc::new(SpawnResumeMock);
+    let mock = Arc::new(ShellSpawnResumeMock {
+        emitted: std::sync::atomic::AtomicBool::new(false),
+    });
     let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+    // echo を実走させるため shell を有効化（tools_config は Arc<RwLock> 共有で runtime に即反映）。
+    *core.state.tools_config.write().unwrap() = shell_enabled_tools_config();
 
     let fixture = Fixture::new();
     let _client = wire_instance(&core, &fixture).await;
 
-    fixture.append_message("9200", &format!("{M_SPAWN} 調べて終わったら教えて"));
+    fixture.append_message("9200", "SPSHELLMARK 調べて終わったら教えて");
 
     // 宣言 say（SP_DECL）と resume 完了報告 say（SP_REPORT）が両方出るまで待つ。
     let both = {
@@ -2791,17 +2800,16 @@ async fn scenario_915_spawned_declaration_no_flag_resume_report_gets_flag() {
 const CHANNEL_XA: &str = "602";
 const CHANNEL_XB: &str = "603";
 const M_XSPAWN: &str = "XSPAWNMARK";
-const M_XSUBTASK: &str = "XSSUBTASKMARK";
 const M_XPLAIN: &str = "XSPLAINMARK";
 const XS_DECL: &str = "xsdecl-Aの宣言投稿";
 const XS_PLAIN: &str = "xsplain-Bの通常発言";
 
-struct CrossSessionHoldMock {
-    release: Arc<std::sync::atomic::AtomicBool>,
+struct ShellSleepCrossMock {
+    emitted: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait::async_trait]
-impl LlmProvider for CrossSessionHoldMock {
+impl LlmProvider for ShellSleepCrossMock {
     fn name(&self) -> &str {
         "mock"
     }
@@ -2813,29 +2821,21 @@ impl LlmProvider for CrossSessionHoldMock {
     }
     async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
         let text = request_text(&request);
-        // (C) 背景 subtask の sub-run: release されるまで**保留**（進行中を維持）。
-        if text.contains(M_XSUBTASK) {
-            while !self.release.load(std::sync::atomic::Ordering::SeqCst) {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            return Ok(text_response("xs-subtask-done"));
-        }
         // (D) チャンネル B の通常ターン: say を返す。
         if text.contains(M_XPLAIN) {
             return Ok(text_response(XS_PLAIN));
         }
-        // (B) チャンネル A の spawn 後（tool_result 有り）: 宣言 say。
+        // (B) チャンネル A の execute_shell 後（tool_result 有り）: 宣言 say（holding）。
         if has_tool_role(&request) {
             return Ok(text_response(XS_DECL));
         }
-        // (A) チャンネル A の初回: subtask を起こす。
-        if text.contains(M_XSPAWN) {
+        // (A) チャンネル A の初回: 実 execute_shell（sleep＝遅延決着）で背景 subtask を起こし保留。
+        // emitted で 1 回だけ（resume ターンで再発行して無限ループしないため）。
+        if text.contains(M_XSPAWN) && !self.emitted.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
             return Ok(tool_call_response(
-                "spawn_subtask",
-                serde_json::json!({
-                    "task": format!("{M_XSUBTASK} 長い処理"),
-                    "timeout_secs": 120,
-                }),
+                "execute_shell",
+                serde_json::json!({ "command": "sleep", "args": ["3"] }),
             ));
         }
         Ok(text_response("xsfiller"))
@@ -2845,13 +2845,14 @@ impl LlmProvider for CrossSessionHoldMock {
 #[tokio::test]
 async fn scenario_915_other_session_subtask_in_progress_no_flag() {
     let buf = install_capture();
-    let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let mock = Arc::new(CrossSessionHoldMock {
-        release: release.clone(),
+    let mock = Arc::new(ShellSleepCrossMock {
+        emitted: std::sync::atomic::AtomicBool::new(false),
     });
     let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+    // sleep を実走させるため shell を有効化（echo・sleep を許可）。
+    *core.state.tools_config.write().unwrap() = shell_enabled_tools_config();
 
-    // チャンネル A（session A）: subtask を起こして保留。
+    // チャンネル A（session A）: execute_shell(sleep) で subtask を起こして保留。
     let fixture_a = Fixture::new();
     let _client_a = wire_instance_on_channel(&core, &fixture_a, CHANNEL_XA).await;
     // チャンネル B（session B）: 通常ターン。
@@ -2912,9 +2913,7 @@ async fn scenario_915_other_session_subtask_in_progress_no_flag() {
         "🏁 が別 session の subtask 進行中に B の say へ誤付与（agent 単位 idle・§13.3.1）: {:?}",
         captured(&buf)
     );
-
-    // 後片付け: subtask を解放して held ループを終わらせる（タスクリーク回避）。
-    release.store(true, std::sync::atomic::Ordering::SeqCst);
+    // sleep 3 は自然終了するので後片付け不要（B の判定はその窓の中で確定済み）。
 }
 
 // ---------------------------------------------------------------------------
