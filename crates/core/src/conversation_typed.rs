@@ -1053,15 +1053,93 @@ mod tests {
         )));
     }
 
-    // 環境変数だけに存在する秘密値を typed item が暗黙に取り込まないことを固定する。
+    // secret トリップワイヤ（§9.2-4）。
+    //
+    // **これは redaction の検査ではない。** derive_items は arguments/結果を verbatim 保持する
+    // 仕様（症状 B の修正そのもの＝引数を潰さない）で、ログ行に秘密値が書かれていれば derive は
+    // そのまま出す。したがってここが守るのは 1 点だけ:
+    // **derive_items は入力ログ行に無い値（プロセス env・周辺状態）を出力 item に混入させない。**
+    // 秘密が env にだけあり memory_sessions のどの行にも書かれていなければ、typed item にも出ない。
+    //
+    // §9.2-4 の本体「env 注入値が memory_sessions.tool_calls_json に一切書かれない」は tool_call を
+    // 記録する保存層（server/process.rs 等の write 経路）の責務で、derive スコープ外
+    // （PR1 は保存層を変更しないため未検査。保存層トリップワイヤは別 PR で起票する）。
+    //
+    // 恒真化を防ぐため 2 方向で固定する:
+    // - 正の対照: 秘密値を **明示的に埋めた** ログ行では derive が verbatim に出す（＝走査が本当に
+    //   秘密値を検出できることの証明。走査や対照が壊れていればここで落ちる）。
+    // - 本検査: 秘密値をどの行にも入れず（引数は $OC_TEST_SECRET と名前で参照）env だけに置くと、
+    //   arguments・content・Omission・診断のどこにも秘密値は出ない。
     #[test]
-    fn env_injected_secret_never_in_items() {
+    fn env_injected_secret_not_pulled_into_items() {
         const SECRET: &str = "S3CRET-DO-NOT-LEAK-abcdef";
         std::env::set_var("OC_TEST_SECRET", SECRET);
-        let serialized = serde_json::to_string(&derive(&sleep_rows(true)).items).unwrap();
-        let leaked = serialized.contains(SECRET);
+
+        // 正の対照: 秘密値をログ本文へ実際に埋めると、verbatim 保持で必ず出る（走査の健全性）。
+        let planted = derive(&[row(
+            1,
+            "tool_call",
+            Some(AGENT),
+            "execute_shell",
+            Some(tool_calls_metadata(json!([call(
+                "call_planted",
+                "execute_shell",
+                json!({"command": "echo", "args": [SECRET]}),
+            )]))),
+        )]);
+        let planted_json = serde_json::to_string(&planted.items).unwrap();
+        assert!(
+            planted_json.contains(SECRET),
+            "対照: 本文へ埋めた秘密値は verbatim 保持で出るはず（出ないなら走査/対照が壊れている）"
+        );
+
+        // 本検査: どのログ行にも秘密値を入れず、引数は env を名前で参照するだけにする。
+        let clean = derive(&[
+            row(
+                10,
+                "speech",
+                Some(USER),
+                "秘密は $OC_TEST_SECRET を使って",
+                None,
+            ),
+            row(
+                11,
+                "tool_call",
+                Some(AGENT),
+                "execute_shell",
+                Some(tool_calls_metadata(json!([call(
+                    "call_ref",
+                    "execute_shell",
+                    // 値ではなく env 変数名を参照する（設計の正本＝秘密は env 注入のみ）。
+                    json!({"command": "sh", "args": ["-c", "echo $OC_TEST_SECRET"]}),
+                )]))),
+            ),
+            row(
+                12,
+                "tool_result",
+                Some(AGENT),
+                // 大きな read 結果 → Omission。pointer/診断まで走査対象に含める。
+                &json!({
+                    "success": true,
+                    "data": {
+                        "path": "/workspace/report.txt",
+                        "content": "x".repeat(80_000),
+                        "has_more": true,
+                    },
+                })
+                .to_string(),
+                Some(json!({"tool_call_id": "call_ref", "tool_name": "execute_shell"})),
+            ),
+        ]);
+        // arguments・content・Omission の pointer・診断文字列まで、全 item を 1 本の JSON にして走査。
+        let mut scanned = serde_json::to_string(&clean.items).unwrap();
+        scanned.push_str(&serde_json::to_string(&clean.diagnostics).unwrap());
+        let leaked = scanned.contains(SECRET);
         std::env::remove_var("OC_TEST_SECRET");
-        assert!(!leaked);
+        assert!(
+            !leaked,
+            "derive が env/周辺状態から秘密値を取り込んではならない（引数は名前参照のみ）"
+        );
     }
 
     // 大きな read 結果だけを説明文なしの構造化 omission にし、shell stdout は Inline に残す。
