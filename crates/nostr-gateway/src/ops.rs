@@ -61,7 +61,7 @@ pub fn operation_declarations() -> Value {
         ),
         decl(
             "reaction",
-            "イベントにリアクションする。event に会話の e番号、emoji に絵文字（省略可）。結果は返らない（撃ちっぱなし・再開はされない）。複数のリアクションは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。",
+            "イベントにリアクションする。event に会話の e番号、emoji に絵文字（省略可）。結果は返らない（撃ちっぱなし・再開はされない）。複数のリアクションは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。This call returns nothing and you will NOT be invoked again after it. If you need N reactions, put N reaction calls in THIS response.",
             json!({"type": "object", "required": ["event"], "properties": {
                 "event": ref_prop("対象イベントの短縮参照（例 e7）"),
                 "emoji": str_prop("リアクション絵文字（省略時は既定）")
@@ -70,7 +70,7 @@ pub fn operation_declarations() -> Value {
         ),
         decl(
             "reply",
-            "イベントに返信する。event に会話の e番号、text に返信本文。結果は返らない（撃ちっぱなし・再開はされない）。複数の返信は1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。",
+            "イベントに返信する。event に会話の e番号、text に返信本文。結果は返らない（撃ちっぱなし・再開はされない）。複数の返信は1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。This call returns nothing and you will NOT be invoked again after it. If you need N replies, put N reply calls in THIS response.",
             json!({"type": "object", "required": ["event", "text"], "properties": {
                 "event": ref_prop("返信先イベントの短縮参照（例 e7）"),
                 "text": str_prop("返信本文")
@@ -79,7 +79,7 @@ pub fn operation_declarations() -> Value {
         ),
         decl(
             "repost",
-            "イベントをリポストする。event に会話の e番号。結果は返らない（撃ちっぱなし・再開はされない）。複数のリポストは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。",
+            "イベントをリポストする。event に会話の e番号。結果は返らない（撃ちっぱなし・再開はされない）。複数のリポストは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。This call returns nothing and you will NOT be invoked again after it. If you need N reposts, put N repost calls in THIS response.",
             json!({"type": "object", "required": ["event"], "properties": {"event": ref_prop("対象イベントの短縮参照（例 e7）")}}),
             conv("not_exposed", "conversation_bound"),
         ),
@@ -363,6 +363,23 @@ mod tests {
                 .unwrap();
             assert!(description.contains("1回の応答"));
             assert!(description.contains("呼び直す必要はない"));
+            // #913: 強い英文で「結果は返らない・再呼び出しされない」を明示（reply×1 停止対策）。
+            assert!(
+                description.contains(
+                    "This call returns nothing and you will NOT be invoked again after it"
+                ),
+                "#913: {name} 説明文に強い fire-and-forget 英文が無い: {description}"
+            );
         }
+        // #913: reply は「N 件必要なら N 個をこの応答に並べる」を明示。
+        let reply_desc = arr
+            .iter()
+            .find(|d| d["name"] == "reply")
+            .and_then(|d| d["description"].as_str())
+            .unwrap();
+        assert!(
+            reply_desc.contains("put N reply calls in THIS response"),
+            "#913: reply 説明文に N 件並置の指示が無い: {reply_desc}"
+        );
     }
 }
