@@ -389,8 +389,9 @@ pub fn build_agent_context(
          put all the calls in ONE response (for example three `reply` calls) — never send\n\
          one and wait to be re-invoked for the next.\n\
          Plain text in a response is posted as ONE message.\n\
-         To post several plain messages separately, end each response with `CONTINUE` and\n\
-         continue in the next. After a response whose only actions\n\
+         To post several separate plain messages, post the first, end that response with\n\
+         `CONTINUE` on its own line, and post the next in the following response (repeat as\n\
+         needed). Never say you cannot post multiple messages. After a response whose only actions\n\
          are utterances, the turn ends. If you want to keep working after speaking (look\n\
          something up, post more, run a query tool), end that same response with `CONTINUE`\n\
          on its own line — you may place it alongside a reply — and you will be called again\n\
@@ -3153,15 +3154,19 @@ mod no_forced_reply_tests {
             "旧・発話も含む包括的な非同期説明が残っている:\n{prompt}"
         );
 
-        // #909: 平文は 1 応答 = 1 投稿。別々に複数の平文を投稿するなら各応答末尾に CONTINUE。
-        // （reply×N in one response の対。実モデルが CONTINUE を使わず 1 投稿 3 段落で返した対策）。
+        // #909: 平文は 1 応答 = 1 投稿。別々に複数投稿するなら各応答末尾 CONTINUE で次応答へ。
+        // 実モデルが「複数投稿はできない」と明示拒否したため、拒否を打ち消す文（Never say …）も要求。
         assert!(
             prompt.contains("Plain text in a response is posted as ONE message"),
             "平文は 1 応答 = 1 投稿の説明が無い（#909）:\n{prompt}"
         );
         assert!(
-            prompt.contains("To post several plain messages separately"),
-            "別々の平文投稿は各応答末尾 CONTINUE の説明が無い（#909）:\n{prompt}"
+            prompt.contains("To post several separate plain messages"),
+            "別々の平文複数投稿の手順（各応答末尾 CONTINUE で次応答へ）の説明が無い（#909）:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("Never say you cannot post multiple messages"),
+            "「複数投稿はできない」と拒否しない指示が無い（#909・harness で拒否実測）:\n{prompt}"
         );
     }
 }
