@@ -268,6 +268,21 @@ pub fn assemble_from_snapshot(
         .or_else(|| snap.as_ref().map(|s| s.through_log_id))
         .unwrap_or(0);
     let items = items_from_logs(conn, session_id, agent_id, &all)?;
+    if std::env::var("OC_TYPED_SHADOW").is_ok() {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let refs = build_conversation_refs(conn, &all, agent_id);
+            let completed = completed_tool_call_ids(&all);
+            let derived =
+                crate::conversation_typed::derive_items(&all, &refs, &completed, agent_id);
+            tracing::debug!(
+                session_id,
+                typed_items = derived.diagnostics.item_count,
+                unpaired = derived.diagnostics.unpaired_call_count,
+                opaque = derived.diagnostics.opaque_event_count,
+                "typed shadow (OC_TYPED_SHADOW)"
+            );
+        }));
+    }
     Ok(AssembledConversation {
         text,
         tokens: ledger.total(),
