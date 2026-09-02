@@ -1007,26 +1007,17 @@ fn enqueue_turn<R: AgentRuntime>(
                         // も含む）。agent-scope は本 session の subtask も内包するので session-scope の
                         // 上位互換。1 つでも走行中なら idle でない＝completed_target を送らない。
                         let agent_has_running = runtime.has_running_subtask_for_agent(&agent_id);
-                        let completed_target = if started_subtask || agent_has_running {
-                            None
-                        } else {
-                            engine_completion.and_then(
-                                |(last_reply, stopped_by_limit, final_had_speech)| {
-                                    if stopped_by_limit {
-                                        if final_had_speech {
-                                            last_continuation_say
-                                                .lock()
-                                                .expect("continuation say id lock")
-                                                .clone()
-                                        } else {
-                                            last_reply
-                                        }
-                                    } else {
-                                        final_say_id.or(last_reply)
-                                    }
-                                },
-                            )
-                        };
+                        // 選定規則（§13.3.5）は resume ターンと共通なので共有ヘルパへ集約（単一実装）。
+                        let completed_target = crate::completion::select_completed_target(
+                            engine_completion,
+                            started_subtask,
+                            agent_has_running,
+                            final_say_id,
+                            last_continuation_say
+                                .lock()
+                                .expect("continuation say id lock")
+                                .clone(),
+                        );
                         // 決着（say/reply/no_reply）の配送**後**に activity ended を出す（統括裁定A
                         // 2026-08-31）。これで say フレームが ended より先に gateway へ届き、返信ターンは
                         // saw_say=true になってから ended を見るので、gate-client の CompletedNoReply が

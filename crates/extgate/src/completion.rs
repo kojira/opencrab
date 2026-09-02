@@ -19,6 +19,39 @@ use crate::registry::ExtgateState;
 /// `session_id_for_binding` と同じ接頭辞。`dispatch_settled` が親セッション判定に使う。
 pub const EXTGATE_SESSION_PREFIX: &str = "extgate-";
 
+/// #915 §13.3.5: activity ended に載せる `completed_target`（🏁 の付け先＝最終生成の最後の投稿の
+/// 発話 id）を選ぶ。通常ターン（`inbound::enqueue_turn`）と resume ターン（`resume_v3_turn`）で
+/// 規則は共通なので 1 実装に集約する（単一実装）。**送る＝🏁 を付ける／`None`＝付けない**。
+///
+/// - `engine_completion`: `(最終生成の最後の投稿系 utterance-op の call_id, stopped_by_limit,
+///   最終生成が CONTINUE 本文を配送したか)`。engine を回さなかったターンは `None`。
+/// - `started_subtask` / `agent_has_running`: 進行中があれば付けない（idle でない・§13.3.1 案E）。
+/// - `final_say_id`: 最終応答が say を配送したときのその delivery_id。
+/// - `last_continuation_say`: 上限打ち切りで最終生成が CONTINUE 本文を配送したとき、その say の
+///   delivery_id（呼び出し側が Mutex から解決して渡す）。
+pub(crate) fn select_completed_target(
+    engine_completion: Option<(Option<String>, bool, bool)>,
+    started_subtask: bool,
+    agent_has_running: bool,
+    final_say_id: Option<String>,
+    last_continuation_say: Option<String>,
+) -> Option<String> {
+    if started_subtask || agent_has_running {
+        return None;
+    }
+    engine_completion.and_then(|(last_reply, stopped_by_limit, final_had_speech)| {
+        if stopped_by_limit {
+            if final_had_speech {
+                last_continuation_say
+            } else {
+                last_reply
+            }
+        } else {
+            final_say_id.or(last_reply)
+        }
+    })
+}
+
 /// V3 の `RunRequest` に既存の `with_dispatch` を常時付ける。ノブ分岐は置かない。
 ///
 /// `process.rs` の `auto_dispatch` は触らない（撤去は別 PR）。sink が無いと
@@ -252,24 +285,16 @@ async fn resume_v3_turn<R: AgentRuntime>(sink: ExtgateCompletionSink<R>, ev: Sub
             let started_subtask = subtask_starts.load(std::sync::atomic::Ordering::SeqCst) > 0;
             // §13.3.1 案E: 進行中判定は agent 単位（別 session の未決着 subtask も含む）。
             let agent_has_running = sink.runtime.has_running_subtask_for_agent(&sink.agent_id);
-            let completed_target = if started_subtask || agent_has_running {
-                None
-            } else {
-                engine_completion.and_then(|(last_reply, stopped_by_limit, final_had_speech)| {
-                    if stopped_by_limit {
-                        if final_had_speech {
-                            last_continuation_say
-                                .lock()
-                                .expect("continuation say id lock")
-                                .clone()
-                        } else {
-                            last_reply
-                        }
-                    } else {
-                        final_say_id.or(last_reply)
-                    }
-                })
-            };
+            let completed_target = select_completed_target(
+                engine_completion,
+                started_subtask,
+                agent_has_running,
+                final_say_id,
+                last_continuation_say
+                    .lock()
+                    .expect("continuation say id lock")
+                    .clone(),
+            );
             emit_activity(
                 &sink.state,
                 &sink.instance_id,
