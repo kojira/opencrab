@@ -17,6 +17,9 @@ pub struct AppConfig {
     pub agent: AgentConfig,
     #[serde(default)]
     pub llm: LlmConfig,
+    /// #884 PR2: 構造化会話（typed history 送信）。既定 off。QC 環境で on。
+    #[serde(default)]
+    pub conversation: ConversationConfig,
     #[serde(default)]
     pub gateway: GatewayConfig,
     #[serde(default)]
@@ -58,6 +61,26 @@ pub struct AppConfig {
     /// External gate V3 UDS listen path。空・欠落は listen しない。
     #[serde(default)]
     pub gate: GateConfig,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ConversationConfig {
+    /// typed history 送信経路を有効化（既定 false）。
+    #[serde(default)]
+    pub typed_history: bool,
+    /// typed 経路で RESPONSE_ONLY_DIRECTIVE を外す（既定 false=付けたまま）。§9.2-6。
+    #[serde(default)]
+    pub drop_response_directive: bool,
+}
+
+#[allow(clippy::derivable_impls)]
+impl Default for ConversationConfig {
+    fn default() -> Self {
+        Self {
+            typed_history: false,
+            drop_response_directive: false,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -1954,6 +1977,23 @@ agent-b = "1"
         assert_eq!(config.database.path, "data/opencrab.db");
         assert_eq!(config.gateway.rest.port, 8080);
         assert_eq!(config.llm.default_provider, "openai");
+    }
+
+    #[test]
+    fn conversation_config_typed_history_defaults_off_and_parses_enabled() {
+        let default: AppConfig = toml::from_str("").expect("empty config must parse");
+        assert!(!default.conversation.typed_history);
+        assert!(!default.conversation.drop_response_directive);
+
+        let enabled: AppConfig = toml::from_str(
+            r#"
+[conversation]
+typed_history = true
+"#,
+        )
+        .expect("conversation config must parse");
+        assert!(enabled.conversation.typed_history);
+        assert!(!enabled.conversation.drop_response_directive);
     }
 
     /// Regression guard for #149: shipping `config/default.toml` must keep the

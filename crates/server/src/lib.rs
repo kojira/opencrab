@@ -115,6 +115,10 @@ pub struct AppState {
     pub tools_config: Arc<RwLock<opencrab_actions::tools::ToolsConfig>>,
     /// コンパクション比率: context_window のうち会話履歴に使う割合 (0.0-1.0, デフォルト 0.5)。
     pub compaction_ratio: f64,
+    /// #884 PR2: typed history 送信を有効化（config `[conversation] typed_history`）。
+    pub typed_history_enabled: bool,
+    /// #884 PR2: typed 経路で RESPONSE_ONLY_DIRECTIVE を外す（config `[conversation] drop_response_directive`）。
+    pub typed_history_drop_directive: bool,
     /// evaluator（契約に対する独立 rubric 評価）の設定。
     /// #291 で対話ターンからの呼び出しを撤去したため現在は未参照。
     /// スリープ側へ評価を移す配線（別 issue）で使う。
@@ -328,6 +332,8 @@ pub(crate) fn test_app_state() -> AppState {
         default_model: "mock:test".to_string(),
         tools_config: Arc::new(RwLock::new(opencrab_actions::tools::ToolsConfig::default())),
         compaction_ratio: 0.5,
+        typed_history_enabled: false,
+        typed_history_drop_directive: false,
         evaluator: config::EvaluatorConfig::default(),
         skill_consolidation: config::SkillConsolidationConfig::default(),
         category_maintenance: config::CategoryMaintenanceConfig::default(),
