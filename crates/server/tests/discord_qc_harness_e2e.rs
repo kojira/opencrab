@@ -2256,6 +2256,303 @@ async fn scenario_915_reply3_flag_on_last_reply() {
 }
 
 // ---------------------------------------------------------------------------
+// #915 / §13.3.6 row 14【reply×N + NO_REPLY（同一生成）→ 最後の reply に 1】: 1 生成で reply を 2 本
+// ＋本文 NO_REPLY。reply は配送され、最終応答は NO_REPLY（say なし）。🏁 は最後の reply の reply_id
+// に 1・他 0・総数 1。発話ありなので 🤐 0。reply は invoke 経路で現 tip は 🏁 0 → **赤**。
+// ---------------------------------------------------------------------------
+const RNR_1: &str = "rnr-返信1";
+const RNR_2: &str = "rnr-返信2（最後）";
+
+struct Reply2ThenNoReplyMock;
+
+#[async_trait::async_trait]
+impl LlmProvider for Reply2ThenNoReplyMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let mut resp = tool_calls_response(vec![
+            ("reply", serde_json::json!({"event": "e1", "text": RNR_1})),
+            ("reply", serde_json::json!({"event": "e1", "text": RNR_2})),
+        ]);
+        resp.choices[0].message.content = Some(MessageContent::Text("NO_REPLY".to_string()));
+        Ok(resp)
+    }
+}
+
+#[tokio::test]
+async fn scenario_915_reply2_then_no_reply_flag_on_last_reply() {
+    let buf = install_capture();
+    let mock = Arc::new(Reply2ThenNoReplyMock);
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    fixture.append_message("9180", "RNRMARK 2 本返信して最後は黙る");
+
+    let delivered = {
+        let buf = buf.clone();
+        wait_until(move || {
+            [RNR_1, RNR_2].iter().all(|b| {
+                captured(&buf)
+                    .iter()
+                    .any(|c| c.kind == "reply" && c.body.contains(b) && !c.reply_id.is_empty())
+            })
+        })
+        .await
+    };
+    assert!(delivered, "reply×2 が配送されない: {:?}", captured(&buf));
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let reply_id_of = |body: &str| -> Option<String> {
+        captured(&buf)
+            .iter()
+            .find(|c| c.kind == "reply" && c.body.contains(body))
+            .map(|c| c.reply_id.clone())
+            .filter(|m| !m.is_empty())
+    };
+    let last_id = reply_id_of(RNR_2).expect("最後の reply の reply_id");
+    let first_id = reply_id_of(RNR_1).expect("1 本目 reply の reply_id");
+    let completed_on = |id: &str| -> usize {
+        captured(&buf)
+            .iter()
+            .filter(|c| {
+                c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == id
+            })
+            .count()
+    };
+    assert_eq!(
+        completed_on(&last_id),
+        1,
+        "🏁 が最後の reply に 1 件で付かない（§13.3.6 row 14・現 tip は reply に 🏁 0）: {:?}",
+        captured(&buf)
+    );
+    assert_eq!(
+        completed_on(&first_id),
+        0,
+        "🏁 が 1 本目の reply に誤付与: {:?}",
+        captured(&buf)
+    );
+    // 発話（reply）ありなので発端 9180 に 🤐 は付かない。
+    let muted = captured(&buf)
+        .iter()
+        .filter(|c| c.kind == "system_reaction" && c.emoji.contains("🤐") && c.message == "9180")
+        .count();
+    assert_eq!(
+        muted,
+        0,
+        "reply ありターンに 🤐 が誤付与: {:?}",
+        captured(&buf)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #915 / §13.3.6 row 12【本文 + 末尾 NO_REPLY → 最終 say に 1】: 本文は配送され（NO_REPLY 以降は破棄）、
+// 最終生成の投稿＝その say。🏁 はその say に 1。現 tip も say に付く（回帰ガード）。
+// ---------------------------------------------------------------------------
+// 本文中に "NO_REPLY"/"CONTINUE" の部分文字列を含めない（サニタイザに途中で切られないため）。
+const BNR_SAY: &str = "bnrsay-末尾マーカーで黙る本文だよ";
+
+struct BodyThenTrailingNoReplyMock;
+
+#[async_trait::async_trait]
+impl LlmProvider for BodyThenTrailingNoReplyMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        Ok(text_response(&format!("{BNR_SAY}\nNO_REPLY")))
+    }
+}
+
+#[tokio::test]
+async fn scenario_915_body_then_trailing_no_reply_flag_on_say() {
+    let buf = install_capture();
+    let mock = Arc::new(BodyThenTrailingNoReplyMock);
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    fixture.append_message("9181", "BNRMARK 本文を出して末尾で黙る");
+
+    let say_completed = {
+        let buf = buf.clone();
+        wait_until(move || {
+            let mid = captured(&buf)
+                .iter()
+                .find(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(BNR_SAY))
+                .map(|c| c.message.clone())
+                .filter(|m| !m.is_empty());
+            match mid {
+                Some(mid) => captured(&buf).iter().any(|c| {
+                    c.kind == "system_reaction"
+                        && c.emoji.contains(SYS_COMPLETED)
+                        && c.message == mid
+                }),
+                None => false,
+            }
+        })
+        .await
+    };
+    assert!(
+        say_completed,
+        "本文 say＋🏁 が観測できない（本文が配送されないか 🏁 が付かない）: {:?}",
+        captured(&buf)
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let say_mid = captured(&buf)
+        .iter()
+        .find(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(BNR_SAY))
+        .map(|c| c.message.clone())
+        .filter(|m| !m.is_empty())
+        .expect("BNR_SAY say の message id");
+    let completed = captured(&buf)
+        .iter()
+        .filter(|c| {
+            c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == say_mid
+        })
+        .count();
+    assert_eq!(
+        completed,
+        1,
+        "🏁 が本文 say に 1 件で付かない（§13.3.6 row 12）: {:?}",
+        captured(&buf)
+    );
+    // 本文に NO_REPLY マーカーが残らない（回帰）。
+    assert!(
+        !captured(&buf)
+            .iter()
+            .any(|c| c.kind == "say" && c.body.contains("NO_REPLY")),
+        "say 本文に NO_REPLY が残留: {:?}",
+        captured(&buf)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #915 / §13.3.6 row 7【reply×N + 本文（同一生成）→ 到着順で最後の投稿に 1】: 1 生成で reply×2＋本文。
+// reply は invoke で先に配送、本文 say は最終応答として後に配送＝到着順で最後は say。🏁 はその say に
+// 1・reply には 0。現 tip も say に付く（回帰ガード）。
+// ---------------------------------------------------------------------------
+const R7_1: &str = "r7-返信1";
+const R7_2: &str = "r7-返信2";
+const R7_SAY: &str = "r7say-本文（到着順で最後）";
+
+struct Reply2PlusBodyMock;
+
+#[async_trait::async_trait]
+impl LlmProvider for Reply2PlusBodyMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let mut resp = tool_calls_response(vec![
+            ("reply", serde_json::json!({"event": "e1", "text": R7_1})),
+            ("reply", serde_json::json!({"event": "e1", "text": R7_2})),
+        ]);
+        resp.choices[0].message.content = Some(MessageContent::Text(R7_SAY.to_string()));
+        Ok(resp)
+    }
+}
+
+#[tokio::test]
+async fn scenario_915_reply2_plus_body_flag_on_last_post_say() {
+    let buf = install_capture();
+    let mock = Arc::new(Reply2PlusBodyMock);
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let _client = wire_instance(&core, &fixture).await;
+
+    fixture.append_message("9182", "R7MARK 2 本返信して本文も出して");
+
+    let say_completed = {
+        let buf = buf.clone();
+        wait_until(move || {
+            let mid = captured(&buf)
+                .iter()
+                .find(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(R7_SAY))
+                .map(|c| c.message.clone())
+                .filter(|m| !m.is_empty());
+            match mid {
+                Some(mid) => captured(&buf).iter().any(|c| {
+                    c.kind == "system_reaction"
+                        && c.emoji.contains(SYS_COMPLETED)
+                        && c.message == mid
+                }),
+                None => false,
+            }
+        })
+        .await
+    };
+    assert!(
+        say_completed,
+        "本文 say＋🏁 が観測できない: {:?}",
+        captured(&buf)
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let say_mid = captured(&buf)
+        .iter()
+        .find(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(R7_SAY))
+        .map(|c| c.message.clone())
+        .filter(|m| !m.is_empty())
+        .expect("R7_SAY say の message id");
+    let completed_on_say = captured(&buf)
+        .iter()
+        .filter(|c| {
+            c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == say_mid
+        })
+        .count();
+    assert_eq!(
+        completed_on_say,
+        1,
+        "🏁 が到着順で最後の投稿（say）に 1 件で付かない（§13.3.6 row 7）: {:?}",
+        captured(&buf)
+    );
+    // reply には 🏁 は付かない（最後の投稿は say）。
+    let reply_id_2 = captured(&buf)
+        .iter()
+        .find(|c| c.kind == "reply" && c.body.contains(R7_2))
+        .map(|c| c.reply_id.clone())
+        .filter(|m| !m.is_empty());
+    if let Some(rid) = reply_id_2 {
+        let on_reply = captured(&buf)
+            .iter()
+            .filter(|c| {
+                c.kind == "system_reaction" && c.emoji.contains(SYS_COMPLETED) && c.message == rid
+            })
+            .count();
+        assert_eq!(
+            on_reply,
+            0,
+            "🏁 が reply に誤付与（最後の投稿は say のはず）: {:?}",
+            captured(&buf)
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // #915 typing【最終投稿後の入力中停止】: 発話ターンで activity ended を受けたら typing keepalive
 // が止まり、失効間隔（8 秒）を跨いでも typing の再送出が 0 であることを観測境界（dry-run
 // kind="typing" のキャプチャ増分）で確定する。単一スレッド実行なので、この待機中に typing が
