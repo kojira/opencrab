@@ -43,7 +43,6 @@ pub fn visible_speech_after_markers(raw: &str, ctx: DeliveryContext<'_>) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::no_reply::NO_REPLY_SENTINEL;
 
     fn ctx() -> DeliveryContext<'static> {
         DeliveryContext {
@@ -51,16 +50,6 @@ mod tests {
             agent_id: "a1",
             origin: "test",
         }
-    }
-
-    /// core 側のミラー定数が actions の正本と一致すること（複製ドリフト防止）。
-    #[test]
-    fn no_reply_sentinel_mirror_matches() {
-        assert_eq!(
-            opencrab_core::continue_marker::NO_REPLY_SENTINEL,
-            NO_REPLY_SENTINEL,
-            "core の NO_REPLY ミラーは actions の正本と一致しなければならない"
-        );
     }
 
     /// 配送点 session_inbound 相当: 最終行 CONTINUE 単独を剥がして本文だけ配送する。

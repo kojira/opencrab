@@ -6,13 +6,14 @@
 //! 配送・保存する。同一行に他の文字がある `CONTINUE`（例「…です CONTINUE」）や途中出現は
 //! 継続マーカーではない（剥がさず本文に残し、配送層が WARN を残す）。
 //!
-//! ## 配置（§11.5 との差分・要レビュー）
-//! 設計 §11.5 は `no_reply.rs`（`crates/actions`）の隣を指示するが、継続を判定する engine は
-//! `crates/core` にあり core は actions に依存できない（依存は `actions → core` の一方向）。両者
-//! から使える最下層 `crates/core` に単一実装として置く。3 配送点（`session_inbound` / discord /
-//! nostr）はいずれも core に依存するので `opencrab_core::strip_trailing_continue` を共有する。
-//! `NO_REPLY` の実体は `opencrab_actions::NO_REPLY_SENTINEL` にあるが core からは参照できない
-//! ため、優先判定用に [`NO_REPLY_SENTINEL`] へ複製する（一致は actions 側テストで固定）。
+//! ## 配置（§11.5 レビュー裁定・core へ一元化）
+//! 継続を判定する engine は `crates/core` にあり core は actions に依存できない（依存は
+//! `actions → core` の一方向）。よって両者から使える最下層 `crates/core` に単一実装として
+//! 置く（設計 §11.5 の「no_reply.rs の隣」は core へ改定）。3 配送点（`session_inbound` /
+//! discord / nostr）はいずれも core に依存するので `opencrab_core::strip_trailing_continue`
+//! を共有する。NO_REPLY 優先（§11.1）の判定に要る [`NO_REPLY_SENTINEL`] も含め、NO_REPLY /
+//! CONTINUE の両センチネルは core が一元管理する。`opencrab_actions::NO_REPLY_SENTINEL` は
+//! ここを re-export する（複製定数は撤去した）。
 
 /// 「このターンを続ける」継続センチネル。最終行がこれ単独なら次イテレーションへ進む。
 pub const CONTINUE_SENTINEL: &str = "CONTINUE";
@@ -20,10 +21,10 @@ pub const CONTINUE_SENTINEL: &str = "CONTINUE";
 /// 継続マーカーログの tracing target。
 pub const CONTINUE_LOG_TARGET: &str = "opencrab::continue_marker";
 
-/// `NO_REPLY` センチネルのミラー（`opencrab_actions::NO_REPLY_SENTINEL` の複製）。
+/// プロジェクト全体の「読んで黙る」センチネル（正本・core が一元管理）。
 ///
-/// core は actions に依存できないため NO_REPLY 優先（§11.1）の判定用にここへ複製する。
-/// 両者の値が一致することは `opencrab_actions` 側の consistency テストで固定する。
+/// `opencrab_actions::NO_REPLY_SENTINEL` はこの定数を re-export する。engine の NO_REPLY 優先
+/// （§11.1）判定と、配送層の `terminate_at_no_reply` が同じ実体を参照する。
 pub const NO_REPLY_SENTINEL: &str = "NO_REPLY";
 
 /// content の**最終行が `CONTINUE` 単独**なら、その行を除いた本文（末尾空白除去）を返す（＝継続）。

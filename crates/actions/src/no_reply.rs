@@ -17,7 +17,10 @@
 //! すべて [`terminate_at_no_reply`] を通す。
 
 /// プロジェクト全体の「読んで黙る」センチネル。下流はこの終端解釈で判定する。
-pub const NO_REPLY_SENTINEL: &str = "NO_REPLY";
+///
+/// 正本は `opencrab_core`（継続を判定する engine が core にあり、NO_REPLY / CONTINUE の両
+/// センチネルを core が一元管理する・#890 §11.5 レビュー裁定）。ここは互換のため re-export。
+pub use opencrab_core::continue_marker::NO_REPLY_SENTINEL;
 
 /// 破棄ログの固定タグ（`grep -c` で頻度集計できるよう 1 語不変・§3.1.1(b)）。
 pub const NO_REPLY_TRAILING_DISCARDED_TAG: &str = "no_reply_trailing_discarded";
