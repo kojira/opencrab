@@ -3005,16 +3005,16 @@ async fn hello_with_ops(
     read_frame(s).await
 }
 
-/// hello + operations が受理され、instance に digest が永続する（§3.3/DI-04）。
+/// hello + operations が受理される。digest の永続化は撤去したので DB 列は NULL のまま（#894）。
 #[tokio::test]
-async fn di_hello_operations_accepted_and_digest_persisted() {
+async fn di_hello_operations_accepted_and_digest_not_persisted() {
     let h = Harness::start().await;
     let instance_id = uuid();
     put_instance(&h, &instance_id, true).await;
     let mut s = h.connect().await;
     let ok = hello_with_ops(&mut s, &instance_id, 1, &ops_reply()).await;
     assert_eq!(ok["m"], "ok", "operations つき hello が受理される");
-    // digest が gate_instances に永続している。
+    // digest は永続しない（照合撤去・#894）。列は残るが書かないので NULL のまま。
     let digest: Option<String> = h
         .state
         .db
@@ -3027,25 +3027,27 @@ async fn di_hello_operations_accepted_and_digest_persisted() {
         )
         .unwrap();
     assert!(
-        digest.is_some_and(|d| d.len() == 64),
-        "宣言 digest が永続する"
+        digest.is_none(),
+        "宣言 digest を永続してはいけない: {digest:?}"
     );
 }
 
-/// 同一 revision で宣言 digest が変わった再接続は operation_declaration_mismatch（DI-04）。
+/// 同一 revision で宣言（op 名・class）が変わった再接続も受理される。永続 digest の照合を
+/// 撤去したため mismatch にならない（#894）。core は hello ごとに宣言を fresh parse する。
 #[tokio::test]
-async fn di_hello_operations_digest_mismatch_on_reconnect() {
+async fn di_hello_operations_change_accepted_on_reconnect() {
     let h = Harness::start().await;
     let instance_id = uuid();
     put_instance(&h, &instance_id, true).await;
-    // 初回 hello で digest 確立。
+    // 初回 hello（reply 宣言）。
     let mut s1 = h.connect().await;
     assert_eq!(
         hello_with_ops(&mut s1, &instance_id, 1, &ops_reply()).await["m"],
         "ok"
     );
     drop(s1);
-    // 別宣言（reaction 1 件）で同一 revision に再接続 → mismatch + close。
+    wait_not_live(&h, &instance_id).await;
+    // 別宣言（op 名も class も違う）で同一 revision に再接続 → 受理される（mismatch なし）。
     let other = json!([{
         "name": "reaction", "description": "d",
         "input_schema": {"type": "object"}, "output_schema": null, "callback_schema": null,
@@ -3053,8 +3055,19 @@ async fn di_hello_operations_digest_mismatch_on_reconnect() {
     }]);
     let mut s2 = h.connect().await;
     let resp = hello_with_ops(&mut s2, &instance_id, 1, &other).await;
-    assert_eq!(resp["m"], "err");
-    assert_eq!(resp["code"], "operation_declaration_mismatch");
+    assert_eq!(resp["m"], "ok", "宣言変更の再接続が拒否された: {resp}");
+    // 新宣言（reaction）が live snapshot に反映されている。
+    let name = {
+        let reg = h.state.lock_registry().unwrap();
+        let e = reg.get(&instance_id).expect("再接続後に live でない");
+        e.declarations.first().map(|d| d.name.clone())
+    };
+    assert_eq!(
+        name.as_deref(),
+        Some("reaction"),
+        "新宣言が反映されていない"
+    );
+    drop(s2);
 }
 
 /// 不正な宣言（非 sort）は operation_declaration_invalid + close（DI-22）。
