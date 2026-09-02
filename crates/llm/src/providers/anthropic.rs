@@ -787,6 +787,32 @@ mod tests {
         assert!(!messages.iter().any(contains_log_marker));
     }
 
+    #[test]
+    fn test_message_name_not_emitted_on_wire() {
+        // #892 回帰固定: anthropic wire は message の `name` を出さない
+        // （anthropic API に name フィールドは無い）。話者は本文へ埋め込む。
+        let provider = AnthropicProvider::new("k");
+        let mut user = Message::user("終わった？");
+        user.name = Some("owner".to_string());
+        let request =
+            ChatRequest::new("claude-x", vec![Message::system("sys"), user]).with_max_tokens(100);
+
+        let body = provider
+            .build_request_body(&request)
+            .expect("valid request builds a body");
+        let messages = body["messages"]
+            .as_array()
+            .expect("messages must be an array");
+
+        assert_eq!(messages.len(), 1, "system は messages から除かれる");
+        assert_eq!(messages[0]["role"], serde_json::json!("user"));
+        assert!(
+            messages[0].get("name").is_none(),
+            "anthropic wire message に name キーを出さない: {}",
+            messages[0]
+        );
+    }
+
     /// #884 PR2 並列呼び出し: 同一生成の並列 ToolCall（1 assistant に tool_calls×2）は
     /// anthropic wire で `tool_use`×2 を 1 つの assistant message へ入れ、対応する連続
     /// Role::Tool は `tool_result`×2 を 1 つの user message へ併合する（tool_use の
