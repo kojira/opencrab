@@ -1006,8 +1006,7 @@ fn enqueue_turn<R: AgentRuntime>(
                         // §13.3.1 案E: 進行中判定は**エージェント単位**（別 session の未決着 subtask
                         // も含む）。agent-scope は本 session の subtask も内包するので session-scope の
                         // 上位互換。1 つでも走行中なら idle でない＝completed_target を送らない。
-                        let agent_has_running =
-                            runtime.has_running_subtask_for_agent(&agent_id);
+                        let agent_has_running = runtime.has_running_subtask_for_agent(&agent_id);
                         let completed_target = if started_subtask || agent_has_running {
                             None
                         } else {

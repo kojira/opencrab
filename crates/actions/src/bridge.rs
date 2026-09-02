@@ -812,9 +812,7 @@ impl BridgedExecutor {
             // アクションが、引数省略時のフォールバックとして読む。
             reply_target: self.reply_target.clone(),
             // #915: engine の tool_call.id を発話 op invoke の call_id へ伝播する。
-            tool_call_id: tool_call_id
-                .filter(|s| !s.is_empty())
-                .map(str::to_string),
+            tool_call_id: tool_call_id.filter(|s| !s.is_empty()).map(str::to_string),
         }
     }
 
