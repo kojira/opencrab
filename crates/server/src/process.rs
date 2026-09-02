@@ -387,7 +387,10 @@ pub fn build_agent_context(
          Utterances (say / reply / reaction / repost) are fire-and-forget: they do NOT\n\
          return a result and you are NOT called again for them. To post several messages,\n\
          put all the calls in ONE response (for example three `reply` calls) — never send\n\
-         one and wait to be re-invoked for the next. After a response whose only actions\n\
+         one and wait to be re-invoked for the next.\n\
+         Plain text in a response is posted as ONE message.\n\
+         To post several plain messages separately, end each response with `CONTINUE` and\n\
+         continue in the next. After a response whose only actions\n\
          are utterances, the turn ends. If you want to keep working after speaking (look\n\
          something up, post more, run a query tool), end that same response with `CONTINUE`\n\
          on its own line — you may place it alongside a reply — and you will be called again\n\
@@ -3148,6 +3151,17 @@ mod no_forced_reply_tests {
         assert!(
             !prompt.contains("When you call a tool, the result arrives later"),
             "旧・発話も含む包括的な非同期説明が残っている:\n{prompt}"
+        );
+
+        // #909: 平文は 1 応答 = 1 投稿。別々に複数の平文を投稿するなら各応答末尾に CONTINUE。
+        // （reply×N in one response の対。実モデルが CONTINUE を使わず 1 投稿 3 段落で返した対策）。
+        assert!(
+            prompt.contains("Plain text in a response is posted as ONE message"),
+            "平文は 1 応答 = 1 投稿の説明が無い（#909）:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("To post several plain messages separately"),
+            "別々の平文投稿は各応答末尾 CONTINUE の説明が無い（#909）:\n{prompt}"
         );
     }
 }
