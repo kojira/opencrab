@@ -369,4 +369,72 @@ mod tests {
         assert!(matches!(out, TransportOutcome::Rejected));
         assert_eq!(rec.bodies().len(), 2, "途中失敗で以降のチャンクは送らない");
     }
+
+    /// DESIGN-PROMPT-INVENTORY-2026-09-03 §1-4 受け入れ（TDD・赤先行）。
+    ///
+    /// 発話 op（reaction / reply）の説明文を「命令・強英文」から「事実（何が起こるか）」へ
+    /// 書換（§2B B4/B5 統合・§3.7）。観測境界は `operation_declarations()` の各 description
+    /// （ops_projection.rs:158 が verbatim 投影する実体）。旧命令断片は count==0、書換後の
+    /// 全文と一致で pin する。現 tip（9a6af850）では旧強英文が残るため **赤**。
+    ///
+    /// 期待文字列の導出: §3.7 は nostr reply のみ逐語。ここは §2B「同型」規則で機械導出した
+    /// （B1 維持＋固定 merge 文＋op 別 fact 文）。test-review で設計意図との一致を確認する。
+    #[test]
+    fn utterance_descriptions_are_factual_rewrite_red() {
+        let decls = operation_declarations();
+        let arr = decls.as_array().unwrap();
+        let desc = |name: &str| -> String {
+            arr.iter()
+                .find(|d| d["name"] == name)
+                .and_then(|d| d["description"].as_str())
+                .unwrap_or_else(|| panic!("op が無い: {name}"))
+                .to_string()
+        };
+
+        // 旧命令・強英文・旧 JP B3 は 0 件（否定側・count）。
+        for name in ["reaction", "reply"] {
+            let d = desc(name);
+            for frag in [
+                "This call returns nothing and you will NOT be invoked again after it",
+                "you will NOT be invoked again",
+                "結果は返らない（撃ちっぱなし・再開はされない）",
+                "1回の応答",
+                "呼び直す必要はない",
+            ] {
+                assert_eq!(
+                    d.matches(frag).count(),
+                    0,
+                    "{name}: 旧命令/強英文が残存: {frag:?}\n{d}"
+                );
+            }
+        }
+        assert_eq!(
+            desc("reaction")
+                .matches("put N reaction calls in THIS response")
+                .count(),
+            0,
+            "reaction: 旧 N 件並置命令が残存\n{}",
+            desc("reaction")
+        );
+        assert_eq!(
+            desc("reply")
+                .matches("put N reply calls in THIS response")
+                .count(),
+            0,
+            "reply: 旧 N 件並置命令が残存\n{}",
+            desc("reply")
+        );
+
+        // 書換後の全文と一致（§2B 新文・事実形）。
+        assert_eq!(
+            desc("reaction"),
+            "会話の e番号のメッセージに絵文字リアクションを付ける。event に e番号、emoji に絵文字。結果は返らず、この呼び出しの後に再度呼び出されることはない（撃ちっぱなし・再開なし）。N 件のリアクションが必要なら、この 1 応答に N 個の reaction 呼び出しを置く。",
+            "reaction 説明文が §2B 新文と一致しない"
+        );
+        assert_eq!(
+            desc("reply"),
+            "会話の e番号のメッセージに返信する。event に e番号、text に返信本文。結果は返らず、この呼び出しの後に再度呼び出されることはない（撃ちっぱなし・再開なし）。N 件の返信が必要なら、この 1 応答に N 個の reply 呼び出しを置く。",
+            "reply 説明文が §2B 新文と一致しない"
+        );
+    }
 }

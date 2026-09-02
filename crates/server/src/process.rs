@@ -3171,6 +3171,232 @@ mod no_forced_reply_tests {
     }
 }
 
+/// DESIGN-PROMPT-INVENTORY-2026-09-03 §1 受け入れテスト（TDD・赤先行）。
+///
+/// 観測境界は `build_agent_context` が返す system prompt 文字列そのもの。
+/// 「行動指示・禁止（〜するな）」を撤去し「事実（何が起こるか）」に書き換える（DIRECTION-LOG
+/// row 438/440・オーナー裁定 §6）。撤去文は count==0、書換後の事実文は存在で pin する。
+/// 各書換は「旧命令 count==0（否定側）」と「新事実文の存在」を対にする。
+///
+/// 現 tip（9a6af850）では撤去対象の命令文が prompt に残っているため、これらの assert は
+/// **赤**になる（撤去 count==0 が失敗・新事実文の存在も失敗）。実装（§3）で緑化する。
+/// 既存の原文依存 assert（system_prompt_explains_continue_marker 等・§5）はこの赤 commit
+/// では触らない（実装 commit で新文へ更新する）。
+#[cfg(test)]
+mod prompt_inventory_red_tests {
+    use super::build_agent_context;
+
+    fn prompt() -> String {
+        let conn = opencrab_db::init_memory().unwrap();
+        let (p, _name) = build_agent_context(&conn, "a1", &opencrab_actions::CallerIdentity::Owner);
+        p
+    }
+
+    /// 空白（改行・連続空白）を 1 個の半角スペースへ畳み、前後を trim する。
+    /// house style の `\n\`（行末で literal 改行）や字下げの差を吸収して節単位で比較するため。
+    fn normalize_ws(s: &str) -> String {
+        s.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// `heading`（"## X"）から次の "## " 見出し直前までを節として切り出す。
+    fn extract_section(prompt: &str, heading: &str) -> String {
+        let start = prompt
+            .find(heading)
+            .unwrap_or_else(|| panic!("見出しが無い: {heading}\n{prompt}"));
+        let after = &prompt[start + heading.len()..];
+        let end = after
+            .find("## ")
+            .map(|e| start + heading.len() + e)
+            .unwrap_or(prompt.len());
+        prompt[start..end].to_string()
+    }
+
+    /// §1-1: 撤去対象（行動指示・禁止）の文が system prompt に **0 件**（1 文 1 assert・count）。
+    /// §2 撤去 14 件（A3/A7/A9/A17/A21/A22/A23/A24/A25/A26/A27/A28/A33/A50）＋
+    /// §6 裁定の撤去（A12 日本語文／A37「Never promise to reply」／Peer Review 節丸ごと／
+    /// 導入部 req/reply マーカー文）。
+    #[test]
+    fn removed_command_and_prohibition_lines_are_gone() {
+        let prompt = prompt();
+        // (fragment, ラベル) — fragment は現 tip の prompt に一意に存在する断片。
+        let removed: &[(&str, &str)] = &[
+            // --- §2 撤去 14 件 ---
+            ("Respond thoughtfully to the conversation.", "A3 丁寧に返せ"),
+            (
+                "Just reply with the message content directly.",
+                "A7 本文だけ返せ",
+            ),
+            (
+                "複数のアクションを連続して呼び出してください",
+                "A9 連続呼び出せ命令",
+            ),
+            (
+                "Briefly tell the user you've started",
+                "A17 開始を宣言せよ（#916 二重投稿元凶）",
+            ),
+            ("Check what the result contains", "A21 結果を確認せよ"),
+            (
+                "If there's more to do: continue with the next step",
+                "A22 続きをせよ",
+            ),
+            (
+                "If the task is done: summarize and reply to the user",
+                "A23 要約して返せ",
+            ),
+            (
+                "If no reply is needed: respond with NO_REPLY",
+                "A24 不要なら NO_REPLY",
+            ),
+            (
+                "Do NOT repeat what you already said in the previous turn.",
+                "A25 繰り返すな",
+            ),
+            (
+                "Do NOT re-explain what you're about to do if you already said it.",
+                "A26 再説明するな",
+            ),
+            ("Just act on the result.", "A27 結果に対処せよ"),
+            (
+                "Before responding after [subtask_completed",
+                "A28 二重投稿コーチング塊",
+            ),
+            (
+                "Never say you cannot post multiple messages",
+                "A33 できないと言うな",
+            ),
+            (
+                "Read the raw content in the `part X/N` messages with fresh eyes",
+                "A50 fresh eyes 作法",
+            ),
+            // --- §6 裁定の撤去 ---
+            (
+                "Bot だからという理由では黙らない",
+                "A12 bot 判定文（§6 撤去）",
+            ),
+            (
+                "Never promise to reply",
+                "A37 後で返すと約束するな（§6 撤去）",
+            ),
+            ("## Peer Review", "Peer Review 節見出し（§6 丸ごと撤去）"),
+            ("Do NOT stay silent", "A49 沈黙するな（Peer Review 節）"),
+            (
+                "you must reply to another bot",
+                "A49 別 bot に返信せよ（Peer Review 節）",
+            ),
+            ("request_peer_review", "Peer Review 節本文"),
+            (
+                "レビュアーとして応答し",
+                "導入部 req/reply マーカー文（§3.1 で撤去）",
+            ),
+        ];
+        for (frag, label) in removed {
+            let count = prompt.matches(frag).count();
+            assert_eq!(
+                count, 0,
+                "撤去対象が残存（{label}）: count={count} / fragment={frag:?}\n{prompt}"
+            );
+        }
+    }
+
+    /// §1-2: §3 の書換後・事実文が存在する（節ごと代表 1–2 文）。
+    /// 各文は撤去された命令の対（否定側は上の removed_* テストが担保）。
+    #[test]
+    fn rewritten_fact_sentences_are_present() {
+        let prompt = prompt();
+        let present: &[(&str, &str)] = &[
+            // 3.1 導入（A6 事実化）: 逐語投稿の事実
+            ("Your response is posted verbatim", "A6 逐語投稿の事実"),
+            // 3.1 Silent Reply（A10/A11 事実化）
+            (
+                "is not delivered or saved",
+                "A10 NO_REPLY は配送も保存もされない",
+            ),
+            (
+                "You may reply with NO_REPLY when a group-chat message does not involve you",
+                "A11 沈黙は許容（命令でなく）",
+            ),
+            // 3.2 Async（A18 事実化・team-lead 指定例）
+            (
+                "Calling the same tool again for the same request starts a second, independent run",
+                "A18 再呼び出しは 2 本目が走る（事実）",
+            ),
+            // 3.3 Continuing（A30 事実化）
+            (
+                "Each utterance call is delivered when it is made",
+                "A30 各発話は呼んだ時点で配送（事実）",
+            ),
+            // 3.4 Memory（A39 事実化）: ツール契約
+            (
+                "returns the full conversation text",
+                "A39 retrieve_memory_nodes の返り値（事実）",
+            ),
+            // 3.5 Task Ledger（A43 事実化・§6 裁定）
+            (
+                "records the contract for a multi-step task",
+                "A43 open_task はコントラクトを記録（事実）",
+            ),
+        ];
+        for (frag, label) in present {
+            assert!(
+                prompt.contains(frag),
+                "書換後の事実文が無い（{label}）: fragment={frag:?}\n{prompt}"
+            );
+        }
+    }
+
+    /// §1-3: 「## Async Behavior」節が §3.2 の全文と一致（節単位・空白正規化）。
+    #[test]
+    fn async_behavior_section_matches_design() {
+        let prompt = prompt();
+        let expected = r#"## Async Behavior
+
+Query tools (execute_shell and the like — anything you call to fetch a result) run
+asynchronously: the result arrives later and you are called again with it in the conversation
+history. Utterances (say / reply / reaction / repost) do not work this way — see "Continuing
+your turn".
+
+Some tools return `{status:"spawned", subtask_id: ...}` immediately instead of a final result.
+The work is then running in the background, and its result arrives later in a separate turn as a
+`[subtask_completed: ...]` entry. Calling the same tool again for the same request starts a
+second, independent run, and the actual result appears only at the completion turn.
+
+A `[subtask_completed: ...]` entry means a tool you called has finished and it is your turn
+again."#;
+        let got = extract_section(&prompt, "## Async Behavior");
+        assert_eq!(
+            normalize_ws(&got),
+            normalize_ws(expected),
+            "Async Behavior 節が §3.2 全文と一致しない\n--- got ---\n{got}\n--- expected ---\n{expected}"
+        );
+    }
+
+    /// §1-3: 「## Continuing your turn」節が §3.3 の全文と一致（節単位・空白正規化）。
+    #[test]
+    fn continuing_your_turn_section_matches_design() {
+        let prompt = prompt();
+        let expected = r#"## Continuing your turn
+
+Utterances (say / reply / reaction / repost) are fire-and-forget: they return no result and you
+are not called again for them. Each utterance call is delivered when it is made, so N messages
+require N calls in this one response.
+
+Plain text in a response is posted as ONE message. To post several separate plain messages, post
+the first, end that response with `CONTINUE` on its own line, and post the next in the following
+response (repeat as needed).
+
+After a response whose only actions are utterances, the turn ends. Ending a response with
+`CONTINUE` on its own line — which may sit alongside a reply — calls you again in this same turn
+with your speech already delivered, so you can keep working after speaking. Without `CONTINUE`
+and without a query/tool call, the turn ends."#;
+        let got = extract_section(&prompt, "## Continuing your turn");
+        assert_eq!(
+            normalize_ws(&got),
+            normalize_ws(expected),
+            "Continuing your turn 節が §3.3 全文と一致しない\n--- got ---\n{got}\n--- expected ---\n{expected}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod past_summary_notice_contract_tests {
     /// 告知が名指しするツールと引数が、実在するツールの実在するパラメータと一致すること。
