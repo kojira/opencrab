@@ -3990,3 +3990,81 @@ async fn test_no_reply_only_is_not_persisted_rest_899() {
             .collect::<Vec<_>>()
     );
 }
+
+/// #899 回帰: content 空＋非発話 tool_call の生成で、on_tool_call が空 speech 行を保存しない。
+///
+/// `visible_speech_after_markers("")` は `Some("")` を返すため、終端解釈の後に空/空白を弾く
+/// ガードが要る（旧 `!content.trim().is_empty()` と同じ）。空 speech 行は typed 履歴に空の
+/// assistant を生む。現 tip（本ブランチ実装後）で赤。
+#[tokio::test]
+async fn test_tool_only_generation_saves_no_empty_speech_899() {
+    let (app, db, mock, _state) = create_test_app_with_state();
+    let (agent_id, app) = create_test_agent_named(app, "ToolOnly", "TestPersona").await;
+
+    // 1 巡目: content 空の非発話 tool_call。2 巡目: 通常テキストで締める。
+    mock.push_tool_call_response(vec![ToolCall {
+        id: "tc-empty-1".to_string(),
+        call_type: "function".to_string(),
+        function: FunctionCall {
+            name: "learn_from_experience".to_string(),
+            arguments: serde_json::json!({
+                "skill_name": "x",
+                "description": "d",
+                "situation_pattern": "s",
+                "guidance": "g"
+            })
+            .to_string(),
+        },
+    }]);
+    mock.push_text_response("完了しました");
+
+    let (status, resp) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/messages"),
+        Some(serde_json::json!({"content": "スキルを覚えて", "user_id": "u9"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "messages 200 でない: {resp}");
+    let session_id = resp["session_id"].as_str().unwrap().to_string();
+
+    // #899 回帰: 空/空白の agent speech 行を保存しない。
+    let empty_speech = session_logs(&db, &session_id)
+        .into_iter()
+        .filter(|l| {
+            l.log_type == "speech"
+                && l.speaker_id.as_deref() == Some(agent_id.as_str())
+                && l.content.trim().is_empty()
+        })
+        .count();
+    assert_eq!(
+        empty_speech, 0,
+        "ツールのみ生成（content 空）で空の agent speech 行が保存された（#899 回帰）"
+    );
+
+    // 次ターンの typed 履歴に空の assistant が無い。
+    let history = {
+        let conn = db.lock().unwrap();
+        opencrab_core::conversation_typed::build_typed_conversation(
+            &conn,
+            &session_id,
+            &agent_id,
+            200_000,
+            100_000,
+            false,
+            false,
+        )
+        .unwrap()
+        .history
+    };
+    let empty_assistant = history.iter().any(|m| {
+        m.role == Role::Assistant
+            && m.text_content()
+                .map(|t| t.trim().is_empty())
+                .unwrap_or(false)
+    });
+    assert!(
+        !empty_assistant,
+        "typed 履歴に空の assistant が現れた（#899 回帰）"
+    );
+}

@@ -1039,6 +1039,8 @@ fn set_turn_log_callbacks(
                 // #899 §12.6: 保存前に NO_REPLY 終端解釈（単一実装 visible_speech_after_markers）を
                 // 通す。沈黙（前段が空）は監査行を残さない（残すと conversation_typed が次ターンの
                 // typed 履歴へ assistant 'NO_REPLY' として再注入する）。
+                // ツールのみ生成（content 空）は `Some("")` になるため、旧 `!content.trim().is_empty()`
+                // と同じく空/空白を弾く（空 speech 行＝typed の空 assistant を作らない）。
                 let visible = opencrab_actions::visible_speech_after_markers(
                     &content,
                     opencrab_actions::DeliveryContext {
@@ -1046,7 +1048,8 @@ fn set_turn_log_callbacks(
                         agent_id: &tc_agent,
                         origin: "engine",
                     },
-                );
+                )
+                .filter(|body| !body.trim().is_empty());
                 if let Some(body) = visible {
                     let speech_log = opencrab_db::queries::SessionLogRow {
                         id: None,
