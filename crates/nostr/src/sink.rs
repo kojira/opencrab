@@ -209,19 +209,18 @@ impl<R: NostrAgentRunner> NostrResponder<R> {
         match self.runner.run_agent_response(req).await {
             Ok(result) => {
                 // 第一柱: NO_REPLY 終端解釈で前段のみを転記する。後続ゴミは破棄し
-                // （非空なら破棄ログ）、前段が空なら沈黙。
-                let term = opencrab_actions::terminate_at_no_reply(&result.response);
-                term.log_trailing_discard(opencrab_actions::DeliveryContext {
-                    session_id,
-                    agent_id,
-                    origin: "nostr",
-                });
-                let Some(reply) = term
-                    .speech()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-                else {
+                // （非空なら破棄ログ）、前段が空なら沈黙。#890 §11: 続けて末尾 CONTINUE も
+                // 剥がす（NO_REPLY→CONTINUE を 1 経路で確定）。
+                let Some(reply) = opencrab_actions::visible_speech_after_markers(
+                    &result.response,
+                    opencrab_actions::DeliveryContext {
+                        session_id,
+                        agent_id,
+                        origin: "nostr",
+                    },
+                )
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()) else {
                     debug!(agent_id, session_id, "nostr: agent chose silence");
                     return None;
                 };

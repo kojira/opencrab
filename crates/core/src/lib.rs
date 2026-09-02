@@ -16,6 +16,7 @@ pub mod a2ui;
 pub mod agent;
 pub mod caller;
 pub mod context_budget;
+pub mod continue_marker;
 pub mod conversation;
 pub mod conversation_typed;
 pub mod engine;
@@ -42,6 +43,7 @@ pub mod workspace;
 // Re-export primary types for convenience.
 pub use agent::{Agent, AgentLlmConfig, AgentModels, ModelRef};
 pub use caller::CallerIdentity;
+pub use continue_marker::{strip_trailing_continue, CONTINUE_LOG_TARGET, CONTINUE_SENTINEL};
 pub use engine::{
     ActionExecutor, ActionResult, ChatRequest, ChatResponse, DispatchCall, DispatchOutcome,
     EngineResult, FunctionDefinition, LiveInboundSource, LlmCallLog, LlmClient, SkillEngine,

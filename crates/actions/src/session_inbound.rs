@@ -340,12 +340,11 @@ pub fn delivery_effect(
 ) -> DeliveryEffect {
     match result {
         Ok(er) if !er.response.is_empty() => {
-            let term = crate::no_reply::terminate_at_no_reply(&er.response);
-            term.log_trailing_discard(ctx);
-            match term.speech() {
+            // NO_REPLY 終端（第一柱）→ CONTINUE 末尾剥がし（#890 §11）を 1 経路で確定。
+            match crate::continue_marker::visible_speech_after_markers(&er.response, ctx) {
                 None => DeliveryEffect::NoReply,
                 Some(body) => DeliveryEffect::Text {
-                    body: body.to_string(),
+                    body,
                     stopped_by_limit: er.stopped_by_limit,
                     tool_calls_made: er.tool_calls_made,
                     iterations: er.iterations,
@@ -963,6 +962,27 @@ mod tests {
             delivery_effect(Ok(er("NO_REPLY 続くゴミ")), ctx),
             DeliveryEffect::NoReply
         );
+    }
+
+    /// #890 §11: 末尾 CONTINUE マーカーは配送 body に残さない（継続判定は engine が済ませ、
+    /// ここは表示保護）。途中出現は本文のまま残す。
+    #[test]
+    fn delivery_effect_strips_tail_continue_marker() {
+        let ctx = crate::no_reply::DeliveryContext::default();
+        match delivery_effect(Ok(er("確認して返すね⚡\nCONTINUE")), ctx) {
+            DeliveryEffect::Text { body, .. } => {
+                assert_eq!(body, "確認して返すね⚡");
+                assert!(!body.contains("CONTINUE"), "body に CONTINUE 混入: {body}");
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+        // 途中出現は剥がさない。
+        match delivery_effect(Ok(er("まず CONTINUE を確認します")), ctx) {
+            DeliveryEffect::Text { body, .. } => {
+                assert_eq!(body, "まず CONTINUE を確認します");
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
     }
 
     fn web_inbound<'a>(

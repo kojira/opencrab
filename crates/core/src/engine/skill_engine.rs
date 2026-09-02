@@ -690,6 +690,30 @@ impl SkillEngine {
                 }
             }
 
+            // #890 §11 / §11.7: content の最終行が CONTINUE 単独なら「このターンを続ける意思」と
+            // みなし、その行を剥がして次イテレーションへ進む（継続を起こすのは text-only 経路のみ・
+            // 下の最終応答分岐で `continue`）。ツール呼び出しと併記された場合はツール経路が優先し、
+            // マーカーは剥がすだけ。NO_REPLY が同居する場合は NO_REPLY 優先で終端する（継続しない・
+            // 剥がしは配送層が担う）。同一行併記・途中出現は継続もしない（WARN は配送層が出す）。
+            // 剥がしは on_response_text 配送前・会話保存前に行う（§11.6: マーカーを残さない）。
+            let mut continue_requested = false;
+            let mut stripped_content: Option<Option<String>> = None;
+            if let Some(c) = content.as_deref() {
+                if !c.contains(crate::continue_marker::NO_REPLY_SENTINEL) {
+                    if let Some(body) = crate::continue_marker::strip_trailing_continue(c) {
+                        continue_requested = true;
+                        stripped_content = Some(if body.is_empty() {
+                            None
+                        } else {
+                            Some(body.to_string())
+                        });
+                    }
+                }
+            }
+            if let Some(new_content) = stripped_content {
+                content = new_content;
+            }
+
             // Fire on_response_text for every LLM reply that has non-empty text.
             if let Some(ref text) = content {
                 if !text.trim().is_empty() {
@@ -1020,6 +1044,26 @@ impl SkillEngine {
                     }
                 }
 
+                continue;
+            }
+
+            // #890 §11: 末尾 CONTINUE でこのターンを継続（ツール呼び出しが無い text-only 経路）。
+            // 剥がし後の本文を assistant メッセージとして積み（マーカー除去済み・§11.6）、次イテレー
+            // ションへ。発話は on_response_text で配送済み（R7 の fire-and-forget）。本文が空
+            // （CONTINUE 単独）なら何も積まずに次イテレーションへ。上限は既存 max_iterations。
+            if continue_requested {
+                if let Some(ref c) = content {
+                    messages.push(Message {
+                        role: Role::Assistant,
+                        content: Some(MessageContent::Text(c.clone())),
+                        name: None,
+                        function_call: None,
+                        tool_calls: None,
+                        tool_call_id: None,
+                    });
+                    turn_ledger.record(format!("asst:{}", messages.len()), c);
+                    apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
+                }
                 continue;
             }
 
@@ -2635,6 +2679,404 @@ mod tests {
                         .is_some_and(|text| text.contains("\"status\":\"spawned\""))
             }),
             "resolve は従来どおり spawned マーカーを次の LLM 呼び出しへ積む"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #890 §11: CONTINUE 末尾マーカーによるターン継続（TDD 赤テスト）。
+    //
+    // LLM 呼び出し回数（MockLlm::counting / MarkerCapturingLlm）とイテレーション数で
+    // 構造計測する。文面分類は一切しない。マーカーは生成 content の末尾に置く。
+    // -----------------------------------------------------------------------
+
+    /// LLM 呼び出し回数と各リクエストを記録する計測用クライアント（#890）。
+    struct MarkerCapturingLlm {
+        responses: std::sync::Mutex<Vec<ChatResponse>>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
+    }
+
+    #[async_trait]
+    impl LlmClient for MarkerCapturingLlm {
+        async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.requests.lock().unwrap().push(request);
+            let mut responses = self.responses.lock().unwrap();
+            if responses.is_empty() {
+                anyhow::bail!("no more mock responses");
+            }
+            Ok(responses.remove(0))
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    impl MarkerCapturingLlm {
+        fn new(
+            responses: Vec<ChatResponse>,
+        ) -> (
+            Self,
+            Arc<std::sync::atomic::AtomicUsize>,
+            Arc<std::sync::Mutex<Vec<ChatRequest>>>,
+        ) {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+            (
+                Self {
+                    responses: std::sync::Mutex::new(responses),
+                    calls: calls.clone(),
+                    requests: requests.clone(),
+                },
+                calls,
+                requests,
+            )
+        }
+    }
+
+    /// 全リクエストのメッセージ本文に CONTINUE が一切現れないこと（§11.6）。
+    fn no_continue_in_requests(requests: &[ChatRequest]) -> bool {
+        requests.iter().all(|req| {
+            req.messages.iter().all(|m| {
+                m.text_content()
+                    .map(|t| !t.contains("CONTINUE"))
+                    .unwrap_or(true)
+            })
+        })
+    }
+
+    /// (a) reply×N のみ → LLM 1 呼び出し・iterations 1（R7 維持・マーカー機構下でも不変）。
+    #[tokio::test]
+    async fn continue_marker_a_reply_only_completes_in_one_call() {
+        use std::sync::atomic::Ordering;
+        use std::sync::{Arc, Mutex};
+
+        let (llm, chat_calls) = MockLlm::counting(vec![tool_call_response(vec![
+            tc("reply-1", "reply", serde_json::json!({"text": "one"})),
+            tc("reply-2", "reply", serde_json::json!({"text": "two"})),
+            tc("reply-3", "reply", serde_json::json!({"text": "three"})),
+        ])]);
+        let executor_calls = Arc::new(Mutex::new(Vec::new()));
+        let executor = MockExecutor::new()
+            .add_result("reply", successful_action_result())
+            .with_call_log(executor_calls.clone());
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+        engine.set_tool_dispatcher(Arc::new(RecordingDispatcher::new(&[])));
+
+        let result = engine
+            .run("system", "3回に分けて返信して", "test-model")
+            .await
+            .expect("純発話生成は 1 呼び出しで完了する");
+
+        assert_eq!(chat_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(result.iterations, 1);
+        assert_eq!(
+            executor_calls.lock().unwrap().as_slice(),
+            &["reply", "reply", "reply"]
+        );
+    }
+
+    /// (b) 発話＋末尾 CONTINUE → 2 呼び出し目が走る・発話は 1 回だけ配送。
+    #[tokio::test]
+    async fn continue_marker_b_speech_then_marker_runs_second_call() {
+        use std::sync::atomic::Ordering;
+        use std::sync::{Arc, Mutex};
+
+        let (llm, chat_calls) = MockLlm::counting(vec![
+            resp(Some("ざっと見て感想を返すね⚡\nCONTINUE"), vec![]),
+            text_response("読んだ。結論はXだが条件Yで再現性が弱い。"),
+        ]);
+        let executor = MockExecutor::new();
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+        engine.set_tool_dispatcher(Arc::new(RecordingDispatcher::new(&[])));
+        let delivered: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let delivered_cb = delivered.clone();
+        engine.set_on_response_text(move |t: String| {
+            delivered_cb.lock().unwrap().push(t);
+        });
+
+        let result = engine
+            .run("system", "この論文どう思う？", "test-model")
+            .await
+            .expect("末尾 CONTINUE は次イテレーションで最終応答へ到達する");
+
+        assert_eq!(
+            chat_calls.load(Ordering::SeqCst),
+            2,
+            "末尾 CONTINUE が 2 回目の LLM 呼び出しを起こす"
+        );
+        assert_eq!(result.iterations, 2);
+        assert_eq!(result.response, "読んだ。結論はXだが条件Yで再現性が弱い。");
+        let delivered = delivered.lock().unwrap();
+        assert_eq!(
+            delivered.as_slice(),
+            &[
+                "ざっと見て感想を返すね⚡".to_string(),
+                "読んだ。結論はXだが条件Yで再現性が弱い。".to_string(),
+            ],
+            "発話はマーカー除去後の本文を 1 回だけ配送する"
+        );
+    }
+
+    /// (c) CONTINUE＋query ツール併記 → ツール経路で 2 呼び出し・二重継続なし・マーカーは剥がす。
+    #[tokio::test]
+    async fn continue_marker_c_with_query_tool_uses_tool_path_no_double() {
+        use std::sync::atomic::Ordering;
+
+        let (llm, chat_calls, requests) = MarkerCapturingLlm::new(vec![
+            resp(
+                Some("全文を確認する\nCONTINUE"),
+                vec![tc("resolve-1", "resolve", serde_json::json!({"ref": "e1"}))],
+            ),
+            text_response("確認した"),
+        ]);
+        let executor = MockExecutor::new();
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+        engine.set_tool_dispatcher(Arc::new(RecordingDispatcher::new(&[])));
+
+        let result = engine
+            .run("system", "全文を見て", "test-model")
+            .await
+            .expect("query ツール併記は従来の混在経路で継続する");
+
+        assert_eq!(
+            chat_calls.load(Ordering::SeqCst),
+            2,
+            "ツール経路が 2 回目を起こす（マーカーで 3 回目にはならない＝二重継続なし）"
+        );
+        assert_eq!(result.iterations, 2);
+        assert!(
+            no_continue_in_requests(&requests.lock().unwrap()),
+            "併記時もマーカーは会話へ残さない"
+        );
+    }
+
+    /// (d) CONTINUE 連打 → max_iterations で停止・fail-loud（max=3 で chat 3・iterations 4）。
+    #[tokio::test]
+    async fn continue_marker_d_spam_stops_at_max_iterations() {
+        use std::sync::atomic::Ordering;
+
+        let (llm, chat_calls) = MockLlm::counting(vec![
+            text_response("CONTINUE"),
+            text_response("CONTINUE"),
+            text_response("CONTINUE"),
+        ]);
+        let executor = MockExecutor::new();
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 3);
+        engine.set_tool_dispatcher(Arc::new(RecordingDispatcher::new(&[])));
+
+        let result = engine
+            .run("system", "続けて", "test-model")
+            .await
+            .expect("上限到達は Ok の打ち切り応答で返る");
+
+        assert!(
+            result.stopped_by_limit,
+            "CONTINUE 連打は既存 max_iterations で fail-loud 停止する"
+        );
+        assert_eq!(chat_calls.load(Ordering::SeqCst), 3, "max=3 で LLM は 3 回");
+        assert_eq!(result.iterations, 4, "4 周目の上限判定で停止する");
+    }
+
+    /// (e) 発話のみ（マーカー無し）→ 次呼び出し不発（R7 回帰・機構が空目覚めを起こさない）。
+    #[tokio::test]
+    async fn continue_marker_e_speech_only_no_second_call() {
+        use std::sync::atomic::Ordering;
+        use std::sync::{Arc, Mutex};
+
+        let (llm, chat_calls) = MockLlm::counting(vec![tool_call_response(vec![tc(
+            "reply-1",
+            "reply",
+            serde_json::json!({"text": "ただの返事"}),
+        )])]);
+        let executor_calls = Arc::new(Mutex::new(Vec::new()));
+        let executor = MockExecutor::new()
+            .add_result("reply", successful_action_result())
+            .with_call_log(executor_calls.clone());
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+        engine.set_tool_dispatcher(Arc::new(RecordingDispatcher::new(&[])));
+
+        let result = engine
+            .run("system", "返事して", "test-model")
+            .await
+            .expect("マーカー無し発話は 1 呼び出しで終わる");
+
+        assert_eq!(
+            chat_calls.load(Ordering::SeqCst),
+            1,
+            "マーカーが無ければ発話のみは次を呼ばない（R7）"
+        );
+        assert_eq!(result.iterations, 1);
+        assert_eq!(executor_calls.lock().unwrap().as_slice(), &["reply"]);
+    }
+
+    /// (f) 途中出現（末尾以外）→ 剥がされず・継続せず（chat 1・本文そのまま）。
+    #[tokio::test]
+    async fn continue_marker_f_midtext_not_stripped_no_continue() {
+        use std::sync::atomic::Ordering;
+
+        const BODY: &str = "まず CONTINUE を確認してから作業します";
+        let (llm, chat_calls) = MockLlm::counting(vec![resp(Some(BODY), vec![])]);
+        let executor = MockExecutor::new();
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+        engine.set_tool_dispatcher(Arc::new(RecordingDispatcher::new(&[])));
+
+        let result = engine
+            .run("system", "説明して", "test-model")
+            .await
+            .expect("途中出現は継続せず最終応答になる");
+
+        assert_eq!(
+            chat_calls.load(Ordering::SeqCst),
+            1,
+            "末尾以外の CONTINUE は継続の足がかりにしない"
+        );
+        assert_eq!(result.iterations, 1);
+        assert_eq!(result.response, BODY, "途中出現は本文をそのまま残す");
+    }
+
+    /// (f2) §11.7: 同一行に他の文字がある CONTINUE は継続マーカーではない（末尾行が単独で
+    /// ないため剥がさず・継続せず・本文そのまま）。chat 1。
+    #[tokio::test]
+    async fn continue_marker_f2_same_line_marker_not_continued() {
+        use std::sync::atomic::Ordering;
+
+        const BODY: &str = "確認して返信します CONTINUE";
+        let (llm, chat_calls) =
+            MockLlm::counting(vec![resp(Some(BODY), vec![]), text_response("二回目")]);
+        let executor = MockExecutor::new();
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+        engine.set_tool_dispatcher(Arc::new(RecordingDispatcher::new(&[])));
+
+        let result = engine
+            .run("system", "説明して", "test-model")
+            .await
+            .expect("同一行併記は継続せず最終応答になる");
+
+        assert_eq!(
+            chat_calls.load(Ordering::SeqCst),
+            1,
+            "最終行が CONTINUE 単独でなければ継続しない"
+        );
+        assert_eq!(result.iterations, 1);
+        assert_eq!(
+            result.response, BODY,
+            "同一行併記は本文そのまま（マーカー扱いしない）"
+        );
+    }
+
+    /// (g) NO_REPLY＋CONTINUE 同時末尾 → NO_REPLY 優先で終端（継続しない・chat 1）。
+    #[tokio::test]
+    async fn continue_marker_g_no_reply_wins_over_continue() {
+        use std::sync::atomic::Ordering;
+
+        let (llm, chat_calls) =
+            MockLlm::counting(vec![resp(Some("本文だけ話す NO_REPLY\nCONTINUE"), vec![])]);
+        let executor = MockExecutor::new();
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+        engine.set_tool_dispatcher(Arc::new(RecordingDispatcher::new(&[])));
+
+        let result = engine
+            .run("system", "どうする？", "test-model")
+            .await
+            .expect("NO_REPLY 優先で終端する");
+
+        assert_eq!(
+            chat_calls.load(Ordering::SeqCst),
+            1,
+            "NO_REPLY が末尾にあれば CONTINUE が同居しても継続しない"
+        );
+        assert_eq!(result.iterations, 1);
+    }
+
+    /// (h) 保存 speech と次イテレーションの会話文字列に CONTINUE が含まれない（§11.6）。
+    #[tokio::test]
+    async fn continue_marker_h_marker_absent_from_conversation() {
+        use std::sync::atomic::Ordering;
+        use std::sync::{Arc, Mutex};
+
+        let (llm, chat_calls, requests) = MarkerCapturingLlm::new(vec![
+            resp(Some("感想を返すね⚡\nCONTINUE"), vec![]),
+            text_response("最終回答"),
+        ]);
+        let executor = MockExecutor::new();
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+        engine.set_tool_dispatcher(Arc::new(RecordingDispatcher::new(&[])));
+        let delivered: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let delivered_cb = delivered.clone();
+        engine.set_on_response_text(move |t: String| {
+            delivered_cb.lock().unwrap().push(t);
+        });
+
+        let _ = engine
+            .run("system", "論文見て", "test-model")
+            .await
+            .expect("継続後に最終応答へ到達する");
+
+        assert_eq!(chat_calls.load(Ordering::SeqCst), 2);
+        let delivered = delivered.lock().unwrap();
+        assert!(
+            delivered.iter().all(|t| !t.contains("CONTINUE")),
+            "配送された speech にマーカーが残らない"
+        );
+        assert_eq!(
+            delivered.first().map(String::as_str),
+            Some("感想を返すね⚡"),
+            "1 回目の配送はマーカー除去後の本文"
+        );
+        assert!(
+            no_continue_in_requests(&requests.lock().unwrap()),
+            "次イテレーションのプロンプト会話部分にマーカーが現れない"
+        );
+    }
+
+    /// (h-typed) §11.6 + #884 PR2: typed 経路（typed_conversation 有り・typed_history=true）でも
+    /// 保存前にマーカーが剥がされ、末尾 CONTINUE で継続し、次イテレーションの会話文字列に
+    /// CONTINUE が現れない。
+    #[tokio::test]
+    async fn continue_marker_h_typed_history_marker_absent() {
+        use std::sync::atomic::Ordering;
+
+        let (llm, chat_calls, requests) = MarkerCapturingLlm::new(vec![
+            resp(Some("感想を返すね⚡\nCONTINUE"), vec![]),
+            text_response("最終回答"),
+        ]);
+        let typed_conversation = crate::conversation_typed::TypedConversation {
+            context_block: None,
+            snapshot_base: None,
+            history: vec![Message {
+                role: Role::User,
+                content: Some(MessageContent::Text("typed current turn".to_string())),
+                name: Some("owner".to_string()),
+                function_call: None,
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            response_directive: Some("directive".to_string()),
+            wire_tokens: 0,
+            diagnostics: crate::conversation_typed::DeriveDiagnostics {
+                item_count: 1,
+                unpaired_call_count: 0,
+                opaque_event_count: 0,
+            },
+        };
+        let executor = MockExecutor::new();
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+        engine.set_conversation_waters(1, 0);
+        engine.set_typed_conversation(Some(typed_conversation));
+
+        let result = engine
+            .run("system", "FLAT_HISTORY_SENTINEL", "test-model")
+            .await
+            .expect("typed 経路でも継続後に最終応答へ到達する");
+
+        assert_eq!(
+            chat_calls.load(Ordering::SeqCst),
+            2,
+            "typed 経路でも末尾 CONTINUE で 2 回目が走る"
+        );
+        assert_eq!(result.response, "最終回答");
+        assert!(
+            no_continue_in_requests(&requests.lock().unwrap()),
+            "typed 経路でも会話文字列にマーカーが現れない（§11.6）"
         );
     }
 
