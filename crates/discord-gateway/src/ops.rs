@@ -40,7 +40,7 @@ pub fn operation_declarations() -> Value {
     json!([
         decl(
             "reaction",
-            "会話の e番号のメッセージに絵文字リアクションを付ける。event に e番号、emoji に絵文字。複数のリアクションは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。",
+            "会話の e番号のメッセージに絵文字リアクションを付ける。event に e番号、emoji に絵文字。結果は返らない（撃ちっぱなし・再開はされない）。複数のリアクションは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。",
             json!({"type": "object", "required": ["event", "emoji"], "properties": {
                 "event": ref_prop("対象メッセージの短縮参照（例 e7）"),
                 "emoji": str_prop("リアクション絵文字（例 👍）")
@@ -48,7 +48,7 @@ pub fn operation_declarations() -> Value {
         ),
         decl(
             "reply",
-            "会話の e番号のメッセージに返信する。event に e番号、text に返信本文。複数の返信は1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。",
+            "会話の e番号のメッセージに返信する。event に e番号、text に返信本文。結果は返らない（撃ちっぱなし・再開はされない）。複数の返信は1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。",
             json!({"type": "object", "required": ["event", "text"], "properties": {
                 "event": ref_prop("返信先メッセージの短縮参照（例 e7）"),
                 "text": str_prop("返信本文")
@@ -125,6 +125,11 @@ async fn deliver_reply(
 
 #[async_trait]
 impl InvokeHandler for DiscordInvokeHandler {
+    // #900: reply/reaction は発話クラス（ユーザーに見える発言）。resolve は照会クラスなので false。
+    fn is_utterance(&self, operation: &str) -> bool {
+        matches!(operation, "reply" | "reaction")
+    }
+
     async fn handle(&self, _binding_id: &str, operation: &str, payload: &Value) -> InvokeOutcome {
         match operation {
             "reply" => {
