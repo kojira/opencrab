@@ -2055,3 +2055,135 @@ async fn scenario_continue_intermediate_delivery_failure_stops_continuation() {
     );
     let _ = &buf;
 }
+
+// ==================== (#898 §13 #8) reply×N＋本文＋末尾 CONTINUE ====================
+//
+// DESIGN-TURN-CONTINUATION §13 #8「reply×N＋本文＋最終行 CONTINUE → 配送 reply N＋本文 1・
+// 保存 N+1・次 進む・残留なし」。#904 で reply（発話クラス）＋末尾 CONTINUE が次イテレーションへ
+// 進むようになったが、併記された**本文（content）**は最終応答と同じ経路で配送・保存される必要が
+// ある（本 PR の in-loop 途中発話配送）。現 tip は reply は配送されるが本文（say）が配送も保存も
+// されない → 赤。
+// 観測境界: extgate の dry-run 配送（kind="reply" / kind="standalone"）・memory_sessions speech・LLM 回数。
+
+const S8_R1: &str = "S8-返信その1";
+const S8_R2: &str = "S8-返信その2";
+const S8_BODY: &str = "S8-本文。まとめて一言";
+const S8_FINAL: &str = "S8-最終本文";
+
+fn two_replies_with_content(r1: &str, r2: &str, content: &str) -> ChatResponse {
+    let mut resp = tool_calls_response(vec![
+        ("reply", serde_json::json!({"event": "e1", "text": r1})),
+        ("reply", serde_json::json!({"event": "e1", "text": r2})),
+    ]);
+    resp.choices[0].message.content = Some(MessageContent::Text(content.to_string()));
+    resp
+}
+
+struct S8Mock {
+    calls: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for S8Mock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        // 1 回目: reply×2 ＋ 本文 ＋ 末尾 CONTINUE（継続）。2 回目以降: 最終本文で終端。
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        if n == 0 {
+            Ok(two_replies_with_content(
+                S8_R1,
+                S8_R2,
+                &format!("{S8_BODY}\u{26a1}\nCONTINUE"),
+            ))
+        } else {
+            Ok(text_response(&format!("{S8_FINAL}\u{26a1}")))
+        }
+    }
+}
+
+#[tokio::test]
+async fn scenario_s13_8_reply_plus_body_plus_continue_delivers_body_and_continues() {
+    let buf = install_capture();
+    let mock = Arc::new(S8Mock {
+        calls: AtomicUsize::new(0),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let (_client, _address, session_id) = wire_instance(&core, &fixture, nostr_config(None)).await;
+
+    let ev = "f8".repeat(32);
+    fixture.append_line(&mention_event(
+        &ev,
+        "S8MARK reply も使いつつ本文も添えて続けて",
+    ));
+
+    // (i) reply×2 と本文 say・最終 say がすべて配送される。
+    let delivered = {
+        let buf = buf.clone();
+        wait_until(move || {
+            let says = captured(&buf);
+            let has = |kind: &str, needle: &str| {
+                says.iter()
+                    .any(|c| c.kind == kind && c.body.contains(needle))
+            };
+            has("reply", S8_R1)
+                && has("reply", S8_R2)
+                && has("standalone", S8_BODY)
+                && has("standalone", S8_FINAL)
+        })
+        .await
+    };
+    assert!(
+        delivered,
+        "reply×2＋本文 say＋最終 say のいずれかが配送されない（#8: 本文 say 未配送）: {:?}",
+        captured(&buf)
+    );
+
+    // (ii) 本文 say（S8_BODY）はちょうど 1 通（1 イテレーション=1 メッセージ）。
+    let body_says = captured(&buf)
+        .iter()
+        .filter(|c| c.kind == "standalone" && c.body.contains(S8_BODY))
+        .count();
+    assert_eq!(body_says, 1, "本文 say が 1 通でない: {:?}", captured(&buf));
+
+    // (iii) LLM は 2 回（reply＋本文＋CONTINUE で継続 → 2 回目で終端）。
+    assert_eq!(mock.calls.load(Ordering::SeqCst), 2, "LLM が 2 回でない");
+
+    // (iv) 残留 CONTINUE なし（配送本文）。
+    assert!(
+        captured(&buf)
+            .iter()
+            .filter(|c| c.body.contains("S8-"))
+            .all(|c| !c.body.contains("CONTINUE")),
+        "配送本文に CONTINUE 残留: {:?}",
+        captured(&buf)
+    );
+
+    // (v) memory_sessions に本文（S8_BODY）と最終（S8_FINAL）が speech として保存される。
+    let speeches: Vec<String> = {
+        let conn = core.extgate.db.lock().unwrap();
+        opencrab_db::queries::list_session_logs_by_session(&conn, &session_id)
+            .unwrap()
+            .into_iter()
+            .filter(|l| l.log_type == "speech")
+            .map(|l| l.content)
+            .collect()
+    };
+    assert!(
+        speeches.iter().any(|s| s.contains(S8_BODY)),
+        "本文（S8_BODY）が memory_sessions に保存されていない: {speeches:?}"
+    );
+    assert!(
+        speeches.iter().any(|s| s.contains(S8_FINAL)),
+        "最終本文（S8_FINAL）が memory_sessions に保存されていない: {speeches:?}"
+    );
+}

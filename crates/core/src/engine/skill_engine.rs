@@ -1085,6 +1085,24 @@ impl SkillEngine {
                     }
                 }
 
+                // #898 §13 #8: 発話クラスのみ＋末尾 CONTINUE で継続するとき、併記された本文
+                // （content・マーカー剥がし済み）を reply 配送のあと・次イテレーション前に、継続分岐と
+                // 同じフックで配送・保存する（extgate 途中発話配送 / memory_sessions speech / REST
+                // responses / intake 保存）。会話文脈は上の assistant メッセージ（tool_calls＋content）で
+                // 積み済みなのでここでは配送・保存だけ。配送失敗（Err）は継続を止める（§13.1 j）。
+                // 照会/道具が混じる（next_llm_call_needed）ときは本文 say を配送しない（holding は従来経路）。
+                if continue_requested && !next_llm_call_needed {
+                    if let Some(ref c) = content {
+                        if !c.trim().is_empty() {
+                            if let Some(ref cb) = self.on_continuation_speech {
+                                cb(c.clone()).await.map_err(|e| {
+                                    anyhow::anyhow!("continuation speech delivery failed: {e:#}")
+                                })?;
+                            }
+                        }
+                    }
+                }
+
                 continue;
             }
 
