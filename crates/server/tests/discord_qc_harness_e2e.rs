@@ -5534,3 +5534,261 @@ async fn scenario_935_lone_said_still_runs_independent_turn() {
         .count();
     assert_eq!(eyes_c, 1, "単独 said(9360) の 👀 が 1 件でない: {:?}", caps);
 }
+
+// ===================================================================
+// #935【(c3) 消費済み subtask 完了の resume skip】
+//
+// 1 ターンで 2 つの subtask（execute_shell echo・背景 subtask 化）を dispatch し、両完了が
+// 揃うまで CONTINUE で lock を保持する。両 subtask 完了 → それぞれ resume が spawn され lock 待ちに
+// 積まれる。X 終了後、先着 resume の build が **両完了を描画**（自分の発端でない他方の完了を
+// 「消費済み入力」として consumed 化する対象）。もう一方の resume はその完了が consumed 済みなので
+// run_serialized 頭で skip されるべき。
+//
+// 観測境界（赤の核心）:
+//   (C1) 完了結果を描画する resume の LLM 呼び出しは **ちょうど 1**（tip は 2＝2 本目 resume も
+//        走って NO_REPLY/報告する）。
+//   (C2) 完了報告 say は **1 件**（tip は 2）。
+// 現 tip は (C1)(C2) が赤（consumed skip が無く 2 本とも走る）。
+// ===================================================================
+const R935C_CH: &str = "636";
+const R935C_SAID: &str = "R935CSAIDMARK";
+const R935C_S1: &str = "R935C1DONE"; // subtask1 echo stdout（resume build に描画される）
+const R935C_S2: &str = "R935C2DONE"; // subtask2 echo stdout
+const R935C_REPORT: &str = "r935creport-完了報告だよ";
+
+struct TwoSubtaskConsumedMock {
+    step: std::sync::atomic::AtomicUsize,
+    /// resume ターン（tool role なし・build が完了 stdout を描画）の LLM 呼び出し回数。
+    /// spawned ack（tool role・ラベルにコマンド引数を含む）と区別するため `!has_tool_role` で判定。
+    resume_calls: std::sync::atomic::AtomicUsize,
+    reqs: Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for TwoSubtaskConsumedMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let tool_role = has_tool_role(&request);
+        let text = request_text(&request);
+        self.reqs.lock().unwrap().push(text.clone());
+        // resume ターン: tool role なしの build に subtask 完了 stdout が描画されている（X の spawned
+        // ack はラベルに同じ引数文字列を含むが tool role 付きなのでここには来ない）。報告する。
+        if !tool_role && (text.contains(R935C_S1) || text.contains(R935C_S2)) {
+            self.resume_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            return Ok(text_response(R935C_REPORT));
+        }
+        // X の dispatch 後継続（spawned ack＝tool role）。
+        if tool_role {
+            let n = self.step.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // 1 回目の ack で 2 つ目の subtask を dispatch。
+            if n == 0 {
+                return Ok(tool_call_response(
+                    "execute_shell",
+                    serde_json::json!({ "command": "echo", "args": [R935C_S2] }),
+                ));
+            }
+            // 両 subtask が settle し resume が lock 待ちに積まれるまで CONTINUE で lock を保持。
+            if n < 10 {
+                tokio::time::sleep(Duration::from_millis(120)).await;
+                return Ok(text_response("holding\nCONTINUE"));
+            }
+            return Ok(text_response(FILLER));
+        }
+        // 初回（said0・tool role なし・完了なし）→ 1 つ目の subtask を dispatch。
+        Ok(tool_call_response(
+            "execute_shell",
+            serde_json::json!({ "command": "echo", "args": [R935C_S1] }),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn scenario_935_consumed_subtask_completion_resume_skipped() {
+    let buf = install_capture();
+    let mock = Arc::new(TwoSubtaskConsumedMock {
+        step: std::sync::atomic::AtomicUsize::new(0),
+        resume_calls: std::sync::atomic::AtomicUsize::new(0),
+        reqs: Mutex::new(Vec::new()),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+    *core.state.tools_config.write().unwrap() = shell_enabled_tools_config();
+
+    let fixture = Fixture::new();
+    let _client = wire_instance_on_channel(&core, &fixture, R935C_CH).await;
+
+    fixture.append_message_ch("9370", R935C_CH, &format!("{R935C_SAID} 2 つ調べて教えて"));
+
+    // 完了報告 say が出るまで待つ（少なくとも 1 本の resume は走る）。
+    let reported = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "say" && c.channel == R935C_CH && c.body.contains(R935C_REPORT))
+        })
+        .await
+    };
+    assert!(
+        reported,
+        "resume 完了報告 say が出ない（2 subtask/resume 未達・テスト前提崩れ）: {:?}",
+        captured(&buf)
+    );
+    // 2 本目の resume（tip では走る）が現れるか、上限まで待つ（fix なら現れず timeout）。
+    let _ = {
+        let mock = mock.clone();
+        wait_until(move || mock.resume_calls.load(std::sync::atomic::Ordering::SeqCst) >= 2).await
+    };
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    let caps = captured(&buf);
+
+    // (前提) 両 subtask が dispatch され、resume の build に完了 stdout が両方描画された。
+    // 完了描画は `出力: <marker>`（`[sN 完了]`）で識別する（system プロンプトも "spawned" や
+    // コマンド引数を含むので生マーカー単体では X の spawned ack と区別できない）。
+    let drew_both = mock.reqs.lock().unwrap().iter().any(|t| {
+        t.contains(&format!("出力: {R935C_S1}")) && t.contains(&format!("出力: {R935C_S2}"))
+    });
+    assert!(
+        drew_both,
+        "resume の build に 2 つの subtask 完了が両方描画されていない（テスト前提崩れ）: reqs={:?}",
+        mock.reqs.lock().unwrap()
+    );
+
+    // ---- (C1・赤の核心) 完了を描画する resume の LLM 呼び出しは 1 のはず ----
+    // tip は 2（先着 resume が両完了を描画・もう一方の resume も consumed skip されず走る）。
+    let resume_calls = mock.resume_calls.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        resume_calls, 1,
+        "消費済み subtask 完了の resume が skip されず走った（#935 (c3)・消費済み入力の二重処理）: \
+         完了を描画する resume の LLM 呼び出しが {resume_calls} 件（1 が正）。reqs={:?}",
+        mock.reqs.lock().unwrap()
+    );
+
+    // ---- (C2・赤) 完了報告 say は 1 件（2 本目 resume の二重報告を塞ぐ）----
+    let report_says = caps
+        .iter()
+        .filter(|c| c.kind == "say" && c.channel == R935C_CH && c.body.contains(R935C_REPORT))
+        .count();
+    assert_eq!(
+        report_says, 1,
+        "resume 完了報告 say が 1 件でない（消費済み完了の resume が二重報告した・#935 (c3)）: {:?}",
+        caps
+    );
+}
+
+// ===================================================================
+// #935【否定側・green 維持】単独 subtask（他に描画するターン無し）の resume は、自分が発端なので
+// 走る。resume 自身の発端完了を consumed に入れて自滅しないことの pin（(b) の「発端 seq は mark
+// しない」と同型・scenario_915 と同型）。tip も fix も green。
+// ===================================================================
+const R935D_CH: &str = "637";
+const R935D_SAID: &str = "R935DSAIDMARK";
+const R935D_S1: &str = "R935D1DONE";
+const R935D_REPORT: &str = "r935dreport-単独完了の報告だよ";
+
+struct LoneSubtaskResumeMock {
+    emitted: std::sync::atomic::AtomicBool,
+    /// resume ターン（tool role なし・完了 stdout 描画）の LLM 呼び出し回数。
+    resume_calls: std::sync::atomic::AtomicUsize,
+    reqs: Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for LoneSubtaskResumeMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let tool_role = has_tool_role(&request);
+        let text = request_text(&request);
+        self.reqs.lock().unwrap().push(text.clone());
+        // resume ターン: tool role なしの build に完了 stdout が描画されている（spawned ack は tool
+        // role 付きでラベルに同じ引数を含むので除外）→ 報告。
+        if !tool_role && text.contains(R935D_S1) {
+            self.resume_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            return Ok(text_response(R935D_REPORT));
+        }
+        // X の spawned ack → 即終了（hold しない・lock をすぐ解放）。
+        if tool_role {
+            return Ok(text_response(FILLER));
+        }
+        // 初回 → 単独 subtask を dispatch。
+        if !self.emitted.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return Ok(tool_call_response(
+                "execute_shell",
+                serde_json::json!({ "command": "echo", "args": [R935D_S1] }),
+            ));
+        }
+        Ok(text_response(FILLER))
+    }
+}
+
+#[tokio::test]
+async fn scenario_935_lone_subtask_completion_resume_runs() {
+    let buf = install_capture();
+    let mock = Arc::new(LoneSubtaskResumeMock {
+        emitted: std::sync::atomic::AtomicBool::new(false),
+        resume_calls: std::sync::atomic::AtomicUsize::new(0),
+        reqs: Mutex::new(Vec::new()),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+    *core.state.tools_config.write().unwrap() = shell_enabled_tools_config();
+
+    let fixture = Fixture::new();
+    let _client = wire_instance_on_channel(&core, &fixture, R935D_CH).await;
+
+    fixture.append_message_ch("9380", R935D_CH, &format!("{R935D_SAID} 1 つ調べて教えて"));
+
+    // 単独 subtask の resume 完了報告が出る（発端なので走る）。
+    let reported = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "say" && c.channel == R935D_CH && c.body.contains(R935D_REPORT))
+        })
+        .await
+    };
+    assert!(
+        reported,
+        "単独 subtask の resume 完了報告が出ない（over-skip の疑い・#935 (c3) 否定側）: {:?}",
+        captured(&buf)
+    );
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let caps = captured(&buf);
+
+    // 単独 subtask の resume は 1 回だけ走る（発端完了を skip しない）。
+    let resume_calls = mock.resume_calls.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        resume_calls,
+        1,
+        "単独 subtask の resume LLM 呼び出しが 1 でない（0 なら発端完了を over-skip）: reqs={:?}",
+        mock.reqs.lock().unwrap()
+    );
+    let report_says = caps
+        .iter()
+        .filter(|c| c.kind == "say" && c.channel == R935D_CH && c.body.contains(R935D_REPORT))
+        .count();
+    assert_eq!(
+        report_says, 1,
+        "単独 subtask の resume 完了報告 say が 1 件でない: {:?}",
+        caps
+    );
+}
