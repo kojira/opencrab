@@ -29,6 +29,13 @@ type ContinuationSpeechHook = Arc<
         + Sync,
 >;
 
+/// #930: 走行中に畳み込んだ said を LLM へ渡す時点で、その said の origin を gateway へ
+/// 通知する **非同期フック**（read state の付与＝👀）。best-effort（失敗してもターンは続ける）
+/// なので Result は返さない。extgate が emit_activity(state="read", origin) の配線を渡す。
+type FoldedOriginHook = Arc<
+    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
+>;
+
 /// The LLM-driven action loop engine.
 ///
 /// The SkillEngine orchestrates the cycle of:
@@ -87,6 +94,8 @@ pub struct SkillEngine {
     /// イテレーションで LLM を呼ぶ直前に引き、新着があれば user メッセージとして
     /// 足す。None なら従来どおりターン開始時の履歴だけで回る。
     live_inbound: Option<Arc<dyn LiveInboundSource>>,
+    /// #930: 畳み込んだ said の origin を read state として通知するフック。None なら通知しない。
+    on_folded_origin: Option<FoldedOriginHook>,
     /// 各 ChatRequest に載せる出力トークン上限（#676）。使用モデルの実能力値を
     /// `model_pricing` から解決して process 側で注入する（[`Self::set_max_output_tokens`]）。
     /// `None` は「上限未指定」＝プロバイダの既定に委ねる（テスト / sub-engine 用）。
@@ -131,6 +140,7 @@ impl SkillEngine {
             tool_dispatcher: None,
             tool_result_offload: None,
             live_inbound: None,
+            on_folded_origin: None,
             max_output_tokens: None,
             conversation_high: None,
             conversation_low: None,
@@ -171,6 +181,11 @@ impl SkillEngine {
     /// 発言をすでに含んでいるため、引くと同じ発言を二重に見せることになる。
     pub fn set_live_inbound(&mut self, source: Arc<dyn LiveInboundSource>) {
         self.live_inbound = Some(source);
+    }
+
+    /// #930: read state（👀）通知フックを設定する。extgate 経路だけが渡す。
+    pub fn set_on_folded_origin(&mut self, cb: FoldedOriginHook) {
+        self.on_folded_origin = Some(cb);
     }
 
     /// 上限超過 tool_result の退避先を設定する（#284）。
@@ -469,6 +484,9 @@ impl SkillEngine {
         };
 
         let mut iterations = 0;
+        // #930: このターンで read（👀）を通知済みの origin。1 origin 1 回に絞る。
+        let mut read_emitted_origins: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         let mut total_tool_calls = 0;
         let mut xml_fallback_parses = 0;
         // #915: 各生成で最後に成功した投稿系 utterance-op の call_id。生成開始時にリセットし、
@@ -519,7 +537,10 @@ impl SkillEngine {
             // （Anthropic は同ロールを 1 ターンへ併合する）。
             if iterations > 1 {
                 if let Some(source) = &self.live_inbound {
-                    for text in source.poll_new_messages() {
+                    // #930: origin つきで引く。畳み込んだ said を LLM へ渡す **この時点** で、
+                    // その said の origin を read state として通知する（👀 を返信の前に付ける）。
+                    for folded in source.poll_new_with_origin() {
+                        let crate::FoldedInbound { text, origin } = folded;
                         tracing::info!(
                             iteration = iterations,
                             bytes = text.len(),
@@ -534,6 +555,14 @@ impl SkillEngine {
                             tool_call_id: None,
                         });
                         turn_ledger.record(format!("live:{}", messages.len()), &text);
+                        // #930: この said を読んだ時点で read（👀）を付ける。1 origin 1 回。
+                        if let Some(origin) = origin {
+                            if read_emitted_origins.insert(origin.clone()) {
+                                if let Some(cb) = &self.on_folded_origin {
+                                    cb(origin).await;
+                                }
+                            }
+                        }
                     }
                 }
             }

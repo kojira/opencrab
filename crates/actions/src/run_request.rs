@@ -24,6 +24,12 @@ pub type ContinuationSpeechHook = Arc<
         + Sync,
 >;
 
+/// #930: 走行中に畳み込んだ said の origin を read state（👀）として gateway へ通知する
+/// 非同期フック（core の `FoldedOriginHook` と一致させる）。best-effort（Result を返さない）。
+pub type ReadOriginHook = Arc<
+    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
+>;
+
 /// 走行中注入（#289）の対象範囲（#323 / B2）。
 ///
 /// #289 の走行中注入はターン開始後に届いたユーザー発言を、走っているターンの入力へ
@@ -77,6 +83,9 @@ pub struct RunRequest {
     /// extgate V3 は途中発話配送、intake は保存を行い、配送失敗（Err）は継続を止めてターンを
     /// 失敗させる。`on_response_text` は最終・text+tool でも発火するため区別できず流用不可。
     pub on_continuation_speech: Option<ContinuationSpeechHook>,
+    /// #930: 走行中に畳み込んだ said を LLM へ渡す時点で、その origin を read state（👀）として
+    /// 通知するフック。extgate V3 だけが渡す。None なら通知しない（従来挙動）。
+    pub on_read_origin: Option<ReadOriginHook>,
     /// 自動 dispatch（非ブロック / RFC #152 S3a）の完了再注入 sink（gateway 別）。
     /// Some のとき `run_agent_response` は depth0 でメインエンジンへ dispatcher を
     /// 注入し、dispatch 対象ツールを background subtask 化する。None なら従来どおり
@@ -168,6 +177,7 @@ impl RunRequest {
             trigger_message_id: None,
             on_response_text: None,
             on_continuation_speech: None,
+            on_read_origin: None,
             completion_sink: None,
             subtask_registry: None,
             reply_target: None,
@@ -207,6 +217,12 @@ impl RunRequest {
     /// #898: 継続分岐専用の途中発話フック（配送・保存・失敗伝播）を設定する。
     pub fn with_on_continuation_speech(mut self, cb: ContinuationSpeechHook) -> Self {
         self.on_continuation_speech = Some(cb);
+        self
+    }
+
+    /// #930: read state（👀）通知フックを設定する。
+    pub fn with_on_read_origin(mut self, cb: ReadOriginHook) -> Self {
+        self.on_read_origin = Some(cb);
         self
     }
 

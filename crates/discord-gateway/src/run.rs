@@ -237,6 +237,10 @@ fn spawn_say_consumer(
         // 別タスクで打つのでこのループはブロックしない。ガードはこのループ寿命に束ねて保持し、
         // consumer 終了時（＝プロセス終了時）にも drop されて止まる。
         let mut typing: Option<crate::typing::TypingKeepalive> = None;
+        // #930: 👀（accepted）を付けた発端 origin の集合。started と read の両方で付けるので、
+        // 同一 origin への二重付与を防ぐループローカルガード（1 origin 1 回）。
+        let mut accepted_origins: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         loop {
             match client.next_live(&address).await {
                 Some(LiveEvent::Message {
@@ -277,24 +281,31 @@ fn spawn_say_consumer(
                     }
                 }
                 Some(LiveEvent::Activity { state, origin, .. }) => {
-                    // 👀: LLM がこの発端メッセージをターン文脈に含めた時点（started+origin）で付ける。
-                    // record-only/held は started へ来ないので「読まれるまで付かない」が保たれる（R2）。
-                    if state == "started" {
+                    // 👀: LLM がこの入力をターン文脈に含めた時点で付ける。ターン発端は started+origin、
+                    // 走行中に畳み込んだ said は read+origin（#930）。1 origin 1 回（started と read が
+                    // 同一 origin に来ても二重付与しない）。record-only/held はどちらへも来ないので
+                    // 「読まれるまで付かない」が保たれる（R2 / #930）。
+                    if state == "started" || state == "read" {
                         if let Some(origin) = &origin {
-                            react_system(&transport, origin, &reactions.accepted).await;
+                            if accepted_origins.insert(origin.clone()) {
+                                react_system(&transport, origin, &reactions.accepted).await;
+                            }
                         }
                     }
                     // typing: core の platform-neutral activity を typing 開始/keepalive/停止へ機械的に
                     // 写す（設計 §5.4）。started で keepalive を起こし、ended（裁定A で say 配送後に届く）
-                    // で止める。channel が無い address（say 不可）では typing も出さない。best-effort。
-                    if let Some(channel) = &channel {
-                        typing = crate::typing::apply_activity_state(
-                            typing,
-                            &state,
-                            &transport,
-                            channel,
-                            crate::typing::TYPING_REFRESH_INTERVAL,
-                        );
+                    // で止める。read はターン境界ではないので typing を駆動しない（進行中を止めない）。
+                    // channel が無い address（say 不可）では typing も出さない。best-effort。
+                    if state != "read" {
+                        if let Some(channel) = &channel {
+                            typing = crate::typing::apply_activity_state(
+                                typing,
+                                &state,
+                                &transport,
+                                channel,
+                                crate::typing::TYPING_REFRESH_INTERVAL,
+                            );
+                        }
                     }
                 }
                 Some(LiveEvent::Completed { target }) => {

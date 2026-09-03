@@ -164,6 +164,30 @@ pub trait LiveInboundSource: Send + Sync {
     /// 新着が無ければ空 Vec（＝プロンプトは 1 バイトも変わらない）。取得に失敗した
     /// 場合も空 Vec を返し、ターンは続行する（best-effort）。
     fn poll_new_messages(&self) -> Vec<String>;
+
+    /// #930: 新着を **origin つき**で返す（read state の付与に使う）。
+    ///
+    /// エンジンは走行中に畳み込んだ said を LLM へ渡す時点で、その said の origin を
+    /// gateway へ通知して 👀（read）を付ける。origin を持たない源（steer 等）は既定実装の
+    /// まま `origin=None` を返してよい（read は付かない）。既定は [`Self::poll_new_messages`]
+    /// を origin なしに写すので、origin を運ぶ源だけがこれを override する。
+    fn poll_new_with_origin(&self) -> Vec<FoldedInbound> {
+        self.poll_new_messages()
+            .into_iter()
+            .map(|text| FoldedInbound { text, origin: None })
+            .collect()
+    }
+}
+
+/// #930: 走行中ターンへ畳み込む新着 said の 1 件（本文＋発端 origin）。
+///
+/// `text` は LLM 入力へ足す整形済み本文（従来の [`LiveInboundSource::poll_new_messages`]
+/// と同じ）。`origin` は「この said を読んだ時点で 👀（read）を付ける先」。origin を持つ源
+/// （ユーザー発話）だけが `Some`。
+#[derive(Debug, Clone)]
+pub struct FoldedInbound {
+    pub text: String,
+    pub origin: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

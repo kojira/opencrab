@@ -394,10 +394,12 @@ fn parse_activity(obj: &Value) -> Result<Activity, FrameError> {
     let binding_id = parse_uuid(&require_str(obj, "binding_id")?)?;
     let activity_id = parse_uuid(&require_str(obj, "activity_id")?)?;
     let state = nonempty_str(obj, "state")?;
-    if state != "started" && state != "ended" {
+    // #930: read state を additive に受理（started/ended に加える）。origin つきで 👀 を付ける。
+    // 未知 state は従来どおり拒否（既知集合のみ通す）。
+    if state != "started" && state != "ended" && state != "read" {
         return Err(FrameError::BadRequest);
     }
-    // R2(👀): origin は optional。欠落=None（旧 core 互換）。present は nonempty string。
+    // R2(👀)/#930(read): origin は optional。欠落=None（旧 core 互換）。present は nonempty string。
     let origin = match obj.get("origin") {
         None | Some(Value::Null) => None,
         Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),

@@ -742,6 +742,16 @@ impl SessionLiveInbound {
 
 impl opencrab_core::LiveInboundSource for SessionLiveInbound {
     fn poll_new_messages(&self) -> Vec<String> {
+        // origin つき経路へ委譲し、本文だけ取り出す（watermark 前進は 1 経路に集約）。
+        self.poll_new_with_origin()
+            .into_iter()
+            .map(|f| f.text)
+            .collect()
+    }
+
+    /// #930: 新着を origin つきで返す。各行の `metadata_json.external_origin`（record_inbound が
+    /// 保存）を read（👀）の付け先として載せる。origin が無い行（system 由来等）は None。
+    fn poll_new_with_origin(&self) -> Vec<opencrab_core::FoldedInbound> {
         use std::sync::atomic::Ordering;
 
         // 対象範囲（#323 / B2）。Silent は相手が不定なので DB を引くまでもなく空。
@@ -780,8 +790,24 @@ impl opencrab_core::LiveInboundSource for SessionLiveInbound {
         if let Some(max_id) = rows.iter().filter_map(|r| r.id).max() {
             self.watermark.store(max_id, Ordering::Relaxed);
         }
-        rows.iter().map(format_live_inbound).collect()
+        rows.iter()
+            .map(|row| opencrab_core::FoldedInbound {
+                text: format_live_inbound(row),
+                origin: external_origin_of(row),
+            })
+            .collect()
     }
+}
+
+/// #930: session log 行の `metadata_json.external_origin`（record_inbound が保存する発端 origin）
+/// を取り出す。read（👀）の付け先。metadata が無い / JSON 解析失敗 / field 無しは None。
+fn external_origin_of(log: &opencrab_db::queries::SessionLogRow) -> Option<String> {
+    let meta = log.metadata_json.as_deref()?;
+    let value: serde_json::Value = serde_json::from_str(meta).ok()?;
+    value
+        .get("external_origin")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 /// 走行中に届いた発言を LLM へ見せる形に整える（#289）。
@@ -1787,6 +1813,11 @@ pub async fn run_agent_response(
     // core / actions で型は構造一致（配送・保存を await し、失敗は継続を止める）。
     if let Some(cb) = req.on_continuation_speech {
         engine.set_on_continuation_speech(cb);
+    }
+
+    // #930: 走行中に畳み込んだ said の origin を read state（👀）として通知するフックを転記する。
+    if let Some(cb) = req.on_read_origin {
+        engine.set_on_folded_origin(cb);
     }
 
     // sleep のメンテナンスラン（#393）はここを配線しない = 生ログ（`memory_sessions`）に

@@ -49,8 +49,8 @@ pub use continue_marker::{
 };
 pub use engine::{
     ActionExecutor, ActionResult, ChatRequest, ChatResponse, DispatchCall, DispatchOutcome,
-    EngineResult, FunctionDefinition, LiveInboundSource, LlmCallLog, LlmClient, SkillEngine,
-    ToolCall, ToolDispatcher,
+    EngineResult, FoldedInbound, FunctionDefinition, LiveInboundSource, LlmCallLog, LlmClient,
+    SkillEngine, ToolCall, ToolDispatcher,
 };
 pub use heartbeat::HeartbeatConfig;
 pub use identity::Identity;
