@@ -5241,3 +5241,296 @@ async fn scenario_933_multi_said_fold_no_independent_turn() {
         caps
     );
 }
+
+// ===================================================================
+// #935【ターン build で一括取り込みされた said に 👀 が付かず、消費済み入力の
+//        独立ターンが走る（最終返答後の NO_REPLY・typing 残留）】
+//
+// R2/R2b は「発端 started」「走行中に畳み込んだ said の read」にしか 👀 付与点が無い。
+// **前ターン終了後に届き、次ターンの build（会話組み立て）で初めてプロンプトに入った said**
+// には付与点が無く、その seq は folded_seqs に入らないので独立ターンも skip されない。
+//
+// 再現構成（QC 実機 e52/e53 と同型・畳み込みではなく build 掃き込み）:
+//   said0（R935_A）が単一 iteration の低速 LLM 呼び出しで session lock を保持（poll なし＝fold
+//   しない）。その保持中に said1/said2（R935_B・別 message id）を受理→記録→独立ターンが lock 待ち。
+//   said0 のターン終了→ FIFO 先頭 said1 のターンが build（会話に said1 と said2 が両方載る・
+//   いずれも「新着メッセージ」ではない＝畳み込みでなく build 掃き込み）。
+//
+// 観測境界（赤の核心）:
+//   (A1) build 掃き込み said を読む said ターンの LLM 呼び出しは **ちょうど 1**（tip は 2＝
+//        said1 の build ＋ said2 自身の消費済み独立ターン）。
+//   (A2) said2 の 👀 は said1 の返信 say より **前**（tip は後＝自分の独立ターン started）。
+//   (A3) R935_BREPLY 返信 say は **1 件**（tip は 2＝独立ターンも二重返信）。
+// 現 tip は (A1)(A2)(A3) が赤。
+// ===================================================================
+const R935_CH: &str = "635";
+const R935_A: &str = "R935AMARK"; // said0（lock 保持・単一 iteration 低速）
+const R935_B: &str = "R935BMARK"; // said1 / said2（build 掃き込み対象）
+const R935_C: &str = "R935CMARK"; // 否定側 B（単独 said）
+const R935_A_REPLY: &str = "r935areply-sleep 実行するね（holding）";
+const R935_BREPLY: &str = "r935breply-date の結果はこうだよ";
+const R935_CREPLY: &str = "r935creply-単独 said の返信だよ";
+
+struct BuildSweepMock {
+    reqs: Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for BuildSweepMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let text = request_text(&request);
+        self.reqs.lock().unwrap().push(text.clone());
+        // 否定側 B: 単独 said（R935_C）は常に返信（独立ターンが走ることの pin）。
+        if text.contains(R935_C) {
+            return Ok(text_response(R935_CREPLY));
+        }
+        // said ターン（build 掃き込み・畳み込みではない）: R935_B を含み「新着メッセージ」でない。
+        // said1 の build も said2 の消費済み独立ターンも、会話に R935_B を含みここへ来る。返信させ、
+        // 呼び出し回数と返信 say 回数の両方を観測境界にする（tip は 2・fix は 1）。
+        if text.contains(R935_B) && !text.contains("新着メッセージ") {
+            return Ok(text_response(R935_BREPLY));
+        }
+        // said0（turn A）: 単一 iteration の低速返信で lock を保持（tool/CONTINUE なし＝poll なし＝
+        // fold しない）。この保持窓で said1/said2 が記録され独立ターンが lock 待ちに積まれる。
+        if text.contains(R935_A) {
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            return Ok(text_response(R935_A_REPLY));
+        }
+        Ok(text_response(FILLER))
+    }
+}
+
+#[tokio::test]
+async fn scenario_935_build_swept_said_read_and_no_independent_turn() {
+    let buf = install_capture();
+    let mock = Arc::new(BuildSweepMock {
+        reqs: Mutex::new(Vec::new()),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+    *core.state.tools_config.write().unwrap() = shell_enabled_tools_config();
+
+    let fixture = Fixture::new();
+    let _client = wire_instance_on_channel(&core, &fixture, R935_CH).await;
+
+    // said0: lock 保持ターン（低速・単一 iteration・fold なし）。
+    fixture.append_message_ch("9350", R935_CH, &format!("{R935_A} sleep 60 して"));
+
+    // turn A（said0）が低速呼び出しへ入った（lock 保持開始）ことを確認してから said1/said2 を投入。
+    let a_started = {
+        let mock = mock.clone();
+        wait_until(move || mock.reqs.lock().unwrap().iter().any(|t| t.contains(R935_A))).await
+    };
+    assert!(
+        a_started,
+        "said0（lock 保持ターン）が開始しない（テスト前提崩れ）: {:?}",
+        mock.reqs.lock().unwrap()
+    );
+
+    // lock 保持中に said1/said2 を受理。畳み込み点は無い（turn A は poll しない）ので、両者は
+    // それぞれ独立ターンが lock 待ちに積まれ、said0 終了後に said1 の build が said2 を掃き込む。
+    fixture.append_message_ch("9351", R935_CH, &format!("{R935_B} date 教えて"));
+    fixture.append_message_ch("9352", R935_CH, &format!("{R935_B} date 教えて"));
+
+    // said1 の build 返信が出るまで待つ。
+    let replied = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "say" && c.channel == R935_CH && c.body.contains(R935_BREPLY))
+        })
+        .await
+    };
+    assert!(
+        replied,
+        "said の build 返信 say が出ない: {:?}",
+        captured(&buf)
+    );
+
+    // said2 の消費済み独立ターン（build 掃き込み以外の 2 本目の R935_B 呼び出し）が現れるか、
+    // 上限まで待つ（fix なら現れず timeout）。
+    let _ = {
+        let mock = mock.clone();
+        wait_until(move || {
+            mock.reqs
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|t| t.contains(R935_B) && !t.contains("新着メッセージ"))
+                .count()
+                >= 2
+        })
+        .await
+    };
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    let caps = captured(&buf);
+
+    // (前提) said は畳み込み（新着メッセージ）ではなく build 掃き込みで入った。
+    let any_fold = mock
+        .reqs
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|t| t.contains(R935_B) && t.contains("新着メッセージ"));
+    assert!(
+        !any_fold,
+        "said が畳み込まれた（build 掃き込みでなく fold・#935 の経路を通っていない）: reqs={:?}",
+        mock.reqs.lock().unwrap()
+    );
+
+    // (前提) said1/said2 とも受理された（👀 が両 message に付いている）。
+    let eyes_on = |mid: &str| -> usize {
+        caps.iter()
+            .filter(|c| {
+                c.kind == "system_reaction" && c.emoji.contains(SYS_ACCEPTED) && c.message == mid
+            })
+            .count()
+    };
+    assert!(
+        eyes_on("9351") >= 1 && eyes_on("9352") >= 1,
+        "said1/said2 の 👀 が付いていない（テスト前提崩れ）: {:?}",
+        caps
+    );
+
+    // ---- (A1・赤の核心) build 掃き込み said を読む said ターンの LLM 呼び出しは 1 のはず ----
+    // tip は 2（said1 の build ＋ said2 の消費済み独立ターン）。
+    let said_b_calls = mock
+        .reqs
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|t| t.contains(R935_B) && !t.contains("新着メッセージ"))
+        .count();
+    assert_eq!(
+        said_b_calls, 1,
+        "build で一括取り込みした said の独立ターンが skip されず走った（#935 欠陥b・消費済み入力の \
+         二重処理）: build 掃き込み said を読む LLM 呼び出しが {said_b_calls} 件（1 が正）。reqs={:?}",
+        mock.reqs.lock().unwrap()
+    );
+
+    // ---- (A2・赤) said2 の 👀 は said1 の返信 say より前（build の LLM 投入時点で read）----
+    let idx_eyes_said2 = caps.iter().position(|c| {
+        c.kind == "system_reaction" && c.emoji.contains(SYS_ACCEPTED) && c.message == "9352"
+    });
+    let idx_first_breply = caps
+        .iter()
+        .position(|c| c.kind == "say" && c.channel == R935_CH && c.body.contains(R935_BREPLY));
+    assert!(
+        idx_eyes_said2.is_some() && idx_first_breply.is_some(),
+        "said2 の 👀 または build 返信 say が観測できない: {:?}",
+        caps
+    );
+    assert!(
+        idx_eyes_said2 < idx_first_breply,
+        "said2 の 👀 が返信より後（#935 欠陥a・build 一括取り込み分に付与点が無く、独立ターンの \
+         started まで遅れる）: 👀(9352) idx={:?} > breply idx={:?}",
+        idx_eyes_said2,
+        idx_first_breply
+    );
+
+    // ---- (A3・赤) build 返信 say は 1 件（消費済み独立ターンの二重返信を塞ぐ）----
+    let breply_says = caps
+        .iter()
+        .filter(|c| c.kind == "say" && c.channel == R935_CH && c.body.contains(R935_BREPLY))
+        .count();
+    assert_eq!(
+        breply_says, 1,
+        "build 掃き込み said の返信 say が 1 件でない（消費済み独立ターンが二重返信した・#935）: {:?}",
+        caps
+    );
+
+    // (支持) 👀 は各 said ちょうど 1 回（started/read の重複なし）。
+    assert_eq!(
+        eyes_on("9351"),
+        1,
+        "👀 が said1(9351) に 1 件でない: {:?}",
+        caps
+    );
+    assert_eq!(
+        eyes_on("9352"),
+        1,
+        "👀 が said2(9352) に 1 件でない: {:?}",
+        caps
+    );
+}
+
+// ===================================================================
+// #935【否定側・green 維持】走行ターンも畳み込みも build 掃き込みも無い単独 said は、
+// 独立ターンが 1 本走る（発端 seq を folded/consumed に入れて自滅しないことの pin）。
+// R2c が「build に載った said を一律 skip」する誤実装だと、発端 said 自身の唯一の
+// 独立ターンも skip され無応答になる。この否定側で over-skip を捕捉する。tip も fix も green。
+// ===================================================================
+#[tokio::test]
+async fn scenario_935_lone_said_still_runs_independent_turn() {
+    let buf = install_capture();
+    let mock = Arc::new(BuildSweepMock {
+        reqs: Mutex::new(Vec::new()),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+    *core.state.tools_config.write().unwrap() = shell_enabled_tools_config();
+
+    let fixture = Fixture::new();
+    let _client = wire_instance_on_channel(&core, &fixture, R935_CH).await;
+
+    // 走行ターンなし・畳み込みなし・build 掃き込みなしの単独 said。
+    fixture.append_message_ch("9360", R935_CH, &format!("{R935_C} 単発の質問"));
+
+    let replied = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "say" && c.channel == R935_CH && c.body.contains(R935_CREPLY))
+        })
+        .await
+    };
+    assert!(
+        replied,
+        "単独 said の独立ターン返信が出ない（over-skip の疑い・#935 否定側）: {:?}",
+        captured(&buf)
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let caps = captured(&buf);
+
+    // 単独 said の独立ターンはちょうど 1 本走る。
+    let c_calls = mock
+        .reqs
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|t| t.contains(R935_C))
+        .count();
+    assert_eq!(
+        c_calls,
+        1,
+        "単独 said の独立ターン LLM 呼び出しが 1 でない（0 なら over-skip）: reqs={:?}",
+        mock.reqs.lock().unwrap()
+    );
+    let creply_says = caps
+        .iter()
+        .filter(|c| c.kind == "say" && c.channel == R935_CH && c.body.contains(R935_CREPLY))
+        .count();
+    assert_eq!(
+        creply_says, 1,
+        "単独 said の返信 say が 1 件でない: {:?}",
+        caps
+    );
+    let eyes_c = caps
+        .iter()
+        .filter(|c| {
+            c.kind == "system_reaction" && c.emoji.contains(SYS_ACCEPTED) && c.message == "9360"
+        })
+        .count();
+    assert_eq!(eyes_c, 1, "単独 said(9360) の 👀 が 1 件でない: {:?}", caps);
+}
