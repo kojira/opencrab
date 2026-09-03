@@ -5804,3 +5804,151 @@ async fn scenario_935_lone_subtask_completion_resume_runs() {
         caps
     );
 }
+
+// ===================================================================
+// #935【初回ターン（起動直後）でも build 掃き込みに read+skip が効く】
+//
+// テストレビュー裁定: watermark 初期化を「ターン開始時の最新 id」に据えると、起動後の最初の
+// ターンで build に掃き込まれた said に read も skip も効かず QC 症状（👀 遅延・消費済み独立ターン・
+// typing 残留）が再配備直後に再現する。初回ターンの watermark は「発端行の log id」とし、発端より
+// 後に届いた said は初回ターンでも初投入として read+consumed にする。
+//
+// 構成: 起動直後、発端 A と直後の B を（同一 build に載るよう）連投。first turn（A のターン）の
+// build に A と B が両方載り、A が発端・B は掃き込み → B に read・B の独立ターンは skip。
+//
+// 観測境界（赤の核心・現行 session_max 初期化＝0d760a53 で赤）:
+//   (F1) B（掃き込み）を読む said ターンの LLM 呼び出しは 1（A のターンのみ）。tip は 2（B 独立ターン）。
+//   (F2) B の返信 say は 1（B 独立ターンの二重返信なし）。
+//   (F3) A の返信後、typing 増分 0（B 独立ターンが started/typing を打たない）。
+// ===================================================================
+const R935F_CH: &str = "639";
+const R935F_A: &str = "R935FAMARK"; // 発端
+const R935F_B: &str = "R935FBMARK"; // 直後に届き同一 build へ掃き込まれる
+const R935F_REPLY: &str = "r935freply-まとめて返信するね";
+
+struct FirstTurnSweepMock {
+    reqs: Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for FirstTurnSweepMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let text = request_text(&request);
+        self.reqs.lock().unwrap().push(text.clone());
+        // said ターン（build 掃き込み・畳み込みでない）→ 返信。A のターンも B の独立ターンも
+        // 会話に A/B を含みここへ来る（fold でないので「新着メッセージ」を含まない）。
+        if (text.contains(R935F_A) || text.contains(R935F_B)) && !text.contains("新着メッセージ")
+        {
+            // 発端 A のターンが少し lock を保持し、B が同一 build に載る猶予を作る（決定論化）。
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            return Ok(text_response(R935F_REPLY));
+        }
+        Ok(text_response(FILLER))
+    }
+}
+
+#[tokio::test]
+async fn scenario_935_first_turn_build_sweep_reads_and_skips() {
+    let buf = install_capture();
+    let mock = Arc::new(FirstTurnSweepMock {
+        reqs: Mutex::new(Vec::new()),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+    *core.state.tools_config.write().unwrap() = shell_enabled_tools_config();
+
+    let fixture = Fixture::new();
+    let _client = wire_instance_on_channel(&core, &fixture, R935F_CH).await;
+
+    // 起動直後、発端 A と直後の B を連投（同一 build に載せる＝初回ターンの掃き込み）。
+    fixture.append_message_ch("9390", R935F_CH, &format!("{R935F_A} 質問その1"));
+    fixture.append_message_ch("9391", R935F_CH, &format!("{R935F_B} 質問その2"));
+
+    let replied = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "say" && c.channel == R935F_CH && c.body.contains(R935F_REPLY))
+        })
+        .await
+    };
+    assert!(
+        replied,
+        "初回ターンの返信 say が出ない: {:?}",
+        captured(&buf)
+    );
+
+    // typing 基準化（返信後）。tip では B の独立ターンが started→typing を打つ。
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let typing_before = count_kind_on_channel(&buf, "typing", R935F_CH);
+    tokio::time::sleep(Duration::from_millis(9000)).await;
+    let typing_after = count_kind_on_channel(&buf, "typing", R935F_CH);
+
+    let caps = captured(&buf);
+
+    // (前提) A のターン build に A と B が両方載った（掃き込みが起きた）。畳み込み（新着）ではない。
+    let swept_together = mock
+        .reqs
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|t| t.contains(R935F_A) && t.contains(R935F_B) && !t.contains("新着メッセージ"));
+    assert!(
+        swept_together,
+        "A のターン build に B が掃き込まれていない（連投が同一 build に載っていない・前提崩れ）: reqs={:?}",
+        mock.reqs.lock().unwrap()
+    );
+
+    // (F1・赤の核心) B（掃き込み）を読む said ターンの LLM 呼び出しは 1（A のターンのみ）。
+    // 現行 session_max 初期化（0d760a53）では初回ターンが掃かず B の独立ターンが走る → 2（赤）。
+    let b_calls = mock
+        .reqs
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|t| t.contains(R935F_B) && !t.contains("新着メッセージ"))
+        .count();
+    assert_eq!(
+        b_calls,
+        1,
+        "初回ターンで build 掃き込みした B が独立ターンで再処理された（#935・初回 watermark 穴）: \
+         B を読む LLM 呼び出しが {b_calls} 件（1 が正）。reqs={:?}",
+        mock.reqs.lock().unwrap()
+    );
+
+    // (F2・赤) B の返信 say は 1（独立ターンの二重返信なし）。
+    let reply_says = caps
+        .iter()
+        .filter(|c| c.kind == "say" && c.channel == R935F_CH && c.body.contains(R935F_REPLY))
+        .count();
+    assert_eq!(
+        reply_says, 1,
+        "初回ターン掃き込みの返信 say が 1 件でない（B 独立ターンの二重返信・#935）: {:?}",
+        caps
+    );
+
+    // (F3・赤) B の 👀 は 1 件（read）。
+    let eyes_b = caps
+        .iter()
+        .filter(|c| {
+            c.kind == "system_reaction" && c.emoji.contains(SYS_ACCEPTED) && c.message == "9391"
+        })
+        .count();
+    assert_eq!(eyes_b, 1, "B(9391) の 👀 が 1 件でない: {:?}", caps);
+
+    // (F4・赤) 返信後 typing 増分 0（B 独立ターンが started/typing を打たない）。
+    assert_eq!(
+        typing_after, typing_before,
+        "初回ターン返信後に typing 再送出（B 独立ターンが started/typing を打った・#935）: \
+         before={typing_before} after={typing_after}"
+    );
+}

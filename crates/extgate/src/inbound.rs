@@ -748,10 +748,8 @@ pub(crate) async fn emit_read_and_consume_said(
     }
 }
 
-/// #935 (a)/(b): watermark 初期化用の「ターン開始時点の最新 log id」。poll（SessionLiveInbound）が
-/// `new` でターン開始時の最新 id を watermark に据えるのと同じ概念で、初回ターン（＝この session で
-/// まだ何もプロンプトへ入れていない）では**ターン開始時点で既に届いていた said を掃かない**ように
-/// する（restart 後の履歴・同時到着した別メンションを一括 skip しない）。以後は前進値を使う。
+/// #935 (a)/(b): 発端の無いターン（heartbeat 等）の watermark 初期化用「ターン開始時点の最新 log id」。
+/// 発端が無いので「開始時点で既に届いていた行」を掃く対象にしない（poll の `new` と同じ既定）。
 fn session_max_log_id(state: &Arc<ExtgateState>, session_id: &str) -> i64 {
     state
         .db
@@ -766,6 +764,22 @@ fn session_max_log_id(state: &Arc<ExtgateState>, session_id: &str) -> i64 {
             .ok()
         })
         .unwrap_or(0)
+}
+
+/// #935 (a)/(b): この origin（発端 said）の memory_sessions log id を read-only で引く（初回ターンの
+/// watermark 初期化用）。**発端の log id より後**に届いた行は初回ターンでも「初投入」＝read+consumed
+/// にし、発端より前の古い履歴（起動前の投稿）には read を出さない（再配備直後の最初のターンでも
+/// QC 症状＝👀 遅延・消費済み独立ターン・typing 残留を出さない）。無ければ None。
+fn origin_log_id(state: &Arc<ExtgateState>, session_id: &str, origin: &str) -> Option<i64> {
+    let conn = state.db.lock().ok()?;
+    conn.query_row(
+        "SELECT id FROM memory_sessions
+         WHERE session_id = ?1 AND json_extract(metadata_json, '$.external_origin') = ?2
+         ORDER BY id DESC LIMIT 1",
+        params![session_id, origin],
+        |r| r.get::<_, i64>(0),
+    )
+    .ok()
 }
 
 /// #935 (c3): watermark `after_id` より後の subtask 完了（`settle_completed` が書く system 行・
@@ -825,10 +839,13 @@ pub(crate) async fn mark_build_consumed_inputs(
     turn_origin: Option<&str>,
     own_completion: Option<&str>,
 ) {
-    // W = watermark。初回（未設定）は「ターン開始時点の最新 log id」で初期化する（poll と同じ概念）。
-    // これにより初回ターンでは既に届いていた said・完了を掃かない（restart 後の履歴や同時到着した
-    // 別メンションを一括 skip しない）。以後のターンは前進した値を使い、前ターン後に届いた分だけを掃く。
-    let init = session_max_log_id(state, session_id);
+    // W = watermark。初回（未設定）は**発端行の log id**で初期化する（発端 said があればその log id・
+    // 無ければターン開始時の最新 id）。これにより初回ターンでも「発端より後に届いた said/完了」は初投入
+    // として read+consumed になり（再配備直後の最初のターンでも QC 症状を出さない）、発端より前の古い
+    // 履歴には read を出さない。2 ターン目以降は前ターンで前進させた watermark をそのまま使う。
+    let init = turn_origin
+        .and_then(|o| origin_log_id(state, session_id, o))
+        .unwrap_or_else(|| session_max_log_id(state, session_id));
     let w = state.injected_watermark_or_init(session_id, init);
     let mut max_id = w;
 
