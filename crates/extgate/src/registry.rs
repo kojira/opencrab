@@ -275,6 +275,17 @@ pub struct ExtgateState {
     /// で正しく、非消費なので二重 take にも免疫。肥大は dequeue した seq より小さいエントリを prune
     /// （turn_queues は到着順 FIFO ＝ より小さい seq は既に dequeue 済みなので安全）。新 DB テーブルなし。
     folded_seqs: Mutex<HashMap<String, BTreeSet<i64>>>,
+    /// #935 (c3): 「消費済み入力」登録簿の完了 id 側。build で初描画された subtask 完了
+    /// （`[sN 完了]`）の subtask_id を session ごとに記録する。その完了に対する resume が
+    /// `run_v3_said_less_turn` 頭へ到達したとき `is_consumed_completion` が真なら **resume を
+    /// 起こさず skip**（消費済み入力の二重処理を防ぐ・said の [`folded_seqs`] と同型）。seq（i64・
+    /// prune 対象）と 完了 id（String）は型が違うため同一 session キーの下に別コレクションで持つ
+    /// （登録簿は 1 つ・#935 設計 (c3) の実装注記: prune は seq のみに意味があるため共通化しない）。
+    consumed_completions: Mutex<HashMap<String, std::collections::HashSet<String>>>,
+    /// #935 (a)/(b): 「プロンプトへ初投入した最終 log id」の per-session watermark（ターン跨ぎ）。
+    /// poll（`crate::process` SessionLiveInbound）の watermark 概念をターン跨ぎで持つ。build で
+    /// これより後の said が「初投入」＝発端以外は read+consumed・発端は started。ターン後に前進。
+    injected_watermark: Mutex<HashMap<String, i64>>,
     #[cfg(any(test, feature = "extgate-probe"))]
     pub probe: GateProbe,
 }
@@ -296,8 +307,48 @@ impl ExtgateState {
             reserved_tool_name: Mutex::new(None),
             turn_queues: Arc::new(SessionTurnQueues::new()),
             folded_seqs: Mutex::new(HashMap::new()),
+            consumed_completions: Mutex::new(HashMap::new()),
+            injected_watermark: Mutex::new(HashMap::new()),
             #[cfg(any(test, feature = "extgate-probe"))]
             probe: GateProbe::default(),
+        }
+    }
+
+    /// #935 (c3): この subtask 完了 id を「build で初描画＝消費済み」として登録簿へ記録する。
+    pub fn mark_consumed_completion(&self, session_id: &str, subtask_id: &str) {
+        if let Ok(mut map) = self.consumed_completions.lock() {
+            map.entry(session_id.to_string())
+                .or_default()
+                .insert(subtask_id.to_string());
+        }
+    }
+
+    /// #935 (c3): この完了 id が「消費済み」か（非消費・読み取りのみ）。resume 側は真なら skip する。
+    pub fn is_consumed_completion(&self, session_id: &str, subtask_id: &str) -> bool {
+        self.consumed_completions
+            .lock()
+            .ok()
+            .map(|map| map.get(session_id).is_some_and(|s| s.contains(subtask_id)))
+            .unwrap_or(false)
+    }
+
+    /// #935 (a)/(b): 「プロンプトへ初投入した最終 log id」watermark を読む。未設定なら `init`
+    /// （＝発端 said の log id）で初期化して返す。初期化により、初回ターンで履歴の古い said が
+    /// 「初投入」と誤判定されて read されるのを防ぐ（restart 後も同様）。
+    pub fn injected_watermark_or_init(&self, session_id: &str, init: i64) -> i64 {
+        self.injected_watermark
+            .lock()
+            .map(|mut map| *map.entry(session_id.to_string()).or_insert(init))
+            .unwrap_or(init)
+    }
+
+    /// #935 (a)/(b): watermark を単調前進させる（`id` が現在値より大きいときだけ更新）。
+    pub fn advance_injected_watermark(&self, session_id: &str, id: i64) {
+        if let Ok(mut map) = self.injected_watermark.lock() {
+            let e = map.entry(session_id.to_string()).or_insert(id);
+            if id > *e {
+                *e = id;
+            }
         }
     }
 

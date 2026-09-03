@@ -719,6 +719,168 @@ pub(crate) fn seq_for_origin(state: &ExtgateState, binding_id: &str, origin: &st
     .ok()
 }
 
+/// #935: build 初投入判定で 1 回に走査する行数の上限（暴走安全弁・超過分は次ターンで拾う）。
+const BUILD_CONSUMED_POLL_LIMIT: usize = 128;
+
+/// #935 (a)/(b): read state（👀）を emit しつつ、その said の `external_origins.seq` を「消費済み
+/// 入力」（`folded_seqs`）へ記録する共有実装。走行中畳み込み（R2b・on_read_origin フック）と
+/// build 初投入（R2c）の両方がここを通る（read 発火・mark の単一実装）。
+pub(crate) async fn emit_read_and_consume_said(
+    state: &Arc<ExtgateState>,
+    instance_id: &str,
+    binding_id: &str,
+    session_id: &str,
+    origin: &str,
+) {
+    let activity_id = uuid::Uuid::new_v4().to_string();
+    crate::listen::emit_activity(
+        state,
+        instance_id,
+        binding_id,
+        &activity_id,
+        "read",
+        Some(origin),
+        None,
+    )
+    .await;
+    if let Some(seq) = seq_for_origin(state, binding_id, origin) {
+        state.mark_folded_seq(session_id, seq);
+    }
+}
+
+/// #935 (a)/(b): watermark 初期化用の「ターン開始時点の最新 log id」。poll（SessionLiveInbound）が
+/// `new` でターン開始時の最新 id を watermark に据えるのと同じ概念で、初回ターン（＝この session で
+/// まだ何もプロンプトへ入れていない）では**ターン開始時点で既に届いていた said を掃かない**ように
+/// する（restart 後の履歴・同時到着した別メンションを一括 skip しない）。以後は前進値を使う。
+fn session_max_log_id(state: &Arc<ExtgateState>, session_id: &str) -> i64 {
+    state
+        .db
+        .lock()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT COALESCE(MAX(id), 0) FROM memory_sessions WHERE session_id = ?1",
+                params![session_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .ok()
+        })
+        .unwrap_or(0)
+}
+
+/// #935 (c3): watermark `after_id` より後の subtask 完了（`settle_completed` が書く system 行・
+/// `speaker_id IS NULL`・`metadata_json.type = "subtask_completed"`）の (subtask_id, log_id) を
+/// 古い順に返す。build で初描画される完了を consumed 化する対象。
+fn build_drawn_completions(
+    state: &Arc<ExtgateState>,
+    session_id: &str,
+    after_id: i64,
+) -> Vec<(String, i64)> {
+    let Ok(conn) = state.db.lock() else {
+        return Vec::new();
+    };
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT id, content FROM memory_sessions
+         WHERE session_id = ?1 AND log_type = 'system' AND speaker_id IS NULL AND id > ?2
+         ORDER BY id ASC",
+    ) else {
+        return Vec::new();
+    };
+    let rows = stmt.query_map(params![session_id, after_id], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+    });
+    let Ok(rows) = rows else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for row in rows.flatten() {
+        let (id, content) = row;
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+            if v.get("type").and_then(|t| t.as_str()) == Some("subtask_completed") {
+                if let Some(sid) = v.get("subtask_id").and_then(|s| s.as_str()) {
+                    out.push((sid.to_string(), id));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// #935 (a)/(b)/(c3): ターン build で初めてプロンプトへ入る行を「消費済み入力」として登録する。
+///
+/// - 前ターン終了後に届き未投入だった said（発端以外）に read+origin を出し seq を consumed 化
+///   （発端は started 済み・read しない = (b) の発端 skip）。
+/// - 初描画される subtask 完了を consumed 化（`own_completion`＝この resume 自身の発端完了は除く）。
+/// - watermark（初投入判定）をターン跨ぎで持ち、処理後に最大 log id へ前進させる。
+///
+/// 走行中畳み込み（R2b）とは同じ [`emit_read_and_consume_said`] を通す（単一実装）。判定範囲は
+/// `after_id`（前ターンまでに投入した最終 log id）より後の行のみ＝古い履歴を再 read しない。
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn mark_build_consumed_inputs(
+    state: &Arc<ExtgateState>,
+    instance_id: &str,
+    binding_id: &str,
+    session_id: &str,
+    agent_id: &str,
+    turn_origin: Option<&str>,
+    own_completion: Option<&str>,
+) {
+    // W = watermark。初回（未設定）は「ターン開始時点の最新 log id」で初期化する（poll と同じ概念）。
+    // これにより初回ターンでは既に届いていた said・完了を掃かない（restart 後の履歴や同時到着した
+    // 別メンションを一括 skip しない）。以後のターンは前進した値を使い、前ターン後に届いた分だけを掃く。
+    let init = session_max_log_id(state, session_id);
+    let w = state.injected_watermark_or_init(session_id, init);
+    let mut max_id = w;
+
+    // W より後の user-speech（build に載る初投入 said）を古い順に。発端は read しない。
+    let rows = {
+        let Ok(conn) = state.db.lock() else {
+            return;
+        };
+        opencrab_db::queries::list_user_speech_logs_after(
+            &conn,
+            session_id,
+            agent_id,
+            w,
+            None,
+            BUILD_CONSUMED_POLL_LIMIT,
+        )
+        .unwrap_or_default()
+    };
+    for row in &rows {
+        if let Some(id) = row.id {
+            max_id = max_id.max(id);
+        }
+        let Some(origin) = row
+            .metadata_json
+            .as_deref()
+            .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+            .and_then(|v| {
+                v.get("external_origin")
+                    .and_then(|o| o.as_str())
+                    .map(|s| s.to_string())
+            })
+        else {
+            continue;
+        };
+        if Some(origin.as_str()) == turn_origin {
+            continue; // 発端は started・read しない（(b) 発端 skip）
+        }
+        emit_read_and_consume_said(state, instance_id, binding_id, session_id, &origin).await;
+    }
+
+    // 初描画される subtask 完了を consumed 化（own_completion は除く＝resume 発端 skip）。
+    for (cid, id) in build_drawn_completions(state, session_id, w) {
+        max_id = max_id.max(id);
+        if Some(cid.as_str()) == own_completion {
+            continue;
+        }
+        state.mark_consumed_completion(session_id, &cid);
+    }
+
+    state.advance_injected_watermark(session_id, max_id);
+}
+
 fn record_inbound(
     tx: &Transaction<'_>,
     session_id: &str,
@@ -882,6 +1044,19 @@ fn enqueue_turn<R: AgentRuntime>(
                     None,
                 )
                 .await;
+                // #935 (a)/(b)/(c3): ターン build で初投入される said（発端以外）に read+origin を出し
+                // seq を consumed 化、初描画される subtask 完了も consumed 化する。発端 said はこの
+                // started が担うので read しない。R2b（走行中畳み込み）と同じ hook を通す単一実装。
+                mark_build_consumed_inputs(
+                    &state,
+                    &instance_id,
+                    &binding_id,
+                    &session_id,
+                    &agent_id,
+                    Some(origin.as_str()),
+                    None,
+                )
+                .await;
                 let caller = match state.db.lock() {
                     Ok(conn) => resolve_caller(
                         &conn,
@@ -1010,23 +1185,10 @@ fn enqueue_turn<R: AgentRuntime>(
                                         let hb = hb.clone();
                                         let hse = hse.clone();
                                         Box::pin(async move {
-                                            let activity_id = uuid::Uuid::new_v4().to_string();
-                                            crate::listen::emit_activity(
-                                                &hs,
-                                                &hi,
-                                                &hb,
-                                                &activity_id,
-                                                "read",
-                                                Some(origin.as_str()),
-                                                None,
-                                            )
-                                            .await;
-                                            // #933: 畳み込んだ said の seq を external_origins から
-                                            // 引き、per-session の畳み込み高水位へ単調に記録する
-                                            // （非消費）。以後この seq 以下の独立ターンは skip される。
-                                            if let Some(seq) = seq_for_origin(&hs, &hb, &origin) {
-                                                hs.mark_folded_seq(&hse, seq);
-                                            }
+                                            // #935: read 発火＋seq consumed 化は build 初投入（R2c）と
+                                            // 同じ共有実装を通す（2 系統にしない）。
+                                            emit_read_and_consume_said(&hs, &hi, &hb, &hse, &origin)
+                                                .await;
                                         })
                                     })
                                 })
