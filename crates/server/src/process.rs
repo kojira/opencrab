@@ -2447,6 +2447,72 @@ mod agent_visible_skill_index_tests {
     }
 }
 
+/// #923 §2.7 / DESIGN-SYSTEM-PROMPT-V2 §I-a: 常時集合の外にあるツールを system prompt へ
+/// 「カテゴリ→名前」の静的インデックス（`## More tools` 節）で列挙し、`describe_tools` で
+/// 取得させる。設定系カテゴリ（configuration / schedule & heartbeat / nostr keys /
+/// allowed commands）は **owner 発話ターンのみ**出す（design §4 の可視条件表・policy と対称）。
+///
+/// 観測境界は `build_agent_context` が返す system prompt 文字列そのもの。
+/// 現 tip（2fe4c1e0）では `## More tools` 節が存在しないため、存在 assert が **赤**。
+#[cfg(test)]
+mod more_tools_static_index_tests {
+    use super::build_agent_context;
+    use opencrab_actions::CallerIdentity;
+
+    /// owner 発話ターン: `## More tools` 節が存在し、設定カテゴリ（owner-only）も出る。
+    #[test]
+    fn owner_turn_has_more_tools_index_with_owner_categories() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let (prompt, _) = build_agent_context(&conn, "a1", &CallerIdentity::Owner);
+
+        assert!(
+            prompt.contains("## More tools"),
+            "owner ターンに静的 index 節（## More tools）が無い:\n{prompt}"
+        );
+        // describe_tools で取得する導線が明記される。
+        assert!(
+            prompt.contains("describe_tools("),
+            "静的 index に describe_tools の取得導線が無い:\n{prompt}"
+        );
+        // owner-only カテゴリ（設定）が owner には見える。
+        assert!(
+            prompt.contains("- configuration:"),
+            "owner ターンに設定カテゴリが無い:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("configure_llm_provider"),
+            "設定カテゴリに configure_llm_provider が無い:\n{prompt}"
+        );
+    }
+
+    /// 非 owner（Agent）発話ターン: `## More tools` 節は出る（常時集合外の共通カテゴリ）が、
+    /// owner-only の設定カテゴリは **不在**（design §4 可視条件・policy と対称）。
+    #[test]
+    fn nonowner_turn_index_omits_owner_only_categories() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let (prompt, _) = build_agent_context(&conn, "a1", &CallerIdentity::Agent);
+
+        // 共通カテゴリの静的 index 節自体は非 owner でも存在する。
+        assert!(
+            prompt.contains("## More tools"),
+            "非 owner ターンに静的 index 節（## More tools）が無い:\n{prompt}"
+        );
+        // owner-only カテゴリ（設定・heartbeat・nostr 鍵・allowed commands）は非 owner に不在。
+        assert!(
+            !prompt.contains("- configuration:"),
+            "設定カテゴリ（owner-only）が非 owner に漏れた:\n{prompt}"
+        );
+        assert!(
+            !prompt.contains("configure_llm_provider"),
+            "configure_llm_provider（owner-only）が非 owner に漏れた:\n{prompt}"
+        );
+        assert!(
+            !prompt.contains("set_my_heartbeat"),
+            "set_my_heartbeat（owner-only）が非 owner に漏れた:\n{prompt}"
+        );
+    }
+}
+
 /// #428: system プロンプトへの curated 記憶注入が `long_term/<見出し>`（取り込みの実形式）を
 /// 拾うことを固定する。従来は完全一致で引いていたため本番の `long_term/*` が 1 件も載らず、
 /// 手書き reference facts が全エージェントで死んでいた。

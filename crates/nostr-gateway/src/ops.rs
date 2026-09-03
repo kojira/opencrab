@@ -367,37 +367,31 @@ mod tests {
                 .find(|d| d["name"] == name)
                 .and_then(|d| d["description"].as_str())
                 .unwrap();
-            // #920: 発話は fire-and-forget（結果は返らず再呼び出しされない）を事実文で明示。
+            // #923: #914（9a6af850）の英文併記形へ戻す（#922 過少化の取り消し）。
             assert!(
-                description.contains(
-                    "結果は返らず、この呼び出しの後に再度呼び出されることはない（撃ちっぱなし・再開なし）。"
-                ),
-                "#920: {name} 説明文に fire-and-forget の事実文が無い: {description}"
+                description.contains("結果は返らない（撃ちっぱなし・再開はされない）。"),
+                "#923: {name} 説明文に #914 の fire-and-forget 事実文が無い: {description}"
             );
         }
-        // #920: reply は「N 件必要なら N 個をこの応答に置く」を事実文で明示。
+        // #923: reply は #914 英文「put N reply calls in THIS response」を含む。
         let reply_desc = arr
             .iter()
             .find(|d| d["name"] == "reply")
             .and_then(|d| d["description"].as_str())
             .unwrap();
         assert!(
-            reply_desc.contains("N 個の reply 呼び出しを置く"),
-            "#920: reply 説明文に N 件並置の事実文が無い: {reply_desc}"
+            reply_desc.contains("put N reply calls in THIS response"),
+            "#923: reply 説明文に #914 の N 件並置英文が無い: {reply_desc}"
         );
     }
 
-    /// DESIGN-PROMPT-INVENTORY-2026-09-03 §1-4 受け入れ（TDD・赤先行）。
-    ///
-    /// 発話 op（reaction / reply / repost）の説明文を「命令・強英文」から「事実」へ書換
-    /// （§2B B4/B5 統合・§3.7）。観測境界は `operation_declarations()` の各 description
-    /// （ops_projection.rs:158 が verbatim 投影する実体）。旧命令断片は count==0、書換後の
-    /// 全文と一致で pin する。現 tip（9a6af850）では旧強英文が残るため **赤**。
-    ///
-    /// 期待文字列: reply は §3.7 逐語。reaction / repost は §2B「同型」規則で機械導出
-    /// （B1 維持＋固定 merge 文＋op 別 fact 文）。test-review で設計意図との一致を確認する。
+    /// #923: 発話 op（reaction / reply / repost）の description を #914（9a6af850）の英文併記形へ
+    /// 戻す（#922 の過少化＝#923 の引数破損の過少因子を取り消す・DIRECTION-LOG 509）。
+    /// 観測境界は `operation_declarations()` の各 description（ops_projection.rs:158 が verbatim
+    /// 投影する実体）。#914 英文断片の存在（#913 断片 assert の復活）＋全文一致で pin する。
+    /// 現 tip では #922 の JP-only 文が入っているため **赤**。
     #[test]
-    fn utterance_descriptions_are_factual_rewrite_red() {
+    fn utterance_descriptions_match_914_english() {
         let decls = operation_declarations();
         let arr = decls.as_array().unwrap();
         let desc = |name: &str| -> String {
@@ -408,51 +402,34 @@ mod tests {
                 .to_string()
         };
 
-        // 旧命令・強英文・旧 JP B3 は 0 件（否定側・count）。
+        // #914 英文併記が復活している（#913 断片 assert を戻す・#922 の否定 assert を反転）。
         for name in ["reaction", "reply", "repost"] {
             let d = desc(name);
-            for frag in [
-                "This call returns nothing and you will NOT be invoked again after it",
-                "you will NOT be invoked again",
-                "結果は返らない（撃ちっぱなし・再開はされない）",
-                "1回の応答",
-                "呼び直す必要はない",
-            ] {
-                assert_eq!(
-                    d.matches(frag).count(),
-                    0,
-                    "{name}: 旧命令/強英文が残存: {frag:?}\n{d}"
-                );
-            }
-        }
-        for (name, old_n) in [
-            ("reaction", "put N reaction calls in THIS response"),
-            ("reply", "put N reply calls in THIS response"),
-            ("repost", "put N repost calls in THIS response"),
-        ] {
-            assert_eq!(
-                desc(name).matches(old_n).count(),
-                0,
-                "{name}: 旧 N 件並置命令が残存\n{}",
-                desc(name)
+            assert!(
+                d.contains("This call returns nothing and you will NOT be invoked again after it"),
+                "{name}: #914 の英文が無い（#922 過少化のまま）:\n{d}"
+            );
+            assert!(
+                d.contains("結果は返らない（撃ちっぱなし・再開はされない）"),
+                "{name}: #914 の JP 事実文が無い:\n{d}"
             );
         }
 
-        // 書換後の全文と一致（§2B 新文・事実形）。
+        // 全文一致（#914・9a6af850 逐語）。
         assert_eq!(
             desc("reaction"),
-            "イベントにリアクションする。event に会話の e番号、emoji に絵文字（省略可）。結果は返らず、この呼び出しの後に再度呼び出されることはない（撃ちっぱなし・再開なし）。N 件のリアクションが必要なら、この 1 応答に N 個の reaction 呼び出しを置く。",
-            "reaction 説明文が §2B 新文と一致しない"
+            "イベントにリアクションする。event に会話の e番号、emoji に絵文字（省略可）。結果は返らない（撃ちっぱなし・再開はされない）。複数のリアクションは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。This call returns nothing and you will NOT be invoked again after it. If you need N reactions, put N reaction calls in THIS response.",
+            "reaction 説明文が #914 全文と一致しない"
         );
         assert_eq!(
             desc("reply"),
-            "イベントに返信する。event に会話の e番号、text に返信本文。結果は返らず、この呼び出しの後に再度呼び出されることはない（撃ちっぱなし・再開なし）。N 件の返信が必要なら、この 1 応答に N 個の reply 呼び出しを置く。",
-            "reply 説明文が §2B 新文と一致しない"
+            "イベントに返信する。event に会話の e番号、text に返信本文。結果は返らない（撃ちっぱなし・再開はされない）。複数の返信は1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。This call returns nothing and you will NOT be invoked again after it. If you need N replies, put N reply calls in THIS response.",
+            "reply 説明文が #914 全文と一致しない"
         );
         assert_eq!(
             desc("repost"),
-            "イベントをリポストする。event に会話の e番号。結果は返らず、この呼び出しの後に再度呼び出されることはない（撃ちっぱなし・再開なし）。N 件のリポストが必要なら、この 1 応答に N 個の repost 呼び出しを置く。",
-            "repost 説明文が §2B 新文と一致しない"
+            "イベントをリポストする。event に会話の e番号。結果は返らない（撃ちっぱなし・再開はされない）。複数のリポストは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。This call returns nothing and you will NOT be invoked again after it. If you need N reposts, put N repost calls in THIS response.",
+            "repost 説明文が #914 全文と一致しない"
         );
     }
 }
