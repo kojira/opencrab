@@ -537,3 +537,141 @@ async fn owner_turn_projects_exactly_the_always_set_plus_describe_tools() {
         "owner 会話ターンの投影集合が常時集合 14＋describe_tools と一致しない",
     );
 }
+
+/// Nostr レーンの会話 op を供給する gateway。Discord との差は **repost**（Nostr 固有の発話 op）。
+/// reply/reaction/repost は発話クラス（DispatchMode::Utterance）、resolve は照会（Inline）。
+/// ＋常時集合の非会話部（execute_shell＋subtask 3）と、常時集合外の write op（kind0）。
+struct NostrFullGateway;
+
+#[async_trait]
+impl GatewayActions for NostrFullGateway {
+    fn definitions(&self) -> Vec<GatewayActionDef> {
+        let mk = |name: &str, dispatch: DispatchMode, sharing: ToolSharing| GatewayActionDef {
+            name: name.to_string(),
+            description: format!("{name} op"),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+            class: ToolClass {
+                dispatch,
+                sub_engine: SubEngineAccess::NotExposed,
+                sharing,
+            },
+        };
+        vec![
+            mk(
+                "reply",
+                DispatchMode::Utterance,
+                ToolSharing::ConversationBound,
+            ),
+            mk(
+                "reaction",
+                DispatchMode::Utterance,
+                ToolSharing::ConversationBound,
+            ),
+            // repost は Nostr の発話 op（会話の常時集合・レーン依存）。
+            mk(
+                "repost",
+                DispatchMode::Utterance,
+                ToolSharing::ConversationBound,
+            ),
+            mk(
+                "resolve",
+                DispatchMode::Inline,
+                ToolSharing::ConversationBound,
+            ),
+            mk(
+                "execute_shell",
+                DispatchMode::Inline,
+                ToolSharing::AgentBound,
+            ),
+            mk(
+                "spawn_subtask",
+                DispatchMode::Inline,
+                ToolSharing::AgentBound,
+            ),
+            mk(
+                "cancel_subtask",
+                DispatchMode::Inline,
+                ToolSharing::AgentBound,
+            ),
+            mk(
+                "steer_subtask",
+                DispatchMode::Inline,
+                ToolSharing::AgentBound,
+            ),
+            // 常時集合の外（Nostr の write op・静的 index の nostr カテゴリ行き）。
+            mk("kind0", DispatchMode::Inline, ToolSharing::AgentBound),
+        ]
+    }
+    async fn execute(
+        &self,
+        name: &str,
+        _a: &serde_json::Value,
+        _c: &GatewayCallContext,
+    ) -> GatewayActionResult {
+        GatewayActionResult {
+            success: true,
+            data: Some(serde_json::json!({"ok": name})),
+            error: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// §Nostr 裁定: Nostr 会話ターンの投影に **repost** が含まれる（常時集合 15＋describe_tools=16）。
+// 常時集合はレーン依存（Discord=reply/reaction/resolve、Nostr=reply/reaction/repost/resolve）。
+// 実装はハードコード列挙でなく発話クラス（Utterance）＋resolve で会話 op を常時に含める。
+// 現 tip（ALWAYS に repost 無し）では repost が投影から落ちるため **赤**。
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn nostr_owner_turn_projection_includes_repost_and_is_exactly_16() {
+    let (_dir, ctx) = ctx_for(CallerIdentity::Owner);
+    let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
+        .with_gateway_actions(std::sync::Arc::new(NostrFullGateway));
+    let (llm, captures) = CapturingMockLlm::new(vec![text_response("done")]);
+
+    let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+    engine
+        .run("You are the owner's agent on nostr", "hi", "mock-model")
+        .await
+        .unwrap();
+
+    let caps = captures.lock().unwrap();
+    assert_eq!(caps.len(), 1);
+    // repost が投影に含まれる（Nostr の常時発話 op）。
+    assert!(
+        caps[0].names.iter().any(|n| n == "repost"),
+        "Nostr 会話ターンの投影に repost が無い（常時集合がレーン依存になっていない）: {:?}",
+        caps[0].names
+    );
+    // 個数 ≤16（常時 15＋describe_tools）。
+    assert!(
+        caps[0].names.len() <= 16,
+        "Nostr 投影が 16 を超えた: {} {:?}",
+        caps[0].names.len(),
+        caps[0].names
+    );
+    // 等値 pin: Nostr の常時集合 15（会話 op 4＋execute_shell＋subtask 3＋memory 3＋ledger 3＋
+    // read_skill）＋describe_tools。kind0（write op）は常時集合外なので投影に出ない。
+    assert_projected_set_eq(
+        &caps[0].names,
+        &[
+            "reply",
+            "reaction",
+            "repost",
+            "resolve",
+            "execute_shell",
+            "spawn_subtask",
+            "cancel_subtask",
+            "steer_subtask",
+            "retrieve_memory_nodes",
+            "search_memory_index",
+            "browse_memory_index",
+            "open_task",
+            "record_task_progress",
+            "close_task",
+            "read_skill",
+            "describe_tools",
+        ],
+        "Nostr 会話ターンの投影集合が常時集合 15（repost 含む）＋describe_tools と一致しない",
+    );
+}
