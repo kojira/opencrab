@@ -1071,6 +1071,9 @@ pub fn default_non_dispatch_tools() -> HashSet<String> {
         "cancel_subtask",
         "report_progress",
         "steer_subtask",
+        // §2.7: describe_tools は同ターンの活性集合を親 executor に書くため inline 固定
+        // （detach すると子 executor に書いて親の list_tools に反映されない）。
+        "describe_tools",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -2325,6 +2328,17 @@ mod tests {
         );
     }
 
+    /// #923 §2.7: describe_tools は既定の非 dispatch 集合に含まれる（inline 固定の種）。
+    /// `inline_tool_names` はこの集合を種にするので、ここに入れることで
+    /// `should_dispatch("describe_tools") == false` が保証される。現 tip では未登録で **赤**。
+    #[test]
+    fn describe_tools_is_in_default_non_dispatch_tools() {
+        assert!(
+            default_non_dispatch_tools().contains("describe_tools"),
+            "describe_tools が default_non_dispatch_tools に無い（dispatch されると活性集合が親 executor に届かない）"
+        );
+    }
+
     /// RFC #152 S3a + S2 dormant 解消の実経路実証:
     /// dispatch した単一ツール（`nostr_generate_key`）が**合成 executor**
     /// （`BridgedExecutor` + gateway_actions = server ツール源）で実行され、完了が
@@ -2439,6 +2453,14 @@ mod tests {
         // （nostr_dm は #514 で撤去したのでここでは検証しない。）
         assert!(!dispatcher.should_dispatch("nostr_reply"));
         assert!(!dispatcher.should_dispatch("nostr_post"));
+        // #923 §2.7: describe_tools は inline（non-dispatch）必須。dispatch すると子 executor
+        // へ detach され、活性化したツール集合が親の list_tools に反映されない（実測・
+        // DIRECTION-LOG 508）。should_dispatch=false を観測境界で固定する。現 tip では
+        // describe_tools が非 dispatch 集合に無く should_dispatch=true なので **赤**。
+        assert!(
+            !dispatcher.should_dispatch("describe_tools"),
+            "describe_tools が dispatch 対象になっている（inline 固定でなければ活性化が親に届かない）"
+        );
 
         let outcome = dispatch_one(
             &dispatcher,

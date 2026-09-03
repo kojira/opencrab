@@ -320,6 +320,12 @@ pub fn build_agent_context(
     // Silent Reply は「相手が Bot か」でシステムが黙らせない。判断はエージェントへ委ね、
     // 沈黙は会話内容（完結した / 新しい情報が無い）で決めさせる（#486・理念: システムは
     // 相手が bot か判定しない）。ループ防止（元の意図）は種別ではなく内容の条件で残す。
+    // §2.7 静的 index（案 I-a・案B）: 「## More tools」節は build_agent_context では組まない。
+    // executor の effective_tool_definitions（policy＋run 済み・そのターンに実行可能な集合）から
+    // 「常時集合を除いた残り」をカテゴリ別に並べて run_agent_response で後付けする
+    // （[`build_more_tools_index`]）。lane（Nostr の会話/write op）と owner-only は effective に
+    // 現れるか否かで自動的に出し分けられる（build_agent_context の契約は変えない）。
+
     let prompt = format!(
         "You are {agent_name} ({persona}).\n\
          \n\
@@ -398,6 +404,118 @@ pub fn build_agent_context(
     );
 
     (prompt, agent_name)
+}
+
+/// #923 §2.7 静的 index（案B）: ツール名 → カテゴリの写像。1 か所に集約する。
+///
+/// 常時集合の外にあるツールを describe_tools で取得させるための分類。未知名は "other"。
+/// lane 依存（Nostr の会話/write op）や owner-only は「effective に現れるか」で決まるので、
+/// ここでは caller/lane を見ずに**名前だけ**で分類する（写像はレーン非依存）。
+fn tool_category(name: &str) -> &'static str {
+    if name.starts_with("mcp__") {
+        return "mcp";
+    }
+    match name {
+        "record_memory_unit"
+        | "record_memory_core"
+        | "tag_topic"
+        | "untag_topic"
+        | "merge_tags"
+        | "summarize_and_save"
+        | "plan_next_memory_window"
+        | "retract_memory_core"
+        | "retract_memory_unit"
+        | "update_memory_core"
+        | "read_my_history"
+        | "search_my_history"
+        | "survey_my_history" => "memory",
+        "create_skill" | "create_my_skill" | "retire_my_skill" | "restore_my_skill" => "skills",
+        "evaluate_response"
+        | "analyze_llm_usage"
+        | "learn_from_experience"
+        | "learn_from_peer"
+        | "reflect_and_learn"
+        | "recall_model_experiences"
+        | "save_model_insight"
+        | "generate_inner_voice"
+        | "update_impression" => "introspection",
+        "ws_read" | "ws_list" | "ws_write" | "ws_edit" | "ws_mkdir" | "ws_delete" => "workspace",
+        "update_task_contract" | "get_task" | "declare_done" => "tasks",
+        "configure_llm_provider"
+        | "configure_nostr"
+        | "configure_self"
+        | "configure_mcp_server"
+        | "select_llm"
+        | "update_instructions" => "configuration",
+        "set_my_heartbeat"
+        | "get_my_heartbeat"
+        | "update_heartbeat_instructions"
+        | "run_my_heartbeat"
+        | "read_heartbeat_instructions"
+        | "set_my_schedule"
+        | "get_my_schedules"
+        | "update_my_schedule"
+        | "delete_my_schedule" => "schedule & heartbeat",
+        "nostr_generate_key" | "nostr_list_keys" | "nostr_switch_identity" => "nostr keys",
+        "add_allowed_command" | "list_allowed_commands" | "remove_allowed_command" => {
+            "allowed commands"
+        }
+        "set_default_webhook"
+        | "get_default_webhook"
+        | "list_webhooks"
+        | "set_default_subtask_webhook"
+        | "get_default_subtask_webhook"
+        | "list_subtask_webhooks" => "webhook",
+        "get_system_info" | "update_memory_index_config" => "system",
+        // Nostr レーンの write/操作 op（Nostr gateway 接続時のみ effective に出る＝Nostr ターンのみ）。
+        "follow" | "unfollow" | "kind0" | "upload" | "nostr_post" | "nostr_reply" | "nostr_zap"
+        | "nostr_run" => "nostr",
+        _ => "other",
+    }
+}
+
+/// #923 §2.7 静的 index（案B）: そのターンの executor から「常時集合を除いた残り」を
+/// カテゴリ別に並べた「## More tools」節を作る。
+///
+/// **単一実装から導出**: 投影集合 = `list_tools()`、実行可能集合 = `effective_tool_definitions()`。
+/// 差（effective − 投影）＝「見えていないが describe_tools で呼べるツール」をカテゴリ分けする。
+/// lane（Nostr）と owner-only は effective に現れるか否かで自動的に出し分く（別の lane 分類を
+/// 新設しない）。空なら空文字列（節ごと出さない）。
+pub fn build_more_tools_index(executor: &opencrab_actions::BridgedExecutor) -> String {
+    use opencrab_core::ActionExecutor;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let projected: BTreeSet<String> = executor.list_tools().into_iter().map(|t| t.name).collect();
+    let mut by_cat: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
+    for def in executor.effective_tool_definitions() {
+        let name = def.definition.name;
+        if projected.contains(&name) {
+            continue;
+        }
+        by_cat.entry(tool_category(&name)).or_default().push(name);
+    }
+    if by_cat.is_empty() {
+        return String::new();
+    }
+    // "other" と "mcp" は最後に回し、それ以外はカテゴリ名昇順（BTreeMap 既定）。
+    let mut lines: Vec<String> = Vec::new();
+    let order_key = |c: &str| match c {
+        "mcp" => 1,
+        "other" => 2,
+        _ => 0,
+    };
+    let mut cats: Vec<(&'static str, Vec<String>)> = by_cat.into_iter().collect();
+    cats.sort_by(|a, b| order_key(a.0).cmp(&order_key(b.0)).then(a.0.cmp(b.0)));
+    for (cat, mut names) in cats {
+        names.sort();
+        lines.push(format!("- {cat}: {}", names.join(", ")));
+    }
+    format!(
+        "\n\n## More tools\n\nThe tools above are always available. Others are listed here by \
+         name; call describe_tools([\"name\", ...]) to load a tool's parameters, then call it — \
+         loaded tools stay available for the rest of this turn.\n{}",
+        lines.join("\n")
+    )
 }
 
 /// ピアレビュアーのロスターセクションを組み立てる。
@@ -1501,6 +1619,19 @@ pub async fn run_agent_response(
     let executor = match tool_event_sink {
         Some(sink) => executor.with_tool_event_sink(sink),
         None => executor,
+    };
+
+    // §2.7 案B: 「## More tools」静的 index を effective − 投影 から導出し system prompt へ後付け。
+    // executor が具体型（`BridgedExecutor`）のうちに計算する（この直後に Arc<dyn> へ包む）。
+    // lane（Nostr）・owner-only は effective に現れるかで自動的に出し分き、build_agent_context の
+    // 契約は変えない。
+    let more_tools_index = build_more_tools_index(&executor);
+    let system_prompt_owned;
+    let system_prompt = if more_tools_index.is_empty() {
+        system_prompt
+    } else {
+        system_prompt_owned = format!("{system_prompt}{more_tools_index}");
+        system_prompt_owned.as_str()
     };
 
     // Create LlmRouterAdapter with metrics recording.

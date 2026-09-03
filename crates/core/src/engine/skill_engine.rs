@@ -348,7 +348,8 @@ impl SkillEngine {
         // 以前はここで Anthropic 固有の cache_control を全リクエストに無条件付与して
         // いたが、読むのは anthropic だけ・system 分は黙って落ちる偽ユニバーサル
         // 抽象だった。エンジンはプロバイダ非依存のリクエストだけを組む。
-        let tools = self.executor.list_tools();
+        // §2.7: functions はループ内で毎イテレーション list_tools を取り直して組む（活性集合を
+        // 反映）。ここでの事前取得は結果を捨てる死んだ呼び出しだったので置かない。
 
         // ユーザーメッセージ本文（画像があればマルチパート）。
         let user_content = if image_urls.is_empty() {
@@ -554,6 +555,11 @@ impl SkillEngine {
                 stage = "llm_call",
                 "turn: LLM リクエスト 開始（入）"
             );
+
+            // §2.7: describe_tools でこのターンに活性化したツールを次イテレーションの関数集合へ
+            // 反映するため、毎イテレーション list_tools を取り直す（階層化しても depth>0 なら
+            // 常に同じ集合を返すので従来挙動と等価）。
+            let tools = self.executor.list_tools();
 
             let request = ChatRequest {
                 model: model.clone(),
