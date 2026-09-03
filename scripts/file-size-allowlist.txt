@@ -4,7 +4,6 @@
 862	crates/actions/src/llm_analysis.rs
 1843	crates/actions/src/memory_units.rs
 877	crates/actions/src/skill_management.rs
-4172	crates/actions/src/subtask.rs
 872	crates/actions/src/tools/shell.rs
 1703	crates/actions/src/webhook_target.rs
 1008	crates/actions/src/workspace.rs
