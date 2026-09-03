@@ -348,8 +348,8 @@ impl SkillEngine {
         // 以前はここで Anthropic 固有の cache_control を全リクエストに無条件付与して
         // いたが、読むのは anthropic だけ・system 分は黙って落ちる偽ユニバーサル
         // 抽象だった。エンジンはプロバイダ非依存のリクエストだけを組む。
-        // 初期 budget 見積り用（実際の各イテレーションは下のループ内で取り直す・§2.7）。
-        let _ = self.executor.list_tools();
+        // §2.7: functions はループ内で毎イテレーション list_tools を取り直して組む（活性集合を
+        // 反映）。ここでの事前取得は結果を捨てる死んだ呼び出しだったので置かない。
 
         // ユーザーメッセージ本文（画像があればマルチパート）。
         let user_content = if image_urls.is_empty() {

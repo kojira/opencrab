@@ -1390,7 +1390,13 @@ fn mcp_servers() -> Vec<opencrab_mcp::ConnectedServer> {
 }
 
 fn tool_names(executor: &opencrab_actions::BridgedExecutor) -> Vec<String> {
-    let mut names: Vec<_> = executor.list_tools().into_iter().map(|d| d.name).collect();
+    // #923: baseline_l2 は全ツール inventory の監査（LLM 投影ではない）。list_tools は depth0 で
+    // 常時集合に絞るため、inventory は narrowing 前の層 effective_tool_definitions() で捕捉する。
+    let mut names: Vec<_> = executor
+        .effective_tool_definitions()
+        .into_iter()
+        .map(|d| d.definition.name)
+        .collect();
     names.sort();
     names
 }
@@ -1835,7 +1841,12 @@ async fn collect_tool_execution(
     ];
     let mut definitions: BTreeMap<String, (usize, FunctionDefinition)> = BTreeMap::new();
     for (profile_index, (_, executor)) in owner_profiles.iter().enumerate() {
-        for definition in executor.list_tools() {
+        // #923: inventory 監査なので narrowing 前の effective_tool_definitions() で捕捉。
+        for definition in executor
+            .effective_tool_definitions()
+            .into_iter()
+            .map(|d| d.definition)
+        {
             if let Some((_, existing)) = definitions.get(&definition.name) {
                 let mut existing_definition = json!({
                     "description":existing.description,
@@ -1884,9 +1895,9 @@ async fn collect_tool_execution(
             .map(ToOwned::to_owned)
             .collect();
         let observed: BTreeSet<_> = executor
-            .list_tools()
+            .effective_tool_definitions()
             .into_iter()
-            .map(|definition| definition.name)
+            .map(|definition| definition.definition.name)
             .filter(|name| !name.starts_with("mcp__"))
             .collect();
         if expected != observed {
@@ -2579,9 +2590,9 @@ mod tests {
                 transport,
             )
             .0
-            .list_tools()
+            .effective_tool_definitions()
         })
-        .map(|definition| definition.name)
+        .map(|definition| definition.definition.name)
         .collect();
         let selected_tools: BTreeSet<_> = catalog
             .tool_execution
