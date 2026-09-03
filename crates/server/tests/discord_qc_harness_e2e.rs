@@ -72,22 +72,61 @@ struct Captured {
 }
 
 static BUFFER: OnceLock<Arc<Mutex<Vec<Captured>>>> = OnceLock::new();
+/// #925 H4: WARN レベルのイベントの `session_id` フィールドだけを溜める。fail-loud の
+/// 「発火せず warn」を観測境界にするため（binary 内で共有・累積・session_id で scope する）。
+static WARN_BUFFER: OnceLock<Arc<Mutex<Vec<String>>>> = OnceLock::new();
 static INIT: Once = Once::new();
 
 fn install_capture() -> Arc<Mutex<Vec<Captured>>> {
     let buf = BUFFER
         .get_or_init(|| Arc::new(Mutex::new(Vec::new())))
         .clone();
+    let warn = WARN_BUFFER
+        .get_or_init(|| Arc::new(Mutex::new(Vec::new())))
+        .clone();
     INIT.call_once(|| {
-        let layer = CaptureLayer { buf: buf.clone() };
+        let layer = CaptureLayer {
+            buf: buf.clone(),
+            warn,
+        };
         let subscriber = tracing_subscriber::registry().with(layer);
         let _ = tracing::subscriber::set_global_default(subscriber);
     });
     buf
 }
 
+/// WARN イベントのうち指定 `session_id` フィールドを持つものの件数（#925 H4 fail-loud）。
+fn warns_with_session(session_id: &str) -> usize {
+    WARN_BUFFER
+        .get_or_init(|| Arc::new(Mutex::new(Vec::new())))
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|s| s.as_str() == session_id)
+        .count()
+}
+
 struct CaptureLayer {
     buf: Arc<Mutex<Vec<Captured>>>,
+    warn: Arc<Mutex<Vec<String>>>,
+}
+
+#[derive(Default)]
+struct WarnVisitor {
+    session_id: Option<String>,
+}
+
+impl tracing::field::Visit for WarnVisitor {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "session_id" {
+            self.session_id = Some(value.to_string());
+        }
+    }
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "session_id" {
+            self.session_id = Some(format!("{value:?}"));
+        }
+    }
 }
 
 #[derive(Default)]
@@ -125,19 +164,28 @@ impl tracing::field::Visit for Visitor {
 
 impl<S: tracing::Subscriber> Layer<S> for CaptureLayer {
     fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
-        if event.metadata().target() != DRY_RUN_TARGET {
+        let meta = event.metadata();
+        if meta.target() == DRY_RUN_TARGET {
+            let mut v = Visitor::default();
+            event.record(&mut v);
+            self.buf.lock().unwrap().push(Captured {
+                kind: v.kind.unwrap_or_default(),
+                body: v.body.unwrap_or_default(),
+                emoji: v.emoji.unwrap_or_default(),
+                channel: v.channel.unwrap_or_default(),
+                message: v.message.unwrap_or_default(),
+                reply_id: v.reply_id.unwrap_or_default(),
+            });
             return;
         }
-        let mut v = Visitor::default();
-        event.record(&mut v);
-        self.buf.lock().unwrap().push(Captured {
-            kind: v.kind.unwrap_or_default(),
-            body: v.body.unwrap_or_default(),
-            emoji: v.emoji.unwrap_or_default(),
-            channel: v.channel.unwrap_or_default(),
-            message: v.message.unwrap_or_default(),
-            reply_id: v.reply_id.unwrap_or_default(),
-        });
+        // #925 H4: WARN の session_id を溜める（fail-loud の「発火せず warn」の観測境界）。
+        if *meta.level() == tracing::Level::WARN {
+            let mut wv = WarnVisitor::default();
+            event.record(&mut wv);
+            if let Some(sid) = wv.session_id {
+                self.warn.lock().unwrap().push(sid);
+            }
+        }
     }
 }
 
@@ -3717,7 +3765,12 @@ fn set_hb_instructions(core: &Core, text: &str) {
     .unwrap();
 }
 
-/// heartbeat 設定行を seed する（enabled・このセッションが heartbeat 対象という前提を実データで置く）。
+/// heartbeat 設定行を seed する（このセッションが heartbeat 対象という**前提**を実データで置く）。
+///
+/// 本テストは受け口（`resolve_target` → `run_one_heartbeat`）を駆動するので、この行の**列挙**
+/// （`list_and_build_heartbeat_entries`）と interval 計算は通らない（それは bin 側で integration
+/// test から不可視・scheduler 単体テストの範囲）。ここでは「configured なセッションだけが発火先に
+/// なる」という前提を明示するために置く（seam 駆動でも観測結果は変わらない）。
 fn seed_hb_config(core: &Core, session_id: &str) {
     let conn = core.extgate.db.lock().unwrap();
     opencrab_db::queries::upsert_session_heartbeat_config(
@@ -3952,10 +4005,40 @@ async fn heartbeat_h1_two_posts_flag_only_on_last() {
         "🏁 が heartbeat 最終投稿に 1 件で付かない: {:?}",
         captured(&buf)
     );
-    // typing: heartbeat ターンでも activity started で入力中が立つ（Discord のみ）。開始を 1 件は観測。
+    // typing（Discord のみ・§5.4）: activity started で入力中が立ち、ended で止まる。dry-run は
+    // 「打った」ときだけ kind="typing" を出す（停止は keepalive の drop で、独立イベントは無い）ので、
+    // 観測できる形で「1 件目の前に開始・最終投稿以降は打たない（＝停止）」を pin する:
+    //   ① CH_HB1 の typing が 1 件以上（開始）。
+    //   ② 最初の typing が本文1 の say より前（1 件目の前に開始）。
+    //   ③ 最後の typing が本文2 の say より前（2 件目の後には打っていない＝ターン終了で停止）。
+    let ch_idx = |kind: &str, body: &str| -> Vec<usize> {
+        captured(&buf)
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                c.channel == CH_HB1 && c.kind == kind && (body.is_empty() || c.body.contains(body))
+            })
+            .map(|(i, _)| i)
+            .collect()
+    };
+    let typing_idxs = ch_idx("typing", "");
+    let b1_idxs = ch_idx("say", HB1_B1);
+    let b2_idxs = ch_idx("say", HB1_B2);
     assert!(
-        count_kind_on_channel(&buf, "typing", CH_HB1) >= 1,
-        "heartbeat ターンで typing（入力中）が観測されない（Discord）: {:?}",
+        !typing_idxs.is_empty(),
+        "heartbeat ターンで typing（入力中）が観測されない（Discord・§5.4 開始）: {:?}",
+        captured(&buf)
+    );
+    let first_b1 = *b1_idxs.iter().min().expect("本文1 の say index");
+    let last_b2 = *b2_idxs.iter().max().expect("本文2 の say index");
+    assert!(
+        *typing_idxs.iter().min().unwrap() < first_b1,
+        "typing の開始が 1 件目の投稿より後（§5.4 開始は 1 件目の前）: {:?}",
+        captured(&buf)
+    );
+    assert!(
+        *typing_idxs.iter().max().unwrap() < last_b2,
+        "最終投稿より後に typing が打たれた（§5.4 2 件目の後には打たない＝停止）: {:?}",
         captured(&buf)
     );
 }
@@ -4186,10 +4269,11 @@ async fn heartbeat_h3_declaration_then_subtask_then_report() {
 }
 
 // ---------------------------------------------------------------------------
-// H4: binding 未接続（gateway 停止中）に時刻到来 → 配送 0・LLM 0・投稿捏造 0（fail-loud）。
-//   binding 行は DB にあるが instance が live でない（spawn しない）。緑では
-//   `resolve_target` は解決するが sink の live 判定で fail-loud（warn・無配送・ターン未実行）、
-//   現 tip では descriptor 未登録で発火せず。どちらも配送・LLM・捏造は 0（fail-loud ガード）。
+// H4: binding 未接続（gateway 停止中）に時刻到来 → **warn 1**・配送 0・LLM 0・投稿捏造 0（fail-loud）。
+//   binding 行は DB にあるが instance が live でない（spawn しない）。赤先行の観測境界は
+//   §2.1 の **warn 1**: 現 tip は descriptor 未登録 → resolve_target None → seam が skip（warn 0）→ 赤。
+//   実装後は resolve_target が解決し、sink の live 判定で fail-loud（session_id 付き warn 1・無配送・
+//   ターン未実行）→ 緑。配送 0・LLM 0・捏造 0 は「未接続でも投稿を捏造しない」否定側ガード。
 // ---------------------------------------------------------------------------
 struct HbDownMock {
     total: std::sync::atomic::AtomicUsize,
@@ -4231,6 +4315,15 @@ async fn heartbeat_h4_unbound_gateway_fires_nothing() {
     fire_heartbeat_via_scheduler_seam(&core, &session_id).await;
     tokio::time::sleep(Duration::from_millis(800)).await;
 
+    // 赤の signal（§2.1 warn 1・§1.5 fail-loud）: 未接続 binding へ時刻が到来したら、発火せず
+    // **この session_id を持つ warn を 1 件**残す。現 tip は extgate descriptor 未登録で
+    // resolve_target が None → seam が黙って skip（warn 0）→ 赤。実装後は resolve_target は解決し、
+    // sink が binding 未接続（instance が live でない）を検知して発火を諦め warn 1 → 緑。
+    assert_eq!(
+        warns_with_session(&session_id),
+        1,
+        "未接続 binding の時刻到来で fail-loud warn（session_id 付き）が 1 件出ない（§1.5・現 tip は skip で warn 0）"
+    );
     // 配送 0（捏造投稿 0）。
     assert_eq!(
         count_kind_on_channel(&buf, "say", CH_HB4),
