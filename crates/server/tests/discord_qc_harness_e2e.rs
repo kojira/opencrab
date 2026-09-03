@@ -4353,3 +4353,337 @@ async fn heartbeat_h4_unbound_gateway_fires_nothing() {
         "未接続 binding で speech が保存された"
     );
 }
+
+// ===================================================================
+// #930【👀 は LLM にその入力を渡した時点で付ける】
+// 発端 A だけでなく、ターン走行中に届いて次イテレーションへ畳み込まれた B も、
+// B を含む LLM 呼び出しが起きた時点で B へ 👀 を 1 回付ける（返信の後ではない）。
+//
+// 仕様: DIRECTION-LOG 116/544・DESIGN-DETAIL-RULINGS:43・issue #930。
+//
+// 再現（root cause #930）: A は execute_shell(sleep) で背景 subtask を起こしつつ、
+// ターンを継続（CONTINUE）してセッションロックを保持したまま回る。走行中に B が届くと
+// core は B を session log に記録し、A ターンの継続イテレーション（iterations>1）で
+// `poll_new_messages` により B を畳み込む（llm_logs: is_bot_iteration=1 に B が入る）。
+// だが現状 👀 は `activity started` の origin にだけ付く（run.rs:284）。畳み込みには
+// started が出ないので、B の 👀 は「B 自身の後続ターン」の started まで遅れる＝**返信の後**。
+//
+// 期待（設計）: 畳み込み時点で core が `activity read`+origin(B) を出し、gateway が
+// その時点で B へ 👀 を付ける（1 origin 1 回）。＝ B の 👀 は B への返信より**前**。
+//
+// 観測境界（§1 標準5点）:
+//  (1) 配送: B への返信 say が出る。
+//  (2) LLM: いずれかの呼び出しが「新着メッセージ」として B を畳み込んでいる（fold 経路の確証）。
+//  (3) 👀 回数: A に 1・B に 1（重複 0）。
+//  (4) 👀 順序（**赤の核心**）: B の 👀 の capture index が B への最初の返信 say より前。
+//      かつ A の宣言 say の後（B 到着時点ではなく畳み込み時点で付く）。
+//  (5) 🏁: B への返信に 🏁 0（A の subtask 進行中＝idle でない）。
+// 現 tip は (4) が **赤**（👀 が返信の後に付く）。
+// ===================================================================
+const R930_CH: &str = "630";
+const R930_A: &str = "R930AMARK";
+const R930_B: &str = "R930BMARK";
+const R930_DECL: &str = "r930decl-調べてるね（宣言・holding）";
+const R930_BREPLY: &str = "r930breply-date の結果はこうだよ";
+
+struct EyesOnReadMock {
+    reqs: Mutex<Vec<String>>,
+    emitted_sleep: std::sync::atomic::AtomicBool,
+    continues: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for EyesOnReadMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let text = request_text(&request);
+        self.reqs.lock().unwrap().push(text.clone());
+        // 畳み込まれた B を含む呼び出し → B へ返信して自然終了。
+        if text.contains(R930_B) {
+            return Ok(text_response(R930_BREPLY));
+        }
+        // A 初回 → execute_shell(sleep) で背景 subtask（🏁 抑制条件＝agent に running subtask）。
+        if text.contains(R930_A)
+            && !self
+                .emitted_sleep
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Ok(tool_call_response(
+                "execute_shell",
+                serde_json::json!({ "command": "sleep", "args": ["8"] }),
+            ));
+        }
+        // spawn 後の継続: 宣言＋CONTINUE でロックを保持したまま B の到着を待つ（畳み込み窓）。
+        // 上限を設けて B が来ないときも自然終了させる（否定テスト・暴走防止）。
+        let c = self
+            .continues
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if c < 20 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            Ok(text_response(&format!("{R930_DECL}\nCONTINUE")))
+        } else {
+            Ok(text_response(FILLER))
+        }
+    }
+}
+
+#[tokio::test]
+async fn scenario_930_eyes_on_read_folded_midturn_message() {
+    let buf = install_capture();
+    let mock = Arc::new(EyesOnReadMock {
+        reqs: Mutex::new(Vec::new()),
+        emitted_sleep: std::sync::atomic::AtomicBool::new(false),
+        continues: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+    // sleep を実走させる（背景 subtask）。
+    *core.state.tools_config.write().unwrap() = shell_enabled_tools_config();
+
+    let fixture = Fixture::new();
+    let _client = wire_instance_on_channel(&core, &fixture, R930_CH).await;
+
+    // 発端 A: 「sleep して終わったら教えて」。
+    fixture.append_message_ch(
+        "6301",
+        R930_CH,
+        &format!("{R930_A} sleep して終わったら教えて"),
+    );
+
+    // A の宣言 say が出る＝subtask 起動＆ターンが CONTINUE ループでロック保持中。
+    let a_ready = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "say" && c.channel == R930_CH && c.body.contains(R930_DECL))
+        })
+        .await
+    };
+    assert!(
+        a_ready,
+        "A の宣言 say が出ない（subtask/継続未達）: {:?}",
+        captured(&buf)
+    );
+    // 前提: この時点で subtask（sleep 8）が走行中（🏁 抑制条件・false-red 防止）。
+    assert!(
+        core.state
+            .subtask_registries
+            .has_running_for_agent(AGENT_ID),
+        "A 宣言時点で subtask が走行中でない（sleep 窓を過ぎた・テスト前提崩れ）"
+    );
+
+    // 走行中に B が届く（A の宣言配送後・畳み込み前）。
+    fixture.append_message_ch(
+        "6302",
+        R930_CH,
+        &format!("{R930_B} その間に date の結果教えて"),
+    );
+
+    // B への返信 say が出るまで待つ（sleep 8 の窓内）。
+    let breplied = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "say" && c.channel == R930_CH && c.body.contains(R930_BREPLY))
+        })
+        .await
+    };
+    assert!(breplied, "B への返信 say が出ない: {:?}", captured(&buf));
+    // 返信時点でも subtask 走行中（🏁 抑制の前提を明示・false-red 防止）。
+    assert!(
+        core.state
+            .subtask_registries
+            .has_running_for_agent(AGENT_ID),
+        "B 返信時点で subtask が走行中でない（sleep 窓を過ぎた・テスト前提崩れ）: {:?}",
+        captured(&buf)
+    );
+    // 現 tip は 👀 が返信の後に付く。その遅延 👀 が現れるまでの猶予（付かない/遅い両方を捉える）。
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+
+    let caps = captured(&buf);
+
+    // ---- (2) LLM: B が「新着メッセージ」として畳み込まれた呼び出しがある（fold 経路の確証）。----
+    let folded = mock
+        .reqs
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|t| t.contains(R930_B) && t.contains("新着メッセージ"));
+    assert!(
+        folded,
+        "B が走行中ターンへ畳み込まれていない（poll_new_messages 経路を通っていない・テスト前提崩れ）: reqs={:?}",
+        mock.reqs.lock().unwrap()
+    );
+
+    // ---- (1) 配送: B への返信 say が最低 1 件。----
+    let first_breply_idx = caps
+        .iter()
+        .position(|c| c.kind == "say" && c.channel == R930_CH && c.body.contains(R930_BREPLY))
+        .expect("B への返信 say の index");
+
+    // ---- (3) 👀 回数: A に 1・B に 1。----
+    let eyes_on = |mid: &str| -> Vec<usize> {
+        caps.iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                c.kind == "system_reaction" && c.emoji.contains(SYS_ACCEPTED) && c.message == mid
+            })
+            .map(|(i, _)| i)
+            .collect()
+    };
+    let eyes_a = eyes_on("6301");
+    let eyes_b = eyes_on("6302");
+    assert_eq!(
+        eyes_a.len(),
+        1,
+        "👀 が発端 A（6301）に 1 件でない: {:?}",
+        caps
+    );
+    assert_eq!(
+        eyes_b.len(),
+        1,
+        "👀 が畳み込まれた B（6302）に 1 件でない（0=付かない / 2=重複）: {:?}",
+        caps
+    );
+    let eyes_b_idx = eyes_b[0];
+
+    // A の宣言 say の最初の index（👀 on B が「B 到着時点」でなく「畳み込み時点以降」に付くことの下限）。
+    let first_decl_idx = caps
+        .iter()
+        .position(|c| c.kind == "say" && c.channel == R930_CH && c.body.contains(R930_DECL))
+        .expect("A の宣言 say の index");
+
+    // ---- (4) 👀 順序（赤の核心）: B の 👀 は B への最初の返信より **前**、かつ宣言の後。----
+    assert!(
+        eyes_b_idx > first_decl_idx,
+        "👀 on B が宣言より前に付いた（畳み込み前に付与）: decl_idx={first_decl_idx} eyes_b_idx={eyes_b_idx} caps={caps:?}"
+    );
+    assert!(
+        eyes_b_idx < first_breply_idx,
+        "👀 on B が B への返信より後に付いた（#930: LLM に渡した時点で付けるべき・現 tip は返信後）: eyes_b_idx={eyes_b_idx} first_breply_idx={first_breply_idx} caps={caps:?}"
+    );
+
+    // ---- (5) 🏁: B への返信 say に 🏁 0（A の subtask 進行中＝idle でない）。----
+    let breply_mids: Vec<String> = caps
+        .iter()
+        .filter(|c| c.kind == "say" && c.channel == R930_CH && c.body.contains(R930_BREPLY))
+        .map(|c| c.message.clone())
+        .collect();
+    let flag_on_breply: usize = breply_mids
+        .iter()
+        .map(|mid| {
+            caps.iter()
+                .filter(|c| {
+                    c.kind == "system_reaction"
+                        && c.emoji.contains(SYS_COMPLETED)
+                        && &c.message == mid
+                })
+                .count()
+        })
+        .sum();
+    assert_eq!(
+        flag_on_breply, 0,
+        "🏁 が B への返信に付いた（subtask 進行中は idle でない・🏁 0 のはず）: {:?}",
+        caps
+    );
+}
+
+// ===================================================================
+// #930 否定側: 走行中に B が届かないターンでは read（👀 の追加付与）は出ない。
+// CONTINUE ループ（iterations>1・poll_new_messages が毎回引かれる）でも、新着が無ければ
+// 👀 は発端 A の 1 件のみ。＝ read が空 poll で誤発火しないことのガード（恒真防止）。
+// ===================================================================
+const R930N_CH: &str = "631";
+const R930N_A: &str = "R930NAMARK";
+const R930N_SAY: &str = "r930n-作業して終わり";
+
+struct NoMidturnMock {
+    continues: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for NoMidturnMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        // 数イテレーション CONTINUE で回してから自然終了（新着注入は無し）。
+        let c = self
+            .continues
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if c < 3 {
+            Ok(text_response(&format!("{R930N_SAY}\nCONTINUE")))
+        } else {
+            Ok(text_response(R930N_SAY))
+        }
+    }
+}
+
+#[tokio::test]
+async fn scenario_930_no_read_reaction_without_midturn_message() {
+    let buf = install_capture();
+    let mock = Arc::new(NoMidturnMock {
+        continues: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let _client = wire_instance_on_channel(&core, &fixture, R930N_CH).await;
+
+    fixture.append_message_ch("6311", R930N_CH, &format!("{R930N_A} 少し作業して"));
+
+    // ターンの say が出るまで待つ。
+    let done = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "say" && c.channel == R930N_CH && c.body.contains(R930N_SAY))
+        })
+        .await
+    };
+    assert!(done, "作業 say が出ない: {:?}", captured(&buf));
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let caps = captured(&buf);
+    // 👀 は発端 A（6311）に 1 件のみ。他 id への 👀（read 誤発火）は 0。
+    let eyes_on_a = caps
+        .iter()
+        .filter(|c| {
+            c.kind == "system_reaction"
+                && c.emoji.contains(SYS_ACCEPTED)
+                && c.channel == R930N_CH
+                && c.message == "6311"
+        })
+        .count();
+    assert_eq!(eyes_on_a, 1, "👀 が発端 A（6311）に 1 件でない: {:?}", caps);
+    let eyes_other = caps
+        .iter()
+        .filter(|c| {
+            c.kind == "system_reaction"
+                && c.emoji.contains(SYS_ACCEPTED)
+                && c.channel == R930N_CH
+                && c.message != "6311"
+        })
+        .count();
+    assert_eq!(
+        eyes_other, 0,
+        "新着の無いターンで 👀 が発端以外へ付いた（read の空 poll 誤発火）: {:?}",
+        caps
+    );
+}
