@@ -358,9 +358,11 @@ async fn test_engine_tool_logs_done_failed_refused() {
 async fn test_engine_lists_all_tools() {
     let (_dir, executor) = setup();
 
-    use opencrab_core::ActionExecutor;
-    let tools = executor.list_tools();
-    let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+    // #923: list_tools() は depth0 で「常時集合＋describe_tools」に絞る（投影の提示層）。
+    // 「dispatcher が全ツールを登録している」ことは narrowing 前の policy 層
+    // （effective_tool_definitions）で検証する（投影 ≤15 は tests/tool_hierarchy.rs が pin）。
+    let tools = executor.effective_tool_definitions();
+    let names: Vec<&str> = tools.iter().map(|t| t.definition.name.as_str()).collect();
 
     assert!(
         names.contains(&"search_my_history"),

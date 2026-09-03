@@ -553,6 +553,10 @@ pub struct BridgedExecutor {
     /// （`sub_engine == Blocked`）と非同期化除外（`dispatch == Inline`）をここから引く。
     /// 索引に無い名前は「遮断しない」（属性を名乗る定義が無いツールは既定で通す）。
     tool_class_index: std::collections::HashMap<String, opencrab_gateway::ToolClass>,
+    /// §2.7 ツール階層（turn ローカル）: describe_tools でこのターンに活性化したツール名。
+    /// depth 0 の list_tools で常時集合に union して投影する。新しい登録簿は作らず、既存の
+    /// effective_tool_definitions（policy 済み）に retain で効かせる。
+    activated_tools: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl BridgedExecutor {
@@ -567,6 +571,7 @@ impl BridgedExecutor {
             reply_target: None,
             tool_allowlist: None,
             tool_class_index: std::collections::HashMap::new(),
+            activated_tools: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         };
         this.rebuild_tool_class_index();
         this
@@ -851,6 +856,57 @@ impl BridgedExecutor {
         true
     }
 
+    /// §2.7 describe_tools 実体: 指定名の schema（policy 済み effective 定義から）を返し、
+    /// このターンの活性化集合へ足す。存在しない/不可視の名前は不明として返す。
+    fn describe_tools_impl(&self, args: &serde_json::Value) -> CoreActionResult {
+        let names: Vec<String> = args
+            .get("names")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if names.is_empty() {
+            return CoreActionResult {
+                success: false,
+                data: serde_json::Value::Null,
+                error: Some("describe_tools: names[] is required".to_string()),
+            };
+        }
+        let effective = self.effective_tool_definitions();
+        let mut loaded = Vec::new();
+        let mut unknown = Vec::new();
+        for name in &names {
+            if let Some(t) = effective.iter().find(|t| &t.definition.name == name) {
+                loaded.push(serde_json::json!({
+                    "name": t.definition.name,
+                    "description": t.definition.description,
+                    "parameters": t.definition.parameters,
+                }));
+            } else {
+                unknown.push(name.clone());
+            }
+        }
+        if let Ok(mut set) = self.activated_tools.lock() {
+            for t in &loaded {
+                if let Some(n) = t.get("name").and_then(|v| v.as_str()) {
+                    set.insert(n.to_string());
+                }
+            }
+        }
+        CoreActionResult {
+            success: true,
+            data: serde_json::json!({
+                "loaded": loaded,
+                "unknown": unknown,
+                "note": "Loaded tools are now callable for the rest of this turn."
+            }),
+            error: None,
+        }
+    }
+
     /// 実際のディスパッチ本体（dispatcher → gateway fallback）。
     /// instrumentation は `ActionExecutor::execute` 側で wrap する。
     async fn dispatch_inner(
@@ -859,6 +915,13 @@ impl BridgedExecutor {
         args: &serde_json::Value,
         tool_call_id: Option<&str>,
     ) -> CoreActionResult {
+        // §2.7: describe_tools は list_tools の上の合成 query ツール（新登録簿なし）。
+        // このターンの活性化集合へ名前を足し、以後の list_tools がそれを投影する。実体ツールの
+        // 実行ではないので policy/run ゲートの前で処理する（activate は可視化だけで、実行時には
+        // 対象ツール自身の policy が別途効く）。
+        if name == "describe_tools" {
+            return self.describe_tools_impl(args);
+        }
         // 可視性（list_tools）と同じポリシー表を実行時にも強制する（#45）。
         // 一覧から隠しただけでは、モデルが名前を記憶で呼んだ場合に素通しになる。
         let reject = |msg: String| CoreActionResult {
@@ -1110,10 +1173,61 @@ impl ActionExecutor for BridgedExecutor {
     }
 
     fn list_tools(&self) -> Vec<FunctionDefinition> {
-        self.effective_tool_definitions()
+        let mut tools: Vec<FunctionDefinition> = self
+            .effective_tool_definitions()
             .into_iter()
             .map(|tool| tool.definition)
-            .collect()
+            .collect();
+        // §2.7 ツール階層: depth 0（通常会話ターン）で LLM へ投影する関数を「常時集合（≤15）」に
+        // 絞る。可視性のみを絞り実行ゲート（policy/run_allows）は不変（可視≠実行可否）。
+        // このターンに describe_tools で活性化した名前を常時集合に union（policy 済みの effective
+        // 定義に retain で効かせるので、owner-only 等の可視条件は保たれる）。
+        if self.depth == 0 {
+            const ALWAYS: &[&str] = &[
+                "reply",
+                "reaction",
+                "resolve",
+                "execute_shell",
+                "spawn_subtask",
+                "cancel_subtask",
+                "steer_subtask",
+                "retrieve_memory_nodes",
+                "search_memory_index",
+                "browse_memory_index",
+                "open_task",
+                "record_task_progress",
+                "close_task",
+                "read_skill",
+            ];
+            let activated = self
+                .activated_tools
+                .lock()
+                .map(|s| s.clone())
+                .unwrap_or_default();
+            tools.retain(|t| ALWAYS.contains(&t.name.as_str()) || activated.contains(&t.name));
+            // describe_tools 自体を常時投影（合成定義・新登録簿なし）。
+            tools.push(FunctionDefinition {
+                name: "describe_tools".to_string(),
+                description: Some(
+                    "Load the parameter schemas of tools listed by name under \"More tools\" \
+                     so you can call them. Pass names as a JSON array of strings. The loaded \
+                     tools stay available for the rest of this turn."
+                        .to_string(),
+                ),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "required": ["names"],
+                    "properties": {
+                        "names": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Tool names to load (from the More tools index)."
+                        }
+                    }
+                }),
+            });
+        }
+        tools
     }
 
     /// 非同期化しないツール名（inline 実行のまま）。
@@ -1566,6 +1680,21 @@ mod tests {
         (dir, ctx)
     }
 
+    /// policy＋allowlist 済みの可視ツール名（§2.7 の depth0 narrowing より前の層）。
+    ///
+    /// #923 で `list_tools()` は depth 0 で「常時集合（≤15）＋describe_tools」に絞る（投影の
+    /// 提示層）。owner-only 可視／agent gating／allowlist／gateway merge／depth ゲートといった
+    /// **可視性-policy の契約**は narrowing より前の層 `effective_tool_definitions()` が担うので、
+    /// これらの検証はこの helper（＝policy 層）に向ける。実行ゲート（dispatch_inner の policy）は
+    /// 無改変で、可視≠実行可否は別テストが pin する。narrowing 後の投影 ≤15 は
+    /// `crates/actions/tests/tool_hierarchy.rs` が等値で pin する。
+    fn policy_visible_names(exec: &BridgedExecutor) -> Vec<String> {
+        exec.effective_tool_definitions()
+            .into_iter()
+            .map(|t| t.definition.name)
+            .collect()
+    }
+
     // ---- list_tools ----
 
     #[test]
@@ -1584,11 +1713,13 @@ mod tests {
     fn select_llm_tool_schema_omits_unregistered_providers() {
         let (_dir, ctx) = test_context();
         let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx);
+        // #923: select_llm は常時集合外（index 行き）。schema の検証は policy 層で行う。
         let tool = executor
-            .list_tools()
+            .effective_tool_definitions()
             .into_iter()
-            .find(|t| t.name == "select_llm")
-            .expect("select_llm");
+            .find(|t| t.definition.name == "select_llm")
+            .expect("select_llm")
+            .definition;
         let desc = tool.description.unwrap_or_default();
         let params = tool.parameters.to_string();
         assert!(desc.contains("mock"), "{desc}");
@@ -1609,12 +1740,13 @@ mod tests {
         let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
             .with_gateway_actions(Arc::new(MockGatewayActions));
 
-        let tools = executor.list_tools();
-        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        // #923: gateway merge は可視性-policy の契約。narrowing 前の policy 層で検証する。
+        let names = policy_visible_names(&executor);
+        let has = |n: &str| names.iter().any(|x| x == n);
 
         // ゲートウェイアクションもマージされる
-        assert!(names.contains(&"gw_action_a"));
-        assert!(names.contains(&"gw_action_b"));
+        assert!(has("gw_action_a"));
+        assert!(has("gw_action_b"));
     }
 
     // ---- run 単位のツール許可リスト（#368）----
@@ -1667,11 +1799,9 @@ mod tests {
         let unrestricted = BridgedExecutor::new(ActionDispatcher::new(), ctx0)
             .with_gateway_actions(Arc::new(MockGatewayActions)) // gw_action_a/b（gateway own 相当）
             .with_mcp_actions(Arc::new(MockMcpSlot)); // mcp__ext__send（MCP スロット）
-        let base: Vec<String> = unrestricted
-            .list_tools()
-            .into_iter()
-            .map(|t| t.name)
-            .collect();
+                                                      // #923: allowlist の可視性は narrowing 前の policy＋allowlist 層で検証する
+                                                      // （list_tools は depth0 で常時集合に絞るため、allowlist 契約は effective 層で見る）。
+        let base: Vec<String> = policy_visible_names(&unrestricted);
         // dispatcher core / gateway own / MCP がどれも見える。
         assert!(
             base.contains(&"ws_delete".to_string()),
@@ -1689,12 +1819,8 @@ mod tests {
             .with_gateway_actions(Arc::new(MockGatewayActions))
             .with_mcp_actions(Arc::new(MockMcpSlot))
             .with_tool_allowlist(Some(allow.clone()));
-        let visible: Vec<String> = restricted
-            .list_tools()
-            .into_iter()
-            .map(|t| t.name)
-            .collect();
-        // 経路2（list_tools 可視性）: 許可されたものだけ見える。
+        let visible: Vec<String> = policy_visible_names(&restricted);
+        // 経路2（policy＋allowlist 可視性）: 許可されたものだけ見える。
         assert!(visible.contains(&"browse_memory_index".to_string()));
         assert!(visible.contains(&"tag_topic".to_string()));
         assert!(visible.contains(&"declare_done".to_string()));
@@ -1768,11 +1894,9 @@ mod tests {
         let (_dir, ctx) = test_context();
         let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
             .with_gateway_actions(Arc::new(MockGatewayDiscord));
-        let names: Vec<String> = executor
-            .list_tools()
-            .iter()
-            .map(|t| t.name.clone())
-            .collect();
+        // #923: depth0 で request_peer_review は投影に出さない（#921・設計 §2.7 L168）が、
+        // policy 層（＝depth ゲートを持つ層）には出る。depth ゲートの契約はこの層で検証する。
+        let names: Vec<String> = policy_visible_names(&executor);
         assert!(names.contains(&"request_peer_review".to_string()));
         assert!(names.contains(&"report_progress".to_string()));
 
@@ -1781,6 +1905,8 @@ mod tests {
         let sub = BridgedExecutor::new(ActionDispatcher::new(), sub_ctx)
             .with_gateway_actions(Arc::new(MockGatewayDiscord))
             .with_depth(1);
+        // depth>0 では list_tools は narrowing しない（常時集合の絞りは depth0 のみ）ので、
+        // sub-engine の depth ゲート（sub_engine=Blocked）はそのまま list_tools で観測できる。
         let names: Vec<String> = sub.list_tools().iter().map(|t| t.name.clone()).collect();
         assert!(!names.contains(&"request_peer_review".to_string()));
         assert!(names.contains(&"report_progress".to_string()));
@@ -1888,19 +2014,14 @@ mod tests {
         let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
             .with_gateway_actions(Arc::new(MockGatewayActionsWithSkills));
 
-        let tools = executor.list_tools();
-        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        // #923: owner/trusted 限定の可視性は narrowing 前の policy 層で検証する。
+        let names = policy_visible_names(&executor);
+        let has = |n: &str| names.iter().any(|x| x == n);
 
+        assert!(has("create_skill"), "TrustedUser should see create_skill");
+        assert!(has("execute_skill"), "TrustedUser should see execute_skill");
         assert!(
-            names.contains(&"create_skill"),
-            "TrustedUser should see create_skill"
-        );
-        assert!(
-            names.contains(&"execute_skill"),
-            "TrustedUser should see execute_skill"
-        );
-        assert!(
-            names.contains(&"gw_action_a"),
+            has("gw_action_a"),
             "TrustedUser should see regular gateway actions"
         );
     }
@@ -1911,19 +2032,14 @@ mod tests {
         let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
             .with_gateway_actions(Arc::new(MockGatewayActionsWithSkills));
 
-        let tools = executor.list_tools();
-        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        // #923: agent gating の可視性は narrowing 前の policy 層で検証する。
+        let names = policy_visible_names(&executor);
+        let has = |n: &str| names.iter().any(|x| x == n);
 
+        assert!(!has("create_skill"), "Agent should NOT see create_skill");
+        assert!(!has("execute_skill"), "Agent should NOT see execute_skill");
         assert!(
-            !names.contains(&"create_skill"),
-            "Agent should NOT see create_skill"
-        );
-        assert!(
-            !names.contains(&"execute_skill"),
-            "Agent should NOT see execute_skill"
-        );
-        assert!(
-            names.contains(&"gw_action_a"),
+            has("gw_action_a"),
             "Agent should still see regular gateway actions"
         );
     }
@@ -1998,7 +2114,8 @@ mod tests {
         let (_dir, ctx) = test_context_with_caller(ev.caller);
         let resumed = BridgedExecutor::new(ActionDispatcher::new(), ctx)
             .with_gateway_actions(Arc::new(MockGatewayActionsWithSkills));
-        let names: Vec<String> = resumed.list_tools().into_iter().map(|t| t.name).collect();
+        // #923: owner/trusted の可視性維持は narrowing 前の policy 層で検証する。
+        let names: Vec<String> = policy_visible_names(&resumed);
         assert!(
             names.iter().any(|n| n == "create_skill"),
             "resume 後に trusted_only のツールが消えている: {names:?}"
@@ -2012,7 +2129,7 @@ mod tests {
         let (_dir2, ctx2) = test_context_with_caller(CallerIdentity::Agent);
         let demoted = BridgedExecutor::new(ActionDispatcher::new(), ctx2)
             .with_gateway_actions(Arc::new(MockGatewayActionsWithSkills));
-        let demoted_names: Vec<String> = demoted.list_tools().into_iter().map(|t| t.name).collect();
+        let demoted_names: Vec<String> = policy_visible_names(&demoted);
         assert!(!demoted_names.iter().any(|n| n == "create_skill"));
         assert!(!demoted_names.iter().any(|n| n == "update_instructions"));
     }
@@ -2024,10 +2141,10 @@ mod tests {
         let (_dir, ctx) = test_context_with_caller(CallerIdentity::Owner);
         let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx);
 
-        let tools = executor.list_tools();
-        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        // #923: owner-only 可視性は narrowing 前の policy 層で検証する。
+        let names = policy_visible_names(&executor);
         assert!(
-            names.contains(&"update_instructions"),
+            names.iter().any(|n| n == "update_instructions"),
             "Owner should see update_instructions"
         );
     }
@@ -2082,11 +2199,11 @@ mod tests {
         let (_d, actx) = test_context_with_caller(CallerIdentity::Agent);
         let agent_exec = BridgedExecutor::new(ActionDispatcher::new(), actx)
             .with_gateway_actions(Arc::new(GwConfig));
+        // #923: owner-only 可視性は narrowing 前の policy 層で検証する。
         assert!(
-            !agent_exec
-                .list_tools()
+            !policy_visible_names(&agent_exec)
                 .iter()
-                .any(|t| t.name == "configure_llm_provider"),
+                .any(|n| n == "configure_llm_provider"),
             "Agent must NOT see configure_llm_provider"
         );
         let r = agent_exec
@@ -2100,10 +2217,9 @@ mod tests {
         let owner_exec = BridgedExecutor::new(ActionDispatcher::new(), octx)
             .with_gateway_actions(Arc::new(GwConfig));
         assert!(
-            owner_exec
-                .list_tools()
+            policy_visible_names(&owner_exec)
                 .iter()
-                .any(|t| t.name == "configure_llm_provider"),
+                .any(|n| n == "configure_llm_provider"),
             "Owner should see configure_llm_provider"
         );
         let r2 = owner_exec
@@ -2111,6 +2227,103 @@ mod tests {
             .await;
         assert!(r2.success, "Owner execution should reach the gateway");
         assert_eq!(r2.data["reached_gateway"], true);
+    }
+
+    /// #923 実行ゲート不変の回帰ガード（可視≠実行可否）: ツール階層で常時集合の外に置いた
+    /// owner-only ツール（`configure_llm_provider`）を、非 owner が `describe_tools` で活性化
+    /// しようとしても — (1) describe_tools は policy 済みの effective 定義からしか schema を
+    /// 引かないので unknown を返し可視化されない、(2) 仮に名前を記憶で呼んでも dispatch_inner の
+    /// policy が従来どおり owner ゲートで拒否する。describe_tools が policy バイパスにならない
+    /// ことを最外層（list_tools 可視性＋execute 実行）で pin する。
+    #[tokio::test]
+    async fn describe_tools_does_not_bypass_owner_gate_for_nonowner() {
+        struct GwConfig;
+        #[async_trait::async_trait]
+        impl GatewayActions for GwConfig {
+            fn definitions(&self) -> Vec<GatewayActionDef> {
+                vec![GatewayActionDef {
+                    name: "configure_llm_provider".to_string(),
+                    class: opencrab_gateway::ToolClass {
+                        dispatch: opencrab_gateway::DispatchMode::Inline,
+                        sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
+                        sharing: opencrab_gateway::ToolSharing::AgentBound,
+                    },
+                    description: "x".to_string(),
+                    parameters: json!({"type": "object"}),
+                }]
+            }
+            async fn execute(
+                &self,
+                _n: &str,
+                _a: &serde_json::Value,
+                _c: &opencrab_gateway::GatewayCallContext,
+            ) -> GatewayActionResult {
+                GatewayActionResult {
+                    success: true,
+                    data: Some(json!({"reached_gateway": true})),
+                    error: None,
+                }
+            }
+        }
+
+        let (_d, actx) = test_context_with_caller(CallerIdentity::Agent);
+        let agent_exec = BridgedExecutor::new(ActionDispatcher::new(), actx)
+            .with_gateway_actions(Arc::new(GwConfig));
+
+        // (1) 非 owner が describe_tools で活性化を試みる → unknown（loaded に入らない）。
+        let d = agent_exec
+            .execute(
+                "describe_tools",
+                &json!({"names": ["configure_llm_provider"]}),
+            )
+            .await;
+        assert!(
+            d.success,
+            "describe_tools 自体は成功する（合成 query ツール）"
+        );
+        let unknown = d.data["unknown"]
+            .as_array()
+            .map(|a| a.iter().any(|v| v == "configure_llm_provider"))
+            .unwrap_or(false);
+        assert!(
+            unknown,
+            "非 owner には configure_llm_provider が unknown（可視化されない）: {:?}",
+            d.data
+        );
+        let loaded_empty = d.data["loaded"]
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(false);
+        assert!(
+            loaded_empty,
+            "owner-only ツールが loaded に入ってはならない"
+        );
+
+        // (2) 活性化後も list_tools（投影）に出ない（可視化バイパスなし）。
+        let names: Vec<String> = agent_exec
+            .list_tools()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert!(
+            !names.iter().any(|n| n == "configure_llm_provider"),
+            "describe_tools 後も owner-only ツールが投影に出てはならない: {names:?}"
+        );
+
+        // (3) 名前を記憶で直接呼んでも dispatch_inner の policy が owner ゲートで拒否する。
+        let r = agent_exec
+            .execute("configure_llm_provider", &json!({"provider": "acp"}))
+            .await;
+        assert!(!r.success, "非 owner の owner-only 実行は拒否されるべき");
+        assert!(
+            r.error.unwrap_or_default().to_lowercase().contains("owner"),
+            "拒否理由は owner ゲート由来であるべき"
+        );
+        // gateway へ到達していない。
+        assert!(
+            r.data.get("reached_gateway").is_none(),
+            "owner ゲートを越えて gateway へ到達してはならない"
+        );
     }
 
     /// #264: `nostr_list_keys` は trusted 限定（owner 限定ではない）。未信頼の会話ターン
@@ -2214,13 +2427,12 @@ mod tests {
             "caller=Agent（Nostr 受信ターン）で nostr_run が policy_allows を通らない \
              — どこかに caller ゲートが足された"
         );
-        // 2. 可視性: モデルに見えていること。
+        // 2. 可視性: モデルに見えていること（#923: 会話 op 以外の可視性は policy 層で）。
         assert!(
-            agent_exec
-                .list_tools()
+            policy_visible_names(&agent_exec)
                 .iter()
-                .any(|t| t.name == "nostr_run"),
-            "caller=Agent の list_tools に nostr_run が出ない"
+                .any(|n| n == "nostr_run"),
+            "caller=Agent の可視集合に nostr_run が出ない"
         );
         // 3. 実行時強制: 名前指定の実行が gateway まで到達すること。
         let r = agent_exec
@@ -2337,11 +2549,8 @@ mod tests {
         let (_d, agent_ctx) = test_context_with_caller(CallerIdentity::Agent);
         let agent_exec = BridgedExecutor::new(ActionDispatcher::new(), agent_ctx)
             .with_gateway_actions(Arc::new(GwNostrMessaging));
-        let listed: Vec<String> = agent_exec
-            .list_tools()
-            .into_iter()
-            .map(|t| t.name)
-            .collect();
+        // #923: 会話 op 以外の可視性は narrowing 前の policy 層で検証する。
+        let listed: Vec<String> = policy_visible_names(&agent_exec);
 
         for name in ["nostr_zap"] {
             // 1. ポリシー述語（list_tools と dispatch_inner が共有する単一の判定）。
@@ -2411,11 +2620,8 @@ mod tests {
         // caller=Agent: 3 経路すべてで落ちる。
         let (_d, agent_ctx) = test_context_with_caller(CallerIdentity::Agent);
         let agent_exec = BridgedExecutor::new(ActionDispatcher::new(), agent_ctx);
-        let agent_listed: Vec<String> = agent_exec
-            .list_tools()
-            .into_iter()
-            .map(|t| t.name)
-            .collect();
+        // #923: agent gating の可視性は narrowing 前の policy 層で検証する。
+        let agent_listed: Vec<String> = policy_visible_names(&agent_exec);
 
         for name in SKILL_LEARNING_TRUSTED_ONLY {
             // 1. ポリシー述語（list_tools と dispatch_inner が共有する単一の判定）。
@@ -2447,7 +2653,8 @@ mod tests {
         ] {
             let (_d, ctx) = test_context_with_caller(caller.clone());
             let exec = BridgedExecutor::new(ActionDispatcher::new(), ctx);
-            let listed: Vec<String> = exec.list_tools().into_iter().map(|t| t.name).collect();
+            // #923: owner/trusted 可視性は narrowing 前の policy 層で検証する。
+            let listed: Vec<String> = policy_visible_names(&exec);
             for name in SKILL_LEARNING_TRUSTED_ONLY {
                 assert!(
                     exec.policy_allows(name),
@@ -2538,11 +2745,8 @@ mod tests {
 
         // caller=Agent: 3 経路すべてで落ちる。
         let (_d, agent_exec) = build_exec(CallerIdentity::Agent);
-        let agent_listed: Vec<String> = agent_exec
-            .list_tools()
-            .into_iter()
-            .map(|t| t.name)
-            .collect();
+        // #923: agent gating の可視性は narrowing 前の policy 層で検証する。
+        let agent_listed: Vec<String> = policy_visible_names(&agent_exec);
         for name in PASSTHROUGH_9_TRUSTED_ONLY {
             // 1. ポリシー述語（list_tools と dispatch_inner が共有する単一の判定）。
             assert!(
@@ -2578,7 +2782,8 @@ mod tests {
             CallerIdentity::TrustedUser,
         ] {
             let (_d, exec) = build_exec(caller.clone());
-            let listed: Vec<String> = exec.list_tools().into_iter().map(|t| t.name).collect();
+            // #923: owner/trusted 可視性は narrowing 前の policy 層で検証する。
+            let listed: Vec<String> = policy_visible_names(&exec);
             for name in PASSTHROUGH_9_TRUSTED_ONLY {
                 assert!(
                     exec.policy_allows(name),
@@ -2630,11 +2835,8 @@ mod tests {
         // caller=Agent: 3 経路すべてで落ちる。
         let (_d, agent_ctx) = test_context_with_caller(CallerIdentity::Agent);
         let agent_exec = BridgedExecutor::new(ActionDispatcher::new(), agent_ctx);
-        let agent_listed: Vec<String> = agent_exec
-            .list_tools()
-            .into_iter()
-            .map(|t| t.name)
-            .collect();
+        // #923: agent gating の可視性は narrowing 前の policy 層で検証する。
+        let agent_listed: Vec<String> = policy_visible_names(&agent_exec);
 
         for name in TAG_ACTIONS_TRUSTED_ONLY {
             // 1. ポリシー述語（list_tools と dispatch_inner が共有する単一の判定）。
@@ -2672,7 +2874,8 @@ mod tests {
         ] {
             let (_d, ctx) = test_context_with_caller(caller.clone());
             let exec = BridgedExecutor::new(ActionDispatcher::new(), ctx);
-            let listed: Vec<String> = exec.list_tools().into_iter().map(|t| t.name).collect();
+            // #923: owner/trusted 可視性は narrowing 前の policy 層で検証する。
+            let listed: Vec<String> = policy_visible_names(&exec);
             for name in TAG_ACTIONS_TRUSTED_ONLY {
                 assert!(
                     exec.policy_allows(name),
@@ -2717,11 +2920,8 @@ mod tests {
     async fn memory_unit_actions_gated_from_agent_caller() {
         let (_d, agent_ctx) = test_context_with_caller(CallerIdentity::Agent);
         let agent_exec = BridgedExecutor::new(ActionDispatcher::new(), agent_ctx);
-        let agent_listed: Vec<String> = agent_exec
-            .list_tools()
-            .into_iter()
-            .map(|t| t.name)
-            .collect();
+        // #923: agent gating の可視性は narrowing 前の policy 層で検証する。
+        let agent_listed: Vec<String> = policy_visible_names(&agent_exec);
 
         for name in MEMORY_UNIT_ACTIONS_TRUSTED_ONLY {
             // 1. ポリシー述語（list_tools と dispatch_inner が共有）。
@@ -2757,7 +2957,8 @@ mod tests {
         ] {
             let (_d, ctx) = test_context_with_caller(caller.clone());
             let exec = BridgedExecutor::new(ActionDispatcher::new(), ctx);
-            let listed: Vec<String> = exec.list_tools().into_iter().map(|t| t.name).collect();
+            // #923: owner/trusted 可視性は narrowing 前の policy 層で検証する。
+            let listed: Vec<String> = policy_visible_names(&exec);
             for name in MEMORY_UNIT_ACTIONS_TRUSTED_ONLY {
                 assert!(
                     exec.policy_allows(name),
@@ -2844,11 +3045,8 @@ mod tests {
         let (_d, actx) = test_context_with_caller(CallerIdentity::Agent);
         let agent_exec = BridgedExecutor::new(ActionDispatcher::new(), actx)
             .with_gateway_actions(Arc::new(GwLocal));
-        let agent_tools: Vec<String> = agent_exec
-            .list_tools()
-            .into_iter()
-            .map(|t| t.name)
-            .collect();
+        // #923: owner-only の可視性は narrowing 前の policy 層で検証する。
+        let agent_tools: Vec<String> = policy_visible_names(&agent_exec);
         for name in LOCAL_OWNER_ONLY_TOOLS {
             // 1. ポリシー述語。
             assert!(
@@ -2876,11 +3074,8 @@ mod tests {
         let (_d2, octx) = test_context_with_caller(CallerIdentity::Owner);
         let owner_exec = BridgedExecutor::new(ActionDispatcher::new(), octx)
             .with_gateway_actions(Arc::new(GwLocal));
-        let owner_tools: Vec<String> = owner_exec
-            .list_tools()
-            .into_iter()
-            .map(|t| t.name)
-            .collect();
+        // #923: owner の可視性は narrowing 前の policy 層で検証する。
+        let owner_tools: Vec<String> = policy_visible_names(&owner_exec);
         for name in LOCAL_OWNER_ONLY_TOOLS {
             assert!(
                 owner_exec.policy_allows(name),
@@ -2888,7 +3083,7 @@ mod tests {
             );
             assert!(
                 owner_tools.iter().any(|t| t == name),
-                "caller=Owner の list_tools に {name} が出るべき（#330）"
+                "caller=Owner の可視集合に {name} が出るべき（#330）"
             );
             // 実行時強制: owner ゲートで**止まらず**先の実装（dispatcher / gateway）へ
             // 到達する。`ws_*` は `ActionDispatcher::new()` に実在するため fake gateway では
@@ -2926,7 +3121,8 @@ mod tests {
         });
         let co_exec = BridgedExecutor::new(ActionDispatcher::new(), cctx)
             .with_gateway_actions(Arc::new(GwLocal));
-        let co_tools: Vec<String> = co_exec.list_tools().into_iter().map(|t| t.name).collect();
+        // #923: co_agent（owner 等価）の可視性は narrowing 前の policy 層で検証する。
+        let co_tools: Vec<String> = policy_visible_names(&co_exec);
         for name in LOCAL_OWNER_ONLY_TOOLS {
             assert!(
                 co_exec.policy_allows(name),
@@ -2934,7 +3130,7 @@ mod tests {
             );
             assert!(
                 co_tools.iter().any(|t| t == name),
-                "caller=CoAgent の list_tools に {name} が出るべき（#485）"
+                "caller=CoAgent の可視集合に {name} が出るべき（#485）"
             );
             let r = co_exec.execute(name, &json!({})).await;
             assert!(
@@ -3031,7 +3227,8 @@ mod tests {
         let (_dir, ctx) = test_context_with_caller(CallerIdentity::Owner);
         let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
             .with_gateway_actions(Arc::new(MockGatewayHeartbeat));
-        let names: Vec<String> = executor.list_tools().into_iter().map(|t| t.name).collect();
+        // #923: heartbeat/owner-only の可視性は narrowing 前の policy 層で検証する。
+        let names: Vec<String> = policy_visible_names(&executor);
         assert!(names.iter().any(|n| n == "update_heartbeat_instructions"));
         assert!(names.iter().any(|n| n == "read_heartbeat_instructions"));
     }
@@ -3041,7 +3238,8 @@ mod tests {
         let (_dir, ctx) = test_context_with_caller(CallerIdentity::Agent);
         let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
             .with_gateway_actions(Arc::new(MockGatewayHeartbeat));
-        let names: Vec<String> = executor.list_tools().into_iter().map(|t| t.name).collect();
+        // #923: heartbeat/owner-only の可視性は narrowing 前の policy 層で検証する。
+        let names: Vec<String> = policy_visible_names(&executor);
         // Agent (non-owner, non-trusted) sees neither.
         assert!(!names.iter().any(|n| n == "update_heartbeat_instructions"));
         assert!(!names.iter().any(|n| n == "read_heartbeat_instructions"));
@@ -3052,7 +3250,8 @@ mod tests {
         let (_dir, ctx) = test_context_with_caller(CallerIdentity::TrustedUser);
         let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
             .with_gateway_actions(Arc::new(MockGatewayHeartbeat));
-        let names: Vec<String> = executor.list_tools().into_iter().map(|t| t.name).collect();
+        // #923: heartbeat/owner-only の可視性は narrowing 前の policy 層で検証する。
+        let names: Vec<String> = policy_visible_names(&executor);
         // TrustedUser can read but not write (write is owner-only).
         assert!(names.iter().any(|n| n == "read_heartbeat_instructions"));
         assert!(!names.iter().any(|n| n == "update_heartbeat_instructions"));

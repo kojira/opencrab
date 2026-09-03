@@ -1071,6 +1071,9 @@ pub fn default_non_dispatch_tools() -> HashSet<String> {
         "cancel_subtask",
         "report_progress",
         "steer_subtask",
+        // §2.7: describe_tools は同ターンの活性集合を親 executor に書くため inline 固定
+        // （detach すると子 executor に書いて親の list_tools に反映されない）。
+        "describe_tools",
     ]
     .iter()
     .map(|s| s.to_string())

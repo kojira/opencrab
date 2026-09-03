@@ -320,6 +320,33 @@ pub fn build_agent_context(
     // Silent Reply は「相手が Bot か」でシステムが黙らせない。判断はエージェントへ委ね、
     // 沈黙は会話内容（完結した / 新しい情報が無い）で決めさせる（#486・理念: システムは
     // 相手が bot か判定しない）。ループ防止（元の意図）は種別ではなく内容の条件で残す。
+    // §2.7 静的 index（案 I-a）。常時集合の外にあるツールを「カテゴリ→名前」で 1 節に列挙し、
+    // describe_tools で取得させる。設定系カテゴリは owner 発話ターンのみ出す（policy と対称・
+    // caller で分岐・DESIGN §4 可視条件表）。
+    let more_tools_section = {
+        let caller_is_owner = caller.is_owner_equivalent();
+        let mut cats: Vec<String> = vec![
+            "- memory: record_memory_unit, record_memory_core, tag_topic, rebuild_memory_index, summarize_and_save".to_string(),
+            "- skills: create_skill, retire_my_skill, restore_my_skill".to_string(),
+            "- introspection: evaluate_response, analyze_llm_usage, learn_from_experience, reflect_and_learn".to_string(),
+            "- workspace: ws_read, ws_list, ws_write, ws_edit, ws_mkdir, ws_delete".to_string(),
+            "- tasks: update_task_contract, get_task".to_string(),
+        ];
+        if caller_is_owner {
+            cats.push("- configuration: configure_llm_provider, configure_nostr, configure_self, select_llm, update_instructions".to_string());
+            cats.push("- schedule & heartbeat: set_my_heartbeat, get_my_heartbeat, update_heartbeat_instructions, run_my_heartbeat, set_my_schedule, get_my_schedules, update_my_schedule, delete_my_schedule".to_string());
+            cats.push(
+                "- nostr keys: nostr_generate_key, nostr_list_keys, nostr_switch_identity"
+                    .to_string(),
+            );
+            cats.push("- allowed commands: add_allowed_command, list_allowed_commands, remove_allowed_command".to_string());
+        }
+        format!(
+            "\n\n## More tools\n\nThe tools above are always available. Others are listed here by name; call describe_tools([\"name\", ...]) to load a tool's parameters, then call it — loaded tools stay available for the rest of this turn.\n{}",
+            cats.join("\n")
+        )
+    };
+
     let prompt = format!(
         "You are {agent_name} ({persona}).\n\
          \n\
@@ -394,7 +421,7 @@ pub fn build_agent_context(
          revises the criteria.\n\
          - Trivial single-message replies do not need a ledger entry.\n\
          \n\
-         {skills_text}{character_section}{instructions_section}{curated_section}",
+         {more_tools_section}{skills_text}{character_section}{instructions_section}{curated_section}",
     );
 
     (prompt, agent_name)

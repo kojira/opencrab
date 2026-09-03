@@ -61,7 +61,7 @@ pub fn operation_declarations() -> Value {
         ),
         decl(
             "reaction",
-            "イベントにリアクションする。event に会話の e番号、emoji に絵文字（省略可）。結果は返らず、この呼び出しの後に再度呼び出されることはない（撃ちっぱなし・再開なし）。N 件のリアクションが必要なら、この 1 応答に N 個の reaction 呼び出しを置く。",
+            "イベントにリアクションする。event に会話の e番号、emoji に絵文字（省略可）。結果は返らない（撃ちっぱなし・再開はされない）。複数のリアクションは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。This call returns nothing and you will NOT be invoked again after it. If you need N reactions, put N reaction calls in THIS response.",
             json!({"type": "object", "required": ["event"], "properties": {
                 "event": ref_prop("対象イベントの短縮参照（例 e7）"),
                 "emoji": str_prop("リアクション絵文字（省略時は既定）")
@@ -70,7 +70,7 @@ pub fn operation_declarations() -> Value {
         ),
         decl(
             "reply",
-            "イベントに返信する。event に会話の e番号、text に返信本文。結果は返らず、この呼び出しの後に再度呼び出されることはない（撃ちっぱなし・再開なし）。N 件の返信が必要なら、この 1 応答に N 個の reply 呼び出しを置く。",
+            "イベントに返信する。event に会話の e番号、text に返信本文。結果は返らない（撃ちっぱなし・再開はされない）。複数の返信は1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。This call returns nothing and you will NOT be invoked again after it. If you need N replies, put N reply calls in THIS response.",
             json!({"type": "object", "required": ["event", "text"], "properties": {
                 "event": ref_prop("返信先イベントの短縮参照（例 e7）"),
                 "text": str_prop("返信本文")
@@ -79,7 +79,7 @@ pub fn operation_declarations() -> Value {
         ),
         decl(
             "repost",
-            "イベントをリポストする。event に会話の e番号。結果は返らず、この呼び出しの後に再度呼び出されることはない（撃ちっぱなし・再開なし）。N 件のリポストが必要なら、この 1 応答に N 個の repost 呼び出しを置く。",
+            "イベントをリポストする。event に会話の e番号。結果は返らない（撃ちっぱなし・再開はされない）。複数のリポストは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。This call returns nothing and you will NOT be invoked again after it. If you need N reposts, put N repost calls in THIS response.",
             json!({"type": "object", "required": ["event"], "properties": {"event": ref_prop("対象イベントの短縮参照（例 e7）")}}),
             conv("not_exposed", "conversation_bound"),
         ),

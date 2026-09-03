@@ -1480,10 +1480,12 @@ mod tests {
 
         // --- 対照: 許可リスト無し（None）なら Owner の全ツールが届く（危険の再現） ---
         let unrestricted = build_organize_executor(&state, false);
+        // #923: allowlist の可視性は narrowing 前の policy＋allowlist 層で検証する（list_tools は
+        // depth0 で常時集合に絞るため、allowlist 契約は effective_tool_definitions で見る）。
         let base: Vec<String> = unrestricted
-            .list_tools()
+            .effective_tool_definitions()
             .into_iter()
-            .map(|t| t.name)
+            .map(|t| t.definition.name)
             .collect();
         for f in forbidden.iter() {
             assert!(
@@ -1495,8 +1497,12 @@ mod tests {
         // --- 整理ラン（許可リスト有り） ---
         let executor = build_organize_executor(&state, true);
 
-        // 経路2: list_tools（可視性）。許可外は 1 つも出ない。
-        let visible: Vec<String> = executor.list_tools().into_iter().map(|t| t.name).collect();
+        // 経路2: 可視性（policy＋allowlist 層）。許可外は 1 つも出ない。
+        let visible: Vec<String> = executor
+            .effective_tool_definitions()
+            .into_iter()
+            .map(|t| t.definition.name)
+            .collect();
         for f in forbidden.iter() {
             assert!(
                 !visible.contains(&f.to_string()),
