@@ -21,6 +21,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ソースファイルは 800 行以内（#937）。ratchet ゲート: 新規/800 行以下ファイルの
+      # 800 行超と、allowlist 凍結済みファイルの行数増加を赤にする。build 前に落として
+      # 高価な toolchain インストールを無駄にしない。減少は allowlist 更新の警告のみ。
+      - name: File size ratchet
+        run: bash scripts/check-file-size.sh
+
       # songbird(voice) は opus、reqwest(native-tls) は OpenSSL、
       # audiopus_sys のビルドに cmake/pkg-config が要る。rusqlite は bundled。
       - name: Install system dependencies
