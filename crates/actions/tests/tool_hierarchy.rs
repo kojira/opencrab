@@ -27,24 +27,6 @@ use opencrab_gateway::{
 };
 use opencrab_llm_types::{Choice, FunctionCall, Message, MessageContent, Role, Usage};
 
-/// 常時集合（DIRECTION-LOG 510・実測 14）。レーン/owner 依存で「見える部分集合」になる。
-const ALWAYS: &[&str] = &[
-    "reply",
-    "reaction",
-    "resolve",
-    "execute_shell",
-    "spawn_subtask",
-    "cancel_subtask",
-    "steer_subtask",
-    "retrieve_memory_nodes",
-    "search_memory_index",
-    "browse_memory_index",
-    "open_task",
-    "record_task_progress",
-    "close_task",
-    "read_skill",
-];
-
 /// 1 回の LLM 呼び出しで投影された functions の観測（名前集合と serialized バイト数）。
 #[derive(Clone, Debug, Default)]
 struct CallCapture {
@@ -251,59 +233,45 @@ async fn discord_nonowner_turn_projects_only_always_set_plus_describe_tools() {
     assert_eq!(caps.len(), 1, "1 ターン = 1 LLM 呼び出し");
     let c = &caps[0];
 
-    // 個数 ≤15。
+    // 等値 pin（テストレビュー指摘・強化）: 非 owner 会話ターンの投影集合を、この caller で
+    // 「可視な常時集合」＝会話 op 3（gateway）＋memory 参照 3＋ledger 3＋read_skill（dispatcher）
+    // ＋describe_tools と**完全一致**で pin する。存在 assert だけだと search/browse_memory_index
+    // や record_task_progress/close_task を落とす実装でも緑になるため、欠落も余分も落とす等値で。
+    // execute_shell / subtask 3 は非 owner では不可視（policy・owner-only or 本モック未供給）なので
+    // ここには入らない。常時集合 14 全ての等値は owner 版
+    // （`owner_turn_projects_exactly_the_always_set_plus_describe_tools`）が受け持つ。
+    assert_projected_set_eq(
+        &c.names,
+        &[
+            "reply",
+            "reaction",
+            "resolve",
+            "retrieve_memory_nodes",
+            "search_memory_index",
+            "browse_memory_index",
+            "open_task",
+            "record_task_progress",
+            "close_task",
+            "read_skill",
+            "describe_tools",
+        ],
+        "非 owner 会話ターンの投影集合が常時集合（可視部分）＋describe_tools と一致しない",
+    );
+
+    // 個数 ≤15（等値 pin に含意されるが冗長に残す）。
     assert!(
         c.names.len() <= 15,
-        "投影 functions が 15 を超えた: {} 個 {:?}",
-        c.names.len(),
+        "投影 functions が 15 を超えた: {:?}",
         c.names
     );
-    // serialized バイト数 ≤10,000（実測 9,187 を基にした上限）。
+
+    // 【粗い sanity のみ】mock 境界のバイト数上限。本モックの gateway op は短い description
+    // なので、これは「常時集合に絞れているか」の粗い sanity であって、実 description 込みの
+    // 実バイト（実測 9,187B 相当）の受入判定ではない。実バイトの受入は PR 本文の隔離実測表で。
     assert!(
         c.bytes <= 10_000,
-        "投影 functions の serialized バイト数が上限超過: {} > 10000",
+        "投影 functions の serialized バイト数が sanity 上限超過: {} > 10000",
         c.bytes
-    );
-    // describe_tools が常時投影される。
-    assert!(
-        c.names.iter().any(|n| n == "describe_tools"),
-        "describe_tools が投影に無い: {:?}",
-        c.names
-    );
-    // 余分 0: 投影は常時集合 ∪ {describe_tools} の部分集合。
-    for n in &c.names {
-        assert!(
-            n == "describe_tools" || ALWAYS.contains(&n.as_str()),
-            "常時集合外のツールが投影された（余分）: {n}\n{:?}",
-            c.names
-        );
-    }
-    // 会話 op（レーン依存の常時集合）が見える。
-    for expect in ["reply", "reaction", "resolve"] {
-        assert!(
-            c.names.iter().any(|n| n == expect),
-            "会話 op {expect} が投影に無い: {:?}",
-            c.names
-        );
-    }
-    // 記憶参照・ledger・read_skill（非 owner でも見える常時集合）。
-    for expect in ["retrieve_memory_nodes", "open_task", "read_skill"] {
-        assert!(
-            c.names.iter().any(|n| n == expect),
-            "常時集合 {expect} が投影に無い: {:?}",
-            c.names
-        );
-    }
-    // 否定側（narrowing が効いている証拠）: 常時集合外は投影されない。
-    assert!(
-        !c.names.iter().any(|n| n == "set_my_heartbeat"),
-        "設定カテゴリの set_my_heartbeat が会話ターンに漏れた: {:?}",
-        c.names
-    );
-    assert!(
-        !c.names.iter().any(|n| n == "search_my_history"),
-        "常時集合外の dispatcher ツール search_my_history が漏れた: {:?}",
-        c.names
     );
 }
 
@@ -432,5 +400,140 @@ async fn rest_lane_turn_projects_at_most_15_functions() {
         !caps[0].names.iter().any(|n| n == "reply"),
         "REST レーンに reply が漏れた: {:?}",
         caps[0].names
+    );
+}
+
+/// 常時集合 14 個すべて（会話 op 3＋execute_shell＋subtask 3）を供給する gateway。
+/// ＋常時集合外の set_my_heartbeat（narrowing で落ちる/index 行き）。owner 等値 pin で
+/// 「常時集合の 14 個が 1 つも欠けない」ことを検証するのに使う。
+struct FullAlwaysGateway;
+
+#[async_trait]
+impl GatewayActions for FullAlwaysGateway {
+    fn definitions(&self) -> Vec<GatewayActionDef> {
+        let mk = |name: &str, dispatch: DispatchMode, sharing: ToolSharing| GatewayActionDef {
+            name: name.to_string(),
+            description: format!("{name} op"),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+            class: ToolClass {
+                dispatch,
+                sub_engine: SubEngineAccess::NotExposed,
+                sharing,
+            },
+        };
+        vec![
+            mk(
+                "reply",
+                DispatchMode::Utterance,
+                ToolSharing::ConversationBound,
+            ),
+            mk(
+                "reaction",
+                DispatchMode::Utterance,
+                ToolSharing::ConversationBound,
+            ),
+            mk(
+                "resolve",
+                DispatchMode::Inline,
+                ToolSharing::ConversationBound,
+            ),
+            mk(
+                "execute_shell",
+                DispatchMode::Inline,
+                ToolSharing::AgentBound,
+            ),
+            mk(
+                "spawn_subtask",
+                DispatchMode::Inline,
+                ToolSharing::AgentBound,
+            ),
+            mk(
+                "cancel_subtask",
+                DispatchMode::Inline,
+                ToolSharing::AgentBound,
+            ),
+            mk(
+                "steer_subtask",
+                DispatchMode::Inline,
+                ToolSharing::AgentBound,
+            ),
+            // 常時集合の外（設定カテゴリ）。narrowing で投影から落ちる。
+            mk(
+                "set_my_heartbeat",
+                DispatchMode::Inline,
+                ToolSharing::AgentBound,
+            ),
+        ]
+    }
+    async fn execute(
+        &self,
+        name: &str,
+        _a: &serde_json::Value,
+        _c: &GatewayCallContext,
+    ) -> GatewayActionResult {
+        GatewayActionResult {
+            success: true,
+            data: Some(serde_json::json!({"ok": name})),
+            error: None,
+        }
+    }
+}
+
+/// 投影名集合が期待集合と**完全一致**することを確認する（余分も欠落も落とす）。
+fn assert_projected_set_eq(actual: &[String], expected: &[&str], ctx: &str) {
+    use std::collections::BTreeSet;
+    let a: BTreeSet<&str> = actual.iter().map(|s| s.as_str()).collect();
+    let e: BTreeSet<&str> = expected.iter().copied().collect();
+    let missing: Vec<&&str> = e.iter().filter(|x| !a.contains(*x)).collect();
+    let extra: Vec<&&str> = a.iter().filter(|x| !e.contains(*x)).collect();
+    assert_eq!(
+        a, e,
+        "{ctx}\n  欠落（narrowing しすぎ）: {missing:?}\n  余分（narrowing 漏れ）: {extra:?}\n  実集合: {a:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §1-1 強化: owner 会話ターンで投影集合が「常時集合 14 ＋ describe_tools」と**等値**。
+// 存在 assert だけだと execute_shell / subtask 3 / memory / ledger を落とす実装でも緑に
+// なる（テストレビュー非ブロック指摘）。ここは可視な常時集合 14 個すべてを gateway/dispatcher
+// で用意し、投影が正確に 15 個（14＋describe_tools）であることを等値で pin する。
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn owner_turn_projects_exactly_the_always_set_plus_describe_tools() {
+    let (_dir, ctx) = ctx_for(CallerIdentity::Owner);
+    let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
+        .with_gateway_actions(std::sync::Arc::new(FullAlwaysGateway));
+    let (llm, captures) = CapturingMockLlm::new(vec![text_response("done")]);
+
+    let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+    engine
+        .run("You are the owner's agent", "hi", "mock-model")
+        .await
+        .unwrap();
+
+    let caps = captures.lock().unwrap();
+    assert_eq!(caps.len(), 1);
+    // 常時集合 14（会話 op 3＋execute_shell＋subtask 3＋memory 3＋ledger 3＋read_skill）＋
+    // describe_tools。set_my_heartbeat は常時集合外なので投影されない（narrowing 漏れ検出）。
+    assert_projected_set_eq(
+        &caps[0].names,
+        &[
+            "reply",
+            "reaction",
+            "resolve",
+            "execute_shell",
+            "spawn_subtask",
+            "cancel_subtask",
+            "steer_subtask",
+            "retrieve_memory_nodes",
+            "search_memory_index",
+            "browse_memory_index",
+            "open_task",
+            "record_task_progress",
+            "close_task",
+            "read_skill",
+            "describe_tools",
+        ],
+        "owner 会話ターンの投影集合が常時集合 14＋describe_tools と一致しない",
     );
 }
