@@ -133,13 +133,9 @@ async fn resume_v3_turn<R: AgentRuntime>(sink: ExtgateCompletionSink<R>, ev: Sub
     // resume は発端 said の無い自己ターン。heartbeat（#925）と完全に同型なので共有ヘルパへ
     // 委譲する（単一実装）。resume は発端 origin への返信先（`ev.reply_target`）を持ち回るが、
     // heartbeat 側は origin が無いので `None`（standalone post）を渡す。
-    run_v3_said_less_turn(
-        sink,
-        ev.caller.clone(),
-        ev.reply_target.clone(),
-        Some(ev.subtask_id.clone()),
-    )
-    .await;
+    // #935 (c3): 発端完了 id を渡し、既に別ターンの build で consumed 化済みなら resume を skip させる。
+    let completion = Some(ev.subtask_id.clone());
+    run_v3_said_less_turn(sink, ev.caller.clone(), ev.reply_target.clone(), completion).await;
 }
 
 /// 発端 said の無い自己ターン（resume 継続 / #925 heartbeat）を 1 本駆動する共有実装。
@@ -161,41 +157,21 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
     let session_id = sink.session_id.clone();
     locks
         .run_serialized(&session_id, async move {
-            // #935 (c3): 発端完了が既に consumed（先に別ターンの build が描画済み）なら resume を
-            // 起こさない。started/typing/LLM を出す前に return（said の folded skip と同じ形）。
-            if let Some(cid) = consumed_completion.as_deref() {
-                if sink.state.is_consumed_completion(&sink.session_id, cid) {
-                    tracing::info!(
-                        session_id = %sink.session_id,
-                        subtask_id = %cid,
-                        "skip resume: subtask completion already consumed by an earlier build (#935 c3)"
-                    );
-                    return;
-                }
-            }
-            let activity_id = uuid::Uuid::new_v4().to_string();
-            emit_activity(
-                &sink.state,
-                &sink.instance_id,
-                &sink.binding_id,
-                &activity_id,
-                "started",
-                None,
-                None,
-            )
-            .await;
-            // #935 (a)/(b)/(c3): resume build で初描画される他の完了・初投入 said を consumed 化する
-            // （発端完了 `consumed_completion` は除く＝(b) 発端 skip）。build 経路の単一実装を通す。
-            crate::inbound::mark_build_consumed_inputs(
+            // #935/#925: resume 頭の共通前処理。発端完了が consumed なら skip（started/typing/LLM
+            // なし）。そうでなければ started（origin=None）を emit し、build 初描画の他完了・初投入
+            // said を consumed 化する（発端完了 `consumed_completion` は除く＝(b) 発端 skip・単一実装）。
+            let Some(activity_id) = crate::consumed::resume_prelude(
                 &sink.state,
                 &sink.instance_id,
                 &sink.binding_id,
                 &sink.session_id,
                 &sink.agent_id,
-                None,
                 consumed_completion.as_deref(),
             )
-            .await;
+            .await
+            else {
+                return;
+            };
             let (system, name) = sink.runtime.build_agent_context(&sink.agent_id, &caller);
             let system = if sink.prompt_suffix.is_empty() {
                 system
@@ -251,7 +227,7 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
                             let session_id = session_id.clone();
                             Box::pin(async move {
                                 // #935: read 発火＋seq consumed 化は build 初投入と同じ共有実装。
-                                crate::inbound::emit_read_and_consume_said(
+                                crate::consumed::emit_read_and_consume_said(
                                     &state,
                                     &instance_id,
                                     &binding_id,

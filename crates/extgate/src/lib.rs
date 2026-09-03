@@ -5,6 +5,7 @@ pub mod bearer;
 pub mod bundle;
 pub mod close;
 pub mod completion;
+pub mod consumed;
 pub mod delivery;
 pub mod delivery_mode;
 pub mod error;

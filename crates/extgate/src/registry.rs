@@ -1,6 +1,6 @@
 //! process-local live registry。startup は空。DB から復元しない。
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 #[cfg(any(test, feature = "extgate-probe"))]
 use std::sync::atomic::AtomicUsize;
@@ -265,27 +265,9 @@ pub struct ExtgateState {
     nostr_privilege: Mutex<HashMap<i64, PrivilegeFire<NostrHeldTurn>>>,
     reserved_tool_name: Mutex<Option<ReservedToolNameFn>>,
     pub turn_queues: Arc<SessionTurnQueues>,
-    /// #930/#933: 走行中ターンへ畳み込んで LLM に渡した said の **external_origins.seq の集合**を
-    /// session ごとに記録する。record→enqueue で積まれた「その said 自身の独立ターン」が後で
-    /// dequeue した際、`folded_seqs.contains(said.seq)` なら **独立ターンを起こさず skip**
-    /// （二重処理を防ぐ・#930 第2欠陥）。
-    /// #933 修正2: スカラ高水位は OnlySpeaker 畳み込み（Nostr resume が `OnlySpeaker(author)`）で
-    /// 別話者の**未 fold** said を over-skip（`seq <= 高水位`で lost message）し得たため、**実際に
-    /// fold した seq だけ**を持つ非消費の集合（BTreeSet）に置換。skip は `contains` のみ＝per-origin
-    /// で正しく、非消費なので二重 take にも免疫。肥大は dequeue した seq より小さいエントリを prune
-    /// （turn_queues は到着順 FIFO ＝ より小さい seq は既に dequeue 済みなので安全）。新 DB テーブルなし。
-    folded_seqs: Mutex<HashMap<String, BTreeSet<i64>>>,
-    /// #935 (c3): 「消費済み入力」登録簿の完了 id 側。build で初描画された subtask 完了
-    /// （`[sN 完了]`）の subtask_id を session ごとに記録する。その完了に対する resume が
-    /// `run_v3_said_less_turn` 頭へ到達したとき `is_consumed_completion` が真なら **resume を
-    /// 起こさず skip**（消費済み入力の二重処理を防ぐ・said の [`folded_seqs`] と同型）。seq（i64・
-    /// prune 対象）と 完了 id（String）は型が違うため同一 session キーの下に別コレクションで持つ
-    /// （登録簿は 1 つ・#935 設計 (c3) の実装注記: prune は seq のみに意味があるため共通化しない）。
-    consumed_completions: Mutex<HashMap<String, std::collections::HashSet<String>>>,
-    /// #935 (a)/(b): 「プロンプトへ初投入した最終 log id」の per-session watermark（ターン跨ぎ）。
-    /// poll（`crate::process` SessionLiveInbound）の watermark 概念をターン跨ぎで持つ。build で
-    /// これより後の said が「初投入」＝発端以外は read+consumed・発端は started。ターン後に前進。
-    injected_watermark: Mutex<HashMap<String, i64>>,
+    /// #930/#933/#935: 「消費済み入力」登録簿（said の seq・完了 id・初投入 watermark を per-session に
+    /// 集約した単一構造体）。実体と条文は [`crate::consumed`]。下の delegation メソッドから触る。
+    consumed: crate::consumed::ConsumedInputs,
     #[cfg(any(test, feature = "extgate-probe"))]
     pub probe: GateProbe,
 }
@@ -306,85 +288,33 @@ impl ExtgateState {
             nostr_privilege: Mutex::new(HashMap::new()),
             reserved_tool_name: Mutex::new(None),
             turn_queues: Arc::new(SessionTurnQueues::new()),
-            folded_seqs: Mutex::new(HashMap::new()),
-            consumed_completions: Mutex::new(HashMap::new()),
-            injected_watermark: Mutex::new(HashMap::new()),
+            consumed: crate::consumed::ConsumedInputs::default(),
             #[cfg(any(test, feature = "extgate-probe"))]
             probe: GateProbe::default(),
         }
     }
 
-    /// #935 (c3): この subtask 完了 id を「build で初描画＝消費済み」として登録簿へ記録する。
-    pub fn mark_consumed_completion(&self, session_id: &str, subtask_id: &str) {
-        if let Ok(mut map) = self.consumed_completions.lock() {
-            map.entry(session_id.to_string())
-                .or_default()
-                .insert(subtask_id.to_string());
-        }
-    }
-
-    /// #935 (c3): この完了 id が「消費済み」か（非消費・読み取りのみ）。resume 側は真なら skip する。
-    pub fn is_consumed_completion(&self, session_id: &str, subtask_id: &str) -> bool {
-        self.consumed_completions
-            .lock()
-            .ok()
-            .map(|map| map.get(session_id).is_some_and(|s| s.contains(subtask_id)))
-            .unwrap_or(false)
-    }
-
-    /// #935 (a)/(b): 「プロンプトへ初投入した最終 log id」watermark を読む。未設定なら `init`
-    /// （＝発端 said の log id）で初期化して返す。初期化により、初回ターンで履歴の古い said が
-    /// 「初投入」と誤判定されて read されるのを防ぐ（restart 後も同様）。
-    pub fn injected_watermark_or_init(&self, session_id: &str, init: i64) -> i64 {
-        self.injected_watermark
-            .lock()
-            .map(|mut map| *map.entry(session_id.to_string()).or_insert(init))
-            .unwrap_or(init)
-    }
-
-    /// #935 (a)/(b): watermark を単調前進させる（`id` が現在値より大きいときだけ更新）。
-    pub fn advance_injected_watermark(&self, session_id: &str, id: i64) {
-        if let Ok(mut map) = self.injected_watermark.lock() {
-            let e = map.entry(session_id.to_string()).or_insert(id);
-            if id > *e {
-                *e = id;
-            }
-        }
-    }
-
-    /// #930/#933: この said の external_origins.seq を「走行中ターンへ畳み込んで read 済み」として
-    /// 集合へ記録する（read state を emit する時点で・fold した各 said ごとに呼ぶ）。**実際に fold
-    /// した seq だけ**を入れる（over-skip を防ぐ）。
+    // #930/#933/#935: 「消費済み入力」登録簿への delegation（実装は [`crate::consumed`]）。
     pub fn mark_folded_seq(&self, session_id: &str, seq: i64) {
-        if let Ok(mut map) = self.folded_seqs.lock() {
-            map.entry(session_id.to_string()).or_default().insert(seq);
-        }
+        self.consumed.mark_folded_seq(session_id, seq);
     }
-
-    /// #933: この seq が「畳み込み済み」か（**非消費**・読み取りのみ）。enqueue 側は真なら独立ターン
-    /// を skip する。実際に fold した seq のみ真＝別話者の未 fold said を over-skip しない。同じ seq
-    /// を何度照会しても真のままで、二重 take に免疫。
     pub fn is_folded(&self, session_id: &str, seq: i64) -> bool {
-        self.folded_seqs
-            .lock()
-            .ok()
-            .map(|map| map.get(session_id).is_some_and(|s| s.contains(&seq)))
-            .unwrap_or(false)
+        self.consumed.is_folded(session_id, seq)
     }
-
-    /// #933: dequeue した seq（`below`）より小さいエントリを掃除する（肥大防止）。turn_queues は
-    /// 到着順 FIFO ＝ `below` より小さい seq の said ターンは既に dequeue 済みなので、その fold 記録は
-    /// もう不要（安全に prune）。空になった session は除去。
     pub fn prune_folded_below(&self, session_id: &str, below: i64) {
-        if let Ok(mut map) = self.folded_seqs.lock() {
-            if let Some(set) = map.get_mut(session_id) {
-                // below 未満を削除（below 以上を残す）。
-                *set = set.split_off(&below);
-                if set.is_empty() {
-                    map.remove(session_id);
-                }
-            }
-        }
+        self.consumed.prune_folded_below(session_id, below);
+    }
+    pub fn mark_consumed_completion(&self, session_id: &str, subtask_id: &str) {
+        self.consumed.mark_completion(session_id, subtask_id);
+    }
+    pub fn is_consumed_completion(&self, session_id: &str, subtask_id: &str) -> bool {
+        self.consumed.is_completion(session_id, subtask_id)
+    }
+    pub fn injected_watermark_or_init(&self, session_id: &str, init: i64) -> i64 {
+        self.consumed.watermark_or_init(session_id, init)
+    }
+    pub fn advance_injected_watermark(&self, session_id: &str, id: i64) {
+        self.consumed.advance_watermark(session_id, id);
     }
 
     pub fn set_nostr_said_admit(&self, admit: NostrSaidAdmit) {
@@ -530,95 +460,5 @@ impl ExtgateState {
             }
             self.halt_notify.notified().await;
         }
-    }
-}
-
-#[cfg(test)]
-mod folded_seq_tests {
-    use super::*;
-
-    fn test_state() -> ExtgateState {
-        ExtgateState::new(
-            opencrab_db::Db::memory().unwrap(),
-            crate::OperatorToken::from_bytes("t"),
-        )
-    }
-
-    // #933 不変(i): is_folded は fold した seq **だけ** 真（未 fold は偽）。
-    #[test]
-    fn is_folded_only_for_marked_seqs() {
-        let s = test_state();
-        s.mark_folded_seq("sess", 5);
-        s.mark_folded_seq("sess", 9);
-        assert!(s.is_folded("sess", 5));
-        assert!(s.is_folded("sess", 9));
-        assert!(!s.is_folded("sess", 7), "未 fold の 7 は skip されない");
-        assert!(!s.is_folded("sess", 3), "未 fold の 3 は skip されない");
-    }
-
-    // #933 不変(ii): is_folded は非消費（同じ seq を何度照会しても真のまま）。
-    // 旧 consume-once は 2 回目の take で漏れたが、非消費なら二重 take/複数 said に免疫。
-    #[test]
-    fn is_folded_is_non_consuming() {
-        let s = test_state();
-        s.mark_folded_seq("sess", 7);
-        for _ in 0..3 {
-            assert!(s.is_folded("sess", 7), "7 は何度照会しても skip 対象のまま");
-        }
-        assert!(!s.is_folded("sess", 8), "8 は独立ターンを起こす");
-    }
-
-    // #933 不変(iii): 複数 said 同時畳み込みで 34,35 とも skip 対象（取りこぼさない）。
-    #[test]
-    fn two_said_fold_both_marked() {
-        let s = test_state();
-        s.mark_folded_seq("sess", 34);
-        s.mark_folded_seq("sess", 35);
-        assert!(s.is_folded("sess", 34), "seq34 は skip 対象");
-        assert!(s.is_folded("sess", 35), "seq35 は skip 対象");
-    }
-
-    // #933 修正2（R1・最重要）: OnlySpeaker 畳み込みでの over-skip 防止。
-    // 別話者 B の said(seq40)が未 fold のまま、A の resume が A の said(seq41)だけ fold しても、
-    // B(40)は skip されない（旧スカラ高水位なら 40<=41 で誤 skip＝lost message だった）。
-    #[test]
-    fn unfolded_other_speaker_seq_not_skipped_even_if_higher_folded() {
-        let s = test_state();
-        // A の resume が seq41 だけ畳み込み（B の seq40 は一度も fold されない）。
-        s.mark_folded_seq("sess", 41);
-        assert!(
-            !s.is_folded("sess", 40),
-            "未 fold の B(40)は独立ターンを起こす（lost 0）"
-        );
-        assert!(s.is_folded("sess", 41), "fold 済みの A(41)は skip");
-    }
-
-    // #933: prune は dequeue した seq 未満を掃除するが、未 fold の判定は変わらない（over-skip なし）。
-    #[test]
-    fn prune_below_keeps_unfolded_not_skipped() {
-        let s = test_state();
-        s.mark_folded_seq("sess", 41);
-        // seq40 の said ターンが dequeue（40 未満を prune）。
-        s.prune_folded_below("sess", 40);
-        assert!(
-            !s.is_folded("sess", 40),
-            "prune 後も未 fold の 40 は skip されない"
-        );
-        assert!(s.is_folded("sess", 41), "41 は残る（40 以上）");
-        // seq42 の said ターンが dequeue（42 未満を prune）→ 41 は掃除される。
-        s.prune_folded_below("sess", 42);
-        assert!(
-            !s.is_folded("sess", 41),
-            "41 の said は dequeue 済み＝prune で掃除"
-        );
-    }
-
-    // #933 不変(iv): session ごとに独立。
-    #[test]
-    fn is_folded_is_per_session() {
-        let s = test_state();
-        s.mark_folded_seq("a", 10);
-        assert!(s.is_folded("a", 10));
-        assert!(!s.is_folded("b", 10), "別 session は未 fold");
     }
 }

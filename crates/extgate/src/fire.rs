@@ -170,7 +170,6 @@ impl<R: AgentRuntime> TimedFireSink for ExtgateTimedFireSink<R> {
         };
         let caller = req.caller;
         tokio::spawn(async move {
-            // heartbeat は subtask 完了を発端にしないので consumed_completion は None。
             run_v3_said_less_turn(sink, caller, None, None).await;
         });
     }
