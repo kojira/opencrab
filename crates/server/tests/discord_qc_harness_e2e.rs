@@ -4018,17 +4018,29 @@ async fn heartbeat_h1_two_posts_flag_only_on_last() {
         "🏁 が heartbeat 最終投稿に 1 件で付かない: {:?}",
         captured(&buf)
     );
-    // typing（Discord のみ・§5.4）: activity started で入力中が立ち、ended で止まる（keepalive の
-    // drop・独立イベント無し）。**開始が観測される**ことを pin する（CH_HB1 に typing が 1 件以上）。
+    // typing（Discord のみ・§5.4）: activity started で入力中が立ち、ended で止まる。
     //
-    // 開始/停止の**厳密な前後関係は決定的に観測できない**: typing broadcast は
-    // `spawn_channel_typing` の別 async タスクで dry-run ログを出し、say 配送は別経路なので、共有
-    // buffer 上の index 順序は 2 タスクの実行タイミング次第（frame は started→say の順だが、ログの
-    // 到着順はそうと限らない）。順序 index を assert するとフルスイート実行でフレークする（実測）ため、
-    // ここでは「発話ありターンで typing が立った（＝入力中が出た）」だけを決定的に固定する。
+    // ② 開始: 発話ありターンで typing が観測される（CH_HB1 に 1 件以上）。
     assert!(
         count_kind_on_channel(&buf, "typing", CH_HB1) >= 1,
         "heartbeat ターンで typing（入力中）が観測されない（Discord・§5.4 開始）: {:?}",
+        captured(&buf)
+    );
+    // ③ 停止（#915・DIRECTION-LOG 625「入力中が残る」不具合の観測点）: 最終投稿の後（activity
+    // ended 後）は typing keepalive を **1 tick も打たない**。
+    //
+    // 決定化: typing tick は `spawn_channel_typing` の別 async タスクが打つため、say とのログ index
+    // 順序は非決定的（順序 assert はフルスイートでフレークする・実測）。そこで index 比較ではなく
+    // **「ended 以後 typing が増えない」**で評価する（team-lead 裁定の決定形）。keepalive の間隔は
+    // `TYPING_REFRESH_INTERVAL=8s`。ターン完了（本文2 配送＋settle でこの時点は activity ended 済み）
+    // 後の typing 数を基準に、8s を超えて待って tick が増えないことを確認する。keepalive が ended で
+    // 止まっていなければ（#915 の残存）+8s で必ず 1 tick 増えるので、決定的に捕捉できる。
+    let typing_after_turn = count_kind_on_channel(&buf, "typing", CH_HB1);
+    tokio::time::sleep(Duration::from_secs(9)).await; // > TYPING_REFRESH_INTERVAL(8s)
+    assert_eq!(
+        count_kind_on_channel(&buf, "typing", CH_HB1),
+        typing_after_turn,
+        "最終投稿の後も typing keepalive が残っている（#915・DIRECTION-LOG 625: activity ended で停止していない）: {:?}",
         captured(&buf)
     );
 }

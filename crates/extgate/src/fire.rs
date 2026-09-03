@@ -138,14 +138,17 @@ impl<R: AgentRuntime> ExtgateTimedFireSink<R> {
 
 impl<R: AgentRuntime> TimedFireSink for ExtgateTimedFireSink<R> {
     fn fire_timed_turn(&self, req: TimedFireRequest) {
-        // §1.5 fail-loud: 生きた binding を解決できないなら発火を諦めて warn（session_id 付き）。
-        // 「gateway なしのハートビートは存在しない」（DIRECTION-LOG 478）の実装。
+        // §1.5 fail-loud: 生きた binding を解決できないなら**発火せず**この 1 箇所だけで warn を残す
+        // （resolve 段でここへ落ちたら return するので delivery 段の warn と二重にならない＝session_id
+        // ごとちょうど 1 件）。`session_id` は **plain &str フィールド**で載せる（Display/Debug 経路だと
+        // 引用符が付き、観測側の等値照合がずれるため）。「gateway なしのハートビートは存在しない」
+        // （DIRECTION-LOG 478）の実装。
         let (binding_id, ctx) = match resolve_live_binding(&self.state, &req.session_id) {
             Some(r) => r,
             None => {
                 tracing::warn!(
-                    session_id = %req.session_id,
-                    agent_id = %req.agent_id,
+                    session_id = req.session_id.as_str(),
+                    agent_id = req.agent_id.as_str(),
                     "timed-fire(extgate): 生きた binding を解決できない（gateway 未接続 / binding 不明・closed）。発火を諦める（fail-loud・投稿を捏造しない）"
                 );
                 return;
