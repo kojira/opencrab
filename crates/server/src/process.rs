@@ -429,7 +429,7 @@ fn tool_category(name: &str) -> &'static str {
         | "read_my_history"
         | "search_my_history"
         | "survey_my_history" => "memory",
-        "create_my_skill" | "retire_my_skill" | "restore_my_skill" => "skills",
+        "create_skill" | "create_my_skill" | "retire_my_skill" | "restore_my_skill" => "skills",
         "evaluate_response"
         | "analyze_llm_usage"
         | "learn_from_experience"
