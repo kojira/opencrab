@@ -392,8 +392,8 @@ pub fn process_said<R: AgentRuntime>(
             said,
             &session_id,
             &prompt_suffix,
-            seq,  // #933: この said の external_origins.seq（畳み込み高水位との比較用）
-            true, // 単一メンション: 発端 said の origin へ返信
+            Some(seq), // #933: この said の external_origins.seq（fold 済み集合との照合用）
+            true,      // 単一メンション: 発端 said の origin へ返信
         );
     }
 
@@ -475,9 +475,8 @@ fn finish_bundle<R: AgentRuntime>(
             &trigger_said,
             ctx.session_id,
             &suffix,
-            // #933: bundle は coordinator ターンで個別 said の畳み込み対象外。fold 高水位で skip
-            // させない（i64::MAX は常に `seq <= high` が偽）。
-            i64::MAX,
+            // #933: bundle は coordinator ターンで個別 said の畳み込み対象外。None で skip/prune 対象外。
+            None,
             false, // bundle: 単一返信先が無い（gateway が standalone post で publish・row292）
         );
     }
@@ -803,9 +802,9 @@ fn enqueue_turn<R: AgentRuntime>(
     said: &Said,
     session_id: &str,
     prompt_suffix: &str,
-    // #933: この said の external_origins.seq。dequeue 時に `seq <= 畳み込み高水位` なら独立ターンを
-    // skip する（二重処理防止・非消費の単一真実）。
-    seq: i64,
+    // #933: この said の external_origins.seq。dequeue 時に「fold 済み集合に含まれる」なら独立
+    // ターンを skip する（二重処理防止・非消費）。bundle は個別 said でないので None（skip 対象外）。
+    seq: Option<i64>,
     // 単一メンション turn は発端 said の origin へ返信（say payload の reply_target に載せる）。
     // bundle turn は単一返信先が無いので false（gateway が standalone post で publish・row292）。
     // 返信先は say payload の明示 reply_target を正とする（裁定A で ended は say の後になったが、
@@ -846,21 +845,24 @@ fn enqueue_turn<R: AgentRuntime>(
         let lock_id = session_id.clone();
         locks
             .run_serialized(&lock_id, async move {
-                // #930/#933: この said が走行中の別ターンへ既に畳み込まれ read 済み
-                // （seq <= 畳み込み高水位）なら、独立ターンを起こさない（started も出さず LLM も
-                // 走らせない）。畳み込みと独立ターンの二重処理・遅延 👀 の源を断つ（#930 第2欠陥）。
-                // #933: 非消費の単調高水位を単一の真実にし、二重 take/順序競合に免疫（複数 said 同時
-                // 畳み込みでも取りこぼさない）。skip は fail-loud の観測点として info で残す。
-                let high = state.folded_high_water(&session_id);
-                if seq <= high {
-                    tracing::info!(
-                        session_id = %session_id,
-                        origin = %origin,
-                        seq,
-                        folded_high_water = high,
-                        "skip independent turn: said already folded into a running turn (#930/#933)"
-                    );
-                    return;
+                // #930/#933: この said が走行中の別ターンへ既に畳み込まれ read 済み（fold 済み集合に
+                // seq が在る）なら、独立ターンを起こさない（started も出さず LLM も走らせない）。
+                // 畳み込みと独立ターンの二重処理・遅延 👀 の源を断つ（#930 第2欠陥）。#933: 実際に fold
+                // した seq だけの非消費集合で判定＝別話者の未 fold said を over-skip しない（OnlySpeaker
+                // 対応）・二重 take に免疫。dequeue を機に seq 未満を prune（FIFO なので安全）。
+                // skip は fail-loud の観測点として info で残す。bundle（seq=None）は skip 対象外。
+                if let Some(seq) = seq {
+                    let folded = state.is_folded(&session_id, seq);
+                    state.prune_folded_below(&session_id, seq);
+                    if folded {
+                        tracing::info!(
+                            session_id = %session_id,
+                            origin = %origin,
+                            seq,
+                            "skip independent turn: said already folded into a running turn (#930/#933)"
+                        );
+                        return;
+                    }
                 }
                 #[cfg(any(test, feature = "extgate-probe"))]
                 state
@@ -1215,9 +1217,9 @@ fn fire_held_turns<R: AgentRuntime>(
         owner_id: last.owner_id.clone(),
         delivery_mode: last.delivery_mode,
     };
-    // #933: 保留していた said 自身の seq。畳み込み済み（seq <= 高水位）なら独立ターンを skip。
-    // external_origins に無ければ i64::MAX（skip しない）。
-    let held_seq = seq_for_origin(&state, &said.binding_id, &said.origin).unwrap_or(i64::MAX);
+    // #933: 保留していた said 自身の seq。fold 済み集合に在れば独立ターンを skip。external_origins に
+    // 無ければ None（skip/prune 対象外）。
+    let held_seq = seq_for_origin(&state, &said.binding_id, &said.origin);
     enqueue_turn(
         state,
         runtime,

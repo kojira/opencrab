@@ -5235,9 +5235,9 @@ async fn scenario_933_multi_said_fold_no_independent_turn() {
         .iter()
         .filter(|c| c.kind == "say" && c.channel == R933_CH && c.body.contains(R930_BREPLY))
         .count();
-    assert!(
-        breply_says >= 1,
-        "畳み込みターンの返信 say が無い: {:?}",
+    assert_eq!(
+        breply_says, 1,
+        "畳み込みターンの返信 say は 1 件のみ（独立ターンの二重返信も塞ぐ・#933）: {:?}",
         caps
     );
 }

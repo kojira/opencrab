@@ -1,6 +1,6 @@
 //! process-local live registry。startup は空。DB から復元しない。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 #[cfg(any(test, feature = "extgate-probe"))]
 use std::sync::atomic::AtomicUsize;
@@ -265,13 +265,16 @@ pub struct ExtgateState {
     nostr_privilege: Mutex<HashMap<i64, PrivilegeFire<NostrHeldTurn>>>,
     reserved_tool_name: Mutex<Option<ReservedToolNameFn>>,
     pub turn_queues: Arc<SessionTurnQueues>,
-    /// #930/#933: 走行中ターンへ畳み込んで LLM に渡した said の **external_origins.seq の高水位**を
+    /// #930/#933: 走行中ターンへ畳み込んで LLM に渡した said の **external_origins.seq の集合**を
     /// session ごとに記録する。record→enqueue で積まれた「その said 自身の独立ターン」が後で
-    /// dequeue した際、`said.seq <= 高水位` なら **独立ターンを起こさず skip**（二重処理を防ぐ・
-    /// #930 第2欠陥）。#933: consume-once の origin 集合は二重 take/順序競合に脆かったため、**非消費の
-    /// 単調高水位**（seq キー）へ置換し「単一の真実」にする。poll は id 昇順（＝seq 昇順）で畳み込む
-    /// ので「seq <= 高水位＝畳み込み済み」の不変が保たれる。新 DB テーブルは足さない in-memory・per-session。
-    folded_seq_high: Mutex<HashMap<String, i64>>,
+    /// dequeue した際、`folded_seqs.contains(said.seq)` なら **独立ターンを起こさず skip**
+    /// （二重処理を防ぐ・#930 第2欠陥）。
+    /// #933 修正2: スカラ高水位は OnlySpeaker 畳み込み（Nostr resume が `OnlySpeaker(author)`）で
+    /// 別話者の**未 fold** said を over-skip（`seq <= 高水位`で lost message）し得たため、**実際に
+    /// fold した seq だけ**を持つ非消費の集合（BTreeSet）に置換。skip は `contains` のみ＝per-origin
+    /// で正しく、非消費なので二重 take にも免疫。肥大は dequeue した seq より小さいエントリを prune
+    /// （turn_queues は到着順 FIFO ＝ より小さい seq は既に dequeue 済みなので安全）。新 DB テーブルなし。
+    folded_seqs: Mutex<HashMap<String, BTreeSet<i64>>>,
     #[cfg(any(test, feature = "extgate-probe"))]
     pub probe: GateProbe,
 }
@@ -292,33 +295,45 @@ impl ExtgateState {
             nostr_privilege: Mutex::new(HashMap::new()),
             reserved_tool_name: Mutex::new(None),
             turn_queues: Arc::new(SessionTurnQueues::new()),
-            folded_seq_high: Mutex::new(HashMap::new()),
+            folded_seqs: Mutex::new(HashMap::new()),
             #[cfg(any(test, feature = "extgate-probe"))]
             probe: GateProbe::default(),
         }
     }
 
-    /// #930/#933: この said の external_origins.seq を「走行中ターンへ畳み込んで read 済み」の
-    /// 高水位として記録する（read state を emit する時点で呼ぶ）。**単調**（小さい seq を後から
-    /// 渡しても下がらない）。
+    /// #930/#933: この said の external_origins.seq を「走行中ターンへ畳み込んで read 済み」として
+    /// 集合へ記録する（read state を emit する時点で・fold した各 said ごとに呼ぶ）。**実際に fold
+    /// した seq だけ**を入れる（over-skip を防ぐ）。
     pub fn mark_folded_seq(&self, session_id: &str, seq: i64) {
-        if let Ok(mut map) = self.folded_seq_high.lock() {
-            let e = map.entry(session_id.to_string()).or_insert(0);
-            if seq > *e {
-                *e = seq;
-            }
+        if let Ok(mut map) = self.folded_seqs.lock() {
+            map.entry(session_id.to_string()).or_default().insert(seq);
         }
     }
 
-    /// #933: この session の畳み込み済み seq 高水位（未記録は 0）。**非消費**（読み取りのみ）。
-    /// enqueue 側は `said.seq <= folded_high_water` なら独立ターンを skip する。同じ seq を何度
-    /// 照会しても真のままで、二重 take・順序競合に免疫。
-    pub fn folded_high_water(&self, session_id: &str) -> i64 {
-        self.folded_seq_high
+    /// #933: この seq が「畳み込み済み」か（**非消費**・読み取りのみ）。enqueue 側は真なら独立ターン
+    /// を skip する。実際に fold した seq のみ真＝別話者の未 fold said を over-skip しない。同じ seq
+    /// を何度照会しても真のままで、二重 take に免疫。
+    pub fn is_folded(&self, session_id: &str, seq: i64) -> bool {
+        self.folded_seqs
             .lock()
             .ok()
-            .and_then(|map| map.get(session_id).copied())
-            .unwrap_or(0)
+            .map(|map| map.get(session_id).is_some_and(|s| s.contains(&seq)))
+            .unwrap_or(false)
+    }
+
+    /// #933: dequeue した seq（`below`）より小さいエントリを掃除する（肥大防止）。turn_queues は
+    /// 到着順 FIFO ＝ `below` より小さい seq の said ターンは既に dequeue 済みなので、その fold 記録は
+    /// もう不要（安全に prune）。空になった session は除去。
+    pub fn prune_folded_below(&self, session_id: &str, below: i64) {
+        if let Ok(mut map) = self.folded_seqs.lock() {
+            if let Some(set) = map.get_mut(session_id) {
+                // below 未満を削除（below 以上を残す）。
+                *set = set.split_off(&below);
+                if set.is_empty() {
+                    map.remove(session_id);
+                }
+            }
+        }
     }
 
     pub fn set_nostr_said_admit(&self, admit: NostrSaidAdmit) {
@@ -478,54 +493,81 @@ mod folded_seq_tests {
         )
     }
 
-    // #933 不変(i): 高水位は単調（小さい seq を後から mark しても下がらない）。
+    // #933 不変(i): is_folded は fold した seq **だけ** 真（未 fold は偽）。
     #[test]
-    fn mark_folded_seq_is_monotonic() {
+    fn is_folded_only_for_marked_seqs() {
         let s = test_state();
         s.mark_folded_seq("sess", 5);
-        assert_eq!(s.folded_high_water("sess"), 5);
-        s.mark_folded_seq("sess", 3); // 小さい seq は下げない
-        assert_eq!(s.folded_high_water("sess"), 5);
-        s.mark_folded_seq("sess", 9); // 大きい seq は上げる
-        assert_eq!(s.folded_high_water("sess"), 9);
+        s.mark_folded_seq("sess", 9);
+        assert!(s.is_folded("sess", 5));
+        assert!(s.is_folded("sess", 9));
+        assert!(!s.is_folded("sess", 7), "未 fold の 7 は skip されない");
+        assert!(!s.is_folded("sess", 3), "未 fold の 3 は skip されない");
     }
 
-    // #933 不変(ii): folded_high_water は非消費（同じ seq を何度照会しても skip 判定が変わらない）。
-    // 現行バグ（consume-once）は 2 回目の take で漏れたが、非消費なら二重 take/複数 said に免疫。
+    // #933 不変(ii): is_folded は非消費（同じ seq を何度照会しても真のまま）。
+    // 旧 consume-once は 2 回目の take で漏れたが、非消費なら二重 take/複数 said に免疫。
     #[test]
-    fn folded_high_water_is_non_consuming() {
+    fn is_folded_is_non_consuming() {
         let s = test_state();
         s.mark_folded_seq("sess", 7);
-        // seq 6,7 は畳み込み済み扱い（<= 高水位）が **何度でも** 真。
         for _ in 0..3 {
-            assert!(6 <= s.folded_high_water("sess"), "seq6 は skip 対象のまま");
-            assert!(7 <= s.folded_high_water("sess"), "seq7 は skip 対象のまま");
+            assert!(s.is_folded("sess", 7), "7 は何度照会しても skip 対象のまま");
         }
-        // seq 8 は未畳み込み（> 高水位）。
-        assert!(8 > s.folded_high_water("sess"), "seq8 は独立ターンを起こす");
+        assert!(!s.is_folded("sess", 8), "8 は独立ターンを起こす");
     }
 
-    // #933 不変(iii): 複数 said 同時畳み込み（高水位を最大へ）で seq34,35 とも skip 対象。
-    // 現行の per-origin consume-once では 2 件目が漏れ得たが、seq 高水位なら 34,35 とも <= 35。
+    // #933 不変(iii): 複数 said 同時畳み込みで 34,35 とも skip 対象（取りこぼさない）。
     #[test]
-    fn two_said_fold_both_below_high_water() {
+    fn two_said_fold_both_marked() {
         let s = test_state();
-        // seq34,35 を畳み込み（高水位=35）。
         s.mark_folded_seq("sess", 34);
         s.mark_folded_seq("sess", 35);
-        let high = s.folded_high_water("sess");
-        assert_eq!(high, 35);
-        // 34,35 とも「seq <= 高水位」で独立ターンを skip（別々に確認・冗長比較を避ける）。
-        assert!(34 <= high, "seq34 は skip 対象");
-        assert!(35 <= high, "seq35 は skip 対象");
+        assert!(s.is_folded("sess", 34), "seq34 は skip 対象");
+        assert!(s.is_folded("sess", 35), "seq35 は skip 対象");
     }
 
-    // #933 不変(iv): session ごとに独立（別 session の高水位は影響しない）。
+    // #933 修正2（R1・最重要）: OnlySpeaker 畳み込みでの over-skip 防止。
+    // 別話者 B の said(seq40)が未 fold のまま、A の resume が A の said(seq41)だけ fold しても、
+    // B(40)は skip されない（旧スカラ高水位なら 40<=41 で誤 skip＝lost message だった）。
     #[test]
-    fn folded_high_water_is_per_session() {
+    fn unfolded_other_speaker_seq_not_skipped_even_if_higher_folded() {
+        let s = test_state();
+        // A の resume が seq41 だけ畳み込み（B の seq40 は一度も fold されない）。
+        s.mark_folded_seq("sess", 41);
+        assert!(
+            !s.is_folded("sess", 40),
+            "未 fold の B(40)は独立ターンを起こす（lost 0）"
+        );
+        assert!(s.is_folded("sess", 41), "fold 済みの A(41)は skip");
+    }
+
+    // #933: prune は dequeue した seq 未満を掃除するが、未 fold の判定は変わらない（over-skip なし）。
+    #[test]
+    fn prune_below_keeps_unfolded_not_skipped() {
+        let s = test_state();
+        s.mark_folded_seq("sess", 41);
+        // seq40 の said ターンが dequeue（40 未満を prune）。
+        s.prune_folded_below("sess", 40);
+        assert!(
+            !s.is_folded("sess", 40),
+            "prune 後も未 fold の 40 は skip されない"
+        );
+        assert!(s.is_folded("sess", 41), "41 は残る（40 以上）");
+        // seq42 の said ターンが dequeue（42 未満を prune）→ 41 は掃除される。
+        s.prune_folded_below("sess", 42);
+        assert!(
+            !s.is_folded("sess", 41),
+            "41 の said は dequeue 済み＝prune で掃除"
+        );
+    }
+
+    // #933 不変(iv): session ごとに独立。
+    #[test]
+    fn is_folded_is_per_session() {
         let s = test_state();
         s.mark_folded_seq("a", 10);
-        assert_eq!(s.folded_high_water("a"), 10);
-        assert_eq!(s.folded_high_water("b"), 0, "別 session は 0（未畳み込み）");
+        assert!(s.is_folded("a", 10));
+        assert!(!s.is_folded("b", 10), "別 session は未 fold");
     }
 }
