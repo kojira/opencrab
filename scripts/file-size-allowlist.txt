@@ -3,7 +3,6 @@
 4028	crates/actions/src/bridge.rs
 862	crates/actions/src/llm_analysis.rs
 1843	crates/actions/src/memory_units.rs
-1372	crates/actions/src/session_inbound.rs
 877	crates/actions/src/skill_management.rs
 4172	crates/actions/src/subtask.rs
 872	crates/actions/src/tools/shell.rs
