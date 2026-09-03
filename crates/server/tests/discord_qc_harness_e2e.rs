@@ -628,6 +628,19 @@ async fn start_core(provider: Arc<dyn LlmProvider>) -> Core {
         OperatorToken::from_bytes(TOKEN),
     ));
     let state = build_app_state(db.clone(), provider);
+    // #925: 本番と同じ descriptor 登録（`register_production_descriptors`）＋ V3 heartbeat 受け口
+    // （`ExtgateTimedFireSink`）を実型で配線する。これで scheduler seam（resolve_target →
+    // run_one_heartbeat）が extgate session を解決し発火できる（未登録なら resolve_target None で
+    // 配送 0＝赤）。descriptor は本番経路で登録するので、`register_production_descriptors` から
+    // ExtgateFire が抜けると本ハーネスの heartbeat も赤になる（配線漏れを捕捉）。
+    opencrab_server::register_production_descriptors(&state.timed_fire_router);
+    state.timed_fire_router.register_shared(
+        opencrab_extgate::EXTGATE_TIMED_FIRE_KIND,
+        Arc::new(opencrab_extgate::ExtgateTimedFireSink::new(
+            extgate.clone(),
+            state.clone(),
+        )),
+    );
 
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("gate.sock");
@@ -4005,40 +4018,17 @@ async fn heartbeat_h1_two_posts_flag_only_on_last() {
         "🏁 が heartbeat 最終投稿に 1 件で付かない: {:?}",
         captured(&buf)
     );
-    // typing（Discord のみ・§5.4）: activity started で入力中が立ち、ended で止まる。dry-run は
-    // 「打った」ときだけ kind="typing" を出す（停止は keepalive の drop で、独立イベントは無い）ので、
-    // 観測できる形で「1 件目の前に開始・最終投稿以降は打たない（＝停止）」を pin する:
-    //   ① CH_HB1 の typing が 1 件以上（開始）。
-    //   ② 最初の typing が本文1 の say より前（1 件目の前に開始）。
-    //   ③ 最後の typing が本文2 の say より前（2 件目の後には打っていない＝ターン終了で停止）。
-    let ch_idx = |kind: &str, body: &str| -> Vec<usize> {
-        captured(&buf)
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| {
-                c.channel == CH_HB1 && c.kind == kind && (body.is_empty() || c.body.contains(body))
-            })
-            .map(|(i, _)| i)
-            .collect()
-    };
-    let typing_idxs = ch_idx("typing", "");
-    let b1_idxs = ch_idx("say", HB1_B1);
-    let b2_idxs = ch_idx("say", HB1_B2);
+    // typing（Discord のみ・§5.4）: activity started で入力中が立ち、ended で止まる（keepalive の
+    // drop・独立イベント無し）。**開始が観測される**ことを pin する（CH_HB1 に typing が 1 件以上）。
+    //
+    // 開始/停止の**厳密な前後関係は決定的に観測できない**: typing broadcast は
+    // `spawn_channel_typing` の別 async タスクで dry-run ログを出し、say 配送は別経路なので、共有
+    // buffer 上の index 順序は 2 タスクの実行タイミング次第（frame は started→say の順だが、ログの
+    // 到着順はそうと限らない）。順序 index を assert するとフルスイート実行でフレークする（実測）ため、
+    // ここでは「発話ありターンで typing が立った（＝入力中が出た）」だけを決定的に固定する。
     assert!(
-        !typing_idxs.is_empty(),
+        count_kind_on_channel(&buf, "typing", CH_HB1) >= 1,
         "heartbeat ターンで typing（入力中）が観測されない（Discord・§5.4 開始）: {:?}",
-        captured(&buf)
-    );
-    let first_b1 = *b1_idxs.iter().min().expect("本文1 の say index");
-    let last_b2 = *b2_idxs.iter().max().expect("本文2 の say index");
-    assert!(
-        *typing_idxs.iter().min().unwrap() < first_b1,
-        "typing の開始が 1 件目の投稿より後（§5.4 開始は 1 件目の前）: {:?}",
-        captured(&buf)
-    );
-    assert!(
-        *typing_idxs.iter().max().unwrap() < last_b2,
-        "最終投稿より後に typing が打たれた（§5.4 2 件目の後には打たない＝停止）: {:?}",
         captured(&buf)
     );
 }

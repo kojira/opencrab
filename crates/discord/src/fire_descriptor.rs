@@ -9,8 +9,9 @@ use opencrab_actions::{gateway_kinds, FireTarget, TransportFire, TransportFireEn
 
 /// `discord-{agent}-{guild}-{channel}` の発火先を名乗る descriptor。
 ///
-/// **性質**（旧 enum から不変）: live G マスタゲートの対象（`is_g_gated=true`）／発火ターンの
-/// 応答本文はそのままチャンネルへ自動配送される（`posts_response_body=true`）。
+/// **性質**（旧 enum から不変）: live G マスタゲートの対象（`is_g_gated=true`）。発火ターンの
+/// 応答本文はそのままチャンネルへ自動配送される（誘導文言は transport 非依存・#925 §1.7 で
+/// `posts_response_body` は撤去）。
 pub struct DiscordFire;
 
 impl TransportFire for DiscordFire {
@@ -51,10 +52,6 @@ impl TransportFire for DiscordFire {
     }
 
     fn is_g_gated(&self) -> bool {
-        true
-    }
-
-    fn posts_response_body(&self) -> bool {
         true
     }
 

@@ -550,6 +550,17 @@ async fn start_core(provider: Arc<dyn LlmProvider>) -> Core {
     extgate.set_nostr_relay(Arc::new(|_agent_id, _text| {}));
 
     let state = build_app_state(db.clone(), provider);
+    // #925: 本番と同じ descriptor 登録＋ V3 heartbeat 受け口を実型で配線する（Nostr レーンも
+    // canonical session は `extgate-<binding_id>` で同一 descriptor が受ける）。未登録なら
+    // resolve_target None で配送 0＝赤。
+    opencrab_server::register_production_descriptors(&state.timed_fire_router);
+    state.timed_fire_router.register_shared(
+        opencrab_extgate::EXTGATE_TIMED_FIRE_KIND,
+        Arc::new(opencrab_extgate::ExtgateTimedFireSink::new(
+            extgate.clone(),
+            state.clone(),
+        )),
+    );
 
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("gate.sock");
