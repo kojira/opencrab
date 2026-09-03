@@ -4379,6 +4379,10 @@ async fn heartbeat_h4_unbound_gateway_fires_nothing() {
 //      かつ A の宣言 say の後（B 到着時点ではなく畳み込み時点で付く）。
 //  (5) 🏁: B への返信に 🏁 0（A の subtask 進行中＝idle でない）。
 // 現 tip は (4) が **赤**（👀 が返信の後に付く）。
+//
+// #930 第2欠陥（二重処理）は companion テスト
+// `scenario_930_folded_said_does_not_spawn_independent_turn` で独立に赤にする
+// （畳み込んだ B が独立ターンを起こさない）。本テストは (1)〜(5) の 👀 タイミングに集中する。
 // ===================================================================
 const R930_CH: &str = "630";
 const R930_A: &str = "R930AMARK";
@@ -4406,9 +4410,15 @@ impl LlmProvider for EyesOnReadMock {
     async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
         let text = request_text(&request);
         self.reqs.lock().unwrap().push(text.clone());
-        // 畳み込まれた B を含む呼び出し → B へ返信して自然終了。
         if text.contains(R930_B) {
-            return Ok(text_response(R930_BREPLY));
+            // 走行中ターンへ「新着メッセージ」として畳み込まれた（fold）呼び出し → B へ返信。
+            if text.contains("新着メッセージ") {
+                return Ok(text_response(R930_BREPLY));
+            }
+            // 「新着」でなく B を読む＝B が自分の独立ターンを起こした（#930 第2欠陥の二重処理）。
+            // production の 07:46:00 と同じく沈黙（NO_REPLY）で終える。この独立ターンの
+            // started+origin(B) が返信の後に 👀 を付ける源。修正後はこの独立ターン自体が起きない。
+            return Ok(text_response("NO_REPLY"));
         }
         // A 初回 → execute_shell(sleep) で背景 subtask（🏁 抑制条件＝agent に running subtask）。
         if text.contains(R930_A)
@@ -4685,5 +4695,154 @@ async fn scenario_930_no_read_reaction_without_midturn_message() {
         eyes_other, 0,
         "新着の無いターンで 👀 が発端以外へ付いた（read の空 poll 誤発火）: {:?}",
         caps
+    );
+}
+
+// ===================================================================
+// #930 第2欠陥【畳み込んだ said は独立ターンを起こさない（二重処理しない）】
+// QC llm_logs（07:45–07:46Z）: 走行中に届いた B は 07:45:39 のイテレーションへ畳み込まれて
+// 読まれ（execute_shell(date) 起動）、07:45:55 の resume で返信されたのに、07:46:00 に **B 単独の
+// ターンがもう 1 本走って NO_REPLY**。この独立ターンの `activity started`+origin(B) が返信の後に
+// 👀 を付ける源だった。＝ B は「畳み込み」と「独立ターン」で二重処理されている。
+//
+// 期待（設計・補足）: 畳み込んだ said を turn_queues から消費済みにする（既存の said→enqueue_turn
+// 経路で「既に文脈に入った seq」を skip する 1 か所。新経路なし）。＝ B を独立ターンとして走らせない。
+//
+// 観測境界: LLM 呼び出し回数（§1 標準3）。B を「新着メッセージ（畳み込み）」以外の文脈で読む
+// 呼び出し＝B が自分の独立ターンを起こした証拠。畳み込み分（新着）のみが正で、それ以外は 0。
+// 現 tip は独立ターン（NO_REPLY）が 1 本走る → **赤**。
+// ===================================================================
+const R930D_CH: &str = "633";
+
+#[tokio::test]
+async fn scenario_930_folded_said_does_not_spawn_independent_turn() {
+    let buf = install_capture();
+    let mock = Arc::new(EyesOnReadMock {
+        reqs: Mutex::new(Vec::new()),
+        emitted_sleep: std::sync::atomic::AtomicBool::new(false),
+        continues: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+    *core.state.tools_config.write().unwrap() = shell_enabled_tools_config();
+
+    let fixture = Fixture::new();
+    let _client = wire_instance_on_channel(&core, &fixture, R930D_CH).await;
+
+    fixture.append_message_ch(
+        "6331",
+        R930D_CH,
+        &format!("{R930_A} sleep して終わったら教えて"),
+    );
+
+    let a_ready = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "say" && c.channel == R930D_CH && c.body.contains(R930_DECL))
+        })
+        .await
+    };
+    assert!(
+        a_ready,
+        "A の宣言 say が出ない（subtask/継続未達）: {:?}",
+        captured(&buf)
+    );
+    assert!(
+        core.state
+            .subtask_registries
+            .has_running_for_agent(AGENT_ID),
+        "A 宣言時点で subtask が走行中でない（テスト前提崩れ）"
+    );
+
+    fixture.append_message_ch(
+        "6332",
+        R930D_CH,
+        &format!("{R930_B} その間に date の結果教えて"),
+    );
+
+    // 畳み込み(fold)で B へ返信 say が出るまで待つ。
+    let breplied = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "say" && c.channel == R930D_CH && c.body.contains(R930_BREPLY))
+        })
+        .await
+    };
+    assert!(
+        breplied,
+        "fold での B への返信 say が出ない: {:?}",
+        captured(&buf)
+    );
+
+    // (前提) 畳み込みが実際に起きた（新着メッセージで B を読む呼び出しがある）。
+    let folded = mock
+        .reqs
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|t| t.contains(R930_B) && t.contains("新着メッセージ"));
+    assert!(
+        folded,
+        "B が畳み込まれていない（poll_new_messages 経路未通過・テスト前提崩れ）: reqs={:?}",
+        mock.reqs.lock().unwrap()
+    );
+
+    // B の独立ターン（畳み込みと二重）の LLM 呼び出しが現れるか、上限まで待つ。
+    // 現 tip は現れる（NO_REPLY で沈黙終了する独立ターン）。修正後は現れない（timeout）。
+    let _ = {
+        let mock = mock.clone();
+        wait_until(move || {
+            mock.reqs
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|t| t.contains(R930_B) && !t.contains("新着メッセージ"))
+        })
+        .await
+    };
+
+    // ---- (赤の核心) 畳み込んだ B を「新着」以外で読む LLM 呼び出し＝独立ターン。0 のはず。----
+    let independent_b_calls = mock
+        .reqs
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|t| t.contains(R930_B) && !t.contains("新着メッセージ"))
+        .count();
+    assert_eq!(
+        independent_b_calls,
+        0,
+        "畳み込んだ B が独立ターンでも処理された（#930 第2欠陥・二重処理／遅延 👀 の源）: \
+         畳み込み以外で B を読む LLM 呼び出しが {independent_b_calls} 件。reqs={:?}",
+        mock.reqs.lock().unwrap()
+    );
+
+    // (補助) B への返信 say はちょうど 1 件（fold の 1 本のみ・独立ターンは投稿しない）。
+    let breply_says = captured(&buf)
+        .iter()
+        .filter(|c| c.kind == "say" && c.channel == R930D_CH && c.body.contains(R930_BREPLY))
+        .count();
+    assert_eq!(
+        breply_says,
+        1,
+        "B への返信 say が 1 件でない（fold の 1 本のみが正）: {:?}",
+        captured(&buf)
+    );
+
+    // (補助) 👀 は B に 1 件（畳み込み read 1 回・独立 started の重複 0）。
+    let eyes_b = captured(&buf)
+        .iter()
+        .filter(|c| {
+            c.kind == "system_reaction" && c.emoji.contains(SYS_ACCEPTED) && c.message == "6332"
+        })
+        .count();
+    assert_eq!(
+        eyes_b,
+        1,
+        "👀 が B（6332）に 1 件でない: {:?}",
+        captured(&buf)
     );
 }
