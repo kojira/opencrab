@@ -5263,7 +5263,8 @@ async fn scenario_933_multi_said_fold_no_independent_turn() {
 //   (A3) R935_BREPLY 返信 say は **1 件**（tip は 2＝独立ターンも二重返信）。
 // 現 tip は (A1)(A2)(A3) が赤。
 // ===================================================================
-const R935_CH: &str = "635";
+const R935_CH: &str = "635"; // A 専用（typing 隔離）
+const R935B_CH: &str = "638"; // B（否定側）専用（typing/say を A と分離）
 const R935_A: &str = "R935AMARK"; // said0（lock 保持・単一 iteration 低速）
 const R935_B: &str = "R935BMARK"; // said1 / said2（build 掃き込み対象）
 const R935_C: &str = "R935CMARK"; // 否定側 B（単独 said）
@@ -5356,22 +5357,16 @@ async fn scenario_935_build_swept_said_read_and_no_independent_turn() {
         captured(&buf)
     );
 
-    // said2 の消費済み独立ターン（build 掃き込み以外の 2 本目の R935_B 呼び出し）が現れるか、
-    // 上限まで待つ（fix なら現れず timeout）。
-    let _ = {
-        let mock = mock.clone();
-        wait_until(move || {
-            mock.reqs
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|t| t.contains(R935_B) && !t.contains("新着メッセージ"))
-                .count()
-                >= 2
-        })
-        .await
-    };
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    // typing 基準化: said1 の返信直後（ended 後）に専用チャンネル 635 の typing を数える。この後に
+    // said2 の消費済み独立ターンが走れば started→typing を打つ（tip・増分>0）。fix なら独立ターンは
+    // run_serialized 頭で skip され started/typing を出さない（増分 0）。「LLM だけ skip して
+    // started/typing は先に打つ」誤実装もここで赤になる。
+    tokio::time::sleep(Duration::from_millis(300)).await; // said1 ターンの ended を確定させる
+    let typing_before = count_kind_on_channel(&buf, "typing", R935_CH);
+    // said2 の消費済み独立ターンが走る猶予＋ typing 失効間隔（8s）を跨ぐ。fix なら独立ターンは起きず
+    // typing も増えない。
+    tokio::time::sleep(Duration::from_millis(9000)).await;
+    let typing_after = count_kind_on_channel(&buf, "typing", R935_CH);
 
     let caps = captured(&buf);
 
@@ -5462,6 +5457,14 @@ async fn scenario_935_build_swept_said_read_and_no_independent_turn() {
         "👀 が said2(9352) に 1 件でない: {:?}",
         caps
     );
+
+    // ---- (A4・赤) 消費済み独立ターンは started/typing を出さない（typing 残留の源を断つ）----
+    // tip は said2 の独立ターンが started→typing を打つので増分>0。fix は skip で増分 0。
+    assert_eq!(
+        typing_after, typing_before,
+        "build 掃き込み said の後に typing が再送出された（消費済み独立ターンが started/typing を打った \
+         ・#935 欠陥／typing 残留）: before={typing_before} after={typing_after}"
+    );
 }
 
 // ===================================================================
@@ -5480,17 +5483,17 @@ async fn scenario_935_lone_said_still_runs_independent_turn() {
     *core.state.tools_config.write().unwrap() = shell_enabled_tools_config();
 
     let fixture = Fixture::new();
-    let _client = wire_instance_on_channel(&core, &fixture, R935_CH).await;
+    let _client = wire_instance_on_channel(&core, &fixture, R935B_CH).await;
 
     // 走行ターンなし・畳み込みなし・build 掃き込みなしの単独 said。
-    fixture.append_message_ch("9360", R935_CH, &format!("{R935_C} 単発の質問"));
+    fixture.append_message_ch("9360", R935B_CH, &format!("{R935_C} 単発の質問"));
 
     let replied = {
         let buf = buf.clone();
         wait_until(move || {
             captured(&buf)
                 .iter()
-                .any(|c| c.kind == "say" && c.channel == R935_CH && c.body.contains(R935_CREPLY))
+                .any(|c| c.kind == "say" && c.channel == R935B_CH && c.body.contains(R935_CREPLY))
         })
         .await
     };
@@ -5519,7 +5522,7 @@ async fn scenario_935_lone_said_still_runs_independent_turn() {
     );
     let creply_says = caps
         .iter()
-        .filter(|c| c.kind == "say" && c.channel == R935_CH && c.body.contains(R935_CREPLY))
+        .filter(|c| c.kind == "say" && c.channel == R935B_CH && c.body.contains(R935_CREPLY))
         .count();
     assert_eq!(
         creply_says, 1,
@@ -5642,12 +5645,13 @@ async fn scenario_935_consumed_subtask_completion_resume_skipped() {
         "resume 完了報告 say が出ない（2 subtask/resume 未達・テスト前提崩れ）: {:?}",
         captured(&buf)
     );
-    // 2 本目の resume（tip では走る）が現れるか、上限まで待つ（fix なら現れず timeout）。
-    let _ = {
-        let mock = mock.clone();
-        wait_until(move || mock.resume_calls.load(std::sync::atomic::Ordering::SeqCst) >= 2).await
-    };
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    // typing 基準化: 先着 resume の報告直後（専用チャンネル 636）。この後に 2 本目の消費済み resume が
+    // 走れば started→typing を打つ（tip・増分>0）。fix なら 2 本目は run_serialized 頭で skip され
+    // started/typing を出さない（増分 0）。「LLM だけ skip して started/typing は先に打つ」誤実装も赤。
+    let typing_before = count_kind_on_channel(&buf, "typing", R935C_CH);
+    // 2 本目の resume が走る猶予＋ typing 失効間隔（8s）を跨ぐ。fix なら 2 本目は起きず typing も増えない。
+    tokio::time::sleep(Duration::from_millis(9000)).await;
+    let typing_after = count_kind_on_channel(&buf, "typing", R935C_CH);
 
     let caps = captured(&buf);
 
@@ -5682,6 +5686,14 @@ async fn scenario_935_consumed_subtask_completion_resume_skipped() {
         report_says, 1,
         "resume 完了報告 say が 1 件でない（消費済み完了の resume が二重報告した・#935 (c3)）: {:?}",
         caps
+    );
+
+    // ---- (C3・赤) 消費済み完了の resume は started/typing を出さない（typing 残留の源を断つ）----
+    // tip は 2 本目の resume が started→typing を打つので増分>0。fix は run_serialized 頭 skip で増分 0。
+    assert_eq!(
+        typing_after, typing_before,
+        "先着 resume の報告後に typing が再送出された（消費済み完了の resume が started/typing を打った \
+         ・#935 (c3)／typing 残留）: before={typing_before} after={typing_after}"
     );
 }
 
