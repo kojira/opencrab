@@ -54,6 +54,5 @@
 1969	crates/server/src/peer_review.rs
 3780	crates/server/src/process.rs
 1396	crates/server/src/scheduler.rs
-1270	crates/server/src/subtask_spawn.rs
 2372	crates/server/src/system_actions/mod.rs
 1425	crates/server/src/webhook_targets.rs
