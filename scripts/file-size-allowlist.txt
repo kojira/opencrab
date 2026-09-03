@@ -1,6 +1,5 @@
 844	crates/actions/src/a2ui.rs
 867	crates/actions/src/agent_gateway.rs
-4028	crates/actions/src/bridge.rs
 862	crates/actions/src/llm_analysis.rs
 1843	crates/actions/src/memory_units.rs
 1372	crates/actions/src/session_inbound.rs
