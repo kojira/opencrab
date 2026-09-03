@@ -1178,14 +1178,18 @@ impl ActionExecutor for BridgedExecutor {
             .into_iter()
             .map(|tool| tool.definition)
             .collect();
-        // §2.7 ツール階層: depth 0（通常会話ターン）で LLM へ投影する関数を「常時集合（≤15）」に
+        // §2.7 ツール階層: depth 0（通常会話ターン）で LLM へ投影する関数を「常時集合（≤15/16）」に
         // 絞る。可視性のみを絞り実行ゲート（policy/run_allows）は不変（可視≠実行可否）。
         // このターンに describe_tools で活性化した名前を常時集合に union（policy 済みの effective
         // 定義に retain で効かせるので、owner-only 等の可視条件は保たれる）。
+        //
+        // 会話 op は**レーン依存**（Discord=reply/reaction/resolve、Nostr=reply/reaction/repost/
+        // resolve）。ハードコード列挙をやめ、op 宣言側の分類を使う: 発話クラス
+        // （`DispatchMode::Utterance`＝reply/reaction/repost）を常時に含め、照会 op の `resolve` は
+        // レーン共通の固定名で含める。これで Nostr レーンでは repost が自動で常時集合に入る。
         if self.depth == 0 {
-            const ALWAYS: &[&str] = &[
-                "reply",
-                "reaction",
+            // 会話 op 以外の常時集合（レーン非依存）＋会話の照会 op `resolve`。
+            const ALWAYS_FIXED: &[&str] = &[
                 "resolve",
                 "execute_shell",
                 "spawn_subtask",
@@ -1204,7 +1208,16 @@ impl ActionExecutor for BridgedExecutor {
                 .lock()
                 .map(|s| s.clone())
                 .unwrap_or_default();
-            tools.retain(|t| ALWAYS.contains(&t.name.as_str()) || activated.contains(&t.name));
+            let is_utterance = |name: &str| {
+                self.tool_class_index
+                    .get(name)
+                    .is_some_and(|c| c.dispatch == opencrab_gateway::DispatchMode::Utterance)
+            };
+            tools.retain(|t| {
+                ALWAYS_FIXED.contains(&t.name.as_str())
+                    || activated.contains(&t.name)
+                    || is_utterance(&t.name)
+            });
             // describe_tools 自体を常時投影（合成定義・新登録簿なし）。
             tools.push(FunctionDefinition {
                 name: "describe_tools".to_string(),
