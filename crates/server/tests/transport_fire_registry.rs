@@ -115,3 +115,25 @@ fn production_registry_has_no_prefix_collision_via_self_check() {
         "本番 transport が prefix 衝突している: {issues:?}"
     );
 }
+
+/// #925: 本番登録簿に extgate descriptor（V3 canonical session `extgate-<binding_id>` の受け口）が
+/// 含まれること。これが抜けると V3 heartbeat が `resolve_target` で解決されず全 skip する。
+/// harness の heartbeat は `start_core` が直接 register するので、**製品配線の抜けはこの pin でしか
+/// 捕捉できない**（テストレビュー D）。
+#[test]
+fn production_registry_includes_extgate_descriptor() {
+    let router = registry();
+    assert!(
+        router
+            .descriptor_kinds()
+            .iter()
+            .any(|k| *k == opencrab_extgate::EXTGATE_TIMED_FIRE_KIND),
+        "register_production_descriptors に extgate descriptor が無い（V3 heartbeat が全 skip する）"
+    );
+    // canonical extgate session（binding_id は UUID）を resolve_target が解決する。
+    let sid = format!("extgate-{AGENT_UUID}");
+    assert!(
+        router.resolve_target(&sid, AGENT_UUID).is_some(),
+        "extgate canonical session を resolve_target が解決できない: {sid}"
+    );
+}

@@ -304,6 +304,10 @@ pub fn register_production_descriptors(router: &opencrab_actions::TimedFireRoute
     router.register_descriptor(Arc::new(opencrab_discord::DiscordFire));
     #[cfg(feature = "nostr")]
     router.register_descriptor(Arc::new(opencrab_nostr::NostrFire));
+    // #925: V3 レーンの canonical session `extgate-<binding_id>`（両 transport 共通）を受ける
+    // 単一 descriptor。gate socket が無い構成でも登録は生存非依存（発火は sink 側の live 判定で
+    // fail-loud）。旧 Discord/Nostr descriptor とは prefix が排他（discord- / nostr- / extgate-）。
+    router.register_descriptor(Arc::new(opencrab_extgate::ExtgateFire));
 }
 
 /// 最小構成の `AppState`（in-memory DB、LLM プロバイダ 0 件、gateway マネージャ無し）。
