@@ -4378,11 +4378,14 @@ async fn heartbeat_h4_unbound_gateway_fires_nothing() {
 //  (4) 👀 順序（**赤の核心**）: B の 👀 の capture index が B への最初の返信 say より前。
 //      かつ A の宣言 say の後（B 到着時点ではなく畳み込み時点で付く）。
 //  (5) 🏁: B への返信に 🏁 0（A の subtask 進行中＝idle でない）。
-// 現 tip は (4) が **赤**（👀 が返信の後に付く）。
+//  (6) 外形（第2欠陥）: B への返信 say はちょうど 1 件（現 tip は畳み込み＋独立ターンで 2 件＝赤）。
+//  (7) 外形: B（6302）への 🤐 は 0（回帰ガード）。
+// 現 tip は (4) が **赤**（👀 が返信の後）。(6) は defect-1 や gateway の per-origin dedup を直しても
+// 独立ターンが残る限り赤のまま（外形 pin）。本テストの独立ターンは返信変種
+// （reply_on_independent=true）で二重返信を say 件数で捉える。
 //
-// #930 第2欠陥（二重処理）は companion テスト
-// `scenario_930_folded_said_does_not_spawn_independent_turn` で独立に赤にする
-// （畳み込んだ B が独立ターンを起こさない）。本テストは (1)〜(5) の 👀 タイミングに集中する。
+// #930 第2欠陥（二重処理）の LLM 呼び出し回数による代理は companion テスト
+// `scenario_930_folded_said_does_not_spawn_independent_turn`（NO_REPLY 変種・633 ch）で補助的に持つ。
 // ===================================================================
 const R930_CH: &str = "630";
 const R930_A: &str = "R930AMARK";
@@ -4394,6 +4397,10 @@ struct EyesOnReadMock {
     reqs: Mutex<Vec<String>>,
     emitted_sleep: std::sync::atomic::AtomicBool,
     continues: std::sync::atomic::AtomicUsize,
+    /// B の独立ターン（畳み込みと二重に走る #930 第2欠陥）で返信するか。
+    /// 主テスト（外形 pin）は true＝独立ターンも返信し、現 tip で B 返信 say が 2 件になる
+    /// （＝「B 返信 say==1」が外形の赤）。companion（LLM 回数代理）は false＝実機どおり NO_REPLY。
+    reply_on_independent: bool,
 }
 
 #[async_trait::async_trait]
@@ -4416,8 +4423,12 @@ impl LlmProvider for EyesOnReadMock {
                 return Ok(text_response(R930_BREPLY));
             }
             // 「新着」でなく B を読む＝B が自分の独立ターンを起こした（#930 第2欠陥の二重処理）。
-            // production の 07:46:00 と同じく沈黙（NO_REPLY）で終える。この独立ターンの
-            // started+origin(B) が返信の後に 👀 を付ける源。修正後はこの独立ターン自体が起きない。
+            // この独立ターンの started+origin(B) が返信の後に 👀 を付ける源。修正後はこの独立
+            // ターン自体が起きない。主テストは返信させて外形（B 返信 say の重複）で捉え、
+            // companion は実機の 07:46:00 どおり NO_REPLY で終える。
+            if self.reply_on_independent {
+                return Ok(text_response(R930_BREPLY));
+            }
             return Ok(text_response("NO_REPLY"));
         }
         // A 初回 → execute_shell(sleep) で背景 subtask（🏁 抑制条件＝agent に running subtask）。
@@ -4452,6 +4463,7 @@ async fn scenario_930_eyes_on_read_folded_midturn_message() {
         reqs: Mutex::new(Vec::new()),
         emitted_sleep: std::sync::atomic::AtomicBool::new(false),
         continues: std::sync::atomic::AtomicUsize::new(0),
+        reply_on_independent: true,
     });
     let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
     // sleep を実走させる（背景 subtask）。
@@ -4605,6 +4617,35 @@ async fn scenario_930_eyes_on_read_folded_midturn_message() {
         "🏁 が B への返信に付いた（subtask 進行中は idle でない・🏁 0 のはず）: {:?}",
         caps
     );
+
+    // ---- (6) 外形 pin（第2欠陥・二重処理）: B への返信 say はちょうど 1 件（fold の 1 本のみ）。----
+    // 現 tip は畳み込みと独立ターンで B に二重返信し 2 件 → 赤。defect-1（👀 タイミング）だけを
+    // 直しても、また gateway に per-origin dedup（1 origin 1 回）だけ入れて 👀 系 assert を緑にしても、
+    // 独立ターンが残る限りこの外形は赤のまま。畳み込んだ said を消費して独立ターンを起こさない
+    // 修正で初めて 1 件になる。
+    let breply_says = caps
+        .iter()
+        .filter(|c| c.kind == "say" && c.channel == R930_CH && c.body.contains(R930_BREPLY))
+        .count();
+    assert_eq!(
+        breply_says, 1,
+        "B への返信 say が 1 件でない（畳み込みと独立ターンの二重返信・#930 第2欠陥）: {:?}",
+        caps
+    );
+
+    // ---- (7) 外形 pin: B（6302）への 🤐 は 0（独立ターンが沈黙終了サインを残さない）。----
+    // 実機の独立ターンは NO_REPLY 変種。畳み込んだ said を独立ターンにしない修正後も、B の発端へ
+    // 🤐 が付いてはならない（B は畳み込みで読まれ・返信されている）。誤って独立 NO_REPLY ターンを
+    // 残すと 🤐 が付き得るため回帰ガードとして pin する。
+    let mute_on_b = caps
+        .iter()
+        .filter(|c| c.kind == "system_reaction" && c.emoji.contains("🤐") && c.message == "6302")
+        .count();
+    assert_eq!(
+        mute_on_b, 0,
+        "🤐 が B（6302）に付いた（畳み込み済みの B へ独立 NO_REPLY ターンの沈黙サイン）: {:?}",
+        caps
+    );
 }
 
 // ===================================================================
@@ -4721,6 +4762,7 @@ async fn scenario_930_folded_said_does_not_spawn_independent_turn() {
         reqs: Mutex::new(Vec::new()),
         emitted_sleep: std::sync::atomic::AtomicBool::new(false),
         continues: std::sync::atomic::AtomicUsize::new(0),
+        reply_on_independent: false,
     });
     let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
     *core.state.tools_config.write().unwrap() = shell_enabled_tools_config();
