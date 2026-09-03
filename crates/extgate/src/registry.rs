@@ -265,6 +265,11 @@ pub struct ExtgateState {
     nostr_privilege: Mutex<HashMap<i64, PrivilegeFire<NostrHeldTurn>>>,
     reserved_tool_name: Mutex<Option<ReservedToolNameFn>>,
     pub turn_queues: Arc<SessionTurnQueues>,
+    /// #930: 走行中ターンへ畳み込んで LLM に渡した said の origin（read 済み）を session ごとに
+    /// 記録する。record→enqueue で積まれた「その said 自身の独立ターン」が後で dequeue した際に、
+    /// ここに在れば **独立ターンを起こさず消費して skip**（二重処理を防ぐ・#930 第2欠陥）。
+    /// 新 DB テーブルは足さない in-memory・per-session（turn_queues と同じ粒度）。
+    folded_origins: Mutex<HashMap<String, HashSet<String>>>,
     #[cfg(any(test, feature = "extgate-probe"))]
     pub probe: GateProbe,
 }
@@ -285,9 +290,36 @@ impl ExtgateState {
             nostr_privilege: Mutex::new(HashMap::new()),
             reserved_tool_name: Mutex::new(None),
             turn_queues: Arc::new(SessionTurnQueues::new()),
+            folded_origins: Mutex::new(HashMap::new()),
             #[cfg(any(test, feature = "extgate-probe"))]
             probe: GateProbe::default(),
         }
+    }
+
+    /// #930: この said の origin を「走行中ターンへ畳み込んで read 済み」として記録する。
+    /// read state を emit する時点で呼ぶ。
+    pub fn mark_folded(&self, session_id: &str, origin: &str) {
+        if let Ok(mut map) = self.folded_origins.lock() {
+            map.entry(session_id.to_string())
+                .or_default()
+                .insert(origin.to_string());
+        }
+    }
+
+    /// #930: この origin が畳み込み済みなら消費して true を返す（＝独立ターンを起こさず skip）。
+    /// 未記録なら false（通常どおりターンを起こす）。1 回だけ有効（消費する）。
+    pub fn take_folded(&self, session_id: &str, origin: &str) -> bool {
+        let Ok(mut map) = self.folded_origins.lock() else {
+            return false;
+        };
+        let Some(set) = map.get_mut(session_id) else {
+            return false;
+        };
+        let hit = set.remove(origin);
+        if set.is_empty() {
+            map.remove(session_id);
+        }
+        hit
     }
 
     pub fn set_nostr_said_admit(&self, admit: NostrSaidAdmit) {

@@ -204,6 +204,34 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
                         caller.clone(),
                     )
                     .with_subtask_starts(Arc::clone(&subtask_starts))
+                    // #930: resume ターンで畳み込んだ said にも read+origin を付ける（付与規則は
+                    // 主ターンと同一・1 origin 1 回）。同時に origin を畳み込み済みに記録し独立ターンを抑止。
+                    .with_on_read_origin({
+                        let state = Arc::clone(&sink.state);
+                        let instance_id = sink.instance_id.clone();
+                        let binding_id = sink.binding_id.clone();
+                        let session_id = sink.session_id.clone();
+                        Arc::new(move |origin: String| {
+                            let state = Arc::clone(&state);
+                            let instance_id = instance_id.clone();
+                            let binding_id = binding_id.clone();
+                            let session_id = session_id.clone();
+                            Box::pin(async move {
+                                let activity_id = uuid::Uuid::new_v4().to_string();
+                                crate::listen::emit_activity(
+                                    &state,
+                                    &instance_id,
+                                    &binding_id,
+                                    &activity_id,
+                                    "read",
+                                    Some(origin.as_str()),
+                                    None,
+                                )
+                                .await;
+                                state.mark_folded(&session_id, &origin);
+                            })
+                        })
+                    })
                     .with_on_continuation_speech({
                         let state = Arc::clone(&sink.state);
                         let instance_id = sink.instance_id.clone();

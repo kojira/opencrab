@@ -827,6 +827,18 @@ fn enqueue_turn<R: AgentRuntime>(
         let lock_id = session_id.clone();
         locks
             .run_serialized(&lock_id, async move {
+                // #930: この said が走行中の別ターンへ既に畳み込まれ read 済み（mark_folded）なら、
+                // 独立ターンを起こさない（started も出さず LLM も走らせない）。畳み込みと独立ターンの
+                // 二重処理・遅延 👀 の源を断つ（第2欠陥）。run_serialized の直列化で、畳み込んだ側の
+                // ターンが先に完了→この said 自身のターンが後で dequeue、の順序が保証される。
+                if state.take_folded(&session_id, &origin) {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        origin = %origin,
+                        "skip independent turn: said already folded into a running turn (#930)"
+                    );
+                    return;
+                }
                 #[cfg(any(test, feature = "extgate-probe"))]
                 state
                     .probe
@@ -959,6 +971,35 @@ fn enqueue_turn<R: AgentRuntime>(
                                 // （settlement→SubtaskSettled.reply_target 経由）。
                                 .with_reply_target(origin.clone())
                                 .with_subtask_starts(Arc::clone(&hook_subtask_starts))
+                                // #930: 走行中に畳み込んだ said を LLM へ渡す時点で read+origin を emit
+                                // （👀 を返信の前に付ける）。同時にその origin を「畳み込み済み」に記録し、
+                                // 後で dequeue するその said 自身の独立ターンを起こさない（第2欠陥）。
+                                .with_on_read_origin({
+                                    let hs = Arc::clone(&hook_state);
+                                    let hi = hook_instance.clone();
+                                    let hb = hook_binding.clone();
+                                    let hse = hook_session.clone();
+                                    Arc::new(move |origin: String| {
+                                        let hs = Arc::clone(&hs);
+                                        let hi = hi.clone();
+                                        let hb = hb.clone();
+                                        let hse = hse.clone();
+                                        Box::pin(async move {
+                                            let activity_id = uuid::Uuid::new_v4().to_string();
+                                            crate::listen::emit_activity(
+                                                &hs,
+                                                &hi,
+                                                &hb,
+                                                &activity_id,
+                                                "read",
+                                                Some(origin.as_str()),
+                                                None,
+                                            )
+                                            .await;
+                                            hs.mark_folded(&hse, &origin);
+                                        })
+                                    })
+                                })
                                 // #898 §12.2/§13.1 j: 末尾 CONTINUE の途中発話をループ中に配送・保存する。
                                 // 最終応答と同じ経路（send_text = say 配送＋speech 保存）を通し、Say モード
                                 // のみ配送（ToolDriven は say 抑止＝reply DI operation が配送を担う）。
