@@ -5087,3 +5087,157 @@ async fn scenario_930_eyes_on_read_via_spawned_ack_reinvocation() {
         caps
     );
 }
+
+// ===================================================================
+// #933 回帰ピン【1 イテレーションで複数 said を畳み込む → 独立ターン 0】
+// 同文の said を 2 件、走行中ターンへ同時に畳み込む。両方 read（👀 各 1）され、畳み込みターンだけ
+// が返信し、**どちらも独立ターンを起こさない**（independent_b_calls==0）。#930 の consume-once
+// 集合は複数同時畳み込みで 2 件目を取りこぼし得た（#933）。seq 高水位（非消費・単調）へ置換した
+// ので 34,35 とも「seq <= 高水位」で skip。deterministic な resume 競合の再現は未達（PR 参照）だが、
+// 本ピンは複数同時畳み込みの skip 経路を最外層で固定する回帰ガード。
+// ===================================================================
+const R933_CH: &str = "641";
+
+#[tokio::test]
+async fn scenario_933_multi_said_fold_no_independent_turn() {
+    let buf = install_capture();
+    let mock = Arc::new(EyesOnReadMock {
+        reqs: Mutex::new(Vec::new()),
+        emitted_sleep: std::sync::atomic::AtomicBool::new(false),
+        continues: std::sync::atomic::AtomicUsize::new(0),
+        reply_on_independent: false, // 独立ターンは NO_REPLY（実機の変種）
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+    *core.state.tools_config.write().unwrap() = shell_enabled_tools_config();
+
+    let fixture = Fixture::new();
+    let _client = wire_instance_on_channel(&core, &fixture, R933_CH).await;
+
+    fixture.append_message_ch(
+        "6410",
+        R933_CH,
+        &format!("{R930_A} sleep して終わったら教えて"),
+    );
+    let a_ready = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "say" && c.channel == R933_CH && c.body.contains(R930_DECL))
+        })
+        .await
+    };
+    assert!(
+        a_ready,
+        "A の宣言 say が出ない（subtask/継続未達）: {:?}",
+        captured(&buf)
+    );
+    assert!(
+        core.state
+            .subtask_registries
+            .has_running_for_agent(AGENT_ID),
+        "A 宣言時点で subtask が走行中でない（テスト前提崩れ）"
+    );
+
+    // 同文の said を 2 件連続投入（同一 poll 窓に入れ 1 イテレーションで畳み込む）。
+    fixture.append_message_ch(
+        "6411",
+        R933_CH,
+        &format!("{R930_B} もういっかい date 教えて"),
+    );
+    fixture.append_message_ch(
+        "6412",
+        R933_CH,
+        &format!("{R930_B} もういっかい date 教えて"),
+    );
+
+    // 畳み込みターンの返信が出るまで待つ。
+    let breplied = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "say" && c.channel == R933_CH && c.body.contains(R930_BREPLY))
+        })
+        .await
+    };
+    assert!(
+        breplied,
+        "畳み込みターンの返信 say が出ない: {:?}",
+        captured(&buf)
+    );
+    // 独立ターン（畳み込み以外で B を読む LLM 呼び出し）が現れるか、上限まで待つ（現れなければ 0）。
+    let _ = {
+        let mock = mock.clone();
+        wait_until(move || {
+            mock.reqs
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|t| t.contains(R930_B) && !t.contains("新着メッセージ"))
+        })
+        .await
+    };
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    let caps = captured(&buf);
+
+    // (前提) 1 イテレーションで 2 件を畳み込んだ（新着メッセージが 1 呼び出しに 2 件）。
+    let folded_two = mock
+        .reqs
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|t| t.matches("新着メッセージ").count() >= 2);
+    assert!(
+        folded_two,
+        "2 said を 1 イテレーションで畳み込めていない（テスト前提崩れ）: reqs={:?}",
+        mock.reqs.lock().unwrap()
+    );
+
+    // (赤の核心) どちらの said も独立ターンを起こさない。畳み込み以外で B を読む LLM 呼び出し 0。
+    let independent_b_calls = mock
+        .reqs
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|t| t.contains(R930_B) && !t.contains("新着メッセージ"))
+        .count();
+    assert_eq!(
+        independent_b_calls, 0,
+        "複数 said 同時畳み込みで独立ターンが走った（#933 skip 漏れ）: 畳み込み以外で B を読む呼び出しが {independent_b_calls} 件。reqs={:?}",
+        mock.reqs.lock().unwrap()
+    );
+
+    // 👀 は 2 said とも 1 件ずつ（read・重複 0）。
+    let eyes_on = |mid: &str| -> usize {
+        caps.iter()
+            .filter(|c| {
+                c.kind == "system_reaction" && c.emoji.contains(SYS_ACCEPTED) && c.message == mid
+            })
+            .count()
+    };
+    assert_eq!(
+        eyes_on("6411"),
+        1,
+        "👀 が said1(6411) に 1 件でない: {:?}",
+        caps
+    );
+    assert_eq!(
+        eyes_on("6412"),
+        1,
+        "👀 が said2(6412) に 1 件でない: {:?}",
+        caps
+    );
+
+    // 返信 say は畳み込みターンの分のみ（独立ターンは NO_REPLY で投稿なし）。
+    let breply_says = caps
+        .iter()
+        .filter(|c| c.kind == "say" && c.channel == R933_CH && c.body.contains(R930_BREPLY))
+        .count();
+    assert_eq!(
+        breply_says, 1,
+        "畳み込みターンの返信 say は 1 件のみ（独立ターンの二重返信も塞ぐ・#933）: {:?}",
+        caps
+    );
+}

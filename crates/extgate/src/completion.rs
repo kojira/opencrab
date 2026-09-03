@@ -228,7 +228,13 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
                                     None,
                                 )
                                 .await;
-                                state.mark_folded(&session_id, &origin);
+                                // #933: 畳み込んだ said の seq を external_origins から引き、
+                                // per-session の畳み込み高水位へ単調記録（非消費）。
+                                if let Some(seq) =
+                                    crate::inbound::seq_for_origin(&state, &binding_id, &origin)
+                                {
+                                    state.mark_folded_seq(&session_id, seq);
+                                }
                             })
                         })
                     })
