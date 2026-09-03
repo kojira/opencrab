@@ -67,28 +67,18 @@ fn channel_label(db: &opencrab_db::Db, target: &FireTarget, agent_id: &str) -> S
 /// 無ければ通常のターンと同じく `NO_REPLY` とだけ返す（沈黙＝無配送・無記録）。旧
 /// `SPEAK`/`LEARN`/`IDLE` の出力規約と、見送り理由を毎回記録させる規約（#515）は撤去した。
 ///
-/// **誘導は発火元 transport で変わる**（`posts_response_body`）。応答本文の自動配送は Discord
-/// チャンネルの発火だけで、ブロードキャスト（Nostr）は自動配送しない（[`run_one_heartbeat`]。
-/// オーナー判断）。したがって:
-/// - **Discord（`posts_response_body = true`）**: 「この応答がそのままチャンネルへ投稿される」。
-/// - **ブロードキャスト（`false`）**: 「投稿するなら投稿ツールで自分から。応答本文は投稿されない」。
+/// **誘導は transport 非依存の 1 種類**（#925 §1.7・裁定 1）。V3 では配送は uniform（応答本文＝
+/// そのセッションの gateway への say・Discord=チャンネル投稿 / Nostr=タイムライン投稿）なので、旧
+/// `posts_response_body` の Discord / Nostr 2 分岐は撤去した。旧 Nostr の「投稿はツール（nostr_post）で」
+/// は旧レーン固有の制約由来で、V3 には持ち込まない（DIRECTION-LOG 481・V3 に `nostr_post` は無い）。
 ///
 /// 「宣言 → サブタスク起動」の進め方は**プロンプトで誘導するだけ**（機構では強制しない）。
 /// **定型の宣言文は埋め込まない**（#588: 毎回同じ文字列が出ると、撤去した `IDLE:` の定型文と
 /// 同じく「エージェントの発話」ではなく「システムの通知」になり、会話ログを汚染する）。伝えるのは
-/// transport ごとの事実だけで、言い回しはエージェントが毎ターン自分の言葉で決める。
-fn format_heartbeat_prompt(
-    channel_name: &str,
-    instructions_text: &str,
-    posts_response_body: bool,
-) -> String {
-    let action = if posts_response_body {
-        // Discord: 応答本文がそのまま投稿される。
-        "取り組むことがあれば、この応答がそのままチャンネルへ投稿されるので、これから何をするかを自分の言葉で短く添えたうえで、実作業は spawn_subtask で起動してください。"
-    } else {
-        // ブロードキャスト（Nostr）: 応答本文は投稿されない。投稿はツールで行う。
-        "取り組むことがあれば、投稿は投稿ツール（nostr_post 等）で自分から行い、実作業は spawn_subtask で起動してください。この応答の本文はチャンネルへは投稿されません。"
-    };
+/// transport 非依存の事実だけで、言い回しはエージェントが毎ターン自分の言葉で決める。
+fn format_heartbeat_prompt(channel_name: &str, instructions_text: &str) -> String {
+    // transport 非依存の 1 文（§1.7）: 応答本文はそのままセッションの gateway へ投稿される。
+    let action = "取り組むことがあれば、この応答はそのままセッションの gateway へ投稿されるので、これから何をするかを自分の言葉で短く添えたうえで、実作業は spawn_subtask で起動してください。";
     format!(
         "[ハートビート] 現在の会話「{channel_name}」。{instructions_text}\nいまはハートビートの時間です。{action}いま何もすることが無ければ、通常のターンと同じく NO_REPLY とだけ答えてください。"
     )
@@ -148,17 +138,15 @@ pub async fn run_one_heartbeat(
     let guild_id = target.guild_id.clone();
     // プロンプト内の会話呼称（transport 別・db を引く Discord は発火経路側で解く・条件 D）。
     let channel_name = channel_label(db, target, agent_id);
-    // 応答本文がその場に自動配送されるか（Discord・web=true / Nostr=false）。誘導を変える。
-    let posts_response_body = descriptor.posts_response_body();
 
-    // 渡すプロンプト（#584: channel → agent → default）→ 整形。応答本文の自動配送有無は transport の
-    // 性質（`posts_response_body`）で決まるので、誘導もそれで変える（`format_heartbeat_prompt`）。
+    // 渡すプロンプト（#584: channel → agent → default）→ 整形。誘導は transport 非依存の 1 種類
+    // （#925 §1.7: V3 は応答本文＝gateway への say で uniform・`posts_response_body` の分岐は撤去）。
     let (prompt, instructions_source) = {
         let conn = db.lock().ok()?;
         let resolved =
             opencrab_db::queries::resolve_heartbeat_instructions(&conn, agent_id, &channel_id);
         (
-            format_heartbeat_prompt(&channel_name, &resolved.text, posts_response_body),
+            format_heartbeat_prompt(&channel_name, &resolved.text),
             resolved.source,
         )
     };
@@ -202,13 +190,13 @@ mod tests {
     #[test]
     fn format_heartbeat_prompt_embeds_channel_name_per_fire_path() {
         // NostrBroadcast は `run_one_heartbeat` が HEARTBEAT_NOSTR_CHANNEL_LABEL を channel_name に使う。
-        let nostr = format_heartbeat_prompt(HEARTBEAT_NOSTR_CHANNEL_LABEL, "巡回してね", false);
+        let nostr = format_heartbeat_prompt(HEARTBEAT_NOSTR_CHANNEL_LABEL, "巡回してね");
         assert!(
             nostr.contains("現在の会話「（自律ハートビート）」。巡回してね"),
             "Nostr 経路の文面が違う: {nostr}"
         );
         // DiscordChannel はチャンネル設定名を channel_name に使う。
-        let discord = format_heartbeat_prompt("雑談", "静かにね", true);
+        let discord = format_heartbeat_prompt("雑談", "静かにね");
         assert!(
             discord.contains("現在の会話「雑談」。静かにね"),
             "Discord 経路の文面が違う: {discord}"
@@ -216,63 +204,52 @@ mod tests {
     }
 
     /// #588 Stage 3: 規約は**通常のターンへ寄せる**。撤去した SPEAK/LEARN/IDLE の語彙が文面に
-    /// 残っておらず、沈黙は通常ターンと同じ `NO_REPLY` で表せることを、両 transport で担保する。
+    /// 残っておらず、沈黙は通常ターンと同じ `NO_REPLY` で表せる（誘導は transport 非依存の 1 種類）。
     #[test]
     fn format_heartbeat_prompt_uses_no_reply_and_drops_speak_learn_idle() {
-        for posts_body in [true, false] {
-            let p = format_heartbeat_prompt("雑談", "静かにね", posts_body);
+        let p = format_heartbeat_prompt("雑談", "静かにね");
+        assert!(
+            p.contains("NO_REPLY"),
+            "沈黙を通常ターンと同じ NO_REPLY で表す規約が無い: {p}"
+        );
+        for retired in ["SPEAK", "LEARN", "IDLE"] {
             assert!(
-                p.contains("NO_REPLY"),
-                "沈黙を通常ターンと同じ NO_REPLY で表す規約が無い（posts_body={posts_body}）: {p}"
-            );
-            for retired in ["SPEAK", "LEARN", "IDLE"] {
-                assert!(
-                    !p.contains(retired),
-                    "撤去した語彙 {retired} が指示文に残っている（posts_body={posts_body}）: {p}"
-                );
-            }
-            assert!(
-                p.contains("spawn_subtask"),
-                "実作業をサブタスクで起動する誘導が無い（posts_body={posts_body}）: {p}"
+                !p.contains(retired),
+                "撤去した語彙 {retired} が指示文に残っている: {p}"
             );
         }
+        assert!(
+            p.contains("spawn_subtask"),
+            "実作業をサブタスクで起動する誘導が無い: {p}"
+        );
     }
 
-    /// #588 Stage 3（オーナー判断）: 誘導は発火元 transport で変わる。
-    /// - Discord: 応答本文がそのまま投稿される旨を伝える。
-    /// - ブロードキャスト（Nostr）: 応答本文は投稿されず、投稿はツールで行う旨を伝える。
-    ///
-    /// どちらも**定型の宣言文をハードコードしない**（issue に 3 回出てくる例示を埋め込まない）。
+    /// #925 §1.7（裁定 1）: 誘導は transport 非依存の 1 種類。V3 は応答本文＝gateway への say で
+    /// uniform なので、旧 Discord / Nostr 2 分岐（`posts_response_body`）は撤去した。旧 Nostr の
+    /// 「投稿はツール（nostr_post）で・本文は投稿されない」は V3 に持ち込まない（V3 に `nostr_post`
+    /// は無い・DIRECTION-LOG 481）。**定型の宣言文はハードコードしない**。
     #[test]
-    fn format_heartbeat_prompt_guidance_varies_by_transport_without_hardcoding_a_declaration() {
-        // Discord: 応答本文が投稿される。
-        let discord = format_heartbeat_prompt("雑談", "静かにね", true);
-        assert!(
-            discord.contains("この応答がそのままチャンネルへ投稿される"),
-            "Discord は応答本文が投稿される旨を伝えていない: {discord}"
-        );
-        assert!(
-            discord.contains("自分の言葉で"),
-            "Discord は宣言をエージェント自身の言葉で書かせていない: {discord}"
-        );
-
-        // ブロードキャスト（Nostr）: 応答本文は投稿されない。投稿はツールで。
-        let broadcast = format_heartbeat_prompt("（自律ハートビート）", "巡回してね", false);
-        assert!(
-            broadcast.contains("投稿されません"),
-            "ブロードキャストで「応答本文は投稿されない」旨が無い（二重投稿の道を塞ぐ要）: {broadcast}"
-        );
-        assert!(
-            broadcast.contains("投稿ツール"),
-            "ブロードキャストで投稿はツールで行う誘導が無い: {broadcast}"
-        );
-        assert!(
-            !broadcast.contains("この応答がそのままチャンネルへ投稿される"),
-            "ブロードキャストで自動投稿を示唆している（本文は投稿されないはず）: {broadcast}"
-        );
-
-        // どちらも定型の宣言文はハードコードしない。
-        for p in [&discord, &broadcast] {
+    fn format_heartbeat_prompt_guidance_is_transport_neutral() {
+        // Discord ラベルでも Nostr ラベルでも同じ 1 種類の誘導になる。
+        let discord = format_heartbeat_prompt("雑談", "静かにね");
+        let nostr = format_heartbeat_prompt(HEARTBEAT_NOSTR_CHANNEL_LABEL, "巡回してね");
+        for p in [&discord, &nostr] {
+            assert!(
+                p.contains("この応答はそのままセッションの gateway へ投稿される"),
+                "transport 非依存の「gateway へ投稿される」誘導が無い: {p}"
+            );
+            assert!(
+                p.contains("自分の言葉で"),
+                "宣言をエージェント自身の言葉で書かせる誘導が無い: {p}"
+            );
+            // 旧 Nostr 固有の分岐（ツール投稿・本文非配送）を持ち込んでいない。
+            assert!(
+                !p.contains("投稿ツール")
+                    && !p.contains("nostr_post")
+                    && !p.contains("投稿されません"),
+                "旧 Nostr 固有の transport 分岐が残っている（§1.7 撤去対象）: {p}"
+            );
+            // 定型の宣言文はハードコードしない。
             assert!(
                 !p.contains("作業するね"),
                 "定型の宣言文がハードコードされている（#588: 例示は実装すべき文字列ではない）: {p}"

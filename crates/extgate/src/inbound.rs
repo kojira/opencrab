@@ -622,6 +622,63 @@ fn load_origin_row(
     }
 }
 
+/// #925: `binding_id` から発火ターンに要る文脈を解決する（`load_origin_row` と同じ源）。
+///
+/// heartbeat 受け口（`crate::fire`）が owner の platform 別解決（`kind_id == "nostr"` 分岐や
+/// `get_agent_*` 呼び出し）という **platform 語彙を持たずに済むよう**、その分岐をこの
+/// 未分離 Nostr profile ファイル（allowlist 済み）へ集約する。live 判定（registry）は platform
+/// 非依存なので呼び出し側（fire.rs）が行う。open binding・未削除 instance のみ解決する。
+pub(crate) struct BindingContext {
+    pub instance_id: String,
+    pub kind_id: String,
+    pub agent_id: String,
+    pub owner_id: String,
+    pub delivery_mode: DeliveryMode,
+}
+
+pub(crate) fn resolve_binding_context(
+    conn: &Connection,
+    binding_id: &str,
+) -> Option<BindingContext> {
+    let (instance_id, kind_id, agent_id, config_b64) = conn
+        .query_row(
+            "SELECT b.instance_id, i.kind_id, a.agent_id, i.config_b64
+             FROM gate_bindings b
+             JOIN gate_instances i ON i.instance_id = b.instance_id
+             JOIN agents a ON a.subject_id = i.subject_id
+             WHERE b.binding_id = ?1 AND b.closed_at IS NULL AND i.deleted_at IS NULL",
+            params![binding_id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .ok()?;
+    let config_bytes = decode_config_b64(&config_b64).ok()?;
+    let delivery_mode =
+        crate::delivery_mode::delivery_mode_from_config_bytes(&config_bytes).ok()?;
+    let owner_id = if kind_id == "nostr" {
+        get_agent_nostr_owner_pubkey(conn, &agent_id).ok()?
+    } else {
+        get_agent_discord_config(conn, &agent_id)
+            .ok()
+            .flatten()
+            .map(|c| c.owner_discord_id)
+            .unwrap_or_default()
+    };
+    Some(BindingContext {
+        instance_id,
+        kind_id,
+        agent_id,
+        owner_id,
+        delivery_mode,
+    })
+}
+
 fn existing_seq(
     tx: &Transaction<'_>,
     binding_id: &str,

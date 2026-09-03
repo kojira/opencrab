@@ -66,7 +66,7 @@
 | b | Nostr 各イテレーション=同一宛先への 1 投稿 | ★`audit_898_..`（3 standalone say が順に出る） | ★（宛先相関までは未 pin） |
 | c | Discord 各イテレーション=1 メッセージ（結合/編集しない） | `audit_s13_1c_continue_split_..`(discord・赤) | ★（3 分割=3 メッセージ・結合なし） |
 | d | REST 各イテレーション=`responses` に 1 要素追加 | — | △ **穴**（REST レーンの CONTINUE 分割 未 pin） |
-| e | scheduler/intake/heartbeat 起点も同期待（NO_REPLY 保存なし含む） | — | △ **穴**（非ユーザー起点ターンの pin なし） |
+| e | scheduler/intake/heartbeat 起点も同期待（NO_REPLY 保存なし含む） | heartbeat: `heartbeat_h1_two_posts_flag_only_on_last`/`heartbeat_h2_no_reply_stays_silent`/`heartbeat_h3_declaration_then_subtask_then_report`/`heartbeat_h4_unbound_gateway_fires_nothing`（discord_qc・#925）＋`heartbeat_h1_nostr_two_standalone_posts`（qc_harness）／scheduler・intake の平文起点: — | ★(heartbeat=非ユーザー起点ターンを配送/保存/LLM/残留/🏁/🤐/typing/warn で pin・H1 は say2・保存2・🏁 は2件目のみ・CONTINUE/NO_REPLY 残留0/ H2 沈黙・🤐 なし/ H3 宣言🏁0＋報告🏁1/ H4 未接続で warn1・配送0・LLM0・捏造0・Nostr は say2 standalone・🏁/🤐/typing 対象なし)＋△(**typing の開始順序（開始<本文1）は未 pin**＝typing broadcast が別 async タスク（`spawn_channel_typing`）で log を出し、say とのバッファ index 順が非決定。**停止（activity ended 後は tick 0）は決定形で pin**＝keepalive interval 8s を超えて待ち tick が増えないことで #915・DIRECTION-LOG 625 の「入力中が残る」を捕捉)＋△(scheduler/intake の平文起点は未 pin) |
 | f | sub-engine(depth>0) も有効 | `continue_marker_i_sub_engine_..`(engine・緑) | ○（sub-engine profile で CONTINUE 継続＋max 上限・非回帰） |
 | g | reaction/repost のみ＝#6（N 配送/N 保存/🤐 なし） | reaction: `audit_s13_1g_reaction_..`(discord・赤・🤐 なし)＋`scenario_c_reaction_..`／repost: — | ★(reaction 🤐)＋△(repost=同一 utterance 機構だが nostr の repost DI 配線が未確認の穴) |
 | h | 空白のみ＋CONTINUE＝#3 | — | △（#3 と同じく最外層未 pin） |
