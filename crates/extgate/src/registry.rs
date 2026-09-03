@@ -265,11 +265,13 @@ pub struct ExtgateState {
     nostr_privilege: Mutex<HashMap<i64, PrivilegeFire<NostrHeldTurn>>>,
     reserved_tool_name: Mutex<Option<ReservedToolNameFn>>,
     pub turn_queues: Arc<SessionTurnQueues>,
-    /// #930: 走行中ターンへ畳み込んで LLM に渡した said の origin（read 済み）を session ごとに
-    /// 記録する。record→enqueue で積まれた「その said 自身の独立ターン」が後で dequeue した際に、
-    /// ここに在れば **独立ターンを起こさず消費して skip**（二重処理を防ぐ・#930 第2欠陥）。
-    /// 新 DB テーブルは足さない in-memory・per-session（turn_queues と同じ粒度）。
-    folded_origins: Mutex<HashMap<String, HashSet<String>>>,
+    /// #930/#933: 走行中ターンへ畳み込んで LLM に渡した said の **external_origins.seq の高水位**を
+    /// session ごとに記録する。record→enqueue で積まれた「その said 自身の独立ターン」が後で
+    /// dequeue した際、`said.seq <= 高水位` なら **独立ターンを起こさず skip**（二重処理を防ぐ・
+    /// #930 第2欠陥）。#933: consume-once の origin 集合は二重 take/順序競合に脆かったため、**非消費の
+    /// 単調高水位**（seq キー）へ置換し「単一の真実」にする。poll は id 昇順（＝seq 昇順）で畳み込む
+    /// ので「seq <= 高水位＝畳み込み済み」の不変が保たれる。新 DB テーブルは足さない in-memory・per-session。
+    folded_seq_high: Mutex<HashMap<String, i64>>,
     #[cfg(any(test, feature = "extgate-probe"))]
     pub probe: GateProbe,
 }
@@ -290,36 +292,33 @@ impl ExtgateState {
             nostr_privilege: Mutex::new(HashMap::new()),
             reserved_tool_name: Mutex::new(None),
             turn_queues: Arc::new(SessionTurnQueues::new()),
-            folded_origins: Mutex::new(HashMap::new()),
+            folded_seq_high: Mutex::new(HashMap::new()),
             #[cfg(any(test, feature = "extgate-probe"))]
             probe: GateProbe::default(),
         }
     }
 
-    /// #930: この said の origin を「走行中ターンへ畳み込んで read 済み」として記録する。
-    /// read state を emit する時点で呼ぶ。
-    pub fn mark_folded(&self, session_id: &str, origin: &str) {
-        if let Ok(mut map) = self.folded_origins.lock() {
-            map.entry(session_id.to_string())
-                .or_default()
-                .insert(origin.to_string());
+    /// #930/#933: この said の external_origins.seq を「走行中ターンへ畳み込んで read 済み」の
+    /// 高水位として記録する（read state を emit する時点で呼ぶ）。**単調**（小さい seq を後から
+    /// 渡しても下がらない）。
+    pub fn mark_folded_seq(&self, session_id: &str, seq: i64) {
+        if let Ok(mut map) = self.folded_seq_high.lock() {
+            let e = map.entry(session_id.to_string()).or_insert(0);
+            if seq > *e {
+                *e = seq;
+            }
         }
     }
 
-    /// #930: この origin が畳み込み済みなら消費して true を返す（＝独立ターンを起こさず skip）。
-    /// 未記録なら false（通常どおりターンを起こす）。1 回だけ有効（消費する）。
-    pub fn take_folded(&self, session_id: &str, origin: &str) -> bool {
-        let Ok(mut map) = self.folded_origins.lock() else {
-            return false;
-        };
-        let Some(set) = map.get_mut(session_id) else {
-            return false;
-        };
-        let hit = set.remove(origin);
-        if set.is_empty() {
-            map.remove(session_id);
-        }
-        hit
+    /// #933: この session の畳み込み済み seq 高水位（未記録は 0）。**非消費**（読み取りのみ）。
+    /// enqueue 側は `said.seq <= folded_high_water` なら独立ターンを skip する。同じ seq を何度
+    /// 照会しても真のままで、二重 take・順序競合に免疫。
+    pub fn folded_high_water(&self, session_id: &str) -> i64 {
+        self.folded_seq_high
+            .lock()
+            .ok()
+            .and_then(|map| map.get(session_id).copied())
+            .unwrap_or(0)
     }
 
     pub fn set_nostr_said_admit(&self, admit: NostrSaidAdmit) {
@@ -465,5 +464,68 @@ impl ExtgateState {
             }
             self.halt_notify.notified().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod folded_seq_tests {
+    use super::*;
+
+    fn test_state() -> ExtgateState {
+        ExtgateState::new(
+            opencrab_db::Db::memory().unwrap(),
+            crate::OperatorToken::from_bytes("t"),
+        )
+    }
+
+    // #933 不変(i): 高水位は単調（小さい seq を後から mark しても下がらない）。
+    #[test]
+    fn mark_folded_seq_is_monotonic() {
+        let s = test_state();
+        s.mark_folded_seq("sess", 5);
+        assert_eq!(s.folded_high_water("sess"), 5);
+        s.mark_folded_seq("sess", 3); // 小さい seq は下げない
+        assert_eq!(s.folded_high_water("sess"), 5);
+        s.mark_folded_seq("sess", 9); // 大きい seq は上げる
+        assert_eq!(s.folded_high_water("sess"), 9);
+    }
+
+    // #933 不変(ii): folded_high_water は非消費（同じ seq を何度照会しても skip 判定が変わらない）。
+    // 現行バグ（consume-once）は 2 回目の take で漏れたが、非消費なら二重 take/複数 said に免疫。
+    #[test]
+    fn folded_high_water_is_non_consuming() {
+        let s = test_state();
+        s.mark_folded_seq("sess", 7);
+        // seq 6,7 は畳み込み済み扱い（<= 高水位）が **何度でも** 真。
+        for _ in 0..3 {
+            assert!(6 <= s.folded_high_water("sess"), "seq6 は skip 対象のまま");
+            assert!(7 <= s.folded_high_water("sess"), "seq7 は skip 対象のまま");
+        }
+        // seq 8 は未畳み込み（> 高水位）。
+        assert!(8 > s.folded_high_water("sess"), "seq8 は独立ターンを起こす");
+    }
+
+    // #933 不変(iii): 複数 said 同時畳み込み（高水位を最大へ）で seq34,35 とも skip 対象。
+    // 現行の per-origin consume-once では 2 件目が漏れ得たが、seq 高水位なら 34,35 とも <= 35。
+    #[test]
+    fn two_said_fold_both_below_high_water() {
+        let s = test_state();
+        // seq34,35 を畳み込み（高水位=35）。
+        s.mark_folded_seq("sess", 34);
+        s.mark_folded_seq("sess", 35);
+        let high = s.folded_high_water("sess");
+        assert_eq!(high, 35);
+        // 34,35 とも「seq <= 高水位」で独立ターンを skip（別々に確認・冗長比較を避ける）。
+        assert!(34 <= high, "seq34 は skip 対象");
+        assert!(35 <= high, "seq35 は skip 対象");
+    }
+
+    // #933 不変(iv): session ごとに独立（別 session の高水位は影響しない）。
+    #[test]
+    fn folded_high_water_is_per_session() {
+        let s = test_state();
+        s.mark_folded_seq("a", 10);
+        assert_eq!(s.folded_high_water("a"), 10);
+        assert_eq!(s.folded_high_water("b"), 0, "別 session は 0（未畳み込み）");
     }
 }

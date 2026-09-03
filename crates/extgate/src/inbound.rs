@@ -392,6 +392,7 @@ pub fn process_said<R: AgentRuntime>(
             said,
             &session_id,
             &prompt_suffix,
+            seq,  // #933: この said の external_origins.seq（畳み込み高水位との比較用）
             true, // 単一メンション: 発端 said の origin へ返信
         );
     }
@@ -474,6 +475,9 @@ fn finish_bundle<R: AgentRuntime>(
             &trigger_said,
             ctx.session_id,
             &suffix,
+            // #933: bundle は coordinator ターンで個別 said の畳み込み対象外。fold 高水位で skip
+            // させない（i64::MAX は常に `seq <= high` が偽）。
+            i64::MAX,
             false, // bundle: 単一返信先が無い（gateway が standalone post で publish・row292）
         );
     }
@@ -704,6 +708,18 @@ fn next_seq(tx: &Transaction<'_>, binding_id: &str) -> Result<i64, GateError> {
     .map_err(|e| GateError::store_logged("said.next_seq", e))
 }
 
+/// #933: (binding_id, origin) の external_origins.seq を read-only で引く（畳み込み高水位の記録用）。
+/// read state の付与時に「畳み込んだ said の seq」を得て `mark_folded_seq` へ渡す。無ければ None。
+pub(crate) fn seq_for_origin(state: &ExtgateState, binding_id: &str, origin: &str) -> Option<i64> {
+    let conn = state.db.lock().ok()?;
+    conn.query_row(
+        "SELECT seq FROM external_origins WHERE binding_id = ?1 AND origin = ?2",
+        params![binding_id, origin],
+        |r| r.get::<_, i64>(0),
+    )
+    .ok()
+}
+
 fn record_inbound(
     tx: &Transaction<'_>,
     session_id: &str,
@@ -787,6 +803,9 @@ fn enqueue_turn<R: AgentRuntime>(
     said: &Said,
     session_id: &str,
     prompt_suffix: &str,
+    // #933: この said の external_origins.seq。dequeue 時に `seq <= 畳み込み高水位` なら独立ターンを
+    // skip する（二重処理防止・非消費の単一真実）。
+    seq: i64,
     // 単一メンション turn は発端 said の origin へ返信（say payload の reply_target に載せる）。
     // bundle turn は単一返信先が無いので false（gateway が standalone post で publish・row292）。
     // 返信先は say payload の明示 reply_target を正とする（裁定A で ended は say の後になったが、
@@ -827,15 +846,19 @@ fn enqueue_turn<R: AgentRuntime>(
         let lock_id = session_id.clone();
         locks
             .run_serialized(&lock_id, async move {
-                // #930: この said が走行中の別ターンへ既に畳み込まれ read 済み（mark_folded）なら、
-                // 独立ターンを起こさない（started も出さず LLM も走らせない）。畳み込みと独立ターンの
-                // 二重処理・遅延 👀 の源を断つ（第2欠陥）。run_serialized の直列化で、畳み込んだ側の
-                // ターンが先に完了→この said 自身のターンが後で dequeue、の順序が保証される。
-                if state.take_folded(&session_id, &origin) {
-                    tracing::debug!(
+                // #930/#933: この said が走行中の別ターンへ既に畳み込まれ read 済み
+                // （seq <= 畳み込み高水位）なら、独立ターンを起こさない（started も出さず LLM も
+                // 走らせない）。畳み込みと独立ターンの二重処理・遅延 👀 の源を断つ（#930 第2欠陥）。
+                // #933: 非消費の単調高水位を単一の真実にし、二重 take/順序競合に免疫（複数 said 同時
+                // 畳み込みでも取りこぼさない）。skip は fail-loud の観測点として info で残す。
+                let high = state.folded_high_water(&session_id);
+                if seq <= high {
+                    tracing::info!(
                         session_id = %session_id,
                         origin = %origin,
-                        "skip independent turn: said already folded into a running turn (#930)"
+                        seq,
+                        folded_high_water = high,
+                        "skip independent turn: said already folded into a running turn (#930/#933)"
                     );
                     return;
                 }
@@ -996,7 +1019,12 @@ fn enqueue_turn<R: AgentRuntime>(
                                                 None,
                                             )
                                             .await;
-                                            hs.mark_folded(&hse, &origin);
+                                            // #933: 畳み込んだ said の seq を external_origins から
+                                            // 引き、per-session の畳み込み高水位へ単調に記録する
+                                            // （非消費）。以後この seq 以下の独立ターンは skip される。
+                                            if let Some(seq) = seq_for_origin(&hs, &hb, &origin) {
+                                                hs.mark_folded_seq(&hse, seq);
+                                            }
                                         })
                                     })
                                 })
@@ -1187,6 +1215,9 @@ fn fire_held_turns<R: AgentRuntime>(
         owner_id: last.owner_id.clone(),
         delivery_mode: last.delivery_mode,
     };
+    // #933: 保留していた said 自身の seq。畳み込み済み（seq <= 高水位）なら独立ターンを skip。
+    // external_origins に無ければ i64::MAX（skip しない）。
+    let held_seq = seq_for_origin(&state, &said.binding_id, &said.origin).unwrap_or(i64::MAX);
     enqueue_turn(
         state,
         runtime,
@@ -1195,6 +1226,7 @@ fn fire_held_turns<R: AgentRuntime>(
         &said,
         &last.session_id,
         &last.prompt_suffix,
+        held_seq,
         true, // 保留していた単一メンション: 発端 said の origin へ返信
     );
 }
