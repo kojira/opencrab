@@ -133,7 +133,9 @@ async fn resume_v3_turn<R: AgentRuntime>(sink: ExtgateCompletionSink<R>, ev: Sub
     // resume は発端 said の無い自己ターン。heartbeat（#925）と完全に同型なので共有ヘルパへ
     // 委譲する（単一実装）。resume は発端 origin への返信先（`ev.reply_target`）を持ち回るが、
     // heartbeat 側は origin が無いので `None`（standalone post）を渡す。
-    run_v3_said_less_turn(sink, ev.caller.clone(), ev.reply_target.clone()).await;
+    // #935 (c3): 発端完了 id を渡し、既に別ターンの build で consumed 化済みなら resume を skip させる。
+    let completion = Some(ev.subtask_id.clone());
+    run_v3_said_less_turn(sink, ev.caller.clone(), ev.reply_target.clone(), completion).await;
 }
 
 /// 発端 said の無い自己ターン（resume 継続 / #925 heartbeat）を 1 本駆動する共有実装。
@@ -147,22 +149,29 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
     sink: ExtgateCompletionSink<R>,
     caller: CallerIdentity,
     reply_target: Option<String>,
+    // #935 (c3): この resume の発端 subtask 完了 id（heartbeat は None）。build で既に別ターンが
+    // 描画・consumed 化していれば `run_serialized` 頭で skip する（消費済み入力の二重処理を防ぐ）。
+    consumed_completion: Option<String>,
 ) {
     let locks = sink.runtime.session_locks();
     let session_id = sink.session_id.clone();
     locks
         .run_serialized(&session_id, async move {
-            let activity_id = uuid::Uuid::new_v4().to_string();
-            emit_activity(
+            // #935/#925: resume 頭の共通前処理。発端完了が consumed なら skip（started/typing/LLM
+            // なし）。そうでなければ started（origin=None）を emit し、build 初描画の他完了・初投入
+            // said を consumed 化する（発端完了 `consumed_completion` は除く＝(b) 発端 skip・単一実装）。
+            let Some(activity_id) = crate::consumed::resume_prelude(
                 &sink.state,
                 &sink.instance_id,
                 &sink.binding_id,
-                &activity_id,
-                "started",
-                None,
-                None,
+                &sink.session_id,
+                &sink.agent_id,
+                consumed_completion.as_deref(),
             )
-            .await;
+            .await
+            else {
+                return;
+            };
             let (system, name) = sink.runtime.build_agent_context(&sink.agent_id, &caller);
             let system = if sink.prompt_suffix.is_empty() {
                 system
@@ -217,24 +226,15 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
                             let binding_id = binding_id.clone();
                             let session_id = session_id.clone();
                             Box::pin(async move {
-                                let activity_id = uuid::Uuid::new_v4().to_string();
-                                crate::listen::emit_activity(
+                                // #935: read 発火＋seq consumed 化は build 初投入と同じ共有実装。
+                                crate::consumed::emit_read_and_consume_said(
                                     &state,
                                     &instance_id,
                                     &binding_id,
-                                    &activity_id,
-                                    "read",
-                                    Some(origin.as_str()),
-                                    None,
+                                    &session_id,
+                                    &origin,
                                 )
                                 .await;
-                                // #933: 畳み込んだ said の seq を external_origins から引き、
-                                // per-session の畳み込み高水位へ単調記録（非消費）。
-                                if let Some(seq) =
-                                    crate::inbound::seq_for_origin(&state, &binding_id, &origin)
-                                {
-                                    state.mark_folded_seq(&session_id, seq);
-                                }
                             })
                         })
                     })

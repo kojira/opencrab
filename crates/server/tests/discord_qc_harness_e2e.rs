@@ -5241,3 +5241,714 @@ async fn scenario_933_multi_said_fold_no_independent_turn() {
         caps
     );
 }
+
+// ===================================================================
+// #935【ターン build で一括取り込みされた said に 👀 が付かず、消費済み入力の
+//        独立ターンが走る（最終返答後の NO_REPLY・typing 残留）】
+//
+// R2/R2b は「発端 started」「走行中に畳み込んだ said の read」にしか 👀 付与点が無い。
+// **前ターン終了後に届き、次ターンの build（会話組み立て）で初めてプロンプトに入った said**
+// には付与点が無く、その seq は folded_seqs に入らないので独立ターンも skip されない。
+//
+// 再現構成（QC 実機 e52/e53 と同型・畳み込みではなく build 掃き込み）:
+//   said0（R935_A）が単一 iteration の低速 LLM 呼び出しで session lock を保持（poll なし＝fold
+//   しない）。その保持中に said1/said2（R935_B・別 message id）を受理→記録→独立ターンが lock 待ち。
+//   said0 のターン終了→ FIFO 先頭 said1 のターンが build（会話に said1 と said2 が両方載る・
+//   いずれも「新着メッセージ」ではない＝畳み込みでなく build 掃き込み）。
+//
+// 観測境界（赤の核心）:
+//   (A1) build 掃き込み said を読む said ターンの LLM 呼び出しは **ちょうど 1**（tip は 2＝
+//        said1 の build ＋ said2 自身の消費済み独立ターン）。
+//   (A2) said2 の 👀 は said1 の返信 say より **前**（tip は後＝自分の独立ターン started）。
+//   (A3) R935_BREPLY 返信 say は **1 件**（tip は 2＝独立ターンも二重返信）。
+// 現 tip は (A1)(A2)(A3) が赤。
+// ===================================================================
+const R935_CH: &str = "635"; // A 専用（typing 隔離）
+const R935B_CH: &str = "638"; // B（否定側）専用（typing/say を A と分離）
+const R935_A: &str = "R935AMARK"; // said0（lock 保持・単一 iteration 低速）
+const R935_B: &str = "R935BMARK"; // said1 / said2（build 掃き込み対象）
+const R935_C: &str = "R935CMARK"; // 否定側 B（単独 said）
+const R935_A_REPLY: &str = "r935areply-sleep 実行するね（holding）";
+const R935_BREPLY: &str = "r935breply-date の結果はこうだよ";
+const R935_CREPLY: &str = "r935creply-単独 said の返信だよ";
+
+struct BuildSweepMock {
+    reqs: Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for BuildSweepMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let text = request_text(&request);
+        self.reqs.lock().unwrap().push(text.clone());
+        // 否定側 B: 単独 said（R935_C）は常に返信（独立ターンが走ることの pin）。
+        if text.contains(R935_C) {
+            return Ok(text_response(R935_CREPLY));
+        }
+        // said ターン（build 掃き込み・畳み込みではない）: R935_B を含み「新着メッセージ」でない。
+        // said1 の build も said2 の消費済み独立ターンも、会話に R935_B を含みここへ来る。返信させ、
+        // 呼び出し回数と返信 say 回数の両方を観測境界にする（tip は 2・fix は 1）。
+        if text.contains(R935_B) && !text.contains("新着メッセージ") {
+            return Ok(text_response(R935_BREPLY));
+        }
+        // said0（turn A）: 単一 iteration の低速返信で lock を保持（tool/CONTINUE なし＝poll なし＝
+        // fold しない）。この保持窓で said1/said2 が記録され独立ターンが lock 待ちに積まれる。
+        if text.contains(R935_A) {
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            return Ok(text_response(R935_A_REPLY));
+        }
+        Ok(text_response(FILLER))
+    }
+}
+
+#[tokio::test]
+async fn scenario_935_build_swept_said_read_and_no_independent_turn() {
+    let buf = install_capture();
+    let mock = Arc::new(BuildSweepMock {
+        reqs: Mutex::new(Vec::new()),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+    *core.state.tools_config.write().unwrap() = shell_enabled_tools_config();
+
+    let fixture = Fixture::new();
+    let _client = wire_instance_on_channel(&core, &fixture, R935_CH).await;
+
+    // said0: lock 保持ターン（低速・単一 iteration・fold なし）。
+    fixture.append_message_ch("9350", R935_CH, &format!("{R935_A} sleep 60 して"));
+
+    // turn A（said0）が低速呼び出しへ入った（lock 保持開始）ことを確認してから said1/said2 を投入。
+    let a_started = {
+        let mock = mock.clone();
+        wait_until(move || mock.reqs.lock().unwrap().iter().any(|t| t.contains(R935_A))).await
+    };
+    assert!(
+        a_started,
+        "said0（lock 保持ターン）が開始しない（テスト前提崩れ）: {:?}",
+        mock.reqs.lock().unwrap()
+    );
+
+    // lock 保持中に said1/said2 を受理。畳み込み点は無い（turn A は poll しない）ので、両者は
+    // それぞれ独立ターンが lock 待ちに積まれ、said0 終了後に said1 の build が said2 を掃き込む。
+    fixture.append_message_ch("9351", R935_CH, &format!("{R935_B} date 教えて"));
+    fixture.append_message_ch("9352", R935_CH, &format!("{R935_B} date 教えて"));
+
+    // said1 の build 返信が出るまで待つ。
+    let replied = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "say" && c.channel == R935_CH && c.body.contains(R935_BREPLY))
+        })
+        .await
+    };
+    assert!(
+        replied,
+        "said の build 返信 say が出ない: {:?}",
+        captured(&buf)
+    );
+
+    // typing 基準化: said1 の返信直後（ended 後）に専用チャンネル 635 の typing を数える。この後に
+    // said2 の消費済み独立ターンが走れば started→typing を打つ（tip・増分>0）。fix なら独立ターンは
+    // run_serialized 頭で skip され started/typing を出さない（増分 0）。「LLM だけ skip して
+    // started/typing は先に打つ」誤実装もここで赤になる。
+    tokio::time::sleep(Duration::from_millis(300)).await; // said1 ターンの ended を確定させる
+    let typing_before = count_kind_on_channel(&buf, "typing", R935_CH);
+    // said2 の消費済み独立ターンが走る猶予＋ typing 失効間隔（8s）を跨ぐ。fix なら独立ターンは起きず
+    // typing も増えない。
+    tokio::time::sleep(Duration::from_millis(9000)).await;
+    let typing_after = count_kind_on_channel(&buf, "typing", R935_CH);
+
+    let caps = captured(&buf);
+
+    // (前提) said は畳み込み（新着メッセージ）ではなく build 掃き込みで入った。
+    let any_fold = mock
+        .reqs
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|t| t.contains(R935_B) && t.contains("新着メッセージ"));
+    assert!(
+        !any_fold,
+        "said が畳み込まれた（build 掃き込みでなく fold・#935 の経路を通っていない）: reqs={:?}",
+        mock.reqs.lock().unwrap()
+    );
+
+    // (前提) said1/said2 とも受理された（👀 が両 message に付いている）。
+    let eyes_on = |mid: &str| -> usize {
+        caps.iter()
+            .filter(|c| {
+                c.kind == "system_reaction" && c.emoji.contains(SYS_ACCEPTED) && c.message == mid
+            })
+            .count()
+    };
+    assert!(
+        eyes_on("9351") >= 1 && eyes_on("9352") >= 1,
+        "said1/said2 の 👀 が付いていない（テスト前提崩れ）: {:?}",
+        caps
+    );
+
+    // ---- (A1・赤の核心) build 掃き込み said を読む said ターンの LLM 呼び出しは 1 のはず ----
+    // tip は 2（said1 の build ＋ said2 の消費済み独立ターン）。
+    let said_b_calls = mock
+        .reqs
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|t| t.contains(R935_B) && !t.contains("新着メッセージ"))
+        .count();
+    assert_eq!(
+        said_b_calls, 1,
+        "build で一括取り込みした said の独立ターンが skip されず走った（#935 欠陥b・消費済み入力の \
+         二重処理）: build 掃き込み said を読む LLM 呼び出しが {said_b_calls} 件（1 が正）。reqs={:?}",
+        mock.reqs.lock().unwrap()
+    );
+
+    // ---- (A2・赤) said2 の 👀 は said1 の返信 say より前（build の LLM 投入時点で read）----
+    let idx_eyes_said2 = caps.iter().position(|c| {
+        c.kind == "system_reaction" && c.emoji.contains(SYS_ACCEPTED) && c.message == "9352"
+    });
+    let idx_first_breply = caps
+        .iter()
+        .position(|c| c.kind == "say" && c.channel == R935_CH && c.body.contains(R935_BREPLY));
+    assert!(
+        idx_eyes_said2.is_some() && idx_first_breply.is_some(),
+        "said2 の 👀 または build 返信 say が観測できない: {:?}",
+        caps
+    );
+    assert!(
+        idx_eyes_said2 < idx_first_breply,
+        "said2 の 👀 が返信より後（#935 欠陥a・build 一括取り込み分に付与点が無く、独立ターンの \
+         started まで遅れる）: 👀(9352) idx={:?} > breply idx={:?}",
+        idx_eyes_said2,
+        idx_first_breply
+    );
+
+    // ---- (A3・赤) build 返信 say は 1 件（消費済み独立ターンの二重返信を塞ぐ）----
+    let breply_says = caps
+        .iter()
+        .filter(|c| c.kind == "say" && c.channel == R935_CH && c.body.contains(R935_BREPLY))
+        .count();
+    assert_eq!(
+        breply_says, 1,
+        "build 掃き込み said の返信 say が 1 件でない（消費済み独立ターンが二重返信した・#935）: {:?}",
+        caps
+    );
+
+    // (支持) 👀 は各 said ちょうど 1 回（started/read の重複なし）。
+    assert_eq!(
+        eyes_on("9351"),
+        1,
+        "👀 が said1(9351) に 1 件でない: {:?}",
+        caps
+    );
+    assert_eq!(
+        eyes_on("9352"),
+        1,
+        "👀 が said2(9352) に 1 件でない: {:?}",
+        caps
+    );
+
+    // ---- (A4・赤) 消費済み独立ターンは started/typing を出さない（typing 残留の源を断つ）----
+    // tip は said2 の独立ターンが started→typing を打つので増分>0。fix は skip で増分 0。
+    assert_eq!(
+        typing_after, typing_before,
+        "build 掃き込み said の後に typing が再送出された（消費済み独立ターンが started/typing を打った \
+         ・#935 欠陥／typing 残留）: before={typing_before} after={typing_after}"
+    );
+}
+
+// ===================================================================
+// #935【否定側・green 維持】走行ターンも畳み込みも build 掃き込みも無い単独 said は、
+// 独立ターンが 1 本走る（発端 seq を folded/consumed に入れて自滅しないことの pin）。
+// R2c が「build に載った said を一律 skip」する誤実装だと、発端 said 自身の唯一の
+// 独立ターンも skip され無応答になる。この否定側で over-skip を捕捉する。tip も fix も green。
+// ===================================================================
+#[tokio::test]
+async fn scenario_935_lone_said_still_runs_independent_turn() {
+    let buf = install_capture();
+    let mock = Arc::new(BuildSweepMock {
+        reqs: Mutex::new(Vec::new()),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+    *core.state.tools_config.write().unwrap() = shell_enabled_tools_config();
+
+    let fixture = Fixture::new();
+    let _client = wire_instance_on_channel(&core, &fixture, R935B_CH).await;
+
+    // 走行ターンなし・畳み込みなし・build 掃き込みなしの単独 said。
+    fixture.append_message_ch("9360", R935B_CH, &format!("{R935_C} 単発の質問"));
+
+    let replied = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "say" && c.channel == R935B_CH && c.body.contains(R935_CREPLY))
+        })
+        .await
+    };
+    assert!(
+        replied,
+        "単独 said の独立ターン返信が出ない（over-skip の疑い・#935 否定側）: {:?}",
+        captured(&buf)
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let caps = captured(&buf);
+
+    // 単独 said の独立ターンはちょうど 1 本走る。
+    let c_calls = mock
+        .reqs
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|t| t.contains(R935_C))
+        .count();
+    assert_eq!(
+        c_calls,
+        1,
+        "単独 said の独立ターン LLM 呼び出しが 1 でない（0 なら over-skip）: reqs={:?}",
+        mock.reqs.lock().unwrap()
+    );
+    let creply_says = caps
+        .iter()
+        .filter(|c| c.kind == "say" && c.channel == R935B_CH && c.body.contains(R935_CREPLY))
+        .count();
+    assert_eq!(
+        creply_says, 1,
+        "単独 said の返信 say が 1 件でない: {:?}",
+        caps
+    );
+    let eyes_c = caps
+        .iter()
+        .filter(|c| {
+            c.kind == "system_reaction" && c.emoji.contains(SYS_ACCEPTED) && c.message == "9360"
+        })
+        .count();
+    assert_eq!(eyes_c, 1, "単独 said(9360) の 👀 が 1 件でない: {:?}", caps);
+}
+
+// ===================================================================
+// #935【(c3) 消費済み subtask 完了の resume skip】
+//
+// 1 ターンで 2 つの subtask（execute_shell echo・背景 subtask 化）を dispatch し、両完了が
+// 揃うまで CONTINUE で lock を保持する。両 subtask 完了 → それぞれ resume が spawn され lock 待ちに
+// 積まれる。X 終了後、先着 resume の build が **両完了を描画**（自分の発端でない他方の完了を
+// 「消費済み入力」として consumed 化する対象）。もう一方の resume はその完了が consumed 済みなので
+// run_serialized 頭で skip されるべき。
+//
+// 観測境界（赤の核心）:
+//   (C1) 完了結果を描画する resume の LLM 呼び出しは **ちょうど 1**（tip は 2＝2 本目 resume も
+//        走って NO_REPLY/報告する）。
+//   (C2) 完了報告 say は **1 件**（tip は 2）。
+// 現 tip は (C1)(C2) が赤（consumed skip が無く 2 本とも走る）。
+// ===================================================================
+const R935C_CH: &str = "636";
+const R935C_SAID: &str = "R935CSAIDMARK";
+const R935C_S1: &str = "R935C1DONE"; // subtask1 echo stdout（resume build に描画される）
+const R935C_S2: &str = "R935C2DONE"; // subtask2 echo stdout
+const R935C_REPORT: &str = "r935creport-完了報告だよ";
+
+struct TwoSubtaskConsumedMock {
+    step: std::sync::atomic::AtomicUsize,
+    /// resume ターン（tool role なし・build が完了 stdout を描画）の LLM 呼び出し回数。
+    /// spawned ack（tool role・ラベルにコマンド引数を含む）と区別するため `!has_tool_role` で判定。
+    resume_calls: std::sync::atomic::AtomicUsize,
+    reqs: Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for TwoSubtaskConsumedMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let tool_role = has_tool_role(&request);
+        let text = request_text(&request);
+        self.reqs.lock().unwrap().push(text.clone());
+        // resume ターン: tool role なしの build に subtask 完了 stdout が描画されている（X の spawned
+        // ack はラベルに同じ引数文字列を含むが tool role 付きなのでここには来ない）。報告する。
+        if !tool_role && (text.contains(R935C_S1) || text.contains(R935C_S2)) {
+            self.resume_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            return Ok(text_response(R935C_REPORT));
+        }
+        // X の dispatch 後継続（spawned ack＝tool role）。
+        if tool_role {
+            let n = self.step.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // 1 回目の ack で 2 つ目の subtask を dispatch。
+            if n == 0 {
+                return Ok(tool_call_response(
+                    "execute_shell",
+                    serde_json::json!({ "command": "echo", "args": [R935C_S2] }),
+                ));
+            }
+            // 両 subtask が settle し resume が lock 待ちに積まれるまで CONTINUE で lock を保持。
+            if n < 10 {
+                tokio::time::sleep(Duration::from_millis(120)).await;
+                return Ok(text_response("holding\nCONTINUE"));
+            }
+            return Ok(text_response(FILLER));
+        }
+        // 初回（said0・tool role なし・完了なし）→ 1 つ目の subtask を dispatch。
+        Ok(tool_call_response(
+            "execute_shell",
+            serde_json::json!({ "command": "echo", "args": [R935C_S1] }),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn scenario_935_consumed_subtask_completion_resume_skipped() {
+    let buf = install_capture();
+    let mock = Arc::new(TwoSubtaskConsumedMock {
+        step: std::sync::atomic::AtomicUsize::new(0),
+        resume_calls: std::sync::atomic::AtomicUsize::new(0),
+        reqs: Mutex::new(Vec::new()),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+    *core.state.tools_config.write().unwrap() = shell_enabled_tools_config();
+
+    let fixture = Fixture::new();
+    let _client = wire_instance_on_channel(&core, &fixture, R935C_CH).await;
+
+    fixture.append_message_ch("9370", R935C_CH, &format!("{R935C_SAID} 2 つ調べて教えて"));
+
+    // 完了報告 say が出るまで待つ（少なくとも 1 本の resume は走る）。
+    let reported = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "say" && c.channel == R935C_CH && c.body.contains(R935C_REPORT))
+        })
+        .await
+    };
+    assert!(
+        reported,
+        "resume 完了報告 say が出ない（2 subtask/resume 未達・テスト前提崩れ）: {:?}",
+        captured(&buf)
+    );
+    // typing 基準化: 先着 resume の報告直後（専用チャンネル 636）。この後に 2 本目の消費済み resume が
+    // 走れば started→typing を打つ（tip・増分>0）。fix なら 2 本目は run_serialized 頭で skip され
+    // started/typing を出さない（増分 0）。「LLM だけ skip して started/typing は先に打つ」誤実装も赤。
+    let typing_before = count_kind_on_channel(&buf, "typing", R935C_CH);
+    // 2 本目の resume が走る猶予＋ typing 失効間隔（8s）を跨ぐ。fix なら 2 本目は起きず typing も増えない。
+    tokio::time::sleep(Duration::from_millis(9000)).await;
+    let typing_after = count_kind_on_channel(&buf, "typing", R935C_CH);
+
+    let caps = captured(&buf);
+
+    // (前提) 両 subtask が dispatch され、resume の build に完了 stdout が両方描画された。
+    // 完了描画は `出力: <marker>`（`[sN 完了]`）で識別する（system プロンプトも "spawned" や
+    // コマンド引数を含むので生マーカー単体では X の spawned ack と区別できない）。
+    let drew_both = mock.reqs.lock().unwrap().iter().any(|t| {
+        t.contains(&format!("出力: {R935C_S1}")) && t.contains(&format!("出力: {R935C_S2}"))
+    });
+    assert!(
+        drew_both,
+        "resume の build に 2 つの subtask 完了が両方描画されていない（テスト前提崩れ）: reqs={:?}",
+        mock.reqs.lock().unwrap()
+    );
+
+    // ---- (C1・赤の核心) 完了を描画する resume の LLM 呼び出しは 1 のはず ----
+    // tip は 2（先着 resume が両完了を描画・もう一方の resume も consumed skip されず走る）。
+    let resume_calls = mock.resume_calls.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        resume_calls, 1,
+        "消費済み subtask 完了の resume が skip されず走った（#935 (c3)・消費済み入力の二重処理）: \
+         完了を描画する resume の LLM 呼び出しが {resume_calls} 件（1 が正）。reqs={:?}",
+        mock.reqs.lock().unwrap()
+    );
+
+    // ---- (C2・赤) 完了報告 say は 1 件（2 本目 resume の二重報告を塞ぐ）----
+    let report_says = caps
+        .iter()
+        .filter(|c| c.kind == "say" && c.channel == R935C_CH && c.body.contains(R935C_REPORT))
+        .count();
+    assert_eq!(
+        report_says, 1,
+        "resume 完了報告 say が 1 件でない（消費済み完了の resume が二重報告した・#935 (c3)）: {:?}",
+        caps
+    );
+
+    // ---- (C3・赤) 消費済み完了の resume は started/typing を出さない（typing 残留の源を断つ）----
+    // tip は 2 本目の resume が started→typing を打つので増分>0。fix は run_serialized 頭 skip で増分 0。
+    assert_eq!(
+        typing_after, typing_before,
+        "先着 resume の報告後に typing が再送出された（消費済み完了の resume が started/typing を打った \
+         ・#935 (c3)／typing 残留）: before={typing_before} after={typing_after}"
+    );
+}
+
+// ===================================================================
+// #935【否定側・green 維持】単独 subtask（他に描画するターン無し）の resume は、自分が発端なので
+// 走る。resume 自身の発端完了を consumed に入れて自滅しないことの pin（(b) の「発端 seq は mark
+// しない」と同型・scenario_915 と同型）。tip も fix も green。
+// ===================================================================
+const R935D_CH: &str = "637";
+const R935D_SAID: &str = "R935DSAIDMARK";
+const R935D_S1: &str = "R935D1DONE";
+const R935D_REPORT: &str = "r935dreport-単独完了の報告だよ";
+
+struct LoneSubtaskResumeMock {
+    emitted: std::sync::atomic::AtomicBool,
+    /// resume ターン（tool role なし・完了 stdout 描画）の LLM 呼び出し回数。
+    resume_calls: std::sync::atomic::AtomicUsize,
+    reqs: Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for LoneSubtaskResumeMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let tool_role = has_tool_role(&request);
+        let text = request_text(&request);
+        self.reqs.lock().unwrap().push(text.clone());
+        // resume ターン: tool role なしの build に完了 stdout が描画されている（spawned ack は tool
+        // role 付きでラベルに同じ引数を含むので除外）→ 報告。
+        if !tool_role && text.contains(R935D_S1) {
+            self.resume_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            return Ok(text_response(R935D_REPORT));
+        }
+        // X の spawned ack → 即終了（hold しない・lock をすぐ解放）。
+        if tool_role {
+            return Ok(text_response(FILLER));
+        }
+        // 初回 → 単独 subtask を dispatch。
+        if !self.emitted.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return Ok(tool_call_response(
+                "execute_shell",
+                serde_json::json!({ "command": "echo", "args": [R935D_S1] }),
+            ));
+        }
+        Ok(text_response(FILLER))
+    }
+}
+
+#[tokio::test]
+async fn scenario_935_lone_subtask_completion_resume_runs() {
+    let buf = install_capture();
+    let mock = Arc::new(LoneSubtaskResumeMock {
+        emitted: std::sync::atomic::AtomicBool::new(false),
+        resume_calls: std::sync::atomic::AtomicUsize::new(0),
+        reqs: Mutex::new(Vec::new()),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+    *core.state.tools_config.write().unwrap() = shell_enabled_tools_config();
+
+    let fixture = Fixture::new();
+    let _client = wire_instance_on_channel(&core, &fixture, R935D_CH).await;
+
+    fixture.append_message_ch("9380", R935D_CH, &format!("{R935D_SAID} 1 つ調べて教えて"));
+
+    // 単独 subtask の resume 完了報告が出る（発端なので走る）。
+    let reported = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "say" && c.channel == R935D_CH && c.body.contains(R935D_REPORT))
+        })
+        .await
+    };
+    assert!(
+        reported,
+        "単独 subtask の resume 完了報告が出ない（over-skip の疑い・#935 (c3) 否定側）: {:?}",
+        captured(&buf)
+    );
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let caps = captured(&buf);
+
+    // 単独 subtask の resume は 1 回だけ走る（発端完了を skip しない）。
+    let resume_calls = mock.resume_calls.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        resume_calls,
+        1,
+        "単独 subtask の resume LLM 呼び出しが 1 でない（0 なら発端完了を over-skip）: reqs={:?}",
+        mock.reqs.lock().unwrap()
+    );
+    let report_says = caps
+        .iter()
+        .filter(|c| c.kind == "say" && c.channel == R935D_CH && c.body.contains(R935D_REPORT))
+        .count();
+    assert_eq!(
+        report_says, 1,
+        "単独 subtask の resume 完了報告 say が 1 件でない: {:?}",
+        caps
+    );
+}
+
+// ===================================================================
+// #935【初回ターン（起動直後）でも build 掃き込みに read+skip が効く】
+//
+// テストレビュー裁定: watermark 初期化を「ターン開始時の最新 id」に据えると、起動後の最初の
+// ターンで build に掃き込まれた said に read も skip も効かず QC 症状（👀 遅延・消費済み独立ターン・
+// typing 残留）が再配備直後に再現する。初回ターンの watermark は「発端行の log id」とし、発端より
+// 後に届いた said は初回ターンでも初投入として read+consumed にする。
+//
+// 構成: 起動直後、発端 A と直後の B を（同一 build に載るよう）連投。first turn（A のターン）の
+// build に A と B が両方載り、A が発端・B は掃き込み → B に read・B の独立ターンは skip。
+//
+// 観測境界（赤の核心・現行 session_max 初期化＝0d760a53 で赤）:
+//   (F1) B（掃き込み）を読む said ターンの LLM 呼び出しは 1（A のターンのみ）。tip は 2（B 独立ターン）。
+//   (F2) B の返信 say は 1（B 独立ターンの二重返信なし）。
+//   (F3) A の返信後、typing 増分 0（B 独立ターンが started/typing を打たない）。
+// ===================================================================
+const R935F_CH: &str = "639";
+const R935F_A: &str = "R935FAMARK"; // 発端
+const R935F_B: &str = "R935FBMARK"; // 直後に届き同一 build へ掃き込まれる
+const R935F_REPLY: &str = "r935freply-まとめて返信するね";
+
+struct FirstTurnSweepMock {
+    reqs: Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for FirstTurnSweepMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let text = request_text(&request);
+        self.reqs.lock().unwrap().push(text.clone());
+        // said ターン（build 掃き込み・畳み込みでない）→ 返信。A のターンも B の独立ターンも
+        // 会話に A/B を含みここへ来る（fold でないので「新着メッセージ」を含まない）。
+        if (text.contains(R935F_A) || text.contains(R935F_B)) && !text.contains("新着メッセージ")
+        {
+            // 発端 A のターンが少し lock を保持し、B が同一 build に載る猶予を作る（決定論化）。
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            return Ok(text_response(R935F_REPLY));
+        }
+        Ok(text_response(FILLER))
+    }
+}
+
+#[tokio::test]
+async fn scenario_935_first_turn_build_sweep_reads_and_skips() {
+    let buf = install_capture();
+    let mock = Arc::new(FirstTurnSweepMock {
+        reqs: Mutex::new(Vec::new()),
+    });
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+    *core.state.tools_config.write().unwrap() = shell_enabled_tools_config();
+
+    let fixture = Fixture::new();
+    let _client = wire_instance_on_channel(&core, &fixture, R935F_CH).await;
+
+    // 起動直後、発端 A と直後の B を連投（同一 build に載せる＝初回ターンの掃き込み）。
+    fixture.append_message_ch("9390", R935F_CH, &format!("{R935F_A} 質問その1"));
+    fixture.append_message_ch("9391", R935F_CH, &format!("{R935F_B} 質問その2"));
+
+    let replied = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "say" && c.channel == R935F_CH && c.body.contains(R935F_REPLY))
+        })
+        .await
+    };
+    assert!(
+        replied,
+        "初回ターンの返信 say が出ない: {:?}",
+        captured(&buf)
+    );
+
+    // typing 基準化（返信後）。tip では B の独立ターンが started→typing を打つ。
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let typing_before = count_kind_on_channel(&buf, "typing", R935F_CH);
+    tokio::time::sleep(Duration::from_millis(9000)).await;
+    let typing_after = count_kind_on_channel(&buf, "typing", R935F_CH);
+
+    let caps = captured(&buf);
+
+    // (前提) A のターン build に A と B が両方載った（掃き込みが起きた）。畳み込み（新着）ではない。
+    let swept_together = mock
+        .reqs
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|t| t.contains(R935F_A) && t.contains(R935F_B) && !t.contains("新着メッセージ"));
+    assert!(
+        swept_together,
+        "A のターン build に B が掃き込まれていない（連投が同一 build に載っていない・前提崩れ）: reqs={:?}",
+        mock.reqs.lock().unwrap()
+    );
+
+    // (F1・赤の核心) B（掃き込み）を読む said ターンの LLM 呼び出しは 1（A のターンのみ）。
+    // 現行 session_max 初期化（0d760a53）では初回ターンが掃かず B の独立ターンが走る → 2（赤）。
+    let b_calls = mock
+        .reqs
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|t| t.contains(R935F_B) && !t.contains("新着メッセージ"))
+        .count();
+    assert_eq!(
+        b_calls,
+        1,
+        "初回ターンで build 掃き込みした B が独立ターンで再処理された（#935・初回 watermark 穴）: \
+         B を読む LLM 呼び出しが {b_calls} 件（1 が正）。reqs={:?}",
+        mock.reqs.lock().unwrap()
+    );
+
+    // (F2・赤) B の返信 say は 1（独立ターンの二重返信なし）。
+    let reply_says = caps
+        .iter()
+        .filter(|c| c.kind == "say" && c.channel == R935F_CH && c.body.contains(R935F_REPLY))
+        .count();
+    assert_eq!(
+        reply_says, 1,
+        "初回ターン掃き込みの返信 say が 1 件でない（B 独立ターンの二重返信・#935）: {:?}",
+        caps
+    );
+
+    // (F3・赤) B の 👀 は 1 件（read）。
+    let eyes_b = caps
+        .iter()
+        .filter(|c| {
+            c.kind == "system_reaction" && c.emoji.contains(SYS_ACCEPTED) && c.message == "9391"
+        })
+        .count();
+    assert_eq!(eyes_b, 1, "B(9391) の 👀 が 1 件でない: {:?}", caps);
+
+    // (F4・赤) 返信後 typing 増分 0（B 独立ターンが started/typing を打たない）。
+    assert_eq!(
+        typing_after, typing_before,
+        "初回ターン返信後に typing 再送出（B 独立ターンが started/typing を打った・#935）: \
+         before={typing_before} after={typing_after}"
+    );
+}

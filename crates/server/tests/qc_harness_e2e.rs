@@ -2233,12 +2233,23 @@ async fn scenario_no_reply_only_is_not_persisted_extgate_899() {
     let fixture = Fixture::new();
     let (_client, _address, session_id) = wire_instance(&core, &fixture, nostr_config(None)).await;
 
-    // 4 メンションを順に投入（同一 binding＝同一セッション・consumer が FIFO 直列化）。
-    // (d) は §13 #13（NO_REPLY+CONTINUE → NO_REPLY 優先で沈黙）。
+    // 4 メンションを **1 件ずつ直列に** 投入する（各ターンの LLM 呼び出しが 1 回増えるのを待って
+    // から次を投げる）。#935 (R2c) 以降、同一 build に一括で掃き込まれた入力は仕様上 1 ターンに
+    // まとまり、発端以外は独立ターンを起こさない（消費済み入力）。本テストの目的（NO_REPLY 非保存・
+    // typed 履歴に NO_REPLY なし・各メンション LLM 1 回）は、各メンションを前ターンの LLM 呼び出し後に
+    // 投入して 4 ターンに分ければ従来どおり保てる。(d) は §13 #13（NO_REPLY+CONTINUE → NO_REPLY 優先）。
+    let await_calls = |n: usize| {
+        let mock = mock.clone();
+        async move { wait_until(move || mock.system_prompts().len() >= n).await }
+    };
     fixture.append_line(&mention_event(&"a1".repeat(32), "NR899-mention-a"));
+    assert!(await_calls(1).await, "(a) の LLM 呼び出しが起きない");
     fixture.append_line(&mention_event(&"b2".repeat(32), "NR899-mention-b"));
+    assert!(await_calls(2).await, "(b) の LLM 呼び出しが起きない");
     fixture.append_line(&mention_event(&"d4".repeat(32), "NR899-mention-d"));
+    assert!(await_calls(3).await, "(d) の LLM 呼び出しが起きない");
     fixture.append_line(&mention_event(&"c3".repeat(32), "NR899-mention-c"));
+    assert!(await_calls(4).await, "(c) の LLM 呼び出しが起きない");
 
     // バリア: 対照(c)の say が出れば FIFO 上 (a)(b) のターンは決着済み。
     let ok = {

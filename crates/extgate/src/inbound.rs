@@ -882,6 +882,19 @@ fn enqueue_turn<R: AgentRuntime>(
                     None,
                 )
                 .await;
+                // #935 (a)/(b)/(c3): ターン build で初投入される said（発端以外）に read+origin を出し
+                // seq を consumed 化、初描画される subtask 完了も consumed 化する。発端 said はこの
+                // started が担うので read しない。R2b（走行中畳み込み）と同じ hook を通す単一実装。
+                crate::consumed::mark_build_consumed_inputs(
+                    &state,
+                    &instance_id,
+                    &binding_id,
+                    &session_id,
+                    &agent_id,
+                    Some(origin.as_str()),
+                    None,
+                )
+                .await;
                 let caller = match state.db.lock() {
                     Ok(conn) => resolve_caller(
                         &conn,
@@ -1010,23 +1023,10 @@ fn enqueue_turn<R: AgentRuntime>(
                                         let hb = hb.clone();
                                         let hse = hse.clone();
                                         Box::pin(async move {
-                                            let activity_id = uuid::Uuid::new_v4().to_string();
-                                            crate::listen::emit_activity(
-                                                &hs,
-                                                &hi,
-                                                &hb,
-                                                &activity_id,
-                                                "read",
-                                                Some(origin.as_str()),
-                                                None,
-                                            )
-                                            .await;
-                                            // #933: 畳み込んだ said の seq を external_origins から
-                                            // 引き、per-session の畳み込み高水位へ単調に記録する
-                                            // （非消費）。以後この seq 以下の独立ターンは skip される。
-                                            if let Some(seq) = seq_for_origin(&hs, &hb, &origin) {
-                                                hs.mark_folded_seq(&hse, seq);
-                                            }
+                                            // #935: read 発火＋seq consumed 化は build 初投入（R2c）と
+                                            // 同じ共有実装を通す（2 系統にしない）。
+                                            crate::consumed::emit_read_and_consume_said(&hs, &hi, &hb, &hse, &origin)
+                                                .await;
                                         })
                                     })
                                 })
