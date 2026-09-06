@@ -255,7 +255,21 @@ fn trait_item_is_cfg_test(node: &syn::TraitItem) -> bool {
     is_cfg_test(attrs)
 }
 
-/// `crates/core/src` 以下の `.rs` を再帰列挙する。
+/// 外部ファイルへ分離されたテスト専用ソースか。
+///
+/// `scripts/check-file-size.sh` と同じ規則で、`tests.rs`、`*_tests.rs`、
+/// `tests/` ディレクトリ配下を production 走査から除外する。名前の部分一致ではなく
+/// path component / file name を比較し、`contest` や `tests_support.rs` は除外しない。
+fn is_external_test_source(path: &Path) -> bool {
+    let file_name = path.file_name().and_then(|name| name.to_str());
+    file_name == Some("tests.rs")
+        || file_name.is_some_and(|name| name.ends_with("_tests.rs"))
+        || path
+            .components()
+            .any(|component| component.as_os_str() == "tests")
+}
+
+/// `crates/core/src` 以下の production `.rs` を再帰列挙する。
 fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let entries =
         std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read_dir {} に失敗: {e}", dir.display()));
@@ -263,11 +277,31 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
         let entry = entry.expect("dir entry");
         let path = entry.path();
         if path.is_dir() {
-            collect_rs_files(&path, out);
-        } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
+            if !is_external_test_source(&path) {
+                collect_rs_files(&path, out);
+            }
+        } else if path.extension().and_then(|s| s.to_str()) == Some("rs")
+            && !is_external_test_source(&path)
+        {
             out.push(path);
         }
     }
+}
+
+#[test]
+fn external_test_source_paths_match_file_size_gate_convention() {
+    assert!(is_external_test_source(Path::new("src/foo/tests.rs")));
+    assert!(is_external_test_source(Path::new("src/foo/unit_tests.rs")));
+    assert!(is_external_test_source(Path::new("src/foo/tests/bar.rs")));
+
+    assert!(!is_external_test_source(Path::new("src/foo/mod.rs")));
+    assert!(!is_external_test_source(Path::new("src/foo/bar.rs")));
+    assert!(!is_external_test_source(Path::new(
+        "src/foo/contest/bar.rs"
+    )));
+    assert!(!is_external_test_source(Path::new(
+        "src/foo/tests_support.rs"
+    )));
 }
 
 #[test]
