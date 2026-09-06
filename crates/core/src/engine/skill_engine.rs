@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+mod run_helpers;
 mod turn_budget;
 
 use anyhow::Result;
@@ -10,9 +11,8 @@ use super::types::{
     LlmClient, ToolDispatcher,
 };
 use super::xml_parser::{parse_xml_tool_calls, strip_function_calls_xml};
-use opencrab_llm_types::{
-    ContentPart, FinishReason, ImageUrl, Message, MessageContent, Role, ToolCall,
-};
+use opencrab_llm_types::{FinishReason, Message, MessageContent, Role, ToolCall};
+use run_helpers::{initialize_turn, InitialTurn};
 use turn_budget::{apply_turn_budget, seat_tool_result};
 #[cfg(test)]
 use turn_budget::{message_plain_text, user_line_items};
@@ -371,122 +371,17 @@ impl SkillEngine {
         // §2.7: functions はループ内で毎イテレーション list_tools を取り直して組む（活性集合を
         // 反映）。ここでの事前取得は結果を捨てる死んだ呼び出しだったので置かない。
 
-        // ユーザーメッセージ本文（画像があればマルチパート）。
-        let user_content = if image_urls.is_empty() {
-            MessageContent::Text(user_message.to_string())
-        } else {
-            let mut parts = vec![ContentPart::Text {
-                text: user_message.to_string(),
-            }];
-            for url in image_urls {
-                parts.push(ContentPart::ImageUrl {
-                    image_url: ImageUrl {
-                        url: url.clone(),
-                        detail: Some("auto".to_string()),
-                    },
-                });
-            }
-            MessageContent::Multi(parts)
-        };
-
-        let mut messages = if let Some(tc) = self.typed_conversation.as_ref() {
-            // #884 PR2: System context に（keep 時のみ）出力指示を後置し、context/snapshot ブロックと
-            // typed history を順に並べる。現ターンのユーザー本文（テキスト）は typed history 末尾の
-            // UserSpeech に既に含まれるため二重に積まない。
-            let mut system = system_context.to_string();
-            // #884 PR2 §9.4-1: 省略ポリシー説明は安定文言なので system に 1 回だけ置く。
-            system.push_str("\n\n");
-            system.push_str(crate::conversation_typed::OMISSION_POLICY_NOTE);
-            if let Some(directive) = &tc.response_directive {
-                system.push_str("\n\n");
-                system.push_str(directive);
-            }
-            let mut msgs: Vec<Message> = Vec::with_capacity(tc.history.len() + 4);
-            msgs.push(Message {
-                role: Role::System,
-                content: Some(MessageContent::Text(system)),
-                name: None,
-                function_call: None,
-                tool_calls: None,
-                tool_call_id: None,
-            });
-            if let Some(cb) = &tc.context_block {
-                msgs.push(cb.clone());
-            }
-            if let Some(sb) = &tc.snapshot_base {
-                msgs.push(sb.clone());
-            }
-            msgs.extend(tc.history.iter().cloned());
-            // 画像は session_logs に無く typed history に載らないので、ある時だけ末尾に画像 User を足す。
-            if !image_urls.is_empty() {
-                let mut parts: Vec<ContentPart> = Vec::new();
-                for url in image_urls {
-                    parts.push(ContentPart::ImageUrl {
-                        image_url: ImageUrl {
-                            url: url.clone(),
-                            detail: Some("auto".to_string()),
-                        },
-                    });
-                }
-                msgs.push(Message {
-                    role: Role::User,
-                    content: Some(MessageContent::Multi(parts)),
-                    name: None,
-                    function_call: None,
-                    tool_calls: None,
-                    tool_call_id: None,
-                });
-            }
-            // 保険: typed 会話が実質空（履歴も context も snapshot も無い）のときだけ、現ターン本文を User として置く。
-            if tc.history.is_empty() && tc.context_block.is_none() && tc.snapshot_base.is_none() {
-                msgs.push(Message {
-                    role: Role::User,
-                    content: Some(user_content.clone()),
-                    name: None,
-                    function_call: None,
-                    tool_calls: None,
-                    tool_call_id: None,
-                });
-            }
-            msgs
-        } else {
-            vec![
-                Message {
-                    role: Role::System,
-                    content: Some(MessageContent::Text(system_context.to_string())),
-                    name: None,
-                    function_call: None,
-                    tool_calls: None,
-                    tool_call_id: None,
-                },
-                Message {
-                    role: Role::User,
-                    content: Some(user_content),
-                    name: None,
-                    function_call: None,
-                    tool_calls: None,
-                    tool_call_id: None,
-                },
-            ]
-        };
-
-        let mut turn_ledger = crate::context_budget::TokenLedger::new();
-        turn_ledger.record("system", system_context);
-        turn_ledger.record("user", user_message);
-        let mut turn_gov = if self.typed_conversation.is_some() {
-            // #884 PR2: typed 経路はターン内圧縮を行わない（PR4 の governor 移行まで）。
-            // apply_turn_budget は messages[1] を flat 履歴前提で切り詰めるため typed では無効化する。
-            None
-        } else {
-            match (self.conversation_high, self.conversation_low) {
-                (Some(h), Some(l)) => {
-                    let mut gov = crate::context_budget::TurnGovernor::new(h, l);
-                    gov.inspect_turn_start(turn_ledger.total());
-                    Some(gov)
-                }
-                _ => None,
-            }
-        };
+        let InitialTurn {
+            mut messages,
+            ledger: mut turn_ledger,
+            governor: mut turn_gov,
+        } = initialize_turn(
+            system_context,
+            user_message,
+            image_urls,
+            self.typed_conversation.as_ref(),
+            (self.conversation_high, self.conversation_low),
+        );
 
         let mut iterations = 0;
         // #930: このターンで read（👀）を通知済みの origin。1 origin 1 回に絞る。
