@@ -7,7 +7,6 @@
 1703	crates/actions/src/webhook_target.rs
 1008	crates/actions/src/workspace.rs
 1231	crates/core/src/context_budget/core_process_e2e.rs
-4843	crates/core/src/conversation.rs
 1938	crates/core/src/conversation_typed.rs
 4549	crates/core/src/engine/skill_engine.rs
 1094	crates/core/src/import/claude_code.rs
