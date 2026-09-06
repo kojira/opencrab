@@ -24,7 +24,7 @@
 1053	crates/gate-client/src/client.rs
 919	crates/llm/src/providers/acp.rs
 951	crates/llm/src/providers/anthropic.rs
-2820	crates/llm/src/providers/chatgpt.rs
+1316	crates/llm/src/providers/chatgpt.rs
 1059	crates/llm/src/providers/codex.rs
 953	crates/llm/src/providers/cursor.rs
 826	crates/llm/src/router.rs
