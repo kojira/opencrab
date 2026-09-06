@@ -37,6 +37,5 @@
 1351	crates/server/src/memory_condense.rs
 1792	crates/server/src/memory_organize.rs
 897	crates/server/src/nostr_runner_impl.rs
-1969	crates/server/src/peer_review.rs
 1396	crates/server/src/scheduler.rs
 1425	crates/server/src/webhook_targets.rs
