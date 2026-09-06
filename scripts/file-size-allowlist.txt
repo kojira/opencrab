@@ -34,7 +34,6 @@
 822	crates/server/src/api/agents_messages.rs
 913	crates/server/src/api/providers.rs
 817	crates/server/src/api/schedules.rs
-2535	crates/server/src/config.rs
 950	crates/server/src/lib.rs
 1208	crates/server/src/main.rs
 1351	crates/server/src/memory_condense.rs
