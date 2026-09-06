@@ -224,7 +224,7 @@ impl Http {
 }
 
 /// agent の discord owner を said author に合わせる。**config は enabled=false のまま owner だけ**
-/// 設定する（caller=Owner の解決は `inbound.rs` load_origin_row が owner_discord_id だけを見るので
+/// 設定する（caller=Owner の解決は `inbound/binding.rs` load_origin_row が owner_discord_id だけを見るので
 /// enabled は不要）。実 Discord gateway が起動し得る enabled=true を残さないため、既存行は PATCH
 /// （enabled を触らない）、無ければ PUT（唯一の作成経路・一時的に enabled=true）で作った上で、
 /// 最後に必ず `discord/stop` で enabled=false へ落とす。QC は discord subsystem 未登録なので stop

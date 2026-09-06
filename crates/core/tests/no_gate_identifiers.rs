@@ -260,28 +260,29 @@ fn trait_item_is_cfg_test(node: &syn::TraitItem) -> bool {
 /// `scripts/check-file-size.sh` と同じ規則で、`tests.rs`、`*_tests.rs`、
 /// `tests/` ディレクトリ配下を production 走査から除外する。名前の部分一致ではなく
 /// path component / file name を比較し、`contest` や `tests_support.rs` は除外しない。
-fn is_external_test_source(path: &Path) -> bool {
-    let file_name = path.file_name().and_then(|name| name.to_str());
+fn is_external_test_source(src_root: &Path, path: &Path) -> bool {
+    let relative = path.strip_prefix(src_root).unwrap_or(path);
+    let file_name = relative.file_name().and_then(|name| name.to_str());
     file_name == Some("tests.rs")
         || file_name.is_some_and(|name| name.ends_with("_tests.rs"))
-        || path
+        || relative
             .components()
             .any(|component| component.as_os_str() == "tests")
 }
 
 /// `crates/core/src` 以下の production `.rs` を再帰列挙する。
-fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+fn collect_rs_files(src_root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
     let entries =
         std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read_dir {} に失敗: {e}", dir.display()));
     for entry in entries {
         let entry = entry.expect("dir entry");
         let path = entry.path();
         if path.is_dir() {
-            if !is_external_test_source(&path) {
-                collect_rs_files(&path, out);
+            if !is_external_test_source(src_root, &path) {
+                collect_rs_files(src_root, &path, out);
             }
         } else if path.extension().and_then(|s| s.to_str()) == Some("rs")
-            && !is_external_test_source(&path)
+            && !is_external_test_source(src_root, &path)
         {
             out.push(path);
         }
@@ -290,25 +291,34 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
 
 #[test]
 fn external_test_source_paths_match_file_size_gate_convention() {
-    assert!(is_external_test_source(Path::new("src/foo/tests.rs")));
-    assert!(is_external_test_source(Path::new("src/foo/unit_tests.rs")));
-    assert!(is_external_test_source(Path::new("src/foo/tests/bar.rs")));
+    let root = Path::new("checkout/tests/opencrab/crates/core/src");
+    assert!(is_external_test_source(root, &root.join("foo/tests.rs")));
+    assert!(is_external_test_source(
+        root,
+        &root.join("foo/unit_tests.rs")
+    ));
+    assert!(is_external_test_source(
+        root,
+        &root.join("foo/tests/bar.rs")
+    ));
 
-    assert!(!is_external_test_source(Path::new("src/foo/mod.rs")));
-    assert!(!is_external_test_source(Path::new("src/foo/bar.rs")));
-    assert!(!is_external_test_source(Path::new(
-        "src/foo/contest/bar.rs"
-    )));
-    assert!(!is_external_test_source(Path::new(
-        "src/foo/tests_support.rs"
-    )));
+    assert!(!is_external_test_source(root, &root.join("foo/mod.rs")));
+    assert!(!is_external_test_source(root, &root.join("foo/bar.rs")));
+    assert!(!is_external_test_source(
+        root,
+        &root.join("foo/contest/bar.rs")
+    ));
+    assert!(!is_external_test_source(
+        root,
+        &root.join("foo/tests_support.rs")
+    ));
 }
 
 #[test]
 fn core_production_has_no_gate_identifiers() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
-    collect_rs_files(&src, &mut files);
+    collect_rs_files(&src, &src, &mut files);
     files.sort();
     assert!(!files.is_empty(), "core の src に .rs が見つからない");
 

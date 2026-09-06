@@ -20,9 +20,9 @@ External gate V3 最小形。契約・設計・検収は `docs/design/external-g
 | `admin.rs` | 6 operation |
 | `protocol.rs` | frame と message の読写 |
 | `inbound/mod.rs` | `crate::inbound` facade と said → `accept_inbound` orchestration。session は `canonical_session_id`（V3.5 reuse）。`kind_id=nostr` は record 前に `NostrSaidAdmit`（V1 アンカー・DM/自己/allow-set）。watch Immediate は `WatchAccept(privilege=Some)`、Bundle は `WatchAccept(privilege=None)`。record 後の turn は session queue 32。溢れは seq=null + 計測（履歴は残さない） |
-| `inbound/bundle_turn.rs` | Bundle member の決着、trigger 読取、Nostr watch prompt、完了 turn の enqueue。完了時の queue 溢れは member を残し turn だけ捨てる |
+| `inbound/bundle_turn.rs` | `NostrBundleCoordinator` の member 決着・全receipt後のturn 0/1、trigger読取、watchと同文面のprompt、完了turnのenqueue。gatewayはackまでだけ`pending_turn`を保持し後続memberを落とさない。完了時のqueue溢れはmemberを残しturnだけ捨てる |
 | `inbound/binding.rs` | binding error/status、origin row・platform 別 owner・`delivery_mode` 解決、heartbeat 用 `BindingContext`。owner 読取失敗は store_error |
-| `inbound/record.rs` | seq 採番、inbound session log、Nostr reply metadata、DM/channel admission query |
+| `inbound/record.rs` | seq採番、inbound session log、Nostr reply metadata、DM/channel admission query。record後にrenderer生本文を転記 |
 | `inbound/turn.rs` | session queue enqueue、`OnlySpeaker` turn、V3 `RunRequest::with_dispatch`（`ExtgateCompletionSink`）、held turn 発火。`delivery_mode` は turn 完了で読む |
 | `inbound/nostr_profile.rs` | Nostr 固有の relay/render、V1・renderer kind 解釈、record 前の `sanitize_tool_result_for_log`、prompt 整形 |
 | `inbound/tests.rs` | inbound profile の unit tests |
