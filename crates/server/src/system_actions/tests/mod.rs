@@ -1,0 +1,16 @@
+mod agent_heartbeat_basics;
+mod agent_heartbeat_schedule;
+mod allowed_command_listing;
+mod allowed_command_management;
+mod cancel_subtask;
+mod definitions;
+mod heartbeat_instructions;
+mod management_transport;
+mod memory_index_config;
+mod nostr_run;
+mod peer_review;
+mod send_ui;
+mod skills;
+mod subtask_control;
+mod support;
+mod webhook_targets;
