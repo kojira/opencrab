@@ -14,7 +14,6 @@
 1649	crates/core/src/tool_result_log.rs
 826	crates/core/src/workspace.rs
 1104	crates/db/src/queries/session_logs.rs
-1981	crates/db/src/schema/mod.rs
 1139	crates/db/src/webgate_transplant.rs
 1221	crates/discord/src/gateway.rs
 1456	crates/discord/src/gateway_actions/mod.rs
