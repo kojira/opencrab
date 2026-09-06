@@ -49,16 +49,40 @@ const FORBIDDEN: &[&str] = &[
 /// module 切り出しで解消される（TODO）。
 ///
 /// 分類の内訳（#852 短報）:
-/// - inbound.rs / completion.rs: **原理的には profile dispatch で汎化可能**な
-///   `kind_id == "nostr"` 分岐を持つが、汎化は挙動に触れるため audit 専用の本 PR の
-///   対象外（phase-2）。
+/// - inbound/mod.rs / binding.rs / record.rs / turn.rs / completion.rs:
+///   **原理的には profile dispatch で汎化可能**な `kind_id == "nostr"` 分岐や
+///   platform 別 owner/caller/pubkey/admit 処理を持つが、汎化は挙動に触れるため
+///   behavior-preserving な module split の対象外（phase-2）。
+/// - inbound/bundle_turn.rs / nostr_profile.rs: Nostr Bundle の完了処理と relay/render/V1
+///   解釈という **Nostr profile 固有**の実装。profile module 内には分離済みだが、profile
+///   dispatch による generic 化は phase-2。
 /// - registry.rs / bundle.rs / lib.rs: Nostr の wire 形式・admit 状態機械・platform 別
 ///   ID 解決など **本質的に platform 固有**な実装。あるべき姿は profile module/crate 側
 ///   への配置（phase-2）。
 const ALLOWLIST: &[(&str, &str)] = &[
     (
-        "extgate/src/inbound.rs",
-        "Nostr 受信の wire 形式（[NOSTRGATE/V1]）解釈・watch 束ね・prompt 整形を持つ未分離の Nostr profile。kind_id 分岐は phase-2 で profile dispatch へ。",
+        "extgate/src/inbound/mod.rs",
+        "said orchestration に Nostr admit/watch と kind_id dispatch が残る。profile dispatch 化は phase-2。",
+    ),
+    (
+        "extgate/src/inbound/binding.rs",
+        "binding owner 解決が Nostr pubkey / Discord config の platform 別 DB schema に依存する。registry 化は phase-2。",
+    ),
+    (
+        "extgate/src/inbound/bundle_turn.rs",
+        "NostrBundleAdmit の完了・relay・Nostr watch prompt を扱う Nostr profile plumbing。phase-2 で profile dispatch 化。",
+    ),
+    (
+        "extgate/src/inbound/nostr_profile.rs",
+        "Nostr 受信の wire 形式（[NOSTRGATE/V1]）解釈・relay・renderer kind・prompt 整形を持つ Nostr profile。",
+    ),
+    (
+        "extgate/src/inbound/record.rs",
+        "Nostr V1 reply_to を session metadata へ写す kind_id dispatch が残る。profile dispatch 化は phase-2。",
+    ),
+    (
+        "extgate/src/inbound/turn.rs",
+        "turn caller platform・inbound pubkey・held turn に Nostr profile 分岐/型が残る。profile dispatch 化は phase-2。",
     ),
     (
         "extgate/src/completion.rs",

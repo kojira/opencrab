@@ -28,7 +28,6 @@
 1158	crates/discord/src/gateway_actions/webhook.rs
 2676	crates/discord/src/message_loop.rs
 1159	crates/discord/src/renderer.rs
-1442	crates/extgate/src/inbound.rs
 1301	crates/extgate/src/listen.rs
 1053	crates/gate-client/src/client.rs
 919	crates/llm/src/providers/acp.rs

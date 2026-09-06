@@ -19,7 +19,13 @@ External gate V3 最小形。契約・設計・検収は `docs/design/external-g
 | `registry.rs` | live 接続の process-local 表。`GateProbe` は `#[cfg]` 隔離 |
 | `admin.rs` | 6 operation |
 | `protocol.rs` | frame と message の読写 |
-| `inbound.rs` | said → `accept_inbound`。session は `canonical_session_id`（V3.5 reuse）。`delivery_mode` を turn 完了で読む。`kind_id=nostr` は record 前に `NostrSaidAdmit`（V1 アンカー・DM/自己/allow-set）。owner 読取失敗は store_error。record 前に renderer 本文を `sanitize_tool_result_for_log`。record 後に renderer 生本文を転記。`prompt_suffix` は watch と同文面。turn は `OnlySpeaker`。V3 `RunRequest` は常に `with_dispatch`（`ExtgateCompletionSink`）。watch Immediate は `WatchAccept(privilege=Some)`。Bundle は `WatchAccept(privilege=None)` + `NostrBundleCoordinator`（member 記録・on_run 抑止・全 receipt 後に turn 0/1）。gateway は Bundle member を `post_said_receipt` で送る（ack までだけ `pending_turn` を残し、後続 member を落とさない）。record 後の turn は session queue 32。溢れは seq=null + 計測（履歴は残さない）。Bundle 完了時の溢れは member を残し turn だけ捨てる |
+| `inbound/mod.rs` | `crate::inbound` facade と said → `accept_inbound` orchestration。session は `canonical_session_id`（V3.5 reuse）。`kind_id=nostr` は record 前に `NostrSaidAdmit`（V1 アンカー・DM/自己/allow-set）。watch Immediate は `WatchAccept(privilege=Some)`、Bundle は `WatchAccept(privilege=None)`。record 後の turn は session queue 32。溢れは seq=null + 計測（履歴は残さない） |
+| `inbound/bundle_turn.rs` | Bundle member の決着、trigger 読取、Nostr watch prompt、完了 turn の enqueue。完了時の queue 溢れは member を残し turn だけ捨てる |
+| `inbound/binding.rs` | binding error/status、origin row・platform 別 owner・`delivery_mode` 解決、heartbeat 用 `BindingContext`。owner 読取失敗は store_error |
+| `inbound/record.rs` | seq 採番、inbound session log、Nostr reply metadata、DM/channel admission query |
+| `inbound/turn.rs` | session queue enqueue、`OnlySpeaker` turn、V3 `RunRequest::with_dispatch`（`ExtgateCompletionSink`）、held turn 発火。`delivery_mode` は turn 完了で読む |
+| `inbound/nostr_profile.rs` | Nostr 固有の relay/render、V1・renderer kind 解釈、record 前の `sanitize_tool_result_for_log`、prompt 整形 |
+| `inbound/tests.rs` | inbound profile の unit tests |
 | `completion.rs` | V3 の `with_dispatch` 口。`v3_attach_dispatch` は常に sink を付ける。決着は `run_session_turn` + `apply_delivery_effect`（inbound フック無し）。ノブ分岐は置かない |
 | `bundle.rs` | `nostr_bundle_state` の insert/update。最初の非重複 member で manifest 全 origin を `external_origins` と照合し old receipt を先に立てる。重複 origin path は呼ばない。manifest 不一致は store_error |
 | `delivery.rs` | `DeliveryEffect` → say 1 回 |
