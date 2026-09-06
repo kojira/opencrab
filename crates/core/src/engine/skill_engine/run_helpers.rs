@@ -2,10 +2,74 @@ use opencrab_llm_types::{
     ChatResponse, ContentPart, FinishReason, ImageUrl, Message, MessageContent, Role, ToolCall,
 };
 
-use super::super::xml_parser::{parse_xml_tool_calls, strip_function_calls_xml};
+use super::super::{
+    types::ToolDispatcher,
+    xml_parser::{parse_xml_tool_calls, strip_function_calls_xml},
+};
 
 use crate::context_budget::{TokenLedger, TurnGovernor};
 use crate::conversation_typed::TypedConversation;
+
+pub(super) struct DispatchPartition<'a> {
+    pub(super) dispatch_start: Option<usize>,
+    /// Original batch index and tool name for each whole-batch inline cause.
+    pub(super) forced_inline: Vec<(usize, &'a str)>,
+}
+
+pub(super) fn partition_tool_calls_for_dispatch<'a, F>(
+    tool_calls: &'a [ToolCall],
+    dispatcher: Option<&dyn ToolDispatcher>,
+    mut is_action_allowed: F,
+) -> DispatchPartition<'a>
+where
+    F: FnMut(&str) -> bool,
+{
+    let Some(dispatcher) = dispatcher else {
+        return DispatchPartition {
+            dispatch_start: None,
+            forced_inline: Vec::new(),
+        };
+    };
+
+    // Cache the predicate once per allowed tool, in source order. Besides avoiding
+    // repeated policy calls, this keeps the first-dispatchable boundary and every
+    // later inline cause based on the same classification pass.
+    let dispatchable: Vec<bool> = tool_calls
+        .iter()
+        .map(|tool_call| {
+            is_action_allowed(&tool_call.function.name)
+                && dispatcher.should_dispatch(&tool_call.function.name)
+        })
+        .collect();
+
+    let Some(first) = dispatchable.iter().position(|&can_dispatch| can_dispatch) else {
+        return DispatchPartition {
+            dispatch_start: None,
+            forced_inline: Vec::new(),
+        };
+    };
+
+    if dispatchable[first..]
+        .iter()
+        .all(|&can_dispatch| can_dispatch)
+    {
+        return DispatchPartition {
+            dispatch_start: Some(first),
+            forced_inline: Vec::new(),
+        };
+    }
+
+    let forced_inline = tool_calls
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index > first && !dispatchable[*index])
+        .map(|(index, tool_call)| (index, tool_call.function.name.as_str()))
+        .collect();
+    DispatchPartition {
+        dispatch_start: None,
+        forced_inline,
+    }
+}
 
 pub(super) struct CallFailure {
     pub(super) code: String,

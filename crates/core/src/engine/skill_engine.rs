@@ -14,7 +14,8 @@ use super::types::{
 use opencrab_llm_types::FinishReason;
 use opencrab_llm_types::{Message, MessageContent, Role, ToolCall};
 use run_helpers::{
-    classify_call_failure, initialize_turn, normalize_response, strip_continue_marker, InitialTurn,
+    classify_call_failure, initialize_turn, normalize_response, partition_tool_calls_for_dispatch,
+    strip_continue_marker, InitialTurn,
 };
 use turn_budget::{apply_turn_budget, seat_tool_result};
 #[cfg(test)]
@@ -770,48 +771,30 @@ impl SkillEngine {
                 //   Some(k) → inline [0,k) を同期実行、dispatch [k,len) を subtask 化
                 //             （k==0 は全体 dispatch）。
                 //   None    → 全体 inline。
-                let dispatch_start: Option<usize> = match &self.tool_dispatcher {
-                    Some(d) => {
-                        let dispatchable: Vec<bool> = tool_calls
-                            .iter()
-                            .map(|tc| {
-                                self.is_action_allowed(&tc.function.name)
-                                    && d.should_dispatch(&tc.function.name)
-                            })
-                            .collect();
-                        match dispatchable.iter().position(|&ok| ok) {
-                            // dispatch 可が 1 つも無い（全部 inline）→ 全体 inline。
-                            // 元から非ブロック要素が無いので縮退ログも出さない。
-                            None => None,
-                            Some(first) => {
-                                if dispatchable[first..].iter().all(|&ok| ok) {
-                                    // inline 接頭辞 [0,first) ＋ dispatch 可接尾辞 [first,len)。
-                                    Some(first)
-                                } else {
-                                    // dispatch 可の後ろに inline ツール → 分割不可、全体 inline
-                                    // に縮退。縮退原因（first より後ろの inline ツール）を明示。
-                                    // 相関 ID（agent_id / session_id / turn_id）は #665 の span
-                                    // から継承する。
-                                    let forced: Vec<&str> = tool_calls
-                                        .iter()
-                                        .enumerate()
-                                        .filter(|(i, _)| *i > first && !dispatchable[*i])
-                                        .map(|(_, tc)| tc.function.name.as_str())
-                                        .collect();
-                                    tracing::debug!(
-                                        iteration = iterations,
-                                        stage = "batch_split",
-                                        tools = tool_calls.len(),
-                                        inline_tools = %forced.join(","),
-                                        "turn: 混在バッチが全体 inline に縮退（dispatch 可の後ろに inline ツール）"
-                                    );
-                                    None
-                                }
-                            }
-                        }
-                    }
-                    None => None,
-                };
+                let dispatch_partition = partition_tool_calls_for_dispatch(
+                    &tool_calls,
+                    self.tool_dispatcher.as_deref(),
+                    |tool_name| self.is_action_allowed(tool_name),
+                );
+                if !dispatch_partition.forced_inline.is_empty() {
+                    // dispatch 可の後ろに inline ツール → 分割不可、全体 inline
+                    // に縮退。縮退原因（first より後ろの inline ツール）を明示。
+                    // 相関 ID（agent_id / session_id / turn_id）は #665 の span
+                    // から継承する。
+                    let forced: Vec<&str> = dispatch_partition
+                        .forced_inline
+                        .iter()
+                        .map(|(_, tool_name)| *tool_name)
+                        .collect();
+                    tracing::debug!(
+                        iteration = iterations,
+                        stage = "batch_split",
+                        tools = tool_calls.len(),
+                        inline_tools = %forced.join(","),
+                        "turn: 混在バッチが全体 inline に縮退（dispatch 可の後ろに inline ツール）"
+                    );
+                }
+                let dispatch_start = dispatch_partition.dispatch_start;
 
                 // inline 接頭辞と dispatch 接尾辞に分ける。dispatch_start==None は全体 inline
                 // （接尾辞は空）。境界の順で実行するため接頭辞を先に走らせ、その後で接尾辞を
