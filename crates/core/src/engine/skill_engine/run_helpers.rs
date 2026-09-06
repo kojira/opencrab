@@ -1,7 +1,117 @@
-use opencrab_llm_types::{ContentPart, ImageUrl, Message, MessageContent, Role};
+use opencrab_llm_types::{
+    ChatResponse, ContentPart, FinishReason, ImageUrl, Message, MessageContent, Role, ToolCall,
+};
+
+use super::super::xml_parser::{parse_xml_tool_calls, strip_function_calls_xml};
 
 use crate::context_budget::{TokenLedger, TurnGovernor};
 use crate::conversation_typed::TypedConversation;
+
+pub(super) struct CallFailure {
+    pub(super) code: String,
+    pub(super) body: String,
+}
+
+pub(super) fn classify_call_failure(
+    llm_result: &anyhow::Result<ChatResponse>,
+    model: &str,
+    max_output_tokens: Option<u32>,
+) -> Option<CallFailure> {
+    match llm_result {
+        Err(e) => {
+            let body = e.to_string();
+            let code = if opencrab_llm_types::is_context_window_error(&body) {
+                opencrab_llm_types::CONTEXT_WINDOW_EXCEEDED_ERROR_CODE.to_string()
+            } else {
+                "error".to_string()
+            };
+            Some(CallFailure { code, body })
+        }
+        Ok(resp) => {
+            let finish_reason = resp.choices.first().and_then(|c| c.finish_reason.as_ref());
+            if finish_reason == Some(&FinishReason::Length) {
+                let body = format!(
+                    "LLM 応答が出力トークン上限（model={}, max_output_tokens={:?}, \
+                     completion_tokens={}）に達して切り捨てられました。切り捨てられた\
+                     応答は最終回答として扱いません（fail loud / 継続生成は #676 方針に\
+                     よりしない）。上限を上げるには model_pricing にそのモデルの \
+                     max_output_tokens を登録し直してください。",
+                    model, max_output_tokens, resp.usage.completion_tokens,
+                );
+                Some(CallFailure {
+                    code: opencrab_llm_types::OUTPUT_TRUNCATED_ERROR_CODE.to_string(),
+                    body,
+                })
+            } else if opencrab_llm_types::is_empty_response(resp) {
+                let body = format!(
+                    "LLM 応答が意味的に空でした（content がフィールド欠落／空文字／\
+                     空白のみ、かつ tool_call 無し）。最終回答として扱いません（fail \
+                     loud / リトライ・フォールバックは #706 方針によりしない）。\
+                     model={model}, finish_reason={finish_reason:?}"
+                );
+                Some(CallFailure {
+                    code: opencrab_llm_types::EMPTY_RESPONSE_ERROR_CODE.to_string(),
+                    body,
+                })
+            } else {
+                None
+            }
+        }
+    }
+}
+
+pub(super) struct NormalizedResponse {
+    pub(super) content: Option<String>,
+    pub(super) tool_calls: Vec<ToolCall>,
+    pub(super) xml_tool_count: usize,
+}
+
+pub(super) fn normalize_response(response: &ChatResponse) -> NormalizedResponse {
+    let mut content = response.first_text().map(str::to_string);
+    let mut tool_calls = response
+        .first_message()
+        .and_then(|m| m.tool_calls.clone())
+        .unwrap_or_default();
+    let mut xml_tool_count = 0;
+
+    if tool_calls.is_empty() {
+        if let Some(ref text) = content {
+            if text.contains("<function_calls>") {
+                let parsed = parse_xml_tool_calls(text);
+                if !parsed.is_empty() {
+                    xml_tool_count = parsed.len();
+                    tool_calls = parsed;
+                    let cleaned = strip_function_calls_xml(text);
+                    content = if cleaned.is_empty() {
+                        None
+                    } else {
+                        Some(cleaned)
+                    };
+                }
+            }
+        }
+    }
+
+    NormalizedResponse {
+        content,
+        tool_calls,
+        xml_tool_count,
+    }
+}
+
+pub(super) fn strip_continue_marker(content: Option<String>) -> (Option<String>, bool) {
+    let Some(content) = content else {
+        return (None, false);
+    };
+    if content.contains(crate::continue_marker::NO_REPLY_SENTINEL) {
+        return (Some(content), false);
+    }
+    match crate::continue_marker::strip_trailing_continue(&content) {
+        Some("") => (None, true),
+        Some(body) => (Some(body.to_string()), true),
+        None => (Some(content), false),
+    }
+}
 
 pub(super) struct InitialTurn {
     pub(super) messages: Vec<Message>,

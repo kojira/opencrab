@@ -10,9 +10,12 @@ use super::types::{
     ActionExecutor, ActionResult, ChatRequest, EngineResult, LiveInboundSource, LlmCallLog,
     LlmClient, ToolDispatcher,
 };
-use super::xml_parser::{parse_xml_tool_calls, strip_function_calls_xml};
-use opencrab_llm_types::{FinishReason, Message, MessageContent, Role, ToolCall};
-use run_helpers::{initialize_turn, InitialTurn};
+#[cfg(test)]
+use opencrab_llm_types::FinishReason;
+use opencrab_llm_types::{Message, MessageContent, Role, ToolCall};
+use run_helpers::{
+    classify_call_failure, initialize_turn, normalize_response, strip_continue_marker, InitialTurn,
+};
 use turn_budget::{apply_turn_budget, seat_tool_result};
 #[cfg(test)]
 use turn_budget::{message_plain_text, user_line_items};
@@ -540,61 +543,14 @@ impl SkillEngine {
             // その値を写すだけにする。判定は中身の形だけで行い、finish_reason=Length は
             // 「上限切り捨て」の特定にのみ使う（空判定には混ぜない＝stop を名乗る空応答を
             // 取りこぼさない）。
-            let call_failure: Option<(String, String)> = match &llm_result {
-                Err(e) => {
-                    let body = e.to_string();
-                    let code = if opencrab_llm_types::is_context_window_error(&body) {
-                        opencrab_llm_types::CONTEXT_WINDOW_EXCEEDED_ERROR_CODE.to_string()
-                    } else {
-                        "error".to_string()
-                    };
-                    Some((code, body))
-                }
-                Ok(resp) => {
-                    let finish_reason = resp.choices.first().and_then(|c| c.finish_reason.as_ref());
-                    if finish_reason == Some(&FinishReason::Length) {
-                        // #676: 出力トークン上限で切り捨てられた応答は、最終回答としても
-                        // ツール往復の一手としても扱わない。継続生成などの自動リカバリは
-                        // 入れない（#676 方針）。
-                        let body = format!(
-                            "LLM 応答が出力トークン上限（model={}, max_output_tokens={:?}, \
-                             completion_tokens={}）に達して切り捨てられました。切り捨てられた\
-                             応答は最終回答として扱いません（fail loud / 継続生成は #676 方針に\
-                             よりしない）。上限を上げるには model_pricing にそのモデルの \
-                             max_output_tokens を登録し直してください。",
-                            model, self.max_output_tokens, resp.usage.completion_tokens,
-                        );
-                        Some((
-                            opencrab_llm_types::OUTPUT_TRUNCATED_ERROR_CODE.to_string(),
-                            body,
-                        ))
-                    } else if opencrab_llm_types::is_empty_response(resp) {
-                        // #706: HTTP 200・finish_reason=stop を名乗りつつ content も tool_call
-                        // も無いターン。最終回答として扱わず、なぜ黙ったかを llm_logs に残す。
-                        // プロンプト長（空応答の実因）は process 側が失敗行へ一様に付ける
-                        // （error_body_with_prompt_size）——ここで手書きしない（数字の出所を 1 つに）。
-                        let body = format!(
-                            "LLM 応答が意味的に空でした（content がフィールド欠落／空文字／\
-                             空白のみ、かつ tool_call 無し）。最終回答として扱いません（fail \
-                             loud / リトライ・フォールバックは #706 方針によりしない）。\
-                             model={model}, finish_reason={finish_reason:?}"
-                        );
-                        Some((
-                            opencrab_llm_types::EMPTY_RESPONSE_ERROR_CODE.to_string(),
-                            body,
-                        ))
-                    } else {
-                        None
-                    }
-                }
-            };
+            let call_failure = classify_call_failure(&llm_result, &model, self.max_output_tokens);
 
             if let Some(cb) = &self.log_callback {
                 cb(&LlmCallLog {
                     request: request_for_log.clone(),
                     response: llm_result.as_ref().ok().cloned(),
-                    error_str: call_failure.as_ref().map(|(_, body)| body.clone()),
-                    error_code: call_failure.as_ref().map(|(code, _)| code.clone()),
+                    error_str: call_failure.as_ref().map(|failure| failure.body.clone()),
+                    error_code: call_failure.as_ref().map(|failure| failure.code.clone()),
                     latency_ms,
                     requested_at: requested_at.clone(),
                     is_bot_iteration: iterations > 1,
@@ -607,7 +563,7 @@ impl SkillEngine {
             // Ok だが意味的に使えない応答（空 #706 / 切り捨て #676）は fail loud で打ち切る。
             // tool_calls / content を抽出する**前**に見る——切り捨てられた tool_call JSON が
             // 「空の tool_calls → 最終応答扱い」で黙って消える形をここ 1 点で塞ぐ。
-            if let Some((code, body)) = call_failure {
+            if let Some(run_helpers::CallFailure { code, body }) = call_failure {
                 tracing::error!(
                     iteration = iterations,
                     error_code = %code,
@@ -619,41 +575,24 @@ impl SkillEngine {
             }
 
             // 応答本文とツールコールをローカルに抽出（正準モデルは choices[0] を持つ）。
-            let mut content: Option<String> = response.first_text().map(|s| s.to_string());
-            let mut tool_calls: Vec<ToolCall> = response
-                .first_message()
-                .and_then(|m| m.tool_calls.clone())
-                .unwrap_or_default();
+            let normalized = normalize_response(&response);
+            let mut content = normalized.content;
+            let tool_calls = normalized.tool_calls;
 
             // If the LLM returned no structured tool calls but embedded
             // <function_calls> XML in the content (e.g. DeepSeek via OpenRouter),
             // parse them out and treat them as normal tool calls.
-            if tool_calls.is_empty() {
-                if let Some(ref c) = content {
-                    if c.contains("<function_calls>") {
-                        let parsed = parse_xml_tool_calls(c);
-                        if !parsed.is_empty() {
-                            // 発火は harness 剪定の判断材料として計測する（EngineResult 経由で
-                            // agent_logs にも記録される）。codex プロバイダは意図的にこの
-                            // フォールバックへ依存するため、発火＝異常ではない（毎イテレーション
-                            // 発火し得るのでログは debug に留め、run 単位の集計を agent_logs で見る）。
-                            xml_fallback_parses += 1;
-                            tracing::debug!(
-                                count = parsed.len(),
-                                model = %model,
-                                "Parsed XML function_calls from content (harness fallback fired)"
-                            );
-                            tool_calls = parsed;
-                            // Strip the XML block from content so it doesn't leak to the user.
-                            let cleaned = strip_function_calls_xml(c);
-                            content = if cleaned.is_empty() {
-                                None
-                            } else {
-                                Some(cleaned)
-                            };
-                        }
-                    }
-                }
+            if normalized.xml_tool_count > 0 {
+                // 発火は harness 剪定の判断材料として計測する（EngineResult 経由で
+                // agent_logs にも記録される）。codex プロバイダは意図的にこの
+                // フォールバックへ依存するため、発火＝異常ではない（毎イテレーション
+                // 発火し得るのでログは debug に留め、run 単位の集計を agent_logs で見る）。
+                xml_fallback_parses += 1;
+                tracing::debug!(
+                    count = normalized.xml_tool_count,
+                    model = %model,
+                    "Parsed XML function_calls from content (harness fallback fired)"
+                );
             }
 
             // #890 §11 / §11.7: content の最終行が CONTINUE 単独なら「このターンを続ける意思」と
@@ -662,23 +601,8 @@ impl SkillEngine {
             // マーカーは剥がすだけ。NO_REPLY が同居する場合は NO_REPLY 優先で終端する（継続しない・
             // 剥がしは配送層が担う）。同一行併記・途中出現は継続もしない（WARN は配送層が出す）。
             // 剥がしは on_response_text 配送前・会話保存前に行う（§11.6: マーカーを残さない）。
-            let mut continue_requested = false;
-            let mut stripped_content: Option<Option<String>> = None;
-            if let Some(c) = content.as_deref() {
-                if !c.contains(crate::continue_marker::NO_REPLY_SENTINEL) {
-                    if let Some(body) = crate::continue_marker::strip_trailing_continue(c) {
-                        continue_requested = true;
-                        stripped_content = Some(if body.is_empty() {
-                            None
-                        } else {
-                            Some(body.to_string())
-                        });
-                    }
-                }
-            }
-            if let Some(new_content) = stripped_content {
-                content = new_content;
-            }
+            let (stripped_content, continue_requested) = strip_continue_marker(content);
+            content = stripped_content;
 
             // #898 §13.1 a: 空 CONTINUE（本文なし・継続）の連鎖を数える。3 連続で解析 warn を 1 行
             // 出す（停止はしない・上限は既存 max_iterations）。非空生成・非継続でリセットする。
