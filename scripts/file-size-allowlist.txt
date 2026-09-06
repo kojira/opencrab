@@ -26,7 +26,6 @@
 953	crates/llm/src/providers/cursor.rs
 826	crates/llm/src/router.rs
 1036	crates/nostr-gateway/src/run.rs
-2126	crates/nostr/src/cli.rs
 1297	crates/nostr/src/sink.rs
 891	crates/nostr/src/watch.rs
 927	crates/server/src/api/agents.rs
