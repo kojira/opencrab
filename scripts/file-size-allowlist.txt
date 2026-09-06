@@ -36,7 +36,6 @@
 950	crates/server/src/lib.rs
 1208	crates/server/src/main.rs
 1351	crates/server/src/memory_condense.rs
-2284	crates/server/src/memory_declare.rs
 1792	crates/server/src/memory_organize.rs
 897	crates/server/src/nostr_runner_impl.rs
 1969	crates/server/src/peer_review.rs
