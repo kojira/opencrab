@@ -10,7 +10,6 @@
 1938	crates/core/src/conversation_typed.rs
 1094	crates/core/src/import/claude_code.rs
 807	crates/core/src/memory/daily_log_indexer.rs
-2532	crates/core/src/memory_index/index_builder.rs
 1649	crates/core/src/tool_result_log.rs
 826	crates/core/src/workspace.rs
 1104	crates/db/src/queries/session_logs.rs
