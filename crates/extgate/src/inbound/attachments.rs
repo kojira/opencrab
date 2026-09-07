@@ -1,3 +1,4 @@
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
@@ -118,24 +119,39 @@ pub(super) fn promote_local_files(
             ..
         } = attachment
         {
-            let source = validate_file(&inbox, local_path, *size, sha256)?;
+            let source = inbox.join(local_path);
             let file_name = format!("{sha256}.bin");
             let destination = store.join(&file_name);
-            match std::fs::hard_link(&source, &destination) {
+            let temp = store.join(format!(".{}.part", uuid::Uuid::new_v4()));
+            let identity = match copy_verified(&source, &temp, *size, sha256) {
+                Ok(identity) => identity,
+                Err(error) => {
+                    remove_promoted_files(&created);
+                    return Err(error);
+                }
+            };
+            match std::fs::hard_link(&temp, &destination) {
                 Ok(()) => created.push(destination),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    validate_file(&store, &file_name, *size, sha256)?;
+                    if let Err(error) = validate_file(&store, &file_name, *size, sha256) {
+                        let _ = std::fs::remove_file(&temp);
+                        remove_promoted_files(&created);
+                        return Err(error);
+                    }
                 }
                 Err(_) => {
+                    let _ = std::fs::remove_file(&temp);
                     remove_promoted_files(&created);
                     return Err(GateError::store());
                 }
             }
-            sources.push(source);
+            let _ = std::fs::remove_file(&temp);
+            sources.push((source, identity));
         }
     }
-    for source in sources {
-        if std::fs::remove_file(source).is_err() {
+    for (source, identity) in sources {
+        let current = source.symlink_metadata().map_err(|_| GateError::store())?;
+        if !identity.matches(&current) || std::fs::remove_file(source).is_err() {
             remove_promoted_files(&created);
             return Err(GateError::store());
         }
@@ -164,6 +180,102 @@ pub(super) fn remove_local_files(state: &ExtgateState, said: &Said) {
             }
         }
     }
+}
+
+struct FileIdentity {
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+impl FileIdentity {
+    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            Self {
+                dev: metadata.dev(),
+                ino: metadata.ino(),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = metadata;
+            Self {}
+        }
+    }
+
+    fn matches(&self, metadata: &std::fs::Metadata) -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            metadata.file_type().is_file()
+                && self.dev == metadata.dev()
+                && self.ino == metadata.ino()
+        }
+        #[cfg(not(unix))]
+        {
+            metadata.file_type().is_file()
+        }
+    }
+}
+
+fn copy_verified(
+    source: &Path,
+    temp: &Path,
+    expected_size: u64,
+    expected_hash: &str,
+) -> Result<FileIdentity, GateError> {
+    let mut source_options = std::fs::OpenOptions::new();
+    source_options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        source_options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut input = source_options
+        .open(source)
+        .map_err(|_| GateError::new(ErrorCode::BadRequest))?;
+    let metadata = input
+        .metadata()
+        .map_err(|_| GateError::new(ErrorCode::BadRequest))?;
+    if !metadata.is_file() || metadata.len() != expected_size {
+        return Err(GateError::new(ErrorCode::BadRequest));
+    }
+    let identity = FileIdentity::from_metadata(&metadata);
+    let mut output_options = std::fs::OpenOptions::new();
+    output_options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        output_options.mode(0o600);
+    }
+    let mut output = output_options.open(temp).map_err(|_| GateError::store())?;
+    let mut hash = Sha256::new();
+    let mut actual = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = input
+            .read(&mut buffer)
+            .map_err(|_| GateError::new(ErrorCode::BadRequest))?;
+        if read == 0 {
+            break;
+        }
+        actual = actual
+            .checked_add(read as u64)
+            .ok_or_else(|| GateError::new(ErrorCode::BadRequest))?;
+        hash.update(&buffer[..read]);
+        output
+            .write_all(&buffer[..read])
+            .map_err(|_| GateError::store())?;
+    }
+    output.sync_all().map_err(|_| GateError::store())?;
+    if actual != expected_size || lower_hex(&hash.finalize()) != expected_hash {
+        let _ = std::fs::remove_file(temp);
+        return Err(GateError::new(ErrorCode::BadRequest));
+    }
+    Ok(identity)
 }
 
 fn validate_file(
@@ -258,6 +370,21 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn detects_source_replacement_after_verified_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let temp = dir.path().join("copy.part");
+        std::fs::write(&source, b"hello").unwrap();
+        let hash = lower_hex(&Sha256::digest(b"hello"));
+        let identity = copy_verified(&source, &temp, 5, &hash).unwrap();
+        std::fs::rename(&source, dir.path().join("old")).unwrap();
+        std::fs::write(&source, b"other").unwrap();
+        assert!(!identity.matches(&source.symlink_metadata().unwrap()));
+        assert_eq!(std::fs::read(temp).unwrap(), b"hello");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn rejects_symlink_even_when_target_is_under_root() {
         use std::os::unix::fs::symlink;
         let dir = tempfile::tempdir().unwrap();
@@ -267,5 +394,6 @@ mod tests {
         let hash = lower_hex(&Sha256::digest(b"hello"));
         let root = dir.path().canonicalize().unwrap();
         assert!(validate_file(&root, "link", 5, &hash).is_err());
+        assert!(copy_verified(&root.join("link"), &root.join("copy.part"), 5, &hash).is_err());
     }
 }

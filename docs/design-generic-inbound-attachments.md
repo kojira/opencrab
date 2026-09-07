@@ -153,7 +153,8 @@ OpenCrabはDiscordより小さいfile size、message合計、添付数の固定�
 - symlink、directory、device、socketを拒否し、regular fileだけ許可する
 - mode、size、SHA-256を再検証する
 - 認可・dedup成功後にstoreへatomic renameする
-- SHA-256をstorage identityにし、no-replace hard linkでstoreへ昇格する
+- sourceをno-follow descriptorで開き、core-owned tempへcopyしながらsize/hashを再検証する
+- SHA-256をstorage identityにし、検証済みtempをno-replace hard linkでstoreへ昇格する
 - DB transaction失敗時は新規作成したstore fileを削除してrollbackする
 
 同じoriginの再送は既存dedupで同じseqへ収束する。再送で作られたinbox fileは不要fileとして削除する。
