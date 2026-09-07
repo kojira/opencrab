@@ -304,6 +304,7 @@ pub fn process_said<R: AgentRuntime>(
                 binding_id: said.binding_id.clone(),
                 origin: said.origin.clone(),
                 author_id: said.author_id.clone(),
+                author_label: said.author_label.clone(),
                 text: said.text.clone(),
                 images: said.image_urls(),
                 address: row.address.clone(),

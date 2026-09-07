@@ -268,10 +268,11 @@ async fn handle_incoming(
         }
     }
     let outcome = client
-        .post_said_with_author(
+        .post_said_with_author_label(
             &address,
             &mapped.origin,
             &mapped.author_id,
+            mapped.author_label.as_deref(),
             &text,
             &attachments,
         )

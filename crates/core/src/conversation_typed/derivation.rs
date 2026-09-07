@@ -269,10 +269,7 @@ pub(crate) fn derive_items(
                 } else {
                     items.push(TypedItem::UserSpeech {
                         event_ref: refs.event_of(log).map(|n| format!("e{n}")),
-                        speaker: log
-                            .speaker_id
-                            .clone()
-                            .unwrap_or_else(|| log.agent_id.clone()),
+                        speaker: refs.speaker_label_for_log(log),
                         timestamp: log.created_at.clone(),
                         content: log.content.clone(),
                         relation: None,

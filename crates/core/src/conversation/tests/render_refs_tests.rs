@@ -19,6 +19,12 @@ mod render_refs_tests {
         }
     }
 
+    fn speech_with_name(agent: &str, speaker: &str, name: &str, text: &str) -> SessionLogRow {
+        let mut log = speech(agent, speaker, text, None);
+        log.metadata_json = Some(serde_json::json!({ "user_name": name }).to_string());
+        log
+    }
+
     fn tool_call(agent: &str, ids: &[&str]) -> SessionLogRow {
         let calls: Vec<serde_json::Value> = ids
             .iter()
@@ -69,6 +75,23 @@ mod render_refs_tests {
         assert_eq!(refs.speaker_label("me"), "me");
         // 未知話者は生のまま。
         assert_eq!(refs.speaker_label("pk_carol"), "pk_carol");
+    }
+
+    #[test]
+    fn speaker_names_are_display_only_and_keep_stable_identity() {
+        let logs = vec![
+            speech_with_name("me", "user-a", "Alice", "first"),
+            speech_with_name("me", "user-b", "Alice", "second"),
+            speech_with_name("me", "user-a", "A|[bad]\nname", "renamed"),
+        ];
+        let refs = ConversationRefs::build(&logs, "me");
+        let first = format_single_log_with_echo(&logs[0], None, Some(&refs));
+        let second = format_single_log_with_echo(&logs[1], None, Some(&refs));
+        let renamed = format_single_log_with_echo(&logs[2], None, Some(&refs));
+        assert!(first.starts_with("[u1|Alice]:"), "{first}");
+        assert!(second.starts_with("[u2|Alice]:"), "{second}");
+        assert!(renamed.starts_with("[u1|A＿＿bad＿name]:"), "{renamed}");
+        assert!(!renamed.contains("\nname]"), "{renamed}");
     }
 
     #[test]

@@ -349,8 +349,36 @@ impl InstanceClient {
         text: &str,
         attachments: &[Attachment],
     ) -> Result<SaidOutcome, PostRefuse> {
-        self.post_said_inner(address, origin, author_id, text, attachments, true)
-            .await
+        self.post_said_with_author_label(
+            address,
+            origin,
+            author_id,
+            None,
+            text,
+            attachments,
+        )
+        .await
+    }
+
+    pub async fn post_said_with_author_label(
+        &self,
+        address: &str,
+        origin: &str,
+        author_id: &str,
+        author_label: Option<&str>,
+        text: &str,
+        attachments: &[Attachment],
+    ) -> Result<SaidOutcome, PostRefuse> {
+        self.post_said_inner(
+            address,
+            origin,
+            author_id,
+            author_label,
+            text,
+            attachments,
+            true,
+        )
+        .await
     }
 
     /// Bundle member 用。ack までだけ `pending_turn` を残す。
@@ -365,15 +393,45 @@ impl InstanceClient {
         text: &str,
         attachments: &[Attachment],
     ) -> Result<SaidOutcome, PostRefuse> {
-        self.post_said_inner(address, origin, author_id, text, attachments, false)
-            .await
+        self.post_said_receipt_with_author_label(
+            address,
+            origin,
+            author_id,
+            None,
+            text,
+            attachments,
+        )
+        .await
     }
 
+    pub async fn post_said_receipt_with_author_label(
+        &self,
+        address: &str,
+        origin: &str,
+        author_id: &str,
+        author_label: Option<&str>,
+        text: &str,
+        attachments: &[Attachment],
+    ) -> Result<SaidOutcome, PostRefuse> {
+        self.post_said_inner(
+            address,
+            origin,
+            author_id,
+            author_label,
+            text,
+            attachments,
+            false,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn post_said_inner(
         &self,
         address: &str,
         origin: &str,
         author_id: &str,
+        author_label: Option<&str>,
         text: &str,
         attachments: &[Attachment],
         occupy_until_turn_ends: bool,
@@ -415,7 +473,15 @@ impl InstanceClient {
                 },
             );
         }
-        let frame = said_frame(&id, &binding_id, origin, author_id, text, attachments);
+        let frame = said_frame_with_author_label(
+            &id,
+            &binding_id,
+            origin,
+            author_id,
+            author_label,
+            text,
+            attachments,
+        );
         tracing::info!(
             instance_id = %self.instance_id,
             binding_id = %binding_id,

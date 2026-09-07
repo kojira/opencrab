@@ -44,6 +44,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
     let instance_id = row.instance_id.clone();
     let binding_id = said.binding_id.clone();
     let author_id = said.author_id.clone();
+    let author_label = said.author_label.clone();
     let text = said.text.clone();
     let images = said.image_urls();
     let address = row.address.clone();
@@ -136,6 +137,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                     let session_id = session_id.clone();
                     let agent_id = agent_id.clone();
                     let author_id = author_id.clone();
+                    let author_label = author_label.clone();
                     let address = address.clone();
                     let text = text.clone();
                     let images = images.clone();
@@ -160,7 +162,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                             session_id: &session_id,
                             agent_id: &agent_id,
                             sender_id: &author_id,
-                            sender_name: "",
+                            sender_name: author_label.as_deref().unwrap_or(""),
                             avatar_url: None,
                             channel_id: Some(&address),
                             pubkey: if kind_id == "nostr" {
@@ -433,6 +435,7 @@ pub(super) fn fire_held_turns<R: AgentRuntime>(
         binding_id: last.binding_id.clone(),
         origin: last.origin.clone(),
         author_id: last.author_id.clone(),
+        author_label: last.author_label.clone(),
         text: last.text.clone(),
         attachments: last
             .images

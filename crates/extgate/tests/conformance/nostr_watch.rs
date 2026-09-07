@@ -115,7 +115,14 @@ async fn watch_bundle_records_then_fires_turn_after_interval() {
             i + 1
         );
         let outcome = client
-            .post_said_receipt(address, origin, &author, &text, &[])
+            .post_said_receipt_with_author_label(
+                address,
+                origin,
+                &author,
+                Some("Nostr Alice"),
+                &text,
+                &[],
+            )
             .await
             .unwrap_or_else(|e| panic!("member {} refuse {e:?}", i + 1));
         assert!(
@@ -151,6 +158,11 @@ async fn watch_bundle_records_then_fires_turn_after_interval() {
     assert!(
         h.runtime.turns.load(Ordering::SeqCst) > before_turns,
         "all receipts enqueue a turn"
+    );
+    assert_eq!(
+        h.runtime.sender_names.lock().unwrap().last().map(String::as_str),
+        Some("Nostr Alice"),
+        "bundle trigger preserves the gateway-provided label"
     );
 }
 
@@ -334,7 +346,14 @@ async fn watch_lane_repost_still_debounced() {
         "[NOSTRGATE/V1 {{\"event_id\":\"{event_id}\",\"kind\":6,\"route\":\"immediate\",\"watch_id\":{watch_id}}}]\n\n[Nostr kind:6 リポスト]"
     );
     let outcome = client
-        .post_said_with_author(address, &origin, &author, &text, &[])
+        .post_said_with_author_label(
+            address,
+            &origin,
+            &author,
+            Some("Held Alice"),
+            &text,
+            &[],
+        )
         .await
         .unwrap_or_else(|e| panic!("said refuse {e:?}"));
     assert!(
@@ -362,5 +381,10 @@ async fn watch_lane_repost_still_debounced() {
         tokio::time::advance(Duration::from_millis(20)).await;
     }
     assert!(fired, "interval 経過で保留分が発火する");
+    assert_eq!(
+        h.runtime.sender_names.lock().unwrap().last().map(String::as_str),
+        Some("Held Alice"),
+        "deferred held turn preserves the gateway-provided label"
+    );
 }
 

@@ -28,7 +28,7 @@ pub fn format_single_log_with_echo(
     match log.log_type.as_str() {
         "speech" => match refs {
             Some(r) => {
-                let speaker = r.speaker_label(log.speaker_id.as_deref().unwrap_or(&log.agent_id));
+                let speaker = r.speaker_label_for_log(log);
                 let eref = r.event_of(log).map(|n| format!("e{n}")).unwrap_or_default();
                 // 関係注記（row295c）: リプライ/リアクション/リポストは種別を残す。ラベル全廃で
                 // 「そもそもリアクションか」が失われた欠陥への対処。対象ノート(→e番号)は現状の
