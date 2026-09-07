@@ -214,16 +214,33 @@ def verify_subject_ids(conn: sqlite3.Connection) -> list[str]:
     return errors
 
 
+def normalized_sql(sql: str | None) -> str:
+    if sql is None:
+        return ""
+    return " ".join(sql.replace("IF NOT EXISTS", "").split())
+
+
+def index_catalog(conn: sqlite3.Connection, table: str) -> list[object]:
+    indexes = []
+    for row in conn.execute(f'PRAGMA index_list("{table}")'):
+        name, unique, origin, partial = row[1], row[2], row[3], row[4]
+        index_columns = list(conn.execute(f'PRAGMA index_info("{name}")'))
+        sql_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name=?", (name,)
+        ).fetchone()
+        indexes.append(
+            (name, unique, origin, partial, index_columns, normalized_sql(sql_row[0] if sql_row else None))
+        )
+    return sorted(indexes, key=lambda item: item[0])
+
+
 def migration_catalog(conn: sqlite3.Connection) -> dict[str, object]:
     table_details = {}
     for table in sorted(NEW_TABLES):
         table_details[table] = {
             "columns": list(conn.execute(f'PRAGMA table_info("{table}")')),
             "foreign_keys": list(conn.execute(f'PRAGMA foreign_key_list("{table}")')),
-            "indexes": list(conn.execute(f'PRAGMA index_list("{table}")')),
-            "sql": conn.execute(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
-            ).fetchone(),
+            "indexes": index_catalog(conn, table),
         }
     object_names = {
         "idx_agents_subject_id",
@@ -231,17 +248,19 @@ def migration_catalog(conn: sqlite3.Connection) -> dict[str, object]:
         "agents_subject_id_assign",
         "agents_subject_id_update_guard",
     }
-    objects = list(
-        conn.execute(
+    objects = [
+        (kind, name, table, normalized_sql(sql))
+        for kind, name, table, sql in conn.execute(
             "SELECT type, name, tbl_name, sql FROM sqlite_master "
-            "WHERE tbl_name IN (%s) OR name IN (%s) ORDER BY type, name"
+            "WHERE type IN ('index', 'trigger') AND "
+            "(tbl_name IN (%s) OR name IN (%s)) ORDER BY type, name"
             % (
                 ",".join("?" for _ in NEW_TABLES),
                 ",".join("?" for _ in object_names),
             ),
             tuple(sorted(NEW_TABLES)) + tuple(sorted(object_names)),
         )
-    )
+    ]
     subject = [
         row
         for row in conn.execute('PRAGMA table_info("agents")')
