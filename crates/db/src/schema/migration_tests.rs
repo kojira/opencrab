@@ -16,3 +16,4 @@ include!("tests/runner_contracts.rs");
 include!("tests/schedule_migrations_v37_v38.rs");
 include!("tests/schema_contracts.rs");
 include!("tests/transplant_migration_v43.rs");
+include!("tests/v47_copy_rehearsal.rs");

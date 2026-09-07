@@ -17,7 +17,7 @@
 やってはいけないこと: 既存表への INSERT、既存行の UPDATE、DROP、列改名、VIEW。
 表集合は期待一覧（適用前 ∪ `session_watches` / `tool_logs`）と一致させる。
 
-本番コピー検証: `scripts/verify-v43-transplant-copy.sh`（`OPENCRAB_REHEARSAL_DB`、sqlite3 `.backup` のみでソースを読む）。
+代表copy migration検証: `scripts/verify-v47-transplant-copy.sh`（`OPENCRAB_REHEARSAL_DB`、SQLite `.backup`のみで隔離済みv43 sourceを読む）。旧`verify-v43-transplant-copy.sh`は互換委譲口。
 
 ## v45（Nostr Bundle coordinator）
 

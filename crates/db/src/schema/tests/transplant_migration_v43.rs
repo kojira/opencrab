@@ -384,10 +384,8 @@ fn v43_schema_parity_fresh_vs_migrated() {
     assert_eq!(schema_version(&migrated).unwrap(), latest_version());
 }
 
-/// 本番コピー検証スクリプトが呼ぶ適用口。env が無いときは何もしない。
-#[test]
-fn apply_initialize_to_v43_copy_db() {
-    let path = match std::env::var("OPENCRAB_V43_APPLY_DB") {
+fn apply_initialize_copy_from_env(variable: &str) {
+    let path = match std::env::var(variable) {
         Ok(p) if !p.is_empty() => p,
         _ => return,
     };
@@ -397,5 +395,22 @@ fn apply_initialize_to_v43_copy_db() {
         latest_version(),
         "コピーの user_version が最新になっていない"
     );
-    assert_v43_schema(&conn);
+    assert!(column_exists(&conn, "sessions", "policy_json").unwrap());
+    assert!(table_exists(&conn, "session_watches").unwrap());
+    assert!(table_exists(&conn, "tool_logs").unwrap());
+    assert_v44_schema(&conn);
+    assert_v45_schema(&conn);
+}
+
+/// 現行の本番コピー検証スクリプトが呼ぶv43→v47適用口。
+/// envが無い通常testでは外部DBを開かない。
+#[test]
+fn apply_initialize_to_v47_copy_db() {
+    apply_initialize_copy_from_env("OPENCRAB_V47_APPLY_DB");
+}
+
+/// 旧script利用者向けのtest FQN/env互換。適用先は常に現行latest。
+#[test]
+fn apply_initialize_to_v43_copy_db() {
+    apply_initialize_copy_from_env("OPENCRAB_V43_APPLY_DB");
 }
