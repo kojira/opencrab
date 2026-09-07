@@ -3,7 +3,6 @@
 862	crates/actions/src/llm_analysis.rs
 877	crates/actions/src/skill_management.rs
 872	crates/actions/src/tools/shell.rs
-1008	crates/actions/src/workspace.rs
 807	crates/core/src/memory/daily_log_indexer.rs
 826	crates/core/src/workspace.rs
 919	crates/llm/src/providers/acp.rs
