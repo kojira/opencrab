@@ -221,8 +221,14 @@ fn rehearsal_catalog(conn: &Connection) -> rusqlite::Result<RehearsalCatalog> {
         .join(",");
     let sql = format!(
         "SELECT type, name, tbl_name, sql FROM sqlite_master
-         WHERE type IN ('index', 'trigger') AND tbl_name IN ({placeholders})
-         ORDER BY type, name"
+         WHERE type IN ('index', 'trigger') AND (
+           tbl_name IN ({placeholders}) OR name IN (
+             'idx_agents_subject_id',
+             'agents_subject_id_insert_guard',
+             'agents_subject_id_assign',
+             'agents_subject_id_update_guard'
+           )
+         ) ORDER BY type, name"
     );
     let mut statement = conn.prepare(&sql)?;
     let objects = statement
