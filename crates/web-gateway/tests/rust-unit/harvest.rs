@@ -1,7 +1,8 @@
 //! WEBGATE §8 固定値を source から機械確認する。
 //! 採取は完了済み。テストは外部ファイルを書かない。採取値は golden にしない。
 
-const CLIENT_SRC: &str = include_str!("../../../gate-client/src/client.rs");
+const CLIENT_STATE_SRC: &str = include_str!("../../../gate-client/src/client/state_api.rs");
+const CLIENT_TRANSPORT_SRC: &str = include_str!("../../../gate-client/src/client/transport.rs");
 const HTTP_SRC: &str = include_str!("../../src/v3/http.rs");
 
 #[derive(Debug)]
@@ -59,8 +60,8 @@ fn harvest() -> Vec<Harvested> {
     vec![
         Harvested {
             symbol: "LIVE_QUEUE_CAP",
-            source_path: "crates/gate-client/src/client.rs",
-            value: take_const_usize(CLIENT_SRC, "LIVE_QUEUE_CAP").expect("LIVE_QUEUE_CAP"),
+            source_path: "crates/gate-client/src/client/state_api.rs",
+            value: take_const_usize(CLIENT_STATE_SRC, "LIVE_QUEUE_CAP").expect("LIVE_QUEUE_CAP"),
         },
         Harvested {
             symbol: "SSE event name (http.rs Event::event)",
@@ -69,23 +70,23 @@ fn harvest() -> Vec<Harvested> {
         },
         Harvested {
             symbol: "SAID_TIMEOUT",
-            source_path: "crates/gate-client/src/client.rs",
-            value: take_duration(CLIENT_SRC, "SAID_TIMEOUT").expect("SAID_TIMEOUT"),
+            source_path: "crates/gate-client/src/client/state_api.rs",
+            value: take_duration(CLIENT_STATE_SRC, "SAID_TIMEOUT").expect("SAID_TIMEOUT"),
         },
         Harvested {
             symbol: "RECONNECT_MIN",
-            source_path: "crates/gate-client/src/client.rs",
-            value: take_duration(CLIENT_SRC, "RECONNECT_MIN").expect("RECONNECT_MIN"),
+            source_path: "crates/gate-client/src/client/state_api.rs",
+            value: take_duration(CLIENT_STATE_SRC, "RECONNECT_MIN").expect("RECONNECT_MIN"),
         },
         Harvested {
             symbol: "RECONNECT_MAX",
-            source_path: "crates/gate-client/src/client.rs",
-            value: take_duration(CLIENT_SRC, "RECONNECT_MAX").expect("RECONNECT_MAX"),
+            source_path: "crates/gate-client/src/client/state_api.rs",
+            value: take_duration(CLIENT_STATE_SRC, "RECONNECT_MAX").expect("RECONNECT_MAX"),
         },
         Harvested {
             symbol: "reconnect backoff rule",
-            source_path: "crates/gate-client/src/client.rs",
-            value: take_backoff_rule(CLIENT_SRC).expect("backoff rule"),
+            source_path: "crates/gate-client/src/client/transport.rs",
+            value: take_backoff_rule(CLIENT_TRANSPORT_SRC).expect("backoff rule"),
         },
     ]
 }
