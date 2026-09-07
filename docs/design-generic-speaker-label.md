@@ -37,7 +37,7 @@ Serenity Messageだけから表示ラベルを決定する。優先順位は次�
 
 ```json
 {
-  "author_id": "1505801361793749032",
+  "author_id": "user-42",
   "author_label": "ぴーこ"
 }
 ```
