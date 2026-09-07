@@ -175,31 +175,30 @@ impl GoogleProvider {
         !(m.starts_with("gemini-1") || m.starts_with("gemini-2"))
     }
 
+    fn image_part(url: &str) -> Value {
+        match super::image_data::split_base64_image_uri(url) {
+            Some((mime_type, data)) => serde_json::json!({
+                "inlineData": {"mimeType": mime_type, "data": data}
+            }),
+            None => serde_json::json!({
+                "inlineData": {"mimeType": "image/jpeg", "data": url}
+            }),
+        }
+    }
+
     fn convert_parts(&self, msg: &Message) -> Vec<Value> {
         match &msg.content {
             Some(MessageContent::Text(text)) => {
                 vec![serde_json::json!({"text": text})]
             }
             Some(MessageContent::Image { image_url, .. }) => {
-                vec![serde_json::json!({
-                    "inlineData": {
-                        "mimeType": "image/jpeg",
-                        "data": image_url.url,
-                    }
-                })]
+                vec![Self::image_part(&image_url.url)]
             }
             Some(MessageContent::Multi(parts)) => parts
                 .iter()
                 .map(|p| match p {
                     ContentPart::Text { text } => serde_json::json!({"text": text}),
-                    ContentPart::ImageUrl { image_url } => {
-                        serde_json::json!({
-                            "inlineData": {
-                                "mimeType": "image/jpeg",
-                                "data": image_url.url,
-                            }
-                        })
-                    }
+                    ContentPart::ImageUrl { image_url } => Self::image_part(&image_url.url),
                 })
                 .collect(),
             None => vec![serde_json::json!({"text": ""})],
@@ -466,6 +465,14 @@ impl LlmProvider for GoogleProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn data_image_uses_gemini_inline_data() {
+        assert_eq!(
+            GoogleProvider::image_part("data:image/png;base64,AAAA"),
+            serde_json::json!({"inlineData":{"mimeType":"image/png","data":"AAAA"}})
+        );
+    }
 
     /// metadata の web_search=true で url_context ツールが tools に載ること。
     /// 未設定なら載らない（function declarations のみ/無し）。

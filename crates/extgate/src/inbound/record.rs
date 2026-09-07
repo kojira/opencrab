@@ -85,7 +85,7 @@ pub(super) fn record_inbound(
                 "media_type": media_type,
                 "size": size,
                 "sha256": sha256,
-                "storage_key": format!("store/{id}.bin"),
+                "storage_key": format!("store/{sha256}.bin"),
             })),
             SaidAttachment::ImageUrl(_) => None,
         })

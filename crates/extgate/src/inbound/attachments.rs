@@ -25,9 +25,10 @@ pub(super) fn materialize(state: &ExtgateState, said: &Said) -> Result<Said, Gat
         .canonicalize()
         .map_err(|_| GateError::new(ErrorCode::BadRequest))?;
     let mut out = said.clone();
+    let mut order = Vec::new();
     let mut text_parts = Vec::new();
     let mut image_parts = Vec::new();
-    for attachment in &said.attachments {
+    for (index, attachment) in said.attachments.iter().enumerate() {
         let SaidAttachment::LocalFile {
             id,
             name,
@@ -42,11 +43,13 @@ pub(super) fn materialize(state: &ExtgateState, said: &Said) -> Result<Said, Gat
         let path = validate_file(&root, local_path, *size, sha256)?;
         let bytes = std::fs::read(path).map_err(|_| GateError::new(ErrorCode::BadRequest))?;
         let mime = media_type.as_deref().unwrap_or("application/octet-stream");
+        order.push(format!("{}. {} ({}, id {})", index + 1, name, mime, id));
         if is_text(mime) {
             let content =
                 std::str::from_utf8(&bytes).map_err(|_| GateError::new(ErrorCode::BadRequest))?;
             text_parts.push(format!(
-                "<attachment id=\"{}\" name=\"{}\" media_type=\"{}\">\n{}\n</attachment>",
+                "<attachment index=\"{}\" id=\"{}\" name=\"{}\" media_type=\"{}\">\n{}\n</attachment>",
+                index + 1,
                 id,
                 escape_attr(name),
                 escape_attr(mime),
@@ -64,18 +67,27 @@ pub(super) fn materialize(state: &ExtgateState, said: &Said) -> Result<Said, Gat
             ));
         }
     }
-    if !text_parts.is_empty() {
+    if !order.is_empty() || !text_parts.is_empty() {
         if !out.text.is_empty() {
             out.text.push_str("\n\n");
         }
-        out.text.push_str(&text_parts.join("\n\n"));
+        if !order.is_empty() {
+            out.text.push_str("<attachment-order>\n");
+            out.text.push_str(&order.join("\n"));
+            out.text.push_str("\n</attachment-order>");
+        }
+        if !text_parts.is_empty() {
+            out.text.push_str("\n\n");
+            out.text.push_str(&text_parts.join("\n\n"));
+        }
     }
     out.attachments.extend(image_parts);
     Ok(out)
 }
 
-/// Move admitted originals from the gateway inbox to the durable sibling store.
-/// The UUID filename is core-validated and independent of platform filenames.
+/// Move admitted originals from the gateway inbox to a content-addressed store.
+/// `hard_link` is no-replace: a gateway-provided UUID can never overwrite an
+/// earlier attachment, and the linked inode is revalidated before source removal.
 pub(super) fn promote_local_files(
     state: &ExtgateState,
     said: &Said,
@@ -95,24 +107,40 @@ pub(super) fn promote_local_files(
         .ok_or_else(|| GateError::new(ErrorCode::BadRequest))?;
     let store = base.join("store");
     std::fs::create_dir_all(&store).map_err(|_| GateError::store())?;
-    let mut promoted: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let store = store.canonicalize().map_err(|_| GateError::store())?;
+    let mut created = Vec::new();
+    let mut sources = Vec::new();
     for attachment in &said.attachments {
-        if let SaidAttachment::LocalFile { id, local_path, .. } = attachment {
-            let source = inbox.join(local_path);
-            let destination = store.join(format!("{id}.bin"));
-            if std::fs::rename(&source, &destination).is_err() {
-                for (old_source, old_destination) in promoted.iter().rev() {
-                    let _ = std::fs::rename(old_destination, old_source);
+        if let SaidAttachment::LocalFile {
+            local_path,
+            size,
+            sha256,
+            ..
+        } = attachment
+        {
+            let source = validate_file(&inbox, local_path, *size, sha256)?;
+            let file_name = format!("{sha256}.bin");
+            let destination = store.join(&file_name);
+            match std::fs::hard_link(&source, &destination) {
+                Ok(()) => created.push(destination),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    validate_file(&store, &file_name, *size, sha256)?;
                 }
-                return Err(GateError::store());
+                Err(_) => {
+                    remove_promoted_files(&created);
+                    return Err(GateError::store());
+                }
             }
-            promoted.push((source, destination));
+            sources.push(source);
         }
     }
-    Ok(promoted
-        .into_iter()
-        .map(|(_, destination)| destination)
-        .collect())
+    for source in sources {
+        if std::fs::remove_file(source).is_err() {
+            remove_promoted_files(&created);
+            return Err(GateError::store());
+        }
+    }
+    Ok(created)
 }
 
 pub(super) fn remove_promoted_files(paths: &[PathBuf]) {

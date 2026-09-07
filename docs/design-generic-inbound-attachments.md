@@ -46,8 +46,7 @@ sequenceDiagram
     gateway->>extgate: One Said with local references
     extgate->>extgate: Authorize and deduplicate
     extgate->>core: Import full validated files
-    core->>engine: Metadata and provider representation
-    engine->>core: Read full content by attachment ID
+    core->>engine: Ordered metadata, text and image input
     extgate-->>gateway: Existing Said result
 ```
 
@@ -74,7 +73,7 @@ coreがgateway placementへspool rootを指定する。gatewayは保存先を独
 ├── inbox/
 │   └── <instance_uuid>/<origin_hash>/<attachment_uuid>.bin
 └── store/
-    └── <agent_uuid>/<session_uuid>/<attachment_uuid>.bin
+    └── <sha256>.bin
 ```
 
 - gateway書込先: `<data_dir>/attachments/inbox`
@@ -111,27 +110,13 @@ Placementへの追加値は次だけとする。
       "media_type": "text/html",
       "size": 8192,
       "sha256": "64-lowercase-hex",
-      "local_path": "<instance_uuid>/<origin_hash>/<attachment_uuid>.bin",
-      "status": "ready"
+      "local_path": "<instance_uuid>/<origin_hash>/<attachment_uuid>.bin"
     }
   ]
 }
 ```
 
-個別download失敗時は次の形にする。
-
-```json
-{
-  "id": "uuid",
-  "name": "example.html",
-  "media_type": "text/html",
-  "size": 0,
-  "status": "unavailable",
-  "error": "download_failed"
-}
-```
-
-`unavailable`には`local_path`と`sha256`を載せない。外部URL、token、HTTP応答本文はwireへ載せない。
+個別download失敗はlocal attachmentとして送らず、本文へ取得失敗metadataを追加する。成功した添付と本文は継続する。外部URLはwireへ載せない。
 
 既存の`{kind:"image",url:"https://..."}`は後方互換のため受理を継続するが、新Discord gatewayは使用しない。
 
@@ -154,7 +139,6 @@ OpenCrabはDiscordより小さいfile size、message合計、添付数の固定�
 | 添付数 | Platform eventに含まれる全件。OpenCrab固定上限なし |
 | 1 file | OpenCrab固定上限なし。Discord通知値と実byte数の完全一致を検証 |
 | Message合計 | 各`declared_size`の合計。OpenCrab固定上限なし |
-| Disk | Download後も設定済みdisk reserveを維持できる場合だけ開始 |
 | Connect timeout | 10秒。sizeとは無関係 |
 | Transfer timeout | 固定total timeoutなし。30秒無通信時だけ失敗 |
 | Redirect | 最大3回、各redirect先を再検証 |
@@ -169,7 +153,8 @@ OpenCrabはDiscordより小さいfile size、message合計、添付数の固定�
 - symlink、directory、device、socketを拒否し、regular fileだけ許可する
 - mode、size、SHA-256を再検証する
 - 認可・dedup成功後にstoreへatomic renameする
-- DB transaction失敗時は移動fileを削除してrollbackする
+- SHA-256をstorage identityにし、no-replace hard linkでstoreへ昇格する
+- DB transaction失敗時は新規作成したstore fileを削除してrollbackする
 
 同じoriginの再送は既存dedupで同じseqへ収束する。再送で作られたinbox fileは不要fileとして削除する。
 
@@ -220,7 +205,6 @@ HTMLはrender、script実行、外部resource取得をせずraw UTF-8 textとし
 | 全download失敗・本文あり | 本文と失敗metadataでturnを開始 |
 | 全download失敗・本文なし | 失敗metadataをuser inputとしてturnを開始 |
 | Discord申告size超過・不足 | 応答不整合として当該fileを拒否し、partial fileを削除 |
-| Disk reserve不足 | download開始前に`insufficient_storage`とし、他の本文・添付は継続 |
 | path/hash不一致 | Saidを`bad_attachment`で拒否し、turnを開始しない |
 | 未認可sender/channel | 既存admissionで拒否し、inbox fileを削除 |
 | duplicate origin | 既存seqを返し、新しいinbox fileを削除 |
@@ -228,15 +212,9 @@ HTMLはrender、script実行、外部resource取得をせずraw UTF-8 textとし
 
 添付の失敗を本文turn全体の失敗へ拡大しない。ただしpath改ざんやhash不一致はsecurity errorとしてSaid全体を拒否する。
 
-## 📦 永続化とcleanup
+## 📦 永続化
 
-session log metadataの`attachments`配列へ汎用metadataと相対`storage_key`を保存する。外部URLと絶対pathは保存しない。DB schema migrationは不要とする。
-
-- inboxの未参照file: 1時間後に削除
-- storeのfile: session log metadataから参照される間は保持
-- metadata参照のないstore file: 24時間後に削除
-- cleanup: startup時と日次
-- cleanupはregular fileだけを対象とし、symlinkを辿らない
+session log metadataの`attachments`配列へ汎用metadataと相対`storage_key`を保存する。外部URLと絶対pathは保存しない。DB schema migrationは不要とする。受理した原本はcontent-addressed storeへ保持する。追加のretention/cleanup policyは本Issueのvertical sliceに含めない。
 
 ## 📍 変更範囲
 
@@ -265,7 +243,8 @@ session log metadataの`attachments`配列へ汎用metadataと相対`storage_key
 - [ ] URL、token、署名query、絶対pathがwire、DB、LLMへ出ない
 - [ ] traversal、symlink、hash差異、size差異を拒否する
 - [ ] Discordが受理したsize/countをOpenCrab独自上限で拒否しない
-- [ ] `declared_size`一致と無通信timeoutを境界値で検証する
+- [ ] `declared_size`一致と無通信timeoutを検証する
+- [ ] 同じattachment UUIDの再利用で既存原本を上書きしない
 - [ ] HTML/text原本と画像原本を全量保存する
 - [ ] partial failureでも一つのturnとして処理する
 - [ ] 旧URL image Saidと添付なしSaidの既存test/FQNを維持する

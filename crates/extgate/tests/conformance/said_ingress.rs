@@ -142,7 +142,7 @@ async fn local_html_is_verified_recorded_and_promoted() {
     assert!(!source.exists());
     assert!(attachments
         .path()
-        .join("store/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.bin")
+        .join(format!("store/{hash}.bin"))
         .is_file());
     let conn = h.state.db.lock().unwrap();
     let (content, metadata): (String, String) = conn
@@ -155,7 +155,107 @@ async fn local_html_is_verified_recorded_and_promoted() {
     assert!(content.contains("GPU OOM explanation"));
     assert!(!metadata.contains("https://"));
     assert!(!metadata.contains(attachments.path().to_string_lossy().as_ref()));
-    assert!(metadata.contains("store/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.bin"));
+    assert!(metadata.contains(&format!("store/{hash}.bin")));
+    drop(conn);
+
+    // Reusing a gateway-supplied UUID with different content must not replace
+    // the first retained original; storage identity is the verified hash.
+    let relative2 = format!("{instance_id}/origin/attachment-2.bin");
+    let source2 = inbox.join(&relative2);
+    let body2 = b"<html><body>different</body></html>";
+    std::fs::write(&source2, body2).unwrap();
+    let hash2 = format!("{:x}", sha2::Sha256::digest(body2));
+    write_frame(
+        &mut s,
+        &json!({
+            "id": "local-2", "m": "said", "binding_id": binding_id,
+            "origin": "local-html-2", "author_id": "u1", "text": "",
+            "attachments": [{
+                "kind": "file", "id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                "name": "other.html", "media_type": "text/html",
+                "size": body2.len(), "sha256": hash2, "local_path": relative2
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(read_said_response(&mut s, "local-2").await["seq"], 2);
+    assert_eq!(
+        std::fs::read(attachments.path().join(format!("store/{hash}.bin"))).unwrap(),
+        body
+    );
+    assert_eq!(
+        std::fs::read(attachments.path().join(format!("store/{hash2}.bin"))).unwrap(),
+        body2
+    );
+}
+
+#[tokio::test]
+async fn mixed_local_attachments_reach_turn_in_declared_order() {
+    use sha2::Digest as _;
+
+    let h = Harness::start().await;
+    let (mut s, instance_id, binding_id) = ready_pair(&h).await;
+    let attachments = tempfile::tempdir().unwrap();
+    let inbox = attachments.path().join("inbox");
+    let image_relative = format!("{instance_id}/origin/image.bin");
+    let image_source = inbox.join(&image_relative);
+    std::fs::create_dir_all(image_source.parent().unwrap()).unwrap();
+    let image = b"\x89PNG\r\n\x1a\nimage";
+    std::fs::write(&image_source, image).unwrap();
+    let text_relative = format!("{instance_id}/origin/note.bin");
+    let text_source = inbox.join(&text_relative);
+    let text = b"first attachment text";
+    std::fs::write(&text_source, text).unwrap();
+    h.state
+        .set_attachment_inbox_root(inbox.canonicalize().unwrap());
+    let image_hash = format!("{:x}", sha2::Sha256::digest(image));
+    let text_hash = format!("{:x}", sha2::Sha256::digest(text));
+
+    write_frame(
+        &mut s,
+        &json!({
+            "id": "local-image", "m": "said", "binding_id": binding_id,
+            "origin": "local-image", "author_id": "u1", "text": "",
+            "attachments": [
+                {
+                    "kind": "file", "id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                    "name": "note.txt", "media_type": "text/plain",
+                    "size": text.len(), "sha256": text_hash, "local_path": text_relative
+                },
+                {
+                    "kind": "file", "id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                    "name": "image.png", "media_type": "image/png",
+                    "size": image.len(), "sha256": image_hash, "local_path": image_relative
+                }
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(read_said_response(&mut s, "local-image").await["seq"], 1);
+    for _ in 0..50 {
+        if !h.runtime.images.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let images = h.runtime.images.lock().unwrap();
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0].len(), 1);
+    assert!(images[0][0].starts_with("data:image/png;base64,"));
+    drop(images);
+    let conversations = h.runtime.conversations.lock().unwrap();
+    let conversation = conversations.last().unwrap();
+    assert!(conversation.contains("1. note.txt"));
+    assert!(conversation.contains("2. image.png"));
+    assert!(conversation.contains("first attachment text"));
+    assert!(attachments
+        .path()
+        .join(format!("store/{image_hash}.bin"))
+        .is_file());
+    assert!(attachments
+        .path()
+        .join(format!("store/{text_hash}.bin"))
+        .is_file());
 }
 
 #[tokio::test]
