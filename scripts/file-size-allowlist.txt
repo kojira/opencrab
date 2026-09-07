@@ -1,5 +1,4 @@
 807	crates/core/src/memory/daily_log_indexer.rs
-826	crates/core/src/workspace.rs
 822	crates/server/src/api/agents_messages.rs
 817	crates/server/src/api/schedules.rs
 1208	crates/server/src/main.rs
