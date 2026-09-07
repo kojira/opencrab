@@ -20,9 +20,17 @@ impl AttachmentSpool {
     pub fn new(root: &Path) -> anyhow::Result<Self> {
         std::fs::create_dir_all(root)?;
         let root = root.canonicalize()?;
+        #[cfg(unix)]
+        std::fs::set_permissions(&root, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
-            .redirect(reqwest::redirect::Policy::limited(3))
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 3 || !is_allowed_source(attempt.url()) {
+                    attempt.stop()
+                } else {
+                    attempt.follow()
+                }
+            }))
             .build()?;
         Ok(Self { root, client })
     }
@@ -33,8 +41,9 @@ impl AttachmentSpool {
         origin: &str,
         source: &IncomingAttachment,
     ) -> anyhow::Result<Attachment> {
-        if !source.url.starts_with("https://") {
-            anyhow::bail!("attachment source must be https");
+        let source_url = reqwest::Url::parse(&source.url)?;
+        if !is_allowed_source(&source_url) {
+            anyhow::bail!("attachment source is not an allowed Discord CDN URL");
         }
         let origin_hash = lower_hex(&Sha256::digest(origin.as_bytes()));
         let attachment_id = uuid::Uuid::new_v4().to_string();
@@ -46,6 +55,9 @@ impl AttachmentSpool {
             .parent()
             .ok_or_else(|| anyhow::anyhow!("attachment path has no parent"))?;
         tokio::fs::create_dir_all(parent).await?;
+        #[cfg(unix)]
+        tokio::fs::set_permissions(parent, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .await?;
         let part_path = parent.join(format!(".{attachment_id}.part"));
 
         let result = self.download_to_part(source, &part_path, &final_path).await;
@@ -77,9 +89,7 @@ impl AttachmentSpool {
             .await?
             .error_for_status()?;
         if let Some(length) = response.content_length() {
-            if length != source.size {
-                anyhow::bail!("attachment size differs from platform metadata");
-            }
+            verify_size(length, source.size)?;
         }
         let mut options = tokio::fs::OpenOptions::new();
         options.write(true).create_new(true);
@@ -97,14 +107,12 @@ impl AttachmentSpool {
                 .checked_add(chunk.len() as u64)
                 .ok_or_else(|| anyhow::anyhow!("attachment size overflow"))?;
             if actual > source.size {
-                anyhow::bail!("attachment size differs from platform metadata");
+                verify_size(actual, source.size)?;
             }
             hash.update(&chunk);
             file.write_all(&chunk).await?;
         }
-        if actual != source.size {
-            anyhow::bail!("attachment size differs from platform metadata");
-        }
+        verify_size(actual, source.size)?;
         file.sync_all().await?;
         drop(file);
         tokio::fs::rename(part_path, final_path).await?;
@@ -116,6 +124,21 @@ impl AttachmentSpool {
             let _ = tokio::fs::remove_file(self.root.join(local_path)).await;
         }
     }
+}
+
+fn is_allowed_source(url: &reqwest::Url) -> bool {
+    url.scheme() == "https"
+        && matches!(
+            url.host_str(),
+            Some("cdn.discordapp.com") | Some("media.discordapp.net")
+        )
+}
+
+fn verify_size(actual: u64, declared: u64) -> anyhow::Result<()> {
+    if actual != declared {
+        anyhow::bail!("attachment size differs from platform metadata");
+    }
+    Ok(())
 }
 
 fn safe_name(name: &str) -> String {
@@ -152,4 +175,38 @@ fn lower_hex(bytes: &[u8]) -> String {
         out.push(HEX[(byte & 0x0f) as usize] as char);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn size_is_integrity_equality_not_an_opencrab_cap() {
+        assert!(verify_size(u64::MAX, u64::MAX).is_ok());
+        assert!(verify_size(100, 99).is_err());
+        assert!(verify_size(98, 99).is_err());
+    }
+
+    #[test]
+    fn accepts_only_discord_https_cdn_sources() {
+        assert!(is_allowed_source(
+            &reqwest::Url::parse("https://cdn.discordapp.com/attachments/a/b/file").unwrap()
+        ));
+        assert!(is_allowed_source(
+            &reqwest::Url::parse("https://media.discordapp.net/attachments/a/b/file").unwrap()
+        ));
+        assert!(!is_allowed_source(
+            &reqwest::Url::parse("https://127.0.0.1/private").unwrap()
+        ));
+        assert!(!is_allowed_source(
+            &reqwest::Url::parse("http://cdn.discordapp.com/attachments/a/b/file").unwrap()
+        ));
+    }
+
+    #[test]
+    fn filename_is_metadata_not_a_path() {
+        assert_eq!(safe_name("../bad\\name.html"), ".._bad_name.html");
+        assert_eq!(safe_name(""), "attachment");
+    }
 }
