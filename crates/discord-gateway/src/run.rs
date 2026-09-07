@@ -239,8 +239,11 @@ async fn handle_incoming(
         match result {
             Ok(attachment) => attachments.push(attachment),
             Err(error) => {
-                let _ = error;
-                tracing::warn!("attachment download failed");
+                tracing::warn!(
+                    attachment_id = %source.id,
+                    error = %error,
+                    "attachment download failed"
+                );
                 if !text.is_empty() {
                     text.push_str("\n\n");
                 }
