@@ -10,4 +10,3 @@
 822	crates/server/src/api/agents_messages.rs
 817	crates/server/src/api/schedules.rs
 1208	crates/server/src/main.rs
-897	crates/server/src/nostr_runner_impl.rs
