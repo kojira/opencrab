@@ -5,7 +5,7 @@ use opencrab_db::queries::{
 use rusqlite::{params, Connection, Transaction};
 
 use crate::error::GateError;
-use crate::protocol::Said;
+use crate::protocol::{Said, SaidAttachment};
 use crate::registry::ExtgateState;
 
 use super::binding::OriginRow;
@@ -60,8 +60,38 @@ pub(super) fn record_inbound(
         "user_name": "",
         "channel_id": row.address,
     });
-    if !said.attachments.is_empty() {
-        meta["image_urls"] = serde_json::json!(said.attachments);
+    let image_urls: Vec<String> = said
+        .image_urls()
+        .into_iter()
+        .filter(|url| url.starts_with("https://"))
+        .collect();
+    if !image_urls.is_empty() {
+        meta["image_urls"] = serde_json::json!(image_urls);
+    }
+    let local_attachments: Vec<serde_json::Value> = said
+        .attachments
+        .iter()
+        .filter_map(|attachment| match attachment {
+            SaidAttachment::LocalFile {
+                id,
+                name,
+                media_type,
+                size,
+                sha256,
+                ..
+            } => Some(serde_json::json!({
+                "id": id,
+                "name": name,
+                "media_type": media_type,
+                "size": size,
+                "sha256": sha256,
+                "storage_key": format!("store/{sha256}.bin"),
+            })),
+            SaidAttachment::ImageUrl(_) => None,
+        })
+        .collect();
+    if !local_attachments.is_empty() {
+        meta["attachments"] = serde_json::Value::Array(local_attachments);
     }
     // external_origin は platform 非依存の汎用 field（§9A の e番号採番・長文切り詰めの源）。
     // 全 gateway kind で記録する。旧実装は `kind_id == "nostr"` に閉じていたが、これは汎用採番機構

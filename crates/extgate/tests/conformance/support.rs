@@ -44,6 +44,7 @@ struct TestRuntime {
     tool_hold_rx: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
     sink_seen: Arc<AtomicBool>,
     conversations: Arc<Mutex<Vec<String>>>,
+    images: Arc<Mutex<Vec<Vec<String>>>>,
     turn_entered: Arc<Notify>,
 }
 
@@ -59,6 +60,7 @@ impl TestRuntime {
             tool_hold_rx: Arc::new(Mutex::new(None)),
             sink_seen: Arc::new(AtomicBool::new(false)),
             conversations: Arc::new(Mutex::new(Vec::new())),
+            images: Arc::new(Mutex::new(Vec::new())),
             turn_entered: Arc::new(Notify::new()),
         }
     }
@@ -70,6 +72,7 @@ impl AgentRuntime for TestRuntime {
         self.sink_seen
             .store(req.completion_sink.is_some(), Ordering::SeqCst);
         self.conversations.lock().unwrap().push(req.conversation);
+        self.images.lock().unwrap().push(req.image_urls.clone());
         self.turn_entered.notify_waiters();
         // 旧 V3（sink 無し）はツールを同期実行する。sink があれば detach 済みなので待たない。
         if req.completion_sink.is_none() {

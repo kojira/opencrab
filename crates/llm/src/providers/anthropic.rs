@@ -272,6 +272,15 @@ impl AnthropicProvider {
         Ok(body)
     }
 
+    fn image_source(url: &str) -> Value {
+        match super::image_data::split_base64_image_uri(url) {
+            Some((media_type, data)) => serde_json::json!({
+                "type": "base64", "media_type": media_type, "data": data
+            }),
+            None => serde_json::json!({"type": "url", "url": url}),
+        }
+    }
+
     fn convert_content_to_anthropic(&self, msg: &Message) -> Value {
         match &msg.content {
             Some(MessageContent::Text(text)) => serde_json::json!(text),
@@ -279,10 +288,7 @@ impl AnthropicProvider {
                 // Anthropic uses base64 image format or URL-based source
                 serde_json::json!([{
                     "type": "image",
-                    "source": {
-                        "type": "url",
-                        "url": image_url.url,
-                    }
+                    "source": Self::image_source(&image_url.url)
                 }])
             }
             Some(MessageContent::Multi(parts)) => {
@@ -295,10 +301,7 @@ impl AnthropicProvider {
                         ContentPart::ImageUrl { image_url } => {
                             serde_json::json!({
                                 "type": "image",
-                                "source": {
-                                    "type": "url",
-                                    "url": image_url.url,
-                                }
+                                "source": Self::image_source(&image_url.url)
                             })
                         }
                     })

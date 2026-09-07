@@ -146,8 +146,7 @@ fn parse_attachments(value: Option<&Value>) -> Result<Vec<Attachment>, &'static 
         if !url.starts_with("https://") || url.len() <= "https://".len() {
             return Err("bad_request");
         }
-        out.push(Attachment {
-            kind: kind.to_string(),
+        out.push(Attachment::ImageUrl {
             url: url.to_string(),
         });
     }

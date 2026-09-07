@@ -19,6 +19,18 @@ pub struct IncomingMessage {
     pub author: IncomingAuthor,
     #[serde(default)]
     pub content: String,
+    #[serde(default)]
+    pub attachments: Vec<IncomingAttachment>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct IncomingAttachment {
+    pub id: String,
+    pub filename: String,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    pub size: u64,
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -38,6 +50,7 @@ pub struct MappedSaid {
     pub origin: String,
     pub author_id: String,
     pub text: String,
+    pub attachments: Vec<IncomingAttachment>,
 }
 
 /// message の stable anchor origin。`discord:message:v1:{channel}:{message}`。
@@ -93,6 +106,7 @@ pub fn map_message(msg: &IncomingMessage, self_bot_id: &str) -> Option<MappedSai
         origin: origin_for(&msg.channel_id, &msg.id),
         author_id: msg.author.id.clone(),
         text: msg.content.clone(),
+        attachments: msg.attachments.clone(),
     })
 }
 
@@ -136,6 +150,7 @@ mod tests {
                 username: Some("someone".into()),
             },
             content: content.into(),
+            attachments: Vec::new(),
         }
     }
 
@@ -185,6 +200,7 @@ mod tests {
             "author は Discord 認証済み sender（#848）"
         );
         assert_eq!(mapped.text, "hello");
+        assert!(mapped.attachments.is_empty());
     }
 
     #[test]
@@ -207,13 +223,16 @@ mod tests {
 
     #[test]
     fn parse_event_line_reads_message_json() {
-        let line = r#"{"id":"7","channel_id":"100","guild_id":"500","author":{"id":"222","bot":false,"username":"al"},"content":"やあ"}"#;
+        let line = r#"{"id":"7","channel_id":"100","guild_id":"500","author":{"id":"222","bot":false,"username":"al"},"content":"やあ","attachments":[{"id":"8","filename":"page.html","content_type":"text/html","size":12,"url":"https://cdn.example/file"}]}"#;
         let m = parse_event_line(line).unwrap();
         assert_eq!(m.id, "7");
         assert_eq!(m.channel_id, "100");
         assert_eq!(m.guild_id.as_deref(), Some("500"));
         assert_eq!(m.author.id, "222");
         assert_eq!(m.content, "やあ");
+        assert_eq!(m.attachments.len(), 1);
+        assert_eq!(m.attachments[0].filename, "page.html");
+        assert_eq!(m.attachments[0].size, 12);
         assert!(parse_event_line("  ").is_none());
         assert!(parse_event_line("not json").is_none());
     }

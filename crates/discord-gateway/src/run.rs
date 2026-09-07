@@ -11,6 +11,7 @@ use std::time::Duration;
 use opencrab_gate_client::client::{InstanceClient, LiveEvent, PostRefuse, SaidOutcome};
 use opencrab_gate_client::{InvokeHandler, SayPolicy};
 
+use crate::attachment::AttachmentSpool;
 use crate::config::{
     config_digest, parse_instance_config, InstanceConfig, InstancePlacement, SystemReactions,
 };
@@ -32,6 +33,7 @@ pub fn spawn_instance(
     config_bytes: &[u8],
     token: Option<Arc<String>>,
     overrides: HarnessOverrides,
+    attachment_spool_root: Option<PathBuf>,
 ) -> anyhow::Result<Arc<InstanceClient>> {
     if overrides.is_active() {
         tracing::warn!(
@@ -73,19 +75,25 @@ pub fn spawn_instance(
         invoke_handler,
     );
 
-    supervise(
-        client.clone(),
-        place.addresses.clone(),
+    let attachment_spool = attachment_spool_root
+        .as_deref()
+        .map(AttachmentSpool::new)
+        .transpose()?
+        .map(Arc::new);
+    supervise(Supervision {
+        client: client.clone(),
+        addresses: place.addresses.clone(),
         cfg,
         transport,
         token,
         overrides,
         delivery_targets,
-    );
+        attachment_spool,
+    });
     Ok(client)
 }
 
-fn supervise(
+struct Supervision {
     client: Arc<InstanceClient>,
     addresses: Vec<String>,
     cfg: InstanceConfig,
@@ -93,7 +101,20 @@ fn supervise(
     token: Option<Arc<String>>,
     overrides: HarnessOverrides,
     delivery_targets: BindingDeliveryTargets,
-) {
+    attachment_spool: Option<Arc<AttachmentSpool>>,
+}
+
+fn supervise(supervision: Supervision) {
+    let Supervision {
+        client,
+        addresses,
+        cfg,
+        transport,
+        token,
+        overrides,
+        delivery_targets,
+        attachment_spool,
+    } = supervision;
     // 受信ループ（1 本）: fixture か serenity。ack 済み binding の channel だけ said にする。
     // 👀 は受信時ではなく say consumer 側（activity started）で付けるので、受信は transport/
     // reactions を持たない（R2）。
@@ -101,6 +122,7 @@ fn supervise(
         client.clone(),
         cfg.agent_id.clone(),
         cfg.self_bot_id.clone(),
+        attachment_spool,
     );
     tokio::spawn(async move {
         if let Some(fixture) = overrides.fake_events {
@@ -129,13 +151,26 @@ fn supervise(
     }
 }
 
-fn build_on_line(client: Arc<InstanceClient>, agent_id: String, self_bot_id: String) -> OnLine {
+fn build_on_line(
+    client: Arc<InstanceClient>,
+    agent_id: String,
+    self_bot_id: String,
+    attachment_spool: Option<Arc<AttachmentSpool>>,
+) -> OnLine {
     Arc::new(move |line: String| {
         let client = client.clone();
         let agent_id = agent_id.clone();
         let self_bot_id = self_bot_id.clone();
+        let attachment_spool = attachment_spool.clone();
         tokio::spawn(async move {
-            handle_incoming(&client, &agent_id, &self_bot_id, &line).await;
+            handle_incoming(
+                &client,
+                &agent_id,
+                &self_bot_id,
+                &line,
+                attachment_spool.as_deref(),
+            )
+            .await;
         });
     })
 }
@@ -182,7 +217,13 @@ async fn react_system_on(
 }
 
 /// 受信 1 件を said へ。自分の投稿と非 ack channel は core へ送らない（§4.3・§5.1）。
-async fn handle_incoming(client: &InstanceClient, agent_id: &str, self_bot_id: &str, line: &str) {
+async fn handle_incoming(
+    client: &InstanceClient,
+    agent_id: &str,
+    self_bot_id: &str,
+    line: &str,
+    attachment_spool: Option<&AttachmentSpool>,
+) {
     let Some(msg) = parse_event_line(line) else {
         return;
     };
@@ -196,16 +237,47 @@ async fn handle_incoming(client: &InstanceClient, agent_id: &str, self_bot_id: &
         tracing::debug!(%address, "message outside ack'd binding; discarded (no core frame)");
         return;
     }
-    match client
+    let mut text = mapped.text;
+    let mut attachments = Vec::with_capacity(mapped.attachments.len());
+    for source in &mapped.attachments {
+        let result = match attachment_spool {
+            Some(spool) => {
+                spool
+                    .download(&client.instance_id, &mapped.origin, source)
+                    .await
+            }
+            None => Err(anyhow::anyhow!("attachment spool is not configured")),
+        };
+        match result {
+            Ok(attachment) => attachments.push(attachment),
+            Err(error) => {
+                tracing::warn!(
+                    attachment_id = %source.id,
+                    error = %error,
+                    "attachment download failed"
+                );
+                if !text.is_empty() {
+                    text.push_str("\n\n");
+                }
+                text.push_str(&format!(
+                    "[Attachment unavailable: {} ({})]",
+                    source.filename,
+                    source.content_type.as_deref().unwrap_or("unknown")
+                ));
+            }
+        }
+    }
+    let outcome = client
         .post_said_with_author(
             &address,
             &mapped.origin,
             &mapped.author_id,
-            &mapped.text,
-            &[],
+            &text,
+            &attachments,
         )
-        .await
-    {
+        .await;
+    let accepted = matches!(&outcome, Ok(SaidOutcome::Accepted { .. }));
+    match outcome {
         Ok(SaidOutcome::Accepted { seq }) => {
             // 👀 はここ（受理・推論前）では付けない。オーナー確定仕様: LLM がこのメッセージを
             // ターン文脈に含めた（読んだ）時点で付ける。record-only は読まれるまで付けない。
@@ -219,6 +291,13 @@ async fn handle_incoming(client: &InstanceClient, agent_id: &str, self_bot_id: &
         }
         Err(PostRefuse::NotReady) => tracing::info!(%address, "said dropped; binding not ready"),
         Err(PostRefuse::Busy) => tracing::info!(%address, "said refused; binding busy"),
+    }
+    if !accepted {
+        if let Some(spool) = attachment_spool {
+            for attachment in &attachments {
+                spool.remove(attachment).await;
+            }
+        }
     }
 }
 

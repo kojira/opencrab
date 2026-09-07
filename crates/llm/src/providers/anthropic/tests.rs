@@ -1,5 +1,17 @@
 use super::*;
 
+#[test]
+fn data_image_uses_anthropic_base64_source() {
+    assert_eq!(
+        AnthropicProvider::image_source("data:image/png;base64,AAAA"),
+        serde_json::json!({"type":"base64","media_type":"image/png","data":"AAAA"})
+    );
+    assert_eq!(
+        AnthropicProvider::image_source("https://example.com/a.png"),
+        serde_json::json!({"type":"url","url":"https://example.com/a.png"})
+    );
+}
+
 fn base_request() -> ChatRequest {
     ChatRequest {
         model: "claude-x".to_string(),

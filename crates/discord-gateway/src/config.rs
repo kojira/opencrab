@@ -6,6 +6,10 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 pub struct Placement {
     pub core_socket: String,
+    /// Core-owned inbox shared by this co-located gateway. Optional only for
+    /// backward-compatible attachment-free placements.
+    #[serde(default)]
+    pub attachment_spool_root: Option<String>,
     pub instances: Vec<InstancePlacement>,
 }
 
@@ -95,6 +99,11 @@ impl Placement {
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.core_socket.is_empty() || !self.core_socket.starts_with('/') {
             anyhow::bail!("core_socket must be an absolute path");
+        }
+        if let Some(root) = &self.attachment_spool_root {
+            if !std::path::Path::new(root).is_absolute() {
+                anyhow::bail!("attachment_spool_root must be an absolute path");
+            }
         }
         if self.instances.is_empty() {
             anyhow::bail!("instances must be nonempty");
@@ -219,6 +228,7 @@ mod tests {
     fn valid_placement_passes_and_has_no_token_field() {
         let p = Placement {
             core_socket: "/tmp/g.sock".into(),
+            attachment_spool_root: None,
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
                 revision: 1,
@@ -238,6 +248,7 @@ mod tests {
     fn empty_addresses_fail_loud() {
         let p = Placement {
             core_socket: "/tmp/g.sock".into(),
+            attachment_spool_root: None,
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
                 revision: 1,
@@ -260,6 +271,7 @@ mod tests {
         // DM は guild 成分が空（discord-{agent}--{channel}）。address 非空なら通す（設計 §3.2/D17-03）。
         let p = Placement {
             core_socket: "/tmp/g.sock".into(),
+            attachment_spool_root: None,
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
                 revision: 1,
@@ -329,6 +341,7 @@ mod tests {
         };
         let p = Placement {
             core_socket: "/tmp/g.sock".into(),
+            attachment_spool_root: None,
             instances: vec![inst.clone(), inst],
         };
         assert!(p.validate().is_err());

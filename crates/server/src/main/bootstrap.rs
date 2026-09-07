@@ -13,6 +13,8 @@ pub(super) struct BootstrapContext {
     #[cfg(feature = "discord")]
     pub(super) gate_socket_for_discord: Option<String>,
     #[cfg(feature = "discord")]
+    pub(super) attachment_inbox_root: std::path::PathBuf,
+    #[cfg(feature = "discord")]
     pub(super) discord_ingress: opencrab_server::discord_provision::DiscordIngress,
     pub(super) effective_voice: opencrab_voice::VoiceConfig,
     #[cfg(feature = "nostr")]
@@ -111,6 +113,18 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
         .as_ref()
         .map(|p| p.to_string_lossy().into_owned());
     let extgate = Arc::new(opencrab_extgate::ExtgateState::new(db.clone(), gate_token));
+    #[cfg(feature = "discord")]
+    let attachment_inbox_root = {
+        let root = std::path::Path::new(&cfg.database.path)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("attachments")
+            .join("inbox");
+        std::fs::create_dir_all(&root)?;
+        root.canonicalize()?
+    };
+    #[cfg(feature = "discord")]
+    extgate.set_attachment_inbox_root(attachment_inbox_root.clone());
 
     // #620: マスターキーの要否は「Nostr が設定されているエージェントが 1 つ以上あるか」で
     // 決める（既存データから判定・新設定は足さない）。**プロセス全体は止めない**（Nostr を
@@ -302,6 +316,8 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
         gate_socket,
         #[cfg(feature = "discord")]
         gate_socket_for_discord,
+        #[cfg(feature = "discord")]
+        attachment_inbox_root,
         #[cfg(feature = "discord")]
         discord_ingress,
         effective_voice,

@@ -81,6 +81,8 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(feature = "discord")]
         gate_socket_for_discord,
         #[cfg(feature = "discord")]
+        attachment_inbox_root,
+        #[cfg(feature = "discord")]
         discord_ingress,
         #[cfg_attr(not(feature = "discord"), allow(unused_variables))]
         effective_voice,
@@ -629,6 +631,7 @@ async fn main() -> anyhow::Result<()> {
             // ここで 1 度だけ書けばよい。
             let placement = serde_json::json!({
                 "core_socket": core_socket,
+                "attachment_spool_root": attachment_inbox_root,
                 "instances": [{
                     "instance_id": plan.instance_id,
                     "revision": plan.revision,

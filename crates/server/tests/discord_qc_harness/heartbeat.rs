@@ -101,7 +101,7 @@ async fn wire_hb(core: &Core, fixture: &Fixture, channel: &str) -> (Arc<Instance
         fake_events: Some(fixture.path.clone()),
         dry_run: true,
     };
-    let client = spawn_instance(core.sock.clone(), &place, &config_bytes, None, overrides)
+    let client = spawn_instance(core.sock.clone(), &place, &config_bytes, None, overrides, None)
         .expect("spawn_instance");
 
     let mut bound = false;
