@@ -11,7 +11,6 @@
 1104	crates/db/src/queries/session_logs.rs
 1139	crates/db/src/webgate_transplant.rs
 1221	crates/discord/src/gateway.rs
-1456	crates/discord/src/gateway_actions/mod.rs
 1370	crates/discord/src/gateway_actions/subtask_engine.rs
 1158	crates/discord/src/gateway_actions/webhook.rs
 1159	crates/discord/src/renderer.rs
