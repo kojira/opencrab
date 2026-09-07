@@ -300,7 +300,7 @@ pub fn process_said<R: AgentRuntime>(
                 origin: said.origin.clone(),
                 author_id: said.author_id.clone(),
                 text: said.text.clone(),
-                images: said.attachments.clone(),
+                images: said.image_urls(),
                 address: row.address.clone(),
                 owner_id: row.owner_id.clone(),
                 kind_id: row.kind_id.clone(),

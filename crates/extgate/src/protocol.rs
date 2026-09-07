@@ -170,6 +170,22 @@ pub struct Hello {
     pub operations: Option<Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SaidAttachment {
+    /// Existing compatibility shape.
+    ImageUrl(String),
+    /// File downloaded by a co-located external gateway. `local_path` is
+    /// relative to the configured attachment inbox root.
+    LocalFile {
+        id: String,
+        name: String,
+        media_type: Option<String>,
+        size: u64,
+        sha256: String,
+        local_path: String,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub struct Said {
     pub id: String,
@@ -177,7 +193,19 @@ pub struct Said {
     pub origin: String,
     pub author_id: String,
     pub text: String,
-    pub attachments: Vec<String>,
+    pub attachments: Vec<SaidAttachment>,
+}
+
+impl Said {
+    pub fn image_urls(&self) -> Vec<String> {
+        self.attachments
+            .iter()
+            .filter_map(|attachment| match attachment {
+                SaidAttachment::ImageUrl(url) => Some(url.clone()),
+                SaidAttachment::LocalFile { .. } => None,
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -322,32 +350,75 @@ fn parse_said(obj: &Value) -> Result<Said, GateError> {
     })
 }
 
-fn parse_attachments(value: Option<&Value>) -> Result<Vec<String>, GateError> {
+fn parse_attachments(value: Option<&Value>) -> Result<Vec<SaidAttachment>, GateError> {
     let Some(Value::Array(items)) = value else {
         return Err(GateError::new(ErrorCode::BadRequest));
     };
-    let mut urls = Vec::with_capacity(items.len());
-    for item in items {
-        let obj = item
-            .as_object()
-            .ok_or_else(|| GateError::new(ErrorCode::BadRequest))?;
-        let kind = obj
-            .get("kind")
-            .and_then(Value::as_str)
-            .ok_or_else(|| GateError::new(ErrorCode::BadRequest))?;
-        if kind != "image" {
-            return Err(GateError::new(ErrorCode::BadRequest));
+    items.iter().map(parse_attachment).collect()
+}
+
+fn parse_attachment(item: &Value) -> Result<SaidAttachment, GateError> {
+    let obj = item
+        .as_object()
+        .ok_or_else(|| GateError::new(ErrorCode::BadRequest))?;
+    match obj.get("kind").and_then(Value::as_str) {
+        Some("image") => {
+            let url = obj
+                .get("url")
+                .and_then(Value::as_str)
+                .ok_or_else(|| GateError::new(ErrorCode::BadRequest))?;
+            if !is_absolute_https(url) {
+                return Err(GateError::new(ErrorCode::BadRequest));
+            }
+            Ok(SaidAttachment::ImageUrl(url.to_string()))
         }
-        let url = obj
-            .get("url")
-            .and_then(Value::as_str)
-            .ok_or_else(|| GateError::new(ErrorCode::BadRequest))?;
-        if !is_absolute_https(url) {
-            return Err(GateError::new(ErrorCode::BadRequest));
-        }
-        urls.push(url.to_string());
+        Some("file") => parse_local_attachment(obj),
+        _ => Err(GateError::new(ErrorCode::BadRequest)),
     }
-    Ok(urls)
+}
+
+fn parse_local_attachment(
+    obj: &serde_json::Map<String, Value>,
+) -> Result<SaidAttachment, GateError> {
+    let id = parse_uuid(&nonempty_map_str(obj, "id")?)?;
+    let name = nonempty_map_str(obj, "name")?;
+    if name.chars().count() > 255 || name.chars().any(|c| c.is_control()) {
+        return Err(GateError::new(ErrorCode::BadRequest));
+    }
+    let media_type = match obj.get("media_type") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) if !value.is_empty() && value.is_ascii() => Some(value.clone()),
+        _ => return Err(GateError::new(ErrorCode::BadRequest)),
+    };
+    let size = obj
+        .get("size")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| GateError::new(ErrorCode::BadRequest))?;
+    let sha256 = parse_digest(&nonempty_map_str(obj, "sha256")?)?;
+    let local_path = nonempty_map_str(obj, "local_path")?;
+    let path = std::path::Path::new(&local_path);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(GateError::new(ErrorCode::BadRequest));
+    }
+    Ok(SaidAttachment::LocalFile {
+        id,
+        name,
+        media_type,
+        size,
+        sha256,
+        local_path,
+    })
+}
+
+fn nonempty_map_str(obj: &serde_json::Map<String, Value>, key: &str) -> Result<String, GateError> {
+    match obj.get(key) {
+        Some(Value::String(value)) if !value.is_empty() => Ok(value.clone()),
+        _ => Err(GateError::new(ErrorCode::BadRequest)),
+    }
 }
 
 fn is_absolute_https(url: &str) -> bool {
@@ -414,5 +485,62 @@ mod activity_tests {
         let started = activity_frame("binding", "activity", "started", Some("origin"), None);
         assert_eq!(started["origin"], "origin");
         assert!(started.get("completed_target").is_none());
+    }
+
+    #[test]
+    fn parses_provider_neutral_local_attachment() {
+        let frame = serde_json::json!({
+            "id": "said-1",
+            "m": "said",
+            "binding_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "origin": "event-1",
+            "author_id": "sender-1",
+            "text": "",
+            "attachments": [{
+                "kind": "file",
+                "id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                "name": "page.html",
+                "media_type": "text/html",
+                "size": 42,
+                "sha256": "a".repeat(64),
+                "local_path": "instance/origin/file.bin"
+            }]
+        });
+        let InboundMsg::Said(said) = parse_inbound(&frame).unwrap() else {
+            panic!("expected said");
+        };
+        assert!(matches!(
+            &said.attachments[0],
+            SaidAttachment::LocalFile { name, size: 42, .. } if name == "page.html"
+        ));
+    }
+
+    #[test]
+    fn rejects_local_attachment_path_traversal() {
+        let mut frame = serde_json::json!({
+            "id": "said-1", "m": "said",
+            "binding_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "origin": "event-1", "author_id": "sender-1", "text": "",
+            "attachments": [{
+                "kind": "file", "id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                "name": "page.html", "media_type": "text/html", "size": 42,
+                "sha256": "a".repeat(64), "local_path": "../escape"
+            }]
+        });
+        assert!(matches!(
+            parse_inbound(&frame).unwrap(),
+            InboundMsg::Invalid {
+                code: ErrorCode::BadRequest,
+                ..
+            }
+        ));
+        frame["attachments"][0]["local_path"] = json!("/absolute/file");
+        assert!(matches!(
+            parse_inbound(&frame).unwrap(),
+            InboundMsg::Invalid {
+                code: ErrorCode::BadRequest,
+                ..
+            }
+        ));
     }
 }

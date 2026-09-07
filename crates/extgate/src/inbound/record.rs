@@ -60,8 +60,9 @@ pub(super) fn record_inbound(
         "user_name": "",
         "channel_id": row.address,
     });
-    if !said.attachments.is_empty() {
-        meta["image_urls"] = serde_json::json!(said.attachments);
+    let image_urls = said.image_urls();
+    if !image_urls.is_empty() {
+        meta["image_urls"] = serde_json::json!(image_urls);
     }
     // external_origin は platform 非依存の汎用 field（§9A の e番号採番・長文切り詰めの源）。
     // 全 gateway kind で記録する。旧実装は `kind_id == "nostr"` に閉じていたが、これは汎用採番機構

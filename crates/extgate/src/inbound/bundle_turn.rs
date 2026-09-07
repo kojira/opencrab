@@ -81,7 +81,11 @@ pub(super) fn finish_bundle<R: AgentRuntime>(
             origin,
             author_id: trigger.0,
             text: trigger.1,
-            attachments: trigger.2,
+            attachments: trigger
+                .2
+                .into_iter()
+                .map(crate::protocol::SaidAttachment::ImageUrl)
+                .collect(),
         };
         enqueue_turn(
             Arc::clone(ctx.state),

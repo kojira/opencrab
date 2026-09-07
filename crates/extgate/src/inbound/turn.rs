@@ -45,7 +45,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
     let binding_id = said.binding_id.clone();
     let author_id = said.author_id.clone();
     let text = said.text.clone();
-    let images = said.attachments.clone();
+    let images = said.image_urls();
     let address = row.address.clone();
     let origin = said.origin.clone();
     let owner_id = row.owner_id.clone();
@@ -434,7 +434,12 @@ pub(super) fn fire_held_turns<R: AgentRuntime>(
         origin: last.origin.clone(),
         author_id: last.author_id.clone(),
         text: last.text.clone(),
-        attachments: last.images.clone(),
+        attachments: last
+            .images
+            .iter()
+            .cloned()
+            .map(crate::protocol::SaidAttachment::ImageUrl)
+            .collect(),
     };
     let row = OriginRow {
         instance_id: last.instance_id.clone(),

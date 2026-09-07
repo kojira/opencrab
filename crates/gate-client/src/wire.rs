@@ -1,5 +1,6 @@
 //! V3 §3 の frame と message。core crate の DTO は使わない。
 
+use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -93,7 +94,7 @@ pub fn said_frame(
         "origin": origin,
         "author_id": author_id,
         "text": text,
-        "attachments": attachments.iter().map(|a| json!({"kind": a.kind, "url": a.url})).collect::<Vec<_>>(),
+        "attachments": attachments,
     })
 }
 
@@ -115,10 +116,24 @@ pub fn err_frame(id: &str, code: &str, detail: Option<&str>) -> Value {
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Attachment {
-    pub kind: String,
-    pub url: String,
+/// Provider-neutral inbound attachment carried by a Said frame.
+///
+/// `ImageUrl` is the existing compatibility shape. New external gateways use
+/// `LocalFile`; the source URL stays inside the gateway process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind")]
+pub enum Attachment {
+    #[serde(rename = "image")]
+    ImageUrl { url: String },
+    #[serde(rename = "file")]
+    LocalFile {
+        id: String,
+        name: String,
+        media_type: Option<String>,
+        size: u64,
+        sha256: String,
+        local_path: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
