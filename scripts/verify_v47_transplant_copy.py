@@ -214,7 +214,7 @@ def verify_subject_ids(conn: sqlite3.Connection) -> list[str]:
     return errors
 
 
-def normalized_sql(sql: str | None) -> str:
+def normalized_sql(sql) -> str:
     if sql is None:
         return ""
     return " ".join(sql.replace("IF NOT EXISTS", "").split())
