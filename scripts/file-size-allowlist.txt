@@ -8,7 +8,6 @@
 919	crates/llm/src/providers/acp.rs
 826	crates/llm/src/router.rs
 891	crates/nostr/src/watch.rs
-927	crates/server/src/api/agents.rs
 822	crates/server/src/api/agents_messages.rs
 913	crates/server/src/api/providers.rs
 817	crates/server/src/api/schedules.rs
