@@ -1,7 +1,6 @@
 844	crates/actions/src/a2ui.rs
 867	crates/actions/src/agent_gateway.rs
 862	crates/actions/src/llm_analysis.rs
-877	crates/actions/src/skill_management.rs
 872	crates/actions/src/tools/shell.rs
 807	crates/core/src/memory/daily_log_indexer.rs
 826	crates/core/src/workspace.rs
