@@ -1,5 +1,6 @@
-use super::{build_conversation_string, RECENT_MIN_USER_SPEECHES};
+use super::budget::build_conversation_string;
 use opencrab_actions::transcript::{InboundMessageRecord, TranscriptSource};
+use opencrab_core::conversation::RECENT_MIN_USER_SPEECHES;
 
 const AGENT: &str = "a1";
 const USER: &str = "owner";

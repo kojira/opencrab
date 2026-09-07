@@ -1,4 +1,4 @@
-use super::typed_exceeds_input_budget;
+use super::budget::typed_exceeds_input_budget;
 
 /// #884 PR2 hard cap: wire トークンが input_high を超えるときだけ flat へ落とす。
 #[test]

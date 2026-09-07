@@ -1,7 +1,3 @@
-use super::super::*;
-use super::support::*;
-use opencrab_gateway::GatewayCaller;
-
 // ---- #157 S7: ピアレビュー依頼（request_peer_review）の gateway 非依存化 ----
 
 /// 素テキスト配送口を提供する inner のフェイク（Discord の代役）。

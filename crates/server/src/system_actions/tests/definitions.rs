@@ -1,6 +1,3 @@
-use super::super::*;
-use super::support::*;
-
 #[test]
 fn own_definition_shape() {
     let defs = SystemGatewayActions::own_definitions();

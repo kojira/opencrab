@@ -1,4 +1,4 @@
-use super::skill_mentioned;
+use super::skills::skill_mentioned;
 
 #[test]
 fn matches_name_case_insensitively() {

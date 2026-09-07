@@ -1,8 +1,3 @@
-pub(super) mod cases {
-    use super::super::dispatcher::cases::FakeExecutor;
-    use super::super::manage::cases::insert_fake_subtask;
-    use super::super::sink::cases::{dispatch_one, RecordingSink};
-    use super::super::*;
 
     // -----------------------------------------------------------------------
     // レビュー指摘（P0/P1）の回帰テスト群
@@ -290,4 +285,3 @@ pub(super) mod cases {
         assert!(registry.is_empty());
         handle.abort();
     }
-}

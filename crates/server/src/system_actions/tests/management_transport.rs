@@ -1,6 +1,3 @@
-use super::super::*;
-use super::support::*;
-
 /// 移設した 4 ツールは **inner（Discord）へ委譲しない**。
 ///
 /// `cancel_subtask` / `report_progress` は Discord 固有の後処理を保つため委譲する

@@ -119,7 +119,7 @@ impl BridgedExecutor {
     /// - **将来 depth>=1 で生の gateway を直付けする経路を足すと、この層が復活する**
     ///   （外周フィルタを通らないツールに対して `Blocked` 属性が実効ゲートになる）。だから
     ///   「使われていないから消す」判断はしないこと。多層防御の意図は残す。
-    fn is_blocked_in_subengine(&self, name: &str) -> bool {
+    pub(super) fn is_blocked_in_subengine(&self, name: &str) -> bool {
         self.tool_class_index
             .get(name)
             .map(|c| c.sub_engine == opencrab_gateway::SubEngineAccess::Blocked)
@@ -282,7 +282,7 @@ impl BridgedExecutor {
 
     /// dispatcher の CallerIdentity を gateway 境界の型付き caller に写像する。
     /// CoAgent の agent_id は保存する（旧 `__caller` 文字列注入では落ちていた）。
-    fn gateway_call_context(
+    pub(super) fn gateway_call_context(
         &self,
         tool_call_id: Option<&str>,
     ) -> opencrab_gateway::GatewayCallContext {
@@ -334,7 +334,7 @@ impl BridgedExecutor {
 
     /// このコンテキスト（caller/depth）で name が可視・実行可能か（#45）。
     /// list_tools と dispatch_inner が同一のポリシー判定を共有するための述語。
-    fn policy_allows(&self, name: &str) -> bool {
+    pub(super) fn policy_allows(&self, name: &str) -> bool {
         let policy = tool_policy(name);
         if policy.owner_only && !self.caller_is_owner() {
             return false;
@@ -786,7 +786,3 @@ const _: fn() = || {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<BridgedExecutor>();
 };
-
-#[cfg(test)]
-#[path = "tests/mod.rs"]
-mod tests;

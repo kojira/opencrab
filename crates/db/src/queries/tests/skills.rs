@@ -1,5 +1,3 @@
-use super::*;
-
 // 9. test_skills_crud
 #[test]
 fn test_skills_crud() {

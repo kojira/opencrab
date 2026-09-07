@@ -1,5 +1,3 @@
-use super::*;
-
 // 4. test_curated_memory_crud
 #[test]
 fn test_curated_memory_crud() {

@@ -1,5 +1,3 @@
-use super::*;
-
 #[test]
 fn insert_session_dual_writes_agent_sessions() {
     let conn = crate::init_memory().unwrap();

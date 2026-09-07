@@ -1,5 +1,3 @@
-use super::super::*;
-use rusqlite::Connection;
 fn create_marker(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch("CREATE TABLE test_marker (id INTEGER)")
 }

@@ -1,6 +1,3 @@
-use super::super::*;
-use super::support::*;
-
 /// **レスポンス JSON が移設前と同一**（記憶インデックス設定）。
 /// `previous` / `current` の入れ子形をリテラルで固定する。
 #[tokio::test]

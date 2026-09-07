@@ -1,5 +1,3 @@
-use super::super::*;
-use super::support::seed_legacy_impressions;
 
 /// v21: 人物像を agent スコープへ（#314）。
 ///

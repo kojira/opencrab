@@ -1,8 +1,3 @@
-use super::*;
-use crate::bridge::REJECTION_CODE_PREFIX;
-use opencrab_gateway::{GatewayActionDef, GatewayActionResult, GatewayCallContext};
-use serde_json::json;
-
 // ---- RFC #152 S2: 合成 gateway 注入 + deny-by-default 最外周フィルタ ----
 
 /// server ツール（nostr_generate_key）と transport ツール（report_progress）と、

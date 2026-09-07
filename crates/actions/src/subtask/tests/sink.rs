@@ -1,5 +1,3 @@
-pub(super) mod cases {
-    use super::super::*;
 
     /// `SubtaskCompletionSink` の最小フェイク実装。受け取った settle を記録する。
     #[derive(Default)]
@@ -522,4 +520,3 @@ pub(super) mod cases {
         assert_eq!(events.len(), 1);
         assert!(events[0].reply_target.is_none());
     }
-}

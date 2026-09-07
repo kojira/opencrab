@@ -1,6 +1,3 @@
-use super::*;
-use crate::CallerIdentity;
-
 fn levels(cs: &[CallerIdentity]) -> Vec<u8> {
     cs.iter().map(|c| c.trust_level()).collect()
 }

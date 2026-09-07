@@ -1,4 +1,4 @@
-use super::SessionLiveInbound;
+use super::live_inbound::SessionLiveInbound;
 use opencrab_actions::transcript::{InboundMessageRecord, TranscriptSource};
 use opencrab_core::LiveInboundSource;
 

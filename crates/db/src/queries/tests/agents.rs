@@ -1,5 +1,3 @@
-use super::*;
-
 #[test]
 fn test_agent_upsert_and_get() {
     let conn = setup();

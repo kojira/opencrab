@@ -9,7 +9,7 @@ const MIN_SKILL_NAME_LEN_FOR_MATCH: usize = 4;
 /// 応答本文に skill 名が現れているか（大文字小文字無視の部分一致）。
 /// `response_lower` は呼び出し側で小文字化済みを渡す。ツール名ベースの
 /// 確実な信号が server 経路に無いため、これが「実際に使った」の実用的な検出。
-fn skill_mentioned(response_lower: &str, skill_name: &str) -> bool {
+pub(super) fn skill_mentioned(response_lower: &str, skill_name: &str) -> bool {
     let name = skill_name.trim().to_lowercase();
     name.chars().count() >= MIN_SKILL_NAME_LEN_FOR_MATCH && response_lower.contains(&name)
 }
@@ -133,7 +133,3 @@ pub(super) fn spawn_background_index_build(
         });
     }
 }
-
-#[cfg(test)]
-#[path = "tests/skill_mentioned.rs"]
-mod skill_mentioned_tests;

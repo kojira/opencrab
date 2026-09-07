@@ -1,5 +1,3 @@
-use super::*;
-
 // 16. test_heartbeat_log_insert
 #[test]
 fn test_heartbeat_log_insert() {

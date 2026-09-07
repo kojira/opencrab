@@ -1,4 +1,4 @@
-use super::build_agent_context;
+use super::prompt::build_agent_context;
 use opencrab_db::queries::TrustedUserPermission;
 
 /// 共有プロンプトから transport 語が消えていること（grep 相当をテスト化）。

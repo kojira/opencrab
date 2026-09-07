@@ -1,7 +1,3 @@
-use super::super::*;
-use super::support::*;
-use opencrab_gateway::GatewayCaller;
-
 /// #647 gateway: 親セッションからの steer は success を返し、data.steered=true と note を載せる。
 #[tokio::test]
 async fn steer_subtask_gateway_accepted_maps_to_success() {

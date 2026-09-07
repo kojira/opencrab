@@ -61,7 +61,3 @@ impl GatewayActions for SubEngineGatewayActions {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "tests/subengine.rs"]
-mod tests;

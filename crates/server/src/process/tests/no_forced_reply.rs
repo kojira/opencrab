@@ -1,4 +1,4 @@
-use super::build_agent_context;
+use super::prompt::build_agent_context;
 
 #[test]
 fn the_prompt_does_not_force_a_reply() {

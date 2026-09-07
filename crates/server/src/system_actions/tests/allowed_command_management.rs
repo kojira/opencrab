@@ -1,7 +1,3 @@
-use super::super::*;
-use super::support::*;
-use opencrab_gateway::GatewayCaller;
-
 /// **#157 S1 の本題**: 4 ツールが `SystemGatewayActions` の own 定義になっている。
 ///
 /// own 定義は transport の有無に依存しないため、これが `definitions()` に出ることは

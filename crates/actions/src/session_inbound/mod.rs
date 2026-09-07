@@ -26,3 +26,7 @@ pub use turn::{
     prepare_session_inbound, prepare_session_inbound_write, run_session_turn, start_session_turn,
     PrepareSessionInboundError,
 };
+
+#[cfg(test)]
+#[path = "tests/mod.rs"]
+mod tests;

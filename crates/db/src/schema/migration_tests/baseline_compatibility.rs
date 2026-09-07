@@ -1,5 +1,3 @@
-use super::super::*;
-use rusqlite::Connection;
 /// A. バージョン管理導入前の旧DBを模して、baseline が再適用され version 1 に
 /// スタンプされることを検証する。
 #[test]

@@ -1,7 +1,3 @@
-use super::super::*;
-use super::support::*;
-use opencrab_gateway::GatewayCaller;
-
 // ---- #156 S3: A2UI 送信（send_ui）の gateway 非依存化 ----
 
 /// A2UI 描画面を提供する inner のフェイク（Discord の代役）。

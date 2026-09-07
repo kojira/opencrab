@@ -1,5 +1,3 @@
-use super::*;
-
 // 15. test_model_pricing_upsert_and_get
 #[test]
 fn test_model_pricing_upsert_and_get() {

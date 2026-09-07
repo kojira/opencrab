@@ -1,5 +1,3 @@
-use super::*;
-
 // 6. test_session_log_insert_and_fts
 #[test]
 fn test_session_log_insert_and_fts() {

@@ -120,35 +120,3 @@ pub fn ensure_request_functions_budget(
 }
 // `format_single_log` は `format_live_inbound`（本番経路）が使うので常時取り込む。
 pub(crate) use opencrab_core::conversation::format_single_log;
-// 以下はテストだけが参照する（本番コードは使わない）。cfg(test) で本番ビルドの
-// unused 警告を避ける。子モジュールのテストが `super::` で辿れる。
-#[cfg(test)]
-use opencrab_core::conversation::{past_summary_omitted_notice, RECENT_MIN_USER_SPEECHES};
-
-#[cfg(test)]
-#[path = "tests/typed_hard_cap.rs"]
-mod typed_hard_cap_tests;
-
-/// #284: コンテキストが逼迫しても**直近のユーザー発言は必ずプロンプトに載る**。
-///
-/// 事故当時、直近 10 件（`RECENT_MIN_LOGS`）が tool_result / evaluation / エージェント
-/// 自身の発言で埋まり、ユーザーの生発言が 1 件も入らなかった。エージェントは指示を
-/// 一度も見ないまま応答していた。ここで固定するのは「ログ種別に関係なく、直近の
-/// ユーザー発言 N 件が優先で残る」こと。
-///
-/// **行の形は本番と同じでなければならない**（#286）。ユーザー発言は**必ず
-/// `record_inbound_message` 経由で**入れること（`agent_id`＝受信側 / `speaker_id`＝送信者、
-/// #377）。手書きの行だと本番と形がずれ、述語のバグを見逃す。
-///
-/// 経緯: 以前ゲートウェイ受信は `agent_id` 列にも送信者 ID を入れており
-/// （`agent_id == speaker_id`）、「`speaker_id != log.agent_id`」という列比較の述語が
-/// Discord / Nostr では常に false になった（当時の該当 4,490 件すべてが `==`）。#377 で
-/// 受信行が `agent_id`＝受信側 に直り列は縮退しなくなったが、正しい述語は今も
-/// `speaker_id != <agent_id 引数>`（`opencrab_core::conversation::is_user_speech` 参照）。
-#[cfg(test)]
-#[path = "tests/recent_user_speech_guarantee.rs"]
-mod recent_user_speech_guarantee_tests;
-
-#[cfg(test)]
-#[path = "tests/past_summary_notice_contract.rs"]
-mod past_summary_notice_contract_tests;

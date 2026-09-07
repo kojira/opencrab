@@ -1,4 +1,4 @@
-use super::build_agent_context;
+use super::prompt::build_agent_context;
 
 fn prompt() -> String {
     let conn = opencrab_db::init_memory().unwrap();

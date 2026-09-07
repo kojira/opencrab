@@ -1,4 +1,3 @@
-use super::super::*;
 /// v19: Nostr 受信転記先の表が増えるだけで、既存の Nostr 設定
 /// （`agent_nostr_config`）の行は 1 つも動かない（#252 段階 A）。冪等でもある。
 #[test]

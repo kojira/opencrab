@@ -1,7 +1,3 @@
-use super::super::*;
-use super::support::*;
-use opencrab_gateway::GatewayCaller;
-
 /// own 定義に 1 件ずつ露出し、**廃止スコープ引数の痕跡がゼロ**であることを固定する
 /// （#456 受け入れ基準）。`agent_id` も無い（他人を指す経路を作らない）。
 #[test]

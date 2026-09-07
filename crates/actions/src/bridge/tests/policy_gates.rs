@@ -1,9 +1,3 @@
-use super::super::*;
-use super::common::*;
-use crate::traits::CallerIdentity;
-use opencrab_gateway::{GatewayActionDef, GatewayActionResult};
-use serde_json::json;
-
 /// #923 実行ゲート不変の回帰ガード（可視≠実行可否）: ツール階層で常時集合の外に置いた
 /// owner-only ツール（`configure_llm_provider`）を、非 owner が `describe_tools` で活性化
 /// しようとしても — (1) describe_tools は policy 済みの effective 定義からしか schema を

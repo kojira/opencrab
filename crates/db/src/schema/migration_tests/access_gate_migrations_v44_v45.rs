@@ -1,6 +1,3 @@
-use super::super::*;
-use super::support::user_tables;
-use rusqlite::Connection;
 fn setup_pre_v44(conn: &Connection) {
     conn.execute_batch(
         "DROP TABLE IF EXISTS deliveries;

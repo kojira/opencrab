@@ -1,6 +1,3 @@
-use super::super::*;
-use super::support::*;
-
 // ---- #157 S5: 通知先（webhook）の管理ツール ----
 
 /// 移設した 6 ツールの名前（#157 S5）。`ensure_*` は含まない（Discord 側に残る）。

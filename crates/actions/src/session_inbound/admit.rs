@@ -88,7 +88,10 @@ impl std::error::Error for InboundDrop {}
 /// [`accept_inbound`] が [`InboundLookups::dm_allowed_any`] の結果を渡す。非 DM は常に通す。
 ///
 /// ゲートは呼ばない。[`accept_inbound`] が内部で使う。
-fn admit_inbound_message(is_dm: bool, dm_allowed_any: bool) -> Result<(), InboundMessageDrop> {
+pub(super) fn admit_inbound_message(
+    is_dm: bool,
+    dm_allowed_any: bool,
+) -> Result<(), InboundMessageDrop> {
     if is_dm && !dm_allowed_any {
         Err(InboundMessageDrop::DmNotTrusted)
     } else {
@@ -99,7 +102,7 @@ fn admit_inbound_message(is_dm: bool, dm_allowed_any: bool) -> Result<(), Inboun
 /// エージェント個別の権限ゲート（DM 個別信頼 / チャンネル whitelist）。
 ///
 /// ゲートは呼ばない。[`accept_inbound`] が内部で使う。
-fn admit_inbound_agent(
+pub(super) fn admit_inbound_agent(
     is_dm: bool,
     dm_allowed: bool,
     channel_whitelisted: bool,
@@ -314,7 +317,3 @@ pub fn plan_record_only_flags(levels: &[u8], has_content: &[bool]) -> Vec<bool> 
     }
     record_only
 }
-
-#[cfg(test)]
-#[path = "admit_tests.rs"]
-mod tests;

@@ -1,7 +1,3 @@
-use super::super::*;
-use super::support::*;
-use opencrab_gateway::GatewayCaller;
-
 // ================================================================================
 // #157 S6: スキル生成（create_skill）の移植テスト
 //

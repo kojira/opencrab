@@ -1,5 +1,3 @@
-use super::*;
-
 // 11. test_impressions_upsert_and_get
 #[test]
 fn test_impressions_upsert_and_get() {

@@ -1,4 +1,3 @@
-use super::super::*;
 /// v41（#660）: provider rename `openai` → `hermit`。
 ///
 /// **本番形フィクスチャ**で「片方だけ改名」「pricing 未同期」の 2 罠を固定する。

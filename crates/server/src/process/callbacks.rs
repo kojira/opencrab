@@ -45,7 +45,10 @@ fn summarize_tool_calls(assistant_content: &str, tool_calls_json: &str) -> Strin
 /// - **閾値判定はしない**。事実（送ったサイズ）だけを残し、判断は読む人に委ねる。
 /// - error_code に依らず失敗行へ一様に付くので、**新しい失敗種別を足しても自動で載る**
 ///   （種別ごとの手書き補間を engine 側に散らさない）。
-fn error_body_with_prompt_size(error_str: Option<&str>, prompt_json: &str) -> Option<String> {
+pub(super) fn error_body_with_prompt_size(
+    error_str: Option<&str>,
+    prompt_json: &str,
+) -> Option<String> {
     error_str.map(|body| {
         let prompt_chars = prompt_json.chars().count();
         format!(
@@ -181,7 +184,7 @@ pub(super) fn set_run_notifier_callbacks(
 /// `workspace_root` は `None` を渡す。engine は callback より手前で `cap_tool_result` を
 /// かけており、ここへ来る本文は上限内なので退避は起きない。仮に起きても実況が
 /// ワークスペースへ書く必要はない（永続化側と二重に書くことになる）。
-fn tool_result_progress_line(
+pub(super) fn tool_result_progress_line(
     tool_name: &str,
     result_json: &str,
     is_error: bool,
@@ -410,11 +413,3 @@ pub(super) fn merge_image_urls(
         urls
     }
 }
-
-#[cfg(test)]
-#[path = "tests/error_body_with_prompt_size.rs"]
-mod error_body_with_prompt_size_tests;
-
-#[cfg(test)]
-#[path = "tests/tool_result_progress_line.rs"]
-mod tool_result_progress_line_tests;

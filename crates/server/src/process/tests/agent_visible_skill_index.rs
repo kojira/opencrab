@@ -1,4 +1,4 @@
-use super::build_agent_context;
+use super::prompt::build_agent_context;
 use opencrab_actions::CallerIdentity;
 use opencrab_db::queries::SkillRow;
 

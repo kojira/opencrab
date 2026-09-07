@@ -1,10 +1,3 @@
-pub(super) mod cases {
-    use super::super::dispatcher::cases::FakeExecutor;
-    use super::super::lifecycle::cases::{
-        completed_log_body, completed_log_count, wait_until_settled,
-    };
-    use super::super::sink::cases::{dispatch_one, RecordingSink};
-    use super::super::*;
 
     /// [P0 回帰] 同一バッチの複数ツールは 1 subtask 内で**dispatch 順に逐次実行**され、
     /// 完了 sink は **1 回だけ**発火する（N 通の返信にならない）。
@@ -570,4 +563,3 @@ pub(super) mod cases {
         // 永続化そのものは従来どおり動く（結果が session_logs に載る）。
         assert!(body.contains("npub1ok"), "結果が永続化されていない");
     }
-}

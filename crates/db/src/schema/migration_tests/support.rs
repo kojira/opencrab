@@ -1,5 +1,3 @@
-use rusqlite::Connection;
-
 /// v20 相当（旧一意制約）の `impressions` を作り直し、行を入れて version 20 へ戻す。
 pub(super) fn seed_legacy_impressions(conn: &Connection, rows: &str) {
     conn.execute_batch(&format!(

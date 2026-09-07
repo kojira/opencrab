@@ -1,5 +1,3 @@
-use super::super::*;
-use super::support::seed_legacy_impressions;
 /// v20 起点の一気通貫（v20→v21→v22→v23）。稼働中の本番 DB は v22 なので実運用の
 /// 経路は v22→v23 だが、新規環境や古い DB からの復元では v20 から連鎖する。この道で
 /// (1) memory_index の時系列ツリーが 1 件も失われず CHECK が広がること、(2) 途中の

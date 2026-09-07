@@ -1,8 +1,3 @@
-use super::super::*;
-use crate::traits::CallerIdentity;
-use opencrab_gateway::{GatewayActionDef, GatewayActionResult, GatewayActions};
-use serde_json::json;
-
 /// テスト用GatewayActionsモック
 pub(super) struct MockGatewayActions;
 

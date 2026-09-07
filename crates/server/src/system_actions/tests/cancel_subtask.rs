@@ -1,7 +1,3 @@
-use super::super::*;
-use super::support::*;
-use opencrab_gateway::GatewayCaller;
-
 // ================================================================================
 // #157 S2 / #184: 停止（cancel_subtask）の移植テスト
 //

@@ -1,5 +1,3 @@
-use super::super::*;
-use rusqlite::Connection;
 // ── v37: セッション一本化スキーマ + 移行（#439 × #455 × #456・PR1）──────────
 
 /// v37 適用前（user_version=36）の DB を模す: 新表 2 つを落として版を 36 へ戻す。

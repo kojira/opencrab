@@ -1,5 +1,3 @@
-use super::super::*;
-use rusqlite::Connection;
 /// H. SCHEMA_SQL 側と TASK_LEDGER_SQL 側で生成されるテーブル定義が一致する
 /// （両所への二重記載がドリフトしていないことの検証）。
 #[test]

@@ -1,6 +1,3 @@
-use super::super::*;
-use super::support::user_tables;
-use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 /// v43 適用前（user_version=42）の DB を模す: 新列・新表を落として版を 42 へ戻す。

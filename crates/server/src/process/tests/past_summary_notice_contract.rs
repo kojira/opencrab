@@ -10,7 +10,7 @@ fn omitted_notice_matches_the_real_tool_surface() {
     use opencrab_actions::memory_access::{RetrieveMemoryNodesAction, SearchMemoryIndexAction};
     use opencrab_actions::Action;
 
-    let notice = super::past_summary_omitted_notice(42);
+    let notice = opencrab_core::conversation::past_summary_omitted_notice(42);
     let search = SearchMemoryIndexAction;
     let retrieve = RetrieveMemoryNodesAction;
     let props = |a: &dyn Action| -> Vec<String> {

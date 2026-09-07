@@ -1,6 +1,3 @@
-pub(super) mod cases {
-    use super::super::sink::cases::{dispatch_one, RecordingSink};
-    use super::super::*;
 
     /// 単一ツールを即完了（または永久 pending）で返す最小 executor。
     /// `SubtaskToolDispatcher` の配線検証用（合成 executor は別テストで検証済み）。
@@ -511,4 +508,3 @@ pub(super) mod cases {
             "abort された subtask は settle_completed を通らず sink を発火しない"
         );
     }
-}

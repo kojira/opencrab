@@ -1,12 +1,3 @@
-use std::sync::{Arc, Mutex};
-
-use opencrab_actions::subtask::{
-    SettleKind, SubtaskCompletionSink, SubtaskRegistry, SubtaskSettled,
-};
-use opencrab_gateway::{GatewayActionResult, GatewayCallContext, GatewayCaller};
-
-use crate::AppState;
-
 // ---- テスト用の LLM プロバイダ（"mock:test" として登録する） ----
 
 /// 1 往復で終わる stub。`hang=true` なら永久に返さない（cancel の対象用）。

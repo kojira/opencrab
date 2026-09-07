@@ -257,15 +257,3 @@ pub fn prepend_runtime_context_discord(
         "[Context]\nCurrent date and time: {now}\nCurrent discussion topic: {session_theme}\nDiscord message_id: {message_id}\n\n{user_message}"
     )
 }
-
-/// 走行中ターンへ届ける新着発言の差分取得（#289）。
-///
-/// `SessionLiveInbound` の契約は 3 つ: (1) ターン開始後に記録された発言だけを返す、
-/// (2) 一度返した発言は二度返さない、(3) エージェント自身の発言は返さない。
-#[cfg(test)]
-#[path = "tests/live_inbound_source.rs"]
-mod live_inbound_source_tests;
-
-#[cfg(test)]
-#[path = "tests/steer_inbound.rs"]
-mod steer_inbound_tests;

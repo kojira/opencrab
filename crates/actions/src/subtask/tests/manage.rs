@@ -1,6 +1,3 @@
-pub(super) mod cases {
-    use super::super::sink::cases::RecordingSink;
-    use super::super::*;
 
     /// 与えた parent_session_id で「即完了しない」fake subtask を registry へ登録し、
     /// その JoinHandle を返す（abort されたか検証するため）。
@@ -489,4 +486,3 @@ pub(super) mod cases {
         registry.remove("sub-1");
         assert!(registry.is_empty());
     }
-}

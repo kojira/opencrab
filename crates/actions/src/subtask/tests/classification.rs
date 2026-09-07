@@ -1,7 +1,3 @@
-pub(super) mod cases {
-    use super::super::dispatcher::cases::FakeExecutor;
-    use super::super::sink::cases::RecordingSink;
-    use super::super::*;
 
     /// [P1 回帰] run 内共有状態を書く `select_llm` は dispatch しない（inline のまま）。
     #[test]
@@ -235,4 +231,3 @@ pub(super) mod cases {
         // 長時間の鍵探索（Dispatchable 属性）は含まれない = dispatch 対象。
         assert!(!inline.contains("nostr_generate_key"));
     }
-}

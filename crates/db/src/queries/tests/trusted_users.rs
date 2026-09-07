@@ -1,5 +1,3 @@
-use super::*;
-
 #[test]
 fn test_trusted_user_display_name_round_trip() {
     let conn = setup();

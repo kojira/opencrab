@@ -1,6 +1,6 @@
 // 実況（progress line）は永続化と同じ無害化（`sanitize_tool_result_for_log`）を通す。
 // #620: 旧来の nsec キー名マスク（SECRET_KEYS）は撤去したので、ここは上限/退避だけを行う。
-use super::tool_result_progress_line;
+use super::callbacks::tool_result_progress_line;
 
 /// 実況行がツール名・成否・中身を含み、失敗は failed と出ること。
 ///

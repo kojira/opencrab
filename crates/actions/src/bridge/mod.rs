@@ -38,3 +38,7 @@ pub struct ExecutorRuntimeState {
     pub model_override: Option<String>,
     pub current_purpose: String,
 }
+
+#[cfg(test)]
+#[path = "tests/mod.rs"]
+mod tests;

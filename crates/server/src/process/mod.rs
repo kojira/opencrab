@@ -86,8 +86,47 @@ fn peer_reviewers_section(conn: &rusqlite::Connection, agent_id: &str) -> String
 }
 
 #[cfg(test)]
+#[path = "tests/agent_visible_skill_index.rs"]
+mod agent_visible_skill_index_tests;
+#[cfg(test)]
+#[path = "tests/curated_long_term_injection.rs"]
+mod curated_long_term_injection_tests;
+#[cfg(test)]
+#[path = "tests/error_body_with_prompt_size.rs"]
+mod error_body_with_prompt_size_tests;
+#[cfg(test)]
+#[path = "tests/live_inbound_source.rs"]
+mod live_inbound_source_tests;
+#[cfg(test)]
+#[path = "tests/no_forced_reply.rs"]
+mod no_forced_reply_tests;
+#[cfg(test)]
+#[path = "tests/past_summary_notice_contract.rs"]
+mod past_summary_notice_contract_tests;
+#[cfg(test)]
 #[path = "tests/peer_reviewers_section.rs"]
 mod peer_reviewers_section_tests;
+#[cfg(test)]
+#[path = "tests/prompt_inventory_red.rs"]
+mod prompt_inventory_red_tests;
+#[cfg(test)]
+#[path = "tests/recent_user_speech_guarantee.rs"]
+mod recent_user_speech_guarantee_tests;
+#[cfg(test)]
+#[path = "tests/shared_prompt_is_transport_neutral.rs"]
+mod shared_prompt_is_transport_neutral_tests;
+#[cfg(test)]
+#[path = "tests/skill_mentioned.rs"]
+mod skill_mentioned_tests;
+#[cfg(test)]
+#[path = "tests/steer_inbound.rs"]
+mod steer_inbound_tests;
+#[cfg(test)]
+#[path = "tests/tool_result_progress_line.rs"]
+mod tool_result_progress_line_tests;
+#[cfg(test)]
+#[path = "tests/typed_hard_cap.rs"]
+mod typed_hard_cap_tests;
 
 /// 実行対象の agent 行が `agents` に存在しないときのエラー（#632）。
 ///

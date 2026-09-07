@@ -1,7 +1,3 @@
-use super::super::*;
-use super::support::*;
-use opencrab_gateway::GatewayCaller;
-
 /// 明示の無効化は anchor/last_fired を触らない（位相保存・再有効化まで保つ）。next_fire_at は null。
 // #654: nostr セッションの発火経路は nostr feature 時のみ登録される（#651）。off は fail-closed。
 #[cfg(feature = "nostr")]

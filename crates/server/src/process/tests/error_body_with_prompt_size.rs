@@ -1,4 +1,4 @@
-use super::error_body_with_prompt_size;
+use super::callbacks::error_body_with_prompt_size;
 
 /// #706: 成功行（error_str=None）にはサイズを付けない（＝毎リクエストで再走査しない）。
 #[test]

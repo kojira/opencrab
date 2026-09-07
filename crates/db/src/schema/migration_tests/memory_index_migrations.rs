@@ -1,5 +1,3 @@
-use super::super::*;
-use super::support::seed_legacy_impressions;
 /// v20 の DB が **v21（impressions の再構築）→ v22（owner_pubkey の追加）** を
 /// 順に通り、**どちらのデータも失われない**（#314 と #319 が同じ版列に並ぶ）。
 ///
