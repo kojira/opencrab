@@ -125,13 +125,20 @@ mod tests {
 
         // メソッド名まで広げて綴り変種を拾う（限界は上記 doc 参照）。
         let needle = "is_control";
-        let allowed: [std::path::PathBuf; 2] = [
+        let allowed: [std::path::PathBuf; 4] = [
             crates_dir.join("core").join("src").join("injection.rs"),
             crates_dir
                 .join("db")
                 .join("src")
                 .join("queries")
                 .join("heartbeat.rs"),
+            // Wire metadata validation, not prompt-field sanitization.
+            crates_dir.join("extgate").join("src").join("protocol.rs"),
+            // Filesystem-safe Discord filename normalization, not prompt sanitization.
+            crates_dir
+                .join("discord-gateway")
+                .join("src")
+                .join("attachment.rs"),
         ];
 
         let mut offenders = Vec::new();
