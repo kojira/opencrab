@@ -80,20 +80,20 @@ pub fn spawn_instance(
         .map(AttachmentSpool::new)
         .transpose()?
         .map(Arc::new);
-    supervise(
-        client.clone(),
-        place.addresses.clone(),
+    supervise(Supervision {
+        client: client.clone(),
+        addresses: place.addresses.clone(),
         cfg,
         transport,
         token,
         overrides,
         delivery_targets,
         attachment_spool,
-    );
+    });
     Ok(client)
 }
 
-fn supervise(
+struct Supervision {
     client: Arc<InstanceClient>,
     addresses: Vec<String>,
     cfg: InstanceConfig,
@@ -102,7 +102,19 @@ fn supervise(
     overrides: HarnessOverrides,
     delivery_targets: BindingDeliveryTargets,
     attachment_spool: Option<Arc<AttachmentSpool>>,
-) {
+}
+
+fn supervise(supervision: Supervision) {
+    let Supervision {
+        client,
+        addresses,
+        cfg,
+        transport,
+        token,
+        overrides,
+        delivery_targets,
+        attachment_spool,
+    } = supervision;
     // 受信ループ（1 本）: fixture か serenity。ack 済み binding の channel だけ said にする。
     // 👀 は受信時ではなく say consumer 側（activity started）で付けるので、受信は transport/
     // reactions を持たない（R2）。
