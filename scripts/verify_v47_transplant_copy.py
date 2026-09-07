@@ -25,6 +25,12 @@ def connect_ro(path: Path) -> sqlite3.Connection:
     return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
 
 
+def connect_work_copy(path: Path) -> sqlite3.Connection:
+    # initialize() configures WAL. The rehearsal owns these temporary copies,
+    # so allow SQLite to open/checkpoint their WAL state normally.
+    return sqlite3.connect(path)
+
+
 def user_tables(conn: sqlite3.Connection) -> list[str]:
     return [
         row[0]
@@ -175,8 +181,8 @@ def verify_subject_ids(conn: sqlite3.Connection) -> list[str]:
 
 def verify_after(before_path: Path, copy_a: Path, copy_b: Path) -> None:
     before = json.loads(before_path.read_text(encoding="utf-8"))
-    a = connect_ro(copy_a)
-    b = connect_ro(copy_b)
+    a = connect_work_copy(copy_a)
+    b = connect_work_copy(copy_b)
     errors = []
     try:
         for label, conn in (("A", a), ("B", b)):
