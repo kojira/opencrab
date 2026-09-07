@@ -190,7 +190,7 @@ pub(super) fn expected_v43_user_tables(before: &[String]) -> Vec<String> {
 }
 
 /// 同じ TX 内の構造不変（設計 §1.6 / §5.2 の TX 内で閉じるもの）。
-/// 既存全行のダイジェスト比較は rehearsal スクリプト側（本番起動で全表 SCAN しない）。
+/// migration chain全体の構造はsynthetic fixtureのunit testsで検証する。
 fn assert_v43_invariants(conn: &Connection, before_tables: &[String]) -> rusqlite::Result<()> {
     let after = user_table_names(conn)?;
     let expected = expected_v43_user_tables(before_tables);
