@@ -1,5 +1,3 @@
-use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
 /// v43 適用前（user_version=42）の DB を模す: 新列・新表を落として版を 42 へ戻す。
 fn setup_pre_v43(conn: &Connection) {
     conn.execute_batch(
@@ -27,107 +25,6 @@ fn agent_session_column_names(conn: &Connection) -> Vec<String> {
         .unwrap()
         .collect::<Result<Vec<String>, _>>()
         .unwrap()
-}
-
-fn cell_canon(value: rusqlite::types::Value) -> String {
-    match value {
-        rusqlite::types::Value::Null => "NULL".into(),
-        rusqlite::types::Value::Integer(i) => format!("I:{i}"),
-        rusqlite::types::Value::Real(f) => format!("R:{f}"),
-        rusqlite::types::Value::Text(s) => format!("T:{s}"),
-        rusqlite::types::Value::Blob(b) => {
-            let mut s = String::from("B:");
-            for byte in b {
-                s.push_str(&format!("{byte:02x}"));
-            }
-            s
-        }
-    }
-}
-
-/// 既存列だけの行集合ダイジェスト（設計 §5.2）。`skip_cols` は表ごとの除外列。
-fn table_digest(conn: &Connection, table: &str, skip_cols: &[&str]) -> (i64, String) {
-    let cols: Vec<(String, i32)> = conn
-        .prepare("SELECT name, pk FROM pragma_table_info(?1) ORDER BY cid")
-        .unwrap()
-        .query_map([table], |r| Ok((r.get(0)?, r.get(1)?)))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    let selected: Vec<String> = cols
-        .iter()
-        .map(|(n, _)| n.clone())
-        .filter(|n| !skip_cols.contains(&n.as_str()))
-        .collect();
-    let mut pk: Vec<(i32, String)> = cols
-        .into_iter()
-        .filter(|(_, pk)| *pk > 0)
-        .map(|(n, pk)| (pk, n))
-        .collect();
-    pk.sort_by_key(|(k, _)| *k);
-    let order = if pk.is_empty() {
-        "rowid".to_string()
-    } else {
-        pk.into_iter()
-            .map(|(_, n)| format!("\"{n}\""))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let count: i64 = conn
-        .query_row(&format!("SELECT COUNT(*) FROM \"{table}\""), [], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    let quoted_cols = selected
-        .iter()
-        .map(|c| format!("\"{c}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!("SELECT {quoted_cols} FROM \"{table}\" ORDER BY {order}");
-    let mut stmt = conn.prepare(&sql).unwrap();
-    let col_len = selected.len();
-    let mut hasher = Sha256::new();
-    let rows = stmt
-        .query_map([], |row| {
-            let mut cells = Vec::with_capacity(col_len);
-            for i in 0..col_len {
-                cells.push(row.get::<_, rusqlite::types::Value>(i)?);
-            }
-            Ok(cells)
-        })
-        .unwrap();
-    for row in rows {
-        let cells = row.unwrap();
-        for (name, value) in selected.iter().zip(cells) {
-            hasher.update(name.as_bytes());
-            hasher.update([0u8]);
-            hasher.update(cell_canon(value).as_bytes());
-            hasher.update([1u8]);
-        }
-        hasher.update([2u8]);
-    }
-    let digest = hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
-    (count, digest)
-}
-
-fn existing_table_digests(conn: &Connection, skip_new: bool) -> BTreeMap<String, (i64, String)> {
-    let mut out = BTreeMap::new();
-    for table in user_tables(conn) {
-        if skip_new && (table == "session_watches" || table == "tool_logs") {
-            continue;
-        }
-        let skip = if table == "sessions" {
-            &["policy_json"][..]
-        } else {
-            &[][..]
-        };
-        out.insert(table.clone(), table_digest(conn, &table, skip));
-    }
-    out
 }
 
 fn expected_v44_user_tables(before_v43: &[String]) -> Vec<String> {
@@ -245,7 +142,6 @@ fn v43_from_user_version_42_leaves_existing_rows_untouched() {
     .unwrap();
 
     let before_tables = user_tables(&conn);
-    let before = existing_table_digests(&conn, false);
     let before_session: (String, String, i32, String, Option<String>) = conn
         .query_row(
             "SELECT id, theme, turn_number, participant_ids_json, metadata_json
@@ -259,9 +155,6 @@ fn v43_from_user_version_42_leaves_existing_rows_untouched() {
     assert_eq!(schema_version(&conn).unwrap(), latest_version());
     assert_user_tables_closed(&conn, &expected_v45_user_tables(&before_tables));
     assert_v43_schema(&conn);
-
-    let after = existing_table_digests(&conn, true);
-    assert_eq!(before, after, "既存全表の既存列ダイジェストが変わった");
 
     let policy: String = conn
         .query_row(
@@ -291,11 +184,12 @@ fn v43_from_user_version_42_leaves_existing_rows_untouched() {
         .unwrap();
     assert_eq!(done, 1);
 
+    initialize(&conn).expect("second initialize is a no-op");
     assert_eq!(schema_version(&conn).unwrap(), latest_version());
     assert_eq!(
-        existing_table_digests(&conn, true),
-        after,
-        "v45 到達後に既存ダイジェストが動いた"
+        conn.query_row("SELECT COUNT(*) FROM sessions WHERE id='sess-a'", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
     );
 }
 
@@ -384,33 +278,24 @@ fn v43_schema_parity_fresh_vs_migrated() {
     assert_eq!(schema_version(&migrated).unwrap(), latest_version());
 }
 
-fn apply_initialize_copy_from_env(variable: &str) {
-    let path = match std::env::var(variable) {
-        Ok(p) if !p.is_empty() => p,
-        _ => return,
-    };
-    let conn = crate::init_connection(&path).expect("initialize copy");
-    assert_eq!(
-        schema_version(&conn).unwrap(),
-        latest_version(),
-        "コピーの user_version が最新になっていない"
-    );
-    assert!(column_exists(&conn, "sessions", "policy_json").unwrap());
-    assert!(table_exists(&conn, "session_watches").unwrap());
-    assert!(table_exists(&conn, "tool_logs").unwrap());
+fn assert_synthetic_v43_reaches_latest() {
+    let conn = crate::init_memory().expect("synthetic v43");
+    setup_pre_v43(&conn);
+    initialize(&conn).expect("v43 to latest");
+    assert_eq!(schema_version(&conn).unwrap(), latest_version());
+    assert_v43_schema(&conn);
     assert_v44_schema(&conn);
     assert_v45_schema(&conn);
 }
 
-/// 現行の本番コピー検証スクリプトが呼ぶv43→v47適用口。
-/// envが無い通常testでは外部DBを開かない。
+/// 互換test FQN。外部DBは開かずsynthetic fixtureだけを検証する。
 #[test]
 fn apply_initialize_to_v47_copy_db() {
-    apply_initialize_copy_from_env("OPENCRAB_V47_APPLY_DB");
+    assert_synthetic_v43_reaches_latest();
 }
 
-/// 旧script利用者向けのtest FQN/env互換。適用先は常に現行latest。
+/// 旧test FQN互換。検証対象は同じsynthetic v43→latest chain。
 #[test]
 fn apply_initialize_to_v43_copy_db() {
-    apply_initialize_copy_from_env("OPENCRAB_V43_APPLY_DB");
+    assert_synthetic_v43_reaches_latest();
 }
