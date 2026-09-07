@@ -20,6 +20,7 @@ use crate::protocol::Said;
 use crate::registry::{ExtgateState, NostrHeldTurn, NostrSaidDecision, NostrWatchSets};
 use crate::ResolveCallerFn;
 
+mod attachments;
 mod binding;
 mod bundle_turn;
 mod nostr_profile;
@@ -28,6 +29,7 @@ mod record;
 mod tests;
 mod turn;
 
+use attachments::{materialize, promote_local_files, remove_local_files, remove_promoted_files};
 use binding::{binding_said_error, load_origin_row};
 pub(crate) use binding::{resolve_binding_context, BindingContext};
 use bundle_turn::{conclude_unrecorded_bundle, finish_bundle, BundleCtx};
@@ -81,6 +83,7 @@ pub fn process_said<R: AgentRuntime>(
 
     if let Some(seq) = existing_seq(&tx, &said.binding_id, &said.origin)? {
         tx.commit().map_err(|_| GateError::store())?;
+        remove_local_files(state, said);
         return Ok(SaidOutcome { seq: Some(seq) });
     }
 
@@ -111,6 +114,8 @@ pub fn process_said<R: AgentRuntime>(
                 return Err(GateError::store_logged("said.session_lookup", e));
             }
         };
+    let materialized_said = materialize(state, said)?;
+    let said = &materialized_said;
     let ctx = BundleCtx {
         state,
         runtime,
@@ -376,8 +381,17 @@ pub fn process_said<R: AgentRuntime>(
         );
         return Ok(SaidOutcome { seq: None });
     }
-    tx.commit()
-        .map_err(|e| GateError::store_logged("said.tx_commit", e))?;
+    let promoted = match promote_local_files(state, said) {
+        Ok(paths) => paths,
+        Err(error) => {
+            let _ = tx.rollback();
+            return Err(error);
+        }
+    };
+    if let Err(error) = tx.commit() {
+        remove_promoted_files(&promoted);
+        return Err(GateError::store_logged("said.tx_commit", error));
+    }
     drop(conn);
 
     if row.kind_id == "nostr" {

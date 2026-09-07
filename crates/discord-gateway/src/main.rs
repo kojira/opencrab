@@ -35,6 +35,7 @@ async fn run() -> anyhow::Result<()> {
     let token = take_bot_token().map(Arc::new);
     let place = Placement::load(&path)?;
     let socket = PathBuf::from(&place.core_socket);
+    let attachment_spool_root = place.attachment_spool_root.as_deref().map(PathBuf::from);
     // QC ハーネス差し替えは env からのみ（既定 OFF＝production 挙動）。
     let overrides = HarnessOverrides::from_env();
 
@@ -50,6 +51,7 @@ async fn run() -> anyhow::Result<()> {
             &bytes,
             token.clone(),
             overrides.clone(),
+            attachment_spool_root.clone(),
         )?;
     }
 

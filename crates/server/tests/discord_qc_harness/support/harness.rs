@@ -279,8 +279,15 @@ pub(crate) async fn wire_instance(core: &Core, fixture: &Fixture) -> Arc<Instanc
         fake_events: Some(fixture.path.clone()),
         dry_run: true,
     };
-    let client = spawn_instance(core.sock.clone(), &place, &config_bytes, None, overrides)
-        .expect("spawn_instance");
+    let client = spawn_instance(
+        core.sock.clone(),
+        &place,
+        &config_bytes,
+        None,
+        overrides,
+        None,
+    )
+    .expect("spawn_instance");
 
     let mut bound = false;
     for _ in 0..250 {
@@ -321,8 +328,15 @@ pub(crate) async fn wire_instance_on_channel(
         fake_events: Some(fixture.path.clone()),
         dry_run: true,
     };
-    let client = spawn_instance(core.sock.clone(), &place, &config_bytes, None, overrides)
-        .expect("spawn_instance");
+    let client = spawn_instance(
+        core.sock.clone(),
+        &place,
+        &config_bytes,
+        None,
+        overrides,
+        None,
+    )
+    .expect("spawn_instance");
 
     let mut bound = false;
     for _ in 0..250 {

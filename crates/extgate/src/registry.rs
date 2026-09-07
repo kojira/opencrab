@@ -260,6 +260,7 @@ pub struct ExtgateState {
     next_identity: AtomicU64,
     nostr_said_admit: Mutex<Option<NostrSaidAdmit>>,
     nostr_workspace: Mutex<Option<NostrWorkspaceFn>>,
+    attachment_inbox_root: Mutex<Option<PathBuf>>,
     nostr_relay: Mutex<Option<NostrRelayFn>>,
     nostr_watch_sets: Mutex<Option<NostrWatchSetsFn>>,
     nostr_privilege: Mutex<HashMap<i64, PrivilegeFire<NostrHeldTurn>>>,
@@ -290,6 +291,7 @@ impl ExtgateState {
             next_identity: AtomicU64::new(1),
             nostr_said_admit: Mutex::new(None),
             nostr_workspace: Mutex::new(None),
+            attachment_inbox_root: Mutex::new(None),
             nostr_relay: Mutex::new(None),
             nostr_watch_sets: Mutex::new(None),
             nostr_privilege: Mutex::new(HashMap::new()),
@@ -342,6 +344,17 @@ impl ExtgateState {
 
     pub fn set_nostr_workspace(&self, workspace: NostrWorkspaceFn) {
         *self.nostr_workspace.lock().expect("nostr workspace") = Some(workspace);
+    }
+
+    pub fn set_attachment_inbox_root(&self, root: PathBuf) {
+        *self
+            .attachment_inbox_root
+            .lock()
+            .expect("attachment inbox root") = Some(root);
+    }
+
+    pub fn attachment_inbox_root(&self) -> Option<PathBuf> {
+        self.attachment_inbox_root.lock().ok()?.clone()
     }
 
     pub fn set_nostr_relay(&self, relay: NostrRelayFn) {

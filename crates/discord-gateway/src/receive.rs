@@ -76,6 +76,13 @@ fn message_to_line(msg: &SerenityMessage) -> String {
             "username": msg.author.name,
         },
         "content": msg.content,
+        "attachments": msg.attachments.iter().map(|attachment| serde_json::json!({
+            "id": attachment.id.get().to_string(),
+            "filename": attachment.filename,
+            "content_type": attachment.content_type,
+            "size": attachment.size,
+            "url": attachment.url,
+        })).collect::<Vec<_>>(),
     })
     .to_string()
 }

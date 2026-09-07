@@ -382,7 +382,11 @@ fn parse_local_attachment(
 ) -> Result<SaidAttachment, GateError> {
     let id = parse_uuid(&nonempty_map_str(obj, "id")?)?;
     let name = nonempty_map_str(obj, "name")?;
-    if name.chars().count() > 255 || name.chars().any(|c| c.is_control()) {
+    if name.chars().count() > 255
+        || name
+            .chars()
+            .any(|c| c.is_control() || c == '/' || c == '\\')
+    {
         return Err(GateError::new(ErrorCode::BadRequest));
     }
     let media_type = match obj.get("media_type") {

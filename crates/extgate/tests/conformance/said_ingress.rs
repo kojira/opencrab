@@ -107,6 +107,58 @@ async fn empty_said_is_bad_request_no_record() {
 }
 
 #[tokio::test]
+async fn local_html_is_verified_recorded_and_promoted() {
+    use sha2::Digest as _;
+
+    let h = Harness::start().await;
+    let (mut s, instance_id, binding_id) = ready_pair(&h).await;
+    let attachments = tempfile::tempdir().unwrap();
+    let inbox = attachments.path().join("inbox");
+    let relative = format!("{instance_id}/origin/attachment.bin");
+    let source = inbox.join(&relative);
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    let body = b"<html><body>GPU OOM explanation</body></html>";
+    std::fs::write(&source, body).unwrap();
+    h.state
+        .set_attachment_inbox_root(inbox.canonicalize().unwrap());
+    let hash = format!("{:x}", sha2::Sha256::digest(body));
+
+    write_frame(
+        &mut s,
+        &json!({
+            "id": "local-1", "m": "said", "binding_id": binding_id,
+            "origin": "local-html", "author_id": "u1", "text": "",
+            "attachments": [{
+                "kind": "file",
+                "id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                "name": "page.html", "media_type": "text/html",
+                "size": body.len(), "sha256": hash, "local_path": relative
+            }]
+        }),
+    )
+    .await;
+    let response = read_said_response(&mut s, "local-1").await;
+    assert_eq!(response["seq"], 1);
+    assert!(!source.exists());
+    assert!(attachments
+        .path()
+        .join("store/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.bin")
+        .is_file());
+    let conn = h.state.db.lock().unwrap();
+    let (content, metadata): (String, String) = conn
+        .query_row(
+            "SELECT content, metadata_json FROM memory_sessions WHERE json_extract(metadata_json, '$.external_origin') = 'local-html' ORDER BY id DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(content.contains("GPU OOM explanation"));
+    assert!(!metadata.contains("https://"));
+    assert!(!metadata.contains(attachments.path().to_string_lossy().as_ref()));
+    assert!(metadata.contains("store/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.bin"));
+}
+
+#[tokio::test]
 async fn image_only_said_is_recorded_and_starts_turn() {
     let h = Harness::start().await;
     let (mut s, _, binding_id) = ready_pair(&h).await;
