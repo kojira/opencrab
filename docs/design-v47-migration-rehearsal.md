@@ -18,13 +18,13 @@ Issue: https://github.com/kojira/opencrab/issues/959
 
 ### 検証script
 
-既存の`OPENCRAB_REHEARSAL_DB`入力を維持し、sourceをSQLite read-only URIで開く。最初にSQLite `.backup`で一時領域へ`pristine.db`を作り、そのcopy A/Bだけに`opencrab_db::schema::initialize`を適用する。
+既存の`OPENCRAB_REHEARSAL_DB`入力を維持する。source本体と存在するWAL/SHM sidecarはSQLiteで直接開かず、存在・size・SHA-256を記録して一時領域へfile copyする。SQLiteはstaged bundleだけを開き、`.backup`で`pristine.db`を作る。そのcopy A/Bだけに`opencrab_db::schema::initialize`を適用する。
 
 scriptは次を担当する。
 
-1. sourceとpristineのversion・schema・既存データsnapshotを採取する
-2. Aへ1回、Bへ2回initializeを適用する
-3. v43→v47の許可済みschema deltaだけを検証する
+1. source DB/WAL/SHM bundleとpristineのversion・schema・既存データsnapshotを採取する
+2. Aへ1回、Bへ2回initializeを適用し、別の空DBからfresh v47 schema catalogを作る
+3. v43→v47の許可済みschema deltaだけをfresh catalogと照合する
 4. 元から存在した全tableについて、元から存在した全columnのCOUNTと型付きcell digestが不変であることを検証する
 5. A/Bの最終schemaとdata snapshotが一致することを検証する
 6. `integrity_check`と`foreign_key_check`を検証する
@@ -78,19 +78,13 @@ v43 sourceをinitializeした直後は上記新規tableが空であることを�
 
 移行前tableの比較では、移行後に追加されたcolumnだけを除外し、移行前から存在したcolumnを全て比較する。tableごとのCOUNTとdigestの双方を一致させる。
 
-source不変確認には実行前後の次を使う。
-
-- `PRAGMA user_version`
-- file size
-- SHA-256
-
-sourceはread-only接続以外で開かない。
+source不変確認ではDB本体・`-wal`・`-shm`それぞれの存在、file size、SHA-256を実行前後で比較する。`PRAGMA user_version`はsource bundleを複製したstaged DBから確認する。source bundle自体はSQLiteで開かず、通常file read以外を行わない。
 
 ## 権限・安全境界
 
 - PR #958検証では既存の隔離済みQC backupを入力に使う
 - production DB pathをscriptや文書へ保存しない
-- sourceへwrite connectionを作らない
+- sourceへSQLite connectionを作らず、DB/WAL/SHMをstagingへ複製してから開く
 - temporary copiesは`mktemp`配下に作り、終了時に削除する
 - DB内容、token、個人識別子を標準出力へ出さない
 - table名、件数、version、digest一致/不一致だけを報告する
@@ -151,7 +145,7 @@ migration SQL、production runtime、gateway、webには変更しない。
 ## 受入条件
 
 - sourceへwriteせずv43→v47 rehearsalがgreen
-- sourceのSHA-256、size、user_versionが不変
+- source DB/WAL/SHMの存在、SHA-256、sizeが不変で、staged sourceのuser_versionが43
 - 既存tableの既存columnにCOUNT/digest差分ゼロ
 - 許可したtable/column以外のschema deltaゼロ
 - `agents.subject_id`のNOT NULL相当・正整数・一意性を確認

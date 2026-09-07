@@ -5,6 +5,7 @@ import hashlib
 import json
 import sqlite3
 import sys
+import tempfile
 from pathlib import Path
 
 SOURCE_VERSION = 43
@@ -45,6 +46,12 @@ def columns(conn: sqlite3.Connection, table: str) -> list[str]:
     return [row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')]
 
 
+def hash_frame(digest: object, tag: bytes, payload: bytes) -> None:
+    digest.update(tag)
+    digest.update(len(payload).to_bytes(8, "big"))
+    digest.update(payload)
+
+
 def table_digest(
     conn: sqlite3.Connection, table: str, selected: list[str]
 ) -> dict[str, object]:
@@ -57,22 +64,25 @@ def table_digest(
     count = conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
     digest = hashlib.sha256()
     for row in conn.execute(f'SELECT {quoted} FROM "{table}" ORDER BY {order}'):
+        digest.update(b"R")
         for name, value in zip(selected, row):
-            digest.update(name.encode("utf-8"))
-            digest.update(b"\0")
+            hash_frame(digest, b"N", name.encode("utf-8"))
             if value is None:
-                cell = b"NULL"
+                cell = b""
+                tag = b"0"
             elif isinstance(value, bytes):
-                cell = b"B:" + value.hex().encode("ascii")
+                cell = value
+                tag = b"B"
             elif isinstance(value, int):
-                cell = f"I:{value}".encode("ascii")
+                cell = str(value).encode("ascii")
+                tag = b"I"
             elif isinstance(value, float):
-                cell = f"R:{value}".encode("ascii")
+                cell = repr(value).encode("ascii")
+                tag = b"F"
             else:
-                cell = f"T:{value}".encode("utf-8")
-            digest.update(cell)
-            digest.update(b"\1")
-        digest.update(b"\2")
+                cell = value.encode("utf-8")
+                tag = b"T"
+            hash_frame(digest, tag, cell)
     return {"count": count, "digest": digest.hexdigest(), "columns": selected}
 
 
@@ -108,6 +118,25 @@ def integrity_errors(conn: sqlite3.Connection) -> list[str]:
     return errors
 
 
+def bundle_manifest(path: Path, output: Path) -> None:
+    manifest = {}
+    for suffix in ("", "-wal", "-shm"):
+        item = Path(str(path) + suffix)
+        if not item.exists():
+            manifest[suffix] = {"exists": False}
+            continue
+        digest = hashlib.sha256()
+        with item.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+        manifest[suffix] = {
+            "exists": True,
+            "size": item.stat().st_size,
+            "sha256": digest.hexdigest(),
+        }
+    output.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+
+
 def capture_before(pristine: Path, output: Path) -> None:
     conn = connect_ro(pristine)
     try:
@@ -117,6 +146,11 @@ def capture_before(pristine: Path, output: Path) -> None:
         errors = integrity_errors(conn)
         if errors:
             raise SystemExit("source copy invalid: " + "; ".join(errors))
+        unexpected = set(user_tables(conn)) & NEW_TABLES
+        if unexpected:
+            raise SystemExit(
+                "v43 source contains future tables: " + ", ".join(sorted(unexpected))
+            )
         snapshot = full_snapshot(conn)
     finally:
         conn.close()
@@ -165,7 +199,8 @@ def compare_existing(
 
 def verify_subject_ids(conn: sqlite3.Connection) -> list[str]:
     null_or_bad = conn.execute(
-        "SELECT COUNT(*) FROM agents WHERE subject_id IS NULL OR subject_id <= 0"
+        "SELECT COUNT(*) FROM agents "
+        "WHERE subject_id IS NULL OR typeof(subject_id) != 'integer' OR subject_id <= 0"
     ).fetchone()[0]
     duplicates = conn.execute(
         "SELECT COUNT(*) FROM ("
@@ -179,10 +214,49 @@ def verify_subject_ids(conn: sqlite3.Connection) -> list[str]:
     return errors
 
 
-def verify_after(before_path: Path, copy_a: Path, copy_b: Path) -> None:
+def migration_catalog(conn: sqlite3.Connection) -> dict[str, object]:
+    table_details = {}
+    for table in sorted(NEW_TABLES):
+        table_details[table] = {
+            "columns": list(conn.execute(f'PRAGMA table_info("{table}")')),
+            "foreign_keys": list(conn.execute(f'PRAGMA foreign_key_list("{table}")')),
+            "indexes": list(conn.execute(f'PRAGMA index_list("{table}")')),
+            "sql": conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone(),
+        }
+    object_names = {
+        "idx_agents_subject_id",
+        "agents_subject_id_insert_guard",
+        "agents_subject_id_assign",
+        "agents_subject_id_update_guard",
+    }
+    objects = list(
+        conn.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master "
+            "WHERE tbl_name IN (%s) OR name IN (%s) ORDER BY type, name"
+            % (
+                ",".join("?" for _ in NEW_TABLES),
+                ",".join("?" for _ in object_names),
+            ),
+            tuple(sorted(NEW_TABLES)) + tuple(sorted(object_names)),
+        )
+    )
+    subject = [
+        row
+        for row in conn.execute('PRAGMA table_info("agents")')
+        if row[1] == "subject_id"
+    ]
+    return {"tables": table_details, "objects": objects, "subject_id": subject}
+
+
+def verify_after(
+    before_path: Path, copy_a: Path, copy_b: Path, fresh_path: Path
+) -> None:
     before = json.loads(before_path.read_text(encoding="utf-8"))
     a = connect_work_copy(copy_a)
     b = connect_work_copy(copy_b)
+    fresh = connect_work_copy(fresh_path)
     errors = []
     try:
         for label, conn in (("A", a), ("B", b)):
@@ -199,9 +273,15 @@ def verify_after(before_path: Path, copy_a: Path, copy_b: Path) -> None:
                         errors.append(f"copy {label}: new table {table} count={count}; want 0")
         if full_snapshot(a) != full_snapshot(b):
             errors.append("copy A and twice-initialized copy B differ")
+        expected_catalog = migration_catalog(fresh)
+        if migration_catalog(a) != expected_catalog:
+            errors.append("copy A migration schema differs from fresh v47 catalog")
+        if migration_catalog(b) != expected_catalog:
+            errors.append("copy B migration schema differs from fresh v47 catalog")
     finally:
         a.close()
         b.close()
+        fresh.close()
     if errors:
         print("v47 copy verification RED:")
         for error in errors:
@@ -214,13 +294,71 @@ def verify_after(before_path: Path, copy_a: Path, copy_b: Path) -> None:
     print("  integrity/foreign keys OK; two-copy/no-op result matched")
 
 
+def self_test() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        malformed = root / "malformed.db"
+        conn = sqlite3.connect(malformed)
+        conn.executescript(
+            "CREATE TABLE gateway_operation_calls (wrong TEXT); PRAGMA user_version=43;"
+        )
+        conn.close()
+        try:
+            capture_before(malformed, root / "before.json")
+        except SystemExit as error:
+            if "future tables" not in str(error):
+                raise
+        else:
+            raise AssertionError("future table in v43 source was accepted")
+
+        first = sqlite3.connect(root / "first.db")
+        second = sqlite3.connect(root / "second.db")
+        first.execute("CREATE TABLE t (a TEXT, b TEXT)")
+        second.execute("CREATE TABLE t (a TEXT, b TEXT)")
+        first.execute("INSERT INTO t VALUES (?, ?)", ("x\u0001N", "y"))
+        second.execute("INSERT INTO t VALUES (?, ?)", ("x", "N\u0001y"))
+        assert table_digest(first, "t", ["a", "b"]) != table_digest(
+            second, "t", ["a", "b"]
+        )
+        first.close()
+        second.close()
+
+        typed = sqlite3.connect(root / "typed.db")
+        typed.execute("CREATE TABLE agents (subject_id)")
+        typed.execute("INSERT INTO agents VALUES (1.5)")
+        assert verify_subject_ids(typed)
+        typed.close()
+
+        bundle = root / "bundle.db"
+        bundle.write_bytes(b"db")
+        Path(str(bundle) + "-wal").write_bytes(b"uncheckpointed-wal")
+        manifest_before = root / "bundle-before.json"
+        bundle_manifest(bundle, manifest_before)
+        state = json.loads(manifest_before.read_text(encoding="utf-8"))
+        assert state["-wal"]["exists"] is True
+        assert state["-shm"]["exists"] is False
+        Path(str(bundle) + "-shm").write_bytes(b"new-shm")
+        manifest_after = root / "bundle-after.json"
+        bundle_manifest(bundle, manifest_after)
+        assert manifest_before.read_bytes() != manifest_after.read_bytes()
+    print("verify_v47_transplant_copy self-test GREEN")
+
+
 def main() -> None:
     if len(sys.argv) < 2:
-        raise SystemExit("usage: verify_v47_transplant_copy.py before|after ...")
-    if sys.argv[1] == "before" and len(sys.argv) == 4:
+        raise SystemExit(
+            "usage: verify_v47_transplant_copy.py manifest|before|after|self-test ..."
+        )
+    if sys.argv[1] == "manifest" and len(sys.argv) == 4:
+        bundle_manifest(Path(sys.argv[2]), Path(sys.argv[3]))
+    elif sys.argv[1] == "before" and len(sys.argv) == 4:
         capture_before(Path(sys.argv[2]), Path(sys.argv[3]))
-    elif sys.argv[1] == "after" and len(sys.argv) == 5:
-        verify_after(Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]))
+    elif sys.argv[1] == "after" and len(sys.argv) == 6:
+        verify_after(
+            Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]), Path(sys.argv[5])
+        )
+    elif sys.argv[1] == "self-test" and len(sys.argv) == 2:
+        self_test()
     else:
         raise SystemExit("invalid arguments")
 

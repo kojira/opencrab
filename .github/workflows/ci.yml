@@ -85,6 +85,9 @@ jobs:
       - name: No private identifiers
         run: bash scripts/check-no-private-identifiers.sh
 
+      - name: Migration rehearsal audit self-test
+        run: python3 scripts/verify_v47_transplant_copy.py self-test
+
       - name: Dependency boundary checks
         run: bash scripts/check-deps.sh
 
