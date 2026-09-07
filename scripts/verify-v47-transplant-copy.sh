@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Representative-copy rehearsal for the current v43 -> v47 migration chain.
-# The supplied source bundle is read only as ordinary files; SQLite opens only staged copies.
+# Rust-backed representative-copy rehearsal for the current v43 -> v47 migration chain.
+# The supplied source bundle is read only as files; SQLite opens only staged copies.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -33,8 +33,21 @@ clone_file() {
   cp -p "$from" "$to"
 }
 
-python3 scripts/verify_v47_transplant_copy.py \
-  manifest "$src" "${workdir}/source-before.json"
+bundle_manifest() {
+  local db="$1" suffix file
+  for suffix in "" -wal -shm; do
+    file="${db}${suffix}"
+    if [[ -f "$file" ]]; then
+      printf '%s|present|' "$suffix"
+      stat -f %z "$file" 2>/dev/null || stat -c %s "$file"
+      shasum -a 256 "$file" | awk '{print $1}'
+    else
+      printf '%s|absent\n' "$suffix"
+    fi
+  done
+}
+
+bundle_manifest "$src" > "${workdir}/source-before.txt"
 clone_file "$src" "${workdir}/staged.db"
 for suffix in -wal -shm; do
   if [[ -f "${src}${suffix}" ]]; then
@@ -46,29 +59,13 @@ echo "==> create pristine SQLite backup from staged source bundle"
 sqlite3 "file:${workdir}/staged.db?mode=ro" ".backup '${workdir}/pristine.db'"
 sqlite3 "${workdir}/pristine.db" ".backup '${workdir}/a.db'"
 sqlite3 "${workdir}/pristine.db" ".backup '${workdir}/b.db'"
-python3 scripts/verify_v47_transplant_copy.py \
-  before "${workdir}/pristine.db" "${workdir}/before.json"
 
-echo "==> initialize fresh v47 schema catalog"
-OPENCRAB_V47_APPLY_DB="${workdir}/fresh.db" cargo test -p opencrab-db --lib \
-  schema::migration_tests::apply_initialize_to_v47_copy_db -- --exact --nocapture
+echo "==> Rust v43 -> v47 data/schema/fixed-point rehearsal"
+OPENCRAB_V47_REHEARSAL_DIR="$workdir" cargo test -p opencrab-db --lib \
+  schema::migration_tests::rehearse_v43_copy_to_v47 -- --exact --nocapture
 
-echo "==> initialize copy A once"
-OPENCRAB_V47_APPLY_DB="${workdir}/a.db" cargo test -p opencrab-db --lib \
-  schema::migration_tests::apply_initialize_to_v47_copy_db -- --exact --nocapture
-
-echo "==> initialize copy B twice (second apply must be a no-op)"
-OPENCRAB_V47_APPLY_DB="${workdir}/b.db" cargo test -p opencrab-db --lib \
-  schema::migration_tests::apply_initialize_to_v47_copy_db -- --exact --nocapture
-OPENCRAB_V47_APPLY_DB="${workdir}/b.db" cargo test -p opencrab-db --lib \
-  schema::migration_tests::apply_initialize_to_v47_copy_db -- --exact --nocapture
-
-python3 scripts/verify_v47_transplant_copy.py after \
-  "${workdir}/before.json" "${workdir}/a.db" "${workdir}/b.db" "${workdir}/fresh.db"
-
-python3 scripts/verify_v47_transplant_copy.py \
-  manifest "$src" "${workdir}/source-after.json"
-if ! cmp -s "${workdir}/source-before.json" "${workdir}/source-after.json"; then
+bundle_manifest "$src" > "${workdir}/source-after.txt"
+if ! cmp -s "${workdir}/source-before.txt" "${workdir}/source-after.txt"; then
   echo "source DB/WAL/SHM bundle changed during rehearsal" >&2
   exit 1
 fi
