@@ -8,7 +8,6 @@
 826	crates/llm/src/router.rs
 891	crates/nostr/src/watch.rs
 822	crates/server/src/api/agents_messages.rs
-913	crates/server/src/api/providers.rs
 817	crates/server/src/api/schedules.rs
 1208	crates/server/src/main.rs
 897	crates/server/src/nostr_runner_impl.rs
