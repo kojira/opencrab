@@ -1,4 +1,4 @@
-# OpenCrab 汎用受信添付設計 DC-953 v0.4
+# OpenCrab 汎用受信添付設計 DC-953 v0.5
 
 _Issue #953 — gatewayが取得した添付を、platform非依存のlocal attachmentとしてcoreへ渡す詳細設計。承認前・未実装。_
 
@@ -9,10 +9,10 @@ _Issue #953 — gatewayが取得した添付を、platform非依存のlocal atta
 | 項目 | 値 |
 | --- | --- |
 | 対象Issue | [#953](https://github.com/kojira/opencrab/issues/953) |
-| 設計版 | `DC-953 v0.4` |
+| 設計版 | `DC-953 v0.5` |
 | 状態 | 設計確定（要件を満たす設計判断を委任済み） |
 | 実装 | 未着手 |
-| v0.3からの変更 | Discord申告sizeを上限ではなく完全性検証値と明記。設計委任に基づき確定 |
+| v0.4からの変更 | 本筋のlocal attachment vertical sliceへ限定し、派生機能を後続候補へ分離 |
 
 ## 🎯 要件
 
@@ -193,9 +193,7 @@ InboundAttachment
 
 対象は`text/*`、`application/json`、`application/xml`、`application/javascript`で、UTF-8検証を通るfileとする。原本は切り詰めず全量保存する。
 
-初回promptにはname、media type、size、attachment IDと、現在のconversation budget内に収まる先頭previewだけを入れる。全内容はplatform非依存の`read_attachment` actionでoffset/lengthを指定して分割読取できる。これによりDiscordのfile sizeを受信上限にしたまま、model contextへ一度に詰め込まない。
-
-`read_attachment`は現在のagent/sessionから参照できるattachment IDだけを受理し、絶対pathを引数に取らない。返却量は既存tool result budgetに従うが、offsetを進めれば原本の末尾まで読める。
+UTF-8 textはuser bodyと分離した汎用attachment partとして会話化する。原本は切り詰めず保存し、LLMへ渡す会話量には既存のconversation budgetを適用する。新しいreader APIは本Issueでは追加しない。
 
 HTMLはrender、script実行、外部resource取得をせずraw UTF-8 textとして読む。返却textはuser supplied attachmentとして明示delimiter内に入れる。
 
@@ -207,7 +205,7 @@ HTMLはrender、script実行、外部resource取得をせずraw UTF-8 textとし
 
 ### Image
 
-検証済みlocal fileを汎用image partとしてprovider adapterへ渡す。providerが原本sizeやdimensionsを受理できない場合も受信を拒否せず、原本を保持したまま一時的なprovider用派生画像を縮小・再encodeする。派生物はcache可能だがsession attachmentの正本にはしない。外部URLはproviderへ渡さない。
+検証済みlocal fileを汎用image partとしてprovider入力へ変換する。provider側の制限はDiscordからの受信可否に使わず、原本を保持する。派生画像cache等は本Issueでは追加しない。外部URLはproviderへ渡さない。
 
 ### Binary
 
@@ -264,12 +262,11 @@ session log metadataの`attachments`配列へ汎用metadataと相対`storage_key
 - [ ] 本文なし、複数、画像/text混在で順序が保たれる
 - [ ] binding未ackではdownloadされない
 - [ ] 未認可、duplicate、Said失敗時にinbox fileが残らない
-- [ ] URL、token、署名query、絶対pathがwire、DB、ログ、LLMへ出ない
+- [ ] URL、token、署名query、絶対pathがwire、DB、LLMへ出ない
 - [ ] traversal、symlink、hash差異、size差異を拒否する
 - [ ] Discordが受理したsize/countをOpenCrab独自上限で拒否しない
-- [ ] `declared_size`一致、disk reserve、無通信timeoutを境界値で検証する
-- [ ] 大きなtextを`read_attachment`で先頭から末尾まで分割読取できる
-- [ ] provider制限を超える画像でも原本を保持し、派生画像で入力できる
+- [ ] `declared_size`一致と無通信timeoutを境界値で検証する
+- [ ] HTML/text原本と画像原本を全量保存する
 - [ ] partial failureでも一つのturnとして処理する
 - [ ] 旧URL image Saidと添付なしSaidの既存test/FQNを維持する
 - [ ] Rust、Web、Conformance CIがgreen
@@ -288,13 +285,13 @@ session log metadataの`attachments`配列へ汎用metadataと相対`storage_key
 ## ✍️ 実装と承認ゲート
 
 1. 汎用型とwire contract test
-2. Core attachment serviceと`read_attachment`
+2. Core attachment materialization
 3. Extgate validationとpersistence
 4. Discord gateway download adapter
-5. Provider-neutral text/image変換と派生画像
+5. Provider-neutral text/image変換
 6. Cleanupと非回帰test
 7. QC配備とユーザー動作確認
 8. PR作成前の明示OK
 9. PR review、最終動作確認、マージ前の明示OK
 
-要件を満たし、綺麗でシンプルにする範囲の設計判断はユーザーから委任済みである。本v0.4を確定版として、`origin/integration/transplant`から実装ブランチを作成する。要件外の仕様変更が必要になった場合だけ設計へ戻り、再確認する。
+要件を満たし、綺麗でシンプルにする範囲の設計判断はユーザーから委任済みである。本v0.5を確定版として、`origin/integration/transplant`から実装ブランチを作成する。要件外の仕様変更が必要になった場合だけ設計へ戻り、再確認する。
