@@ -54,8 +54,27 @@ async fn scenario_915_max_iterations_flag_only_on_last_delivered_say() {
         "上限まで回らない（LLM calls={}）",
         mock.calls.load(Ordering::SeqCst)
     );
-    // 打ち切り後の決着（ended）猶予。
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    // 固定sleepではなく、最後の対象sayへの完了reactionをboundedに待つ。
+    let settled = {
+        let buf = buf.clone();
+        wait_until(move || {
+            let events = captured(&buf);
+            let Some(last_say) = events
+                .iter()
+                .rev()
+                .find(|c| c.kind == "say" && c.channel == CHANNEL && c.body.contains(ML_PREFIX))
+            else {
+                return false;
+            };
+            events.iter().any(|c| {
+                c.kind == "system_reaction"
+                    && c.emoji.contains(SYS_COMPLETED)
+                    && c.message == last_say.message
+            })
+        })
+        .await
+    };
+    assert!(settled, "上限打ち切り後の完了reactionがtimeoutした");
 
     // このターンの mlsay say を buffer 順（配送順）で集める。最後の 1 つが「最後に配送した投稿」。
     let ml_says: Vec<String> = captured(&buf)
