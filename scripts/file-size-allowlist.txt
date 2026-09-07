@@ -1,4 +1,3 @@
-844	crates/actions/src/a2ui.rs
 807	crates/core/src/memory/daily_log_indexer.rs
 826	crates/core/src/workspace.rs
 826	crates/llm/src/router.rs
