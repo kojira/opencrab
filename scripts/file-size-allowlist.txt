@@ -6,7 +6,6 @@
 807	crates/core/src/memory/daily_log_indexer.rs
 826	crates/core/src/workspace.rs
 919	crates/llm/src/providers/acp.rs
-951	crates/llm/src/providers/anthropic.rs
 826	crates/llm/src/router.rs
 891	crates/nostr/src/watch.rs
 927	crates/server/src/api/agents.rs
