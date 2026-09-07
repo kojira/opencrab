@@ -49,16 +49,40 @@ const FORBIDDEN: &[&str] = &[
 /// module 切り出しで解消される（TODO）。
 ///
 /// 分類の内訳（#852 短報）:
-/// - inbound.rs / completion.rs: **原理的には profile dispatch で汎化可能**な
-///   `kind_id == "nostr"` 分岐を持つが、汎化は挙動に触れるため audit 専用の本 PR の
-///   対象外（phase-2）。
+/// - inbound/mod.rs / binding.rs / record.rs / turn.rs / completion.rs:
+///   **原理的には profile dispatch で汎化可能**な `kind_id == "nostr"` 分岐や
+///   platform 別 owner/caller/pubkey/admit 処理を持つが、汎化は挙動に触れるため
+///   behavior-preserving な module split の対象外（phase-2）。
+/// - inbound/bundle_turn.rs / nostr_profile.rs: Nostr Bundle の完了処理と relay/render/V1
+///   解釈という **Nostr profile 固有**の実装。profile module 内には分離済みだが、profile
+///   dispatch による generic 化は phase-2。
 /// - registry.rs / bundle.rs / lib.rs: Nostr の wire 形式・admit 状態機械・platform 別
 ///   ID 解決など **本質的に platform 固有**な実装。あるべき姿は profile module/crate 側
 ///   への配置（phase-2）。
 const ALLOWLIST: &[(&str, &str)] = &[
     (
-        "extgate/src/inbound.rs",
-        "Nostr 受信の wire 形式（[NOSTRGATE/V1]）解釈・watch 束ね・prompt 整形を持つ未分離の Nostr profile。kind_id 分岐は phase-2 で profile dispatch へ。",
+        "extgate/src/inbound/mod.rs",
+        "said orchestration に Nostr admit/watch と kind_id dispatch が残る。profile dispatch 化は phase-2。",
+    ),
+    (
+        "extgate/src/inbound/binding.rs",
+        "binding owner 解決が Nostr pubkey / Discord config の platform 別 DB schema に依存する。registry 化は phase-2。",
+    ),
+    (
+        "extgate/src/inbound/bundle_turn.rs",
+        "NostrBundleAdmit の完了・relay・Nostr watch prompt を扱う Nostr profile plumbing。phase-2 で profile dispatch 化。",
+    ),
+    (
+        "extgate/src/inbound/nostr_profile.rs",
+        "Nostr 受信の wire 形式（[NOSTRGATE/V1]）解釈・relay・renderer kind・prompt 整形を持つ Nostr profile。",
+    ),
+    (
+        "extgate/src/inbound/record.rs",
+        "Nostr V1 reply_to を session metadata へ写す kind_id dispatch が残る。profile dispatch 化は phase-2。",
+    ),
+    (
+        "extgate/src/inbound/turn.rs",
+        "turn caller platform・inbound pubkey・held turn に Nostr profile 分岐/型が残る。profile dispatch 化は phase-2。",
     ),
     (
         "extgate/src/completion.rs",
@@ -331,16 +355,31 @@ fn scan_source(rel: &str, text: &str) -> Vec<String> {
     finder.violations
 }
 
-/// `dir` 以下の `.rs` を再帰列挙する。
-fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+/// 外部ファイルへ分離されたテスト専用ソースか。
+fn is_external_test_source(src_root: &Path, path: &Path) -> bool {
+    let relative = path.strip_prefix(src_root).unwrap_or(path);
+    let file_name = relative.file_name().and_then(|name| name.to_str());
+    file_name == Some("tests.rs")
+        || file_name.is_some_and(|name| name.ends_with("_tests.rs"))
+        || relative
+            .components()
+            .any(|component| component.as_os_str() == "tests")
+}
+
+/// `src_root` 以下の production `.rs` を再帰列挙する。
+fn collect_rs_files(src_root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
     let entries =
         std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read_dir {} に失敗: {e}", dir.display()));
     for entry in entries {
         let entry = entry.expect("dir entry");
         let path = entry.path();
         if path.is_dir() {
-            collect_rs_files(&path, out);
-        } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
+            if !is_external_test_source(src_root, &path) {
+                collect_rs_files(src_root, &path, out);
+            }
+        } else if path.extension().and_then(|s| s.to_str()) == Some("rs")
+            && !is_external_test_source(src_root, &path)
+        {
             out.push(path);
         }
     }
@@ -355,6 +394,30 @@ fn rel_from_crates(crates_dir: &Path, path: &Path) -> String {
 }
 
 #[test]
+fn external_test_source_paths_match_file_size_gate_convention() {
+    let root = Path::new("checkout/tests/opencrab/crates/extgate/src");
+    assert!(is_external_test_source(root, &root.join("foo/tests.rs")));
+    assert!(is_external_test_source(
+        root,
+        &root.join("foo/unit_tests.rs")
+    ));
+    assert!(is_external_test_source(
+        root,
+        &root.join("foo/tests/bar.rs")
+    ));
+    assert!(!is_external_test_source(root, &root.join("foo/mod.rs")));
+    assert!(!is_external_test_source(root, &root.join("foo/bar.rs")));
+    assert!(!is_external_test_source(
+        root,
+        &root.join("foo/contest/bar.rs")
+    ));
+    assert!(!is_external_test_source(
+        root,
+        &root.join("foo/tests_support.rs")
+    ));
+}
+
+#[test]
 fn gateway_shared_layer_has_no_platform_branch() {
     // extgate の manifest は `crates/extgate`。その親が `crates/`。
     let crates_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -362,9 +425,11 @@ fn gateway_shared_layer_has_no_platform_branch() {
         .expect("crates/ dir")
         .to_path_buf();
 
+    let extgate_src = crates_dir.join("extgate/src");
+    let gate_client_src = crates_dir.join("gate-client/src");
     let mut files = Vec::new();
-    collect_rs_files(&crates_dir.join("extgate/src"), &mut files);
-    collect_rs_files(&crates_dir.join("gate-client/src"), &mut files);
+    collect_rs_files(&extgate_src, &extgate_src, &mut files);
+    collect_rs_files(&gate_client_src, &gate_client_src, &mut files);
     files.sort();
     assert!(
         !files.is_empty(),
