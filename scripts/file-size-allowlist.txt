@@ -28,5 +28,4 @@
 817	crates/server/src/api/schedules.rs
 950	crates/server/src/lib.rs
 1208	crates/server/src/main.rs
-1351	crates/server/src/memory_condense.rs
 897	crates/server/src/nostr_runner_impl.rs
