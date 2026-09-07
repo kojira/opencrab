@@ -66,6 +66,46 @@ fn call(call_id: &str, tool_name: &str, arguments: Value) -> Value {
     })
 }
 
+#[test]
+fn user_speech_keeps_stable_identity_with_sanitized_per_message_label() {
+    let logs = vec![
+        row(
+            1,
+            "speech",
+            Some("user-a"),
+            "one",
+            Some(json!({"user_name": "Alice"})),
+        ),
+        row(
+            2,
+            "speech",
+            Some("user-b"),
+            "two",
+            Some(json!({"user_name": "Alice"})),
+        ),
+        row(
+            3,
+            "speech",
+            Some("user-a"),
+            "three",
+            Some(json!({"user_name": "A|[bad]\nname"})),
+        ),
+        row(4, "speech", Some("user-c"), "four", None),
+    ];
+    let speakers: Vec<String> = derive(&logs)
+        .items
+        .into_iter()
+        .filter_map(|item| match item {
+            TypedItem::UserSpeech { speaker, .. } => Some(speaker),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        speakers,
+        ["u1|Alice", "u2|Alice", "u1|A＿＿bad＿name", "u3"]
+    );
+}
+
 fn sleep_rows(include_settle: bool) -> Vec<opencrab_db::queries::SessionLogRow> {
     let mut logs = vec![
         row(99, "speech", Some(USER), "sleep を実行して", None),

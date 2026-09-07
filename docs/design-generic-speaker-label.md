@@ -49,11 +49,11 @@ Serenity Messageだけから表示ラベルを決定する。優先順位は次�
 
 ### Extgate persistence
 
-`memory_sessions.speaker_id`は従来どおり`author_id`を保存する。既存`metadata_json`へ汎用field `speaker_label`を追加し、schema migrationは行わない。絶対path、token、platform URLは追加しない。
+`memory_sessions.speaker_id`は従来どおり`author_id`を保存する。既存の汎用表示名field `metadata_json.user_name`へlabelを保存し、schema migrationや重複fieldの追加は行わない。絶対path、token、platform URLは追加しない。
 
 ### Core conversation renderer
 
-各speech logの`metadata_json.speaker_label`を読み、stable refと同時に表示する。
+各speech logの`metadata_json.user_name`を読み、stable refと同時に表示する。
 
 ```text
 [u4|ぴーこ][2026-09-07 16:39:23]e62:
@@ -86,7 +86,7 @@ sequenceDiagram
     G->>G: labelをmessage内情報だけで選択
     G->>E: Said(author_id, author_label?, text)
     E->>E: author_idでadmission
-    E->>DB: speaker_id=author_id, metadata.speaker_label=label
+    E->>DB: speaker_id=author_id, metadata.user_name=label
     DB->>C: speech logs
     C->>L: [uN|label] + content
     Note over C,L: 名前確認にplatform resolve不要
@@ -149,7 +149,7 @@ DB schema migrationは行わない。
 - Discord label優先順位がnickname > global name > usernameになる
 - `author_id`と`author_label`が別fieldとしてwireを通る
 - admissionはlabelではなくIDだけを見る
-- speech rowは`speaker_id=author_id`、metadataに`speaker_label`を持つ
+- speech rowは`speaker_id=author_id`、metadataの既存`user_name`にlabelを持つ
 - retained conversationが`[uN|label]`を出す
 - current live turnにもIDとlabelが入る
 - 同名別IDは別`uN`、同ID改名は同じ`uN`

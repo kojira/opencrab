@@ -87,7 +87,19 @@ pub fn said_frame(
     text: &str,
     attachments: &[Attachment],
 ) -> Value {
-    json!({
+    said_frame_with_author_label(id, binding_id, origin, author_id, None, text, attachments)
+}
+
+pub fn said_frame_with_author_label(
+    id: &str,
+    binding_id: &str,
+    origin: &str,
+    author_id: &str,
+    author_label: Option<&str>,
+    text: &str,
+    attachments: &[Attachment],
+) -> Value {
+    let mut frame = json!({
         "id": id,
         "m": "said",
         "binding_id": binding_id,
@@ -95,7 +107,11 @@ pub fn said_frame(
         "author_id": author_id,
         "text": text,
         "attachments": attachments,
-    })
+    });
+    if let Some(label) = author_label {
+        frame["author_label"] = json!(label);
+    }
+    frame
 }
 
 pub fn ok_frame(id: &str) -> Value {
@@ -504,6 +520,23 @@ mod tests {
     fn config_bytes_are_compact_author_id() {
         let bytes = config_bytes("owner-1");
         assert_eq!(bytes, br#"{"author_id":"owner-1"}"#);
+    }
+
+    #[test]
+    fn said_author_label_is_additive_and_optional() {
+        let legacy = said_frame("said:1", "binding", "origin", "author", "hello", &[]);
+        assert!(legacy.get("author_label").is_none());
+        let labeled = said_frame_with_author_label(
+            "said:1",
+            "binding",
+            "origin",
+            "author",
+            Some("Alice"),
+            "hello",
+            &[],
+        );
+        assert_eq!(labeled["author_id"], "author");
+        assert_eq!(labeled["author_label"], "Alice");
     }
 
     #[test]

@@ -42,6 +42,10 @@ pub struct IncomingAuthor {
     pub bot: bool,
     #[serde(default)]
     pub username: Option<String>,
+    #[serde(default)]
+    pub global_name: Option<String>,
+    #[serde(default)]
+    pub nickname: Option<String>,
 }
 
 /// said に載せる写像結果。origin/author は core が e/u 番号へ写す。
@@ -49,6 +53,7 @@ pub struct IncomingAuthor {
 pub struct MappedSaid {
     pub origin: String,
     pub author_id: String,
+    pub author_label: Option<String>,
     pub text: String,
     pub attachments: Vec<IncomingAttachment>,
 }
@@ -105,6 +110,7 @@ pub fn map_message(msg: &IncomingMessage, self_bot_id: &str) -> Option<MappedSai
     Some(MappedSaid {
         origin: origin_for(&msg.channel_id, &msg.id),
         author_id: msg.author.id.clone(),
+        author_label: author_label(&msg.author),
         text: msg.content.clone(),
         attachments: msg.attachments.clone(),
     })
@@ -123,6 +129,15 @@ pub fn parse_event_line(line: &str) -> Option<IncomingMessage> {
         return None;
     }
     serde_json::from_str(line).ok()
+}
+
+fn author_label(author: &IncomingAuthor) -> Option<String> {
+    [&author.nickname, &author.global_name, &author.username]
+        .into_iter()
+        .flatten()
+        .map(|value| value.trim())
+        .find(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn is_decimal(s: &str) -> bool {
@@ -148,6 +163,8 @@ mod tests {
                 id: author.into(),
                 bot: false,
                 username: Some("someone".into()),
+                global_name: None,
+                nickname: None,
             },
             content: content.into(),
             attachments: Vec::new(),
@@ -199,8 +216,30 @@ mod tests {
             mapped.author_id, "222",
             "author は Discord 認証済み sender（#848）"
         );
+        assert_eq!(mapped.author_label.as_deref(), Some("someone"));
         assert_eq!(mapped.text, "hello");
         assert!(mapped.attachments.is_empty());
+    }
+
+    #[test]
+    fn author_label_prefers_nickname_then_global_name_then_username() {
+        let mut m = msg("2", "100", Some("500"), "222", "hello");
+        m.author.global_name = Some("Global".into());
+        m.author.nickname = Some("Nickname".into());
+        assert_eq!(
+            map_message(&m, "111").unwrap().author_label.as_deref(),
+            Some("Nickname")
+        );
+        m.author.nickname = Some("  ".into());
+        assert_eq!(
+            map_message(&m, "111").unwrap().author_label.as_deref(),
+            Some("Global")
+        );
+        m.author.global_name = None;
+        assert_eq!(
+            map_message(&m, "111").unwrap().author_label.as_deref(),
+            Some("someone")
+        );
     }
 
     #[test]

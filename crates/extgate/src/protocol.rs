@@ -192,6 +192,9 @@ pub struct Said {
     pub binding_id: String,
     pub origin: String,
     pub author_id: String,
+    /// Untrusted, display-only label supplied by the gateway. Authorization
+    /// continues to use `author_id` exclusively.
+    pub author_label: Option<String>,
     pub text: String,
     pub attachments: Vec<SaidAttachment>,
 }
@@ -335,6 +338,17 @@ fn parse_said(obj: &Value) -> Result<Said, GateError> {
     let binding_id = parse_uuid(&require_str(obj, "binding_id")?)?;
     let origin = nonempty_str(obj, "origin")?;
     let author_id = nonempty_str(obj, "author_id")?;
+    let author_label = match obj.get("author_label") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(label))
+            if !label.trim().is_empty()
+                && label.chars().count() <= 100
+                && !label.chars().any(char::is_control) =>
+        {
+            Some(label.clone())
+        }
+        _ => return Err(GateError::new(ErrorCode::BadRequest)),
+    };
     let text = require_str(obj, "text")?;
     let attachments = parse_attachments(obj.get("attachments"))?;
     if text.is_empty() && attachments.is_empty() {
@@ -345,6 +359,7 @@ fn parse_said(obj: &Value) -> Result<Said, GateError> {
         binding_id,
         origin,
         author_id,
+        author_label,
         text,
         attachments,
     })
@@ -516,6 +531,36 @@ mod activity_tests {
         assert!(matches!(
             &said.attachments[0],
             SaidAttachment::LocalFile { name, size: 42, .. } if name == "page.html"
+        ));
+    }
+
+    #[test]
+    fn author_label_is_optional_display_metadata() {
+        let mut frame = serde_json::json!({
+            "id": "said-1", "m": "said",
+            "binding_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "origin": "event-1", "author_id": "sender-1", "author_label": "Alice",
+            "text": "hello", "attachments": []
+        });
+        let InboundMsg::Said(said) = parse_inbound(&frame).unwrap() else {
+            panic!("expected said");
+        };
+        assert_eq!(said.author_id, "sender-1");
+        assert_eq!(said.author_label.as_deref(), Some("Alice"));
+
+        frame.as_object_mut().unwrap().remove("author_label");
+        let InboundMsg::Said(said) = parse_inbound(&frame).unwrap() else {
+            panic!("expected said");
+        };
+        assert_eq!(said.author_label, None);
+
+        frame["author_label"] = serde_json::json!("bad\nlabel");
+        assert!(matches!(
+            parse_inbound(&frame).unwrap(),
+            InboundMsg::Invalid {
+                code: ErrorCode::BadRequest,
+                ..
+            }
         ));
     }
 

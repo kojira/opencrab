@@ -215,6 +215,7 @@ pub struct NostrHeldTurn {
     pub binding_id: String,
     pub origin: String,
     pub author_id: String,
+    pub author_label: Option<String>,
     pub text: String,
     pub images: Vec<String>,
     pub address: String,

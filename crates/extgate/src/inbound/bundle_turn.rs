@@ -80,9 +80,10 @@ pub(super) fn finish_bundle<R: AgentRuntime>(
             binding_id: ctx.said.binding_id.clone(),
             origin,
             author_id: trigger.0,
-            text: trigger.1,
+            author_label: trigger.1,
+            text: trigger.2,
             attachments: trigger
-                .2
+                .3
                 .into_iter()
                 .map(crate::protocol::SaidAttachment::ImageUrl)
                 .collect(),
@@ -107,7 +108,7 @@ fn load_bundle_trigger(
     tx: &Transaction<'_>,
     session_id: &str,
     origin: &str,
-) -> Result<(String, String, Vec<String>), GateError> {
+) -> Result<(String, Option<String>, String, Vec<String>), GateError> {
     match tx.query_row(
         "SELECT speaker_id, content, metadata_json FROM memory_sessions
          WHERE session_id = ?1 AND json_extract(metadata_json, '$.external_origin') = ?2
@@ -122,13 +123,20 @@ fn load_bundle_trigger(
         },
     ) {
         Ok((speaker, content, meta)) => {
-            let images = meta
+            let metadata = meta
                 .as_deref()
-                .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+                .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok());
+            let author_label = metadata
+                .as_ref()
+                .and_then(|v| v.get("user_name"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            let images = metadata
+                .as_ref()
                 .and_then(|v| v.get("image_urls").cloned())
                 .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
                 .unwrap_or_default();
-            Ok((speaker.unwrap_or_default(), content, images))
+            Ok((speaker.unwrap_or_default(), author_label, content, images))
         }
         Err(rusqlite::Error::QueryReturnedNoRows) | Err(_) => Err(GateError::store()),
     }

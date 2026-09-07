@@ -44,6 +44,7 @@ struct TestRuntime {
     tool_hold_rx: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
     sink_seen: Arc<AtomicBool>,
     conversations: Arc<Mutex<Vec<String>>>,
+    sender_names: Arc<Mutex<Vec<String>>>,
     images: Arc<Mutex<Vec<Vec<String>>>>,
     turn_entered: Arc<Notify>,
 }
@@ -60,6 +61,7 @@ impl TestRuntime {
             tool_hold_rx: Arc::new(Mutex::new(None)),
             sink_seen: Arc::new(AtomicBool::new(false)),
             conversations: Arc::new(Mutex::new(Vec::new())),
+            sender_names: Arc::new(Mutex::new(Vec::new())),
             images: Arc::new(Mutex::new(Vec::new())),
             turn_entered: Arc::new(Notify::new()),
         }
@@ -152,8 +154,12 @@ impl AgentRuntime for TestRuntime {
         &self,
         _source: TranscriptSource,
         _agent_id: &str,
-        _record: &InboundMessageRecord<'_>,
+        record: &InboundMessageRecord<'_>,
     ) {
+        self.sender_names
+            .lock()
+            .unwrap()
+            .push(record.sender_name.to_string());
     }
     fn record_outbound_reply(&self, _source: TranscriptSource, _record: &OutboundReplyRecord<'_>) {}
     fn record_interaction_response(

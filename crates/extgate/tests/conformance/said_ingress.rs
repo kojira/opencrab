@@ -59,6 +59,47 @@ async fn said_dedup_same_origin_and_separate_bindings() {
 }
 
 #[tokio::test]
+async fn author_label_is_persisted_and_reaches_live_turn() {
+    let h = Harness::start().await;
+    let (mut s, _, binding_id) = ready_pair(&h).await;
+    write_frame(
+        &mut s,
+        &json!({
+            "id": "labeled", "m": "said", "binding_id": binding_id,
+            "origin": "labeled-origin", "author_id": "user-42",
+            "author_label": "Alice", "text": "hello", "attachments": []
+        }),
+    )
+    .await;
+    assert_eq!(read_said_response(&mut s, "labeled").await["seq"], 1);
+    for _ in 0..50 {
+        if !h.runtime.sender_names.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let conn = h.state.db.lock().unwrap();
+    let (speaker_id, metadata): (String, String) = conn
+        .query_row(
+            "SELECT speaker_id, metadata_json FROM memory_sessions WHERE json_extract(metadata_json, '$.external_origin') = 'labeled-origin' ORDER BY id DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(speaker_id, "user-42");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&metadata).unwrap()["user_name"],
+        "Alice"
+    );
+    drop(conn);
+    assert_eq!(
+        h.runtime.sender_names.lock().unwrap().last().map(String::as_str),
+        Some("Alice"),
+        "live turn must carry the gateway-provided display label"
+    );
+}
+
+#[tokio::test]
 async fn said_seq_null_when_not_recorded_and_lookups_are_real() {
     let h = Harness::start().await;
     let (mut s, _, binding_id) = ready_pair(&h).await;

@@ -105,6 +105,44 @@ impl ConversationRefs {
         }
     }
 
+    /// Keep the stable `uN` identity while adding an untrusted display-only
+    /// label captured by the gateway at the time of the speech.
+    pub(crate) fn speaker_label_with_name(&self, speaker: &str, name: Option<&str>) -> String {
+        let identity = self.speaker_label(speaker);
+        if speaker == self.agent_id {
+            return identity;
+        }
+        let Some(name) = name.filter(|name| !name.is_empty()) else {
+            return identity;
+        };
+        let safe =
+            crate::injection::sanitize_embedded_field(name, 100).replace(['[', ']', '|'], "＿");
+        if safe.is_empty() {
+            identity
+        } else {
+            format!("{identity}|{safe}")
+        }
+    }
+
+    pub(crate) fn speaker_label_for_log(
+        &self,
+        log: &opencrab_db::queries::SessionLogRow,
+    ) -> String {
+        let name = log
+            .metadata_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|meta| {
+                meta.get("user_name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            });
+        self.speaker_label_with_name(
+            log.speaker_id.as_deref().unwrap_or(&log.agent_id),
+            name.as_deref(),
+        )
+    }
+
     pub(crate) fn event_of(&self, log: &opencrab_db::queries::SessionLogRow) -> Option<usize> {
         external_origin_of(log).and_then(|o| self.events.get(&o).copied())
     }
