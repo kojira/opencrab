@@ -395,7 +395,9 @@ fn apply_initialize_copy_from_env(variable: &str) {
         latest_version(),
         "コピーの user_version が最新になっていない"
     );
-    assert_v43_schema(&conn);
+    assert!(column_exists(&conn, "sessions", "policy_json").unwrap());
+    assert!(table_exists(&conn, "session_watches").unwrap());
+    assert!(table_exists(&conn, "tool_logs").unwrap());
     assert_v44_schema(&conn);
     assert_v45_schema(&conn);
 }
