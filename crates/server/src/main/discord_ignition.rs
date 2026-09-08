@@ -13,6 +13,7 @@ pub(super) struct DiscordV3Controller {
     attachment_spool_root: std::path::PathBuf,
     gateway_bin: std::path::PathBuf,
     supervisors: std::sync::Arc<GatewaySupervisorSet>,
+    lifecycle: tokio::sync::Mutex<()>,
 }
 
 impl DiscordV3Controller {
@@ -39,6 +40,7 @@ impl DiscordV3Controller {
             attachment_spool_root: attachment_spool_root.to_path_buf(),
             gateway_bin: gateway_bin.to_path_buf(),
             supervisors: GatewaySupervisorSet::new(SupervisorConfig::default()),
+            lifecycle: tokio::sync::Mutex::new(()),
         }))
     }
 
@@ -66,8 +68,11 @@ impl DiscordV3Controller {
             }],
         });
         let path = self.placement_dir.join(format!("{}.json", plan.agent_id));
-        std::fs::write(&path, serde_json::to_vec_pretty(&placement)?)
-            .with_context(|| format!("placement 書き出し失敗: {}", path.display()))?;
+        let temporary = path.with_extension("json.tmp");
+        std::fs::write(&temporary, serde_json::to_vec_pretty(&placement)?)
+            .with_context(|| format!("placement 書き出し失敗: {}", temporary.display()))?;
+        std::fs::rename(&temporary, &path)
+            .with_context(|| format!("placement 置換失敗: {}", path.display()))?;
         let spawner = std::sync::Arc::new(GatewayChildSpawner::new(
             self.gateway_bin.clone(),
             path,
@@ -136,6 +141,10 @@ impl AgentGatewayLifecycle for DiscordV3Controller {
     }
 
     async fn start(&self, agent_id: &str) -> anyhow::Result<()> {
+        let _lifecycle = self.lifecycle.lock().await;
+        // Fail closed before token validation/provisioning so stale credentials cannot stay live.
+        self.supervisors.stop(agent_id).await;
+        super::require_resolvable_binary("discord-gateway", &self.gateway_bin)?;
         let config = {
             let conn = self
                 .db
@@ -163,6 +172,7 @@ impl AgentGatewayLifecycle for DiscordV3Controller {
     }
 
     async fn stop(&self, agent_id: &str) {
+        let _lifecycle = self.lifecycle.lock().await;
         self.supervisors.stop(agent_id).await;
     }
 
@@ -178,6 +188,7 @@ impl AgentGatewayLifecycle for DiscordV3Controller {
     }
 
     async fn shutdown_all(&self) {
+        let _lifecycle = self.lifecycle.lock().await;
         self.supervisors.shutdown_all().await;
     }
 }

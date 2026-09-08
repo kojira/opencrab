@@ -129,15 +129,17 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(feature = "discord")]
     let discord_gateway_bin = resolve_discord_gateway_bin();
     #[cfg(feature = "discord")]
-    let start_discord = {
-        let conn = state
-            .db
-            .lock()
-            .map_err(|_| anyhow::anyhow!("db lock for Discord startup validation"))?;
-        !opencrab_db::queries::list_enabled_agent_discord_configs(&conn)?.is_empty()
-    };
+    let discord_configured = state
+        .db
+        .lock()
+        .map_err(|_| anyhow::anyhow!("db lock for Discord startup validation"))?
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_discord_config)",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
     #[cfg(feature = "discord")]
-    if start_discord {
+    if discord_configured {
         require_resolvable_binary("discord-gateway", &discord_gateway_bin)?;
         if gate_socket_for_discord.is_none() {
             anyhow::bail!("Discord V3 requires an absolute gate.listen_socket");
@@ -148,7 +150,17 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(feature = "nostr")]
     let nostaro_bin = resolve_nostaro_bin();
     #[cfg(feature = "nostr")]
-    if start_nostr {
+    let nostr_configured = state
+        .db
+        .lock()
+        .map_err(|_| anyhow::anyhow!("db lock for Nostr startup validation"))?
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_nostr_config)",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+    #[cfg(feature = "nostr")]
+    if nostr_configured {
         require_resolvable_binary("nostr-gateway", &nostr_gateway_bin)?;
         require_resolvable_binary("nostaro", &nostaro_bin)?;
     }
@@ -345,6 +357,9 @@ async fn main() -> anyhow::Result<()> {
                 extgate_for_nostr_live
                     .agent_has_live_gateway(agent_id, opencrab_actions::gateway_kinds::NOSTR)
             });
+        // Reconcile every enabled row from its current DB configuration before any external
+        // child is launched. A stale prior placement must never mask a provisioning failure.
+        manager.restore_from_db_checked().await?;
         let v3_only = opencrab_server::dedicated_gateway::V3OnlyGateway::new(manager, nostr_live)
             .with_process(process_controller);
         state.gateways.register(v3_only);
@@ -355,14 +370,6 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    // **2 つ目の復元位置**（ルータ構築の直前 / #191 段階2 PR5）。ここまでで未復元なのは
-    // 直前に登録した Nostr だけなので（Discord は上のブロックで復元済み・MCP は登録簿に
-    // 入れない）、移設前の `manager.restore_from_db()` と 1 対 1。
-    //
-    // Discord を落とした構成（`--no-default-features`）では 1 つ目の走査ごと消えるため、
-    // ここが唯一の復元位置になる。**新しい transport を足すときも呼び出し口は増えない**:
-    // 復元させたい位置より前で `register` すればよい。
-    state.gateways.restore_pending().await;
     #[cfg(feature = "discord")]
     state.gateways.register(discord_process_controller.clone());
 

@@ -36,10 +36,17 @@ WORKDIR /src
 # これらが無いと opencrab-server は既定 features でビルドできない。
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       cmake pkg-config libopus-dev libssl-dev \
+       cmake pkg-config libopus-dev libssl-dev git \
     && rm -rf /var/lib/apt/lists/*
 
 COPY . .
+
+# Nostr V3 runtime dependency. Pin the audited revision so enabled container deployments do not
+# depend on an ambient host binary or a mutable branch.
+ARG NOSTARO_REV=eb09173b6b526a9c29d1228b1dddee875cdc6b83
+RUN git clone https://github.com/kojira/nostaro.git /tmp/nostaro \
+    && git -C /tmp/nostaro checkout --detach "$NOSTARO_REV" \
+    && cargo build --release --manifest-path /tmp/nostaro/Cargo.toml
 
 # 既定 features（discord + nostr + web）でビルドする＝本番サーバと同じ全部入り。
 # ここで `--features` を渡さないのは、opencrab-server の default が
@@ -62,6 +69,7 @@ WORKDIR /app
 COPY --from=build /src/target/release/opencrab-server /usr/local/bin/opencrab-server
 COPY --from=build /src/target/release/nostr-gateway /usr/local/bin/nostr-gateway
 COPY --from=build /src/target/release/discord-gateway /usr/local/bin/discord-gateway
+COPY --from=build /tmp/nostaro/target/release/nostaro /usr/local/bin/nostaro
 USER crab
 ENV TZ=Asia/Tokyo
 EXPOSE 8080

@@ -12,6 +12,7 @@ pub(super) struct NostrV3Controller {
     gateway_bin: std::path::PathBuf,
     nostaro_bin: std::path::PathBuf,
     supervisors: std::sync::Arc<GatewaySupervisorSet>,
+    lifecycle: tokio::sync::Mutex<()>,
 }
 
 impl NostrV3Controller {
@@ -38,6 +39,7 @@ impl NostrV3Controller {
             gateway_bin: gateway_bin.to_path_buf(),
             nostaro_bin: nostaro_bin.to_path_buf(),
             supervisors: GatewaySupervisorSet::new(SupervisorConfig::default()),
+            lifecycle: tokio::sync::Mutex::new(()),
         }))
     }
 
@@ -68,8 +70,11 @@ impl NostrV3Controller {
             }],
         });
         let path = self.placement_dir.join(format!("{}.json", plan.agent_id));
-        std::fs::write(&path, serde_json::to_vec_pretty(&placement)?)
-            .with_context(|| format!("placement 書き出し失敗: {}", path.display()))?;
+        let temporary = path.with_extension("json.tmp");
+        std::fs::write(&temporary, serde_json::to_vec_pretty(&placement)?)
+            .with_context(|| format!("placement 書き出し失敗: {}", temporary.display()))?;
+        std::fs::rename(&temporary, &path)
+            .with_context(|| format!("placement 置換失敗: {}", path.display()))?;
         let spawner = std::sync::Arc::new(GatewayChildSpawner::new_nostr(
             self.gateway_bin.clone(),
             path,
@@ -86,15 +91,18 @@ impl NostrV3Controller {
     }
 
     pub(super) async fn start_all(&self) -> anyhow::Result<()> {
-        let plans = {
+        let agent_ids: Vec<String> = {
             let conn = self
                 .db
                 .lock()
                 .map_err(|_| anyhow::anyhow!("db lock for Nostr V3 ignition"))?;
             opencrab_server::nostr_provision::load_nostr_placement_plans(&conn)?
+                .into_iter()
+                .map(|plan| plan.agent_id)
+                .collect()
         };
-        for plan in plans {
-            self.start_plan(plan).await?;
+        for agent_id in agent_ids {
+            V3ProcessControl::start(self, &agent_id).await?;
         }
         Ok(())
     }
@@ -103,14 +111,20 @@ impl NostrV3Controller {
 #[async_trait::async_trait]
 impl V3ProcessControl for NostrV3Controller {
     async fn start(&self, agent_id: &str) -> anyhow::Result<()> {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.supervisors.stop(agent_id).await;
+        super::require_resolvable_binary("nostr-gateway", &self.gateway_bin)?;
+        super::require_resolvable_binary("nostaro", &self.nostaro_bin)?;
         self.start_plan(self.plan(agent_id)?).await
     }
 
     async fn stop(&self, agent_id: &str) {
+        let _lifecycle = self.lifecycle.lock().await;
         self.supervisors.stop(agent_id).await;
     }
 
     async fn shutdown_all(&self) {
+        let _lifecycle = self.lifecycle.lock().await;
         self.supervisors.shutdown_all().await;
     }
 }

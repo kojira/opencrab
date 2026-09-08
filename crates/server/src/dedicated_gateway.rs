@@ -23,11 +23,14 @@ pub trait V3ProcessControl: Send + Sync {
 struct V3IdentityProvisioning {
     inner: Arc<dyn GatewayIdentityProvisioning>,
     process: Arc<dyn V3ProcessControl>,
+    lifecycle: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[async_trait]
 impl GatewayIdentityProvisioning for V3IdentityProvisioning {
     async fn adopt_identity(&self, agent_id: &str, identity: &str) -> anyhow::Result<String> {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.process.stop(agent_id).await;
         let adopted = self.inner.adopt_identity(agent_id, identity).await?;
         self.process.start(agent_id).await?;
         Ok(adopted)
@@ -40,6 +43,7 @@ pub struct V3OnlyGateway {
     inner: SharedAgentGateway,
     v3_live: V3LivenessProbe,
     process: Option<Arc<dyn V3ProcessControl>>,
+    lifecycle: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl V3OnlyGateway {
@@ -48,6 +52,7 @@ impl V3OnlyGateway {
             inner,
             v3_live,
             process: None,
+            lifecycle: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -64,6 +69,7 @@ impl AgentGatewayLifecycle for V3OnlyGateway {
     }
 
     async fn start(&self, agent_id: &str) -> anyhow::Result<()> {
+        let _lifecycle = self.lifecycle.lock().await;
         // Restart is stop-first. If core provisioning fails, no stale external child may keep
         // serving the previous placement/credential.
         if let Some(process) = &self.process {
@@ -77,6 +83,7 @@ impl AgentGatewayLifecycle for V3OnlyGateway {
     }
 
     async fn stop(&self, agent_id: &str) {
+        let _lifecycle = self.lifecycle.lock().await;
         if let Some(process) = &self.process {
             process.stop(agent_id).await;
         }
@@ -92,6 +99,7 @@ impl AgentGatewayLifecycle for V3OnlyGateway {
     }
 
     async fn shutdown_all(&self) {
+        let _lifecycle = self.lifecycle.lock().await;
         if let Some(process) = &self.process {
             process.shutdown_all().await;
         }
@@ -119,6 +127,7 @@ impl AgentGatewayLifecycle for V3OnlyGateway {
             Some(process) => Some(Arc::new(V3IdentityProvisioning {
                 inner,
                 process: process.clone(),
+                lifecycle: self.lifecycle.clone(),
             })),
             None => Some(inner),
         }

@@ -80,15 +80,17 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
     let gate_token = opencrab_extgate::OperatorToken::take_from_env();
     let gate_socket = opencrab_extgate::validate_listen_socket(&cfg.gate.listen_socket)?;
     #[cfg(feature = "discord")]
-    let discord_enabled = match db.lock() {
-        Ok(conn) => opencrab_db::queries::list_enabled_agent_discord_configs(&conn)
-            .map(|rows| !rows.is_empty())
-            .unwrap_or(false),
-        Err(_) => false,
-    };
-    // Discord is V3-only. Environments with an enabled agent must opt in explicitly.
+    let discord_configured = db
+        .lock()
+        .map_err(|_| anyhow::anyhow!("db lock for Discord configuration detection"))?
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_discord_config)",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+    // Discord is V3-only. Configured rows may be enabled dynamically, so validate at startup.
     #[cfg(feature = "discord")]
-    if discord_enabled {
+    if discord_configured {
         opencrab_server::discord_provision::DiscordIngress::parse(&cfg.gate.discord_ingress)
             .ok_or_else(|| {
                 anyhow::anyhow!(
@@ -129,23 +131,23 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
     // 使っていない構成はマスターキー無しでも通常起動する）。マスターキーが在るときだけ Nostr
     // サブシステムを起動し、at-rest 移行を行う。
     #[cfg(feature = "nostr")]
-    let nostr_configured = match db.lock() {
-        Ok(conn) => opencrab_db::queries::has_any_agent_nostr_config(&conn).unwrap_or(false),
-        Err(_) => false,
+    let nostr_configured = {
+        let conn = db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("db lock for Nostr configuration detection"))?;
+        opencrab_db::queries::has_any_agent_nostr_config(&conn)?
     };
     #[cfg(feature = "nostr")]
-    let nostr_enabled = match db.lock() {
-        Ok(conn) => conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM agent_nostr_config WHERE enabled = 1)",
-                [],
-                |row| row.get::<_, bool>(0),
-            )
-            .unwrap_or(false),
-        Err(_) => false,
-    };
+    let nostr_enabled = db
+        .lock()
+        .map_err(|_| anyhow::anyhow!("db lock for enabled Nostr detection"))?
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_nostr_config WHERE enabled = 1)",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
     #[cfg(feature = "nostr")]
-    let _nostr_ingress = if nostr_enabled {
+    let _nostr_ingress = if nostr_configured {
         match opencrab_nostr::NostrIngress::parse(&cfg.gate.nostr_ingress) {
             Some(opencrab_nostr::NostrIngress::V3) => opencrab_nostr::NostrIngress::V3,
             _ => anyhow::bail!(
@@ -156,7 +158,7 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
         opencrab_nostr::NostrIngress::V3
     };
     #[cfg(feature = "nostr")]
-    if nostr_enabled && gate_socket.is_none() {
+    if nostr_configured && gate_socket.is_none() {
         anyhow::bail!("Nostr 設定済み環境では絶対パスの gate.listen_socket が必須です");
     }
     #[cfg(feature = "nostr")]

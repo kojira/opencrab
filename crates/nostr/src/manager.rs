@@ -203,16 +203,23 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
         })
     }
 
-    /// enabled な設定を DB から復元して起動する。
-    pub async fn restore_from_db(&self) {
+    /// enabled な設定を DB から復元し、どれか一つでも現在設定を投影できなければ失敗する。
+    pub async fn restore_from_db_checked(&self) -> anyhow::Result<()> {
         for cfg in self.runner.list_enabled_nostr_configs() {
             let config = crate::config_from_row(&cfg);
-            if let Err(e) = self
-                .start_agent_gateway(&cfg.agent_id, &cfg.secret_key, config)
+            self.start_agent_gateway(&cfg.agent_id, &cfg.secret_key, config)
                 .await
-            {
-                error!(agent_id = %cfg.agent_id, error = %e, "Failed to restore Nostr gateway");
-            }
+                .map_err(|error| {
+                    anyhow::anyhow!("failed to restore Nostr gateway {}: {error}", cfg.agent_id)
+                })?;
+        }
+        Ok(())
+    }
+
+    /// Registry lifecycle compatibility wrapper. Production startup uses the checked variant.
+    pub async fn restore_from_db(&self) {
+        if let Err(error) = self.restore_from_db_checked().await {
+            error!(error = %error, "Failed to restore Nostr gateways");
         }
     }
 

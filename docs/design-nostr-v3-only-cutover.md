@@ -20,6 +20,6 @@ The deletion phase precedes QC and production remediation. Newer incident detail
 
 ## Production acceptance
 
-A real relay event addressed to the agent reaches the LLM and produces exactly one published reply event signed by `npub1n0staxr79rlk9472m0gxj6684p7n83778lhypy4d47smn45rmyvqzkzvt6`. Receiving an event, generating text, recording a DB row, or logging gateway startup alone does not satisfy acceptance.
+A real relay event addressed to the agent reaches the LLM and produces exactly one published reply event signed by the operator-approved production vanity identity. Receiving an event, generating text, recording a DB row, or logging gateway startup alone does not satisfy acceptance. Concrete production identifiers belong in private deployment evidence, not tracked source.
 
 Discord follows the same V3-only contract: remove legacy/shared ingress, shadow mode, per-message fallback, and implicit legacy defaults before QC.
