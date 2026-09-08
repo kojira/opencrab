@@ -76,6 +76,7 @@ fn v33_deletes_maintenance_run_logs_from_both_tables() {
             is_bot_iteration: false,
             cache_read_tokens: None,
             cache_creation_tokens: None,
+            provider_tool_history: "{}".to_string(),
             created_at: "2026-08-05T00:00:00+00:00".to_string(),
         },
     )

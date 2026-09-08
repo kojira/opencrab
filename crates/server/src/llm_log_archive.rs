@@ -452,6 +452,7 @@ mod tests {
             is_bot_iteration: false,
             cache_read_tokens: None,
             cache_creation_tokens: None,
+            provider_tool_history: "{}".to_string(),
             created_at: ts.to_string(),
         }
     }

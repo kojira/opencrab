@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use tracing::Instrument;
 
-use opencrab_core::LlmCallLog;
 use opencrab_llm::pricing::PricingRegistry;
 
 use crate::llm_adapter::{LlmRouterAdapter, MetricsContext};

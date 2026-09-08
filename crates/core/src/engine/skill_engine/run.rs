@@ -9,7 +9,7 @@ use super::{
     turn_budget::{apply_turn_budget, seat_tool_result},
     SkillEngine,
 };
-use crate::engine::types::{ChatRequest, EngineResult, LlmCallLog};
+use crate::engine::types::{ChatRequest, EngineResult, LlmCallLog, LlmExchangeLog};
 
 impl SkillEngine {
     /// Run the action loop with the given system context and user message.
@@ -216,14 +216,14 @@ impl SkillEngine {
             }
 
             let call_start = std::time::Instant::now();
-            let llm_result = self.llm.chat(request).await;
+            let exchange_result = self.llm.chat_with_history(request).await;
             let latency_ms = call_start.elapsed().as_millis() as i64;
             // #665: LLM 呼び出しの出。入と対で出す（入だけだと「入って止まった」と「戻った」が
             // 区別できない）。成否と latency を載せ、この後のツール往復／最終応答へ進む。
             tracing::debug!(
                 iteration = iterations,
                 latency_ms,
-                ok = llm_result.is_ok(),
+                ok = exchange_result.is_ok(),
                 stage = "llm_call",
                 "turn: LLM リクエスト 完了（出）"
             );
@@ -237,22 +237,48 @@ impl SkillEngine {
             // その値を写すだけにする。判定は中身の形だけで行い、finish_reason=Length は
             // 「上限切り捨て」の特定にのみ使う（空判定には混ぜない＝stop を名乗る空応答を
             // 取りこぼさない）。
-            let call_failure = classify_call_failure(&llm_result, &model, self.max_output_tokens);
+            let response_result = match &exchange_result {
+                Ok(exchange) => Ok(exchange.response.clone()),
+                Err(error) => Err(anyhow::anyhow!(error.to_string())),
+            };
+            let call_failure =
+                classify_call_failure(&response_result, &model, self.max_output_tokens);
+            let call_log = LlmCallLog {
+                request: request_for_log.clone(),
+                response: exchange_result
+                    .as_ref()
+                    .ok()
+                    .map(|exchange| exchange.response.clone()),
+                error_str: call_failure.as_ref().map(|failure| failure.body.clone()),
+                error_code: call_failure.as_ref().map(|failure| failure.code.clone()),
+                latency_ms,
+                requested_at: requested_at.clone(),
+                is_bot_iteration: iterations > 1,
+            };
 
             if let Some(cb) = &self.log_callback {
-                cb(&LlmCallLog {
-                    request: request_for_log.clone(),
-                    response: llm_result.as_ref().ok().cloned(),
-                    error_str: call_failure.as_ref().map(|failure| failure.body.clone()),
-                    error_code: call_failure.as_ref().map(|failure| failure.code.clone()),
-                    latency_ms,
-                    requested_at: requested_at.clone(),
-                    is_bot_iteration: iterations > 1,
+                cb(&call_log);
+            }
+            if let Some(cb) = &self.exchange_log_callback {
+                let provider_tool_history = exchange_result
+                    .as_ref()
+                    .map(|exchange| exchange.provider_tool_history.clone())
+                    .unwrap_or_else(|_| opencrab_llm_types::ProviderToolHistory {
+                        // A transport error carries no reliable resolved-provider identity here.
+                        // Do not label non-ChatGPT failures as native-search parse failures.
+                        state: opencrab_llm_types::ProviderToolHistoryState::NotRequested,
+                        provider: None,
+                        calls: Vec::new(),
+                        citations: Vec::new(),
+                    });
+                cb(&LlmExchangeLog {
+                    call: call_log,
+                    provider_tool_history,
                 });
             }
 
             // transport 失敗はここで打ち切り（理由は上で llm_logs に残した）。
-            let response = llm_result?;
+            let response = exchange_result?.response;
 
             // Ok だが意味的に使えない応答（空 #706 / 切り捨て #676）は fail loud で打ち切る。
             // tool_calls / content を抽出する**前**に見る——切り捨てられた tool_call JSON が

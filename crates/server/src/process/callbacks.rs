@@ -66,7 +66,8 @@ pub(super) fn set_llm_log_callback(
     log_session_id: String,
     log_trigger_message_id: Option<String>,
 ) {
-    engine.set_log_callback(move |log: &LlmCallLog| {
+    engine.set_exchange_log_callback(move |exchange: &opencrab_core::LlmExchangeLog| {
+        let log = &exchange.call;
         let (prompt_tokens, completion_tokens, total_tokens) = log
             .response
             .as_ref()
@@ -131,6 +132,8 @@ pub(super) fn set_llm_log_callback(
             is_bot_iteration: log.is_bot_iteration,
             cache_read_tokens,
             cache_creation_tokens,
+            provider_tool_history: serde_json::to_string(&exchange.provider_tool_history)
+                .unwrap_or_else(|_| "{}".to_string()),
             created_at: chrono::Utc::now().to_rfc3339(),
         };
         if let Ok(conn) = log_db.lock() {

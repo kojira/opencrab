@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 // Canonical LLM message model shared with the provider/router layer.
-pub use opencrab_llm_types::{ChatRequest, ChatResponse, FunctionDefinition, ToolCall};
+pub use opencrab_llm_types::{
+    ChatRequest, ChatResponse, FunctionDefinition, LlmExchange, ProviderToolHistory, ToolCall,
+};
 
 // ---------------------------------------------------------------------------
 // Trait: ActionExecutor
@@ -219,6 +221,13 @@ pub struct LlmCallLog {
     pub is_bot_iteration: bool,
 }
 
+/// Additive log payload carrying provider-executed tool history.
+#[derive(Debug, Clone)]
+pub struct LlmExchangeLog {
+    pub call: LlmCallLog,
+    pub provider_tool_history: ProviderToolHistory,
+}
+
 /// Trait for LLM chat completion.
 ///
 /// Defined in `opencrab-core` so the engine can call the LLM without
@@ -229,6 +238,14 @@ pub struct LlmCallLog {
 pub trait LlmClient: Send + Sync {
     /// Send a chat request and receive a response.
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse>;
+
+    /// Additive provider-history path. Existing clients remain source-compatible.
+    async fn chat_with_history(&self, request: ChatRequest) -> Result<LlmExchange> {
+        Ok(LlmExchange {
+            response: self.chat(request).await?,
+            provider_tool_history: Default::default(),
+        })
+    }
 }
 
 /// The result of an engine run.

@@ -10,7 +10,8 @@ use tracing;
 #[cfg(test)]
 use super::types::ChatRequest;
 use super::types::{
-    self, ActionExecutor, ActionResult, LiveInboundSource, LlmCallLog, LlmClient, ToolDispatcher,
+    self, ActionExecutor, ActionResult, LiveInboundSource, LlmCallLog, LlmClient, LlmExchangeLog,
+    ToolDispatcher,
 };
 #[cfg(test)]
 use opencrab_llm_types::FinishReason;
@@ -25,6 +26,7 @@ use turn_budget::{apply_turn_budget, message_plain_text, seat_tool_result, user_
 
 /// LLM 呼び出しごとのログコールバック。
 type LogCallback = Box<dyn Fn(&LlmCallLog) + Send + Sync>;
+type ExchangeLogCallback = Box<dyn Fn(&LlmExchangeLog) + Send + Sync>;
 /// ツール結果受信フック: (tool_call_id, tool_name, result_json, is_error)。
 type ToolResultHook = Arc<dyn Fn(String, String, String, bool) + Send + Sync>;
 /// #898: 継続分岐（末尾 CONTINUE の text-only イテレーション）で剥がした途中発話を
@@ -65,6 +67,8 @@ pub struct SkillEngine {
     pub allowed_actions: Option<std::collections::HashSet<String>>,
     /// Optional callback invoked after each LLM call for logging.
     pub log_callback: Option<LogCallback>,
+    /// Additive callback carrying provider-executed tool history.
+    pub exchange_log_callback: Option<ExchangeLogCallback>,
     /// Optional callback invoked with response text on every LLM reply.
     pub on_response_text: Option<Arc<dyn Fn(String) + Send + Sync>>,
     /// #898: 末尾 CONTINUE で継続する text-only イテレーションで剥がした途中発話を
@@ -142,6 +146,7 @@ impl SkillEngine {
             max_iterations,
             allowed_actions: None,
             log_callback: None,
+            exchange_log_callback: None,
             on_response_text: None,
             on_continuation_speech: None,
             on_tool_call: Vec::new(),
@@ -293,6 +298,14 @@ impl SkillEngine {
     /// Set the LLM log callback, invoked after each LLM call.
     pub fn set_log_callback(&mut self, cb: impl Fn(&LlmCallLog) + Send + Sync + 'static) {
         self.log_callback = Some(Box::new(cb));
+    }
+
+    /// Set the additive LLM log callback with provider-executed tool history.
+    pub fn set_exchange_log_callback(
+        &mut self,
+        cb: impl Fn(&LlmExchangeLog) + Send + Sync + 'static,
+    ) {
+        self.exchange_log_callback = Some(Box::new(cb));
     }
 
     /// Set the on_response_text callback, invoked with response text on every LLM reply.

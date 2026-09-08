@@ -173,6 +173,10 @@ pub async fn maybe_run_skill_consolidation(
             is_bot_iteration: false,
             cache_read_tokens: None,
             cache_creation_tokens: None,
+            provider_tool_history: serde_json::to_string(
+                &opencrab_llm_types::ProviderToolHistory::default(),
+            )
+            .expect("default provider tool history serializes"),
             created_at: now.to_rfc3339(),
         };
         if let Err(e) = opencrab_db::queries::insert_llm_log(&conn, &row) {

@@ -16,6 +16,74 @@
     }
 
     #[tokio::test]
+    async fn provider_tool_history_reaches_additive_log_callback() {
+        struct HistoryLlm;
+
+        #[async_trait]
+        impl LlmClient for HistoryLlm {
+            async fn chat(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+                unreachable!("engine should use the additive history path")
+            }
+
+            async fn chat_with_history(
+                &self,
+                _request: ChatRequest,
+            ) -> anyhow::Result<opencrab_llm_types::LlmExchange> {
+                Ok(opencrab_llm_types::LlmExchange {
+                    response: text_response("done"),
+                    provider_tool_history: opencrab_llm_types::ProviderToolHistory {
+                        state: opencrab_llm_types::ProviderToolHistoryState::Captured,
+                        provider: Some("chatgpt".to_string()),
+                        calls: Vec::new(),
+                        citations: Vec::new(),
+                    },
+                })
+            }
+        }
+
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let captured_for_callback = captured.clone();
+        let mut engine = SkillEngine::new(Box::new(HistoryLlm), Box::new(MockExecutor::new()), 1);
+        engine.set_exchange_log_callback(move |log| {
+            *captured_for_callback.lock().unwrap() =
+                Some(log.provider_tool_history.state.clone());
+        });
+
+        engine.run("system", "user", "model").await.unwrap();
+        assert_eq!(
+            *captured.lock().unwrap(),
+            Some(opencrab_llm_types::ProviderToolHistoryState::Captured)
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_unknown_provider_is_not_mislabeled_as_native_history_failure() {
+        struct FailingLlm;
+
+        #[async_trait]
+        impl LlmClient for FailingLlm {
+            async fn chat(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+                anyhow::bail!("transport failed")
+            }
+        }
+
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let captured_for_callback = captured.clone();
+        let mut engine = SkillEngine::new(Box::new(FailingLlm), Box::new(MockExecutor::new()), 1);
+        engine.set_web_search(true);
+        engine.set_exchange_log_callback(move |log| {
+            *captured_for_callback.lock().unwrap() =
+                Some(log.provider_tool_history.state.clone());
+        });
+
+        assert!(engine.run("system", "user", "model").await.is_err());
+        assert_eq!(
+            *captured.lock().unwrap(),
+            Some(opencrab_llm_types::ProviderToolHistoryState::NotRequested)
+        );
+    }
+
+    #[tokio::test]
     async fn typed_conversation_uses_typed_history() {
         use std::sync::Mutex;
 

@@ -9,6 +9,10 @@ use super::*;
 // LLM Logs
 // ============================================
 
+fn empty_provider_tool_history() -> String {
+    "{}".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmLogRow {
     pub id: String,
@@ -29,13 +33,15 @@ pub struct LlmLogRow {
     pub is_bot_iteration: bool,
     pub cache_read_tokens: Option<i64>,
     pub cache_creation_tokens: Option<i64>,
+    #[serde(default = "empty_provider_tool_history")]
+    pub provider_tool_history: String,
     pub created_at: String,
 }
 
 pub fn insert_llm_log(conn: &Connection, row: &LlmLogRow) -> Result<()> {
     conn.execute(
-        "INSERT INTO llm_logs (id, agent_id, session_id, model, prompt, response, tool_calls, latency_ms, prompt_tokens, completion_tokens, total_tokens, error_code, error_body, requested_at, trigger_message_id, is_bot_iteration, cache_read_tokens, cache_creation_tokens, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+        "INSERT INTO llm_logs (id, agent_id, session_id, model, prompt, response, tool_calls, latency_ms, prompt_tokens, completion_tokens, total_tokens, error_code, error_body, requested_at, trigger_message_id, is_bot_iteration, cache_read_tokens, cache_creation_tokens, provider_tool_history, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
         params![
             row.id,
             row.agent_id,
@@ -55,10 +61,51 @@ pub fn insert_llm_log(conn: &Connection, row: &LlmLogRow) -> Result<()> {
             row.is_bot_iteration,
             row.cache_read_tokens,
             row.cache_creation_tokens,
+            row.provider_tool_history,
             row.created_at,
         ],
     )?;
     Ok(())
+}
+
+pub fn get_llm_log(conn: &Connection, agent_id: &str, id: &str) -> Result<Option<LlmLogRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, session_id, model, prompt, response, tool_calls,
+                latency_ms, prompt_tokens, completion_tokens, total_tokens,
+                error_code, error_body, requested_at, trigger_message_id,
+                is_bot_iteration, cache_read_tokens, cache_creation_tokens,
+                provider_tool_history, created_at
+         FROM llm_logs WHERE agent_id = ?1 AND id = ?2",
+    )?;
+    let mut rows = stmt.query(params![agent_id, id])?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    Ok(Some(LlmLogRow {
+        id: row.get(0)?,
+        agent_id: row.get(1)?,
+        session_id: row.get(2)?,
+        model: row.get(3)?,
+        prompt: row.get(4)?,
+        response: row.get(5)?,
+        tool_calls: row.get(6)?,
+        latency_ms: row.get(7)?,
+        prompt_tokens: row.get(8)?,
+        completion_tokens: row.get(9)?,
+        total_tokens: row.get(10)?,
+        error_code: row.get(11)?,
+        error_body: row.get(12)?,
+        requested_at: row.get(13)?,
+        trigger_message_id: row.get(14)?,
+        is_bot_iteration: row
+            .get::<_, i64>(15)
+            .map(|value| value != 0)
+            .unwrap_or(false),
+        cache_read_tokens: row.get(16)?,
+        cache_creation_tokens: row.get(17)?,
+        provider_tool_history: row.get(18)?,
+        created_at: row.get(19)?,
+    }))
 }
 
 pub fn list_llm_logs(conn: &Connection, agent_id: &str, limit: i64) -> Result<Vec<LlmLogRow>> {
@@ -66,7 +113,8 @@ pub fn list_llm_logs(conn: &Connection, agent_id: &str, limit: i64) -> Result<Ve
         "SELECT id, agent_id, session_id, model, prompt, response, tool_calls,
                 latency_ms, prompt_tokens, completion_tokens, total_tokens,
                 error_code, error_body, requested_at, trigger_message_id,
-                is_bot_iteration, cache_read_tokens, cache_creation_tokens, created_at
+                is_bot_iteration, cache_read_tokens, cache_creation_tokens,
+                provider_tool_history, created_at
          FROM llm_logs
          WHERE agent_id = ?1
          ORDER BY created_at DESC
@@ -92,7 +140,8 @@ pub fn list_llm_logs(conn: &Connection, agent_id: &str, limit: i64) -> Result<Ve
             is_bot_iteration: row.get::<_, i64>(15).map(|v| v != 0).unwrap_or(false),
             cache_read_tokens: row.get(16)?,
             cache_creation_tokens: row.get(17)?,
-            created_at: row.get(18)?,
+            provider_tool_history: row.get(18)?,
+            created_at: row.get(19)?,
         })
     })?;
     Ok(rows.filter_map(|r| r.ok()).collect())
@@ -185,7 +234,8 @@ pub fn list_llm_logs_for_month(conn: &Connection, month: &str) -> Result<Vec<Llm
         "SELECT id, agent_id, session_id, model, prompt, response, tool_calls,
                 latency_ms, prompt_tokens, completion_tokens, total_tokens,
                 error_code, error_body, requested_at, trigger_message_id,
-                is_bot_iteration, cache_read_tokens, cache_creation_tokens, created_at
+                is_bot_iteration, cache_read_tokens, cache_creation_tokens,
+                provider_tool_history, created_at
          FROM llm_logs
          WHERE substr(COALESCE(requested_at, created_at), 1, 7) = ?1
          ORDER BY COALESCE(requested_at, created_at) ASC, id ASC",
@@ -210,7 +260,8 @@ pub fn list_llm_logs_for_month(conn: &Connection, month: &str) -> Result<Vec<Llm
             is_bot_iteration: row.get::<_, i64>(15).map(|v| v != 0).unwrap_or(false),
             cache_read_tokens: row.get(16)?,
             cache_creation_tokens: row.get(17)?,
-            created_at: row.get(18)?,
+            provider_tool_history: row.get(18)?,
+            created_at: row.get(19)?,
         })
     })?;
     Ok(rows.filter_map(|r| r.ok()).collect())
@@ -262,6 +313,7 @@ mod archive_query_tests {
             is_bot_iteration: false,
             cache_read_tokens: None,
             cache_creation_tokens: None,
+            provider_tool_history: "{}".to_string(),
             created_at: ts.to_string(),
         };
         insert_llm_log(conn, &row).unwrap();
@@ -341,6 +393,7 @@ mod stats_query_tests {
             is_bot_iteration: false,
             cache_read_tokens: None,
             cache_creation_tokens: None,
+            provider_tool_history: "{}".to_string(),
             created_at: ts.to_string(),
         };
         insert_llm_log(conn, &row).unwrap();
