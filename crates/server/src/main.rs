@@ -92,12 +92,20 @@ fn resolve_nostaro_bin() -> std::path::PathBuf {
 }
 
 #[cfg(any(feature = "discord", feature = "nostr"))]
+fn is_executable_file(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    path.metadata()
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(any(feature = "discord", feature = "nostr"))]
 fn require_resolvable_binary(label: &str, path: &std::path::Path) -> anyhow::Result<()> {
     let found = if path.components().count() > 1 || path.is_absolute() {
-        path.is_file()
+        is_executable_file(path)
     } else {
-        std::env::var_os("PATH")
-            .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(path).is_file()))
+        std::env::var_os("PATH").is_some_and(|paths| {
+            std::env::split_paths(&paths).any(|dir| is_executable_file(&dir.join(path)))
+        })
     };
     if !found {
         anyhow::bail!("{label} binary is not resolvable: {}", path.display());
