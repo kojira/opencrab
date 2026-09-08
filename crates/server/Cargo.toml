@@ -36,6 +36,7 @@ chrono = { workspace = true }
 iana-time-zone = { workspace = true }
 dashmap = { workspace = true }
 rusqlite = { workspace = true }
+libc = { workspace = true }
 opencrab-core = { workspace = true }
 opencrab-llm = { workspace = true }
 opencrab-llm-types = { workspace = true }

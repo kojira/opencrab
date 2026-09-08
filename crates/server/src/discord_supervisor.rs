@@ -224,23 +224,47 @@ impl GatewaySupervisorSet {
 /// `tokio::process::Child` のラッパ。
 pub struct TokioChild {
     child: tokio::process::Child,
+    /// Spawned child is its own process-group leader. Descendants inherit this group.
+    process_group: i32,
+}
+
+impl TokioChild {
+    fn signal_group(&self, signal: i32) {
+        // SAFETY: `process_group` is a positive pid captured directly after spawn. A negative
+        // target asks kill(2) to signal that isolated process group, never the server's group.
+        let rc = unsafe { libc::kill(-self.process_group, signal) };
+        if rc != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                warn!(%error, process_group = self.process_group, "failed to signal gateway process group");
+            }
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl SupervisedChild for TokioChild {
     async fn wait_exit(&mut self) -> String {
-        match self.child.wait().await {
+        let outcome = match self.child.wait().await {
             Ok(status) => format!("{status}"),
             Err(e) => format!("wait() error: {e}"),
-        }
+        };
+        // If the gateway itself crashed, do not leave credential-bearing descendants behind.
+        self.signal_group(libc::SIGKILL);
+        outcome
     }
 
     async fn kill(&mut self) {
-        // start_kill（SIGKILL）→ wait で reap。既に死んでいれば start_kill は Err になりうるが無害。
-        if let Err(e) = self.child.start_kill() {
-            warn!(error = %e, "discord-gateway child の kill 要求に失敗（既に終了済みの可能性）");
+        // Give the whole isolated group a chance to exit, then force-clean every descendant.
+        self.signal_group(libc::SIGTERM);
+        if tokio::time::timeout(Duration::from_secs(3), self.child.wait())
+            .await
+            .is_err()
+        {
+            self.signal_group(libc::SIGKILL);
+            let _ = self.child.wait().await;
         }
-        let _ = self.child.wait().await;
+        self.signal_group(libc::SIGKILL);
     }
 
     fn pid(&self) -> Option<u32> {
@@ -304,8 +328,17 @@ impl ChildSpawner for GatewayChildSpawner {
         cmd.arg(&self.placement_path);
         cmd.env(self.secret_env, &self.secret);
         cmd.kill_on_drop(true);
+        // External gateways may spawn transport helpers (for example `nostaro watch`). Keep
+        // each gateway tree in an isolated group so stop/restart/shutdown cannot orphan them.
+        std::os::unix::process::CommandExt::process_group(cmd.as_std_mut(), 0);
         let child = cmd.spawn()?;
-        Ok(Box::new(TokioChild { child }))
+        let process_group = child.id().ok_or_else(|| {
+            std::io::Error::other("spawned gateway child did not expose a process id")
+        })? as i32;
+        Ok(Box::new(TokioChild {
+            child,
+            process_group,
+        }))
     }
 
     fn agent_id(&self) -> &str {
