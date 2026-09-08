@@ -7,7 +7,8 @@ use opencrab_server::discord_supervisor::{
 pub(super) struct NostrV3Controller {
     db: opencrab_db::Db,
     placement_dir: std::path::PathBuf,
-    core_socket: String,
+    core_socket: Option<String>,
+    ingress_v3: bool,
     secret_provider: opencrab_nostr::MainKeyProvider,
     gateway_bin: std::path::PathBuf,
     nostaro_bin: std::path::PathBuf,
@@ -19,7 +20,8 @@ impl NostrV3Controller {
     pub(super) fn new(
         db: &opencrab_db::Db,
         database_path: &str,
-        core_socket: &str,
+        core_socket: Option<&str>,
+        ingress_v3: bool,
         secret_provider: &opencrab_nostr::MainKeyProvider,
         gateway_bin: &std::path::Path,
         nostaro_bin: &std::path::Path,
@@ -34,7 +36,8 @@ impl NostrV3Controller {
         Ok(std::sync::Arc::new(Self {
             db: db.clone(),
             placement_dir,
-            core_socket: core_socket.to_string(),
+            core_socket: core_socket.map(ToOwned::to_owned),
+            ingress_v3,
             secret_provider: secret_provider.clone(),
             gateway_bin: gateway_bin.to_path_buf(),
             nostaro_bin: nostaro_bin.to_path_buf(),
@@ -59,8 +62,12 @@ impl NostrV3Controller {
         plan: opencrab_server::nostr_provision::NostrPlacementPlan,
     ) -> anyhow::Result<()> {
         let secret = (self.secret_provider)(&plan.agent_id)?;
+        let core_socket = self
+            .core_socket
+            .as_deref()
+            .context("Nostr V3 requires an absolute gate.listen_socket")?;
         let placement = serde_json::json!({
-            "core_socket": self.core_socket,
+            "core_socket": core_socket,
             "nostaro_bin": self.nostaro_bin,
             "instances": [{
                 "instance_id": plan.instance_id,
@@ -113,6 +120,12 @@ impl V3ProcessControl for NostrV3Controller {
     async fn start(&self, agent_id: &str) -> anyhow::Result<()> {
         let _lifecycle = self.lifecycle.lock().await;
         self.supervisors.stop(agent_id).await;
+        if !self.ingress_v3 {
+            anyhow::bail!("Nostr gateway start requires gate.nostr_ingress = v3");
+        }
+        if self.core_socket.is_none() {
+            anyhow::bail!("Nostr V3 requires an absolute gate.listen_socket");
+        }
         super::require_resolvable_binary("nostr-gateway", &self.gateway_bin)?;
         super::require_resolvable_binary("nostaro", &self.nostaro_bin)?;
         self.start_plan(self.plan(agent_id)?).await
@@ -126,5 +139,53 @@ impl V3ProcessControl for NostrV3Controller {
     async fn shutdown_all(&self) {
         let _lifecycle = self.lifecycle.lock().await;
         self.supervisors.shutdown_all().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn first_dynamic_row_cannot_bypass_v3_or_socket_prerequisites() {
+        let db = opencrab_db::Db::memory().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let provider: opencrab_nostr::MainKeyProvider =
+            std::sync::Arc::new(|_| anyhow::bail!("must not read secret before prerequisites"));
+        let invalid_ingress = NostrV3Controller::new(
+            &db,
+            root.path().join("db.sqlite").to_str().unwrap(),
+            Some("/tmp/extgate.sock"),
+            false,
+            &provider,
+            std::path::Path::new("/bin/true"),
+            std::path::Path::new("/bin/true"),
+        )
+        .unwrap();
+        assert!(
+            V3ProcessControl::start(invalid_ingress.as_ref(), "new-agent")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("nostr_ingress = v3")
+        );
+
+        let missing_socket = NostrV3Controller::new(
+            &db,
+            root.path().join("db.sqlite").to_str().unwrap(),
+            None,
+            true,
+            &provider,
+            std::path::Path::new("/bin/true"),
+            std::path::Path::new("/bin/true"),
+        )
+        .unwrap();
+        assert!(
+            V3ProcessControl::start(missing_socket.as_ref(), "new-agent")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("listen_socket")
+        );
     }
 }

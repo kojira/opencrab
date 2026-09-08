@@ -224,9 +224,9 @@ async fn main() -> anyhow::Result<()> {
         &state.db,
         extgate.clone(),
         &cfg.database.path,
-        gate_socket_for_discord
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("Discord V3 requires gate.listen_socket"))?,
+        gate_socket_for_discord.as_deref(),
+        opencrab_server::discord_provision::DiscordIngress::parse(&cfg.gate.discord_ingress)
+            .is_some(),
         &attachment_inbox_root,
         &discord_gateway_bin,
     )?;
@@ -258,9 +258,11 @@ async fn main() -> anyhow::Result<()> {
         let process_controller = nostr_ignition::NostrV3Controller::new(
             &state.db,
             &cfg.database.path,
-            gate_socket_for_nostr
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("Nostr V3 requires gate.listen_socket"))?,
+            gate_socket_for_nostr.as_deref(),
+            matches!(
+                opencrab_nostr::NostrIngress::parse(&cfg.gate.nostr_ingress),
+                Some(opencrab_nostr::NostrIngress::V3)
+            ),
             &provider,
             &nostr_gateway_bin,
             &nostaro_bin,
