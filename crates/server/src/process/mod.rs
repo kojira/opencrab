@@ -501,7 +501,11 @@ pub async fn run_agent_response(
         engine.set_on_continuation_speech(cb);
     }
 
-    // #930: 走行中に畳み込んだ said の origin を read state（👀）として通知するフックを転記する。
+    // #964: 初回 request の発端 origin と、2 回目以降に実際に畳み込んだ origin を
+    // `llm.chat` の直前に read state（👀）として通知する設定を転記する。
+    if let Some(origin) = req.initial_read_origin {
+        engine.set_initial_read_origin(origin);
+    }
     if let Some(cb) = req.on_read_origin {
         engine.set_on_folded_origin(cb);
     }

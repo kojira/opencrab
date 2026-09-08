@@ -484,7 +484,7 @@ conformance suite は少なくとも次を自動検証する。
 - `3bdb3aab` の user_version 43 相当 DB と fresh DB の双方が v44 へ到達し、新規 gate 表が exact 4 表。
 - 4 表の PK/FK/CHECK/partial unique、agents subject backfill/自動採番/unique/positive guard を検証する。
 - migration 中の各 statement failure が全 rollback し、user_version 43 のまま起動失敗になる。
-- omoikane と instance PUT → Binding PUT → hello/bind → said → activity started/ended → say/ok の相互 E2E を緑にする。
+- omoikane と instance PUT → Binding PUT → hello/bind → said → activity started/read/ended → say/ok の相互 E2E を緑にする。
 - 切断 E2E で pending say が indeterminate、再接続後の同 delivery say が 0 件である。
 
 ## 10. omoikane 差分
@@ -501,7 +501,7 @@ conformance suite は少なくとも次を自動検証する。
 | `effect` + kind=`say` + address | direct `m="say"`、binding_id、payload だけ。payload は `{"text":body}`、text nonempty。 |
 | success response の delivered/origin、false branch | `ok` は配送成功だけ。外部 origin は返さない。確定非受理は `err(external_rejected)`。 |
 | response に `m` 無し | response は `m="ok"|"err"` を必須にする。pending 種と shape を照合する。 |
-| activity started/progress/ended + address/kind/label | binding_id/activity_id と started/ended だけ。response と delivery は作らない。 |
+| activity started/progress/ended + address/kind/label | binding_id/activity_id と started/read/ended だけ。started は typing、read+origin は LLM request 直前の既読通知。response と delivery は作らない。 |
 | origin 重複を null と解釈する G1 | 重複は初回 seq。null は core が記録しなかった said だけ。 |
 | 接続情報を DB と admin GET に投影 | 接続は process memory だけ。restart は空。Instance GET に接続 field を返さない。 |
 | 多数の gate 補助表 | gate_instances、gate_bindings、external_origins、deliveries の 4 表。subject は agents 列。 |

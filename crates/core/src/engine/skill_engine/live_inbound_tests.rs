@@ -250,6 +250,251 @@
         );
     }
 
+    /// #964: request 境界と直列性を 1 本の制御可能な LLM で固定する。
+    struct BoundaryLlm {
+        requests: std::sync::Mutex<Vec<ChatRequest>>,
+        events: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        first_entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release_first: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    }
+
+    #[async_trait]
+    impl LlmClient for BoundaryLlm {
+        async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+            let call = {
+                let mut requests = self.requests.lock().unwrap();
+                requests.push(request);
+                requests.len()
+            };
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("llm{call}_invoked"));
+            if call == 1 {
+                if let Some(tx) = self.first_entered.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+                let rx = self.release_first.lock().unwrap().take().unwrap();
+                let _ = rx.await;
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push("llm1_completed".to_string());
+                Ok(response(None, vec![tool_call("call-1")]))
+            } else {
+                Ok(response(Some("done"), vec![]))
+            }
+        }
+    }
+
+    struct BoundaryExecutor {
+        events: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl ActionExecutor for BoundaryExecutor {
+        async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ActionResult {
+            self.events
+                .lock()
+                .unwrap()
+                .push("result1_completed".to_string());
+            ActionResult {
+                success: true,
+                data: serde_json::json!("result-one"),
+                error: None,
+            }
+        }
+
+        fn list_tools(&self) -> Vec<FunctionDefinition> {
+            NoopExecutor.list_tools()
+        }
+    }
+
+    struct BoundaryInbound {
+        events: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        polls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl LiveInboundSource for BoundaryInbound {
+        fn poll_new_messages(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn poll_new_with_origin(&self) -> Vec<crate::FoldedInbound> {
+            let poll = self
+                .polls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.events
+                .lock()
+                .unwrap()
+                .push("request2_construction_started".to_string());
+            if poll == 0 {
+                vec![crate::FoldedInbound {
+                    text: "[owner]:\nfolded inbound".to_string(),
+                    origin: Some("origin-b".to_string()),
+                }]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn read_notifications_are_at_exact_sequential_request_boundaries() {
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let llm = std::sync::Arc::new(BoundaryLlm {
+            requests: std::sync::Mutex::new(Vec::new()),
+            events: events.clone(),
+            first_entered: std::sync::Mutex::new(Some(entered_tx)),
+            release_first: std::sync::Mutex::new(Some(release_rx)),
+        });
+        let source = std::sync::Arc::new(BoundaryInbound {
+            events: events.clone(),
+            polls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut engine = SkillEngine::new(
+            Box::new(BoundaryLlmHandle(llm.clone())),
+            Box::new(BoundaryExecutor {
+                events: events.clone(),
+            }),
+            10,
+        );
+        engine.set_live_inbound(source.clone());
+        engine.set_initial_read_origin("origin-a".to_string());
+        engine.set_on_folded_origin({
+            let events = events.clone();
+            std::sync::Arc::new(move |origin| {
+                let events = events.clone();
+                Box::pin(async move {
+                    events.lock().unwrap().push(format!("read:{origin}"));
+                })
+            })
+        });
+
+        let run = tokio::spawn(async move { engine.run("system", "initial", "model").await });
+        entered_rx.await.unwrap();
+        assert_eq!(source.polls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(llm.requests.lock().unwrap().len(), 1);
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            ["read:origin-a", "llm1_invoked"],
+            "発端 read は request1 の直前、request1 完了までは request2 を構築しない"
+        );
+
+        release_tx.send(()).unwrap();
+        run.await.unwrap().unwrap();
+
+        let requests = llm.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let second = &requests[1].messages;
+        let result_pos = second
+            .iter()
+            .position(|m| m.role == Role::Tool)
+            .expect("result1 in request2");
+        let folded_pos = second
+            .iter()
+            .position(|m| {
+                m.role == Role::User
+                    && matches!(&m.content, Some(MessageContent::Text(t)) if t.contains("folded inbound"))
+            })
+            .expect("folded inbound in request2");
+        assert!(result_pos < folded_pos, "result1 の後に folded inbound を積む");
+        assert!(matches!(
+            &second[result_pos].content,
+            Some(MessageContent::Text(t)) if t.contains("result-one")
+        ));
+        drop(requests);
+
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            [
+                "read:origin-a",
+                "llm1_invoked",
+                "llm1_completed",
+                "result1_completed",
+                "request2_construction_started",
+                "read:origin-b",
+                "llm2_invoked",
+            ],
+            "request1 完了→result1→request2 構築→folded read→request2 呼出しの順"
+        );
+    }
+
+    struct FailingRequestSetupExecutor;
+
+    #[async_trait]
+    impl ActionExecutor for FailingRequestSetupExecutor {
+        async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ActionResult {
+            panic!("execute must not be reached")
+        }
+
+        fn list_tools(&self) -> Vec<FunctionDefinition> {
+            panic!("simulated request setup failure")
+        }
+    }
+
+    /// DC-964 v0.5 §7(8): origin が pending でも request 構築が完了しなければ read しない。
+    #[tokio::test]
+    async fn pending_origin_is_not_read_when_request_setup_fails_before_chat() {
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let llm = std::sync::Arc::new(RecordingLlm::new(Vec::new()));
+        let mut engine = SkillEngine::new(
+            Box::new(LlmHandle(llm.clone())),
+            Box::new(FailingRequestSetupExecutor),
+            10,
+        );
+        engine.set_initial_read_origin("origin-pending".to_string());
+        engine.set_on_folded_origin({
+            let reads = reads.clone();
+            std::sync::Arc::new(move |_| {
+                let reads = reads.clone();
+                Box::pin(async move {
+                    reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                })
+            })
+        });
+
+        let failed = tokio::spawn(async move { engine.run("system", "initial", "model").await })
+            .await
+            .expect_err("request setup must fail before chat");
+        assert!(failed.is_panic(), "setup failure is the injected panic");
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(llm.call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn no_origin_emits_no_read_notification() {
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let llm = std::sync::Arc::new(RecordingLlm::new(vec![response(Some("done"), vec![])]));
+        let mut engine = SkillEngine::new(
+            Box::new(LlmHandle(llm)),
+            Box::new(NoopExecutor),
+            10,
+        );
+        engine.set_on_folded_origin({
+            let reads = reads.clone();
+            std::sync::Arc::new(move |_| {
+                let reads = reads.clone();
+                Box::pin(async move {
+                    reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                })
+            })
+        });
+        engine.run("system", "initial", "model").await.unwrap();
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    struct BoundaryLlmHandle(std::sync::Arc<BoundaryLlm>);
+
+    #[async_trait]
+    impl LlmClient for BoundaryLlmHandle {
+        async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+            self.0.chat(request).await
+        }
+    }
+
     /// `Arc<RecordingLlm>` を `Box<dyn LlmClient>` として engine に渡すための薄い委譲。
     struct LlmHandle(std::sync::Arc<RecordingLlm>);
 

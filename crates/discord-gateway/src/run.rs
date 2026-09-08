@@ -280,9 +280,9 @@ async fn handle_incoming(
     let accepted = matches!(&outcome, Ok(SaidOutcome::Accepted { .. }));
     match outcome {
         Ok(SaidOutcome::Accepted { seq }) => {
-            // 👀 はここ（受理・推論前）では付けない。オーナー確定仕様: LLM がこのメッセージを
-            // ターン文脈に含めた（読んだ）時点で付ける。record-only は読まれるまで付けない。
-            // 実際の付与は say consumer が activity started(origin) を受けた時点で行う（R2）。
+            // 👀 はここ（受理・推論前）では付けない。LLM request にこのメッセージを新しく
+            // 含める直前に付ける。record-only は読まれるまで付けない。実際の付与は consumer が
+            // activity read(origin) を受けた時点で行う（#964）。
             tracing::info!(%address, seq, "said accepted");
         }
         Ok(SaidOutcome::NotAdmitted) => tracing::info!(%address, "said not admitted"),
@@ -361,11 +361,10 @@ fn spawn_say_consumer(
                     }
                 }
                 Some(LiveEvent::Activity { state, origin, .. }) => {
-                    // 👀: LLM がこの入力をターン文脈に含めた時点で付ける。ターン発端は started+origin、
-                    // 走行中に畳み込んだ said は read+origin（#930）。1 origin 1 回（started と read が
-                    // 同一 origin に来ても二重付与しない）。record-only/held はどちらへも来ないので
-                    // 「読まれるまで付かない」が保たれる（R2 / #930）。
-                    if state == "started" || state == "read" {
+                    // #964 👀: 投稿を新しく含む LLM request の直前に届く read+origin だけで付ける。
+                    // started は typing 専用で origin を持たない。1 origin 1 回。record-only/held は
+                    // read が来ないので「読まれるまで付かない」が保たれる。
+                    if state == "read" {
                         if let Some(origin) = &origin {
                             if accepted_origins.insert(origin.clone()) {
                                 react_system(&transport, origin, &reactions.accepted).await;

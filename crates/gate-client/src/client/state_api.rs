@@ -61,8 +61,8 @@ pub enum LiveEvent {
     Activity {
         activity_id: String,
         state: String,
-        /// R2(👀): started が読み取ったターン発端の origin（state="started" のときだけ Some）。
-        /// consumer（discord-gateway）は started+Some でこの origin へ 👀 を付ける。
+        /// #964: 次の LLM request に新しく含める投稿の origin（state="read" のときだけ Some）。
+        /// consumer（discord-gateway）は read+Some でこの origin へ 👀 を付ける。
         origin: Option<String>,
     },
     /// #915: activity ended で core が指定した完了サインの付け先（発話 id）。

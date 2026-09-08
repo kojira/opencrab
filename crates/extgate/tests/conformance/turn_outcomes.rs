@@ -193,15 +193,22 @@ async fn e2e_omoikane_flow() {
     let mut saw_started = false;
     let mut saw_ended = false;
     let mut saw_say = false;
-    // R2(👀): started は発端 origin を運び、ended は運ばない。
-    let mut started_origin: Option<String> = None;
+    // #964: started は origin を持たず、LLM call 直前の read が発端 origin を運ぶ。
+    let mut started_had_origin = false;
+    let mut read_origin: Option<String> = None;
+    let mut activity_order = Vec::new();
     let mut ended_had_origin = false;
     for _ in 0..80 {
         if let Some(v) = read_frame_opt(&mut s).await {
             match v["m"].as_str() {
                 Some("activity") if v["state"] == "started" => {
                     saw_started = true;
-                    started_origin = v["origin"].as_str().map(str::to_string);
+                    started_had_origin = !v["origin"].is_null();
+                    activity_order.push("started");
+                }
+                Some("activity") if v["state"] == "read" => {
+                    read_origin = v["origin"].as_str().map(str::to_string);
+                    activity_order.push("read");
                 }
                 Some("activity") if v["state"] == "ended" => {
                     saw_ended = true;
@@ -215,14 +222,16 @@ async fn e2e_omoikane_flow() {
                 _ => {}
             }
         }
-        if saw_started && saw_ended && saw_say {
+        if saw_started && read_origin.is_some() && saw_ended && saw_say {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(saw_started && saw_ended && saw_say);
-    // R2: started(origin) が発端 said へ 👀 を配線するための情報。ended には載らない。
-    assert_eq!(started_origin.as_deref(), Some("omo-1"));
+    assert!(!started_had_origin, "started は origin を持たない");
+    assert_eq!(read_origin.as_deref(), Some("omo-1"));
+    assert_eq!(activity_order.first(), Some(&"started"));
+    assert_eq!(activity_order.get(1), Some(&"read"));
     assert!(!ended_had_origin);
 }
 

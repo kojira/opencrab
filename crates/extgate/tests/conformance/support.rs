@@ -73,8 +73,15 @@ impl AgentRuntime for TestRuntime {
     async fn run_agent_response(&self, req: RunRequest) -> anyhow::Result<EngineResult> {
         self.sink_seen
             .store(req.completion_sink.is_some(), Ordering::SeqCst);
+        let initial_read_origin = req.initial_read_origin.clone();
+        let on_read_origin = req.on_read_origin.clone();
         self.conversations.lock().unwrap().push(req.conversation);
         self.images.lock().unwrap().push(req.image_urls.clone());
+        // #964: この conformance runtime の Engine 境界を模擬する。request が完成した後、
+        // simulated LLM call の直前にだけ initial origin の read 通知を await する。
+        if let (Some(origin), Some(cb)) = (initial_read_origin, on_read_origin) {
+            cb(origin).await;
+        }
         self.turn_entered.notify_waiters();
         // 旧 V3（sink 無し）はツールを同期実行する。sink があれば detach 済みなので待たない。
         if req.completion_sink.is_none() {

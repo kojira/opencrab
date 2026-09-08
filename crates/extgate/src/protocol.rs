@@ -135,8 +135,8 @@ pub fn activity_frame(
         "activity_id": activity_id,
         "state": state,
     });
-    // R2(👀): started が読み取ったターン発端の origin を additive に載せる。旧 gateway は
-    // 認識しない field を無視するので互換（DESIGN-EXTGATE-V3 §「認識しない field は無視」）。
+    // #964: read が示す「次の LLM request に新しく含めた投稿」の origin を additive に載せる。
+    // 旧 gateway は認識しない field を無視するので互換（DESIGN-EXTGATE-V3 §「認識しない field は無視」）。
     if let Some(origin) = origin {
         frame["origin"] = json!(origin);
     }
@@ -501,9 +501,9 @@ mod activity_tests {
         assert_eq!(ended["completed_target"], "utterance");
         assert!(ended.get("origin").is_none());
 
-        let started = activity_frame("binding", "activity", "started", Some("origin"), None);
-        assert_eq!(started["origin"], "origin");
-        assert!(started.get("completed_target").is_none());
+        let read = activity_frame("binding", "activity", "read", Some("origin"), None);
+        assert_eq!(read["origin"], "origin");
+        assert!(read.get("completed_target").is_none());
     }
 
     #[test]
