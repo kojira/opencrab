@@ -179,6 +179,8 @@ path = "{db}"
 
 [gate]
 listen_socket = "{sock}"
+discord_ingress = "v3"
+nostr_ingress = "v3"
 
 [tools]
 enabled = false
@@ -325,10 +327,15 @@ fn spawn_core(root: &Path) -> Proc {
     let core_log = root.join("core.log");
     let core_out = std::fs::File::create(&core_log).unwrap();
     let core_err = core_out.try_clone().unwrap();
+    let executable_fixture = std::env::current_exe().expect("current test executable");
     Proc(
         Command::new(server_bin())
             .current_dir(root)
             .env("OPENCRAB_GATE_OPERATOR_TOKEN", TOKEN)
+            // A disabled Discord row is persisted below to exercise caller identity. V3-only
+            // startup still validates that configured rows have an executable deployment
+            // prerequisite, but it must never launch this fixture while the row is disabled.
+            .env("OPENCRAB_DISCORD_GATEWAY_BIN", executable_fixture)
             .env(
                 "RUST_LOG",
                 "opencrab=info,opencrab_server=info,opencrab_extgate=info",
