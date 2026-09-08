@@ -64,6 +64,11 @@ impl AgentGatewayLifecycle for V3OnlyGateway {
     }
 
     async fn start(&self, agent_id: &str) -> anyhow::Result<()> {
+        // Restart is stop-first. If core provisioning fails, no stale external child may keep
+        // serving the previous placement/credential.
+        if let Some(process) = &self.process {
+            process.stop(agent_id).await;
+        }
         self.inner.start(agent_id).await?;
         if let Some(process) = &self.process {
             process.start(agent_id).await?;

@@ -49,10 +49,7 @@ impl NostrV3Controller {
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("db lock for Nostr V3 ignition"))?;
-        opencrab_server::nostr_provision::load_nostr_placement_plans(&conn)?
-            .into_iter()
-            .find(|plan| plan.agent_id == agent_id)
-            .with_context(|| format!("enabled Nostr V3 placement not found for {agent_id}"))
+        opencrab_server::nostr_provision::load_nostr_placement_plan(&conn, agent_id)
     }
 
     async fn start_plan(

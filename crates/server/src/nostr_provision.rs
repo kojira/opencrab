@@ -21,6 +21,48 @@ pub struct NostrPlacementPlan {
 
 /// Provisioning が完了した enabled Nostr instance を、外部 gateway の placement へ投影する。
 /// default session の open binding が無い・重複する instance は fail-loud にする。
+pub fn load_nostr_placement_plan(conn: &Connection, agent_id: &str) -> Result<NostrPlacementPlan> {
+    let row = conn
+        .query_row(
+            "SELECT nc.agent_id, gi.instance_id, gi.revision, gb.address, gi.config_b64
+             FROM agent_nostr_config nc
+             JOIN agents a ON a.agent_id = nc.agent_id
+             JOIN gate_instances gi
+               ON gi.subject_id = a.subject_id AND gi.kind_id = 'nostr'
+              AND gi.enabled = 1 AND gi.deleted_at IS NULL
+             JOIN gate_bindings gb
+               ON gb.instance_id = gi.instance_id AND gb.closed_at IS NULL
+              AND gb.address = 'nostr-' || nc.agent_id
+             WHERE nc.agent_id = ?1",
+            params![agent_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .optional()?
+        .with_context(|| format!("Nostr V3 placement not found for {agent_id}"))?;
+    let (agent_id, instance_id, revision, address, config_b64) = row;
+    let expected_instance_id = nostr_instance_id(&agent_id);
+    if instance_id != expected_instance_id {
+        bail!(
+            "agent {agent_id} の Nostr instance が不正: expected={expected_instance_id}, actual={instance_id}"
+        );
+    }
+    Ok(NostrPlacementPlan {
+        agent_id,
+        instance_id,
+        revision: u64::try_from(revision).context("nostr instance revision")?,
+        address,
+        config_b64,
+    })
+}
+
 pub fn load_nostr_placement_plans(conn: &Connection) -> Result<Vec<NostrPlacementPlan>> {
     let mut stmt = conn.prepare(
         "SELECT nc.agent_id, gi.instance_id, gi.revision, gb.address, gi.config_b64
@@ -363,6 +405,11 @@ mod tests {
         assert_eq!(placements[0].revision, 1);
         assert_eq!(placements[0].address, sid);
         assert!(!placements[0].config_b64.is_empty());
+
+        opencrab_db::queries::set_agent_nostr_config_enabled(&conn, "a1", false).unwrap();
+        assert!(load_nostr_placement_plans(&conn).unwrap().is_empty());
+        let dynamic = load_nostr_placement_plan(&conn, "a1").unwrap();
+        assert_eq!(dynamic.instance_id, nostr_instance_id("a1"));
     }
 
     #[test]

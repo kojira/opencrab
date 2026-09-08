@@ -84,16 +84,8 @@ impl DiscordV3Controller {
     }
 
     async fn ensure_bot_user_id(&self, agent_id: &str, token: &str) -> anyhow::Result<()> {
-        let current = {
-            let conn = self
-                .db
-                .lock()
-                .map_err(|_| anyhow::anyhow!("db lock for Discord identity"))?;
-            opencrab_db::queries::get_agent_discord_bot_user_id(&conn, agent_id)?
-        };
-        if !current.trim().is_empty() {
-            return Ok(());
-        }
+        // The token identifies the bot. Revalidate on every process start so token rotation
+        // cannot reuse a stale self_bot_id and ingest the new bot's own messages.
         let response = reqwest::Client::new()
             .get("https://discord.com/api/v10/users/@me")
             .header(reqwest::header::AUTHORIZATION, format!("Bot {token}"))

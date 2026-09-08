@@ -18,7 +18,7 @@ use crate::config::NostrConfig;
 use crate::identity::NostrIdentityAdmin;
 use crate::runner::NostrAgentRunner;
 use crate::session::{NostrSessionRuntime, NOSTR_SESSION_PREFIX};
-use crate::watch::watch_subscribe_config;
+use crate::watch_policy::watch_subscribe_config;
 
 mod allow_sources;
 mod identity_admin;

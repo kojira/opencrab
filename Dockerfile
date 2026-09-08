@@ -45,7 +45,8 @@ COPY . .
 # ここで `--features` を渡さないのは、opencrab-server の default が
 # ["discord","nostr","web"] のため（crates/server/Cargo.toml）。個別に絞りたく
 # なった場合は `--no-default-features --features <...>` を使うこと。
-RUN cargo build --release -p opencrab-server
+RUN cargo build --release -p opencrab-server \
+    && cargo build --release -p opencrab-nostr-gateway -p opencrab-discord-gateway
 
 FROM debian:bookworm-slim
 # 実行時共有ライブラリ:
@@ -59,6 +60,8 @@ RUN apt-get update \
     && useradd -r -m -d /app crab
 WORKDIR /app
 COPY --from=build /src/target/release/opencrab-server /usr/local/bin/opencrab-server
+COPY --from=build /src/target/release/nostr-gateway /usr/local/bin/nostr-gateway
+COPY --from=build /src/target/release/discord-gateway /usr/local/bin/discord-gateway
 USER crab
 ENV TZ=Asia/Tokyo
 EXPOSE 8080

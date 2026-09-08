@@ -117,8 +117,6 @@ async fn main() -> anyhow::Result<()> {
         gate_socket_for_nostr,
         #[cfg(feature = "discord")]
         attachment_inbox_root,
-        #[cfg(feature = "discord")]
-        #[cfg_attr(not(feature = "discord"), allow(unused_variables))]
         #[cfg(feature = "nostr")]
         nostr_master_key,
         #[cfg(feature = "nostr")]
@@ -131,7 +129,15 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(feature = "discord")]
     let discord_gateway_bin = resolve_discord_gateway_bin();
     #[cfg(feature = "discord")]
-    {
+    let start_discord = {
+        let conn = state
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("db lock for Discord startup validation"))?;
+        !opencrab_db::queries::list_enabled_agent_discord_configs(&conn)?.is_empty()
+    };
+    #[cfg(feature = "discord")]
+    if start_discord {
         require_resolvable_binary("discord-gateway", &discord_gateway_bin)?;
         if gate_socket_for_discord.is_none() {
             anyhow::bail!("Discord V3 requires an absolute gate.listen_socket");
@@ -517,5 +523,5 @@ fn nostr_bundle_from_anchor(
 // （時刻が来たら発火先ゲートウェイのループへ `TimedFire` を 1 本流すだけの free 関数）に集約した。lib へ
 // 置いてあるので scheduler（時刻発火）と `run_my_heartbeat`（手動発火）が同じ 1 つの関数を共有する。
 // 専用のターン実装・専用配送（旧 `heartbeat_delivery.rs`）・scheduler 側の継続ターン機構は撤去し、以降の
-// ターンはゲートウェイ既存の通常ルート（Discord=`SubtaskCompleted` / Nostr=`NostrResponder`）が回す。
+// ターンはexternal gatewayの通常delivery経路が回す。
 // 指示文の整形テストは `heartbeat_fire` の `#[cfg(test)]` にある。

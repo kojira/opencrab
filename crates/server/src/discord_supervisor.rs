@@ -17,6 +17,7 @@
 //! いずれにも出さない（`nostr-gateway` の watch 子と同じ流儀）。
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -175,6 +176,9 @@ struct SupervisedTask {
 pub struct GatewaySupervisorSet {
     config: SupervisorConfig,
     tasks: tokio::sync::Mutex<HashMap<String, SupervisedTask>>,
+    /// Serializes compound lifecycle operations so task replacement cannot race stop/shutdown.
+    lifecycle: tokio::sync::Mutex<()>,
+    closed: AtomicBool,
 }
 
 impl GatewaySupervisorSet {
@@ -182,11 +186,17 @@ impl GatewaySupervisorSet {
         Arc::new(Self {
             config,
             tasks: tokio::sync::Mutex::new(HashMap::new()),
+            lifecycle: tokio::sync::Mutex::new(()),
+            closed: AtomicBool::new(false),
         })
     }
 
     pub async fn start(&self, agent_id: &str, spawner: Arc<dyn ChildSpawner>) {
-        self.stop(agent_id).await;
+        let _lifecycle = self.lifecycle.lock().await;
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        self.stop_locked(agent_id).await;
         let (shutdown, receiver) = watch::channel(false);
         let config = self.config.clone();
         let join = tokio::spawn(supervise(spawner, config, receiver));
@@ -196,7 +206,7 @@ impl GatewaySupervisorSet {
             .insert(agent_id.to_string(), SupervisedTask { shutdown, join });
     }
 
-    pub async fn stop(&self, agent_id: &str) {
+    async fn stop_locked(&self, agent_id: &str) {
         let task = self.tasks.lock().await.remove(agent_id);
         if let Some(task) = task {
             let _ = task.shutdown.send(true);
@@ -204,7 +214,14 @@ impl GatewaySupervisorSet {
         }
     }
 
+    pub async fn stop(&self, agent_id: &str) {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.stop_locked(agent_id).await;
+    }
+
     pub async fn shutdown_all(&self) {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.closed.store(true, Ordering::Release);
         let tasks: Vec<_> = self
             .tasks
             .lock()
@@ -239,6 +256,14 @@ impl TokioChild {
                 warn!(%error, process_group = self.process_group, "failed to signal gateway process group");
             }
         }
+    }
+}
+
+impl Drop for TokioChild {
+    fn drop(&mut self) {
+        // Backstop for task abort/runtime unwind: kill_on_drop covers only the direct child.
+        // The isolated process group also contains transport helpers with the same credential.
+        let _ = unsafe { libc::kill(-self.process_group, libc::SIGKILL) };
     }
 }
 
@@ -661,6 +686,44 @@ mod tests {
             spawns_at_shutdown,
             "shutdown 後に再 spawn してはいけない"
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_replacement_leaves_one_owned_child() {
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let kills = Arc::new(AtomicUsize::new(0));
+        let dies: Arc<Mutex<Vec<Arc<Notify>>>> = Arc::default();
+        let spawner = Arc::new(FakeSpawner {
+            agent_id: "a1".into(),
+            spawns: spawns.clone(),
+            kills: kills.clone(),
+            dies,
+        });
+        let set = GatewaySupervisorSet::new(fast_cfg());
+        tokio::join!(set.start("a1", spawner.clone()), set.start("a1", spawner));
+        assert!(wait_until(|| spawns.load(Ordering::SeqCst) >= 1).await);
+        set.shutdown_all().await;
+        assert_eq!(
+            kills.load(Ordering::SeqCst),
+            spawns.load(Ordering::SeqCst),
+            "every spawned child must remain owned and terminated"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_is_terminal_against_concurrent_or_later_start() {
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let spawner = Arc::new(FakeSpawner {
+            agent_id: "a1".into(),
+            spawns: spawns.clone(),
+            kills: Arc::new(AtomicUsize::new(0)),
+            dies: Arc::default(),
+        });
+        let set = GatewaySupervisorSet::new(fast_cfg());
+        set.shutdown_all().await;
+        set.start("a1", spawner).await;
+        tokio::task::yield_now().await;
+        assert_eq!(spawns.load(Ordering::SeqCst), 0);
     }
 
     /// 起動前に既に shutdown なら 1 度も spawn しない。

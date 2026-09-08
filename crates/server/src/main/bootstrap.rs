@@ -16,7 +16,6 @@ pub(super) struct BootstrapContext {
     pub(super) gate_socket_for_nostr: Option<String>,
     #[cfg(feature = "discord")]
     pub(super) attachment_inbox_root: std::path::PathBuf,
-    #[cfg(feature = "discord")]
     #[cfg(feature = "nostr")]
     pub(super) nostr_master_key: Option<opencrab_nostr::MasterKey>,
     #[cfg(feature = "nostr")]
@@ -41,17 +40,6 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
 
     // Load config from TOML (with env var expansion)
     let cfg = config::load_config("config/default.toml")?;
-
-    // Discord is V3-only. Missing, legacy, shadow, and unknown values fail closed.
-    #[cfg(feature = "discord")]
-    let _discord_ingress =
-        opencrab_server::discord_provision::DiscordIngress::parse(&cfg.gate.discord_ingress)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "gate.discord_ingress は明示的な v3 が必須です。得た値: {:?}",
-                    cfg.gate.discord_ingress
-                )
-            })?;
 
     // #620: Nostr の at-rest 暗号化マスターキーを **load_config 直後・全 tokio::spawn より前**に
     // env から読み、**即 remove_var** する。以降 spawn される execute_shell は inherit_env=true で
@@ -91,6 +79,27 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
     }
     let gate_token = opencrab_extgate::OperatorToken::take_from_env();
     let gate_socket = opencrab_extgate::validate_listen_socket(&cfg.gate.listen_socket)?;
+    #[cfg(feature = "discord")]
+    let discord_enabled = match db.lock() {
+        Ok(conn) => opencrab_db::queries::list_enabled_agent_discord_configs(&conn)
+            .map(|rows| !rows.is_empty())
+            .unwrap_or(false),
+        Err(_) => false,
+    };
+    // Discord is V3-only. Environments with an enabled agent must opt in explicitly.
+    #[cfg(feature = "discord")]
+    if discord_enabled {
+        opencrab_server::discord_provision::DiscordIngress::parse(&cfg.gate.discord_ingress)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "enabled Discord agent requires gate.discord_ingress = v3; got {:?}",
+                    cfg.gate.discord_ingress
+                )
+            })?;
+        if gate_socket.is_none() {
+            anyhow::bail!("enabled Discord agent requires an absolute gate.listen_socket");
+        }
+    }
     // Discord V3 点火の placement.core_socket 用に、validate 済み path を文字列で控える
     // （`gate_socket` は下の UDS listener ブロックで move されるため、ここで clone）。
     #[cfg(feature = "discord")]

@@ -150,6 +150,8 @@ mod tests {
             .cloned()
             .collect();
         assert_eq!(live_tools, selected_tools);
+        // Discord is V3-only: transport-owned local action tools are no longer part of the
+        // server executor. External capabilities are declared by the connected gateway.
         assert_eq!(
             live_tools
                 .iter()
@@ -165,7 +167,7 @@ mod tests {
                         )
                 })
                 .count(),
-            12
+            0
         );
         // DI フェーズ1: 投稿・操作系の組み込み Nostr ツールは撤去した（能力宣言 DI へ移行・
         // 普通の投稿は say）。組み込み tool surface には出ない（DI operation は runtime 宣言で
