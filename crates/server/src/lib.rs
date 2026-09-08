@@ -19,7 +19,6 @@ pub mod dedicated_gateway;
 #[cfg(feature = "discord")]
 mod discord_fire;
 pub mod discord_provision;
-#[cfg(feature = "discord")]
 pub mod discord_supervisor;
 pub mod heartbeat_fire;
 pub mod heartbeat_instructions;
@@ -55,7 +54,6 @@ pub mod baseline_l1;
 #[doc(hidden)]
 pub mod baseline_l2;
 
-#[cfg(feature = "discord")]
 pub mod transcript;
 
 /// per-agent Nostr sub-gateway マネージャの共有ハンドル。
