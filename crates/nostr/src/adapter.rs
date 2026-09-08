@@ -12,7 +12,7 @@ use opencrab_actions::{
 
 use crate::event::NostrEvent;
 use crate::pubkey::follow_key;
-use crate::watch::{classify_watch_event, WatchForward};
+use crate::watch_policy::{classify_watch_event, WatchForward};
 
 /// 輸送時機。gateway が確定した `route` をそのまま使う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -178,9 +178,14 @@ impl opencrab_nostr::NostrAgentRunner for AppState {
         nostr_gate_allow_keys_from_db(&conn, agent_id)
     }
 
-    fn list_enabled_nostr_configs(&self) -> Vec<opencrab_db::queries::AgentNostrConfigRow> {
-        let conn = self.db.lock().unwrap();
-        opencrab_db::queries::list_enabled_agent_nostr_configs(&conn).unwrap_or_default()
+    fn list_enabled_nostr_configs(
+        &self,
+    ) -> anyhow::Result<Vec<opencrab_db::queries::AgentNostrConfigRow>> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("db lock for enabled Nostr configuration list"))?;
+        opencrab_db::queries::list_enabled_agent_nostr_configs(&conn)
     }
 
     fn get_nostr_config(

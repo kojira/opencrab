@@ -17,8 +17,8 @@ pub mod caller_identity;
 pub mod config;
 pub mod dedicated_gateway;
 #[cfg(feature = "discord")]
+mod discord_fire;
 pub mod discord_provision;
-#[cfg(feature = "discord")]
 pub mod discord_supervisor;
 pub mod heartbeat_fire;
 pub mod heartbeat_instructions;
@@ -54,8 +54,6 @@ pub mod baseline_l1;
 #[doc(hidden)]
 pub mod baseline_l2;
 
-#[cfg(feature = "discord")]
-mod agent_runner_impl;
 pub mod transcript;
 
 /// per-agent Nostr sub-gateway マネージャの共有ハンドル。
@@ -301,7 +299,7 @@ impl AppState {
 )]
 pub fn register_production_descriptors(router: &opencrab_actions::TimedFireRouter) {
     #[cfg(feature = "discord")]
-    router.register_descriptor(Arc::new(opencrab_discord::DiscordFire));
+    router.register_descriptor(Arc::new(discord_fire::DiscordFire));
     #[cfg(feature = "nostr")]
     router.register_descriptor(Arc::new(opencrab_nostr::NostrFire));
     // #925: V3 レーンの canonical session `extgate-<binding_id>`（両 transport 共通）を受ける
@@ -571,11 +569,7 @@ async fn api_health_check() -> axum::Json<serde_json::Value> {
     axum::Json(serde_json::json!({"status": "ok"}))
 }
 
-/// transport 登録簿（#191 段階2 PR2）が、実物のマネージャを載せて期待どおり働くこと。
-///
-/// 偽実装ではなく `DiscordGatewayManager` / `NostrGatewayManager` を入れる。生成は
-/// ネットワークに出ない（実際の接続は `start` を呼んだときだけ）ので、
-/// 「本物がトレイトオブジェクトとして成立するか」をここで押さえられる。
+/// transport登録簿とNostrのcore-side identity capability managerを検証する。
 #[cfg(test)]
 #[path = "lib/gateway_registry_tests.rs"]
 mod gateway_registry_tests;

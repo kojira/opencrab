@@ -239,16 +239,21 @@ pub(crate) async fn apply_nostr_settings(
     // 方針として残す**（契約が持つのは起動と停止だけ）。`start` は上で upsert した行を
     // DB から読み直すが、その時点の行は enabled=false なので、Nostr 側のガードは
     // enabled を見ない（理由は `NostrGatewayManager` のトレイト実装の doc）。
-    if let Some(gw) = state.gateways.get(gateway_kinds::NOSTR) {
-        if enabled {
-            gw.start(agent_id)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            let conn = state.db.lock().unwrap();
-            opencrab_db::queries::set_agent_nostr_config_enabled(&conn, agent_id, true).ok();
-        } else {
-            gw.stop(agent_id).await;
-        }
+    if enabled {
+        let gw = state.gateways.get(gateway_kinds::NOSTR).ok_or_else(|| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Nostr V3 runtime is unavailable (master key or gate configuration missing)"
+                    .to_string(),
+            )
+        })?;
+        gw.start(agent_id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::set_agent_nostr_config_enabled(&conn, agent_id, true).ok();
+    } else if let Some(gw) = state.gateways.get(gateway_kinds::NOSTR) {
+        gw.stop(agent_id).await;
     }
 
     Ok(())
@@ -374,11 +379,16 @@ pub async fn start_nostr_gateway(
     }
     // 起動が成功してから enabled=true にする（失敗時に「enabled だが未稼働」の
     // 不整合を残さない）。この順序はハンドラ側の方針として残す。
-    if let Some(gw) = state.gateways.get(gateway_kinds::NOSTR) {
-        gw.start(&id)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    }
+    let gw = state.gateways.get(gateway_kinds::NOSTR).ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Nostr V3 runtime is unavailable (master key or gate configuration missing)"
+                .to_string(),
+        )
+    })?;
+    gw.start(&id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     {
         let conn = state.db.lock().unwrap();
         opencrab_db::queries::set_agent_nostr_config_enabled(&conn, &id, true).ok();

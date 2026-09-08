@@ -10,6 +10,118 @@ use opencrab_nostr::{
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NostrPlacementPlan {
+    pub agent_id: String,
+    pub instance_id: String,
+    pub revision: u64,
+    pub address: String,
+    pub config_b64: String,
+}
+
+/// Provisioning が完了した enabled Nostr instance を、外部 gateway の placement へ投影する。
+/// default session の open binding が無い・重複する instance は fail-loud にする。
+pub fn load_nostr_placement_plan(conn: &Connection, agent_id: &str) -> Result<NostrPlacementPlan> {
+    let row = conn
+        .query_row(
+            "SELECT nc.agent_id, gi.instance_id, gi.revision, gb.address, gi.config_b64
+             FROM agent_nostr_config nc
+             JOIN agents a ON a.agent_id = nc.agent_id
+             JOIN gate_instances gi
+               ON gi.subject_id = a.subject_id AND gi.kind_id = 'nostr'
+              AND gi.enabled = 1 AND gi.deleted_at IS NULL
+             JOIN gate_bindings gb
+               ON gb.instance_id = gi.instance_id AND gb.closed_at IS NULL
+              AND gb.address = 'nostr-' || nc.agent_id
+             WHERE nc.agent_id = ?1",
+            params![agent_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .optional()?
+        .with_context(|| format!("Nostr V3 placement not found for {agent_id}"))?;
+    let (agent_id, instance_id, revision, address, config_b64) = row;
+    let expected_instance_id = nostr_instance_id(&agent_id);
+    if instance_id != expected_instance_id {
+        bail!(
+            "agent {agent_id} の Nostr instance が不正: expected={expected_instance_id}, actual={instance_id}"
+        );
+    }
+    Ok(NostrPlacementPlan {
+        agent_id,
+        instance_id,
+        revision: u64::try_from(revision).context("nostr instance revision")?,
+        address,
+        config_b64,
+    })
+}
+
+pub fn load_nostr_placement_plans(conn: &Connection) -> Result<Vec<NostrPlacementPlan>> {
+    let mut stmt = conn.prepare(
+        "SELECT nc.agent_id, gi.instance_id, gi.revision, gb.address, gi.config_b64
+         FROM agent_nostr_config nc
+         JOIN agents a ON a.agent_id = nc.agent_id
+         JOIN gate_instances gi
+           ON gi.subject_id = a.subject_id
+          AND gi.kind_id = 'nostr'
+          AND gi.enabled = 1
+          AND gi.deleted_at IS NULL
+         JOIN gate_bindings gb
+           ON gb.instance_id = gi.instance_id
+          AND gb.closed_at IS NULL
+          AND gb.address = 'nostr-' || nc.agent_id
+         WHERE nc.enabled = 1
+         ORDER BY nc.agent_id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let revision = row.get::<_, i64>(2)?;
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            revision,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    })?;
+
+    let mut plans = Vec::new();
+    for row in rows {
+        let (agent_id, instance_id, revision, address, config_b64) = row?;
+        let expected_instance_id = nostr_instance_id(&agent_id);
+        if instance_id != expected_instance_id {
+            bail!(
+                "agent {agent_id} の Nostr instance が不正: expected={expected_instance_id}, actual={instance_id}"
+            );
+        }
+        plans.push(NostrPlacementPlan {
+            agent_id,
+            instance_id,
+            revision: u64::try_from(revision).context("nostr instance revision")?,
+            address,
+            config_b64,
+        });
+    }
+    let enabled: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM agent_nostr_config WHERE enabled = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    if i64::try_from(plans.len()).context("nostr placement count")? != enabled {
+        bail!(
+            "enabled Nostr agent {enabled} 件に対して有効な V3 placement は {} 件（binding/instance 欠落）",
+            plans.len()
+        );
+    }
+    Ok(plans)
+}
+
 /// session ごと 1 binding。session 不在・membership 不一致は fail-loud。
 pub fn provision_nostr_gate(
     conn: &mut Connection,
@@ -119,18 +231,6 @@ pub fn provision_nostr_gate(
     Ok(plans)
 }
 
-/// instance 行だけ敷く（Binding PUT はしない）。`v3_shadow` / `v3` の instance 準備。
-pub fn provision_nostr_instance(
-    conn: &mut Connection,
-    agent_id: &str,
-    self_pubkey: &str,
-    config: &NostrConfig,
-    watches: &[SessionWatchRow],
-    now: i64,
-) -> Result<u64> {
-    upsert_nostr_instance(conn, agent_id, self_pubkey, config, watches, now, false)
-}
-
 /// 停止後の identity 切替用。config を書き revision を +1 する。
 pub fn revise_nostr_gate(
     conn: &mut Connection,
@@ -140,17 +240,16 @@ pub fn revise_nostr_gate(
     watches: &[SessionWatchRow],
     now: i64,
 ) -> Result<u64> {
-    upsert_nostr_instance(conn, agent_id, self_pubkey, config, watches, now, true)
+    update_nostr_instance(conn, agent_id, self_pubkey, config, watches, now)
 }
 
-fn upsert_nostr_instance(
+fn update_nostr_instance(
     conn: &mut Connection,
     agent_id: &str,
     self_pubkey: &str,
     config: &NostrConfig,
     watches: &[SessionWatchRow],
     now: i64,
-    bump_revision: bool,
 ) -> Result<u64> {
     let instance_id = nostr_instance_id(agent_id);
     let name = agent_name(conn, agent_id)?;
@@ -186,7 +285,7 @@ fn upsert_nostr_instance(
             bail!("nostr instance {instance_id} が別 kind/subject で存在する")
         }
         Some((_, _, None, rev)) => {
-            let new_rev = if bump_revision { rev + 1 } else { rev };
+            let new_rev = rev + 1;
             tx.execute(
                 "UPDATE gate_instances
                  SET config_b64 = ?2, config_digest = ?3, revision = ?4, updated_at = ?5
@@ -195,19 +294,7 @@ fn upsert_nostr_instance(
             )?;
             u64::try_from(new_rev).context("revision")?
         }
-        None => {
-            if bump_revision {
-                bail!("nostr instance {instance_id} が無いので revision を上げられない");
-            }
-            tx.execute(
-                "INSERT INTO gate_instances (
-                    instance_id, kind_id, subject_id, revision, enabled,
-                    config_b64, config_digest, created_at, updated_at, deleted_at
-                 ) VALUES (?1, 'nostr', ?2, 1, 1, ?3, ?4, ?5, ?5, NULL)",
-                params![instance_id, subject_id, config_b64, digest, now],
-            )?;
-            1
-        }
+        None => bail!("nostr instance {instance_id} が無いので revision を上げられない"),
     };
     tx.commit()?;
     Ok(revision)
@@ -226,7 +313,8 @@ fn agent_name(conn: &Connection, agent_id: &str) -> Result<String> {
 mod tests {
     use super::*;
     use opencrab_db::queries::{
-        insert_agent_session_in_tx, insert_session_in_tx, upsert_agent, AgentRow,
+        insert_agent_session_in_tx, insert_session_in_tx, upsert_agent, upsert_agent_nostr_config,
+        AgentNostrConfigRow, AgentRow,
     };
     use opencrab_nostr::{nostr_binding_id, nostr_session_id};
 
@@ -285,6 +373,65 @@ mod tests {
     }
 
     #[test]
+    fn enabled_agent_projects_to_external_gateway_placement() {
+        let mut conn = opencrab_db::init_memory().unwrap();
+        seed_agent(&conn);
+        let sid = nostr_session_id("a1");
+        let tx = conn.transaction().unwrap();
+        insert_session_in_tx(&tx, &sid, &sid, "2026-01-01T00:00:00Z").unwrap();
+        insert_agent_session_in_tx(&tx, "a1", &sid).unwrap();
+        tx.commit().unwrap();
+        upsert_agent_nostr_config(
+            &conn,
+            &AgentNostrConfigRow {
+                agent_id: "a1".into(),
+                secret_key: "encrypted-secret-placeholder".into(),
+                relays_json: r#"["wss://yabu.me"]"#.into(),
+                filter_json: "{}".into(),
+                enabled: true,
+            },
+        )
+        .unwrap();
+        let cfg = NostrConfig {
+            relays: vec!["wss://yabu.me".into()],
+            filter: opencrab_nostr::NostrFilter::default(),
+        };
+        provision_nostr_gate(&mut conn, "a1", &"aa".repeat(32), &cfg, &[], 1).unwrap();
+
+        let placements = load_nostr_placement_plans(&conn).unwrap();
+        assert_eq!(placements.len(), 1);
+        assert_eq!(placements[0].agent_id, "a1");
+        assert_eq!(placements[0].instance_id, nostr_instance_id("a1"));
+        assert_eq!(placements[0].revision, 1);
+        assert_eq!(placements[0].address, sid);
+        assert!(!placements[0].config_b64.is_empty());
+
+        opencrab_db::queries::set_agent_nostr_config_enabled(&conn, "a1", false).unwrap();
+        assert!(load_nostr_placement_plans(&conn).unwrap().is_empty());
+        let dynamic = load_nostr_placement_plan(&conn, "a1").unwrap();
+        assert_eq!(dynamic.instance_id, nostr_instance_id("a1"));
+    }
+
+    #[test]
+    fn enabled_agent_without_v3_binding_is_fail_loud() {
+        let conn = opencrab_db::init_memory().unwrap();
+        seed_agent(&conn);
+        upsert_agent_nostr_config(
+            &conn,
+            &AgentNostrConfigRow {
+                agent_id: "a1".into(),
+                secret_key: "encrypted-secret-placeholder".into(),
+                relays_json: "[]".into(),
+                filter_json: "{}".into(),
+                enabled: true,
+            },
+        )
+        .unwrap();
+        let error = load_nostr_placement_plans(&conn).unwrap_err();
+        assert!(error.to_string().contains("placement"));
+    }
+
+    #[test]
     fn missing_session_is_fail_loud() {
         let mut conn = opencrab_db::init_memory().unwrap();
         seed_agent(&conn);
@@ -298,29 +445,6 @@ mod tests {
     }
 
     #[test]
-    fn instance_only_does_not_put_binding() {
-        let mut conn = opencrab_db::init_memory().unwrap();
-        seed_agent(&conn);
-        let cfg = NostrConfig {
-            relays: vec!["wss://yabu.me".into()],
-            filter: opencrab_nostr::NostrFilter::default(),
-        };
-        provision_nostr_instance(&mut conn, "a1", &"aa".repeat(32), &cfg, &[], 1).unwrap();
-        let bindings: i64 = conn
-            .query_row("SELECT COUNT(*) FROM gate_bindings", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(bindings, 0);
-        let rev: i64 = conn
-            .query_row(
-                "SELECT revision FROM gate_instances WHERE instance_id = ?1",
-                params![nostr_instance_id("a1")],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(rev, 1);
-    }
-
-    #[test]
     fn revise_bumps_revision() {
         let mut conn = opencrab_db::init_memory().unwrap();
         seed_agent(&conn);
@@ -328,7 +452,12 @@ mod tests {
             relays: vec!["wss://yabu.me".into()],
             filter: opencrab_nostr::NostrFilter::default(),
         };
-        provision_nostr_instance(&mut conn, "a1", &"aa".repeat(32), &cfg, &[], 1).unwrap();
+        let sid = nostr_session_id("a1");
+        let tx = conn.transaction().unwrap();
+        insert_session_in_tx(&tx, &sid, &sid, "2026-01-01T00:00:00Z").unwrap();
+        insert_agent_session_in_tx(&tx, "a1", &sid).unwrap();
+        tx.commit().unwrap();
+        provision_nostr_gate(&mut conn, "a1", &"aa".repeat(32), &cfg, &[], 1).unwrap();
         let rev = revise_nostr_gate(&mut conn, "a1", &"bb".repeat(32), &cfg, &[], 2).unwrap();
         assert_eq!(rev, 2);
         let stored: i64 = conn
@@ -349,7 +478,12 @@ mod tests {
             relays: vec!["wss://yabu.me".into()],
             filter: opencrab_nostr::NostrFilter::default(),
         };
-        provision_nostr_instance(&mut conn, "a1", &"aa".repeat(32), &cfg, &[], 1).unwrap();
+        let sid = nostr_session_id("a1");
+        let tx = conn.transaction().unwrap();
+        insert_session_in_tx(&tx, &sid, &sid, "2026-01-01T00:00:00Z").unwrap();
+        insert_agent_session_in_tx(&tx, "a1", &sid).unwrap();
+        tx.commit().unwrap();
+        provision_nostr_gate(&mut conn, "a1", &"aa".repeat(32), &cfg, &[], 1).unwrap();
         let config_b64: String = conn
             .query_row(
                 "SELECT config_b64 FROM gate_instances WHERE instance_id = ?1",
@@ -389,7 +523,7 @@ mod tests {
             filter: opencrab_nostr::NostrFilter::default(),
         };
         let err =
-            provision_nostr_instance(&mut conn, "a1", &"aa".repeat(32), &cfg, &[], 1).unwrap_err();
+            provision_nostr_gate(&mut conn, "a1", &"aa".repeat(32), &cfg, &[], 1).unwrap_err();
         assert!(
             err.to_string().contains("agents.name"),
             "empty name must fail-loud: {err}"

@@ -108,7 +108,7 @@ fn record_heartbeat_fire(db: &opencrab_db::Db, agent_id: &str, channel_id: &str,
 ///
 /// caller は **常に `Owner`**（本人が自分の意思で動くターン）。プロンプトは受け口側で system プロンプト
 /// へ足され、会話ログには「発言」として残さない（#501）。継続ターンはループ既存の subtask 完了経路
-/// （Discord=`SubtaskCompleted` / Nostr=`NostrResponder` の `SubtaskCompletionSink`）が担う。
+/// （external gateway の通常delivery経路）が担う。
 ///
 /// **`last_fired_at` はここでは刻まない**（呼び出し側の責務）。スケジューラは成功発火時に刻み、
 /// `run_my_heartbeat`（手動発火）は**刻まない**（時間発火の位相をずらさないため・#599）。

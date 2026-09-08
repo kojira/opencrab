@@ -450,14 +450,7 @@ pub(super) fn build_executor_with_state(
     };
     let gateway_actions: Option<Arc<dyn GatewayActions>> = match transport {
         ToolTransportProfile::WithoutTransport => None,
-        ToolTransportProfile::Discord => Some(Arc::new(
-            opencrab_discord::DiscordGatewayActions::from_token(
-                "baseline-not-a-credential",
-                state.db.clone(),
-                state.workspace_base.clone(),
-                None,
-            ),
-        )),
+        ToolTransportProfile::Discord => None,
         ToolTransportProfile::Nostr => Some(Arc::new(opencrab_nostr::NostrGatewayActions::new(
             opencrab_nostr::NostaroCli::new(),
         ))),

@@ -2,9 +2,8 @@ use super::*;
 
 /// 生成鍵の採用（identity 切替）capability の実体（#264）。
 ///
-/// マネージャと**同じ登録簿**（`gateways` / `admins` の Arc）を共有する。判定は 2 モード:
-/// - **稼働中 + legacy/shadow** → per-agent admin で in-place ホットスワップ。
-/// - **稼働中 + v3** → 鍵更新のあと停止→revision→再起動。
+/// マネージャと**同じ登録簿**（`gateways` / `admins` の Arc）を共有する。
+/// 稼働中の identity 切替は停止→revision→V3 再起動する。
 /// - **未稼働（自己ブートストラップ）** → `agent_nostr_config` に鍵・リレー・**空フィルタ**
 ///   （＝nostaro の mention-only 既定に委ねて自分宛のみ / #271）を enabled=false で書き、
 ///   [`spawn_agent_gateway`] で起動＝接続、
@@ -19,10 +18,8 @@ pub struct NostrIdentityProvisioner<R: NostrAgentRunner> {
     /// #588 TimedFire / #603: 採用時 bootstrap 起動でも時刻発火の受け口を登録する（本体と同じ
     /// 登録簿・**必須**）。
     pub(super) timed_fire_router: Arc<opencrab_actions::TimedFireRouter>,
-    pub(super) ingress: NostrIngress,
     pub(super) allow_store: AllowSetStore,
     pub(super) provisioner: Option<NostrProvisionFn>,
-    pub(super) instance_provisioner: Option<NostrInstanceFn>,
     pub(super) reviser: Option<NostrReviseFn>,
 }
 
@@ -70,7 +67,7 @@ impl<R: NostrAgentRunner> opencrab_actions::GatewayIdentityProvisioning
     for NostrIdentityProvisioner<R>
 {
     async fn adopt_identity(&self, agent_id: &str, npub: &str) -> anyhow::Result<String> {
-        // 稼働中: legacy はホットスワップ、v3 は admin 内で停止→revision→再起動。
+        // 稼働中は admin 内で停止→revision→V3 再起動する。
         let running_admin = self.admins.read().unwrap().get(agent_id).cloned();
         if let Some(admin) = running_admin {
             return admin.adopt_generated_identity(agent_id, npub).await;
@@ -105,10 +102,8 @@ impl<R: NostrAgentRunner> opencrab_actions::GatewayIdentityProvisioning
             &nsec,
             config,
             self.timed_fire_router.clone(),
-            self.ingress,
             self.allow_store.clone(),
             self.provisioner.clone(),
-            self.instance_provisioner.clone(),
             self.reviser.clone(),
         )
         .await?;

@@ -113,40 +113,6 @@ struct CancelObservation {
     aborted: bool,
 }
 
-/// **#184 の実害バグの e2e 固定**: Discord の gateway actions を実際に inner として
-/// 配線した REST の run で最後の走行中 subtask を停止すると、セッションが `completed`
-/// になる（停止 sink が発火する唯一の経路）。
-///
-/// 落ちるとき: 合成層が停止を own で処理しなくなったとき（inner へ委譲する / own の
-/// 分岐から sink 通知が抜けるなど）。Discord は #204 以降 `cancel_subtask` を定義しない
-/// ので、委譲すれば `Unknown action` になり sink は呼ばれない。
-#[cfg(feature = "discord")]
-#[tokio::test]
-async fn test_rest_cancel_completes_session_with_discord_gateway_wired() {
-    let obs = cancel_last_subtask_in_rest_run_with_inner(|db, workspace_base| {
-        // 接続しない（Http クライアントを組むだけ）。Discord API は一度も叩かない。
-        // serenity の型は discord クレート内（from_token）に閉じる。
-        Arc::new(opencrab_discord::DiscordGatewayActions::from_token(
-            "dummy-token",
-            db,
-            workspace_base,
-            None,
-        ))
-    })
-    .await;
-    assert_eq!(
-        obs.session_status.as_deref(),
-        Some("completed"),
-        "REST + Discord 配線で最後の走行中 subtask を停止したのにセッションが completed に\
-         ならない（RestCompletionSink::on_subtask_cancelled が呼ばれていない = #184 の再発）"
-    );
-    assert!(
-        obs.removed_from_registry,
-        "停止が共有 registry に到達していない（not found のまま）"
-    );
-    assert!(obs.aborted, "停止したのに subtask が abort されていない");
-}
-
 /// **#204 前の構成そのものの再現**: inner（Discord 相当）が `cancel_subtask` を**同名で
 /// 定義していても**、停止は own が処理してセッションが `completed` になる。
 ///
@@ -156,18 +122,14 @@ async fn test_rest_cancel_completes_session_with_discord_gateway_wired() {
 #[cfg(feature = "discord")]
 #[tokio::test]
 async fn test_rest_cancel_completes_session_even_if_inner_defines_cancel_subtask() {
-    /// 実際の Discord gateway actions に「`cancel_subtask` の定義と実装」を足した inner。
-    /// #204 で撤去した旧 Discord 実装と同じ形（sink を触らずに成功を返す）。
     struct CancelDefiningInner {
-        discord: opencrab_discord::DiscordGatewayActions,
         cancel_calls: Arc<Mutex<Vec<String>>>,
     }
 
     #[async_trait::async_trait]
     impl opencrab_gateway::GatewayActions for CancelDefiningInner {
         fn definitions(&self) -> Vec<opencrab_gateway::GatewayActionDef> {
-            let mut defs = self.discord.definitions();
-            defs.push(opencrab_gateway::GatewayActionDef {
+            vec![opencrab_gateway::GatewayActionDef {
                 name: "cancel_subtask".to_string(),
                 class: opencrab_gateway::ToolClass {
                     dispatch: opencrab_gateway::DispatchMode::Inline,
@@ -180,8 +142,7 @@ async fn test_rest_cancel_completes_session_even_if_inner_defines_cancel_subtask
                     "properties": {"subtask_id": {"type": "string"}},
                     "required": ["subtask_id"]
                 }),
-            });
-            defs
+            }]
         }
 
         async fn execute(
@@ -202,20 +163,19 @@ async fn test_rest_cancel_completes_session_even_if_inner_defines_cancel_subtask
                     error: None,
                 };
             }
-            self.discord.execute(name, args, ctx).await
+            let _ = ctx;
+            opencrab_gateway::GatewayActionResult {
+                success: false,
+                data: None,
+                error: Some(format!("Unknown action: {name}")),
+            }
         }
     }
 
     let cancel_calls = Arc::new(Mutex::new(Vec::new()));
     let recorded = cancel_calls.clone();
-    let obs = cancel_last_subtask_in_rest_run_with_inner(move |db, workspace_base| {
+    let obs = cancel_last_subtask_in_rest_run_with_inner(move |_db, _workspace_base| {
         Arc::new(CancelDefiningInner {
-            discord: opencrab_discord::DiscordGatewayActions::from_token(
-                "dummy-token",
-                db,
-                workspace_base,
-                None,
-            ),
             cancel_calls: recorded,
         })
     })

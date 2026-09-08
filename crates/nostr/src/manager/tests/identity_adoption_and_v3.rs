@@ -91,7 +91,8 @@
 
         let runner = SlowRunner::new(Duration::from_millis(1));
         let (_fake, cli) = fake_nostaro("selfpubkeyhex");
-        let mgr = NostrGatewayManager::new(runner.clone(), test_router()).with_cli(cli);
+        let mgr = NostrGatewayManager::new(runner.clone(), test_router()).with_cli(cli)
+            .with_provisioner(Arc::new(|_, _, _, _| Ok(())));
 
         assert!(!mgr.is_running(agent), "採用前は未稼働（未設定）");
 
@@ -184,7 +185,8 @@
         };
         let runner = SlowRunner::new(Duration::from_millis(1)).with_preset_config(existing);
         let (_fake, cli) = fake_nostaro("selfpubkeyhex");
-        let mgr = NostrGatewayManager::new(runner.clone(), test_router()).with_cli(cli);
+        let mgr = NostrGatewayManager::new(runner.clone(), test_router()).with_cli(cli)
+            .with_provisioner(Arc::new(|_, _, _, _| Ok(())));
 
         mgr.identity_provisioner()
             .adopt_identity(agent, npub)
@@ -240,7 +242,8 @@
         let runner = SlowRunner::new(Duration::from_millis(1));
         // pubkey を返さない fake → 起動が pubkey ガード（fail-closed）で失敗する。
         let (_fake, cli) = fake_nostaro("");
-        let mgr = NostrGatewayManager::new(runner.clone(), test_router()).with_cli(cli);
+        let mgr = NostrGatewayManager::new(runner.clone(), test_router()).with_cli(cli)
+            .with_provisioner(Arc::new(|_, _, _, _| Ok(())));
 
         let res = mgr.identity_provisioner().adopt_identity(agent, npub).await;
         assert!(res.is_err(), "pubkey 取得不可なら採用は失敗する");
@@ -254,98 +257,6 @@
             "起動失敗時に enabled=true にしない（不整合を残さない）"
         );
 
-        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
-    }
-
-    /// [#264 回帰] 稼働中エージェントの採用は**既存のホットスワップ経路**を通る
-    /// （bootstrap の upsert / enabled 書き込みをせず、本鍵だけ差し替える＝再接続なし）。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn adopt_identity_uses_hotswap_when_gateway_running() {
-        use opencrab_actions::GatewayIdentityProvisioning;
-
-        let agent = "agent-hotswap-264";
-        let npub_new = "npub1hotswapnew";
-        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
-
-        // 稼働中エージェント: 運用者が設定した既存フィルタを持つ（ホットスワップは既存 relays を継承）。
-        let existing = AgentNostrConfigRow {
-            agent_id: agent.to_string(),
-            secret_key: "nsec1old".to_string(),
-            relays_json: r#"["wss://yabu.me"]"#.to_string(),
-            filter_json: r#"{"keywords":["opencrab"]}"#.to_string(),
-            enabled: true,
-        };
-        let runner = SlowRunner::new(Duration::from_millis(1)).with_preset_config(existing);
-        // #489: fake nostaro は自 pubkey を **大文字 hex** で返す。逆引き表へは保存前に
-        // `normalize_pubkey` を通した **小文字 hex** が入る（突合相手の author も正規化 hex）
-        // ことを、起動時・identity 切替の両経路で固定する。
-        let pubkey_upper = "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789";
-        let pubkey_lower = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
-        let (_fake, cli) = fake_nostaro(pubkey_upper);
-        let mgr = NostrGatewayManager::new(runner.clone(), test_router()).with_cli(cli);
-
-        // 稼働させる（admin が admins 登録簿へ入る）。
-        let configured = crate::config::NostrConfig {
-            relays: vec!["wss://yabu.me".to_string()],
-            filter: crate::config::NostrFilter {
-                authors: vec![],
-                keywords: vec!["opencrab".to_string()],
-                kinds: vec![],
-            },
-        };
-        mgr.start_agent_gateway(agent, "nsec1old", configured)
-            .await
-            .unwrap();
-        assert!(mgr.is_running(agent));
-
-        // 新しい生成鍵を保存して採用。
-        NostaroCli::new()
-            .save_generated_key(
-                agent,
-                &crate::cli::GeneratedKey {
-                    nsec: "nsec1newhot".to_string(),
-                    npub: npub_new.to_string(),
-                    pubkey: "y".to_string(),
-                },
-            )
-            .unwrap();
-
-        let adopted = mgr
-            .identity_provisioner()
-            .adopt_identity(agent, npub_new)
-            .await
-            .unwrap();
-        assert_eq!(adopted, npub_new);
-
-        // ホットスワップ経路: bootstrap の upsert も enabled 書き込みもしない。
-        assert!(
-            runner.upserted.lock().unwrap().is_empty(),
-            "稼働中はホットスワップ（config を upsert しない）"
-        );
-        assert!(
-            runner.enabled_calls.lock().unwrap().is_empty(),
-            "ホットスワップは enabled を触らない"
-        );
-        // 本鍵だけ差し替える（set_nostr_secret_key に新 nsec）。
-        assert_eq!(
-            *runner.secret_sets.lock().unwrap(),
-            vec!["nsec1newhot".to_string()],
-            "ホットスワップは本鍵だけ差し替える"
-        );
-        // #489: 自 pubkey は co_agent 逆引き表へ書き戻される（起動時 + identity 切替時の 2 回）。
-        // どちらも fake nostaro の pubkey 出力（大文字 hex）を正規化した **小文字 hex**。
-        // 切替でも stale にならない。
-        assert_eq!(
-            *runner.self_pubkey_sets.lock().unwrap(),
-            vec![pubkey_lower.to_string(), pubkey_lower.to_string()],
-            "起動時と identity 切替時に self_pubkey を正規化して書き戻す（#489）"
-        );
-        assert!(
-            mgr.is_running(agent),
-            "ホットスワップは再接続しない（稼働継続）"
-        );
-
-        mgr.stop_agent_gateway(agent).await;
         let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
     }
 
@@ -373,7 +284,6 @@
         let revise_count = revise_calls.clone();
         let mgr = NostrGatewayManager::new(runner.clone(), test_router())
             .with_cli(cli)
-            .with_ingress(NostrIngress::V3)
             .with_provisioner(Arc::new(|_, _, _, _| Ok(())))
             .with_reviser(Arc::new(move |_, _, _, _| {
                 revise_count.fetch_add(1, AtomicOrdering::SeqCst);
@@ -442,58 +352,6 @@
         let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
     }
 
-    /// v3_shadow は本番 UDS の listen 前でも legacy ループを立てる。
-    /// 照合は parse/分類のメモリ内だけ。UDS hello / bind ack / live 占有はしない。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn v3_shadow_starts_legacy_before_uds_listen() {
-        let agent = "agent-shadow-before-listen";
-        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
-
-        let existing = AgentNostrConfigRow {
-            agent_id: agent.to_string(),
-            secret_key: "nsec1old".to_string(),
-            relays_json: r#"["wss://yabu.me"]"#.to_string(),
-            filter_json: r#"{"keywords":["opencrab"]}"#.to_string(),
-            enabled: true,
-        };
-        let runner = SlowRunner::new(Duration::from_millis(1)).with_preset_config(existing);
-        let (_fake, cli) =
-            fake_nostaro("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789");
-        let provisioned = Arc::new(AtomicUsize::new(0));
-        let count = provisioned.clone();
-        let mgr = NostrGatewayManager::new(runner, test_router())
-            .with_cli(cli)
-            .with_ingress(NostrIngress::V3Shadow)
-            .with_instance_provisioner(Arc::new(move |_, _, _, _| {
-                count.fetch_add(1, AtomicOrdering::SeqCst);
-                Ok(1)
-            }));
-
-        let configured = crate::config::NostrConfig {
-            relays: vec!["wss://yabu.me".to_string()],
-            filter: crate::config::NostrFilter {
-                authors: vec![],
-                keywords: vec!["opencrab".to_string()],
-                kinds: vec![],
-            },
-        };
-        mgr.start_agent_gateway(agent, "nsec1old", configured)
-            .await
-            .unwrap();
-        assert!(
-            mgr.is_running(agent),
-            "listen 前でも v3_shadow は legacy を立てる"
-        );
-        assert_eq!(
-            provisioned.load(AtomicOrdering::SeqCst),
-            1,
-            "instance 行は敷く（UDS hello はしない）"
-        );
-
-        mgr.stop_agent_gateway(agent).await;
-        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
-    }
-
     /// [#489] 自 pubkey が **正規化できない値**（npub でも 64 桁 hex でもない）なら、逆引き表へ
     /// **保存しない**（黙って壊れた値を入れない）。突合相手の author は `normalize_pubkey` 済みの
     /// 小文字 hex なので、生値を入れると必ず食い違って co_agent が静かに fail-closed で死ぬ
@@ -513,7 +371,8 @@
         let runner = SlowRunner::new(Duration::from_millis(1)).with_preset_config(existing);
         // 64 桁 hex でも npub でもない非空出力 → pubkey 取得ガードは通るが normalize_pubkey は None。
         let (_fake, cli) = fake_nostaro("not-a-valid-pubkey");
-        let mgr = NostrGatewayManager::new(runner.clone(), test_router()).with_cli(cli);
+        let mgr = NostrGatewayManager::new(runner.clone(), test_router()).with_cli(cli)
+            .with_provisioner(Arc::new(|_, _, _, _| Ok(())));
 
         let configured = crate::config::NostrConfig {
             relays: vec!["wss://yabu.me".to_string()],

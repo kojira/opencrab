@@ -83,24 +83,6 @@ typed_history = true
     /// `[gateway.discord] default_subtask_webhook` は #157 S5 以前の唯一の書き方。
     /// これが読めなくなると既存の運用が黙って通知を失う。
     #[test]
-    fn legacy_discord_webhook_key_is_still_honored() {
-        let cfg: AppConfig = toml::from_str(
-            r#"
-[gateway.discord]
-default_subtask_webhook = { url = "https://discord.com/api/webhooks/1/legacytok", events = ["started"] }
-"#,
-        )
-        .unwrap();
-        let resolved = cfg.default_subtask_webhook().expect("旧キーが読まれるべき");
-        assert_eq!(resolved.url, "https://discord.com/api/webhooks/1/legacytok");
-        assert_eq!(resolved.events, Some(vec!["started".to_string()]));
-    }
-
-    /// 新しい **transport 非依存キー** `[subtask] default_webhook` が読める。
-    ///
-    /// Discord の設定ブロックが 1 行も無い設定ファイルでも通知先が決まる
-    /// （= Discord 機能フラグから独立した）ことがこの持ち上げの要点。
-    #[test]
     fn transport_neutral_webhook_key_is_honored_without_any_discord_config() {
         let cfg: AppConfig = toml::from_str(
             r#"
@@ -117,26 +99,7 @@ default_webhook = { url = "https://discord.com/api/webhooks/2/neutraltok" }
         assert_eq!(resolved.events, None);
     }
 
-    /// 両方書いてあるときは新キーが勝つ（移行期の曖昧さを残さない）。
-    #[test]
-    fn transport_neutral_webhook_key_wins_over_the_legacy_one() {
-        let cfg: AppConfig = toml::from_str(
-            r#"
-[subtask]
-default_webhook = { url = "https://discord.com/api/webhooks/2/neutraltok" }
-
-[gateway.discord]
-default_subtask_webhook = { url = "https://discord.com/api/webhooks/1/legacytok" }
-"#,
-        )
-        .unwrap();
-        assert_eq!(
-            cfg.default_subtask_webhook().unwrap().url,
-            "https://discord.com/api/webhooks/2/neutraltok"
-        );
-    }
-
-    /// どちらも無ければ未設定。url が空文字のときも未設定として扱う。
+    /// Empty transport-neutral webhook settings disable delivery.
     #[test]
     fn absent_or_empty_webhook_url_resolves_to_none() {
         let empty: AppConfig = toml::from_str("").unwrap();
@@ -154,109 +117,3 @@ default_webhook = { url = "" }
             "url が空なら未設定扱い（`.env` 未設定で ${{VAR}} が空展開される運用）"
         );
     }
-
-    // ---- #207: 新キーが空で旧キーの値を隠すときの警告 ----
-
-    /// 判定の真理値表を網羅で固定する。
-    ///
-    /// 真になるのは「新キーの節がある × url が空」かつ「旧キーに有効な url がある」の
-    /// 1 通りだけ。新キーの節が無ければ旧キーがそのまま使われるので隠していない。
-    /// 新キーに url があればそれが使われる（意図どおりの優先）ので警告しない。
-    #[test]
-    fn masking_predicate_is_true_only_for_empty_new_key_over_a_valid_legacy_one() {
-        let cfg = |url: &str| SubtaskWebhookConfig {
-            url: url.to_string(),
-            events: None,
-        };
-        let urls = ["", "   ", "https://example.test/hook"];
-        for new_url in urls {
-            for legacy_url in urls {
-                let expected = new_url.trim().is_empty() && !legacy_url.trim().is_empty();
-                assert_eq!(
-                    legacy_webhook_masked_by_empty_new_key(
-                        Some(&cfg(new_url)),
-                        Some(&cfg(legacy_url))
-                    ),
-                    expected,
-                    "new={new_url:?} legacy={legacy_url:?}"
-                );
-            }
-            // 旧キーの節が無ければ隠すものが無い。
-            assert!(!legacy_webhook_masked_by_empty_new_key(
-                Some(&cfg(new_url)),
-                None
-            ));
-            // 新キーの節が無ければ旧キーがそのまま使われる。
-            assert!(!legacy_webhook_masked_by_empty_new_key(
-                None,
-                Some(&cfg(new_url))
-            ));
-        }
-        assert!(!legacy_webhook_masked_by_empty_new_key(None, None));
-    }
-
-    /// 踏む経路そのままの設定ファイルで警告条件を満たし、**挙動は変わらない**。
-    ///
-    /// `${SUBTASK_WEBHOOK_URL}` が `.env` に無いと空文字へ展開されるので、新キーは
-    /// `url = ""` と等価になる。
-    #[test]
-    fn empty_new_key_over_a_valid_legacy_key_warns_without_changing_resolution() {
-        let cfg: AppConfig = toml::from_str(
-            r#"
-[subtask]
-default_webhook = { url = "" }
-
-[gateway.discord]
-default_subtask_webhook = { url = "https://discord.com/api/webhooks/1/legacytok" }
-"#,
-        )
-        .unwrap();
-        assert!(
-            cfg.legacy_webhook_masked_by_empty_new_key(),
-            "新キーが空 + 旧キーに有効な値 → 警告条件を満たす"
-        );
-        assert!(cfg.warn_if_legacy_webhook_masked());
-        assert!(
-            cfg.default_subtask_webhook().is_none(),
-            "警告を足しても解決順序は変えない（空 url は「無効」のまま）"
-        );
-    }
-
-    /// 誤検知させない: 警告が「いつも出ている」ものになると誰も読まなくなる。
-    #[test]
-    fn no_masking_warning_for_the_ordinary_configurations() {
-        // 何も書いていない（配布テンプレートの既定）。
-        let empty: AppConfig = toml::from_str("").unwrap();
-        assert!(!empty.warn_if_legacy_webhook_masked());
-
-        // 旧キーだけ（移行前の既存運用）。
-        let legacy_only: AppConfig = toml::from_str(
-            r#"
-[gateway.discord]
-default_subtask_webhook = { url = "https://discord.com/api/webhooks/1/legacytok" }
-"#,
-        )
-        .unwrap();
-        assert!(!legacy_only.warn_if_legacy_webhook_masked());
-
-        // 新キーだけ（移行後）。
-        let new_only: AppConfig = toml::from_str(
-            r#"
-[subtask]
-default_webhook = { url = "https://example.test/hook" }
-"#,
-        )
-        .unwrap();
-        assert!(!new_only.warn_if_legacy_webhook_masked());
-
-        // 新キーを空にして意図的に無効化（旧キーも無いので隠していない）。
-        let disabled: AppConfig = toml::from_str(
-            r#"
-[subtask]
-default_webhook = { url = "" }
-"#,
-        )
-        .unwrap();
-        assert!(!disabled.warn_if_legacy_webhook_masked());
-    }
-

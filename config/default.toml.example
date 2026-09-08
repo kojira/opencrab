@@ -38,8 +38,7 @@ auto_dispatch = true
 # 解決され、DB に設定が 1 つも無いときだけこの値が使われる。
 # 特定の transport（Discord 等）に依存しない設定なので [subtask] に置く。
 #
-# 旧キー [gateway.discord] default_subtask_webhook も引き続き読まれる（後方互換）。
-# 両方書いた場合はこちらが優先。url = "" または未指定なら無効。
+# url = "" または未指定なら無効。
 # default_webhook = { url = "${SUBTASK_WEBHOOK_URL}", events = ["started", "progress", "completed", "failed", "timed_out", "aborted"] }
 
 [llm]
@@ -130,27 +129,6 @@ cheap = { provider = "openai", model = "claude-haiku" }
 enabled = true
 port = 8080
 
-# 全体（共有）Discord ゲートウェイ。オンボーディングでは **エージェント個別** の
-# Discord 設定（ダッシュボード `/setup` の「Discord 接続」）を推奨するため、
-# ここは既定で無効。個人 ID は含めない。
-[gateway.discord]
-enabled = false
-token = "${DISCORD_TOKEN}"
-guild_ids = []
-agent_ids = []           # 応答させるエージェント ID（per-agent 設定を使う場合は空でよい）
-# オーナーの Discord ユーザー ID。環境ごとに変わるので `.env` の
-# OWNER_DISCORD_ID から渡す。空にすると、オーナー専用機能が使えなくなる一方で
-# 信頼ユーザー未登録のエージェントでは DM が全許可になり、オーナー専用 UI も
-# 開く（docs/discord.md 参照）。Discord を使うなら必ず設定する。
-owner_discord_id = "${OWNER_DISCORD_ID}"
-# spawn_subtask.webhook を明示しない時に使う lifecycle 通知先。
-# 実 URL は `.env` の DISCORD_SUBTASK_WEBHOOK_URL から渡す。
-# url = "" または行ごと未指定なら無効。
-#
-# 【旧キー】transport 非依存の [subtask] default_webhook へ移動した。ここも
-# 引き続き読まれる（後方互換）が、新規に書くなら [subtask] 側を使うこと。
-# default_subtask_webhook = { url = "${DISCORD_SUBTASK_WEBHOOK_URL}", events = ["started", "progress", "completed", "failed", "timed_out", "aborted"] }
-
 [dashboard]
 enabled = true
 port = 3000
@@ -160,10 +138,9 @@ path = "data/opencrab.db"
 
 [gate]
 listen_socket = "/tmp/opencrab-extgate.sock"
-# Nostr inbound の段階移行（DESIGN-NOSTRGATE §6）。legacy | v3_shadow | v3。既定=legacy。
-nostr_ingress = "legacy"
-# Discord inbound の段階移行（DESIGN-DISCORD-GATE §8.1）。legacy | v3_shadow | v3。既定=legacy。
-discord_ingress = "legacy"
+# Both transports are V3-only; missing or any other value fails startup when applicable.
+nostr_ingress = "v3"
+discord_ingress = "v3"
 
 # ===== ツール設定 =====
 [tools]

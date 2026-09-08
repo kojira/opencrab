@@ -27,15 +27,13 @@ use tokio::sync::mpsc;
 pub use opencrab_actions::webhook_target::{
     build_message_with_attachment_preview, build_message_with_optional_attachment,
     build_webhook_body, has_activity_default, record_webhook_delivery_failure, redact_webhook_url,
-    resolve_activity_webhook, resolve_subtask_webhook, validate_webhook_url, WebhookConfig,
-    WebhookMessage, WebhookResolution, WebhookSource,
+    resolve_activity_webhook, resolve_subtask_webhook, WebhookConfig, WebhookMessage,
+    WebhookResolution, WebhookSource,
 };
 
 /// 送信を最終的にあきらめたとき、短いエラー説明文字列で呼ばれる give-up sink。
 type GiveupSink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
-/// Discord メッセージの安全な本文長（2000 上限に対し metadata 用の余裕を残す）。
-pub const DISCORD_CHUNK_LIMIT: usize = 1900;
 const DISCORD_MESSAGE_LIMIT: usize = 2000;
 
 /// 1 回の webhook POST に許すハングの上限。

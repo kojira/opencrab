@@ -1,8 +1,7 @@
 //! Discord の時刻発火 descriptor（#628）。
 //!
 //! transport が「自分の発火先としての性質と ID 書式」を名乗る [`opencrab_actions::TransportFire`]
-//! の Discord 実装。旧 `opencrab_db::queries::SessionFireTarget::DiscordChannel` の挙動を厳密に
-//! 写す（parse / build / G ゲート対象 / 応答本文の自動配送）。**db 層から transport の知識を
+//! の Discord 実装。parse / build / Gゲート対象を定義し、db層からtransport知識を
 //! 撤去する**ための移設先で、Discord を足す / 変える作業がこの crate 内で完結するようにする。
 
 use opencrab_actions::{gateway_kinds, FireTarget, TransportFire, TransportFireEnv};
@@ -59,18 +58,8 @@ impl TransportFire for DiscordFire {
         "Discord のチャンネル"
     }
 
-    /// この Discord ゲートウェイが設定上「立ち上がるべき」か（実行時述語・条件 D）。
-    ///
-    /// 判定は旧 `main.rs` の `discord_expected` を厳密に写す: TOML の共有ゲートウェイが
-    /// 設定されている（`configured_shared_kinds` に自分の kind がある）か、per-agent の
-    /// 有効な Discord 設定が db にある（#602 の本番対象はまさに TOML に無い per-agent）。
+    /// Enabled per-agent V3 configurations determine whether Discord should be running.
     fn should_be_running(&self, env: &TransportFireEnv) -> bool {
-        if env
-            .configured_shared_kinds
-            .contains(&gateway_kinds::DISCORD)
-        {
-            return true;
-        }
         opencrab_db::queries::list_enabled_agent_discord_configs(env.conn)
             .map(|v| !v.is_empty())
             .unwrap_or(false)

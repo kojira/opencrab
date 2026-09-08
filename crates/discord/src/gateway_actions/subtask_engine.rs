@@ -8,85 +8,8 @@
 //! - `DiscordCompletionSink`（決着を Discord のイベントループへ再注入する）
 //! - activity webhook 向けの `ToolEventSink` とその factory
 
-use std::sync::Arc;
-
 use super::webhook::{self, DeliveryBatch, WebhookResolution};
-use crate::message_loop::{parse_discord_session, LoopEvent};
-use opencrab_actions::subtask::{SubtaskCompletionSink, SubtaskSettled};
-
-/// `SubtaskCompletionSink` の Discord 実装（RFC #152 S1）。
-///
-/// 旧 `send_subtask_completed_event`（LoopEvent 直依存）を置換する。runtime
-/// （actions 側 `settle_completed` / progress debounce）は `Arc<dyn
-/// SubtaskCompletionSink>` としてこれを呼ぶだけで、`LoopEvent` を知らない。
-/// `parse_discord_session` / `LoopEvent` は Discord に閉じたままここに残す。
-///
-/// parent_session_id から routing 情報を復元して `LoopEvent::SubtaskCompleted` を送る
-/// （#39）。session_id（`discord-{agent}-{guild}-{channel}`）から導出できるため、
-/// クロージャの登録は不要。event_tx 未設定（イベントループの無い構築、例: 一発呼びの
-/// API 経路）や Discord 形式でない session は、旧実装で未登録だった場合と同様に発火
-/// しない（debug のみ）。
-///
-/// **web / Nostr sink との意図的な差分**: あちらは `kind != SettleKind::Completed` を
-/// 捨てるが、Discord は `Progress` も送る。`report_progress` のデバウンス発火が
-/// この sink を通ってメインエンジンを呼び直す「進捗実況」機能で、main の
-/// `send_subtask_completed_event(..., "progress")` から続く既存挙動だから
-/// （ガードを足すと機能が黙って消える）。`Cancelled` は別メソッド
-/// （`on_subtask_cancelled` の既定実装 = 何もしない）なのでここには来ない。
-/// この差分は `discord_sink_forwards_progress_unlike_web_and_nostr` で固定している。
-pub(crate) struct DiscordCompletionSink {
-    pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<LoopEvent>>,
-}
-
-impl SubtaskCompletionSink for DiscordCompletionSink {
-    /// Discord の親セッションは `discord-{agent}-{guild}-{channel}`。
-    fn session_prefix(&self) -> &'static str {
-        "discord-"
-    }
-    /// **Discord だけ `true`**（#638）。`report_progress` のデバウンス発火でメインエンジンを
-    /// 呼び直す「進捗実況」が Discord 固有の機能で、main の
-    /// `send_subtask_completed_event(..., "progress")` から続く既存挙動。ここを `false` に
-    /// すると機能が黙って消える（`discord_sink_forwards_progress_unlike_web_and_nostr` が固定）。
-    fn forwards_progress(&self) -> bool {
-        true
-    }
-    fn deliver_continuation(&self, ev: SubtaskSettled) {
-        let Some(tx) = &self.event_tx else {
-            tracing::debug!(
-                session_id = %ev.session_id,
-                "subtask completion: event_tx not configured, skipping main-engine notification"
-            );
-            return;
-        };
-        let Some((guild_id, channel_id)) = parse_discord_session(&ev.session_id) else {
-            // 非 Discord の親セッション（heartbeat-* / subtask-* のネスト等）は正常系。
-            // 旧レジストリ実装でも未登録で発火しなかったため、debug に留める。
-            tracing::debug!(
-                session_id = %ev.session_id,
-                "subtask completion: parent session is not a discord session, skipping main-engine notification"
-            );
-            return;
-        };
-        let is_dm = guild_id.is_empty();
-        let _ = tx.send(LoopEvent::SubtaskCompleted {
-            session_id: ev.session_id,
-            agent_id: ev.agent_id,
-            subtask_id: ev.subtask_id,
-            // 本文は運ばない。完了本文は DB（session_logs）へ永続化済みで、再注入は
-            // `build_conversation_string` が DB から読み直す（`process_subtask_completed`
-            // の引数は `_result` = 未使用。RFC §1.3）。
-            result: String::new(),
-            exit_reason: ev.exit_reason,
-            channel_id,
-            channel_id_str: channel_id.to_string(),
-            guild_id,
-            is_dm,
-            // 元のターンの呼び出し元を resume まで運ぶ（#298）。ここで落とすと
-            // `process_subtask_completed` が最小権限で再開してしまう。
-            caller: ev.caller,
-        });
-    }
-}
+use std::sync::Arc;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 

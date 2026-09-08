@@ -1,0 +1,255 @@
+use anyhow::Context as _;
+use opencrab_actions::AgentGatewayLifecycle;
+use opencrab_server::discord_provision::{load_discord_launch_plan, DiscordLaunchPlan};
+use opencrab_server::discord_supervisor::{
+    GatewayChildSpawner, GatewaySupervisorSet, SupervisorConfig,
+};
+
+pub(super) struct DiscordV3Controller {
+    db: opencrab_db::Db,
+    extgate: std::sync::Arc<opencrab_extgate::ExtgateState>,
+    placement_dir: std::path::PathBuf,
+    core_socket: Option<String>,
+    ingress_v3: bool,
+    attachment_spool_root: std::path::PathBuf,
+    gateway_bin: std::path::PathBuf,
+    supervisors: std::sync::Arc<GatewaySupervisorSet>,
+    lifecycle: tokio::sync::Mutex<()>,
+}
+
+impl DiscordV3Controller {
+    pub(super) fn new(
+        db: &opencrab_db::Db,
+        extgate: std::sync::Arc<opencrab_extgate::ExtgateState>,
+        database_path: &str,
+        core_socket: Option<&str>,
+        ingress_v3: bool,
+        attachment_spool_root: &std::path::Path,
+        gateway_bin: &std::path::Path,
+    ) -> anyhow::Result<std::sync::Arc<Self>> {
+        let placement_dir = std::path::Path::new(database_path)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("gate")
+            .join("discord");
+        std::fs::create_dir_all(&placement_dir)
+            .with_context(|| format!("placement dir 作成失敗: {}", placement_dir.display()))?;
+        Ok(std::sync::Arc::new(Self {
+            db: db.clone(),
+            extgate,
+            placement_dir,
+            core_socket: core_socket.map(ToOwned::to_owned),
+            ingress_v3,
+            attachment_spool_root: attachment_spool_root.to_path_buf(),
+            gateway_bin: gateway_bin.to_path_buf(),
+            supervisors: GatewaySupervisorSet::new(SupervisorConfig::default()),
+            lifecycle: tokio::sync::Mutex::new(()),
+        }))
+    }
+
+    fn plan(&self, agent_id: &str) -> anyhow::Result<DiscordLaunchPlan> {
+        let mut conn = self
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("db lock for Discord V3 ignition"))?;
+        load_discord_launch_plan(&mut conn, agent_id, opencrab_extgate::now_nanos())
+    }
+
+    async fn start_plan(&self, launch: DiscordLaunchPlan) -> anyhow::Result<()> {
+        let DiscordLaunchPlan {
+            placement: plan,
+            bot_token,
+        } = launch;
+        let core_socket = self
+            .core_socket
+            .as_deref()
+            .context("Discord V3 requires an absolute gate.listen_socket")?;
+        let placement = serde_json::json!({
+            "core_socket": core_socket,
+            "attachment_spool_root": self.attachment_spool_root,
+            "instances": [{
+                "instance_id": plan.instance_id,
+                "revision": plan.revision,
+                "addresses": plan.addresses,
+                "config_b64": plan.config_b64,
+            }],
+        });
+        let path = self.placement_dir.join(format!("{}.json", plan.agent_id));
+        let temporary = path.with_extension("json.tmp");
+        std::fs::write(&temporary, serde_json::to_vec_pretty(&placement)?)
+            .with_context(|| format!("placement 書き出し失敗: {}", temporary.display()))?;
+        std::fs::rename(&temporary, &path)
+            .with_context(|| format!("placement 置換失敗: {}", path.display()))?;
+        let spawner = std::sync::Arc::new(GatewayChildSpawner::new(
+            self.gateway_bin.clone(),
+            path,
+            bot_token,
+            plan.agent_id.clone(),
+        ));
+        self.supervisors.start(&plan.agent_id, spawner).await;
+        tracing::info!(
+            agent_id = %plan.agent_id,
+            bin = %self.gateway_bin.display(),
+            "discord-gateway supervisor started; token injected only in child env"
+        );
+        Ok(())
+    }
+
+    async fn ensure_bot_user_id(&self, agent_id: &str, token: &str) -> anyhow::Result<()> {
+        // The token identifies the bot. Revalidate on every process start so token rotation
+        // cannot reuse a stale self_bot_id and ingest the new bot's own messages.
+        let response = reqwest::Client::new()
+            .get("https://discord.com/api/v10/users/@me")
+            .header(reqwest::header::AUTHORIZATION, format!("Bot {token}"))
+            .send()
+            .await
+            .context("Discord bot identity request failed")?
+            .error_for_status()
+            .context("Discord bot identity rejected")?;
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .context("Discord bot identity response was invalid")?;
+        let bot_user_id = body
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .context("Discord bot identity response had no id")?;
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("db lock for Discord identity update"))?;
+        opencrab_db::queries::set_agent_discord_bot_user_id(&conn, agent_id, bot_user_id)?;
+        Ok(())
+    }
+
+    pub(super) async fn start_all(&self) -> anyhow::Result<()> {
+        let ids: Vec<String> = {
+            let conn = self
+                .db
+                .lock()
+                .map_err(|_| anyhow::anyhow!("db lock for Discord V3 ignition"))?;
+            opencrab_db::queries::list_enabled_agent_discord_configs(&conn)?
+                .into_iter()
+                .map(|config| config.agent_id)
+                .collect()
+        };
+        for agent_id in ids {
+            AgentGatewayLifecycle::start(self, &agent_id).await?;
+        }
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentGatewayLifecycle for DiscordV3Controller {
+    fn kind(&self) -> &'static str {
+        opencrab_actions::gateway_kinds::DISCORD
+    }
+
+    async fn start(&self, agent_id: &str) -> anyhow::Result<()> {
+        let _lifecycle = self.lifecycle.lock().await;
+        // Fail closed before token validation/provisioning so stale credentials cannot stay live.
+        self.supervisors.stop(agent_id).await;
+        if !self.ingress_v3 {
+            anyhow::bail!("Discord gateway start requires gate.discord_ingress = v3");
+        }
+        if self.core_socket.is_none() {
+            anyhow::bail!("Discord V3 requires an absolute gate.listen_socket");
+        }
+        super::require_resolvable_binary("discord-gateway", &self.gateway_bin)?;
+        let config = {
+            let conn = self
+                .db
+                .lock()
+                .map_err(|_| anyhow::anyhow!("db lock for Discord V3 start"))?;
+            opencrab_db::queries::get_agent_discord_config(&conn, agent_id)?
+                .with_context(|| format!("Discord config not found for {agent_id}"))?
+        };
+        if !config.enabled {
+            return Err(opencrab_actions::StartDeclined::err(
+                self.kind(),
+                agent_id,
+                "設定が無効です",
+            ));
+        }
+        if config.bot_token.trim().is_empty() {
+            return Err(opencrab_actions::StartDeclined::err(
+                self.kind(),
+                agent_id,
+                "bot token が空です",
+            ));
+        }
+        self.ensure_bot_user_id(agent_id, &config.bot_token).await?;
+        self.start_plan(self.plan(agent_id)?).await
+    }
+
+    async fn stop(&self, agent_id: &str) {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.supervisors.stop(agent_id).await;
+    }
+
+    fn is_running(&self, agent_id: &str) -> bool {
+        self.extgate
+            .agent_has_live_gateway(agent_id, opencrab_actions::gateway_kinds::DISCORD)
+    }
+
+    async fn restore_all(&self) {
+        if let Err(error) = self.start_all().await {
+            tracing::error!(error = %error, "Discord V3 restore failed");
+        }
+    }
+
+    async fn shutdown_all(&self) {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.supervisors.shutdown_all().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn first_dynamic_row_cannot_bypass_v3_or_socket_prerequisites() {
+        let db = opencrab_db::Db::memory().unwrap();
+        let extgate = std::sync::Arc::new(opencrab_extgate::ExtgateState::new(
+            db.clone(),
+            opencrab_extgate::OperatorToken::from_bytes("test"),
+        ));
+        let root = tempfile::tempdir().unwrap();
+        let invalid_ingress = DiscordV3Controller::new(
+            &db,
+            extgate.clone(),
+            root.path().join("db.sqlite").to_str().unwrap(),
+            Some("/tmp/extgate.sock"),
+            false,
+            root.path(),
+            std::path::Path::new("/bin/true"),
+        )
+        .unwrap();
+        assert!(invalid_ingress
+            .start("new-agent")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("discord_ingress = v3"));
+
+        let missing_socket = DiscordV3Controller::new(
+            &db,
+            extgate,
+            root.path().join("db.sqlite").to_str().unwrap(),
+            None,
+            true,
+            root.path(),
+            std::path::Path::new("/bin/true"),
+        )
+        .unwrap();
+        assert!(missing_socket
+            .start("new-agent")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("listen_socket"));
+    }
+}

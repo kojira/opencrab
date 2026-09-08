@@ -87,7 +87,9 @@ fn core_restart_gateway_reconnects_then_create_201_message_say() {
     let core = spawn_core(root.path());
     assert!(
         wait_http(core_port, "/health", Duration::from_secs(30)),
-        "core did not restart"
+        "core did not restart: {}",
+        std::fs::read_to_string(root.path().join("core.log"))
+            .unwrap_or_else(|error| format!("<core log unavailable: {error}>"))
     );
     let live = wait_gateway_uds(gw_port, Duration::from_secs(15));
     assert!(

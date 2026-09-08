@@ -32,7 +32,7 @@
       "5xx": 4
     },
     "tool_effects_observed": 50,
-    "tool_success_uncollected_count": 16
+    "tool_success_uncollected_count": 4
   },
   "http": {
     "probes": [
@@ -12571,22 +12571,10 @@
         "workspace": "Fresh temporary roots contain only collector-owned files. The collector creates a fixed baseline-command executable fixture and an empty import-source directory outside agent workspaces; tool cases create captured/, captured/file.txt, captured/summary.txt, and skills/captured-skill.skill.md through the real tools. The shell allowlist contains only the absolute path of baseline-command, and its subprocess environment is empty."
       },
       "success_uncollected_l3": {
-        "discord_add_reaction": "Requires a live Discord gateway and mutates a remote message.",
-        "discord_channel_config": "Requires a live Discord gateway and reads or mutates remote channel configuration.",
-        "discord_create_channel": "Requires a live Discord gateway and creates a remote channel.",
-        "discord_create_webhook": "Requires a live Discord gateway and creates a remote webhook.",
-        "discord_list_channels": "Requires a live Discord gateway to list remote channels.",
-        "discord_list_guilds": "Requires a live Discord gateway to list remote guilds.",
-        "discord_send_file": "Requires a live Discord gateway and uploads a file to a remote channel.",
-        "ensure_subtask_webhook": "Requires a live Discord gateway and may create a remote webhook.",
-        "ensure_webhook": "Requires a live Discord gateway and may create a remote webhook.",
-        "join_voice_channel": "Requires a live Discord gateway and joins a remote voice channel.",
-        "leave_voice_channel": "Requires a live Discord gateway and leaves a remote voice channel.",
         "nostr_generate_key": "Requires the operator's nostaro executable and writes key material outside the temporary workspace.",
         "nostr_switch_identity": "Requires a generated key and configured Nostr transport capability; successful adoption may start a live relay connection.",
         "request_peer_review": "Success delivers a message through the active transport. A local fake delivery would not fix live delivery behavior.",
-        "run_my_heartbeat": "Successful manual fire runs an actual agent turn through a configured transport and LLM provider.",
-        "send_ui": "Requires a live Discord gateway and sends remote UI components."
+        "run_my_heartbeat": "Successful manual fire runs an actual agent turn through a configured transport and LLM provider."
       },
       "why": "Visibility alone does not prove direct invocation is gated or that result/error translation survives a replacement."
     },
@@ -12816,85 +12804,6 @@
       {
         "arguments": {},
         "required_by_observed_schema": [
-          "channel_id",
-          "message_id",
-          "emoji"
-        ],
-        "result": {
-          "data": null,
-          "error": "channel_idパラメータが必要です",
-          "success": false
-        },
-        "tool": "discord_add_reaction"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "channel_id",
-          "guild_id",
-          "readable",
-          "writable"
-        ],
-        "result": {
-          "data": null,
-          "error": "channel_idパラメータが必要です",
-          "success": false
-        },
-        "tool": "discord_channel_config"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "guild_id",
-          "name"
-        ],
-        "result": {
-          "data": null,
-          "error": "guild_idパラメータが必要です（デフォルトサーバーは解決できないため、discord_list_guildsで取得した数値IDを指定してください）",
-          "success": false
-        },
-        "tool": "discord_create_channel"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "channel_id"
-        ],
-        "result": {
-          "data": null,
-          "error": "channel_idパラメータが必要です",
-          "success": false
-        },
-        "tool": "discord_create_webhook"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "guild_id"
-        ],
-        "result": {
-          "data": null,
-          "error": "guild_idパラメータが必要です",
-          "success": false
-        },
-        "tool": "discord_list_channels"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "channel_id",
-          "file_path"
-        ],
-        "result": {
-          "data": null,
-          "error": "channel_idパラメータが必要です",
-          "success": false
-        },
-        "tool": "discord_send_file"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
           "evaluation"
         ],
         "result": {
@@ -12938,18 +12847,6 @@
           "success": false
         },
         "tool": "generate_inner_voice"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "channel_id"
-        ],
-        "result": {
-          "data": null,
-          "error": "voice 機能が無効です（config.toml の [voice] enabled = true が必要）",
-          "success": false
-        },
-        "tool": "join_voice_channel"
       },
       {
         "arguments": {},
@@ -13279,19 +13176,6 @@
           "success": true
         },
         "tool": "select_llm"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "channel_id",
-          "components"
-        ],
-        "result": {
-          "data": null,
-          "error": "channel_idパラメータが必要です",
-          "success": false
-        },
-        "tool": "send_ui"
       },
       {
         "arguments": {},
@@ -13742,20 +13626,6 @@
         },
         "result": {
           "data": null,
-          "error": "rejected: action 'join_voice_channel' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "join_voice_channel"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
           "error": "rejected: action 'learn_from_experience' requires a trusted caller (owner/co_agent/trusted_user)",
           "success": false
         },
@@ -13774,20 +13644,6 @@
           "success": false
         },
         "tool": "learn_from_peer"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'leave_voice_channel' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "leave_voice_channel"
       },
       {
         "caller": "agent",
@@ -19112,24 +18968,6 @@
         "facet": "missing_arguments",
         "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
         "status": "not_applicable",
-        "tool": "discord_list_guilds"
-      },
-      {
-        "facet": "missing_arguments",
-        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
-        "status": "not_applicable",
-        "tool": "ensure_subtask_webhook"
-      },
-      {
-        "facet": "missing_arguments",
-        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
-        "status": "not_applicable",
-        "tool": "ensure_webhook"
-      },
-      {
-        "facet": "missing_arguments",
-        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
-        "status": "not_applicable",
         "tool": "get_default_subtask_webhook"
       },
       {
@@ -19167,12 +19005,6 @@
         "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
         "status": "not_applicable",
         "tool": "get_task"
-      },
-      {
-        "facet": "missing_arguments",
-        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
-        "status": "not_applicable",
-        "tool": "leave_voice_channel"
       },
       {
         "facet": "missing_arguments",
@@ -19278,72 +19110,6 @@
       },
       {
         "facet": "success",
-        "reason": "Requires a live Discord gateway and mutates a remote message.",
-        "status": "uncollected",
-        "tool": "discord_add_reaction"
-      },
-      {
-        "facet": "success",
-        "reason": "Requires a live Discord gateway and reads or mutates remote channel configuration.",
-        "status": "uncollected",
-        "tool": "discord_channel_config"
-      },
-      {
-        "facet": "success",
-        "reason": "Requires a live Discord gateway and creates a remote channel.",
-        "status": "uncollected",
-        "tool": "discord_create_channel"
-      },
-      {
-        "facet": "success",
-        "reason": "Requires a live Discord gateway and creates a remote webhook.",
-        "status": "uncollected",
-        "tool": "discord_create_webhook"
-      },
-      {
-        "facet": "success",
-        "reason": "Requires a live Discord gateway to list remote channels.",
-        "status": "uncollected",
-        "tool": "discord_list_channels"
-      },
-      {
-        "facet": "success",
-        "reason": "Requires a live Discord gateway to list remote guilds.",
-        "status": "uncollected",
-        "tool": "discord_list_guilds"
-      },
-      {
-        "facet": "success",
-        "reason": "Requires a live Discord gateway and uploads a file to a remote channel.",
-        "status": "uncollected",
-        "tool": "discord_send_file"
-      },
-      {
-        "facet": "success",
-        "reason": "Requires a live Discord gateway and may create a remote webhook.",
-        "status": "uncollected",
-        "tool": "ensure_subtask_webhook"
-      },
-      {
-        "facet": "success",
-        "reason": "Requires a live Discord gateway and may create a remote webhook.",
-        "status": "uncollected",
-        "tool": "ensure_webhook"
-      },
-      {
-        "facet": "success",
-        "reason": "Requires a live Discord gateway and joins a remote voice channel.",
-        "status": "uncollected",
-        "tool": "join_voice_channel"
-      },
-      {
-        "facet": "success",
-        "reason": "Requires a live Discord gateway and leaves a remote voice channel.",
-        "status": "uncollected",
-        "tool": "leave_voice_channel"
-      },
-      {
-        "facet": "success",
         "reason": "Requires the operator's nostaro executable and writes key material outside the temporary workspace.",
         "status": "uncollected",
         "tool": "nostr_generate_key"
@@ -19365,12 +19131,6 @@
         "reason": "Successful manual fire runs an actual agent turn through a configured transport and LLM provider.",
         "status": "uncollected",
         "tool": "run_my_heartbeat"
-      },
-      {
-        "facet": "success",
-        "reason": "Requires a live Discord gateway and sends remote UI components.",
-        "status": "uncollected",
-        "tool": "send_ui"
       }
     ],
     "unsuccessful_attempts": []
@@ -19497,15 +19257,6 @@
           "create_skill",
           "declare_done",
           "delete_my_schedule",
-          "discord_add_reaction",
-          "discord_channel_config",
-          "discord_create_channel",
-          "discord_create_webhook",
-          "discord_list_channels",
-          "discord_list_guilds",
-          "discord_send_file",
-          "ensure_subtask_webhook",
-          "ensure_webhook",
           "evaluate_response",
           "execute_shell",
           "generate_inner_voice",
@@ -19516,10 +19267,8 @@
           "get_my_schedules",
           "get_system_info",
           "get_task",
-          "join_voice_channel",
           "learn_from_experience",
           "learn_from_peer",
-          "leave_voice_channel",
           "list_allowed_commands",
           "list_subtask_webhooks",
           "list_webhooks",
@@ -19554,7 +19303,6 @@
           "search_memory_index",
           "search_my_history",
           "select_llm",
-          "send_ui",
           "set_default_subtask_webhook",
           "set_default_webhook",
           "set_my_heartbeat",

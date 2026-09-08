@@ -412,7 +412,8 @@ fn send_said_turn_say_sse_over_real_processes() {
     );
     assert!(
         wait_http(core_port, "/health", Duration::from_secs(30)),
-        "core HTTP did not start"
+        "core HTTP did not start: {}",
+        std::fs::read_to_string(&core_log).unwrap_or_default()
     );
 
     let (st, body) = http(

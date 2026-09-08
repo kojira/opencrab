@@ -236,7 +236,7 @@ pub trait GatewayNostrPassthrough: Send + Sync {
 
 /// 受信を持つ transport の per-agent ライフサイクル管理。
 ///
-/// 実装するのは**マネージャ**（`DiscordGatewayManager` / `NostrGatewayManager`）であって
+/// 実装するのはtransportのlifecycle controllerであって
 /// 接続 1 本ではない。1 実装が「そのプロセスにおけるその transport 全エージェント分」を
 /// 束ねる。
 ///

@@ -77,11 +77,10 @@ impl Default for ConversationConfig {
 pub struct GateConfig {
     #[serde(default)]
     pub listen_socket: String,
-    /// DESIGN-NOSTRGATE §6: `legacy` | `v3_shadow` | `v3`。欠落・空は `legacy`。
+    /// Nostr ingress is V3-only; missing or any other value fails when Nostr is enabled.
     #[serde(default)]
     pub nostr_ingress: String,
-    /// DESIGN-DISCORD-GATE §8.1: `legacy` | `v3_shadow` | `v3`。欠落・空は `legacy`。
-    /// `v3_shadow`/`v3` のとき起動時に discord-gateway プロセスを点火する（`discord_provision`）。
+    /// Discord ingress is V3-only; missing or any other value fails startup.
     #[serde(default)]
     pub discord_ingress: String,
 }
@@ -354,11 +353,7 @@ pub struct SubtaskConfig {
     /// 通知先の解決順は「明示指定 → DB の scope 別既定（tool>agent>global）→ ここ」。
     /// DB 行が 1 つも無いときだけ効く最後の砦（`WebhookSource::EnvConfig`）。
     ///
-    /// 元は `[gateway.discord] default_subtask_webhook` にあり、**Discord 機能が有効な
-    /// ビルドの Discord 起動ブロックでしか読まれていなかった**ため、web / REST / Nostr /
-    /// heartbeat の経路からは到達できなかった。transport 非依存の `[subtask]` 名前空間へ
-    /// 持ち上げる。旧キーは後方互換のフォールバックとして読み続ける
-    /// （[`AppConfig::default_subtask_webhook`]）。
+    /// transport非依存の`[subtask]`名前空間だけを使用する。
     #[serde(default)]
     pub default_webhook: Option<SubtaskWebhookConfig>,
 }
@@ -373,85 +368,17 @@ impl Default for SubtaskConfig {
 }
 
 impl AppConfig {
-    /// 設定ファイル由来の通知先フォールバックを解決する（#157 S5）。
-    ///
-    /// 優先順位は **新キー `[subtask] default_webhook` → 旧キー
-    /// `[gateway.discord] default_subtask_webhook`**。旧キーだけを書いた既存の設定
-    /// ファイルはそのまま動き続ける（後方互換）。url が空/空白のみなら「未設定」。
-    ///
-    /// transport の機能フラグから独立している点が要点で、`#[cfg(feature = "discord")]`
-    /// の外から呼べる。`AppState::default_subtask_webhook` へはこの結果を入れる。
+    /// Resolve the transport-neutral configured notification destination.
     pub fn default_subtask_webhook(
         &self,
     ) -> Option<opencrab_actions::webhook_target::WebhookConfig> {
-        self.subtask
-            .default_webhook
-            .as_ref()
-            .or(self.gateway.discord.default_subtask_webhook.as_ref())
-            .and_then(|c| {
-                opencrab_actions::webhook_target::WebhookConfig::from_parts(
-                    c.url.clone(),
-                    c.events.clone(),
-                )
-            })
+        self.subtask.default_webhook.as_ref().and_then(|config| {
+            opencrab_actions::webhook_target::WebhookConfig::from_parts(
+                config.url.clone(),
+                config.events.clone(),
+            )
+        })
     }
-
-    /// 新キーが**空の url で書かれていて**、旧キーの有効な値を隠しているか（#207）。
-    ///
-    /// [`Self::default_subtask_webhook`] の解決は「新キーの**節があるか**」で分岐し、
-    /// url が空かどうかを見るのはその後。よって新キーを `url = ""` で書くと、旧キーに
-    /// 有効な値があっても通知先は未設定になる。これは設定例の記述（「両方書いた場合は
-    /// 新しい方が優先」「url が空なら無効」）どおりの**意図した挙動**（通知を明示的に
-    /// 止める手段）なので解決順序は変えない。ただし黙って起きると原因が分からないので
-    /// 起動時に警告する（[`Self::warn_if_legacy_webhook_masked`]）。
-    ///
-    /// 踏む経路: 設定例の `default_webhook = { url = "${SUBTASK_WEBHOOK_URL}" }` の
-    /// コメントを外したが `.env` に変数を入れていない場合。`${VAR}` の展開は未定義の
-    /// 変数を空文字にするため url が空になる。
-    pub fn legacy_webhook_masked_by_empty_new_key(&self) -> bool {
-        legacy_webhook_masked_by_empty_new_key(
-            self.subtask.default_webhook.as_ref(),
-            self.gateway.discord.default_subtask_webhook.as_ref(),
-        )
-    }
-
-    /// 新キーが旧キーの有効な値を隠しているとき警告する。警告したら `true`。
-    ///
-    /// 挙動は変えない（通知先の解決結果には触らない）。何が起きているかと、どう直せば
-    /// よいか（新キーに値を入れる / 新キーの行を消す）が本文から分かるようにする。
-    pub fn warn_if_legacy_webhook_masked(&self) -> bool {
-        if !self.legacy_webhook_masked_by_empty_new_key() {
-            return false;
-        }
-        warn!(
-            "[subtask] default_webhook has an empty url, so the value in \
-             [gateway.discord] default_subtask_webhook is NOT used and subtask lifecycle \
-             notifications have no destination (an empty url means \"disabled\"; the newer key \
-             wins when both are set). If you meant to migrate, put the real URL in \
-             [subtask] default_webhook (check that the ${{VAR}} it references is set in .env \
-             -- undefined variables expand to an empty string). If you meant to keep using the \
-             legacy key, delete the [subtask] default_webhook line. If you meant to turn \
-             notifications off, this warning is expected."
-        );
-        true
-    }
-}
-
-/// [`AppConfig::legacy_webhook_masked_by_empty_new_key`] の判定本体（#207）。
-///
-/// 「新キーの節はあるが url が空」かつ「旧キーに有効な url がある」ときだけ真。
-/// 新キーの節が無ければ旧キーがそのまま使われるので隠していない。新キーに有効な url が
-/// あれば新キーが使われる（これは意図どおりの優先）ので警告しない。
-fn legacy_webhook_masked_by_empty_new_key(
-    new_key: Option<&SubtaskWebhookConfig>,
-    legacy_key: Option<&SubtaskWebhookConfig>,
-) -> bool {
-    let new_key_is_empty = match new_key {
-        Some(c) => c.url.trim().is_empty(),
-        None => return false,
-    };
-    let legacy_has_value = legacy_key.is_some_and(|c| !c.url.trim().is_empty());
-    new_key_is_empty && legacy_has_value
 }
 
 fn default_subtask_auto_dispatch() -> bool {
