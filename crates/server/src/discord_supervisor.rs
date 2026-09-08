@@ -16,6 +16,7 @@
 //! **秘密（bot token）**: 本番 spawner は token を **子の env のみ**へ注入し、親 env・argv・ログの
 //! いずれにも出さない（`nostr-gateway` の watch 子と同じ流儀）。
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -162,6 +163,61 @@ pub trait ChildSpawner: Send + Sync {
     fn agent_id(&self) -> &str;
     fn gateway_name(&self) -> &str {
         "gateway"
+    }
+}
+
+struct SupervisedTask {
+    shutdown: watch::Sender<bool>,
+    join: tokio::task::JoinHandle<()>,
+}
+
+/// Owns one supervised external gateway task per agent and provides race-free replacement.
+pub struct GatewaySupervisorSet {
+    config: SupervisorConfig,
+    tasks: tokio::sync::Mutex<HashMap<String, SupervisedTask>>,
+}
+
+impl GatewaySupervisorSet {
+    pub fn new(config: SupervisorConfig) -> Arc<Self> {
+        Arc::new(Self {
+            config,
+            tasks: tokio::sync::Mutex::new(HashMap::new()),
+        })
+    }
+
+    pub async fn start(&self, agent_id: &str, spawner: Arc<dyn ChildSpawner>) {
+        self.stop(agent_id).await;
+        let (shutdown, receiver) = watch::channel(false);
+        let config = self.config.clone();
+        let join = tokio::spawn(supervise(spawner, config, receiver));
+        self.tasks
+            .lock()
+            .await
+            .insert(agent_id.to_string(), SupervisedTask { shutdown, join });
+    }
+
+    pub async fn stop(&self, agent_id: &str) {
+        let task = self.tasks.lock().await.remove(agent_id);
+        if let Some(task) = task {
+            let _ = task.shutdown.send(true);
+            let _ = task.join.await;
+        }
+    }
+
+    pub async fn shutdown_all(&self) {
+        let tasks: Vec<_> = self
+            .tasks
+            .lock()
+            .await
+            .drain()
+            .map(|(_, task)| task)
+            .collect();
+        for task in &tasks {
+            let _ = task.shutdown.send(true);
+        }
+        for task in tasks {
+            let _ = task.join.await;
+        }
     }
 }
 

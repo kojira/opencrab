@@ -13,16 +13,47 @@ use opencrab_actions::{
 /// V3 gateway の liveness を返す probe（agent_id → 稼働中か）。
 pub type V3LivenessProbe = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
+#[async_trait]
+pub trait V3ProcessControl: Send + Sync {
+    async fn start(&self, agent_id: &str) -> anyhow::Result<()>;
+    async fn stop(&self, agent_id: &str);
+    async fn shutdown_all(&self);
+}
+
+struct V3IdentityProvisioning {
+    inner: Arc<dyn GatewayIdentityProvisioning>,
+    process: Arc<dyn V3ProcessControl>,
+}
+
+#[async_trait]
+impl GatewayIdentityProvisioning for V3IdentityProvisioning {
+    async fn adopt_identity(&self, agent_id: &str, identity: &str) -> anyhow::Result<String> {
+        let adopted = self.inner.adopt_identity(agent_id, identity).await?;
+        self.process.start(agent_id).await?;
+        Ok(adopted)
+    }
+}
+
 /// V3-only transport decorator. Lifecycle/capabilities remain on the core manager, but runtime
 /// liveness is true only after the external gateway has registered with extgate.
 pub struct V3OnlyGateway {
     inner: SharedAgentGateway,
     v3_live: V3LivenessProbe,
+    process: Option<Arc<dyn V3ProcessControl>>,
 }
 
 impl V3OnlyGateway {
-    pub fn new(inner: SharedAgentGateway, v3_live: V3LivenessProbe) -> Arc<Self> {
-        Arc::new(Self { inner, v3_live })
+    pub fn new(inner: SharedAgentGateway, v3_live: V3LivenessProbe) -> Self {
+        Self {
+            inner,
+            v3_live,
+            process: None,
+        }
+    }
+
+    pub fn with_process(mut self, process: Arc<dyn V3ProcessControl>) -> Arc<Self> {
+        self.process = Some(process);
+        Arc::new(self)
     }
 }
 
@@ -33,10 +64,17 @@ impl AgentGatewayLifecycle for V3OnlyGateway {
     }
 
     async fn start(&self, agent_id: &str) -> anyhow::Result<()> {
-        self.inner.start(agent_id).await
+        self.inner.start(agent_id).await?;
+        if let Some(process) = &self.process {
+            process.start(agent_id).await?;
+        }
+        Ok(())
     }
 
     async fn stop(&self, agent_id: &str) {
+        if let Some(process) = &self.process {
+            process.stop(agent_id).await;
+        }
         self.inner.stop(agent_id).await
     }
 
@@ -49,6 +87,9 @@ impl AgentGatewayLifecycle for V3OnlyGateway {
     }
 
     async fn shutdown_all(&self) {
+        if let Some(process) = &self.process {
+            process.shutdown_all().await;
+        }
         self.inner.shutdown_all().await
     }
 
@@ -68,7 +109,14 @@ impl AgentGatewayLifecycle for V3OnlyGateway {
     }
 
     fn identity_provisioning(&self) -> Option<Arc<dyn GatewayIdentityProvisioning>> {
-        self.inner.identity_provisioning()
+        let inner = self.inner.identity_provisioning()?;
+        match &self.process {
+            Some(process) => Some(Arc::new(V3IdentityProvisioning {
+                inner,
+                process: process.clone(),
+            })),
+            None => Some(inner),
+        }
     }
 
     fn nostr_passthrough(&self) -> Option<Arc<dyn GatewayNostrPassthrough>> {
@@ -110,7 +158,7 @@ mod tests {
             started: AtomicBool::new(false),
         });
         let probe: V3LivenessProbe = Arc::new(|agent_id: &str| agent_id == "externally-live");
-        let gateway = V3OnlyGateway::new(inner, probe);
+        let gateway = Arc::new(V3OnlyGateway::new(inner, probe));
         assert!(!gateway.is_running("core-only"));
         assert!(gateway.is_running("externally-live"));
         assert!(gateway.gateway_actions_for("core-only").is_none());

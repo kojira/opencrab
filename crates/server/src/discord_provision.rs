@@ -5,15 +5,13 @@
 //! core に Discord 固有の enum / DB 列 / 語彙は足さない。
 //!
 //! **秘密（bot token）はこのモジュールに一切載せない**。token は `agent_discord_config.bot_token` に
-//! あり、点火オーケストレータ（[`ignite_discord_instances`]）が spawn クロージャへ**別引数**で渡す。
-//! spawn 実装（main.rs）は token を子プロセスの env（`DISCORD_BOT_TOKEN`）へ注入する（argv 禁止）。
+//! あり、process controllerがtokenを子プロセスのenv（`DISCORD_BOT_TOKEN`）だけへ注入する。
 //! `self_bot_id` は `agent_discord_config.bot_user_id`（各 bot 自身の認証済み接続＝`get_current_user`
 //! だけが書く）。未接続で空なら V3 config を組めないので当該 agent は fail-loud で skip する。
 
 use anyhow::{bail, Context, Result};
 use opencrab_db::queries::{create_gate_binding_in_tx, get_session, CreateGateBindingError};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
-use tracing::info;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DiscordIngress;
@@ -28,14 +26,6 @@ impl DiscordIngress {
 
     pub fn as_str(self) -> &'static str {
         "v3"
-    }
-
-    pub fn provisions_instance(self) -> bool {
-        true
-    }
-
-    pub fn provisions_binding(self) -> bool {
-        true
     }
 }
 
@@ -232,84 +222,52 @@ pub struct DiscordPlacementPlan {
     pub config_b64: String,
 }
 
-/// spawn クロージャ。`(plan, bot_token)`。token は env 注入用で、**ログに出さないこと**。
-pub type DiscordSpawnFn<'a> = dyn Fn(&DiscordPlacementPlan, &str) -> Result<()> + Send + Sync + 'a;
-
-/// 点火の集計（起動時ログ / テスト用）。
-#[derive(Debug, Default, Clone)]
-pub struct DiscordIgniteReport {
-    /// provision まで到達した agent_id。
-    pub provisioned: Vec<String>,
-    /// spawn クロージャが Ok を返した agent_id。
-    pub spawned: Vec<String>,
+pub struct DiscordLaunchPlan {
+    pub placement: DiscordPlacementPlan,
+    pub bot_token: String,
 }
 
-/// server 起動時、enabled な各 agent の V3 instance/binding を敷き、
-/// `spawn` クロージャで discord-gateway プロセスを起こす。
-/// 前提を満たさない agent（bot_user_id / bot_token 未設定・whitelist channel 0・provision 失敗）は
-/// **黙って通さず warn して skip** する（1 agent の失敗で全体を止めない）。
-pub fn ignite_discord_instances(
+pub fn load_discord_launch_plan(
     conn: &mut Connection,
-    ingress: DiscordIngress,
+    agent_id: &str,
     now: i64,
-    spawn: &DiscordSpawnFn,
-) -> Result<DiscordIgniteReport> {
-    let mut report = DiscordIgniteReport::default();
-
-    let configs = opencrab_db::queries::list_enabled_agent_discord_configs(conn)?;
-    info!(
-        ingress = ingress.as_str(),
-        candidates = configs.len(),
-        "discord V3 点火開始"
-    );
-
-    for cfg in configs {
-        let agent_id = cfg.agent_id.clone();
-        let self_bot_id = opencrab_db::queries::get_agent_discord_bot_user_id(conn, &agent_id)?;
-        if self_bot_id.trim().is_empty() {
-            bail!("enabled Discord agent {agent_id} has no bot_user_id");
-        }
-        if cfg.bot_token.trim().is_empty() {
-            bail!("enabled Discord agent {agent_id} has no bot_token");
-        }
-        let name = agent_name(conn, &agent_id)
-            .with_context(|| format!("enabled Discord agent {agent_id} has no valid name"))?;
-        let channels = opencrab_db::queries::list_channel_configs_by_agent(conn, &agent_id)
-            .with_context(|| {
-                format!("cannot read channels for enabled Discord agent {agent_id}")
-            })?;
-        let addresses: Vec<String> = channels
-            .iter()
-            .filter(|c| c.whitelisted)
-            .map(|c| discord_address(&agent_id, &c.guild_id, &c.channel_id))
-            .collect();
-        if addresses.is_empty() {
-            bail!("enabled Discord agent {agent_id} has no whitelisted channel");
-        }
-        let res =
-            provision_discord_gate(conn, &agent_id, &self_bot_id, &name, &addresses, true, now)
-                .with_context(|| format!("Discord V3 provision failed for {agent_id}"))?;
-        report.provisioned.push(agent_id.clone());
-        let plan = DiscordPlacementPlan {
-            agent_id: agent_id.clone(),
-            instance_id: res.instance_id,
-            revision: res.revision,
-            addresses: res.addresses,
-            config_b64: res.config_b64,
-        };
-        spawn(&plan, &cfg.bot_token)
-            .with_context(|| format!("discord-gateway spawn failed for {agent_id}"))?;
-        info!(
-            agent_id = %agent_id,
-            instance_id = %plan.instance_id,
-            revision = plan.revision,
-            addresses = plan.addresses.len(),
-            "discord-gateway spawn"
-        );
-        report.spawned.push(agent_id);
+) -> Result<DiscordLaunchPlan> {
+    let cfg = opencrab_db::queries::get_agent_discord_config(conn, agent_id)?
+        .with_context(|| format!("Discord config not found for {agent_id}"))?;
+    if !cfg.enabled {
+        bail!("Discord config is disabled for {agent_id}");
     }
-
-    Ok(report)
+    if cfg.bot_token.trim().is_empty() {
+        bail!("enabled Discord agent {agent_id} has no bot_token");
+    }
+    let self_bot_id = opencrab_db::queries::get_agent_discord_bot_user_id(conn, agent_id)?;
+    if self_bot_id.trim().is_empty() {
+        bail!("enabled Discord agent {agent_id} has no bot_user_id");
+    }
+    let name = agent_name(conn, agent_id)
+        .with_context(|| format!("enabled Discord agent {agent_id} has no valid name"))?;
+    let channels = opencrab_db::queries::list_channel_configs_by_agent(conn, agent_id)
+        .with_context(|| format!("cannot read channels for enabled Discord agent {agent_id}"))?;
+    let addresses: Vec<String> = channels
+        .iter()
+        .filter(|channel| channel.whitelisted)
+        .map(|channel| discord_address(agent_id, &channel.guild_id, &channel.channel_id))
+        .collect();
+    if addresses.is_empty() {
+        bail!("enabled Discord agent {agent_id} has no whitelisted channel");
+    }
+    let result = provision_discord_gate(conn, agent_id, &self_bot_id, &name, &addresses, true, now)
+        .with_context(|| format!("Discord V3 provision failed for {agent_id}"))?;
+    Ok(DiscordLaunchPlan {
+        placement: DiscordPlacementPlan {
+            agent_id: agent_id.to_string(),
+            instance_id: result.instance_id,
+            revision: result.revision,
+            addresses: result.addresses,
+            config_b64: result.config_b64,
+        },
+        bot_token: cfg.bot_token,
+    })
 }
 
 #[cfg(test)]
@@ -319,7 +277,6 @@ mod tests {
         insert_agent_session_in_tx, insert_session_in_tx, upsert_agent, AgentDiscordConfigRow,
         AgentRow, ChannelConfigRow,
     };
-    use std::sync::Mutex;
 
     fn seed_agent(conn: &Connection, agent_id: &str, name: &str) {
         upsert_agent(
@@ -375,31 +332,12 @@ mod tests {
         .unwrap();
     }
 
-    /// spawn 呼び出しを記録する fake（実プロセス spawn は行わない）。
-    #[derive(Default)]
-    struct FakeSpawner {
-        calls: Mutex<Vec<(String, String)>>, // (agent_id, bot_token)
-    }
-    impl FakeSpawner {
-        fn as_fn(&self) -> impl Fn(&DiscordPlacementPlan, &str) -> Result<()> + '_ {
-            move |plan: &DiscordPlacementPlan, token: &str| {
-                self.calls
-                    .lock()
-                    .unwrap()
-                    .push((plan.agent_id.clone(), token.to_string()));
-                Ok(())
-            }
-        }
-    }
-
     #[test]
     fn ingress_accepts_only_explicit_v3() {
         assert_eq!(DiscordIngress::parse("v3"), Some(DiscordIngress::V3));
         for retired in ["", "legacy", "v3_shadow", "bogus"] {
             assert_eq!(DiscordIngress::parse(retired), None, "accepted {retired:?}");
         }
-        assert!(DiscordIngress::V3.provisions_instance());
-        assert!(DiscordIngress::V3.provisions_binding());
     }
 
     #[test]
@@ -436,10 +374,9 @@ mod tests {
             tx.commit().unwrap();
         }
 
-        let spawner = FakeSpawner::default();
-        let f = spawner.as_fn();
-        let report = ignite_discord_instances(&mut conn, DiscordIngress::V3, 9, &f).unwrap();
-        assert_eq!(report.spawned, vec!["a1".to_string()]);
+        let launch = load_discord_launch_plan(&mut conn, "a1", 9).unwrap();
+        assert_eq!(launch.placement.agent_id, "a1");
+        assert_eq!(launch.bot_token, "tok");
         let bindings: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM gate_bindings WHERE address = ?1",
@@ -458,9 +395,9 @@ mod tests {
         // bot_user_id は既定 ""（未接続）。
         seed_channel(&conn, "a1", "500", "600", true);
 
-        let spawner = FakeSpawner::default();
-        let f = spawner.as_fn();
-        let err = ignite_discord_instances(&mut conn, DiscordIngress::V3, 1, &f).unwrap_err();
+        let Err(err) = load_discord_launch_plan(&mut conn, "a1", 1) else {
+            panic!("missing bot_user_id was accepted")
+        };
         assert!(err.to_string().contains("bot_user_id"), "{err:#}");
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM gate_instances", [], |r| r.get(0))
@@ -476,9 +413,9 @@ mod tests {
         opencrab_db::queries::set_agent_discord_bot_user_id(&conn, "a1", "111").unwrap();
         seed_channel(&conn, "a1", "500", "600", false); // whitelisted=false
 
-        let spawner = FakeSpawner::default();
-        let f = spawner.as_fn();
-        let err = ignite_discord_instances(&mut conn, DiscordIngress::V3, 1, &f).unwrap_err();
+        let Err(err) = load_discord_launch_plan(&mut conn, "a1", 1) else {
+            panic!("missing whitelisted channel was accepted")
+        };
         assert!(err.to_string().contains("whitelisted channel"), "{err:#}");
     }
 }

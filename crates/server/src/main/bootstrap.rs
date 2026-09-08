@@ -17,7 +17,6 @@ pub(super) struct BootstrapContext {
     #[cfg(feature = "discord")]
     pub(super) attachment_inbox_root: std::path::PathBuf,
     #[cfg(feature = "discord")]
-    pub(super) discord_ingress: opencrab_server::discord_provision::DiscordIngress,
     #[cfg(feature = "nostr")]
     pub(super) nostr_master_key: Option<opencrab_nostr::MasterKey>,
     #[cfg(feature = "nostr")]
@@ -45,7 +44,7 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
 
     // Discord is V3-only. Missing, legacy, shadow, and unknown values fail closed.
     #[cfg(feature = "discord")]
-    let discord_ingress =
+    let _discord_ingress =
         opencrab_server::discord_provision::DiscordIngress::parse(&cfg.gate.discord_ingress)
             .ok_or_else(|| {
                 anyhow::anyhow!(
@@ -328,8 +327,6 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
         gate_socket_for_nostr,
         #[cfg(feature = "discord")]
         attachment_inbox_root,
-        #[cfg(feature = "discord")]
-        discord_ingress,
         #[cfg(feature = "nostr")]
         nostr_master_key,
         #[cfg(feature = "nostr")]

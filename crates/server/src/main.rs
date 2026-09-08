@@ -6,6 +6,9 @@ use opencrab_server::create_router_with_gate;
 mod background;
 #[path = "main/bootstrap.rs"]
 mod bootstrap;
+#[cfg(feature = "discord")]
+#[path = "main/discord_ignition.rs"]
+mod discord_ignition;
 mod intake_process;
 #[cfg(feature = "nostr")]
 #[path = "main/nostr_ignition.rs"]
@@ -115,7 +118,6 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(feature = "discord")]
         attachment_inbox_root,
         #[cfg(feature = "discord")]
-        discord_ingress,
         #[cfg_attr(not(feature = "discord"), allow(unused_variables))]
         #[cfg(feature = "nostr")]
         nostr_master_key,
@@ -191,8 +193,17 @@ async fn main() -> anyhow::Result<()> {
         state.cleanup_stale_interactions();
     }
 
-    // Discord ingress is V3-only and is started by the external gateway ignition below.
-
+    #[cfg(feature = "discord")]
+    let discord_process_controller = discord_ignition::DiscordV3Controller::new(
+        &state.db,
+        extgate.clone(),
+        &cfg.database.path,
+        gate_socket_for_discord
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("Discord V3 requires gate.listen_socket"))?,
+        &attachment_inbox_root,
+        &discord_gateway_bin,
+    )?;
     let _watcher_handle = background::spawn_background_tasks(
         &state,
         &cfg,
@@ -208,7 +219,7 @@ async fn main() -> anyhow::Result<()> {
     // 止まる）。Nostr 未設定の構成ではそもそもマスターキー不要なので、ここを飛ばして通常起動する。
     // PR-1B: Nostr は会話ゲートなので nostr feature の内側。外した構成ではこのブロック自体が無い。
     #[cfg(feature = "nostr")]
-    let mut nostr_gateway_secret_provider: Option<opencrab_nostr::MainKeyProvider> = None;
+    let mut nostr_process_controller: Option<Arc<nostr_ignition::NostrV3Controller>> = None;
     #[cfg(feature = "nostr")]
     if let Some(master_key) = nostr_master_key.clone() {
         // nostaro は**エージェントの workspace ルートを cwd にして**起動する（#299）。
@@ -218,7 +229,17 @@ async fn main() -> anyhow::Result<()> {
         // #620: 本鍵は config へ書かず、`base_command` が spawn ごとに **本鍵プロバイダ**で DB の
         // 暗号文を復号して env 注入する。生成鍵ファイルの復号用に **マスターキー**も注入する。
         let provider = opencrab_nostr::db_main_key_provider(state.db.clone(), master_key.clone());
-        nostr_gateway_secret_provider = Some(provider.clone());
+        let process_controller = nostr_ignition::NostrV3Controller::new(
+            &state.db,
+            &cfg.database.path,
+            gate_socket_for_nostr
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("Nostr V3 requires gate.listen_socket"))?,
+            &provider,
+            &nostr_gateway_bin,
+            &nostaro_bin,
+        )?;
+        nostr_process_controller = Some(process_controller.clone());
         let cli = opencrab_nostr::NostaroCli::new()
             .with_binary_path(nostaro_bin.to_string_lossy().into_owned())
             .with_workspace_base(state.workspace_base.clone())
@@ -318,7 +339,8 @@ async fn main() -> anyhow::Result<()> {
                 extgate_for_nostr_live
                     .agent_has_live_gateway(agent_id, opencrab_actions::gateway_kinds::NOSTR)
             });
-        let v3_only = opencrab_server::dedicated_gateway::V3OnlyGateway::new(manager, nostr_live);
+        let v3_only = opencrab_server::dedicated_gateway::V3OnlyGateway::new(manager, nostr_live)
+            .with_process(process_controller);
         state.gateways.register(v3_only);
     } else {
         tracing::info!(
@@ -335,6 +357,8 @@ async fn main() -> anyhow::Result<()> {
     // ここが唯一の復元位置になる。**新しい transport を足すときも呼び出し口は増えない**:
     // 復元させたい位置より前で `register` すればよい。
     state.gateways.restore_pending().await;
+    #[cfg(feature = "discord")]
+    state.gateways.register(discord_process_controller.clone());
 
     // Per-agent MCP 接続マネージャ。enabled なサーバへ起動時に接続する。
     //
@@ -392,108 +416,16 @@ async fn main() -> anyhow::Result<()> {
     }
 
     #[cfg(feature = "nostr")]
-    let nostr_shutdown_tx = nostr_ignition::ignite(
-        start_nostr,
-        &state.db,
-        &cfg.database.path,
-        gate_socket_for_nostr.as_deref(),
-        nostr_gateway_secret_provider.as_ref(),
-        &nostr_gateway_bin,
-        &nostaro_bin,
-    )?;
-
-    // Discord V3 点火。enabled な agent_discord_config 各体について instance と binding を
-    // 敷き、discord-gateway プロセスを起こす。**UDS listener を spawn した後**に行う（子が core socket へ
-    // 接続できるように。子側 InstanceClient は接続を再試行する）。
-    // #865: discord-gateway 子プロセスの監視/再起動/後始末（[`discord_supervisor`]）を配線する。
-    // shutdown 信号（SIGINT/SIGTERM）でこの `watch` を立てると、各 supervisor は再起動せず子を
-    // terminate する（孤児防止）。
-    #[cfg(feature = "discord")]
-    let mut discord_shutdown_tx: Option<tokio::sync::watch::Sender<bool>> = None;
-    #[cfg(feature = "discord")]
-    if discord_ingress.provisions_instance() {
-        use anyhow::Context as _;
-        use opencrab_server::discord_provision::{ignite_discord_instances, DiscordPlacementPlan};
-        use opencrab_server::discord_supervisor::{
-            supervise, GatewayChildSpawner, SupervisorConfig,
-        };
-
-        // placement.json（非秘密）の出力先。DB と同じボリューム（内蔵ディスクに置かない方針）。
-        let placement_dir = std::path::Path::new(&cfg.database.path)
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."))
-            .join("gate")
-            .join("discord");
-        let bin = discord_gateway_bin.clone();
-        let core_socket = gate_socket_for_discord.clone();
-
-        // supervisor 群の shutdown 信号。SIGINT/SIGTERM で `true` を送ると各 supervisor は再起動せず
-        // 子を terminate する。
-        let (sd_tx, sd_rx) = tokio::sync::watch::channel(false);
-        discord_shutdown_tx = Some(sd_tx);
-        let supervisor_cfg = SupervisorConfig::default();
-
-        let spawn = move |plan: &DiscordPlacementPlan, bot_token: &str| -> anyhow::Result<()> {
-            let Some(core_socket) = core_socket.as_deref() else {
-                anyhow::bail!(
-                    "gate.listen_socket 未設定のため discord-gateway を起動できない（V3 は UDS 必須）"
-                );
-            };
-            // placement.json（秘密なし。bot token は載せない）。再起動でも同じ file を再 exec するので
-            // ここで 1 度だけ書けばよい。
-            let placement = serde_json::json!({
-                "core_socket": core_socket,
-                "attachment_spool_root": attachment_inbox_root,
-                "instances": [{
-                    "instance_id": plan.instance_id,
-                    "revision": plan.revision,
-                    "addresses": plan.addresses,
-                    "config_b64": plan.config_b64,
-                }],
-            });
-            std::fs::create_dir_all(&placement_dir)
-                .with_context(|| format!("placement dir 作成失敗: {}", placement_dir.display()))?;
-            let path = placement_dir.join(format!("{}.json", plan.agent_id));
-            std::fs::write(&path, serde_json::to_vec_pretty(&placement)?)
-                .with_context(|| format!("placement 書き出し失敗: {}", path.display()))?;
-
-            // detach をやめ、監視付き supervisor を起こす。bot token は **子の env のみ**（親 env も
-            // argv も汚さない・ログにも出さない）で GatewayChildSpawner が注入する。supervisor は
-            // 子の終了検知・指数バックオフ再起動・shutdown 時の terminate を担う。
-            let spawner = std::sync::Arc::new(GatewayChildSpawner::new(
-                bin.clone(),
-                path,
-                bot_token.to_string(),
-                plan.agent_id.clone(),
-            ));
-            tokio::spawn(supervise(spawner, supervisor_cfg.clone(), sd_rx.clone()));
-            tracing::info!(
-                agent_id = %plan.agent_id,
-                bin = %bin.display(),
-                "discord-gateway supervisor 起動（監視/再起動/後始末つき・token は env 注入）"
-            );
-            Ok(())
-        };
-
-        let report = {
-            let mut conn = state
-                .db
-                .lock()
-                .map_err(|_| anyhow::anyhow!("db lock for Discord V3 ignition"))?;
-            ignite_discord_instances(
-                &mut conn,
-                discord_ingress,
-                opencrab_extgate::now_nanos(),
-                &spawn,
-            )?
-        };
-        tracing::info!(
-            ingress = discord_ingress.as_str(),
-            provisioned = report.provisioned.len(),
-            spawned = report.spawned.len(),
-            "discord V3 点火完了"
-        );
+    if start_nostr {
+        nostr_process_controller
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Nostr V3 process controller is unavailable"))?
+            .start_all()
+            .await?;
     }
+
+    #[cfg(feature = "discord")]
+    discord_process_controller.start_all().await?;
 
     let app = create_router_with_gate(state, extgate);
 
@@ -509,12 +441,16 @@ async fn main() -> anyhow::Result<()> {
                 wait_for_os_shutdown().await;
                 tracing::info!("shutdown signal received: terminating gateway children");
                 #[cfg(feature = "discord")]
-                if let Some(tx) = &discord_shutdown_tx {
-                    let _ = tx.send(true);
-                }
+                opencrab_actions::AgentGatewayLifecycle::shutdown_all(
+                    discord_process_controller.as_ref(),
+                )
+                .await;
                 #[cfg(feature = "nostr")]
-                if let Some(tx) = &nostr_shutdown_tx {
-                    let _ = tx.send(true);
+                if let Some(controller) = &nostr_process_controller {
+                    opencrab_server::dedicated_gateway::V3ProcessControl::shutdown_all(
+                        controller.as_ref(),
+                    )
+                    .await;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             })
