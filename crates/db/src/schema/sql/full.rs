@@ -212,6 +212,15 @@ CREATE TABLE IF NOT EXISTS model_pricing (
     PRIMARY KEY (provider, model)
 );
 
+-- 標準 config の既定モデルは、fresh DB の初回起動時点で budget の必須値を持つ。
+-- subscription 経路なので価格は 0。v49 migration が既存 DB を同じ形へ収束させる。
+INSERT OR IGNORE INTO model_pricing (
+    provider, model, input_price_per_1m, output_price_per_1m,
+    context_window, max_output_tokens, updated_at
+) VALUES (
+    'codex', 'gpt-5.6', 0.0, 0.0, 1050000, 32000, datetime('now')
+);
+
 -- ============================================
 -- ハートビートログ（発火ログ）
 -- ============================================

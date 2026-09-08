@@ -25,9 +25,11 @@ async fn test_model_pricing_put_then_list() {
     let (status, resp) = send_request(app, "GET", "/api/llm/model-pricing", None).await;
     assert_eq!(status, StatusCode::OK);
     let models = resp["models"].as_array().unwrap();
-    assert_eq!(models.len(), 1);
-    assert_eq!(models[0]["provider"], "testprov");
-    assert_eq!(models[0]["context_window"], 200000);
+    let saved = models
+        .iter()
+        .find(|row| row["provider"] == "testprov" && row["model"] == "testmodel")
+        .expect("saved model is listed alongside the standard seed");
+    assert_eq!(saved["context_window"], 200000);
 }
 
 /// `context_window` こそが登録の目的なので、0 以下は受け付けない。
@@ -46,9 +48,11 @@ async fn test_model_pricing_rejects_non_positive_context_window() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
-    // 弾いた以上、行は作られていない。
+    // 弾いた以上、対象行は作られていない（fresh DB の標準 seed は残る）。
     let (_, resp) = send_request(app, "GET", "/api/llm/model-pricing", None).await;
-    assert!(resp["models"].as_array().unwrap().is_empty());
+    assert!(!resp["models"].as_array().unwrap().iter().any(|row| {
+        row["provider"] == "testprov" && row["model"] == "testmodel"
+    }));
 }
 
 async fn register_model(app: Router, provider: &str, model: &str, window: i64) {

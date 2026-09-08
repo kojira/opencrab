@@ -37,7 +37,7 @@ async fn test_model_pricing_list_exposes_compaction_ratio() {
     // 実効予算 = context_window × compaction_ratio をフロントが計算するには
     // compaction_ratio が要る（#484）。ここでは **既定 0.5 を避けて** 0.375 を state に
     // 入れ、ハンドラが state.compaction_ratio を読んでいる（定数を返していない）ことを
-    // 確かめる。行も 1 件入れて models と同居することを見る。
+    // 確かめる。追加行が標準 seed と models 内で同居することを見る。
     let (state, db) = create_test_state(0.375);
     {
         let conn = db.lock().unwrap();
@@ -60,8 +60,11 @@ async fn test_model_pricing_list_exposes_compaction_ratio() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["compaction_ratio"].as_f64(), Some(0.375));
     let models = body["models"].as_array().unwrap();
-    assert_eq!(models.len(), 1);
-    assert_eq!(models[0]["context_window"].as_i64(), Some(400_000));
+    let luna = models
+        .iter()
+        .find(|row| row["provider"] == "chatgpt" && row["model"] == "gpt-5.6-luna")
+        .expect("inserted model is listed alongside the standard seed");
+    assert_eq!(luna["context_window"].as_i64(), Some(400_000));
 }
 
 #[tokio::test]
