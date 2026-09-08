@@ -21,6 +21,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ソースファイルは 800 行以内（#937）。ratchet ゲート: 新規/800 行以下ファイルの
+      # 800 行超と、allowlist 凍結済みファイルの行数増加を赤にする。build 前に落として
+      # 高価な toolchain インストールを無駄にしない。減少は allowlist 更新の警告のみ。
+      - name: File size ratchet
+        run: bash scripts/check-file-size.sh
+
       # songbird(voice) は opus、reqwest(native-tls) は OpenSSL、
       # audiopus_sys のビルドに cmake/pkg-config が要る。rusqlite は bundled。
       - name: Install system dependencies
@@ -55,8 +61,11 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-features
 
+      # --no-fail-fast: fail-fast だと最初に赤になった test binary で cargo が停止し、
+      # 後続クレート/バイナリ（例: qc_harness_e2e）の赤 assert が同一 run に現れない。
+      # 複数クレートに跨る赤ピンの CI 証跡を 1 run で揃えるため fail-fast を切る（テスト基盤 #905）。
       - name: Test
-        run: cargo test --workspace --all-features
+        run: cargo test --workspace --all-features --no-fail-fast
 
       # baseline の外形構成は周囲の feature union やローカル Nostr 設定に依存させない。
       # default feature を切った状態から baseline-l2 だけを選び、採取 profile 自身が
@@ -78,6 +87,38 @@ jobs:
 
       - name: Dependency boundary checks
         run: bash scripts/check-deps.sh
+
+  # DESIGN-SAMPLES-NODE.md §5: sample は workspace build の必須対象ではないが、
+  # merge CI の共通 conformance 行列には必須。既定 SUT は Rust binary。
+  # Node 列は OPENCRAB_CONFORMANCE_SUT で path だけ差し替える（言語名分岐なし）。
+  # Node の exact version は samples/node/.node-version（22.19.0）。
+  conformance:
+    name: Conformance (Rust / Node / static audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.98.0
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: samples/node/.node-version
+
+      - name: samples/node static audit
+        run: bash scripts/check-samples-node.sh
+
+      - name: Conformance (Rust SUT)
+        run: cargo test -p opencrab-web-gateway --test conformance --all-features
+
+      - name: Conformance (Node SUT)
+        env:
+          OPENCRAB_CONFORMANCE_SUT: ${{ github.workspace }}/samples/node/web-gateway/web-gateway.js
+        run: cargo test -p opencrab-web-gateway --test conformance --all-features
 
   web:
     name: Web (typecheck / build / test)

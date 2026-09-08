@@ -57,17 +57,33 @@ pub struct DiscordGatewayManager<T: AgentRunner> {
     // **必須**（`new` の引数）にしてあるので配線し忘れが起きえない（#602 で忘れて本番が止まった。
     // Option + builder だと呼び忘れてもコンパイルが通ってしまう）。
     timed_fire_router: Arc<TimedFireRouter>,
+    // DESIGN-DISCORD-GATE §8.1: この legacy per-agent ループが「同じ agent を V3 gateway process が
+    // 実際に受信中か」を per-message で見て、受信中なら退く（二重受信防止）ための probe。
+    // **必須**（`new` の引数）にしてある。#603 と同じ理由で Option + builder にしない:
+    // これを配線し忘れると legacy 車線が V3 と並走し同一メッセージを二重処理する（本バグ）。
+    // probe が false（V3 死亡/未接続/ロック失敗）なら退かず legacy が処理を続け外形を減らさない。
+    v3_liveness: crate::message_loop::V3LivenessProbe,
 }
 
 impl<T: AgentRunner> DiscordGatewayManager<T> {
     /// `timed_fire_router` は**必須**。scheduler の時刻発火をこのマネージャの per-agent ループへ
     /// 届けるための受け口レジストリで、渡さないと発火が届かない（#603）。型で強制することで
     /// #602 のような「配線し忘れて黙って全 skip」を再発させない。
-    pub fn new(state: T, timed_fire_router: Arc<TimedFireRouter>) -> Self {
+    ///
+    /// `v3_liveness` も**必須**（DESIGN-DISCORD-GATE §8.1）: per-agent ループが V3 gateway process の
+    /// 生存を見て二重受信を避けるための probe。実体は server 層で
+    /// `ExtgateState::agent_has_live_gateway(agent, "discord")` を包む closure。配線し忘れを
+    /// 型で潰すため引数にしてある（忘れると legacy 車線が V3 と並走して二重処理する）。
+    pub fn new(
+        state: T,
+        timed_fire_router: Arc<TimedFireRouter>,
+        v3_liveness: crate::message_loop::V3LivenessProbe,
+    ) -> Self {
         Self {
             gateways: RwLock::new(HashMap::new()),
             state,
             timed_fire_router,
+            v3_liveness,
         }
     }
 
@@ -125,7 +141,14 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
                 }
             }
             Err(e) => {
-                error!(agent_id = %agent_id, error = %e, "#489: 自分の Discord user id を取得できず co_agent 逆引き表を更新できなかった（co_agent は fail-closed のまま）");
+                // #337: この `get_current_user`（`GET /users/@me`）は起動直後の最初の
+                // 実 REST 呼び出しなので、ここが認証エラー（401 相当 = 無効トークン等）で
+                // 落ちるなら、ゲートウェイの WebSocket 側も同じトークンで接続できず
+                // （4004）機能しない可能性が高い。#489 の best-effort 意図（co_agent 逆引きは
+                // 諦めて起動は続ける）は保つが、ERROR にその含意を明記して切り分けを助ける。
+                // 恒久的な接続死そのものは client タスク監視（gateway.rs #337）が
+                // `warn_discord_client_task_exited` で別途 fail-loud にする。
+                error!(agent_id = %agent_id, error = %e, "#489/#337: 自分の Discord user id を取得できず co_agent 逆引き表を更新できなかった（co_agent は fail-closed のまま）。これが認証エラー（401 = 無効トークン/権限不足）なら、ゲートウェイ接続自体も機能していない疑いが濃い。トークンと有効化 intent を確認せよ。");
             }
         }
 
@@ -178,6 +201,7 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
         let loop_gateway = gateway.clone();
         let agent_ids = vec![agent_id.to_string()];
         let owner = owner_discord_id.to_string();
+        let loop_v3_liveness = self.v3_liveness.clone();
 
         let handle = tokio::spawn(async move {
             crate::run_discord_loop(
@@ -191,6 +215,11 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
                 // per-agent ゲートウェイは enabled な設定から起動される側なので
                 // 専用設定スキップは無効（true にすると自分自身を skip してしまう）。
                 false,
+                // DESIGN-DISCORD-GATE §8.1: ただし V3 gateway process が同じ agent を受信中なら退く
+                // （二重受信防止）。`served_by_dedicated_gateway`（legacy manager 自身の生死を OR）は
+                // ここでは常に true になり使えない（自分自身を skip してしまう）ので、V3 liveness だけを
+                // 見る専用 probe を渡す。V3 死亡時は false へ倒れ legacy が処理を続ける（外形不減）。
+                Some(loop_v3_liveness),
                 // VC 対話 v1 は共有（TOML）ゲートウェイのみ対応。per-agent 側は未配線。
                 None,
                 subtask_registry_for_loop,
@@ -346,10 +375,12 @@ impl<T: AgentRunner> opencrab_actions::AgentGatewayLifecycle for DiscordGatewayM
     /// 稼働中の per-agent ゲートウェイの HTTP クライアントからツール実行の実体を組む
     /// （capability / #191 段階2 PR4）。稼働していなければ `None`。
     ///
-    /// A2UI の描画面と owner を**付けない**のは意図的な差で、
+    /// 組み立ては REST 経路（`POST /api/agents/{id}/messages`）が手前でやっていたものを
+    /// **そのまま**移設したもの。A2UI の描画面と owner を**付けない**のは移設前と同じで、
     /// 意図的な差である: それらは受信ループが持つ per-connection の状態
     /// （`start_agent_gateway` が作る保留対話の登録簿・イベント送信口）に紐づいており、
-    /// 接続の外から組み直すと**別の登録簿**を指してしまう。
+    /// 接続の外から組み直すと**別の登録簿**を指してしまう。ここで足すと REST 経由で
+    /// 開いた対話に誰も応答できなくなる。
     fn gateway_actions_for(
         &self,
         agent_id: &str,

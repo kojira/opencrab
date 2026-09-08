@@ -10,8 +10,9 @@ use crate::session::NOSTR_SESSION_PREFIX;
 
 /// `nostr-{agent}` の発火先を名乗る descriptor。
 ///
-/// **性質**（旧 enum から不変）: live G マスタゲートの対象外（`is_g_gated=false`）／機構は
-/// publish しないので応答本文は自動配送しない（`posts_response_body=false`・投稿はツールで）。
+/// **性質**（旧 enum から不変）: live G マスタゲートの対象外（`is_g_gated=false`）。
+/// （旧 `posts_response_body` は #925 §1.7 で撤去。V3 の Nostr 発火は extgate レーンが担い、
+/// 応答本文＝gateway への say としてタイムラインへ投稿される。）
 pub struct NostrFire;
 
 impl TransportFire for NostrFire {
@@ -40,10 +41,6 @@ impl TransportFire for NostrFire {
     }
 
     fn is_g_gated(&self) -> bool {
-        false
-    }
-
-    fn posts_response_body(&self) -> bool {
         false
     }
 

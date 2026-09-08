@@ -4,6 +4,7 @@ pub mod chatgpt;
 pub mod codex;
 pub mod cursor;
 pub mod google;
+mod image_data;
 pub mod llamacpp;
 pub mod ollama;
 pub mod openai;

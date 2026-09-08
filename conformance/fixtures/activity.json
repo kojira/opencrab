@@ -1,0 +1,63 @@
+{
+  "name": "activity",
+  "prelude": "hello_bind",
+  "steps": [
+    {
+      "op": "sse_open",
+      "id": "ev",
+      "path": "/api/web-conversations/web-agent-conv/events"
+    },
+    {
+      "op": "http_post_async",
+      "id": "p1",
+      "path": "/api/web-conversations/web-agent-conv/messages",
+      "body": {
+        "client_message_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "text": "hi",
+        "attachments": []
+      }
+    },
+    { "op": "uds_recv", "id": "said1", "expect": { "m": "said" } },
+    { "op": "uds_send", "frame": { "id": "$said1.id", "m": "ok", "seq": 3 } },
+    { "op": "http_await", "id": "p1", "status": 202, "body": { "state": "accepted", "seq": 3 } },
+    {
+      "op": "uds_send",
+      "frame": {
+        "m": "activity",
+        "binding_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "activity_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        "state": "started"
+      }
+    },
+    {
+      "op": "sse_recv",
+      "id": "ev",
+      "event": "activity",
+      "data": {
+        "activity_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        "state": "started"
+      }
+    },
+    {
+      "op": "uds_send",
+      "frame": {
+        "m": "activity",
+        "binding_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "activity_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        "state": "ended"
+      }
+    },
+    {
+      "op": "sse_recv",
+      "id": "ev",
+      "event": "activity",
+      "data": { "state": "ended" }
+    },
+    {
+      "op": "sse_recv",
+      "id": "ev",
+      "event": "completed_no_reply",
+      "data": {}
+    }
+  ]
+}

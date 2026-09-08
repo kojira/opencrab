@@ -261,13 +261,36 @@ async fn main() -> anyhow::Result<()> {
             // ── sessions list ──
             ["sessions", "list"] => {
                 let conn = db.lock().unwrap();
-                let sessions = opencrab_db::queries::list_sessions(&conn).unwrap_or_default();
-                if sessions.is_empty() {
-                    println!("  (no sessions found)");
-                } else {
-                    for s in sessions {
-                        println!("  {} - {} [{}] ({})", &s.id[..8], s.theme, s.status, s.mode);
+                let mut before: Option<String> = None;
+                let mut any = false;
+                loop {
+                    let page = match opencrab_db::queries::list_sessions_page(
+                        &conn,
+                        100,
+                        before.as_deref(),
+                    ) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            println!("  list failed: {e}");
+                            break;
+                        }
+                    };
+                    if page.is_empty() {
+                        break;
                     }
+                    any = true;
+                    for item in &page {
+                        let s = &item.session;
+                        let id = if s.id.len() >= 8 { &s.id[..8] } else { &s.id };
+                        println!("  {} - {} [{}] ({})", id, s.theme, s.status, s.mode);
+                    }
+                    if page.len() < 100 {
+                        break;
+                    }
+                    before = page.last().map(|i| i.session.id.clone());
+                }
+                if !any {
+                    println!("  (no sessions found)");
                 }
             }
 

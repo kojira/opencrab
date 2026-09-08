@@ -57,6 +57,8 @@ fn create_real_llm_app() -> (Router, opencrab_db::Db) {
             opencrab_actions::tools::ToolsConfig::default(),
         )),
         compaction_ratio: 0.5,
+        typed_history_enabled: false,
+        typed_history_drop_directive: false,
         evaluator: opencrab_server::config::EvaluatorConfig::default(),
         skill_consolidation: opencrab_server::config::SkillConsolidationConfig::default(),
         category_maintenance: opencrab_server::config::CategoryMaintenanceConfig::default(),
@@ -69,8 +71,6 @@ fn create_real_llm_app() -> (Router, opencrab_db::Db) {
         intake_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
         mcp_manager: None,
         gateways: std::sync::Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
-        #[cfg(feature = "web")]
-        web_gateway: std::sync::Arc::new(opencrab_web_gateway::WebGateway::new()),
         subtask_registries: std::sync::Arc::new(
             opencrab_server::subtask_registries::SubtaskRegistries::new(),
         ),
@@ -166,7 +166,7 @@ async fn create_agent_with_personality(
 /// Alice sends a message → Bob (real LLM) generates a thoughtful response.
 /// Verifies the full pipeline: HTTP → send_message → SkillEngine → LLM → response.
 #[tokio::test]
-#[ignore]
+#[ignore = "old /sessions/{id}/messages withdrawn; protocol 2 E2E is web-gateway core_process_e2e"]
 async fn test_real_llm_basic_conversation() {
     let (app, _db) = create_real_llm_app();
 
@@ -233,7 +233,7 @@ async fn test_real_llm_basic_conversation() {
 /// The Learner agent's personality explicitly says to use `learn_from_experience`
 /// after receiving insights. This tests the full tool-calling flow with a real LLM.
 #[tokio::test]
-#[ignore]
+#[ignore = "old /sessions/{id}/messages withdrawn; protocol 2 E2E is web-gateway core_process_e2e"]
 async fn test_real_llm_agent_learns_and_creates_skill() {
     let (app, db) = create_real_llm_app();
 
@@ -332,7 +332,7 @@ async fn test_real_llm_agent_learns_and_creates_skill() {
 /// Two agents discuss over 3 rounds. After the discussion, the Reflector
 /// agent should use `reflect_and_learn` or `learn_from_experience` to capture insights.
 #[tokio::test]
-#[ignore]
+#[ignore = "old /sessions/{id}/messages withdrawn; protocol 2 E2E is web-gateway core_process_e2e"]
 async fn test_real_llm_multi_round_discussion_with_reflection() {
     let (app, db) = create_real_llm_app();
 
@@ -510,7 +510,7 @@ async fn test_real_llm_multi_round_discussion_with_reflection() {
 ///
 /// First seeds conversation history, then prompts the agent to search and learn.
 #[tokio::test]
-#[ignore]
+#[ignore = "old /sessions/{id}/messages withdrawn; protocol 2 E2E is web-gateway core_process_e2e"]
 async fn test_real_llm_search_history_and_create_skill() {
     let (app, db) = create_real_llm_app();
 

@@ -272,6 +272,15 @@ impl AnthropicProvider {
         Ok(body)
     }
 
+    fn image_source(url: &str) -> Value {
+        match super::image_data::split_base64_image_uri(url) {
+            Some((media_type, data)) => serde_json::json!({
+                "type": "base64", "media_type": media_type, "data": data
+            }),
+            None => serde_json::json!({"type": "url", "url": url}),
+        }
+    }
+
     fn convert_content_to_anthropic(&self, msg: &Message) -> Value {
         match &msg.content {
             Some(MessageContent::Text(text)) => serde_json::json!(text),
@@ -279,10 +288,7 @@ impl AnthropicProvider {
                 // Anthropic uses base64 image format or URL-based source
                 serde_json::json!([{
                     "type": "image",
-                    "source": {
-                        "type": "url",
-                        "url": image_url.url,
-                    }
+                    "source": Self::image_source(&image_url.url)
                 }])
             }
             Some(MessageContent::Multi(parts)) => {
@@ -295,10 +301,7 @@ impl AnthropicProvider {
                         ContentPart::ImageUrl { image_url } => {
                             serde_json::json!({
                                 "type": "image",
-                                "source": {
-                                    "type": "url",
-                                    "url": image_url.url,
-                                }
+                                "source": Self::image_source(&image_url.url)
                             })
                         }
                     })
@@ -580,159 +583,5 @@ impl LlmProvider for AnthropicProvider {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn base_request() -> ChatRequest {
-        ChatRequest {
-            model: "claude-x".to_string(),
-            messages: vec![Message::system("sys prompt"), Message::user("hi")],
-            temperature: None,
-            max_tokens: Some(100),
-            stop: None,
-            stream: None,
-            agent_id: None,
-            reasoning_effort: None,
-            metadata: Default::default(),
-            functions: Some(vec![
-                FunctionDefinition {
-                    name: "a".to_string(),
-                    description: Some("d".to_string()),
-                    parameters: serde_json::json!({"type": "object"}),
-                },
-                FunctionDefinition {
-                    name: "b".to_string(),
-                    description: Some("d".to_string()),
-                    parameters: serde_json::json!({"type": "object"}),
-                },
-            ]),
-            function_call: None,
-        }
-    }
-
-    /// プロンプトキャッシュはプロバイダの能力（#44）: system は cache_control 付き
-    /// text ブロック配列、tools は最後の定義にのみ cache_control が付くこと。
-    #[test]
-    fn cache_policy_applied_by_provider() {
-        let provider = AnthropicProvider::new("k");
-        let body = provider
-            .build_request_body(&base_request())
-            .expect("valid request builds a body");
-
-        let system = body["system"].as_array().expect("system must be blocks");
-        assert_eq!(system.len(), 1);
-        assert_eq!(system[0]["type"], "text");
-        assert_eq!(system[0]["text"], "sys prompt");
-        assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
-        assert_eq!(system[0]["cache_control"]["ttl"], "1h");
-
-        let tools = body["tools"].as_array().unwrap();
-        assert!(tools[0].get("cache_control").is_none());
-        assert_eq!(tools[1]["cache_control"]["type"], "ephemeral");
-
-        // 最後のメッセージの最終ブロックに incremental cache マーカーが付く
-        // （文字列 content はブロック配列へ変換される）。
-        let messages = body["messages"].as_array().unwrap();
-        let last = messages.last().unwrap();
-        let blocks = last["content"].as_array().expect("last content is blocks");
-        let last_block = blocks.last().unwrap();
-        assert_eq!(last_block["cache_control"]["type"], "ephemeral");
-        // 5m 既定 TTL（ttl キー無し）— 1h を明示するのは system/tools のみ
-        assert!(last_block["cache_control"].get("ttl").is_none());
-        // 先行メッセージにはマーカーが無い
-        for msg in &messages[..messages.len() - 1] {
-            match &msg["content"] {
-                serde_json::Value::Array(blocks) => {
-                    for b in blocks {
-                        assert!(b.get("cache_control").is_none());
-                    }
-                }
-                v => assert!(v.is_string()),
-            }
-        }
-    }
-
-    /// tools 無しの単発呼び出し（evaluator / ロールアップ等）にはメッセージ側の
-    /// キャッシュマーカーを付けない（書き込み割増 +25% に対して後続ヒットが無い）。
-    #[test]
-    fn no_message_cache_marker_without_tools() {
-        let provider = AnthropicProvider::new("k");
-        let mut req = base_request();
-        req.functions = None;
-        let body = provider
-            .build_request_body(&req)
-            .expect("valid request builds a body");
-        let messages = body["messages"].as_array().unwrap();
-        let last = messages.last().unwrap();
-        assert!(
-            last["content"].is_string(),
-            "content must stay a plain string without tools"
-        );
-    }
-
-    /// 複数 system メッセージは連結して1ブロックになる（旧挙動の保存）。
-    #[test]
-    fn multiple_system_messages_concatenated() {
-        let mut req = base_request();
-        req.messages.insert(1, Message::system("second sys"));
-        let provider = AnthropicProvider::new("k");
-        let body = provider
-            .build_request_body(&req)
-            .expect("valid request builds a body");
-        let system = body["system"].as_array().unwrap();
-        assert_eq!(system.len(), 1);
-        assert_eq!(system[0]["text"], "sys prompt\n\nsecond sys");
-    }
-
-    /// max_tokens が None のときは任意定数へ黙って落とさず fail loud する（#681）。
-    /// Anthropic の messages API は max_tokens を必須で要求するため省略もできない。
-    #[test]
-    fn missing_max_tokens_fails_loud() {
-        let mut req = base_request();
-        req.max_tokens = None;
-        let provider = AnthropicProvider::new("k");
-        let err = provider
-            .build_request_body(&req)
-            .expect_err("None max_tokens must be a loud error, not a silent default");
-        assert!(
-            err.to_string().contains("max_tokens"),
-            "error should name the missing field: {err}"
-        );
-    }
-
-    /// リクエストを受けてから `delay` 待って 200 を返すモック（timeout 検証用）。
-    async fn spawn_slow_mock(delay: Duration) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            while let Ok((mut sock, _)) = listener.accept().await {
-                tokio::spawn(async move {
-                    let mut buf = [0u8; 8192];
-                    let _ = sock.read(&mut buf).await;
-                    tokio::time::sleep(delay).await;
-                    let resp =
-                        "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}";
-                    let _ = sock.write_all(resp.as_bytes()).await;
-                    let _ = sock.shutdown().await;
-                });
-            }
-        });
-        format!("http://{addr}/slow")
-    }
-
-    /// #667: 総時間 timeout が実際に client へ効いていることを確認する。無応答の上流を
-    /// 有限で切る（fail loud）ための肝なので、定数の保持ではなく client の挙動で見る。
-    #[tokio::test]
-    async fn test_chat_timeout_is_applied_to_the_http_client() {
-        let url = spawn_slow_mock(Duration::from_millis(1500)).await;
-
-        let short = build_client(1);
-        let err = short.get(&url).send().await.unwrap_err();
-        assert!(err.is_timeout(), "1 秒なら timeout するはず: {err}");
-
-        let long = build_client(10);
-        let resp = long.get(&url).send().await.expect("10 秒なら読み切れる");
-        assert!(resp.status().is_success());
-    }
-}
+#[path = "anthropic/tests.rs"]
+mod tests;

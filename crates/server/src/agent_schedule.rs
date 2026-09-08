@@ -433,7 +433,7 @@ mod tests {
     /// 別エージェント（agent-y）の文脈。他人の id を渡す攻撃の再現に使う。
     // #654: 使うのは nostr/web セッションを立てる test だけ。発火経路 descriptor は各 feature 時
     // のみ登録される（#651）ので、その cfg 下でだけ使われる（bare/discord では未使用＝不要）。
-    #[cfg(any(feature = "nostr", feature = "web"))]
+    #[cfg(feature = "nostr")]
     fn ctx_for(agent_id: &str, session_id: &str) -> GatewayCallContext {
         let mut c = GatewayCallContext::new(GatewayCaller::TrustedUser, agent_id);
         c.session_id = Some(session_id.to_string());
@@ -483,22 +483,6 @@ mod tests {
         let e = res.error.unwrap();
         assert!(e.contains("発火経路"), "理由: {e}");
         assert!(e.contains("実行してください"), "remedy: {e}");
-    }
-
-    /// #627: web セッション（`web-{agent}-{conversation}`）は発火先として**受理**される
-    /// （隔離環境でもダッシュボードの会話に定時実行を設定できる）。
-    // #654: web セッションの発火経路（WebFire descriptor）は web feature 時のみ登録される（#651）。
-    // off では web-{agent}-{conv} が fail-closed になり「web で受理」の検証が成立しないので同じ cfg で囲む。
-    #[cfg(feature = "web")]
-    #[tokio::test]
-    async fn set_accepts_web_session() {
-        let state = crate::test_app_state();
-        let res = set_my_schedule(
-            &state,
-            &json!({"cron_expr": "@every 3h", "message": "巡回"}),
-            &ctx_for("agent-x", "web-agent-x-conv1"),
-        );
-        assert!(res.success, "web セッションが受理されない: {:?}", res.error);
     }
 
     /// cron 式が不正ならその場でエラー（remedy 付き）。

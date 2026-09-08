@@ -1,0 +1,47 @@
+[package]
+name = "opencrab-extgate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rusqlite = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+libc = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+opencrab-db = { workspace = true }
+opencrab-actions = { workspace = true }
+opencrab-core = { workspace = true }
+opencrab-gateway = { workspace = true }
+base64 = "0.22"
+
+[features]
+default = ["extgate-probe"]
+extgate-probe = []
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tower = { workspace = true }
+http-body-util = "0.1"
+tokio = { workspace = true, features = ["test-util"] }
+opencrab-gate-client = { workspace = true }
+# #894: hello 拒否理由の fail-loud ログ（server WARN / client reason）を tracing capture で検証。
+tracing-subscriber = { workspace = true }
+# no_platform_branch テスト（#852）: gateway 共有層（extgate / gate-client の
+# production）を AST で走査し、platform 特化分岐（`kind_id == "<platform>"`）と
+# gate/SDK 固有の識別子・文字列が混ざっていないことを検査する。
+syn = { version = "2", features = ["full", "visit", "parsing"] }
+proc-macro2 = "1"
+quote = "1"
+
+[lints]
+workspace = true

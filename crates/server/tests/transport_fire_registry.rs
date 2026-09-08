@@ -29,7 +29,7 @@ fn registry() -> TimedFireRouter {
 // #654: 登録簿は feature 依存の descriptor（DiscordFire / NostrFire / WebFire・#651）だけで満ちる。
 // 全 feature off では登録簿が空で「1 つ以上を round-trip」が成立しない。少なくとも 1 つの transport
 // が入るときだけ意味を持つので、いずれかの feature がある構成に囲む（残る 2 test は空でも恒真）。
-#[cfg(any(feature = "discord", feature = "nostr", feature = "web"))]
+#[cfg(any(feature = "discord", feature = "nostr"))]
 #[test]
 fn every_descriptor_round_trips_through_the_registry() {
     let router = registry();
@@ -113,5 +113,27 @@ fn production_registry_has_no_prefix_collision_via_self_check() {
             opencrab_actions::TimedFireSelfCheckIssue::PrefixCollision { .. }
         )),
         "本番 transport が prefix 衝突している: {issues:?}"
+    );
+}
+
+/// #925: 本番登録簿に extgate descriptor（V3 canonical session `extgate-<binding_id>` の受け口）が
+/// 含まれること。これが抜けると V3 heartbeat が `resolve_target` で解決されず全 skip する。
+/// harness の heartbeat は `start_core` が直接 register するので、**製品配線の抜けはこの pin でしか
+/// 捕捉できない**（テストレビュー D）。
+#[test]
+fn production_registry_includes_extgate_descriptor() {
+    let router = registry();
+    assert!(
+        router
+            .descriptor_kinds()
+            .iter()
+            .any(|k| *k == opencrab_extgate::EXTGATE_TIMED_FIRE_KIND),
+        "register_production_descriptors に extgate descriptor が無い（V3 heartbeat が全 skip する）"
+    );
+    // canonical extgate session（binding_id は UUID）を resolve_target が解決する。
+    let sid = format!("extgate-{AGENT_UUID}");
+    assert!(
+        router.resolve_target(&sid, AGENT_UUID).is_some(),
+        "extgate canonical session を resolve_target が解決できない: {sid}"
     );
 }

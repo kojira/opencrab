@@ -1,4 +1,5 @@
-//! Discord固有のI/O操作 (list_guilds, list_channels, channel_config, add_reaction, send_file)
+//! Discord固有のI/O操作 (list_guilds, list_channels, add_reaction, send_file)。
+//! `discord_channel_config` の書き込みは core（`apply_discord_channel_config`）へ委譲する。
 
 use std::path::{Path, PathBuf};
 
@@ -160,126 +161,7 @@ impl DiscordGatewayActions {
         args: &serde_json::Value,
         ctx: &GatewayCallContext,
     ) -> GatewayActionResult {
-        let channel_id = match args.get("channel_id").and_then(|v| v.as_str()) {
-            Some(id) => id,
-            None => {
-                return GatewayActionResult {
-                    success: false,
-                    data: None,
-                    error: Some("channel_idパラメータが必要です".to_string()),
-                }
-            }
-        };
-        let guild_id = match args.get("guild_id").and_then(|v| v.as_str()) {
-            Some(id) => id,
-            None => {
-                return GatewayActionResult {
-                    success: false,
-                    data: None,
-                    error: Some("guild_idパラメータが必要です".to_string()),
-                }
-            }
-        };
-        let channel_name = args
-            .get("channel_name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let readable = match args.get("readable").and_then(|v| v.as_bool()) {
-            Some(r) => r,
-            None => {
-                return GatewayActionResult {
-                    success: false,
-                    data: None,
-                    error: Some("readableパラメータが必要です".to_string()),
-                }
-            }
-        };
-        let writable = match args.get("writable").and_then(|v| v.as_bool()) {
-            Some(w) => w,
-            None => {
-                return GatewayActionResult {
-                    success: false,
-                    data: None,
-                    error: Some("writableパラメータが必要です".to_string()),
-                }
-            }
-        };
-
-        // #421: whitelisted / heartbeat_enabled は省略可。full-replace で既定値へ落とすと
-        // 「読み書きだけ変えたい」操作が既存の whitelist / heartbeat 設定を黙って壊す
-        // （whitelisted=1 が省略で 0 に、無効化していた heartbeat が省略で true に戻る）。
-        // 省略時は既存行の値（行が無ければ現在の実効値）を保持する patch 意味論にする。
-        // 明示指定された値はそのまま書く（意図した設定操作であることは変えない）。
-        let whitelisted_arg = args.get("whitelisted").and_then(|v| v.as_bool());
-        let heartbeat_enabled_arg = args.get("heartbeat_enabled").and_then(|v| v.as_bool());
-
-        // 応答表示にも使うため、実際に書いた whitelisted を block の外へ返す。
-        let (result, whitelisted) = {
-            let conn = self.db.lock().unwrap();
-            // 既存のハートビート上書き・intervalを保持する（読み書き設定の更新で消さない）。
-            let existing = opencrab_db::queries::get_channel_config_for_agent(
-                &conn,
-                channel_id,
-                &ctx.agent_id,
-            )
-            .ok()
-            .flatten();
-            // 省略時は現在の実効 whitelist（エージェント行優先→グローバル→false）を保持。
-            let whitelisted = whitelisted_arg.unwrap_or_else(|| {
-                opencrab_db::queries::is_channel_whitelisted_for_agent(
-                    &conn,
-                    channel_id,
-                    &ctx.agent_id,
-                )
-            });
-            // 省略時は既存行の heartbeat_enabled を保持（行が無ければ既定 true）。
-            let heartbeat_enabled = heartbeat_enabled_arg
-                .or_else(|| existing.as_ref().map(|c| c.heartbeat_enabled))
-                .unwrap_or(true);
-            let cfg = opencrab_db::queries::ChannelConfigRow {
-                channel_id: channel_id.to_string(),
-                agent_id: ctx.agent_id.clone(),
-                guild_id: guild_id.to_string(),
-                channel_name: channel_name.to_string(),
-                readable,
-                writable,
-                whitelisted,
-                heartbeat_enabled,
-                heartbeat_interval_secs: existing.as_ref().and_then(|c| c.heartbeat_interval_secs),
-                heartbeat_instructions: existing
-                    .map(|c| c.heartbeat_instructions)
-                    .unwrap_or_default(),
-            };
-            (
-                opencrab_db::queries::upsert_channel_config(&conn, &cfg),
-                whitelisted,
-            )
-        };
-
-        match result {
-            Ok(()) => GatewayActionResult {
-                success: true,
-                data: Some(json!({
-                    "channel_id": channel_id,
-                    "channel_name": channel_name,
-                    "readable": readable,
-                    "writable": writable,
-                    "whitelisted": whitelisted,
-                    "message": format!(
-                        "チャンネル {} の設定を更新しました (readable={}, writable={})",
-                        if channel_name.is_empty() { channel_id } else { channel_name },
-                        readable,
-                        writable,
-                    ),
-                })),
-                error: None,
-            },
-            Err(e) => GatewayActionResult {
-                success: false,
-                data: None,
-                error: Some(format!("チャンネル設定の保存に失敗: {e}")),
-            },
-        }
+        opencrab_actions::apply_discord_channel_config(&self.db, args, &ctx.agent_id)
     }
 
     pub(crate) async fn execute_discord_create_webhook(

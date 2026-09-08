@@ -58,17 +58,28 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
     /// セッションの会話履歴文字列（コンパクション込み）を組み立てる。
     ///
     /// 二重回答を防ぐ要: resume は完了本文を sink で運ばず、DB から会話を再構築する。
+    /// `system_prompt` / `runtime_context_text` はこのターンの実 request と一致させる。
     fn build_conversation_string(
         &self,
         session_id: &str,
         agent_id: &str,
         context_budget_tokens: usize,
+        system_prompt: &str,
+        runtime_context_text: &str,
     ) -> Result<String>;
 
-    /// 会話コンテキストのトークン予算（有効モデルの context window × 比率）。
+    /// 会話車線のトークン予算（`apply_line_items` の `conversation_high`）。
     ///
-    /// `agent_id` の per-agent モデルに応じた pricing を参照する。
-    fn context_budget_tokens(&self, agent_id: &str) -> usize;
+    /// `system_prompt` / `runtime_context_text` はこのターンの実 request と一致させる
+    /// （caller 差・discord 行・Nostr の非前置を含む）。失敗は既定予算へ落とさず、
+    /// 一意名（超過は `context_budget_exhausted`）で返す。
+    fn context_budget_tokens(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        system_prompt: &str,
+        runtime_context_text: &str,
+    ) -> std::result::Result<usize, opencrab_core::context_budget::ContextBudgetError>;
 
     /// LLM プロバイダが 1 つ以上使えるか（未設定なら実行せずに返す）。
     fn has_llm_providers(&self) -> bool;
@@ -99,8 +110,19 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
     /// `AppState` が 1 つだけ生成して保持し、全経路がその `Arc` を clone して共有する。
     fn session_locks(&self) -> std::sync::Arc<crate::SessionLocks>;
 
-    /// NO_REPLY（沈黙の明示）を記録する（best-effort）。
-    fn record_agent_no_reply(&self, agent_id: &str, session_id: &str);
+    /// この session の dispatch registry（inbound と resume で同一 Arc）。
+    ///
+    /// `AppState.subtask_registries` の貸し出し。V3 が `with_dispatch` するとき
+    /// `cancel_subtask` と同じ Arc を見るために使う。新機構ではない。
+    fn subtask_registry_for(&self, session_id: &str) -> crate::SubtaskRegistry;
+
+    /// #915: このエージェントに未決着 subtask が 1 つでもあるか（session を跨ぐ・agent 単位 idle
+    /// 判定・§13.3.1 案E）。🏁 は「エージェントがもう何もしていない」印なので、別 session で走る
+    /// subtask があるターンの投稿には付けない。既定は `false`（agent-scope 集計を持たないテスト
+    /// runtime 用）。実 runtime（AppState）は `subtask_registries.has_running_for_agent` を返す。
+    fn has_running_subtask_for_agent(&self, _agent_id: &str) -> bool {
+        false
+    }
 
     /// ゲートウェイから受信した発言をセッションログへ記録する。**記録できたら `true`**。
     ///

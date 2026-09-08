@@ -114,7 +114,7 @@ pub struct TransportFireEnv<'a> {
 
 /// transport が「自分の発火先としての性質と ID 書式」を名乗る descriptor（#628）。
 ///
-/// **静的**（`is_g_gated` / `posts_response_body` / `human_hint` / `kind` / parse / build）＝
+/// **静的**（`is_g_gated` / `human_hint` / `kind` / parse / build）＝
 /// ゲートウェイの生存に依存せず常に同じ答えを返す。唯一 [`should_be_running`] だけが
 /// 実行時環境を引く述語（[`TransportFireEnv`] の doc・条件 D）。
 ///
@@ -137,9 +137,6 @@ pub trait TransportFire: Send + Sync {
 
     /// 発火時に live G マスタゲートの対象か（Discord=true / Nostr・web=false）。
     fn is_g_gated(&self) -> bool;
-
-    /// 発火ターンの応答本文がその場に自動配送されるか（Discord・web=true / Nostr=false）。
-    fn posts_response_body(&self) -> bool;
 
     /// 「発火できる場所」をユーザに示す短い名詞句（remedy 文言の部品・条件 D で trait 側へ）。
     /// 例: 「Discord のチャンネル」。[`TimedFireRouter::fire_target_hint`] が全 descriptor 分を畳む。
@@ -518,9 +515,6 @@ mod tests {
         }
         fn is_g_gated(&self) -> bool {
             self.g_gated
-        }
-        fn posts_response_body(&self) -> bool {
-            false
         }
         fn human_hint(&self) -> &'static str {
             self.kind

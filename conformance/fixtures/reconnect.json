@@ -1,0 +1,51 @@
+{
+  "name": "reconnect",
+  "prelude": "hello_bind",
+  "steps": [
+    { "op": "uds_close" },
+    { "op": "uds_accept" },
+    {
+      "op": "uds_recv",
+      "id": "hello2",
+      "expect": {
+        "m": "hello",
+        "protocol": 2,
+        "instance_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "revision": 1,
+        "config_digest": "3b354e0c676677f4ab5735bc9f8eb2fbb2c74df34e5d54d3b4fd88165b542672"
+      }
+    },
+    { "op": "uds_send", "frame": { "id": "$hello2.id", "m": "ok" } },
+    {
+      "op": "uds_send",
+      "frame": {
+        "id": "bind:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "m": "bind",
+        "binding_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "address": "web-agent-conv"
+      }
+    },
+    {
+      "op": "uds_recv",
+      "expect": { "m": "ok", "id": "bind:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }
+    },
+    {
+      "op": "http_post_async",
+      "id": "p1",
+      "path": "/api/web-conversations/web-agent-conv/messages",
+      "body": {
+        "client_message_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "text": "hello",
+        "attachments": []
+      }
+    },
+    { "op": "uds_recv", "id": "said1", "expect": { "m": "said" } },
+    { "op": "uds_send", "frame": { "id": "$said1.id", "m": "ok", "seq": 1 } },
+    {
+      "op": "http_await",
+      "id": "p1",
+      "status": 202,
+      "body": { "state": "accepted", "seq": 1 }
+    }
+  ]
+}

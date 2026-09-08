@@ -271,7 +271,7 @@ async fn ensure_test_agent(client: &reqwest::Client) -> anyhow::Result<String> {
     Ok(TEST_AGENT_ID.to_string())
 }
 
-/// `POST /api/agents/{id}/web/send` — inbound メッセージを送る。resp を返す。
+/// 旧 `POST /api/agents/{id}/web/send`。会話口は撤去済み（404）。protocol 2 は web-gateway。
 async fn web_send(
     client: &reqwest::Client,
     agent_id: &str,
@@ -390,7 +390,7 @@ fn nostaro_vanity_running(prefix: &str) -> bool {
 
 /// web/send で挨拶 → 一定時間内に memory_sessions に user speech と agent speech が両方入る。
 #[tokio::test]
-#[ignore]
+#[ignore = "old /web/send withdrawn; protocol 2 E2E is web-gateway core_process_e2e"]
 async fn e2e_basic_reply() {
     if !setup() {
         return;
@@ -438,7 +438,7 @@ async fn e2e_basic_reply() {
 /// execute_shell の非ブロック dispatch→再注入を検証する。
 /// tool_result に status:"spawned"、その後 subtask 完了（system: subtask_completed）と最終応答。
 #[tokio::test]
-#[ignore]
+#[ignore = "old /web/send withdrawn; protocol 2 E2E is web-gateway core_process_e2e"]
 async fn e2e_nonblocking_dispatch() {
     if !setup() {
         return;
@@ -539,7 +539,7 @@ async fn e2e_nonblocking_dispatch() {
 /// LLM 非決定性への配慮: 外部プロセス起動が確認できない場合は fail させず eprintln で
 /// skip 理由を出す。ただし cancel が呼ばれた形跡（tool_cancelled）は検証する。
 #[tokio::test]
-#[ignore]
+#[ignore = "old /web/send withdrawn; protocol 2 E2E is web-gateway core_process_e2e"]
 async fn e2e_cancel_stops_subtask() {
     if !setup() {
         return;
@@ -651,7 +651,7 @@ async fn e2e_cancel_stops_subtask() {
 
 /// 鍵生成を依頼した turn の llm_logs.prompt に `nostr_generate_key` が含まれる（露出）ことを DB で確認。
 #[tokio::test]
-#[ignore]
+#[ignore = "old /web/send withdrawn; protocol 2 E2E is web-gateway core_process_e2e"]
 async fn e2e_nostr_generate_key_exposed() {
     if !setup() {
         return;

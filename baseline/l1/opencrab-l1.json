@@ -3,8 +3,7 @@
     "build": {
       "required_cargo_features": [
         "discord",
-        "nostr",
-        "web"
+        "nostr"
       ],
       "selection": "the baseline-l1 Cargo feature enables this exact set; ambient feature unification is not used"
     },
@@ -133,20 +132,7 @@
         },
         "response": {
           "body_utf8": "",
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
+          "headers": [],
           "status": 404
         }
       },
@@ -266,7 +252,7 @@
     ]
   },
   "http": {
-    "route_count": 80,
+    "route_count": 85,
     "routes": [
       {
         "activation": "always",
@@ -275,6 +261,14 @@
           "POST"
         ],
         "path": "/api/agents",
+        "source": "opencrab_server::create_router"
+      },
+      {
+        "activation": "always",
+        "methods": [
+          "POST"
+        ],
+        "path": "/api/agents/{agent_id}/web-conversations",
         "source": "opencrab_server::create_router"
       },
       {
@@ -449,6 +443,14 @@
       {
         "activation": "always",
         "methods": [
+          "GET"
+        ],
+        "path": "/api/agents/{id}/llm-logs/{log_id}/tool-history",
+        "source": "opencrab_server::create_router"
+      },
+      {
+        "activation": "always",
+        "methods": [
           "GET",
           "PUT"
         ],
@@ -546,6 +548,14 @@
         "source": "opencrab_server::create_router"
       },
       {
+        "activation": "always",
+        "methods": [
+          "POST"
+        ],
+        "path": "/api/agents/{id}/messages",
+        "source": "opencrab_server::create_router"
+      },
+      {
         "activation": "cfg(feature = \"nostr\")",
         "methods": [
           "DELETE",
@@ -586,6 +596,24 @@
           "POST"
         ],
         "path": "/api/agents/{id}/nostr/stop",
+        "source": "opencrab_server::nostr_routes"
+      },
+      {
+        "activation": "cfg(feature = \"nostr\")",
+        "methods": [
+          "GET",
+          "POST"
+        ],
+        "path": "/api/agents/{id}/nostr/watches",
+        "source": "opencrab_server::nostr_routes"
+      },
+      {
+        "activation": "cfg(feature = \"nostr\")",
+        "methods": [
+          "DELETE",
+          "PUT"
+        ],
+        "path": "/api/agents/{id}/nostr/watches/{watch_id}",
         "source": "opencrab_server::nostr_routes"
       },
       {
@@ -690,6 +718,14 @@
       {
         "activation": "always",
         "methods": [
+          "GET"
+        ],
+        "path": "/api/agents/{id}/tool-logs",
+        "source": "opencrab_server::create_router"
+      },
+      {
+        "activation": "always",
+        "methods": [
           "GET",
           "POST"
         ],
@@ -706,22 +742,6 @@
         "source": "opencrab_server::create_router"
       },
       {
-        "activation": "cfg(feature = \"web\")",
-        "methods": [
-          "POST"
-        ],
-        "path": "/api/agents/{id}/web/send",
-        "source": "opencrab_web_gateway::routes"
-      },
-      {
-        "activation": "cfg(feature = \"web\")",
-        "methods": [
-          "GET"
-        ],
-        "path": "/api/agents/{id}/web/stream",
-        "source": "opencrab_web_gateway::routes"
-      },
-      {
         "activation": "always",
         "methods": [
           "GET"
@@ -736,6 +756,33 @@
           "PUT"
         ],
         "path": "/api/agents/{id}/workspace/{*path}",
+        "source": "opencrab_server::create_router"
+      },
+      {
+        "activation": "always",
+        "methods": [
+          "DELETE",
+          "PUT"
+        ],
+        "path": "/api/gate-bindings/{binding_id}",
+        "source": "opencrab_server::create_router"
+      },
+      {
+        "activation": "always",
+        "methods": [
+          "DELETE",
+          "GET",
+          "PUT"
+        ],
+        "path": "/api/gate-instances/{instance_id}",
+        "source": "opencrab_server::create_router"
+      },
+      {
+        "activation": "always",
+        "methods": [
+          "POST"
+        ],
+        "path": "/api/gate-instances/{instance_id}/revisions",
         "source": "opencrab_server::create_router"
       },
       {
@@ -883,22 +930,6 @@
           "GET"
         ],
         "path": "/api/sessions/{id}/logs",
-        "source": "opencrab_server::create_router"
-      },
-      {
-        "activation": "always",
-        "methods": [
-          "POST"
-        ],
-        "path": "/api/sessions/{id}/mentor",
-        "source": "opencrab_server::create_router"
-      },
-      {
-        "activation": "always",
-        "methods": [
-          "POST"
-        ],
-        "path": "/api/sessions/{id}/messages",
         "source": "opencrab_server::create_router"
       },
       {
@@ -1524,7 +1555,7 @@
             "sharing": "conversation_bound",
             "sub_engine": "blocked"
           },
-          "description": "Discordメッセージにリアクション（絵文字）を追加する。Unicode絵文字（例: ⚡）またはカスタム絵文字（name:id形式）を指定できる。テキストで返すほどでもない反応は、これでリアクションだけ付けて応答本文を NO_REPLY にしてよい。",
+          "description": "Discordメッセージにリアクション（絵文字）を追加する。Unicode絵文字（例: ⚡）またはカスタム絵文字（name:id形式）を指定できる。テキストで返すほどでもない反応は、これでリアクションだけ付けて応答本文を NO_REPLY にしてよい。複数のリアクションは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。",
           "input_schema": {
             "properties": {
               "channel_id": {
@@ -2588,42 +2619,6 @@
             "sharing": "agent_bound",
             "sub_engine": "not_exposed"
           },
-          "description": "Nostr CLI（nostaro）を薄く passthrough 実行する。`subcommand` に nostaro のサブコマンド（例: post / reply / zap / upload / react / repost / follow / unfollow / profile / channel / get / timeline / search / decode / pubkey など）を、`args` にそのサブコマンドのフラグと値を**1 要素ずつ**配列で渡す（例: subcommand=\"profile\", args=[\"--name\",\"…\",\"--about\",\"…\"] でプロフィール(kind:0)を設定）。投稿・プロフィール(kind:0)設定・チャンネル・取得など nostaro が持つ操作を使える。署名は**あなた自身の採用済み Nostr 鍵**で行われ、秘密鍵(nsec)は扱わない・見えない。鍵の作成/採用は nostr_generate_key / nostr_switch_identity を使うこと（init は不可）。受信の常時監視（watch）はここからは起動できない。リレー設定は opencrab 側（configure_nostr / ダッシュボード）で管理するため relay サブコマンドは不可。**dm は不可**（#514: DM は扱わない。private な話は Discord の DM か指定チャンネルで）。event は任意 kind の publish に使える（例: subcommand=\"event\", args=[\"-k\",\"40\",\"-c\",\"…\"] でパブリックチャット作成）。まだ鍵を採用していない場合は先に nostr_switch_identity で採用すること。`timeline` は**フォロー基準**（自分とフォロー中の相手のノートが対象で、足りない分だけリレーから補われる）。フォローしていない人のノートを含むリレー全体の新着を見るには `timeline --global` を使う（件数が多くなるので `--out <相対パス> --out-format json` を併せて渡せる。`--out-format` は `--out` とセットで指定する）。`--file` / `--out` などに渡す相対パスは、ws_* / execute_shell と同じ**あなた自身の workspace** が基準（ws_write で作ったファイルをそのまま`--file <相対パス>` に渡せるし、`--out <相対パス>` の出力は ws_read で読める）。",
-          "input_schema": {
-            "properties": {
-              "args": {
-                "description": "サブコマンドの引数。フラグと値を 1 要素ずつ配列で渡す（省略可）。",
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
-              "subcommand": {
-                "description": "nostaro のサブコマンド（init/watch/relay/dm は不可）。",
-                "type": "string"
-              }
-            },
-            "required": [
-              "subcommand"
-            ],
-            "type": "object"
-          },
-          "name": "nostr_run",
-          "origin": "gateway",
-          "visibility": {
-            "depth_capped": false,
-            "owner_only": false,
-            "trusted_only": false
-          }
-        },
-        {
-          "activation": "always",
-          "classification": {
-            "collection_status": "observed",
-            "dispatch": "inline",
-            "sharing": "agent_bound",
-            "sub_engine": "not_exposed"
-          },
           "description": "自分が nostr_generate_key で生成した鍵を、この Nostr ゲートウェイの**本鍵（送信・受信のアイデンティティ）として採用**する。以後の投稿はその鍵で行われる。まだ Nostr に接続していなければ、この操作で自動的に接続まで行う（自分への言及を購読する最小フィルタを設定して起動する）。npub には nostr_generate_key で作った鍵の npub を渡す。重要な操作なのでowner（信頼ユーザー）からの依頼時のみ実行される。秘密鍵は扱わない（npub 参照のみ）。",
           "input_schema": {
             "properties": {
@@ -3480,7 +3475,7 @@
             "sharing": "agent_bound",
             "sub_engine": "not_exposed"
           },
-          "description": "タスクに応じて使用するLLMモデルを切り替える。provider:model形式（例: openai:gpt-4o-mini）またはエイリアス（fast, smart等）で指定。",
+          "description": "タスクに応じて使用するLLMモデルを切り替える。provider:model 形式またはエイリアスで指定。構成済みプロバイダ: （構成済みプロバイダなし）。未登録のプロバイダは拒否される。",
           "input_schema": {
             "properties": {
               "duration": {
@@ -3488,7 +3483,7 @@
                 "type": "string"
               },
               "model_alias": {
-                "description": "使用するモデル（provider:model形式またはエイリアス。例: openai:gpt-4o-mini, openrouter:openai/gpt-4o-mini, fast, smart）",
+                "description": "使用するモデル（provider:model またはエイリアス）。構成済みプロバイダ: （構成済みプロバイダなし）",
                 "type": "string"
               },
               "purpose": {
@@ -5838,113 +5833,6 @@
           }
         },
         {
-          "activation": "observed_only_when_tools_enabled",
-          "classification": {
-            "collection_status": "observed",
-            "dispatch": "inline",
-            "sharing": "agent_bound",
-            "sub_engine": "not_exposed"
-          },
-          "description": "Nostr に新規ノート（kind:1）を投稿する。",
-          "input_schema": {
-            "properties": {
-              "from": {
-                "description": "任意。nostr_generate_key で生成した鍵の npub を指定すると、本鍵ではなくその鍵で送信する（未指定なら本鍵で送信）。指定できるのは自分が生成した鍵のみ。",
-                "type": "string"
-              },
-              "text": {
-                "description": "投稿本文。",
-                "type": "string"
-              }
-            },
-            "required": [
-              "text"
-            ],
-            "type": "object"
-          },
-          "name": "nostr_post",
-          "origin": "gateway",
-          "visibility": {
-            "depth_capped": false,
-            "owner_only": false,
-            "trusted_only": false
-          }
-        },
-        {
-          "activation": "observed_only_when_tools_enabled",
-          "classification": {
-            "collection_status": "observed",
-            "dispatch": "inline",
-            "sharing": "conversation_bound",
-            "sub_engine": "not_exposed"
-          },
-          "description": "Nostr の特定ノートに返信する。target は受信イベントの note_id（note1...）または hex id。",
-          "input_schema": {
-            "properties": {
-              "from": {
-                "description": "任意。nostr_generate_key で生成した鍵の npub を指定すると、本鍵ではなくその鍵で送信する（未指定なら本鍵で送信）。指定できるのは自分が生成した鍵のみ。",
-                "type": "string"
-              },
-              "target": {
-                "description": "返信先ノートの note1.../hex id。",
-                "type": "string"
-              },
-              "text": {
-                "description": "返信本文。",
-                "type": "string"
-              }
-            },
-            "required": [
-              "target",
-              "text"
-            ],
-            "type": "object"
-          },
-          "name": "nostr_reply",
-          "origin": "gateway",
-          "visibility": {
-            "depth_capped": false,
-            "owner_only": false,
-            "trusted_only": false
-          }
-        },
-        {
-          "activation": "always",
-          "classification": {
-            "collection_status": "observed",
-            "dispatch": "inline",
-            "sharing": "agent_bound",
-            "sub_engine": "not_exposed"
-          },
-          "description": "Nostr CLI（nostaro）を薄く passthrough 実行する。`subcommand` に nostaro のサブコマンド（例: post / reply / zap / upload / react / repost / follow / unfollow / profile / channel / get / timeline / search / decode / pubkey など）を、`args` にそのサブコマンドのフラグと値を**1 要素ずつ**配列で渡す（例: subcommand=\"profile\", args=[\"--name\",\"…\",\"--about\",\"…\"] でプロフィール(kind:0)を設定）。投稿・プロフィール(kind:0)設定・チャンネル・取得など nostaro が持つ操作を使える。署名は**あなた自身の採用済み Nostr 鍵**で行われ、秘密鍵(nsec)は扱わない・見えない。鍵の作成/採用は nostr_generate_key / nostr_switch_identity を使うこと（init は不可）。受信の常時監視（watch）はここからは起動できない。リレー設定は opencrab 側（configure_nostr / ダッシュボード）で管理するため relay サブコマンドは不可。**dm は不可**（#514: DM は扱わない。private な話は Discord の DM か指定チャンネルで）。event は任意 kind の publish に使える（例: subcommand=\"event\", args=[\"-k\",\"40\",\"-c\",\"…\"] でパブリックチャット作成）。まだ鍵を採用していない場合は先に nostr_switch_identity で採用すること。`timeline` は**フォロー基準**（自分とフォロー中の相手のノートが対象で、足りない分だけリレーから補われる）。フォローしていない人のノートを含むリレー全体の新着を見るには `timeline --global` を使う（件数が多くなるので `--out <相対パス> --out-format json` を併せて渡せる。`--out-format` は `--out` とセットで指定する）。`--file` / `--out` などに渡す相対パスは、ws_* / execute_shell と同じ**あなた自身の workspace** が基準（ws_write で作ったファイルをそのまま`--file <相対パス>` に渡せるし、`--out <相対パス>` の出力は ws_read で読める）。",
-          "input_schema": {
-            "properties": {
-              "args": {
-                "description": "サブコマンドの引数。フラグと値を 1 要素ずつ配列で渡す（省略可）。",
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
-              "subcommand": {
-                "description": "nostaro のサブコマンド（init/watch/relay/dm は不可）。",
-                "type": "string"
-              }
-            },
-            "required": [
-              "subcommand"
-            ],
-            "type": "object"
-          },
-          "name": "nostr_run",
-          "origin": "gateway",
-          "visibility": {
-            "depth_capped": false,
-            "owner_only": false,
-            "trusted_only": false
-          }
-        },
-        {
           "activation": "always",
           "classification": {
             "collection_status": "observed",
@@ -5971,81 +5859,6 @@
             "depth_capped": false,
             "owner_only": false,
             "trusted_only": true
-          }
-        },
-        {
-          "activation": "observed_only_when_tools_enabled",
-          "classification": {
-            "collection_status": "observed",
-            "dispatch": "inline",
-            "sharing": "agent_bound",
-            "sub_engine": "not_exposed"
-          },
-          "description": "ワークスペース内のファイルを Blossom にアップロードして URL を得る。",
-          "input_schema": {
-            "properties": {
-              "from": {
-                "description": "任意。nostr_generate_key で生成した鍵の npub を指定すると、本鍵ではなくその鍵で送信する（未指定なら本鍵で送信）。指定できるのは自分が生成した鍵のみ。",
-                "type": "string"
-              },
-              "path": {
-                "description": "アップロードするファイルパス。",
-                "type": "string"
-              }
-            },
-            "required": [
-              "path"
-            ],
-            "type": "object"
-          },
-          "name": "nostr_upload",
-          "origin": "gateway",
-          "visibility": {
-            "depth_capped": false,
-            "owner_only": false,
-            "trusted_only": false
-          }
-        },
-        {
-          "activation": "observed_only_when_tools_enabled",
-          "classification": {
-            "collection_status": "observed",
-            "dispatch": "inline",
-            "sharing": "agent_bound",
-            "sub_engine": "not_exposed"
-          },
-          "description": "Nostr で zap（Lightning 投げ銭）を送る。",
-          "input_schema": {
-            "properties": {
-              "amount": {
-                "description": "sats 単位の金額。",
-                "type": "integer"
-              },
-              "from": {
-                "description": "任意。nostr_generate_key で生成した鍵の npub を指定すると、本鍵ではなくその鍵で送信する（未指定なら本鍵で送信）。指定できるのは自分が生成した鍵のみ。",
-                "type": "string"
-              },
-              "message": {
-                "description": "zap コメント（任意）。",
-                "type": "string"
-              },
-              "recipient": {
-                "description": "宛先の npub または hex pubkey。",
-                "type": "string"
-              }
-            },
-            "required": [
-              "recipient",
-              "amount"
-            ],
-            "type": "object"
-          },
-          "name": "nostr_zap",
-          "origin": "gateway",
-          "visibility": {
-            "depth_capped": false,
-            "owner_only": false,
-            "trusted_only": false
           }
         },
         {
@@ -6883,7 +6696,7 @@
             "sharing": "agent_bound",
             "sub_engine": "not_exposed"
           },
-          "description": "タスクに応じて使用するLLMモデルを切り替える。provider:model形式（例: openai:gpt-4o-mini）またはエイリアス（fast, smart等）で指定。",
+          "description": "タスクに応じて使用するLLMモデルを切り替える。provider:model 形式またはエイリアスで指定。構成済みプロバイダ: （構成済みプロバイダなし）。未登録のプロバイダは拒否される。",
           "input_schema": {
             "properties": {
               "duration": {
@@ -6891,7 +6704,7 @@
                 "type": "string"
               },
               "model_alias": {
-                "description": "使用するモデル（provider:model形式またはエイリアス。例: openai:gpt-4o-mini, openrouter:openai/gpt-4o-mini, fast, smart）",
+                "description": "使用するモデル（provider:model またはエイリアス）。構成済みプロバイダ: （構成済みプロバイダなし）",
                 "type": "string"
               },
               "purpose": {
@@ -9099,42 +8912,6 @@
             "sharing": "agent_bound",
             "sub_engine": "not_exposed"
           },
-          "description": "Nostr CLI（nostaro）を薄く passthrough 実行する。`subcommand` に nostaro のサブコマンド（例: post / reply / zap / upload / react / repost / follow / unfollow / profile / channel / get / timeline / search / decode / pubkey など）を、`args` にそのサブコマンドのフラグと値を**1 要素ずつ**配列で渡す（例: subcommand=\"profile\", args=[\"--name\",\"…\",\"--about\",\"…\"] でプロフィール(kind:0)を設定）。投稿・プロフィール(kind:0)設定・チャンネル・取得など nostaro が持つ操作を使える。署名は**あなた自身の採用済み Nostr 鍵**で行われ、秘密鍵(nsec)は扱わない・見えない。鍵の作成/採用は nostr_generate_key / nostr_switch_identity を使うこと（init は不可）。受信の常時監視（watch）はここからは起動できない。リレー設定は opencrab 側（configure_nostr / ダッシュボード）で管理するため relay サブコマンドは不可。**dm は不可**（#514: DM は扱わない。private な話は Discord の DM か指定チャンネルで）。event は任意 kind の publish に使える（例: subcommand=\"event\", args=[\"-k\",\"40\",\"-c\",\"…\"] でパブリックチャット作成）。まだ鍵を採用していない場合は先に nostr_switch_identity で採用すること。`timeline` は**フォロー基準**（自分とフォロー中の相手のノートが対象で、足りない分だけリレーから補われる）。フォローしていない人のノートを含むリレー全体の新着を見るには `timeline --global` を使う（件数が多くなるので `--out <相対パス> --out-format json` を併せて渡せる。`--out-format` は `--out` とセットで指定する）。`--file` / `--out` などに渡す相対パスは、ws_* / execute_shell と同じ**あなた自身の workspace** が基準（ws_write で作ったファイルをそのまま`--file <相対パス>` に渡せるし、`--out <相対パス>` の出力は ws_read で読める）。",
-          "input_schema": {
-            "properties": {
-              "args": {
-                "description": "サブコマンドの引数。フラグと値を 1 要素ずつ配列で渡す（省略可）。",
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
-              "subcommand": {
-                "description": "nostaro のサブコマンド（init/watch/relay/dm は不可）。",
-                "type": "string"
-              }
-            },
-            "required": [
-              "subcommand"
-            ],
-            "type": "object"
-          },
-          "name": "nostr_run",
-          "origin": "gateway",
-          "visibility": {
-            "depth_capped": false,
-            "owner_only": false,
-            "trusted_only": false
-          }
-        },
-        {
-          "activation": "always",
-          "classification": {
-            "collection_status": "observed",
-            "dispatch": "inline",
-            "sharing": "agent_bound",
-            "sub_engine": "not_exposed"
-          },
           "description": "自分が nostr_generate_key で生成した鍵を、この Nostr ゲートウェイの**本鍵（送信・受信のアイデンティティ）として採用**する。以後の投稿はその鍵で行われる。まだ Nostr に接続していなければ、この操作で自動的に接続まで行う（自分への言及を購読する最小フィルタを設定して起動する）。npub には nostr_generate_key で作った鍵の npub を渡す。重要な操作なのでowner（信頼ユーザー）からの依頼時のみ実行される。秘密鍵は扱わない（npub 参照のみ）。",
           "input_schema": {
             "properties": {
@@ -9991,7 +9768,7 @@
             "sharing": "agent_bound",
             "sub_engine": "not_exposed"
           },
-          "description": "タスクに応じて使用するLLMモデルを切り替える。provider:model形式（例: openai:gpt-4o-mini）またはエイリアス（fast, smart等）で指定。",
+          "description": "タスクに応じて使用するLLMモデルを切り替える。provider:model 形式またはエイリアスで指定。構成済みプロバイダ: （構成済みプロバイダなし）。未登録のプロバイダは拒否される。",
           "input_schema": {
             "properties": {
               "duration": {
@@ -9999,7 +9776,7 @@
                 "type": "string"
               },
               "model_alias": {
-                "description": "使用するモデル（provider:model形式またはエイリアス。例: openai:gpt-4o-mini, openrouter:openai/gpt-4o-mini, fast, smart）",
+                "description": "使用するモデル（provider:model またはエイリアス）。構成済みプロバイダ: （構成済みプロバイダなし）",
                 "type": "string"
               },
               "purpose": {

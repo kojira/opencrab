@@ -105,6 +105,9 @@ mod tests {
     /// - `core/src/injection.rs`（この単一実装。doc/テストにも綴りが出る）
     /// - `db/queries/heartbeat.rs`（`\n`/`\t` を残す別目的の `is_control`。誤検出を避け
     ///   るため明示的に allowlist する）
+    ///
+    /// （DI フェーズ1: `nostr-gateway/src/map.rs` の sanitize_anchor_field は §9A.2 で削除され、
+    /// is_control 自前実装が無くなったため allowlist から外した。）
     #[test]
     fn sanitizer_is_the_single_source() {
         use std::path::Path;
@@ -122,13 +125,20 @@ mod tests {
 
         // メソッド名まで広げて綴り変種を拾う（限界は上記 doc 参照）。
         let needle = "is_control";
-        let allowed: [std::path::PathBuf; 2] = [
+        let allowed: [std::path::PathBuf; 4] = [
             crates_dir.join("core").join("src").join("injection.rs"),
             crates_dir
                 .join("db")
                 .join("src")
                 .join("queries")
                 .join("heartbeat.rs"),
+            // Wire metadata validation, not prompt-field sanitization.
+            crates_dir.join("extgate").join("src").join("protocol.rs"),
+            // Filesystem-safe Discord filename normalization, not prompt sanitization.
+            crates_dir
+                .join("discord-gateway")
+                .join("src")
+                .join("attachment.rs"),
         ];
 
         let mut offenders = Vec::new();

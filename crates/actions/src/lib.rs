@@ -3,6 +3,7 @@ pub mod agent_gateway;
 pub mod agent_runtime;
 pub mod bridge;
 pub mod common;
+pub mod continue_marker;
 pub mod dispatcher;
 pub mod learning;
 pub mod llm_analysis;
@@ -10,6 +11,7 @@ pub mod llm_evaluation;
 pub mod llm_selection;
 pub mod memory_access;
 pub mod memory_units;
+pub mod no_reply;
 pub mod search;
 pub mod session_runtime;
 pub mod skill_management;
@@ -25,7 +27,10 @@ pub mod transcript;
 pub mod webhook_target;
 pub mod workspace;
 
+pub mod channel_config;
 pub mod run_request;
+pub mod session_inbound;
+pub mod session_watch_policy;
 
 pub use a2ui::{send_ui, send_ui_definition};
 pub use agent_gateway::{
@@ -40,9 +45,29 @@ pub use bridge::{
     CORE_DISPATCHABLE_ACTIONS, CORE_INLINE_ACTIONS, MCP_TOOL_PREFIX, OWNER_ONLY_ACTIONS,
     REJECTION_CODE_PREFIX, TRUSTED_ONLY_ACTIONS,
 };
+pub use channel_config::apply_discord_channel_config;
+pub use continue_marker::{
+    strip_trailing_continue, visible_speech_after_markers, CONTINUE_LOG_TARGET, CONTINUE_SENTINEL,
+};
 pub use dispatcher::ActionDispatcher;
+pub use no_reply::{
+    terminate_at_no_reply, DeliveryContext, NoReplyTermination, NO_REPLY_LOG_TARGET,
+    NO_REPLY_SENTINEL, NO_REPLY_TRAILING_DISCARDED_TAG,
+};
 pub use run_request::{LiveInboundScope, RunRequest};
+pub use session_inbound::{
+    accept_inbound, consecutive_trust_groups, delivery_effect, plan_record_only_flags,
+    prepare_session_inbound, prepare_session_inbound_write, run_session_turn, start_session_turn,
+    AdmittedInbound, DeliveryEffect, InboundAgentDrop, InboundDrop, InboundLookups,
+    InboundMessageDrop, InboundWork, NormalizedInbound, NormalizedInboundEvent,
+    PrepareSessionInboundError, PrivilegeFire, WatchAccept,
+};
 pub use session_runtime::{SessionLocks, SessionRuntime};
+pub use session_watch_policy::{
+    caller_policy_key, parse_session_watch_policy, watch_author_standing, ClassPolicy,
+    SessionPolicyError, SessionWatchPolicy, WatchAllowSets, WatchAuthorStanding,
+    AGREED_IMMEDIATE_KINDS, POLICY_CLASS_KEYS, WATCH_KIND_LABELS,
+};
 pub use subtask::{
     cancel_subtask, default_non_dispatch_tools, dispatch_settled, steer_subtask, CancelOutcome,
     NoopCompletionSink, SettleKind, SharedExecutor, SpawnedSubtask, SteerOutcome,

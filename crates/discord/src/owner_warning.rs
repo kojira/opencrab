@@ -9,7 +9,7 @@
 //! 配布テンプレートは共有ゲートウェイを無効にしているため、新規オンボーディングは
 //! per-agent 経路を通る。両経路で同じ本文の警告を出せるよう、判定と文面をここに集約する。
 
-use tracing::warn;
+use tracing::{error, info, warn};
 
 /// owner 未設定が招く結果（両経路で同じ内容を出す）。
 ///
@@ -114,6 +114,64 @@ pub fn warn_inbound_message_dropped(session_id: &str, sender_id: &str, text_len:
         text_len,
         "failed to persist an inbound user message after retries. The agent will answer WITHOUT \
          ever seeing this message. Check database health (disk full / locked / permissions)."
+    );
+    true
+}
+
+/// A2UI インタラクション受信が連続で失敗しているときの警告。警告したら `true`。
+///
+/// [`warn_inbound_stalled`] のインタラクション版。以前はインタラクション受信タスクは
+/// `recv_interaction()` が `Err` を返した時点で `break` して黙って終了しており、以後
+/// ボタン/セレクト/モーダルの応答が誰にも気づかれないまま一切届かなくなっていた
+/// （受信メッセージ側 #284 と同型の非対称）。再試行しても復旧しないことをここで表面化させる。
+pub fn warn_interaction_recv_stalled(consecutive_failures: u32, secs_since_last_ok: u64) -> bool {
+    warn!(
+        failures = consecutive_failures,
+        secs_since_last_ok,
+        "Discord interaction receive has failed {consecutive_failures} times in a row and has \
+         not delivered an interaction for {secs_since_last_ok}s. The receiver keeps retrying with \
+         backoff, but button / select / modal responses are NOT reaching agents while this lasts. \
+         Check the Discord gateway connection."
+    );
+    true
+}
+
+/// serenity の client タスクが終了した（＝ Discord への接続が死んだ）ときの fail-loud。
+/// エスカレーションを鳴らしたら `true`、意図した停止で鳴らさなかったら `false`。
+///
+/// **接続死のサイレント停止を防ぐのがこの関数の役目。** `DiscordGateway::start` は
+/// `client.start()` を detach spawn で回すが、致命エラー（4004 invalid token /
+/// 4014 disallowed intents など復旧不能）でこのタスクが終わっても、以前は ERROR ログを
+/// 1 行出すだけで誰にもエスカレーションされなかった。受信転送側の stall 検知
+/// （[`warn_inbound_stalled`]）は `recv()` が `Err` を返すことを発火条件にしているが、
+/// その `recv()` の `tx` は `DiscordGateway` 構造体が保持しているため全 Sender drop が
+/// 起きず `Err` にならない。結果「起動ログは出る → 以後メッセージが永久に来ない →
+/// 警告もエスカレーションもゼロ」という、Nostr の watch 死亡サイレント停止と同型の
+/// 事故になっていた。ここでタスク終了そのものを表面化させる。
+///
+/// `shutting_down` が真なら [`DiscordGateway::shutdown`] 由来の**意図した停止**なので
+/// 鳴らさない（INFO のみ）。それ以外のタスク終了は、`Ok`（想定外の正常終了）も
+/// `Err`（致命エラー）も等しく「接続が死んだ」ので ERROR + true で鳴らす。
+///
+/// 配送手段が `error!`（ログ）なのは [`warn_inbound_stalled`] と同じ理由で意図的:
+/// client タスクが死んでいる局面ではゲートウェイ経由の DM 送信も同時に壊れているため、
+/// 通知を Discord に載せると黙って失敗しうる。ログなら落ちない。深刻度は stall（WARN）
+/// より上（復旧不能・恒久的な受信停止）なので ERROR にする。
+pub fn warn_discord_client_task_exited(shutting_down: bool, outcome: &str) -> bool {
+    if shutting_down {
+        info!(
+            outcome = %outcome,
+            "Discord client task ended after an explicit shutdown (expected)."
+        );
+        return false;
+    }
+    error!(
+        outcome = %outcome,
+        "Discord client task exited WITHOUT a shutdown having been requested. The gateway will \
+         NOT reconnect on its own: user messages, interactions, and timed fires stop reaching \
+         this agent from now on, silently. Common causes are fatal gateway errors (4004 invalid \
+         token / 4014 disallowed intents) that serenity cannot recover from. Restart the gateway \
+         and check the Discord token / enabled intents."
     );
     true
 }
@@ -331,6 +389,74 @@ mod tests {
             "本文が出ること: {logs}"
         );
         assert!(logs.contains("discord-crab-111-222"), "session_id: {logs}");
+    }
+
+    /// #337: インタラクション受信が止まっていることも沈黙ではなくログとして出ること。
+    #[test]
+    fn interaction_stalled_warning_is_emitted() {
+        let logs = captured_logs(|| {
+            assert!(warn_interaction_recv_stalled(5, 42));
+        });
+        assert!(logs.contains("WARN"), "warn レベルで出ること: {logs}");
+        assert!(
+            logs.contains("interaction receive has failed"),
+            "本文が出ること: {logs}"
+        );
+        assert!(logs.contains('5') && logs.contains("42"), "計測値: {logs}");
+    }
+
+    /// 接続死のサイレント停止を潰す本丸: client タスクが**意図しない**終了をしたら、
+    /// ERROR で鳴り（`true`）、何が起きたか（恒久停止・要因・対処）が読み取れること。
+    #[test]
+    fn client_task_exit_without_shutdown_escalates() {
+        let logs = captured_logs(|| {
+            assert!(
+                warn_discord_client_task_exited(false, "error: Gateway closed: 4004"),
+                "shutdown 要求無しのタスク終了はエスカレーションするはず"
+            );
+        });
+        assert!(logs.contains("ERROR"), "error レベルで出ること: {logs}");
+        assert!(
+            logs.contains("Discord client task exited"),
+            "本文が出ること: {logs}"
+        );
+        assert!(
+            logs.contains("will NOT reconnect"),
+            "恒久停止だと分かること: {logs}"
+        );
+        // 要因（outcome）が切り分けのために残ること。
+        assert!(logs.contains("4004"), "outcome が残ること: {logs}");
+    }
+
+    /// `Err` だけでなく**想定外の正常終了（`Ok`）**も接続死として同じく鳴らす
+    /// （どちらも「以後メッセージが来ない」ことに変わりはない）。
+    #[test]
+    fn client_task_ok_exit_without_shutdown_also_escalates() {
+        let logs = captured_logs(|| {
+            assert!(warn_discord_client_task_exited(false, "ok"));
+        });
+        assert!(logs.contains("ERROR"), "error レベルで出ること: {logs}");
+        assert!(logs.contains("Discord client task exited"), "本文: {logs}");
+    }
+
+    /// 意図した shutdown 由来の終了では**鳴らさない**（`false`）。誤エスカレーション防止。
+    /// INFO は WARN 未満なので captured_logs（WARN 以上）には出ない＝ノイズにならない。
+    #[test]
+    fn client_task_exit_after_shutdown_is_silent() {
+        let logs = captured_logs(|| {
+            assert!(
+                !warn_discord_client_task_exited(true, "ok"),
+                "意図した停止で鳴らしてはいけない（誤エスカレーション）"
+            );
+        });
+        assert!(
+            !logs.contains("ERROR"),
+            "意図した停止で ERROR を出してはいけない: {logs}"
+        );
+        assert!(
+            !logs.contains("Discord client task exited"),
+            "エスカレーション本文を出してはいけない: {logs}"
+        );
     }
 
     #[test]

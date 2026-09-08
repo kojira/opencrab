@@ -110,20 +110,27 @@ OpenCrab のツール（`nostr_*`）は既存 CLI を呼ぶだけ。改造不要
 | OpenCrab ツール | nostaro 呼び出し |
 |---|---|
 | `nostr_post`   | `nostaro --config <p> post "<text>"` |
-| `nostr_reply`  | `nostaro --config <p> reply <target> "<text>"` |
+| 返信（core `say`） | `nostaro --config <p> reply <target> "<text>"` |
 | `nostr_zap`    | `nostaro --config <p> zap <recipient> <amount> -m "<message>"` |
 | `nostr_upload` | `nostaro --config <p> upload <path>` |
 
+> **返信は say 一本（2026-08-30 オーナー裁定）**。`nostr_reply` ツールのエージェント露出は
+> 撤去した（`crates/nostr/src/actions.rs` の `execute` 側 legacy 防御 arm のみ残置）。V3 の
+> Nostr 受信ターンでは、エージェントが返信本文をそのまま応答本文（core `say`）に書き、
+> gateway が対象ノートへの `nostaro reply` として投稿する（`kojira/opencrab#840`）。上表の
+> `nostaro reply` 呼び出し自体は変わらない（呼び出し元が say 経路になっただけ）。
+
 > **#514: DM 送信は禁止**。`nostr_dm` ツールは撤去し、`nostaro dm` を叩く経路
-> （送信メソッド・`nostr_run dm` passthrough）も塞いだ。DM は暗号化されていても秘密鍵が
+> （送信メソッド・passthrough 機構の `dm`）も塞いだ。DM は暗号化されていても秘密鍵が
 > 漏れた時点で過去に遡って全部読めるため、その前提ごと無くす（オーナー決定）。private な
 > 話は Nostr でせず、Discord の DM か指定チャンネルを使う。
 >
-> **#699（2026-08-19 オーナー裁定）: `nostr_run event` は許可**。任意 kind の publish
-> （kind:40 のパブリックチャット作成等）は正当用途があり、塞ぐ不自由が利益を上回っていた。
-> `event -k 4` で DM kind を生発行できる理論上の迂回は残るが、DM として機能させるには
-> 暗号化まで自前でイベントを組む必要があり実用的でない（受容）。「便利な暗号化 DM」の
-> 経路である `dm` の deny は維持する。
+> **`nostr_run`（薄い nostaro passthrough / #268）は撤去済み（2026-08-30 オーナー裁定・
+> 返信/投稿は say 一本）**。任意 kind publish を許可していた #699（2026-08-19）を含め、
+> エージェントに `nostr_run` は露出しない（`GatewayActionDef` と impl を削除し dispatch は
+> fail-close）。投稿は `nostr_post`、返信は core `say`。passthrough 機構
+> （`NostaroCli::run_passthrough` / `GatewayNostrPassthrough`・`dm` deny を含む）はコード上は
+> 残置するが、エージェント露出する呼び出し元は無い。
 
 成功時 exit 0・stdout に結果（投稿なら note id / upload なら URL）を出す前提。
 

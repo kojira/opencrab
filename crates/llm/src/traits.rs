@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 
 use crate::message::{ChatRequest, ChatResponse, ChatStreamDelta};
+use opencrab_llm_types::LlmExchange;
 
 /// Information about an available model.
 #[derive(Debug, Clone)]
@@ -28,6 +29,15 @@ pub trait LlmProvider: Send + Sync {
 
     /// Perform a chat completion request.
     async fn chat_completion(&self, request: ChatRequest) -> Result<ChatResponse>;
+
+    /// Perform a chat completion and return any provider-executed tool history.
+    /// Existing providers remain compatible and report no native tool request.
+    async fn chat_completion_with_history(&self, request: ChatRequest) -> Result<LlmExchange> {
+        Ok(LlmExchange {
+            response: self.chat_completion(request).await?,
+            provider_tool_history: Default::default(),
+        })
+    }
 
     /// Perform a streaming chat completion request.
     ///

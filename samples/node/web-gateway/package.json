@@ -1,0 +1,10 @@
+{
+  "name": "opencrab-web-gateway-node",
+  "private": true,
+  "type": "commonjs",
+  "bin": {
+    "web-gateway": "./web-gateway.js"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

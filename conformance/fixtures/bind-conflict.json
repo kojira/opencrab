@@ -1,0 +1,26 @@
+{
+  "name": "bind-conflict",
+  "prelude": "hello_bind",
+  "steps": [
+    {
+      "op": "sse_open",
+      "id": "ev",
+      "path": "/api/web-conversations/web-agent-conv/events"
+    },
+    {
+      "op": "uds_send",
+      "frame": {
+        "id": "bind:other",
+        "m": "bind",
+        "binding_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "address": "web-agent-conv"
+      }
+    },
+    {
+      "op": "sse_recv",
+      "id": "ev",
+      "event": "gate_error",
+      "data": { "code": "binding_conflict" }
+    }
+  ]
+}

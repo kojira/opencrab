@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 // Canonical LLM message model shared with the provider/router layer.
-pub use opencrab_llm_types::{ChatRequest, ChatResponse, FunctionDefinition, ToolCall};
+pub use opencrab_llm_types::{
+    ChatRequest, ChatResponse, FunctionDefinition, LlmExchange, ProviderToolHistory, ToolCall,
+};
 
 // ---------------------------------------------------------------------------
 // Trait: ActionExecutor
@@ -53,6 +55,17 @@ pub trait ActionExecutor: Send + Sync {
     /// 知らないまま名前集合だけ受け取れるように、戻り値は `HashSet<String>` にする
     /// （依存の向きを増やさない）。
     fn inline_tool_names(&self) -> std::collections::HashSet<String> {
+        std::collections::HashSet::new()
+    }
+
+    /// 発話クラス（撃ちっぱなし・§3.3・第三柱）のツール名集合。既定は空集合。
+    ///
+    /// `inline_tool_names` と同じく分類の権威はツール定義の属性
+    /// （`GatewayActionDef.class.dispatch == Utterance`）で、それを読める実装
+    /// （`BridgedExecutor`）だけが override する。発話クラスは `inline_tool_names` にも
+    /// 含める（＝ `should_dispatch` を偽にして背景 subtask 化しない）。ここで別に返すのは
+    /// エンジンが「inline だが撃ちっぱなし配送」を見分けるため（`ToolDispatcher::is_utterance`）。
+    fn utterance_tool_names(&self) -> std::collections::HashSet<String> {
         std::collections::HashSet::new()
     }
 }
@@ -104,6 +117,16 @@ pub trait ToolDispatcher: Send + Sync {
     /// `false`（＝従来どおり同期実行）を返すことを想定する。
     fn should_dispatch(&self, tool_name: &str) -> bool;
 
+    /// このツールが**発話クラス**（撃ちっぱなし・DESIGN-RESUME-SETTLE §3.3・第三柱）か。
+    ///
+    /// `true` のツール（reply/reaction/repost）は subtask 化も settle も resume もせず、
+    /// **同ターンで inline 実行して配送**し、モデルへ領収書（tool_result 本文）を返さず
+    /// 会話に機械行も残さない。`should_dispatch` は発話クラスに対して `false`
+    /// （＝背景 subtask 化しない）を返すこと。既定は `false`（従来ツールは非発話）。
+    fn is_utterance(&self, _tool_name: &str) -> bool {
+        false
+    }
+
     /// **同一バッチのツール呼び出し群**を 1 本の background subtask として起動し、
     /// 同期的にマーカーを返す。
     ///
@@ -143,6 +166,30 @@ pub trait LiveInboundSource: Send + Sync {
     /// 新着が無ければ空 Vec（＝プロンプトは 1 バイトも変わらない）。取得に失敗した
     /// 場合も空 Vec を返し、ターンは続行する（best-effort）。
     fn poll_new_messages(&self) -> Vec<String>;
+
+    /// #930: 新着を **origin つき**で返す（read state の付与に使う）。
+    ///
+    /// エンジンは走行中に畳み込んだ said を LLM へ渡す時点で、その said の origin を
+    /// gateway へ通知して 👀（read）を付ける。origin を持たない源（steer 等）は既定実装の
+    /// まま `origin=None` を返してよい（read は付かない）。既定は [`Self::poll_new_messages`]
+    /// を origin なしに写すので、origin を運ぶ源だけがこれを override する。
+    fn poll_new_with_origin(&self) -> Vec<FoldedInbound> {
+        self.poll_new_messages()
+            .into_iter()
+            .map(|text| FoldedInbound { text, origin: None })
+            .collect()
+    }
+}
+
+/// #930: 走行中ターンへ畳み込む新着 said の 1 件（本文＋発端 origin）。
+///
+/// `text` は LLM 入力へ足す整形済み本文（従来の [`LiveInboundSource::poll_new_messages`]
+/// と同じ）。`origin` は「この said を読んだ時点で 👀（read）を付ける先」。origin を持つ源
+/// （ユーザー発話）だけが `Some`。
+#[derive(Debug, Clone)]
+pub struct FoldedInbound {
+    pub text: String,
+    pub origin: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +221,13 @@ pub struct LlmCallLog {
     pub is_bot_iteration: bool,
 }
 
+/// Additive log payload carrying provider-executed tool history.
+#[derive(Debug, Clone)]
+pub struct LlmExchangeLog {
+    pub call: LlmCallLog,
+    pub provider_tool_history: ProviderToolHistory,
+}
+
 /// Trait for LLM chat completion.
 ///
 /// Defined in `opencrab-core` so the engine can call the LLM without
@@ -184,6 +238,14 @@ pub struct LlmCallLog {
 pub trait LlmClient: Send + Sync {
     /// Send a chat request and receive a response.
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse>;
+
+    /// Additive provider-history path. Existing clients remain source-compatible.
+    async fn chat_with_history(&self, request: ChatRequest) -> Result<LlmExchange> {
+        Ok(LlmExchange {
+            response: self.chat(request).await?,
+            provider_tool_history: Default::default(),
+        })
+    }
 }
 
 /// The result of an engine run.
@@ -197,6 +259,14 @@ pub struct EngineResult {
     pub tool_calls_made: usize,
     /// Whether the engine stopped due to hitting the iteration limit.
     pub stopped_by_limit: bool,
+    /// #915: 最終生成で成功した投稿系 utterance-op の最後の call_id。
+    /// 現行の投稿系 operation は reply。reaction/repost/resolve は対象外。
+    #[serde(default)]
+    pub last_posting_utterance_id: Option<String>,
+    /// #915: 上限打ち切り時、打ち切られた最終生成が CONTINUE 本文を配送したか。
+    /// 配送側が保持する最後の say delivery_id を同じ生成の候補として選ぶための内部信号。
+    #[serde(default)]
+    pub last_generation_had_continuation_speech: bool,
     /// XML `<function_calls>` フォールバックで tool calls を復元した回数。
     /// harness 剪定の判断材料（native tool calling で不要になれば 0 になる）。
     #[serde(default)]

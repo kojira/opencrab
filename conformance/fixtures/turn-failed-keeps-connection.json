@@ -1,0 +1,49 @@
+{
+  "name": "turn-failed-keeps-connection",
+  "prelude": "hello_bind",
+  "steps": [
+    { "op": "sse_open", "id": "ev", "path": "/api/web-conversations/web-agent-conv/events" },
+    {
+      "op": "http_post_async",
+      "id": "p1",
+      "path": "/api/web-conversations/web-agent-conv/messages",
+      "body": {
+        "client_message_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "text": "one",
+        "attachments": []
+      }
+    },
+    {
+      "op": "uds_recv",
+      "id": "said1",
+      "expect": { "m": "said", "origin": "web:cccccccc-cccc-4ccc-8ccc-cccccccccccc" }
+    },
+    { "op": "uds_send", "frame": { "id": "$said1.id", "m": "ok", "seq": 1 } },
+    { "op": "http_await", "id": "p1", "status": 202, "body": { "state": "accepted", "seq": 1 } },
+
+    { "op": "uds_send", "frame": {
+      "m": "turn_failed",
+      "binding_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "origin": "web:cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+    } },
+    { "op": "uds_idle", "ms": 100 },
+
+    {
+      "op": "http_post_async",
+      "id": "p2",
+      "path": "/api/web-conversations/web-agent-conv/messages",
+      "body": {
+        "client_message_id": "11111111-1111-4111-8111-111111111111",
+        "text": "two",
+        "attachments": []
+      }
+    },
+    {
+      "op": "uds_recv",
+      "id": "said2",
+      "expect": { "m": "said", "origin": "web:11111111-1111-4111-8111-111111111111" }
+    },
+    { "op": "uds_send", "frame": { "id": "$said2.id", "m": "ok", "seq": 2 } },
+    { "op": "http_await", "id": "p2", "status": 202, "body": { "state": "accepted", "seq": 2 } }
+  ]
+}

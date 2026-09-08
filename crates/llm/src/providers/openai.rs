@@ -55,6 +55,64 @@ fn is_reasoning_model(model: &str) -> bool {
     m.starts_with("gpt-5") || m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4")
 }
 
+/// 非既定 `temperature` を載せると 400 になるモデルか。
+///
+/// GPT-5 / o シリーズは既存の推論判定。Claude は公式 cutoff（Opus 4.7 以降、
+/// および Claude 5 系。Sonnet 5 は QC 実測で temperature deprecated）。
+/// 世代で判定し、個別モデル ID の列挙はしない。`is_reasoning_model` には畳まない
+/// （Claude は `max_tokens` / `reasoning_effort` の扱いが違う）。
+fn omits_temperature(model: &str) -> bool {
+    is_reasoning_model(model) || claude_rejects_temperature(model)
+}
+
+fn claude_rejects_temperature(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    let name = m.rsplit(['/', ':']).next().unwrap_or(m.as_str());
+    if name.contains("mythos-preview") {
+        return true;
+    }
+    match claude_generation(name) {
+        Some((major, minor)) => major >= 5 || (major == 4 && minor >= 7),
+        None => false,
+    }
+}
+
+/// Claude の世代 `(major, minor)`。読めなければ `None`（温度は従来どおり送る）。
+///
+/// - `claude-sonnet-5` / `claude-opus-5` → (5, 0)
+/// - `claude-opus-4-7` / `claude-sonnet-4-6` → (4, 7) / (4, 6)
+/// - `claude-3-5-sonnet-20241022` → (3, 5)
+fn claude_generation(model: &str) -> Option<(u32, u32)> {
+    let rest = model.strip_prefix("claude-")?;
+    let parts: Vec<&str> = rest.split('-').collect();
+    let first = parts.first()?;
+    if let Ok(major) = first.parse::<u32>() {
+        let minor = parts
+            .get(1)
+            .and_then(|p| parse_claude_version_part(p))
+            .unwrap_or(0);
+        return Some((major, minor));
+    }
+    let nums: Vec<u32> = parts
+        .iter()
+        .skip(1)
+        .filter_map(|p| parse_claude_version_part(p))
+        .collect();
+    let major = *nums.first()?;
+    let minor = nums.get(1).copied().unwrap_or(0);
+    Some((major, minor))
+}
+
+fn parse_claude_version_part(part: &str) -> Option<u32> {
+    let n = part.parse::<u32>().ok()?;
+    // 日付サフィックス（20250929）は世代ではない
+    if n >= 20_000_000 {
+        None
+    } else {
+        Some(n)
+    }
+}
+
 /// OpenAI API provider.
 #[derive(Debug, Clone)]
 pub struct OpenAiProvider {
@@ -132,10 +190,9 @@ impl OpenAiProvider {
         let reasoning = is_reasoning_model(&request.model);
 
         if let Some(temp) = request.temperature {
-            // GPT-5 系 / o シリーズは temperature 既定値 (1) 以外を 400 で拒否する。
-            // エンジンは 0.7/0.0 を送ってくるため、推論モデルでは温度を送らない
-            // （サーバ既定にフォールバック）。それ以外は従来どおり。
-            if !reasoning {
+            // エンジンは 0.7/0.0 を常に載せる。非対応モデルへ送ると 400 になるので
+            // ここで落とす（再送フォールバックではない。wire を先に正しくする）。
+            if !omits_temperature(&request.model) {
                 body["temperature"] = serde_json::json!(temp);
             }
         }
@@ -390,6 +447,71 @@ mod tests {
         // 非推論モデルには reasoning_effort を付けない
         assert!(body.get("reasoning_effort").is_none());
         assert!(body.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
+    fn test_claude_generation_cutoff() {
+        assert_eq!(claude_generation("claude-sonnet-5"), Some((5, 0)));
+        assert_eq!(claude_generation("claude-opus-5"), Some((5, 0)));
+        assert_eq!(claude_generation("claude-opus-4-7"), Some((4, 7)));
+        assert_eq!(claude_generation("claude-sonnet-4-6"), Some((4, 6)));
+        assert_eq!(
+            claude_generation("claude-3-5-sonnet-20241022"),
+            Some((3, 5))
+        );
+        assert_eq!(
+            claude_generation("claude-sonnet-4-5-20250929"),
+            Some((4, 5))
+        );
+        assert!(claude_generation("gpt-4o").is_none());
+    }
+
+    #[test]
+    fn test_claude_sonnet_5_body_omits_temperature_keeps_max_tokens() {
+        let p = OpenAiProvider::new("k").with_reasoning_effort("high");
+        let req = ChatRequest::new("claude-sonnet-5", vec![Message::user("hi")])
+            .with_temperature(0.7)
+            .with_max_tokens(4096);
+        let body = p.build_request_body(&req);
+        assert!(
+            body.get("temperature").is_none(),
+            "temperature must be omitted for claude-sonnet-5"
+        );
+        // Claude は推論モデルではない。max_tokens のまま、reasoning_effort は付けない。
+        assert_eq!(body["max_tokens"], 4096);
+        assert!(body.get("max_completion_tokens").is_none());
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn test_claude_opus_5_body_omits_temperature() {
+        let p = OpenAiProvider::new("k");
+        let req = ChatRequest::new("claude-opus-5", vec![Message::user("hi")])
+            .with_temperature(0.7)
+            .with_max_tokens(128000);
+        let body = p.build_request_body(&req);
+        assert!(body.get("temperature").is_none());
+        assert_eq!(body["max_tokens"], 128000);
+    }
+
+    #[test]
+    fn test_legacy_claude_body_keeps_temperature() {
+        let p = OpenAiProvider::new("k");
+        for model in [
+            "claude-sonnet-4-6",
+            "claude-opus-4-6",
+            "claude-3-haiku-20240307",
+        ] {
+            let req = ChatRequest::new(model, vec![Message::user("hi")])
+                .with_temperature(0.7)
+                .with_max_tokens(1024);
+            let body = p.build_request_body(&req);
+            assert_eq!(
+                body["temperature"], 0.7,
+                "{model} still accepts temperature"
+            );
+            assert_eq!(body["max_tokens"], 1024);
+        }
     }
 
     /// リクエストを受けてから `delay` 待って 200 を返すモック（timeout 検証用）。

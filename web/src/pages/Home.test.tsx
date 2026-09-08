@@ -49,6 +49,7 @@ const fakeSessions: SessionDto[] = [
     participant_count: 2,
     agent_ids: ['a1', 'a2'],
     metadata_json: null,
+    gateway_bound: false,
   },
   {
     id: 's2',
@@ -60,6 +61,7 @@ const fakeSessions: SessionDto[] = [
     participant_count: 3,
     agent_ids: ['a1', 'a2', 'a3'],
     metadata_json: null,
+    gateway_bound: false,
   },
   {
     id: 's3',
@@ -71,6 +73,7 @@ const fakeSessions: SessionDto[] = [
     participant_count: 2,
     agent_ids: ['a1', 'a3'],
     metadata_json: null,
+    gateway_bound: false,
   },
 ];
 

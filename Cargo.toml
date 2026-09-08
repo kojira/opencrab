@@ -10,18 +10,14 @@ members = [
     "crates/discord",
     "crates/nostr",
     "crates/web-gateway",
+    "crates/nostr-gateway",
+    "crates/discord-gateway",
+    "crates/gate-client",
     "crates/mcp",
     "crates/server",
     "crates/cli",
     "crates/voice",
-    "crates/port",
-    "crates/store",
-    "crates/engine",
-    "crates/social-runtime",
-    "crates/plugd",
-    "crates/app",
-    "crates/web-gate",
-    "crates/nostr-gate",
+    "crates/extgate",
 ]
 
 [workspace.lints.clippy]
@@ -77,7 +73,8 @@ regex = "1"
 memchr = "2"
 
 # Utils
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+libc = "0.2"
 sha2 = "0.10"
 toml = "0.8"
 tempfile = "3"
@@ -96,7 +93,11 @@ opencrab-actions = { path = "crates/actions" }
 opencrab-db = { path = "crates/db" }
 opencrab-discord = { path = "crates/discord" }
 opencrab-nostr = { path = "crates/nostr" }
+opencrab-extgate = { path = "crates/extgate", default-features = false }
 opencrab-web-gateway = { path = "crates/web-gateway" }
+opencrab-nostr-gateway = { path = "crates/nostr-gateway" }
+opencrab-discord-gateway = { path = "crates/discord-gateway" }
+opencrab-gate-client = { path = "crates/gate-client" }
 opencrab-mcp = { path = "crates/mcp" }
 
 # 開発ビルド高速化: デバッグ情報を減らしてリンク時間とバイナリサイズを削減。

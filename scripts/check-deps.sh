@@ -77,7 +77,7 @@ echo "R5(server no-default) OK"
 # feature 統合で server の既定は落ちない（段階 1 の E2E で判明済み）。
 cargo build -p opencrab-gateway
 cargo test -p opencrab-server --no-default-features
-for f in discord nostr web; do
+for f in discord nostr; do
   cargo build -p opencrab-server --no-default-features --features "$f"
 done
 cargo build -p opencrab-server

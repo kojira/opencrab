@@ -12,10 +12,15 @@ export default function Home() {
   const { t } = useTranslation();
   const [agents, setAgents] = useState<AgentSummary[]>([]);
   const [sessions, setSessions] = useState<SessionDto[]>([]);
+  const [error, setError] = useState('');
 
   useEffect(() => {
-    getAgents().then(setAgents).catch(() => {});
-    getSessions().then(setSessions).catch(() => {});
+    getAgents()
+      .then(setAgents)
+      .catch((e: Error) => setError(e.message));
+    getSessions()
+      .then(setSessions)
+      .catch((e: Error) => setError(e.message));
   }, []);
 
   const activeSessions = sessions.filter((s) => s.status === 'active').length;
@@ -32,6 +37,17 @@ export default function Home() {
 
       {/* Onboarding checklist (未完なら導線、完了なら控えめ表示) */}
       <SetupChecklist />
+
+      {error ? (
+        <div className="card-outlined border-error bg-error-container/30 p-4" role="alert">
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-outlined text-error">error</span>
+            <p className="text-body-lg text-error-on-container">
+              {t('common.error', { message: `GET /api/sessions: ${error}` })}
+            </p>
+          </div>
+        </div>
+      ) : null}
 
       {/* Stat bar */}
       <div className="flex items-center gap-4 px-4 py-2.5 rounded-xl bg-surface-container border border-outline-variant/50 flex-wrap">

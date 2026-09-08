@@ -215,6 +215,17 @@ port = 3000
 [database]
 path = "data/opencrab.db"
 
+[gate]
+# External gate V3 の Unix domain socket。空・相対 path は起動失敗。
+listen_socket = "/tmp/opencrab-extgate.sock"
+# Nostr inbound の段階移行（DESIGN-NOSTRGATE §6）。legacy | v3_shadow | v3。既定=legacy。
+# 旧 in-process ループは削除しない。未知値は起動失敗。
+nostr_ingress = "legacy"
+# Discord inbound の段階移行（DESIGN-DISCORD-GATE §8.1）。legacy | v3_shadow | v3。既定=legacy。
+# v3_shadow/v3 で起動時に discord-gateway プロセスを点火（instance 敷設・v3 は binding も）。
+# 旧共有 message_loop は削除しない（V3AwareGateway の liveness OR で per-message に退く）。未知値は起動失敗。
+discord_ingress = "legacy"
+
 # 古い LLM ログの zip アーカイブ（#337）
 #
 # llm_logs は 1 行にプロンプト全文＋応答を丸ごと保存するため肥大しやすく（実測で DB の

@@ -3,7 +3,7 @@
 //! 実装は gateway 非依存層 [`opencrab_actions::subtask_registries`] にある。
 //! server → nostr の依存方向のため、Nostr ゲートウェイからも同じ型を使えるように
 //! するには registry 本体（`SubtaskRegistry`）と同じ crate に置く必要があった。
-//! ここは既存の呼び出し元（`AppState` / web gateway / heartbeat / E2E）が
+//! ここは既存の呼び出し元（`AppState` / web gateway / REST / heartbeat / E2E）が
 //! 使っているパスを保つための再エクスポート。
 //!
 //! 加えて、同じ「経路横断で共有する subtask 実行状態」の層として

@@ -1,0 +1,394 @@
+//! operator と gateway が共有する配置。HTTP bind は無い。秘密は載せない。
+
+use serde::Deserialize;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Placement {
+    pub core_socket: String,
+    pub nostaro_bin: String,
+    pub instances: Vec<InstancePlacement>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct InstancePlacement {
+    pub instance_id: String,
+    pub revision: u64,
+    pub address: String,
+    pub config_b64: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct InstanceConfig {
+    pub relays: Vec<String>,
+    #[serde(default)]
+    pub filter: WatchFilter,
+    pub self_pubkey: String,
+    /// エージェント表示名。メンション車線の keyword。空なら fail-loud。
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub watches: Vec<WatchPlacement>,
+    #[serde(default)]
+    pub delivery_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WatchFilter {
+    #[serde(default)]
+    pub authors: Vec<String>,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    #[serde(default)]
+    pub kinds: Vec<u32>,
+    /// メンション車線だけが入れる nostaro `--npub`（p タグ対象）。config JSON からは来ない。
+    #[serde(default, skip)]
+    pub npub: Option<String>,
+}
+
+/// タイムライン束ねの上限件数。省略時はこの値。
+pub const DEFAULT_BUNDLE_MAX_ITEMS: i64 = 50;
+
+fn default_max_items() -> i64 {
+    DEFAULT_BUNDLE_MAX_ITEMS
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WatchPlacement {
+    pub id: i64,
+    pub interval_secs: i64,
+    /// 1 interval で束ねる上限。省略時は [`DEFAULT_BUNDLE_MAX_ITEMS`]。
+    #[serde(default = "default_max_items")]
+    pub max_items: i64,
+    #[serde(default)]
+    pub filter: WatchFilter,
+    #[serde(default)]
+    pub filter_json: Option<WatchFilter>,
+}
+
+impl WatchPlacement {
+    pub fn effective_filter(&self) -> &WatchFilter {
+        self.filter_json.as_ref().unwrap_or(&self.filter)
+    }
+}
+
+const DM_KINDS: &[u32] = &[4, 1059];
+
+impl Placement {
+    pub fn load(path: &std::path::Path) -> anyhow::Result<Self> {
+        let text = std::fs::read_to_string(path)?;
+        let place: Placement = serde_json::from_str(&text)?;
+        place.validate()?;
+        Ok(place)
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.core_socket.is_empty() || !self.core_socket.starts_with('/') {
+            anyhow::bail!("core_socket must be an absolute path");
+        }
+        if self.nostaro_bin.is_empty() {
+            anyhow::bail!("nostaro_bin must be nonempty");
+        }
+        if self.instances.is_empty() {
+            anyhow::bail!("instances must be nonempty");
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for inst in &self.instances {
+            if inst.revision == 0 {
+                anyhow::bail!("revision must be positive");
+            }
+            if inst.address.is_empty() {
+                anyhow::bail!("address must be nonempty");
+            }
+            parse_uuid(&inst.instance_id)?;
+            if !seen.insert(inst.instance_id.clone()) {
+                anyhow::bail!("duplicate instance_id is a double live; refuse startup");
+            }
+            let bytes = decode_config_b64(&inst.config_b64)?;
+            let cfg = parse_instance_config(&bytes)?;
+            validate_instance_config(&cfg)?;
+        }
+        Ok(())
+    }
+}
+
+pub fn decode_config_b64(config_b64: &str) -> anyhow::Result<Vec<u8>> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(config_b64)
+        .map_err(|_| anyhow::anyhow!("config_b64 must be standard padded base64"))
+}
+
+pub fn config_digest(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex_lower(&Sha256::digest(bytes))
+}
+
+pub fn parse_instance_config(bytes: &[u8]) -> anyhow::Result<InstanceConfig> {
+    let cfg: InstanceConfig = serde_json::from_slice(bytes)
+        .map_err(|e| anyhow::anyhow!("instance config is not valid JSON object: {e}"))?;
+    validate_instance_config(&cfg)?;
+    Ok(cfg)
+}
+
+fn validate_instance_config(cfg: &InstanceConfig) -> anyhow::Result<()> {
+    if cfg.relays.is_empty() {
+        anyhow::bail!("relays must be nonempty");
+    }
+    if !is_hex_pubkey(&cfg.self_pubkey) {
+        anyhow::bail!("self_pubkey must be 64 lowercase hex");
+    }
+    if cfg
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .is_none()
+    {
+        anyhow::bail!("name must be nonempty");
+    }
+    match cfg.delivery_mode.as_deref() {
+        None | Some("say") | Some("tool_driven") => {}
+        Some(_) => anyhow::bail!("delivery_mode must be say or tool_driven"),
+    }
+    for watch in &cfg.watches {
+        if watch.interval_secs <= 0 {
+            anyhow::bail!(
+                "watch {} interval_secs must be a positive integer",
+                watch.id
+            );
+        }
+        if watch.max_items <= 0 {
+            anyhow::bail!("watch {} max_items must be a positive integer", watch.id);
+        }
+    }
+    Ok(())
+}
+
+pub fn effective_kinds(filter: &WatchFilter) -> Vec<u32> {
+    let filtered: Vec<u32> = filter
+        .kinds
+        .iter()
+        .copied()
+        .filter(|k| !DM_KINDS.contains(k))
+        .collect();
+    if filtered.is_empty() {
+        vec![1]
+    } else {
+        filtered
+    }
+}
+
+pub fn watches_beyond_self(filter: &WatchFilter) -> bool {
+    !filter.authors.is_empty() || !filter.keywords.is_empty()
+}
+
+/// メンション車線（default lane）の購読フィルタ。
+///
+/// instance の filter を土台に、`name` を keyword として無条件で足す。
+/// hex pubkey は本文 substring にならないので入れない。
+/// p タグ対象は `self_pubkey`（`--npub`）。kind は 1 と 7 を必ず含める。
+pub fn mention_lane_filter(cfg: &InstanceConfig) -> WatchFilter {
+    let mut filter = cfg.filter.clone();
+    if let Some(name) = cfg.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+        push_keyword_once(&mut filter.keywords, name);
+    }
+    for kind in [1u32, 7] {
+        if !filter.kinds.contains(&kind) {
+            filter.kinds.push(kind);
+        }
+    }
+    filter.npub = Some(cfg.self_pubkey.clone());
+    filter
+}
+
+fn push_keyword_once(keywords: &mut Vec<String>, keyword: &str) {
+    if !keywords.iter().any(|k| k == keyword) {
+        keywords.push(keyword.to_string());
+    }
+}
+
+pub fn parse_uuid(raw: &str) -> anyhow::Result<String> {
+    let parsed = uuid::Uuid::parse_str(raw)?;
+    let canonical = parsed.to_string();
+    if canonical != raw {
+        anyhow::bail!("instance_id must be canonical lowercase UUID");
+    }
+    Ok(canonical)
+}
+
+fn is_hex_pubkey(raw: &str) -> bool {
+    raw.len() == 64 && raw.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_config() -> InstanceConfig {
+        InstanceConfig {
+            relays: vec!["wss://example.invalid".into()],
+            filter: WatchFilter::default(),
+            self_pubkey: "aa".repeat(32),
+            name: Some("crab".into()),
+            watches: vec![],
+            delivery_mode: Some("tool_driven".into()),
+        }
+    }
+
+    #[test]
+    fn rejects_http_listen_fields_by_absence() {
+        let p = Placement {
+            core_socket: "/tmp/g.sock".into(),
+            nostaro_bin: "nostaro".into(),
+            instances: vec![InstancePlacement {
+                instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+                revision: 1,
+                address: "nostr-a1".into(),
+                config_b64: {
+                    use base64::Engine;
+                    base64::engine::general_purpose::STANDARD.encode(
+                        serde_json::to_vec(&serde_json::json!({
+                            "relays": ["wss://example.invalid"],
+                            "self_pubkey": "aa".repeat(32),
+                            "name": "crab",
+                        }))
+                        .unwrap(),
+                    )
+                },
+            }],
+        };
+        p.validate().unwrap();
+    }
+
+    #[test]
+    fn empty_relays_fail_loud() {
+        let mut cfg = sample_config();
+        cfg.relays.clear();
+        assert!(validate_instance_config(&cfg).is_err());
+    }
+
+    #[test]
+    fn empty_kinds_mean_kind_1_and_dm_kinds_are_stripped() {
+        assert_eq!(effective_kinds(&WatchFilter::default()), vec![1]);
+        let f = WatchFilter {
+            kinds: vec![1, 4, 1059, 7],
+            ..WatchFilter::default()
+        };
+        assert_eq!(effective_kinds(&f), vec![1, 7]);
+    }
+
+    #[test]
+    fn watch_filter_json_is_the_effective_filter() {
+        let cfg: InstanceConfig = serde_json::from_value(serde_json::json!({
+            "relays": ["wss://example.invalid"],
+            "self_pubkey": "aa".repeat(32),
+            "name": "crab",
+            "watches": [{
+                "id": 17,
+                "interval_secs": 30,
+                "session_id": "nostr-a1",
+                "filter_json": {
+                    "authors": ["npub1watched"],
+                    "keywords": ["opencrab"],
+                    "kinds": [1, 7]
+                }
+            }]
+        }))
+        .unwrap();
+        let watch = &cfg.watches[0];
+        assert_eq!(watch.effective_filter().authors, vec!["npub1watched"]);
+        assert_eq!(watch.effective_filter().keywords, vec!["opencrab"]);
+        assert_eq!(watch.effective_filter().kinds, vec![1, 7]);
+        assert_eq!(watch.max_items, DEFAULT_BUNDLE_MAX_ITEMS);
+        assert!(watches_beyond_self(watch.effective_filter()));
+    }
+
+    #[test]
+    fn omitted_max_items_defaults_to_50() {
+        let cfg: InstanceConfig = serde_json::from_value(serde_json::json!({
+            "relays": ["wss://example.invalid"],
+            "self_pubkey": "aa".repeat(32),
+            "name": "crab",
+            "watches": [{
+                "id": 1,
+                "interval_secs": 30,
+                "filter_json": { "authors": ["npub1watched"] }
+            }]
+        }))
+        .unwrap();
+        assert_eq!(cfg.watches[0].max_items, 50);
+        validate_instance_config(&cfg).unwrap();
+    }
+
+    #[test]
+    fn explicit_max_items_is_kept() {
+        let cfg: InstanceConfig = serde_json::from_value(serde_json::json!({
+            "relays": ["wss://example.invalid"],
+            "self_pubkey": "aa".repeat(32),
+            "name": "crab",
+            "watches": [{
+                "id": 1,
+                "interval_secs": 30,
+                "max_items": 10,
+                "filter_json": { "authors": ["npub1watched"] }
+            }]
+        }))
+        .unwrap();
+        assert_eq!(cfg.watches[0].max_items, 10);
+        validate_instance_config(&cfg).unwrap();
+    }
+
+    #[test]
+    fn non_positive_max_items_is_fail_loud() {
+        let mut cfg = sample_config();
+        cfg.watches.push(WatchPlacement {
+            id: 1,
+            interval_secs: 30,
+            max_items: 0,
+            filter: WatchFilter::default(),
+            filter_json: None,
+        });
+        let err = validate_instance_config(&cfg).unwrap_err();
+        assert!(err.to_string().contains("max_items"), "{err}");
+        cfg.watches[0].max_items = -1;
+        let err = validate_instance_config(&cfg).unwrap_err();
+        assert!(err.to_string().contains("max_items"), "{err}");
+    }
+
+    #[test]
+    fn mention_lane_filter_adds_name_not_hex() {
+        let cfg = sample_config();
+        let filter = mention_lane_filter(&cfg);
+        assert_eq!(filter.keywords, vec!["crab".to_string()]);
+        assert!(
+            !filter.keywords.contains(&cfg.self_pubkey),
+            "hex pubkey must not be a keyword: {:?}",
+            filter.keywords
+        );
+        assert_eq!(filter.npub.as_deref(), Some(cfg.self_pubkey.as_str()));
+        assert!(filter.kinds.contains(&1), "{:?}", filter.kinds);
+        assert!(filter.kinds.contains(&7), "{:?}", filter.kinds);
+        assert!(!watches_beyond_self(&cfg.filter));
+    }
+
+    #[test]
+    fn empty_name_is_fail_loud() {
+        let mut cfg = sample_config();
+        cfg.name = Some("   ".into());
+        let err = validate_instance_config(&cfg).unwrap_err();
+        assert!(err.to_string().contains("name"), "{err}");
+        cfg.name = None;
+        let err = validate_instance_config(&cfg).unwrap_err();
+        assert!(err.to_string().contains("name"), "{err}");
+    }
+}

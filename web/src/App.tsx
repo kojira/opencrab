@@ -21,6 +21,7 @@ import Workspace from './pages/Workspace';
 import AgentChannels from './pages/AgentChannels';
 import AgentAllowedCommands from './pages/AgentAllowedCommands';
 import AgentLlmLogs from './pages/AgentLlmLogs';
+import AgentToolLogs from './pages/AgentToolLogs';
 import SystemSettings from './pages/SystemSettings';
 import Setup from './pages/Setup';
 
@@ -50,6 +51,7 @@ export default function App() {
             <Route path="channels" element={<AgentChannels />} />
             <Route path="allowed-commands" element={<AgentAllowedCommands />} />
             <Route path="llm-logs" element={<AgentLlmLogs />} />
+            <Route path="tool-logs" element={<AgentToolLogs />} />
           </Route>
           <Route path="/sessions" element={<Sessions />} />
           <Route path="/sessions/:id" element={<SessionDetail />} />

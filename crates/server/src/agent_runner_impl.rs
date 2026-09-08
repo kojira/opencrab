@@ -29,6 +29,7 @@ impl opencrab_discord::AgentRunner for AppState {
             .unwrap_or(false)
     }
 
+    // 誰か・権限の計算本体（ゲートは accept_inbound に渡すだけ）。
     fn is_channel_whitelisted_for_agent(&self, channel_id: &str, agent_id: &str) -> bool {
         self.db
             .lock()

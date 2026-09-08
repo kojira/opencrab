@@ -1,0 +1,11 @@
+# opencrab-gate-client
+
+in-tree Rust gateway 共用の V3 protocol=2 client / wire / json。core crate の wire DTO は依存しない。独立実装の原則は `samples/` にだけ適用する（POLICY-BUILTIN-GATES 裁定 3）。
+
+| ファイル | 役割 |
+|---|---|
+| `client.rs` | 1 instance = 1 UDS。`connect` は 1 回（rust-unit）。`spawn` は production 経路（指数 backoff 再接続 + hello replay）。`SayPolicy::RejectExternal` は say を投稿せず `external_rejected`。`post_said_with_author` は event ごとの author。turn 実行中でも別 origin の said を送る（core の session queue 32 が直列化する。`PostRefuse::Busy` はキュー満杯の応答にだけ使う）。`post_said_receipt` は Bundle member（ack までだけ `pending_turn` を残す。`CompletedNoReply` は activity started）。hello / bind / said / say / close を info |
+| `wire.rs` | frame の読写。core DTO を使わない |
+| `json.rs` | duplicate member 拒否 |
+
+抽出元は `crates/web-gateway/src/v3/{client,wire,json}.rs`。機械的移動のみで、挙動は変えない。

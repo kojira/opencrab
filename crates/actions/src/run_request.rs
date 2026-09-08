@@ -13,6 +13,23 @@ use crate::subtask::{SubtaskCompletionSink, SubtaskRegistry};
 use crate::subtask_notify::SubtaskRunNotifier;
 use crate::traits::CallerIdentity;
 
+/// #898: 継続分岐の途中発話を配送・保存する非同期フック（core の同名型と一致させる）。
+/// 失敗（Err）は継続を止めてターンを失敗させる（§13.1 j）。
+pub type ContinuationSpeechHook = Arc<
+    dyn Fn(
+            String,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// #964: 次の LLM request に新しく含める said の origin を read state（👀）として gateway へ
+/// 通知する非同期フック。best-effort（Result を返さない）。
+pub type ReadOriginHook = Arc<
+    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
+>;
+
 /// 走行中注入（#289）の対象範囲（#323 / B2）。
 ///
 /// #289 の走行中注入はターン開始後に届いたユーザー発言を、走っているターンの入力へ
@@ -61,6 +78,17 @@ pub struct RunRequest {
     pub trigger_message_id: Option<String>,
     /// 応答テキスト確定時の即時コールバック（Discord への先行送信等）。
     pub on_response_text: Option<Arc<dyn Fn(String) + Send + Sync>>,
+    /// #898: 末尾 CONTINUE で継続する text-only イテレーションの途中発話を、次イテレーション前に
+    /// **ループ中で配送・保存する**非同期フック（§12.2/§13.1 j）。REST は responses への追加、
+    /// extgate V3 は途中発話配送、intake は保存を行い、配送失敗（Err）は継続を止めてターンを
+    /// 失敗させる。`on_response_text` は最終・text+tool でも発火するため区別できず流用不可。
+    pub on_continuation_speech: Option<ContinuationSpeechHook>,
+    /// #964: 次の LLM request に新しく含める said の origin を、`llm.chat` の直前に read state
+    /// （👀）として通知するフック。extgate V3 だけが渡す。None なら通知しない。
+    pub on_read_origin: Option<ReadOriginHook>,
+    /// #964: 初回 LLM request に含まれる発端 said の origin。said の無い resume / heartbeat と
+    /// extgate 以外は None。通知は [`Self::on_read_origin`] がある場合だけ request 直前に行う。
+    pub initial_read_origin: Option<String>,
     /// 自動 dispatch（非ブロック / RFC #152 S3a）の完了再注入 sink（gateway 別）。
     /// Some のとき `run_agent_response` は depth0 でメインエンジンへ dispatcher を
     /// 注入し、dispatch 対象ツールを background subtask 化する。None なら従来どおり
@@ -122,8 +150,8 @@ pub struct RunRequest {
     /// 登録簿を後から覗く形にしないのは、run が返る前に決着した subtask が既に
     /// 除去されていて取りこぼす（＝まさに resume が来るケースを見落とす）ため。
     ///
-    /// `None`（既定）なら数えない。使うのは Discord の「発言終わり」判定だけで、
-    /// 他のゲートウェイは渡さない。
+    /// `None`（既定）なら数えない。Discord の legacy 経路と extgate の activity ended
+    /// `completed_target` 判定が、spawn を起こしたターンを idle と誤認しないために使う。
     pub subtask_starts: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
@@ -151,6 +179,9 @@ impl RunRequest {
             depth: 0,
             trigger_message_id: None,
             on_response_text: None,
+            on_continuation_speech: None,
+            on_read_origin: None,
+            initial_read_origin: None,
             completion_sink: None,
             subtask_registry: None,
             reply_target: None,
@@ -184,6 +215,24 @@ impl RunRequest {
 
     pub fn with_on_response_text(mut self, cb: Arc<dyn Fn(String) + Send + Sync>) -> Self {
         self.on_response_text = Some(cb);
+        self
+    }
+
+    /// #898: 継続分岐専用の途中発話フック（配送・保存・失敗伝播）を設定する。
+    pub fn with_on_continuation_speech(mut self, cb: ContinuationSpeechHook) -> Self {
+        self.on_continuation_speech = Some(cb);
+        self
+    }
+
+    /// #964: LLM request 直前の read state（👀）通知フックを設定する。
+    pub fn with_on_read_origin(mut self, cb: ReadOriginHook) -> Self {
+        self.on_read_origin = Some(cb);
+        self
+    }
+
+    /// #964: 初回 LLM request に含まれる発端 said の origin を設定する。
+    pub fn with_initial_read_origin(mut self, origin: impl Into<String>) -> Self {
+        self.initial_read_origin = Some(origin.into());
         self
     }
 

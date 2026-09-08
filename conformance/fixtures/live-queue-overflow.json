@@ -1,0 +1,30 @@
+{
+  "name": "live-queue-overflow",
+  "prelude": "hello_bind",
+  "steps": [
+    {
+      "op": "uds_send_says",
+      "count": 32,
+      "id_prefix": "q",
+      "binding_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "expect_ok": true
+    },
+    {
+      "op": "uds_send",
+      "frame": {
+        "id": "q32",
+        "m": "say",
+        "binding_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "payload": { "text": "overflow" }
+      }
+    },
+    {
+      "op": "uds_recv",
+      "expect": {
+        "m": "err",
+        "id": "q32",
+        "code": "external_rejected"
+      }
+    }
+  ]
+}

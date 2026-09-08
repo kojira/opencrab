@@ -16,6 +16,7 @@ const tabs = [
   { key: 'channels', path: '/channels', icon: 'tag', labelKey: 'agentNav.channels' },
   { key: 'allowed-commands', path: '/allowed-commands', icon: 'terminal', labelKey: 'agentNav.allowedCommands' },
   { key: 'llm-logs', path: '/llm-logs', icon: 'receipt_long', labelKey: 'agentNav.llmLogs' },
+  { key: 'tool-logs', path: '/tool-logs', icon: 'handyman', labelKey: 'agentNav.toolLogs' },
   { key: 'analytics', path: '/analytics', icon: 'analytics', labelKey: 'agentNav.analytics' },
 ];
 

@@ -103,3 +103,56 @@ export function updateNostrRelayConfig(
 ): Promise<UpdateNostrRelayResult> {
   return api.put(`/agents/${agentId}/nostr-relay`, body);
 }
+
+// ---- session_watches（Nostr 設定経路の拡張 / 工程 5-a）----
+
+export interface SessionWatchDto {
+  id: number;
+  session_id: string;
+  agent_id: string;
+  interval_secs: number;
+  filter: {
+    authors?: string[];
+    keywords?: string[];
+    kinds?: number[];
+  };
+  created_at: string;
+}
+
+export interface WatchWriteBody {
+  session_id: string;
+  interval_secs: number;
+  filter: {
+    authors: string[];
+    keywords: string[];
+    kinds: number[];
+  };
+}
+
+export function listSessionWatches(
+  agentId: string,
+): Promise<{ watches: SessionWatchDto[] }> {
+  return api.get(`/agents/${agentId}/nostr/watches`);
+}
+
+export function createSessionWatch(
+  agentId: string,
+  body: WatchWriteBody,
+): Promise<{ created: boolean; watch: SessionWatchDto }> {
+  return api.post(`/agents/${agentId}/nostr/watches`, body);
+}
+
+export function updateSessionWatch(
+  agentId: string,
+  watchId: number,
+  body: WatchWriteBody,
+): Promise<{ updated: boolean; watch: SessionWatchDto }> {
+  return api.put(`/agents/${agentId}/nostr/watches/${watchId}`, body);
+}
+
+export function deleteSessionWatch(
+  agentId: string,
+  watchId: number,
+): Promise<{ deleted: boolean }> {
+  return api.del(`/agents/${agentId}/nostr/watches/${watchId}`);
+}

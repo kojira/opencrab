@@ -101,24 +101,6 @@ pub fn record_inbound_message(
     false
 }
 
-/// NO_REPLY（沈黙の明示）。
-pub fn record_agent_no_reply(conn: &Connection, agent_id: &str, session_id: &str) {
-    insert_session_log_best_effort(
-        conn,
-        &SessionLogRow {
-            id: None,
-            agent_id: agent_id.to_string(),
-            session_id: session_id.to_string(),
-            log_type: "speech".to_string(),
-            content: "NO_REPLY".to_string(),
-            speaker_id: Some(agent_id.to_string()),
-            turn_number: None,
-            metadata_json: Some(serde_json::json!({"no_reply": true}).to_string()),
-            created_at: None,
-        },
-    );
-}
-
 /// エージェントがゲートウェイへ返した応答（Discord / Nostr 共通）。
 ///
 /// metadata の `triggered_by` 等の差分は [`AgentReplyContext`] で表す。
@@ -143,7 +125,7 @@ pub fn record_outbound_reply(
     );
 }
 
-/// セッション管理 REST 経由のエージェント応答。
+/// REST 経由のエージェント応答（sessions.rs / agents_messages.rs 共通の形）。
 ///
 /// ゲートウェイ経由の応答と違い `source` を持たない（統合前からそう）。
 pub fn record_rest_agent_reply(

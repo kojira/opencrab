@@ -27,8 +27,9 @@ pub use gateway_actions::{spawn_activity_tool_event_sink, DiscordWebhookNotifier
 pub use manager::DiscordGatewayManager;
 pub use message_loop::run_discord_loop;
 pub use owner_warning::{
-    gateway_will_start, warn_if_agent_gateway_owner_unset, warn_if_shared_gateway_owner_unset,
-    warn_inbound_message_dropped, warn_inbound_stalled,
+    gateway_will_start, warn_discord_client_task_exited, warn_if_agent_gateway_owner_unset,
+    warn_if_shared_gateway_owner_unset, warn_inbound_message_dropped, warn_inbound_stalled,
+    warn_interaction_recv_stalled,
 };
 pub use renderer::DiscordRenderer;
 
@@ -96,24 +97,19 @@ pub trait AgentRunner: opencrab_actions::AgentRuntime {
     /// チャンネルが書き込み可か。DB 不可時は fail-closed（false）。
     fn is_channel_writable(&self, channel_id: &str) -> bool;
 
-    /// チャンネルがこのエージェントのホワイトリストにあるか。fail-closed。
-    fn is_channel_whitelisted_for_agent(&self, channel_id: &str, agent_id: &str) -> bool;
-
-    /// DM を受け付けるか（いずれかのエージェントが信頼していれば true の事前ゲート）。
-    /// owner は常に許可。DB 不可時は fail-closed。
-    fn dm_allowed_any(&self, sender_id: &str, agent_ids: &[String], owner_discord_id: &str)
-        -> bool;
-
-    /// DM を受け付けるか（エージェント個別ゲート）。owner は常に許可。fail-closed。
-    fn dm_allowed(&self, sender_id: &str, agent_id: &str, owner_discord_id: &str) -> bool;
-
-    /// 送信者の CallerIdentity を解決する（owner > trusted_users の permission > Agent）。
+    // 誰か・権限の計算本体。ゲートは [`opencrab_actions::accept_inbound`] に渡すだけ。
     fn resolve_caller(
         &self,
         sender_id: &str,
         agent_ids: &[String],
-        owner_discord_id: &str,
+        owner_id: &str,
     ) -> opencrab_actions::CallerIdentity;
+
+    fn dm_allowed_any(&self, sender_id: &str, agent_ids: &[String], owner_id: &str) -> bool;
+
+    fn dm_allowed(&self, sender_id: &str, agent_id: &str, owner_id: &str) -> bool;
+
+    fn is_channel_whitelisted_for_agent(&self, channel_id: &str, agent_id: &str) -> bool;
 
     // ---- per-agent ゲートウェイ（#40） ----
 
