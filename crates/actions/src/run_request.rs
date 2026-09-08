@@ -24,8 +24,8 @@ pub type ContinuationSpeechHook = Arc<
         + Sync,
 >;
 
-/// #930: 走行中に畳み込んだ said の origin を read state（👀）として gateway へ通知する
-/// 非同期フック（core の `FoldedOriginHook` と一致させる）。best-effort（Result を返さない）。
+/// #964: 次の LLM request に新しく含める said の origin を read state（👀）として gateway へ
+/// 通知する非同期フック。best-effort（Result を返さない）。
 pub type ReadOriginHook = Arc<
     dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
 >;
@@ -83,9 +83,12 @@ pub struct RunRequest {
     /// extgate V3 は途中発話配送、intake は保存を行い、配送失敗（Err）は継続を止めてターンを
     /// 失敗させる。`on_response_text` は最終・text+tool でも発火するため区別できず流用不可。
     pub on_continuation_speech: Option<ContinuationSpeechHook>,
-    /// #930: 走行中に畳み込んだ said を LLM へ渡す時点で、その origin を read state（👀）として
-    /// 通知するフック。extgate V3 だけが渡す。None なら通知しない（従来挙動）。
+    /// #964: 次の LLM request に新しく含める said の origin を、`llm.chat` の直前に read state
+    /// （👀）として通知するフック。extgate V3 だけが渡す。None なら通知しない。
     pub on_read_origin: Option<ReadOriginHook>,
+    /// #964: 初回 LLM request に含まれる発端 said の origin。said の無い resume / heartbeat と
+    /// extgate 以外は None。通知は [`Self::on_read_origin`] がある場合だけ request 直前に行う。
+    pub initial_read_origin: Option<String>,
     /// 自動 dispatch（非ブロック / RFC #152 S3a）の完了再注入 sink（gateway 別）。
     /// Some のとき `run_agent_response` は depth0 でメインエンジンへ dispatcher を
     /// 注入し、dispatch 対象ツールを background subtask 化する。None なら従来どおり
@@ -178,6 +181,7 @@ impl RunRequest {
             on_response_text: None,
             on_continuation_speech: None,
             on_read_origin: None,
+            initial_read_origin: None,
             completion_sink: None,
             subtask_registry: None,
             reply_target: None,
@@ -220,9 +224,15 @@ impl RunRequest {
         self
     }
 
-    /// #930: read state（👀）通知フックを設定する。
+    /// #964: LLM request 直前の read state（👀）通知フックを設定する。
     pub fn with_on_read_origin(mut self, cb: ReadOriginHook) -> Self {
         self.on_read_origin = Some(cb);
+        self
+    }
+
+    /// #964: 初回 LLM request に含まれる発端 said の origin を設定する。
+    pub fn with_initial_read_origin(mut self, origin: impl Into<String>) -> Self {
+        self.initial_read_origin = Some(origin.into());
         self
     }
 

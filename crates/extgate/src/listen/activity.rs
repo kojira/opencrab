@@ -9,7 +9,7 @@ pub async fn emit_activity(
     binding_id: &str,
     activity_id: &str,
     activity_state: &str,
-    // R2(👀): started が読み取るターン発端の origin。started のときだけ Some を渡す（ended は None）。
+    // #964: LLM request 直前の read 通知だけが origin を持つ。started / ended は None。
     origin: Option<&str>,
     // #915: ended で 🏁 を付ける say delivery_id / reply call_id。無ければ field を送らない。
     completed_target: Option<&str>,

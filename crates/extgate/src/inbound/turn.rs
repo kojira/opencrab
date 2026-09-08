@@ -98,15 +98,15 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                     .start_session_turn_count
                     .fetch_add(1, Ordering::SeqCst);
                 let activity_id = uuid::Uuid::new_v4().to_string();
-                // R2(👀): started に発端 origin を載せる。gateway はこの時点で 👀 を付ける
-                // （record-only/held はここへ来ないので「読まれるまで付かない」が保たれる）。
+                // #964: started は typing の開始だけを通知する。発端 origin の read（👀）は、
+                // その origin を含む初回 LLM request が完成した後、chat 呼び出し直前に別途 emit する。
                 emit_activity(
                     &state,
                     &instance_id,
                     &binding_id,
                     &activity_id,
                     "started",
-                    Some(origin.as_str()),
+                    None,
                     None,
                 )
                 .await;
@@ -220,24 +220,29 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                     caller.clone(),
                                 )
                                 .with_image_urls(images.clone())
+                                // #964: 発端 origin は started へ載せず、初回 LLM request の直前に
+                                // read+origin として通知する。
+                                .with_initial_read_origin(origin.clone())
                                 // 発端イベントの origin を subtask へ引き継ぐ。subtask 完了時の
                                 // resume ターンの say がこの origin へ返信できるようにする
                                 // （settlement→SubtaskSettled.reply_target 経由）。
                                 .with_reply_target(origin.clone())
                                 .with_subtask_starts(Arc::clone(&hook_subtask_starts))
-                                // #930: 走行中に畳み込んだ said を LLM へ渡す時点で read+origin を emit
-                                // （👀 を返信の前に付ける）。同時にその origin を「畳み込み済み」に記録し、
-                                // 後で dequeue するその said 自身の独立ターンを起こさない（第2欠陥）。
+                                // #964: 発端と走行中に畳み込んだ said の read+origin を、それぞれを
+                                // 含む exact request の `llm.chat` 直前に emit する。畳み込み origin
+                                // だけは従来どおり記録し、後続の独立ターンを起こさない。
                                 .with_on_read_origin({
                                     let hs = Arc::clone(&hook_state);
                                     let hi = hook_instance.clone();
                                     let hb = hook_binding.clone();
                                     let hse = hook_session.clone();
+                                    let initial_origin = origin.clone();
                                     Arc::new(move |origin: String| {
                                         let hs = Arc::clone(&hs);
                                         let hi = hi.clone();
                                         let hb = hb.clone();
                                         let hse = hse.clone();
+                                        let initial_origin = initial_origin.clone();
                                         Box::pin(async move {
                                             let activity_id = uuid::Uuid::new_v4().to_string();
                                             crate::listen::emit_activity(
@@ -252,9 +257,12 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                             .await;
                                             // #933: 畳み込んだ said の seq を external_origins から
                                             // 引き、per-session の畳み込み高水位へ単調に記録する
-                                            // （非消費）。以後この seq 以下の独立ターンは skip される。
-                                            if let Some(seq) = seq_for_origin(&hs, &hb, &origin) {
-                                                hs.mark_folded_seq(&hse, seq);
+                                            // （非消費）。発端自身は fold ではないので記録しない。
+                                            if origin != initial_origin {
+                                                if let Some(seq) = seq_for_origin(&hs, &hb, &origin)
+                                                {
+                                                    hs.mark_folded_seq(&hse, seq);
+                                                }
                                             }
                                         })
                                     })

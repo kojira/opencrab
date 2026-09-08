@@ -36,10 +36,10 @@ type ContinuationSpeechHook = Arc<
         + Sync,
 >;
 
-/// #930: 走行中に畳み込んだ said を LLM へ渡す時点で、その said の origin を gateway へ
-/// 通知する **非同期フック**（read state の付与＝👀）。best-effort（失敗してもターンは続ける）
-/// なので Result は返さない。extgate が emit_activity(state="read", origin) の配線を渡す。
-type FoldedOriginHook = Arc<
+/// #964: 次の LLM request に新しく含める said の origin を gateway へ通知する非同期フック
+/// （read state の付与＝👀）。best-effort（失敗してもターンは続ける）なので Result は返さない。
+/// extgate が emit_activity(state="read", origin) の配線を渡す。
+type ReadOriginHook = Arc<
     dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
 >;
 
@@ -101,8 +101,12 @@ pub struct SkillEngine {
     /// イテレーションで LLM を呼ぶ直前に引き、新着があれば user メッセージとして
     /// 足す。None なら従来どおりターン開始時の履歴だけで回る。
     live_inbound: Option<Arc<dyn LiveInboundSource>>,
-    /// #930: 畳み込んだ said の origin を read state として通知するフック。None なら通知しない。
-    on_folded_origin: Option<FoldedOriginHook>,
+    /// #964: request に新しく含める origin を `llm.chat` の直前に read state として通知する
+    /// フック。None なら通知しない。
+    on_read_origin: Option<ReadOriginHook>,
+    /// 初回 request に含まれる発端 origin。`run_agent_response` の loop restart を跨いでも
+    /// 1 回だけ通知するため、request 境界で consume する。
+    initial_read_origin: std::sync::Mutex<Option<String>>,
     /// 各 ChatRequest に載せる出力トークン上限（#676）。使用モデルの実能力値を
     /// `model_pricing` から解決して process 側で注入する（[`Self::set_max_output_tokens`]）。
     /// `None` は「上限未指定」＝プロバイダの既定に委ねる（テスト / sub-engine 用）。
@@ -147,7 +151,8 @@ impl SkillEngine {
             tool_dispatcher: None,
             tool_result_offload: None,
             live_inbound: None,
-            on_folded_origin: None,
+            on_read_origin: None,
+            initial_read_origin: std::sync::Mutex::new(None),
             max_output_tokens: None,
             conversation_high: None,
             conversation_low: None,
@@ -190,9 +195,20 @@ impl SkillEngine {
         self.live_inbound = Some(source);
     }
 
-    /// #930: read state（👀）通知フックを設定する。extgate 経路だけが渡す。
-    pub fn set_on_folded_origin(&mut self, cb: FoldedOriginHook) {
-        self.on_folded_origin = Some(cb);
+    /// #964: LLM request 直前の read state（👀）通知フックを設定する。extgate 経路だけが渡す。
+    ///
+    /// 名前は既存 API とテスト FQN の互換のため維持するが、発端 origin と走行中に畳み込んだ
+    /// origin の両方を request 境界で通知する。
+    pub fn set_on_folded_origin(&mut self, cb: ReadOriginHook) {
+        self.on_read_origin = Some(cb);
+    }
+
+    /// #964: 初回 LLM request に含まれる発端 said の origin を設定する。
+    pub fn set_initial_read_origin(&mut self, origin: String) {
+        *self
+            .initial_read_origin
+            .get_mut()
+            .expect("initial read origin lock poisoned") = Some(origin);
     }
 
     /// 上限超過 tool_result の退避先を設定する（#284）。

@@ -204,8 +204,9 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
                         caller.clone(),
                     )
                     .with_subtask_starts(Arc::clone(&subtask_starts))
-                    // #930: resume ターンで畳み込んだ said にも read+origin を付ける（付与規則は
-                    // 主ターンと同一・1 origin 1 回）。同時に origin を畳み込み済みに記録し独立ターンを抑止。
+                    // #964: resume ターンで畳み込んだ said にも、その said を含む LLM request の
+                    // 直前に read+origin を付ける（主ターンと同じ境界・1 origin 1 回）。同時に
+                    // origin を畳み込み済みに記録し独立ターンを抑止。
                     .with_on_read_origin({
                         let state = Arc::clone(&sink.state);
                         let instance_id = sink.instance_id.clone();

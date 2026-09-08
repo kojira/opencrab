@@ -9,11 +9,9 @@
 // ターンを継続（CONTINUE）してセッションロックを保持したまま回る。走行中に B が届くと
 // core は B を session log に記録し、A ターンの継続イテレーション（iterations>1）で
 // `poll_new_messages` により B を畳み込む（llm_logs: is_bot_iteration=1 に B が入る）。
-// だが現状 👀 は `activity started` の origin にだけ付く（run.rs:284）。畳み込みには
-// started が出ないので、B の 👀 は「B 自身の後続ターン」の started まで遅れる＝**返信の後**。
-//
-// 期待（設計）: 畳み込み時点で core が `activity read`+origin(B) を出し、gateway が
-// その時点で B へ 👀 を付ける（1 origin 1 回）。＝ B の 👀 は B への返信より**前**。
+// #964 では started を typing 専用にし、発端 A も畳み込み B も、それぞれを新しく含む
+// exact LLM request の直前に core が `activity read`+origin を出す。gateway はその時点で
+// 👀 を付ける（1 origin 1 回）。＝ B の 👀 は B への返信より**前**。
 //
 // 観測境界（§1 標準5点）:
 //  (1) 配送: B への返信 say が出る。
@@ -24,8 +22,8 @@
 //  (5) 🏁: B への返信に 🏁 0（A の subtask 進行中＝idle でない）。
 //  (6) 外形（第2欠陥）: B への返信 say はちょうど 1 件（現 tip は畳み込み＋独立ターンで 2 件＝赤）。
 //  (7) 外形: B（6302）への 🤐 は 0（回帰ガード）。
-// 現 tip は (4) が **赤**（👀 が返信の後）。(6) は defect-1 や gateway の per-origin dedup を直しても
-// 独立ターンが残る限り赤のまま（外形 pin）。本テストの独立ターンは返信変種
+// (6) は request 境界や gateway の per-origin dedup だけを直しても独立ターンが残る限り赤のまま
+// （外形 pin）。本テストの独立ターンは返信変種
 // （reply_on_independent=true）で二重返信を say 件数で捉える。
 //
 // #930 第2欠陥（二重処理）の LLM 呼び出し回数による代理は companion テスト
@@ -103,7 +101,7 @@ async fn scenario_930_eyes_on_read_folded_midturn_message() {
         "B 返信時点で subtask が走行中でない（sleep 窓を過ぎた・テスト前提崩れ）: {:?}",
         captured(&buf)
     );
-    // 現 tip は 👀 が返信の後に付く。その遅延 👀 が現れるまでの猶予（付かない/遅い両方を捉える）。
+    // 非同期配送の重複や遅延が現れるまでの猶予（付かない/遅い両方を捉える）。
     tokio::time::sleep(Duration::from_millis(1200)).await;
 
     let caps = captured(&buf);

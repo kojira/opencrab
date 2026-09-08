@@ -58,7 +58,16 @@ impl SkillEngine {
         );
 
         let mut iterations = 0;
-        // #930: このターンで read（👀）を通知済みの origin。1 origin 1 回に絞る。
+        // #964: 次の request に新しく含める origin。発端は初回だけここへ入り、走行中の新着は
+        // 実際に messages へ append したイテレーションで加える。loop restart が同じ engine を
+        // 再利用しても発端を再通知しないよう、engine 側の値はここで consume する。
+        let initial_read_origin = self
+            .initial_read_origin
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let mut pending_read_origins: Vec<String> = initial_read_origin.into_iter().collect();
+        // 同じ run 内で既に通知した origin は再び pending に入れない。
         let mut read_emitted_origins: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         let mut total_tool_calls = 0;
@@ -111,8 +120,8 @@ impl SkillEngine {
             // （Anthropic は同ロールを 1 ターンへ併合する）。
             if iterations > 1 {
                 if let Some(source) = &self.live_inbound {
-                    // #930: origin つきで引く。畳み込んだ said を LLM へ渡す **この時点** で、
-                    // その said の origin を read state として通知する（👀 を返信の前に付ける）。
+                    // #964: origin つきで引く。ここでは request に含める本文と origin の組を
+                    // pending に積むだけにし、read 通知は request 構築後の `llm.chat` 直前まで遅らせる。
                     for folded in source.poll_new_with_origin() {
                         let crate::FoldedInbound { text, origin } = folded;
                         tracing::info!(
@@ -129,12 +138,12 @@ impl SkillEngine {
                             tool_call_id: None,
                         });
                         turn_ledger.record(format!("live:{}", messages.len()), &text);
-                        // #930: この said を読んだ時点で read（👀）を付ける。1 origin 1 回。
+                        // 同じ origin が同一 poll や以前の request に重なっても通知は 1 回だけ。
                         if let Some(origin) = origin {
-                            if read_emitted_origins.insert(origin.clone()) {
-                                if let Some(cb) = &self.on_folded_origin {
-                                    cb(origin).await;
-                                }
+                            if !read_emitted_origins.contains(&origin)
+                                && !pending_read_origins.contains(&origin)
+                            {
+                                pending_read_origins.push(origin);
                             }
                         }
                     }
@@ -192,6 +201,20 @@ impl SkillEngine {
             let request_for_log = request.clone();
             let requested_at =
                 chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+
+            // #964: この exact request に新しく含めた origin の read 通知を、request が完成した後、
+            // `llm.chat(request).await` の直前に逐次 emit する。対象が無ければ何もしない。
+            // drain してから呼ぶことで、同じ origin は次の request で重複通知しない。
+            if let Some(cb) = &self.on_read_origin {
+                for origin in pending_read_origins.drain(..) {
+                    if read_emitted_origins.insert(origin.clone()) {
+                        cb(origin).await;
+                    }
+                }
+            } else {
+                pending_read_origins.clear();
+            }
+
             let call_start = std::time::Instant::now();
             let llm_result = self.llm.chat(request).await;
             let latency_ms = call_start.elapsed().as_millis() as i64;
