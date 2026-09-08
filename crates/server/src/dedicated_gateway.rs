@@ -15,13 +15,15 @@ pub type V3LivenessProbe = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 #[async_trait]
 pub trait V3ProcessControl: Send + Sync {
+    fn validate_start(&self) -> anyhow::Result<()>;
     async fn start(&self, agent_id: &str) -> anyhow::Result<()>;
     async fn stop(&self, agent_id: &str);
     async fn shutdown_all(&self);
 }
 
 struct V3IdentityProvisioning {
-    inner: Arc<dyn GatewayIdentityProvisioning>,
+    identity: Arc<dyn GatewayIdentityProvisioning>,
+    gateway: SharedAgentGateway,
     process: Arc<dyn V3ProcessControl>,
     lifecycle: Arc<tokio::sync::Mutex<()>>,
 }
@@ -31,8 +33,12 @@ impl GatewayIdentityProvisioning for V3IdentityProvisioning {
     async fn adopt_identity(&self, agent_id: &str, identity: &str) -> anyhow::Result<String> {
         let _lifecycle = self.lifecycle.lock().await;
         self.process.stop(agent_id).await;
-        let adopted = self.inner.adopt_identity(agent_id, identity).await?;
-        self.process.start(agent_id).await?;
+        self.process.validate_start()?;
+        let adopted = self.identity.adopt_identity(agent_id, identity).await?;
+        if let Err(error) = self.process.start(agent_id).await {
+            self.gateway.stop(agent_id).await;
+            return Err(error);
+        }
         Ok(adopted)
     }
 }
@@ -74,10 +80,14 @@ impl AgentGatewayLifecycle for V3OnlyGateway {
         // serving the previous placement/credential.
         if let Some(process) = &self.process {
             process.stop(agent_id).await;
+            process.validate_start()?;
         }
         self.inner.start(agent_id).await?;
         if let Some(process) = &self.process {
-            process.start(agent_id).await?;
+            if let Err(error) = process.start(agent_id).await {
+                self.inner.stop(agent_id).await;
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -125,7 +135,8 @@ impl AgentGatewayLifecycle for V3OnlyGateway {
         let inner = self.inner.identity_provisioning()?;
         match &self.process {
             Some(process) => Some(Arc::new(V3IdentityProvisioning {
-                inner,
+                identity: inner,
+                gateway: self.inner.clone(),
                 process: process.clone(),
                 lifecycle: self.lifecycle.clone(),
             })),
@@ -163,6 +174,33 @@ mod tests {
         }
         async fn restore_all(&self) {}
         async fn shutdown_all(&self) {}
+    }
+
+    struct RejectingProcess;
+
+    #[async_trait]
+    impl V3ProcessControl for RejectingProcess {
+        fn validate_start(&self) -> anyhow::Result<()> {
+            anyhow::bail!("V3 prerequisites unavailable")
+        }
+        async fn start(&self, _agent_id: &str) -> anyhow::Result<()> {
+            panic!("start must not run after validation failure")
+        }
+        async fn stop(&self, _agent_id: &str) {}
+        async fn shutdown_all(&self) {}
+    }
+
+    #[tokio::test]
+    async fn v3_prerequisites_are_checked_before_inner_runtime_side_effects() {
+        let inner = Arc::new(FakeInner {
+            running: "none",
+            started: AtomicBool::new(false),
+        });
+        let gateway = V3OnlyGateway::new(inner.clone(), Arc::new(|_| false))
+            .with_process(Arc::new(RejectingProcess));
+        let error = gateway.start("agent").await.unwrap_err();
+        assert!(error.to_string().contains("prerequisites"));
+        assert!(!inner.started.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

@@ -153,10 +153,11 @@ from the dashboard. See
 
 `OPENCRAB_SECRET_MASTER_KEY` encrypts Nostr secret keys at rest (DB main keys and
 generated-key files) so they never sit in plaintext where an agent can read them. **It is
-required whenever any agent has Nostr configured** — if it is missing/invalid at boot the
-server still starts, but the Nostr subsystem does not (both sending and receiving stop,
-with a banner in the logs). Deployments that do not use Nostr can leave it unset and start
-normally.
+required whenever any agent has Nostr configured**. If an enabled Nostr row exists and the
+key is missing, invalid, or does not decrypt existing ciphertext, startup fails loudly. If all
+configured rows are disabled, the server may start with the Nostr subsystem unavailable and a
+banner in the logs; enabling still fails until the prerequisite is supplied. Deployments that do
+not use Nostr can leave it unset and start normally.
 
 - **Generate it** (32 random bytes, base64):
 

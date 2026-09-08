@@ -276,8 +276,8 @@
             })
         }
 
-        fn list_enabled_nostr_configs(&self) -> Vec<AgentNostrConfigRow> {
-            Vec::new()
+        fn list_enabled_nostr_configs(&self) -> anyhow::Result<Vec<AgentNostrConfigRow>> {
+            Ok(Vec::new())
         }
 
         fn get_nostr_config(&self, _agent_id: &str) -> Option<AgentNostrConfigRow> {

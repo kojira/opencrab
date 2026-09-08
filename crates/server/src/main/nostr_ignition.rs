@@ -97,6 +97,17 @@ impl NostrV3Controller {
         Ok(())
     }
 
+    fn validate_start_prerequisites(&self) -> anyhow::Result<()> {
+        if !self.ingress_v3 {
+            anyhow::bail!("Nostr gateway start requires gate.nostr_ingress = v3");
+        }
+        if self.core_socket.is_none() {
+            anyhow::bail!("Nostr V3 requires an absolute gate.listen_socket");
+        }
+        super::require_resolvable_binary("nostr-gateway", &self.gateway_bin)?;
+        super::require_resolvable_binary("nostaro", &self.nostaro_bin)
+    }
+
     pub(super) async fn start_all(&self) -> anyhow::Result<()> {
         let agent_ids: Vec<String> = {
             let conn = self
@@ -117,17 +128,14 @@ impl NostrV3Controller {
 
 #[async_trait::async_trait]
 impl V3ProcessControl for NostrV3Controller {
+    fn validate_start(&self) -> anyhow::Result<()> {
+        self.validate_start_prerequisites()
+    }
+
     async fn start(&self, agent_id: &str) -> anyhow::Result<()> {
         let _lifecycle = self.lifecycle.lock().await;
         self.supervisors.stop(agent_id).await;
-        if !self.ingress_v3 {
-            anyhow::bail!("Nostr gateway start requires gate.nostr_ingress = v3");
-        }
-        if self.core_socket.is_none() {
-            anyhow::bail!("Nostr V3 requires an absolute gate.listen_socket");
-        }
-        super::require_resolvable_binary("nostr-gateway", &self.gateway_bin)?;
-        super::require_resolvable_binary("nostaro", &self.nostaro_bin)?;
+        self.validate_start_prerequisites()?;
         self.start_plan(self.plan(agent_id)?).await
     }
 

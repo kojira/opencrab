@@ -70,7 +70,7 @@ pub trait NostrAgentRunner: AgentRuntime {
     // 宣言を分ける理由が無い。
 
     /// enabled な per-agent Nostr 設定一覧（起動時 restore 用）。
-    fn list_enabled_nostr_configs(&self) -> Vec<AgentNostrConfigRow>;
+    fn list_enabled_nostr_configs(&self) -> anyhow::Result<Vec<AgentNostrConfigRow>>;
 
     /// エージェントの Nostr 設定行を取得する（identity 切替で relays 継承に使う）。
     fn get_nostr_config(&self, agent_id: &str) -> Option<AgentNostrConfigRow>;

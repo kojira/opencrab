@@ -205,7 +205,7 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
 
     /// enabled な設定を DB から復元し、どれか一つでも現在設定を投影できなければ失敗する。
     pub async fn restore_from_db_checked(&self) -> anyhow::Result<()> {
-        for cfg in self.runner.list_enabled_nostr_configs() {
+        for cfg in self.runner.list_enabled_nostr_configs()? {
             let config = crate::config_from_row(&cfg);
             self.start_agent_gateway(&cfg.agent_id, &cfg.secret_key, config)
                 .await
