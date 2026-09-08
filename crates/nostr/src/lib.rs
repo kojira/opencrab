@@ -35,7 +35,6 @@ pub mod provision;
 pub mod pubkey;
 pub mod runner;
 pub mod session;
-pub mod shadow;
 pub mod sink;
 #[cfg(test)]
 mod test_support;
@@ -62,7 +61,7 @@ pub use fire_descriptor::NostrFire;
 pub use identity::NostrIdentityAdmin;
 pub use ingress::NostrIngress;
 pub use key_provisioning::NostrKeyProvisioning;
-pub use manager::{NostrGatewayManager, NostrInstanceFn, NostrProvisionFn, NostrReviseFn};
+pub use manager::{NostrGatewayManager, NostrProvisionFn, NostrReviseFn};
 pub use passthrough::NostrPassthrough;
 pub use provision::{instance_config_bytes, instance_config_value};
 pub use pubkey::{normalize_pubkey, to_npub};

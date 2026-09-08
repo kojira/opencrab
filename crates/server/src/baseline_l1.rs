@@ -151,16 +151,7 @@ pub fn collect_tools() -> Result<Value, String> {
     let without_transport = production_executor(true, None)?;
 
     #[cfg(feature = "discord")]
-    let discord = {
-        let gateway: Arc<dyn GatewayActions> =
-            Arc::new(opencrab_discord::DiscordGatewayActions::from_token(
-                "baseline-not-a-credential",
-                opencrab_db::Db::memory().map_err(|error| error.to_string())?,
-                std::env::temp_dir().to_string_lossy().to_string(),
-                None,
-            ));
-        definitions_json(&production_executor(true, Some(gateway))?, &disabled_names)
-    };
+    let discord = definitions_json(&without_transport, &disabled_names);
     #[cfg(not(feature = "discord"))]
     let discord: Vec<Value> = Vec::new();
 

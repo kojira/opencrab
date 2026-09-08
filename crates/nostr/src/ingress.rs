@@ -1,50 +1,18 @@
-//! 段階移行フラグ。既定は旧 in-process ループ。旧経路は削除しない。
+//! Nostr ingress mode. The external V3 gateway is the only supported runtime.
 
-/// `legacy`（既定） / `v3_shadow` / `v3`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NostrIngress {
     #[default]
-    Legacy,
-    V3Shadow,
     V3,
 }
 
 impl NostrIngress {
     pub fn parse(raw: &str) -> Option<Self> {
-        match raw.trim() {
-            "" | "legacy" => Some(Self::Legacy),
-            "v3_shadow" => Some(Self::V3Shadow),
-            "v3" => Some(Self::V3),
-            _ => None,
-        }
+        (raw.trim() == "v3").then_some(Self::V3)
     }
 
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Legacy => "legacy",
-            Self::V3Shadow => "v3_shadow",
-            Self::V3 => "v3",
-        }
-    }
-
-    /// 旧 in-process default/watch ループを回す。
-    pub fn runs_legacy_loops(self) -> bool {
-        matches!(self, Self::Legacy | Self::V3Shadow)
-    }
-
-    /// instance 行を DB に敷設する（binding は含まない）。
-    pub fn provisions_instance(self) -> bool {
-        matches!(self, Self::V3 | Self::V3Shadow)
-    }
-
-    /// instance と Binding PUT を敷設する。
-    pub fn provisions_binding(self) -> bool {
-        matches!(self, Self::V3)
-    }
-
-    /// Binding PUT / said / say を行わない shadow。parse/分類のメモリ内照合だけ。
-    pub fn shadows_only(self) -> bool {
-        matches!(self, Self::V3Shadow)
+        "v3"
     }
 }
 
@@ -53,38 +21,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_is_legacy() {
-        assert_eq!(NostrIngress::default(), NostrIngress::Legacy);
-        assert_eq!(NostrIngress::parse(""), Some(NostrIngress::Legacy));
-        assert_eq!(NostrIngress::parse("legacy"), Some(NostrIngress::Legacy));
-        assert!(NostrIngress::Legacy.runs_legacy_loops());
-        assert!(!NostrIngress::Legacy.provisions_instance());
-        assert!(!NostrIngress::Legacy.provisions_binding());
-        assert!(!NostrIngress::Legacy.shadows_only());
-    }
-
-    #[test]
-    fn v3_stops_legacy_loops_and_provisions() {
-        let m = NostrIngress::parse("v3").unwrap();
-        assert_eq!(m, NostrIngress::V3);
-        assert!(!m.runs_legacy_loops());
-        assert!(m.provisions_instance());
-        assert!(m.provisions_binding());
-        assert!(!m.shadows_only());
-    }
-
-    #[test]
-    fn v3_shadow_keeps_legacy_and_skips_binding_put() {
-        let m = NostrIngress::parse("v3_shadow").unwrap();
-        assert!(m.runs_legacy_loops());
-        assert!(m.provisions_instance());
-        assert!(!m.provisions_binding());
-        assert!(m.shadows_only());
-    }
-
-    #[test]
-    fn unknown_is_none() {
-        assert!(NostrIngress::parse("banana").is_none());
-        assert!(NostrIngress::parse("V3").is_none());
+    fn only_explicit_v3_is_accepted() {
+        assert_eq!(NostrIngress::parse("v3"), Some(NostrIngress::V3));
+        for removed in ["", "legacy", "v3_shadow", "V3", "banana"] {
+            assert_eq!(NostrIngress::parse(removed), None, "{removed}");
+        }
     }
 }

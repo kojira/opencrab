@@ -12,13 +12,12 @@ pub(super) struct BootstrapContext {
     pub(super) gate_socket: Option<std::path::PathBuf>,
     #[cfg(feature = "discord")]
     pub(super) gate_socket_for_discord: Option<String>,
+    #[cfg(feature = "nostr")]
+    pub(super) gate_socket_for_nostr: Option<String>,
     #[cfg(feature = "discord")]
     pub(super) attachment_inbox_root: std::path::PathBuf,
     #[cfg(feature = "discord")]
     pub(super) discord_ingress: opencrab_server::discord_provision::DiscordIngress,
-    pub(super) effective_voice: opencrab_voice::VoiceConfig,
-    #[cfg(feature = "nostr")]
-    pub(super) nostr_ingress: opencrab_nostr::NostrIngress,
     #[cfg(feature = "nostr")]
     pub(super) nostr_master_key: Option<opencrab_nostr::MasterKey>,
     #[cfg(feature = "nostr")]
@@ -44,26 +43,13 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
     // Load config from TOML (with env var expansion)
     let cfg = config::load_config("config/default.toml")?;
 
-    // 新しい通知先キーを空 url で書くと、旧キーの有効な値が黙って無効化される（#207）。
-    // 挙動（新キー優先 / 空 url は無効）は意図したものなので変えず、気づけるようにだけする。
-    cfg.warn_if_legacy_webhook_masked();
-
-    #[cfg(feature = "nostr")]
-    let nostr_ingress =
-        opencrab_nostr::NostrIngress::parse(&cfg.gate.nostr_ingress).ok_or_else(|| {
-            anyhow::anyhow!(
-                "gate.nostr_ingress は legacy|v3_shadow|v3（欠落=legacy）。得た値: {:?}",
-                cfg.gate.nostr_ingress
-            )
-        })?;
-
-    // Discord も同型（DESIGN-DISCORD-GATE §8.1）。未知値は起動失敗（fail-loud）。
+    // Discord is V3-only. Missing, legacy, shadow, and unknown values fail closed.
     #[cfg(feature = "discord")]
     let discord_ingress =
         opencrab_server::discord_provision::DiscordIngress::parse(&cfg.gate.discord_ingress)
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "gate.discord_ingress は legacy|v3_shadow|v3（欠落=legacy）。得た値: {:?}",
+                    "gate.discord_ingress は明示的な v3 が必須です。得た値: {:?}",
                     cfg.gate.discord_ingress
                 )
             })?;
@@ -112,6 +98,10 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
     let gate_socket_for_discord: Option<String> = gate_socket
         .as_ref()
         .map(|p| p.to_string_lossy().into_owned());
+    #[cfg(feature = "nostr")]
+    let gate_socket_for_nostr: Option<String> = gate_socket
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned());
     let extgate = Arc::new(opencrab_extgate::ExtgateState::new(db.clone(), gate_token));
     #[cfg(feature = "discord")]
     let attachment_inbox_root = {
@@ -135,6 +125,32 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
         Ok(conn) => opencrab_db::queries::has_any_agent_nostr_config(&conn).unwrap_or(false),
         Err(_) => false,
     };
+    #[cfg(feature = "nostr")]
+    let nostr_enabled = match db.lock() {
+        Ok(conn) => conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM agent_nostr_config WHERE enabled = 1)",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap_or(false),
+        Err(_) => false,
+    };
+    #[cfg(feature = "nostr")]
+    let _nostr_ingress = if nostr_enabled {
+        match opencrab_nostr::NostrIngress::parse(&cfg.gate.nostr_ingress) {
+            Some(opencrab_nostr::NostrIngress::V3) => opencrab_nostr::NostrIngress::V3,
+            _ => anyhow::bail!(
+                "Nostr 設定済み環境では gate.nostr_ingress = \"v3\" が必須です（legacy fallback は廃止）"
+            ),
+        }
+    } else {
+        opencrab_nostr::NostrIngress::V3
+    };
+    #[cfg(feature = "nostr")]
+    if nostr_enabled && gate_socket.is_none() {
+        anyhow::bail!("Nostr 設定済み環境では絶対パスの gate.listen_socket が必須です");
+    }
     #[cfg(feature = "nostr")]
     let mut nostr_master_key: Option<opencrab_nostr::MasterKey> = match master_key_parsed {
         Some(Ok(key)) => Some(key),
@@ -173,7 +189,13 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
     // Nostr サブシステムを起動してよいのは、（一致する）マスターキーが在るときだけ（#620）。
     // 無ければ（未設定 / 不正形式 / 既存暗号文と不一致）Nostr は起動しない＝送信も受信も止まる。
     #[cfg(feature = "nostr")]
-    let start_nostr = nostr_master_key.is_some();
+    if nostr_enabled && nostr_master_key.is_none() {
+        anyhow::bail!(
+            "enabled Nostr agent がありますが有効な OPENCRAB_SECRET_MASTER_KEY がありません"
+        );
+    }
+    #[cfg(feature = "nostr")]
+    let start_nostr = nostr_enabled;
 
     // #620: 平文の at-rest 秘密を暗号化する移行（起動時 1 回・冪等・対象が無ければ no-op）。
     #[cfg(feature = "nostr")]
@@ -213,20 +235,6 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
     };
     let effective_llm = config::apply_llm_overrides(&cfg.llm, &llm_overrides);
     let llm_router = config::build_llm_router(&effective_llm)?;
-
-    // 実効 voice 設定: DB オーバーライド（完全置換）> TOML。
-    // 起動時の VC ランタイム構築にのみ使う（discord feature 無効時は未使用）。
-    #[cfg_attr(not(feature = "discord"), allow(unused_variables))]
-    let effective_voice: opencrab_voice::VoiceConfig = {
-        let conn = db.lock().unwrap();
-        match opencrab_db::queries::get_voice_config_override(&conn) {
-            Ok(Some(json)) => serde_json::from_str(&json).unwrap_or_else(|e| {
-                tracing::warn!("voice_config_override JSON is broken; using TOML: {e}");
-                cfg.voice.clone()
-            }),
-            _ => cfg.voice.clone(),
-        }
-    };
 
     let default_model = format!("{}:{}", cfg.llm.default_provider, cfg.llm.default_model);
 
@@ -316,13 +324,12 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
         gate_socket,
         #[cfg(feature = "discord")]
         gate_socket_for_discord,
+        #[cfg(feature = "nostr")]
+        gate_socket_for_nostr,
         #[cfg(feature = "discord")]
         attachment_inbox_root,
         #[cfg(feature = "discord")]
         discord_ingress,
-        effective_voice,
-        #[cfg(feature = "nostr")]
-        nostr_ingress,
         #[cfg(feature = "nostr")]
         nostr_master_key,
         #[cfg(feature = "nostr")]

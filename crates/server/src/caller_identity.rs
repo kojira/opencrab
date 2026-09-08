@@ -175,6 +175,7 @@ pub fn resolve_caller_identity_with_owner(
 ///   分岐を持たせて経路名で一貫させておく。
 ///
 /// 逆引きできなければ `None`（曖昧なときに通さない）。
+#[allow(dead_code)]
 pub(crate) fn resolve_co_agent_uuid(
     conn: &rusqlite::Connection,
     platform: &str,

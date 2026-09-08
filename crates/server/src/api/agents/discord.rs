@@ -95,8 +95,7 @@ pub async fn patch_discord_config(
     if let Some(gw) = state.gateways.get(gateway_kinds::DISCORD) {
         // Stop the current gateway first (no-op if not running).
         gw.stop(&id).await;
-        // 起動条件（enabled かつトークンが空白でない）の判定は `start` の中にある
-        // （#191 段階2 PR3 で `gateway_will_start` ごと実装側へ持ち上げた）。
+        // 起動条件（enabled かつトークンが空白でない）の判定は`start`の中にある。
         // 条件を満たさずに見送られたときは以前と同じく**黙って何もしない**ので、
         // `StartDeclined` は error ログに出さない（本当の起動失敗だけ残す）。
         if let Err(e) = gw.start(&id).await {

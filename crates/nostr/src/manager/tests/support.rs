@@ -1,6 +1,7 @@
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::Mutex;
+    use std::time::Duration;
 
     use opencrab_actions::webhook_target::WebhookConfig;
     use opencrab_actions::{CallerIdentity, RunRequest};
@@ -97,58 +98,12 @@
             }
         }
 
-        /// 受信本文の退避先を仕込む（#570 の退避経路の検証用）。
-        fn with_workspace_root(mut self, root: std::path::PathBuf) -> Self {
-            self.workspace_root = Some(root);
-            self
-        }
-
-        /// 「この pubkey がオーナー」という解決結果を仕込む（#319）。
-        fn with_owner_pubkey(mut self, pubkey: &str) -> Self {
-            self.owner_pubkey = Some(pubkey.to_string());
-            self
-        }
-
-        /// #698: この pubkey を trusted_user（platform=nostr）として許可源に載せる。
-        fn with_trusted_pubkey(mut self, pubkey: &str) -> Self {
-            self.trusted_pubkeys.push(pubkey.to_string());
-            self
-        }
-
-        /// #698: この pubkey を co_agent（owner 等価）として許可源に載せる。
-        fn with_co_agent_pubkey(mut self, pubkey: &str) -> Self {
-            self.co_agent_pubkeys.push(pubkey.to_string());
-            self
-        }
-
-        /// #698: `nostr_gate_allow_keys` を `Err` にする（DB 故障の模擬。前回値保持の検証用）。
-        fn with_allow_keys_error(mut self) -> Self {
-            self.allow_keys_error = true;
-            self
-        }
-
         /// get_nostr_config が返す既存設定を仕込む（ホットスワップ経路の検証 / #264）。
         fn with_preset_config(mut self, row: AgentNostrConfigRow) -> Self {
             self.preset_config = Some(row);
             self
         }
 
-        /// 転記先を有効化した runner（#252 のフック検証用）。
-        fn with_relay_target(mut self, url: &str) -> Self {
-            self.relay_target = Some(WebhookConfig {
-                url: url.to_string(),
-                events: None,
-            });
-            self
-        }
-
-        fn finished_len(&self) -> usize {
-            self.finished.lock().unwrap().len()
-        }
-
-        fn snapshot(list: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
-            list.lock().unwrap().clone()
-        }
     }
 
     #[async_trait::async_trait]
@@ -371,164 +326,6 @@
 
         fn get_session_policy_json(&self, _session_id: &str) -> anyhow::Result<Option<String>> {
             Ok(Some("{}".to_string()))
-        }
-    }
-
-    struct NoopAdmin;
-
-    #[async_trait::async_trait]
-    impl NostrIdentityAdmin for NoopAdmin {
-        async fn adopt_generated_identity(
-            &self,
-            _agent_id: &str,
-            npub: &str,
-        ) -> anyhow::Result<String> {
-            Ok(npub.to_string())
-        }
-    }
-
-    fn event(id: &str, pubkey: &str, content: &str) -> NostrEvent {
-        NostrEvent {
-            id: id.to_string(),
-            pubkey: pubkey.to_string(),
-            npub: None,
-            note_id: Some(format!("note1{id}")),
-            author_name: None,
-            created_at: 0,
-            kind: 1,
-            content: content.to_string(),
-            tags: Vec::new(),
-        }
-    }
-
-    /// 受信ループ相当の呼び出しを組み立てるテスト用ハーネス。
-    struct Harness {
-        runner: SlowRunner,
-        admin: Arc<dyn NostrIdentityAdmin>,
-        runtime: Arc<NostrSessionRuntime>,
-        permits: Arc<Semaphore>,
-        queues: Arc<SessionQueues>,
-        cli: NostaroCli,
-        agent_id: String,
-        /// #698 元栓の許可集合。owner / co_agent / trusted_users は構築時に runner の
-        /// `nostr_gate_allow_keys` から載せる。`feed*` は流す前に発言者を followees へ入れる
-        /// （既存テストはフォロー元栓を検証対象にしていないので素通しを保つ）。ゲート自体の
-        /// 検証は [`Self::feed_unfollowed_event`]（followees に入れない経路）で行う。
-        allow: AllowGate,
-        /// #698 元栓で捨てた件数（揮発カウンタ）。
-        dropped: Arc<AtomicU64>,
-    }
-
-    impl Harness {
-        fn new(agent_id: &str, delay: Duration, permits: usize, capacity: usize) -> Self {
-            Self::with_runner(agent_id, SlowRunner::new(delay), permits, capacity)
-        }
-
-        fn with_runner(
-            agent_id: &str,
-            runner: SlowRunner,
-            permits: usize,
-            capacity: usize,
-        ) -> Self {
-            // 本番の build_allow_sources と同じく、DB 由来キー（owner/co_agent/trusted）を
-            // follow_key で寄せて許可集合に載せる。followees は feed 時に足す。
-            let db = runner.nostr_gate_allow_keys(agent_id).expect(
-                "テスト: 許可源の取得（allow_keys_error を立てた runner は Harness に使わない）",
-            );
-            let to_set = |v: &[String]| -> HashSet<String> {
-                v.iter().map(|s| crate::pubkey::follow_key(s)).collect()
-            };
-            let allow = Arc::new(RwLock::new(AllowSources {
-                followees: HashSet::new(),
-                owner: to_set(&db.owner),
-                co_agents: to_set(&db.co_agents),
-                trusted_users: to_set(&db.trusted_users),
-            }));
-            Self {
-                runner,
-                admin: Arc::new(NoopAdmin),
-                runtime: Arc::new(NostrSessionRuntime::new()),
-                permits: Arc::new(Semaphore::new(permits)),
-                queues: Arc::new(SessionQueues::new(capacity)),
-                cli: NostaroCli::new(),
-                agent_id: agent_id.to_string(),
-                allow,
-                dropped: Arc::new(AtomicU64::new(0)),
-            }
-        }
-
-        /// watch ループが 1 行読んだのと同じ処理（同期・await 無し）。
-        async fn feed(&self, id: &str, pubkey: &str, content: &str) {
-            self.feed_event(event(id, pubkey, content)).await;
-        }
-
-        /// 任意のイベントを1件流す（メタ情報の検証用 / #282）。
-        async fn feed_event(&self, ev: NostrEvent) {
-            self.feed_event_as(&self.agent_id, ev).await;
-        }
-
-        /// **別エージェント**として1件流す（= 別セッション / #323）。
-        ///
-        /// session が agent 単位になったので、「別セッション」を作る唯一の軸が
-        /// エージェントになった。本番では `permits` / `queues` はエージェント毎に
-        /// 作られるが（[`run_nostr_loop`]）、ここで見たいのは [`SessionQueues`] が
-        /// 複数 session を持ったときの挙動なので、意図的に 1 束を共有して流す。
-        ///
-        /// #698: 発言者を followees へ入れてから流す（＝フォロイー扱い）。フォロー元栓を
-        /// 検証しない既存テストの素通しを保つため。ゲートの検証は [`Self::feed_unfollowed_event`]。
-        async fn feed_event_as(&self, agent_id: &str, ev: NostrEvent) {
-            self.allow
-                .write()
-                .unwrap()
-                .followees
-                .insert(crate::pubkey::follow_key(&ev.pubkey));
-            self.dispatch(agent_id, ev).await;
-        }
-
-        /// 許可集合へ入れずに1件流す（元栓の検証用 / #698）。発言者がフォロイー・owner・
-        /// co_agent・trusted_user のいずれでもなければ、ゲートで捨てられる。
-        async fn feed_unfollowed_event(&self, ev: NostrEvent) {
-            self.dispatch(&self.agent_id, ev).await;
-        }
-
-        /// `handle_event` を現在の allow / dropped で呼ぶ共通経路。
-        async fn dispatch(&self, agent_id: &str, ev: NostrEvent) {
-            handle_event(
-                &self.runner,
-                &self.cli,
-                agent_id,
-                "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-                &self.allow,
-                &self.dropped,
-                &self.admin,
-                &self.runtime,
-                &self.permits,
-                &self.queues,
-                ev,
-            )
-            .await;
-        }
-
-        fn dropped(&self) -> u64 {
-            self.dropped.load(AtomicOrdering::SeqCst)
-        }
-
-        /// [`Self::feed`] の別エージェント版（#323）。
-        async fn feed_as(&self, agent_id: &str, id: &str, pubkey: &str, content: &str) {
-            self.feed_event_as(agent_id, event(id, pubkey, content))
-                .await;
-        }
-
-        /// 応答生成が `n` 件完了するまで待つ（タイムアウトしたら false）。
-        async fn wait_finished(&self, n: usize, timeout: Duration) -> bool {
-            let deadline = std::time::Instant::now() + timeout;
-            while std::time::Instant::now() < deadline {
-                if self.runner.finished_len() >= n {
-                    return true;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            self.runner.finished_len() >= n
         }
     }
 

@@ -119,15 +119,9 @@ pub(super) fn spawn_background_tasks(
     // 足しても、この照合はその descriptor と sink を自動で拾う（手書きリストの更新漏れが起きない）。
     {
         let check_state = state.clone();
-        // TOML 共有ゲートウェイが設定されている kind（db に無い設定を畳んで env へ渡す）。
-        // per-agent（DB）だけの体は各 descriptor が env.conn を引いて拾う（#602 の本番対象）。
-        #[cfg_attr(not(feature = "discord"), allow(unused_mut))]
+        // External V3 gateways are discovered from DB-backed descriptors and live registration.
         let mut configured_shared_kinds: std::collections::HashSet<&'static str> =
             std::collections::HashSet::new();
-        #[cfg(feature = "discord")]
-        if !cfg.gateway.discord.agent_ids.is_empty() {
-            configured_shared_kinds.insert(opencrab_actions::gateway_kinds::DISCORD);
-        }
         // #925: gate socket があれば V3 レーン（extgate）は立ち上がる。`ExtgateFire::should_be_running`
         // がこれを見る（sink は下の serve_uds ブロックで register_shared する）。含めないと起動時
         // セルフチェックが extgate を見ない（should_be_running=false で sink 不在を正常と誤認）。

@@ -1,8 +1,6 @@
 //! discord-gateway 子プロセスの監視・自動再起動・後始末（DESIGN-DISCORD-GATE / #865）。
 //!
-//! server が spawn する discord-gateway は「1 process = 1 agent」。最小配線では detach（spawn して
-//! 放置）だったため、子が死ぬと **誰も気づかず**（サイレント死）V3 ingress が恒久停止し、#866 の
-//! liveness probe が false のまま legacy に永久委譲されっぱなしになる。撤去ゲート前にこの穴を塞ぐ。
+//! server が spawn する外部gatewayは「1 process = 1 agent」。子のサイレント死を防ぐ。
 //!
 //! この module は 3 つを足す（core に Discord 語彙は増やさない・server の spawn 層で完結）:
 //!
@@ -13,10 +11,7 @@
 //! 3. **後始末**: `shutdown` フラグ（[`tokio::sync::watch`]）が立ったら **再起動せず** 子を terminate
 //!    （孤児プロセス防止）。本番の spawn は `kill_on_drop(true)` も併用し、タスク drop でも子を殺す。
 //!
-//! **#866 との協調を壊さない**: 再起動で子が core UDS へ再接続し instance を再登録すると、extgate の
-//! in-memory live registry が再び live を返す → probe が true → legacy が退く。V3 死 → legacy 受け →
-//! V3 復活 → legacy 退避、の往復は registry が駆動するので、本 supervisor は「同じ子を上げ直す」だけで
-//! この外形不減を保つ（liveness に触れない）。
+//! 再起動で子がcore UDSへ再接続すると、extgateのlive registryが再び稼働を示す。
 //!
 //! **秘密（bot token）**: 本番 spawner は token を **子の env のみ**へ注入し、親 env・argv・ログの
 //! いずれにも出さない（`nostr-gateway` の watch 子と同じ流儀）。
@@ -88,9 +83,8 @@ pub fn is_crash_loop(consecutive: u32, threshold: u32) -> bool {
 
 /// 子が **意図せず** 終了したときの fail-loud（#857 `owner_warning` 流儀）。鳴らしたら `true`。
 ///
-/// **接続死のサイレント停止を潰すのが役目。** V3 が止まっても #866 の liveness fallback で legacy が
-/// inbound を受けるので取りこぼしは無いが、V3 delivery は復旧まで壊れたまま。crash-loop 時は文面を
-/// 強め、原因の切り分け先（binary / placement / core UDS / token・intents）を残す。配送手段が `error!`
+/// **接続死のサイレント停止を潰すのが役目。** 外部gateway停止中は受信・配送とも停止する。
+/// crash-loop時は原因の切り分け先（binary / placement / core UDS / credential）を残す。`error!`
 /// なのは、子が死んでいる局面では Discord 経由通知も壊れうるため（ログなら落ちない）。
 ///
 /// `outcome` には exit status の人間可読要約だけを渡す（**秘密を含めない**）。
@@ -109,11 +103,10 @@ pub fn escalate_child_exited(
             uptime_secs,
             outcome = %outcome,
             next_delay_secs,
-            "discord-gateway child has died {consecutive} times in a row (CRASH LOOP). V3 ingress \
-             for this agent is DOWN; #866 liveness falls back to the legacy loop so inbound is not \
-             lost, but V3 delivery stays broken until a restart sticks. The supervisor keeps \
-             retrying with capped backoff (next in {next_delay_secs}s). Check the discord-gateway \
-             binary, its placement.json, the core UDS socket, and the bot token / gateway intents."
+            "gateway child has died {consecutive} times in a row (CRASH LOOP). Ingress and \
+             delivery for this agent are DOWN with no legacy fallback. The supervisor keeps \
+             retrying with capped backoff (next in {next_delay_secs}s). Check the gateway binary, \
+             placement, core UDS socket, and child credential."
         );
     } else {
         error!(
@@ -122,9 +115,9 @@ pub fn escalate_child_exited(
             uptime_secs,
             outcome = %outcome,
             next_delay_secs,
-            "discord-gateway child exited WITHOUT a shutdown having been requested (was up \
-             {uptime_secs}s). V3 ingress for this agent stops until it is restarted; #866 liveness \
-             falls back to the legacy loop meanwhile. Auto-restarting in {next_delay_secs}s."
+            "gateway child exited WITHOUT a shutdown having been requested (was up \
+             {uptime_secs}s). Ingress and delivery are down with no fallback until restart. \
+             Auto-restarting in {next_delay_secs}s."
         );
     }
     true
@@ -142,9 +135,9 @@ pub fn escalate_spawn_failed(
         consecutive,
         error = %error,
         next_delay_secs,
-        "failed to (re)spawn the discord-gateway child ({consecutive} attempts in a row). V3 \
-         ingress for this agent is DOWN (the legacy loop serves it via #866 liveness). Retrying in \
-         {next_delay_secs}s. Check the discord-gateway binary path, permissions, and placement.json."
+        "failed to (re)spawn the gateway child ({consecutive} attempts in a row). Ingress and \
+         delivery for this agent are DOWN with no fallback. Retrying in {next_delay_secs}s. \
+         Check the gateway binary path, permissions, and placement."
     );
     true
 }
@@ -165,8 +158,11 @@ pub trait SupervisedChild: Send {
 pub trait ChildSpawner: Send + Sync {
     /// 子を spawn する（placement.json は事前に書かれている前提・再起動でも同じ file を再 exec）。
     async fn spawn(&self) -> std::io::Result<Box<dyn SupervisedChild>>;
-    /// どの agent の gateway か（ログ用）。
+    /// どの agent / gateway か（ログ用）。
     fn agent_id(&self) -> &str;
+    fn gateway_name(&self) -> &str {
+        "gateway"
+    }
 }
 
 /// `tokio::process::Child` のラッパ。
@@ -204,7 +200,9 @@ pub struct GatewayChildSpawner {
     bin: std::path::PathBuf,
     placement_path: std::path::PathBuf,
     /// 秘密。Debug 導出しない・ログに出さない。
-    bot_token: String,
+    secret: String,
+    secret_env: &'static str,
+    gateway_name: &'static str,
     agent_id: String,
 }
 
@@ -218,7 +216,26 @@ impl GatewayChildSpawner {
         Self {
             bin,
             placement_path,
-            bot_token,
+            secret: bot_token,
+            secret_env: "DISCORD_BOT_TOKEN",
+            gateway_name: "discord-gateway",
+            agent_id,
+        }
+    }
+
+    /// Nostr V3 gateway 用。復号済み鍵は子 env だけへ注入し、placement/argv へ載せない。
+    pub fn new_nostr(
+        bin: std::path::PathBuf,
+        placement_path: std::path::PathBuf,
+        secret_key: String,
+        agent_id: String,
+    ) -> Self {
+        Self {
+            bin,
+            placement_path,
+            secret: secret_key,
+            secret_env: "NOSTARO_SECRET_KEY",
+            gateway_name: "nostr-gateway",
             agent_id,
         }
     }
@@ -229,7 +246,7 @@ impl ChildSpawner for GatewayChildSpawner {
     async fn spawn(&self) -> std::io::Result<Box<dyn SupervisedChild>> {
         let mut cmd = tokio::process::Command::new(&self.bin);
         cmd.arg(&self.placement_path);
-        cmd.env("DISCORD_BOT_TOKEN", &self.bot_token);
+        cmd.env(self.secret_env, &self.secret);
         cmd.kill_on_drop(true);
         let child = cmd.spawn()?;
         Ok(Box::new(TokioChild { child }))
@@ -237,6 +254,10 @@ impl ChildSpawner for GatewayChildSpawner {
 
     fn agent_id(&self) -> &str {
         &self.agent_id
+    }
+
+    fn gateway_name(&self) -> &str {
+        self.gateway_name
     }
 }
 
@@ -251,6 +272,7 @@ pub async fn supervise(
     mut shutdown: watch::Receiver<bool>,
 ) {
     let agent_id = spawner.agent_id().to_string();
+    let gateway_name = spawner.gateway_name().to_string();
     let mut consecutive: u32 = 0;
 
     loop {
@@ -263,8 +285,9 @@ pub async fn supervise(
             Ok(c) => {
                 info!(
                     agent_id = %agent_id,
+                    gateway = %gateway_name,
                     pid = ?c.pid(),
-                    "discord-gateway 子プロセス起動（監視付き・token は env 注入）"
+                    "gateway child started under supervision; credential injected by env"
                 );
                 c
             }
@@ -287,8 +310,9 @@ pub async fn supervise(
                     // shutdown 中の終了は意図した停止。鳴らさず（誤エスカレーション防止）再起動もしない。
                     info!(
                         agent_id = %agent_id,
+                        gateway = %gateway_name,
                         outcome = %outcome,
-                        "discord-gateway child exited during shutdown (expected; no restart)"
+                        "gateway child exited during shutdown (expected; no restart)"
                     );
                     break;
                 }
@@ -310,7 +334,7 @@ pub async fn supervise(
             }
             _ = wait_for_shutdown(&mut shutdown) => {
                 // 生きている子を terminate（孤児防止）。再起動はしない。
-                info!(agent_id = %agent_id, "shutdown 要求により discord-gateway child を terminate");
+                info!(agent_id = %agent_id, gateway = %gateway_name, "terminating gateway child on shutdown");
                 child.kill().await;
                 break;
             }
@@ -350,6 +374,19 @@ mod tests {
     use tokio::sync::Notify;
 
     // ---- pure ロジック ----
+
+    #[test]
+    fn nostr_spawner_injects_only_the_nostr_secret_env() {
+        let spawner = GatewayChildSpawner::new_nostr(
+            "nostr-gateway".into(),
+            "placement.json".into(),
+            "not-a-real-secret".into(),
+            "a1".into(),
+        );
+        assert_eq!(spawner.secret_env, "NOSTARO_SECRET_KEY");
+        assert_eq!(spawner.gateway_name(), "nostr-gateway");
+        assert_eq!(spawner.agent_id(), "a1");
+    }
 
     #[test]
     fn backoff_doubles_and_caps() {

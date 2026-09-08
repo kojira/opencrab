@@ -1,78 +1,32 @@
-//! Per-agent Nostr sub-gateway マネージャ + watch ループ。
+//! Per-agent Nostr V3 core manager.
 //!
-//! Discord の `DiscordGatewayManager` と同型。エージェント毎に nostaro の `watch --json`
-//! を spawn し、JSONL イベントを読んで `run_agent_response` → 返信する。
-//!
-//! **受信ループは応答生成でブロックしない**（#178）。応答生成（会話再構築 → LLM →
-//! 返信）は受信ループの外へ出し、ループは即次の行へ進む。
-//!
-//! ただし単純に `tokio::spawn` へ投げると、**連投の処理順が「どの spawn タスクが先に
-//! session ロックを取るか」で決まる**（= ランダム）。5 通目への返信が 1 通目より先に
-//! 届きうる。そこで [`SessionQueues`] を挟み、**session ごとに 1 本の consumer タスク**
-//! が bounded な mpsc から FIFO で取り出して処理する（per-session 直列 + 順序保証、
-//! 別セッションは並行）。consumer はキューが空になったら自分ごと回収される
-//! （task/チャネルのリーク防止）。
-//!
-//! **#323 以降、Nostr の session は agent 単位で 1 本**（`nostr-{agent_id}`）なので、
-//! このループが持つ consumer は実質 1 本になり、そのエージェントの応答生成は相手が
-//! 誰であれ 1 件ずつ直列に走る（オーナー方針「発言し終わるまで次の LLM を呼ばない」）。
-//! [`SessionQueues`] は「1 本前提」に作り替えていない: キュー束は session_id をキーに
-//! した写像のままで、1 本になっても回収・再投入・溢れの扱いは変わらない。permit も
-//! consumer の内側で取り、`await` が終われば返るのでデッドロックにも枯渇にもならない。
-//!
-//! 同時実行上限（[`MAX_CONCURRENT_RESPONSES`]）の permit は **consumer タスクの内側**
-//! で取る。受信ループ側で取ると「session ロック待ちで何もしていないタスク」が permit を
-//! 占有し、上限が埋まった時点でループ全体（＝そのエージェントの全受信）が止まる
-//! （head-of-line blocking / #178 が直そうとしたバグと同型）。
+//! External `nostr-gateway` processes own relay subscriptions and final-speech delivery. This
+//! manager keeps the authoritative allow-set, provisions V3 instance/binding rows, and exposes
+//! identity/key capabilities. It contains no in-process relay watch or delivery fallback.
 
 use std::collections::{HashMap, HashSet};
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::sync::{Arc, RwLock};
 
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::mpsc;
-use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use anyhow::Context;
 
-use crate::adapter::{
-    accept_nostr_inbound, pre_record_drop, AllowSetStore, AllowSources, DropReason,
-};
-use crate::binding::skip_default_loop;
+use crate::adapter::{AllowSetStore, AllowSources};
 use crate::cli::NostaroCli;
 use crate::config::NostrConfig;
-use crate::event::{parse_watch_line, NostrEvent};
 use crate::identity::NostrIdentityAdmin;
-use crate::ingress::NostrIngress;
 use crate::runner::NostrAgentRunner;
-use crate::session::{nostr_session_id, NostrSessionRuntime, NOSTR_SESSION_PREFIX};
-use crate::sink::NostrResponder;
-use crate::watch::{
-    accept_watch_events, apply_watch_effect, classify_watch_event, prepare_watch_inbound,
-    recorded_watch_text, run_watch_turn, watch_bundle_prompt_suffix, watch_prompt_suffix,
-    watch_subscribe_config, TimelineBundle, WatchForward,
-};
+use crate::session::{NostrSessionRuntime, NOSTR_SESSION_PREFIX};
+use crate::watch::watch_subscribe_config;
 
-mod allow_refresh;
-mod gateway_loop;
+mod allow_sources;
 mod identity_admin;
 mod identity_provisioner;
-mod inbound;
-mod session_queue;
-mod watch_pipeline;
 
-use allow_refresh::*;
-use gateway_loop::*;
+use allow_sources::*;
 use identity_admin::*;
 pub use identity_provisioner::NostrIdentityProvisioner;
-use inbound::*;
-use session_queue::*;
-use watch_pipeline::*;
 
 /// watch ループが握る self_pubkey の共有セル（identity 切替で更新可能）。
 type SelfPubkey = Arc<RwLock<String>>;
@@ -83,41 +37,6 @@ type SelfPubkey = Arc<RwLock<String>>;
 /// trusted_users / owner / co_agent の更新へ追従するため**定期更新でこのセルを差し替える**
 /// （[`run_watch_once`] の更新経路）。ゲート判定はこのセルを読むだけ。
 type AllowGate = Arc<RwLock<AllowSources>>;
-
-/// 許可源（フォローリスト + DB 由来）を引き直す間隔（#698）。差し替えへの追従はこの粒度。
-///
-/// 洪水対策の元栓自体は**取得済みの許可集合で即座に効く**ので、更新は「新しくフォロー／登録した
-/// 相手が通り始めるまでの遅延」を決めるだけ。短くしすぎると relay へ `following` を叩く頻度が
-/// 上がるので、分オーダーにする。
-const ALLOW_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
-
-/// watch が落ちたときの再接続バックオフ。
-const WATCH_RESTART_DELAY: Duration = Duration::from_secs(5);
-
-/// 応答生成の同時実行上限（per-agent / #178）。
-///
-/// 受信ループを塞がないために応答生成はループ外で走らせるが、無制限に走らせると洪水時に
-/// LLM 呼び出しとメモリが暴走する。permit で「同時に走る応答生成は最大 N 本」に絞る。
-/// permit の取得は **consumer タスクの内側**（[`SessionQueues::run_consumer`]）で行う。
-/// 受信ループ側で取ると待機中のタスクが permit を占有してループが止まる。
-///
-/// #323 で session が agent 単位の 1 本になったため、このエージェントが実際に使う
-/// permit は常に 1 枚（実効同時実行数 = 1）。**値は変えない**: 上限は「暴走したときの
-/// 天井」であって目標値ではなく、1 本になったからといって天井を下げる理由も、
-/// 並行を取り戻すために上げる理由も無い（直列化は意図した挙動）。
-const MAX_CONCURRENT_RESPONSES: usize = 8;
-
-/// per-session の inbound キュー容量（per-agent / #168）。
-///
-/// 応答生成は LLM 1 往復ぶんかかるので、連投され続けるとキューは伸びる。
-/// 無制限に伸ばすとメモリと「もう誰も待っていない返信」が溜まるだけなので上限を置き、
-/// 溢れたぶんは**ログに残して**捨てる（本文は転記済みなので次の応答の会話履歴に載る）。
-///
-/// #323 の挙動変化: session が agent 単位の 1 本になったので、この 32 件は
-/// 「相手 1 人あたり」ではなく**そのエージェント宛の受信の合計**になる。**値は変えない**
-/// （新しい上限を足さない / 元の上限を据え置く）。溢れても本文は転記済みで、次の応答の
-/// 会話履歴には載る — 1 本化で履歴が揃うぶん、捨てられた回のぶんも文脈からは追える。
-const SESSION_QUEUE_CAPACITY: usize = 32;
 
 /// 稼働中 gateway の登録簿（agent_id → watch ループの JoinHandle）。
 ///
@@ -139,8 +58,8 @@ pub type NostrProvisionFn = Arc<
         + Sync,
 >;
 
-/// instance 行だけ敷く（Binding PUT なし）。戻りは revision。
-pub type NostrInstanceFn = Arc<
+/// 停止後の identity 切替。config を書き revision を +1 する。
+pub type NostrReviseFn = Arc<
     dyn Fn(
             &str,
             &str,
@@ -150,9 +69,6 @@ pub type NostrInstanceFn = Arc<
         + Send
         + Sync,
 >;
-
-/// 停止後の identity 切替。config を書き revision を +1 する。
-pub type NostrReviseFn = NostrInstanceFn;
 
 pub struct NostrGatewayManager<R: NostrAgentRunner> {
     // std RwLock: is_running を同期メソッドにするため。ガードは await を跨がない。
@@ -168,14 +84,10 @@ pub struct NostrGatewayManager<R: NostrAgentRunner> {
     /// #588 TimedFire / #603: 時刻発火の受け口を登録する登録簿（**必須**・`new` の引数）。
     /// Option + builder だと配線し忘れてもコンパイルが通り、実際 #602 で忘れて本番が止まった。
     timed_fire_router: Arc<opencrab_actions::TimedFireRouter>,
-    /// 段階移行フラグ。既定は旧 in-process ループ。
-    ingress: NostrIngress,
     /// 元栓の共有ストア。V3 said も同じ判断を読む。
     allow_store: AllowSetStore,
     /// V3 のときだけ呼ぶ binding 敷設。
     provisioner: Option<NostrProvisionFn>,
-    /// `v3_shadow` の instance 行（Binding PUT なし）。
-    instance_provisioner: Option<NostrInstanceFn>,
     /// V3 identity 切替の revision 更新。
     reviser: Option<NostrReviseFn>,
 }
@@ -196,10 +108,8 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
             cli: NostaroCli::new(),
             runtime,
             timed_fire_router,
-            ingress: NostrIngress::Legacy,
             allow_store: AllowSetStore::default(),
             provisioner: None,
-            instance_provisioner: None,
             reviser: None,
         }
     }
@@ -209,18 +119,8 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
         self
     }
 
-    pub fn with_ingress(mut self, ingress: NostrIngress) -> Self {
-        self.ingress = ingress;
-        self
-    }
-
     pub fn with_provisioner(mut self, provisioner: NostrProvisionFn) -> Self {
         self.provisioner = Some(provisioner);
-        self
-    }
-
-    pub fn with_instance_provisioner(mut self, provisioner: NostrInstanceFn) -> Self {
-        self.instance_provisioner = Some(provisioner);
         self
     }
 
@@ -259,10 +159,8 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
             secret_key,
             config,
             self.timed_fire_router.clone(),
-            self.ingress,
             self.allow_store.clone(),
             self.provisioner.clone(),
-            self.instance_provisioner.clone(),
             self.reviser.clone(),
         )
         .await
@@ -290,8 +188,7 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
     /// 生成鍵の採用（identity 切替）capability を返す（#264）。
     ///
     /// `gateways` / `admins` の**同じ登録簿**（Arc）を共有する実体を返すので、採用時の
-    /// bootstrap 起動・稼働中判定・（legacy の）ホットスワップ /（v3 の停止→revision→再起動）
-    /// が本体と一貫する。
+    /// bootstrap 起動・稼働中判定・V3 の停止→revision→再起動が本体と一貫する。
     pub fn identity_provisioner(&self) -> Arc<NostrIdentityProvisioner<R>> {
         Arc::new(NostrIdentityProvisioner {
             gateways: self.gateways.clone(),
@@ -300,10 +197,8 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
             cli: self.cli.clone(),
             runtime: self.runtime.clone(),
             timed_fire_router: self.timed_fire_router.clone(),
-            ingress: self.ingress,
             allow_store: self.allow_store.clone(),
             provisioner: self.provisioner.clone(),
-            instance_provisioner: self.instance_provisioner.clone(),
             reviser: self.reviser.clone(),
         })
     }
@@ -424,8 +319,8 @@ impl<R: NostrAgentRunner> opencrab_actions::AgentGatewayLifecycle for NostrGatew
     /// 生成鍵の採用（identity 切替）capability（#264）。
     ///
     /// server-own の `nostr_switch_identity` がここから引く。稼働の有無を必要としない
-    /// （未稼働なら bootstrap 起動＝接続、稼働中なら legacy はホットスワップ・v3 は
-    /// 停止→revision→再起動）ので、`key_provisioning` と同じく `is_running` に関わらず
+    /// （未稼働なら bootstrap 起動＝接続、稼働中なら停止→revision→V3 再起動）ので、
+    /// `key_provisioning` と同じく `is_running` に関わらず
     /// 常に `Some` を返す。
     fn identity_provisioning(
         &self,

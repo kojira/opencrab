@@ -256,7 +256,7 @@
             .await;
         assert_eq!(out.as_deref(), Some("本文"));
 
-        // DI フェーズ1: legacy sink の組み込み publish ツール（nostr_post/reply）は撤去済み。
+        // sink の組み込み publish ツール（nostr_post/reply）は撤去済み。
         // 名前指定の nostr_reply は fail-closed で publish されず、機構も reply_target（implicit）へ
         // 送らない → 何も publish されない（返信は V3/DI reply 操作が担う）。応答本文の転記は残る。
         let sent = fake.sent();

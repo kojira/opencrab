@@ -1,15 +1,6 @@
-//! 専用 gateway の liveness に V3 gateway を OR する透過デコレータ（DESIGN-DISCORD-GATE §8.1）。
+//! V3-only gateway liveness decorator.
 //!
-//! 併存期（legacy per-agent gateway + 新 V3 gateway process）に、共有 `message_loop` の
-//! `served_by_dedicated_gateway`（= 登録簿の `is_running`）が **どちらか一方でも稼働中**なら
-//! 対象 agent を除外するようにする。これが二重受信防止 lever であり、落とすと同一 channel で
-//! 新旧が二重応答する。
-//!
-//! V3 の liveness は core の in-memory live registry（`ExtgateState::agent_has_live_gateway`）が
-//! 正で、DB の enabled フラグではない（#40 の教訓: enabled=1 でも接続が死んでいれば false へ倒し、
-//! どの gateway からも応答しない状態を作らない）。
-//!
-//! `is_running` 以外は inner（legacy manager）へ委譲する純粋なデコレータ。
+//! Runtime liveness comes only from the external gateway registry, never from a core keepalive.
 
 use std::sync::Arc;
 
@@ -22,20 +13,21 @@ use opencrab_actions::{
 /// V3 gateway の liveness を返す probe（agent_id → 稼働中か）。
 pub type V3LivenessProbe = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
-/// legacy gateway を包み、`is_running` に V3 liveness を OR する。他メソッドは inner へ委譲。
-pub struct V3AwareGateway {
+/// V3-only transport decorator. Lifecycle/capabilities remain on the core manager, but runtime
+/// liveness is true only after the external gateway has registered with extgate.
+pub struct V3OnlyGateway {
     inner: SharedAgentGateway,
     v3_live: V3LivenessProbe,
 }
 
-impl V3AwareGateway {
+impl V3OnlyGateway {
     pub fn new(inner: SharedAgentGateway, v3_live: V3LivenessProbe) -> Arc<Self> {
         Arc::new(Self { inner, v3_live })
     }
 }
 
 #[async_trait]
-impl AgentGatewayLifecycle for V3AwareGateway {
+impl AgentGatewayLifecycle for V3OnlyGateway {
     fn kind(&self) -> &'static str {
         self.inner.kind()
     }
@@ -48,9 +40,8 @@ impl AgentGatewayLifecycle for V3AwareGateway {
         self.inner.stop(agent_id).await
     }
 
-    /// legacy が稼働中、または V3 gateway が当該 agent を受信できる状態なら true。
     fn is_running(&self, agent_id: &str) -> bool {
-        self.inner.is_running(agent_id) || (self.v3_live)(agent_id)
+        (self.v3_live)(agent_id)
     }
 
     async fn restore_all(&self) {
@@ -65,7 +56,11 @@ impl AgentGatewayLifecycle for V3AwareGateway {
         &self,
         agent_id: &str,
     ) -> Option<Arc<dyn opencrab_gateway::GatewayActions>> {
-        self.inner.gateway_actions_for(agent_id)
+        if self.is_running(agent_id) {
+            self.inner.gateway_actions_for(agent_id)
+        } else {
+            None
+        }
     }
 
     fn key_provisioning(&self) -> Option<Arc<dyn GatewayKeyProvisioning>> {
@@ -109,40 +104,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn is_running_ors_legacy_and_v3() {
+    async fn v3_only_never_reports_core_keep_alive_as_external_liveness() {
         let inner = Arc::new(FakeInner {
-            running: "legacy-agent",
+            running: "core-only",
             started: AtomicBool::new(false),
         });
-        let probe: V3LivenessProbe = Arc::new(|agent_id: &str| agent_id == "v3-agent");
-        let deco = V3AwareGateway::new(inner.clone(), probe);
-
-        // legacy 側で稼働 → true。
-        assert!(deco.is_running("legacy-agent"));
-        // V3 側で稼働 → true（legacy は false でも OR で拾う）。
-        assert!(deco.is_running("v3-agent"));
-        // どちらも非稼働 → false（共有側が処理を続ける）。
-        assert!(!deco.is_running("nobody"));
-
-        // 他メソッドは inner へ委譲。
-        assert_eq!(deco.kind(), "discord");
-        deco.start("x").await.unwrap();
-        assert!(
-            inner.started.load(Ordering::SeqCst),
-            "start が inner へ委譲される"
-        );
-    }
-
-    #[tokio::test]
-    async fn is_running_true_when_only_v3_live() {
-        // legacy がどの agent でも非稼働（起動失敗相当）でも、V3 が生きていれば除外される。
-        let inner = Arc::new(FakeInner {
-            running: "",
-            started: AtomicBool::new(false),
-        });
-        let probe: V3LivenessProbe = Arc::new(|agent_id: &str| agent_id == "crab");
-        let deco = V3AwareGateway::new(inner, probe);
-        assert!(deco.is_running("crab"));
-        assert!(!deco.is_running("other"));
+        let probe: V3LivenessProbe = Arc::new(|agent_id: &str| agent_id == "externally-live");
+        let gateway = V3OnlyGateway::new(inner, probe);
+        assert!(!gateway.is_running("core-only"));
+        assert!(gateway.is_running("externally-live"));
+        assert!(gateway.gateway_actions_for("core-only").is_none());
     }
 }

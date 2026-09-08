@@ -8,10 +8,8 @@ struct V3IdentityRestart<R: NostrAgentRunner> {
     cli: NostaroCli,
     runtime: Arc<NostrSessionRuntime>,
     timed_fire_router: Arc<opencrab_actions::TimedFireRouter>,
-    ingress: NostrIngress,
     allow_store: AllowSetStore,
     provisioner: Option<NostrProvisionFn>,
-    instance_provisioner: Option<NostrInstanceFn>,
     reviser: Option<NostrReviseFn>,
 }
 
@@ -52,19 +50,16 @@ impl<R: NostrAgentRunner> V3IdentityRestart<R> {
             secret_key,
             config,
             self.timed_fire_router.clone(),
-            self.ingress,
             self.allow_store.clone(),
             self.provisioner.clone(),
-            self.instance_provisioner.clone(),
             self.reviser.clone(),
         )
         .await
     }
 }
 
-/// watch ループが握る identity 切替の実体。runner（DB）+ cli + self_pubkey セルを capture し、
-/// 生成鍵を本鍵に採用する。legacy は self_pubkey セル更新のみ（watch 無停止）。
-/// v3 は鍵更新のあと停止→revision→再起動する。
+/// identity 切替の実体。runner（DB）+ cli + self_pubkey セルを capture し、
+/// 生成鍵を本鍵に採用した後、V3 gateway を停止→revision→再起動する。
 struct LoopIdentityAdmin<R: NostrAgentRunner> {
     runner: R,
     cli: NostaroCli,
@@ -180,10 +175,8 @@ pub(super) async fn spawn_agent_gateway<R: NostrAgentRunner>(
     secret_key: &str,
     config: NostrConfig,
     timed_fire_router: Arc<opencrab_actions::TimedFireRouter>,
-    ingress: NostrIngress,
     allow_store: AllowSetStore,
     provisioner: Option<NostrProvisionFn>,
-    instance_provisioner: Option<NostrInstanceFn>,
     reviser: Option<NostrReviseFn>,
 ) -> anyhow::Result<()> {
     // 資格情報のガード（#191 段階2 PR3）。DB の secret_key（#620 以降は暗号文 `enc:v1:…`）が
@@ -288,41 +281,27 @@ pub(super) async fn spawn_agent_gateway<R: NostrAgentRunner>(
         }
         watch_subscribe_config(w, relays.clone())?;
     }
-    let default_sid = nostr_session_id(agent_id);
-    let skip_default_loop = skip_default_loop(&watches, &default_sid);
-    if ingress.provisions_binding() {
-        let Some(provision) = provisioner.as_ref() else {
-            anyhow::bail!("nostr_ingress=v3 なのに binding provisioner が無い");
-        };
-        provision(agent_id, &self_pubkey, &config, &watches)?;
-    }
-    if ingress.shadows_only() {
-        let Some(provision) = instance_provisioner.as_ref() else {
-            anyhow::bail!("nostr_ingress=v3_shadow なのに instance provisioner が無い");
-        };
-        provision(agent_id, &self_pubkey, &config, &watches)?;
-    }
+    let Some(provision) = provisioner.as_ref() else {
+        anyhow::bail!("Nostr V3 binding provisioner が無い");
+    };
+    provision(agent_id, &self_pubkey, &config, &watches)?;
 
     let runner_c = runner.clone();
     let cli_c = cli.clone();
     let agent = agent_id.to_string();
-    // self_pubkey は共有セル。legacy の identity 切替はセル更新。v3 は停止→再起動。
+    // self_pubkey は共有セル。identity 切替は停止→revision→V3 再起動。
     let self_pubkey_cell = Arc::new(RwLock::new(self_pubkey));
-    let v3_restart = (ingress == NostrIngress::V3).then(|| {
-        Arc::new(V3IdentityRestart {
-            gateways: gateways.clone(),
-            admins: admins.clone(),
-            runner: runner_c.clone(),
-            cli: cli_c.clone(),
-            runtime: runtime.clone(),
-            timed_fire_router: timed_fire_router.clone(),
-            ingress,
-            allow_store: allow_store.clone(),
-            provisioner: provisioner.clone(),
-            instance_provisioner: instance_provisioner.clone(),
-            reviser: reviser.clone(),
-        })
-    });
+    let v3_restart = Some(Arc::new(V3IdentityRestart {
+        gateways: gateways.clone(),
+        admins: admins.clone(),
+        runner: runner_c.clone(),
+        cli: cli_c.clone(),
+        runtime: runtime.clone(),
+        timed_fire_router: timed_fire_router.clone(),
+        allow_store: allow_store.clone(),
+        provisioner: provisioner.clone(),
+        reviser: reviser.clone(),
+    }));
     let admin: Arc<dyn NostrIdentityAdmin> = Arc::new(LoopIdentityAdmin {
         runner: runner_c.clone(),
         cli: cli_c.clone(),
@@ -334,40 +313,8 @@ pub(super) async fn spawn_agent_gateway<R: NostrAgentRunner>(
         .write()
         .unwrap()
         .insert(agent_id.to_string(), admin.clone());
-    let runtime_c = runtime.clone();
-    let shadows = ingress.shadows_only();
     let handle = tokio::spawn(async move {
-        if ingress.runs_legacy_loops() {
-            run_agent_inbound_loops(
-                runner_c,
-                cli_c,
-                agent,
-                config,
-                self_pubkey_cell,
-                allow,
-                allow_store,
-                admin,
-                runtime_c,
-                timed_fire_router,
-                watches,
-                skip_default_loop,
-                shadows,
-            )
-            .await;
-        } else {
-            run_v3_core_keep_alive(
-                runner_c,
-                cli_c,
-                agent,
-                self_pubkey_cell,
-                allow,
-                allow_store,
-                admin,
-                runtime_c,
-                timed_fire_router,
-            )
-            .await;
-        }
+        run_v3_core_keep_alive(runner_c, cli_c, agent, allow, allow_store).await;
     });
 
     gateways

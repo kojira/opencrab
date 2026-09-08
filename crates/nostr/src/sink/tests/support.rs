@@ -113,7 +113,7 @@
             if !self.delay.is_zero() {
                 tokio::time::sleep(self.delay).await;
             }
-            // DI フェーズ1: 組み込み nostr_reply は撤去済み（fail-closed）。legacy sink 経由の
+            // 組み込み nostr_reply は撤去済み（fail-closed）。sink 経由の
             // publish 副経路は残さない（返信は V3/DI reply 操作）。名前指定は成功しないこと。
             if let (Some(target), Some(ga)) =
                 (&self.explicit_reply_target, req.gateway_actions.as_ref())

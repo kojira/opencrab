@@ -9,50 +9,6 @@ fn meta() -> LifecycleMeta {
     }
 }
 
-/// ドリフト固定: 自己受信 drop の判定
-/// （`crate::gateway::content_is_subtask_lifecycle_payload`）は、ここの
-/// lifecycle payload builder の**実出力の 1 行目ヘッダ**に一致し続けなければならない。
-/// ヘッダ書式を変えて判定側を更新し忘れると、自分の webhook 投稿の自己受信ループが
-/// 静かに戻る。書式の出所であるこのモジュールで固定する。
-#[test]
-fn lifecycle_headers_are_recognized_by_self_receive_drop() {
-    // started: 短い task（インライン・添付なし）。
-    let started = build_started_messages(&meta(), "task body");
-    assert!(
-        crate::gateway::content_is_subtask_lifecycle_payload(&started[0].content),
-        "started ヘッダが drop 判定に一致しない: {:?}",
-        started[0].content
-    );
-    // started: 長い task（プレビュー + 添付の 1 通）。以前は本体が headerless の
-    // 別メッセージで判定をすり抜けていた退行を固定する。プレビュー 1 行目もヘッダ。
-    let long_started = build_started_messages(&meta(), &"x".repeat(5000));
-    assert_eq!(long_started.len(), 1, "started は 1 通に畳む");
-    assert!(
-        crate::gateway::content_is_subtask_lifecycle_payload(&long_started[0].content),
-        "長い started 本体が drop 判定に一致しない: {:?}",
-        long_started[0].content
-    );
-    // terminal: 既知ステータス + `_ => ℹ️` フォールバック（未知ステータス）。
-    for status in [
-        "completed",
-        "failed",
-        "timed_out",
-        "aborted",
-        "unknown_status",
-    ] {
-        let m = build_terminal_message(status, "r", "s", Some(1), "detail");
-        assert!(
-            crate::gateway::content_is_subtask_lifecycle_payload(&m),
-            "terminal({status}) ヘッダが drop 判定に一致しない: {m:?}"
-        );
-    }
-    let progress = build_progress_message("r", "s", "halfway");
-    assert!(
-        crate::gateway::content_is_subtask_lifecycle_payload(&progress),
-        "progress ヘッダが drop 判定に一致しない: {progress:?}"
-    );
-}
-
 #[test]
 fn test_build_started_messages_single_headered_message_with_inline_task() {
     let msgs = build_started_messages(&meta(), "abcdef");
@@ -63,10 +19,6 @@ fn test_build_started_messages_single_headered_message_with_inline_task() {
     assert!(msgs[0].content.contains("sess1"));
     assert!(msgs[0].content.contains("task: abcdef"));
     assert!(!msgs[0].has_attachment());
-    // 自己受信 drop 判定（1 行目ヘッダ）に一致する。
-    assert!(crate::gateway::content_is_subtask_lifecycle_payload(
-        &msgs[0].content
-    ));
 }
 
 #[test]
@@ -75,9 +27,6 @@ fn test_build_started_messages_empty_task_has_no_task_line() {
     assert_eq!(msgs.len(), 1);
     assert!(msgs[0].content.starts_with("🟢 **subtask started**"));
     assert!(!msgs[0].content.contains("task:"));
-    assert!(crate::gateway::content_is_subtask_lifecycle_payload(
-        &msgs[0].content
-    ));
 }
 
 /// #293 の性質を維持: 長い task text は part X/N 連投にならず、
@@ -96,11 +45,7 @@ fn test_build_started_messages_long_task_becomes_single_attachment() {
         body.content.chars().count()
     );
     assert!(!body.content.starts_with("part 1/"));
-    // プレビュー 1 行目はヘッダのまま → 長文添付でも自己受信 drop 判定に一致する。
     assert!(body.content.starts_with("🟢 **subtask started**"));
-    assert!(crate::gateway::content_is_subtask_lifecycle_payload(
-        &body.content
-    ));
     // 添付本体は全文（ヘッダ + メタ + task）をロスなく含む。
     let delivered = body.delivered_text();
     assert!(delivered.contains(&long), "task 全文が添付に入っていない");

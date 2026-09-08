@@ -132,32 +132,6 @@ pub struct AliasConfig {
 pub struct GatewayConfig {
     #[serde(default)]
     pub rest: RestGatewayConfig,
-    #[serde(default)]
-    pub discord: DiscordGatewayConfig,
-}
-
-#[derive(Debug, Deserialize, Default, Clone)]
-pub struct DiscordGatewayConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    pub token: String,
-    #[serde(default)]
-    pub guild_ids: Vec<u64>,
-    /// Discordメッセージに応答するエージェントのIDリスト
-    #[serde(default)]
-    pub agent_ids: Vec<String>,
-    /// DMに応答するオーナーのDiscord User ID（設定時、このID以外からのDMは無視）
-    #[serde(default)]
-    pub owner_discord_id: String,
-    /// spawn_subtask.webhook が省略された時に使うデフォルトの lifecycle webhook。
-    ///
-    /// **旧キー（後方互換）**: #157 S5 で transport 非依存の `[subtask] default_webhook`
-    /// へ持ち上げた。既存の設定ファイルを壊さないためここは残し、新キーが未設定の
-    /// ときのフォールバックとして読み続ける（[`AppConfig::default_subtask_webhook`]）。
-    /// 新規に書くなら `[subtask] default_webhook` を使うこと。
-    #[serde(default)]
-    pub default_subtask_webhook: Option<SubtaskWebhookConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

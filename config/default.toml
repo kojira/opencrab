@@ -194,20 +194,6 @@ cheap = { provider = "hermit", model = "claude-haiku" }
 enabled = true
 port = 8080
 
-[gateway.discord]
-enabled = true
-token = "${DISCORD_TOKEN}"
-guild_ids = []
-agent_ids = ["crab", "agent-a", "11111111-1111-4111-8111-111111111111"]  # Discordメッセージに応答するエージェントID
-# DMに応答するオーナーのDiscord User ID。環境ごとに変わるので `.env` の
-# OWNER_DISCORD_ID から渡す（未設定なら空 = オーナー無しとして扱われる）。
-owner_discord_id = "${OWNER_DISCORD_ID}"
-# ハートビートを流すチャンネルは DB（discord_channel_config.heartbeat_enabled）で
-# 管理する。かつての `heartbeat_channel_id` はどこからも読まれていなかったので削除した（#215）。
-# spawn_subtask.webhook を明示しない時に使う lifecycle webhook。
-# url = "" または未指定なら無効。実URLは環境変数で渡す。
-default_subtask_webhook = { url = "${DISCORD_SUBTASK_WEBHOOK_URL}", events = ["started", "progress", "completed", "failed", "timed_out", "aborted"] }
-
 [dashboard]
 enabled = true
 port = 3000
@@ -218,13 +204,10 @@ path = "data/opencrab.db"
 [gate]
 # External gate V3 の Unix domain socket。空・相対 path は起動失敗。
 listen_socket = "/tmp/opencrab-extgate.sock"
-# Nostr inbound の段階移行（DESIGN-NOSTRGATE §6）。legacy | v3_shadow | v3。既定=legacy。
-# 旧 in-process ループは削除しない。未知値は起動失敗。
-nostr_ingress = "legacy"
-# Discord inbound の段階移行（DESIGN-DISCORD-GATE §8.1）。legacy | v3_shadow | v3。既定=legacy。
-# v3_shadow/v3 で起動時に discord-gateway プロセスを点火（instance 敷設・v3 は binding も）。
-# 旧共有 message_loop は削除しない（V3AwareGateway の liveness OR で per-message に退く）。未知値は起動失敗。
-discord_ingress = "legacy"
+# Nostr ingress は V3 のみ。enabled な Nostr agent がある環境で欠落・別値なら起動失敗。
+nostr_ingress = "v3"
+# Discord ingress is V3-only. Missing, legacy, shadow, or unknown values fail startup.
+discord_ingress = "v3"
 
 # 古い LLM ログの zip アーカイブ（#337）
 #
