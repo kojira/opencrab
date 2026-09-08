@@ -4,7 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
 
-use opencrab_core::{ChatRequest, ChatResponse, LlmClient};
+use opencrab_core::{ChatRequest, ChatResponse, LlmClient, LlmExchange};
 use opencrab_llm::pricing::PricingRegistry;
 
 /// Configuration for metrics recording.
@@ -59,6 +59,10 @@ impl LlmRouterAdapter {
 #[async_trait]
 impl LlmClient for LlmRouterAdapter {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
+        Ok(self.chat_with_history(request).await?.response)
+    }
+
+    async fn chat_with_history(&self, request: ChatRequest) -> Result<LlmExchange> {
         let model_requested = request.model.clone();
         let mut request = request;
         if self.agent_id.is_some() {
@@ -67,7 +71,7 @@ impl LlmClient for LlmRouterAdapter {
 
         let start = std::time::Instant::now();
         let router = self.router.get();
-        let response = router.chat_completion(request).await?;
+        let exchange = router.chat_completion_with_history(request).await?;
         let latency_ms = start.elapsed().as_millis() as i64;
 
         // Record metrics to DB if context is available.
@@ -79,9 +83,9 @@ impl LlmClient for LlmRouterAdapter {
                 .resolve_model(&model_requested)
                 .unwrap_or_else(|_| ("unknown".to_string(), model_requested.clone()));
 
-            let input_tokens = response.usage.prompt_tokens as i32;
-            let output_tokens = response.usage.completion_tokens as i32;
-            let total_tokens = response.usage.total_tokens as i32;
+            let input_tokens = exchange.response.usage.prompt_tokens as i32;
+            let output_tokens = exchange.response.usage.completion_tokens as i32;
+            let total_tokens = exchange.response.usage.total_tokens as i32;
 
             let estimated_cost = ctx
                 .pricing
@@ -122,6 +126,6 @@ impl LlmClient for LlmRouterAdapter {
             }
         }
 
-        Ok(response)
+        Ok(exchange)
     }
 }

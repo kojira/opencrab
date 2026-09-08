@@ -18,6 +18,7 @@ interface LlmLog {
   trigger_message_id: string | null;
   cache_read_tokens: number | null;
   cache_creation_tokens: number | null;
+  provider_tool_history: ProviderToolHistory;
   is_bot_iteration: boolean;
   created_at: string;
 }
@@ -32,6 +33,27 @@ interface LlmLogStat {
   error_count: number;
   cache_read_tokens: number;
   cache_creation_tokens: number;
+}
+
+interface ProviderToolHistory {
+  state: "legacy_unknown" | "not_requested" | "not_used" | "captured" | "incomplete";
+  provider: string | null;
+  calls: Array<{ id: string; status: string | null; action: Record<string, unknown> }>;
+  citations: Array<{ url: string; title: string | null }>;
+}
+
+interface ToolHistoryEntry {
+  source_memory_log_id: number | null;
+  call: Record<string, unknown>;
+  result: string | null;
+  subtask_id: string | null;
+  completion: Record<string, unknown> | null;
+}
+
+interface ToolHistoryResponse {
+  entries: ToolHistoryEntry[];
+  provider_tool_history: ProviderToolHistory;
+  error?: string;
 }
 
 interface ToolCallEntry {
@@ -85,6 +107,14 @@ async function fetchLlmLogs(agentId: string, limit = 20): Promise<LlmLog[]> {
   return res.json();
 }
 
+async function fetchLlmToolHistory(agentId: string, logId: string): Promise<ToolHistoryResponse> {
+  const res = await fetch(`/api/agents/${agentId}/llm-logs/${logId}/tool-history`);
+  if (!res.ok) throw new Error("Failed to fetch tool history");
+  const history = (await res.json()) as ToolHistoryResponse;
+  if (history.error) throw new Error(history.error);
+  return history;
+}
+
 async function fetchLlmLogStats(agentId: string): Promise<LlmLogStat[]> {
   const res = await fetch(`/api/agents/${agentId}/llm-logs/stats`);
   if (!res.ok) throw new Error("Failed to fetch stats");
@@ -116,7 +146,17 @@ export type {
   ChatResponseSimple,
   LlmLog,
   LlmLogStat,
+  ProviderToolHistory,
   ToolDef,
+  ToolHistoryEntry,
+  ToolHistoryResponse,
   UsageInfo,
 };
-export { fetchLlmLogs, fetchLlmLogStats, formatNumber, truncate, tryParseJson };
+export {
+  fetchLlmLogs,
+  fetchLlmLogStats,
+  fetchLlmToolHistory,
+  formatNumber,
+  truncate,
+  tryParseJson,
+};

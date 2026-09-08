@@ -27,7 +27,7 @@
       "valid_rejections": 35
     },
     "http_observed_status_classes": {
-      "2xx": 140,
+      "2xx": 142,
       "4xx": 49,
       "5xx": 4
     },
@@ -2927,6 +2927,73 @@
         },
         "response": {
           "body": [],
+          "headers": [
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "access-control-expose-headers",
+              "value": "*"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "vary",
+              "value": "origin, access-control-request-method, access-control-request-headers"
+            }
+          ],
+          "status": 200
+        },
+        "selection": "resource_absence_or_empty_state"
+      },
+      {
+        "effect": null,
+        "name": "get___api_agents_id_llm-logs_log_id_tool-history__normal",
+        "request": {
+          "body": null,
+          "method": "GET",
+          "uri": "/api/agents/baseline-agent/llm-logs/1/tool-history"
+        },
+        "response": {
+          "body": {
+            "error": "llm log not found"
+          },
+          "headers": [
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "access-control-expose-headers",
+              "value": "*"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "vary",
+              "value": "origin, access-control-request-method, access-control-request-headers"
+            }
+          ],
+          "status": 200
+        },
+        "selection": "normal_or_local_precondition_branch"
+      },
+      {
+        "name": "get___api_agents_id_llm-logs_log_id_tool-history__reject_or_absent",
+        "request": {
+          "body_utf8": null,
+          "method": "GET",
+          "uri": "/api/agents/baseline-missing/llm-logs/999999/tool-history"
+        },
+        "response": {
+          "body": {
+            "error": "llm log not found"
+          },
           "headers": [
             {
               "name": "access-control-allow-origin",
@@ -10804,7 +10871,7 @@
         "selection": "resource_absence_or_empty_state"
       }
     ],
-    "source_route_count": 84,
+    "source_route_count": 85,
     "uncollected": [
       {
         "branch": "normal",
@@ -11732,6 +11799,10 @@
         "instance_id": {
           "missing": "<uuid>",
           "normal": "<uuid>"
+        },
+        "log_id": {
+          "missing": "999999",
+          "normal": "1"
         },
         "name": {
           "missing": "baseline-missing",

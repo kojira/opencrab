@@ -435,6 +435,7 @@ macro_rules! production_routes {
         $apply!($target, "/api/agents/{id}/allowed-commands/{command}", delete => api::allowed_commands::remove_allowed_command);
         $apply!($target, "/api/agents/{id}/llm-logs", get => api::llm_logs::list_llm_logs);
         $apply!($target, "/api/agents/{id}/llm-logs/stats", get => api::llm_logs::llm_logs_stats);
+        $apply!($target, "/api/agents/{id}/llm-logs/{log_id}/tool-history", get => api::llm_logs::llm_log_tool_history);
         $apply!($target, "/api/agents/{id}/tool-logs", get => api::tool_logs::list_tool_logs);
         $apply!($target, "/api/import/scan", post => api::import::scan_workspace_handler);
         $apply!($target, "/api/import/execute", post => api::import::execute_import_handler);

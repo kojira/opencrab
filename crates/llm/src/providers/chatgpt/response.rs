@@ -13,6 +13,15 @@ impl ChatGptProvider {
     // #676: pub —— chatgpt の SSE パース（incomplete→Length を含む）を server 側の
     // 「incomplete→ターン失敗」end-to-end テストから直接叩けるようにする（純パーサ）。
     pub fn parse_response(&self, sse_text: &str, model: &str) -> Result<ChatResponse> {
+        Ok(self.parse_exchange(sse_text, model, false)?.response)
+    }
+
+    pub(super) fn parse_exchange(
+        &self,
+        sse_text: &str,
+        model: &str,
+        web_search_requested: bool,
+    ) -> Result<opencrab_llm_types::LlmExchange> {
         // #844: message アイテムごとのテキストを別々に集める。`current` が進行中アイテムの
         // 蓄積で、アイテム境界（output_item.done）で `items` に確定する。無区切り連結せず
         // アイテム境界を保持することで、下流でセンチネルが平文連結されるのを防ぐ。
@@ -30,6 +39,10 @@ impl ChatGptProvider {
         let mut dbg_data_line_count: usize = 0;
         let mut dbg_delta_event_count: usize = 0;
         let mut current_event = String::new();
+        let mut native_calls = Vec::new();
+        let mut citations = Vec::new();
+        let mut native_parse_failed = false;
+        let mut native_lifecycle_seen = false;
 
         for line in sse_text.lines() {
             let line = line.trim();
@@ -49,6 +62,7 @@ impl ChatGptProvider {
             let parsed: Value = match serde_json::from_str(data) {
                 Ok(v) => v,
                 Err(_) => {
+                    native_parse_failed |= web_search_requested;
                     current_event.clear();
                     continue;
                 }
@@ -66,6 +80,12 @@ impl ChatGptProvider {
                     if let Some(call) = Self::parse_function_call_item(&parsed["item"]) {
                         tool_calls.push(call);
                     }
+                    Self::capture_web_search_item(
+                        &parsed["item"],
+                        &mut native_calls,
+                        &mut citations,
+                        &mut native_parse_failed,
+                    );
                     // #844: message アイテムの境界。蓄積テキストがあれば 1 アイテムとして
                     // 確定し、次アイテムのテキストと無区切り連結されるのを断ち切る。
                     // function_call / reasoning アイテムはテキストを積まないので current は空。
@@ -93,6 +113,12 @@ impl ChatGptProvider {
                                     tool_calls.push(call);
                                 }
                             }
+                            Self::capture_web_search_item(
+                                item,
+                                &mut native_calls,
+                                &mut citations,
+                                &mut native_parse_failed,
+                            );
                         }
                     }
                     let u = &parsed["response"]["usage"];
@@ -113,6 +139,12 @@ impl ChatGptProvider {
                         // 返さない。ここが 0 なのはバグではなく仕様。
                         cache_creation_input_tokens: 0,
                     };
+                }
+                "response.output_text.annotation.added" => {
+                    Self::capture_citation(&parsed["annotation"], &mut citations);
+                }
+                event if event.starts_with("response.web_search_call.") => {
+                    native_lifecycle_seen = true;
                 }
                 "error" => {
                     let msg = parsed["message"]
@@ -177,7 +209,7 @@ impl ChatGptProvider {
             Some(tool_calls)
         };
 
-        Ok(ChatResponse {
+        let response = ChatResponse {
             id,
             model: model.to_string(),
             choices: vec![Choice {
@@ -194,7 +226,113 @@ impl ChatGptProvider {
             }],
             usage,
             created: 0,
+        };
+        let state = if !web_search_requested {
+            opencrab_llm_types::ProviderToolHistoryState::NotRequested
+        } else if native_parse_failed
+            || (native_lifecycle_seen && native_calls.is_empty() && citations.is_empty())
+        {
+            opencrab_llm_types::ProviderToolHistoryState::Incomplete
+        } else if native_calls.is_empty() && citations.is_empty() {
+            opencrab_llm_types::ProviderToolHistoryState::NotUsed
+        } else {
+            opencrab_llm_types::ProviderToolHistoryState::Captured
+        };
+        Ok(opencrab_llm_types::LlmExchange {
+            response,
+            provider_tool_history: opencrab_llm_types::ProviderToolHistory {
+                state,
+                provider: Some("chatgpt".to_string()),
+                calls: native_calls,
+                citations,
+            },
         })
+    }
+
+    fn capture_web_search_item(
+        item: &Value,
+        calls: &mut Vec<opencrab_llm_types::ProviderToolCall>,
+        citations: &mut Vec<opencrab_llm_types::ProviderCitation>,
+        parse_failed: &mut bool,
+    ) {
+        if item["type"].as_str() == Some("web_search_call") {
+            let Some(id) = item["id"].as_str().or_else(|| item["call_id"].as_str()) else {
+                *parse_failed = true;
+                return;
+            };
+            let action = match item.get("action") {
+                Some(Value::Object(fields)) => {
+                    let allowed = ["type", "query", "url", "pattern"];
+                    Value::Object(
+                        fields
+                            .iter()
+                            .filter(|(key, _)| allowed.contains(&key.as_str()))
+                            .map(|(key, value)| (key.clone(), value.clone()))
+                            .collect(),
+                    )
+                }
+                _ => {
+                    *parse_failed = true;
+                    Value::Object(Default::default())
+                }
+            };
+            let action_type = action["type"].as_str().unwrap_or_default();
+            if action_type.contains("search") && action["query"].as_str().is_none() {
+                *parse_failed = true;
+            }
+            if let Some(existing) = calls.iter_mut().find(|call| call.id == id) {
+                existing.status = item["status"].as_str().map(str::to_string);
+                existing.action = action;
+            } else {
+                calls.push(opencrab_llm_types::ProviderToolCall {
+                    id: id.to_string(),
+                    status: item["status"].as_str().map(str::to_string),
+                    action,
+                });
+            }
+        }
+        Self::capture_citations_from_item(item, citations);
+    }
+
+    fn capture_citations_from_item(
+        item: &Value,
+        citations: &mut Vec<opencrab_llm_types::ProviderCitation>,
+    ) {
+        if let Some(content) = item["content"].as_array() {
+            for part in content {
+                if let Some(annotations) = part["annotations"].as_array() {
+                    for annotation in annotations {
+                        Self::capture_citation(annotation, citations);
+                    }
+                }
+            }
+        }
+    }
+
+    fn capture_citation(
+        annotation: &Value,
+        citations: &mut Vec<opencrab_llm_types::ProviderCitation>,
+    ) {
+        let source = annotation.get("url_citation").unwrap_or(annotation);
+        if source["type"]
+            .as_str()
+            .is_some_and(|kind| kind != "url_citation")
+        {
+            return;
+        }
+        let Some(url) = source["url"].as_str() else {
+            return;
+        };
+        if !(url.starts_with("https://") || url.starts_with("http://")) {
+            return;
+        }
+        if citations.iter().any(|citation| citation.url == url) {
+            return;
+        }
+        citations.push(opencrab_llm_types::ProviderCitation {
+            url: url.to_string(),
+            title: source["title"].as_str().map(str::to_string),
+        });
     }
 
     fn parse_function_call_item(item: &Value) -> Option<ToolCall> {

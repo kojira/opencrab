@@ -6,6 +6,60 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
+/// Capture state for provider-executed tools (currently ChatGPT native web search).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderToolHistoryState {
+    LegacyUnknown,
+    NotRequested,
+    NotUsed,
+    Captured,
+    Incomplete,
+}
+
+/// One provider-executed tool call. `action` contains only the provider fields
+/// explicitly retained by the parser; raw transport events are never stored.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderToolCall {
+    pub id: String,
+    pub status: Option<String>,
+    pub action: Value,
+}
+
+/// A URL citation attached to a provider response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderCitation {
+    pub url: String,
+    pub title: Option<String>,
+}
+
+/// Provider-native tool history associated with one LLM response.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderToolHistory {
+    pub state: ProviderToolHistoryState,
+    pub provider: Option<String>,
+    pub calls: Vec<ProviderToolCall>,
+    pub citations: Vec<ProviderCitation>,
+}
+
+impl Default for ProviderToolHistory {
+    fn default() -> Self {
+        Self {
+            state: ProviderToolHistoryState::NotRequested,
+            provider: None,
+            calls: Vec::new(),
+            citations: Vec::new(),
+        }
+    }
+}
+
+/// A normal chat response plus provider-executed tool history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmExchange {
+    pub response: ChatResponse,
+    pub provider_tool_history: ProviderToolHistory,
+}
+
 /// Role of a message participant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

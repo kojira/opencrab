@@ -201,7 +201,15 @@ impl LlmRouter {
     /// 1. Resolve the model (alias -> provider:model)
     /// 2. Send to that provider
     /// 3. On failure, try the fallback chain
-    pub async fn chat_completion(&self, mut request: ChatRequest) -> Result<ChatResponse> {
+    pub async fn chat_completion(&self, request: ChatRequest) -> Result<ChatResponse> {
+        Ok(self.chat_completion_with_history(request).await?.response)
+    }
+
+    /// Route a chat completion while preserving provider-executed tool history.
+    pub async fn chat_completion_with_history(
+        &self,
+        mut request: ChatRequest,
+    ) -> Result<opencrab_llm_types::LlmExchange> {
         let (provider_name, model_name) = self.resolve_model(&request.model)?;
         request.model = model_name;
 
@@ -382,7 +390,7 @@ impl LlmRouter {
         provider: &Arc<dyn LlmProvider>,
         provider_name: &str,
         request: &ChatRequest,
-    ) -> Result<ChatResponse> {
+    ) -> Result<opencrab_llm_types::LlmExchange> {
         let mut last_error = None;
 
         for attempt in 0..MAX_RETRIES {
@@ -398,18 +406,18 @@ impl LlmRouter {
             }
 
             let start = std::time::Instant::now();
-            match provider.chat_completion(request.clone()).await {
-                Ok(response) => {
+            match provider.chat_completion_with_history(request.clone()).await {
+                Ok(exchange) => {
                     if let Some(ref metrics) = self.metrics {
                         metrics.record_success(
                             provider_name,
-                            &response.model,
-                            response.usage.prompt_tokens,
-                            response.usage.completion_tokens,
+                            &exchange.response.model,
+                            exchange.response.usage.prompt_tokens,
+                            exchange.response.usage.completion_tokens,
                             start.elapsed().as_millis() as u64,
                         );
                     }
-                    return Ok(response);
+                    return Ok(exchange);
                 }
                 Err(e) => {
                     if let Some(ref metrics) = self.metrics {

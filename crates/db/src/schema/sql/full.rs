@@ -548,6 +548,7 @@ CREATE TABLE IF NOT EXISTS llm_logs (
     is_bot_iteration INTEGER NOT NULL DEFAULT 0,
     cache_read_tokens INTEGER,
     cache_creation_tokens INTEGER,
+    provider_tool_history TEXT NOT NULL DEFAULT '{}',
     created_at TEXT DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_llm_logs_agent ON llm_logs(agent_id);

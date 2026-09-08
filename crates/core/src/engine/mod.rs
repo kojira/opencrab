@@ -8,6 +8,6 @@ pub use skill_engine::SkillEngine;
 pub use types::{
     ActionExecutor, ActionResult, ChatRequest, ChatResponse, DispatchCall, DispatchOutcome,
     EngineResult, FoldedInbound, FunctionDefinition, LiveInboundSource, LlmCallLog, LlmClient,
-    ToolCall, ToolDispatcher,
+    LlmExchange, LlmExchangeLog, ProviderToolHistory, ToolCall, ToolDispatcher,
 };
 pub use xml_parser::parse_xml_tool_calls;

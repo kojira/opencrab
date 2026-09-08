@@ -72,7 +72,19 @@ impl LlmProvider for ChatGptProvider {
     }
 
     async fn chat_completion(&self, request: ChatRequest) -> Result<ChatResponse> {
+        Ok(self.chat_completion_with_history(request).await?.response)
+    }
+
+    async fn chat_completion_with_history(
+        &self,
+        request: ChatRequest,
+    ) -> Result<opencrab_llm_types::LlmExchange> {
         debug!(model = %request.model, "ChatGPT chat completion");
+        let web_search_requested = request
+            .metadata
+            .get("web_search")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let mut token = self.fresh_access_token().await?;
         let mut account_id = extract_account_id(&token)?;
         // http(s) 画像は自分で取得して data URI 化してから送る（後述）。
@@ -126,7 +138,7 @@ impl LlmProvider for ChatGptProvider {
             return Err(crate::error::api_error("ChatGPT", status, text));
         }
 
-        let result = self.parse_response(&text, &request.model);
+        let result = self.parse_exchange(&text, &request.model, web_search_requested);
         tracing::warn!(
             success = result.is_ok(),
             "ChatGPT chat_completion parse result"

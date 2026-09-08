@@ -252,7 +252,7 @@
     ]
   },
   "http": {
-    "route_count": 84,
+    "route_count": 85,
     "routes": [
       {
         "activation": "always",
@@ -438,6 +438,14 @@
           "GET"
         ],
         "path": "/api/agents/{id}/llm-logs/stats",
+        "source": "opencrab_server::create_router"
+      },
+      {
+        "activation": "always",
+        "methods": [
+          "GET"
+        ],
+        "path": "/api/agents/{id}/llm-logs/{log_id}/tool-history",
         "source": "opencrab_server::create_router"
       },
       {
@@ -1547,7 +1555,7 @@
             "sharing": "conversation_bound",
             "sub_engine": "blocked"
           },
-          "description": "Discordメッセージにリアクション（絵文字）を追加する。Unicode絵文字（例: ⚡）またはカスタム絵文字（name:id形式）を指定できる。テキストで返すほどでもない反応は、これでリアクションだけ付けて応答本文を NO_REPLY にしてよい。",
+          "description": "Discordメッセージにリアクション（絵文字）を追加する。Unicode絵文字（例: ⚡）またはカスタム絵文字（name:id形式）を指定できる。テキストで返すほどでもない反応は、これでリアクションだけ付けて応答本文を NO_REPLY にしてよい。複数のリアクションは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。",
           "input_schema": {
             "properties": {
               "channel_id": {
