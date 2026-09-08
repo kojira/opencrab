@@ -306,6 +306,12 @@ mod model_context_window_gate_tests {
     }
 
     #[test]
+    fn fresh_database_accepts_the_standard_default_model_at_startup() {
+        let conn = opencrab_db::init_memory().unwrap();
+        ensure_startup_budget_inputs(&conn, "codex:gpt-5.6").unwrap();
+    }
+
+    #[test]
     fn unregistered_model_is_rejected_with_how_to_register() {
         let conn = opencrab_db::init_memory().unwrap();
         let err = ensure_model_context_window_registered(&conn, "p1:m1").unwrap_err();

@@ -127,9 +127,8 @@ fn provider_rename_openai_to_hermit_migration_v41() {
     );
 }
 
-/// v42（#676）: model_pricing に max_output_tokens 列を足し、claude-opus-5 だけ 128000 に
-/// バックフィルする。既存の context_window / 単価は壊さない。値を持つ行と gpt-5.6 系（NULL
-/// のまま）が同居することを見る。冪等でもある。
+/// v42（#676）で列と claude-opus-5、v49（#969）で標準 gpt-5.6 系の予約値が届く。
+/// 既存の context_window / 単価を壊さず、全 migration の再適用も冪等であることを見る。
 #[test]
 fn model_pricing_max_output_tokens_backfill_migration_v42() {
     let conn = crate::init_memory().expect("init");
@@ -159,11 +158,14 @@ fn model_pricing_max_output_tokens_backfill_migration_v42() {
     // 既存の context_window / 単価は不変。
     assert_eq!(opus.context_window, Some(200000));
 
-    // gpt-5.6 系は公式値未確定のため触らない（NULL のまま）。
+    // v42 では NULL のままだった標準 gpt-5.6 系は、v49 で予約値を補完する。
     let sol = crate::queries::get_model_pricing(&conn, "chatgpt", "gpt-5.6-sol")
         .unwrap()
         .expect("gpt-5.6-sol の行");
-    assert_eq!(sol.max_output_tokens, None);
+    assert_eq!(sol.max_output_tokens, Some(32_000));
+    assert_eq!(sol.context_window, Some(350_000));
+    assert_eq!(sol.input_price_per_1m, 5.0);
+    assert_eq!(sol.output_price_per_1m, 30.0);
 
     // 冪等性: 再実行しても値は変わらない（ALTER は列存在で no-op、backfill は IS NULL で自然 no-op）。
     conn.execute_batch("PRAGMA user_version = 41;").unwrap();

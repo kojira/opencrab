@@ -11,6 +11,7 @@ include!("tests/late_version_migrations_v41_v42_v46.rs");
 include!("tests/legacy_foundation_migrations.rs");
 include!("tests/maintenance_cleanup_migration_v33.rs");
 include!("tests/memory_index_migrations.rs");
+include!("tests/model_budget_seed_migration_v49.rs");
 include!("tests/nostr_skills_config_migrations.rs");
 include!("tests/provider_tool_history_migration_v48.rs");
 include!("tests/routing_migration_v32.rs");
