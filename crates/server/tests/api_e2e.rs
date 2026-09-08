@@ -16,6 +16,7 @@ include!("api_e2e/agents_sessions_memory.rs");
 include!("api_e2e/discord_owner_identity.rs");
 include!("api_e2e/llm_support.rs");
 include!("api_e2e/llm_conversation.rs");
+include!("api_e2e/llm_tool_history.rs");
 include!("api_e2e/import_api.rs");
 include!("api_e2e/provider_voice_setup.rs");
 include!("api_e2e/skill_consolidation.rs");
