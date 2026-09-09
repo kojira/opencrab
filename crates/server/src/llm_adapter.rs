@@ -58,19 +58,6 @@ impl LlmRouterAdapter {
 
 #[async_trait]
 impl LlmClient for LlmRouterAdapter {
-    fn measure_request_tokens(
-        &self,
-        request: &ChatRequest,
-    ) -> Option<opencrab_core::RequestTokenMeasurement> {
-        self.router
-            .get()
-            .measure_request_tokens(request)
-            .map(|tokens| opencrab_core::RequestTokenMeasurement {
-                tokens,
-                capability: opencrab_core::RequestTokenMeterCapability::CertifiedUpperBound,
-            })
-    }
-
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
         Ok(self.chat_with_history(request).await?.response)
     }

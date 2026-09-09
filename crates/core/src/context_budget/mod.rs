@@ -13,9 +13,6 @@ mod governor;
 mod ledger;
 mod observe;
 mod request;
-mod tool_result_budget;
-#[cfg(test)]
-mod tool_result_budget_tests;
 
 pub use compact::{
     argument_reference, compact_to_low_water, group_items, should_compact, CompactItem,
@@ -40,10 +37,6 @@ pub use observe::{
 pub use request::{
     measure_functions_tokens, measure_memory_index, resolve_agent_request_envelope,
     resolve_request_envelope, RequestEnvelopeArgs,
-};
-pub use tool_result_budget::{
-    allocate_result_tokens, available_result_tokens, effective_input_limit, page_utf8_result,
-    validate_final_request_tokens, ModelInputLimits, ResultPage, ToolResultBudgetError,
 };
 
 /// `provider:model` 形式（またはモデル名のみ）を pricing 参照用に分割する。
@@ -71,8 +64,7 @@ pub fn model_context_window_missing_message(spec: &str) -> String {
         "model \"{spec}\" has no context_window registered in model_pricing. \
          Register it first: PUT /api/llm/model-pricing with body \
          {{\"provider\": \"...\", \"model\": \"...\", \"input_price_per_1m\": 0.0, \
-         \"output_price_per_1m\": 0.0, \"context_window\": <max tokens>, \
-         \"max_input_tokens\": <max input tokens>}}. \
+         \"output_price_per_1m\": 0.0, \"context_window\": <max tokens>}}. \
          Current registrations: GET /api/llm/model-pricing."
     )
 }
@@ -118,7 +110,6 @@ pub fn model_max_output_tokens_missing_message(spec: &str) -> String {
         "model \"{spec}\" has no max_output_tokens registered in model_pricing. \
          Register it first: PUT /api/llm/model-pricing with body \
          {{\"provider\": \"...\", \"model\": \"...\", \"context_window\": <max tokens>, \
-         \"max_input_tokens\": <max input tokens>, \
          \"max_output_tokens\": <model's output cap>}}. \
          Current registrations: GET /api/llm/model-pricing."
     )
@@ -153,43 +144,6 @@ pub fn ensure_model_max_output_tokens_registered(
     spec: &str,
 ) -> Result<(), String> {
     resolve_model_max_output_tokens(conn, spec).map(|_| ())
-}
-
-/// #975: tool結果capに使う明示的な入力能力を解決する。context_windowへのfallbackは禁止。
-pub fn resolve_model_input_limits(
-    conn: &rusqlite::Connection,
-    spec: &str,
-) -> Result<ModelInputLimits, String> {
-    let (provider, model) = split_llm_model_spec(spec);
-    let (provider, model) = model_pricing_key(provider, model);
-    let row = opencrab_db::queries::get_model_pricing(conn, &provider, &model)
-        .map_err(|error| format!("failed to look up model_pricing for \"{spec}\": {error}"))?
-        .ok_or_else(|| format!("model \"{spec}\" has no model_pricing row"))?;
-    let max_input_tokens = row
-        .max_input_tokens
-        .filter(|value| *value > 0)
-        .map(|value| value as usize)
-        .ok_or_else(|| {
-            format!("model \"{spec}\" has no max_input_tokens registered in model_pricing")
-        })?;
-    Ok(ModelInputLimits {
-        max_input_tokens: Some(max_input_tokens),
-        max_output_tokens: row
-            .max_output_tokens
-            .filter(|value| *value > 0)
-            .map(|value| value as usize),
-        max_total_tokens: row
-            .max_total_tokens
-            .filter(|value| *value > 0)
-            .map(|value| value as usize),
-    })
-}
-
-pub fn ensure_model_max_input_tokens_registered(
-    conn: &rusqlite::Connection,
-    spec: &str,
-) -> Result<(), String> {
-    resolve_model_input_limits(conn, spec).map(|_| ())
 }
 
 /// 窓と出力予約を同時に解決する。どちらかが無 / NULL / 0 なら既定へ落とさない。
@@ -242,8 +196,6 @@ pub fn ensure_startup_budget_inputs(
 ) -> Result<(), ContextBudgetError> {
     let (provider, model) = split_llm_model_spec(default_spec);
     resolve_model_budget_inputs(conn, provider, model)?;
-    resolve_model_input_limits(conn, default_spec)
-        .map_err(ContextBudgetError::MissingMaxInputTokens)?;
     let ids = opencrab_db::queries::list_agent_ids(conn).map_err(|e| {
         ContextBudgetError::LookupFailed {
             spec: default_spec.to_string(),
@@ -258,8 +210,6 @@ pub fn ensure_startup_budget_inputs(
         })?;
         let (provider, model) = split_llm_model_spec(&spec);
         resolve_model_budget_inputs(conn, provider, model)?;
-        resolve_model_input_limits(conn, &spec)
-            .map_err(ContextBudgetError::MissingMaxInputTokens)?;
     }
     Ok(())
 }
@@ -283,7 +233,6 @@ pub fn check_agent_model_change(
         return Ok(());
     }
     ensure_model_context_window_registered(conn, new_model)?;
-    ensure_model_max_input_tokens_registered(conn, new_model)?;
     ensure_model_max_output_tokens_registered(conn, new_model)?;
     Ok(())
 }
@@ -343,9 +292,7 @@ mod model_context_window_gate_tests {
                 input_price_per_1m: 0.0,
                 output_price_per_1m: 0.0,
                 context_window: window,
-                max_input_tokens: window,
                 max_output_tokens: max_output,
-                max_total_tokens: None,
             },
         )
         .unwrap();

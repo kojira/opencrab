@@ -326,7 +326,6 @@
         engine.set_tool_dispatcher(dispatcher.clone());
 
         // subscriber を有効化したまま、同一スレッドで run を完走させる。
-        let _tracing_guard = TRACING_TEST_LOCK.lock().unwrap();
         tracing::subscriber::with_default(subscriber, || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()

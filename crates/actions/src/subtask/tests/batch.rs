@@ -350,11 +350,8 @@
         );
         assert_eq!(cancelled, CancelOutcome::Cancelled);
 
-        // cancelled terminalを親LLMへ一度戻し、部分結果も残す。
-        let events = sink.events.lock().unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].kind, SettleKind::Cancelled);
-        drop(events);
+        // 完了 sink は発火しない（停止したので返信しない）が、部分結果は残る。
+        assert!(sink.events.lock().unwrap().is_empty());
         let conn = db.lock().unwrap();
         let log = opencrab_db::queries::list_recent_session_logs(&conn, parent, 10)
             .unwrap()

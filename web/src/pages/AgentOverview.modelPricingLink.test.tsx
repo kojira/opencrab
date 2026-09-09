@@ -38,8 +38,7 @@ const REAL_UNREGISTERED_MSG =
   `model "${SPEC}" has no context_window registered in model_pricing. ` +
   `Register it first: PUT /api/llm/model-pricing with body ` +
   `{"provider": "...", "model": "...", "input_price_per_1m": 0.0, ` +
-  `"output_price_per_1m": 0.0, "context_window": <max tokens>, ` +
-  `"max_input_tokens": <max input tokens>}. ` +
+  `"output_price_per_1m": 0.0, "context_window": <max tokens>}. ` +
   `Current registrations: GET /api/llm/model-pricing.`;
 
 beforeEach(() => {

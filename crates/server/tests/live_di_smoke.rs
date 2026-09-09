@@ -42,8 +42,7 @@
 //! `LIVE_GATE_SOCK`（gate UDS の絶対パス・gate モードで**必須**）、
 //! `LIVE_MODE`（gate | rest・既定 gate）、
 //! `LIVE_CORE_HTTP`（既定 http://127.0.0.1:18700）、
-//! `LIVE_SCENARIO`（reply3 | plain3 | noreply | oneq | sleep60 | issue975-success |
-//! issue975-failure | issue975-multi | issue975-large・既定 reply3）、
+//! `LIVE_SCENARIO`（reply3 | plain3 | noreply | oneq | sleep60・既定 reply3）、
 //! `LIVE_PROMPT_FILE`（プロンプト差し替え・省略時はシナリオ既定文）、
 //! `LIVE_TIMEOUT_SECS`（ターン観測の上限秒・省略時 sleep60=150 / その他=60）。
 
@@ -88,62 +87,36 @@ struct Scenario {
     prompt: &'static str,
     /// resume ターン（subtask）を待つ。true は最初の ended で切らず 2 回目 ended / deadline まで観測。
     expect_resume: bool,
-    /// #975 live契約: 実LLMへ渡る会話ログに必要なterminal statusと実行数。
-    expected_tool_status: Option<&'static str>,
-    expected_tool_count: Option<usize>,
 }
 
 fn scenario_for(name: &str) -> Scenario {
-    fn plain(name: &'static str, prompt: &'static str) -> Scenario {
-        Scenario {
-            name,
-            prompt,
-            expect_resume: false,
-            expected_tool_status: None,
-            expected_tool_count: None,
-        }
-    }
     match name {
-        "reply3" => plain("reply3", "このメッセージに、reply（返信）操作を使って3回に分けて返事してください。3つの短い返信に分けてください。"),
-        "plain3" => plain("plain3", "返信ツールを使わず、別々の投稿（メッセージ）として3回に分けて投稿して。1回目・2回目・3回目と番号を付けて。"),
-        "noreply" => plain("noreply", "（独り言・あなたへの依頼や質問ではありません。返事は不要です。）今日はいい天気ですね。"),
-        "oneq" => plain("oneq", "1たす1はいくつですか。ひとことで答えてください。"),
+        "reply3" => Scenario {
+            name: "reply3",
+            prompt: "このメッセージに、reply（返信）操作を使って3回に分けて返事してください。3つの短い返信に分けてください。",
+            expect_resume: false,
+        },
+        "plain3" => Scenario {
+            name: "plain3",
+            prompt: "返信ツールを使わず、別々の投稿（メッセージ）として3回に分けて投稿して。1回目・2回目・3回目と番号を付けて。",
+            expect_resume: false,
+        },
+        "noreply" => Scenario {
+            name: "noreply",
+            prompt: "（独り言・あなたへの依頼や質問ではありません。返事は不要です。）今日はいい天気ですね。",
+            expect_resume: false,
+        },
+        "oneq" => Scenario {
+            name: "oneq",
+            prompt: "1たす1はいくつですか。ひとことで答えてください。",
+            expect_resume: false,
+        },
         "sleep60" => Scenario {
             name: "sleep60",
             prompt: "60秒 sleep して、終わったらそのことを教えてください。",
             expect_resume: true,
-            expected_tool_status: Some("completed"),
-            expected_tool_count: Some(1),
         },
-        "issue975-success" => Scenario {
-            name: "issue975-success",
-            prompt: "必ず execute_shell を一度だけ使い、echo issue975-live-success を実行してください。running中は再実行せず、完了結果を読んでから短く報告してください。",
-            expect_resume: true,
-            expected_tool_status: Some("completed"),
-            expected_tool_count: Some(1),
-        },
-        "issue975-failure" => Scenario {
-            name: "issue975-failure",
-            prompt: "必ず execute_shell を一度だけ使い、commandをpython3、argsを[\"-c\", \"import sys; print('issue975-live-failure', file=sys.stderr); sys.exit(7)\"]として実行してください。running中は再実行せず、失敗結果を読んでから短く報告してください。",
-            expect_resume: true,
-            expected_tool_status: Some("failed"),
-            expected_tool_count: Some(1),
-        },
-        "issue975-multi" => Scenario {
-            name: "issue975-multi",
-            prompt: "一つの応答で execute_shell を二回呼び、echo issue975-live-first と echo issue975-live-second をこの順に実行してください。両方の完了結果を読んでから報告してください。",
-            expect_resume: true,
-            expected_tool_status: Some("completed"),
-            expected_tool_count: Some(2),
-        },
-        "issue975-large" => Scenario {
-            name: "issue975-large",
-            prompt: "必ず execute_shell を一度だけ使い、commandをpython3、argsを[\"-c\", \"print(('issue975-live-large' + chr(10)) * 20000, end='')\"]として実行してください。running中は再実行せず、完了後は結果の保存先とサイズだけ報告してください。",
-            expect_resume: true,
-            expected_tool_status: Some("completed"),
-            expected_tool_count: Some(1),
-        },
-        other => panic!("未知の LIVE_SCENARIO: {other}（reply3|plain3|noreply|oneq|sleep60|issue975-*）"),
+        other => panic!("未知の LIVE_SCENARIO: {other}（reply3|plain3|noreply|oneq|sleep60）"),
     }
 }
 
@@ -299,29 +272,6 @@ async fn llm_log_ids(http: &Http, agent: &str) -> HashSet<String> {
         .unwrap_or_default()
 }
 
-/// ターン中に実providerへ渡された最終ChatRequest。DB会話行ではなくllm_logs.promptの
-/// exact request JSONを読む（#975 live acceptanceの正本）。
-async fn llm_requests_after(http: &Http, agent: &str, before_ids: &HashSet<String>) -> Vec<Value> {
-    let (st, body) = http
-        .get_json(&format!("/api/agents/{agent}/llm-logs?limit=50"))
-        .await;
-    if !st.is_success() {
-        return Vec::new();
-    }
-    body.as_array()
-        .into_iter()
-        .flatten()
-        .filter(|entry| {
-            entry
-                .get("id")
-                .and_then(Value::as_str)
-                .is_some_and(|id| !before_ids.contains(id))
-        })
-        .filter_map(|entry| entry.get("prompt").and_then(Value::as_str))
-        .filter_map(|prompt| serde_json::from_str(prompt).ok())
-        .collect()
-}
-
 /// memory_sessions 保存行（log_type, content）。`GET /api/sessions/{id}/logs`。
 async fn session_logs(http: &Http, session_id: &str) -> Vec<(String, String)> {
     let (st, body) = http
@@ -365,8 +315,6 @@ struct Observed {
     saved: Vec<(String, String)>,
     /// LLM 呼び出し回数（= 単一ターンではイテレーション数）。
     llm_calls: usize,
-    /// 実providerへ送信したChatRequest JSON（APIのllm log差分）。
-    llm_requests: Vec<Value>,
     /// gate: activity 遷移。
     activities: Vec<String>,
     completed_no_reply: bool,
@@ -433,134 +381,6 @@ async fn live_di_smoke() {
         any,
         "観測点が全て空（配線失敗・mode={mode}・timeout={timeout_secs}s）"
     );
-    assert_issue975_live_contract(&scenario, &obs);
-}
-
-fn non_system_request_text(request: &Value) -> String {
-    request
-        .get("messages")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|message| message.get("role").and_then(Value::as_str) != Some("system"))
-        .map(Value::to_string)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn request_has_tool_call_id(request: &Value, id: &str) -> bool {
-    request
-        .get("messages")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .flat_map(|message| {
-            message
-                .get("tool_calls")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-        })
-        .any(|call| call.get("id").and_then(Value::as_str) == Some(id))
-}
-
-fn lifecycle_ids(text: &str, status: &str) -> Vec<String> {
-    let suffix = format!("] status:{status}");
-    text.match_indices("[<t")
-        .filter_map(|(start, _)| {
-            let tail = &text[start + 2..];
-            let end = tail.find(']')?;
-            let id = &tail[..end];
-            tail[end..].starts_with(&suffix).then(|| id.to_string())
-        })
-        .collect()
-}
-
-/// #975の手動liveシナリオは、実モデルの自然言語だけでなく、実providerへ渡した最終
-/// ChatRequestを合否の正本にする。raw provider IDや制御記号をログへ残さない。
-fn assert_issue975_live_contract(scenario: &Scenario, obs: &Observed) {
-    let Some(expected_status) = scenario.expected_tool_status else {
-        return;
-    };
-    assert!(
-        obs.llm_requests.len() >= 2,
-        "{}: tool開始後に実LLMが再度呼ばれていない",
-        scenario.name
-    );
-    let texts: Vec<String> = obs
-        .llm_requests
-        .iter()
-        .map(non_system_request_text)
-        .collect();
-    let all = texts.join("\n");
-    let running_ids = lifecycle_ids(&all, "running");
-    let terminal_ids = lifecycle_ids(&all, expected_status);
-    let expected_count = scenario.expected_tool_count.unwrap();
-    let unique_running = running_ids.iter().collect::<HashSet<_>>();
-    let unique_terminal = terminal_ids.iter().collect::<HashSet<_>>();
-    assert_eq!(
-        unique_running.len(),
-        expected_count,
-        "{}: tool実行数が期待値と異なる: {unique_running:?}",
-        scenario.name
-    );
-    assert_eq!(
-        unique_terminal.len(),
-        expected_count,
-        "{}: terminal数が期待値と異なる: {unique_terminal:?}",
-        scenario.name
-    );
-    assert!(
-        running_ids.len() >= expected_count,
-        "{}: status:runningが不足: {running_ids:?}",
-        scenario.name
-    );
-    assert!(
-        terminal_ids.len() >= expected_count,
-        "{}: status:{expected_status}が実LLM入力へ届いていない: {terminal_ids:?}",
-        scenario.name
-    );
-    for id in terminal_ids.iter().collect::<HashSet<_>>() {
-        assert!(
-            running_ids.contains(id),
-            "{}: terminalだけがありcall/runningと相関しない: {id}",
-            scenario.name
-        );
-        assert!(
-            all.contains(&format!("[{id}>"))
-                || obs
-                    .llm_requests
-                    .iter()
-                    .any(|request| request_has_tool_call_id(request, id)),
-            "{}: 短縮ID {id} のtool callが実LLM入力にない",
-            scenario.name
-        );
-    }
-    assert!(
-        !all.contains("toolu_"),
-        "provider raw tool IDがLLM入力へ漏れた"
-    );
-    assert!(!all.contains("CONTINUE"), "CONTINUEが会話履歴へ残った");
-    assert!(!all.contains("NO_REPLY"), "NO_REPLYが会話履歴へ残った");
-    if scenario.name == "issue975-failure" {
-        assert!(all.contains("issue975-live-failure"));
-        assert!(
-            all.contains("result_omitted:true")
-                || all.contains("exit code: 7")
-                || all.contains("exit_code\\\":7"),
-            "失敗詳細または永続参照のどちらも実LLM入力にない"
-        );
-        assert!(!all.contains("status:completed"));
-    }
-    if scenario.name == "issue975-success" {
-        assert!(all.contains("issue975-live-success"));
-    }
-    if scenario.name == "issue975-large" {
-        assert!(
-            all.contains("result_omitted") || all.contains("issue975-live-large"),
-            "大容量結果が本文または明示的な省略参照として届いていない"
-        );
-    }
 }
 
 /// gate モード: 偽ゲートを bind して DI 発話 op / say / ゲート反応まで観測する。
@@ -708,19 +528,8 @@ async fn run_gate(
                     ended_count += 1;
                     if !scenario.expect_resume {
                         soft_deadline = Some(Instant::now() + Duration::from_secs(2));
-                    } else {
-                        let terminal_seen = if let Some(status) = scenario.expected_tool_status {
-                            llm_requests_after(http, agent, &before_ids)
-                                .await
-                                .iter()
-                                .map(non_system_request_text)
-                                .any(|text| text.contains(&format!("] status:{status}")))
-                        } else {
-                            false
-                        };
-                        if ended_count >= 2 || terminal_seen {
-                            break;
-                        }
+                    } else if ended_count >= 2 {
+                        break;
                     }
                 }
             }
@@ -755,7 +564,6 @@ async fn run_gate(
         .iter()
         .filter(|id| !before_ids.contains(*id))
         .count();
-    let llm_requests = llm_requests_after(http, agent, &before_ids).await;
     let session_id = opencrab_extgate::session_id_for_binding(&binding_id);
     let saved = session_logs(http, &session_id).await;
 
@@ -784,7 +592,6 @@ async fn run_gate(
         rest_responses: Vec::new(),
         saved,
         llm_calls,
-        llm_requests,
         activities,
         completed_no_reply,
         turn_failed,
@@ -836,7 +643,6 @@ async fn run_rest(http: &Http, agent: &str, owner: &str, prompt: &str) -> Observ
         .iter()
         .filter(|id| !before_ids.contains(*id))
         .count();
-    let llm_requests = llm_requests_after(http, agent, &before_ids).await;
     let saved = session_logs(http, &session_id).await;
 
     let fn_bodies = rest_responses.clone();
@@ -844,7 +650,6 @@ async fn run_rest(http: &Http, agent: &str, owner: &str, prompt: &str) -> Observ
         rest_responses,
         saved,
         llm_calls,
-        llm_requests,
         fn_bodies,
         ..Default::default()
     }

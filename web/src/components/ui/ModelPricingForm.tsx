@@ -14,10 +14,8 @@ export interface ModelPricingFormInitial {
   input_price_per_1m?: number;
   output_price_per_1m?: number;
   context_window?: number | null;
-  max_input_tokens?: number | null;
   /** #676: 出力トークン上限（任意）。max_tokens を送るプロバイダのモデルにだけ必要。 */
   max_output_tokens?: number | null;
-  max_total_tokens?: number | null;
 }
 
 /**
@@ -46,12 +44,6 @@ export default function ModelPricingForm({
   const [contextWindow, setContextWindow] = useState(
     initial?.context_window != null ? String(initial.context_window) : '',
   );
-  const [maxInputTokens, setMaxInputTokens] = useState(
-    initial?.max_input_tokens != null ? String(initial.max_input_tokens) : '',
-  );
-  const [maxTotalTokens, setMaxTotalTokens] = useState(
-    initial?.max_total_tokens != null ? String(initial.max_total_tokens) : '',
-  );
   const [inputPrice, setInputPrice] = useState(
     initial?.input_price_per_1m != null ? String(initial.input_price_per_1m) : '',
   );
@@ -79,20 +71,6 @@ export default function ModelPricingForm({
       setError('context_window は正の整数トークン数で入力してください');
       return;
     }
-    const mit = Number(maxInputTokens);
-    if (!Number.isFinite(mit) || !Number.isInteger(mit) || mit <= 0) {
-      setError('max_input_tokens は正の整数トークン数で入力してください');
-      return;
-    }
-    let mtt: number | null = null;
-    if (maxTotalTokens.trim() !== '') {
-      const v = Number(maxTotalTokens);
-      if (!Number.isFinite(v) || !Number.isInteger(v) || v <= 0) {
-        setError('max_total_tokens は空欄か、正の整数トークン数で入力してください');
-        return;
-      }
-      mtt = v;
-    }
     const inp = inputPrice.trim() === '' ? 0 : Number(inputPrice);
     const out = outputPrice.trim() === '' ? 0 : Number(outputPrice);
     if (!Number.isFinite(inp) || inp < 0 || !Number.isFinite(out) || out < 0) {
@@ -117,9 +95,7 @@ export default function ModelPricingForm({
         input_price_per_1m: inp,
         output_price_per_1m: out,
         context_window: cw,
-        max_input_tokens: mit,
         max_output_tokens: mot,
-        max_total_tokens: mtt,
       });
       onSaved({
         provider: p,
@@ -127,9 +103,7 @@ export default function ModelPricingForm({
         input_price_per_1m: inp,
         output_price_per_1m: out,
         context_window: cw,
-        max_input_tokens: mit,
         max_output_tokens: mot,
-        max_total_tokens: mtt,
       });
     } catch (e) {
       setError(String(e));
@@ -182,30 +156,6 @@ export default function ModelPricingForm({
             <strong>モデル提供元の公式ドキュメント</strong>を見てください（集約サイトの数字は
             当てになりません）。
           </p>
-        </div>
-        <div>
-          <label className="mb-1 block text-xs font-medium text-on-surface-variant">
-            max_input_tokens（最大入力・必須）
-          </label>
-          <input
-            value={maxInputTokens}
-            onChange={(e) => setMaxInputTokens(e.target.value)}
-            inputMode="numeric"
-            placeholder="例: 350000"
-            className={inputCls}
-          />
-        </div>
-        <div>
-          <label className="mb-1 block text-xs font-medium text-on-surface-variant">
-            max_total_tokens（入出力共有窓・任意）
-          </label>
-          <input
-            value={maxTotalTokens}
-            onChange={(e) => setMaxTotalTokens(e.target.value)}
-            inputMode="numeric"
-            placeholder="独立上限なら空欄"
-            className={inputCls}
-          />
         </div>
         <div className="sm:col-span-2">
           <label className="mb-1 block text-xs font-medium text-on-surface-variant">

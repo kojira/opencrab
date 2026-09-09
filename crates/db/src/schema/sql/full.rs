@@ -208,10 +208,6 @@ CREATE TABLE IF NOT EXISTS model_pricing (
     -- max_tokens に使い、未登録（NULL / 0 以下）だと使用時に fail loud で止まる。
     -- 番号付きマイグレーション v42 で既存 DB にも追加する。
     max_output_tokens INTEGER,
-    -- #975: request入力の独立上限。context_windowは互換用に残しcap計算へ流用しない。
-    max_input_tokens INTEGER,
-    -- providerが入力＋出力の共有上限を明示する場合だけ設定する。
-    max_total_tokens INTEGER,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (provider, model)
 );
@@ -220,9 +216,9 @@ CREATE TABLE IF NOT EXISTS model_pricing (
 -- subscription 経路なので価格は 0。v49 migration が既存 DB を同じ形へ収束させる。
 INSERT OR IGNORE INTO model_pricing (
     provider, model, input_price_per_1m, output_price_per_1m,
-    context_window, max_output_tokens, max_input_tokens, updated_at
+    context_window, max_output_tokens, updated_at
 ) VALUES (
-    'codex', 'gpt-5.6', 0.0, 0.0, 1050000, 32000, 1050000, datetime('now')
+    'codex', 'gpt-5.6', 0.0, 0.0, 1050000, 32000, datetime('now')
 );
 
 -- ============================================

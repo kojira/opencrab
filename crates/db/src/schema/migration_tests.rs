@@ -19,4 +19,3 @@ include!("tests/runner_contracts.rs");
 include!("tests/schedule_migrations_v37_v38.rs");
 include!("tests/schema_contracts.rs");
 include!("tests/transplant_migration_v43.rs");
-include!("tests/tool_continuation_schema_v50.rs");

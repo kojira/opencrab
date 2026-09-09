@@ -1,20 +1,15 @@
+use anyhow::Result;
+use opencrab_llm_types::{Message, MessageContent, Role, ToolCall};
+
 use super::{
-    completion_requests::{
-        append_live_completions, assign_conversation_tool_ids, mark_completion_effect_applied,
-        prepare_completion_request, recover_dispatch_effects, recover_tool_effect,
-        register_tool_result_alternate,
-    },
-    request_builder::{append_live_inbound, build_chat_request, turn_state_digest},
     run_helpers::{
-        initialize_turn, normalize_response, partition_tool_calls_for_dispatch,
-        strip_continue_marker, InitialTurn,
+        self, classify_call_failure, initialize_turn, normalize_response,
+        partition_tool_calls_for_dispatch, strip_continue_marker, InitialTurn,
     },
     turn_budget::{apply_turn_budget, seat_tool_result},
     SkillEngine,
 };
-use crate::engine::types::EngineResult;
-use anyhow::Result;
-use opencrab_llm_types::{Message, MessageContent, Role, ToolCall};
+use crate::engine::types::{ChatRequest, EngineResult, LlmCallLog, LlmExchangeLog};
 
 impl SkillEngine {
     /// Run the action loop with the given system context and user message.
@@ -75,21 +70,14 @@ impl SkillEngine {
         // 同じ run 内で既に通知した origin は再び pending に入れない。
         let mut read_emitted_origins: std::collections::HashSet<String> =
             std::collections::HashSet::new();
-        // source側のwatermarkに加え、同じrun内でもevent IDを防御的に冪等化する。
-        let mut folded_completion_ids: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-        let mut pending_completion_event_ids: Vec<String> = Vec::new();
-        // messages上のcompletion本文と、安全な永続参照版。requestごとにmeterで選ぶ。
-        let mut completion_message_alternates: Vec<(usize, String)> = Vec::new();
         let mut total_tool_calls = 0;
         let mut xml_fallback_parses = 0;
         // #915: 各生成で最後に成功した投稿系 utterance-op の call_id。生成開始時にリセットし、
         // 上限到達時だけ直前（打ち切られた最終生成）の値を保持して返す。
         let mut last_posting_utterance_id: Option<String> = None;
         let mut last_generation_had_continuation_speech = false;
-        // #975: 同じ会話状態での空CONTINUEは一度だけ再試行し、busy loopを止める。
-        let mut last_empty_continue_state: Option<[u8; 32]> = None;
-        let mut running_background_batches: usize = 0;
+        // #898 §13.1 a: 空 CONTINUE（本文なし・継続）の連続回数。3 連続で解析 warn を 1 行出す。
+        let mut consecutive_empty_continue: usize = 0;
 
         loop {
             iterations += 1;
@@ -131,42 +119,47 @@ impl SkillEngine {
             // user メッセージが並ぶ形になるが、連続 user ロールは許容される
             // （Anthropic は同ロールを 1 ターンへ併合する）。
             if iterations > 1 {
-                append_live_inbound(
-                    self,
-                    &mut messages,
-                    &mut turn_ledger,
-                    &mut pending_read_origins,
-                    &read_emitted_origins,
-                );
+                if let Some(source) = &self.live_inbound {
+                    // #964: origin つきで引く。ここでは request に含める本文と origin の組を
+                    // pending に積むだけにし、read 通知は request 構築後の `llm.chat` 直前まで遅らせる。
+                    for folded in source.poll_new_with_origin() {
+                        let crate::FoldedInbound { text, origin } = folded;
+                        tracing::info!(
+                            iteration = iterations,
+                            bytes = text.len(),
+                            "injecting newly arrived user speech into the running turn"
+                        );
+                        messages.push(Message {
+                            role: Role::User,
+                            content: Some(MessageContent::Text(text.clone())),
+                            name: None,
+                            function_call: None,
+                            tool_calls: None,
+                            tool_call_id: None,
+                        });
+                        turn_ledger.record(format!("live:{}", messages.len()), &text);
+                        // 同じ origin が同一 poll や以前の request に重なっても通知は 1 回だけ。
+                        if let Some(origin) = origin {
+                            if !read_emitted_origins.contains(&origin)
+                                && !pending_read_origins.contains(&origin)
+                            {
+                                pending_read_origins.push(origin);
+                            }
+                        }
+                    }
+                }
             }
-            // #975: turn開始後に決着したbackground toolの結果を、固定済みmessagesへ差分追加する。
-            // provider実行中には割り込まず、次の反復のrequest構築直前だけで取り込む。
-            append_live_completions(
-                self,
-                &mut messages,
-                &mut turn_ledger,
-                &mut folded_completion_ids,
-                &mut pending_completion_event_ids,
-                &mut completion_message_alternates,
-                &mut running_background_batches,
-            );
             apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
 
-            let recovered_effect = (iterations == 1)
-                .then_some(self.live_tool_completions.as_ref())
-                .flatten()
-                .map(|source| source.recover_pending_effect())
-                .transpose()
-                .map_err(anyhow::Error::msg)?
-                .flatten();
-
             // Check for dynamic model override.
-            let mut model = model_override
+            let model = model_override
                 .as_ref()
                 .and_then(|o| o.lock().ok().and_then(|m| m.clone()))
                 .unwrap_or_else(|| default_model.to_string());
 
-            // LLM呼び出し前を記録し、宙吊り時の最後の観測点にする。
+            // #665: LLM 呼び出しの入り。この後の `self.llm.chat(...).await` が返らなければここが
+            // 最後の行になる（宙吊りの典型＝推論に入って戻らない／プロキシ未到達）。agent_id / session_id /
+            // turn_id は run_agent_response が張った span から継承する。
             tracing::debug!(
                 iteration = iterations,
                 model = %model,
@@ -175,23 +168,39 @@ impl SkillEngine {
                 "turn: LLM リクエスト 開始（入）"
             );
 
-            // describe_toolsで活性化したツールを反映するため毎イテレーション取り直す。
+            // §2.7: describe_tools でこのターンに活性化したツールを次イテレーションの関数集合へ
+            // 反映するため、毎イテレーション list_tools を取り直す（階層化しても depth>0 なら
+            // 常に同じ集合を返すので従来挙動と等価）。
             let tools = self.executor.list_tools();
-            let request = build_chat_request(self, model.clone(), &messages, tools)?;
-            let (request, completion_request_id, recovered_response) =
-                if let Some((request_id, exact_request, response)) = recovered_effect {
-                    (exact_request, Some(request_id), Some(response))
+
+            let request = ChatRequest {
+                model: model.clone(),
+                messages: messages.clone(),
+                functions: if tools.is_empty() {
+                    None
                 } else {
-                    let (request, request_id) = prepare_completion_request(
-                        self,
-                        request,
-                        &mut messages,
-                        &completion_message_alternates,
-                        &pending_completion_event_ids,
-                    )?;
-                    (request, request_id, None)
-                };
-            model = request.model.clone();
+                    Some(tools.clone())
+                },
+                function_call: None,
+                temperature: Some(0.7),
+                max_tokens: self.max_output_tokens,
+                stop: None,
+                stream: None,
+                metadata: {
+                    let mut m: std::collections::HashMap<String, serde_json::Value> =
+                        Default::default();
+                    if self.web_search {
+                        m.insert("web_search".to_string(), serde_json::json!(true));
+                    }
+                    m
+                },
+                agent_id: None,
+                reasoning_effort: self.reasoning_effort.clone(),
+            };
+
+            let request_for_log = request.clone();
+            let requested_at =
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
             // #964: この exact request に新しく含めた origin の read 通知を、request が完成した後、
             // `llm.chat(request).await` の直前に逐次 emit する。対象が無ければ何もしない。
@@ -206,23 +215,93 @@ impl SkillEngine {
                 pending_read_origins.clear();
             }
 
-            let (response, request_for_log, replayed_effect) = self
-                .execute_exchange(
-                    request,
-                    &model,
-                    iterations,
-                    completion_request_id.as_deref(),
-                    &mut pending_completion_event_ids,
-                    recovered_response,
-                )
-                .await?;
+            let call_start = std::time::Instant::now();
+            let exchange_result = self.llm.chat_with_history(request).await;
+            let latency_ms = call_start.elapsed().as_millis() as i64;
+            // #665: LLM 呼び出しの出。入と対で出す（入だけだと「入って止まった」と「戻った」が
+            // 区別できない）。成否と latency を載せ、この後のツール往復／最終応答へ進む。
+            tracing::debug!(
+                iteration = iterations,
+                latency_ms,
+                ok = exchange_result.is_ok(),
+                stage = "llm_call",
+                "turn: LLM リクエスト 完了（出）"
+            );
+
+            // #706 / #676: transport の成否とは別に「このターンの応答は使えるか」を
+            // **log_callback の前に**判定する。log_callback（process.rs 側）はこの時点で
+            // llm_logs へ即 INSERT するので、判定結果を載せずに呼ぶと、切り捨て（#676）や
+            // 意味的に空（#706）の応答が error 欄空の「成功行」として残り、fail loud に
+            // しても理由がログに載らない（設計 §1-c の落とし穴）。空応答と出力上限切り捨てを
+            // 同じ 1 経路で捕まえ、種別（error_code）を engine 側で確定させる——process は
+            // その値を写すだけにする。判定は中身の形だけで行い、finish_reason=Length は
+            // 「上限切り捨て」の特定にのみ使う（空判定には混ぜない＝stop を名乗る空応答を
+            // 取りこぼさない）。
+            let response_result = match &exchange_result {
+                Ok(exchange) => Ok(exchange.response.clone()),
+                Err(error) => Err(anyhow::anyhow!(error.to_string())),
+            };
+            let call_failure =
+                classify_call_failure(&response_result, &model, self.max_output_tokens);
+            let call_log = LlmCallLog {
+                request: request_for_log.clone(),
+                response: exchange_result
+                    .as_ref()
+                    .ok()
+                    .map(|exchange| exchange.response.clone()),
+                error_str: call_failure.as_ref().map(|failure| failure.body.clone()),
+                error_code: call_failure.as_ref().map(|failure| failure.code.clone()),
+                latency_ms,
+                requested_at: requested_at.clone(),
+                is_bot_iteration: iterations > 1,
+            };
+
+            if let Some(cb) = &self.log_callback {
+                cb(&call_log);
+            }
+            if let Some(cb) = &self.exchange_log_callback {
+                let provider_tool_history = exchange_result
+                    .as_ref()
+                    .map(|exchange| exchange.provider_tool_history.clone())
+                    .unwrap_or_else(|_| opencrab_llm_types::ProviderToolHistory {
+                        // A transport error carries no reliable resolved-provider identity here.
+                        // Do not label non-ChatGPT failures as native-search parse failures.
+                        state: opencrab_llm_types::ProviderToolHistoryState::NotRequested,
+                        provider: None,
+                        calls: Vec::new(),
+                        citations: Vec::new(),
+                    });
+                cb(&LlmExchangeLog {
+                    call: call_log,
+                    provider_tool_history,
+                });
+            }
+
+            // transport 失敗はここで打ち切り（理由は上で llm_logs に残した）。
+            let response = exchange_result?.response;
+
+            // Ok だが意味的に使えない応答（空 #706 / 切り捨て #676）は fail loud で打ち切る。
+            // tool_calls / content を抽出する**前**に見る——切り捨てられた tool_call JSON が
+            // 「空の tool_calls → 最終応答扱い」で黙って消える形をここ 1 点で塞ぐ。
+            if let Some(run_helpers::CallFailure { code, body }) = call_failure {
+                tracing::error!(
+                    iteration = iterations,
+                    error_code = %code,
+                    model = %model,
+                    stage = "turn_failed",
+                    "turn: LLM 応答が使えないためターン失敗（fail loud）"
+                );
+                anyhow::bail!("{body}");
+            }
 
             // 応答本文とツールコールをローカルに抽出（正準モデルは choices[0] を持つ）。
             let normalized = normalize_response(&response);
             let mut content = normalized.content;
-            let mut tool_calls = normalized.tool_calls;
-            assign_conversation_tool_ids(self, &mut tool_calls, replayed_effect)?;
+            let tool_calls = normalized.tool_calls;
 
+            // If the LLM returned no structured tool calls but embedded
+            // <function_calls> XML in the content (e.g. DeepSeek via OpenRouter),
+            // parse them out and treat them as normal tool calls.
             if normalized.xml_tool_count > 0 {
                 // 発火は harness 剪定の判断材料として計測する（EngineResult 経由で
                 // agent_logs にも記録される）。codex プロバイダは意図的にこの
@@ -245,29 +324,19 @@ impl SkillEngine {
             let (stripped_content, continue_requested) = strip_continue_marker(content);
             content = stripped_content;
 
-            let empty_continue =
-                continue_requested && content.as_deref().map(str::trim).unwrap_or("").is_empty();
-            if empty_continue {
-                let state = turn_state_digest(&request_for_log.messages)?;
-                if last_empty_continue_state == Some(state) {
-                    crate::continue_marker::warn_no_progress_continuation(iterations);
-                    mark_completion_effect_applied(self, completion_request_id.as_deref())?;
-                    if running_background_batches > 0 {
-                        return Ok(EngineResult {
-                            response: String::new(),
-                            iterations,
-                            tool_calls_made: total_tool_calls,
-                            stopped_by_limit: false,
-                            last_posting_utterance_id,
-                            last_generation_had_continuation_speech,
-                            xml_fallback_parses,
-                        });
-                    }
-                    anyhow::bail!("no_progress_continuation: empty CONTINUE repeated without a changed turn state");
+            // #898 §13.1 a: 空 CONTINUE（本文なし・継続）の連鎖を数える。3 連続で解析 warn を 1 行
+            // 出す（停止はしない・上限は既存 max_iterations）。非空生成・非継続でリセットする。
+            if continue_requested && content.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                consecutive_empty_continue += 1;
+                if consecutive_empty_continue == 3 {
+                    tracing::warn!(
+                        target: crate::continue_marker::CONTINUE_LOG_TARGET,
+                        iteration = iterations,
+                        "空 CONTINUE 連続 3 回（解析用・停止しない・§13.1 a）"
+                    );
                 }
-                last_empty_continue_state = Some(state);
             } else {
-                last_empty_continue_state = None;
+                consecutive_empty_continue = 0;
             }
 
             // Fire on_response_text for every LLM reply that has non-empty text.
@@ -321,7 +390,6 @@ impl SkillEngine {
                             "turn: 純発話生成を配送（1 生成で完結・機械行なし）"
                         );
                     }
-                    mark_completion_effect_applied(self, completion_request_id.as_deref())?;
                     return Ok(EngineResult {
                         response: content.unwrap_or_default(),
                         iterations,
@@ -460,29 +528,6 @@ impl SkillEngine {
                     total_tool_calls += 1;
                     let tool_name = &tool_call.function.name;
 
-                    // durable response replayでは、同じ短縮tool IDの結果が既に永続化済みなら
-                    // executorを再度呼ばず、そのexact resultを会話へ戻す。
-                    let recovered = recover_tool_effect(
-                        self.live_tool_completions.as_deref(),
-                        replayed_effect,
-                        tool_call,
-                    );
-                    if let Some((result_json, _running)) = recovered {
-                        messages.push(Message::tool(tool_call.id.clone(), result_json.clone()));
-                        if self.model_input_limits_resolver.is_some() {
-                            register_tool_result_alternate(
-                                &messages,
-                                &mut completion_message_alternates,
-                                &tool_call.id,
-                                tool_name,
-                                &result_json,
-                            );
-                        }
-                        turn_ledger.record(format!("tool:{}", messages.len()), &result_json);
-                        apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
-                        continue;
-                    }
-
                     // #665: inline ツール実行の入り。この後の `execute_with_id(...).await` が返らなければ
                     // ここが最後の行になる（シェル・MCP・返信送信など外部待ちのツールで固着した形）。
                     tracing::debug!(
@@ -499,15 +544,6 @@ impl SkillEngine {
                         let result_json = serde_json::to_string(&denied)
                             .unwrap_or_else(|_| r#"{"error": "Permission denied"}"#.to_string());
                         messages.push(Message::tool(tool_call.id.clone(), result_json.clone()));
-                        if self.model_input_limits_resolver.is_some() {
-                            register_tool_result_alternate(
-                                &messages,
-                                &mut completion_message_alternates,
-                                &tool_call.id,
-                                tool_name,
-                                &result_json,
-                            );
-                        }
                         turn_ledger.record(format!("tool:{}", messages.len()), &result_json);
                         apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
 
@@ -597,15 +633,6 @@ impl SkillEngine {
                     )?;
 
                     messages.push(Message::tool(tool_call.id.clone(), result_json.clone()));
-                    if self.model_input_limits_resolver.is_some() {
-                        register_tool_result_alternate(
-                            &messages,
-                            &mut completion_message_alternates,
-                            &tool_call.id,
-                            tool_name,
-                            &result_json,
-                        );
-                    }
                     turn_ledger.record(format!("tool:{}", messages.len()), &result_json);
                     apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
 
@@ -620,75 +647,49 @@ impl SkillEngine {
                     }
                 }
 
-                // dispatch接尾辞を、inline接頭辞の後に一つのsubtaskとして起動する。
+                // dispatch 接尾辞（あれば）を 1 本の subtask にまとめて起動する。
+                // inline 接頭辞の同期実行が終わった**後**にここへ来るため、順序保証は保たれる。
+                // 各 tool_call には同じ subtask_id を持つ spawned マーカーを同ターンで返す。
                 if !dispatch_calls.is_empty() {
-                    let recovered_dispatch = recover_dispatch_effects(
-                        self.live_tool_completions.as_deref(),
-                        replayed_effect,
-                        dispatch_calls,
+                    let dispatcher = self
+                        .tool_dispatcher
+                        .as_ref()
+                        .expect("dispatch_start is Some");
+                    let calls: Vec<super::types::DispatchCall> = dispatch_calls
+                        .iter()
+                        .map(|tc| super::types::DispatchCall {
+                            tool_name: tc.function.name.clone(),
+                            args: tc.arguments_json(),
+                            tool_call_id: tc.id.clone(),
+                        })
+                        .collect();
+                    total_tool_calls += calls.len();
+                    let outcome = dispatcher.dispatch_batch(&calls);
+                    tracing::debug!(
+                        tools = calls.len(),
+                        subtask_id = %outcome.subtask_id,
+                        "tool batch auto-dispatched as a single background subtask"
                     );
-                    if let Some(effects) = recovered_dispatch {
-                        total_tool_calls += dispatch_calls.len();
-                        for (tool_call, (result_json, running)) in
-                            dispatch_calls.iter().zip(effects)
-                        {
-                            running_background_batches += usize::from(running);
-                            messages.push(Message::tool(tool_call.id.clone(), result_json.clone()));
-                            turn_ledger.record(format!("tool:{}", messages.len()), &result_json);
-                            apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
-                        }
-                    } else {
-                        let dispatcher = self
-                            .tool_dispatcher
-                            .as_ref()
-                            .expect("dispatch_start is Some");
-                        let calls: Vec<super::types::DispatchCall> = dispatch_calls
-                            .iter()
-                            .map(|tc| super::types::DispatchCall {
-                                tool_name: tc.function.name.clone(),
-                                args: tc.arguments_json(),
-                                tool_call_id: tc.id.clone(),
-                            })
-                            .collect();
-                        total_tool_calls += calls.len();
-                        running_background_batches += 1;
-                        dispatcher.defer_dispatch_start();
-                        let outcome = dispatcher.dispatch_batch(&calls);
-                        tracing::debug!(
-                            tools = calls.len(),
-                            subtask_id = %outcome.subtask_id,
-                            "tool batch auto-dispatched as a single background subtask"
-                        );
-                        for tool_call in dispatch_calls {
-                            let spawned = serde_json::json!({
-                                "status": "spawned",
-                                "subtask_id": outcome.subtask_id.clone(),
-                                "tool": tool_call.function.name,
-                                "label": outcome.label.clone(),
-                            });
-                            let result_json = serde_json::to_string(&spawned)
-                                .unwrap_or_else(|_| r#"{"status":"spawned"}"#.to_string());
-                            let running_for_model = format!(
-                                "[<{}] status:running tool:{}",
-                                tool_call.id, tool_call.function.name
-                            );
-                            messages.push(Message::tool(
+                    for tool_call in dispatch_calls {
+                        let spawned = serde_json::json!({
+                            "status": "spawned",
+                            "subtask_id": outcome.subtask_id,
+                            "tool": tool_call.function.name,
+                            "label": outcome.label,
+                        });
+                        let result_json = serde_json::to_string(&spawned)
+                            .unwrap_or_else(|_| r#"{"status":"spawned"}"#.to_string());
+                        messages.push(Message::tool(tool_call.id.clone(), result_json.clone()));
+                        turn_ledger.record(format!("tool:{}", messages.len()), &result_json);
+                        apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
+                        for cb in &self.on_tool_result {
+                            cb(
                                 tool_call.id.clone(),
-                                running_for_model.clone(),
-                            ));
-                            turn_ledger
-                                .record(format!("tool:{}", messages.len()), &running_for_model);
-                            apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
-                            for cb in &self.on_tool_result {
-                                cb(
-                                    tool_call.id.clone(),
-                                    tool_call.function.name.clone(),
-                                    result_json.clone(),
-                                    false,
-                                );
-                            }
+                                tool_call.function.name.clone(),
+                                result_json.clone(),
+                                false,
+                            );
                         }
-                        dispatcher.release_dispatch(&outcome.subtask_id);
                     }
                 }
 
@@ -711,7 +712,6 @@ impl SkillEngine {
                     }
                 }
 
-                mark_completion_effect_applied(self, completion_request_id.as_deref())?;
                 continue;
             }
 
@@ -743,7 +743,6 @@ impl SkillEngine {
                     turn_ledger.record(format!("asst:{}", messages.len()), c);
                     apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
                 }
-                // continuation speechはgateway delivery ACKがoutboxを確定する。
                 continue;
             }
 
@@ -761,7 +760,6 @@ impl SkillEngine {
             // tool_call も無いターンは上流の意味的検証で fail loud 済み。空応答が Ok として
             // 通る唯一の穴だった 787 はこれで塞がっている）。
 
-            // final textのoutbox適用は、outer delivery層の送信ACK後に確定する。
             return Ok(EngineResult {
                 response: final_text,
                 iterations,

@@ -546,9 +546,7 @@ mod tests {
                     input_price_per_1m: 0.0,
                     output_price_per_1m: 0.0,
                     context_window: Some(200_000),
-                    max_input_tokens: Some(200_000),
                     max_output_tokens: Some(4_096),
-                    max_total_tokens: None,
                 },
             )
             .unwrap();

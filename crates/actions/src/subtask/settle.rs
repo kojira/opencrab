@@ -1,48 +1,6 @@
 use super::sink::{dispatch_settled, SubtaskCompletionSink, SubtaskSettled};
 use super::{SettleKind, SubtaskLifecycle, SubtaskRegistry};
 
-fn persisted_result_metadata(result_text: &str) -> (usize, usize, Option<String>) {
-    let original_bytes = result_text
-        .split("the serialized result was ")
-        .nth(1)
-        .and_then(|rest| rest.split_whitespace().next())
-        .and_then(|value| value.parse().ok());
-    let saved_lines = [" bytes, ", " bytes ("].iter().find_map(|separator| {
-        result_text
-            .split(separator)
-            .nth(1)
-            .and_then(|rest| rest.split_whitespace().next())
-            .and_then(|value| value.parse().ok())
-    });
-    let path = result_text
-        .split(" to `")
-        .nth(1)
-        .and_then(|rest| rest.split('`').next())
-        .map(str::to_string);
-    (
-        original_bytes.unwrap_or(result_text.len()),
-        saved_lines.unwrap_or_else(|| result_text.lines().count()),
-        path,
-    )
-}
-
-fn result_reports_failure(result_text: &str) -> bool {
-    fn value_failed(value: &serde_json::Value) -> bool {
-        value.get("success").and_then(|success| success.as_bool()) == Some(false)
-            || value
-                .get("data")
-                .and_then(|data| data.get("exit_code"))
-                .and_then(|code| code.as_i64())
-                .is_some_and(|code| code != 0)
-            || value
-                .as_array()
-                .is_some_and(|items| items.iter().any(value_failed))
-            || value.get("result").is_some_and(value_failed)
-    }
-
-    serde_json::from_str::<serde_json::Value>(result_text).is_ok_and(|value| value_failed(&value))
-}
-
 /// `settle_completed` が subtask_completed ログの記録と sink 発火に用いる文脈。
 ///
 /// 本文（result）は別引数で受け取る。DB へは本文込みで永続化するが、sink へ渡す
@@ -108,31 +66,9 @@ pub fn settle_completed(
         return;
     }
 
-    // 1. 完了本文と未消費eventを同じtransactionで永続化する（#975）。sinkはこの後。
+    // 1. 完了本文を DB へ永続化する（sink 発火より前 = 順序契約）。
     if !ctx.parent_session_id.is_empty() {
-        let persisted = (|| -> anyhow::Result<()> {
-            let conn = db
-                .lock()
-                .map_err(|error| anyhow::anyhow!("db lock failed: {error}"))?;
-            let tx = conn.unchecked_transaction()?;
-            let completed_at = chrono::Utc::now().to_rfc3339();
-            let tool_call_ids = opencrab_db::queries::list_tool_call_ids_for_subtask(
-                &tx,
-                &ctx.parent_session_id,
-                &ctx.subtask_id,
-            )?;
-            let conversation_tool_id = tool_call_ids
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "legacy_unknown".to_string());
-            let lifecycle_status = match ctx.exit_reason.as_str() {
-                "completed" if result_reports_failure(result_text) => "failed",
-                "completed" => "completed",
-                "timeout" => "timed_out",
-                "cancelled" | "aborted" => "cancelled",
-                _ => "failed",
-            };
-            let (result_bytes, result_lines, result_path) = persisted_result_metadata(result_text);
+        if let Ok(conn) = db.lock() {
             let log = opencrab_db::queries::SessionLogRow {
                 id: None,
                 agent_id: ctx.agent_id.clone(),
@@ -148,51 +84,10 @@ pub fn settle_completed(
                 .to_string(),
                 speaker_id: None,
                 turn_number: None,
-                metadata_json: Some(
-                    serde_json::json!({
-                        "conversation_tool_id": conversation_tool_id.clone(),
-                        "conversation_tool_ids": tool_call_ids.clone(),
-                        "lifecycle_status": lifecycle_status,
-                        "result_omitted": false,
-                        "result_bytes": result_bytes,
-                        "result_lines": result_lines,
-                        "result_path": result_path,
-                    })
-                    .to_string(),
-                ),
+                metadata_json: None,
                 created_at: None,
             };
-            let result_log_id =
-                opencrab_db::queries::insert_session_log_at(&tx, &log, &completed_at)?;
-            let event_tool_ids = if tool_call_ids.is_empty() {
-                vec![conversation_tool_id]
-            } else {
-                tool_call_ids
-            };
-            for tool_call_id in event_tool_ids {
-                opencrab_db::queries::enqueue_tool_completion_event(
-                    &tx,
-                    &opencrab_db::queries::NewToolCompletionEvent {
-                        event_id: &uuid::Uuid::new_v4().to_string(),
-                        session_id: &ctx.parent_session_id,
-                        causal_turn_id: &format!("{}:{}", ctx.parent_session_id, ctx.subtask_id),
-                        tool_call_id: &tool_call_id,
-                        execution_id: &ctx.subtask_id,
-                        result_log_id,
-                        completed_at: &completed_at,
-                    },
-                )?;
-            }
-            tx.commit()?;
-            Ok(())
-        })();
-        if let Err(error) = persisted {
-            tracing::error!(
-                session_id = %ctx.parent_session_id,
-                subtask_id = %ctx.subtask_id,
-                "failed to persist subtask completion event atomically: {error}"
-            );
-            return;
+            opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
         }
     }
 
