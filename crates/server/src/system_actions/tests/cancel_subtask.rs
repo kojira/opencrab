@@ -190,7 +190,7 @@ async fn cancel_subtask_falls_back_to_label_without_sub_session() {
     assert_eq!(meta["task"], "execute_shell(ls -la)");
     // #184: 種別名は固定値ではなく**実際に停止したツール名**。
     assert_eq!(meta["tool_name"], "execute_shell");
-    assert_eq!(meta["tool_call_id"], "st-auto");
+    assert_eq!(meta["tool_call_id"], "legacy_unknown");
     assert_eq!(meta["label"], "execute_shell(ls -la)");
     assert_eq!(meta["completed_calls"], json!([]));
 }
@@ -313,8 +313,8 @@ async fn cancel_subtask_notifies_the_completion_sink() {
     assert!(r.success, "{:?}", r.error);
     assert_eq!(
         sink.0.lock().unwrap().clone(),
-        vec!["cancelled:st-1:cancelled"],
-        "停止は on_subtask_cancelled だけを呼ぶ（resume する on_subtask_settled は呼ばない）"
+        vec!["cancelled:st-1:cancelled", "settled"],
+        "状態整合通知とterminal completion resumeを各一回呼ぶ"
     );
 }
 

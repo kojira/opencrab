@@ -281,6 +281,79 @@ pub fn list_user_speech_logs_after(
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
+/// spawned acknowledgementからsubtaskに属する短縮tool call IDを取得する（#975）。
+pub fn list_tool_call_ids_for_subtask(
+    conn: &Connection,
+    session_id: &str,
+    subtask_id: &str,
+) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT json_extract(metadata_json, '$.conversation_tool_id')
+         FROM memory_sessions
+         WHERE session_id = ?1 AND log_type = 'tool_result'
+           AND json_extract(content, '$.subtask_id') = ?2
+           AND json_extract(metadata_json, '$.lifecycle_status') = 'running'
+         ORDER BY id",
+    )?;
+    let rows = stmt.query_map(params![session_id, subtask_id], |row| row.get(0))?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// 正本completion eventが参照するsession logをIDで取得する（#975）。
+pub fn get_session_log_by_id(conn: &Connection, id: i64) -> Result<Option<SessionLogRow>> {
+    conn.query_row(
+        "SELECT id, agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json, created_at
+         FROM memory_sessions WHERE id = ?1",
+        [id],
+        |row| {
+            Ok(SessionLogRow {
+                id: row.get(0)?,
+                agent_id: row.get(1)?,
+                session_id: row.get(2)?,
+                log_type: row.get(3)?,
+                content: row.get(4)?,
+                speaker_id: row.get(5)?,
+                turn_number: row.get(6)?,
+                metadata_json: row.get(7)?,
+                created_at: row.get(8)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+/// 会話構築後に決着したbackground subtaskのsystemログを古い順に返す（#975）。
+/// JSON typeをSQLで厳密一致させ、他のsystem eventを巻き込まない。
+pub fn list_subtask_completion_logs_after(
+    conn: &Connection,
+    session_id: &str,
+    after_id: i64,
+    limit: usize,
+) -> Result<Vec<SessionLogRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json, created_at
+         FROM memory_sessions
+         WHERE session_id = ?1 AND log_type = 'system' AND id > ?2
+           AND json_extract(content, '$.type') = 'subtask_completed'
+         ORDER BY id ASC LIMIT ?3",
+    )?;
+    let rows = stmt.query_map(params![session_id, after_id, limit as i64], |row| {
+        Ok(SessionLogRow {
+            id: row.get(0)?,
+            agent_id: row.get(1)?,
+            session_id: row.get(2)?,
+            log_type: row.get(3)?,
+            content: row.get(4)?,
+            speaker_id: row.get(5)?,
+            turn_number: row.get(6)?,
+            metadata_json: row.get(7)?,
+            created_at: row.get(8)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 /// 走行中サブタスクへ届いた steer（追加指示）ログを、`after_id` より後だけ古い順に返す（#647）。
 ///
 /// `list_user_speech_logs_after` の steer 版。サブタスクは `run_agent_response` を depth+1 で

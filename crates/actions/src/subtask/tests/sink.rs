@@ -89,13 +89,12 @@
         );
     }
 
-    /// **停止（Cancelled）では継続しない**。停止は `on_subtask_cancelled` の役目で、
-    /// ここへ流すと「止めたのに返信する」ことになる（既存の意図を集約後も保つ）。
+    /// cancellationもterminal tool resultなので、親LLMへ一度だけ継続配送する。
     #[test]
-    fn cancelled_never_continues() {
+    fn cancelled_continues_once() {
         let sink = ProbeSink::new("web-", true);
         dispatch_settled(&sink, probe_ev("web-a", SettleKind::Cancelled));
-        assert!(sink.kinds().is_empty(), "停止で継続が起きた");
+        assert_eq!(sink.kinds(), vec![SettleKind::Cancelled]);
     }
 
     /// **他の transport の親セッションは配送しない**（ネストした subtask や heartbeat の
@@ -246,13 +245,23 @@
                 exit_reason: "completed".to_string(),
                 lifecycle: SubtaskLifecycle::new(),
             },
-            "the result body",
+            "first line\nsecond line",
         );
 
         // sink 発火時点で完了ログが既に DB にあった（DB 永続化 → 通知）。
         assert_eq!(sink.logs_at_fire.load(Ordering::SeqCst), 1);
-        // registry からは除去済み。
         assert!(registry.is_empty());
+        let conn = db.lock().unwrap();
+        let metadata: String = conn
+            .query_row(
+                "SELECT metadata_json FROM memory_sessions WHERE session_id = ?1",
+                ["discord-a-1-2"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(metadata["result_bytes"], 22);
+        assert_eq!(metadata["result_lines"], 2);
     }
 
     /// #553: settle_completed は sub-session の `sessions.status` を **exit_reason** へ

@@ -240,6 +240,73 @@
         );
     }
 
+    #[tokio::test]
+    async fn immediate_completion_waits_for_short_id_persistence() {
+        let db = opencrab_db::Db::from_connection(opencrab_db::init_memory().unwrap());
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let dispatcher = SubtaskToolDispatcher::new(
+            Arc::new(FakeExecutor { pending: false }),
+            registry.clone(),
+            db.clone(),
+            Arc::new(NoopCompletionSink),
+            "agent-a",
+            "session-fast",
+        );
+        dispatcher.defer_dispatch_start();
+        let outcome = dispatcher.dispatch_batch(&[opencrab_core::DispatchCall {
+            tool_name: "some_tool".to_string(),
+            args: serde_json::json!({}),
+            tool_call_id: "t1".to_string(),
+        }]);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(registry.contains_key(&outcome.subtask_id));
+        {
+            let conn = db.lock().unwrap();
+            opencrab_db::queries::insert_session_log(
+                &conn,
+                &opencrab_db::queries::SessionLogRow {
+                    id: None,
+                    agent_id: "agent-a".to_string(),
+                    session_id: "session-fast".to_string(),
+                    log_type: "tool_result".to_string(),
+                    content: serde_json::json!({
+                        "status": "spawned",
+                        "subtask_id": outcome.subtask_id,
+                    })
+                    .to_string(),
+                    speaker_id: None,
+                    turn_number: None,
+                    metadata_json: Some(
+                        serde_json::json!({
+                            "conversation_tool_id": "t1",
+                            "subtask_id": outcome.subtask_id,
+                            "lifecycle_status": "running",
+                        })
+                        .to_string(),
+                    ),
+                    created_at: None,
+                },
+            )
+            .unwrap();
+        }
+        dispatcher.release_dispatch(&outcome.subtask_id);
+        for _ in 0..200 {
+            if registry.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(registry.is_empty());
+        let conn = db.lock().unwrap();
+        let events = opencrab_db::queries::list_unconsumed_tool_completion_events(
+            &conn,
+            "session-fast",
+        )
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].tool_call_id, "t1");
+    }
+
     /// #923 §2.7: describe_tools は既定の非 dispatch 集合に含まれる（inline 固定の種）。
     /// `inline_tool_names` はこの集合を種にするので、ここに入れることで
     /// `should_dispatch("describe_tools") == false` が保証される。現 tip では未登録で **赤**。

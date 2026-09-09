@@ -438,6 +438,7 @@ export async function startHarness() {
       provider: 'openai',
       model: 'e2e-mock',
       context_window: 8192,
+      max_input_tokens: 8192,
       max_output_tokens: 1024,
     }),
   });

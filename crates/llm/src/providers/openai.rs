@@ -264,6 +264,22 @@ impl LlmProvider for OpenAiProvider {
         &self.name
     }
 
+    fn measure_request_tokens(&self, request: &ChatRequest) -> Option<usize> {
+        // URLだけではprovider側の画像token数を証明できない。completion-bearing画像
+        // requestはNoneをfail-loudとして扱い、非画像wireだけをbyte上界で測る。
+        if request.messages.iter().any(|message| {
+            matches!(
+                message.content.as_ref(),
+                Some(MessageContent::Image { .. }) | Some(MessageContent::Multi(_))
+            )
+        }) {
+            return None;
+        }
+        serde_json::to_vec(&self.build_request_body(request))
+            .ok()
+            .map(|wire| wire.len())
+    }
+
     async fn available_models(&self) -> Result<Vec<ModelInfo>> {
         let url = format!("{}/models", self.base_url);
         let resp = self
@@ -533,6 +549,36 @@ mod tests {
             }
         });
         format!("http://{addr}/slow")
+    }
+
+    #[test]
+    fn image_and_multipart_requests_have_no_sync_certified_meter() {
+        let provider = OpenAiProvider::new("unused");
+        for content in [
+            MessageContent::Image {
+                content_type: "image_url".to_string(),
+                image_url: ImageUrl {
+                    url: "https://example.invalid/large.png".to_string(),
+                    detail: None,
+                },
+            },
+            MessageContent::Multi(vec![ContentPart::Text {
+                text: "multipart".to_string(),
+            }]),
+        ] {
+            let request = ChatRequest::new(
+                "model",
+                vec![Message {
+                    role: Role::User,
+                    content: Some(content),
+                    name: None,
+                    function_call: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                }],
+            );
+            assert_eq!(provider.measure_request_tokens(&request), None);
+        }
     }
 
     /// #667: 総時間 timeout が実際に client へ効いていることを確認する。無応答の上流を

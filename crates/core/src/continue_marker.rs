@@ -27,6 +27,26 @@ pub const CONTINUE_LOG_TARGET: &str = "opencrab::continue_marker";
 /// （§11.1）判定と、配送層の `terminate_at_no_reply` が同じ実体を参照する。
 pub const NO_REPLY_SENTINEL: &str = "NO_REPLY";
 
+#[cfg(test)]
+thread_local! {
+    static NO_PROGRESS_WARNINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+pub(crate) fn warn_no_progress_continuation(iteration: usize) {
+    #[cfg(test)]
+    NO_PROGRESS_WARNINGS.with(|count| count.set(count.get() + 1));
+    tracing::warn!(
+        target: CONTINUE_LOG_TARGET,
+        iteration,
+        "empty CONTINUE repeated without a changed turn state"
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn no_progress_warning_count() -> usize {
+    NO_PROGRESS_WARNINGS.with(std::cell::Cell::get)
+}
+
 /// content の**最終行が `CONTINUE` 単独**なら、その行を除いた本文（末尾空白除去）を返す（＝継続）。
 ///
 /// - 最終行が `CONTINUE` 単独（行頭行末の空白と末尾の改行/空白は無視）→ `Some(本文)`。

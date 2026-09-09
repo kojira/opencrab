@@ -24,8 +24,8 @@ fn v47_from_user_version_46_reaches_current_schema_and_is_idempotent() {
     assert!(!table_exists(&conn, "gateway_operation_calls").unwrap());
     assert!(!column_exists(&conn, "gate_instances", "operation_declaration_digest").unwrap());
 
-    initialize(&conn).expect("migrate through v49");
-    assert_eq!(schema_version(&conn).unwrap(), 49);
+    initialize(&conn).expect("migrate through v50");
+    assert_eq!(schema_version(&conn).unwrap(), 50);
     assert!(column_exists(&conn, "gate_instances", "operation_declaration_digest").unwrap());
     assert_eq!(
         gateway_operation_column_names(&conn),
@@ -43,7 +43,7 @@ fn v47_from_user_version_46_reaches_current_schema_and_is_idempotent() {
     );
 
     initialize(&conn).expect("second initialize must be a no-op");
-    assert_eq!(schema_version(&conn).unwrap(), 49);
+    assert_eq!(schema_version(&conn).unwrap(), 50);
     assert_eq!(
         gateway_operation_column_names(&conn),
         [

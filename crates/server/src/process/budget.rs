@@ -8,9 +8,10 @@ use super::*;
 // する（doc に理由を明記した `subtask_registries` と同じ手）。
 pub use opencrab_core::context_budget::{
     check_agent_model_change, compute_context_budget, ensure_functions_within_cap,
-    ensure_model_context_window_registered, ensure_model_max_output_tokens_registered,
-    ensure_startup_budget_inputs, measure_functions_tokens, model_context_window_missing_message,
-    normalize_model_spec, resolve_agent_request_envelope, resolve_model_max_output_tokens,
+    ensure_model_context_window_registered, ensure_model_max_input_tokens_registered,
+    ensure_model_max_output_tokens_registered, ensure_startup_budget_inputs,
+    measure_functions_tokens, model_context_window_missing_message, normalize_model_spec,
+    resolve_agent_request_envelope, resolve_model_input_limits, resolve_model_max_output_tokens,
     resolve_water_levels, split_llm_model_spec, ContextBudgetEnvelope, ContextBudgetError,
     ContextBudgetPolicy, MemoryIndexDecision, RequestEnvelopeArgs, DEFAULT_MEMORY_INDEX_TOKEN_CAP,
 };
@@ -36,6 +37,45 @@ pub fn core_functions_tokens() -> Result<usize, ContextBudgetError> {
         })
         .collect();
     measure_functions_tokens(&defs)
+}
+
+/// #975: 明示的な入力上限を解決してengineへ渡す。context_windowへfallbackしない。
+pub(super) fn configure_model_input_limits(
+    state: &AppState,
+    model: &str,
+    engine: &mut opencrab_core::SkillEngine,
+) -> anyhow::Result<()> {
+    let conn = state
+        .db
+        .lock()
+        .map_err(|e| anyhow::anyhow!("db lock failed: {e}"))?;
+    let limits = resolve_model_input_limits(&conn, model).map_err(anyhow::Error::msg)?;
+    drop(conn);
+    engine.set_model_input_limits(limits);
+    let db = state.db.clone();
+    engine.set_model_input_limits_resolver(move |model| {
+        let conn = db.lock().map_err(|error| error.to_string())?;
+        resolve_model_input_limits(&conn, model)
+    });
+    Ok(())
+}
+
+/// #676: backendへmax_tokensを送るproviderだけ、登録値をengineへ設定する。
+pub(super) fn configure_model_output_limit(
+    state: &AppState,
+    model: &str,
+    engine: &mut opencrab_core::SkillEngine,
+) -> anyhow::Result<()> {
+    if !state.llm_router.get().sends_max_output_tokens(model) {
+        return Ok(());
+    }
+    let conn = state
+        .db
+        .lock()
+        .map_err(|e| anyhow::anyhow!("db lock failed: {e}"))?;
+    let max_output = resolve_model_max_output_tokens(&conn, model).map_err(anyhow::Error::msg)?;
+    engine.set_max_output_tokens(max_output);
+    Ok(())
 }
 
 /// Memory Index を載せるか。判定は envelope 側だけが持つ。

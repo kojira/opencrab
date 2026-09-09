@@ -382,7 +382,9 @@ fn send_said_turn_say_sse_over_real_processes() {
                 // （context_window × compaction_ratio）に収める必要がある。8192 では収まらず
                 // context_budget_exhausted で turn が止まるため、実運用寄りの大きさにする。
                 context_window: Some(200_000),
+                max_input_tokens: Some(200_000),
                 max_output_tokens: Some(1024),
+                max_total_tokens: None,
             },
         )
         .expect("seed model_pricing for startup budget check");
@@ -442,7 +444,7 @@ fn send_said_turn_say_sse_over_real_processes() {
         "PUT",
         "/api/llm/model-pricing",
         None,
-        Some(r#"{"provider":"openai","model":"e2e-mock","context_window":200000,"max_output_tokens":1024}"#),
+        Some(r#"{"provider":"openai","model":"e2e-mock","context_window":200000,"max_input_tokens":200000,"max_output_tokens":1024}"#),
         Duration::from_secs(5),
     )
     .expect("model pricing");

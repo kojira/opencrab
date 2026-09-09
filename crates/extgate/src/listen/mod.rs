@@ -396,6 +396,7 @@ async fn dispatch_frame<R: AgentRuntime>(ctx: &mut ConnCtx<'_, R>, bytes: &[u8])
         (ConnState::Running, InboundMsg::Response(resp)) => {
             handle_response(
                 state,
+                runtime,
                 writer,
                 instance_id.as_deref().unwrap(),
                 identity,

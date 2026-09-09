@@ -378,7 +378,9 @@ fn register_mock_pricing(db: &opencrab_db::Db) {
             input_price_per_1m: 0.0,
             output_price_per_1m: 0.0,
             context_window: Some(200_000),
+            max_input_tokens: Some(200_000),
             max_output_tokens: Some(4_096),
+            max_total_tokens: None,
         },
     )
     .expect("test model_pricing");
@@ -413,9 +415,35 @@ fn upsert_test_agent(db: &opencrab_db::Db) -> i64 {
     .unwrap()
 }
 
+struct MeteredHarnessProvider(Arc<dyn LlmProvider>);
+
+#[async_trait::async_trait]
+impl LlmProvider for MeteredHarnessProvider {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+
+    fn sends_max_output_tokens(&self) -> bool {
+        self.0.sends_max_output_tokens()
+    }
+
+    fn measure_request_tokens(&self, request: &ChatRequest) -> Option<usize> {
+        serde_json::to_vec(request).ok().map(|wire| wire.len())
+    }
+
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        self.0.available_models().await
+    }
+
+    async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        self.0.chat_completion(request).await
+    }
+}
+
 fn build_app_state(db: opencrab_db::Db, provider: Arc<dyn LlmProvider>) -> AppState {
     let mut router = LlmRouter::new();
-    router.add_provider(provider);
+    router.add_provider(Arc::new(MeteredHarnessProvider(provider)));
+
     router.set_default_provider("mock");
     AppState {
         db,

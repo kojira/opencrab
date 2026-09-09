@@ -15,7 +15,8 @@ async fn test_model_pricing_put_then_list() {
             "model": "testmodel",
             "input_price_per_1m": 1.5,
             "output_price_per_1m": 3.0,
-            "context_window": 200000
+            "context_window": 200000,
+            "max_input_tokens": 200000
         })),
     )
     .await;
@@ -30,6 +31,35 @@ async fn test_model_pricing_put_then_list() {
         .find(|row| row["provider"] == "testprov" && row["model"] == "testmodel")
         .expect("saved model is listed alongside the standard seed");
     assert_eq!(saved["context_window"], 200000);
+    assert_eq!(saved["max_input_tokens"], 200000);
+    assert!(saved["max_total_tokens"].is_null());
+}
+
+#[tokio::test]
+async fn test_model_pricing_put_keeps_pre_v50_payload_compatible() {
+    let app = create_test_app();
+    let (status, resp) = send_request(
+        app.clone(),
+        "PUT",
+        "/api/llm/model-pricing",
+        Some(serde_json::json!({
+            "provider": "legacy-client",
+            "model": "legacy-model",
+            "context_window": 200000
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(resp["max_input_tokens"].is_null());
+
+    let (_, listed) = send_request(app, "GET", "/api/llm/model-pricing", None).await;
+    let row = listed["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["provider"] == "legacy-client")
+        .unwrap();
+    assert!(row["max_input_tokens"].is_null());
 }
 
 /// `context_window` こそが登録の目的なので、0 以下は受け付けない。
@@ -42,7 +72,8 @@ async fn test_model_pricing_rejects_non_positive_context_window() {
         "PUT",
         "/api/llm/model-pricing",
         Some(serde_json::json!({
-            "provider": "testprov", "model": "testmodel", "context_window": 0
+            "provider": "testprov", "model": "testmodel",
+            "context_window": 0, "max_input_tokens": 200000
         })),
     )
     .await;
@@ -65,7 +96,8 @@ async fn register_model(app: Router, provider: &str, model: &str, window: i64) {
         "/api/llm/model-pricing",
         Some(serde_json::json!({
             "provider": provider, "model": model,
-            "context_window": window, "max_output_tokens": 8192
+            "context_window": window, "max_input_tokens": window,
+            "max_output_tokens": 8192
         })),
     )
     .await;
@@ -241,7 +273,8 @@ async fn test_model_pricing_trim_is_consistent_between_put_and_gate() {
         "/api/llm/model-pricing",
         Some(serde_json::json!({
             "provider": "  testprov  ", "model": "  testmodel  ",
-            "context_window": 200000, "max_output_tokens": 8192
+            "context_window": 200000, "max_input_tokens": 200000,
+            "max_output_tokens": 8192
         })),
     )
     .await;

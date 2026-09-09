@@ -11,14 +11,18 @@ export interface ModelPricing {
   model: string;
   input_price_per_1m: number;
   output_price_per_1m: number;
-  /** そのモデルの最大コンテキスト長（トークン）。未登録行では null。 */
+  /** 互換・会話圧縮用の最大コンテキスト長。 */
   context_window: number | null;
+  /** #975: tool結果capに使う独立した最大入力。 */
+  max_input_tokens?: number | null;
   /**
    * #676: そのモデルの出力トークン上限（実能力値・トークン）。未登録行では null。
    * max_tokens を送るプロバイダ（openai形式/anthropic 等）のモデルにだけ必要で、
    * 送らないプロバイダ（chatgpt/codex/cursor/acp）では null のままで良い（任意）。
    */
   max_output_tokens: number | null;
+  /** 入出力共有窓が明示されたモデルだけ設定する。 */
+  max_total_tokens?: number | null;
 }
 
 export interface ModelPricingListResponse {
@@ -41,7 +45,9 @@ export interface PutModelPricingBody {
   input_price_per_1m: number;
   output_price_per_1m: number;
   context_window: number;
+  max_input_tokens: number;
   max_output_tokens?: number | null;
+  max_total_tokens?: number | null;
 }
 
 export function listModelPricing(): Promise<ModelPricingListResponse> {

@@ -163,10 +163,10 @@ async fn spawned_subtask_is_cancellable_through_the_shared_registry() {
         "subtask_spawned"
     ));
 
-    // 停止は `on_subtask_cancelled`（resume しない別メソッド）で通知される。
+    // 状態整合通知とterminal completion resumeが各一回届く。
     let seen = sink.seen();
-    assert_eq!(seen.len(), 1, "停止通知は 1 本: {seen:?}");
-    assert_eq!(seen[0].0, SettleKind::Cancelled);
+    assert_eq!(seen.len(), 2, "cancelの二つの責務が各1本: {seen:?}");
+    assert!(seen.iter().all(|event| event.0 == SettleKind::Cancelled));
 
     // 二重決着しない: 完了ログは着地しない（止めたのに返信が届くのを防ぐ）。
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;

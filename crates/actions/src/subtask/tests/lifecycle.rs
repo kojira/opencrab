@@ -249,17 +249,39 @@
         );
     }
 
-    /// [P1 回帰] cancel は完了経路ではなく `on_subtask_cancelled` を通り、
-    /// `exit_reason="cancelled"` / `kind=Cancelled` で通知される
-    /// （REST が最後の subtask 停止でセッションを完了にできる）。
+    /// cancelは状態整合通知とterminal completion resumeを各一回発火する。
     #[tokio::test]
-    async fn cancel_notifies_sink_without_completion() {
+    async fn cancel_notifies_sink_and_resumes_with_terminal_completion() {
         let conn = opencrab_db::init_memory().unwrap();
         let db = opencrab_db::Db::from_connection(conn);
         let registry: SubtaskRegistry = Arc::new(DashMap::new());
         let sink = RecordingSink::default();
         let parent = "agent-msg-agent-a-u1";
         let handle = insert_fake_subtask(&registry, "st-1", parent);
+        {
+            let conn = db.lock().unwrap();
+            opencrab_db::queries::insert_session_log(
+                &conn,
+                &opencrab_db::queries::SessionLogRow {
+                    id: None,
+                    agent_id: "agent-a".to_string(),
+                    session_id: parent.to_string(),
+                    log_type: "tool_result".to_string(),
+                    content: serde_json::json!({"subtask_id": "st-1"}).to_string(),
+                    speaker_id: None,
+                    turn_number: None,
+                    metadata_json: Some(
+                        serde_json::json!({
+                            "conversation_tool_id": "t7",
+                            "lifecycle_status": "running"
+                        })
+                        .to_string(),
+                    ),
+                    created_at: None,
+                },
+            )
+            .unwrap();
+        }
 
         let outcome = cancel_subtask(
             &registry,
@@ -277,11 +299,26 @@
         assert_eq!(cancelled[0].exit_reason, "cancelled");
         assert_eq!(cancelled[0].kind, SettleKind::Cancelled);
         assert_eq!(cancelled[0].session_id, parent);
-        // 完了経路（resume する側）は発火しない。
-        assert!(
-            sink.events.lock().unwrap().is_empty(),
-            "停止で on_subtask_settled（resume 経路）を呼んではならない"
-        );
+        let resumed = sink.events.lock().unwrap();
+        assert_eq!(resumed.len(), 1, "cancelled completion resumeは一回");
+        assert_eq!(resumed[0].kind, SettleKind::Cancelled);
+        let conn = db.lock().unwrap();
+        let events = opencrab_db::queries::list_unconsumed_tool_completion_events(&conn, parent)
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].tool_call_id, "t7");
+        let logs = opencrab_db::queries::list_recent_session_logs(&conn, parent, 10).unwrap();
+        let cancelled_log = logs
+            .iter()
+            .find(|log| log.log_type == "tool_cancelled")
+            .unwrap();
+        assert!(cancelled_log.content.contains("was cancelled"));
+        assert!(cancelled_log
+            .metadata_json
+            .as_deref()
+            .unwrap()
+            .contains("\"conversation_tool_ids\":[\"t7\"]"));
+        drop(conn);
         assert!(registry.is_empty());
         handle.abort();
     }

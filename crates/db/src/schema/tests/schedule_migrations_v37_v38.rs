@@ -60,7 +60,7 @@ fn v37_backfill_preserves_firing_and_normalizes() {
     assert_eq!(schema_version(&conn).unwrap(), latest_version());
     // v48 は llm_logs へのprovider履歴列追加だけで、v38..v48 とも
     // session_heartbeat_config を触らない。下の v37 backfill 検証はそのまま成立する。
-    assert_eq!(latest_version(), 49, "v49 が最新版であること");
+    assert_eq!(latest_version(), 50, "v50 が最新版であること");
 
     // 期待: 9 行 = step1(nostr-A) 1 + step2(A/201=0, C/202=1, D/222=1) 3 +
     //             step3(A,B,C,D,E の ch205 展開・全 enabled=0) 5。

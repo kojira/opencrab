@@ -196,6 +196,9 @@ pub struct SubtaskToolDispatcher {
     /// 親ターンが「この run は subtask を起こしたか」を数えるカウンタ（#431）。
     /// 登録簿への登録が済んだところで加算する。`None` なら数えない。
     subtask_starts: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    /// engineがrunning相関を永続化するまでworkerを止めるgate。
+    start_gates: dashmap::DashMap<String, tokio::sync::oneshot::Sender<()>>,
+    defer_next_start: std::sync::atomic::AtomicBool,
 }
 
 impl SubtaskToolDispatcher {
@@ -226,6 +229,8 @@ impl SubtaskToolDispatcher {
             timeout: std::time::Duration::from_secs(DEFAULT_DISPATCH_TIMEOUT_SECS),
             workspace_root: None,
             subtask_starts: None,
+            start_gates: dashmap::DashMap::new(),
+            defer_next_start: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -363,6 +368,11 @@ fn batch_result_entry(tool: &str, outcome: &CallOutcome) -> serde_json::Value {
 }
 
 impl ToolDispatcher for SubtaskToolDispatcher {
+    fn defer_dispatch_start(&self) {
+        self.defer_next_start
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     fn should_dispatch(&self, tool_name: &str) -> bool {
         // MCP ツール（`mcp__*`）は既定 inline（安全側）。運用者が繋いだ任意ツールなので
         // 配送系かどうかを静的に分類できず、全 dispatch すると外部送信系 MCP が
@@ -593,10 +603,22 @@ impl ToolDispatcher for SubtaskToolDispatcher {
         if let Some(c) = &self.subtask_starts {
             c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
-        // insert 完了 → タスク本体の実行を許可する。
-        let _ = start_tx.send(());
+        if self
+            .defer_next_start
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.start_gates.insert(subtask_id.clone(), start_tx);
+        } else {
+            let _ = start_tx.send(());
+        }
 
         DispatchOutcome { subtask_id, label }
+    }
+
+    fn release_dispatch(&self, subtask_id: &str) {
+        if let Some((_, gate)) = self.start_gates.remove(subtask_id) {
+            let _ = gate.send(());
+        }
     }
 }
 

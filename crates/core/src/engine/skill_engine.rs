@@ -1,5 +1,8 @@
 use std::sync::Arc;
 
+mod completion_requests;
+mod exchange;
+mod request_builder;
 mod run;
 mod run_helpers;
 mod turn_budget;
@@ -10,8 +13,8 @@ use tracing;
 #[cfg(test)]
 use super::types::ChatRequest;
 use super::types::{
-    self, ActionExecutor, ActionResult, LiveInboundSource, LlmCallLog, LlmClient, LlmExchangeLog,
-    ToolDispatcher,
+    self, ActionExecutor, ActionResult, LiveInboundSource, LiveToolCompletionSource, LlmCallLog,
+    LlmClient, LlmExchangeLog, ToolDispatcher,
 };
 #[cfg(test)]
 use opencrab_llm_types::FinishReason;
@@ -27,8 +30,16 @@ use turn_budget::{apply_turn_budget, message_plain_text, seat_tool_result, user_
 /// LLM 呼び出しごとのログコールバック。
 type LogCallback = Box<dyn Fn(&LlmCallLog) + Send + Sync>;
 type ExchangeLogCallback = Box<dyn Fn(&LlmExchangeLog) + Send + Sync>;
+type DurableExchangeLogCallback =
+    Box<dyn Fn(&LlmExchangeLog, &[String], Option<&str>) -> Result<()> + Send + Sync>;
 /// ツール結果受信フック: (tool_call_id, tool_name, result_json, is_error)。
 type ToolResultHook = Arc<dyn Fn(String, String, String, bool) + Send + Sync>;
+type ToolIdCorrelationHook = Arc<dyn Fn(String, String, usize) + Send + Sync>;
+type InputLimitsResolver = Arc<
+    dyn Fn(&str) -> std::result::Result<crate::context_budget::ModelInputLimits, String>
+        + Send
+        + Sync,
+>;
 /// #898: 継続分岐（末尾 CONTINUE の text-only イテレーション）で剥がした途中発話を
 /// **配送・保存する非同期フック**。配送はループ中に行い、失敗（Err）は継続を止める
 /// （§13.1 j: 失敗を隠して次に進まない）。REST/extgate/intake が各レーンの配線を渡す。
@@ -69,6 +80,8 @@ pub struct SkillEngine {
     pub log_callback: Option<LogCallback>,
     /// Additive callback carrying provider-executed tool history.
     pub exchange_log_callback: Option<ExchangeLogCallback>,
+    /// Durable logger that atomically consumes included completion events.
+    pub durable_exchange_log_callback: Option<DurableExchangeLogCallback>,
     /// Optional callback invoked with response text on every LLM reply.
     pub on_response_text: Option<Arc<dyn Fn(String) + Send + Sync>>,
     /// #898: 末尾 CONTINUE で継続する text-only イテレーションで剥がした途中発話を
@@ -85,6 +98,10 @@ pub struct SkillEngine {
     /// Callbacks invoked when a tool result is received: (tool_call_id, tool_name, result_json, is_error).
     /// [`Self::on_tool_call`] と同じく複数持ち、登録順に全部呼ぶ（#397）。
     on_tool_result: Vec<ToolResultHook>,
+    /// #975: (short_id, provider_call_id, sequence)の内部相関を永続化するフック。
+    on_tool_id_correlation: Vec<ToolIdCorrelationHook>,
+    next_tool_sequence: std::sync::atomic::AtomicUsize,
+    short_tool_ids_enabled: bool,
     /// Per-run reasoning (thinking) effort. Attached to every ChatRequest so
     /// providers can override their construction-time default per agent.
     reasoning_effort: Option<String>,
@@ -105,6 +122,8 @@ pub struct SkillEngine {
     /// イテレーションで LLM を呼ぶ直前に引き、新着があれば user メッセージとして
     /// 足す。None なら従来どおりターン開始時の履歴だけで回る。
     live_inbound: Option<Arc<dyn LiveInboundSource>>,
+    /// #975: 会話構築後に到着したbackground tool完了の差分取得口。
+    live_tool_completions: Option<Arc<dyn LiveToolCompletionSource>>,
     /// #964: request に新しく含める origin を `llm.chat` の直前に read state として通知する
     /// フック。None なら通知しない。
     on_read_origin: Option<ReadOriginHook>,
@@ -118,6 +137,9 @@ pub struct SkillEngine {
     /// engine まで来ない）。この値で頭打ちになった応答は finish_reason=Length で戻り、
     /// run ループがターンを失敗させる。
     max_output_tokens: Option<u32>,
+    /// #975: tool completion本文をrequestへ載せる際の明示的なモデル入力能力。
+    model_input_limits: Option<crate::context_budget::ModelInputLimits>,
+    model_input_limits_resolver: Option<InputLimitsResolver>,
     /// 会話車線の二水位（#826-B）。未設定なら途中圧縮しない（テスト / sub-engine）。
     conversation_high: Option<usize>,
     conversation_low: Option<usize>,
@@ -147,18 +169,25 @@ impl SkillEngine {
             allowed_actions: None,
             log_callback: None,
             exchange_log_callback: None,
+            durable_exchange_log_callback: None,
             on_response_text: None,
             on_continuation_speech: None,
             on_tool_call: Vec::new(),
             on_tool_result: Vec::new(),
+            on_tool_id_correlation: Vec::new(),
+            next_tool_sequence: std::sync::atomic::AtomicUsize::new(1),
+            short_tool_ids_enabled: false,
             reasoning_effort: None,
             web_search: false,
             tool_dispatcher: None,
             tool_result_offload: None,
             live_inbound: None,
+            live_tool_completions: None,
             on_read_origin: None,
             initial_read_origin: std::sync::Mutex::new(None),
             max_output_tokens: None,
+            model_input_limits: None,
+            model_input_limits_resolver: None,
             conversation_high: None,
             conversation_low: None,
             typed_conversation: None,
@@ -180,11 +209,49 @@ impl SkillEngine {
         self.typed_conversation = tc;
     }
 
+    /// #975: session内で次に使う短縮tool IDの連番を設定する。
+    pub fn set_next_tool_sequence(&mut self, sequence: usize) {
+        self.next_tool_sequence
+            .store(sequence.max(1), std::sync::atomic::Ordering::SeqCst);
+        self.short_tool_ids_enabled = true;
+    }
+
+    pub fn add_on_tool_id_correlation<F>(&mut self, callback: F)
+    where
+        F: Fn(String, String, usize) + Send + Sync + 'static,
+    {
+        self.on_tool_id_correlation.push(Arc::new(callback));
+    }
+
     /// 各 ChatRequest に載せる出力トークン上限を設定する（#676）。使用モデルの実能力値を
     /// `model_pricing` から解決して渡す。process 側が未登録を fail loud で弾くため、
     /// 本番ではここに来る前にターンが止まる。
     pub fn set_max_output_tokens(&mut self, max_output_tokens: u32) {
         self.max_output_tokens = Some(max_output_tokens);
+    }
+
+    pub fn set_model_input_limits(&mut self, limits: crate::context_budget::ModelInputLimits) {
+        self.model_input_limits = Some(limits);
+    }
+
+    pub fn set_model_input_limits_resolver<F>(&mut self, resolver: F)
+    where
+        F: Fn(&str) -> std::result::Result<crate::context_budget::ModelInputLimits, String>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.model_input_limits_resolver = Some(Arc::new(resolver));
+    }
+
+    pub(super) fn resolved_model_input_limits(
+        &self,
+        model: &str,
+    ) -> Result<Option<crate::context_budget::ModelInputLimits>> {
+        if let Some(resolve) = &self.model_input_limits_resolver {
+            return resolve(model).map(Some).map_err(anyhow::Error::msg);
+        }
+        Ok(self.model_input_limits)
     }
 
     /// 走行中の新着ユーザー発言の取得口を注入する（#289）。
@@ -198,6 +265,11 @@ impl SkillEngine {
     /// 発言をすでに含んでいるため、引くと同じ発言を二重に見せることになる。
     pub fn set_live_inbound(&mut self, source: Arc<dyn LiveInboundSource>) {
         self.live_inbound = Some(source);
+    }
+
+    /// #975: 同じ因果的turnの反復間へbackground tool完了を差分注入する。
+    pub fn set_live_tool_completions(&mut self, source: Arc<dyn LiveToolCompletionSource>) {
+        self.live_tool_completions = Some(source);
     }
 
     /// #964: LLM request 直前の read state（👀）通知フックを設定する。extgate 経路だけが渡す。
@@ -306,6 +378,13 @@ impl SkillEngine {
         cb: impl Fn(&LlmExchangeLog) + Send + Sync + 'static,
     ) {
         self.exchange_log_callback = Some(Box::new(cb));
+    }
+
+    pub fn set_durable_exchange_log_callback(
+        &mut self,
+        cb: impl Fn(&LlmExchangeLog, &[String], Option<&str>) -> Result<()> + Send + Sync + 'static,
+    ) {
+        self.durable_exchange_log_callback = Some(Box::new(cb));
     }
 
     /// Set the on_response_text callback, invoked with response text on every LLM reply.

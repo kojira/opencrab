@@ -13,6 +13,23 @@ impl LlmProvider for ChatGptProvider {
         false
     }
 
+    fn measure_request_tokens(&self, request: &ChatRequest) -> Option<usize> {
+        // 実送信前にremote画像をdata URIへ展開するため、同期meterでは画像requestを
+        // 証明できない。completion-bearing requestはNoneをfail-loudとして扱う。
+        if request.messages.iter().any(|message| {
+            matches!(
+                message.content.as_ref(),
+                Some(opencrab_llm_types::MessageContent::Image { .. })
+                    | Some(opencrab_llm_types::MessageContent::Multi(_))
+            )
+        }) {
+            return None;
+        }
+        serde_json::to_vec(&self.build_request_body(request, true))
+            .ok()
+            .map(|wire| wire.len())
+    }
+
     async fn available_models(&self) -> Result<Vec<ModelInfo>> {
         Ok(vec![
             // GPT-5.6 系（gpt-5.6 は Sol にエイリアス）。codex CLI と同じ
@@ -270,5 +287,40 @@ impl LlmProvider for ChatGptProvider {
 
     async fn health_check(&self) -> Result<bool> {
         Ok(self.load_access_token().is_ok())
+    }
+}
+
+#[cfg(test)]
+mod meter_tests {
+    use super::*;
+
+    #[test]
+    fn image_and_multipart_requests_have_no_sync_certified_meter() {
+        let provider = ChatGptProvider::new();
+        for content in [
+            MessageContent::Image {
+                content_type: "image_url".to_string(),
+                image_url: ImageUrl {
+                    url: "https://example.invalid/large.png".to_string(),
+                    detail: None,
+                },
+            },
+            MessageContent::Multi(vec![ContentPart::Text {
+                text: "text-only multipart is conservatively unsupported".to_string(),
+            }]),
+        ] {
+            let request = ChatRequest::new(
+                "gpt-5.6",
+                vec![Message {
+                    role: Role::User,
+                    content: Some(content),
+                    name: None,
+                    function_call: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                }],
+            );
+            assert_eq!(provider.measure_request_tokens(&request), None);
+        }
     }
 }

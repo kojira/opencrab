@@ -367,7 +367,9 @@ fn seed_core(root: &Path, db: &Path, sock: &Path, core_port: u16, llm_port: u16)
                 input_price_per_1m: 0.0,
                 output_price_per_1m: 0.0,
                 context_window: Some(200_000),
+                max_input_tokens: Some(200_000),
                 max_output_tokens: Some(1024),
+                max_total_tokens: None,
             },
         )
         .expect("seed model_pricing for startup budget check");
@@ -403,7 +405,7 @@ fn seed_core(root: &Path, db: &Path, sock: &Path, core_port: u16, llm_port: u16)
         "PUT",
         "/api/llm/model-pricing",
         None,
-        Some(r#"{"provider":"openai","model":"e2e-mock","context_window":200000,"max_output_tokens":1024}"#),
+        Some(r#"{"provider":"openai","model":"e2e-mock","context_window":200000,"max_input_tokens":200000,"max_output_tokens":1024}"#),
         Duration::from_secs(5),
     )
     .expect("model pricing");

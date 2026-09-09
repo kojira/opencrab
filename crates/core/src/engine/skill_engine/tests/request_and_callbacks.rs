@@ -546,6 +546,71 @@
     }
 
     #[tokio::test]
+    async fn model_override_re_resolves_request_output_limit() {
+        use std::sync::Mutex;
+
+        type SeenLimits = Arc<Mutex<Vec<(String, Option<u32>)>>>;
+        struct LimitsLlm(SeenLimits);
+        #[async_trait]
+        impl LlmClient for LimitsLlm {
+            async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((request.model.clone(), request.max_tokens));
+                Ok(ChatResponse::text("done"))
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut engine = SkillEngine::new(
+            Box::new(LimitsLlm(Arc::clone(&seen))),
+            Box::new(MockExecutor::new()),
+            2,
+        );
+        engine.set_max_output_tokens(999);
+        engine.set_model_input_limits_resolver(|model| {
+            Ok(crate::context_budget::ModelInputLimits {
+                max_input_tokens: Some(if model == "override-model" { 200 } else { 100 }),
+                max_output_tokens: Some(if model == "override-model" { 77 } else { 55 }),
+                max_total_tokens: None,
+            })
+        });
+        let model_override = Arc::new(Mutex::new(Some("override-model".to_string())));
+        engine
+            .run_with_model_override("system", "hi", "default-model", Some(model_override), &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            &[("override-model".to_string(), Some(77))]
+        );
+    }
+
+    #[tokio::test]
+    async fn model_override_missing_output_limit_never_inherits_initial_model_limit() {
+        let mut engine = SkillEngine::new(
+            Box::new(MockLlm::new(vec![text_response("must not run")])),
+            Box::new(MockExecutor::new()),
+            2,
+        );
+        engine.set_max_output_tokens(999);
+        engine.set_model_input_limits_resolver(|_| {
+            Ok(crate::context_budget::ModelInputLimits {
+                max_input_tokens: Some(200),
+                max_output_tokens: None,
+                max_total_tokens: None,
+            })
+        });
+        let model_override = Arc::new(std::sync::Mutex::new(Some("override-model".to_string())));
+        let error = engine
+            .run_with_model_override("system", "hi", "default-model", Some(model_override), &[])
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("max_output_tokens"));
+    }
+
+    #[tokio::test]
     async fn test_on_response_text_fires_on_every_iteration() {
         use std::sync::{Arc, Mutex};
 

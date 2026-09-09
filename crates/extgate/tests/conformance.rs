@@ -13,3 +13,4 @@ include!("conformance/nostr_watch.rs");
 include!("conformance/turn_queue.rs");
 include!("conformance/operations.rs");
 include!("conformance/hello_diagnostics.rs");
+include!("conformance/completion_recovery.rs");

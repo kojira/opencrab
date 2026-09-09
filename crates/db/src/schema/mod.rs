@@ -13,7 +13,7 @@ use migrations::MIGRATION_GROUPS;
 use sql::{
     AGENT_HEARTBEAT_CONFIG_SQL, AGENT_MCP_CONFIG_SQL, AGENT_NOSTR_CONFIG_SQL,
     AGENT_NOSTR_RELAY_CONFIG_SQL, MEMORY_CATEGORY_MEMBERS_MM_SQL, MEMORY_CATEGORY_MEMBERS_SQL,
-    PROVIDER_SETTINGS_SQL, SCHEMA_SQL, SKILL_USAGE_LOG_SQL, TASK_LEDGER_SQL,
+    PROVIDER_SETTINGS_SQL, SCHEMA_SQL, SKILL_USAGE_LOG_SQL, TASK_LEDGER_SQL, TOOL_CONTINUATION_SQL,
 };
 use v37_v42::{migrate_v37_session_heartbeat, migrate_v38_align_schedule_vocab};
 use v43_v47::{
@@ -108,6 +108,7 @@ pub fn initialize(conn: &Connection) -> rusqlite::Result<()> {
     if current < BASELINE_VERSION {
         let tx = conn.unchecked_transaction()?;
         tx.execute_batch(SCHEMA_SQL)?;
+        tx.execute_batch(TOOL_CONTINUATION_SQL)?;
         migrate(&tx)?;
         tx.execute_batch(&format!("PRAGMA user_version = {BASELINE_VERSION}"))?;
         tx.commit()?;

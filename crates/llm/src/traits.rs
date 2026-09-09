@@ -74,6 +74,12 @@ pub trait LlmProvider: Send + Sync {
         Ok(Box::pin(futures::stream::once(async { Ok(delta) })))
     }
 
+    /// providerの最終wire framingを含むtoken数を、exact tokenizerまたは検証済み上界で返す。
+    /// 推測しかできないproviderはNoneを返す。
+    fn measure_request_tokens(&self, _request: &ChatRequest) -> Option<usize> {
+        None
+    }
+
     /// Whether this provider supports function calling / tools.
     fn supports_function_calling(&self) -> bool {
         false
