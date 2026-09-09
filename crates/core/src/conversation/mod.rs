@@ -20,6 +20,7 @@ pub use assembly::{
     build_conversation_string_with_waters, NO_MESSAGES_MARKER, RECENT_MIN_USER_SPEECHES,
     RESPONSE_ONLY_DIRECTIVE,
 };
+pub(crate) use format::format_history_log;
 pub use format::{format_single_log, format_single_log_with_echo};
 pub use past_summary::past_summary_omitted_notice;
 pub use refs::ConversationRefs;
@@ -71,5 +72,7 @@ include!("tests/response_only_directive_tests.rs");
 include!("tests/result_reference_tests.rs");
 #[cfg(test)]
 include!("tests/subtask_completed_folding_tests.rs");
+#[cfg(test)]
+include!("tests/pending_completion_history_tests.rs");
 #[cfg(test)]
 include!("tests/render_refs_tests.rs");

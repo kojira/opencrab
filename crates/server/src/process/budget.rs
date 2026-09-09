@@ -62,6 +62,11 @@ fn persist_turn_end_snapshot(
         .db
         .lock()
         .map_err(|e| anyhow::anyhow!("db lock poisoned: {e}"))?;
+    // 未応答completionの実本文は次のresume requestだけの一時表示。ここでsnapshotへ
+    // 凍結すると、応答後のturnにも本文が残るため、応答が記録された後の正時へ延期する。
+    if opencrab_core::context_budget::has_pending_completion(&conn, session_id, agent_id)? {
+        return Ok(());
+    }
     let assembled =
         opencrab_core::context_budget::assemble_from_snapshot(&conn, session_id, agent_id)?;
     let mut gov =

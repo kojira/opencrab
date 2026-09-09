@@ -13,7 +13,66 @@ use super::compact::{
     compact_to_low_water, should_compact, CompactItem, CompactLane, CompactOutcome, CompactPhase,
 };
 use super::ledger::TokenLedger;
-use crate::conversation::format_single_log_with_echo;
+fn completion_subtask_id(log: &opencrab_db::queries::SessionLogRow) -> Option<String> {
+    if log.log_type != "system" {
+        return None;
+    }
+    let value = serde_json::from_str::<serde_json::Value>(&log.content).ok()?;
+    if value.get("type").and_then(|v| v.as_str()) != Some("subtask_completed") {
+        return None;
+    }
+    value
+        .get("subtask_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+}
+
+fn latest_completion_log_ids(logs: &[opencrab_db::queries::SessionLogRow]) -> HashSet<i64> {
+    let mut latest = HashMap::new();
+    for log in logs {
+        if let (Some(subtask_id), Some(log_id)) = (completion_subtask_id(log), log.id) {
+            latest.insert(subtask_id, log_id);
+        }
+    }
+    latest.into_values().collect()
+}
+
+fn pending_completion_log_ids(
+    logs: &[opencrab_db::queries::SessionLogRow],
+    agent_id: &str,
+) -> HashSet<i64> {
+    let mut answered = false;
+    let mut pending = HashSet::new();
+    let mut seen_subtasks = HashSet::new();
+    for log in logs.iter().rev() {
+        let speaker = log.speaker_id.as_deref().unwrap_or(&log.agent_id);
+        if log.log_type == "speech" && speaker == agent_id {
+            answered = true;
+        }
+        if !answered {
+            if let Some(subtask_id) = completion_subtask_id(log) {
+                if seen_subtasks.insert(subtask_id) {
+                    if let Some(id) = log.id {
+                        pending.insert(id);
+                    }
+                }
+            }
+        }
+    }
+    pending
+}
+
+/// 未応答completionが正本ログにあるか。snapshotへ一時本文を凍結しないための判定。
+pub fn has_pending_completion(
+    conn: &Connection,
+    session_id: &str,
+    agent_id: &str,
+) -> Result<bool, anyhow::Error> {
+    let logs = crate::conversation::retain_conversation_logs(
+        opencrab_db::queries::list_session_logs_by_session(conn, session_id)?,
+    );
+    Ok(!pending_completion_log_ids(&logs, agent_id).is_empty())
+}
 
 thread_local! {
     static EVENT_SINK: RefCell<Vec<GovernorEvent>> = const { RefCell::new(Vec::new()) };
@@ -211,18 +270,30 @@ pub fn assemble_from_snapshot(
         opencrab_db::queries::list_session_logs_by_session(conn, session_id)?,
     );
     let completed_for_read = completed_tool_call_ids(&all);
+    let pending_completions = pending_completion_log_ids(&all, agent_id);
+    let latest_completions = latest_completion_log_ids(&all);
     // §9A: u/e/c 短縮参照は全履歴の初出順で採番し、snapshot 境界を跨いでも安定させる。
     let refs = build_conversation_refs(conn, &all, agent_id);
     // 並行バッチの spawn 受理（同一 subtask を call ごとに重複記録）は初出だけ残す（row295 item4）。
     let mut seen_spawns = std::collections::HashSet::new();
     let delta = logs
         .iter()
-        .filter(|l| match crate::conversation::spawn_ack_subtask_id(l) {
-            Some(sid) => seen_spawns.insert(sid),
-            None => true,
+        .filter(|l| {
+            if completion_subtask_id(l).is_some() {
+                return l.id.is_some_and(|id| latest_completions.contains(&id));
+            }
+            match crate::conversation::spawn_ack_subtask_id(l) {
+                Some(sid) => seen_spawns.insert(sid),
+                None => true,
+            }
         })
         .map(|l| {
-            let text = format_single_log_with_echo(l, Some(&completed_for_read), Some(&refs));
+            let text = crate::conversation::format_history_log(
+                l,
+                Some(&completed_for_read),
+                Some(&refs),
+                l.id.is_some_and(|id| pending_completions.contains(&id)),
+            );
             // row318 検知器: delta 描画に生識別子が残る＝描画器のバグ。fail-loud に WARN（本番では
             // 短縮形が出ているはずなのでここは鳴らない）。凍結 snapshot blob はこの対象外。
             // #847/row339: speech 本文（利用者・全話者の自由記述）は**原文のまま**描画するので
@@ -343,6 +414,7 @@ pub fn items_from_logs(
     let recent_tail = all.len().saturating_sub(8);
 
     let completed_ids = completed_tool_call_ids(&all);
+    let latest_completions = latest_completion_log_ids(&all);
     let refs = build_conversation_refs(conn, &all, agent_id);
     let groups = partition_exchange_groups(&all, agent_id);
 
@@ -358,12 +430,24 @@ pub fn items_from_logs(
             .any(|&i| newest_user.contains(&i) || i >= recent_tail);
         for i in idxs {
             let log = &all[i];
+            if completion_subtask_id(log).is_some()
+                && !log.id.is_some_and(|id| latest_completions.contains(&id))
+            {
+                continue;
+            }
             if let Some(sid) = crate::conversation::spawn_ack_subtask_id(log) {
                 if !seen_spawns.insert(sid) {
                     continue;
                 }
             }
-            let text = format_single_log_with_echo(log, Some(&completed_ids), Some(&refs));
+            // snapshot/compactionへ凍結する本文は常に履歴形。未応答completionの実本文は
+            // request組立時のdeltaだけに載せ、次turnへ凍結しない。
+            let text = crate::conversation::format_history_log(
+                log,
+                Some(&completed_ids),
+                Some(&refs),
+                false,
+            );
             // row318 検知器（items 経路も同じ描画器を通る）。#847: speech 本文は対象外（構造ヘッダは見る）。
             if let Some(line) = crate::conversation::leaked_identifier_in_render(log, &text) {
                 tracing::warn!(

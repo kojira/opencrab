@@ -27,8 +27,8 @@ pub use envelope::{
 };
 pub use error::{ContextBudgetError, CONTEXT_BUDGET_EXHAUSTED};
 pub use governor::{
-    assemble_from_snapshot, items_from_logs, take_governor_events, AssembledConversation,
-    GovernorEvent, TurnGovernor,
+    assemble_from_snapshot, has_pending_completion, items_from_logs, take_governor_events,
+    AssembledConversation, GovernorEvent, TurnGovernor,
 };
 pub use ledger::{LedgerItem, TokenLedger};
 pub use observe::{

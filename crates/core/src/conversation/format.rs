@@ -3,10 +3,20 @@ use super::sanitize::{
     inbound_relation_annotation, outgoing_relation_annotation, render_limit,
     scrub_identifiers_for_display, strip_inbound_meta_for_display, truncate_body,
 };
-use super::tool_result_fold::{fold_subtask_completed, result_reference};
+use super::tool_result_fold::{fold_subtask_completed, result_reference, signals_failure};
 
 pub fn format_single_log(log: &opencrab_db::queries::SessionLogRow) -> String {
     format_single_log_with_echo(log, None, None)
+}
+
+/// 会話履歴用の整形。未応答の completion は実本文を一度だけ載せ、応答済みなら永続参照へ落とす。
+pub(crate) fn format_history_log(
+    log: &opencrab_db::queries::SessionLogRow,
+    completed_ids: Option<&std::collections::HashSet<String>>,
+    refs: Option<&ConversationRefs>,
+    pending_completion: bool,
+) -> String {
+    format_single_log_inner(log, completed_ids, refs, Some(pending_completion))
 }
 /// 完了済み tool_call の arguments を `{ref,digest,bytes}` に置換して読む。
 /// 未決着 call は `completed_ids` に無いので全文のまま。`refs` があれば §9A の短縮参照
@@ -16,6 +26,15 @@ pub fn format_single_log_with_echo(
     log: &opencrab_db::queries::SessionLogRow,
     completed_ids: Option<&std::collections::HashSet<String>>,
     refs: Option<&ConversationRefs>,
+) -> String {
+    format_single_log_inner(log, completed_ids, refs, None)
+}
+
+fn format_single_log_inner(
+    log: &opencrab_db::queries::SessionLogRow,
+    completed_ids: Option<&std::collections::HashSet<String>>,
+    refs: Option<&ConversationRefs>,
+    pending_completion: Option<bool>,
 ) -> String {
     let ts = log
         .created_at
@@ -214,7 +233,14 @@ pub fn format_single_log_with_echo(
                     // pretty-print（範囲外・塊の証拠なし）。**厳密一致**で 1 type だけ分岐し、
                     // 他の type を巻き込まない（設計 Q2 #8）。
                     if kind == "subtask_completed" {
-                        return format_subtask_completed(&value, &log.content, &ts, refs);
+                        return format_subtask_completed(
+                            &value,
+                            &log.content,
+                            &ts,
+                            log.id,
+                            refs,
+                            pending_completion,
+                        );
                     }
                     let content = serde_json::to_string_pretty(&value)
                         .unwrap_or_else(|_| log.content.clone());
@@ -235,11 +261,30 @@ pub fn format_single_log_with_echo(
 /// `exit_reason`）はそのまま pretty-print する——監査の相関（起動応答との突き合わせ・記録の在り処）を
 /// 会話から消さない。畳めない形（失敗・散文・退避 notice 等）では `result` は原文のまま残るので、
 /// 表示は従来の pretty-print と一致する（挙動を変えるのは畳めたときだけ）。
+fn completion_result_failed(result: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(result) else {
+        return false;
+    };
+    let failed = |item: &serde_json::Value| {
+        let value = item.get("result").unwrap_or(item);
+        let data = value.get("data").unwrap_or(&serde_json::Value::Null);
+        let is_tool_envelope = value.get("success").and_then(|v| v.as_bool()).is_some()
+            || data.get("exit_code").and_then(|v| v.as_i64()).is_some();
+        is_tool_envelope && signals_failure(value, data)
+    };
+    value
+        .as_array()
+        .map(|items| items.iter().any(failed))
+        .unwrap_or_else(|| failed(&value))
+}
+
 fn format_subtask_completed(
     value: &serde_json::Value,
     raw_content: &str,
     ts: &str,
+    log_id: Option<i64>,
     refs: Option<&ConversationRefs>,
+    pending_completion: Option<bool>,
 ) -> String {
     // `result` は文字列（`settle_completed` が `result_text` を JSON 文字列として載せる）。
     // 想定外に文字列でなければ触らず pretty-print に委ねる（fail-safe・稀）。
@@ -265,7 +310,23 @@ fn format_subtask_completed(
         .map(|n| format!("s{n}"))
         .unwrap_or_else(|| "subtask".to_string());
 
-    // 本文は畳んだ result だけ（ツール結果 blob は要約・散文はそのまま・切り詰めは fold 内の不変条件）。
-    let body = fold_subtask_completed(exit_reason, result_str);
+    let status = if exit_reason == "completed" && !completion_result_failed(result_str) {
+        "completed"
+    } else {
+        "failed"
+    };
+    let body = match pending_completion {
+        // completion直後のresume requestだけは、永続化済みの実結果をそのまま読む。
+        Some(true) => format!("status:{status}\n{result_str}"),
+        // 自分の応答が後続した履歴では再掲せず、正本ログの取得先だけ残す。
+        Some(false) => format!(
+            "status:{status} result_omitted:true\nread_my_history(around_id={})",
+            log_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "latest".to_string())
+        ),
+        // 単体整形APIは既存挙動を維持する。
+        None => fold_subtask_completed(exit_reason, result_str),
+    };
     format!("[{label} 完了]{ts}:\n{body}")
 }
