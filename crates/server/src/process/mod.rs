@@ -24,12 +24,12 @@ pub use budget::{
     build_conversation_string, build_conversation_string_with_memory_index,
     build_conversation_string_with_waters, check_agent_model_change, compute_context_budget,
     core_functions_tokens, ensure_functions_within_cap, ensure_model_context_window_registered,
-    ensure_model_max_input_tokens_registered, ensure_model_max_output_tokens_registered,
-    ensure_request_functions_budget, ensure_startup_budget_inputs, include_memory_index,
-    measure_functions_tokens, model_context_window_missing_message, normalize_model_spec,
-    resolve_agent_request_envelope, resolve_model_input_limits, resolve_model_max_output_tokens,
-    resolve_water_levels, split_llm_model_spec, ContextBudgetEnvelope, ContextBudgetError,
-    ContextBudgetPolicy, MemoryIndexDecision, RequestEnvelopeArgs, DEFAULT_MEMORY_INDEX_TOKEN_CAP,
+    ensure_model_max_output_tokens_registered, ensure_request_functions_budget,
+    ensure_startup_budget_inputs, include_memory_index, measure_functions_tokens,
+    model_context_window_missing_message, normalize_model_spec, resolve_agent_request_envelope,
+    resolve_model_max_output_tokens, resolve_water_levels, split_llm_model_spec,
+    ContextBudgetEnvelope, ContextBudgetError, ContextBudgetPolicy, MemoryIndexDecision,
+    RequestEnvelopeArgs, DEFAULT_MEMORY_INDEX_TOKEN_CAP,
 };
 pub use live_inbound::{prepend_runtime_context, prepend_runtime_context_discord};
 pub use prompt::{build_agent_context, build_more_tools_index};
@@ -42,7 +42,7 @@ use budget::{format_single_log, spawn_background_turn_end_snapshot, typed_exceed
 use callbacks::{
     merge_image_urls, set_llm_log_callback, set_run_notifier_callbacks, set_turn_log_callbacks,
 };
-use live_inbound::{SessionLiveInbound, SessionLiveToolCompletions, SubtaskSteerInbound};
+use live_inbound::{SessionLiveInbound, SubtaskSteerInbound};
 use loop_restart::prepare_loop_restart;
 use skills::{record_used_skills, spawn_background_index_build};
 
@@ -377,36 +377,6 @@ pub async fn run_agent_response(
         max_iterations,
     );
 
-    // #975: providerの長いcall IDは内部相関へ保存し、以後のwire会話にはsession内t連番を使う。
-    let next_tool_sequence = {
-        let conn = state
-            .db
-            .lock()
-            .map_err(|error| anyhow::anyhow!("db lock failed: {error}"))?;
-        opencrab_db::queries::next_tool_call_sequence(&conn, session_id)?
-    };
-    engine.set_next_tool_sequence(next_tool_sequence);
-    {
-        let correlation_db = state.db.clone();
-        let correlation_session = session_id.to_string();
-        engine.add_on_tool_id_correlation(move |short_id, provider_call_id, sequence| {
-            if let Ok(conn) = correlation_db.lock() {
-                if let Err(error) = opencrab_db::queries::insert_tool_call_correlation(
-                    &conn,
-                    &correlation_session,
-                    sequence,
-                    &short_id,
-                    &provider_call_id,
-                ) {
-                    tracing::error!(session_id = %correlation_session, "failed to persist tool call correlation: {error}");
-                }
-            }
-        });
-    }
-
-    // #975: providerに関係なく明示的な入力能力が必須。context_windowへはfallbackしない。
-    budget::configure_model_input_limits(state, &effective_model, &mut engine)?;
-
     // #676（案Y）: 送るプロバイダのモデルは、出力上限（max_output_tokens）を model_pricing から
     // 実能力値で解決して engine に渡す。未登録（NULL / 0 以下 / 行なし）なら fail loud で
     // ターンを止める（グローバルな任意定数を既定に置かない）。「送るか」はプロバイダの能力宣言
@@ -414,7 +384,20 @@ pub async fn run_agent_response(
     // は解決も要求もせず、engine は上限未指定のまま＝プロバイダ内部既定に委ねる（切り捨ては
     // 方針3の incomplete→Length→bail が担う）。解決は effective_model（ターン単位）で行う——
     // context_window 予算計算と同じ流儀・同じ粒度（select_llm の per-iteration 上書きは追わない）。
-    budget::configure_model_output_limit(state, &effective_model, &mut engine)?;
+    if state
+        .llm_router
+        .get()
+        .sends_max_output_tokens(&effective_model)
+    {
+        let max_out = {
+            let conn = state
+                .db
+                .lock()
+                .map_err(|e| anyhow::anyhow!("db lock failed: {e}"))?;
+            resolve_model_max_output_tokens(&conn, &effective_model).map_err(anyhow::Error::msg)?
+        };
+        engine.set_max_output_tokens(max_out);
+    }
 
     // #284: LLM へ返す tool_result のサイズ上限と退避先。engine 側で上限を効かせ、
     // 全文はワークスペースへ残す（エージェントが read_file で続きを読める）。
@@ -441,10 +424,6 @@ pub async fn run_agent_response(
             SessionLiveInbound::new(state.db.clone(), session_id, agent_id)
                 .with_scope(req.live_inbound_scope.clone()),
         ));
-        engine.set_live_tool_completions(std::sync::Arc::new(SessionLiveToolCompletions::new(
-            state.db.clone(),
-            session_id,
-        )));
     } else {
         // #647: サブタスク（depth>0）は走行中ユーザー発話の当事者ではないが、親/オーナーからの
         // steer（追加指示）は反復の合間に読む。ユーザー発話版と同じ `LiveInboundSource` 機構を

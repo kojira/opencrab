@@ -131,7 +131,7 @@ async fn scenario_930_eyes_on_read_via_spawned_ack_reinvocation() {
     let folded_via_spawned_ack = mock.reqs.lock().unwrap().iter().any(|t| {
         t.contains(R930S_B)
             && t.contains("新着メッセージ")
-            && (t.contains("status:running") || t.contains("status:completed"))
+            && (t.contains("spawned") || t.contains("subtask_completed"))
     });
     assert!(
         folded_via_spawned_ack,

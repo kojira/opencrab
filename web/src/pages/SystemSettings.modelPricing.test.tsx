@@ -104,7 +104,7 @@ describe('ModelPricingSection list', () => {
     });
     // 実効予算は算出されない（525,000 を捏造しない）
     expect(screen.queryByText('525,000')).not.toBeInTheDocument();
-    expect(screen.getAllByText('—').length).toBeGreaterThan(0);
+    expect(screen.getByText('—')).toBeInTheDocument();
   });
 
   it('flags rows whose context_window is missing', async () => {
@@ -123,7 +123,7 @@ describe('ModelPricingSection list', () => {
     render(<ModelPricingSection />);
 
     await waitFor(() => {
-      expect(screen.getAllByText('未登録').length).toBeGreaterThan(0);
+      expect(screen.getByText('未登録')).toBeInTheDocument();
     });
   });
 });

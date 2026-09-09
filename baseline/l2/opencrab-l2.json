@@ -8703,9 +8703,7 @@
               {
                 "context_window": 1050000,
                 "input_price_per_1m": 0.0,
-                "max_input_tokens": 1050000,
                 "max_output_tokens": 32000,
-                "max_total_tokens": null,
                 "model": "gpt-5.6",
                 "output_price_per_1m": 0.0,
                 "provider": "codex"
@@ -8748,9 +8746,7 @@
               {
                 "context_window": 1050000,
                 "input_price_per_1m": 0.0,
-                "max_input_tokens": 1050000,
                 "max_output_tokens": 32000,
-                "max_total_tokens": null,
                 "model": "gpt-5.6",
                 "output_price_per_1m": 0.0,
                 "provider": "codex"
@@ -8788,9 +8784,7 @@
                 {
                   "context_window": 4096,
                   "input_price_per_1m": 0.0,
-                  "max_input_tokens": null,
                   "max_output_tokens": null,
-                  "max_total_tokens": null,
                   "model": "model",
                   "output_price_per_1m": 0.0,
                   "provider": "baseline"
@@ -8798,9 +8792,7 @@
                 {
                   "context_window": 1050000,
                   "input_price_per_1m": 0.0,
-                  "max_input_tokens": 1050000,
                   "max_output_tokens": 32000,
-                  "max_total_tokens": null,
                   "model": "gpt-5.6",
                   "output_price_per_1m": 0.0,
                   "provider": "codex"
@@ -8834,9 +8826,7 @@
                 {
                   "context_window": 1050000,
                   "input_price_per_1m": 0.0,
-                  "max_input_tokens": 1050000,
                   "max_output_tokens": 32000,
-                  "max_total_tokens": null,
                   "model": "gpt-5.6",
                   "output_price_per_1m": 0.0,
                   "provider": "codex"
@@ -8886,9 +8876,7 @@
         "response": {
           "body": {
             "context_window": 4096,
-            "max_input_tokens": null,
             "max_output_tokens": null,
-            "max_total_tokens": null,
             "model": "model",
             "provider": "baseline",
             "saved": true

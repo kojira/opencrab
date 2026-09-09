@@ -137,13 +137,7 @@ pub trait ToolDispatcher: Send + Sync {
     ///
     /// 実処理（`executor.execute_with_id`）は別タスクで走り、完了で
     /// `settle_completed`（DB 永続化 → sink 発火）が親セッションを resume させる。
-    /// engineがrunning相関の永続化までworker開始を遅延させることを宣言する。
-    fn defer_dispatch_start(&self) {}
-
     fn dispatch_batch(&self, calls: &[DispatchCall]) -> DispatchOutcome;
-
-    /// running rowsと短縮ID相関の永続化後にbackground workerを解放する。
-    fn release_dispatch(&self, _subtask_id: &str) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -198,68 +192,6 @@ pub struct FoldedInbound {
     pub origin: Option<String>,
 }
 
-/// 走行中の因果的turnへ追加するbackground toolの完了差分。
-#[derive(Debug, Clone)]
-pub struct FoldedToolCompletion {
-    /// 永続completion eventの一意ID。再注入防止とrequest相関に使う。
-    pub event_id: String,
-    /// 現在の因果的turnで、入力上限に収まる場合の完了表現。
-    pub text: String,
-    /// meter不在または上限超過時の永続参照。本文を含めない。
-    pub omitted_text: String,
-}
-
-/// durable response replay時に再実行を抑止できる、既に永続化済みのtool effect。
-#[derive(Debug, Clone)]
-pub struct RecoveredToolEffect {
-    pub content: String,
-    pub is_error: bool,
-    pub lifecycle_status: String,
-}
-
-/// 会話構築後に到着したtool完了を、LLM反復の境界で差分取得する。
-pub trait LiveToolCompletionSource: Send + Sync {
-    /// 未消費完了を決定的順序で返す。
-    fn poll_tool_completions(&self) -> Vec<FoldedToolCompletion>;
-    /// 応答保存後・効果適用前にcrashしたrequestをprovider再呼出しなしで再生する。
-    fn recover_pending_effect(
-        &self,
-    ) -> Result<Option<(String, ChatRequest, ChatResponse)>, String> {
-        Ok(None)
-    }
-
-    /// exact response replayで同じtool call IDの永続結果があれば返す。
-    fn recover_tool_effect(&self, _tool_call_id: &str) -> Option<RecoveredToolEffect> {
-        None
-    }
-
-    /// replayされたprovider call IDを初回実行時の短縮IDへ戻す。
-    fn resolve_conversation_tool_id(&self, _provider_call_id: &str) -> Option<String> {
-        None
-    }
-    /// 効果（発話・tool dispatch）を処理し終えたresponseを確定する。
-    fn mark_effect_applied(&self, _request_id: &str) -> Result<(), String> {
-        Ok(())
-    }
-    /// crash前にincludedだったexact requestを再利用する。
-    fn recover_included_request(
-        &self,
-        _event_ids: &[String],
-    ) -> Result<Option<(String, ChatRequest)>, String> {
-        Ok(None)
-    }
-    /// 完成したprovider requestへ含める直前にrequest相関を永続化する。
-    fn mark_included(
-        &self,
-        event_ids: &[String],
-        request_id: &str,
-        request_digest: &str,
-        request_json: &str,
-    ) -> Result<(), String>;
-    /// provider応答を採用した後にだけ消費済みへ進める。
-    fn mark_consumed(&self, event_ids: &[String], request_id: &str) -> Result<(), String>;
-}
-
 // ---------------------------------------------------------------------------
 // Trait: LlmClient
 // ---------------------------------------------------------------------------
@@ -302,28 +234,10 @@ pub struct LlmExchangeLog {
 /// depending on `opencrab-llm` (providers/router) directly. The server's
 /// router adapter and test mocks implement this trait over the canonical
 /// message model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RequestTokenMeterCapability {
-    ExactTokenizer,
-    CertifiedUpperBound,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RequestTokenMeasurement {
-    pub tokens: usize,
-    pub capability: RequestTokenMeterCapability,
-}
-
 #[async_trait]
 pub trait LlmClient: Send + Sync {
     /// Send a chat request and receive a response.
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse>;
-
-    /// providerの最終wire framingを含む入力token数。推測値は返さない。
-    /// 実装不能ならNoneとし、engineはtool結果本文をインライン化しない。
-    fn measure_request_tokens(&self, _request: &ChatRequest) -> Option<RequestTokenMeasurement> {
-        None
-    }
 
     /// Additive provider-history path. Existing clients remain source-compatible.
     async fn chat_with_history(&self, request: ChatRequest) -> Result<LlmExchange> {

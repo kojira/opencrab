@@ -5,7 +5,6 @@ mod v37_v42;
 mod v43_v47;
 mod v48;
 mod v49;
-mod v50;
 
 use super::Migration;
 
@@ -17,5 +16,4 @@ pub(super) static MIGRATION_GROUPS: &[&[Migration]] = &[
     v43_v47::MIGRATIONS,
     v48::MIGRATIONS,
     v49::MIGRATIONS,
-    v50::MIGRATIONS,
 ];

@@ -25,7 +25,7 @@ fn v48_to_v49_completes_existing_default_and_only_fills_known_null_budgets() {
     initialize(&conn).unwrap();
     initialize(&conn).unwrap();
 
-    assert_eq!(schema_version(&conn).unwrap(), 50);
+    assert_eq!(schema_version(&conn).unwrap(), 49);
     let default = crate::queries::get_model_pricing(&conn, "codex", "gpt-5.6")
         .unwrap()
         .expect("existing default row");
@@ -62,7 +62,7 @@ fn fresh_schema_seeds_complete_standard_default_budget() {
     let conn = Connection::open_in_memory().unwrap();
     initialize(&conn).unwrap();
 
-    assert_eq!(schema_version(&conn).unwrap(), 50);
+    assert_eq!(schema_version(&conn).unwrap(), 49);
     let default = crate::queries::get_model_pricing(&conn, "codex", "gpt-5.6")
         .unwrap()
         .expect("standard default pricing row");

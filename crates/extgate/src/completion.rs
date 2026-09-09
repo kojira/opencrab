@@ -129,72 +129,11 @@ impl<R: AgentRuntime> SubtaskCompletionSink for ExtgateCompletionSink<R> {
     }
 }
 
-/// gateway再接続時に、前processが永続化済みだが未消費のcompletionを再開する。
-pub(crate) fn resume_pending_after_bind<R: AgentRuntime>(
-    state: Arc<ExtgateState>,
-    runtime: R,
-    instance_id: &str,
-    binding_id: &str,
-) {
-    let ctx = {
-        let Ok(conn) = state.db.lock() else { return };
-        let Some(ctx) = crate::inbound::resolve_binding_context(&conn, binding_id) else {
-            return;
-        };
-        ctx
-    };
-    if ctx.instance_id != instance_id {
-        return;
-    }
-    let mut sessions = vec![format!("{EXTGATE_SESSION_PREFIX}{binding_id}")];
-    if ctx.kind_id == "nostr" {
-        sessions.push(format!("nostr-{}", ctx.agent_id));
-    }
-    for session_id in sessions {
-        let first_execution = {
-            let Ok(conn) = state.db.lock() else { continue };
-            opencrab_db::queries::list_unconsumed_tool_completion_events(&conn, &session_id)
-                .ok()
-                .and_then(|events| events.first().map(|event| event.execution_id.clone()))
-                .or_else(|| {
-                    opencrab_db::queries::load_pending_tool_completion_effect(&conn, &session_id)
-                        .ok()
-                        .flatten()
-                        .map(|(request_id, _, _)| request_id)
-                })
-        };
-        let Some(execution_id) = first_execution else {
-            continue;
-        };
-        let sink = ExtgateCompletionSink {
-            state: Arc::clone(&state),
-            runtime: runtime.clone(),
-            instance_id: instance_id.to_string(),
-            binding_id: binding_id.to_string(),
-            agent_id: ctx.agent_id.clone(),
-            session_id,
-            kind_id: ctx.kind_id.clone(),
-            author_id: ctx.owner_id.clone(),
-            delivery_mode: ctx.delivery_mode,
-            prompt_suffix: String::new(),
-        };
-        tokio::spawn(async move {
-            run_v3_said_less_turn(sink, CallerIdentity::Agent, None, Some(&execution_id)).await;
-        });
-    }
-}
-
 async fn resume_v3_turn<R: AgentRuntime>(sink: ExtgateCompletionSink<R>, ev: SubtaskSettled) {
     // resume は発端 said の無い自己ターン。heartbeat（#925）と完全に同型なので共有ヘルパへ
     // 委譲する（単一実装）。resume は発端 origin への返信先（`ev.reply_target`）を持ち回るが、
     // heartbeat 側は origin が無いので `None`（standalone post）を渡す。
-    run_v3_said_less_turn(
-        sink,
-        ev.caller.clone(),
-        ev.reply_target.clone(),
-        Some(ev.subtask_id.as_str()),
-    )
-    .await;
+    run_v3_said_less_turn(sink, ev.caller.clone(), ev.reply_target.clone()).await;
 }
 
 /// 発端 said の無い自己ターン（resume 継続 / #925 heartbeat）を 1 本駆動する共有実装。
@@ -208,32 +147,11 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
     sink: ExtgateCompletionSink<R>,
     caller: CallerIdentity,
     reply_target: Option<String>,
-    completion_execution_id: Option<&str>,
 ) {
     let locks = sink.runtime.session_locks();
     let session_id = sink.session_id.clone();
-    let completion_execution_id = completion_execution_id.map(str::to_string);
     locks
         .run_serialized(&session_id, async move {
-            if let Some(execution_id) = completion_execution_id.as_deref() {
-                let already_consumed = sink
-                    .state
-                    .db
-                    .lock()
-                    .ok()
-                    .and_then(|conn| {
-                        opencrab_db::queries::is_tool_completion_consumed(&conn, execution_id).ok()
-                    })
-                    .unwrap_or(false);
-                if already_consumed {
-                    tracing::info!(
-                        session_id = %sink.session_id,
-                        subtask_id = %execution_id,
-                        "skip resume: completion was consumed by the running causal turn"
-                    );
-                    return;
-                }
-            }
             let activity_id = uuid::Uuid::new_v4().to_string();
             emit_activity(
                 &sink.state,

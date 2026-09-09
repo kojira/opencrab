@@ -66,100 +66,82 @@ pub(super) fn set_llm_log_callback(
     log_session_id: String,
     log_trigger_message_id: Option<String>,
 ) {
-    engine.set_durable_exchange_log_callback(
-        move |exchange: &opencrab_core::LlmExchangeLog, completion_ids, request_id| {
-            let log = &exchange.call;
-            let (prompt_tokens, completion_tokens, total_tokens) = log
+    engine.set_exchange_log_callback(move |exchange: &opencrab_core::LlmExchangeLog| {
+        let log = &exchange.call;
+        let (prompt_tokens, completion_tokens, total_tokens) = log
+            .response
+            .as_ref()
+            .map(|r| &r.usage)
+            .map(|u| {
+                (
+                    Some(u.prompt_tokens as i64),
+                    Some(u.completion_tokens as i64),
+                    Some(u.total_tokens as i64),
+                )
+            })
+            .unwrap_or((None, None, None));
+
+        let cache_read_tokens = log
+            .response
+            .as_ref()
+            .map(|r| &r.usage)
+            .map(|u| u.cache_read_input_tokens as i64);
+        let cache_creation_tokens = log
+            .response
+            .as_ref()
+            .map(|r| &r.usage)
+            .map(|u| u.cache_creation_input_tokens as i64);
+
+        let response_str = log
+            .response
+            .as_ref()
+            .map(|r| serde_json::to_string(r).unwrap_or_default())
+            .unwrap_or_default();
+
+        // #706: リクエスト全体のシリアライズは prompt 列用に元々ここで走る。空応答など
+        // 失敗行の原因（プロンプト長）の当たり付けに、この**同じ**文字列のサイズを使い回す
+        // （追加のシリアライズも、成功行での再走査もしない。error_body_with_prompt_size 参照）。
+        let prompt_json = serde_json::to_string(&log.request).unwrap_or_default();
+
+        let log_row = opencrab_db::queries::LlmLogRow {
+            id: uuid::Uuid::new_v4().to_string(),
+            agent_id: log_agent_id.clone(),
+            session_id: Some(log_session_id.clone()),
+            model: Some(log.request.model.clone()),
+            prompt: prompt_json.clone(),
+            response: response_str,
+            tool_calls: log
                 .response
                 .as_ref()
-                .map(|r| &r.usage)
-                .map(|u| {
-                    (
-                        Some(u.prompt_tokens as i64),
-                        Some(u.completion_tokens as i64),
-                        Some(u.total_tokens as i64),
-                    )
-                })
-                .unwrap_or((None, None, None));
-
-            let cache_read_tokens = log
-                .response
-                .as_ref()
-                .map(|r| &r.usage)
-                .map(|u| u.cache_read_input_tokens as i64);
-            let cache_creation_tokens = log
-                .response
-                .as_ref()
-                .map(|r| &r.usage)
-                .map(|u| u.cache_creation_input_tokens as i64);
-
-            let response_str = log
-                .response
-                .as_ref()
-                .map(|r| serde_json::to_string(r).unwrap_or_default())
-                .unwrap_or_default();
-
-            // #706: リクエスト全体のシリアライズは prompt 列用に元々ここで走る。空応答など
-            // 失敗行の原因（プロンプト長）の当たり付けに、この**同じ**文字列のサイズを使い回す
-            // （追加のシリアライズも、成功行での再走査もしない。error_body_with_prompt_size 参照）。
-            let prompt_json = serde_json::to_string(&log.request).unwrap_or_default();
-
-            let log_row = opencrab_db::queries::LlmLogRow {
-                id: uuid::Uuid::new_v4().to_string(),
-                agent_id: log_agent_id.clone(),
-                session_id: Some(log_session_id.clone()),
-                model: Some(log.request.model.clone()),
-                prompt: prompt_json.clone(),
-                response: response_str.clone(),
-                tool_calls: log
-                    .response
-                    .as_ref()
-                    .and_then(|r| r.first_message())
-                    .and_then(|m| m.tool_calls.as_ref())
-                    .filter(|tc| !tc.is_empty())
-                    .and_then(|tc| serde_json::to_string(tc).ok()),
-                latency_ms: Some(log.latency_ms),
-                prompt_tokens,
-                completion_tokens,
-                total_tokens,
-                // #706 / #676 / #539: error_code の判定は engine 側で一元化済み
-                // （transport error / context 超過 / 空応答 / 出力上限切り捨て）。ここは
-                // その値を写すだけ——文字列一致を process 側で再実装しない（判断は core、
-                // ゲート/writer は配送）。
-                error_code: log.error_code.clone(),
-                error_body: error_body_with_prompt_size(log.error_str.as_deref(), &prompt_json),
-                requested_at: Some(log.requested_at.clone()),
-                trigger_message_id: log_trigger_message_id.clone(),
-                is_bot_iteration: log.is_bot_iteration,
-                cache_read_tokens,
-                cache_creation_tokens,
-                provider_tool_history: serde_json::to_string(&exchange.provider_tool_history)
-                    .unwrap_or_else(|_| "{}".to_string()),
-                created_at: chrono::Utc::now().to_rfc3339(),
-            };
-            let conn = log_db
-                .lock()
-                .map_err(|error| anyhow::anyhow!("llm log DB lock failed: {error}"))?;
-            let tx = conn.unchecked_transaction()?;
-            opencrab_db::queries::insert_llm_log(&tx, &log_row)?;
-            if log.error_code.is_none() {
-                if let Some(request_id) = request_id {
-                    opencrab_db::queries::record_tool_completion_response_in_transaction(
-                        &tx,
-                        request_id,
-                        &response_str,
-                    )?;
-                    opencrab_db::queries::mark_tool_completion_events_consumed_in_transaction(
-                        &tx,
-                        completion_ids,
-                        request_id,
-                    )?;
-                }
+                .and_then(|r| r.first_message())
+                .and_then(|m| m.tool_calls.as_ref())
+                .filter(|tc| !tc.is_empty())
+                .and_then(|tc| serde_json::to_string(tc).ok()),
+            latency_ms: Some(log.latency_ms),
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            // #706 / #676 / #539: error_code の判定は engine 側で一元化済み
+            // （transport error / context 超過 / 空応答 / 出力上限切り捨て）。ここは
+            // その値を写すだけ——文字列一致を process 側で再実装しない（判断は core、
+            // ゲート/writer は配送）。
+            error_code: log.error_code.clone(),
+            error_body: error_body_with_prompt_size(log.error_str.as_deref(), &prompt_json),
+            requested_at: Some(log.requested_at.clone()),
+            trigger_message_id: log_trigger_message_id.clone(),
+            is_bot_iteration: log.is_bot_iteration,
+            cache_read_tokens,
+            cache_creation_tokens,
+            provider_tool_history: serde_json::to_string(&exchange.provider_tool_history)
+                .unwrap_or_else(|_| "{}".to_string()),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        if let Ok(conn) = log_db.lock() {
+            if let Err(e) = opencrab_db::queries::insert_llm_log(&conn, &log_row) {
+                tracing::error!("Failed to insert llm_log: {e}");
             }
-            tx.commit()?;
-            Ok(())
-        },
-    );
+        }
+    });
 }
 
 /// サブタスク走行の実況（#175 S4）の配線。ツール呼び出しと結果を進捗として通知口へ流す。
@@ -309,28 +291,12 @@ pub(super) fn set_turn_log_callbacks(
                             })
                         })
                         .unwrap_or_default();
-                let conversation_tool_ids =
-                    serde_json::from_str::<serde_json::Value>(&tool_calls_json)
-                        .ok()
-                        .and_then(|value| value.as_array().cloned())
-                        .map(|items| {
-                            items
-                                .iter()
-                                .filter_map(|item| item.get("id").and_then(|id| id.as_str()))
-                                .map(|id| (id.to_string(), serde_json::Value::String(id.to_string())))
-                                .collect::<serde_json::Map<_, _>>()
-                        })
-                        .unwrap_or_default();
                 let metadata = if preserve_ids.is_empty() {
-                    serde_json::json!({
-                        "tool_calls_json": tool_calls_json,
-                        "conversation_tool_ids": conversation_tool_ids,
-                    })
+                    serde_json::json!({ "tool_calls_json": tool_calls_json })
                 } else {
                     serde_json::json!({
                         "tool_calls_json": tool_calls_json,
                         "preserve_arg_call_ids": preserve_ids,
-                        "conversation_tool_ids": conversation_tool_ids,
                     })
                 };
                 let log = opencrab_db::queries::SessionLogRow {
@@ -373,12 +339,6 @@ pub(super) fn set_turn_log_callbacks(
                 );
 
                 if let Ok(conn) = tr_db.lock() {
-                    let lifecycle_status = serde_json::from_str::<serde_json::Value>(&content)
-                        .ok()
-                        .and_then(|value| value.get("status").and_then(|status| status.as_str()).map(str::to_string))
-                        .filter(|status| status == "spawned" || status == "accepted" || status == "queued")
-                        .map(|_| "running")
-                        .unwrap_or("completed");
                     let log = opencrab_db::queries::SessionLogRow {
                         id: None,
                         agent_id: tr_agent.clone(),
@@ -390,11 +350,8 @@ pub(super) fn set_turn_log_callbacks(
                         metadata_json: Some(
                             serde_json::json!({
                                 "tool_call_id": tool_call_id,
-                                "conversation_tool_id": tool_call_id,
                                 "tool_name": tool_name,
                                 "is_error": is_error,
-                                "lifecycle_status": lifecycle_status,
-                                "result_omitted": false,
                             })
                             .to_string(),
                         ),

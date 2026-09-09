@@ -9,9 +9,7 @@ fn test_model_pricing_upsert_and_get() {
         input_price_per_1m: 30.0,
         output_price_per_1m: 60.0,
         context_window: Some(128000),
-        max_input_tokens: Some(128000),
         max_output_tokens: Some(8192),
-        max_total_tokens: None,
     };
 
     upsert_model_pricing(&conn, &pricing).unwrap();

@@ -1,4 +1,4 @@
-use super::sink::{dispatch_settled, SubtaskCompletionSink, SubtaskSettled};
+use super::sink::{SubtaskCompletionSink, SubtaskSettled};
 use super::{CallerIdentity, SettleKind, SpawnedSubtask, SubtaskRegistry};
 
 /// 走行中 subtask に対する管理操作（cancel / steer）の共有認可述語（#331 / #647）。
@@ -129,109 +129,75 @@ pub fn cancel_subtask(
             if !parent.is_empty() {
                 let completed = subtask.lifecycle.completed_calls();
                 if let Ok(conn) = db.lock() {
-                    let persisted = (|| -> anyhow::Result<()> {
-                        let tx = conn.unchecked_transaction()?;
-                        let tool_call_ids = opencrab_db::queries::list_tool_call_ids_for_subtask(
-                            &tx, &parent, subtask_id,
-                        )?;
-                        let conversation_tool_id = tool_call_ids
-                            .first()
-                            .cloned()
-                            .unwrap_or_else(|| "legacy_unknown".to_string());
-                        // 停止対象の説明は sub-session の theme を第一候補にする（旧 Discord
-                        // 実装から移設 / #176）。明示的な `spawn_subtask` はここに人間可読な
-                        // テーマを持つが、自動 dispatch は sub-session の行を作らないため
-                        // theme を引けない。引けない/空のときは registry の label
-                        // （例: `execute_shell(...)`）へフォールバックする。
-                        let task_description =
-                            opencrab_db::queries::get_session(&tx, &subtask.session_id)
-                                .ok()
-                                .flatten()
-                                .map(|session| {
-                                    session
-                                        .theme
-                                        .strip_prefix("Subtask: ")
-                                        .unwrap_or(&session.theme)
-                                        .to_string()
-                                })
-                                .filter(|desc| !desc.is_empty())
-                                .unwrap_or_else(|| subtask.label.clone());
-                        let content = if completed.is_empty() {
-                            format!("subtask '{task_description}' was cancelled")
-                        } else {
-                            let partial = serde_json::to_string(&completed)
-                                .unwrap_or_else(|_| "[]".to_string());
-                            format!(
+                    // 停止対象の説明は sub-session の theme を第一候補にする（旧 Discord
+                    // 実装から移設 / #176）。明示的な `spawn_subtask` はここに人間可読な
+                    // テーマを持つが、自動 dispatch は sub-session の行を作らないため
+                    // theme を引けない。引けない/空のときは registry の label
+                    // （例: `execute_shell(...)`）へフォールバックする。
+                    let task_description =
+                        opencrab_db::queries::get_session(&conn, &subtask.session_id)
+                            .ok()
+                            .flatten()
+                            .map(|session| {
+                                session
+                                    .theme
+                                    .strip_prefix("Subtask: ")
+                                    .unwrap_or(&session.theme)
+                                    .to_string()
+                            })
+                            .filter(|desc| !desc.is_empty())
+                            .unwrap_or_else(|| subtask.label.clone());
+                    let content = if completed.is_empty() {
+                        format!("subtask '{task_description}' was cancelled")
+                    } else {
+                        let partial =
+                            serde_json::to_string(&completed).unwrap_or_else(|_| "[]".to_string());
+                        format!(
                             "subtask '{}' was cancelled after {} completed tool call(s): {partial}",
                             task_description,
                             completed.len()
                         )
-                        };
-                        let log = opencrab_db::queries::SessionLogRow {
-                            id: None,
-                            agent_id: subtask.agent_id.clone(),
-                            session_id: parent.clone(),
-                            log_type: "tool_cancelled".to_string(),
-                            content,
-                            speaker_id: None,
-                            turn_number: None,
-                            metadata_json: Some(
-                                // `task` は旧 Discord 実装のキー、`label` / `completed_calls`
-                                // は neutral 実装のキー。統合後は**両方**載せる（どちらの
-                                // 読み手も壊さない）。`tool_name` は固定値ではなく
-                                // **実際に停止したツール名**（#184）。
-                                serde_json::json!({
-                                    "tool_call_id": conversation_tool_id.clone(),
-                                    "conversation_tool_ids": tool_call_ids.clone(),
-                                    "lifecycle_status": "cancelled",
-                                    "tool_name": subtask.tool_name,
-                                    "task": task_description,
-                                    "label": subtask.label,
-                                    "completed_calls": completed,
-                                })
-                                .to_string(),
-                            ),
-                            created_at: None,
-                        };
-                        let completed_at = chrono::Utc::now().to_rfc3339();
-                        let result_log_id =
-                            opencrab_db::queries::insert_session_log_at(&tx, &log, &completed_at)?;
-                        let event_tool_ids = if tool_call_ids.is_empty() {
-                            vec![conversation_tool_id]
-                        } else {
-                            tool_call_ids
-                        };
-                        for tool_call_id in &event_tool_ids {
-                            opencrab_db::queries::enqueue_tool_completion_event(
-                                &tx,
-                                &opencrab_db::queries::NewToolCompletionEvent {
-                                    event_id: &uuid::Uuid::new_v4().to_string(),
-                                    session_id: &parent,
-                                    causal_turn_id: &format!("{parent}:{subtask_id}"),
-                                    tool_call_id,
-                                    execution_id: subtask_id,
-                                    result_log_id,
-                                    completed_at: &completed_at,
-                                },
-                            )?;
-                        }
-                        opencrab_db::queries::set_session_status(
-                            &tx,
-                            &subtask.session_id,
-                            "cancelled",
-                        )?;
-                        tx.commit()?;
-                        Ok(())
-                    })();
-                    if let Err(error) = persisted {
-                        tracing::error!(subtask_id, "failed to persist cancellation: {error}");
-                    }
+                    };
+                    let log = opencrab_db::queries::SessionLogRow {
+                        id: None,
+                        agent_id: subtask.agent_id.clone(),
+                        session_id: parent.clone(),
+                        log_type: "tool_cancelled".to_string(),
+                        content,
+                        speaker_id: None,
+                        turn_number: None,
+                        metadata_json: Some(
+                            // `task` は旧 Discord 実装のキー、`label` / `completed_calls`
+                            // は neutral 実装のキー。統合後は**両方**載せる（どちらの
+                            // 読み手も壊さない）。`tool_name` は固定値ではなく
+                            // **実際に停止したツール名**（#184）。
+                            serde_json::json!({
+                                "tool_call_id": subtask_id,
+                                "tool_name": subtask.tool_name,
+                                "task": task_description,
+                                "label": subtask.label,
+                                "completed_calls": completed,
+                            })
+                            .to_string(),
+                        ),
+                        created_at: None,
+                    };
+                    opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
+                    // #553: subtask セッションの死活を永続化する（cancelled）。settle_completed
+                    // の終端化と対をなす。sub-session 行が無ければ 0 行更新で無害。
+                    let _ = opencrab_db::queries::set_session_status(
+                        &conn,
+                        &subtask.session_id,
+                        "cancelled",
+                    );
                 }
             }
 
-            // まず状態整合を通知し、その後terminal completionとして一度resumeする。
+            // 停止を sink へ通知する（完了経路とは別メソッド = resume しない）。
+            // これで「最後の subtask が cancel されたのに誰もセッションを完了に
+            // しない」（REST が永久 active）が起きない。
             if let Some(sink) = sink {
-                let settled = SubtaskSettled {
+                sink.on_subtask_cancelled(SubtaskSettled {
                     session_id: parent,
                     agent_id: subtask.agent_id.clone(),
                     subtask_id: subtask_id.to_string(),
@@ -239,9 +205,7 @@ pub fn cancel_subtask(
                     kind: SettleKind::Cancelled,
                     reply_target: subtask.reply_target.clone(),
                     caller: subtask.caller.clone(),
-                };
-                sink.on_subtask_cancelled(settled.clone());
-                dispatch_settled(sink, settled);
+                });
             }
             CancelOutcome::Cancelled
         }

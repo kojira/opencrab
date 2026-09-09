@@ -111,16 +111,7 @@ pub fn format_single_log_with_echo(
                                         } else {
                                             args
                                         };
-                                        // #975: 新規rowはsession内の短い相関IDだけをモデルへ見せる。
-                                        // provider call IDはmetadata内の対応表に留める。
-                                        if let Some(short_id) = meta
-                                            .get("conversation_tool_ids")
-                                            .and_then(|value| value.get(id))
-                                            .and_then(|value| value.as_str())
-                                        {
-                                            return Some(format!("[{short_id}>] {name}({args})"));
-                                        }
-                                        // 旧rowは従来のc番号またはid表示を維持する。
+                                        // §9A: call_id を c 番号へ短縮（call_ 生 ID を排除）。
                                         let call_ref = refs
                                             .and_then(|r| r.call_of(id))
                                             .map(|n| format!("c{n}"))
@@ -156,53 +147,6 @@ pub fn format_single_log_with_echo(
                 .as_ref()
                 .and_then(|value| value.get("tool_name").and_then(|v| v.as_str()))
                 .unwrap_or("unknown");
-            // #975: 明示的なlifecycle metadataを持つ新規rowは短い同一IDで状態を表す。
-            // spawned/内部UUIDを本文として再掲せず、完了と開始を混同しない。
-            if let Some(short_id) = meta
-                .as_ref()
-                .and_then(|value| value.get("conversation_tool_id"))
-                .and_then(|value| value.as_str())
-            {
-                let lifecycle = meta
-                    .as_ref()
-                    .and_then(|value| value.get("lifecycle_status"))
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("unknown");
-                if lifecycle == "running" {
-                    return format!("[<{short_id}] status:running tool:{tool_name}");
-                }
-                if lifecycle == "completed" {
-                    let omitted = meta
-                        .as_ref()
-                        .and_then(|value| value.get("result_omitted"))
-                        .and_then(|value| value.as_bool())
-                        .unwrap_or(false);
-                    if omitted {
-                        let path = meta
-                            .as_ref()
-                            .and_then(|value| value.get("result_path"))
-                            .and_then(|value| value.as_str())
-                            .unwrap_or("unknown");
-                        let bytes = meta
-                            .as_ref()
-                            .and_then(|value| value.get("result_bytes"))
-                            .and_then(|value| value.as_u64())
-                            .unwrap_or(0);
-                        let lines = meta
-                            .as_ref()
-                            .and_then(|value| value.get("result_lines"))
-                            .and_then(|value| value.as_u64())
-                            .unwrap_or(0);
-                        return format!(
-                            "[<{short_id}] status:completed tool:{tool_name} result_omitted:true path:{path} bytes:{bytes} lines:{lines}"
-                        );
-                    }
-                    return format!(
-                        "[<{short_id}] status:completed tool:{tool_name}\n{}",
-                        log.content
-                    );
-                }
-            }
             // #707: **読みの本文は次のターンへ持ち越さない**。
             //
             // 以前はツール結果の JSON を丸ごと会話へ再生していた。実測（直近 100 件）では
@@ -245,118 +189,24 @@ pub fn format_single_log_with_echo(
                 .metadata_json
                 .as_deref()
                 .and_then(|meta_json| serde_json::from_str::<serde_json::Value>(meta_json).ok());
-            let mut lifecycle_ids: Vec<&str> = meta
-                .as_ref()
-                .and_then(|value| value.get("conversation_tool_ids"))
-                .and_then(|value| value.as_array())
-                .into_iter()
-                .flatten()
-                .filter_map(|value| value.as_str())
-                .collect();
             let tool_call_id = meta
                 .as_ref()
                 .and_then(|value| value.get("tool_call_id").and_then(|v| v.as_str()))
-                .unwrap_or("legacy_unknown");
-            if lifecycle_ids.is_empty() && tool_call_id.starts_with('t') {
-                lifecycle_ids.push(tool_call_id);
-            }
+                .unwrap_or("?");
             let tool_name = meta
                 .as_ref()
                 .and_then(|value| value.get("tool_name").and_then(|v| v.as_str()))
                 .unwrap_or("unknown");
-            if !lifecycle_ids.is_empty() {
-                let statuses = lifecycle_ids
-                    .iter()
-                    .map(|id| format!("[<{id}] status:cancelled"))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                return format!("{statuses}\n{}", log.content);
-            }
             let call_ref = refs
                 .and_then(|r| r.call_of(tool_call_id))
                 .map(|n| format!("c{n}"))
-                .unwrap_or_else(|| "legacy_unknown".to_string());
+                .unwrap_or_else(|| format!("id={tool_call_id}"));
             format!(
                 "[tool_cancelled]{}:\n[{}]: {} がキャンセルされた\n{}",
                 ts, call_ref, tool_name, log.content
             )
         }
         "system" => {
-            let lifecycle_meta = log
-                .metadata_json
-                .as_deref()
-                .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok());
-            if let Some(status) = lifecycle_meta
-                .as_ref()
-                .and_then(|value| value.get("lifecycle_status"))
-                .and_then(|value| value.as_str())
-            {
-                let mut short_ids: Vec<&str> = lifecycle_meta
-                    .as_ref()
-                    .and_then(|value| value.get("conversation_tool_ids"))
-                    .and_then(|value| value.as_array())
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|value| value.as_str())
-                    .collect();
-                if short_ids.is_empty() {
-                    if let Some(short_id) = lifecycle_meta
-                        .as_ref()
-                        .and_then(|value| value.get("conversation_tool_id"))
-                        .and_then(|value| value.as_str())
-                    {
-                        short_ids.push(short_id);
-                    }
-                }
-                if !short_ids.is_empty() {
-                    if lifecycle_meta
-                        .as_ref()
-                        .and_then(|value| value.get("result_omitted"))
-                        .and_then(|value| value.as_bool())
-                        == Some(true)
-                    {
-                        let path = lifecycle_meta
-                            .as_ref()
-                            .and_then(|value| value.get("result_path"))
-                            .and_then(|value| value.as_str())
-                            .unwrap_or("unknown");
-                        let bytes = lifecycle_meta
-                            .as_ref()
-                            .and_then(|value| value.get("result_bytes"))
-                            .and_then(|value| value.as_u64())
-                            .unwrap_or(0);
-                        let lines = lifecycle_meta
-                            .as_ref()
-                            .and_then(|value| value.get("result_lines"))
-                            .and_then(|value| value.as_u64())
-                            .unwrap_or(0);
-                        return short_ids
-                            .iter()
-                            .map(|id| format!("[<{id}] status:{status} result_omitted:true path:{path} bytes:{bytes} lines:{lines}"))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                    }
-                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&log.content) {
-                        let exit_reason = value
-                            .get("exit_reason")
-                            .and_then(|value| value.as_str())
-                            .unwrap_or("");
-                        let result = value
-                            .get("result")
-                            .and_then(|value| value.as_str())
-                            .unwrap_or("");
-                        let statuses = short_ids
-                            .iter()
-                            .map(|id| format!("[<{id}] status:{status}"))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        return format!(
-                            "{statuses}\n{}",
-                            fold_subtask_completed(exit_reason, result)
-                        );
-                    }
-                }
-            }
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&log.content) {
                 if let Some(kind) = value.get("type").and_then(|v| v.as_str()) {
                     // #713: `subtask_completed` **だけ**、入れ子 `result`（ツール実行の本文）を

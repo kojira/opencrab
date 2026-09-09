@@ -14,8 +14,6 @@ pub enum ContextBudgetError {
     #[error("{0}")]
     MissingContextWindow(String),
     #[error("{0}")]
-    MissingMaxInputTokens(String),
-    #[error("{0}")]
     MissingMaxOutputTokens(String),
     #[error("failed to look up model_pricing for \"{spec}\": {cause}")]
     LookupFailed { spec: String, cause: String },
@@ -49,7 +47,6 @@ impl ContextBudgetError {
     pub fn name(&self) -> &'static str {
         match self {
             Self::MissingContextWindow(_) => "model_context_window_missing",
-            Self::MissingMaxInputTokens(_) => "model_max_input_tokens_missing",
             Self::MissingMaxOutputTokens(_) => "model_max_output_tokens_missing",
             Self::LookupFailed { .. } => "model_pricing_lookup_failed",
             Self::NonPositiveWater { .. } => "non_positive_water_inputs",

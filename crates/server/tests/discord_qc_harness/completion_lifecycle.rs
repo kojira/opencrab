@@ -9,9 +9,7 @@
 const ML_PREFIX: &str = "mlsay-iteration-";
 
 struct AlwaysContinueMock {
-    marker: String,
-    all_calls: std::sync::atomic::AtomicUsize,
-    loop_calls: std::sync::atomic::AtomicUsize,
+    calls: std::sync::atomic::AtomicUsize,
 }
 
 #[async_trait::async_trait]
@@ -25,16 +23,9 @@ impl LlmProvider for AlwaysContinueMock {
     async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
         Ok(vec![])
     }
-    async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
-        self.all_calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        if !request_text(&request).contains(&self.marker) {
-            return Ok(text_response("NO_REPLY"));
-        }
-        let n = self
-            .loop_calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        // 対象発言にだけ「本文＋末尾 CONTINUE」を返す。共有QC fixtureの過去発言では回さない。
+    async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // 常に「本文＋末尾 CONTINUE」で継続 → 上限まで回る。各本文は一意（buffer 順で最後を特定）。
         Ok(text_response(&format!("{ML_PREFIX}{n:03}\nCONTINUE")))
     }
 }
@@ -43,49 +34,25 @@ impl LlmProvider for AlwaysContinueMock {
 async fn scenario_915_max_iterations_flag_only_on_last_delivered_say() {
     use std::sync::atomic::Ordering;
     let buf = install_capture();
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let marker = format!("MLMARK-{nonce}");
     let mock = Arc::new(AlwaysContinueMock {
-        marker: marker.clone(),
-        all_calls: std::sync::atomic::AtomicUsize::new(0),
-        loop_calls: std::sync::atomic::AtomicUsize::new(0),
+        calls: std::sync::atomic::AtomicUsize::new(0),
     });
     let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
 
     let fixture = Fixture::new();
     let _client = wire_instance(&core, &fixture).await;
 
-    // 共有fixtureに残る過去イベントのNO_REPLY処理が静止してから対象を投入する。
-    // 対象投入中の旧turnへfoldされ、同じ発言が独立turnにも回るテスト間汚染を避ける。
-    let mut previous = mock.all_calls.load(Ordering::SeqCst);
-    let mut stable_ticks = 0;
-    for _ in 0..25 {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let current = mock.all_calls.load(Ordering::SeqCst);
-        if current == previous {
-            stable_ticks += 1;
-            if stable_ticks >= 5 {
-                break;
-            }
-        } else {
-            previous = current;
-            stable_ticks = 0;
-        }
-    }
-    fixture.append_message(&nonce.to_string(), &format!("{marker} ずっと続けて（上限まで）"));
+    fixture.append_message("9190", "MLMARK ずっと続けて（上限まで）");
 
     // 上限打ち切りまで走る。LLM 呼び出しが 30 回に達する（depth0 上限）まで待つ。
     let looped = {
         let mock = mock.clone();
-        wait_until(move || mock.loop_calls.load(Ordering::SeqCst) >= 30).await
+        wait_until(move || mock.calls.load(Ordering::SeqCst) >= 30).await
     };
     assert!(
         looped,
         "上限まで回らない（LLM calls={}）",
-        mock.loop_calls.load(Ordering::SeqCst)
+        mock.calls.load(Ordering::SeqCst)
     );
     // 固定sleepではなく、最後の対象sayへの完了reactionをboundedに待つ。
     let settled = {
@@ -107,12 +74,7 @@ async fn scenario_915_max_iterations_flag_only_on_last_delivered_say() {
         })
         .await
     };
-    assert!(
-        settled,
-        "上限打ち切り後の完了reactionがtimeoutした: calls={}, events={:?}",
-        mock.loop_calls.load(Ordering::SeqCst),
-        captured(&buf)
-    );
+    assert!(settled, "上限打ち切り後の完了reactionがtimeoutした");
 
     // このターンの mlsay say を buffer 順（配送順）で集める。最後の 1 つが「最後に配送した投稿」。
     let ml_says: Vec<String> = captured(&buf)

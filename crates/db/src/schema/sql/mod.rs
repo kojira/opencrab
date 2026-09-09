@@ -3,9 +3,6 @@
 //! `schema.rs` から機械的に切り出した純粋な文字列定数で、文面は 1 文字も変えていない（#518）。
 //! 親モジュール（`schema`）の MIGRATIONS クロージャ / `migrate()` / `initialize` から参照される。
 
-mod tool_continuation;
-pub(super) use tool_continuation::TOOL_CONTINUATION_SQL;
-
 /// カテゴリ層メンバー表 — **v23 当時の形**（topic ↔ category の参照, issue #313）。
 ///
 /// PK は `(agent_id, topic_id)` = 1 topic 高々 1 category（sticky）。**これは v23 が

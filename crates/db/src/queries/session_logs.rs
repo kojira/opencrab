@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::Utc;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
 #[allow(unused_imports)]

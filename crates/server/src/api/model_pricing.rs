@@ -62,19 +62,12 @@ pub struct PutModelPricingBody {
     /// そのモデルの最大コンテキスト長（トークン）。
     /// **必須**。これが登録の目的なので、省略や 0 以下は受け付けない。
     pub context_window: i32,
-    /// #975: providerが明示する最大入力。旧clientとの互換のためPUTでは省略可だが、
-    /// 未登録のmodelを実際に使う時点ではfail-loudにする。
-    #[serde(default)]
-    pub max_input_tokens: Option<i32>,
     /// #676: そのモデルの出力トークン上限（実能力値）。**任意（nullable）**。
     /// max_tokens を送るプロバイダ（openai形式/anthropic 等）のモデルにだけ必要で、
     /// 送らないプロバイダ（chatgpt/codex/cursor/acp）には不要なため全モデル一律必須にしない
     /// （#676・案Y）。指定するなら 0 以下は受け付けない。
     #[serde(default)]
     pub max_output_tokens: Option<i32>,
-    /// 入出力が共有窓のモデルだけ指定する。独立上限ならNULL。
-    #[serde(default)]
-    pub max_total_tokens: Option<i32>,
 }
 
 pub async fn put_model_pricing(
@@ -93,24 +86,11 @@ pub async fn put_model_pricing(
             "context_window must be a positive number of tokens".to_string(),
         ));
     }
-    if matches!(body.max_input_tokens, Some(v) if v <= 0) {
-        return Err(bad(
-            StatusCode::BAD_REQUEST,
-            "max_input_tokens, if provided, must be a positive number of tokens".to_string(),
-        ));
-    }
     // #676: max_output_tokens は任意だが、指定するなら正の値のみ（NULL は「未登録」で許容）。
     if matches!(body.max_output_tokens, Some(v) if v <= 0) {
         return Err(bad(
             StatusCode::BAD_REQUEST,
             "max_output_tokens, if provided, must be a positive number of tokens".to_string(),
-        ));
-    }
-
-    if matches!(body.max_total_tokens, Some(v) if v <= 0) {
-        return Err(bad(
-            StatusCode::BAD_REQUEST,
-            "max_total_tokens, if provided, must be positive".to_string(),
         ));
     }
 
@@ -120,9 +100,7 @@ pub async fn put_model_pricing(
         input_price_per_1m: body.input_price_per_1m,
         output_price_per_1m: body.output_price_per_1m,
         context_window: Some(body.context_window),
-        max_input_tokens: body.max_input_tokens,
         max_output_tokens: body.max_output_tokens,
-        max_total_tokens: body.max_total_tokens,
     };
 
     let conn = state
@@ -137,9 +115,7 @@ pub async fn put_model_pricing(
         "provider": row.provider,
         "model": row.model,
         "context_window": body.context_window,
-        "max_input_tokens": body.max_input_tokens,
         "max_output_tokens": body.max_output_tokens,
-        "max_total_tokens": body.max_total_tokens,
     })))
 }
 

@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use opencrab_actions::AgentRuntime;
 use tokio::sync::oneshot;
 
 use super::activity::emit_turn_failed;
@@ -11,9 +10,8 @@ use crate::operation_calls::terminalize_call;
 use crate::protocol::WireResponse;
 use crate::registry::{ExtgateState, OperationOutcome, Pending};
 
-pub(crate) async fn handle_response<R: AgentRuntime>(
+pub(crate) async fn handle_response(
     state: &Arc<ExtgateState>,
-    runtime: &R,
     writer: &Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>,
     instance_id: &str,
     identity: u64,
@@ -61,15 +59,8 @@ pub(crate) async fn handle_response<R: AgentRuntime>(
                     Err(_) => return Err(()),
                 };
                 if let Some(live) = reg.get_mut(instance_id) {
-                    live.acknowledged.insert(binding_id.clone());
+                    live.acknowledged.insert(binding_id);
                 }
-                drop(reg);
-                crate::completion::resume_pending_after_bind(
-                    Arc::clone(state),
-                    runtime.clone(),
-                    instance_id,
-                    &binding_id,
-                );
                 Ok(())
             } else if resp.code == Some(ErrorCode::BindFailed) {
                 close_live(
