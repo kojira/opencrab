@@ -187,6 +187,14 @@ impl LlmRouter {
         }
     }
 
+    pub fn measure_request_tokens(&self, request: &ChatRequest) -> Option<usize> {
+        let (provider_name, model_name) = self.resolve_model(&request.model).ok()?;
+        let provider = self.providers.get(&provider_name)?;
+        let mut resolved = request.clone();
+        resolved.model = model_name;
+        provider.measure_request_tokens(&resolved)
+    }
+
     fn parse_provider_model(&self, s: &str) -> Result<(String, String)> {
         let parts: Vec<&str> = s.splitn(2, ':').collect();
         if parts.len() != 2 {

@@ -25,6 +25,7 @@ describe('ModelPricingForm', () => {
     await user.type(screen.getByPlaceholderText('例: chatgpt / gemini'), 'chatgpt');
     await user.type(screen.getByPlaceholderText('例: gpt-5.6-terra'), 'gpt-5.6-terra');
     await user.type(screen.getByPlaceholderText('例: 1050000'), '1050000');
+    await user.type(screen.getByPlaceholderText('例: 350000'), '350000');
     await user.type(screen.getByPlaceholderText('例: 2.0'), '2');
     await user.type(screen.getByPlaceholderText('例: 12.0'), '12');
     await user.click(screen.getByText('登録'));
@@ -40,7 +41,9 @@ describe('ModelPricingForm', () => {
       input_price_per_1m: 2,
       output_price_per_1m: 12,
       context_window: 1050000,
+      max_input_tokens: 350000,
       max_output_tokens: null,
+      max_total_tokens: null,
     });
     await waitFor(() => {
       expect(onSaved).toHaveBeenCalledWith(
@@ -52,12 +55,13 @@ describe('ModelPricingForm', () => {
   it('prefills initial values so editing does not require retyping', () => {
     render(
       <ModelPricingForm
-        initial={{ provider: 'chatgpt', model: 'gpt-5.6-sol', context_window: 1050000, input_price_per_1m: 5, output_price_per_1m: 30 }}
+        initial={{ provider: 'chatgpt', model: 'gpt-5.6-sol', context_window: 1050000, max_input_tokens: 350000, input_price_per_1m: 5, output_price_per_1m: 30 }}
         keysReadOnly
         onSaved={vi.fn()}
       />,
     );
     expect(screen.getByPlaceholderText('例: 1050000')).toHaveValue('1050000');
+    expect(screen.getByPlaceholderText('例: 350000')).toHaveValue('350000');
     expect(screen.getByDisplayValue('gpt-5.6-sol')).toBeInTheDocument();
   });
 

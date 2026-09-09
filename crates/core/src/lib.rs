@@ -49,8 +49,10 @@ pub use continue_marker::{
 };
 pub use engine::{
     ActionExecutor, ActionResult, ChatRequest, ChatResponse, DispatchCall, DispatchOutcome,
-    EngineResult, FoldedInbound, FunctionDefinition, LiveInboundSource, LlmCallLog, LlmClient,
-    LlmExchange, LlmExchangeLog, ProviderToolHistory, SkillEngine, ToolCall, ToolDispatcher,
+    EngineResult, FoldedInbound, FoldedToolCompletion, FunctionDefinition, LiveInboundSource,
+    LiveToolCompletionSource, LlmCallLog, LlmClient, LlmExchange, LlmExchangeLog,
+    ProviderToolHistory, RecoveredToolEffect, RequestTokenMeasurement, RequestTokenMeterCapability,
+    SkillEngine, ToolCall, ToolDispatcher,
 };
 pub use heartbeat::HeartbeatConfig;
 pub use identity::Identity;

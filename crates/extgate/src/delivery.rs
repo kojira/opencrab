@@ -74,11 +74,15 @@ pub async fn apply_delivery_effect(
             }
         }
         DeliveryEffect::NoReply => {
+            acknowledge_pending_completion_effect(state, session_id);
             // #899: 沈黙（NO_REPLY 終端）は speech を残さない。裸 NO_REPLY を永続すると
             // conversation_typed が `assistant: 'NO_REPLY'` としてモデルへ再注入する。
             // 配送層は既に visible_speech_after_markers で沈黙判定済み。ここは何もしない。
         }
         DeliveryEffect::Empty | DeliveryEffect::Failed { .. } => {
+            if matches!(effect, DeliveryEffect::Empty) {
+                acknowledge_pending_completion_effect(state, session_id);
+            }
             if let DeliveryEffect::Failed { error } = &effect {
                 tracing::error!(error = %error, "session turn failed");
                 // R3(❌): ターン失敗を発端 origin つきで gateway へ通知する（gateway が ❌ を付ける）。
@@ -91,6 +95,20 @@ pub async fn apply_delivery_effect(
         }
     }
     None
+}
+
+fn acknowledge_pending_completion_effect(state: &ExtgateState, session_id: &str) {
+    let Ok(conn) = state.db.lock() else { return };
+    let Ok(Some((request_id, _, _))) =
+        opencrab_db::queries::load_pending_tool_completion_effect(&conn, session_id)
+    else {
+        return;
+    };
+    if let Err(error) =
+        opencrab_db::queries::mark_tool_completion_effect_applied(&conn, &request_id)
+    {
+        tracing::error!(session_id, request_id, %error, "completion effect ACK failed");
+    }
 }
 
 /// #898 §12.2/§13.1: 末尾 CONTINUE で継続する途中イテレーションの発話を、最終応答と同じ
@@ -139,7 +157,19 @@ async fn send_text(
         live.writer.clone()
     };
 
-    let delivery_id = Uuid::new_v4().to_string();
+    let completion_request_id = {
+        let conn = state.db.lock().map_err(|_| GateError::store())?;
+        opencrab_db::queries::load_pending_tool_completion_effect(&conn, session_id)
+            .map_err(|_| GateError::store())?
+            .map(|(request_id, _, _)| request_id)
+    };
+    let delivery_id = completion_request_id
+        .as_ref()
+        .map(|request_id| {
+            let effect_id = Uuid::new_v5(&Uuid::NAMESPACE_OID, body.as_bytes());
+            format!("{request_id}:{effect_id}")
+        })
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
     let now = now_nanos();
     let payload = serde_json::json!({"text": body}).to_string();
     {
@@ -147,6 +177,15 @@ async fn send_text(
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| GateError::store())?;
+        let existing = tx.query_row(
+            "SELECT state FROM deliveries WHERE delivery_id = ?1",
+            [&delivery_id],
+            |row| row.get::<_, String>(0),
+        );
+        if existing.is_ok() {
+            tx.commit().map_err(|_| GateError::store())?;
+            return Ok(delivery_id);
+        }
         let open = tx.query_row(
             "SELECT instance_id, closed_at FROM gate_bindings WHERE binding_id = ?1",
             params![binding_id],
@@ -261,14 +300,34 @@ pub fn mark_indeterminate(state: &ExtgateState, delivery_ids: &[String]) -> Resu
 
 pub fn mark_delivered(state: &ExtgateState, delivery_id: &str) -> Result<(), GateError> {
     let conn = state.db.lock().map_err(|_| GateError::store())?;
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|_| GateError::store())?;
     let now = now_nanos();
-    conn.execute(
+    tx.execute(
         "UPDATE deliveries
          SET state = 'delivered', error = NULL, updated_at = ?2
          WHERE delivery_id = ?1 AND state = 'sending'",
         params![delivery_id, now],
     )
     .map_err(|_| GateError::store())?;
+    let completion_request_id = delivery_id.split(':').next().unwrap_or(delivery_id);
+    let effect_exists: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM tool_completion_requests
+                            WHERE request_id = ?1 AND effects_state = 'pending'
+                              AND COALESCE(json_array_length(json_extract(
+                                    response_json, '$.choices[0].message.tool_calls'
+                                  )), 0) = 0)",
+            [completion_request_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| GateError::store())?;
+    if effect_exists {
+        opencrab_db::queries::mark_tool_completion_effect_applied(&tx, completion_request_id)
+            .map_err(|_| GateError::store())?;
+    }
+    tx.commit().map_err(|_| GateError::store())?;
     Ok(())
 }
 

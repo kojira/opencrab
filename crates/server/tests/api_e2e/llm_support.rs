@@ -106,6 +106,10 @@ impl LlmProvider for MockLlmProvider {
         false
     }
 
+    fn measure_request_tokens(&self, request: &ChatRequest) -> Option<usize> {
+        serde_json::to_vec(request).ok().map(|wire| wire.len())
+    }
+
     async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
         Ok(vec![])
     }
@@ -142,7 +146,9 @@ fn register_mock_model_pricing(db: &opencrab_db::Db, provider: &str, model: &str
             input_price_per_1m: 0.0,
             output_price_per_1m: 0.0,
             context_window: Some(200_000),
+            max_input_tokens: Some(200_000),
             max_output_tokens: Some(4_096),
+            max_total_tokens: None,
         },
     )
     .expect("test model_pricing");

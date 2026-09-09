@@ -170,11 +170,10 @@
             second_messages.iter().any(|message| {
                 message.role == Role::Tool
                     && message.tool_call_id.as_deref() == Some("resolve-1")
-                    && message
-                        .text_content()
-                        .is_some_and(|text| text.contains("\"status\":\"spawned\""))
+                    && message.text_content()
+                        == Some("[<resolve-1] status:running tool:resolve")
             }),
-            "resolve は従来どおり spawned マーカーを次の LLM 呼び出しへ積む"
+            "resolve はrunningとして次の実LLM会話ログへ積む"
         );
     }
 

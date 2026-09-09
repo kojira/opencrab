@@ -12,3 +12,4 @@ mod heartbeat;
 mod holding_resume;
 mod no_reply;
 mod read_reactions;
+mod tool_completion_turn;

@@ -223,13 +223,15 @@ asynchronously: the result arrives later and you are called again with it in the
 history. Utterances (say / reply / reaction / repost) do not work this way — see "Continuing
 your turn".
 
-Some tools return `{status:"spawned", subtask_id: ...}` immediately instead of a final result.
-The work is then running in the background, and its result arrives later in a separate turn as a
-`[subtask_completed: ...]` entry. Calling the same tool again for the same request starts a
-second, independent run, and the actual result appears only at the completion turn.
+A tool call is shown as `[tN>]`, followed by `[<tN] status:running` while its background
+execution is still in progress. `running` is only an acknowledgement, never the final result. Do
+not call that tool again merely because it is running; end or wait for its terminal status.
 
-A `[subtask_completed: ...]` entry means a tool you called has finished and it is your turn
-again."#;
+`[<tN] status:completed`, `failed`, `timed_out`, or `cancelled` is the authoritative terminal
+result of the matching `[tN>]` call, and causes you to be called again. Continue the task from
+that result. Calling the same tool again for the same request starts a second, independent run.
+Do not repeat a completed call solely to satisfy the original request again; call it again only
+when a distinct next operation or an intentional retry is actually required."#;
     let got = extract_section(&prompt, "## Async Behavior");
     assert_eq!(
             normalize_ws(&got),

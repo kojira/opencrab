@@ -97,13 +97,9 @@ pub trait SubtaskCompletionSink: Send + Sync {
 
     /// `cancel_subtask` で subtask が停止したときの通知（`kind = Cancelled`）。
     ///
-    /// **完了経路とは別メソッド**にしてある。停止は「resume して返信する」イベント
-    /// ではなく、`on_subtask_settled` に流すと resume する sink（Discord / web /
-    /// Nostr）が「止めたのに返信する」ことになる。既定実装は debug ログのみで、
-    /// 停止で状態整合が必要な sink（REST の `sessions.status`）だけが override する。
-    ///
-    /// これにより「停止の到達性」が `cancel_subtask` の 1 箇所に閉じる（各経路が
-    /// cancel 後に個別に後始末する必要がない）。
+    /// completion resumeとは別の状態整合通知。REST等はここでsession状態を閉じる。
+    /// cancellation自体はterminal tool resultなので、この通知後に`dispatch_settled`から
+    /// 一度だけLLMへ戻す。既定実装はdebugログのみ。
     fn on_subtask_cancelled(&self, ev: SubtaskSettled) {
         tracing::debug!(
             session_id = %ev.session_id,
@@ -126,10 +122,9 @@ pub trait SubtaskCompletionSink: Send + Sync {
 /// [`SubtaskCompletionSink::forwards_progress`]（性質）だけを答える。
 ///
 /// 判断は 3 つだけ:
-/// 1. **kind**: `Completed` は常に継続する。`Progress` は `forwards_progress()` が `true` の
-///    transport にだけ配送する（Discord の進捗実況）。それ以外（`Cancelled` 等）は配送しない
-///    ——停止は [`SubtaskCompletionSink::on_subtask_cancelled`] の役目で、ここへ流すと
-///    「止めたのに返信する」ことになる。
+/// 1. **kind**: `Completed`とterminalな`Cancelled`は継続する。`Progress`は
+///    `forwards_progress()`がtrueのtransportにだけ配送する。cancel時のsession状態整合は
+///    [`SubtaskCompletionSink::on_subtask_cancelled`]が別に担う。
 /// 2. **親セッションが自分のものか**: `owns_parent_session()` で確かめる（既定は
 ///    `session_prefix()` の接頭辞一致・extgate だけ実 session と等値比較へ override）。
 ///    ネストした subtask や heartbeat の決着が同じ sink を通り得るため（正常系なので debug に留める）。
@@ -141,7 +136,7 @@ pub trait SubtaskCompletionSink: Send + Sync {
 /// 直接呼ばず**必ずここを通る**。これで判断が 1 箇所に閉じ、transport 側にコピーが生まれない。
 pub fn dispatch_settled(sink: &dyn SubtaskCompletionSink, ev: SubtaskSettled) {
     match ev.kind {
-        SettleKind::Completed => {}
+        SettleKind::Completed | SettleKind::Cancelled => {}
         SettleKind::Progress => {
             if !sink.forwards_progress() {
                 tracing::debug!(
@@ -150,14 +145,6 @@ pub fn dispatch_settled(sink: &dyn SubtaskCompletionSink, ev: SubtaskSettled) {
                 );
                 return;
             }
-        }
-        other => {
-            tracing::debug!(
-                session_id = %ev.session_id,
-                kind = ?other,
-                "subtask settled: not a continuation trigger, skipping"
-            );
-            return;
         }
     }
     if !sink.owns_parent_session(&ev.session_id) {
