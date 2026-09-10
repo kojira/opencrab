@@ -629,3 +629,77 @@
         );
     }
 
+    /// 明示終端が無い本文は途中発話であり、次の LLM iteration へ進む。
+    #[tokio::test]
+    async fn explicit_termination_plain_speech_without_no_reply_runs_next_call() {
+        use std::sync::atomic::Ordering;
+
+        let (llm, chat_calls) = MockLlm::counting(vec![
+            text_response("今から調べる"),
+            text_response("調査結果はX\nNO_REPLY"),
+        ]);
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(MockExecutor::new()), 10);
+        engine.set_tool_dispatcher(Arc::new(RecordingDispatcher::new(&[])));
+
+        let result = engine
+            .run("system", "調べて", "test-model")
+            .await
+            .expect("NO_REPLY まで継続する");
+
+        assert_eq!(chat_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(result.iterations, 2);
+        assert_eq!(result.response, "調査結果はX");
+    }
+
+    /// reply だけの generation も明示終端が無ければ完了にせず、次の LLM を呼ぶ。
+    #[tokio::test]
+    async fn explicit_termination_utterance_without_no_reply_runs_next_call() {
+        use std::sync::atomic::Ordering;
+        use std::sync::Mutex;
+
+        let (llm, chat_calls) = MockLlm::counting(vec![
+            tool_call_response(vec![tc(
+                "reply-1",
+                "reply",
+                serde_json::json!({"text": "確認するね"}),
+            )]),
+            text_response("確認結果はY\nNO_REPLY"),
+        ]);
+        let executor_calls = Arc::new(Mutex::new(Vec::new()));
+        let executor = MockExecutor::new()
+            .add_result("reply", successful_action_result())
+            .with_call_log(executor_calls.clone());
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+        engine.set_tool_dispatcher(Arc::new(RecordingDispatcher::new(&[])));
+
+        let result = engine
+            .run("system", "確認して", "test-model")
+            .await
+            .expect("reply 後も NO_REPLY まで継続する");
+
+        assert_eq!(chat_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(result.iterations, 2);
+        assert_eq!(executor_calls.lock().unwrap().as_slice(), &["reply"]);
+        assert_eq!(result.response, "確認結果はY");
+    }
+
+    /// 本文末尾の NO_REPLY は本文を残して明示終了し、制御文字自体は返さない。
+    #[tokio::test]
+    async fn explicit_termination_body_then_no_reply_ends_in_one_call() {
+        use std::sync::atomic::Ordering;
+
+        let (llm, chat_calls) =
+            MockLlm::counting(vec![text_response("これが最終回答\nNO_REPLY")]);
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(MockExecutor::new()), 10);
+        engine.set_tool_dispatcher(Arc::new(RecordingDispatcher::new(&[])));
+
+        let result = engine
+            .run("system", "答えて", "test-model")
+            .await
+            .expect("NO_REPLY で明示終了する");
+
+        assert_eq!(chat_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(result.iterations, 1);
+        assert_eq!(result.response, "これが最終回答");
+    }
+
