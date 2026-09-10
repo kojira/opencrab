@@ -132,6 +132,7 @@ const SP_REPORT: &str = "spreport-結果はこうだった（完了報告投稿�
 
 struct ShellSpawnResumeMock {
     emitted: std::sync::atomic::AtomicBool,
+    requests: Mutex<Vec<ChatRequest>>,
 }
 
 #[async_trait::async_trait]
@@ -146,6 +147,7 @@ impl LlmProvider for ShellSpawnResumeMock {
         Ok(vec![])
     }
     async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        self.requests.lock().unwrap().push(request.clone());
         // (2) dispatch 直後の継続（合成 "spawned" 結果＝tool role）→ 宣言 say（holding）でターンを閉じる。
         if has_tool_role(&request) {
             return Ok(text_response(SP_DECL));
@@ -167,6 +169,7 @@ async fn scenario_915_spawned_declaration_no_flag_resume_report_gets_flag() {
     let buf = install_capture();
     let mock = Arc::new(ShellSpawnResumeMock {
         emitted: std::sync::atomic::AtomicBool::new(false),
+        requests: Mutex::new(Vec::new()),
     });
     let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
     // echo を実走させるため shell を有効化（tools_config は Arc<RwLock> 共有で runtime に即反映）。
@@ -195,6 +198,21 @@ async fn scenario_915_spawned_declaration_no_flag_resume_report_gets_flag() {
         "宣言 say と resume 完了報告 say が揃わない（subtask/resume 未達）: {:?}",
         captured(&buf)
     );
+    let requests = mock.requests.lock().unwrap();
+    let requests_with_result = requests
+        .iter()
+        .filter(|request| {
+            let text = request_text(request);
+            text.contains("[s1 完了]")
+                && text.contains(&format!("終了コード 0・出力: {SP_ECHO}"))
+        })
+        .count();
+    assert_eq!(
+        requests_with_result, 1,
+        "保存されたbackground shell結果がresumeの実ChatRequestへ1回だけ入らない: {:#?}",
+        requests.iter().map(request_text).collect::<Vec<_>>()
+    );
+    drop(requests);
     // 決着後の 🏁 付与猶予。
     tokio::time::sleep(Duration::from_millis(600)).await;
 
