@@ -198,21 +198,22 @@ async fn scenario_915_spawned_declaration_no_flag_resume_report_gets_flag() {
         "宣言 say と resume 完了報告 say が揃わない（subtask/resume 未達）: {:?}",
         captured(&buf)
     );
-    let requests = mock.requests.lock().unwrap();
-    let requests_with_result = requests
-        .iter()
-        .filter(|request| {
-            let text = request_text(request);
-            text.contains("[s1 完了]")
-                && text.contains(&format!("終了コード 0・出力: {SP_ECHO}"))
-        })
-        .count();
-    assert_eq!(
-        requests_with_result, 1,
-        "保存されたbackground shell結果がresumeの実ChatRequestへ1回だけ入らない: {:#?}",
-        requests.iter().map(request_text).collect::<Vec<_>>()
-    );
-    drop(requests);
+    {
+        let requests = mock.requests.lock().unwrap();
+        let requests_with_result = requests
+            .iter()
+            .filter(|request| {
+                let text = request_text(request);
+                text.contains("[s1 完了]")
+                    && text.contains(&format!("終了コード 0・出力: {SP_ECHO}"))
+            })
+            .count();
+        assert_eq!(
+            requests_with_result, 1,
+            "保存されたbackground shell結果がresumeの実ChatRequestへ1回だけ入らない: {:#?}",
+            requests.iter().map(request_text).collect::<Vec<_>>()
+        );
+    }
     // 決着後の 🏁 付与猶予。
     tokio::time::sleep(Duration::from_millis(600)).await;
 
