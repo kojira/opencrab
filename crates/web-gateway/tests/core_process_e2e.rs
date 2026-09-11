@@ -427,16 +427,6 @@ fn send_said_turn_say_sse_over_real_processes() {
     .expect("create agent");
     assert_eq!(st, 200, "{body}");
 
-    {
-        let conn = Connection::open(&db).expect("open db for owner");
-        conn.execute(
-            "INSERT INTO agent_discord_config (agent_id, bot_token, owner_discord_id, enabled, updated_at)
-             VALUES (?1, 'x', ?2, 0, datetime('now'))",
-            [AGENT, AUTHOR],
-        )
-        .unwrap();
-    }
-
     let (st, body) = http(
         core_port,
         "PUT",

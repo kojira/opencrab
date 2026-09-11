@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 
 use super::client::{InstanceClient, LiveEvent, PostRefuse, SaidOutcome};
 use super::json::parse_object_no_dup;
-use super::wire::{parse_uuid, Attachment};
+use super::wire::{parse_uuid, Attachment, LiveInboundScope, SaidCaller, SaidContext};
 
 const JSON_TYPE: &str = "application/json; charset=utf-8";
 
@@ -177,8 +177,23 @@ async fn post_message(
             return json_error(StatusCode::CONFLICT, "binding_conflict", None);
         }
     };
+    // The web gateway binds only to loopback. An HTTP post accepted at this boundary is the
+    // operator-owned local web identity; shared layers receive only this generic role.
+    let context = SaidContext {
+        caller: SaidCaller::Owner,
+        start_turn: true,
+        system_context: None,
+        reply_target: None,
+        live_inbound_scope: LiveInboundScope::All,
+    };
     match client
-        .post_said(&session_id, &origin, &parsed.text, &parsed.attachments)
+        .post_said_with_self_context(
+            &session_id,
+            &origin,
+            &context,
+            &parsed.text,
+            &parsed.attachments,
+        )
         .await
     {
         Err(PostRefuse::NotReady) => {

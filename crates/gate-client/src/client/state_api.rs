@@ -383,6 +383,27 @@ impl InstanceClient {
     }
 
     /// Platform-neutral contextを伴うSaid。個別gatewayの判断結果はこの汎用形で渡す。
+    pub async fn post_said_with_self_context(
+        &self,
+        address: &str,
+        origin: &str,
+        context: &SaidContext,
+        text: &str,
+        attachments: &[Attachment],
+    ) -> Result<SaidOutcome, PostRefuse> {
+        self.post_said_with_context(
+            address,
+            origin,
+            &self.author_id,
+            None,
+            context,
+            text,
+            attachments,
+        )
+        .await
+    }
+
+    /// Platform-neutral context with an explicitly authenticated author.
     #[allow(clippy::too_many_arguments)]
     pub async fn post_said_with_context(
         &self,
