@@ -146,7 +146,11 @@ pub enum Attachment {
         id: String,
         name: String,
         media_type: Option<String>,
+        /// Legacy source-compatibility field; never serialized or validated.
+        #[serde(default, skip_serializing)]
         size: u64,
+        /// Legacy source-compatibility field; never serialized or validated.
+        #[serde(default, skip_serializing)]
         sha256: String,
         local_path: String,
     },
@@ -537,6 +541,21 @@ mod tests {
         );
         assert_eq!(labeled["author_id"], "author");
         assert_eq!(labeled["author_label"], "Alice");
+    }
+
+    #[test]
+    fn local_file_wire_omits_legacy_size_and_hash_fields() {
+        let attachment = Attachment::LocalFile {
+            id: "id".into(),
+            name: "image.png".into(),
+            media_type: Some("image/png".into()),
+            size: 123,
+            sha256: "legacy".into(),
+            local_path: "instance/id.bin".into(),
+        };
+        let value = serde_json::to_value(attachment).unwrap();
+        assert!(value.get("size").is_none());
+        assert!(value.get("sha256").is_none());
     }
 
     #[test]

@@ -148,8 +148,7 @@ async fn empty_said_is_bad_request_no_record() {
 }
 
 #[tokio::test]
-async fn local_html_is_verified_recorded_and_promoted() {
-    use sha2::Digest as _;
+async fn local_html_is_recorded_and_promoted() {
 
     let h = Harness::start().await;
     let (mut s, instance_id, binding_id) = ready_pair(&h).await;
@@ -162,8 +161,6 @@ async fn local_html_is_verified_recorded_and_promoted() {
     std::fs::write(&source, body).unwrap();
     h.state
         .set_attachment_inbox_root(inbox.canonicalize().unwrap());
-    let hash = format!("{:x}", sha2::Sha256::digest(body));
-
     write_frame(
         &mut s,
         &json!({
@@ -172,8 +169,7 @@ async fn local_html_is_verified_recorded_and_promoted() {
             "attachments": [{
                 "kind": "file",
                 "id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-                "name": "page.html", "media_type": "text/html",
-                "size": body.len(), "sha256": hash, "local_path": relative
+                "name": "page.html", "media_type": "text/html", "local_path": relative
             }]
         }),
     )
@@ -183,7 +179,7 @@ async fn local_html_is_verified_recorded_and_promoted() {
     assert!(!source.exists());
     assert!(attachments
         .path()
-        .join(format!("store/{hash}.bin"))
+        .join("store/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.bin")
         .is_file());
     let conn = h.state.db.lock().unwrap();
     let (content, metadata): (String, String) = conn
@@ -196,43 +192,13 @@ async fn local_html_is_verified_recorded_and_promoted() {
     assert!(content.contains("GPU OOM explanation"));
     assert!(!metadata.contains("https://"));
     assert!(!metadata.contains(attachments.path().to_string_lossy().as_ref()));
-    assert!(metadata.contains(&format!("store/{hash}.bin")));
+    assert!(metadata.contains("store/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.bin"));
+    assert!(!metadata.contains("sha256"));
     drop(conn);
-
-    // Reusing a gateway-supplied UUID with different content must not replace
-    // the first retained original; storage identity is the verified hash.
-    let relative2 = format!("{instance_id}/origin/attachment-2.bin");
-    let source2 = inbox.join(&relative2);
-    let body2 = b"<html><body>different</body></html>";
-    std::fs::write(&source2, body2).unwrap();
-    let hash2 = format!("{:x}", sha2::Sha256::digest(body2));
-    write_frame(
-        &mut s,
-        &json!({
-            "id": "local-2", "m": "said", "binding_id": binding_id,
-            "origin": "local-html-2", "author_id": "u1", "text": "",
-            "attachments": [{
-                "kind": "file", "id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-                "name": "other.html", "media_type": "text/html",
-                "size": body2.len(), "sha256": hash2, "local_path": relative2
-            }]
-        }),
-    )
-    .await;
-    assert_eq!(read_said_response(&mut s, "local-2").await["seq"], 2);
-    assert_eq!(
-        std::fs::read(attachments.path().join(format!("store/{hash}.bin"))).unwrap(),
-        body
-    );
-    assert_eq!(
-        std::fs::read(attachments.path().join(format!("store/{hash2}.bin"))).unwrap(),
-        body2
-    );
 }
 
 #[tokio::test]
 async fn mixed_local_attachments_reach_turn_in_declared_order() {
-    use sha2::Digest as _;
 
     let h = Harness::start().await;
     let (mut s, instance_id, binding_id) = ready_pair(&h).await;
@@ -249,9 +215,6 @@ async fn mixed_local_attachments_reach_turn_in_declared_order() {
     std::fs::write(&text_source, text).unwrap();
     h.state
         .set_attachment_inbox_root(inbox.canonicalize().unwrap());
-    let image_hash = format!("{:x}", sha2::Sha256::digest(image));
-    let text_hash = format!("{:x}", sha2::Sha256::digest(text));
-
     write_frame(
         &mut s,
         &json!({
@@ -260,13 +223,11 @@ async fn mixed_local_attachments_reach_turn_in_declared_order() {
             "attachments": [
                 {
                     "kind": "file", "id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
-                    "name": "note.txt", "media_type": "text/plain",
-                    "size": text.len(), "sha256": text_hash, "local_path": text_relative
+                    "name": "note.txt", "media_type": "text/plain", "local_path": text_relative
                 },
                 {
                     "kind": "file", "id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-                    "name": "image.png", "media_type": "image/png",
-                    "size": image.len(), "sha256": image_hash, "local_path": image_relative
+                    "name": "IMG_6467.png", "media_type": "image/jpeg", "local_path": image_relative
                 }
             ]
         }),
@@ -287,15 +248,16 @@ async fn mixed_local_attachments_reach_turn_in_declared_order() {
     let conversations = h.runtime.conversations.lock().unwrap();
     let conversation = conversations.last().unwrap();
     assert!(conversation.contains("1. note.txt"));
-    assert!(conversation.contains("2. image.png"));
+    assert!(conversation.contains("[画像添付: IMG_6467.png (image/png)]"));
+    assert!(!conversation.contains("Inspect the attached image"));
     assert!(conversation.contains("first attachment text"));
     assert!(attachments
         .path()
-        .join(format!("store/{image_hash}.bin"))
+        .join("store/cccccccc-cccc-4ccc-8ccc-cccccccccccc.bin")
         .is_file());
     assert!(attachments
         .path()
-        .join(format!("store/{text_hash}.bin"))
+        .join("store/dddddddd-dddd-4ddd-8ddd-dddddddddddd.bin")
         .is_file());
 }
 

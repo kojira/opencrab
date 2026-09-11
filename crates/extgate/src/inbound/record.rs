@@ -77,15 +77,13 @@ pub(super) fn record_inbound(
                 name,
                 media_type,
                 size,
-                sha256,
                 ..
             } => Some(serde_json::json!({
                 "id": id,
                 "name": name,
                 "media_type": media_type,
                 "size": size,
-                "sha256": sha256,
-                "storage_key": format!("store/{sha256}.bin"),
+                "storage_key": format!("store/{id}.bin"),
             })),
             SaidAttachment::ImageUrl(_) => None,
         })

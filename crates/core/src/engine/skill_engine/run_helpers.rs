@@ -255,7 +255,7 @@ pub(super) fn initialize_turn(
         }
         msgs
     } else {
-        vec![
+        let mut msgs = vec![
             Message {
                 role: Role::System,
                 content: Some(MessageContent::Text(system_context.to_string())),
@@ -266,13 +266,35 @@ pub(super) fn initialize_turn(
             },
             Message {
                 role: Role::User,
-                content: Some(user_content),
+                content: Some(MessageContent::Text(user_message.to_string())),
                 name: None,
                 function_call: None,
                 tool_calls: None,
                 tool_call_id: None,
             },
-        ]
+        ];
+        if !image_urls.is_empty() {
+            let mut parts = vec![ContentPart::Text {
+                text: "[現在のユーザー投稿: 画像添付]".to_string(),
+            }];
+            for url in image_urls {
+                parts.push(ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: url.clone(),
+                        detail: Some("auto".to_string()),
+                    },
+                });
+            }
+            msgs.push(Message {
+                role: Role::User,
+                content: Some(MessageContent::Multi(parts)),
+                name: None,
+                function_call: None,
+                tool_calls: None,
+                tool_call_id: None,
+            });
+        }
+        msgs
     };
 
     let mut ledger = TokenLedger::new();

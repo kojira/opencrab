@@ -181,7 +181,6 @@ pub enum SaidAttachment {
         name: String,
         media_type: Option<String>,
         size: u64,
-        sha256: String,
         local_path: String,
     },
 }
@@ -409,11 +408,6 @@ fn parse_local_attachment(
         Some(Value::String(value)) if !value.is_empty() && value.is_ascii() => Some(value.clone()),
         _ => return Err(GateError::new(ErrorCode::BadRequest)),
     };
-    let size = obj
-        .get("size")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| GateError::new(ErrorCode::BadRequest))?;
-    let sha256 = parse_digest(&nonempty_map_str(obj, "sha256")?)?;
     let local_path = nonempty_map_str(obj, "local_path")?;
     let path = std::path::Path::new(&local_path);
     if path.is_absolute()
@@ -427,8 +421,7 @@ fn parse_local_attachment(
         id,
         name,
         media_type,
-        size,
-        sha256,
+        size: 0,
         local_path,
     })
 }
@@ -520,9 +513,7 @@ mod activity_tests {
                 "id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
                 "name": "page.html",
                 "media_type": "text/html",
-                "size": 42,
-                "sha256": "a".repeat(64),
-                "local_path": "instance/origin/file.bin"
+                "local_path": "instance/file.bin"
             }]
         });
         let InboundMsg::Said(said) = parse_inbound(&frame).unwrap() else {
@@ -530,7 +521,7 @@ mod activity_tests {
         };
         assert!(matches!(
             &said.attachments[0],
-            SaidAttachment::LocalFile { name, size: 42, .. } if name == "page.html"
+            SaidAttachment::LocalFile { name, .. } if name == "page.html"
         ));
     }
 
@@ -572,8 +563,7 @@ mod activity_tests {
             "origin": "event-1", "author_id": "sender-1", "text": "",
             "attachments": [{
                 "kind": "file", "id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-                "name": "page.html", "media_type": "text/html", "size": 42,
-                "sha256": "a".repeat(64), "local_path": "../escape"
+                "name": "page.html", "media_type": "text/html", "local_path": "../escape"
             }]
         });
         assert!(matches!(
