@@ -176,57 +176,9 @@
         );
     }
 
-    /// #431: auto-dispatch が親ターンの subtask 起動カウンタを進める。
-    ///
-    /// Discord legacy と extgate の 🏁 判定は、この数で「この run が subtask を起こしたか」を
-    /// 判定する（V3 はさらに未決着 subtask の有無も見る）。ここが進まないと、掘削を投げたターンに 🏁 が付き
-    /// 『調べますね🏁』の数分後に続きが届く逆情報になる。
+    /// auto-dispatch は登録した subtask を通常どおり完了させる。
     #[tokio::test]
-    async fn dispatch_counts_the_subtask_start_for_the_parent_turn() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        let conn = opencrab_db::init_memory().unwrap();
-        let db = opencrab_db::Db::from_connection(conn);
-        let registry: SubtaskRegistry = Arc::new(DashMap::new());
-        let sink = Arc::new(RecordingSink::default());
-        let starts = Arc::new(AtomicUsize::new(0));
-
-        let dispatcher = SubtaskToolDispatcher::new(
-            Arc::new(FakeExecutor { pending: false }) as Arc<dyn ActionExecutor>,
-            registry.clone(),
-            db.clone(),
-            sink.clone(),
-            "agent-a",
-            "discord-agent-a-c1",
-        )
-        .with_subtask_starts(Some(starts.clone()));
-
-        assert_eq!(starts.load(Ordering::SeqCst), 0, "dispatch 前は 0");
-        dispatch_one(&dispatcher, "some_tool", serde_json::json!({}), "tc-1");
-        assert_eq!(
-            starts.load(Ordering::SeqCst),
-            1,
-            "registry 登録が成立したら親ターンのカウンタが進む"
-        );
-
-        // 別バッチをもう 1 本投げたら 2（`dispatch_batch` 1 回 = subtask 1 本）。
-        dispatch_one(&dispatcher, "some_tool", serde_json::json!({}), "tc-2");
-        assert_eq!(starts.load(Ordering::SeqCst), 2);
-
-        wait_until_settled(&registry).await;
-        // 決着して registry から消えても、起こした事実（カウンタ）は残る。これが
-        // 「registry を後から覗く」形との違いで、run が返る前に決着した subtask を
-        // 取りこぼさない理由。
-        assert_eq!(
-            starts.load(Ordering::SeqCst),
-            2,
-            "決着で registry から消えてもカウンタは戻らない"
-        );
-    }
-
-    /// #431: カウンタ未配線（`None`）でも dispatch は従来どおり動く（非破壊）。
-    #[tokio::test]
-    async fn dispatch_without_a_counter_still_works() {
+    async fn dispatch_still_completes() {
         let conn = opencrab_db::init_memory().unwrap();
         let db = opencrab_db::Db::from_connection(conn);
         let registry: SubtaskRegistry = Arc::new(DashMap::new());
@@ -245,7 +197,7 @@
         assert_eq!(
             sink.events.lock().unwrap().len(),
             1,
-            "カウンタ未配線でも完了 sink は従来どおり発火する"
+            "完了 sink が発火する"
         );
     }
 

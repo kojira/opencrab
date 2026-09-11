@@ -193,9 +193,6 @@ pub struct SubtaskToolDispatcher {
     /// （inline 経路 `process.rs` の `tool_result_workspace` と同じもの）。
     /// `None` なら退避せず切り詰める。
     workspace_root: Option<std::path::PathBuf>,
-    /// 親ターンが「この run は subtask を起こしたか」を数えるカウンタ（#431）。
-    /// 登録簿への登録が済んだところで加算する。`None` なら数えない。
-    subtask_starts: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 impl SubtaskToolDispatcher {
@@ -225,20 +222,7 @@ impl SubtaskToolDispatcher {
             caller: CallerIdentity::Agent,
             timeout: std::time::Duration::from_secs(DEFAULT_DISPATCH_TIMEOUT_SECS),
             workspace_root: None,
-            subtask_starts: None,
         }
-    }
-
-    /// 親ターンの subtask 起動カウンタを設定する（#431）。
-    ///
-    /// 明示 `spawn_subtask` 経路（`SystemGatewayActions`）と**同じカウンタ**を共有し、
-    /// 親ターンは 1 つの数で「次の行動を選んだか」を見る。
-    pub fn with_subtask_starts(
-        mut self,
-        counter: Option<Arc<std::sync::atomic::AtomicUsize>>,
-    ) -> Self {
-        self.subtask_starts = counter;
-        self
     }
 
     /// auto-dispatch 対象外の集合を差し替える。
@@ -588,11 +572,6 @@ impl ToolDispatcher for SubtaskToolDispatcher {
                 steerable: false,
             },
         );
-        // #431: 登録が成立した = このターンは「次の行動」を起こした。明示
-        // `spawn_subtask` 経路と同じカウンタへ載せ、親ターンは 1 つの数で判定する。
-        if let Some(c) = &self.subtask_starts {
-            c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        }
         // insert 完了 → タスク本体の実行を許可する。
         let _ = start_tx.send(());
 

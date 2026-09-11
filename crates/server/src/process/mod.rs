@@ -301,7 +301,6 @@ pub async fn run_agent_response(
             gateway_actions: req.gateway_actions.clone(),
             subtask_registry: subtask_registry.clone(),
             completion_sink: req.completion_sink.clone(),
-            subtask_starts: req.subtask_starts.clone(),
             reply_target: req.reply_target.clone(),
             tool_allowlist: req.tool_allowlist.clone(),
         },
@@ -461,10 +460,7 @@ pub async fn run_agent_response(
             .with_caller(run_caller.clone())
             // 大きい tool_result は inline 経路と同様にワークスペースへ退避する
             // （DB へ無制限に入れると resume 時の会話再構築が context 予算を溢れる）。
-            .with_workspace_root(Some(tool_result_workspace.clone()))
-            // #431: auto-dispatch の起動を親ターンのカウンタへ載せる。上の
-            // `SystemGatewayActions`（明示 spawn_subtask）へ渡すのと同一 Arc。
-            .with_subtask_starts(req.subtask_starts.clone());
+            .with_workspace_root(Some(tool_result_workspace.clone()));
             engine.set_tool_dispatcher(std::sync::Arc::new(dispatcher));
         }
     }

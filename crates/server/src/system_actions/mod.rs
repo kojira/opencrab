@@ -60,12 +60,6 @@ pub struct SystemGatewayActions {
     /// transport の有無で消えないようにするのが #157 の目的で、無いときは実行だけが
     /// 明示エラーになる。
     text_delivery: Option<Arc<dyn opencrab_core::text_delivery::TextDelivery>>,
-    /// 親ターンが「この run は subtask を起こしたか」を数えるカウンタ（#431）。
-    ///
-    /// 明示 `spawn_subtask` が**登録簿への登録まで到達した**（＝ `success`）ときだけ
-    /// 加算する。auto-dispatch 側（`SubtaskToolDispatcher`）と同一の Arc を共有し、
-    /// 親ターンは 1 つの数で両経路を見る。`None`（既定）なら数えない。
-    subtask_starts: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 /// `report_progress` が登録簿から引く、進捗通知に要る項目だけの写し。
@@ -111,22 +105,7 @@ impl SystemGatewayActions {
             completion_sink,
             a2ui,
             text_delivery,
-            subtask_starts: None,
         }
-    }
-
-    /// 親ターンの subtask 起動カウンタを設定する（#431）。
-    ///
-    /// `SubtaskToolDispatcher::with_subtask_starts` と**同じ Arc** を渡すこと。
-    /// 位置引数ではなく builder にしているのは、この配線を必要とするのが
-    /// `run_agent_response` の 1 箇所だけで、他の生成箇所（テスト・単発呼び出し）を
-    /// `None` で埋めさせないため。
-    pub fn with_subtask_starts(
-        mut self,
-        counter: Option<Arc<std::sync::atomic::AtomicUsize>>,
-    ) -> Self {
-        self.subtask_starts = counter;
-        self
     }
 
     /// 本ツール源が直接提供するツール定義（A2UI 描画面がある構成の全量）。

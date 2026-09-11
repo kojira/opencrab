@@ -130,7 +130,6 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                 } else {
                     format!("{system}\n\n{prompt_suffix}")
                 };
-                let subtask_starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
                 let last_continuation_say = Arc::new(std::sync::Mutex::new(None::<String>));
                 let turn_res = {
                     let runtime = runtime.clone();
@@ -155,7 +154,6 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                     let hook_agent = agent_id.clone();
                     let hook_session = session_id.clone();
                     let hook_reply = reply_target.clone();
-                    let hook_subtask_starts = Arc::clone(&subtask_starts);
                     let hook_last_continuation_say = Arc::clone(&last_continuation_say);
                     tokio::spawn(async move {
                         let inbound = NormalizedInbound {
@@ -227,7 +225,6 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                 // resume ターンの say がこの origin へ返信できるようにする
                                 // （settlement→SubtaskSettled.reply_target 経由）。
                                 .with_reply_target(origin.clone())
-                                .with_subtask_starts(Arc::clone(&hook_subtask_starts))
                                 // #964: 発端と走行中に畳み込んだ said の read+origin を、それぞれを
                                 // 含む exact request の `llm.chat` 直前に emit する。畳み込み origin
                                 // だけは従来どおり記録し、後続の独立ターンを起こさない。
@@ -364,8 +361,6 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                             reply_target.as_deref(),
                         )
                         .await;
-                        let started_subtask =
-                            subtask_starts.load(std::sync::atomic::Ordering::SeqCst) > 0;
                         // §13.3.1 案E: 進行中判定は**エージェント単位**（別 session の未決着 subtask
                         // も含む）。agent-scope は本 session の subtask も内包するので session-scope の
                         // 上位互換。1 つでも走行中なら idle でない＝completed_target を送らない。
@@ -373,7 +368,6 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                         // 選定規則（§13.3.5）は resume ターンと共通なので共有ヘルパへ集約（単一実装）。
                         let completed_target = crate::completion::select_completed_target(
                             engine_completion,
-                            started_subtask,
                             agent_has_running,
                             final_say_id,
                             last_continuation_say

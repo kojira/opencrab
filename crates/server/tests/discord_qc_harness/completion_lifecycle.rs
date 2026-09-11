@@ -118,13 +118,10 @@ async fn scenario_915_max_iterations_flag_only_on_last_delivered_say() {
 }
 
 // ---------------------------------------------------------------------------
-// #915 / §13.3.6 row 10【本文＋query ツール（holding・spawn）→ 宣言 0 ／ resume 完了報告 → 1】:
-// **実物の execute_shell**（echo・即時決着＝date 相当）を呼ぶターン。execute_shell は inline 集合に
-// 無いので背景 subtask 化され（#152/#671）、dispatch 直後の継続で宣言（holding）say を投稿する。
-// subtask 決着（実 echo → settle）後の resume ターンで完了報告 say を投稿。🏁 は宣言 say には付かず
-// （進行中）、resume 報告 say に 1・総数 1。統括裁定: 照会クラス常時 detach なので「date 単独」も実機は
-// この execute_shell→spawned→resume 経路。現 tip は say 配送ごとに 🏁 → 宣言にも付く → **赤**（総数 2）。
-// 偽ツールは作らず、echo のみ許可した実 shell 設定で実走する。
+// 親ターンが実行中に subtask が決着する経路。**実物の execute_shell**（echo）を背景化し、
+// spawned 結果への応答生成中に完了させる。NO_REPLY 終了境界で完了を親へ取り込み、同じ親ターンの
+// 最終報告へ 🏁 を付ける。過去の「このターンで開始した」という派生カウンタでは抑止せず、終了時点の
+// registry が idle なら完了扱いにする。宣言投稿には 🏁 0、最終報告に 1、総数 1。
 // ---------------------------------------------------------------------------
 const SP_ECHO: &str = "specho-shell-stdout-即時";
 const SP_DECL: &str = "spdecl-調べてるね（宣言・holding）";
@@ -146,8 +143,14 @@ impl LlmProvider for ShellSpawnResumeMock {
         Ok(vec![])
     }
     async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
-        // (2) dispatch 直後の継続（合成 "spawned" 結果＝tool role）→ 宣言 say（holding）でターンを閉じる。
+        let text = request_text(&request);
+        // (3) NO_REPLY 終了境界で親ターンへ届いた完了結果を読んで最終報告する。
+        if text.contains("[新着完了イベント:") {
+            return Ok(text_response(&format!("{SP_REPORT}\nNO_REPLY")));
+        }
+        // (2) spawned 結果への応答生成中に echo を決着させ、active parent へ渡す。
         if has_tool_role(&request) {
+            tokio::time::sleep(Duration::from_millis(200)).await;
             return Ok(text_response(&format!("{SP_DECL}\nNO_REPLY")));
         }
         // (1) 初回（tool role 無し・1 回だけ）→ 実 execute_shell（echo）を呼ぶ＝背景 subtask 化。
@@ -157,13 +160,12 @@ impl LlmProvider for ShellSpawnResumeMock {
                 serde_json::json!({ "command": "echo", "args": [SP_ECHO] }),
             ));
         }
-        // (3) subtask 決着後の resume ターン（tool role 無し・2 回目以降）→ 完了報告 say。
-        Ok(text_response(&format!("{SP_REPORT}\nNO_REPLY")))
+        Ok(text_response("unexpected fallback\nNO_REPLY"))
     }
 }
 
 #[tokio::test]
-async fn scenario_915_spawned_declaration_no_flag_resume_report_gets_flag() {
+async fn subtask_settled_during_active_parent_flags_only_the_final_report() {
     let buf = install_capture();
     let mock = Arc::new(ShellSpawnResumeMock {
         emitted: std::sync::atomic::AtomicBool::new(false),
@@ -177,7 +179,7 @@ async fn scenario_915_spawned_declaration_no_flag_resume_report_gets_flag() {
 
     fixture.append_message("9200", "SPSHELLMARK 調べて終わったら教えて");
 
-    // 宣言 say（SP_DECL）と resume 完了報告 say（SP_REPORT）が両方出るまで待つ。
+    // 宣言 say（SP_DECL）と同じ親ターンの完了報告 say（SP_REPORT）が両方出るまで待つ。
     let both = {
         let buf = buf.clone();
         wait_until(move || {
@@ -192,7 +194,7 @@ async fn scenario_915_spawned_declaration_no_flag_resume_report_gets_flag() {
     };
     assert!(
         both,
-        "宣言 say と resume 完了報告 say が揃わない（subtask/resume 未達）: {:?}",
+        "宣言 say と active parent の完了報告 say が揃わない: {:?}",
         captured(&buf)
     );
     // 決着後の 🏁 付与猶予。
@@ -223,11 +225,11 @@ async fn scenario_915_spawned_declaration_no_flag_resume_report_gets_flag() {
         "🏁 が spawned 宣言 say に誤付与（進行中は付けない・§13.3.6）: {:?}",
         captured(&buf)
     );
-    // resume 完了報告 say には 🏁 1。
+    // active parent の完了報告 say には 🏁 1。
     assert_eq!(
         completed_on(&report_mid),
         1,
-        "🏁 が resume 完了報告 say に 1 件で付かない（§13.3.6・§13.3.4）: {:?}",
+        "🏁 が active parent の完了報告 say に 1 件で付かない: {:?}",
         captured(&buf)
     );
     // 2 say（宣言・報告）合計で 🏁 は 1（宣言に付く現 tip は総数 2 → 赤）。
@@ -235,7 +237,7 @@ async fn scenario_915_spawned_declaration_no_flag_resume_report_gets_flag() {
     assert_eq!(
         total,
         1,
-        "spawned→resume の 🏁 総数が 1 でない（宣言に誤付与）: {:?}",
+        "active parent 内の spawned→settled で 🏁 総数が 1 でない: {:?}",
         captured(&buf)
     );
 }
