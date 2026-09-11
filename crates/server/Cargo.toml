@@ -4,9 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-default = ["discord"]
-discord = ["dep:opencrab-discord"]
-baseline-l1 = ["discord"]
+default = []
+baseline-l1 = []
 baseline-l2 = ["baseline-l1"]
 
 [[bin]]
@@ -46,7 +45,6 @@ opencrab-extgate = { workspace = true }
 opencrab-mcp = { workspace = true }
 dotenvy = { workspace = true }
 toml = { workspace = true }
-opencrab-discord = { workspace = true, optional = true }
 opencrab-voice = { workspace = true }
 notify = "6"
 notify-debouncer-mini = "0.4"

@@ -13,9 +13,6 @@ pub mod agent_schedule;
 pub mod api;
 pub mod caller_identity;
 pub mod config;
-#[cfg(feature = "discord")]
-mod discord_fire;
-pub mod discord_provision;
 pub mod heartbeat_fire;
 pub mod heartbeat_instructions;
 pub mod hot_reload;
@@ -272,10 +269,7 @@ impl AppState {
 /// なお起動時の防御は [`opencrab_actions::TimedFireRouter::self_check`]（本番登録簿そのもので
 /// prefix 衝突・登録漏れを検出）が担う。この 1 本化は「登録関数への追加忘れ」を減らす方で、
 /// 両方あって初めて塞がる。
-#[cfg_attr(not(feature = "discord"), allow(unused_variables))]
 pub fn register_production_descriptors(router: &opencrab_actions::TimedFireRouter) {
-    #[cfg(feature = "discord")]
-    router.register_descriptor(Arc::new(discord_fire::DiscordFire));
     // #925: V3 レーンの canonical session `extgate-<binding_id>`を受ける単一 descriptor。
     // gate socket が無い構成でも登録は生存非依存（発火は sink 側の live 判定で fail-loud）。
     router.register_descriptor(Arc::new(opencrab_extgate::ExtgateFire));
@@ -384,9 +378,6 @@ macro_rules! production_routes {
         $apply!($target, "/api/agents/{id}/analytics/detail", get => api::analytics::get_metrics_detail);
         $apply!($target, "/api/agents/{id}/workspace", get => api::workspace::list_workspace);
         $apply!($target, "/api/agents/{id}/workspace/{*path}", get => api::workspace::read_file, put => api::workspace::write_file);
-        $apply!($target, "/api/agents/{id}/discord", get => api::agents::get_discord_config, put => api::agents::update_discord_config, patch => api::agents::patch_discord_config, delete => api::agents::delete_discord_config);
-        $apply!($target, "/api/agents/{id}/discord/start", post => api::agents::start_discord_gateway);
-        $apply!($target, "/api/agents/{id}/discord/stop", post => api::agents::stop_discord_gateway);
         $apply!($target, "/api/agents/{id}/mcp", get => api::mcp::list_mcp_servers, put => api::mcp::put_mcp_server);
         $apply!($target, "/api/agents/{id}/mcp/{name}", delete => api::mcp::delete_mcp_server);
         $apply!($target, "/api/agents/{id}/mcp/{name}/enabled", post => api::mcp::set_mcp_enabled);

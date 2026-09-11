@@ -322,10 +322,6 @@ pub async fn run_agent_response(
     //   fall through しない。
     let run_notifier = req.run_notifier.clone();
     let notifier_tool_sink = run_notifier.as_ref().and_then(|n| n.tool_event_sink());
-    #[cfg(feature = "discord")]
-    let tool_event_sink = notifier_tool_sink
-        .or_else(|| opencrab_discord::spawn_activity_tool_event_sink(state.db.clone(), agent_id));
-    #[cfg(not(feature = "discord"))]
     let tool_event_sink = notifier_tool_sink;
     let executor = match tool_event_sink {
         Some(sink) => executor.with_tool_event_sink(sink),
@@ -334,7 +330,7 @@ pub async fn run_agent_response(
 
     // §2.7 案B: 「## More tools」静的 index を effective − 投影 から導出し system prompt へ後付け。
     // executor が具体型（`BridgedExecutor`）のうちに計算する（この直後に Arc<dyn> へ包む）。
-    // lane（Nostr）・owner-only は effective に現れるかで自動的に出し分き、build_agent_context の
+    // lane・owner-only は effective に現れるかで自動的に出し分け、build_agent_context の
     // 契約は変えない。
     let more_tools_index = build_more_tools_index(&executor);
     let system_prompt_owned;

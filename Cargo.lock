@@ -1749,7 +1749,6 @@ dependencies = [
  "opencrab-actions",
  "opencrab-core",
  "opencrab-db",
- "opencrab-discord",
  "opencrab-discord-gateway",
  "opencrab-extgate",
  "opencrab-gate-client",

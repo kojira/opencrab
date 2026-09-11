@@ -6,9 +6,6 @@ use opencrab_server::create_router_with_gate;
 mod background;
 #[path = "main/bootstrap.rs"]
 mod bootstrap;
-#[cfg(feature = "discord")]
-#[path = "main/discord_ignition.rs"]
-mod discord_ignition;
 mod intake_process;
 mod scheduler;
 
@@ -53,89 +50,18 @@ fn resolve_agent_id(conn: &rusqlite::Connection, agent_id: &str) -> String {
     agent_id.to_string()
 }
 
-/// discord-gateway 子 binary の解決順（DESIGN-DISCORD-GATE §0: 1 process = 1 agent）。
-/// 1. 環境変数 `OPENCRAB_DISCORD_GATEWAY_BIN`（明示指定・運用者が場所を固定できる）。
-/// 2. server 実行ファイルと同じディレクトリの `discord-gateway`（cargo の同一 target/ 配置）。
-/// 3. 上記が無ければ `discord-gateway`（PATH 解決に委ねる）。
-#[cfg(feature = "discord")]
-fn resolve_discord_gateway_bin() -> std::path::PathBuf {
-    resolve_gateway_bin("OPENCRAB_DISCORD_GATEWAY_BIN", "discord-gateway")
-}
-
-fn resolve_gateway_bin(env_name: &str, binary_name: &str) -> std::path::PathBuf {
-    if let Ok(p) = std::env::var(env_name) {
-        if !p.trim().is_empty() {
-            return std::path::PathBuf::from(p);
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let sibling = dir.join(binary_name);
-            if sibling.exists() {
-                return sibling;
-            }
-        }
-    }
-    std::path::PathBuf::from(binary_name)
-}
-
-#[cfg(feature = "discord")]
-fn is_executable_file(path: &std::path::Path) -> bool {
-    use std::os::unix::fs::PermissionsExt as _;
-    path.metadata()
-        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
-}
-
-#[cfg(feature = "discord")]
-fn require_resolvable_binary(label: &str, path: &std::path::Path) -> anyhow::Result<()> {
-    let found = if path.components().count() > 1 || path.is_absolute() {
-        is_executable_file(path)
-    } else {
-        std::env::var_os("PATH").is_some_and(|paths| {
-            std::env::split_paths(&paths).any(|dir| is_executable_file(&dir.join(path)))
-        })
-    };
-    if !found {
-        anyhow::bail!("{label} binary is not resolvable: {}", path.display());
-    }
-    Ok(())
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let bootstrap::BootstrapContext {
         cfg,
         extgate,
         gate_socket,
-        #[cfg(feature = "discord")]
-        gate_socket_for_discord,
-        #[cfg(feature = "discord")]
-        attachment_inbox_root,
         heartbeat_config_tx,
         heartbeat_config_rx,
         mut state,
         ..
     } = bootstrap::initialize()?;
 
-    #[cfg(feature = "discord")]
-    let discord_gateway_bin = resolve_discord_gateway_bin();
-    #[cfg(feature = "discord")]
-    let discord_configured = state
-        .db
-        .lock()
-        .map_err(|_| anyhow::anyhow!("db lock for Discord startup validation"))?
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM agent_discord_config)",
-            [],
-            |row| row.get::<_, bool>(0),
-        )?;
-    #[cfg(feature = "discord")]
-    if discord_configured {
-        require_resolvable_binary("discord-gateway", &discord_gateway_bin)?;
-        if gate_socket_for_discord.is_none() {
-            anyhow::bail!("Discord V3 requires an absolute gate.listen_socket");
-        }
-    }
     // #628: transport の発火先 descriptor を**生存非依存で**登録する（ゲートウェイの起動有無・
     // 資格情報の有無に関わらず常時。受理判定・ゲート理由表示・parse はゲートウェイ停止中でも
     // 要る）。sink（生存で register/unregister）とは別の登録で、ここは起動ブロックの**外**に
@@ -155,22 +81,6 @@ async fn main() -> anyhow::Result<()> {
 
     opencrab_server::register_production_descriptors(&state.timed_fire_router);
 
-    // サブタスク lifecycle 通知の実装を配線する（#175 S4）。`spawn_subtask` は gateway
-    // 非依存層にあるため、通知先の解決（DB の webhook 設定 + TOML の既定）だけを持つ
-    // この実装を `AppState` へ差し込む。Discord ゲートウェイの稼働有無とは独立に効く
-    // （web / REST から起動したサブタスクにも lifecycle 通知が出る）。
-    #[cfg(feature = "discord")]
-    {
-        let default_subtask_webhook = state.default_subtask_webhook.clone();
-        *state.subtask_lifecycle_notifier.lock().unwrap() = Some(Arc::new(
-            opencrab_discord::DiscordWebhookNotifier::new(
-                state.db.clone(),
-                default_subtask_webhook,
-            ),
-        )
-            as Arc<dyn opencrab_actions::subtask_notify::SubtaskLifecycleNotifier>);
-    }
-
     // 前プロセスから残った保留対話を**期限切れとして明示的に閉じる**（#196）。
     // 保留状態のメモリ上の登録簿はプロセスと寿命を共にするので、ここに残っている
     // `pending` 行は誰も応答を受け取れない。無言で放置すると「ボタンを押しても何も
@@ -182,17 +92,6 @@ async fn main() -> anyhow::Result<()> {
         state.cleanup_stale_interactions();
     }
 
-    #[cfg(feature = "discord")]
-    let discord_process_controller = discord_ignition::DiscordV3Controller::new(
-        &state.db,
-        extgate.clone(),
-        &cfg.database.path,
-        gate_socket_for_discord.as_deref(),
-        opencrab_server::discord_provision::DiscordIngress::parse(&cfg.gate.discord_ingress)
-            .is_some(),
-        &attachment_inbox_root,
-        &discord_gateway_bin,
-    )?;
     let _watcher_handle = background::spawn_background_tasks(
         &state,
         &cfg,
@@ -200,9 +99,6 @@ async fn main() -> anyhow::Result<()> {
         heartbeat_config_tx,
         heartbeat_config_rx,
     );
-
-    #[cfg(feature = "discord")]
-    state.gateways.register(discord_process_controller.clone());
 
     // Per-agent MCP 接続マネージャ。enabled なサーバへ起動時に接続する。
     //
@@ -259,39 +155,20 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    #[cfg(feature = "discord")]
-    discord_process_controller.start_all().await?;
-
     let app = create_router_with_gate(state, extgate);
 
     let addr = format!("0.0.0.0:{}", cfg.gateway.rest.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("Server listening on {}", addr);
 
-    // SIGINT/SIGTERM で HTTP を drain し、監視中の外部 gateway 子を terminate する。
-    #[cfg(feature = "discord")]
-    {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                wait_for_os_shutdown().await;
-                tracing::info!("shutdown signal received: terminating gateway children");
-                #[cfg(feature = "discord")]
-                opencrab_actions::AgentGatewayLifecycle::shutdown_all(
-                    discord_process_controller.as_ref(),
-                )
-                .await;
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            })
-            .await?;
-    }
-    #[cfg(not(feature = "discord"))]
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(wait_for_os_shutdown())
+        .await?;
 
     Ok(())
 }
 
 /// SIGINT（Ctrl-C）または SIGTERM を待つ。graceful shutdown のトリガに使う。
-#[cfg(feature = "discord")]
 async fn wait_for_os_shutdown() {
     #[cfg(unix)]
     {

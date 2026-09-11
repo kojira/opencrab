@@ -1,4 +1,4 @@
-//! gateway共有実行層（core / extgate / gate-client）のproductionにplatform特化分岐や
+//! gateway共有実行層（actions / core / db / extgate / gate-client / server）のproductionにplatform特化分岐や
 //! gate/SDK固有の識別子が現れないことのstatic audit。
 //!
 //! 背景: DI 原則「gateway 語彙を共有経路に持ち込まない」の static audit は元々
@@ -363,7 +363,7 @@ fn gateway_shared_layer_has_no_platform_branch() {
         .to_path_buf();
 
     let mut files = Vec::new();
-    for crate_name in ["core", "extgate", "gate-client"] {
+    for crate_name in ["actions", "core", "db", "extgate", "gate-client", "server"] {
         let src = crates_dir.join(crate_name).join("src");
         collect_rs_files(&src, &src, &mut files);
     }

@@ -10,10 +10,6 @@ pub(super) struct BootstrapContext {
     pub(super) cfg: AppConfig,
     pub(super) extgate: Arc<opencrab_extgate::ExtgateState>,
     pub(super) gate_socket: Option<std::path::PathBuf>,
-    #[cfg(feature = "discord")]
-    pub(super) gate_socket_for_discord: Option<String>,
-    #[cfg(feature = "discord")]
-    pub(super) attachment_inbox_root: std::path::PathBuf,
     pub(super) heartbeat_config_tx: watch::Sender<HeartbeatConfig>,
     pub(super) heartbeat_config_rx: watch::Receiver<HeartbeatConfig>,
     pub(super) state: AppState,
@@ -51,48 +47,7 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
     }
     let gate_token = opencrab_extgate::OperatorToken::take_from_env();
     let gate_socket = opencrab_extgate::validate_listen_socket(&cfg.gate.listen_socket)?;
-    #[cfg(feature = "discord")]
-    let discord_configured = db
-        .lock()
-        .map_err(|_| anyhow::anyhow!("db lock for Discord configuration detection"))?
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM agent_discord_config)",
-            [],
-            |row| row.get::<_, bool>(0),
-        )?;
-    // Discord is V3-only. Configured rows may be enabled dynamically, so validate at startup.
-    #[cfg(feature = "discord")]
-    if discord_configured {
-        opencrab_server::discord_provision::DiscordIngress::parse(&cfg.gate.discord_ingress)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "enabled Discord agent requires gate.discord_ingress = v3; got {:?}",
-                    cfg.gate.discord_ingress
-                )
-            })?;
-        if gate_socket.is_none() {
-            anyhow::bail!("enabled Discord agent requires an absolute gate.listen_socket");
-        }
-    }
-    // Discord V3 点火の placement.core_socket 用に、validate 済み path を文字列で控える
-    // （`gate_socket` は下の UDS listener ブロックで move されるため、ここで clone）。
-    #[cfg(feature = "discord")]
-    let gate_socket_for_discord: Option<String> = gate_socket
-        .as_ref()
-        .map(|p| p.to_string_lossy().into_owned());
     let extgate = Arc::new(opencrab_extgate::ExtgateState::new(db.clone(), gate_token));
-    #[cfg(feature = "discord")]
-    let attachment_inbox_root = {
-        let root = std::path::Path::new(&cfg.database.path)
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."))
-            .join("attachments")
-            .join("inbox");
-        std::fs::create_dir_all(&root)?;
-        root.canonicalize()?
-    };
-    #[cfg(feature = "discord")]
-    extgate.set_attachment_inbox_root(attachment_inbox_root.clone());
 
     // #553: 起動時リコンサイル。新プロセスの subtask registry（in-memory）は必ず空なので、
     // この時点で status='active' の subtask セッションは定義上すべて孤児（前プロセスと共に
@@ -129,7 +84,7 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
 
     // ハートビートの初期設定と live G の watch チャネル。
     //
-    // **AppState 構築より前に作る**のは、`get_my_heartbeat`（PR3）が `discord-` セッションの
+    // **AppState 構築より前に作る**のは、`get_my_heartbeat`（PR3）が 会話セッションの
     // ゲート理由（G=false）を本人へ見せるために live G を `AppState::heartbeat_config_rx` から
     // 読むため（scheduler が発火時に読むのと同一源・hot-reload 追従）。tx は config watcher へ、
     // rx は AppState と scheduler へ配る（受信端は clone 可能）。
@@ -200,10 +155,6 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
         cfg,
         extgate,
         gate_socket,
-        #[cfg(feature = "discord")]
-        gate_socket_for_discord,
-        #[cfg(feature = "discord")]
-        attachment_inbox_root,
         heartbeat_config_tx,
         heartbeat_config_rx,
         state,

@@ -286,25 +286,20 @@ mod tests {
         }
     }
 
-    /// 未定義の経路は弾く（登録できても誰とも一致しない行を作らせない）。
+    /// 共有APIはkindと識別子を解釈せず、そのまま保存する。
     #[tokio::test]
-    async fn unknown_platform_is_rejected() {
+    async fn platform_and_user_id_are_opaque() {
         let state = crate::test_app_state();
-        // `nostr` は #319 で読み出し側が引く経路になったので、ここには置けない。
-        for bad in ["mastodon", "Nostr", "Web", " web", ""] {
-            let err = add_trusted_user(
-                State(state.clone()),
-                Path("agent-1".to_string()),
-                Json(req("42", Some(bad))),
-            )
-            .await
-            .expect_err("unknown platform");
-            assert_eq!(err, StatusCode::BAD_REQUEST, "{bad:?}");
-        }
-        let conn = state.db.lock().unwrap();
-        assert!(opencrab_db::queries::list_trusted_users(&conn, "agent-1")
-            .unwrap()
-            .is_empty());
+        let dto = add_trusted_user(
+            State(state.clone()),
+            Path("agent-1".to_string()),
+            Json(req("not-a-shared-format", Some("external-kind"))),
+        )
+        .await
+        .expect("opaque values are accepted")
+        .0;
+        assert_eq!(dto.platform, "external-kind");
+        assert_eq!(dto.user_id, "not-a-shared-format");
     }
 
     /// 一意制約はまだ `(user_id, agent_id)`（#159 に残した非可逆な変更）。
@@ -349,68 +344,6 @@ mod tests {
         assert_eq!(rows[0].platform, TRUSTED_PLATFORM_WEB);
         // 経路で絞らない一覧であることは維持（運用者は全経路を見られる）。
         assert_eq!(rows[0].user_id, "dash-user");
-    }
-
-    // ---- nostr の書き込み正規化（#319） ----
-
-    /// **非正規表現（大文字 hex / 大文字 npub / 前後空白）で登録しても、canonical
-    /// 小文字 hex で保存され、hex の発言者で読み出しに引き当たる。**
-    ///
-    /// 読み出し側は canonical hex / npub で exact-match するため、正規化せず素通しで
-    /// 保存すると（この修正前の挙動）その信頼ユーザーが受信ターンで一致しない。
-    #[cfg(feature = "nostr")]
-    #[tokio::test]
-    async fn nostr_user_id_is_normalized_on_write_and_matches_the_speaker() {
-        use opencrab_db::queries::TRUSTED_PLATFORM_NOSTR;
-        // ダミー鍵（実在の pubkey は書かない）。
-        const HEX: &str = "0000000000000000000000000000000000000000000000000000000000000009";
-        let npub = opencrab_nostr::to_npub(HEX).unwrap();
-        for raw in [
-            format!("  {}\n", HEX.to_ascii_uppercase()),
-            format!(" {} ", npub.to_ascii_uppercase()),
-        ] {
-            let state = crate::test_app_state();
-            let dto = add_trusted_user(
-                State(state.clone()),
-                Path("agent-1".to_string()),
-                Json(req(&raw, Some(TRUSTED_PLATFORM_NOSTR))),
-            )
-            .await
-            .expect("add")
-            .0;
-            // 保存形は canonical 小文字 hex。
-            assert_eq!(dto.user_id, HEX, "非正規 {raw:?} が正規化されていない");
-            // 受信ターンの発言者解決（読み出し側）で hex の発言者に一致する。
-            let conn = state.db.lock().unwrap();
-            assert_eq!(
-                crate::nostr_runner_impl::resolve_nostr_caller_identity(&conn, "agent-1", HEX),
-                opencrab_actions::CallerIdentity::TrustedUser,
-                "非正規 {raw:?} で登録した nostr 信頼ユーザーが読み出しで一致しない"
-            );
-        }
-    }
-
-    /// 正規化できない nostr の識別子は 400（誰とも一致しない行を作らせない）。
-    /// 他経路は素通しなので、この検証は `platform='nostr'` のときだけ効く。
-    #[tokio::test]
-    async fn malformed_nostr_user_id_is_rejected() {
-        use opencrab_db::queries::TRUSTED_PLATFORM_NOSTR;
-        let state = crate::test_app_state();
-        for bad in ["not-a-key", "npub1broken", "abcd", ""] {
-            let err = add_trusted_user(
-                State(state.clone()),
-                Path("agent-1".to_string()),
-                Json(req(bad, Some(TRUSTED_PLATFORM_NOSTR))),
-            )
-            .await
-            .expect_err("malformed nostr id");
-            assert_eq!(err, StatusCode::BAD_REQUEST, "{bad:?}");
-        }
-        // 弾かれた登録は 1 行も残らない。
-        let conn = state.db.lock().unwrap();
-        assert!(opencrab_db::queries::list_trusted_users(&conn, "agent-1")
-            .unwrap()
-            .is_empty());
     }
 
     // ---- 権限の表記（#234） ----
