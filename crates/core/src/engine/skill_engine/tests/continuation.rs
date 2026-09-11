@@ -24,6 +24,19 @@
     }
 
     #[tokio::test]
+    async fn standalone_no_reply_keeps_prior_text_when_no_delivery_hook_exists() {
+        let (llm, _) = MockLlm::counting(vec![
+            text_response("64"),
+            text_response("NO_REPLY"),
+        ]);
+        let engine = SkillEngine::new(Box::new(llm), Box::new(MockExecutor::new()), 10);
+
+        let result = engine.run("system", "23+41", "test-model").await.unwrap();
+
+        assert_eq!(result.response, "64");
+    }
+
+    #[tokio::test]
     async fn explicit_termination_utterance_without_no_reply_runs_next_call() {
         use std::sync::atomic::Ordering;
         use std::sync::Mutex;

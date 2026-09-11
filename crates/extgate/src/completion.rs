@@ -47,12 +47,10 @@ pub(crate) fn select_completed_target(
                 last_reply
             }
         } else {
-            final_say_id.or_else(|| {
-                if final_had_speech {
-                    last_continuation_say
-                } else {
-                    last_reply
-                }
+            final_say_id.or(if final_had_speech {
+                last_continuation_say
+            } else {
+                last_reply
             })
         }
     })

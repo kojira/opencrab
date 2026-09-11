@@ -62,6 +62,8 @@ impl SkillEngine {
         // 上限到達時だけ直前（打ち切られた最終生成）の値を保持して返す。
         let mut last_posting_utterance_id: Option<String> = None;
         let mut last_generation_had_continuation_speech = false;
+        // 配送フックの無い run（subtask 等）は、単独 NO_REPLY で直前の本文を失わない。
+        let mut last_undelivered_speech: Option<String> = None;
 
         loop {
             iterations += 1;
@@ -672,6 +674,8 @@ impl SkillEngine {
                                 cb(c.clone()).await.map_err(|e| {
                                     anyhow::anyhow!("continuation speech delivery failed: {e:#}")
                                 })?;
+                            } else {
+                                last_undelivered_speech = Some(c.clone());
                             }
                         }
                     }
@@ -693,6 +697,8 @@ impl SkillEngine {
                         cb(c.clone()).await.map_err(|e| {
                             anyhow::anyhow!("continuation speech delivery failed: {e:#}")
                         })?;
+                    } else {
+                        last_undelivered_speech = Some(c.clone());
                     }
                     messages.push(Message {
                         role: Role::Assistant,
@@ -723,6 +729,8 @@ impl SkillEngine {
                             cb(speech.clone()).await.map_err(|e| {
                                 anyhow::anyhow!("continuation speech delivery failed: {e:#}")
                             })?;
+                        } else {
+                            last_undelivered_speech = Some(speech.clone());
                         }
                         messages.push(Message {
                             role: Role::Assistant,
@@ -759,7 +767,10 @@ impl SkillEngine {
             }
 
             // No tool calls and no late inbound: this is the final response.
-            let final_text = content.unwrap_or_default();
+            let final_text = content
+                .filter(|text| !text.trim().is_empty())
+                .or(last_undelivered_speech)
+                .unwrap_or_default();
 
             tracing::warn!(
                 iteration = iterations,
