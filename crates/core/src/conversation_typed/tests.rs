@@ -66,6 +66,5 @@ fn call(call_id: &str, tool_name: &str, arguments: Value) -> Value {
     })
 }
 
-
 include!("tests/assembly_cases.rs");
 include!("tests/safety_and_shadow.rs");

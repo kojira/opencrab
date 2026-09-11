@@ -295,8 +295,8 @@ async fn test_setup_status_fresh_and_after_agent() {
     assert_eq!(json["steps"]["llm_provider"]["done"], false);
     assert_eq!(json["steps"]["agent"]["done"], false);
     assert_eq!(json["steps"]["agent"]["count"], 0);
-    assert_eq!(json["steps"]["discord"]["done"], false);
-    assert_eq!(json["steps"]["channel"]["done"], false);
+    assert!(json["steps"].get("discord").is_none());
+    assert!(json["steps"].get("channel").is_none());
 
     // エージェントを作ると agent ステップが done + count=1 になる。
     let (_agent_id, app) = create_test_agent(app).await;

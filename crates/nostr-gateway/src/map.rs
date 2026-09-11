@@ -289,7 +289,7 @@ fn extract_image_urls(text: &str) -> Vec<String> {
 }
 
 fn push_image_url(urls: &mut Vec<String>, candidate: &str) {
-    let url = candidate.trim_end_matches(|c| matches!(c, ')' | ']' | '}' | '.' | ',' | '!' | '?'));
+    let url = candidate.trim_end_matches([')', ']', '}', '.', ',', '!', '?']);
     if !url.starts_with("https://") {
         return;
     }

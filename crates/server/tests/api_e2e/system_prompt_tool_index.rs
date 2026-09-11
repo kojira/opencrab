@@ -88,8 +88,8 @@ async fn captured_system_prompt(
     mock.system_prompts().first().cloned().unwrap_or_default()
 }
 
-/// Nostr レーン（Nostr の write op あり）: index に nostr カテゴリが出る。実装前は index 自体が
-/// 後付けされないため **赤**。
+/// 互換FQN。外部gatewayが提供するoperationは共有層でgateway名へ分類されず、
+/// opaqueなoperationとしてindexへ残る。
 #[tokio::test]
 async fn nostr_turn_system_prompt_index_has_nostr_category() {
     let sp = captured_system_prompt(
@@ -104,10 +104,10 @@ async fn nostr_turn_system_prompt_index_has_nostr_category() {
         sp.contains("## More tools"),
         "index 節が system prompt に無い:\n{sp}"
     );
-    assert!(
-        sp.contains("- nostr:") && sp.contains("kind0"),
-        "Nostr ターンの system prompt に nostr カテゴリ（follow/unfollow/kind0/upload）が無い:\n{sp}"
-    );
+    assert!(!sp.contains("- nostr:"), "gateway名を分類に使っている:\n{sp}");
+    for operation in ["follow", "unfollow", "kind0", "upload"] {
+        assert!(sp.contains(operation), "operation {operation} が無い:\n{sp}");
+    }
 }
 
 /// Discord レーン（Nostr の write op 無し）: nostr カテゴリは出ない（負のコントロール）。
