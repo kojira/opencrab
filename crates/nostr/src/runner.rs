@@ -27,6 +27,8 @@ pub struct NostrGateAllowKeys {
     /// owner 等価の co_agent の self_pubkey（`trusted_co_agents` の UUID を
     /// `agent_nostr_config.self_pubkey` で引いたもの / #485 #489）。
     pub co_agents: Vec<String>,
+    /// co_agent pubkey と agent UUID の対応。gateway が generic caller identity を作るために使う。
+    pub co_agent_identities: Vec<(String, String)>,
     /// `platform='nostr'` の `trusted_users` の識別子（permission を問わず、登録されていれば許可）。
     pub trusted_users: Vec<String>,
 }

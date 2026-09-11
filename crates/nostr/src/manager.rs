@@ -53,7 +53,13 @@ type AdminMap = Arc<RwLock<HashMap<String, Arc<dyn NostrIdentityAdmin>>>>;
 
 /// V3 の instance/binding 敷設。session 不在・membership 不一致は fail-loud。
 pub type NostrProvisionFn = Arc<
-    dyn Fn(&str, &str, &NostrConfig, &[opencrab_db::queries::SessionWatchRow]) -> anyhow::Result<()>
+    dyn Fn(
+            &str,
+            &str,
+            &NostrConfig,
+            &[opencrab_db::queries::SessionWatchRow],
+            &AllowSources,
+        ) -> anyhow::Result<()>
         + Send
         + Sync,
 >;
@@ -65,6 +71,7 @@ pub type NostrReviseFn = Arc<
             &str,
             &NostrConfig,
             &[opencrab_db::queries::SessionWatchRow],
+            &AllowSources,
         ) -> anyhow::Result<u64>
         + Send
         + Sync,

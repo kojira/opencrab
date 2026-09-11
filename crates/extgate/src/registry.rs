@@ -8,14 +8,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
-use opencrab_actions::{PrivilegeFire, WatchAllowSets};
 use opencrab_db::Db;
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::sync::oneshot;
 
 use crate::bearer::OperatorToken;
-use crate::bundle::NostrBundleAdmit;
-use crate::delivery_mode::DeliveryMode;
 use crate::error::{ErrorCode, GateError};
 use crate::operations::GatewayOperationDeclaration;
 use crate::turn_queue::SessionTurnQueues;
@@ -181,62 +178,6 @@ pub struct GateProbe {
     pub turn_queue_dropped: AtomicUsize,
 }
 
-/// kind_id=nostr の said を record 前に判定する。不正アンカーは `Err(bad_request)`。
-pub type NostrSaidAdmit =
-    Arc<dyn Fn(&str, &str, &str) -> Result<NostrSaidDecision, GateError> + Send + Sync>;
-pub type NostrWorkspaceFn = Arc<dyn Fn(&str) -> Option<PathBuf> + Send + Sync>;
-pub type NostrRelayFn = Arc<dyn Fn(&str, String) + Send + Sync>;
-pub type NostrWatchSetsFn = Arc<dyn Fn(&str) -> Option<NostrWatchSets> + Send + Sync>;
-
-#[derive(Debug, Clone, Default)]
-pub struct NostrWatchSets {
-    pub followees: HashSet<String>,
-    pub owner: HashSet<String>,
-    pub co_agents: HashSet<String>,
-    pub trusted_users: HashSet<String>,
-}
-
-impl NostrWatchSets {
-    pub fn as_watch_allow(&self) -> WatchAllowSets<'_> {
-        WatchAllowSets {
-            followees: &self.followees,
-            owner: &self.owner,
-            co_agents: &self.co_agents,
-            trusted_users: &self.trusted_users,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct NostrHeldTurn {
-    pub session_id: String,
-    pub instance_id: String,
-    pub agent_id: String,
-    pub binding_id: String,
-    pub origin: String,
-    pub author_id: String,
-    pub author_label: Option<String>,
-    pub text: String,
-    pub images: Vec<String>,
-    pub address: String,
-    pub owner_id: String,
-    pub kind_id: String,
-    pub delivery_mode: DeliveryMode,
-    pub prompt_suffix: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NostrSaidDecision {
-    Drop {
-        bundle: Option<NostrBundleAdmit>,
-    },
-    Accept {
-        watch_id: Option<i64>,
-        immediate: bool,
-        bundle: Option<NostrBundleAdmit>,
-    },
-}
-
 /// invoke の三結果（DI 拡張 §5.3）。terminal 化後に oneshot で `invoke_and_wait` へ届ける。
 #[derive(Debug, Clone)]
 pub enum OperationOutcome {
@@ -259,12 +200,7 @@ pub struct ExtgateState {
     pub halt: AtomicBool,
     halt_notify: tokio::sync::Notify,
     next_identity: AtomicU64,
-    nostr_said_admit: Mutex<Option<NostrSaidAdmit>>,
-    nostr_workspace: Mutex<Option<NostrWorkspaceFn>>,
     attachment_inbox_root: Mutex<Option<PathBuf>>,
-    nostr_relay: Mutex<Option<NostrRelayFn>>,
-    nostr_watch_sets: Mutex<Option<NostrWatchSetsFn>>,
-    nostr_privilege: Mutex<HashMap<i64, PrivilegeFire<NostrHeldTurn>>>,
     reserved_tool_name: Mutex<Option<ReservedToolNameFn>>,
     pub turn_queues: Arc<SessionTurnQueues>,
     /// #930/#933: 走行中ターンへ畳み込んで LLM に渡した said の **external_origins.seq の集合**を
@@ -290,12 +226,7 @@ impl ExtgateState {
             halt: AtomicBool::new(false),
             halt_notify: tokio::sync::Notify::new(),
             next_identity: AtomicU64::new(1),
-            nostr_said_admit: Mutex::new(None),
-            nostr_workspace: Mutex::new(None),
             attachment_inbox_root: Mutex::new(None),
-            nostr_relay: Mutex::new(None),
-            nostr_watch_sets: Mutex::new(None),
-            nostr_privilege: Mutex::new(HashMap::new()),
             reserved_tool_name: Mutex::new(None),
             turn_queues: Arc::new(SessionTurnQueues::new()),
             folded_seqs: Mutex::new(HashMap::new()),
@@ -339,14 +270,6 @@ impl ExtgateState {
         }
     }
 
-    pub fn set_nostr_said_admit(&self, admit: NostrSaidAdmit) {
-        *self.nostr_said_admit.lock().expect("nostr admit") = Some(admit);
-    }
-
-    pub fn set_nostr_workspace(&self, workspace: NostrWorkspaceFn) {
-        *self.nostr_workspace.lock().expect("nostr workspace") = Some(workspace);
-    }
-
     pub fn set_attachment_inbox_root(&self, root: PathBuf) {
         *self
             .attachment_inbox_root
@@ -356,14 +279,6 @@ impl ExtgateState {
 
     pub fn attachment_inbox_root(&self) -> Option<PathBuf> {
         self.attachment_inbox_root.lock().ok()?.clone()
-    }
-
-    pub fn set_nostr_relay(&self, relay: NostrRelayFn) {
-        *self.nostr_relay.lock().expect("nostr relay") = Some(relay);
-    }
-
-    pub fn set_nostr_watch_sets(&self, sets: NostrWatchSetsFn) {
-        *self.nostr_watch_sets.lock().expect("nostr watch sets") = Some(sets);
     }
 
     /// builtin / 既存 tool 名 collision 判定を登録する。
@@ -378,26 +293,6 @@ impl ExtgateState {
             Err(_) => return false,
         };
         hook.map(|h| h(name)).unwrap_or(false)
-    }
-
-    pub fn nostr_workspace_root(&self, agent_id: &str) -> Option<PathBuf> {
-        let hook = self.nostr_workspace.lock().ok()?.clone();
-        hook.and_then(|h| h(agent_id))
-    }
-
-    pub fn relay_nostr_inbound(&self, agent_id: &str, text: String) {
-        let hook = match self.nostr_relay.lock() {
-            Ok(g) => g.clone(),
-            Err(_) => return,
-        };
-        if let Some(hook) = hook {
-            hook(agent_id, text);
-        }
-    }
-
-    pub fn nostr_watch_sets_for(&self, agent_id: &str) -> Option<NostrWatchSets> {
-        let hook = self.nostr_watch_sets.lock().ok()?.clone();
-        hook.and_then(|h| h(agent_id))
     }
 
     /// 専用 V3 gateway（`kind_id`）が当該 `agent_id` を実際に受信できる状態か（platform 非依存）。
@@ -431,35 +326,6 @@ impl ExtgateState {
             )
             .is_ok()
         })
-    }
-
-    pub fn privilege_for(
-        &self,
-        watch_id: i64,
-        make: impl FnOnce() -> PrivilegeFire<NostrHeldTurn>,
-    ) -> Result<PrivilegeFire<NostrHeldTurn>, GateError> {
-        let mut g = self
-            .nostr_privilege
-            .lock()
-            .map_err(|_| GateError::store())?;
-        Ok(g.entry(watch_id).or_insert_with(make).clone())
-    }
-
-    pub fn admit_nostr_said(
-        &self,
-        agent_id: &str,
-        author_id: &str,
-        text: &str,
-    ) -> Result<NostrSaidDecision, GateError> {
-        let hook = self
-            .nostr_said_admit
-            .lock()
-            .map_err(|_| GateError::store())?
-            .clone();
-        let Some(hook) = hook else {
-            return Err(GateError::new(ErrorCode::BadRequest));
-        };
-        hook(agent_id, author_id, text)
     }
 
     pub fn lock_registry(&self) -> Result<MutexGuard<'_, Registry>, GateError> {

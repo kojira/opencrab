@@ -118,18 +118,21 @@ pub(crate) fn nostr_gate_allow_keys_from_db(
     // **空文字**（未登録）の co_agent は正当にスキップ。self_pubkey の**読み出し失敗**（DB エラー）は
     // 下で `?` で伝播（空にして黙って消さない）。
     let mut co_agents: Vec<String> = Vec::new();
+    let mut co_agent_identities: Vec<(String, String)> = Vec::new();
     for row in opencrab_db::queries::list_trusted_co_agents(conn, agent_id)
         .context("#698: trusted_co_agents の読み出しに失敗")?
     {
         let pk = opencrab_db::queries::get_agent_nostr_self_pubkey(conn, &row.co_agent_id)
             .context("#698: co_agent の self_pubkey 読み出しに失敗")?;
         if !pk.trim().is_empty() {
+            co_agent_identities.push((pk.clone(), row.co_agent_id));
             co_agents.push(pk);
         }
     }
     Ok(opencrab_nostr::NostrGateAllowKeys {
         owner,
         co_agents,
+        co_agent_identities,
         trusted_users,
     })
 }

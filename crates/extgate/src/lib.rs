@@ -2,7 +2,6 @@
 
 pub mod admin;
 pub mod bearer;
-pub mod bundle;
 pub mod close;
 pub mod completion;
 pub mod delivery;
@@ -23,7 +22,6 @@ pub mod turn_queue;
 
 pub use admin::admin_router;
 pub use bearer::OperatorToken;
-pub use bundle::NostrBundleAdmit;
 pub use delivery_mode::{
     adjust_inbound_effect, delivery_mode_from_config_bytes, dispatches_v3_say, DeliveryMode,
 };
@@ -41,17 +39,10 @@ pub use operations::{
     SubEngine,
 };
 pub use ops_projection::ExtgateOpsGatewayActions;
-pub use registry::{
-    ExtgateState, NostrHeldTurn, NostrRelayFn, NostrSaidAdmit, NostrSaidDecision, NostrWatchSets,
-    NostrWatchSetsFn, NostrWorkspaceFn, OperationOutcome, Registry, ReservedToolNameFn,
-};
+pub use registry::{ExtgateState, OperationOutcome, Registry, ReservedToolNameFn};
 
 use opencrab_actions::CallerIdentity;
-use opencrab_db::queries::{
-    get_trusted_user, is_trusted_co_agent, resolve_agent_by_discord_bot_user_id,
-    resolve_agent_by_nostr_self_pubkey, TrustedUserPermission, TRUSTED_PLATFORM_DISCORD,
-    TRUSTED_PLATFORM_NOSTR,
-};
+use opencrab_db::queries::{get_trusted_user, TrustedUserPermission};
 use rusqlite::Connection;
 
 /// server が `resolve_caller_identity_with_owner` を渡す。
@@ -71,15 +62,6 @@ pub fn resolve_caller_identity_with_owner(
     {
         return CallerIdentity::Owner;
     }
-    if let Some(co_uuid) = resolve_co_agent_uuid(
-        conn,
-        platform,
-        user_ids.first().copied().unwrap_or_default(),
-    ) {
-        if is_trusted_co_agent(conn, agent_id, &co_uuid).unwrap_or(false) {
-            return CallerIdentity::CoAgent { agent_id: co_uuid };
-        }
-    }
     let permission = user_ids
         .iter()
         .find_map(|uid| get_trusted_user(conn, platform, uid, agent_id).map(|u| u.permission));
@@ -91,13 +73,5 @@ pub fn resolve_caller_identity_with_owner(
             CallerIdentity::TrustedUser
         }
         None => CallerIdentity::Agent,
-    }
-}
-
-fn resolve_co_agent_uuid(conn: &Connection, platform: &str, identifier: &str) -> Option<String> {
-    match platform {
-        TRUSTED_PLATFORM_DISCORD => resolve_agent_by_discord_bot_user_id(conn, identifier),
-        TRUSTED_PLATFORM_NOSTR => resolve_agent_by_nostr_self_pubkey(conn, identifier),
-        _ => None,
     }
 }

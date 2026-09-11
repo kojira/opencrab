@@ -282,83 +282,40 @@ async fn main() -> anyhow::Result<()> {
             state.timed_fire_router.clone(),
         )
         .with_cli(cli)
-        .with_provisioner(Arc::new(move |agent_id, self_pk, config, watches| {
-            let mut conn = db_for_provision
-                .lock()
-                .map_err(|_| anyhow::anyhow!("db lock for nostr provision"))?;
-            opencrab_server::nostr_provision::provision_nostr_gate(
-                &mut conn,
-                agent_id,
-                self_pk,
-                config,
-                watches,
-                opencrab_extgate::now_nanos(),
-            )?;
-            Ok(())
-        }))
-        .with_reviser(Arc::new(move |agent_id, self_pk, config, watches| {
-            let mut conn = db_for_revise
-                .lock()
-                .map_err(|_| anyhow::anyhow!("db lock for nostr revise"))?;
-            opencrab_server::nostr_provision::revise_nostr_gate(
-                &mut conn,
-                agent_id,
-                self_pk,
-                config,
-                watches,
-                opencrab_extgate::now_nanos(),
-            )
-        }));
+        .with_provisioner(Arc::new(
+            move |agent_id, self_pk, config, watches, access| {
+                let mut conn = db_for_provision
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("db lock for nostr provision"))?;
+                opencrab_server::nostr_provision::provision_nostr_gate(
+                    &mut conn,
+                    agent_id,
+                    self_pk,
+                    config,
+                    watches,
+                    access,
+                    opencrab_extgate::now_nanos(),
+                )?;
+                Ok(())
+            },
+        ))
+        .with_reviser(Arc::new(
+            move |agent_id, self_pk, config, watches, access| {
+                let mut conn = db_for_revise
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("db lock for nostr revise"))?;
+                opencrab_server::nostr_provision::revise_nostr_gate(
+                    &mut conn,
+                    agent_id,
+                    self_pk,
+                    config,
+                    watches,
+                    access,
+                    opencrab_extgate::now_nanos(),
+                )
+            },
+        ));
         let manager: opencrab_server::SharedNostrManager = Arc::new(manager_builder);
-        let store = manager.allow_store().clone();
-        let store_sets = store.clone();
-        extgate.set_nostr_said_admit(Arc::new(move |agent_id, author_id, text| {
-            use opencrab_extgate::{ErrorCode, GateError, NostrSaidDecision};
-            use opencrab_nostr::{admit_nostr_said, AdmitSaidError, IngressRoute};
-            let Some(allow) = store.get_allow(agent_id) else {
-                return Err(GateError::store());
-            };
-            let Some(self_pk) = store.self_pubkey(agent_id) else {
-                return Err(GateError::store());
-            };
-            match admit_nostr_said(text, author_id, &self_pk, &allow) {
-                // 診断のため detail を載せる（本文/鍵/path は入れない・カテゴリのみ）。anchor の
-                // key 集合/型不整合（gateway↔core のバージョン齟齬など）を素早く切り分けられる。
-                Err(AdmitSaidError::BadAnchor) => Err(GateError::with_detail(
-                    ErrorCode::BadRequest,
-                    "nostr V1 anchor parse failed (unknown/missing key or bad type)",
-                )),
-                Err(AdmitSaidError::Drop { anchor, .. }) => Ok(NostrSaidDecision::Drop {
-                    bundle: nostr_bundle_from_anchor(&anchor)?,
-                }),
-                Ok(anchor) => Ok(NostrSaidDecision::Accept {
-                    watch_id: anchor.watch_id,
-                    immediate: anchor.route == IngressRoute::Immediate,
-                    bundle: nostr_bundle_from_anchor(&anchor)?,
-                }),
-            }
-        }));
-        extgate.set_nostr_watch_sets(Arc::new(move |agent_id| {
-            store_sets
-                .get_allow(agent_id)
-                .map(|allow| opencrab_extgate::NostrWatchSets {
-                    followees: allow.followees,
-                    owner: allow.owner,
-                    co_agents: allow.co_agents,
-                    trusted_users: allow.trusted_users,
-                })
-        }));
-        let workspace_base = state.workspace_base.clone();
-        extgate.set_nostr_workspace(Arc::new(move |agent_id| {
-            opencrab_core::workspace::resolve_agent_workspace(&workspace_base, agent_id).ok()
-        }));
-        let relay_runner = state.clone();
-        extgate.set_nostr_relay(Arc::new(move |agent_id, text| {
-            use opencrab_nostr::NostrAgentRunner;
-            if let Some(target) = relay_runner.resolve_nostr_relay_target(agent_id) {
-                relay_runner.relay_inbound_notification(&target, text);
-            }
-        }));
         // Liveness は manager の keep-alive task ではなく、外部 gateway が extgate へ登録済みかを
         // 正とする。子が crash-loop 中なら false のままで、稼働中と誤報しない。
         let extgate_for_nostr_live = extgate.clone();
@@ -508,31 +465,6 @@ async fn wait_for_os_shutdown() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
-    }
-}
-
-#[cfg(feature = "nostr")]
-fn nostr_bundle_from_anchor(
-    anchor: &opencrab_nostr::V1Anchor,
-) -> Result<Option<opencrab_extgate::NostrBundleAdmit>, opencrab_extgate::GateError> {
-    use opencrab_extgate::{ErrorCode, GateError, NostrBundleAdmit};
-    use opencrab_nostr::IngressRoute;
-    if anchor.route != IngressRoute::Bundle {
-        return Ok(None);
-    }
-    match (
-        anchor.bundle_id.clone(),
-        anchor.index,
-        anchor.count,
-        anchor.origins.clone(),
-    ) {
-        (Some(bundle_id), Some(index), Some(count), Some(origins)) => Ok(Some(NostrBundleAdmit {
-            bundle_id,
-            index,
-            count,
-            origins,
-        })),
-        _ => Err(GateError::new(ErrorCode::BadRequest)),
     }
 }
 

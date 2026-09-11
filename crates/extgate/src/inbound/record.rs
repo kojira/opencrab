@@ -9,7 +9,6 @@ use crate::protocol::{Said, SaidAttachment};
 use crate::registry::ExtgateState;
 
 use super::binding::OriginRow;
-use super::nostr_profile::parse_v1_reply_to;
 
 pub(super) fn existing_seq(
     tx: &Transaction<'_>,
@@ -99,13 +98,9 @@ pub(super) fn record_inbound(
     // 漏れた既存バグであり、DI 原則（core に個別 gateway 語彙を持ち込まない）に反する。剥がして
     // Discord 等の全 kind で e番号が付くようにする（統括裁定 2026-08-31）。
     meta["external_origin"] = serde_json::json!(said.origin);
-    // 返信/リアクション/リポストの対象 event_id を記録（row295c 6b）。会話表示が
-    // `(reply→e番号)` を解決するのに使う。旧行は未記録＝表示側が `→外部` フォールバック。
-    // 対象抽出は Nostr の V1 アンカー本文に依存する platform 固有処理なのでガード内に残す。
-    if row.kind_id == "nostr" {
-        if let Some(reply_to) = parse_v1_reply_to(&said.text) {
-            meta["reply_target"] = serde_json::json!(reply_to);
-        }
+    // Gatewayが供給した外部reply参照はopaque値として保存し、coreでは解釈しない。
+    if let Some(reply_target) = &said.reply_target {
+        meta["reply_target"] = serde_json::json!(reply_target);
     }
     insert_session_log(
         tx,

@@ -1,7 +1,7 @@
 //! watch JSONL → V3 said。origin 規約と版付きアンカー。
 
+use opencrab_gate_client::wire::Attachment;
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -25,16 +25,6 @@ pub enum Route {
     Default,
     Immediate,
     Bundle,
-}
-
-impl Route {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Default => "default",
-            Self::Immediate => "immediate",
-            Self::Bundle => "bundle",
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +71,9 @@ pub struct SaidMap {
     pub origin: String,
     pub author_id: String,
     pub text: String,
+    pub attachments: Vec<Attachment>,
+    pub system_context: String,
+    pub reply_target: Option<String>,
     pub route: Route,
 }
 
@@ -176,36 +169,29 @@ pub fn map_event(
     };
     let origin = decisive_origin(lane, &event_id);
     let history = history_text(event);
-    let anchor = v1_anchor(
-        event,
-        self_pubkey,
-        beyond_self,
-        lane,
-        route,
-        &event_id,
-        bundle,
-    );
-    let text = match bundle {
-        Some(place) => {
-            format!(
-                "{anchor}\n{}\n{history}",
-                bundle_members_line(&place.origins)
-            )
-        }
-        None => format!("{anchor}\n{history}"),
-    };
+    let _ = (self_pubkey, beyond_self);
+    let attachments = image_urls(event)
+        .into_iter()
+        .map(|url| Attachment::ImageUrl { url })
+        .collect();
     Some(SaidMap {
         origin,
-        author_id,
-        text,
+        author_id: author_id.clone(),
+        text: history,
+        attachments,
+        system_context: bundle
+            .map(|place| bundle_response_context(place.count))
+            .unwrap_or_else(|| response_context(event, &author_id)),
+        reply_target: bundle.is_none().then(|| parent_event_id(event)).flatten(),
         route,
     })
 }
 
-/// coordinator が最初の非重複 member で全 origin を照合するための第2行。
 pub fn bundle_members_line(origins: &[String]) -> String {
-    let values = origins.iter().cloned().map(Value::String).collect();
-    format!("[NOSTRBUNDLE/V1 {}]", Value::Array(values))
+    format!(
+        "[NOSTRBUNDLE/V1 {}]",
+        serde_json::to_string(origins).expect("string list serializes")
+    )
 }
 
 pub fn bundle_id(binding_id: &str, watch_id: i64, event_ids: &[String]) -> String {
@@ -252,6 +238,75 @@ fn e_tag_is_self(event: &WatchEvent, self_pubkey: &str) -> bool {
     })
 }
 
+fn bundle_response_context(count: u32) -> String {
+    format!(
+        "[Nostr] タイムラインの束ね（{count} 件）です。窓内を1ターンの文脈に載せています。\
+         心が動いた投稿には本文をそのまま書いて独立投稿で触れてよいです。\
+         特定投稿に反応するなら reply(e番号, 本文)／reaction(e番号)／repost(e番号) を使ってください。\
+         反応不要なら NO_REPLY とだけ答えてください。"
+    )
+}
+
+fn response_context(event: &WatchEvent, author_id: &str) -> String {
+    let short: String = author_id.chars().take(12).collect();
+    format!(
+        "[Nostr] {short}… さんの投稿（kind:{}／{}）への応答です。\n\
+         普通の投稿は本文をそのまま書いてください。\n\
+         この投稿へ返信するなら reply(e番号, 本文)、リアクションは reaction(e番号)、\
+         リポストは repost(e番号) を使ってください。\n\
+         反応が不要なら NO_REPLY とだけ答えてください。",
+        event.kind,
+        inbound_kind_label(event),
+    )
+}
+
+fn image_urls(event: &WatchEvent) -> Vec<String> {
+    let mut urls = extract_image_urls(&event.content);
+    for tag in &event.tags {
+        if tag.first().is_some_and(|name| name == "imeta") {
+            for value in tag.iter().skip(1) {
+                if let Some(url) = value.strip_prefix("url ") {
+                    push_image_url(&mut urls, url.trim());
+                }
+            }
+        }
+    }
+    urls
+}
+
+fn extract_image_urls(text: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    for token in text.split_whitespace() {
+        let candidate = token.trim_matches(|c: char| {
+            matches!(
+                c,
+                '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | '"' | '\'' | ',' | ';'
+            )
+        });
+        push_image_url(&mut urls, candidate);
+    }
+    urls
+}
+
+fn push_image_url(urls: &mut Vec<String>, candidate: &str) {
+    let url = candidate.trim_end_matches(|c| matches!(c, ')' | ']' | '}' | '.' | ',' | '!' | '?'));
+    if !url.starts_with("https://") {
+        return;
+    }
+    let path = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .to_ascii_lowercase();
+    if [".jpg", ".jpeg", ".png", ".gif", ".webp"]
+        .iter()
+        .any(|extension| path.ends_with(extension))
+        && !urls.iter().any(|existing| existing == url)
+    {
+        urls.push(url.to_string());
+    }
+}
+
 fn inbound_kind_label(event: &WatchEvent) -> &'static str {
     if event.kind == 4 || event.kind == 1059 {
         return "DM";
@@ -282,52 +337,6 @@ fn history_text(event: &WatchEvent) -> String {
     } else {
         format!("{}\n{anchor}", event.content)
     }
-}
-
-fn v1_anchor(
-    event: &WatchEvent,
-    self_pubkey: &str,
-    beyond_cfg: bool,
-    lane: &Lane,
-    route: Route,
-    event_id: &str,
-    bundle: Option<&BundlePlace>,
-) -> String {
-    let p_self = p_tag_is_self(event, self_pubkey);
-    let mut obj = Map::new();
-    obj.insert("beyond_self".into(), json!(beyond_cfg));
-    obj.insert(
-        "bundle_id".into(),
-        bundle
-            .map(|b| Value::String(b.bundle_id.clone()))
-            .unwrap_or(Value::Null),
-    );
-    obj.insert(
-        "count".into(),
-        bundle.map(|b| json!(b.count)).unwrap_or(Value::Null),
-    );
-    obj.insert("event_id".into(), json!(event_id));
-    obj.insert("has_e".into(), json!(has_e_tag(event)));
-    obj.insert(
-        "index".into(),
-        bundle.map(|b| json!(b.index)).unwrap_or(Value::Null),
-    );
-    obj.insert("kind".into(), json!(event.kind));
-    obj.insert("p_self".into(), json!(p_self));
-    // 返信/リアクション/リポストが指す対象ノートの event_id（row295c 6b）。会話表示で
-    // `(reply→e番号)` を解決するため載せる。旧行（未記録）は表示側が `→外部` フォールバック。
-    obj.insert(
-        "reply_to".into(),
-        parent_event_id(event)
-            .map(|id| json!(id))
-            .unwrap_or(Value::Null),
-    );
-    obj.insert("route".into(), json!(route.as_str()));
-    obj.insert(
-        "watch_id".into(),
-        lane.watch_id().map(|id| json!(id)).unwrap_or(Value::Null),
-    );
-    format!("[NOSTRGATE/V1 {}]", Value::Object(obj))
 }
 
 /// 返信/リアクション/リポストが指す対象ノートの event_id（NIP-10: `reply` マーク優先・無ければ
@@ -400,13 +409,9 @@ mod tests {
             ],
         );
         let mapped = map_event(&event, &self_pk, false, &Lane::watch(17), None).unwrap();
-        // §9A.2: history 行から from=/target= を撤去。種別ラベルだけ残る。
-        let expected = format!(
-            "[NOSTRGATE/V1 {{\"beyond_self\":false,\"bundle_id\":null,\"count\":null,\"event_id\":\"{}\",\"has_e\":true,\"index\":null,\"kind\":1,\"p_self\":true,\"reply_to\":\"{}\",\"route\":\"immediate\",\"watch_id\":17}}]\nhello\n[Nostr kind:1 リプライ]",
-            "aa".repeat(32),
-            "bb".repeat(32),
-        );
-        assert_eq!(mapped.text, expected);
+        assert_eq!(mapped.text, "hello\n[Nostr kind:1 リプライ]");
+        assert_eq!(mapped.reply_target, Some("bb".repeat(32)));
+        assert!(mapped.system_context.contains("kind:1／リプライ"));
         assert_eq!(
             mapped.origin,
             format!("nostr:event:v1:watch:17:{}", "aa".repeat(32))
@@ -468,9 +473,7 @@ mod tests {
         let event = ev(1, vec![vec!["p".into(), self_pk.clone()]]);
         let mapped = map_event(&event, &self_pk, false, &Lane::default_lane(), None).unwrap();
         assert_eq!(mapped.route, Route::Immediate);
-        assert!(mapped.text.contains("\"route\":\"immediate\""));
-        assert!(!mapped.text.contains("\"route\":\"bundle\""));
-        assert!(mapped.text.contains("\"watch_id\":null"));
+        assert!(!mapped.text.contains("NOSTRGATE"));
         assert_eq!(
             mapped.origin,
             format!("nostr:event:v1:default:{}", "aa".repeat(32))
@@ -512,11 +515,9 @@ mod tests {
         let self_pk = self_pk();
         let event = ev(1, vec![]);
         let mapped = map_event(&event, &self_pk, false, &Lane::watch(17), None).unwrap();
-        assert!(mapped.text.contains("\"beyond_self\":false"));
-        assert!(mapped.text.contains("\"p_self\":false"));
+        assert_eq!(mapped.route, Route::Immediate);
         let mapped = map_event(&event, &self_pk, true, &Lane::watch(17), None).unwrap();
-        assert!(mapped.text.contains("\"beyond_self\":true"));
-        assert!(mapped.text.contains("\"p_self\":false"));
+        assert_eq!(mapped.route, Route::Bundle);
     }
 
     #[test]
@@ -540,13 +541,7 @@ mod tests {
         };
         let mapped = map_event(&event, &self_pk, true, &Lane::watch(17), Some(&place)).unwrap();
         assert_eq!(mapped.route, Route::Bundle);
-        assert!(mapped.text.contains(&format!("\"bundle_id\":\"{bid}\"")));
-        assert!(mapped.text.contains("\"index\":1"));
-        assert!(mapped.text.contains("\"count\":2"));
-        assert!(mapped.text.contains("\"route\":\"bundle\""));
-        let members = bundle_members_line(&origins);
-        assert!(mapped.text.contains(&members));
-        let lines: Vec<&str> = mapped.text.lines().collect();
-        assert_eq!(lines[1], members);
+        assert_eq!(mapped.text, "hello\n[Nostr kind:1 メンション]");
+        assert!(!mapped.text.contains("NOSTRBUNDLE"));
     }
 }

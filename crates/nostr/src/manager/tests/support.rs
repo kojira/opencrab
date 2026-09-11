@@ -273,6 +273,7 @@
             Ok(crate::NostrGateAllowKeys {
                 owner: self.owner_pubkey.clone().into_iter().collect(),
                 co_agents: self.co_agent_pubkeys.clone(),
+                co_agent_identities: Vec::new(),
                 trusted_users: self.trusted_pubkeys.clone(),
             })
         }

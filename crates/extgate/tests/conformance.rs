@@ -9,7 +9,6 @@ include!("conformance/delivery.rs");
 include!("conformance/turn_outcomes.rs");
 include!("conformance/session_binding.rs");
 include!("conformance/delivery_modes.rs");
-include!("conformance/nostr_watch.rs");
 include!("conformance/turn_queue.rs");
 include!("conformance/operations.rs");
 include!("conformance/hello_diagnostics.rs");

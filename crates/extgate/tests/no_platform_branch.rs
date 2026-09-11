@@ -1,5 +1,5 @@
-//! #852: gateway 共有層（extgate / gate-client の production）に platform 特化分岐や
-//! gate/SDK 固有の識別子が現れないことの static audit。
+//! gateway共有実行層（core / extgate / gate-client）のproductionにplatform特化分岐や
+//! gate/SDK固有の識別子が現れないことのstatic audit。
 //!
 //! 背景: DI 原則「gateway 語彙を共有経路に持ち込まない」の static audit は元々
 //! `crates/core/tests/no_gate_identifiers.rs`（R7）と #851 の
@@ -24,11 +24,6 @@
 //! - doc コメント（`#[doc = "..."]` / `//!` / `///`）。
 //! - マクロ本体の生トークン（`syn` が展開しないため届かない。既知の限界）。
 //!
-//! これらに加え、**まだ generic 化できていない Nostr profile ファイル**は
-//! `ALLOWLIST` に「なぜ generic にできないか」を 1 行添えて登録する。allowlist に載る
-//! ファイルは走査対象外になるが、それ以外の共有ファイルは厳格に検査される（新たな
-//! platform 語彙が generic 面へ紛れ込めば fail する）。allowlist の各行は phase-2 の
-//! profile module 切り出しで解消される TODO を兼ねる。
 
 use std::path::{Path, PathBuf};
 
@@ -42,64 +37,6 @@ use syn::{Attribute, BinOp, Expr, ExprBinary, Lit, Meta};
 /// profile の platform 分岐は下の `kind_id == "web"` 検査が拾う）。
 const FORBIDDEN: &[&str] = &[
     "discord", "serenity", "songbird", "nostr", "telegram", "slack",
-];
-
-/// まだ generic 化できていない Nostr profile ファイル。`(相対パス, なぜ generic に
-/// できないか)`。ここに載るファイルは走査対象外になる。各理由は phase-2 の profile
-/// module 切り出しで解消される（TODO）。
-///
-/// 分類の内訳（#852 短報）:
-/// - inbound/mod.rs / binding.rs / record.rs / turn.rs / completion.rs:
-///   **原理的には profile dispatch で汎化可能**な `kind_id == "nostr"` 分岐や
-///   platform 別 owner/caller/pubkey/admit 処理を持つが、汎化は挙動に触れるため
-///   behavior-preserving な module split の対象外（phase-2）。
-/// - inbound/bundle_turn.rs / nostr_profile.rs: Nostr Bundle の完了処理と relay/render/V1
-///   解釈という **Nostr profile 固有**の実装。profile module 内には分離済みだが、profile
-///   dispatch による generic 化は phase-2。
-/// - registry.rs / bundle.rs / lib.rs: Nostr の wire 形式・admit 状態機械・platform 別
-///   ID 解決など **本質的に platform 固有**な実装。あるべき姿は profile module/crate 側
-///   への配置（phase-2）。
-const ALLOWLIST: &[(&str, &str)] = &[
-    (
-        "extgate/src/inbound/mod.rs",
-        "said orchestration に Nostr admit/watch と kind_id dispatch が残る。profile dispatch 化は phase-2。",
-    ),
-    (
-        "extgate/src/inbound/binding.rs",
-        "binding owner 解決が Nostr pubkey / Discord config の platform 別 DB schema に依存する。registry 化は phase-2。",
-    ),
-    (
-        "extgate/src/inbound/bundle_turn.rs",
-        "NostrBundleAdmit の完了・relay・Nostr watch prompt を扱う Nostr profile plumbing。phase-2 で profile dispatch 化。",
-    ),
-    (
-        "extgate/src/inbound/nostr_profile.rs",
-        "Nostr 受信の wire 形式（[NOSTRGATE/V1]）解釈・relay・renderer kind・prompt 整形を持つ Nostr profile。",
-    ),
-    (
-        "extgate/src/inbound/record.rs",
-        "Nostr V1 reply_to を session metadata へ写す kind_id dispatch が残る。profile dispatch 化は phase-2。",
-    ),
-    (
-        "extgate/src/inbound/turn.rs",
-        "turn caller platform・inbound pubkey・held turn に Nostr profile 分岐/型が残る。profile dispatch 化は phase-2。",
-    ),
-    (
-        "extgate/src/completion.rs",
-        "resume ターンの LiveInboundScope 選択に Nostr 固有の話者スコープ分岐が残る。profile dispatch 化は phase-2。",
-    ),
-    (
-        "extgate/src/registry.rs",
-        "Nostr profile hook（NostrSaidAdmit / nostr_workspace / nostr_relay / NostrBundleAdmit 等）を保持。profile 抽象化は phase-2。",
-    ),
-    (
-        "extgate/src/bundle.rs",
-        "Nostr バンドル admit の状態機械と nostr_bundle_state テーブル。Nostr profile 実装。phase-2 で profile 側へ。",
-    ),
-    (
-        "extgate/src/lib.rs",
-        "co-agent 解決の platform 分岐（TRUSTED_PLATFORM_DISCORD/NOSTR → resolve_agent_by_*）。DB 側の platform 別 ID 列に依存し registry 化は phase-2。",
-    ),
 ];
 
 // ---------------------------------------------------------------------------
@@ -385,7 +322,7 @@ fn collect_rs_files(src_root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// `crates/` を基準にした相対パス（`extgate/src/foo.rs` の形）。allowlist 照合に使う。
+/// `crates/` を基準にした相対path（`extgate/src/foo.rs`の形）。
 fn rel_from_crates(crates_dir: &Path, path: &Path) -> String {
     path.strip_prefix(crates_dir)
         .unwrap_or(path)
@@ -425,31 +362,20 @@ fn gateway_shared_layer_has_no_platform_branch() {
         .expect("crates/ dir")
         .to_path_buf();
 
-    let extgate_src = crates_dir.join("extgate/src");
-    let gate_client_src = crates_dir.join("gate-client/src");
     let mut files = Vec::new();
-    collect_rs_files(&extgate_src, &extgate_src, &mut files);
-    collect_rs_files(&gate_client_src, &gate_client_src, &mut files);
+    for crate_name in ["core", "extgate", "gate-client"] {
+        let src = crates_dir.join(crate_name).join("src");
+        collect_rs_files(&src, &src, &mut files);
+    }
     files.sort();
     assert!(
         !files.is_empty(),
         "gateway 共有層の src に .rs が見つからない"
     );
 
-    // allowlist の各エントリが実在ファイルを指すことを保証（腐った allowlist を防ぐ）。
-    for (rel, _why) in ALLOWLIST {
-        assert!(
-            crates_dir.join(rel).is_file(),
-            "ALLOWLIST の項目 {rel} が実在しない（リネーム後の腐り。更新すること）"
-        );
-    }
-
     let mut violations = Vec::new();
     for file in &files {
         let rel = rel_from_crates(&crates_dir, file);
-        if ALLOWLIST.iter().any(|(a, _)| *a == rel) {
-            continue;
-        }
         let text = std::fs::read_to_string(file)
             .unwrap_or_else(|e| panic!("read {} に失敗: {e}", file.display()));
         violations.extend(scan_source(&rel, &text));
@@ -457,9 +383,7 @@ fn gateway_shared_layer_has_no_platform_branch() {
 
     assert!(
         violations.is_empty(),
-        "gateway 共有層（allowlist 外）に platform 特化分岐 / gate 固有語彙が見つかった \
-         （generic 面に混入した証拠。禁止語を減らさず該当箇所を profile へ寄せるか、\
-         正当なら理由付きで ALLOWLIST に登録すること）:\n{}",
+        "gateway共有層にplatform特化分岐／固有語彙が見つかった:\n{}",
         violations.join("\n")
     );
 }

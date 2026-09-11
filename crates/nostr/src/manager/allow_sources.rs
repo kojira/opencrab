@@ -27,10 +27,16 @@ pub(super) async fn build_allow_sources<R: NostrAgentRunner>(
     let to_set = |v: &[String]| -> HashSet<String> {
         v.iter().map(|s| crate::pubkey::follow_key(s)).collect()
     };
+    let co_agent_identities = db
+        .co_agent_identities
+        .iter()
+        .map(|(key, agent_id)| (crate::pubkey::follow_key(key), agent_id.clone()))
+        .collect();
     Ok(AllowSources {
         followees,
         owner: to_set(&db.owner),
         co_agents: to_set(&db.co_agents),
+        co_agent_identities,
         trusted_users: to_set(&db.trusted_users),
     })
 }

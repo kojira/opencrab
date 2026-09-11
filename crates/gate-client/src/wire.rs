@@ -99,6 +99,56 @@ pub fn said_frame_with_author_label(
     text: &str,
     attachments: &[Attachment],
 ) -> Value {
+    said_frame_with_context(
+        id,
+        binding_id,
+        origin,
+        author_id,
+        author_label,
+        None,
+        text,
+        attachments,
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SaidContext {
+    pub caller: SaidCaller,
+    pub start_turn: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_context: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_target: Option<String>,
+    pub live_inbound_scope: LiveInboundScope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "role", rename_all = "snake_case")]
+pub enum SaidCaller {
+    Owner,
+    Agent,
+    CoAgent { agent_id: String },
+    TrustedUser,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveInboundScope {
+    All,
+    Speaker,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn said_frame_with_context(
+    id: &str,
+    binding_id: &str,
+    origin: &str,
+    author_id: &str,
+    author_label: Option<&str>,
+    context: Option<&SaidContext>,
+    text: &str,
+    attachments: &[Attachment],
+) -> Value {
     let mut frame = json!({
         "id": id,
         "m": "said",
@@ -110,6 +160,18 @@ pub fn said_frame_with_author_label(
     });
     if let Some(label) = author_label {
         frame["author_label"] = json!(label);
+    }
+    if let Some(context) = context {
+        frame["caller"] = serde_json::to_value(&context.caller).expect("caller serializes");
+        frame["start_turn"] = json!(context.start_turn);
+        if let Some(system) = &context.system_context {
+            frame["system_context"] = json!(system);
+        }
+        if let Some(target) = &context.reply_target {
+            frame["reply_target"] = json!(target);
+        }
+        frame["live_inbound_scope"] =
+            serde_json::to_value(context.live_inbound_scope).expect("scope serializes");
     }
     frame
 }

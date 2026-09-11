@@ -9,12 +9,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use opencrab_gate_client::client::{InstanceClient, LiveEvent, PostRefuse, SaidOutcome};
+use opencrab_gate_client::wire::{LiveInboundScope, SaidContext};
 use opencrab_gate_client::SayPolicy;
 use tokio::sync::Notify;
 
 use crate::config::{
-    config_digest, mention_lane_filter, parse_instance_config, watches_beyond_self, InstanceConfig,
-    InstancePlacement, WatchFilter, WatchPlacement,
+    config_digest, mention_lane_filter, parse_instance_config, watches_beyond_self, AccessConfig,
+    InstanceConfig, InstancePlacement, WatchFilter, WatchPlacement,
 };
 use crate::dedup::SeenEvents;
 use crate::harness::HarnessOverrides;
@@ -295,6 +296,7 @@ fn start_lanes(
                 cfg.relays.clone(),
                 planned.filter,
                 cfg.self_pubkey.clone(),
+                cfg.access.clone(),
                 planned.watch,
                 secret.clone(),
                 nostaro_bin.clone(),
@@ -315,6 +317,7 @@ fn spawn_lane(
     relays: Vec<String>,
     filter: WatchFilter,
     self_pubkey: String,
+    access: AccessConfig,
     watch: Option<WatchPlacement>,
     secret: Option<Arc<String>>,
     nostaro_bin: PathBuf,
@@ -344,6 +347,7 @@ fn spawn_lane(
             let self_pubkey = self_pubkey.clone();
             let metrics = metrics.clone();
             let seen = seen.clone();
+            let access = access.clone();
             move |line: String| {
                 let pending = pending.clone();
                 let client = client.clone();
@@ -352,12 +356,14 @@ fn spawn_lane(
                 let self_pubkey = self_pubkey.clone();
                 let metrics = metrics.clone();
                 let seen = seen.clone();
+                let access = access.clone();
                 tokio::spawn(async move {
                     handle_line(
                         &client,
                         &address,
                         &lane,
                         &self_pubkey,
+                        &access,
                         beyond,
                         &pending,
                         &metrics,
@@ -393,6 +399,7 @@ fn spawn_lane(
                     &address,
                     &lane,
                     &self_pubkey,
+                    &access,
                     beyond,
                     &pending,
                     &metrics,
@@ -418,6 +425,7 @@ async fn handle_line(
     address: &str,
     lane: &Lane,
     self_pubkey: &str,
+    access: &AccessConfig,
     beyond: bool,
     pending: &tokio::sync::Mutex<Vec<WatchEvent>>,
     metrics: &SaidMetrics,
@@ -427,6 +435,10 @@ async fn handle_line(
     let Some(event) = parse_watch_line(&line) else {
         return;
     };
+    if crate::admission::admit(&event, self_pubkey, access).is_none() {
+        tracing::debug!(id = %event.id, "event dropped by gateway admission");
+        return;
+    }
     // Defect A（QC #10）: 自分宛て #p メンション/リプライは default(mention) 車線が `--npub` で
     // 必ず即時に拾う。watch 車線が同じイベントを先に握っても、ここで default 車線へ譲って捨てる。
     // これで owner がフォロイーにも含まれるときのレースで watch origin に取り込まれ、権限デバウンスへ
@@ -456,6 +468,7 @@ async fn handle_line(
         address,
         lane,
         self_pubkey,
+        access,
         beyond,
         &event,
         None,
@@ -533,6 +546,7 @@ async fn flush_bundle(
     address: &str,
     lane: &Lane,
     self_pubkey: &str,
+    access: &AccessConfig,
     beyond: bool,
     pending: &tokio::sync::Mutex<Vec<WatchEvent>>,
     metrics: &SaidMetrics,
@@ -597,6 +611,7 @@ async fn flush_bundle(
             address,
             lane,
             self_pubkey,
+            access,
             beyond,
             event,
             Some(&place),
@@ -620,36 +635,38 @@ async fn send_mapped(
     address: &str,
     lane: &Lane,
     self_pubkey: &str,
+    access: &AccessConfig,
     beyond: bool,
     event: &WatchEvent,
     bundle: Option<&BundlePlace>,
     metrics: &SaidMetrics,
 ) -> bool {
+    let Some(caller) = crate::admission::admit(event, self_pubkey, access) else {
+        tracing::debug!(id = %event.id, "said dropped by gateway admission");
+        return true;
+    };
     let Some(mapped) = map_event(event, self_pubkey, beyond, lane, bundle) else {
         tracing::warn!(id = %event.id, "said dropped; author or event id is not hex");
         return false;
     };
-    let post = if bundle.is_some() {
-        client
-            .post_said_receipt(
-                address,
-                &mapped.origin,
-                &mapped.author_id,
-                &mapped.text,
-                &[],
-            )
-            .await
-    } else {
-        client
-            .post_said_with_author(
-                address,
-                &mapped.origin,
-                &mapped.author_id,
-                &mapped.text,
-                &[],
-            )
-            .await
+    let context = SaidContext {
+        caller,
+        start_turn: bundle.is_none_or(|place| place.index == place.count),
+        system_context: Some(mapped.system_context.clone()),
+        reply_target: mapped.reply_target.clone(),
+        live_inbound_scope: LiveInboundScope::Speaker,
     };
+    let post = client
+        .post_said_with_context(
+            address,
+            &mapped.origin,
+            &mapped.author_id,
+            None,
+            &context,
+            &mapped.text,
+            &mapped.attachments,
+        )
+        .await;
     match post {
         Ok(outcome) => {
             record_said_outcome(metrics, &mapped.origin, &outcome);

@@ -186,15 +186,32 @@ pub enum SaidAttachment {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SaidCaller {
+    Owner,
+    Agent,
+    CoAgent { agent_id: String },
+    TrustedUser,
+}
+
 #[derive(Debug, Clone)]
 pub struct Said {
     pub id: String,
     pub binding_id: String,
     pub origin: String,
     pub author_id: String,
-    /// Untrusted, display-only label supplied by the gateway. Authorization
-    /// continues to use `author_id` exclusively.
+    /// Untrusted, display-only label supplied by the gateway.
     pub author_label: Option<String>,
+    /// Caller classification asserted by the operator-installed gateway.
+    pub caller: SaidCaller,
+    /// Whether this record starts a model turn. False supports provider-neutral batch staging.
+    pub start_turn: bool,
+    /// Optional gateway-provided system context. Core treats it as opaque text.
+    pub system_context: Option<String>,
+    /// Optional external reply reference, persisted without interpretation.
+    pub reply_target: Option<String>,
+    /// Restrict live inbound folding to this speaker without naming a platform.
+    pub only_speaker: bool,
     pub text: String,
     pub attachments: Vec<SaidAttachment>,
 }
@@ -349,6 +366,20 @@ fn parse_said(obj: &Value) -> Result<Said, GateError> {
         }
         _ => return Err(GateError::new(ErrorCode::BadRequest)),
     };
+    let caller = parse_said_caller(obj.get("caller"))?;
+    let start_turn = match obj.get("start_turn") {
+        None | Some(Value::Null) => true,
+        Some(Value::Bool(value)) => *value,
+        _ => return Err(GateError::new(ErrorCode::BadRequest)),
+    };
+    let system_context = optional_bounded_text(obj.get("system_context"), 16_384)?;
+    let reply_target = optional_bounded_text(obj.get("reply_target"), 4_096)?;
+    let only_speaker = match obj.get("live_inbound_scope") {
+        None | Some(Value::Null) => false,
+        Some(Value::String(scope)) if scope == "all" => false,
+        Some(Value::String(scope)) if scope == "speaker" => true,
+        _ => return Err(GateError::new(ErrorCode::BadRequest)),
+    };
     let text = require_str(obj, "text")?;
     let attachments = parse_attachments(obj.get("attachments"))?;
     if text.is_empty() && attachments.is_empty() {
@@ -360,9 +391,43 @@ fn parse_said(obj: &Value) -> Result<Said, GateError> {
         origin,
         author_id,
         author_label,
+        caller,
+        start_turn,
+        system_context,
+        reply_target,
+        only_speaker,
         text,
         attachments,
     })
+}
+
+fn parse_said_caller(value: Option<&Value>) -> Result<SaidCaller, GateError> {
+    let Some(Value::Object(obj)) = value else {
+        return Ok(SaidCaller::Agent);
+    };
+    match obj.get("role").and_then(Value::as_str) {
+        Some("owner") => Ok(SaidCaller::Owner),
+        Some("agent") => Ok(SaidCaller::Agent),
+        Some("trusted_user") => Ok(SaidCaller::TrustedUser),
+        Some("co_agent") => {
+            let agent_id = nonempty_map_str(obj, "agent_id")?;
+            Ok(SaidCaller::CoAgent { agent_id })
+        }
+        _ => Err(GateError::new(ErrorCode::BadRequest)),
+    }
+}
+
+fn optional_bounded_text(
+    value: Option<&Value>,
+    max_bytes: usize,
+) -> Result<Option<String>, GateError> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) if !text.is_empty() && text.len() <= max_bytes => {
+            Ok(Some(text.clone()))
+        }
+        _ => Err(GateError::new(ErrorCode::BadRequest)),
+    }
 }
 
 fn parse_attachments(value: Option<&Value>) -> Result<Vec<SaidAttachment>, GateError> {

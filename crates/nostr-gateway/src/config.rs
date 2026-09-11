@@ -30,6 +30,20 @@ pub struct InstanceConfig {
     pub watches: Vec<WatchPlacement>,
     #[serde(default)]
     pub delivery_mode: Option<String>,
+    #[serde(default)]
+    pub access: AccessConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AccessConfig {
+    #[serde(default)]
+    pub followees: Vec<String>,
+    #[serde(default)]
+    pub owner: Vec<String>,
+    #[serde(default)]
+    pub co_agents: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub trusted_users: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -242,6 +256,7 @@ mod tests {
             name: Some("crab".into()),
             watches: vec![],
             delivery_mode: Some("tool_driven".into()),
+            access: AccessConfig::default(),
         }
     }
 

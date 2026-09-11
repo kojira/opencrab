@@ -14,8 +14,7 @@ use opencrab_llm::traits::LlmProvider;
 use opencrab_server::AppState;
 
 use opencrab_extgate::{
-    admin_router, resolve_caller_identity_with_owner, serve_uds, ExtgateState, NostrSaidDecision,
-    NostrWatchSets, OperatorToken,
+    admin_router, resolve_caller_identity_with_owner, serve_uds, ExtgateState, OperatorToken,
 };
 use opencrab_gate_client::client::InstanceClient;
 use opencrab_nostr_gateway::config::InstancePlacement;
@@ -472,7 +471,6 @@ struct Core {
     sock: PathBuf,
     subject_id: i64,
     _dir: tempfile::TempDir,
-    _ws: tempfile::TempDir,
 }
 
 /// 実 serve_uds core + 実 AppState runtime を UDS で立ち上げ、nostr admit/watch hooks を配線する。
@@ -481,58 +479,10 @@ async fn start_core(provider: Arc<dyn LlmProvider>) -> Core {
     let db = opencrab_db::Db::from_connection(conn);
     register_mock_pricing(&db);
     let subject_id = upsert_test_agent(&db);
-    // owner = 発端 author にして caller=Owner に解決させる（spawn_subtask 等を確実に使える）。
-    {
-        let conn = db.lock().unwrap();
-        opencrab_db::queries::upsert_agent_nostr_config(
-            &conn,
-            &opencrab_db::queries::AgentNostrConfigRow {
-                agent_id: AGENT_ID.into(),
-                secret_key: "nsec1placeholder".into(),
-                relays_json: "[]".into(),
-                filter_json: "{}".into(),
-                enabled: true,
-            },
-        )
-        .unwrap();
-        opencrab_db::queries::set_agent_nostr_owner_pubkey(&conn, AGENT_ID, &author_pk()).unwrap();
-    }
-
     let extgate = Arc::new(ExtgateState::new(
         db.clone(),
         OperatorToken::from_bytes(TOKEN),
     ));
-
-    // nostr said の元栓。production（server main）と同じ `admit_nostr_said` を呼ぶ。
-    // allow-set に author を入れ、self_pubkey は config と揃える。
-    let self_pk = self_pk();
-    let author = author_pk();
-    extgate.set_nostr_said_admit(Arc::new(move |_agent_id, author_id, text| {
-        use opencrab_extgate::{ErrorCode, GateError};
-        use opencrab_nostr::{admit_nostr_said, AdmitSaidError, AllowSources, IngressRoute};
-        let mut allow = AllowSources::default();
-        allow.owner.insert(author.clone());
-        match admit_nostr_said(text, author_id, &self_pk, &allow) {
-            Err(AdmitSaidError::BadAnchor) => Err(GateError::new(ErrorCode::BadRequest)),
-            Err(AdmitSaidError::Drop { .. }) => Ok(NostrSaidDecision::Drop { bundle: None }),
-            Ok(anchor) => Ok(NostrSaidDecision::Accept {
-                watch_id: anchor.watch_id,
-                immediate: anchor.route == IngressRoute::Immediate,
-                bundle: None,
-            }),
-        }
-    }));
-    let author_sets = author_pk();
-    extgate.set_nostr_watch_sets(Arc::new(move |_agent_id| {
-        let mut sets = NostrWatchSets::default();
-        sets.owner.insert(author_sets.clone());
-        Some(sets)
-    }));
-    let ws = tempfile::tempdir().unwrap();
-    let ws_path = ws.path().to_path_buf();
-    // workspace hook はサニタイズ退避先。TempDir は Core が保持して test 期間中は生かす。
-    extgate.set_nostr_workspace(Arc::new(move |_agent_id| Some(ws_path.clone())));
-    extgate.set_nostr_relay(Arc::new(|_agent_id, _text| {}));
 
     let state = build_app_state(db.clone(), provider);
     // #925: 本番と同じ descriptor 登録＋ V3 heartbeat 受け口を実型で配線する（Nostr レーンも
@@ -576,7 +526,6 @@ async fn start_core(provider: Arc<dyn LlmProvider>) -> Core {
         sock,
         subject_id,
         _dir: dir,
-        _ws: ws,
     }
 }
 
@@ -692,6 +641,7 @@ fn nostr_config(watches: Option<serde_json::Value>) -> Vec<u8> {
         "self_pubkey": self_pk(),
         "name": "crab",
         "delivery_mode": "say",
+        "access": {"owner": [author_pk()]},
     });
     if let Some(w) = watches {
         cfg["watches"] = w;

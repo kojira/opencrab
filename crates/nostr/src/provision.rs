@@ -67,6 +67,37 @@ pub fn instance_config_bytes(
     )?)?)
 }
 
+pub fn instance_config_bytes_with_access(
+    self_pubkey: &str,
+    name: &str,
+    config: &NostrConfig,
+    watches: &[SessionWatchRow],
+    access: &crate::AllowSources,
+) -> anyhow::Result<Vec<u8>> {
+    fn sorted(values: &std::collections::HashSet<String>) -> Vec<String> {
+        let mut values: Vec<String> = values.iter().cloned().collect();
+        values.sort();
+        values
+    }
+
+    let mut value = instance_config_value(self_pubkey, name, config, watches)?;
+    let mut co_agents: std::collections::BTreeMap<String, String> = access
+        .co_agent_identities
+        .iter()
+        .map(|(key, agent_id)| (key.clone(), agent_id.clone()))
+        .collect();
+    for key in sorted(&access.co_agents) {
+        co_agents.entry(key).or_default();
+    }
+    value["access"] = json!({
+        "co_agents": co_agents,
+        "followees": sorted(&access.followees),
+        "owner": sorted(&access.owner),
+        "trusted_users": sorted(&access.trusted_users),
+    });
+    Ok(serde_json::to_vec(&value)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

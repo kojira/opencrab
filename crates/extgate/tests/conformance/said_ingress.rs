@@ -100,6 +100,54 @@ async fn author_label_is_persisted_and_reaches_live_turn() {
 }
 
 #[tokio::test]
+async fn staged_said_records_without_turn_until_batch_trigger() {
+    let h = Harness::start().await;
+    let (mut s, _, binding_id) = ready_pair(&h).await;
+    write_frame(
+        &mut s,
+        &json!({
+            "id": "stage-1", "m": "said", "binding_id": binding_id,
+            "origin": "batch-1", "author_id": "u1", "caller": {"role": "agent"},
+            "start_turn": false, "text": "first", "attachments": []
+        }),
+    )
+    .await;
+    assert_eq!(read_said_response(&mut s, "stage-1").await["seq"], 1);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(h.runtime.turns.load(Ordering::SeqCst), 0);
+
+    write_frame(
+        &mut s,
+        &json!({
+            "id": "stage-2", "m": "said", "binding_id": binding_id,
+            "origin": "batch-2", "author_id": "u2", "caller": {"role": "agent"},
+            "start_turn": true, "text": "second", "attachments": []
+        }),
+    )
+    .await;
+    assert_eq!(read_said_response(&mut s, "stage-2").await["seq"], 2);
+    for _ in 0..50 {
+        if h.runtime.turns.load(Ordering::SeqCst) == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(h.runtime.turns.load(Ordering::SeqCst), 1);
+    let count: i64 = h
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM memory_sessions WHERE json_extract(metadata_json, '$.external_origin') IN ('batch-1', 'batch-2')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 2);
+}
+
+#[tokio::test]
 async fn said_seq_null_when_not_recorded_and_lookups_are_real() {
     let h = Harness::start().await;
     let (mut s, _, binding_id) = ready_pair(&h).await;

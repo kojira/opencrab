@@ -5,8 +5,8 @@ use opencrab_db::queries::{
     create_gate_binding_in_tx, get_session, CreateGateBindingError, SessionWatchRow,
 };
 use opencrab_nostr::{
-    instance_config_bytes, nostr_instance_id, plan_session_bindings, NostrConfig,
-    SessionBindingPlan,
+    instance_config_bytes_with_access, nostr_instance_id, plan_session_bindings, AllowSources,
+    NostrConfig, SessionBindingPlan,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
@@ -129,12 +129,14 @@ pub fn provision_nostr_gate(
     self_pubkey: &str,
     config: &NostrConfig,
     watches: &[SessionWatchRow],
+    access: &AllowSources,
     now: i64,
 ) -> Result<Vec<SessionBindingPlan>> {
     let plans = plan_session_bindings(agent_id, watches)?;
     let instance_id = nostr_instance_id(agent_id);
     let name = agent_name(conn, agent_id)?;
-    let config_bytes = instance_config_bytes(self_pubkey, &name, config, watches)?;
+    let config_bytes =
+        instance_config_bytes_with_access(self_pubkey, &name, config, watches, access)?;
     let config_b64 = opencrab_extgate::encode_config_b64(&config_bytes);
     let digest = opencrab_extgate::config_digest(&config_bytes);
 
@@ -238,9 +240,10 @@ pub fn revise_nostr_gate(
     self_pubkey: &str,
     config: &NostrConfig,
     watches: &[SessionWatchRow],
+    access: &AllowSources,
     now: i64,
 ) -> Result<u64> {
-    update_nostr_instance(conn, agent_id, self_pubkey, config, watches, now)
+    update_nostr_instance(conn, agent_id, self_pubkey, config, watches, access, now)
 }
 
 fn update_nostr_instance(
@@ -249,11 +252,13 @@ fn update_nostr_instance(
     self_pubkey: &str,
     config: &NostrConfig,
     watches: &[SessionWatchRow],
+    access: &AllowSources,
     now: i64,
 ) -> Result<u64> {
     let instance_id = nostr_instance_id(agent_id);
     let name = agent_name(conn, agent_id)?;
-    let config_bytes = instance_config_bytes(self_pubkey, &name, config, watches)?;
+    let config_bytes =
+        instance_config_bytes_with_access(self_pubkey, &name, config, watches, access)?;
     let config_b64 = opencrab_extgate::encode_config_b64(&config_bytes);
     let digest = opencrab_extgate::config_digest(&config_bytes);
     let subject_id: i64 = conn
@@ -354,7 +359,16 @@ mod tests {
             relays: vec!["wss://yabu.me".into()],
             filter: opencrab_nostr::NostrFilter::default(),
         };
-        let plans = provision_nostr_gate(&mut conn, "a1", &"aa".repeat(32), &cfg, &[], 1).unwrap();
+        let plans = provision_nostr_gate(
+            &mut conn,
+            "a1",
+            &"aa".repeat(32),
+            &cfg,
+            &[],
+            &AllowSources::default(),
+            1,
+        )
+        .unwrap();
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].address, sid);
         assert_eq!(plans[0].binding_id, nostr_binding_id("a1", &sid));
@@ -396,7 +410,16 @@ mod tests {
             relays: vec!["wss://yabu.me".into()],
             filter: opencrab_nostr::NostrFilter::default(),
         };
-        provision_nostr_gate(&mut conn, "a1", &"aa".repeat(32), &cfg, &[], 1).unwrap();
+        provision_nostr_gate(
+            &mut conn,
+            "a1",
+            &"aa".repeat(32),
+            &cfg,
+            &[],
+            &AllowSources::default(),
+            1,
+        )
+        .unwrap();
 
         let placements = load_nostr_placement_plans(&conn).unwrap();
         assert_eq!(placements.len(), 1);
@@ -439,8 +462,16 @@ mod tests {
             relays: vec!["wss://yabu.me".into()],
             filter: opencrab_nostr::NostrFilter::default(),
         };
-        let err =
-            provision_nostr_gate(&mut conn, "a1", &"aa".repeat(32), &cfg, &[], 1).unwrap_err();
+        let err = provision_nostr_gate(
+            &mut conn,
+            "a1",
+            &"aa".repeat(32),
+            &cfg,
+            &[],
+            &AllowSources::default(),
+            1,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("session"));
     }
 
@@ -457,8 +488,26 @@ mod tests {
         insert_session_in_tx(&tx, &sid, &sid, "2026-01-01T00:00:00Z").unwrap();
         insert_agent_session_in_tx(&tx, "a1", &sid).unwrap();
         tx.commit().unwrap();
-        provision_nostr_gate(&mut conn, "a1", &"aa".repeat(32), &cfg, &[], 1).unwrap();
-        let rev = revise_nostr_gate(&mut conn, "a1", &"bb".repeat(32), &cfg, &[], 2).unwrap();
+        provision_nostr_gate(
+            &mut conn,
+            "a1",
+            &"aa".repeat(32),
+            &cfg,
+            &[],
+            &AllowSources::default(),
+            1,
+        )
+        .unwrap();
+        let rev = revise_nostr_gate(
+            &mut conn,
+            "a1",
+            &"bb".repeat(32),
+            &cfg,
+            &[],
+            &AllowSources::default(),
+            2,
+        )
+        .unwrap();
         assert_eq!(rev, 2);
         let stored: i64 = conn
             .query_row(
@@ -483,7 +532,16 @@ mod tests {
         insert_session_in_tx(&tx, &sid, &sid, "2026-01-01T00:00:00Z").unwrap();
         insert_agent_session_in_tx(&tx, "a1", &sid).unwrap();
         tx.commit().unwrap();
-        provision_nostr_gate(&mut conn, "a1", &"aa".repeat(32), &cfg, &[], 1).unwrap();
+        provision_nostr_gate(
+            &mut conn,
+            "a1",
+            &"aa".repeat(32),
+            &cfg,
+            &[],
+            &AllowSources::default(),
+            1,
+        )
+        .unwrap();
         let config_b64: String = conn
             .query_row(
                 "SELECT config_b64 FROM gate_instances WHERE instance_id = ?1",
@@ -522,8 +580,16 @@ mod tests {
             relays: vec!["wss://yabu.me".into()],
             filter: opencrab_nostr::NostrFilter::default(),
         };
-        let err =
-            provision_nostr_gate(&mut conn, "a1", &"aa".repeat(32), &cfg, &[], 1).unwrap_err();
+        let err = provision_nostr_gate(
+            &mut conn,
+            "a1",
+            &"aa".repeat(32),
+            &cfg,
+            &[],
+            &AllowSources::default(),
+            1,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("agents.name"),
             "empty name must fail-loud: {err}"

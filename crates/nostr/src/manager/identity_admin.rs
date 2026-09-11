@@ -39,7 +39,8 @@ impl<R: NostrAgentRunner> V3IdentityRestart<R> {
         let Some(revise) = self.reviser.as_ref() else {
             anyhow::bail!("nostr_ingress=v3 なのに reviser が無い");
         };
-        revise(agent_id, self_pubkey, &config, &watches)?;
+        let allow_sources = build_allow_sources(&self.runner, &self.cli, agent_id).await?;
+        revise(agent_id, self_pubkey, &config, &watches, &allow_sources)?;
         spawn_agent_gateway(
             &self.gateways,
             &self.admins,
@@ -247,7 +248,7 @@ pub(super) async fn spawn_agent_gateway<R: NostrAgentRunner>(
     );
     allow_store.replace_allow(agent_id, allow_sources.clone());
     allow_store.set_self_pubkey(agent_id, self_pubkey.clone());
-    let allow: AllowGate = Arc::new(RwLock::new(allow_sources));
+    let allow: AllowGate = Arc::new(RwLock::new(allow_sources.clone()));
 
     // #489: 自 pubkey を co_agent 逆引き表（`agent_nostr_config.self_pubkey`）へ書き戻す。
     // 出所は自 secret_key から導出した自分の pubkey（受信著者ではない）＝信頼できる出所。
@@ -284,7 +285,7 @@ pub(super) async fn spawn_agent_gateway<R: NostrAgentRunner>(
     let Some(provision) = provisioner.as_ref() else {
         anyhow::bail!("Nostr V3 binding provisioner が無い");
     };
-    provision(agent_id, &self_pubkey, &config, &watches)?;
+    provision(agent_id, &self_pubkey, &config, &watches, &allow_sources)?;
 
     let runner_c = runner.clone();
     let cli_c = cli.clone();

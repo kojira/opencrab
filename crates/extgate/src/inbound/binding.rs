@@ -1,4 +1,3 @@
-use opencrab_db::queries::{get_agent_discord_config, get_agent_nostr_owner_pubkey};
 use rusqlite::{params, Connection, Transaction};
 
 use crate::delivery_mode::DeliveryMode;
@@ -11,10 +10,8 @@ use super::SaidOutcome;
 #[derive(Clone)]
 pub(super) struct OriginRow {
     pub(super) instance_id: String,
-    pub(super) kind_id: String,
     pub(super) address: String,
     pub(super) agent_id: String,
-    pub(super) owner_id: String,
     pub(super) delivery_mode: DeliveryMode,
 }
 
@@ -91,29 +88,18 @@ pub(super) fn load_origin_row(
     match result {
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(_) => Err(GateError::store()),
-        Ok((inst, kind_id, address, agent_id, closed, config_b64)) => {
+        Ok((inst, _kind_id, address, agent_id, closed, config_b64)) => {
             if inst != instance_id || closed.is_some() {
                 return Ok(None);
             }
-            let owner_id = if kind_id == "nostr" {
-                get_agent_nostr_owner_pubkey(tx, &agent_id).map_err(|_| GateError::store())?
-            } else {
-                get_agent_discord_config(tx, &agent_id)
-                    .ok()
-                    .flatten()
-                    .map(|c| c.owner_discord_id)
-                    .unwrap_or_default()
-            };
             let config_bytes = decode_config_b64(&config_b64)?;
             let delivery_mode =
                 crate::delivery_mode::delivery_mode_from_config_bytes(&config_bytes)
                     .map_err(|_| GateError::new(ErrorCode::BadRequest))?;
             Ok(Some(OriginRow {
                 instance_id: inst,
-                kind_id,
                 address,
                 agent_id,
-                owner_id,
                 delivery_mode,
             }))
         }
@@ -128,9 +114,7 @@ pub(super) fn load_origin_row(
 /// 非依存なので呼び出し側（fire.rs）が行う。open binding・未削除 instance のみ解決する。
 pub(crate) struct BindingContext {
     pub instance_id: String,
-    pub kind_id: String,
     pub agent_id: String,
-    pub owner_id: String,
     pub delivery_mode: DeliveryMode,
 }
 
@@ -159,20 +143,10 @@ pub(crate) fn resolve_binding_context(
     let config_bytes = decode_config_b64(&config_b64).ok()?;
     let delivery_mode =
         crate::delivery_mode::delivery_mode_from_config_bytes(&config_bytes).ok()?;
-    let owner_id = if kind_id == "nostr" {
-        get_agent_nostr_owner_pubkey(conn, &agent_id).ok()?
-    } else {
-        get_agent_discord_config(conn, &agent_id)
-            .ok()
-            .flatten()
-            .map(|c| c.owner_discord_id)
-            .unwrap_or_default()
-    };
+    let _ = kind_id;
     Some(BindingContext {
         instance_id,
-        kind_id,
         agent_id,
-        owner_id,
         delivery_mode,
     })
 }

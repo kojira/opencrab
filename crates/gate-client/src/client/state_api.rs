@@ -374,6 +374,32 @@ impl InstanceClient {
             origin,
             author_id,
             author_label,
+            None,
+            text,
+            attachments,
+            true,
+        )
+        .await
+    }
+
+    /// Platform-neutral contextを伴うSaid。個別gatewayの判断結果はこの汎用形で渡す。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn post_said_with_context(
+        &self,
+        address: &str,
+        origin: &str,
+        author_id: &str,
+        author_label: Option<&str>,
+        context: &SaidContext,
+        text: &str,
+        attachments: &[Attachment],
+    ) -> Result<SaidOutcome, PostRefuse> {
+        self.post_said_inner(
+            address,
+            origin,
+            author_id,
+            author_label,
+            Some(context),
             text,
             attachments,
             true,
@@ -418,6 +444,7 @@ impl InstanceClient {
             origin,
             author_id,
             author_label,
+            None,
             text,
             attachments,
             false,
@@ -432,6 +459,7 @@ impl InstanceClient {
         origin: &str,
         author_id: &str,
         author_label: Option<&str>,
+        context: Option<&SaidContext>,
         text: &str,
         attachments: &[Attachment],
         occupy_until_turn_ends: bool,
@@ -473,12 +501,13 @@ impl InstanceClient {
                 },
             );
         }
-        let frame = said_frame_with_author_label(
+        let frame = said_frame_with_context(
             &id,
             &binding_id,
             origin,
             author_id,
             author_label,
+            context,
             text,
             attachments,
         );

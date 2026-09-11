@@ -92,7 +92,7 @@
         let runner = SlowRunner::new(Duration::from_millis(1));
         let (_fake, cli) = fake_nostaro("selfpubkeyhex");
         let mgr = NostrGatewayManager::new(runner.clone(), test_router()).with_cli(cli)
-            .with_provisioner(Arc::new(|_, _, _, _| Ok(())));
+            .with_provisioner(Arc::new(|_, _, _, _, _| Ok(())));
 
         assert!(!mgr.is_running(agent), "採用前は未稼働（未設定）");
 
@@ -186,7 +186,7 @@
         let runner = SlowRunner::new(Duration::from_millis(1)).with_preset_config(existing);
         let (_fake, cli) = fake_nostaro("selfpubkeyhex");
         let mgr = NostrGatewayManager::new(runner.clone(), test_router()).with_cli(cli)
-            .with_provisioner(Arc::new(|_, _, _, _| Ok(())));
+            .with_provisioner(Arc::new(|_, _, _, _, _| Ok(())));
 
         mgr.identity_provisioner()
             .adopt_identity(agent, npub)
@@ -243,7 +243,7 @@
         // pubkey を返さない fake → 起動が pubkey ガード（fail-closed）で失敗する。
         let (_fake, cli) = fake_nostaro("");
         let mgr = NostrGatewayManager::new(runner.clone(), test_router()).with_cli(cli)
-            .with_provisioner(Arc::new(|_, _, _, _| Ok(())));
+            .with_provisioner(Arc::new(|_, _, _, _, _| Ok(())));
 
         let res = mgr.identity_provisioner().adopt_identity(agent, npub).await;
         assert!(res.is_err(), "pubkey 取得不可なら採用は失敗する");
@@ -284,8 +284,8 @@
         let revise_count = revise_calls.clone();
         let mgr = NostrGatewayManager::new(runner.clone(), test_router())
             .with_cli(cli)
-            .with_provisioner(Arc::new(|_, _, _, _| Ok(())))
-            .with_reviser(Arc::new(move |_, _, _, _| {
+            .with_provisioner(Arc::new(|_, _, _, _, _| Ok(())))
+            .with_reviser(Arc::new(move |_, _, _, _, _| {
                 revise_count.fetch_add(1, AtomicOrdering::SeqCst);
                 Ok(2)
             }));
@@ -372,7 +372,7 @@
         // 64 桁 hex でも npub でもない非空出力 → pubkey 取得ガードは通るが normalize_pubkey は None。
         let (_fake, cli) = fake_nostaro("not-a-valid-pubkey");
         let mgr = NostrGatewayManager::new(runner.clone(), test_router()).with_cli(cli)
-            .with_provisioner(Arc::new(|_, _, _, _| Ok(())));
+            .with_provisioner(Arc::new(|_, _, _, _, _| Ok(())));
 
         let configured = crate::config::NostrConfig {
             relays: vec!["wss://yabu.me".to_string()],

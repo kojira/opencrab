@@ -236,6 +236,7 @@ mod tests {
             name: Some("crab".into()),
             watches: vec![],
             delivery_mode: None,
+            access: crate::config::AccessConfig::default(),
         };
         let args = plan_mention_lane_args(&cfg.relays, &cfg);
         assert_eq!(args[0], "watch");
@@ -273,6 +274,7 @@ mod tests {
             name: Some("くらぶ".into()),
             watches: vec![],
             delivery_mode: None,
+            access: crate::config::AccessConfig::default(),
         };
         let args = plan_mention_lane_args(&cfg.relays, &cfg);
         assert!(
