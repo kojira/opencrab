@@ -84,6 +84,62 @@
     }
 
     #[tokio::test]
+    async fn flat_image_turn_marks_the_current_user_post_separately() {
+        use std::sync::Mutex;
+
+        struct CapturingLlm {
+            captured: Arc<Mutex<Vec<Vec<Message>>>>,
+        }
+
+        #[async_trait]
+        impl LlmClient for CapturingLlm {
+            async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+                self.captured.lock().unwrap().push(request.messages);
+                Ok(final_text_response("done"))
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let engine = SkillEngine::new(
+            Box::new(CapturingLlm {
+                captured: captured.clone(),
+            }),
+            Box::new(MockExecutor::new()),
+            1,
+        );
+        engine
+            .run_with_model_override(
+                "system",
+                "rendered conversation\n\nresponse-only directive",
+                "model",
+                None,
+                &["data:image/png;base64,AAAA".to_string()],
+            )
+            .await
+            .unwrap();
+
+        let calls = captured.lock().unwrap();
+        let messages = &calls[0];
+        assert_eq!(messages.len(), 3);
+        assert_eq!(message_plain_text(&messages[1]), "rendered conversation\n\nresponse-only directive");
+        assert_eq!(messages[2].role, Role::User);
+        let Some(MessageContent::Multi(parts)) = &messages[2].content else {
+            panic!("current image post must be a multipart user message");
+        };
+        assert!(matches!(
+            &parts[0],
+            opencrab_llm_types::ContentPart::Text { text }
+                if text == "[現在のユーザー投稿: 画像添付]"
+        ));
+        assert!(matches!(
+            &parts[1],
+            opencrab_llm_types::ContentPart::ImageUrl { image_url }
+                if image_url.url == "data:image/png;base64,AAAA"
+        ));
+        assert!(!message_plain_text(&messages[2]).contains("Inspect"));
+    }
+
+    #[tokio::test]
     async fn typed_conversation_uses_typed_history() {
         use std::sync::Mutex;
 
