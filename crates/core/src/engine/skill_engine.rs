@@ -131,6 +131,17 @@ struct ToolResultOffload {
 }
 
 impl SkillEngine {
+    /// Run the action loop with the given system context and user message.
+    pub async fn run(
+        &self,
+        system_context: &str,
+        user_message: &str,
+        model: &str,
+    ) -> Result<types::EngineResult> {
+        self.run_with_model_override(system_context, user_message, model, None, &[])
+            .await
+    }
+
     /// Create a new SkillEngine.
     pub fn new(
         llm: Box<dyn LlmClient>,

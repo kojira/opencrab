@@ -27,7 +27,7 @@ pub const EXTGATE_SESSION_PREFIX: &str = "extgate-";
 ///   最終生成が途中本文を配送したか)`。engineを回さなかったターンは`None`。
 /// - `started_subtask` / `agent_has_running`: 進行中があれば付けない（idle でない・§13.3.1 案E）。
 /// - `final_say_id`: 最終応答が say を配送したときのその delivery_id。
-/// - `last_continuation_say`: 上限打ち切りで最終生成の途中本文を配送したとき、そのsayの
+/// - `last_continuation_say`: callback が最終生成の本文を配送したとき、そのsayの
 ///   delivery_id。field名は互換のため維持する。
 pub(crate) fn select_completed_target(
     engine_completion: Option<(Option<String>, bool, bool)>,
@@ -47,7 +47,13 @@ pub(crate) fn select_completed_target(
                 last_reply
             }
         } else {
-            final_say_id.or(last_reply)
+            final_say_id.or_else(|| {
+                if final_had_speech {
+                    last_continuation_say
+                } else {
+                    last_reply
+                }
+            })
         }
     })
 }
@@ -372,6 +378,20 @@ mod tests {
     use crate::ids::session_id_for_binding;
     use opencrab_actions::{CallerIdentity, NoopCompletionSink, SubtaskRegistries};
     use std::sync::Arc;
+
+    #[test]
+    fn final_callback_speech_uses_its_delivery_id_as_completed_target() {
+        assert_eq!(
+            select_completed_target(
+                Some((Some("utterance-call-id".to_string()), false, true)),
+                false,
+                false,
+                None,
+                Some("say-delivery-id".to_string()),
+            ),
+            Some("say-delivery-id".to_string())
+        );
+    }
 
     #[test]
     fn exhausted_turn_reacts_to_the_last_post_instead_of_posting_a_message() {

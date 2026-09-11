@@ -12,20 +12,6 @@ use super::{
 use crate::engine::types::{ChatRequest, EngineResult, LlmCallLog, LlmExchangeLog};
 
 impl SkillEngine {
-    /// Run the action loop with the given system context and user message.
-    ///
-    /// Returns the final text response from the LLM after all tool calls
-    /// have been resolved.
-    pub async fn run(
-        &self,
-        system_context: &str,
-        user_message: &str,
-        model: &str,
-    ) -> Result<EngineResult> {
-        self.run_with_model_override(system_context, user_message, model, None, &[])
-            .await
-    }
-
     /// Run the action loop with optional dynamic model override.
     ///
     /// If `model_override` is provided, the engine checks it before each LLM call
