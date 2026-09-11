@@ -287,7 +287,7 @@ async fn main() -> anyhow::Result<()> {
                 let mut conn = db_for_provision
                     .lock()
                     .map_err(|_| anyhow::anyhow!("db lock for nostr provision"))?;
-                opencrab_server::nostr_provision::provision_nostr_gate(
+                opencrab_nostr::gate_provision::provision_nostr_gate(
                     &mut conn,
                     agent_id,
                     self_pk,
@@ -304,7 +304,7 @@ async fn main() -> anyhow::Result<()> {
                 let mut conn = db_for_revise
                     .lock()
                     .map_err(|_| anyhow::anyhow!("db lock for nostr revise"))?;
-                opencrab_server::nostr_provision::revise_nostr_gate(
+                opencrab_nostr::gate_provision::revise_nostr_gate(
                     &mut conn,
                     agent_id,
                     self_pk,

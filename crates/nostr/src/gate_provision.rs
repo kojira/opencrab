@@ -1,12 +1,12 @@
 //! Nostr instance / binding の core 側敷設。address は既存 session_id（V3.5 reuse）。
 
+use crate::{
+    instance_config_bytes_with_access, nostr_instance_id, plan_session_bindings, AllowSources,
+    NostrConfig, SessionBindingPlan,
+};
 use anyhow::{bail, Context, Result};
 use opencrab_db::queries::{
     create_gate_binding_in_tx, get_session, CreateGateBindingError, SessionWatchRow,
-};
-use opencrab_nostr::{
-    instance_config_bytes_with_access, nostr_instance_id, plan_session_bindings, AllowSources,
-    NostrConfig, SessionBindingPlan,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
@@ -17,6 +17,22 @@ pub struct NostrPlacementPlan {
     pub revision: u64,
     pub address: String,
     pub config_b64: String,
+}
+
+fn encode_config_b64(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+fn config_digest(bytes: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut out, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    out
 }
 
 /// Provisioning が完了した enabled Nostr instance を、外部 gateway の placement へ投影する。
@@ -137,8 +153,8 @@ pub fn provision_nostr_gate(
     let name = agent_name(conn, agent_id)?;
     let config_bytes =
         instance_config_bytes_with_access(self_pubkey, &name, config, watches, access)?;
-    let config_b64 = opencrab_extgate::encode_config_b64(&config_bytes);
-    let digest = opencrab_extgate::config_digest(&config_bytes);
+    let config_b64 = encode_config_b64(&config_bytes);
+    let digest = config_digest(&config_bytes);
 
     let subject_id: i64 = conn
         .query_row(
@@ -259,8 +275,8 @@ fn update_nostr_instance(
     let name = agent_name(conn, agent_id)?;
     let config_bytes =
         instance_config_bytes_with_access(self_pubkey, &name, config, watches, access)?;
-    let config_b64 = opencrab_extgate::encode_config_b64(&config_bytes);
-    let digest = opencrab_extgate::config_digest(&config_bytes);
+    let config_b64 = encode_config_b64(&config_bytes);
+    let digest = config_digest(&config_bytes);
     let subject_id: i64 = conn
         .query_row(
             "SELECT subject_id FROM agents WHERE agent_id = ?1",
@@ -317,11 +333,11 @@ fn agent_name(conn: &Connection, agent_id: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{nostr_binding_id, nostr_session_id};
     use opencrab_db::queries::{
         insert_agent_session_in_tx, insert_session_in_tx, upsert_agent, upsert_agent_nostr_config,
         AgentNostrConfigRow, AgentRow,
     };
-    use opencrab_nostr::{nostr_binding_id, nostr_session_id};
 
     fn seed_agent(conn: &Connection) {
         upsert_agent(
@@ -357,7 +373,7 @@ mod tests {
 
         let cfg = NostrConfig {
             relays: vec!["wss://yabu.me".into()],
-            filter: opencrab_nostr::NostrFilter::default(),
+            filter: crate::NostrFilter::default(),
         };
         let plans = provision_nostr_gate(
             &mut conn,
@@ -408,7 +424,7 @@ mod tests {
         .unwrap();
         let cfg = NostrConfig {
             relays: vec!["wss://yabu.me".into()],
-            filter: opencrab_nostr::NostrFilter::default(),
+            filter: crate::NostrFilter::default(),
         };
         provision_nostr_gate(
             &mut conn,
@@ -460,7 +476,7 @@ mod tests {
         seed_agent(&conn);
         let cfg = NostrConfig {
             relays: vec!["wss://yabu.me".into()],
-            filter: opencrab_nostr::NostrFilter::default(),
+            filter: crate::NostrFilter::default(),
         };
         let err = provision_nostr_gate(
             &mut conn,
@@ -481,7 +497,7 @@ mod tests {
         seed_agent(&conn);
         let cfg = NostrConfig {
             relays: vec!["wss://yabu.me".into()],
-            filter: opencrab_nostr::NostrFilter::default(),
+            filter: crate::NostrFilter::default(),
         };
         let sid = nostr_session_id("a1");
         let tx = conn.transaction().unwrap();
@@ -525,7 +541,7 @@ mod tests {
         seed_agent(&conn);
         let cfg = NostrConfig {
             relays: vec!["wss://yabu.me".into()],
-            filter: opencrab_nostr::NostrFilter::default(),
+            filter: crate::NostrFilter::default(),
         };
         let sid = nostr_session_id("a1");
         let tx = conn.transaction().unwrap();
@@ -549,7 +565,12 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        let bytes = opencrab_extgate::ids::decode_config_b64(&config_b64).unwrap();
+        let bytes = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD
+                .decode(&config_b64)
+                .unwrap()
+        };
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["name"], "a1");
     }
@@ -578,7 +599,7 @@ mod tests {
         .unwrap();
         let cfg = NostrConfig {
             relays: vec!["wss://yabu.me".into()],
-            filter: opencrab_nostr::NostrFilter::default(),
+            filter: crate::NostrFilter::default(),
         };
         let err = provision_nostr_gate(
             &mut conn,

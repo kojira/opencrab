@@ -297,10 +297,10 @@ impl SupervisedChild for TokioChild {
     }
 }
 
-/// discord-gateway バイナリを exec する本番 spawner。
+/// 外部 gateway バイナリを exec する本番 spawner。
 ///
-/// **bot token は子の env（`DISCORD_BOT_TOKEN`）のみ** に渡す（親 env も argv も汚さない・ログにも
-/// 出さない）。`kill_on_drop(true)` で、監視タスクが drop されても子を確実に殺す（孤児防止の backstop）。
+/// 資格情報は指定された子の env だけへ渡し、argv・placement・ログには載せない。
+/// `kill_on_drop(true)` で監視タスクが drop されても子を確実に殺す（孤児防止の backstop）。
 pub struct GatewayChildSpawner {
     bin: std::path::PathBuf,
     placement_path: std::path::PathBuf,
@@ -328,19 +328,22 @@ impl GatewayChildSpawner {
         }
     }
 
-    /// Nostr V3 gateway 用。復号済み鍵は子 env だけへ注入し、placement/argv へ載せない。
-    pub fn new_nostr(
+    /// 任意の外部 gateway 用。復号済み資格情報は子 env だけへ注入し、
+    /// placement/argv へ載せない。
+    pub fn with_secret_env(
         bin: std::path::PathBuf,
         placement_path: std::path::PathBuf,
-        secret_key: String,
+        secret: String,
+        secret_env: &'static str,
+        gateway_name: &'static str,
         agent_id: String,
     ) -> Self {
         Self {
             bin,
             placement_path,
-            secret: secret_key,
-            secret_env: "NOSTARO_SECRET_KEY",
-            gateway_name: "nostr-gateway",
+            secret,
+            secret_env,
+            gateway_name,
             agent_id,
         }
     }
@@ -490,15 +493,17 @@ mod tests {
     // ---- pure ロジック ----
 
     #[test]
-    fn nostr_spawner_injects_only_the_nostr_secret_env() {
-        let spawner = GatewayChildSpawner::new_nostr(
-            "nostr-gateway".into(),
+    fn generic_spawner_injects_only_the_selected_secret_env() {
+        let spawner = GatewayChildSpawner::with_secret_env(
+            "example-gateway".into(),
             "placement.json".into(),
             "not-a-real-secret".into(),
+            "EXAMPLE_GATEWAY_SECRET",
+            "example-gateway",
             "a1".into(),
         );
-        assert_eq!(spawner.secret_env, "NOSTARO_SECRET_KEY");
-        assert_eq!(spawner.gateway_name(), "nostr-gateway");
+        assert_eq!(spawner.secret_env, "EXAMPLE_GATEWAY_SECRET");
+        assert_eq!(spawner.gateway_name(), "example-gateway");
         assert_eq!(spawner.agent_id(), "a1");
     }
 

@@ -190,7 +190,7 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
     #[cfg(feature = "nostr")]
     if let Some(key) = nostr_master_key.clone() {
         if let Some(reason) =
-            opencrab_server::nostr_secret_migration::master_key_mismatch_reason(&db, &key)
+            opencrab_nostr::secret_migration::master_key_mismatch_reason(&db, &key)
         {
             emit_master_key_banner(&reason);
             nostr_master_key = None;
@@ -210,7 +210,7 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
     // #620: 平文の at-rest 秘密を暗号化する移行（起動時 1 回・冪等・対象が無ければ no-op）。
     #[cfg(feature = "nostr")]
     if let Some(mk) = &nostr_master_key {
-        let report = opencrab_server::nostr_secret_migration::migrate_nostr_secrets_at_rest(
+        let report = opencrab_nostr::secret_migration::migrate_nostr_secrets_at_rest(
             &db,
             mk,
             std::path::Path::new("data/agents"),

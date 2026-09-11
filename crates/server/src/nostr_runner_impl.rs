@@ -70,6 +70,15 @@ pub(crate) fn resolve_nostr_caller_identity(
     if let Some(n) = npub.as_deref() {
         ids.push(n);
     }
+    if let Some(co_agent_id) = opencrab_db::queries::resolve_agent_by_nostr_self_pubkey(conn, &hex)
+    {
+        if opencrab_db::queries::is_trusted_co_agent(conn, agent_id, &co_agent_id).unwrap_or(false)
+        {
+            return opencrab_actions::CallerIdentity::CoAgent {
+                agent_id: co_agent_id,
+            };
+        }
+    }
     crate::caller_identity::resolve_caller_identity_with_owner(
         conn,
         opencrab_db::queries::TRUSTED_PLATFORM_NOSTR,

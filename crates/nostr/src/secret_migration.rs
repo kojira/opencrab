@@ -7,9 +7,9 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::MasterKey;
 use opencrab_core::secret_box;
 use opencrab_db::Db;
-use opencrab_nostr::MasterKey;
 use tracing::{error, info, warn};
 
 /// 移行結果のサマリ（起動ログに出す）。
@@ -83,7 +83,7 @@ pub fn migrate_nostr_secrets_at_rest(
         // 1b) 永続 config に**平文の secret_key 行が実際に残っているときだけ**その行を
         //     落とす（relays/default_relays/blossom は保つ）。既に鍵行が無ければ何もしない
         //     ＝冪等（2 回目以降の起動で無条件書き込み＆誤カウントをしない）。
-        match opencrab_nostr::NostaroCli::agent_config_path(&row.agent_id) {
+        match crate::NostaroCli::agent_config_path(&row.agent_id) {
             Ok(path) => match strip_secret_key_line_from_config(&path) {
                 Ok(true) => report.configs_regenerated += 1,
                 Ok(false) => {}

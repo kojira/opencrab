@@ -31,11 +31,7 @@ pub mod memory_declare;
 pub mod memory_maintenance;
 pub mod memory_organize;
 #[cfg(feature = "nostr")]
-pub mod nostr_provision;
-#[cfg(feature = "nostr")]
 pub mod nostr_runner_impl;
-#[cfg(feature = "nostr")]
-pub mod nostr_secret_migration;
 pub mod offload_cleanup;
 pub mod peer_review;
 pub mod process;

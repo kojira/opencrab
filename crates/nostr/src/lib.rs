@@ -24,6 +24,7 @@ pub mod cli;
 pub mod config;
 pub mod event;
 pub mod fire_descriptor;
+pub mod gate_provision;
 pub mod identity;
 pub mod ingress;
 pub mod key_provisioning;
@@ -32,6 +33,7 @@ pub mod passthrough;
 pub mod provision;
 pub mod pubkey;
 pub mod runner;
+pub mod secret_migration;
 pub mod session;
 #[cfg(test)]
 mod test_support;

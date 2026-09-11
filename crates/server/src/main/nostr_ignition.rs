@@ -49,17 +49,17 @@ impl NostrV3Controller {
     fn plan(
         &self,
         agent_id: &str,
-    ) -> anyhow::Result<opencrab_server::nostr_provision::NostrPlacementPlan> {
+    ) -> anyhow::Result<opencrab_nostr::gate_provision::NostrPlacementPlan> {
         let conn = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("db lock for Nostr V3 ignition"))?;
-        opencrab_server::nostr_provision::load_nostr_placement_plan(&conn, agent_id)
+        opencrab_nostr::gate_provision::load_nostr_placement_plan(&conn, agent_id)
     }
 
     async fn start_plan(
         &self,
-        plan: opencrab_server::nostr_provision::NostrPlacementPlan,
+        plan: opencrab_nostr::gate_provision::NostrPlacementPlan,
     ) -> anyhow::Result<()> {
         let secret = (self.secret_provider)(&plan.agent_id)?;
         let core_socket = self
@@ -82,10 +82,12 @@ impl NostrV3Controller {
             .with_context(|| format!("placement 書き出し失敗: {}", temporary.display()))?;
         std::fs::rename(&temporary, &path)
             .with_context(|| format!("placement 置換失敗: {}", path.display()))?;
-        let spawner = std::sync::Arc::new(GatewayChildSpawner::new_nostr(
+        let spawner = std::sync::Arc::new(GatewayChildSpawner::with_secret_env(
             self.gateway_bin.clone(),
             path,
             secret.to_string(),
+            "NOSTARO_SECRET_KEY",
+            "nostr-gateway",
             plan.agent_id.clone(),
         ));
         self.supervisors.start(&plan.agent_id, spawner).await;
@@ -114,7 +116,7 @@ impl NostrV3Controller {
                 .db
                 .lock()
                 .map_err(|_| anyhow::anyhow!("db lock for Nostr V3 ignition"))?;
-            opencrab_server::nostr_provision::load_nostr_placement_plans(&conn)?
+            opencrab_nostr::gate_provision::load_nostr_placement_plans(&conn)?
                 .into_iter()
                 .map(|plan| plan.agent_id)
                 .collect()
