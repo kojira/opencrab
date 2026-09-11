@@ -1,9 +1,12 @@
+const TEST_SOURCE_A: &str = "source-a";
+const TEST_SOURCE_B: &str = "source-b";
+
 #[test]
 fn test_trusted_user_display_name_round_trip() {
     let conn = setup();
     add_trusted_user(
         &conn,
-        TRUSTED_PLATFORM_DISCORD,
+        TEST_SOURCE_A,
         "id-1",
         "a1",
         "42",
@@ -13,7 +16,7 @@ fn test_trusted_user_display_name_round_trip() {
         "Crab B",
     )
     .unwrap();
-    let row = get_trusted_user(&conn, TRUSTED_PLATFORM_DISCORD, "42", "a1").unwrap();
+    let row = get_trusted_user(&conn, TEST_SOURCE_A, "42", "a1").unwrap();
     assert_eq!(row.display_name, "Crab B");
     assert_eq!(row.permission, TrustedUserPermission::CoAgent);
 
@@ -28,10 +31,9 @@ fn test_trusted_user_display_name_round_trip() {
         [],
     )
     .unwrap();
-    let row = get_trusted_user(&conn, TRUSTED_PLATFORM_DISCORD, "43", "a1").unwrap();
+    let row = get_trusted_user(&conn, "external", "43", "a1").unwrap();
     assert_eq!(row.display_name, "");
-    // 列追加前からある行は従来の経路（discord）として生きる（#214）
-    assert_eq!(row.platform, TRUSTED_PLATFORM_DISCORD);
+    assert_eq!(row.platform, "external");
 }
 
 // ---- 経路（identity platform）で識別子空間が分かれること（#214） ----
@@ -57,8 +59,8 @@ fn add_trusted(conn: &Connection, platform: &str, row_id: &str, user_id: &str, a
 fn trust_does_not_cross_platforms() {
     let conn = setup();
     // Discord 経路に "42" を登録する。
-    add_trusted(&conn, TRUSTED_PLATFORM_DISCORD, "row-d", "42", "a1");
-    assert!(is_trusted_user(&conn, TRUSTED_PLATFORM_DISCORD, "42", "a1"));
+    add_trusted(&conn, TEST_SOURCE_A, "row-d", "42", "a1");
+    assert!(is_trusted_user(&conn, TEST_SOURCE_A, "42", "a1"));
     // 同じ文字列を web / REST の識別子として名乗っても、その経路では信頼されない。
     assert!(!is_trusted_user(&conn, TRUSTED_PLATFORM_WEB, "42", "a1"));
     assert!(!is_trusted_user(&conn, TRUSTED_PLATFORM_REST, "42", "a1"));
@@ -74,7 +76,7 @@ fn trust_does_not_cross_platforms() {
     ));
     assert!(!is_trusted_user(
         &conn,
-        TRUSTED_PLATFORM_DISCORD,
+        TEST_SOURCE_A,
         "dash-user",
         "a1"
     ));
@@ -85,18 +87,18 @@ fn trust_does_not_cross_platforms() {
 #[test]
 fn trusted_user_count_is_scoped_by_platform() {
     let conn = setup();
-    assert_eq!(trusted_user_count(&conn, TRUSTED_PLATFORM_DISCORD, "a1"), 0);
+    assert_eq!(trusted_user_count(&conn, TEST_SOURCE_A, "a1"), 0);
 
     add_trusted(&conn, TRUSTED_PLATFORM_WEB, "row-w", "dash-user", "a1");
     assert_eq!(trusted_user_count(&conn, TRUSTED_PLATFORM_WEB, "a1"), 1);
     // web に 1 件あっても Discord から見れば未登録（= owner のみ許可の段が生きる）。
-    assert_eq!(trusted_user_count(&conn, TRUSTED_PLATFORM_DISCORD, "a1"), 0);
+    assert_eq!(trusted_user_count(&conn, TEST_SOURCE_A, "a1"), 0);
     assert_eq!(trusted_user_count(&conn, TRUSTED_PLATFORM_REST, "a1"), 0);
 
-    add_trusted(&conn, TRUSTED_PLATFORM_DISCORD, "row-d", "42", "a1");
-    assert_eq!(trusted_user_count(&conn, TRUSTED_PLATFORM_DISCORD, "a1"), 1);
+    add_trusted(&conn, TEST_SOURCE_A, "row-d", "42", "a1");
+    assert_eq!(trusted_user_count(&conn, TEST_SOURCE_A, "a1"), 1);
     // エージェントでも切れている
-    assert_eq!(trusted_user_count(&conn, TRUSTED_PLATFORM_DISCORD, "a2"), 0);
+    assert_eq!(trusted_user_count(&conn, TEST_SOURCE_A, "a2"), 0);
 }
 
 /// 互換読みの撤去（#159）で**何が変わったか**を明示する。
@@ -107,10 +109,10 @@ fn trusted_user_count_is_scoped_by_platform() {
 #[test]
 fn legacy_discord_rows_no_longer_grant_trust_on_other_platforms() {
     let conn = setup();
-    add_trusted(&conn, TRUSTED_PLATFORM_DISCORD, "row-d", "42", "a1");
+    add_trusted(&conn, TEST_SOURCE_A, "row-d", "42", "a1");
 
     // 従来経路の行は自経路（discord）でだけ効く。
-    assert!(get_trusted_user(&conn, TRUSTED_PLATFORM_DISCORD, "42", "a1").is_some());
+    assert!(get_trusted_user(&conn, TEST_SOURCE_A, "42", "a1").is_some());
     // web / REST から同じ識別子で来ても引けない（＝移行前のユーザーは信頼を失う）。
     assert!(get_trusted_user(&conn, TRUSTED_PLATFORM_WEB, "42", "a1").is_none());
     assert!(get_trusted_user(&conn, TRUSTED_PLATFORM_REST, "42", "a1").is_none());
@@ -119,7 +121,7 @@ fn legacy_discord_rows_no_longer_grant_trust_on_other_platforms() {
     add_trusted(&conn, TRUSTED_PLATFORM_WEB, "row-w", "dash-user", "a1");
     let own = get_trusted_user(&conn, TRUSTED_PLATFORM_WEB, "dash-user", "a1").expect("web row");
     assert_eq!(own.platform, TRUSTED_PLATFORM_WEB);
-    assert!(get_trusted_user(&conn, TRUSTED_PLATFORM_DISCORD, "dash-user", "a1").is_none());
+    assert!(get_trusted_user(&conn, TEST_SOURCE_A, "dash-user", "a1").is_none());
 }
 
 /// 登録 API が受け付ける経路の集合＝読み出し側が引く経路の集合。
@@ -128,15 +130,15 @@ fn legacy_discord_rows_no_longer_grant_trust_on_other_platforms() {
 /// なったので、登録 API も受け付ける。
 #[test]
 fn known_platforms_are_exactly_the_read_paths() {
-    assert!(is_known_trusted_platform(TRUSTED_PLATFORM_DISCORD));
+    assert!(is_known_trusted_platform(TEST_SOURCE_A));
     assert!(is_known_trusted_platform(TRUSTED_PLATFORM_WEB));
     assert!(is_known_trusted_platform(TRUSTED_PLATFORM_REST));
-    assert!(is_known_trusted_platform(TRUSTED_PLATFORM_NOSTR));
+    assert!(is_known_trusted_platform(TEST_SOURCE_B));
     assert!(is_known_trusted_platform(TRUSTED_PLATFORM_EXTGATE));
-    // 綴り間違い・未定義の経路は弾く（登録できても誰とも一致しない行になるため）。
-    assert!(!is_known_trusted_platform("Discord"));
-    assert!(!is_known_trusted_platform("Nostr"));
-    assert!(!is_known_trusted_platform("mastodon"));
+    // 共有層はopaque値を列挙せず、安全な保存形式だけを検証する。
+    assert!(is_known_trusted_platform("UpperCase"));
+    assert!(is_known_trusted_platform("unregistered-source"));
+    assert!(!is_known_trusted_platform("contains space"));
     assert!(!is_known_trusted_platform(""));
 }
 
@@ -146,7 +148,7 @@ fn co_agent_roster_is_scoped_by_platform() {
     let conn = setup();
     add_trusted_user(
         &conn,
-        TRUSTED_PLATFORM_DISCORD,
+        TEST_SOURCE_A,
         "row-d",
         "a1",
         "42",
@@ -169,7 +171,7 @@ fn co_agent_roster_is_scoped_by_platform() {
     )
     .unwrap();
 
-    let discord = list_co_agent_reviewers(&conn, TRUSTED_PLATFORM_DISCORD, "a1").unwrap();
+    let discord = list_co_agent_reviewers(&conn, TEST_SOURCE_A, "a1").unwrap();
     assert_eq!(discord.len(), 1);
     assert_eq!(discord[0].display_name, "Crab D");
 
@@ -182,15 +184,15 @@ fn co_agent_roster_is_scoped_by_platform() {
         .is_empty());
 
     // permission と agent_id の絞り込みは維持されている。
-    add_trusted(&conn, TRUSTED_PLATFORM_DISCORD, "row-u", "43", "a1");
+    add_trusted(&conn, TEST_SOURCE_A, "row-u", "43", "a1");
     assert_eq!(
-        list_co_agent_reviewers(&conn, TRUSTED_PLATFORM_DISCORD, "a1")
+        list_co_agent_reviewers(&conn, TEST_SOURCE_A, "a1")
             .unwrap()
             .len(),
         1
     );
     assert!(
-        list_co_agent_reviewers(&conn, TRUSTED_PLATFORM_DISCORD, "a2")
+        list_co_agent_reviewers(&conn, TEST_SOURCE_A, "a2")
             .unwrap()
             .is_empty()
     );

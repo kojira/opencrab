@@ -94,38 +94,8 @@ pub(super) const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 22,
-        description: "agent_nostr_config.owner_pubkey (Nostr のオーナー識別子, issue #319)",
-        // **列追加のみ。既存の表・行の内容には一切触れない。**
-        //
-        // Discord は per-agent 設定に `agent_discord_config.owner_discord_id` を持ち、
-        // 発言者がオーナーかをそこで判定している。Nostr には対応する置き場所が無く、
-        // 受信ターンの呼び出し元が一律 `Agent` に固定されていた（#319）。同じ形にする
-        // ための列で、**既定は空文字＝オーナー未設定**（誰もオーナーにならない /
-        // `opencrab_core::owner::is_owner_id` の fail-closed）。列を足しただけでは
-        // どのエージェントの挙動も変わらない。
-        //
-        // 表現は **64 桁小文字 hex に正規化して保存する**（Nostr 受信イベントの
-        // `pubkey` が hex なので、比較の基準を受信側に合わせる）。入口
-        // （`configure_nostr` / REST）が npub でも hex でも受け取って正規化するため、
-        // この列に npub が入ることは無い。
-        //
-        // 冪等性: 新規DB は `SCHEMA_SQL` 側で列を持つので `column_exists` でガードする
-        // （v12 / v16 の前例）。2 回目以降は no-op。
-        //
-        // 切り戻し: 列は読まれなくなるだけで既存の行は壊れない。古いバイナリへ戻すときは
-        // 版番号を戻すこと（列はそのままで良い）:
-        //
-        //   BEGIN;
-        //   PRAGMA user_version = 21;
-        //   COMMIT;
-        up: |conn| {
-            if !column_exists(conn, "agent_nostr_config", "owner_pubkey")? {
-                conn.execute_batch(
-                    "ALTER TABLE agent_nostr_config ADD COLUMN owner_pubkey TEXT NOT NULL DEFAULT ''",
-                )?;
-            }
-            Ok(())
-        },
+        description: "retired gateway-owned identity migration",
+        up: |_| Ok(()),
     },
     Migration {
         version: 23,

@@ -274,7 +274,7 @@ pub fn delete_soul_preset(conn: &Connection, preset_id: &str) -> Result<bool> {
     Ok(deleted > 0)
 }
 
-/// Delete an agent and all related data (agents row, skills, curated memory, discord config, presets).
+/// Delete an agent and all shared related data.
 pub fn delete_agent(conn: &Connection, agent_id: &str) -> Result<bool> {
     let deleted = conn.execute("DELETE FROM agents WHERE agent_id = ?1", params![agent_id])?;
     conn.execute(
@@ -284,10 +284,6 @@ pub fn delete_agent(conn: &Connection, agent_id: &str) -> Result<bool> {
     conn.execute("DELETE FROM skills WHERE agent_id = ?1", params![agent_id])?;
     conn.execute(
         "DELETE FROM memory_curated WHERE agent_id = ?1",
-        params![agent_id],
-    )?;
-    conn.execute(
-        "DELETE FROM agent_discord_config WHERE agent_id = ?1",
         params![agent_id],
     )?;
     Ok(deleted > 0)

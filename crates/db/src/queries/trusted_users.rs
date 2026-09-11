@@ -112,37 +112,20 @@ pub fn delete_trusted_co_agent(
 // **#159 に残っている作業**:
 // - 一意制約 `(user_id, agent_id)` → `(platform, user_id, agent_id)`（表の再構築＝非可逆）
 
-/// 列追加前から存在する行が属する経路。マイグレーションの `DEFAULT` と一致させる。
-pub const TRUSTED_PLATFORM_DISCORD: &str = "discord";
-/// ダッシュボード（web ゲートウェイ）が申告するユーザー識別子の経路。
+/// ダッシュボード自身が使う識別子source。
 pub const TRUSTED_PLATFORM_WEB: &str = "web";
-/// REST `POST /api/agents/{id}/messages` が申告するユーザー識別子の経路。
+/// REST message intakeが使う識別子source。
 pub const TRUSTED_PLATFORM_REST: &str = "rest";
-/// Nostr 受信イベントの著者 pubkey の経路（#319）。
-///
-/// 識別子は **64 桁小文字 hex**（Nostr 受信イベントの `pubkey` の表現）で登録する。
-/// npub で登録された行も引けるよう、読み出し側（`crates/server` の Nostr の呼び出し元
-/// 解決）は hex と npub の両方の表現で引く。
-pub const TRUSTED_PLATFORM_NOSTR: &str = "nostr";
-/// external gate 受信の author 識別子の経路（V3 §7.2）。
+/// external gateが運ぶopaqueな識別子source。
 pub const TRUSTED_PLATFORM_EXTGATE: &str = "extgate";
 
-/// 読み出し側が実際に引く経路の全体。登録 API の検証に使う。
-///
-/// 未知の経路の行は**どの読み出しとも一致しない**（登録しても誰も信頼されない）。
-/// 綴り間違いが「登録できたのに効かない」行として黙って残るのを防ぐため、
-/// 登録 API はこの集合で弾く（fail-closed 側の検証であって、認可の判定ではない）。
-pub const TRUSTED_PLATFORMS: [&str; 5] = [
-    TRUSTED_PLATFORM_DISCORD,
-    TRUSTED_PLATFORM_WEB,
-    TRUSTED_PLATFORM_REST,
-    TRUSTED_PLATFORM_NOSTR,
-    TRUSTED_PLATFORM_EXTGATE,
-];
-
-/// 読み出し側が引く経路として定義済みか。
-pub fn is_known_trusted_platform(platform: &str) -> bool {
-    TRUSTED_PLATFORMS.contains(&platform)
+/// Sourceはgatewayが所有するopaque値。共有DBは列挙せず、安全な保存形式だけを検証する。
+pub fn is_known_trusted_platform(source: &str) -> bool {
+    !source.is_empty()
+        && source.len() <= 64
+        && source.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
 }
 
 // ---- 権限（列挙型, #234） ----

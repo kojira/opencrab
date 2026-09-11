@@ -40,7 +40,7 @@ pub fn get_channel_config_for_agent(
 ) -> Result<Option<ChannelConfigRow>> {
     let result = conn.query_row(
         "SELECT channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs, heartbeat_instructions
-         FROM discord_channel_config WHERE channel_id = ?1 AND agent_id = ?2",
+         FROM channel_config WHERE channel_id = ?1 AND agent_id = ?2",
         params![channel_id, agent_id],
         |row| {
             Ok(ChannelConfigRow {
@@ -67,7 +67,7 @@ pub fn get_channel_config_for_agent(
 
 pub fn upsert_channel_config(conn: &Connection, cfg: &ChannelConfigRow) -> Result<()> {
     conn.execute(
-        "INSERT INTO discord_channel_config (channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs, heartbeat_instructions, updated_at)
+        "INSERT INTO channel_config (channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs, heartbeat_instructions, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT(channel_id, agent_id) DO UPDATE SET
             guild_id = excluded.guild_id,
@@ -108,7 +108,7 @@ pub fn delete_channel_config_for_agent(
     agent_id: &str,
 ) -> Result<bool> {
     let rows_affected = conn.execute(
-        "DELETE FROM discord_channel_config WHERE channel_id = ?1 AND agent_id = ?2",
+        "DELETE FROM channel_config WHERE channel_id = ?1 AND agent_id = ?2",
         rusqlite::params![channel_id, agent_id],
     )?;
     Ok(rows_affected > 0)
@@ -120,7 +120,7 @@ pub fn list_channel_configs_by_guild(
 ) -> Result<Vec<ChannelConfigRow>> {
     let mut stmt = conn.prepare(
         "SELECT channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs, heartbeat_instructions
-         FROM discord_channel_config WHERE guild_id = ?1 ORDER BY channel_name",
+         FROM channel_config WHERE guild_id = ?1 ORDER BY channel_name",
     )?;
 
     let rows = stmt.query_map(params![guild_id], |row| {
@@ -148,7 +148,7 @@ pub fn list_channel_configs_by_agent(
 ) -> Result<Vec<ChannelConfigRow>> {
     let mut stmt = conn.prepare(
         "SELECT channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs, heartbeat_instructions
-         FROM discord_channel_config WHERE agent_id = ?1 ORDER BY channel_name",
+         FROM channel_config WHERE agent_id = ?1 ORDER BY channel_name",
     )?;
     let rows = stmt.query_map(params![agent_id], |row| {
         Ok(ChannelConfigRow {
@@ -171,7 +171,7 @@ pub fn list_channel_configs_by_agent(
 pub fn list_whitelisted_channels(conn: &Connection) -> Result<Vec<ChannelConfigRow>> {
     let mut stmt = conn.prepare(
         "SELECT channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs, heartbeat_instructions
-         FROM discord_channel_config WHERE whitelisted = 1 ORDER BY channel_id",
+         FROM channel_config WHERE whitelisted = 1 ORDER BY channel_id",
     )?;
 
     let rows = stmt.query_map([], |row| {
@@ -197,7 +197,7 @@ pub fn list_whitelisted_channels(conn: &Connection) -> Result<Vec<ChannelConfigR
 pub fn list_heartbeat_channels(conn: &Connection) -> Result<Vec<ChannelConfigRow>> {
     let mut stmt = conn.prepare(
         "SELECT channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs, heartbeat_instructions
-         FROM discord_channel_config WHERE heartbeat_enabled = 1 ORDER BY channel_id",
+         FROM channel_config WHERE heartbeat_enabled = 1 ORDER BY channel_id",
     )?;
 
     let rows = stmt.query_map([], |row| {

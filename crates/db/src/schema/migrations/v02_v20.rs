@@ -8,21 +8,8 @@ pub(super) const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 3,
-        description: "trusted_discord_users.display_name (peer reviewer roster, issue #57)",
-        // 新規DB は SCHEMA_SQL 側で列を持つため、column_exists でガードして冪等にする。
-        // #159 (v17) で表は `trusted_users` に改名した。新規DBには旧名の表が存在しない
-        // ので table_exists で先にガードする（無ければ何もしない）。
-        up: |conn| {
-            if !table_exists(conn, "trusted_discord_users")? {
-                return Ok(());
-            }
-            if !column_exists(conn, "trusted_discord_users", "display_name")? {
-                conn.execute_batch(
-                    "ALTER TABLE trusted_discord_users ADD COLUMN display_name TEXT NOT NULL DEFAULT ''",
-                )?;
-            }
-            Ok(())
-        },
+        description: "retired legacy external-user display migration",
+        up: |_| Ok(()),
     },
     Migration {
         version: 4,
@@ -226,8 +213,8 @@ pub(super) const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 13,
-        description: "agent_nostr_config (per-agent Nostr sub-gateway: 隔離鍵 + relays + filter)",
-        up: |conn| conn.execute_batch(AGENT_NOSTR_CONFIG_SQL),
+        description: "retired gateway-owned configuration migration",
+        up: |_| Ok(()),
     },
     Migration {
         version: 14,
@@ -255,77 +242,13 @@ pub(super) const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 16,
-        description: "trusted_discord_users.platform (信頼済みユーザーの識別子空間を経路で分ける, issue #214)",
-        // 列追加のみ（ほぼ可逆）。既存行は全て Discord の識別子空間なので DEFAULT 'discord'
-        // で生かす。一意制約 (discord_user_id, agent_id) はここでは触らない
-        // （変更するとテーブル再構築＝非可逆になるため #159 に合流させる）。
-        // 新規DB は SCHEMA_SQL 側で列を持つため column_exists でガードして冪等にする（v3 前例）。
-        // #159 (v17) で表は `trusted_users` に改名したので、v3 と同様 table_exists で
-        // 旧名の表の有無を先に見る（新規DBには無いので何もしない）。
-        up: |conn| {
-            if !table_exists(conn, "trusted_discord_users")? {
-                return Ok(());
-            }
-            if !column_exists(conn, "trusted_discord_users", "platform")? {
-                conn.execute_batch(
-                    "ALTER TABLE trusted_discord_users ADD COLUMN platform TEXT NOT NULL DEFAULT 'discord'",
-                )?;
-            }
-            Ok(())
-        },
+        description: "retired legacy identity-source migration",
+        up: |_| Ok(()),
     },
     Migration {
         version: 17,
-        description:
-            "trusted_discord_users → trusted_users / discord_user_id → user_id (Discord 命名の解消, issue #159)",
-        // **信頼済みユーザーの行は 1 件も失わない。** 改名で移送するのが基本で、唯一の
-        // 例外は #479 の「空の新表を DROP してから改名」だが、DROP するのは行ゼロの表だけ。
-        //
-        // `ALTER TABLE ... RENAME TO` と `ALTER TABLE ... RENAME COLUMN` は
-        // テーブルの再構築を伴わない（SQLite が sqlite_schema の DDL 文字列を
-        // 書き換えるだけ）ので、行はそのまま生き、**逆向きの RENAME で戻せる**
-        // ＝可逆。一意制約 `(user_id, agent_id)` の作り直し（→ `(platform, user_id,
-        // agent_id)`）は再構築が要る非可逆な変更なので、ここには**混ぜない**。
-        //
-        // 冪等性: 新規DB は SCHEMA_SQL 側で既に新しい名前なので、どの分岐も走らない。
-        // 版付き旧DB では run_migrations が version>17 で二度と呼ばず、本番（version=38）は
-        // baseline も通らない（下記 #479 分岐が本番を触ることはない）。
-        up: |conn| {
-            if table_exists(conn, "trusted_discord_users")? {
-                if !table_exists(conn, "trusted_users")? {
-                    // 通常の昇格経路（版付き旧DB）: 新表がまだ無いので単純に改名する。
-                    conn.execute_batch(
-                        "ALTER TABLE trusted_discord_users RENAME TO trusted_users",
-                    )?;
-                } else if !table_has_rows(conn, "trusted_users")? {
-                    // #479: 版管理導入前（user_version<1）の旧DBは baseline 経路を通り、
-                    // 先に SCHEMA_SQL が **空の** trusted_users を作る。そのため上の
-                    // `!table_exists` ガードが false になって改名が skip され、旧表に
-                    // データが取り残されていた（クラッシュしないので気づけない）。
-                    // 空の新表を DROP してから改名でデータを移す。**空表の DROP は
-                    // 行を 1 件も消さない**ので、通常経路（新表にデータあり）は下の else で
-                    // 一切触らず保護される（設計上の安全条件）。
-                    conn.execute_batch(
-                        "DROP TABLE trusted_users;
-                         ALTER TABLE trusted_discord_users RENAME TO trusted_users",
-                    )?;
-                }
-                // else: 新表に既にデータがある = 既に正しく昇格済み。この並存は通常経路では
-                // 起きないが、起きても実データを持つ新表は壊さず、旧表にも触れない（冪等・保全優先）。
-            }
-            if column_exists(conn, "trusted_users", "discord_user_id")? {
-                conn.execute_batch(
-                    "ALTER TABLE trusted_users RENAME COLUMN discord_user_id TO user_id",
-                )?;
-            }
-            // インデックスは表に追従して残る（名前は旧いまま）。索引は行を持たない
-            // 派生物なので、旧名を落として新名で貼り直す。
-            conn.execute_batch(
-                "DROP INDEX IF EXISTS idx_trusted_discord_users_agent;
-                 CREATE INDEX IF NOT EXISTS idx_trusted_users_agent ON trusted_users(agent_id);",
-            )?;
-            Ok(())
-        },
+        description: "retired legacy trusted-user naming migration",
+        up: |_| Ok(()),
     },
     Migration {
         version: 18,
@@ -370,23 +293,8 @@ pub(super) const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 19,
-        description: "agent_nostr_relay_config (Nostr 受信を Discord へ転記する宛先, issue #252)",
-        // **表の新設のみ。既存の表・行には一切触れない。**
-        //
-        // 既定は**無効**（`enabled INTEGER NOT NULL DEFAULT 0`）。行を作っただけで転記が
-        // 始まらないよう fail-closed に倒す（#240 の轍）。行が無いエージェントも無効として
-        // 扱う（`opencrab_actions::webhook_target::resolve_nostr_relay_webhook` が fail-closed）。
-        //
-        // 冪等性: `CREATE TABLE IF NOT EXISTS`。2 回目以降は no-op。
-        //
-        // 切り戻し: 表を落とすだけで元に戻る（失われるのはこの表の行だけ）。古いバイナリへ
-        // 戻すときは版番号も戻すこと:
-        //
-        //   BEGIN;
-        //   DROP TABLE IF EXISTS agent_nostr_relay_config;
-        //   PRAGMA user_version = 18;
-        //   COMMIT;
-        up: |conn| conn.execute_batch(AGENT_NOSTR_RELAY_CONFIG_SQL),
+        description: "retired gateway-owned relay configuration migration",
+        up: |_| Ok(()),
     },
     Migration {
         version: 20,

@@ -143,22 +143,6 @@ CREATE TABLE IF NOT EXISTS gateway_operation_calls (
     )
 }
 
-pub(super) fn migrate_v45_nostr_bundle_state(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(
-        r#"
-CREATE TABLE IF NOT EXISTS nostr_bundle_state (
-    binding_id TEXT NOT NULL,
-    bundle_id TEXT NOT NULL,
-    manifest_json TEXT NOT NULL,
-    received_bits TEXT NOT NULL,
-    new_admitted_bits TEXT NOT NULL,
-    completed INTEGER NOT NULL CHECK(completed IN (0,1)),
-    PRIMARY KEY(binding_id, bundle_id)
-);
-"#,
-    )
-}
-
 fn migration_err(msg: &str) -> rusqlite::Error {
     rusqlite::Error::SqliteFailure(
         rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),

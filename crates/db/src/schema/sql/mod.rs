@@ -40,37 +40,6 @@ CREATE TABLE memory_category_members (
 CREATE INDEX IF NOT EXISTS idx_memory_category_members_cat ON memory_category_members(agent_id, category_id);
 ";
 
-/// per-agent の Nostr sub-gateway 設定。秘密鍵はエージェント毎に隔離（鍵の共有防止）。
-pub(super) const AGENT_NOSTR_CONFIG_SQL: &str = "
-CREATE TABLE IF NOT EXISTS agent_nostr_config (
-    agent_id TEXT PRIMARY KEY,
-    secret_key TEXT NOT NULL,
-    relays_json TEXT NOT NULL DEFAULT '[]',
-    filter_json TEXT NOT NULL DEFAULT '{}',
-    enabled INTEGER NOT NULL DEFAULT 0,
-    updated_at TEXT NOT NULL
-);
-";
-
-/// per-agent の Nostr 受信転記先設定（issue #252 段階 A）。
-///
-/// エージェントが Nostr で受け取った自分宛の受信を、エージェント単位で設定した 1 つの
-/// Discord チャンネル（webhook）へ転記するための宛先。
-///
-/// - `enabled`: 既定 **0（無効）**。行を作っただけでは転記しない（fail-closed / #240 と同じ轍を
-///   踏まない）。行が無いエージェントも無効として扱う（上位の解決が fail-closed）。
-/// - `webhook_url`: 転記先の webhook URL。NULL / 空なら転記しない。URL の妥当性検証は
-///   db 層では行わず、`opencrab_actions::webhook_target::resolve_nostr_relay_webhook` が担う
-///   （db クレートは Discord/webhook の語彙に依存しない）。
-pub(super) const AGENT_NOSTR_RELAY_CONFIG_SQL: &str = "
-CREATE TABLE IF NOT EXISTS agent_nostr_relay_config (
-    agent_id TEXT PRIMARY KEY,
-    enabled INTEGER NOT NULL DEFAULT 0,
-    webhook_url TEXT,
-    updated_at TEXT NOT NULL
-);
-";
-
 /// per-agent のハートビート設定（#247）。**エージェント自身が触れる唯一の自律実行設定**。
 ///
 /// - `enabled`: 既定 **0（無効）**。設定を作っただけで自律実行が始まらないようにする（#240）。
@@ -92,10 +61,8 @@ CREATE TABLE IF NOT EXISTS agent_heartbeat_config (
 
 /// セッション単位のハートビート設定（統合スケジューラ / #439 × #456 の PR1）。
 ///
-/// agent スコープ（`agent_heartbeat_config`）と channel スコープ
-/// （`discord_channel_config.heartbeat_*`）の二本立てを **セッション単位の 1 テーブル**へ
-/// 畳んだ後継。`session_id` は不透明な文字列（例: `nostr-{agent}` /
-/// `discord-{agent}-{guild}-{channel}` / `web-{agent}-{conversation}`・列挙は固定しない）。
+/// agent スコープと channel スコープの二本立てを **セッション単位の 1 テーブル**へ
+/// 畳んだ後継。`session_id` は不透明な文字列であり、形式を固定しない。
 /// 発火先は各 transport の descriptor が `session_id` から導くので**列に持たない**（特定
 /// transport 前提の列を一般化テーブルへ持ち込まない・#628）。
 ///
@@ -121,7 +88,7 @@ CREATE TABLE IF NOT EXISTS session_heartbeat_config (
 /// per-agent 定時実行（#455 の PR1 スキーマ）。cron / `@every` をセッション時刻源へ載せる。
 ///
 /// 既定は**無効**（fail-closed・#240）。`session_id` は注入先の一本化されたセッション
-/// （Nostr agent は `nostr-{agent}`）。`next_run_at` は計算結果キャッシュで真実は再計算。
+/// 。`next_run_at` は計算結果キャッシュで真実は再計算。
 /// jitter は列を作らない（設計 §9・非採用）。**発火（scheduler 配線）は PR4** で、この PR は
 /// 表の新設のみ（既存挙動は 1 バイトも変わらない＝積むものが無い）。
 ///
@@ -231,7 +198,7 @@ CREATE TABLE IF NOT EXISTS task_progress (
 CREATE INDEX IF NOT EXISTS idx_task_progress_task ON task_progress(task_id);
 "#;
 
-/// セッションに紐づく Nostr 購読（1 セッション N 行 / 載せ替え工程 3・v43）。
+/// セッションに紐づく外部購読（1 セッション N 行 / 載せ替え工程 3・v43）。
 ///
 /// `SCHEMA_SQL` 側の同名ブロックと文面を揃えること（新規 DB は SCHEMA_SQL、
 /// 既存 DB は v43 で同じ形に収束する）。
