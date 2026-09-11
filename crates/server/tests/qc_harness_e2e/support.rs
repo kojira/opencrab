@@ -239,6 +239,7 @@ fn mention_event(id: &str, content: &str) -> String {
 struct FifoMock {
     responses: Mutex<std::collections::VecDeque<ChatResponse>>,
     system_prompts: Mutex<Vec<String>>,
+    image_urls: Mutex<Vec<Vec<String>>>,
 }
 
 impl FifoMock {
@@ -246,6 +247,7 @@ impl FifoMock {
         Self {
             responses: Mutex::new(std::collections::VecDeque::new()),
             system_prompts: Mutex::new(Vec::new()),
+            image_urls: Mutex::new(Vec::new()),
         }
     }
     fn push_text(&self, text: &str) {
@@ -256,6 +258,9 @@ impl FifoMock {
     }
     fn system_prompts(&self) -> Vec<String> {
         self.system_prompts.lock().unwrap().clone()
+    }
+    fn image_urls(&self) -> Vec<Vec<String>> {
+        self.image_urls.lock().unwrap().clone()
     }
 }
 
@@ -275,6 +280,10 @@ impl LlmProvider for FifoMock {
             .lock()
             .unwrap()
             .push(system_of(&request));
+        self.image_urls
+            .lock()
+            .unwrap()
+            .push(image_urls_of(&request));
         self.responses
             .lock()
             .unwrap()
@@ -303,6 +312,24 @@ fn request_text(request: &ChatRequest) -> String {
         .filter_map(|m| m.text_content())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn image_urls_of(request: &ChatRequest) -> Vec<String> {
+    request
+        .messages
+        .iter()
+        .flat_map(|message| match message.content.as_ref() {
+            Some(MessageContent::Image { image_url, .. }) => vec![image_url.url.clone()],
+            Some(MessageContent::Multi(parts)) => parts
+                .iter()
+                .filter_map(|part| match part {
+                    ContentPart::ImageUrl { image_url } => Some(image_url.url.clone()),
+                    ContentPart::Text { .. } => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect()
 }
 
 fn has_tool_role(request: &ChatRequest) -> bool {

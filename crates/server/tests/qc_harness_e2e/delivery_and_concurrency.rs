@@ -32,6 +32,31 @@ async fn scenario_a_mention_becomes_say() {
     assert_eq!(mock.system_prompts().len(), 1, "ターンが 1 本でない");
 }
 
+#[tokio::test]
+async fn scenario_nostr_image_url_reaches_the_model_as_an_image() {
+    let mock = Arc::new(FifoMock::new());
+    mock.push_text("画像を確認したよ\nNO_REPLY");
+    let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let (_client, _address, _session_id) = wire_instance(&core, &fixture, nostr_config(None)).await;
+    let url = "https://i.nostr.build/ZvhTViRbRy8RohIWWqIH9P.jpg";
+    fixture.append_line(&mention_event(
+        &"a2".repeat(32),
+        &format!("この画像見える？\n\n{url}"),
+    ));
+
+    assert!(
+        wait_until({
+            let mock = mock.clone();
+            move || !mock.image_urls().is_empty()
+        })
+        .await,
+        "Nostr image URL did not reach the model"
+    );
+    assert_eq!(mock.image_urls(), vec![vec![url.to_string()]]);
+}
+
 // ============ (A1/A1L) NO_REPLY 終端化 + 破棄ログ（第一柱・DESIGN-RESUME-SETTLE §3.1/§3.1.1）============
 
 /// mock 応答に `…本文… NO_REPLY …ゴミ…` を混入させたとき:
