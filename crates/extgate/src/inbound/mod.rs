@@ -248,7 +248,7 @@ pub fn process_said<R: AgentRuntime>(
             &session_id,
             said.system_context.as_deref().unwrap_or(""),
             Some(seq),
-            Some(said.origin.as_str()),
+            said.reply_target.as_deref().or(Some(said.origin.as_str())),
         );
     }
     Ok(SaidOutcome { seq: Some(seq) })
