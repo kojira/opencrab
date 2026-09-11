@@ -19,7 +19,6 @@ pub mod dedicated_gateway;
 #[cfg(feature = "discord")]
 mod discord_fire;
 pub mod discord_provision;
-pub mod discord_supervisor;
 pub mod heartbeat_fire;
 pub mod heartbeat_instructions;
 pub mod hot_reload;

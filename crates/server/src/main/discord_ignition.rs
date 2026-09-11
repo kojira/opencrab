@@ -1,9 +1,9 @@
 use anyhow::Context as _;
 use opencrab_actions::AgentGatewayLifecycle;
-use opencrab_server::discord_provision::{load_discord_launch_plan, DiscordLaunchPlan};
-use opencrab_server::discord_supervisor::{
+use opencrab_gateway::process_supervisor::{
     GatewayChildSpawner, GatewaySupervisorSet, SupervisorConfig,
 };
+use opencrab_server::discord_provision::{load_discord_launch_plan, DiscordLaunchPlan};
 
 pub(super) struct DiscordV3Controller {
     db: opencrab_db::Db,
