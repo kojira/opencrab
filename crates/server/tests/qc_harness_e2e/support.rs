@@ -13,9 +13,7 @@ use opencrab_llm::router::LlmRouter;
 use opencrab_llm::traits::LlmProvider;
 use opencrab_server::AppState;
 
-use opencrab_extgate::{
-    admin_router, resolve_caller_identity_with_owner, serve_uds, ExtgateState, OperatorToken,
-};
+use opencrab_extgate::{admin_router, serve_uds, ExtgateState, OperatorToken};
 use opencrab_gate_client::client::InstanceClient;
 use opencrab_nostr_gateway::config::InstancePlacement;
 use opencrab_nostr_gateway::harness::HarnessOverrides;
@@ -504,12 +502,7 @@ async fn start_core(provider: Arc<dyn LlmProvider>) -> Core {
         let runtime = state.clone();
         let path = sock.clone();
         tokio::spawn(async move {
-            let _ = serve_uds(
-                listen_state,
-                runtime,
-                resolve_caller_identity_with_owner,
-                path,
-            )
+            let _ = serve_uds(listen_state, runtime, path)
             .await;
         });
     }

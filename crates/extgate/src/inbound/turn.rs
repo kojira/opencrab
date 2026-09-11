@@ -14,7 +14,6 @@ use crate::error::ErrorCode;
 use crate::listen::emit_activity;
 use crate::protocol::Said;
 use crate::registry::ExtgateState;
-use crate::ResolveCallerFn;
 
 use super::asserted_caller;
 use super::binding::OriginRow;
@@ -24,7 +23,6 @@ use super::record::seq_for_origin;
 pub(super) fn enqueue_turn<R: AgentRuntime>(
     state: Arc<ExtgateState>,
     runtime: R,
-    resolve_caller: ResolveCallerFn,
     row: &OriginRow,
     said: &Said,
     session_id: &str,
@@ -102,7 +100,6 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                     None,
                 )
                 .await;
-                let _ = resolve_caller;
                 let (system, name) = runtime.build_agent_context(&agent_id, &caller);
                 let system = if system_context.is_empty() {
                     system

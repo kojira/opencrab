@@ -15,9 +15,7 @@ pub(crate) use opencrab_server::AppState;
 pub(crate) use opencrab_discord_gateway::config::InstancePlacement;
 pub(crate) use opencrab_discord_gateway::harness::HarnessOverrides;
 pub(crate) use opencrab_discord_gateway::run::spawn_instance;
-pub(crate) use opencrab_extgate::{
-    admin_router, resolve_caller_identity_with_owner, serve_uds, ExtgateState, OperatorToken,
-};
+pub(crate) use opencrab_extgate::{admin_router, serve_uds, ExtgateState, OperatorToken};
 pub(crate) use opencrab_gate_client::client::InstanceClient;
 
 pub(crate) use tracing_subscriber::layer::{Context, SubscriberExt};

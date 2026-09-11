@@ -142,14 +142,7 @@ async fn main() -> anyhow::Result<()> {
             "timed-fire: 受け口を登録（V3 extgate・heartbeat）"
         );
         tokio::spawn(async move {
-            if let Err(e) = opencrab_extgate::serve_uds(
-                listen_state,
-                runtime,
-                opencrab_server::caller_identity::resolve_caller_identity_with_owner,
-                path,
-            )
-            .await
-            {
+            if let Err(e) = opencrab_extgate::serve_uds(listen_state, runtime, path).await {
                 tracing::error!(error = %e, "extgate listener halted");
                 std::process::exit(1);
             }

@@ -151,13 +151,7 @@ pub(crate) async fn start_core(provider: Arc<dyn LlmProvider>) -> Core {
         let runtime = state.clone();
         let path = sock.clone();
         tokio::spawn(async move {
-            let _ = serve_uds(
-                listen_state,
-                runtime,
-                resolve_caller_identity_with_owner,
-                path,
-            )
-            .await;
+            let _ = serve_uds(listen_state, runtime, path).await;
         });
     }
     for _ in 0..200 {

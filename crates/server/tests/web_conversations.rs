@@ -436,13 +436,7 @@ async fn live_gateway_create_returns_201_ready() {
     let runtime = state.clone();
     let path = sock.clone();
     tokio::spawn(async move {
-        let _ = opencrab_extgate::serve_uds(
-            listen,
-            runtime,
-            opencrab_extgate::resolve_caller_identity_with_owner,
-            path,
-        )
-        .await;
+        let _ = opencrab_extgate::serve_uds(listen, runtime, path).await;
     });
     for _ in 0..200 {
         if sock.exists() {
@@ -507,13 +501,7 @@ async fn socket_close_during_bind_keeps_binding_and_returns_202() {
     let runtime = state.clone();
     let path = sock.clone();
     tokio::spawn(async move {
-        let _ = opencrab_extgate::serve_uds(
-            listen,
-            runtime,
-            opencrab_extgate::resolve_caller_identity_with_owner,
-            path,
-        )
-        .await;
+        let _ = opencrab_extgate::serve_uds(listen, runtime, path).await;
     });
     for _ in 0..200 {
         if sock.exists() {
@@ -563,13 +551,7 @@ async fn race_barriers_keep_single_binding_and_single_bind() {
     let runtime = state.clone();
     let path = sock.clone();
     tokio::spawn(async move {
-        let _ = opencrab_extgate::serve_uds(
-            listen,
-            runtime,
-            opencrab_extgate::resolve_caller_identity_with_owner,
-            path,
-        )
-        .await;
+        let _ = opencrab_extgate::serve_uds(listen, runtime, path).await;
     });
     for _ in 0..200 {
         if sock.exists() {

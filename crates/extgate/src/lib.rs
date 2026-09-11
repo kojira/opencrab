@@ -40,38 +40,3 @@ pub use operations::{
 };
 pub use ops_projection::ExtgateOpsGatewayActions;
 pub use registry::{ExtgateState, OperationOutcome, Registry, ReservedToolNameFn};
-
-use opencrab_actions::CallerIdentity;
-use opencrab_db::queries::{get_trusted_user, TrustedUserPermission};
-use rusqlite::Connection;
-
-/// server が `resolve_caller_identity_with_owner` を渡す。
-pub type ResolveCallerFn = fn(&Connection, &str, &[&str], &str, &str) -> CallerIdentity;
-
-/// 本番と同じ 1 実装。owner → co_agent → trusted_user → Agent。
-pub fn resolve_caller_identity_with_owner(
-    conn: &Connection,
-    platform: &str,
-    user_ids: &[&str],
-    agent_id: &str,
-    owner_id: &str,
-) -> CallerIdentity {
-    if user_ids
-        .iter()
-        .any(|uid| opencrab_core::owner::is_owner_id(owner_id, uid))
-    {
-        return CallerIdentity::Owner;
-    }
-    let permission = user_ids
-        .iter()
-        .find_map(|uid| get_trusted_user(conn, platform, uid, agent_id).map(|u| u.permission));
-    match permission {
-        Some(TrustedUserPermission::CoAgent) => CallerIdentity::CoAgent {
-            agent_id: user_ids.first().copied().unwrap_or_default().to_string(),
-        },
-        Some(TrustedUserPermission::Owner) | Some(TrustedUserPermission::User) => {
-            CallerIdentity::TrustedUser
-        }
-        None => CallerIdentity::Agent,
-    }
-}

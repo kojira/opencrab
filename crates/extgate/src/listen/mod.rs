@@ -25,7 +25,6 @@ use crate::ids::now_nanos;
 use crate::inbound::process_said;
 use crate::protocol::{err_frame, ok_said_frame, read_frame, write_json, FrameError, InboundMsg};
 use crate::registry::ExtgateState;
-use crate::ResolveCallerFn;
 
 use hello::handle_hello;
 use response::handle_response;
@@ -79,7 +78,6 @@ pub fn recover_stale_deliveries(conn: &mut Connection, now: i64) -> Result<(), G
 pub async fn serve_uds<R: AgentRuntime>(
     state: Arc<ExtgateState>,
     runtime: R,
-    resolve_caller: ResolveCallerFn,
     path: PathBuf,
 ) -> Result<(), anyhow::Error> {
     let listener = UnixListener::bind(&path)?;
@@ -105,7 +103,7 @@ pub async fn serve_uds<R: AgentRuntime>(
         let halt = Arc::clone(&state);
         let runtime = runtime.clone();
         let task = tokio::spawn(async move {
-            handle_connection(conn_state, runtime, resolve_caller, stream).await;
+            handle_connection(conn_state, runtime, stream).await;
         });
         tokio::spawn(async move {
             if task.await.is_err() {
@@ -120,7 +118,6 @@ pub async fn serve_uds<R: AgentRuntime>(
 async fn handle_connection<R: AgentRuntime>(
     state: Arc<ExtgateState>,
     runtime: R,
-    resolve_caller: ResolveCallerFn,
     stream: tokio::net::UnixStream,
 ) {
     let (read, write) = stream.into_split();
@@ -163,7 +160,6 @@ async fn handle_connection<R: AgentRuntime>(
             let mut ctx = ConnCtx {
                 state: &state,
                 runtime: &runtime,
-                resolve_caller,
                 writer: &writer,
                 phase: &mut phase,
                 instance_id: &mut instance_id,
@@ -217,7 +213,6 @@ async fn handle_connection<R: AgentRuntime>(
                 let mut ctx = ConnCtx {
                     state: &state,
                     runtime: &runtime,
-                    resolve_caller,
                     writer: &writer,
                     phase: &mut phase,
                     instance_id: &mut instance_id,
@@ -234,7 +229,6 @@ async fn handle_connection<R: AgentRuntime>(
 struct ConnCtx<'a, R> {
     state: &'a Arc<ExtgateState>,
     runtime: &'a R,
-    resolve_caller: ResolveCallerFn,
     writer: &'a Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>,
     phase: &'a mut ConnState,
     instance_id: &'a mut Option<String>,
@@ -244,7 +238,6 @@ struct ConnCtx<'a, R> {
 async fn dispatch_frame<R: AgentRuntime>(ctx: &mut ConnCtx<'_, R>, bytes: &[u8]) -> Result<(), ()> {
     let state = ctx.state;
     let runtime = ctx.runtime;
-    let resolve_caller = ctx.resolve_caller;
     let writer = ctx.writer;
     let identity = ctx.identity;
     let phase = &mut *ctx.phase;
@@ -342,7 +335,7 @@ async fn dispatch_frame<R: AgentRuntime>(ctx: &mut ConnCtx<'_, R>, bytes: &[u8])
         }
         (ConnState::Running, InboundMsg::Said(said)) => {
             let inst = instance_id.as_deref().expect("running has instance");
-            match process_said(state, inst, &said, resolve_caller, runtime) {
+            match process_said(state, inst, &said, runtime) {
                 Ok(out) => {
                     if write_json(writer, &ok_said_frame(&said.id, out.seq))
                         .await

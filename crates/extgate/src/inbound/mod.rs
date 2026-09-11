@@ -14,7 +14,6 @@ use rusqlite::{params, TransactionBehavior};
 use crate::error::{ErrorCode, GateError};
 use crate::protocol::{Said, SaidCaller};
 use crate::registry::ExtgateState;
-use crate::ResolveCallerFn;
 
 mod attachments;
 mod binding;
@@ -48,7 +47,6 @@ pub fn process_said<R: AgentRuntime>(
     state: &Arc<ExtgateState>,
     instance_id: &str,
     said: &Said,
-    resolve_caller: ResolveCallerFn,
     runtime: &R,
 ) -> Result<SaidOutcome, GateError> {
     {
@@ -242,7 +240,6 @@ pub fn process_said<R: AgentRuntime>(
         enqueue_turn(
             Arc::clone(state),
             runtime.clone(),
-            resolve_caller,
             &row,
             said,
             &session_id,

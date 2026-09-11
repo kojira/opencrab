@@ -46,7 +46,25 @@ pub fn resolve_caller_identity_with_owner(
     agent_id: &str,
     owner_id: &str,
 ) -> CallerIdentity {
-    opencrab_extgate::resolve_caller_identity_with_owner(conn, source, user_ids, agent_id, owner_id)
+    use opencrab_db::queries::{get_trusted_user, TrustedUserPermission};
+
+    if user_ids
+        .iter()
+        .any(|user_id| opencrab_core::owner::is_owner_id(owner_id, user_id))
+    {
+        return CallerIdentity::Owner;
+    }
+    match user_ids.iter().find_map(|user_id| {
+        get_trusted_user(conn, source, user_id, agent_id).map(|row| row.permission)
+    }) {
+        Some(TrustedUserPermission::CoAgent) => CallerIdentity::CoAgent {
+            agent_id: user_ids.first().copied().unwrap_or_default().to_string(),
+        },
+        Some(TrustedUserPermission::Owner | TrustedUserPermission::User) => {
+            CallerIdentity::TrustedUser
+        }
+        None => CallerIdentity::Agent,
+    }
 }
 
 #[cfg(test)]

@@ -17,8 +17,8 @@ use opencrab_db::queries::{AgentRow, SessionRow, TRUSTED_PLATFORM_EXTGATE};
 use opencrab_extgate::completion::ExtgateCompletionSink;
 use opencrab_extgate::{
     admin_router, invoke_and_wait, now_nanos, recover_stale_calls, recover_stale_deliveries,
-    resolve_caller_identity_with_owner, serve_uds, session_id_for_binding, validate_listen_socket,
-    DeliveryMode, ExtgateOpsGatewayActions, ExtgateState, OperatorToken, UNAUTHORIZED_BODY,
+    serve_uds, session_id_for_binding, validate_listen_socket, DeliveryMode,
+    ExtgateOpsGatewayActions, ExtgateState, OperatorToken, UNAUTHORIZED_BODY,
 };
 use opencrab_gate_client::client::{InstanceClient, SaidOutcome};
 use opencrab_gateway::{GatewayActions, GatewayCallContext};
@@ -272,7 +272,7 @@ impl Harness {
         let rt = runtime.clone();
         let path = sock.clone();
         tokio::spawn(async move {
-            let _ = serve_uds(listen_state, rt, resolve_caller_identity_with_owner, path).await;
+            let _ = serve_uds(listen_state, rt, path).await;
         });
         for _ in 0..200 {
             if sock.exists() {
