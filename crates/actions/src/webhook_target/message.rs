@@ -425,40 +425,28 @@ fn redact_secret_token(tok: &str) -> (String, bool) {
     (tok.to_string(), false)
 }
 
-/// Discord webhook URL を検証する。空・パース不可・Discord webhook でない場合は Err(理由)。
+/// 共有webhook URLの最小安全条件を検証する。
 ///
-/// 理由文字列に raw URL は含めない。
+/// 個別serviceのhostやpath形式は解釈しない。理由文字列にraw URLは含めない。
 pub fn validate_webhook_url(url: &str) -> Result<(), String> {
     let url = url.trim();
     if url.is_empty() {
         return Err("url is empty".to_string());
     }
-    let rest = match url.strip_prefix("https://") {
-        Some(r) => r,
-        None => return Err("url must start with https://".to_string()),
-    };
-    // host = "https://" と最初の '/' の間の部分。
-    let (host, path) = match rest.find('/') {
-        Some(idx) => (&rest[..idx], &rest[idx..]),
-        None => return Err("url has no path".to_string()),
-    };
-    const ALLOWED_HOSTS: [&str; 4] = [
-        "discord.com",
-        "discordapp.com",
-        "ptb.discord.com",
-        "canary.discord.com",
-    ];
-    if !ALLOWED_HOSTS.contains(&host) {
-        return Err("host is not a Discord webhook host".to_string());
+    let rest = url
+        .strip_prefix("https://")
+        .ok_or_else(|| "url must use https".to_string())?;
+    let (authority, path) = rest
+        .split_once('/')
+        .ok_or_else(|| "url has no path".to_string())?;
+    if authority.is_empty() {
+        return Err("url has no host".to_string());
     }
-    let webhook_path = match path.strip_prefix("/api/webhooks/") {
-        Some(p) => p,
-        None => return Err("path must start with /api/webhooks/".to_string()),
-    };
-    // id / token の 2 つ以上の非空セグメントが必要。
-    let segments: Vec<&str> = webhook_path.split('/').filter(|s| !s.is_empty()).collect();
-    if segments.len() < 2 {
-        return Err("path is missing webhook id or token".to_string());
+    if authority.contains('@') {
+        return Err("url must not contain credentials".to_string());
+    }
+    if path.is_empty() {
+        return Err("url has no path".to_string());
     }
     Ok(())
 }
