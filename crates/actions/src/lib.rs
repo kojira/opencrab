@@ -5,6 +5,7 @@ pub mod bridge;
 pub mod common;
 pub mod continue_marker;
 pub mod dispatcher;
+pub mod external_gateway;
 pub mod learning;
 pub mod llm_analysis;
 pub mod llm_evaluation;

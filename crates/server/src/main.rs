@@ -319,7 +319,7 @@ async fn main() -> anyhow::Result<()> {
         // Liveness は manager の keep-alive task ではなく、外部 gateway が extgate へ登録済みかを
         // 正とする。子が crash-loop 中なら false のままで、稼働中と誤報しない。
         let extgate_for_nostr_live = extgate.clone();
-        let nostr_live: opencrab_server::dedicated_gateway::V3LivenessProbe =
+        let nostr_live: opencrab_actions::external_gateway::V3LivenessProbe =
             Arc::new(move |agent_id| {
                 extgate_for_nostr_live
                     .agent_has_live_gateway(agent_id, opencrab_actions::gateway_kinds::NOSTR)
@@ -327,7 +327,7 @@ async fn main() -> anyhow::Result<()> {
         // Reconcile every enabled row from its current DB configuration before any external
         // child is launched. A stale prior placement must never mask a provisioning failure.
         manager.restore_from_db_checked().await?;
-        let v3_only = opencrab_server::dedicated_gateway::V3OnlyGateway::new(manager, nostr_live)
+        let v3_only = opencrab_actions::external_gateway::V3OnlyGateway::new(manager, nostr_live)
             .with_process(process_controller);
         state.gateways.register(v3_only);
     } else {
@@ -427,7 +427,7 @@ async fn main() -> anyhow::Result<()> {
                 .await;
                 #[cfg(feature = "nostr")]
                 if let Some(controller) = &nostr_process_controller {
-                    opencrab_server::dedicated_gateway::V3ProcessControl::shutdown_all(
+                    opencrab_actions::external_gateway::V3ProcessControl::shutdown_all(
                         controller.as_ref(),
                     )
                     .await;

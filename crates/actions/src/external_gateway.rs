@@ -4,11 +4,11 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use opencrab_actions::{
+use crate::{
     AgentGatewayLifecycle, GatewayIdentityProvisioning, GatewayKeyProvisioning,
     GatewayNostrPassthrough, SharedAgentGateway,
 };
+use async_trait::async_trait;
 
 /// V3 gateway の liveness を返す probe（agent_id → 稼働中か）。
 pub type V3LivenessProbe = Arc<dyn Fn(&str) -> bool + Send + Sync>;

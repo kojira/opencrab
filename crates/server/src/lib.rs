@@ -15,7 +15,6 @@ pub mod agent_schedule;
 pub mod api;
 pub mod caller_identity;
 pub mod config;
-pub mod dedicated_gateway;
 #[cfg(feature = "discord")]
 mod discord_fire;
 pub mod discord_provision;

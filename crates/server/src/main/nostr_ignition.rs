@@ -1,8 +1,8 @@
 use anyhow::Context as _;
+use opencrab_actions::external_gateway::V3ProcessControl;
 use opencrab_gateway::process_supervisor::{
     GatewayChildSpawner, GatewaySupervisorSet, SupervisorConfig,
 };
-use opencrab_server::dedicated_gateway::V3ProcessControl;
 
 pub(super) struct NostrV3Controller {
     db: opencrab_db::Db,
