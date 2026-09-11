@@ -636,7 +636,7 @@ async fn send_mapped(
                 &mapped.origin,
                 &mapped.author_id,
                 &mapped.text,
-                &[],
+                &mapped.attachments,
             )
             .await
     } else {
@@ -646,7 +646,7 @@ async fn send_mapped(
                 &mapped.origin,
                 &mapped.author_id,
                 &mapped.text,
-                &[],
+                &mapped.attachments,
             )
             .await
     };

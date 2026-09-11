@@ -1,5 +1,6 @@
 //! watch JSONL → V3 said。origin 規約と版付きアンカー。
 
+use opencrab_gate_client::wire::Attachment;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -81,6 +82,7 @@ pub struct SaidMap {
     pub origin: String,
     pub author_id: String,
     pub text: String,
+    pub attachments: Vec<Attachment>,
     pub route: Route,
 }
 
@@ -194,10 +196,15 @@ pub fn map_event(
         }
         None => format!("{anchor}\n{history}"),
     };
+    let attachments = opencrab_core::llm_text::extract_image_urls(&event.content)
+        .into_iter()
+        .map(|url| Attachment::ImageUrl { url })
+        .collect();
     Some(SaidMap {
         origin,
         author_id,
         text,
+        attachments,
         route,
     })
 }
@@ -486,6 +493,20 @@ mod tests {
         let event = ev(1059, vec![]);
         let mapped = map_event(&event, &self_pk, true, &Lane::watch(1), None).unwrap();
         assert_eq!(mapped.route, Route::Immediate);
+    }
+
+    #[test]
+    fn image_url_in_content_becomes_a_model_attachment() {
+        let mut event = ev(1, vec![]);
+        event.content =
+            "この画像見える？\n\nhttps://i.nostr.build/ZvhTViRbRy8RohIWWqIH9P.jpg".into();
+        let mapped = map_event(&event, &self_pk(), false, &Lane::default_lane(), None).unwrap();
+        assert_eq!(
+            mapped.attachments,
+            vec![opencrab_gate_client::wire::Attachment::ImageUrl {
+                url: "https://i.nostr.build/ZvhTViRbRy8RohIWWqIH9P.jpg".into(),
+            }]
+        );
     }
 
     #[test]

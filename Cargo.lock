@@ -1710,6 +1710,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64",
+ "opencrab-core",
  "opencrab-gate-client",
  "serde",
  "serde_json",
