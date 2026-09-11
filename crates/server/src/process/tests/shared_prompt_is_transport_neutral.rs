@@ -9,7 +9,7 @@ fn shared_prompt_has_no_transport_specific_terms() {
     // transport 語・名簿（表示名）が共有プロンプトに漏れないことを検査する。
     opencrab_db::queries::add_trusted_user(
         &conn,
-        opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
+        "external-a",
         "r1",
         "a1",
         "42",

@@ -125,22 +125,6 @@ pub(crate) async fn start_core(provider: Arc<dyn LlmProvider>) -> Core {
     let db = opencrab_db::Db::from_connection(conn);
     register_mock_pricing(&db);
     let subject_id = upsert_test_agent(&db);
-    // discord owner = 発端 author（generic admission で caller=Owner に解決させる）。
-    {
-        let conn = db.lock().unwrap();
-        opencrab_db::queries::upsert_agent_discord_config(
-            &conn,
-            &opencrab_db::queries::AgentDiscordConfigRow {
-                agent_id: AGENT_ID.into(),
-                // legacy 列。V3 gateway は token を env で持つのでここは使わない（placeholder）。
-                bot_token: "placeholder-not-used-by-v3".into(),
-                owner_discord_id: AUTHOR.into(),
-                enabled: true,
-            },
-        )
-        .unwrap();
-    }
-
     let extgate = Arc::new(ExtgateState::new(
         db.clone(),
         OperatorToken::from_bytes(TOKEN),

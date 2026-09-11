@@ -35,45 +35,6 @@ fn config_digest(bytes: &[u8]) -> String {
     out
 }
 
-/// Gateway-owned admission material loaded from the legacy configuration store during migration.
-/// Missing rows are an empty set; query failures remain errors.
-pub fn load_gate_allow_keys(
-    conn: &Connection,
-    agent_id: &str,
-) -> Result<crate::NostrGateAllowKeys> {
-    let owner_pubkey = opencrab_db::queries::get_agent_nostr_owner_pubkey(conn, agent_id)
-        .context("owner_pubkey read failed")?;
-    let owner = if owner_pubkey.trim().is_empty() {
-        Vec::new()
-    } else {
-        vec![owner_pubkey]
-    };
-    let trusted_users = opencrab_db::queries::list_trusted_users(conn, agent_id)
-        .context("trusted_users read failed")?
-        .into_iter()
-        .filter(|row| row.platform == opencrab_db::queries::TRUSTED_PLATFORM_NOSTR)
-        .map(|row| row.user_id)
-        .collect();
-    let mut co_agents = Vec::new();
-    let mut co_agent_identities = Vec::new();
-    for row in opencrab_db::queries::list_trusted_co_agents(conn, agent_id)
-        .context("trusted_co_agents read failed")?
-    {
-        let pubkey = opencrab_db::queries::get_agent_nostr_self_pubkey(conn, &row.co_agent_id)
-            .context("co-agent pubkey read failed")?;
-        if !pubkey.trim().is_empty() {
-            co_agent_identities.push((pubkey.clone(), row.co_agent_id));
-            co_agents.push(pubkey);
-        }
-    }
-    Ok(crate::NostrGateAllowKeys {
-        owner,
-        co_agents,
-        co_agent_identities,
-        trusted_users,
-    })
-}
-
 pub fn build_allow_sources(
     followees: impl IntoIterator<Item = String>,
     keys: &crate::NostrGateAllowKeys,
@@ -105,104 +66,33 @@ pub fn build_allow_sources(
 /// Provisioning が完了した enabled Nostr instance を、外部 gateway の placement へ投影する。
 /// default session の open binding が無い・重複する instance は fail-loud にする。
 pub fn load_nostr_placement_plan(conn: &Connection, agent_id: &str) -> Result<NostrPlacementPlan> {
+    let instance_id = nostr_instance_id(agent_id);
+    let address = crate::nostr_session_id(agent_id);
     let row = conn
         .query_row(
-            "SELECT nc.agent_id, gi.instance_id, gi.revision, gb.address, gi.config_b64
-             FROM agent_nostr_config nc
-             JOIN agents a ON a.agent_id = nc.agent_id
-             JOIN gate_instances gi
-               ON gi.subject_id = a.subject_id AND gi.kind_id = 'nostr'
-              AND gi.enabled = 1 AND gi.deleted_at IS NULL
-             JOIN gate_bindings gb
-               ON gb.instance_id = gi.instance_id AND gb.closed_at IS NULL
-              AND gb.address = 'nostr-' || nc.agent_id
-             WHERE nc.agent_id = ?1",
-            params![agent_id],
+            "SELECT gi.revision, gb.address, gi.config_b64
+             FROM gate_instances gi
+             JOIN gate_bindings gb ON gb.instance_id = gi.instance_id
+             WHERE gi.instance_id = ?1 AND gi.enabled = 1 AND gi.deleted_at IS NULL
+               AND gb.address = ?2 AND gb.closed_at IS NULL",
+            params![instance_id, address],
             |row| {
                 Ok((
-                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(2)?,
                 ))
             },
         )
         .optional()?
-        .with_context(|| format!("Nostr V3 placement not found for {agent_id}"))?;
-    let (agent_id, instance_id, revision, address, config_b64) = row;
-    let expected_instance_id = nostr_instance_id(&agent_id);
-    if instance_id != expected_instance_id {
-        bail!(
-            "agent {agent_id} の Nostr instance が不正: expected={expected_instance_id}, actual={instance_id}"
-        );
-    }
+        .with_context(|| format!("gateway placement not found for {agent_id}"))?;
     Ok(NostrPlacementPlan {
-        agent_id,
+        agent_id: agent_id.to_string(),
         instance_id,
-        revision: u64::try_from(revision).context("nostr instance revision")?,
-        address,
-        config_b64,
+        revision: u64::try_from(row.0).context("gateway instance revision")?,
+        address: row.1,
+        config_b64: row.2,
     })
-}
-
-pub fn load_nostr_placement_plans(conn: &Connection) -> Result<Vec<NostrPlacementPlan>> {
-    let mut stmt = conn.prepare(
-        "SELECT nc.agent_id, gi.instance_id, gi.revision, gb.address, gi.config_b64
-         FROM agent_nostr_config nc
-         JOIN agents a ON a.agent_id = nc.agent_id
-         JOIN gate_instances gi
-           ON gi.subject_id = a.subject_id
-          AND gi.kind_id = 'nostr'
-          AND gi.enabled = 1
-          AND gi.deleted_at IS NULL
-         JOIN gate_bindings gb
-           ON gb.instance_id = gi.instance_id
-          AND gb.closed_at IS NULL
-          AND gb.address = 'nostr-' || nc.agent_id
-         WHERE nc.enabled = 1
-         ORDER BY nc.agent_id",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        let revision = row.get::<_, i64>(2)?;
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            revision,
-            row.get::<_, String>(3)?,
-            row.get::<_, String>(4)?,
-        ))
-    })?;
-
-    let mut plans = Vec::new();
-    for row in rows {
-        let (agent_id, instance_id, revision, address, config_b64) = row?;
-        let expected_instance_id = nostr_instance_id(&agent_id);
-        if instance_id != expected_instance_id {
-            bail!(
-                "agent {agent_id} の Nostr instance が不正: expected={expected_instance_id}, actual={instance_id}"
-            );
-        }
-        plans.push(NostrPlacementPlan {
-            agent_id,
-            instance_id,
-            revision: u64::try_from(revision).context("nostr instance revision")?,
-            address,
-            config_b64,
-        });
-    }
-    let enabled: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM agent_nostr_config WHERE enabled = 1",
-        [],
-        |row| row.get(0),
-    )?;
-    if i64::try_from(plans.len()).context("nostr placement count")? != enabled {
-        bail!(
-            "enabled Nostr agent {enabled} 件に対して有効な V3 placement は {} 件（binding/instance 欠落）",
-            plans.len()
-        );
-    }
-    Ok(plans)
 }
 
 /// session ごと 1 binding。session 不在・membership 不一致は fail-loud。
@@ -402,8 +292,7 @@ mod tests {
     use super::*;
     use crate::{nostr_binding_id, nostr_session_id};
     use opencrab_db::queries::{
-        insert_agent_session_in_tx, insert_session_in_tx, upsert_agent, upsert_agent_nostr_config,
-        AgentNostrConfigRow, AgentRow,
+        insert_agent_session_in_tx, insert_session_in_tx, upsert_agent, AgentRow,
     };
 
     fn seed_agent(conn: &Connection) {
@@ -467,74 +356,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(kind, "nostr");
-    }
-
-    #[test]
-    fn enabled_agent_projects_to_external_gateway_placement() {
-        let mut conn = opencrab_db::init_memory().unwrap();
-        seed_agent(&conn);
-        let sid = nostr_session_id("a1");
-        let tx = conn.transaction().unwrap();
-        insert_session_in_tx(&tx, &sid, &sid, "2026-01-01T00:00:00Z").unwrap();
-        insert_agent_session_in_tx(&tx, "a1", &sid).unwrap();
-        tx.commit().unwrap();
-        upsert_agent_nostr_config(
-            &conn,
-            &AgentNostrConfigRow {
-                agent_id: "a1".into(),
-                secret_key: "encrypted-secret-placeholder".into(),
-                relays_json: r#"["wss://yabu.me"]"#.into(),
-                filter_json: "{}".into(),
-                enabled: true,
-            },
-        )
-        .unwrap();
-        let cfg = NostrConfig {
-            relays: vec!["wss://yabu.me".into()],
-            filter: crate::NostrFilter::default(),
-        };
-        provision_nostr_gate(
-            &mut conn,
-            "a1",
-            &"aa".repeat(32),
-            &cfg,
-            &[],
-            &AllowSources::default(),
-            1,
-        )
-        .unwrap();
-
-        let placements = load_nostr_placement_plans(&conn).unwrap();
-        assert_eq!(placements.len(), 1);
-        assert_eq!(placements[0].agent_id, "a1");
-        assert_eq!(placements[0].instance_id, nostr_instance_id("a1"));
-        assert_eq!(placements[0].revision, 1);
-        assert_eq!(placements[0].address, sid);
-        assert!(!placements[0].config_b64.is_empty());
-
-        opencrab_db::queries::set_agent_nostr_config_enabled(&conn, "a1", false).unwrap();
-        assert!(load_nostr_placement_plans(&conn).unwrap().is_empty());
-        let dynamic = load_nostr_placement_plan(&conn, "a1").unwrap();
-        assert_eq!(dynamic.instance_id, nostr_instance_id("a1"));
-    }
-
-    #[test]
-    fn enabled_agent_without_v3_binding_is_fail_loud() {
-        let conn = opencrab_db::init_memory().unwrap();
-        seed_agent(&conn);
-        upsert_agent_nostr_config(
-            &conn,
-            &AgentNostrConfigRow {
-                agent_id: "a1".into(),
-                secret_key: "encrypted-secret-placeholder".into(),
-                relays_json: "[]".into(),
-                filter_json: "{}".into(),
-                enabled: true,
-            },
-        )
-        .unwrap();
-        let error = load_nostr_placement_plans(&conn).unwrap_err();
-        assert!(error.to_string().contains("placement"));
     }
 
     #[test]

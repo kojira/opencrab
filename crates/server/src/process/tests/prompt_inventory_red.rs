@@ -333,7 +333,7 @@ fn peer_review_section_and_roster_are_removed() {
     // 表示名つき co-agent レビュアーを seed（現 tip なら名簿に載る）。
     opencrab_db::queries::add_trusted_user(
         &conn,
-        opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
+        "external-a",
         "r1",
         "a1",
         "42",

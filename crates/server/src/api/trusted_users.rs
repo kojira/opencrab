@@ -196,9 +196,9 @@ pub async fn delete_trusted_user(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opencrab_db::queries::{
-        TRUSTED_PLATFORM_DISCORD, TRUSTED_PLATFORM_REST, TRUSTED_PLATFORM_WEB,
-    };
+    use opencrab_db::queries::{TRUSTED_PLATFORM_REST, TRUSTED_PLATFORM_WEB};
+
+    const TEST_EXTERNAL_SOURCE: &str = "external-a";
 
     fn req(user_id: &str, platform: Option<&str>) -> AddTrustedUserRequest {
         AddTrustedUserRequest {
@@ -269,7 +269,7 @@ mod tests {
             // 他経路へは漏れない。
             assert!(opencrab_db::queries::get_trusted_user(
                 &conn,
-                TRUSTED_PLATFORM_DISCORD,
+                TEST_EXTERNAL_SOURCE,
                 user_id,
                 "agent-1"
             )
@@ -301,7 +301,7 @@ mod tests {
         let _first = add_trusted_user(
             State(state.clone()),
             Path("agent-1".to_string()),
-            Json(req("42", Some(TRUSTED_PLATFORM_DISCORD))),
+            Json(req("42", Some(TEST_EXTERNAL_SOURCE))),
         )
         .await
         .expect("first add");

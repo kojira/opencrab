@@ -112,10 +112,6 @@ pub fn config_from_parts(relays_json: &str, filter_json: &str) -> NostrConfig {
     NostrConfig { relays, filter }
 }
 
-pub fn config_from_row(row: &opencrab_db::queries::AgentNostrConfigRow) -> NostrConfig {
-    config_from_parts(&row.relays_json, &row.filter_json)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
