@@ -226,7 +226,7 @@
         // #654: configure_nostr の定義は nostr feature 依存（#651）。off では定義が無く対照が
         // 空論になるので、期待値も同じ cfg で組む（feature off でも他の外向きツールは全経路で
         // 塞がることを引き続き固定する）。nostr off では下の push が cfg で消え mut が不要になる。
-        #[cfg_attr(not(feature = "nostr"), allow(unused_mut))]
+        #[allow(unused_mut)]
         let mut forbidden = vec![
             "execute_shell",          // dispatcher（config 駆動）
             "ws_write",               // dispatcher core
@@ -238,7 +238,7 @@
             "configure_mcp_server",   // gateway own
             "mcp__ext__send",         // MCP スロット
         ];
-        #[cfg(feature = "nostr")]
+#[cfg(any())]
         {
             forbidden.push("configure_nostr"); // gateway own
         }

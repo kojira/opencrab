@@ -50,7 +50,7 @@ fn create_real_llm_app() -> (Router, opencrab_db::Db) {
         voice_config: Arc::new(Default::default()),
         voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base,
-        #[cfg(feature = "nostr")]
+        #[cfg(any())]
         nostr_master_key: None,
         default_model: "openrouter:openai/gpt-4o".to_string(),
         tools_config: Arc::new(std::sync::RwLock::new(

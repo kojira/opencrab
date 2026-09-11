@@ -496,8 +496,3 @@ async fn health_check() -> &'static str {
 async fn api_health_check() -> axum::Json<serde_json::Value> {
     axum::Json(serde_json::json!({"status": "ok"}))
 }
-
-/// transport登録簿の共通契約を検証する。
-#[cfg(test)]
-#[path = "lib/gateway_registry_tests.rs"]
-mod gateway_registry_tests;

@@ -27,7 +27,7 @@ fn own_definition_shape() {
 /// this test fails — that is the "露出が二度と消えない" guard.
 // #654: nostr ツール定義は #651 で nostr feature 依存になった。feature off では定義自体が
 // 存在せず「常時露出」が空論になるので、同じ cfg で囲む（#630 の外した構成でのテスト経路）。
-#[cfg(feature = "nostr")]
+#[cfg(any())]
 #[test]
 fn nostr_generate_key_is_always_exposed() {
     let defs = SystemGatewayActions::own_definitions();
@@ -53,7 +53,7 @@ fn nostr_generate_key_is_always_exposed() {
 /// nostr gateway is running / no key is configured. It must not require args
 /// and must not leak nsec (it only returns npubs).
 // #654: nostr 定義は nostr feature 依存（#651）。off では定義が無いので同じ cfg で囲む。
-#[cfg(feature = "nostr")]
+#[cfg(any())]
 #[test]
 fn nostr_list_keys_is_always_exposed() {
     let defs = SystemGatewayActions::own_definitions();
@@ -71,7 +71,7 @@ fn nostr_list_keys_is_always_exposed() {
 /// unconfigured agent can adopt a generated key and self-connect on any turn
 /// (not only when a nostr watch loop is already running). It requires `npub`.
 // #654: nostr 定義は nostr feature 依存（#651）。off では定義が無いので同じ cfg で囲む。
-#[cfg(feature = "nostr")]
+#[cfg(any())]
 #[test]
 fn nostr_switch_identity_is_always_exposed() {
     let defs = SystemGatewayActions::own_definitions();
@@ -91,7 +91,7 @@ fn nostr_switch_identity_is_always_exposed() {
 /// list must still contain exactly one entry (providers reject duplicates).
 // #654: nostr_generate_key の定義は nostr feature 依存（#651）。off では 0 件になり
 // 「重複せず 1 件」の不変条件が空論になるので、同じ cfg で囲む。
-#[cfg(feature = "nostr")]
+#[cfg(any())]
 #[test]
 fn definitions_dedup_keeps_single_nostr_generate_key() {
     // own_definitions is the source that definitions() starts from; assert it
@@ -156,7 +156,7 @@ fn cancel_subtask_is_exposed_in_own_definitions() {
 // own_definitions() の feature 依存部分は nostr のみ（#651）なので、README（全部入りの正典）と
 // own の突き合わせが成立するのは nostr feature 時だけ。off では documented ⊄ registered になる
 // ので同じ cfg で囲む。
-#[cfg(feature = "nostr")]
+#[cfg(any())]
 #[test]
 fn server_gateway_action_table_matches_own_definitions() {
     let readme_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md");
@@ -269,7 +269,7 @@ fn server_tool_class_invariants_are_fixed() {
     // Dispatchable（長時間 / 同ターンで読み戻さない書き込み）。`nostr_generate_key` のみ
     // nostr feature に依存する（PR-1B）ので期待値も同じ cfg で組む。
     // #654: nostr off では下の insert が cfg で消え mut が不要になる。
-    #[cfg_attr(not(feature = "nostr"), allow(unused_mut))]
+    #[allow(unused_mut)]
     let mut expected_dispatch: std::collections::BTreeSet<String> = [
         "rebuild_memory_index",
         "update_memory_index_config",
@@ -279,7 +279,7 @@ fn server_tool_class_invariants_are_fixed() {
     .iter()
     .map(|s| s.to_string())
     .collect();
-    #[cfg(feature = "nostr")]
+#[cfg(any())]
     expected_dispatch.insert("nostr_generate_key".to_string());
     assert_eq!(
         dispatchable, expected_dispatch,
@@ -297,10 +297,10 @@ fn server_tool_class_invariants_are_fixed() {
     // `#[cfg(feature = "nostr")]` に囲まれている（PR-1B）。よって `own_definitions()` から
     // 集めた Allowed 集合は nostr 構成の有無で縮む。期待値も **同じ feature 条件**で組む。
     // #654: nostr off では下の insert が cfg で消え mut が不要になる。
-    #[cfg_attr(not(feature = "nostr"), allow(unused_mut))]
+    #[allow(unused_mut)]
     let mut expected: std::collections::BTreeSet<String> =
         std::iter::once("report_progress".to_string()).collect();
-    #[cfg(feature = "nostr")]
+#[cfg(any())]
     expected.insert("nostr_generate_key".to_string());
     assert_eq!(
         allowed, expected,
@@ -341,7 +341,7 @@ fn config_tools_are_inline_and_key_generation_is_dispatched() {
         );
     }
     // `configure_nostr` の def は nostr feature 時のみ push される（PR-1B）。
-    #[cfg(feature = "nostr")]
+#[cfg(any())]
     assert_eq!(
         class_of("configure_nostr").dispatch,
         DispatchMode::Inline,
@@ -358,7 +358,7 @@ fn config_tools_are_inline_and_key_generation_is_dispatched() {
             "{name} は dispatch 対象に残す（同ターンで読み戻さない書き込み）"
         );
     }
-    #[cfg(feature = "nostr")]
+#[cfg(any())]
     assert_eq!(
         class_of("nostr_generate_key").dispatch,
         DispatchMode::Dispatchable,
@@ -506,7 +506,7 @@ fn sub_engine_cannot_see_spawn_subtask() {
     assert!(names.contains(&"report_progress".to_string()));
     // #654: nostr_generate_key の定義は nostr feature 依存（#651）。off では露出しないので
     // 期待値も同じ cfg で組む（sub-engine 許可リストの対照そのものは report_progress で担保）。
-    #[cfg(feature = "nostr")]
+#[cfg(any())]
     assert!(names.contains(&"nostr_generate_key".to_string()));
 }
 

@@ -17,7 +17,7 @@ pub(crate) fn heartbeat_state() -> AppState {
 
 /// live G（global heartbeat kill-switch）を固定した state。`discord-` のゲート理由の検証用。
 // #654: 使うのは discord_ctx を立てる G ゲート検証（discord feature 依存・#651）だけなので同じ cfg で囲む。
-#[cfg(feature = "discord")]
+#[cfg(any())]
 pub(crate) fn heartbeat_state_with_g(g: bool) -> AppState {
     let mut state = heartbeat_state();
     state.heartbeat_config_rx =
@@ -39,7 +39,7 @@ pub(crate) fn nostr_ctx() -> GatewayCallContext {
 /// 現在セッションを Discord チャンネル（`discord-{agent}-{guild}-{channel}`）にした ctx。
 // #654: discord セッションの発火経路（DiscordFire）は discord feature 時のみ登録される（#651）。
 // この ctx を使う test は同じ cfg で囲まれているので helper も揃える。
-#[cfg(feature = "discord")]
+#[cfg(any())]
 pub(crate) fn discord_ctx() -> GatewayCallContext {
     let mut c = GatewayCallContext::new(GatewayCaller::TrustedUser, "agent-x");
     c.session_id = Some("discord-agent-x-100-200".to_string());

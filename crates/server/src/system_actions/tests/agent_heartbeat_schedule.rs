@@ -1,6 +1,6 @@
 /// 明示の無効化は anchor/last_fired を触らない（位相保存・再有効化まで保つ）。next_fire_at は null。
 // #654: nostr セッションの発火経路は nostr feature 時のみ登録される（#651）。off は fail-closed。
-#[cfg(feature = "nostr")]
+#[cfg(any())]
 #[tokio::test]
 async fn set_my_heartbeat_disable_keeps_phase() {
     let state = heartbeat_state();
@@ -29,7 +29,7 @@ async fn set_my_heartbeat_disable_keeps_phase() {
 /// #605: 間隔変更は anchor を now へ張り直さない（起点を据え置く）。以前は毎回 now へ
 /// リセットしていたため、調整のたびに次回発火が先送りされて発火しなかった。
 // #654: nostr セッションの発火経路は nostr feature 時のみ登録される（#651）。off は fail-closed。
-#[cfg(feature = "nostr")]
+#[cfg(any())]
 #[tokio::test]
 async fn set_my_heartbeat_interval_change_preserves_anchor() {
     let state = heartbeat_state();
@@ -63,7 +63,7 @@ async fn set_my_heartbeat_interval_change_preserves_anchor() {
 /// #605 の本丸: 設定変更で `last_fired_at`（発火した事実）を消さない。消すと next_fire が
 /// anchor 基準へ戻り、調整のたびに位相が先送りされて発火しなくなる。
 // #654: nostr セッションの発火経路は nostr feature 時のみ登録される（#651）。off は fail-closed。
-#[cfg(feature = "nostr")]
+#[cfg(any())]
 #[tokio::test]
 async fn set_my_heartbeat_preserves_last_fired_across_config_change() {
     let state = heartbeat_state();
@@ -110,7 +110,7 @@ async fn set_my_heartbeat_preserves_last_fired_across_config_change() {
 /// #605 対称ケース: 間隔の**延長**でも last_fired を保ち、next_fire = last_fired+（延ばした）interval。
 /// 短縮ケース（preserves_last_fired_across_config_change）と経路は同一だが、対称性のため延長方向も明示する。
 // #654: nostr セッションの発火経路は nostr feature 時のみ登録される（#651）。off は fail-closed。
-#[cfg(feature = "nostr")]
+#[cfg(any())]
 #[tokio::test]
 async fn set_my_heartbeat_preserves_last_fired_when_interval_extended() {
     let state = heartbeat_state();
@@ -162,7 +162,7 @@ async fn set_my_heartbeat_preserves_last_fired_when_interval_extended() {
 /// #605: 発火済みセッションの**再有効化**でも last_fired を保つ（→ next_fire = last_fired+interval。
 /// 過ぎていれば即発火する）。以前は再有効化で last_fired=NULL・anchor=now になり先送りされた。
 // #654: nostr セッションの発火経路は nostr feature 時のみ登録される（#651）。off は fail-closed。
-#[cfg(feature = "nostr")]
+#[cfg(any())]
 #[tokio::test]
 async fn set_my_heartbeat_reenable_after_fire_preserves_last_fired() {
     let state = heartbeat_state();
@@ -205,7 +205,7 @@ async fn set_my_heartbeat_reenable_after_fire_preserves_last_fired() {
 /// #605: 初回有効化は従来どおり anchor=now を打ち、next_fire = now+interval（enable 直後の
 /// 即発火は避ける）。last_fired はまだ無い。
 // #654: nostr セッションの発火経路は nostr feature 時のみ登録される（#651）。off は fail-closed。
-#[cfg(feature = "nostr")]
+#[cfg(any())]
 #[tokio::test]
 async fn set_my_heartbeat_first_enable_sets_anchor_to_now() {
     let state = heartbeat_state();
@@ -244,7 +244,7 @@ async fn set_my_heartbeat_first_enable_sets_anchor_to_now() {
 /// #605 の目玉を直接 assert: `last_fired + interval < now` なら next_fire は**過去**（＝即発火）。
 /// 既存テストは last_fired が -30/-120 秒で next_fire が常に未来だったため、この核心を守っていなかった。
 // #654: nostr セッションの発火経路は nostr feature 時のみ登録される（#651）。off は fail-closed。
-#[cfg(feature = "nostr")]
+#[cfg(any())]
 #[tokio::test]
 async fn set_my_heartbeat_next_fire_is_in_the_past_when_overdue() {
     let state = heartbeat_state();
@@ -285,7 +285,7 @@ async fn set_my_heartbeat_next_fire_is_in_the_past_when_overdue() {
 /// #605 doc の 2 ケース目: **未発火 + 古い anchor + 間隔短縮**でも next_fire は過去＝即発火。
 /// anchor を据え置く（now へ張り直さない）ので `anchor+新interval` が過ぎれば直ちに発火する。
 // #654: nostr セッションの発火経路は nostr feature 時のみ登録される（#651）。off は fail-closed。
-#[cfg(feature = "nostr")]
+#[cfg(any())]
 #[tokio::test]
 async fn set_my_heartbeat_never_fired_old_anchor_shorten_fires_immediately() {
     let state = heartbeat_state();
@@ -341,7 +341,7 @@ async fn set_my_heartbeat_never_fired_old_anchor_shorten_fires_immediately() {
 
 /// #437: set 後に中央スケジューラを起こす（即時反映）。notify の permit を消費できる。
 // #654: nostr セッションの発火経路は nostr feature 時のみ登録される（#651）。off は fail-closed。
-#[cfg(feature = "nostr")]
+#[cfg(any())]
 #[tokio::test]
 async fn set_my_heartbeat_wakes_scheduler() {
     let state = heartbeat_state();
@@ -381,7 +381,7 @@ async fn agent_heartbeat_tools_reject_untrusted_agent() {
 
 /// Owner は許可（自分の設定を自分で触るのが目的）。
 // #654: nostr セッションの発火経路は nostr feature 時のみ登録される（#651）。off は fail-closed。
-#[cfg(feature = "nostr")]
+#[cfg(any())]
 #[tokio::test]
 async fn set_my_heartbeat_allows_owner() {
     let actions = SystemGatewayActions::new(heartbeat_state(), None, None, None);

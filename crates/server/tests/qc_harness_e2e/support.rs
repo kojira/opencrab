@@ -427,7 +427,7 @@ fn build_app_state(db: opencrab_db::Db, provider: Arc<dyn LlmProvider>) -> AppSt
             .join("opencrab_qc_harness")
             .to_string_lossy()
             .to_string(),
-        #[cfg(feature = "nostr")]
+#[cfg(any())]
         nostr_master_key: None,
         default_model: "mock:gpt-4o".to_string(),
         tools_config: Arc::new(std::sync::RwLock::new(

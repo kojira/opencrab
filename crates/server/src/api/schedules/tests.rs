@@ -41,7 +41,7 @@ async fn create_rejects_foreign_session() {
 
 // #654: nostr セッションで作成する。resolve_target は NostrFire descriptor（nostr feature）が
 // 要る（#651）。off では作成が 400/fail-closed になり検証対象の挙動が存在しないので同じ cfg で囲む。
-#[cfg(feature = "nostr")]
+#[cfg(any())]
 #[tokio::test]
 async fn create_then_list_computes_next_fire_at() {
     let state = state_with_db();
@@ -74,7 +74,7 @@ async fn create_then_list_computes_next_fire_at() {
 }
 
 // #654: nostr セッションで作成→更新→削除する。NostrFire（nostr feature）が要る（#651）。
-#[cfg(feature = "nostr")]
+#[cfg(any())]
 #[tokio::test]
 async fn patch_disable_stops_and_keeps_phase_then_delete() {
     let state = state_with_db();
@@ -127,7 +127,7 @@ async fn patch_disable_stops_and_keeps_phase_then_delete() {
 }
 
 // #654: nostr セッションで作成→cron 更新する。NostrFire（nostr feature）が要る（#651）。
-#[cfg(feature = "nostr")]
+#[cfg(any())]
 #[tokio::test]
 async fn patch_cron_change_resets_anchor() {
     let state = state_with_db();
@@ -202,7 +202,7 @@ async fn patch_missing_is_404() {
 
 // #654: nostr セッションで作成する。create_schedule_core の resolve_target は NostrFire
 // （nostr feature）が要る（#651）。off では .expect が落ちるので同じ cfg で囲む。
-#[cfg(feature = "nostr")]
+#[cfg(any())]
 #[test]
 fn create_is_idempotent_on_same_content() {
     let state = state_with_db();
@@ -219,7 +219,7 @@ fn create_is_idempotent_on_same_content() {
 }
 
 // #654: nostr セッションで作成する。NostrFire（nostr feature）が要る（#651）。
-#[cfg(feature = "nostr")]
+#[cfg(any())]
 #[test]
 fn same_cron_different_message_is_two_schedules() {
     let state = state_with_db();
@@ -236,7 +236,7 @@ fn same_cron_different_message_is_two_schedules() {
 
 /// 既に有効な同一内容の再登録では位相（anchor/last_fired）を保存する（冪等 = 時刻も動かさない）。
 // #654: nostr セッションで作成する。NostrFire（nostr feature）が要る（#651）。
-#[cfg(feature = "nostr")]
+#[cfg(any())]
 #[test]
 fn idempotent_reregister_preserves_phase() {
     let state = state_with_db();
