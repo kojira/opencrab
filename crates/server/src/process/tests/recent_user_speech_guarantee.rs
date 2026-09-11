@@ -13,7 +13,7 @@ fn insert_user_speech(conn: &rusqlite::Connection, text: &str) {
     assert!(
         crate::transcript::record_inbound_message(
             conn,
-            TranscriptSource::Discord,
+            TranscriptSource::new("test-in", "test-out"),
             &InboundMessageRecord {
                 session_id: SESSION,
                 recipient_agent_id: AGENT,

@@ -339,9 +339,8 @@ fn record_audit(
         scope: scope.to_string(),
         channel_id: channel_id.map(|s| s.to_string()),
         caller_identity: caller.to_string(),
-        // bridge は Discord ユーザーIDを持たないため常に None（旧 __caller_discord_id
-        // 読みは注入元が存在しない死にコードだったので削除 — #36）。
-        caller_discord_id: None,
+        // 共有bridgeは外部ユーザー識別子を監査payloadへ重複保存しない。
+        caller_user_id: None,
         old_value: old_value.map(|s| s.to_string()),
         new_value: Some(new_value.to_string()),
         reason: reason.map(|s| s.to_string()),

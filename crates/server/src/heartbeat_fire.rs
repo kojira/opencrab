@@ -151,22 +151,13 @@ pub async fn run_one_heartbeat(
 mod tests {
     use super::*;
 
-    /// #501: 指示文の整形は発火経路で決まる `channel_name` を差し込むだけ。Nostr（ラベル）と
-    /// Discord（チャンネル名）で正しい文面になること。
+    /// 指示文の整形は配送側から渡された会話ラベルを差し込むだけ。
     #[test]
     fn format_heartbeat_prompt_embeds_channel_name_per_fire_path() {
-        // NostrBroadcast は `run_one_heartbeat` が HEARTBEAT_NOSTR_CHANNEL_LABEL を channel_name に使う。
-        let nostr = format_heartbeat_prompt(HEARTBEAT_NOSTR_CHANNEL_LABEL, "巡回してね");
-        assert!(
-            nostr.contains("現在の会話「（自律ハートビート）」。巡回してね"),
-            "Nostr 経路の文面が違う: {nostr}"
-        );
-        // DiscordChannel はチャンネル設定名を channel_name に使う。
-        let discord = format_heartbeat_prompt("雑談", "静かにね");
-        assert!(
-            discord.contains("現在の会話「雑談」。静かにね"),
-            "Discord 経路の文面が違う: {discord}"
-        );
+        let neutral = format_heartbeat_prompt(HEARTBEAT_NEUTRAL_CHANNEL_LABEL, "巡回してね");
+        assert!(neutral.contains("現在の会話「（この会話）」。巡回してね"));
+        let named = format_heartbeat_prompt("雑談", "静かにね");
+        assert!(named.contains("現在の会話「雑談」。静かにね"));
     }
 
     /// #588 Stage 3: 規約は**通常のターンへ寄せる**。撤去した SPEAK/LEARN/IDLE の語彙が文面に
@@ -198,7 +189,7 @@ mod tests {
     fn format_heartbeat_prompt_guidance_is_transport_neutral() {
         // Discord ラベルでも Nostr ラベルでも同じ 1 種類の誘導になる。
         let discord = format_heartbeat_prompt("雑談", "静かにね");
-        let nostr = format_heartbeat_prompt(HEARTBEAT_NOSTR_CHANNEL_LABEL, "巡回してね");
+        let nostr = format_heartbeat_prompt(HEARTBEAT_NEUTRAL_CHANNEL_LABEL, "巡回してね");
         for p in [&discord, &nostr] {
             assert!(
                 p.contains("この応答はそのままセッションの gateway へ投稿される"),

@@ -2,7 +2,7 @@
     fn definition_is_stable() {
         let def = request_peer_review_definition();
         assert_eq!(def.name, "request_peer_review");
-        assert!(def.description.starts_with("自分の成果物（diff・実行結果・トレース等）を、同じチャンネルにいる別のBot（別モデル）に"));
+        assert!(def.description.starts_with("自分の成果物（diff・実行結果・トレース等）を、同じ会話にいる別のBot（別モデル）に"));
         assert_eq!(def.parameters["required"], json!(["content"]));
         let props = def.parameters["properties"].as_object().unwrap();
         let mut keys: Vec<&str> = props.keys().map(|k| k.as_str()).collect();

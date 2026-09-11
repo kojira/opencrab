@@ -146,7 +146,7 @@ pub(super) fn prepare_loop_restart(
         .unwrap_or_default();
     let runtime_text = match trigger_message_id {
         Some(message_id) if !message_id.is_empty() => {
-            prepend_runtime_context_discord("", &theme, message_id)
+            prepend_runtime_context_with_message_id("", &theme, message_id)
         }
         _ => prepend_runtime_context("", &theme),
     };
@@ -218,7 +218,7 @@ pub(super) fn prepare_loop_restart(
     };
     let rebuilt = match trigger_message_id {
         Some(message_id) if !message_id.is_empty() => {
-            prepend_runtime_context_discord(&rebuilt, &theme, message_id)
+            prepend_runtime_context_with_message_id(&rebuilt, &theme, message_id)
         }
         _ => prepend_runtime_context(&rebuilt, &theme),
     };

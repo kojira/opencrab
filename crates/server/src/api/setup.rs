@@ -1,8 +1,7 @@
 //! オンボーディング（運営者の初回セットアップ）用 API。
 //!
-//! - `GET  /api/setup/status` — 4 ステップ（LLM プロバイダ / エージェント /
-//!   Discord 接続 / チャンネル whitelist）の進捗を集約して返す。ダッシュボードの
-//!   セットアップウィザードと Home のチェックリストが同じ形を読む。
+//! - `GET  /api/setup/status` — server所有の2ステップ（LLMプロバイダ / エージェント）の
+//!   進捗を集約して返す。外部gatewayの設定状態は各gateway自身の管理口が所有する。
 //! - `POST /api/agents/{id}/skills/seed-standard` — `skills/*.skill.md` を読み、
 //!   frontmatter をパースして標準スキルをそのエージェントにシードする。新規
 //!   エージェントを作った直後に呼ぶことで「作ってすぐ使える」状態にする。
@@ -89,38 +88,14 @@ pub async fn get_setup_status(State(state): State<AppState>) -> Json<serde_json:
     let llm_detail = active_providers.join(", ");
 
     // 以降は DB 参照。ロックは 1 度だけ取ってまとめて読む。
-    let (agent_count, discord_configured, discord_enabled, channel_count, overrides) = {
+    let (agent_count, overrides) = {
         let conn = state.db.lock().unwrap();
         let overrides =
             opencrab_db::queries::list_llm_provider_overrides(&conn).unwrap_or_default();
-        let agent_ids = opencrab_db::queries::list_agent_ids(&conn).unwrap_or_default();
-        let agent_count = agent_ids.len();
-
-        // per-agent Discord: bot_token が入っていれば「設定済み」。enabled は別途集計。
-        let mut discord_configured = 0usize;
-        let mut discord_enabled = 0usize;
-        for aid in &agent_ids {
-            if let Ok(Some(cfg)) = opencrab_db::queries::get_agent_discord_config(&conn, aid) {
-                if !cfg.bot_token.trim().is_empty() {
-                    discord_configured += 1;
-                    if cfg.enabled {
-                        discord_enabled += 1;
-                    }
-                }
-            }
-        }
-
-        let channel_count = opencrab_db::queries::list_whitelisted_channels(&conn)
-            .map(|v| v.len())
+        let agent_count = opencrab_db::queries::list_agent_ids(&conn)
+            .map(|ids| ids.len())
             .unwrap_or(0);
-
-        (
-            agent_count,
-            discord_configured,
-            discord_enabled,
-            channel_count,
-            overrides,
-        )
+        (agent_count, overrides)
     };
 
     // --- LLM プロバイダ: 「既定プロバイダが実際に使える状態か」で判定する ---
@@ -134,18 +109,12 @@ pub async fn get_setup_status(State(state): State<AppState>) -> Json<serde_json:
     let llm_done = llm_provider_ready(default_provider, &state.llm_config, &overrides);
 
     let agent_done = agent_count > 0;
-    let discord_done = discord_configured > 0;
-    let channel_done = channel_count > 0;
 
-    // 未完の最初のステップ（ウィザードの初期フォーカス先）。
+    // 未完の最初のserver所有ステップ（ウィザードの初期フォーカス先）。
     let next_step = if !llm_done {
         Some("llm_provider")
     } else if !agent_done {
         Some("agent")
-    } else if !discord_done {
-        Some("discord")
-    } else if !channel_done {
-        Some("channel")
     } else {
         None
     };
@@ -159,9 +128,7 @@ pub async fn get_setup_status(State(state): State<AppState>) -> Json<serde_json:
                 "count": active_providers.len(),
                 "default_provider": default_provider,
             },
-            "agent":        { "done": agent_done, "count": agent_count },
-            "discord":      { "done": discord_done, "count": discord_configured, "enabled": discord_enabled },
-            "channel":      { "done": channel_done, "count": channel_count },
+            "agent": { "done": agent_done, "count": agent_count },
         },
         "complete": complete,
         "next_step": next_step,

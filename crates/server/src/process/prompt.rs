@@ -186,7 +186,7 @@ pub fn build_agent_context(
 /// #923 §2.7 静的 index（案B）: ツール名 → カテゴリの写像。1 か所に集約する。
 ///
 /// 常時集合の外にあるツールを describe_tools で取得させるための分類。未知名は "other"。
-/// lane 依存（Nostr の会話/write op）や owner-only は「effective に現れるか」で決まるので、
+/// lane依存の操作やowner-onlyは「effectiveに現れるか」で決まるので、
 /// ここでは caller/lane を見ずに**名前だけ**で分類する（写像はレーン非依存）。
 fn tool_category(name: &str) -> &'static str {
     if name.starts_with("mcp__") {
@@ -219,7 +219,6 @@ fn tool_category(name: &str) -> &'static str {
         "ws_read" | "ws_list" | "ws_write" | "ws_edit" | "ws_mkdir" | "ws_delete" => "workspace",
         "update_task_contract" | "get_task" | "declare_done" => "tasks",
         "configure_llm_provider"
-        | "configure_nostr"
         | "configure_self"
         | "configure_mcp_server"
         | "select_llm"
@@ -233,7 +232,6 @@ fn tool_category(name: &str) -> &'static str {
         | "get_my_schedules"
         | "update_my_schedule"
         | "delete_my_schedule" => "schedule & heartbeat",
-        "nostr_generate_key" | "nostr_list_keys" | "nostr_switch_identity" => "nostr keys",
         "add_allowed_command" | "list_allowed_commands" | "remove_allowed_command" => {
             "allowed commands"
         }
@@ -244,9 +242,6 @@ fn tool_category(name: &str) -> &'static str {
         | "get_default_subtask_webhook"
         | "list_subtask_webhooks" => "webhook",
         "get_system_info" | "update_memory_index_config" => "system",
-        // Nostr レーンの write/操作 op（Nostr gateway 接続時のみ effective に出る＝Nostr ターンのみ）。
-        "follow" | "unfollow" | "kind0" | "upload" | "nostr_post" | "nostr_reply" | "nostr_zap"
-        | "nostr_run" => "nostr",
         _ => "other",
     }
 }

@@ -14,7 +14,7 @@ fn insert_user_speech(db: &opencrab_db::Db, text: &str) {
     assert!(
         crate::transcript::record_inbound_message(
             &conn,
-            TranscriptSource::Discord,
+            TranscriptSource::new("test-in", "test-out"),
             &InboundMessageRecord {
                 session_id: SESSION,
                 recipient_agent_id: AGENT,
@@ -165,7 +165,7 @@ fn insert_speech_from(db: &opencrab_db::Db, speaker: &str, text: &str) {
     let conn = db.lock().unwrap();
     assert!(crate::transcript::record_inbound_message(
         &conn,
-        TranscriptSource::Nostr,
+        TranscriptSource::new("other-in", "other-out"),
         &InboundMessageRecord {
             session_id: SESSION,
             recipient_agent_id: AGENT,

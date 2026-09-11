@@ -90,7 +90,7 @@ fn set_my_heartbeat_definition() -> GatewayActionDef {
     GatewayActionDef {
                 name: "set_my_heartbeat".to_string(),
                 class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
-                description: "自分（呼び出し元エージェント）のハートビート（自律実行）の有効/無効と間隔を、いま話しているセッションに対して設定する。対象は常にこのセッション（Nostr の自発投稿、またはこの Discord チャンネル）で、どこに設定するか選ぶ必要はない。他のエージェントや別のチャンネルの設定は変えられない。間隔には運用者が決めた下限があり、それより短い値は拒否される（丸められない）ので、拒否されたらエラーに載っている下限以上で指定し直すこと。有効にした直後から次回発火時刻が算出され、再起動を待たず即時に反映される。発火タイミングは非対称: 一度も発火していないセッションを初めて有効化したときは間隔をまるごと待つ（今すぐは発火しない）が、既に発火したことがあるセッションの再有効化や間隔の短縮では、前回発火（や起点）＋新しい間隔が既に過ぎていれば直ちに発火する（設定変更で発火の記録は消えない）。今すぐ試したいなら run_my_heartbeat を使う。ハートビートで何をするかの指示文はこのツールでは変えられない（オーナー限定の別ツール）。".to_string(),
+                description: "自分（呼び出し元エージェント）のハートビート（自律実行）の有効/無効と間隔を、いま話しているセッションに対して設定する。対象は常にこのセッションで、配送経路を選ぶ必要はない。他のエージェントや別のチャンネルの設定は変えられない。間隔には運用者が決めた下限があり、それより短い値は拒否される（丸められない）ので、拒否されたらエラーに載っている下限以上で指定し直すこと。有効にした直後から次回発火時刻が算出され、再起動を待たず即時に反映される。発火タイミングは非対称: 一度も発火していないセッションを初めて有効化したときは間隔をまるごと待つ（今すぐは発火しない）が、既に発火したことがあるセッションの再有効化や間隔の短縮では、前回発火（や起点）＋新しい間隔が既に過ぎていれば直ちに発火する（設定変更で発火の記録は消えない）。今すぐ試したいなら run_my_heartbeat を使う。ハートビートで何をするかの指示文はこのツールでは変えられない（オーナー限定の別ツール）。".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -113,13 +113,13 @@ fn run_my_heartbeat_definition() -> GatewayActionDef {
     GatewayActionDef {
                 name: "run_my_heartbeat".to_string(),
                 class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
-                description: "自分（呼び出し元エージェント）のハートビートを、次の発火時刻を待たずに今すぐ手動で発火する。テストや動作確認に使う（時間発火とまったく同じ経路——宣言→サブタスク→継続→投稿——を通るので、待たずに一連の流れを検証できる）。対象は省略すると「いま話しているセッション」、session_id を渡せばそのセッション。発火先は Discord チャンネルまたは Nostr の自発投稿で、発火経路の無いセッション種別は拒否される。実際のターンは今のターンが終わってから走る（すぐに投げて返る）。time-fire の位相をずらさないため last_fired_at は更新しない（次回の定期発火時刻は変わらない）。オーナーまたは co_agent のみ実行できる。".to_string(),
+                description: "自分（呼び出し元エージェント）のハートビートを、次の発火時刻を待たずに今すぐ手動で発火する。テストや動作確認に使う（時間発火とまったく同じ経路——宣言→サブタスク→継続→投稿——を通るので、待たずに一連の流れを検証できる）。対象は省略すると「いま話しているセッション」、session_id を渡せばそのセッション。発火先は現在のセッションに登録された配送経路で、経路の無いセッションは拒否される。実際のターンは今のターンが終わってから走る（すぐに投げて返る）。time-fire の位相をずらさないため last_fired_at は更新しない（次回の定期発火時刻は変わらない）。オーナーまたは co_agent のみ実行できる。".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
                         "session_id": {
                             "type": "string",
-                            "description": "発火する対象セッションの session_id（discord-… / nostr-…）。省略すると、いま話しているセッションを発火する。"
+                            "description": "発火する対象セッションの session_id。省略すると、いま話しているセッションを発火する。"
                         }
                     }
                 }),
@@ -145,7 +145,7 @@ fn set_my_schedule_definition() -> GatewayActionDef {
     GatewayActionDef {
                 name: "set_my_schedule".to_string(),
                 class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
-                description: "自分（呼び出し元エージェント）の定時実行スケジュールを、いま話しているセッションに対して登録する。ハートビート（固定短間隔の tick）とは別の、時刻・周期ベースの自律実行。対象は常にこのセッション（Nostr の自発投稿、またはこの Discord チャンネル）で、どこに登録するか選ぶ必要はない。cron_expr は「標準 5 フィールド cron」（例: `0 7 * * *` = 毎朝 7 時、`0 */3 * * *` = 3 時間ごとの 0 分）か「@every 形式」（例: `@every 3h`、`@every 1h30m`、`@every 45m`）で指定する。timezone は cron の評価に使う IANA 名で、省略時は Asia/Tokyo。message は発火時に自分へ渡される指示文（例: ニュースを巡回して要約を書く）。cron 式が不正なら登録は拒否され、その場でエラーが返る（実行時に黙って発火しないことはない）ので、エラーが出たら直して呼び直すこと。enabled は省略時 true（登録するとそのまま定期実行が始まる）。登録直後から次回発火時刻が算出され、再起動を待たず即時に反映される。運用者がハートビートを無効化していても、定時実行は止まらない（別概念）。".to_string(),
+                description: "自分（呼び出し元エージェント）の定時実行スケジュールを、いま話しているセッションに対して登録する。ハートビート（固定短間隔の tick）とは別の、時刻・周期ベースの自律実行。対象は常にこのセッションで、配送経路を選ぶ必要はない。cron_expr は「標準 5 フィールド cron」（例: `0 7 * * *` = 毎朝 7 時、`0 */3 * * *` = 3 時間ごとの 0 分）か「@every 形式」（例: `@every 3h`、`@every 1h30m`、`@every 45m`）で指定する。timezone は cron の評価に使う IANA 名で、省略時は Asia/Tokyo。message は発火時に自分へ渡される指示文（例: ニュースを巡回して要約を書く）。cron 式が不正なら登録は拒否され、その場でエラーが返る（実行時に黙って発火しないことはない）ので、エラーが出たら直して呼び直すこと。enabled は省略時 true（登録するとそのまま定期実行が始まる）。登録直後から次回発火時刻が算出され、再起動を待たず即時に反映される。運用者がハートビートを無効化していても、定時実行は止まらない（別概念）。".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {

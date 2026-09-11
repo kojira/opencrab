@@ -54,16 +54,13 @@ pub async fn list_trusted_users(
 
 #[derive(Debug, Deserialize)]
 pub struct AddTrustedUserRequest {
-    /// その経路でのユーザー識別子。旧キー `discord_user_id` も受け付ける（後方互換）。
-    #[serde(alias = "discord_user_id")]
+    /// source内で一意なopaqueユーザー識別子。
     pub user_id: String,
     pub permission: Option<String>,
     /// ロスター表示用の名前（ピアレビュアー一覧等）。省略時は空。
     pub display_name: Option<String>,
-    /// `user_id` がどの経路の識別子か（`discord` / `web` / `rest`, #159）。
-    ///
-    /// **省略時は `discord`**（#214 以前からの登録リクエストがそのまま動く）。
-    pub platform: Option<String>,
+    /// `user_id` の識別子空間を表すopaqueなsource。必須。
+    pub platform: String,
 }
 
 /// 信頼済みユーザーを 1 件登録する。
@@ -86,9 +83,7 @@ pub async fn add_trusted_user(
     Path(agent_id): Path<String>,
     Json(req): Json<AddTrustedUserRequest>,
 ) -> Result<Json<TrustedUserDto>, StatusCode> {
-    let platform = req
-        .platform
-        .unwrap_or_else(|| opencrab_db::queries::TRUSTED_PLATFORM_DISCORD.to_string());
+    let platform = req.platform;
     // platformとuser_idはこの共有APIではopaque。個別gatewayの形式検証はgateway側で行う。
     let user_id = req.user_id;
     let permission = parse_permission(req.permission.as_deref())?;
@@ -210,7 +205,7 @@ mod tests {
             user_id: user_id.to_string(),
             permission: None,
             display_name: None,
-            platform: platform.map(str::to_string),
+            platform: platform.unwrap_or("test-source").to_string(),
         }
     }
 
@@ -224,13 +219,13 @@ mod tests {
             user_id: user_id.to_string(),
             permission: Some(permission.to_string()),
             display_name: Some("Crab B".to_string()),
-            platform: Some(platform.to_string()),
+            platform: platform.to_string(),
         }
     }
 
-    /// 経路を省略した登録は従来どおり `discord`（#214 以前のリクエストが動き続ける）。
+    /// テストhelperの省略sourceはopaqueな既定値を使う。
     #[tokio::test]
-    async fn platform_defaults_to_discord() {
+    async fn helper_default_source_is_opaque() {
         let state = crate::test_app_state();
         let dto = add_trusted_user(
             State(state.clone()),
@@ -240,16 +235,12 @@ mod tests {
         .await
         .expect("add")
         .0;
-        assert_eq!(dto.platform, TRUSTED_PLATFORM_DISCORD);
+        assert_eq!(dto.platform, "test-source");
 
         let conn = state.db.lock().unwrap();
-        assert!(opencrab_db::queries::get_trusted_user(
-            &conn,
-            TRUSTED_PLATFORM_DISCORD,
-            "42",
-            "agent-1"
-        )
-        .is_some());
+        assert!(
+            opencrab_db::queries::get_trusted_user(&conn, "test-source", "42", "agent-1").is_some()
+        );
     }
 
     /// 経路を指定すればその経路の行になる（互換読みの撤去後、これが唯一の登録手段）。

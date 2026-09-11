@@ -32,7 +32,7 @@ pub use budget::{
     ContextBudgetEnvelope, ContextBudgetError, ContextBudgetPolicy, MemoryIndexDecision,
     RequestEnvelopeArgs, DEFAULT_MEMORY_INDEX_TOKEN_CAP,
 };
-pub use live_inbound::{prepend_runtime_context, prepend_runtime_context_discord};
+pub use live_inbound::{prepend_runtime_context, prepend_runtime_context_with_message_id};
 pub use prompt::{build_agent_context, build_more_tools_index};
 #[allow(unused_imports)]
 pub(crate) use wiring::{

@@ -6,7 +6,7 @@
         let delivery = FakeDelivery::new();
         opencrab_db::queries::add_trusted_user(
             &conn,
-            opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
+            REVIEWER_PLATFORM,
             "row-1",
             "agent-1",
             "42",
@@ -19,7 +19,7 @@
         // 数値の display_name（id 解釈に食われないこと）
         opencrab_db::queries::add_trusted_user(
             &conn,
-            opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
+            REVIEWER_PLATFORM,
             "row-2",
             "agent-1",
             "77",
@@ -32,7 +32,7 @@
         // co_agent でない行はロスター外
         opencrab_db::queries::add_trusted_user(
             &conn,
-            opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
+            REVIEWER_PLATFORM,
             "row-3",
             "agent-1",
             "44",
@@ -72,35 +72,6 @@
         assert!(!err.contains("Human"));
     }
 
-    /// #159: 名簿の経路と受理ゲートの経路が一致していること。
-    ///
-    /// ずれると「依頼は飛ぶが返信を受理されない」相手を指名できてしまう。
-    /// `TranscriptSource` に由来が増えたら下の `match` が非網羅でコンパイルできず、
-    /// 名簿側（[`REVIEWER_PLATFORM`]）の見直しを強制する。
-    #[test]
-    fn roster_platform_matches_the_harvestable_platforms() {
-        let all = [
-            TranscriptSource::Discord,
-            TranscriptSource::Nostr,
-            TranscriptSource::External,
-        ];
-        for source in all {
-            let expected = match source {
-                TranscriptSource::Discord => Some(REVIEWER_PLATFORM),
-                TranscriptSource::Nostr => None,
-                TranscriptSource::External => None,
-            };
-            assert_eq!(trusted_platform_for(source), expected, "{source:?}");
-        }
-        let harvestable: std::collections::BTreeSet<&str> =
-            all.into_iter().filter_map(trusted_platform_for).collect();
-        assert_eq!(
-            harvestable,
-            std::collections::BTreeSet::from([REVIEWER_PLATFORM]),
-            "受理できる経路の集合＝名簿を引く経路であること"
-        );
-    }
-
     /// 受理できない経路の co_agent は指名できない（依頼だけ飛ぶ状態を作らない）。
     #[test]
     fn resolve_reviewer_ignores_other_platform_co_agents() {
@@ -108,7 +79,7 @@
         let delivery = FakeDelivery::new();
         opencrab_db::queries::add_trusted_user(
             &conn,
-            opencrab_db::queries::TRUSTED_PLATFORM_WEB,
+            "other-source",
             "row-w",
             "agent-1",
             "77",

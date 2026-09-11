@@ -77,12 +77,6 @@ impl Default for ConversationConfig {
 pub struct GateConfig {
     #[serde(default)]
     pub listen_socket: String,
-    /// Nostr ingress is V3-only; missing or any other value fails when Nostr is enabled.
-    #[serde(default)]
-    pub nostr_ingress: String,
-    /// Discord ingress is V3-only; missing or any other value fails startup.
-    #[serde(default)]
-    pub discord_ingress: String,
 }
 
 /// 古い `llm_logs` を zip へ書き出して DB から外す設定（#337）。

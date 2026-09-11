@@ -240,7 +240,7 @@ fn entry_at(session: &str, next: Option<DateTime<Utc>>) -> Entry {
         next_fire_at: next,
         kind: FireKind::Heartbeat {
             target: FireTarget {
-                kind: opencrab_actions::gateway_kinds::NOSTR,
+                kind: "test-kind",
                 channel_id: String::new(),
                 guild_id: String::new(),
                 route: String::new(),

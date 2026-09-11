@@ -268,8 +268,11 @@ mod tests {
     #[test]
     fn discord_inbound_metadata_is_byte_identical() {
         assert_eq!(
-            inbound_metadata_json(TranscriptSource::Discord, &discord_inbound(None, &[])),
-            r#"{"channel_id":"222","source":"discord","user_name":"エージェントC"}"#
+            inbound_metadata_json(
+                TranscriptSource::new("test-in", "test-out"),
+                &discord_inbound(None, &[])
+            ),
+            r#"{"channel_id":"222","source":"test-in","user_name":"エージェントC"}"#
         );
     }
 
@@ -281,10 +284,10 @@ mod tests {
         ];
         assert_eq!(
             inbound_metadata_json(
-                TranscriptSource::Discord,
+                TranscriptSource::new("test-in", "test-out"),
                 &discord_inbound(Some("https://cdn/avatar.png"), &images)
             ),
-            r#"{"channel_id":"222","image_urls":["https://cdn/a.png","https://cdn/b.png"],"source":"discord","user_avatar_url":"https://cdn/avatar.png","user_name":"エージェントC"}"#
+            r#"{"channel_id":"222","image_urls":["https://cdn/a.png","https://cdn/b.png"],"source":"test-in","user_avatar_url":"https://cdn/avatar.png","user_name":"エージェントC"}"#
         );
     }
 
@@ -302,8 +305,8 @@ mod tests {
             image_urls: &[],
         };
         assert_eq!(
-            inbound_metadata_json(TranscriptSource::Nostr, &record),
-            r#"{"pubkey":"npub-hex","source":"nostr","user_name":"だれか"}"#
+            inbound_metadata_json(TranscriptSource::new("other-in", "other-out"), &record),
+            r#"{"pubkey":"npub-hex","source":"other-in","user_name":"だれか"}"#
         );
     }
 
@@ -321,10 +324,10 @@ mod tests {
     fn discord_direct_reply_metadata_is_byte_identical() {
         assert_eq!(
             outbound_metadata_json(
-                TranscriptSource::Discord,
+                TranscriptSource::new("test-in", "test-out"),
                 &discord_reply(Some(AgentReplyContext::Direct { tool_calls_made: 3 }))
             ),
-            r#"{"channel_id":"222","source":"discord_response","tool_calls_made":3}"#
+            r#"{"channel_id":"222","source":"test-out","tool_calls_made":3}"#
         );
     }
 
@@ -332,10 +335,10 @@ mod tests {
     fn discord_subtask_completed_reply_metadata_is_byte_identical() {
         assert_eq!(
             outbound_metadata_json(
-                TranscriptSource::Discord,
+                TranscriptSource::new("test-in", "test-out"),
                 &discord_reply(Some(AgentReplyContext::SubtaskCompleted))
             ),
-            r#"{"channel_id":"222","source":"discord_response","triggered_by":"subtask_completed"}"#
+            r#"{"channel_id":"222","source":"test-out","triggered_by":"subtask_completed"}"#
         );
     }
 
@@ -343,12 +346,12 @@ mod tests {
     fn discord_interaction_reply_metadata_is_byte_identical() {
         assert_eq!(
             outbound_metadata_json(
-                TranscriptSource::Discord,
+                TranscriptSource::new("test-in", "test-out"),
                 &discord_reply(Some(AgentReplyContext::InteractionResponse {
                     interaction_id: "int-9"
                 }))
             ),
-            r#"{"channel_id":"222","interaction_id":"int-9","source":"discord_response","triggered_by":"interaction_response"}"#
+            r#"{"channel_id":"222","interaction_id":"int-9","source":"test-out","triggered_by":"interaction_response"}"#
         );
     }
 
@@ -362,20 +365,21 @@ mod tests {
             context: None,
         };
         assert_eq!(
-            outbound_metadata_json(TranscriptSource::Nostr, &record),
-            r#"{"source":"nostr_response"}"#
+            outbound_metadata_json(TranscriptSource::new("other-in", "other-out"), &record),
+            r#"{"source":"other-out"}"#
         );
     }
 
     /// 宛先の識別子（web の表示が参照する `channel_id`）を落としていないこと。
     #[test]
     fn discord_rows_keep_destination_id() {
-        assert!(
-            inbound_metadata_json(TranscriptSource::Discord, &discord_inbound(None, &[]))
-                .contains(r#""channel_id":"222""#)
-        );
+        assert!(inbound_metadata_json(
+            TranscriptSource::new("test-in", "test-out"),
+            &discord_inbound(None, &[])
+        )
+        .contains(r#""channel_id":"222""#));
         assert!(outbound_metadata_json(
-            TranscriptSource::Discord,
+            TranscriptSource::new("test-in", "test-out"),
             &discord_reply(Some(AgentReplyContext::Direct { tool_calls_made: 0 }))
         )
         .contains(r#""channel_id":"222""#));
@@ -391,12 +395,12 @@ mod tests {
 
         record_inbound_message(
             &conn,
-            TranscriptSource::Discord,
+            TranscriptSource::new("test-in", "test-out"),
             &discord_inbound(None, &[]),
         );
         record_outbound_reply(
             &conn,
-            TranscriptSource::Discord,
+            TranscriptSource::new("test-in", "test-out"),
             &discord_reply(Some(AgentReplyContext::SubtaskCompleted)),
         );
 
@@ -418,14 +422,14 @@ mod tests {
                     "agent-1".to_string(),
                     "111".to_string(),
                     "speech".to_string(),
-                    r#"{"channel_id":"222","source":"discord","user_name":"エージェントC"}"#
+                    r#"{"channel_id":"222","source":"test-in","user_name":"エージェントC"}"#
                         .to_string(),
                 ),
                 (
                     "agent-1".to_string(),
                     "agent-1".to_string(),
                     "speech".to_string(),
-                    r#"{"channel_id":"222","source":"discord_response","triggered_by":"subtask_completed"}"#
+                    r#"{"channel_id":"222","source":"test-out","triggered_by":"subtask_completed"}"#
                         .to_string(),
                 ),
             ]
@@ -451,7 +455,7 @@ mod tests {
         };
         assert!(record_inbound_message(
             &conn,
-            TranscriptSource::Nostr,
+            TranscriptSource::new("other-in", "other-out"),
             &record
         ));
 

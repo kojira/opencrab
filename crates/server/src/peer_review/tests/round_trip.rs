@@ -40,7 +40,7 @@
                     user_id: REVIEWER_ID.to_string(),
                     permission: Some("co-agent".to_string()),
                     display_name: Some(REVIEWER_NAME.to_string()),
-                    platform: None,
+                    platform: REVIEWER_PLATFORM.to_string(),
                 }),
             )
             .await
@@ -201,7 +201,7 @@
 
             // (5) レビュアーの返信を**共通の受信フック経由**で流す
             state.on_inbound_message(
-                TranscriptSource::Discord,
+                TranscriptSource::new(REVIEWER_PLATFORM, "test-out"),
                 AGENT,
                 &inbound(REVIEWER_ID, REPLY),
             );
@@ -219,7 +219,7 @@
 
             // 1 依頼 1 記録: 同じ返信をもう一度流しても増えない
             state.on_inbound_message(
-                TranscriptSource::Discord,
+                TranscriptSource::new(REVIEWER_PLATFORM, "test-out"),
                 AGENT,
                 &inbound(REVIEWER_ID, REPLY),
             );
@@ -231,7 +231,7 @@
         async fn gate_marker_must_start_a_line() {
             let (state, task_id, _d) = request_sent().await;
             state.on_inbound_message(
-                TranscriptSource::Discord,
+                TranscriptSource::new(REVIEWER_PLATFORM, "test-out"),
                 AGENT,
                 &inbound(
                     REVIEWER_ID,
@@ -252,7 +252,7 @@
             let (state, task_id, delivery) = request_sent().await;
             let header = delivery.sent.lock().unwrap()[0].1.clone();
             state.on_inbound_message(
-                TranscriptSource::Discord,
+                TranscriptSource::new(REVIEWER_PLATFORM, "test-out"),
                 AGENT,
                 &inbound(REVIEWER_ID, &header),
             );
@@ -265,7 +265,7 @@
         async fn gate_sender_must_be_a_registered_co_agent() {
             let (state, task_id, _d) = request_sent().await;
             state.on_inbound_message(
-                TranscriptSource::Discord,
+                TranscriptSource::new(REVIEWER_PLATFORM, "test-out"),
                 AGENT,
                 &inbound("999999999999999999", REPLY),
             );
@@ -314,7 +314,7 @@
             );
 
             state2.on_inbound_message(
-                TranscriptSource::Discord,
+                TranscriptSource::new(REVIEWER_PLATFORM, "test-out"),
                 AGENT,
                 &inbound(REVIEWER_ID, REPLY),
             );
@@ -335,7 +335,7 @@
             register_reviewer(&state).await;
             let task_id = seed_agent_and_task(&state);
             state.on_inbound_message(
-                TranscriptSource::Discord,
+                TranscriptSource::new(REVIEWER_PLATFORM, "test-out"),
                 AGENT,
                 &inbound(REVIEWER_ID, REPLY),
             );
@@ -354,7 +354,7 @@
                 session_id: "sess-other",
                 ..inbound(REVIEWER_ID, REPLY)
             };
-            state.on_inbound_message(TranscriptSource::Discord, AGENT, &other);
+            state.on_inbound_message(TranscriptSource::new("test-in", "test-out"), AGENT, &other);
             assert_eq!(
                 ledger(&state, task_id).len(),
                 1,

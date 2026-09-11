@@ -8,7 +8,7 @@ fn roster_lists_co_agents_only_and_handles_empty() {
 
     opencrab_db::queries::add_trusted_user(
         &conn,
-        opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
+        crate::peer_review::REVIEWER_PLATFORM,
         "r1",
         "a1",
         "42",
@@ -20,7 +20,7 @@ fn roster_lists_co_agents_only_and_handles_empty() {
     .unwrap();
     opencrab_db::queries::add_trusted_user(
         &conn,
-        opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
+        crate::peer_review::REVIEWER_PLATFORM,
         "r2",
         "a1",
         "43",
@@ -32,7 +32,7 @@ fn roster_lists_co_agents_only_and_handles_empty() {
     .unwrap();
     opencrab_db::queries::add_trusted_user(
         &conn,
-        opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
+        crate::peer_review::REVIEWER_PLATFORM,
         "r3",
         "a1",
         "44",
@@ -61,7 +61,7 @@ fn roster_is_empty_when_all_display_names_are_blank() {
     let conn = opencrab_db::init_memory().unwrap();
     opencrab_db::queries::add_trusted_user(
         &conn,
-        opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
+        crate::peer_review::REVIEWER_PLATFORM,
         "r1",
         "a1",
         "42",
