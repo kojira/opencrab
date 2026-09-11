@@ -5,10 +5,25 @@ Nostr inbound の独立 binary。`nostaro watch` 子プロセスの JSONL を V3
 ## 起動 ABI
 
 ```text
-nostr-gateway /path/to/placement.json
+nostr-gateway daemon /path/to/daemon.json
+nostr-gateway instance /path/to/placement.json
 ```
 
-argv は placement JSON 1 個だけ。HTTP listen はしない（ready=listen ではない）。配置が正しければ UDS client を張り、watch 子を起動して生存する。listen 文言を ready protocol にしない。
+`daemon` はgateway専用SQLite、ローカルadmin UDS、instance childのreconcileを所有する。`instance` はplacementに従ってcore UDSへ接続し、watch childを起動する。HTTP listenとserver proxyは作らない。
+
+```json
+{
+  "database_path": "/var/lib/opencrab-nostr/gateway.db",
+  "core_database_path": "/var/lib/opencrab/opencrab.db",
+  "legacy_database_path": "/var/lib/opencrab/opencrab.db",
+  "admin_socket": "/run/opencrab/nostr-admin.sock",
+  "core_socket": "/run/opencrab/gate.sock",
+  "nostaro_bin": "/usr/local/bin/nostaro",
+  "placement_dir": "/var/lib/opencrab-nostr/placements"
+}
+```
+
+`legacy_database_path`は一回限りのimport元であり、完了marker後のruntime読取には使わない。admin UDSは0600で、秘密鍵を応答へ含めない。`database_path`と`core_database_path`を同一pathにしてはならない。
 
 `NOSTARO_SECRET_KEY` は起動時に process env から除去し、watch child env にだけ渡す。argv・log・status・config に出さない。
 

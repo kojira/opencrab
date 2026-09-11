@@ -9,18 +9,27 @@ use anyhow::{Context as _, Result};
 use opencrab_gateway::process_supervisor::{
     GatewayChildSpawner, GatewaySupervisorSet, SupervisorConfig,
 };
-use opencrab_nostr::{config_from_row, NostaroCli};
+use opencrab_nostr::{config_from_parts, NostaroCli};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 
 use crate::config::{InstancePlacement, Placement};
 use crate::secret::{take_master_key, MASTER_KEY_ENV};
+use crate::store::{GatewayStore, InstanceRow};
 
 const DEFAULT_RECONCILE_SECS: u64 = 5;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DaemonConfig {
+    /// Gateway-owned configuration database.
     pub database_path: PathBuf,
+    /// Core-owned conversation database. Only generic instance/binding provisioning uses it.
+    pub core_database_path: PathBuf,
+    /// Optional one-shot source for importing pre-separation configuration.
+    #[serde(default)]
+    pub legacy_database_path: Option<PathBuf>,
+    /// Gateway-owned local administration socket.
+    pub admin_socket: PathBuf,
     pub core_socket: PathBuf,
     pub nostaro_bin: PathBuf,
     #[serde(default = "default_placement_dir")]
@@ -56,6 +65,22 @@ impl DaemonConfig {
         if !self.database_path.is_absolute() {
             anyhow::bail!("database_path must be absolute");
         }
+        if !self.core_database_path.is_absolute() {
+            anyhow::bail!("core_database_path must be absolute");
+        }
+        if self.database_path == self.core_database_path {
+            anyhow::bail!("database_path must differ from core_database_path");
+        }
+        if self
+            .legacy_database_path
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
+        {
+            anyhow::bail!("legacy_database_path must be absolute");
+        }
+        if !self.admin_socket.is_absolute() {
+            anyhow::bail!("admin_socket must be absolute");
+        }
         if !self.core_socket.is_absolute() {
             anyhow::bail!("core_socket must be absolute");
         }
@@ -71,12 +96,14 @@ impl DaemonConfig {
 
 struct Daemon {
     config: DaemonConfig,
-    db: opencrab_db::Db,
+    store: Arc<std::sync::Mutex<GatewayStore>>,
+    core_db: opencrab_db::Db,
     cli: NostaroCli,
     secret_provider: opencrab_nostr::MainKeyProvider,
     supervisors: Arc<GatewaySupervisorSet>,
     active: BTreeMap<String, String>,
     executable: PathBuf,
+    _admin_task: tokio::task::JoinHandle<Result<()>>,
 }
 
 impl Daemon {
@@ -84,46 +111,54 @@ impl Daemon {
         let encoded_key = take_master_key()
             .with_context(|| format!("{MASTER_KEY_ENV} is required by the gateway daemon"))?;
         let master_key = Arc::new(opencrab_core::secret_box::parse_master_key(&encoded_key)?);
-        let db = opencrab_db::Db::open(
-            config
-                .database_path
-                .to_str()
-                .context("database_path must be UTF-8")?,
-        )?;
-        let report = opencrab_nostr::secret_migration::migrate_nostr_secrets_at_rest(
-            &db,
-            &master_key,
-            Path::new("data/agents"),
-        );
-        if report.changed_anything() {
-            tracing::info!(?report, "gateway-owned secret migration completed");
+        let mut gateway_store = GatewayStore::open(&config.database_path)?;
+        if let Some(legacy_path) = &config.legacy_database_path {
+            if gateway_store.import_legacy_once(legacy_path)? {
+                tracing::info!(source = %legacy_path.display(), "legacy gateway configuration imported");
+            }
         }
-        let secret_provider = opencrab_nostr::db_main_key_provider(db.clone(), master_key.clone());
+        let encrypted = gateway_store.encrypt_plaintext_secrets(&master_key)?;
+        if encrypted > 0 {
+            tracing::info!(encrypted, "gateway secrets encrypted at rest");
+        }
+        let store = Arc::new(std::sync::Mutex::new(gateway_store));
+        let secret_provider = gateway_secret_provider(store.clone(), master_key.clone());
+        let core_db = opencrab_db::Db::open(
+            config
+                .core_database_path
+                .to_str()
+                .context("core_database_path must be UTF-8")?,
+        )?;
         let cli = NostaroCli::new()
             .with_binary_path(config.nostaro_bin.to_string_lossy().into_owned())
             .with_workspace_base(config.workspace_base.clone())
-            .with_master_key(master_key)
+            .with_master_key(master_key.clone())
             .with_main_key_provider(secret_provider.clone());
         std::fs::create_dir_all(&config.placement_dir)?;
+        let admin_task = crate::admin::spawn(
+            config.admin_socket.clone(),
+            store.clone(),
+            master_key.clone(),
+        );
         Ok(Self {
             config,
-            db,
+            store,
+            core_db,
             cli,
             secret_provider,
             supervisors: GatewaySupervisorSet::new(SupervisorConfig::default()),
             active: BTreeMap::new(),
             executable: std::env::current_exe().context("resolve current gateway executable")?,
+            _admin_task: admin_task,
         })
     }
 
     async fn reconcile(&mut self) -> Result<()> {
-        let rows = {
-            let conn = self
-                .db
-                .lock()
-                .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
-            opencrab_db::queries::list_enabled_agent_nostr_configs(&conn)?
-        };
+        let rows = self
+            .store
+            .lock()
+            .map_err(|_| anyhow::anyhow!("gateway store lock poisoned"))?
+            .list_enabled()?;
         let desired: BTreeSet<String> = rows.iter().map(|row| row.agent_id.clone()).collect();
         let stopped: Vec<String> = self
             .active
@@ -145,36 +180,35 @@ impl Daemon {
         Ok(())
     }
 
-    async fn reconcile_agent(
-        &mut self,
-        row: &opencrab_db::queries::AgentNostrConfigRow,
-    ) -> Result<()> {
+    async fn reconcile_agent(&mut self, row: &InstanceRow) -> Result<()> {
         if row.secret_key.trim().is_empty() {
             anyhow::bail!("configured instance has no secret key");
         }
-        let config = config_from_row(row);
+        let config = config_from_parts(&row.relays_json, &row.filter_json);
         NostaroCli::materialize_config(&row.agent_id, &config.effective_relays(), None)?;
         let self_pubkey = self.cli.pubkey(&row.agent_id).await?.trim().to_string();
         let followees = self.cli.fetch_following(&row.agent_id).await?;
         let (watches, access) = {
-            let conn = self
-                .db
+            let store = self
+                .store
                 .lock()
-                .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
-            let watches =
-                opencrab_db::queries::list_session_watches_for_agent(&conn, &row.agent_id)?;
-            let keys = opencrab_nostr::gate_provision::load_gate_allow_keys(&conn, &row.agent_id)?;
+                .map_err(|_| anyhow::anyhow!("gateway store lock poisoned"))?;
+            let watches = store.watches(&row.agent_id)?;
+            let keys = store.allow_keys(&row.agent_id)?;
             (
                 watches,
                 opencrab_nostr::gate_provision::build_allow_sources(followees, &keys),
             )
         };
         let plan = {
-            let mut conn = self
-                .db
+            self.store
                 .lock()
-                .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
-            opencrab_db::queries::set_agent_nostr_self_pubkey(&conn, &row.agent_id, &self_pubkey)?;
+                .map_err(|_| anyhow::anyhow!("gateway store lock poisoned"))?
+                .set_self_pubkey(&row.agent_id, &self_pubkey)?;
+            let mut conn = self
+                .core_db
+                .lock()
+                .map_err(|_| anyhow::anyhow!("core database lock poisoned"))?;
             opencrab_nostr::gate_provision::provision_nostr_gate(
                 &mut conn,
                 &row.agent_id,
@@ -220,6 +254,31 @@ impl Daemon {
     }
 }
 
+fn gateway_secret_provider(
+    store: Arc<std::sync::Mutex<GatewayStore>>,
+    master_key: opencrab_nostr::MasterKey,
+) -> opencrab_nostr::MainKeyProvider {
+    Arc::new(move |agent_id: &str| {
+        let secret = store
+            .lock()
+            .map_err(|_| anyhow::anyhow!("gateway store lock poisoned"))?
+            .get(agent_id)?
+            .map(|row| row.secret_key)
+            .with_context(|| format!("gateway instance {agent_id} is not configured"))?;
+        if secret.trim().is_empty() {
+            anyhow::bail!("gateway instance has no secret key");
+        }
+        if opencrab_core::secret_box::is_encrypted(&secret) {
+            let bytes = opencrab_core::secret_box::decrypt(&secret, &master_key)?;
+            Ok(zeroize::Zeroizing::new(
+                String::from_utf8(bytes.to_vec()).context("decrypted gateway key is not UTF-8")?,
+            ))
+        } else {
+            Ok(zeroize::Zeroizing::new(secret))
+        }
+    })
+}
+
 fn now_nanos() -> Result<i64> {
     let elapsed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -227,7 +286,7 @@ fn now_nanos() -> Result<i64> {
     i64::try_from(elapsed.as_nanos()).context("current time does not fit i64 nanoseconds")
 }
 
-fn fingerprint(row: &opencrab_db::queries::AgentNostrConfigRow, config_b64: &str) -> String {
+fn fingerprint(row: &InstanceRow, config_b64: &str) -> String {
     let mut hash = Sha256::new();
     hash.update(row.secret_key.as_bytes());
     hash.update([0]);
@@ -266,6 +325,9 @@ mod tests {
     fn daemon_config_requires_absolute_database_and_socket() {
         let config = DaemonConfig {
             database_path: "relative.db".into(),
+            core_database_path: "/tmp/core.db".into(),
+            legacy_database_path: None,
+            admin_socket: "/tmp/nostr-admin.sock".into(),
             core_socket: "/tmp/gate.sock".into(),
             nostaro_bin: "nostaro".into(),
             placement_dir: "data/gate/nostr".into(),

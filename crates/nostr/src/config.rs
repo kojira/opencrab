@@ -106,10 +106,14 @@ impl Default for NostrConfig {
 
 /// DB 行（relays_json / filter_json）を [`NostrConfig`] にパースする。
 /// 壊れた JSON は既定（空）にフォールバックする。
-pub fn config_from_row(row: &opencrab_db::queries::AgentNostrConfigRow) -> NostrConfig {
-    let relays: Vec<String> = serde_json::from_str(&row.relays_json).unwrap_or_default();
-    let filter: NostrFilter = serde_json::from_str(&row.filter_json).unwrap_or_default();
+pub fn config_from_parts(relays_json: &str, filter_json: &str) -> NostrConfig {
+    let relays: Vec<String> = serde_json::from_str(relays_json).unwrap_or_default();
+    let filter: NostrFilter = serde_json::from_str(filter_json).unwrap_or_default();
     NostrConfig { relays, filter }
+}
+
+pub fn config_from_row(row: &opencrab_db::queries::AgentNostrConfigRow) -> NostrConfig {
+    config_from_parts(&row.relays_json, &row.filter_json)
 }
 
 #[cfg(test)]
