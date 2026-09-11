@@ -238,6 +238,7 @@ pub(crate) fn discord_config() -> Vec<u8> {
         "self_bot_id": SELF_BOT,
         "name": "crab",
         "delivery_mode": "say",
+        "access": {"owners": [AUTHOR]},
     }))
     .unwrap()
 }

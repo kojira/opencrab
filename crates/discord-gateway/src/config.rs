@@ -39,6 +39,10 @@ pub struct InstanceConfig {
     /// 配送モード（say | tool_driven）。
     #[serde(default)]
     pub delivery_mode: Option<String>,
+    /// Gateway-owned caller classification. IDs are authenticated Discord user snowflakes;
+    /// shared layers receive only the resulting generic caller role.
+    #[serde(default)]
+    pub access: AccessConfig,
     /// system reaction（受理／完了／失敗）の絵文字。profile data（D17-12・instance config_b64）で
     /// 上書きし、無ければ現行と同じ既定値（👀🏁❌）。core に Discord 語彙は足さない。
     #[serde(default)]
@@ -52,6 +56,16 @@ pub struct InstanceConfig {
 /// - `failed`（❌）: 発端メッセージへの返信配送が失敗した時点で付ける。
 /// - `no_reply`（🤐）: ターンが沈黙（say 無し）で終えた時点で発端メッセージへ付ける
 ///   （`CompletedNoReply` の reply_origin が Single のときだけ・裁定A で真の沈黙だけに立つ）。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AccessConfig {
+    #[serde(default)]
+    pub owners: Vec<String>,
+    #[serde(default)]
+    pub co_agents: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub trusted_users: Vec<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct SystemReactions {
     #[serde(default = "default_accepted")]
@@ -169,6 +183,25 @@ fn validate_instance_config(cfg: &InstanceConfig) -> anyhow::Result<()> {
         None | Some("say") | Some("tool_driven") => {}
         Some(_) => anyhow::bail!("delivery_mode must be say or tool_driven"),
     }
+    for user_id in cfg
+        .access
+        .owners
+        .iter()
+        .chain(cfg.access.co_agents.keys())
+        .chain(cfg.access.trusted_users.iter())
+    {
+        if !is_snowflake(user_id) {
+            anyhow::bail!("access user ids must be decimal snowflakes");
+        }
+    }
+    if cfg
+        .access
+        .co_agents
+        .values()
+        .any(|agent_id| agent_id.trim().is_empty())
+    {
+        anyhow::bail!("access co-agent ids must be nonempty");
+    }
     let sr = &cfg.system_reactions;
     for (label, emoji) in [
         ("accepted", &sr.accepted),
@@ -264,6 +297,23 @@ mod tests {
         let mut v = sample_config();
         v["self_bot_id"] = serde_json::json!("not-a-number");
         assert!(parse_instance_config(&serde_json::to_vec(&v).unwrap()).is_err());
+    }
+
+    #[test]
+    fn access_ids_are_gateway_owned_and_validated() {
+        let mut valid = sample_config();
+        valid["access"] = serde_json::json!({
+            "owners": ["100"],
+            "co_agents": {"200": "agent-b"},
+            "trusted_users": ["300"]
+        });
+        let config = parse_instance_config(&serde_json::to_vec(&valid).unwrap()).unwrap();
+        assert_eq!(config.access.owners, ["100"]);
+        assert_eq!(config.access.co_agents["200"], "agent-b");
+        assert_eq!(config.access.trusted_users, ["300"]);
+
+        valid["access"]["owners"] = serde_json::json!(["not-a-snowflake"]);
+        assert!(parse_instance_config(&serde_json::to_vec(&valid).unwrap()).is_err());
     }
 
     #[test]

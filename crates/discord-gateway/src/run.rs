@@ -9,11 +9,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use opencrab_gate_client::client::{InstanceClient, LiveEvent, PostRefuse, SaidOutcome};
+use opencrab_gate_client::wire::{LiveInboundScope, SaidCaller, SaidContext};
 use opencrab_gate_client::{InvokeHandler, SayPolicy};
 
 use crate::attachment::AttachmentSpool;
 use crate::config::{
-    config_digest, parse_instance_config, InstanceConfig, InstancePlacement, SystemReactions,
+    config_digest, parse_instance_config, AccessConfig, InstanceConfig, InstancePlacement,
+    SystemReactions,
 };
 use crate::harness::HarnessOverrides;
 use crate::map::{address_of, map_message, parse_address, parse_event_line, parse_origin};
@@ -122,6 +124,7 @@ fn supervise(supervision: Supervision) {
         client.clone(),
         cfg.agent_id.clone(),
         cfg.self_bot_id.clone(),
+        cfg.access.clone(),
         attachment_spool,
     );
     tokio::spawn(async move {
@@ -155,18 +158,21 @@ fn build_on_line(
     client: Arc<InstanceClient>,
     agent_id: String,
     self_bot_id: String,
+    access: AccessConfig,
     attachment_spool: Option<Arc<AttachmentSpool>>,
 ) -> OnLine {
     Arc::new(move |line: String| {
         let client = client.clone();
         let agent_id = agent_id.clone();
         let self_bot_id = self_bot_id.clone();
+        let access = access.clone();
         let attachment_spool = attachment_spool.clone();
         tokio::spawn(async move {
             handle_incoming(
                 &client,
                 &agent_id,
                 &self_bot_id,
+                &access,
                 &line,
                 attachment_spool.as_deref(),
             )
@@ -216,11 +222,26 @@ async fn react_system_on(
     }
 }
 
+fn caller_for(access: &AccessConfig, author_id: &str) -> SaidCaller {
+    if access.owners.iter().any(|id| id == author_id) {
+        SaidCaller::Owner
+    } else if let Some(agent_id) = access.co_agents.get(author_id) {
+        SaidCaller::CoAgent {
+            agent_id: agent_id.clone(),
+        }
+    } else if access.trusted_users.iter().any(|id| id == author_id) {
+        SaidCaller::TrustedUser
+    } else {
+        SaidCaller::Agent
+    }
+}
+
 /// 受信 1 件を said へ。自分の投稿と非 ack channel は core へ送らない（§4.3・§5.1）。
 async fn handle_incoming(
     client: &InstanceClient,
     agent_id: &str,
     self_bot_id: &str,
+    access: &AccessConfig,
     line: &str,
     attachment_spool: Option<&AttachmentSpool>,
 ) {
@@ -267,12 +288,20 @@ async fn handle_incoming(
             }
         }
     }
+    let context = SaidContext {
+        caller: caller_for(access, &mapped.author_id),
+        start_turn: true,
+        system_context: None,
+        reply_target: None,
+        live_inbound_scope: LiveInboundScope::All,
+    };
     let outcome = client
-        .post_said_with_author_label(
+        .post_said_with_context(
             &address,
             &mapped.origin,
             &mapped.author_id,
             mapped.author_label.as_deref(),
+            &context,
             &text,
             &attachments,
         )
@@ -433,4 +462,27 @@ fn spawn_say_consumer(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod caller_tests {
+    use super::*;
+
+    #[test]
+    fn gateway_classifies_authenticated_author_from_its_access_config() {
+        let access = AccessConfig {
+            owners: vec!["100".into()],
+            co_agents: [("200".into(), "agent-b".into())].into_iter().collect(),
+            trusted_users: vec!["300".into()],
+        };
+        assert_eq!(caller_for(&access, "100"), SaidCaller::Owner);
+        assert_eq!(
+            caller_for(&access, "200"),
+            SaidCaller::CoAgent {
+                agent_id: "agent-b".into()
+            }
+        );
+        assert_eq!(caller_for(&access, "300"), SaidCaller::TrustedUser);
+        assert_eq!(caller_for(&access, "400"), SaidCaller::Agent);
+    }
 }
