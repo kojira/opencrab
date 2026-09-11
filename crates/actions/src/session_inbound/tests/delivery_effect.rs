@@ -4,9 +4,17 @@ fn er(response: &str) -> EngineResult {
         iterations: 1,
         tool_calls_made: 2,
         stopped_by_limit: false,
+        explicit_termination: None,
         last_posting_utterance_id: None,
         last_generation_had_continuation_speech: false,
         xml_fallback_parses: 0,
+    }
+}
+
+fn no_reply(response: &str) -> EngineResult {
+    EngineResult {
+        explicit_termination: Some(opencrab_core::ExplicitTermination::NoReply),
+        ..er(response)
     }
 }
 
@@ -22,12 +30,13 @@ fn delivery_effect_maps_engine_result() {
             iterations: 1,
         }
     );
-    assert_eq!(delivery_effect(Ok(er("NO_REPLY")), ctx), DeliveryEffect::NoReply);
+    assert_eq!(delivery_effect(Ok(no_reply("")), ctx), DeliveryEffect::NoReply);
     let empty = EngineResult {
         response: String::new(),
         iterations: 0,
         tool_calls_made: 0,
         stopped_by_limit: false,
+        explicit_termination: None,
         last_posting_utterance_id: None,
         last_generation_had_continuation_speech: false,
         xml_fallback_parses: 0,
@@ -42,32 +51,9 @@ fn delivery_effect_maps_engine_result() {
 #[test]
 fn delivery_effect_terminates_at_no_reply() {
     let ctx = crate::no_reply::DeliveryContext::default();
-    match delivery_effect(Ok(er("本文だけ話す NO_REPLY これはゴミ")), ctx) {
-        DeliveryEffect::Text { body, .. } => {
-            assert_eq!(body, "本文だけ話す");
-            assert!(!body.contains("NO_REPLY"), "body に NO_REPLY 混入: {body}");
-            assert!(!body.contains("ゴミ"), "body に破棄テキスト混入: {body}");
-        }
+    match delivery_effect(Ok(no_reply("本文だけ話す")), ctx) {
+        DeliveryEffect::Text { body, .. } => assert_eq!(body, "本文だけ話す"),
         other => panic!("expected Text, got {other:?}"),
     }
-    assert_eq!(
-        delivery_effect(Ok(er("NO_REPLY 続くゴミ")), ctx),
-        DeliveryEffect::NoReply
-    );
-}
-
-#[test]
-fn delivery_effect_strips_tail_continue_marker() {
-    let ctx = crate::no_reply::DeliveryContext::default();
-    match delivery_effect(Ok(er("確認して返すね⚡\nCONTINUE")), ctx) {
-        DeliveryEffect::Text { body, .. } => {
-            assert_eq!(body, "確認して返すね⚡");
-            assert!(!body.contains("CONTINUE"), "body に CONTINUE 混入: {body}");
-        }
-        other => panic!("expected Text, got {other:?}"),
-    }
-    match delivery_effect(Ok(er("まず CONTINUE を確認します")), ctx) {
-        DeliveryEffect::Text { body, .. } => assert_eq!(body, "まず CONTINUE を確認します"),
-        other => panic!("expected Text, got {other:?}"),
-    }
+    assert_eq!(delivery_effect(Ok(no_reply("")), ctx), DeliveryEffect::NoReply);
 }

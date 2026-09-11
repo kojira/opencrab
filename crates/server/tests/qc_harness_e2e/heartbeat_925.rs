@@ -88,8 +88,8 @@ impl LlmProvider for HbNostrTwoSayMock {
                 .plain_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             return Ok(match n {
-                0 => text_response(&format!("{HBN_B1}\nCONTINUE")),
-                _ => text_response(HBN_B2),
+                0 => text_response(HBN_B1),
+                _ => text_response(&format!("{HBN_B2}\nNO_REPLY")),
             });
         }
         Ok(text_response("NO_REPLY"))
@@ -156,21 +156,21 @@ async fn heartbeat_h1_nostr_two_standalone_posts() {
         "nostr heartbeat 最終投稿（本文2）が standalone post 1 件で出ない（#925）: {:?}",
         captured(&buf)
     );
-    // LLM 回数: 本文1＋CONTINUE と 本文2 で 2 回（Discord と同一）。
+    // LLM 回数: 本文1＋継続 と 本文2 で 2 回（Discord と同一）。
     assert_eq!(
         mock.total.load(Ordering::SeqCst),
         2,
         "nostr heartbeat の LLM 呼び出しが 2 回でない（1 ターン＋継続分・Discord と同一）"
     );
-    // 残留 0: どの standalone 本文にも CONTINUE/NO_REPLY が出ない。
+    // 残留 0: どの standalone 本文にも 継続/NO_REPLY が出ない。
     assert!(
         captured(&buf)
             .iter()
             .filter(
                 |c| c.kind == "standalone" && (c.body.contains(HBN_B1) || c.body.contains(HBN_B2))
             )
-            .all(|c| !c.body.contains("CONTINUE") && !c.body.contains("NO_REPLY")),
-        "nostr heartbeat の standalone post に CONTINUE/NO_REPLY が残留: {:?}",
+            .all(|c| !c.body.contains("継続") && !c.body.contains("NO_REPLY")),
+        "nostr heartbeat の standalone post に 継続/NO_REPLY が残留: {:?}",
         captured(&buf)
     );
     // 保存 2 行（Discord と同一・per-core DB で隔離）。

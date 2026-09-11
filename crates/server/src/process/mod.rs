@@ -14,6 +14,7 @@ use crate::AppState;
 
 mod budget;
 mod callbacks;
+mod end_event;
 mod live_inbound;
 mod loop_restart;
 mod prompt;
@@ -300,7 +301,6 @@ pub async fn run_agent_response(
             gateway_actions: req.gateway_actions.clone(),
             subtask_registry: subtask_registry.clone(),
             completion_sink: req.completion_sink.clone(),
-            subtask_starts: req.subtask_starts.clone(),
             reply_target: req.reply_target.clone(),
             tool_allowlist: req.tool_allowlist.clone(),
         },
@@ -460,10 +460,7 @@ pub async fn run_agent_response(
             .with_caller(run_caller.clone())
             // 大きい tool_result は inline 経路と同様にワークスペースへ退避する
             // （DB へ無制限に入れると resume 時の会話再構築が context 予算を溢れる）。
-            .with_workspace_root(Some(tool_result_workspace.clone()))
-            // #431: auto-dispatch の起動を親ターンのカウンタへ載せる。上の
-            // `SystemGatewayActions`（明示 spawn_subtask）へ渡すのと同一 Arc。
-            .with_subtask_starts(req.subtask_starts.clone());
+            .with_workspace_root(Some(tool_result_workspace.clone()));
             engine.set_tool_dispatcher(std::sync::Arc::new(dispatcher));
         }
     }
@@ -494,7 +491,7 @@ pub async fn run_agent_response(
         engine.set_on_response_text(move |text: String| cb(text));
     }
 
-    // #898: 継続分岐（末尾 CONTINUE の text-only イテレーション）の途中発話フックを転記する。
+    // 明示終端前の text-only iteration を配送する途中発話フックを転記する。
     // core / actions で型は構造一致（配送・保存を await し、失敗は継続を止める）。
     if let Some(cb) = req.on_continuation_speech {
         engine.set_on_continuation_speech(cb);
@@ -640,7 +637,14 @@ pub async fn run_agent_response(
                         engine.set_typed_conversation(None);
                     }
                 }
-                Err(e) => return Err(anyhow::anyhow!("{e}")),
+                Err(e) => {
+                    if req.persist_turn_logs {
+                        end_event::persist_context_budget_error(
+                            &state.db, agent_id, session_id, &e,
+                        );
+                    }
+                    return Err(e.into());
+                }
             }
         }
         let result = engine
@@ -719,6 +723,11 @@ pub async fn run_agent_response(
             None => break result,
         }
     };
+
+    // 配送しない制御終端も、通常 speech と分離した system event として監査可能にする。
+    if req.persist_turn_logs {
+        end_event::persist_result(&state.db, agent_id, session_id, &result);
+    }
 
     // 記憶インデックスの背景ビルドとスキル利用回数は depth 0（メインターン）のみ。
     // sub-engine の内部 run では走らせない（旧 `execute_spawn_subtask` の sub-engine は

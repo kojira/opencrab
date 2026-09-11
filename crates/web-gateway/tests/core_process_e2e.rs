@@ -82,7 +82,7 @@ fn spawn_mock_llm() -> MockLlm {
                     ready = cv.wait(ready).unwrap();
                 }
                 let body = format!(
-                    r#"{{"id":"e2e","choices":[{{"index":0,"message":{{"role":"assistant","content":"{REPLY}"}},"finish_reason":"stop"}}]}}"#
+                    r#"{{"id":"e2e","choices":[{{"index":0,"message":{{"role":"assistant","content":"{REPLY}\n\nNO_REPLY"}},"finish_reason":"stop"}}]}}"#
                 );
                 let resp = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",

@@ -87,7 +87,7 @@ impl opencrab_core::LiveInboundSource for SessionLiveInbound {
             // ロックが取れないだけでターンを落とさない（次のイテレーションで拾える）。
             Err(_) => return Vec::new(),
         };
-        let rows = match opencrab_db::queries::list_user_speech_logs_after(
+        let rows = match opencrab_db::queries::list_live_inbound_logs_after(
             &conn,
             &self.session_id,
             &self.agent_id,
@@ -130,14 +130,17 @@ fn external_origin_of(log: &opencrab_db::queries::SessionLogRow) -> Option<Strin
         .map(|s| s.to_string())
 }
 
-/// 走行中に届いた発言を LLM へ見せる形に整える（#289）。
+/// 走行中に届いた発言またはcompletionをLLMへ見せる形に整える。
 ///
-/// 本文の整形は履歴と同じ [`format_single_log`] を使い、走行中に届いたという**事実**
-/// だけを 1 行足す。ここに「必ず返せ」等の指示は書かない — 届けるのが仕事であって、
-/// 応答するかどうかはエージェントの判断に委ねる。
+/// 本文の整形は履歴と同じ[`format_single_log`]を使い、走行中に届いた事実だけを添える。
 fn format_live_inbound(log: &opencrab_db::queries::SessionLogRow) -> String {
+    let label = if log.log_type == "system" {
+        "新着完了イベント"
+    } else {
+        "新着メッセージ"
+    };
     format!(
-        "[新着メッセージ: あなたがこのターンを処理している間に届きました]\n{}",
+        "[{label}: あなたがこのターンを処理している間に届きました]\n{}",
         format_single_log(log)
     )
 }

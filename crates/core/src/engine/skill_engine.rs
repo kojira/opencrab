@@ -29,9 +29,8 @@ type LogCallback = Box<dyn Fn(&LlmCallLog) + Send + Sync>;
 type ExchangeLogCallback = Box<dyn Fn(&LlmExchangeLog) + Send + Sync>;
 /// ツール結果受信フック: (tool_call_id, tool_name, result_json, is_error)。
 type ToolResultHook = Arc<dyn Fn(String, String, String, bool) + Send + Sync>;
-/// #898: 継続分岐（末尾 CONTINUE の text-only イテレーション）で剥がした途中発話を
-/// **配送・保存する非同期フック**。配送はループ中に行い、失敗（Err）は継続を止める
-/// （§13.1 j: 失敗を隠して次に進まない）。REST/extgate/intake が各レーンの配線を渡す。
+/// 明示終端前の text-only iteration を**配送・保存する非同期フック**。
+/// 配送はループ中に行い、失敗（Err）は継続を止める。REST/extgate/intake が配線を渡す。
 type ContinuationSpeechHook = Arc<
     dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
         + Send
@@ -54,8 +53,8 @@ type ReadOriginHook = Arc<
 /// 4. Executing any requested tool calls
 /// 5. Feeding results back and repeating
 ///
-/// This continues until the LLM produces a final text response
-/// or the maximum iteration count is reached.
+/// This continues until the LLM explicitly terminates with `NO_REPLY`
+/// or a resource limit is reached.
 pub struct SkillEngine {
     /// The LLM client for chat completion.
     llm: Box<dyn LlmClient>,
@@ -71,11 +70,9 @@ pub struct SkillEngine {
     pub exchange_log_callback: Option<ExchangeLogCallback>,
     /// Optional callback invoked with response text on every LLM reply.
     pub on_response_text: Option<Arc<dyn Fn(String) + Send + Sync>>,
-    /// #898: 末尾 CONTINUE で継続する text-only イテレーションで剥がした途中発話を
-    /// 配送・保存する非同期フック。`on_response_text` は最終応答・text+tool 併記でも
-    /// 発火するため区別できず流用不可（二重配送・二重保存を招く）。このフックは **継続分岐
-    /// （マーカー剥がし後・次イテレーション前）でのみ** 非空の本文で await され、Err なら
-    /// 継続を止めてターンを失敗させる（§13.1 j）。
+    /// 明示終端前の text-only iteration を配送・保存する非同期フック。
+    /// `on_response_text` は最終応答・text+tool 併記でも発火するため流用せず、次iteration前に
+    /// 非空本文で await する。Err ならターンを失敗させる。
     pub on_continuation_speech: Option<ContinuationSpeechHook>,
     /// Callbacks invoked when the assistant produces tool calls: (assistant_content, tool_calls_json).
     ///
@@ -134,6 +131,17 @@ struct ToolResultOffload {
 }
 
 impl SkillEngine {
+    /// Run the action loop with the given system context and user message.
+    pub async fn run(
+        &self,
+        system_context: &str,
+        user_message: &str,
+        model: &str,
+    ) -> Result<types::EngineResult> {
+        self.run_with_model_override(system_context, user_message, model, None, &[])
+            .await
+    }
+
     /// Create a new SkillEngine.
     pub fn new(
         llm: Box<dyn LlmClient>,
@@ -313,7 +321,7 @@ impl SkillEngine {
         self.on_response_text = Some(Arc::new(cb));
     }
 
-    /// #898: 継続分岐（末尾 CONTINUE の text-only イテレーション）専用の途中発話フックを設定する。
+    /// 明示終端前の text-only iteration 用の途中発話フックを設定する。
     /// マーカー剥がし後・次イテレーション前に、非空の本文で await される。Err は継続を止める。
     pub fn set_on_continuation_speech(&mut self, cb: ContinuationSpeechHook) {
         self.on_continuation_speech = Some(cb);

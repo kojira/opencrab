@@ -154,7 +154,7 @@ impl GatewayActions for SystemGatewayActions {
             // subtask 起動（#175 S4）。transport 非依存の唯一の実装（Discord 側の実装は
             // 撤去済み）。inner へは委譲しない。
             "spawn_subtask" => {
-                let res = crate::subtask_spawn::spawn_subtask(
+                crate::subtask_spawn::spawn_subtask(
                     &self.state,
                     self.subtask_registry.as_ref(),
                     self.completion_sink.clone(),
@@ -165,19 +165,7 @@ impl GatewayActions for SystemGatewayActions {
                     args,
                     ctx,
                 )
-                .await;
-                // #431: 起動が成立したときだけ「このターンは次の行動を選んだ」と数える。
-                // `spawn_subtask` は登録簿へ insert し終えてから `success: true` を返し、
-                // 手前の失敗（task 引数なし / session 不明 / 登録簿未配線）は全て
-                // `success: false` なので、success ⟺ 登録済み ⟺ 完了で resume が来る。
-                // 起動に失敗したターンは resume が来ない＝そのターンが最後の発話なので、
-                // ここで数えないのが正しい（🏁 は付く）。
-                if res.success {
-                    if let Some(c) = &self.subtask_starts {
-                        c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    }
-                }
-                res
+                .await
             }
             // A2UI 送信（#156 S3）。Discord 側の実装は撤去済みなので inner へは委譲しない
             // （委譲パターンにすると二重定義を招く）。描画面が無い transport では

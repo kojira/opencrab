@@ -92,6 +92,23 @@ pub(super) fn set_llm_log_callback(
             .map(|r| &r.usage)
             .map(|u| u.cache_creation_input_tokens as i64);
 
+        if let Some(text) = log
+            .response
+            .as_ref()
+            .and_then(|response| response.first_message())
+            .and_then(|message| message.text_content())
+        {
+            let termination = opencrab_actions::terminate_at_no_reply(text);
+            opencrab_actions::no_reply::log_trailing_discard(
+                &termination,
+                opencrab_actions::DeliveryContext {
+                    session_id: &log_session_id,
+                    agent_id: &log_agent_id,
+                    origin: "llm_response",
+                },
+            );
+        }
+
         let response_str = log
             .response
             .as_ref()

@@ -100,7 +100,6 @@ fn production_executor(
             gateway_actions,
             subtask_registry: Arc::new(dashmap::DashMap::new()),
             completion_sink: None,
-            subtask_starts: None,
             reply_target: None,
             tool_allowlist: None,
         },

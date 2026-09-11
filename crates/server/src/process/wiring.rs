@@ -61,7 +61,6 @@ pub(crate) struct TurnExecutorWiring {
     pub gateway_actions: Option<Arc<dyn opencrab_gateway::GatewayActions>>,
     pub subtask_registry: opencrab_actions::SubtaskRegistry,
     pub completion_sink: Option<Arc<dyn opencrab_actions::SubtaskCompletionSink>>,
-    pub subtask_starts: Option<Arc<std::sync::atomic::AtomicUsize>>,
     pub reply_target: Option<String>,
     pub tool_allowlist: Option<Vec<String>>,
 }
@@ -88,15 +87,13 @@ where
             | opencrab_actions::CallerIdentity::CoAgent { .. }
             | opencrab_actions::CallerIdentity::TrustedUser
     );
-    let system_actions: Arc<dyn opencrab_gateway::GatewayActions> = Arc::new(
-        crate::system_actions::SystemGatewayActions::new(
+    let system_actions: Arc<dyn opencrab_gateway::GatewayActions> =
+        Arc::new(crate::system_actions::SystemGatewayActions::new(
             state.clone(),
             wiring.gateway_actions,
             Some(wiring.subtask_registry),
             wiring.completion_sink,
-        )
-        .with_subtask_starts(wiring.subtask_starts),
-    );
+        ));
     let gateway_actions: Arc<dyn opencrab_gateway::GatewayActions> = if wiring.depth == 0 {
         system_actions
     } else {

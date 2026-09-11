@@ -14,7 +14,7 @@
 //   test から不可視のため、それが握る seam（`resolve_target`）を直接呼ぶ。両者は同一関数（同 file:line）。
 //
 // 観測境界（Discord）: dry-run kind="say"（配送）・memory_sessions speech（保存）・
-//   mock 呼び出し数（LLM 回数）・say 本文の残留（CONTINUE/NO_REPLY）・system_reaction 🏁/🤐・typing。
+//   mock 呼び出し数（LLM 回数）・say 本文の残留（継続/NO_REPLY）・system_reaction 🏁/🤐・typing。
 //   BUFFER は binary 内で共有・累積のため、heartbeat の各シナリオは専用チャンネルへ束ねて隔離する
 //   （typing は scope key を持たないので channel で分ける）。memory_sessions は start_core ごとに
 //   別 DB（`init_memory`）なので speech 件数はテスト間で隔離される。
@@ -147,22 +147,22 @@ impl LlmProvider for HbTwoSayMock {
     async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
         self.total.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let text = request_text(&request);
-        // heartbeat 起点ターン（system に [ハートビート]＋M_HB1）で 本文1＋CONTINUE → 本文2 の 2 分割。
+        // heartbeat 起点ターン（system に [ハートビート]＋M_HB1）で 本文1＋継続 → 本文2 の 2 分割。
         if text.contains(M_HB1) && !has_tool_role(&request) {
             let n = self
                 .plain_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             return Ok(match n {
-                0 => text_response(&format!("{HB1_B1}\nCONTINUE")),
-                _ => text_response(HB1_B2),
+                0 => text_response(HB1_B1),
+                _ => text_response(&format!("{HB1_B2}\nNO_REPLY")),
             });
         }
-        Ok(text_response(FILLER))
+        Ok(text_response(&format!("{FILLER}\nNO_REPLY")))
     }
 }
 
 // ---------------------------------------------------------------------------
-// H1: heartbeat 起点で 2 件投稿（say 2・保存 2・🏁 は 2 件目のみ・CONTINUE/NO_REPLY 残留 0・typing）。
+// H1: heartbeat 起点で 2 件投稿（say 2・保存 2・🏁 は 2 件目のみ・継続/NO_REPLY 残留 0・typing）。
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn heartbeat_h1_two_posts_flag_only_on_last() {
@@ -221,21 +221,21 @@ async fn heartbeat_h1_two_posts_flag_only_on_last() {
         "heartbeat 最終投稿（本文2）が 1 件配送されない（#925）: {:?}",
         captured(&buf)
     );
-    // LLM 回数: 本文1＋CONTINUE と 本文2 で 2 回（1 ターン＋継続分）。
+    // LLM 回数: 本文1＋継続 と 本文2 で 2 回（1 ターン＋継続分）。
     assert_eq!(
         mock.total.load(Ordering::SeqCst),
         2,
         "heartbeat の LLM 呼び出しが 2 回でない（1 ターン＋継続分）"
     );
-    // 残留 0: どの say 本文にも "CONTINUE"/"NO_REPLY" が出ない。
+    // 残留 0: どの say 本文にも "継続"/"NO_REPLY" が出ない。
     assert!(
         captured(&buf)
             .iter()
             .filter(|c| c.kind == "say"
                 && c.channel == CH_HB1
                 && (c.body.contains(HB1_B1) || c.body.contains(HB1_B2)))
-            .all(|c| !c.body.contains("CONTINUE") && !c.body.contains("NO_REPLY")),
-        "heartbeat の say に CONTINUE/NO_REPLY が残留: {:?}",
+            .all(|c| !c.body.contains("継続") && !c.body.contains("NO_REPLY")),
+        "heartbeat の say に 継続/NO_REPLY が残留: {:?}",
         captured(&buf)
     );
     // 保存 2 行（memory_sessions・per-core DB で隔離）。
@@ -327,7 +327,7 @@ impl LlmProvider for HbSilentMock {
         if text.contains(M_HB2) && !has_tool_role(&request) {
             return Ok(text_response("NO_REPLY"));
         }
-        Ok(text_response(FILLER))
+        Ok(text_response(&format!("{FILLER}\nNO_REPLY")))
     }
 }
 
@@ -414,7 +414,7 @@ impl LlmProvider for HbDeclMock {
             return Ok(shell_with_content_response(HB3_DECL, "echo", &[HB3_ECHO]));
         }
         // subtask 決着後の resume ターン → 完了報告 say。
-        Ok(text_response(HB3_REPORT))
+        Ok(text_response(&format!("{HB3_REPORT}\nNO_REPLY")))
     }
 }
 
@@ -551,7 +551,7 @@ impl LlmProvider for HbDownMock {
     async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
         self.total.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         // 未接続なのに呼ばれたら捏造。出たら不具合として検知する。
-        Ok(text_response(HB4_FABRICATED))
+        Ok(text_response(&format!("{HB4_FABRICATED}\nNO_REPLY")))
     }
 }
 

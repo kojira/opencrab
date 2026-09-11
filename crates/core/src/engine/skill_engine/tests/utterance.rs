@@ -6,11 +6,14 @@
         use std::sync::atomic::Ordering;
         use std::sync::{Arc, Mutex};
 
-        let (llm, chat_calls) = MockLlm::counting(vec![tool_call_response(vec![
-            tc("reply-1", "reply", serde_json::json!({"text": "one"})),
-            tc("reply-2", "reply", serde_json::json!({"text": "two"})),
-            tc("reply-3", "reply", serde_json::json!({"text": "three"})),
-        ])]);
+        let (llm, chat_calls) = MockLlm::counting(vec![resp(
+            Some("NO_REPLY"),
+            vec![
+                tc("reply-1", "reply", serde_json::json!({"text": "one"})),
+                tc("reply-2", "reply", serde_json::json!({"text": "two"})),
+                tc("reply-3", "reply", serde_json::json!({"text": "three"})),
+            ],
+        )]);
         let executor_calls = Arc::new(Mutex::new(Vec::new()));
         let executor = MockExecutor::new()
             .add_result("reply", successful_action_result())
@@ -58,7 +61,7 @@
 
         const CONTENT: &str = "通常本文も同じ生成で返す";
         let (llm, chat_calls) = MockLlm::counting(vec![resp(
-            Some(CONTENT),
+            Some("通常本文も同じ生成で返す\nNO_REPLY"),
             vec![tc(
                 "reply-1",
                 "reply",
@@ -131,7 +134,7 @@
                     tc("reply-1", "reply", serde_json::json!({"text": "返信本文"})),
                     tc("resolve-1", "resolve", serde_json::json!({"ref": "e1"})),
                 ]),
-                text_response("照会を開始しました"),
+                final_text_response("照会を開始しました"),
             ]),
             calls: chat_calls.clone(),
             requests: requests.clone(),

@@ -163,20 +163,6 @@ pub(super) fn normalize_response(response: &ChatResponse) -> NormalizedResponse 
     }
 }
 
-pub(super) fn strip_continue_marker(content: Option<String>) -> (Option<String>, bool) {
-    let Some(content) = content else {
-        return (None, false);
-    };
-    if content.contains(crate::continue_marker::NO_REPLY_SENTINEL) {
-        return (Some(content), false);
-    }
-    match crate::continue_marker::strip_trailing_continue(&content) {
-        Some("") => (None, true),
-        Some(body) => (Some(body.to_string()), true),
-        None => (Some(content), false),
-    }
-}
-
 pub(super) struct InitialTurn {
     pub(super) messages: Vec<Message>,
     pub(super) ledger: TokenLedger,

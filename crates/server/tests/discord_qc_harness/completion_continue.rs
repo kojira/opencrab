@@ -30,7 +30,7 @@ fn three_reply_response() -> ChatResponse {
     };
     let msg = Message {
         role: Role::Assistant,
-        content: None,
+        content: Some(MessageContent::Text("NO_REPLY".to_string())),
         name: None,
         function_call: None,
         tool_calls: Some(vec![tc(B_R3_1), tc(B_R3_2), tc(B_R3_3)]),
@@ -137,7 +137,7 @@ async fn audit_900c_utterance_only_reply_turn_gets_no_muted_reaction() {
 }
 
 // ---------------------------------------------------------------------------
-// §13.1 c【Discord で 1 イテレーション = 1 メッセージ（結合/編集しない）】: 本文＋CONTINUE で
+// §13.1 c【Discord で 1 イテレーション = 1 メッセージ（結合/編集しない）】: 本文＋継続 で
 // 3 分割 → Discord に 3 メッセージが別々に出る（#898 の discord レーン版）。
 // 現 tip: 配送層が最終応答（er.response）だけを say するので最後の 1 メッセージだけ → 赤。
 // §13 #2 を 3 連鎖／ターン合計 plain3 の Discord レーン。
@@ -164,9 +164,9 @@ impl LlmProvider for ContinueSplitMock {
     async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
         let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(match n {
-            0 => text_response(&format!("{CC_1}\nCONTINUE")),
-            1 => text_response(&format!("{CC_2}\nCONTINUE")),
-            _ => text_response(CC_3),
+            0 => text_response(CC_1),
+            1 => text_response(CC_2),
+            _ => text_response(&format!("{CC_3}\nNO_REPLY")),
         })
     }
 }
@@ -223,25 +223,25 @@ async fn audit_s13_1c_continue_split_is_separate_discord_messages() {
         "分割メッセージが 1 通に結合された（1 イテレーション=1 メッセージに反する）: {:?}",
         captured(&buf)
     );
-    // LLM 3・残留 CONTINUE なし。
+    // LLM 3・残留 継続 なし。
     assert_eq!(
         mock.calls.load(Ordering::SeqCst),
         3,
-        "CONTINUE 3 分割の LLM 呼び出しが 3 でない"
+        "継続 3 分割の LLM 呼び出しが 3 でない"
     );
     assert!(
         captured(&buf)
             .iter()
             .filter(|c| c.kind == "say" && [CC_1, CC_2, CC_3].iter().any(|m| c.body.contains(m)))
-            .all(|c| !c.body.contains("CONTINUE")),
-        "say に CONTINUE が残留: {:?}",
+            .all(|c| !c.body.contains("継続")),
+        "say に 継続 が残留: {:?}",
         captured(&buf)
     );
 }
 
 // ---------------------------------------------------------------------------
-// #915【🏁 はターン終了時のみ・途中投稿には付けない】: 純 say の末尾 CONTINUE で 3 分割した
-// ターン（本文＋CONTINUE ×2 → 本文）で、🏁（完了サイン）は**最後の say メッセージ 1 件だけ**に
+// #915【🏁 はターン終了時のみ・途中投稿には付けない】: 純 say の末尾 継続 で 3 分割した
+// ターン（本文＋継続 ×2 → 本文）で、🏁（完了サイン）は**最後の say メッセージ 1 件だけ**に
 // 付き、途中の 2 件には付かない。オーナー裁定（逐語）:「🏁を付けるのは次のターンがない時だけ
 // です」「続きがないことを知らせるものですよ」。
 //
@@ -272,9 +272,9 @@ impl LlmProvider for FlagContinueSplitMock {
     async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
         let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(match n {
-            0 => text_response(&format!("{FC_1}\nCONTINUE")),
-            1 => text_response(&format!("{FC_2}\nCONTINUE")),
-            _ => text_response(FC_3),
+            0 => text_response(FC_1),
+            1 => text_response(FC_2),
+            _ => text_response(&format!("{FC_3}\nNO_REPLY")),
         })
     }
 }
@@ -398,11 +398,11 @@ async fn scenario_915_completed_flag_only_on_last_say_of_continue_split() {
         captured(&buf)
     );
 
-    // LLM 3・say 配送 3・CONTINUE 残留なし（回帰）。
+    // LLM 3・say 配送 3・継続 残留なし（回帰）。
     assert_eq!(
         mock.calls.load(Ordering::SeqCst),
         3,
-        "CONTINUE 3 分割の LLM 呼び出しが 3 でない"
+        "継続 3 分割の LLM 呼び出しが 3 でない"
     );
     for m in [FC_1, FC_2, FC_3] {
         let n = captured(&buf)
@@ -414,7 +414,7 @@ async fn scenario_915_completed_flag_only_on_last_say_of_continue_split() {
 }
 
 // ---------------------------------------------------------------------------
-// #915 / §13.2 表 row 8【reply → CONTINUE → say】: reply を配送してから CONTINUE で継続し、
+// #915 / §13.2 表 row 8【reply → 継続 → say】: reply を配送してから 継続 で継続し、
 // 最終イテレーションで say を投稿するターン。🏁 はターン終了時（activity ended）の最後の投稿
 // ＝最終 say に **1 件だけ**。途中の reply には付けない（own say id で相関・count で pin）。
 // ---------------------------------------------------------------------------
@@ -439,10 +439,10 @@ impl LlmProvider for ReplyThenContinueThenSayMock {
     async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
         let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(match n {
-            // 1 生成目: reply（本文 RC_REPLY）＋末尾 CONTINUE（本文は空＝継続のみ）→ 進む。
-            0 => reply_with_content_response(RC_REPLY, "CONTINUE"),
-            // 2 生成目: 純 say（最終・CONTINUE なし）→ ターン終了。
-            _ => text_response(RC_SAY),
+            // 1 生成目: reply（本文 RC_REPLY）＋末尾 継続（本文は空＝継続のみ）→ 進む。
+            0 => reply_with_content_response(RC_REPLY, ""),
+            // 2 生成目: 純 say＋明示終端。
+            _ => text_response(&format!("{RC_SAY}\nNO_REPLY")),
         })
     }
 }
@@ -459,7 +459,7 @@ async fn scenario_915_reply_then_continue_then_say_flag_only_on_last_say() {
     let fixture = Fixture::new();
     let _client = wire_instance(&core, &fixture).await;
 
-    fixture.append_message("9153", &format!("{M_REPLY} からの CONTINUE で最後は say"));
+    fixture.append_message("9153", &format!("{M_REPLY} からの 継続 で最後は say"));
 
     // 最終 say（RC_SAY）の own message id に 🏁 が付くまで待つ（決着＝activity ended で付与）。
     let saw_last_completed = {
@@ -547,14 +547,14 @@ async fn scenario_915_reply_then_continue_then_say_flag_only_on_last_say() {
     assert_eq!(
         total,
         1,
-        "reply→CONTINUE→say の 🏁 総数が 1 でない（§13.3.6 row 9）: {:?}",
+        "reply→継続→say の 🏁 総数が 1 でない（§13.3.6 row 9）: {:?}",
         captured(&buf)
     );
 
-    // LLM 2 回（reply+CONTINUE → 最終 say）。
+    // LLM 2 回（reply+継続 → 最終 say）。
     assert_eq!(
         mock.calls.load(Ordering::SeqCst),
         2,
-        "reply→CONTINUE→say の LLM 呼び出しが 2 でない"
+        "reply→継続→say の LLM 呼び出しが 2 でない"
     );
 }

@@ -33,14 +33,14 @@ impl LlmProvider for EyesOnReadMock {
         if text.contains(R930_B) {
             // 走行中ターンへ「新着メッセージ」として畳み込まれた（fold）呼び出し → B へ返信。
             if text.contains("新着メッセージ") {
-                return Ok(text_response(R930_BREPLY));
+                return Ok(text_response(&format!("{R930_BREPLY}\nNO_REPLY")));
             }
             // 「新着」でなく B を読む＝B が自分の独立ターンを起こした（#930 第2欠陥の二重処理）。
             // この独立ターンの started+origin(B) が返信の後に 👀 を付ける源。修正後はこの独立
             // ターン自体が起きない。主テストは返信させて外形（B 返信 say の重複）で捉え、
             // companion は実機の 07:46:00 どおり NO_REPLY で終える。
             if self.reply_on_independent {
-                return Ok(text_response(R930_BREPLY));
+                return Ok(text_response(&format!("{R930_BREPLY}\nNO_REPLY")));
             }
             return Ok(text_response("NO_REPLY"));
         }
@@ -55,16 +55,16 @@ impl LlmProvider for EyesOnReadMock {
                 serde_json::json!({ "command": "sleep", "args": ["8"] }),
             ));
         }
-        // spawn 後の継続: 宣言＋CONTINUE でロックを保持したまま B の到着を待つ（畳み込み窓）。
+        // spawn 後の継続: 宣言＋継続 でロックを保持したまま B の到着を待つ（畳み込み窓）。
         // 上限を設けて B が来ないときも自然終了させる（否定テスト・暴走防止）。
         let c = self
             .continues
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if c < 20 {
             tokio::time::sleep(Duration::from_millis(200)).await;
-            Ok(text_response(&format!("{R930_DECL}\nCONTINUE")))
+            Ok(text_response(R930_DECL))
         } else {
-            Ok(text_response(FILLER))
+            Ok(text_response(&format!("{FILLER}\nNO_REPLY")))
         }
     }
 }

@@ -127,10 +127,11 @@
             self.finished.lock().unwrap().push(target);
             // NO_REPLY にして nostaro（外部プロセス）を一切呼ばない。
             Ok(EngineResult {
-                response: "NO_REPLY".to_string(),
+                response: String::new(),
                 iterations: 1,
                 tool_calls_made: 0,
                 stopped_by_limit: false,
+                explicit_termination: Some(opencrab_core::ExplicitTermination::NoReply),
                 last_posting_utterance_id: None,
                 last_generation_had_continuation_speech: false,
                 xml_fallback_parses: 0,

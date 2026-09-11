@@ -131,6 +131,11 @@ fn text_resp(content: &str) -> String {
     .to_string()
 }
 
+/// 可視本文を返した同じ応答でターンを明示終了するmock応答。
+fn finished_text_resp(content: &str) -> String {
+    text_resp(&format!("{content}\n\nNO_REPLY"))
+}
+
 /// tool_call（tool_calls / finish_reason=tool_calls）応答の OpenAI JSON。
 /// arguments は JSON 文字列で載せる（openai_compat パーサ要件）。
 fn tool_call_resp(name: &str, args: serde_json::Value) -> String {

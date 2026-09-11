@@ -4,7 +4,7 @@ use opencrab_llm_types::{Message, MessageContent, Role, ToolCall};
 use super::{
     run_helpers::{
         self, classify_call_failure, initialize_turn, normalize_response,
-        partition_tool_calls_for_dispatch, strip_continue_marker, InitialTurn,
+        partition_tool_calls_for_dispatch, InitialTurn,
     },
     turn_budget::{apply_turn_budget, seat_tool_result},
     SkillEngine,
@@ -12,20 +12,6 @@ use super::{
 use crate::engine::types::{ChatRequest, EngineResult, LlmCallLog, LlmExchangeLog};
 
 impl SkillEngine {
-    /// Run the action loop with the given system context and user message.
-    ///
-    /// Returns the final text response from the LLM after all tool calls
-    /// have been resolved.
-    pub async fn run(
-        &self,
-        system_context: &str,
-        user_message: &str,
-        model: &str,
-    ) -> Result<EngineResult> {
-        self.run_with_model_override(system_context, user_message, model, None, &[])
-            .await
-    }
-
     /// Run the action loop with optional dynamic model override.
     ///
     /// If `model_override` is provided, the engine checks it before each LLM call
@@ -76,8 +62,8 @@ impl SkillEngine {
         // 上限到達時だけ直前（打ち切られた最終生成）の値を保持して返す。
         let mut last_posting_utterance_id: Option<String> = None;
         let mut last_generation_had_continuation_speech = false;
-        // #898 §13.1 a: 空 CONTINUE（本文なし・継続）の連続回数。3 連続で解析 warn を 1 行出す。
-        let mut consecutive_empty_continue: usize = 0;
+        // 配送フックの無い run（subtask 等）は、単独 NO_REPLY で直前の本文を失わない。
+        let mut last_undelivered_speech: Option<String> = None;
 
         loop {
             iterations += 1;
@@ -89,10 +75,13 @@ impl SkillEngine {
                     "SkillEngine reached max iterations, stopping"
                 );
                 return Ok(EngineResult {
-                    response: "I've reached the maximum number of steps for this task. Here's what I've done so far.".to_string(),
+                    // 資源切れを assistant 発言に偽装しない。gateway は既に配送した最後の
+                    // 投稿へ完了リアクションを付け、server は turn_exhausted を履歴へ残す。
+                    response: String::new(),
                     iterations,
                     tool_calls_made: total_tool_calls,
                     stopped_by_limit: true,
+                    explicit_termination: None,
                     last_posting_utterance_id,
                     last_generation_had_continuation_speech,
                     xml_fallback_parses,
@@ -315,28 +304,19 @@ impl SkillEngine {
                 );
             }
 
-            // #890 §11 / §11.7: content の最終行が CONTINUE 単独なら「このターンを続ける意思」と
-            // みなし、その行を剥がして次イテレーションへ進む（継続を起こすのは text-only 経路のみ・
-            // 下の最終応答分岐で `continue`）。ツール呼び出しと併記された場合はツール経路が優先し、
-            // マーカーは剥がすだけ。NO_REPLY が同居する場合は NO_REPLY 優先で終端する（継続しない・
-            // 剥がしは配送層が担う）。同一行併記・途中出現は継続もしない（WARN は配送層が出す）。
-            // 剥がしは on_response_text 配送前・会話保存前に行う（§11.6: マーカーを残さない）。
-            let (stripped_content, continue_requested) = strip_continue_marker(content);
-            content = stripped_content;
-
-            // #898 §13.1 a: 空 CONTINUE（本文なし・継続）の連鎖を数える。3 連続で解析 warn を 1 行
-            // 出す（停止はしない・上限は既存 max_iterations）。非空生成・非継続でリセットする。
-            if continue_requested && content.as_deref().map(str::trim).unwrap_or("").is_empty() {
-                consecutive_empty_continue += 1;
-                if consecutive_empty_continue == 3 {
-                    tracing::warn!(
-                        target: crate::continue_marker::CONTINUE_LOG_TARGET,
-                        iteration = iterations,
-                        "空 CONTINUE 連続 3 回（解析用・停止しない・§13.1 a）"
-                    );
-                }
-            } else {
-                consecutive_empty_continue = 0;
+            // ターンは既定で継続する。LLM が NO_REPLY を明示した生成だけが終了を要求する。
+            // marker は配送本文から分離して EngineResult::explicit_termination に保持する。
+            // query/tool call と併記された場合は結果を読む必要があるため tool 経路を優先する。
+            let termination = content
+                .as_deref()
+                .map(crate::continue_marker::terminate_at_no_reply);
+            let termination_requested = termination
+                .as_ref()
+                .is_some_and(|termination| termination.terminated());
+            if termination_requested {
+                content = termination
+                    .as_ref()
+                    .and_then(|termination| termination.speech().map(str::to_string));
             }
 
             // Fire on_response_text for every LLM reply that has non-empty text.
@@ -355,22 +335,21 @@ impl SkillEngine {
                 }
             }
 
-            // If there are tool calls, execute them. A generation containing only allowed
-            // utterance calls completes the turn without another LLM call; query/tool calls
-            // still produce tool results and continue the loop.
+            // If there are tool calls, execute them. Utterance-only generations are also
+            // followed by another LLM call unless this generation explicitly terminates;
+            // query/tool calls produce tool results before the next call.
             if !tool_calls.is_empty() {
-                // 発話クラスだけで完結した生成は、普通の発話と同じく 1 生成で終了する（R7・
-                // row360 / #880）。照会/道具、または permission denied の発話が 1 つでもあれば
-                // provider の tool_call/tool_result 対を作って次の LLM 呼び出しへ進む。
+                // 照会/道具、またはpermission deniedの発話が1つでもあればproviderの
+                // tool_call/tool_result対を作る。許可済み発話だけでも明示終了が無ければ、
+                // 最小ackを積んで次のLLM呼び出しへ進む。
                 let next_llm_call_needed = tool_calls.iter().any(|tc| {
                     !self.is_utterance_tool(&tc.function.name)
                         || !self.is_action_allowed(&tc.function.name)
                 });
 
-                // #900: 純発話でも末尾 CONTINUE が併記されていれば、発話を配送してから次イテレー
-                // ションへ進む（発話クラスのみ＋末尾 CONTINUE → 継続）。この場合は下の混在パスへ落とし、
-                // 各発話を最小 ack で満たして次の LLM 呼び出しを起こす（本文＝マーカー剥がし済みの content）。
-                if !next_llm_call_needed && !continue_requested {
+                // 純発話でも NO_REPLY が無ければ、最小 ack を積んで次の LLM 呼び出しへ進む。
+                // NO_REPLY があるときだけ発話を配送して、この generation で明示終了する。
+                if !next_llm_call_needed && termination_requested {
                     for tool_call in &tool_calls {
                         total_tool_calls += 1;
                         let tool_name = &tool_call.function.name;
@@ -395,6 +374,7 @@ impl SkillEngine {
                         iterations,
                         tool_calls_made: total_tool_calls,
                         stopped_by_limit: false,
+                        explicit_termination: Some(crate::engine::ExplicitTermination::NoReply),
                         last_posting_utterance_id,
                         last_generation_had_continuation_speech,
                         xml_fallback_parses,
@@ -425,27 +405,17 @@ impl SkillEngine {
                     .filter(|tc| !self.is_utterance_tool(&tc.function.name))
                     .collect();
 
-                // #916 §13 #10: 本文＋照会/道具（query/dispatch）クラスの生成の本文は「宣言（holding）」。
-                // 既存の中間発話配送フック（on_continuation_speech → 配送＋保存）で 1 件だけ配送・保存する。
-                // 配送したら on_tool_call へは本文を渡さず二重保存を避ける（配送は保存と対）。フックが
-                // 無いレーン（旧 discord は on_response_text で反復配送・core 単体テストは配送なし）は
-                // 従来どおり on_tool_call が本文を保存する（挙動不変）。content は末尾 CONTINUE 剥がし済み。
-                // 配送する holding 本文は NO_REPLY 終端解釈後の可視発言。判定は core 単一実装
-                // terminate_at_no_reply().speech()（配送層 visible_speech_after_markers と同じ 1 実装・
-                // 部分文字列の別判定を作らない・#916 レビュー）。content は末尾 CONTINUE 剥がし済み
-                // （§11.6）なので visible_speech_after_markers（NO_REPLY→CONTINUE 剥がし）と同一結果。
-                // 沈黙（可視本文なし・単独/行頭 NO_REPLY）は配送しない。
+                // 本文＋照会/道具クラスの生成本文は holding 発話として1件だけ配送・保存する。
+                // `content` は上で終端markerを除去済み。配送後は on_tool_call へ本文を渡さず
+                // 二重保存を避ける。
                 let mut holding_delivered = false;
                 if !persisted.is_empty() {
-                    if let Some(c) = content.as_deref() {
-                        let term = crate::continue_marker::terminate_at_no_reply(c);
-                        if let Some(body) = term.speech().filter(|b| !b.trim().is_empty()) {
-                            if let Some(ref cb) = self.on_continuation_speech {
-                                cb(body.to_string()).await.map_err(|e| {
-                                    anyhow::anyhow!("holding speech delivery failed: {e:#}")
-                                })?;
-                                holding_delivered = true;
-                            }
+                    if let Some(body) = content.as_deref().filter(|body| !body.trim().is_empty()) {
+                        if let Some(ref cb) = self.on_continuation_speech {
+                            cb(body.to_string()).await.map_err(|e| {
+                                anyhow::anyhow!("holding speech delivery failed: {e:#}")
+                            })?;
+                            holding_delivered = true;
                         }
                     }
                 }
@@ -693,13 +663,10 @@ impl SkillEngine {
                     }
                 }
 
-                // #898 §13 #8: 発話クラスのみ＋末尾 CONTINUE で継続するとき、併記された本文
-                // （content・マーカー剥がし済み）を reply 配送のあと・次イテレーション前に、継続分岐と
-                // 同じフックで配送・保存する（extgate 途中発話配送 / memory_sessions speech / REST
-                // responses / intake 保存）。会話文脈は上の assistant メッセージ（tool_calls＋content）で
-                // 積み済みなのでここでは配送・保存だけ。配送失敗（Err）は継続を止める（§13.1 j）。
-                // 照会/道具が混じる（next_llm_call_needed）ときは本文 say を配送しない（holding は従来経路）。
-                if continue_requested && !next_llm_call_needed {
+                // 発話クラスのみで明示終了されていない生成に本文もある場合、reply 配送のあと・
+                // 次イテレーション前に途中発話として配送・保存する。照会/道具が混じるときの本文は
+                // holding の既存経路が担当する。
+                if !termination_requested && !next_llm_call_needed {
                     if let Some(ref c) = content {
                         if !c.trim().is_empty() {
                             last_generation_had_continuation_speech = true;
@@ -707,6 +674,8 @@ impl SkillEngine {
                                 cb(c.clone()).await.map_err(|e| {
                                     anyhow::anyhow!("continuation speech delivery failed: {e:#}")
                                 })?;
+                            } else {
+                                last_undelivered_speech = Some(c.clone());
                             }
                         }
                     }
@@ -715,11 +684,8 @@ impl SkillEngine {
                 continue;
             }
 
-            // #890 §11: 末尾 CONTINUE でこのターンを継続（ツール呼び出しが無い text-only 経路）。
-            // 剥がし後の本文を assistant メッセージとして積み（マーカー除去済み・§11.6）、次イテレー
-            // ションへ。本文が空（CONTINUE 単独）なら何も積まずに次イテレーションへ。上限は既存
-            // max_iterations。
-            if continue_requested {
+            // tool call が無い本文も、NO_REPLY が無ければ途中発話として積んで次へ進む。
+            if !termination_requested {
                 if let Some(ref c) = content {
                     // #898 §12.2/§13.1 j: 剥がし後の途中発話を、次イテレーション前に**ループ中で
                     // 配送・保存する**（REST responses への追加 / extgate 途中発話配送 / memory_sessions
@@ -731,6 +697,8 @@ impl SkillEngine {
                         cb(c.clone()).await.map_err(|e| {
                             anyhow::anyhow!("continuation speech delivery failed: {e:#}")
                         })?;
+                    } else {
+                        last_undelivered_speech = Some(c.clone());
                     }
                     messages.push(Message {
                         role: Role::Assistant,
@@ -746,8 +714,63 @@ impl SkillEngine {
                 continue;
             }
 
-            // No tool calls: this is the final response.
-            let final_text = content.unwrap_or_default();
+            // NO_REPLY生成中に新着が届いていたら、終了より新着を優先する。completion sinkは
+            // 親が実行中なら別turnを起動しないため、ここが終了境界での最後の受け渡し点になる。
+            let late_inbound = self
+                .live_inbound
+                .as_ref()
+                .map(|source| source.poll_new_with_origin())
+                .unwrap_or_default();
+            if !late_inbound.is_empty() {
+                if let Some(ref speech) = content {
+                    if !speech.trim().is_empty() {
+                        last_generation_had_continuation_speech = true;
+                        if let Some(ref cb) = self.on_continuation_speech {
+                            cb(speech.clone()).await.map_err(|e| {
+                                anyhow::anyhow!("continuation speech delivery failed: {e:#}")
+                            })?;
+                        } else {
+                            last_undelivered_speech = Some(speech.clone());
+                        }
+                        messages.push(Message {
+                            role: Role::Assistant,
+                            content: Some(MessageContent::Text(speech.clone())),
+                            name: None,
+                            function_call: None,
+                            tool_calls: None,
+                            tool_call_id: None,
+                        });
+                        turn_ledger.record(format!("asst:{}", messages.len()), speech);
+                    }
+                }
+                for folded in late_inbound {
+                    let crate::FoldedInbound { text, origin } = folded;
+                    messages.push(Message {
+                        role: Role::User,
+                        content: Some(MessageContent::Text(text.clone())),
+                        name: None,
+                        function_call: None,
+                        tool_calls: None,
+                        tool_call_id: None,
+                    });
+                    turn_ledger.record(format!("live:{}", messages.len()), &text);
+                    if let Some(origin) = origin {
+                        if !read_emitted_origins.contains(&origin)
+                            && !pending_read_origins.contains(&origin)
+                        {
+                            pending_read_origins.push(origin);
+                        }
+                    }
+                }
+                apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
+                continue;
+            }
+
+            // No tool calls and no late inbound: this is the final response.
+            let final_text = content
+                .filter(|text| !text.trim().is_empty())
+                .or(last_undelivered_speech)
+                .unwrap_or_default();
 
             tracing::warn!(
                 iteration = iterations,
@@ -765,6 +788,7 @@ impl SkillEngine {
                 iterations,
                 tool_calls_made: total_tool_calls,
                 stopped_by_limit: false,
+                explicit_termination: Some(crate::engine::ExplicitTermination::NoReply),
                 last_posting_utterance_id,
                 last_generation_had_continuation_speech,
                 xml_fallback_parses,

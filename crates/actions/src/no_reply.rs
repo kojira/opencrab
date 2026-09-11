@@ -1,8 +1,8 @@
 //! `NO_REPLY` 終端解釈の配送層フック（DESIGN-RESUME-SETTLE §3.1 / §3.1.1・第一柱）。
 //!
 //! 純粋な終端判定（[`terminate_at_no_reply`] / [`NoReplyTermination`]）は **`opencrab_core`
-//! が単一実装**として持つ（継続を判定する engine が core に居り、NO_REPLY / CONTINUE の両
-//! センチネルと判定を core が一元管理する・#890 §11.5・#916 レビュー）。ここは互換のため
+//! が単一実装**として持つ（継続と明示終端を判定する engine が core に居り、NO_REPLY の
+//! センチネルと判定を一元管理する）。ここは互換のため
 //! re-export し、配送層固有の破棄ログ（[`log_trailing_discard`]・[`DeliveryContext`]）だけを持つ。
 //!
 //! R4 統括裁定: **出現＝終端**（例外規則なし・文中引用も終端扱い）。応答に最初の `NO_REPLY`
@@ -12,14 +12,11 @@
 
 // 純粋判定と結果型・センチネルは core の単一実装を re-export する（別実装を作らない）。
 pub use opencrab_core::continue_marker::{
-    terminate_at_no_reply, NoReplyTermination, NO_REPLY_SENTINEL,
+    terminate_at_no_reply, NoReplyTermination, NO_REPLY_LOG_TARGET, NO_REPLY_SENTINEL,
 };
 
 /// 破棄ログの固定タグ（`grep -c` で頻度集計できるよう 1 語不変・§3.1.1(b)）。
 pub const NO_REPLY_TRAILING_DISCARDED_TAG: &str = "no_reply_trailing_discarded";
-
-/// 破棄ログの tracing target（qc harness 等が拾う識別子）。
-pub const NO_REPLY_LOG_TARGET: &str = "opencrab::no_reply";
 
 /// 破棄ログの相関コンテキスト（§3.1.1(a)・突き合わせ識別子）。
 ///

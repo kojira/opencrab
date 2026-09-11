@@ -32,7 +32,10 @@ impl opencrab_llm::traits::LlmProvider for StubProvider {
             model: request.model,
             choices: vec![opencrab_llm::message::Choice {
                 index: 0,
-                message: opencrab_llm::message::Message::assistant(&self.reply),
+                message: opencrab_llm::message::Message::assistant(format!(
+                    "{}\nNO_REPLY",
+                    self.reply
+                )),
                 finish_reason: Some(opencrab_llm::message::FinishReason::Stop),
             }],
             usage: Default::default(),
@@ -77,7 +80,7 @@ impl opencrab_llm::traits::LlmProvider for CapturingStub {
             model: request.model,
             choices: vec![opencrab_llm::message::Choice {
                 index: 0,
-                message: opencrab_llm::message::Message::assistant("done"),
+                message: opencrab_llm::message::Message::assistant("done\nNO_REPLY"),
                 finish_reason: Some(opencrab_llm::message::FinishReason::Stop),
             }],
             usage: Default::default(),
@@ -131,7 +134,10 @@ impl opencrab_llm::traits::LlmProvider for GatedStub {
             model: request.model,
             choices: vec![opencrab_llm::message::Choice {
                 index: 0,
-                message: opencrab_llm::message::Message::assistant(&self.reply),
+                message: opencrab_llm::message::Message::assistant(format!(
+                    "{}\nNO_REPLY",
+                    self.reply
+                )),
                 finish_reason: Some(opencrab_llm::message::FinishReason::Stop),
             }],
             usage: Default::default(),

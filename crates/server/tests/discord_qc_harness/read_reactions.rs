@@ -6,7 +6,7 @@
 // 仕様: DIRECTION-LOG 116/544・DESIGN-DETAIL-RULINGS:43・issue #930。
 //
 // 再現（root cause #930）: A は execute_shell(sleep) で背景 subtask を起こしつつ、
-// ターンを継続（CONTINUE）してセッションロックを保持したまま回る。走行中に B が届くと
+// ターンを継続（継続）してセッションロックを保持したまま回る。走行中に B が届くと
 // core は B を session log に記録し、A ターンの継続イテレーション（iterations>1）で
 // `poll_new_messages` により B を畳み込む（llm_logs: is_bot_iteration=1 に B が入る）。
 // #964 では started を typing 専用にし、発端 A も畳み込み B も、それぞれを新しく含む
@@ -52,7 +52,7 @@ async fn scenario_930_eyes_on_read_folded_midturn_message() {
         &format!("{R930_A} sleep して終わったら教えて"),
     );
 
-    // A の宣言 say が出る＝subtask 起動＆ターンが CONTINUE ループでロック保持中。
+    // A の宣言 say が出る＝subtask 起動＆ターンが 継続 ループでロック保持中。
     let a_ready = {
         let buf = buf.clone();
         wait_until(move || {
@@ -223,7 +223,7 @@ async fn scenario_930_eyes_on_read_folded_midturn_message() {
 
 // ===================================================================
 // #930 否定側: 走行中に B が届かないターンでは read（👀 の追加付与）は出ない。
-// CONTINUE ループ（iterations>1・poll_new_messages が毎回引かれる）でも、新着が無ければ
+// 継続 ループ（iterations>1・poll_new_messages が毎回引かれる）でも、新着が無ければ
 // 👀 は発端 A の 1 件のみ。＝ read が空 poll で誤発火しないことのガード（恒真防止）。
 // ===================================================================
 const R930N_CH: &str = "631";
@@ -246,14 +246,14 @@ impl LlmProvider for NoMidturnMock {
         Ok(vec![])
     }
     async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
-        // 数イテレーション CONTINUE で回してから自然終了（新着注入は無し）。
+        // 数イテレーション 継続 で回してから自然終了（新着注入は無し）。
         let c = self
             .continues
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if c < 3 {
-            Ok(text_response(&format!("{R930N_SAY}\nCONTINUE")))
-        } else {
             Ok(text_response(R930N_SAY))
+        } else {
+            Ok(text_response(&format!("{R930N_SAY}\nNO_REPLY")))
         }
     }
 }

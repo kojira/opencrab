@@ -46,7 +46,7 @@ pub(crate) const FILLER: &str = "fillerbody-omega";
 
 // #900 追加マーカー（"REPLYMARK"/"MUTEMARK" 等を部分文字列に含めない独立名）。
 pub(crate) const M_REPLY3: &str = "REP3MARK"; // reply×3 in one（§13 #6・reply3-in-one）
-pub(crate) const M_REPLY_CONT: &str = "REPCONTMARK"; // reply＋末尾 CONTINUE（§13 #9）
+pub(crate) const M_REPLY_CONT: &str = "REPCONTMARK"; // reply＋末尾 継続（§13 #9）
 pub(crate) const M_REPLY_NR: &str = "REPSILENTMARK"; // reply＋NO_REPLY（§13 #14）
 pub(crate) const B_REPLY3: [&str; 3] = ["rep3-返信1", "rep3-返信2", "rep3-返信3"];
 pub(crate) const B_REPLY_CONT: &str = "repcont-返信本文";
@@ -66,43 +66,43 @@ impl LlmProvider for RoutedMock {
     async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
         let text = request_text(&request);
         self.reqs.lock().unwrap().push(text.clone());
-        // #900: reply＋末尾 CONTINUE の継続後（tool role あり）は最終 reply で自然終了する。
+        // #900: reply＋末尾 継続 の継続後（tool role あり）は最終 reply で自然終了する。
         // has_tool_role でも先に判定する（継続イテレーションはツール ack を伴う）。
         if text.contains(M_REPLY_CONT) && has_tool_role(&request) {
-            return Ok(tool_call_response(
-                "reply",
-                serde_json::json!({"event": "e1", "text": B_REPLY_CONT}),
-            ));
+            return Ok(reply_with_content_response(B_REPLY_CONT, "NO_REPLY"));
         }
         if !has_tool_role(&request) {
             // §13 #6: reply×3 を 1 生成に並べる（配送 3・LLM 1）。
             if text.contains(M_REPLY3) {
-                return Ok(tool_calls_response(
+                let mut response = tool_calls_response(
                     B_REPLY3
                         .iter()
                         .map(|b| ("reply", serde_json::json!({"event": "e1", "text": b})))
                         .collect(),
-                ));
+                );
+                response.choices[0].message.content =
+                    Some(MessageContent::Text("NO_REPLY".to_string()));
+                return Ok(response);
             }
-            // §13 #9: reply＋末尾 CONTINUE（1 生成目・継続する）。
+            // §13 #9: reply＋末尾 継続（1 生成目・継続する）。
             if text.contains(M_REPLY_CONT) {
-                return Ok(reply_with_content_response(B_REPLY_CONT, "CONTINUE"));
+                return Ok(reply_with_content_response(B_REPLY_CONT, ""));
             }
             // §13 #14: reply＋NO_REPLY（発話ありの沈黙終端・reply は配送される）。
             if text.contains(M_REPLY_NR) {
                 return Ok(reply_with_content_response(B_REPLY_NR, "NO_REPLY"));
             }
             if text.contains(M_REPLY) {
-                return Ok(tool_call_response(
-                    "reply",
-                    serde_json::json!({"event": "e1", "text": B_REPLY}),
-                ));
+                return Ok(reply_with_content_response(B_REPLY, "NO_REPLY"));
             }
             if text.contains(M_REACT) {
-                return Ok(tool_call_response(
+                let mut response = tool_call_response(
                     "reaction",
                     serde_json::json!({"event": "e1", "emoji": EMOJI}),
-                ));
+                );
+                response.choices[0].message.content =
+                    Some(MessageContent::Text("NO_REPLY".to_string()));
+                return Ok(response);
             }
             if text.contains(M_NOREPLY) {
                 // 沈黙ターン: say も tool も出さず NO_REPLY だけ返す（core は say 0・ended のみ）。
@@ -110,16 +110,16 @@ impl LlmProvider for RoutedMock {
             }
             if text.contains(M_LONGSAY) {
                 // 2000 字超の say（turn は plain text で閉じるので resume ループしない）。
-                return Ok(text_response(&long_say_body()));
+                return Ok(text_response(&format!("{}\nNO_REPLY", long_say_body())));
             }
             if text.contains(M_SAY_D) {
-                return Ok(text_response(B_SAY_D));
+                return Ok(text_response(&format!("{B_SAY_D}\nNO_REPLY")));
             }
             if text.contains(M_SAY) {
-                return Ok(text_response(B_SAY));
+                return Ok(text_response(&format!("{B_SAY}\nNO_REPLY")));
             }
         }
         // spawn 後の継続 / 決着後の resume。追加ツールを出さず turn を閉じる filler。
-        Ok(text_response(FILLER))
+        Ok(text_response(&format!("{FILLER}\nNO_REPLY")))
     }
 }

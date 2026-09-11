@@ -248,6 +248,13 @@ pub trait LlmClient: Send + Sync {
     }
 }
 
+/// LLM が指定した正常な明示終了理由。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExplicitTermination {
+    NoReply,
+}
+
 /// The result of an engine run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineResult {
@@ -259,12 +266,15 @@ pub struct EngineResult {
     pub tool_calls_made: usize,
     /// Whether the engine stopped due to hitting the iteration limit.
     pub stopped_by_limit: bool,
+    /// 正常終了を明示した制御記号。配送本文とは分離して保持する。
+    #[serde(default)]
+    pub explicit_termination: Option<ExplicitTermination>,
     /// #915: 最終生成で成功した投稿系 utterance-op の最後の call_id。
     /// 現行の投稿系 operation は reply。reaction/repost/resolve は対象外。
     #[serde(default)]
     pub last_posting_utterance_id: Option<String>,
-    /// #915: 上限打ち切り時、打ち切られた最終生成が CONTINUE 本文を配送したか。
-    /// 配送側が保持する最後の say delivery_id を同じ生成の候補として選ぶための内部信号。
+    /// 上限打ち切り時、打ち切られた最終生成が途中本文を配送したか。
+    /// 互換のため旧field名を維持し、最後の say delivery_id を選ぶ内部信号として使う。
     #[serde(default)]
     pub last_generation_had_continuation_speech: bool,
     /// XML `<function_calls>` フォールバックで tool calls を復元した回数。

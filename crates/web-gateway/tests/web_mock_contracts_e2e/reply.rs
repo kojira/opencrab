@@ -6,7 +6,7 @@
 fn reply_turn_does_not_emit_completed_no_reply() {
     const B_REPLY: &str = "replybody-omega-answer";
     // 何が来ても通常の返信本文（＝say）を返す。
-    let mock = spawn_mock(|_req, _gate| text_resp(B_REPLY));
+    let mock = spawn_mock(|_req, _gate| finished_text_resp(B_REPLY));
     let h = setup(mock.port, "replyturn", false, "[tools]\nenabled = false\n");
     let session = &h.session;
 

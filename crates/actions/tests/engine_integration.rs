@@ -184,7 +184,7 @@ async fn test_engine_search_then_create_skill() {
         // Step 3: Final text response
         resp(
             Some(
-                "I searched my history and created a new skill based on my Rust knowledge."
+                "I searched my history and created a new skill based on my Rust knowledge.\nNO_REPLY"
                     .to_string(),
             ),
             vec![],
@@ -236,7 +236,7 @@ async fn test_engine_learn_from_experience() {
             )],
         ),
         resp(
-            Some("I've learned a new debugging workflow skill.".to_string()),
+            Some("I've learned a new debugging workflow skill.\nNO_REPLY".to_string()),
             vec![],
         ),
     ]);
@@ -275,7 +275,7 @@ async fn test_engine_tool_logs_done_failed_refused() {
             None,
             vec![tc("tc-2", "nonexistent_tool", serde_json::json!({}))],
         ),
-        resp(Some("searched then failed".to_string()), vec![]),
+        resp(Some("searched then failed\nNO_REPLY".to_string()), vec![]),
     ]);
     let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
     let result = engine
@@ -335,7 +335,7 @@ async fn test_engine_tool_logs_done_failed_refused() {
                 serde_json::json!({"command": "echo hi"}),
             )],
         ),
-        resp(Some("refused".to_string()), vec![]),
+        resp(Some("refused\nNO_REPLY".to_string()), vec![]),
     ]);
     let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
     let result = engine
@@ -551,7 +551,7 @@ async fn test_agentic_rag_browse_then_retrieve() {
         // Step 2: ツリー結果を見てRustトピックのnode_idで retrieve を呼ぶ
         resp(None, vec![tc("tc-retrieve", "retrieve_memory_nodes", serde_json::json!({"node_ids": [rust_topic_id]}))]),
         // Step 3: 取得した全文テキストをもとに最終回答
-        resp(Some("過去の会話によると、Rustのライフタイムは参照の有効期間を示すアノテーションで、借用チェッカーがこれを検証してメモリ安全性を保証します。"
+        resp(Some("過去の会話によると、Rustのライフタイムは参照の有効期間を示すアノテーションで、借用チェッカーがこれを検証してメモリ安全性を保証します。\nNO_REPLY"
                     .to_string()), vec![]),
     ]);
 
@@ -596,7 +596,7 @@ async fn test_agentic_rag_empty_index() {
         ),
         // 最終回答
         resp(
-            Some("記憶インデックスに該当する情報がありませんでした。".to_string()),
+            Some("記憶インデックスに該当する情報がありませんでした。\nNO_REPLY".to_string()),
             vec![],
         ),
     ]);
@@ -638,7 +638,7 @@ async fn test_agentic_rag_multi_node_retrieve() {
         // 2つのノードを同時にretrieve
         resp(None, vec![tc("tc-2", "retrieve_memory_nodes", serde_json::json!({"node_ids": [rust_topic_id, db_topic_id]}))]),
         // 横断的な回答
-        resp(Some("RustとSQLiteの両方について議論しました。Rustではライフタイムと借用チェッカー、SQLiteではWALモードのパフォーマンスについて話しました。"
+        resp(Some("RustとSQLiteの両方について議論しました。Rustではライフタイムと借用チェッカー、SQLiteではWALモードのパフォーマンスについて話しました。\nNO_REPLY"
                     .to_string()), vec![]),
     ]);
 
@@ -682,7 +682,7 @@ async fn test_agentic_rag_combined_with_fts() {
         // Step 3: Pythonトピックを特定してretrieve
         resp(None, vec![tc("tc-3", "retrieve_memory_nodes", serde_json::json!({"node_ids": [python_topic_id]}))]),
         // Step 4: 全情報をもとに最終回答
-        resp(Some("Pythonのasync/awaitとasyncioイベントループについて過去に議論しました。シングルスレッドのイベントループでコルーチンをスケジューリングする仕組みです。"
+        resp(Some("Pythonのasync/awaitとasyncioイベントループについて過去に議論しました。シングルスレッドのイベントループでコルーチンをスケジューリングする仕組みです。\nNO_REPLY"
                     .to_string()), vec![]),
     ]);
 
@@ -714,7 +714,10 @@ async fn test_engine_unknown_action_handled() {
             None,
             vec![tc("tc-1", "nonexistent_action", serde_json::json!({}))],
         ),
-        resp(Some("That action was not found.".to_string()), vec![]),
+        resp(
+            Some("That action was not found.\nNO_REPLY".to_string()),
+            vec![],
+        ),
     ]);
 
     let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);

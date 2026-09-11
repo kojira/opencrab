@@ -44,13 +44,13 @@ pub mod workspace;
 pub use agent::{Agent, AgentLlmConfig, AgentModels, ModelRef};
 pub use caller::CallerIdentity;
 pub use continue_marker::{
-    strip_trailing_continue, terminate_at_no_reply, NoReplyTermination, CONTINUE_LOG_TARGET,
-    CONTINUE_SENTINEL, NO_REPLY_SENTINEL,
+    terminate_at_no_reply, NoReplyTermination, NO_REPLY_LOG_TARGET, NO_REPLY_SENTINEL,
 };
 pub use engine::{
     ActionExecutor, ActionResult, ChatRequest, ChatResponse, DispatchCall, DispatchOutcome,
-    EngineResult, FoldedInbound, FunctionDefinition, LiveInboundSource, LlmCallLog, LlmClient,
-    LlmExchange, LlmExchangeLog, ProviderToolHistory, SkillEngine, ToolCall, ToolDispatcher,
+    EngineResult, ExplicitTermination, FoldedInbound, FunctionDefinition, LiveInboundSource,
+    LlmCallLog, LlmClient, LlmExchange, LlmExchangeLog, ProviderToolHistory, SkillEngine, ToolCall,
+    ToolDispatcher,
 };
 pub use heartbeat::HeartbeatConfig;
 pub use identity::Identity;

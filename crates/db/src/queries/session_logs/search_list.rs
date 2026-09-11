@@ -281,6 +281,50 @@ pub fn list_user_speech_logs_after(
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
+/// 親ターンのiteration間へ注入する新着発言とsubtask completionを返す。
+///
+/// 発言の述語は[`list_user_speech_logs_after`]と同じ。completionは親sessionへ保存済みの
+/// system eventだけを加える。単調増加idにより同じ行を二度返さない。
+pub fn list_live_inbound_logs_after(
+    conn: &Connection,
+    session_id: &str,
+    agent_id: &str,
+    after_id: i64,
+    only_speaker: Option<&str>,
+    limit: usize,
+) -> Result<Vec<SessionLogRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json, created_at
+         FROM memory_sessions
+         WHERE session_id = ?1 AND id > ?3
+           AND (
+             (log_type = 'speech' AND speaker_id IS NOT NULL AND speaker_id != ?2
+              AND (?4 IS NULL OR speaker_id = ?4))
+             OR
+             (log_type = 'system' AND
+              CASE WHEN json_valid(content) THEN json_extract(content, '$.type') END = 'subtask_completed')
+           )
+         ORDER BY id ASC LIMIT ?5",
+    )?;
+    let rows = stmt.query_map(
+        params![session_id, agent_id, after_id, only_speaker, limit as i64],
+        |row| {
+            Ok(SessionLogRow {
+                id: row.get(0)?,
+                agent_id: row.get(1)?,
+                session_id: row.get(2)?,
+                log_type: row.get(3)?,
+                content: row.get(4)?,
+                speaker_id: row.get(5)?,
+                turn_number: row.get(6)?,
+                metadata_json: row.get(7)?,
+                created_at: row.get(8)?,
+            })
+        },
+    )?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 /// 走行中サブタスクへ届いた steer（追加指示）ログを、`after_id` より後だけ古い順に返す（#647）。
 ///
 /// `list_user_speech_logs_after` の steer 版。サブタスクは `run_agent_response` を depth+1 で

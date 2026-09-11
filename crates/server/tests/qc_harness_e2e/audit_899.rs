@@ -38,7 +38,7 @@ impl LlmProvider for NoReplyProbeMock {
                 .filter_map(|m| m.text_content().map(|s| s.to_string()))
                 .collect();
             *self.turn2_assistant.lock().unwrap() = Some(asst);
-            return Ok(text_response(B899_TURN2));
+            return Ok(text_response(&format!("{B899_TURN2}\nNO_REPLY")));
         }
         // ターン 1（M899_1）と保険: NO_REPLY のみ。
         Ok(text_response("NO_REPLY"))

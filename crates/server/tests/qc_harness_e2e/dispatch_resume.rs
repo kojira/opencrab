@@ -51,7 +51,7 @@ impl LlmProvider for ShellMock {
         // (2) dispatch 直後の継続イテレーション（合成 "spawned" 結果 = tool role）→ ack say で
         //     ターンを閉じる。ここで背景 subtask（echo）が走る。
         if has_tool_role(&request) {
-            return Ok(text_response(B_SHELL_ACK));
+            return Ok(text_response(&format!("{B_SHELL_ACK}\nNO_REPLY")));
         }
         // (1) 初回メンション（tool role 無し・最初の 1 回だけ）→ execute_shell を呼ぶ。
         //     opencrab は execute_shell を inline 化しないので背景 subtask へ回る。
@@ -65,7 +65,7 @@ impl LlmProvider for ShellMock {
         // (3) subtask 決着後の resume ターン（tool role 無し・2 回目以降）→ 会話本文を捕まえて
         //     完了報告 say で閉じる。**この text に echo の stdout が含まれていること**がピン。
         *self.resume_text.lock().unwrap() = Some(text);
-        Ok(text_response(B_SHELL_DONE))
+        Ok(text_response(&format!("{B_SHELL_DONE}\nNO_REPLY")))
     }
 }
 
@@ -187,7 +187,7 @@ impl LlmProvider for WsWriteMock {
         let text = request_text(&request);
         // (2) dispatch 直後の継続イテレーション（合成 "spawned" 結果 = tool role）→ ack say で閉じる。
         if has_tool_role(&request) {
-            return Ok(text_response(B_WSWRITE_ACK));
+            return Ok(text_response(&format!("{B_WSWRITE_ACK}\nNO_REPLY")));
         }
         // (1) 初回メンション → ws_write を呼ぶ（inline 化されないので背景 subtask へ回る）。
         if !self.emitted.swap(true, Ordering::SeqCst) {
@@ -200,7 +200,7 @@ impl LlmProvider for WsWriteMock {
         // (3) 決着後の resume ターン → 会話本文を捕まえて完了報告 say で閉じる。
         //     **この text に ws_write の path（payload）が含まれていること**がピン。
         *self.resume_text.lock().unwrap() = Some(text);
-        Ok(text_response(B_WSWRITE_DONE))
+        Ok(text_response(&format!("{B_WSWRITE_DONE}\nNO_REPLY")))
     }
 }
 
@@ -343,10 +343,10 @@ impl LlmProvider for BigShellMock {
             // **同じ execute_shell は再実行しない**（回答して閉じる）。
             if tool_text.contains(BIG_OUT_MARK) {
                 *self.read_back_text.lock().unwrap() = Some(tool_text);
-                return Ok(text_response(B_BIG_DONE));
+                return Ok(text_response(&format!("{B_BIG_DONE}\nNO_REPLY")));
             }
             // それ以外（dispatch 直後の合成 `spawned` 結果）→ ack でターンを閉じる。
-            return Ok(text_response(B_BIG_ACK));
+            return Ok(text_response(&format!("{B_BIG_ACK}\nNO_REPLY")));
         }
 
         // (1) 初回メンション（tool role 無し・最初の 1 回）→ 大出力 execute_shell を呼ぶ。
@@ -377,7 +377,7 @@ impl LlmProvider for BigShellMock {
         }
 
         // フォールバック（想定外の追加ターン）→ 回答で閉じる。
-        Ok(text_response(B_BIG_DONE))
+        Ok(text_response(&format!("{B_BIG_DONE}\nNO_REPLY")))
     }
 }
 

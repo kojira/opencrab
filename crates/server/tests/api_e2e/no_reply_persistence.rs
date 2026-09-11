@@ -20,6 +20,40 @@ async fn agent_message(
     (app, responses, session_id)
 }
 
+#[tokio::test]
+async fn explicit_no_reply_termination_is_persisted_as_control_history() {
+    const BODY: &str = "明示終了の最終回答";
+    let (app, db, mock) = create_test_app_with_llm();
+    let (agent_id, app) = create_test_agent(app).await;
+    mock.push_text_response(&format!("{BODY}\nNO_REPLY"));
+
+    let (_app, responses, session_id) =
+        agent_message(app, &agent_id, "termination-user", "答えて").await;
+    assert_eq!(responses.len(), 1);
+    assert_eq!(responses[0]["content"], BODY);
+
+    let logs = {
+        let conn = db.lock().unwrap();
+        opencrab_db::queries::list_session_logs_by_session(&conn, &session_id).unwrap()
+    };
+    let terminations: Vec<_> = logs
+        .iter()
+        .filter(|log| {
+            log.log_type == "system"
+                && serde_json::from_str::<serde_json::Value>(&log.content)
+                    .ok()
+                    .and_then(|value| value.get("type").and_then(|v| v.as_str()).map(str::to_owned))
+                    .as_deref()
+                    == Some("turn_terminated")
+        })
+        .collect();
+    assert_eq!(terminations.len(), 1, "明示終了イベントが1件でない");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&terminations[0].content).unwrap()["marker"],
+        "NO_REPLY"
+    );
+}
+
 /// #899: REST 経路（`record_rest_agent_reply`）は engine 生応答をそのまま `responses` に返し、
 /// `speech` として保存していた。`NO_REPLY` のみの応答が `assistant: 'NO_REPLY'` として保存され、
 /// 次ターンの typed 履歴でモデルへ渡る。配送層 3 箇所と同じ `terminate_at_no_reply` を保存/返却前に
@@ -43,11 +77,11 @@ async fn test_no_reply_only_is_not_persisted_rest_899() {
     let (app, db, mock) = create_test_app_with_llm();
     let (agent_id, app) = create_test_agent(app).await;
 
-    // FIFO: (a) 単独 NO_REPLY → (b) 本文+NO_REPLY → (d) NO_REPLY+CONTINUE → (c) 対照。
+    // FIFO: (a) 単独NO_REPLY → (b) 本文+NO_REPLY → (d) 終端後の破棄対象 → (c) 対照。
     mock.push_text_response("NO_REPLY");
     mock.push_text_response(&format!("{BODY_B}\nNO_REPLY"));
-    mock.push_text_response("NO_REPLY\nCONTINUE");
-    mock.push_text_response(CTRL_C);
+    mock.push_text_response("NO_REPLY\n破棄対象");
+    mock.push_text_response(&format!("{CTRL_C}\nNO_REPLY"));
 
     // (a) 単独 NO_REPLY: responses 0 件（§13 #11 / ターン合計 noreply）。
     let llm_before = mock.system_prompts().len();
@@ -75,12 +109,12 @@ async fn test_no_reply_only_is_not_persisted_rest_899() {
         resp_b
     );
 
-    // (d) NO_REPLY+CONTINUE: NO_REPLY 優先で沈黙。responses 0 件（§13 #13）。
+    // (d) 終端後に文字列があっても沈黙し、responsesは空。
     let (app, resp_d, _) = agent_message(app, &agent_id, USER, "問い d").await;
     assert_eq!(
         resp_d.len(),
         0,
-        "(d) NO_REPLY+CONTINUE で NO_REPLY 優先の沈黙にならない（§13 #13）: {:?}",
+        "(d) 終端後の文字列を破棄して沈黙にならない: {:?}",
         resp_d
     );
 

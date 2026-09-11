@@ -32,18 +32,18 @@ impl LlmProvider for A3Mock {
             return Ok(text_response("NO_REPLY"));
         }
         if text.contains(M_A3_THREE) {
-            return Ok(tool_calls_response(
+            let mut response = tool_calls_response(
                 B_A3_THREE
                     .iter()
                     .map(|body| ("reply", serde_json::json!({"event": "e1", "text": body})))
                     .collect(),
-            ));
+            );
+            response.choices[0].message.content =
+                Some(MessageContent::Text("NO_REPLY".to_string()));
+            return Ok(response);
         }
         if text.contains(M_A3) {
-            return Ok(tool_call_response(
-                "reply",
-                serde_json::json!({"event": "e1", "text": B_A3}),
-            ));
+            return Ok(reply_with_content_response(B_A3, "NO_REPLY"));
         }
         Ok(text_response("NO_REPLY"))
     }
@@ -201,14 +201,14 @@ async fn scenario_a3_three_replies_complete_in_one_llm_call_without_subtask() {
     );
 }
 
-// ==================== (A3-CONTINUE) 発話のみ＋末尾 CONTINUE で継続（#900） ====================
+// ==================== (A3-継続) 発話のみ＋末尾 継続 で継続（#900） ====================
 //
-// #900: reply（発話クラス）のみの生成でも content 末尾が CONTINUE 単独なら、発話を配送してから
-// 次イテレーションへ進む。reply×1＋CONTINUE を 3 回連ねると、3 通配送・LLM 3 呼び出し・CONTINUE は
+// #900: reply（発話クラス）のみの生成でも content 末尾が 継続 単独なら、発話を配送してから
+// 次イテレーションへ進む。reply×1＋継続 を 3 回連ねると、3 通配送・LLM 3 呼び出し・継続 は
 // 本文へ残らない（撃ちっぱなし＋末尾マーカーの併記契約）。旧挙動（純発話は 1 生成で必ず完結）だと
 // 1 通・LLM 1 で止まるので、この差が回帰ガードになる。
 
-// マーカー文字列自体に "CONTINUE" を含めない（残留検査で発端メッセージが誤検知するのを避ける）。
+// マーカー文字列自体に "継続" を含めない（残留検査で発端メッセージが誤検知するのを避ける）。
 const M_A3_CONT: &str = "A3CONTMARK";
 const B_A3_CONT: [&str; 3] = ["A3-CONT返信1", "A3-CONT返信2", "A3-CONT返信3"];
 
@@ -235,21 +235,18 @@ impl LlmProvider for A3ContinueMock {
         Ok(vec![])
     }
     async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
-        // 生成回数で分岐する（純発話＋CONTINUE の継続は tool role ack を返すため、text マーカーだけ
-        // では 1・2・3 回目を区別できない）。1・2 回目は reply＋末尾 CONTINUE、3 回目は reply のみ。
+        // 生成回数で分岐する（純発話＋継続 の継続は tool role ack を返すため、text マーカーだけ
+        // では 1・2・3 回目を区別できない）。1・2 回目は reply＋末尾 継続、3 回目は reply のみ。
         let n = self.chat_calls.fetch_add(1, Ordering::SeqCst);
         if n < 2 {
-            Ok(reply_with_content_response(B_A3_CONT[n], "CONTINUE"))
+            Ok(reply_with_content_response(B_A3_CONT[n], ""))
         } else {
-            Ok(tool_call_response(
-                "reply",
-                serde_json::json!({"event": "e1", "text": B_A3_CONT[2]}),
-            ))
+            Ok(reply_with_content_response(B_A3_CONT[2], "NO_REPLY"))
         }
     }
 }
 
-/// #900: reply×1＋末尾 CONTINUE を 3 回連ねる → 3 通配送・LLM 3 呼び出し・CONTINUE 非残留。
+/// #900: reply×1＋末尾 継続 を 3 回連ねる → 3 通配送・LLM 3 呼び出し・継続 非残留。
 #[tokio::test]
 async fn scenario_a3_utterance_only_with_continue_runs_next_iteration() {
     let buf = install_capture();
@@ -280,7 +277,7 @@ async fn scenario_a3_utterance_only_with_continue_runs_next_iteration() {
     };
     assert!(
         delivered,
-        "reply×1＋CONTINUE の 3 連が全通配送されない（継続が起きていない）: {:?}",
+        "reply×1＋継続 の 3 連が全通配送されない（継続が起きていない）: {:?}",
         captured(&buf)
     );
 
@@ -292,21 +289,21 @@ async fn scenario_a3_utterance_only_with_continue_runs_next_iteration() {
             .count();
         assert_eq!(count, 1, "reply 本文 {body} の配送回数が 1 でない");
     }
-    // 3 回の生成すべてが走る（1・2 回目は CONTINUE で継続、3 回目で自然終了）。
+    // 3 回の生成すべてが走る（1・2 回目は 継続 で継続、3 回目で自然終了）。
     assert_eq!(
         mock.chat_calls.load(Ordering::SeqCst),
         3,
-        "純発話＋末尾 CONTINUE が次イテレーションを起こさない（1 生成で止まった）"
+        "純発話＋末尾 継続 が次イテレーションを起こさない（1 生成で止まった）"
     );
     assert!(
         !core.state.subtask_registries.has_running(&session_id),
-        "発話＋CONTINUE が subtask 化された"
+        "発話＋継続 が subtask 化された"
     );
-    // CONTINUE は say としても speech ログとしても残らない（剥がされて空になる）。
-    let no_continue_captured = captured(&buf).iter().all(|c| !c.body.contains("CONTINUE"));
+    // 継続 は say としても speech ログとしても残らない（剥がされて空になる）。
+    let no_continue_captured = captured(&buf).iter().all(|c| !c.body.contains("継続"));
     assert!(
         no_continue_captured,
-        "配送本文に CONTINUE が残留: {:?}",
+        "配送本文に 継続 が残留: {:?}",
         captured(&buf)
     );
     let logs = {
@@ -314,20 +311,20 @@ async fn scenario_a3_utterance_only_with_continue_runs_next_iteration() {
         opencrab_db::queries::list_session_logs_by_session(&conn, &session_id).unwrap()
     };
     assert!(
-        !logs.iter().any(|l| l.content.contains("CONTINUE")),
-        "session_logs に CONTINUE が残留: {:?}",
+        !logs.iter().any(|l| l.content.contains("継続")),
+        "session_logs に 継続 が残留: {:?}",
         logs.iter()
             .map(|l| (&l.log_type, &l.content))
             .collect::<Vec<_>>()
     );
-    // §13 ターン合計 reply1＋CONTINUE×2: 保存 3（各イテレーションの reply が speech 保存される）。
+    // §13 ターン合計 reply1＋継続×2: 保存 3（各イテレーションの reply が speech 保存される）。
     let agent_speech_saves = logs
         .iter()
         .filter(|l| l.log_type == "speech" && l.speaker_id.as_deref() == Some(AGENT_ID))
         .count();
     assert_eq!(
         agent_speech_saves, 3,
-        "reply1＋CONTINUE×2 の agent 発話 speech 保存が 3 でない（§13=保存3・§12.2 各イテレーション保存）: {:?}",
+        "reply1＋継続×2 の agent 発話 speech 保存が 3 でない（§13=保存3・§12.2 各イテレーション保存）: {:?}",
         logs.iter()
             .map(|l| (&l.log_type, &l.speaker_id, &l.content))
             .collect::<Vec<_>>()

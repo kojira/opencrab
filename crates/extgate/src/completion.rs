@@ -23,20 +23,20 @@ pub const EXTGATE_SESSION_PREFIX: &str = "extgate-";
 /// 発話 id）を選ぶ。通常ターン（`inbound::enqueue_turn`）と resume ターン（`resume_v3_turn`）で
 /// 規則は共通なので 1 実装に集約する（単一実装）。**送る＝🏁 を付ける／`None`＝付けない**。
 ///
-/// - `engine_completion`: `(最終生成の最後の投稿系 utterance-op の call_id, stopped_by_limit,
-///   最終生成が CONTINUE 本文を配送したか)`。engine を回さなかったターンは `None`。
-/// - `started_subtask` / `agent_has_running`: 進行中があれば付けない（idle でない・§13.3.1 案E）。
+/// - `engine_completion`: `(最終生成の最後の投稿系utterance-opのcall_id, stopped_by_limit,
+///   最終生成が途中本文を配送したか)`。engineを回さなかったターンは`None`。
+/// - `agent_has_running`: 終了時点で進行中があれば付けない（idle でない・§13.3.1 案E）。
+///   ターン中に開始した履歴だけでは抑止しない。終了前に全件決着していれば idle である。
 /// - `final_say_id`: 最終応答が say を配送したときのその delivery_id。
-/// - `last_continuation_say`: 上限打ち切りで最終生成が CONTINUE 本文を配送したとき、その say の
-///   delivery_id（呼び出し側が Mutex から解決して渡す）。
+/// - `last_continuation_say`: callback が最終生成の本文を配送したとき、そのsayの
+///   delivery_id。field名は互換のため維持する。
 pub(crate) fn select_completed_target(
     engine_completion: Option<(Option<String>, bool, bool)>,
-    started_subtask: bool,
     agent_has_running: bool,
     final_say_id: Option<String>,
     last_continuation_say: Option<String>,
 ) -> Option<String> {
-    if started_subtask || agent_has_running {
+    if agent_has_running {
         return None;
     }
     engine_completion.and_then(|(last_reply, stopped_by_limit, final_had_speech)| {
@@ -47,7 +47,11 @@ pub(crate) fn select_completed_target(
                 last_reply
             }
         } else {
-            final_say_id.or(last_reply)
+            final_say_id.or(if final_had_speech {
+                last_continuation_say
+            } else {
+                last_reply
+            })
         }
     })
 }
@@ -122,6 +126,15 @@ impl<R: AgentRuntime> SubtaskCompletionSink for ExtgateCompletionSink<R> {
     }
 
     fn deliver_continuation(&self, ev: SubtaskSettled) {
+        let locks = self.runtime.session_locks();
+        if locks.holds_lock_entry(&self.session_id) {
+            tracing::debug!(
+                session_id = %self.session_id,
+                subtask_id = %ev.subtask_id,
+                "subtask completion left for the active parent turn"
+            );
+            return;
+        }
         let sink = self.clone();
         tokio::spawn(async move {
             resume_v3_turn(sink, ev).await;
@@ -173,7 +186,6 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
             let dispatch: Arc<dyn SubtaskCompletionSink> = Arc::new(sink.clone());
             let kind_id = sink.kind_id.clone();
             let author_id = sink.author_id.clone();
-            let subtask_starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let last_continuation_say = Arc::new(std::sync::Mutex::new(None::<String>));
             // DI 拡張 §8: resume ターンでも宣言能力を tool set へ載せる（連鎖して更に DI 操作を
             // 呼べるように）。宣言が無ければ None。
@@ -203,7 +215,6 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
                         "extgate",
                         caller.clone(),
                     )
-                    .with_subtask_starts(Arc::clone(&subtask_starts))
                     // #964: resume ターンで畳み込んだ said にも、その said を含む LLM request の
                     // 直前に read+origin を付ける（主ターンと同じ境界・1 origin 1 回）。同時に
                     // origin を畳み込み済みに記録し独立ターンを抑止。
@@ -330,12 +341,10 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
                 reply_target.as_deref(),
             )
             .await;
-            let started_subtask = subtask_starts.load(std::sync::atomic::Ordering::SeqCst) > 0;
             // §13.3.1 案E: 進行中判定は agent 単位（別 session の未決着 subtask も含む）。
             let agent_has_running = sink.runtime.has_running_subtask_for_agent(&sink.agent_id);
             let completed_target = select_completed_target(
                 engine_completion,
-                started_subtask,
                 agent_has_running,
                 final_say_id,
                 last_continuation_say
@@ -363,6 +372,54 @@ mod tests {
     use crate::ids::session_id_for_binding;
     use opencrab_actions::{CallerIdentity, NoopCompletionSink, SubtaskRegistries};
     use std::sync::Arc;
+
+    #[test]
+    fn subtask_settled_during_parent_turn_allows_final_completed_target() {
+        assert_eq!(
+            select_completed_target(
+                Some((Some("utterance-call-id".to_string()), false, true)),
+                false,
+                None,
+                Some("say-delivery-id".to_string()),
+            ),
+            Some("say-delivery-id".to_string())
+        );
+    }
+
+    #[test]
+    fn final_callback_speech_uses_its_delivery_id_as_completed_target() {
+        assert_eq!(
+            select_completed_target(
+                Some((Some("utterance-call-id".to_string()), false, true)),
+                false,
+                None,
+                Some("say-delivery-id".to_string()),
+            ),
+            Some("say-delivery-id".to_string())
+        );
+    }
+
+    #[test]
+    fn exhausted_turn_reacts_to_the_last_post_instead_of_posting_a_message() {
+        assert_eq!(
+            select_completed_target(
+                Some((None, true, true)),
+                false,
+                None,
+                Some("last-say".to_string()),
+            ),
+            Some("last-say".to_string())
+        );
+        assert_eq!(
+            select_completed_target(
+                Some((Some("last-reply".to_string()), true, false)),
+                false,
+                None,
+                None,
+            ),
+            Some("last-reply".to_string())
+        );
+    }
 
     #[test]
     fn v3_run_request_always_attaches_dispatch() {

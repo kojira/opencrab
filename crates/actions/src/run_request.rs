@@ -78,10 +78,9 @@ pub struct RunRequest {
     pub trigger_message_id: Option<String>,
     /// 応答テキスト確定時の即時コールバック（Discord への先行送信等）。
     pub on_response_text: Option<Arc<dyn Fn(String) + Send + Sync>>,
-    /// #898: 末尾 CONTINUE で継続する text-only イテレーションの途中発話を、次イテレーション前に
-    /// **ループ中で配送・保存する**非同期フック（§12.2/§13.1 j）。REST は responses への追加、
-    /// extgate V3 は途中発話配送、intake は保存を行い、配送失敗（Err）は継続を止めてターンを
-    /// 失敗させる。`on_response_text` は最終・text+tool でも発火するため区別できず流用不可。
+    /// 明示終了前の text-only iteration の途中発話を、次iteration前に配送・保存する
+    /// 非同期フック。RESTはresponsesへの追加、extgate V3は途中発話配送、intakeは保存を行う。
+    /// 配送失敗（Err）はターンを失敗させる。
     pub on_continuation_speech: Option<ContinuationSpeechHook>,
     /// #964: 次の LLM request に新しく含める said の origin を、`llm.chat` の直前に read state
     /// （👀）として通知するフック。extgate V3 だけが渡す。None なら通知しない。
@@ -136,23 +135,6 @@ pub struct RunRequest {
     ///
     /// 対話ターン・heartbeat・subtask は `true` のままで一切変わらない。
     pub persist_turn_logs: bool,
-    /// **この run が起こした subtask の本数**を数えるターンローカルなカウンタ（#431）。
-    ///
-    /// 呼び出し側（gateway）が run ごとに新しい `AtomicUsize` を作って渡し、run が
-    /// 返った後に読む。`0` より大きければ「このターンは次の行動を選んで終わった」＝
-    /// 完了時に親セッションが resume され、続きの発話がそこで起きる。
-    ///
-    /// **両方の起動経路を 1 つの数で見る**のが要点:
-    /// - 自動 dispatch（`SubtaskToolDispatcher`）
-    /// - 明示 `spawn_subtask` ツール
-    ///
-    /// どちらも登録簿（`SubtaskRegistry`）への登録が成立した時点でだけ加算する。
-    /// 登録簿を後から覗く形にしないのは、run が返る前に決着した subtask が既に
-    /// 除去されていて取りこぼす（＝まさに resume が来るケースを見落とす）ため。
-    ///
-    /// `None`（既定）なら数えない。Discord の legacy 経路と extgate の activity ended
-    /// `completed_target` 判定が、spawn を起こしたターンを idle と誤認しないために使う。
-    pub subtask_starts: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 impl RunRequest {
@@ -189,7 +171,6 @@ impl RunRequest {
             live_inbound_scope: LiveInboundScope::AllOthers,
             tool_allowlist: None,
             persist_turn_logs: true,
-            subtask_starts: None,
         }
     }
 
@@ -250,16 +231,6 @@ impl RunRequest {
     ) -> Self {
         self.completion_sink = Some(sink);
         self.subtask_registry = registry;
-        self
-    }
-
-    /// この run が起こした subtask の本数を数えるカウンタを渡す（#431）。
-    ///
-    /// 自動 dispatch と明示 `spawn_subtask` の**両経路**が、登録簿への登録が成立した
-    /// ところで加算する。呼び出し側は run が返った後に読み、`0` なら「次の行動を選ばず
-    /// 終わったターン」と判定できる。詳細は [`RunRequest::subtask_starts`]。
-    pub fn with_subtask_starts(mut self, counter: Arc<std::sync::atomic::AtomicUsize>) -> Self {
-        self.subtask_starts = Some(counter);
         self
     }
 

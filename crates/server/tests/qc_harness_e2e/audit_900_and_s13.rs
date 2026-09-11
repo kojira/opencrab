@@ -1,10 +1,8 @@
 // ---------------------------------------------------------------------------
-// #900(b)【§13 #9（reply×N＋CONTINUE のみ→reply N 配送・進む）／ターン合計 reply1＋CONTINUE ×2→reply1】:
-// reply×1 + 末尾 CONTINUE を 2 回、最後に reply×1 → 配送 3・LLM 3。
+// #900(b)【§13 #9（reply×N＋継続 のみ→reply N 配送・進む）／ターン合計 reply1＋継続 ×2→reply1】:
+// reply×1 + 末尾 継続 を 2 回、最後に reply×1 → 配送 3・LLM 3。
 //
-// 現 tip: 発話クラスのみの生成は `next_llm_call_needed=false` で即 return し、末尾 CONTINUE を
-// 無視する（continue_requested を tool_call 分岐が見ない）。→ reply 1 通・LLM 1 回で赤。
-// 期待: 発話のみ + 末尾 CONTINUE は「配送してから次イテレーション」。
+// 現契約では発話だけで終了せず、NO_REPLY が出るまで次iterationへ進む。
 // ---------------------------------------------------------------------------
 const B900_1: &str = "b900-reply-one 一通目";
 const B900_2: &str = "b900-reply-two 二通目";
@@ -14,9 +12,9 @@ fn reply_with_optional_continue(text: &str, cont: bool) -> ChatResponse {
     let msg = Message {
         role: Role::Assistant,
         content: if cont {
-            Some(MessageContent::Text("CONTINUE".to_string()))
-        } else {
             None
+        } else {
+            Some(MessageContent::Text("NO_REPLY".to_string()))
         },
         name: None,
         function_call: None,
@@ -105,13 +103,13 @@ async fn audit_900b_reply_plus_continue_delivers_three_over_three_llm_calls() {
         assert_eq!(
             n,
             1,
-            "reply {b} の配送回数が 1 でない（#900(b): 発話＋CONTINUE 継続が効かない）: {:?}",
+            "reply {b} の配送回数が 1 でない（#900(b): 発話＋継続 継続が効かない）: {:?}",
             captured(&buf)
         );
     }
     assert!(
         all_three,
-        "reply×3（発話＋CONTINUE 継続）が揃わない: {:?}",
+        "reply×3（発話＋継続 継続）が揃わない: {:?}",
         captured(&buf)
     );
 
@@ -119,7 +117,7 @@ async fn audit_900b_reply_plus_continue_delivers_three_over_three_llm_calls() {
     assert_eq!(
         mock.calls.load(Ordering::SeqCst),
         3,
-        "発話＋末尾 CONTINUE が次イテレーションを起こしていない（LLM 呼び出しが 3 でない）"
+        "発話＋末尾 継続 が次イテレーションを起こしていない（LLM 呼び出しが 3 でない）"
     );
 }
 
@@ -146,7 +144,7 @@ fn replies_with_body(replies: &[&str], body: &str) -> ChatResponse {
         .collect();
     let msg = Message {
         role: Role::Assistant,
-        content: Some(MessageContent::Text(body.to_string())),
+        content: Some(MessageContent::Text(format!("{body}\nNO_REPLY"))),
         name: None,
         function_call: None,
         tool_calls: Some(tool_calls),

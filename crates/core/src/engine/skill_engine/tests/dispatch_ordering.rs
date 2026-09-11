@@ -10,7 +10,7 @@
                 tc("tc-1", "write_file", serde_json::json!({"path": "x"})),
                 tc("tc-2", "execute_shell", serde_json::json!({"cmd": "build"})),
             ]),
-            text_response("開始しました"),
+            final_text_response("開始しました"),
         ]);
         let mut engine = SkillEngine::new(Box::new(llm), Box::new(MockExecutor::new()), 10);
         let dispatcher = Arc::new(RecordingDispatcher::new(&["spawn_subtask"]));
@@ -55,7 +55,7 @@
                 tc("tc-1", "write_file", serde_json::json!({"path": "x"})),
                 tc("tc-2", "discord_send", serde_json::json!({"text": "hi"})),
             ]),
-            text_response("done"),
+            final_text_response("done"),
         ]);
         struct OrderExecutor {
             order: Arc<Mutex<Vec<String>>>,
@@ -124,7 +124,7 @@
                     serde_json::json!({"cmd": "claude ..."}),
                 ),
             ]),
-            text_response("開始しました"),
+            final_text_response("開始しました"),
         ]);
 
         // executor（inline 実行）と dispatcher（subtask 化）を同一タイムラインへ記録し、
@@ -253,7 +253,7 @@
                     serde_json::json!({"note": "done"}),
                 ),
             ]),
-            text_response("done"),
+            final_text_response("done"),
         ]);
         struct OrderExecutor {
             order: Arc<Mutex<Vec<String>>>,
@@ -383,7 +383,7 @@
                 ),
             ]),
             // 次イテレーションでツールを呼ばない → ここでループ終了（declare_done ではなく）。
-            text_response("終わります"),
+            final_text_response("終わります"),
         ]);
 
         // executor は inline 実行だけを記録（declare_done のみ来るべき）。
@@ -467,7 +467,7 @@
                 tc("tc-1", "not_a_real_tool", serde_json::json!({})),
                 tc("tc-2", "execute_shell", serde_json::json!({"cmd": "x"})),
             ]),
-            text_response("done"),
+            final_text_response("done"),
         ]);
         // executor は inline 実行のみ記録（未許可は executor に届かず denied になるべき）。
         struct SpyExecutor {

@@ -230,7 +230,7 @@ async fn scenario_e3_reply3_in_one_turn_does_not_get_muted_reaction() {
     assert_no_muted_on(&buf, "706").await;
 }
 
-// ==================== (e4) §13 #9: reply＋末尾 CONTINUE ターンには 🤐 が付かない（#900） ====================
+// ==================== (e4) §13 #9: reply＋末尾 継続 ターンには 🤐 が付かない（#900） ====================
 #[tokio::test]
 async fn scenario_e4_reply_then_continue_turn_does_not_get_muted_reaction() {
     let buf = install_capture();
@@ -252,7 +252,7 @@ async fn scenario_e4_reply_then_continue_turn_does_not_get_muted_reaction() {
     };
     assert!(
         replied,
-        "reply＋CONTINUE ターンの reply が配送されない: {:?}",
+        "reply＋継続 ターンの reply が配送されない: {:?}",
         captured(&buf)
     );
     // 発話（reply）があったので 🤐 は付かない（§13 #9）。

@@ -4,7 +4,7 @@
 async fn scenario_a_mention_becomes_say() {
     let buf = install_capture();
     let mock = Arc::new(FifoMock::new());
-    mock.push_text("QCA-ACK 了解、やっておくね");
+    mock.push_text("QCA-ACK 了解、やっておくね\nNO_REPLY");
     let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
 
     let fixture = Fixture::new();
@@ -132,7 +132,7 @@ async fn scenario_no_reply_terminates_and_logs_discard() {
 async fn scenario_c_same_event_on_both_lanes_says_once() {
     let buf = install_capture();
     let mock = Arc::new(FifoMock::new());
-    mock.push_text("QCC-ACK ひとつだけ返すよ");
+    mock.push_text("QCC-ACK ひとつだけ返すよ\nNO_REPLY");
     // 万一 2 ターン走ったら 2 本目が消費される。後段で system_prompts 数を見て 1 本を確かめる。
     mock.push_text("QCC-EXTRA 余計な二本目");
     let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
@@ -223,15 +223,15 @@ impl LlmProvider for RoutedMock {
         // 注意: システムプロンプトにはツール解説として "subtask_completed" が常に含まれるため、
         // それでは判定できない。決着で親ログに載る subtask 結果本文（会話に現れる）で判定する。
         if text.contains(B_SUBTASK_RESULT) {
-            return Ok(text_response(B_COMPLETION));
+            return Ok(text_response(&format!("{B_COMPLETION}\nNO_REPLY")));
         }
         // (B) 親ターン#1 の spawn_subtask 実行後（tool_result 有り）→ 即応 ack say(1)。
         if has_tool_role(&request) {
-            return Ok(text_response(B_ACK));
+            return Ok(text_response(&format!("{B_ACK}\nNO_REPLY")));
         }
         // (D) 第2依頼のターン → 即応 say(2)。
         if text.contains(M_SECOND) {
-            return Ok(text_response(B_SECOND));
+            return Ok(text_response(&format!("{B_SECOND}\nNO_REPLY")));
         }
         // (A) 親ターン#1 の初回 → spawn_subtask を呼んで背景サブタスクを detach。
         if text.contains(M_FIRST) {
@@ -255,7 +255,7 @@ impl LlmProvider for RoutedMock {
                 }
                 waiter.await;
             }
-            return Ok(text_response(B_SUBTASK_RESULT));
+            return Ok(text_response(&format!("{B_SUBTASK_RESULT}\nNO_REPLY")));
         }
         Err(anyhow::anyhow!("RoutedMock: unrouted request: {text}"))
     }
