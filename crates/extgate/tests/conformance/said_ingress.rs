@@ -300,6 +300,52 @@ async fn mixed_local_attachments_reach_turn_in_declared_order() {
 }
 
 #[tokio::test]
+async fn image_only_local_attachment_preserves_pre_v3_image_anchor() {
+    use sha2::Digest as _;
+
+    let h = Harness::start().await;
+    let (mut s, instance_id, binding_id) = ready_pair(&h).await;
+    let attachments = tempfile::tempdir().unwrap();
+    let inbox = attachments.path().join("inbox");
+    let relative = format!("{instance_id}/origin/image.bin");
+    let source = inbox.join(&relative);
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    let image = b"\x89PNG\r\n\x1a\nimage";
+    std::fs::write(&source, image).unwrap();
+    h.state
+        .set_attachment_inbox_root(inbox.canonicalize().unwrap());
+    let hash = format!("{:x}", sha2::Sha256::digest(image));
+
+    write_frame(
+        &mut s,
+        &json!({
+            "id": "local-image-anchor", "m": "said", "binding_id": binding_id,
+            "origin": "local-image-anchor", "author_id": "u1", "text": "",
+            "attachments": [{
+                "kind": "file", "id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                "name": "image.png", "media_type": "image/png",
+                "size": image.len(), "sha256": hash, "local_path": relative
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(
+        read_said_response(&mut s, "local-image-anchor").await["seq"],
+        1
+    );
+    for _ in 0..50 {
+        if !h.runtime.images.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let conversation = h.runtime.conversations.lock().unwrap().last().unwrap().clone();
+    assert!(conversation.contains("[画像添付: image.png (image/png)]"));
+    assert!(!conversation.contains("Inspect the attached image"));
+    assert!(h.runtime.images.lock().unwrap()[0][0].starts_with("data:image/png;base64,"));
+}
+
+#[tokio::test]
 async fn image_only_said_is_recorded_and_starts_turn() {
     let h = Harness::start().await;
     let (mut s, _, binding_id) = ready_pair(&h).await;

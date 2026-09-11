@@ -44,8 +44,8 @@ pub(super) fn materialize(state: &ExtgateState, said: &Said) -> Result<Said, Gat
         let path = validate_file(&root, local_path, *size, sha256)?;
         let bytes = std::fs::read(path).map_err(|_| GateError::new(ErrorCode::BadRequest))?;
         let mime = media_type.as_deref().unwrap_or("application/octet-stream");
-        order.push(format!("{}. {} ({}, id {})", index + 1, name, mime, id));
         if is_text(mime) {
+            order.push(format!("{}. {} ({}, id {})", index + 1, name, mime, id));
             let content =
                 std::str::from_utf8(&bytes).map_err(|_| GateError::new(ErrorCode::BadRequest))?;
             text_parts.push(format!(
@@ -57,11 +57,22 @@ pub(super) fn materialize(state: &ExtgateState, said: &Said) -> Result<Said, Gat
                 content
             ));
         } else if is_verified_image(mime, &bytes) {
+            // V3前のDiscord経路と同じ画像アンカーを会話へ残す。画像dataだけでは
+            // 本文なし投稿が「何について応答するターンか」を失うため、命令を足すのではなく
+            // 添付が画像であるという受信事実を明示する。
+            order.push(format!(
+                "{}. {} — [画像添付: {} ({})]",
+                index + 1,
+                escape_attr(name),
+                escape_attr(name),
+                escape_attr(mime)
+            ));
             image_parts.push(SaidAttachment::ImageUrl(format!(
                 "data:{mime};base64,{}",
                 base64::engine::general_purpose::STANDARD.encode(&bytes)
             )));
         } else {
+            order.push(format!("{}. {} ({}, id {})", index + 1, name, mime, id));
             text_parts.push(format!(
                 "[Attachment: {} ({}, {} bytes, id {}) — content extraction unsupported]",
                 name, mime, size, id
