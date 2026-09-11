@@ -140,6 +140,39 @@
         }
     }
 
+    /// NO_REPLY生成中に到着したcompletionを終了境界で拾い、結果を読んでから終了する。
+    #[tokio::test]
+    async fn completion_arriving_during_no_reply_is_read_before_termination() {
+        let llm = std::sync::Arc::new(RecordingLlm::new(vec![
+            response(Some("NO_REPLY"), vec![]),
+            response(Some("結果391を確認した\nNO_REPLY"), vec![]),
+        ]));
+        let source = std::sync::Arc::new(ScriptedInbound::new(vec![vec![
+            "[subtask 完了]: 173 + 218 = 391",
+        ]]));
+        let mut engine = SkillEngine::new(
+            Box::new(LlmHandle(llm.clone())),
+            Box::new(NoopExecutor),
+            4,
+        );
+        engine.set_live_inbound(source);
+
+        let result = engine.run("system", "計算して", "model").await.unwrap();
+
+        assert_eq!(llm.call_count(), 2, "新着結果を読まずに終了してはならない");
+        assert!(
+            llm.user_texts(1)
+                .iter()
+                .any(|text| text.contains("173 + 218 = 391")),
+            "completion結果が次requestへ入ること"
+        );
+        assert_eq!(result.response, "結果391を確認した");
+        assert_eq!(
+            result.explicit_termination,
+            Some(crate::ExplicitTermination::NoReply)
+        );
+    }
+
     /// ループ実行中に届いた発言が、**次のイテレーションの入力**に載る。
     ///
     /// これが #289 の本体: 1 回目の LLM 呼び出し時点では入力に無く、ツール往復を挟んだ
@@ -148,7 +181,7 @@
     async fn new_speech_reaches_the_next_iteration() {
         let llm = std::sync::Arc::new(RecordingLlm::new(vec![
             response(None, vec![tool_call("call-1")]),
-            response(Some("了解、止めるね"), vec![]),
+            response(Some("了解、止めるね\nNO_REPLY"), vec![]),
         ]));
         let source = std::sync::Arc::new(ScriptedInbound::new(vec![vec!["[owner]:\nやめて"]]));
 
@@ -182,7 +215,7 @@
         let llm = std::sync::Arc::new(RecordingLlm::new(vec![
             response(None, vec![tool_call("call-1")]),
             response(None, vec![tool_call("call-2")]),
-            response(Some("done"), vec![]),
+            response(Some("done\nNO_REPLY"), vec![]),
         ]));
         let source = std::sync::Arc::new(ScriptedInbound::new(vec![vec!["[owner]:\nやめて"]]));
 
@@ -206,7 +239,7 @@
     /// 1 回目の LLM 呼び出しの前には poll しない（履歴と二重になるため）。
     #[tokio::test]
     async fn the_first_iteration_does_not_poll() {
-        let llm = std::sync::Arc::new(RecordingLlm::new(vec![response(Some("hi"), vec![])]));
+        let llm = std::sync::Arc::new(RecordingLlm::new(vec![response(Some("hi\nNO_REPLY"), vec![])]));
         let source = std::sync::Arc::new(ScriptedInbound::new(vec![]));
 
         let mut engine =
@@ -215,7 +248,11 @@
         engine.run("system", "hi", "test-model").await.unwrap();
 
         assert_eq!(llm.call_count(), 1);
-        assert_eq!(source.polls(), 0, "ツール往復が無ければ引かない");
+        assert_eq!(
+            source.polls(),
+            1,
+            "初回request前には引かず、NO_REPLY終了境界でだけ確認する"
+        );
     }
 
     /// 新着が無ければ入力は従来と同一（1 バイトも増えない）。
@@ -223,7 +260,7 @@
     async fn no_new_speech_changes_nothing() {
         let script = vec![
             response(None, vec![tool_call("call-1")]),
-            response(Some("done"), vec![]),
+            response(Some("done\nNO_REPLY"), vec![]),
         ];
         let with_source = std::sync::Arc::new(RecordingLlm::new(script.clone()));
         let without_source = std::sync::Arc::new(RecordingLlm::new(script));
@@ -282,7 +319,7 @@
                     .push("llm1_completed".to_string());
                 Ok(response(None, vec![tool_call("call-1")]))
             } else {
-                Ok(response(Some("done"), vec![]))
+                Ok(response(Some("done\nNO_REPLY"), vec![]))
             }
         }
     }
@@ -417,8 +454,9 @@
                 "request2_construction_started",
                 "read:origin-b",
                 "llm2_invoked",
+                "request2_construction_started",
             ],
-            "request1 完了→result1→request2 構築→folded read→request2 呼出しの順"
+            "request2呼出し後、NO_REPLY終了境界でも新着を最終確認する"
         );
     }
 
@@ -467,7 +505,7 @@
     #[tokio::test]
     async fn no_origin_emits_no_read_notification() {
         let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let llm = std::sync::Arc::new(RecordingLlm::new(vec![response(Some("done"), vec![])]));
+        let llm = std::sync::Arc::new(RecordingLlm::new(vec![response(Some("done\nNO_REPLY"), vec![])]));
         let mut engine = SkillEngine::new(
             Box::new(LlmHandle(llm)),
             Box::new(NoopExecutor),

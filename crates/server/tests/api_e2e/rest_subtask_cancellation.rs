@@ -41,7 +41,7 @@ async fn cancel_last_subtask_in_rest_run_with_inner(
     //    作りつつ `active` のまま残す（= 本番の「dispatch 済みでまだ走っている」状態）。
     let registry = state.subtask_registries.registry_for(&session_id);
     let handle = insert_running_subtask(&registry, "st-dw-1", &session_id, &agent_id);
-    mock.push_text_response("走らせています");
+    mock.push_text_response("走らせています\nNO_REPLY");
     let (status, _) = send_request(
         app.clone(),
         "POST",
@@ -65,7 +65,7 @@ async fn cancel_last_subtask_in_rest_run_with_inner(
             arguments: serde_json::json!({"subtask_id": "st-dw-1"}).to_string(),
         },
     }]);
-    mock.push_text_response("止めました");
+    mock.push_text_response("止めました\nNO_REPLY");
 
     let sink: Arc<dyn opencrab_actions::SubtaskCompletionSink> =
         Arc::new(opencrab_server::api::agents_messages::RestCompletionSink {
@@ -209,7 +209,7 @@ async fn test_rest_session_stays_active_while_subtask_runs() {
     let registry = state.subtask_registries.registry_for(&session_id);
     let handle = insert_running_subtask(&registry, "st-running", &session_id, &agent_id);
 
-    mock.push_text_response("走らせています");
+    mock.push_text_response("走らせています\nNO_REPLY");
     let (status, _) = send_request(
         app.clone(),
         "POST",
@@ -234,7 +234,7 @@ async fn test_rest_session_completed_when_no_subtask_runs() {
     let (agent_id, app) = create_test_agent_named(app, "Plain", "TestPersona").await;
     let session_id = format!("agent-msg-{agent_id}-u1");
 
-    mock.push_text_response("できました");
+    mock.push_text_response("できました\nNO_REPLY");
     let (status, _) = send_request(
         app.clone(),
         "POST",
@@ -270,13 +270,13 @@ async fn test_rest_sink_completes_session_after_last_subtask_settles() {
             .to_string(),
         },
     }]);
-    mock.push_text_response("開始しました");
+    mock.push_text_response("開始しました\nNO_REPLY");
     // #638: subtask の決着が**継続ターン**を起こすようになったので、その 1 本分の応答も要る
     // （以前は REST だけ継続しなかったため 2 本で足りていた）。継続ターンが終わってから
     // `sessions.status` の整合が行われる。本文は #631 の最小再現（`HELLO_631` を返させる）に
     // 合わせ、**継続ターンの応答だと一意に分かる文言**にする——下でセッションログに
     // この本文が残ることを assert し、「継続が走った」だけでなく「結果が読める」ことまで留める。
-    mock.push_text_response("HELLO_631 を確認しました");
+    mock.push_text_response("HELLO_631 を確認しました\nNO_REPLY");
 
     let (status, resp) = send_request(
         app.clone(),

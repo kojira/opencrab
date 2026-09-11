@@ -178,14 +178,9 @@ async fn run_rest_continuation(
     match result {
         Ok(engine_result) => {
             // #899: 保存前に NO_REPLY 終端解釈。沈黙は speech を残さない。
-            if let Some(body) = opencrab_actions::visible_speech_after_markers(
-                &engine_result.response,
-                opencrab_actions::DeliveryContext {
-                    session_id: &session_id,
-                    agent_id: &agent_id,
-                    origin: "rest",
-                },
-            ) {
+            if let Some(body) =
+                (!engine_result.response.trim().is_empty()).then(|| engine_result.response.clone())
+            {
                 if let Ok(conn) = state.db.lock() {
                     crate::transcript::record_rest_agent_reply(
                         &conn,
@@ -529,10 +524,8 @@ pub async fn send_agent_message(
     if let Some(ga) = gateway_actions {
         run_req = run_req.with_gateway_actions(ga);
     }
-    // #898 §12.2/§13.1 d: 末尾 CONTINUE の途中発話を、次イテレーション前に responses へ 1 要素ずつ
-    // 追加（順序保持）し memory_sessions へ speech 保存する。REST は外部配送先が無いので「配送」＝
-    // responses への追加。フックはループ中に保存し、本文はバッファへ集めて run 後に responses の
-    // 前段へ積む（REST に配送失敗は無いので常に Ok）。
+    // 明示終了前の途中発話を、次iteration前にresponsesへ順序どおり追加し、
+    // memory_sessionsへspeech保存する。RESTは外部配送先がないためresponsesへの追加を配送とする。
     let intermediate_speeches: Arc<std::sync::Mutex<Vec<String>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
     {
@@ -577,14 +570,8 @@ pub async fn send_agent_message(
         Ok(engine_result) => {
             // #899: 保存/返却前に NO_REPLY 終端解釈（配送層 3 箇所と同じ単一実装）を通す。
             // 沈黙（前段が空）は speech を残さず responses も返さない。前段が本文なら本文のみ。
-            let speech = opencrab_actions::visible_speech_after_markers(
-                &engine_result.response,
-                opencrab_actions::DeliveryContext {
-                    session_id: &session_id,
-                    agent_id: &id,
-                    origin: "rest",
-                },
-            );
+            let speech =
+                (!engine_result.response.trim().is_empty()).then(|| engine_result.response.clone());
 
             // Log agent response（沈黙でなければ本文のみ）。
             if let Some(body) = &speech {
@@ -603,9 +590,8 @@ pub async fn send_agent_message(
             // 最後の subtask 決着時に RestCompletionSink が完了させる）。
             complete_session_if_idle(&state.db, &session_id, &subtask_registry);
 
-            // #898 §13.1 d: 途中発話（順序保持）→ 最終応答 の順で responses に載せる。途中発話は
-            // 本文ありのみ（空 CONTINUE はフック未発火）。最終は #899 の NO_REPLY 終端解釈で本文が
-            // あるときだけ載せる（沈黙は載せない）。
+            // 途中発話（順序保持）→最終応答の順でresponsesに載せる。
+            // 最終応答は可視本文がある場合だけ載せ、沈黙は載せない。
             let mut responses_json: Vec<serde_json::Value> = intermediate_speeches
                 .lock()
                 .map(|g| {

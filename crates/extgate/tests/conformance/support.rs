@@ -100,11 +100,21 @@ impl AgentRuntime for TestRuntime {
         if reply == "__FAIL__" {
             anyhow::bail!("simulated turn failure");
         }
+        let termination = opencrab_core::terminate_at_no_reply(&reply);
+        let explicit_termination = termination
+            .terminated()
+            .then_some(opencrab_core::ExplicitTermination::NoReply);
+        let response = if termination.terminated() {
+            termination.speech().unwrap_or_default().to_string()
+        } else {
+            reply
+        };
         Ok(EngineResult {
-            response: reply,
+            response,
             iterations: 1,
             tool_calls_made: 0,
             stopped_by_limit: false,
+            explicit_termination,
             last_posting_utterance_id: None,
             last_generation_had_continuation_speech: false,
             xml_fallback_parses: 0,

@@ -11,7 +11,7 @@
 //   - 保存: session_logs（`list_session_logs_by_session`）の log_type=="speech" 行。
 //           エージェント自身の発話は speaker_id==AGENT_ID。
 //   - LLM 回数: mock 側のカウンタ（system_prompts().len() もしくは AtomicUsize）。
-//   - 残留マーカー: say body / speech content に "CONTINUE" / "NO_REPLY" が現れないこと。
+//   - 残留マーカー: say body / speech content に "継続" / "NO_REPLY" が現れないこと。
 //   - 次ターン typed 履歴: 2 ターン目リクエストの Assistant ロールメッセージ本文。
 // =====================================================================================
 

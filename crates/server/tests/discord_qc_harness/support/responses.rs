@@ -99,7 +99,7 @@ pub(crate) fn tool_calls_response(calls: Vec<(&str, serde_json::Value)>) -> Chat
     }
 }
 
-/// reply tool_call と content を同一生成に載せる（reply＋本文/CONTINUE/NO_REPLY 併記用）。
+/// reply tool_call と content を同一生成に載せる（reply＋本文/継続/NO_REPLY 併記用）。
 pub(crate) fn reply_with_content_response(text: &str, content: &str) -> ChatResponse {
     let mut resp = tool_call_response("reply", serde_json::json!({"event": "e1", "text": text}));
     resp.choices[0].message.content = Some(MessageContent::Text(content.to_string()));

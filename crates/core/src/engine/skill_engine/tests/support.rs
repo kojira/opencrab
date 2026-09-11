@@ -36,6 +36,10 @@
         resp(Some(text), vec![])
     }
 
+    fn final_text_response(text: &str) -> ChatResponse {
+        text_response(&format!("{text}\nNO_REPLY"))
+    }
+
     fn tool_call_response(calls: Vec<ToolCall>) -> ChatResponse {
         resp(None, calls)
     }

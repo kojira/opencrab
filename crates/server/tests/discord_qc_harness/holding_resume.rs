@@ -39,7 +39,7 @@ impl LlmProvider for HoldingShellMock {
             return Ok(shell_with_content_response(H916_DECL, "echo", &[H916_ECHO]));
         }
         // subtask 決着後の resume ターン（tool role 無し・2 回目以降）→ 完了報告 say。
-        Ok(text_response(H916_REPORT))
+        Ok(text_response(&format!("{H916_REPORT}\nNO_REPLY")))
     }
 }
 
@@ -181,11 +181,11 @@ async fn scenario_916_holding_body_delivered_and_saved() {
 }
 
 // ---------------------------------------------------------------------------
-// #918 §13.4.2【resume ターンで 本文＋CONTINUE→本文 → 配送 2・保存 2・🏁 は 2 件目のみ・
-// CONTINUE 残留 0】:
-//   spawn ターンで宣言（別生成）→ subtask（echo）決着 → resume ターンが本文1＋末尾CONTINUE →
+// #918 §13.4.2【resume ターンで 本文＋継続→本文 → 配送 2・保存 2・🏁 は 2 件目のみ・
+// 継続 残留 0】:
+//   spawn ターンで宣言（別生成）→ subtask（echo）決着 → resume ターンが本文1＋末尾継続 →
 //   本文2 で 2 分割。resume の途中発話（本文1）が配送・保存され、最終（本文2）に 🏁 1、途中に 🏁 0、
-//   どの say にも "CONTINUE" が出ない。
+//   どの say にも "継続" が出ない。
 //   注（実装調査）: base tip 9dc50f35(#917) が completion.rs:194 に on_continuation_speech を配線済み。
 //   本テストは #918 の現状（赤 or 緑）を実証する探り。緑なら「#917 で解消済み」を確定させる回帰。
 // ---------------------------------------------------------------------------
@@ -213,7 +213,7 @@ impl LlmProvider for ResumeContinueMock {
     async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
         // spawn ターンの ack（合成 "spawned" 結果＝tool role）→ 宣言 say（別生成・配送される）。
         if has_tool_role(&request) {
-            return Ok(text_response(SP918_DECL));
+            return Ok(text_response(&format!("{SP918_DECL}\nNO_REPLY")));
         }
         // 初回（tool role 無し・1 回だけ）→ execute_shell(echo) で背景 subtask 化。
         if !self.emitted.swap(true, std::sync::atomic::Ordering::SeqCst) {
@@ -222,13 +222,13 @@ impl LlmProvider for ResumeContinueMock {
                 serde_json::json!({ "command": "echo", "args": [H918_ECHO] }),
             ));
         }
-        // subtask 決着後の resume ターン（tool role 無し・emitted 済み）: 本文1＋CONTINUE → 本文2。
+        // subtask 決着後の resume ターン（tool role 無し・emitted 済み）: 本文1＋継続 → 本文2。
         let n = self
             .resume_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         match n {
-            0 => Ok(text_response(&format!("{R918_1}\nCONTINUE"))),
-            _ => Ok(text_response(R918_2)),
+            0 => Ok(text_response(R918_1)),
+            _ => Ok(text_response(&format!("{R918_2}\nNO_REPLY"))),
         }
     }
 }
@@ -296,15 +296,15 @@ async fn scenario_918_resume_turn_continue_split_delivers_both() {
         captured(&buf)
     );
 
-    // CONTINUE 残留 0: どの say にも "CONTINUE" が出ない（§13.4.2 手順 3）。
+    // 継続 残留 0: どの say にも "継続" が出ない（§13.4.2 手順 3）。
     assert!(
         captured(&buf)
             .iter()
             .filter(|c| c.kind == "say"
                 && c.channel == CHANNEL
                 && (c.body.contains(R918_1) || c.body.contains(R918_2)))
-            .all(|c| !c.body.contains("CONTINUE")),
-        "resume の say に CONTINUE が残留（§13.4.2 手順 3/5）: {:?}",
+            .all(|c| !c.body.contains("継続")),
+        "resume の say に 継続 が残留（§13.4.2 手順 3/5）: {:?}",
         captured(&buf)
     );
 
@@ -356,13 +356,13 @@ async fn scenario_918_resume_turn_continue_split_delivers_both() {
         own_speech_rows, 3,
         "自 speech 保存行が宣言 1＋報告 2 の 3 行でない（§13.4.2 手順 4）: {own_speech_rows}"
     );
-    // 残留 0（本文側）: 保存された自 speech の本文に CONTINUE が一切含まれない（§13.4.2 手順 3/5）。
+    // 残留 0（本文側）: 保存された自 speech の本文に 継続 が一切含まれない（§13.4.2 手順 3/5）。
     let continue_in_saved: i64 = {
         let conn = core.extgate.db.lock().unwrap();
         conn.query_row(
             &format!(
                 "SELECT COUNT(*) FROM memory_sessions WHERE log_type='speech' \
-                 AND speaker_id='{AGENT_ID}' AND content LIKE '%CONTINUE%'"
+                 AND speaker_id='{AGENT_ID}' AND content LIKE '%継続%'"
             ),
             [],
             |r| r.get(0),
@@ -371,7 +371,7 @@ async fn scenario_918_resume_turn_continue_split_delivers_both() {
     };
     assert_eq!(
         continue_in_saved, 0,
-        "保存された自 speech 本文に CONTINUE が残留（§13.4.2 手順 3/5）: {continue_in_saved}"
+        "保存された自 speech 本文に 継続 が残留（§13.4.2 手順 3/5）: {continue_in_saved}"
     );
 }
 

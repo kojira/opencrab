@@ -1,13 +1,13 @@
 // ===================================================================
-// #930【👀 のタイミング・spawned ack 再呼び出し経路（CONTINUE 不使用）】
+// #930【👀 のタイミング・spawned ack 再呼び出し経路（継続 不使用）】
 // QC 実機（llm_logs 07:45Z）では A ターンは execute_shell(sleep) の **spawned ack 後の
-// 再呼び出し（is_bot_iteration=1）** で B を畳み込む（CONTINUE ではない）。この経路でも
-// 現 tip は 👀 が返信の後に付く（＝#930）。companion の CONTINUE 版と別に、実機どおりの
+// 再呼び出し（is_bot_iteration=1）** で B を畳み込む（継続 ではない）。この経路でも
+// 現 tip は 👀 が返信の後に付く（＝#930）。companion の 継続 版と別に、実機どおりの
 // tool-call 再呼び出し経路で赤を pin する。
 //
 // 構成: A→execute_shell(sleep 8)（長い subtask・🏁 抑制）。以降の spawned ack 再呼び出し
 // （has_tool_role）では keep-alive に execute_shell(echo) を spawn して turn を継続させる
-// （CONTINUE は使わない）。走行中に B を投入 → spawned ack 再呼び出しの poll_new_messages で
+// （継続 は使わない）。走行中に B を投入 → spawned ack 再呼び出しの poll_new_messages で
 // 畳み込み（新着メッセージ）→ 返信。
 //
 // 観測境界: (1) 畳み込みが spawned ack 再呼び出し（tool 文脈あり・新着メッセージ）で起きる
@@ -41,7 +41,7 @@ impl LlmProvider for SpawnedAckFoldMock {
         if text.contains(R930S_B) {
             // spawned ack 再呼び出しで「新着メッセージ」として畳み込まれた B → 返信。
             if text.contains("新着メッセージ") {
-                return Ok(text_response(R930S_BREPLY));
+                return Ok(text_response(&format!("{R930S_BREPLY}\nNO_REPLY")));
             }
             // 独立ターンは沈黙（#930 第2欠陥・二重処理）。
             return Ok(text_response("NO_REPLY"));
@@ -54,7 +54,7 @@ impl LlmProvider for SpawnedAckFoldMock {
                 serde_json::json!({ "command": "sleep", "args": ["8"] }),
             ));
         }
-        // spawned ack 再呼び出し（has_tool_role）: CONTINUE を使わず echo の spawn で turn を継続
+        // spawned ack 再呼び出し（has_tool_role）: 継続 を使わず echo の spawn で turn を継続
         // し、毎回 poll_new_messages を引かせて B の到着窓を作る（上限つき・暴走防止）。
         if has_tool_role(&request) && n < 25 {
             tokio::time::sleep(Duration::from_millis(150)).await;
@@ -63,7 +63,7 @@ impl LlmProvider for SpawnedAckFoldMock {
                 serde_json::json!({ "command": "echo", "args": [format!("keep-{n}")] }),
             ));
         }
-        Ok(text_response(FILLER))
+        Ok(text_response(&format!("{FILLER}\nNO_REPLY")))
     }
 }
 

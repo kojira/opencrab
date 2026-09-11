@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // #915 / §13.3.6 row 16【反復上限（max_iterations）到達 → 最後に配送した投稿に 1】: 常に
-// 「本文＋CONTINUE」を返し続けるターンは depth0 の上限（process.rs:1583・30）で打ち切られる。
+// 「本文＋継続」を返し続けるターンは depth0 の上限（process.rs:1583・30）で打ち切られる。
 // 打ち切られた最終生成の最後の投稿（＝最後に配送した say）にだけ 🏁 1・他 0・総数 1。
 // 現 tip は say 配送ごとに 🏁 を付けるため全 say に付く → **赤**。上限は既存ハードコードを実走
 // （dry-run なので高速・test-only の上限注入は作らない・統括裁定）。
@@ -25,8 +25,8 @@ impl LlmProvider for AlwaysContinueMock {
     }
     async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
         let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        // 常に「本文＋末尾 CONTINUE」で継続 → 上限まで回る。各本文は一意（buffer 順で最後を特定）。
-        Ok(text_response(&format!("{ML_PREFIX}{n:03}\nCONTINUE")))
+        // 常に「本文＋末尾 継続」で継続 → 上限まで回る。各本文は一意（buffer 順で最後を特定）。
+        Ok(text_response(&format!("{ML_PREFIX}{n:03}")))
     }
 }
 
@@ -148,7 +148,7 @@ impl LlmProvider for ShellSpawnResumeMock {
     async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
         // (2) dispatch 直後の継続（合成 "spawned" 結果＝tool role）→ 宣言 say（holding）でターンを閉じる。
         if has_tool_role(&request) {
-            return Ok(text_response(SP_DECL));
+            return Ok(text_response(&format!("{SP_DECL}\nNO_REPLY")));
         }
         // (1) 初回（tool role 無し・1 回だけ）→ 実 execute_shell（echo）を呼ぶ＝背景 subtask 化。
         if !self.emitted.swap(true, std::sync::atomic::Ordering::SeqCst) {
@@ -158,7 +158,7 @@ impl LlmProvider for ShellSpawnResumeMock {
             ));
         }
         // (3) subtask 決着後の resume ターン（tool role 無し・2 回目以降）→ 完了報告 say。
-        Ok(text_response(SP_REPORT))
+        Ok(text_response(&format!("{SP_REPORT}\nNO_REPLY")))
     }
 }
 
@@ -274,11 +274,11 @@ impl LlmProvider for ShellSleepCrossMock {
         let text = request_text(&request);
         // (D) チャンネル B の通常ターン: say を返す。
         if text.contains(M_XPLAIN) {
-            return Ok(text_response(XS_PLAIN));
+            return Ok(text_response(&format!("{XS_PLAIN}\nNO_REPLY")));
         }
         // (B) チャンネル A の execute_shell 後（tool_result 有り）: 宣言 say（holding）。
         if has_tool_role(&request) {
-            return Ok(text_response(XS_DECL));
+            return Ok(text_response(&format!("{XS_DECL}\nNO_REPLY")));
         }
         // (A) チャンネル A の初回: 実 execute_shell（sleep＝遅延決着）で背景 subtask を起こし保留。
         // emitted で 1 回だけ（resume ターンで再発行して無限ループしないため）。
@@ -289,7 +289,7 @@ impl LlmProvider for ShellSleepCrossMock {
                 serde_json::json!({ "command": "sleep", "args": ["8"] }),
             ));
         }
-        Ok(text_response("xsfiller"))
+        Ok(text_response("xsfiller\nNO_REPLY"))
     }
 }
 
@@ -402,7 +402,7 @@ impl LlmProvider for SingleSayThenIdleMock {
     }
     async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(text_response(TY_SAY))
+        Ok(text_response(&format!("{TY_SAY}\nNO_REPLY")))
     }
 }
 

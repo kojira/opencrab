@@ -2,7 +2,7 @@
 //!
 //! 稼働中の QC core（実 LLM）に対し、指定エージェントへ「ユーザー発話」を 1 件送って、その
 //! ターンの観測点をテンプレ §1（TEMPLATE-TDD-INSTRUCTION.md §1）の語彙で標準出力に表で出す。
-//! オーナー無しで発話クラス・CONTINUE・🤐(NO_REPLY) の実挙動を内部検証する。
+//! オーナー無しで発話クラス・継続・🤐(NO_REPLY) の実挙動を内部検証する。
 //!
 //! 2 経路を同じ表形式で出せる（`LIVE_MODE`）:
 //! - `gate`（既定）: 偽の V3 ゲートを gate UDS に外部ゲートとして bind し、DI 発話 op（reply/
@@ -16,7 +16,7 @@
 //! テンプレ §1 の観測境界に対応する出力列:
 //! REST `responses` 件数/本文（rest）／ ゲート配送回数・本文（gate: op と say）／
 //! memory_sessions 保存件数/本文 ／ LLM 呼び出し回数・イテレーション数 ／
-//! 残留マーカー（NO_REPLY/CONTINUE）／ ゲート反応（🤐/❌）。
+//! 残留マーカー（NO_REPLY/継続）／ ゲート反応（🤐/❌）。
 //!
 //! QC core を汚さない: gate 経路は専用 instance/binding を毎回新規採番・agent は env で指定する
 //! 専用テスト bot。のすたろう/くらぶの session には触れない。gate の admission は agent の discord
@@ -704,9 +704,9 @@ fn print_table(
         obs.llm_calls
     );
     println!(
-        "残留マーカー             : NO_REPLY={}  CONTINUE={}",
+        "残留マーカー             : NO_REPLY={}  継続={}",
         obs.residue("NO_REPLY"),
-        obs.residue("CONTINUE")
+        obs.residue("継続")
     );
     if mode == "gate" {
         println!(

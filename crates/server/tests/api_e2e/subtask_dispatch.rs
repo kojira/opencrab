@@ -48,7 +48,7 @@ async fn test_dispatched_subtask_carries_the_run_caller_to_settlement() {
                 .to_string(),
             },
         }]);
-        mock.push_text_response("バックグラウンドで実行を開始しました");
+        mock.push_text_response("バックグラウンドで実行を開始しました\nNO_REPLY");
 
         let capture = Arc::new(CaptureSink::default());
         let sink: Arc<dyn opencrab_actions::SubtaskCompletionSink> = capture.clone();
@@ -151,8 +151,8 @@ async fn test_run_counts_subtask_starts_from_both_launch_paths() {
             },
         }]);
         // 親ターンの締め。明示 spawn 経路は sub-engine も同じモックから引くので多めに積む。
-        mock.push_text_response("調べますね");
-        mock.push_text_response("調べますね");
+        mock.push_text_response("調べますね\nNO_REPLY");
+        mock.push_text_response("調べますね\nNO_REPLY");
 
         let starts = Arc::new(AtomicUsize::new(0));
         let sink: Arc<dyn opencrab_actions::SubtaskCompletionSink> = Arc::new(NoopSink);

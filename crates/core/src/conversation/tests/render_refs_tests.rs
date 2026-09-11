@@ -563,4 +563,45 @@ mod render_refs_tests {
         assert!(!out.contains("sub-xyz-1"), "生 UUID が残存: {out}");
         assert!(!out.contains("exit_reason"), "定型 field が残存: {out}");
     }
+
+    #[test]
+    fn explicit_turn_termination_renders_as_control_history() {
+        let log = SessionLogRow {
+            id: Some(3),
+            agent_id: "me".into(),
+            session_id: "s".into(),
+            log_type: "system".into(),
+            content: r#"{"type":"turn_terminated","marker":"NO_REPLY"}"#.into(),
+            speaker_id: None,
+            turn_number: None,
+            metadata_json: None,
+            created_at: None,
+        };
+
+        assert_eq!(
+            format_single_log_with_echo(&log, None, None),
+            "[turn_terminated: NO_REPLY]"
+        );
+    }
+
+    #[test]
+    fn exhausted_turn_renders_as_control_history() {
+        let log = SessionLogRow {
+            id: Some(4),
+            agent_id: "me".into(),
+            session_id: "s".into(),
+            log_type: "system".into(),
+            content: r#"{"type":"turn_exhausted","reason":"iteration_limit","iterations":11}"#
+                .into(),
+            speaker_id: None,
+            turn_number: None,
+            metadata_json: None,
+            created_at: None,
+        };
+
+        assert_eq!(
+            format_single_log_with_echo(&log, None, None),
+            "[turn_exhausted: iteration_limit, iterations=11]"
+        );
+    }
 }

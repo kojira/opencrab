@@ -66,7 +66,7 @@ async fn test_rest_message_dispatches_tool_as_background_subtask() {
             .to_string(),
         },
     }]);
-    mock.push_text_response("バックグラウンドで実行を開始しました");
+    mock.push_text_response("バックグラウンドで実行を開始しました\nNO_REPLY");
 
     let (status, resp) = send_request(
         app.clone(),
@@ -139,7 +139,7 @@ async fn test_rest_messages_unknown_agent_is_rejected_without_running() {
 async fn test_rest_messages_existing_agent_runs() {
     let (app, _db, mock, _state) = create_test_app_with_state();
     let (agent_id, app) = create_test_agent_named(app, "RestReal", "TestPersona").await;
-    mock.push_text_response("やあ");
+    mock.push_text_response("やあ\nNO_REPLY");
 
     let (status, resp) = send_request(
         app.clone(),
@@ -203,7 +203,7 @@ impl LlmProvider for SerializationProbe {
             model: "mock-model".to_string(),
             choices: vec![Choice {
                 index: 0,
-                message: Message::assistant("ok"),
+                message: Message::assistant("ok\nNO_REPLY"),
                 finish_reason: Some(FinishReason::Stop),
             }],
             usage: Usage::default(),
@@ -347,7 +347,7 @@ async fn test_rest_cancel_subtask_reaches_shared_registry() {
             arguments: serde_json::json!({"subtask_id": "st-rest-1"}).to_string(),
         },
     }]);
-    mock.push_text_response("止めました");
+    mock.push_text_response("止めました\nNO_REPLY");
 
     let (status, _resp) = send_request(
         app.clone(),

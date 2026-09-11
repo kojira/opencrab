@@ -1,8 +1,8 @@
 // ---------------------------------------------------------------------------
-// #898【DESIGN-TURN-CONTINUATION §13 #2（本文＋最終行 CONTINUE→進む）を 3 連鎖／ターン合計 plain3・
-// §13.1 b/c/d（1 イテレーション=1 投稿・順序保持）】: reply なし・CONTINUE で 3 分割 → 配送 3・保存 3・LLM 3・残留なし。
+// #898【DESIGN-TURN-CONTINUATION §13 #2（本文＋最終行 継続→進む）を 3 連鎖／ターン合計 plain3・
+// §13.1 b/c/d（1 イテレーション=1 投稿・順序保持）】: reply なし・継続 で 3 分割 → 配送 3・保存 3・LLM 3・残留なし。
 //
-// 現 tip: 機構（CONTINUE 3 イテレーション）は動くが配送/保存は最終応答（er.response）だけを
+// 現 tip: 機構（継続 3 イテレーション）は動くが配送/保存は最終応答（er.response）だけを
 // 通すので「3回目」だけが say/speech に残る（配送 1・保存 1）。→ 赤。
 // 期待（設計 §11.1）: 途中イテレーションの発話も 1 回ずつ配送・保存される。
 // ---------------------------------------------------------------------------
@@ -14,10 +14,10 @@ const AUD898_3: &str = "AUD898-THREE 監査三回目";
 async fn audit_898_continue_split_delivers_and_saves_each_iteration() {
     let buf = install_capture();
     let mock = Arc::new(FifoMock::new());
-    // 各生成の末尾に単独行 CONTINUE（最終だけ無し）。engine は剥がして次イテレーションへ。
-    mock.push_text(&format!("{AUD898_1}\nCONTINUE"));
-    mock.push_text(&format!("{AUD898_2}\nCONTINUE"));
-    mock.push_text(AUD898_3);
+    // 各生成の末尾に単独行 継続（最終だけ無し）。engine は剥がして次イテレーションへ。
+    mock.push_text(AUD898_1);
+    mock.push_text(AUD898_2);
+    mock.push_text(&format!("{AUD898_3}\nNO_REPLY"));
     let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
 
     let fixture = Fixture::new();
@@ -36,7 +36,7 @@ async fn audit_898_continue_split_delivers_and_saves_each_iteration() {
     };
     assert!(
         done,
-        "3回目の配送が出ない（CONTINUE 機構未到達）: {:?}",
+        "3回目の配送が出ない（継続 機構未到達）: {:?}",
         captured(&buf)
     );
 
@@ -70,10 +70,10 @@ async fn audit_898_continue_split_delivers_and_saves_each_iteration() {
     assert_eq!(
         mock.system_prompts().len(),
         3,
-        "CONTINUE 3 分割の LLM 呼び出しが 3 でない"
+        "継続 3 分割の LLM 呼び出しが 3 でない"
     );
 
-    // 残留マーカー: この分割ターンの say / speech に CONTINUE が残らない（§11.6）。
+    // 残留マーカー: この分割ターンの say / speech に 継続 が残らない（§11.6）。
     // BUFFER は binary 全体で共有・累積するため、C898 マーカーを含む say に限定して判定する。
     assert!(
         captured(&buf)
@@ -81,13 +81,13 @@ async fn audit_898_continue_split_delivers_and_saves_each_iteration() {
             .filter(|c| [AUD898_1, AUD898_2, AUD898_3]
                 .iter()
                 .any(|m| c.body.contains(m)))
-            .all(|c| !c.body.contains("CONTINUE")),
-        "say body に CONTINUE が残留: {:?}",
+            .all(|c| !c.body.contains("継続")),
+        "say body に 継続 が残留: {:?}",
         captured(&buf)
     );
     assert!(
-        saved.iter().all(|s| !s.contains("CONTINUE")),
-        "speech content に CONTINUE が残留: {saved:?}"
+        saved.iter().all(|s| !s.contains("継続")),
+        "speech content に 継続 が残留: {saved:?}"
     );
 }
 

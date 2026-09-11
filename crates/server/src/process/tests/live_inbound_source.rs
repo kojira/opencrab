@@ -31,6 +31,32 @@ fn insert_user_speech(db: &opencrab_db::Db, text: &str) {
     );
 }
 
+fn insert_subtask_completion(db: &opencrab_db::Db, result: &str) {
+    let conn = db.lock().unwrap();
+    opencrab_db::queries::insert_session_log(
+        &conn,
+        &opencrab_db::queries::SessionLogRow {
+            id: None,
+            agent_id: AGENT.to_string(),
+            session_id: SESSION.to_string(),
+            log_type: "system".to_string(),
+            content: serde_json::json!({
+                "type": "subtask_completed",
+                "subtask_id": "sub-live-1",
+                "session_id": "subtask-sub-live-1",
+                "exit_reason": "completed",
+                "result": result,
+            })
+            .to_string(),
+            speaker_id: None,
+            turn_number: None,
+            metadata_json: None,
+            created_at: None,
+        },
+    )
+    .unwrap();
+}
+
 fn insert_agent_speech(db: &opencrab_db::Db, text: &str) {
     let conn = db.lock().unwrap();
     opencrab_db::queries::insert_session_log(
@@ -72,6 +98,24 @@ fn speech_recorded_during_the_turn_is_delivered() {
         !out[0].contains("調べておいて"),
         "履歴に載っている発言は再送しない: {}",
         out[0]
+    );
+}
+
+/// ターン開始後に保存されたsubtask completionも、次のLLM requestへ一度だけ注入する。
+#[test]
+fn subtask_completion_recorded_during_the_turn_is_delivered_once() {
+    let db = opencrab_db::Db::memory().unwrap();
+    let source = SessionLiveInbound::new(db.clone(), SESSION, AGENT);
+
+    insert_subtask_completion(&db, "計算結果は391、検算済み");
+
+    let out = source.poll_new_messages();
+    assert_eq!(out.len(), 1, "completion 1件だけ: {out:?}");
+    assert!(out[0].contains("subtask 完了"), "{}", out[0]);
+    assert!(out[0].contains("計算結果は391"), "{}", out[0]);
+    assert!(
+        source.poll_new_messages().is_empty(),
+        "同じcompletionを二度注入しない"
     );
 }
 

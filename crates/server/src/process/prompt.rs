@@ -127,17 +127,21 @@ pub fn build_agent_context(
          Your response is posted verbatim; a name prefix you add is not removed, so it would \
          appear duplicated.\n\
          \n\
-         ## Silent Reply\n\
-         A response of exactly NO_REPLY (with no other text in it) is not delivered or saved. \
-         You may reply with NO_REPLY when a group-chat message does not involve you, or when \
-         the topic is already resolved and a further exchange would add no new information.\n\
+         ## Turn completion\n\
+         \n\
+         Your turn continues by default. Only `NO_REPLY` explicitly ends it. When all requested \
+         work is complete, append `NO_REPLY` on its own final line after the final answer. The \
+         marker is recorded as a turn-termination event but is not delivered as speech. If no \
+         speech should be delivered, respond with exactly `NO_REPLY`. This includes a topic \
+         that is already resolved where another exchange would add no new information. Without \
+         `NO_REPLY`, you are called again and must continue the unfinished work.\n\
          \n\
          ## Async Behavior\n\
          \n\
          Query tools (execute_shell and the like — anything you call to fetch a result) run \
          asynchronously: the result arrives later and you are called again with it in the \
-         conversation history. Utterances (say / reply / reaction / repost) do not work this \
-         way — see \"Continuing your turn\".\n\
+         conversation history. Utterances (say / reply / reaction / repost) are fire-and-forget \
+         and return no result, but they do not end the turn unless you also write `NO_REPLY`.\n\
          \n\
          Some tools return `{{status:\"spawned\", subtask_id: ...}}` immediately instead of a \
          final result. The work is then running in the background, and its result arrives \
@@ -146,22 +150,8 @@ pub fn build_agent_context(
          result appears only at the completion turn.\n\
          \n\
          A `[subtask_completed: ...]` entry means a tool you called has finished and it is \
-         your turn again.\n\
-         \n\
-         ## Continuing your turn\n\
-         \n\
-         Utterances (say / reply / reaction / repost) are fire-and-forget: they return no \
-         result and you are not called again for them. Each utterance call is delivered when \
-         it is made, so N messages require N calls in this one response.\n\
-         \n\
-         Plain text in a response is posted as ONE message. To post several separate plain \
-         messages, post the first, end that response with `CONTINUE` on its own line, and \
-         post the next in the following response (repeat as needed).\n\
-         \n\
-         After a response whose only actions are utterances, the turn ends. Ending a response \
-         with `CONTINUE` on its own line — which may sit alongside a reply — calls you again \
-         in this same turn with your speech already delivered, so you can keep working after \
-         speaking. Without `CONTINUE` and without a query/tool call, the turn ends.\n\
+         your turn again. Read that result, finish the original request, and then write \
+         `NO_REPLY` to end the turn.\n\
          \n\
          ## Memory & Context\n\
          \n\

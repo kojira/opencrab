@@ -23,12 +23,12 @@ pub const EXTGATE_SESSION_PREFIX: &str = "extgate-";
 /// 発話 id）を選ぶ。通常ターン（`inbound::enqueue_turn`）と resume ターン（`resume_v3_turn`）で
 /// 規則は共通なので 1 実装に集約する（単一実装）。**送る＝🏁 を付ける／`None`＝付けない**。
 ///
-/// - `engine_completion`: `(最終生成の最後の投稿系 utterance-op の call_id, stopped_by_limit,
-///   最終生成が CONTINUE 本文を配送したか)`。engine を回さなかったターンは `None`。
+/// - `engine_completion`: `(最終生成の最後の投稿系utterance-opのcall_id, stopped_by_limit,
+///   最終生成が途中本文を配送したか)`。engineを回さなかったターンは`None`。
 /// - `started_subtask` / `agent_has_running`: 進行中があれば付けない（idle でない・§13.3.1 案E）。
 /// - `final_say_id`: 最終応答が say を配送したときのその delivery_id。
-/// - `last_continuation_say`: 上限打ち切りで最終生成が CONTINUE 本文を配送したとき、その say の
-///   delivery_id（呼び出し側が Mutex から解決して渡す）。
+/// - `last_continuation_say`: 上限打ち切りで最終生成の途中本文を配送したとき、そのsayの
+///   delivery_id。field名は互換のため維持する。
 pub(crate) fn select_completed_target(
     engine_completion: Option<(Option<String>, bool, bool)>,
     started_subtask: bool,
@@ -122,6 +122,15 @@ impl<R: AgentRuntime> SubtaskCompletionSink for ExtgateCompletionSink<R> {
     }
 
     fn deliver_continuation(&self, ev: SubtaskSettled) {
+        let locks = self.runtime.session_locks();
+        if locks.holds_lock_entry(&self.session_id) {
+            tracing::debug!(
+                session_id = %self.session_id,
+                subtask_id = %ev.subtask_id,
+                "subtask completion left for the active parent turn"
+            );
+            return;
+        }
         let sink = self.clone();
         tokio::spawn(async move {
             resume_v3_turn(sink, ev).await;
@@ -363,6 +372,30 @@ mod tests {
     use crate::ids::session_id_for_binding;
     use opencrab_actions::{CallerIdentity, NoopCompletionSink, SubtaskRegistries};
     use std::sync::Arc;
+
+    #[test]
+    fn exhausted_turn_reacts_to_the_last_post_instead_of_posting_a_message() {
+        assert_eq!(
+            select_completed_target(
+                Some((None, true, true)),
+                false,
+                false,
+                None,
+                Some("last-say".to_string()),
+            ),
+            Some("last-say".to_string())
+        );
+        assert_eq!(
+            select_completed_target(
+                Some((Some("last-reply".to_string()), true, false)),
+                false,
+                false,
+                None,
+                None,
+            ),
+            Some("last-reply".to_string())
+        );
+    }
 
     #[test]
     fn v3_run_request_always_attaches_dispatch() {

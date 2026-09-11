@@ -216,6 +216,25 @@ pub fn format_single_log_with_echo(
                     if kind == "subtask_completed" {
                         return format_subtask_completed(&value, &log.content, &ts, refs);
                     }
+                    if kind == "turn_terminated" {
+                        let marker = value
+                            .get("marker")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("NO_REPLY");
+                        return format!("[turn_terminated: {marker}]");
+                    }
+                    if kind == "turn_exhausted" {
+                        let reason = value
+                            .get("reason")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        let iterations = value
+                            .get("iterations")
+                            .and_then(|v| v.as_u64())
+                            .map(|n| format!(", iterations={n}"))
+                            .unwrap_or_default();
+                        return format!("[turn_exhausted: {reason}{iterations}]");
+                    }
                     let content = serde_json::to_string_pretty(&value)
                         .unwrap_or_else(|_| log.content.clone());
                     return format!("[system: {}]{}:\n{}", kind, ts, content);

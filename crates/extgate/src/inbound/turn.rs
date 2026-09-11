@@ -267,10 +267,8 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                         })
                                     })
                                 })
-                                // #898 §12.2/§13.1 j: 末尾 CONTINUE の途中発話をループ中に配送・保存する。
-                                // 最終応答と同じ経路（send_text = say 配送＋speech 保存）を通し、Say モード
-                                // のみ配送（ToolDriven は say 抑止＝reply DI operation が配送を担う）。
-                                // 配送失敗（Err）は継続を止めてターンを失敗させる（失敗を隠さない）。
+                                // 明示終了前の途中発話をループ中に配送・保存する。最終応答と同じ
+                                // send_text経路を通し、Sayモードのみ配送する。配送失敗はターンを失敗させる。
                                 .with_on_continuation_speech({
                                     let hs = Arc::clone(&hook_state);
                                     let hi = hook_instance.clone();

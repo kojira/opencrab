@@ -78,10 +78,9 @@ pub struct RunRequest {
     pub trigger_message_id: Option<String>,
     /// 応答テキスト確定時の即時コールバック（Discord への先行送信等）。
     pub on_response_text: Option<Arc<dyn Fn(String) + Send + Sync>>,
-    /// #898: 末尾 CONTINUE で継続する text-only イテレーションの途中発話を、次イテレーション前に
-    /// **ループ中で配送・保存する**非同期フック（§12.2/§13.1 j）。REST は responses への追加、
-    /// extgate V3 は途中発話配送、intake は保存を行い、配送失敗（Err）は継続を止めてターンを
-    /// 失敗させる。`on_response_text` は最終・text+tool でも発火するため区別できず流用不可。
+    /// 明示終了前の text-only iteration の途中発話を、次iteration前に配送・保存する
+    /// 非同期フック。RESTはresponsesへの追加、extgate V3は途中発話配送、intakeは保存を行う。
+    /// 配送失敗（Err）はターンを失敗させる。
     pub on_continuation_speech: Option<ContinuationSpeechHook>,
     /// #964: 次の LLM request に新しく含める said の origin を、`llm.chat` の直前に read state
     /// （👀）として通知するフック。extgate V3 だけが渡す。None なら通知しない。

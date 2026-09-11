@@ -4,7 +4,7 @@
 
     #[tokio::test]
     async fn test_direct_response() {
-        let llm = MockLlm::new(vec![text_response("Hello, world!")]);
+        let llm = MockLlm::new(vec![final_text_response("Hello, world!")]);
         let executor = MockExecutor::new();
         let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
 
@@ -30,7 +30,7 @@
                 _request: ChatRequest,
             ) -> anyhow::Result<opencrab_llm_types::LlmExchange> {
                 Ok(opencrab_llm_types::LlmExchange {
-                    response: text_response("done"),
+                    response: final_text_response("done"),
                     provider_tool_history: opencrab_llm_types::ProviderToolHistory {
                         state: opencrab_llm_types::ProviderToolHistoryState::Captured,
                         provider: Some("chatgpt".to_string()),
@@ -95,7 +95,7 @@
         impl LlmClient for CapturingLlm {
             async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
                 self.captured.lock().unwrap().push(request.messages);
-                Ok(text_response("typed response"))
+                Ok(final_text_response("typed response"))
             }
         }
 
@@ -302,7 +302,7 @@
     async fn test_empty_content_with_tool_call_is_not_empty() {
         let llm = MockLlm::new(vec![
             tool_call_response(vec![tc("c1", "test_tool", serde_json::json!({}))]),
-            text_response("done"),
+            final_text_response("done"),
         ]);
         let executor = MockExecutor::new().add_result(
             "test_tool",
@@ -324,7 +324,7 @@
     /// #676: finish_reason=Stop の正常応答は従来どおり最終回答として返る（回帰防止）。
     #[tokio::test]
     async fn test_stop_finish_reason_is_returned_normally() {
-        let llm = MockLlm::new(vec![ChatResponse::text("完了しました")]);
+        let llm = MockLlm::new(vec![ChatResponse::text("完了しました\nNO_REPLY")]);
         let engine = SkillEngine::new(Box::new(llm), Box::new(MockExecutor::new()), 10);
         let result = engine.run("system", "hi", "test-model").await.unwrap();
         assert_eq!(result.response, "完了しました");
@@ -375,7 +375,7 @@
     async fn test_single_tool_call() {
         let llm = MockLlm::new(vec![
             tool_call_response(vec![tc("tc-1", "test_tool", serde_json::json!({}))]),
-            text_response("Done with tool call"),
+            final_text_response("Done with tool call"),
         ]);
         let executor = MockExecutor::new().add_result(
             "test_tool",
@@ -426,7 +426,7 @@
                 tc("tc-1", "test_tool", serde_json::json!({})),
                 tc("tc-2", "test_tool", serde_json::json!({})),
             ]),
-            text_response("Both tools done"),
+            final_text_response("Both tools done"),
         ]);
         let executor = MockExecutor::new().add_result(
             "test_tool",
@@ -455,7 +455,7 @@
                 "test_tool",
                 serde_json::json!({"query": "test"}),
             )]),
-            text_response("Received tool feedback"),
+            final_text_response("Received tool feedback"),
         ]);
         let executor = MockExecutor::new().add_result(
             "test_tool",
@@ -507,7 +507,7 @@
             responses: Mutex::new(vec![
                 // First call uses default model; after tool call, model override kicks in.
                 tool_call_response(vec![tc("tc-1", "test_tool", serde_json::json!({}))]),
-                text_response("Done after model switch"),
+                final_text_response("Done after model switch"),
             ]),
             captured_models: captured.clone(),
         };
@@ -554,7 +554,7 @@
                 Some("調べてみます"),
                 vec![tc("tc-1", "test_tool", serde_json::json!({}))],
             ),
-            resp(Some("天気は20度です"), vec![]),
+            final_text_response("天気は20度です"),
         ]);
         let executor = MockExecutor::new().add_result(
             "test_tool",
@@ -614,7 +614,7 @@
                 // First response: tool call
                 tool_call_response(vec![tc("tc-1", "test_tool", serde_json::json!({}))]),
                 // Second response: final text
-                text_response("All done"),
+                final_text_response("All done"),
             ]),
             captured_messages: captured.clone(),
         };
@@ -662,7 +662,7 @@
     async fn test_on_response_text_fires_for_direct_response() {
         use std::sync::{Arc, Mutex};
 
-        let llm = MockLlm::new(vec![text_response("直接答えます")]);
+        let llm = MockLlm::new(vec![final_text_response("直接答えます")]);
         let executor = MockExecutor::new();
 
         let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
@@ -690,7 +690,7 @@
 
         let llm = MockLlm::new(vec![
             tool_call_response(vec![tc("tc-1", "test_tool", serde_json::json!({}))]),
-            text_response("done"),
+            final_text_response("done"),
         ]);
         let executor = MockExecutor::new().add_result(
             "test_tool",

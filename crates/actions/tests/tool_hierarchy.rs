@@ -96,7 +96,7 @@ fn text_response(text: &str) -> ChatResponse {
             index: 0,
             message: Message {
                 role: Role::Assistant,
-                content: Some(MessageContent::Text(text.to_string())),
+                content: Some(MessageContent::Text(format!("{text}\nNO_REPLY"))),
                 name: None,
                 function_call: None,
                 tool_calls: None,

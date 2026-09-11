@@ -19,15 +19,15 @@ fn second_request_not_blocked_during_long_op() {
     let mock = spawn_mock(|req, gate| {
         // (E) subtask 決着後の resume → 完了報告 say(3)。B_SUBTASK_RESULT を最優先で見る。
         if req.contains(B_SUBTASK_RESULT) {
-            return text_resp(B_COMPLETION);
+            return finished_text_resp(B_COMPLETION);
         }
         // (B) 親ターン#1 の spawn_subtask 実行後（tool 結果あり）→ 即応 ack say(1)。
         if has_tool_result(req) {
-            return text_resp(B_ACK);
+            return finished_text_resp(B_ACK);
         }
         // (D) 第2依頼 → 即応 say(2)。
         if req.contains(M_SECOND) {
-            return text_resp(B_SECOND);
+            return finished_text_resp(B_SECOND);
         }
         // (A) 親ターン#1 初回 → spawn_subtask で背景サブタスクを detach。
         if req.contains(M_FIRST) {
@@ -42,7 +42,7 @@ fn second_request_not_blocked_during_long_op() {
         // (C) 背景サブタスク sub-run → release まで保持（＝長処理の走行中）。
         if req.contains(M_SUBTASK) {
             wait_release(gate);
-            return text_resp(B_SUBTASK_RESULT);
+            return finished_text_resp(B_SUBTASK_RESULT);
         }
         // その他（create の hello 等）は沈黙。
         text_resp("NO_REPLY")

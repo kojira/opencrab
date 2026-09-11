@@ -186,9 +186,8 @@ async fn process_agent_inbox(state: &AppState, stored_agent_id: &str) {
         "intake",
         CallerIdentity::Owner,
     );
-    // #898 §13.1 e: 末尾 CONTINUE の途中発話も、次イテレーション前に intake セッションへ speech
-    // として保存する（intake は外部配送しないので保存のみ・§12.6 の NO_REPLY 非保存は継続分岐へ
-    // 入らないので対象外）。最終応答は下で保存する（従来どおり）。
+    // 明示終了前の途中発話を、次iteration前にintakeセッションへspeechとして保存する。
+    // intakeは外部配送しないため保存のみ行い、最終応答は下で保存する。
     let req = {
         let hook_db = state.db.clone();
         let hook_agent = resolved_agent_id.clone();
@@ -222,14 +221,9 @@ async fn process_agent_inbox(state: &AppState, stored_agent_id: &str) {
             if let Ok(conn) = state.db.lock() {
                 // #899 §12.6: 保存前に NO_REPLY 終端解釈（単一実装）を通す。沈黙は speech を
                 // 残さない（処理済みマークは沈黙でも刻む＝イベントは消化済み）。
-                if let Some(body) = opencrab_actions::visible_speech_after_markers(
-                    &result.response,
-                    opencrab_actions::DeliveryContext {
-                        session_id: &session_id,
-                        agent_id: &resolved_agent_id,
-                        origin: "intake",
-                    },
-                ) {
+                if let Some(body) =
+                    (!result.response.trim().is_empty()).then(|| result.response.clone())
+                {
                     let log = SessionLogRow {
                         id: None,
                         agent_id: resolved_agent_id.clone(),
@@ -464,11 +458,7 @@ mod tests {
         );
     }
 
-    // ===== #898 §13.1 e: intake 起点のターンでも CONTINUE 途中発話が保存される =====
-    // DESIGN-TURN-CONTINUATION §13.1 e「scheduler / intake / heartbeat 起点のターン（ユーザー
-    // 発話なし）… 表の期待は同じ。CONTINUE も有効」。plain3（本文＋CONTINUE ×2 → 本文）で
-    // intake セッションに speech 3 件・LLM 3 回（intake は外部配送しないので観測は保存件数と
-    // LLM 回数）。現状は最終応答 1 件しか保存されない。
+    // intake 起点でも、明示終端までの各途中発話を順に保存する。
 
     struct E13Mock {
         responses:
@@ -626,9 +616,9 @@ mod tests {
     #[tokio::test]
     async fn intake_continue_saves_each_intermediate_speech() {
         let mock = std::sync::Arc::new(E13Mock::new(&[
-            "E13-1回目。まず一つ⚡\nCONTINUE",
-            "E13-2回目。次いこう⚡\nCONTINUE",
-            "E13-3回目。これで最後⚡",
+            "E13-1回目。まず一つ⚡",
+            "E13-2回目。次いこう⚡",
+            "E13-3回目。これで最後⚡\nNO_REPLY",
         ]));
         let state = intake_test_state(mock.clone());
 
@@ -667,9 +657,9 @@ mod tests {
             "intake 起点でも途中発話が保存されるはず（現状は最終のみ）: {speeches:?}"
         );
         assert!(
-            speeches.iter().all(|s| !s.contains("CONTINUE")),
-            "保存された speech に CONTINUE 残留: {speeches:?}"
+            speeches.iter().all(|s| !s.contains("NO_REPLY")),
+            "保存された speech に NO_REPLY が混入: {speeches:?}"
         );
-        assert_eq!(mock.calls(), 3, "末尾 CONTINUE で LLM が 3 回呼ばれるはず");
+        assert_eq!(mock.calls(), 3, "NO_REPLY まで LLM が 3 回呼ばれるはず");
     }
 }

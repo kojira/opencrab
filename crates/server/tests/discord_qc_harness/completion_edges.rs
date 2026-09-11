@@ -1,10 +1,10 @@
 // ---------------------------------------------------------------------------
-// #915 / §13.2・DIRECTION-LOG 446【say→CONTINUE→NO_REPLY で終わるターン】: 最終生成が NO_REPLY
-// （投稿なし）なので 🏁 は 0。途中の say（CONTINUE で進んだ投稿）にも付けない。発話があった
-// ターンなので 🤐 も 0。ルール: 🏁 は「ツール呼び出しも CONTINUE も含まない最終生成の自分の
+// #915 / §13.2・DIRECTION-LOG 446【say→継続→NO_REPLY で終わるターン】: 最終生成が NO_REPLY
+// （投稿なし）なので 🏁 は 0。途中の say（継続 で進んだ投稿）にも付けない。発話があった
+// ターンなので 🤐 も 0。ルール: 🏁 は「ツール呼び出しも 継続 も含まない最終生成の自分の
 // 投稿」にだけ付く。最終生成に投稿が無ければ付けない。
 // ---------------------------------------------------------------------------
-// 本文中に "NO_REPLY"/"CONTINUE" の部分文字列を含めない（含めるとサニタイザに途中で切られ、
+// 本文中に "NO_REPLY"/"継続" の部分文字列を含めない（含めるとサニタイザに途中で切られ、
 // 継続ではなく本文＋末尾 NO_REPLY（row 12）扱いになる）。
 
 const SCN_SAY: &str = "scncont-途中で続ける本文だよ";
@@ -27,8 +27,8 @@ impl LlmProvider for SayContinueThenNoReplyMock {
     async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
         let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(match n {
-            // 1 生成目: 本文＋末尾 CONTINUE（途中の投稿・継続）。
-            0 => text_response(&format!("{SCN_SAY}\nCONTINUE")),
+            // 1 生成目: 本文＋末尾 継続（途中の投稿・継続）。
+            0 => text_response(SCN_SAY),
             // 2 生成目: NO_REPLY（投稿なしで終端）。
             _ => text_response("NO_REPLY"),
         })
@@ -110,20 +110,20 @@ async fn scenario_915_say_continue_then_no_reply_gets_no_flag() {
     assert_eq!(
         muted_on_origin,
         0,
-        "🏁 発話ありターンに 🤐 が誤付与（say→CONTINUE→NO_REPLY は 🤐 0）: {:?}",
+        "🏁 発話ありターンに 🤐 が誤付与（say→継続→NO_REPLY は 🤐 0）: {:?}",
         captured(&buf)
     );
 
     assert_eq!(
         mock.calls.load(Ordering::SeqCst),
         2,
-        "say→CONTINUE→NO_REPLY の LLM 呼び出しが 2 でない"
+        "say→継続→NO_REPLY の LLM 呼び出しが 2 でない"
     );
 }
 
 // ---------------------------------------------------------------------------
-// #915 / DIRECTION-LOG 446【reply→CONTINUE→reaction のみで終わるターン】: 最終生成が reaction のみ
-// （reaction は「投稿」ではない）なので 🏁 は 0。途中の reply（CONTINUE で進んだ投稿）にも付けない。
+// #915 / DIRECTION-LOG 446【reply→継続→reaction のみで終わるターン】: 最終生成が reaction のみ
+// （reaction は「投稿」ではない）なので 🏁 は 0。途中の reply（継続 で進んだ投稿）にも付けない。
 // reply/reaction は invoke 経路で say consumer を通らないため現 tip でも 0（回帰ガード）。
 // ---------------------------------------------------------------------------
 const RR_REPLY: &str = "rrreply-途中の返信（最終は reaction のみ）";
@@ -147,13 +147,19 @@ impl LlmProvider for ReplyContinueThenReactionMock {
     async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
         let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(match n {
-            // 1 生成目: reply（本文 RR_REPLY）＋末尾 CONTINUE（本文は空＝継続）→ 進む。
-            0 => reply_with_content_response(RR_REPLY, "CONTINUE"),
-            // 2 生成目: reaction のみ（投稿なしで終端）。
-            _ => tool_call_response(
-                "reaction",
-                serde_json::json!({"event": "e1", "emoji": RR_EMOJI}),
-            ),
+            // 1 生成目: reply（本文 RR_REPLY）＋末尾 継続（本文は空＝継続）→ 進む。
+            0 => reply_with_content_response(RR_REPLY, ""),
+            // 2 生成目: reaction のみ＋明示終端。
+            _ => {
+                let mut response = tool_call_response(
+                    "reaction",
+                    serde_json::json!({"event": "e1", "emoji": RR_EMOJI}),
+                );
+                response.choices[0].message.content =
+                    Some(MessageContent::Text("NO_REPLY".to_string()));
+                response
+            }
+
         })
     }
 }
@@ -222,7 +228,7 @@ async fn scenario_915_reply_continue_then_reaction_only_gets_no_flag() {
     assert_eq!(
         mock.calls.load(Ordering::SeqCst),
         2,
-        "reply→CONTINUE→reaction の LLM 呼び出しが 2 でない"
+        "reply→継続→reaction の LLM 呼び出しが 2 でない"
     );
 }
 
@@ -422,7 +428,7 @@ async fn scenario_915_reply2_then_no_reply_flag_on_last_reply() {
 // #915 / §13.3.6 row 12【本文 + 末尾 NO_REPLY → 最終 say に 1】: 本文は配送され（NO_REPLY 以降は破棄）、
 // 最終生成の投稿＝その say。🏁 はその say に 1。現 tip も say に付く（回帰ガード）。
 // ---------------------------------------------------------------------------
-// 本文中に "NO_REPLY"/"CONTINUE" の部分文字列を含めない（サニタイザに途中で切られないため）。
+// 本文中に "NO_REPLY"/"継続" の部分文字列を含めない（サニタイザに途中で切られないため）。
 const BNR_SAY: &str = "bnrsay-末尾マーカーで黙る本文だよ";
 
 struct BodyThenTrailingNoReplyMock;
@@ -535,7 +541,8 @@ impl LlmProvider for Reply2PlusBodyMock {
             ("reply", serde_json::json!({"event": "e1", "text": R7_1})),
             ("reply", serde_json::json!({"event": "e1", "text": R7_2})),
         ]);
-        resp.choices[0].message.content = Some(MessageContent::Text(R7_SAY.to_string()));
+        resp.choices[0].message.content =
+            Some(MessageContent::Text(format!("{R7_SAY}\nNO_REPLY")));
         Ok(resp)
     }
 }

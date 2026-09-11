@@ -10,7 +10,7 @@ fn unauthorized_shell_command_is_rejected() {
     // 初回は execute_shell(rm) を tool_call。拒否結果の再注入後は短い確認テキストで締める。
     let mock = spawn_mock(|req, _gate| {
         if has_tool_result(req) {
-            return text_resp("rejected-ok 拒否を確認しました");
+            return finished_text_resp("rejected-ok 拒否を確認しました");
         }
         if req.contains(M_SHELL) {
             return tool_call_resp(

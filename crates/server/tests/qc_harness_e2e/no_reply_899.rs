@@ -22,18 +22,18 @@ async fn scenario_no_reply_only_is_not_persisted_extgate_899() {
 
     let buf = install_capture();
     let mock = Arc::new(FifoMock::new());
-    // FIFO: (a) 単独 NO_REPLY → (b) 本文+NO_REPLY → (d) NO_REPLY+CONTINUE → (c) 対照兼バリア。
+    // FIFO: (a) 単独NO_REPLY → (b) 本文+NO_REPLY → (d) 終端後の破棄対象 → (c) 対照兼バリア。
     mock.push_text("NO_REPLY");
     mock.push_text(&format!("{BODY_B}\nNO_REPLY"));
-    mock.push_text("NO_REPLY\nCONTINUE");
-    mock.push_text(CTRL_C);
+    mock.push_text("NO_REPLY\n破棄対象");
+    mock.push_text(&format!("{CTRL_C}\nNO_REPLY"));
     let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
 
     let fixture = Fixture::new();
     let (_client, _address, session_id) = wire_instance(&core, &fixture, nostr_config(None)).await;
 
     // 4 メンションを順に投入（同一 binding＝同一セッション・consumer が FIFO 直列化）。
-    // (d) は §13 #13（NO_REPLY+CONTINUE → NO_REPLY 優先で沈黙）。
+    // (d) は終端後の文字列を破棄して沈黙する。
     fixture.append_line(&mention_event(&"a1".repeat(32), "NR899-mention-a"));
     fixture.append_line(&mention_event(&"b2".repeat(32), "NR899-mention-b"));
     fixture.append_line(&mention_event(&"d4".repeat(32), "NR899-mention-d"));

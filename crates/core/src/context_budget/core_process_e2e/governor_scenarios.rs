@@ -320,7 +320,7 @@ fn text_resp(text: &str) -> ChatResponse {
             index: 0,
             message: Message {
                 role: Role::Assistant,
-                content: Some(MessageContent::Text(text.into())),
+                content: Some(MessageContent::Text(format!("{text}\nNO_REPLY"))),
                 name: None,
                 function_call: None,
                 tool_calls: None,

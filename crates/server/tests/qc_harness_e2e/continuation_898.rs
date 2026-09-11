@@ -1,8 +1,8 @@
-// ==================== (#898) CONTINUE 途中イテレーションの発話配送・保存 ====================
+// ==================== (#898) 継続 途中イテレーションの発話配送・保存 ====================
 //
-// DESIGN-TURN-CONTINUATION §11.1: 末尾 CONTINUE の生成は「残りの content を通常どおり配送・
-// 保存 → 次イテレーション」。reply を使わない純テキストを 3 分割（1回目 CONTINUE / 2回目
-// CONTINUE / 3回目）した場合、途中イテレーション（1回目・2回目）の発話も say として配送され、
+// DESIGN-TURN-CONTINUATION §11.1: 末尾 継続 の生成は「残りの content を通常どおり配送・
+// 保存 → 次イテレーション」。reply を使わない純テキストを 3 分割（1回目 継続 / 2回目
+// 継続 / 3回目）した場合、途中イテレーション（1回目・2回目）の発話も say として配送され、
 // memory_sessions に speech として保存されること。#895 は engine 側の on_response_text 発火を
 // モックで固定したが extgate V3 の実配線（apply_delivery_effect は最終 EngineResult.response
 // のみ配送）を通しておらず、途中発話が配送も保存もされずに落ちていた（#898 QC 実弾で確認）。
@@ -16,10 +16,10 @@ const C898_3: &str = "C898-3回目。これで最後";
 async fn scenario_continue_intermediate_speech_delivered_and_saved() {
     let buf = install_capture();
     let mock = Arc::new(FifoMock::new());
-    // reply を使わない純テキスト 3 分割。末尾 CONTINUE で継続、3 回目は継続せず終了。
-    mock.push_text(&format!("{C898_1}\u{26a1}\nCONTINUE"));
-    mock.push_text(&format!("{C898_2}\u{26a1}\nCONTINUE"));
-    mock.push_text(&format!("{C898_3}\u{26a1}"));
+    // reply を使わない純テキスト 3 分割。末尾 継続 で継続、3 回目は継続せず終了。
+    mock.push_text(&format!("{C898_1}\u{26a1}"));
+    mock.push_text(&format!("{C898_2}\u{26a1}"));
+    mock.push_text(&format!("{C898_3}\u{26a1}\nNO_REPLY"));
     let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
 
     let fixture = Fixture::new();
@@ -43,28 +43,28 @@ async fn scenario_continue_intermediate_speech_delivered_and_saved() {
     };
     assert!(
         delivered,
-        "CONTINUE 途中イテレーションの発話が say 配送されない: {:?}",
+        "継続 途中イテレーションの発話が say 配送されない: {:?}",
         captured(&buf)
     );
 
-    // (ii) 配送された say の本文に CONTINUE マーカーが残らない（§11.6）。
+    // (ii) 配送された say の本文に 継続 マーカーが残らない（§11.6）。
     let c898_says: Vec<CapturedSay> = captured(&buf)
         .into_iter()
         .filter(|c| c.body.contains("C898-"))
         .collect();
     assert!(
-        c898_says.iter().all(|c| !c.body.contains("CONTINUE")),
-        "say 本文に CONTINUE が残留した: {c898_says:?}"
+        c898_says.iter().all(|c| !c.body.contains("継続")),
+        "say 本文に 継続 が残留した: {c898_says:?}"
     );
 
-    // (iii) LLM は 3 回呼ばれる（末尾 CONTINUE が 2 回の追加イテレーションを起こす）。
+    // (iii) LLM は 3 回呼ばれる（末尾 継続 が 2 回の追加イテレーションを起こす）。
     assert_eq!(
         mock.system_prompts().len(),
         3,
-        "末尾 CONTINUE で LLM が 3 回呼ばれていない"
+        "末尾 継続 で LLM が 3 回呼ばれていない"
     );
 
-    // (iv) memory_sessions に 3 件の speech が保存され、いずれにも CONTINUE が残らない。
+    // (iv) memory_sessions に 3 件の speech が保存され、いずれにも 継続 が残らない。
     let speeches: Vec<String> = {
         let conn = core.extgate.db.lock().unwrap();
         opencrab_db::queries::list_session_logs_by_session(&conn, &session_id)
@@ -80,8 +80,8 @@ async fn scenario_continue_intermediate_speech_delivered_and_saved() {
         "途中イテレーションの発話が memory_sessions に保存されていない: {speeches:?}"
     );
     assert!(
-        speeches.iter().all(|s| !s.contains("CONTINUE")),
-        "保存された speech に CONTINUE が残留した: {speeches:?}"
+        speeches.iter().all(|s| !s.contains("継続")),
+        "保存された speech に 継続 が残留した: {speeches:?}"
     );
 }
 
@@ -99,9 +99,9 @@ const J898_3: &str = "J898-3回目。これで最後";
 async fn scenario_continue_intermediate_delivery_failure_stops_continuation() {
     let buf = install_capture();
     let mock = Arc::new(FifoMock::new());
-    mock.push_text(&format!("{J898_1}\u{26a1}\nCONTINUE"));
-    mock.push_text(&format!("{J898_2}\u{26a1}\nCONTINUE"));
-    mock.push_text(&format!("{J898_3}\u{26a1}"));
+    mock.push_text(&format!("{J898_1}\u{26a1}"));
+    mock.push_text(&format!("{J898_2}\u{26a1}"));
+    mock.push_text(&format!("{J898_3}\u{26a1}\nNO_REPLY"));
     let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
 
     // 途中発話（say）の配送をゲート error（disconnect）にする。
@@ -133,10 +133,10 @@ async fn scenario_continue_intermediate_delivery_failure_stops_continuation() {
     let _ = &buf;
 }
 
-// ==================== (#898 §13 #8) reply×N＋本文＋末尾 CONTINUE ====================
+// ==================== (#898 §13 #8) reply×N＋本文＋末尾 継続 ====================
 //
-// DESIGN-TURN-CONTINUATION §13 #8「reply×N＋本文＋最終行 CONTINUE → 配送 reply N＋本文 1・
-// 保存 N+1・次 進む・残留なし」。#904 で reply（発話クラス）＋末尾 CONTINUE が次イテレーションへ
+// DESIGN-TURN-CONTINUATION §13 #8「reply×N＋本文＋最終行 継続 → 配送 reply N＋本文 1・
+// 保存 N+1・次 進む・残留なし」。#904 で reply（発話クラス）＋末尾 継続 が次イテレーションへ
 // 進むようになったが、併記された**本文（content）**は最終応答と同じ経路で配送・保存される必要が
 // ある（本 PR の in-loop 途中発話配送）。現 tip は reply は配送されるが本文（say）が配送も保存も
 // されない → 赤。
@@ -172,16 +172,16 @@ impl LlmProvider for S8Mock {
         Ok(vec![])
     }
     async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
-        // 1 回目: reply×2 ＋ 本文 ＋ 末尾 CONTINUE（継続）。2 回目以降: 最終本文で終端。
+        // 1 回目: reply×2 ＋ 本文 ＋ 末尾 継続（継続）。2 回目以降: 最終本文で終端。
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
         if n == 0 {
             Ok(two_replies_with_content(
                 S8_R1,
                 S8_R2,
-                &format!("{S8_BODY}\u{26a1}\nCONTINUE"),
+                &format!("{S8_BODY}\u{26a1}"),
             ))
         } else {
-            Ok(text_response(&format!("{S8_FINAL}\u{26a1}")))
+            Ok(text_response(&format!("{S8_FINAL}\u{26a1}\nNO_REPLY")))
         }
     }
 }
@@ -232,16 +232,16 @@ async fn scenario_s13_8_reply_plus_body_plus_continue_delivers_body_and_continue
         .count();
     assert_eq!(body_says, 1, "本文 say が 1 通でない: {:?}", captured(&buf));
 
-    // (iii) LLM は 2 回（reply＋本文＋CONTINUE で継続 → 2 回目で終端）。
+    // (iii) LLM は 2 回（reply＋本文＋継続 で継続 → 2 回目で終端）。
     assert_eq!(mock.calls.load(Ordering::SeqCst), 2, "LLM が 2 回でない");
 
-    // (iv) 残留 CONTINUE なし（配送本文）。
+    // (iv) 残留 継続 なし（配送本文）。
     assert!(
         captured(&buf)
             .iter()
             .filter(|c| c.body.contains("S8-"))
-            .all(|c| !c.body.contains("CONTINUE")),
-        "配送本文に CONTINUE 残留: {:?}",
+            .all(|c| !c.body.contains("継続")),
+        "配送本文に 継続 残留: {:?}",
         captured(&buf)
     );
 

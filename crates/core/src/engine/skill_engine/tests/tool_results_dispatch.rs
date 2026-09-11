@@ -11,7 +11,7 @@
                 "nostr_generate_key",
                 serde_json::json!({}),
             )]),
-            text_response("鍵の生成を開始しました"),
+            final_text_response("鍵の生成を開始しました"),
         ]);
         // executor が呼ばれたら記録する（dispatch 対象は呼ばれてはならない）。
         struct SpyExecutor {
@@ -116,7 +116,7 @@
         let llm = CapturingLlm {
             responses: Mutex::new(vec![
                 tool_call_response(vec![tc("tc-1", "test_tool", serde_json::json!({}))]),
-                text_response("ok"),
+                final_text_response("ok"),
             ]),
             seen_tool_messages: seen_tool_messages.clone(),
         };
@@ -209,7 +209,7 @@
         let llm = CapturingLlm {
             responses: Mutex::new(vec![
                 tool_call_response(vec![tc("tc-1", "test_tool", serde_json::json!({}))]),
-                text_response("ok"),
+                final_text_response("ok"),
             ]),
             seen: seen.clone(),
         };
@@ -245,7 +245,7 @@
 
         let llm = MockLlm::new(vec![
             tool_call_response(vec![tc("tc-1", "test_tool", serde_json::json!({}))]),
-            text_response("done"),
+            final_text_response("done"),
         ]);
         let executor = MockExecutor::new().add_result(
             "test_tool",

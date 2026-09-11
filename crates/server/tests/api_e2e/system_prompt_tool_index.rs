@@ -71,7 +71,7 @@ async fn captured_system_prompt(
     let (app, _db, mock, state) = create_test_app_with_state();
     let (agent_id, _app) = create_test_agent_named(app, "IdxBot", "P").await;
     let session_id = format!("web-{agent_id}-idx");
-    mock.push_text_response("done");
+    mock.push_text_response("done\nNO_REPLY");
     let req = opencrab_actions::RunRequest::new(
         &agent_id,
         "IdxBot",

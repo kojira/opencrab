@@ -25,7 +25,7 @@ fn shared_prompt_has_no_transport_specific_terms() {
 
     // 空プロンプトを検査して通っているのではないことの canary（安定した節見出しで確認）。
     assert!(
-        prompt.contains("## Silent Reply"),
+        prompt.contains("## Turn completion"),
         "prompt too small: {prompt}"
     );
     // #920: 登録レビュアーの表示名も共有プロンプトには出さない（名簿撤去）。

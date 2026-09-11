@@ -27,7 +27,9 @@ pub(super) fn sub_system_prompt(
          - depth: {depth}\n\
          - Discordへの直接送信は禁止されています\n\
          - 進捗報告は report_progress を使ってください（subtask_id 引数は省略可。省略時はこのサブタスクとして報告されます）\n\
-         - タスク完了時はテキストで結果を返してください（Discord送信はメインエンジンが行います）\n\n\
+         - 作業予告だけで終了せず、依頼された結果を完成させてください\n\
+         - タスク完了時は結果の最終行に NO_REPLY を置いて明示終了してください（NO_REPLY は結果本文から除外されます）\n\
+         - Discord送信はメインエンジンが行います\n\n\
          You are a sub-engine executing a delegated task.\
          {instructions_section}"
     )

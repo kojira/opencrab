@@ -125,6 +125,7 @@ fn engine_result(stopped_by_limit: bool) -> EngineResult {
         iterations: 1,
         tool_calls_made: 0,
         stopped_by_limit,
+        explicit_termination: None,
         last_posting_utterance_id: None,
         last_generation_had_continuation_speech: false,
         xml_fallback_parses: 0,

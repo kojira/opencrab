@@ -14,6 +14,7 @@ use crate::AppState;
 
 mod budget;
 mod callbacks;
+mod end_event;
 mod live_inbound;
 mod loop_restart;
 mod prompt;
@@ -494,7 +495,7 @@ pub async fn run_agent_response(
         engine.set_on_response_text(move |text: String| cb(text));
     }
 
-    // #898: 継続分岐（末尾 CONTINUE の text-only イテレーション）の途中発話フックを転記する。
+    // 明示終端前の text-only iteration を配送する途中発話フックを転記する。
     // core / actions で型は構造一致（配送・保存を await し、失敗は継続を止める）。
     if let Some(cb) = req.on_continuation_speech {
         engine.set_on_continuation_speech(cb);
@@ -640,7 +641,14 @@ pub async fn run_agent_response(
                         engine.set_typed_conversation(None);
                     }
                 }
-                Err(e) => return Err(anyhow::anyhow!("{e}")),
+                Err(e) => {
+                    if req.persist_turn_logs {
+                        end_event::persist_context_budget_error(
+                            &state.db, agent_id, session_id, &e,
+                        );
+                    }
+                    return Err(e.into());
+                }
             }
         }
         let result = engine
@@ -719,6 +727,11 @@ pub async fn run_agent_response(
             None => break result,
         }
     };
+
+    // 配送しない制御終端も、通常 speech と分離した system event として監査可能にする。
+    if req.persist_turn_logs {
+        end_event::persist_result(&state.db, agent_id, session_id, &result);
+    }
 
     // 記憶インデックスの背景ビルドとスキル利用回数は depth 0（メインターン）のみ。
     // sub-engine の内部 run では走らせない（旧 `execute_spawn_subtask` の sub-engine は

@@ -169,24 +169,24 @@ fn rewritten_fact_sentences_are_present() {
     let present: &[(&str, &str)] = &[
         // 3.1 導入（A6 事実化）: 逐語投稿の事実
         ("Your response is posted verbatim", "A6 逐語投稿の事実"),
-        // 3.1 Silent Reply（A10/A11 事実化）
+        // 明示終端は配送本文と分離して保存する。
         (
-            "is not delivered or saved",
-            "A10 NO_REPLY は配送も保存もされない",
+            "marker is recorded as a turn-termination event but is not delivered as speech",
+            "NO_REPLY は終了記録として保存し発話配送しない",
         ),
         (
-            "You may reply with NO_REPLY when a group-chat message does not involve you",
-            "A11 沈黙は許容（命令でなく）",
+            "a topic that is already resolved where another exchange would add no new information",
+            "情報を増やさない応答は明示終了できる",
         ),
         // 3.2 Async（A18 事実化・team-lead 指定例）
         (
             "Calling the same tool again for the same request starts a second, independent run",
             "A18 再呼び出しは 2 本目が走る（事実）",
         ),
-        // 3.3 Continuing（A30 事実化）
+        // 発話だけではターンを終了しない。
         (
-            "Each utterance call is delivered when it is made",
-            "A30 各発話は呼んだ時点で配送（事実）",
+            "they do not end the turn unless you also write `NO_REPLY`",
+            "発話後も既定継続",
         ),
         // 3.4 Memory（A39 事実化）: ツール契約
         (
@@ -220,8 +220,8 @@ fn async_behavior_section_matches_design() {
 
 Query tools (execute_shell and the like — anything you call to fetch a result) run
 asynchronously: the result arrives later and you are called again with it in the conversation
-history. Utterances (say / reply / reaction / repost) do not work this way — see "Continuing
-your turn".
+history. Utterances (say / reply / reaction / repost) are fire-and-forget and return no result,
+but they do not end the turn unless you also write `NO_REPLY`.
 
 Some tools return `{status:"spawned", subtask_id: ...}` immediately instead of a final result.
 The work is then running in the background, and its result arrives later in a separate turn as a
@@ -229,7 +229,7 @@ The work is then running in the background, and its result arrives later in a se
 second, independent run, and the actual result appears only at the completion turn.
 
 A `[subtask_completed: ...]` entry means a tool you called has finished and it is your turn
-again."#;
+again. Read that result, finish the original request, and then write `NO_REPLY` to end the turn."#;
     let got = extract_section(&prompt, "## Async Behavior");
     assert_eq!(
             normalize_ws(&got),
@@ -238,25 +238,19 @@ again."#;
         );
 }
 
-/// §1-3: 「## Continuing your turn」節が §3.3 の全文と一致（節単位・空白正規化）。
+/// 明示終端節が全文一致する。
 #[test]
 fn continuing_your_turn_section_matches_design() {
     let prompt = prompt();
-    let expected = r#"## Continuing your turn
+    let expected = r#"## Turn completion
 
-Utterances (say / reply / reaction / repost) are fire-and-forget: they return no result and you
-are not called again for them. Each utterance call is delivered when it is made, so N messages
-require N calls in this one response.
-
-Plain text in a response is posted as ONE message. To post several separate plain messages, post
-the first, end that response with `CONTINUE` on its own line, and post the next in the following
-response (repeat as needed).
-
-After a response whose only actions are utterances, the turn ends. Ending a response with
-`CONTINUE` on its own line — which may sit alongside a reply — calls you again in this same turn
-with your speech already delivered, so you can keep working after speaking. Without `CONTINUE`
-and without a query/tool call, the turn ends."#;
-    let got = extract_section(&prompt, "## Continuing your turn");
+Your turn continues by default. Only `NO_REPLY` explicitly ends it. When all requested work is
+complete, append `NO_REPLY` on its own final line after the final answer. The marker is recorded
+as a turn-termination event but is not delivered as speech. If no speech should be delivered,
+respond with exactly `NO_REPLY`. This includes a topic that is already resolved where another
+exchange would add no new information. Without `NO_REPLY`, you are called again and must
+continue the unfinished work."#;
+    let got = extract_section(&prompt, "## Turn completion");
     assert_eq!(
             normalize_ws(&got),
             normalize_ws(expected),
@@ -264,16 +258,19 @@ and without a query/tool call, the turn ends."#;
         );
 }
 
-/// §7: 「## Silent Reply」節が §3.1 の全文と一致（節単位・空白正規化）。
-/// 期待文は §3.1 下書きから §6（A12 撤去）・§7（Peer Review ポインタ A13 撤去）を反映した後の形。
+/// 旧 Silent Reply 節は Turn completion 契約へ統合されている。
 #[test]
 fn silent_reply_section_matches_design() {
     let prompt = prompt();
-    let expected = r#"## Silent Reply
-A response of exactly NO_REPLY (with no other text in it) is not delivered or saved. You may
-reply with NO_REPLY when a group-chat message does not involve you, or when the topic is already
-resolved and a further exchange would add no new information."#;
-    let got = extract_section(&prompt, "## Silent Reply");
+    let expected = r#"## Turn completion
+
+Your turn continues by default. Only `NO_REPLY` explicitly ends it. When all requested work is
+complete, append `NO_REPLY` on its own final line after the final answer. The marker is recorded
+as a turn-termination event but is not delivered as speech. If no speech should be delivered,
+respond with exactly `NO_REPLY`. This includes a topic that is already resolved where another
+exchange would add no new information. Without `NO_REPLY`, you are called again and must
+continue the unfinished work."#;
+    let got = extract_section(&prompt, "## Turn completion");
     assert_eq!(
             normalize_ws(&got),
             normalize_ws(expected),

@@ -411,3 +411,69 @@ async fn settlement_on_reused_nostr_session_resumes() {
     );
 }
 
+/// 親ターンが実行中なら、保存済みcompletionは親のiterationへ委ね、別resumeを待機させない。
+#[tokio::test]
+async fn settlement_during_active_parent_does_not_start_another_resume() {
+    let h = Harness::start().await;
+    let (_s, instance_id, binding_id) = ready_pair(&h).await;
+    let session_id = format!("extgate-{binding_id}");
+    let sink = ExtgateCompletionSink {
+        state: Arc::clone(&h.state),
+        runtime: h.runtime.clone(),
+        instance_id,
+        binding_id,
+        agent_id: "agent-1".into(),
+        session_id: session_id.clone(),
+        kind_id: "web".into(),
+        author_id: "user-1".into(),
+        delivery_mode: DeliveryMode::Say,
+        prompt_suffix: String::new(),
+    };
+
+    let locks = h.runtime.session_locks();
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let active_session = session_id.clone();
+    let active = tokio::spawn(async move {
+        locks
+            .run_serialized(&active_session, async move {
+                entered_tx.send(()).unwrap();
+                release_rx.await.unwrap();
+            })
+            .await;
+    });
+    entered_rx.await.unwrap();
+
+    settle_completed(
+        &h.runtime.subtask_registry_for(&session_id),
+        &h.state.db,
+        &sink,
+        SettleContext {
+            parent_session_id: session_id.clone(),
+            agent_id: "agent-1".into(),
+            subtask_id: "st-active".into(),
+            sub_session_id: String::new(),
+            exit_reason: "completed".into(),
+            lifecycle: SubtaskLifecycle::new(),
+        },
+        "active-parent-result",
+    );
+
+    release_tx.send(()).unwrap();
+    active.await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        h.runtime.turns.load(Ordering::SeqCst),
+        0,
+        "実行中の親の後ろへ別resume turnを待機させない"
+    );
+    let logs = {
+        let conn = h.state.db.lock().unwrap();
+        opencrab_db::queries::list_session_logs_by_session(&conn, &session_id).unwrap()
+    };
+    assert!(
+        logs.iter().any(|log| log.content.contains("active-parent-result")),
+        "completion結果自体は親sessionへ保存する"
+    );
+}
+
