@@ -87,16 +87,12 @@ pub(super) struct ToolScenarioCatalog {
 pub(super) enum ToolTransportProfile {
     #[default]
     WithoutTransport,
-    Discord,
-    Nostr,
 }
 
 impl ToolTransportProfile {
     pub(super) fn as_str(self) -> &'static str {
         match self {
             Self::WithoutTransport => "without_transport",
-            Self::Discord => "discord",
-            Self::Nostr => "nostr",
         }
     }
 }

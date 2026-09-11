@@ -28,11 +28,17 @@ use tower::ServiceExt;
 
 use crate::{create_router, process, test_app_state, AppState};
 
+#[path = "l2/catalog.rs"]
 mod catalog;
+#[path = "l2/fixture.rs"]
 mod fixture;
+#[path = "l2/http_capture.rs"]
 mod http_capture;
+#[path = "l2/mcp_coverage.rs"]
 mod mcp_coverage;
+#[path = "l2/tool_execution.rs"]
 mod tool_execution;
+#[path = "l2/tool_setup.rs"]
 mod tool_setup;
 
 use catalog::*;
@@ -122,26 +128,22 @@ mod tests {
         assert_eq!(l1["http"]["routes"], production_routes);
 
         let (_, catalog) = read_scenarios(&scenarios_path).expect("read scenario catalog");
-        let live_tools: BTreeSet<_> = [
-            ToolTransportProfile::WithoutTransport,
-            ToolTransportProfile::Discord,
-            ToolTransportProfile::Nostr,
-        ]
-        .into_iter()
-        .flat_map(|transport| {
-            build_executor_with_state(
-                opencrab_actions::CallerIdentity::Owner,
-                0,
-                true,
-                None,
-                "default",
-                transport,
-            )
-            .0
-            .effective_tool_definitions()
-        })
-        .map(|definition| definition.definition.name)
-        .collect();
+        let live_tools: BTreeSet<_> = [ToolTransportProfile::WithoutTransport]
+            .into_iter()
+            .flat_map(|transport| {
+                build_executor_with_state(
+                    opencrab_actions::CallerIdentity::Owner,
+                    0,
+                    true,
+                    None,
+                    "default",
+                    transport,
+                )
+                .0
+                .effective_tool_definitions()
+            })
+            .map(|definition| definition.definition.name)
+            .collect();
         let selected_tools: BTreeSet<_> = catalog
             .tool_execution
             .success_arguments
@@ -315,7 +317,7 @@ mod tests {
         );
         assert_eq!(
             first["capture_profile"]["build"]["required_cargo_features"],
-            json!(["discord", "nostr"])
+            json!([])
         );
         let diagnostic_probe = |name: &str| {
             first["http"]["probes"]

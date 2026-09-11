@@ -35,10 +35,12 @@ pub mod webhook_targets;
 
 #[cfg(feature = "baseline-l1")]
 #[doc(hidden)]
+#[path = "../tests/baseline_support/l1.rs"]
 pub mod baseline_l1;
 
 #[cfg(feature = "baseline-l2")]
 #[doc(hidden)]
+#[path = "../tests/baseline_support/l2.rs"]
 pub mod baseline_l2;
 
 pub mod transcript;

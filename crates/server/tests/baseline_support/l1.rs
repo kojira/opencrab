@@ -14,24 +14,11 @@ use tower::ServiceExt;
 use crate::{create_router, process, test_app_state};
 
 pub fn capture_profile() -> Result<Value, String> {
-    let missing_features = [
-        (!cfg!(feature = "discord")).then_some("discord"),
-        (!cfg!(feature = "nostr")).then_some("nostr"),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>();
-    if !missing_features.is_empty() {
-        return Err(format!(
-            "baseline full-production-surface-v1 requires Cargo features: {}",
-            missing_features.join(", ")
-        ));
-    }
     Ok(json!({
         "id": "full-production-surface-v1",
         "build": {
-            "required_cargo_features": ["discord", "nostr"],
-            "selection": "the baseline-l1 Cargo feature enables this exact set; ambient feature unification is not used"
+            "required_cargo_features": [],
+            "selection": "the baseline-l1 Cargo feature captures the shared server; external gateways are separate processes"
         },
         "runtime": {
             "database": "fresh in-memory fixture",
@@ -149,26 +136,9 @@ pub fn collect_tools() -> Result<Value, String> {
         .collect();
     let without_transport = production_executor(true, None)?;
 
-    #[cfg(feature = "discord")]
-    let discord = definitions_json(&without_transport, &disabled_names);
-    #[cfg(not(feature = "discord"))]
-    let discord: Vec<Value> = Vec::new();
-
-    #[cfg(feature = "nostr")]
-    let nostr = {
-        let gateway: Arc<dyn GatewayActions> = Arc::new(opencrab_nostr::NostrGatewayActions::new(
-            opencrab_nostr::NostaroCli::new(),
-        ));
-        definitions_json(&production_executor(true, Some(gateway))?, &disabled_names)
-    };
-    #[cfg(not(feature = "nostr"))]
-    let nostr: Vec<Value> = Vec::new();
-
     Ok(json!({
         "effective_profiles": {
             "without_transport_surface": definitions_json(&without_transport, &disabled_names),
-            "discord_turn": discord,
-            "nostr_turn": nostr,
         },
         "uncollected": [{
             "kind":"configured_action_class",

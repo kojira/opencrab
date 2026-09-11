@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) const AGENT_ID: &str = "baseline-agent";
 pub(super) const SESSION_ID: &str = "baseline-session";
-pub(super) const TOOL_SESSION_ID: &str = "nostr-baseline-agent";
+pub(super) const TOOL_SESSION_ID: &str = "baseline-tool-agent";
 static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const COLLECTOR_WORKSPACE_TOKEN: &str = "{collector_workspace}";
 const FIXTURE_EXECUTABLE_NAME: &str = "baseline-command";
@@ -16,19 +16,6 @@ pub(super) fn fixture_workspace(kind: &str) -> std::path::PathBuf {
 }
 
 pub(super) fn capture_profile() -> Result<Value, String> {
-    let missing_features = [
-        (!cfg!(feature = "discord")).then_some("discord"),
-        (!cfg!(feature = "nostr")).then_some("nostr"),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>();
-    if !missing_features.is_empty() {
-        return Err(format!(
-            "baseline full-production-surface-v1 requires Cargo features: {}",
-            missing_features.join(", ")
-        ));
-    }
     if !cfg!(unix) {
         return Err(
             "baseline full-production-surface-v1 requires a Unix target with /bin/sh".to_string(),
@@ -37,8 +24,8 @@ pub(super) fn capture_profile() -> Result<Value, String> {
     Ok(json!({
         "id": "full-production-surface-v1",
         "build": {
-            "required_cargo_features": ["discord", "nostr"],
-            "selection": "the baseline-l2 Cargo feature enables baseline-l1 and its exact feature set; ambient feature unification is not used",
+            "required_cargo_features": [],
+            "selection": "the baseline-l2 Cargo feature enables baseline-l1; external gateway implementations are outside the server baseline",
             "target_family": "unix"
         },
         "runtime": {

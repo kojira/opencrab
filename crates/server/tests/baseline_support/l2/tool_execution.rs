@@ -192,36 +192,10 @@ pub(super) async fn collect_tool_execution(
     catalog: &ToolScenarioCatalog,
 ) -> Result<Value, String> {
     use opencrab_actions::CallerIdentity;
-    let owner_profiles = [
-        (
-            ToolTransportProfile::WithoutTransport,
-            build_executor(CallerIdentity::Owner, 0, true, None, "default"),
-        ),
-        (
-            ToolTransportProfile::Discord,
-            build_executor_with_state(
-                CallerIdentity::Owner,
-                0,
-                true,
-                None,
-                "default",
-                ToolTransportProfile::Discord,
-            )
-            .0,
-        ),
-        (
-            ToolTransportProfile::Nostr,
-            build_executor_with_state(
-                CallerIdentity::Owner,
-                0,
-                true,
-                None,
-                "default",
-                ToolTransportProfile::Nostr,
-            )
-            .0,
-        ),
-    ];
+    let owner_profiles = [(
+        ToolTransportProfile::WithoutTransport,
+        build_executor(CallerIdentity::Owner, 0, true, None, "default"),
+    )];
     let mut definitions: BTreeMap<String, (usize, FunctionDefinition)> = BTreeMap::new();
     for (profile_index, (_, executor)) in owner_profiles.iter().enumerate() {
         // #923: inventory 監査なので narrowing 前の effective_tool_definitions() で捕捉。
@@ -264,11 +238,7 @@ pub(super) async fn collect_tool_execution(
         .pointer("/tools/effective_profiles")
         .and_then(Value::as_object)
         .ok_or_else(|| "L1 tool profiles are missing".to_string())?;
-    for (profile_name, (profile, executor)) in [
-        ("without_transport_surface", &owner_profiles[0]),
-        ("discord_turn", &owner_profiles[1]),
-        ("nostr_turn", &owner_profiles[2]),
-    ] {
+    for (profile_name, (profile, executor)) in [("without_transport_surface", &owner_profiles[0])] {
         let expected: BTreeSet<_> = l1_profiles
             .get(profile_name)
             .and_then(Value::as_array)
@@ -403,27 +373,13 @@ pub(super) async fn collect_tool_execution(
         }));
     }
 
-    let agent_profiles = [
-        build_executor(CallerIdentity::Agent, 0, true, None, "default"),
-        build_executor_with_state(
-            CallerIdentity::Agent,
-            0,
-            true,
-            None,
-            "default",
-            ToolTransportProfile::Discord,
-        )
-        .0,
-        build_executor_with_state(
-            CallerIdentity::Agent,
-            0,
-            true,
-            None,
-            "default",
-            ToolTransportProfile::Nostr,
-        )
-        .0,
-    ];
+    let agent_profiles = [build_executor(
+        CallerIdentity::Agent,
+        0,
+        true,
+        None,
+        "default",
+    )];
     let mut permission = Vec::new();
     for def in &all_defs {
         let policy = opencrab_actions::tool_policy(&def.name);

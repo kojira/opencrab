@@ -10,6 +10,7 @@ mod intake_process;
 mod scheduler;
 
 #[cfg(test)]
+#[path = "../tests/baseline_support/bin_test_support.rs"]
 mod bin_test_support;
 
 // #599: ハートビートの発火本体（`run_one_heartbeat`）と表示ラベル

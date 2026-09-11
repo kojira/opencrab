@@ -311,19 +311,6 @@ fn seeded_tool_state() -> AppState {
             },
         )
         .expect("seed baseline gateway agent");
-        #[cfg(feature = "nostr")]
-        opencrab_db::queries::upsert_agent_nostr_config(
-            &conn,
-            &opencrab_db::queries::AgentNostrConfigRow {
-                agent_id: AGENT_ID.to_string(),
-                enabled: false,
-                relays_json: "[]".to_string(),
-                filter_json: "{\"authors\":[],\"keywords\":[],\"kinds\":[]}".to_string(),
-                secret_key: "nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqzqujme"
-                    .to_string(),
-            },
-        )
-        .expect("seed baseline Nostr config");
     }
     state
 }
@@ -424,22 +411,6 @@ pub(super) fn build_executor_with_state(
             .to_string_lossy()
             .to_string()
     });
-    #[cfg(feature = "nostr")]
-    {
-        let connection = state.db.lock().expect("lock baseline Nostr DB");
-        opencrab_db::queries::upsert_agent_nostr_config(
-            &connection,
-            &opencrab_db::queries::AgentNostrConfigRow {
-                agent_id: AGENT_ID.to_string(),
-                enabled: false,
-                relays_json: "[]".to_string(),
-                filter_json: "{\"authors\":[],\"keywords\":[],\"kinds\":[]}".to_string(),
-                secret_key: "nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqzqujme"
-                    .to_string(),
-            },
-        )
-        .expect("seed baseline Nostr config");
-    }
     *state.tools_config.write().expect("baseline tools config") = opencrab_actions::ToolsConfig {
         enabled: shell_enabled,
         shell: shell_enabled.then(|| opencrab_actions::ShellToolConfig {
@@ -448,13 +419,8 @@ pub(super) fn build_executor_with_state(
             ..Default::default()
         }),
     };
-    let gateway_actions: Option<Arc<dyn GatewayActions>> = match transport {
-        ToolTransportProfile::WithoutTransport => None,
-        ToolTransportProfile::Discord => None,
-        ToolTransportProfile::Nostr => Some(Arc::new(opencrab_nostr::NostrGatewayActions::new(
-            opencrab_nostr::NostaroCli::new(),
-        ))),
-    };
+    let _ = transport;
+    let gateway_actions: Option<Arc<dyn GatewayActions>> = None;
     let executor = process::build_turn_executor(
         &state,
         process::TurnExecutorWiring {
