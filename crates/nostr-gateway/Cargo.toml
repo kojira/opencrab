@@ -19,6 +19,10 @@ sha2.workspace = true
 base64 = "0.22"
 async-trait.workspace = true
 opencrab-gate-client.workspace = true
+opencrab-core.workspace = true
+opencrab-db.workspace = true
+opencrab-gateway.workspace = true
+opencrab-nostr.workspace = true
 
 [[bin]]
 name = "nostr-gateway"

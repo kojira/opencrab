@@ -20,7 +20,6 @@ opencrab-core.workspace = true
 opencrab-gateway.workspace = true
 opencrab-actions.workspace = true
 opencrab-db.workspace = true
-opencrab-nostr-gateway.workspace = true
 sha2.workspace = true
 base64 = "0.22"
 rusqlite.workspace = true

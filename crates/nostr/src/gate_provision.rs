@@ -35,6 +35,73 @@ fn config_digest(bytes: &[u8]) -> String {
     out
 }
 
+/// Gateway-owned admission material loaded from the legacy configuration store during migration.
+/// Missing rows are an empty set; query failures remain errors.
+pub fn load_gate_allow_keys(
+    conn: &Connection,
+    agent_id: &str,
+) -> Result<crate::NostrGateAllowKeys> {
+    let owner_pubkey = opencrab_db::queries::get_agent_nostr_owner_pubkey(conn, agent_id)
+        .context("owner_pubkey read failed")?;
+    let owner = if owner_pubkey.trim().is_empty() {
+        Vec::new()
+    } else {
+        vec![owner_pubkey]
+    };
+    let trusted_users = opencrab_db::queries::list_trusted_users(conn, agent_id)
+        .context("trusted_users read failed")?
+        .into_iter()
+        .filter(|row| row.platform == opencrab_db::queries::TRUSTED_PLATFORM_NOSTR)
+        .map(|row| row.user_id)
+        .collect();
+    let mut co_agents = Vec::new();
+    let mut co_agent_identities = Vec::new();
+    for row in opencrab_db::queries::list_trusted_co_agents(conn, agent_id)
+        .context("trusted_co_agents read failed")?
+    {
+        let pubkey = opencrab_db::queries::get_agent_nostr_self_pubkey(conn, &row.co_agent_id)
+            .context("co-agent pubkey read failed")?;
+        if !pubkey.trim().is_empty() {
+            co_agent_identities.push((pubkey.clone(), row.co_agent_id));
+            co_agents.push(pubkey);
+        }
+    }
+    Ok(crate::NostrGateAllowKeys {
+        owner,
+        co_agents,
+        co_agent_identities,
+        trusted_users,
+    })
+}
+
+pub fn build_allow_sources(
+    followees: impl IntoIterator<Item = String>,
+    keys: &crate::NostrGateAllowKeys,
+) -> crate::AllowSources {
+    fn normalized(values: &[String]) -> std::collections::HashSet<String> {
+        values
+            .iter()
+            .filter_map(|value| crate::normalize_pubkey(value))
+            .collect()
+    }
+    crate::AllowSources {
+        followees: followees
+            .into_iter()
+            .filter_map(|value| crate::normalize_pubkey(&value))
+            .collect(),
+        owner: normalized(&keys.owner),
+        co_agents: normalized(&keys.co_agents),
+        co_agent_identities: keys
+            .co_agent_identities
+            .iter()
+            .filter_map(|(key, agent_id)| {
+                crate::normalize_pubkey(key).map(|key| (key, agent_id.clone()))
+            })
+            .collect(),
+        trusted_users: normalized(&keys.trusted_users),
+    }
+}
+
 /// Provisioning が完了した enabled Nostr instance を、外部 gateway の placement へ投影する。
 /// default session の open binding が無い・重複する instance は fail-loud にする。
 pub fn load_nostr_placement_plan(conn: &Connection, agent_id: &str) -> Result<NostrPlacementPlan> {

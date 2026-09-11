@@ -48,29 +48,8 @@ impl GatewayActions for SystemGatewayActions {
         match name {
             "configure_llm_provider" => self.configure_llm_provider(args, ctx).await,
             "manage_allowed_commands" => self.manage_allowed_commands(args, ctx).await,
-            // PR-1B: Nostr の会話ゲートツール群は nostr feature の内側。外した構成では
-            // これらの arm も descriptor も消え、既定 `_ =>` の inner 委譲へ落ちる。
-            #[cfg(feature = "nostr")]
-            "configure_nostr" => self.configure_nostr(args, ctx).await,
             "configure_self" => self.configure_self(args, ctx).await,
             "configure_mcp_server" => self.configure_mcp_server(args, ctx).await,
-            // bootstrap 鍵生成（鍵未設定でも露出）。inner より先に own が処理する。
-            #[cfg(feature = "nostr")]
-            "nostr_generate_key" => self.nostr_generate_key(args, ctx).await,
-            // bootstrap 鍵一覧（鍵未設定でも露出）。生成鍵の npub のみ返す（nsec 非返却）。
-            #[cfg(feature = "nostr")]
-            "nostr_list_keys" => Self::nostr_list_keys(ctx),
-            // bootstrap identity 採用（鍵未設定でも露出）。未接続なら自分宛のみを購読する
-            // 設定で自動接続する。inner より先に own が処理する（#264）。
-            #[cfg(feature = "nostr")]
-            "nostr_switch_identity" => self.nostr_switch_identity(args, ctx).await,
-            // `nostr_run`（薄い nostaro passthrough / #268）は撤去した（オーナー裁定）。定義から
-            // 外したのでモデルは通常ここへ来ないが、名前指定で呼ばれても fail-close で拒否する
-            // （黙って成功に見せない・feature の有無に依らず塞ぐ）。返信は say、独立投稿は nostr_post。
-            "nostr_run" => err(
-                "nostr_run は撤去されました（返信は say、投稿は nostr_post を使ってください）"
-                    .to_string(),
-            ),
             // 記憶インデックスの全再構築（#175 S4）。inner へは委譲しない。
             "rebuild_memory_index" => self.rebuild_memory_index(ctx).await,
             // 汎用エージェント管理ツール（#157 S1）。Discord 側の実装は撤去済みなので
@@ -101,16 +80,6 @@ impl GatewayActions for SystemGatewayActions {
             }
             "read_heartbeat_instructions" => {
                 crate::heartbeat_instructions::read_heartbeat_instructions(&self.state, args, ctx)
-            }
-            // エージェント自身の Nostr 転記設定（#252 段階 C）。対象は常に
-            // `ctx.agent_id` で、引数から他エージェントを指す経路は無い。
-            #[cfg(feature = "nostr")]
-            "get_my_nostr_relay" => {
-                crate::agent_nostr_relay::get_my_nostr_relay(&self.state, args, ctx)
-            }
-            #[cfg(feature = "nostr")]
-            "set_my_nostr_relay" => {
-                crate::agent_nostr_relay::set_my_nostr_relay(&self.state, args, ctx)
             }
             // エージェント自身のハートビート設定（#247 段階 2）。対象は常に
             // `ctx.agent_id` で、引数から他エージェントを指す経路は無い。

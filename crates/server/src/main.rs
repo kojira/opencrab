@@ -10,9 +10,6 @@ mod bootstrap;
 #[path = "main/discord_ignition.rs"]
 mod discord_ignition;
 mod intake_process;
-#[cfg(feature = "nostr")]
-#[path = "main/nostr_ignition.rs"]
-mod nostr_ignition;
 mod scheduler;
 
 #[cfg(test)]
@@ -82,23 +79,14 @@ fn resolve_gateway_bin(env_name: &str, binary_name: &str) -> std::path::PathBuf 
     std::path::PathBuf::from(binary_name)
 }
 
-#[cfg(feature = "nostr")]
-fn resolve_nostaro_bin() -> std::path::PathBuf {
-    std::env::var("OPENCRAB_NOSTARO_BIN")
-        .ok()
-        .filter(|path| !path.trim().is_empty())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("nostaro"))
-}
-
-#[cfg(any(feature = "discord", feature = "nostr"))]
+#[cfg(feature = "discord")]
 fn is_executable_file(path: &std::path::Path) -> bool {
     use std::os::unix::fs::PermissionsExt as _;
     path.metadata()
         .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
-#[cfg(any(feature = "discord", feature = "nostr"))]
+#[cfg(feature = "discord")]
 fn require_resolvable_binary(label: &str, path: &std::path::Path) -> anyhow::Result<()> {
     let found = if path.components().count() > 1 || path.is_absolute() {
         is_executable_file(path)
@@ -121,17 +109,12 @@ async fn main() -> anyhow::Result<()> {
         gate_socket,
         #[cfg(feature = "discord")]
         gate_socket_for_discord,
-        #[cfg(feature = "nostr")]
-        gate_socket_for_nostr,
         #[cfg(feature = "discord")]
         attachment_inbox_root,
-        #[cfg(feature = "nostr")]
-        nostr_master_key,
-        #[cfg(feature = "nostr")]
-        start_nostr,
         heartbeat_config_tx,
         heartbeat_config_rx,
         mut state,
+        ..
     } = bootstrap::initialize()?;
 
     #[cfg(feature = "discord")]
@@ -153,26 +136,6 @@ async fn main() -> anyhow::Result<()> {
             anyhow::bail!("Discord V3 requires an absolute gate.listen_socket");
         }
     }
-    #[cfg(feature = "nostr")]
-    let nostr_gateway_bin = resolve_gateway_bin("OPENCRAB_NOSTR_GATEWAY_BIN", "nostr-gateway");
-    #[cfg(feature = "nostr")]
-    let nostaro_bin = resolve_nostaro_bin();
-    #[cfg(feature = "nostr")]
-    let nostr_configured = state
-        .db
-        .lock()
-        .map_err(|_| anyhow::anyhow!("db lock for Nostr startup validation"))?
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM agent_nostr_config)",
-            [],
-            |row| row.get::<_, bool>(0),
-        )?;
-    #[cfg(feature = "nostr")]
-    if nostr_configured {
-        require_resolvable_binary("nostr-gateway", &nostr_gateway_bin)?;
-        require_resolvable_binary("nostaro", &nostaro_bin)?;
-    }
-
     // #628: transport の発火先 descriptor を**生存非依存で**登録する（ゲートウェイの起動有無・
     // 資格情報の有無に関わらず常時。受理判定・ゲート理由表示・parse はゲートウェイ停止中でも
     // 要る）。sink（生存で register/unregister）とは別の登録で、ここは起動ブロックの**外**に
@@ -213,7 +176,7 @@ async fn main() -> anyhow::Result<()> {
     // `pending` 行は誰も応答を受け取れない。無言で放置すると「ボタンを押しても何も
     // 起きない」行が DB に溜まり続けるため、起動時に 1 度だけ閉じてログに残す。
     // transport に依存しない処理なので、Discord 機能フラグやゲートウェイの稼働有無の
-    // **外**で行う（nostr / web / REST だけの構成でも効く）。
+    // **外**で行う（web / REST だけの構成でも効く）。
     {
         use opencrab_actions::AgentRuntime as _;
         state.cleanup_stale_interactions();
@@ -237,105 +200,6 @@ async fn main() -> anyhow::Result<()> {
         heartbeat_config_tx,
         heartbeat_config_rx,
     );
-
-    // Per-agent Nostr sub-gateway マネージャ（discord と同様に、state clone より前に
-    // 生成して配線する）。
-    //
-    // #620: **マスターキーが在るときだけ**登録する。無ければ Nostr は起動しない（送信も受信も
-    // 止まる）。Nostr 未設定の構成ではそもそもマスターキー不要なので、ここを飛ばして通常起動する。
-    // PR-1B: Nostr は会話ゲートなので nostr feature の内側。外した構成ではこのブロック自体が無い。
-    #[cfg(feature = "nostr")]
-    let mut nostr_process_controller: Option<Arc<nostr_ignition::NostrV3Controller>> = None;
-    #[cfg(feature = "nostr")]
-    if let Some(master_key) = nostr_master_key.clone() {
-        // nostaro は**エージェントの workspace ルートを cwd にして**起動する（#299）。
-        // `execute_shell` / `ws_*` と同じ `agent.workspace_path` を渡して基準を揃える
-        // （`nostr_run event --file <相対>` / `--out <相対>` がそれらと噛み合う）。
-        //
-        // #620: 本鍵は config へ書かず、`base_command` が spawn ごとに **本鍵プロバイダ**で DB の
-        // 暗号文を復号して env 注入する。生成鍵ファイルの復号用に **マスターキー**も注入する。
-        let provider = opencrab_nostr::db_main_key_provider(state.db.clone(), master_key.clone());
-        let process_controller = nostr_ignition::NostrV3Controller::new(
-            &state.db,
-            &cfg.database.path,
-            gate_socket_for_nostr.as_deref(),
-            matches!(
-                opencrab_nostr::NostrIngress::parse(&cfg.gate.nostr_ingress),
-                Some(opencrab_nostr::NostrIngress::V3)
-            ),
-            &provider,
-            &nostr_gateway_bin,
-            &nostaro_bin,
-        )?;
-        nostr_process_controller = Some(process_controller.clone());
-        let cli = opencrab_nostr::NostaroCli::new()
-            .with_binary_path(nostaro_bin.to_string_lossy().into_owned())
-            .with_workspace_base(state.workspace_base.clone())
-            .with_master_key(master_key)
-            .with_main_key_provider(provider);
-        // #588 TimedFire / #603: 時刻発火の受け口レジストリは `new` の必須引数（Discord と同型・
-        // per-agent→共有の解決はルータが行う）。忘れるとコンパイルエラーになる。
-        let db_for_provision = state.db.clone();
-        let db_for_revise = state.db.clone();
-        let manager_builder = opencrab_nostr::NostrGatewayManager::new(
-            state.clone(),
-            state.timed_fire_router.clone(),
-        )
-        .with_cli(cli)
-        .with_provisioner(Arc::new(
-            move |agent_id, self_pk, config, watches, access| {
-                let mut conn = db_for_provision
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("db lock for nostr provision"))?;
-                opencrab_nostr::gate_provision::provision_nostr_gate(
-                    &mut conn,
-                    agent_id,
-                    self_pk,
-                    config,
-                    watches,
-                    access,
-                    opencrab_extgate::now_nanos(),
-                )?;
-                Ok(())
-            },
-        ))
-        .with_reviser(Arc::new(
-            move |agent_id, self_pk, config, watches, access| {
-                let mut conn = db_for_revise
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("db lock for nostr revise"))?;
-                opencrab_nostr::gate_provision::revise_nostr_gate(
-                    &mut conn,
-                    agent_id,
-                    self_pk,
-                    config,
-                    watches,
-                    access,
-                    opencrab_extgate::now_nanos(),
-                )
-            },
-        ));
-        let manager: opencrab_server::SharedNostrManager = Arc::new(manager_builder);
-        // Liveness は manager の keep-alive task ではなく、外部 gateway が extgate へ登録済みかを
-        // 正とする。子が crash-loop 中なら false のままで、稼働中と誤報しない。
-        let extgate_for_nostr_live = extgate.clone();
-        let nostr_live: opencrab_actions::external_gateway::V3LivenessProbe =
-            Arc::new(move |agent_id| {
-                extgate_for_nostr_live
-                    .agent_has_live_gateway(agent_id, opencrab_actions::gateway_kinds::NOSTR)
-            });
-        // Reconcile every enabled row from its current DB configuration before any external
-        // child is launched. A stale prior placement must never mask a provisioning failure.
-        manager.restore_from_db_checked().await?;
-        let v3_only = opencrab_actions::external_gateway::V3OnlyGateway::new(manager, nostr_live)
-            .with_process(process_controller);
-        state.gateways.register(v3_only);
-    } else {
-        tracing::info!(
-            start_nostr,
-            "Nostr サブシステムは起動しない（マスターキー未設定 / 不正）。Nostr 未設定の構成なら正常。"
-        );
-    }
 
     #[cfg(feature = "discord")]
     state.gateways.register(discord_process_controller.clone());
@@ -395,15 +259,6 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    #[cfg(feature = "nostr")]
-    if start_nostr {
-        nostr_process_controller
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Nostr V3 process controller is unavailable"))?
-            .start_all()
-            .await?;
-    }
-
     #[cfg(feature = "discord")]
     discord_process_controller.start_all().await?;
 
@@ -414,7 +269,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Server listening on {}", addr);
 
     // SIGINT/SIGTERM で HTTP を drain し、監視中の外部 gateway 子を terminate する。
-    #[cfg(any(feature = "discord", feature = "nostr"))]
+    #[cfg(feature = "discord")]
     {
         axum::serve(listener, app)
             .with_graceful_shutdown(async move {
@@ -425,25 +280,18 @@ async fn main() -> anyhow::Result<()> {
                     discord_process_controller.as_ref(),
                 )
                 .await;
-                #[cfg(feature = "nostr")]
-                if let Some(controller) = &nostr_process_controller {
-                    opencrab_actions::external_gateway::V3ProcessControl::shutdown_all(
-                        controller.as_ref(),
-                    )
-                    .await;
-                }
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             })
             .await?;
     }
-    #[cfg(not(any(feature = "discord", feature = "nostr")))]
+    #[cfg(not(feature = "discord"))]
     axum::serve(listener, app).await?;
 
     Ok(())
 }
 
 /// SIGINT（Ctrl-C）または SIGTERM を待つ。graceful shutdown のトリガに使う。
-#[cfg(any(feature = "discord", feature = "nostr"))]
+#[cfg(feature = "discord")]
 async fn wait_for_os_shutdown() {
     #[cfg(unix)]
     {

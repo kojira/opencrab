@@ -89,31 +89,8 @@ pub async fn add_trusted_user(
     let platform = req
         .platform
         .unwrap_or_else(|| opencrab_db::queries::TRUSTED_PLATFORM_DISCORD.to_string());
-    if !opencrab_db::queries::is_known_trusted_platform(&platform) {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    // `platform='nostr'` の識別子は保存前に canonical 小文字 hex へ正規化する。読み出し側
-    // （[`crate::nostr_runner_impl::resolve_nostr_caller_identity`]）は canonical hex /
-    // npub で exact-match するため、大文字 hex / 大文字 npub / 前後空白のまま保存すると
-    // その信頼ユーザーが読み出しで一致しない。正規化できない値は保存せず 400
-    // （設定できたように見えて永久に誰とも一致しない行を作らせない）。入口 `configure_nostr`
-    // / REST の owner_pubkey と同じ扱いで、新しい制約ではなく既存の入口正規化の網羅。
-    // 他経路（discord / web / rest）の識別子は素通し（挙動を変えない）。
-    // PR-1B: 公開鍵の正規化は Nostr クレートの実装なので nostr feature の内側。nostr を
-    // 外した構成では `platform='nostr'` の信頼ユーザーは正規化できないため**受け付けず
-    // 400 で拒否**する（丸めず・素通しの平文保存もしない＝暗黙のフォールバックを作らない）。
-    let user_id = if platform == opencrab_db::queries::TRUSTED_PLATFORM_NOSTR {
-        #[cfg(feature = "nostr")]
-        {
-            opencrab_nostr::normalize_pubkey(&req.user_id).ok_or(StatusCode::BAD_REQUEST)?
-        }
-        #[cfg(not(feature = "nostr"))]
-        {
-            return Err(StatusCode::BAD_REQUEST);
-        }
-    } else {
-        req.user_id
-    };
+    // platformとuser_idはこの共有APIではopaque。個別gatewayの形式検証はgateway側で行う。
+    let user_id = req.user_id;
     let permission = parse_permission(req.permission.as_deref())?;
     let conn = state.db.lock().unwrap();
     let id = uuid::Uuid::new_v4().to_string();

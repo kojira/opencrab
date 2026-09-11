@@ -12,21 +12,15 @@ pub(super) struct BootstrapContext {
     pub(super) gate_socket: Option<std::path::PathBuf>,
     #[cfg(feature = "discord")]
     pub(super) gate_socket_for_discord: Option<String>,
-    #[cfg(feature = "nostr")]
-    pub(super) gate_socket_for_nostr: Option<String>,
     #[cfg(feature = "discord")]
     pub(super) attachment_inbox_root: std::path::PathBuf,
-    #[cfg(feature = "nostr")]
-    pub(super) nostr_master_key: Option<opencrab_nostr::MasterKey>,
-    #[cfg(feature = "nostr")]
-    pub(super) start_nostr: bool,
     pub(super) heartbeat_config_tx: watch::Sender<HeartbeatConfig>,
     pub(super) heartbeat_config_rx: watch::Receiver<HeartbeatConfig>,
     pub(super) state: AppState,
 }
 
 /// Loads and validates startup configuration, scrubs secrets, recovers the DB,
-/// validates/migrates Nostr secrets, and constructs the initial application state.
+/// recovers the database and constructs the initial application state.
 /// No task is spawned before this function returns.
 pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
     // Load .env file if present
@@ -40,28 +34,6 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
 
     // Load config from TOML (with env var expansion)
     let cfg = config::load_config("config/default.toml")?;
-
-    // #620: Nostr の at-rest 暗号化マスターキーを **load_config 直後・全 tokio::spawn より前**に
-    // env から読み、**即 remove_var** する。以降 spawn される execute_shell は inherit_env=true で
-    // `std::env::vars()` を子へコピーする（crates/actions/src/tools/shell.rs）ので、ここで消せば
-    // エージェントのシェルの環境に平文で出ない。config の `${}` 展開（hot-reload 経路が env を
-    // 読む）を経由せず、直接 std::env::var で読む。
-    //
-    // **env スクラブ（読み取り＋ remove_var）は feature 非依存で常に走らせる**（多層防御）。
-    // これは「Nostr 専用の処理」ではなく「秘密を env に残さない」ための処理で、`nostr` を外した
-    // ビルドでも `OPENCRAB_SECRET_MASTER_KEY` を env から消さないと、その秘密が起動する全シェルへ
-    // 平文継承される（PR-1B のレビュー指摘 / 退行防止）。**この remove_var を nostr feature の
-    // 内側へ戻さないこと。** 一方、値を `MasterKey` へ parse する部分だけは型が `opencrab_nostr`
-    // にあるので `nostr` feature の内側に置く（nostr-off では at-rest 暗号機構ごと不要）。
-    #[cfg_attr(not(feature = "nostr"), allow(unused_variables))]
-    let master_key_env = std::env::var("OPENCRAB_SECRET_MASTER_KEY")
-        .ok()
-        .filter(|s| !s.trim().is_empty());
-    std::env::remove_var("OPENCRAB_SECRET_MASTER_KEY");
-    #[cfg(feature = "nostr")]
-    let master_key_parsed: Option<anyhow::Result<opencrab_nostr::MasterKey>> = master_key_env
-        .as_deref()
-        .map(|b64| opencrab_core::secret_box::parse_master_key(b64).map(std::sync::Arc::new));
 
     // DB初期化（本番はコネクションプール）
     let db = opencrab_db::Db::open(&cfg.database.path)?;
@@ -108,10 +80,6 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
     let gate_socket_for_discord: Option<String> = gate_socket
         .as_ref()
         .map(|p| p.to_string_lossy().into_owned());
-    #[cfg(feature = "nostr")]
-    let gate_socket_for_nostr: Option<String> = gate_socket
-        .as_ref()
-        .map(|p| p.to_string_lossy().into_owned());
     let extgate = Arc::new(opencrab_extgate::ExtgateState::new(db.clone(), gate_token));
     #[cfg(feature = "discord")]
     let attachment_inbox_root = {
@@ -125,100 +93,6 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
     };
     #[cfg(feature = "discord")]
     extgate.set_attachment_inbox_root(attachment_inbox_root.clone());
-
-    // #620: マスターキーの要否は「Nostr が設定されているエージェントが 1 つ以上あるか」で
-    // 決める（既存データから判定・新設定は足さない）。**プロセス全体は止めない**（Nostr を
-    // 使っていない構成はマスターキー無しでも通常起動する）。マスターキーが在るときだけ Nostr
-    // サブシステムを起動し、at-rest 移行を行う。
-    #[cfg(feature = "nostr")]
-    let nostr_configured = {
-        let conn = db
-            .lock()
-            .map_err(|_| anyhow::anyhow!("db lock for Nostr configuration detection"))?;
-        opencrab_db::queries::has_any_agent_nostr_config(&conn)?
-    };
-    #[cfg(feature = "nostr")]
-    let nostr_enabled = db
-        .lock()
-        .map_err(|_| anyhow::anyhow!("db lock for enabled Nostr detection"))?
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM agent_nostr_config WHERE enabled = 1)",
-            [],
-            |row| row.get::<_, bool>(0),
-        )?;
-    #[cfg(feature = "nostr")]
-    let _nostr_ingress = if nostr_configured {
-        match opencrab_nostr::NostrIngress::parse(&cfg.gate.nostr_ingress) {
-            Some(opencrab_nostr::NostrIngress::V3) => opencrab_nostr::NostrIngress::V3,
-            _ => anyhow::bail!(
-                "Nostr 設定済み環境では gate.nostr_ingress = \"v3\" が必須です（legacy fallback は廃止）"
-            ),
-        }
-    } else {
-        opencrab_nostr::NostrIngress::V3
-    };
-    #[cfg(feature = "nostr")]
-    if nostr_configured && gate_socket.is_none() {
-        anyhow::bail!("Nostr 設定済み環境では絶対パスの gate.listen_socket が必須です");
-    }
-    #[cfg(feature = "nostr")]
-    let mut nostr_master_key: Option<opencrab_nostr::MasterKey> = match master_key_parsed {
-        Some(Ok(key)) => Some(key),
-        Some(Err(e)) => {
-            if nostr_configured {
-                emit_master_key_banner(&format!(
-                    "OPENCRAB_SECRET_MASTER_KEY が不正です（base64 32 バイトが必要）: {e}"
-                ));
-            } else {
-                tracing::warn!(error = %e, "OPENCRAB_SECRET_MASTER_KEY が不正ですが Nostr 未設定のため無視して起動します");
-            }
-            None
-        }
-        None => {
-            if nostr_configured {
-                emit_master_key_banner(
-                    "環境変数 OPENCRAB_SECRET_MASTER_KEY が未設定です（Nostr が設定済みのため必須）",
-                );
-            }
-            None
-        }
-    };
-    // #620: 形式は正しいが**中身が違う**マスターキー（別環境の貼り間違え等）を、既存の暗号文の
-    // 試し復号で捕まえる。ここで捕まえないと、移行は `enc:` を skip し provider の復号だけが
-    // 後で失敗して post/watch がエラー連発になり、起動時に何も見えない。移行の**前**に判定し、
-    // 不一致なら既存のバナー経路で大きく知らせて Nostr を起動しない。
-    #[cfg(feature = "nostr")]
-    if let Some(key) = nostr_master_key.clone() {
-        if let Some(reason) =
-            opencrab_nostr::secret_migration::master_key_mismatch_reason(&db, &key)
-        {
-            emit_master_key_banner(&reason);
-            nostr_master_key = None;
-        }
-    }
-    // Nostr サブシステムを起動してよいのは、（一致する）マスターキーが在るときだけ（#620）。
-    // 無ければ（未設定 / 不正形式 / 既存暗号文と不一致）Nostr は起動しない＝送信も受信も止まる。
-    #[cfg(feature = "nostr")]
-    if nostr_enabled && nostr_master_key.is_none() {
-        anyhow::bail!(
-            "enabled Nostr agent がありますが有効な OPENCRAB_SECRET_MASTER_KEY がありません"
-        );
-    }
-    #[cfg(feature = "nostr")]
-    let start_nostr = nostr_enabled;
-
-    // #620: 平文の at-rest 秘密を暗号化する移行（起動時 1 回・冪等・対象が無ければ no-op）。
-    #[cfg(feature = "nostr")]
-    if let Some(mk) = &nostr_master_key {
-        let report = opencrab_nostr::secret_migration::migrate_nostr_secrets_at_rest(
-            &db,
-            mk,
-            std::path::Path::new("data/agents"),
-        );
-        if report.changed_anything() {
-            tracing::info!(?report, "#620: Nostr 秘密の at-rest 移行を実施した");
-        }
-    }
 
     // #553: 起動時リコンサイル。新プロセスの subtask registry（in-memory）は必ず空なので、
     // この時点で status='active' の subtask セッションは定義上すべて孤児（前プロセスと共に
@@ -277,12 +151,6 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
         voice_config: Arc::new(cfg.voice.clone()),
         voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base: cfg.agent.workspace_path.clone(),
-        // #620: DB 本鍵・生成鍵の at-rest 暗号/復号に使うマスターキー（runner の encrypt-on-write
-        // が使う）。**有効（形式が正しく既存暗号文とも一致）なマスターキーがあるときだけ Some**
-        // で、Nostr 未設定の構成でも env に有効なキーがあれば Some になる。未設定 / 不正形式 /
-        // 既存暗号文と不一致のときは None（暗号化を有効化していない＝従来挙動）。
-        #[cfg(feature = "nostr")]
-        nostr_master_key: nostr_master_key.clone(),
         tools_config: Arc::new(std::sync::RwLock::new(tools_cfg)),
         default_model,
         compaction_ratio: cfg.llm.compaction_ratio,
@@ -303,7 +171,7 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
         gateways: Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
         subtask_registries: Arc::new(opencrab_server::subtask_registries::SubtaskRegistries::new()),
         // #588 Stage 2: プロセス全体で 1 つの per-session 直列化ロック。heartbeat・scheduler・
-        // Discord 受信ループ・Nostr ランタイムが同じ実体を共有し、同一セッションのターンを直列化する。
+        // gateway受信ループが同じ実体を共有し、同一セッションのターンを直列化する。
         session_locks: Arc::new(opencrab_actions::SessionLocks::new()),
         progress_debounce: Arc::new(opencrab_server::subtask_registries::ProgressDebounce::new()),
         subtask_notifiers: Arc::new(dashmap::DashMap::new()),
@@ -334,32 +202,10 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
         gate_socket,
         #[cfg(feature = "discord")]
         gate_socket_for_discord,
-        #[cfg(feature = "nostr")]
-        gate_socket_for_nostr,
         #[cfg(feature = "discord")]
         attachment_inbox_root,
-        #[cfg(feature = "nostr")]
-        nostr_master_key,
-        #[cfg(feature = "nostr")]
-        start_nostr,
         heartbeat_config_tx,
         heartbeat_config_rx,
         state,
     })
-}
-
-/// #620: Nostr を起動できない理由を起動ログに埋もれない形で知らせる。
-#[cfg(feature = "nostr")]
-fn emit_master_key_banner(reason: &str) {
-    let line = "=".repeat(72);
-    tracing::error!(
-        "\n{line}\n\
-         [#620] Nostr を起動できません: {reason}\n\
-         at-rest 暗号化のマスターキーが無い/不正なため、この構成では Nostr の秘密鍵を\n\
-         復号できません。よって **Nostr の送信も受信も停止** します（Discord など他の機能は\n\
-         そのまま動きます）。\n\
-         対処: base64 でエンコードした 32 バイトのマスターキーを環境変数\n\
-         OPENCRAB_SECRET_MASTER_KEY に設定して再起動してください。\n\
-         {line}"
-    );
 }

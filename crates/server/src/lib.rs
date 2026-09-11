@@ -8,8 +8,6 @@ use tower_http::trace::TraceLayer;
 pub mod agent_heartbeat;
 pub mod agent_log;
 pub mod agent_management;
-#[cfg(feature = "nostr")]
-pub mod agent_nostr_relay;
 pub mod agent_runtime_impl;
 pub mod agent_schedule;
 pub mod api;
@@ -28,8 +26,6 @@ pub mod memory_condense;
 pub mod memory_declare;
 pub mod memory_maintenance;
 pub mod memory_organize;
-#[cfg(feature = "nostr")]
-pub mod nostr_runner_impl;
 pub mod offload_cleanup;
 pub mod peer_review;
 pub mod process;
@@ -49,10 +45,6 @@ pub mod baseline_l1;
 pub mod baseline_l2;
 
 pub mod transcript;
-
-/// per-agent Nostr sub-gateway マネージャの共有ハンドル。
-#[cfg(feature = "nostr")]
-pub type SharedNostrManager = Arc<opencrab_nostr::NostrGatewayManager<AppState>>;
 
 /// per-agent MCP 接続マネージャの共有ハンドル。
 pub type SharedMcpManager = Arc<opencrab_mcp::McpClientManager>;
@@ -96,13 +88,6 @@ pub struct AppState {
     /// プロバイダー設定変更を再起動なしで反映するために使う。
     pub voice_runtime: Arc<std::sync::Mutex<Option<Arc<dyn opencrab_voice::VoiceRuntime>>>>,
     pub workspace_base: String,
-    /// #620: Nostr の at-rest 秘密（DB 本鍵・生成鍵ファイル）の暗号/復号に使うマスターキー。
-    /// 起動時に env `OPENCRAB_SECRET_MASTER_KEY` から読んで即 `remove_var` し、ここへ保持する。
-    /// **有効（base64 32B かつ既存暗号文とも一致）なマスターキーがあるときだけ `Some`**。
-    /// `None` は未設定 / 不正形式 / 既存暗号文と不一致のいずれか（暗号化を有効化していない＝
-    /// 従来挙動）。Nostr サブシステムは `Some` のときだけ起動する（`None` ならバナーで拒否）。
-    #[cfg(feature = "nostr")]
-    pub nostr_master_key: Option<opencrab_nostr::MasterKey>,
     pub default_model: String,
     pub tools_config: Arc<RwLock<opencrab_actions::tools::ToolsConfig>>,
     /// コンパクション比率: context_window のうち会話履歴に使う割合 (0.0-1.0, デフォルト 0.5)。
@@ -287,18 +272,12 @@ impl AppState {
 /// なお起動時の防御は [`opencrab_actions::TimedFireRouter::self_check`]（本番登録簿そのもので
 /// prefix 衝突・登録漏れを検出）が担う。この 1 本化は「登録関数への追加忘れ」を減らす方で、
 /// 両方あって初めて塞がる。
-#[cfg_attr(
-    not(any(feature = "discord", feature = "nostr")),
-    allow(unused_variables)
-)]
+#[cfg_attr(not(feature = "discord"), allow(unused_variables))]
 pub fn register_production_descriptors(router: &opencrab_actions::TimedFireRouter) {
     #[cfg(feature = "discord")]
     router.register_descriptor(Arc::new(discord_fire::DiscordFire));
-    #[cfg(feature = "nostr")]
-    router.register_descriptor(Arc::new(opencrab_nostr::NostrFire));
-    // #925: V3 レーンの canonical session `extgate-<binding_id>`（両 transport 共通）を受ける
-    // 単一 descriptor。gate socket が無い構成でも登録は生存非依存（発火は sink 側の live 判定で
-    // fail-loud）。旧 Discord/Nostr descriptor とは prefix が排他（discord- / nostr- / extgate-）。
+    // #925: V3 レーンの canonical session `extgate-<binding_id>`を受ける単一 descriptor。
+    // gate socket が無い構成でも登録は生存非依存（発火は sink 側の live 判定で fail-loud）。
     router.register_descriptor(Arc::new(opencrab_extgate::ExtgateFire));
 }
 
@@ -322,9 +301,6 @@ pub(crate) fn test_app_state() -> AppState {
         voice_config: Arc::new(Default::default()),
         voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
-        // #620: テストは暗号化を有効化しない（None＝平文フォールバック / 従来挙動）。
-        #[cfg(feature = "nostr")]
-        nostr_master_key: None,
         default_model: "mock:test".to_string(),
         tools_config: Arc::new(RwLock::new(opencrab_actions::tools::ToolsConfig::default())),
         compaction_ratio: 0.5,
@@ -438,19 +414,6 @@ macro_rules! production_routes {
     };
 }
 
-#[cfg(feature = "nostr")]
-macro_rules! nostr_production_routes {
-    ($apply:ident, $target:ident) => {
-        $apply!($target, "/api/agents/{id}/nostr", get => api::nostr::get_nostr_config, put => api::nostr::update_nostr_config, delete => api::nostr::delete_nostr_config);
-        $apply!($target, "/api/agents/{id}/nostr/generate", post => api::nostr::generate_nostr_key);
-        $apply!($target, "/api/agents/{id}/nostr/start", post => api::nostr::start_nostr_gateway);
-        $apply!($target, "/api/agents/{id}/nostr/stop", post => api::nostr::stop_nostr_gateway);
-        $apply!($target, "/api/agents/{id}/nostr-relay", get => api::nostr_relay::get_nostr_relay_config, put => api::nostr_relay::update_nostr_relay_config);
-        $apply!($target, "/api/agents/{id}/nostr/watches", get => api::session_watches::list_session_watches, post => api::session_watches::create_session_watch);
-        $apply!($target, "/api/agents/{id}/nostr/watches/{watch_id}", put => api::session_watches::update_session_watch, delete => api::session_watches::delete_session_watch);
-    };
-}
-
 macro_rules! mount_route {
     ($router:ident, $path:literal, $first_method:ident => $first_handler:expr $(, $method:ident => $handler:expr)*) => {
         $router = $router.route(
@@ -473,20 +436,6 @@ macro_rules! describe_route {
     }};
 }
 
-#[cfg(feature = "nostr")]
-macro_rules! describe_nostr_route {
-    ($routes:ident, $path:literal, $($method:ident => $handler:expr),+ $(,)?) => {{
-        let mut methods = vec![$(stringify!($method).to_ascii_uppercase()),+];
-        methods.sort();
-        $routes.push(HttpRouteDescriptor {
-            path: $path.to_string(),
-            methods,
-            activation: "cfg(feature = \"nostr\")".to_string(),
-            source: "opencrab_server::nostr_routes".to_string(),
-        });
-    }};
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct HttpRouteDescriptor {
     pub path: String,
@@ -499,8 +448,6 @@ pub struct HttpRouteDescriptor {
 pub fn production_route_inventory() -> Vec<HttpRouteDescriptor> {
     let mut routes = Vec::new();
     production_routes!(describe_route, routes);
-    #[cfg(feature = "nostr")]
-    nostr_production_routes!(describe_nostr_route, routes);
     describe_gate_admin_routes(&mut routes);
     routes.sort_by(|a, b| a.path.cmp(&b.path));
     routes
@@ -541,12 +488,6 @@ pub fn create_router_with_gate(
 ) -> Router {
     let mut router = Router::new();
     production_routes!(mount_route, router);
-    #[cfg(feature = "nostr")]
-    {
-        let mut nostr = Router::new();
-        nostr_production_routes!(mount_route, nostr);
-        router = router.merge(nostr);
-    }
     router
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
@@ -563,7 +504,7 @@ async fn api_health_check() -> axum::Json<serde_json::Value> {
     axum::Json(serde_json::json!({"status": "ok"}))
 }
 
-/// transport登録簿とNostrのcore-side identity capability managerを検証する。
+/// transport登録簿の共通契約を検証する。
 #[cfg(test)]
 #[path = "lib/gateway_registry_tests.rs"]
 mod gateway_registry_tests;

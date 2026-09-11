@@ -2,6 +2,7 @@
 
 pub mod admission;
 pub mod config;
+pub mod daemon;
 pub mod dedup;
 pub mod harness;
 pub mod map;
