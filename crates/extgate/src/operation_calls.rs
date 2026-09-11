@@ -217,7 +217,7 @@ pub async fn invoke_utterance(
     speech_meta.insert(
         "source".to_string(),
         Value::String(
-            opencrab_actions::TranscriptSource::External
+            opencrab_actions::TranscriptSource::new("external", "external_response")
                 .reply()
                 .to_string(),
         ),

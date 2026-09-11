@@ -29,7 +29,6 @@ pub mod identity;
 pub mod ingress;
 pub mod key_provisioning;
 pub mod manager;
-pub mod passthrough;
 pub mod provision;
 pub mod pubkey;
 pub mod runner;
@@ -61,10 +60,13 @@ pub use identity::NostrIdentityAdmin;
 pub use ingress::NostrIngress;
 pub use key_provisioning::NostrKeyProvisioning;
 pub use manager::{NostrGatewayManager, NostrProvisionFn, NostrReviseFn};
-pub use passthrough::NostrPassthrough;
 pub use provision::{
     instance_config_bytes, instance_config_bytes_with_access, instance_config_value,
 };
 pub use pubkey::{normalize_pubkey, to_npub};
 pub use runner::{NostrAgentRunner, NostrGateAllowKeys};
 pub use session::{nostr_session_id, NostrSessionRuntime, NOSTR_SESSION_PREFIX};
+
+pub const GATEWAY_KIND: &str = "nostr";
+pub const TRANSCRIPT_SOURCE: opencrab_actions::TranscriptSource =
+    opencrab_actions::TranscriptSource::new("nostr", "nostr_response");

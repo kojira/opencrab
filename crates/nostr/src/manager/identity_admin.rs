@@ -151,7 +151,7 @@ pub(super) fn stop_gateway(
     allow_store.remove(agent_id);
     // #588 TimedFire: 死んだループへ発火が消えないよう受け口を解除する。Nostr は共有ゲートウェイが
     // 無い（per-agent のみ）ので、解除しないと停止後の時刻発火が宛先なく捨てられる（#603: 必須）。
-    timed_fire_router.unregister_per_agent(opencrab_actions::gateway_kinds::NOSTR, agent_id);
+    timed_fire_router.unregister_per_agent(crate::GATEWAY_KIND, agent_id);
     if let Some(handle) = handle {
         // abort でループ frame を drop → 子 nostaro は kill_on_drop で kill される。
         handle.abort();
@@ -186,7 +186,7 @@ pub(super) async fn spawn_agent_gateway<R: NostrAgentRunner>(
     // 実際の鍵は本鍵プロバイダが DB から復号して env で注入する。
     if secret_key.trim().is_empty() {
         return Err(opencrab_actions::StartDeclined::err(
-            opencrab_actions::gateway_kinds::NOSTR,
+            crate::GATEWAY_KIND,
             agent_id,
             "秘密鍵（nsec）が未設定です。先に鍵を生成してください",
         ));

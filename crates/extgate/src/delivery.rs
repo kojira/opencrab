@@ -179,7 +179,7 @@ async fn send_text(
                 speaker_id: Some(agent_id.to_string()),
                 turn_number: None,
                 metadata_json: Some(
-                    serde_json::json!({"source": TranscriptSource::External.reply()}).to_string(),
+                    serde_json::json!({"source": TranscriptSource::new("external", "external_response").reply()}).to_string(),
                 ),
                 created_at: None,
             },

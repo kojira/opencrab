@@ -266,7 +266,7 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
 #[async_trait::async_trait]
 impl<R: NostrAgentRunner> opencrab_actions::AgentGatewayLifecycle for NostrGatewayManager<R> {
     fn kind(&self) -> &'static str {
-        opencrab_actions::gateway_kinds::NOSTR
+        crate::GATEWAY_KIND
     }
 
     async fn start(&self, agent_id: &str) -> anyhow::Result<()> {
@@ -340,16 +340,6 @@ impl<R: NostrAgentRunner> opencrab_actions::AgentGatewayLifecycle for NostrGatew
         &self,
     ) -> Option<Arc<dyn opencrab_actions::GatewayIdentityProvisioning>> {
         Some(self.identity_provisioner())
-    }
-
-    /// 薄い nostaro passthrough capability（#268）。
-    ///
-    /// マネージャの [`NostaroCli`] を clone して渡すので `binary_path` / timeout をそのまま
-    /// 継承する。`key_provisioning` と同じく**稼働は要らない**（config.toml さえあれば投稿
-    /// できる）ため `is_running` に関わらず常に `Some` を返す。deny・config 固定・未
-    /// materialize の明示エラー・nsec マスクは `NostaroCli::run_passthrough` の内側。
-    fn nostr_passthrough(&self) -> Option<Arc<dyn opencrab_actions::GatewayNostrPassthrough>> {
-        Some(Arc::new(crate::NostrPassthrough::new(self.cli.clone())))
     }
 }
 

@@ -176,7 +176,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                             });
                         start_session_turn(
                             &runtime,
-                            TranscriptSource::External,
+                            TranscriptSource::new("external", "external_response"),
                             &inbound,
                             &system,
                             // extgate は会話へ runtime context を前置しない（wrap は素通し）。

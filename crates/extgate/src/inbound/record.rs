@@ -55,7 +55,7 @@ pub(super) fn record_inbound(
     content: &str,
 ) -> Result<(), GateError> {
     let mut meta = serde_json::json!({
-        "source": TranscriptSource::External.inbound(),
+        "source": TranscriptSource::new("external", "external_response").inbound(),
         "user_name": said.author_label.as_deref().unwrap_or(""),
         "channel_id": row.address,
     });

@@ -5,7 +5,6 @@ pub mod bridge;
 pub mod common;
 pub mod continue_marker;
 pub mod dispatcher;
-pub mod external_gateway;
 pub mod learning;
 pub mod llm_analysis;
 pub mod llm_evaluation;
@@ -35,9 +34,8 @@ pub mod session_watch_policy;
 
 pub use a2ui::{send_ui, send_ui_definition};
 pub use agent_gateway::{
-    is_start_declined, kinds as gateway_kinds, AgentGatewayLifecycle, AgentGatewayRegistry,
-    GatewayIdentityProvisioning, GatewayKeyProvisioning, GatewayNostrPassthrough, ProvisionedKey,
-    SharedAgentGateway, StartDeclined,
+    is_start_declined, AgentGatewayLifecycle, AgentGatewayRegistry, GatewayIdentityProvisioning,
+    GatewayKeyProvisioning, ProvisionedKey, SharedAgentGateway, StartDeclined,
 };
 pub use agent_runtime::AgentRuntime;
 pub use bridge::{
@@ -46,7 +44,7 @@ pub use bridge::{
     CORE_DISPATCHABLE_ACTIONS, CORE_INLINE_ACTIONS, MCP_TOOL_PREFIX, OWNER_ONLY_ACTIONS,
     REJECTION_CODE_PREFIX, TRUSTED_ONLY_ACTIONS,
 };
-pub use channel_config::apply_discord_channel_config;
+pub use channel_config::apply_channel_config;
 pub use continue_marker::visible_speech_after_markers;
 pub use dispatcher::ActionDispatcher;
 pub use no_reply::{

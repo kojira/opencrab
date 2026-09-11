@@ -4,7 +4,7 @@
 /// **なぜ core だけ名前リストが残るか**: 分類の権威は各ツール定義の属性
 /// （`GatewayActionDef.class`）へ移した（PR-2B）。ただし core アクションは
 /// `actions` クレート自身の一次ツールで `GatewayActionDef` を持たない（属性を名乗る
-/// 構築サイトが無い）。基準は「**ゲート固有の名前かどうか**」で、Discord / Nostr /
+/// 構築サイトが無い）。基準は「**ゲート固有の名前かどうか**」で、concrete gateway /
 /// server の各 gateway 固有の名前は属性へ吸収して定数を消したが、core は「ゲート固有の
 /// 名前」ではないのでここへ残す。`BridgedExecutor` はこの 2 定数から `dispatch` を合成し、
 /// gateway / MCP の属性と 1 つの索引にまとめる。
@@ -65,13 +65,13 @@ pub const CORE_INLINE_ACTIONS: &[&str] = &[
     //     決める → 付ける/外す/統合する」という短い書き込みループを回す。結果（新設できたか /
     //     何件付け替えたか）を同ターンで見て次の操作を決めるので background 化しない。短時間の
     //     書き込みで、dispatch すると resume ターンの雑音が増えるだけ。呼び出し元は
-    //     `TRUSTED_ONLY_ACTIONS` にも入れて Nostr（caller=Agent）から触らせない。
+    //     `TRUSTED_ONLY_ACTIONS` にも入れて 外部callerから触らせない。
     "tag_topic",
     "untag_topic",
     "merge_tags",
     // (6) 記憶の単位（宣言）の記録 2 つ（#379）。宣言/取り消しは短時間の書き込みで、
     //     結果（宣言できたか / 取り消せたか）を同ターンで見て次の操作を決める。呼び出し元は
-    //     `TRUSTED_ONLY_ACTIONS` にも入れて Nostr（caller=Agent）から触らせない。
+    //     `TRUSTED_ONLY_ACTIONS` にも入れて 外部callerから触らせない。
     "record_memory_unit",
     "retract_memory_unit",
     // (6) 宣言ランの窓の希望（#394）。1 行を UPSERT するだけの短時間の書き込みで、
@@ -79,7 +79,7 @@ pub const CORE_INLINE_ACTIONS: &[&str] = &[
     "plan_next_memory_window",
     // (6) 記憶の凝縮（#411）。ユニットを俯瞰した原則を core として刻む/更新する/取り消す短時間の
     //     書き込み。結果（刻めたか / 根拠が解決できたか）を同ターンで見て次の原則を決めるので
-    //     background 化しない。呼び出し元は `TRUSTED_ONLY_ACTIONS` にも入れて Nostr（caller=Agent）
+    //     background 化しない。呼び出し元は `TRUSTED_ONLY_ACTIONS` にも入れて 外部caller
     //     から触らせない（宣言道具と同じ論拠）。
     "record_memory_core",
     "update_memory_core",
@@ -117,15 +117,13 @@ pub const OWNER_ONLY_ACTIONS: &[&str] = &[
     "configure_llm_provider",
     // 許可コマンド（execute_shell のホワイトリスト）の管理。実行範囲を広げるため owner のみ。
     "manage_allowed_commands",
-    // Nostr 連携設定（購読リレー/フィルタ/有効化）。外部発信・アイデンティティに関わるため owner のみ。
-    "configure_nostr",
     // 自分の人格/モデル/推論強度/web 検索の変更。挙動を左右するため owner のみ。
     "configure_self",
     // MCP サーバ設定の管理（外部プロセス起動・env に秘密を含みうる）。owner のみ。
     "configure_mcp_server",
     // --- ローカルのシェル実行 / ファイル操作 / 実行許可リストの自己拡張（#330） ---
-    // これらは「Nostr 上での活動」や「未信頼ユーザーとの会話」とは無関係の、
-    // ホスト機の制御そのものであり、最上位の権限面。caller=Agent（Nostr 受信ターン /
+    // これらは外部活動とは無関係の、
+    // ホスト機の制御そのものであり、最上位の権限面。caller=Agent（外部受信ターン /
     // 非オーナー相手の会話ターン）へ出す理由が無い。オーナー指示は「オーナー以外の指示で
     // ローカルのファイルを見る/変えるのも駄目」なので trusted_only ではなく **owner_only**
     // に揃える（CoAgent / TrustedUser にも開けない）。
@@ -160,10 +158,9 @@ pub const OWNER_ONLY_ACTIONS: &[&str] = &[
 pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
     "create_skill",
     "execute_skill",
-    // スキル生成（core 版）と自律学習（#351）。Nostr は誰でも話しかけられるので、会話の
+    // スキル生成（core 版）と自律学習（#351）。外部会話の
     // 流れでスキルを作らせ続ければスキル棚をスパムで汚染できる。オーナー明示の要望
-    // （2026-08-03「スキルを作るのもなし。スパム的に作らされる可能性あるからだめ」）で
-    // caller=Agent（Nostr 受信ターン / 非オーナー相手の会話ターン）からは一覧にも出さず
+    // 要求によりcaller=Agent（外部受信ターン）からは一覧にも出さず
     // 実行もしない。gateway 版の `create_skill`（上）と同じ棚に揃える。owner/co_agent/
     // trusted_user が自分の意思で触るターン（heartbeat tick / ダッシュボード / オーナー
     // 会話）は全て caller=Owner なので従来どおり通る。`learn_from_experience` /
@@ -174,14 +171,6 @@ pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
     "learn_from_peer",
     "reflect_and_learn",
     "read_heartbeat_instructions",
-    // エージェント自身の Nostr 受信 → Discord 転記先設定（#252 段階 C）。**owner 限定に
-    // はしない** — 自分の転記先を自分で決めるのがこの機能の目的で、エージェントが自分の
-    // 意思で触るターン（heartbeat tick / ダッシュボード / オーナー会話）は全て
-    // caller=Owner なので妨げられない。一方 caller=Agent は「未信頼の外部ユーザーと
-    // 会話しているターン」なので、そこへ開けると Nostr の会話ターンで自分宛受信を
-    // 任意の Discord チャンネルへ流させられる。`set_my_heartbeat`（#247/#251）と同じ扱い。
-    "get_my_nostr_relay",
-    "set_my_nostr_relay",
     // 自分のハートビート（自律実行）の有効化と間隔（#247）。**owner 限定にはしない** —
     // 自分の設定を自分で触れることがこの機能の目的で、エージェントが自分の意思で
     // 触るターン（heartbeat tick / ダッシュボード / オーナーとの会話）は全て
@@ -206,15 +195,7 @@ pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
     // （co_agent は一覧に見えても実行は拒否される）。
     "join_voice_channel",
     "leave_voice_channel",
-    // 本鍵（アイデンティティ）の切替。外部ユーザーが勝手に乗っ取れないよう owner/
-    // trusted のみ（inbound=Agent には一覧にも出さず実行もしない）。
-    "nostr_switch_identity",
-    // 生成鍵の npub 一覧。nsec は返さないが、自分の鍵一覧は運用者/自分（caller=Owner の
-    // ターン: heartbeat / ダッシュボード / オーナー会話）だけが見ればよい情報で、外部
-    // ユーザー由来の会話ターン（caller=Agent）へ出す必要は無い。`nostr_switch_identity`
-    // と対で使う管理系ツールなので同じ trusted ゲートに揃える。
-    "nostr_list_keys",
-    // caller=Agent（Nostr 受信ターン / 非オーナー相手の会話ターン）に素通しだった 9 個
+    // caller=Agent（外部受信ターン）に素通しだった 9 個
     // （#356）。棚卸しで OWNER_ONLY にも TRUSTED_ONLY にも入っておらず外部ユーザー由来の
     // 会話ターンから使えていたもの。オーナー要望（2026-08-03「記憶検索はいいと思う。他の
     // ツールさえ使えなければ」）に従い 9 個すべて **trusted_only**（owner_only ではない）。
@@ -223,7 +204,7 @@ pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
     // 従来どおり通る。#351/#353 と同じ手口＝既存の caller ゲートへの追加のみで、新しい
     // 概念・列・設定は足していない。
     //
-    // 通知転送先（webhook）の設定・読み取り。一番危険なのは `set_default_*` — Nostr で
+    // 通知転送先（webhook）の設定・読み取り。一番危険なのは `set_default_*` — 外部経路で
     // 話しかけた第三者にエージェントの通知先 URL を自分のサーバへ向け替えられると、以後の
     // 通知内容がそこへ流れる。読み取り側（`get_*` / `list_*`）も設定済み URL を露出する。
     // これら 6 個は `SystemGatewayActions`（server 側 own ツール / #157 S5）の実装。
@@ -243,7 +224,7 @@ pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
     // OWNER_ONLY（#330）だが、その許可リストの読み取りは素通しだった。
     // `SystemGatewayActions`（server 側 own ツール / #157 S1）の実装。
     "list_allowed_commands",
-    // 記憶へのタグ付け（#359 / #313 段階2）。Nostr は誰でも話しかけられるので、会話の
+    // 記憶へのタグ付け（#359 / #313 段階2）。外部callerは未信頼になりうるため、会話の
     // 流れで記憶にタグを付けさせ続ければタグ語彙をスパムで汚染できる（#351/#353 と同じ
     // 論拠）。整理ラン（段階3）は caller=Owner で走る（heartbeat と同じ前例）ので支障は
     // 無い。`OWNER_ONLY` ではなく **trusted_only** — owner だけでなく CoAgent /
@@ -256,7 +237,7 @@ pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
     "untag_topic",
     "merge_tags",
     // 記憶の単位（宣言）道具 4 つ（#379 #376 段階1）。タグ道具（上）と同じ論拠で
-    // **trusted_only**: Nostr（caller=Agent）は誰でも話しかけられるので、会話の流れで
+    // **trusted_only**: 外部callerは誰でも話しかけられるので、会話の流れで
     // 生ログを俯瞰させ・宣言させ続けると、記憶レイヤをスパムで汚染できる。宣言ラン
     // （段階2）は caller=Owner で走る（heartbeat と同じ前例）ので支障は無い。owner /
     // co_agent / trusted_user が自分の意思で触るターン（heartbeat tick / ダッシュボード /
@@ -268,11 +249,11 @@ pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
     "read_my_history",
     "record_memory_unit",
     "retract_memory_unit",
-    // 宣言ランの窓の希望（#394）。同じ論拠で trusted_only: caller=Agent（Nostr の受信ターン）
+    // 宣言ランの窓の希望（#394）。同じ論拠で trusted_only: caller=Agent（外部受信ターン）
     // から触れると、話しかけるだけで他人の宣言ランの窓を動かせてしまう。宣言ラン本体は
     // caller=Owner で走るので支障は無い。
     "plan_next_memory_window",
-    // 記憶の凝縮 道具 3 つ（#411）。宣言道具と同じ論拠で trusted_only: caller=Agent（Nostr の
+    // 記憶の凝縮 道具 3 つ（#411）。宣言道具と同じ論拠で trusted_only: caller=Agent（外部受信ターンの
     // 受信ターン）から触れると、会話の流れで人格の核（core）をスパムで汚染できる。凝縮ラン本体は
     // caller=Owner で走る（宣言ラン・heartbeat と同じ前例）ので支障は無い。core dispatcher の
     // アクション（`crates/actions/src/memory_units.rs`）で、既存の caller ゲートへの追加のみ。
@@ -280,30 +261,6 @@ pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
     "update_memory_core",
     "retract_memory_core",
 ];
-
-// `nostr_run`（薄い nostaro passthrough / #268）は**ここに入れない**（#303）。
-// opencrab が Nostr 連携で担保するのは ①鍵のエージェント間混同防止 ②nsec の隠蔽 の
-// 2 点だけで、①は常に当該エージェント自身の `--config` を渡す passthrough の構造が、
-// ②は出力マスクが担保している。caller による露出制限はどちらにも要らない。
-// caller=Agent が指すのは **Nostr 受信ターン**（`crates/nostr/src/sink.rs`）と、非オーナー
-// 相手の会話ターン。ここへ入れると Nostr 受信ターンから `nostr_run` が丸ごと消えるため、
-// 「Nostr 上で自律的に活動する」という目的そのものを塞ぐ。
-// （heartbeat tick は caller=Owner なので元から塞がれていない。上の各コメントも同じ。）
-//
-// `nostr_zap` は同じ理由で**ここに入れない**（#306）。以前は `nostr_dm` と共に入っていたが、
-// `nostr_run` を開けた時点で `nostr_run zap` / `nostr_run dm` が同じターンから通るように
-// なり（当時の passthrough deny は `init`/`watch`/`relay` の 3 つだけ）、inner ツール名だけを
-// 隠しても能力は塞げていなかった。一貫性は**制約を増やす方向ではなく減らす方向**で取る、
-// というのがオーナーの決定（#306）。使うかどうかはエージェントが自分で判断する。
-//
-// **`nostr_dm` は #514 で別扱いになった**: DM は秘密鍵漏洩で過去に遡って全部読めるため
-// 送信禁止（オーナー決定）。定義から削除し、送信のもう一方の経路 `nostr_run dm` も
-// passthrough deny（`crates/nostr/src/cli.rs` の `PASSTHROUGH_DENIED_SUBCOMMANDS` に `dm`）で
-// 塞いだ。#306 の「減らす方向」とは逆の追加だが、#306 は「DM か zap か」の caller ゲートの
-// 話で、#514 は「DM という機能そのものを持たない」というより上位の決定なので矛盾しない。
-// 上の nostr_switch_identity / nostr_list_keys は残る — こちらは①鍵の混同防止に
-// 直接効き、`nostr_run` 側でも `init` が deny されていて迂回路が無い。
-// nostr_zap のゲートを外した状態は `nostr_messaging_passes_the_gate_for_agent_caller` が固定する。
 
 /// アクション名 → 権限/深度ポリシー（#45 の単一の表）。
 ///

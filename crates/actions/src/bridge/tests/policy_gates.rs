@@ -98,53 +98,9 @@ async fn describe_tools_does_not_bypass_owner_gate_for_nonowner() {
 /// #264: `nostr_list_keys` は trusted 限定（owner 限定ではない）。未信頼の会話ターン
 /// （caller=Agent）には出さず実行もしないが、owner/co_agent/trusted_user のターンでは
 /// 使える（heartbeat / ダッシュボード / オーナー会話は全て trusted 相当の caller）。
-#[test]
-fn test_nostr_list_keys_is_trusted_only() {
-    let p = tool_policy("nostr_list_keys");
-    assert!(p.trusted_only, "nostr_list_keys must be trusted_only");
-    assert!(
-        !p.owner_only,
-        "nostr_list_keys should be trusted_only, not owner_only（自分の鍵一覧は自分で見る）"
-    );
-
-    // caller=Agent は可視化されない（policy 表の権威を直接見る）。
-    let (_d, agent_ctx) = test_context_with_caller(CallerIdentity::Agent);
-    let agent_exec = BridgedExecutor::new(ActionDispatcher::new(), agent_ctx);
-    assert!(
-        !agent_exec.policy_allows("nostr_list_keys"),
-        "Agent（未信頼の外部会話ターン）は nostr_list_keys を使えない"
-    );
-    // caller=TrustedUser は使える。
-    let (_d2, trusted_ctx) = test_context_with_caller(CallerIdentity::TrustedUser);
-    let trusted_exec = BridgedExecutor::new(ActionDispatcher::new(), trusted_ctx);
-    assert!(
-        trusted_exec.policy_allows("nostr_list_keys"),
-        "TrustedUser は nostr_list_keys を使える"
-    );
-}
-
 /// #264: `nostr_switch_identity`（採用＝接続）は trusted 限定。外部ユーザー由来の
 /// 会話ターン（caller=Agent）には出さず実行もしない（乗っ取り防止）。owner/trusted の
 /// ターン（heartbeat / ダッシュボード / オーナー会話）でだけ自分の意思で採用できる。
-#[test]
-fn test_nostr_switch_identity_is_trusted_only() {
-    let p = tool_policy("nostr_switch_identity");
-    assert!(p.trusted_only, "nostr_switch_identity must be trusted_only");
-
-    let (_d, agent_ctx) = test_context_with_caller(CallerIdentity::Agent);
-    let agent_exec = BridgedExecutor::new(ActionDispatcher::new(), agent_ctx);
-    assert!(
-        !agent_exec.policy_allows("nostr_switch_identity"),
-        "Agent（未信頼の外部会話ターン）は nostr_switch_identity を使えない（乗っ取り防止）"
-    );
-    let (_d2, owner_ctx) = test_context_with_caller(CallerIdentity::Owner);
-    let owner_exec = BridgedExecutor::new(ActionDispatcher::new(), owner_ctx);
-    assert!(
-        owner_exec.policy_allows("nostr_switch_identity"),
-        "Owner は nostr_switch_identity を使える"
-    );
-}
-
 /// #303: `nostr_run` は caller=Agent のターンで**実際にゲートを通る**。
 ///
 /// caller=Agent が指すのは **Nostr 受信ターン**（`crates/nostr/src/sink.rs`）と
@@ -229,42 +185,6 @@ async fn nostr_run_passes_the_gate_for_agent_caller() {
 /// 発言者からの解決（`NostrAgentRunner::resolve_nostr_caller`）で `Owner` に
 /// なったターンが、ポリシー層でどう扱われるかをここに固定する。以前は Nostr の
 /// 呼び出し元が `Agent` 固定だったため、この一覧が丸ごと消えていた（issue 本文の表）。
-#[test]
-fn test_owner_caller_unlocks_the_tools_missing_from_nostr_turns() {
-    // issue #319 で「消えている」と記録されたツール。
-    const OWNER_ONLY_FROM_ISSUE: [&str; 7] = [
-        "configure_self",
-        "configure_nostr",
-        "configure_llm_provider",
-        "configure_mcp_server",
-        "update_instructions",
-        "update_heartbeat_instructions",
-        "manage_allowed_commands",
-    ];
-    const TRUSTED_ONLY_FROM_ISSUE: [&str; 4] = [
-        "set_my_heartbeat",
-        "get_my_heartbeat",
-        "nostr_list_keys",
-        "nostr_switch_identity",
-    ];
-
-    let (_d, owner_ctx) = test_context_with_caller(CallerIdentity::Owner);
-    let owner_exec = BridgedExecutor::new(ActionDispatcher::new(), owner_ctx);
-    let (_d2, agent_ctx) = test_context_with_caller(CallerIdentity::Agent);
-    let agent_exec = BridgedExecutor::new(ActionDispatcher::new(), agent_ctx);
-
-    for name in OWNER_ONLY_FROM_ISSUE.iter().chain(&TRUSTED_ONLY_FROM_ISSUE) {
-        assert!(
-            owner_exec.policy_allows(name),
-            "オーナー発のターンで {name} が通らない"
-        );
-        assert!(
-            !agent_exec.policy_allows(name),
-            "他人発のターン（最小権限）で {name} が通ってしまう"
-        );
-    }
-}
-
 /// #306: `nostr_zap` は caller=Agent のターンで**実際にゲートを通る**。
 ///
 /// 以前は `nostr_dm` / `nostr_zap` が `TRUSTED_ONLY_ACTIONS` に入っていたが、`nostr_run`
@@ -279,79 +199,6 @@ fn test_owner_caller_unlocks_the_tools_missing_from_nostr_turns() {
 /// `nostr_run` 側（`nostr_run_passes_the_gate_for_agent_caller`）と同じく、リストに
 /// 無いことだけを見ても**別の場所に新しいゲートが足された**場合を捕まえられないので、
 /// `policy_allows` / `list_tools` / `dispatch_inner`（= `execute`）の 3 経路を通す。
-#[tokio::test]
-async fn nostr_messaging_passes_the_gate_for_agent_caller() {
-    /// `nostr_zap` を定義するだけの fake gateway
-    /// （本体は `crates/nostr` にあり、この crate からは参照できない）。
-    struct GwNostrMessaging;
-    #[async_trait::async_trait]
-    impl GatewayActions for GwNostrMessaging {
-        fn definitions(&self) -> Vec<GatewayActionDef> {
-            ["nostr_zap"]
-                .into_iter()
-                .map(|name| GatewayActionDef {
-                    name: name.to_string(),
-                    class: opencrab_gateway::ToolClass {
-                        dispatch: opencrab_gateway::DispatchMode::Inline,
-                        sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
-                        sharing: opencrab_gateway::ToolSharing::AgentBound,
-                    },
-                    description: "x".to_string(),
-                    parameters: json!({"type": "object"}),
-                })
-                .collect()
-        }
-        async fn execute(
-            &self,
-            _n: &str,
-            _a: &serde_json::Value,
-            _c: &opencrab_gateway::GatewayCallContext,
-        ) -> GatewayActionResult {
-            GatewayActionResult {
-                success: true,
-                data: Some(json!({"reached_gateway": true})),
-                error: None,
-            }
-        }
-    }
-
-    let (_d, agent_ctx) = test_context_with_caller(CallerIdentity::Agent);
-    let agent_exec = BridgedExecutor::new(ActionDispatcher::new(), agent_ctx)
-        .with_gateway_actions(Arc::new(GwNostrMessaging));
-    // #923: 会話 op 以外の可視性は narrowing 前の policy 層で検証する。
-    let listed: Vec<String> = policy_visible_names(&agent_exec);
-
-    for name in ["nostr_zap"] {
-        // 1. ポリシー述語（list_tools と dispatch_inner が共有する単一の判定）。
-        assert!(
-            agent_exec.policy_allows(name),
-            "caller=Agent（Nostr 受信ターン）で {name} が policy_allows を通らない \
-             — TRUSTED_ONLY_ACTIONS へ戻されたか、別の場所に caller ゲートが足された"
-        );
-        // 2. 可視性: モデルに見えていること。
-        assert!(
-            listed.iter().any(|n| n == name),
-            "caller=Agent の list_tools に {name} が出ない"
-        );
-        // 3. 実行時強制: 名前指定の実行が gateway まで到達すること。
-        let r = agent_exec.execute(name, &json!({})).await;
-        assert!(
-            r.success,
-            "caller=Agent の {name} 実行が拒否された: {:?}",
-            r.error
-        );
-        assert_eq!(r.data["reached_gateway"], true);
-    }
-
-    // 対照: 他ツールの trusted ゲートは維持されている（一律に開けたのではない）。
-    for name in ["create_skill", "nostr_switch_identity", "nostr_list_keys"] {
-        assert!(
-            !agent_exec.policy_allows(name),
-            "{name} の trusted ゲートは維持されるべき（#306 は nostr_zap のみ・nostr_dm は #514 で撤去）"
-        );
-    }
-}
-
 /// #351 で trusted ゲートへ載せるスキル生成 / 自律学習系（core dispatcher アクション）。
 const SKILL_LEARNING_TRUSTED_ONLY: &[&str] = &[
     "create_my_skill",

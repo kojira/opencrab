@@ -190,7 +190,7 @@
             source: opencrab_actions::TranscriptSource,
             record: &opencrab_actions::InboundMessageRecord<'_>,
         ) -> bool {
-            assert_eq!(source, opencrab_actions::TranscriptSource::Nostr);
+            assert_eq!(source, crate::TRANSCRIPT_SOURCE);
             self.recorded.lock().unwrap().push(record.text.to_string());
             self.recorded_sessions
                 .lock()

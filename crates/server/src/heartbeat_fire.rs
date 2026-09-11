@@ -9,57 +9,25 @@
 //! **両者が「まったく同じ経路」を通る**ことが要件（テスト用の別経路を作ると本番と挙動が割れる）。
 //! `bin` の mod は lib から参照できないので、共有できる lib へ置き、両方がこの 1 つの関数を呼ぶ。
 
-use opencrab_actions::{gateway_kinds, CallerIdentity, FireTarget};
+use opencrab_actions::{CallerIdentity, FireTarget};
 
 use crate::AppState;
 
-/// Nostr 宛ハートビートターンの**表示用 channel_name**（プロンプト内の会話呼称）。
-/// Nostr broadcast は特定チャンネルを持たないため、会話名の代わりにこのラベルを充てる。
-///
-/// **スコープではなく表示ラベル**である点に注意。旧名は「agent スコープ」の語を含んでおり、
-/// agent スコープ発火（#456 で全廃済み・現在は session 単位の `nostr-` セッションから発火）が
-/// まだ残っているかのように読み手を誤らせたため改名した（#472）。
-/// 場所の呼称は transport 中立にする（#158 S2 と同方針）。
-pub const HEARTBEAT_NOSTR_CHANNEL_LABEL: &str = "（自律ハートビート）";
-
-/// Discord / Nostr 以外の発火先宛ハートビートの**表示用 channel_name**（真に中立の
-/// ラベル・#628 条件 D）。
-///
-/// [`channel_label`] の `_` 分岐が使う。web 固有ラベルを流用すると 5 つ目の transport
-/// （例 Matrix）でも「ダッシュボードの会話」と出てしまうので、fallback は transport を名指し
-/// しない中立語にする（transport 中立・#158 S2 と同方針）。
 pub const HEARTBEAT_NEUTRAL_CHANNEL_LABEL: &str = "（この会話）";
 
-/// 発火先 → プロンプト内の会話呼称（表示用 channel_name）を解く小関数（#628 条件 D）。
-///
-/// **`channel_label` は `TransportFire` trait に置かない**: Discord は実行時に db から
-/// チャンネル名を引き、他は固定ラベルで、「静的 descriptor」の建前と矛盾するため。発火経路
-/// （このモジュール）側に `target → 表示名` の小関数として残す。
-/// - **Discord**: db のチャンネル設定名（無ければ channel_id）。
-/// - **Nostr**: 固定ラベル [`HEARTBEAT_NOSTR_CHANNEL_LABEL`]。
-/// - **その他**: 真に中立の [`HEARTBEAT_NEUTRAL_CHANNEL_LABEL`]。
-fn channel_label(db: &opencrab_db::Db, target: &FireTarget, agent_id: &str) -> String {
-    match target.kind {
-        gateway_kinds::DISCORD => {
-            let Ok(conn) = db.lock() else {
-                return target.channel_id.clone();
-            };
-            opencrab_db::queries::get_channel_config_for_agent(&conn, &target.channel_id, agent_id)
-                .ok()
-                .flatten()
-                .map(|r| r.channel_name)
-                .filter(|n| !n.is_empty())
-                .unwrap_or_else(|| target.channel_id.clone())
-        }
-        gateway_kinds::NOSTR => HEARTBEAT_NOSTR_CHANNEL_LABEL.to_string(),
-        _ => HEARTBEAT_NEUTRAL_CHANNEL_LABEL.to_string(),
+/// 共有層は発火先kindを解釈しない。gatewayがopaqueな表示tokenを渡した場合だけ使い、
+/// 空なら中立ラベルへ倒す。
+fn channel_label(_db: &opencrab_db::Db, target: &FireTarget, _agent_id: &str) -> String {
+    if target.channel_id.trim().is_empty() {
+        HEARTBEAT_NEUTRAL_CHANNEL_LABEL.to_string()
+    } else {
+        target.channel_id.clone()
     }
 }
 
 /// ハートビート指示文を system プロンプト用の 1 文へ整形する（#501）。
 ///
-/// `channel_name` は発火経路で決まる（`FireTarget::NostrBroadcast` は
-/// [`HEARTBEAT_NOSTR_CHANNEL_LABEL`]、`DiscordChannel` はチャンネル設定名）。
+/// `channel_name` は発火経路からopaqueな表示tokenとして渡される。
 /// `instructions_text` は `resolve_heartbeat_instructions` の合成結果。整形はここ 1 箇所で、
 /// 呼び出し側はこの文字列を system プロンプトへそのまま載せる。
 ///
@@ -68,9 +36,7 @@ fn channel_label(db: &opencrab_db::Db, target: &FireTarget, agent_id: &str) -> S
 /// `SPEAK`/`LEARN`/`IDLE` の出力規約と、見送り理由を毎回記録させる規約（#515）は撤去した。
 ///
 /// **誘導は transport 非依存の 1 種類**（#925 §1.7・裁定 1）。V3 では配送は uniform（応答本文＝
-/// そのセッションの gateway への say・Discord=チャンネル投稿 / Nostr=タイムライン投稿）なので、旧
-/// `posts_response_body` の Discord / Nostr 2 分岐は撤去した。旧 Nostr の「投稿はツール（nostr_post）で」
-/// は旧レーン固有の制約由来で、V3 には持ち込まない（DIRECTION-LOG 481・V3 に `nostr_post` は無い）。
+/// そのセッションの gateway への say）なので、旧transport別分岐は撤去した。
 ///
 /// 「宣言 → サブタスク起動」の進め方は**プロンプトで誘導するだけ**（機構では強制しない）。
 /// **定型の宣言文は埋め込まない**（#588: 毎回同じ文字列が出ると、撤去した `IDLE:` の定型文と

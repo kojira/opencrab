@@ -4,7 +4,7 @@
 //! の Nostr 実装。旧 `opencrab_db::queries::SessionFireTarget::NostrBroadcast` の挙動を厳密に
 //! 写す。Nostr broadcast は特定チャンネルを持たない（channel/guild は空）。
 
-use opencrab_actions::{gateway_kinds, FireTarget, TransportFire, TransportFireEnv};
+use opencrab_actions::{FireTarget, TransportFire, TransportFireEnv};
 
 use crate::session::NOSTR_SESSION_PREFIX;
 
@@ -17,7 +17,7 @@ pub struct NostrFire;
 
 impl TransportFire for NostrFire {
     fn kind(&self) -> &'static str {
-        gateway_kinds::NOSTR
+        crate::GATEWAY_KIND
     }
 
     /// `nostr-{agent}` に完全一致すれば自分の発火先（旧 `resolve_session_fire_target` の
@@ -25,7 +25,7 @@ impl TransportFire for NostrFire {
     fn parse(&self, session_id: &str, agent_id: &str) -> Option<FireTarget> {
         if session_id == format!("{NOSTR_SESSION_PREFIX}{agent_id}") {
             Some(FireTarget {
-                kind: gateway_kinds::NOSTR,
+                kind: crate::GATEWAY_KIND,
                 channel_id: String::new(),
                 guild_id: String::new(),
                 route: String::new(),
@@ -60,7 +60,7 @@ impl TransportFire for NostrFire {
 
     fn sample_target(&self) -> FireTarget {
         FireTarget {
-            kind: gateway_kinds::NOSTR,
+            kind: crate::GATEWAY_KIND,
             channel_id: String::new(),
             guild_id: String::new(),
             route: String::new(),
@@ -79,7 +79,7 @@ mod tests {
         assert_eq!(
             NostrFire.parse(&format!("nostr-{AGENT_UUID}"), AGENT_UUID),
             Some(FireTarget {
-                kind: gateway_kinds::NOSTR,
+                kind: crate::GATEWAY_KIND,
                 channel_id: String::new(),
                 guild_id: String::new(),
                 route: String::new(),

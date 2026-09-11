@@ -8,7 +8,7 @@ use axum::{
 };
 use serde::Deserialize;
 
-use opencrab_actions::{gateway_kinds, SubtaskCompletionSink, SubtaskRegistry, SubtaskSettled};
+use opencrab_actions::{SubtaskCompletionSink, SubtaskRegistry, SubtaskSettled};
 
 use crate::process;
 use crate::process::AgentNotFound;
@@ -433,20 +433,8 @@ pub async fn send_agent_message(
     //    `cancel_subtask` から停止できる（使い捨ての DashMap では常に not found）。
     let subtask_registry = state.subtask_registries.registry_for(&session_id);
 
-    // 6. transport のツール実行の実体を capability で引く（#191 段階2 PR4）。
-    //    以前はここで `discord_manager` を名指しし、`get_http_for_agent` から
-    //    `DiscordGatewayActions` を組み立てていた（Discord の feature の内と外で
-    //    同じ束縛を 2 度書いていた）。組み立ては transport 側へ移り、ここは
-    //    「登録簿から引いて、あれば使う」だけになる。**未登録・未稼働はどちらも
-    //    `None`**（＝ transport 固有ツール無しで会話する）で、移設前と同じ。
-    //
-    //    停止（`cancel_subtask`）は #157 S2 で gateway 非依存層だけの実装になったので、
-    //    Discord の gateway_actions へ registry を渡す必要はもう無い（`SystemGatewayActions`
-    //    が上の共有 registry を直接引く）。
-    let gateway_actions: Option<Arc<dyn opencrab_gateway::GatewayActions>> = state
-        .gateways
-        .get(gateway_kinds::DISCORD)
-        .and_then(|gw| gw.gateway_actions_for(&id));
+    // RESTは具体gateway接続を所有しないため、transport固有tool surfaceを注入しない。
+    let gateway_actions: Option<Arc<dyn opencrab_gateway::GatewayActions>> = None;
 
     // 7. Build agent context. 本ターンの caller（上で resolve 済み）で index を絞る。
     // 同じ caller を下の RunRequest にも載せる（index と実行権限を一致させる / #352）。

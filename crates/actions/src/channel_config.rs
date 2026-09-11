@@ -10,7 +10,7 @@ use serde_json::json;
 /// `discord_channel_config` の DB 書き込み。
 ///
 /// 引数検査・省略時 patch（#421）・応答 JSON は移設前と同一。
-pub fn apply_discord_channel_config(
+pub fn apply_channel_config(
     db: &opencrab_db::Db,
     args: &serde_json::Value,
     agent_id: &str,
@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn upsert_writes_readable_writable() {
         let db = opencrab_db::Db::memory().unwrap();
-        let result = apply_discord_channel_config(
+        let result = apply_channel_config(
             &db,
             &json!({
                 "channel_id": "ch-1",
@@ -156,7 +156,7 @@ mod tests {
     #[test]
     fn omitted_whitelisted_preserves_existing() {
         let db = opencrab_db::Db::memory().unwrap();
-        apply_discord_channel_config(
+        apply_channel_config(
             &db,
             &json!({
                 "channel_id": "ch-1",
@@ -168,7 +168,7 @@ mod tests {
             }),
             "test-agent",
         );
-        let r2 = apply_discord_channel_config(
+        let r2 = apply_channel_config(
             &db,
             &json!({
                 "channel_id": "ch-1",
@@ -192,8 +192,7 @@ mod tests {
     #[test]
     fn missing_guild_id_fails() {
         let db = opencrab_db::Db::memory().unwrap();
-        let result =
-            apply_discord_channel_config(&db, &json!({"channel_id": "ch-1"}), "test-agent");
+        let result = apply_channel_config(&db, &json!({"channel_id": "ch-1"}), "test-agent");
         assert!(!result.success);
         assert!(result.error.unwrap().contains("guild_id"));
     }
