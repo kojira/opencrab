@@ -38,7 +38,9 @@ pub fn event_id_from_origin(origin: &str) -> Option<String> {
     let event_id = match parts.as_slice() {
         ["nostr", "event", "v1", "default", event_id] => *event_id,
         ["nostr", "event", "v1", "watch", watch_id, event_id]
-            if watch_id.parse::<i64>().is_ok() =>
+            if watch_id
+                .parse::<i64>()
+                .is_ok_and(|parsed| parsed > 0 && parsed.to_string() == *watch_id) =>
         {
             *event_id
         }
@@ -243,10 +245,6 @@ mod tests {
             event_id_from_origin(&format!("nostr:event:v1:watch:4:{id}")).as_deref(),
             Some(id.as_str())
         );
-        assert_eq!(
-            event_id_from_origin(&format!("nostr:event:v1:watch:-1:{id}")).as_deref(),
-            Some(id.as_str())
-        );
     }
 
     #[test]
@@ -269,6 +267,10 @@ mod tests {
             format!("nostr:event:v1:watch:{id}"),
             format!("nostr:event:v1:watch:::{id}"),
             format!("nostr:event:v1:watch:nope:{id}"),
+            format!("nostr:event:v1:watch:-1:{id}"),
+            format!("nostr:event:v1:watch:0:{id}"),
+            format!("nostr:event:v1:watch:+1:{id}"),
+            format!("nostr:event:v1:watch:01:{id}"),
             format!("nostr:event:v1:watch:9223372036854775808:{id}"),
             format!("nostr:event:v1:watch:1:extra:{id}"),
         ] {
