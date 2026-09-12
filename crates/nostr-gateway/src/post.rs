@@ -34,12 +34,18 @@ pub enum SayDelivery {
 
 /// origin から返信先 event_id（hex64）を取り出す。origin は `nostr:event:v1:{lane}:{event_id}`。
 pub fn event_id_from_origin(origin: &str) -> Option<String> {
-    if !origin.starts_with("nostr:event:v1:") {
-        return None;
-    }
-    let last = origin.rsplit(':').next()?;
-    if last.len() == 64 && last.bytes().all(|b| b.is_ascii_hexdigit()) {
-        Some(last.to_ascii_lowercase())
+    let parts = origin.split(':').collect::<Vec<_>>();
+    let event_id = match parts.as_slice() {
+        ["nostr", "event", "v1", "default", event_id] => *event_id,
+        ["nostr", "event", "v1", "watch", watch_id, event_id]
+            if watch_id.parse::<i64>().is_ok() =>
+        {
+            *event_id
+        }
+        _ => return None,
+    };
+    if event_id.len() == 64 && event_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Some(event_id.to_ascii_lowercase())
     } else {
         None
     }
@@ -74,6 +80,51 @@ fn event_id_from_reply_target(target: &str) -> Option<String> {
         return Some(target.to_ascii_lowercase());
     }
     event_id_from_origin(target)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DeliveryKind {
+    Reply(String),
+    Standalone,
+}
+
+impl DeliveryKind {
+    fn log_kind(&self) -> &'static str {
+        match self {
+            Self::Reply(_) => "reply",
+            Self::Standalone => "standalone",
+        }
+    }
+
+    fn operation(&self) -> &'static str {
+        match self {
+            Self::Reply(_) => "reply",
+            Self::Standalone => "post",
+        }
+    }
+
+    fn success(&self) -> SayDelivery {
+        match self {
+            Self::Reply(_) => SayDelivery::Posted,
+            Self::Standalone => SayDelivery::PostedStandalone,
+        }
+    }
+
+    fn argv(&self, config_path: &Path, text: &str) -> Vec<String> {
+        match self {
+            Self::Reply(event_id) => reply_argv(config_path, event_id, text),
+            Self::Standalone => post_argv(config_path, text),
+        }
+    }
+}
+
+fn delivery_kind_for_target(target: Option<&str>) -> Result<DeliveryKind, &'static str> {
+    match target {
+        Some(target) => event_id_from_reply_target(target)
+            .map(DeliveryKind::Reply)
+            .ok_or("invalid reply target"),
+        None => Ok(DeliveryKind::Standalone),
+    }
 }
 
 /// この instance の nostaro post 用 config パス（socket と同じディレクトリ）。
@@ -142,27 +193,14 @@ pub async fn deliver_say(
     text: &str,
     dry_run: bool,
 ) -> SayDelivery {
-    let reply_target = match reply_origin {
-        Some(target) => match event_id_from_reply_target(&target) {
-            Some(event_id) => Some(event_id),
-            None => return SayDelivery::Failed("invalid reply target".to_string()),
-        },
-        None => None,
+    let delivery_kind = match delivery_kind_for_target(reply_origin.as_deref()) {
+        Ok(kind) => kind,
+        Err(message) => return SayDelivery::Failed(message.to_string()),
     };
-    let (argv, success, operation, kind) = match reply_target {
-        Some(event_id) => (
-            reply_argv(config_path, &event_id, text),
-            SayDelivery::Posted,
-            "reply",
-            "reply",
-        ),
-        None => (
-            post_argv(config_path, text),
-            SayDelivery::PostedStandalone,
-            "post",
-            "standalone",
-        ),
-    };
+    let argv = delivery_kind.argv(config_path, text);
+    let success = delivery_kind.success();
+    let operation = delivery_kind.operation();
+    let kind = delivery_kind.log_kind();
     if dry_run {
         tracing::info!(
             target: DRY_RUN_LOG_TARGET,
@@ -205,6 +243,10 @@ mod tests {
             event_id_from_origin(&format!("nostr:event:v1:watch:4:{id}")).as_deref(),
             Some(id.as_str())
         );
+        assert_eq!(
+            event_id_from_origin(&format!("nostr:event:v1:watch:-1:{id}")).as_deref(),
+            Some(id.as_str())
+        );
     }
 
     #[test]
@@ -215,6 +257,23 @@ mod tests {
             event_id_from_origin("nostr:event:v1:default:not-64-hex"),
             None
         );
+    }
+
+    #[test]
+    fn event_id_rejects_malformed_origin_lanes() {
+        let id = "aa".repeat(32);
+        for origin in [
+            format!("nostr:event:v1::{id}"),
+            format!("nostr:event:v1:other:{id}"),
+            format!("nostr:event:v1:default:extra:{id}"),
+            format!("nostr:event:v1:watch:{id}"),
+            format!("nostr:event:v1:watch:::{id}"),
+            format!("nostr:event:v1:watch:nope:{id}"),
+            format!("nostr:event:v1:watch:9223372036854775808:{id}"),
+            format!("nostr:event:v1:watch:1:extra:{id}"),
+        ] {
+            assert_eq!(event_id_from_origin(&origin), None, "accepted {origin}");
+        }
     }
 
     #[test]
@@ -467,6 +526,19 @@ mod tests {
             }
             other => panic!("expected Failed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn delivery_kind_drives_dry_run_log_kind() {
+        let id = "dd".repeat(32);
+        assert_eq!(
+            delivery_kind_for_target(Some(&id)).unwrap().log_kind(),
+            "reply"
+        );
+        assert_eq!(
+            delivery_kind_for_target(None).unwrap().log_kind(),
+            "standalone"
+        );
     }
 
     #[tokio::test]

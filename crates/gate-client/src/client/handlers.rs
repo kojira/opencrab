@@ -127,6 +127,13 @@ async fn handle_say(client: &InstanceClient, say: Say, generation: u64) -> bool 
         let _ = send_frame(client, err_frame(&say.id, "external_rejected", None)).await;
         return false;
     };
+    let explicit_reply_target = match say_reply_target(&say.payload) {
+        Ok(target) => target.map(str::to_string),
+        Err(_) => {
+            let _ = send_frame(client, err_frame(&say.id, "bad_request", None)).await;
+            return false;
+        }
+    };
     let mut inner = client.inner.lock().await;
     if inner.closed {
         return true;
@@ -143,9 +150,8 @@ async fn handle_say(client: &InstanceClient, say: Say, generation: u64) -> bool 
     };
     // 返信先: payload の明示 reply_target（送信側が載せた発端 origin・resume 等）を最優先。
     // 無ければ進行中ターンの pending_turn（即時 said が刻んだ Single だけ Some）に委ねる。
-    let reply_origin = say_reply_target(&say.payload)
-        .map(str::to_string)
-        .or_else(|| match inner.pending_turn.get(&say.binding_id) {
+    let reply_origin =
+        explicit_reply_target.or_else(|| match inner.pending_turn.get(&say.binding_id) {
             Some(turn) => match &turn.reply_origin {
                 ReplyOrigin::Single(o) => Some(o.clone()),
                 ReplyOrigin::None | ReplyOrigin::Ambiguous => None,

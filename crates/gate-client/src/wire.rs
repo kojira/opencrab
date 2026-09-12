@@ -452,6 +452,7 @@ fn parse_say(obj: &Value) -> Result<Say, FrameError> {
     if !payload.is_object() {
         return Err(FrameError::BadRequest);
     }
+    say_reply_target(&payload)?;
     Ok(Say {
         id,
         binding_id,
@@ -566,11 +567,12 @@ pub fn say_text(payload: &Value) -> Option<&str> {
 }
 
 /// say payload の明示 `reply_target`（発端イベントの origin）。gateway が返信先を導けない
-/// resume ターン等で送信側が載せる。欠落・非 string・空は None（gateway 側の相関に委ねる）。
-pub fn say_reply_target(payload: &Value) -> Option<&str> {
+/// resume ターン等で送信側が載せる。欠落時だけ Ok(None)、present-but-invalidはBadRequest。
+pub fn say_reply_target(payload: &Value) -> Result<Option<&str>, FrameError> {
     match payload.get("reply_target") {
-        Some(Value::String(s)) if !s.is_empty() => Some(s.as_str()),
-        _ => None,
+        None => Ok(None),
+        Some(Value::String(s)) if !s.is_empty() => Ok(Some(s.as_str())),
+        Some(_) => Err(FrameError::BadRequest),
     }
 }
 
@@ -632,15 +634,33 @@ mod tests {
     #[test]
     fn say_reply_target_reads_optional_origin() {
         assert_eq!(
-            say_reply_target(&json!({"text":"hi","reply_target":"nostr:event:v1:default:aa"})),
-            Some("nostr:event:v1:default:aa")
+            say_reply_target(&json!({"text":"hi","reply_target":"opaque-origin"})),
+            Ok(Some("opaque-origin"))
         );
-        // 欠落・空は None（gateway 側の相関に委ねる）。
-        assert_eq!(say_reply_target(&json!({"text":"hi"})), None);
-        assert_eq!(
-            say_reply_target(&json!({"text":"hi","reply_target":""})),
-            None
-        );
+        assert_eq!(say_reply_target(&json!({"text":"hi"})), Ok(None));
+        for reply_target in [Value::Null, json!(42), json!("")] {
+            assert_eq!(
+                say_reply_target(&json!({"text":"hi","reply_target":reply_target})),
+                Err(FrameError::BadRequest)
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_present_say_reply_target_is_bad_request() {
+        for reply_target in [Value::Null, json!(42), json!("")] {
+            let raw = serde_json::to_vec(&json!({
+                "id": "say:1",
+                "m": "say",
+                "binding_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "payload": {"text": "hi", "reply_target": reply_target}
+            }))
+            .unwrap();
+            match parse_frame_bytes(&raw).unwrap() {
+                CoreMsg::Invalid { code, .. } => assert_eq!(code, "bad_request"),
+                other => panic!("malformed reply_target accepted: {other:?}"),
+            }
+        }
     }
 
     #[test]
