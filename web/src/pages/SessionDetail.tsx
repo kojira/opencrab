@@ -605,7 +605,7 @@ export default function SessionDetail() {
         className="flex-1 min-h-0 overflow-y-auto space-y-2 mb-4"
         onScroll={onLogScroll}
       >
-        {logsKind === 'loading' ? (
+        {ownershipPending || logsKind === 'loading' ? (
           <div className="empty-state" aria-busy="true">
             <p className="text-body-lg text-on-surface-variant">{t('sessionDetail.loadingLogs')}</p>
           </div>

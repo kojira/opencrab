@@ -394,6 +394,67 @@ describe('SessionDetail web conversation', () => {
     expect(sendWebMessage).toHaveBeenCalled();
   });
 
+  it('does not expose web internals while gateway ownership is unresolved', async () => {
+    let resolveOwnership!: (state: 'ready') => void;
+    getWebConversationState.mockReturnValue(
+      new Promise<'ready'>((resolve) => {
+        resolveOwnership = resolve;
+      }),
+    );
+    getSession.mockResolvedValue(dto('ready'));
+    getSessionLogs.mockResolvedValue([
+      {
+        id: 1,
+        agent_id: 'agent-1',
+        session_id: SESSION_ID,
+        log_type: 'speech',
+        content: 'pending-user-message',
+        speaker_id: 'web-qc-human',
+        turn_number: 1,
+        metadata_json: null,
+        created_at: '2026-09-12T00:00:00Z',
+      },
+      {
+        id: 2,
+        agent_id: 'agent-1',
+        session_id: SESSION_ID,
+        log_type: 'system',
+        content: '{"type":"turn_terminated","marker":"NO_REPLY"}',
+        speaker_id: null,
+        turn_number: null,
+        metadata_json: null,
+        created_at: '2026-09-12T00:00:01Z',
+      },
+      {
+        id: 3,
+        agent_id: 'agent-1',
+        session_id: SESSION_ID,
+        log_type: 'system',
+        content: '{"type":"turn_exhausted","reason":"iteration_limit","iterations":31}',
+        speaker_id: null,
+        turn_number: null,
+        metadata_json: null,
+        created_at: '2026-09-12T00:00:02Z',
+      },
+    ]);
+
+    renderDetail();
+
+    await waitFor(() => expect(getSessionLogs).toHaveBeenCalled());
+    expect(screen.queryByText('web-qc-human')).not.toBeInTheDocument();
+    expect(screen.queryByText(/turn_terminated/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/NO_REPLY/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/turn_exhausted/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/iteration_limit/)).not.toBeInTheDocument();
+
+    await act(async () => resolveOwnership('ready'));
+    expect(await screen.findByText('sessionDetail.you')).toBeInTheDocument();
+    expect(screen.getByText('pending-user-message')).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'sessionDetail.responseIncomplete',
+    );
+  });
+
   it('hides normal termination internals and labels human and agent speech', async () => {
     getSession.mockResolvedValue(dto('ready'));
     getSessionLogs.mockResolvedValue([
