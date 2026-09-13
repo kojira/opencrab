@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use opencrab_core::heartbeat::HeartbeatConfig;
@@ -13,6 +14,26 @@ pub(super) struct BootstrapContext {
     pub(super) heartbeat_config_tx: watch::Sender<HeartbeatConfig>,
     pub(super) heartbeat_config_rx: watch::Receiver<HeartbeatConfig>,
     pub(super) state: AppState,
+}
+
+fn attachment_inbox_path(database_path: &Path) -> PathBuf {
+    database_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("attachments/inbox")
+}
+
+fn configure_attachment_inbox(
+    extgate: &opencrab_extgate::ExtgateState,
+    database_path: &Path,
+) -> anyhow::Result<PathBuf> {
+    let inbox = attachment_inbox_path(database_path);
+    std::fs::create_dir_all(&inbox)?;
+    #[cfg(unix)]
+    std::fs::set_permissions(&inbox, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+    let inbox = inbox.canonicalize()?;
+    extgate.set_attachment_inbox_root(inbox.clone());
+    Ok(inbox)
 }
 
 /// Loads and validates startup configuration, scrubs secrets, recovers the DB,
@@ -48,6 +69,7 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
     let gate_token = opencrab_extgate::OperatorToken::take_from_env();
     let gate_socket = opencrab_extgate::validate_listen_socket(&cfg.gate.listen_socket)?;
     let extgate = Arc::new(opencrab_extgate::ExtgateState::new(db.clone(), gate_token));
+    configure_attachment_inbox(&extgate, Path::new(&cfg.database.path))?;
 
     // #553: 起動時リコンサイル。新プロセスの subtask registry（in-memory）は必ず空なので、
     // この時点で status='active' の subtask セッションは定義上すべて孤児（前プロセスと共に
@@ -159,4 +181,40 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
         heartbeat_config_rx,
         state,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn attachment_inbox_is_derived_from_the_core_database_directory() {
+        let database = std::path::Path::new("runtime/data/opencrab.db");
+        assert_eq!(
+            super::attachment_inbox_path(database),
+            std::path::Path::new("runtime/data/attachments/inbox")
+        );
+    }
+
+    #[test]
+    fn startup_configures_a_private_core_owned_attachment_inbox() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("data/opencrab.db");
+        std::fs::create_dir_all(database.parent().unwrap()).unwrap();
+        let db = opencrab_db::Db::open(database.to_str().unwrap()).unwrap();
+        let extgate = opencrab_extgate::ExtgateState::new(
+            db,
+            opencrab_extgate::OperatorToken::from_bytes(""),
+        );
+
+        let inbox = super::configure_attachment_inbox(&extgate, &database).unwrap();
+
+        assert_eq!(extgate.attachment_inbox_root().as_deref(), Some(&*inbox));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(inbox).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+    }
 }
