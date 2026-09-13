@@ -7,6 +7,7 @@ import SessionDetail, { BINDING_POLL_MAX, BINDING_POLL_MS } from './SessionDetai
 
 const getSession = vi.fn();
 const getSessionLogs = vi.fn();
+const getWebConversationState = vi.fn();
 const sendWebMessage = vi.fn();
 const sendOwnerInstruction = vi.fn();
 
@@ -16,6 +17,7 @@ vi.mock('../api/sessions', async () => {
     ...actual,
     getSession: (...args: unknown[]) => getSession(...args),
     getSessionLogs: (...args: unknown[]) => getSessionLogs(...args),
+    getWebConversationState: (...args: unknown[]) => getWebConversationState(...args),
     sendWebMessage: (...args: unknown[]) => sendWebMessage(...args),
     sendOwnerInstruction: (...args: unknown[]) => sendOwnerInstruction(...args),
   };
@@ -47,7 +49,7 @@ const PHYSICAL_ID = 'extgate-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const originalRandomUUID = crypto.randomUUID;
 
-function dto(state: SessionDto['web_binding_state'], id = SESSION_ID): SessionDto {
+function dto(_state: 'ready' | 'provisioning' | 'unavailable', id = SESSION_ID): SessionDto {
   return {
     id,
     mode: 'solo',
@@ -58,9 +60,6 @@ function dto(state: SessionDto['web_binding_state'], id = SESSION_ID): SessionDt
     participant_count: 1,
     agent_ids: ['agent-1'],
     metadata_json: null,
-    gateway_bound: true,
-    web_binding_state: state,
-    binding_address: SESSION_ID,
   };
 }
 
@@ -77,6 +76,8 @@ function renderDetail(pathId = SESSION_ID) {
 beforeEach(() => {
   getSession.mockReset();
   getSessionLogs.mockReset();
+  getWebConversationState.mockReset();
+  getWebConversationState.mockResolvedValue('ready');
   sendWebMessage.mockReset();
   sendOwnerInstruction.mockReset();
   FakeEventSource.instances = [];
@@ -94,7 +95,32 @@ afterEach(() => {
 });
 
 describe('SessionDetail web conversation', () => {
+  it('uses gateway ownership status instead of server session projection', async () => {
+    getSession.mockResolvedValue({
+      id: PHYSICAL_ID,
+      mode: 'solo',
+      theme: PHYSICAL_ID,
+      phase: 'main',
+      turn_number: 0,
+      status: 'active',
+      participant_count: 1,
+      agent_ids: ['agent-1'],
+      metadata_json: null,
+    });
+    getSessionLogs.mockResolvedValue([]);
+    renderDetail(PHYSICAL_ID);
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText('sessionDetail.ownerPlaceholder')).toBeEnabled();
+    });
+    expect(getWebConversationState).toHaveBeenCalledWith(PHYSICAL_ID);
+    expect(FakeEventSource.instances[0].url).toBe(
+      `/api/web-conversations/${PHYSICAL_ID}/events`,
+    );
+  });
+
   it('shows unnamed title and disables composer while provisioning', async () => {
+    getWebConversationState.mockResolvedValue('provisioning');
     getSession.mockResolvedValue(dto('provisioning'));
     getSessionLogs.mockResolvedValue([]);
     renderDetail();
@@ -108,7 +134,10 @@ describe('SessionDetail web conversation', () => {
 
   it('enables composer after a poll reaches ready', async () => {
     vi.useFakeTimers();
-    getSession.mockResolvedValueOnce(dto('provisioning')).mockResolvedValue(dto('ready'));
+    getWebConversationState
+      .mockResolvedValueOnce('provisioning')
+      .mockResolvedValue('ready');
+    getSession.mockResolvedValue(dto('provisioning'));
     getSessionLogs.mockResolvedValue([]);
     renderDetail();
     await act(async () => {
@@ -119,12 +148,13 @@ describe('SessionDetail web conversation', () => {
       await vi.advanceTimersByTimeAsync(BINDING_POLL_MS);
     });
     expect(screen.getByPlaceholderText('sessionDetail.ownerPlaceholder')).toBeEnabled();
-    expect(getSession.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(getWebConversationState.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(sendWebMessage).not.toHaveBeenCalled();
   });
 
   it('shows retry after 60s timeout without confusing empty/ready', async () => {
     vi.useFakeTimers();
+    getWebConversationState.mockResolvedValue('provisioning');
     getSession.mockResolvedValue(dto('provisioning'));
     getSessionLogs.mockResolvedValue([]);
     renderDetail();
@@ -141,9 +171,10 @@ describe('SessionDetail web conversation', () => {
 
   it('shows retry on detail poll error and does not treat it as empty', async () => {
     vi.useFakeTimers();
-    getSession
-      .mockResolvedValueOnce(dto('provisioning'))
+    getWebConversationState
+      .mockResolvedValueOnce('provisioning')
       .mockRejectedValueOnce(new Error('detail-read-failed'));
+    getSession.mockResolvedValue(dto('provisioning'));
     getSessionLogs.mockResolvedValue([]);
     renderDetail();
     await act(async () => {
@@ -159,6 +190,7 @@ describe('SessionDetail web conversation', () => {
   });
 
   it('does not auto-create a conversation from the detail page', async () => {
+    getWebConversationState.mockResolvedValue('provisioning');
     getSession.mockResolvedValue(dto('provisioning'));
     getSessionLogs.mockResolvedValue([]);
     const fetchMock = vi.fn();
@@ -171,6 +203,7 @@ describe('SessionDetail web conversation', () => {
   });
 
   it('does not attach SSE or unbound chrome on intake sessions', async () => {
+    getWebConversationState.mockResolvedValue(null);
     getSession.mockResolvedValue({
       id: 'intake-1',
       mode: 'intake',
@@ -181,7 +214,6 @@ describe('SessionDetail web conversation', () => {
       participant_count: 1,
       agent_ids: ['agent-1'],
       metadata_json: null,
-      gateway_bound: false,
     });
     getSessionLogs.mockResolvedValue([]);
     render(
@@ -202,6 +234,7 @@ describe('SessionDetail web conversation', () => {
   });
 
   it('sends owner instruction on intake and never opens web-conversation SSE', async () => {
+    getWebConversationState.mockResolvedValue(null);
     getSession.mockResolvedValue({
       id: 'intake-1',
       mode: 'intake',
@@ -212,7 +245,6 @@ describe('SessionDetail web conversation', () => {
       participant_count: 1,
       agent_ids: ['agent-1'],
       metadata_json: null,
-      gateway_bound: false,
     });
     getSessionLogs.mockResolvedValue([]);
     sendOwnerInstruction.mockResolvedValue({ id: 1 });
@@ -281,7 +313,7 @@ describe('SessionDetail web conversation', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
-  it('opens with physical id, posts to binding address, and shows say', async () => {
+  it('opens and posts with the gateway-owned physical session id', async () => {
     getSession.mockResolvedValue(dto('ready', PHYSICAL_ID));
     getSessionLogs
       .mockResolvedValueOnce([])
@@ -310,23 +342,18 @@ describe('SessionDetail web conversation', () => {
     });
     expect(FakeEventSource.instances).toHaveLength(1);
     expect(FakeEventSource.instances[0].url).toBe(
-      `/api/web-conversations/${SESSION_ID}/events`,
+      `/api/web-conversations/${PHYSICAL_ID}/events`,
     );
     const user = userEvent.setup();
     await user.type(screen.getByPlaceholderText('sessionDetail.ownerPlaceholder'), 'from-physical');
     await user.click(screen.getByRole('button', { name: /common.send/ }));
     await waitFor(() => {
       expect(sendWebMessage).toHaveBeenCalledWith(
-        SESSION_ID,
+        PHYSICAL_ID,
         expect.stringMatching(UUID_V4),
         'from-physical',
       );
     });
-    expect(sendWebMessage).not.toHaveBeenCalledWith(
-      PHYSICAL_ID,
-      expect.anything(),
-      expect.anything(),
-    );
     await act(async () => {
       FakeEventSource.instances[0].emit('message', { text: 'agent-say' });
     });

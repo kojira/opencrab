@@ -196,9 +196,10 @@ pub async fn delete_trusted_user(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opencrab_db::queries::{TRUSTED_PLATFORM_REST, TRUSTED_PLATFORM_WEB};
+    use opencrab_db::queries::TRUSTED_PLATFORM_REST;
 
     const TEST_EXTERNAL_SOURCE: &str = "external-a";
+    const OTHER_EXTERNAL_SOURCE: &str = "external-b";
 
     fn req(user_id: &str, platform: Option<&str>) -> AddTrustedUserRequest {
         AddTrustedUserRequest {
@@ -248,7 +249,7 @@ mod tests {
     async fn platform_is_taken_from_the_request() {
         let state = crate::test_app_state();
         for (platform, user_id) in [
-            (TRUSTED_PLATFORM_WEB, "dash-user"),
+            (TEST_EXTERNAL_SOURCE, "dash-user"),
             (TRUSTED_PLATFORM_REST, "rest-user"),
         ] {
             let dto = add_trusted_user(
@@ -269,7 +270,7 @@ mod tests {
             // 他経路へは漏れない。
             assert!(opencrab_db::queries::get_trusted_user(
                 &conn,
-                TEST_EXTERNAL_SOURCE,
+                OTHER_EXTERNAL_SOURCE,
                 user_id,
                 "agent-1"
             )
@@ -309,7 +310,7 @@ mod tests {
         let err = add_trusted_user(
             State(state.clone()),
             Path("agent-1".to_string()),
-            Json(req("42", Some(TRUSTED_PLATFORM_WEB))),
+            Json(req("42", Some(TEST_EXTERNAL_SOURCE))),
         )
         .await
         .expect_err("unique violation");
@@ -323,7 +324,7 @@ mod tests {
         let _added = add_trusted_user(
             State(state.clone()),
             Path("agent-1".to_string()),
-            Json(req("dash-user", Some(TRUSTED_PLATFORM_WEB))),
+            Json(req("dash-user", Some(TEST_EXTERNAL_SOURCE))),
         )
         .await
         .expect("add");
@@ -332,7 +333,7 @@ mod tests {
             .await
             .0;
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].platform, TRUSTED_PLATFORM_WEB);
+        assert_eq!(rows[0].platform, TEST_EXTERNAL_SOURCE);
         // 経路で絞らない一覧であることは維持（運用者は全経路を見られる）。
         assert_eq!(rows[0].user_id, "dash-user");
     }
@@ -363,7 +364,7 @@ mod tests {
             let err = add_trusted_user(
                 State(state.clone()),
                 Path("agent-1".to_string()),
-                Json(req_with_permission("42", TRUSTED_PLATFORM_WEB, bad)),
+                Json(req_with_permission("42", TEST_EXTERNAL_SOURCE, bad)),
             )
             .await
             .expect_err("unknown permission");
@@ -383,7 +384,7 @@ mod tests {
         let dto = add_trusted_user(
             State(state.clone()),
             Path("agent-1".to_string()),
-            Json(req_with_permission("42", TRUSTED_PLATFORM_WEB, "co-agent")),
+            Json(req_with_permission("42", TEST_EXTERNAL_SOURCE, "co-agent")),
         )
         .await
         .expect("add")
@@ -422,7 +423,7 @@ mod tests {
             Path("agent-1".to_string()),
             Json(req_with_permission(
                 "dash-user",
-                TRUSTED_PLATFORM_WEB,
+                TEST_EXTERNAL_SOURCE,
                 "co-agent",
             )),
         )
@@ -441,7 +442,7 @@ mod tests {
         assert_eq!(
             crate::caller_identity::resolve_caller_identity(
                 &conn,
-                TRUSTED_PLATFORM_WEB,
+                TEST_EXTERNAL_SOURCE,
                 "dash-user",
                 "agent-1",
             ),
@@ -451,7 +452,7 @@ mod tests {
         );
         // 相互レビューの名簿
         let roster =
-            opencrab_db::queries::list_co_agent_reviewers(&conn, TRUSTED_PLATFORM_WEB, "agent-1")
+            opencrab_db::queries::list_co_agent_reviewers(&conn, TEST_EXTERNAL_SOURCE, "agent-1")
                 .unwrap();
         assert_eq!(roster.len(), 1);
         assert_eq!(roster[0].user_id, "dash-user");

@@ -12,11 +12,11 @@ fn connected_create_is_201_then_sse_said_turn_say() {
     assert!(wait_tcp(gw_port, Duration::from_secs(15)), "gateway http");
 
     let (st, body) = http(
-        core_port,
+        gw_port,
         "POST",
-        &format!("/api/agents/{AGENT}/web-conversations"),
+        "/api/web-conversations",
         None,
-        Some(r#"{"name":"E2E"}"#),
+        Some(&format!(r#"{{"agent_id":"{AGENT}","name":"E2E"}}"#)),
         Duration::from_secs(70),
     )
     .expect("create");
@@ -27,19 +27,6 @@ fn connected_create_is_201_then_sse_said_turn_say() {
     let session = v["session_id"].as_str().unwrap().to_string();
     let binding = v["binding_id"].as_str().unwrap().to_string();
     assert_eq!(counts(&db), (1, 1, 1));
-
-    let (st, detail) = http(
-        core_port,
-        "GET",
-        &format!("/api/sessions/{session}"),
-        None,
-        None,
-        Duration::from_secs(5),
-    )
-    .expect("detail");
-    assert_eq!(st, 200, "{detail}");
-    let d: serde_json::Value = serde_json::from_str(detail.trim()).unwrap();
-    assert_eq!(d["web_binding_state"], "ready");
 
     let sse_rx = spawn_sse(gw_port, &session);
     let post_body = format!(

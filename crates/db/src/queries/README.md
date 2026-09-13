@@ -12,19 +12,16 @@ session 不在・membership 不一致は fail-loud。
 
 | 関数 | 契約 |
 |---|---|
-| `create_gate_binding_in_tx` | physical session・sole membership・open binding を 1 TX。theme は呼び出し側が渡す。commit は呼び出し側。V3 Binding PUT と Web 会話作成の唯一の書込口。V3.5: address が既存 session id と byte 一致なら新 session を作らず再利用。membership 不一致・複数・他 open binding の占有は `CreateGateBindingError::Conflict` |
+| `create_gate_binding_in_tx` | physical session・sole membership・open bindingを1 TXで作る汎用部品。themeは呼び出し側が渡し、commitも呼び出し側が行う。addressが既存session IDとbyte一致なら再利用する。membership不一致・複数・他open bindingの占有は`CreateGateBindingError::Conflict` |
 | `canonical_session_id` | physical `extgate-{binding_id}` があればそれ、無ければ address と id が一致する再利用 session。どちらも無ければ None |
 
-## sessions（webgate read 投影）
+## sessions
 
 | 関数 | 契約 |
 |---|---|
-| `open_web_physical_session` | 開いている web binding の physical ID。address または physical ID で解決。同一 session に 2 件なら失敗 |
-| `open_web_binding` | 開いている web binding の binding_id / instance_id / address。address または physical ID。同一 session に 2 件なら失敗 |
-| `effective_agent_ids` | `agent_sessions` を join した実効参加者。open web binding があれば physical の membership |
-| `project_session_row` | logical ID 維持。alias があれば表示属性は alias。無ければ physical。会話状態は physical。membership から participant を埋める |
-| `list_sessions_page` | physical 行を除き logical 1 件。alias の無い open web binding も含める。各行に `agent_ids`。`updated_at DESC`。`limit` と `before` |
-| `list_sessions` | テスト専用。投影なし全件 |
+| `effective_agent_ids` | opaque session IDをそのまま使い、`agent_sessions`をjoinした実効参加者を返す |
+| `list_sessions_page` | 全sessionを`updated_at DESC, id DESC`で返す。`limit`とopaqueな`before`を受ける |
+| `list_sessions` | テスト専用の全件一覧 |
 
 ## tool_logs（載せ替え工程 5-b）
 

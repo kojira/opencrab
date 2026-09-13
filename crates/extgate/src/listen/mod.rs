@@ -2,11 +2,12 @@
 
 mod activity;
 mod bind;
+mod create_binding;
 mod hello;
 mod response;
 
 pub use activity::{emit_activity, emit_turn_failed};
-pub use bind::{enqueue_bind, wait_bind_ack, web_binding_state, EnqueueBindOutcome};
+pub use bind::{enqueue_bind, wait_bind_ack, EnqueueBindOutcome};
 
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::fs::PermissionsExt;
@@ -26,6 +27,7 @@ use crate::inbound::process_said;
 use crate::protocol::{err_frame, ok_said_frame, read_frame, write_json, FrameError, InboundMsg};
 use crate::registry::ExtgateState;
 
+use create_binding::handle_create_binding;
 use hello::handle_hello;
 use response::handle_response;
 
@@ -268,6 +270,18 @@ async fn dispatch_frame<R: AgentRuntime>(ctx: &mut ConnCtx<'_, R>, bytes: &[u8])
                 Err(()) => Err(()),
             }
         }
+        (ConnState::PreHello, InboundMsg::CreateBinding(request)) => {
+            close_live(
+                state,
+                None,
+                Some(identity),
+                ErrorCode::ProtocolOrder,
+                Some(&request.id),
+                Some(writer),
+            )
+            .await;
+            Err(())
+        }
         (ConnState::PreHello, InboundMsg::Said(said)) => {
             close_live(
                 state,
@@ -332,6 +346,22 @@ async fn dispatch_frame<R: AgentRuntime>(ctx: &mut ConnCtx<'_, R>, bytes: &[u8])
             )
             .await;
             Err(())
+        }
+        (ConnState::Running, InboundMsg::CreateBinding(request)) => {
+            let inst = instance_id.as_deref().expect("running has instance");
+            let result = handle_create_binding(state, writer, inst, request).await;
+            if result.is_err() {
+                close_live(
+                    state,
+                    Some(inst),
+                    Some(identity),
+                    ErrorCode::StoreError,
+                    None,
+                    None,
+                )
+                .await;
+            }
+            result
         }
         (ConnState::Running, InboundMsg::Said(said)) => {
             let inst = instance_id.as_deref().expect("running has instance");

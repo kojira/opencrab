@@ -195,6 +195,14 @@ pub enum SaidCaller {
 }
 
 #[derive(Debug, Clone)]
+pub struct CreateBinding {
+    pub id: String,
+    pub binding_id: String,
+    pub address: String,
+    pub session_theme: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct Said {
     pub id: String,
     pub binding_id: String,
@@ -242,6 +250,7 @@ pub struct WireResponse {
 #[derive(Debug)]
 pub enum InboundMsg {
     Hello(Hello),
+    CreateBinding(CreateBinding),
     Said(Said),
     Response(WireResponse),
     Reverse {
@@ -308,6 +317,14 @@ pub fn parse_inbound(obj: &Value) -> Result<InboundMsg, GateError> {
                 m,
             }),
         },
+        "create_binding" => match parse_create_binding(obj) {
+            Ok(request) => Ok(InboundMsg::CreateBinding(request)),
+            Err(e) => Ok(InboundMsg::Invalid {
+                id: opt_id(obj),
+                code: e.code,
+                m,
+            }),
+        },
         "said" => match parse_said(obj) {
             Ok(s) => Ok(InboundMsg::Said(s)),
             Err(e) => Ok(InboundMsg::Invalid {
@@ -347,6 +364,19 @@ fn parse_hello(obj: &Value) -> Result<Hello, GateError> {
         revision,
         config_digest,
         operations,
+    })
+}
+
+fn parse_create_binding(obj: &Value) -> Result<CreateBinding, GateError> {
+    let id = parse_request_id(&require_str(obj, "id")?)?;
+    let binding_id = parse_uuid(&require_str(obj, "binding_id")?)?;
+    let address = nonempty_str(obj, "address")?;
+    let session_theme = nonempty_str(obj, "session_theme")?;
+    Ok(CreateBinding {
+        id,
+        binding_id,
+        address,
+        session_theme,
     })
 }
 

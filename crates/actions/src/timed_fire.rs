@@ -41,7 +41,7 @@ pub fn new_turn_id() -> String {
 pub struct TimedFireRequest {
     /// 発火先＝実会話セッション。**登録済み transport のセッション**で、書式は各 transport の
     /// [`TransportFire`] descriptor が名乗る（例: `nostr-{agent}` / `discord-{agent}-{guild}-{channel}`
-    /// / `web-{agent}-{conversation}`）。列挙を固定しない（transport を足しても腐らない）。
+    /// / 外部conversation address）。列挙を固定しない（transportを足しても腐らない）。
     pub session_id: String,
     pub agent_id: String,
     /// transport 固有のチャンネル token（Discord は数値文字列、Nostr broadcast・web は空）。

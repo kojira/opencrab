@@ -15,7 +15,7 @@ pub trait InvokeHandler: Send + Sync {
     /// #900: 発話は say と同じく「そのターンで発話した」証跡になる。gateway 固有の operation
     /// 名を知るのは handler なので、発話クラスの判定は handler が担う（gate-client は非依存）。
     /// これが `true` の invoke が Ok で決着すると、ターンは沈黙ではなくなり `CompletedNoReply`
-    /// （Discord なら 🤐）を立てない。resolve/follow 等の照会・操作クラスは既定の `false`。
+    /// 外部側の沈黙表現を立てない。resolve/follow等の照会・操作classは既定の`false`。
     fn is_utterance(&self, operation: &str) -> bool {
         let _ = operation;
         false
@@ -53,16 +53,15 @@ pub enum LiveEvent {
         ///
         /// 即時ターン（`occupy_until_turn_ends=true` の said 1 本）でだけ `Some`。bundle
         /// ターン（複数 said・activity started 起源）や、同一ターンに複数の即時 said が
-        /// 相乗りした曖昧ケースでは `None`（＝単一の返信先が無い）。consumer（nostr-gateway）は
-        /// `Some` を e-tag reply、`None` を「返信先無し」として扱う。web など返信先を使わない
-        /// consumer は無視してよい。
+        /// 相乗りした曖昧ケースでは`None`（単一の返信先が無い）。consumerは`Some`を
+        /// 対象返信、`None`を「返信先無し」として扱う。返信先を使わないconsumerは無視してよい。
         reply_origin: Option<String>,
     },
     Activity {
         activity_id: String,
         state: String,
         /// #964: 次の LLM request に新しく含める投稿の origin（state="read" のときだけ Some）。
-        /// consumer（discord-gateway）は read+Some でこの origin へ 👀 を付ける。
+        /// consumerはread+Someを外部側の既読表現へ変換できる。
         origin: Option<String>,
     },
     /// #915: activity ended で core が指定した完了サインの付け先（発話 id）。
@@ -71,13 +70,13 @@ pub enum LiveEvent {
         /// 沈黙で終えたターン（say 無し）の発端 origin。即時ターン（`occupy_until_turn_ends`）が
         /// 単独で握った said（`ReplyOrigin::Single`）だけ `Some`。bundle ターンや複数即時 said の
         /// 相乗り（`None`/`Ambiguous`）では単一の発端を決められないので `None`。consumer は `Some` を
-        /// 「その発端メッセージが沈黙で終えた」サイン（Discord なら 🤐）に使い、`None` は無視してよい。
+        /// 「その発端messageが沈黙で終えた」サインに使い、`None`は無視してよい。
         /// 裁定A（core が ended を say の後に出す）により、返信ターンでは saw_utterance=true のため
         /// このイベントは立たず、真の沈黙ターンだけに立つ。
         reply_origin: Option<String>,
     },
     /// R3(❌): ターン失敗（DeliveryEffect::Failed）。`reply_origin` は発端メッセージの origin。
-    /// consumer（discord-gateway）はこの origin へ ❌ を付ける。error 本文は運ばない。
+    /// consumerはこのoriginへ外部側の失敗表現を付けられる。error本文は運ばない。
     TurnFailed { reply_origin: String },
     Error {
         code: String,
@@ -105,7 +104,14 @@ pub enum PostRefuse {
     Busy,
 }
 
-/// core からの `say` をどう扱うか。Web は live queue へ受理、Nostr 第1段は投稿能力が無いので拒否する。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateBindingError {
+    NotReady,
+    Rejected { code: String },
+    Disconnected,
+}
+
+/// core からの `say` をどう扱うか。外部出力をlive queueへ受理するか拒否する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SayPolicy {
     AcceptToLiveQueue,
@@ -114,6 +120,7 @@ pub enum SayPolicy {
 
 enum PendingKind {
     Hello,
+    Command,
     Said,
 }
 
@@ -280,7 +287,7 @@ impl InstanceClient {
         client
     }
 
-    /// DI 能力宣言つきで接続する（nostr-gateway 等）。`operations` を hello に載せ、invoke は
+    /// DI能力宣言つきで接続する。`operations`をhelloに載せ、invokeは
     /// `invoke_handler` で実行する。従来の `spawn` は operations/handler なし（能力ゼロ）。
     #[allow(clippy::too_many_arguments)]
     pub fn spawn_with_operations(
@@ -328,6 +335,62 @@ impl InstanceClient {
             return None;
         }
         inner.acknowledged.get(address).cloned()
+    }
+
+    /// 接続中instance自身のopaque bindingをcoreへ作成要求する。
+    pub async fn create_binding(
+        &self,
+        binding_id: &str,
+        address: &str,
+        session_theme: &str,
+    ) -> Result<(), CreateBindingError> {
+        if self.inner.lock().await.closed {
+            return Err(CreateBindingError::NotReady);
+        }
+        let id = self.next_id();
+        let (tx, rx) = oneshot::channel();
+        self.inner.lock().await.pending_said.insert(
+            id.clone(),
+            PendingSaid {
+                kind: PendingKind::Command,
+                reply: tx,
+            },
+        );
+        if !send_frame(
+            self,
+            create_binding_frame(&id, binding_id, address, session_theme),
+        )
+        .await
+        {
+            self.inner.lock().await.pending_said.remove(&id);
+            return Err(CreateBindingError::Disconnected);
+        }
+        match tokio::time::timeout(SAID_TIMEOUT, rx).await {
+            Ok(Ok(SaidOutcome::Accepted { .. })) => {
+                let mut inner = self.inner.lock().await;
+                match inner.remembered.get(address) {
+                    Some(existing) if existing != binding_id => {
+                        Err(CreateBindingError::Rejected {
+                            code: "binding_conflict".to_string(),
+                        })
+                    }
+                    Some(_) => Ok(()),
+                    None => {
+                        inner
+                            .remembered
+                            .insert(address.to_string(), binding_id.to_string());
+                        Ok(())
+                    }
+                }
+            }
+            Ok(Ok(SaidOutcome::WireErr { code, .. })) => {
+                Err(CreateBindingError::Rejected { code })
+            }
+            Ok(Ok(SaidOutcome::Disconnected)) | Ok(Err(_)) | Err(_) => {
+                Err(CreateBindingError::Disconnected)
+            }
+            Ok(Ok(SaidOutcome::NotAdmitted)) => Err(CreateBindingError::Disconnected),
+        }
     }
 
     pub async fn post_said(

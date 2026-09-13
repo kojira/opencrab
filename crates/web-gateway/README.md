@@ -6,12 +6,14 @@ Web 会話の独立 binary。HTTP/SSE を V3 protocol=2（UDS）へ変換する�
 
 | method / path | 役割 |
 |---|---|
+| `POST /api/web-conversations` | `{agent_id,name}`からgatewayがIDを採番し、対象instanceへ汎用`create_binding`を直接送る。bind ack済みは`201 ready`、待機中は`202 provisioning` |
+| `GET /api/web-conversations/{session_id}` | Web gateway自身がownershipとbinding状態（`ready` / `provisioning` / `unavailable`）を返す。非所有は404 |
 | `POST /api/web-conversations/{session_id}/messages` | body exact `{client_message_id,text,attachments}` → V3 `said`。`202` は said ack まで |
 | `GET /api/web-conversations/{session_id}/events` | say / activity / `completed_no_reply` の SSE |
 | `GET\|POST /rooms/{room}/messages` | 404。alias しない |
 | `GET /chat` | 404。redirect しない |
 
-`session_id` は binding address（legacy logical session と byte-equal）。未 ack は `503`。同一 address を複数 instance が ack したら `409 binding_conflict`。turn 実行中の別 UUID は said を送り、core の session queue 32 が直列化する。キュー満杯は `ok.seq=null` → `403 {state:"not_admitted"}`。`409 conversation_busy` は `PostRefuse::Busy` のときだけ（キュー満杯を client が Busy に写したとき）。`ok.seq=null` は `403 {state:"not_admitted"}`。said 応答は 10 秒で打ち切り、`disconnect` 相当で pending を落とす。wire close の SSE は `event: gate_error`（ブラウザ予約の `error` とぶつからない）。同一 address への後勝ち bind は上書きせず接続を閉じる。
+`session_id`はgatewayが作ったphysical session IDで、binding addressとbyte-equal。未ackは`503`。同一 address を複数 instance が ack したら `409 binding_conflict`。turn 実行中の別 UUID は said を送り、core の session queue 32 が直列化する。キュー満杯は `ok.seq=null` → `403 {state:"not_admitted"}`。`409 conversation_busy` は `PostRefuse::Busy` のときだけ（キュー満杯を client が Busy に写したとき）。`ok.seq=null` は `403 {state:"not_admitted"}`。said 応答は 10 秒で打ち切り、`disconnect` 相当で pending を落とす。wire close の SSE は `event: gate_error`（ブラウザ予約の `error` とぶつからない）。同一 address への後勝ち bind は上書きせず接続を閉じる。
 
 UDS 切断後も HTTP listen は落とさない。指数 backoff（200ms…8s）で再接続し、hello 再送で open binding を replay する。切断中の message POST は `503 disconnect`、events は SSE `gate_error`（code=`disconnect`）。tracing filter は `opencrab_web_gateway` / `opencrab_gate_client` と binary 名 `web_gateway`。hello / bind / said / say / close を info に残す。V3 client / wire / json は `opencrab-gate-client` を使う。
 
@@ -23,7 +25,7 @@ operator が書いた placement JSON を argv で渡す。
 web-gateway /path/to/placement.json
 ```
 
-`http_bind` は loopback のみ。`core_socket` は絶対 path。instance ごとに UDS を 1 本。config bytes は byte-exact `{"author_id":<json-string>}`（空白なし）。digest は SHA-256 lowerhex。
+`http_bind` は loopback のみ。`core_socket` は絶対 path。instanceごとに`agent_id`とUDSを1本ずつ定義し、同じ`agent_id`の重複は拒否する。config bytes は byte-exact `{"author_id":<json-string>}`（空白なし）。digest は SHA-256 lowerhex。
 
 ## 検収
 

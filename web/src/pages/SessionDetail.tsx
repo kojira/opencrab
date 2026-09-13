@@ -5,10 +5,12 @@ import {
   conversationEventsUrl,
   getSession,
   getSessionLogs,
+  getWebConversationState,
   sendOwnerInstruction,
   sendWebMessage,
   ConversationSendError,
 } from '../api/sessions';
+import type { WebConversationState } from '../api/sessions';
 import type { SessionDto, SessionLogRow } from '../api/types';
 import { conversationTitle } from '../lib/conversationTitle';
 import {
@@ -177,6 +179,7 @@ export default function SessionDetail() {
   const [pollError, setPollError] = useState<string | null>(null);
   const [pollTimedOut, setPollTimedOut] = useState(false);
   const [pollNonce, setPollNonce] = useState(0);
+  const [webState, setWebState] = useState<WebConversationState | null>();
   const abortRef = useRef<AbortController | null>(null);
   const sourceRef = useRef<EventSource | null>(null);
   const logListRef = useRef<HTMLDivElement>(null);
@@ -191,6 +194,17 @@ export default function SessionDetail() {
     abortRef.current = ac;
     setSessionKind('loading');
     setLogsKind('loading');
+    setWebState(undefined);
+    getWebConversationState(sessionId)
+      .then((state) => {
+        if (ac.signal.aborted) return;
+        setWebState(state);
+      })
+      .catch((e: Error) => {
+        if (ac.signal.aborted) return;
+        setWebState('unavailable');
+        setPollError(e.message);
+      });
     getSession(sessionId, ac.signal)
       .then((s) => {
         if (ac.signal.aborted) return;
@@ -257,12 +271,12 @@ export default function SessionDetail() {
     };
   }, [id]);
 
-  // §4.3: open web binding の address または physical。server の gateway_bound がその写像。
-  // gateway 呼び出しの正は GET 応答の binding_address。URL / ID 形式から推測しない。
-  const isWebConversation = session?.gateway_bound === true;
-  const gatewaySessionId = session?.binding_address;
-  const ready = isWebConversation && session?.web_binding_state === 'ready';
-  const preparing = isWebConversation && session?.web_binding_state !== 'ready';
+  // Web ownershipとbinding状態はWeb gateway自身へ問い合わせる。server sessionはopaque。
+  const ownershipPending = webState === undefined;
+  const isWebConversation = webState !== undefined && webState !== null;
+  const gatewaySessionId = isWebConversation ? id : undefined;
+  const ready = webState === 'ready';
+  const preparing = isWebConversation && !ready;
 
   useEffect(() => {
     if (!id || !preparing || pollTimedOut || pollError) return;
@@ -275,11 +289,15 @@ export default function SessionDetail() {
         setPollTimedOut(true);
         return;
       }
-      getSession(id)
-        .then((s) => {
+      getWebConversationState(id)
+        .then((state) => {
           if (cancelled) return;
-          setSession(s);
-          setSessionKind('loaded');
+          if (state === null) {
+            window.clearInterval(timer);
+            setPollError('binding_not_found');
+            return;
+          }
+          setWebState(state);
         })
         .catch((e: Error) => {
           if (cancelled) return;
@@ -431,7 +449,7 @@ export default function SessionDetail() {
     const text = ownerInput.trim();
     try {
       if (!gatewaySessionId) {
-        throw new Error('binding_address_missing');
+        throw new Error('gateway_session_missing');
       }
       const clientId = pendingId ?? uuidV4();
       forceToBottomRef.current = true;
@@ -454,7 +472,7 @@ export default function SessionDetail() {
     if (!pendingId || !pendingText) return;
     try {
       if (!gatewaySessionId) {
-        throw new Error('binding_address_missing');
+        throw new Error('gateway_session_missing');
       }
       setSendPhase('submitting');
       setSendError(null);
@@ -486,10 +504,13 @@ export default function SessionDetail() {
     setPollTimedOut(false);
     setPollNonce((n) => n + 1);
     if (id) {
-      getSession(id)
-        .then((s) => {
-          setSession(s);
-          setSessionKind('loaded');
+      getWebConversationState(id)
+        .then((state) => {
+          if (state === null) {
+            setPollError('binding_not_found');
+          } else {
+            setWebState(state);
+          }
         })
         .catch((e: Error) => {
           setPollError(e.message);
@@ -615,7 +636,7 @@ export default function SessionDetail() {
 
       {sessionKind === 'loaded' && session ? (
         <div className="card-elevated">
-          {!isWebConversation ? (
+          {ownershipPending ? null : !isWebConversation ? (
             <form className="flex gap-3" onSubmit={(e) => void submitOwner(e)}>
               <input
                 type="text"

@@ -94,7 +94,6 @@
         "name": "Created Baseline Agent",
         "persona_name": "Created"
       },
-      "POST /api/agents/{agent_id}/web-conversations": {},
       "POST /api/agents/{id}/messages": {
         "content": "baseline",
         "user_id": "baseline-user"

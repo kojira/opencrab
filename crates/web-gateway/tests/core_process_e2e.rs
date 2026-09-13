@@ -481,7 +481,7 @@ fn send_said_turn_say_sse_over_real_processes() {
     std::fs::write(
         &placement,
         format!(
-            r#"{{"http_bind":"127.0.0.1:{gw_port}","core_socket":"{}","instances":[{{"instance_id":"{INSTANCE}","revision":1,"author_id":"{AUTHOR}"}}]}}"#,
+            r#"{{"http_bind":"127.0.0.1:{gw_port}","core_socket":"{}","instances":[{{"instance_id":"{INSTANCE}","revision":1,"agent_id":"{AGENT}","author_id":"{AUTHOR}"}}]}}"#,
             sock.display()
         ),
     )

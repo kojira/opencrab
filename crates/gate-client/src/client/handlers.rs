@@ -266,7 +266,7 @@ async fn handle_response(client: &InstanceClient, resp: WireResponse, generation
         return;
     };
     let outcome = match pending.kind {
-        PendingKind::Hello => {
+        PendingKind::Hello | PendingKind::Command => {
             if resp.ok && resp.seq.is_none() {
                 SaidOutcome::Accepted { seq: 0 }
             } else if !resp.ok {

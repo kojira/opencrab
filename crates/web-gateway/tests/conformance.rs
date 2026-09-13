@@ -298,6 +298,7 @@ impl Session {
             "instances": [{
                 "instance_id": ids["instance_id"],
                 "revision": ids["revision"],
+                "agent_id": "agent-a",
                 "author_id": ids["author_id"],
             }]
         });

@@ -31,7 +31,7 @@ pub use ids::{config_digest, encode_config_b64, now_nanos, session_id_for_bindin
 pub use inbound::channel_whitelisted;
 pub use listen::{
     enqueue_bind, recover_stale_deliveries, serve_uds, validate_listen_socket, wait_bind_ack,
-    web_binding_state, EnqueueBindOutcome,
+    EnqueueBindOutcome,
 };
 pub use operation_calls::{invoke_and_wait, invoke_utterance, recover_stale_calls, InvokeError};
 pub use operations::{

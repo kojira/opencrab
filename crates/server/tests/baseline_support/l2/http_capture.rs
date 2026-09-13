@@ -149,7 +149,7 @@ fn seeded_state() -> Result<AppState, String> {
     .map_err(|e| format!("seed co-agent: {e}"))?;
     opencrab_db::queries::add_trusted_user(
         &conn,
-        "web",
+        "baseline-source",
         "baseline-trusted-row",
         AGENT_ID,
         "baseline-user",
@@ -182,16 +182,6 @@ fn seeded_state() -> Result<AppState, String> {
         "baseline",
     )
     .map_err(|e| format!("seed allowed command: {e}"))?;
-    opencrab_db::queries::upsert_agent_discord_config(
-        &conn,
-        &opencrab_db::queries::AgentDiscordConfigRow {
-            agent_id: AGENT_ID.to_string(),
-            bot_token: "baseline-not-a-credential".to_string(),
-            owner_discord_id: "baseline-owner".to_string(),
-            enabled: true,
-        },
-    )
-    .map_err(|e| format!("seed Discord config: {e}"))?;
     opencrab_db::queries::upsert_agent_mcp_server(
         &conn,
         &opencrab_db::queries::AgentMcpServerRow {
@@ -205,18 +195,6 @@ fn seeded_state() -> Result<AppState, String> {
         },
     )
     .map_err(|e| format!("seed MCP config: {e}"))?;
-    opencrab_db::queries::upsert_agent_nostr_config(
-        &conn,
-        &opencrab_db::queries::AgentNostrConfigRow {
-            agent_id: AGENT_ID.to_string(),
-            secret_key: "nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqzqujme"
-                .to_string(),
-            relays_json: "[]".to_string(),
-            filter_json: "{\"authors\":[],\"keywords\":[],\"kinds\":[]}".to_string(),
-            enabled: true,
-        },
-    )
-    .map_err(|e| format!("seed Nostr config: {e}"))?;
     opencrab_db::queries::set_voice_config_override(
         &conn,
         r#"{"enabled":false,"stt":{"language":"ja"}}"#,

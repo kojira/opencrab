@@ -39,6 +39,41 @@ const FORBIDDEN: &[&str] = &[
     "discord", "serenity", "songbird", "nostr", "telegram", "slack",
 ];
 
+const WEB_GATEWAY_IDENTIFIERS: &[&str] = &[
+    "webgate",
+    "web_gateway",
+    "webbinding",
+    "web_binding",
+    "webconversation",
+    "web_conversation",
+    "websession",
+    "web_session",
+    "trusted_platform_web",
+];
+
+fn concrete_web_identifier(word: &str) -> Option<&'static str> {
+    let lower = word.to_ascii_lowercase();
+    WEB_GATEWAY_IDENTIFIERS
+        .iter()
+        .copied()
+        .find(|needle| lower.contains(needle))
+}
+
+fn concrete_web_literal(text: &str) -> Option<&'static str> {
+    let lower = text.to_ascii_lowercase();
+    let compact: String = lower.chars().filter(|c| !c.is_whitespace()).collect();
+    if compact.contains("kind_id='web'") || compact.contains("kind_id=\"web\"") {
+        return Some("kind_id web predicate");
+    }
+    if lower.contains("web-conversations") {
+        return Some("web-conversations route");
+    }
+    if lower.starts_with("webgate_v") || lower == "web-" || lower.starts_with("opencrab:web:") {
+        return Some("web gateway owned literal");
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // cfg(test) 判定（`no_gate_identifiers.rs` から移植。挙動を揃える）。
 // ---------------------------------------------------------------------------
@@ -229,7 +264,7 @@ impl<'ast> Visit<'ast> for Finder {
     // --- 識別子 ---
     fn visit_ident(&mut self, node: &'ast proc_macro2::Ident) {
         let text = node.to_string();
-        if let Some(word) = hit(&text) {
+        if let Some(word) = hit(&text).or_else(|| concrete_web_identifier(&text)) {
             self.record("識別子", &text, word);
         }
     }
@@ -237,7 +272,7 @@ impl<'ast> Visit<'ast> for Finder {
     // --- 文字列リテラル ---
     fn visit_lit_str(&mut self, node: &'ast syn::LitStr) {
         let text = node.value();
-        if let Some(word) = hit(&text) {
+        if let Some(word) = hit(&text).or_else(|| concrete_web_literal(&text)) {
             self.record("文字列リテラル", &text, word);
         }
     }
@@ -430,6 +465,34 @@ fn detector_flags_platform_identifier() {
         v.iter().any(|m| m.contains("nostr")),
         "nostr_token 識別子を検出できていない: {v:?}"
     );
+}
+
+#[test]
+fn detector_flags_concrete_web_identifiers_sql_and_routes() {
+    for src in [
+        r#"fn web_binding_state() {}"#,
+        r##"const SQL: &str = r#"SELECT 1 WHERE kind_id = 'web'"#;"##,
+        r#"const ROUTE: &str = "/api/agents/{id}/web-conversations";"#,
+        r#"const PREFIX: &str = "web-";"#,
+    ] {
+        let v = scan_source("fixture.rs", src);
+        assert!(!v.is_empty(), "concrete Web gateway fixture passed: {src}");
+    }
+}
+
+#[test]
+fn detector_allows_generic_web_terms() {
+    let src = r#"
+        fn website() {
+            let webhook = "https://example.test/hook";
+            let web_search = true;
+            let mime = "image/webp";
+            let frontend = "browser HTTP";
+            let _ = (webhook, web_search, mime, frontend);
+        }
+    "#;
+    let v = scan_source("fixture.rs", src);
+    assert!(v.is_empty(), "generic Web terms were rejected: {v:?}");
 }
 
 #[test]

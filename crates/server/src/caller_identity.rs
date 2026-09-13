@@ -70,9 +70,9 @@ pub fn resolve_caller_identity_with_owner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opencrab_db::queries::{
-        TrustedUserPermission, TRUSTED_PLATFORM_REST, TRUSTED_PLATFORM_WEB,
-    };
+    use opencrab_db::queries::{TrustedUserPermission, TRUSTED_PLATFORM_REST};
+
+    const TEST_EXTERNAL_SOURCE: &str = "external-a";
 
     fn register(
         conn: &rusqlite::Connection,
@@ -99,12 +99,12 @@ mod tests {
         let conn = opencrab_db::init_memory().unwrap();
         register(
             &conn,
-            TRUSTED_PLATFORM_WEB,
+            TEST_EXTERNAL_SOURCE,
             "42",
             TrustedUserPermission::User,
         );
         assert_eq!(
-            resolve_caller_identity(&conn, TRUSTED_PLATFORM_WEB, "42", "agent-1"),
+            resolve_caller_identity(&conn, TEST_EXTERNAL_SOURCE, "42", "agent-1"),
             CallerIdentity::TrustedUser
         );
         assert_eq!(

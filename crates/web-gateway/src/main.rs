@@ -34,15 +34,23 @@ async fn run() -> anyhow::Result<()> {
     let socket = PathBuf::from(&place.core_socket);
 
     let mut instances = Vec::new();
+    let mut agent_clients = std::collections::HashMap::new();
     for inst in &place.instances {
         let digest = config_digest(&inst.author_id);
-        instances.push(InstanceClient::spawn(
+        let client = InstanceClient::spawn(
             socket.clone(),
             inst.instance_id.clone(),
             inst.revision,
             inst.author_id.clone(),
             digest,
-        ));
+        );
+        if agent_clients
+            .insert(inst.agent_id.clone(), client.clone())
+            .is_some()
+        {
+            anyhow::bail!("duplicate agent_id in placement");
+        }
+        instances.push(client);
     }
 
     let bind: std::net::SocketAddr = place.http_bind.parse()?;
@@ -50,7 +58,10 @@ async fn run() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("bind {}", place.http_bind))?;
     tracing::info!(addr = %place.http_bind, "web-gateway listening");
-    let app = router(HttpState { instances });
+    let app = router(HttpState {
+        instances,
+        agent_clients,
+    });
     axum::serve(listener, app).await.context("serve")?;
     Ok(())
 }

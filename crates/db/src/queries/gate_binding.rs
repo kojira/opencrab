@@ -1,4 +1,4 @@
-//! Binding 永続化の唯一の入口。V3 Binding PUT と Web 会話作成が同じ TX 部品を使う。
+//! Binding永続化の唯一の入口。admin PUTとgateway要求が同じtransaction部品を使う。
 //!
 //! V3.5: `address` が既存 session id と byte 一致なら新 session を insert せず再利用する。
 
@@ -97,8 +97,8 @@ fn insert_binding_row(
 
 /// session / membership / binding を同一 TX で書く。commit は呼び出し側。
 ///
-/// `session_theme` は Binding PUT では address、Web 作成では normalized name
-/// （未指定時は address）。address が既存 session id と byte 一致ならその session を
+/// `session_theme`はaddressまたはgatewayが決めた表示名。addressが既存session IDと
+/// byte一致ならそのsessionを
 /// 再利用し `extgate-{binding_id}` は作らない（V3.5）。無い場合だけ従来の新設。
 pub fn create_gate_binding_in_tx(
     tx: &Transaction<'_>,

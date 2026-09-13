@@ -99,10 +99,6 @@ export interface SessionRow {
   max_turns: number | null;
   metadata_json: string | null;
   agent_ids?: string[];
-  gateway_bound?: boolean;
-  web_binding_state?: 'ready' | 'provisioning' | 'unavailable';
-  /** open web binding の address（論理 session_id）。gateway 呼び出しの正。 */
-  binding_address?: string;
 }
 
 export interface SessionDto {
@@ -115,10 +111,6 @@ export interface SessionDto {
   participant_count: number;
   agent_ids: string[];
   metadata_json: string | null;
-  gateway_bound: boolean;
-  web_binding_state?: 'ready' | 'provisioning' | 'unavailable';
-  /** open web binding の address（論理 session_id）。gateway 呼び出しの正。 */
-  binding_address?: string;
 }
 
 export interface SessionLogRow {

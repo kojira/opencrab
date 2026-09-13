@@ -1,6 +1,5 @@
 pub mod queries;
 pub mod schema;
-pub mod webgate_transplant;
 
 use anyhow::Result;
 use r2d2_sqlite::SqliteConnectionManager;

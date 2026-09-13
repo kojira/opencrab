@@ -15,12 +15,6 @@ function toSessionDto(s: SessionRow): SessionDto {
     participant_count: agentIds.length,
     agent_ids: agentIds,
     metadata_json: s.metadata_json,
-    gateway_bound: s.gateway_bound === true,
-    web_binding_state: s.web_binding_state,
-    binding_address:
-      typeof s.binding_address === 'string' && s.binding_address.length > 0
-        ? s.binding_address
-        : undefined,
   };
 }
 
@@ -48,10 +42,10 @@ export async function createWebConversation(
   agentId: string,
   name?: string,
 ): Promise<CreatedConversation> {
-  const res = await fetch(`/api/agents/${agentId}/web-conversations`, {
+  const res = await fetch('/api/web-conversations', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: name === undefined ? '{}' : JSON.stringify({ name }),
+    body: JSON.stringify({ agent_id: agentId, name: name ?? null }),
   });
   const body = (await res.json().catch(() => ({}))) as {
     conversation_id?: string;
@@ -76,6 +70,33 @@ export async function createWebConversation(
       state: body.state,
       httpStatus: res.status as 201 | 202,
     };
+  }
+  const code =
+    typeof body.error === 'string'
+      ? body.error
+      : (body.error?.code ?? String(res.status));
+  throw new ConversationCreateError(res.status, code, code);
+}
+
+export type WebConversationState = 'ready' | 'provisioning' | 'unavailable';
+
+/** Web gateway自身へownershipとbinding状態を問い合わせる。404は非Web session。 */
+export async function getWebConversationState(
+  sessionId: string,
+): Promise<WebConversationState | null> {
+  const res = await fetch(`/api/web-conversations/${encodeURIComponent(sessionId)}`);
+  if (res.status === 404) return null;
+  const body = (await res.json().catch(() => ({}))) as {
+    state?: string;
+    error?: string | { code?: string };
+  };
+  if (
+    res.status === 200 &&
+    (body.state === 'ready' ||
+      body.state === 'provisioning' ||
+      body.state === 'unavailable')
+  ) {
+    return body.state;
   }
   const code =
     typeof body.error === 'string'
