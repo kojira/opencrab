@@ -24,6 +24,7 @@ import { uuidV4 } from '../lib/uuid';
 
 export const BINDING_POLL_MS = 1000;
 export const BINDING_POLL_MAX = 60;
+const SEND_SETTLEMENT_POLL_MS = 1000;
 
 type LoadKind = 'idle' | 'loading' | 'loaded-empty' | 'loaded' | 'error';
 type SendPhase = 'idle' | 'submitting' | 'accepted' | 'responding';
@@ -190,6 +191,7 @@ export default function SessionDetail() {
   const [sendPhase, setSendPhase] = useState<SendPhase>('idle');
   const [pendingText, setPendingText] = useState('');
   const [pendingId, setPendingId] = useState<string | null>(null);
+  const [pendingOrigin, setPendingOrigin] = useState<string | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
   const [liveAgent, setLiveAgent] = useState<string | null>(null);
   const [noReply, setNoReply] = useState(false);
@@ -200,6 +202,7 @@ export default function SessionDetail() {
   const [agentLabels, setAgentLabels] = useState<Record<string, string>>({});
   const abortRef = useRef<AbortController | null>(null);
   const sourceRef = useRef<EventSource | null>(null);
+  const pendingOriginRef = useRef<string | null>(null);
   const logListRef = useRef<HTMLDivElement>(null);
   const pinToBottomRef = useRef(true);
   const forceToBottomRef = useRef(false);
@@ -251,12 +254,27 @@ export default function SessionDetail() {
   const refreshTail = (sessionId: string) => {
     getSessionLogs(sessionId)
       .then((rows) => {
+        const origin = pendingOriginRef.current;
+        if (origin) {
+          const inboundIndex = rows.findIndex((row) => {
+            const metadata = parseLogMetadata(row.metadata_json);
+            return metadata?.external_origin === origin;
+          });
+          const following = inboundIndex < 0 ? [] : rows.slice(inboundIndex + 1);
+          const persistedReply = following.some(
+            (row) => row.log_type === 'speech' && row.speaker_id === row.agent_id,
+          );
+          const exhausted = following.some((row) => internalTurnEvent(row) === 'exhausted');
+          if (!persistedReply && !exhausted) return;
+        }
         setLogs(rows);
         setHasOlder(rows.length === 100);
         setLogsKind(rows.length === 0 ? 'loaded-empty' : 'loaded');
         setLiveAgent(null);
         setPendingText('');
         setPendingId(null);
+        pendingOriginRef.current = null;
+        setPendingOrigin(null);
       })
       .catch((e: Error) => {
         setLogsError(e.message);
@@ -350,6 +368,62 @@ export default function SessionDetail() {
   }, [id, preparing, pollTimedOut, pollError, pollNonce]);
 
   useEffect(() => {
+    if (!id || !pendingOrigin || sendPhase === 'idle') return;
+    let cancelled = false;
+    let settled = false;
+    let terminationObserved = false;
+    let timer: number | undefined;
+
+    const poll = () => {
+      getSessionLogs(id)
+        .then((rows) => {
+          if (cancelled) return;
+          const inboundIndex = rows.findIndex((row) => {
+            const metadata = parseLogMetadata(row.metadata_json);
+            return metadata?.external_origin === pendingOrigin;
+          });
+          if (inboundIndex < 0) return;
+          const following = rows.slice(inboundIndex + 1);
+          const hasAgentSpeech = following.some(
+            (row) => row.log_type === 'speech' && row.speaker_id === row.agent_id,
+          );
+          const exhausted = following.some((row) => internalTurnEvent(row) === 'exhausted');
+          const terminated = following.some((row) => internalTurnEvent(row) === 'terminated');
+          if (hasAgentSpeech || exhausted || (terminated && terminationObserved)) {
+            settled = true;
+            setLogs(rows);
+            setHasOlder(rows.length === 100);
+            setLogsKind(rows.length === 0 ? 'loaded-empty' : 'loaded');
+            setLiveAgent(null);
+            setPendingText('');
+            setPendingId(null);
+            pendingOriginRef.current = null;
+            setPendingOrigin(null);
+            setSendPhase('idle');
+            if (terminated && !hasAgentSpeech) setNoReply(true);
+            return;
+          }
+          terminationObserved = terminationObserved || terminated;
+        })
+        .catch(() => {
+          // SSE remains the primary completion path. A transient read failure must not
+          // discard the optimistic message or disable the next bounded poll.
+        })
+        .finally(() => {
+          if (!cancelled && !settled) {
+            timer = window.setTimeout(poll, SEND_SETTLEMENT_POLL_MS);
+          }
+        });
+    };
+
+    timer = window.setTimeout(poll, SEND_SETTLEMENT_POLL_MS);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [id, pendingOrigin, sendPhase]);
+
+  useEffect(() => {
     if (!id || !isWebConversation || !gatewaySessionId || !ready || sessionKind !== 'loaded' || logsKind === 'loading' || logsKind === 'idle') return;
     sourceRef.current?.close();
     const es = new EventSource(conversationEventsUrl(gatewaySessionId));
@@ -378,6 +452,8 @@ export default function SessionDetail() {
     es.addEventListener('completed_no_reply', () => {
       setSendPhase('idle');
       setPendingId(null);
+      pendingOriginRef.current = null;
+      setPendingOrigin(null);
       setLiveAgent(null);
       setNoReply(true);
       refreshTail(id);
@@ -496,7 +572,9 @@ export default function SessionDetail() {
       setSendPhase('submitting');
       setSendError(null);
       setNoReply(false);
-      await sendWebMessage(gatewaySessionId, clientId, text);
+      const accepted = await sendWebMessage(gatewaySessionId, clientId, text);
+      pendingOriginRef.current = accepted.origin;
+      setPendingOrigin(accepted.origin);
       setSendPhase('accepted');
       setOwnerInput('');
     } catch (err) {
@@ -514,7 +592,9 @@ export default function SessionDetail() {
       }
       setSendPhase('submitting');
       setSendError(null);
-      await sendWebMessage(gatewaySessionId, pendingId, pendingText);
+      const accepted = await sendWebMessage(gatewaySessionId, pendingId, pendingText);
+      pendingOriginRef.current = accepted.origin;
+      setPendingOrigin(accepted.origin);
       setSendPhase('accepted');
     } catch (err) {
       const code = err instanceof ConversationSendError ? err.code : (err as Error).message;

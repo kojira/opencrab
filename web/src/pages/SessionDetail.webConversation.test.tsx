@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor, act } from '@testing-library/react';
+import { render, screen, waitFor, act, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { SessionDto } from '../api/types';
@@ -392,6 +392,98 @@ describe('SessionDetail web conversation', () => {
     expect(screen.getByText('will-fail')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'common.retry' })).toBeInTheDocument();
     expect(sendWebMessage).toHaveBeenCalled();
+  });
+
+  it('does not clear optimistic speech when SSE wins the persistence race', async () => {
+    getSession.mockResolvedValue(dto('ready'));
+    getSessionLogs.mockResolvedValue([]);
+    sendWebMessage.mockResolvedValue({
+      client_message_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      origin: 'web:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      seq: 2,
+      state: 'accepted',
+    });
+    renderDetail();
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText('sessionDetail.ownerPlaceholder')).toBeEnabled();
+    });
+    const input = screen.getByPlaceholderText('sessionDetail.ownerPlaceholder');
+    fireEvent.change(input, { target: { value: '消えない投稿' } });
+    fireEvent.submit(input.closest('form')!);
+    await waitFor(() => expect(sendWebMessage).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      FakeEventSource.instances[0].emit('message', { text: '先に届いた応答' });
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText('消えない投稿')).toBeInTheDocument();
+    expect(screen.getByText('先に届いた応答')).toBeInTheDocument();
+  });
+
+  it('keeps optimistic speech visible and settles from persisted logs when SSE is missed', async () => {
+    vi.useFakeTimers();
+    const userSpeech = {
+      id: 10,
+      agent_id: 'agent-1',
+      session_id: SESSION_ID,
+      log_type: 'speech',
+      content: 'もしもし？',
+      speaker_id: 'web-qc-human',
+      turn_number: 2,
+      metadata_json: '{"external_origin":"web:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}',
+      created_at: '2026-09-13T05:47:14Z',
+    };
+    const agentSpeech = {
+      id: 12,
+      agent_id: 'agent-1',
+      session_id: SESSION_ID,
+      log_type: 'speech',
+      content: 'はい、届いています。',
+      speaker_id: 'agent-1',
+      turn_number: 2,
+      metadata_json: null,
+      created_at: '2026-09-13T05:47:18Z',
+    };
+    getSession.mockResolvedValue(dto('ready'));
+    getSessionLogs
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([userSpeech])
+      .mockResolvedValue([userSpeech, agentSpeech]);
+    sendWebMessage.mockResolvedValue({
+      client_message_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      origin: 'web:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      seq: 2,
+      state: 'accepted',
+    });
+    renderDetail();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const input = screen.getByPlaceholderText('sessionDetail.ownerPlaceholder');
+    fireEvent.change(input, { target: { value: 'もしもし？' } });
+    fireEvent.submit(input.closest('form')!);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getAllByText('もしもし？')).toHaveLength(1);
+    expect(screen.getByTestId('session-pending-spinner')).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(getSessionLogs).toHaveBeenCalledTimes(2);
+    expect(screen.getAllByText('もしもし？')).toHaveLength(1);
+    expect(screen.getByTestId('session-pending-spinner')).toBeInTheDocument();
+    expect(screen.queryByText('はい、届いています。')).not.toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(getSessionLogs.mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(screen.getAllByText('もしもし？')).toHaveLength(1);
+    expect(screen.getByText('はい、届いています。')).toBeInTheDocument();
+    expect(screen.queryByTestId('session-pending-spinner')).not.toBeInTheDocument();
   });
 
   it('does not expose web internals while gateway ownership is unresolved', async () => {
