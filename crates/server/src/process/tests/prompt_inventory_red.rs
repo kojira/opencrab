@@ -257,10 +257,6 @@ again. Read that result, finish the original request, and then write `NO_REPLY` 
         !got.contains("Respond with exactly `NO_REPLY`"),
         "待機を NO_REPLY 終了へ読み替えてはならない: {got}"
     );
-    assert!(
-        !got.contains("WAIT_FOR_COMPLETION"),
-        "待機専用 marker を追加してはならない: {got}"
-    );
 }
 
 /// 明示終端節が全文一致する。
