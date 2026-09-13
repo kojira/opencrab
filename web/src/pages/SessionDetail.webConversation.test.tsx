@@ -10,6 +10,7 @@ const getSessionLogs = vi.fn();
 const getWebConversationState = vi.fn();
 const sendWebMessage = vi.fn();
 const sendOwnerInstruction = vi.fn();
+const getAgent = vi.fn();
 
 vi.mock('../api/sessions', async () => {
   const actual = await vi.importActual<typeof import('../api/sessions')>('../api/sessions');
@@ -22,6 +23,10 @@ vi.mock('../api/sessions', async () => {
     sendOwnerInstruction: (...args: unknown[]) => sendOwnerInstruction(...args),
   };
 });
+
+vi.mock('../api/agents', () => ({
+  getAgent: (...args: unknown[]) => getAgent(...args),
+}));
 
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
@@ -80,6 +85,12 @@ beforeEach(() => {
   getWebConversationState.mockResolvedValue('ready');
   sendWebMessage.mockReset();
   sendOwnerInstruction.mockReset();
+  getAgent.mockReset();
+  getAgent.mockResolvedValue({
+    id: 'agent-1',
+    name: 'Kurabu Agent',
+    persona_name: 'くらぶ',
+  });
   FakeEventSource.instances = [];
   vi.stubGlobal('EventSource', FakeEventSource);
 });
@@ -381,5 +392,82 @@ describe('SessionDetail web conversation', () => {
     expect(screen.getByText('will-fail')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'common.retry' })).toBeInTheDocument();
     expect(sendWebMessage).toHaveBeenCalled();
+  });
+
+  it('hides normal termination internals and labels human and agent speech', async () => {
+    getSession.mockResolvedValue(dto('ready'));
+    getSessionLogs.mockResolvedValue([
+      {
+        id: 1,
+        agent_id: 'agent-1',
+        session_id: SESSION_ID,
+        log_type: 'speech',
+        content: 'テスト',
+        speaker_id: 'web-qc-human',
+        turn_number: 1,
+        metadata_json: null,
+        created_at: '2026-09-12T00:00:00Z',
+      },
+      {
+        id: 2,
+        agent_id: 'agent-1',
+        session_id: SESSION_ID,
+        log_type: 'speech',
+        content: 'こんにちは！',
+        speaker_id: 'agent-1',
+        turn_number: 1,
+        metadata_json: null,
+        created_at: '2026-09-12T00:00:01Z',
+      },
+      {
+        id: 3,
+        agent_id: 'agent-1',
+        session_id: SESSION_ID,
+        log_type: 'system',
+        content: '{"type":"turn_terminated","marker":"NO_REPLY"}',
+        speaker_id: null,
+        turn_number: null,
+        metadata_json: null,
+        created_at: '2026-09-12T00:00:02Z',
+      },
+    ]);
+
+    renderDetail();
+
+    expect(await screen.findByText('sessionDetail.you')).toBeInTheDocument();
+    expect(await screen.findByText('くらぶ')).toBeInTheDocument();
+    expect(screen.getByText('テスト')).toBeInTheDocument();
+    expect(screen.getByText('こんにちは！')).toBeInTheDocument();
+    expect(screen.queryByText('web-qc-human')).not.toBeInTheDocument();
+    expect(screen.queryByText('agent-1')).not.toBeInTheDocument();
+    expect(screen.queryByText(/turn_terminated/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/NO_REPLY/)).not.toBeInTheDocument();
+  });
+
+  it('renders turn exhaustion as one human-facing warning, not raw JSON', async () => {
+    getSession.mockResolvedValue(dto('ready'));
+    getSessionLogs.mockResolvedValue([
+      {
+        id: 4,
+        agent_id: 'agent-1',
+        session_id: SESSION_ID,
+        log_type: 'system',
+        content: '{"type":"turn_exhausted","reason":"iteration_limit","iterations":31}',
+        speaker_id: null,
+        turn_number: null,
+        metadata_json: null,
+        created_at: '2026-09-12T00:00:03Z',
+      },
+    ]);
+
+    renderDetail();
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'sessionDetail.responseIncomplete',
+    );
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    expect(screen.queryByText(/turn_exhausted/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/iteration_limit/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/31/)).not.toBeInTheDocument();
   });
 });

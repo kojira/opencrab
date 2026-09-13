@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { getAgent } from '../api/agents';
 import {
   conversationEventsUrl,
   getSession,
@@ -43,16 +44,32 @@ function parseLogMetadata(metadataJson: string | null): LogMetadata | null {
   }
 }
 
+type InternalTurnEvent = 'terminated' | 'exhausted' | null;
+
+function internalTurnEvent(log: SessionLogRow): InternalTurnEvent {
+  if (log.log_type !== 'system') return null;
+  try {
+    const value = JSON.parse(log.content) as { type?: unknown; marker?: unknown };
+    if (value.type === 'turn_terminated' && value.marker === 'NO_REPLY') return 'terminated';
+    if (value.type === 'turn_exhausted') return 'exhausted';
+  } catch {
+    // Other system log text remains visible as before.
+  }
+  return null;
+}
+
 function SessionLogItem({
   logType,
   content,
   speakerId,
+  speakerLabel,
   metadataJson,
   pending,
 }: {
   logType: string;
   content: string;
   speakerId: string | null;
+  speakerLabel?: string;
   metadataJson: string | null;
   pending?: boolean;
 }) {
@@ -107,7 +124,7 @@ function SessionLogItem({
     speakerDisplay = (
       <div className="flex items-center gap-2">
         <span className={`material-symbols-outlined text-lg ${iconColor}`}>{icon}</span>
-        <span className="text-label-lg text-on-surface">{speakerId || ''}</span>
+        <span className="text-label-lg text-on-surface">{speakerLabel ?? speakerId ?? ''}</span>
       </div>
     );
   }
@@ -180,6 +197,7 @@ export default function SessionDetail() {
   const [pollTimedOut, setPollTimedOut] = useState(false);
   const [pollNonce, setPollNonce] = useState(0);
   const [webState, setWebState] = useState<WebConversationState | null>();
+  const [agentLabels, setAgentLabels] = useState<Record<string, string>>({});
   const abortRef = useRef<AbortController | null>(null);
   const sourceRef = useRef<EventSource | null>(null);
   const logListRef = useRef<HTMLDivElement>(null);
@@ -277,6 +295,26 @@ export default function SessionDetail() {
   const gatewaySessionId = isWebConversation ? id : undefined;
   const ready = webState === 'ready';
   const preparing = isWebConversation && !ready;
+
+  useEffect(() => {
+    if (!isWebConversation || !session) return;
+    let cancelled = false;
+    Promise.all(
+      session.agent_ids.map(async (agentId) => {
+        try {
+          const agent = await getAgent(agentId);
+          return [agentId, agent.persona_name || agent.name] as const;
+        } catch {
+          return [agentId, ''] as const;
+        }
+      }),
+    ).then((entries) => {
+      if (!cancelled) setAgentLabels(Object.fromEntries(entries));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isWebConversation, session]);
 
   useEffect(() => {
     if (!id || !preparing || pollTimedOut || pollError) return;
@@ -498,6 +536,19 @@ export default function SessionDetail() {
   const title = session
     ? conversationTitle(session.id, session.theme, t('sessions.newConversation'))
     : '';
+  const visibleLogs = isWebConversation
+    ? logs.filter((log) => internalTurnEvent(log) === null)
+    : logs;
+  const responseExhausted = isWebConversation
+    && logs.some((log) => internalTurnEvent(log) === 'exhausted');
+  const webSpeakerLabel = (log: SessionLogRow) => {
+    if (!isWebConversation || log.log_type !== 'speech') return undefined;
+    const agentSpoke = log.speaker_id === log.agent_id
+      || (log.speaker_id != null && session?.agent_ids.includes(log.speaker_id));
+    return agentSpoke
+      ? agentLabels[log.agent_id] || t('sessionDetail.agent')
+      : t('sessionDetail.you');
+  };
 
   const retryBindingPoll = () => {
     setPollError(null);
@@ -572,20 +623,29 @@ export default function SessionDetail() {
                 {t('sessions.loadMore')}
               </button>
             ) : null}
-            {logs.map((log) => (
+            {visibleLogs.map((log) => (
               <SessionLogItem
                 key={log.id}
                 logType={log.log_type}
                 content={log.content}
                 speakerId={log.speaker_id}
+                speakerLabel={webSpeakerLabel(log)}
                 metadataJson={log.metadata_json}
               />
             ))}
+            {responseExhausted ? (
+              <div className="card-outlined border-error bg-error-container/30 p-4" role="alert">
+                <p className="text-body-lg text-error-on-container">
+                  {t('sessionDetail.responseIncomplete')}
+                </p>
+              </div>
+            ) : null}
             {pendingText ? (
               <SessionLogItem
                 logType="speech"
                 content={pendingText}
                 speakerId="web-user"
+                speakerLabel={t('sessionDetail.you')}
                 metadataJson={null}
                 pending={sendPhase === 'submitting' || sendPhase === 'accepted' || sendPhase === 'responding'}
               />
@@ -596,7 +656,13 @@ export default function SessionDetail() {
               </p>
             ) : null}
             {liveAgent ? (
-              <SessionLogItem logType="speech" content={liveAgent} speakerId="agent" metadataJson={null} />
+              <SessionLogItem
+                logType="speech"
+                content={liveAgent}
+                speakerId="agent"
+                speakerLabel={session ? agentLabels[session.agent_ids[0]] || t('sessionDetail.agent') : t('sessionDetail.agent')}
+                metadataJson={null}
+              />
             ) : null}
             {noReply ? (
               <p className="text-body-sm text-on-surface-variant" aria-live="polite">
