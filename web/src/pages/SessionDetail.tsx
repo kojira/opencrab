@@ -622,12 +622,11 @@ export default function SessionDetail() {
   const responseExhausted = isWebConversation
     && logs.some((log) => internalTurnEvent(log) === 'exhausted');
   const webSpeakerLabel = (log: SessionLogRow) => {
-    if (!isWebConversation || log.log_type !== 'speech') return undefined;
+    if (!isWebConversation) return undefined;
     const agentSpoke = log.speaker_id === log.agent_id
       || (log.speaker_id != null && session?.agent_ids.includes(log.speaker_id));
-    return agentSpoke
-      ? agentLabels[log.agent_id] || t('sessionDetail.agent')
-      : t('sessionDetail.you');
+    if (agentSpoke) return agentLabels[log.agent_id] || t('sessionDetail.agent');
+    return log.log_type === 'speech' ? t('sessionDetail.you') : undefined;
   };
 
   const retryBindingPoll = () => {
