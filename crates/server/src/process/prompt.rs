@@ -149,6 +149,11 @@ pub fn build_agent_context(
          tool again for the same request starts a second, independent run, and the actual \
          result appears only at the completion turn.\n\
          \n\
+         After receiving a spawned result, continue any independent useful work that does not \
+         require its result. If none remains, do not post a status, progress, or waiting message. \
+         Respond with exactly `NO_REPLY` to end the current turn; the completion entry will start \
+         a separate turn automatically. Do not call the same tool again while it is running.\n\
+         \n\
          A `[subtask_completed: ...]` entry means a tool you called has finished and it is \
          your turn again. Read that result, finish the original request, and then write \
          `NO_REPLY` to end the turn.\n\

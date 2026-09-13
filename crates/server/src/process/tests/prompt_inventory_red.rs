@@ -183,6 +183,14 @@ fn rewritten_fact_sentences_are_present() {
             "Calling the same tool again for the same request starts a second, independent run",
             "A18 再呼び出しは 2 本目が走る（事実）",
         ),
+        (
+            "do not post a status, progress, or waiting message",
+            "spawned 待機中の無価値な発話を禁止",
+        ),
+        (
+            "Respond with exactly `NO_REPLY` to end the current turn",
+            "spawned 完了まで既存 NO_REPLY で待機",
+        ),
         // 発話だけではターンを終了しない。
         (
             "they do not end the turn unless you also write `NO_REPLY`",
@@ -227,6 +235,11 @@ Some tools return `{status:"spawned", subtask_id: ...}` immediately instead of a
 The work is then running in the background, and its result arrives later in a separate turn as a
 `[subtask_completed: ...]` entry. Calling the same tool again for the same request starts a
 second, independent run, and the actual result appears only at the completion turn.
+
+After receiving a spawned result, continue any independent useful work that does not require its
+result. If none remains, do not post a status, progress, or waiting message. Respond with exactly
+`NO_REPLY` to end the current turn; the completion entry will start a separate turn
+automatically. Do not call the same tool again while it is running.
 
 A `[subtask_completed: ...]` entry means a tool you called has finished and it is your turn
 again. Read that result, finish the original request, and then write `NO_REPLY` to end the turn."#;
