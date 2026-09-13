@@ -184,12 +184,16 @@ fn rewritten_fact_sentences_are_present() {
             "A18 再呼び出しは 2 本目が走る（事実）",
         ),
         (
-            "do not post a status, progress, or waiting message",
-            "spawned 待機中の無価値な発話を禁止",
+            "decide whether any independent useful work remains",
+            "spawned 後の継続可否は agent 自身が判断",
         ),
         (
-            "Respond with exactly `NO_REPLY` to end the current turn",
-            "spawned 完了まで既存 NO_REPLY で待機",
+            "wait for the `[subtask_completed: ...]` entry",
+            "他に進める作業が無ければ completion を待機",
+        ),
+        (
+            "without posting a status, progress, or waiting message",
+            "spawned 待機中の無価値な発話を禁止",
         ),
         // 発話だけではターンを終了しない。
         (
@@ -236,10 +240,10 @@ The work is then running in the background, and its result arrives later in a se
 `[subtask_completed: ...]` entry. Calling the same tool again for the same request starts a
 second, independent run, and the actual result appears only at the completion turn.
 
-After receiving a spawned result, continue any independent useful work that does not require its
-result. If none remains, do not post a status, progress, or waiting message. Respond with exactly
-`NO_REPLY` to end the current turn; the completion entry will start a separate turn
-automatically. Do not call the same tool again while it is running.
+After receiving a spawned result, decide whether any independent useful work remains that does
+not require its result. Continue that work if so. If none remains, wait for the
+`[subtask_completed: ...]` entry without posting a status, progress, or waiting message. Do not
+call the same tool again while it is running.
 
 A `[subtask_completed: ...]` entry means a tool you called has finished and it is your turn
 again. Read that result, finish the original request, and then write `NO_REPLY` to end the turn."#;
@@ -249,6 +253,14 @@ again. Read that result, finish the original request, and then write `NO_REPLY` 
             normalize_ws(expected),
             "Async Behavior 節が §3.2 全文と一致しない\n--- got ---\n{got}\n--- expected ---\n{expected}"
         );
+    assert!(
+        !got.contains("Respond with exactly `NO_REPLY`"),
+        "待機を NO_REPLY 終了へ読み替えてはならない: {got}"
+    );
+    assert!(
+        !got.contains("WAIT_FOR_COMPLETION"),
+        "待機専用 marker を追加してはならない: {got}"
+    );
 }
 
 /// 明示終端節が全文一致する。
