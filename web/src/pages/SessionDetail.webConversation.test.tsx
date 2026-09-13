@@ -597,7 +597,7 @@ describe('SessionDetail web conversation', () => {
     expect(screen.queryByText(/NO_REPLY/)).not.toBeInTheDocument();
   });
 
-  it('labels agent-owned tool logs with the persona instead of the raw agent id', async () => {
+  it('collapses agent-owned tool logs by default and expands their preserved details', async () => {
     getSession.mockResolvedValue(dto('ready'));
     getSessionLogs.mockResolvedValue([
       {
@@ -622,14 +622,42 @@ describe('SessionDetail web conversation', () => {
         metadata_json: null,
         created_at: '2026-09-12T00:00:04Z',
       },
+      {
+        id: 6,
+        agent_id: 'agent-1',
+        session_id: SESSION_ID,
+        log_type: 'speech',
+        content: '完了しました',
+        speaker_id: 'agent-1',
+        turn_number: 1,
+        metadata_json: null,
+        created_at: '2026-09-12T00:00:05Z',
+      },
     ]);
 
     renderDetail();
 
-    expect(await screen.findAllByText('くらぶ')).toHaveLength(2);
+    expect(await screen.findAllByText('くらぶ')).toHaveLength(3);
     expect(screen.queryByText('agent-1')).not.toBeInTheDocument();
-    expect(screen.getByText('execute_shell')).toBeInTheDocument();
-    expect(screen.getByText('{"status":"spawned"}')).toBeInTheDocument();
+    const details = screen.getAllByTestId('session-tool-log');
+    expect(details).toHaveLength(2);
+    expect(details[0]).not.toHaveAttribute('open');
+    expect(details[1]).not.toHaveAttribute('open');
+    expect(screen.getByText('execute_shell')).not.toBeVisible();
+    expect(screen.getByText('{"status":"spawned"}')).not.toBeVisible();
+    expect(screen.getByText('tool_call')).toBeVisible();
+    expect(screen.getByText('tool_result')).toBeVisible();
+
+    const firstSummary = details[0].querySelector('summary');
+    expect(firstSummary).not.toBeNull();
+    await userEvent.click(firstSummary!);
+    expect(details[0]).toHaveAttribute('open');
+    expect(screen.getByText('execute_shell')).toBeVisible();
+    await userEvent.click(firstSummary!);
+    expect(details[0]).not.toHaveAttribute('open');
+    expect(screen.getByText('execute_shell')).not.toBeVisible();
+
+    expect(screen.getByText('完了しました').closest('details')).toBeNull();
   });
 
   it('renders turn exhaustion as one human-facing warning, not raw JSON', async () => {

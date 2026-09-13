@@ -130,24 +130,41 @@ function SessionLogItem({
     );
   }
 
-  return (
-    <div className={`bg-surface-container rounded-lg border-l-4 ${borderColor} p-4`}>
-      <div className="flex items-center justify-between mb-2">
-        {speakerDisplay}
-        <div className="flex items-center gap-2">
-          {pending ? (
-            <span
-              className="material-symbols-outlined text-sm animate-spin"
-              aria-live="polite"
-              data-testid="session-pending-spinner"
-            >
-              progress_activity
-            </span>
-          ) : null}
-          <span className="badge-neutral text-label-sm">{logType}</span>
-        </div>
+  const header = (
+    <div className="flex items-center justify-between gap-2">
+      {speakerDisplay}
+      <div className="flex items-center gap-2">
+        {pending ? (
+          <span
+            className="material-symbols-outlined text-sm animate-spin"
+            aria-live="polite"
+            data-testid="session-pending-spinner"
+          >
+            progress_activity
+          </span>
+        ) : null}
+        <span className="badge-neutral text-label-sm">{logType}</span>
       </div>
-      <p className="text-body-lg text-on-surface whitespace-pre-wrap break-words pl-8">{content}</p>
+    </div>
+  );
+  const body = (
+    <p className="text-body-lg text-on-surface whitespace-pre-wrap break-words pl-8">{content}</p>
+  );
+  const cardClass = `bg-surface-container rounded-lg border-l-4 ${borderColor}`;
+
+  if (logType === 'tool_call' || logType === 'tool_result') {
+    return (
+      <details className={cardClass} data-testid="session-tool-log">
+        <summary className="cursor-pointer p-4">{header}</summary>
+        <div className="px-4 pb-4">{body}</div>
+      </details>
+    );
+  }
+
+  return (
+    <div className={`${cardClass} p-4`}>
+      <div className="mb-2">{header}</div>
+      {body}
     </div>
   );
 }
