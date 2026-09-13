@@ -68,7 +68,11 @@ fn concrete_web_literal(text: &str) -> Option<&'static str> {
     if lower.contains("web-conversations") {
         return Some("web-conversations route");
     }
-    if lower.starts_with("webgate_v") || lower == "web-" || lower.starts_with("opencrab:web:") {
+    if lower == "web"
+        || lower.starts_with("webgate_v")
+        || lower == "web-"
+        || lower.starts_with("opencrab:web:")
+    {
         return Some("web gateway owned literal");
     }
     None
@@ -471,6 +475,7 @@ fn detector_flags_platform_identifier() {
 fn detector_flags_concrete_web_identifiers_sql_and_routes() {
     for src in [
         r#"fn web_binding_state() {}"#,
+        r#"const KIND: &str = "web";"#,
         r##"const SQL: &str = r#"SELECT 1 WHERE kind_id = 'web'"#;"##,
         r#"const ROUTE: &str = "/api/agents/{id}/web-conversations";"#,
         r#"const PREFIX: &str = "web-";"#,
