@@ -238,7 +238,8 @@ but they do not end the turn unless you also write `NO_REPLY`.
 Some tools return `{status:"spawned", subtask_id: ...}` immediately instead of a final result.
 The work is then running in the background, and its result arrives later in a separate turn as a
 `[subtask_completed: ...]` entry. Calling the same tool again for the same request starts a
-second, independent run, and the actual result appears only at the completion turn.
+second, independent run, and the actual result appears only at the completion turn. Call a
+background tool without narrating that it is starting or how long it will take.
 
 After receiving a spawned result, decide whether any independent useful work remains that does
 not require its result. Continue that work if so. If none remains, wait for the
