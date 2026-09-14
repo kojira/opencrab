@@ -27,8 +27,6 @@ pub const NO_MESSAGES_MARKER: &str = "No messages yet.";
 /// 履歴が空（`NO_MESSAGES_MARKER`）のときはタグを付けない。
 pub const CONVERSATION_HISTORY_START: &str = "<conversation_history>";
 pub const CONVERSATION_HISTORY_END: &str = "</conversation_history>";
-/// Typed-history requests keep equivalent output guidance in the system message.
-pub const CONVERSATION_RESPONSE_GUIDANCE: &str = "Output only your own response content; never reproduce or continue transcript-formatted speaker lines.";
 
 /// セッションログから会話文字列を構築する（トークン予算ベースのコンパクション対応）。
 ///

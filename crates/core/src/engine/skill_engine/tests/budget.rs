@@ -314,6 +314,12 @@
             ));
         }
         conversation.push_str("[subtask_completed: subtask_id=st-1, exit_reason=completed]\n");
+        let conversation = format!(
+            "{}\n{}{}",
+            crate::conversation::CONVERSATION_HISTORY_START,
+            conversation,
+            crate::conversation::CONVERSATION_HISTORY_END
+        );
 
         let conv = crate::tokens::estimate_tokens(&conversation);
         let reserved = crate::tool_result_log::READ_TOOL_RESULT_TOKEN_LIMIT;
@@ -387,5 +393,28 @@
             "決着イテレーションのプロンプトに発端 user 発話が残ること。実際の末尾: {}",
             settle_user.chars().rev().take(400).collect::<String>()
         );
+        assert_eq!(
+            settle_user
+                .matches(crate::conversation::CONVERSATION_HISTORY_START)
+                .count(),
+            1,
+            "圧縮後も開始タグは1件: {settle_user}"
+        );
+        assert_eq!(
+            settle_user
+                .matches(crate::conversation::CONVERSATION_HISTORY_END)
+                .count(),
+            1,
+            "圧縮後も終端タグは1件: {settle_user}"
+        );
+        let start = settle_user
+            .find(crate::conversation::CONVERSATION_HISTORY_START)
+            .unwrap();
+        let origin = settle_user.find(ORIGIN).unwrap();
+        let end = settle_user
+            .find(crate::conversation::CONVERSATION_HISTORY_END)
+            .unwrap();
+        assert!(start < origin && origin < end, "{settle_user}");
+        assert!(!settle_user.contains("ここから先はあなた自身の本文のみを書く"));
     }
 

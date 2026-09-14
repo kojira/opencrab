@@ -1,6 +1,8 @@
 use anyhow::Result;
 use opencrab_llm_types::{ContentPart, Message, MessageContent};
 
+use crate::conversation::{CONVERSATION_HISTORY_END, CONVERSATION_HISTORY_START};
+
 pub(super) fn message_plain_text(msg: &Message) -> String {
     match &msg.content {
         Some(MessageContent::Text(t)) => t.clone(),
@@ -48,13 +50,37 @@ fn is_toolish_user_block(block: &str) -> bool {
         || block.contains("[subtask_completed")
 }
 
+fn conversation_history_range(text: &str) -> Option<(usize, usize)> {
+    let start = text.find(CONVERSATION_HISTORY_START)? + CONVERSATION_HISTORY_START.len();
+    let end = text[start..].find(CONVERSATION_HISTORY_END)? + start;
+    Some((start, end))
+}
+
+fn compactable_user_text(text: &str) -> &str {
+    conversation_history_range(text)
+        .map(|(start, end)| text[start..end].trim_matches('\n'))
+        .unwrap_or(text)
+}
+
+fn rebuild_user_text(original: &str, compacted: &str) -> String {
+    let Some((start, end)) = conversation_history_range(original) else {
+        return compacted.to_string();
+    };
+    format!(
+        "{}\n{}\n{}",
+        &original[..start],
+        compacted.trim_matches('\n'),
+        &original[end..]
+    )
+}
+
 pub(super) fn user_line_items(messages: &[Message]) -> Vec<crate::context_budget::CompactItem> {
     use crate::context_budget::{CompactItem, CompactLane, TokenLedger};
     let Some(user) = messages.get(1) else {
         return Vec::new();
     };
     let text = message_plain_text(user);
-    let blocks = split_user_blocks(&text);
+    let blocks = split_user_blocks(compactable_user_text(&text));
     let tail = blocks.len().saturating_sub(8);
     let newest_speech: std::collections::HashSet<usize> = blocks
         .iter()
@@ -128,9 +154,13 @@ pub(super) fn apply_turn_budget(
     // `reserved` は「これから載せる本文」の見積り。会話単体は高水位未満でも、
     // 本文を足すと超えるなら先に刈って残り枠を空ける。収まらなくてもここでは
     // 止めない（結果は残り枠へ切り詰めて必ず載せる）。
+    let user_text = messages.get(1).map(message_plain_text).unwrap_or_default();
+    let compactable_tokens = crate::tokens::estimate_tokens(compactable_user_text(&user_text));
+    let fixed_user_tokens = user_tokens.saturating_sub(compactable_tokens);
     let other = ledger
         .total()
         .saturating_sub(user_tokens)
+        .saturating_add(fixed_user_tokens)
         .saturating_add(reserved);
     let items = user_line_items(messages);
     let Some(outcome) =
@@ -139,10 +169,11 @@ pub(super) fn apply_turn_budget(
         return Ok(());
     };
     if outcome.fired {
+        let rebuilt = rebuild_user_text(&user_text, &outcome.text);
         if let Some(user) = messages.get_mut(1) {
-            user.content = Some(MessageContent::Text(outcome.text.clone()));
+            user.content = Some(MessageContent::Text(rebuilt.clone()));
         }
-        ledger.record_tokens("user", outcome.after_tokens);
+        ledger.record("user", &rebuilt);
     }
     Ok(())
 }

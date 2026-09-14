@@ -169,8 +169,8 @@ fn rewritten_fact_sentences_are_present() {
     let present: &[(&str, &str)] = &[
         // 3.1 導入（A6 事実化）: 履歴境界と逐語投稿の事実
         (
-            "Conversation context is delimited by `<conversation_history>` and `</conversation_history>`",
-            "会話履歴の構造境界",
+            "When conversation history is present, it is delimited by `<conversation_history>` and `</conversation_history>`",
+            "会話履歴がある場合の構造境界",
         ),
         (
             "never reproduce or continue transcript-formatted speaker lines",

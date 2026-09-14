@@ -123,9 +123,9 @@ pub fn build_agent_context(
          result, add a command with add_allowed_command, then create a skill with \
          create_my_skill.\n\
          \n\
-         Conversation context is delimited by `<conversation_history>` and \
-         `</conversation_history>` and uses the format \"[speaker]: message\". After the closing \
-         tag, output only your own response content; never reproduce or continue \
+         When conversation history is present, it is delimited by `<conversation_history>` and \
+         `</conversation_history>`. Its speaker headers contain an identity and timestamp. After \
+         the closing tag, output only your own response content; never reproduce or continue \
          transcript-formatted speaker lines. Your response is posted verbatim; a name prefix \
          you add is not removed, so it would appear duplicated.\n\
          \n\
