@@ -238,29 +238,28 @@ pub(super) async fn collect_tool_execution(
         .pointer("/tools/effective_profiles")
         .and_then(Value::as_object)
         .ok_or_else(|| "L1 tool profiles are missing".to_string())?;
-    for (profile_name, (profile, executor)) in [("without_transport_surface", &owner_profiles[0])] {
-        let expected: BTreeSet<_> = l1_profiles
-            .get(profile_name)
-            .and_then(Value::as_array)
-            .ok_or_else(|| format!("L1 tool profile {profile_name} is missing"))?
-            .iter()
-            .filter_map(|definition| definition["name"].as_str())
-            .map(ToOwned::to_owned)
-            .collect();
-        let observed: BTreeSet<_> = executor
-            .effective_tool_definitions()
-            .into_iter()
-            .map(|definition| definition.definition.name)
-            .filter(|name| !name.starts_with("mcp__"))
-            .collect();
-        if expected != observed {
-            return Err(format!(
-                "L2 {} profile is not identical to L1 {profile_name}; missing={:?}, unknown={:?}",
-                profile.as_str(),
-                expected.difference(&observed).collect::<Vec<_>>(),
-                observed.difference(&expected).collect::<Vec<_>>()
-            ));
-        }
+    let (profile_name, (profile, executor)) = ("without_transport_surface", &owner_profiles[0]);
+    let expected: BTreeSet<_> = l1_profiles
+        .get(profile_name)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("L1 tool profile {profile_name} is missing"))?
+        .iter()
+        .filter_map(|definition| definition["name"].as_str())
+        .map(ToOwned::to_owned)
+        .collect();
+    let observed: BTreeSet<_> = executor
+        .effective_tool_definitions()
+        .into_iter()
+        .map(|definition| definition.definition.name)
+        .filter(|name| !name.starts_with("mcp__"))
+        .collect();
+    if expected != observed {
+        return Err(format!(
+            "L2 {} profile is not identical to L1 {profile_name}; missing={:?}, unknown={:?}",
+            profile.as_str(),
+            expected.difference(&observed).collect::<Vec<_>>(),
+            observed.difference(&expected).collect::<Vec<_>>()
+        ));
     }
     let mut expected_tools: BTreeSet<_> = l1_profiles
         .values()
