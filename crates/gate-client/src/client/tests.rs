@@ -20,12 +20,12 @@
                 inner
                     .acknowledged
                     .insert("address".into(), "binding".into());
-                inner.pending_turn.insert(
+                inner.pending_turns.insert(
                     "binding".into(),
-                    PendingTurn {
+                    std::collections::VecDeque::from([PendingTurn {
                         saw_utterance: false,
-                        reply_origin: ReplyOrigin::Single("pending-origin".into()),
-                    },
+                        reply_origin: Some("pending-origin".into()),
+                    }]),
                 );
             }
 
@@ -50,7 +50,10 @@
                 "malformed reply_target reached the live delivery queue"
             );
             assert!(matches!(
-                inner.pending_turn.get("binding"),
+                inner
+                    .pending_turns
+                    .get("binding")
+                    .and_then(|turns| turns.front()),
                 Some(PendingTurn {
                     saw_utterance: false,
                     ..

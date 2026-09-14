@@ -61,7 +61,11 @@ async fn handle_invoke(client: &InstanceClient, inv: Invoke, generation: u64) ->
             // 照会・操作クラス（resolve 等）は is_utterance=false なので印づけない（沈黙判定は不変）。
             if handler.is_utterance(&inv.operation) {
                 let mut inner = client.inner.lock().await;
-                if let Some(turn) = inner.pending_turn.get_mut(&inv.binding_id) {
+                if let Some(turn) = inner
+                    .pending_turns
+                    .get_mut(&inv.binding_id)
+                    .and_then(|turns| turns.front_mut())
+                {
                     turn.saw_utterance = true;
                 }
             }
@@ -149,15 +153,14 @@ async fn handle_say(client: &InstanceClient, say: Say, generation: u64) -> bool 
         return false;
     };
     // 返信先: payload の明示 reply_target（送信側が載せた発端 origin・resume 等）を最優先。
-    // 無ければ進行中ターンの pending_turn（即時 said が刻んだ Single だけ Some）に委ねる。
-    let reply_origin =
-        explicit_reply_target.or_else(|| match inner.pending_turn.get(&say.binding_id) {
-            Some(turn) => match &turn.reply_origin {
-                ReplyOrigin::Single(o) => Some(o.clone()),
-                ReplyOrigin::None | ReplyOrigin::Ambiguous => None,
-            },
-            None => None,
-        });
+    // 無ければ進行中FIFOの先頭turnが所有するoriginに委ねる。
+    let reply_origin = explicit_reply_target.or_else(|| {
+        inner
+            .pending_turns
+            .get(&say.binding_id)
+            .and_then(|turns| turns.front())
+            .and_then(|turn| turn.reply_origin.clone())
+    });
     let q = inner
         .live
         .entry(address.clone())
@@ -172,7 +175,11 @@ async fn handle_say(client: &InstanceClient, say: Say, generation: u64) -> bool 
         let _ = send_frame(client, err_frame(&say.id, "external_rejected", None)).await;
         return false;
     }
-    if let Some(turn) = inner.pending_turn.get_mut(&say.binding_id) {
+    if let Some(turn) = inner
+        .pending_turns
+        .get_mut(&say.binding_id)
+        .and_then(|turns| turns.front_mut())
+    {
         turn.saw_utterance = true;
     }
     drop(inner);
@@ -206,31 +213,30 @@ async fn handle_activity(client: &InstanceClient, activity: Activity) {
         origin: activity.origin.clone(),
     });
     if activity.state == "started" {
-        inner
-            .pending_turn
+        let turns = inner
+            .pending_turns
             .entry(activity.binding_id.clone())
-            .or_insert_with(|| PendingTurn {
+            .or_default();
+        if turns.is_empty() {
+            turns.push_back(PendingTurn {
                 saw_utterance: false,
-                reply_origin: ReplyOrigin::None,
+                reply_origin: None,
             });
+        }
     } else if activity.state == "ended" {
+        let turn = pop_pending_turn(&mut inner, &activity.binding_id);
         if let Some(target) = activity.completed_target {
             if let Some(q) = inner.live.get_mut(&address) {
                 let _ = q.try_push(LiveEvent::Completed { target });
             }
-            inner.pending_turn.remove(&activity.binding_id);
             return;
         }
-        if let Some(turn) = inner.pending_turn.remove(&activity.binding_id) {
+        if let Some(turn) = turn {
             if !turn.saw_utterance {
-                // Message と同じ pending_turn.reply_origin を露出する（新フレームではなく既存追跡の
-                // surface）。Single だけ発端を運び、None/Ambiguous は単一発端無しとして None。
-                let reply_origin = match &turn.reply_origin {
-                    ReplyOrigin::Single(o) => Some(o.clone()),
-                    ReplyOrigin::None | ReplyOrigin::Ambiguous => None,
-                };
                 if let Some(q) = inner.live.get_mut(&address) {
-                    let _ = q.try_push(LiveEvent::CompletedNoReply { reply_origin });
+                    let _ = q.try_push(LiveEvent::CompletedNoReply {
+                        reply_origin: turn.reply_origin,
+                    });
                 }
             }
         }
@@ -265,9 +271,10 @@ async fn handle_response(client: &InstanceClient, resp: WireResponse, generation
         close_all(client, "response_invalid", generation).await;
         return;
     };
-    let outcome = match pending.kind {
+    let PendingSaid { kind, reply } = pending;
+    let (outcome, reservation) = match kind {
         PendingKind::Hello | PendingKind::Command => {
-            if resp.ok && resp.seq.is_none() {
+            let outcome = if resp.ok && resp.seq.is_none() {
                 SaidOutcome::Accepted { seq: 0 }
             } else if !resp.ok {
                 SaidOutcome::WireErr {
@@ -278,10 +285,11 @@ async fn handle_response(client: &InstanceClient, resp: WireResponse, generation
                 drop(inner);
                 close_all(client, "response_invalid", generation).await;
                 return;
-            }
+            };
+            (outcome, None)
         }
-        PendingKind::Said => {
-            if resp.ok {
+        PendingKind::Said { reservation } => {
+            let outcome = if resp.ok {
                 match resp.seq {
                     Some(Some(seq)) => SaidOutcome::Accepted { seq },
                     Some(None) => SaidOutcome::NotAdmitted,
@@ -296,10 +304,18 @@ async fn handle_response(client: &InstanceClient, resp: WireResponse, generation
                     code: resp.code.unwrap_or_else(|| "bad_request".into()),
                     detail: resp.detail,
                 }
-            }
+            };
+            (outcome, reservation)
         }
     };
-    let _ = pending.reply.send(outcome);
+    // Response handling, not the waiting caller, owns rejection cleanup. A cancelled caller may
+    // still receive a valid core response, and only core's admission result decides ownership.
+    if !matches!(outcome, SaidOutcome::Accepted { .. }) {
+        if let Some((binding_id, origin)) = reservation {
+            remove_pending_origin(&mut inner, &binding_id, &origin);
+        }
+    }
+    let _ = reply.send(outcome);
 }
 
 async fn close_all(client: &InstanceClient, code: &str, generation: u64) {
@@ -315,7 +331,7 @@ async fn close_all(client: &InstanceClient, code: &str, generation: u64) {
     for (_, pending) in inner.pending_said.drain() {
         let _ = pending.reply.send(SaidOutcome::Disconnected);
     }
-    inner.pending_turn.clear();
+    inner.pending_turns.clear();
     let ev = LiveEvent::Error {
         code: code.to_string(),
         detail: None,

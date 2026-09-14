@@ -19,7 +19,7 @@ async fn attach(
         inner.closed = false;
         inner.acknowledged.clear();
         inner.pending_said.clear();
-        inner.pending_turn.clear();
+        inner.pending_turns.clear();
         inner.live.clear();
         inner.generation
     };

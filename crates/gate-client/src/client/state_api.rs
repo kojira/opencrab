@@ -67,9 +67,8 @@ pub enum LiveEvent {
     /// #915: activity ended で core が指定した完了サインの付け先（発話 id）。
     Completed { target: String },
     CompletedNoReply {
-        /// 沈黙で終えたターン（say 無し）の発端 origin。即時ターン（`occupy_until_turn_ends`）が
-        /// 単独で握った said（`ReplyOrigin::Single`）だけ `Some`。bundle ターンや複数即時 said の
-        /// 相乗り（`None`/`Ambiguous`）では単一の発端を決められないので `None`。consumer は `Some` を
+        /// 沈黙で終えたターン（say 無し）の発端 origin。即時ターンなら、そのターンを受理した
+        /// said の origin。bundle ターンには単一の発端がないため `None`。consumer は `Some` を
         /// 「その発端messageが沈黙で終えた」サインに使い、`None`は無視してよい。
         /// 裁定A（core が ended を say の後に出す）により、返信ターンでは saw_utterance=true のため
         /// このイベントは立たず、真の沈黙ターンだけに立つ。
@@ -121,7 +120,9 @@ pub enum SayPolicy {
 enum PendingKind {
     Hello,
     Command,
-    Said,
+    Said {
+        reservation: Option<(String, String)>,
+    },
 }
 
 struct PendingSaid {
@@ -129,20 +130,12 @@ struct PendingSaid {
     reply: oneshot::Sender<SaidOutcome>,
 }
 
-/// 進行中ターンの返信先追跡。即時 said（`occupy_until_turn_ends`）が origin を刻む。
-#[derive(Clone)]
-enum ReplyOrigin {
-    /// まだ said を刻んでいない（bundle ターンは activity started で None のまま生成される）。
-    None,
-    /// 即時 said 1 本だけが握ったターン。その said の origin。
-    Single(String),
-    /// 同一ターンに複数の即時 said が相乗り。単一の返信先を決められない。
-    Ambiguous,
-}
-
+/// 受理済みターンの返信先追跡。coreは同一bindingの受理済みimmediate saidを順に実行し、
+/// activity endedもその受理順で送るため、gatewayは同じFIFO順でoriginを所有する。
 struct PendingTurn {
     saw_utterance: bool,
-    reply_origin: ReplyOrigin,
+    /// 即時saidは発端origin、bundle turnは単一発端がないためNone。
+    reply_origin: Option<String>,
 }
 
 struct LiveQueue {
@@ -181,10 +174,39 @@ struct Inner {
     acknowledged: HashMap<String, String>,
     remembered: HashMap<String, String>,
     pending_said: HashMap<String, PendingSaid>,
-    pending_turn: HashMap<String, PendingTurn>,
+    pending_turns: HashMap<String, VecDeque<PendingTurn>>,
     live: HashMap<String, LiveQueue>,
     closed: bool,
     generation: u64,
+}
+
+fn remove_pending_origin(inner: &mut Inner, binding_id: &str, origin: &str) {
+    let should_remove = if let Some(turns) = inner.pending_turns.get_mut(binding_id) {
+        if let Some(position) = turns
+            .iter()
+            .rposition(|turn| turn.reply_origin.as_deref() == Some(origin))
+        {
+            turns.remove(position);
+        }
+        turns.is_empty()
+    } else {
+        false
+    };
+    if should_remove {
+        inner.pending_turns.remove(binding_id);
+    }
+}
+
+fn pop_pending_turn(inner: &mut Inner, binding_id: &str) -> Option<PendingTurn> {
+    let (turn, empty) = {
+        let turns = inner.pending_turns.get_mut(binding_id)?;
+        let turn = turns.pop_front();
+        (turn, turns.is_empty())
+    };
+    if empty {
+        inner.pending_turns.remove(binding_id);
+    }
+    turn
 }
 
 pub struct InstanceClient {
@@ -221,7 +243,7 @@ impl InstanceClient {
                 acknowledged: HashMap::new(),
                 remembered: HashMap::new(),
                 pending_said: HashMap::new(),
-                pending_turn: HashMap::new(),
+                pending_turns: HashMap::new(),
                 live: HashMap::new(),
                 closed: true,
                 generation: 0,
@@ -491,10 +513,10 @@ impl InstanceClient {
         .await
     }
 
-    /// Bundle member 用。ack までだけ `pending_turn` を残す。
+    /// Bundle member 用。bundle receipt自身はturn originを予約しない。
     ///
-    /// Accepted のあと turn が始まらない（coordinator が全 receipt 待ち）ときに
-    /// 次の origin を送れる。ターン中の `CompletedNoReply` 追跡は activity started が立てる。
+    /// Accepted のあとturnが始まらない（coordinatorが全receipt待ち）ときにも
+    /// 次のoriginを送れる。ターン中の`CompletedNoReply`追跡はactivity startedが立てる。
     pub async fn post_said_receipt(
         &self,
         address: &str,
@@ -548,6 +570,11 @@ impl InstanceClient {
         attachments: &[Attachment],
         occupy_until_turn_ends: bool,
     ) -> Result<SaidOutcome, PostRefuse> {
+        let id = self.next_id();
+        let (tx, rx) = oneshot::channel();
+        // Acquire the current writer before reserving origin ownership. After reservation, queueing
+        // the frame is synchronous, so task cancellation cannot leave an unsent reservation behind.
+        let write = self.write.lock().await;
         let binding_id = {
             let mut inner = self.inner.lock().await;
             if inner.closed {
@@ -556,35 +583,28 @@ impl InstanceClient {
             let Some(binding_id) = inner.acknowledged.get(address).cloned() else {
                 return Err(PostRefuse::NotReady);
             };
-            let entry = inner
-                .pending_turn
-                .entry(binding_id.clone())
-                .or_insert_with(|| PendingTurn {
-                    saw_utterance: false,
-                    reply_origin: ReplyOrigin::None,
-                });
-            // 即時 said（ターン終了まで占有）だけが返信先を刻む。bundle receipt
-            // （occupy=false）は ack 後に pending_turn ごと消えるので刻まない。
-            if occupy_until_turn_ends {
-                entry.reply_origin = match &entry.reply_origin {
-                    ReplyOrigin::None => ReplyOrigin::Single(origin.to_string()),
-                    ReplyOrigin::Single(_) | ReplyOrigin::Ambiguous => ReplyOrigin::Ambiguous,
-                };
-            }
-            binding_id
-        };
-        let id = self.next_id();
-        let (tx, rx) = oneshot::channel();
-        {
-            let mut inner = self.inner.lock().await;
+            // Immediate said values reserve one turn each in wire-send order. Bundle receipts do
+            // not own an origin; activity started creates their origin-less turn when needed.
+            let reservation = occupy_until_turn_ends.then(|| {
+                inner
+                    .pending_turns
+                    .entry(binding_id.clone())
+                    .or_default()
+                    .push_back(PendingTurn {
+                        saw_utterance: false,
+                        reply_origin: Some(origin.to_string()),
+                    });
+                (binding_id.clone(), origin.to_string())
+            });
             inner.pending_said.insert(
                 id.clone(),
                 PendingSaid {
-                    kind: PendingKind::Said,
+                    kind: PendingKind::Said { reservation },
                     reply: tx,
                 },
             );
-        }
+            binding_id
+        };
         let frame = said_frame_with_context(
             &id,
             &binding_id,
@@ -601,18 +621,18 @@ impl InstanceClient {
             origin,
             "said"
         );
-        if !send_frame(self, frame).await {
+        if write.tx.send(frame).is_err() {
+            drop(write);
             let mut inner = self.inner.lock().await;
-            inner.pending_turn.remove(&binding_id);
+            if occupy_until_turn_ends {
+                remove_pending_origin(&mut inner, &binding_id, origin);
+            }
             inner.pending_said.remove(&id);
             return Ok(SaidOutcome::Disconnected);
         }
+        drop(write);
         match tokio::time::timeout(SAID_TIMEOUT, rx).await {
             Ok(Ok(outcome)) => {
-                if !occupy_until_turn_ends || !matches!(outcome, SaidOutcome::Accepted { .. }) {
-                    let mut inner = self.inner.lock().await;
-                    inner.pending_turn.remove(&binding_id);
-                }
                 tracing::info!(
                     instance_id = %self.instance_id,
                     binding_id = %binding_id,
