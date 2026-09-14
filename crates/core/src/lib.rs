@@ -18,7 +18,6 @@ pub mod caller;
 pub mod context_budget;
 pub mod continue_marker;
 pub mod conversation;
-pub mod conversation_typed;
 pub mod engine;
 pub mod evaluator;
 pub mod heartbeat;

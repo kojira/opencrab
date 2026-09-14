@@ -37,8 +37,6 @@ fn create_test_state(compaction_ratio: f64) -> (AppState, opencrab_db::Db) {
             opencrab_actions::tools::ToolsConfig::default(),
         )),
         compaction_ratio,
-        typed_history_enabled: false,
-        typed_history_drop_directive: false,
         evaluator: opencrab_server::config::EvaluatorConfig::default(),
         skill_consolidation: opencrab_server::config::SkillConsolidationConfig::default(),
         category_maintenance: opencrab_server::config::CategoryMaintenanceConfig::default(),

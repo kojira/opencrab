@@ -244,7 +244,6 @@ pub(super) fn set_turn_log_callbacks(
             if let Ok(conn) = tc_db.lock() {
                 // LLMがtext+tool_callsを同時に返した場合、textをspeechとして記録する。
                 // #899 §12.6: 保存前に NO_REPLY 終端解釈（単一実装 visible_speech_after_markers）を
-                // 通す。沈黙（前段が空）は監査行を残さない（残すと conversation_typed が次ターンの
                 // typed 履歴へ assistant 'NO_REPLY' として再注入する）。
                 // ツールのみ生成（content 空）は `Some("")` になるため、旧 `!content.trim().is_empty()`
                 // と同じく空/空白を弾く（空 speech 行＝typed の空 assistant を作らない）。

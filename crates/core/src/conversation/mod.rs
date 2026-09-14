@@ -34,7 +34,8 @@ pub(crate) use sanitize::{
     restore_frozen_snapshot, scrub_identifiers_for_display, strip_frozen_snapshot,
     strip_inbound_meta_for_display, FROZEN_SNAPSHOT_V2_MARKER,
 };
-pub(crate) use tool_result_fold::{result_reference, signals_failure};
+#[cfg(test)]
+pub(crate) use tool_result_fold::result_reference;
 
 #[cfg(test)]
 use crate::tokens::estimate_tokens;

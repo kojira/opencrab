@@ -163,45 +163,13 @@ async fn test_no_reply_only_is_not_persisted_rest_899() {
         agent_speech
     );
 
-    // --- 観測3: typed 履歴に assistant 'NO_REPLY' が無い ---
-    let history = {
-        let conn = db.lock().unwrap();
-        opencrab_core::conversation_typed::build_typed_conversation(
-            &conn,
-            &session_id,
-            &agent_id,
-            200_000,
-            100_000,
-            false,
-            false,
-        )
-        .unwrap()
-        .history
-    };
-    let assistant_no_reply = history.iter().any(|m| {
-        m.role == Role::Assistant
-            && m.text_content()
-                .map(|t| t.trim() == "NO_REPLY")
-                .unwrap_or(false)
-    });
-    assert!(
-        !assistant_no_reply,
-        "typed 履歴に assistant 'NO_REPLY' が現れた（#899）: {:?}",
-        history
-            .iter()
-            .map(|m| (
-                format!("{:?}", m.role),
-                m.text_content().map(|s| s.to_string())
-            ))
-            .collect::<Vec<_>>()
-    );
+
 }
 
 /// #899 回帰: content 空＋非発話 tool_call の生成で、on_tool_call が空 speech 行を保存しない。
 ///
 /// `visible_speech_after_markers("")` は `Some("")` を返すため、終端解釈の後に空/空白を弾く
-/// ガードが要る（旧 `!content.trim().is_empty()` と同じ）。空 speech 行は typed 履歴に空の
-/// assistant を生む。現 tip（本ブランチ実装後）で赤。
+/// ガードが要る（旧 `!content.trim().is_empty()` と同じ）。
 #[tokio::test]
 async fn test_tool_only_generation_saves_no_empty_speech_899() {
     let (app, db, mock, _state) = create_test_app_with_state();
@@ -248,37 +216,13 @@ async fn test_tool_only_generation_saves_no_empty_speech_899() {
         "ツールのみ生成（content 空）で空の agent speech 行が保存された（#899 回帰）"
     );
 
-    // 次ターンの typed 履歴に空の assistant が無い。
-    let history = {
-        let conn = db.lock().unwrap();
-        opencrab_core::conversation_typed::build_typed_conversation(
-            &conn,
-            &session_id,
-            &agent_id,
-            200_000,
-            100_000,
-            false,
-            false,
-        )
-        .unwrap()
-        .history
-    };
-    let empty_assistant = history.iter().any(|m| {
-        m.role == Role::Assistant
-            && m.text_content()
-                .map(|t| t.trim().is_empty())
-                .unwrap_or(false)
-    });
-    assert!(
-        !empty_assistant,
-        "typed 履歴に空の assistant が現れた（#899 回帰）"
-    );
+
 }
 
 /// #899 ガードの真の穴埋め（テストレビュー所見・非回帰）: **on_tool_call 経路**で content が
 /// **"NO_REPLY"（非空テキスト）** ＋ 照会/道具 tool_call を 1 生成で併記したとき、保存前の
-/// NO_REPLY 終端解釈（`visible_speech_after_markers`・#903 §12.6）が効き "NO_REPLY" speech を
-/// 残さない・次ターン typed 履歴にも現れないことを固定する。
+/// NO_REPLY 終端解釈（`visible_speech_after_markers`・#903 §12.6）が効き、
+/// "NO_REPLY" speech を残さないことを固定する。
 ///
 /// 既存 `test_tool_only_generation_saves_no_empty_speech_899` は content=**空**のみを通すため、
 /// 旧 `!content.trim().is_empty()` filter でも通り、#903 の NO_REPLY 対応を区別しない（恒真）。
@@ -334,30 +278,6 @@ async fn test_no_reply_text_with_tool_call_saves_no_speech_899_guard() {
         "on_tool_call 経路で content=NO_REPLY が speech 保存された（#899 ガード revert）"
     );
 
-    // 次ターンの typed 履歴に assistant 'NO_REPLY' が無い。
-    let history = {
-        let conn = db.lock().unwrap();
-        opencrab_core::conversation_typed::build_typed_conversation(
-            &conn,
-            &session_id,
-            &agent_id,
-            200_000,
-            100_000,
-            false,
-            false,
-        )
-        .unwrap()
-        .history
-    };
-    let has_no_reply_assistant = history.iter().any(|m| {
-        m.role == Role::Assistant
-            && m.text_content()
-                .map(|t| t.contains("NO_REPLY"))
-                .unwrap_or(false)
-    });
-    assert!(
-        !has_no_reply_assistant,
-        "typed 履歴に assistant 'NO_REPLY' が現れた（#899 ガード revert）"
-    );
+
 }
 

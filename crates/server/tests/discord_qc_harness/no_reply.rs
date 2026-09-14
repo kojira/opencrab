@@ -47,7 +47,6 @@ async fn scenario_e_no_reply_gets_muted_reaction() {
     );
 
     // #899 / §12.6: 沈黙決着で 🤐 は付くが、speech='NO_REPLY' の監査行は残さない。
-    // （裸 NO_REPLY を永続すると conversation_typed が assistant 'NO_REPLY' として再注入する。）
     let no_reply_rows: i64 = {
         let conn = core.extgate.db.lock().unwrap();
         conn.query_row(

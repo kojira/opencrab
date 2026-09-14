@@ -40,23 +40,6 @@ agent-b = "1"
         assert_eq!(config.llm.default_provider, "openai");
     }
 
-    #[test]
-    fn conversation_config_typed_history_defaults_off_and_parses_enabled() {
-        let default: AppConfig = toml::from_str("").expect("empty config must parse");
-        assert!(!default.conversation.typed_history);
-        assert!(!default.conversation.drop_response_directive);
-
-        let enabled: AppConfig = toml::from_str(
-            r#"
-[conversation]
-typed_history = true
-"#,
-        )
-        .expect("conversation config must parse");
-        assert!(enabled.conversation.typed_history);
-        assert!(!enabled.conversation.drop_response_directive);
-    }
-
     /// Regression guard for #149: shipping `config/default.toml` must keep the
     /// codex sandbox at `read-only` so the codex CLI cannot write to the
     /// workspace / run arbitrary builds. If someone flips it back to

@@ -7,9 +7,6 @@ pub struct AppConfig {
     pub agent: AgentConfig,
     #[serde(default)]
     pub llm: LlmConfig,
-    /// #884 PR2: 構造化会話（typed history 送信）。既定 off。QC 環境で on。
-    #[serde(default)]
-    pub conversation: ConversationConfig,
     #[serde(default)]
     pub gateway: GatewayConfig,
     #[serde(default)]
@@ -51,26 +48,6 @@ pub struct AppConfig {
     /// External gate V3 UDS listen path。空・欠落は listen しない。
     #[serde(default)]
     pub gate: GateConfig,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct ConversationConfig {
-    /// typed history 送信経路を有効化（既定 false）。
-    #[serde(default)]
-    pub typed_history: bool,
-    /// typed 経路で RESPONSE_ONLY_DIRECTIVE を外す（既定 false=付けたまま）。§9.2-6。
-    #[serde(default)]
-    pub drop_response_directive: bool,
-}
-
-#[allow(clippy::derivable_impls)]
-impl Default for ConversationConfig {
-    fn default() -> Self {
-        Self {
-            typed_history: false,
-            drop_response_directive: false,
-        }
-    }
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]

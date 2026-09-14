@@ -70,7 +70,6 @@
 | f | sub-engine(depth>0) も有効 | `continue_marker_i_sub_engine_..`(engine・緑) | ○（sub-engine profile で CONTINUE 継続＋max 上限・非回帰） |
 | g | reaction/repost のみ＝#6（N 配送/N 保存/🤐 なし） | reaction: `audit_s13_1g_reaction_..`(discord・赤・🤐 なし)＋`scenario_c_reaction_..`／repost: — | ★(reaction 🤐)＋△(repost=同一 utterance 機構だが nostr の repost DI 配線が未確認の穴) |
 | h | 空白のみ＋CONTINUE＝#3 | — | △（#3 と同じく最外層未 pin） |
-| i | typed_history on/off で同一期待 | ★`audit_899a_..`（typed off で履歴に NO_REPLY なしを pin） | ○（両モードの網羅は未） |
 | j | 途中配送失敗（ゲート error）は継続を止める（❌/turn_failed） | — | △ **穴**（配送失敗で継続停止の pin なし） |
 
 ## 3. 恒真疑い（エンジン/ゲート層の内部境界 pin）

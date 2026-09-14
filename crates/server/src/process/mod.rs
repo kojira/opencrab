@@ -39,7 +39,7 @@ pub(crate) use wiring::{
     build_turn_executor, effective_allowed_commands, resolve_run_tools_config, TurnExecutorWiring,
 };
 
-use budget::{format_single_log, spawn_background_turn_end_snapshot, typed_exceeds_input_budget};
+use budget::{format_single_log, spawn_background_turn_end_snapshot};
 use callbacks::{
     merge_image_urls, set_llm_log_callback, set_run_notifier_callbacks, set_turn_log_callbacks,
 };
@@ -124,10 +124,6 @@ mod steer_inbound_tests;
 #[cfg(test)]
 #[path = "tests/tool_result_progress_line.rs"]
 mod tool_result_progress_line_tests;
-#[cfg(test)]
-#[path = "tests/typed_hard_cap.rs"]
-mod typed_hard_cap_tests;
-
 /// 実行対象の agent 行が `agents` に存在しないときのエラー（#632）。
 ///
 /// `run_agent_response` は**サーバ側の全ターン実行が通る唯一のチョークポイント**
@@ -584,54 +580,6 @@ pub async fn run_agent_response(
                 Ok(env) => {
                     engine.set_conversation_waters(env.conversation_high, env.conversation_low);
                     last_waters = Some((env.conversation_high, env.conversation_low));
-                    // #884 PR2: typed history flag が有効なら typed 会話を組んで差し込む。
-                    // 失敗時は flat へフォールバック（None）。
-                    if state.typed_history_enabled {
-                        match opencrab_core::conversation_typed::build_typed_conversation(
-                            &conn,
-                            session_id,
-                            agent_id,
-                            env.conversation_high,
-                            env.conversation_low,
-                            include_memory_index(&env),
-                            !state.typed_history_drop_directive,
-                        ) {
-                            Ok(tc)
-                                if typed_exceeds_input_budget(
-                                    tc.wire_tokens,
-                                    env.water.input_high,
-                                ) =>
-                            {
-                                // #884 PR2 hard cap: PR2 は typed 側を圧縮しないため、typed の wire
-                                // トークンがモデルの入力上限（input_high）を超えると provider が
-                                // hard-fail する。その turn だけ flat 経路（圧縮あり）へ落とす（§7 fallback）。
-                                tracing::warn!(
-                                    session_id,
-                                    wire_tokens = tc.wire_tokens,
-                                    input_high = env.water.input_high,
-                                    "typed wire tokens exceed model input budget; falling back to flat for this turn"
-                                );
-                                engine.set_typed_conversation(None);
-                            }
-                            Ok(tc) => {
-                                tracing::debug!(
-                                    session_id,
-                                    wire_tokens = tc.wire_tokens,
-                                    items = tc.diagnostics.item_count,
-                                    unpaired = tc.diagnostics.unpaired_call_count,
-                                    opaque = tc.diagnostics.opaque_event_count,
-                                    "typed history enabled: sending typed conversation"
-                                );
-                                engine.set_typed_conversation(Some(tc));
-                            }
-                            Err(e) => {
-                                tracing::warn!(session_id, %e, "typed conversation build failed; falling back to flat");
-                                engine.set_typed_conversation(None);
-                            }
-                        }
-                    } else {
-                        engine.set_typed_conversation(None);
-                    }
                 }
                 Err(e) => {
                     if req.persist_turn_logs {

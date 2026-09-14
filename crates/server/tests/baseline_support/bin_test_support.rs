@@ -137,8 +137,6 @@ pub(crate) fn app_state_with_agent(provider: Arc<dyn LlmProvider>, agent_id: &st
             opencrab_actions::tools::ToolsConfig::default(),
         )),
         compaction_ratio: 0.5,
-        typed_history_enabled: false,
-        typed_history_drop_directive: false,
         evaluator: config::EvaluatorConfig::default(),
         skill_consolidation: config::SkillConsolidationConfig::default(),
         category_maintenance: config::CategoryMaintenanceConfig::default(),
