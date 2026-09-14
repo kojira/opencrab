@@ -45,9 +45,6 @@ fn expected_v44_user_tables(before_v43: &[String]) -> Vec<String> {
 
 fn expected_v45_user_tables(before_v43: &[String]) -> Vec<String> {
     let mut expected = expected_v44_user_tables(before_v43);
-    if !expected.iter().any(|t| t == "nostr_bundle_state") {
-        expected.push("nostr_bundle_state".to_string());
-    }
     expected.sort();
     expected
 }
@@ -276,26 +273,4 @@ fn v43_schema_parity_fresh_vs_migrated() {
     assert_eq!(dump(&fresh), dump(&migrated));
     assert_eq!(schema_version(&fresh).unwrap(), latest_version());
     assert_eq!(schema_version(&migrated).unwrap(), latest_version());
-}
-
-fn assert_synthetic_v43_reaches_latest() {
-    let conn = crate::init_memory().expect("synthetic v43");
-    setup_pre_v43(&conn);
-    initialize(&conn).expect("v43 to latest");
-    assert_eq!(schema_version(&conn).unwrap(), latest_version());
-    assert_v43_schema(&conn);
-    assert_v44_schema(&conn);
-    assert_v45_schema(&conn);
-}
-
-/// 互換test FQN。外部DBは開かずsynthetic fixtureだけを検証する。
-#[test]
-fn apply_initialize_to_v47_copy_db() {
-    assert_synthetic_v43_reaches_latest();
-}
-
-/// 旧test FQN互換。検証対象は同じsynthetic v43→latest chain。
-#[test]
-fn apply_initialize_to_v43_copy_db() {
-    assert_synthetic_v43_reaches_latest();
 }

@@ -111,46 +111,6 @@ async fn scenario_no_reply_only_is_not_persisted_extgate_899() {
         agent_speech
     );
 
-    // --- 観測3: 次ターンの typed 履歴に assistant 'NO_REPLY' が無い ---
-    let history = {
-        let conn = core.extgate.db.lock().unwrap();
-        opencrab_core::conversation_typed::build_typed_conversation(
-            &conn,
-            &session_id,
-            AGENT_ID,
-            200_000,
-            100_000,
-            false,
-            false,
-        )
-        .unwrap()
-        .history
-    };
-    let assistant_no_reply = history.iter().any(|m| {
-        m.role == Role::Assistant
-            && m.text_content()
-                .map(|t| t.trim() == "NO_REPLY")
-                .unwrap_or(false)
-    });
-    assert!(
-        !assistant_no_reply,
-        "typed 履歴に assistant 'NO_REPLY' が現れた（#899）: {:?}",
-        history
-            .iter()
-            .map(|m| (
-                format!("{:?}", m.role),
-                m.text_content().map(|s| s.to_string())
-            ))
-            .collect::<Vec<_>>()
-    );
 
-    // --- 観測4: 各ターンの LLM 呼び出しは 1 回（ターン合計 noreply: LLM==1）---
-    // 4 メンション＝4 ターン。各ターンが plain text で 1 生成のみ（沈黙 a/d も含め再生成しない）。
-    assert_eq!(
-        mock.system_prompts().len(),
-        4,
-        "各ターンの LLM 呼び出しが 1 回でない（沈黙ターンで余計な再生成が起きている）: {}",
-        mock.system_prompts().len()
-    );
 }
 

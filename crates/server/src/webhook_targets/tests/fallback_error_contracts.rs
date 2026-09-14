@@ -176,17 +176,15 @@
         assert!(!e.starts_with(REJECTION_CODE_PREFIX));
     }
 
-    /// **URL のホスト許可リストを緩めていない**。
-    ///
-    /// `validate_webhook_url` は下位層（#157 S4）に降りているが、set の入口でそれを
-    /// 通していることをここで固定する。文言も移設前と同一。
+    /// 共有入口でscheme、authority、pathの最小安全条件を検証する。
     #[tokio::test]
-    async fn host_allowlist_is_still_enforced_on_set() {
+    async fn generic_url_safety_is_enforced_on_set() {
         let (actions, db) = make_test_actions();
         for bad in [
-            "https://evil.example.com/api/webhooks/1/tok",
-            "http://discord.com/api/webhooks/1/tok",
-            "https://discord.com/not-a-webhook",
+            "http://hooks.example.test/events",
+            "https:///events",
+            "https://user:secret@hooks.example.test/events",
+            "https://hooks.example.test",
         ] {
             let result = actions
                 .execute(

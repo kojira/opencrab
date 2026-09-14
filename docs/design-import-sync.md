@@ -178,7 +178,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_curated_agent_category
 
 **リクエスト**:
 ```
-GET /api/agents/{id}/import/sync/status?source_dir=/Volumes/2TB/openclaw/workspace
+GET /api/agents/{id}/import/sync/status?source_dir=/path/to/openclaw/workspace
 ```
 
 | パラメータ | 型 | 必須 | 説明 |
@@ -191,7 +191,7 @@ GET /api/agents/{id}/import/sync/status?source_dir=/Volumes/2TB/openclaw/workspa
 ```json
 {
   "agent_id": "agent-abc-123",
-  "source_dir": "/Volumes/2TB/openclaw/workspace",
+  "source_dir": "/path/to/openclaw/workspace",
   "last_sync_at": "2026-03-22T10:00:00+09:00",
   "changes": {
     "memory_md": {
@@ -235,7 +235,7 @@ GET /api/agents/{id}/import/sync/status?source_dir=/Volumes/2TB/openclaw/workspa
 **リクエスト**:
 ```json
 {
-  "source_dir": "/Volumes/2TB/openclaw/workspace",
+  "source_dir": "/path/to/openclaw/workspace",
   "options": {
     "include_daily_logs": true,
     "daily_log_days": 30,
@@ -297,7 +297,7 @@ GET /api/agents/{id}/import/sync/history?limit=20&offset=0
     {
       "id": "sync-uuid-1",
       "agent_id": "agent-abc-123",
-      "source_dir": "/Volumes/2TB/openclaw/workspace",
+      "source_dir": "/path/to/openclaw/workspace",
       "file_type": "daily_log",
       "file_name": "memory/2026-03-25.md",
       "content_hash": "abc123...",
@@ -543,7 +543,7 @@ if agent.is_none() {
 ┌────────────────────────────────────────────────────┐
 │  OpenClaw ログ同期 (エージェント)                  │
 ├────────────────────────────────────────────────────┤
-│  ソースディレクトリ: /Volumes/2TB/openclaw/workspace│
+│  ソースディレクトリ: /path/to/openclaw/workspace │
 │  最終同期: 2026-03-22 10:00  [今すぐ同期]          │
 ├────────────────────────────────────────────────────┤
 │  変更検知結果                                       │
@@ -572,7 +572,7 @@ if agent.is_none() {
 ```rust
 // 将来の拡張: config に sync_source_dir を追加
 // [agent.sync]
-// source_dir = "/Volumes/2TB/openclaw/workspace"
+// source_dir = "/path/to/openclaw/workspace"
 // auto_sync = true
 // interval_secs = 300
 ```
@@ -583,8 +583,8 @@ if agent.is_none() {
 
 `(agent_id, source_dir, file_name)` の複合キーにより、同一エージェントに複数のソースディレクトリからログを集約することが可能。例:
 
-- `/Volumes/2TB/openclaw/workspace` (メイン環境)
-- `/Users/username/openclaw/workspace` (サブ環境)
+- `/path/to/openclaw/workspace` (メイン環境)
+- `/home/user/openclaw/workspace` (サブ環境)
 
 ### 10.3 スキルの更新同期
 

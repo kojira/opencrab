@@ -1,8 +1,5 @@
 //! Pure Nostr watch subscription and inbound classification policy shared with V3 admission.
 
-use opencrab_db::queries::SessionWatchRow;
-
-use crate::config::{NostrConfig, NostrFilter};
 use crate::event::NostrEvent;
 use crate::pubkey::follow_key;
 
@@ -11,31 +8,6 @@ pub enum WatchForward {
     Discard,
     Immediate { label: &'static str },
     Bundle { label: &'static str },
-}
-
-pub fn parse_watch_filter(filter_json: &str) -> anyhow::Result<NostrFilter> {
-    let value: serde_json::Value = serde_json::from_str(filter_json)
-        .map_err(|e| anyhow::anyhow!("session_watches.filter_json が読めない: {e}"))?;
-    if !value.is_object() {
-        anyhow::bail!("session_watches.filter_json は JSON object が必須");
-    }
-    serde_json::from_value(value).map_err(|e| {
-        anyhow::anyhow!("session_watches.filter_json が NostrFilter として読めない: {e}")
-    })
-}
-
-pub fn watch_subscribe_config(
-    watch: &SessionWatchRow,
-    relays: Vec<String>,
-) -> anyhow::Result<NostrConfig> {
-    if watch.interval_secs <= 0 {
-        anyhow::bail!(
-            "session_watches.id={} の interval_secs が正の整数ではない（既定値は使わない）",
-            watch.id
-        );
-    }
-    let filter = parse_watch_filter(&watch.filter_json)?;
-    Ok(NostrConfig { relays, filter })
 }
 
 fn p_tag_is_self(event: &NostrEvent, self_pubkey: &str) -> bool {

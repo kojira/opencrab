@@ -105,8 +105,7 @@ CREATE TABLE IF NOT EXISTS skills (
     -- 前に作られた既存スキル（legacy grandfather = Owner 相当扱い）。read_skill が
     -- 「強いターンが弱いスキルを借りる」confused deputy を塞ぐために参照する（#335）。
     created_caller TEXT,
-    -- caller=Agent のターン（＝素の Agent 権限で走る run。外部 Nostr の受信ターンが
-    -- 典型例だが、判定軸は transport ではなく **caller=Agent** である）に、この skill を
+    -- caller=Agent のターン（＝素の Agent 権限で走る外部受信）に、この skill を
     -- index（system prompt）へ出し read_skill の本文を渡してよいか。既定 0 = 見せない
     -- （fail-closed）。オーナーがダッシュボード（REST）で少数だけ 1 に切り替える。
     -- Owner / CoAgent / TrustedUser の見え方には影響しない（従来どおり全部見える）。issue #352。
@@ -121,8 +120,8 @@ CREATE INDEX IF NOT EXISTS idx_skills_active ON skills(agent_id, is_active);
 -- ============================================
 -- Impressions: 心象
 -- ============================================
--- スコープは **agent × target**（#314）。同じ相手なら Discord でも Nostr でも
--- 同じ 1 行を更新・参照する（「同じ人は同じ人」）。`session_id` は
+-- スコープは **agent × target**（#314）。同じ相手は経路によらず同じ 1 行を
+-- 更新・参照する。`session_id` は
 -- 「**最後に更新されたセッション**」の記録として残す（時系列の辿り先）。
 CREATE TABLE IF NOT EXISTS impressions (
     id TEXT PRIMARY KEY,
@@ -250,7 +249,7 @@ CREATE TABLE IF NOT EXISTS heartbeat_instructions_audit (
     scope TEXT NOT NULL,
     channel_id TEXT,
     caller_identity TEXT NOT NULL,
-    caller_discord_id TEXT,
+    caller_user_id TEXT,
     old_value TEXT,
     new_value TEXT,
     reason TEXT,
@@ -293,9 +292,9 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
 );
 
 -- ============================================
--- Discordチャンネル設定
+-- チャンネル設定
 -- ============================================
-CREATE TABLE IF NOT EXISTS discord_channel_config (
+CREATE TABLE IF NOT EXISTS channel_config (
     channel_id TEXT NOT NULL,
     agent_id TEXT NOT NULL DEFAULT '',
     guild_id TEXT NOT NULL,
@@ -309,7 +308,7 @@ CREATE TABLE IF NOT EXISTS discord_channel_config (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (channel_id, agent_id)
 );
-CREATE INDEX IF NOT EXISTS idx_discord_channel_guild ON discord_channel_config(guild_id);
+CREATE INDEX IF NOT EXISTS idx_channel_guild ON channel_config(guild_id);
 
 -- ============================================
 -- ペルソナプリセット
@@ -324,54 +323,6 @@ CREATE TABLE IF NOT EXISTS soul_presets (
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_soul_presets_agent ON soul_presets(agent_id);
-
--- ============================================
--- エージェント別Discord Bot設定
--- ============================================
-CREATE TABLE IF NOT EXISTS agent_discord_config (
-    agent_id TEXT PRIMARY KEY,
-    bot_token TEXT NOT NULL,
-    owner_discord_id TEXT NOT NULL DEFAULT '',
-    enabled INTEGER NOT NULL DEFAULT 1,
-    -- この bot 自身の Discord user id（#489）。**発言者識別子 → agent UUID の逆引き**に使う
-    -- （co_agent 判定）。書くのは gateway 起動時の**自分自身の認証済み接続**（`get_current_user`）
-    -- だけで、config 構造体・upsert・REST 設定 API のどれからも書けない（外部が仕込めない）。
-    -- 既定の空文字は「未接続 = 逆引き不可 = fail-closed」を意味する。
-    bot_user_id TEXT NOT NULL DEFAULT '',
-    updated_at TEXT NOT NULL
-);
-
--- ============================================
--- エージェント別 Nostr sub-gateway 設定（秘密鍵は per-agent 隔離）
--- ============================================
-CREATE TABLE IF NOT EXISTS agent_nostr_config (
-    agent_id TEXT PRIMARY KEY,
-    secret_key TEXT NOT NULL,
-    relays_json TEXT NOT NULL DEFAULT '[]',
-    filter_json TEXT NOT NULL DEFAULT '{}',
-    enabled INTEGER NOT NULL DEFAULT 0,
-    -- Nostr 経路のオーナー識別子（#319）。`agent_discord_config.owner_discord_id` の
-    -- Nostr 版。**64 桁小文字 hex に正規化して保存**し、既定の空文字は「オーナー未設定
-    -- ＝誰もオーナーにならない」を意味する（fail-closed）。
-    owner_pubkey TEXT NOT NULL DEFAULT '',
-    -- この agent 自身の Nostr pubkey（#489。64 桁小文字 hex）。**発言者 pubkey → agent UUID の
-    -- 逆引き**に使う（co_agent 判定）。書くのは gateway 起動時に自分の secret_key から導出した
-    -- pubkey（`nostaro pubkey`）と identity 切替時の新 pubkey **だけ**で、config 構造体・upsert・
-    -- REST 設定 API のどれからも書けない。既定の空文字は「未接続 = 逆引き不可 = fail-closed」。
-    self_pubkey TEXT NOT NULL DEFAULT '',
-    updated_at TEXT NOT NULL
-);
-
--- ============================================
--- エージェント別 Nostr 受信 → Discord 転記先（issue #252 段階 A）
--- 既定は無効（行があっても enabled=0 なら転記しない / fail-closed）
--- ============================================
-CREATE TABLE IF NOT EXISTS agent_nostr_relay_config (
-    agent_id TEXT PRIMARY KEY,
-    enabled INTEGER NOT NULL DEFAULT 0,
-    webhook_url TEXT,
-    updated_at TEXT NOT NULL
-);
 
 -- ============================================
 -- Agent Webhook Config (subtask/tool/lifecycle webhook defaults)
@@ -476,8 +427,6 @@ CREATE INDEX IF NOT EXISTS idx_trusted_co_agents_agent ON trusted_co_agents(agen
 -- ============================================
 -- 信頼済みユーザー（経路ごとの識別子空間）
 -- ============================================
--- 旧名は `trusted_discord_users` / `discord_user_id`。Discord 以外の経路（web / rest）も
--- 同じ表を使うので #159 (v17) で改名した。旧DBは v17 の RENAME で追従する。
 CREATE TABLE IF NOT EXISTS trusted_users (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
@@ -486,10 +435,8 @@ CREATE TABLE IF NOT EXISTS trusted_users (
   created_by TEXT NOT NULL DEFAULT 'owner',
   created_at TEXT NOT NULL,
   display_name TEXT NOT NULL DEFAULT '',
-  -- その識別子が「どの経路のものか」（#214）。列追加前の行は全て Discord の
-  -- 識別子空間なので DEFAULT 'discord'（`pending_interactions.platform` の前例に倣う）。
-  -- 一意制約は (user_id, agent_id) のまま据え置く（作り直しは非可逆なので #159 の最終段）。
-  platform TEXT NOT NULL DEFAULT 'discord',
+  -- 識別子のopaqueな発行元。共有層は値を解釈しない。
+  platform TEXT NOT NULL DEFAULT 'external',
   UNIQUE (user_id, agent_id)
 );
 CREATE INDEX IF NOT EXISTS idx_trusted_users_agent ON trusted_users(agent_id);
@@ -604,7 +551,7 @@ CREATE TABLE IF NOT EXISTS pending_interactions (
     session_id TEXT NOT NULL,
     channel_id TEXT NOT NULL,
     message_id TEXT,
-    platform TEXT NOT NULL DEFAULT 'discord',
+    platform TEXT NOT NULL DEFAULT 'external',
     surface_id TEXT NOT NULL,
     a2ui_components_json TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
@@ -717,12 +664,9 @@ CREATE TABLE IF NOT EXISTS task_progress (
 CREATE INDEX IF NOT EXISTS idx_task_progress_task ON task_progress(task_id);
 
 -- ============================================
--- SESSION WATCHES: セッションに紐づく Nostr 購読（1 セッション N 行）
+-- SESSION WATCHES: セッションに紐づく外部購読（1 セッション N 行）
 -- ============================================
--- 行があるセッションだけ新機構（束ね / 即時転送の分岐）が効く。
--- 既存 nostr-{agent} は行ゼロのまま → 現行 agent_nostr_config watch を維持。
 -- interval_secs は必須（DEFAULT 無し）。未設定の INSERT は SQL が拒否する。
--- リレー・鍵は agent_nostr_config（接続の家）。本表は購読条件だけ。
 CREATE TABLE IF NOT EXISTS session_watches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL,
@@ -756,16 +700,4 @@ CREATE TABLE IF NOT EXISTS tool_logs (
 CREATE INDEX IF NOT EXISTS idx_tool_logs_agent ON tool_logs(agent_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_tool_logs_session ON tool_logs(session_id);
 
--- ============================================
--- NOSTR BUNDLE STATE: V3 TimelineBundle の core coordinator（V3 4表に含めない）
--- ============================================
-CREATE TABLE IF NOT EXISTS nostr_bundle_state (
-    binding_id TEXT NOT NULL,
-    bundle_id TEXT NOT NULL,
-    manifest_json TEXT NOT NULL,
-    received_bits TEXT NOT NULL,
-    new_admitted_bits TEXT NOT NULL,
-    completed INTEGER NOT NULL CHECK(completed IN (0,1)),
-    PRIMARY KEY(binding_id, bundle_id)
-);
 "#;

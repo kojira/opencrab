@@ -42,14 +42,13 @@ fn test_base64_encode_vectors() {
 
 #[test]
 fn test_is_global_ip_rejects_internal() {
-    use std::net::IpAddr;
+    use std::net::{IpAddr, Ipv4Addr};
     let bad = [
         "127.0.0.1",
         "10.0.0.1",
         "192.168.1.1",
         "172.16.0.1",
         "169.254.169.254", // クラウドメタデータ
-        "100.64.0.1",      // CGNAT
         "0.0.0.0",
         "::1",
         "::ffff:127.0.0.1", // v4-mapped loopback
@@ -65,6 +64,8 @@ fn test_is_global_ip_rejects_internal() {
         let ip: IpAddr = s.parse().unwrap();
         assert!(!is_global_ip(ip), "{s} should be rejected");
     }
+    let carrier_grade_nat = IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1));
+    assert!(!is_global_ip(carrier_grade_nat));
     let good = ["8.8.8.8", "1.1.1.1", "2001:4860:4860::8888"];
     for s in good {
         let ip: IpAddr = s.parse().unwrap();

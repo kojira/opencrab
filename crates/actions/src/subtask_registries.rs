@@ -11,7 +11,7 @@
 //! （設定変更で作り直される）が跨っても registry が失われないようにする。
 //!
 //! エントリの GC は行わない。キーの母数は「エージェント × 会話相手」で有界であり、
-//! 決着後は中身が空の `DashMap` が残るだけ（web gateway の registries も同様）。
+//! 決着後は中身が空の `DashMap` が残るだけ（外部gatewayのregistriesも同様）。
 //!
 //! #168 で `crates/server` からこの gateway 非依存層へ移した。Nostr ゲートウェイ
 //! （`crates/nostr`）も per-session registry を必要とするが、依存方向は

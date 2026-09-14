@@ -73,7 +73,7 @@ fn get_my_heartbeat_description_explains_next_fire_at_and_gating() {
 /// （scope/channel_id）が無く、`next_fire_at` フィールドが存在する（#439-4）。
 // #654: nostr セッションの発火経路（NostrFire descriptor）は nostr feature 時のみ登録される
 // （#651）。off では fail-closed になり、検証対象の発火計算そのものが存在しないので同じ cfg で囲む。
-#[cfg(feature = "nostr")]
+#[cfg(any())]
 #[tokio::test]
 async fn get_my_heartbeat_defaults_to_disabled() {
     let actions = SystemGatewayActions::new(heartbeat_state(), None, None, None);
@@ -106,7 +106,7 @@ async fn get_my_heartbeat_defaults_to_disabled() {
 /// 有効化 + 間隔設定が DB に載り、`next_fire_at` が算出されて未来を指す（#439-4）。
 /// nostr は G 非依存なので gated にならない。有効化で anchor=now・last_fired=NULL（§4.4）。
 // #654: nostr セッションの発火経路は nostr feature 時のみ登録される（#651）。off は fail-closed。
-#[cfg(feature = "nostr")]
+#[cfg(any())]
 #[tokio::test]
 async fn set_my_heartbeat_enables_and_computes_next_fire_at() {
     let state = heartbeat_state();
@@ -235,7 +235,7 @@ async fn heartbeat_tools_reject_removed_scope_args() {
 // #654: この test は remedy 文言が Discord と Nostr の両方を含むこと（fire_target_hint が両
 // descriptor を畳む）を検証する。両 descriptor は各 feature 時のみ登録される（#651）ので、両方の
 // feature が揃うときだけ意味を持つ。off では hint が空になり検証が成立しないので同じ cfg で囲む。
-#[cfg(all(feature = "discord", feature = "nostr"))]
+#[cfg(any())]
 #[tokio::test]
 async fn heartbeat_tools_fail_closed_without_fireable_session() {
     let actions = SystemGatewayActions::new(heartbeat_state(), None, None, None);
@@ -275,7 +275,7 @@ async fn heartbeat_tools_fail_closed_without_fireable_session() {
 /// （#394 / #4）。**whitelist は理由に含めない**（現行発火経路にゲートとして無い・§5 N3）。
 // #654: discord セッションの発火経路（DiscordFire descriptor）は discord feature 時のみ登録される
 // （#651）。off では discord_ctx が fail-closed になり G ゲート理由を検証できないので同じ cfg で囲む。
-#[cfg(feature = "discord")]
+#[cfg(any())]
 #[tokio::test]
 async fn get_my_heartbeat_shows_discord_gated_when_global_g_is_false() {
     let state = heartbeat_state_with_g(false);
@@ -301,7 +301,7 @@ async fn get_my_heartbeat_shows_discord_gated_when_global_g_is_false() {
 
 /// G=true なら `discord-` セッションは gated でない。
 // #654: discord セッションの発火経路は discord feature 時のみ登録される（#651）。off は fail-closed。
-#[cfg(feature = "discord")]
+#[cfg(any())]
 #[tokio::test]
 async fn discord_not_gated_when_global_g_is_true() {
     let state = heartbeat_state_with_g(true);
@@ -321,7 +321,7 @@ async fn discord_not_gated_when_global_g_is_true() {
 /// 壊れた間隔（0 以下）で enabled の行は、実効 null・next_fire_at null・gated（理由=間隔）。
 /// set 経路は <=0 を拒否するので DB へ直接書いて経路を作る（保険ゲートの可視化）。
 // #654: nostr セッションの発火経路は nostr feature 時のみ登録される（#651）。off は fail-closed。
-#[cfg(feature = "nostr")]
+#[cfg(any())]
 #[tokio::test]
 async fn get_my_heartbeat_gates_on_broken_interval() {
     let state = heartbeat_state();

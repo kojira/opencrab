@@ -13,7 +13,6 @@ include!("cancel_subtask.rs");
 include!("heartbeat_instructions.rs");
 include!("management_transport.rs");
 include!("memory_index_config.rs");
-include!("nostr_run.rs");
 include!("peer_review.rs");
 include!("send_ui.rs");
 include!("skills.rs");

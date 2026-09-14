@@ -1,22 +1,15 @@
 //! セッション単位の直列化ランタイム（#190 S1 / 方針は #191）。
 //!
-//! ゲートウェイ（web / Nostr）は「1 セッション = 1 会話」の単位で応答生成を直列化する
-//! 必要がある。inbound の応答生成と subtask 完了 resume の応答生成が同一セッションで
-//! 並行すると、両者が同じ会話履歴から独立に返信を組み立てて**二重投稿**になる
-//! （RFC #152 §6 の不変条件違反）。
-//!
-//! この直列化は web（`WebGateway`）と Nostr（`NostrSessionRuntime`）で文字レベルまで
-//! ほぼ同一のコードとして二重に実装されていた。差は可視性と、web が SSE 配信チャンネルを
-//! 同じ構造体に同居させていた点だけだった。同じ不変条件を守るコードが 2 箇所にあると
-//! 片方だけ直る（= 片方だけ壊れる）ため、ここ 1 つに寄せる。
+//! 外部gatewayは「1 session = 1 conversation」の単位で応答生成を直列化する必要がある。
+//! inboundとsubtask完了resumeが同一sessionで並行すると、両者が同じ会話履歴から独立に
+//! 返信を組み立てて二重配送になる。この共通不変条件を守る実装をここ1つに置く。
 //!
 //! 併せて dispatch 用の登録簿（[`SubtaskRegistries`]）も保持する。inbound と resume が
 //! **同一 Arc の registry** を共有することが `cancel_subtask`（#161）が走行中 subtask に
 //! 到達できる条件であり、直列化と同じ「セッション単位の実行状態」だからである。
 //!
-//! ここに置く理由（依存方向）: 依存は server → nostr であり、Nostr 側から server の型は
-//! 参照できない。registry 本体（`SubtaskRegistry`）と同じ gateway 非依存層に置くことで、
-//! どのゲートウェイからも同じ 1 実装を使える。
+//! registry本体（`SubtaskRegistry`）と同じgateway非依存層に置くことで、
+//! どのgatewayからも同じ実装を使える。
 //!
 //! Discord は受信ループ形のため「spawn 込みで応答を返さない」という別形だが、そのために
 //! ロック表を二重に持つ理由はない。[`SessionLocks::spawn_serialized`]（`run_serialized` を

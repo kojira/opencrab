@@ -1,4 +1,4 @@
-// ==================== (a) mention → say（standalone post） ====================
+// ==================== (a) mention → say（origin event への reply） ====================
 
 #[tokio::test]
 async fn scenario_a_mention_becomes_say() {
@@ -18,7 +18,7 @@ async fn scenario_a_mention_becomes_say() {
         wait_until(move || {
             captured(&buf)
                 .iter()
-                .any(|c| c.body.contains("QCA-ACK") && c.kind == "standalone")
+                .any(|c| c.body.contains("QCA-ACK") && c.kind == "reply")
         })
         .await
     };
@@ -62,7 +62,7 @@ async fn scenario_no_reply_terminates_and_logs_discard() {
         wait_until(move || {
             captured(&buf)
                 .iter()
-                .any(|c| c.body.contains("NRTERM-KEEP") && c.kind == "standalone")
+                .any(|c| c.body.contains("NRTERM-KEEP") && c.kind == "reply")
         })
         .await
     };

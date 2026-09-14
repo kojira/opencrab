@@ -13,7 +13,6 @@ use opencrab_server::{create_router, AppState};
 
 include!("api_e2e/support.rs");
 include!("api_e2e/agents_sessions_memory.rs");
-include!("api_e2e/discord_owner_identity.rs");
 include!("api_e2e/llm_support.rs");
 include!("api_e2e/llm_conversation.rs");
 include!("api_e2e/llm_tool_history.rs");

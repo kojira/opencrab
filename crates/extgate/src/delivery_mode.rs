@@ -1,4 +1,4 @@
-//! instance config の optional `delivery_mode`。欠落は `say`（WEBGATE §8.2）。
+//! instance configのoptional `delivery_mode`。欠落時は`say`配送を使う。
 //! `kind_id` では分岐しない。
 
 use opencrab_actions::DeliveryEffect;

@@ -1,5 +1,4 @@
 include!("agents/core.rs");
-include!("agents/discord.rs");
 include!("agents/memory_index.rs");
 
 #[cfg(test)]

@@ -29,7 +29,7 @@
 ///
 /// `make_inner` はハンドラと同じ材料（共有 DB / workspace_base）から transport gateway を
 /// 組むためのファクトリ。本番（`send_agent_message` step 6）と同じく `state.db` を渡す。
-#[cfg(feature = "discord")]
+#[cfg(any())]
 async fn cancel_last_subtask_in_rest_run_with_inner(
     make_inner: impl FnOnce(opencrab_db::Db, String) -> Arc<dyn opencrab_gateway::GatewayActions>,
 ) -> CancelObservation {
@@ -103,7 +103,7 @@ async fn cancel_last_subtask_in_rest_run_with_inner(
 }
 
 /// [`cancel_last_subtask_in_rest_run_with_inner`] の観測結果。
-#[cfg(feature = "discord")]
+#[cfg(any())]
 struct CancelObservation {
     /// 停止後の親セッションの `sessions.status`（本題。`completed` でなければ #184 の再発）。
     session_status: Option<String>,
@@ -119,7 +119,7 @@ struct CancelObservation {
 /// 落ちるとき: 合成層の停止を `report_progress` と同じ「inner が定義していれば委譲」
 /// パターンに戻したとき。委譲先は sink を触らないので、セッションは `active` のまま残る
 /// （= #184 で報告された永久 active そのもの）。
-#[cfg(feature = "discord")]
+#[cfg(any())]
 #[tokio::test]
 async fn test_rest_cancel_completes_session_even_if_inner_defines_cancel_subtask() {
     struct CancelDefiningInner {

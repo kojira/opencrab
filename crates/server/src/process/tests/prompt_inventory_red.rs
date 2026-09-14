@@ -167,7 +167,15 @@ fn removed_command_and_prohibition_lines_are_gone() {
 fn rewritten_fact_sentences_are_present() {
     let prompt = prompt();
     let present: &[(&str, &str)] = &[
-        // 3.1 導入（A6 事実化）: 逐語投稿の事実
+        // 3.1 導入（A6 事実化）: 履歴境界と逐語投稿の事実
+        (
+            "When conversation history is present, it is delimited by `<conversation_history>` and `</conversation_history>`",
+            "会話履歴がある場合の構造境界",
+        ),
+        (
+            "never reproduce or continue transcript-formatted speaker lines",
+            "履歴形式を応答として継続しない",
+        ),
         ("Your response is posted verbatim", "A6 逐語投稿の事実"),
         // 明示終端は配送本文と分離して保存する。
         (
@@ -182,6 +190,18 @@ fn rewritten_fact_sentences_are_present() {
         (
             "Calling the same tool again for the same request starts a second, independent run",
             "A18 再呼び出しは 2 本目が走る（事実）",
+        ),
+        (
+            "decide whether any independent useful work remains",
+            "spawned 後の継続可否は agent 自身が判断",
+        ),
+        (
+            "respond with exactly `NO_REPLY` to end the current turn without speech",
+            "他に進める作業が無ければ NO_REPLY で無発話終了",
+        ),
+        (
+            "do not post a status, progress, or waiting message",
+            "spawned 待機中の無価値な発話を禁止",
         ),
         // 発話だけではターンを終了しない。
         (
@@ -227,6 +247,12 @@ Some tools return `{status:"spawned", subtask_id: ...}` immediately instead of a
 The work is then running in the background, and its result arrives later in a separate turn as a
 `[subtask_completed: ...]` entry. Calling the same tool again for the same request starts a
 second, independent run, and the actual result appears only at the completion turn.
+
+After receiving a spawned result, decide whether any independent useful work remains that does
+not require its result. Continue that work if so. If none remains, do not post a status,
+progress, or waiting message; respond with exactly `NO_REPLY` to end the current turn without
+speech. The completion entry will start the next turn. Do not call the same tool again while it
+is running.
 
 A `[subtask_completed: ...]` entry means a tool you called has finished and it is your turn
 again. Read that result, finish the original request, and then write `NO_REPLY` to end the turn."#;
@@ -333,7 +359,7 @@ fn peer_review_section_and_roster_are_removed() {
     // 表示名つき co-agent レビュアーを seed（現 tip なら名簿に載る）。
     opencrab_db::queries::add_trusted_user(
         &conn,
-        opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
+        "external-a",
         "r1",
         "a1",
         "42",

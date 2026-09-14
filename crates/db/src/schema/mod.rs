@@ -8,21 +8,16 @@ mod v37_v42;
 mod v43_v47;
 
 use baseline::migrate;
-use helpers::{column_exists, table_exists, table_has_rows};
+use helpers::{column_exists, table_exists};
 use migrations::MIGRATION_GROUPS;
 use sql::{
-    AGENT_HEARTBEAT_CONFIG_SQL, AGENT_MCP_CONFIG_SQL, AGENT_NOSTR_CONFIG_SQL,
-    AGENT_NOSTR_RELAY_CONFIG_SQL, MEMORY_CATEGORY_MEMBERS_MM_SQL, MEMORY_CATEGORY_MEMBERS_SQL,
-    PROVIDER_SETTINGS_SQL, SCHEMA_SQL, SKILL_USAGE_LOG_SQL, TASK_LEDGER_SQL,
+    AGENT_HEARTBEAT_CONFIG_SQL, AGENT_MCP_CONFIG_SQL, MEMORY_CATEGORY_MEMBERS_MM_SQL,
+    MEMORY_CATEGORY_MEMBERS_SQL, PROVIDER_SETTINGS_SQL, SCHEMA_SQL, SKILL_USAGE_LOG_SQL,
+    TASK_LEDGER_SQL,
 };
 use v37_v42::{migrate_v37_session_heartbeat, migrate_v38_align_schedule_vocab};
-use v43_v47::{
-    migrate_v43_transplant_schema, migrate_v44_extgate, migrate_v45_nostr_bundle_state,
-    migrate_v47_gateway_operations,
-};
+use v43_v47::{migrate_v43_transplant_schema, migrate_v44_extgate, migrate_v47_gateway_operations};
 
-#[cfg(test)]
-use v37_v42::{norm_discord_id, session_id_is_valid};
 #[cfg(test)]
 use v43_v47::expected_v43_user_tables;
 

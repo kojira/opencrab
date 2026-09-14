@@ -119,7 +119,7 @@ terminate_pid() {
 #    checkout の隔離テスト用 nostaro まで巻き込む。
 #  - 照合は「バイナリ名 nostaro（argv0 の basename）」と「--config が $SCRIPT_DIR/data/agents/
 #    で始まる」の両方を要求する。nostaro のバイナリは opencrab の checkout の外（別プロジェクト
-#    の絶対パス、実測では /Volumes/2TB/openclaw/workspace/projects/nostaro/target/release/nostaro）
+#    の絶対パス）
 #    にあり、この opencrab checkout を指さない。よってバイナリのパスでは checkout を区別できず、
 #    区別の鍵はこの checkout 配下を指す --config 接頭辞になる。
 #  - kill する前に ppid==1（孤児）であることを確認する。ppid!=1 の一致は「殺すべき親付き

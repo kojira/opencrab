@@ -7,7 +7,7 @@
             // 送信者 "42" をこのエージェントの co_agent として登録
             opencrab_db::queries::add_trusted_user(
                 &conn,
-                opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
+                REVIEWER_PLATFORM,
                 "row-1",
                 "a1",
                 "42",
@@ -70,7 +70,7 @@
             let conn = db.lock().unwrap();
             opencrab_db::queries::add_trusted_user(
                 &conn,
-                opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
+                REVIEWER_PLATFORM,
                 "row-1",
                 "a1",
                 "42",
@@ -105,15 +105,14 @@
         // 経路の列を持たない由来 → 回収しない（識別子が偶然一致しても受理しない）
         assert!(!harvest_inbound_reply(
             &db,
-            TranscriptSource::Nostr,
+            TranscriptSource::new("other-in", "other-out"),
             "a1",
             &record
         ));
-        assert!(trusted_platform_for(TranscriptSource::Nostr).is_none());
         // Discord は登録済み経路 → 回収する
         assert!(harvest_inbound_reply(
             &db,
-            TranscriptSource::Discord,
+            TranscriptSource::new(REVIEWER_PLATFORM, "test-out"),
             "a1",
             &record
         ));

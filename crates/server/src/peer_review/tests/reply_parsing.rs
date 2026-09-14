@@ -11,7 +11,7 @@
     ) -> bool {
         record_peer_review_reply(
             db,
-            opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
+            REVIEWER_PLATFORM,
             agent_id,
             session_id,
             sender_id,

@@ -72,10 +72,10 @@ test('plain HTTP non-secure: physical id send + overflow scroll follow/hold', as
   await assertPlainNonSecure(page);
 
   const created = (await page.evaluate(async () => {
-    const res = await fetch('/api/agents/e2eagent/web-conversations', {
+    const res = await fetch('/api/web-conversations', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: '{}',
+      body: JSON.stringify({ agent_id: 'e2eagent' }),
     });
     return { status: res.status, body: await res.json() };
   })) as {
@@ -86,10 +86,12 @@ test('plain HTTP non-secure: physical id send + overflow scroll follow/hold', as
   expect(created.body.binding_id, JSON.stringify(created.body)).toMatch(
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
   );
-  expect(created.body.session_id, JSON.stringify(created.body)).toMatch(/^web-e2eagent-/);
-  const physicalId = `extgate-${created.body.binding_id}`;
-  const logicalId = created.body.session_id as string;
-  console.log(`logical=${logicalId} physical=${physicalId}`);
+  expect(created.body.session_id, JSON.stringify(created.body)).toBe(
+    `extgate-${created.body.binding_id}`,
+  );
+  const physicalId = created.body.session_id as string;
+  const logicalId = physicalId;
+  console.log(`session=${physicalId}`);
 
   const seed = await page.evaluate(
     async ({ sessionId, count }) => {

@@ -99,11 +99,13 @@ fn core_restart_gateway_reconnects_then_create_201_message_say() {
     );
 
     let (st, body) = http(
-        core_port,
+        gw_port,
         "POST",
-        &format!("/api/agents/{AGENT}/web-conversations"),
+        "/api/web-conversations",
         None,
-        Some(r#"{"name":"Reconnect"}"#),
+        Some(&format!(
+            r#"{{"agent_id":"{AGENT}","name":"Reconnect"}}"#
+        )),
         Duration::from_secs(70),
     )
     .expect("create");

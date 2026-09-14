@@ -71,7 +71,7 @@ pub fn request_peer_review_definition() -> GatewayActionDef {
     GatewayActionDef {
         name: "request_peer_review".to_string(),
         class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::Blocked, sharing: opencrab_gateway::ToolSharing::AgentBound },
-        description: "自分の成果物（diff・実行結果・トレース等）を、同じチャンネルにいる別のBot（別モデル）にピアレビューしてもらうため、レビュー依頼をDiscordチャンネルへ投稿する。contentは要約せずRAWのまま part X/N で分割送信される。レビュアーは [Peer Review] で始まる返信（score 0.0-1.0 / gaps / summary）を返す想定。activeタスクがあればタスク台帳に [peer review requested] を自動記録する。".to_string(),
+        description: "自分の成果物（diff・実行結果・トレース等）を、同じ会話にいる別のBot（別モデル）にピアレビューしてもらうため、レビュー依頼を現在の返信先へ投稿する。contentは要約せずRAWのまま part X/N で分割送信される。レビュアーは [Peer Review] で始まる返信（score 0.0-1.0 / gaps / summary）を返す想定。activeタスクがあればタスク台帳に [peer review requested] を自動記録する。".to_string(),
         parameters: json!({
             "type": "object",
             "required": ["content"],
@@ -587,34 +587,15 @@ pub(crate) fn harvest_inbound_reply(
     agent_id: &str,
     record: &InboundMessageRecord<'_>,
 ) -> bool {
-    let Some(platform) = trusted_platform_for(source) else {
-        tracing::debug!(
-            agent_id = %agent_id,
-            "inbound hook: 信頼済みユーザーの経路が未定義の由来 — ピアレビュー回収をスキップ (#159)"
-        );
-        return false;
-    };
     record_peer_review_reply(
         db,
-        platform,
+        source.inbound(),
         agent_id,
         record.session_id,
         record.sender_id,
         record.sender_name,
         record.text,
     )
-}
-
-/// 受信の由来を、信頼済みユーザー表（`trusted_users.platform`）のキー空間へ対応づける。
-///
-/// Nostr は送信者識別子（pubkey）を信頼済みユーザー表の経路として持たない。
-/// 対応が無い由来は `None` を返し、回収させない（fail-closed）。
-fn trusted_platform_for(source: TranscriptSource) -> Option<&'static str> {
-    match source {
-        TranscriptSource::Discord => Some(opencrab_db::queries::TRUSTED_PLATFORM_DISCORD),
-        TranscriptSource::Nostr => None,
-        TranscriptSource::External => None,
-    }
 }
 
 /// レビュアー名簿（ロスター）を引く経路（#159）。
@@ -626,7 +607,7 @@ fn trusted_platform_for(source: TranscriptSource) -> Option<&'static str> {
 ///
 /// 一致は `roster_platform_matches_the_harvestable_platforms` が固定する
 /// （`TranscriptSource` に由来が増えたらそのテストがコンパイルできなくなる）。
-pub(crate) const REVIEWER_PLATFORM: &str = opencrab_db::queries::TRUSTED_PLATFORM_DISCORD;
+pub(crate) const REVIEWER_PLATFORM: &str = "external";
 
 /// 受信した `[Peer Review]` 返信を requester の active タスクへ自動記録する（#58）。
 ///

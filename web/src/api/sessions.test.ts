@@ -14,6 +14,7 @@ import {
   sendWebMessage,
   conversationEventsUrl,
   createWebConversation,
+  getWebConversationState,
 } from './sessions';
 import { conversationTitle } from '../lib/conversationTitle';
 import type { SessionRow } from './types';
@@ -87,26 +88,9 @@ describe('getSession', () => {
       participant_count: 4,
       agent_ids: ['a1', 'a2', 'a3', 'a4'],
       metadata_json: null,
-      gateway_bound: false,
-      web_binding_state: undefined,
-      binding_address: undefined,
     });
   });
 
-  it('passes through server binding_address and does not invent one', async () => {
-    mockedApi.get.mockResolvedValue(
-      makeRow({
-        id: 'extgate-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
-        gateway_bound: true,
-        web_binding_state: 'ready',
-        binding_address: 'web-a1-c1',
-        agent_ids: ['a1'],
-      }),
-    );
-    const result = await getSession('extgate-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
-    expect(result.binding_address).toBe('web-a1-c1');
-    expect(result.id).toBe('extgate-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
-  });
 });
 
 describe('createWebConversation', () => {
@@ -129,10 +113,10 @@ describe('createWebConversation', () => {
     expect(created.state).toBe('provisioning');
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api/agents/agent-1/web-conversations',
+      '/api/web-conversations',
       expect.objectContaining({
         method: 'POST',
-        body: '{}',
+        body: JSON.stringify({ agent_id: 'agent-1', name: null }),
       }),
     );
     vi.unstubAllGlobals();
@@ -147,6 +131,24 @@ describe('createWebConversation', () => {
       status: 409,
       code: 'web_instance_unavailable',
     });
+    vi.unstubAllGlobals();
+  });
+});
+
+describe('getWebConversationState', () => {
+  it('reads ownership state from the web gateway and treats 404 as not owned', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        status: 200,
+        json: async () => ({ session_id: 'extgate-b', state: 'ready' }),
+      })
+      .mockResolvedValueOnce({ status: 404 });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(getWebConversationState('extgate-b')).resolves.toBe('ready');
+    await expect(getWebConversationState('plain')).resolves.toBeNull();
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/web-conversations/extgate-b');
     vi.unstubAllGlobals();
   });
 });

@@ -9,7 +9,6 @@ use super::*;
 include!("memory_index/fixtures.rs");
 include!("sessions.rs");
 include!("agents.rs");
-include!("agent_discord_config.rs");
 include!("agent_inbox.rs");
 include!("channel_config.rs");
 include!("curated_memory.rs");

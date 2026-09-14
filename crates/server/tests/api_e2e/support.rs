@@ -30,15 +30,13 @@ fn create_test_state(compaction_ratio: f64) -> (AppState, opencrab_db::Db) {
         voice_config: Arc::new(Default::default()),
         voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
-        #[cfg(feature = "nostr")]
+#[cfg(any())]
         nostr_master_key: None,
         default_model: "mock:test".to_string(),
         tools_config: Arc::new(std::sync::RwLock::new(
             opencrab_actions::tools::ToolsConfig::default(),
         )),
         compaction_ratio,
-        typed_history_enabled: false,
-        typed_history_drop_directive: false,
         evaluator: opencrab_server::config::EvaluatorConfig::default(),
         skill_consolidation: opencrab_server::config::SkillConsolidationConfig::default(),
         category_maintenance: opencrab_server::config::CategoryMaintenanceConfig::default(),

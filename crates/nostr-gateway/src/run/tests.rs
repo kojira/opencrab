@@ -20,6 +20,7 @@ fn watches_present_still_spawns_mention_keyword_lane() {
             filter_json: None,
         }],
         delivery_mode: None,
+        access: AccessConfig::default(),
     };
     let planned = plan_lane_spawns(&cfg);
     assert_eq!(planned.len(), 2, "mention + watch");
@@ -151,6 +152,7 @@ fn dedup_ttl_covers_max_watch_interval() {
         name: None,
         watches: vec![],
         delivery_mode: None,
+        access: AccessConfig::default(),
     };
     // watch 無しは下限。
     assert_eq!(dedup_ttl(&cfg), DEDUP_TTL_FLOOR);
@@ -330,10 +332,11 @@ fn capped_bundle_manifest_matches_coordinator_contract() {
             Some(&place),
         )
         .expect("map");
+        assert!(!mapped.text.contains("NOSTRBUNDLE"));
         assert!(mapped
-            .text
-            .contains(&crate::map::bundle_members_line(&origins)));
-        assert!(mapped.text.contains(&format!("\"count\":{count}")));
+            .system_context
+            .contains(&format!("束ね（{count} 件）")));
+        assert_eq!(mapped.reply_target, None);
         assert!(!mapped.text.contains(&dropped_origin));
     }
 }

@@ -1,14 +1,17 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { getAgent } from '../api/agents';
 import {
   conversationEventsUrl,
   getSession,
   getSessionLogs,
+  getWebConversationState,
   sendOwnerInstruction,
   sendWebMessage,
   ConversationSendError,
 } from '../api/sessions';
+import type { WebConversationState } from '../api/sessions';
 import type { SessionDto, SessionLogRow } from '../api/types';
 import { conversationTitle } from '../lib/conversationTitle';
 import {
@@ -21,6 +24,7 @@ import { uuidV4 } from '../lib/uuid';
 
 export const BINDING_POLL_MS = 1000;
 export const BINDING_POLL_MAX = 60;
+const SEND_SETTLEMENT_POLL_MS = 1000;
 
 type LoadKind = 'idle' | 'loading' | 'loaded-empty' | 'loaded' | 'error';
 type SendPhase = 'idle' | 'submitting' | 'accepted' | 'responding';
@@ -41,16 +45,32 @@ function parseLogMetadata(metadataJson: string | null): LogMetadata | null {
   }
 }
 
+type InternalTurnEvent = 'terminated' | 'exhausted' | null;
+
+function internalTurnEvent(log: SessionLogRow): InternalTurnEvent {
+  if (log.log_type !== 'system') return null;
+  try {
+    const value = JSON.parse(log.content) as { type?: unknown; marker?: unknown };
+    if (value.type === 'turn_terminated' && value.marker === 'NO_REPLY') return 'terminated';
+    if (value.type === 'turn_exhausted') return 'exhausted';
+  } catch {
+    // Other system log text remains visible as before.
+  }
+  return null;
+}
+
 function SessionLogItem({
   logType,
   content,
   speakerId,
+  speakerLabel,
   metadataJson,
   pending,
 }: {
   logType: string;
   content: string;
   speakerId: string | null;
+  speakerLabel?: string;
   metadataJson: string | null;
   pending?: boolean;
 }) {
@@ -105,29 +125,46 @@ function SessionLogItem({
     speakerDisplay = (
       <div className="flex items-center gap-2">
         <span className={`material-symbols-outlined text-lg ${iconColor}`}>{icon}</span>
-        <span className="text-label-lg text-on-surface">{speakerId || ''}</span>
+        <span className="text-label-lg text-on-surface">{speakerLabel ?? speakerId ?? ''}</span>
       </div>
     );
   }
 
-  return (
-    <div className={`bg-surface-container rounded-lg border-l-4 ${borderColor} p-4`}>
-      <div className="flex items-center justify-between mb-2">
-        {speakerDisplay}
-        <div className="flex items-center gap-2">
-          {pending ? (
-            <span
-              className="material-symbols-outlined text-sm animate-spin"
-              aria-live="polite"
-              data-testid="session-pending-spinner"
-            >
-              progress_activity
-            </span>
-          ) : null}
-          <span className="badge-neutral text-label-sm">{logType}</span>
-        </div>
+  const header = (
+    <div className="flex items-center justify-between gap-2">
+      {speakerDisplay}
+      <div className="flex items-center gap-2">
+        {pending ? (
+          <span
+            className="material-symbols-outlined text-sm animate-spin"
+            aria-live="polite"
+            data-testid="session-pending-spinner"
+          >
+            progress_activity
+          </span>
+        ) : null}
+        <span className="badge-neutral text-label-sm">{logType}</span>
       </div>
-      <p className="text-body-lg text-on-surface whitespace-pre-wrap break-words pl-8">{content}</p>
+    </div>
+  );
+  const body = (
+    <p className="text-body-lg text-on-surface whitespace-pre-wrap break-words pl-8">{content}</p>
+  );
+  const cardClass = `bg-surface-container rounded-lg border-l-4 ${borderColor}`;
+
+  if (logType === 'tool_call' || logType === 'tool_result') {
+    return (
+      <details className={cardClass} data-testid="session-tool-log">
+        <summary className="cursor-pointer p-4">{header}</summary>
+        <div className="px-4 pb-4">{body}</div>
+      </details>
+    );
+  }
+
+  return (
+    <div className={`${cardClass} p-4`}>
+      <div className="mb-2">{header}</div>
+      {body}
     </div>
   );
 }
@@ -171,14 +208,18 @@ export default function SessionDetail() {
   const [sendPhase, setSendPhase] = useState<SendPhase>('idle');
   const [pendingText, setPendingText] = useState('');
   const [pendingId, setPendingId] = useState<string | null>(null);
+  const [pendingOrigin, setPendingOrigin] = useState<string | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
   const [liveAgent, setLiveAgent] = useState<string | null>(null);
   const [noReply, setNoReply] = useState(false);
   const [pollError, setPollError] = useState<string | null>(null);
   const [pollTimedOut, setPollTimedOut] = useState(false);
   const [pollNonce, setPollNonce] = useState(0);
+  const [webState, setWebState] = useState<WebConversationState | null>();
+  const [agentLabels, setAgentLabels] = useState<Record<string, string>>({});
   const abortRef = useRef<AbortController | null>(null);
   const sourceRef = useRef<EventSource | null>(null);
+  const pendingOriginRef = useRef<string | null>(null);
   const logListRef = useRef<HTMLDivElement>(null);
   const pinToBottomRef = useRef(true);
   const forceToBottomRef = useRef(false);
@@ -191,6 +232,17 @@ export default function SessionDetail() {
     abortRef.current = ac;
     setSessionKind('loading');
     setLogsKind('loading');
+    setWebState(undefined);
+    getWebConversationState(sessionId)
+      .then((state) => {
+        if (ac.signal.aborted) return;
+        setWebState(state);
+      })
+      .catch((e: Error) => {
+        if (ac.signal.aborted) return;
+        setWebState('unavailable');
+        setPollError(e.message);
+      });
     getSession(sessionId, ac.signal)
       .then((s) => {
         if (ac.signal.aborted) return;
@@ -219,12 +271,27 @@ export default function SessionDetail() {
   const refreshTail = (sessionId: string) => {
     getSessionLogs(sessionId)
       .then((rows) => {
+        const origin = pendingOriginRef.current;
+        if (origin) {
+          const inboundIndex = rows.findIndex((row) => {
+            const metadata = parseLogMetadata(row.metadata_json);
+            return metadata?.external_origin === origin;
+          });
+          const following = inboundIndex < 0 ? [] : rows.slice(inboundIndex + 1);
+          const persistedReply = following.some(
+            (row) => row.log_type === 'speech' && row.speaker_id === row.agent_id,
+          );
+          const exhausted = following.some((row) => internalTurnEvent(row) === 'exhausted');
+          if (!persistedReply && !exhausted) return;
+        }
         setLogs(rows);
         setHasOlder(rows.length === 100);
         setLogsKind(rows.length === 0 ? 'loaded-empty' : 'loaded');
         setLiveAgent(null);
         setPendingText('');
         setPendingId(null);
+        pendingOriginRef.current = null;
+        setPendingOrigin(null);
       })
       .catch((e: Error) => {
         setLogsError(e.message);
@@ -257,12 +324,32 @@ export default function SessionDetail() {
     };
   }, [id]);
 
-  // §4.3: open web binding の address または physical。server の gateway_bound がその写像。
-  // gateway 呼び出しの正は GET 応答の binding_address。URL / ID 形式から推測しない。
-  const isWebConversation = session?.gateway_bound === true;
-  const gatewaySessionId = session?.binding_address;
-  const ready = isWebConversation && session?.web_binding_state === 'ready';
-  const preparing = isWebConversation && session?.web_binding_state !== 'ready';
+  // Web ownershipとbinding状態はWeb gateway自身へ問い合わせる。server sessionはopaque。
+  const ownershipPending = webState === undefined;
+  const isWebConversation = webState !== undefined && webState !== null;
+  const gatewaySessionId = isWebConversation ? id : undefined;
+  const ready = webState === 'ready';
+  const preparing = isWebConversation && !ready;
+
+  useEffect(() => {
+    if (!isWebConversation || !session) return;
+    let cancelled = false;
+    Promise.all(
+      session.agent_ids.map(async (agentId) => {
+        try {
+          const agent = await getAgent(agentId);
+          return [agentId, agent.persona_name || agent.name] as const;
+        } catch {
+          return [agentId, ''] as const;
+        }
+      }),
+    ).then((entries) => {
+      if (!cancelled) setAgentLabels(Object.fromEntries(entries));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isWebConversation, session]);
 
   useEffect(() => {
     if (!id || !preparing || pollTimedOut || pollError) return;
@@ -275,11 +362,15 @@ export default function SessionDetail() {
         setPollTimedOut(true);
         return;
       }
-      getSession(id)
-        .then((s) => {
+      getWebConversationState(id)
+        .then((state) => {
           if (cancelled) return;
-          setSession(s);
-          setSessionKind('loaded');
+          if (state === null) {
+            window.clearInterval(timer);
+            setPollError('binding_not_found');
+            return;
+          }
+          setWebState(state);
         })
         .catch((e: Error) => {
           if (cancelled) return;
@@ -292,6 +383,62 @@ export default function SessionDetail() {
       window.clearInterval(timer);
     };
   }, [id, preparing, pollTimedOut, pollError, pollNonce]);
+
+  useEffect(() => {
+    if (!id || !pendingOrigin || sendPhase === 'idle') return;
+    let cancelled = false;
+    let settled = false;
+    let terminationObserved = false;
+    let timer: number | undefined;
+
+    const poll = () => {
+      getSessionLogs(id)
+        .then((rows) => {
+          if (cancelled) return;
+          const inboundIndex = rows.findIndex((row) => {
+            const metadata = parseLogMetadata(row.metadata_json);
+            return metadata?.external_origin === pendingOrigin;
+          });
+          if (inboundIndex < 0) return;
+          const following = rows.slice(inboundIndex + 1);
+          const hasAgentSpeech = following.some(
+            (row) => row.log_type === 'speech' && row.speaker_id === row.agent_id,
+          );
+          const exhausted = following.some((row) => internalTurnEvent(row) === 'exhausted');
+          const terminated = following.some((row) => internalTurnEvent(row) === 'terminated');
+          if (hasAgentSpeech || exhausted || (terminated && terminationObserved)) {
+            settled = true;
+            setLogs(rows);
+            setHasOlder(rows.length === 100);
+            setLogsKind(rows.length === 0 ? 'loaded-empty' : 'loaded');
+            setLiveAgent(null);
+            setPendingText('');
+            setPendingId(null);
+            pendingOriginRef.current = null;
+            setPendingOrigin(null);
+            setSendPhase('idle');
+            if (terminated && !hasAgentSpeech) setNoReply(true);
+            return;
+          }
+          terminationObserved = terminationObserved || terminated;
+        })
+        .catch(() => {
+          // SSE remains the primary completion path. A transient read failure must not
+          // discard the optimistic message or disable the next bounded poll.
+        })
+        .finally(() => {
+          if (!cancelled && !settled) {
+            timer = window.setTimeout(poll, SEND_SETTLEMENT_POLL_MS);
+          }
+        });
+    };
+
+    timer = window.setTimeout(poll, SEND_SETTLEMENT_POLL_MS);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [id, pendingOrigin, sendPhase]);
 
   useEffect(() => {
     if (!id || !isWebConversation || !gatewaySessionId || !ready || sessionKind !== 'loaded' || logsKind === 'loading' || logsKind === 'idle') return;
@@ -322,6 +469,8 @@ export default function SessionDetail() {
     es.addEventListener('completed_no_reply', () => {
       setSendPhase('idle');
       setPendingId(null);
+      pendingOriginRef.current = null;
+      setPendingOrigin(null);
       setLiveAgent(null);
       setNoReply(true);
       refreshTail(id);
@@ -431,7 +580,7 @@ export default function SessionDetail() {
     const text = ownerInput.trim();
     try {
       if (!gatewaySessionId) {
-        throw new Error('binding_address_missing');
+        throw new Error('gateway_session_missing');
       }
       const clientId = pendingId ?? uuidV4();
       forceToBottomRef.current = true;
@@ -440,7 +589,9 @@ export default function SessionDetail() {
       setSendPhase('submitting');
       setSendError(null);
       setNoReply(false);
-      await sendWebMessage(gatewaySessionId, clientId, text);
+      const accepted = await sendWebMessage(gatewaySessionId, clientId, text);
+      pendingOriginRef.current = accepted.origin;
+      setPendingOrigin(accepted.origin);
       setSendPhase('accepted');
       setOwnerInput('');
     } catch (err) {
@@ -454,11 +605,13 @@ export default function SessionDetail() {
     if (!pendingId || !pendingText) return;
     try {
       if (!gatewaySessionId) {
-        throw new Error('binding_address_missing');
+        throw new Error('gateway_session_missing');
       }
       setSendPhase('submitting');
       setSendError(null);
-      await sendWebMessage(gatewaySessionId, pendingId, pendingText);
+      const accepted = await sendWebMessage(gatewaySessionId, pendingId, pendingText);
+      pendingOriginRef.current = accepted.origin;
+      setPendingOrigin(accepted.origin);
       setSendPhase('accepted');
     } catch (err) {
       const code = err instanceof ConversationSendError ? err.code : (err as Error).message;
@@ -480,16 +633,31 @@ export default function SessionDetail() {
   const title = session
     ? conversationTitle(session.id, session.theme, t('sessions.newConversation'))
     : '';
+  const visibleLogs = isWebConversation
+    ? logs.filter((log) => internalTurnEvent(log) === null)
+    : logs;
+  const responseExhausted = isWebConversation
+    && logs.some((log) => internalTurnEvent(log) === 'exhausted');
+  const webSpeakerLabel = (log: SessionLogRow) => {
+    if (!isWebConversation) return undefined;
+    const agentSpoke = log.speaker_id === log.agent_id
+      || (log.speaker_id != null && session?.agent_ids.includes(log.speaker_id));
+    if (agentSpoke) return agentLabels[log.agent_id] || t('sessionDetail.agent');
+    return log.log_type === 'speech' ? t('sessionDetail.you') : undefined;
+  };
 
   const retryBindingPoll = () => {
     setPollError(null);
     setPollTimedOut(false);
     setPollNonce((n) => n + 1);
     if (id) {
-      getSession(id)
-        .then((s) => {
-          setSession(s);
-          setSessionKind('loaded');
+      getWebConversationState(id)
+        .then((state) => {
+          if (state === null) {
+            setPollError('binding_not_found');
+          } else {
+            setWebState(state);
+          }
         })
         .catch((e: Error) => {
           setPollError(e.message);
@@ -533,7 +701,7 @@ export default function SessionDetail() {
         className="flex-1 min-h-0 overflow-y-auto space-y-2 mb-4"
         onScroll={onLogScroll}
       >
-        {logsKind === 'loading' ? (
+        {ownershipPending || logsKind === 'loading' ? (
           <div className="empty-state" aria-busy="true">
             <p className="text-body-lg text-on-surface-variant">{t('sessionDetail.loadingLogs')}</p>
           </div>
@@ -551,20 +719,29 @@ export default function SessionDetail() {
                 {t('sessions.loadMore')}
               </button>
             ) : null}
-            {logs.map((log) => (
+            {visibleLogs.map((log) => (
               <SessionLogItem
                 key={log.id}
                 logType={log.log_type}
                 content={log.content}
                 speakerId={log.speaker_id}
+                speakerLabel={webSpeakerLabel(log)}
                 metadataJson={log.metadata_json}
               />
             ))}
+            {responseExhausted ? (
+              <div className="card-outlined border-error bg-error-container/30 p-4" role="alert">
+                <p className="text-body-lg text-error-on-container">
+                  {t('sessionDetail.responseIncomplete')}
+                </p>
+              </div>
+            ) : null}
             {pendingText ? (
               <SessionLogItem
                 logType="speech"
                 content={pendingText}
                 speakerId="web-user"
+                speakerLabel={t('sessionDetail.you')}
                 metadataJson={null}
                 pending={sendPhase === 'submitting' || sendPhase === 'accepted' || sendPhase === 'responding'}
               />
@@ -575,7 +752,13 @@ export default function SessionDetail() {
               </p>
             ) : null}
             {liveAgent ? (
-              <SessionLogItem logType="speech" content={liveAgent} speakerId="agent" metadataJson={null} />
+              <SessionLogItem
+                logType="speech"
+                content={liveAgent}
+                speakerId="agent"
+                speakerLabel={session ? agentLabels[session.agent_ids[0]] || t('sessionDetail.agent') : t('sessionDetail.agent')}
+                metadataJson={null}
+              />
             ) : null}
             {noReply ? (
               <p className="text-body-sm text-on-surface-variant" aria-live="polite">
@@ -615,7 +798,7 @@ export default function SessionDetail() {
 
       {sessionKind === 'loaded' && session ? (
         <div className="card-elevated">
-          {!isWebConversation ? (
+          {ownershipPending ? null : !isWebConversation ? (
             <form className="flex gap-3" onSubmit={(e) => void submitOwner(e)}>
               <input
                 type="text"

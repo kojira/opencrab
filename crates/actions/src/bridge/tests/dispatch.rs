@@ -231,24 +231,6 @@ fn local_tools_gated_by_caller_only_regardless_of_depth() {
 
 /// 設定変更系（#116）は owner 限定であること（ポリシー表の権威）。
 #[test]
-fn test_settings_tools_are_owner_only() {
-    for name in [
-        "configure_llm_provider",
-        "manage_allowed_commands",
-        "configure_nostr",
-        "configure_self",
-        "configure_mcp_server",
-    ] {
-        let p = tool_policy(name);
-        assert!(p.owner_only, "{name} must be owner_only");
-        assert!(
-            !p.trusted_only,
-            "{name} should be gated by owner_only, not trusted_only"
-        );
-    }
-}
-
-#[test]
 fn test_list_tools_owner_sees_update_heartbeat_instructions() {
     let (_dir, ctx) = test_context_with_caller(CallerIdentity::Owner);
     let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)

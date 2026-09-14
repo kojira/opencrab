@@ -304,25 +304,19 @@
     #[test]
     fn test_validate_webhook_url_valid() {
         assert!(validate_webhook_url(VALID_URL).is_ok());
-        assert!(validate_webhook_url("https://canary.discord.com/api/webhooks/1/tok").is_ok());
-        assert!(validate_webhook_url("https://discordapp.com/api/webhooks/1/tok").is_ok());
-        assert!(validate_webhook_url("https://ptb.discord.com/api/webhooks/1/tok").is_ok());
+        assert!(validate_webhook_url("https://hooks.example.test/events").is_ok());
     }
 
     #[test]
     fn test_validate_webhook_url_invalid() {
         assert!(validate_webhook_url("").is_err());
         assert!(validate_webhook_url("   ").is_err());
-        assert!(validate_webhook_url("http://discord.com/api/webhooks/1/tok").is_err());
-        assert!(validate_webhook_url("https://evil.com/api/webhooks/1/tok").is_err());
-        // missing token segment
-        assert!(validate_webhook_url("https://discord.com/api/webhooks/123").is_err());
-        // wrong path
-        assert!(validate_webhook_url("https://discord.com/channels/1/2").is_err());
-        // no path
-        assert!(validate_webhook_url("https://discord.com").is_err());
-        // reason must not leak the raw url
-        let reason = validate_webhook_url("https://evil.com/api/webhooks/1/secrettok").unwrap_err();
+        assert!(validate_webhook_url("http://hooks.example.test/events").is_err());
+        assert!(validate_webhook_url("https:///events").is_err());
+        assert!(validate_webhook_url("https://user:secret@hooks.example.test/events").is_err());
+        assert!(validate_webhook_url("https://hooks.example.test").is_err());
+        let reason = validate_webhook_url("https://user:secrettok@hooks.example.test/events")
+            .unwrap_err();
         assert!(!reason.contains("secrettok"));
     }
 

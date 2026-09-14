@@ -390,58 +390,35 @@ async fn post_revision_inner(
         return Err(GateError::new(ErrorCode::InstanceActive));
     }
     let mut conn = state.db.lock().map_err(|_| GateError::store())?;
-    let tx = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|_| GateError::store())?;
-    let row = tx
-        .query_row(
-            "SELECT revision, deleted_at FROM gate_instances WHERE instance_id = ?1",
-            params![instance_id],
-            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?)),
-        )
-        .optional()
-        .map_err(|_| GateError::store())?;
-    match row {
-        None | Some((_, Some(_))) => {
-            let _ = tx.rollback();
-            Err(GateError::new(ErrorCode::InstanceUnknown))
+    let new_revision = opencrab_db::queries::revise_gate_instance(
+        &mut conn,
+        &instance_id,
+        expected,
+        enabled,
+        &config_b64,
+        &digest,
+        now,
+    )
+    .map_err(|error| match error {
+        opencrab_db::queries::ReviseGateInstanceError::Unknown => {
+            GateError::new(ErrorCode::InstanceUnknown)
         }
-        Some((rev, None)) if u64::try_from(rev).ok() != Some(expected) => {
-            let _ = tx.rollback();
-            Err(GateError::new(ErrorCode::RevisionConflict))
+        opencrab_db::queries::ReviseGateInstanceError::RevisionConflict => {
+            GateError::new(ErrorCode::RevisionConflict)
         }
-        Some((rev, None)) => {
-            let new_rev = rev + 1;
-            // DI-04: revision 更新で宣言 digest を未確立化（NULL）する。新 revision の初回 hello が
-            // その時点の宣言で digest を再確立する。宣言を変えたいときは revision を上げる、が正規手順。
-            tx.execute(
-                "UPDATE gate_instances
-                 SET revision = ?2, enabled = ?3, config_b64 = ?4, config_digest = ?5,
-                     operation_declaration_digest = NULL, updated_at = ?6
-                 WHERE instance_id = ?1",
-                params![
-                    instance_id,
-                    new_rev,
-                    i64::from(enabled),
-                    config_b64,
-                    digest,
-                    now
-                ],
-            )
-            .map_err(|_| GateError::store())?;
-            tx.commit().map_err(|_| GateError::store())?;
-            drop(reg);
-            Ok(json_ok(
-                StatusCode::CREATED,
-                json!({
-                    "instance_id": instance_id,
-                    "revision": new_rev,
-                    "enabled": enabled,
-                    "config_digest": digest,
-                }),
-            ))
-        }
-    }
+        opencrab_db::queries::ReviseGateInstanceError::Store(_) => GateError::store(),
+    })?;
+    drop(conn);
+    drop(reg);
+    Ok(json_ok(
+        StatusCode::CREATED,
+        json!({
+            "instance_id": instance_id,
+            "revision": new_revision,
+            "enabled": enabled,
+            "config_digest": digest,
+        }),
+    ))
 }
 
 async fn put_binding(

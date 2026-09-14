@@ -100,6 +100,108 @@ async fn author_label_is_persisted_and_reaches_live_turn() {
 }
 
 #[tokio::test]
+async fn gateway_context_and_reply_target_reach_storage_and_turn() {
+    let h = Harness::start().await;
+    let (mut stream, _, binding_id) = ready_pair(&h).await;
+    write_frame(
+        &mut stream,
+        &json!({
+            "id": "context-1", "m": "said", "binding_id": binding_id,
+            "origin": "context-origin", "author_id": "user-42",
+            "caller": {"role": "trusted_user", "subject_id": "user-42"},
+            "system_context": "gateway supplied context",
+            "reply_target": "opaque:reply:42",
+            "text": "hello", "attachments": []
+        }),
+    )
+    .await;
+    assert_eq!(read_said_response(&mut stream, "context-1").await["seq"], 1);
+    for _ in 0..50 {
+        if !h.runtime.system_prompts.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    assert!(h
+        .runtime
+        .system_prompts
+        .lock()
+        .unwrap()
+        .last()
+        .is_some_and(|prompt| prompt.contains("gateway supplied context")));
+    assert_eq!(
+        h.runtime.reply_targets.lock().unwrap().last().cloned(),
+        Some(Some("opaque:reply:42".to_string()))
+    );
+
+    let metadata: String = h
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT metadata_json FROM memory_sessions
+             WHERE json_extract(metadata_json, '$.external_origin') = 'context-origin'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&metadata).unwrap()["reply_target"],
+        "opaque:reply:42"
+    );
+}
+
+#[tokio::test]
+async fn staged_said_records_without_turn_until_batch_trigger() {
+    let h = Harness::start().await;
+    let (mut s, _, binding_id) = ready_pair(&h).await;
+    write_frame(
+        &mut s,
+        &json!({
+            "id": "stage-1", "m": "said", "binding_id": binding_id,
+            "origin": "batch-1", "author_id": "u1", "caller": {"role": "agent"},
+            "start_turn": false, "text": "first", "attachments": []
+        }),
+    )
+    .await;
+    assert_eq!(read_said_response(&mut s, "stage-1").await["seq"], 1);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(h.runtime.turns.load(Ordering::SeqCst), 0);
+
+    write_frame(
+        &mut s,
+        &json!({
+            "id": "stage-2", "m": "said", "binding_id": binding_id,
+            "origin": "batch-2", "author_id": "u2", "caller": {"role": "agent"},
+            "start_turn": true, "text": "second", "attachments": []
+        }),
+    )
+    .await;
+    assert_eq!(read_said_response(&mut s, "stage-2").await["seq"], 2);
+    for _ in 0..50 {
+        if h.runtime.turns.load(Ordering::SeqCst) == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(h.runtime.turns.load(Ordering::SeqCst), 1);
+    let count: i64 = h
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM memory_sessions WHERE json_extract(metadata_json, '$.external_origin') IN ('batch-1', 'batch-2')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 2);
+}
+
+#[tokio::test]
 async fn said_seq_null_when_not_recorded_and_lookups_are_real() {
     let h = Harness::start().await;
     let (mut s, _, binding_id) = ready_pair(&h).await;

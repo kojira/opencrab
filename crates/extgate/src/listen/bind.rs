@@ -46,27 +46,6 @@ pub async fn wait_bind_ack(
     }
 }
 
-/// open binding と registry から Web 投影の state を導出する。
-/// pending 待ちだけが provisioning。live 不在・enqueue 未実行は unavailable。
-pub fn web_binding_state(
-    reg: &crate::registry::Registry,
-    instance_id: &str,
-    binding_id: &str,
-) -> &'static str {
-    match reg.get(instance_id) {
-        Some(live) if live.acknowledged.contains(binding_id) => "ready",
-        Some(live)
-            if live
-                .pending
-                .values()
-                .any(|p| p.binding_id() == Some(binding_id)) =>
-        {
-            "provisioning"
-        }
-        Some(_) | None => "unavailable",
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnqueueBindOutcome {
     Written,

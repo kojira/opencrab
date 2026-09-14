@@ -99,7 +99,12 @@ fn route_inventory_has_no_withdrawn_conversation_post() {
     let routes = opencrab_server::production_route_inventory();
     let mut hits = Vec::new();
     for route in &routes {
-        if WITHDRAWN_CORE_CONVERSATION.contains(&route.path.as_str()) {
+        if WITHDRAWN_CORE_CONVERSATION.contains(&route.path.as_str())
+            || route
+                .path
+                .split('/')
+                .any(|segment| segment == "web-conversations")
+        {
             hits.push(format!("{} {}", route.methods.join(","), route.path));
         }
     }

@@ -3,10 +3,9 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use opencrab_actions::{
-    delivery_effect, start_session_turn, AgentRuntime, CallerIdentity, NormalizedInbound,
-    RunRequest, SubtaskCompletionSink, TranscriptSource,
+    delivery_effect, start_session_turn, AgentRuntime, NormalizedInbound, RunRequest,
+    SubtaskCompletionSink, TranscriptSource,
 };
-use opencrab_db::queries::{TRUSTED_PLATFORM_EXTGATE, TRUSTED_PLATFORM_NOSTR};
 
 use crate::completion::{v3_attach_dispatch, ExtgateCompletionSink};
 use crate::delivery::apply_delivery_effect;
@@ -14,9 +13,9 @@ use crate::delivery_mode::{adjust_inbound_effect, DeliveryMode};
 use crate::error::ErrorCode;
 use crate::listen::emit_activity;
 use crate::protocol::Said;
-use crate::registry::{ExtgateState, NostrHeldTurn};
-use crate::ResolveCallerFn;
+use crate::registry::ExtgateState;
 
+use super::asserted_caller;
 use super::binding::OriginRow;
 use super::record::seq_for_origin;
 
@@ -24,19 +23,15 @@ use super::record::seq_for_origin;
 pub(super) fn enqueue_turn<R: AgentRuntime>(
     state: Arc<ExtgateState>,
     runtime: R,
-    resolve_caller: ResolveCallerFn,
     row: &OriginRow,
     said: &Said,
     session_id: &str,
-    prompt_suffix: &str,
+    system_context: &str,
     // #933: この said の external_origins.seq。dequeue 時に「fold 済み集合に含まれる」なら独立
     // ターンを skip する（二重処理防止・非消費）。bundle は個別 said でないので None（skip 対象外）。
     seq: Option<i64>,
-    // 単一メンション turn は発端 said の origin へ返信（say payload の reply_target に載せる）。
-    // bundle turn は単一返信先が無いので false（gateway が standalone post で publish・row292）。
-    // 返信先は say payload の明示 reply_target を正とする（裁定A で ended は say の後になったが、
-    // gateway の pending_turn 相関に依存させず明示値を主にする方針は据え置き）。
-    reply_to_origin: bool,
+    // Gatewayが指定した外部返信相関。coreは内容を解釈せずsayへ返す。
+    reply_target: Option<&str>,
 ) {
     let locks = runtime.session_locks();
     let session_id = session_id.to_string();
@@ -49,16 +44,11 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
     let images = said.image_urls();
     let address = row.address.clone();
     let origin = said.origin.clone();
-    let owner_id = row.owner_id.clone();
-    let kind_id = row.kind_id.clone();
     let delivery_mode = row.delivery_mode;
-    let prompt_suffix = prompt_suffix.to_string();
-    // say の返信先（発端イベント origin）。単一メンションのみ。bundle は None。
-    let reply_target: Option<String> = if reply_to_origin {
-        Some(origin.clone())
-    } else {
-        None
-    };
+    let system_context = system_context.to_string();
+    let reply_target = reply_target.map(str::to_string);
+    let caller = asserted_caller(&said.caller);
+    let only_speaker = said.only_speaker;
     if !state.turn_queues.try_reserve(&session_id) {
         #[cfg(any(test, feature = "extgate-probe"))]
         state
@@ -110,25 +100,11 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                     None,
                 )
                 .await;
-                let caller = match state.db.lock() {
-                    Ok(conn) => resolve_caller(
-                        &conn,
-                        if kind_id == "nostr" {
-                            TRUSTED_PLATFORM_NOSTR
-                        } else {
-                            TRUSTED_PLATFORM_EXTGATE
-                        },
-                        &[author_id.as_str()],
-                        &agent_id,
-                        &owner_id,
-                    ),
-                    Err(_) => CallerIdentity::Agent,
-                };
                 let (system, name) = runtime.build_agent_context(&agent_id, &caller);
-                let system = if prompt_suffix.is_empty() {
+                let system = if system_context.is_empty() {
                     system
                 } else {
-                    format!("{system}\n\n{prompt_suffix}")
+                    format!("{system}\n\n{system_context}")
                 };
                 let last_continuation_say = Arc::new(std::sync::Mutex::new(None::<String>));
                 let turn_res = {
@@ -141,11 +117,11 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                     let text = text.clone();
                     let images = images.clone();
                     let origin = origin.clone();
-                    let kind_id = kind_id.clone();
+                    let only_speaker = only_speaker;
                     let state = Arc::clone(&state);
                     let instance_id = instance_id.clone();
                     let binding_id = binding_id.clone();
-                    let prompt_suffix = prompt_suffix.clone();
+                    let system_context = system_context.clone();
                     // #898: 継続分岐の途中発話フック用クローン（state/instance/binding は直後に
                     // sink へ move されるので、フック用に別クローンを先に確保する）。
                     let hook_state = Arc::clone(&state);
@@ -154,6 +130,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                     let hook_agent = agent_id.clone();
                     let hook_session = session_id.clone();
                     let hook_reply = reply_target.clone();
+                    let request_reply_target = reply_target.clone();
                     let hook_last_continuation_say = Arc::clone(&last_continuation_say);
                     tokio::spawn(async move {
                         let inbound = NormalizedInbound {
@@ -163,11 +140,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                             sender_name: author_label.as_deref().unwrap_or(""),
                             avatar_url: None,
                             channel_id: Some(&address),
-                            pubkey: if kind_id == "nostr" {
-                                Some(author_id.as_str())
-                            } else {
-                                None
-                            },
+                            pubkey: None,
                             text: &text,
                             image_urls: &images,
                             external_id: &origin,
@@ -193,14 +166,14 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                 binding_id,
                                 agent_id: agent_id.clone(),
                                 session_id: session_id.clone(),
-                                kind_id: kind_id.clone(),
-                                author_id: author_id.clone(),
+                                only_speaker,
+                                speaker_id: author_id.clone(),
                                 delivery_mode,
-                                prompt_suffix,
+                                system_context,
                             });
                         start_session_turn(
                             &runtime,
-                            TranscriptSource::External,
+                            TranscriptSource::new("external", "external_response"),
                             &inbound,
                             &system,
                             // extgate は会話へ runtime context を前置しない（wrap は素通し）。
@@ -221,10 +194,6 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                 // #964: 発端 origin は started へ載せず、初回 LLM request の直前に
                                 // read+origin として通知する。
                                 .with_initial_read_origin(origin.clone())
-                                // 発端イベントの origin を subtask へ引き継ぐ。subtask 完了時の
-                                // resume ターンの say がこの origin へ返信できるようにする
-                                // （settlement→SubtaskSettled.reply_target 経由）。
-                                .with_reply_target(origin.clone())
                                 // #964: 発端と走行中に畳み込んだ said の read+origin を、それぞれを
                                 // 含む exact request の `llm.chat` 直前に emit する。畳み込み origin
                                 // だけは従来どおり記録し、後続の独立ターンを起こさない。
@@ -309,13 +278,18 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                         })
                                     })
                                 });
+                                // Gateway が与えた opaque な返信先だけを subtask 完了へ持ち回る。
+                                // 内部 origin を外部返信先として推測しない。
+                                if let Some(target) = request_reply_target.clone() {
+                                    req = req.with_reply_target(target);
+                                }
                                 // DI 拡張 §8: 宣言能力を tool set へ載せる（宣言があるときだけ）。
                                 if let Some(ga) = ops_actions.clone() {
                                     req = req.with_gateway_actions(ga);
                                 }
                                 v3_attach_dispatch(
                                     req,
-                                    &kind_id,
+                                    only_speaker,
                                     author_id.clone(),
                                     registry.clone(),
                                     Arc::clone(&sink),
@@ -419,51 +393,4 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
             })
             .await;
     });
-}
-
-pub(super) fn fire_held_turns<R: AgentRuntime>(
-    state: Arc<ExtgateState>,
-    runtime: R,
-    resolve_caller: ResolveCallerFn,
-    held: Vec<(NostrHeldTurn, CallerIdentity)>,
-) {
-    let Some((last, _)) = held.last() else {
-        return;
-    };
-    let said = Said {
-        id: String::new(),
-        binding_id: last.binding_id.clone(),
-        origin: last.origin.clone(),
-        author_id: last.author_id.clone(),
-        author_label: last.author_label.clone(),
-        text: last.text.clone(),
-        attachments: last
-            .images
-            .iter()
-            .cloned()
-            .map(crate::protocol::SaidAttachment::ImageUrl)
-            .collect(),
-    };
-    let row = OriginRow {
-        instance_id: last.instance_id.clone(),
-        kind_id: last.kind_id.clone(),
-        address: last.address.clone(),
-        agent_id: last.agent_id.clone(),
-        owner_id: last.owner_id.clone(),
-        delivery_mode: last.delivery_mode,
-    };
-    // #933: 保留していた said 自身の seq。fold 済み集合に在れば独立ターンを skip。external_origins に
-    // 無ければ None（skip/prune 対象外）。
-    let held_seq = seq_for_origin(&state, &said.binding_id, &said.origin);
-    enqueue_turn(
-        state,
-        runtime,
-        resolve_caller,
-        &row,
-        &said,
-        &last.session_id,
-        &last.prompt_suffix,
-        held_seq,
-        true, // 保留していた単一メンション: 発端 said の origin へ返信
-    );
 }

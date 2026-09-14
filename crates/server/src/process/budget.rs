@@ -43,13 +43,6 @@ pub fn include_memory_index(env: &ContextBudgetEnvelope) -> bool {
     matches!(env.memory_index_decision, MemoryIndexDecision::Inject)
 }
 
-/// #884 PR2 hard cap: typed 側は PR2 では圧縮しないため、typed の wire トークンがモデルの
-/// 入力上限（`input_high`）を超えると provider が hard-fail する。超過なら typed を諦めて
-/// flat 経路（圧縮あり）へ落とす（§7 fallback）。
-pub(crate) fn typed_exceeds_input_budget(wire_tokens: usize, input_high: usize) -> bool {
-    wire_tokens > input_high
-}
-
 /// ターン終了直後の正時: 派生スナップショットを行追加する（#826-B）。
 fn persist_turn_end_snapshot(
     state: &AppState,

@@ -389,15 +389,6 @@ fn seed_core(root: &Path, db: &Path, sock: &Path, core_port: u16, llm_port: u16)
     )
     .expect("create agent");
     assert_eq!(st, 200, "{body}");
-    {
-        let conn = Connection::open(db).expect("open db for owner");
-        conn.execute(
-            "INSERT INTO agent_discord_config (agent_id, bot_token, owner_discord_id, enabled, updated_at)
-             VALUES (?1, 'x', ?2, 0, datetime('now'))",
-            [AGENT, AUTHOR],
-        )
-        .unwrap();
-    }
     let (st, body) = http(
         core_port,
         "PUT",
@@ -440,7 +431,7 @@ fn spawn_gateway(root: &Path, sock: &Path, gw_port: u16) -> Proc {
     std::fs::write(
         &placement,
         format!(
-            r#"{{"http_bind":"127.0.0.1:{gw_port}","core_socket":"{}","instances":[{{"instance_id":"{INSTANCE}","revision":1,"author_id":"{AUTHOR}"}}]}}"#,
+            r#"{{"http_bind":"127.0.0.1:{gw_port}","core_socket":"{}","instances":[{{"instance_id":"{INSTANCE}","revision":1,"agent_id":"{AGENT}","author_id":"{AUTHOR}"}}]}}"#,
             sock.display()
         ),
     )

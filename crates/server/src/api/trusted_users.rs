@@ -54,16 +54,13 @@ pub async fn list_trusted_users(
 
 #[derive(Debug, Deserialize)]
 pub struct AddTrustedUserRequest {
-    /// その経路でのユーザー識別子。旧キー `discord_user_id` も受け付ける（後方互換）。
-    #[serde(alias = "discord_user_id")]
+    /// source内で一意なopaqueユーザー識別子。
     pub user_id: String,
     pub permission: Option<String>,
     /// ロスター表示用の名前（ピアレビュアー一覧等）。省略時は空。
     pub display_name: Option<String>,
-    /// `user_id` がどの経路の識別子か（`discord` / `web` / `rest`, #159）。
-    ///
-    /// **省略時は `discord`**（#214 以前からの登録リクエストがそのまま動く）。
-    pub platform: Option<String>,
+    /// `user_id` の識別子空間を表すopaqueなsource。必須。
+    pub platform: String,
 }
 
 /// 信頼済みユーザーを 1 件登録する。
@@ -86,34 +83,9 @@ pub async fn add_trusted_user(
     Path(agent_id): Path<String>,
     Json(req): Json<AddTrustedUserRequest>,
 ) -> Result<Json<TrustedUserDto>, StatusCode> {
-    let platform = req
-        .platform
-        .unwrap_or_else(|| opencrab_db::queries::TRUSTED_PLATFORM_DISCORD.to_string());
-    if !opencrab_db::queries::is_known_trusted_platform(&platform) {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    // `platform='nostr'` の識別子は保存前に canonical 小文字 hex へ正規化する。読み出し側
-    // （[`crate::nostr_runner_impl::resolve_nostr_caller_identity`]）は canonical hex /
-    // npub で exact-match するため、大文字 hex / 大文字 npub / 前後空白のまま保存すると
-    // その信頼ユーザーが読み出しで一致しない。正規化できない値は保存せず 400
-    // （設定できたように見えて永久に誰とも一致しない行を作らせない）。入口 `configure_nostr`
-    // / REST の owner_pubkey と同じ扱いで、新しい制約ではなく既存の入口正規化の網羅。
-    // 他経路（discord / web / rest）の識別子は素通し（挙動を変えない）。
-    // PR-1B: 公開鍵の正規化は Nostr クレートの実装なので nostr feature の内側。nostr を
-    // 外した構成では `platform='nostr'` の信頼ユーザーは正規化できないため**受け付けず
-    // 400 で拒否**する（丸めず・素通しの平文保存もしない＝暗黙のフォールバックを作らない）。
-    let user_id = if platform == opencrab_db::queries::TRUSTED_PLATFORM_NOSTR {
-        #[cfg(feature = "nostr")]
-        {
-            opencrab_nostr::normalize_pubkey(&req.user_id).ok_or(StatusCode::BAD_REQUEST)?
-        }
-        #[cfg(not(feature = "nostr"))]
-        {
-            return Err(StatusCode::BAD_REQUEST);
-        }
-    } else {
-        req.user_id
-    };
+    let platform = req.platform;
+    // platformとuser_idはこの共有APIではopaque。個別gatewayの形式検証はgateway側で行う。
+    let user_id = req.user_id;
     let permission = parse_permission(req.permission.as_deref())?;
     let conn = state.db.lock().unwrap();
     let id = uuid::Uuid::new_v4().to_string();
@@ -224,16 +196,17 @@ pub async fn delete_trusted_user(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opencrab_db::queries::{
-        TRUSTED_PLATFORM_DISCORD, TRUSTED_PLATFORM_REST, TRUSTED_PLATFORM_WEB,
-    };
+    use opencrab_db::queries::TRUSTED_PLATFORM_REST;
+
+    const TEST_EXTERNAL_SOURCE: &str = "external-a";
+    const OTHER_EXTERNAL_SOURCE: &str = "external-b";
 
     fn req(user_id: &str, platform: Option<&str>) -> AddTrustedUserRequest {
         AddTrustedUserRequest {
             user_id: user_id.to_string(),
             permission: None,
             display_name: None,
-            platform: platform.map(str::to_string),
+            platform: platform.unwrap_or("test-source").to_string(),
         }
     }
 
@@ -247,13 +220,13 @@ mod tests {
             user_id: user_id.to_string(),
             permission: Some(permission.to_string()),
             display_name: Some("Crab B".to_string()),
-            platform: Some(platform.to_string()),
+            platform: platform.to_string(),
         }
     }
 
-    /// 経路を省略した登録は従来どおり `discord`（#214 以前のリクエストが動き続ける）。
+    /// テストhelperの省略sourceはopaqueな既定値を使う。
     #[tokio::test]
-    async fn platform_defaults_to_discord() {
+    async fn helper_default_source_is_opaque() {
         let state = crate::test_app_state();
         let dto = add_trusted_user(
             State(state.clone()),
@@ -263,16 +236,12 @@ mod tests {
         .await
         .expect("add")
         .0;
-        assert_eq!(dto.platform, TRUSTED_PLATFORM_DISCORD);
+        assert_eq!(dto.platform, "test-source");
 
         let conn = state.db.lock().unwrap();
-        assert!(opencrab_db::queries::get_trusted_user(
-            &conn,
-            TRUSTED_PLATFORM_DISCORD,
-            "42",
-            "agent-1"
-        )
-        .is_some());
+        assert!(
+            opencrab_db::queries::get_trusted_user(&conn, "test-source", "42", "agent-1").is_some()
+        );
     }
 
     /// 経路を指定すればその経路の行になる（互換読みの撤去後、これが唯一の登録手段）。
@@ -280,7 +249,7 @@ mod tests {
     async fn platform_is_taken_from_the_request() {
         let state = crate::test_app_state();
         for (platform, user_id) in [
-            (TRUSTED_PLATFORM_WEB, "dash-user"),
+            (TEST_EXTERNAL_SOURCE, "dash-user"),
             (TRUSTED_PLATFORM_REST, "rest-user"),
         ] {
             let dto = add_trusted_user(
@@ -301,7 +270,7 @@ mod tests {
             // 他経路へは漏れない。
             assert!(opencrab_db::queries::get_trusted_user(
                 &conn,
-                TRUSTED_PLATFORM_DISCORD,
+                OTHER_EXTERNAL_SOURCE,
                 user_id,
                 "agent-1"
             )
@@ -309,25 +278,20 @@ mod tests {
         }
     }
 
-    /// 未定義の経路は弾く（登録できても誰とも一致しない行を作らせない）。
+    /// 共有APIはkindと識別子を解釈せず、そのまま保存する。
     #[tokio::test]
-    async fn unknown_platform_is_rejected() {
+    async fn platform_and_user_id_are_opaque() {
         let state = crate::test_app_state();
-        // `nostr` は #319 で読み出し側が引く経路になったので、ここには置けない。
-        for bad in ["mastodon", "Nostr", "Web", " web", ""] {
-            let err = add_trusted_user(
-                State(state.clone()),
-                Path("agent-1".to_string()),
-                Json(req("42", Some(bad))),
-            )
-            .await
-            .expect_err("unknown platform");
-            assert_eq!(err, StatusCode::BAD_REQUEST, "{bad:?}");
-        }
-        let conn = state.db.lock().unwrap();
-        assert!(opencrab_db::queries::list_trusted_users(&conn, "agent-1")
-            .unwrap()
-            .is_empty());
+        let dto = add_trusted_user(
+            State(state.clone()),
+            Path("agent-1".to_string()),
+            Json(req("not-a-shared-format", Some("external-kind"))),
+        )
+        .await
+        .expect("opaque values are accepted")
+        .0;
+        assert_eq!(dto.platform, "external-kind");
+        assert_eq!(dto.user_id, "not-a-shared-format");
     }
 
     /// 一意制約はまだ `(user_id, agent_id)`（#159 に残した非可逆な変更）。
@@ -338,7 +302,7 @@ mod tests {
         let _first = add_trusted_user(
             State(state.clone()),
             Path("agent-1".to_string()),
-            Json(req("42", Some(TRUSTED_PLATFORM_DISCORD))),
+            Json(req("42", Some(TEST_EXTERNAL_SOURCE))),
         )
         .await
         .expect("first add");
@@ -346,7 +310,7 @@ mod tests {
         let err = add_trusted_user(
             State(state.clone()),
             Path("agent-1".to_string()),
-            Json(req("42", Some(TRUSTED_PLATFORM_WEB))),
+            Json(req("42", Some(TEST_EXTERNAL_SOURCE))),
         )
         .await
         .expect_err("unique violation");
@@ -360,7 +324,7 @@ mod tests {
         let _added = add_trusted_user(
             State(state.clone()),
             Path("agent-1".to_string()),
-            Json(req("dash-user", Some(TRUSTED_PLATFORM_WEB))),
+            Json(req("dash-user", Some(TEST_EXTERNAL_SOURCE))),
         )
         .await
         .expect("add");
@@ -369,71 +333,9 @@ mod tests {
             .await
             .0;
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].platform, TRUSTED_PLATFORM_WEB);
+        assert_eq!(rows[0].platform, TEST_EXTERNAL_SOURCE);
         // 経路で絞らない一覧であることは維持（運用者は全経路を見られる）。
         assert_eq!(rows[0].user_id, "dash-user");
-    }
-
-    // ---- nostr の書き込み正規化（#319） ----
-
-    /// **非正規表現（大文字 hex / 大文字 npub / 前後空白）で登録しても、canonical
-    /// 小文字 hex で保存され、hex の発言者で読み出しに引き当たる。**
-    ///
-    /// 読み出し側は canonical hex / npub で exact-match するため、正規化せず素通しで
-    /// 保存すると（この修正前の挙動）その信頼ユーザーが受信ターンで一致しない。
-    #[cfg(feature = "nostr")]
-    #[tokio::test]
-    async fn nostr_user_id_is_normalized_on_write_and_matches_the_speaker() {
-        use opencrab_db::queries::TRUSTED_PLATFORM_NOSTR;
-        // ダミー鍵（実在の pubkey は書かない）。
-        const HEX: &str = "0000000000000000000000000000000000000000000000000000000000000009";
-        let npub = opencrab_nostr::to_npub(HEX).unwrap();
-        for raw in [
-            format!("  {}\n", HEX.to_ascii_uppercase()),
-            format!(" {} ", npub.to_ascii_uppercase()),
-        ] {
-            let state = crate::test_app_state();
-            let dto = add_trusted_user(
-                State(state.clone()),
-                Path("agent-1".to_string()),
-                Json(req(&raw, Some(TRUSTED_PLATFORM_NOSTR))),
-            )
-            .await
-            .expect("add")
-            .0;
-            // 保存形は canonical 小文字 hex。
-            assert_eq!(dto.user_id, HEX, "非正規 {raw:?} が正規化されていない");
-            // 受信ターンの発言者解決（読み出し側）で hex の発言者に一致する。
-            let conn = state.db.lock().unwrap();
-            assert_eq!(
-                crate::nostr_runner_impl::resolve_nostr_caller_identity(&conn, "agent-1", HEX),
-                opencrab_actions::CallerIdentity::TrustedUser,
-                "非正規 {raw:?} で登録した nostr 信頼ユーザーが読み出しで一致しない"
-            );
-        }
-    }
-
-    /// 正規化できない nostr の識別子は 400（誰とも一致しない行を作らせない）。
-    /// 他経路は素通しなので、この検証は `platform='nostr'` のときだけ効く。
-    #[tokio::test]
-    async fn malformed_nostr_user_id_is_rejected() {
-        use opencrab_db::queries::TRUSTED_PLATFORM_NOSTR;
-        let state = crate::test_app_state();
-        for bad in ["not-a-key", "npub1broken", "abcd", ""] {
-            let err = add_trusted_user(
-                State(state.clone()),
-                Path("agent-1".to_string()),
-                Json(req(bad, Some(TRUSTED_PLATFORM_NOSTR))),
-            )
-            .await
-            .expect_err("malformed nostr id");
-            assert_eq!(err, StatusCode::BAD_REQUEST, "{bad:?}");
-        }
-        // 弾かれた登録は 1 行も残らない。
-        let conn = state.db.lock().unwrap();
-        assert!(opencrab_db::queries::list_trusted_users(&conn, "agent-1")
-            .unwrap()
-            .is_empty());
     }
 
     // ---- 権限の表記（#234） ----
@@ -462,7 +364,7 @@ mod tests {
             let err = add_trusted_user(
                 State(state.clone()),
                 Path("agent-1".to_string()),
-                Json(req_with_permission("42", TRUSTED_PLATFORM_WEB, bad)),
+                Json(req_with_permission("42", TEST_EXTERNAL_SOURCE, bad)),
             )
             .await
             .expect_err("unknown permission");
@@ -482,7 +384,7 @@ mod tests {
         let dto = add_trusted_user(
             State(state.clone()),
             Path("agent-1".to_string()),
-            Json(req_with_permission("42", TRUSTED_PLATFORM_WEB, "co-agent")),
+            Json(req_with_permission("42", TEST_EXTERNAL_SOURCE, "co-agent")),
         )
         .await
         .expect("add")
@@ -521,7 +423,7 @@ mod tests {
             Path("agent-1".to_string()),
             Json(req_with_permission(
                 "dash-user",
-                TRUSTED_PLATFORM_WEB,
+                TEST_EXTERNAL_SOURCE,
                 "co-agent",
             )),
         )
@@ -540,7 +442,7 @@ mod tests {
         assert_eq!(
             crate::caller_identity::resolve_caller_identity(
                 &conn,
-                TRUSTED_PLATFORM_WEB,
+                TEST_EXTERNAL_SOURCE,
                 "dash-user",
                 "agent-1",
             ),
@@ -550,7 +452,7 @@ mod tests {
         );
         // 相互レビューの名簿
         let roster =
-            opencrab_db::queries::list_co_agent_reviewers(&conn, TRUSTED_PLATFORM_WEB, "agent-1")
+            opencrab_db::queries::list_co_agent_reviewers(&conn, TEST_EXTERNAL_SOURCE, "agent-1")
                 .unwrap();
         assert_eq!(roster.len(), 1);
         assert_eq!(roster[0].user_id, "dash-user");

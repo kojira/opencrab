@@ -17,8 +17,8 @@ mod tool_result_fold;
 
 pub use assembly::{
     build_conversation_string, build_conversation_string_with_memory_index,
-    build_conversation_string_with_waters, NO_MESSAGES_MARKER, RECENT_MIN_USER_SPEECHES,
-    RESPONSE_ONLY_DIRECTIVE,
+    build_conversation_string_with_waters, CONVERSATION_HISTORY_END, CONVERSATION_HISTORY_START,
+    NO_MESSAGES_MARKER, RECENT_MIN_USER_SPEECHES,
 };
 pub use format::{format_single_log, format_single_log_with_echo};
 pub use past_summary::past_summary_omitted_notice;
@@ -34,7 +34,8 @@ pub(crate) use sanitize::{
     restore_frozen_snapshot, scrub_identifiers_for_display, strip_frozen_snapshot,
     strip_inbound_meta_for_display, FROZEN_SNAPSHOT_V2_MARKER,
 };
-pub(crate) use tool_result_fold::{result_reference, signals_failure};
+#[cfg(test)]
+pub(crate) use tool_result_fold::result_reference;
 
 #[cfg(test)]
 use crate::tokens::estimate_tokens;

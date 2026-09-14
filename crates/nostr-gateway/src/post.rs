@@ -34,19 +34,26 @@ pub enum SayDelivery {
 
 /// origin から返信先 event_id（hex64）を取り出す。origin は `nostr:event:v1:{lane}:{event_id}`。
 pub fn event_id_from_origin(origin: &str) -> Option<String> {
-    if !origin.starts_with("nostr:event:v1:") {
-        return None;
-    }
-    let last = origin.rsplit(':').next()?;
-    if last.len() == 64 && last.bytes().all(|b| b.is_ascii_hexdigit()) {
-        Some(last.to_ascii_lowercase())
+    let parts = origin.split(':').collect::<Vec<_>>();
+    let event_id = match parts.as_slice() {
+        ["nostr", "event", "v1", "default", event_id] => *event_id,
+        ["nostr", "event", "v1", "watch", watch_id, event_id]
+            if watch_id
+                .parse::<i64>()
+                .is_ok_and(|parsed| parsed > 0 && parsed.to_string() == *watch_id) =>
+        {
+            *event_id
+        }
+        _ => return None,
+    };
+    if event_id.len() == 64 && event_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Some(event_id.to_ascii_lowercase())
     } else {
         None
     }
 }
 
 /// `nostaro --config <cfg> post -- <text>` の argv（鍵は env・argv に載せない）。
-/// DI-16: say は常に新規 post（standalone）。返信は DI `reply` 操作が担う。
 /// `--` でオプション終端し、`-` 始まりの text も positional として渡す。
 pub fn post_argv(config_path: &Path, text: &str) -> Vec<String> {
     vec![
@@ -56,6 +63,70 @@ pub fn post_argv(config_path: &Path, text: &str) -> Vec<String> {
         "--".to_string(),
         text.to_string(),
     ]
+}
+
+/// `nostaro --config <cfg> reply -- <event-id> <text>` のargv。
+pub fn reply_argv(config_path: &Path, event_id: &str, text: &str) -> Vec<String> {
+    vec![
+        "--config".to_string(),
+        config_path.to_string_lossy().into_owned(),
+        "reply".to_string(),
+        "--".to_string(),
+        event_id.to_string(),
+        text.to_string(),
+    ]
+}
+
+fn event_id_from_reply_target(target: &str) -> Option<String> {
+    if target.len() == 64 && target.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Some(target.to_ascii_lowercase());
+    }
+    event_id_from_origin(target)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DeliveryKind {
+    Reply(String),
+    Standalone,
+}
+
+impl DeliveryKind {
+    fn log_kind(&self) -> &'static str {
+        match self {
+            Self::Reply(_) => "reply",
+            Self::Standalone => "standalone",
+        }
+    }
+
+    fn operation(&self) -> &'static str {
+        match self {
+            Self::Reply(_) => "reply",
+            Self::Standalone => "post",
+        }
+    }
+
+    fn success(&self) -> SayDelivery {
+        match self {
+            Self::Reply(_) => SayDelivery::Posted,
+            Self::Standalone => SayDelivery::PostedStandalone,
+        }
+    }
+
+    fn argv(&self, config_path: &Path, text: &str) -> Vec<String> {
+        match self {
+            Self::Reply(event_id) => reply_argv(config_path, event_id, text),
+            Self::Standalone => post_argv(config_path, text),
+        }
+    }
+}
+
+fn delivery_kind_for_target(target: Option<&str>) -> Result<DeliveryKind, &'static str> {
+    match target {
+        Some(target) => event_id_from_reply_target(target)
+            .map(DeliveryKind::Reply)
+            .ok_or("invalid reply target"),
+        None => Ok(DeliveryKind::Standalone),
+    }
 }
 
 /// この instance の nostaro post 用 config パス（socket と同じディレクトリ）。
@@ -110,45 +181,52 @@ fn build_post_command(bin: &Path, argv: &[String], secret: Option<&str>) -> Comm
     cmd
 }
 
-/// say を配送する（DI-16: 常に新規 post = standalone）。返信は DI `reply` 操作が担うので、
-/// say に reply target を暗黙設定しない。`reply_origin` は wire 互換のため受けるが使わない。
-/// row292/#843 の「返信先が無い say も drop せず publish」は、常に standalone post とする
-/// 本設計で完全に満たされる（drop は発生しない）。結果は観測性のため `PostedStandalone` を返す。
+/// say を配送する。返信先があれば対象eventへのreply、無ければstandalone postにする。
+/// 返信先はraw hex64または`nostr:event:v1:{lane}:{hex64}`だけを受け付け、不正値はchildを
+/// spawnせずfail-closedにする。row292/#843どおり、返信先が無いsay自体はdropしない。
 ///
-/// `dry_run=true`（QC ハーネス）のときは publish せず、本文・種別を INFO ログに全文残して
-/// core へは成功 ack（`PostedStandalone`）を返す。nostaro も spawn しない。**dry_run=false は
-/// 従来どおり standalone post を発行する**。
+/// `dry_run=true`（QCハーネス）のときはpublishせず、本文・種別をINFO logに残し、実配送と
+/// 同じ`SayDelivery` variantを返す。nostaroはspawnしない。
 pub async fn deliver_say(
     nostaro_bin: &Path,
     config_path: &Path,
     secret: Option<&str>,
-    _reply_origin: Option<String>,
+    reply_origin: Option<String>,
     text: &str,
     dry_run: bool,
 ) -> SayDelivery {
+    let delivery_kind = match delivery_kind_for_target(reply_origin.as_deref()) {
+        Ok(kind) => kind,
+        Err(message) => return SayDelivery::Failed(message.to_string()),
+    };
+    let argv = delivery_kind.argv(config_path, text);
+    let success = delivery_kind.success();
+    let operation = delivery_kind.operation();
+    let kind = delivery_kind.log_kind();
     if dry_run {
-        // publish せず全文をログに残す（種別は常に standalone = DI-16）。
         tracing::info!(
             target: DRY_RUN_LOG_TARGET,
-            kind = "standalone",
+            kind,
             body = %text,
-            "DRY_RUN say (not published; standalone post)"
+            "DRY_RUN say (not published)"
         );
-        return SayDelivery::PostedStandalone;
+        return success;
     }
-    let argv = post_argv(config_path, text);
     let mut cmd = build_post_command(nostaro_bin, &argv, secret);
     match tokio::time::timeout(POST_TIMEOUT, cmd.output()).await {
-        Ok(Ok(out)) if out.status.success() => SayDelivery::PostedStandalone,
+        Ok(Ok(out)) if out.status.success() => success,
         Ok(Ok(out)) => {
             let stderr = redact_secrets(String::from_utf8_lossy(&out.stderr).trim());
             SayDelivery::Failed(format!(
-                "nostaro post exit {:?}: {stderr}",
+                "nostaro {operation} exit {:?}: {stderr}",
                 out.status.code()
             ))
         }
         Ok(Err(e)) => SayDelivery::Failed(format!("nostaro spawn 失敗: {e}")),
-        Err(_) => SayDelivery::Failed(format!("nostaro post timeout {}s", POST_TIMEOUT.as_secs())),
+        Err(_) => SayDelivery::Failed(format!(
+            "nostaro {operation} timeout {}s",
+            POST_TIMEOUT.as_secs()
+        )),
     }
 }
 
@@ -177,6 +255,27 @@ mod tests {
             event_id_from_origin("nostr:event:v1:default:not-64-hex"),
             None
         );
+    }
+
+    #[test]
+    fn event_id_rejects_malformed_origin_lanes() {
+        let id = "aa".repeat(32);
+        for origin in [
+            format!("nostr:event:v1::{id}"),
+            format!("nostr:event:v1:other:{id}"),
+            format!("nostr:event:v1:default:extra:{id}"),
+            format!("nostr:event:v1:watch:{id}"),
+            format!("nostr:event:v1:watch:::{id}"),
+            format!("nostr:event:v1:watch:nope:{id}"),
+            format!("nostr:event:v1:watch:-1:{id}"),
+            format!("nostr:event:v1:watch:0:{id}"),
+            format!("nostr:event:v1:watch:+1:{id}"),
+            format!("nostr:event:v1:watch:01:{id}"),
+            format!("nostr:event:v1:watch:{}:{id}", "9".repeat(20)),
+            format!("nostr:event:v1:watch:1:extra:{id}"),
+        ] {
+            assert_eq!(event_id_from_origin(&origin), None, "accepted {origin}");
+        }
     }
 
     #[test]
@@ -266,7 +365,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn say_invokes_nostaro_post_with_env_secret() {
+    async fn origin_target_invokes_nostaro_reply_with_env_secret() {
         // 子 spawn は environ を読むので env 書換テストと直列化する（#868 の flaky 本体）。
         let _env = crate::ENV_LOCK.lock().await;
         // 実 relay 不要のモック nostaro。argv と env を控えて 0 exit する。
@@ -290,8 +389,8 @@ mod tests {
         }
         let cfg = dir.path().join("cfg.toml");
         write_relays_config(&cfg, &["wss://x.example".into()]).unwrap();
-        // DI-16: say は常に standalone post。reply_origin を渡しても post になる（reply にしない）。
-        let origin = format!("nostr:event:v1:default:{}", "bb".repeat(32));
+        let id = "bb".repeat(32);
+        let origin = format!("nostr:event:v1:default:{id}");
         let got = deliver_say(
             &script,
             &cfg,
@@ -301,19 +400,92 @@ mod tests {
             false,
         )
         .await;
-        assert_eq!(got, SayDelivery::PostedStandalone);
+        assert_eq!(got, SayDelivery::Posted);
         let recorded = std::fs::read_to_string(&out_file).unwrap();
-        assert!(recorded.contains("post"), "post subcommand: {recorded}");
-        assert!(!recorded.contains("reply"), "reply にしない: {recorded}");
-        assert!(recorded.contains("やあ"), "本文が渡っていない: {recorded}");
+        assert!(
+            recorded.contains(&format!(
+                "ARGV:--config {} reply -- {id} やあ",
+                cfg.display()
+            )),
+            "reply argv: {recorded}"
+        );
         assert!(
             recorded.contains("ENV:nsec1fakekey"),
             "鍵が env で渡っていない: {recorded}"
         );
         assert!(
             !recorded.contains("--relay"),
-            "post に --relay は無い（config の relays を使う）: {recorded}"
+            "reply に --relay は無い（config の relays を使う）: {recorded}"
         );
+    }
+
+    #[tokio::test]
+    async fn explicit_raw_target_replies_and_terminates_text_options() {
+        let _env = crate::ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-nostaro");
+        let out_file = dir.path().join("invoked.txt");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexit 0\n",
+                out_file.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut p = std::fs::metadata(&script).unwrap().permissions();
+            p.set_mode(0o755);
+            std::fs::set_permissions(&script, p).unwrap();
+        }
+        let cfg = dir.path().join("cfg.toml");
+        let id = "ab".repeat(32);
+        let got = deliver_say(&script, &cfg, None, Some(id.clone()), "-hello", false).await;
+        assert_eq!(got, SayDelivery::Posted);
+        let recorded = std::fs::read_to_string(&out_file).unwrap();
+        assert_eq!(
+            recorded.lines().collect::<Vec<_>>(),
+            vec![
+                "--config",
+                cfg.to_str().unwrap(),
+                "reply",
+                "--",
+                id.as_str(),
+                "-hello"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_explicit_target_fails_without_spawning() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("spawned");
+        let script = dir.path().join("fake-nostaro");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\ntouch '{}'\nexit 0\n", marker.display()),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut p = std::fs::metadata(&script).unwrap().permissions();
+            p.set_mode(0o755);
+            std::fs::set_permissions(&script, p).unwrap();
+        }
+        let got = deliver_say(
+            &script,
+            &dir.path().join("cfg.toml"),
+            None,
+            Some("not-an-event".into()),
+            "hello",
+            false,
+        )
+        .await;
+        assert!(matches!(got, SayDelivery::Failed(_)), "got {got:?}");
+        assert!(!marker.exists(), "invalid target must not spawn child");
     }
 
     #[tokio::test]
@@ -358,10 +530,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn delivery_kind_drives_dry_run_log_kind() {
+        let id = "dd".repeat(32);
+        assert_eq!(
+            delivery_kind_for_target(Some(&id)).unwrap().log_kind(),
+            "reply"
+        );
+        assert_eq!(
+            delivery_kind_for_target(None).unwrap().log_kind(),
+            "standalone"
+        );
+    }
+
     #[tokio::test]
-    async fn dry_run_acks_without_spawning() {
-        // dry_run は nostaro を spawn せず（存在しない bin/cfg でも）PostedStandalone を返す。
-        let got = deliver_say(
+    async fn dry_run_distinguishes_reply_and_standalone_without_spawning() {
+        let reply = deliver_say(
             Path::new("/nonexistent/nostaro"),
             Path::new("/nonexistent/cfg.toml"),
             Some("nsec1fakekey"),
@@ -370,6 +554,20 @@ mod tests {
             true,
         )
         .await;
-        assert_eq!(got, SayDelivery::PostedStandalone, "dry_run は成功 ack");
+        let standalone = deliver_say(
+            Path::new("/nonexistent/nostaro"),
+            Path::new("/nonexistent/cfg.toml"),
+            Some("nsec1fakekey"),
+            None,
+            "エアリプ",
+            true,
+        )
+        .await;
+        assert_eq!(reply, SayDelivery::Posted, "target付きdry-runはreply");
+        assert_eq!(
+            standalone,
+            SayDelivery::PostedStandalone,
+            "target無しdry-runはstandalone"
+        );
     }
 }

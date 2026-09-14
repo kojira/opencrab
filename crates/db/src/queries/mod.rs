@@ -4,12 +4,9 @@
 //! ここから再輸出されるため、消費側の `opencrab_db::queries::X` パスは
 //! 分割前と変わらない。新しいドメインを足すときは新しいサブモジュールに。
 
-mod agent_discord_config;
 mod agent_inbox;
 mod agent_logs;
 mod agent_mcp_config;
-mod agent_nostr_config;
-mod agent_nostr_relay_config;
 mod agent_schedules;
 mod agents;
 mod allowed_commands;
@@ -36,12 +33,9 @@ mod tool_logs;
 mod trusted_users;
 mod webhook_config;
 
-pub use agent_discord_config::*;
 pub use agent_inbox::*;
 pub use agent_logs::*;
 pub use agent_mcp_config::*;
-pub use agent_nostr_config::*;
-pub use agent_nostr_relay_config::*;
 pub use agent_schedules::*;
 pub use agents::*;
 pub use allowed_commands::*;

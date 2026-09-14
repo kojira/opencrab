@@ -221,13 +221,7 @@
         let state = crate::test_app_state();
 
         // 眠っている間に外へ手が出る／状態を書き換えるツール（全スロットにまたがる）。
-        // nostr_run は露出撤去済み（返信は say 一本 / #840）なので外向きツール表からは外す
-        // （own 定義に無く「許可リスト無しでは届くはず」の対照が成り立たない）。
-        // #654: configure_nostr の定義は nostr feature 依存（#651）。off では定義が無く対照が
-        // 空論になるので、期待値も同じ cfg で組む（feature off でも他の外向きツールは全経路で
-        // 塞がることを引き続き固定する）。nostr off では下の push が cfg で消え mut が不要になる。
-        #[cfg_attr(not(feature = "nostr"), allow(unused_mut))]
-        let mut forbidden = vec![
+        let forbidden = [
             "execute_shell",          // dispatcher（config 駆動）
             "ws_write",               // dispatcher core
             "ws_delete",              // dispatcher core
@@ -238,10 +232,6 @@
             "configure_mcp_server",   // gateway own
             "mcp__ext__send",         // MCP スロット
         ];
-        #[cfg(feature = "nostr")]
-        {
-            forbidden.push("configure_nostr"); // gateway own
-        }
         // 整理に要る読み取り・タグ・終了宣言。
         let allowed = [
             "browse_memory_index",

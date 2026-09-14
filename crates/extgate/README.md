@@ -31,7 +31,7 @@ External gate V3 最小形。契約・設計・検収は `docs/design/external-g
 | `delivery.rs` | `DeliveryEffect` → say 1 回 |
 | `delivery_mode.rs` | optional `delivery_mode`（欠落=`say`）。`tool_driven` は inbound Text を NoReply にし、自発の V3 say を渡さない。`kind_id` では分岐しない |
 | `turn_queue.rs` | session turn queue（cap 32）。reserve / FIFO consumer。溢れは dropped を足す |
-| `listen.rs` | UDS listen と接続状態機械。`enqueue_bind` は lock 失敗・未 live を warn（fail-quiet 禁止）。`web_binding_state` は ack=`ready` / pending=`provisioning` / それ以外=`unavailable`。`wait_bind_ack` は live 消失理由を残す |
+| `listen.rs` | UDS listenと接続状態機械。`enqueue_bind`はlock失敗・未liveをwarn（fail-quiet禁止）。binding ack/pendingはopaqueなinstance/binding/addressとして管理する |
 | `close.rs` | live close。request id 抽出済みなら err 1 回、未抽出は log のみ（wire 0） |
 
 ## 非目標

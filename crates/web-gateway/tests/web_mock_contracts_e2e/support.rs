@@ -344,7 +344,7 @@ fn spawn_gateway(root: &Path, sock: &Path, gw_port: u16) -> Proc {
     std::fs::write(
         &placement,
         format!(
-            r#"{{"http_bind":"127.0.0.1:{gw_port}","core_socket":"{}","instances":[{{"instance_id":"{INSTANCE}","revision":1,"author_id":"{AUTHOR}"}}]}}"#,
+            r#"{{"http_bind":"127.0.0.1:{gw_port}","core_socket":"{}","instances":[{{"instance_id":"{INSTANCE}","revision":1,"agent_id":"{AGENT}","author_id":"{AUTHOR}"}}]}}"#,
             sock.display()
         ),
     )
@@ -430,17 +430,6 @@ fn setup(mock_port: u16, tag: &str, auto_dispatch: bool, tools_block: &str) -> H
     .expect("create agent");
     assert_eq!(st, 200, "{body}");
 
-    // owner_discord_id=AUTHOR にして web author(e2e-owner)=owner を成立させる（caller=Owner）。
-    {
-        let conn = Connection::open(&db).expect("open db for owner");
-        conn.execute(
-            "INSERT INTO agent_discord_config (agent_id, bot_token, owner_discord_id, enabled, updated_at)
-             VALUES (?1, 'x', ?2, 0, datetime('now'))",
-            [AGENT, AUTHOR],
-        )
-        .unwrap();
-    }
-
     let (st, body) = http(
         core_port,
         "PUT",
@@ -483,11 +472,11 @@ fn setup(mock_port: u16, tag: &str, auto_dispatch: bool, tools_block: &str) -> H
 
     // connected create: gateway 接続済みなら 201 ready で binding+session を返す。
     let (st, body) = http(
-        core_port,
+        gw_port,
         "POST",
-        &format!("/api/agents/{AGENT}/web-conversations"),
+        "/api/web-conversations",
         None,
-        Some(r#"{"name":"E2E"}"#),
+        Some(&format!(r#"{{"agent_id":"{AGENT}","name":"E2E"}}"#)),
         Duration::from_secs(70),
     )
     .expect("create web-conversation");

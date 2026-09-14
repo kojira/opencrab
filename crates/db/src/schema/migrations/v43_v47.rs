@@ -34,19 +34,8 @@ pub(super) const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 45,
-        description: "nostr_bundle_state（Nostr Bundle coordinator。V3 4表に含めない）",
-        // 新規 DB は SCHEMA_SQL 側で表を持つので IF NOT EXISTS で no-op。
-        // 既存 DB（v44）でのみ CREATE が走る。DDL のみ・既存行は触らない。
-        //
-        // ## やってよいことだけ
-        //   CREATE TABLE IF NOT EXISTS nostr_bundle_state
-        //
-        // ## やってはいけないこと
-        //   V3 4表への列追加、wire/admin 契約の変更、既存行の UPDATE/DROP。
-        //
-        // ## 切り戻し
-        //   BEGIN; PRAGMA user_version = 44; COMMIT;
-        up: migrate_v45_nostr_bundle_state,
+        description: "retired gateway-owned bundle migration",
+        up: |_| Ok(()),
     },
     Migration {
         version: 46,

@@ -135,7 +135,7 @@ fn test_heartbeat_instructions_audit_roundtrip() {
         scope: "agent".to_string(),
         channel_id: None,
         caller_identity: "owner".to_string(),
-        caller_discord_id: Some("123".to_string()),
+        caller_user_id: Some("123".to_string()),
         old_value: Some("old".to_string()),
         new_value: Some("new".to_string()),
         reason: Some("オーナー依頼".to_string()),

@@ -573,15 +573,13 @@ mod tests {
             voice_config: std::sync::Arc::new(Default::default()),
             voice_runtime: std::sync::Arc::new(std::sync::Mutex::new(None)),
             workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
-            #[cfg(feature = "nostr")]
+            #[cfg(any())]
             nostr_master_key: None,
             default_model: "mock:gpt-4o".to_string(),
             tools_config: std::sync::Arc::new(std::sync::RwLock::new(
                 opencrab_actions::tools::ToolsConfig::default(),
             )),
             compaction_ratio: 0.5,
-            typed_history_enabled: false,
-            typed_history_drop_directive: false,
             evaluator: opencrab_server::config::EvaluatorConfig::default(),
             skill_consolidation: opencrab_server::config::SkillConsolidationConfig::default(),
             category_maintenance: opencrab_server::config::CategoryMaintenanceConfig::default(),

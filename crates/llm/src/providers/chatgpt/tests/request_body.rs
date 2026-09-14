@@ -273,7 +273,7 @@ fn test_build_request_body_converts_tool_result_to_function_call_output_item() {
 }
 
 #[test]
-fn test_typed_history_past_turn_converts_to_function_call_items() {
+fn test_past_turn_converts_to_function_call_items() {
     let provider = ChatGptProvider::new();
     let mut assistant = Message::assistant("");
     assistant.content = None;

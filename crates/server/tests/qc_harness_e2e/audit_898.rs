@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // #898【DESIGN-TURN-CONTINUATION §13 #2（本文＋最終行 継続→進む）を 3 連鎖／ターン合計 plain3・
-// §13.1 b/c/d（1 イテレーション=1 投稿・順序保持）】: reply なし・継続 で 3 分割 → 配送 3・保存 3・LLM 3・残留なし。
+// §13.1 b/c/d（1 イテレーション=1 投稿・順序保持）】: 明示 reply tool なし・継続で 3 分割 → 配送 3・保存 3・LLM 3・残留なし。
 //
 // 現 tip: 機構（継続 3 イテレーション）は動くが配送/保存は最終応答（er.response）だけを
 // 通すので「3回目」だけが say/speech に残る（配送 1・保存 1）。→ 赤。
@@ -43,11 +43,11 @@ async fn audit_898_continue_split_delivers_and_saves_each_iteration() {
     // 途中イテレーションも配送されるだけの猶予（現 tip では出ないので落ち着き待ち）。
     tokio::time::sleep(Duration::from_millis(400)).await;
 
-    // 配送: 3 本すべてが standalone say として出る（現 tip は AUD898_3 のみ → 赤）。
+    // 配送: 返信元を持つ mention への 3 本すべてが reply say として出る。
     for body in [AUD898_1, AUD898_2, AUD898_3] {
         let n = captured(&buf)
             .iter()
-            .filter(|c| c.kind == "standalone" && c.body.contains(body))
+            .filter(|c| c.kind == "reply" && c.body.contains(body))
             .count();
         assert_eq!(
             n,

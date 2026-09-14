@@ -1,6 +1,9 @@
 //! Nostr gateway。watch JSONL → V3 said（inbound）／ V3 say → nostaro reply（outbound）。
 
+pub mod admin;
+pub mod admission;
 pub mod config;
+pub mod daemon;
 pub mod dedup;
 pub mod harness;
 pub mod map;
@@ -8,6 +11,7 @@ pub mod ops;
 pub mod post;
 pub mod run;
 pub mod secret;
+pub mod store;
 pub mod watch;
 
 /// テスト専用: プロセス env を触るテストと、子プロセスを spawn するテストを直列化する。

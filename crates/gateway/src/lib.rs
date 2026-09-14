@@ -1,3 +1,5 @@
+pub mod process_supervisor;
+
 pub mod message;
 pub mod traits;
 

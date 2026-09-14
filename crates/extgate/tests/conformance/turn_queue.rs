@@ -307,10 +307,10 @@ async fn settlement_is_consumed_on_next_turn() {
         binding_id: binding_id.clone(),
         agent_id: "agent-1".into(),
         session_id: session_id.clone(),
-        kind_id: "discord".into(),
-        author_id: "u1".into(),
+        only_speaker: false,
+        speaker_id: "u1".into(),
         delivery_mode: DeliveryMode::Say,
-        prompt_suffix: String::new(),
+        system_context: String::new(),
     };
     settle_completed(
         &h.runtime.subtask_registry_for(&session_id),
@@ -370,10 +370,10 @@ async fn settlement_on_reused_nostr_session_resumes() {
         binding_id,
         agent_id: "agent-1".into(),
         session_id: session_id.clone(),
-        kind_id: "nostr".into(),
-        author_id: "npub-u1".into(),
+        only_speaker: true,
+        speaker_id: "npub-u1".into(),
         delivery_mode: DeliveryMode::Say,
-        prompt_suffix: String::new(),
+        system_context: String::new(),
     };
     settle_completed(
         &h.runtime.subtask_registry_for(&session_id),
@@ -424,10 +424,10 @@ async fn settlement_during_active_parent_does_not_start_another_resume() {
         binding_id,
         agent_id: "agent-1".into(),
         session_id: session_id.clone(),
-        kind_id: "web".into(),
-        author_id: "user-1".into(),
+        only_speaker: false,
+        speaker_id: "user-1".into(),
         delivery_mode: DeliveryMode::Say,
-        prompt_suffix: String::new(),
+        system_context: String::new(),
     };
 
     let locks = h.runtime.session_locks();

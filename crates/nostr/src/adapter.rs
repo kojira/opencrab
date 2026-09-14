@@ -55,6 +55,7 @@ pub struct AllowSources {
     pub followees: HashSet<String>,
     pub owner: HashSet<String>,
     pub co_agents: HashSet<String>,
+    pub co_agent_identities: std::collections::HashMap<String, String>,
     pub trusted_users: HashSet<String>,
 }
 

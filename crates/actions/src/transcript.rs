@@ -12,39 +12,27 @@
 //! 文字列比較で読んでいるため、値を変えると web を同時に直す必要がある。値を変えないので
 //! web は無変更で動く。
 
-/// 転記の由来ゲートウェイ。`session_logs.metadata_json` の `source` 値を決める。
+/// 転記元が決めたopaqueなsource pair。
 ///
-/// 由来を **`&str` の引数で受けない**のが要点: `"discord"` / `"nostr_response"` のような
-/// 自由文字列は綴り違いがコンパイルを通り、そのまま DB に入って web の表示だけが静かに
-/// 壊れる（`AgentRuntime::ensure_session` の `mode: &str` で実際に作ってしまった構造 —
-/// #156 S1）。列挙型で受け、文字列はこの 1 箇所だけが持つ。
+/// 共有層は値を列挙・解釈しない。具体gatewayが自分のcrate内で定数を構築し、受信と返信の
+/// 対を型として渡すことで、共有層での綴り違いだけを防ぐ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TranscriptSource {
-    /// Discord（`"discord"` / `"discord_response"`）。
-    Discord,
-    /// Nostr（`"nostr"` / `"nostr_response"`）。
-    Nostr,
-    /// External gate（`"external"` / `"external_response"`）。
-    External,
+pub struct TranscriptSource {
+    inbound: &'static str,
+    reply: &'static str,
 }
 
 impl TranscriptSource {
-    /// 受信発話の `source` 値（移設前の値をそのまま返す）。
-    pub const fn inbound(self) -> &'static str {
-        match self {
-            Self::Discord => "discord",
-            Self::Nostr => "nostr",
-            Self::External => "external",
-        }
+    pub const fn new(inbound: &'static str, reply: &'static str) -> Self {
+        Self { inbound, reply }
     }
 
-    /// エージェント応答の `source` 値（移設前の値をそのまま返す）。
+    pub const fn inbound(self) -> &'static str {
+        self.inbound
+    }
+
     pub const fn reply(self) -> &'static str {
-        match self {
-            Self::Discord => "discord_response",
-            Self::Nostr => "nostr_response",
-            Self::External => "external_response",
-        }
+        self.reply
     }
 }
 
@@ -123,14 +111,10 @@ pub struct InteractionRecord<'a> {
 mod tests {
     use super::*;
 
-    /// `source` 値は web（SessionDetail / SessionCard）が文字列比較で読むため固定。
     #[test]
-    fn source_strings_are_frozen() {
-        assert_eq!(TranscriptSource::Discord.inbound(), "discord");
-        assert_eq!(TranscriptSource::Discord.reply(), "discord_response");
-        assert_eq!(TranscriptSource::Nostr.inbound(), "nostr");
-        assert_eq!(TranscriptSource::Nostr.reply(), "nostr_response");
-        assert_eq!(TranscriptSource::External.inbound(), "external");
-        assert_eq!(TranscriptSource::External.reply(), "external_response");
+    fn source_pair_is_preserved() {
+        let source = TranscriptSource::new("inbound", "reply");
+        assert_eq!(source.inbound(), "inbound");
+        assert_eq!(source.reply(), "reply");
     }
 }

@@ -15,6 +15,7 @@ pub struct Placement {
 pub struct InstancePlacement {
     pub instance_id: String,
     pub revision: u64,
+    pub agent_id: String,
     pub author_id: String,
 }
 
@@ -40,18 +41,25 @@ impl Placement {
         if self.instances.is_empty() {
             anyhow::bail!("instances must be nonempty");
         }
-        let mut seen = std::collections::BTreeSet::new();
+        let mut seen_instances = std::collections::BTreeSet::new();
+        let mut seen_agents = std::collections::BTreeSet::new();
         for inst in &self.instances {
             if inst.revision == 0 {
                 anyhow::bail!("revision must be positive");
+            }
+            if inst.agent_id.is_empty() {
+                anyhow::bail!("agent_id must be nonempty");
             }
             if inst.author_id.is_empty() {
                 anyhow::bail!("author_id must be nonempty");
             }
             crate::v3::wire::parse_uuid(&inst.instance_id)
                 .map_err(|_| anyhow::anyhow!("instance_id must be canonical lowercase UUID"))?;
-            if !seen.insert(inst.instance_id.clone()) {
+            if !seen_instances.insert(inst.instance_id.clone()) {
                 anyhow::bail!("duplicate instance_id is a double live; refuse startup");
+            }
+            if !seen_agents.insert(inst.agent_id.clone()) {
+                anyhow::bail!("duplicate agent_id is ambiguous; refuse startup");
             }
         }
         Ok(())
@@ -70,6 +78,7 @@ mod tests {
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
                 revision: 1,
+                agent_id: "agent-a".into(),
                 author_id: "owner".into(),
             }],
         };
@@ -84,6 +93,7 @@ mod tests {
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
                 revision: 1,
+                agent_id: "agent-a".into(),
                 author_id: "owner".into(),
             }],
         };

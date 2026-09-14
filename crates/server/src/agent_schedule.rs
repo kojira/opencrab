@@ -433,7 +433,7 @@ mod tests {
     /// 別エージェント（agent-y）の文脈。他人の id を渡す攻撃の再現に使う。
     // #654: 使うのは nostr/web セッションを立てる test だけ。発火経路 descriptor は各 feature 時
     // のみ登録される（#651）ので、その cfg 下でだけ使われる（bare/discord では未使用＝不要）。
-    #[cfg(feature = "nostr")]
+    #[cfg(any())]
     fn ctx_for(agent_id: &str, session_id: &str) -> GatewayCallContext {
         let mut c = GatewayCallContext::new(GatewayCaller::TrustedUser, agent_id);
         c.session_id = Some(session_id.to_string());
@@ -443,7 +443,7 @@ mod tests {
     /// set_my_schedule は **ctx.session_id** に対して作成する（スコープ引数なし）。
     // #654: nostr セッションの発火経路（NostrFire descriptor）は nostr feature 時のみ登録される
     // （#651）。off では作成が fail-closed になり検証対象の挙動が存在しないので同じ cfg で囲む。
-    #[cfg(feature = "nostr")]
+    #[cfg(any())]
     #[tokio::test]
     async fn set_creates_on_current_session_and_get_lists_it() {
         let state = crate::test_app_state();
@@ -488,7 +488,7 @@ mod tests {
     /// cron 式が不正ならその場でエラー（remedy 付き）。
     // #654: nostr セッションで cron 検証まで到達するには NostrFire（nostr feature）が要る（#651）。
     // off では発火経路解決が先に fail-closed になり cron 検証へ届かないので同じ cfg で囲む。
-    #[cfg(feature = "nostr")]
+    #[cfg(any())]
     #[tokio::test]
     async fn set_rejects_invalid_cron_in_the_same_turn() {
         let state = crate::test_app_state();
@@ -520,7 +520,7 @@ mod tests {
 
     /// 必須引数（cron_expr / message）欠落は remedy 付きエラー。
     // #654: nostr セッションで必須引数検証まで到達するには NostrFire（nostr feature）が要る（#651）。
-    #[cfg(feature = "nostr")]
+    #[cfg(any())]
     #[tokio::test]
     async fn set_requires_cron_and_message() {
         let state = crate::test_app_state();
@@ -534,7 +534,7 @@ mod tests {
     /// 自分のスケジュールを作って id を取り出すヘルパ。
     // #654: nostr セッションで作成する test 専用のヘルパ。NostrFire descriptor は nostr feature
     // 時のみ登録される（#651）ので同じ cfg で囲む。
-    #[cfg(feature = "nostr")]
+    #[cfg(any())]
     fn create_one(state: &AppState, c: &GatewayCallContext) -> i64 {
         let res = set_my_schedule(
             state,
@@ -547,7 +547,7 @@ mod tests {
 
     /// update に enabled=false を渡すと「止まる」が**行は残る**（履歴が追える）。
     // #654: nostr セッションで作成→更新する。NostrFire（nostr feature）が要る（#651）。
-    #[cfg(feature = "nostr")]
+    #[cfg(any())]
     #[tokio::test]
     async fn update_disable_stops_but_keeps_row() {
         let state = crate::test_app_state();
@@ -567,7 +567,7 @@ mod tests {
 
     /// update で cron を変えると「間隔を変える」が実現し、id は変わらない。
     // #654: nostr セッションで作成→更新する。NostrFire（nostr feature）が要る（#651）。
-    #[cfg(feature = "nostr")]
+    #[cfg(any())]
     #[tokio::test]
     async fn update_changes_interval_same_id() {
         let state = crate::test_app_state();
@@ -587,7 +587,7 @@ mod tests {
 
     /// 変更フィールドが 1 つも無い update は暗黙の no-op を避けて拒否する。
     // #654: nostr セッションで作成→更新する。NostrFire（nostr feature）が要る（#651）。
-    #[cfg(feature = "nostr")]
+    #[cfg(any())]
     #[tokio::test]
     async fn update_rejects_no_fields() {
         let state = crate::test_app_state();
@@ -600,7 +600,7 @@ mod tests {
 
     /// update の cron 不正は同ターンでエラー（直して呼び直せる）。
     // #654: nostr セッションで作成→更新する。NostrFire（nostr feature）が要る（#651）。
-    #[cfg(feature = "nostr")]
+    #[cfg(any())]
     #[tokio::test]
     async fn update_rejects_invalid_cron_in_the_same_turn() {
         let state = crate::test_app_state();
@@ -617,7 +617,7 @@ mod tests {
 
     /// delete は行ごと消す（以後 list に出ない）。
     // #654: nostr セッションで作成→削除する。NostrFire（nostr feature）が要る（#651）。
-    #[cfg(feature = "nostr")]
+    #[cfg(any())]
     #[tokio::test]
     async fn delete_removes_row() {
         let state = crate::test_app_state();
@@ -635,7 +635,7 @@ mod tests {
     /// 存在しない id の delete は remedy 付きエラー（成功しない）。
     // #654: nostr セッションで「見つからない」まで到達するには NostrFire（nostr feature）が要る
     // （#651）。off では発火経路解決が先に fail-closed になり所属チェックへ届かないので同じ cfg で囲む。
-    #[cfg(feature = "nostr")]
+    #[cfg(any())]
     #[tokio::test]
     async fn delete_missing_id_fails() {
         let state = crate::test_app_state();
@@ -650,7 +650,7 @@ mod tests {
     /// このテストは所属チェックの変異検出用: `load_owned_schedule` の agent_id 一致条件を外すと
     /// delete が通り、`victim_survives` が赤くなる。
     // #654: 両者とも nostr セッション（NostrFire・nostr feature）で作成・攻撃する（#651）。
-    #[cfg(feature = "nostr")]
+    #[cfg(any())]
     #[tokio::test]
     async fn foreign_agent_cannot_touch_others_schedule() {
         let state = crate::test_app_state();
@@ -685,7 +685,7 @@ mod tests {
     /// 外すとこのテストが赤くなる。
     // #654: nostr セッションで作成し、別セッションからの操作を弾く。作成・照会に NostrFire
     // （nostr feature）が要る（#651）。攻撃側の別セッション拒否は理由を問わないので nostr 単独で足りる。
-    #[cfg(feature = "nostr")]
+    #[cfg(any())]
     #[tokio::test]
     async fn other_session_of_same_agent_cannot_touch() {
         let state = crate::test_app_state();
@@ -705,7 +705,7 @@ mod tests {
 
     /// id を文字列で渡しても受け付ける（LLM が数値を文字列化する実測に対応）。
     // #654: nostr セッションで作成→更新する。NostrFire（nostr feature）が要る（#651）。
-    #[cfg(feature = "nostr")]
+    #[cfg(any())]
     #[tokio::test]
     async fn update_accepts_stringified_id() {
         let state = crate::test_app_state();

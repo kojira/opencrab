@@ -104,8 +104,6 @@ async fn tool_driven_inbound_is_no_reply_without_say() {
         .query_row("SELECT COUNT(*) FROM deliveries", [], |r| r.get(0))
         .unwrap();
     assert_eq!(deliveries, 0);
-    // #899: 沈黙（NO_REPLY 終端）は speech として残さない。裸 NO_REPLY を永続すると
-    // conversation_typed が `assistant: 'NO_REPLY'` としてモデルへ再注入する。
     let no_reply: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM memory_sessions WHERE content = 'NO_REPLY'",

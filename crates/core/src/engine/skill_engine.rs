@@ -118,8 +118,6 @@ pub struct SkillEngine {
     /// 会話車線の二水位（#826-B）。未設定なら途中圧縮しない（テスト / sub-engine）。
     conversation_high: Option<usize>,
     conversation_low: Option<usize>,
-    /// PR2 (#884): 事前に組んだ typed 会話。Some のとき初期 messages を typed history から組む。
-    typed_conversation: Option<crate::conversation_typed::TypedConversation>,
 }
 
 /// LLM へ返す tool_result の退避先設定（#284）。
@@ -169,7 +167,6 @@ impl SkillEngine {
             max_output_tokens: None,
             conversation_high: None,
             conversation_low: None,
-            typed_conversation: None,
         }
     }
 
@@ -178,14 +175,6 @@ impl SkillEngine {
     pub fn set_conversation_waters(&mut self, high: usize, low: usize) {
         self.conversation_high = Some(high);
         self.conversation_low = Some(low);
-    }
-
-    /// #884 PR2: typed 会話を差し込む（None で flat 挙動へ戻す）。
-    pub fn set_typed_conversation(
-        &mut self,
-        tc: Option<crate::conversation_typed::TypedConversation>,
-    ) {
-        self.typed_conversation = tc;
     }
 
     /// 各 ChatRequest に載せる出力トークン上限を設定する（#676）。使用モデルの実能力値を

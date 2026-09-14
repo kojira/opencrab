@@ -1,11 +1,8 @@
 {
   "capture_profile": {
     "build": {
-      "required_cargo_features": [
-        "discord",
-        "nostr"
-      ],
-      "selection": "the baseline-l2 Cargo feature enables baseline-l1 and its exact feature set; ambient feature unification is not used",
+      "required_cargo_features": [],
+      "selection": "the baseline-l2 Cargo feature enables baseline-l1; external gateway implementations are outside the server baseline",
       "target_family": "unix"
     },
     "id": "full-production-surface-v1",
@@ -20,19 +17,19 @@
   "coverage": {
     "claim": "Only nonempty observations satisfying their facet predicate are fixed by this artifact; every uncollected or not_applicable entry is an explicit non-claim.",
     "http_facets": {
-      "effects_observed": 46,
+      "effects_observed": 35,
       "effects_uncollected": 0,
-      "not_applicable": 3,
-      "uncollected": 38,
-      "valid_rejections": 35
+      "not_applicable": 1,
+      "uncollected": 32,
+      "valid_rejections": 28
     },
     "http_observed_status_classes": {
-      "2xx": 142,
-      "4xx": 49,
+      "2xx": 121,
+      "4xx": 40,
       "5xx": 4
     },
-    "tool_effects_observed": 50,
-    "tool_success_uncollected_count": 4
+    "tool_effects_observed": 44,
+    "tool_success_uncollected_count": 8
   },
   "http": {
     "probes": [
@@ -259,73 +256,6 @@
             {
               "name": "content-type",
               "value": "text/plain; charset=utf-8"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 400
-        },
-        "selection": "malformed_json_rejection"
-      },
-      {
-        "effect": null,
-        "name": "post___api_agents_agent_id_web-conversations__normal",
-        "request": {
-          "body": {},
-          "method": "POST",
-          "uri": "/api/agents/baseline-agent/web-conversations"
-        },
-        "response": {
-          "body": {
-            "error": "web_instance_unavailable"
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 409
-        },
-        "selection": "normal_or_local_precondition_branch"
-      },
-      {
-        "name": "post___api_agents_agent_id_web-conversations__reject_or_absent",
-        "request": {
-          "body_utf8": "{",
-          "method": "POST",
-          "uri": "/api/agents/baseline-agent/web-conversations"
-        },
-        "response": {
-          "body": {
-            "error": "invalid json"
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
             },
             {
               "name": "vary",
@@ -2109,570 +2039,6 @@
         "selection": "resource_absence_or_empty_state"
       },
       {
-        "effect": {
-          "after": {
-            "body": {
-              "configured": false
-            },
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "before": {
-            "body": {
-              "configured": true,
-              "enabled": true,
-              "owner_discord_id": "baseline-owner",
-              "running": false,
-              "token_masked": "baseline-n..."
-            },
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "observer": {
-            "body": null,
-            "db_query": null,
-            "method": "GET",
-            "path": "/api/agents/{id}/discord"
-          },
-          "status": "observed"
-        },
-        "name": "delete___api_agents_id_discord__normal",
-        "request": {
-          "body": null,
-          "method": "DELETE",
-          "uri": "/api/agents/baseline-agent/discord"
-        },
-        "response": {
-          "body": {
-            "deleted": true
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "normal_or_local_precondition_branch"
-      },
-      {
-        "name": "delete___api_agents_id_discord__reject_or_absent",
-        "request": {
-          "body_utf8": null,
-          "method": "DELETE",
-          "uri": "/api/agents/baseline-missing/discord"
-        },
-        "response": {
-          "body": {
-            "deleted": false
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "resource_absence_or_empty_state"
-      },
-      {
-        "effect": null,
-        "name": "get___api_agents_id_discord__normal",
-        "request": {
-          "body": null,
-          "method": "GET",
-          "uri": "/api/agents/baseline-agent/discord"
-        },
-        "response": {
-          "body": {
-            "configured": true,
-            "enabled": true,
-            "owner_discord_id": "baseline-owner",
-            "running": false,
-            "token_masked": "baseline-n..."
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "normal_or_local_precondition_branch"
-      },
-      {
-        "name": "get___api_agents_id_discord__reject_or_absent",
-        "request": {
-          "body_utf8": null,
-          "method": "GET",
-          "uri": "/api/agents/baseline-missing/discord"
-        },
-        "response": {
-          "body": {
-            "configured": false
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "resource_absence_or_empty_state"
-      },
-      {
-        "effect": {
-          "after": {
-            "body": {
-              "configured": true,
-              "enabled": true,
-              "owner_discord_id": "baseline-owner-2",
-              "running": false,
-              "token_masked": "baseline-n..."
-            },
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "before": {
-            "body": {
-              "configured": true,
-              "enabled": true,
-              "owner_discord_id": "baseline-owner",
-              "running": false,
-              "token_masked": "baseline-n..."
-            },
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "observer": {
-            "body": null,
-            "db_query": null,
-            "method": "GET",
-            "path": "/api/agents/{id}/discord"
-          },
-          "status": "observed"
-        },
-        "name": "patch___api_agents_id_discord__normal",
-        "request": {
-          "body": {
-            "owner_discord_id": "baseline-owner-2"
-          },
-          "method": "PATCH",
-          "uri": "/api/agents/baseline-agent/discord"
-        },
-        "response": {
-          "body": {
-            "configured": true,
-            "enabled": true,
-            "ok": true,
-            "owner_discord_id": "baseline-owner-2",
-            "token_masked": "baseline-n..."
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "normal_or_local_precondition_branch"
-      },
-      {
-        "name": "patch___api_agents_id_discord__reject_or_absent",
-        "request": {
-          "body_utf8": "{",
-          "method": "PATCH",
-          "uri": "/api/agents/baseline-agent/discord"
-        },
-        "response": {
-          "body": "Failed to parse the request body as JSON: EOF while parsing an object at line 1 column 1",
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "text/plain; charset=utf-8"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 400
-        },
-        "selection": "malformed_json_rejection"
-      },
-      {
-        "effect": {
-          "after": {
-            "body": {
-              "configured": true,
-              "enabled": true,
-              "owner_discord_id": "baseline-owner-updated",
-              "running": false,
-              "token_masked": "baseline-n..."
-            },
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "before": {
-            "body": {
-              "configured": true,
-              "enabled": true,
-              "owner_discord_id": "baseline-owner",
-              "running": false,
-              "token_masked": "baseline-n..."
-            },
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "observer": {
-            "body": null,
-            "db_query": null,
-            "method": "GET",
-            "path": "/api/agents/{id}/discord"
-          },
-          "status": "observed"
-        },
-        "name": "put___api_agents_id_discord__normal",
-        "request": {
-          "body": {
-            "bot_token": "baseline-not-a-credential",
-            "owner_discord_id": "baseline-owner-updated"
-          },
-          "method": "PUT",
-          "uri": "/api/agents/baseline-agent/discord"
-        },
-        "response": {
-          "body": {
-            "message": "Config saved. Gateway not started (discord feature not active).",
-            "ok": true
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "normal_or_local_precondition_branch"
-      },
-      {
-        "name": "put___api_agents_id_discord__reject_or_absent",
-        "request": {
-          "body_utf8": "{",
-          "method": "PUT",
-          "uri": "/api/agents/baseline-agent/discord"
-        },
-        "response": {
-          "body": "Failed to parse the request body as JSON: EOF while parsing an object at line 1 column 1",
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "text/plain; charset=utf-8"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 400
-        },
-        "selection": "malformed_json_rejection"
-      },
-      {
-        "effect": {
-          "after": {
-            "body": {
-              "configured": true,
-              "enabled": false,
-              "owner_discord_id": "baseline-owner",
-              "running": false,
-              "token_masked": "baseline-n..."
-            },
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "before": {
-            "body": {
-              "configured": true,
-              "enabled": true,
-              "owner_discord_id": "baseline-owner",
-              "running": false,
-              "token_masked": "baseline-n..."
-            },
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "observer": {
-            "body": null,
-            "db_query": null,
-            "method": "GET",
-            "path": "/api/agents/{id}/discord"
-          },
-          "status": "observed"
-        },
-        "name": "post___api_agents_id_discord_stop__normal",
-        "request": {
-          "body": null,
-          "method": "POST",
-          "uri": "/api/agents/baseline-agent/discord/stop"
-        },
-        "response": {
-          "body": {
-            "ok": true
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "normal_or_local_precondition_branch"
-      },
-      {
         "effect": null,
         "name": "get___api_agents_id_import_sync_history__normal",
         "request": {
@@ -4336,7 +3702,6 @@
                 ],
                 "done_count": 0,
                 "facilitator_id": null,
-                "gateway_bound": false,
                 "id": "agent-msg-baseline-agent-baseline-user",
                 "max_turns": null,
                 "metadata_json": null,
@@ -4353,7 +3718,6 @@
                 ],
                 "done_count": 0,
                 "facilitator_id": null,
-                "gateway_bound": false,
                 "id": "baseline-session",
                 "max_turns": 1,
                 "metadata_json": null,
@@ -4393,7 +3757,6 @@
                 ],
                 "done_count": 0,
                 "facilitator_id": null,
-                "gateway_bound": false,
                 "id": "baseline-session",
                 "max_turns": 1,
                 "metadata_json": null,
@@ -4477,1066 +3840,6 @@
           "body_utf8": "{",
           "method": "POST",
           "uri": "/api/agents/baseline-agent/messages"
-        },
-        "response": {
-          "body": "Failed to parse the request body as JSON: EOF while parsing an object at line 1 column 1",
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "text/plain; charset=utf-8"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 400
-        },
-        "selection": "malformed_json_rejection"
-      },
-      {
-        "effect": {
-          "after": {
-            "body": {
-              "configured": false,
-              "enabled": false,
-              "filter": {
-                "authors": [],
-                "keywords": [],
-                "kinds": []
-              },
-              "has_secret_key": false,
-              "owner_pubkey": "",
-              "relays": [
-                "wss://yabu.me",
-                "wss://r.kojira.io"
-              ],
-              "running": false,
-              "secret_key_masked": ""
-            },
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "before": {
-            "body": {
-              "configured": true,
-              "enabled": true,
-              "filter": {
-                "authors": [],
-                "keywords": [],
-                "kinds": []
-              },
-              "has_secret_key": true,
-              "owner_pubkey": "",
-              "relays": [
-                "wss://yabu.me",
-                "wss://r.kojira.io"
-              ],
-              "running": false,
-              "secret_key_masked": "••••••••"
-            },
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "observer": {
-            "body": null,
-            "db_query": null,
-            "method": "GET",
-            "path": "/api/agents/{id}/nostr"
-          },
-          "status": "observed"
-        },
-        "name": "delete___api_agents_id_nostr__normal",
-        "request": {
-          "body": null,
-          "method": "DELETE",
-          "uri": "/api/agents/baseline-agent/nostr"
-        },
-        "response": {
-          "body": {
-            "deleted": true
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "normal_or_local_precondition_branch"
-      },
-      {
-        "name": "delete___api_agents_id_nostr__reject_or_absent",
-        "request": {
-          "body_utf8": null,
-          "method": "DELETE",
-          "uri": "/api/agents/baseline-missing/nostr"
-        },
-        "response": {
-          "body": {
-            "deleted": false
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "resource_absence_or_empty_state"
-      },
-      {
-        "effect": null,
-        "name": "get___api_agents_id_nostr__normal",
-        "request": {
-          "body": null,
-          "method": "GET",
-          "uri": "/api/agents/baseline-agent/nostr"
-        },
-        "response": {
-          "body": {
-            "configured": true,
-            "enabled": true,
-            "filter": {
-              "authors": [],
-              "keywords": [],
-              "kinds": []
-            },
-            "has_secret_key": true,
-            "owner_pubkey": "",
-            "relays": [
-              "wss://yabu.me",
-              "wss://r.kojira.io"
-            ],
-            "running": false,
-            "secret_key_masked": "••••••••"
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "normal_or_local_precondition_branch"
-      },
-      {
-        "name": "get___api_agents_id_nostr__reject_or_absent",
-        "request": {
-          "body_utf8": null,
-          "method": "GET",
-          "uri": "/api/agents/baseline-missing/nostr"
-        },
-        "response": {
-          "body": {
-            "configured": false,
-            "enabled": false,
-            "filter": {
-              "authors": [],
-              "keywords": [],
-              "kinds": []
-            },
-            "has_secret_key": false,
-            "owner_pubkey": "",
-            "relays": [
-              "wss://yabu.me",
-              "wss://r.kojira.io"
-            ],
-            "running": false,
-            "secret_key_masked": ""
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "resource_absence_or_empty_state"
-      },
-      {
-        "effect": {
-          "after": {
-            "body": {
-              "configured": true,
-              "enabled": false,
-              "filter": {
-                "authors": [],
-                "keywords": [],
-                "kinds": []
-              },
-              "has_secret_key": true,
-              "owner_pubkey": "",
-              "relays": [
-                "wss://yabu.me",
-                "wss://r.kojira.io"
-              ],
-              "running": false,
-              "secret_key_masked": "••••••••"
-            },
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "before": {
-            "body": {
-              "configured": true,
-              "enabled": true,
-              "filter": {
-                "authors": [],
-                "keywords": [],
-                "kinds": []
-              },
-              "has_secret_key": true,
-              "owner_pubkey": "",
-              "relays": [
-                "wss://yabu.me",
-                "wss://r.kojira.io"
-              ],
-              "running": false,
-              "secret_key_masked": "••••••••"
-            },
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "observer": {
-            "body": null,
-            "db_query": null,
-            "method": "GET",
-            "path": "/api/agents/{id}/nostr"
-          },
-          "status": "observed"
-        },
-        "name": "put___api_agents_id_nostr__normal",
-        "request": {
-          "body": {
-            "enabled": false
-          },
-          "method": "PUT",
-          "uri": "/api/agents/baseline-agent/nostr"
-        },
-        "response": {
-          "body": {
-            "enabled": false,
-            "updated": true
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "normal_or_local_precondition_branch"
-      },
-      {
-        "name": "put___api_agents_id_nostr__reject_or_absent",
-        "request": {
-          "body_utf8": "{",
-          "method": "PUT",
-          "uri": "/api/agents/baseline-agent/nostr"
-        },
-        "response": {
-          "body": "Failed to parse the request body as JSON: EOF while parsing an object at line 1 column 1",
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "text/plain; charset=utf-8"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 400
-        },
-        "selection": "malformed_json_rejection"
-      },
-      {
-        "effect": null,
-        "name": "get___api_agents_id_nostr-relay__normal",
-        "request": {
-          "body": null,
-          "method": "GET",
-          "uri": "/api/agents/baseline-agent/nostr-relay"
-        },
-        "response": {
-          "body": {
-            "configured": false,
-            "enabled": false,
-            "has_webhook": false,
-            "webhook_url_masked": ""
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "normal_or_local_precondition_branch"
-      },
-      {
-        "name": "get___api_agents_id_nostr-relay__reject_or_absent",
-        "request": {
-          "body_utf8": null,
-          "method": "GET",
-          "uri": "/api/agents/baseline-missing/nostr-relay"
-        },
-        "response": {
-          "body": {
-            "configured": false,
-            "enabled": false,
-            "has_webhook": false,
-            "webhook_url_masked": ""
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "resource_absence_or_empty_state"
-      },
-      {
-        "effect": {
-          "after": {
-            "body": {
-              "configured": true,
-              "enabled": false,
-              "has_webhook": false,
-              "webhook_url_masked": ""
-            },
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "before": {
-            "body": {
-              "configured": false,
-              "enabled": false,
-              "has_webhook": false,
-              "webhook_url_masked": ""
-            },
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "observer": {
-            "body": null,
-            "db_query": null,
-            "method": "GET",
-            "path": "/api/agents/{id}/nostr-relay"
-          },
-          "status": "observed"
-        },
-        "name": "put___api_agents_id_nostr-relay__normal",
-        "request": {
-          "body": {
-            "enabled": false
-          },
-          "method": "PUT",
-          "uri": "/api/agents/baseline-agent/nostr-relay"
-        },
-        "response": {
-          "body": {
-            "enabled": false,
-            "has_webhook": false,
-            "updated": true,
-            "webhook_url_masked": ""
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "normal_or_local_precondition_branch"
-      },
-      {
-        "name": "put___api_agents_id_nostr-relay__reject_or_absent",
-        "request": {
-          "body_utf8": "{",
-          "method": "PUT",
-          "uri": "/api/agents/baseline-agent/nostr-relay"
-        },
-        "response": {
-          "body": "Failed to parse the request body as JSON: EOF while parsing an object at line 1 column 1",
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "text/plain; charset=utf-8"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 400
-        },
-        "selection": "malformed_json_rejection"
-      },
-      {
-        "effect": {
-          "after": {
-            "body": {
-              "configured": true,
-              "enabled": false,
-              "filter": {
-                "authors": [],
-                "keywords": [],
-                "kinds": []
-              },
-              "has_secret_key": true,
-              "owner_pubkey": "",
-              "relays": [
-                "wss://yabu.me",
-                "wss://r.kojira.io"
-              ],
-              "running": false,
-              "secret_key_masked": "••••••••"
-            },
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "before": {
-            "body": {
-              "configured": true,
-              "enabled": true,
-              "filter": {
-                "authors": [],
-                "keywords": [],
-                "kinds": []
-              },
-              "has_secret_key": true,
-              "owner_pubkey": "",
-              "relays": [
-                "wss://yabu.me",
-                "wss://r.kojira.io"
-              ],
-              "running": false,
-              "secret_key_masked": "••••••••"
-            },
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "observer": {
-            "body": null,
-            "db_query": null,
-            "method": "GET",
-            "path": "/api/agents/{id}/nostr"
-          },
-          "status": "observed"
-        },
-        "name": "post___api_agents_id_nostr_stop__normal",
-        "request": {
-          "body": null,
-          "method": "POST",
-          "uri": "/api/agents/baseline-agent/nostr/stop"
-        },
-        "response": {
-          "body": {
-            "stopped": true
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "normal_or_local_precondition_branch"
-      },
-      {
-        "effect": null,
-        "name": "get___api_agents_id_nostr_watches__normal",
-        "request": {
-          "body": null,
-          "method": "GET",
-          "uri": "/api/agents/baseline-agent/nostr/watches"
-        },
-        "response": {
-          "body": {
-            "watches": []
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "normal_or_local_precondition_branch"
-      },
-      {
-        "name": "get___api_agents_id_nostr_watches__reject_or_absent",
-        "request": {
-          "body_utf8": null,
-          "method": "GET",
-          "uri": "/api/agents/baseline-missing/nostr/watches"
-        },
-        "response": {
-          "body": {
-            "watches": []
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "resource_absence_or_empty_state"
-      },
-      {
-        "effect": {
-          "after": {
-            "body": {
-              "watches": [
-                {
-                  "agent_id": "baseline-agent",
-                  "created_at": "<timestamp>",
-                  "filter": {},
-                  "id": 1,
-                  "interval_secs": 60,
-                  "session_id": "nostr-baseline-agent"
-                }
-              ]
-            },
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "before": {
-            "body": {
-              "watches": []
-            },
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "observer": {
-            "body": null,
-            "db_query": null,
-            "method": "GET",
-            "path": "/api/agents/{id}/nostr/watches"
-          },
-          "status": "observed"
-        },
-        "name": "post___api_agents_id_nostr_watches__normal",
-        "request": {
-          "body": {
-            "filter": {},
-            "interval_secs": 60,
-            "session_id": "nostr-baseline-agent"
-          },
-          "method": "POST",
-          "uri": "/api/agents/baseline-agent/nostr/watches"
-        },
-        "response": {
-          "body": {
-            "created": true,
-            "watch": {
-              "agent_id": "baseline-agent",
-              "created_at": "<timestamp>",
-              "filter": {},
-              "id": 1,
-              "interval_secs": 60,
-              "session_id": "nostr-baseline-agent"
-            }
-          },
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 200
-        },
-        "selection": "normal_or_local_precondition_branch"
-      },
-      {
-        "name": "post___api_agents_id_nostr_watches__reject_or_absent",
-        "request": {
-          "body_utf8": "{",
-          "method": "POST",
-          "uri": "/api/agents/baseline-agent/nostr/watches"
-        },
-        "response": {
-          "body": "Failed to parse the request body as JSON: EOF while parsing an object at line 1 column 1",
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "text/plain; charset=utf-8"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 400
-        },
-        "selection": "malformed_json_rejection"
-      },
-      {
-        "effect": null,
-        "name": "delete___api_agents_id_nostr_watches_watch_id__normal",
-        "request": {
-          "body": null,
-          "method": "DELETE",
-          "uri": "/api/agents/baseline-agent/nostr/watches/1"
-        },
-        "response": {
-          "body": "watch が無い",
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "text/plain; charset=utf-8"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 404
-        },
-        "selection": "normal_or_local_precondition_branch"
-      },
-      {
-        "name": "delete___api_agents_id_nostr_watches_watch_id__reject_or_absent",
-        "request": {
-          "body_utf8": null,
-          "method": "DELETE",
-          "uri": "/api/agents/baseline-missing/nostr/watches/999999"
-        },
-        "response": {
-          "body": "watch が無い",
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "text/plain; charset=utf-8"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 404
-        },
-        "selection": "resource_absence_or_empty_state"
-      },
-      {
-        "effect": null,
-        "name": "put___api_agents_id_nostr_watches_watch_id__normal",
-        "request": {
-          "body": {
-            "filter": {},
-            "interval_secs": 120,
-            "session_id": "nostr-baseline-agent"
-          },
-          "method": "PUT",
-          "uri": "/api/agents/baseline-agent/nostr/watches/1"
-        },
-        "response": {
-          "body": "watch が無い",
-          "headers": [
-            {
-              "name": "access-control-allow-origin",
-              "value": "*"
-            },
-            {
-              "name": "access-control-expose-headers",
-              "value": "*"
-            },
-            {
-              "name": "content-type",
-              "value": "text/plain; charset=utf-8"
-            },
-            {
-              "name": "vary",
-              "value": "origin, access-control-request-method, access-control-request-headers"
-            }
-          ],
-          "status": 404
-        },
-        "selection": "normal_or_local_precondition_branch"
-      },
-      {
-        "name": "put___api_agents_id_nostr_watches_watch_id__reject_or_absent",
-        "request": {
-          "body_utf8": "{",
-          "method": "PUT",
-          "uri": "/api/agents/baseline-agent/nostr/watches/1"
         },
         "response": {
           "body": "Failed to parse the request body as JSON: EOF while parsing an object at line 1 column 1",
@@ -5649,138 +3952,21 @@
         "selection": "resource_absence_or_empty_state"
       },
       {
-        "effect": {
-          "after": {
-            "body": {
-              "agent_id": "baseline-agent",
-              "count": 2,
-              "schedules": [
-                {
-                  "agent_id": "baseline-agent",
-                  "anchor_at": null,
-                  "cron_expr": "0 0 * * *",
-                  "enabled": false,
-                  "gated": false,
-                  "gated_reason": null,
-                  "id": 1,
-                  "last_fired_at": null,
-                  "message": "seed schedule",
-                  "next_fire_at": null,
-                  "session_id": "nostr-baseline-agent",
-                  "timezone": "Asia/Tokyo"
-                },
-                {
-                  "agent_id": "baseline-agent",
-                  "anchor_at": null,
-                  "cron_expr": "0 1 * * *",
-                  "enabled": false,
-                  "gated": false,
-                  "gated_reason": null,
-                  "id": 2,
-                  "last_fired_at": null,
-                  "message": "baseline",
-                  "next_fire_at": null,
-                  "session_id": "nostr-baseline-agent",
-                  "timezone": "Asia/Tokyo"
-                }
-              ]
-            },
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "before": {
-            "body": {
-              "agent_id": "baseline-agent",
-              "count": 1,
-              "schedules": [
-                {
-                  "agent_id": "baseline-agent",
-                  "anchor_at": null,
-                  "cron_expr": "0 0 * * *",
-                  "enabled": false,
-                  "gated": false,
-                  "gated_reason": null,
-                  "id": 1,
-                  "last_fired_at": null,
-                  "message": "seed schedule",
-                  "next_fire_at": null,
-                  "session_id": "nostr-baseline-agent",
-                  "timezone": "Asia/Tokyo"
-                }
-              ]
-            },
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "observer": {
-            "body": null,
-            "db_query": null,
-            "method": "GET",
-            "path": "/api/agents/{id}/schedules"
-          },
-          "status": "observed"
-        },
+        "effect": null,
         "name": "post___api_agents_id_schedules__normal",
         "request": {
           "body": {
             "cron_expr": "0 1 * * *",
             "enabled": false,
             "message": "baseline",
-            "session_id": "nostr-baseline-agent",
+            "session_id": "baseline-tool-agent",
             "timezone": "Asia/Tokyo"
           },
           "method": "POST",
           "uri": "/api/agents/baseline-agent/schedules"
         },
         "response": {
-          "body": {
-            "agent_id": "baseline-agent",
-            "anchor_at": null,
-            "cron_expr": "0 1 * * *",
-            "enabled": false,
-            "gated": false,
-            "gated_reason": null,
-            "id": 2,
-            "last_fired_at": null,
-            "message": "baseline",
-            "next_fire_at": null,
-            "session_id": "nostr-baseline-agent",
-            "timezone": "Asia/Tokyo"
-          },
+          "body": "",
           "headers": [
             {
               "name": "access-control-allow-origin",
@@ -5791,15 +3977,11 @@
               "value": "*"
             },
             {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
               "name": "vary",
               "value": "origin, access-control-request-method, access-control-request-headers"
             }
           ],
-          "status": 200
+          "status": 400
         },
         "selection": "normal_or_local_precondition_branch"
       },
@@ -7326,7 +5508,7 @@
               "display_name": "Baseline User",
               "id": "baseline-trusted-row",
               "permission": "user",
-              "platform": "web",
+              "platform": "baseline-source",
               "user_id": "baseline-user"
             }
           ],
@@ -7394,7 +5576,7 @@
                 "display_name": "Baseline User",
                 "id": "baseline-trusted-row",
                 "permission": "user",
-                "platform": "web",
+                "platform": "baseline-source",
                 "user_id": "baseline-user"
               },
               {
@@ -7437,7 +5619,7 @@
                 "display_name": "Baseline User",
                 "id": "baseline-trusted-row",
                 "permission": "user",
-                "platform": "web",
+                "platform": "baseline-source",
                 "user_id": "baseline-user"
               }
             ],
@@ -7577,7 +5759,7 @@
                 "display_name": "Baseline User",
                 "id": "baseline-trusted-row",
                 "permission": "user",
-                "platform": "web",
+                "platform": "baseline-source",
                 "user_id": "baseline-user"
               }
             ],
@@ -7685,7 +5867,7 @@
                 "display_name": "Renamed",
                 "id": "baseline-trusted-row",
                 "permission": "user",
-                "platform": "web",
+                "platform": "baseline-source",
                 "user_id": "baseline-user"
               }
             ],
@@ -7718,7 +5900,7 @@
                 "display_name": "Baseline User",
                 "id": "baseline-trusted-row",
                 "permission": "user",
-                "platform": "web",
+                "platform": "baseline-source",
                 "user_id": "baseline-user"
               }
             ],
@@ -9623,97 +7805,7 @@
         "selection": "resource_absence_or_empty_state"
       },
       {
-        "effect": {
-          "after": {
-            "body": {
-              "agent_id": "baseline-agent",
-              "count": 1,
-              "schedules": [
-                {
-                  "agent_id": "baseline-agent",
-                  "anchor_at": "<timestamp>",
-                  "cron_expr": "0 0 * * *",
-                  "enabled": true,
-                  "gated": false,
-                  "gated_reason": null,
-                  "id": 1,
-                  "last_fired_at": null,
-                  "message": "seed schedule",
-                  "next_fire_at": "<timestamp>",
-                  "session_id": "nostr-baseline-agent",
-                  "timezone": "Asia/Tokyo"
-                }
-              ]
-            },
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "before": {
-            "body": {
-              "agent_id": "baseline-agent",
-              "count": 1,
-              "schedules": [
-                {
-                  "agent_id": "baseline-agent",
-                  "anchor_at": null,
-                  "cron_expr": "0 0 * * *",
-                  "enabled": false,
-                  "gated": false,
-                  "gated_reason": null,
-                  "id": 1,
-                  "last_fired_at": null,
-                  "message": "seed schedule",
-                  "next_fire_at": null,
-                  "session_id": "nostr-baseline-agent",
-                  "timezone": "Asia/Tokyo"
-                }
-              ]
-            },
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "observer": {
-            "body": null,
-            "db_query": null,
-            "method": "GET",
-            "path": "/api/agents/{id}/schedules"
-          },
-          "status": "observed"
-        },
+        "effect": null,
         "name": "patch___api_schedules_sid__normal",
         "request": {
           "body": {
@@ -9723,20 +7815,7 @@
           "uri": "/api/schedules/1"
         },
         "response": {
-          "body": {
-            "agent_id": "baseline-agent",
-            "anchor_at": "<timestamp>",
-            "cron_expr": "0 0 * * *",
-            "enabled": true,
-            "gated": false,
-            "gated_reason": null,
-            "id": 1,
-            "last_fired_at": null,
-            "message": "seed schedule",
-            "next_fire_at": "<timestamp>",
-            "session_id": "nostr-baseline-agent",
-            "timezone": "Asia/Tokyo"
-          },
+          "body": "",
           "headers": [
             {
               "name": "access-control-allow-origin",
@@ -9747,15 +7826,11 @@
               "value": "*"
             },
             {
-              "name": "content-type",
-              "value": "application/json"
-            },
-            {
               "name": "vary",
               "value": "origin, access-control-request-method, access-control-request-headers"
             }
           ],
-          "status": 200
+          "status": 400
         },
         "selection": "normal_or_local_precondition_branch"
       },
@@ -9806,7 +7881,6 @@
               ],
               "done_count": 0,
               "facilitator_id": null,
-              "gateway_bound": false,
               "id": "baseline-session",
               "max_turns": 1,
               "metadata_json": null,
@@ -9855,7 +7929,6 @@
               ],
               "done_count": 0,
               "facilitator_id": null,
-              "gateway_bound": false,
               "id": "baseline-session",
               "max_turns": 1,
               "metadata_json": null,
@@ -9897,7 +7970,6 @@
                 "agent_ids": [],
                 "done_count": 0,
                 "facilitator_id": null,
-                "gateway_bound": false,
                 "id": "<uuid>",
                 "max_turns": null,
                 "metadata_json": null,
@@ -9914,7 +7986,6 @@
                 ],
                 "done_count": 0,
                 "facilitator_id": null,
-                "gateway_bound": false,
                 "id": "baseline-session",
                 "max_turns": 1,
                 "metadata_json": null,
@@ -9954,7 +8025,6 @@
                 ],
                 "done_count": 0,
                 "facilitator_id": null,
-                "gateway_bound": false,
                 "id": "baseline-session",
                 "max_turns": 1,
                 "metadata_json": null,
@@ -10075,7 +8145,6 @@
             ],
             "done_count": 0,
             "facilitator_id": null,
-            "gateway_bound": false,
             "id": "baseline-session",
             "max_turns": 1,
             "metadata_json": null,
@@ -10221,15 +8290,6 @@
                 "count": 1,
                 "done": true
               },
-              "channel": {
-                "count": 1,
-                "done": true
-              },
-              "discord": {
-                "count": 1,
-                "done": true,
-                "enabled": 1
-              },
               "llm_provider": {
                 "count": 0,
                 "default_provider": "openai",
@@ -10275,15 +8335,6 @@
               "agent": {
                 "count": 1,
                 "done": true
-              },
-              "channel": {
-                "count": 1,
-                "done": true
-              },
-              "discord": {
-                "count": 1,
-                "done": true,
-                "enabled": 1
               },
               "llm_provider": {
                 "count": 0,
@@ -10906,7 +8957,7 @@
         "selection": "resource_absence_or_empty_state"
       }
     ],
-    "source_route_count": 85,
+    "source_route_count": 74,
     "uncollected": [
       {
         "branch": "normal",
@@ -10941,31 +8992,6 @@
         "path": "/api/agents/{id}/daily-log-index/run",
         "reason": "bodyless scheduling action has no deterministic rejection branch without changing production preconditions",
         "status": "uncollected"
-      },
-      {
-        "branch": "normal",
-        "level": "L3",
-        "method": "POST",
-        "name": "post___api_agents_id_discord_start__normal",
-        "path": "/api/agents/{id}/discord/start",
-        "reason": "would connect to Discord",
-        "status": "uncollected"
-      },
-      {
-        "branch": "input_rejection",
-        "method": "POST",
-        "name": "post___api_agents_id_discord_start__reject_or_absent",
-        "path": "/api/agents/{id}/discord/start",
-        "reason": "bodyless live-gateway action; malformed JSON is not an input facet",
-        "status": "uncollected"
-      },
-      {
-        "branch": "input_rejection",
-        "method": "POST",
-        "name": "post___api_agents_id_discord_stop__reject_or_absent",
-        "path": "/api/agents/{id}/discord/stop",
-        "reason": "bodyless idempotent stop action has no request-body rejection facet",
-        "status": "not_applicable"
       },
       {
         "branch": "normal",
@@ -11051,48 +9077,6 @@
         "path": "/api/agents/{id}/memory/index/rebuild",
         "reason": "bodyless scheduling action has no deterministic rejection branch without changing production preconditions",
         "status": "uncollected"
-      },
-      {
-        "branch": "normal",
-        "level": "L3",
-        "method": "POST",
-        "name": "post___api_agents_id_nostr_generate__normal",
-        "path": "/api/agents/{id}/nostr/generate",
-        "reason": "successful key generation requires the operator's nostaro executable",
-        "status": "uncollected"
-      },
-      {
-        "branch": "input_rejection",
-        "method": "POST",
-        "name": "post___api_agents_id_nostr_generate__reject_or_absent",
-        "path": "/api/agents/{id}/nostr/generate",
-        "reason": "bodyless operator-executable action; no executable is invoked by L2",
-        "status": "uncollected"
-      },
-      {
-        "branch": "normal",
-        "level": "L3",
-        "method": "POST",
-        "name": "post___api_agents_id_nostr_start__normal",
-        "path": "/api/agents/{id}/nostr/start",
-        "reason": "would connect to Nostr relays",
-        "status": "uncollected"
-      },
-      {
-        "branch": "input_rejection",
-        "method": "POST",
-        "name": "post___api_agents_id_nostr_start__reject_or_absent",
-        "path": "/api/agents/{id}/nostr/start",
-        "reason": "bodyless live-gateway action; malformed JSON is not an input facet",
-        "status": "uncollected"
-      },
-      {
-        "branch": "input_rejection",
-        "method": "POST",
-        "name": "post___api_agents_id_nostr_stop__reject_or_absent",
-        "path": "/api/agents/{id}/nostr/stop",
-        "reason": "bodyless idempotent stop action has no request-body rejection facet",
-        "status": "not_applicable"
       },
       {
         "branch": "normal",
@@ -11339,14 +9323,6 @@
           "kind": "uncollected",
           "reason": "bodyless scheduling action has no deterministic rejection branch without changing production preconditions"
         },
-        "POST /api/agents/{id}/discord/start": {
-          "kind": "uncollected",
-          "reason": "bodyless live-gateway action; malformed JSON is not an input facet"
-        },
-        "POST /api/agents/{id}/discord/stop": {
-          "kind": "not_applicable",
-          "reason": "bodyless idempotent stop action has no request-body rejection facet"
-        },
         "POST /api/agents/{id}/import/sync": {
           "kind": "uncollected",
           "reason": "bodyless operator-workspace action; operator source is outside L2"
@@ -11366,18 +9342,6 @@
         "POST /api/agents/{id}/memory/index/rebuild": {
           "kind": "uncollected",
           "reason": "bodyless scheduling action has no deterministic rejection branch without changing production preconditions"
-        },
-        "POST /api/agents/{id}/nostr/generate": {
-          "kind": "uncollected",
-          "reason": "bodyless operator-executable action; no executable is invoked by L2"
-        },
-        "POST /api/agents/{id}/nostr/start": {
-          "kind": "uncollected",
-          "reason": "bodyless live-gateway action; malformed JSON is not an input facet"
-        },
-        "POST /api/agents/{id}/nostr/stop": {
-          "kind": "not_applicable",
-          "reason": "bodyless idempotent stop action has no request-body rejection facet"
         },
         "POST /api/agents/{id}/skills/seed-standard": {
           "kind": "uncollected",
@@ -11434,10 +9398,6 @@
           "method": "GET",
           "path": "/api/agents/{id}/co-agents"
         },
-        "DELETE /api/agents/{id}/discord": {
-          "method": "GET",
-          "path": "/api/agents/{id}/discord"
-        },
         "DELETE /api/agents/{id}/mcp/{name}": {
           "method": "GET",
           "path": "/api/agents/{id}/mcp"
@@ -11449,14 +9409,6 @@
         "DELETE /api/agents/{id}/memory/index": {
           "method": "GET",
           "path": "/api/agents/{id}/memory/index"
-        },
-        "DELETE /api/agents/{id}/nostr": {
-          "method": "GET",
-          "path": "/api/agents/{id}/nostr"
-        },
-        "DELETE /api/agents/{id}/nostr/watches/{watch_id}": {
-          "method": "GET",
-          "path": "/api/agents/{id}/nostr/watches"
         },
         "DELETE /api/agents/{id}/soul/presets/{preset_id}": {
           "method": "GET",
@@ -11478,10 +9430,6 @@
           "method": "GET",
           "path": "/api/agents/{id}"
         },
-        "PATCH /api/agents/{id}/discord": {
-          "method": "GET",
-          "path": "/api/agents/{id}/discord"
-        },
         "PATCH /api/agents/{id}/trusted-users/{user_id}": {
           "method": "GET",
           "path": "/api/agents/{id}/trusted-users"
@@ -11502,10 +9450,6 @@
           "method": "GET",
           "path": "/api/agents/{id}/co-agents"
         },
-        "POST /api/agents/{id}/discord/stop": {
-          "method": "GET",
-          "path": "/api/agents/{id}/discord"
-        },
         "POST /api/agents/{id}/mcp/{name}/enabled": {
           "method": "GET",
           "path": "/api/agents/{id}/mcp"
@@ -11513,14 +9457,6 @@
         "POST /api/agents/{id}/messages": {
           "method": "GET",
           "path": "/api/sessions"
-        },
-        "POST /api/agents/{id}/nostr/stop": {
-          "method": "GET",
-          "path": "/api/agents/{id}/nostr"
-        },
-        "POST /api/agents/{id}/nostr/watches": {
-          "method": "GET",
-          "path": "/api/agents/{id}/nostr/watches"
         },
         "POST /api/agents/{id}/schedules": {
           "method": "GET",
@@ -11569,10 +9505,6 @@
           "method": "GET",
           "path": "/api/agents/{id}/channel-configs"
         },
-        "PUT /api/agents/{id}/discord": {
-          "method": "GET",
-          "path": "/api/agents/{id}/discord"
-        },
         "PUT /api/agents/{id}/mcp": {
           "method": "GET",
           "path": "/api/agents/{id}/mcp"
@@ -11580,18 +9512,6 @@
         "PUT /api/agents/{id}/memory/index/config": {
           "method": "GET",
           "path": "/api/agents/{id}/memory/index"
-        },
-        "PUT /api/agents/{id}/nostr": {
-          "method": "GET",
-          "path": "/api/agents/{id}/nostr"
-        },
-        "PUT /api/agents/{id}/nostr-relay": {
-          "method": "GET",
-          "path": "/api/agents/{id}/nostr-relay"
-        },
-        "PUT /api/agents/{id}/nostr/watches/{watch_id}": {
-          "method": "GET",
-          "path": "/api/agents/{id}/nostr/watches"
         },
         "PUT /api/agents/{id}/skills/{skill_id}": {
           "method": "GET",
@@ -11618,9 +9538,6 @@
         "PATCH /api/agents/{id}": {
           "personality": "updated personality"
         },
-        "PATCH /api/agents/{id}/discord": {
-          "owner_discord_id": "baseline-owner-2"
-        },
         "PATCH /api/agents/{id}/trusted-users/{user_id}": {
           "display_name": "Renamed"
         },
@@ -11634,7 +9551,6 @@
           "name": "Created Baseline Agent",
           "persona_name": "Created"
         },
-        "POST /api/agents/{agent_id}/web-conversations": {},
         "POST /api/agents/{id}/allowed-commands": {
           "command": "printf"
         },
@@ -11656,16 +9572,11 @@
           "content": "baseline",
           "user_id": "baseline-user"
         },
-        "POST /api/agents/{id}/nostr/watches": {
-          "filter": {},
-          "interval_secs": 60,
-          "session_id": "nostr-baseline-agent"
-        },
         "POST /api/agents/{id}/schedules": {
           "cron_expr": "0 1 * * *",
           "enabled": false,
           "message": "baseline",
-          "session_id": "nostr-baseline-agent",
+          "session_id": "baseline-tool-agent",
           "timezone": "Asia/Tokyo"
         },
         "POST /api/agents/{id}/skills": {
@@ -11715,10 +9626,6 @@
           "whitelisted": true,
           "writable": true
         },
-        "PUT /api/agents/{id}/discord": {
-          "bot_token": "baseline-not-a-credential",
-          "owner_discord_id": "baseline-owner-updated"
-        },
         "PUT /api/agents/{id}/mcp": {
           "args": [],
           "command": "false",
@@ -11729,17 +9636,6 @@
         },
         "PUT /api/agents/{id}/memory/index/config": {
           "batch_size": 17
-        },
-        "PUT /api/agents/{id}/nostr": {
-          "enabled": false
-        },
-        "PUT /api/agents/{id}/nostr-relay": {
-          "enabled": false
-        },
-        "PUT /api/agents/{id}/nostr/watches/{watch_id}": {
-          "filter": {},
-          "interval_secs": 120,
-          "session_id": "nostr-baseline-agent"
         },
         "PUT /api/agents/{id}/skills/{skill_id}": {
           "description": "baseline",
@@ -11768,14 +9664,11 @@
         "PATCH /api/system/log-level": "changes process-global tracing state and has no isolated production fixture",
         "POST /api/agents/{id}/daily-log-index/rebuild": "successful branch schedules LLM-backed indexing",
         "POST /api/agents/{id}/daily-log-index/run": "successful branch schedules LLM-backed indexing",
-        "POST /api/agents/{id}/discord/start": "would connect to Discord",
         "POST /api/agents/{id}/import/sync": "depends on an operator import source",
         "POST /api/agents/{id}/mcp/{name}/test": "operator supplied subprocess",
         "POST /api/agents/{id}/memory/index": "successful branch schedules LLM-backed indexing",
         "POST /api/agents/{id}/memory/index/merge": "successful mutation requires an LLM-backed merge; the local no-provider branch has no state change to claim",
         "POST /api/agents/{id}/memory/index/rebuild": "successful branch schedules LLM-backed indexing",
-        "POST /api/agents/{id}/nostr/generate": "successful key generation requires the operator's nostaro executable",
-        "POST /api/agents/{id}/nostr/start": "would connect to Nostr relays",
         "POST /api/agents/{id}/skills/seed-standard": "standard skill packaging differs between test and production compilation and is not a stable L2 fixture",
         "POST /api/gate-instances/{instance_id}/revisions": "operator Bearer admin; L2 does not hold OPENCRAB_GATE_OPERATOR_TOKEN",
         "POST /api/import/execute": "depends on an operator-selected external workspace",
@@ -11934,7 +9827,6 @@
         "record_task_progress",
         "close_task",
         "configure_llm_provider",
-        "configure_nostr",
         "configure_self",
         "rebuild_memory_index",
         "update_memory_index_config",
@@ -11942,11 +9834,6 @@
         "remove_allowed_command",
         "create_skill",
         "update_heartbeat_instructions",
-        "set_my_nostr_relay",
-        "set_my_heartbeat",
-        "set_my_schedule",
-        "update_my_schedule",
-        "delete_my_schedule",
         "set_default_subtask_webhook",
         "set_default_webhook",
         "spawn_subtask",
@@ -12008,12 +9895,6 @@
           "method": "GET",
           "uri": "/api/llm/providers"
         },
-        "configure_nostr": {
-          "arguments": null,
-          "expect_status": 200,
-          "method": "GET",
-          "uri": "/api/agents/baseline-agent/nostr"
-        },
         "configure_self": {
           "arguments": null,
           "expect_status": 200,
@@ -12033,11 +9914,6 @@
           },
           "expect_success": true,
           "tool": "read_skill"
-        },
-        "delete_my_schedule": {
-          "arguments": {},
-          "expect_success": true,
-          "tool": "get_my_schedules"
         },
         "evaluate_response": {
           "arguments": {
@@ -12146,21 +10022,6 @@
           "arguments": null,
           "db_query": "webhook_configs"
         },
-        "set_my_heartbeat": {
-          "arguments": {},
-          "expect_success": true,
-          "tool": "get_my_heartbeat"
-        },
-        "set_my_nostr_relay": {
-          "arguments": {},
-          "expect_success": true,
-          "tool": "get_my_nostr_relay"
-        },
-        "set_my_schedule": {
-          "arguments": {},
-          "expect_success": true,
-          "tool": "get_my_schedules"
-        },
         "summarize_and_save": {
           "arguments": {
             "path": "captured/summary.txt"
@@ -12200,11 +10061,6 @@
         "update_memory_index_config": {
           "arguments": null,
           "db_query": "memory_index_config"
-        },
-        "update_my_schedule": {
-          "arguments": {},
-          "expect_success": true,
-          "tool": "get_my_schedules"
         },
         "update_task_contract": {
           "arguments": {},
@@ -12248,9 +10104,6 @@
         "execute_shell",
         "get_default_subtask_webhook",
         "get_default_webhook",
-        "get_my_heartbeat",
-        "get_my_nostr_relay",
-        "get_my_schedules",
         "get_system_info",
         "get_task",
         "list_allowed_commands",
@@ -12259,7 +10112,6 @@
         "manage_allowed_commands",
         "mcp__public_local__echo",
         "mcp__trusted_local__echo",
-        "nostr_list_keys",
         "read_heartbeat_instructions",
         "read_my_history",
         "read_skill",
@@ -12301,12 +10153,6 @@
         "configure_mcp_server": {
           "action": "list"
         },
-        "configure_nostr": {
-          "enabled": false,
-          "keywords": [
-            "baseline"
-          ]
-        },
         "configure_self": {
           "personality": "baseline configured"
         },
@@ -12327,9 +10173,6 @@
         "declare_done": {
           "reason": "baseline complete"
         },
-        "delete_my_schedule": {
-          "id": 1
-        },
         "evaluate_response": {
           "evaluation": "baseline evaluation",
           "quality_score": 0.75,
@@ -12349,9 +10192,6 @@
         },
         "get_default_subtask_webhook": {},
         "get_default_webhook": {},
-        "get_my_heartbeat": {},
-        "get_my_nostr_relay": {},
-        "get_my_schedules": {},
         "get_system_info": {},
         "get_task": {},
         "learn_from_experience": {
@@ -12388,7 +10228,6 @@
           "from": "Merge From",
           "into": "Merge Into"
         },
-        "nostr_list_keys": {},
         "open_task": {
           "contract": "captured",
           "goal": "baseline goal"
@@ -12489,27 +10328,13 @@
           "enabled": true,
           "kind": "subtask",
           "scope": "agent",
-          "url": "https://discord.com/api/webhooks/1/baseline"
+          "url": "https://hooks.example.test/api/1/baseline"
         },
         "set_default_webhook": {
           "enabled": true,
           "family": "tool",
           "scope": "agent",
-          "url": "https://discord.com/api/webhooks/1/baseline"
-        },
-        "set_my_heartbeat": {
-          "enabled": false,
-          "interval_secs": 3600
-        },
-        "set_my_nostr_relay": {
-          "enabled": true,
-          "webhook_url": "https://discord.com/api/webhooks/1/baseline"
-        },
-        "set_my_schedule": {
-          "cron_expr": "0 9 * * *",
-          "enabled": true,
-          "message": "baseline schedule",
-          "timezone": "UTC"
+          "url": "https://hooks.example.test/api/1/baseline"
         },
         "spawn_subtask": {
           "label": "baseline subtask",
@@ -12566,11 +10391,6 @@
           "batch_size": 20,
           "threshold": 100
         },
-        "update_my_schedule": {
-          "enabled": false,
-          "id": 1,
-          "message": "baseline schedule updated"
-        },
         "update_task_contract": {
           "contract": "captured result",
           "goal": "baseline updated goal"
@@ -12606,10 +10426,14 @@
         "workspace": "Fresh temporary roots contain only collector-owned files. The collector creates a fixed baseline-command executable fixture and an empty import-source directory outside agent workspaces; tool cases create captured/, captured/file.txt, captured/summary.txt, and skills/captured-skill.skill.md through the real tools. The shell allowlist contains only the absolute path of baseline-command, and its subprocess environment is empty."
       },
       "success_uncollected_l3": {
-        "nostr_generate_key": "Requires the operator's nostaro executable and writes key material outside the temporary workspace.",
-        "nostr_switch_identity": "Requires a generated key and configured Nostr transport capability; successful adoption may start a live relay connection.",
+        "delete_my_schedule": "requires an inbound gateway session fire descriptor owned by an external gateway process",
+        "get_my_heartbeat": "requires an inbound gateway session fire descriptor owned by an external gateway process",
+        "get_my_schedules": "requires an inbound gateway session fire descriptor owned by an external gateway process",
         "request_peer_review": "Success delivers a message through the active transport. A local fake delivery would not fix live delivery behavior.",
-        "run_my_heartbeat": "Successful manual fire runs an actual agent turn through a configured transport and LLM provider."
+        "run_my_heartbeat": "Successful manual fire runs an actual agent turn through a configured transport and LLM provider.",
+        "set_my_heartbeat": "requires an inbound gateway session fire descriptor owned by an external gateway process",
+        "set_my_schedule": "requires an inbound gateway session fire descriptor owned by an external gateway process",
+        "update_my_schedule": "requires an inbound gateway session fire descriptor owned by an external gateway process"
       },
       "why": "Visibility alone does not prove direct invocation is gated or that result/error translation survives a replacement."
     },
@@ -12620,20 +10444,6 @@
           "depth": 0,
           "name": "owner_depth0_all_features",
           "shell_enabled": true
-        },
-        {
-          "caller": "owner",
-          "depth": 0,
-          "name": "owner_depth0_discord",
-          "shell_enabled": true,
-          "transport": "discord"
-        },
-        {
-          "caller": "owner",
-          "depth": 0,
-          "name": "owner_depth0_nostr",
-          "shell_enabled": true,
-          "transport": "nostr"
         },
         {
           "caller": "co_agent",
@@ -12831,7 +10641,7 @@
         ],
         "result": {
           "data": null,
-          "error": "idは必須です。get_my_schedules が返した id をそのまま渡してください。",
+          "error": "このセッションからは定時実行を設定・照会できません（このセッション種別には発火経路がありません）。設定したい対象のセッション——ゲートに接続したセッション——で実行してください。",
           "success": false
         },
         "tool": "delete_my_schedule"
@@ -12971,18 +10781,6 @@
           "success": false
         },
         "tool": "merge_tags"
-      },
-      {
-        "arguments": {},
-        "required_by_observed_schema": [
-          "npub"
-        ],
-        "result": {
-          "data": null,
-          "error": "npub パラメータが必要です",
-          "success": false
-        },
-        "tool": "nostr_switch_identity"
       },
       {
         "arguments": {},
@@ -13244,7 +11042,7 @@
         ],
         "result": {
           "data": null,
-          "error": "cron_exprは必須です。cron 5 フィールド（例: 0 7 * * * = 毎朝 7 時）か @every 形式（例: @every 3h）で指定してください。",
+          "error": "このセッションからは定時実行を設定・照会できません（このセッション種別には発火経路がありません）。設定したい対象のセッション——ゲートに接続したセッション——で実行してください。",
           "success": false
         },
         "tool": "set_my_schedule"
@@ -13372,7 +11170,7 @@
         ],
         "result": {
           "data": null,
-          "error": "idは必須です。get_my_schedules が返した id をそのまま渡してください。",
+          "error": "このセッションからは定時実行を設定・照会できません（このセッション種別には発火経路がありません）。設定したい対象のセッション——ゲートに接続したセッション——で実行してください。",
           "success": false
         },
         "tool": "update_my_schedule"
@@ -13493,20 +11291,6 @@
         },
         "result": {
           "data": null,
-          "error": "rejected: action 'configure_nostr' requires owner",
-          "success": false
-        },
-        "tool": "configure_nostr"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": true,
-          "trusted_only": false
-        },
-        "result": {
-          "data": null,
           "error": "rejected: action 'configure_self' requires owner",
           "success": false
         },
@@ -13609,20 +11393,6 @@
           "success": false
         },
         "tool": "get_my_heartbeat"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'get_my_nostr_relay' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "get_my_nostr_relay"
       },
       {
         "caller": "agent",
@@ -13763,34 +11533,6 @@
           "success": false
         },
         "tool": "merge_tags"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'nostr_list_keys' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "nostr_list_keys"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'nostr_switch_identity' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "nostr_switch_identity"
       },
       {
         "caller": "agent",
@@ -13973,20 +11715,6 @@
           "success": false
         },
         "tool": "set_my_heartbeat"
-      },
-      {
-        "caller": "agent",
-        "policy": {
-          "mcp_trusted_only": false,
-          "owner_only": false,
-          "trusted_only": true
-        },
-        "result": {
-          "data": null,
-          "error": "rejected: action 'set_my_nostr_relay' requires a trusted caller (owner/co_agent/trusted_user)",
-          "success": false
-        },
-        "tool": "set_my_nostr_relay"
       },
       {
         "caller": "agent",
@@ -14849,116 +12577,6 @@
       },
       {
         "arguments": {
-          "enabled": false,
-          "keywords": [
-            "baseline"
-          ]
-        },
-        "postcondition": {
-          "arguments": null,
-          "before": {
-            "body": {
-              "configured": true,
-              "enabled": false,
-              "filter": {
-                "authors": [],
-                "keywords": [],
-                "kinds": []
-              },
-              "has_secret_key": true,
-              "owner_pubkey": "",
-              "relays": [
-                "wss://yabu.me",
-                "wss://r.kojira.io"
-              ],
-              "running": false,
-              "secret_key_masked": "••••••••"
-            },
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "db_query": null,
-          "expect_success": false,
-          "method": "GET",
-          "observed": {
-            "body": {
-              "configured": true,
-              "enabled": false,
-              "filter": {
-                "authors": [],
-                "keywords": [
-                  "baseline"
-                ],
-                "kinds": []
-              },
-              "has_secret_key": true,
-              "owner_pubkey": "",
-              "relays": [
-                "wss://yabu.me",
-                "wss://r.kojira.io"
-              ],
-              "running": false,
-              "secret_key_masked": "••••••••"
-            },
-            "headers": [
-              {
-                "name": "access-control-allow-origin",
-                "value": "*"
-              },
-              {
-                "name": "access-control-expose-headers",
-                "value": "*"
-              },
-              {
-                "name": "content-type",
-                "value": "application/json"
-              },
-              {
-                "name": "vary",
-                "value": "origin, access-control-request-method, access-control-request-headers"
-              }
-            ],
-            "status": 200
-          },
-          "tool": null,
-          "uri": "/api/agents/baseline-agent/nostr"
-        },
-        "result": {
-          "data": {
-            "agent_id": "baseline-agent",
-            "authors": [],
-            "enabled": false,
-            "keywords": [
-              "baseline"
-            ],
-            "kinds": [],
-            "owner_pubkey": "",
-            "relays": []
-          },
-          "error": null,
-          "success": true
-        },
-        "tool": "configure_nostr"
-      },
-      {
-        "arguments": {
           "personality": "baseline configured"
         },
         "postcondition": {
@@ -15166,62 +12784,6 @@
       },
       {
         "arguments": {
-          "id": 1
-        },
-        "postcondition": {
-          "arguments": {},
-          "before": {
-            "data": {
-              "count": 1,
-              "schedules": [
-                {
-                  "agent_id": "baseline-agent",
-                  "anchor_at": null,
-                  "cron_expr": "0 9 * * *",
-                  "enabled": true,
-                  "gated": true,
-                  "gated_reason": "スケジュール式（0 9 * * *）を解釈できないため発火しません。cron 5 フィールド（例: 0 7 * * *）か @every 形式（例: @every 3h）で指定し直してください。",
-                  "id": 1,
-                  "last_fired_at": null,
-                  "message": "fixture schedule",
-                  "next_fire_at": null,
-                  "session_id": "nostr-baseline-agent",
-                  "timezone": "UTC"
-                }
-              ],
-              "session_id": "nostr-baseline-agent"
-            },
-            "error": null,
-            "success": true
-          },
-          "db_query": null,
-          "expect_success": true,
-          "method": null,
-          "observed": {
-            "data": {
-              "count": 0,
-              "schedules": [],
-              "session_id": "nostr-baseline-agent"
-            },
-            "error": null,
-            "success": true
-          },
-          "tool": "get_my_schedules",
-          "uri": null
-        },
-        "result": {
-          "data": {
-            "id": 1,
-            "message": "スケジュールを削除しました",
-            "success": true
-          },
-          "error": null,
-          "success": true
-        },
-        "tool": "delete_my_schedule"
-      },
-      {
-        "arguments": {
           "evaluation": "baseline evaluation",
           "quality_score": 0.75,
           "tags": [
@@ -15370,7 +12932,7 @@
               {
                 "content": "baseline thought",
                 "log_type": "inner_voice",
-                "session_id": "nostr-baseline-agent",
+                "session_id": "baseline-tool-agent",
                 "speaker_id": "baseline-agent"
               }
             ]
@@ -15423,58 +12985,6 @@
           "success": true
         },
         "tool": "get_default_webhook"
-      },
-      {
-        "arguments": {},
-        "postcondition": null,
-        "result": {
-          "data": {
-            "anchor_at": null,
-            "configured_interval_secs": null,
-            "default_interval_secs": 29,
-            "enabled": false,
-            "gated": false,
-            "gated_reason": null,
-            "interval_secs": 300,
-            "last_fired_at": null,
-            "max_interval_secs": 86400,
-            "min_interval_secs": 300,
-            "next_fire_at": null,
-            "session_id": "nostr-baseline-agent"
-          },
-          "error": null,
-          "success": true
-        },
-        "tool": "get_my_heartbeat"
-      },
-      {
-        "arguments": {},
-        "postcondition": null,
-        "result": {
-          "data": {
-            "agent_id": "baseline-agent",
-            "enabled": false,
-            "redacted_url": null,
-            "webhook_configured": false
-          },
-          "error": null,
-          "success": true
-        },
-        "tool": "get_my_nostr_relay"
-      },
-      {
-        "arguments": {},
-        "postcondition": null,
-        "result": {
-          "data": {
-            "count": 0,
-            "schedules": [],
-            "session_id": "nostr-baseline-agent"
-          },
-          "error": null,
-          "success": true
-        },
-        "tool": "get_my_schedules"
       },
       {
         "arguments": {},
@@ -15854,19 +13364,6 @@
           "success": true
         },
         "tool": "merge_tags"
-      },
-      {
-        "arguments": {},
-        "postcondition": null,
-        "result": {
-          "data": {
-            "note": "あなたが生成した鍵の npub 一覧です。nostr_switch_identity で本鍵に採用できます。秘密鍵(nsec)はサーバ内に安全に保存されており、ここには含まれません。",
-            "npubs": []
-          },
-          "error": null,
-          "success": true
-        },
-        "tool": "nostr_list_keys"
       },
       {
         "arguments": {
@@ -17390,7 +14887,7 @@
           "enabled": true,
           "kind": "subtask",
           "scope": "agent",
-          "url": "https://discord.com/api/webhooks/1/baseline"
+          "url": "https://hooks.example.test/api/1/baseline"
         },
         "postcondition": {
           "arguments": null,
@@ -17416,7 +14913,7 @@
                 "scope": "agent",
                 "tool_name": "",
                 "updated_at": "<timestamp>",
-                "url": "https://discord.com/api/webhooks/1/baseline"
+                "url": "https://hooks.example.test/api/1/baseline"
               }
             ]
           },
@@ -17428,7 +14925,7 @@
             "agent_id": "baseline-agent",
             "enabled": true,
             "family": "subtask",
-            "redacted_url": "https://discord.com/api/webhooks/1/[redacted]",
+            "redacted_url": "https://hooks.example.test/api/1/[redacted]",
             "scope": "agent",
             "tool_name": ""
           },
@@ -17442,7 +14939,7 @@
           "enabled": true,
           "family": "tool",
           "scope": "agent",
-          "url": "https://discord.com/api/webhooks/1/baseline"
+          "url": "https://hooks.example.test/api/1/baseline"
         },
         "postcondition": {
           "arguments": null,
@@ -17468,7 +14965,7 @@
                 "scope": "agent",
                 "tool_name": "",
                 "updated_at": "<timestamp>",
-                "url": "https://discord.com/api/webhooks/1/baseline"
+                "url": "https://hooks.example.test/api/1/baseline"
               }
             ]
           },
@@ -17480,7 +14977,7 @@
             "agent_id": "baseline-agent",
             "enabled": true,
             "family": "tool",
-            "redacted_url": "https://discord.com/api/webhooks/1/[redacted]",
+            "redacted_url": "https://hooks.example.test/api/1/[redacted]",
             "scope": "agent",
             "tool_name": ""
           },
@@ -17488,191 +14985,6 @@
           "success": true
         },
         "tool": "set_default_webhook"
-      },
-      {
-        "arguments": {
-          "enabled": false,
-          "interval_secs": 3600
-        },
-        "postcondition": {
-          "arguments": {},
-          "before": {
-            "data": {
-              "anchor_at": null,
-              "configured_interval_secs": null,
-              "default_interval_secs": 29,
-              "enabled": false,
-              "gated": false,
-              "gated_reason": null,
-              "interval_secs": 300,
-              "last_fired_at": null,
-              "max_interval_secs": 86400,
-              "min_interval_secs": 300,
-              "next_fire_at": null,
-              "session_id": "nostr-baseline-agent"
-            },
-            "error": null,
-            "success": true
-          },
-          "db_query": null,
-          "expect_success": true,
-          "method": null,
-          "observed": {
-            "data": {
-              "anchor_at": null,
-              "configured_interval_secs": 3600,
-              "default_interval_secs": 29,
-              "enabled": false,
-              "gated": false,
-              "gated_reason": null,
-              "interval_secs": 3600,
-              "last_fired_at": null,
-              "max_interval_secs": 86400,
-              "min_interval_secs": 300,
-              "next_fire_at": null,
-              "session_id": "nostr-baseline-agent"
-            },
-            "error": null,
-            "success": true
-          },
-          "tool": "get_my_heartbeat",
-          "uri": null
-        },
-        "result": {
-          "data": {
-            "anchor_at": null,
-            "configured_interval_secs": 3600,
-            "default_interval_secs": 29,
-            "enabled": false,
-            "gated": false,
-            "gated_reason": null,
-            "interval_secs": 3600,
-            "last_fired_at": null,
-            "max_interval_secs": 86400,
-            "min_interval_secs": 300,
-            "next_fire_at": null,
-            "session_id": "nostr-baseline-agent",
-            "success": true
-          },
-          "error": null,
-          "success": true
-        },
-        "tool": "set_my_heartbeat"
-      },
-      {
-        "arguments": {
-          "enabled": true,
-          "webhook_url": "https://discord.com/api/webhooks/1/baseline"
-        },
-        "postcondition": {
-          "arguments": {},
-          "before": {
-            "data": {
-              "agent_id": "baseline-agent",
-              "enabled": false,
-              "redacted_url": null,
-              "webhook_configured": false
-            },
-            "error": null,
-            "success": true
-          },
-          "db_query": null,
-          "expect_success": true,
-          "method": null,
-          "observed": {
-            "data": {
-              "agent_id": "baseline-agent",
-              "enabled": true,
-              "redacted_url": "https://discord.com/api/webhooks/1/[redacted]",
-              "webhook_configured": true
-            },
-            "error": null,
-            "success": true
-          },
-          "tool": "get_my_nostr_relay",
-          "uri": null
-        },
-        "result": {
-          "data": {
-            "agent_id": "baseline-agent",
-            "enabled": true,
-            "redacted_url": "https://discord.com/api/webhooks/1/[redacted]",
-            "success": true,
-            "webhook_configured": true
-          },
-          "error": null,
-          "success": true
-        },
-        "tool": "set_my_nostr_relay"
-      },
-      {
-        "arguments": {
-          "cron_expr": "0 9 * * *",
-          "enabled": true,
-          "message": "baseline schedule",
-          "timezone": "UTC"
-        },
-        "postcondition": {
-          "arguments": {},
-          "before": {
-            "data": {
-              "count": 0,
-              "schedules": [],
-              "session_id": "nostr-baseline-agent"
-            },
-            "error": null,
-            "success": true
-          },
-          "db_query": null,
-          "expect_success": true,
-          "method": null,
-          "observed": {
-            "data": {
-              "count": 1,
-              "schedules": [
-                {
-                  "agent_id": "baseline-agent",
-                  "anchor_at": "<timestamp>",
-                  "cron_expr": "0 9 * * *",
-                  "enabled": true,
-                  "gated": false,
-                  "gated_reason": null,
-                  "id": 1,
-                  "last_fired_at": null,
-                  "message": "baseline schedule",
-                  "next_fire_at": "<timestamp>",
-                  "session_id": "nostr-baseline-agent",
-                  "timezone": "UTC"
-                }
-              ],
-              "session_id": "nostr-baseline-agent"
-            },
-            "error": null,
-            "success": true
-          },
-          "tool": "get_my_schedules",
-          "uri": null
-        },
-        "result": {
-          "data": {
-            "agent_id": "baseline-agent",
-            "anchor_at": "<timestamp>",
-            "cron_expr": "0 9 * * *",
-            "enabled": true,
-            "gated": false,
-            "gated_reason": null,
-            "id": 1,
-            "last_fired_at": null,
-            "message": "baseline schedule",
-            "next_fire_at": "<timestamp>",
-            "session_id": "nostr-baseline-agent",
-            "success": true,
-            "timezone": "UTC"
-          },
-          "error": null,
-          "success": true
-        },
-        "tool": "set_my_schedule"
       },
       {
         "arguments": {
@@ -18176,7 +15488,7 @@
                 "notes": "",
                 "personality": "",
                 "recent_behavior": "",
-                "session_id": "nostr-baseline-agent",
+                "session_id": "baseline-tool-agent",
                 "target_id": "baseline-peer",
                 "target_name": "Baseline Peer"
               }
@@ -18516,89 +15828,6 @@
       },
       {
         "arguments": {
-          "enabled": false,
-          "id": 1,
-          "message": "baseline schedule updated"
-        },
-        "postcondition": {
-          "arguments": {},
-          "before": {
-            "data": {
-              "count": 1,
-              "schedules": [
-                {
-                  "agent_id": "baseline-agent",
-                  "anchor_at": null,
-                  "cron_expr": "0 9 * * *",
-                  "enabled": true,
-                  "gated": true,
-                  "gated_reason": "スケジュール式（0 9 * * *）を解釈できないため発火しません。cron 5 フィールド（例: 0 7 * * *）か @every 形式（例: @every 3h）で指定し直してください。",
-                  "id": 1,
-                  "last_fired_at": null,
-                  "message": "fixture schedule",
-                  "next_fire_at": null,
-                  "session_id": "nostr-baseline-agent",
-                  "timezone": "UTC"
-                }
-              ],
-              "session_id": "nostr-baseline-agent"
-            },
-            "error": null,
-            "success": true
-          },
-          "db_query": null,
-          "expect_success": true,
-          "method": null,
-          "observed": {
-            "data": {
-              "count": 1,
-              "schedules": [
-                {
-                  "agent_id": "baseline-agent",
-                  "anchor_at": null,
-                  "cron_expr": "0 9 * * *",
-                  "enabled": false,
-                  "gated": false,
-                  "gated_reason": null,
-                  "id": 1,
-                  "last_fired_at": null,
-                  "message": "baseline schedule updated",
-                  "next_fire_at": null,
-                  "session_id": "nostr-baseline-agent",
-                  "timezone": "UTC"
-                }
-              ],
-              "session_id": "nostr-baseline-agent"
-            },
-            "error": null,
-            "success": true
-          },
-          "tool": "get_my_schedules",
-          "uri": null
-        },
-        "result": {
-          "data": {
-            "agent_id": "baseline-agent",
-            "anchor_at": null,
-            "cron_expr": "0 9 * * *",
-            "enabled": false,
-            "gated": false,
-            "gated_reason": null,
-            "id": 1,
-            "last_fired_at": null,
-            "message": "baseline schedule updated",
-            "next_fire_at": null,
-            "session_id": "nostr-baseline-agent",
-            "success": true,
-            "timezone": "UTC"
-          },
-          "error": null,
-          "success": true
-        },
-        "tool": "update_my_schedule"
-      },
-      {
-        "arguments": {
           "contract": "captured result",
           "goal": "baseline updated goal"
         },
@@ -18902,7 +16131,7 @@
         "effect": {
           "logs_after": 1,
           "logs_before": 0,
-          "session_id": "nostr-baseline-agent"
+          "session_id": "baseline-tool-agent"
         },
         "result": {
           "data": {
@@ -18985,12 +16214,6 @@
         "facet": "missing_arguments",
         "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
         "status": "not_applicable",
-        "tool": "configure_nostr"
-      },
-      {
-        "facet": "missing_arguments",
-        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
-        "status": "not_applicable",
         "tool": "configure_self"
       },
       {
@@ -19016,12 +16239,6 @@
         "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
         "status": "not_applicable",
         "tool": "get_my_heartbeat"
-      },
-      {
-        "facet": "missing_arguments",
-        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
-        "status": "not_applicable",
-        "tool": "get_my_nostr_relay"
       },
       {
         "facet": "missing_arguments",
@@ -19058,18 +16275,6 @@
         "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
         "status": "not_applicable",
         "tool": "list_webhooks"
-      },
-      {
-        "facet": "missing_arguments",
-        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
-        "status": "not_applicable",
-        "tool": "nostr_generate_key"
-      },
-      {
-        "facet": "missing_arguments",
-        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
-        "status": "not_applicable",
-        "tool": "nostr_list_keys"
       },
       {
         "facet": "missing_arguments",
@@ -19117,12 +16322,6 @@
         "facet": "missing_arguments",
         "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
         "status": "not_applicable",
-        "tool": "set_my_nostr_relay"
-      },
-      {
-        "facet": "missing_arguments",
-        "reason": "observed schema declares no required arguments; invoking {} would not be an argument-missing probe",
-        "status": "not_applicable",
         "tool": "survey_my_history"
       },
       {
@@ -19145,15 +16344,21 @@
       },
       {
         "facet": "success",
-        "reason": "Requires the operator's nostaro executable and writes key material outside the temporary workspace.",
+        "reason": "requires an inbound gateway session fire descriptor owned by an external gateway process",
         "status": "uncollected",
-        "tool": "nostr_generate_key"
+        "tool": "delete_my_schedule"
       },
       {
         "facet": "success",
-        "reason": "Requires a generated key and configured Nostr transport capability; successful adoption may start a live relay connection.",
+        "reason": "requires an inbound gateway session fire descriptor owned by an external gateway process",
         "status": "uncollected",
-        "tool": "nostr_switch_identity"
+        "tool": "get_my_heartbeat"
+      },
+      {
+        "facet": "success",
+        "reason": "requires an inbound gateway session fire descriptor owned by an external gateway process",
+        "status": "uncollected",
+        "tool": "get_my_schedules"
       },
       {
         "facet": "success",
@@ -19166,6 +16371,24 @@
         "reason": "Successful manual fire runs an actual agent turn through a configured transport and LLM provider.",
         "status": "uncollected",
         "tool": "run_my_heartbeat"
+      },
+      {
+        "facet": "success",
+        "reason": "requires an inbound gateway session fire descriptor owned by an external gateway process",
+        "status": "uncollected",
+        "tool": "set_my_heartbeat"
+      },
+      {
+        "facet": "success",
+        "reason": "requires an inbound gateway session fire descriptor owned by an external gateway process",
+        "status": "uncollected",
+        "tool": "set_my_schedule"
+      },
+      {
+        "facet": "success",
+        "reason": "requires an inbound gateway session fire descriptor owned by an external gateway process",
+        "status": "uncollected",
+        "tool": "update_my_schedule"
       }
     ],
     "unsuccessful_attempts": []
@@ -19190,7 +16413,6 @@
           "close_task",
           "configure_llm_provider",
           "configure_mcp_server",
-          "configure_nostr",
           "configure_self",
           "create_my_skill",
           "create_skill",
@@ -19202,7 +16424,6 @@
           "get_default_subtask_webhook",
           "get_default_webhook",
           "get_my_heartbeat",
-          "get_my_nostr_relay",
           "get_my_schedules",
           "get_system_info",
           "get_task",
@@ -19215,9 +16436,6 @@
           "mcp__public_local__echo",
           "mcp__trusted_local__echo",
           "merge_tags",
-          "nostr_generate_key",
-          "nostr_list_keys",
-          "nostr_switch_identity",
           "open_task",
           "plan_next_memory_window",
           "read_heartbeat_instructions",
@@ -19245,199 +16463,6 @@
           "set_default_subtask_webhook",
           "set_default_webhook",
           "set_my_heartbeat",
-          "set_my_nostr_relay",
-          "set_my_schedule",
-          "spawn_subtask",
-          "steer_subtask",
-          "summarize_and_save",
-          "survey_my_history",
-          "tag_topic",
-          "untag_topic",
-          "update_heartbeat_instructions",
-          "update_impression",
-          "update_instructions",
-          "update_memory_core",
-          "update_memory_index_config",
-          "update_my_schedule",
-          "update_task_contract",
-          "ws_delete",
-          "ws_edit",
-          "ws_list",
-          "ws_mkdir",
-          "ws_read",
-          "ws_write"
-        ]
-      },
-      {
-        "dimensions": {
-          "allowlist": null,
-          "caller": "owner",
-          "depth": 0,
-          "mcp_caller_is_trusted": true,
-          "shell_enabled": true,
-          "transport": "discord"
-        },
-        "name": "owner_depth0_discord",
-        "visible_tools": [
-          "add_allowed_command",
-          "analyze_llm_usage",
-          "browse_memory_index",
-          "cancel_subtask",
-          "close_task",
-          "configure_llm_provider",
-          "configure_mcp_server",
-          "configure_nostr",
-          "configure_self",
-          "create_my_skill",
-          "create_skill",
-          "declare_done",
-          "delete_my_schedule",
-          "evaluate_response",
-          "execute_shell",
-          "generate_inner_voice",
-          "get_default_subtask_webhook",
-          "get_default_webhook",
-          "get_my_heartbeat",
-          "get_my_nostr_relay",
-          "get_my_schedules",
-          "get_system_info",
-          "get_task",
-          "learn_from_experience",
-          "learn_from_peer",
-          "list_allowed_commands",
-          "list_subtask_webhooks",
-          "list_webhooks",
-          "manage_allowed_commands",
-          "mcp__public_local__echo",
-          "mcp__trusted_local__echo",
-          "merge_tags",
-          "nostr_generate_key",
-          "nostr_list_keys",
-          "nostr_switch_identity",
-          "open_task",
-          "plan_next_memory_window",
-          "read_heartbeat_instructions",
-          "read_my_history",
-          "read_skill",
-          "rebuild_memory_index",
-          "recall_model_experiences",
-          "record_memory_core",
-          "record_memory_unit",
-          "record_task_progress",
-          "reflect_and_learn",
-          "remove_allowed_command",
-          "report_progress",
-          "request_peer_review",
-          "restore_my_skill",
-          "retire_my_skill",
-          "retract_memory_core",
-          "retract_memory_unit",
-          "retrieve_memory_nodes",
-          "run_my_heartbeat",
-          "save_model_insight",
-          "search_memory_index",
-          "search_my_history",
-          "select_llm",
-          "set_default_subtask_webhook",
-          "set_default_webhook",
-          "set_my_heartbeat",
-          "set_my_nostr_relay",
-          "set_my_schedule",
-          "spawn_subtask",
-          "steer_subtask",
-          "summarize_and_save",
-          "survey_my_history",
-          "tag_topic",
-          "untag_topic",
-          "update_heartbeat_instructions",
-          "update_impression",
-          "update_instructions",
-          "update_memory_core",
-          "update_memory_index_config",
-          "update_my_schedule",
-          "update_task_contract",
-          "ws_delete",
-          "ws_edit",
-          "ws_list",
-          "ws_mkdir",
-          "ws_read",
-          "ws_write"
-        ]
-      },
-      {
-        "dimensions": {
-          "allowlist": null,
-          "caller": "owner",
-          "depth": 0,
-          "mcp_caller_is_trusted": true,
-          "shell_enabled": true,
-          "transport": "nostr"
-        },
-        "name": "owner_depth0_nostr",
-        "visible_tools": [
-          "add_allowed_command",
-          "analyze_llm_usage",
-          "browse_memory_index",
-          "cancel_subtask",
-          "close_task",
-          "configure_llm_provider",
-          "configure_mcp_server",
-          "configure_nostr",
-          "configure_self",
-          "create_my_skill",
-          "create_skill",
-          "declare_done",
-          "delete_my_schedule",
-          "evaluate_response",
-          "execute_shell",
-          "generate_inner_voice",
-          "get_default_subtask_webhook",
-          "get_default_webhook",
-          "get_my_heartbeat",
-          "get_my_nostr_relay",
-          "get_my_schedules",
-          "get_system_info",
-          "get_task",
-          "learn_from_experience",
-          "learn_from_peer",
-          "list_allowed_commands",
-          "list_subtask_webhooks",
-          "list_webhooks",
-          "manage_allowed_commands",
-          "mcp__public_local__echo",
-          "mcp__trusted_local__echo",
-          "merge_tags",
-          "nostr_generate_key",
-          "nostr_list_keys",
-          "nostr_switch_identity",
-          "open_task",
-          "plan_next_memory_window",
-          "read_heartbeat_instructions",
-          "read_my_history",
-          "read_skill",
-          "rebuild_memory_index",
-          "recall_model_experiences",
-          "record_memory_core",
-          "record_memory_unit",
-          "record_task_progress",
-          "reflect_and_learn",
-          "remove_allowed_command",
-          "report_progress",
-          "request_peer_review",
-          "restore_my_skill",
-          "retire_my_skill",
-          "retract_memory_core",
-          "retract_memory_unit",
-          "retrieve_memory_nodes",
-          "run_my_heartbeat",
-          "save_model_insight",
-          "search_memory_index",
-          "search_my_history",
-          "select_llm",
-          "set_default_subtask_webhook",
-          "set_default_webhook",
-          "set_my_heartbeat",
-          "set_my_nostr_relay",
           "set_my_schedule",
           "spawn_subtask",
           "steer_subtask",
@@ -19478,7 +16503,6 @@
           "close_task",
           "configure_llm_provider",
           "configure_mcp_server",
-          "configure_nostr",
           "configure_self",
           "create_my_skill",
           "create_skill",
@@ -19490,7 +16514,6 @@
           "get_default_subtask_webhook",
           "get_default_webhook",
           "get_my_heartbeat",
-          "get_my_nostr_relay",
           "get_my_schedules",
           "get_system_info",
           "get_task",
@@ -19503,9 +16526,6 @@
           "mcp__public_local__echo",
           "mcp__trusted_local__echo",
           "merge_tags",
-          "nostr_generate_key",
-          "nostr_list_keys",
-          "nostr_switch_identity",
           "open_task",
           "plan_next_memory_window",
           "read_heartbeat_instructions",
@@ -19533,7 +16553,6 @@
           "set_default_subtask_webhook",
           "set_default_webhook",
           "set_my_heartbeat",
-          "set_my_nostr_relay",
           "set_my_schedule",
           "spawn_subtask",
           "steer_subtask",
@@ -19580,7 +16599,6 @@
           "get_default_subtask_webhook",
           "get_default_webhook",
           "get_my_heartbeat",
-          "get_my_nostr_relay",
           "get_my_schedules",
           "get_system_info",
           "get_task",
@@ -19592,9 +16610,6 @@
           "mcp__public_local__echo",
           "mcp__trusted_local__echo",
           "merge_tags",
-          "nostr_generate_key",
-          "nostr_list_keys",
-          "nostr_switch_identity",
           "open_task",
           "plan_next_memory_window",
           "read_heartbeat_instructions",
@@ -19620,7 +16635,6 @@
           "set_default_subtask_webhook",
           "set_default_webhook",
           "set_my_heartbeat",
-          "set_my_nostr_relay",
           "set_my_schedule",
           "spawn_subtask",
           "steer_subtask",
@@ -19655,7 +16669,6 @@
           "generate_inner_voice",
           "get_task",
           "mcp__public_local__echo",
-          "nostr_generate_key",
           "open_task",
           "read_skill",
           "rebuild_memory_index",
@@ -19701,7 +16714,6 @@
           "learn_from_experience",
           "learn_from_peer",
           "merge_tags",
-          "nostr_generate_key",
           "open_task",
           "plan_next_memory_window",
           "read_my_history",
@@ -19761,7 +16773,6 @@
           "learn_from_experience",
           "learn_from_peer",
           "merge_tags",
-          "nostr_generate_key",
           "open_task",
           "plan_next_memory_window",
           "read_my_history",
@@ -19815,7 +16826,6 @@
           "close_task",
           "configure_llm_provider",
           "configure_mcp_server",
-          "configure_nostr",
           "configure_self",
           "create_my_skill",
           "create_skill",
@@ -19826,7 +16836,6 @@
           "get_default_subtask_webhook",
           "get_default_webhook",
           "get_my_heartbeat",
-          "get_my_nostr_relay",
           "get_my_schedules",
           "get_system_info",
           "get_task",
@@ -19839,9 +16848,6 @@
           "mcp__public_local__echo",
           "mcp__trusted_local__echo",
           "merge_tags",
-          "nostr_generate_key",
-          "nostr_list_keys",
-          "nostr_switch_identity",
           "open_task",
           "plan_next_memory_window",
           "read_heartbeat_instructions",
@@ -19869,7 +16875,6 @@
           "set_default_subtask_webhook",
           "set_default_webhook",
           "set_my_heartbeat",
-          "set_my_nostr_relay",
           "set_my_schedule",
           "spawn_subtask",
           "steer_subtask",
@@ -19932,7 +16937,6 @@
           "generate_inner_voice",
           "get_task",
           "mcp__public_local__echo",
-          "nostr_generate_key",
           "open_task",
           "read_skill",
           "rebuild_memory_index",

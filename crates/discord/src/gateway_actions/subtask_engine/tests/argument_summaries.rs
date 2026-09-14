@@ -286,8 +286,8 @@
     #[test]
     fn test_webhook_tool_event_sink_invalid_activity_sends_nothing() {
         let conn = opencrab_db::init_memory().unwrap();
-        // invalid (non-discord) url -> WebhookResolution::Error, must drop, no fallback.
-        insert_activity_row(&conn, "https://evil.example.com/api/webhooks/1/tok", true);
+        // Invalid non-HTTPS URL -> WebhookResolution::Error, must drop, no fallback.
+        insert_activity_row(&conn, "http://evil.example.com/hook", true);
         let db = opencrab_db::Db::from_connection(conn);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DeliveryBatch>();
         let sink = make_sink(db, tx);

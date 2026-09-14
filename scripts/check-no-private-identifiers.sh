@@ -7,6 +7,7 @@
 #   - 32 byte の Nostr 鍵に相当する npub1 / nsec1（標準・合成 fixture は除外）
 #   - 平文メールアドレス（予約ドメインの fixture は除外）
 #   - 外部ホストを指す wss:// endpoint（公共 relay・予約ドメイン等は除外）
+#   - macOS の利用者・volume 固有絶対パスと、CGNAT 内部 IPv4 address
 #   - .private-identifiers がある場合は、その 1 行 1 値の固定文字列
 #
 # この検査が見ないもの:
@@ -46,6 +47,24 @@ report_fixed_hits() {
     fail=1
   fi
 }
+
+report_pattern_hits() {
+  local kind=$1
+  local pattern=$2
+  local hits
+  hits="$(git grep -nIE -e "$pattern" "${GREP_SCOPE[@]}" 2>/dev/null || true)"
+  if [ -n "$hits" ]; then
+    echo "[error] ${kind} が追跡ファイルに入っています:"
+    printf '%s\n' "$hits" | head -20
+    fail=1
+  fi
+}
+
+# 公開repositoryへ特定machineのmount/user pathやprivate overlay addressを残さない。
+# pattern自体は実値を含まず、予約語またはaddress rangeだけを表す。
+report_pattern_hits 'machine-specific absolute path' '/(Users|Volumes)/[^/]+/'
+report_pattern_hits 'private CGNAT IPv4 address' \
+  '(^|[^0-9])100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}([^0-9]|$)'
 
 # このリポジトリ自身の GitHub URL・issue 参照・CI badge は公開情報であり、リンクを
 # 壊さないため許可する。owner 名をスクリプトへ複製せず、origin から exact prefix を得る。

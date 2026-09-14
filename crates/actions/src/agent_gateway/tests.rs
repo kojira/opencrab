@@ -5,6 +5,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 type OrderLog = Arc<std::sync::Mutex<Vec<&'static str>>>;
 
 /// ネットワークに出ない偽マネージャ（呼ばれた回数だけ数える）。
+const KIND_A: &str = "kind-a";
+const KIND_B: &str = "kind-b";
+
 struct FakeGateway {
     kind: &'static str,
     running: Vec<String>,
@@ -73,11 +76,11 @@ impl AgentGatewayLifecycle for FakeGateway {
 #[test]
 fn keeps_registration_order() {
     let registry = AgentGatewayRegistry::new();
-    registry.register(FakeGateway::new(kinds::DISCORD, &[]));
-    registry.register(FakeGateway::new(kinds::NOSTR, &[]));
-    assert_eq!(registry.kinds(), vec![kinds::DISCORD, kinds::NOSTR]);
+    registry.register(FakeGateway::new(KIND_A, &[]));
+    registry.register(FakeGateway::new(KIND_B, &[]));
+    assert_eq!(registry.kinds(), vec![KIND_A, KIND_B]);
     assert_eq!(registry.all().len(), 2);
-    assert!(registry.get(kinds::DISCORD).is_some());
+    assert!(registry.get(KIND_A).is_some());
     assert!(registry.get("mcp").is_none(), "MCP は登録簿に入れない");
 }
 
@@ -85,13 +88,13 @@ fn keeps_registration_order() {
 #[test]
 fn re_registering_same_kind_replaces_in_place() {
     let registry = AgentGatewayRegistry::new();
-    registry.register(FakeGateway::new(kinds::DISCORD, &["a"]));
-    registry.register(FakeGateway::new(kinds::NOSTR, &[]));
-    registry.register(FakeGateway::new(kinds::DISCORD, &["b"]));
+    registry.register(FakeGateway::new(KIND_A, &["a"]));
+    registry.register(FakeGateway::new(KIND_B, &[]));
+    registry.register(FakeGateway::new(KIND_A, &["b"]));
 
-    assert_eq!(registry.kinds(), vec![kinds::DISCORD, kinds::NOSTR]);
-    assert!(!registry.is_running(kinds::DISCORD, "a"), "古い方は捨てる");
-    assert!(registry.is_running(kinds::DISCORD, "b"));
+    assert_eq!(registry.kinds(), vec![KIND_A, KIND_B]);
+    assert!(!registry.is_running(KIND_A, "a"), "古い方は捨てる");
+    assert!(registry.is_running(KIND_A, "b"));
 }
 
 /// **未登録の種別は false**（共有ゲートウェイが処理を続ける側へ倒す）。
@@ -99,14 +102,14 @@ fn re_registering_same_kind_replaces_in_place() {
 fn is_running_is_false_for_unregistered_kind() {
     let registry = AgentGatewayRegistry::new();
     assert!(
-        !registry.is_running(kinds::DISCORD, "crab"),
+        !registry.is_running(KIND_A, "crab"),
         "未登録で true に倒すと二重処理になる"
     );
-    registry.register(FakeGateway::new(kinds::NOSTR, &["crab"]));
-    assert!(!registry.is_running(kinds::DISCORD, "crab"));
-    assert!(registry.is_running(kinds::NOSTR, "crab"));
+    registry.register(FakeGateway::new(KIND_B, &["crab"]));
+    assert!(!registry.is_running(KIND_A, "crab"));
+    assert!(registry.is_running(KIND_B, "crab"));
     assert!(
-        !registry.is_running(kinds::NOSTR, "other"),
+        !registry.is_running(KIND_B, "other"),
         "稼働していないエージェントも false"
     );
 }
@@ -119,7 +122,7 @@ fn is_running_is_false_for_unregistered_kind() {
 #[test]
 fn survives_a_poisoned_lock() {
     let registry = Arc::new(AgentGatewayRegistry::new());
-    registry.register(FakeGateway::new(kinds::NOSTR, &["crab"]));
+    registry.register(FakeGateway::new(KIND_B, &["crab"]));
 
     // 書きガードを持ったまま panic させて poison させる。
     let poisoner = registry.clone();
@@ -132,14 +135,14 @@ fn survives_a_poisoned_lock() {
     assert!(registry.gateways.is_poisoned());
 
     // 読み取り系はすべて答え続ける。
-    assert!(registry.is_running(kinds::NOSTR, "crab"));
-    assert!(!registry.is_running(kinds::DISCORD, "crab"));
-    assert_eq!(registry.kinds(), vec![kinds::NOSTR]);
+    assert!(registry.is_running(KIND_B, "crab"));
+    assert!(!registry.is_running(KIND_A, "crab"));
+    assert_eq!(registry.kinds(), vec![KIND_B]);
     assert_eq!(registry.all().len(), 1);
-    assert!(registry.get(kinds::NOSTR).is_some());
+    assert!(registry.get(KIND_B).is_some());
     // 追加登録（書き込み）も通る。
-    registry.register(FakeGateway::new(kinds::DISCORD, &[]));
-    assert_eq!(registry.kinds(), vec![kinds::NOSTR, kinds::DISCORD]);
+    registry.register(FakeGateway::new(KIND_A, &[]));
+    assert_eq!(registry.kinds(), vec![KIND_B, KIND_A]);
 }
 
 /// 「設定どおり起動しなかった」失敗を、本当の起動失敗と**取り違えない**。
@@ -149,7 +152,7 @@ fn survives_a_poisoned_lock() {
 /// 誤って `true` になると、本物の起動失敗が握り潰される。
 #[test]
 fn start_declined_is_distinguishable_from_a_real_failure() {
-    let declined = StartDeclined::err(kinds::DISCORD, "crab", "enabled=false");
+    let declined = StartDeclined::err(KIND_A, "crab", "enabled=false");
     assert!(is_start_declined(&declined));
     let text = declined.to_string();
     assert!(
@@ -176,8 +179,8 @@ fn start_declined_is_distinguishable_from_a_real_failure() {
 #[test]
 fn capability_accessors_default_to_none() {
     let registry = AgentGatewayRegistry::new();
-    registry.register(FakeGateway::new(kinds::NOSTR, &["crab"]));
-    let gw = registry.get(kinds::NOSTR).unwrap();
+    registry.register(FakeGateway::new(KIND_B, &["crab"]));
+    let gw = registry.get(KIND_B).unwrap();
 
     assert!(
         gw.gateway_actions_for("crab").is_none(),
@@ -186,10 +189,6 @@ fn capability_accessors_default_to_none() {
     assert!(
         gw.key_provisioning().is_none(),
         "実装しない transport は鍵を払い出せない"
-    );
-    assert!(
-        gw.nostr_passthrough().is_none(),
-        "実装しない transport は CLI passthrough を持たない"
     );
 }
 
@@ -201,13 +200,13 @@ fn capability_accessors_default_to_none() {
 #[test]
 fn unregistered_kind_yields_no_capability() {
     let registry = AgentGatewayRegistry::new();
-    assert!(registry.get(kinds::DISCORD).is_none());
+    assert!(registry.get(KIND_A).is_none());
     assert!(registry
-        .get(kinds::DISCORD)
+        .get(KIND_A)
         .and_then(|gw| gw.gateway_actions_for("crab"))
         .is_none());
     assert!(registry
-        .get(kinds::NOSTR)
+        .get(KIND_B)
         .and_then(|gw| gw.key_provisioning())
         .is_none());
 }
@@ -247,15 +246,15 @@ async fn restore_pending_restores_each_gateway_at_its_own_point() {
     let registry = AgentGatewayRegistry::new();
 
     // 位置 1（共有ゲートウェイ起動後）: この時点で登録済みなのは Discord だけ。
-    let discord = FakeGateway::new(kinds::DISCORD, &[]);
+    let discord = FakeGateway::new(KIND_A, &[]);
     registry.register(discord.clone());
-    assert_eq!(registry.restore_pending().await, vec![kinds::DISCORD]);
+    assert_eq!(registry.restore_pending().await, vec![KIND_A]);
     assert_eq!(discord.restored.load(Ordering::SeqCst), 1);
 
     // 位置 2（ルータ構築の直前）: Nostr を登録してから走査。**Discord は再復元しない。**
-    let nostr = FakeGateway::new(kinds::NOSTR, &[]);
+    let nostr = FakeGateway::new(KIND_B, &[]);
     registry.register(nostr.clone());
-    assert_eq!(registry.restore_pending().await, vec![kinds::NOSTR]);
+    assert_eq!(registry.restore_pending().await, vec![KIND_B]);
     assert_eq!(
         discord.restored.load(Ordering::SeqCst),
         1,
@@ -269,14 +268,14 @@ async fn restore_pending_restores_each_gateway_at_its_own_point() {
 async fn restore_pending_follows_registration_order() {
     let log: OrderLog = Arc::new(std::sync::Mutex::new(vec![]));
     let registry = AgentGatewayRegistry::new();
-    registry.register(FakeGateway::with_order_log(kinds::DISCORD, &log));
-    registry.register(FakeGateway::with_order_log(kinds::NOSTR, &log));
+    registry.register(FakeGateway::with_order_log(KIND_A, &log));
+    registry.register(FakeGateway::with_order_log(KIND_B, &log));
 
     let restored = registry.restore_pending().await;
-    assert_eq!(restored, vec![kinds::DISCORD, kinds::NOSTR]);
+    assert_eq!(restored, vec![KIND_A, KIND_B]);
     assert_eq!(
         *log.lock().unwrap(),
-        vec![kinds::DISCORD, kinds::NOSTR],
+        vec![KIND_A, KIND_B],
         "実際に復元が走った順も登録順であること"
     );
 }
@@ -286,14 +285,14 @@ async fn restore_pending_follows_registration_order() {
 #[tokio::test]
 async fn restore_pending_is_a_one_shot_per_gateway() {
     let registry = AgentGatewayRegistry::new();
-    let nostr = FakeGateway::new(kinds::NOSTR, &[]);
+    let nostr = FakeGateway::new(KIND_B, &[]);
     registry.register(nostr.clone());
 
-    assert_eq!(registry.restore_pending().await, vec![kinds::NOSTR]);
+    assert_eq!(registry.restore_pending().await, vec![KIND_B]);
     assert!(registry.restore_pending().await.is_empty());
     assert!(registry.restore_pending().await.is_empty());
     assert_eq!(nostr.restored.load(Ordering::SeqCst), 1);
-    assert!(registry.is_restored(kinds::NOSTR));
+    assert!(registry.is_restored(KIND_B));
 }
 
 /// **Discord を落とした構成**（`--no-default-features`）でも同じ形で通る。
@@ -307,26 +306,23 @@ async fn restore_pending_works_without_discord_registered() {
         "空の登録簿でも安全に呼べる"
     );
 
-    let nostr = FakeGateway::new(kinds::NOSTR, &[]);
+    let nostr = FakeGateway::new(KIND_B, &[]);
     registry.register(nostr.clone());
-    assert_eq!(registry.restore_pending().await, vec![kinds::NOSTR]);
+    assert_eq!(registry.restore_pending().await, vec![KIND_B]);
     assert_eq!(nostr.restored.load(Ordering::SeqCst), 1);
-    assert!(
-        !registry.is_restored(kinds::DISCORD),
-        "未登録は復元済みでない"
-    );
+    assert!(!registry.is_restored(KIND_A), "未登録は復元済みでない");
 }
 
 /// 同じ種別を置き換えたら復元済みの印も落ちる（新しいマネージャは未復元）。
 #[tokio::test]
 async fn re_registering_clears_the_restored_mark() {
     let registry = AgentGatewayRegistry::new();
-    registry.register(FakeGateway::new(kinds::NOSTR, &[]));
-    assert_eq!(registry.restore_pending().await, vec![kinds::NOSTR]);
+    registry.register(FakeGateway::new(KIND_B, &[]));
+    assert_eq!(registry.restore_pending().await, vec![KIND_B]);
 
-    let replacement = FakeGateway::new(kinds::NOSTR, &[]);
+    let replacement = FakeGateway::new(KIND_B, &[]);
     registry.register(replacement.clone());
-    assert_eq!(registry.restore_pending().await, vec![kinds::NOSTR]);
+    assert_eq!(registry.restore_pending().await, vec![KIND_B]);
     assert_eq!(replacement.restored.load(Ordering::SeqCst), 1);
 }
 
@@ -334,15 +330,15 @@ async fn re_registering_clears_the_restored_mark() {
 #[tokio::test]
 async fn all_operations_are_callable_through_the_trait_object() {
     let registry = AgentGatewayRegistry::new();
-    registry.register(FakeGateway::new(kinds::NOSTR, &[]));
+    registry.register(FakeGateway::new(KIND_B, &[]));
 
-    let gw = registry.get(kinds::NOSTR).unwrap();
+    let gw = registry.get(KIND_B).unwrap();
     gw.start("crab").await.unwrap();
     gw.stop("crab").await;
     let _ = gw.is_running("crab");
     gw.restore_all().await;
     gw.shutdown_all().await;
-    assert_eq!(gw.kind(), kinds::NOSTR);
+    assert_eq!(gw.kind(), KIND_B);
 
     // 走査（PR5 の一般化が取る形）もロックを跨がずにできる。
     for gw in registry.all() {

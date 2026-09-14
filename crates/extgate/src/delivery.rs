@@ -74,8 +74,6 @@ pub async fn apply_delivery_effect(
             }
         }
         DeliveryEffect::NoReply => {
-            // #899: 沈黙（NO_REPLY 終端）は speech を残さない。裸 NO_REPLY を永続すると
-            // conversation_typed が `assistant: 'NO_REPLY'` としてモデルへ再注入する。
             // 配送層は既に visible_speech_after_markers で沈黙判定済み。ここは何もしない。
         }
         DeliveryEffect::Empty | DeliveryEffect::Failed { .. } => {
@@ -179,7 +177,7 @@ async fn send_text(
                 speaker_id: Some(agent_id.to_string()),
                 turn_number: None,
                 metadata_json: Some(
-                    serde_json::json!({"source": TranscriptSource::External.reply()}).to_string(),
+                    serde_json::json!({"source": TranscriptSource::new("external", "external_response").reply()}).to_string(),
                 ),
                 created_at: None,
             },

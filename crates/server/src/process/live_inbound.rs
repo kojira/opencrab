@@ -247,8 +247,8 @@ fn format_steer_inbound(message: &str) -> String {
 /// （`process::prepend_runtime_context(..)`）を変えずに済むよう再エクスポートを残す。
 pub use opencrab_core::runtime_context::prepend_runtime_context;
 
-/// Discord用: message_idを含む変動コンテキストを前置するヘルパー
-pub fn prepend_runtime_context_discord(
+/// 外部メッセージ識別子を含む変動コンテキストを前置するヘルパー。
+pub fn prepend_runtime_context_with_message_id(
     user_message: &str,
     session_theme: &str,
     message_id: &str,
@@ -257,6 +257,6 @@ pub fn prepend_runtime_context_discord(
     let tz_name = iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string());
     let now = format!("{now} ({tz_name})");
     format!(
-        "[Context]\nCurrent date and time: {now}\nCurrent discussion topic: {session_theme}\nDiscord message_id: {message_id}\n\n{user_message}"
+        "[Context]\nCurrent date and time: {now}\nCurrent discussion topic: {session_theme}\nExternal message_id: {message_id}\n\n{user_message}"
     )
 }

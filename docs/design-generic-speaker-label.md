@@ -161,10 +161,10 @@ DB schema migrationは行わない。
 ### QC
 
 1. ぴーこが許可channelへ識別用本文を投稿する
-2. kojiraが別投稿で「直前の投稿者は誰」と質問する
+2. オーナーが別投稿で「直前の投稿者は誰」と質問する
 3. のすたろうが外部`resolve` toolを呼ばず「ぴーこ」と答える
 4. LLM requestに`uN|ぴーこ`または同等のstable ID + labelがある
-5. kojira発話には別`uN|kojira`がある
+5. オーナー発話には別`uN|owner`がある
 6. HTML/image添付、reply/reaction/typing、Nostr、dashboard/APIが非回帰
 
 ## 停止条件

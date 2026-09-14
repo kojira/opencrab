@@ -60,15 +60,13 @@ fn build_app_state(db: opencrab_db::Db, provider: Arc<dyn LlmProvider>) -> AppSt
             .join("opencrab_discord_qc")
             .to_string_lossy()
             .to_string(),
-        #[cfg(feature = "nostr")]
+        #[cfg(any())]
         nostr_master_key: None,
         default_model: "mock:gpt-4o".to_string(),
         tools_config: Arc::new(std::sync::RwLock::new(
             opencrab_actions::tools::ToolsConfig::default(),
         )),
         compaction_ratio: 0.5,
-        typed_history_enabled: false,
-        typed_history_drop_directive: false,
         evaluator: opencrab_server::config::EvaluatorConfig::default(),
         skill_consolidation: opencrab_server::config::SkillConsolidationConfig::default(),
         category_maintenance: opencrab_server::config::CategoryMaintenanceConfig::default(),
@@ -125,22 +123,6 @@ pub(crate) async fn start_core(provider: Arc<dyn LlmProvider>) -> Core {
     let db = opencrab_db::Db::from_connection(conn);
     register_mock_pricing(&db);
     let subject_id = upsert_test_agent(&db);
-    // discord owner = 発端 author（generic admission で caller=Owner に解決させる）。
-    {
-        let conn = db.lock().unwrap();
-        opencrab_db::queries::upsert_agent_discord_config(
-            &conn,
-            &opencrab_db::queries::AgentDiscordConfigRow {
-                agent_id: AGENT_ID.into(),
-                // legacy 列。V3 gateway は token を env で持つのでここは使わない（placeholder）。
-                bot_token: "placeholder-not-used-by-v3".into(),
-                owner_discord_id: AUTHOR.into(),
-                enabled: true,
-            },
-        )
-        .unwrap();
-    }
-
     let extgate = Arc::new(ExtgateState::new(
         db.clone(),
         OperatorToken::from_bytes(TOKEN),
@@ -167,13 +149,7 @@ pub(crate) async fn start_core(provider: Arc<dyn LlmProvider>) -> Core {
         let runtime = state.clone();
         let path = sock.clone();
         tokio::spawn(async move {
-            let _ = serve_uds(
-                listen_state,
-                runtime,
-                resolve_caller_identity_with_owner,
-                path,
-            )
-            .await;
+            let _ = serve_uds(listen_state, runtime, path).await;
         });
     }
     for _ in 0..200 {
@@ -254,6 +230,7 @@ pub(crate) fn discord_config() -> Vec<u8> {
         "self_bot_id": SELF_BOT,
         "name": "crab",
         "delivery_mode": "say",
+        "access": {"owners": [AUTHOR]},
     }))
     .unwrap()
 }

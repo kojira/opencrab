@@ -47,50 +47,54 @@ pub(super) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch("ALTER TABLE skills ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")?;
     }
 
-    // discord_channel_config.whitelisted カラム追加
+    // channel_config.whitelisted カラム追加
     let has_whitelisted_col: bool = conn
-        .prepare("SELECT COUNT(*) FROM pragma_table_info('discord_channel_config') WHERE name='whitelisted'")?
+        .prepare(
+            "SELECT COUNT(*) FROM pragma_table_info('channel_config') WHERE name='whitelisted'",
+        )?
         .query_row([], |row| row.get::<_, i64>(0))
         .map(|c| c > 0)
         .unwrap_or(false);
     if !has_whitelisted_col {
         conn.execute_batch(
-            "ALTER TABLE discord_channel_config ADD COLUMN whitelisted INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE channel_config ADD COLUMN whitelisted INTEGER NOT NULL DEFAULT 0",
         )?;
     }
 
-    // discord_channel_config.heartbeat_enabled カラム追加
+    // channel_config.heartbeat_enabled カラム追加
     let has_heartbeat_enabled_col: bool = conn
-        .prepare("SELECT COUNT(*) FROM pragma_table_info('discord_channel_config') WHERE name='heartbeat_enabled'")?
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('channel_config') WHERE name='heartbeat_enabled'")?
         .query_row([], |row| row.get::<_, i64>(0))
         .map(|c| c > 0)
         .unwrap_or(false);
     if !has_heartbeat_enabled_col {
-        conn.execute_batch("ALTER TABLE discord_channel_config ADD COLUMN heartbeat_enabled INTEGER NOT NULL DEFAULT 1")?;
+        conn.execute_batch(
+            "ALTER TABLE channel_config ADD COLUMN heartbeat_enabled INTEGER NOT NULL DEFAULT 1",
+        )?;
     }
 
-    // discord_channel_config.heartbeat_interval_secs カラム追加
+    // channel_config.heartbeat_interval_secs カラム追加
     let has_hb_interval: bool = conn
-        .prepare("SELECT COUNT(*) FROM pragma_table_info('discord_channel_config') WHERE name='heartbeat_interval_secs'")?
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('channel_config') WHERE name='heartbeat_interval_secs'")?
         .query_row([], |row| row.get::<_, i64>(0))
         .map(|c| c > 0)
         .unwrap_or(false);
     if !has_hb_interval {
         conn.execute_batch(
-            "ALTER TABLE discord_channel_config ADD COLUMN heartbeat_interval_secs INTEGER",
+            "ALTER TABLE channel_config ADD COLUMN heartbeat_interval_secs INTEGER",
         )?;
     }
 
-    // discord_channel_config: agent_idカラム追加 + PKを(channel_id, agent_id)に変更
+    // channel_config: agent_idカラム追加 + PKを(channel_id, agent_id)に変更
     let has_agent_id_col: bool = conn
-        .prepare("SELECT COUNT(*) FROM pragma_table_info('discord_channel_config') WHERE name='agent_id'")?
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('channel_config') WHERE name='agent_id'")?
         .query_row([], |row| row.get::<_, i64>(0))
         .map(|c| c > 0)
         .unwrap_or(false);
     if !has_agent_id_col {
         // テーブル再作成でPKを(channel_id, agent_id)に変更
         conn.execute_batch("
-            CREATE TABLE IF NOT EXISTS discord_channel_config_new (
+            CREATE TABLE IF NOT EXISTS channel_config_new (
                 channel_id TEXT NOT NULL,
                 agent_id TEXT NOT NULL DEFAULT '',
                 guild_id TEXT NOT NULL,
@@ -103,20 +107,18 @@ pub(super) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (channel_id, agent_id)
             );
-            INSERT INTO discord_channel_config_new
+            INSERT INTO channel_config_new
                 (channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs, updated_at)
             SELECT channel_id, '', guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs, updated_at
-            FROM discord_channel_config;
-            DROP TABLE discord_channel_config;
-            ALTER TABLE discord_channel_config_new RENAME TO discord_channel_config;
-            CREATE INDEX IF NOT EXISTS idx_discord_channel_guild ON discord_channel_config(guild_id);
-            CREATE INDEX IF NOT EXISTS idx_discord_channel_agent ON discord_channel_config(agent_id);
+            FROM channel_config;
+            DROP TABLE channel_config;
+            ALTER TABLE channel_config_new RENAME TO channel_config;
+            CREATE INDEX IF NOT EXISTS idx_channel_guild ON channel_config(guild_id);
+            CREATE INDEX IF NOT EXISTS idx_channel_agent ON channel_config(agent_id);
         ")?;
     }
     // agent_idカラムが存在する場合もインデックスを保証する（新規DB・マイグレーション済みDB共通）
-    conn.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_discord_channel_agent ON discord_channel_config(agent_id)",
-    )?;
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_channel_agent ON channel_config(agent_id)")?;
 
     // agents.heartbeat_instructions カラム追加（ハートビート専用指示）
     let has_agent_hb_instr: bool = conn
@@ -132,15 +134,15 @@ pub(super) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         )?;
     }
 
-    // discord_channel_config.heartbeat_instructions カラム追加（チャンネル単位の上書き）
+    // channel_config.heartbeat_instructions カラム追加（チャンネル単位の上書き）
     let has_channel_hb_instr: bool = conn
-        .prepare("SELECT COUNT(*) FROM pragma_table_info('discord_channel_config') WHERE name='heartbeat_instructions'")?
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('channel_config') WHERE name='heartbeat_instructions'")?
         .query_row([], |row| row.get::<_, i64>(0))
         .map(|c| c > 0)
         .unwrap_or(false);
     if !has_channel_hb_instr {
         conn.execute_batch(
-            "ALTER TABLE discord_channel_config ADD COLUMN heartbeat_instructions TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE channel_config ADD COLUMN heartbeat_instructions TEXT NOT NULL DEFAULT ''",
         )?;
     }
 
@@ -152,7 +154,7 @@ pub(super) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             scope TEXT NOT NULL,
             channel_id TEXT,
             caller_identity TEXT NOT NULL,
-            caller_discord_id TEXT,
+            caller_user_id TEXT,
             old_value TEXT,
             new_value TEXT,
             reason TEXT,

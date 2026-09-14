@@ -4,7 +4,6 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use opencrab_actions::gateway_kinds;
 
 use crate::AppState;
 
@@ -208,11 +207,6 @@ pub async fn delete_agent(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<serde_json::Value> {
-    // Stop per-agent Discord gateway if running.
-    if let Some(gw) = state.gateways.get(gateway_kinds::DISCORD) {
-        gw.stop(&id).await;
-    }
-
     let conn = state.db.lock().unwrap();
     let deleted = opencrab_db::queries::delete_agent(&conn, &id).unwrap();
 

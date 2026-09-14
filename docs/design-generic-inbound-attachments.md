@@ -259,7 +259,7 @@ session log metadataの`attachments`配列へ汎用metadataと相対`storage_key
 4. のすたろうが画像内容を回答する
 5. 複数添付の順序と内容を回答できることを確認する
 6. 非許可channelではdownload fileが作られないことを確認する
-7. dashboard `http://100.85.27.3:18701`でsessionが正常表示されることを確認する
+7. dashboard `${OPENCRAB_QC_BASE_URL}`でsessionが正常表示されることを確認する
 8. reaction、reply、typing、owner-only toolが回帰していないことを確認する
 
 ## ✍️ 実装と承認ゲート

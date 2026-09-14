@@ -162,7 +162,7 @@ opencrab実装済み機能の網羅的テスト計画。
 
 ```bash
 # opencrabサーバー起動確認
-cd /Volumes/2TB/openclaw/workspace/projects/opencrab
+cd "$OPENCRAB_REPO"
 ./dev.sh status
 
 # API動作確認

@@ -340,7 +340,7 @@ pub struct HeartbeatInstructionsAuditRow {
     pub scope: String,
     pub channel_id: Option<String>,
     pub caller_identity: String,
-    pub caller_discord_id: Option<String>,
+    pub caller_user_id: Option<String>,
     pub old_value: Option<String>,
     pub new_value: Option<String>,
     pub reason: Option<String>,
@@ -353,14 +353,14 @@ pub fn insert_heartbeat_instructions_audit(
 ) -> Result<()> {
     conn.execute(
         "INSERT INTO heartbeat_instructions_audit
-            (agent_id, scope, channel_id, caller_identity, caller_discord_id, old_value, new_value, reason, created_at)
+            (agent_id, scope, channel_id, caller_identity, caller_user_id, old_value, new_value, reason, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             audit.agent_id,
             audit.scope,
             audit.channel_id,
             audit.caller_identity,
-            audit.caller_discord_id,
+            audit.caller_user_id,
             audit.old_value,
             audit.new_value,
             audit.reason,
@@ -377,7 +377,7 @@ pub fn list_heartbeat_instructions_audit(
     limit: i64,
 ) -> Result<Vec<HeartbeatInstructionsAuditRow>> {
     let mut stmt = conn.prepare(
-        "SELECT agent_id, scope, channel_id, caller_identity, caller_discord_id, old_value, new_value, reason
+        "SELECT agent_id, scope, channel_id, caller_identity, caller_user_id, old_value, new_value, reason
          FROM heartbeat_instructions_audit WHERE agent_id = ?1 ORDER BY id DESC LIMIT ?2",
     )?;
     let rows = stmt.query_map(params![agent_id, limit], |row| {
@@ -386,7 +386,7 @@ pub fn list_heartbeat_instructions_audit(
             scope: row.get(1)?,
             channel_id: row.get(2)?,
             caller_identity: row.get(3)?,
-            caller_discord_id: row.get(4)?,
+            caller_user_id: row.get(4)?,
             old_value: row.get(5)?,
             new_value: row.get(6)?,
             reason: row.get(7)?,

@@ -79,6 +79,21 @@ pub fn hello_frame_with_operations(
     frame
 }
 
+pub fn create_binding_frame(
+    id: &str,
+    binding_id: &str,
+    address: &str,
+    session_theme: &str,
+) -> Value {
+    json!({
+        "id": id,
+        "m": "create_binding",
+        "binding_id": binding_id,
+        "address": address,
+        "session_theme": session_theme,
+    })
+}
+
 pub fn said_frame(
     id: &str,
     binding_id: &str,
@@ -99,6 +114,56 @@ pub fn said_frame_with_author_label(
     text: &str,
     attachments: &[Attachment],
 ) -> Value {
+    said_frame_with_context(
+        id,
+        binding_id,
+        origin,
+        author_id,
+        author_label,
+        None,
+        text,
+        attachments,
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SaidContext {
+    pub caller: SaidCaller,
+    pub start_turn: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_context: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_target: Option<String>,
+    pub live_inbound_scope: LiveInboundScope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "role", rename_all = "snake_case")]
+pub enum SaidCaller {
+    Owner,
+    Agent,
+    CoAgent { agent_id: String },
+    TrustedUser,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveInboundScope {
+    All,
+    Speaker,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn said_frame_with_context(
+    id: &str,
+    binding_id: &str,
+    origin: &str,
+    author_id: &str,
+    author_label: Option<&str>,
+    context: Option<&SaidContext>,
+    text: &str,
+    attachments: &[Attachment],
+) -> Value {
     let mut frame = json!({
         "id": id,
         "m": "said",
@@ -110,6 +175,18 @@ pub fn said_frame_with_author_label(
     });
     if let Some(label) = author_label {
         frame["author_label"] = json!(label);
+    }
+    if let Some(context) = context {
+        frame["caller"] = serde_json::to_value(&context.caller).expect("caller serializes");
+        frame["start_turn"] = json!(context.start_turn);
+        if let Some(system) = &context.system_context {
+            frame["system_context"] = json!(system);
+        }
+        if let Some(target) = &context.reply_target {
+            frame["reply_target"] = json!(target);
+        }
+        frame["live_inbound_scope"] =
+            serde_json::to_value(context.live_inbound_scope).expect("scope serializes");
     }
     frame
 }
@@ -390,6 +467,7 @@ fn parse_say(obj: &Value) -> Result<Say, FrameError> {
     if !payload.is_object() {
         return Err(FrameError::BadRequest);
     }
+    say_reply_target(&payload)?;
     Ok(Say {
         id,
         binding_id,
@@ -504,215 +582,15 @@ pub fn say_text(payload: &Value) -> Option<&str> {
 }
 
 /// say payload の明示 `reply_target`（発端イベントの origin）。gateway が返信先を導けない
-/// resume ターン等で送信側が載せる。欠落・非 string・空は None（gateway 側の相関に委ねる）。
-pub fn say_reply_target(payload: &Value) -> Option<&str> {
+/// resume ターン等で送信側が載せる。欠落時だけ Ok(None)、present-but-invalidはBadRequest。
+pub fn say_reply_target(payload: &Value) -> Result<Option<&str>, FrameError> {
     match payload.get("reply_target") {
-        Some(Value::String(s)) if !s.is_empty() => Some(s.as_str()),
-        _ => None,
+        None => Ok(None),
+        Some(Value::String(s)) if !s.is_empty() => Ok(Some(s.as_str())),
+        Some(_) => Err(FrameError::BadRequest),
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn config_bytes_are_compact_author_id() {
-        let bytes = config_bytes("owner-1");
-        assert_eq!(bytes, br#"{"author_id":"owner-1"}"#);
-    }
-
-    #[test]
-    fn said_author_label_is_additive_and_optional() {
-        let legacy = said_frame("said:1", "binding", "origin", "author", "hello", &[]);
-        assert!(legacy.get("author_label").is_none());
-        let labeled = said_frame_with_author_label(
-            "said:1",
-            "binding",
-            "origin",
-            "author",
-            Some("Alice"),
-            "hello",
-            &[],
-        );
-        assert_eq!(labeled["author_id"], "author");
-        assert_eq!(labeled["author_label"], "Alice");
-    }
-
-    #[test]
-    fn config_digest_is_sha256_lowerhex() {
-        let d = config_digest("owner-1");
-        assert_eq!(d.len(), 64);
-        assert!(d.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
-        assert_eq!(d, config_digest("owner-1"));
-        assert_ne!(d, config_digest("owner-2"));
-    }
-
-    #[test]
-    fn parse_bind_ok() {
-        let raw = br#"{"id":"bind:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","m":"bind","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","address":"web-a-c"}"#;
-        match parse_frame_bytes(raw).unwrap() {
-            CoreMsg::Bind(b) => {
-                assert_eq!(b.address, "web-a-c");
-                assert_eq!(b.binding_id, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
-            }
-            other => panic!("{other:?}"),
-        }
-    }
-
-    #[test]
-    fn say_text_ignores_unknown_and_rejects_empty() {
-        assert_eq!(say_text(&json!({"text":"hi","extra":1})), Some("hi"));
-        assert_eq!(say_text(&json!({"text":""})), None);
-        assert_eq!(say_text(&json!({})), None);
-    }
-
-    #[test]
-    fn say_reply_target_reads_optional_origin() {
-        assert_eq!(
-            say_reply_target(&json!({"text":"hi","reply_target":"nostr:event:v1:default:aa"})),
-            Some("nostr:event:v1:default:aa")
-        );
-        // 欠落・空は None（gateway 側の相関に委ねる）。
-        assert_eq!(say_reply_target(&json!({"text":"hi"})), None);
-        assert_eq!(
-            say_reply_target(&json!({"text":"hi","reply_target":""})),
-            None
-        );
-    }
-
-    #[test]
-    fn duplicate_member_is_bad_request() {
-        let raw = br#"{"id":"1","m":"ok","id":"2"}"#;
-        assert_eq!(parse_frame_bytes(raw).unwrap_err(), FrameError::BadRequest);
-    }
-
-    #[test]
-    fn parse_invoke_ok() {
-        let raw = br#"{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","m":"invoke","binding_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","operation":"reply","context":{"continuation_id":null},"payload":{"event":"e7","text":"hi"}}"#;
-        match parse_frame_bytes(raw).unwrap() {
-            CoreMsg::Invoke(i) => {
-                assert_eq!(i.id, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
-                assert_eq!(i.binding_id, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
-                assert_eq!(i.operation, "reply");
-                assert_eq!(i.continuation_id, None);
-                assert_eq!(i.payload, json!({"event":"e7","text":"hi"}));
-            }
-            other => panic!("{other:?}"),
-        }
-    }
-
-    #[test]
-    fn parse_invoke_missing_payload_is_bad_request() {
-        let raw = br#"{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","m":"invoke","binding_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","operation":"reply","context":{"continuation_id":null}}"#;
-        match parse_frame_bytes(raw).unwrap() {
-            CoreMsg::Invalid { code, .. } => assert_eq!(code, "bad_request"),
-            other => panic!("{other:?}"),
-        }
-    }
-
-    // #964: read は次の request に新しく含める投稿の origin を運ぶ。
-    #[test]
-    fn parse_activity_read_carries_origin() {
-        let raw = br#"{"m":"activity","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","activity_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","state":"read","origin":"omo-1"}"#;
-        match parse_frame_bytes(raw).unwrap() {
-            CoreMsg::Activity(a) => {
-                assert_eq!(a.state, "read");
-                assert_eq!(a.origin.as_deref(), Some("omo-1"));
-                assert_eq!(a.completed_target, None);
-            }
-            other => panic!("{other:?}"),
-        }
-    }
-
-    // origin 欠落は None（後方互換）。additive の未知 field も無視。
-    #[test]
-    fn parse_activity_without_origin_is_none() {
-        let raw = br#"{"m":"activity","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","activity_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","state":"ended","future_field":42}"#;
-        match parse_frame_bytes(raw).unwrap() {
-            CoreMsg::Activity(a) => {
-                assert_eq!(a.state, "ended");
-                assert_eq!(a.origin, None);
-                assert_eq!(a.completed_target, None);
-            }
-            other => panic!("{other:?}"),
-        }
-    }
-
-    #[test]
-    fn parse_activity_ended_carries_completed_target() {
-        let raw = br#"{"m":"activity","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","activity_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","state":"ended","completed_target":"cccccccc-cccc-4ccc-8ccc-cccccccccccc"}"#;
-        match parse_frame_bytes(raw).unwrap() {
-            CoreMsg::Activity(a) => {
-                assert_eq!(a.state, "ended");
-                assert_eq!(a.origin, None);
-                assert_eq!(
-                    a.completed_target.as_deref(),
-                    Some("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
-                );
-            }
-            other => panic!("{other:?}"),
-        }
-    }
-
-    // R3(❌): turn_failed は binding_id + origin を運ぶ。error 本文（未知 field）は無視。
-    #[test]
-    fn parse_turn_failed_ok() {
-        let raw = br#"{"m":"turn_failed","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","origin":"boom-1","error":"leaked-should-be-ignored"}"#;
-        match parse_frame_bytes(raw).unwrap() {
-            CoreMsg::TurnFailed(t) => {
-                assert_eq!(t.binding_id, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
-                assert_eq!(t.origin, "boom-1");
-            }
-            other => panic!("{other:?}"),
-        }
-    }
-
-    #[test]
-    fn parse_turn_failed_missing_origin_is_bad_request() {
-        let raw = br#"{"m":"turn_failed","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}"#;
-        match parse_frame_bytes(raw).unwrap() {
-            CoreMsg::Invalid { code, .. } => assert_eq!(code, "bad_request"),
-            other => panic!("{other:?}"),
-        }
-    }
-
-    // 後方互換: 未知 `m` かつ id 無しの core→gate 通知（turn_failed を知らない旧 gateway 相当）は
-    // Unknown に落ち、handle_msg で write 0・keep（close しない）。DESIGN-EXTGATE-V3 §「RUNNING の
-    // 未知 m は unknown_message・keep」。これが崩れると外部 DI gateway を壊すので固定する。
-    #[test]
-    fn unknown_noid_notification_is_ignorable_unknown() {
-        let raw = br#"{"m":"turn_failed_v99","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","origin":"x"}"#;
-        match parse_frame_bytes(raw).unwrap() {
-            CoreMsg::Unknown { id, m } => {
-                assert_eq!(id, None);
-                assert_eq!(m, "turn_failed_v99");
-            }
-            other => panic!("{other:?}"),
-        }
-    }
-
-    #[test]
-    fn invoke_ok_frame_carries_result() {
-        assert_eq!(
-            invoke_ok_frame("call-1", &json!({"ok":true})),
-            json!({"id":"call-1","m":"ok","result":{"ok":true}})
-        );
-        // JSON null は合法な result。
-        assert_eq!(
-            invoke_ok_frame("call-1", &Value::Null),
-            json!({"id":"call-1","m":"ok","result":null})
-        );
-    }
-
-    #[test]
-    fn hello_with_operations_optional() {
-        // None は従来の hello（operations field なし＝能力ゼロ）。
-        let plain = hello_frame_with_operations("h", "iid", 1, &"a".repeat(64), None);
-        assert!(plain.get("operations").is_none());
-        // Some は operations を載せる。
-        let ops = json!([{"name":"reply"}]);
-        let withops = hello_frame_with_operations("h", "iid", 1, &"a".repeat(64), Some(&ops));
-        assert_eq!(withops["operations"], ops);
-    }
-}
+#[path = "wire/tests.rs"]
+mod tests;

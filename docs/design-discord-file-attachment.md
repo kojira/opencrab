@@ -153,7 +153,7 @@ discord_send_file
 許可: /workspace/generated/image.png
 許可: generated/image.png  (ワークスペース相対)
 禁止: /etc/passwd
-禁止: /Volumes/2TB/secrets/keys.json
+禁止: /private/secrets/keys.json
 禁止: ../../../etc/shadow  (パストラバーサル)
 ```
 

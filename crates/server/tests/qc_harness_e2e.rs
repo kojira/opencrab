@@ -9,9 +9,9 @@
 //! グローバル subscriber を 1 回だけ張り、各テストは注入した固有本文で絞る。
 //! 単一スレッド（`--test-threads=1`）前提。
 //!
-//! 注意（現行本線 DI-16 / row292）: say は常に standalone post として publish される
-//! （特定イベントへの e-tag 返信は DI `reply` 操作が担い、say 経路には返信先が無い）。
-//! よって観測は「standalone post の本文」で行い、返信先イベント id では相関しない。
+//! `say`はinbound originがあればそのeventへのreplyとしてpublishされる。
+//! targetlessなheartbeat／bundle由来の`say`だけがstandalone postになる。
+//! 各テストはoriginの有無に応じてreply targetまたはstandalone本文を観測する。
 
 include!("qc_harness_e2e/support.rs");
 include!("qc_harness_e2e/delivery_and_concurrency.rs");

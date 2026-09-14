@@ -2407,7 +2407,7 @@ openclaw ワークスペース（SOUL.md、IDENTITY.md、skills/ など）を op
 
 ```json
 {
-  "source_dir": "/Volumes/2TB/openclaw/workspace",
+  "source_dir": "/path/to/openclaw/workspace",
   "options": {
     "include_daily_logs": true,
     "daily_log_days": 30,
@@ -2443,7 +2443,7 @@ openclaw ワークスペース（SOUL.md、IDENTITY.md、skills/ など）を op
 
 ```json
 {
-  "source_dir": "/Volumes/2TB/openclaw/workspace",
+  "source_dir": "/path/to/openclaw/workspace",
   "soul": {"persona_name": "エージェントC", "personality": "17歳高校生...", "found": true},
   "identity": {"name": "エージェントC", "image_url": null, "metadata_json": "{}", "found": true},
   "memory_curated": [{"category": "preference", "content": "..."}],
@@ -2482,7 +2482,7 @@ openclaw ワークスペース（SOUL.md、IDENTITY.md、skills/ など）を op
 
 ```json
 {
-  "source_dir": "/Volumes/2TB/openclaw/workspace",
+  "source_dir": "/path/to/openclaw/workspace",
   "agent_name": "agent-c",
   "options": {
     "include_daily_logs": true,

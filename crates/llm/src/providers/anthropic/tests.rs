@@ -130,7 +130,7 @@ fn missing_max_tokens_fails_loud() {
 }
 
 #[test]
-fn test_typed_history_past_turn_converts_to_tool_use_result_blocks() {
+fn test_past_turn_converts_to_tool_use_result_blocks() {
     let provider = AnthropicProvider::new("k");
     let mut assistant = Message::assistant("");
     assistant.content = None;

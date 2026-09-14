@@ -163,10 +163,10 @@ impl<R: AgentRuntime> TimedFireSink for ExtgateTimedFireSink<R> {
             binding_id,
             agent_id: ctx.agent_id,
             session_id: req.session_id,
-            kind_id: ctx.kind_id,
-            author_id: ctx.owner_id,
+            only_speaker: false,
+            speaker_id: String::new(),
             delivery_mode: ctx.delivery_mode,
-            prompt_suffix: req.prompt,
+            system_context: req.prompt,
         };
         let caller = req.caller;
         tokio::spawn(async move {

@@ -56,7 +56,7 @@ BOOTSTRAP.md            # ブートストラップ設定（同上）
 
 OpenClawには2種類のワークスペースがある：
 
-1. **メインワークスペース** (`/Volumes/2TB/openclaw/workspace/` など)
+1. **メインワークスペース** (`/path/to/openclaw/workspace/` など)
    - エージェントが実際に使うワークスペース
    - カスタムSOUL.md、MEMORY.md、スキル群が存在する
    - インポートのメイン対象
@@ -246,7 +246,7 @@ CLIは既存の `crates/cli/` に追加コマンドとして実装。
 ```
 POST /api/import/scan
 Body: {
-  "source_dir": "/Volumes/2TB/openclaw/workspace",
+  "source_dir": "/path/to/openclaw/workspace",
   "options": {
     "include_daily_logs": true,
     "daily_log_days": 30,        // 最新N日分
@@ -295,7 +295,7 @@ Body: {
 ```
 POST /api/import/execute
 Body: {
-  "source_dir": "/Volumes/2TB/openclaw/workspace",
+  "source_dir": "/path/to/openclaw/workspace",
   "agent_name": "エージェントC",
   "options": { ... },
   "confirmed": true
@@ -327,7 +327,7 @@ GET /api/import/status/{import_id}
 │  OpenClaw インポート                                │
 ├────────────────────────────────────────────────────┤
 │  新規エージェント名: [エージェントC    ]              │
-│  ソースディレクトリ: [/Volumes/2TB/openclaw/workspace] [スキャン] │
+│  ソースディレクトリ: [/path/to/openclaw/workspace] [スキャン] │
 ├────────────────────────────────────────────────────┤
 │  スキャン結果                                       │
 │  ✅ SOUL.md      → soul.personality (2.0KB)        │
@@ -370,7 +370,7 @@ opencrab import --name エージェントC --source /path/to/openclaw/workspace
 ### 5.1 問題
 
 スキルのguidanceやスクリプトファイルには元のワークスペースのパスがハードコードされている場合がある。
-例: `/Volumes/2TB/openclaw/workspace/skills/nano-banana-pro/scripts/generate_image.py`
+例: `/path/to/openclaw/workspace/skills/nano-banana-pro/scripts/generate_image.py`
 
 これをそのままインポートすると、新しいエージェントのワークスペースでは動作しない。
 
@@ -387,7 +387,7 @@ LLMによる直接テキスト置換ではなく、テンポラリエージェ�
 2. **テンポラリエージェントの作成**
    - インポートAPIが最小設定のテンポラリエージェントを一時作成する
    - テンポラリエージェントに渡す情報:
-     - `source_dir`: 元のワークスペースパス（例: `/Volumes/2TB/openclaw/workspace`）
+     - `source_dir`: 元のワークスペースパス（例: `/path/to/openclaw/workspace`）
      - `new_workspace`: 新しいエージェントのワークスペースパス（例: `data/agents/{agent_id}/workspace`）
      - `target_files`: パス変換対象のファイル一覧
 
@@ -632,7 +632,7 @@ fn test_excluded_patterns() { ... }
 ### OpenClawワークスペース構成（実測）
 
 ```
-/Volumes/2TB/openclaw/workspace/
+/path/to/openclaw/workspace/
 ├── SOUL.md           # エージェント性格・ペルソナ（2KB程度）
 ├── IDENTITY.md       # 名前・アバター等のメタデータ
 ├── USER.md           # オーナー情報

@@ -198,7 +198,7 @@ async fn audit_s13_7_replies_plus_body_deliver_all_and_save_all() {
     let ev = "1307".repeat(16);
     fixture.append_line(&mention_event(&ev, "R7-MARK 2 回返信して最後にまとめて"));
 
-    // 本文 say（standalone）が出るまで待つ。
+    // 返信元を持つ mention への本文 say が出るまで待つ。
     let done = {
         let buf = buf.clone();
         wait_until(move || body_index(&buf, R7_BODY).is_some()).await
@@ -206,7 +206,7 @@ async fn audit_s13_7_replies_plus_body_deliver_all_and_save_all() {
     assert!(done, "本文 say が出ない: {:?}", captured(&buf));
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // 配送: reply2（kind=reply）＋本文1（kind=standalone）。
+    // 配送: 明示 reply 2 本＋返信元へ返す本文 1 本（すべて kind=reply）。
     for r in [R7_REPLY_1, R7_REPLY_2] {
         let n = captured(&buf)
             .iter()
@@ -221,7 +221,7 @@ async fn audit_s13_7_replies_plus_body_deliver_all_and_save_all() {
     }
     let body_says = captured(&buf)
         .iter()
-        .filter(|c| c.kind == "standalone" && c.body.contains(R7_BODY))
+        .filter(|c| c.kind == "reply" && c.body.contains(R7_BODY))
         .count();
     assert_eq!(
         body_says,

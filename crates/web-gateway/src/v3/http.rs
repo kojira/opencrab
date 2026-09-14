@@ -1,5 +1,6 @@
 //! HTTP/SSE 外形。判断はしない。Bearer は持たない。
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,19 +13,22 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
-use super::client::{InstanceClient, LiveEvent, PostRefuse, SaidOutcome};
+use super::client::{CreateBindingError, InstanceClient, LiveEvent, PostRefuse, SaidOutcome};
 use super::json::parse_object_no_dup;
-use super::wire::{parse_uuid, Attachment};
+use super::wire::{parse_uuid, Attachment, LiveInboundScope, SaidCaller, SaidContext};
 
 const JSON_TYPE: &str = "application/json; charset=utf-8";
 
 #[derive(Clone)]
 pub struct HttpState {
     pub instances: Vec<Arc<InstanceClient>>,
+    pub agent_clients: HashMap<String, Arc<InstanceClient>>,
 }
 
 pub fn router(state: HttpState) -> Router {
     Router::new()
+        .route("/api/web-conversations", post(create_conversation))
+        .route("/api/web-conversations/{session_id}", get(get_conversation))
         .route(
             "/api/web-conversations/{session_id}/messages",
             post(post_message),
@@ -36,6 +40,123 @@ pub fn router(state: HttpState) -> Router {
         .route("/rooms/{room}/messages", get(gone).post(gone))
         .route("/chat", get(gone))
         .with_state(state)
+}
+
+struct CreateBody {
+    agent_id: String,
+    name: Option<String>,
+}
+
+fn parse_create_body(bytes: &[u8]) -> Result<CreateBody, &'static str> {
+    let value = parse_object_no_dup(bytes).map_err(|_| "bad_request")?;
+    let obj = value.as_object().ok_or("bad_request")?;
+    if obj.keys().any(|key| key != "agent_id" && key != "name") {
+        return Err("bad_request");
+    }
+    let agent_id = obj
+        .get("agent_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or("bad_request")?
+        .to_string();
+    let name = match obj.get("name") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => {
+            let trimmed = value.trim_matches(char::is_whitespace);
+            if trimmed.contains('\n') || trimmed.contains('\r') || trimmed.chars().count() > 100 {
+                return Err("bad_request");
+            }
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }
+        Some(_) => return Err("bad_request"),
+    };
+    Ok(CreateBody { agent_id, name })
+}
+
+async fn create_conversation(State(state): State<HttpState>, body: axum::body::Bytes) -> Response {
+    let parsed = match parse_create_body(&body) {
+        Ok(parsed) => parsed,
+        Err(code) => return json_error(StatusCode::BAD_REQUEST, code, None),
+    };
+    let Some(client) = state.agent_clients.get(&parsed.agent_id) else {
+        return json_error(StatusCode::CONFLICT, "instance_unavailable", None);
+    };
+    if !client.connection_live().await {
+        return json_error(StatusCode::SERVICE_UNAVAILABLE, "instance_not_ready", None);
+    }
+    let conversation_id = uuid::Uuid::new_v4().to_string();
+    let binding_id = uuid::Uuid::new_v4().to_string();
+    let session_id = format!("extgate-{binding_id}");
+    let theme = parsed.name.as_deref().unwrap_or(&session_id);
+    match client.create_binding(&binding_id, &session_id, theme).await {
+        Ok(()) => {}
+        Err(CreateBindingError::NotReady | CreateBindingError::Disconnected) => {
+            return json_error(StatusCode::SERVICE_UNAVAILABLE, "instance_not_ready", None);
+        }
+        Err(CreateBindingError::Rejected { code }) => {
+            return json_error(wire_status(&code), &code, None);
+        }
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    while tokio::time::Instant::now() < deadline {
+        if client.binding_for_address(&session_id).await.as_deref() == Some(&binding_id) {
+            return json_state(
+                StatusCode::CREATED,
+                json!({
+                    "conversation_id": conversation_id,
+                    "session_id": session_id,
+                    "binding_id": binding_id,
+                    "name": parsed.name,
+                    "state": "ready",
+                }),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    json_state(
+        StatusCode::ACCEPTED,
+        json!({
+            "conversation_id": conversation_id,
+            "session_id": session_id,
+            "binding_id": binding_id,
+            "name": parsed.name,
+            "state": "provisioning",
+        }),
+    )
+}
+
+async fn get_conversation(
+    State(state): State<HttpState>,
+    Path(session_id): Path<String>,
+) -> Response {
+    let mut remembered = Vec::new();
+    let mut ready = Vec::new();
+    for client in &state.instances {
+        if client.remembered_binding(&session_id).await.is_some() {
+            remembered.push(client);
+            if client.binding_for_address(&session_id).await.is_some() {
+                ready.push(client);
+            }
+        }
+    }
+    if ready.len() > 1 || remembered.len() > 1 {
+        return json_error(StatusCode::CONFLICT, "binding_conflict", None);
+    }
+    let state_name = if ready.len() == 1 {
+        "ready"
+    } else if let Some(client) = remembered.first() {
+        if client.connection_live().await {
+            "provisioning"
+        } else {
+            "unavailable"
+        }
+    } else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    json_state(
+        StatusCode::OK,
+        json!({"session_id": session_id, "state": state_name}),
+    )
 }
 
 async fn gone() -> Response {
@@ -177,8 +298,23 @@ async fn post_message(
             return json_error(StatusCode::CONFLICT, "binding_conflict", None);
         }
     };
+    // The web gateway binds only to loopback. An HTTP post accepted at this boundary is the
+    // operator-owned local web identity; shared layers receive only this generic role.
+    let context = SaidContext {
+        caller: SaidCaller::Owner,
+        start_turn: true,
+        system_context: None,
+        reply_target: None,
+        live_inbound_scope: LiveInboundScope::All,
+    };
     match client
-        .post_said(&session_id, &origin, &parsed.text, &parsed.attachments)
+        .post_said_with_self_context(
+            &session_id,
+            &origin,
+            &context,
+            &parsed.text,
+            &parsed.attachments,
+        )
         .await
     {
         Err(PostRefuse::NotReady) => {

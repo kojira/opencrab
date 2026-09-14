@@ -194,6 +194,85 @@ async fn rust_unit_hello_bind_said_dedup() {
 }
 
 #[tokio::test]
+async fn rust_unit_conversation_status_is_owned_by_web_gateway() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("core.sock");
+    let mut mock = MockCore::spawn(sock.clone());
+    let connect = tokio::spawn(async move { connect_client(&sock).await });
+    hello_and_bind(&mut mock).await;
+    let client = connect.await.unwrap();
+    wait_bound(&client).await;
+    let app = router(HttpState {
+        instances: vec![client],
+        agent_clients: std::collections::HashMap::new(),
+    });
+
+    let ready = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/web-conversations/{ADDRESS}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ready.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&ready.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body, json!({"session_id": ADDRESS, "state": "ready"}));
+
+    let missing = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/web-conversations/not-owned")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn rust_unit_created_binding_is_provisioning_before_bind() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("core.sock");
+    let mut mock = MockCore::spawn(sock.clone());
+    let connect = tokio::spawn(async move { connect_client(&sock).await });
+    let hello = mock.recv().await;
+    mock.send(&json!({"id": hello["id"], "m": "ok"})).await;
+    let client = connect.await.unwrap();
+
+    let create = {
+        let client = client.clone();
+        tokio::spawn(async move { client.create_binding(BINDING, ADDRESS, "name").await })
+    };
+    let request = mock.recv().await;
+    assert_eq!(request["m"], "create_binding");
+    mock.send(&json!({"id": request["id"], "m": "ok"})).await;
+    create.await.unwrap().unwrap();
+
+    let app = router(HttpState {
+        instances: vec![client],
+        agent_clients: std::collections::HashMap::new(),
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/web-conversations/{ADDRESS}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["state"], "provisioning");
+}
+
+#[tokio::test]
 async fn rust_unit_say_ok_external_rejected_close() {
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("core.sock");
@@ -379,6 +458,7 @@ async fn rust_unit_http_post_202_not_admitted_busy_and_old_routes_404() {
     wait_bound(&client).await;
     let app = router(HttpState {
         instances: vec![client.clone()],
+        agent_clients: std::collections::HashMap::new(),
     });
 
     let req_null = Request::builder()
@@ -486,6 +566,7 @@ async fn rust_unit_disconnect_and_unacked_503() {
     let client = connect.await.unwrap();
     let app = router(HttpState {
         instances: vec![client.clone()],
+        agent_clients: std::collections::HashMap::new(),
     });
     let res = app
         .clone()

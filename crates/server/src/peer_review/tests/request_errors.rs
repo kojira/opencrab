@@ -6,7 +6,7 @@
             let conn = db.lock().unwrap();
             opencrab_db::queries::add_trusted_user(
                 &conn,
-                opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
+                REVIEWER_PLATFORM,
                 "row-1",
                 "agent-a",
                 "42",

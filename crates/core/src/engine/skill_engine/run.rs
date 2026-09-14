@@ -39,7 +39,6 @@ impl SkillEngine {
             system_context,
             user_message,
             image_urls,
-            self.typed_conversation.as_ref(),
             (self.conversation_high, self.conversation_low),
         );
 
