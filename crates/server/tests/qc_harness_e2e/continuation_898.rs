@@ -1,8 +1,8 @@
 // ==================== (#898) 継続 途中イテレーションの発話配送・保存 ====================
 //
 // DESIGN-TURN-CONTINUATION §11.1: 末尾 継続 の生成は「残りの content を通常どおり配送・
-// 保存 → 次イテレーション」。reply を使わない純テキストを 3 分割（1回目 継続 / 2回目
-// 継続 / 3回目）した場合、途中イテレーション（1回目・2回目）の発話も say として配送され、
+// 保存 → 次イテレーション」。明示 reply tool を使わない純テキストを 3 分割（1回目 継続 /
+// 2回目 継続 / 3回目）した場合、途中イテレーション（1回目・2回目）の発話も say として配送され、
 // memory_sessions に speech として保存されること。#895 は engine 側の on_response_text 発火を
 // モックで固定したが extgate V3 の実配線（apply_delivery_effect は最終 EngineResult.response
 // のみ配送）を通しておらず、途中発話が配送も保存もされずに落ちていた（#898 QC 実弾で確認）。
@@ -16,7 +16,7 @@ const C898_3: &str = "C898-3回目。これで最後";
 async fn scenario_continue_intermediate_speech_delivered_and_saved() {
     let buf = install_capture();
     let mock = Arc::new(FifoMock::new());
-    // reply を使わない純テキスト 3 分割。末尾 継続 で継続、3 回目は継続せず終了。
+    // 明示 reply tool を使わない純テキスト 3 分割。末尾 継続 で継続、3 回目は終了。
     mock.push_text(&format!("{C898_1}\u{26a1}"));
     mock.push_text(&format!("{C898_2}\u{26a1}"));
     mock.push_text(&format!("{C898_3}\u{26a1}\nNO_REPLY"));
@@ -28,14 +28,14 @@ async fn scenario_continue_intermediate_speech_delivered_and_saved() {
     let ev = "d8".repeat(32);
     fixture.append_line(&mention_event(&ev, "3回に分けて投稿して reply使わずに"));
 
-    // (i) 3 分割の全 say が standalone post として配送される（途中発話 1回目/2回目も届く）。
+    // (i) 返信元を持つ mention への 3 分割の全 say が reply として配送される。
     let delivered = {
         let buf = buf.clone();
         wait_until(move || {
             let says = captured(&buf);
             let has = |needle: &str| {
                 says.iter()
-                    .any(|c| c.kind == "standalone" && c.body.contains(needle))
+                    .any(|c| c.kind == "reply" && c.body.contains(needle))
             };
             has(C898_1) && has(C898_2) && has(C898_3)
         })
@@ -140,7 +140,7 @@ async fn scenario_continue_intermediate_delivery_failure_stops_continuation() {
 // 進むようになったが、併記された**本文（content）**は最終応答と同じ経路で配送・保存される必要が
 // ある（本 PR の in-loop 途中発話配送）。現 tip は reply は配送されるが本文（say）が配送も保存も
 // されない → 赤。
-// 観測境界: extgate の dry-run 配送（kind="reply" / kind="standalone"）・memory_sessions speech・LLM 回数。
+// 観測境界: extgate の dry-run reply 配送・memory_sessions speech・LLM 回数。
 
 const S8_R1: &str = "S8-返信その1";
 const S8_R2: &str = "S8-返信その2";
@@ -214,8 +214,8 @@ async fn scenario_s13_8_reply_plus_body_plus_continue_delivers_body_and_continue
             };
             has("reply", S8_R1)
                 && has("reply", S8_R2)
-                && has("standalone", S8_BODY)
-                && has("standalone", S8_FINAL)
+                && has("reply", S8_BODY)
+                && has("reply", S8_FINAL)
         })
         .await
     };
@@ -228,7 +228,7 @@ async fn scenario_s13_8_reply_plus_body_plus_continue_delivers_body_and_continue
     // (ii) 本文 say（S8_BODY）はちょうど 1 通（1 イテレーション=1 メッセージ）。
     let body_says = captured(&buf)
         .iter()
-        .filter(|c| c.kind == "standalone" && c.body.contains(S8_BODY))
+        .filter(|c| c.kind == "reply" && c.body.contains(S8_BODY))
         .count();
     assert_eq!(body_says, 1, "本文 say が 1 通でない: {:?}", captured(&buf));
 
