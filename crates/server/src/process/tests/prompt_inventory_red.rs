@@ -188,11 +188,11 @@ fn rewritten_fact_sentences_are_present() {
             "spawned 後の継続可否は agent 自身が判断",
         ),
         (
-            "wait for the `[subtask_completed: ...]` entry",
-            "他に進める作業が無ければ completion を待機",
+            "respond with exactly `NO_REPLY` to end the current turn without speech",
+            "他に進める作業が無ければ NO_REPLY で無発話終了",
         ),
         (
-            "without posting a status, progress, or waiting message",
+            "do not post a status, progress, or waiting message",
             "spawned 待機中の無価値な発話を禁止",
         ),
         // 発話だけではターンを終了しない。
@@ -241,9 +241,10 @@ The work is then running in the background, and its result arrives later in a se
 second, independent run, and the actual result appears only at the completion turn.
 
 After receiving a spawned result, decide whether any independent useful work remains that does
-not require its result. Continue that work if so. If none remains, wait for the
-`[subtask_completed: ...]` entry without posting a status, progress, or waiting message. Do not
-call the same tool again while it is running.
+not require its result. Continue that work if so. If none remains, do not post a status,
+progress, or waiting message; respond with exactly `NO_REPLY` to end the current turn without
+speech. The completion entry will start the next turn. Do not call the same tool again while it
+is running.
 
 A `[subtask_completed: ...]` entry means a tool you called has finished and it is your turn
 again. Read that result, finish the original request, and then write `NO_REPLY` to end the turn."#;
@@ -253,10 +254,6 @@ again. Read that result, finish the original request, and then write `NO_REPLY` 
             normalize_ws(expected),
             "Async Behavior 節が §3.2 全文と一致しない\n--- got ---\n{got}\n--- expected ---\n{expected}"
         );
-    assert!(
-        !got.contains("Respond with exactly `NO_REPLY`"),
-        "待機を NO_REPLY 終了へ読み替えてはならない: {got}"
-    );
 }
 
 /// 明示終端節が全文一致する。
