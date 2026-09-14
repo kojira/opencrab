@@ -155,7 +155,7 @@ async fn agent_caller_cannot_read_non_visible_skill_body() {
                 "name": "Internal",
                 "description": "d",
                 "situation_pattern": "s",
-                "guidance": "local path /Volumes/... internal steps"
+                "guidance": "machine-specific absolute path and internal steps"
             }),
             &owner_ctx,
         )

@@ -70,7 +70,7 @@ pub(super) fn is_global_ip(ip: std::net::IpAddr) -> bool {
                 || v4.is_broadcast()
                 || v4.is_multicast()
                 || v4.is_documentation()
-                || (o[0] == 100 && (o[1] & 0xc0) == 64)) // 100.64.0.0/10 CGNAT
+                || (o[0] == 100 && (o[1] & 0xc0) == 64)) // carrier-grade NAT range
         }
         IpAddr::V6(v6) => {
             // IPv4-mapped（::ffff:a.b.c.d）で内部アドレスへ回避されないよう展開して判定。

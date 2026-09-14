@@ -342,7 +342,7 @@ WHERE state='sending';
 
 ### 7.1 確認済み実名
 
-READ-ONLY で `/Volumes/2TB/openclaw/.claude-scratch/opencrab/worktrees/wt-transplant` の実コードを確認した。次の名前をそのまま使い、同じ意味の stub や別入口を作らない。
+READ-ONLY の隔離worktreeで実コードを確認した。次の名前をそのまま使い、同じ意味の stub や別入口を作らない。
 
 ```rust
 pub fn accept_inbound<T: Send + 'static>(

@@ -838,7 +838,7 @@ P0修正案Bでは「ツールありの場合はon_first_responseを発火しな
 P1実装で `tokio-util` の `CancellationToken` が必要になる。現在の `Cargo.toml` に既に含まれているか確認が必要。
 
 ```bash
-grep -r "tokio-util" /Volumes/2TB/openclaw/workspace/projects/opencrab/Cargo.toml
+grep -r "tokio-util" "$OPENCRAB_REPO/Cargo.toml"
 ```
 
 ---

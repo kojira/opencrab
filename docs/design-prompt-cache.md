@@ -2,7 +2,7 @@
 
 > 作成日: 2026-03-23（v6を改訂）
 > 対象バージョン: opencrab（Claude Sonnet 4.6使用）
-> 参照: `/Volumes/2TB/openclaw/workspace/data/anthropic-cache-spec.md`
+> 参照: provider の公式 prompt caching 仕様
 > **前提**: hermit-shellの `cache_control` パススルーは実装済み (commit bc34123)（ただし後述の修正が必要）
 
 ---

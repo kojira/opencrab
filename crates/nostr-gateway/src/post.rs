@@ -271,7 +271,7 @@ mod tests {
             format!("nostr:event:v1:watch:0:{id}"),
             format!("nostr:event:v1:watch:+1:{id}"),
             format!("nostr:event:v1:watch:01:{id}"),
-            format!("nostr:event:v1:watch:9223372036854775808:{id}"),
+            format!("nostr:event:v1:watch:{}:{id}", "9".repeat(20)),
             format!("nostr:event:v1:watch:1:extra:{id}"),
         ] {
             assert_eq!(event_id_from_origin(&origin), None, "accepted {origin}");
