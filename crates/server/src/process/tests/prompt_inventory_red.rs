@@ -167,7 +167,15 @@ fn removed_command_and_prohibition_lines_are_gone() {
 fn rewritten_fact_sentences_are_present() {
     let prompt = prompt();
     let present: &[(&str, &str)] = &[
-        // 3.1 導入（A6 事実化）: 逐語投稿の事実
+        // 3.1 導入（A6 事実化）: 履歴境界と逐語投稿の事実
+        (
+            "Conversation context is delimited by `<conversation_history>` and `</conversation_history>`",
+            "会話履歴の構造境界",
+        ),
+        (
+            "never reproduce or continue transcript-formatted speaker lines",
+            "履歴形式を応答として継続しない",
+        ),
         ("Your response is posted verbatim", "A6 逐語投稿の事実"),
         // 明示終端は配送本文と分離して保存する。
         (

@@ -333,7 +333,7 @@ fn typed_conversation_no_snapshot_basic() {
         .any(|message| message.role == Role::Tool));
     assert_eq!(
         conversation.response_directive.as_deref(),
-        Some(crate::conversation::RESPONSE_ONLY_DIRECTIVE)
+        Some(crate::conversation::CONVERSATION_RESPONSE_GUIDANCE)
     );
     assert!(conversation.wire_tokens > 0);
 }

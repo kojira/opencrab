@@ -470,7 +470,7 @@ pub fn build_typed_conversation(
 
     let response_directive =
         if keep_response_directive && (!assembled.history.is_empty() || snapshot_base.is_some()) {
-            Some(crate::conversation::RESPONSE_ONLY_DIRECTIVE.to_string())
+            Some(crate::conversation::CONVERSATION_RESPONSE_GUIDANCE.to_string())
         } else {
             None
         };

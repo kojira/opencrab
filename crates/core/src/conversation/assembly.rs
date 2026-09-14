@@ -21,16 +21,14 @@ pub const RECENT_MIN_USER_SPEECHES: usize = 5;
 /// 会話履歴が空のときに `build_conversation_inner` が返すマーカー（#691 の判定にも使う）。
 pub const NO_MESSAGES_MARKER: &str = "No messages yet.";
 
-/// 応答直前に会話履歴の末尾へ置く出力指示（#691）。
+/// LLMへ渡す会話履歴だけを囲む構造タグ（#691）。
 ///
-/// opus-5 は 1:1 の長い会話で「次のユーザー発言」を続きとして**捏造**する傾向がある
-/// （モデル固有の挙動・オーナー観測）。会話履歴は `[ID] [時刻]:` 形式で 1 行 1 発話に
-/// 連結されるため、生成モデルが最も自然な予測として「次の話者行」を書き足してしまう。
-/// 生成点に最も近い指示が最も効く（オーナー裁定・実測）ので、履歴の**直後**
-/// （＝生成点の直前）にこの 1 行だけを置く。ロール分離・履歴形式の変更・出力の
-/// フィルタはしない（オーナー裁定で対策から除外）。履歴が空（`NO_MESSAGES_MARKER`）の
-/// ときは真似る対象が無いので付けない。
-pub const RESPONSE_ONLY_DIRECTIVE: &str = "ここから先はあなた自身の本文のみを書く。`[ID] [時刻]:` 形式の行（他の話者の発言の再現・引用・続き）を出力してはならない。";
+/// `[ID] [時刻]:` 形式の履歴と生成位置の境界を、ユーザー命令を追加せず明示する。
+/// 履歴が空（`NO_MESSAGES_MARKER`）のときはタグを付けない。
+pub const CONVERSATION_HISTORY_START: &str = "<conversation_history>";
+pub const CONVERSATION_HISTORY_END: &str = "</conversation_history>";
+/// Typed-history requests keep equivalent output guidance in the system message.
+pub const CONVERSATION_RESPONSE_GUIDANCE: &str = "Output only your own response content; never reproduce or continue transcript-formatted speaker lines.";
 
 /// セッションログから会話文字列を構築する（トークン予算ベースのコンパクション対応）。
 ///
@@ -89,12 +87,12 @@ pub fn build_conversation_string_with_waters(
     // #536: 最後の `parts.join("\n\n")` の区切りも出力へ含まれるので計上する。
     // 会話車線の区切りだけを conversation_high から引く（MI は fixed 済み）。
     inner_budget = inner_budget.saturating_sub(prefix.billed().count() * estimate_tokens("\n\n"));
-    // #691: 履歴の直後に置く出力指示のぶんを会話予算から先に引く。prepend 前の返り値が
-    // `context_budget_tokens` を超えないという契約（下の budget テスト群）を保つため、
-    // #536 の区切り計上と同じ流儀で組み込み前に確保する。履歴が空で指示を付けない場合は
-    // 数十トークン過剰に確保するだけで実害はない（空履歴は "No messages yet." のみ）。
-    let directive_cost = estimate_tokens(RESPONSE_ONLY_DIRECTIVE) + estimate_tokens("\n\n");
-    inner_budget = inner_budget.saturating_sub(directive_cost);
+    // #691: 非空履歴を囲む開始・終了タグと改行を会話予算から先に引く。
+    // 空履歴ではタグを付けないため、この予約分は使われない。
+    let boundary_cost = estimate_tokens(CONVERSATION_HISTORY_START)
+        + estimate_tokens(CONVERSATION_HISTORY_END)
+        + estimate_tokens("\n\n");
+    inner_budget = inner_budget.saturating_sub(boundary_cost);
     let prefix_cost = conversation_high.saturating_sub(inner_budget);
     let inner_low = conversation_low.saturating_sub(prefix_cost);
     let inner = build_conversation_inner(conn, session_id, agent_id, inner_budget, inner_low)?;
@@ -103,14 +101,14 @@ pub fn build_conversation_string_with_waters(
     let history_is_empty = inner == NO_MESSAGES_MARKER;
 
     let mut parts = prefix.ordered();
-    parts.push(inner);
-    let mut out = parts.join("\n\n");
-    if !history_is_empty {
-        // 応答直前の出力指示を履歴の**直後**（＝生成点の直前）へ 1 行だけ置く（#691）。
-        out.push_str("\n\n");
-        out.push_str(RESPONSE_ONLY_DIRECTIVE);
+    if history_is_empty {
+        parts.push(inner);
+    } else {
+        parts.push(format!(
+            "{CONVERSATION_HISTORY_START}\n{inner}\n{CONVERSATION_HISTORY_END}"
+        ));
     }
-    Ok(out)
+    Ok(parts.join("\n\n"))
 }
 
 /// 会話本文の前に置く固定セクション（台帳 / [Memory Index] / [Impressions]）。
