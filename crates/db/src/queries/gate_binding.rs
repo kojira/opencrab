@@ -6,7 +6,7 @@ use std::cell::Cell;
 
 use anyhow::Result;
 use chrono::Utc;
-use rusqlite::{params, Connection, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use super::{
     get_session, insert_agent_session_in_tx, insert_session_in_tx, list_session_participants,
@@ -29,6 +29,89 @@ impl From<rusqlite::Error> for CreateGateBindingError {
     fn from(e: rusqlite::Error) -> Self {
         Self::Store(e.into())
     }
+}
+
+/// Result of the shared stop-before-revision storage operation.
+#[derive(Debug)]
+pub enum ReviseGateInstanceError {
+    Unknown,
+    RevisionConflict,
+    Store(anyhow::Error),
+}
+
+impl From<rusqlite::Error> for ReviseGateInstanceError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Store(error.into())
+    }
+}
+
+/// Revises a stopped generic gate instance and invalidates its operation declaration.
+/// Callers own the liveness check and must stop the active child before calling this.
+pub fn revise_gate_instance(
+    conn: &mut Connection,
+    instance_id: &str,
+    expected_revision: u64,
+    enabled: bool,
+    config_b64: &str,
+    config_digest: &str,
+    now: i64,
+) -> std::result::Result<u64, ReviseGateInstanceError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let revision = revise_gate_instance_in_tx(
+        &tx,
+        instance_id,
+        expected_revision,
+        enabled,
+        config_b64,
+        config_digest,
+        now,
+    )?;
+    tx.commit()?;
+    Ok(revision)
+}
+
+/// Transactional component of [`revise_gate_instance`] for callers that also update bindings.
+pub fn revise_gate_instance_in_tx(
+    tx: &Transaction<'_>,
+    instance_id: &str,
+    expected_revision: u64,
+    enabled: bool,
+    config_b64: &str,
+    config_digest: &str,
+    now: i64,
+) -> std::result::Result<u64, ReviseGateInstanceError> {
+    let row = tx
+        .query_row(
+            "SELECT revision, deleted_at FROM gate_instances WHERE instance_id = ?1",
+            params![instance_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
+        )
+        .optional()?;
+    let (revision, deleted_at) = row.ok_or(ReviseGateInstanceError::Unknown)?;
+    if deleted_at.is_some() {
+        return Err(ReviseGateInstanceError::Unknown);
+    }
+    if u64::try_from(revision).ok() != Some(expected_revision) {
+        return Err(ReviseGateInstanceError::RevisionConflict);
+    }
+    let new_revision = revision
+        .checked_add(1)
+        .ok_or_else(|| ReviseGateInstanceError::Store(anyhow::anyhow!("revision overflow")))?;
+    tx.execute(
+        "UPDATE gate_instances
+         SET revision = ?2, enabled = ?3, config_b64 = ?4, config_digest = ?5,
+             operation_declaration_digest = NULL, updated_at = ?6
+         WHERE instance_id = ?1",
+        params![
+            instance_id,
+            new_revision,
+            i64::from(enabled),
+            config_b64,
+            config_digest,
+            now
+        ],
+    )?;
+    u64::try_from(new_revision).map_err(|error| ReviseGateInstanceError::Store(error.into()))
 }
 
 thread_local! {
@@ -198,7 +281,6 @@ pub fn canonical_session_id(
 mod tests {
     use super::*;
     use crate::queries::{get_session, insert_session, upsert_agent, AgentRow, SessionRow};
-    use rusqlite::TransactionBehavior;
 
     fn seed_agent_and_instance(conn: &rusqlite::Connection) -> (String, i64) {
         upsert_agent(
@@ -474,6 +556,45 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM gate_bindings", [], |r| r.get(0))
             .unwrap();
         assert_eq!(bindings, 1);
+    }
+
+    #[test]
+    fn stopped_instance_revision_is_atomic_and_invalidates_declaration() {
+        let mut conn = crate::init_memory().unwrap();
+        let (instance, _) = seed_agent_and_instance(&conn);
+        conn.execute(
+            "UPDATE gate_instances SET operation_declaration_digest = 'old' WHERE instance_id = ?1",
+            [&instance],
+        )
+        .unwrap();
+
+        let digest = "a".repeat(64);
+        let revision =
+            revise_gate_instance(&mut conn, &instance, 1, true, "bmV3", &digest, 42).unwrap();
+        assert_eq!(revision, 2);
+        let stored: (i64, String, String, Option<String>, i64) = conn
+            .query_row(
+                "SELECT revision, config_b64, config_digest,
+                        operation_declaration_digest, updated_at
+                 FROM gate_instances WHERE instance_id = ?1",
+                [&instance],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(stored, (2, "bmV3".into(), digest, None, 42));
+
+        assert!(matches!(
+            revise_gate_instance(&mut conn, &instance, 1, true, "x", "y", 43),
+            Err(ReviseGateInstanceError::RevisionConflict)
+        ));
     }
 
     #[test]

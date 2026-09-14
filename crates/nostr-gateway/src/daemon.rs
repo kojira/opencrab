@@ -200,58 +200,166 @@ impl Daemon {
                 opencrab_nostr::gate_provision::build_allow_sources(followees, &keys),
             )
         };
-        let plan = {
-            self.store
-                .lock()
-                .map_err(|_| anyhow::anyhow!("gateway store lock poisoned"))?
-                .set_self_pubkey(&row.agent_id, &self_pubkey)?;
-            let mut conn = self
+        let (existing, desired_config_b64) = {
+            let conn = self
                 .core_db
                 .lock()
                 .map_err(|_| anyhow::anyhow!("core database lock poisoned"))?;
-            opencrab_nostr::gate_provision::provision_nostr_gate(
-                &mut conn,
+            let desired = opencrab_nostr::gate_provision::desired_nostr_config_b64(
+                &conn,
                 &row.agent_id,
                 &self_pubkey,
                 &config,
                 &watches,
                 &access,
-                now_nanos()?,
             )?;
-            opencrab_nostr::gate_provision::load_nostr_placement_plan(&conn, &row.agent_id)?
+            let existing =
+                opencrab_nostr::gate_provision::find_nostr_placement_plan(&conn, &row.agent_id)?;
+            (existing, desired)
         };
-        let fingerprint = fingerprint(row, &plan.config_b64);
-        if self.active.get(&row.agent_id) == Some(&fingerprint) {
+        let fingerprint = fingerprint(row, &desired_config_b64);
+        let steps = reconciliation_steps(
+            existing.as_ref(),
+            self.active.get(&row.agent_id).map(String::as_str),
+            &fingerprint,
+            &desired_config_b64,
+        );
+        if steps.is_empty() {
             return Ok(());
         }
-        let placement = Placement {
-            core_socket: self.config.core_socket.to_string_lossy().into_owned(),
-            nostaro_bin: self.config.nostaro_bin.to_string_lossy().into_owned(),
-            instances: vec![InstancePlacement {
-                instance_id: plan.instance_id,
-                revision: plan.revision,
-                address: plan.address,
-                config_b64: plan.config_b64,
-            }],
-        };
-        let path = self
-            .config
-            .placement_dir
-            .join(format!("{}.json", row.agent_id));
-        write_placement(&path, &placement)?;
-        let secret = (self.secret_provider)(&row.agent_id)?;
-        let spawner = Arc::new(GatewayChildSpawner::with_secret_env(
-            self.executable.clone(),
-            path,
-            secret.to_string(),
-            crate::secret::SECRET_ENV,
-            "nostr-gateway-instance",
-            row.agent_id.clone(),
-        ));
-        self.supervisors.start(&row.agent_id, spawner).await;
-        self.active.insert(row.agent_id.clone(), fingerprint);
+
+        let mut self_pubkey_stored = false;
+        for step in steps {
+            match step {
+                ReconcileStep::Stop => {
+                    self.supervisors.stop(&row.agent_id).await;
+                    self.active.remove(&row.agent_id);
+                }
+                ReconcileStep::Provision | ReconcileStep::Revise => {
+                    self.store
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("gateway store lock poisoned"))?
+                        .set_self_pubkey(&row.agent_id, &self_pubkey)?;
+                    self_pubkey_stored = true;
+                    let mut conn = self
+                        .core_db
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("core database lock poisoned"))?;
+                    match step {
+                        ReconcileStep::Provision => {
+                            opencrab_nostr::gate_provision::provision_nostr_gate(
+                                &mut conn,
+                                &row.agent_id,
+                                &self_pubkey,
+                                &config,
+                                &watches,
+                                &access,
+                                now_nanos()?,
+                            )?;
+                        }
+                        ReconcileStep::Revise => {
+                            opencrab_nostr::gate_provision::revise_nostr_gate(
+                                &mut conn,
+                                &row.agent_id,
+                                &self_pubkey,
+                                &config,
+                                &watches,
+                                &access,
+                                opencrab_nostr::gate_provision::StoppedRevision {
+                                    expected_revision: existing
+                                        .as_ref()
+                                        .context("revision requested without existing placement")?
+                                        .revision,
+                                    updated_at: now_nanos()?,
+                                },
+                            )?;
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                ReconcileStep::Start => {
+                    if !self_pubkey_stored {
+                        self.store
+                            .lock()
+                            .map_err(|_| anyhow::anyhow!("gateway store lock poisoned"))?
+                            .set_self_pubkey(&row.agent_id, &self_pubkey)?;
+                    }
+                    let plan = {
+                        let conn = self
+                            .core_db
+                            .lock()
+                            .map_err(|_| anyhow::anyhow!("core database lock poisoned"))?;
+                        opencrab_nostr::gate_provision::load_nostr_placement_plan(
+                            &conn,
+                            &row.agent_id,
+                        )?
+                    };
+                    let placement = Placement {
+                        core_socket: self.config.core_socket.to_string_lossy().into_owned(),
+                        nostaro_bin: self.config.nostaro_bin.to_string_lossy().into_owned(),
+                        instances: vec![InstancePlacement {
+                            instance_id: plan.instance_id,
+                            revision: plan.revision,
+                            address: plan.address,
+                            config_b64: plan.config_b64,
+                        }],
+                    };
+                    let path = self
+                        .config
+                        .placement_dir
+                        .join(format!("{}.json", row.agent_id));
+                    write_placement(&path, &placement)?;
+                    let secret = (self.secret_provider)(&row.agent_id)?;
+                    let spawner = Arc::new(GatewayChildSpawner::with_secret_env(
+                        self.executable.clone(),
+                        path,
+                        secret.to_string(),
+                        crate::secret::SECRET_ENV,
+                        "nostr-gateway-instance",
+                        row.agent_id.clone(),
+                    ));
+                    self.supervisors.start(&row.agent_id, spawner).await;
+                    self.active
+                        .insert(row.agent_id.clone(), fingerprint.clone());
+                }
+            }
+        }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReconcileStep {
+    Stop,
+    Provision,
+    Revise,
+    Start,
+}
+
+fn reconciliation_steps(
+    existing: Option<&opencrab_nostr::gate_provision::NostrPlacementPlan>,
+    active_fingerprint: Option<&str>,
+    desired_fingerprint: &str,
+    desired_config_b64: &str,
+) -> Vec<ReconcileStep> {
+    let config_changed = existing.is_some_and(|plan| plan.config_b64 != desired_config_b64);
+    if !config_changed && active_fingerprint == Some(desired_fingerprint) {
+        return Vec::new();
+    }
+
+    let mut steps = Vec::with_capacity(3);
+    if active_fingerprint.is_some() {
+        steps.push(ReconcileStep::Stop);
+    }
+    steps.push(match existing {
+        None => ReconcileStep::Provision,
+        Some(_) if config_changed => ReconcileStep::Revise,
+        Some(_) => ReconcileStep::Start,
+    });
+    if !matches!(steps.last(), Some(ReconcileStep::Start)) {
+        steps.push(ReconcileStep::Start);
+    }
+    steps
 }
 
 fn gateway_secret_provider(
@@ -320,6 +428,65 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn placement(config_b64: &str) -> opencrab_nostr::gate_provision::NostrPlacementPlan {
+        opencrab_nostr::gate_provision::NostrPlacementPlan {
+            agent_id: "agent".into(),
+            instance_id: "instance".into(),
+            revision: 7,
+            address: "address".into(),
+            config_b64: config_b64.into(),
+        }
+    }
+
+    #[test]
+    fn changed_active_instance_stops_before_revision_and_restart() {
+        assert_eq!(
+            reconciliation_steps(
+                Some(&placement("old")),
+                Some("old-fingerprint"),
+                "new-fingerprint",
+                "new"
+            ),
+            [
+                ReconcileStep::Stop,
+                ReconcileStep::Revise,
+                ReconcileStep::Start
+            ]
+        );
+    }
+
+    #[test]
+    fn unchanged_active_instance_does_not_churn() {
+        assert!(reconciliation_steps(
+            Some(&placement("same")),
+            Some("same-fingerprint"),
+            "same-fingerprint",
+            "same"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn absent_instance_is_provisioned_before_start() {
+        assert_eq!(
+            reconciliation_steps(None, None, "new-fingerprint", "new"),
+            [ReconcileStep::Provision, ReconcileStep::Start]
+        );
+    }
+
+    #[test]
+    fn secret_only_change_stops_without_revising_core_config() {
+        assert_eq!(
+            reconciliation_steps(
+                Some(&placement("same")),
+                Some("old-fingerprint"),
+                "new-fingerprint",
+                "same"
+            ),
+            [ReconcileStep::Stop, ReconcileStep::Start]
+        );
+    }
 
     #[test]
     fn daemon_config_requires_absolute_database_and_socket() {

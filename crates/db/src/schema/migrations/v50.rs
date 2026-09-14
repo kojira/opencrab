@@ -1,6 +1,33 @@
 use super::Migration;
 use crate::schema::{column_exists, table_exists};
 
+fn predecessor_channel_table(conn: &rusqlite::Connection) -> rusqlite::Result<Option<String>> {
+    let expected_columns = "channel_id|agent_id|guild_id|channel_name|readable|writable|whitelisted|heartbeat_enabled|heartbeat_interval_secs|heartbeat_instructions|updated_at";
+    let mut statement = conn.prepare(
+        "SELECT schema.name
+         FROM sqlite_master schema
+         WHERE schema.type = 'table' AND schema.name <> 'channel_config'
+           AND (SELECT group_concat(info.name, '|')
+                FROM pragma_table_info(schema.name) info) = ?1",
+    )?;
+    let mut rows = statement.query([expected_columns])?;
+    let first = rows
+        .next()?
+        .map(|row| row.get::<_, String>(0))
+        .transpose()?;
+    if rows.next()?.is_some() {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+            Some("multiple structurally compatible channel tables found".into()),
+        ));
+    }
+    Ok(first)
+}
+
+fn quoted_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
 pub(super) static MIGRATIONS: &[Migration] = &[Migration {
     version: 50,
     description: "converge shared channel and heartbeat audit storage on opaque identifiers",
@@ -19,8 +46,25 @@ pub(super) static MIGRATIONS: &[Migration] = &[Migration {
                 heartbeat_instructions TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (channel_id, agent_id)
-             );
-             CREATE INDEX IF NOT EXISTS idx_channel_guild ON channel_config(guild_id);
+             );",
+        )?;
+        if let Some(predecessor) = predecessor_channel_table(conn)? {
+            let predecessor = quoted_identifier(&predecessor);
+            conn.execute_batch(&format!(
+                "INSERT INTO channel_config (
+                    channel_id, agent_id, guild_id, channel_name, readable, writable,
+                    whitelisted, heartbeat_enabled, heartbeat_interval_secs,
+                    heartbeat_instructions, updated_at
+                 )
+                 SELECT channel_id, agent_id, guild_id, channel_name, readable, writable,
+                    whitelisted, heartbeat_enabled, heartbeat_interval_secs,
+                    heartbeat_instructions, updated_at
+                 FROM {predecessor};
+                 DROP TABLE {predecessor};"
+            ))?;
+        }
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_channel_guild ON channel_config(guild_id);
              CREATE INDEX IF NOT EXISTS idx_channel_agent ON channel_config(agent_id);",
         )?;
 

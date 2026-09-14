@@ -1,6 +1,6 @@
 # nostr-gateway
 
-Nostr inbound の独立 binary。`nostaro watch` 子プロセスの JSONL を V3 `said` へ写すだけ。投稿しない。Bearer を持たない。core crate の wire DTO に依存しない。
+Nostr ingress／delivery の独立 binary。`nostaro watch` 子プロセスの JSONL を V3 `said` へ写し、coreからの`reply`／`say`をNostrへ投稿する。Bearer を持たない。core crate の wire DTO に依存しない。
 
 ## 起動 ABI
 
@@ -46,7 +46,8 @@ watch の有効フィルタは `filter_json`。アンカー `beyond_self` は wa
 - Bundle の次行: `[NOSTRBUNDLE/V1 [origin…]]`（index 順。coordinator が最初の非重複 member で全 origin を照合する）。flush の各 member は `post_said_receipt`（Accepted 後も次 origin を送る）
 - その下: 採取 §3 の履歴本文 renderer
 - kind 4/1059 が現れたら `route=immediate`（Discard は core）
-- 受信した `say` は投稿せず `external_rejected`
+- inbound originを引き継ぐ`say`はそのeventへの`reply`として投稿する
+- reply targetのないheartbeat／bundle由来の`say`はstandalone postとして投稿する
 
 ## 検収
 
