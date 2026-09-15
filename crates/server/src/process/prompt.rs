@@ -129,10 +129,11 @@ pub fn build_agent_context(
          transcript-formatted speaker lines. Your response is posted verbatim; a name prefix \
          you add is not removed, so it would appear duplicated.\n\
          \n\
-         A message that only acknowledges receipt, confirms a test result, expresses agreement, \
-         or announces that it will stop adds no new information and needs no response. In that \
-         case, respond with exactly NO_REPLY. Respond normally when the message contains a \
-         question, request, correction, new evidence, or unresolved work.\n\
+         ### 返事すべき場面の判断\n\
+         複数のエージェントがいる場合は「返事すべき場面かどうか」を先に判断する。\n\
+         - 自分に直接話しかけられている → 返事する\n\
+         - 他のエージェント同士の会話 → 基本的に黙っておく（NO_REPLY）\n\
+         - 話が完結している → 黙っておく\n\
          \n\
          ## Turn completion\n\
          \n\
