@@ -113,6 +113,18 @@ async fn post_and_accept(
     ));
 }
 
+async fn queue_core_say(core: &mut MockCore, index: usize) {
+    let id = format!("core-say-{index}");
+    core.write(json!({
+        "id": id,
+        "m": "say",
+        "binding_id": BINDING,
+        "payload": {"text": format!("queued-{index}")}
+    }))
+    .await;
+    assert_eq!(core.read().await["m"], "ok");
+}
+
 async fn event(client: &InstanceClient) -> LiveEvent {
     tokio::time::timeout(Duration::from_secs(2), client.next_live(ADDRESS))
         .await
@@ -216,6 +228,69 @@ async fn completed_target_and_silent_origins_coexist_in_stable_order() {
         }
     );
     no_extra(&client).await;
+}
+
+#[tokio::test]
+async fn ended_batch_at_exact_capacity_is_complete_and_ordered() {
+    let (client, mut core) = setup().await;
+    for index in 0..29 {
+        queue_core_say(&mut core, index).await;
+    }
+    core.activity(
+        "ended",
+        json!({
+            "completed_target":"cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            "silent_origins":["origin-b"]
+        }),
+    )
+    .await;
+
+    for index in 0..29 {
+        assert!(
+            matches!(event(&client).await, LiveEvent::Message { text, .. } if text == format!("queued-{index}"))
+        );
+    }
+    assert!(matches!(event(&client).await, LiveEvent::Activity { state, .. } if state == "ended"));
+    assert_eq!(
+        event(&client).await,
+        LiveEvent::Completed {
+            target: "cccccccc-cccc-4ccc-8ccc-cccccccccccc".into()
+        }
+    );
+    assert_eq!(
+        event(&client).await,
+        LiveEvent::CompletedNoReply {
+            reply_origin: Some("origin-b".into())
+        }
+    );
+    no_extra(&client).await;
+}
+
+#[tokio::test]
+async fn overflowing_ended_batch_is_atomic_and_disconnects() {
+    let (client, mut core) = setup().await;
+    for index in 0..30 {
+        queue_core_say(&mut core, index).await;
+    }
+    core.activity(
+        "ended",
+        json!({
+            "completed_target":"cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            "silent_origins":["origin-b"]
+        }),
+    )
+    .await;
+    // Let the reader process the whole ended frame before consumers free queue capacity.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    for index in 0..30 {
+        assert!(
+            matches!(event(&client).await, LiveEvent::Message { text, .. } if text == format!("queued-{index}"))
+        );
+    }
+    assert!(
+        matches!(event(&client).await, LiveEvent::Error { code, .. } if code == "live_queue_full" || code == "disconnect")
+    );
 }
 
 #[tokio::test]

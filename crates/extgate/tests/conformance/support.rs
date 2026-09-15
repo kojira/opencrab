@@ -37,6 +37,7 @@ struct TestRuntime {
     locks: Arc<SessionLocks>,
     registries: Arc<SubtaskRegistries>,
     reply: Arc<Mutex<String>>,
+    budget_fails: Arc<AtomicBool>,
     turns: Arc<AtomicUsize>,
     hold_rx: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
     /// sink 未配線（旧 V3）のときだけ待つ。遅いツールの同期実行相当。
@@ -57,6 +58,7 @@ impl TestRuntime {
             locks: Arc::new(SessionLocks::new()),
             registries: Arc::new(SubtaskRegistries::new()),
             reply: Arc::new(Mutex::new("hello from agent".into())),
+            budget_fails: Arc::new(AtomicBool::new(false)),
             turns: Arc::new(AtomicUsize::new(0)),
             hold_rx: Arc::new(Mutex::new(None)),
             tool_hold_rx: Arc::new(Mutex::new(None)),
@@ -112,6 +114,18 @@ impl AgentRuntime for TestRuntime {
         if reply == "__FAIL__" {
             anyhow::bail!("simulated turn failure");
         }
+        let folded_origins = if reply == "__VISIBLE_A_SILENT_FOLDED__" {
+            // The conformance runtime stands in for the engine; the test admits origin-b while
+            // this request is held and returns the engine outcome for that folded inbound.
+            vec!["origin-b".to_string()]
+        } else {
+            Vec::new()
+        };
+        let reply = if reply == "__VISIBLE_A_SILENT_FOLDED__" {
+            "visible-a".to_string()
+        } else {
+            reply
+        };
         let termination = opencrab_core::terminate_at_no_reply(&reply);
         let explicit_termination = termination
             .terminated()
@@ -121,7 +135,9 @@ impl AgentRuntime for TestRuntime {
         } else {
             reply
         };
-        let silent_origins = if response.trim().is_empty() && explicit_termination.is_some() {
+        let silent_origins = if !folded_origins.is_empty() {
+            folded_origins
+        } else if response.trim().is_empty() && explicit_termination.is_some() {
             result_origin.into_iter().collect()
         } else {
             Vec::new()
@@ -164,6 +180,13 @@ impl AgentRuntime for TestRuntime {
         _system_prompt: &str,
         _runtime_context_text: &str,
     ) -> std::result::Result<usize, opencrab_core::context_budget::ContextBudgetError> {
+        if self.budget_fails.load(Ordering::SeqCst) {
+            return Err(
+                opencrab_core::context_budget::ContextBudgetError::MissingContextWindow(
+                    "simulated budget failure".into(),
+                ),
+            );
+        }
         Ok(1024)
     }
     fn has_llm_providers(&self) -> bool {

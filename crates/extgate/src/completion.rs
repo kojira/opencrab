@@ -321,7 +321,7 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
             let silent_origins = engine_result
                 .map(|er| er.silent_origins.clone())
                 .unwrap_or_default();
-            let engine_failed = turn.as_ref().is_some_and(Result::is_err);
+            let engine_succeeded = turn.as_ref().is_some_and(Result::is_ok);
             let effect = match turn {
                 Some(r) => delivery_effect(
                     r,
@@ -355,7 +355,7 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
                     .expect("continuation say id lock")
                     .clone(),
             );
-            if !engine_failed {
+            if engine_succeeded {
                 emit_ended_activity(
                     &sink.state,
                     &sink.instance_id,

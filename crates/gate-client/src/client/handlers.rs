@@ -5,10 +5,7 @@ async fn handle_msg(client: &InstanceClient, msg: CoreMsg, generation: u64) -> b
             false
         }
         CoreMsg::Say(say) => handle_say(client, say, generation).await,
-        CoreMsg::Activity(activity) => {
-            handle_activity(client, activity).await;
-            false
-        }
+        CoreMsg::Activity(activity) => handle_activity(client, activity, generation).await,
         CoreMsg::TurnFailed(tf) => {
             handle_turn_failed(client, tf).await;
             false
@@ -183,10 +180,10 @@ async fn handle_say(client: &InstanceClient, say: Say, generation: u64) -> bool 
     false
 }
 
-async fn handle_activity(client: &InstanceClient, activity: Activity) {
+async fn handle_activity(client: &InstanceClient, activity: Activity, generation: u64) -> bool {
     let mut inner = client.inner.lock().await;
     if inner.closed {
-        return;
+        return true;
     }
     let address = inner
         .acknowledged
@@ -194,43 +191,28 @@ async fn handle_activity(client: &InstanceClient, activity: Activity) {
         .find(|(_, bid)| *bid == &activity.binding_id)
         .map(|(a, _)| a.clone());
     let Some(address) = address else {
-        return;
+        return false;
     };
-    let q = inner
-        .live
-        .entry(address.clone())
-        .or_insert_with(LiveQueue::new);
-    let _ = q.try_push(LiveEvent::Activity {
-        activity_id: activity.activity_id,
-        state: activity.state.clone(),
-        origin: activity.origin.clone(),
-    });
-    if activity.state == "started" {
-        inner
-            .pending_turn
-            .entry(activity.binding_id.clone())
-            .or_insert_with(|| PendingTurn {
-                saw_utterance: false,
-                reply_origin: ReplyOrigin::None,
-            });
-    } else if activity.state == "ended" {
+
+    if activity.state == "ended" {
         let legacy_turn = inner.pending_turn.remove(&activity.binding_id);
         let has_completed_target = activity.completed_target.is_some();
+        let mut events = vec![LiveEvent::Activity {
+            activity_id: activity.activity_id,
+            state: activity.state,
+            origin: activity.origin,
+        }];
         if let Some(target) = activity.completed_target {
-            if let Some(q) = inner.live.get_mut(&address) {
-                let _ = q.try_push(LiveEvent::Completed { target });
-            }
+            events.push(LiveEvent::Completed { target });
         }
         if let Some(origins) = activity.silent_origins {
             // Presentはemptyを含めauthoritative。admission/say観測によるlegacy推測を重ねない。
             let mut emitted = std::collections::HashSet::new();
-            if let Some(q) = inner.live.get_mut(&address) {
-                for origin in origins {
-                    if emitted.insert(origin.clone()) {
-                        let _ = q.try_push(LiveEvent::CompletedNoReply {
-                            reply_origin: Some(origin),
-                        });
-                    }
+            for origin in origins {
+                if emitted.insert(origin.clone()) {
+                    events.push(LiveEvent::CompletedNoReply {
+                        reply_origin: Some(origin),
+                    });
                 }
             }
         } else if !has_completed_target {
@@ -240,12 +222,46 @@ async fn handle_activity(client: &InstanceClient, activity: Activity) {
                     ReplyOrigin::Single(origin) => Some(origin),
                     ReplyOrigin::None | ReplyOrigin::Ambiguous => None,
                 };
-                if let Some(q) = inner.live.get_mut(&address) {
-                    let _ = q.try_push(LiveEvent::CompletedNoReply { reply_origin });
-                }
+                events.push(LiveEvent::CompletedNoReply { reply_origin });
             }
         }
+        let accepted = inner
+            .live
+            .entry(address)
+            .or_insert_with(LiveQueue::new)
+            .try_push_batch(events);
+        if !accepted {
+            drop(inner);
+            close_all(client, "live_queue_full", generation).await;
+            return true;
+        }
+        return false;
     }
+
+    let accepted = inner
+        .live
+        .entry(address)
+        .or_insert_with(LiveQueue::new)
+        .try_push(LiveEvent::Activity {
+            activity_id: activity.activity_id,
+            state: activity.state.clone(),
+            origin: activity.origin,
+        });
+    if !accepted {
+        drop(inner);
+        close_all(client, "live_queue_full", generation).await;
+        return true;
+    }
+    if activity.state == "started" {
+        inner
+            .pending_turn
+            .entry(activity.binding_id)
+            .or_insert_with(|| PendingTurn {
+                saw_utterance: false,
+                reply_origin: ReplyOrigin::None,
+            });
+    }
+    false
 }
 
 /// R3(❌): core→gate のターン失敗通知を live queue へ載せる。binding_id→address を解決し、

@@ -382,3 +382,8 @@ mod tests;
 mod live_inbound_tests {
     include!("skill_engine/live_inbound_tests.rs");
 }
+
+#[cfg(test)]
+mod silent_origin_transition_tests {
+    include!("skill_engine/silent_origin_transition_tests.rs");
+}

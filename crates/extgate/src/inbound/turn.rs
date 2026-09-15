@@ -313,7 +313,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                         let silent_origins = engine_result
                             .map(|er| er.silent_origins.clone())
                             .unwrap_or_default();
-                        let engine_failed = turn.as_ref().is_some_and(Result::is_err);
+                        let engine_succeeded = turn.as_ref().is_some_and(Result::is_ok);
                         let effect = match turn {
                             Some(r) => delivery_effect(
                                 r,
@@ -354,7 +354,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                         );
                         // 成功したexecutionだけauthoritative ended outcomeを送る。engine errorは
                         // turn_failed経路が正本であり、empty silenceへ偽装しない。
-                        if !engine_failed {
+                        if engine_succeeded {
                             emit_ended_activity(
                                 &state,
                                 &instance_id,
