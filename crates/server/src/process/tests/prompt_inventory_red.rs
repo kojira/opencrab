@@ -232,6 +232,34 @@ fn rewritten_fact_sentences_are_present() {
     }
 }
 
+#[test]
+fn status_only_policy_is_at_the_history_turn_boundary() {
+    let prompt = prompt();
+    let policy = "A message that only acknowledges receipt, confirms a test result, expresses \
+                  agreement, or announces that it will stop adds no new information and needs no \
+                  response. In that case, respond with exactly NO_REPLY. Respond normally when the \
+                  message contains a question, request, correction, new evidence, or unresolved \
+                  work.";
+
+    assert_eq!(
+        normalize_ws(&prompt).matches(&normalize_ws(policy)).count(),
+        1,
+        "status-only policy must appear exactly once:\n{prompt}"
+    );
+
+    let history = prompt
+        .find("When conversation history is present")
+        .expect("conversation-history guidance");
+    let policy = prompt
+        .find("A message that only acknowledges receipt")
+        .expect("status-only policy");
+    let completion = prompt.find("## Turn completion").expect("turn completion");
+    assert!(
+        history < policy && policy < completion,
+        "status-only policy must follow history guidance and precede turn completion:\n{prompt}"
+    );
+}
+
 /// §1-3: 「## Async Behavior」節が §3.2 の全文と一致（節単位・空白正規化）。
 #[test]
 fn async_behavior_section_matches_design() {

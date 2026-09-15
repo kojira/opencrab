@@ -129,6 +129,11 @@ pub fn build_agent_context(
          transcript-formatted speaker lines. Your response is posted verbatim; a name prefix \
          you add is not removed, so it would appear duplicated.\n\
          \n\
+         A message that only acknowledges receipt, confirms a test result, expresses agreement, \
+         or announces that it will stop adds no new information and needs no response. In that \
+         case, respond with exactly NO_REPLY. Respond normally when the message contains a \
+         question, request, correction, new evidence, or unresolved work.\n\
+         \n\
          ## Turn completion\n\
          \n\
          Your turn continues by default. Only `NO_REPLY` explicitly ends it. When all requested \
