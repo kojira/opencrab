@@ -152,8 +152,45 @@ fn parse_activity_ended_carries_completed_target() {
                 a.completed_target.as_deref(),
                 Some("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
             );
+            assert_eq!(a.silent_origins, None);
         }
         other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn parse_activity_distinguishes_absent_empty_and_present_silent_origins() {
+    for (field, expected) in [
+        ("", None),
+        (",\"silent_origins\":[]", Some(Vec::<String>::new())),
+        (
+            ",\"silent_origins\":[\"origin-a\",\"origin-b\"]",
+            Some(vec!["origin-a".into(), "origin-b".into()]),
+        ),
+    ] {
+        let raw = format!(
+            "{{\"m\":\"activity\",\"binding_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"activity_id\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"state\":\"ended\"{field}}}"
+        );
+        match parse_frame_bytes(raw.as_bytes()).unwrap() {
+            CoreMsg::Activity(activity) => assert_eq!(activity.silent_origins, expected),
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+#[test]
+fn malformed_silent_origins_is_bad_request() {
+    for value in ["null", "{}", "[7]", "[\"\"]"] {
+        let raw = format!(
+            "{{\"m\":\"activity\",\"binding_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"activity_id\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"state\":\"ended\",\"silent_origins\":{value}}}"
+        );
+        assert!(matches!(
+            parse_frame_bytes(raw.as_bytes()).unwrap(),
+            CoreMsg::Invalid {
+                code: "bad_request",
+                ..
+            }
+        ));
     }
 }
 

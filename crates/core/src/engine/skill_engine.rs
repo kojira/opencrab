@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
+mod live_inbound;
 mod run;
 mod run_helpers;
+mod silent_origins;
 mod turn_budget;
 
 use anyhow::Result;
@@ -379,4 +381,9 @@ mod tests;
 #[cfg(test)]
 mod live_inbound_tests {
     include!("skill_engine/live_inbound_tests.rs");
+}
+
+#[cfg(test)]
+mod silent_origin_transition_tests {
+    include!("skill_engine/silent_origin_transition_tests.rs");
 }

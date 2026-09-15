@@ -477,3 +477,63 @@ async fn settlement_during_active_parent_does_not_start_another_resume() {
     );
 }
 
+async fn assert_failed_completion_resume_has_no_ended(reply: &str, budget_fails: bool) {
+    let h = Harness::start().await;
+    let (mut s, instance_id, binding_id) = ready_pair(&h).await;
+    *h.runtime.reply.lock().unwrap() = reply.to_string();
+    h.runtime
+        .budget_fails
+        .store(budget_fails, Ordering::SeqCst);
+    let session_id = format!("extgate-{binding_id}");
+    let sink = ExtgateCompletionSink {
+        state: Arc::clone(&h.state),
+        runtime: h.runtime.clone(),
+        instance_id,
+        binding_id,
+        agent_id: "agent-1".into(),
+        session_id: session_id.clone(),
+        only_speaker: false,
+        speaker_id: "u1".into(),
+        delivery_mode: DeliveryMode::Say,
+        system_context: String::new(),
+    };
+    settle_completed(
+        &h.runtime.subtask_registry_for(&session_id),
+        &h.state.db,
+        &sink,
+        SettleContext {
+            parent_session_id: session_id,
+            agent_id: "agent-1".into(),
+            subtask_id: "st-failed-resume".into(),
+            sub_session_id: String::new(),
+            exit_reason: "completed".into(),
+            lifecycle: SubtaskLifecycle::new(),
+        },
+        "completion-result",
+    );
+
+    let mut saw_started = false;
+    for _ in 0..8 {
+        let Some(v) = read_frame_opt(&mut s).await else {
+            if saw_started {
+                break;
+            }
+            continue;
+        };
+        if v["m"] == "activity" && v["state"] == "started" {
+            saw_started = true;
+        }
+        assert!(
+            !(v["m"] == "activity" && v["state"] == "ended"),
+            "failed completion resume must not emit authoritative ended: {v}"
+        );
+    }
+    assert!(saw_started, "completion resume lifecycle must start");
+}
+
+#[tokio::test]
+async fn completion_none_and_error_emit_no_authoritative_ended() {
+    assert_failed_completion_resume_has_no_ended("__FAIL__", false).await;
+    assert_failed_completion_resume_has_no_ended("hello", true).await;
+}
+

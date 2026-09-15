@@ -159,16 +159,26 @@ impl LiveQueue {
     }
 
     fn try_push(&mut self, ev: LiveEvent) -> bool {
-        if let Some(idx) = self.waiters.iter().position(|w| !w.is_closed()) {
-            let waiter = self.waiters.remove(idx);
-            if waiter.send(ev.clone()).is_ok() {
-                return true;
-            }
-        }
-        if self.events.len() >= LIVE_QUEUE_CAP {
+        self.try_push_batch(vec![ev])
+    }
+
+    /// One wire frame may expand into ended, completed, and multiple silent outcomes. Reserve the
+    /// whole batch before making any item observable so capacity pressure cannot expose a prefix.
+    fn try_push_batch(&mut self, events: Vec<LiveEvent>) -> bool {
+        if events.len() > LIVE_QUEUE_CAP.saturating_sub(self.events.len()) {
             return false;
         }
-        self.events.push_back(ev);
+        self.events.extend(events);
+        while !self.events.is_empty() {
+            let Some(idx) = self.waiters.iter().position(|waiter| !waiter.is_closed()) else {
+                break;
+            };
+            let waiter = self.waiters.remove(idx);
+            let event = self.events.pop_front().expect("queue checked non-empty");
+            if let Err(event) = waiter.send(event) {
+                self.events.push_front(event);
+            }
+        }
         true
     }
 

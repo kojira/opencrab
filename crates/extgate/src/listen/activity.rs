@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::protocol::{activity_frame, turn_failed_frame, write_json};
+use crate::protocol::{activity_frame, ended_activity_frame, turn_failed_frame, write_json};
 use crate::registry::ExtgateState;
 
 pub async fn emit_activity(
@@ -35,6 +35,35 @@ pub async fn emit_activity(
             origin,
             completed_target,
         ),
+    )
+    .await;
+}
+
+/// Successful executionのauthoritative ended outcome。new coreは沈黙originが無くても
+/// `silent_origins: []`を必ず送る。
+pub async fn emit_ended_activity(
+    state: &Arc<ExtgateState>,
+    instance_id: &str,
+    binding_id: &str,
+    activity_id: &str,
+    completed_target: Option<&str>,
+    silent_origins: &[String],
+) {
+    let writer = {
+        let Ok(reg) = state.lock_registry() else {
+            return;
+        };
+        let Some(live) = reg.get(instance_id) else {
+            return;
+        };
+        if !live.acknowledged.contains(binding_id) {
+            return;
+        }
+        live.writer.clone()
+    };
+    let _ = write_json(
+        &writer,
+        &ended_activity_frame(binding_id, activity_id, completed_target, silent_origins),
     )
     .await;
 }

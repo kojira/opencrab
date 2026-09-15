@@ -11,7 +11,7 @@ use crate::completion::{v3_attach_dispatch, ExtgateCompletionSink};
 use crate::delivery::apply_delivery_effect;
 use crate::delivery_mode::{adjust_inbound_effect, DeliveryMode};
 use crate::error::ErrorCode;
-use crate::listen::emit_activity;
+use crate::listen::{emit_activity, emit_ended_activity};
 use crate::protocol::Said;
 use crate::registry::ExtgateState;
 
@@ -302,15 +302,18 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                 };
                 match turn_res {
                     Ok(turn) => {
-                        let engine_completion = turn.as_ref().and_then(|r| {
-                            r.as_ref().ok().map(|er| {
-                                (
-                                    er.last_posting_utterance_id.clone(),
-                                    er.stopped_by_limit,
-                                    er.last_generation_had_continuation_speech,
-                                )
-                            })
+                        let engine_result = turn.as_ref().and_then(|result| result.as_ref().ok());
+                        let engine_completion = engine_result.map(|er| {
+                            (
+                                er.last_posting_utterance_id.clone(),
+                                er.stopped_by_limit,
+                                er.last_generation_had_continuation_speech,
+                            )
                         });
+                        let silent_origins = engine_result
+                            .map(|er| er.silent_origins.clone())
+                            .unwrap_or_default();
+                        let engine_succeeded = turn.as_ref().is_some_and(Result::is_ok);
                         let effect = match turn {
                             Some(r) => delivery_effect(
                                 r,
@@ -349,35 +352,23 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                 .expect("continuation say id lock")
                                 .clone(),
                         );
-                        // 決着（say/reply/no_reply）の配送**後**に activity ended を出す（統括裁定A
-                        // 2026-08-31）。これで say フレームが ended より先に gateway へ届き、返信ターンは
-                        // saw_say=true になってから ended を見るので、gate-client の CompletedNoReply が
-                        // 沈黙（say 無し）ターンだけに正しく立つ（返信ターンでの偽 CompletedNoReply を撤去）。
-                        emit_activity(
-                            &state,
-                            &instance_id,
-                            &binding_id,
-                            &activity_id,
-                            "ended",
-                            None,
-                            completed_target.as_deref(),
-                        )
-                        .await;
+                        // 成功したexecutionだけauthoritative ended outcomeを送る。engine errorは
+                        // turn_failed経路が正本であり、empty silenceへ偽装しない。
+                        if engine_succeeded {
+                            emit_ended_activity(
+                                &state,
+                                &instance_id,
+                                &binding_id,
+                                &activity_id,
+                                completed_target.as_deref(),
+                                &silent_origins,
+                            )
+                            .await;
+                        }
                     }
                     Err(_) => {
                         tracing::error!("extgate turn task panicked");
-                        // パニック時は決着を配送できない。turn 境界だけは通知してから close する
-                        // （沈黙ターンと同じく say 無しの ended＝CompletedNoReply 相当）。
-                        emit_activity(
-                            &state,
-                            &instance_id,
-                            &binding_id,
-                            &activity_id,
-                            "ended",
-                            None,
-                            None,
-                        )
-                        .await;
+                        // Authoritative engine outcomeを得られないためsuccessful endedは送らない。
                         crate::close::close_live(
                             &state,
                             Some(&instance_id),

@@ -108,6 +108,46 @@
         }
     }
 
+    struct ScriptedOriginInbound {
+        pending: std::sync::Mutex<Vec<Vec<crate::FoldedInbound>>>,
+    }
+
+    impl ScriptedOriginInbound {
+        fn new(batches: Vec<Vec<(&str, &str)>>) -> Self {
+            Self {
+                pending: std::sync::Mutex::new(
+                    batches
+                        .into_iter()
+                        .map(|batch| {
+                            batch
+                                .into_iter()
+                                .map(|(text, origin)| crate::FoldedInbound {
+                                    text: text.to_string(),
+                                    origin: Some(origin.to_string()),
+                                })
+                                .collect()
+                        })
+                        .collect(),
+                ),
+            }
+        }
+    }
+
+    impl LiveInboundSource for ScriptedOriginInbound {
+        fn poll_new_messages(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn poll_new_with_origin(&self) -> Vec<crate::FoldedInbound> {
+            let mut pending = self.pending.lock().unwrap();
+            if pending.is_empty() {
+                Vec::new()
+            } else {
+                pending.remove(0)
+            }
+        }
+    }
+
     fn tool_call(id: &str) -> ToolCall {
         ToolCall {
             id: id.to_string(),
@@ -204,6 +244,102 @@
             second.iter().any(|t| t.contains("やめて")),
             "走行中の新着が次のイテレーションに載る: {second:?}"
         );
+    }
+
+    /// 実QCの順序: Aの可視status＋background tool後、同じexecutionへBを取り込み、
+    /// Bのexact requestがNO_REPLYならBだけをsilent outcomeにする。
+    #[tokio::test]
+    async fn visible_a_then_folded_b_no_reply_reports_only_b_origin() {
+        let llm = std::sync::Arc::new(RecordingLlm::new(vec![
+            response(Some("実行する"), vec![tool_call("slow-call")]),
+            response(Some("NO_REPLY"), vec![]),
+        ]));
+        let source = std::sync::Arc::new(ScriptedOriginInbound::new(vec![vec![(
+            "[owner]:\n返信不要です",
+            "origin-b",
+        )]]));
+        let delivered = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut engine =
+            SkillEngine::new(Box::new(LlmHandle(llm.clone())), Box::new(NoopExecutor), 10);
+        engine.set_initial_read_origin("origin-a".to_string());
+        engine.set_live_inbound(source);
+        engine.set_on_continuation_speech({
+            let delivered = delivered.clone();
+            std::sync::Arc::new(move |text| {
+                let delivered = delivered.clone();
+                Box::pin(async move {
+                    delivered.lock().unwrap().push(text);
+                    Ok(())
+                })
+            })
+        });
+
+        let result = engine.run("system", "slow work", "test-model").await.unwrap();
+
+        assert_eq!(llm.call_count(), 2);
+        assert_eq!(
+            llm.user_texts(1)
+                .iter()
+                .filter(|text| text.contains("返信不要です"))
+                .count(),
+            1,
+            "Bはexact second ChatRequestへ1回だけ入る"
+        );
+        assert_eq!(delivered.lock().unwrap().as_slice(), ["実行する"]);
+        assert_eq!(result.silent_origins, ["origin-b"]);
+        assert!(!result.silent_origins.iter().any(|origin| origin == "origin-a"));
+    }
+
+    #[tokio::test]
+    async fn exact_no_reply_marks_initial_origin_silent() {
+        let llm = std::sync::Arc::new(RecordingLlm::new(vec![response(
+            Some("NO_REPLY"),
+            vec![],
+        )]));
+        let mut engine =
+            SkillEngine::new(Box::new(LlmHandle(llm)), Box::new(NoopExecutor), 4);
+        engine.set_initial_read_origin("origin-a".to_string());
+
+        let result = engine.run("system", "quiet", "model").await.unwrap();
+
+        assert_eq!(result.silent_origins, ["origin-a"]);
+    }
+
+    #[tokio::test]
+    async fn visible_text_with_no_reply_is_not_silent() {
+        let llm = std::sync::Arc::new(RecordingLlm::new(vec![response(
+            Some("visible answer\nNO_REPLY"),
+            vec![],
+        )]));
+        let mut engine =
+            SkillEngine::new(Box::new(LlmHandle(llm)), Box::new(NoopExecutor), 4);
+        engine.set_initial_read_origin("origin-a".to_string());
+
+        let result = engine.run("system", "answer", "model").await.unwrap();
+
+        assert_eq!(result.response, "visible answer");
+        assert!(result.silent_origins.is_empty());
+    }
+
+    #[tokio::test]
+    async fn non_utterance_tool_retains_ordered_deduplicated_silent_origins() {
+        let llm = std::sync::Arc::new(RecordingLlm::new(vec![
+            response(None, vec![tool_call("call-1")]),
+            response(Some("NO_REPLY"), vec![]),
+        ]));
+        let source = std::sync::Arc::new(ScriptedOriginInbound::new(vec![vec![
+            ("b", "origin-b"),
+            ("b duplicate", "origin-b"),
+            ("c", "origin-c"),
+        ]]));
+        let mut engine =
+            SkillEngine::new(Box::new(LlmHandle(llm)), Box::new(NoopExecutor), 4);
+        engine.set_initial_read_origin("origin-a".to_string());
+        engine.set_live_inbound(source);
+
+        let result = engine.run("system", "work", "model").await.unwrap();
+
+        assert_eq!(result.silent_origins, ["origin-a", "origin-b", "origin-c"]);
     }
 
     /// 同じ発言は二度注入されない。

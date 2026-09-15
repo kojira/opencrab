@@ -255,6 +255,9 @@ pub struct Activity {
     /// #915: ended で完了サインを付ける発話 id（say delivery_id / reply call_id）。
     /// additive field なので旧 core の欠落は None。
     pub completed_target: Option<String>,
+    /// New coreがendedへ必ず載せるauthoritative silent outcome。`None`は旧coreの
+    /// field欠落、`Some(vec![])`は確認済みの沈黙なしで、意味を区別する。
+    pub silent_origins: Option<Vec<String>>,
 }
 
 /// R3(❌): core→gate のターン失敗通知（DeliveryEffect::Failed）。id を持たない fire-and-forget
@@ -519,12 +522,27 @@ fn parse_activity(obj: &Value) -> Result<Activity, FrameError> {
         Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
         Some(_) => return Err(FrameError::BadRequest),
     };
+    let silent_origins = match obj.get("silent_origins") {
+        None => None,
+        Some(Value::Array(values)) if state == "ended" => {
+            let mut origins = Vec::with_capacity(values.len());
+            for value in values {
+                match value {
+                    Value::String(origin) if !origin.is_empty() => origins.push(origin.clone()),
+                    _ => return Err(FrameError::BadRequest),
+                }
+            }
+            Some(origins)
+        }
+        Some(_) => return Err(FrameError::BadRequest),
+    };
     Ok(Activity {
         binding_id,
         activity_id,
         state,
         origin,
         completed_target,
+        silent_origins,
     })
 }
 

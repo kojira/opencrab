@@ -6,7 +6,7 @@ mod create_binding;
 mod hello;
 mod response;
 
-pub use activity::{emit_activity, emit_turn_failed};
+pub use activity::{emit_activity, emit_ended_activity, emit_turn_failed};
 pub use bind::{enqueue_bind, wait_bind_ack, EnqueueBindOutcome};
 
 use std::os::unix::fs::FileTypeExt;

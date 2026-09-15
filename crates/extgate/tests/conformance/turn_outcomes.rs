@@ -96,21 +96,22 @@ async fn no_reply_turn_emits_ended_without_say() {
     .await;
     let _ = read_frame(&mut s).await; // said ok
     let mut saw_say = false;
-    let mut saw_ended = false;
+    let mut ended = None;
     for _ in 0..80 {
         if let Some(v) = read_frame_opt(&mut s).await {
             match v["m"].as_str() {
                 Some("say") => saw_say = true,
-                Some("activity") if v["state"] == "ended" => saw_ended = true,
+                Some("activity") if v["state"] == "ended" => ended = Some(v),
                 _ => {}
             }
         }
-        if saw_ended {
+        if ended.is_some() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert!(saw_ended, "沈黙ターンでも activity ended は出る");
+    let ended = ended.expect("沈黙ターンでも activity ended は出る");
+    assert_eq!(ended["silent_origins"], json!(["nr"]));
     assert!(!saw_say, "沈黙（NO_REPLY）ターンで say は出ない");
 }
 
@@ -138,10 +139,12 @@ async fn turn_failed_emits_frame_with_origin() {
     assert_eq!(ok["seq"], 1);
     let mut turn_failed: Option<Value> = None;
     let mut saw_say = false;
+    let mut saw_ended = false;
     for _ in 0..80 {
         if let Some(v) = read_frame_opt(&mut s).await {
             match v["m"].as_str() {
                 Some("turn_failed") => turn_failed = Some(v),
+                Some("activity") if v["state"] == "ended" => saw_ended = true,
                 Some("say") => saw_say = true,
                 _ => {}
             }
@@ -157,11 +160,109 @@ async fn turn_failed_emits_frame_with_origin() {
     // error 本文は wire に載せない（多エージェント相互反応ループ防止・#668）。
     assert!(tf.get("error").is_none() && tf.get("detail").is_none());
     assert!(!saw_say);
+    assert!(!saw_ended, "engine Err must not emit authoritative ended");
+    if let Some(v) = read_frame_opt(&mut s).await {
+        assert_ne!(v["state"], "ended", "ended must not follow turn_failed");
+    }
     let conn = h.state.db.lock().unwrap();
     let n: i64 = conn
         .query_row("SELECT COUNT(*) FROM deliveries", [], |r| r.get(0))
         .unwrap();
     assert_eq!(n, 0, "失敗ターンは say を出さない");
+}
+
+#[tokio::test]
+async fn budget_failure_none_emits_no_authoritative_ended() {
+    let h = Harness::start().await;
+    let (mut s, _, binding_id) = ready_pair(&h).await;
+    h.runtime.budget_fails.store(true, Ordering::SeqCst);
+    write_frame(
+        &mut s,
+        &json!({
+            "id": "none-1",
+            "m": "said",
+            "binding_id": binding_id,
+            "origin": "none-origin",
+            "author_id": "u1",
+            "text": "hi",
+            "attachments": []
+        }),
+    )
+    .await;
+    assert_eq!(read_said_response(&mut s, "none-1").await["m"], "ok");
+
+    while let Some(v) = read_frame_opt(&mut s).await {
+        assert!(
+            !(v["m"] == "activity" && v["state"] == "ended"),
+            "engine None must not emit authoritative ended: {v}"
+        );
+    }
+    assert_eq!(h.runtime.turns.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn visible_a_and_folded_b_share_ended_with_completion_and_only_b_silent() {
+    let h = Harness::start().await;
+    let (mut s, _, binding_id) = ready_pair(&h).await;
+    *h.runtime.reply.lock().unwrap() = "__VISIBLE_A_SILENT_FOLDED__".into();
+    let (release_tx, release_rx) = oneshot::channel();
+    *h.runtime.hold_rx.lock().unwrap() = Some(release_rx);
+    let entered = h.runtime.turn_entered.notified();
+
+    write_frame(
+        &mut s,
+        &json!({
+            "id": "a",
+            "m": "said",
+            "binding_id": binding_id,
+            "origin": "origin-a",
+            "author_id": "u1",
+            "text": "slow work",
+            "attachments": []
+        }),
+    )
+    .await;
+    assert_eq!(read_said_response(&mut s, "a").await["m"], "ok");
+    entered.await;
+    write_frame(
+        &mut s,
+        &json!({
+            "id": "b",
+            "m": "said",
+            "binding_id": binding_id,
+            "origin": "origin-b",
+            "author_id": "u1",
+            "text": "no reply needed",
+            "attachments": []
+        }),
+    )
+    .await;
+    assert_eq!(read_said_response(&mut s, "b").await["m"], "ok");
+    release_tx.send(()).unwrap();
+
+    let mut say_id = None;
+    let mut ended = None;
+    for _ in 0..20 {
+        let Some(v) = read_frame_opt(&mut s).await else {
+            continue;
+        };
+        match v["m"].as_str() {
+            Some("say") => {
+                assert_eq!(v["payload"]["text"], "visible-a");
+                say_id = v["id"].as_str().map(str::to_string);
+                write_frame(&mut s, &json!({"id": v["id"], "m": "ok"})).await;
+            }
+            Some("activity") if v["state"] == "ended" => ended = Some(v),
+            _ => {}
+        }
+        if say_id.is_some() && ended.is_some() {
+            break;
+        }
+    }
+    let say_id = say_id.expect("A visible say");
+    let ended = ended.expect("successful lifecycle ended");
+    assert_eq!(ended["completed_target"], say_id);
+    assert_eq!(ended["silent_origins"], json!(["origin-b"]));
 }
 
 #[tokio::test]

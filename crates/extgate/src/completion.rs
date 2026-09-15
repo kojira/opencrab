@@ -13,7 +13,7 @@ use opencrab_actions::{
 
 use crate::delivery::apply_delivery_effect;
 use crate::delivery_mode::{adjust_inbound_effect, DeliveryMode};
-use crate::listen::emit_activity;
+use crate::listen::{emit_activity, emit_ended_activity};
 use crate::registry::ExtgateState;
 
 /// `session_id_for_binding` と同じ接頭辞。`dispatch_settled` が親セッション判定に使う。
@@ -310,15 +310,18 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
                 },
             )
             .await;
-            let engine_completion = turn.as_ref().and_then(|r| {
-                r.as_ref().ok().map(|er| {
-                    (
-                        er.last_posting_utterance_id.clone(),
-                        er.stopped_by_limit,
-                        er.last_generation_had_continuation_speech,
-                    )
-                })
+            let engine_result = turn.as_ref().and_then(|result| result.as_ref().ok());
+            let engine_completion = engine_result.map(|er| {
+                (
+                    er.last_posting_utterance_id.clone(),
+                    er.stopped_by_limit,
+                    er.last_generation_had_continuation_speech,
+                )
             });
+            let silent_origins = engine_result
+                .map(|er| er.silent_origins.clone())
+                .unwrap_or_default();
+            let engine_succeeded = turn.as_ref().is_some_and(Result::is_ok);
             let effect = match turn {
                 Some(r) => delivery_effect(
                     r,
@@ -352,16 +355,17 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
                     .expect("continuation say id lock")
                     .clone(),
             );
-            emit_activity(
-                &sink.state,
-                &sink.instance_id,
-                &sink.binding_id,
-                &activity_id,
-                "ended",
-                None,
-                completed_target.as_deref(),
-            )
-            .await;
+            if engine_succeeded {
+                emit_ended_activity(
+                    &sink.state,
+                    &sink.instance_id,
+                    &sink.binding_id,
+                    &activity_id,
+                    completed_target.as_deref(),
+                    &silent_origins,
+                )
+                .await;
+            }
         })
         .await;
 }

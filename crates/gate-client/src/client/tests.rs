@@ -83,7 +83,9 @@
                 state: "started".into(),
                 origin: None,
                 completed_target: None,
+                silent_origins: None,
             },
+            0,
         )
         .await;
         handle_activity(
@@ -94,7 +96,9 @@
                 state: "ended".into(),
                 origin: None,
                 completed_target: Some("utterance".into()),
+                silent_origins: None,
             },
+            0,
         )
         .await;
 
