@@ -136,12 +136,16 @@ pub(crate) fn captured(buf: &Arc<Mutex<Vec<Captured>>>) -> Vec<Captured> {
     buf.lock().unwrap().clone()
 }
 
-pub(crate) async fn wait_until(pred: impl Fn() -> bool) -> bool {
-    for _ in 0..250 {
+pub(crate) async fn wait_until_attempts(attempts: usize, pred: impl Fn() -> bool) -> bool {
+    for _ in 0..attempts {
         if pred() {
             return true;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     pred()
+}
+
+pub(crate) async fn wait_until(pred: impl Fn() -> bool) -> bool {
+    wait_until_attempts(250, pred).await
 }

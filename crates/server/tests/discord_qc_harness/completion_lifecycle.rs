@@ -55,9 +55,11 @@ async fn scenario_915_max_iterations_flag_only_on_last_delivered_say() {
         mock.calls.load(Ordering::SeqCst)
     );
     // 固定sleepではなく、最後の対象sayへの完了reactionをboundedに待つ。
+    // このケースだけは 30 inference に伴う activity start/stop も実 gateway が処理するため、
+    // 並列 CI の負荷を見込んだ 15 秒の上限を使う。他ケースの既定 5 秒は延長しない。
     let settled = {
         let buf = buf.clone();
-        wait_until(move || {
+        wait_until_attempts(750, move || {
             let events = captured(&buf);
             let Some(last_say) = events
                 .iter()

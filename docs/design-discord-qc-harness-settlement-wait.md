@@ -16,8 +16,13 @@ Issue: https://github.com/kojira/opencrab/issues/962
 - runtime、API、DB、gateway実装は変更しない
 - suite直列化やassertion緩和は行わない
 
+## v0.2: per-inference activity 境界への追従
+
+各 LLM 呼び出しを `started` / `stopped` で囲む場合、この30反復ケースはターン終端に加えて60件のactivity frameを実gatewayで処理する。並列CIでは正しいcompletion reactionが従来の5秒上限より遅れることがあるため、このケースだけ上限を15秒にする。既定の`wait_until`、相関条件、assertion、runtime semanticsは変更しない。
+
 ## Acceptance
 
-- 単独testと38件並列suiteが合格する
+- 単独testと対象の#915並列test群が合格する
+- 正式CIの38件並列suiteが合格する
 - timeout時はfail closedする
 - 最後の対象say以外のcompletion reactionを成功条件にしない
