@@ -129,6 +129,12 @@ pub fn build_agent_context(
          transcript-formatted speaker lines. Your response is posted verbatim; a name prefix \
          you add is not removed, so it would appear duplicated.\n\
          \n\
+         ### 返事すべき場面の判断\n\
+         複数のエージェントがいる場合は「返事すべき場面かどうか」を先に判断する。\n\
+         - 自分に直接話しかけられている → 返事する\n\
+         - 他のエージェント同士の会話 → 基本的に黙っておく（NO_REPLY）\n\
+         - 話が完結している → 黙っておく\n\
+         \n\
          ## Turn completion\n\
          \n\
          Your turn continues by default. Only `NO_REPLY` explicitly ends it. When all requested \

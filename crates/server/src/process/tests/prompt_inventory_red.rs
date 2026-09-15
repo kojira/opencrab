@@ -232,6 +232,46 @@ fn rewritten_fact_sentences_are_present() {
     }
 }
 
+#[test]
+fn meta_participation_policy_is_at_the_history_turn_boundary() {
+    let prompt = prompt();
+    let policy = "### 返事すべき場面の判断 \
+                  複数のエージェントがいる場合は「返事すべき場面かどうか」を先に判断する。 \
+                  - 自分に直接話しかけられている → 返事する \
+                  - 他のエージェント同士の会話 → 基本的に黙っておく（NO_REPLY） \
+                  - 話が完結している → 黙っておく";
+    let rejected = "A message that only acknowledges receipt, confirms a test result, expresses \
+                    agreement, or announces that it will stop adds no new information and needs no \
+                    response. In that case, respond with exactly NO_REPLY. Respond normally when the \
+                    message contains a question, request, correction, new evidence, or unresolved \
+                    work.";
+
+    assert_eq!(
+        normalize_ws(&prompt).matches(&normalize_ws(policy)).count(),
+        1,
+        "meta-participation policy must appear exactly once:\n{prompt}"
+    );
+    assert_eq!(
+        normalize_ws(&prompt)
+            .matches(&normalize_ws(rejected))
+            .count(),
+        0,
+        "rejected status-category policy must be absent:\n{prompt}"
+    );
+
+    let history = prompt
+        .find("When conversation history is present")
+        .expect("conversation-history guidance");
+    let policy = prompt
+        .find("### 返事すべき場面の判断")
+        .expect("meta-participation policy");
+    let completion = prompt.find("## Turn completion").expect("turn completion");
+    assert!(
+        history < policy && policy < completion,
+        "meta-participation policy must follow history guidance and precede turn completion:\n{prompt}"
+    );
+}
+
 /// §1-3: 「## Async Behavior」節が §3.2 の全文と一致（節単位・空白正規化）。
 #[test]
 fn async_behavior_section_matches_design() {
