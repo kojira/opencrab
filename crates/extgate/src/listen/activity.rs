@@ -3,6 +3,33 @@ use std::sync::Arc;
 use crate::protocol::{activity_frame, ended_activity_frame, turn_failed_frame, write_json};
 use crate::registry::ExtgateState;
 
+pub fn llm_activity_hook(
+    state: Arc<ExtgateState>,
+    instance_id: String,
+    binding_id: String,
+    activity_id: String,
+    activity_state: &'static str,
+) -> opencrab_actions::LlmActivityHook {
+    Arc::new(move || {
+        let state = Arc::clone(&state);
+        let instance_id = instance_id.clone();
+        let binding_id = binding_id.clone();
+        let activity_id = activity_id.clone();
+        Box::pin(async move {
+            emit_activity(
+                &state,
+                &instance_id,
+                &binding_id,
+                &activity_id,
+                activity_state,
+                None,
+                None,
+            )
+            .await;
+        })
+    })
+}
+
 pub async fn emit_activity(
     state: &Arc<ExtgateState>,
     instance_id: &str,

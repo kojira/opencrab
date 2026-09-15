@@ -30,6 +30,10 @@ pub type ReadOriginHook = Arc<
     dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
 >;
 
+/// LLM 呼び出しの直前・直後に activity を通知する非同期フック。
+pub type LlmActivityHook =
+    Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
+
 /// 走行中注入（#289）の対象範囲（#323 / B2）。
 ///
 /// #289 の走行中注入はターン開始後に届いたユーザー発言を、走っているターンの入力へ
@@ -85,6 +89,9 @@ pub struct RunRequest {
     /// #964: 次の LLM request に新しく含める said の origin を、`llm.chat` の直前に read state
     /// （👀）として通知するフック。extgate V3 だけが渡す。None なら通知しない。
     pub on_read_origin: Option<ReadOriginHook>,
+    /// LLM 呼び出しの直前・直後だけ typing activity を有効にするフック。
+    pub on_llm_start: Option<LlmActivityHook>,
+    pub on_llm_stop: Option<LlmActivityHook>,
     /// #964: 初回 LLM request に含まれる発端 said の origin。said の無い resume / heartbeat と
     /// extgate 以外は None。通知は [`Self::on_read_origin`] がある場合だけ request 直前に行う。
     pub initial_read_origin: Option<String>,
@@ -163,6 +170,8 @@ impl RunRequest {
             on_response_text: None,
             on_continuation_speech: None,
             on_read_origin: None,
+            on_llm_start: None,
+            on_llm_stop: None,
             initial_read_origin: None,
             completion_sink: None,
             subtask_registry: None,
@@ -208,6 +217,17 @@ impl RunRequest {
     /// #964: LLM request 直前の read state（👀）通知フックを設定する。
     pub fn with_on_read_origin(mut self, cb: ReadOriginHook) -> Self {
         self.on_read_origin = Some(cb);
+        self
+    }
+
+    /// LLM inference の直前・直後に activity を通知するフックを設定する。
+    pub fn with_llm_activity_hooks(
+        mut self,
+        start: LlmActivityHook,
+        stop: LlmActivityHook,
+    ) -> Self {
+        self.on_llm_start = Some(start);
+        self.on_llm_stop = Some(stop);
         self
     }
 

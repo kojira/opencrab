@@ -16,6 +16,91 @@
     }
 
     #[tokio::test]
+    async fn llm_activity_hooks_bracket_tool_no_reply_and_error_calls() {
+        struct EventLlm {
+            events: Arc<std::sync::Mutex<Vec<&'static str>>>,
+            responses: std::sync::Mutex<std::collections::VecDeque<anyhow::Result<ChatResponse>>>,
+        }
+
+        #[async_trait]
+        impl LlmClient for EventLlm {
+            async fn chat(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+                self.events.lock().unwrap().push("llm");
+                self.responses
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .expect("response")
+            }
+        }
+
+        fn hook(
+            events: Arc<std::sync::Mutex<Vec<&'static str>>>,
+            event: &'static str,
+        ) -> super::LlmActivityHook {
+            Arc::new(move || {
+                let events = events.clone();
+                Box::pin(async move {
+                    events.lock().unwrap().push(event);
+                })
+            })
+        }
+
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let llm = EventLlm {
+            events: events.clone(),
+            responses: std::sync::Mutex::new(
+                [
+                    Ok(tool_call_response(vec![tc(
+                        "call-1",
+                        "test_tool",
+                        serde_json::json!({}),
+                    )])),
+                    Ok(final_text_response("NO_REPLY")),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+        };
+        let executor = MockExecutor::new().add_result(
+            "test_tool",
+            ActionResult {
+                success: true,
+                data: serde_json::json!("ok"),
+                error: None,
+            },
+        );
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 3);
+        engine.set_llm_activity_hooks(
+            hook(events.clone(), "start"),
+            hook(events.clone(), "stop"),
+        );
+        engine.run("system", "user", "model").await.unwrap();
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["start", "llm", "stop", "start", "llm", "stop"]
+        );
+
+        let error_events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let error_llm = EventLlm {
+            events: error_events.clone(),
+            responses: std::sync::Mutex::new(
+                [Err(anyhow::anyhow!("transport failed"))]
+                    .into_iter()
+                    .collect(),
+            ),
+        };
+        let mut error_engine =
+            SkillEngine::new(Box::new(error_llm), Box::new(MockExecutor::new()), 1);
+        error_engine.set_llm_activity_hooks(
+            hook(error_events.clone(), "start"),
+            hook(error_events.clone(), "stop"),
+        );
+        assert!(error_engine.run("system", "user", "model").await.is_err());
+        assert_eq!(*error_events.lock().unwrap(), ["start", "llm", "stop"]);
+    }
+
+    #[tokio::test]
     async fn provider_tool_history_reaches_additive_log_callback() {
         struct HistoryLlm;
 

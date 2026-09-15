@@ -352,7 +352,7 @@ fn spawn_say_consumer(
     tokio::spawn(async move {
         // address → channel snowflake（say はこの channel への通常投稿）。
         let channel = parse_address(&agent_id, &address).map(|(_, ch)| ch);
-        // ターン進行中の typing keepalive（設計 §5.4）。activity started で起こし、ended で止める。
+        // ターン進行中の typing keepalive（設計 §5.4）。activity started で起こし、stopped（ended は fallback）で止める。
         // 別タスクで打つのでこのループはブロックしない。ガードはこのループ寿命に束ねて保持し、
         // consumer 終了時（＝プロセス終了時）にも drop されて止まる。
         let mut typing: Option<crate::typing::TypingKeepalive> = None;
@@ -411,7 +411,7 @@ fn spawn_say_consumer(
                         }
                     }
                     // typing: core の platform-neutral activity を typing 開始/keepalive/停止へ機械的に
-                    // 写す（設計 §5.4）。started で keepalive を起こし、ended（裁定A で say 配送後に届く）
+                    // 写す（設計 §5.4）。started で keepalive を起こし、LLM 出力直後の stopped（ended は fallback）
                     // で止める。read はターン境界ではないので typing を駆動しない（進行中を止めない）。
                     // channel が無い address（say 不可）では typing も出さない。best-effort。
                     if state != "read" {

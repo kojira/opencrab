@@ -506,9 +506,9 @@ fn parse_activity(obj: &Value) -> Result<Activity, FrameError> {
     let binding_id = parse_uuid(&require_str(obj, "binding_id")?)?;
     let activity_id = parse_uuid(&require_str(obj, "activity_id")?)?;
     let state = nonempty_str(obj, "state")?;
-    // #930: read state を additive に受理（started/ended に加える）。origin つきで 👀 を付ける。
+    // read は 👀、started/stopped は LLM inference 中の typing、ended は turn 最終決着。
     // 未知 state は従来どおり拒否（既知集合のみ通す）。
-    if state != "started" && state != "ended" && state != "read" {
+    if state != "started" && state != "stopped" && state != "ended" && state != "read" {
         return Err(FrameError::BadRequest);
     }
     // R2(👀)/#930(read): origin は optional。欠落=None（旧 core 互換）。present は nonempty string。

@@ -497,6 +497,9 @@ pub async fn run_agent_response(
     if let Some(cb) = req.on_read_origin {
         engine.set_on_folded_origin(cb);
     }
+    if let (Some(start), Some(stop)) = (req.on_llm_start, req.on_llm_stop) {
+        engine.set_llm_activity_hooks(start, stop);
+    }
 
     // sleep のメンテナンスラン（#393）はここを配線しない = 生ログ（`memory_sessions`）に
     // 1 行も書かない。整備作業のターンは本人の体験ではなく、記録すると次の宣言ランが

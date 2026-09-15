@@ -51,7 +51,7 @@ pub use no_reply::{
     terminate_at_no_reply, DeliveryContext, NoReplyTermination, NO_REPLY_LOG_TARGET,
     NO_REPLY_SENTINEL, NO_REPLY_TRAILING_DISCARDED_TAG,
 };
-pub use run_request::{LiveInboundScope, RunRequest};
+pub use run_request::{LiveInboundScope, LlmActivityHook, RunRequest};
 pub use session_inbound::{
     accept_inbound, consecutive_trust_groups, delivery_effect, plan_record_only_flags,
     prepare_session_inbound, prepare_session_inbound_write, run_session_turn, start_session_turn,

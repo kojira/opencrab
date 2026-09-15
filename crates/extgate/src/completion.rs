@@ -13,7 +13,7 @@ use opencrab_actions::{
 
 use crate::delivery::apply_delivery_effect;
 use crate::delivery_mode::{adjust_inbound_effect, DeliveryMode};
-use crate::listen::{emit_activity, emit_ended_activity};
+use crate::listen::emit_ended_activity;
 use crate::registry::ExtgateState;
 
 /// `session_id_for_binding` と同じ接頭辞。`dispatch_settled` が親セッション判定に使う。
@@ -166,16 +166,6 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
     locks
         .run_serialized(&session_id, async move {
             let activity_id = uuid::Uuid::new_v4().to_string();
-            emit_activity(
-                &sink.state,
-                &sink.instance_id,
-                &sink.binding_id,
-                &activity_id,
-                "started",
-                None,
-                None,
-            )
-            .await;
             let (system, name) = sink.runtime.build_agent_context(&sink.agent_id, &caller);
             let system = if sink.system_context.is_empty() {
                 system
@@ -187,6 +177,7 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
             let only_speaker = sink.only_speaker;
             let speaker_id = sink.speaker_id.clone();
             let last_continuation_say = Arc::new(std::sync::Mutex::new(None::<String>));
+            let hook_activity = activity_id.clone();
             // DI 拡張 §8: resume ターンでも宣言能力を tool set へ載せる（連鎖して更に DI 操作を
             // 呼べるように）。宣言が無ければ None。
             let ops_actions: Option<Arc<dyn opencrab_gateway::GatewayActions>> =
@@ -214,6 +205,22 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
                         conversation,
                         "extgate",
                         caller.clone(),
+                    )
+                    .with_llm_activity_hooks(
+                        crate::listen::llm_activity_hook(
+                            Arc::clone(&sink.state),
+                            sink.instance_id.clone(),
+                            sink.binding_id.clone(),
+                            hook_activity.clone(),
+                            "started",
+                        ),
+                        crate::listen::llm_activity_hook(
+                            Arc::clone(&sink.state),
+                            sink.instance_id.clone(),
+                            sink.binding_id.clone(),
+                            hook_activity.clone(),
+                            "stopped",
+                        ),
                     )
                     // #964: resume ターンで畳み込んだ said にも、その said を含む LLM request の
                     // 直前に read+origin を付ける（主ターンと同じ境界・1 origin 1 回）。同時に

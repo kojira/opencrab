@@ -127,6 +127,19 @@ fn parse_activity_read_carries_origin() {
     }
 }
 
+#[test]
+fn parse_activity_stopped_is_a_non_final_typing_boundary() {
+    let raw = br#"{"m":"activity","binding_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","activity_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","state":"stopped"}"#;
+    match parse_frame_bytes(raw).unwrap() {
+        CoreMsg::Activity(a) => {
+            assert_eq!(a.state, "stopped");
+            assert_eq!(a.origin, None);
+            assert_eq!(a.silent_origins, None);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
 // origin 欠落は None（後方互換）。additive の未知 field も無視。
 #[test]
 fn parse_activity_without_origin_is_none() {

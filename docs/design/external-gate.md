@@ -65,7 +65,7 @@ ErrDetail  = string | null
 | gate→core `said` | `id,m,binding_id,origin,author_id,text,attachments` | `m="said"`; identity は nonempty; `text` は string; `attachments` は `Attachment[]` | core→gate `ok` に `seq`。記録失敗は `err`。 |
 | core→gate `bind` | `id,m,binding_id,address` | `m="bind"`; `id="bind:"+binding_id` | gate→core `ok`。受理不能は `err(code="bind_failed")`。 |
 | core→gate `say` | `id,m,binding_id,payload` | `m="say"`; `id=delivery_id`; payload は §3.4 | gate→core `ok`。外部 API が非受理と確定した場合だけ `err(code="external_rejected")`。 |
-| core→gate `activity` | `m,binding_id,activity_id,state` | `m="activity"`; `state="started"|"ended"` | 応答なし。 |
+| core→gate `activity` | `m,binding_id,activity_id,state` | `m="activity"`; `state="started"|"stopped"|"read"|"ended"` | 応答なし。 |
 | response `ok` | `id,m` または `id,m,seq` | `m="ok"`; hello/bind/say は前者、said は `seq:positive-i64|null` を持つ | pending request 1 件を消費。 |
 | response `err` | `id,m,code,detail` | `m="err"`; `code` は §5.4; `detail` は `ErrDetail` | pending request 1 件を消費。 |
 
@@ -78,7 +78,7 @@ hello 成功後、core は当該 instance の open binding 全件へ `binding_id
 - core が生成する payload は exact `{"text": body}`。`body` は 1 byte 以上の UTF-8 string。
 - gateway は payload の `text` 以外の member を無視する。`text` 欠落、string 以外、空 string は `external_rejected` を返し、外部 API I/O は 0。
 - gateway は外部 API が投稿を受理したと確認した後だけ say `ok` を返す。受理前後が不明なら `ok` / `err` を作らず socket を close する。
-- activity は表示専用 best-effort。core はターン開始前に `started`、終了 path の finally 相当箇所で同じ `activity_id` の `ended` を 1 回書く。activity 失敗から say を生成、再送、変更しない。
+- activity は表示専用 best-effort。core は各 LLM inference の直前に `started`、呼び出しが戻った直後に `stopped` を書く。execution 全体の終了 path では同じ `activity_id` の `ended` を 1 回書く。activity 失敗から say を生成、再送、変更しない。
 
 ### 3.5 said 応答と同seq
 
@@ -501,7 +501,7 @@ conformance suite は少なくとも次を自動検証する。
 | `effect` + kind=`say` + address | direct `m="say"`、binding_id、payload だけ。payload は `{"text":body}`、text nonempty。 |
 | success response の delivered/origin、false branch | `ok` は配送成功だけ。外部 origin は返さない。確定非受理は `err(external_rejected)`。 |
 | response に `m` 無し | response は `m="ok"|"err"` を必須にする。pending 種と shape を照合する。 |
-| activity started/progress/ended + address/kind/label | binding_id/activity_id と started/read/ended だけ。started は typing、read+origin は LLM request 直前の既読通知。response と delivery は作らない。 |
+| activity started/stopped/read/ended + address/kind/label | binding_id/activity_id と started/stopped/read/ended だけ。started/stopped は LLM inference 境界の typing、read+origin は LLM request 直前の既読通知。response と delivery は作らない。 |
 | origin 重複を null と解釈する G1 | 重複は初回 seq。null は core が記録しなかった said だけ。 |
 | 接続情報を DB と admin GET に投影 | 接続は process memory だけ。restart は空。Instance GET に接続 field を返さない。 |
 | 多数の gate 補助表 | gate_instances、gate_bindings、external_origins、deliveries の 4 表。subject は agents 列。 |

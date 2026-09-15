@@ -46,6 +46,9 @@ type ReadOriginHook = Arc<
     dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
 >;
 
+type LlmActivityHook =
+    Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
+
 /// The LLM-driven action loop engine.
 ///
 /// The SkillEngine orchestrates the cycle of:
@@ -107,6 +110,9 @@ pub struct SkillEngine {
     /// #964: request に新しく含める origin を `llm.chat` の直前に read state として通知する
     /// フック。None なら通知しない。
     on_read_origin: Option<ReadOriginHook>,
+    /// LLM inference の直前・直後だけ gateway activity を有効にするフック。
+    on_llm_start: Option<LlmActivityHook>,
+    on_llm_stop: Option<LlmActivityHook>,
     /// 初回 request に含まれる発端 origin。`run_agent_response` の loop restart を跨いでも
     /// 1 回だけ通知するため、request 境界で consume する。
     initial_read_origin: std::sync::Mutex<Option<String>>,
@@ -131,6 +137,20 @@ struct ToolResultOffload {
 }
 
 impl SkillEngine {
+    async fn chat_with_activity(
+        &self,
+        request: types::ChatRequest,
+    ) -> Result<opencrab_llm_types::LlmExchange> {
+        if let Some(cb) = &self.on_llm_start {
+            cb().await;
+        }
+        let result = self.llm.chat_with_history(request).await;
+        if let Some(cb) = &self.on_llm_stop {
+            cb().await;
+        }
+        result
+    }
+
     /// Run the action loop with the given system context and user message.
     pub async fn run(
         &self,
@@ -165,6 +185,8 @@ impl SkillEngine {
             tool_result_offload: None,
             live_inbound: None,
             on_read_origin: None,
+            on_llm_start: None,
+            on_llm_stop: None,
             initial_read_origin: std::sync::Mutex::new(None),
             max_output_tokens: None,
             conversation_high: None,
@@ -205,6 +227,12 @@ impl SkillEngine {
     /// origin の両方を request 境界で通知する。
     pub fn set_on_folded_origin(&mut self, cb: ReadOriginHook) {
         self.on_read_origin = Some(cb);
+    }
+
+    /// LLM inference の直前・直後に gateway activity を通知する。
+    pub fn set_llm_activity_hooks(&mut self, start: LlmActivityHook, stop: LlmActivityHook) {
+        self.on_llm_start = Some(start);
+        self.on_llm_stop = Some(stop);
     }
 
     /// #964: 初回 LLM request に含まれる発端 said の origin を設定する。

@@ -11,7 +11,7 @@ use crate::completion::{v3_attach_dispatch, ExtgateCompletionSink};
 use crate::delivery::apply_delivery_effect;
 use crate::delivery_mode::{adjust_inbound_effect, DeliveryMode};
 use crate::error::ErrorCode;
-use crate::listen::{emit_activity, emit_ended_activity};
+use crate::listen::emit_ended_activity;
 use crate::protocol::Said;
 use crate::registry::ExtgateState;
 
@@ -88,18 +88,6 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                     .start_session_turn_count
                     .fetch_add(1, Ordering::SeqCst);
                 let activity_id = uuid::Uuid::new_v4().to_string();
-                // #964: started は typing の開始だけを通知する。発端 origin の read（👀）は、
-                // その origin を含む初回 LLM request が完成した後、chat 呼び出し直前に別途 emit する。
-                emit_activity(
-                    &state,
-                    &instance_id,
-                    &binding_id,
-                    &activity_id,
-                    "started",
-                    None,
-                    None,
-                )
-                .await;
                 let (system, name) = runtime.build_agent_context(&agent_id, &caller);
                 let system = if system_context.is_empty() {
                     system
@@ -130,6 +118,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                     let hook_agent = agent_id.clone();
                     let hook_session = session_id.clone();
                     let hook_reply = reply_target.clone();
+                    let hook_activity = activity_id.clone();
                     let request_reply_target = reply_target.clone();
                     let hook_last_continuation_say = Arc::clone(&last_continuation_say);
                     tokio::spawn(async move {
@@ -191,6 +180,22 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                     caller.clone(),
                                 )
                                 .with_image_urls(images.clone())
+                                .with_llm_activity_hooks(
+                                    crate::listen::llm_activity_hook(
+                                        Arc::clone(&hook_state),
+                                        hook_instance.clone(),
+                                        hook_binding.clone(),
+                                        hook_activity.clone(),
+                                        "started",
+                                    ),
+                                    crate::listen::llm_activity_hook(
+                                        Arc::clone(&hook_state),
+                                        hook_instance.clone(),
+                                        hook_binding.clone(),
+                                        hook_activity.clone(),
+                                        "stopped",
+                                    ),
+                                )
                                 // #964: 発端 origin は started へ載せず、初回 LLM request の直前に
                                 // read+origin として通知する。
                                 .with_initial_read_origin(origin.clone())

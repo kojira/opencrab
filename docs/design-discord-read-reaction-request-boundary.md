@@ -30,11 +30,13 @@ LLM呼び出しは必ず直列で行う。
 
 ## 3. 修正方針
 
-### 3.1 `activity started`
+### 3.1 LLM inference activity
 
-- `activity started`は入力中表示の開始だけに使う。
-- `activity started`では投稿へ👀を付けない。
-- 発端投稿のoriginを`activity started`へ載せない。
+- `activity started`は各`llm.chat`の直前に送り、入力中表示を開始する。
+- `llm.chat`が成功・失敗のどの結果で戻っても、直後に非終端の`activity stopped`を送り、出力処理より先に入力中表示を止める。
+- context構築中とtool実行中は入力中表示を維持しない。
+- `activity ended`はexecution全体のauthoritativeな終了通知として維持する。
+- `activity started`では投稿へ👀を付けず、発端投稿のoriginも載せない。
 
 ### 3.2 LLM呼び出し直前
 
@@ -97,8 +99,9 @@ Discord gatewayは既存どおり`read+origin`を受けて、その投稿へ👀
 
 決定的なテストで次を確認する。
 
-1. `activity started`だけでは👀が付かない。
-2. 初回LLM呼び出しの直前に、発端投稿へ👀が1回だけ付く。
+1. 各LLM呼び出しが`activity started`→`llm.chat`→`activity stopped`の順になり、tool-only、`NO_REPLY`、errorでも対になる。
+2. `activity started`だけでは👀が付かない。
+3. 初回LLM呼び出しの直前に、発端投稿へ👀が1回だけ付く。
 3. 対象originがないLLM呼び出しでは👀を付けない。
 4. 1個目のLLMが処理結果を返す前に、2個目のプロンプトを構築しない。
 5. 1個目のLLMが処理結果を返す前に、2個目のLLMを呼び出さない。

@@ -185,7 +185,7 @@ impl SkillEngine {
             }
 
             let call_start = std::time::Instant::now();
-            let exchange_result = self.llm.chat_with_history(request).await;
+            let exchange_result = self.chat_with_activity(request).await;
             let latency_ms = call_start.elapsed().as_millis() as i64;
             // #665: LLM 呼び出しの出。入と対で出す（入だけだと「入って止まった」と「戻った」が
             // 区別できない）。成否と latency を載せ、この後のツール往復／最終応答へ進む。
