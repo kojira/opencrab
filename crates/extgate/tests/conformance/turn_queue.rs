@@ -513,6 +513,7 @@ async fn assert_failed_completion_resume_has_no_ended(reply: &str, budget_fails:
     );
 
     let mut saw_started = false;
+    let mut saw_stopped = false;
     for _ in 0..8 {
         let Some(v) = read_frame_opt(&mut s).await else {
             if saw_started {
@@ -523,12 +524,19 @@ async fn assert_failed_completion_resume_has_no_ended(reply: &str, budget_fails:
         if v["m"] == "activity" && v["state"] == "started" {
             saw_started = true;
         }
+        if v["m"] == "activity" && v["state"] == "stopped" {
+            saw_stopped = true;
+        }
         assert!(
             !(v["m"] == "activity" && v["state"] == "ended"),
             "failed completion resume must not emit authoritative ended: {v}"
         );
     }
-    assert!(saw_started, "completion resume lifecycle must start");
+    if budget_fails {
+        assert!(!saw_started && !saw_stopped, "no LLM call means no typing");
+    } else {
+        assert!(saw_started && saw_stopped, "failed LLM call must be bracketed");
+    }
 }
 
 #[tokio::test]

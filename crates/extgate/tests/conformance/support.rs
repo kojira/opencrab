@@ -81,6 +81,8 @@ impl AgentRuntime for TestRuntime {
         let initial_read_origin = req.initial_read_origin.clone();
         let result_origin = initial_read_origin.clone();
         let on_read_origin = req.on_read_origin.clone();
+        let on_llm_start = req.on_llm_start.clone();
+        let on_llm_stop = req.on_llm_stop.clone();
         self.system_prompts
             .lock()
             .unwrap()
@@ -91,10 +93,13 @@ impl AgentRuntime for TestRuntime {
             .push(req.reply_target.clone());
         self.conversations.lock().unwrap().push(req.conversation);
         self.images.lock().unwrap().push(req.image_urls.clone());
-        // #964: この conformance runtime の Engine 境界を模擬する。request が完成した後、
-        // simulated LLM call の直前にだけ initial origin の read 通知を await する。
+        // Engine の read/activity/LLM 境界を模擬する。read 通知の後で typing を開始し、
+        // simulated LLM call へ入る。
         if let (Some(origin), Some(cb)) = (initial_read_origin, on_read_origin) {
             cb(origin).await;
+        }
+        if let Some(cb) = on_llm_start {
+            cb().await;
         }
         self.turn_entered.notify_waiters();
         // 旧 V3（sink 無し）はツールを同期実行する。sink があれば detach 済みなので待たない。
@@ -107,6 +112,9 @@ impl AgentRuntime for TestRuntime {
         let hold = self.hold_rx.lock().unwrap().take();
         if let Some(rx) = hold {
             let _ = rx.await;
+        }
+        if let Some(cb) = on_llm_stop {
+            cb().await;
         }
         self.turns.fetch_add(1, Ordering::SeqCst);
         let reply = self.reply.lock().unwrap().clone();

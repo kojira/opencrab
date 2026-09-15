@@ -26,11 +26,14 @@
         impl LlmClient for EventLlm {
             async fn chat(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
                 self.events.lock().unwrap().push("llm");
-                self.responses
+                let result = self
+                    .responses
                     .lock()
                     .unwrap()
                     .pop_front()
-                    .expect("response")
+                    .expect("response");
+                self.events.lock().unwrap().push("output");
+                result
             }
         }
 
@@ -51,11 +54,10 @@
             events: events.clone(),
             responses: std::sync::Mutex::new(
                 [
-                    Ok(tool_call_response(vec![tc(
-                        "call-1",
-                        "test_tool",
-                        serde_json::json!({}),
-                    )])),
+                    Ok(resp(
+                        Some("working"),
+                        vec![tc("call-1", "test_tool", serde_json::json!({}))],
+                    )),
                     Ok(final_text_response("NO_REPLY")),
                 ]
                 .into_iter()
@@ -71,14 +73,28 @@
             },
         );
         let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 3);
+        let read_events = events.clone();
+        engine.set_on_folded_origin(Arc::new(move |_origin| {
+            let events = read_events.clone();
+            Box::pin(async move { events.lock().unwrap().push("read") })
+        }));
+        engine.set_initial_read_origin("origin-1".into());
         engine.set_llm_activity_hooks(
             hook(events.clone(), "start"),
             hook(events.clone(), "stop"),
         );
+        let text_events = events.clone();
+        engine.set_on_response_text(move |_| text_events.lock().unwrap().push("text"));
+        let tool_events = events.clone();
+        engine.add_on_tool_call(move |_, _| tool_events.lock().unwrap().push("tool"));
         engine.run("system", "user", "model").await.unwrap();
+        events.lock().unwrap().push("returned");
         assert_eq!(
             *events.lock().unwrap(),
-            ["start", "llm", "stop", "start", "llm", "stop"]
+            [
+                "read", "start", "llm", "output", "stop", "text", "tool", "start", "llm",
+                "output", "stop", "returned"
+            ]
         );
 
         let error_events = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -97,7 +113,11 @@
             hook(error_events.clone(), "stop"),
         );
         assert!(error_engine.run("system", "user", "model").await.is_err());
-        assert_eq!(*error_events.lock().unwrap(), ["start", "llm", "stop"]);
+        error_events.lock().unwrap().push("error");
+        assert_eq!(
+            *error_events.lock().unwrap(),
+            ["start", "llm", "output", "stop", "error"]
+        );
     }
 
     #[tokio::test]
