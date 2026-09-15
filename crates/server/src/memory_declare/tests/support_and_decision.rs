@@ -374,6 +374,7 @@
             tool_calls_made: 0,
             stopped_by_limit,
             explicit_termination: None,
+            silent_origins: Vec::new(),
             last_posting_utterance_id: None,
             last_generation_had_continuation_speech: false,
             xml_fallback_parses: 0,

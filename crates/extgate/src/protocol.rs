@@ -148,6 +148,19 @@ pub fn activity_frame(
     frame
 }
 
+/// New coreのsuccessful ended outcome。`silent_origins`はemptyでも必ず載せ、
+/// field欠落を旧core互換fallbackと区別できるようにする。
+pub fn ended_activity_frame(
+    binding_id: &str,
+    activity_id: &str,
+    completed_target: Option<&str>,
+    silent_origins: &[String],
+) -> Value {
+    let mut frame = activity_frame(binding_id, activity_id, "ended", None, completed_target);
+    frame["silent_origins"] = json!(silent_origins);
+    frame
+}
+
 /// R3(❌): ターン失敗通知フレーム。id を持たない fire-and-forget 通知（activity と同型）。
 /// 未知フレームを ignore する準拠 gateway は write 0・keep で素通しする。error 本文は載せない。
 pub fn turn_failed_frame(binding_id: &str, origin: &str) -> Value {
@@ -599,6 +612,22 @@ mod activity_tests {
         let read = activity_frame("binding", "activity", "read", Some("origin"), None);
         assert_eq!(read["origin"], "origin");
         assert!(read.get("completed_target").is_none());
+    }
+
+    #[test]
+    fn authoritative_ended_always_carries_silent_origins_and_can_coexist() {
+        let empty = ended_activity_frame("binding", "activity", None, &[]);
+        assert_eq!(empty["silent_origins"], serde_json::json!([]));
+        assert!(empty.get("completed_target").is_none());
+
+        let ended = ended_activity_frame(
+            "binding",
+            "activity",
+            Some("utterance"),
+            &["origin-b".to_string()],
+        );
+        assert_eq!(ended["completed_target"], "utterance");
+        assert_eq!(ended["silent_origins"], serde_json::json!(["origin-b"]));
     }
 
     #[test]

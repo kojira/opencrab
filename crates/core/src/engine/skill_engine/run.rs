@@ -6,6 +6,7 @@ use super::{
         self, classify_call_failure, initialize_turn, normalize_response,
         partition_tool_calls_for_dispatch, InitialTurn,
     },
+    silent_origins::SilentOriginTracker,
     turn_budget::{apply_turn_budget, seat_tool_result},
     SkillEngine,
 };
@@ -43,18 +44,14 @@ impl SkillEngine {
         );
 
         let mut iterations = 0;
-        // #964: 次の request に新しく含める origin。発端は初回だけここへ入り、走行中の新着は
-        // 実際に messages へ append したイテレーションで加える。loop restart が同じ engine を
-        // 再利用しても発端を再通知しないよう、engine 側の値はここで consume する。
+        // 発端originは初回だけconsumeし、走行中の新着はrequestへappendした時点で加える。
         let initial_read_origin = self
             .initial_read_origin
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         let mut pending_read_origins: Vec<String> = initial_read_origin.into_iter().collect();
-        // 同じ run 内で既に通知した origin は再び pending に入れない。
-        let mut read_emitted_origins: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut silent_origins = SilentOriginTracker::new();
         let mut total_tool_calls = 0;
         let mut xml_fallback_parses = 0;
         // #915: 各生成で最後に成功した投稿系 utterance-op の call_id。生成開始時にリセットし、
@@ -81,6 +78,7 @@ impl SkillEngine {
                     tool_calls_made: total_tool_calls,
                     stopped_by_limit: true,
                     explicit_termination: None,
+                    silent_origins: Vec::new(),
                     last_posting_utterance_id,
                     last_generation_had_continuation_speech,
                     xml_fallback_parses,
@@ -111,29 +109,14 @@ impl SkillEngine {
                     // #964: origin つきで引く。ここでは request に含める本文と origin の組を
                     // pending に積むだけにし、read 通知は request 構築後の `llm.chat` 直前まで遅らせる。
                     for folded in source.poll_new_with_origin() {
-                        let crate::FoldedInbound { text, origin } = folded;
-                        tracing::info!(
-                            iteration = iterations,
-                            bytes = text.len(),
-                            "injecting newly arrived user speech into the running turn"
+                        super::live_inbound::append(
+                            folded,
+                            &mut messages,
+                            &mut turn_ledger,
+                            &mut pending_read_origins,
+                            &silent_origins,
+                            Some(iterations),
                         );
-                        messages.push(Message {
-                            role: Role::User,
-                            content: Some(MessageContent::Text(text.clone())),
-                            name: None,
-                            function_call: None,
-                            tool_calls: None,
-                            tool_call_id: None,
-                        });
-                        turn_ledger.record(format!("live:{}", messages.len()), &text);
-                        // 同じ origin が同一 poll や以前の request に重なっても通知は 1 回だけ。
-                        if let Some(origin) = origin {
-                            if !read_emitted_origins.contains(&origin)
-                                && !pending_read_origins.contains(&origin)
-                            {
-                                pending_read_origins.push(origin);
-                            }
-                        }
                     }
                 }
             }
@@ -193,14 +176,12 @@ impl SkillEngine {
             // #964: この exact request に新しく含めた origin の read 通知を、request が完成した後、
             // `llm.chat(request).await` の直前に逐次 emit する。対象が無ければ何もしない。
             // drain してから呼ぶことで、同じ origin は次の request で重複通知しない。
-            if let Some(cb) = &self.on_read_origin {
-                for origin in pending_read_origins.drain(..) {
-                    if read_emitted_origins.insert(origin.clone()) {
+            for origin in pending_read_origins.drain(..) {
+                if silent_origins.include_in_request(origin.clone()) {
+                    if let Some(cb) = &self.on_read_origin {
                         cb(origin).await;
                     }
                 }
-            } else {
-                pending_read_origins.clear();
             }
 
             let call_start = std::time::Instant::now();
@@ -349,6 +330,7 @@ impl SkillEngine {
                 // 純発話でも NO_REPLY が無ければ、最小 ack を積んで次の LLM 呼び出しへ進む。
                 // NO_REPLY があるときだけ発話を配送して、この generation で明示終了する。
                 if !next_llm_call_needed && termination_requested {
+                    let mut successful_utterance = false;
                     for tool_call in &tool_calls {
                         total_tool_calls += 1;
                         let tool_name = &tool_call.function.name;
@@ -357,8 +339,11 @@ impl SkillEngine {
                             .executor
                             .execute_with_id(tool_name, &args, &tool_call.id)
                             .await;
-                        if tool_name == "reply" && result.success {
-                            last_posting_utterance_id = Some(tool_call.id.clone());
+                        if result.success {
+                            successful_utterance = true;
+                            if tool_name == "reply" {
+                                last_posting_utterance_id = Some(tool_call.id.clone());
+                            }
                         }
                         tracing::debug!(
                             iteration = iterations,
@@ -368,12 +353,19 @@ impl SkillEngine {
                             "turn: 純発話生成を配送（1 生成で完結・機械行なし）"
                         );
                     }
+                    let response = content.unwrap_or_default();
+                    if successful_utterance || !response.trim().is_empty() {
+                        silent_origins.resolve_visible();
+                    } else {
+                        silent_origins.resolve_silent();
+                    }
                     return Ok(EngineResult {
-                        response: content.unwrap_or_default(),
+                        response,
                         iterations,
                         tool_calls_made: total_tool_calls,
                         stopped_by_limit: false,
                         explicit_termination: Some(crate::engine::ExplicitTermination::NoReply),
+                        silent_origins: silent_origins.into_silent(),
                         last_posting_utterance_id,
                         last_generation_had_continuation_speech,
                         xml_fallback_parses,
@@ -414,6 +406,7 @@ impl SkillEngine {
                             cb(body.to_string()).await.map_err(|e| {
                                 anyhow::anyhow!("holding speech delivery failed: {e:#}")
                             })?;
+                            silent_origins.resolve_visible();
                             holding_delivered = true;
                         }
                     }
@@ -542,8 +535,11 @@ impl SkillEngine {
                             .executor
                             .execute_with_id(tool_name, &args, &tool_call.id)
                             .await;
-                        if tool_name == "reply" && result.success {
-                            last_posting_utterance_id = Some(tool_call.id.clone());
+                        if result.success {
+                            silent_origins.resolve_visible();
+                            if tool_name == "reply" {
+                                last_posting_utterance_id = Some(tool_call.id.clone());
+                            }
                         }
                         // 最小 ack（データを持たない空オブジェクト・capping 不要）。成功/失敗を
                         // 名乗らない——失敗は say と同一経路で ❌/turn_failed に別途表面化する（C9）。
@@ -673,8 +669,11 @@ impl SkillEngine {
                                 cb(c.clone()).await.map_err(|e| {
                                     anyhow::anyhow!("continuation speech delivery failed: {e:#}")
                                 })?;
+                                silent_origins.resolve_visible();
                             } else {
+                                // 最終EngineResultで上位が配送する本文なので、このrequestはsilentではない。
                                 last_undelivered_speech = Some(c.clone());
+                                silent_origins.resolve_visible();
                             }
                         }
                     }
@@ -696,8 +695,10 @@ impl SkillEngine {
                         cb(c.clone()).await.map_err(|e| {
                             anyhow::anyhow!("continuation speech delivery failed: {e:#}")
                         })?;
+                        silent_origins.resolve_visible();
                     } else {
                         last_undelivered_speech = Some(c.clone());
+                        silent_origins.resolve_visible();
                     }
                     messages.push(Message {
                         role: Role::Assistant,
@@ -711,6 +712,11 @@ impl SkillEngine {
                     apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
                 }
                 continue;
+            }
+
+            // visible textなしの明示NO_REPLYは、このexact requestまでの未解決originだけを沈黙確定する。
+            if content.as_deref().is_none_or(|text| text.trim().is_empty()) {
+                silent_origins.resolve_silent();
             }
 
             // NO_REPLY生成中に新着が届いていたら、終了より新着を優先する。completion sinkは
@@ -728,8 +734,10 @@ impl SkillEngine {
                             cb(speech.clone()).await.map_err(|e| {
                                 anyhow::anyhow!("continuation speech delivery failed: {e:#}")
                             })?;
+                            silent_origins.resolve_visible();
                         } else {
                             last_undelivered_speech = Some(speech.clone());
+                            silent_origins.resolve_visible();
                         }
                         messages.push(Message {
                             role: Role::Assistant,
@@ -743,23 +751,14 @@ impl SkillEngine {
                     }
                 }
                 for folded in late_inbound {
-                    let crate::FoldedInbound { text, origin } = folded;
-                    messages.push(Message {
-                        role: Role::User,
-                        content: Some(MessageContent::Text(text.clone())),
-                        name: None,
-                        function_call: None,
-                        tool_calls: None,
-                        tool_call_id: None,
-                    });
-                    turn_ledger.record(format!("live:{}", messages.len()), &text);
-                    if let Some(origin) = origin {
-                        if !read_emitted_origins.contains(&origin)
-                            && !pending_read_origins.contains(&origin)
-                        {
-                            pending_read_origins.push(origin);
-                        }
-                    }
+                    super::live_inbound::append(
+                        folded,
+                        &mut messages,
+                        &mut turn_ledger,
+                        &mut pending_read_origins,
+                        &silent_origins,
+                        None,
+                    );
                 }
                 apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
                 continue;
@@ -770,6 +769,9 @@ impl SkillEngine {
                 .filter(|text| !text.trim().is_empty())
                 .or(last_undelivered_speech)
                 .unwrap_or_default();
+            if !final_text.trim().is_empty() {
+                silent_origins.resolve_visible();
+            }
 
             tracing::warn!(
                 iteration = iterations,
@@ -788,6 +790,7 @@ impl SkillEngine {
                 tool_calls_made: total_tool_calls,
                 stopped_by_limit: false,
                 explicit_termination: Some(crate::engine::ExplicitTermination::NoReply),
+                silent_origins: silent_origins.into_silent(),
                 last_posting_utterance_id,
                 last_generation_had_continuation_speech,
                 xml_fallback_parses,

@@ -269,6 +269,10 @@ pub struct EngineResult {
     /// 正常終了を明示した制御記号。配送本文とは分離して保持する。
     #[serde(default)]
     pub explicit_termination: Option<ExplicitTermination>,
+    /// このexecutionでexact requestへ取り込み、可視結果を持たない明示NO_REPLYで
+    /// 無発話確定したopaque origin。request取り込み順・重複なし。
+    #[serde(default)]
+    pub silent_origins: Vec<String>,
     /// #915: 最終生成で成功した投稿系 utterance-op の最後の call_id。
     /// 現行の投稿系 operation は reply。reaction/repost/resolve は対象外。
     #[serde(default)]

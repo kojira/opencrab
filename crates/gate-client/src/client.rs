@@ -1,7 +1,7 @@
 //! 1 instance = 1 UDS connection。hello / bind ack / said / say / activity だけ。
 //! 切断後は指数 backoff で再接続し、hello 再送で open binding を replay する。
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

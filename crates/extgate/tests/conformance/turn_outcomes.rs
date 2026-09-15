@@ -96,21 +96,22 @@ async fn no_reply_turn_emits_ended_without_say() {
     .await;
     let _ = read_frame(&mut s).await; // said ok
     let mut saw_say = false;
-    let mut saw_ended = false;
+    let mut ended = None;
     for _ in 0..80 {
         if let Some(v) = read_frame_opt(&mut s).await {
             match v["m"].as_str() {
                 Some("say") => saw_say = true,
-                Some("activity") if v["state"] == "ended" => saw_ended = true,
+                Some("activity") if v["state"] == "ended" => ended = Some(v),
                 _ => {}
             }
         }
-        if saw_ended {
+        if ended.is_some() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert!(saw_ended, "沈黙ターンでも activity ended は出る");
+    let ended = ended.expect("沈黙ターンでも activity ended は出る");
+    assert_eq!(ended["silent_origins"], json!(["nr"]));
     assert!(!saw_say, "沈黙（NO_REPLY）ターンで say は出ない");
 }
 

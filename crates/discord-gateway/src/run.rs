@@ -191,6 +191,16 @@ async fn react_system(transport: &Arc<dyn DiscordTransport>, origin: &str, emoji
     react_system_on(transport, &channel, &message, emoji).await;
 }
 
+async fn react_no_reply(
+    transport: &Arc<dyn DiscordTransport>,
+    reply_origin: Option<&str>,
+    emoji: &str,
+) {
+    if let Some(origin) = reply_origin {
+        react_system(transport, origin, emoji).await;
+    }
+}
+
 /// (channel, message) を直接指定して system reaction を付ける（失敗は warn のみ・非致命）。
 /// 🏁（完了）は activity ended で core が指定した**最終生成の最後の投稿**へ付けるため、
 /// 発話 id の対応表から得た自分の message id をここへ渡す。
@@ -440,12 +450,8 @@ fn spawn_say_consumer(
                     }
                 }
                 Some(LiveEvent::CompletedNoReply { reply_origin }) => {
-                    // 🤐: ターンが沈黙（say 無し）で終えた。裁定A で core が ended を say の後に出す
-                    // ため、返信ターンでは立たず真の沈黙ターンだけに立つ。発端（即時ターンの Single）が
-                    // 分かるときだけその発端メッセージへ NO_REPLY サインを付ける（None は付けない）。
-                    if let Some(origin) = &reply_origin {
-                        react_system(&transport, origin, &reactions.no_reply).await;
-                    }
+                    // Authoritative silent origin（または旧core fallback）を機械的に🤐へ写す。
+                    react_no_reply(&transport, reply_origin.as_deref(), &reactions.no_reply).await;
                 }
                 Some(LiveEvent::TurnFailed { reply_origin }) => {
                     // ❌: ターン失敗（エンジン/プロバイダ失敗）を発端メッセージへ可視化する（R3）。
@@ -463,6 +469,9 @@ fn spawn_say_consumer(
         }
     })
 }
+
+#[cfg(test)]
+mod silent_origin_tests;
 
 #[cfg(test)]
 mod caller_tests {

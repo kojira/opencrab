@@ -7,7 +7,6 @@ use opencrab_gate_client::wire::{read_frame, write_json};
 use serde_json::{json, Value};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixListener;
-use tokio::task::JoinHandle;
 
 const ADDRESS: &str = "discord:test";
 const BINDING: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -39,24 +38,25 @@ impl MockCore {
             .expect("write core frame");
     }
 
-    async fn accept(&mut self, id: &str, seq: i64) {
-        self.write(json!({"id": id, "m": "ok", "seq": seq})).await;
+    async fn accept_next_said(&mut self, origin: &str, seq: i64) {
+        let frame = self.read().await;
+        assert_eq!(frame["m"], "said");
+        assert_eq!(frame["origin"], origin);
+        self.write(json!({"id": frame["id"], "m": "ok", "seq": seq}))
+            .await;
     }
 
-    async fn reject(&mut self, id: &str) {
-        self.write(json!({"id": id, "m": "ok", "seq": null})).await;
-    }
-
-    async fn activity(&mut self, ordinal: u32, state: &str, completed: Option<&str>) {
-        self.write(json!({
+    async fn activity(&mut self, state: &str, extra: Value) {
+        let mut frame = json!({
             "m": "activity",
             "binding_id": BINDING,
-            "activity_id": format!("00000000-0000-4000-8000-{ordinal:012}"),
+            "activity_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
             "state": state,
-            "origin": null,
-            "completed_target": completed,
-        }))
-        .await;
+        });
+        if let Value::Object(extra) = extra {
+            frame.as_object_mut().unwrap().extend(extra);
+        }
+        self.write(frame).await;
     }
 }
 
@@ -83,7 +83,6 @@ async fn setup() -> (Arc<InstanceClient>, MockCore) {
         socket,
     };
     let hello = core.read().await;
-    assert_eq!(hello["m"], "hello");
     core.write(json!({"id": hello["id"], "m": "ok"})).await;
     let client = connect.await.expect("join connect");
     core.write(json!({
@@ -93,205 +92,146 @@ async fn setup() -> (Arc<InstanceClient>, MockCore) {
         "address": ADDRESS,
     }))
     .await;
-    let bind_ack = core.read().await;
-    assert_eq!(bind_ack, json!({"id": "bind:1", "m": "ok"}));
+    assert_eq!(core.read().await, json!({"id": "bind:1", "m": "ok"}));
     (client, core)
 }
 
-fn post(
+async fn post_and_accept(
     client: &Arc<InstanceClient>,
+    core: &mut MockCore,
     origin: &'static str,
-) -> JoinHandle<Result<SaidOutcome, opencrab_gate_client::client::PostRefuse>> {
-    let client = client.clone();
-    tokio::spawn(async move { client.post_said(ADDRESS, origin, origin, &[]).await })
-}
-
-async fn read_said(core: &mut MockCore, origin: &str) -> String {
-    let frame = core.read().await;
-    assert_eq!(frame["m"], "said");
-    assert_eq!(frame["origin"], origin);
-    frame["id"].as_str().expect("said id").to_string()
-}
-
-async fn expect_accepted(
-    task: JoinHandle<Result<SaidOutcome, opencrab_gate_client::client::PostRefuse>>,
     seq: i64,
 ) {
+    let task = {
+        let client = client.clone();
+        tokio::spawn(async move { client.post_said(ADDRESS, origin, origin, &[]).await })
+    };
+    core.accept_next_said(origin, seq).await;
     assert!(matches!(
-        task.await.expect("join said").expect("post said"),
+        task.await.expect("said task").expect("post said"),
         SaidOutcome::Accepted { seq: actual } if actual == seq
     ));
 }
 
-async fn next_event(client: &InstanceClient) -> LiveEvent {
+async fn event(client: &InstanceClient) -> LiveEvent {
     tokio::time::timeout(Duration::from_secs(2), client.next_live(ADDRESS))
         .await
-        .expect("live event timeout")
+        .expect("event timeout")
         .expect("live event")
 }
 
-async fn expect_activity(client: &InstanceClient, state: &str) {
-    assert!(matches!(
-        next_event(client).await,
-        LiveEvent::Activity { state: actual, .. } if actual == state
-    ));
-}
-
-async fn expect_no_reply(client: &InstanceClient, origin: &str) {
-    assert_eq!(
-        next_event(client).await,
-        LiveEvent::CompletedNoReply {
-            reply_origin: Some(origin.into())
-        }
-    );
-}
-
-async fn expect_no_extra_event(client: &InstanceClient) {
+async fn no_extra(client: &InstanceClient) {
     assert!(
-        tokio::time::timeout(Duration::from_millis(50), client.next_live(ADDRESS))
+        tokio::time::timeout(Duration::from_millis(75), client.next_live(ADDRESS))
             .await
             .is_err(),
-        "unexpected extra live event"
+        "unexpected extra event"
     );
 }
 
 #[tokio::test]
-async fn visible_a_then_silent_b_uses_b_origin_with_reordered_accepts() {
+async fn one_execution_two_inbounds_reports_only_authoritative_silent_origin() {
     let (client, mut core) = setup().await;
-    let a = post(&client, "origin-a");
-    let a_id = read_said(&mut core, "origin-a").await;
-    let b = post(&client, "origin-b");
-    let b_id = read_said(&mut core, "origin-b").await;
+    post_and_accept(&client, &mut core, "origin-a", 1).await;
+    post_and_accept(&client, &mut core, "origin-b", 2).await;
+    core.activity("started", json!({})).await;
+    core.activity("ended", json!({"silent_origins":["origin-b"]}))
+        .await;
 
-    core.accept(&b_id, 2).await;
-    core.accept(&a_id, 1).await;
-    expect_accepted(b, 2).await;
-    expect_accepted(a, 1).await;
-    core.activity(1, "ended", Some("utterance-a")).await;
-    core.activity(2, "started", None).await;
-    core.activity(3, "ended", None).await;
-
-    expect_activity(&client, "ended").await;
+    assert!(
+        matches!(event(&client).await, LiveEvent::Activity { state, .. } if state == "started")
+    );
+    assert!(matches!(event(&client).await, LiveEvent::Activity { state, .. } if state == "ended"));
     assert_eq!(
-        next_event(&client).await,
-        LiveEvent::Completed {
-            target: "utterance-a".into()
+        event(&client).await,
+        LiveEvent::CompletedNoReply {
+            reply_origin: Some("origin-b".into())
         }
     );
-    expect_activity(&client, "started").await;
-    expect_activity(&client, "ended").await;
-    expect_no_reply(&client, "origin-b").await;
-    expect_no_extra_event(&client).await;
+    no_extra(&client).await;
 }
 
 #[tokio::test]
-async fn silent_a_then_silent_b_uses_each_origin_once() {
+async fn authoritative_empty_suppresses_legacy_inference() {
     let (client, mut core) = setup().await;
-    let a = post(&client, "origin-a");
-    let a_id = read_said(&mut core, "origin-a").await;
-    let b = post(&client, "origin-b");
-    let b_id = read_said(&mut core, "origin-b").await;
+    post_and_accept(&client, &mut core, "origin-a", 1).await;
+    core.activity("started", json!({})).await;
+    core.activity("ended", json!({"silent_origins":[]})).await;
 
-    core.accept(&a_id, 1).await;
-    core.accept(&b_id, 2).await;
-    expect_accepted(a, 1).await;
-    expect_accepted(b, 2).await;
-    core.activity(1, "ended", None).await;
-    core.activity(2, "started", None).await;
-    core.activity(3, "ended", None).await;
-
-    expect_activity(&client, "ended").await;
-    expect_no_reply(&client, "origin-a").await;
-    expect_activity(&client, "started").await;
-    expect_activity(&client, "ended").await;
-    expect_no_reply(&client, "origin-b").await;
-    expect_no_extra_event(&client).await;
+    assert!(
+        matches!(event(&client).await, LiveEvent::Activity { state, .. } if state == "started")
+    );
+    assert!(matches!(event(&client).await, LiveEvent::Activity { state, .. } if state == "ended"));
+    no_extra(&client).await;
 }
 
 #[tokio::test]
-async fn rejected_a_does_not_take_accepted_b_origin() {
+async fn absent_field_keeps_legacy_standalone_fallback() {
     let (client, mut core) = setup().await;
-    let a = post(&client, "origin-a");
-    let a_id = read_said(&mut core, "origin-a").await;
-    let b = post(&client, "origin-b");
-    let b_id = read_said(&mut core, "origin-b").await;
+    post_and_accept(&client, &mut core, "origin-a", 1).await;
+    core.activity("started", json!({})).await;
+    core.activity("ended", json!({})).await;
 
-    core.reject(&a_id).await;
-    core.accept(&b_id, 2).await;
-    assert!(matches!(
-        a.await.expect("join a").expect("post a"),
-        SaidOutcome::NotAdmitted
-    ));
-    expect_accepted(b, 2).await;
-    core.activity(1, "started", None).await;
-    core.activity(2, "ended", None).await;
-
-    expect_activity(&client, "started").await;
-    expect_activity(&client, "ended").await;
-    expect_no_reply(&client, "origin-b").await;
-    expect_no_extra_event(&client).await;
+    assert!(
+        matches!(event(&client).await, LiveEvent::Activity { state, .. } if state == "started")
+    );
+    assert!(matches!(event(&client).await, LiveEvent::Activity { state, .. } if state == "ended"));
+    assert_eq!(
+        event(&client).await,
+        LiveEvent::CompletedNoReply {
+            reply_origin: Some("origin-a".into())
+        }
+    );
 }
 
 #[tokio::test]
-async fn cancelled_rejected_said_releases_its_origin() {
+async fn completed_target_and_silent_origins_coexist_in_stable_order() {
     let (client, mut core) = setup().await;
-    let a = post(&client, "origin-a");
-    let a_id = read_said(&mut core, "origin-a").await;
-    a.abort();
-    assert!(a.await.expect_err("cancelled a").is_cancelled());
-    core.reject(&a_id).await;
+    post_and_accept(&client, &mut core, "origin-a", 1).await;
+    post_and_accept(&client, &mut core, "origin-b", 2).await;
+    core.activity("started", json!({})).await;
+    core.activity(
+        "ended",
+        json!({
+            "completed_target":"cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            "silent_origins":["origin-b","origin-b"]
+        }),
+    )
+    .await;
 
-    let b = post(&client, "origin-b");
-    let b_id = read_said(&mut core, "origin-b").await;
-    core.accept(&b_id, 2).await;
-    expect_accepted(b, 2).await;
-    core.activity(1, "started", None).await;
-    core.activity(2, "ended", None).await;
-
-    expect_activity(&client, "started").await;
-    expect_activity(&client, "ended").await;
-    expect_no_reply(&client, "origin-b").await;
-    expect_no_extra_event(&client).await;
+    assert!(
+        matches!(event(&client).await, LiveEvent::Activity { state, .. } if state == "started")
+    );
+    assert!(matches!(event(&client).await, LiveEvent::Activity { state, .. } if state == "ended"));
+    assert_eq!(
+        event(&client).await,
+        LiveEvent::Completed {
+            target: "cccccccc-cccc-4ccc-8ccc-cccccccccccc".into()
+        }
+    );
+    assert_eq!(
+        event(&client).await,
+        LiveEvent::CompletedNoReply {
+            reply_origin: Some("origin-b".into())
+        }
+    );
+    no_extra(&client).await;
 }
 
 #[tokio::test]
-async fn cancelled_accepted_said_keeps_core_owned_origin() {
+async fn malformed_silent_origins_is_rejected_without_legacy_fallback() {
     let (client, mut core) = setup().await;
-    let a = post(&client, "origin-a");
-    let a_id = read_said(&mut core, "origin-a").await;
-    a.abort();
-    assert!(a.await.expect_err("cancelled a").is_cancelled());
-    core.accept(&a_id, 1).await;
+    post_and_accept(&client, &mut core, "origin-a", 1).await;
+    core.activity("started", json!({})).await;
+    core.activity("ended", json!({"id":"bad:1","silent_origins":[7]}))
+        .await;
+    assert_eq!(
+        core.read().await,
+        json!({"id":"bad:1","m":"err","code":"bad_request","detail":null})
+    );
 
-    let b = post(&client, "origin-b");
-    let b_id = read_said(&mut core, "origin-b").await;
-    core.accept(&b_id, 2).await;
-    expect_accepted(b, 2).await;
-    core.activity(1, "ended", None).await;
-    core.activity(2, "started", None).await;
-    core.activity(3, "ended", None).await;
-
-    expect_activity(&client, "ended").await;
-    expect_no_reply(&client, "origin-a").await;
-    expect_activity(&client, "started").await;
-    expect_activity(&client, "ended").await;
-    expect_no_reply(&client, "origin-b").await;
-    expect_no_extra_event(&client).await;
-}
-
-#[tokio::test]
-async fn disconnect_clears_outstanding_said_without_no_reply() {
-    let (client, mut core) = setup().await;
-    let a = post(&client, "origin-a");
-    let _a_id = read_said(&mut core, "origin-a").await;
-    drop(core);
-
-    assert!(matches!(
-        a.await.expect("join a").expect("post a"),
-        SaidOutcome::Disconnected
-    ));
-    assert!(matches!(
-        next_event(&client).await,
-        LiveEvent::Error { code, .. } if code == "disconnect"
-    ));
+    assert!(
+        matches!(event(&client).await, LiveEvent::Activity { state, .. } if state == "started")
+    );
+    no_extra(&client).await;
 }

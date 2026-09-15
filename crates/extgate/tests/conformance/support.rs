@@ -77,6 +77,7 @@ impl AgentRuntime for TestRuntime {
         self.sink_seen
             .store(req.completion_sink.is_some(), Ordering::SeqCst);
         let initial_read_origin = req.initial_read_origin.clone();
+        let result_origin = initial_read_origin.clone();
         let on_read_origin = req.on_read_origin.clone();
         self.system_prompts
             .lock()
@@ -120,12 +121,18 @@ impl AgentRuntime for TestRuntime {
         } else {
             reply
         };
+        let silent_origins = if response.trim().is_empty() && explicit_termination.is_some() {
+            result_origin.into_iter().collect()
+        } else {
+            Vec::new()
+        };
         Ok(EngineResult {
             response,
             iterations: 1,
             tool_calls_made: 0,
             stopped_by_limit: false,
             explicit_termination,
+            silent_origins,
             last_posting_utterance_id: None,
             last_generation_had_continuation_speech: false,
             xml_fallback_parses: 0,
