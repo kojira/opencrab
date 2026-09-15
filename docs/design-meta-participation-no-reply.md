@@ -4,7 +4,7 @@
 
 Issue #991 concerns an agent speaking merely because a shared conversation produced a new inbound message. Receiving a message starts a turn, but it does not by itself create an obligation to reply.
 
-The earlier status-category policy was rejected because it classified surface forms instead of asking the agent whether it should participate. Two softer English formulations of the meta-level rule were also rejected: both produced a visible reply in 0/2 checks against the production-derived failure request.
+The earlier status-category policy was rejected because it classified surface forms instead of asking the agent whether it should participate. Two softer English formulations of the meta-level rule were also rejected: both produced a visible reply in 2/2 checks against the production-derived failure request.
 
 The exact participation block in this design was then added to the same production-derived request without other changes. Condition Y produced exactly `NO_REPLY` in 2/2 checks. Condition Z changed only the latest input to a direct request and produced a normal answer in 2/2 checks. This establishes the prompt-level behavior without claiming an internal model mechanism.
 
