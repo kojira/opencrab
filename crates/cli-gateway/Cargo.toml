@@ -1,0 +1,25 @@
+[package]
+name = "opencrab-cli-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+opencrab-gate-client.workspace = true
+
+[[bin]]
+name = "opencrab-cli-gateway"
+path = "src/main.rs"
+
+[dev-dependencies]
+tempfile.workspace = true
