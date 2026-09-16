@@ -85,7 +85,7 @@ pub fn parse_record(bytes: &[u8]) -> Result<Input, RecordError> {
             let id = object
                 .get("id")
                 .and_then(Value::as_str)
-                .and_then(|raw| canonical_uuid(raw).ok())
+                .and_then(canonical_uuid)
                 .ok_or_else(|| bad(None))?;
             let text = object
                 .get("text")
@@ -112,7 +112,7 @@ fn trustworthy_id(value: &Value) -> Option<String> {
     value
         .get("id")
         .and_then(Value::as_str)
-        .and_then(|raw| canonical_uuid(raw).ok())
+        .and_then(canonical_uuid)
 }
 
 fn bad(request_id: Option<String>) -> RecordError {

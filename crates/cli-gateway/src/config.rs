@@ -39,7 +39,7 @@ impl Placement {
         let mut agents = BTreeSet::new();
         for instance in &self.instances {
             canonical_uuid(&instance.instance_id)
-                .map_err(|_| anyhow::anyhow!("instance_id must be a canonical lowercase UUID"))?;
+                .ok_or_else(|| anyhow::anyhow!("instance_id must be a canonical lowercase UUID"))?;
             if instance.revision == 0 {
                 anyhow::bail!("revision must be positive");
             }
@@ -74,14 +74,10 @@ impl Placement {
     }
 }
 
-pub fn canonical_uuid(raw: &str) -> Result<String, ()> {
-    let parsed = uuid::Uuid::parse_str(raw).map_err(|_| ())?;
+pub fn canonical_uuid(raw: &str) -> Option<String> {
+    let parsed = uuid::Uuid::parse_str(raw).ok()?;
     let canonical = parsed.to_string();
-    if canonical == raw {
-        Ok(canonical)
-    } else {
-        Err(())
-    }
+    (canonical == raw).then_some(canonical)
 }
 
 #[cfg(test)]
