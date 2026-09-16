@@ -50,7 +50,11 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(async_main(args, placement, instance, frontend)) {
+    let result = runtime.block_on(async_main(args, placement, instance, frontend));
+    // Tokio's stdin uses a blocking reader that cannot be cancelled while a pipe/TTY remains open.
+    // Gateway tasks and output are already drained above; do not let runtime teardown defeat signal bounds.
+    runtime.shutdown_timeout(Duration::ZERO);
+    match result {
         Ok(Exit::Normal) => ExitCode::SUCCESS,
         Ok(Exit::Interrupted) => ExitCode::from(130),
         Err(error) => {
@@ -75,33 +79,34 @@ async fn async_main(
         )
         .init();
     let (control_tx, control_rx) = mpsc::channel(2);
-    tokio::spawn(signal_owner(control_tx));
-    runtime::run(
+    let interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let signal_task = tokio::spawn(signal_owner(control_tx, interrupt, terminate));
+    let result = runtime::run(
         RunOptions {
             placement,
             instance,
             session: args.session,
             frontend,
             connect_timeout: Duration::from_secs(args.connect_timeout_secs),
+            terminate_drain: Duration::from_secs(10),
         },
         tokio::io::stdin(),
         tokio::io::stdout(),
+        tokio::io::stderr(),
         control_rx,
     )
-    .await
+    .await;
+    signal_task.abort();
+    let _ = signal_task.await;
+    result
 }
 
-async fn signal_owner(sender: mpsc::Sender<Control>) {
-    let mut interrupt =
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()) {
-            Ok(signal) => signal,
-            Err(_) => return,
-        };
-    let mut terminate =
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(signal) => signal,
-            Err(_) => return,
-        };
+async fn signal_owner(
+    sender: mpsc::Sender<Control>,
+    mut interrupt: tokio::signal::unix::Signal,
+    mut terminate: tokio::signal::unix::Signal,
+) {
     let first = tokio::select! {
         _ = interrupt.recv() => Control::Interrupt,
         _ = terminate.recv() => Control::Terminate,

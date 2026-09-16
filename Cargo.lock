@@ -1497,6 +1497,7 @@ name = "opencrab-cli-gateway"
 version = "0.2.17"
 dependencies = [
  "anyhow",
+ "libc",
  "opencrab-gate-client",
  "serde",
  "serde_json",

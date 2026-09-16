@@ -8,9 +8,11 @@ use anyhow::Context;
 use opencrab_gate_client::client::{
     CreateBindingError, InstanceClient, LiveEvent, PostRefuse, SaidOutcome,
 };
-use opencrab_gate_client::wire::{config_digest, LiveInboundScope, SaidCaller, SaidContext};
+use opencrab_gate_client::wire::{
+    config_digest, said_frame_with_context, LiveInboundScope, SaidCaller, SaidContext, MAX_FRAME,
+};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
 
 use crate::args::SessionArg;
 use crate::config::{InstancePlacement, Placement};
@@ -19,7 +21,6 @@ use crate::repl;
 
 const QUEUE_CAPACITY: usize = 32;
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
-const TERMINATE_DRAIN: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Frontend {
@@ -45,26 +46,122 @@ pub struct RunOptions {
     pub session: SessionArg,
     pub frontend: Frontend,
     pub connect_timeout: Duration,
+    /// Production passes ten seconds. Tests may shorten the same bounded-drain path.
+    pub terminate_drain: Duration,
 }
 
-pub async fn run<R, W>(
+#[derive(Clone)]
+struct Emitters {
+    frontend: Frontend,
+    output: mpsc::Sender<Output>,
+    diagnostics: mpsc::Sender<String>,
+}
+
+impl Emitters {
+    async fn event(&self, event: Event) -> anyhow::Result<()> {
+        if self.frontend == Frontend::Repl {
+            if let Event::Error { code, .. } = &event {
+                return self.diagnostic(code).await;
+            }
+        }
+        self.output
+            .send(Output::Event(event))
+            .await
+            .map_err(|_| anyhow::anyhow!("output_closed"))
+    }
+
+    async fn error(&self, request_id: Option<String>, code: &str) -> anyhow::Result<()> {
+        self.event(error_event(request_id, code)).await
+    }
+
+    async fn diagnostic(&self, code: &str) -> anyhow::Result<()> {
+        self.diagnostics
+            .send(format!("error: {}", repl::safe_text(code)))
+            .await
+            .map_err(|_| anyhow::anyhow!("diagnostic output closed"))
+    }
+}
+
+struct ConnectionState {
+    ready: AtomicBool,
+    transition: Mutex<()>,
+    agent_id: String,
+    session_id: String,
+}
+
+impl ConnectionState {
+    fn new(agent_id: String, session_id: String) -> Self {
+        Self {
+            ready: AtomicBool::new(true),
+            transition: Mutex::new(()),
+            agent_id,
+            session_id,
+        }
+    }
+
+    fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::SeqCst)
+    }
+
+    async fn set(&self, current: bool, emitters: &Emitters) -> anyhow::Result<()> {
+        let _guard = self.transition.lock().await;
+        self.set_locked(current, emitters).await
+    }
+
+    async fn disconnected_request_error(
+        &self,
+        request_id: String,
+        emitters: &Emitters,
+    ) -> anyhow::Result<()> {
+        let _guard = self.transition.lock().await;
+        self.set_locked(false, emitters).await?;
+        emitters.error(Some(request_id), "disconnect").await
+    }
+
+    async fn set_locked(&self, current: bool, emitters: &Emitters) -> anyhow::Result<()> {
+        let previous = self.ready.load(Ordering::SeqCst);
+        if previous == current {
+            return Ok(());
+        }
+        self.ready.store(current, Ordering::SeqCst);
+        let state = if current { "connected" } else { "disconnected" };
+        emitters.event(Event::Connection { state }).await?;
+        if current {
+            emitters
+                .event(Event::Ready {
+                    agent_id: self.agent_id.clone(),
+                    session_id: self.session_id.clone(),
+                    state: "connected",
+                })
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+pub async fn run<R, W, E>(
     options: RunOptions,
     stdin: R,
     stdout: W,
+    stderr: E,
     mut controls: mpsc::Receiver<Control>,
 ) -> anyhow::Result<Exit>
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
+    E: AsyncWrite + Unpin + Send + 'static,
 {
     let (output_tx, output_rx) = mpsc::channel(QUEUE_CAPACITY);
-    let (writer_done_tx, mut writer_done_rx) = oneshot::channel();
+    let (diagnostic_tx, diagnostic_rx) = mpsc::channel(QUEUE_CAPACITY);
     let frontend = options.frontend;
     let agent_id = options.instance.agent_id.clone();
-    let writer_task = tokio::spawn(async move {
-        let result = output_loop(frontend, output_rx, stdout, &agent_id).await;
-        let _ = writer_done_tx.send(result);
-    });
+    let mut writer_task = tokio::spawn(output_loop(frontend, output_rx, stdout, agent_id));
+    let mut diagnostic_task = tokio::spawn(diagnostic_loop(diagnostic_rx, stderr));
+    let emitters = Emitters {
+        frontend,
+        output: output_tx,
+        diagnostics: diagnostic_tx,
+    };
 
     let client = InstanceClient::spawn(
         PathBuf::from(&options.placement.core_socket),
@@ -81,57 +178,57 @@ where
                     SessionArg::New(_) => "instance_unavailable",
                     SessionArg::Existing(_) => "session_unavailable",
                 };
-                let _ = emit_error(&output_tx, None, code).await;
-                drop(output_tx);
-                let _ = writer_task.await;
+                let _ = emitters.error(None, code).await;
+                drop(emitters);
+                join_output(&mut writer_task, "stdout").await?;
+                join_output(&mut diagnostic_task, "stderr").await?;
                 return Err(error);
             }
         };
 
-    send_output(
-        &output_tx,
-        Event::Ready {
+    emitters
+        .event(Event::Ready {
             agent_id: options.instance.agent_id.clone(),
             session_id: session_id.clone(),
             state: "connected",
-        },
-    )
-    .await?;
+        })
+        .await?;
 
-    let ready = Arc::new(AtomicBool::new(true));
+    let connection = Arc::new(ConnectionState::new(
+        options.instance.agent_id.clone(),
+        session_id.clone(),
+    ));
     let (activity_tx, activity_rx) = watch::channel(0_usize);
     let (ingress_tx, ingress_rx) = mpsc::channel(QUEUE_CAPACITY);
     let (sender_done_tx, mut sender_done_rx) = oneshot::channel();
 
-    let input_task = tokio::spawn(input_loop(
+    let mut input_task = tokio::spawn(input_loop(
         options.frontend,
         stdin,
         ingress_tx.clone(),
-        output_tx.clone(),
-        ready.clone(),
-        options.instance.agent_id.clone(),
-        session_id.clone(),
+        emitters.clone(),
+        connection.clone(),
     ));
-    let sender_task = tokio::spawn(sender_loop(
+    let mut sender_task = tokio::spawn(sender_loop(
         client.clone(),
         session_id.clone(),
         ingress_rx,
-        output_tx.clone(),
+        emitters.clone(),
+        connection.clone(),
         sender_done_tx,
     ));
-    let live_task = tokio::spawn(live_loop(
+    let mut live_task = tokio::spawn(live_loop(
         client.clone(),
         session_id.clone(),
-        output_tx.clone(),
-        ready.clone(),
+        emitters.clone(),
+        connection.clone(),
         activity_tx,
     ));
-    let monitor_task = tokio::spawn(connection_loop(
+    let mut monitor_task = tokio::spawn(connection_loop(
         client,
         session_id,
-        options.instance.agent_id,
-        output_tx.clone(),
-        ready,
+        emitters.clone(),
+        connection,
     ));
 
     enum Stop {
@@ -139,6 +236,7 @@ where
         Interrupt,
         Terminate,
         Output(anyhow::Result<()>),
+        Diagnostic(anyhow::Result<()>),
     }
     let stop = tokio::select! {
         result = &mut sender_done_rx => Stop::Requested(result.unwrap_or_else(|_| Err(anyhow::anyhow!("sender stopped")))),
@@ -147,43 +245,46 @@ where
             Some(Control::Terminate) => Stop::Terminate,
             None => Stop::Requested(Err(anyhow::anyhow!("signal owner stopped"))),
         },
-        result = &mut writer_done_rx => Stop::Output(result.unwrap_or_else(|_| Err(anyhow::anyhow!("output task stopped")))),
+        result = &mut writer_task => Stop::Output(flatten_join(result, "stdout")),
+        result = &mut diagnostic_task => Stop::Diagnostic(flatten_join(result, "stderr")),
     };
 
     match stop {
         Stop::Interrupt => {
-            input_task.abort();
-            sender_task.abort();
-            live_task.abort();
-            monitor_task.abort();
+            abort_all(&[&input_task, &sender_task, &live_task, &monitor_task]);
+            let _ = (&mut input_task).await;
+            let _ = (&mut sender_task).await;
+            let _ = (&mut live_task).await;
+            let _ = (&mut monitor_task).await;
             drop(ingress_tx);
-            drop(output_tx);
-            let _ = writer_task.await;
+            drop(emitters);
+            join_output(&mut writer_task, "stdout").await?;
+            join_output(&mut diagnostic_task, "stderr").await?;
             Ok(Exit::Interrupted)
         }
-        Stop::Output(result) => {
-            input_task.abort();
-            sender_task.abort();
-            live_task.abort();
-            monitor_task.abort();
-            result.context("stdout")?;
+        Stop::Output(result) | Stop::Diagnostic(result) => {
+            abort_all(&[&input_task, &sender_task, &live_task, &monitor_task]);
+            result?;
             Err(anyhow::anyhow!("output closed"))
         }
         Stop::Requested(sender_result) => {
             sender_result?;
             finish_graceful(
                 activity_rx,
-                output_tx,
-                input_task,
-                live_task,
-                monitor_task,
-                writer_task,
+                emitters,
+                &mut input_task,
+                &mut sender_task,
+                &mut live_task,
+                &mut monitor_task,
+                &mut writer_task,
+                &mut diagnostic_task,
             )
             .await
         }
         Stop::Terminate => {
-            input_task.abort();
             let drain = async {
+                input_task.abort();
+                let _ = (&mut input_task).await;
                 ingress_tx
                     .send(Input::Shutdown)
                     .await
@@ -191,26 +292,56 @@ where
                 sender_done_rx
                     .await
                     .map_err(|_| anyhow::anyhow!("sender stopped"))??;
+                let _ = (&mut sender_task).await;
                 wait_inactive(activity_rx).await;
-                send_output(
-                    &output_tx,
-                    Event::Closed {
+                emitters
+                    .event(Event::Closed {
                         reason: "requested",
-                    },
-                )
-                .await
+                    })
+                    .await?;
+                live_task.abort();
+                monitor_task.abort();
+                let _ = (&mut live_task).await;
+                let _ = (&mut monitor_task).await;
+                drop(ingress_tx);
+                drop(emitters);
+                join_output(&mut writer_task, "stdout").await?;
+                join_output(&mut diagnostic_task, "stderr").await?;
+                Ok(Exit::Normal)
             };
-            let result = tokio::time::timeout(TERMINATE_DRAIN, drain)
-                .await
-                .map_err(|_| anyhow::anyhow!("termination drain timed out"))?;
-            result?;
-            live_task.abort();
-            monitor_task.abort();
-            drop(output_tx);
-            writer_task.await.context("output join")?;
-            Ok(Exit::Normal)
+            match tokio::time::timeout(options.terminate_drain, drain).await {
+                Ok(result) => result,
+                Err(_) => {
+                    abort_all(&[&input_task, &sender_task, &live_task, &monitor_task]);
+                    writer_task.abort();
+                    diagnostic_task.abort();
+                    Err(anyhow::anyhow!("termination drain timed out"))
+                }
+            }
         }
     }
+}
+
+fn abort_all(tasks: &[&tokio::task::JoinHandle<()>]) {
+    for task in tasks {
+        task.abort();
+    }
+}
+
+fn flatten_join(
+    result: Result<anyhow::Result<()>, tokio::task::JoinError>,
+    name: &str,
+) -> anyhow::Result<()> {
+    result.with_context(|| format!("{name} task join"))?
+}
+
+async fn join_output(
+    task: &mut tokio::task::JoinHandle<anyhow::Result<()>>,
+    name: &str,
+) -> anyhow::Result<()> {
+    (&mut *task)
+        .await
+        .with_context(|| format!("{name} task join"))?
 }
 
 async fn establish_session(
@@ -258,21 +389,19 @@ async fn input_loop<R: AsyncRead + Unpin>(
     frontend: Frontend,
     stdin: R,
     ingress: mpsc::Sender<Input>,
-    output: mpsc::Sender<Output>,
-    ready: Arc<AtomicBool>,
-    agent_id: String,
-    session_id: String,
+    emitters: Emitters,
+    connection: Arc<ConnectionState>,
 ) {
     match frontend {
-        Frontend::Jsonl => jsonl_input(stdin, ingress, output).await,
-        Frontend::Repl => repl_input(stdin, ingress, output, ready, agent_id, session_id).await,
+        Frontend::Jsonl => jsonl_input(stdin, ingress, emitters).await,
+        Frontend::Repl => repl_input(stdin, ingress, emitters, connection).await,
     }
 }
 
 async fn jsonl_input<R: AsyncRead + Unpin>(
     mut reader: R,
     ingress: mpsc::Sender<Input>,
-    output: mpsc::Sender<Output>,
+    emitters: Emitters,
 ) {
     loop {
         match jsonl::read_record(&mut reader).await {
@@ -287,10 +416,7 @@ async fn jsonl_input<R: AsyncRead + Unpin>(
                 }
             }
             ReadRecord::Record(Err(error)) => {
-                if emit_error(&output, error.request_id, error.code)
-                    .await
-                    .is_err()
-                {
+                if emitters.error(error.request_id, error.code).await.is_err() {
                     break;
                 }
             }
@@ -301,10 +427,8 @@ async fn jsonl_input<R: AsyncRead + Unpin>(
 async fn repl_input<R: AsyncRead + Unpin>(
     reader: R,
     ingress: mpsc::Sender<Input>,
-    output: mpsc::Sender<Output>,
-    ready: Arc<AtomicBool>,
-    agent_id: String,
-    session_id: String,
+    emitters: Emitters,
+    connection: Arc<ConnectionState>,
 ) {
     let mut lines = BufReader::new(reader).lines();
     while let Ok(Some(line)) = lines.next_line().await {
@@ -317,22 +441,27 @@ async fn repl_input<R: AsyncRead + Unpin>(
                 }
             }
             repl::Line::Help => {
-                let _ = output.send(Output::ReplLine(repl::help().into())).await;
+                let _ = emitters
+                    .output
+                    .send(Output::ReplLine(repl::help().into()))
+                    .await;
             }
             repl::Line::Status => {
-                let state = if ready.load(Ordering::SeqCst) {
+                let state = if connection.is_ready() {
                     "connected"
                 } else {
                     "disconnected"
                 };
-                let _ = output
+                let _ = emitters
+                    .output
                     .send(Output::ReplLine(format!(
-                        "{agent_id} / {session_id}: {state}"
+                        "{} / {}: {state}",
+                        connection.agent_id, connection.session_id
                     )))
                     .await;
             }
             repl::Line::Error(error) => {
-                let _ = output.send(Output::ReplLine(error)).await;
+                let _ = emitters.diagnostic(&error).await;
             }
         }
     }
@@ -343,7 +472,8 @@ async fn sender_loop(
     client: Arc<InstanceClient>,
     address: String,
     mut ingress: mpsc::Receiver<Input>,
-    output: mpsc::Sender<Output>,
+    emitters: Emitters,
+    connection: Arc<ConnectionState>,
     done: oneshot::Sender<anyhow::Result<()>>,
 ) {
     let result = async {
@@ -353,6 +483,13 @@ async fn sender_loop(
                 Input::Message { id, text } => {
                     let origin = format!("cli:{id}");
                     let context = owner_context();
+                    let binding_id = client.binding_for_address(&address).await;
+                    if let Some(binding_id) = binding_id {
+                        if !said_fits(&binding_id, &origin, &client.author_id, &context, &text) {
+                            emitters.error(Some(id), "too_large").await?;
+                            continue;
+                        }
+                    }
                     let outcome = client
                         .post_said_with_self_context(&address, &origin, &context, &text, &[])
                         .await;
@@ -362,8 +499,11 @@ async fn sender_loop(
                         }
                         other => other,
                     };
-                    let event = map_said(id, origin, outcome);
-                    send_output(&output, event).await?;
+                    if matches!(outcome, Ok(SaidOutcome::Disconnected)) {
+                        connection.disconnected_request_error(id, &emitters).await?;
+                        continue;
+                    }
+                    emitters.event(map_said(id, origin, outcome)).await?;
                 }
             }
         }
@@ -371,6 +511,29 @@ async fn sender_loop(
     }
     .await;
     let _ = done.send(result);
+}
+
+fn said_fits(
+    binding_id: &str,
+    origin: &str,
+    author_id: &str,
+    context: &SaidContext,
+    text: &str,
+) -> bool {
+    let maximum_request_id = format!("said:{}", u64::MAX);
+    let frame = said_frame_with_context(
+        &maximum_request_id,
+        binding_id,
+        origin,
+        author_id,
+        None,
+        Some(context),
+        text,
+        &[],
+    );
+    serde_json::to_vec(&frame)
+        .map(|bytes| bytes.len().saturating_add(1) <= MAX_FRAME)
+        .unwrap_or(false)
 }
 
 fn owner_context() -> SaidContext {
@@ -388,10 +551,7 @@ fn map_said(id: String, origin: String, outcome: Result<SaidOutcome, PostRefuse>
         Ok(SaidOutcome::Accepted { seq }) => Event::Accepted { id, origin, seq },
         Ok(SaidOutcome::NotAdmitted) => Event::NotAdmitted { id },
         Ok(SaidOutcome::Disconnected) => error_event(Some(id), "disconnect"),
-        Ok(SaidOutcome::WireErr { code, .. }) => {
-            let stable = stable_wire_code(&code);
-            error_event(Some(id), stable)
-        }
+        Ok(SaidOutcome::WireErr { code, .. }) => error_event(Some(id), stable_wire_code(&code)),
         Err(PostRefuse::NotReady) => error_event(Some(id), "instance_not_ready"),
         Err(PostRefuse::Busy) => error_event(Some(id), "conversation_busy"),
     }
@@ -400,6 +560,7 @@ fn map_said(id: String, origin: String, outcome: Result<SaidOutcome, PostRefuse>
 fn stable_wire_code(code: &str) -> &str {
     match code {
         "bad_request"
+        | "too_large"
         | "instance_unavailable"
         | "session_unavailable"
         | "instance_not_ready"
@@ -415,13 +576,13 @@ fn stable_wire_code(code: &str) -> &str {
 async fn live_loop(
     client: Arc<InstanceClient>,
     address: String,
-    output: mpsc::Sender<Output>,
-    ready: Arc<AtomicBool>,
+    emitters: Emitters,
+    connection: Arc<ConnectionState>,
     activity: watch::Sender<usize>,
 ) {
     let mut started = HashSet::new();
     loop {
-        if !ready.load(Ordering::SeqCst) {
+        if !connection.is_ready() {
             tokio::time::sleep(POLL_INTERVAL).await;
             continue;
         }
@@ -431,7 +592,7 @@ async fn live_loop(
         if matches!(&live, LiveEvent::Error { code, .. } if code == "disconnect") {
             started.clear();
             let _ = activity.send(0);
-            tokio::time::sleep(POLL_INTERVAL).await;
+            let _ = connection.set(false, &emitters).await;
             continue;
         }
         let activity_change = match &live {
@@ -444,7 +605,7 @@ async fn live_loop(
             LiveEvent::TurnFailed { .. } => Some((false, String::new())),
             _ => None,
         };
-        if send_output(&output, map_live(live)).await.is_err() {
+        if emitters.event(map_live(live)).await.is_err() {
             break;
         }
         if let Some((is_start, activity_id)) = activity_change {
@@ -490,63 +651,45 @@ fn map_live(event: LiveEvent) -> Event {
 async fn connection_loop(
     client: Arc<InstanceClient>,
     address: String,
-    agent_id: String,
-    output: mpsc::Sender<Output>,
-    ready: Arc<AtomicBool>,
+    emitters: Emitters,
+    connection: Arc<ConnectionState>,
 ) {
-    let mut previous = true;
     loop {
         let current = client.binding_for_address(&address).await.is_some();
-        if current != previous {
-            ready.store(current, Ordering::SeqCst);
-            let state = if current { "connected" } else { "disconnected" };
-            if send_output(&output, Event::Connection { state })
-                .await
-                .is_err()
-            {
-                break;
-            }
-            if current
-                && send_output(
-                    &output,
-                    Event::Ready {
-                        agent_id: agent_id.clone(),
-                        session_id: address.clone(),
-                        state: "connected",
-                    },
-                )
-                .await
-                .is_err()
-            {
-                break;
-            }
-            previous = current;
+        if connection.set(current, &emitters).await.is_err() {
+            break;
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn finish_graceful(
     activity: watch::Receiver<usize>,
-    output: mpsc::Sender<Output>,
-    input_task: tokio::task::JoinHandle<()>,
-    live_task: tokio::task::JoinHandle<()>,
-    monitor_task: tokio::task::JoinHandle<()>,
-    writer_task: tokio::task::JoinHandle<()>,
+    emitters: Emitters,
+    input_task: &mut tokio::task::JoinHandle<()>,
+    sender_task: &mut tokio::task::JoinHandle<()>,
+    live_task: &mut tokio::task::JoinHandle<()>,
+    monitor_task: &mut tokio::task::JoinHandle<()>,
+    writer_task: &mut tokio::task::JoinHandle<anyhow::Result<()>>,
+    diagnostic_task: &mut tokio::task::JoinHandle<anyhow::Result<()>>,
 ) -> anyhow::Result<Exit> {
     input_task.abort();
+    let _ = (&mut *input_task).await;
+    let _ = (&mut *sender_task).await;
     wait_inactive(activity).await;
-    send_output(
-        &output,
-        Event::Closed {
+    emitters
+        .event(Event::Closed {
             reason: "requested",
-        },
-    )
-    .await?;
+        })
+        .await?;
     live_task.abort();
     monitor_task.abort();
-    drop(output);
-    writer_task.await.context("output join")?;
+    let _ = (&mut *live_task).await;
+    let _ = (&mut *monitor_task).await;
+    drop(emitters);
+    join_output(writer_task, "stdout").await?;
+    join_output(diagnostic_task, "stderr").await?;
     Ok(Exit::Normal)
 }
 
@@ -571,11 +714,11 @@ async fn output_loop<W: AsyncWrite + Unpin>(
     frontend: Frontend,
     mut queue: mpsc::Receiver<Output>,
     mut writer: W,
-    agent_id: &str,
+    agent_id: String,
 ) -> anyhow::Result<()> {
     while let Some(output) = queue.recv().await {
         match frontend {
-            Frontend::Repl => repl::write_output(&mut writer, &output, agent_id).await?,
+            Frontend::Repl => repl::write_output(&mut writer, &output, &agent_id).await?,
             Frontend::Jsonl => match output {
                 Output::Event(event) => {
                     let mut bytes = serde_json::to_vec(&event)?;
@@ -591,19 +734,17 @@ async fn output_loop<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
-async fn send_output(output: &mpsc::Sender<Output>, event: Event) -> anyhow::Result<()> {
-    output
-        .send(Output::Event(event))
-        .await
-        .map_err(|_| anyhow::anyhow!("output_closed"))
-}
-
-async fn emit_error(
-    output: &mpsc::Sender<Output>,
-    request_id: Option<String>,
-    code: &str,
+async fn diagnostic_loop<W: AsyncWrite + Unpin>(
+    mut queue: mpsc::Receiver<String>,
+    mut writer: W,
 ) -> anyhow::Result<()> {
-    send_output(output, error_event(request_id, code)).await
+    while let Some(line) = queue.recv().await {
+        writer.write_all(line.as_bytes()).await?;
+        writer.write_all(b"\n").await?;
+        writer.flush().await?;
+    }
+    writer.flush().await?;
+    Ok(())
 }
 
 fn error_event(request_id: Option<String>, code: &str) -> Event {
@@ -615,99 +756,5 @@ fn error_event(request_id: Option<String>, code: &str) -> Event {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn owner_context_is_exact() {
-        assert_eq!(owner_context().caller, SaidCaller::Owner);
-        assert!(owner_context().start_turn);
-        assert_eq!(owner_context().system_context, None);
-        assert_eq!(owner_context().reply_target, None);
-        assert_eq!(owner_context().live_inbound_scope, LiveInboundScope::All);
-    }
-
-    #[test]
-    fn maps_acceptance_and_redacts_wire_details() {
-        let id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".to_string();
-        let origin = format!("cli:{id}");
-        assert_eq!(
-            map_said(
-                id.clone(),
-                origin.clone(),
-                Ok(SaidOutcome::Accepted { seq: 4 })
-            ),
-            Event::Accepted {
-                id: id.clone(),
-                origin,
-                seq: 4
-            }
-        );
-        assert_eq!(
-            map_said(
-                id.clone(),
-                format!("cli:{id}"),
-                Ok(SaidOutcome::WireErr {
-                    code: "private_sql_error".into(),
-                    detail: Some("secret".into())
-                })
-            ),
-            Event::Error {
-                request_id: Some(id),
-                code: "gate_error".into(),
-                detail: None
-            }
-        );
-    }
-
-    #[test]
-    fn maps_all_live_contract_variants() {
-        assert!(matches!(
-            map_live(LiveEvent::Message {
-                delivery_id: "d".into(),
-                text: "reply".into(),
-                reply_origin: None,
-            }),
-            Event::Message { .. }
-        ));
-        assert!(matches!(
-            map_live(LiveEvent::Activity {
-                activity_id: "a".into(),
-                state: "read".into(),
-                origin: Some("cli:x".into()),
-            }),
-            Event::Activity { .. }
-        ));
-        assert!(matches!(
-            map_live(LiveEvent::CompletedNoReply { reply_origin: None }),
-            Event::CompletedNoReply { reply_origin: None }
-        ));
-        assert!(matches!(
-            map_live(LiveEvent::TurnFailed {
-                reply_origin: "cli:x".into()
-            }),
-            Event::TurnFailed { .. }
-        ));
-        assert!(matches!(
-            map_live(LiveEvent::Completed { target: "d".into() }),
-            Event::Completed { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn bounded_output_writer_reports_broken_pipe() {
-        assert_eq!(QUEUE_CAPACITY, 32);
-        let (writer, reader) = tokio::io::duplex(64);
-        drop(reader);
-        let (tx, rx) = mpsc::channel(QUEUE_CAPACITY);
-        tx.send(Output::Event(Event::Closed {
-            reason: "requested",
-        }))
-        .await
-        .unwrap();
-        drop(tx);
-        assert!(output_loop(Frontend::Jsonl, rx, writer, "agent-a")
-            .await
-            .is_err());
-    }
-}
+#[path = "runtime/tests.rs"]
+mod tests;
