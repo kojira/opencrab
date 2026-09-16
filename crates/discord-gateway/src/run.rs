@@ -399,7 +399,20 @@ fn spawn_say_consumer(
                         }
                     }
                 }
-                Some(LiveEvent::Activity { state, origin, .. }) => {
+                Some(LiveEvent::Activity {
+                    activity_id,
+                    state,
+                    origin,
+                    ..
+                }) => {
+                    if matches!(state.as_str(), "started" | "stopped" | "ended") {
+                        tracing::info!(
+                            event = "activity_received",
+                            activity_id,
+                            state,
+                            "core activity received"
+                        );
+                    }
                     // #964 👀: 投稿を新しく含む LLM request の直前に届く read+origin だけで付ける。
                     // started は typing 専用で origin を持たない。1 origin 1 回。record-only/held は
                     // read が来ないので「読まれるまで付かない」が保たれる。
@@ -422,6 +435,13 @@ fn spawn_say_consumer(
                                 &transport,
                                 channel,
                                 crate::typing::TYPING_REFRESH_INTERVAL,
+                            );
+                            tracing::info!(
+                                event = "typing_keepalive_state_applied",
+                                activity_id,
+                                state,
+                                keepalive_active = typing.is_some(),
+                                "typing keepalive state applied; Discord client indicator state is not asserted"
                             );
                         }
                     }

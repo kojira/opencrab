@@ -16,7 +16,7 @@
     }
 
     #[tokio::test]
-    async fn llm_activity_hooks_bracket_tool_no_reply_and_error_calls() {
+    async fn llm_activity_hooks_bracket_llm_return_for_tool_no_reply_and_error_calls() {
         struct EventLlm {
             events: Arc<std::sync::Mutex<Vec<&'static str>>>,
             responses: std::sync::Mutex<std::collections::VecDeque<anyhow::Result<ChatResponse>>>,

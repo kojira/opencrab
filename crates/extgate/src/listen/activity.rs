@@ -53,7 +53,16 @@ pub async fn emit_activity(
         }
         live.writer.clone()
     };
-    let _ = write_json(
+    let log_llm_boundary = matches!(activity_state, "started" | "stopped");
+    if log_llm_boundary {
+        tracing::info!(
+            event = "activity_emit_started",
+            activity_id,
+            state = activity_state,
+            "activity emit starting"
+        );
+    }
+    let write_result = write_json(
         &writer,
         &activity_frame(
             binding_id,
@@ -64,6 +73,19 @@ pub async fn emit_activity(
         ),
     )
     .await;
+    if log_llm_boundary {
+        tracing::info!(
+            event = "activity_emit_completed",
+            activity_id,
+            state = activity_state,
+            outcome = if write_result.is_ok() {
+                "success"
+            } else {
+                "error"
+            },
+            "activity emit completed"
+        );
+    }
 }
 
 /// Successful executionのauthoritative ended outcome。new coreは沈黙originが無くても
@@ -88,11 +110,28 @@ pub async fn emit_ended_activity(
         }
         live.writer.clone()
     };
-    let _ = write_json(
+    tracing::info!(
+        event = "turn_final_activity_ended_emit_started",
+        activity_id,
+        state = "ended",
+        "turn-final activity ended emit starting"
+    );
+    let write_result = write_json(
         &writer,
         &ended_activity_frame(binding_id, activity_id, completed_target, silent_origins),
     )
     .await;
+    tracing::info!(
+        event = "turn_final_activity_ended_emit_completed",
+        activity_id,
+        state = "ended",
+        outcome = if write_result.is_ok() {
+            "success"
+        } else {
+            "error"
+        },
+        "turn-final activity ended emit completed"
+    );
 }
 
 /// R3(❌): ターン失敗（DeliveryEffect::Failed）を発端 origin つきで gateway へ通知する。

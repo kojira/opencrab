@@ -145,6 +145,11 @@ impl SkillEngine {
             cb().await;
         }
         let result = self.llm.chat_with_history(request).await;
+        tracing::info!(
+            event = "llm_call_returned",
+            outcome = if result.is_ok() { "success" } else { "error" },
+            "LLM call returned"
+        );
         if let Some(cb) = &self.on_llm_stop {
             cb().await;
         }
