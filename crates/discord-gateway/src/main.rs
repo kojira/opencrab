@@ -9,6 +9,16 @@ use opencrab_discord_gateway::config::{decode_config_b64, Placement};
 use opencrab_discord_gateway::harness::HarnessOverrides;
 use opencrab_discord_gateway::run::spawn_instance;
 use opencrab_discord_gateway::secret::take_bot_token;
+use tracing_subscriber::EnvFilter;
+
+const ACTIVITY_LOG_DIRECTIVE: &str = "opencrab_activity=info";
+
+fn runtime_log_filter(base: EnvFilter) -> anyhow::Result<EnvFilter> {
+    Ok(base
+        .add_directive("opencrab_discord_gateway=info".parse()?)
+        .add_directive("opencrab_gate_client=info".parse()?)
+        .add_directive(ACTIVITY_LOG_DIRECTIVE.parse()?))
+}
 
 fn main() -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -20,11 +30,7 @@ fn main() -> anyhow::Result<()> {
 
 async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("opencrab_discord_gateway=info".parse()?)
-                .add_directive("opencrab_gate_client=info".parse()?),
-        )
+        .with_env_filter(runtime_log_filter(EnvFilter::from_default_env())?)
         .init();
 
     let path = std::env::args()
@@ -58,4 +64,15 @@ async fn run() -> anyhow::Result<()> {
     tracing::info!("discord-gateway running");
     std::future::pending::<()>().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_filter_keeps_activity_info_enabled_over_off_default() {
+        let filter = runtime_log_filter(EnvFilter::new("off")).unwrap();
+        assert!(filter.to_string().contains(ACTIVITY_LOG_DIRECTIVE));
+    }
 }

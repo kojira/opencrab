@@ -56,6 +56,7 @@ pub async fn emit_activity(
     let log_llm_boundary = matches!(activity_state, "started" | "stopped");
     if log_llm_boundary {
         tracing::info!(
+            target: "opencrab_activity",
             event = "activity_emit_started",
             activity_id,
             state = activity_state,
@@ -75,6 +76,7 @@ pub async fn emit_activity(
     .await;
     if log_llm_boundary {
         tracing::info!(
+            target: "opencrab_activity",
             event = "activity_emit_completed",
             activity_id,
             state = activity_state,
@@ -111,6 +113,7 @@ pub async fn emit_ended_activity(
         live.writer.clone()
     };
     tracing::info!(
+        target: "opencrab_activity",
         event = "turn_final_activity_ended_emit_started",
         activity_id,
         state = "ended",
@@ -122,6 +125,7 @@ pub async fn emit_ended_activity(
     )
     .await;
     tracing::info!(
+        target: "opencrab_activity",
         event = "turn_final_activity_ended_emit_completed",
         activity_id,
         state = "ended",

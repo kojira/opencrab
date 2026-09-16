@@ -6,6 +6,14 @@ use opencrab_server::{config, config::AppConfig, AppState};
 use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
 
+const ACTIVITY_LOG_DIRECTIVE: &str = "opencrab_activity=info";
+
+fn runtime_log_filter(base: EnvFilter) -> anyhow::Result<EnvFilter> {
+    Ok(base
+        .add_directive("opencrab=info".parse()?)
+        .add_directive(ACTIVITY_LOG_DIRECTIVE.parse()?))
+}
+
 /// Owned results of the pre-spawn startup phase.
 pub(super) struct BootstrapContext {
     pub(super) cfg: AppConfig,
@@ -44,7 +52,7 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
     dotenvy::dotenv().ok();
 
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("opencrab=info".parse()?))
+        .with_env_filter(runtime_log_filter(EnvFilter::from_default_env())?)
         .init();
 
     tracing::info!("Starting OpenCrab server...");
@@ -183,6 +191,26 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_filter_keeps_activity_info_enabled_over_off_default() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let subscriber =
+            tracing_subscriber::registry().with(runtime_log_filter(EnvFilter::new("off")).unwrap());
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(tracing::enabled!(
+                target: "opencrab_activity",
+                tracing::Level::INFO
+            ));
+            assert!(!tracing::enabled!(
+                target: "unrelated_activity",
+                tracing::Level::INFO
+            ));
+        });
+    }
+
     #[test]
     fn attachment_inbox_is_derived_from_the_core_database_directory() {
         let database = std::path::Path::new("runtime/data/opencrab.db");

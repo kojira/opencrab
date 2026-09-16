@@ -146,6 +146,7 @@ impl SkillEngine {
         }
         let result = self.llm.chat_with_history(request).await;
         tracing::info!(
+            target: "opencrab_activity",
             event = "llm_call_returned",
             outcome = if result.is_ok() { "success" } else { "error" },
             "LLM call returned"

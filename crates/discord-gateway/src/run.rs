@@ -407,6 +407,7 @@ fn spawn_say_consumer(
                 }) => {
                     if matches!(state.as_str(), "started" | "stopped" | "ended") {
                         tracing::info!(
+                            target: "opencrab_activity",
                             event = "activity_received",
                             activity_id,
                             state,
@@ -437,6 +438,7 @@ fn spawn_say_consumer(
                                 crate::typing::TYPING_REFRESH_INTERVAL,
                             );
                             tracing::info!(
+                                target: "opencrab_activity",
                                 event = "typing_keepalive_state_applied",
                                 activity_id,
                                 state,
