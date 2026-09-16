@@ -1493,6 +1493,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "opencrab-cli-gateway"
+version = "0.2.17"
+dependencies = [
+ "anyhow",
+ "libc",
+ "opencrab-gate-client",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "opencrab-core"
 version = "0.2.17"
 dependencies = [

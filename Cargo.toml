@@ -18,6 +18,7 @@ members = [
     "crates/cli",
     "crates/voice",
     "crates/extgate",
+    "crates/cli-gateway",
 ]
 
 [workspace.lints.clippy]
@@ -98,6 +99,7 @@ opencrab-web-gateway = { path = "crates/web-gateway" }
 opencrab-nostr-gateway = { path = "crates/nostr-gateway" }
 opencrab-discord-gateway = { path = "crates/discord-gateway" }
 opencrab-gate-client = { path = "crates/gate-client" }
+opencrab-cli-gateway = { path = "crates/cli-gateway" }
 opencrab-mcp = { path = "crates/mcp" }
 
 # 開発ビルド高速化: デバッグ情報を減らしてリンク時間とバイナリサイズを削減。

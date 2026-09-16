@@ -216,10 +216,14 @@ async fn scenario_no_exit_code_dispatch_result_survives_into_resume_turn() {
     let ev = "e1".repeat(32);
     fixture.append_line(&mention_event(&ev, M_WSWRITE));
 
-    // 決着後の完了報告 say が出るまで待つ（= resume ターンまで到達した）。
+    // ws_write の背景実行から settle・resume・配送まで複数段あるため、CI の並列負荷を考慮して
+    // このシナリオだけ長めに待つ。
     let done = {
         let buf = buf.clone();
-        wait_until(move || body_index(&buf, B_WSWRITE_DONE).is_some()).await
+        wait_until_for(Duration::from_secs(15), move || {
+            body_index(&buf, B_WSWRITE_DONE).is_some()
+        })
+        .await
     };
     assert!(
         done,

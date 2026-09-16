@@ -177,13 +177,22 @@ fn discards(buf: &Arc<Mutex<Vec<CapturedDiscard>>>) -> Vec<CapturedDiscard> {
 
 /// 述語が真になるまで最大 ~5s ポーリングする。
 async fn wait_until(pred: impl Fn() -> bool) -> bool {
-    for _ in 0..250 {
+    wait_until_for(Duration::from_secs(5), pred).await
+}
+
+/// 述語が真になるまで指定時間ポーリングする。
+async fn wait_until_for(timeout: Duration, pred: impl Fn() -> bool) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
         if pred() {
             return true;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return pred();
+        }
+        tokio::time::sleep(Duration::from_millis(20).min(deadline - now)).await;
     }
-    pred()
 }
 
 fn body_index(buf: &Arc<Mutex<Vec<CapturedSay>>>, needle: &str) -> Option<usize> {

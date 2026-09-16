@@ -31,6 +31,7 @@
 - **Conversation Compaction** — Token-budget-based automatic compaction; replaces older messages with memory index topic summaries, keeping recent logs in full
 - **Skill System** — Standard and acquired skills with effectiveness tracking, usage metrics, and guidance-based execution where the LLM dynamically calls `execute_shell`
 - **Multi-Channel Communication** — REST API, CLI, WebSocket, web dashboard, Discord and Nostr gateway adapters
+- **Standalone terminal gateway** — `opencrab-cli-gateway` provides a human REPL or strict JSONL stream for one exact pre-provisioned agent/session over the generic V3 Unix-socket protocol
 - **Per-Agent Discord Gateway** — DB-persisted Discord config per agent with independent start/stop lifecycle management
 - **Per-Agent Nostr Gateway** — DB-persisted key and relay config per agent; an agent can generate a key and adopt it as its own identity, which also brings the gateway up (see [Nostr](#nostr))
 - **Message Debounce** — Per (channel, sender) debounce window batches rapid messages into a single request
@@ -62,7 +63,8 @@ opencrab/
 │   ├── db/         # SQLite persistence with FTS5 full-text search
 │   ├── mcp/        # MCP client (external tool servers as child processes)
 │   ├── server/     # Axum REST API server (hot-reload config watcher), agent response pipeline
-│   ├── cli/        # Interactive REPL CLI
+│   ├── cli/        # Database-management REPL CLI
+│   ├── cli-gateway/# Standalone text REPL/JSONL gateway over generic V3 UDS
 │   ├── discord/    # Discord gateway with per-agent manager and message loop
 │   ├── nostr/      # Nostr gateway: per-agent key/relay config, per-session queue,
 │   │               #   concurrency cap, and a thin `nostaro` CLI passthrough

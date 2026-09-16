@@ -40,7 +40,7 @@ done
 echo "R5(gateway/actions) OK"
 
 # --- R6: shared/server から concrete gateway への逆流を禁止する ---
-CONCRETE='opencrab-discord|opencrab-discord-gateway|opencrab-nostr|opencrab-nostr-gateway|opencrab-web-gateway'
+CONCRETE='opencrab-cli-gateway|opencrab-discord|opencrab-discord-gateway|opencrab-nostr|opencrab-nostr-gateway|opencrab-web-gateway'
 for p in opencrab-core opencrab-db opencrab-gateway opencrab-actions opencrab-extgate opencrab-gate-client opencrab-server; do
   deps="$(cargo tree -p "$p" --edges no-dev --prefix none --no-dedupe \
     | sed -E 's/ v[0-9].*//' | sort -u)"
