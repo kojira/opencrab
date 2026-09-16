@@ -483,12 +483,13 @@ async fn sender_loop(
                 Input::Message { id, text } => {
                     let origin = format!("cli:{id}");
                     let context = owner_context();
-                    let binding_id = client.binding_for_address(&address).await;
-                    if let Some(binding_id) = binding_id {
-                        if !said_fits(&binding_id, &origin, &client.author_id, &context, &text) {
-                            emitters.error(Some(id), "too_large").await?;
-                            continue;
-                        }
+                    let Some(binding_id) = client.binding_for_address(&address).await else {
+                        connection.disconnected_request_error(id, &emitters).await?;
+                        continue;
+                    };
+                    if !said_fits(&binding_id, &origin, &client.author_id, &context, &text) {
+                        emitters.error(Some(id), "too_large").await?;
+                        continue;
                     }
                     let outcome = client
                         .post_said_with_self_context(&address, &origin, &context, &text, &[])

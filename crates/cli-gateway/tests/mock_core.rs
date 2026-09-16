@@ -6,7 +6,7 @@ use opencrab_cli_gateway::config::{InstancePlacement, Placement};
 use opencrab_cli_gateway::runtime::{run, Frontend, RunOptions};
 use opencrab_gate_client::wire::{read_frame, write_json};
 use serde_json::{json, Value};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 
@@ -228,6 +228,115 @@ async fn disconnect_reconnects_and_never_replays_uncertain_input() {
         1
     );
     assert!(!records.iter().any(|record| record["type"] == "accepted"));
+}
+
+#[tokio::test]
+async fn unbound_reconnect_rejects_oversized_input_without_posting() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("gate.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let warmup_id = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    let next_id = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    let (unbound_tx, unbound_rx) = tokio::sync::oneshot::channel();
+    let (bind_tx, bind_rx) = tokio::sync::oneshot::channel();
+    let (rebound_tx, rebound_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut first, _) = listener.accept().await.unwrap();
+        hello(&mut first).await;
+        bind(&mut first, BINDING_ID, ADDRESS).await;
+        let said = read_value(&mut first).await;
+        assert_eq!(said["origin"], format!("cli:{warmup_id}"));
+        write_json(&mut first, &json!({"id": said["id"], "m": "ok", "seq": 7}))
+            .await
+            .unwrap();
+        drop(first);
+        let (mut second, _) = listener.accept().await.unwrap();
+        hello(&mut second).await;
+        unbound_tx.send(()).unwrap();
+        bind_rx.await.unwrap();
+        bind(&mut second, BINDING_ID, ADDRESS).await;
+        rebound_tx.send(()).unwrap();
+        let said = read_value(&mut second).await;
+        assert_eq!(said["origin"], format!("cli:{next_id}"));
+        assert_eq!(said["text"], "after-reconnect");
+        write_json(&mut second, &json!({"id": said["id"], "m": "ok", "seq": 8}))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    });
+    let (mut input_writer, input_reader) =
+        tokio::io::duplex(opencrab_cli_gateway::jsonl::MAX_LINE * 2);
+    let (output_writer, output_reader) = tokio::io::duplex(16 * 1024);
+    let (_control_tx, control_rx) = mpsc::channel(1);
+    let run_task = tokio::spawn(run(
+        options(socket, SessionArg::Existing(ADDRESS.into())),
+        input_reader,
+        output_writer,
+        tokio::io::sink(),
+        control_rx,
+    ));
+    use tokio::io::AsyncWriteExt;
+    input_writer
+        .write_all(
+            format!("{{\"type\":\"message\",\"id\":\"{warmup_id}\",\"text\":\"warmup\"}}\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+    unbound_rx.await.unwrap();
+    let prefix = format!("{{\"type\":\"message\",\"id\":\"{MESSAGE_ID}\",\"text\":\"");
+    let suffix = "\"}\n";
+    let text_len = opencrab_cli_gateway::jsonl::MAX_LINE - prefix.len() - suffix.len();
+    input_writer
+        .write_all(format!("{prefix}{}{suffix}", "x".repeat(text_len)).as_bytes())
+        .await
+        .unwrap();
+    let mut lines = BufReader::new(output_reader).lines();
+    let mut records = Vec::new();
+    loop {
+        let record: Value =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        let rejected = record["type"] == "error"
+            && record["request_id"] == MESSAGE_ID
+            && record["code"] == "disconnect";
+        records.push(record);
+        if rejected {
+            break;
+        }
+    }
+    bind_tx.send(()).unwrap();
+    rebound_rx.await.unwrap();
+    input_writer
+        .write_all(
+            format!("{{\"type\":\"message\",\"id\":\"{next_id}\",\"text\":\"after-reconnect\"}}\n{{\"type\":\"shutdown\"}}\n").as_bytes(),
+        )
+        .await
+        .unwrap();
+    input_writer.shutdown().await.unwrap();
+    while let Some(line) = lines.next_line().await.unwrap() {
+        records.push(serde_json::from_str(&line).unwrap());
+    }
+    run_task.await.unwrap().unwrap();
+    server.await.unwrap();
+    let disconnected = records
+        .iter()
+        .position(|record| record["type"] == "connection" && record["state"] == "disconnected")
+        .unwrap();
+    let error = records
+        .iter()
+        .position(|record| {
+            record["type"] == "error"
+                && record["request_id"] == MESSAGE_ID
+                && record["code"] == "disconnect"
+        })
+        .unwrap();
+    assert!(disconnected < error);
+    assert!(!records
+        .iter()
+        .any(|record| { record["request_id"] == MESSAGE_ID && record["code"] == "too_large" }));
+    assert!(records
+        .iter()
+        .any(|record| record["type"] == "accepted" && record["id"] == next_id));
 }
 
 #[tokio::test]
