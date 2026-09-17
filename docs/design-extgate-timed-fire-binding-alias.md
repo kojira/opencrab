@@ -8,7 +8,7 @@ Status: implementation-ready
 
 A generic extgate binding can reuse a session when `gate_bindings.address` is byte-equal to an existing `sessions.id`. `canonical_session_id` then returns that address, and inbound records history in the reused session. Timed-fire routing does not follow the same rule: `ExtgateFire::parse` accepts only a physical `extgate-<binding UUID>` ID. Heartbeat tools, schedule validation, and scheduler rebuild therefore reject an enabled reused-address session before the extgate sink can run.
 
-The approved decision is to keep the existing canonical session and add a generic, exact binding-address alias lookup. We will not move history or configuration to a physical extgate session.
+The approved decision is to keep the existing canonical session and add a generic, exact binding-address alias lookup. We will not move history or configuration to a physical extgate session. Because this lookup starts with `gate_bindings.address`, the next DB migration also adds a generic address-first partial index over open bindings. That migration changes indexing only; it rewrites no session, history, membership, heartbeat, schedule, instance, or binding row.
 
 This is an extgate invariant, not a protocol rule. No shared implementation may recognize a protocol kind, protocol session prefix, protocol-specific type, or protocol topology. Protocol-specific regression setup belongs only to `crates/nostr` or `crates/nostr-gateway`. There is no change under `crates/core`.
 
@@ -17,6 +17,7 @@ This is an extgate invariant, not a protocol rule. No shared implementation may 
 | Concern | Owner |
 |---|---|
 | Canonical session selection and exact session-to-binding lookup | `crates/db/src/queries/gate_binding.rs` |
+| Address-first open-binding index and migration/rollback contract | next numbered migration (`v51` at this source revision) under `crates/db/src/schema` |
 | Static timed-fire parsing contract and DB-aware persisted-target hook | `crates/actions/src/timed_fire.rs` |
 | extgate physical/alias target construction and fire-time revalidation | `crates/extgate/src/fire.rs` |
 | Production descriptor registration | Existing `crates/server/src/lib.rs` registration; no protocol-specific registration |
@@ -38,16 +39,18 @@ The sink's live-binding checks are never reached.
 
 ## 4. Repaired sequence
 
-1. Binding creation and inbound remain unchanged.
-2. Every server path that validates a stored/current session uses a new DB-aware router entry point, `resolve_persisted_target(conn, session_id, agent_id)`.
-3. The router asks each descriptor to resolve the persisted session. The trait's default implementation delegates to the existing static `parse`, preserving other transports.
-4. `ExtgateFire` overrides persisted resolution. It asks the DB query layer for the one open, non-deleted binding whose canonical session is exactly `session_id`.
-5. Extgate accepts the result only when its owning `agent_id` exactly equals the requested agent. It returns a target whose `route` is the full canonical session ID.
-6. `ExtgateFire::build_session_id` returns that full route. Thus `run_one_heartbeat` places the original canonical session ID, not a synthesized physical ID, into `TimedFireRequest`.
-7. `ExtgateTimedFireSink` performs the same canonical-session lookup again, verifies the requested agent again, resolves binding context, and then applies the existing live-instance and acknowledged-binding checks.
-8. The existing said-less extgate turn runs against the reused canonical session, preserving history, delivery behavior, locks, continuation, and completion handling.
+1. The next numbered DB migration adds the address-first partial index described in §5. It changes no rows.
+2. Binding creation and inbound remain unchanged.
+3. Every server path that validates a stored/current session uses a new DB-aware router entry point, `resolve_persisted_target(conn, session_id, agent_id)`.
+4. During every scheduler rebuild, **each enabled heartbeat row and each enabled schedule row** passes that same resolver before an `Entry` is created. A failed resolution skips the row fail-closed; neither loop has a syntax-only bypass.
+5. The router asks each descriptor to resolve the persisted session. The trait's default implementation delegates to the existing static `parse`, preserving other transports.
+6. `ExtgateFire` overrides persisted resolution. It asks the DB query layer for the one open, non-deleted binding whose canonical session is exactly `session_id`.
+7. Extgate accepts the result only when its owning `agent_id` exactly equals the requested agent. It returns a target whose `route` is the full canonical session ID.
+8. `ExtgateFire::build_session_id` returns that full route. Thus `run_one_heartbeat` places the original canonical session ID, not a synthesized physical ID, into `TimedFireRequest`.
+9. `ExtgateTimedFireSink` performs the same canonical-session lookup again, verifies the requested agent again, resolves binding context, and then applies the existing live-instance and acknowledged-binding checks.
+10. The existing said-less extgate turn runs against the reused canonical session, preserving history, delivery behavior, locks, continuation, and completion handling.
 
-The second lookup is intentional TOCTOU protection: closing/deleting/replacing a binding between scheduler resolution and sink receipt must stop delivery.
+The second lookup is intentional TOCTOU protection: closing/deleting/replacing a binding between scheduler resolution and sink receipt must stop delivery. A schedule `Entry` does not need to retain the resolved `FireTarget` because its existing execution path consumes the canonical session directly; the successful target is an admission proof and may be discarded only after `resolve_persisted_target` returns it. Heartbeat keeps the target as today. Both row types still use the identical resolver and fail-closed outcomes before entry creation.
 
 ## 5. DB API and exact lookup
 
@@ -82,9 +85,44 @@ Algorithm:
 5. Deduplicate by `binding_id` because the physical and address candidate paths can identify the same row.
 6. Return `Match` only for exactly one retained binding, `NotFound` for zero, and `Ambiguous` for more than one. Query/storage errors remain `Err`; callers log and fail closed.
 
-Use separate indexed queries rather than an `OR`: binding ID uses the binding key, and address uses the existing open-address index. This is read-only and needs no schema change.
+Use separate queries rather than an `OR`: the physical candidate uses the binding key; the alias candidate is exactly:
 
-`enabled` is deliberately not part of identity resolution. A stopped/disabled instance must remain inspectable by heartbeat tools, matching physical-session behavior. Actual firing still requires a live instance and binding acknowledgement in `ExtgateTimedFireSink`.
+```sql
+SELECT b.binding_id, b.instance_id, b.address, a.agent_id
+FROM gate_bindings AS b
+JOIN gate_instances AS i ON i.instance_id = b.instance_id
+JOIN agents AS a ON a.subject_id = i.subject_id
+WHERE b.address = ?1
+  AND b.closed_at IS NULL
+  AND i.deleted_at IS NULL
+ORDER BY b.binding_id;
+```
+
+The address predicate is byte-exact and remains the first restriction. The query does not use `LIKE`, a prefix, normalization, a protocol kind, or an address parser. `canonical_session_id` filtering and ambiguity counting then run as specified above.
+
+### 5.1 Address-first index migration
+
+At this source revision the latest schema is v50, so implementation adds the next migration as v51 with this exact DDL:
+
+```sql
+CREATE INDEX idx_gate_bindings_open_address_lookup
+ON gate_bindings(address, binding_id, instance_id)
+WHERE closed_at IS NULL;
+```
+
+`address` is deliberately first so lookup is independent of instance. `binding_id` and `instance_id` make the candidate read covering where SQLite permits; the existing unique partial index on `(instance_id, address)` remains unchanged because it enforces a different invariant. The new index is non-unique: ambiguity remains data that the resolver must detect and reject, not silently prevent or choose around.
+
+Add v51 to the ordered migration catalog. The migration runs in the existing per-version transaction. Fresh databases and upgrades from v50 both receive the same index through the numbered migration path; historical migration bodies are not edited.
+
+Migration failure is fail-loud: an index creation error (including an object already occupying the approved index name) rolls back the v51 transaction, leaves `PRAGMA user_version = 50`, preserves all rows, and prevents application startup. The DDL intentionally omits `IF NOT EXISTS`; the migration catalog makes normal initialization idempotent, while a conflicting or manually altered schema must not be stamped as valid. Because failed transactional DDL leaves no index, a normal retry safely creates it. The implementation must not catch that failure and continue with an unindexed production scheduler. Lookup query/storage errors remain `Err`; extgate logs them and scheduler/tool validation returns no target.
+
+### 5.2 Query-plan and scale proof
+
+Migration/schema tests inspect `PRAGMA index_list('gate_bindings')` and `PRAGMA index_info('idx_gate_bindings_open_address_lookup')` to pin: non-unique, partial, and ordered columns `(address, binding_id, instance_id)`. An upgrade fixture starts at v50 with representative open and closed rows, initializes twice, and proves row counts/values are byte-identical while the index exists once.
+
+A deterministic query-plan test seeds at least 10,000 nonmatching open/closed bindings plus one exact address and runs `EXPLAIN QUERY PLAN` for the address candidate SQL. It must name `idx_gate_bindings_open_address_lookup` and must not report a full scan of `gate_bindings`. An ignored scale test seeds at least 100,000 bindings, executes repeated hit and miss lookups, asserts correct results, prints timing with `--nocapture`, and imposes no flaky wall-clock threshold; index selection is the pass/fail performance invariant.
+
+`enabled` is deliberately not part of identity resolution. A stopped/disabled instance must remain inspectable by heartbeat tools, matching physical-session behavior. Actual heartbeat delivery still requires a live instance and binding acknowledgement in `ExtgateTimedFireSink`.
 
 ## 6. Timed-fire API
 
@@ -101,7 +139,7 @@ fn resolve_persisted(
 }
 ```
 
-Add `TimedFireRouter::resolve_persisted_target(conn, session_id, agent_id)`. It calls `resolve_persisted` on all registered descriptors and returns a target only when there is exactly one distinct match. Zero or multiple matches return `None`; multiple matches emit a warning without exposing session content. This makes dynamic alias collisions fail closed rather than depend on registration order.
+Add `TimedFireRouter::resolve_persisted_target(conn, session_id, agent_id)`. It calls `resolve_persisted` on all registered descriptors and returns a target only when there is exactly one distinct match. Zero or multiple matches return `None`; multiple matches emit a warning without exposing session content. This makes dynamic alias collisions fail closed rather than depend on registration order. This one method is the mandatory admission gate for heartbeat tools, schedule APIs, enabled heartbeat rows, and enabled schedule rows.
 
 `ExtgateFire::resolve_persisted` uses `lookup_canonical_gate_binding`, rejects `NotFound`, `Ambiguous`, DB errors, and agent mismatch, and otherwise returns:
 
@@ -154,18 +192,16 @@ The physical static parser remains available only for format/collision checks. P
 ## 9. Binding lifecycle, reconnect, and idempotency
 
 - **Creation/reuse:** no change. Existing transaction logic chooses physical creation or address reuse.
-- **Reconnect:** hello replay and bind acknowledgement remain unchanged. Persistent alias lookup continues to return the same binding while disconnected, but the sink refuses delivery until acknowledgement returns.
-- **Close:** a closed binding stops resolving immediately. Existing heartbeat/schedule rows remain untouched and can become routable again only through a valid new open binding for the same canonical address and owner.
-- **Delete:** a deleted instance never resolves.
-- **Replacement:** if a new open binding legitimately takes the same address, the existing canonical heartbeat/schedule row follows that canonical address after exact ownership and uniqueness checks. No binding ID is stored in the heartbeat row.
-- **Repeated resolution:** all new operations are reads. They create no session, binding, heartbeat row, schedule, or registry entry.
+- **Reconnect:** hello replay and bind acknowledgement remain unchanged. Persistent alias lookup continues to return the same binding while disconnected, so valid heartbeat/schedule rows still pass identity admission; the heartbeat sink refuses delivery until acknowledgement returns. After reconnect and acknowledgement, the same rows and binding resolve and fire without repair or rewrite.
+- **Close:** a closed binding stops resolving immediately. Both heartbeat and schedule rows are omitted at scheduler entry creation. Existing rows remain untouched and can become routable again only through a valid new open binding for the same canonical address and owner.
+- **Delete:** a deleted instance never resolves; neither persisted row type creates a scheduler entry.
+- **Replacement:** if a new open binding legitimately takes the same address, the existing canonical heartbeat/schedule row follows that canonical address after exact ownership and uniqueness checks. No binding ID is stored in either timed-fire row.
+- **Repeated resolution:** after the one-time index migration, all resolution operations are reads. They create or update no session, history, membership, instance, binding, heartbeat row, schedule, or registry entry. Tests snapshot all affected table counts and values around repeated hit/miss resolution.
 - **Concurrent lifecycle change:** the sink's second DB lookup and existing live acknowledgement check close the race without a transaction spanning async work.
 
 ## 10. Compatibility and migration
 
-There is no schema or data migration.
-
-Existing data remains authoritative:
+There is one schema migration: the additive v51 partial index in §5.1. It performs no data migration and no row rewrite. Existing data remains authoritative:
 
 - reused canonical session ID;
 - all conversation and memory history attached to it;
@@ -175,17 +211,20 @@ Existing data remains authoritative:
 - binding and instance rows;
 - physical extgate sessions and their heartbeat/schedule rows.
 
-The source already has all required relations and indexes, and `canonical_session_id` already defines the physical-versus-address precedence. A migration would duplicate or split history and violate the approved decision.
+The source already has all required relations, and `canonical_session_id` already defines physical-versus-address precedence. The only missing scale primitive is an address-first open-binding index; v51 adds exactly that. An alias table, backfill, or row migration would duplicate or split authority and remains prohibited.
 
 ## 11. Planned files
 
 Production changes:
 
-- `crates/db/src/queries/gate_binding.rs` — canonical binding lookup and unit tests.
-- `crates/db/src/queries/README.md` — document the new generic query contract.
+- `crates/db/src/queries/gate_binding.rs` — canonical binding lookup, exact address SQL, query-plan/scale tests, and no-write idempotency tests.
+- `crates/db/src/queries/README.md` — document the new generic query and index contract.
+- `crates/db/src/schema/migrations/v51.rs` — additive address-first partial index only.
+- `crates/db/src/schema/migrations/mod.rs` — append v51 to the ordered catalog.
+- `crates/db/src/schema/migration_tests.rs` and a focused v51 test file under `crates/db/src/schema/tests` — fresh/upgrade/idempotency/failure/row-preservation/index-shape coverage.
 - `crates/actions/src/timed_fire.rs` — default persisted-resolution hook, router method, unique-match behavior, and neutral documentation/tests.
 - `crates/extgate/src/fire.rs` — full-session route, DB-aware resolution, ownership check, and sink revalidation.
-- `crates/server/src/scheduler.rs` — use persisted resolution with its existing DB connection.
+- `crates/server/src/scheduler.rs` — gate **both** enabled heartbeat and enabled schedule rows through persisted resolution before either `Entry` is pushed, using the existing DB connection.
 - `crates/server/src/agent_heartbeat.rs` — use persisted resolution for current and explicit sessions.
 - `crates/server/src/agent_schedule.rs` — use persisted resolution.
 - `crates/server/src/api/schedules.rs` — use persisted resolution for create/update validation.
@@ -198,21 +237,26 @@ Protocol-owned regression only:
 Explicitly unchanged:
 
 - all files under `crates/core`;
-- schemas and migrations;
+- every schema object except the one generic v51 index;
 - wire protocol, gate client, gateway address generation, and inbound persistence;
 - production code in `crates/nostr` and `crates/nostr-gateway`.
 
 ## 12. Red tests to add first
 
-### DB query tests
+### Migration, index, and DB query tests
 
-In `gate_binding.rs`:
-
-1. `lookup_canonical_gate_binding_resolves_reused_exact_address` — existing session plus one open binding returns its binding and owner.
-2. `lookup_canonical_gate_binding_preserves_physical_session` — physical canonical session still resolves.
-3. `lookup_canonical_gate_binding_rejects_closed_or_deleted`.
-4. `lookup_canonical_gate_binding_rejects_noncanonical_address_when_physical_exists`.
-5. `lookup_canonical_gate_binding_reports_ambiguous_exact_address` — seed two open candidates directly to model corrupt/legacy data.
+1. `v50_to_v51_adds_open_address_lookup_index_without_rewriting_rows` — seed open/closed bindings and related rows, migrate twice, assert latest version, one index, and byte-identical row values/counts.
+2. `fresh_schema_has_open_address_lookup_index` — inspect `index_list`/`index_info` for non-unique, partial, address-first `(address, binding_id, instance_id)` shape.
+3. `v51_index_failure_rolls_back_and_keeps_version_50` — occupy the approved index name with a conflicting schema object, prove fail-loud transaction rollback, unchanged rows, and version 50; remove the conflict and prove retry succeeds.
+4. `v51_index_rollback_to_v50_and_forward_reapply_preserves_rows` — apply v51, follow the documented stopped-process rollback (`DROP INDEX`, version 50), verify old-shape readability, then initialize forward again and prove identical rows plus restored index.
+5. `lookup_canonical_gate_binding_uses_open_address_lookup_index` — seed at least 10,000 mixed rows; `EXPLAIN QUERY PLAN` must name the new index and not scan `gate_bindings`.
+6. ignored `lookup_canonical_gate_binding_scale` — at least 100,000 rows, repeated exact hits/misses, correct results, printed timing, no wall-clock assertion.
+7. `lookup_canonical_gate_binding_resolves_reused_exact_address` — existing session plus one open binding returns its binding and owner.
+8. `lookup_canonical_gate_binding_preserves_physical_session` — physical canonical session still resolves.
+9. `lookup_canonical_gate_binding_rejects_closed_or_deleted`.
+10. `lookup_canonical_gate_binding_rejects_noncanonical_address_when_physical_exists`.
+11. `lookup_canonical_gate_binding_reports_ambiguous_exact_address` — seed two open candidates directly to model corrupt/legacy data.
+12. `repeated_canonical_binding_resolution_writes_nothing` — snapshot `PRAGMA user_version`, all relevant row counts/values, and `Connection::total_changes`; repeat matching, missing, wrong-owner-at-router, and ambiguous resolutions; assert snapshots and total changes are unchanged.
 
 ### Router/extgate tests
 
@@ -222,15 +266,24 @@ In `gate_binding.rs`:
 4. Existing static physical descriptor round-trip remains green.
 5. Sink test: alias resolved before close but closed before `fire_timed_turn` produces no runtime call/delivery.
 6. Sink test: request agent mismatch produces no runtime call/delivery.
+7. `timed_fire_alias_disconnected_is_not_delivered` — persistent resolution succeeds, but no live instance means no runtime call or delivery.
+8. `timed_fire_alias_unacknowledged_is_not_delivered` — live instance without this binding in `acknowledged` means no runtime call or delivery.
+9. `timed_fire_alias_reconnect_after_ack_delivers_once` — the same unchanged session/config first fails while disconnected, then reconnect/ack permits exactly one turn; no binding/config/session rewrite occurs.
 
 ### Server tests
 
-Use only generic extgate fixtures and opaque addresses:
+Use only generic extgate fixtures and opaque addresses. Exercise `rebuild_entries`, not a test-only approximation:
 
-1. scheduler rebuild includes an enabled heartbeat row on a reused canonical address.
-2. heartbeat get/set/run validation accepts that owned address and rejects another agent.
-3. schedule create/update accepts that owned address and rejects another agent.
-4. existing physical-session scheduler/tool tests remain green.
+1. enabled heartbeat on a valid reused address creates exactly one heartbeat entry.
+2. enabled schedule on the same valid alias creates exactly one schedule entry.
+3. closed binding creates neither heartbeat nor schedule entry.
+4. deleted instance creates neither heartbeat nor schedule entry.
+5. ambiguous canonical binding creates neither heartbeat nor schedule entry.
+6. wrong-owner row creates neither heartbeat nor schedule entry.
+7. malformed/no-match rows remain fail-closed for both row types.
+8. heartbeat get/set/run and schedule create/update accept the owned alias and reject another agent through the same router method.
+9. existing physical-session scheduler/tool tests remain green.
+10. repeated scheduler rebuilds over unchanged heartbeat/schedule rows produce stable entry sets and write no DB state.
 
 ### Protocol-owned regression
 
@@ -241,7 +294,9 @@ In `crates/nostr`, provision an existing protocol session through `provision_nos
 Focused red/green loop:
 
 ```text
+cargo test -p opencrab-db v51
 cargo test -p opencrab-db gate_binding
+cargo test -p opencrab-db lookup_canonical_gate_binding_scale -- --ignored --nocapture
 cargo test -p opencrab-actions timed_fire
 cargo test -p opencrab-extgate --test conformance
 cargo test -p opencrab-server scheduler
@@ -260,21 +315,28 @@ cargo test --workspace
 
 Acceptance observations:
 
-- an enabled reused-address heartbeat produces one scheduler entry;
+- the v51 migration adds only `idx_gate_bindings_open_address_lookup`, preserves all rows, and is retry-safe;
+- the exact-address candidate query selects that index at 10,000+ rows and the ignored 100,000-row scale probe remains correct;
+- an enabled reused-address heartbeat and an enabled reused-address schedule each produce one scheduler entry only after `resolve_persisted_target` succeeds;
+- closed, deleted, ambiguous, wrong-owner, malformed, and missing bindings produce no heartbeat or schedule entry;
 - `run_one_heartbeat` sends the unchanged canonical session ID to the extgate sink;
-- the sink selects the expected live acknowledged binding;
-- history/config row counts and session IDs do not change;
-- closed, ambiguous, wrong-owner, disconnected, and unacknowledged cases emit no delivery.
+- disconnected and unacknowledged bindings produce no delivery, while reconnect plus acknowledgement permits one delivery without data repair;
+- repeated resolver calls and scheduler rebuilds do not change history/config/gate rows, session IDs, schema version, or `total_changes`;
+- the sink selects only the expected live acknowledged binding.
 
 ## 14. Rollback
 
-Rollback is a code revert of the implementation commit(s). Because the change performs no writes and has no migration, rollback requires no data repair. Existing canonical sessions, history, heartbeat rows, and schedules remain valid; on old code, reused-address timed fire returns to fail-closed behavior. Operators can also disable the affected heartbeat/schedule while rolling back without modifying bindings or history.
+The preferred rollback build reverts resolver/scheduler behavior but retains the v51 migration catalog entry and harmless additive index. That build can open a v51 database, ignores the unused index, and requires no data repair; reused-address timed fire returns to fail-closed behavior while all canonical sessions, history, heartbeat rows, and schedules remain intact.
+
+If an exact pre-v51 binary must be restored, its downgrade guard will correctly reject `user_version = 51`. With the application stopped, use one explicit transaction to `DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup` and set `PRAGMA user_version = 50`, then start the old binary. No table or row rollback is required. Re-deploying the forward build recreates the index through v51. A failed v51 application leaves version 50 automatically as described in §5.1.
+
+Operators may disable affected heartbeat/schedule rows during rollback without modifying bindings or history.
 
 ## 15. Non-goals
 
 - Migrating or copying reused sessions to physical extgate session IDs.
 - Rewriting existing history, memberships, heartbeat rows, or schedules.
-- Adding a schema, alias table, cache, background repair, or startup backfill.
+- Adding any schema object beyond the approved generic address-first partial index; no alias table, cache, background repair, or startup backfill.
 - Changing binding creation, provisioning, wire frames, reconnect, or acknowledgement semantics.
 - Adding protocol-specific behavior to core, actions, server, extgate, or DB shared code.
 - Inferring a binding from a protocol prefix or address shape.
