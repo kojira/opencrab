@@ -139,11 +139,13 @@ pub(crate) fn create_schedule_core(
             "スケジュール式または timezone が不正です（{e}）。cron は 5 フィールド（例: 0 7 * * *）、周期は @every 3h の形式、timezone は Asia/Tokyo のような IANA 名で指定してください。"
         ))
     })?;
-    if state
-        .timed_fire_router
-        .resolve_target(session_id, agent_id)
-        .is_none()
-    {
+    let target = {
+        let conn = state.db.lock().unwrap();
+        state
+            .timed_fire_router
+            .resolve_persisted_target(&conn, session_id, agent_id)
+    };
+    if target.is_none() {
         // remedy は登録済み transport から生成する（#628・手書きしない）。
         return Err(ScheduleOpError::BadRequest(format!(
             "このセッションには発火経路がありません（{} のセッションでのみ登録できます）。",
@@ -484,11 +486,13 @@ pub async fn update_schedule(
 
     // 検証（不正は 400）。
     validate_schedule(&new_cron, &new_tz).map_err(|_| StatusCode::BAD_REQUEST)?;
-    if state
-        .timed_fire_router
-        .resolve_target(&new_session_id, &existing.agent_id)
-        .is_none()
-    {
+    let target = {
+        let conn = state.db.lock().unwrap();
+        state
+            .timed_fire_router
+            .resolve_persisted_target(&conn, &new_session_id, &existing.agent_id)
+    };
+    if target.is_none() {
         return Err(StatusCode::BAD_REQUEST);
     }
     if new_message.trim().is_empty() {

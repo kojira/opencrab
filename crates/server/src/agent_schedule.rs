@@ -107,7 +107,13 @@ fn current_session(
             )));
         }
     };
-    match state.timed_fire_router.resolve_target(session_id, &ctx.agent_id) {
+    let target = {
+        let conn = state.db.lock().unwrap();
+        state
+            .timed_fire_router
+            .resolve_persisted_target(&conn, session_id, &ctx.agent_id)
+    };
+    match target {
         Some(_) => Ok(session_id.to_string()),
         None => Err(err(format!(
             "このセッションからは定時実行を設定・照会できません（このセッション種別には発火経路がありません）。設定したい対象のセッション——{}——で実行してください。",
@@ -428,6 +434,83 @@ mod tests {
         let mut c = GatewayCallContext::new(GatewayCaller::TrustedUser, "agent-x");
         c.session_id = Some(session_id.to_string());
         c
+    }
+
+    fn state_with_alias(session_id: &str) -> AppState {
+        let state = crate::test_app_state();
+        let mut conn = state.db.lock().unwrap();
+        opencrab_db::queries::upsert_agent(
+            &conn,
+            &opencrab_db::queries::AgentRow {
+                agent_id: "agent-x".into(),
+                name: "agent".into(),
+                job_title: None,
+                organization: None,
+                image_url: None,
+                persona_name: "persona".into(),
+                personality: None,
+                instructions: String::new(),
+                heartbeat_instructions: String::new(),
+                model: None,
+                reasoning_effort: None,
+                web_search: None,
+                metadata_json: None,
+            },
+        )
+        .unwrap();
+        let subject_id: i64 = conn
+            .query_row(
+                "SELECT subject_id FROM agents WHERE agent_id = 'agent-x'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO gate_instances
+             (instance_id, kind_id, subject_id, revision, enabled, config_b64, config_digest, created_at, updated_at)
+             VALUES ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'generic', ?1, 1, 1, 'e30=', ?2, 1, 1)",
+            rusqlite::params![subject_id, "0".repeat(64)],
+        )
+        .unwrap();
+        let tx = conn.transaction().unwrap();
+        opencrab_db::queries::insert_session_in_tx(
+            &tx,
+            session_id,
+            "alias",
+            "2026-01-01T00:00:00Z",
+        )
+        .unwrap();
+        opencrab_db::queries::insert_agent_session_in_tx(&tx, "agent-x", session_id).unwrap();
+        opencrab_db::queries::create_gate_binding_in_tx(
+            &tx,
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            session_id,
+            session_id,
+            1,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        drop(conn);
+        state
+    }
+
+    #[test]
+    fn set_and_update_accept_owned_alias() {
+        let session_id = "opaque-schedule-session";
+        let state = state_with_alias(session_id);
+        let context = ctx(session_id);
+        let created = set_my_schedule(
+            &state,
+            &json!({"cron_expr": "@every 3h", "message": "first"}),
+            &context,
+        );
+        assert!(created.success, "alias create: {:?}", created.error);
+        let id = created.data.unwrap()["id"].as_i64().unwrap();
+        let updated =
+            update_my_schedule(&state, &json!({"id": id, "message": "updated"}), &context);
+        assert!(updated.success, "alias update: {:?}", updated.error);
+        assert_eq!(updated.data.unwrap()["message"], "updated");
     }
 
     /// 別エージェント（agent-y）の文脈。他人の id を渡す攻撃の再現に使う。

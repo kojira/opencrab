@@ -24,6 +24,7 @@ pub(super) fn seed_legacy_impressions(conn: &Connection, rows: &str) {
                 communication_style, recent_behavior, agreement, notes,
                 last_updated_turn, created_at, updated_at)
                VALUES {rows};
+             DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
              PRAGMA user_version = 20"
     ))
     .unwrap();

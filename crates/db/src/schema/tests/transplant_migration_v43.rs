@@ -4,6 +4,7 @@ fn setup_pre_v43(conn: &Connection) {
         "ALTER TABLE sessions DROP COLUMN policy_json;
          DROP TABLE IF EXISTS session_watches;
          DROP TABLE IF EXISTS tool_logs;
+         DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
          PRAGMA user_version = 42;",
     )
     .unwrap();

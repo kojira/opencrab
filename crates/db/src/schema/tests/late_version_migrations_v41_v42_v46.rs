@@ -10,7 +10,8 @@ fn provider_rename_openai_to_hermit_migration_v41() {
     // v40 相当の既存 DB を模す: version を 40 へ戻し、openai を指す行と、
     // **変わってはいけない** 対照行（別 provider / 先頭アンカーに引っかからない
     // 部分一致 / NULL）を置く。
-    conn.execute_batch("PRAGMA user_version = 40;").unwrap();
+    conn.execute_batch("DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
+    PRAGMA user_version = 40;").unwrap();
     conn.execute_batch(
         "INSERT INTO agents (agent_id, name, persona_name, model) VALUES \
             ('a-openai',     'n', 'p', 'openai:claude-sonnet-4-6'), \
@@ -114,7 +115,8 @@ fn provider_rename_openai_to_hermit_migration_v41() {
     assert!(override_exists("ollama"), "無関係な override が消えた");
 
     // 冪等性: 再実行しても openai 行はもう無く、hermit の値は変わらない（自然 no-op）。
-    conn.execute_batch("PRAGMA user_version = 40;").unwrap();
+    conn.execute_batch("DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
+    PRAGMA user_version = 40;").unwrap();
     run_migrations(&conn, MIGRATIONS).expect("v41 rerun no-op");
     assert_eq!(
         model_of("a-openai").as_deref(),
@@ -136,7 +138,8 @@ fn model_pricing_max_output_tokens_backfill_migration_v42() {
     // （新規 init は既に v42 まで済み・列ありなので、明示的に前状態を作る。）
     conn.execute_batch("ALTER TABLE model_pricing DROP COLUMN max_output_tokens;")
         .unwrap();
-    conn.execute_batch("PRAGMA user_version = 41;").unwrap();
+    conn.execute_batch("DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
+    PRAGMA user_version = 41;").unwrap();
     conn.execute_batch(
         "INSERT INTO model_pricing \
             (provider, model, input_price_per_1m, output_price_per_1m, context_window, updated_at) VALUES \
@@ -168,7 +171,8 @@ fn model_pricing_max_output_tokens_backfill_migration_v42() {
     assert_eq!(sol.output_price_per_1m, 30.0);
 
     // 冪等性: 再実行しても値は変わらない（ALTER は列存在で no-op、backfill は IS NULL で自然 no-op）。
-    conn.execute_batch("PRAGMA user_version = 41;").unwrap();
+    conn.execute_batch("DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
+    PRAGMA user_version = 41;").unwrap();
     run_migrations(&conn, MIGRATIONS).expect("v42 rerun no-op");
     assert_eq!(
         crate::queries::get_model_pricing(&conn, "hermit", "claude-opus-5")
@@ -185,7 +189,8 @@ fn model_pricing_max_output_tokens_backfill_migration_v42() {
 #[test]
 fn conversation_snapshots_migration_v46() {
     let conn = crate::init_memory().expect("init");
-    conn.execute_batch("DROP TABLE IF EXISTS conversation_snapshots; PRAGMA user_version = 45;")
+    conn.execute_batch("DROP TABLE IF EXISTS conversation_snapshots; DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
+    PRAGMA user_version = 45;")
         .unwrap();
     assert!(!table_exists(&conn, "conversation_snapshots").unwrap());
 
@@ -193,7 +198,8 @@ fn conversation_snapshots_migration_v46() {
     assert_eq!(schema_version(&conn).unwrap(), latest_version());
     assert!(table_exists(&conn, "conversation_snapshots").unwrap());
 
-    conn.execute_batch("PRAGMA user_version = 45;").unwrap();
+    conn.execute_batch("DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
+    PRAGMA user_version = 45;").unwrap();
     run_migrations(&conn, MIGRATIONS).expect("v46 rerun no-op");
     assert!(table_exists(&conn, "conversation_snapshots").unwrap());
 }

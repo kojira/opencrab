@@ -10,6 +10,110 @@ fn nostr_session() -> String {
     format!("nostr-{AGENT}")
 }
 
+fn state_with_alias(session_id: &str) -> AppState {
+    let state = state_with_db();
+    let mut conn = state.db.lock().unwrap();
+    opencrab_db::queries::upsert_agent(
+        &conn,
+        &opencrab_db::queries::AgentRow {
+            agent_id: AGENT.into(),
+            name: "agent".into(),
+            job_title: None,
+            organization: None,
+            image_url: None,
+            persona_name: "persona".into(),
+            personality: None,
+            instructions: String::new(),
+            heartbeat_instructions: String::new(),
+            model: None,
+            reasoning_effort: None,
+            web_search: None,
+            metadata_json: None,
+        },
+    )
+    .unwrap();
+    let subject_id: i64 = conn
+        .query_row(
+            "SELECT subject_id FROM agents WHERE agent_id = ?1",
+            [AGENT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    conn.execute(
+        "INSERT INTO gate_instances
+         (instance_id, kind_id, subject_id, revision, enabled, config_b64, config_digest, created_at, updated_at)
+         VALUES ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'generic', ?1, 1, 1, 'e30=', ?2, 1, 1)",
+        rusqlite::params![subject_id, "0".repeat(64)],
+    )
+    .unwrap();
+    let tx = conn.transaction().unwrap();
+    opencrab_db::queries::insert_session_in_tx(&tx, session_id, "alias", "2026-01-01T00:00:00Z")
+        .unwrap();
+    opencrab_db::queries::insert_agent_session_in_tx(&tx, AGENT, session_id).unwrap();
+    opencrab_db::queries::create_gate_binding_in_tx(
+        &tx,
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        session_id,
+        session_id,
+        1,
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    drop(conn);
+    state
+}
+
+#[tokio::test]
+async fn create_and_update_accept_owned_alias_and_reject_wrong_owner() {
+    let session_id = "opaque-schedule-session";
+    let state = state_with_alias(session_id);
+    let created = create_schedule(
+        State(state.clone()),
+        Path(AGENT.to_string()),
+        Json(CreateRequest {
+            session_id: session_id.into(),
+            cron_expr: "@every 3h".into(),
+            timezone: "UTC".into(),
+            message: "first".into(),
+            enabled: true,
+        }),
+    )
+    .await
+    .expect("owned alias create")
+    .0;
+    let updated = update_schedule(
+        State(state.clone()),
+        Path(created.id),
+        Json(PatchRequest {
+            session_id: Some(session_id.into()),
+            cron_expr: None,
+            timezone: None,
+            message: Some("updated".into()),
+            enabled: None,
+        }),
+    )
+    .await
+    .expect("owned alias update")
+    .0;
+    assert_eq!(updated.session_id, session_id);
+    assert_eq!(updated.message, "updated");
+
+    let wrong_owner = create_schedule(
+        State(state),
+        Path("other-agent".into()),
+        Json(CreateRequest {
+            session_id: session_id.into(),
+            cron_expr: "@every 1h".into(),
+            timezone: "UTC".into(),
+            message: "wrong".into(),
+            enabled: true,
+        }),
+    )
+    .await;
+    assert_eq!(wrong_owner.err(), Some(StatusCode::BAD_REQUEST));
+}
+
 #[tokio::test]
 async fn create_rejects_bad_cron() {
     let state = state_with_db();

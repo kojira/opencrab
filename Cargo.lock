@@ -1709,6 +1709,7 @@ dependencies = [
  "opencrab-actions",
  "opencrab-core",
  "opencrab-db",
+ "opencrab-extgate",
  "opencrab-gateway",
  "rusqlite",
  "serde",

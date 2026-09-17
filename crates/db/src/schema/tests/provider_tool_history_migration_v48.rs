@@ -19,6 +19,12 @@ fn v47_to_v48_adds_provider_tool_history_once_and_preserves_rows() {
              updated_at TEXT NOT NULL,
              PRIMARY KEY (provider, model)
          );
+         CREATE TABLE gate_bindings (
+             binding_id TEXT,
+             instance_id TEXT,
+             address TEXT,
+             closed_at INTEGER
+         );
          PRAGMA user_version = 47;",
     )
     .unwrap();
@@ -26,7 +32,7 @@ fn v47_to_v48_adds_provider_tool_history_once_and_preserves_rows() {
     initialize(&conn).unwrap();
     initialize(&conn).unwrap();
 
-    assert_eq!(schema_version(&conn).unwrap(), 50);
+    assert_eq!(schema_version(&conn).unwrap(), 51);
     assert!(column_exists(&conn, "llm_logs", "provider_tool_history").unwrap());
     let history: String = conn
         .query_row(
@@ -43,5 +49,5 @@ fn fresh_schema_contains_provider_tool_history() {
     let conn = Connection::open_in_memory().unwrap();
     initialize(&conn).unwrap();
     assert!(column_exists(&conn, "llm_logs", "provider_tool_history").unwrap());
-    assert_eq!(schema_version(&conn).unwrap(), 50);
+    assert_eq!(schema_version(&conn).unwrap(), 51);
 }

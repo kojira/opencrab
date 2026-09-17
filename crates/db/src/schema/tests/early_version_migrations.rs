@@ -4,7 +4,8 @@ fn agent_sessions_backfill_migration_v4() {
     let conn = crate::init_memory().expect("init");
     // v3 状態に戻し、v4 の backfill 対象となる sessions 行を用意する
     // （うち1件は壊れた JSON — skip され、他の行は影響を受けないこと）。
-    conn.execute_batch("PRAGMA user_version = 3").unwrap();
+    conn.execute_batch("DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
+    PRAGMA user_version = 3").unwrap();
     conn.execute_batch("DELETE FROM agent_sessions").unwrap();
     conn.execute_batch(
             "INSERT INTO sessions (id, mode, theme, phase, turn_number, status, participant_ids_json, done_count, created_at, updated_at)
@@ -68,7 +69,8 @@ fn memory_index_fk_cascade_and_check_enforced() {
 fn memory_index_rebuild_migration_v5_upgrades_legacy_table() {
     let conn = crate::init_memory().expect("init");
     // v4 時点の旧テーブル形（FK/CHECK なし）を再現する
-    conn.execute_batch("PRAGMA user_version = 4").unwrap();
+    conn.execute_batch("DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
+    PRAGMA user_version = 4").unwrap();
     conn.execute_batch(
             "DROP TABLE memory_index_nodes;
              CREATE TABLE memory_index_nodes (
@@ -128,10 +130,12 @@ fn task_ledger_restart_count_migration_v6() {
     assert!(column_exists(&conn, "task_ledger", "restart_count").unwrap());
 
     // 既存DB（v5 時点 = 列なし）からの upgrade。
-    conn.execute_batch("DROP TABLE task_progress; DROP TABLE task_ledger; PRAGMA user_version = 1")
+    conn.execute_batch("DROP TABLE task_progress; DROP TABLE task_ledger; DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
+    PRAGMA user_version = 1")
         .unwrap();
     conn.execute_batch(TASK_LEDGER_SQL).unwrap();
-    conn.execute_batch("PRAGMA user_version = 5").unwrap();
+    conn.execute_batch("DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
+    PRAGMA user_version = 5").unwrap();
     conn.execute_batch(
         "INSERT INTO task_ledger (agent_id, session_id, goal, status, created_at, updated_at)
              VALUES ('a1', 's1', 'g', 'active', '2026-01-01', '2026-01-01')",
@@ -180,6 +184,7 @@ fn memory_index_keywords_migration_v7() {
              );
              INSERT INTO memory_index_nodes (id, agent_id, node_type, title, summary, created_at, updated_at)
              VALUES ('t-legacy', 'a1', 'topic', '旧トピック', '旧要約テキスト', '2026-01-01', '2026-01-01');
+             DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
              PRAGMA user_version = 6;",
         )
         .unwrap();
@@ -199,7 +204,8 @@ fn memory_index_keywords_migration_v7() {
     // keywords_json は DEFAULT '[]' で読める
     assert_eq!(hits[0].keywords_json, "[]");
     // 再実行してもバックフィルは重複しない
-    conn.execute_batch("PRAGMA user_version = 6").unwrap();
+    conn.execute_batch("DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
+    PRAGMA user_version = 6").unwrap();
     run_migrations(&conn, MIGRATIONS).expect("v7 rerun");
     let fts_rows: i64 = conn
         .query_row("SELECT COUNT(*) FROM memory_index_fts", [], |r| r.get(0))

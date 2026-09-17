@@ -277,6 +277,99 @@ pub fn canonical_session_id(
     Ok(None)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalGateBinding {
+    pub binding_id: String,
+    pub agent_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CanonicalGateBindingLookup {
+    Match(CanonicalGateBinding),
+    NotFound,
+    Ambiguous,
+}
+
+pub(crate) const CANONICAL_ADDRESS_CANDIDATES_SQL: &str =
+    "SELECT b.binding_id, b.instance_id, b.address, a.agent_id
+     FROM gate_bindings AS b
+     JOIN gate_instances AS i ON i.instance_id = b.instance_id
+     JOIN agents AS a ON a.subject_id = i.subject_id
+     WHERE b.address = ?1
+       AND b.closed_at IS NULL
+       AND i.deleted_at IS NULL
+     ORDER BY b.binding_id";
+
+/// Resolve one canonical session to its open generic gate binding.
+///
+/// Both physical sessions and exact binding-address aliases use the same canonical-session rule as
+/// inbound persistence. Ambiguous or non-canonical candidates are never selected arbitrarily.
+pub fn lookup_canonical_gate_binding(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<CanonicalGateBindingLookup> {
+    let mut candidates = std::collections::BTreeMap::<String, (String, String)>::new();
+
+    if let Some(binding_id) = session_id.strip_prefix("extgate-") {
+        let row = conn
+            .query_row(
+                "SELECT b.binding_id, b.address, a.agent_id
+                 FROM gate_bindings AS b
+                 JOIN gate_instances AS i ON i.instance_id = b.instance_id
+                 JOIN agents AS a ON a.subject_id = i.subject_id
+                 WHERE b.binding_id = ?1
+                   AND b.closed_at IS NULL
+                   AND i.deleted_at IS NULL",
+                [binding_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((binding_id, address, agent_id)) = row {
+            candidates.insert(binding_id, (address, agent_id));
+        }
+    }
+
+    let mut statement = conn.prepare(CANONICAL_ADDRESS_CANDIDATES_SQL)?;
+    let address_rows = statement.query_map([session_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    for row in address_rows {
+        let (binding_id, address, agent_id) = row?;
+        candidates.insert(binding_id, (address, agent_id));
+    }
+    drop(statement);
+
+    let mut matches = Vec::new();
+    for (binding_id, (address, agent_id)) in candidates {
+        if canonical_session_id(conn, &binding_id, &address)?.as_deref() == Some(session_id) {
+            matches.push(CanonicalGateBinding {
+                binding_id,
+                agent_id,
+            });
+        }
+    }
+
+    Ok(match matches.as_slice() {
+        [] => CanonicalGateBindingLookup::NotFound,
+        [one] => CanonicalGateBindingLookup::Match(one.clone()),
+        _ => CanonicalGateBindingLookup::Ambiguous,
+    })
+}
+
+#[cfg(test)]
+#[path = "gate_binding_lookup_tests.rs"]
+mod lookup_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -22,7 +22,8 @@ fn task_ledger_schema_parity() {
     // 既存DB: baseline 後に v2 マイグレーション由来で作成。
     let migrated = crate::init_memory().expect("migrated");
     migrated
-        .execute_batch("DROP TABLE task_progress; DROP TABLE task_ledger; PRAGMA user_version = 1")
+        .execute_batch("DROP TABLE task_progress; DROP TABLE task_ledger; DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
+        PRAGMA user_version = 1")
         .unwrap();
     initialize(&migrated).expect("re-migrate");
 

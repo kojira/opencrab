@@ -6,7 +6,8 @@ fn baseline_reconciles_pre_versioning_db() {
     assert_eq!(schema_version(&conn).unwrap(), latest_version());
 
     // 旧DBを模す: version を 0 に戻し、baseline が再追加する列を落とす。
-    conn.execute_batch("PRAGMA user_version = 0").unwrap();
+    conn.execute_batch("DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
+    PRAGMA user_version = 0").unwrap();
     conn.execute_batch("ALTER TABLE skills DROP COLUMN archived")
         .unwrap();
     assert!(!column_exists(&conn, "skills", "archived").unwrap());
@@ -39,7 +40,8 @@ fn session_type_index_reaches_new_and_existing_dbs() {
     assert!(has_session_type_index(&conn), "新規 DB に index が無い");
 
     // 既存 DB（v38・index 無し）を模す: index を落として版を 38 へ戻す。
-    conn.execute_batch("DROP INDEX idx_memory_sessions_session_type; PRAGMA user_version = 38;")
+    conn.execute_batch("DROP INDEX idx_memory_sessions_session_type; DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
+    PRAGMA user_version = 38;")
         .unwrap();
     assert!(!has_session_type_index(&conn));
 
