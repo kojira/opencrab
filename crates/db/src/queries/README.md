@@ -14,6 +14,7 @@ session 不在・membership 不一致は fail-loud。
 |---|---|
 | `create_gate_binding_in_tx` | physical session・sole membership・open bindingを1 TXで作る汎用部品。themeは呼び出し側が渡し、commitも呼び出し側が行う。addressが既存session IDとbyte一致なら再利用する。membership不一致・複数・他open bindingの占有は`CreateGateBindingError::Conflict` |
 | `canonical_session_id` | physical `extgate-{binding_id}` があればそれ、無ければ address と id が一致する再利用 session。どちらも無ければ None |
+| `lookup_canonical_gate_binding` | canonical session ID から open・未削除の generic binding を exact 解決。0件=`NotFound`、複数=`Ambiguous`。address 候補は v51 の address-first partial index を使う |
 
 ## sessions
 

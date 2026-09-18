@@ -131,6 +131,20 @@ pub trait TransportFire: Send + Sync {
     /// ハイフン入り）で接頭辞を剥がすので naive な `split('-')` にしない（fail-closed）。
     fn parse(&self, session_id: &str, agent_id: &str) -> Option<FireTarget>;
 
+    /// Resolve a persisted session with read-only routing metadata available.
+    ///
+    /// Most transports have a self-describing session ID and use the static parser. Transports
+    /// whose canonical session can be an exact persisted alias override this hook. Implementations
+    /// must not write through `conn` and must fail closed on missing or ambiguous metadata.
+    fn resolve_persisted(
+        &self,
+        _conn: &rusqlite::Connection,
+        session_id: &str,
+        agent_id: &str,
+    ) -> Option<FireTarget> {
+        self.parse(session_id, agent_id)
+    }
+
     /// [`parse`](Self::parse) の逆写像（発火先 → session_id）。両者が独立実装なので
     /// round-trip テスト（#628 条件 C）で恒真にならないことを担保する。
     fn build_session_id(&self, target: &FireTarget, agent_id: &str) -> String;
@@ -284,6 +298,39 @@ impl TimedFireRouter {
             .unwrap()
             .iter()
             .find_map(|d| d.parse(session_id, agent_id))
+    }
+
+    /// Resolve a persisted session through every descriptor and require one distinct match.
+    ///
+    /// Unlike static prefix collision checks, persisted aliases can depend on DB rows. Returning no
+    /// target for multiple matches prevents descriptor registration order from selecting a route.
+    pub fn resolve_persisted_target(
+        &self,
+        conn: &rusqlite::Connection,
+        session_id: &str,
+        agent_id: &str,
+    ) -> Option<FireTarget> {
+        let descriptors = self.descriptors.lock().unwrap();
+        let mut matches = Vec::new();
+        for descriptor in descriptors.iter() {
+            if let Some(target) = descriptor.resolve_persisted(conn, session_id, agent_id) {
+                if !matches.contains(&target) {
+                    matches.push(target);
+                }
+            }
+        }
+        match matches.len() {
+            1 => matches.pop(),
+            0 => None,
+            count => {
+                tracing::warn!(
+                    agent_id,
+                    match_count = count,
+                    "timed-fire: persisted session matched multiple descriptors; refusing"
+                );
+                None
+            }
+        }
     }
 
     /// 登録済み descriptor の kind 集合（起動時セルフチェックの双方向照合用・条件 A）。
@@ -556,6 +603,27 @@ mod tests {
         assert!(router.resolve_target("beta-a1", "a1").is_some());
         // 発火経路の無い種別は None（fail-closed）。
         assert!(router.resolve_target("web-a1", "a1").is_none());
+    }
+
+    #[test]
+    fn persisted_target_requires_exactly_one_descriptor_match() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let router = TimedFireRouter::new();
+        router.register_descriptor(dummy("alpha", "same"));
+        assert!(router
+            .resolve_persisted_target(&conn, "same-a1", "a1")
+            .is_some());
+
+        router.register_descriptor(dummy("beta", "same"));
+        assert!(
+            router
+                .resolve_persisted_target(&conn, "same-a1", "a1")
+                .is_none(),
+            "multiple persisted descriptor matches must fail closed"
+        );
+        assert!(router
+            .resolve_persisted_target(&conn, "missing-a1", "a1")
+            .is_none());
     }
 
     /// remedy 文言は登録した descriptor の human_hint を登録順に畳む（手書き列挙なし）。

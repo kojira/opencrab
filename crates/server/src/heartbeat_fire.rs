@@ -150,6 +150,42 @@ pub async fn run_one_heartbeat(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    struct RecordingSink(Arc<Mutex<Vec<opencrab_actions::TimedFireRequest>>>);
+
+    impl opencrab_actions::TimedFireSink for RecordingSink {
+        fn fire_timed_turn(&self, request: opencrab_actions::TimedFireRequest) {
+            self.0.lock().unwrap().push(request);
+        }
+    }
+
+    #[tokio::test]
+    async fn run_one_heartbeat_preserves_alias_and_owner_caller() {
+        let state = crate::test_app_state();
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        state.timed_fire_router.register_shared(
+            opencrab_extgate::EXTGATE_TIMED_FIRE_KIND,
+            Arc::new(RecordingSink(Arc::clone(&recorded))),
+        );
+        let alias = "opaque-canonical-session\0byte-exact";
+        let target = FireTarget {
+            kind: opencrab_extgate::EXTGATE_TIMED_FIRE_KIND,
+            channel_id: String::new(),
+            guild_id: String::new(),
+            route: alias.to_string(),
+        };
+
+        assert_eq!(
+            run_one_heartbeat(&state, "agent-a", &target).await,
+            Some(())
+        );
+        let mut requests = recorded.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let request = requests.pop().unwrap();
+        assert_eq!(request.session_id.as_bytes(), alias.as_bytes());
+        assert_eq!(request.caller, CallerIdentity::Owner);
+    }
 
     /// 指示文の整形は配送側から渡された会話ラベルを差し込むだけ。
     #[test]

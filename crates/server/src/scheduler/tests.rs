@@ -1,5 +1,7 @@
 use super::*;
 
+mod alias_resolution;
+
 const AGENT_UUID: &str = "11111111-1111-4111-8111-111111111111";
 
 /// #899 / §12.6: schedule 発火ターンの応答が NO_REPLY のみなら speech を保存しない
@@ -76,11 +78,7 @@ fn later_of_picks_the_later() {
 // ---- rebuild / 発火集合の不変条件（設計 §4.2 / §5・#5） ----
 
 use chrono::Duration;
-use opencrab_db::queries::AgentScheduleRow;
-// #654: SessionHeartbeatConfigRow は heartbeat 発火集合テスト（router 解決に依存＝nostr feature
-// が要る・#651）専用の helper でしか使わないので、その cfg に合わせて import も囲む。
-#[cfg(any())]
-use opencrab_db::queries::SessionHeartbeatConfigRow;
+use opencrab_db::queries::{AgentScheduleRow, SessionHeartbeatConfigRow};
 use std::collections::HashMap;
 
 // #654: 2 エージェント目は heartbeat 発火集合テスト（nostr feature 依存・#651）専用。
@@ -91,6 +89,63 @@ fn hb_key(session: &str) -> EntryKey {
     EntryKey::Heartbeat {
         session_id: session.to_string(),
     }
+}
+
+fn seed_generic_alias_binding(
+    conn: &mut rusqlite::Connection,
+    agent_id: &str,
+    session_id: &str,
+) -> (String, String) {
+    opencrab_db::queries::upsert_agent(
+        conn,
+        &opencrab_db::queries::AgentRow {
+            agent_id: agent_id.into(),
+            name: "agent".into(),
+            job_title: None,
+            organization: None,
+            image_url: None,
+            persona_name: "persona".into(),
+            personality: None,
+            instructions: String::new(),
+            heartbeat_instructions: String::new(),
+            model: None,
+            reasoning_effort: None,
+            web_search: None,
+            metadata_json: None,
+        },
+    )
+    .unwrap();
+    let subject_id: i64 = conn
+        .query_row(
+            "SELECT subject_id FROM agents WHERE agent_id = ?1",
+            [agent_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let instance_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string();
+    let binding_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".to_string();
+    conn.execute(
+        "INSERT INTO gate_instances
+         (instance_id, kind_id, subject_id, revision, enabled, config_b64, config_digest, created_at, updated_at)
+         VALUES (?1, 'generic', ?2, 1, 1, 'e30=', ?3, 1, 1)",
+        rusqlite::params![instance_id, subject_id, "0".repeat(64)],
+    )
+    .unwrap();
+    let tx = conn.transaction().unwrap();
+    opencrab_db::queries::insert_session_in_tx(&tx, session_id, "alias", "2026-01-01T00:00:00Z")
+        .unwrap();
+    opencrab_db::queries::insert_agent_session_in_tx(&tx, agent_id, session_id).unwrap();
+    opencrab_db::queries::create_gate_binding_in_tx(
+        &tx,
+        &binding_id,
+        &instance_id,
+        session_id,
+        session_id,
+        1,
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    (instance_id, binding_id)
 }
 
 // #654: heartbeat 発火集合テスト（nostr feature 依存・上記 import 参照）専用の helper。
@@ -498,8 +553,9 @@ fn schedule_keys(entries: &[Entry]) -> std::collections::BTreeSet<i64> {
 /// enabled な cron / `@every` の両方が rebuild に載る。disabled は載らない（enabled=false で停止）。
 #[test]
 fn schedules_enabled_both_kinds_load_disabled_excluded() {
-    let conn = opencrab_db::init_memory().unwrap();
+    let mut conn = opencrab_db::init_memory().unwrap();
     let sid = format!("nostr-{AGENT_UUID}");
+    seed_generic_alias_binding(&mut conn, AGENT_UUID, &sid);
     let past = (Utc::now() - Duration::hours(1)).to_rfc3339();
     // cron（enabled）。
     let id_cron = opencrab_db::queries::insert_agent_schedule(
@@ -543,9 +599,10 @@ fn schedules_enabled_both_kinds_load_disabled_excluded() {
 /// schedule は live G の対象外（G=false でも発火対象に残る・統括裁定 §10.1）。
 #[test]
 fn schedules_are_not_gated_by_g() {
-    let conn = opencrab_db::init_memory().unwrap();
-    // discord- セッションの schedule（HB なら G=false で消える種別）。
+    let mut conn = opencrab_db::init_memory().unwrap();
+    // canonical alias の schedule。schedule 自体は live G の対象外。
     let sid = format!("discord-{AGENT_UUID}-1001-2002");
+    seed_generic_alias_binding(&mut conn, AGENT_UUID, &sid);
     let past = (Utc::now() - Duration::hours(1)).to_rfc3339();
     let id = opencrab_db::queries::insert_agent_schedule(
         &conn,
@@ -565,8 +622,9 @@ fn schedules_are_not_gated_by_g() {
 /// 長時間ダウン後の cron schedule も 1 エントリ・due（missed-run 1 回圧縮・§8）。
 #[test]
 fn schedule_missed_run_compresses_to_one() {
-    let conn = opencrab_db::init_memory().unwrap();
+    let mut conn = opencrab_db::init_memory().unwrap();
     let sid = format!("nostr-{AGENT_UUID}");
+    seed_generic_alias_binding(&mut conn, AGENT_UUID, &sid);
     let long_ago = (Utc::now() - Duration::days(3)).to_rfc3339();
     opencrab_db::queries::insert_agent_schedule(
         &conn,
@@ -614,8 +672,9 @@ fn schedule_unparseable_expr_is_skipped() {
 /// （二重実行しない・向きは後ろ・§8 / §4.4）。
 #[test]
 fn schedule_success_pushes_next_forward() {
-    let conn = opencrab_db::init_memory().unwrap();
+    let mut conn = opencrab_db::init_memory().unwrap();
     let sid = format!("nostr-{AGENT_UUID}");
+    seed_generic_alias_binding(&mut conn, AGENT_UUID, &sid);
     let long_ago = (Utc::now() - Duration::days(3)).to_rfc3339();
     let id = opencrab_db::queries::insert_agent_schedule(
         &conn,

@@ -18,6 +18,7 @@ fn skills_created_caller_migration_v24_reaches_existing_db() {
                VALUES ('legacy1', 'a1', 'n', 'd', 'sp', 'g',
                        'experience', 0, 1, '\"agent\"', 0,
                        '2026-01-01', '2026-01-01');
+             DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
              PRAGMA user_version = 23",
     )
     .unwrap();
@@ -85,6 +86,7 @@ fn skills_agent_visible_migration_v25_reaches_existing_db_default_zero() {
                 '2026-01-01', '2026-01-01'),
                ('s2', 'a1', 'n2', 'd', 'sp', 'g', 'experience', 0, 1, '\"agent\"', 0,
                 '2026-01-01', '2026-01-01');
+             DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
              PRAGMA user_version = 24",
     )
     .unwrap();
@@ -155,6 +157,7 @@ fn agent_memory_index_config_last_organize_at_migration_v27_reaches_existing_db(
              INSERT INTO agent_memory_index_config
                (agent_id, batch_size, threshold, updated_at, last_skill_consolidation_at)
                VALUES ('a1', 50, 20, '2026-01-01', '2026-07-01T00:00:00Z');
+             DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
              PRAGMA user_version = 26",
     )
     .unwrap();
@@ -226,6 +229,7 @@ fn agent_memory_index_config_backlog_cursor_migration_v28_reaches_existing_db() 
              INSERT INTO agent_memory_index_config
                (agent_id, batch_size, threshold, updated_at, last_skill_consolidation_at, last_organize_at)
                VALUES ('a1', 50, 20, '2026-01-01', '2026-07-01T00:00:00Z', '2026-08-03T00:00:00Z|n5');
+             DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
              PRAGMA user_version = 27",
         )
         .unwrap();
@@ -305,6 +309,7 @@ fn agent_memory_index_config_last_run_at_migration_v29_reaches_existing_db() {
              INSERT INTO agent_memory_index_config
                (agent_id, batch_size, threshold, updated_at, last_organize_at, organize_backlog_cursor)
                VALUES ('a1', 50, 20, '2026-01-01', '2026-08-04T00:00:00Z|n5', '2026-06-01T00:00:00Z|old3');
+             DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
              PRAGMA user_version = 28",
         )
         .unwrap();
@@ -364,6 +369,7 @@ fn agent_memory_index_config_declare_cursor_migration_v31_reaches_existing_db() 
                 organize_backlog_cursor, organize_last_run_at)
                VALUES ('a1', 50, 20, '2026-01-01', '2026-08-04T00:00:00Z|n5',
                        '2026-06-01T00:00:00Z|old3', '2026-08-05T00:00:00Z');
+             DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
              PRAGMA user_version = 30",
     )
     .unwrap();
@@ -431,6 +437,7 @@ fn agent_memory_index_config_declare_window_migration_v34_reaches_existing_db() 
                 organize_last_run_at)
                VALUES ('a1', 50, 20, '2026-01-01', '2026-08-05T00:00:00Z|23594',
                        '2026-08-05T00:00:00Z');
+             DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
              PRAGMA user_version = 32",
     )
     .unwrap();
@@ -488,6 +495,7 @@ fn agent_memory_index_config_condense_cursor_migration_v35_reaches_existing_db()
                 memory_declare_window)
                VALUES ('a1', 50, 20, '2026-01-01', '2026-08-07T00:00:00Z|60000',
                        '{\"window_size\":300}');
+             DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
              PRAGMA user_version = 34",
     )
     .unwrap();

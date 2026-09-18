@@ -107,7 +107,16 @@ fn current_session(
             )));
         }
     };
-    match state.timed_fire_router.resolve_target(session_id, &ctx.agent_id) {
+    let target = {
+        let conn = state.db.lock().map_err(|error| {
+            tracing::error!(%error, agent_id = %ctx.agent_id, "schedule: persisted target DB lock failed");
+            err("定時実行の発火先を確認できませんでした。しばらくしてから再試行してください")
+        })?;
+        state
+            .timed_fire_router
+            .resolve_persisted_target(&conn, session_id, &ctx.agent_id)
+    };
+    match target {
         Some(_) => Ok(session_id.to_string()),
         None => Err(err(format!(
             "このセッションからは定時実行を設定・照会できません（このセッション種別には発火経路がありません）。設定したい対象のセッション——{}——で実行してください。",
@@ -418,6 +427,10 @@ pub(crate) fn delete_my_schedule(
         Err(ScheduleOpError::BadRequest(m)) | Err(ScheduleOpError::Internal(m)) => err(m),
     }
 }
+
+#[cfg(test)]
+#[path = "agent_schedule/review_tests.rs"]
+mod review_tests;
 
 #[cfg(test)]
 mod tests {

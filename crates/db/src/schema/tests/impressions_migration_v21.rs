@@ -135,6 +135,7 @@ fn impressions_agent_scope_migration_v21_detects_reformatted_legacy_schema() {
                 updated_at TEXT NOT NULL,
                 UNIQUE  (agent_id,session_id,target_id)
              );
+             DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
              PRAGMA user_version = 20",
     )
     .unwrap();

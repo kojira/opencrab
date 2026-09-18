@@ -33,6 +33,7 @@ fn memory_index_category_migration_v23_widens_check_and_preserves_rows() {
                     ('sess', 'a1', 'p', 'session', 'S', 's', '2026-01-01', '2026-01-01'),
                     ('t', 'a1', 'sess', 'topic', 'Rust入門', 's', '2026-01-02', '2026-01-02');
              DROP TABLE IF EXISTS memory_category_members;
+             DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
              PRAGMA user_version = 22;",
         )
         .unwrap();
@@ -129,6 +130,7 @@ fn memory_index_reset_and_multi_tag_migration_v26() {
              INSERT INTO memory_curated (id, agent_id, category, content, updated_at)
              VALUES ('m1', 'a1', 'long_term/rule', '送金は必ず二重確認', '2026-02-01'),
                     ('m2', 'a1', 'reflection', '振り返り', '2026-02-01');
+             DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
              PRAGMA user_version = 25;",
         )
         .unwrap();

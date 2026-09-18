@@ -172,6 +172,20 @@ fn parse_interval_arg(
 /// `ctx.session_id` が無い（セッション文脈なし）→ fail-closed エラー。発火経路が無い種別
 /// （登録済み descriptor がどれも名乗らない）→ fail-closed エラー。発火（scheduler）と同じ
 /// 登録簿を引くので「設定できたのに永遠に発火しない行」を作らせない（設計 §13.1）。
+fn resolve_persisted_target(
+    state: &AppState,
+    session_id: &str,
+    agent_id: &str,
+) -> Result<Option<opencrab_actions::FireTarget>, GatewayActionResult> {
+    let conn = state.db.lock().map_err(|error| {
+        tracing::error!(%error, agent_id, "heartbeat: persisted target DB lock failed");
+        err("ハートビートの発火先を確認できませんでした。しばらくしてから再試行してください")
+    })?;
+    Ok(state
+        .timed_fire_router
+        .resolve_persisted_target(&conn, session_id, agent_id))
+}
+
 fn current_session_target(
     state: &AppState,
     ctx: &GatewayCallContext,
@@ -189,7 +203,8 @@ fn current_session_target(
             )));
         }
     };
-    match state.timed_fire_router.resolve_target(session_id, &ctx.agent_id) {
+    let target = resolve_persisted_target(state, session_id, &ctx.agent_id)?;
+    match target {
         Some(target) => Ok((session_id.to_string(), target)),
         // 理由（発火経路が無い種別）＋ remedy（どこで実行すればよいか）を 1 読で示す（M-b）。
         None => Err(err(format!(
@@ -503,7 +518,11 @@ pub(crate) fn run_my_heartbeat(
     // 発火経路の無い種別は fail-closed で拒否する（transport 登録簿と同じ解決・#628）。
     let (session_id, target) = match args.get("session_id") {
         Some(serde_json::Value::String(s)) if !s.trim().is_empty() => {
-            match state.timed_fire_router.resolve_target(s, &ctx.agent_id) {
+            let target = match resolve_persisted_target(state, s, &ctx.agent_id) {
+                Ok(target) => target,
+                Err(error) => return error,
+            };
+            match target {
                 Some(t) => (s.to_string(), t),
                 None => {
                     // remedy は登録済み transport から生成する（#628・web を足しても自動で載る）。
@@ -560,9 +579,141 @@ pub(crate) fn run_my_heartbeat(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    struct NoopTimedFireSink;
+    impl opencrab_actions::TimedFireSink for NoopTimedFireSink {
+        fn fire_timed_turn(&self, _req: opencrab_actions::TimedFireRequest) {}
+    }
+
+    fn alias_state() -> (AppState, GatewayCallContext, String) {
+        let state = crate::test_app_state();
+        let agent_id = "alias-agent";
+        let session_id = "opaque-heartbeat-session".to_string();
+        {
+            let mut conn = state.db.lock().unwrap();
+            opencrab_db::queries::upsert_agent(
+                &conn,
+                &opencrab_db::queries::AgentRow {
+                    agent_id: agent_id.into(),
+                    name: "agent".into(),
+                    job_title: None,
+                    organization: None,
+                    image_url: None,
+                    persona_name: "persona".into(),
+                    personality: None,
+                    instructions: String::new(),
+                    heartbeat_instructions: String::new(),
+                    model: None,
+                    reasoning_effort: None,
+                    web_search: None,
+                    metadata_json: None,
+                },
+            )
+            .unwrap();
+            let subject_id: i64 = conn
+                .query_row(
+                    "SELECT subject_id FROM agents WHERE agent_id = ?1",
+                    [agent_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            conn.execute(
+                "INSERT INTO gate_instances
+                 (instance_id, kind_id, subject_id, revision, enabled, config_b64, config_digest, created_at, updated_at)
+                 VALUES ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'generic', ?1, 1, 1, 'e30=', ?2, 1, 1)",
+                rusqlite::params![subject_id, "0".repeat(64)],
+            )
+            .unwrap();
+            let tx = conn.transaction().unwrap();
+            opencrab_db::queries::insert_session_in_tx(
+                &tx,
+                &session_id,
+                "alias",
+                "2026-01-01T00:00:00Z",
+            )
+            .unwrap();
+            opencrab_db::queries::insert_agent_session_in_tx(&tx, agent_id, &session_id).unwrap();
+            opencrab_db::queries::create_gate_binding_in_tx(
+                &tx,
+                "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                &session_id,
+                &session_id,
+                1,
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+        state.timed_fire_router.register_shared(
+            opencrab_extgate::EXTGATE_TIMED_FIRE_KIND,
+            Arc::new(NoopTimedFireSink),
+        );
+        let ctx = GatewayCallContext::new(GatewayCaller::Owner, agent_id)
+            .with_session_id(session_id.clone());
+        (state, ctx, session_id)
+    }
 
     fn ctx(caller: GatewayCaller) -> GatewayCallContext {
         GatewayCallContext::new(caller, "agent-x")
+    }
+
+    fn poison_db(db: &opencrab_db::Db) {
+        let db = db.clone();
+        assert!(std::thread::spawn(move || {
+            let _guard = db.lock().unwrap();
+            panic!("poison test DB");
+        })
+        .join()
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn heartbeat_get_set_and_run_accept_reused_canonical_address() {
+        let (state, ctx, session_id) = alias_state();
+
+        let get = get_my_heartbeat(&state, &serde_json::json!({}), &ctx);
+        assert!(get.success, "get rejected alias: {:?}", get.error);
+        let set = set_my_heartbeat(
+            &state,
+            &serde_json::json!({"enabled": true, "interval_secs": 600}),
+            &ctx,
+        );
+        assert!(set.success, "set rejected alias: {:?}", set.error);
+        let run = run_my_heartbeat(&state, &serde_json::json!({}), &ctx);
+        assert!(run.success, "run rejected alias: {:?}", run.error);
+
+        let row = opencrab_db::queries::get_session_heartbeat_config(
+            &state.db.lock().unwrap(),
+            &ctx.agent_id,
+            &session_id,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(row.enabled);
+        assert_eq!(row.session_id, session_id);
+    }
+
+    #[test]
+    fn persisted_resolution_db_lock_failure_is_fail_closed() {
+        let (state, ctx, session_id) = alias_state();
+        poison_db(&state.db);
+
+        let get = get_my_heartbeat(&state, &serde_json::json!({}), &ctx);
+        assert!(!get.success);
+        assert!(get.error.unwrap().contains("再試行"));
+
+        let run = run_my_heartbeat(&state, &serde_json::json!({"session_id": session_id}), &ctx);
+        assert!(!run.success);
+        assert!(run.error.unwrap().contains("再試行"));
+    }
+
+    #[test]
+    fn heartbeat_alias_rejects_wrong_owner() {
+        let (state, mut ctx, _) = alias_state();
+        ctx.agent_id = "other-agent".into();
+        let get = get_my_heartbeat(&state, &serde_json::json!({}), &ctx);
+        assert!(!get.success);
     }
 
     /// #599: `run_my_heartbeat` の handler ゲートは owner / co_agent のみ通す（bridge の

@@ -4,7 +4,7 @@
 //! （[`crate::completion::run_v3_said_less_turn`]）と完全に同型。ここには **wire を 1 byte も
 //! 変えずに** heartbeat を V3 レーンへ載せるための最小 2 部品だけを置く:
 //!
-//! 1. [`ExtgateFire`]: `extgate-<binding_id>` の発火先を名乗る静的 descriptor（[`TransportFire`]）。
+//! 1. [`ExtgateFire`]: physical session と persisted canonical alias を解決する descriptor（[`TransportFire`]）。
 //! 2. [`ExtgateTimedFireSink`]: 受けて session→binding を解決し、生きた binding 内で resume と
 //!    同じ said 無しターンを 1 本回す薄い sink（[`TimedFireSink`]）。
 //!
@@ -30,7 +30,7 @@ use crate::registry::ExtgateState;
 /// `canonical_session_id`）。
 pub const EXTGATE_TIMED_FIRE_KIND: &str = "extgate";
 
-/// `extgate-<binding_id>` の発火先を名乗る descriptor（#628 / #925）。
+/// physical session と persisted canonical alias の発火先を名乗る descriptor（#628 / #925 / #996）。
 ///
 /// **性質**: live G マスタゲートの対象外（`is_g_gated=false`・Nostr / web と同じ）。応答本文は
 /// `delivery_mode`（instance 設定・既定 say）に従って gateway へ配送される（Discord=チャンネル投稿 /
@@ -46,7 +46,7 @@ impl TransportFire for ExtgateFire {
     ///
     /// session は **binding 主権**（agent 非依存）。`agent_id` は使わない（discord/nostr descriptor
     /// と違い接頭辞に agent を含まない）。binding_id は UUID なので、壊れた session_id では
-    /// `None`（fail-closed・外部へ発火を捏造しない）。`route` に binding_id を載せて
+    /// `None`（fail-closed・外部へ発火を捏造しない）。`route` に canonical session ID 全体を載せて
     /// [`build_session_id`](Self::build_session_id) の逆写像を成立させる。
     fn parse(&self, session_id: &str, _agent_id: &str) -> Option<FireTarget> {
         let binding_id = session_id.strip_prefix(EXTGATE_SESSION_PREFIX)?;
@@ -56,13 +56,42 @@ impl TransportFire for ExtgateFire {
             kind: EXTGATE_TIMED_FIRE_KIND,
             channel_id: String::new(),
             guild_id: String::new(),
-            route: binding_id.to_string(),
+            route: session_id.to_string(),
         })
     }
 
-    /// [`parse`](Self::parse) の逆写像。`extgate-<binding_id>` を組む（agent 非依存）。
+    fn resolve_persisted(
+        &self,
+        conn: &rusqlite::Connection,
+        session_id: &str,
+        agent_id: &str,
+    ) -> Option<FireTarget> {
+        use opencrab_db::queries::CanonicalGateBindingLookup;
+
+        match opencrab_db::queries::lookup_canonical_gate_binding(conn, session_id) {
+            Ok(CanonicalGateBindingLookup::Match(binding)) if binding.agent_id == agent_id => {
+                Some(FireTarget {
+                    kind: EXTGATE_TIMED_FIRE_KIND,
+                    channel_id: String::new(),
+                    guild_id: String::new(),
+                    route: session_id.to_string(),
+                })
+            }
+            Ok(
+                CanonicalGateBindingLookup::Match(_)
+                | CanonicalGateBindingLookup::NotFound
+                | CanonicalGateBindingLookup::Ambiguous,
+            ) => None,
+            Err(error) => {
+                tracing::warn!(%error, "timed-fire(extgate): persisted binding lookup failed");
+                None
+            }
+        }
+    }
+
+    /// [`parse`](Self::parse) の逆写像。canonical session ID をそのまま返す。
     fn build_session_id(&self, target: &FireTarget, _agent_id: &str) -> String {
-        format!("{EXTGATE_SESSION_PREFIX}{}", target.route)
+        target.route.clone()
     }
 
     fn is_g_gated(&self) -> bool {
@@ -87,12 +116,12 @@ impl TransportFire for ExtgateFire {
             kind: EXTGATE_TIMED_FIRE_KIND,
             channel_id: String::new(),
             guild_id: String::new(),
-            route: "11111111-1111-4111-8111-111111111111".to_string(),
+            route: "extgate-11111111-1111-4111-8111-111111111111".to_string(),
         }
     }
 }
 
-/// `extgate-<binding_id>` を **生きた binding** へ解決する（§1.5・fail-loud）。
+/// canonical session ID を **生きた binding** へ解決する（§1.5・fail-loud）。
 ///
 /// 解決できない（binding 不明 / closed / instance 未削除でない / instance が live でない /
 /// この binding を acknowledged していない / config 壊れ）ときは `None`。呼び出し側はその場合
@@ -104,12 +133,28 @@ impl TransportFire for ExtgateFire {
 fn resolve_live_binding(
     state: &ExtgateState,
     session_id: &str,
+    expected_agent_id: &str,
 ) -> Option<(String, BindingContext)> {
-    let binding_id = session_id.strip_prefix(EXTGATE_SESSION_PREFIX)?.to_string();
-    // DB 段（open binding・未削除 instance・owner・delivery_mode）。db ロックは registry ロックより先に手放す。
-    let ctx = {
+    // DB 段（canonical session・open binding・未削除 instance・owner・delivery_mode）。
+    // db ロックは registry ロックより先に手放す。
+    let (binding_id, ctx) = {
+        use opencrab_db::queries::CanonicalGateBindingLookup;
         let conn = state.db.lock().ok()?;
-        resolve_binding_context(&conn, &binding_id)?
+        let binding = match opencrab_db::queries::lookup_canonical_gate_binding(&conn, session_id)
+            .ok()?
+        {
+            CanonicalGateBindingLookup::Match(binding) if binding.agent_id == expected_agent_id => {
+                binding
+            }
+            CanonicalGateBindingLookup::Match(_)
+            | CanonicalGateBindingLookup::NotFound
+            | CanonicalGateBindingLookup::Ambiguous => return None,
+        };
+        let ctx = resolve_binding_context(&conn, &binding.binding_id)?;
+        if ctx.agent_id != expected_agent_id {
+            return None;
+        }
+        (binding.binding_id, ctx)
     };
     // live 判定（§1.5・DESIGN-gateway-takein-v2:173 fail-loud）: instance が live かつ
     // この binding を acknowledged していること。未接続なら None（＝warn・無配送）。
@@ -143,7 +188,11 @@ impl<R: AgentRuntime> TimedFireSink for ExtgateTimedFireSink<R> {
         // ごとちょうど 1 件）。`session_id` は **plain &str フィールド**で載せる（Display/Debug 経路だと
         // 引用符が付き、観測側の等値照合がずれるため）。「gateway なしのハートビートは存在しない」
         // （DIRECTION-LOG 478）の実装。
-        let (binding_id, ctx) = match resolve_live_binding(&self.state, &req.session_id) {
+        let (binding_id, ctx) = match resolve_live_binding(
+            &self.state,
+            &req.session_id,
+            &req.agent_id,
+        ) {
             Some(r) => r,
             None => {
                 tracing::warn!(
@@ -172,5 +221,150 @@ impl<R: AgentRuntime> TimedFireSink for ExtgateTimedFireSink<R> {
         tokio::spawn(async move {
             run_v3_said_less_turn(sink, caller, None).await;
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+
+    use opencrab_db::queries::AgentRow;
+
+    fn alias_state() -> (Arc<ExtgateState>, String, String, String) {
+        let mut conn = opencrab_db::init_memory().unwrap();
+        let agent_id = "alias-agent".to_string();
+        let session_id = "opaque-canonical-session".to_string();
+        let instance_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string();
+        let binding_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".to_string();
+        opencrab_db::queries::upsert_agent(
+            &conn,
+            &AgentRow {
+                agent_id: agent_id.clone(),
+                name: "agent".into(),
+                job_title: None,
+                organization: None,
+                image_url: None,
+                persona_name: "persona".into(),
+                personality: None,
+                instructions: String::new(),
+                heartbeat_instructions: String::new(),
+                model: None,
+                reasoning_effort: None,
+                web_search: None,
+                metadata_json: None,
+            },
+        )
+        .unwrap();
+        let subject_id: i64 = conn
+            .query_row(
+                "SELECT subject_id FROM agents WHERE agent_id = ?1",
+                [&agent_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO gate_instances
+             (instance_id, kind_id, subject_id, revision, enabled, config_b64, config_digest, created_at, updated_at)
+             VALUES (?1, 'generic', ?2, 1, 1, 'e30=', ?3, 1, 1)",
+            rusqlite::params![instance_id, subject_id, "0".repeat(64)],
+        )
+        .unwrap();
+        let tx = conn.transaction().unwrap();
+        opencrab_db::queries::insert_session_in_tx(
+            &tx,
+            &session_id,
+            "alias",
+            "2026-01-01T00:00:00Z",
+        )
+        .unwrap();
+        opencrab_db::queries::insert_agent_session_in_tx(&tx, &agent_id, &session_id).unwrap();
+        opencrab_db::queries::create_gate_binding_in_tx(
+            &tx,
+            &binding_id,
+            &instance_id,
+            &session_id,
+            &session_id,
+            1,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        let state = Arc::new(ExtgateState::new(
+            opencrab_db::Db::from_connection(conn),
+            crate::OperatorToken::from_bytes("test-token"),
+        ));
+        (state, agent_id, session_id, binding_id)
+    }
+
+    #[test]
+    fn persisted_alias_resolves_exact_owner_and_round_trips() {
+        let (state, agent_id, session_id, _) = alias_state();
+        let conn = state.db.lock().unwrap();
+        let target = ExtgateFire
+            .resolve_persisted(&conn, &session_id, &agent_id)
+            .expect("owned alias");
+        assert_eq!(ExtgateFire.build_session_id(&target, &agent_id), session_id);
+        assert!(ExtgateFire
+            .resolve_persisted(&conn, &target.route, "other-agent")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn live_alias_requires_ack_and_recovers_after_reconnect() {
+        let (state, agent_id, session_id, binding_id) = alias_state();
+        assert!(resolve_live_binding(&state, &session_id, &agent_id).is_none());
+        assert!(resolve_live_binding(&state, &session_id, "other-agent").is_none());
+
+        let (stream, _peer) = tokio::net::UnixStream::pair().unwrap();
+        let (_reader, writer) = stream.into_split();
+        state.registry.lock().unwrap().insert(
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+            crate::registry::LiveEntry {
+                identity: 1,
+                revision: 1,
+                writer: Arc::new(tokio::sync::Mutex::new(writer)),
+                acknowledged: HashSet::from(["cccccccc-cccc-4ccc-8ccc-cccccccccccc".into()]),
+                pending: HashMap::new(),
+                declarations: Arc::new(Vec::new()),
+                declaration_digest: String::new(),
+            },
+        );
+        assert!(
+            resolve_live_binding(&state, &session_id, &agent_id).is_none(),
+            "unacknowledged binding must not fire"
+        );
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .get_mut("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+            .unwrap()
+            .acknowledged
+            .insert(binding_id.clone());
+        let resolved = resolve_live_binding(&state, &session_id, &agent_id).expect("acknowledged");
+        assert_eq!(resolved.0, binding_id);
+
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .remove_if_identity("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", 1);
+        assert!(resolve_live_binding(&state, &session_id, &agent_id).is_none());
+
+        let (stream, _peer) = tokio::net::UnixStream::pair().unwrap();
+        let (_reader, writer) = stream.into_split();
+        state.registry.lock().unwrap().insert(
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+            crate::registry::LiveEntry {
+                identity: 2,
+                revision: 1,
+                writer: Arc::new(tokio::sync::Mutex::new(writer)),
+                acknowledged: HashSet::from([binding_id]),
+                pending: HashMap::new(),
+                declarations: Arc::new(Vec::new()),
+                declaration_digest: String::new(),
+            },
+        );
+        assert!(resolve_live_binding(&state, &session_id, &agent_id).is_some());
     }
 }

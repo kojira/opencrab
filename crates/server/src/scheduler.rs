@@ -149,7 +149,9 @@ fn rebuild_entries(
     match opencrab_db::queries::list_enabled_session_heartbeat_configs(conn) {
         Ok(rows) => {
             for row in rows {
-                let Some(target) = router.resolve_target(&row.session_id, &row.agent_id) else {
+                let Some(target) =
+                    router.resolve_persisted_target(conn, &row.session_id, &row.agent_id)
+                else {
                     // 未知/解釈不能な session_id → 発火しない（壊れた行で外部へ publish しない）。
                     tracing::warn!(
                         agent_id = %row.agent_id,
@@ -217,6 +219,18 @@ fn rebuild_entries(
                 let Some(schedule_id) = row.id else {
                     continue; // DB 由来は必ず Some。
                 };
+                if router
+                    .resolve_persisted_target(conn, &row.session_id, &row.agent_id)
+                    .is_none()
+                {
+                    tracing::warn!(
+                        agent_id = %row.agent_id,
+                        session_id = %row.session_id,
+                        schedule_id,
+                        "scheduler: schedule target could not be resolved; skipping"
+                    );
+                    continue;
+                }
                 let key = EntryKey::Schedule { schedule_id };
                 let anchor = parse_wall_clock(&row.anchor_at);
                 let db_last = parse_wall_clock(&row.last_fired_at);

@@ -3,6 +3,10 @@
 新規 DB は `sql.rs` の `SCHEMA_SQL`。既存 DB は `mod.rs` の `MIGRATIONS`。
 両方に同じ差分を書く（新規 DB は最新番号を通らず SCHEMA だけ、が本体の罠）。
 
+## v51（generic open binding address lookup）
+
+`gate_bindings(address, binding_id, instance_id) WHERE closed_at IS NULL` の非一意 index を追加する。address exact lookup の scale 対策だけで、session/history/config/binding 行は書き換えない。ambiguity は query 層が fail-closed で扱う。
+
 ## v43（載せ替え工程 3）
 
 会話の単位はセッション。表は `sessions` / `agent_sessions` のまま。データ移動ゼロ。

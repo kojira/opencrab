@@ -7,7 +7,8 @@
 fn task_ledger_migration_upgrades_v1_db() {
     let conn = crate::init_memory().expect("init");
     // v1 相当の既存DBを模す: タスク台帳を落として version 1 に戻す。
-    conn.execute_batch("DROP TABLE task_progress; DROP TABLE task_ledger; PRAGMA user_version = 1")
+    conn.execute_batch("DROP TABLE task_progress; DROP TABLE task_ledger; DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
+    PRAGMA user_version = 1")
         .unwrap();
     assert!(!table_exists(&conn, "task_ledger").unwrap());
 
@@ -108,6 +109,7 @@ fn permission_spelling_migration_rewrites_rows_without_changing_who_is_a_co_agen
                       ('r2', '43', 'a1', 'user',     'owner', '2026-01-02', '',       'discord'),
                       ('r3', '44', 'a1', 'owner',    'owner', '2026-01-03', '',       'discord'),
                       ('r4', '45', 'a1', 'coagent',  'owner', '2026-01-04', 'Typo',   'discord');
+             DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
              PRAGMA user_version = 17",
     )
     .unwrap();

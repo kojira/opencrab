@@ -30,6 +30,12 @@ fn v50_migrates_channel_config_without_losing_values_or_leaving_two_authorities(
              );
              CREATE INDEX idx_discord_channel_guild
                ON discord_channel_config(guild_id);
+             CREATE TABLE gate_bindings (
+                binding_id TEXT,
+                instance_id TEXT,
+                address TEXT,
+                closed_at INTEGER
+             );
              PRAGMA user_version = 49;",
         )
         .unwrap();
@@ -87,7 +93,7 @@ fn v50_migrates_channel_config_without_losing_values_or_leaving_two_authorities(
         }
 
         initialize(&conn).unwrap();
-        assert_eq!(schema_version(&conn).unwrap(), 50);
+        assert_eq!(schema_version(&conn).unwrap(), 51);
         assert!(table_exists(&conn, "channel_config").unwrap());
         assert!(!table_exists(&conn, "discord_channel_config").unwrap());
 
@@ -147,7 +153,7 @@ fn v50_migrates_channel_config_without_losing_values_or_leaving_two_authorities(
     {
         let conn = Connection::open(&path).unwrap();
         initialize(&conn).unwrap();
-        assert_eq!(schema_version(&conn).unwrap(), 50);
+        assert_eq!(schema_version(&conn).unwrap(), 51);
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM channel_config", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
@@ -178,6 +184,12 @@ fn v50_preserves_heartbeat_audit_values_with_opaque_caller_id() {
            (agent_id, scope, channel_id, caller_identity, legacy_caller_id,
             old_value, new_value, reason, created_at)
          VALUES ('a1', 'channel', 'c1', 'owner', 'u1', 'old', 'new', 'test', 'now');
+         CREATE TABLE gate_bindings (
+            binding_id TEXT,
+            instance_id TEXT,
+            address TEXT,
+            closed_at INTEGER
+         );
          PRAGMA user_version = 49;",
     )
     .unwrap();

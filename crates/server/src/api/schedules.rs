@@ -68,6 +68,20 @@ pub(crate) enum ScheduleOpError {
     Internal(String),
 }
 
+fn resolve_persisted_schedule_target(
+    state: &AppState,
+    session_id: &str,
+    agent_id: &str,
+) -> Result<Option<opencrab_actions::FireTarget>, ScheduleOpError> {
+    let conn = state.db.lock().map_err(|error| {
+        tracing::error!(%error, agent_id, "schedule API: persisted target DB lock failed");
+        ScheduleOpError::Internal("persisted schedule target DB unavailable".into())
+    })?;
+    Ok(state
+        .timed_fire_router
+        .resolve_persisted_target(&conn, session_id, agent_id))
+}
+
 fn parse_wall_clock(s: &Option<String>) -> Option<DateTime<Utc>> {
     let s = s.as_ref()?;
     DateTime::parse_from_rfc3339(s)
@@ -139,11 +153,8 @@ pub(crate) fn create_schedule_core(
             "スケジュール式または timezone が不正です（{e}）。cron は 5 フィールド（例: 0 7 * * *）、周期は @every 3h の形式、timezone は Asia/Tokyo のような IANA 名で指定してください。"
         ))
     })?;
-    if state
-        .timed_fire_router
-        .resolve_target(session_id, agent_id)
-        .is_none()
-    {
+    let target = resolve_persisted_schedule_target(state, session_id, agent_id)?;
+    if target.is_none() {
         // remedy は登録済み transport から生成する（#628・手書きしない）。
         return Err(ScheduleOpError::BadRequest(format!(
             "このセッションには発火経路がありません（{} のセッションでのみ登録できます）。",
@@ -484,11 +495,9 @@ pub async fn update_schedule(
 
     // 検証（不正は 400）。
     validate_schedule(&new_cron, &new_tz).map_err(|_| StatusCode::BAD_REQUEST)?;
-    if state
-        .timed_fire_router
-        .resolve_target(&new_session_id, &existing.agent_id)
-        .is_none()
-    {
+    let target = resolve_persisted_schedule_target(&state, &new_session_id, &existing.agent_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if target.is_none() {
         return Err(StatusCode::BAD_REQUEST);
     }
     if new_message.trim().is_empty() {

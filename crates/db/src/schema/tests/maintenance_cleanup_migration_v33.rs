@@ -109,7 +109,8 @@ fn v33_deletes_maintenance_run_logs_from_both_tables() {
     let orphans_before = orphans(&conn);
     assert_eq!(orphans_before, 1, "孤児の仕込みが効いている");
 
-    conn.execute_batch("PRAGMA user_version = 32").unwrap();
+    conn.execute_batch("DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
+    PRAGMA user_version = 32").unwrap();
     run_migrations(&conn, MIGRATIONS).expect("v33");
     assert_eq!(schema_version(&conn).unwrap(), latest_version());
 
@@ -173,7 +174,8 @@ fn v33_deletes_maintenance_run_logs_from_both_tables() {
     // 冪等: 版を 32 へ戻して再実行しても何も変わらない（対象 0 行）。
     let body_after = count("SELECT COUNT(*) FROM memory_sessions");
     let fts_after = count("SELECT COUNT(*) FROM memory_sessions_fts");
-    conn.execute_batch("PRAGMA user_version = 32").unwrap();
+    conn.execute_batch("DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
+    PRAGMA user_version = 32").unwrap();
     run_migrations(&conn, MIGRATIONS).expect("v33 再実行");
     assert_eq!(count("SELECT COUNT(*) FROM memory_sessions"), body_after);
     assert_eq!(count("SELECT COUNT(*) FROM memory_sessions_fts"), fts_after);
@@ -420,7 +422,8 @@ fn v33_deletes_maintenance_run_index_nodes_and_only_pure_maintenance_units() {
     assert_eq!(child_count_of("period-2"), 1);
     assert_eq!(child_count_of("declroot-1"), 3);
 
-    conn.execute_batch("PRAGMA user_version = 32").unwrap();
+    conn.execute_batch("DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
+    PRAGMA user_version = 32").unwrap();
     run_migrations(&conn, MIGRATIONS).expect("v33");
     assert_eq!(schema_version(&conn).unwrap(), latest_version());
 
@@ -481,7 +484,8 @@ fn v33_deletes_maintenance_run_index_nodes_and_only_pure_maintenance_units() {
 
     // 冪等: 版を 32 へ戻して再実行しても何も変わらない。生ログが消えた後は
     // 「範囲に 1 件以上ある」が成り立たないので、unit-mixed / unit-empty も対象外のまま。
-    conn.execute_batch("PRAGMA user_version = 32").unwrap();
+    conn.execute_batch("DROP INDEX IF EXISTS idx_gate_bindings_open_address_lookup;
+    PRAGMA user_version = 32").unwrap();
     run_migrations(&conn, MIGRATIONS).expect("v33 再実行");
     assert_eq!(count("SELECT COUNT(*) FROM memory_index_nodes"), 7);
     assert_eq!(count("SELECT COUNT(*) FROM memory_sessions"), 1);
