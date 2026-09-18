@@ -172,6 +172,20 @@ fn parse_interval_arg(
 /// `ctx.session_id` が無い（セッション文脈なし）→ fail-closed エラー。発火経路が無い種別
 /// （登録済み descriptor がどれも名乗らない）→ fail-closed エラー。発火（scheduler）と同じ
 /// 登録簿を引くので「設定できたのに永遠に発火しない行」を作らせない（設計 §13.1）。
+fn resolve_persisted_target(
+    state: &AppState,
+    session_id: &str,
+    agent_id: &str,
+) -> Result<Option<opencrab_actions::FireTarget>, GatewayActionResult> {
+    let conn = state.db.lock().map_err(|error| {
+        tracing::error!(%error, agent_id, "heartbeat: persisted target DB lock failed");
+        err("ハートビートの発火先を確認できませんでした。しばらくしてから再試行してください")
+    })?;
+    Ok(state
+        .timed_fire_router
+        .resolve_persisted_target(&conn, session_id, agent_id))
+}
+
 fn current_session_target(
     state: &AppState,
     ctx: &GatewayCallContext,
@@ -189,12 +203,7 @@ fn current_session_target(
             )));
         }
     };
-    let target = {
-        let conn = state.db.lock().unwrap();
-        state
-            .timed_fire_router
-            .resolve_persisted_target(&conn, session_id, &ctx.agent_id)
-    };
+    let target = resolve_persisted_target(state, session_id, &ctx.agent_id)?;
     match target {
         Some(target) => Ok((session_id.to_string(), target)),
         // 理由（発火経路が無い種別）＋ remedy（どこで実行すればよいか）を 1 読で示す（M-b）。
@@ -509,11 +518,9 @@ pub(crate) fn run_my_heartbeat(
     // 発火経路の無い種別は fail-closed で拒否する（transport 登録簿と同じ解決・#628）。
     let (session_id, target) = match args.get("session_id") {
         Some(serde_json::Value::String(s)) if !s.trim().is_empty() => {
-            let target = {
-                let conn = state.db.lock().unwrap();
-                state
-                    .timed_fire_router
-                    .resolve_persisted_target(&conn, s, &ctx.agent_id)
+            let target = match resolve_persisted_target(state, s, &ctx.agent_id) {
+                Ok(target) => target,
+                Err(error) => return error,
             };
             match target {
                 Some(t) => (s.to_string(), t),
@@ -651,6 +658,16 @@ mod tests {
         GatewayCallContext::new(caller, "agent-x")
     }
 
+    fn poison_db(db: &opencrab_db::Db) {
+        let db = db.clone();
+        assert!(std::thread::spawn(move || {
+            let _guard = db.lock().unwrap();
+            panic!("poison test DB");
+        })
+        .join()
+        .is_err());
+    }
+
     #[tokio::test]
     async fn heartbeat_get_set_and_run_accept_reused_canonical_address() {
         let (state, ctx, session_id) = alias_state();
@@ -675,6 +692,20 @@ mod tests {
         .unwrap();
         assert!(row.enabled);
         assert_eq!(row.session_id, session_id);
+    }
+
+    #[test]
+    fn persisted_resolution_db_lock_failure_is_fail_closed() {
+        let (state, ctx, session_id) = alias_state();
+        poison_db(&state.db);
+
+        let get = get_my_heartbeat(&state, &serde_json::json!({}), &ctx);
+        assert!(!get.success);
+        assert!(get.error.unwrap().contains("再試行"));
+
+        let run = run_my_heartbeat(&state, &serde_json::json!({"session_id": session_id}), &ctx);
+        assert!(!run.success);
+        assert!(run.error.unwrap().contains("再試行"));
     }
 
     #[test]

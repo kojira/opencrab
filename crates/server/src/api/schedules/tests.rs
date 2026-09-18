@@ -10,6 +10,16 @@ fn nostr_session() -> String {
     format!("nostr-{AGENT}")
 }
 
+fn poison_db(db: &opencrab_db::Db) {
+    let db = db.clone();
+    assert!(std::thread::spawn(move || {
+        let _guard = db.lock().unwrap();
+        panic!("poison test DB");
+    })
+    .join()
+    .is_err());
+}
+
 fn state_with_alias(session_id: &str) -> AppState {
     let state = state_with_db();
     let mut conn = state.db.lock().unwrap();
@@ -112,6 +122,26 @@ async fn create_and_update_accept_owned_alias_and_reject_wrong_owner() {
     )
     .await;
     assert_eq!(wrong_owner.err(), Some(StatusCode::BAD_REQUEST));
+}
+
+#[tokio::test]
+async fn persisted_resolution_db_lock_failure_returns_internal_error() {
+    let state = state_with_db();
+    poison_db(&state.db);
+    let request = CreateRequest {
+        session_id: "opaque-session".into(),
+        cron_expr: "@every 3h".into(),
+        timezone: "UTC".into(),
+        message: "run".into(),
+        enabled: true,
+    };
+    let result =
+        create_schedule(State(state.clone()), Path(AGENT.to_string()), Json(request)).await;
+    assert_eq!(result.err(), Some(StatusCode::INTERNAL_SERVER_ERROR));
+    assert!(matches!(
+        resolve_persisted_schedule_target(&state, "opaque-session", AGENT),
+        Err(ScheduleOpError::Internal(_))
+    ));
 }
 
 #[tokio::test]

@@ -183,7 +183,7 @@ These checks apply equally to every generic extgate binding address. Protocol-sp
 | Physical session exists, so address is not canonical | address is not an alias |
 | Exactly one canonical binding, wrong agent | no target |
 | More than one canonical candidate, including corrupt/legacy data | ambiguous; no target |
-| DB lock/query failure | warning; no target |
+| DB lock/query failure | warning; tool calls fail closed with a retryable error, and schedule HTTP create/update returns 500 |
 | Binding closes after target resolution | sink revalidation rejects |
 | Instance is disconnected or binding is not acknowledged | existing sink warning; no turn |
 
@@ -284,6 +284,7 @@ Use only generic extgate fixtures and opaque addresses. Exercise `rebuild_entrie
 8. heartbeat get/set/run and schedule create/update accept the owned alias and reject another agent through the same router method.
 9. existing physical-session scheduler/tool tests remain green.
 10. repeated scheduler rebuilds over unchanged heartbeat/schedule rows produce stable entry sets and write no DB state.
+11. poisoned/unavailable DB acquisition during persisted resolution returns an explicit fail-closed tool error or HTTP 500; it never panics or degrades into a bad-target 400.
 
 ### Protocol-owned regression
 
