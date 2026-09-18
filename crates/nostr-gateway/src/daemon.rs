@@ -1,6 +1,7 @@
 //! Standalone lifecycle owner for all configured instances.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -409,112 +410,68 @@ fn write_placement(path: &Path, placement: &Placement) -> Result<()> {
     Ok(())
 }
 
-pub async fn run(config: DaemonConfig) -> Result<()> {
-    let mut daemon = Daemon::new(config)?;
-    let period = Duration::from_secs(daemon.config.reconcile_secs);
-    let mut ticker = tokio::time::interval(period);
-    loop {
+fn shutdown_signal() -> Result<impl Future<Output = Result<()>>> {
+    // Construct both Unix streams before returning. Unlike `ctrl_c()`, this synchronously
+    // installs both handlers before the initial reconciliation can spawn a gateway process.
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .context("install SIGINT handler")?;
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("install SIGTERM handler")?;
+    Ok(async move {
         tokio::select! {
-            _ = ticker.tick() => daemon.reconcile().await?,
-            signal = tokio::signal::ctrl_c() => {
-                signal.context("shutdown signal")?;
-                daemon.supervisors.shutdown_all().await;
-                return Ok(());
+            signal = interrupt.recv() => {
+                signal.context("SIGINT signal stream closed")?;
+                Ok(())
+            }
+            signal = terminate.recv() => {
+                signal.context("SIGTERM signal stream closed")?;
+                Ok(())
             }
         }
-    }
+    })
+}
+
+async fn shutdown_supervisors_on_exit<W, S>(
+    supervisors: Arc<GatewaySupervisorSet>,
+    work: W,
+    shutdown: S,
+) -> Result<()>
+where
+    W: Future<Output = Result<()>>,
+    S: Future<Output = Result<()>>,
+{
+    // Scope the pinned futures so the losing branch is dropped before cleanup. In particular, a
+    // cancelled reconciliation must release any supervisor lifecycle guard before shutdown_all.
+    let outcome = {
+        tokio::pin!(work);
+        tokio::pin!(shutdown);
+        // Poll shutdown independently of reconciliation so a blocked reconcile future is cancelled.
+        tokio::select! {
+            biased;
+            signal = &mut shutdown => signal,
+            outcome = &mut work => outcome,
+        }
+    };
+    // Always await every identity owner, including replacements created by reconciliation.
+    supervisors.shutdown_all().await;
+    outcome
+}
+
+pub async fn run(config: DaemonConfig) -> Result<()> {
+    let mut daemon = Daemon::new(config)?;
+    let shutdown = shutdown_signal()?;
+    let supervisors = daemon.supervisors.clone();
+    let work = async move {
+        let period = Duration::from_secs(daemon.config.reconcile_secs);
+        let mut ticker = tokio::time::interval(period);
+        loop {
+            ticker.tick().await;
+            daemon.reconcile().await?;
+        }
+    };
+    shutdown_supervisors_on_exit(supervisors, work, shutdown).await
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn placement(config_b64: &str) -> opencrab_nostr::gate_provision::NostrPlacementPlan {
-        opencrab_nostr::gate_provision::NostrPlacementPlan {
-            agent_id: "agent".into(),
-            instance_id: "instance".into(),
-            revision: 7,
-            address: "address".into(),
-            config_b64: config_b64.into(),
-        }
-    }
-
-    #[test]
-    fn changed_active_instance_stops_before_revision_and_restart() {
-        assert_eq!(
-            reconciliation_steps(
-                Some(&placement("old")),
-                Some("old-fingerprint"),
-                "new-fingerprint",
-                "new"
-            ),
-            [
-                ReconcileStep::Stop,
-                ReconcileStep::Revise,
-                ReconcileStep::Start
-            ]
-        );
-    }
-
-    #[test]
-    fn unchanged_active_instance_does_not_churn() {
-        assert!(reconciliation_steps(
-            Some(&placement("same")),
-            Some("same-fingerprint"),
-            "same-fingerprint",
-            "same"
-        )
-        .is_empty());
-    }
-
-    #[test]
-    fn absent_instance_is_provisioned_before_start() {
-        assert_eq!(
-            reconciliation_steps(None, None, "new-fingerprint", "new"),
-            [ReconcileStep::Provision, ReconcileStep::Start]
-        );
-    }
-
-    #[test]
-    fn secret_only_change_stops_without_revising_core_config() {
-        assert_eq!(
-            reconciliation_steps(
-                Some(&placement("same")),
-                Some("old-fingerprint"),
-                "new-fingerprint",
-                "same"
-            ),
-            [ReconcileStep::Stop, ReconcileStep::Start]
-        );
-    }
-
-    #[test]
-    fn daemon_config_requires_absolute_database_and_socket() {
-        let config = DaemonConfig {
-            database_path: "relative.db".into(),
-            core_database_path: "/tmp/core.db".into(),
-            legacy_database_path: None,
-            admin_socket: "/tmp/nostr-admin.sock".into(),
-            core_socket: "/tmp/gate.sock".into(),
-            nostaro_bin: "nostaro".into(),
-            placement_dir: "data/gate/nostr".into(),
-            workspace_base: default_workspace_base(),
-            reconcile_secs: 5,
-        };
-        assert!(config
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("database_path"));
-        let config = DaemonConfig {
-            database_path: "/tmp/opencrab.db".into(),
-            core_socket: "relative.sock".into(),
-            ..config
-        };
-        assert!(config
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("core_socket"));
-    }
-}
+#[path = "daemon_tests.rs"]
+mod tests;
