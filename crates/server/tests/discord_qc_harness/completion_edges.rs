@@ -1,8 +1,7 @@
 // ---------------------------------------------------------------------------
-// #915 / §13.2・DIRECTION-LOG 446【say→継続→NO_REPLY で終わるターン】: 最終生成が NO_REPLY
-// （投稿なし）なので 🏁 は 0。途中の say（継続 で進んだ投稿）にも付けない。発話があった
-// ターンなので 🤐 も 0。ルール: 🏁 は「ツール呼び出しも 継続 も含まない最終生成の自分の
-// 投稿」にだけ付く。最終生成に投稿が無ければ付けない。
+// #915 / §13.2【say→継続→NO_REPLY で終わるターン】: 最終生成の NO_REPLY でターン終了が
+// 確定した時点で、直前に配送した say へ 🏁 を 1 件付ける。発話があったターンなので 🤐 は 0。
+// 初回 NO_REPLY のように、このターンで先行する投稿が無い場合は従来どおり 🏁 を付けない。
 // ---------------------------------------------------------------------------
 // 本文中に "NO_REPLY"/"継続" の部分文字列を含めない（含めるとサニタイザに途中で切られ、
 // 継続ではなく本文＋末尾 NO_REPLY（row 12）扱いになる）。
@@ -36,7 +35,7 @@ impl LlmProvider for SayContinueThenNoReplyMock {
 }
 
 #[tokio::test]
-async fn scenario_915_say_continue_then_no_reply_gets_no_flag() {
+async fn scenario_915_say_continue_then_no_reply_flags_previous_say() {
     use std::sync::atomic::Ordering;
     let buf = install_capture();
     let mock = Arc::new(SayContinueThenNoReplyMock {
@@ -74,8 +73,7 @@ async fn scenario_915_say_continue_then_no_reply_gets_no_flag() {
         .filter(|m| !m.is_empty())
         .expect("SCN_SAY say の message id");
 
-    // 🏁 は途中 say に付かない（最終生成は NO_REPLY＝投稿なし → 🏁 0）。現 tip は say 配送ごとに
-    // 付けるため途中 say に 🏁 が付く → 赤。
+    // 最終 NO_REPLY でターン終了が確定したため、直前の say に 🏁 を 1 件付ける。
     let completed_on_say = captured(&buf)
         .iter()
         .filter(|c| {
@@ -84,8 +82,8 @@ async fn scenario_915_say_continue_then_no_reply_gets_no_flag() {
         .count();
     assert_eq!(
         completed_on_say,
-        0,
-        "🏁 が途中 say に誤付与（最終 NO_REPLY のターンは 🏁 0・DIRECTION-LOG 446）: {:?}",
+        1,
+        "最終 NO_REPLY で直前の say に 🏁 が 1 件付かない: {:?}",
         captured(&buf)
     );
     // 発端 9160 にも 🏁 は付かない。
