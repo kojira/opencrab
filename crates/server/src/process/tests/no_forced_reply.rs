@@ -29,12 +29,10 @@ fn loop_prevention_survives_but_not_by_peer_type() {
 
     assert!(prompt.contains("## Turn completion"), "prompt:\n{prompt}");
 
-    // ループ防止は内容ベースで残る（#920: 事実文 §3.1 へ更新）。
+    // 継続可否は相手の種別ではなく、モデル自身が現在のターンごとに判断する。
     assert!(
-        prompt.contains(
-            "a topic that is already resolved where another exchange would add no new information"
-        ),
-        "content-based loop prevention was lost:\n{prompt}"
+        prompt.contains("Decide whether to continue the current turn"),
+        "turn-level continuation decision was lost:\n{prompt}"
     );
 
     // 「相手が Bot だから黙る」という種別ベースの沈黙条件は消えていること。
@@ -44,7 +42,7 @@ fn loop_prevention_survives_but_not_by_peer_type() {
     );
 }
 
-/// ターンは既定継続で、NO_REPLY だけが明示終端になる契約をモデルへ伝える。
+/// 発話の有無と継続可否をモデルが判断し、NO_REPLY で終了を示す契約を伝える。
 #[test]
 fn system_prompt_explains_explicit_termination() {
     let conn = opencrab_db::init_memory().unwrap();
@@ -53,16 +51,20 @@ fn system_prompt_explains_explicit_termination() {
 
     assert!(prompt.contains("## Turn completion"), "prompt:\n{prompt}");
     assert!(
-        prompt.contains("Your turn continues by default"),
-        "既定継続の説明が無い:\n{prompt}"
+        prompt.contains("Decide whether to continue the current turn"),
+        "継続判断の説明が無い:\n{prompt}"
     );
     assert!(
-        prompt.contains("Only `NO_REPLY` explicitly ends it"),
-        "明示終端の説明が無い:\n{prompt}"
+        prompt.contains("If no speech should be delivered, respond with exactly `NO_REPLY`"),
+        "無発話終了の説明が無い:\n{prompt}"
     );
     assert!(
-        prompt.contains("marker is recorded as a turn-termination event"),
-        "終了記録を保存する説明が無い:\n{prompt}"
+        prompt.contains("If you provide speech and decide to end the turn, append `NO_REPLY`"),
+        "発話後の終了方法が無い:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("If you decide to continue the turn, omit `NO_REPLY`"),
+        "継続方法が無い:\n{prompt}"
     );
     assert!(
         prompt.contains("fire-and-forget")

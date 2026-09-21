@@ -137,12 +137,11 @@ pub fn build_agent_context(
          \n\
          ## Turn completion\n\
          \n\
-         Your turn continues by default. Only `NO_REPLY` explicitly ends it. When all requested \
-         work is complete, append `NO_REPLY` on its own final line after the final answer. The \
-         marker is recorded as a turn-termination event but is not delivered as speech. If no \
-         speech should be delivered, respond with exactly `NO_REPLY`. This includes a topic \
-         that is already resolved where another exchange would add no new information. Without \
-         `NO_REPLY`, you are called again and must continue the unfinished work.\n\
+         Decide whether to continue the current turn.\n\
+         If no speech should be delivered, respond with exactly `NO_REPLY`.\n\
+         If you provide speech and decide to end the turn, append `NO_REPLY` on its own final \
+         line.\n\
+         If you decide to continue the turn, omit `NO_REPLY`.\n\
          \n\
          ## Async Behavior\n\
          \n\
