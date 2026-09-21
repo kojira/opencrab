@@ -7,12 +7,26 @@ use super::{
         partition_tool_calls_for_dispatch, InitialTurn,
     },
     silent_origins::SilentOriginTracker,
-    turn_budget::{apply_turn_budget, seat_tool_result},
+    turn_budget::{append_or_create_bounded_history_block, apply_turn_budget, seat_tool_result},
     SkillEngine,
 };
 use crate::engine::types::{ChatRequest, EngineResult, LlmCallLog, LlmExchangeLog};
 
 impl SkillEngine {
+    fn append_assistant_history_entry(
+        &self,
+        messages: &mut [Message],
+        ledger: &mut crate::context_budget::TokenLedger,
+        speech: &str,
+    ) -> Result<bool> {
+        let Some(name) = self.assistant_history_name.as_deref() else {
+            return Ok(false);
+        };
+        let created_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let rendered = crate::conversation::format_speech_entry(name, Some(&created_at), speech);
+        append_or_create_bounded_history_block(messages, ledger, &rendered)
+    }
+
     /// Run the action loop with optional dynamic model override.
     ///
     /// If `model_override` is provided, the engine checks it before each LLM call
@@ -374,6 +388,7 @@ impl SkillEngine {
 
                 // Add the assistant message with tool calls (arguments already
                 // canonical Strings, so no Value->String conversion needed).
+                let assistant_tool_message_index = messages.len();
                 messages.push(Message {
                     role: Role::Assistant,
                     content: content.clone().map(MessageContent::Text),
@@ -382,8 +397,9 @@ impl SkillEngine {
                     tool_calls: Some(tool_calls.clone()),
                     tool_call_id: None,
                 });
+                let assistant_ledger_key = format!("asst:{}", messages.len());
                 turn_ledger.record(
-                    format!("asst:{}", messages.len()),
+                    assistant_ledger_key.clone(),
                     content.as_deref().unwrap_or(""),
                 );
                 apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
@@ -408,6 +424,14 @@ impl SkillEngine {
                             })?;
                             silent_origins.resolve_visible();
                             holding_delivered = true;
+                            if self.append_assistant_history_entry(
+                                &mut messages,
+                                &mut turn_ledger,
+                                body,
+                            )? {
+                                messages[assistant_tool_message_index].content = None;
+                                turn_ledger.remove_key(&assistant_ledger_key);
+                            }
                         }
                     }
                 }
@@ -670,6 +694,14 @@ impl SkillEngine {
                                     anyhow::anyhow!("continuation speech delivery failed: {e:#}")
                                 })?;
                                 silent_origins.resolve_visible();
+                                if self.append_assistant_history_entry(
+                                    &mut messages,
+                                    &mut turn_ledger,
+                                    c,
+                                )? {
+                                    messages[assistant_tool_message_index].content = None;
+                                    turn_ledger.remove_key(&assistant_ledger_key);
+                                }
                             } else {
                                 // 最終EngineResultで上位が配送する本文なので、このrequestはsilentではない。
                                 last_undelivered_speech = Some(c.clone());
@@ -700,15 +732,19 @@ impl SkillEngine {
                         last_undelivered_speech = Some(c.clone());
                         silent_origins.resolve_visible();
                     }
-                    messages.push(Message {
-                        role: Role::Assistant,
-                        content: Some(MessageContent::Text(c.clone())),
-                        name: None,
-                        function_call: None,
-                        tool_calls: None,
-                        tool_call_id: None,
-                    });
-                    turn_ledger.record(format!("asst:{}", messages.len()), c);
+                    // Keep visible speech in the one canonical conversation boundary. Structured
+                    // provider tool messages, if present, remain untouched in their native slots.
+                    if !self.append_assistant_history_entry(&mut messages, &mut turn_ledger, c)? {
+                        messages.push(Message {
+                            role: Role::Assistant,
+                            content: Some(MessageContent::Text(c.clone())),
+                            name: None,
+                            function_call: None,
+                            tool_calls: None,
+                            tool_call_id: None,
+                        });
+                        turn_ledger.record(format!("asst:{}", messages.len()), c);
+                    }
                     apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
                 }
                 continue;
@@ -739,15 +775,21 @@ impl SkillEngine {
                             last_undelivered_speech = Some(speech.clone());
                             silent_origins.resolve_visible();
                         }
-                        messages.push(Message {
-                            role: Role::Assistant,
-                            content: Some(MessageContent::Text(speech.clone())),
-                            name: None,
-                            function_call: None,
-                            tool_calls: None,
-                            tool_call_id: None,
-                        });
-                        turn_ledger.record(format!("asst:{}", messages.len()), speech);
+                        if !self.append_assistant_history_entry(
+                            &mut messages,
+                            &mut turn_ledger,
+                            speech,
+                        )? {
+                            messages.push(Message {
+                                role: Role::Assistant,
+                                content: Some(MessageContent::Text(speech.clone())),
+                                name: None,
+                                function_call: None,
+                                tool_calls: None,
+                                tool_call_id: None,
+                            });
+                            turn_ledger.record(format!("asst:{}", messages.len()), speech);
+                        }
                     }
                 }
                 for folded in late_inbound {

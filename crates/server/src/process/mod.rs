@@ -368,6 +368,7 @@ pub async fn run_agent_response(
         Box::new(opencrab_actions::SharedExecutor(executor.clone())),
         max_iterations,
     );
+    engine.set_assistant_history_name(agent_name.to_string());
 
     // #676（案Y）: 送るプロバイダのモデルは、出力上限（max_output_tokens）を model_pricing から
     // 実能力値で解決して engine に渡す。未登録（NULL / 0 以下 / 行なし）なら fail loud で

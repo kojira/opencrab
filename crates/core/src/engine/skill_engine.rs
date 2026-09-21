@@ -117,6 +117,9 @@ pub struct SkillEngine {
     /// engine まで来ない）。この値で頭打ちになった応答は finish_reason=Length で戻り、
     /// run ループがターンを失敗させる。
     max_output_tokens: Option<u32>,
+    /// Canonical display identity used when rebuilding this assistant's visible in-turn speech.
+    /// Production sets this from the resolved agent name before the first request.
+    assistant_history_name: Option<String>,
     /// 会話車線の二水位（#826-B）。未設定なら途中圧縮しない（テスト / sub-engine）。
     conversation_high: Option<usize>,
     conversation_low: Option<usize>,
@@ -167,9 +170,16 @@ impl SkillEngine {
             on_read_origin: None,
             initial_read_origin: std::sync::Mutex::new(None),
             max_output_tokens: None,
+            assistant_history_name: None,
             conversation_high: None,
             conversation_low: None,
         }
+    }
+
+    /// Set the resolved assistant display identity used by canonical in-turn history rendering.
+    pub fn set_assistant_history_name(&mut self, name: impl Into<String>) {
+        let name = name.into();
+        self.assistant_history_name = (!name.trim().is_empty()).then_some(name);
     }
 
     /// ターン内 append 境界の二水位。設定すると TokenLedger 合計だけで超過判定し、
@@ -189,9 +199,9 @@ impl SkillEngine {
     /// 走行中の新着ユーザー発言の取得口を注入する（#289）。
     ///
     /// 設定すると、2 回目以降のイテレーションで LLM を呼ぶ直前に
-    /// [`LiveInboundSource::poll_new_messages`] を引き、返ってきた本文を user
-    /// メッセージとして `messages` の末尾へ足す。新着が無ければ何も足さない
-    /// （＝従来と 1 バイトも変わらない）。
+    /// [`LiveInboundSource::poll_new_messages`] を引き、返ってきた本文を既存の
+    /// `<conversation_history>` 内へ時系列順に足す。境界がない内部用途だけは user
+    /// メッセージとして末尾へ足す。新着が無ければ何も足さない。
     ///
     /// 1 回目のイテレーションでは引かない。ターン開始時の会話履歴がその時点の
     /// 発言をすでに含んでいるため、引くと同じ発言を二重に見せることになる。

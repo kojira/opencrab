@@ -81,6 +81,35 @@
         }
     }
 
+    struct CapturingLlm {
+        responses: std::sync::Mutex<Vec<ChatResponse>>,
+        requests: Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
+    }
+
+    impl CapturingLlm {
+        fn new(
+            responses: Vec<ChatResponse>,
+            requests: Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
+        ) -> Self {
+            Self {
+                responses: std::sync::Mutex::new(responses),
+                requests,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmClient for CapturingLlm {
+        async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+            self.requests.lock().unwrap().push(request.messages);
+            let mut responses = self.responses.lock().unwrap();
+            if responses.is_empty() {
+                anyhow::bail!("no more mock responses");
+            }
+            Ok(responses.remove(0))
+        }
+    }
+
     struct MockExecutor {
         results: std::collections::HashMap<String, ActionResult>,
         calls: Option<Arc<std::sync::Mutex<Vec<String>>>>,
