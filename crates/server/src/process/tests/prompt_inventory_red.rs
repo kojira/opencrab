@@ -317,7 +317,9 @@ fn continuing_your_turn_section_matches_design() {
 Decide whether to continue the current turn.
 If no speech should be delivered, respond with exactly `NO_REPLY`.
 If you provide speech and decide to end the turn, append `NO_REPLY` on its own final line.
-If you decide to continue the turn, omit `NO_REPLY`."#;
+If you decide to continue the turn, omit `NO_REPLY`.
+Do not repeat or paraphrase speech already delivered during the current turn; if no new useful
+action or information remains, end the turn."#;
     let got = extract_section(&prompt, "## Turn completion");
     assert_eq!(
             normalize_ws(&got),
@@ -335,7 +337,9 @@ fn silent_reply_section_matches_design() {
 Decide whether to continue the current turn.
 If no speech should be delivered, respond with exactly `NO_REPLY`.
 If you provide speech and decide to end the turn, append `NO_REPLY` on its own final line.
-If you decide to continue the turn, omit `NO_REPLY`."#;
+If you decide to continue the turn, omit `NO_REPLY`.
+Do not repeat or paraphrase speech already delivered during the current turn; if no new useful
+action or information remains, end the turn."#;
     let got = extract_section(&prompt, "## Turn completion");
     assert_eq!(
             normalize_ws(&got),

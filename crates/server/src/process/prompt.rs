@@ -142,6 +142,8 @@ pub fn build_agent_context(
          If you provide speech and decide to end the turn, append `NO_REPLY` on its own final \
          line.\n\
          If you decide to continue the turn, omit `NO_REPLY`.\n\
+         Do not repeat or paraphrase speech already delivered during the current turn; if no new \
+         useful action or information remains, end the turn.\n\
          \n\
          ## Async Behavior\n\
          \n\
