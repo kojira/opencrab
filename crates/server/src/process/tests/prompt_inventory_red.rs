@@ -240,10 +240,10 @@ fn rewritten_fact_sentences_are_present() {
 fn meta_participation_policy_is_at_the_history_turn_boundary() {
     let prompt = prompt();
     let policy = "### 返事すべき場面の判断 \
-                  複数のエージェントがいる場合は「返事すべき場面かどうか」を先に判断する。 \
-                  - 自分に直接話しかけられている → 返事する \
-                  - 他のエージェント同士の会話 → 基本的に黙っておく（NO_REPLY） \
-                  - 話が完結している → 黙っておく";
+                  会話履歴全体と、すでに配送された自分の発話を見て判断する。 \
+                  - 最新の新しい発言で自分に直接話しかけられ、まだ答えていない → 返事する \
+                  - すでに自分の発話が答えており、新しい発言・結果・情報がない → `NO_REPLY` \
+                  - 他のエージェント同士の会話で、自分の返事が必要ない → `NO_REPLY`";
     let rejected = "A message that only acknowledges receipt, confirms a test result, expresses \
                     agreement, or announces that it will stop adds no new information and needs no \
                     response. In that case, respond with exactly NO_REPLY. Respond normally when the \
@@ -299,7 +299,8 @@ speech. The completion entry will start the next turn. Do not call the same tool
 is running.
 
 A `[subtask_completed: ...]` entry means a tool you called has finished and it is your turn
-again. Read that result, finish the original request, and then write `NO_REPLY` to end the turn."#;
+again. Read that result, finish the original request, and then apply the Turn completion rules
+above."#;
     let got = extract_section(&prompt, "## Async Behavior");
     assert_eq!(
             normalize_ws(&got),
