@@ -177,14 +177,18 @@ fn rewritten_fact_sentences_are_present() {
             "履歴形式を応答として継続しない",
         ),
         ("Your response is posted verbatim", "A6 逐語投稿の事実"),
-        // 明示終端は配送本文と分離して保存する。
+        // 発話の有無と継続可否を分けて判断する。
         (
-            "marker is recorded as a turn-termination event but is not delivered as speech",
-            "NO_REPLY は終了記録として保存し発話配送しない",
+            "If no speech should be delivered, respond with exactly `NO_REPLY`",
+            "無発話なら NO_REPLY のみ",
         ),
         (
-            "a topic that is already resolved where another exchange would add no new information",
-            "情報を増やさない応答は明示終了できる",
+            "If you provide speech and decide to end the turn, append `NO_REPLY`",
+            "発話して終了する場合だけ末尾に NO_REPLY",
+        ),
+        (
+            "If you decide to continue the turn, omit `NO_REPLY`",
+            "継続する場合は NO_REPLY を付けない",
         ),
         // 3.2 Async（A18 事実化・team-lead 指定例）
         (
@@ -236,10 +240,10 @@ fn rewritten_fact_sentences_are_present() {
 fn meta_participation_policy_is_at_the_history_turn_boundary() {
     let prompt = prompt();
     let policy = "### 返事すべき場面の判断 \
-                  複数のエージェントがいる場合は「返事すべき場面かどうか」を先に判断する。 \
-                  - 自分に直接話しかけられている → 返事する \
-                  - 他のエージェント同士の会話 → 基本的に黙っておく（NO_REPLY） \
-                  - 話が完結している → 黙っておく";
+                  会話履歴全体と、すでに配送された自分の発話を見て判断する。 \
+                  - 最新の新しい発言で自分に直接話しかけられ、まだ答えていない → 返事する \
+                  - すでに自分の発話が答えており、新しい発言・結果・情報がない → `NO_REPLY` \
+                  - 他のエージェント同士の会話で、自分の返事が必要ない → `NO_REPLY`";
     let rejected = "A message that only acknowledges receipt, confirms a test result, expresses \
                     agreement, or announces that it will stop adds no new information and needs no \
                     response. In that case, respond with exactly NO_REPLY. Respond normally when the \
@@ -295,7 +299,8 @@ speech. The completion entry will start the next turn. Do not call the same tool
 is running.
 
 A `[subtask_completed: ...]` entry means a tool you called has finished and it is your turn
-again. Read that result, finish the original request, and then write `NO_REPLY` to end the turn."#;
+again. Read that result, finish the original request, and then apply the Turn completion rules
+above."#;
     let got = extract_section(&prompt, "## Async Behavior");
     assert_eq!(
             normalize_ws(&got),
@@ -310,12 +315,10 @@ fn continuing_your_turn_section_matches_design() {
     let prompt = prompt();
     let expected = r#"## Turn completion
 
-Your turn continues by default. Only `NO_REPLY` explicitly ends it. When all requested work is
-complete, append `NO_REPLY` on its own final line after the final answer. The marker is recorded
-as a turn-termination event but is not delivered as speech. If no speech should be delivered,
-respond with exactly `NO_REPLY`. This includes a topic that is already resolved where another
-exchange would add no new information. Without `NO_REPLY`, you are called again and must
-continue the unfinished work."#;
+Decide whether to continue the current turn.
+If no speech should be delivered, respond with exactly `NO_REPLY`.
+If you provide speech and decide to end the turn, append `NO_REPLY` on its own final line.
+If you decide to continue the turn, omit `NO_REPLY`."#;
     let got = extract_section(&prompt, "## Turn completion");
     assert_eq!(
             normalize_ws(&got),
@@ -330,12 +333,10 @@ fn silent_reply_section_matches_design() {
     let prompt = prompt();
     let expected = r#"## Turn completion
 
-Your turn continues by default. Only `NO_REPLY` explicitly ends it. When all requested work is
-complete, append `NO_REPLY` on its own final line after the final answer. The marker is recorded
-as a turn-termination event but is not delivered as speech. If no speech should be delivered,
-respond with exactly `NO_REPLY`. This includes a topic that is already resolved where another
-exchange would add no new information. Without `NO_REPLY`, you are called again and must
-continue the unfinished work."#;
+Decide whether to continue the current turn.
+If no speech should be delivered, respond with exactly `NO_REPLY`.
+If you provide speech and decide to end the turn, append `NO_REPLY` on its own final line.
+If you decide to continue the turn, omit `NO_REPLY`."#;
     let got = extract_section(&prompt, "## Turn completion");
     assert_eq!(
             normalize_ws(&got),

@@ -24,14 +24,15 @@ pub const EXTGATE_SESSION_PREFIX: &str = "extgate-";
 /// 規則は共通なので 1 実装に集約する（単一実装）。**送る＝🏁 を付ける／`None`＝付けない**。
 ///
 /// - `engine_completion`: `(最終生成の最後の投稿系utterance-opのcall_id, stopped_by_limit,
-///   最終生成が途中本文を配送したか)`。engineを回さなかったターンは`None`。
+///   最終生成が途中本文を配送したか, NO_REPLYで明示終了したか)`。engineを回さなかったターンは
+///   `None`。
 /// - `agent_has_running`: 終了時点で進行中があれば付けない（idle でない・§13.3.1 案E）。
 ///   ターン中に開始した履歴だけでは抑止しない。終了前に全件決着していれば idle である。
 /// - `final_say_id`: 最終応答が say を配送したときのその delivery_id。
 /// - `last_continuation_say`: callback が最終生成の本文を配送したとき、そのsayの
 ///   delivery_id。field名は互換のため維持する。
 pub(crate) fn select_completed_target(
-    engine_completion: Option<(Option<String>, bool, bool)>,
+    engine_completion: Option<(Option<String>, bool, bool, bool)>,
     agent_has_running: bool,
     final_say_id: Option<String>,
     last_continuation_say: Option<String>,
@@ -39,21 +40,27 @@ pub(crate) fn select_completed_target(
     if agent_has_running {
         return None;
     }
-    engine_completion.and_then(|(last_reply, stopped_by_limit, final_had_speech)| {
-        if stopped_by_limit {
-            if final_had_speech {
-                last_continuation_say
+    engine_completion.and_then(
+        |(last_reply, stopped_by_limit, final_had_speech, ended_with_no_reply)| {
+            if stopped_by_limit {
+                if final_had_speech {
+                    last_continuation_say
+                } else {
+                    last_reply
+                }
             } else {
-                last_reply
+                final_say_id.or(if final_had_speech {
+                    last_continuation_say
+                } else {
+                    last_reply.or(if ended_with_no_reply {
+                        last_continuation_say
+                    } else {
+                        None
+                    })
+                })
             }
-        } else {
-            final_say_id.or(if final_had_speech {
-                last_continuation_say
-            } else {
-                last_reply
-            })
-        }
-    })
+        },
+    )
 }
 
 /// V3 の `RunRequest` に既存の `with_dispatch` を常時付ける。ノブ分岐は置かない。
@@ -316,6 +323,7 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
                     er.last_posting_utterance_id.clone(),
                     er.stopped_by_limit,
                     er.last_generation_had_continuation_speech,
+                    er.explicit_termination.is_some(),
                 )
             });
             let silent_origins = engine_result
@@ -381,7 +389,7 @@ mod tests {
     fn subtask_settled_during_parent_turn_allows_final_completed_target() {
         assert_eq!(
             select_completed_target(
-                Some((Some("utterance-call-id".to_string()), false, true)),
+                Some((Some("utterance-call-id".to_string()), false, true, false,)),
                 false,
                 None,
                 Some("say-delivery-id".to_string()),
@@ -394,7 +402,7 @@ mod tests {
     fn final_callback_speech_uses_its_delivery_id_as_completed_target() {
         assert_eq!(
             select_completed_target(
-                Some((Some("utterance-call-id".to_string()), false, true)),
+                Some((Some("utterance-call-id".to_string()), false, true, false,)),
                 false,
                 None,
                 Some("say-delivery-id".to_string()),
@@ -404,10 +412,23 @@ mod tests {
     }
 
     #[test]
+    fn no_reply_after_continuation_reacts_to_the_previous_say() {
+        assert_eq!(
+            select_completed_target(
+                Some((None, false, false, true)),
+                false,
+                None,
+                Some("previous-say".to_string()),
+            ),
+            Some("previous-say".to_string())
+        );
+    }
+
+    #[test]
     fn exhausted_turn_reacts_to_the_last_post_instead_of_posting_a_message() {
         assert_eq!(
             select_completed_target(
-                Some((None, true, true)),
+                Some((None, true, true, false)),
                 false,
                 None,
                 Some("last-say".to_string()),
@@ -416,7 +437,7 @@ mod tests {
         );
         assert_eq!(
             select_completed_target(
-                Some((Some("last-reply".to_string()), true, false)),
+                Some((Some("last-reply".to_string()), true, false, false)),
                 false,
                 None,
                 None,

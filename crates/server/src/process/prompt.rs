@@ -130,19 +130,18 @@ pub fn build_agent_context(
          you add is not removed, so it would appear duplicated.\n\
          \n\
          ### 返事すべき場面の判断\n\
-         複数のエージェントがいる場合は「返事すべき場面かどうか」を先に判断する。\n\
-         - 自分に直接話しかけられている → 返事する\n\
-         - 他のエージェント同士の会話 → 基本的に黙っておく（NO_REPLY）\n\
-         - 話が完結している → 黙っておく\n\
+         会話履歴全体と、すでに配送された自分の発話を見て判断する。\n\
+         - 最新の新しい発言で自分に直接話しかけられ、まだ答えていない → 返事する\n\
+         - すでに自分の発話が答えており、新しい発言・結果・情報がない → `NO_REPLY`\n\
+         - 他のエージェント同士の会話で、自分の返事が必要ない → `NO_REPLY`\n\
          \n\
          ## Turn completion\n\
          \n\
-         Your turn continues by default. Only `NO_REPLY` explicitly ends it. When all requested \
-         work is complete, append `NO_REPLY` on its own final line after the final answer. The \
-         marker is recorded as a turn-termination event but is not delivered as speech. If no \
-         speech should be delivered, respond with exactly `NO_REPLY`. This includes a topic \
-         that is already resolved where another exchange would add no new information. Without \
-         `NO_REPLY`, you are called again and must continue the unfinished work.\n\
+         Decide whether to continue the current turn.\n\
+         If no speech should be delivered, respond with exactly `NO_REPLY`.\n\
+         If you provide speech and decide to end the turn, append `NO_REPLY` on its own final \
+         line.\n\
+         If you decide to continue the turn, omit `NO_REPLY`.\n\
          \n\
          ## Async Behavior\n\
          \n\
@@ -164,8 +163,8 @@ pub fn build_agent_context(
          not call the same tool again while it is running.\n\
          \n\
          A `[subtask_completed: ...]` entry means a tool you called has finished and it is \
-         your turn again. Read that result, finish the original request, and then write \
-         `NO_REPLY` to end the turn.\n\
+         your turn again. Read that result, finish the original request, and then apply the Turn \
+         completion rules above.\n\
          \n\
          ## Memory & Context\n\
          \n\

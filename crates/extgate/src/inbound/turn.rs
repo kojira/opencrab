@@ -308,6 +308,7 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                                 er.last_posting_utterance_id.clone(),
                                 er.stopped_by_limit,
                                 er.last_generation_had_continuation_speech,
+                                er.explicit_termination.is_some(),
                             )
                         });
                         let silent_origins = engine_result
