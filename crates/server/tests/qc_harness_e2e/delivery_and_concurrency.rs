@@ -32,22 +32,16 @@ async fn scenario_a_mention_becomes_say() {
     assert_eq!(mock.system_prompts().len(), 1, "ターンが 1 本でない");
 }
 
-// ============ (A1/A1L) NO_REPLY 終端化 + 破棄ログ（第一柱・DESIGN-RESUME-SETTLE §3.1/§3.1.1）============
+// ============ 最終独立行だけを NO_REPLY 終端として扱う ============
 
-/// mock 応答に `…本文… NO_REPLY …ゴミ…` を混入させたとき:
-/// (i) 配送 say の body に `NO_REPLY` もゴミも含まれず、前段本文だけで確定する（A1）
-/// (ii) 破棄ログ `no_reply_trailing_discarded` が 1 件出て破棄全文と session_id を持つ（A1L）
-/// (iii) 破棄テキストは wire（dry-run say）に一切現れない（§3.1.1(c)）
 #[tokio::test]
-async fn scenario_no_reply_terminates_and_logs_discard() {
-    // 互いに部分文字列にならない一意マーカー（グローバルバッファの他テスト混線を避ける）。
-    const KEEP: &str = "NRTERM-KEEP 本文はここまで";
-    const GARBAGE: &str = "NRTERM-GARBAGE 破棄されるゴミ";
+async fn scenario_inline_no_reply_is_delivered_and_final_line_terminates() {
+    const VISIBLE: &str = "NRTERM-KEEP 『NO_REPLYで終わる』という説明も全文を届ける";
 
     let buf = install_capture();
     let dbuf = discard_buffer();
     let mock = Arc::new(FifoMock::new());
-    mock.push_text(&format!("{KEEP} NO_REPLY {GARBAGE}"));
+    mock.push_text(&format!("{VISIBLE}\nNO_REPLY"));
     let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
 
     let fixture = Fixture::new();
@@ -56,73 +50,19 @@ async fn scenario_no_reply_terminates_and_logs_discard() {
     let event_id = "d1".repeat(32);
     fixture.append_line(&mention_event(&event_id, "NRTERM-MARK メンション本文"));
 
-    // (i) 前段本文で say が確定するまで待つ。
     let ok = {
         let buf = buf.clone();
-        wait_until(move || {
-            captured(&buf)
-                .iter()
-                .any(|c| c.body.contains("NRTERM-KEEP") && c.kind == "reply")
-        })
-        .await
+        wait_until(move || captured(&buf).iter().any(|c| c.body == VISIBLE && c.kind == "reply"))
+            .await
     };
-    assert!(ok, "前段本文の say が出ない: {:?}", captured(&buf));
-
-    // (i) 該当 say の body に NO_REPLY もゴミも含まれない。
-    let says: Vec<_> = captured(&buf)
-        .into_iter()
-        .filter(|c| c.body.contains("NRTERM-KEEP"))
-        .collect();
-    for s in &says {
-        assert!(
-            !s.body.contains("NO_REPLY"),
-            "say body に NO_REPLY が混入: {:?}",
-            s
-        );
-        assert!(
-            !s.body.contains("NRTERM-GARBAGE"),
-            "say body に破棄テキストが混入: {:?}",
-            s
-        );
-    }
-
-    // (iii) 破棄テキストはどの dry-run say にも現れない（wire 非搭載）。
+    assert!(ok, "本文全文の say が出ない: {:?}", captured(&buf));
+    assert_eq!(mock.system_prompts().len(), 1, "最終行で終了していない");
     assert!(
-        captured(&buf)
-            .iter()
-            .all(|c| !c.body.contains("NRTERM-GARBAGE")),
-        "破棄テキストが wire(dry-run say) に現れた: {:?}",
-        captured(&buf)
-    );
-
-    // (ii) 破棄ログが 1 件出ており、破棄全文と session_id を持つ（A1L）。
-    let ok_discard = {
-        let dbuf = dbuf.clone();
-        wait_until(move || {
-            discards(&dbuf)
-                .iter()
-                .any(|d| d.discarded.contains("NRTERM-GARBAGE"))
-        })
-        .await
-    };
-    assert!(
-        ok_discard,
-        "破棄ログ(no_reply_trailing_discarded) が出ていない: {:?}",
         discards(&dbuf)
-    );
-    let d = discards(&dbuf)
-        .into_iter()
-        .find(|d| d.discarded.contains("NRTERM-GARBAGE"))
-        .unwrap();
-    assert!(
-        d.discarded.contains("NO_REPLY"),
-        "破棄全文に NO_REPLY トークンが含まれない: {:?}",
-        d
-    );
-    assert!(
-        !d.session_id.is_empty(),
-        "破棄ログに session_id 相関キーが無い: {:?}",
-        d
+            .iter()
+            .all(|d| !d.discarded.contains("NRTERM-KEEP")),
+        "通常本文が破棄ログに記録された: {:?}",
+        discards(&dbuf)
     );
 }
 
