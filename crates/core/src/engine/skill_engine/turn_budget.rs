@@ -92,6 +92,9 @@ pub(super) fn append_bounded_history_block(
     let mut starts = 0;
     let mut ends = 0;
     for (index, message) in messages.iter().enumerate() {
+        if message.role != Role::User {
+            continue;
+        }
         let text = message_plain_text(message);
         let message_starts = text.matches(CONVERSATION_HISTORY_START).count();
         let message_ends = text.matches(CONVERSATION_HISTORY_END).count();
@@ -150,11 +153,13 @@ pub(super) fn append_or_create_bounded_history_block(
 
     let starts = messages
         .iter()
+        .filter(|message| message.role == Role::User)
         .map(message_plain_text)
         .map(|text| text.matches(CONVERSATION_HISTORY_START).count())
         .sum::<usize>();
     let ends = messages
         .iter()
+        .filter(|message| message.role == Role::User)
         .map(message_plain_text)
         .map(|text| text.matches(CONVERSATION_HISTORY_END).count())
         .sum::<usize>();
