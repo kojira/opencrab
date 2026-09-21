@@ -11,6 +11,7 @@ include!("discord_qc_harness/chunking.rs");
 include!("discord_qc_harness/completion_continue.rs");
 include!("discord_qc_harness/completion_edges.rs");
 include!("discord_qc_harness/completion_lifecycle.rs");
+include!("discord_qc_harness/duplicate_boundary.rs");
 include!("discord_qc_harness/folding.rs");
 include!("discord_qc_harness/heartbeat.rs");
 include!("discord_qc_harness/holding_resume.rs");

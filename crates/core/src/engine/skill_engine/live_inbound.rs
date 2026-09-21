@@ -1,6 +1,6 @@
 use opencrab_llm_types::{Message, MessageContent, Role};
 
-use super::silent_origins::SilentOriginTracker;
+use super::{silent_origins::SilentOriginTracker, turn_budget::append_bounded_history_block};
 use crate::context_budget::TokenLedger;
 use crate::FoldedInbound;
 
@@ -21,15 +21,17 @@ pub(super) fn append(
             "injecting newly arrived user speech into the running turn"
         );
     }
-    messages.push(Message {
-        role: Role::User,
-        content: Some(MessageContent::Text(text.clone())),
-        name: None,
-        function_call: None,
-        tool_calls: None,
-        tool_call_id: None,
-    });
-    ledger.record(format!("live:{}", messages.len()), &text);
+    if !append_bounded_history_block(messages, ledger, &text) {
+        messages.push(Message {
+            role: Role::User,
+            content: Some(MessageContent::Text(text.clone())),
+            name: None,
+            function_call: None,
+            tool_calls: None,
+            tool_call_id: None,
+        });
+        ledger.record(format!("live:{}", messages.len()), &text);
+    }
     if let Some(origin) = origin {
         if !silent_origins.was_read(&origin) && !pending_read_origins.contains(&origin) {
             pending_read_origins.push(origin);

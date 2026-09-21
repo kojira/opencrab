@@ -7,7 +7,7 @@ use super::{
         partition_tool_calls_for_dispatch, InitialTurn,
     },
     silent_origins::SilentOriginTracker,
-    turn_budget::{apply_turn_budget, seat_tool_result},
+    turn_budget::{apply_turn_budget, move_assistant, seat_assistant, seat_tool_result},
     SkillEngine,
 };
 use crate::engine::types::{ChatRequest, EngineResult, LlmCallLog, LlmExchangeLog};
@@ -60,6 +60,7 @@ impl SkillEngine {
         let mut last_generation_had_continuation_speech = false;
         // 配送フックの無い run（subtask 等）は、単独 NO_REPLY で直前の本文を失わない。
         let mut last_undelivered_speech: Option<String> = None;
+        let history_name = self.assistant_history_name.as_deref();
 
         loop {
             iterations += 1;
@@ -374,6 +375,7 @@ impl SkillEngine {
 
                 // Add the assistant message with tool calls (arguments already
                 // canonical Strings, so no Value->String conversion needed).
+                let assistant_tool_message_index = messages.len();
                 messages.push(Message {
                     role: Role::Assistant,
                     content: content.clone().map(MessageContent::Text),
@@ -382,12 +384,12 @@ impl SkillEngine {
                     tool_calls: Some(tool_calls.clone()),
                     tool_call_id: None,
                 });
+                let assistant_ledger_key = format!("asst:{}", messages.len());
                 turn_ledger.record(
-                    format!("asst:{}", messages.len()),
+                    assistant_ledger_key.clone(),
                     content.as_deref().unwrap_or(""),
                 );
                 apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
-
                 // 発話クラス（reply/reaction/repost・§3.3.1 C6）の tool_call は**機械行を
                 // 永続しない**。発話の本文は配送経路が speech ログとして残す（本文＋関係注記）
                 // ので、ここで永続 tool_call 行から除外する。照会/道具クラスの call は従来どおり。
@@ -395,7 +397,6 @@ impl SkillEngine {
                     .iter()
                     .filter(|tc| !self.is_utterance_tool(&tc.function.name))
                     .collect();
-
                 // 本文＋照会/道具クラスの生成本文は holding 発話として1件だけ配送・保存する。
                 // `content` は上で終端markerを除去済み。配送後は on_tool_call へ本文を渡さず
                 // 二重保存を避ける。
@@ -408,10 +409,17 @@ impl SkillEngine {
                             })?;
                             silent_origins.resolve_visible();
                             holding_delivered = true;
+                            move_assistant(
+                                &mut messages,
+                                &mut turn_ledger,
+                                history_name,
+                                body,
+                                assistant_tool_message_index,
+                                &assistant_ledger_key,
+                            )?;
                         }
                     }
                 }
-
                 // Notify on_tool_call callbacks.
                 if !persisted.is_empty() && !self.on_tool_call.is_empty() {
                     let calls_json = serde_json::to_string(&persisted).unwrap_or_default();
@@ -670,6 +678,14 @@ impl SkillEngine {
                                     anyhow::anyhow!("continuation speech delivery failed: {e:#}")
                                 })?;
                                 silent_origins.resolve_visible();
+                                move_assistant(
+                                    &mut messages,
+                                    &mut turn_ledger,
+                                    history_name,
+                                    c,
+                                    assistant_tool_message_index,
+                                    &assistant_ledger_key,
+                                )?;
                             } else {
                                 // 最終EngineResultで上位が配送する本文なので、このrequestはsilentではない。
                                 last_undelivered_speech = Some(c.clone());
@@ -700,15 +716,7 @@ impl SkillEngine {
                         last_undelivered_speech = Some(c.clone());
                         silent_origins.resolve_visible();
                     }
-                    messages.push(Message {
-                        role: Role::Assistant,
-                        content: Some(MessageContent::Text(c.clone())),
-                        name: None,
-                        function_call: None,
-                        tool_calls: None,
-                        tool_call_id: None,
-                    });
-                    turn_ledger.record(format!("asst:{}", messages.len()), c);
+                    seat_assistant(&mut messages, &mut turn_ledger, history_name, c)?;
                     apply_turn_budget(&mut turn_gov, &mut turn_ledger, &mut messages, 0)?;
                 }
                 continue;
@@ -739,15 +747,7 @@ impl SkillEngine {
                             last_undelivered_speech = Some(speech.clone());
                             silent_origins.resolve_visible();
                         }
-                        messages.push(Message {
-                            role: Role::Assistant,
-                            content: Some(MessageContent::Text(speech.clone())),
-                            name: None,
-                            function_call: None,
-                            tool_calls: None,
-                            tool_call_id: None,
-                        });
-                        turn_ledger.record(format!("asst:{}", messages.len()), speech);
+                        seat_assistant(&mut messages, &mut turn_ledger, history_name, speech)?;
                     }
                 }
                 for folded in late_inbound {

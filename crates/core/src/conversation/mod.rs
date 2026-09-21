@@ -20,7 +20,7 @@ pub use assembly::{
     build_conversation_string_with_waters, CONVERSATION_HISTORY_END, CONVERSATION_HISTORY_START,
     NO_MESSAGES_MARKER, RECENT_MIN_USER_SPEECHES,
 };
-pub use format::{format_single_log, format_single_log_with_echo};
+pub use format::{format_single_log, format_single_log_with_echo, format_speech_entry};
 pub use past_summary::past_summary_omitted_notice;
 pub use refs::ConversationRefs;
 pub use retain::retain_conversation_logs;

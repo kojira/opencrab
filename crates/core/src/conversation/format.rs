@@ -8,6 +8,16 @@ use super::tool_result_fold::{fold_subtask_completed, result_reference};
 pub fn format_single_log(log: &opencrab_db::queries::SessionLogRow) -> String {
     format_single_log_with_echo(log, None, None)
 }
+
+/// Canonical visible speech entry used by persisted and in-turn conversation history.
+pub fn format_speech_entry(speaker: &str, created_at: Option<&str>, content: &str) -> String {
+    let timestamp = created_at
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|dt| dt.format("[%Y-%m-%d %H:%M:%S]").to_string())
+        .unwrap_or_default();
+    format!("[{speaker}]{timestamp}:\n{content}")
+}
+
 /// 完了済み tool_call の arguments を `{ref,digest,bytes}` に置換して読む。
 /// 未決着 call は `completed_ids` に無いので全文のまま。`refs` があれば §9A の短縮参照
 /// （u/e/c 番号・識別子排除・長文切り詰め）を適用する。None なら従来の生表示（単体整形・
@@ -47,7 +57,7 @@ pub fn format_single_log_with_echo(
             }
             None => {
                 let speaker = log.speaker_id.as_deref().unwrap_or(&log.agent_id);
-                format!("[{}]{}:\n{}", speaker, ts, log.content)
+                format_speech_entry(speaker, log.created_at.as_deref(), &log.content)
             }
         },
         "tool_call" => {

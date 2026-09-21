@@ -1,5 +1,5 @@
 use anyhow::Result;
-use opencrab_llm_types::{ContentPart, Message, MessageContent};
+use opencrab_llm_types::{ContentPart, Message, MessageContent, Role};
 
 use crate::conversation::{CONVERSATION_HISTORY_END, CONVERSATION_HISTORY_START};
 
@@ -51,6 +51,11 @@ fn is_toolish_user_block(block: &str) -> bool {
 }
 
 fn conversation_history_range(text: &str) -> Option<(usize, usize)> {
+    if text.matches(CONVERSATION_HISTORY_START).count() != 1
+        || text.matches(CONVERSATION_HISTORY_END).count() != 1
+    {
+        return None;
+    }
     let start = text.find(CONVERSATION_HISTORY_START)? + CONVERSATION_HISTORY_START.len();
     let end = text[start..].find(CONVERSATION_HISTORY_END)? + start;
     Some((start, end))
@@ -72,6 +77,176 @@ fn rebuild_user_text(original: &str, compacted: &str) -> String {
         compacted.trim_matches('\n'),
         &original[end..]
     )
+}
+
+/// Append one canonically rendered visible event to the request's single bounded history.
+///
+/// Structured provider messages remain in their original slots; only their visible conversation
+/// counterparts are rebuilt here. Refuse malformed/multiple boundaries rather than guessing.
+pub(super) fn append_bounded_history_block(
+    messages: &mut [Message],
+    ledger: &mut crate::context_budget::TokenLedger,
+    block: &str,
+) -> bool {
+    let mut bounded_message = None;
+    let mut starts = 0;
+    let mut ends = 0;
+    for (index, message) in messages.iter().enumerate() {
+        if message.role != Role::User {
+            continue;
+        }
+        let text = message_plain_text(message);
+        let message_starts = text.matches(CONVERSATION_HISTORY_START).count();
+        let message_ends = text.matches(CONVERSATION_HISTORY_END).count();
+        if message_starts > 0 || message_ends > 0 {
+            bounded_message = Some(index);
+        }
+        starts += message_starts;
+        ends += message_ends;
+    }
+    if starts != 1 || ends != 1 {
+        return false;
+    }
+    let Some(message) = bounded_message.and_then(|index| messages.get_mut(index)) else {
+        return false;
+    };
+    let text = match message.content.as_mut() {
+        Some(MessageContent::Text(text)) => text,
+        Some(MessageContent::Multi(parts)) => {
+            let Some(ContentPart::Text { text }) = parts.iter_mut().find(|part| {
+                matches!(
+                    part,
+                    ContentPart::Text { text }
+                        if text.contains(CONVERSATION_HISTORY_START)
+                            && text.contains(CONVERSATION_HISTORY_END)
+                )
+            }) else {
+                return false;
+            };
+            text
+        }
+        Some(MessageContent::Image { .. }) | None => return false,
+    };
+    let Some((_, end)) = conversation_history_range(text) else {
+        return false;
+    };
+    let separator = if text[..end].ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    text.insert_str(end, &format!("{separator}{block}\n"));
+    ledger.record("user", text);
+    true
+}
+
+/// Append to the canonical history, creating its single boundary around the initial user text
+/// only when no boundary markers exist anywhere in the request.
+pub(super) fn append_or_create_bounded_history_block(
+    messages: &mut [Message],
+    ledger: &mut crate::context_budget::TokenLedger,
+    block: &str,
+) -> Result<bool> {
+    if append_bounded_history_block(messages, ledger, block) {
+        return Ok(true);
+    }
+
+    let starts = messages
+        .iter()
+        .filter(|message| message.role == Role::User)
+        .map(message_plain_text)
+        .map(|text| text.matches(CONVERSATION_HISTORY_START).count())
+        .sum::<usize>();
+    let ends = messages
+        .iter()
+        .filter(|message| message.role == Role::User)
+        .map(message_plain_text)
+        .map(|text| text.matches(CONVERSATION_HISTORY_END).count())
+        .sum::<usize>();
+    if starts != 0 || ends != 0 {
+        return Err(anyhow::anyhow!(
+            "malformed or multiple <conversation_history> boundaries: found {starts} opening and {ends} closing markers"
+        ));
+    }
+
+    let Some(user) = messages
+        .iter_mut()
+        .find(|message| message.role == Role::User)
+    else {
+        return Ok(false);
+    };
+    let text = match user.content.as_mut() {
+        Some(MessageContent::Text(text)) => text,
+        Some(MessageContent::Multi(parts)) => {
+            let Some(ContentPart::Text { text }) = parts
+                .iter_mut()
+                .find(|part| matches!(part, ContentPart::Text { .. }))
+            else {
+                return Ok(false);
+            };
+            text
+        }
+        Some(MessageContent::Image { .. }) | None => return Ok(false),
+    };
+    let original = text.trim_matches('\n');
+    *text = if original.is_empty() {
+        format!("{CONVERSATION_HISTORY_START}\n{block}\n{CONVERSATION_HISTORY_END}")
+    } else {
+        format!("{CONVERSATION_HISTORY_START}\n{original}\n{block}\n{CONVERSATION_HISTORY_END}")
+    };
+    ledger.record("user", text);
+    Ok(true)
+}
+
+pub(super) fn append_assistant_history(
+    messages: &mut [Message],
+    ledger: &mut crate::context_budget::TokenLedger,
+    assistant_name: Option<&str>,
+    speech: &str,
+) -> Result<bool> {
+    let Some(name) = assistant_name else {
+        return Ok(false);
+    };
+    let created_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let rendered = crate::conversation::format_speech_entry(name, Some(&created_at), speech);
+    append_or_create_bounded_history_block(messages, ledger, &rendered)
+}
+
+/// Move delivered speech off a native tool-call message and into the canonical history.
+pub(super) fn move_assistant(
+    messages: &mut [Message],
+    ledger: &mut crate::context_budget::TokenLedger,
+    assistant_name: Option<&str>,
+    speech: &str,
+    assistant_message_index: usize,
+    assistant_ledger_key: &str,
+) -> Result<()> {
+    if append_assistant_history(messages, ledger, assistant_name, speech)? {
+        messages[assistant_message_index].content = None;
+        ledger.remove_key(assistant_ledger_key);
+    }
+    Ok(())
+}
+
+/// Seat visible speech in the canonical boundary, falling back to a provider assistant message.
+pub(super) fn seat_assistant(
+    messages: &mut Vec<Message>,
+    ledger: &mut crate::context_budget::TokenLedger,
+    assistant_name: Option<&str>,
+    speech: &str,
+) -> Result<()> {
+    if !append_assistant_history(messages, ledger, assistant_name, speech)? {
+        messages.push(Message {
+            role: Role::Assistant,
+            content: Some(MessageContent::Text(speech.to_string())),
+            name: None,
+            function_call: None,
+            tool_calls: None,
+            tool_call_id: None,
+        });
+        ledger.record(format!("asst:{}", messages.len()), speech);
+    }
+    Ok(())
 }
 
 pub(super) fn user_line_items(messages: &[Message]) -> Vec<crate::context_budget::CompactItem> {
@@ -211,4 +386,16 @@ pub(super) fn seat_tool_result(
         )?;
     }
     Ok(cap(remaining_conversation(gov, ledger)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::conversation_history_range;
+
+    #[test]
+    fn conversation_history_range_rejects_two_complete_blocks() {
+        let input = "<conversation_history>\n[u1]:\nfirst\n</conversation_history>\n<conversation_history>\n[u2]:\nsecond\n</conversation_history>";
+
+        assert_eq!(conversation_history_range(input), None);
+    }
 }
