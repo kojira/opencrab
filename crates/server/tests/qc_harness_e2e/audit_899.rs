@@ -124,7 +124,7 @@ const B899B_KEEP: &str = "nr899b-keep 本文はここまで";
 async fn audit_899b_body_plus_no_reply_delivers_body_only_saved_once() {
     let buf = install_capture();
     let mock = Arc::new(FifoMock::new());
-    mock.push_text(&format!("{B899B_KEEP} NO_REPLY 破棄されるべき後段"));
+    mock.push_text(&format!("{B899B_KEEP}\nNO_REPLY"));
     let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
 
     let fixture = Fixture::new();

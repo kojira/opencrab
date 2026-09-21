@@ -48,7 +48,6 @@ struct CapturedSay {
 #[derive(Clone, Debug, Default)]
 struct CapturedDiscard {
     discarded: String,
-    session_id: String,
 }
 
 static BUFFER: OnceLock<Arc<Mutex<Vec<CapturedSay>>>> = OnceLock::new();
@@ -121,14 +120,12 @@ impl tracing::field::Visit for SayVisitor {
 #[derive(Default)]
 struct DiscardVisitor {
     discarded: Option<String>,
-    session_id: Option<String>,
 }
 
 impl DiscardVisitor {
     fn set(&mut self, name: &str, value: String) {
         match name {
             "discarded" => self.discarded = Some(value),
-            "session_id" => self.session_id = Some(value),
             _ => {}
         }
     }
@@ -159,7 +156,6 @@ impl<S: tracing::Subscriber> Layer<S> for CaptureLayer {
                 event.record(&mut v);
                 self.discard.lock().unwrap().push(CapturedDiscard {
                     discarded: v.discarded.unwrap_or_default(),
-                    session_id: v.session_id.unwrap_or_default(),
                 });
             }
             _ => {}

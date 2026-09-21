@@ -5,17 +5,15 @@
 //! センチネルと判定を一元管理する）。ここは互換のため
 //! re-export し、配送層固有の破棄ログ（[`log_trailing_discard`]・[`DeliveryContext`]）だけを持つ。
 //!
-//! R4 統括裁定: **出現＝終端**（例外規則なし・文中引用も終端扱い）。応答に最初の `NO_REPLY`
-//! が現れた地点で発言を打ち切り、前段が空なら沈黙・非空なら前段のみを発言・以降は破棄する。
-//! 破棄内容は後続に非空テキストがある場合だけ固定タグ [`NO_REPLY_TRAILING_DISCARDED_TAG`] の
-//! WARN をサーバローカルログへ残す（wire・配送・gateway 通知には載せない）。
+//! `NO_REPLY` は、応答の最終行全体がその文字列だけの場合に限り終端として扱う。
+//! 文中・引用内・途中行の出現は通常の発話として保持する。
 
 // 純粋判定と結果型・センチネルは core の単一実装を re-export する（別実装を作らない）。
 pub use opencrab_core::continue_marker::{
     terminate_at_no_reply, NoReplyTermination, NO_REPLY_LOG_TARGET, NO_REPLY_SENTINEL,
 };
 
-/// 破棄ログの固定タグ（`grep -c` で頻度集計できるよう 1 語不変・§3.1.1(b)）。
+/// 旧「マーカー以降を破棄」契約との互換用ログタグ。
 pub const NO_REPLY_TRAILING_DISCARDED_TAG: &str = "no_reply_trailing_discarded";
 
 /// 破棄ログの相関コンテキスト（§3.1.1(a)・突き合わせ識別子）。
@@ -29,11 +27,8 @@ pub struct DeliveryContext<'a> {
     pub origin: &'a str,
 }
 
-/// §3.1.1: `NO_REPLY` の後に非空テキストが続いていたら破棄ログを WARN で残す。
-///
-/// 破棄テキストは **サーバローカルログのみ**（wire・配送・gateway 通知には載せない）。
-/// 単独 `NO_REPLY`・末尾 `NO_REPLY`（後続が空白のみ）では WARN を出さない。
-/// core の [`NoReplyTermination`] を受け取る配送層固有の副作用（tracing）なのでここに置く。
+/// 旧「マーカー以降を破棄」契約との互換フック。
+/// 最終独立行だけを終端とする現在の parser では破棄対象が生じないため、通常は何もしない。
 pub fn log_trailing_discard(term: &NoReplyTermination, ctx: DeliveryContext<'_>) {
     let Some(discarded) = term.trailing_discard() else {
         return;
@@ -62,16 +57,11 @@ mod tests {
         }
     }
 
-    /// 破棄ログの発火条件（後続非空だけ Some）を core の trailing_discard 経由で確認する。
     #[test]
-    fn log_trailing_discard_smoke() {
-        // 末尾 NO_REPLY（後続空）は破棄ログ対象外。
-        let quiet = terminate_at_no_reply("本文だけ話す NO_REPLY");
-        assert_eq!(quiet.trailing_discard(), None);
-        log_trailing_discard(&quiet, ctx()); // 出さない（パニックしないこと）。
-                                             // 後続非空は破棄対象。
-        let noisy = terminate_at_no_reply("本文 NO_REPLY ゴミ");
-        assert_eq!(noisy.trailing_discard(), Some("NO_REPLY ゴミ"));
-        log_trailing_discard(&noisy, ctx()); // WARN を出す（パニックしないこと）。
+    fn final_line_marker_has_no_trailing_discard() {
+        let termination = terminate_at_no_reply("本文だけ話す\nNO_REPLY");
+        assert!(termination.terminated());
+        assert_eq!(termination.trailing_discard(), None);
+        log_trailing_discard(&termination, ctx());
     }
 }

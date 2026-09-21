@@ -66,21 +66,23 @@ async fn explicit_no_reply_termination_is_persisted_as_control_history() {
 /// | (a) `NO_REPLY` のみ | 0 件                | 0（NO_REPLY 行を残さない）| NO_REPLY 無し      |
 /// | (b) 本文+`NO_REPLY` | 1 件・本文のみ      | 1（本文のみ・NO_REPLY 無）| 本文のみ           |
 /// | (c) 対照: 通常応答  | 1 件                | 1                        | 通常応答           |
+/// | (d) 途中行のマーカー | 1 件・全文           | 1（全文）                | 全文               |
 ///
-/// (a)(b) が現 tip で赤（生応答が返却・保存される）。
+/// (a)(b) は終端を、(d) は最終独立行以外を通常本文として保持する契約を固定する。
 #[tokio::test]
 async fn test_no_reply_only_is_not_persisted_rest_899() {
     const BODY_B: &str = "NR899B-本文だけ残る";
     const CTRL_C: &str = "NR899C-通常応答";
+    const BODY_D: &str = "NO_REPLY\n破棄しない本文";
     const USER: &str = "u899";
 
     let (app, db, mock) = create_test_app_with_llm();
     let (agent_id, app) = create_test_agent(app).await;
 
-    // FIFO: (a) 単独NO_REPLY → (b) 本文+NO_REPLY → (d) 終端後の破棄対象 → (c) 対照。
+    // FIFO: (a) 単独NO_REPLY → (b) 本文+最終行NO_REPLY → (d) 途中行NO_REPLY → (c) 対照。
     mock.push_text_response("NO_REPLY");
     mock.push_text_response(&format!("{BODY_B}\nNO_REPLY"));
-    mock.push_text_response("NO_REPLY\n破棄対象");
+    mock.push_text_response(&format!("{BODY_D}\nNO_REPLY"));
     mock.push_text_response(&format!("{CTRL_C}\nNO_REPLY"));
 
     // (a) 単独 NO_REPLY: responses 0 件（§13 #11 / ターン合計 noreply）。
@@ -109,14 +111,10 @@ async fn test_no_reply_only_is_not_persisted_rest_899() {
         resp_b
     );
 
-    // (d) 終端後に文字列があっても沈黙し、responsesは空。
+    // (d) 最終行でない NO_REPLY は通常本文として全文を返す。
     let (app, resp_d, _) = agent_message(app, &agent_id, USER, "問い d").await;
-    assert_eq!(
-        resp_d.len(),
-        0,
-        "(d) 終端後の文字列を破棄して沈黙にならない: {:?}",
-        resp_d
-    );
+    assert_eq!(resp_d.len(), 1, "(d) responses が 1 件でない: {resp_d:?}");
+    assert_eq!(resp_d[0]["content"].as_str().unwrap(), BODY_D);
 
     // (c) 対照: responses 1 件・そのまま。
     let (_app, resp_c, _) = agent_message(app, &agent_id, USER, "問い c").await;
@@ -135,14 +133,14 @@ async fn test_no_reply_only_is_not_persisted_rest_899() {
             .map(|l| l.content)
             .collect()
     };
+    assert!(
+        agent_speech.iter().all(|c| c.trim() != "NO_REPLY"),
+        "(a) 単独 NO_REPLY が speech として保存された: {agent_speech:?}"
+    );
     assert_eq!(
-        agent_speech
-            .iter()
-            .filter(|c| c.contains("NO_REPLY"))
-            .count(),
-        0,
-        "NO_REPLY を含む agent speech 行が残っている（#899）: {:?}",
-        agent_speech
+        agent_speech.iter().filter(|c| c.as_str() == BODY_D).count(),
+        1,
+        "(d) 途中行 NO_REPLY を含む全文が保存されていない: {agent_speech:?}"
     );
     let b_rows: Vec<&String> = agent_speech.iter().filter(|c| c.contains(BODY_B)).collect();
     assert_eq!(
