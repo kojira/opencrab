@@ -243,11 +243,10 @@ async fn subtask_settled_during_active_parent_flags_only_the_final_report() {
 }
 
 // ---------------------------------------------------------------------------
-// #915 / §13.3.1【別 session の subtask 進行中 → 本ターンの投稿に 🏁 0（エージェント単位 idle）】:
-// チャンネル A（session A）で subtask を起こし**保留**（決着させない）。その状態でチャンネル B
-// （session B）へ通常メッセージを送り say を投稿。エージェントに未決着 subtask があるので B の say は
-// idle でない＝🏁 0。現 tip は say 配送ごと（session を見ない）に 🏁 → B の say に付く → **赤**。
-// §13.3.1 案E（agent 単位）確定・§13.3.5 は agent-scope 集計を要ビルド検証と明記。
+// 別 parent session の subtask は本ターンの完了を抑止しない:
+// チャンネル A（session A）で subtask を起こし**保留**（決着させない）。その状態で同じ agent の
+// チャンネル B（session B）へ通常メッセージを送り say を投稿。B の parent session 自体は idle なので、
+// B の say には 🏁 1。agent 全体の走行中判定を使うと B の 🏁 が消えるため赤になる。
 // 専用チャンネル 602（spawner）/603（plain）で他テストと分離。
 // ---------------------------------------------------------------------------
 const CHANNEL_XA: &str = "602";
@@ -296,7 +295,7 @@ impl LlmProvider for ShellSleepCrossMock {
 }
 
 #[tokio::test]
-async fn scenario_915_other_session_subtask_in_progress_no_flag() {
+async fn other_parent_session_subtask_does_not_suppress_completed_flag() {
     let buf = install_capture();
     let mock = Arc::new(ShellSleepCrossMock {
         emitted: std::sync::atomic::AtomicBool::new(false),
@@ -342,9 +341,8 @@ async fn scenario_915_other_session_subtask_in_progress_no_flag() {
         .await
     };
     assert!(b_ready, "B の通常 say が出ない: {:?}", captured(&buf));
-    // false-red 防止（統括指摘）: B の 🏁 判定は B の activity ended（B の say 直後）で行われる。
-    // その時点で A の subtask（sleep 8）が走行中であることを明示確認する。走行中でなければ sleep 窓を
-    // 過ぎており、B が正しく 🏁 を得た（＝テスト前提崩れ）ので、assert ではなくこの確認で弾く。
+    // false-green 防止: B の activity ended 判定時点でも、同じ agent の別 parent session A には
+    // subtask が走行中であることを明示確認する。
     assert!(
         core.state
             .subtask_registries
@@ -368,15 +366,13 @@ async fn scenario_915_other_session_subtask_in_progress_no_flag() {
         })
         .count();
 
-    // エージェントに未決着 subtask（session A）があるので、B の say には 🏁 を付けない（§13.3.1 案E）。
-    // 現 tip は say 配送ごとに付ける（session を見ない）ため B に付く → 赤。
     assert_eq!(
         completed_on_b,
-        0,
-        "🏁 が別 session の subtask 進行中に B の say へ誤付与（agent 単位 idle・§13.3.1）: {:?}",
+        1,
+        "別 parent session A の subtask が B の completed target を抑止した: {:?}",
         captured(&buf)
     );
-    // sleep 3 は自然終了するので後片付け不要（B の判定はその窓の中で確定済み）。
+    // sleep は自然終了するので後片付け不要（B の判定はその窓の中で確定済み）。
 }
 
 // ---------------------------------------------------------------------------

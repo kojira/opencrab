@@ -24,6 +24,7 @@ const CH_HB1: &str = "610";
 const CH_HB2: &str = "611";
 const CH_HB3: &str = "612";
 const CH_HB4: &str = "613";
+const CH_HB5: &str = "614";
 
 const M_HB1: &str = "HBONEMARK";
 const HB1_B1: &str = "hb1-巡回して見つけたこと その1（heartbeat 途中発話）";
@@ -34,6 +35,8 @@ const HB3_DECL: &str = "hb3-調べるね（heartbeat 宣言・execute_shell と�
 const HB3_REPORT: &str = "hb3-終わったよ（resume 完了報告）";
 const HB3_ECHO: &str = "hb3-echo-即時stdout";
 const HB4_FABRICATED: &str = "hb4-未接続なのに投稿された（捏造検知用・出たら不具合）";
+const M_HB5: &str = "HBFIVEMARK";
+const HB5_REPORT: &str = "hb5-別セッション作業中でも完了";
 
 /// agent 単位の heartbeat 指示文を設定する（`resolve_heartbeat_instructions` の "agent" ソース）。
 /// これが `run_one_heartbeat` の system プロンプトへ載り、mock が heartbeat 起点のターンを識別する。
@@ -524,6 +527,104 @@ async fn heartbeat_h3_declaration_then_subtask_then_report() {
         "🏁 が heartbeat 完了報告 say に 1 件で付かない: {:?}",
         captured(&buf)
     );
+}
+
+// ---------------------------------------------------------------------------
+// H5: said-less heartbeat の parent session と無関係な同一 agent の subtask は、heartbeat 投稿の
+// completed target を抑止しない。同一 parent session の抑止は H3 の宣言 🏁 0 が固定する。
+// ---------------------------------------------------------------------------
+struct HbCrossSessionMock;
+
+#[async_trait::async_trait]
+impl LlmProvider for HbCrossSessionMock {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn sends_max_output_tokens(&self) -> bool {
+        false
+    }
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        assert!(request_text(&request).contains(M_HB5));
+        Ok(text_response(&format!("{HB5_REPORT}\nNO_REPLY")))
+    }
+}
+
+#[tokio::test]
+async fn heartbeat_other_parent_subtask_does_not_suppress_completed_flag() {
+    let buf = install_capture();
+    let core = start_core(Arc::new(HbCrossSessionMock) as Arc<dyn LlmProvider>).await;
+
+    let fixture = Fixture::new();
+    let (_client, binding_id) = wire_hb(&core, &fixture, CH_HB5).await;
+    let session_id = format!("extgate-{binding_id}");
+    set_hb_instructions(&core, &format!("{M_HB5} 完了報告を投稿して"));
+    seed_hb_config(&core, &session_id);
+
+    let other_parent_session = "extgate-other-parent";
+    let pending = tokio::spawn(std::future::pending::<()>());
+    core.state
+        .subtask_registries
+        .registry_for(other_parent_session)
+        .insert(
+            "hb5-other-subtask".to_string(),
+            opencrab_actions::subtask::SpawnedSubtask {
+                abort_handle: pending.abort_handle(),
+                session_id: "subtask-hb5-other".to_string(),
+                parent_session_id: other_parent_session.to_string(),
+                agent_id: AGENT_ID.to_string(),
+                label: "unrelated work".to_string(),
+                tool_name: "spawn_subtask".to_string(),
+                started_at: std::time::Instant::now(),
+                reply_target: None,
+                caller: opencrab_actions::CallerIdentity::Owner,
+                lifecycle: opencrab_actions::SubtaskLifecycle::new(),
+                steerable: false,
+            },
+        );
+    assert!(
+        core.state
+            .subtask_registries
+            .has_running(other_parent_session)
+    );
+    assert!(
+        !core.state.subtask_registries.has_running(&session_id),
+        "heartbeat の parent session 自体は idle であること"
+    );
+
+    fire_heartbeat_via_scheduler_seam(&core, &session_id).await;
+
+    let completed = {
+        let buf = buf.clone();
+        wait_until(move || {
+            let caps = captured(&buf);
+            let Some(report) = caps.iter().find(|c| {
+                c.kind == "say" && c.channel == CH_HB5 && c.body.contains(HB5_REPORT)
+            }) else {
+                return false;
+            };
+            caps.iter().any(|c| {
+                c.kind == "system_reaction"
+                    && c.emoji.contains(SYS_COMPLETED)
+                    && c.message == report.message
+            })
+        })
+        .await
+    };
+    assert!(
+        completed,
+        "別 parent session の subtask が said-less heartbeat の completed target を抑止した: {:?}",
+        captured(&buf)
+    );
+    assert!(
+        core.state
+            .subtask_registries
+            .has_running(other_parent_session),
+        "completed 判定時にも別 parent session の subtask が走行中であること"
+    );
+    pending.abort();
 }
 
 // ---------------------------------------------------------------------------
