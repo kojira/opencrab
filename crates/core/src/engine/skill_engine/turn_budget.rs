@@ -198,6 +198,57 @@ pub(super) fn append_or_create_bounded_history_block(
     Ok(true)
 }
 
+pub(super) fn append_assistant_history(
+    messages: &mut [Message],
+    ledger: &mut crate::context_budget::TokenLedger,
+    assistant_name: Option<&str>,
+    speech: &str,
+) -> Result<bool> {
+    let Some(name) = assistant_name else {
+        return Ok(false);
+    };
+    let created_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let rendered = crate::conversation::format_speech_entry(name, Some(&created_at), speech);
+    append_or_create_bounded_history_block(messages, ledger, &rendered)
+}
+
+/// Move delivered speech off a native tool-call message and into the canonical history.
+pub(super) fn move_assistant(
+    messages: &mut [Message],
+    ledger: &mut crate::context_budget::TokenLedger,
+    assistant_name: Option<&str>,
+    speech: &str,
+    assistant_message_index: usize,
+    assistant_ledger_key: &str,
+) -> Result<()> {
+    if append_assistant_history(messages, ledger, assistant_name, speech)? {
+        messages[assistant_message_index].content = None;
+        ledger.remove_key(assistant_ledger_key);
+    }
+    Ok(())
+}
+
+/// Seat visible speech in the canonical boundary, falling back to a provider assistant message.
+pub(super) fn seat_assistant(
+    messages: &mut Vec<Message>,
+    ledger: &mut crate::context_budget::TokenLedger,
+    assistant_name: Option<&str>,
+    speech: &str,
+) -> Result<()> {
+    if !append_assistant_history(messages, ledger, assistant_name, speech)? {
+        messages.push(Message {
+            role: Role::Assistant,
+            content: Some(MessageContent::Text(speech.to_string())),
+            name: None,
+            function_call: None,
+            tool_calls: None,
+            tool_call_id: None,
+        });
+        ledger.record(format!("asst:{}", messages.len()), speech);
+    }
+    Ok(())
+}
+
 pub(super) fn user_line_items(messages: &[Message]) -> Vec<crate::context_budget::CompactItem> {
     use crate::context_budget::{CompactItem, CompactLane, TokenLedger};
     let Some(user) = messages.get(1) else {
