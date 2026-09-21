@@ -124,9 +124,8 @@ struct DiscardVisitor {
 
 impl DiscardVisitor {
     fn set(&mut self, name: &str, value: String) {
-        match name {
-            "discarded" => self.discarded = Some(value),
-            _ => {}
+        if name == "discarded" {
+            self.discarded = Some(value);
         }
     }
 }
