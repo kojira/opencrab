@@ -255,16 +255,25 @@ fn hello_with_operations_optional() {
     assert_eq!(withops["operations"], ops);
 }
 
-// RED scaffold: keep the missing command constructor test at assertion level. Replace this
-// test-only stand-in with the production wire constructor when the vertical slice is implemented.
-fn command_frame_under_test(
-    _id: &str,
-    _binding_id: &str,
-    _caller: &SaidCaller,
-    _name: &str,
-    _args: &Value,
-) -> Value {
-    json!({"m": "command"})
+#[test]
+fn command_replies_preserve_result_and_old_core_unknown_message() {
+    match parse_frame_bytes(br#"{"m":"ok","id":"cmd-1","result":{"models":[]}}"#).unwrap() {
+        CoreMsg::Response(response) => {
+            assert!(response.ok);
+            assert_eq!(response.result, Some(json!({"models": []})));
+        }
+        other => panic!("{other:?}"),
+    }
+    match parse_frame_bytes(br#"{"m":"err","id":"cmd-2","code":"unknown_message","detail":null}"#)
+        .unwrap()
+    {
+        CoreMsg::Response(response) => {
+            assert!(!response.ok);
+            assert_eq!(response.code.as_deref(), Some("unknown_message"));
+            assert_eq!(response.message, None);
+        }
+        other => panic!("{other:?}"),
+    }
 }
 
 #[test]
@@ -279,7 +288,7 @@ fn command_frame_round_trips_all_contract_fields() {
         "args": {"model": "openai:gpt-5"},
     });
 
-    let outbound = command_frame_under_test(
+    let outbound = command_frame(
         "cmd-set-1",
         binding_id,
         &SaidCaller::Owner,

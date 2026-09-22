@@ -1,26 +1,8 @@
-use serde_json::{json, Value};
+use serde_json::json;
 
-#[derive(Debug, PartialEq, Eq)]
-enum InteractionAction {
-    Command { name: String, args: Value },
-    Said,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct AutocompleteChoice {
-    name: String,
-    value: String,
-}
-
-// RED scaffolds: these pure stand-ins keep the tests offline and assertion-level until the
-// Discord interaction mapper and local autocomplete filter are implemented in production.
-fn map_model_submission(_subcommand: &str, _model: Option<&str>) -> Option<InteractionAction> {
-    None
-}
-
-fn autocomplete_choices(_models: &[String], _query: &str) -> Vec<AutocompleteChoice> {
-    Vec::new()
-}
+use crate::model::{
+    autocomplete_choices, map_model_submission, AutocompleteChoice, InteractionAction,
+};
 
 #[test]
 fn model_interaction_maps_to_command_and_never_to_said() {

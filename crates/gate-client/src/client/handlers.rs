@@ -287,6 +287,21 @@ async fn handle_turn_failed(client: &InstanceClient, tf: TurnFailed) {
 
 async fn handle_response(client: &InstanceClient, resp: WireResponse, generation: u64) {
     let mut inner = client.inner.lock().await;
+    if let Some(pending) = inner.pending_commands.remove(&resp.id) {
+        let outcome = if resp.ok {
+            resp.result.ok_or(CommandError::Disconnected)
+        } else {
+            Err(CommandError::Rejected {
+                code: resp.code.unwrap_or_else(|| "bad_request".to_string()),
+                message: resp.message.or(resp.detail),
+            })
+        };
+        let _ = pending.reply.send(outcome);
+        return;
+    }
+    if inner.expired_commands.remove(&resp.id) {
+        return;
+    }
     let Some(pending) = inner.pending_said.remove(&resp.id) else {
         drop(inner);
         close_all(client, "response_invalid", generation).await;
@@ -342,6 +357,10 @@ async fn close_all(client: &InstanceClient, code: &str, generation: u64) {
     for (_, pending) in inner.pending_said.drain() {
         let _ = pending.reply.send(SaidOutcome::Disconnected);
     }
+    for (_, pending) in inner.pending_commands.drain() {
+        let _ = pending.reply.send(Err(CommandError::Disconnected));
+    }
+    inner.expired_commands.clear();
     inner.pending_turn.clear();
     let ev = LiveEvent::Error {
         code: code.to_string(),

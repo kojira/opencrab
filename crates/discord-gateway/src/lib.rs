@@ -13,6 +13,7 @@ pub mod attachment;
 pub mod config;
 pub mod harness;
 pub mod map;
+pub mod model;
 pub mod ops;
 pub mod post;
 pub mod receive;

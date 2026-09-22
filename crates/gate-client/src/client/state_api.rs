@@ -111,6 +111,17 @@ pub enum CreateBindingError {
     Disconnected,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandError {
+    NotReady,
+    Rejected {
+        code: String,
+        message: Option<String>,
+    },
+    Timeout,
+    Disconnected,
+}
+
 /// core からの `say` をどう扱うか。外部出力をlive queueへ受理するか拒否する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SayPolicy {
@@ -127,6 +138,10 @@ enum PendingKind {
 struct PendingSaid {
     kind: PendingKind,
     reply: oneshot::Sender<SaidOutcome>,
+}
+
+struct PendingCommand {
+    reply: oneshot::Sender<Result<Value, CommandError>>,
 }
 
 /// 進行中ターンの返信先追跡。即時 said（`occupy_until_turn_ends`）が origin を刻む。
@@ -191,6 +206,8 @@ struct Inner {
     acknowledged: HashMap<String, String>,
     remembered: HashMap<String, String>,
     pending_said: HashMap<String, PendingSaid>,
+    pending_commands: HashMap<String, PendingCommand>,
+    expired_commands: HashSet<String>,
     pending_turn: HashMap<String, PendingTurn>,
     live: HashMap<String, LiveQueue>,
     closed: bool,
@@ -231,6 +248,8 @@ impl InstanceClient {
                 acknowledged: HashMap::new(),
                 remembered: HashMap::new(),
                 pending_said: HashMap::new(),
+                pending_commands: HashMap::new(),
+                expired_commands: HashSet::new(),
                 pending_turn: HashMap::new(),
                 live: HashMap::new(),
                 closed: true,
@@ -400,6 +419,62 @@ impl InstanceClient {
                 Err(CreateBindingError::Disconnected)
             }
             Ok(Ok(SaidOutcome::NotAdmitted)) => Err(CreateBindingError::Disconnected),
+        }
+    }
+
+    /// Send one generic command over the current connection. The caller owns the timeout; timed
+    /// out correlations are removed and a late response is ignored.
+    pub async fn command(
+        &self,
+        address: &str,
+        caller: &SaidCaller,
+        name: &str,
+        args: &Value,
+        timeout: Duration,
+    ) -> Result<Value, CommandError> {
+        if !args.is_object() {
+            return Err(CommandError::Rejected {
+                code: "invalid_args".to_string(),
+                message: Some("Invalid command arguments.".to_string()),
+            });
+        }
+        let binding_id = {
+            let inner = self.inner.lock().await;
+            if inner.closed {
+                return Err(CommandError::NotReady);
+            }
+            inner
+                .acknowledged
+                .get(address)
+                .cloned()
+                .ok_or(CommandError::NotReady)?
+        };
+        let id = format!("command:{}", self.req_seq.fetch_add(1, Ordering::Relaxed));
+        let (tx, rx) = oneshot::channel();
+        self.inner
+            .lock()
+            .await
+            .pending_commands
+            .insert(id.clone(), PendingCommand { reply: tx });
+        if !send_frame(
+            self,
+            command_frame(&id, &binding_id, caller, name, args),
+        )
+        .await
+        {
+            self.inner.lock().await.pending_commands.remove(&id);
+            return Err(CommandError::Disconnected);
+        }
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(_)) => Err(CommandError::Disconnected),
+            Err(_) => {
+                let mut inner = self.inner.lock().await;
+                if inner.pending_commands.remove(&id).is_some() {
+                    inner.expired_commands.insert(id);
+                }
+                Err(CommandError::Timeout)
+            }
         }
     }
 

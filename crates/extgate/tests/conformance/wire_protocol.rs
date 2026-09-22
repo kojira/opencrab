@@ -419,6 +419,78 @@ async fn coagent_model_command_is_forbidden_before_handler_invocation() {
 }
 
 #[tokio::test]
+async fn owner_model_commands_dispatch_and_correlate_results() {
+    let h = Harness::start().await;
+    let (mut stream, _, binding_id) = ready_pair(&h).await;
+
+    for (id, name, args) in [
+        ("cmd-list", "list_models", json!({})),
+        ("cmd-set", "set_model", json!({"model": "gpt-5"})),
+        ("cmd-reset", "reset_model", json!({})),
+    ] {
+        write_frame(
+            &mut stream,
+            &json!({
+                "m": "command",
+                "id": id,
+                "binding_id": binding_id,
+                "caller": {"role": "owner"},
+                "name": name,
+                "args": args,
+            }),
+        )
+        .await;
+        let response = read_frame(&mut stream).await;
+        assert_eq!(response["id"], id);
+        assert_eq!(response["m"], "ok");
+        assert!(response.get("result").is_some());
+    }
+
+    let persisted: Option<String> = h
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT model FROM agents WHERE agent_id = 'agent-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(persisted, None);
+}
+
+#[tokio::test]
+async fn every_non_owner_model_caller_is_forbidden() {
+    let h = Harness::start().await;
+    let (mut stream, _, binding_id) = ready_pair(&h).await;
+    let callers = [
+        json!({"role": "co_agent", "agent_id": "agent-b"}),
+        json!({"role": "trusted_user"}),
+        json!({"role": "agent"}),
+    ];
+    for (index, caller) in callers.into_iter().enumerate() {
+        let id = format!("cmd-forbidden-{index}");
+        write_frame(
+            &mut stream,
+            &json!({
+                "m": "command",
+                "id": id,
+                "binding_id": binding_id,
+                "caller": caller,
+                "name": "list_models",
+                "args": {},
+            }),
+        )
+        .await;
+        let response = read_frame(&mut stream).await;
+        assert_eq!(response["id"], id);
+        assert_eq!(response["code"], "forbidden");
+        assert_eq!(response["message"], "Only an owner may use model commands.");
+    }
+}
+
+#[tokio::test]
 async fn running_reverse_and_unknown_without_id_keep() {
     let h = Harness::start().await;
     let (mut s, _, binding_id) = ready_pair(&h).await;

@@ -13,6 +13,7 @@ use tokio::net::unix::OwnedWriteHalf;
 use tokio::sync::oneshot;
 
 use crate::bearer::OperatorToken;
+use crate::commands::CommandRegistry;
 use crate::error::{ErrorCode, GateError};
 use crate::operations::GatewayOperationDeclaration;
 use crate::turn_queue::SessionTurnQueues;
@@ -203,6 +204,7 @@ pub struct ExtgateState {
     attachment_inbox_root: Mutex<Option<PathBuf>>,
     reserved_tool_name: Mutex<Option<ReservedToolNameFn>>,
     pub turn_queues: Arc<SessionTurnQueues>,
+    pub commands: CommandRegistry,
     /// #930/#933: 走行中ターンへ畳み込んで LLM に渡した said の **external_origins.seq の集合**を
     /// session ごとに記録する。record→enqueue で積まれた「その said 自身の独立ターン」が後で
     /// dequeue した際、`folded_seqs.contains(said.seq)` なら **独立ターンを起こさず skip**
@@ -229,6 +231,8 @@ impl ExtgateState {
             attachment_inbox_root: Mutex::new(None),
             reserved_tool_name: Mutex::new(None),
             turn_queues: Arc::new(SessionTurnQueues::new()),
+            commands: CommandRegistry::with_builtins()
+                .expect("built-in command names must be unique"),
             folded_seqs: Mutex::new(HashMap::new()),
             #[cfg(any(test, feature = "extgate-probe"))]
             probe: GateProbe::default(),

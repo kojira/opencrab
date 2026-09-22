@@ -11,6 +11,7 @@ pub mod llm_evaluation;
 pub mod llm_selection;
 pub mod memory_access;
 pub mod memory_units;
+pub mod model_admin;
 pub mod no_reply;
 pub mod search;
 pub mod session_runtime;
@@ -47,6 +48,7 @@ pub use bridge::{
 pub use channel_config::apply_channel_config;
 pub use continue_marker::visible_speech_after_markers;
 pub use dispatcher::ActionDispatcher;
+pub use model_admin::{ModelAdminError, ModelAdministration, ModelSnapshot};
 pub use no_reply::{
     terminate_at_no_reply, DeliveryContext, NoReplyTermination, NO_REPLY_LOG_TARGET,
     NO_REPLY_SENTINEL, NO_REPLY_TRAILING_DISCARDED_TAG,

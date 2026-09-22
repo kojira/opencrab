@@ -64,6 +64,14 @@ pub fn ok_said_frame(id: &str, seq: Option<i64>) -> Value {
     json!({"id": id, "m": "ok", "seq": seq})
 }
 
+pub fn command_ok_frame(id: &str, result: &Value) -> Value {
+    json!({"id": id, "m": "ok", "result": result})
+}
+
+pub fn command_err_frame(id: &str, code: &str, message: &str) -> Value {
+    json!({"id": id, "m": "err", "code": code, "message": message})
+}
+
 pub fn err_frame(id: &str, code: ErrorCode, detail: Option<&str>) -> Value {
     json!({
         "id": id,
@@ -216,6 +224,15 @@ pub struct CreateBinding {
 }
 
 #[derive(Debug, Clone)]
+pub struct Command {
+    pub id: String,
+    pub binding_id: String,
+    pub caller: SaidCaller,
+    pub name: String,
+    pub args: serde_json::Map<String, Value>,
+}
+
+#[derive(Debug, Clone)]
 pub struct Said {
     pub id: String,
     pub binding_id: String,
@@ -264,6 +281,7 @@ pub struct WireResponse {
 pub enum InboundMsg {
     Hello(Hello),
     CreateBinding(CreateBinding),
+    Command(Command),
     Said(Said),
     Response(WireResponse),
     Reverse {
@@ -346,6 +364,14 @@ pub fn parse_inbound(obj: &Value) -> Result<InboundMsg, GateError> {
                 m,
             }),
         },
+        "command" => match parse_command(obj) {
+            Ok(command) => Ok(InboundMsg::Command(command)),
+            Err(e) => Ok(InboundMsg::Invalid {
+                id: opt_id(obj),
+                code: e.code,
+                m,
+            }),
+        },
         "ok" | "err" => match parse_response(obj, &m) {
             Ok(resp) => Ok(InboundMsg::Response(resp)),
             Err(_) => Ok(InboundMsg::Invalid {
@@ -390,6 +416,28 @@ fn parse_create_binding(obj: &Value) -> Result<CreateBinding, GateError> {
         binding_id,
         address,
         session_theme,
+    })
+}
+
+fn parse_command(obj: &Value) -> Result<Command, GateError> {
+    let id = parse_request_id(&require_str(obj, "id")?)?;
+    let binding_id = parse_uuid(&require_str(obj, "binding_id")?)?;
+    if obj.get("caller").is_none() {
+        return Err(GateError::new(ErrorCode::BadRequest));
+    }
+    let caller = parse_said_caller(obj.get("caller"))?;
+    let name = nonempty_str(obj, "name")?;
+    let args = obj
+        .get("args")
+        .and_then(Value::as_object)
+        .cloned()
+        .ok_or_else(|| GateError::new(ErrorCode::BadRequest))?;
+    Ok(Command {
+        id,
+        binding_id,
+        caller,
+        name,
+        args,
     })
 }
 
