@@ -125,7 +125,7 @@ mod tests {
 
         // メソッド名まで広げて綴り変種を拾う（限界は上記 doc 参照）。
         let needle = "is_control";
-        let allowed: [std::path::PathBuf; 5] = [
+        let allowed: [std::path::PathBuf; 6] = [
             crates_dir.join("core").join("src").join("injection.rs"),
             crates_dir
                 .join("db")
@@ -139,6 +139,11 @@ mod tests {
                 .join("discord-gateway")
                 .join("src")
                 .join("attachment.rs"),
+            // Discord Markdown response escaping, not prompt-field sanitization.
+            crates_dir
+                .join("discord-gateway")
+                .join("src")
+                .join("model.rs"),
             // Terminal control-character escaping for REPL rendering, not prompt sanitization.
             crates_dir.join("cli-gateway").join("src").join("repl.rs"),
         ];
