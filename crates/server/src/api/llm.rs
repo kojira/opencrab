@@ -110,16 +110,86 @@ mod slash_model_resolution_contract {
         values.iter().map(|value| (*value).to_string()).collect()
     }
 
-    #[tokio::test]
-    async fn provider_failure_makes_the_shared_catalog_fallible() {
+    fn state_with_failing_catalog(configured_model: Option<&str>) -> crate::AppState {
         let state = crate::test_app_state();
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::upsert_agent(
+                &conn,
+                &opencrab_db::queries::AgentRow {
+                    agent_id: "agent-x".to_string(),
+                    name: "Agent X".to_string(),
+                    job_title: None,
+                    organization: None,
+                    image_url: None,
+                    persona_name: "Agent X".to_string(),
+                    personality: None,
+                    instructions: String::new(),
+                    heartbeat_instructions: String::new(),
+                    model: configured_model.map(str::to_string),
+                    reasoning_effort: None,
+                    web_search: None,
+                    metadata_json: None,
+                },
+            )
+            .unwrap();
+        }
         let mut router = opencrab_llm::router::LlmRouter::new();
         router.add_provider(Arc::new(FailingModelCatalog));
         state.llm_router.swap(router);
+        state
+    }
+
+    #[tokio::test]
+    async fn provider_failure_makes_the_shared_catalog_fallible() {
+        let state = state_with_failing_catalog(None);
 
         assert!(available_models(&state).await.is_err());
         assert_eq!(
             state.list_models("agent-x").await,
+            Err(ModelAdminError::Internal)
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_exact_set_succeeds_when_catalog_refresh_fails() {
+        let state = state_with_failing_catalog(Some("failing:model-x"));
+
+        let snapshot = state.set_model("agent-x", "failing:model-x").await.unwrap();
+
+        assert_eq!(snapshot.models, Vec::<String>::new());
+        assert_eq!(
+            snapshot.configured_model.as_deref(),
+            Some("failing:model-x")
+        );
+        assert_eq!(snapshot.current_model, "failing:model-x");
+    }
+
+    #[tokio::test]
+    async fn repeated_reset_succeeds_when_catalog_refresh_fails() {
+        let state = state_with_failing_catalog(None);
+
+        let snapshot = state.reset_model("agent-x").await.unwrap();
+
+        assert_eq!(snapshot.models, Vec::<String>::new());
+        assert_eq!(snapshot.configured_model, None);
+        assert_eq!(snapshot.current_model, state.default_model);
+    }
+
+    #[tokio::test]
+    async fn real_model_changes_still_fail_when_catalog_refresh_fails() {
+        let state = state_with_failing_catalog(Some("failing:model-x"));
+
+        assert_eq!(
+            state.set_model("agent-x", "failing:model-y").await,
+            Err(ModelAdminError::Internal)
+        );
+        assert_eq!(
+            state.set_model("agent-x", "model-x").await,
+            Err(ModelAdminError::Internal)
+        );
+        assert_eq!(
+            state.reset_model("agent-x").await,
             Err(ModelAdminError::Internal)
         );
     }

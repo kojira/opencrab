@@ -65,6 +65,26 @@ impl ModelAdministration for AppState {
         agent_id: &str,
         model: &str,
     ) -> Result<ModelSnapshot, ModelAdminError> {
+        let configured_model = {
+            let conn = self.db.lock().map_err(|_| ModelAdminError::Internal)?;
+            opencrab_db::queries::get_agent(&conn, agent_id)
+                .map_err(|_| ModelAdminError::Internal)?
+                .ok_or(ModelAdminError::Internal)?
+                .model
+        };
+        let exact_canonical_request = model.trim() == model
+            && model
+                .split_once(':')
+                .is_some_and(|(provider, model_id)| !provider.is_empty() && !model_id.is_empty());
+        if exact_canonical_request && configured_model.as_deref() == Some(model) {
+            return Ok(ModelSnapshot {
+                models: Vec::new(),
+                configured_model,
+                current_model: model.to_string(),
+                default_model: self.default_model.clone(),
+            });
+        }
+
         let models = crate::api::llm::available_models(self)
             .await
             .map_err(|_| ModelAdminError::Internal)?;
@@ -108,6 +128,23 @@ impl ModelAdministration for AppState {
     }
 
     async fn reset_model(&self, agent_id: &str) -> Result<ModelSnapshot, ModelAdminError> {
+        let already_reset = {
+            let conn = self.db.lock().map_err(|_| ModelAdminError::Internal)?;
+            opencrab_db::queries::get_agent(&conn, agent_id)
+                .map_err(|_| ModelAdminError::Internal)?
+                .ok_or(ModelAdminError::Internal)?
+                .model
+                .is_none()
+        };
+        if already_reset {
+            return Ok(ModelSnapshot {
+                models: Vec::new(),
+                configured_model: None,
+                current_model: self.default_model.clone(),
+                default_model: self.default_model.clone(),
+            });
+        }
+
         let models = crate::api::llm::available_models(self)
             .await
             .map_err(|_| ModelAdminError::Internal)?;
