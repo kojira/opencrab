@@ -380,6 +380,45 @@ async fn running_unknown_message_keeps_connection() {
 }
 
 #[tokio::test]
+async fn coagent_model_command_is_forbidden_before_handler_invocation() {
+    let h = Harness::start().await;
+    let (mut s, _, binding_id) = ready_pair(&h).await;
+
+    write_frame(
+        &mut s,
+        &json!({
+            "m": "command",
+            "id": "cmd-coagent-1",
+            "binding_id": binding_id,
+            "caller": {"role": "co_agent", "agent_id": "agent-b"},
+            "name": "set_model",
+            "args": {"model": "openai:gpt-5"}
+        }),
+    )
+    .await;
+    let response = read_frame(&mut s).await;
+
+    // The command authorization gate must run before any model handler side effect.
+    assert_eq!(h.runtime.turns.load(Ordering::SeqCst), 0);
+    let persisted_model: Option<String> = h
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT model FROM agents WHERE agent_id = 'agent-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(persisted_model, None);
+    assert_eq!(response["id"], "cmd-coagent-1");
+    assert_eq!(response["m"], "err");
+    assert_eq!(response["code"], "forbidden");
+    assert_eq!(response["message"], "Only an owner may use model commands.");
+}
+
+#[tokio::test]
 async fn running_reverse_and_unknown_without_id_keep() {
     let h = Harness::start().await;
     let (mut s, _, binding_id) = ready_pair(&h).await;

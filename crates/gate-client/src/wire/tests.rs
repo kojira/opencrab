@@ -254,3 +254,41 @@ fn hello_with_operations_optional() {
     let withops = hello_frame_with_operations("h", "iid", 1, &"a".repeat(64), Some(&ops));
     assert_eq!(withops["operations"], ops);
 }
+
+// RED scaffold: keep the missing command constructor test at assertion level. Replace this
+// test-only stand-in with the production wire constructor when the vertical slice is implemented.
+fn command_frame_under_test(
+    _id: &str,
+    _binding_id: &str,
+    _caller: &SaidCaller,
+    _name: &str,
+    _args: &Value,
+) -> Value {
+    json!({"m": "command"})
+}
+
+#[test]
+fn command_frame_round_trips_all_contract_fields() {
+    let binding_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let expected = json!({
+        "m": "command",
+        "id": "cmd-set-1",
+        "binding_id": binding_id,
+        "caller": {"role": "owner"},
+        "name": "set_model",
+        "args": {"model": "openai:gpt-5"},
+    });
+
+    let outbound = command_frame_under_test(
+        "cmd-set-1",
+        binding_id,
+        &SaidCaller::Owner,
+        "set_model",
+        &json!({"model": "openai:gpt-5"}),
+    );
+    let encoded = serde_json::to_vec(&outbound).expect("command frame serializes");
+    let round_tripped: Value =
+        serde_json::from_slice(&encoded).expect("serialized command frame parses");
+
+    assert_eq!(round_tripped, expected);
+}

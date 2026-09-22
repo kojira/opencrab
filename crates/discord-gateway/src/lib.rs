@@ -20,3 +20,6 @@ pub mod run;
 pub mod secret;
 pub mod transport;
 pub mod typing;
+
+#[cfg(test)]
+mod model_interaction_contract_tests;
