@@ -339,14 +339,12 @@ pub(super) fn enqueue_turn<R: AgentRuntime>(
                             reply_target.as_deref(),
                         )
                         .await;
-                        // §13.3.1 案E: 進行中判定は**エージェント単位**（別 session の未決着 subtask
-                        // も含む）。agent-scope は本 session の subtask も内包するので session-scope の
-                        // 上位互換。1 つでも走行中なら idle でない＝completed_target を送らない。
-                        let agent_has_running = runtime.has_running_subtask_for_agent(&agent_id);
+                        let parent_session_has_running =
+                            !runtime.subtask_registry_for(&session_id).is_empty();
                         // 選定規則（§13.3.5）は resume ターンと共通なので共有ヘルパへ集約（単一実装）。
                         let completed_target = crate::completion::select_completed_target(
                             engine_completion,
-                            agent_has_running,
+                            parent_session_has_running,
                             final_say_id,
                             last_continuation_say
                                 .lock()

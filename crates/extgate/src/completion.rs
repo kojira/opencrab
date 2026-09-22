@@ -26,18 +26,18 @@ pub const EXTGATE_SESSION_PREFIX: &str = "extgate-";
 /// - `engine_completion`: `(最終生成の最後の投稿系utterance-opのcall_id, stopped_by_limit,
 ///   最終生成が途中本文を配送したか, NO_REPLYで明示終了したか)`。engineを回さなかったターンは
 ///   `None`。
-/// - `agent_has_running`: 終了時点で進行中があれば付けない（idle でない・§13.3.1 案E）。
+/// - `parent_session_has_running`: 終了時点でこの parent session に進行中があれば付けない。
 ///   ターン中に開始した履歴だけでは抑止しない。終了前に全件決着していれば idle である。
 /// - `final_say_id`: 最終応答が say を配送したときのその delivery_id。
 /// - `last_continuation_say`: callback が最終生成の本文を配送したとき、そのsayの
 ///   delivery_id。field名は互換のため維持する。
 pub(crate) fn select_completed_target(
     engine_completion: Option<(Option<String>, bool, bool, bool)>,
-    agent_has_running: bool,
+    parent_session_has_running: bool,
     final_say_id: Option<String>,
     last_continuation_say: Option<String>,
 ) -> Option<String> {
-    if agent_has_running {
+    if parent_session_has_running {
         return None;
     }
     engine_completion.and_then(
@@ -352,11 +352,13 @@ pub(crate) async fn run_v3_said_less_turn<R: AgentRuntime>(
                 reply_target.as_deref(),
             )
             .await;
-            // §13.3.1 案E: 進行中判定は agent 単位（別 session の未決着 subtask も含む）。
-            let agent_has_running = sink.runtime.has_running_subtask_for_agent(&sink.agent_id);
+            let parent_session_has_running = !sink
+                .runtime
+                .subtask_registry_for(&sink.session_id)
+                .is_empty();
             let completed_target = select_completed_target(
                 engine_completion,
-                agent_has_running,
+                parent_session_has_running,
                 final_say_id,
                 last_continuation_say
                     .lock()
