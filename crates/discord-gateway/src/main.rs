@@ -43,17 +43,19 @@ async fn run() -> anyhow::Result<()> {
         anyhow::bail!("DISCORD_BOT_TOKEN が未設定（production は token 必須・dry-run 以外）");
     }
 
-    for inst in &place.instances {
-        let bytes = decode_config_b64(&inst.config_b64)?;
-        spawn_instance(
-            socket.clone(),
-            inst,
-            &bytes,
-            token.clone(),
-            overrides.clone(),
-            attachment_spool_root.clone(),
-        )?;
-    }
+    let inst = place
+        .instances
+        .first()
+        .context("validated placement has no instance")?;
+    let bytes = decode_config_b64(&inst.config_b64)?;
+    spawn_instance(
+        socket,
+        inst,
+        &bytes,
+        token,
+        overrides,
+        attachment_spool_root,
+    )?;
 
     tracing::info!("discord-gateway running");
     std::future::pending::<()>().await;

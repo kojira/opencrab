@@ -40,7 +40,9 @@ fn resolve_runtime_envelope(
 #[async_trait]
 impl ModelAdministration for AppState {
     async fn list_models(&self, agent_id: &str) -> Result<ModelSnapshot, ModelAdminError> {
-        let models = crate::api::llm::available_models(self).await;
+        let models = crate::api::llm::available_models(self)
+            .await
+            .map_err(|_| ModelAdminError::Internal)?;
         let conn = self.db.lock().map_err(|_| ModelAdminError::Internal)?;
         let agent = opencrab_db::queries::get_agent(&conn, agent_id)
             .map_err(|_| ModelAdminError::Internal)?
@@ -63,7 +65,9 @@ impl ModelAdministration for AppState {
         agent_id: &str,
         model: &str,
     ) -> Result<ModelSnapshot, ModelAdminError> {
-        let models = crate::api::llm::available_models(self).await;
+        let models = crate::api::llm::available_models(self)
+            .await
+            .map_err(|_| ModelAdminError::Internal)?;
         let canonical =
             crate::api::llm::resolve_exact_model(&models, model).map_err(|error| match error {
                 crate::api::llm::ModelResolutionError::InvalidArgs => ModelAdminError::InvalidArgs,
@@ -104,7 +108,9 @@ impl ModelAdministration for AppState {
     }
 
     async fn reset_model(&self, agent_id: &str) -> Result<ModelSnapshot, ModelAdminError> {
-        let models = crate::api::llm::available_models(self).await;
+        let models = crate::api::llm::available_models(self)
+            .await
+            .map_err(|_| ModelAdminError::Internal)?;
         let conn = self.db.lock().map_err(|_| ModelAdminError::Internal)?;
         let existing = opencrab_db::queries::get_agent(&conn, agent_id)
             .map_err(|_| ModelAdminError::Internal)?

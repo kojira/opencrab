@@ -422,10 +422,11 @@ fn parse_create_binding(obj: &Value) -> Result<CreateBinding, GateError> {
 fn parse_command(obj: &Value) -> Result<Command, GateError> {
     let id = parse_request_id(&require_str(obj, "id")?)?;
     let binding_id = parse_uuid(&require_str(obj, "binding_id")?)?;
-    if obj.get("caller").is_none() {
-        return Err(GateError::new(ErrorCode::BadRequest));
-    }
-    let caller = parse_said_caller(obj.get("caller"))?;
+    let caller_value = obj
+        .get("caller")
+        .filter(|value| value.is_object())
+        .ok_or_else(|| GateError::new(ErrorCode::BadRequest))?;
+    let caller = parse_said_caller(Some(caller_value))?;
     let name = nonempty_str(obj, "name")?;
     let args = obj
         .get("args")
@@ -734,6 +735,32 @@ mod activity_tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn command_requires_an_object_caller() {
+        for caller in [
+            serde_json::Value::Null,
+            serde_json::json!("owner"),
+            serde_json::json!(true),
+            serde_json::json!([]),
+        ] {
+            let frame = serde_json::json!({
+                "id": "command-1",
+                "m": "command",
+                "binding_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "caller": caller,
+                "name": "list_models",
+                "args": {}
+            });
+            assert!(matches!(
+                parse_inbound(&frame).unwrap(),
+                InboundMsg::Invalid {
+                    code: ErrorCode::BadRequest,
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]

@@ -237,10 +237,16 @@ pub(crate) fn format_model_list(result: &ModelListResult) -> String {
 fn escape_inline(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
-        if matches!(character, '\\' | '`') {
-            escaped.push('\\');
+        match character {
+            '\r' => escaped.push_str("\\r"),
+            '\n' => escaped.push_str("\\n"),
+            character if character.is_control() => escaped.push('�'),
+            '\\' | '`' => {
+                escaped.push('\\');
+                escaped.push(character);
+            }
+            character => escaped.push(character),
         }
-        escaped.push(character);
     }
     escaped
 }
@@ -315,6 +321,23 @@ mod tests {
             ),
             "This server does not support /model yet (unknown_message)."
         );
+    }
+
+    #[test]
+    fn dynamic_model_ids_cannot_break_out_of_inline_code() {
+        let result = ModelListResult {
+            models: vec!["provider:safe`\n# [forged](https://example.invalid)".to_string()],
+            configured_model: None,
+            current_model: "provider:current\r\n> forged".to_string(),
+            default_model: "provider:default".to_string(),
+        };
+
+        let text = format_model_list(&result);
+
+        assert!(text.contains("`provider:safe\\`\\n# [forged](https://example.invalid)`"));
+        assert!(text.contains("Current: `provider:current\\r\\n> forged`"));
+        assert!(!text.contains("\n# [forged]"));
+        assert!(!text.contains("\n> forged"));
     }
 
     #[test]
