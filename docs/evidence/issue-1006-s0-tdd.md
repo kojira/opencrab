@@ -1,0 +1,94 @@
+# Issue #1006 S0 audit hardening — TDD evidence
+
+Base under test: `d1ba0c3be4aed72508408b46dbc4e9228e14e679`.
+Scope: S0 static boundary guards only; no S1/runtime behavior and no stash use.
+
+## Assertion-level RED
+
+Command (tests were added before changing the detector):
+
+```text
+python3 -m unittest scripts.tests.test_gateway_boundary_audit -v
+```
+
+Captured result: **26 tests; 19 failures and 1 error**. Each missing seam failed by its own assertion:
+
+- dependency direction/metadata: `test_reverse_normal_concrete_gateway_dependency_is_rejected`, `test_reverse_build_concrete_gateway_dependency_is_rejected`, `test_cargo_metadata_allows_reviewed_server_dev_qc_edge`, `test_cargo_metadata_rejects_server_gateway_normal_edge`, and `test_cargo_metadata_rejects_server_gateway_build_edge`;
+- identifier inventory: `test_schema_identifier_mutation_is_rejected`, `test_platform_dto_field_mutation_is_rejected`, `test_concrete_route_mutation_is_rejected`, `test_gateway_kind_branch_mutation_is_rejected`, `test_operation_name_branch_mutation_is_rejected`, `test_session_watch_singular_query_symbol_is_rejected`, and `test_session_watches_plural_camel_symbol_is_rejected`;
+- core SQLite/store provenance: `test_gateway_core_path_acceptance_is_rejected`, `test_direct_aliased_sqlite_open_is_inventoried`, `test_helper_mediated_core_store_open_is_rejected`, and `test_gateway_owned_store_open_is_explicit_inventory_not_silent`;
+- public reachability: `test_public_reachability_rejects_renamed_admin_factory`, `test_public_reachability_rejects_direct_six_operation_registration`, and `test_public_reachability_rejects_public_merge`;
+- fail-closed inventory: `test_unclassified_and_stale_burn_down_entries_fail_closed` could not obtain the newly required singular finding.
+
+Representative exact failures were `AssertionError: 'platform-production-gateway-dependency' not found in set()`, `AssertionError: 'shared-platform-dto' not found in set()`, `AssertionError: 'gateway-db-open' not found in set()`, and `AssertionError: 'public-gate-admin-reachable' not found in set()`.
+
+Two negative controls initially used the new rule names and therefore did not expose the old detector's false positives. They were tightened to require zero findings, then replayed directly against the base detector from `git show d1ba0c3:scripts/gateway_boundary_audit.py`:
+
+```text
+old arbitrary-core-import rules: ['gateway-core-sqlite-open']
+AssertionError: arbitrary core import was mislabeled as gateway-core-sqlite-open
+
+old protected-UDS-only rules: ['public-gate-admin']
+AssertionError: protected UDS-only admin router was mislabeled public by lexical spelling
+```
+
+The complete captured RED logs were `/tmp/issue-1006-s0-fix-red.log`, `/tmp/issue-1006-s0-fix-red-old-regressions.log`, and `/tmp/issue-1006-s0-fix-red-old-uds.log` during this run; the concise, non-secret evidence is retained here.
+
+## Minimal GREEN
+
+The detector now:
+
+1. classifies both dependency directions from TOML and real `cargo metadata`, including normal/build rejection, reviewed server dev-only QC evidence, and rejection of dev gateway edges outside that scope;
+2. separates schema/query identifiers, DTO `platform` fields, concrete routes, and gateway/operation-name branches while permitting generic value use of `platform` and generic `kind` branches;
+3. separately inventories core/legacy path acceptance and DB/store open sites, recognizes aliased `rusqlite::Connection`, catches helper-mediated core paths, and records exactly two current gateway-owned store opens as valid provenance;
+4. traces the router value passed to the public TCP listener through Router-returning factories, so renamed/direct/merged gate-admin routes are reachable findings while UDS-only construction is not;
+5. makes generated baselines `pending-line-review` until a reviewer marks the exact line inventory reviewed.
+
+Final GREEN commands and results:
+
+```text
+python3 -m unittest scripts.tests.test_gateway_boundary_audit -v
+Ran 29 tests ... OK
+
+python3 scripts/gateway_boundary_audit.py
+gateway boundary audit OK: 454 classified findings
+cargo metadata allowed dev-only QC edges: ['opencrab-server -> opencrab-discord-gateway', 'opencrab-server -> opencrab-nostr-gateway']
+
+cargo test -p opencrab-server --test webgate_static_audit
+9 passed; 0 failed
+
+cargo fmt --all -- --check
+passed
+
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+passed
+
+bash scripts/check-deps.sh
+R4 OK; R5 OK; R6 OK; R7 OK
+
+bash scripts/check-file-size.sh
+OK: every Rust source file is at most 800 lines
+
+cargo tree -p opencrab-server --edges no-dev | (! grep -E 'opencrab-(discord|nostr|web)-gateway')
+passed (no concrete gateway in the production tree)
+```
+
+One intermediate metadata validation assertion incorrectly included the generic `opencrab-gateway` crate because it filtered only by the `-gateway` suffix. The command failed, the assertion was corrected to the three concrete daemon packages, and the corrected check proved Discord/Nostr are dev-only and Web is absent.
+
+## Reviewed baseline
+
+The line-specific baseline has **454** entries: **450** production violations, **2** explicitly valid gateway-owned store opens, and **2** reviewed server dev-only QC edges.
+
+| Rule | Count |
+|---|---:|
+| `gateway-core-path` | 16 |
+| `gateway-db-open` | 4 |
+| `gateway-production-dependency` | 4 |
+| `public-gate-admin-reachable` | 3 |
+| `reviewed-gateway-dev-dependency` | 2 |
+| `shared-concrete-route` | 4 |
+| `shared-concrete-schema` | 212 |
+| `shared-concrete-vocabulary` | 192 |
+| `shared-gateway-name-branch` | 2 |
+| `shared-platform-dto` | 15 |
+
+The only valid store-provenance entries are `crates/nostr-gateway/src/daemon.rs:115` and `crates/nostr-gateway/src/store.rs:66`. The reviewed dev-only edges are `crates/server/Cargo.toml:79` and `crates/server/Cargo.toml:82`; real metadata and the no-dev tree prove they are absent from production edges. Every entry has an exact path, line, snippet, classification, V01–V16 mapping, owner stage, and expiry. Coverage-anchor duplication, stale entries, new unclassified findings, count drift, and an unreviewed regenerated baseline all fail closed.

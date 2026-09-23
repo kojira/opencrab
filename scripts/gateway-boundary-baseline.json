@@ -1,236 +1,236 @@
 {
-  "schema": 1,
-  "purpose": "Issue #1006 S0 line-specific burn-down; entries are debts with mandatory expiry, not permanent exceptions",
+  "schema": 2,
+  "purpose": "Issue #1006 S0 line-specific reviewed burn-down; entries are debts or explicit gateway-store provenance, never wildcard exceptions",
+  "review": {
+    "status": "line-by-line-reviewed",
+    "finding_count": 454,
+    "policy": "review every path/line/snippet classification, owner stage, expiry, and gateway-store provenance",
+    "rule_counts": {
+      "gateway-core-path": 16,
+      "gateway-db-open": 4,
+      "gateway-production-dependency": 4,
+      "public-gate-admin-reachable": 3,
+      "reviewed-gateway-dev-dependency": 2,
+      "shared-concrete-route": 4,
+      "shared-concrete-schema": 212,
+      "shared-concrete-vocabulary": 192,
+      "shared-gateway-name-branch": 2,
+      "shared-platform-dto": 15
+    },
+    "classification_counts": {
+      "dev-only-qc": 2,
+      "production-violation": 450,
+      "valid-gateway-owned-store": 2
+    },
+    "valid_gateway_store_entries": [
+      "crates/nostr-gateway/src/daemon.rs:115",
+      "crates/nostr-gateway/src/store.rs:66"
+    ],
+    "reviewed_dev_only_qc_entries": [
+      "crates/server/Cargo.toml:79",
+      "crates/server/Cargo.toml:82"
+    ]
+  },
   "entries": [
     {
-      "rule": "gateway-core-sqlite-open",
+      "rule": "gateway-core-path",
       "path": "crates/nostr-gateway/src/daemon.rs",
       "line": 28,
       "snippet": "pub core_database_path: PathBuf,",
       "classification": "production-violation",
       "violation": "V02",
       "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy DB field, import, and direct core SQLite access"
+      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
     },
     {
-      "rule": "gateway-core-sqlite-open",
+      "rule": "gateway-core-path",
       "path": "crates/nostr-gateway/src/daemon.rs",
       "line": 31,
       "snippet": "pub legacy_database_path: Option<PathBuf>,",
       "classification": "production-violation",
       "violation": "V03",
       "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy DB field, import, and direct core SQLite access"
+      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
     },
     {
-      "rule": "gateway-core-sqlite-open",
+      "rule": "gateway-core-path",
       "path": "crates/nostr-gateway/src/daemon.rs",
       "line": 69,
       "snippet": "if !self.core_database_path.is_absolute() {",
       "classification": "production-violation",
       "violation": "V02",
       "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy DB field, import, and direct core SQLite access"
+      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
     },
     {
-      "rule": "gateway-core-sqlite-open",
+      "rule": "gateway-core-path",
       "path": "crates/nostr-gateway/src/daemon.rs",
       "line": 70,
       "snippet": "anyhow::bail!(\"core_database_path must be absolute\");",
       "classification": "production-violation",
       "violation": "V02",
       "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy DB field, import, and direct core SQLite access"
+      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
     },
     {
-      "rule": "gateway-core-sqlite-open",
+      "rule": "gateway-core-path",
       "path": "crates/nostr-gateway/src/daemon.rs",
       "line": 72,
       "snippet": "if self.database_path == self.core_database_path {",
       "classification": "production-violation",
       "violation": "V02",
       "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy DB field, import, and direct core SQLite access"
+      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
     },
     {
-      "rule": "gateway-core-sqlite-open",
+      "rule": "gateway-core-path",
       "path": "crates/nostr-gateway/src/daemon.rs",
       "line": 73,
       "snippet": "anyhow::bail!(\"database_path must differ from core_database_path\");",
       "classification": "production-violation",
       "violation": "V02",
       "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy DB field, import, and direct core SQLite access"
+      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
     },
     {
-      "rule": "gateway-core-sqlite-open",
+      "rule": "gateway-core-path",
       "path": "crates/nostr-gateway/src/daemon.rs",
       "line": 76,
       "snippet": ".legacy_database_path",
       "classification": "production-violation",
       "violation": "V03",
       "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy DB field, import, and direct core SQLite access"
+      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
     },
     {
-      "rule": "gateway-core-sqlite-open",
+      "rule": "gateway-core-path",
       "path": "crates/nostr-gateway/src/daemon.rs",
       "line": 80,
       "snippet": "anyhow::bail!(\"legacy_database_path must be absolute\");",
       "classification": "production-violation",
       "violation": "V03",
       "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy DB field, import, and direct core SQLite access"
+      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
     },
     {
-      "rule": "gateway-core-sqlite-open",
-      "path": "crates/nostr-gateway/src/daemon.rs",
-      "line": 101,
-      "snippet": "core_db: opencrab_db::Db,",
-      "classification": "production-violation",
-      "violation": "V02",
-      "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy DB field, import, and direct core SQLite access"
-    },
-    {
-      "rule": "gateway-core-sqlite-open",
-      "path": "crates/nostr-gateway/src/daemon.rs",
-      "line": 114,
-      "snippet": "let master_key = Arc::new(opencrab_core::secret_box::parse_master_key(&encoded_key)?);",
-      "classification": "production-violation",
-      "violation": "V02",
-      "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy DB field, import, and direct core SQLite access"
-    },
-    {
-      "rule": "gateway-core-sqlite-open",
+      "rule": "gateway-core-path",
       "path": "crates/nostr-gateway/src/daemon.rs",
       "line": 116,
       "snippet": "if let Some(legacy_path) = &config.legacy_database_path {",
       "classification": "production-violation",
       "violation": "V03",
       "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy DB field, import, and direct core SQLite access"
+      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
     },
     {
-      "rule": "gateway-core-sqlite-open",
+      "rule": "gateway-core-path",
       "path": "crates/nostr-gateway/src/daemon.rs",
-      "line": 127,
-      "snippet": "let core_db = opencrab_db::Db::open(",
+      "line": 117,
+      "snippet": "if gateway_store.import_legacy_once(legacy_path)? {",
       "classification": "production-violation",
-      "violation": "V02",
+      "violation": "V03",
       "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy DB field, import, and direct core SQLite access"
+      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
     },
     {
-      "rule": "gateway-core-sqlite-open",
+      "rule": "gateway-core-path",
+      "path": "crates/nostr-gateway/src/daemon.rs",
+      "line": 118,
+      "snippet": "tracing::info!(source = %legacy_path.display(), \"legacy gateway configuration imported\");",
+      "classification": "production-violation",
+      "violation": "V03",
+      "owner_stage": "S5/S8",
+      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
+    },
+    {
+      "rule": "gateway-core-path",
       "path": "crates/nostr-gateway/src/daemon.rs",
       "line": 129,
       "snippet": ".core_database_path",
       "classification": "production-violation",
       "violation": "V02",
       "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy DB field, import, and direct core SQLite access"
+      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
     },
     {
-      "rule": "gateway-core-sqlite-open",
+      "rule": "gateway-core-path",
       "path": "crates/nostr-gateway/src/daemon.rs",
       "line": 131,
       "snippet": ".context(\"core_database_path must be UTF-8\")?,",
       "classification": "production-violation",
       "violation": "V02",
       "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy DB field, import, and direct core SQLite access"
+      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
     },
     {
-      "rule": "gateway-core-sqlite-open",
+      "rule": "gateway-core-path",
+      "path": "crates/nostr-gateway/src/store.rs",
+      "line": 80,
+      "snippet": "pub fn import_legacy_once(&mut self, legacy_path: &Path) -> Result<bool> {",
+      "classification": "production-violation",
+      "violation": "V03",
+      "owner_stage": "S5/S8",
+      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
+    },
+    {
+      "rule": "gateway-core-path",
+      "path": "crates/nostr-gateway/src/store.rs",
+      "line": 94,
+      "snippet": "Connection::open_with_flags(legacy_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)",
+      "classification": "production-violation",
+      "violation": "V03",
+      "owner_stage": "S5/S8",
+      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
+    },
+    {
+      "rule": "gateway-core-path",
+      "path": "crates/nostr-gateway/src/store.rs",
+      "line": 95,
+      "snippet": ".with_context(|| format!(\"open legacy DB {}\", legacy_path.display()))?;",
+      "classification": "production-violation",
+      "violation": "V03",
+      "owner_stage": "S5/S8",
+      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
+    },
+    {
+      "rule": "gateway-db-open",
       "path": "crates/nostr-gateway/src/daemon.rs",
-      "line": 380,
-      "snippet": "if opencrab_core::secret_box::is_encrypted(&secret) {",
-      "classification": "production-violation",
+      "line": 115,
+      "snippet": "let mut gateway_store = GatewayStore::open(&config.database_path)?;",
+      "classification": "valid-gateway-owned-store",
       "violation": "V02",
-      "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy DB field, import, and direct core SQLite access"
+      "owner_stage": "S5",
+      "expires_when": "retain only while provenance remains the daemon-owned gateway database"
     },
     {
-      "rule": "gateway-core-sqlite-open",
+      "rule": "gateway-db-open",
       "path": "crates/nostr-gateway/src/daemon.rs",
-      "line": 381,
-      "snippet": "let bytes = opencrab_core::secret_box::decrypt(&secret, &master_key)?;",
+      "line": 127,
+      "snippet": "let core_db = opencrab_db::Db::open(",
       "classification": "production-violation",
       "violation": "V02",
       "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy DB field, import, and direct core SQLite access"
+      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
     },
     {
-      "rule": "gateway-core-sqlite-open",
+      "rule": "gateway-db-open",
       "path": "crates/nostr-gateway/src/store.rs",
-      "line": 6,
-      "snippet": "use opencrab_db::queries::SessionWatchRow;",
-      "classification": "production-violation",
+      "line": 66,
+      "snippet": "let conn = Connection::open(path)",
+      "classification": "valid-gateway-owned-store",
       "violation": "V02",
-      "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy DB field, import, and direct core SQLite access"
+      "owner_stage": "S5",
+      "expires_when": "retain only while provenance remains the daemon-owned gateway database"
     },
     {
-      "rule": "gateway-core-sqlite-open",
+      "rule": "gateway-db-open",
       "path": "crates/nostr-gateway/src/store.rs",
-      "line": 166,
-      "snippet": "master_key: &[u8; opencrab_core::secret_box::MASTER_KEY_LEN],",
+      "line": 94,
+      "snippet": "Connection::open_with_flags(legacy_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)",
       "classification": "production-violation",
-      "violation": "V02",
+      "violation": "V03",
       "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy DB field, import, and direct core SQLite access"
-    },
-    {
-      "rule": "gateway-core-sqlite-open",
-      "path": "crates/nostr-gateway/src/store.rs",
-      "line": 172,
-      "snippet": "if secret.trim().is_empty() || opencrab_core::secret_box::is_encrypted(&secret) {",
-      "classification": "production-violation",
-      "violation": "V02",
-      "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy DB field, import, and direct core SQLite access"
-    },
-    {
-      "rule": "gateway-core-sqlite-open",
-      "path": "crates/nostr-gateway/src/store.rs",
-      "line": 175,
-      "snippet": "let encrypted = opencrab_core::secret_box::encrypt(secret.as_bytes(), master_key)?;",
-      "classification": "production-violation",
-      "violation": "V02",
-      "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy DB field, import, and direct core SQLite access"
-    },
-    {
-      "rule": "gateway-core-sqlite-open",
-      "path": "crates/nostr-gateway/src/store.rs",
-      "line": 214,
-      "snippet": "master_key: &[u8; opencrab_core::secret_box::MASTER_KEY_LEN],",
-      "classification": "production-violation",
-      "violation": "V02",
-      "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy DB field, import, and direct core SQLite access"
-    },
-    {
-      "rule": "gateway-core-sqlite-open",
-      "path": "crates/nostr-gateway/src/store.rs",
-      "line": 216,
-      "snippet": "let secret = if opencrab_core::secret_box::is_encrypted(&row.secret_key) {",
-      "classification": "production-violation",
-      "violation": "V02",
-      "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy DB field, import, and direct core SQLite access"
-    },
-    {
-      "rule": "gateway-core-sqlite-open",
-      "path": "crates/nostr-gateway/src/store.rs",
-      "line": 219,
-      "snippet": "opencrab_core::secret_box::encrypt(row.secret_key.as_bytes(), master_key)?",
-      "classification": "production-violation",
-      "violation": "V02",
-      "owner_stage": "S5/S8",
-      "expires_when": "remove runtime core/legacy DB field, import, and direct core SQLite access"
+      "expires_when": "remove runtime core/legacy path and direct/helper-mediated core database access"
     },
     {
       "rule": "gateway-production-dependency",
@@ -273,54 +273,2214 @@
       "expires_when": "remove forbidden normal/build dependency from the concrete daemon"
     },
     {
-      "rule": "public-gate-admin",
-      "path": "crates/server/src/lib.rs",
-      "line": 468,
-      "snippet": "create_router_with_gate(state, extgate)",
+      "rule": "public-gate-admin-reachable",
+      "path": "crates/extgate/src/admin.rs",
+      "line": 23,
+      "snippet": "\"/api/gate-instances/{instance_id}\",",
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S1",
-      "expires_when": "public TCP has no gate-admin merge, reachability, description, or extension"
+      "expires_when": "public TCP cannot reach any of the six gate-admin operations"
     },
     {
-      "rule": "public-gate-admin",
-      "path": "crates/server/src/lib.rs",
-      "line": 471,
-      "snippet": "pub fn create_router_with_gate(",
+      "rule": "public-gate-admin-reachable",
+      "path": "crates/extgate/src/admin.rs",
+      "line": 27,
+      "snippet": "\"/api/gate-instances/{instance_id}/revisions\",",
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S1",
-      "expires_when": "public TCP has no gate-admin merge, reachability, description, or extension"
+      "expires_when": "public TCP cannot reach any of the six gate-admin operations"
     },
     {
-      "rule": "public-gate-admin",
-      "path": "crates/server/src/lib.rs",
-      "line": 482,
-      "snippet": ".merge(opencrab_extgate::admin_router(extgate))",
+      "rule": "public-gate-admin-reachable",
+      "path": "crates/extgate/src/admin.rs",
+      "line": 31,
+      "snippet": "\"/api/gate-bindings/{binding_id}\",",
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S1",
-      "expires_when": "public TCP has no gate-admin merge, reachability, description, or extension"
+      "expires_when": "public TCP cannot reach any of the six gate-admin operations"
     },
     {
-      "rule": "public-gate-admin",
-      "path": "crates/server/src/main.rs",
+      "rule": "reviewed-gateway-dev-dependency",
+      "path": "crates/server/Cargo.toml",
+      "line": 79,
+      "snippet": "opencrab-nostr-gateway = { workspace = true }",
+      "classification": "dev-only-qc",
+      "violation": "V14",
+      "owner_stage": "S11",
+      "expires_when": "retain only while isolated QC needs it and cargo tree --edges no-dev remains free of the daemon"
+    },
+    {
+      "rule": "reviewed-gateway-dev-dependency",
+      "path": "crates/server/Cargo.toml",
+      "line": 82,
+      "snippet": "opencrab-discord-gateway = { workspace = true }",
+      "classification": "dev-only-qc",
+      "violation": "V14",
+      "owner_stage": "S11",
+      "expires_when": "retain only while isolated QC needs it and cargo tree --edges no-dev remains free of the daemon"
+    },
+    {
+      "rule": "shared-concrete-route",
+      "path": "crates/server/src/lib.rs",
+      "line": 382,
+      "snippet": "$apply!($target, \"/api/agents/{id}/channel-configs\", get => api::channel_configs::list_channel_configs, put => api::channel_configs::upsert_channel_config);",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-route",
+      "path": "crates/server/src/lib.rs",
+      "line": 383,
+      "snippet": "$apply!($target, \"/api/agents/{id}/channel-configs/{channel_id}\", delete => api::channel_configs::delete_channel_config);",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-route",
+      "path": "crates/server/src/lib.rs",
+      "line": 384,
+      "snippet": "$apply!($target, \"/api/agents/{id}/trusted-users\", get => api::trusted_users::list_trusted_users, post => api::trusted_users::add_trusted_user);",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-route",
+      "path": "crates/server/src/lib.rs",
+      "line": 385,
+      "snippet": "$apply!($target, \"/api/agents/{id}/trusted-users/{user_id}\", patch => api::trusted_users::update_trusted_user, delete => api::trusted_users::delete_trusted_user);",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/actions/src/bridge/executor.rs",
+      "line": 297,
+      "snippet": "crate::traits::CallerIdentity::TrustedUser => {",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/actions/src/bridge/executor.rs",
+      "line": 298,
+      "snippet": "opencrab_gateway::GatewayCaller::TrustedUser",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/actions/src/bridge/executor.rs",
+      "line": 331,
+      "snippet": "| crate::traits::CallerIdentity::TrustedUser",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/actions/src/bridge/executor.rs",
+      "line": 433,
+      "snippet": "\"action '{name}' requires a trusted caller (owner/co_agent/trusted_user)\"",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/actions/src/channel_config.rs",
+      "line": 13,
+      "snippet": "pub fn apply_channel_config(",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/actions/src/channel_config.rs",
+      "line": 71,
+      "snippet": "opencrab_db::queries::get_channel_config_for_agent(&conn, channel_id, agent_id)",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/actions/src/channel_config.rs",
+      "line": 80,
+      "snippet": "let cfg = opencrab_db::queries::ChannelConfigRow {",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/actions/src/channel_config.rs",
+      "line": 95,
+      "snippet": "opencrab_db::queries::upsert_channel_config(&conn, &cfg),",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/actions/src/lib.rs",
+      "line": 31,
+      "snippet": "pub mod channel_config;",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/actions/src/lib.rs",
+      "line": 34,
+      "snippet": "pub mod session_watch_policy;",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/actions/src/lib.rs",
+      "line": 48,
+      "snippet": "pub use channel_config::apply_channel_config;",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/actions/src/lib.rs",
+      "line": 65,
+      "snippet": "pub use session_watch_policy::{",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/actions/src/lib.rs",
+      "line": 66,
+      "snippet": "caller_policy_key, parse_session_watch_policy, watch_author_standing, ClassPolicy,",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/actions/src/lib.rs",
+      "line": 67,
+      "snippet": "SessionPolicyError, SessionWatchPolicy, WatchAllowSets, WatchAuthorStanding,",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/actions/src/session_inbound/admit.rs",
       "line": 3,
-      "snippet": "use opencrab_server::create_router_with_gate;",
+      "snippet": "use crate::session_watch_policy::{",
       "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S1",
-      "expires_when": "public TCP has no gate-admin merge, reachability, description, or extension"
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
     },
     {
-      "rule": "public-gate-admin",
-      "path": "crates/server/src/main.rs",
-      "line": 152,
-      "snippet": "let app = create_router_with_gate(state, extgate);",
+      "rule": "shared-concrete-schema",
+      "path": "crates/actions/src/session_watch_policy.rs",
+      "line": 24,
+      "snippet": "pub const POLICY_CLASS_KEYS: &[&str] = &[\"Owner\", \"CoAgent\", \"TrustedUser\", \"Agent\"];",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/actions/src/session_watch_policy.rs",
+      "line": 69,
+      "snippet": "pub struct SessionWatchPolicy {",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/actions/src/session_watch_policy.rs",
+      "line": 78,
+      "snippet": "CallerIdentity::TrustedUser => \"TrustedUser\",",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/actions/src/session_watch_policy.rs",
+      "line": 91,
+      "snippet": "pub trusted_users: &'a HashSet<String>,",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/actions/src/session_watch_policy.rs",
+      "line": 99,
+      "snippet": "|| self.trusted_users.contains(author_key)",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/actions/src/session_watch_policy.rs",
+      "line": 119,
+      "snippet": "pub fn parse_session_watch_policy(",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/actions/src/session_watch_policy.rs",
+      "line": 121,
+      "snippet": ") -> Result<Option<SessionWatchPolicy>, SessionPolicyError> {",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/actions/src/session_watch_policy.rs",
+      "line": 142,
+      "snippet": "Ok(Some(SessionWatchPolicy { classes }))",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/actions/src/session_watch_policy.rs",
+      "line": 198,
+      "snippet": "match parse_session_watch_policy(policy_json)? {",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/actions/src/session_watch_policy.rs",
+      "line": 402,
+      "snippet": "parse_session_watch_policy(bad_kind),",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/actions/src/session_watch_policy.rs",
+      "line": 466,
+      "snippet": "trusted_users: &trusted,",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/core/src/caller.rs",
+      "line": 20,
+      "snippet": "TrustedUser,",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/core/src/caller.rs",
+      "line": 62,
+      "snippet": "CallerIdentity::TrustedUser => 1,",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/core/src/caller.rs",
+      "line": 85,
+      "snippet": "CallerIdentity::TrustedUser => \"trusted\",",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/core/src/caller.rs",
+      "line": 100,
+      "snippet": "Some(\"trusted\") => CallerIdentity::TrustedUser.trust_level(),",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 14,
+      "snippet": "pub struct ChannelConfigRow {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 31,
+      "snippet": "pub fn get_channel_config(conn: &Connection, channel_id: &str) -> Result<Option<ChannelConfigRow>> {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 32,
+      "snippet": "get_channel_config_for_agent(conn, channel_id, \"\")",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 36,
+      "snippet": "pub fn get_channel_config_for_agent(",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 40,
+      "snippet": ") -> Result<Option<ChannelConfigRow>> {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 43,
+      "snippet": "FROM channel_config WHERE channel_id = ?1 AND agent_id = ?2\",",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 46,
+      "snippet": "Ok(ChannelConfigRow {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 68,
+      "snippet": "pub fn upsert_channel_config(conn: &Connection, cfg: &ChannelConfigRow) -> Result<()> {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 70,
+      "snippet": "\"INSERT INTO channel_config (channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs, heartbeat_instructions, updated_at)",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 100,
+      "snippet": "pub fn delete_channel_config(conn: &Connection, channel_id: &str) -> Result<bool> {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 101,
+      "snippet": "delete_channel_config_for_agent(conn, channel_id, \"\")",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 105,
+      "snippet": "pub fn delete_channel_config_for_agent(",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 111,
+      "snippet": "\"DELETE FROM channel_config WHERE channel_id = ?1 AND agent_id = ?2\",",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 117,
+      "snippet": "pub fn list_channel_configs_by_guild(",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 120,
+      "snippet": ") -> Result<Vec<ChannelConfigRow>> {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 123,
+      "snippet": "FROM channel_config WHERE guild_id = ?1 ORDER BY channel_name\",",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 127,
+      "snippet": "Ok(ChannelConfigRow {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 145,
+      "snippet": "pub fn list_channel_configs_by_agent(",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 148,
+      "snippet": ") -> Result<Vec<ChannelConfigRow>> {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 151,
+      "snippet": "FROM channel_config WHERE agent_id = ?1 ORDER BY channel_name\",",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 154,
+      "snippet": "Ok(ChannelConfigRow {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 171,
+      "snippet": "pub fn list_whitelisted_channels(conn: &Connection) -> Result<Vec<ChannelConfigRow>> {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 174,
+      "snippet": "FROM channel_config WHERE whitelisted = 1 ORDER BY channel_id\",",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 178,
+      "snippet": "Ok(ChannelConfigRow {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 197,
+      "snippet": "pub fn list_heartbeat_channels(conn: &Connection) -> Result<Vec<ChannelConfigRow>> {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 200,
+      "snippet": "FROM channel_config WHERE heartbeat_enabled = 1 ORDER BY channel_id\",",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 204,
+      "snippet": "Ok(ChannelConfigRow {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 223,
+      "snippet": "get_channel_config(conn, channel_id)",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 232,
+      "snippet": "get_channel_config(conn, channel_id)",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 241,
+      "snippet": "get_channel_config(conn, channel_id)",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 256,
+      "snippet": "if let Some(cfg) = get_channel_config_for_agent(conn, channel_id, agent_id)",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 263,
+      "snippet": "get_channel_config_for_agent(conn, channel_id, \"\")",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 273,
+      "snippet": "if let Some(cfg) = get_channel_config_for_agent(conn, channel_id, agent_id)",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 279,
+      "snippet": "get_channel_config_for_agent(conn, channel_id, \"\")",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 289,
+      "snippet": "if let Some(cfg) = get_channel_config_for_agent(conn, channel_id, agent_id)",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/channel_config.rs",
+      "line": 295,
+      "snippet": "get_channel_config_for_agent(conn, channel_id, \"\")",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/heartbeat.rs",
+      "line": 67,
+      "snippet": "let per_agent = get_channel_config_for_agent(conn, channel_id, agent_id)",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/heartbeat.rs",
+      "line": 74,
+      "snippet": "None => get_channel_config_for_agent(conn, channel_id, \"\")",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/mod.rs",
+      "line": 13,
+      "snippet": "mod channel_config;",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/mod.rs",
+      "line": 27,
+      "snippet": "mod session_watches;",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/mod.rs",
+      "line": 33,
+      "snippet": "mod trusted_users;",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/mod.rs",
+      "line": 42,
+      "snippet": "pub use channel_config::*;",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/mod.rs",
+      "line": 56,
+      "snippet": "pub use session_watches::*;",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/mod.rs",
+      "line": 62,
+      "snippet": "pub use trusted_users::*;",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/session_watches.rs",
+      "line": 15,
+      "snippet": "pub struct SessionWatchRow {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/session_watches.rs",
+      "line": 40,
+      "snippet": "pub fn insert_session_watch(",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/session_watches.rs",
+      "line": 50,
+      "snippet": "\"INSERT INTO session_watches (session_id, agent_id, interval_secs, filter_json, created_at)",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/session_watches.rs",
+      "line": 58,
+      "snippet": "pub fn get_session_watch(conn: &Connection, id: i64) -> Result<Option<SessionWatchRow>> {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/session_watches.rs",
+      "line": 61,
+      "snippet": "FROM session_watches WHERE id = ?1\",",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/session_watches.rs",
+      "line": 73,
+      "snippet": "pub fn list_session_watches_for_agent(",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/session_watches.rs",
+      "line": 76,
+      "snippet": ") -> Result<Vec<SessionWatchRow>> {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/session_watches.rs",
+      "line": 79,
+      "snippet": "FROM session_watches WHERE agent_id = ?1 ORDER BY id\",",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/session_watches.rs",
+      "line": 88,
+      "snippet": "pub fn update_session_watch(",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/session_watches.rs",
+      "line": 98,
+      "snippet": "\"UPDATE session_watches",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/session_watches.rs",
+      "line": 107,
+      "snippet": "pub fn delete_session_watch(conn: &Connection, id: i64) -> Result<bool> {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/session_watches.rs",
+      "line": 108,
+      "snippet": "let n = conn.execute(\"DELETE FROM session_watches WHERE id = ?1\", params![id])?;",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/session_watches.rs",
+      "line": 112,
+      "snippet": "fn row_from_watch(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionWatchRow> {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/session_watches.rs",
+      "line": 113,
+      "snippet": "Ok(SessionWatchRow {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 155,
+      "snippet": "pub enum TrustedUserPermission {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 167,
+      "snippet": "pub const TRUSTED_USER_PERMISSIONS: [TrustedUserPermission; 3] = [",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 168,
+      "snippet": "TrustedUserPermission::Owner,",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 169,
+      "snippet": "TrustedUserPermission::User,",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 170,
+      "snippet": "TrustedUserPermission::CoAgent,",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 173,
+      "snippet": "impl TrustedUserPermission {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 186,
+      "snippet": "TRUSTED_USER_PERMISSIONS",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 202,
+      "snippet": "pub struct TrustedUserRow {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 207,
+      "snippet": "pub permission: TrustedUserPermission,",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 216,
+      "snippet": "fn trusted_user_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrustedUserRow> {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 217,
+      "snippet": "Ok(TrustedUserRow {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 221,
+      "snippet": "permission: TrustedUserPermission::from_db_str(&row.get::<_, String>(3)?),",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 229,
+      "snippet": "const TRUSTED_USER_COLUMNS: &str =",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 235,
+      "snippet": "pub fn get_trusted_user(",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 240,
+      "snippet": ") -> Option<TrustedUserRow> {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 243,
+      "snippet": "\"SELECT {TRUSTED_USER_COLUMNS} \\",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 244,
+      "snippet": "FROM trusted_users \\",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 248,
+      "snippet": "trusted_user_from_row,",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 255,
+      "snippet": "pub fn list_trusted_users(conn: &Connection, agent_id: &str) -> Result<Vec<TrustedUserRow>> {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 257,
+      "snippet": "\"SELECT {TRUSTED_USER_COLUMNS} \\",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 258,
+      "snippet": "FROM trusted_users WHERE agent_id = ?1 ORDER BY created_at ASC\"",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 260,
+      "snippet": "let rows = stmt.query_map([agent_id], trusted_user_from_row)?;",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 274,
+      "snippet": "pub fn add_trusted_user(",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 280,
+      "snippet": "permission: TrustedUserPermission,",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 286,
+      "snippet": "\"INSERT INTO trusted_users (id, user_id, agent_id, permission, created_by, created_at, display_name, platform) \\",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 307,
+      "snippet": ") -> Result<Vec<TrustedUserRow>> {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 309,
+      "snippet": "\"SELECT {TRUSTED_USER_COLUMNS} \\",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 310,
+      "snippet": "FROM trusted_users WHERE platform = ?1 AND agent_id = ?2 AND permission = ?3 \\",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 317,
+      "snippet": "TrustedUserPermission::CoAgent.as_db_str(),",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 319,
+      "snippet": "trusted_user_from_row,",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 324,
+      "snippet": "pub fn update_trusted_user_display_name(",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 330,
+      "snippet": "\"UPDATE trusted_users SET display_name = ?2 WHERE id = ?1\",",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 336,
+      "snippet": "pub fn update_trusted_user_permission(",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 339,
+      "snippet": "permission: TrustedUserPermission,",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 342,
+      "snippet": "\"UPDATE trusted_users SET permission = ?2 WHERE id = ?1\",",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 348,
+      "snippet": "pub fn remove_trusted_user(conn: &Connection, id: &str) -> Result<bool> {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 349,
+      "snippet": "let n = conn.execute(\"DELETE FROM trusted_users WHERE id = ?1\", [id])?;",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 356,
+      "snippet": "\"SELECT COUNT(*) FROM trusted_users \\",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 377,
+      "snippet": "\"SELECT COUNT(*) FROM trusted_users WHERE platform = ?1 AND agent_id = ?2\",",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/schema/sql/full.rs",
+      "line": 111,
+      "snippet": "-- Owner / CoAgent / TrustedUser の見え方には影響しない（従来どおり全部見える）。issue #352。",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/schema/sql/full.rs",
+      "line": 297,
+      "snippet": "CREATE TABLE IF NOT EXISTS channel_config (",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/schema/sql/full.rs",
+      "line": 311,
+      "snippet": "CREATE INDEX IF NOT EXISTS idx_channel_guild ON channel_config(guild_id);",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/schema/sql/full.rs",
+      "line": 430,
+      "snippet": "CREATE TABLE IF NOT EXISTS trusted_users (",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/schema/sql/full.rs",
+      "line": 442,
+      "snippet": "CREATE INDEX IF NOT EXISTS idx_trusted_users_agent ON trusted_users(agent_id);",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/schema/sql/full.rs",
+      "line": 670,
+      "snippet": "CREATE TABLE IF NOT EXISTS session_watches (",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/schema/sql/full.rs",
+      "line": 679,
+      "snippet": "CREATE INDEX IF NOT EXISTS idx_session_watches_session ON session_watches(session_id);",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/schema/sql/mod.rs",
+      "line": 205,
+      "snippet": "pub(super) const SESSION_WATCHES_SQL: &str = \"",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/schema/sql/mod.rs",
+      "line": 206,
+      "snippet": "CREATE TABLE IF NOT EXISTS session_watches (",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/db/src/schema/sql/mod.rs",
+      "line": 215,
+      "snippet": "CREATE INDEX IF NOT EXISTS idx_session_watches_session ON session_watches(session_id);",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/extgate/src/inbound/mod.rs",
+      "line": 42,
+      "snippet": "SaidCaller::TrustedUser => CallerIdentity::TrustedUser,",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/extgate/src/inbound/record.rs",
+      "line": 3,
+      "snippet": "insert_session_log, is_trusted_user, SessionLogRow, TRUSTED_PLATFORM_EXTGATE,",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/extgate/src/inbound/record.rs",
+      "line": 128,
+      "snippet": "is_trusted_user(conn, TRUSTED_PLATFORM_EXTGATE, sender, agent_id)",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/extgate/src/protocol.rs",
+      "line": 215,
+      "snippet": "TrustedUser,",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/extgate/src/protocol.rs",
+      "line": 503,
+      "snippet": "Some(\"trusted_user\") => Ok(SaidCaller::TrustedUser),",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/gate-client/src/wire.rs",
+      "line": 146,
+      "snippet": "TrustedUser,",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/gateway/src/traits.rs",
+      "line": 19,
+      "snippet": "TrustedUser,",
+      "classification": "production-violation",
+      "violation": "V10",
+      "owner_stage": "S3",
+      "expires_when": "derive routing solely from dynamic declaration metadata"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/gateway/src/traits.rs",
+      "line": 29,
+      "snippet": "GatewayCaller::TrustedUser => \"trusted_user\",",
+      "classification": "production-violation",
+      "violation": "V10",
+      "owner_stage": "S3",
+      "expires_when": "derive routing solely from dynamic declaration metadata"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/gateway/src/traits.rs",
+      "line": 64,
+      "snippet": "GatewayCaller::TrustedUser => CallerIdentity::TrustedUser,",
+      "classification": "production-violation",
+      "violation": "V10",
+      "owner_stage": "S3",
+      "expires_when": "derive routing solely from dynamic declaration metadata"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/agent_heartbeat.rs",
+      "line": 51,
+      "snippet": "GatewayCaller::Owner | GatewayCaller::CoAgent { .. } | GatewayCaller::TrustedUser",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/agent_management.rs",
+      "line": 68,
+      "snippet": "GatewayCaller::Owner | GatewayCaller::CoAgent { .. } | GatewayCaller::TrustedUser",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/agent_schedule.rs",
+      "line": 52,
+      "snippet": "GatewayCaller::Owner | GatewayCaller::CoAgent { .. } | GatewayCaller::TrustedUser",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/agents_messages.rs",
+      "line": 365,
+      "snippet": "opencrab_actions::CallerIdentity::TrustedUser => \"trusted_user\",",
       "classification": "production-violation",
       "violation": "V07",
-      "owner_stage": "S1",
-      "expires_when": "public TCP has no gate-admin merge, reachability, description, or extension"
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/channel_configs.rs",
+      "line": 16,
+      "snippet": "pub struct ChannelConfigDto {",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/channel_configs.rs",
+      "line": 33,
+      "snippet": "pub configs: Vec<ChannelConfigDto>,",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/channel_configs.rs",
+      "line": 37,
+      "snippet": "pub async fn list_channel_configs(",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/channel_configs.rs",
+      "line": 44,
+      "snippet": "opencrab_db::queries::list_channel_configs_by_agent(&conn, &agent_id).unwrap_or_default();",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/channel_configs.rs",
+      "line": 47,
+      "snippet": "let configs: Vec<ChannelConfigDto> = rows",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/channel_configs.rs",
+      "line": 50,
+      "snippet": ".map(|r| ChannelConfigDto {",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/channel_configs.rs",
+      "line": 92,
+      "snippet": "pub async fn upsert_channel_config(",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/channel_configs.rs",
+      "line": 100,
+      "snippet": "opencrab_db::queries::get_channel_config_for_agent(&conn, &req.channel_id, &agent_id)",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/channel_configs.rs",
+      "line": 123,
+      "snippet": "let cfg = opencrab_db::queries::ChannelConfigRow {",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/channel_configs.rs",
+      "line": 135,
+      "snippet": "opencrab_db::queries::upsert_channel_config(&conn, &cfg)",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/channel_configs.rs",
+      "line": 144,
+      "snippet": "pub async fn delete_channel_config(",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/channel_configs.rs",
+      "line": 150,
+      "snippet": "opencrab_db::queries::delete_channel_config_for_agent(&conn, &channel_id, &agent_id)",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/mod.rs",
+      "line": 5,
+      "snippet": "pub mod channel_configs;",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/mod.rs",
+      "line": 24,
+      "snippet": "pub mod trusted_users;",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/trusted_users.rs",
+      "line": 8,
+      "snippet": "use opencrab_db::queries::TrustedUserPermission;",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/trusted_users.rs",
+      "line": 13,
+      "snippet": "pub struct TrustedUserDto {",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/trusted_users.rs",
+      "line": 22,
+      "snippet": "pub permission: TrustedUserPermission,",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/trusted_users.rs",
+      "line": 33,
+      "snippet": "fn row_to_dto(r: opencrab_db::queries::TrustedUserRow) -> TrustedUserDto {",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/trusted_users.rs",
+      "line": 34,
+      "snippet": "TrustedUserDto {",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/trusted_users.rs",
+      "line": 46,
+      "snippet": "pub async fn list_trusted_users(",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/trusted_users.rs",
+      "line": 49,
+      "snippet": ") -> Json<Vec<TrustedUserDto>> {",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/trusted_users.rs",
+      "line": 51,
+      "snippet": "let rows = opencrab_db::queries::list_trusted_users(&conn, &agent_id).unwrap_or_default();",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/trusted_users.rs",
+      "line": 56,
+      "snippet": "pub struct AddTrustedUserRequest {",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/trusted_users.rs",
+      "line": 81,
+      "snippet": "pub async fn add_trusted_user(",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/trusted_users.rs",
+      "line": 84,
+      "snippet": "Json(req): Json<AddTrustedUserRequest>,",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/trusted_users.rs",
+      "line": 85,
+      "snippet": ") -> Result<Json<TrustedUserDto>, StatusCode> {",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/trusted_users.rs",
+      "line": 95,
+      "snippet": "opencrab_db::queries::add_trusted_user(",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/trusted_users.rs",
+      "line": 115,
+      "snippet": "Ok(Json(TrustedUserDto {",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/trusted_users.rs",
+      "line": 131,
+      "snippet": "fn parse_permission(raw: Option<&str>) -> Result<TrustedUserPermission, StatusCode> {",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/trusted_users.rs",
+      "line": 133,
+      "snippet": "None => Ok(TrustedUserPermission::default()),",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/trusted_users.rs",
+      "line": 134,
+      "snippet": "Some(s) => TrustedUserPermission::parse(s).ok_or(StatusCode::BAD_REQUEST),",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/trusted_users.rs",
+      "line": 148,
+      "snippet": "pub struct UpdateTrustedUserRequest {",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/trusted_users.rs",
+      "line": 155,
+      "snippet": "pub async fn update_trusted_user(",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/trusted_users.rs",
+      "line": 158,
+      "snippet": "Json(req): Json<UpdateTrustedUserRequest>,",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/trusted_users.rs",
+      "line": 162,
+      "snippet": "Some(s) => Some(TrustedUserPermission::parse(s).ok_or(StatusCode::BAD_REQUEST)?),",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/trusted_users.rs",
+      "line": 171,
+      "snippet": "opencrab_db::queries::update_trusted_user_permission(&tx, &user_id, permission)?;",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/trusted_users.rs",
+      "line": 174,
+      "snippet": "updated |= opencrab_db::queries::update_trusted_user_display_name(",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/trusted_users.rs",
+      "line": 187,
+      "snippet": "pub async fn delete_trusted_user(",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/api/trusted_users.rs",
+      "line": 192,
+      "snippet": "let deleted = opencrab_db::queries::remove_trusted_user(&conn, &user_id).unwrap_or(false);",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/caller_identity.rs",
+      "line": 32,
+      "snippet": "CallerIdentity::TrustedUser",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/caller_identity.rs",
+      "line": 49,
+      "snippet": "use opencrab_db::queries::{get_trusted_user, TrustedUserPermission};",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/caller_identity.rs",
+      "line": 58,
+      "snippet": "get_trusted_user(conn, source, user_id, agent_id).map(|row| row.permission)",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/caller_identity.rs",
+      "line": 60,
+      "snippet": "Some(TrustedUserPermission::CoAgent) => CallerIdentity::CoAgent {",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/caller_identity.rs",
+      "line": 63,
+      "snippet": "Some(TrustedUserPermission::Owner | TrustedUserPermission::User) => {",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/caller_identity.rs",
+      "line": 64,
+      "snippet": "CallerIdentity::TrustedUser",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/heartbeat_instructions.rs",
+      "line": 141,
+      "snippet": "let existing = opencrab_db::queries::get_channel_config_for_agent(",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/heartbeat_instructions.rs",
+      "line": 177,
+      "snippet": "None => opencrab_db::queries::ChannelConfigRow {",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/heartbeat_instructions.rs",
+      "line": 203,
+      "snippet": "if let Err(e) = opencrab_db::queries::upsert_channel_config(&conn, &cfg) {",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/heartbeat_instructions.rs",
+      "line": 242,
+      "snippet": "GatewayCaller::Owner | GatewayCaller::CoAgent { .. } | GatewayCaller::TrustedUser",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/heartbeat_instructions.rs",
+      "line": 282,
+      "snippet": "let text = opencrab_db::queries::get_channel_config_for_agent(",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/peer_review.rs",
+      "line": 213,
+      "snippet": "\"(なし — trusted-users API で permission=co-agent + display_name を登録してください)\"",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/peer_review.rs",
+      "line": 642,
+      "snippet": "let is_co_agent = opencrab_db::queries::get_trusted_user(&conn, platform, sender_id, agent_id)",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/peer_review.rs",
+      "line": 643,
+      "snippet": ".map(|u| u.permission == opencrab_db::queries::TrustedUserPermission::CoAgent)",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/process/wiring.rs",
+      "line": 88,
+      "snippet": "| opencrab_actions::CallerIdentity::TrustedUser",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/system_actions/definitions/webhooks.rs",
+      "line": 15,
+      "snippet": "description: \"spawn_subtask が webhook 未指定時に実際に使うデフォルト subtask webhook を解決して返す。トークンは秘匿され redacted_url のみ返る。owner/trusted_user/co_agent のみ。\".to_string(),",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/system_actions/definitions/webhooks.rs",
+      "line": 93,
+      "snippet": "description: \"登録されている subtask webhook 設定を一覧する。トークンは秘匿され redacted_url のみ返る。owner/trusted_user/co_agent のみ。\".to_string(),",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/system_actions/definitions/webhooks.rs",
+      "line": 119,
+      "snippet": "description: \"実際に使われるデフォルト webhook を解決して返す（既定 family='activity'＝一般ツール/コマンド活動）。トークンは秘匿され redacted_url のみ返る。owner/trusted_user/co_agent のみ。\".to_string(),",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/system_actions/definitions/webhooks.rs",
+      "line": 199,
+      "snippet": "description: \"登録されている webhook 設定を一覧する。`family`/`scope` で絞り込み可（省略時は全件）。トークンは秘匿され redacted_url のみ返る。owner/trusted_user/co_agent のみ。\".to_string(),",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/webhook_targets.rs",
+      "line": 143,
+      "snippet": "GatewayCaller::Owner | GatewayCaller::CoAgent { .. } | GatewayCaller::TrustedUser",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/webhook_targets.rs",
+      "line": 145,
+      "snippet": "return reject(\"redacted read requires owner/trusted_user/co_agent\");",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/webhook_targets.rs",
+      "line": 458,
+      "snippet": "GatewayCaller::Owner | GatewayCaller::CoAgent { .. } | GatewayCaller::TrustedUser",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-concrete-schema",
+      "path": "crates/server/src/webhook_targets.rs",
+      "line": 460,
+      "snippet": "return reject(\"redacted read requires owner/trusted_user/co_agent\");",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -495,22 +2655,12 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/actions/src/channel_config.rs",
-      "line": 13,
-      "snippet": "pub fn apply_channel_config(",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/channel_config.rs",
       "line": 18,
       "snippet": "let channel_id = match args.get(\"channel_id\").and_then(|v| v.as_str()) {",
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -520,7 +2670,7 @@
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -530,7 +2680,7 @@
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -540,17 +2690,7 @@
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/channel_config.rs",
-      "line": 71,
-      "snippet": "opencrab_db::queries::get_channel_config_for_agent(&conn, channel_id, agent_id)",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -560,7 +2700,7 @@
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -570,7 +2710,7 @@
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -580,17 +2720,7 @@
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/channel_config.rs",
-      "line": 95,
-      "snippet": "opencrab_db::queries::upsert_channel_config(&conn, &cfg),",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -600,7 +2730,7 @@
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -610,17 +2740,7 @@
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/lib.rs",
-      "line": 31,
-      "snippet": "pub mod channel_config;",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -637,16 +2757,6 @@
       "path": "crates/actions/src/lib.rs",
       "line": 39,
       "snippet": "GatewayKeyProvisioning, ProvisionedKey, SharedAgentGateway, StartDeclined,",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/lib.rs",
-      "line": 48,
-      "snippet": "pub use channel_config::apply_channel_config;",
       "classification": "production-violation",
       "violation": "V11",
       "owner_stage": "S3/S5/S10",
@@ -714,33 +2824,13 @@
     },
     {
       "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/session_watch_policy.rs",
-      "line": 91,
-      "snippet": "pub trusted_users: &'a HashSet<String>,",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/actions/src/session_watch_policy.rs",
-      "line": 99,
-      "snippet": "|| self.trusted_users.contains(author_key)",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
       "path": "crates/actions/src/timed_fire.rs",
       "line": 48,
       "snippet": "pub channel_id: String,",
       "classification": "production-violation",
       "violation": "V09",
       "owner_stage": "S3",
-      "expires_when": "replace platform-shaped routing fields with canonical generic binding/session IDs"
+      "expires_when": "replace platform-shaped routing with canonical generic binding/session IDs"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -750,7 +2840,7 @@
       "classification": "production-violation",
       "violation": "V09",
       "owner_stage": "S3",
-      "expires_when": "replace platform-shaped routing fields with canonical generic binding/session IDs"
+      "expires_when": "replace platform-shaped routing with canonical generic binding/session IDs"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -760,7 +2850,7 @@
       "classification": "production-violation",
       "violation": "V09",
       "owner_stage": "S3",
-      "expires_when": "replace platform-shaped routing fields with canonical generic binding/session IDs"
+      "expires_when": "replace platform-shaped routing with canonical generic binding/session IDs"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -770,7 +2860,7 @@
       "classification": "production-violation",
       "violation": "V09",
       "owner_stage": "S3",
-      "expires_when": "replace platform-shaped routing fields with canonical generic binding/session IDs"
+      "expires_when": "replace platform-shaped routing with canonical generic binding/session IDs"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -814,33 +2904,13 @@
     },
     {
       "rule": "shared-concrete-vocabulary",
-      "path": "crates/core/src/context_budget/core_process_e2e/assembly_identifiers.rs",
-      "line": 353,
-      "snippet": "r#\"{{\"success\":false,\"data\":null,\"error\":\"nostr_run failed: Event not found: {event_hex}\"}}\"#",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/core/src/context_budget/core_process_e2e/assembly_identifiers.rs",
-      "line": 364,
-      "snippet": "serde_json::json!({\"tool_call_id\": \"tc-x\", \"tool_name\": \"nostr_run\"}).to_string(),",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
       "path": "crates/db/src/queries/channel_config.rs",
       "line": 15,
       "snippet": "pub channel_id: String,",
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -850,37 +2920,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/channel_config.rs",
-      "line": 31,
-      "snippet": "pub fn get_channel_config(conn: &Connection, channel_id: &str) -> Result<Option<ChannelConfigRow>> {",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/channel_config.rs",
-      "line": 32,
-      "snippet": "get_channel_config_for_agent(conn, channel_id, \"\")",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/channel_config.rs",
-      "line": 36,
-      "snippet": "pub fn get_channel_config_for_agent(",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -890,7 +2930,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -900,17 +2940,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/channel_config.rs",
-      "line": 43,
-      "snippet": "FROM channel_config WHERE channel_id = ?1 AND agent_id = ?2\",",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -920,7 +2950,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -930,7 +2960,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -940,27 +2970,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/channel_config.rs",
-      "line": 68,
-      "snippet": "pub fn upsert_channel_config(conn: &Connection, cfg: &ChannelConfigRow) -> Result<()> {",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/channel_config.rs",
-      "line": 70,
-      "snippet": "\"INSERT INTO channel_config (channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs, heartbeat_instructions, updated_at)",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -970,7 +2980,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -980,7 +2990,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -990,7 +3000,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1000,37 +3010,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/channel_config.rs",
-      "line": 100,
-      "snippet": "pub fn delete_channel_config(conn: &Connection, channel_id: &str) -> Result<bool> {",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/channel_config.rs",
-      "line": 101,
-      "snippet": "delete_channel_config_for_agent(conn, channel_id, \"\")",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/channel_config.rs",
-      "line": 105,
-      "snippet": "pub fn delete_channel_config_for_agent(",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1040,17 +3020,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/channel_config.rs",
-      "line": 111,
-      "snippet": "\"DELETE FROM channel_config WHERE channel_id = ?1 AND agent_id = ?2\",",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1060,17 +3030,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/channel_config.rs",
-      "line": 117,
-      "snippet": "pub fn list_channel_configs_by_guild(",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1080,7 +3040,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1090,17 +3050,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/channel_config.rs",
-      "line": 123,
-      "snippet": "FROM channel_config WHERE guild_id = ?1 ORDER BY channel_name\",",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1110,7 +3060,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1120,7 +3070,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1130,17 +3080,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/channel_config.rs",
-      "line": 145,
-      "snippet": "pub fn list_channel_configs_by_agent(",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1150,17 +3090,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/channel_config.rs",
-      "line": 151,
-      "snippet": "FROM channel_config WHERE agent_id = ?1 ORDER BY channel_name\",",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1170,7 +3100,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1180,7 +3110,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1190,17 +3120,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/channel_config.rs",
-      "line": 174,
-      "snippet": "FROM channel_config WHERE whitelisted = 1 ORDER BY channel_id\",",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1210,7 +3130,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1220,7 +3140,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1230,17 +3150,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/channel_config.rs",
-      "line": 200,
-      "snippet": "FROM channel_config WHERE heartbeat_enabled = 1 ORDER BY channel_id\",",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1250,7 +3160,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1260,7 +3170,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1270,17 +3180,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/channel_config.rs",
-      "line": 223,
-      "snippet": "get_channel_config(conn, channel_id)",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1290,17 +3190,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/channel_config.rs",
-      "line": 232,
-      "snippet": "get_channel_config(conn, channel_id)",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1310,17 +3200,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/channel_config.rs",
-      "line": 241,
-      "snippet": "get_channel_config(conn, channel_id)",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1330,27 +3210,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/channel_config.rs",
-      "line": 256,
-      "snippet": "if let Some(cfg) = get_channel_config_for_agent(conn, channel_id, agent_id)",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/channel_config.rs",
-      "line": 263,
-      "snippet": "get_channel_config_for_agent(conn, channel_id, \"\")",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1360,27 +3220,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/channel_config.rs",
-      "line": 273,
-      "snippet": "if let Some(cfg) = get_channel_config_for_agent(conn, channel_id, agent_id)",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/channel_config.rs",
-      "line": 279,
-      "snippet": "get_channel_config_for_agent(conn, channel_id, \"\")",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1390,27 +3230,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/channel_config.rs",
-      "line": 289,
-      "snippet": "if let Some(cfg) = get_channel_config_for_agent(conn, channel_id, agent_id)",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/channel_config.rs",
-      "line": 295,
-      "snippet": "get_channel_config_for_agent(conn, channel_id, \"\")",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1420,27 +3240,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/heartbeat.rs",
-      "line": 67,
-      "snippet": "let per_agent = get_channel_config_for_agent(conn, channel_id, agent_id)",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/heartbeat.rs",
-      "line": 74,
-      "snippet": "None => get_channel_config_for_agent(conn, channel_id, \"\")",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1450,7 +3250,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1460,7 +3260,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1470,7 +3270,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1480,7 +3280,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1490,67 +3290,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/mod.rs",
-      "line": 13,
-      "snippet": "mod channel_config;",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/mod.rs",
-      "line": 27,
-      "snippet": "mod session_watches;",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/mod.rs",
-      "line": 33,
-      "snippet": "mod trusted_users;",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/mod.rs",
-      "line": 42,
-      "snippet": "pub use channel_config::*;",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/mod.rs",
-      "line": 56,
-      "snippet": "pub use session_watches::*;",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/mod.rs",
-      "line": 62,
-      "snippet": "pub use trusted_users::*;",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1560,7 +3300,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1570,7 +3310,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1580,7 +3320,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1590,7 +3330,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1600,7 +3340,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1610,7 +3350,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1620,7 +3360,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1630,7 +3370,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1640,167 +3380,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/session_watches.rs",
-      "line": 50,
-      "snippet": "\"INSERT INTO session_watches (session_id, agent_id, interval_secs, filter_json, created_at)",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/session_watches.rs",
-      "line": 61,
-      "snippet": "FROM session_watches WHERE id = ?1\",",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/session_watches.rs",
-      "line": 73,
-      "snippet": "pub fn list_session_watches_for_agent(",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/session_watches.rs",
-      "line": 79,
-      "snippet": "FROM session_watches WHERE agent_id = ?1 ORDER BY id\",",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/session_watches.rs",
-      "line": 98,
-      "snippet": "\"UPDATE session_watches",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/session_watches.rs",
-      "line": 108,
-      "snippet": "let n = conn.execute(\"DELETE FROM session_watches WHERE id = ?1\", params![id])?;",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 244,
-      "snippet": "FROM trusted_users \\",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 255,
-      "snippet": "pub fn list_trusted_users(conn: &Connection, agent_id: &str) -> Result<Vec<TrustedUserRow>> {",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 258,
-      "snippet": "FROM trusted_users WHERE agent_id = ?1 ORDER BY created_at ASC\"",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 286,
-      "snippet": "\"INSERT INTO trusted_users (id, user_id, agent_id, permission, created_by, created_at, display_name, platform) \\",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 310,
-      "snippet": "FROM trusted_users WHERE platform = ?1 AND agent_id = ?2 AND permission = ?3 \\",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 330,
-      "snippet": "\"UPDATE trusted_users SET display_name = ?2 WHERE id = ?1\",",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 342,
-      "snippet": "\"UPDATE trusted_users SET permission = ?2 WHERE id = ?1\",",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 349,
-      "snippet": "let n = conn.execute(\"DELETE FROM trusted_users WHERE id = ?1\", [id])?;",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 356,
-      "snippet": "\"SELECT COUNT(*) FROM trusted_users \\",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/queries/trusted_users.rs",
-      "line": 377,
-      "snippet": "\"SELECT COUNT(*) FROM trusted_users WHERE platform = ?1 AND agent_id = ?2\",",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1810,17 +3390,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/schema/sql/full.rs",
-      "line": 297,
-      "snippet": "CREATE TABLE IF NOT EXISTS channel_config (",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1830,7 +3400,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1840,7 +3410,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1850,37 +3420,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/schema/sql/full.rs",
-      "line": 311,
-      "snippet": "CREATE INDEX IF NOT EXISTS idx_channel_guild ON channel_config(guild_id);",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/schema/sql/full.rs",
-      "line": 430,
-      "snippet": "CREATE TABLE IF NOT EXISTS trusted_users (",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/schema/sql/full.rs",
-      "line": 442,
-      "snippet": "CREATE INDEX IF NOT EXISTS idx_trusted_users_agent ON trusted_users(agent_id);",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -1890,57 +3430,7 @@
       "classification": "production-violation",
       "violation": "V06",
       "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/schema/sql/full.rs",
-      "line": 670,
-      "snippet": "CREATE TABLE IF NOT EXISTS session_watches (",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/schema/sql/full.rs",
-      "line": 679,
-      "snippet": "CREATE INDEX IF NOT EXISTS idx_session_watches_session ON session_watches(session_id);",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/schema/sql/mod.rs",
-      "line": 205,
-      "snippet": "pub(super) const SESSION_WATCHES_SQL: &str = \"",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/schema/sql/mod.rs",
-      "line": 206,
-      "snippet": "CREATE TABLE IF NOT EXISTS session_watches (",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/db/src/schema/sql/mod.rs",
-      "line": 215,
-      "snippet": "CREATE INDEX IF NOT EXISTS idx_session_watches_session ON session_watches(session_id);",
-      "classification": "production-violation",
-      "violation": "V06",
-      "owner_stage": "S8/S10",
-      "expires_when": "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -2064,16 +3554,6 @@
     },
     {
       "rule": "shared-concrete-vocabulary",
-      "path": "crates/extgate/src/ops_projection.rs",
-      "line": 112,
-      "snippet": ".unwrap_or_else(|| opencrab_gateway::is_known_utterance_op(&decl.name))",
-      "classification": "production-violation",
-      "violation": "V10",
-      "owner_stage": "S3",
-      "expires_when": "remove operation-name fallback and derive policy solely from declared metadata"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
       "path": "crates/gateway/src/lib.rs",
       "line": 8,
       "snippet": "is_known_utterance_op, utterance_body, DispatchMode, GatewayActionDef, GatewayActionResult,",
@@ -2130,7 +3610,7 @@
       "classification": "production-violation",
       "violation": "V05",
       "owner_stage": "S5",
-      "expires_when": "move/rename supervisor utility so shared production source has no concrete vocabulary"
+      "expires_when": "move platform-neutral process utility out of shared concrete ownership"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -2140,17 +3620,7 @@
       "classification": "production-violation",
       "violation": "V05",
       "owner_stage": "S5",
-      "expires_when": "move/rename supervisor utility so shared production source has no concrete vocabulary"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/gateway/src/traits.rs",
-      "line": 265,
-      "snippet": "pub fn is_known_utterance_op(name: &str) -> bool {",
-      "classification": "production-violation",
-      "violation": "V10",
-      "owner_stage": "S3",
-      "expires_when": "remove operation-name fallback and derive policy solely from declared metadata"
+      "expires_when": "move platform-neutral process utility out of shared concrete ownership"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -2190,7 +3660,7 @@
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -2200,7 +3670,7 @@
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -2210,7 +3680,7 @@
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -2220,27 +3690,7 @@
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 37,
-      "snippet": "pub async fn list_channel_configs(",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 44,
-      "snippet": "opencrab_db::queries::list_channel_configs_by_agent(&conn, &agent_id).unwrap_or_default();",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -2250,7 +3700,7 @@
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -2260,7 +3710,7 @@
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -2270,7 +3720,7 @@
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -2280,7 +3730,7 @@
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -2290,7 +3740,7 @@
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -2300,7 +3750,7 @@
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -2310,27 +3760,7 @@
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 92,
-      "snippet": "pub async fn upsert_channel_config(",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 100,
-      "snippet": "opencrab_db::queries::get_channel_config_for_agent(&conn, &req.channel_id, &agent_id)",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -2340,7 +3770,7 @@
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -2350,7 +3780,7 @@
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -2360,7 +3790,7 @@
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -2370,7 +3800,7 @@
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -2380,17 +3810,7 @@
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 135,
-      "snippet": "opencrab_db::queries::upsert_channel_config(&conn, &cfg)",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -2400,17 +3820,7 @@
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 144,
-      "snippet": "pub async fn delete_channel_config(",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -2420,17 +3830,7 @@
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/api/channel_configs.rs",
-      "line": 150,
-      "snippet": "opencrab_db::queries::delete_channel_config_for_agent(&conn, &channel_id, &agent_id)",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -2440,47 +3840,7 @@
       "classification": "production-violation",
       "violation": "V07",
       "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/api/mod.rs",
-      "line": 5,
-      "snippet": "pub mod channel_configs;",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/api/mod.rs",
-      "line": 24,
-      "snippet": "pub mod trusted_users;",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/api/trusted_users.rs",
-      "line": 46,
-      "snippet": "pub async fn list_trusted_users(",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/api/trusted_users.rs",
-      "line": 51,
-      "snippet": "let rows = opencrab_db::queries::list_trusted_users(&conn, &agent_id).unwrap_or_default();",
-      "classification": "production-violation",
-      "violation": "V07",
-      "owner_stage": "S5/S10",
-      "expires_when": "move concrete administration/state to gateway-owned stores and remove core route/query"
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -2605,16 +3965,6 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 141,
-      "snippet": "let existing = opencrab_db::queries::get_channel_config_for_agent(",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_instructions.rs",
       "line": 143,
       "snippet": "channel_id,",
       "classification": "production-violation",
@@ -2725,16 +4075,6 @@
     {
       "rule": "shared-concrete-vocabulary",
       "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 203,
-      "snippet": "if let Err(e) = opencrab_db::queries::upsert_channel_config(&conn, &cfg) {",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_instructions.rs",
       "line": 214,
       "snippet": "Some(channel_id),",
       "classification": "production-violation",
@@ -2767,16 +4107,6 @@
       "path": "crates/server/src/heartbeat_instructions.rs",
       "line": 277,
       "snippet": "error: Some(format!(\"scope={scope}のときはchannel_idが必要です\")),",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/heartbeat_instructions.rs",
-      "line": 282,
-      "snippet": "let text = opencrab_db::queries::get_channel_config_for_agent(",
       "classification": "production-violation",
       "violation": "V11",
       "owner_stage": "S3/S5/S10",
@@ -2884,46 +4214,6 @@
     },
     {
       "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/lib.rs",
-      "line": 382,
-      "snippet": "$apply!($target, \"/api/agents/{id}/channel-configs\", get => api::channel_configs::list_channel_configs, put => api::channel_configs::upsert_channel_config);",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/lib.rs",
-      "line": 383,
-      "snippet": "$apply!($target, \"/api/agents/{id}/channel-configs/{channel_id}\", delete => api::channel_configs::delete_channel_config);",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/lib.rs",
-      "line": 384,
-      "snippet": "$apply!($target, \"/api/agents/{id}/trusted-users\", get => api::trusted_users::list_trusted_users, post => api::trusted_users::add_trusted_user);",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
-      "path": "crates/server/src/lib.rs",
-      "line": 385,
-      "snippet": "$apply!($target, \"/api/agents/{id}/trusted-users/{user_id}\", patch => api::trusted_users::update_trusted_user, delete => api::trusted_users::delete_trusted_user);",
-      "classification": "production-violation",
-      "violation": "V11",
-      "owner_stage": "S3/S5/S10",
-      "expires_when": "remove concrete platform symbol/branch from shared production source"
-    },
-    {
-      "rule": "shared-concrete-vocabulary",
       "path": "crates/server/src/main/bootstrap.rs",
       "line": 146,
       "snippet": "gateways: Arc::new(opencrab_actions::AgentGatewayRegistry::new()),",
@@ -3000,7 +4290,7 @@
       "classification": "production-violation",
       "violation": "V09",
       "owner_stage": "S3",
-      "expires_when": "replace platform-shaped routing fields with canonical generic binding/session IDs"
+      "expires_when": "replace platform-shaped routing with canonical generic binding/session IDs"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -3010,7 +4300,7 @@
       "classification": "production-violation",
       "violation": "V09",
       "owner_stage": "S3",
-      "expires_when": "replace platform-shaped routing fields with canonical generic binding/session IDs"
+      "expires_when": "replace platform-shaped routing with canonical generic binding/session IDs"
     },
     {
       "rule": "shared-concrete-vocabulary",
@@ -3107,6 +4397,176 @@
       "path": "crates/server/src/transcript.rs",
       "line": 222,
       "snippet": "meta[\"channel_id\"] = serde_json::json!(channel_id);",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-gateway-name-branch",
+      "path": "crates/extgate/src/ops_projection.rs",
+      "line": 112,
+      "snippet": ".unwrap_or_else(|| opencrab_gateway::is_known_utterance_op(&decl.name))",
+      "classification": "production-violation",
+      "violation": "V10",
+      "owner_stage": "S3",
+      "expires_when": "derive routing solely from dynamic declaration metadata"
+    },
+    {
+      "rule": "shared-gateway-name-branch",
+      "path": "crates/gateway/src/traits.rs",
+      "line": 265,
+      "snippet": "pub fn is_known_utterance_op(name: &str) -> bool {",
+      "classification": "production-violation",
+      "violation": "V10",
+      "owner_stage": "S3",
+      "expires_when": "derive routing solely from dynamic declaration metadata"
+    },
+    {
+      "rule": "shared-platform-dto",
+      "path": "crates/core/src/a2ui.rs",
+      "line": 95,
+      "snippet": "pub platform: String,",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-platform-dto",
+      "path": "crates/core/src/a2ui.rs",
+      "line": 104,
+      "snippet": "pub platform: String,",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-platform-dto",
+      "path": "crates/core/src/a2ui.rs",
+      "line": 257,
+      "snippet": "pub platform: String,",
+      "classification": "production-violation",
+      "violation": "V11",
+      "owner_stage": "S3/S5/S10",
+      "expires_when": "remove concrete platform symbol/branch from shared production source"
+    },
+    {
+      "rule": "shared-platform-dto",
+      "path": "crates/db/src/queries/pending_interactions.rs",
+      "line": 18,
+      "snippet": "pub platform: String,",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-platform-dto",
+      "path": "crates/db/src/queries/pending_interactions.rs",
+      "line": 42,
+      "snippet": "platform: &str,",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-platform-dto",
+      "path": "crates/db/src/queries/pending_interactions.rs",
+      "line": 136,
+      "snippet": "pub platform: String,",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-platform-dto",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 213,
+      "snippet": "pub platform: String,",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-platform-dto",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 237,
+      "snippet": "platform: &str,",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-platform-dto",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 276,
+      "snippet": "platform: &str,",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-platform-dto",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 305,
+      "snippet": "platform: &str,",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-platform-dto",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 354,
+      "snippet": "pub fn is_trusted_user(conn: &Connection, platform: &str, user_id: &str, agent_id: &str) -> bool {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-platform-dto",
+      "path": "crates/db/src/queries/trusted_users.rs",
+      "line": 375,
+      "snippet": "pub fn trusted_user_count(conn: &Connection, platform: &str, agent_id: &str) -> i64 {",
+      "classification": "production-violation",
+      "violation": "V06",
+      "owner_stage": "S8/S10",
+      "expires_when": "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
+    },
+    {
+      "rule": "shared-platform-dto",
+      "path": "crates/server/src/api/trusted_users.rs",
+      "line": 30,
+      "snippet": "pub platform: String,",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-platform-dto",
+      "path": "crates/server/src/api/trusted_users.rs",
+      "line": 63,
+      "snippet": "pub platform: String,",
+      "classification": "production-violation",
+      "violation": "V07",
+      "owner_stage": "S5/S10",
+      "expires_when": "move administration/state to gateway-owned stores and remove core route/query"
+    },
+    {
+      "rule": "shared-platform-dto",
+      "path": "crates/server/src/peer_review.rs",
+      "line": 626,
+      "snippet": "platform: &str,",
       "classification": "production-violation",
       "violation": "V11",
       "owner_stage": "S3/S5/S10",

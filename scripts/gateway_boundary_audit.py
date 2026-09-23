@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Static gateway/core ownership boundary audit for Issue #1006 S0.
+"""Fail-closed static ownership-boundary audit for Issue #1006 S0.
 
-The checked baseline is a burn-down list, not an allowlist: every production
-finding is tied to an owner stage and removal criterion, and an unclassified or
-new occurrence fails. Tests, comments, and historical migration sources are
-excluded structurally rather than by suppressing matching text.
+The checked JSON is a line-specific burn-down inventory, not an allowlist.
+Every current production occurrence is classified with an owner and expiry;
+anything new, moved, duplicated, or removed fails until it is reviewed.
 """
 
 from __future__ import annotations
@@ -18,54 +17,50 @@ import sys
 import tomllib
 from typing import Iterable, Mapping, NamedTuple
 
-SHARED_CRATES = {
-    "actions",
-    "core",
-    "db",
-    "extgate",
-    "gate-client",
-    "gateway",
-    "server",
-}
+SHARED_CRATES = {"actions", "core", "db", "extgate", "gate-client", "gateway", "server"}
 FORBIDDEN_GATEWAY_DEPENDENCIES = {
-    "opencrab-actions",
-    "opencrab-core",
-    "opencrab-db",
-    "opencrab-discord",
-    "opencrab-extgate",
-    "opencrab-gateway",
-    "opencrab-llm",
-    "opencrab-llm-types",
-    "opencrab-mcp",
-    "opencrab-nostr",
-    "opencrab-server",
-    "opencrab-voice",
+    "opencrab-actions", "opencrab-core", "opencrab-db", "opencrab-discord",
+    "opencrab-extgate", "opencrab-gateway", "opencrab-llm",
+    "opencrab-llm-types", "opencrab-mcp", "opencrab-nostr",
+    "opencrab-server", "opencrab-voice",
 }
-VOCABULARY = re.compile(
-    r"(?:"
-    r"agent_(?:discord|nostr)_config|"
-    r"channel_configs?|trusted_users|session_watches|"
-    r"owner_pubkey|self_pubkey|owner_discord_id|"
-    r"AgentGateway(?:Registry|Lifecycle)?|"
-    r"is_known_utterance_op|"
-    r"guild_id|channel_id|"
-    r"discord(?:[_-]?gateway)?|nostr(?:[_-]?gateway)?"
-    r")",
+CONCRETE_VOCABULARY = re.compile(
+    r"(?:owner_pubkey|self_pubkey|owner_discord_id|AgentGateway(?:Registry|Lifecycle)?|"
+    r"is_known_utterance_op|guild_id|channel_id|discord(?:[_-]?gateway)?|"
+    r"nostr(?:[_-]?gateway)?)",
     re.IGNORECASE,
 )
-CORE_SQLITE = re.compile(
-    r"(?:core_database_path|legacy_database_path|opencrab_(?:db|core)::|"
-    r"use\s+opencrab_(?:db|core)\b)"
+SCHEMA_IDENTIFIERS = re.compile(
+    r"(?:agent_(?:discord|nostr)_config|channel_config(?:s)?|trusted_user(?:s)?|session_watch(?:es)?)",
+    re.IGNORECASE,
 )
-PUBLIC_ADMIN = re.compile(r"(?:create_router_with_gate|opencrab_extgate::admin_router|\badmin_router\s*\()")
-HISTORICAL_PARTS = (
-    "/src/schema/migrations/",
-    "/src/schema/tests/",
+CONCRETE_ROUTES = re.compile(r"/(?:channel-configs|trusted-users)(?:[/\"]|$)")
+DTO_PLATFORM_FIELD = re.compile(
+    r"\b(?:pub(?:\([^)]*\))?\s+)?platform\s*:\s*(?:&(?:'\w+\s+)?str\b|String\b|Option<|Cow<|[A-Z][A-Za-z0-9_:<>]*)"
 )
+NAME_BRANCH = re.compile(
+    r"(?:\b(?:gateway_kind|gateway_name|operation_name|platform)\s*==\s*\"|"
+    r"\bmatch\s+(?:gateway_kind|gateway_name|operation_name|platform)\b|"
+    r"\bdecl\.name\s*==\s*\"|\bis_known_utterance_op\s*\()"
+)
+CORE_PATH = re.compile(r"\b(?:core|legacy)(?:_database|_db)?_path\b", re.IGNORECASE)
+DB_CALL = re.compile(r"\b([A-Za-z_][A-Za-z0-9_:]*(?:Store|Db|Database|Connection)|Connection|Sqlite)::(open|open_with_flags|connect)\s*\(")
+CORE_STORE_CALL = re.compile(r"\b[A-Za-z_][A-Za-z0-9_:]*(?:Store|Db|Database|Connection)::(?:open|open_with_flags|connect|load)\s*\(")
+GATE_ADMIN_PATH = re.compile(r'"(/api/gate-(?:instances|bindings)[^\"]*)"')
+HISTORICAL_PARTS = ("/src/schema/migrations/", "/src/schema/tests/")
 HISTORICAL_FILES = {
     "crates/db/src/schema/baseline.rs",
     "crates/db/src/schema/migration_tests.rs",
     "crates/db/src/schema/v43_v47.rs",
+}
+VALID_GATEWAY_DB_OPENS = {
+    ("crates/nostr-gateway/src/store.rs", "let conn = Connection::open(path)"),
+    ("crates/nostr-gateway/src/daemon.rs", "let mut gateway_store = GatewayStore::open(&config.database_path)?;"),
+}
+VALID_CLASSIFICATIONS = {
+    "production-violation",
+    "valid-gateway-owned-store",
+    "dev-only-qc",
 }
 
 
@@ -80,49 +75,82 @@ class Finding(NamedTuple):
         return self.rule, self.path, self.line, self.snippet
 
 
+class RustFunction(NamedTuple):
+    path: str
+    name: str
+    start_line: int
+    lines: tuple[tuple[int, str], ...]
+
+    @property
+    def body(self) -> str:
+        return "\n".join(line for _, line in self.lines)
+
+
 def _is_gateway_manifest(path: str) -> bool:
     parts = pathlib.PurePosixPath(path).parts
+    return len(parts) == 3 and parts[0] == "crates" and parts[1].endswith("-gateway") and parts[2] == "Cargo.toml"
+
+
+def _dependency_package_name(key: str, value: object) -> str:
+    if isinstance(value, dict) and isinstance(value.get("package"), str):
+        return value["package"]
+    return key
+
+
+def _is_concrete_gateway_package(name: str) -> bool:
     return (
-        len(parts) == 3
-        and parts[0] == "crates"
-        and parts[1].endswith("-gateway")
-        and parts[2] == "Cargo.toml"
+        name.startswith("opencrab-")
+        and name.endswith("-gateway")
+        and name not in {"opencrab-gate-client", "opencrab-gateway"}
     )
 
 
+def _dependency_line(lines: list[str], key: str) -> tuple[int, str]:
+    for number, line in enumerate(lines, 1):
+        if re.match(rf"\s*{re.escape(key)}(?:\.|\s*=)", line):
+            return number, line.strip()
+    return 1, lines[0].strip() if lines else ""
+
+
 def _manifest_findings(path: str, text: str) -> list[Finding]:
-    if not _is_gateway_manifest(path):
+    if not path.startswith("crates/") or not path.endswith("/Cargo.toml"):
         return []
     try:
         document = tomllib.loads(text)
     except tomllib.TOMLDecodeError:
         return []
-    findings: list[Finding] = []
     lines = text.splitlines()
-    for table_name in ("dependencies", "build-dependencies"):
-        for dependency in document.get(table_name, {}):
-            if dependency not in FORBIDDEN_GATEWAY_DEPENDENCIES:
-                continue
-            line = next(
-                (i for i, value in enumerate(lines, 1) if re.match(rf"\s*{re.escape(dependency)}(?:\.|\s*=)", value)),
-                1,
-            )
-            findings.append(
-                Finding("gateway-production-dependency", path, line, lines[line - 1].strip())
-            )
+    is_gateway = _is_gateway_manifest(path)
+    findings: list[Finding] = []
+    for table_name in ("dependencies", "build-dependencies", "dev-dependencies"):
+        dependencies = document.get(table_name, {})
+        if not isinstance(dependencies, dict):
+            continue
+        for key, value in dependencies.items():
+            package = _dependency_package_name(key, value)
+            line, snippet = _dependency_line(lines, key)
+            if table_name != "dev-dependencies" and is_gateway and package in FORBIDDEN_GATEWAY_DEPENDENCIES:
+                findings.append(Finding("gateway-production-dependency", path, line, snippet))
+            if not is_gateway and _is_concrete_gateway_package(package):
+                if table_name != "dev-dependencies":
+                    findings.append(Finding("platform-production-gateway-dependency", path, line, snippet))
+                elif pathlib.PurePosixPath(path).parts[1] == "server":
+                    findings.append(Finding("reviewed-gateway-dev-dependency", path, line, snippet))
+                else:
+                    findings.append(Finding("unreviewed-gateway-dev-dependency", path, line, snippet))
     return findings
 
 
 def _strip_rust_comments(lines: Iterable[str]) -> Iterable[tuple[int, str]]:
-    """Yield source with // and /* */ comments removed, preserving strings."""
+    """Yield Rust without comments while retaining strings and source lines."""
     block_depth = 0
     for line_number, line in enumerate(lines, 1):
         out: list[str] = []
         i = 0
-        quote: str | None = None
+        quote = False
         escaped = False
         while i < len(line):
-            pair = line[i : i + 2]
+            pair = line[i:i + 2]
             if block_depth:
                 if pair == "/*":
                     block_depth += 1
@@ -140,8 +168,8 @@ def _strip_rust_comments(lines: Iterable[str]) -> Iterable[tuple[int, str]]:
                     escaped = False
                 elif char == "\\":
                     escaped = True
-                elif char == quote:
-                    quote = None
+                elif char == '"':
+                    quote = False
                 i += 1
                 continue
             if pair == "//":
@@ -150,33 +178,54 @@ def _strip_rust_comments(lines: Iterable[str]) -> Iterable[tuple[int, str]]:
                 block_depth = 1
                 i += 2
                 continue
-            # A single quote commonly begins a Rust lifetime (`'a`), not a
-            # quoted region. Double-quoted strings are enough to prevent `//`
-            # in URLs from being mistaken for comments.
             if char == '"':
-                quote = char
+                quote = True
             out.append(char)
             i += 1
         yield line_number, "".join(out)
 
 
+def _mask_strings(code: str) -> str:
+    out: list[str] = []
+    quote = False
+    escaped = False
+    for char in code:
+        if quote:
+            out.append(" ")
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quote = False
+        else:
+            if char == '"':
+                quote = True
+                out.append(" ")
+            else:
+                out.append(char)
+    return "".join(out)
+
+
 def _production_rust_lines(path: str, text: str) -> Iterable[tuple[int, str]]:
     normalized = f"/{path}"
     file_name = pathlib.PurePosixPath(path).name
+    path_parts = pathlib.PurePosixPath(path).parts
     if (
         "/tests/" in normalized
         or file_name == "tests.rs"
         or file_name.endswith("_tests.rs")
+        or any(part.endswith("_e2e") for part in path_parts)
     ):
         return
     if any(part in normalized for part in HISTORICAL_PARTS) or path in HISTORICAL_FILES:
         return
-
     cfg_test_pending = False
     test_depth: int | None = None
     brace_depth = 0
     for line_number, code in _strip_rust_comments(text.splitlines()):
-        delta = code.count("{") - code.count("}")
+        masked = _mask_strings(code)
+        delta = masked.count("{") - masked.count("}")
         if test_depth is not None:
             brace_depth += delta
             if brace_depth < test_depth:
@@ -187,15 +236,14 @@ def _production_rust_lines(path: str, text: str) -> Iterable[tuple[int, str]]:
             brace_depth += delta
             continue
         if cfg_test_pending:
-            if "{" in code:
-                test_depth = brace_depth + code[: code.index("{") + 1].count("{")
+            if "{" in masked:
+                test_depth = brace_depth + masked[:masked.index("{") + 1].count("{")
                 cfg_test_pending = False
                 brace_depth += delta
                 if brace_depth < test_depth:
                     test_depth = None
                 continue
             if code.strip():
-                # Attribute may precede a one-line test item; exclude that item.
                 cfg_test_pending = False
                 brace_depth += delta
                 continue
@@ -206,50 +254,145 @@ def _production_rust_lines(path: str, text: str) -> Iterable[tuple[int, str]]:
 
 def _shared_production_path(path: str) -> bool:
     parts = pathlib.PurePosixPath(path).parts
-    return (
-        len(parts) >= 4
-        and parts[0] == "crates"
-        and parts[1] in SHARED_CRATES
-        and parts[2] == "src"
-        and path.endswith(".rs")
-    )
+    return len(parts) >= 4 and parts[0] == "crates" and parts[1] in SHARED_CRATES and parts[2] == "src" and path.endswith(".rs")
 
 
 def _gateway_production_path(path: str) -> bool:
     parts = pathlib.PurePosixPath(path).parts
-    return (
-        len(parts) >= 4
-        and parts[0] == "crates"
-        and parts[1].endswith("-gateway")
-        and parts[2] == "src"
-        and path.endswith(".rs")
-    )
+    return len(parts) >= 4 and parts[0] == "crates" and parts[1].endswith("-gateway") and parts[2] == "src" and path.endswith(".rs")
 
 
-def _source_findings(path: str, text: str) -> list[Finding]:
+def _normalized_identifier_text(code: str) -> str:
+    snake = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", code)
+    return snake.replace("-", "_").lower()
+
+
+def _shared_source_findings(path: str, text: str) -> list[Finding]:
     findings: list[Finding] = []
-    if _shared_production_path(path):
-        for line_number, code in _production_rust_lines(path, text):
-            if VOCABULARY.search(code):
-                findings.append(Finding("shared-concrete-vocabulary", path, line_number, code))
-            if path.startswith("crates/server/") and PUBLIC_ADMIN.search(code):
-                findings.append(Finding("public-gate-admin", path, line_number, code))
-    elif _gateway_production_path(path):
-        for line_number, code in _production_rust_lines(path, text):
-            if CORE_SQLITE.search(code):
-                findings.append(Finding("gateway-core-sqlite-open", path, line_number, code))
+    for line_number, code in _production_rust_lines(path, text):
+        normalized = _normalized_identifier_text(code)
+        if CONCRETE_ROUTES.search(code):
+            rule = "shared-concrete-route"
+        elif DTO_PLATFORM_FIELD.search(code):
+            rule = "shared-platform-dto"
+        elif NAME_BRANCH.search(code):
+            rule = "shared-gateway-name-branch"
+        elif SCHEMA_IDENTIFIERS.search(normalized):
+            rule = "shared-concrete-schema"
+        elif CONCRETE_VOCABULARY.search(code):
+            rule = "shared-concrete-vocabulary"
+        else:
+            continue
+        findings.append(Finding(rule, path, line_number, code))
+    return findings
+
+
+def _gateway_source_findings(path: str, text: str) -> list[Finding]:
+    findings: list[Finding] = []
+    production = list(_production_rust_lines(path, text))
+    aliases = {"Connection"}
+    for _, code in production:
+        match = re.search(r"\buse\s+rusqlite::Connection(?:\s+as\s+(\w+))?", code)
+        if match:
+            aliases.add(match.group(1) or "Connection")
+    alias_pattern = re.compile(rf"\b(?:{'|'.join(map(re.escape, sorted(aliases)))})::(?:open|open_with_flags)\s*\(")
+    for line_number, code in production:
+        if CORE_PATH.search(code):
+            findings.append(Finding("gateway-core-path", path, line_number, code))
+        if DB_CALL.search(code) or alias_pattern.search(code) or "opencrab_db::Db::open(" in code:
+            findings.append(Finding("gateway-db-open", path, line_number, code))
+        if CORE_PATH.search(code) and CORE_STORE_CALL.search(code):
+            findings.append(Finding("gateway-core-store-open", path, line_number, code))
+    return findings
+
+
+def _extract_functions(path: str, text: str) -> list[RustFunction]:
+    production = list(_production_rust_lines(path, text))
+    functions: list[RustFunction] = []
+    index = 0
+    while index < len(production):
+        line_number, code = production[index]
+        match = re.search(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>]*>)?\s*\(", code)
+        if not match:
+            index += 1
+            continue
+        name = match.group(1)
+        body: list[tuple[int, str]] = []
+        depth = 0
+        started = False
+        cursor = index
+        while cursor < len(production):
+            number, value = production[cursor]
+            body.append((number, value))
+            masked = _mask_strings(value)
+            if "{" in masked:
+                started = True
+            if started:
+                depth += masked.count("{") - masked.count("}")
+                if depth <= 0:
+                    break
+            cursor += 1
+        if started:
+            functions.append(RustFunction(path, name, line_number, tuple(body)))
+            index = max(index + 1, cursor + 1)
+        else:
+            index += 1
+    return functions
+
+
+def _public_route_findings(files: Mapping[str, str]) -> list[Finding]:
+    functions: list[RustFunction] = []
+    for path, text in files.items():
+        if _shared_production_path(path):
+            functions.extend(_extract_functions(path, text))
+    by_name: dict[str, list[RustFunction]] = {}
+    for function in functions:
+        header = function.body.split("{", 1)[0]
+        if re.search(r"->\s*(?:axum::)?Router\b", header):
+            by_name.setdefault(function.name, []).append(function)
+    roots = [f for f in functions if "TcpListener::bind" in f.body and "axum::serve" in f.body]
+    reachable: set[tuple[str, str, int]] = {
+        (root.path, root.name, root.start_line) for root in roots
+    }
+    call_pattern = re.compile(r"(?<!\bfn\s)\b([A-Za-z_][A-Za-z0-9_]*)\s*(?:!\s*)?\(")
+    pending: list[RustFunction] = []
+    for root in roots:
+        flattened = re.sub(r"\s+", " ", root.body)
+        for served in re.findall(r"axum::serve\s*\([^,]+,\s*([A-Za-z_][A-Za-z0-9_]*)", flattened):
+            assignment = re.search(rf"\blet\s+(?:mut\s+)?{re.escape(served)}\s*=\s*(.*?);", flattened)
+            if assignment:
+                for called in call_pattern.findall(assignment.group(1)):
+                    pending.extend(by_name.get(called, []))
+    while pending:
+        function = pending.pop()
+        key = (function.path, function.name, function.start_line)
+        if key in reachable:
+            continue
+        reachable.add(key)
+        for called in call_pattern.findall(function.body):
+            pending.extend(by_name.get(called, []))
+    findings: list[Finding] = []
+    for function in functions:
+        key = (function.path, function.name, function.start_line)
+        if key not in reachable:
+            continue
+        for line_number, code in function.lines:
+            if GATE_ADMIN_PATH.search(code):
+                findings.append(Finding("public-gate-admin-reachable", function.path, line_number, code))
     return findings
 
 
 def audit_texts(files: Mapping[str, str]) -> list[Finding]:
-    """Return production boundary findings for an in-memory path -> text fixture."""
+    normalized = {pathlib.PurePosixPath(path).as_posix(): text for path, text in files.items()}
     findings: list[Finding] = []
-    for path, text in sorted(files.items()):
-        path = pathlib.PurePosixPath(path).as_posix()
+    for path, text in sorted(normalized.items()):
         if path.endswith("Cargo.toml"):
             findings.extend(_manifest_findings(path, text))
-        if path.endswith(".rs"):
-            findings.extend(_source_findings(path, text))
+        if _shared_production_path(path):
+            findings.extend(_shared_source_findings(path, text))
+        elif _gateway_production_path(path):
+            findings.extend(_gateway_source_findings(path, text))
+    findings.extend(_public_route_findings(normalized))
     return sorted(set(findings), key=lambda item: item.key)
 
 
@@ -268,41 +411,47 @@ def repository_texts(root: pathlib.Path) -> dict[str, str]:
     return files
 
 
-def _metadata_for(finding: Finding) -> tuple[str, str, str]:
+def _metadata_for(finding: Finding) -> tuple[str, str, str, str]:
     path = finding.path
     if finding.rule == "gateway-production-dependency":
-        return "V01", "S5", "remove forbidden normal/build dependency from the concrete daemon"
-    if finding.rule == "gateway-core-sqlite-open":
-        violation = "V03" if "legacy_database_path" in finding.snippet else "V02"
-        return violation, "S5/S8", "remove runtime core/legacy DB field, import, and direct core SQLite access"
-    if finding.rule == "public-gate-admin":
-        return "V07", "S1", "public TCP has no gate-admin merge, reachability, description, or extension"
+        return "production-violation", "V01", "S5", "remove forbidden normal/build dependency from the concrete daemon"
+    if finding.rule == "platform-production-gateway-dependency":
+        return "production-violation", "V14", "S5/S9", "remove concrete gateway from non-dev dependency graph; keep reviewed QC edge dev-only"
+    if finding.rule == "reviewed-gateway-dev-dependency":
+        return "dev-only-qc", "V14", "S11", "retain only while isolated QC needs it and cargo tree --edges no-dev remains free of the daemon"
+    if finding.rule == "unreviewed-gateway-dev-dependency":
+        return "production-violation", "V14", "S0", "remove or explicitly move reviewed QC dependency to server dev-only scope"
+    if finding.rule == "gateway-db-open" and (path, finding.snippet) in VALID_GATEWAY_DB_OPENS:
+        return "valid-gateway-owned-store", "V02", "S5", "retain only while provenance remains the daemon-owned gateway database"
+    if finding.rule in {"gateway-core-path", "gateway-core-store-open", "gateway-db-open"}:
+        violation = "V03" if "legacy" in finding.snippet.lower() else "V02"
+        return "production-violation", violation, "S5/S8", "remove runtime core/legacy path and direct/helper-mediated core database access"
+    if finding.rule == "public-gate-admin-reachable":
+        return "production-violation", "V07", "S1", "public TCP cannot reach any of the six gate-admin operations"
     if "process_supervisor" in path:
-        return "V05", "S5", "move/rename supervisor utility so shared production source has no concrete vocabulary"
+        return "production-violation", "V05", "S5", "move platform-neutral process utility out of shared concrete ownership"
     if "agent_gateway" in path:
-        return "V08", "S5", "remove concrete lifecycle registry after daemon-owned lifecycle is live"
+        return "production-violation", "V08", "S5", "remove concrete lifecycle registry after daemon-owned lifecycle is live"
     if "timed_fire" in path or "subtask" in path:
-        return "V09", "S3", "replace platform-shaped routing fields with canonical generic binding/session IDs"
-    if "ops_projection" in path or "operations" in path or "traits.rs" in path:
-        return "V10", "S3", "remove operation-name fallback and derive policy solely from declared metadata"
+        return "production-violation", "V09", "S3", "replace platform-shaped routing with canonical generic binding/session IDs"
+    if finding.rule == "shared-gateway-name-branch" or "ops_projection" in path or "traits.rs" in path:
+        return "production-violation", "V10", "S3", "derive routing solely from dynamic declaration metadata"
     if path.startswith("crates/db/"):
-        return "V06", "S8/S10", "project approved generic state, verify freeze, then guarded cleanup removes concrete core schema/query"
+        return "production-violation", "V06", "S8/S10", "project generic state, verify freeze, then guarded cleanup removes concrete schema/query"
     if path.startswith("crates/server/src/api/") or "channel_config" in path or "trusted_users" in path:
-        return "V07", "S5/S10", "move concrete administration/state to gateway-owned stores and remove core route/query"
-    return "V11", "S3/S5/S10", "remove concrete platform symbol/branch from shared production source"
+        return "production-violation", "V07", "S5/S10", "move administration/state to gateway-owned stores and remove core route/query"
+    return "production-violation", "V11", "S3/S5/S10", "remove concrete platform symbol/branch from shared production source"
 
 
-def cargo_metadata_evidence(root: pathlib.Path) -> tuple[set[tuple[str, str]], list[str]]:
-    """Return forbidden normal/build gateway edges and allowed dev-only QC edges."""
+def cargo_metadata_evidence(root: pathlib.Path) -> tuple[set[tuple[str, str, str]], list[str]]:
+    """Classify actual Cargo normal/build edges; dev-only QC edges stay evidence."""
+    root = root.resolve()
     result = subprocess.run(
         ["cargo", "metadata", "--format-version", "1", "--no-deps"],
-        cwd=root,
-        check=True,
-        capture_output=True,
-        text=True,
+        cwd=root, check=True, capture_output=True, text=True,
     )
     metadata = json.loads(result.stdout)
-    production: set[tuple[str, str]] = set()
+    production: set[tuple[str, str, str]] = set()
     dev_only: list[str] = []
     for package in metadata["packages"]:
         manifest = pathlib.Path(package["manifest_path"])
@@ -314,54 +463,45 @@ def cargo_metadata_evidence(root: pathlib.Path) -> tuple[set[tuple[str, str]], l
         for dependency in package["dependencies"]:
             name = dependency["name"]
             kind = dependency.get("kind") or "normal"
-            if is_gateway and name in FORBIDDEN_GATEWAY_DEPENDENCIES and kind != "dev":
-                production.add((rel_manifest, name))
-            if (
-                kind == "dev"
-                and name.startswith("opencrab-")
-                and name.endswith("-gateway")
-                and package["name"] in {"opencrab-server", "opencrab-web-gateway"}
-            ):
-                dev_only.append(f"{package['name']} -> {name}")
+            if kind != "dev" and is_gateway and name in FORBIDDEN_GATEWAY_DEPENDENCIES:
+                production.add(("gateway-production-dependency", rel_manifest, name))
+            if kind != "dev" and not is_gateway and _is_concrete_gateway_package(name):
+                production.add(("platform-production-gateway-dependency", rel_manifest, name))
+            if kind == "dev" and _is_concrete_gateway_package(name):
+                if package["name"] == "opencrab-server":
+                    dev_only.append(f"{package['name']} -> {name}")
+                else:
+                    production.add(("unreviewed-gateway-dev-dependency", rel_manifest, name))
     return production, sorted(dev_only)
 
 
 def baseline_document(findings: list[Finding]) -> dict:
     entries = []
     for finding in findings:
-        violation, owner, expiry = _metadata_for(finding)
-        entries.append(
-            {
-                "rule": finding.rule,
-                "path": finding.path,
-                "line": finding.line,
-                "snippet": finding.snippet,
-                "classification": "production-violation",
-                "violation": violation,
-                "owner_stage": owner,
-                "expires_when": expiry,
-            }
-        )
+        classification, violation, owner, expiry = _metadata_for(finding)
+        entries.append({
+            "rule": finding.rule, "path": finding.path, "line": finding.line,
+            "snippet": finding.snippet, "classification": classification,
+            "violation": violation, "owner_stage": owner, "expires_when": expiry,
+        })
     return {
-        "schema": 1,
-        "purpose": "Issue #1006 S0 line-specific burn-down; entries are debts with mandatory expiry, not permanent exceptions",
+        "schema": 2,
+        "purpose": "Issue #1006 S0 line-specific reviewed burn-down; entries are debts or explicit gateway-store provenance, never wildcard exceptions",
+        "review": {
+            "status": "pending-line-review",
+            "finding_count": len(entries),
+            "policy": "review every path/line/snippet classification, owner stage, expiry, and gateway-store provenance",
+        },
         "entries": entries,
         "coverage": [],
     }
 
 
 def _entry_key(entry: Mapping[str, object]) -> tuple[str, str, int, str]:
-    return (
-        str(entry["rule"]),
-        str(entry["path"]),
-        int(entry["line"]),
-        str(entry["snippet"]),
-    )
+    return str(entry["rule"]), str(entry["path"]), int(entry["line"]), str(entry["snippet"])
 
 
-def check_baseline(
-    findings: list[Finding], document: Mapping[str, object], root: pathlib.Path | None = None
-) -> list[str]:
+def check_baseline(findings: list[Finding], document: Mapping[str, object], root: pathlib.Path | None = None) -> list[str]:
     errors: list[str] = []
     entries = document.get("entries")
     if not isinstance(entries, list):
@@ -371,65 +511,63 @@ def check_baseline(
         if not isinstance(entry, dict):
             errors.append("baseline entry is not an object")
             continue
-        missing = {
-            "rule",
-            "path",
-            "line",
-            "snippet",
-            "classification",
-            "violation",
-            "owner_stage",
-            "expires_when",
-        } - entry.keys()
+        required = {"rule", "path", "line", "snippet", "classification", "violation", "owner_stage", "expires_when"}
+        missing = required - entry.keys()
         if missing:
             errors.append(f"baseline entry missing {sorted(missing)}: {entry}")
             continue
-        if entry["classification"] != "production-violation":
-            errors.append(f"invalid production classification: {entry}")
+        if entry["classification"] not in VALID_CLASSIFICATIONS:
+            errors.append(f"invalid finding classification: {entry}")
         if not str(entry["owner_stage"]).startswith("S") or not str(entry["expires_when"]).strip():
             errors.append(f"baseline entry lacks owner/expiry: {entry}")
         key = _entry_key(entry)
         if key in baseline:
             errors.append(f"duplicate baseline entry: {key}")
         baseline[key] = entry
-
+    review = document.get("review")
+    if not isinstance(review, dict) or review.get("status") != "line-by-line-reviewed":
+        errors.append("baseline review status must be line-by-line-reviewed")
+    elif review.get("finding_count") != len(entries):
+        errors.append("baseline review finding_count does not match entries")
     current = {finding.key: finding for finding in findings}
     for key in sorted(current.keys() - baseline.keys()):
         finding = current[key]
-        errors.append(
-            f"UNCLASSIFIED {finding.rule} {finding.path}:{finding.line}: {finding.snippet}"
-        )
+        errors.append(f"UNCLASSIFIED {finding.rule} {finding.path}:{finding.line}: {finding.snippet}")
     for key in sorted(baseline.keys() - current.keys()):
         errors.append(f"STALE baseline entry (remove/review it): {key}")
-
     coverage = document.get("coverage")
     if not isinstance(coverage, list):
         errors.append("baseline coverage must be a list")
-    else:
-        covered = {str(item.get("violation")) for item in coverage if isinstance(item, dict)}
-        covered.update(str(entry.get("violation")) for entry in entries if isinstance(entry, dict))
-        missing_ids = {f"V{i:02d}" for i in range(1, 17)} - covered
-        if missing_ids:
-            errors.append(f"V01-V16 coverage missing: {sorted(missing_ids)}")
-        for item in coverage:
-            if not isinstance(item, dict):
-                errors.append("coverage entry is not an object")
-                continue
-            required = {"violation", "classification", "path", "line", "needle", "owner_stage", "expires_when"}
-            absent = required - item.keys()
-            if absent:
-                errors.append(f"coverage entry missing {sorted(absent)}: {item}")
-                continue
-            evidence_path = pathlib.Path(str(item["path"]))
-            if root is not None:
-                evidence_path = root / evidence_path
-            if not evidence_path.is_file():
-                errors.append(f"coverage path missing: {evidence_path}")
-                continue
-            evidence_lines = evidence_path.read_text().splitlines()
-            line = int(item["line"])
-            if line < 1 or line > len(evidence_lines) or str(item["needle"]) not in evidence_lines[line - 1]:
-                errors.append(f"coverage anchor changed: {item['violation']} {evidence_path}:{line}")
+        return errors
+    covered = {str(item.get("violation")) for item in coverage if isinstance(item, dict)}
+    covered.update(str(entry.get("violation")) for entry in entries if isinstance(entry, dict))
+    missing_ids = {f"V{i:02d}" for i in range(1, 17)} - covered
+    if missing_ids:
+        errors.append(f"V01-V16 coverage missing: {sorted(missing_ids)}")
+    coverage_keys: set[tuple[str, str, int, str]] = set()
+    for item in coverage:
+        if not isinstance(item, dict):
+            errors.append("coverage entry is not an object")
+            continue
+        required = {"violation", "classification", "path", "line", "needle", "owner_stage", "expires_when"}
+        absent = required - item.keys()
+        if absent:
+            errors.append(f"coverage entry missing {sorted(absent)}: {item}")
+            continue
+        key = (str(item["violation"]), str(item["path"]), int(item["line"]), str(item["needle"]))
+        if key in coverage_keys:
+            errors.append(f"duplicate coverage anchor: {key}")
+        coverage_keys.add(key)
+        evidence_path = pathlib.Path(str(item["path"]))
+        if root is not None:
+            evidence_path = root / evidence_path
+        if not evidence_path.is_file():
+            errors.append(f"coverage path missing: {evidence_path}")
+            continue
+        evidence_lines = evidence_path.read_text().splitlines()
+        line = int(item["line"])
+        if line < 1 or line > len(evidence_lines) or str(item["needle"]) not in evidence_lines[line - 1]:
+            errors.append(f"coverage anchor changed: {item['violation']} {evidence_path}:{line}")
     return errors
 
 
@@ -446,8 +584,7 @@ def main(argv: list[str] | None = None) -> int:
         document = baseline_document(findings)
         if baseline_path.is_file():
             try:
-                previous = json.loads(baseline_path.read_text())
-                document["coverage"] = previous.get("coverage", [])
+                document["coverage"] = json.loads(baseline_path.read_text()).get("coverage", [])
             except json.JSONDecodeError:
                 pass
         baseline_path.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n")
@@ -464,15 +601,23 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
         errors.append(f"cargo metadata evidence failed: {error}")
         metadata_edges, dev_only_edges = set(), []
-    source_edges = {
-        (finding.path, finding.snippet.split(".", 1)[0].split("=", 1)[0].strip())
-        for finding in findings
-        if finding.rule == "gateway-production-dependency"
-    }
+    source_edges = set()
+    for finding in findings:
+        if finding.rule not in {
+            "gateway-production-dependency",
+            "platform-production-gateway-dependency",
+            "unreviewed-gateway-dev-dependency",
+        }:
+            continue
+        key = finding.snippet.split("=", 1)[0].strip().split(".", 1)[0]
+        manifest = tomllib.loads((root / finding.path).read_text())
+        package = key
+        for table in ("dependencies", "build-dependencies", "dev-dependencies"):
+            if key in manifest.get(table, {}):
+                package = _dependency_package_name(key, manifest[table][key])
+        source_edges.add((finding.rule, finding.path, package))
     if metadata_edges != source_edges:
-        errors.append(
-            f"Cargo metadata/TOML production-edge mismatch: metadata={sorted(metadata_edges)} source={sorted(source_edges)}"
-        )
+        errors.append(f"Cargo metadata/TOML production-edge mismatch: metadata={sorted(metadata_edges)} source={sorted(source_edges)}")
     if errors:
         print("gateway boundary audit FAILED", file=sys.stderr)
         print("\n".join(errors), file=sys.stderr)
@@ -480,7 +625,7 @@ def main(argv: list[str] | None = None) -> int:
     counts: dict[str, int] = {}
     for finding in findings:
         counts[finding.rule] = counts.get(finding.rule, 0) + 1
-    print(f"gateway boundary audit OK: {len(findings)} classified production findings; {counts}")
+    print(f"gateway boundary audit OK: {len(findings)} classified findings; {counts}")
     print(f"cargo metadata allowed dev-only QC edges: {dev_only_edges}")
     return 0
 
