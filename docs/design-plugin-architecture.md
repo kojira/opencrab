@@ -78,8 +78,8 @@ server ---------------- generic core APIs only --------------------------> core
 
 1. **汎用の実体を transport から引き剥がし、下位層に 1 つへ寄せる**
    セッション直列化 / 登録簿 / 完了通知 / 汎用管理ツール群。
-2. **上位から各ゲートウェイの名指しを消す**
-   既存のゲートウェイ抽象を実際に使い、上位はゲートウェイの集合だけを持つ。ゲートウェイを足しても上位に手が入らない状態にする。
+2. **上位から各ゲートウェイの名指しと in-process lifecycle registry を消す**
+   上位が使えるのは、generic runtime の capability / liveness / binding registry または opaque な gate-admin/runtime protocol endpoint だけとする。#191 の `AgentGatewayLifecycle` / `AgentGatewayRegistry` を具象 gateway の集合として再利用してはならない。新しい gateway を足しても core/shared/server の registry 型・登録コード・起動順に手が入らない状態にする。
 3. **境界をプロセス境界に置き換える**
    1〜2 で汎用会話実行を core に 1 つへ寄せた後、具象 gateway daemon を `server` から独立配備する。daemon は gateway-owned store と local admin を持ち、自分の instance child だけを監督する。core とは generic gate-admin UDS と runtime UDS だけで通信する。MCP の supervision 実装は generic utility の参考にはなるが、`server` が具象 gateway を子として所有する形は採らない。
 

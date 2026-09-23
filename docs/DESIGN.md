@@ -158,7 +158,7 @@ SkillEngine
 
 **ツール名の一覧はこのドキュメントには置かない**（各定義の属性・core の 2 定数・制御ツールのハードコードが権威。ここに書くのは上の分類基準だけ。一覧を二重管理すると必ず実装と乖離するため）。
 
-上記の core built-in 分類は core tool に限る。外部 gateway operation は hello の digest-covered `authorization.allowed_callers` / `dispatch` / `sub_engine` / `sharing` / `effect` metadata が唯一の権威で、新しい operation 名を shared allowlist、prefix、既知 utterance 一覧へ追加してはならない。詳細は [gateway ownership §4](design-gateway-process-ownership.md#4-one-to-one-to-be-transition-and-completion-map)。
+上記の core built-in 分類は core tool に限る。外部 gateway operation は hello の digest-covered `authorization.allowed_callers` / `dispatch` / `sub_engine` / `sharing` / `effect` metadata が唯一の権威で、`dispatch=utterance` と `effect=utterance` は iff として両方向を検証する。`final_delivery=operation_driven` は有効な utterance operation を 1 つ以上要求する。新しい operation 名を shared allowlist、prefix、既知 utterance 一覧へ追加してはならない。詳細は [gateway ownership §4](design-gateway-process-ownership.md#4-one-to-one-to-be-transition-and-completion-map)。
 
 分類の対象外が 2 つある。どちらも**既定の振る舞い**に落ちる:
 
@@ -325,7 +325,8 @@ The REST conversation path continues to record a generic session message, build 
 | `model_experience_notes` | モデル体験メモ (situation, observation, recommendation) |
 | `model_pricing` | モデル価格情報 |
 | `heartbeat_log` | ハートビート記録 |
-| `session_heartbeat_config` | セッション単位ハートビート設定 (#439/#456・永続アンカー last_fired_at) |
+| `session_heartbeat_config` | `(agent_id, session_id)` 単位の汎用ハートビート設定 (#439/#456・永続アンカー last_fired_at) |
+| `session_heartbeat_instructions` | `session_heartbeat_config` と同じ複合主キー/FK `(agent_id, session_id)`。nullable `override_text`（NULL は current agent instructions → generic default を継承）と `updated_at` を持ち、upgrade の単一 stopped projection transaction と fresh schema の双方で作成 |
 | `agent_schedules` | per-agent 定時実行 (#455・cron/@every・last_fired_at・next は照会時算出) |
 | `memory_index_nodes` | 記憶インデックスの階層ツリーノード (node_type, title, summary, log_id range) |
 | `memory_index_watermark` | インデックス構築の進捗管理 (last_indexed_log_id) |
@@ -381,4 +382,4 @@ Dioxus (Rust製WebUIフレームワーク) + Tailwind CSSで構築。
 
 The previous commands that enabled Discord/Nostr/Web as `opencrab-server` features and configured `[gateway.discord]` were instructions for the superseded in-process architecture. Do not use them as implementation guidance. The target deployment starts core/server generic services and each selected concrete gateway daemon/client independently. Each daemon receives only its gateway-owned DB/admin paths, generic gate-admin/runtime UDS paths, and separately sourced secrets; it never receives a core/legacy DB path. Operators administer platform state through the daemon-local UDS, provision core generic rows through gate-admin, and let the daemon supervise its own children.
 
-Cutover is offline and follows [design-gateway-process-ownership.md §9–11](design-gateway-process-ownership.md#9-offline-migration-and-completeness-proof): matched pre-import backups, import/verification, provision-only QC, post-QC freeze snapshots/digests, verify-and-mark, guarded cleanup, and rollback using the exact freeze set. Production deployment remains an operator action.
+Cutover is offline and follows [design-gateway-process-ownership.md §9–11](design-gateway-process-ownership.md#9-offline-migration-and-completeness-proof): matched pre-import backups, read-only-core import/verification, exactly one stopped writable-core heartbeat projection, provision-only QC, post-QC freeze snapshots/digests, verify-and-mark, guarded cleanup, and rollback using the exact freeze set. Production deployment remains an operator action.

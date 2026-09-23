@@ -119,7 +119,7 @@ The inventory is complete only if the implementation audit enumerates every prod
 | V07 | Concrete administration moves from public server routes to gateway-local UDS. | Cut clients over after verified import, then delete concrete DTO/handler/router entries. | Public server returns 404 for concrete gateway admin routes; local daemon admin authorization tests pass. |
 | V08 | Server owns no concrete gateway lifecycle; each daemon owns its children. | Delete `AgentGatewayLifecycle`/server registry after external daemons cover live routing; retain only generic extgate liveness. | Server starts and serves generic core APIs with no concrete daemon present and contains no concrete spawn/config/lifecycle path. |
 | V09 | Core schedules generic session turns; runtime delivery resolves only canonical generic binding/session IDs. Platform subscriptions and destinations remain gateway-owned. | Replace platform-shaped fire fields/descriptors with binding-based generic envelopes; preserve one core session-lock/subtask/schedule/heartbeat implementation. | A synthetic new kind receives timed fire without shared source change; no shared parser knows a platform prefix; duplicate-turn/lock tests pass. |
-| V10 | Every gateway operation declaration requires `authorization`, `dispatch`, `sub_engine`, `sharing`, and `effect` metadata. | Version hello declaration; migrate Discord/Nostr declarations; remove gateway-name fallback/allowlists after compatibility-free cutover. | Arbitrary valid new operation names project, authorize, and dispatch from metadata alone; missing/unknown metadata fails hello; only collision with a built-in name is rejected. |
+| V10 | Every gateway operation declaration requires `authorization`, `dispatch`, `sub_engine`, `sharing`, and `effect` metadata. | Version hello declaration; migrate Discord/Nostr declarations; remove gateway-name fallback/allowlists after compatibility-free cutover. | Arbitrary valid new operation names project, authorize, and dispatch from metadata alone; missing/unknown metadata and either direction of utterance mismatch fail hello; `operation_driven` without a valid utterance operation fails; only collision with a built-in name is rejected. |
 | V11 | Expand static audits from core-only identifiers to all shared/server production AST and macro/manifests. | Classify allowed historical/test/comment occurrences separately; permit no production platform vocabulary. | A fixture adding a kind branch or platform schema/query/route symbol fails CI. |
 | V12 | Web remains independently deployed and owns Web authentication/policy/display state. | Keep current runtime client; move any future durable Web concrete config into a Web-owned store/admin plane before adding it. | Web can be built/deployed without core schema/source changes; no Web policy column/route appears in core/server. |
 | V13 | CLI remains an operator-launched independent generic-runtime client. | Keep current path and opaque placement; do not add CLI-specific core policy. | CLI builds/runs against the generic protocol with no core/shared/server change. |
@@ -135,9 +135,9 @@ For protocol version 3, every operation declaration contains these required, dig
 - `dispatch`: `inline`, `background`, or `utterance`; `utterance` uses the exactly-once delivery path and is never converted into a background subtask;
 - `sub_engine`: `not_exposed`, `blocked`, or `allowed`;
 - `sharing`: `agent_bound` or `conversation_bound`;
-- `effect`: `read_only`, `state_change`, or `utterance`, with `dispatch=utterance` requiring `effect=utterance`.
+- `effect`: `read_only`, `state_change`, or `utterance`; `dispatch=utterance` **if and only if** `effect=utterance` (both directions are validated).
 
-Unknown enum values, missing fields, duplicate names, invalid schemas, forbidden combinations, or collisions with a built-in core tool name reject hello. Core may reserve its own built-in names, but it has no gateway-operation allowlist, prefix rule, “known utterance” list, or per-name authorization/dispatch branch. The live declaration snapshot is the sole authority for visibility, authorization, dispatch, sub-engine exposure, sharing, invocation, and callback validation. Thus a new tool name requires only a new gateway declaration.
+Unknown enum values, missing fields, duplicate names, invalid schemas, a `dispatch`/`effect` mismatch in either direction, forbidden combinations, or collisions with a built-in core tool name reject hello. Core may reserve its own built-in names, but it has no gateway-operation allowlist, prefix rule, “known utterance” list, or per-name authorization/dispatch branch. The live declaration snapshot is the sole authority for visibility, authorization, dispatch, sub-engine exposure, sharing, invocation, and callback validation. Thus a new tool name requires only a new gateway declaration.
 
 ## 5. Gateway-owned reference records and stable IDs
 
@@ -195,7 +195,7 @@ The protocol retains six mutating/read operations:
 
 In one core transaction it:
 
-1. verifies an undeleted instance and its immutable subject association; stopped or disabled instances may be provisioned;
+1. verifies an undeleted instance and its immutable subject association; non-live or disabled instances may be provisioned;
 2. creates the session and subject membership if the session is absent;
 3. otherwise verifies exact session title and subject membership;
 4. creates the binding, or returns the existing byte-identical binding;
@@ -205,7 +205,7 @@ Core stores the title as ordinary conversation metadata and does not parse it. `
 
 `DELETE binding` closes one binding idempotently. Both admin `PUT binding` and runtime lazy `create_binding` call the same internal `CoreBindingService` transaction above: admin is used for daemon desired-state reconciliation; runtime is allowed only for an authenticated live instance discovering an external conversation. Before runtime creation, the child must send the discovery over its private daemon control channel, the daemon must commit it to the desired generation, and only then acknowledge the child. A crash therefore leaves either no binding or a locally desired binding that reconciliation can idempotently create. Neither path can create for another instance or update a session. `DELETE instance` requires it to be non-live and atomically tombstones it and closes all open bindings. No API lists by kind, decodes config, resolves an agent name, or exposes platform vocabulary.
 
-Runtime hello, unlike provisioning, requires an enabled, undeleted instance with matching revision/digest. It declares operation capabilities dynamically using generic operation names, schemas, authorization, dispatch, sharing, sub-engine, and effect metadata defined in §4, plus required `final_delivery` (`automatic` or `operation_driven`). For `automatic`, core emits the normalized final response over the generic delivery frame; for `operation_driven`, no implicit final text is emitted and declared utterance operations perform delivery. Core uses this live metadata and never decodes opaque config to choose final-delivery behavior.
+Runtime hello, unlike provisioning, requires an enabled, undeleted instance with matching revision/digest. It declares operation capabilities dynamically using generic operation names, schemas, authorization, dispatch, sharing, sub-engine, and effect metadata defined in §4, plus required `final_delivery` (`automatic` or `operation_driven`). For `automatic`, core emits the normalized final response over the generic delivery frame. For `operation_driven`, no implicit final text is emitted and the validated declaration set must contain at least one operation with `dispatch=utterance` and `effect=utterance`; an empty or non-utterance-only set rejects hello. Core uses this live metadata and never decodes opaque config to choose final-delivery behavior.
 
 Inbound events carry only the binding, external event ID as opaque dedup material, normalized content/attachments, and a gateway-authenticated generic caller classification (`owner`, `co_agent`, `trusted`, or `guest`). A `co_agent` classification must include internal `agent_id` and relationship revision. Core queries the current internal relationship on every tool execution and turn continuation, requires the reference and revision to match, and rejects immediately after revocation; the gateway remains sole owner of external-ID authentication/mapping. Other external identity/policy data never reaches core. This dynamic contract, together with opaque placement, is what makes the new-gateway litmus test enforceable.
 
@@ -213,33 +213,46 @@ Before approving any protocol or schema change, reviewers must apply the litmus 
 
 ## 7. Lifecycle and reconciliation saga
 
-There is no distributed transaction between a gateway database and core. Each gateway store has an explicit saga state:
+There is no distributed transaction between a gateway database and core. Each gateway store persists exactly these saga states:
 
-- `disabled`: no child may run;
-- `pending`: desired generation committed locally but not verified in core;
-- `provisioning`: child stopped while idempotent core operations run;
-- `ready`: exact core revision, digest, and open binding inventory verified;
-- `running`: the child for the verified generation is live;
-- `error`: reconciliation failed; child is stopped and the stored generic error code is operator-visible.
+- `disabled`: the applied generation is verified disabled in core; no placement exists and no child may run;
+- `pending`: a desired generation is committed locally but not yet verified in core;
+- `provisioning`: no child is live while idempotent core operations run;
+- `ready`: an **enabled** generation, exact core revision/digest, and complete binding inventory are verified, but the child is not yet ready;
+- `running`: the child for that enabled verified generation completed runtime hello and all bind acknowledgements;
+- `error`: reconciliation or child execution failed; no child is live, and generic error code, failure count, and retry deadline are persisted.
+
+`recovering` is not a persisted saga state. It is a transient in-memory startup procedure entered only when the daemon opens a row persisted as `running`. Before serving admin work, daemon startup deterministically handles **every** persisted state:
+
+- `disabled`: terminate/reap any recorded process, remove placement, and verify the applied core instance remains disabled; an exact match stays `disabled`, otherwise atomically move to `pending`;
+- `pending`: terminate/reap any recorded process, remain `pending`, and enqueue reconciliation immediately;
+- `provisioning`: treat daemon loss as an interrupted saga, terminate/reap any recorded process, atomically normalize to `pending`, and reconcile from observed core state;
+- `ready`: terminate/reap any unacknowledged/stale process, re-GET the core instance; only an exact enabled generation stays `ready` and proceeds to child start, while mismatch or newly desired disable moves to `pending`;
+- `running`: enter transient `recovering` and follow the adoption/loss mapping below;
+- `error`: ensure no process is live; a newer desired generation cancels the old deadline and moves to `pending`, the same generation before its persisted deadline remains `error`, and the same generation at/after the deadline moves to `pending`.
+
+A required process operation or core GET that cannot complete maps to persisted `error` with `startup_recovery_failed` and backoff rather than guessing. Every startup write compares desired generation, so stale recovery cannot overwrite newer admin intent.
 
 All gateway admin changes first commit a new desired generation and `pending` state in one local transaction. The sole reconciliation path is:
 
-1. stop and fully reap the existing child;
-2. mark `provisioning`;
-3. `GET instance`;
-4. create it if absent, accept it if byte-identical, or revise it from the observed revision if config/enabled differs;
-5. idempotently put every desired binding;
-6. delete obsolete bindings only after all desired bindings exist;
-7. `GET instance` again and compare revision, digest, enabled value, and the complete binding inventory;
-8. commit the applied generation and `ready` in one local transaction;
+1. ensure the row is `pending`, stop and fully reap any existing child, then persist `provisioning`;
+2. `GET instance`;
+3. create it if absent, accept it if byte-identical, or revise it from the observed revision if config/enabled differs;
+4. idempotently put every desired binding;
+5. delete obsolete bindings only after all desired bindings exist;
+6. `GET instance` again and compare revision, digest, enabled value, and the complete binding inventory;
+7. if desired `enabled=false`, remove any placement, atomically commit applied generation plus `disabled`, and finish without creating or starting a child;
+8. if desired `enabled=true`, atomically commit applied generation plus `ready`;
 9. materialize a non-secret placement and start the child;
-10. mark `running` only after the child completes runtime hello/bind acknowledgement.
+10. mark `running` only after the child completes runtime hello and every bind acknowledgement.
 
-A failure at any step records `error`, leaves the child stopped, and retries from the observed core state. If revision succeeded but a binding failed, retry does not add another revision when the digest already matches. If local verification commit fails after core success, retry rediscovers the exact state. A child is never started from `pending`, `provisioning`, or `error`.
+A reconciliation failure at any step maps the row to persisted `error`, guarantees no child is live, and schedules retry from observed core state. At retry deadline, an enabled or disabled desired row moves atomically from `error` to `pending` and re-enters the same path. If revision succeeded but a binding failed, retry does not add another revision when the digest already matches. If local verification commit fails after core success, retry rediscovers the exact state. A child is never started from `disabled`, `pending`, `provisioning`, or `error`; `ready` is reachable only for an enabled instance.
 
-Daemon and child also have a private inherited control channel, distinct from both core UDS paths. The child reports `started`, runtime hello/bind readiness, discovered-binding requests, structured fatal exit reason, and graceful-stop acknowledgement. The daemon persists PID/start nonce, desired generation, consecutive failures, next retry time, and last exit before changing state. `running` requires matching nonce/generation plus hello and all bind acknowledgements. On daemon restart, any stored `running` row is `recovering`: it verifies process identity and core liveness, adopts only an exact nonce/generation match, otherwise terminates/reaps a stale child and reconciles from `pending`. Unexpected exit atomically records stopped/error state and exponential backoff with bounded jitter; stable uptime resets the counter. An operator disable/delete cancels backoff and can never be undone by a stale timer.
+Daemon and child have a private inherited control channel, distinct from both core UDS paths. The child reports `started`, runtime hello/bind readiness, discovered-binding requests, structured fatal exit reason, and graceful-stop acknowledgement. The daemon persists PID/start nonce, desired generation, consecutive failures, next retry time, and last exit before changing state. `running` requires matching nonce/generation plus hello and all bind acknowledgements.
 
-Disabling is stop/reap, revision to disabled, close bindings if requested by operator policy, verify, then local commit. Deletion is stop/reap, close bindings, delete instance, verify `instance_unknown`, then delete local non-secret configuration; credentials require a separate explicit destructive confirmation.
+During transient startup recovery of a persisted `running` row, an exact process nonce/generation match **and** matching core runtime liveness is adopted back to `running`. No process, a mismatched/stale process, failed liveness, or a child that exits during recovery maps deterministically to persisted `error` with `child_lost`, after terminating/reaping any stale child and computing backoff. An unexpected child exit from `ready` startup or `running` maps atomically to `error` with `child_start_exit` or `child_exit` respectively and a persisted exponential-backoff deadline with bounded jitter; stable uptime resets the counter. An expected stop is initiated only after the desired generation is already `pending` (or deletion is recorded), so its exit cannot overwrite the newer state. Operator disable/delete cancels backoff and stale timers compare generation before writing.
+
+Disabling uses the same path: commit desired disabled as `pending`, stop/reap, revise core to disabled, optionally close bindings according to operator policy, verify, remove placement, then commit `disabled`. Deletion is stop/reap, close bindings, delete instance, verify `instance_unknown`, then delete local non-secret configuration; credentials require a separate explicit destructive confirmation.
 
 Core owns runtime connection liveness but never starts a process. A daemon owns child startup, restart, backoff, placement generation, secret injection, and shutdown. Two daemon instances contending for one gateway database are prevented with an exclusive process lock.
 
@@ -269,9 +282,22 @@ The tool refuses symlinks, non-regular database files, an incomplete backup, a c
 
 It copies all concrete Discord/Nostr settings, external identity projections, watches, credentials, stable generic references, and desired placements. Internal co-agent relationships remain in core; their external identity projections are copied to each gateway. Histories, agents, subjects, sessions, generic gate rows, and exactly-once ledgers are not moved or rewritten.
 
-Discord mapping is field-specific: `channel_config.channel_id/agent_id/guild_id/channel_name/readable/writable/whitelisted` becomes the Discord store endpoint plus admission/read/write policy. For a channel, the existing non-empty exact `agent_id` row retains precedence over the `agent_id=''` global fallback; exact rows map to that instance policy scope and global rows map to an explicit gateway-wide fallback scope. The migrator copies and verifies both classes separately and never collapses a global/per-agent pair; `heartbeat_enabled/heartbeat_interval_secs/heartbeat_instructions` becomes core generic `session_heartbeat_config` for the already-bound session and is not copied into Discord; application/bot-user/display/delivery/reaction fields become the Discord instance profile; `trusted_users` rows whose platform is Discord become owner/trusted external projections; external co-agent IDs become gateway projections pointing at the unchanged internal co-agent relationship ID/revision; token/credential columns become encrypted credential records; existing generic instance/binding IDs and opaque addresses are preserved. Nostr config, watches, relay/filter rows, public keys, role projections, and secret keys map analogously to the named Nostr store tables/classes.
+Discord mapping is field-specific: `channel_config.channel_id/agent_id/guild_id/channel_name/readable/writable/whitelisted` becomes the Discord store endpoint plus admission/read/write policy. For a channel, a non-empty exact `agent_id` row retains precedence over the `agent_id=''` global fallback; exact and global rows map to distinct instance-policy and gateway-wide-fallback records, and counts/digests prove that no pair is collapsed. Heartbeat fields are not copied to Discord and are projected in the single writable-core phase below. Application/bot-user/display/delivery/reaction fields become the Discord instance profile; `trusted_users` rows whose platform is Discord become owner/trusted external projections; external co-agent IDs become gateway projections pointing at the unchanged internal co-agent relationship ID/revision; token/credential columns become encrypted credential records; existing generic instance/binding IDs and opaque addresses are preserved. Nostr config, watches, relay/filter rows, public keys, role projections, and secret keys map analogously to the named Nostr store tables/classes.
 
 Credential import has no silent fallback precedence. For each instance the migrator inventories every legacy DB, file, environment/operator, and existing destination candidate. Zero candidates fails; multiple non-empty candidates must decrypt/normalize to identical bytes or require an explicit per-instance `--credential-source` recorded by source fingerprint in the secret-free manifest. An existing destination credential wins only when its digest matches the selected source. Runtime admin exposes distinct `set`, `rotate`, and confirmed `destroy` operations; update never falls back to old core/TOML data, and plaintext is never returned.
+
+### Single stopped writable-core heartbeat projection
+
+The import above reads source core SQLite read-only. After that import succeeds, while every service and child remains stopped, `opencrab-gateway-migrate project-heartbeats` is the **only stopped/offline migration phase** allowed to open core directly read-write for heartbeat projection. Later live provisioning still writes through core's gate-admin service, never through migration SQL. In one immediate transaction the projection creates the generic instructions schema if absent, writes only generic heartbeat targets, and writes a `separation_migrations` phase marker; it cannot change gateway rows, bindings, sessions, history, or legacy source rows. The marker stores migration version plus source and target digests. Transaction rollback leaves no marker and permits retry. After a committed marker, a repeated invocation returns idempotent `already_applied` only when migration version and recomputed source/target digests exactly match; changed or missing inputs/targets fail closed. Thus a lost success response is recoverable without permitting a second projection. No daemon contains this path.
+
+The generic targets are:
+
+- `session_heartbeat_config`, keyed by existing composite `(agent_id, session_id)`, containing `enabled`, `interval_secs`, scheduling anchor, and last-fired state; and
+- `session_heartbeat_instructions`, with the same composite primary key and foreign key to `session_heartbeat_config(agent_id, session_id)` (and `session_id` to `sessions`), containing nullable opaque `override_text` and `updated_at`. `NULL` means resolve the current core-owned `agents.heartbeat_instructions`, then the generic default; it does not mean an empty platform override.
+
+The stopped projection transaction adds `session_heartbeat_instructions` to upgraded core schema; fresh-schema initialization creates the same table and composite constraints directly. For each target composite key, an absent config/instructions pair is created and a byte/semantic-identical existing pair is accepted. Any non-identical existing row fails for explicit operator resolution: projection never overwrites a scheduling anchor, `last_fired_at`, instructions, or user-edited generic heartbeat configuration.
+
+For **every existing open Discord binding/session and agent**, projection resolves config and instruction sources independently. `enabled`/`interval_secs` use the exact `(channel_id, agent_id)` row when it exists, otherwise `(channel_id, agent_id='')`. Instruction override uses the existing field-specific chain: non-empty exact-agent channel instructions, else non-empty global-channel instructions, else `override_text=NULL` so runtime uses the current `agents.heartbeat_instructions`, else the generic default. An exact channel row with empty instructions therefore never suppresses a non-empty global override. Projection materializes exactly one config row and exactly one instruction row for the bound `(agent_id, session_id)`. A global config or instruction source fans out to every eligible bound agent/session; an exact source shadows it only for the corresponding field and agent/session. The manifest records separate `config_source` and `instruction_source` for every source-row-to-target composite-key edge plus per-source fan-out counts, so neither two per-agent rows nor an exact/global pair can collapse into one target. Duplicate/ambiguous bindings, a non-default heartbeat source with no resolvable bound agent/session, missing membership, an existing-target conflict, or any count/digest mismatch aborts the transaction. This projection occurs exactly once after read-only import and before QC, `verify-and-mark`, or destructive cleanup.
 
 The tool then verifies:
 
@@ -280,6 +306,7 @@ The tool then verifies:
 - every imported credential decrypts inside the corresponding gateway store library without printing plaintext;
 - every subject/session reference exists and has the expected membership;
 - each desired instance/config digest/binding inventory is equivalent to existing generic placement;
+- every eligible Discord binding/agent has exactly one projected generic heartbeat config/instruction pair at `(agent_id, session_id)`, with separate config/instruction precedence choices, existing-target disposition, and source fan-out edges matching the manifest;
 - every gateway row in mixed legacy identity storage is represented once in the owning gateway;
 - no destination conflict or unmapped source row remains.
 
@@ -293,14 +320,15 @@ The only supported cutover order is:
 
 1. stop core and both gateway daemons; verify no gateway child remains;
 2. create and verify backups of core and both gateway databases;
-3. run offline import and completeness verification;
-4. start core with the dedicated gate-admin UDS but keep gateway children stopped;
-5. run each daemon in provision-only mode, execute the saga through `ready`, and verify generic GET snapshots;
-6. start children and perform isolated inbound, outbound, role-classification, history, and duplicate-event exactly-once checks;
-7. stop all services again, create the three-file post-QC freeze set, and run `verify-and-mark`;
-8. apply the guarded destructive core migration against that freeze lineage;
-9. deploy server/shared binaries with concrete APIs and queries removed;
-10. start core, then daemons, and repeat isolated checks.
+3. run the read-only-core import and destination completeness verification;
+4. with all processes still stopped, run the single writable-core `project-heartbeats` transaction and verify its marker/digests;
+5. start core with the dedicated gate-admin UDS but keep gateway children stopped;
+6. run each daemon in provision-only mode: enabled instances reach `ready`; disabled instances reach `disabled` with no placement/child; verify generic GET snapshots;
+7. start children for enabled instances only and perform isolated inbound, outbound, role-classification, history, and duplicate-event exactly-once checks;
+8. stop all services again, create the three-file post-QC freeze set, and run `verify-and-mark`;
+9. apply the guarded destructive core migration against that freeze lineage;
+10. deploy server/shared binaries with concrete APIs and queries removed;
+11. start core, then daemons, and repeat isolated checks.
 
 There is no dual-run, shadow read, feature flag, runtime import, or fallback.
 
@@ -314,7 +342,7 @@ In one transaction it:
 
 - removes gateway rows from mixed `trusted_users` storage;
 - migrates genuine non-gateway REST/API identities to `api_principals` with no platform column;
-- drops `channel_config` only after its generic heartbeat fields have been mapped to `session_heartbeat_config`; drops platform `session_watches`, `agent_discord_config`, `agent_nostr_config`, their indexes/triggers, and obsolete secret columns;
+- verifies the committed heartbeat-projection marker/digests, then drops `channel_config`; drops platform `session_watches`, `agent_discord_config`, `agent_nostr_config`, their indexes/triggers, and obsolete secret columns;
 - removes old mixed identity tables after the non-gateway rows are verified;
 - preserves agents, subjects, sessions, membership, histories, internal co-agent relationships, opaque gate instances/bindings, and exactly-once/delivery ledgers;
 - records the applied generic separation migration.
@@ -339,7 +367,7 @@ CI scans production Rust and manifests, excluding historical SQL migration fixtu
 - config decoding or kind enumeration in core;
 - plaintext secret fields in opaque config or placement files.
 
-Protocol tests prove byte-idempotent create, conflicting create, stopped-only revision, stable stale-revision errors, atomic generic session/binding creation, duplicate-address rejection, complete sorted binding discovery, sanitized errors, and token redaction. Daemon tests prove role classification, deterministic/preserved IDs, stop-before-change, partial-failure stopped state, retry convergence, and secret encryption/redaction. Migration tests cover populated upgrades, idempotent reruns, conflicting destinations, missing mappings, completeness digests, marker refusal, fresh initialization, preservation of retained data, and matched-backup rollback.
+Protocol tests prove byte-idempotent create, conflicting create, non-live-only revision, stable stale-revision errors, atomic generic session/binding creation, duplicate-address rejection, complete sorted binding discovery, sanitized errors, token redaction, `dispatch=utterance` iff `effect=utterance`, and rejection of `operation_driven` without a valid utterance operation. Daemon tests prove role classification, deterministic/preserved IDs, stop-before-change, persisted/transient state transitions, disabled-without-child behavior, deterministic exit/recovery mapping, retry convergence, and secret encryption/redaction. Migration tests cover populated upgrades, lost-response `already_applied` projection retry, changed-digest refusal, non-identical existing heartbeat-target refusal, config/instruction exact-global fan-out without collapse, empty-exact-instruction fallback to non-empty global, NULL inheritance to current agent/default, instructions-schema upgrade/fresh initialization, conflicting destinations, missing mappings, completeness digests, marker refusal, preservation of retained data, and matched-backup rollback.
 
 Release is blocked until isolated QC demonstrates existing agent/binding continuity, owner/co-agent/trusted semantics, history preservation, inbound/outbound operation, and duplicate-event exactly-once behavior for both gateways. Production deployment is an operator action outside repository implementation work.
 
