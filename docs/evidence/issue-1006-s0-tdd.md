@@ -92,3 +92,59 @@ The line-specific baseline has **454** entries: **450** production violations, *
 | `shared-platform-dto` | 15 |
 
 The only valid store-provenance entries are `crates/nostr-gateway/src/daemon.rs:115` and `crates/nostr-gateway/src/store.rs:66`. The reviewed dev-only edges are `crates/server/Cargo.toml:79` and `crates/server/Cargo.toml:82`; real metadata and the no-dev tree prove they are absent from production edges. Every entry has an exact path, line, snippet, classification, V01–V16 mapping, owner stage, and expiry. Coverage-anchor duplication, stale entries, new unclassified findings, count drift, and an unreviewed regenerated baseline all fail closed.
+
+## Follow-up false-negative fix pass
+
+Base under test: `d3f1562a76ceb57a9a413d7eff5b256958a1d116`.
+
+Seven named assertions were added before changing the detector and run with:
+
+```text
+python3 -m unittest -v \
+  ...test_public_reachability_traces_direct_served_factory_expression \
+  ...test_public_reachability_traces_mutation_and_alias_into_serve \
+  ...test_grouped_arbitrary_sqlite_alias_open_is_inventoried \
+  ...test_platform_dto_qualified_lowercase_type_is_rejected \
+  ...test_gateway_kind_non_equality_branch_is_rejected \
+  ...test_borrowed_qualified_gateway_name_match_is_rejected \
+  ...test_qualified_operation_name_match_is_rejected
+```
+
+Exact RED: **7 tests, 7 failures**. Every assertion reported its expected rule absent from `set()`:
+
+- both public reachability assertions lacked `public-gate-admin-reachable`;
+- grouped `Conn::open` lacked `gateway-db-open`;
+- `pub platform: serde_json::Value` lacked `shared-platform-dto`;
+- `!=`, borrowed qualified `match`, and qualified `.as_str()` match forms lacked `shared-gateway-name-branch`.
+
+The captured RED log was `/tmp/issue-1006-s0-fix2-red.log` during this run. Minimal GREEN adds balanced `axum::serve` argument extraction and backwards, position-aware expression/assignment/alias tracing, grouped/direct/type `rusqlite::Connection` alias provenance, type-independent public `platform` field recognition, and guarded comparison/match forms for qualified or borrowed gateway/operation variables. A type-alias regression was added for the supported straightforward alias form, and the non-equality assertion covers `!=`, `<`, `<=`, `>`, and `>=` independently. A negative assertion proves mutation after the served alias does not contaminate reachability. The protected-UDS-only negative remains green.
+
+The repository finding set remains exactly **454** entries, so the reviewed baseline was not regenerated or rewritten in this pass.
+
+Follow-up GREEN validation:
+
+```text
+python3 -m unittest scripts.tests.test_gateway_boundary_audit -v
+Ran 38 tests ... OK
+
+python3 scripts/gateway_boundary_audit.py
+gateway boundary audit OK: 454 classified findings
+
+cargo test -p opencrab-server --test webgate_static_audit
+9 passed; 0 failed
+
+bash scripts/check-deps.sh && bash scripts/check-file-size.sh
+R4/R5/R6/R7 OK; Rust source size OK
+
+cargo metadata --format-version 1 --no-deps
+server concrete edges: Discord dev-only, Nostr dev-only, Web absent
+
+cargo tree -p opencrab-server --edges no-dev
+no Discord/Nostr/Web concrete gateway edge
+
+cargo fmt --all -- --check
+passed
+
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+passed
+```

@@ -162,12 +162,42 @@ opencrab-example-gateway = { path = "../example-gateway" }
         files = {"crates/db/src/queries/trusted_users.rs": "pub struct ExternalUser { pub platform: String }\n"}
         self.assertIn("shared-platform-dto", self.rules(files))
 
+    def test_platform_dto_qualified_lowercase_type_is_rejected(self):
+        files = {
+            "crates/db/src/queries/trusted_users.rs":
+                "pub struct ExternalUser { pub platform: serde_json::Value }\n"
+        }
+        self.assertIn("shared-platform-dto", self.rules(files))
+
     def test_concrete_route_mutation_is_rejected(self):
         files = {"crates/server/src/lib.rs": 'router.route("/api/agents/{id}/trusted-users", get(handler));\n'}
         self.assertIn("shared-concrete-route", self.rules(files))
 
     def test_gateway_kind_branch_mutation_is_rejected(self):
         files = {"crates/core/src/dispatch.rs": 'if gateway_kind == "matrix" { select_adapter(); }\n'}
+        self.assertIn("shared-gateway-name-branch", self.rules(files))
+
+    def test_gateway_kind_non_equality_branch_is_rejected(self):
+        for operator in ("!=", "<", "<=", ">", ">="):
+            with self.subTest(operator=operator):
+                files = {
+                    "crates/core/src/dispatch.rs":
+                        f'if request.gateway_kind {operator} "matrix" {{ select_adapter(); }}\n'
+                }
+                self.assertIn("shared-gateway-name-branch", self.rules(files))
+
+    def test_borrowed_qualified_gateway_name_match_is_rejected(self):
+        files = {
+            "crates/core/src/dispatch.rs":
+                'match &request.gateway_name { "matrix" => select_adapter(), _ => fallback() }\n'
+        }
+        self.assertIn("shared-gateway-name-branch", self.rules(files))
+
+    def test_qualified_operation_name_match_is_rejected(self):
+        files = {
+            "crates/extgate/src/dispatch.rs":
+                'match request.operation_name.as_str() { "send" => utter(), _ => fallback() }\n'
+        }
         self.assertIn("shared-gateway-name-branch", self.rules(files))
 
     def test_operation_name_branch_mutation_is_rejected(self):
@@ -195,7 +225,10 @@ opencrab-example-gateway = { path = "../example-gateway" }
     def test_legitimate_generic_platform_value_and_kind_branch_are_not_broadly_banned(self):
         permitted = {
             "crates/core/src/catalog.rs":
-                'let platform = descriptor.platform();\nif kind == "tool" { index(platform); }\n'
+                'let platform = descriptor.platform();\n'
+                'if kind == "tool" { index(platform); }\n'
+                'if request.kind != "tool" { fallback(); }\n'
+                'match &request.name { "tool" => index(platform), _ => fallback() }\n'
         }
         self.assertFalse(self.rules(permitted))
 
@@ -207,6 +240,22 @@ opencrab-example-gateway = { path = "../example-gateway" }
         files = {
             "crates/example-gateway/src/store.rs":
                 "use rusqlite::Connection as Sqlite;\nfn open(path: &Path) { Sqlite::open(path); }\n"
+        }
+        self.assertIn("gateway-db-open", self.rules(files))
+
+    def test_grouped_arbitrary_sqlite_alias_open_is_inventoried(self):
+        files = {
+            "crates/example-gateway/src/store.rs":
+                "use rusqlite::{Connection as Conn, OpenFlags};\n"
+                "fn open(path: &Path) { Conn::open(path); }\n"
+        }
+        self.assertIn("gateway-db-open", self.rules(files))
+
+    def test_sqlite_connection_type_alias_open_is_inventoried(self):
+        files = {
+            "crates/example-gateway/src/store.rs":
+                "type StoreConn = rusqlite::Connection;\n"
+                "fn open(path: &Path) { StoreConn::open(path); }\n"
         }
         self.assertIn("gateway-db-open", self.rules(files))
 
@@ -266,6 +315,51 @@ opencrab-example-gateway = { path = "../example-gateway" }
             "crates/server/src/lib.rs": self._six_operation_router("public_router"),
         }
         self.assertIn("public-gate-admin-reachable", self.rules(files))
+
+    def test_public_reachability_traces_direct_served_factory_expression(self):
+        files = {
+            "crates/server/src/main.rs": textwrap.dedent("""
+                async fn main() {
+                    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
+                    axum::serve(listener, public_router()).await.unwrap();
+                }
+            """),
+            "crates/server/src/lib.rs": self._six_operation_router("protected_controls")
+                + "fn public_router() -> Router { protected_controls() }\n",
+        }
+        self.assertIn("public-gate-admin-reachable", self.rules(files))
+
+    def test_public_reachability_traces_mutation_and_alias_into_serve(self):
+        files = {
+            "crates/server/src/main.rs": textwrap.dedent("""
+                async fn main() {
+                    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
+                    let mut app = public_router();
+                    app = app.merge(protected_controls());
+                    let served = app;
+                    axum::serve(listener, served).await.unwrap();
+                }
+            """),
+            "crates/server/src/lib.rs": self._six_operation_router("protected_controls")
+                + "fn public_router() -> Router { Router::new() }\n",
+        }
+        self.assertIn("public-gate-admin-reachable", self.rules(files))
+
+    def test_public_reachability_ignores_mutation_after_served_alias(self):
+        files = {
+            "crates/server/src/main.rs": textwrap.dedent("""
+                async fn main() {
+                    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
+                    let app = public_router();
+                    let served = app.clone();
+                    axum::serve(listener, served).await.unwrap();
+                    let _unused = app.merge(protected_controls());
+                }
+            """),
+            "crates/server/src/lib.rs": self._six_operation_router("protected_controls")
+                + "fn public_router() -> Router { Router::new() }\n",
+        }
+        self.assertNotIn("public-gate-admin-reachable", self.rules(files))
 
     def test_public_reachability_rejects_public_merge(self):
         files = {

@@ -36,15 +36,20 @@ SCHEMA_IDENTIFIERS = re.compile(
 )
 CONCRETE_ROUTES = re.compile(r"/(?:channel-configs|trusted-users)(?:[/\"]|$)")
 DTO_PLATFORM_FIELD = re.compile(
-    r"\b(?:pub(?:\([^)]*\))?\s+)?platform\s*:\s*(?:&(?:'\w+\s+)?str\b|String\b|Option<|Cow<|[A-Z][A-Za-z0-9_:<>]*)"
+    r"(?:\bpub(?:\([^)]*\))?\s+platform\s*:|"
+    r"\bplatform\s*:\s*(?:&(?:'\w+\s+)?str\b|String\b|Option<|Cow<|[A-Z][A-Za-z0-9_:<>]*))"
+)
+_GUARDED_NAME_EXPR = (
+    r"(?:[A-Za-z_][A-Za-z0-9_]*(?:::|\.))*"
+    r"(?:gateway_kind|gateway_name|operation_name|platform)\b"
 )
 NAME_BRANCH = re.compile(
-    r"(?:\b(?:gateway_kind|gateway_name|operation_name|platform)\s*==\s*\"|"
-    r"\bmatch\s+(?:gateway_kind|gateway_name|operation_name|platform)\b|"
-    r"\bdecl\.name\s*==\s*\"|\bis_known_utterance_op\s*\()"
+    rf"(?:(?:&\s*|\*\s*)?{_GUARDED_NAME_EXPR}(?:\.as_str\(\))?\s*(?:==|!=|<=|>=|<|>)\s*\"|"
+    rf"\bmatch\s+(?:&\s*|\*\s*)?{_GUARDED_NAME_EXPR}(?:\.as_str\(\))?|"
+    r"\bdecl\.name\s*(?:==|!=|<=|>=|<|>)\s*\"|\bis_known_utterance_op\s*\()"
 )
 CORE_PATH = re.compile(r"\b(?:core|legacy)(?:_database|_db)?_path\b", re.IGNORECASE)
-DB_CALL = re.compile(r"\b([A-Za-z_][A-Za-z0-9_:]*(?:Store|Db|Database|Connection)|Connection|Sqlite)::(open|open_with_flags|connect)\s*\(")
+DB_CALL = re.compile(r"\b([A-Za-z_][A-Za-z0-9_:]*(?:Store|Db|Database|Connection)|Connection)::(open|open_with_flags|connect)\s*\(")
 CORE_STORE_CALL = re.compile(r"\b[A-Za-z_][A-Za-z0-9_:]*(?:Store|Db|Database|Connection)::(?:open|open_with_flags|connect|load)\s*\(")
 GATE_ADMIN_PATH = re.compile(r'"(/api/gate-(?:instances|bindings)[^\"]*)"')
 HISTORICAL_PARTS = ("/src/schema/migrations/", "/src/schema/tests/")
@@ -287,14 +292,35 @@ def _shared_source_findings(path: str, text: str) -> list[Finding]:
     return findings
 
 
+def _rusqlite_connection_aliases(production: list[tuple[int, str]]) -> set[str]:
+    source = "\n".join(code for _, code in production)
+    aliases = {"Connection"}
+    for match in re.finditer(r"\buse\s+rusqlite::Connection(?:\s+as\s+(\w+))?\s*;", source):
+        aliases.add(match.group(1) or "Connection")
+    for group in re.findall(r"\buse\s+rusqlite::\{(.*?)\}\s*;", source, re.DOTALL):
+        for item in group.split(","):
+            match = re.fullmatch(r"\s*Connection(?:\s+as\s+(\w+))?\s*", item)
+            if match:
+                aliases.add(match.group(1) or "Connection")
+    changed = True
+    while changed:
+        changed = False
+        for alias, target in re.findall(
+            r"\b(?:pub\s+)?type\s+(\w+)\s*=\s*([A-Za-z_][A-Za-z0-9_:]*)\s*;",
+            source,
+        ):
+            target_name = target.rsplit("::", 1)[-1]
+            if target == "rusqlite::Connection" or target_name in aliases:
+                if alias not in aliases:
+                    aliases.add(alias)
+                    changed = True
+    return aliases
+
+
 def _gateway_source_findings(path: str, text: str) -> list[Finding]:
     findings: list[Finding] = []
     production = list(_production_rust_lines(path, text))
-    aliases = {"Connection"}
-    for _, code in production:
-        match = re.search(r"\buse\s+rusqlite::Connection(?:\s+as\s+(\w+))?", code)
-        if match:
-            aliases.add(match.group(1) or "Connection")
+    aliases = _rusqlite_connection_aliases(production)
     alias_pattern = re.compile(rf"\b(?:{'|'.join(map(re.escape, sorted(aliases)))})::(?:open|open_with_flags)\s*\(")
     for line_number, code in production:
         if CORE_PATH.search(code):
@@ -340,6 +366,93 @@ def _extract_functions(path: str, text: str) -> list[RustFunction]:
     return functions
 
 
+def _balanced_call_arguments(source: str, callee: str) -> list[tuple[int, list[str]]]:
+    """Return call positions and top-level balanced arguments."""
+    calls: list[tuple[int, list[str]]] = []
+    for match in re.finditer(rf"\b{re.escape(callee)}\s*\(", source):
+        start = source.find("(", match.start())
+        args: list[str] = []
+        arg_start = start + 1
+        paren_depth = 1
+        bracket_depth = 0
+        brace_depth = 0
+        quote = False
+        escaped = False
+        index = start + 1
+        while index < len(source):
+            char = source[index]
+            if quote:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    quote = False
+                index += 1
+                continue
+            if char == '"':
+                quote = True
+            elif char == "(":
+                paren_depth += 1
+            elif char == ")":
+                paren_depth -= 1
+                if paren_depth == 0:
+                    args.append(source[arg_start:index].strip())
+                    calls.append((match.start(), args))
+                    break
+            elif char == "[":
+                bracket_depth += 1
+            elif char == "]":
+                bracket_depth -= 1
+            elif char == "{":
+                brace_depth += 1
+            elif char == "}":
+                brace_depth -= 1
+            elif char == "," and paren_depth == 1 and bracket_depth == 0 and brace_depth == 0:
+                args.append(source[arg_start:index].strip())
+                arg_start = index + 1
+            index += 1
+    return calls
+
+
+def _assignment_expressions(source: str) -> dict[str, list[tuple[int, str]]]:
+    assignments: dict[str, list[tuple[int, str]]] = {}
+    pattern = re.compile(
+        r"(?:\blet\s+(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)"
+        r"(?:\s*:[^=;]+)?|\b([A-Za-z_][A-Za-z0-9_]*))\s*=\s*(.*?);",
+        re.DOTALL,
+    )
+    for match in pattern.finditer(source):
+        name = match.group(1) or match.group(2)
+        assignments.setdefault(name, []).append((match.start(), match.group(3).strip()))
+    return assignments
+
+
+def _expressions_feeding_serve(root: RustFunction) -> list[str]:
+    source = "\n".join(code for _, code in root.lines)
+    assignments = _assignment_expressions(source)
+    expressions: list[str] = []
+    pending: list[tuple[str, int]] = []
+    for call_position, arguments in _balanced_call_arguments(source, "axum::serve"):
+        if len(arguments) >= 2:
+            pending.append((arguments[1], call_position))
+    visited_variables: set[tuple[str, int]] = set()
+    while pending:
+        expression, before_position = pending.pop()
+        expressions.append(expression)
+        for identifier in re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", expression):
+            visit = (identifier, before_position)
+            if visit in visited_variables or identifier not in assignments:
+                continue
+            visited_variables.add(visit)
+            pending.extend(
+                (assigned_expression, assignment_position)
+                for assignment_position, assigned_expression in assignments[identifier]
+                if assignment_position < before_position
+            )
+    return expressions
+
+
 def _public_route_findings(files: Mapping[str, str]) -> list[Finding]:
     functions: list[RustFunction] = []
     for path, text in files.items():
@@ -357,12 +470,9 @@ def _public_route_findings(files: Mapping[str, str]) -> list[Finding]:
     call_pattern = re.compile(r"(?<!\bfn\s)\b([A-Za-z_][A-Za-z0-9_]*)\s*(?:!\s*)?\(")
     pending: list[RustFunction] = []
     for root in roots:
-        flattened = re.sub(r"\s+", " ", root.body)
-        for served in re.findall(r"axum::serve\s*\([^,]+,\s*([A-Za-z_][A-Za-z0-9_]*)", flattened):
-            assignment = re.search(rf"\blet\s+(?:mut\s+)?{re.escape(served)}\s*=\s*(.*?);", flattened)
-            if assignment:
-                for called in call_pattern.findall(assignment.group(1)):
-                    pending.extend(by_name.get(called, []))
+        for expression in _expressions_feeding_serve(root):
+            for called in call_pattern.findall(expression):
+                pending.extend(by_name.get(called, []))
     while pending:
         function = pending.pop()
         key = (function.path, function.name, function.start_line)
