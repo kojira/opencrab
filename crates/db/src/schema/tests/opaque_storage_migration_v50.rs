@@ -93,7 +93,7 @@ fn v50_migrates_channel_config_without_losing_values_or_leaving_two_authorities(
         }
 
         initialize(&conn).unwrap();
-        assert_eq!(schema_version(&conn).unwrap(), 51);
+        assert_eq!(schema_version(&conn).unwrap(), 52);
         assert!(table_exists(&conn, "channel_config").unwrap());
         assert!(!table_exists(&conn, "discord_channel_config").unwrap());
 
@@ -153,7 +153,7 @@ fn v50_migrates_channel_config_without_losing_values_or_leaving_two_authorities(
     {
         let conn = Connection::open(&path).unwrap();
         initialize(&conn).unwrap();
-        assert_eq!(schema_version(&conn).unwrap(), 51);
+        assert_eq!(schema_version(&conn).unwrap(), 52);
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM channel_config", [], |row| row.get::<_, i64>(0))
                 .unwrap(),

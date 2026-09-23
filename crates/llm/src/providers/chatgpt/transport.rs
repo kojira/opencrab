@@ -48,6 +48,20 @@ impl LlmProvider for ChatGptProvider {
                 supports_vision: true,
             },
             ModelInfo {
+                id: "gpt-6-sol".to_string(),
+                name: "GPT-6 Sol".to_string(),
+                context_window: 400_000,
+                supports_function_calling: true,
+                supports_vision: true,
+            },
+            ModelInfo {
+                id: "gpt-6-luna".to_string(),
+                name: "GPT-6 Luna".to_string(),
+                context_window: 400_000,
+                supports_function_calling: true,
+                supports_vision: true,
+            },
+            ModelInfo {
                 id: "gpt-5.5".to_string(),
                 name: "GPT-5.5".to_string(),
                 context_window: 128000,

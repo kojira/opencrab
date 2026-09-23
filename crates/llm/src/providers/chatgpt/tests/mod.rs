@@ -5,4 +5,5 @@ include!("auth_tokens_and_refresh.rs");
 include!("request_body.rs");
 include!("response_parsing.rs");
 include!("provider_tool_history.rs");
+include!("model_catalog.rs");
 include!("live_api.rs");

@@ -74,7 +74,7 @@ fn gate_binding_rows(conn: &Connection) -> Vec<(String, String, String, i64, Opt
 #[test]
 fn fresh_schema_has_open_address_lookup_index_v51() {
     let conn = crate::init_memory().unwrap();
-    assert_eq!(schema_version(&conn).unwrap(), 51);
+    assert_eq!(schema_version(&conn).unwrap(), 52);
     assert_eq!(
         gate_binding_lookup_index_shape(&conn),
         Some((
@@ -98,7 +98,7 @@ fn v50_to_v51_adds_open_address_lookup_index_without_rewriting_rows() {
     initialize(&conn).unwrap();
     initialize(&conn).unwrap();
 
-    assert_eq!(schema_version(&conn).unwrap(), 51);
+    assert_eq!(schema_version(&conn).unwrap(), 52);
     assert_eq!(gate_binding_rows(&conn), before);
     assert!(gate_binding_lookup_index_shape(&conn).is_some());
 }
@@ -124,7 +124,7 @@ fn v51_index_failure_rolls_back_and_keeps_version_50() {
     ))
     .unwrap();
     initialize(&conn).unwrap();
-    assert_eq!(schema_version(&conn).unwrap(), 51);
+    assert_eq!(schema_version(&conn).unwrap(), 52);
     assert!(gate_binding_lookup_index_shape(&conn).is_some());
 }
 
@@ -142,7 +142,7 @@ fn v51_index_rollback_to_v50_and_forward_reapply_preserves_rows() {
     assert_eq!(gate_binding_rows(&conn), before);
 
     initialize(&conn).unwrap();
-    assert_eq!(schema_version(&conn).unwrap(), 51);
+    assert_eq!(schema_version(&conn).unwrap(), 52);
     assert_eq!(gate_binding_rows(&conn), before);
     assert!(gate_binding_lookup_index_shape(&conn).is_some());
 }
