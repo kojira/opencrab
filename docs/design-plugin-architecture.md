@@ -31,7 +31,7 @@
 
 ここで言う「**コア**」は特定のクレート名ではなく **gateway 非依存層**を指す（`core` / `db` / `actions`）。状態の実体を置く先は主に `actions`。`core` は下位層のため `actions` に依存できない（依存の向きは `DESIGN.md` §2.2 を参照）ので、「コアに置く」を `crates/core` と読み替えないこと。
 
-プラグインは再起動されうるので、差し替え可能な gateway 間で共有される永続 **汎用会話・実行状態**はコアが 1 つだけ持つ。一方、具象 platform の状態をコアへ集めてはならない。完全な所有境界と移行条件は architecture review 承認後の [design-gateway-process-ownership.md](design-gateway-process-ownership.md)（Issue #1006）を基準とし、この文書の「状態」「設定」「transport」は次の限定した意味で使う。
+プラグインは再起動されうるので、差し替え可能な gateway 間で共有される永続 **汎用会話・実行状態**はコアが 1 つだけ持つ。一方、具象 platform の状態をコアへ集めてはならない。承認済みの完全な所有境界と移行条件は [design-gateway-process-ownership.md](design-gateway-process-ownership.md)（Issue #1006）を基準とし、実装順序と gate は同文書の [§13 staged TDD plan](design-gateway-process-ownership.md#13-staged-assertion-level-tdd-execution-plan) に従う。この文書の「状態」「設定」「transport」は次の限定した意味で使う。
 
 **コアが持つ汎用会話・実行状態**
 - エージェント、subject、session、membership、会話履歴

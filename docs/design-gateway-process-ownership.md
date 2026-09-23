@@ -433,4 +433,136 @@ Release is blocked until isolated QC demonstrates existing agent/subject/binding
 
 ### Design-review completion criteria
 
-Architecture review remains blocked until all of the following are true in the documents: this file, `design-plugin-architecture.md`, and `DESIGN.md` use the same **generic conversation/execution state** versus **concrete platform state/lifecycle** vocabulary and the same target dependency diagram; none says that all plugin configuration belongs in core, that a transport is storage/policy-free, that external exactly-once is universal, or that `server` owns/supervises a concrete gateway; every V01–V16 item has exactly one transition and measurable completion criterion; the exactly-two offline direct-write phases, read-only `verify-freeze`, atomic cleanup record, and their non-overlapping permissions, two ledgers and reconnect guarantee immutability, row-level identity disposition, public gate-admin isolation, revocation boundaries, positive-integer subject transition, mutable-versus-immutable digest rule, and complete operation compatibility rule have executable test criteria; and the Issue #1006 acceptance bullets and zero-core-change new-gateway litmus test are all represented. Implementation review remains separately blocked until the mapped evidence is produced.
+Architecture review was blocked until all of the following became true in the documents: this file, `design-plugin-architecture.md`, and `DESIGN.md` use the same **generic conversation/execution state** versus **concrete platform state/lifecycle** vocabulary and the same target dependency diagram; none says that all plugin configuration belongs in core, that a transport is storage/policy-free, that external exactly-once is universal, or that `server` owns/supervises a concrete gateway; every V01–V16 item has exactly one transition and measurable completion criterion; the exactly-two offline direct-write phases, read-only `verify-freeze`, atomic cleanup record, and their non-overlapping permissions, two ledgers and reconnect guarantee immutability, row-level identity disposition, public gate-admin isolation, revocation boundaries, positive-integer subject transition, mutable-versus-immutable digest rule, and complete operation compatibility rule have executable test criteria; and the Issue #1006 acceptance bullets and zero-core-change new-gateway litmus test are all represented. The target satisfying those criteria was independently approved at `cda2f74aa1160952152d47a30b45d3ad55482167`. Implementation review remains separately blocked until the mapped evidence is produced.
+
+## 13. Staged assertion-level TDD execution plan
+
+Architecture approval fixes the target, not the implementation. Every stage below follows the same mandatory loop: add a named assertion whose pre-change failure demonstrates the exact missing behavior; retain the RED command/output; make the smallest production change that satisfies only that assertion; run the stage and regression gates; obtain implementation review; and record a rollback checkpoint before advancing. A compile failure, broad snapshot change, or test that fails for an unrelated setup error is not an acceptable RED. If a later stage exposes an earlier design/implementation defect, return to that owning stage rather than patching around it.
+
+No stage authorizes production deployment. The real destructive-cleanup invocation and production deployment remain separate operator-authorized gates. Runtime compatibility import/fallback is never permitted. The only offline programs allowed to open core read-write remain (1) the single pre-QC `project-core-state` transaction and (2) the post-QC guarded destructive-cleanup transaction; test fixtures may exercise those programs against disposable databases but cannot introduce another writer.
+
+### Sequence, dependencies, and rollback points
+
+| Stage | Depends on | Executable outcome | Rollback checkpoint | Timing |
+|---|---|---|---|---|
+| S0 | approved architecture | Boundary-audit harness rejects new violations and inventories existing ones. | Pre-implementation commit plus complete classified audit output. | Tests first; no cutover. |
+| S1 | S0 | Generic gate-admin is authenticated/scoped on its protected UDS and absent from public TCP. | Binary/config pair before listener/route change. | Early. |
+| S2 | S1 | Generic subject allocation, grants, tombstones, and one binding authority work through gate-admin. | Pre-generic-schema database fixture and matched snapshot restore proof. | Early; generic schema only. |
+| S3 | S1–S2 | Dynamic operation metadata and generic binding/session routing replace names and platform-shaped shared semantics. | Last compatible runtime-protocol fixture and declaration digest. | Early. |
+| S4 | S2–S3 | Generic heartbeat instructions and exact/global precedence replace platform watches in live paths. | Pre-projection heartbeat fixture and scheduler transcript. | Early; no legacy deletion. |
+| S5 | S1–S4 | Discord, Nostr, and Web own stores, local admin, credentials, identity/policy, and child lifecycle. | Per-gateway store snapshot plus previous independently runnable binary/config. | Early implementation, no production cutover. |
+| S6 | S2, S3, S5 | Current co-agent relationship/revision is revalidated at every execution/emission boundary. | Authorization fixture and pre-change binaries. | Early implementation. |
+| S7 | S3, S5–S6 | Core work/ack and gateway emission ledgers converge under crash/reconnect with adapter-qualified guarantees. | Both-ledger fixture pair and protocol digest. | Early implementation, before migration. |
+| S8 | S2, S4–S7 | Offline import/disposition and first writer `project-core-state` are complete and idempotent on disposable and QC copies. | Matched pre-migration core plus all participating-gateway snapshots. | Late migration gate; no cleanup. |
+| S9 | S8 | Isolated Discord/Nostr/Web and synthetic-gateway QC passes after provision-only cutover. | Exact S8 snapshot set and QC deployment manifest. | Post-migration, pre-freeze. |
+| S10 | S9 | Read-only `verify-freeze` and the second writer perform guarded cleanup with a separate record. | External post-QC freeze set/manifest, retained until release acceptance. | Destructive gate; operator authorization required for real data. |
+| S11 | S10 | Matched rollback rehearsal, final audits, and production-readiness evidence pass. | Both pre-migration and post-QC matched snapshot sets remain restorable. | Last; deployment still separately authorized. |
+
+Tests for S0–S7 and disposable-database tests for S8/S10 should be introduced as early as their dependencies permit. That does not authorize running phase 1 against a real cutover copy, creating the post-QC freeze, invoking phase 2, or deploying: those actions remain ordered S8 → S9 → S10 → S11.
+
+### S0 — architecture and static boundary guards
+
+- **RED:** Extend `crates/server/tests/webgate_static_audit.rs` or add a focused `gateway_boundary_static_audit` category with mutation fixtures. Assertions must initially show that a forbidden normal concrete-gateway dependency, concrete platform schema/DTO/route/name branch, direct core-SQLite open, or public `admin_router` merge is not rejected. A Cargo-metadata assertion must separately distinguish allowed dev-only QC edges from production `--edges no-dev` edges.
+- **Minimal GREEN:** Add only the reusable manifest/AST/route audit and a reviewed, line-specific burn-down inventory for already-known V01–V16 occurrences; do not suppress new or unclassified matches. This stage prevents regression while later stages remove the inventory.
+- **Gate/evidence:** Store RED output, negative-fixture GREEN output, full classified occurrence report, production/dev dependency trees, and `git diff --check`. Review must confirm every allowlisted occurrence has an owner stage and expiry.
+- **Still forbidden:** Treating comments, historical migrations, tests, and reachable production code as equivalent; broad word deletion; adding a new exception; changing runtime behavior before its owning RED.
+
+### S1 — protected generic gate-admin and public isolation
+
+- **RED:** In extgate/server integration and `api_e2e` route tests, assert each of the six operations returns 404 on public TCP; the dedicated core UDS alone serves them; missing/empty/wrong/expired/revoked/out-of-scope bearers fail; token/path/body/config are redacted; socket mode is `0600`; and bind, permission, or principal setup failure prevents request acceptance. Current public route merging or empty-token reachability must make the named assertions fail.
+- **Minimal GREEN:** Bind a distinct core-owned gate-admin UDS, install one nonempty scoped-principal authenticator before accepting requests, and remove all production public-router merges/descriptions/extensions for these operations. Keep the six generic request/response meanings; add no gateway-specific field.
+- **Gate/evidence:** Six-path public/UDS matrix, startup-failure tests, scope matrix, redaction capture, route inventory, and production reachability audit all pass. Review verifies no public proxy to the UDS.
+- **Still forbidden:** Empty-token production constructors, permissive-CORS exposure, concrete gateway administration on this UDS, daemon core-DB access, or deployment before later data stages.
+
+### S2 — generic subject safeguards and one binding authority
+
+- **RED:** In `crates/db/src/schema/tests`, gate-binding query tests, and extgate gate-admin protocol tests, assert byte-identical preservation of positive INTEGER subject IDs/associations, allocator high-water monotonicity, tombstone-before-hard-delete and permanent non-reuse, hashed single-use/expiry-bound grants for first association, grandfathered existing associations, duplicate-address refusal, idempotent create, conflicting-create rejection, and atomic session/binding creation. Each assertion must fail against the absent or split authority.
+- **Minimal GREEN:** Add only kind-neutral allocator/tombstone/grant state and the scoped idempotent gate-admin binding service. Route both operator provisioning and runtime lazy discovery through that one service; preserve opaque kind/config/address values.
+- **Gate/evidence:** Populated-upgrade and fresh-schema suites, concurrent create/grant consumption tests, exact ID/association digest comparison, and sanitized protocol errors pass.
+- **Still forbidden:** Platform columns/enums/prefix rules, subject renumbering, a second binding writer, daemon direct SQL, or consuming a grant for a pre-existing association.
+
+### S3 — dynamic operations and platform-neutral routing
+
+- **RED:** In extgate hello/operations tests, `transport_fire_registry`, action routing tests, and QC utterance contracts, assert arbitrary names work solely from digest-covered `authorization`, `dispatch`, `sub_engine`, `sharing`, and `effect`; missing/unknown metadata fails hello; `dispatch=utterance` iff `effect=utterance`; `operation_driven` requires a valid utterance operation; required guarantee incompatibility fails before execution; and exact/global binding routing uses only generic IDs. Add static assertions that platform-shaped timed-fire fields, operation-name fallbacks, concrete lifecycle registries, and production kind branches remain detectable.
+- **Minimal GREEN:** Version the dynamic declaration/invocation envelopes, validate the complete compatibility matrix, remove gateway-operation name classification, and replace platform-shaped fire/sink/lifecycle paths with generic binding/session envelopes and generic extgate liveness. Preserve core-owned built-in tool policy and CLI's opaque generic client behavior.
+- **Gate/evidence:** Protocol vectors, stale/live declaration digest cases, exact/global fan-out, timed/subtask/automatic continuation, and arbitrary synthetic operation-name tests pass; S0 burn-down entries for V08–V10 close.
+- **Still forbidden:** Static gateway operation allowlists, platform IDs in shared envelopes, server supervision of concrete daemons, or weakening a declaration/invocation guarantee.
+
+### S4 — generic heartbeat instructions
+
+- **RED:** In DB schema/query, scheduler, gate-admin, and heartbeat QC tests, assert composite `(agent_id, session_id)` instructions, exact-over-global precedence, empty-exact fallback, NULL inheritance to current agent/default, non-identical pre-projection target refusal, stopped projection of initial anchors, and legitimate post-start `last_fired_at` updates. Existing `session_watches` or platform destinations must cause the target assertions/static audit to fail.
+- **Minimal GREEN:** Add the generic heartbeat-instructions schema/API and make the scheduler emit binding/session work only. Keep initial projection fingerprinting for stopped retry while excluding mutable runtime anchors from long-lived lineage equality.
+- **Gate/evidence:** Deterministic scheduler transcripts, precedence matrix, restart behavior, and immutable-marker/mutable-anchor tests pass without a gateway name in production shared code.
+- **Still forbidden:** A platform watch schema in core, gateway-owned scheduling of generic turns, runtime migration fallback, or deletion of legacy source rows before S10.
+
+### S5 — gateway-owned stores, administration, secrets, and lifecycle
+
+- **RED:** In `discord-gateway` run/daemon tests, `nostr-gateway/src/daemon_tests.rs`, new Web store/admin tests, and process-supervisor tests, assert Discord/Nostr daemons run/administer/restart their children while server is stopped and Web remains independently runnable; disabled/non-ready daemon instances create no placement or child; persisted lifecycle recovery follows §7; local admin is scoped; secrets are encrypted/redacted and injected only into children; and runtime configuration rejects core/legacy DB paths. Assertions must expose today's missing Discord/Web owner, Nostr core DB/import dependency, and concrete shared-supervisor vocabulary.
+- **Minimal GREEN:** Add one gateway-owned SQLite store and protected local-admin endpoint per concrete gateway; move identity/config/policy/credential references into the owner; move Discord/Nostr child lifecycle into their daemons while keeping Web independently launched; make the process utility platform-neutral; and remove daemon runtime core-SQL/import code. Keep platform SDK/parsing/send/watch behavior inside its gateway and retain QC-only concrete dependencies as dev-only.
+- **Gate/evidence:** Per-gateway fresh/restart/crash/disabled/admin-scope tests, credential redaction scans, `cargo tree --edges no-dev`, no-core-open audit, server-stopped operation, and Web collision/rerun tests pass independently.
+- **Still forbidden:** Server-created placements, operator placement as canonical state, plaintext opaque config, core/shared credential decoding, runtime legacy import, or promoting QC dependencies to production.
+
+### S6 — authorization revalidation boundaries
+
+- **RED:** Add table-driven core/extgate/QC tests that revoke or revision-bump a co-agent immediately before (1) initial model turn, (2) queue dequeue/retry, (3) tool invocation, (4) automatic continuation, (5) operation-driven continuation, (6) timed/subtask continuation, and (7) outbound-delivery commit. Every case must initially demonstrate unwanted later model/tool execution or ledger mutation, then assert zero such effects.
+- **Minimal GREEN:** At each boundary, call the current generic relationship/revision authority and fail closed before the side effect; pass only generic role/revision evidence projected by the owning gateway. Share a helper only if it preserves the separate checks.
+- **Gate/evidence:** The seven-boundary matrix passes for revoke and revision bump, including queued retries and concurrent races, with no cached authorization accepted across a boundary.
+- **Still forbidden:** One-time admission checks, stale role caching, core lookup of platform identity/policy, or committing an outbound row after revocation.
+
+### S7 — two ledgers, reconnect, and adapter-qualified delivery
+
+- **RED:** In extgate delivery/runtime tests plus Nostr/Discord gateway tests, enumerate every prepare/send/receipt/ack crash window; same-key/same-digest/guarantee replay; digest/guarantee conflict; ordered reconnect drain; close-with-pending/retention; weaker/same/stronger hello; recognized/unrecognized adapter-protocol digest; and terminal rows with no external I/O. Nostr assertions require one persisted signed event ID across retries. Discord assertions require a stable at-most-25-character nonce, bounded `enforce_nonce`, persisted references, and no resend after unreconcilable ambiguity/window expiry.
+- **Minimal GREEN:** Persist immutable guarantee and prepared protocol evidence in the core pending/ack row and gateway `(binding_id, delivery_id)` emission row; implement the generic retention/reconnect handshake. Nostr signs once and reconciles one event ID. Discord advertises `at_most_once_indeterminate` and durably transitions ambiguity to `indeterminate`.
+- **Gate/evidence:** Deterministic fault-injection matrix, ledger digest comparisons, downgrade/upgrade/protocol-mismatch matrix, Nostr logical-exactly-once proof, Discord nonce-window proof, and S6 pre-commit revocation tests pass.
+- **Still forbidden:** Universal external exactly-once claims, relabeling an existing guarantee, sending an `indeterminate` row again, fabricating legacy receipts, or acknowledging core work before the specified gateway outcome.
+
+### S8 — offline disposition/import and first direct writer
+
+- **RED:** In a dedicated migrator integration suite with disposable populated databases, assert a fingerprint-keyed disposition for every legal `trusted_users.platform/source` class, explicit `extgate` fan-out approval, collision/missing-destination refusal, credential-source conflict handling, zero-unmapped proof, byte-identical IDs/history, all-store snapshot inventory, and import rerun/conflict behavior. Separately assert `project-core-state` cannot delete legacy rows, writes once atomically, records its immutable marker, returns read-only exact-match `already_applied` after a lost response, and rejects any mismatch. A direct-writer allowlist test must fail if any executable other than phase 1 and phase 2 can write core offline.
+- **Minimal GREEN:** Implement the offline-only importer and manifest, then the single immediate `project-core-state` transaction for approved generic safeguards, dispositions, guarantees, and heartbeat targets. Copy to every required Discord/Nostr/Web destination before projection and leave all legacy source rows intact.
+- **Gate/evidence:** Fresh/populated fixtures, identity matrix, selected-credential proof, source/destination logical digests, marker byte-stability, lost-response retry, and matched pre-migration restore pass. Only after review may phase 1 run on an isolated QC copy.
+- **Still forbidden:** Runtime import/fallback, partial destination sets, changing existing IDs/history, a second projection transaction, phase-2 deletion, or opening production data.
+
+### S9 — isolated cutover QC and synthetic gateway
+
+- **RED:** Before changing the isolated deployment, run the new QC assertions and capture their specific failures for gateway-owned Owner/CoAgent/TrustedUser behavior, history/ID continuity, public six-path 404, protected/local UDS auth, server-stopped lifecycle, dynamic operations, heartbeat routing, all S6 revocation boundaries, both-ledger crash/reconnect cases, and adapter guarantees. Add a dev-only synthetic weaker-gateway test that initially fails because its fixture cannot yet provision, declare an operation, receive timed work, and emit a result while the pinned core/shared/server artifact hashes remain unchanged.
+- **Minimal GREEN:** Make no new product behavior here: add only the dev-only synthetic adapter/QC fixture, deploy reviewed S1–S8 binaries/config to isolated Discord/Nostr/Web environments, run offline import plus phase 1 on their copies, and provision through the protected generic authority. A failure returns to the owning stage and repeats RED→GREEN review.
+- **Gate/evidence:** Signed QC manifest includes before/after logical digests, all identity dispositions, history/tool chronology, exact/global routing, Nostr event IDs, Discord nonce/indeterminate cases, synthetic gateway diff showing zero core/shared/server change, CLI generic-path smoke, and dev-only QC dependency proof.
+- **Still forbidden:** Production traffic, legacy-source deletion, mutable freeze markers, bypassing failed assertions, or calling a QC deployment a production authorization.
+
+### S10 — read-only freeze and second direct writer
+
+- **RED:** In migrator tests, assert `verify-freeze` opens core and every participating gateway DB read-only and preserves byte/logical digests; missing/extra stores, schema/version/freeze/manifest/disposition/lineage mismatch fails; mutation between preflight and cleanup aborts before deletion; locks survive through commit/rollback; cleanup cannot create/backfill/project generic state; and deletion plus the separate cleanup/applied record is atomic while the projection marker remains unchanged.
+- **Minimal GREEN:** Implement read-only `verify-freeze`, immutable gateway handles/read locks, and one guarded destructive-cleanup core transaction that repeats every check, deletes only authorized legacy concrete state, and records cleanup/freeze/manifest IDs separately. After all services are stopped, the real sequence creates the external post-QC freeze set, runs the read-only preflight, and only then may invoke this second and final offline direct writer.
+- **Gate/evidence:** Before/after digest proof, mutation-race suite, transaction fault injection, retained-state/history proof, immutable projection-marker comparison, and successful restore of the complete post-QC freeze set pass. Real cleanup additionally requires explicit destructive operator authorization.
+- **Still forbidden:** A pre-cleanup marker write, excluding a mutable marker from the digest, a third writer, cleanup after any intervening mutation, deleting retained generic/history state, or proceeding with an incomplete freeze set.
+
+### S11 — rollback proof and production readiness
+
+- **RED:** Make the release checklist executable so it initially fails on any missing artifact: pre-migration and post-QC matched restore, every V01–V16 closure, zero unclassified production occurrence, zero unmapped identity, public/UDS isolation, synthetic zero-core-change proof, adapter guarantee evidence, and exact binary/config/schema/manifest hashes.
+- **Minimal GREEN:** Add no compensating runtime behavior. Rehearse restore from both matched snapshot sets in isolated infrastructure, rerun S0–S10 gates on the restored states, and assemble the immutable release evidence. Any product failure returns to its owning stage.
+- **Gate/evidence:** Independent implementation review approves the complete evidence index; rollback restores core and every participating gateway together with matching logical digests; worktree/index and secret scan are clean; deployment inputs are pinned. Production deployment still requires separate operator authorization and the transactional deployer.
+- **Still forbidden:** Partial-store rollback, forward-fixing a failed rollback, secret-bearing evidence, declaring Issue #1006 complete before production QC, or treating readiness review as deployment permission.
+
+### V01–V16 coverage map
+
+The stage evidence supplements, and does not weaken, each measurable criterion in §4.
+
+| Inventory item | Owning stages | Completion evidence |
+|---|---|---|
+| V01 | S0, S5 | Production dependency/AST audit and Nostr daemon no-core dependency. |
+| V02 | S1, S5 | Gate-admin protocol matrix and zero daemon core-SQLite opens. |
+| V03 | S5, S8, S10 | No runtime import symbols; offline rerun/conflict and two-writer proofs. |
+| V04 | S5, S9 | Discord daemon-owned store/admin/lifecycle under server-stopped QC. |
+| V05 | S0, S5 | Platform-neutral process utility and no concrete server supervision. |
+| V06 | S2, S4–S6, S8, S10 | Subject/identity/policy/heartbeat preservation, disposition, and guarded cleanup digests. |
+| V07 | S1, S5 | Public six-path 404, protected core UDS, and gateway-local admin tests. |
+| V08 | S3, S5 | Generic extgate liveness only; independently owned concrete children. |
+| V09 | S3–S4, S7 | Generic binding/session work plus split-ledger crash/reconnect proof. |
+| V10 | S3, S7 | Metadata-only operation compatibility and guarantee enforcement. |
+| V11 | S0, S3, S10 | Zero unclassified production vocabulary/branch/schema/route occurrence. |
+| V12 | S5, S8–S9 | Web-owned store/admin/import/rollback without runtime core access. |
+| V13 | S3, S9 | CLI remains an opaque generic client in smoke/QC. |
+| V14 | S0, S5, S9 | Concrete dependencies remain dev-only and QC remains runnable. |
+| V15 | S0, S8, S10–S11 | Reachability classification, preserved history/migrations, and matched restores. |
+| V16 | S0, S3, S7, S9 | Synthetic gateway proves zero core/shared/server source, schema, migration, or redeployment change. |

@@ -298,7 +298,7 @@ Every legacy external-identity row, including `rest`, `extgate`, Web, arbitrary,
 | CLI | independently launched CLI gateway | runtime UDS; CLI owns terminal selection/input/display |
 | REST | core/server generic administration | not a concrete gateway; no platform settings/identity API |
 
-The evidence-backed source inventory, migration mapping, and completion criteria are authoritative only after review of [design-gateway-process-ownership.md](design-gateway-process-ownership.md).
+The approved evidence-backed source inventory, migration mapping, and completion criteria are authoritative in [design-gateway-process-ownership.md](design-gateway-process-ownership.md); its [§13 staged TDD plan](design-gateway-process-ownership.md#13-staged-assertion-level-tdd-execution-plan) governs implementation order and gates.
 
 ---
 
