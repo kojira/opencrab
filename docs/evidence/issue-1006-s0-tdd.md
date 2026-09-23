@@ -148,3 +148,54 @@ passed
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 passed
 ```
+
+## Final review-blocker pass: normative provenance and function-item aliases
+
+Base under test: `b5f36f465e043f55cdd0d9f1c8f0ed02784df08a`.
+
+Eight independent assertions were added before detector changes and run together. Exact RED was **8 tests: 6 failures, 2 passes**. The six proven gaps were:
+
+- unqualified and qualified public router function-item aliases both failed with `AssertionError: 'public-gate-admin-reachable' not found in set()`;
+- relabeling an unreviewed production DB open as `valid-gateway-owned-store`, or independently changing its violation, owner stage, or expiry, produced only the unrelated V01–V16 coverage warning and no field-mismatch error.
+
+The two visibility-qualified alias assertions were already GREEN on the base: both `pub(crate) type StoreConn = rusqlite::Connection` and a chained `pub(in crate::store)` / `pub(super)` alias emitted `gateway-db-open`. The existing unanchored `\btype` scan recognizes visibility-prefixed declarations despite its narrower-looking optional `pub` group. Per review direction, those regression fixtures remain, but no unsupported production parser change was made without RED. The exact mixed RED/preexisting-GREEN output was retained during the run at `/tmp/issue-1006-s0-fix3-red.log`.
+
+Minimal GREEN now resolves a bare or qualified function-item path discovered through the existing position-aware served-expression trace into the reviewed Router factory graph. It also compares every current baseline entry's `classification`, `violation`, `owner_stage`, and `expires_when` exactly with `_metadata_for(finding)`. Consequently only the two code-reviewed `VALID_GATEWAY_DB_OPENS` tuples can carry `valid-gateway-owned-store`; baseline regeneration cannot redefine that provenance policy.
+
+Initial focused GREEN and full mutation validation:
+
+```text
+8 focused tests ... OK
+python3 -m unittest scripts.tests.test_gateway_boundary_audit -v
+Ran 46 tests ... OK
+
+python3 scripts/gateway_boundary_audit.py
+gateway boundary audit OK: 454 classified findings
+```
+
+The repository finding set remained exactly **454**, so the reviewed baseline was not regenerated or modified.
+
+Final validation for this pass:
+
+```text
+cargo test -p opencrab-server --test webgate_static_audit
+9 passed; 0 failed
+
+bash scripts/check-deps.sh && bash scripts/check-file-size.sh
+R4/R5/R6/R7 OK; every Rust source file is at most 800 lines
+
+cargo metadata --format-version 1 --no-deps
+server concrete edges: Discord dev-only, Nostr dev-only, Web absent
+
+cargo tree -p opencrab-server --edges no-dev
+no Discord/Nostr/Web concrete gateway edge
+
+cargo fmt --all -- --check
+passed
+
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+passed
+
+git diff --check
+passed
+```

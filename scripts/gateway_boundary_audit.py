@@ -468,10 +468,17 @@ def _public_route_findings(files: Mapping[str, str]) -> list[Finding]:
         (root.path, root.name, root.start_line) for root in roots
     }
     call_pattern = re.compile(r"(?<!\bfn\s)\b([A-Za-z_][A-Za-z0-9_]*)\s*(?:!\s*)?\(")
+    bare_path_pattern = re.compile(
+        r"^(?:[A-Za-z_][A-Za-z0-9_]*::)*([A-Za-z_][A-Za-z0-9_]*)$"
+    )
     pending: list[RustFunction] = []
     for root in roots:
         for expression in _expressions_feeding_serve(root):
-            for called in call_pattern.findall(expression):
+            called_names = set(call_pattern.findall(expression))
+            bare_path = bare_path_pattern.fullmatch(expression.strip())
+            if bare_path:
+                called_names.add(bare_path.group(1))
+            for called in called_names:
                 pending.extend(by_name.get(called, []))
     while pending:
         function = pending.pop()
@@ -645,6 +652,17 @@ def check_baseline(findings: list[Finding], document: Mapping[str, object], root
         errors.append(f"UNCLASSIFIED {finding.rule} {finding.path}:{finding.line}: {finding.snippet}")
     for key in sorted(baseline.keys() - current.keys()):
         errors.append(f"STALE baseline entry (remove/review it): {key}")
+    normative_fields = ("classification", "violation", "owner_stage", "expires_when")
+    for key in sorted(current.keys() & baseline.keys()):
+        expected = dict(zip(normative_fields, _metadata_for(current[key])))
+        entry = baseline[key]
+        for field in normative_fields:
+            actual = entry.get(field)
+            if actual != expected[field]:
+                errors.append(
+                    f"baseline {field} mismatch for {key}: "
+                    f"expected {expected[field]!r}, got {actual!r}"
+                )
     coverage = document.get("coverage")
     if not isinstance(coverage, list):
         errors.append("baseline coverage must be a list")

@@ -259,6 +259,23 @@ opencrab-example-gateway = { path = "../example-gateway" }
         }
         self.assertIn("gateway-db-open", self.rules(files))
 
+    def test_pub_crate_sqlite_connection_type_alias_open_is_inventoried(self):
+        files = {
+            "crates/example-gateway/src/store.rs":
+                "pub(crate) type StoreConn = rusqlite::Connection;\n"
+                "fn open(path: &Path) { StoreConn::open(path); }\n"
+        }
+        self.assertIn("gateway-db-open", self.rules(files))
+
+    def test_pub_in_sqlite_connection_type_alias_chain_is_inventoried(self):
+        files = {
+            "crates/example-gateway/src/store.rs":
+                "pub(in crate::store) type InnerConn = rusqlite::Connection;\n"
+                "pub(super) type StoreConn = InnerConn;\n"
+                "fn open(path: &Path) { StoreConn::open(path); }\n"
+        }
+        self.assertIn("gateway-db-open", self.rules(files))
+
     def test_helper_mediated_core_store_open_is_rejected(self):
         files = {
             "crates/example-gateway/src/daemon.rs":
@@ -345,6 +362,34 @@ opencrab-example-gateway = { path = "../example-gateway" }
         }
         self.assertIn("public-gate-admin-reachable", self.rules(files))
 
+    def test_public_reachability_traces_function_item_alias(self):
+        files = {
+            "crates/server/src/main.rs": textwrap.dedent("""
+                async fn main() {
+                    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
+                    let factory = protected_controls;
+                    let app = factory();
+                    axum::serve(listener, app).await.unwrap();
+                }
+            """),
+            "crates/server/src/lib.rs": self._six_operation_router("protected_controls"),
+        }
+        self.assertIn("public-gate-admin-reachable", self.rules(files))
+
+    def test_public_reachability_traces_qualified_function_item_alias(self):
+        files = {
+            "crates/server/src/main.rs": textwrap.dedent("""
+                async fn main() {
+                    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
+                    let factory = crate::protected_controls;
+                    let app = factory();
+                    axum::serve(listener, app).await.unwrap();
+                }
+            """),
+            "crates/server/src/lib.rs": self._six_operation_router("protected_controls"),
+        }
+        self.assertIn("public-gate-admin-reachable", self.rules(files))
+
     def test_public_reachability_ignores_mutation_after_served_alias(self):
         files = {
             "crates/server/src/main.rs": textwrap.dedent("""
@@ -408,6 +453,52 @@ opencrab-example-gateway = { path = "../example-gateway" }
         document["review"]["status"] = "line-by-line-reviewed"
         errors = AUDIT.check_baseline([finding], document)
         self.assertFalse(any("baseline review" in error for error in errors), errors)
+
+    @staticmethod
+    def _reviewed_document_for(finding):
+        document = AUDIT.baseline_document([finding])
+        document["review"]["status"] = "line-by-line-reviewed"
+        return document
+
+    def test_baseline_cannot_relabel_production_db_open_as_valid_store(self):
+        finding = AUDIT.audit_texts({
+            "crates/example-gateway/src/store.rs":
+                "fn open(path: &Path) { GatewayStore::open(path); }\n"
+        })[0]
+        document = self._reviewed_document_for(finding)
+        document["entries"][0]["classification"] = "valid-gateway-owned-store"
+        errors = AUDIT.check_baseline([finding], document)
+        self.assertTrue(any("classification mismatch" in error for error in errors), errors)
+
+    def test_baseline_violation_must_match_normative_metadata(self):
+        finding = AUDIT.audit_texts({
+            "crates/example-gateway/src/store.rs":
+                "fn open(path: &Path) { GatewayStore::open(path); }\n"
+        })[0]
+        document = self._reviewed_document_for(finding)
+        document["entries"][0]["violation"] = "V16"
+        errors = AUDIT.check_baseline([finding], document)
+        self.assertTrue(any("violation mismatch" in error for error in errors), errors)
+
+    def test_baseline_owner_must_match_normative_metadata(self):
+        finding = AUDIT.audit_texts({
+            "crates/example-gateway/src/store.rs":
+                "fn open(path: &Path) { GatewayStore::open(path); }\n"
+        })[0]
+        document = self._reviewed_document_for(finding)
+        document["entries"][0]["owner_stage"] = "S11"
+        errors = AUDIT.check_baseline([finding], document)
+        self.assertTrue(any("owner_stage mismatch" in error for error in errors), errors)
+
+    def test_baseline_expiry_must_match_normative_metadata(self):
+        finding = AUDIT.audit_texts({
+            "crates/example-gateway/src/store.rs":
+                "fn open(path: &Path) { GatewayStore::open(path); }\n"
+        })[0]
+        document = self._reviewed_document_for(finding)
+        document["entries"][0]["expires_when"] = "never"
+        errors = AUDIT.check_baseline([finding], document)
+        self.assertTrue(any("expires_when mismatch" in error for error in errors), errors)
 
 
 if __name__ == "__main__":
