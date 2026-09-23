@@ -199,3 +199,20 @@ passed
 git diff --check
 passed
 ```
+
+## Exact gateway-store identity pass
+
+Base under test: `ac37156f8b86b4f6e3d517766bb4653a85794a72`.
+
+A focused mutation assertion duplicated each reviewed gateway DB-open snippet on the immediately following line in the same approved file. Before the detector change, both subtests failed independently:
+
+```text
+test_valid_gateway_db_open_requires_exact_finding_identity
+store.rs: expected 'production-violation', got 'valid-gateway-owned-store'
+daemon.rs: expected 'production-violation', got 'valid-gateway-owned-store'
+FAILED (failures=2)
+```
+
+The raw RED output was retained during the run at `/tmp/issue-1006-s0-fix4-red.log`. Minimal GREEN replaces path/snippet provenance with exact `(rule, path, line, snippet)` identities for `store.rs:66` and `daemon.rs:115`. The original sites remain valid; a duplicate or moved occurrence is a production violation and also causes baseline stale/unclassified failure. Focused GREEN passed. The current identities still match the reviewed 454-entry inventory, so the baseline was not regenerated or modified.
+
+Final GREEN validation passed: 47 Python mutation tests; the 454-finding repository audit; 9 `webgate_static_audit` tests; R4–R7 dependency and source-size checks; Cargo metadata and no-dev tree assertions; `cargo fmt --check`; full-workspace/all-target/all-feature Clippy with warnings denied; and `git diff --check`.

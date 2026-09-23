@@ -470,6 +470,32 @@ opencrab-example-gateway = { path = "../example-gateway" }
         errors = AUDIT.check_baseline([finding], document)
         self.assertTrue(any("classification mismatch" in error for error in errors), errors)
 
+    def test_valid_gateway_db_open_requires_exact_finding_identity(self):
+        approved_sites = (
+            (
+                "crates/nostr-gateway/src/store.rs",
+                66,
+                "let conn = Connection::open(path)",
+            ),
+            (
+                "crates/nostr-gateway/src/daemon.rs",
+                115,
+                "let mut gateway_store = GatewayStore::open(&config.database_path)?;",
+            ),
+        )
+        for path, approved_line, snippet in approved_sites:
+            with self.subTest(path=path):
+                source = "\n" * (approved_line - 1) + snippet + "\n" + snippet + "\n"
+                findings = self.findings({path: source}, "gateway-db-open")
+                self.assertEqual([approved_line, approved_line + 1], [item.line for item in findings])
+                approved, moved = (AUDIT._metadata_for(item) for item in findings)
+                self.assertEqual("valid-gateway-owned-store", approved[0])
+                self.assertEqual("production-violation", moved[0])
+                document = self._reviewed_document_for(findings[0])
+                errors = AUDIT.check_baseline([findings[1]], document)
+                self.assertTrue(any(error.startswith("UNCLASSIFIED") for error in errors), errors)
+                self.assertTrue(any(error.startswith("STALE baseline entry") for error in errors), errors)
+
     def test_baseline_violation_must_match_normative_metadata(self):
         finding = AUDIT.audit_texts({
             "crates/example-gateway/src/store.rs":

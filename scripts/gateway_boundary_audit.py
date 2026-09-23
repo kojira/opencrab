@@ -58,9 +58,19 @@ HISTORICAL_FILES = {
     "crates/db/src/schema/migration_tests.rs",
     "crates/db/src/schema/v43_v47.rs",
 }
-VALID_GATEWAY_DB_OPENS = {
-    ("crates/nostr-gateway/src/store.rs", "let conn = Connection::open(path)"),
-    ("crates/nostr-gateway/src/daemon.rs", "let mut gateway_store = GatewayStore::open(&config.database_path)?;"),
+VALID_GATEWAY_DB_OPEN_IDENTITIES = {
+    (
+        "gateway-db-open",
+        "crates/nostr-gateway/src/store.rs",
+        66,
+        "let conn = Connection::open(path)",
+    ),
+    (
+        "gateway-db-open",
+        "crates/nostr-gateway/src/daemon.rs",
+        115,
+        "let mut gateway_store = GatewayStore::open(&config.database_path)?;",
+    ),
 }
 VALID_CLASSIFICATIONS = {
     "production-violation",
@@ -538,7 +548,7 @@ def _metadata_for(finding: Finding) -> tuple[str, str, str, str]:
         return "dev-only-qc", "V14", "S11", "retain only while isolated QC needs it and cargo tree --edges no-dev remains free of the daemon"
     if finding.rule == "unreviewed-gateway-dev-dependency":
         return "production-violation", "V14", "S0", "remove or explicitly move reviewed QC dependency to server dev-only scope"
-    if finding.rule == "gateway-db-open" and (path, finding.snippet) in VALID_GATEWAY_DB_OPENS:
+    if finding.key in VALID_GATEWAY_DB_OPEN_IDENTITIES:
         return "valid-gateway-owned-store", "V02", "S5", "retain only while provenance remains the daemon-owned gateway database"
     if finding.rule in {"gateway-core-path", "gateway-core-store-open", "gateway-db-open"}:
         violation = "V03" if "legacy" in finding.snippet.lower() else "V02"
