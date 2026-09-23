@@ -327,10 +327,14 @@ def _rusqlite_connection_aliases(production: list[tuple[int, str]]) -> set[str]:
     return aliases
 
 
-def _gateway_source_findings(path: str, text: str) -> list[Finding]:
+def _gateway_source_findings(
+    path: str,
+    text: str,
+    crate_aliases: set[str] | None = None,
+) -> list[Finding]:
     findings: list[Finding] = []
     production = list(_production_rust_lines(path, text))
-    aliases = _rusqlite_connection_aliases(production)
+    aliases = crate_aliases or _rusqlite_connection_aliases(production)
     alias_pattern = re.compile(rf"\b(?:{'|'.join(map(re.escape, sorted(aliases)))})::(?:open|open_with_flags)\s*\(")
     for line_number, code in production:
         if CORE_PATH.search(code):
@@ -473,7 +477,7 @@ def _public_route_findings(files: Mapping[str, str]) -> list[Finding]:
         header = function.body.split("{", 1)[0]
         if re.search(r"->\s*(?:axum::)?Router\b", header):
             by_name.setdefault(function.name, []).append(function)
-    roots = [f for f in functions if "TcpListener::bind" in f.body and "axum::serve" in f.body]
+    roots = [f for f in functions if "axum::serve" in f.body]
     reachable: set[tuple[str, str, int]] = {
         (root.path, root.name, root.start_line) for root in roots
     }
@@ -511,6 +515,15 @@ def _public_route_findings(files: Mapping[str, str]) -> list[Finding]:
 
 def audit_texts(files: Mapping[str, str]) -> list[Finding]:
     normalized = {pathlib.PurePosixPath(path).as_posix(): text for path, text in files.items()}
+    gateway_alias_sources: dict[str, list[tuple[int, str]]] = {}
+    for path, text in normalized.items():
+        if _gateway_production_path(path):
+            crate = pathlib.PurePosixPath(path).parts[1]
+            gateway_alias_sources.setdefault(crate, []).extend(_production_rust_lines(path, text))
+    gateway_aliases = {
+        crate: _rusqlite_connection_aliases(production)
+        for crate, production in gateway_alias_sources.items()
+    }
     findings: list[Finding] = []
     for path, text in sorted(normalized.items()):
         if path.endswith("Cargo.toml"):
@@ -518,7 +531,8 @@ def audit_texts(files: Mapping[str, str]) -> list[Finding]:
         if _shared_production_path(path):
             findings.extend(_shared_source_findings(path, text))
         elif _gateway_production_path(path):
-            findings.extend(_gateway_source_findings(path, text))
+            crate = pathlib.PurePosixPath(path).parts[1]
+            findings.extend(_gateway_source_findings(path, text, gateway_aliases[crate]))
     findings.extend(_public_route_findings(normalized))
     return sorted(set(findings), key=lambda item: item.key)
 

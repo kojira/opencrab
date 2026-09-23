@@ -276,6 +276,38 @@ opencrab-example-gateway = { path = "../example-gateway" }
         }
         self.assertIn("gateway-db-open", self.rules(files))
 
+    def test_cross_module_sqlite_connection_alias_open_is_inventoried(self):
+        files = {
+            "crates/example-gateway/src/store_types.rs":
+                "pub type Handle = rusqlite::Connection;\n",
+            "crates/example-gateway/src/daemon.rs":
+                "use crate::store_types::Handle;\n"
+                "fn open(path: &Path) { Handle::open(path); }\n",
+        }
+        findings = self.findings(files, "gateway-db-open")
+        self.assertEqual(["crates/example-gateway/src/daemon.rs"], [item.path for item in findings])
+
+    def test_cross_module_chained_sqlite_alias_open_is_inventoried(self):
+        files = {
+            "crates/example-gateway/src/store_types.rs":
+                "pub type RawHandle = rusqlite::Connection;\n"
+                "pub type Handle = RawHandle;\n",
+            "crates/example-gateway/src/daemon.rs":
+                "use crate::store_types::Handle;\n"
+                "fn open(path: &Path) { Handle::open(path); }\n",
+        }
+        findings = self.findings(files, "gateway-db-open")
+        self.assertEqual(["crates/example-gateway/src/daemon.rs"], [item.path for item in findings])
+
+    def test_sqlite_aliases_do_not_leak_across_gateway_crates(self):
+        files = {
+            "crates/example-gateway/src/store_types.rs":
+                "pub type Handle = rusqlite::Connection;\n",
+            "crates/other-gateway/src/daemon.rs":
+                "fn open(path: &Path) { Handle::open(path); }\n",
+        }
+        self.assertNotIn("gateway-db-open", self.rules(files))
+
     def test_helper_mediated_core_store_open_is_rejected(self):
         files = {
             "crates/example-gateway/src/daemon.rs":
@@ -343,6 +375,21 @@ opencrab-example-gateway = { path = "../example-gateway" }
             """),
             "crates/server/src/lib.rs": self._six_operation_router("protected_controls")
                 + "fn public_router() -> Router { protected_controls() }\n",
+        }
+        self.assertIn("public-gate-admin-reachable", self.rules(files))
+
+    def test_public_reachability_traces_split_listener_binding_helper(self):
+        files = {
+            "crates/server/src/main.rs": textwrap.dedent("""
+                async fn bind_public() -> tokio::net::TcpListener {
+                    tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap()
+                }
+                async fn main() {
+                    let listener = bind_public().await;
+                    axum::serve(listener, create_router_with_gate()).await.unwrap();
+                }
+            """),
+            "crates/server/src/lib.rs": self._six_operation_router("create_router_with_gate"),
         }
         self.assertIn("public-gate-admin-reachable", self.rules(files))
 

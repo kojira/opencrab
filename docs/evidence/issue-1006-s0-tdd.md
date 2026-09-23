@@ -216,3 +216,16 @@ FAILED (failures=2)
 The raw RED output was retained during the run at `/tmp/issue-1006-s0-fix4-red.log`. Minimal GREEN replaces path/snippet provenance with exact `(rule, path, line, snippet)` identities for `store.rs:66` and `daemon.rs:115`. The original sites remain valid; a duplicate or moved occurrence is a production violation and also causes baseline stale/unclassified failure. Focused GREEN passed. The current identities still match the reviewed 454-entry inventory, so the baseline was not regenerated or modified.
 
 Final GREEN validation passed: 47 Python mutation tests; the 454-finding repository audit; 9 `webgate_static_audit` tests; R4–R7 dependency and source-size checks; Cargo metadata and no-dev tree assertions; `cargo fmt --check`; full-workspace/all-target/all-feature Clippy with warnings denied; and `git diff --check`.
+
+## Split-listener and cross-module-alias pass
+
+Base under test: `8e9d438a52fac37f00734c1b4a43e51f733ff927`.
+
+Three assertions were added before detector changes. Exact RED was **3 tests, 3 failures**:
+
+- `test_public_reachability_traces_split_listener_binding_helper` found no `public-gate-admin-reachable` when `bind_public()` owned `TcpListener::bind` and `main` called `axum::serve` with `create_router_with_gate()`;
+- direct and chained cross-module SQLite alias tests both expected the daemon `Handle::open(path)` finding but received an empty list.
+
+The raw RED output was retained during the run at `/tmp/issue-1006-s0-fix5-red.log`. Minimal GREEN roots the shared-production route graph on `axum::serve` itself, while the protected `serve_uds` negative remains outside the graph. Concrete-gateway SQLite aliases are now derived to a fixed point from all production source files in that one crate and supplied to each file audit. A separate negative assertion proves aliases do not leak into another gateway crate. Focused GREEN passed all new assertions plus protected-UDS and exact-site-provenance controls. The repository audit remains exactly 454 findings, so the reviewed baseline was not regenerated or modified.
+
+Final GREEN validation passed: 51 Python mutation tests; the 454-finding repository audit; 9 `webgate_static_audit` tests; R4–R7 dependency and source-size checks; Cargo metadata and no-dev tree assertions; `cargo fmt --check`; full-workspace/all-target/all-feature Clippy with warnings denied; and `git diff --check`.
