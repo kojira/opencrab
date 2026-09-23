@@ -94,6 +94,61 @@ fn walk_ext(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) {
     }
 }
 
+fn public_gate_admin_route_debt(
+    routes: &[opencrab_server::HttpRouteDescriptor],
+) -> Vec<(String, Vec<String>)> {
+    routes
+        .iter()
+        .filter(|route| {
+            route.path.starts_with("/api/gate-instances")
+                || route.path.starts_with("/api/gate-bindings")
+        })
+        .map(|route| (route.path.clone(), route.methods.clone()))
+        .collect()
+}
+
+#[test]
+fn public_gate_admin_route_debt_matches_s0_burn_down() {
+    // V07 / owner S1: this is debt, not an approved public API. S1 expires the
+    // entire list by moving all six operations to the protected core UDS.
+    let actual = public_gate_admin_route_debt(&opencrab_server::production_route_inventory());
+    let expected = vec![
+        (
+            "/api/gate-bindings/{binding_id}".to_string(),
+            vec!["DELETE".to_string(), "PUT".to_string()],
+        ),
+        (
+            "/api/gate-instances/{instance_id}".to_string(),
+            vec!["DELETE".to_string(), "GET".to_string(), "PUT".to_string()],
+        ),
+        (
+            "/api/gate-instances/{instance_id}/revisions".to_string(),
+            vec!["POST".to_string()],
+        ),
+    ];
+    assert_eq!(
+        actual, expected,
+        "unclassified public gate-admin route debt"
+    );
+}
+
+#[test]
+fn public_gate_admin_route_detector_rejects_an_added_route() {
+    let mut routes = opencrab_server::production_route_inventory();
+    let reviewed_debt = public_gate_admin_route_debt(&routes);
+    routes.push(opencrab_server::HttpRouteDescriptor {
+        path: "/api/gate-instances/{instance_id}/unclassified".to_string(),
+        methods: vec!["POST".to_string()],
+        activation: "always".to_string(),
+        source: "mutation-fixture".to_string(),
+    });
+    assert_ne!(
+        public_gate_admin_route_debt(&routes),
+        reviewed_debt,
+        "an added public gate-admin route must not match reviewed debt"
+    );
+}
+
 #[test]
 fn route_inventory_has_no_withdrawn_conversation_post() {
     let routes = opencrab_server::production_route_inventory();

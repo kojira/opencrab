@@ -83,6 +83,14 @@ jobs:
       - name: Dependency boundary checks
         run: bash scripts/check-deps.sh
 
+      # #1006 S0: checked burn-down for concrete-gateway production edges,
+      # shared/server concrete vocabulary, direct core SQLite opens, and public
+      # gate-admin reachability. Mutation fixtures ensure the detector fails.
+      - name: Gateway ownership boundary audit
+        run: |
+          python3 -m unittest scripts.tests.test_gateway_boundary_audit -v
+          python3 scripts/gateway_boundary_audit.py
+
   # DESIGN-SAMPLES-NODE.md §5: sample は workspace build の必須対象ではないが、
   # merge CI の共通 conformance 行列には必須。既定 SUT は Rust binary。
   # Node 列は OPENCRAB_CONFORMANCE_SUT で path だけ差し替える（言語名分岐なし）。
