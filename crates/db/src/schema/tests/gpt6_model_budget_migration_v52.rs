@@ -8,7 +8,9 @@ fn v51_to_v52_seeds_gpt_6_chatgpt_model_budgets_without_overwriting_operator_row
          INSERT INTO model_pricing (
              provider, model, input_price_per_1m, output_price_per_1m,
              context_window, max_output_tokens, updated_at
-         ) VALUES ('chatgpt', 'gpt-6-sol', 7.0, 9.0, 123456, 6543, 'operator');
+         ) VALUES
+             ('chatgpt', 'gpt-6-sol', 7.0, 9.0, 123456, 6543, 'operator'),
+             ('chatgpt', 'gpt-6-luna', 0.0, 0.0, NULL, NULL, 'partial');
          PRAGMA user_version = 51;",
     )
     .unwrap();
