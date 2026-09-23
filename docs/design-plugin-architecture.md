@@ -45,14 +45,20 @@
 - endpoint / account / application / bot ID、credential、外部 identity projection
 - admission / delivery policy、subscription / filter / watch、表示整形・reaction
 - platform schema、ローカル管理面、配置生成、instance child の起動・停止・再起動
-- `(binding_id, delivery_id)` ごとの durable external-emission ledger、platform request identity / external reference
+- `(binding_id, delivery_id)` ごとの durable external-emission ledger、immutable guarantee、prepared request、adapter-protocol/capability digest、external reference
 - platform の送受信、認証、generic caller role への分類
 
 「transport は送受信だけ」は「汎用会話実行を持たない」という意味であり、platform policy・storage・authentication・lifecycle まで stateless にする意味ではない。generic な外部サービス supervision utility は共有してよいが、`server` は具象 gateway daemon を spawn / supervise / configure / proxy しない。各独立 daemon が自分の instance child を監督する。
 
-外部送信は core の pending/ack ledger と gateway の emission ledger を組み合わせる。core 内の work/ack replay と inbound dedup は exactly-once だが、外部 platform の保証を一律に exactly-once と呼ばない。hello は実際の `delivery_guarantee` を digest-covered capability として宣言し、新規 delivery row は non-legacy guarantee を必須とする。upgrade 前の terminal row は `legacy_unqualified` のまま replay/relabel せず、送信開始前と証明できる pending だけが初回 post-cutover send の直前に live guarantee を取得する。Nostr は事前に永続化した同一 signed event ID の再 publish により logical `exactly_once` を宣言できる。Discord は永続化した 25 文字以下の nonce と `enforce_nonce` を有効期間内だけ用い、曖昧性が期限を越えたら再送せず durable `indeterminate` にするため `at_most_once_indeterminate` である。utterance declaration が `exactly_once` を要求して hello capability が弱ければ hello を拒否する。declaration が弱い保証を許しても invocation envelope が independently `exactly_once` へ引き上げた場合は実行・送信前にその invocation を拒否し、暗黙 downgrade しない。
+外部送信は core の pending/ack ledger と gateway の emission ledger を組み合わせ、両方が immutable `delivery_guarantee` を保存する。gateway row は prepared request と、それを reconcile できる adapter-protocol/capability digest も保存する。core 内の work/ack replay と inbound dedup は exactly-once だが、外部 platform の保証を一律に exactly-once と呼ばない。hello は実際の `delivery_guarantee` を digest-covered capability として宣言し、新規 delivery row は non-legacy guarantee を必須とする。upgrade 前の terminal row は `legacy_unqualified` のまま replay/relabel せず、送信開始前と証明できる pending だけが初回 post-cutover send の直前に live guarantee を取得する。Nostr は事前に永続化した同一 signed event ID の再 publish により logical `exactly_once` を宣言できる。Discord は永続化した 25 文字以下の nonce と `enforce_nonce` を有効期間内だけ用い、曖昧性が期限を越えたら再送せず durable `indeterminate` にするため `at_most_once_indeterminate` である。utterance declaration が `exactly_once` を要求して hello capability が弱ければ hello を拒否する。declaration が弱い保証を許しても invocation envelope が independently `exactly_once` へ引き上げた場合は実行・送信前にその invocation を拒否し、暗黙 downgrade しない。
+
+reconnect 時も row が権威である。terminal outcome は後の hello に関係なく外部 I/O なしで報告できる。unsent row は現在 capability が保存済み保証を満たす時だけ送信し、prepared row は保存済み保証と prepared primitive/protocol digest を認識・証明できる時だけ reconcile/retry する。downgrade または protocol mismatch は再送せず durable `operator_blocked`/`indeterminate` とし、強い adapter が弱い row を扱っても保証を relabel しない。
 
 `co_agent` の権限は caller snapshot だけでは継続しない。core は initial model turn、queue の dequeue/retry、各 tool invocation、各 continuation（automatic / operation-driven / timed / subtask を含む）と outbound-delivery commit の直前に現在の relationship/revision を再検証し、revocation/mismatch なら以後の model/tool 実行も外部送信もなく pending work を generic に終了する。
+
+external identity は `trusted_users.platform/source` の既知値だけでなく `rest`、`extgate`、Web、任意 opaque 値を含む全 row を canonical source-row fingerprint で disposition する。Discord/Nostr は導出可能な store、genuine REST/API は `api_principals`、その他は operator が fingerprint-bound に 1 個以上の gateway instance store または `api_principals` へ明示 mapping する。global `extgate` fan-out も edge ごとの確認が必要で、Web edge があれば Web-owned durable store/local admin と `--web-db` が必須である。snapshot/rollback は core と manifest 内の全 participating gateway DB を対象にし、guess/drop/silent duplicate/unmapped row を許さない。
+
+core gate-admin の 6 operation は permissive-CORS public router から完全に外し、nonempty scoped bearer principal と mode `0600` を受理前に検証する専用 core UDS だけで提供する。public TCP は全 6 path で 404、empty-token production path は禁止し、これは各 gateway-local concrete admin UDS とも別 socket である。
 
 `subject_id` は UUID 化せず、現行の opaque な正の INTEGER と既存 gate association を byte-for-byte 保存する。generic `subject_id_allocator`、`subject_tombstones`、`subject_association_grants`（単調 high-water、hard delete 前の永続 tombstone、短命・hashed・single-use grant）は gateway 種別に依存しない core mechanism である。既存 association は grant 不要、新規 first association のみ generic operator administration が発行した grant を `PUT instance` で atomic consume する。
 
@@ -76,7 +82,7 @@ server ---------------- generic core APIs only --------------------------> core
 
 ## 4. 現状との差分
 
-#191 で得た、共有 SDK への具象 SDK 漏れを防ぐ依存検査、汎用 `AgentRuntime`、単一の session lock / subtask / completion 実体、動的 operation 宣言、generic runtime UDS は有効なので保存する。一方、#1006 の現行 inventory では Nostr daemon の core SQLite 直結・runtime import、core の具象 schema/query、server の具象管理 API、server/shared lifecycle 登録簿、platform-shaped timed-fire、Discord の placement-only ownership が未解消である。Web/CLI の独立 generic-runtime client と server の dev-only Discord/Nostr QC 依存は違反ではない。
+#191 で得た、共有 SDK への具象 SDK 漏れを防ぐ依存検査、汎用 `AgentRuntime`、単一の session lock / subtask / completion 実体、動的 operation 宣言、generic runtime UDS は有効なので保存する。一方、#1006 の現行 inventory では Nostr daemon の core SQLite 直結・runtime import、core の具象 schema/query、server の具象管理 API、public router への generic gate-admin merge、server/shared lifecycle 登録簿、platform-shaped timed-fire、Discord の placement-only ownership、Web-owned identity migration destination の欠如が未解消である。Web/CLI の独立 generic-runtime client と server の dev-only Discord/Nostr QC 依存自体は違反ではない。
 
 完全な AS-IS evidence、production / dev-only / dead・legacy / test / comment / historical migration / persisted history の分類、および各 V01–V16 と TO-BE transition/completion criterion の 1 対 1 対応は [design-gateway-process-ownership.md §3–4](design-gateway-process-ownership.md#3-evidence-backed-as-is-violation-inventory) に集約する。単一の stopped writable-core `project-core-state` phase だけが generic subject allocator/tombstone/grant を backfill し heartbeat を projection する。initial projection fingerprint は stopped retry 専用であり、post-start の `last_fired_at` 等は immutable lineage equality から除外する。過去の段階 1–2 の説明を future direction として再利用して `server` 所有へ戻してはならない。
 
@@ -104,7 +110,9 @@ server ---------------- generic core APIs only --------------------------> core
 - **状態の owner を data class で決めたか**
   判定: gateway 間で共有する汎用会話・実行状態なら core。endpoint/account ID、credential、外部 identity、platform policy/subscription/display/lifecycle と external-emission ledger なら具象 gateway。再起動後も必要という理由だけで platform state を core へ置かない。
 - **保証を platform capability より強く書いていないか**
-  判定: core work/ack と inbound dedup、Nostr logical event identity、Discord bounded nonce/`indeterminate` を区別し、各 crash window・retention・closed binding・reconnect の test があるか。
+  判定: core/gateway 両 row の immutable guarantee と prepared protocol digest を比較し、downgrade/upgrade/mismatch で relabel/resend しないか。core work/ack と inbound dedup、Nostr logical event identity、Discord bounded nonce/`indeterminate` を区別し、unsent/prepared/terminal の reconnect test があるか。
+- **identity と admin socket を lossless/fail-closed に分離したか**
+  判定: 全 source fingerprint に明示 disposition/destination proof があり、Web を含む participating store 全体を snapshot/rollback するか。public TCP は gate-admin 全 6 path が 404 で、protected core UDS と gateway-local UDS が別か。
 - **revocation と subject non-reuse を全境界で守るか**
   判定: co-agent は各 model/tool/queue/continuation の直前に再検証するか。現行 INTEGER subject ID を書換えず、tombstone-before-delete と first-association grant を generic に強制するか。
 - その変更は 3（プロセス境界）へ進む余地を **狭めていないか**
