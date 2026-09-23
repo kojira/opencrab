@@ -119,8 +119,8 @@ impl Placement {
                 anyhow::bail!("attachment_spool_root must be an absolute path");
             }
         }
-        if self.instances.is_empty() {
-            anyhow::bail!("instances must be nonempty");
+        if self.instances.len() != 1 {
+            anyhow::bail!("discord-gateway requires exactly one instance per process");
         }
         let mut seen = std::collections::BTreeSet::new();
         for inst in &self.instances {
@@ -382,9 +382,9 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_instance_id_is_double_live() {
-        let inst = InstancePlacement {
-            instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+    fn multiple_instances_are_rejected_before_starting_receivers() {
+        let instance = |instance_id: &str| InstancePlacement {
+            instance_id: instance_id.into(),
             revision: 1,
             addresses: vec!["discord-agent-x-100-200".into()],
             config_b64: encode(&sample_config()),
@@ -392,8 +392,15 @@ mod tests {
         let p = Placement {
             core_socket: "/tmp/g.sock".into(),
             attachment_spool_root: None,
-            instances: vec![inst.clone(), inst],
+            instances: vec![
+                instance("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                instance("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            ],
         };
-        assert!(p.validate().is_err());
+
+        assert_eq!(
+            p.validate().unwrap_err().to_string(),
+            "discord-gateway requires exactly one instance per process"
+        );
     }
 }

@@ -18,7 +18,14 @@ use crate::config::{
     SystemReactions,
 };
 use crate::harness::HarnessOverrides;
-use crate::map::{address_of, map_message, parse_address, parse_event_line, parse_origin};
+use crate::map::{
+    address_for, address_of, map_message, parse_address, parse_event_line, parse_origin,
+};
+use crate::model::{
+    autocomplete_choices, command_error_text, list_result, map_model_submission,
+    submission_success, InteractionAction, ModelInteractionEvent, ModelListResult,
+    AUTOCOMPLETE_TIMEOUT, COMMAND_TIMEOUT, MODEL_CACHE_TTL,
+};
 use crate::ops::{
     operation_declarations, targets_for, BindingDeliveryTargets, DiscordInvokeHandler,
 };
@@ -50,14 +57,17 @@ pub fn spawn_instance(
 
     // transport: dry-run（REST を叩かずログ）か production（serenity REST・token 保持）。
     // say も invoke も同一 transport を通すので dry-run 分岐は 1 箇所。
-    let transport: Arc<dyn DiscordTransport> = if overrides.dry_run {
-        Arc::new(DryRunTransport)
-    } else {
-        let token = token
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("production は bot token（env）が必須"))?;
-        Arc::new(SerenityTransport::new(&token))
-    };
+    let (transport, serenity_http): (Arc<dyn DiscordTransport>, Option<Arc<serenity::http::Http>>) =
+        if overrides.dry_run {
+            (Arc::new(DryRunTransport), None)
+        } else {
+            let token = token
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("production は bot token（env）が必須"))?;
+            let serenity = Arc::new(SerenityTransport::new(&token));
+            let http = serenity.http();
+            (serenity, Some(http))
+        };
 
     let delivery_targets: BindingDeliveryTargets =
         Arc::new(tokio::sync::Mutex::new(HashMap::new()));
@@ -91,6 +101,7 @@ pub fn spawn_instance(
         overrides,
         delivery_targets,
         attachment_spool,
+        serenity_http,
     });
     Ok(client)
 }
@@ -104,6 +115,7 @@ struct Supervision {
     overrides: HarnessOverrides,
     delivery_targets: BindingDeliveryTargets,
     attachment_spool: Option<Arc<AttachmentSpool>>,
+    serenity_http: Option<Arc<serenity::http::Http>>,
 }
 
 fn supervise(supervision: Supervision) {
@@ -116,6 +128,7 @@ fn supervise(supervision: Supervision) {
         overrides,
         delivery_targets,
         attachment_spool,
+        serenity_http,
     } = supervision;
     // 受信ループ（1 本）: fixture か serenity。ack 済み binding の channel だけ said にする。
     // 👀 は受信時ではなく say consumer 側（activity started）で付けるので、受信は transport/
@@ -126,6 +139,7 @@ fn supervise(supervision: Supervision) {
         cfg.self_bot_id.clone(),
         cfg.access.clone(),
         attachment_spool,
+        serenity_http,
     );
     tokio::spawn(async move {
         if let Some(fixture) = overrides.fake_events {
@@ -160,14 +174,34 @@ fn build_on_line(
     self_bot_id: String,
     access: AccessConfig,
     attachment_spool: Option<Arc<AttachmentSpool>>,
+    serenity_http: Option<Arc<serenity::http::Http>>,
 ) -> OnLine {
+    let model_cache = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     Arc::new(move |line: String| {
         let client = client.clone();
         let agent_id = agent_id.clone();
         let self_bot_id = self_bot_id.clone();
         let access = access.clone();
         let attachment_spool = attachment_spool.clone();
+        let serenity_http = serenity_http.clone();
+        let model_cache = model_cache.clone();
         tokio::spawn(async move {
+            if let Ok(event) = serde_json::from_str::<ModelInteractionEvent>(&line) {
+                if event.event_kind == "model_interaction" {
+                    if let Some(http) = serenity_http {
+                        handle_model_interaction(
+                            &client,
+                            &agent_id,
+                            &access,
+                            &http,
+                            &model_cache,
+                            event,
+                        )
+                        .await;
+                    }
+                    return;
+                }
+            }
             handle_incoming(
                 &client,
                 &agent_id,
@@ -179,6 +213,156 @@ fn build_on_line(
             .await;
         });
     })
+}
+
+#[derive(Clone)]
+struct CachedModels {
+    fetched_at: std::time::Instant,
+    result: ModelListResult,
+}
+
+type ModelCache = Arc<tokio::sync::Mutex<HashMap<String, CachedModels>>>;
+
+async fn handle_model_interaction(
+    client: &InstanceClient,
+    agent_id: &str,
+    access: &AccessConfig,
+    http: &serenity::http::Http,
+    cache: &ModelCache,
+    event: ModelInteractionEvent,
+) {
+    let (Ok(interaction_id), Ok(application_id)) = (
+        event.interaction_id.parse::<u64>(),
+        event.application_id.parse::<u64>(),
+    ) else {
+        return;
+    };
+    http.set_application_id(serenity::all::ApplicationId::new(application_id));
+    let interaction_id = serenity::all::InteractionId::new(interaction_id);
+    let guild = event.guild_id.as_deref().unwrap_or("");
+    let address = address_for(agent_id, guild, &event.channel_id);
+    let caller = caller_for(access, &event.user_id);
+
+    if event.autocomplete {
+        let models = autocomplete_models(client, &address, &caller, cache).await;
+        let choices = autocomplete_choices(&models, event.model.as_deref().unwrap_or_default());
+        let response = choices.into_iter().fold(
+            serenity::all::CreateAutocompleteResponse::new(),
+            |response, choice| response.add_string_choice(choice.name, choice.value),
+        );
+        let response = serenity::all::CreateInteractionResponse::Autocomplete(response);
+        if let Err(error) = http
+            .create_interaction_response(interaction_id, &event.token, &response, Vec::new())
+            .await
+        {
+            tracing::debug!(error = %crate::secret::redact_token(&error.to_string()), "model autocomplete response failed");
+        }
+        return;
+    }
+
+    let deferred = serenity::all::CreateInteractionResponse::Defer(
+        serenity::all::CreateInteractionResponseMessage::new().ephemeral(true),
+    );
+    if let Err(error) = http
+        .create_interaction_response(interaction_id, &event.token, &deferred, Vec::new())
+        .await
+    {
+        tracing::warn!(error = %crate::secret::redact_token(&error.to_string()), "failed to defer /model response");
+        return;
+    }
+
+    let Some(InteractionAction::Command { name, args }) =
+        map_model_submission(&event.subcommand, event.model.as_deref())
+    else {
+        edit_model_response(
+            http,
+            &event.token,
+            "The model command failed: Invalid command arguments.",
+        )
+        .await;
+        return;
+    };
+    let binding_id = client.binding_for_address(&address).await;
+    let outcome = client
+        .command(&address, &caller, &name, &args, COMMAND_TIMEOUT)
+        .await;
+    let text = match outcome {
+        Ok(value) => {
+            if name == "list_models" {
+                if let (Some(binding_id), Some(result)) = (binding_id, list_result(value.clone())) {
+                    cache.lock().await.insert(
+                        binding_id,
+                        CachedModels {
+                            fetched_at: std::time::Instant::now(),
+                            result,
+                        },
+                    );
+                }
+            }
+            submission_success(&name, value)
+                .unwrap_or_else(|| "The model command failed: invalid server response".to_string())
+        }
+        Err(error) => command_error_text(event.model.as_deref(), &error),
+    };
+    edit_model_response(http, &event.token, &text).await;
+}
+
+async fn autocomplete_models(
+    client: &InstanceClient,
+    address: &str,
+    caller: &SaidCaller,
+    cache: &ModelCache,
+) -> Vec<String> {
+    let Some(binding_id) = client.binding_for_address(address).await else {
+        return Vec::new();
+    };
+    let now = std::time::Instant::now();
+    if let Some(entry) = cache.lock().await.get(&binding_id).cloned() {
+        if now.duration_since(entry.fetched_at) < MODEL_CACHE_TTL {
+            return entry.result.models;
+        }
+    }
+    let Ok(value) = client
+        .command(
+            address,
+            caller,
+            "list_models",
+            &serde_json::json!({}),
+            AUTOCOMPLETE_TIMEOUT,
+        )
+        .await
+    else {
+        return Vec::new();
+    };
+    let Some(result) = list_result(value) else {
+        return Vec::new();
+    };
+    let models = result.models.clone();
+    cache.lock().await.insert(
+        binding_id,
+        CachedModels {
+            fetched_at: std::time::Instant::now(),
+            result,
+        },
+    );
+    models
+}
+
+async fn edit_model_response(http: &serenity::http::Http, token: &str, text: &str) {
+    let allowed_mentions = serenity::all::CreateAllowedMentions::new()
+        .all_users(false)
+        .all_roles(false)
+        .everyone(false)
+        .replied_user(false);
+    let edit = serenity::all::EditInteractionResponse::new()
+        .content(text)
+        .allowed_mentions(allowed_mentions);
+    if let Err(error) = http
+        .edit_original_interaction_response(token, &edit, Vec::new())
+        .await
+    {
+        tracing::warn!(error = %crate::secret::redact_token(&error.to_string()), "failed to edit /model response");
+    }
 }
 
 /// system reaction を発端メッセージ（origin anchor）へ best-effort で付ける。👀（受理）と

@@ -195,6 +195,23 @@ pub fn ok_frame(id: &str) -> Value {
     json!({"id": id, "m": "ok"})
 }
 
+pub fn command_frame(
+    id: &str,
+    binding_id: &str,
+    caller: &SaidCaller,
+    name: &str,
+    args: &Value,
+) -> Value {
+    json!({
+        "m": "command",
+        "id": id,
+        "binding_id": binding_id,
+        "caller": caller,
+        "name": name,
+        "args": args,
+    })
+}
+
 /// invoke 成功応答（DI 拡張 §5.1）。`result` は opaque JSON-value（null 含む）。
 pub fn invoke_ok_frame(id: &str, result: &Value) -> Value {
     json!({"id": id, "m": "ok", "result": result})
@@ -285,8 +302,10 @@ pub struct WireResponse {
     pub id: String,
     pub ok: bool,
     pub seq: Option<Option<i64>>,
+    pub result: Option<Value>,
     pub code: Option<String>,
     pub detail: Option<String>,
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -571,22 +590,34 @@ fn parse_response(obj: &Value, m: &str) -> Result<WireResponse, FrameError> {
             id,
             ok: true,
             seq,
+            result: obj.get("result").cloned(),
             code: None,
             detail: None,
+            message: None,
         })
     } else {
         let code = require_str(obj, "code")?;
         let detail = match obj.get("detail") {
-            Some(Value::Null) => None,
+            Some(Value::Null) | None => None,
             Some(Value::String(s)) => Some(s.clone()),
-            None | Some(_) => return Err(FrameError::BadRequest),
+            Some(_) => return Err(FrameError::BadRequest),
         };
+        let message = match obj.get("message") {
+            None => None,
+            Some(Value::String(message)) => Some(message.clone()),
+            Some(_) => return Err(FrameError::BadRequest),
+        };
+        if obj.get("detail").is_none() && message.is_none() {
+            return Err(FrameError::BadRequest);
+        }
         Ok(WireResponse {
             id,
             ok: false,
             seq: None,
+            result: None,
             code: Some(code),
             detail,
+            message,
         })
     }
 }

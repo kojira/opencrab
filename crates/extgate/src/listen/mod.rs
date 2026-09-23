@@ -15,16 +15,20 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use opencrab_actions::AgentRuntime;
+use opencrab_actions::{AgentRuntime, ModelAdministration};
 use rusqlite::{params, Connection, TransactionBehavior};
 use tokio::io::BufReader;
 use tokio::net::UnixListener;
 
 use crate::close::{close_all_lives, close_live};
+use crate::commands::{CommandContext, CommandError};
 use crate::error::{ErrorCode, GateError};
 use crate::ids::now_nanos;
 use crate::inbound::process_said;
-use crate::protocol::{err_frame, ok_said_frame, read_frame, write_json, FrameError, InboundMsg};
+use crate::protocol::{
+    command_err_frame, command_ok_frame, err_frame, ok_said_frame, read_frame, write_json, Command,
+    FrameError, InboundMsg, SaidCaller,
+};
 use crate::registry::ExtgateState;
 
 use create_binding::handle_create_binding;
@@ -77,7 +81,7 @@ pub fn recover_stale_deliveries(conn: &mut Connection, now: i64) -> Result<(), G
     Ok(())
 }
 
-pub async fn serve_uds<R: AgentRuntime>(
+pub async fn serve_uds<R: AgentRuntime + ModelAdministration>(
     state: Arc<ExtgateState>,
     runtime: R,
     path: PathBuf,
@@ -117,7 +121,7 @@ pub async fn serve_uds<R: AgentRuntime>(
     }
 }
 
-async fn handle_connection<R: AgentRuntime>(
+async fn handle_connection<R: AgentRuntime + ModelAdministration>(
     state: Arc<ExtgateState>,
     runtime: R,
     stream: tokio::net::UnixStream,
@@ -237,7 +241,10 @@ struct ConnCtx<'a, R> {
     identity: u64,
 }
 
-async fn dispatch_frame<R: AgentRuntime>(ctx: &mut ConnCtx<'_, R>, bytes: &[u8]) -> Result<(), ()> {
+async fn dispatch_frame<R: AgentRuntime + ModelAdministration>(
+    ctx: &mut ConnCtx<'_, R>,
+    bytes: &[u8],
+) -> Result<(), ()> {
     let state = ctx.state;
     let runtime = ctx.runtime;
     let writer = ctx.writer;
@@ -277,6 +284,18 @@ async fn dispatch_frame<R: AgentRuntime>(ctx: &mut ConnCtx<'_, R>, bytes: &[u8])
                 Some(identity),
                 ErrorCode::ProtocolOrder,
                 Some(&request.id),
+                Some(writer),
+            )
+            .await;
+            Err(())
+        }
+        (ConnState::PreHello, InboundMsg::Command(command)) => {
+            close_live(
+                state,
+                None,
+                Some(identity),
+                ErrorCode::ProtocolOrder,
+                Some(&command.id),
                 Some(writer),
             )
             .await;
@@ -362,6 +381,10 @@ async fn dispatch_frame<R: AgentRuntime>(ctx: &mut ConnCtx<'_, R>, bytes: &[u8])
                 .await;
             }
             result
+        }
+        (ConnState::Running, InboundMsg::Command(command)) => {
+            let inst = instance_id.as_deref().expect("running has instance");
+            handle_command(state, runtime, writer, inst, identity, command).await
         }
         (ConnState::Running, InboundMsg::Said(said)) => {
             let inst = instance_id.as_deref().expect("running has instance");
@@ -499,6 +522,74 @@ async fn dispatch_frame<R: AgentRuntime>(ctx: &mut ConnCtx<'_, R>, bytes: &[u8])
             }
         }
     }
+}
+
+async fn handle_command<R: ModelAdministration>(
+    state: &ExtgateState,
+    runtime: &R,
+    writer: &tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>,
+    instance_id: &str,
+    identity: u64,
+    command: Command,
+) -> Result<(), ()> {
+    // Model administration intentionally has a stricter boundary than ordinary said admission.
+    let outcome = if !matches!(command.caller, SaidCaller::Owner) {
+        Err(CommandError::forbidden())
+    } else {
+        let acknowledged = state
+            .lock_registry()
+            .ok()
+            .and_then(|registry| {
+                registry.get(instance_id).map(|live| {
+                    live.identity == identity && live.acknowledged.contains(&command.binding_id)
+                })
+            })
+            .unwrap_or(false);
+        if !acknowledged {
+            Err(CommandError::binding_not_found())
+        } else {
+            let agent_id = match state.db.lock() {
+                Ok(conn) => conn.query_row(
+                    "SELECT a.agent_id
+                     FROM gate_bindings b
+                     JOIN gate_instances i ON i.instance_id = b.instance_id
+                     JOIN agents a ON a.subject_id = i.subject_id
+                     WHERE b.binding_id = ?1 AND b.instance_id = ?2
+                       AND b.closed_at IS NULL AND i.deleted_at IS NULL",
+                    rusqlite::params![command.binding_id, instance_id],
+                    |row| row.get::<_, String>(0),
+                ),
+                Err(_) => Err(rusqlite::Error::InvalidQuery),
+            };
+            match agent_id {
+                Ok(agent_id) => {
+                    state
+                        .commands
+                        .dispatch(
+                            &command.name,
+                            CommandContext {
+                                agent_id: &agent_id,
+                                caller: &command.caller,
+                                models: runtime,
+                            },
+                            &command.args,
+                        )
+                        .await
+                }
+                Err(rusqlite::Error::QueryReturnedNoRows) => Err(CommandError::binding_not_found()),
+                Err(error) => {
+                    tracing::error!(error = %error, "model command binding lookup failed");
+                    Err(CommandError::internal())
+                }
+            }
+        }
+    };
+
+    let response = match outcome {
+        Ok(result) => command_ok_frame(&command.id, &result),
+        Err(error) => command_err_frame(&command.id, error.code, &error.message),
+    };
+    write_json(writer, &response).await.map_err(|_| ())
 }
 
 pub fn recover_now(conn: &mut Connection) -> Result<(), GateError> {

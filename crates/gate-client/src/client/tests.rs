@@ -117,3 +117,54 @@
             })
         );
     }
+
+#[tokio::test]
+async fn command_timeout_removes_pending_and_ignores_late_reply() {
+    let client = InstanceClient::blank(
+        "instance".to_string(),
+        "author".to_string(),
+        SayPolicy::AcceptToLiveQueue,
+        None,
+        None,
+    );
+    let (write_tx, mut write_rx) = mpsc::unbounded_channel();
+    client.write.lock().await.tx = write_tx;
+    {
+        let mut inner = client.inner.lock().await;
+        inner.closed = false;
+        inner
+            .acknowledged
+            .insert("address".to_string(), "binding".to_string());
+    }
+
+    let outcome = client
+        .command(
+            "address",
+            &SaidCaller::Owner,
+            "list_models",
+            &serde_json::json!({}),
+            Duration::from_millis(1),
+        )
+        .await;
+    assert_eq!(outcome, Err(CommandError::Timeout));
+    let sent = write_rx.recv().await.unwrap();
+    let id = sent["id"].as_str().unwrap().to_string();
+    assert!(client.inner.lock().await.pending_commands.is_empty());
+
+    handle_response(
+        &client,
+        WireResponse {
+            id,
+            ok: true,
+            seq: None,
+            result: Some(serde_json::json!({})),
+            code: None,
+            detail: None,
+            message: None,
+        },
+        0,
+    )
+    .await;
+    assert!(!client.inner.lock().await.closed);
+    assert!(write_rx.try_recv().is_err(), "late reply must not trigger a retry");
+}

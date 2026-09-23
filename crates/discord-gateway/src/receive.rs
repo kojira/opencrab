@@ -61,7 +61,10 @@ pub async fn run_fake_events_once(fixture: &Path, on_line: OnLine) -> anyhow::Re
 
 // ==================== production: serenity gateway ====================
 
-use serenity::all::{Context, EventHandler, GatewayIntents, Message as SerenityMessage};
+use serenity::all::{
+    Command, CommandDataOptionValue, CommandInteraction, Context, EventHandler, GatewayIntents,
+    Interaction, Message as SerenityMessage, Ready,
+};
 use serenity::Client;
 
 /// serenity Message → IncomingMessage 相当の JSON 行。生 ID は on_line 経由で map.rs が origin/author へ写す。
@@ -89,12 +92,63 @@ fn message_to_line(msg: &SerenityMessage) -> String {
     .to_string()
 }
 
+fn model_interaction_to_line(
+    interaction: &CommandInteraction,
+    autocomplete: bool,
+) -> Option<String> {
+    if interaction.data.name != "model" {
+        return None;
+    }
+    let option = interaction.data.options.first()?;
+    let (subcommand, options) = match &option.value {
+        CommandDataOptionValue::SubCommand(options) => (option.name.clone(), options),
+        _ => return None,
+    };
+    let model = options.first().and_then(|option| match &option.value {
+        CommandDataOptionValue::String(value) => Some(value.clone()),
+        CommandDataOptionValue::Autocomplete { value, .. } => Some(value.clone()),
+        _ => None,
+    });
+    let event = crate::model::ModelInteractionEvent {
+        event_kind: "model_interaction".to_string(),
+        interaction_id: interaction.id.get().to_string(),
+        application_id: interaction.application_id.get().to_string(),
+        token: interaction.token.clone(),
+        guild_id: interaction.guild_id.map(|id| id.get().to_string()),
+        channel_id: interaction.channel_id.get().to_string(),
+        user_id: interaction.user.id.get().to_string(),
+        autocomplete,
+        subcommand,
+        model,
+    };
+    serde_json::to_string(&event).ok()
+}
+
 struct Forwarder {
     on_line: OnLine,
 }
 
 #[async_trait::async_trait]
 impl EventHandler for Forwarder {
+    async fn ready(&self, ctx: Context, _ready: Ready) {
+        if let Err(error) =
+            Command::create_global_command(&ctx.http, crate::model::model_command()).await
+        {
+            tracing::warn!(error = %crate::secret::redact_token(&error.to_string()), "failed to register /model");
+        }
+    }
+
+    async fn interaction_create(&self, _ctx: Context, interaction: Interaction) {
+        let line = match interaction {
+            Interaction::Command(command) => model_interaction_to_line(&command, false),
+            Interaction::Autocomplete(command) => model_interaction_to_line(&command, true),
+            _ => None,
+        };
+        if let Some(line) = line {
+            (self.on_line)(line);
+        }
+    }
+
     async fn message(&self, _ctx: Context, msg: SerenityMessage) {
         // 自分自身の除外は map.rs（self_bot_id 一致）で行う。ここは全 Message を機械変換する。
         (self.on_line)(message_to_line(&msg));

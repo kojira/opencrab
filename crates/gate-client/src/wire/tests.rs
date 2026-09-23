@@ -254,3 +254,50 @@ fn hello_with_operations_optional() {
     let withops = hello_frame_with_operations("h", "iid", 1, &"a".repeat(64), Some(&ops));
     assert_eq!(withops["operations"], ops);
 }
+
+#[test]
+fn command_replies_preserve_result_and_old_core_unknown_message() {
+    match parse_frame_bytes(br#"{"m":"ok","id":"cmd-1","result":{"models":[]}}"#).unwrap() {
+        CoreMsg::Response(response) => {
+            assert!(response.ok);
+            assert_eq!(response.result, Some(json!({"models": []})));
+        }
+        other => panic!("{other:?}"),
+    }
+    match parse_frame_bytes(br#"{"m":"err","id":"cmd-2","code":"unknown_message","detail":null}"#)
+        .unwrap()
+    {
+        CoreMsg::Response(response) => {
+            assert!(!response.ok);
+            assert_eq!(response.code.as_deref(), Some("unknown_message"));
+            assert_eq!(response.message, None);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn command_frame_round_trips_all_contract_fields() {
+    let binding_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let expected = json!({
+        "m": "command",
+        "id": "cmd-set-1",
+        "binding_id": binding_id,
+        "caller": {"role": "owner"},
+        "name": "set_model",
+        "args": {"model": "openai:gpt-5"},
+    });
+
+    let outbound = command_frame(
+        "cmd-set-1",
+        binding_id,
+        &SaidCaller::Owner,
+        "set_model",
+        &json!({"model": "openai:gpt-5"}),
+    );
+    let encoded = serde_json::to_vec(&outbound).expect("command frame serializes");
+    let round_tripped: Value =
+        serde_json::from_slice(&encoded).expect("serialized command frame parses");
+
+    assert_eq!(round_tripped, expected);
+}

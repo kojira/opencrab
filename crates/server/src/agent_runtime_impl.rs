@@ -9,7 +9,7 @@
 
 use async_trait::async_trait;
 
-use opencrab_actions::AgentRuntime;
+use opencrab_actions::{AgentRuntime, ModelAdminError, ModelAdministration, ModelSnapshot};
 
 use crate::process;
 use crate::AppState;
@@ -35,6 +35,143 @@ fn resolve_runtime_envelope(
         functions_tokens,
         entrypoint: "agent_runtime",
     })
+}
+
+#[async_trait]
+impl ModelAdministration for AppState {
+    async fn list_models(&self, agent_id: &str) -> Result<ModelSnapshot, ModelAdminError> {
+        let models = crate::api::llm::available_models(self)
+            .await
+            .map_err(|_| ModelAdminError::Internal)?;
+        let conn = self.db.lock().map_err(|_| ModelAdminError::Internal)?;
+        let agent = opencrab_db::queries::get_agent(&conn, agent_id)
+            .map_err(|_| ModelAdminError::Internal)?
+            .ok_or(ModelAdminError::Internal)?;
+        let configured_model = agent.model;
+        let current_model = configured_model
+            .clone()
+            .filter(|model| !model.is_empty())
+            .unwrap_or_else(|| self.default_model.clone());
+        Ok(ModelSnapshot {
+            models,
+            configured_model,
+            current_model,
+            default_model: self.default_model.clone(),
+        })
+    }
+
+    async fn set_model(
+        &self,
+        agent_id: &str,
+        model: &str,
+    ) -> Result<ModelSnapshot, ModelAdminError> {
+        let configured_model = {
+            let conn = self.db.lock().map_err(|_| ModelAdminError::Internal)?;
+            opencrab_db::queries::get_agent(&conn, agent_id)
+                .map_err(|_| ModelAdminError::Internal)?
+                .ok_or(ModelAdminError::Internal)?
+                .model
+        };
+        let exact_canonical_request = model.trim() == model
+            && model
+                .split_once(':')
+                .is_some_and(|(provider, model_id)| !provider.is_empty() && !model_id.is_empty());
+        if exact_canonical_request && configured_model.as_deref() == Some(model) {
+            return Ok(ModelSnapshot {
+                models: Vec::new(),
+                configured_model,
+                current_model: model.to_string(),
+                default_model: self.default_model.clone(),
+            });
+        }
+
+        let models = crate::api::llm::available_models(self)
+            .await
+            .map_err(|_| ModelAdminError::Internal)?;
+        let canonical =
+            crate::api::llm::resolve_exact_model(&models, model).map_err(|error| match error {
+                crate::api::llm::ModelResolutionError::InvalidArgs => ModelAdminError::InvalidArgs,
+                crate::api::llm::ModelResolutionError::NotFound => ModelAdminError::NotFound,
+                crate::api::llm::ModelResolutionError::Ambiguous => ModelAdminError::Ambiguous,
+            })?;
+
+        let conn = self.db.lock().map_err(|_| ModelAdminError::Internal)?;
+        let existing = opencrab_db::queries::get_agent(&conn, agent_id)
+            .map_err(|_| ModelAdminError::Internal)?
+            .ok_or(ModelAdminError::Internal)?;
+        if existing.model.as_deref() != Some(canonical.as_str()) {
+            let sends_max = self.llm_router.get().sends_max_output_tokens(&canonical);
+            crate::process::check_agent_model_change(
+                &conn,
+                Some(&existing),
+                Some(&canonical),
+                sends_max,
+            )
+            .map_err(ModelAdminError::Validation)?;
+            let patch = opencrab_db::queries::AgentPatch {
+                model: Some(Some(canonical.clone())),
+                ..Default::default()
+            };
+            if !opencrab_db::queries::apply_agent_patch(&conn, agent_id, &patch)
+                .map_err(|_| ModelAdminError::Internal)?
+            {
+                return Err(ModelAdminError::Internal);
+            }
+        }
+
+        Ok(ModelSnapshot {
+            models,
+            configured_model: Some(canonical.clone()),
+            current_model: canonical,
+            default_model: self.default_model.clone(),
+        })
+    }
+
+    async fn reset_model(&self, agent_id: &str) -> Result<ModelSnapshot, ModelAdminError> {
+        let already_reset = {
+            let conn = self.db.lock().map_err(|_| ModelAdminError::Internal)?;
+            opencrab_db::queries::get_agent(&conn, agent_id)
+                .map_err(|_| ModelAdminError::Internal)?
+                .ok_or(ModelAdminError::Internal)?
+                .model
+                .is_none()
+        };
+        if already_reset {
+            return Ok(ModelSnapshot {
+                models: Vec::new(),
+                configured_model: None,
+                current_model: self.default_model.clone(),
+                default_model: self.default_model.clone(),
+            });
+        }
+
+        let models = crate::api::llm::available_models(self)
+            .await
+            .map_err(|_| ModelAdminError::Internal)?;
+        let conn = self.db.lock().map_err(|_| ModelAdminError::Internal)?;
+        let existing = opencrab_db::queries::get_agent(&conn, agent_id)
+            .map_err(|_| ModelAdminError::Internal)?
+            .ok_or(ModelAdminError::Internal)?;
+        if existing.model.is_some() {
+            crate::process::check_agent_model_change(&conn, Some(&existing), None, true)
+                .map_err(ModelAdminError::Validation)?;
+            let patch = opencrab_db::queries::AgentPatch {
+                model: Some(None),
+                ..Default::default()
+            };
+            if !opencrab_db::queries::apply_agent_patch(&conn, agent_id, &patch)
+                .map_err(|_| ModelAdminError::Internal)?
+            {
+                return Err(ModelAdminError::Internal);
+            }
+        }
+        Ok(ModelSnapshot {
+            models,
+            configured_model: None,
+            current_model: self.default_model.clone(),
+            default_model: self.default_model.clone(),
+        })
+    }
 }
 
 #[async_trait]

@@ -1,7 +1,7 @@
 //! 1 instance = 1 UDS connection。hello / bind ack / said / say / activity だけ。
 //! 切断後は指数 backoff で再接続し、hello 再送で open binding を replay する。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -14,10 +14,10 @@ use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 use super::wire::{
-    create_binding_frame, err_frame, hello_frame_with_operations, invoke_ok_frame, ok_frame,
-    parse_frame_bytes, read_frame, said_frame_with_context, say_reply_target, say_text, write_json,
-    Activity, Attachment, Bind, CoreMsg, FrameError, Invoke, SaidContext, Say, TurnFailed,
-    WireResponse,
+    command_frame, create_binding_frame, err_frame, hello_frame_with_operations, invoke_ok_frame,
+    ok_frame, parse_frame_bytes, read_frame, said_frame_with_context, say_reply_target, say_text,
+    write_json, Activity, Attachment, Bind, CoreMsg, FrameError, Invoke, SaidCaller, SaidContext,
+    Say, TurnFailed, WireResponse,
 };
 
 include!("client/state_api.rs");

@@ -19,6 +19,8 @@ async fn attach(
         inner.closed = false;
         inner.acknowledged.clear();
         inner.pending_said.clear();
+        inner.pending_commands.clear();
+        inner.expired_commands.clear();
         inner.pending_turn.clear();
         inner.live.clear();
         inner.generation

@@ -6883,6 +6883,22 @@
             "compaction_ratio": 0.5,
             "models": [
               {
+                "context_window": 400000,
+                "input_price_per_1m": 0.0,
+                "max_output_tokens": 32000,
+                "model": "gpt-6-luna",
+                "output_price_per_1m": 0.0,
+                "provider": "chatgpt"
+              },
+              {
+                "context_window": 400000,
+                "input_price_per_1m": 0.0,
+                "max_output_tokens": 32000,
+                "model": "gpt-6-sol",
+                "output_price_per_1m": 0.0,
+                "provider": "chatgpt"
+              },
+              {
                 "context_window": 1050000,
                 "input_price_per_1m": 0.0,
                 "max_output_tokens": 32000,
@@ -6925,6 +6941,22 @@
           "body": {
             "compaction_ratio": 0.5,
             "models": [
+              {
+                "context_window": 400000,
+                "input_price_per_1m": 0.0,
+                "max_output_tokens": 32000,
+                "model": "gpt-6-luna",
+                "output_price_per_1m": 0.0,
+                "provider": "chatgpt"
+              },
+              {
+                "context_window": 400000,
+                "input_price_per_1m": 0.0,
+                "max_output_tokens": 32000,
+                "model": "gpt-6-sol",
+                "output_price_per_1m": 0.0,
+                "provider": "chatgpt"
+              },
               {
                 "context_window": 1050000,
                 "input_price_per_1m": 0.0,
@@ -6972,6 +7004,22 @@
                   "provider": "baseline"
                 },
                 {
+                  "context_window": 400000,
+                  "input_price_per_1m": 0.0,
+                  "max_output_tokens": 32000,
+                  "model": "gpt-6-luna",
+                  "output_price_per_1m": 0.0,
+                  "provider": "chatgpt"
+                },
+                {
+                  "context_window": 400000,
+                  "input_price_per_1m": 0.0,
+                  "max_output_tokens": 32000,
+                  "model": "gpt-6-sol",
+                  "output_price_per_1m": 0.0,
+                  "provider": "chatgpt"
+                },
+                {
                   "context_window": 1050000,
                   "input_price_per_1m": 0.0,
                   "max_output_tokens": 32000,
@@ -7005,6 +7053,22 @@
             "body": {
               "compaction_ratio": 0.5,
               "models": [
+                {
+                  "context_window": 400000,
+                  "input_price_per_1m": 0.0,
+                  "max_output_tokens": 32000,
+                  "model": "gpt-6-luna",
+                  "output_price_per_1m": 0.0,
+                  "provider": "chatgpt"
+                },
+                {
+                  "context_window": 400000,
+                  "input_price_per_1m": 0.0,
+                  "max_output_tokens": 32000,
+                  "model": "gpt-6-sol",
+                  "output_price_per_1m": 0.0,
+                  "provider": "chatgpt"
+                },
                 {
                   "context_window": 1050000,
                   "input_price_per_1m": 0.0,

@@ -13,6 +13,7 @@ pub mod attachment;
 pub mod config;
 pub mod harness;
 pub mod map;
+pub mod model;
 pub mod ops;
 pub mod post;
 pub mod receive;
@@ -20,3 +21,6 @@ pub mod run;
 pub mod secret;
 pub mod transport;
 pub mod typing;
+
+#[cfg(test)]
+mod model_interaction_contract_tests;
