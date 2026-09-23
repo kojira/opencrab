@@ -299,6 +299,30 @@ opencrab-example-gateway = { path = "../example-gateway" }
         findings = self.findings(files, "gateway-db-open")
         self.assertEqual(["crates/example-gateway/src/daemon.rs"], [item.path for item in findings])
 
+    def test_cross_module_renamed_sqlite_import_is_inventoried(self):
+        files = {
+            "crates/example-gateway/src/store_types.rs":
+                "pub type Raw = rusqlite::Connection;\n",
+            "crates/example-gateway/src/daemon.rs":
+                "use crate::store_types::Raw as Handle;\n"
+                "fn open(path: &Path) { Handle::open(path); }\n",
+        }
+        findings = self.findings(files, "gateway-db-open")
+        self.assertEqual(["crates/example-gateway/src/daemon.rs"], [item.path for item in findings])
+
+    def test_multi_hop_grouped_renamed_sqlite_reexport_is_inventoried(self):
+        files = {
+            "crates/example-gateway/src/store_types.rs":
+                "pub type Raw = rusqlite::Connection;\n",
+            "crates/example-gateway/src/exports.rs":
+                "pub use crate::store_types::{Raw as Exported};\n",
+            "crates/example-gateway/src/daemon.rs":
+                "use crate::exports::{Exported as Handle};\n"
+                "fn open(path: &Path) { Handle::open(path); }\n",
+        }
+        findings = self.findings(files, "gateway-db-open")
+        self.assertEqual(["crates/example-gateway/src/daemon.rs"], [item.path for item in findings])
+
     def test_sqlite_aliases_do_not_leak_across_gateway_crates(self):
         files = {
             "crates/example-gateway/src/store_types.rs":

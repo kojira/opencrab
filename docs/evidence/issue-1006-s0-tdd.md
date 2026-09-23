@@ -229,3 +229,13 @@ Three assertions were added before detector changes. Exact RED was **3 tests, 3 
 The raw RED output was retained during the run at `/tmp/issue-1006-s0-fix5-red.log`. Minimal GREEN roots the shared-production route graph on `axum::serve` itself, while the protected `serve_uds` negative remains outside the graph. Concrete-gateway SQLite aliases are now derived to a fixed point from all production source files in that one crate and supplied to each file audit. A separate negative assertion proves aliases do not leak into another gateway crate. Focused GREEN passed all new assertions plus protected-UDS and exact-site-provenance controls. The repository audit remains exactly 454 findings, so the reviewed baseline was not regenerated or modified.
 
 Final GREEN validation passed: 51 Python mutation tests; the 454-finding repository audit; 9 `webgate_static_audit` tests; R4–R7 dependency and source-size checks; Cargo metadata and no-dev tree assertions; `cargo fmt --check`; full-workspace/all-target/all-feature Clippy with warnings denied; and `git diff --check`.
+
+## Renamed import/re-export alias pass
+
+Base under test: `d17872b08922fbc9515b6f2c7ef28002bd8cbb1e`.
+
+Two assertions were added before detector changes. Exact RED was **2 tests, 2 failures**: a direct `use crate::store_types::Raw as Handle` and a multi-hop grouped `pub use ...::{Raw as Exported}` followed by `use ...::{Exported as Handle}` both expected the daemon `Handle::open(path)` finding but received an empty list. Raw RED output was retained during the run at `/tmp/issue-1006-s0-fix6-red.log`.
+
+Minimal GREEN extracts straightforward ordinary/grouped `use` and `pub use` imported-name-to-local-name edges, then resolves those edges together with type aliases in the existing per-concrete-gateway-crate fixed point. Focused GREEN passed both new assertions and the ordinary import, chained type alias, grouped rusqlite alias, cross-crate non-leakage, protected-UDS, and exact-site-provenance controls. The repository audit remains exactly 454 findings, so neither the reviewed baseline nor provenance authority changed.
+
+Final GREEN validation passed: 53 Python mutation tests; the 454-finding repository audit; 9 `webgate_static_audit` tests; R4–R7 dependency and source-size checks; Cargo metadata and no-dev tree assertions; `cargo fmt --check`; full-workspace/all-target/all-feature Clippy with warnings denied; and `git diff --check`.

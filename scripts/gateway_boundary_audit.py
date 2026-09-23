@@ -302,28 +302,45 @@ def _shared_source_findings(path: str, text: str) -> list[Finding]:
     return findings
 
 
+def _rust_use_alias_edges(source: str) -> list[tuple[str, str]]:
+    """Return straightforward imported-name -> local-name edges."""
+    edges: list[tuple[str, str]] = []
+    for match in re.finditer(r"\buse\s+([^;]+);", source, re.DOTALL):
+        clause = match.group(1).strip()
+        grouped = re.fullmatch(r"(.+?)::\{(.*)\}", clause, re.DOTALL)
+        items = grouped.group(2).split(",") if grouped else [clause]
+        for item in items:
+            item = item.strip()
+            if not item or item == "self" or item == "*":
+                continue
+            renamed = re.fullmatch(
+                r"([A-Za-z_][A-Za-z0-9_:]*)(?:\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?",
+                item,
+            )
+            if not renamed:
+                continue
+            imported = renamed.group(1).rsplit("::", 1)[-1]
+            local = renamed.group(2) or imported
+            edges.append((imported, local))
+    return edges
+
+
 def _rusqlite_connection_aliases(production: list[tuple[int, str]]) -> set[str]:
     source = "\n".join(code for _, code in production)
     aliases = {"Connection"}
-    for match in re.finditer(r"\buse\s+rusqlite::Connection(?:\s+as\s+(\w+))?\s*;", source):
-        aliases.add(match.group(1) or "Connection")
-    for group in re.findall(r"\buse\s+rusqlite::\{(.*?)\}\s*;", source, re.DOTALL):
-        for item in group.split(","):
-            match = re.fullmatch(r"\s*Connection(?:\s+as\s+(\w+))?\s*", item)
-            if match:
-                aliases.add(match.group(1) or "Connection")
+    alias_edges = _rust_use_alias_edges(source)
+    for alias, target in re.findall(
+        r"\b(?:pub\s+)?type\s+(\w+)\s*=\s*([A-Za-z_][A-Za-z0-9_:]*)\s*;",
+        source,
+    ):
+        alias_edges.append((target.rsplit("::", 1)[-1], alias))
     changed = True
     while changed:
         changed = False
-        for alias, target in re.findall(
-            r"\b(?:pub\s+)?type\s+(\w+)\s*=\s*([A-Za-z_][A-Za-z0-9_:]*)\s*;",
-            source,
-        ):
-            target_name = target.rsplit("::", 1)[-1]
-            if target == "rusqlite::Connection" or target_name in aliases:
-                if alias not in aliases:
-                    aliases.add(alias)
-                    changed = True
+        for imported, local in alias_edges:
+            if imported in aliases and local not in aliases:
+                aliases.add(local)
+                changed = True
     return aliases
 
 
