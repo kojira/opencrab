@@ -182,3 +182,65 @@ reachability findings. No finding classification, owner, expiry, or detector pol
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: passed.
 
 No S2+ schema/API, live data, deployment state, or `stash@{0}` was touched.
+
+## P1 follow-up: structural production-authority removal
+
+Base reviewed: `8df88f64be553a6f62d4f4c990228d498e2d126d`.
+
+The user subsequently narrowed this checkpoint to the one structural S1 acceptance failure that
+can change the production authority model: the plaintext `OperatorToken` authorizer and
+`ExtgateState::new(db, token)` constructor remained compilable under a production Cargo feature.
+The other five review observations were explicitly deferred rather than silently implemented.
+
+### Genuine RED
+
+Commit `faef8cf` added the named production-tree assertion before production changes. Command:
+
+```text
+cargo test -p opencrab-extgate --test gate_admin_production_boundary \
+  production_features_cannot_reach_plaintext_legacy_gate_admin_authorizer -- --exact
+```
+
+It failed with exit 101 and:
+
+```text
+test production_features_cannot_reach_plaintext_legacy_gate_admin_authorizer ... FAILED
+the default production build must not enable test/QC probes
+```
+
+The first assertion exposed the then-default feature path; inspection in the same test also pinned
+the production `legacy_admin_token` field/constructor and public `OperatorToken` export. Exact output
+is retained at `/tmp/issue-1006-s1-p1-red-legacy.txt` for this worktree session.
+
+A malformed-path matrix was also briefly committed RED, proving the reviewed `400` before auth, but
+was removed in follow-up commit `5471aa7` when the user explicitly deferred items 1–5. No production
+path-extraction change remains in this checkpoint.
+
+### GREEN
+
+Commit `4fd4cdb` removes `bearer.rs`, the public export, legacy state, constructor, authentication and
+target-authorization bypasses, and audit skips. `ExtgateState` now has only the database-backed
+constructor. Conformance and server QC fixtures use sealed database principals and exact operation,
+subject, and instance scopes; probe instrumentation remains available for legitimate QC edges but
+no feature compiles a plaintext authorizer. Commits `54f07d3` and `98f4935` make per-instance QC
+principals isolated and lock their dev-only base64 helper.
+
+The named production-boundary test is GREEN. The database-backed gate-admin security tests, all 81
+extgate conformance tests, 21 Nostr QC tests, and the previously failing multi-instance Discord QC
+case are GREEN. Full final validation is recorded in the checkpoint artifact.
+
+### Explicitly deferred Issue candidates (user-prioritized)
+
+1. **Post-bind socket failure cleanup:** trigger is a rare failure after pathname creation during
+   listen/fd-transfer/wait/nonblocking/Tokio conversion; impact is a stale UDS pathname requiring
+   operator removal before restart. Preserve replacement-inode safety when addressed.
+2. **Malformed percent-path auth/audit ordering:** trigger is an invalid percent-encoded route
+   parameter; current impact is an Axum `400` before the uniform `401`/sanitized denial audit, with
+   no mutation or data exposure observed. Cover all six operations when addressed.
+3. **v53 same-name migration collisions:** trigger is an abnormal/manually pre-created same-name S1
+   table/index/trigger in a v52 database; impact is potentially retaining a weaker object while
+   stamping v53. Add transactional collision fixtures if this state is brought into support scope.
+4. **Canonical UUID database checks:** trigger is direct/manual insertion bypassing the manifest
+   parser; impact is accepting malformed lowercase 36-byte scope IDs that later fail authorization.
+5. **Idempotent audit result classification:** trigger is a successful replay/no-op; impact is
+   forensic precision (`succeeded` rather than `idempotent`), not mutation correctness.
