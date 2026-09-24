@@ -254,29 +254,15 @@ impl ExtgateState {
         self.legacy_admin_token.is_some()
     }
 
-    pub(crate) fn authorize_legacy_admin(
-        &self,
-        headers: &axum::http::HeaderMap,
-    ) -> Result<(), GateError> {
-        if let Some(token) = &self.legacy_admin_token {
-            token.authorize(headers)?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn authorize_admin(
+    pub(crate) fn authenticate_admin(
         &self,
         headers: &axum::http::HeaderMap,
         operation: crate::gate_admin_security::Operation,
-        subject_id: i64,
-        instance_id: uuid::Uuid,
-    ) -> Result<crate::gate_admin_security::Authorized, GateError> {
+    ) -> Result<crate::gate_admin_security::Authenticated, GateError> {
         if let Some(token) = &self.legacy_admin_token {
             token.authorize(headers)?;
-            return Ok(crate::gate_admin_security::Authorized {
+            return Ok(crate::gate_admin_security::Authenticated {
                 principal_id: "test-fixture".to_owned(),
-                subject_id,
-                instance_id,
             });
         }
         let header = headers
@@ -284,10 +270,44 @@ impl ExtgateState {
             .and_then(|value| value.to_str().ok());
         let mut conn = self.db.lock().map_err(|_| GateError::store())?;
         let now = crate::ids::now_nanos();
-        match crate::gate_admin_security::authorize(
+        match crate::gate_admin_security::authenticate(&mut conn, header, operation, now) {
+            Ok(authenticated) => Ok(authenticated),
+            Err(crate::gate_admin_security::SecurityError::Store) => Err(GateError::store()),
+            Err(_) => {
+                crate::gate_admin_security::append_audit_for_attempt(
+                    &conn,
+                    uuid::Uuid::new_v4(),
+                    now,
+                    operation,
+                    None,
+                    None,
+                    "unauthorized",
+                )
+                .map_err(|_| GateError::store())?;
+                Err(GateError::new(ErrorCode::Unauthorized))
+            }
+        }
+    }
+
+    pub(crate) fn authorize_admin_target(
+        &self,
+        operation: crate::gate_admin_security::Operation,
+        authenticated: &crate::gate_admin_security::Authenticated,
+        subject_id: i64,
+        instance_id: uuid::Uuid,
+    ) -> Result<crate::gate_admin_security::Authorized, GateError> {
+        if self.legacy_admin_token.is_some() {
+            return Ok(crate::gate_admin_security::Authorized {
+                principal_id: authenticated.principal_id.clone(),
+                subject_id,
+                instance_id,
+            });
+        }
+        let mut conn = self.db.lock().map_err(|_| GateError::store())?;
+        let now = crate::ids::now_nanos();
+        match crate::gate_admin_security::authorize_target(
             &mut conn,
-            header,
-            operation,
+            authenticated,
             subject_id,
             instance_id,
             now,
@@ -295,11 +315,12 @@ impl ExtgateState {
             Ok(authorized) => Ok(authorized),
             Err(crate::gate_admin_security::SecurityError::Store) => Err(GateError::store()),
             Err(_) => {
-                crate::gate_admin_security::append_audit(
+                crate::gate_admin_security::append_audit_for_attempt(
                     &conn,
                     uuid::Uuid::new_v4(),
                     now,
                     operation,
+                    None,
                     None,
                     "unauthorized",
                 )

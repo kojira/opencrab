@@ -577,21 +577,53 @@ pub fn revoke(conn: &Connection, principal_id: &str, now: i64) -> Result<(), Sec
 }
 
 #[derive(Clone, Debug)]
+pub struct Authenticated {
+    pub principal_id: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct Authorized {
     pub principal_id: String,
     pub subject_id: i64,
     pub instance_id: Uuid,
 }
 
-/// Full-scans every credential and authorizes only one current principal and one target scope.
-pub fn authorize(
+fn current_principal<'a>(
+    tx: &Transaction<'_>,
+    rows: &'a [PrincipalRow],
+    principal_id: &str,
+    now: i64,
+) -> Result<&'a PrincipalRow, SecurityError> {
+    let row = rows
+        .iter()
+        .find(|row| row.id == principal_id)
+        .ok_or(SecurityError::Unauthorized)?;
+    let successor_deadline: Option<i64> = tx
+        .query_row(
+            "SELECT overlap_deadline FROM gate_admin_principals
+             WHERE predecessor_principal_id=?1 AND sealed_at IS NOT NULL",
+            [&row.id],
+            |record| record.get(0),
+        )
+        .optional()
+        .map_err(|_| SecurityError::Store)?;
+    if row.sealed_at.is_none()
+        || row.revoked_at.is_some()
+        || row.expires_at <= now
+        || successor_deadline.is_some_and(|deadline| deadline <= now)
+    {
+        return Err(SecurityError::Unauthorized);
+    }
+    Ok(row)
+}
+
+/// Authenticates the credential and operation before request-body parsing or target lookup.
+pub fn authenticate(
     conn: &mut Connection,
     authorization: Option<&str>,
     operation: Operation,
-    subject_id: i64,
-    instance_id: Uuid,
     now: i64,
-) -> Result<Authorized, SecurityError> {
+) -> Result<Authenticated, SecurityError> {
     let raw = authorization
         .and_then(|header| header.strip_prefix("Bearer "))
         .ok_or(SecurityError::Unauthorized)?;
@@ -618,25 +650,7 @@ pub fn authorize(
     if matches.len() != 1 {
         return Err(SecurityError::Unauthorized);
     }
-    let row = rows
-        .iter()
-        .find(|row| row.id == matches[0])
-        .ok_or(SecurityError::Unauthorized)?;
-    let successor_deadline: Option<i64> = tx
-        .query_row(
-            "SELECT overlap_deadline FROM gate_admin_principals
-             WHERE predecessor_principal_id=?1 AND sealed_at IS NOT NULL",
-            [&row.id],
-            |record| record.get(0),
-        )
-        .optional()
-        .map_err(|_| SecurityError::Store)?;
-    if row.revoked_at.is_some()
-        || row.expires_at <= now
-        || successor_deadline.is_some_and(|deadline| deadline <= now)
-    {
-        return Err(SecurityError::Unauthorized);
-    }
+    let row = current_principal(&tx, &rows, &matches[0], now)?;
     let operation_allowed = tx
         .query_row(
             "SELECT 1 FROM gate_admin_principal_operations WHERE principal_id=?1 AND operation=?2",
@@ -646,6 +660,27 @@ pub fn authorize(
         .optional()
         .map_err(|_| SecurityError::Store)?
         .is_some();
+    if !operation_allowed {
+        return Err(SecurityError::Unauthorized);
+    }
+    let principal_id = row.id.clone();
+    tx.commit().map_err(|_| SecurityError::Store)?;
+    Ok(Authenticated { principal_id })
+}
+
+/// Revalidates current credential state and authorizes the parsed generic target scope.
+pub fn authorize_target(
+    conn: &mut Connection,
+    authenticated: &Authenticated,
+    subject_id: i64,
+    instance_id: Uuid,
+    now: i64,
+) -> Result<Authorized, SecurityError> {
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Deferred)
+        .map_err(|_| SecurityError::Store)?;
+    let rows = load_principals(&tx)?;
+    let row = current_principal(&tx, &rows, &authenticated.principal_id, now)?;
     let subject_allowed = tx
         .query_row(
             "SELECT 1 FROM gate_admin_principal_subjects WHERE principal_id=?1 AND subject_id=?2",
@@ -682,15 +717,29 @@ pub fn authorize(
         let namespace = Uuid::parse_str(&namespace).map_err(|_| SecurityError::Store)?;
         Uuid::new_v5(&namespace, format!("instance\0{agent_id}").as_bytes()) == instance_id
     };
-    if !operation_allowed || !subject_allowed || !instance_allowed {
+    if !subject_allowed || !instance_allowed {
         return Err(SecurityError::Unauthorized);
     }
+    let principal_id = row.id.clone();
     tx.commit().map_err(|_| SecurityError::Store)?;
     Ok(Authorized {
-        principal_id: row.id.clone(),
+        principal_id,
         subject_id,
         instance_id,
     })
+}
+
+/// Full-scans every credential and authorizes only one current principal and one target scope.
+pub fn authorize(
+    conn: &mut Connection,
+    authorization: Option<&str>,
+    operation: Operation,
+    subject_id: i64,
+    instance_id: Uuid,
+    now: i64,
+) -> Result<Authorized, SecurityError> {
+    let authenticated = authenticate(conn, authorization, operation, now)?;
+    authorize_target(conn, &authenticated, subject_id, instance_id, now)
 }
 
 /// Executes an authorized mutation and audit as one outer transaction. A rejected
@@ -740,12 +789,13 @@ where
     }
 }
 
-pub fn append_audit(
+pub fn append_audit_for_attempt(
     conn: &Connection,
     request_id: Uuid,
     attempted_at: i64,
     operation: Operation,
-    authorized: Option<&Authorized>,
+    principal_id: Option<&str>,
+    authorized_target: Option<(i64, Uuid)>,
     result_class: &str,
 ) -> Result<(), SecurityError> {
     conn.execute(
@@ -757,15 +807,34 @@ pub fn append_audit(
             Uuid::new_v4().to_string(),
             request_id.to_string(),
             attempted_at,
-            authorized.map(|value| &value.principal_id),
+            principal_id,
             operation.as_str(),
-            authorized.map(|value| value.subject_id),
-            authorized.map(|value| value.instance_id.to_string()),
+            authorized_target.map(|value| value.0),
+            authorized_target.map(|value| value.1.to_string()),
             result_class,
         ],
     )
     .map_err(|_| SecurityError::Store)?;
     Ok(())
+}
+
+pub fn append_audit(
+    conn: &Connection,
+    request_id: Uuid,
+    attempted_at: i64,
+    operation: Operation,
+    authorized: Option<&Authorized>,
+    result_class: &str,
+) -> Result<(), SecurityError> {
+    append_audit_for_attempt(
+        conn,
+        request_id,
+        attempted_at,
+        operation,
+        authorized.map(|value| value.principal_id.as_str()),
+        authorized.map(|value| (value.subject_id, value.instance_id)),
+        result_class,
+    )
 }
 
 #[cfg(test)]

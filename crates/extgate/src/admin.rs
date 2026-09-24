@@ -8,7 +8,7 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::Router;
-use rusqlite::{params, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::{json, Value};
 
 use crate::error::{ErrorCode, GateError, JSON_CONTENT_TYPE};
@@ -35,12 +35,123 @@ pub fn admin_router(state: Arc<ExtgateState>) -> Router {
         .with_state(state)
 }
 
-async fn read_body(req: Request) -> Result<(axum::http::HeaderMap, Vec<u8>), GateError> {
+async fn begin_request(
+    state: &ExtgateState,
+    operation: Operation,
+    req: Request,
+) -> Result<(crate::gate_admin_security::Authenticated, Vec<u8>), GateError> {
     let (parts, body) = req.into_parts();
-    let bytes = to_bytes(body, usize::MAX)
-        .await
-        .map_err(|_| GateError::new(ErrorCode::BadRequest))?;
-    Ok((parts.headers, bytes.to_vec()))
+    let authenticated = state.authenticate_admin(&parts.headers, operation)?;
+    let bytes = match to_bytes(body, usize::MAX).await {
+        Ok(bytes) => bytes.to_vec(),
+        Err(_) => {
+            audit_early_error(state, operation, &authenticated, ErrorCode::BadRequest)?;
+            return Err(GateError::new(ErrorCode::BadRequest));
+        }
+    };
+    Ok((authenticated, bytes))
+}
+
+fn result_class(code: ErrorCode) -> &'static str {
+    match code {
+        ErrorCode::BadRequest => "bad_request",
+        ErrorCode::SubjectUnknown | ErrorCode::InstanceUnknown | ErrorCode::BindingUnknown => {
+            "not_found"
+        }
+        ErrorCode::StoreError => "store_error",
+        ErrorCode::Unauthorized => "unauthorized",
+        _ => "conflict",
+    }
+}
+
+fn audit_early_error(
+    state: &ExtgateState,
+    operation: Operation,
+    authenticated: &crate::gate_admin_security::Authenticated,
+    code: ErrorCode,
+) -> Result<(), GateError> {
+    if state.uses_legacy_admin() {
+        return Ok(());
+    }
+    let conn = state.db.lock().map_err(|_| GateError::store())?;
+    crate::gate_admin_security::append_audit_for_attempt(
+        &conn,
+        uuid::Uuid::new_v4(),
+        now_nanos(),
+        operation,
+        Some(&authenticated.principal_id),
+        None,
+        result_class(code),
+    )
+    .map_err(|_| GateError::store())
+}
+
+fn early<T>(
+    state: &ExtgateState,
+    operation: Operation,
+    authenticated: &crate::gate_admin_security::Authenticated,
+    result: Result<T, GateError>,
+) -> Result<T, GateError> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            audit_early_error(state, operation, authenticated, error.code)?;
+            Err(error)
+        }
+    }
+}
+
+fn audited_operation<T, F>(
+    state: &ExtgateState,
+    operation: Operation,
+    authorized: &crate::gate_admin_security::Authorized,
+    action: F,
+) -> Result<T, GateError>
+where
+    F: FnOnce(&Transaction<'_>) -> Result<T, GateError>,
+{
+    let mut conn = state.db.lock().map_err(|_| GateError::store())?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| GateError::store())?;
+    tx.execute_batch("SAVEPOINT gate_admin_handler")
+        .map_err(|_| GateError::store())?;
+    match action(&tx) {
+        Ok(value) => {
+            if !state.uses_legacy_admin() {
+                crate::gate_admin_security::append_audit(
+                    &tx,
+                    uuid::Uuid::new_v4(),
+                    now_nanos(),
+                    operation,
+                    Some(authorized),
+                    "succeeded",
+                )
+                .map_err(|_| GateError::store())?;
+            }
+            tx.execute_batch("RELEASE gate_admin_handler")
+                .map_err(|_| GateError::store())?;
+            tx.commit().map_err(|_| GateError::store())?;
+            Ok(value)
+        }
+        Err(error) => {
+            tx.execute_batch("ROLLBACK TO gate_admin_handler; RELEASE gate_admin_handler")
+                .map_err(|_| GateError::store())?;
+            if !state.uses_legacy_admin() {
+                crate::gate_admin_security::append_audit(
+                    &tx,
+                    uuid::Uuid::new_v4(),
+                    now_nanos(),
+                    operation,
+                    Some(authorized),
+                    result_class(error.code),
+                )
+                .map_err(|_| GateError::store())?;
+            }
+            tx.commit().map_err(|_| GateError::store())?;
+            Err(error)
+        }
+    }
 }
 
 fn json_ok(status: StatusCode, value: Value) -> Response {
@@ -131,34 +242,14 @@ fn subject_for_instance(state: &ExtgateState, instance_id: &str) -> Result<i64, 
 
 fn authorize_target(
     state: &ExtgateState,
-    headers: &axum::http::HeaderMap,
     operation: Operation,
+    authenticated: &crate::gate_admin_security::Authenticated,
     subject_id: i64,
     instance_id: &str,
 ) -> Result<crate::gate_admin_security::Authorized, GateError> {
     let uuid =
         uuid::Uuid::parse_str(instance_id).map_err(|_| GateError::new(ErrorCode::BadRequest))?;
-    state.authorize_admin(headers, operation, subject_id, uuid)
-}
-
-fn audit_success(
-    state: &ExtgateState,
-    operation: Operation,
-    authorized: &crate::gate_admin_security::Authorized,
-) -> Result<(), GateError> {
-    if state.uses_legacy_admin() {
-        return Ok(());
-    }
-    let conn = state.db.lock().map_err(|_| GateError::store())?;
-    crate::gate_admin_security::append_audit(
-        &conn,
-        uuid::Uuid::new_v4(),
-        now_nanos(),
-        operation,
-        Some(authorized),
-        "succeeded",
-    )
-    .map_err(|_| GateError::store())
+    state.authorize_admin_target(operation, authenticated, subject_id, uuid)
 }
 
 fn agent_for_subject(conn: &rusqlite::Connection, subject_id: i64) -> Result<String, GateError> {
@@ -239,36 +330,31 @@ async fn get_instance_inner(
     instance_id: &str,
     req: Request,
 ) -> Result<Response, GateError> {
-    let (headers, body) = read_body(req).await?;
-    state.authorize_legacy_admin(&headers)?;
-    require_empty_body(&body)?;
-    let instance_id = parse_uuid(instance_id)?;
-    let subject_id = subject_for_instance(state, &instance_id)?;
-    let authorized = authorize_target(
+    let operation = Operation::InstanceRead;
+    let (authenticated, body) = begin_request(state, operation, req).await?;
+    early(state, operation, &authenticated, require_empty_body(&body))?;
+    let instance_id = early(state, operation, &authenticated, parse_uuid(instance_id))?;
+    let subject_id = early(
         state,
-        &headers,
-        Operation::InstanceRead,
-        subject_id,
-        &instance_id,
+        operation,
+        &authenticated,
+        subject_for_instance(state, &instance_id),
     )?;
-    let conn = state.db.lock().map_err(|_| GateError::store())?;
-    let deleted: Option<Option<i64>> = conn
-        .query_row(
-            "SELECT deleted_at FROM gate_instances WHERE instance_id = ?1",
-            params![instance_id],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(|_| GateError::store())?;
-    match deleted {
-        None | Some(Some(_)) => Err(GateError::new(ErrorCode::InstanceUnknown)),
-        Some(None) => {
-            let response = json_ok(StatusCode::OK, instance_json(&conn, &instance_id)?);
-            drop(conn);
-            audit_success(state, Operation::InstanceRead, &authorized)?;
-            Ok(response)
+    let authorized = authorize_target(state, operation, &authenticated, subject_id, &instance_id)?;
+    audited_operation(state, operation, &authorized, |conn| {
+        let deleted: Option<Option<i64>> = conn
+            .query_row(
+                "SELECT deleted_at FROM gate_instances WHERE instance_id = ?1",
+                params![instance_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|_| GateError::store())?;
+        match deleted {
+            None | Some(Some(_)) => Err(GateError::new(ErrorCode::InstanceUnknown)),
+            Some(None) => Ok(json_ok(StatusCode::OK, instance_json(conn, &instance_id)?)),
         }
-    }
+    })
 }
 
 async fn put_instance(
@@ -287,80 +373,97 @@ async fn put_instance_inner(
     instance_id: &str,
     req: Request,
 ) -> Result<Response, GateError> {
-    let (headers, body) = read_body(req).await?;
-    state.authorize_legacy_admin(&headers)?;
-    let obj = require_object(&body)?;
-    let instance_id = parse_uuid(instance_id)?;
-    let kind_id = require_string(&obj, "kind_id")?;
-    let subject_id = require_positive_i64(&obj, "subject_id")?;
-    let authorized = authorize_target(
+    let operation = Operation::InstancePut;
+    let (authenticated, body) = begin_request(state, operation, req).await?;
+    let obj = early(state, operation, &authenticated, require_object(&body))?;
+    let instance_id = early(state, operation, &authenticated, parse_uuid(instance_id))?;
+    let kind_id = early(
         state,
-        &headers,
-        Operation::InstancePut,
-        subject_id,
-        &instance_id,
+        operation,
+        &authenticated,
+        require_string(&obj, "kind_id"),
     )?;
-    let enabled = require_bool(&obj, "enabled")?;
-    let config_b64 = require_string_any(&obj, "config_b64")?;
-    let config_bytes = decode_config_b64(&config_b64)?;
+    let subject_id = early(
+        state,
+        operation,
+        &authenticated,
+        require_positive_i64(&obj, "subject_id"),
+    )?;
+    let authorized = authorize_target(state, operation, &authenticated, subject_id, &instance_id)?;
+    let enabled = early(
+        state,
+        operation,
+        &authenticated,
+        require_bool(&obj, "enabled"),
+    )?;
+    let config_b64 = early(
+        state,
+        operation,
+        &authenticated,
+        require_string_any(&obj, "config_b64"),
+    )?;
+    let config_bytes = early(
+        state,
+        operation,
+        &authenticated,
+        decode_config_b64(&config_b64),
+    )?;
     let digest = config_digest(&config_bytes);
     let now = now_nanos();
 
-    let conn = state.db.lock().map_err(|_| GateError::store())?;
-    let _agent = agent_for_subject(&conn, subject_id)?;
-    let existing = conn
-        .query_row(
-            "SELECT kind_id, subject_id, enabled, config_b64, deleted_at
-             FROM gate_instances WHERE instance_id = ?1",
-            params![instance_id],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, Option<i64>>(4)?,
+    audited_operation(state, operation, &authorized, |conn| {
+        let _agent = agent_for_subject(conn, subject_id)?;
+        let existing = conn
+            .query_row(
+                "SELECT kind_id, subject_id, enabled, config_b64, deleted_at
+                 FROM gate_instances WHERE instance_id = ?1",
+                params![instance_id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, Option<i64>>(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|_| GateError::store())?;
+        match existing {
+            Some((_, _, _, _, Some(_))) => Err(GateError::new(ErrorCode::InstanceConflict)),
+            Some((k, s, e, cfg, None)) => {
+                let same_bytes = decode_config_b64(&cfg)? == config_bytes;
+                if k == kind_id && s == subject_id && (e == 1) == enabled && same_bytes {
+                    Ok(json_ok(StatusCode::OK, instance_json(conn, &instance_id)?))
+                } else {
+                    Err(GateError::new(ErrorCode::InstanceConflict))
+                }
+            }
+            None => {
+                conn.execute(
+                    "INSERT INTO gate_instances (
+                        instance_id, kind_id, subject_id, revision, enabled,
+                        config_b64, config_digest, created_at, updated_at, deleted_at
+                     ) VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, ?7, ?7, NULL)",
+                    params![
+                        instance_id,
+                        kind_id,
+                        subject_id,
+                        i64::from(enabled),
+                        config_b64,
+                        digest,
+                        now
+                    ],
+                )
+                .map_err(|_| GateError::store())?;
+                Ok(json_ok(
+                    StatusCode::CREATED,
+                    instance_json(conn, &instance_id)?,
                 ))
-            },
-        )
-        .optional()
-        .map_err(|_| GateError::store())?;
-    match existing {
-        Some((_, _, _, _, Some(_))) => Err(GateError::new(ErrorCode::InstanceConflict)),
-        Some((k, s, e, cfg, None)) => {
-            let same_bytes = decode_config_b64(&cfg)? == config_bytes;
-            if k == kind_id && s == subject_id && (e == 1) == enabled && same_bytes {
-                let response = json_ok(StatusCode::OK, instance_json(&conn, &instance_id)?);
-                drop(conn);
-                audit_success(state, Operation::InstancePut, &authorized)?;
-                Ok(response)
-            } else {
-                Err(GateError::new(ErrorCode::InstanceConflict))
             }
         }
-        None => {
-            conn.execute(
-                "INSERT INTO gate_instances (
-                    instance_id, kind_id, subject_id, revision, enabled,
-                    config_b64, config_digest, created_at, updated_at, deleted_at
-                 ) VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, ?7, ?7, NULL)",
-                params![
-                    instance_id,
-                    kind_id,
-                    subject_id,
-                    i64::from(enabled),
-                    config_b64,
-                    digest,
-                    now
-                ],
-            )
-            .map_err(|_| GateError::store())?;
-            let response = json_ok(StatusCode::CREATED, instance_json(&conn, &instance_id)?);
-            drop(conn);
-            audit_success(state, Operation::InstancePut, &authorized)?;
-            Ok(response)
-        }
-    }
+    })
 }
 
 async fn delete_instance(
@@ -379,62 +482,54 @@ async fn delete_instance_inner(
     instance_id: &str,
     req: Request,
 ) -> Result<Response, GateError> {
-    let (headers, body) = read_body(req).await?;
-    state.authorize_legacy_admin(&headers)?;
-    require_empty_body(&body)?;
-    let instance_id = parse_uuid(instance_id)?;
-    let subject_id = subject_for_instance(state, &instance_id)?;
-    let authorized = authorize_target(
+    let operation = Operation::InstanceDelete;
+    let (authenticated, body) = begin_request(state, operation, req).await?;
+    early(state, operation, &authenticated, require_empty_body(&body))?;
+    let instance_id = early(state, operation, &authenticated, parse_uuid(instance_id))?;
+    let subject_id = early(
         state,
-        &headers,
-        Operation::InstanceDelete,
-        subject_id,
-        &instance_id,
+        operation,
+        &authenticated,
+        subject_for_instance(state, &instance_id),
     )?;
+    let authorized = authorize_target(state, operation, &authenticated, subject_id, &instance_id)?;
     let now = now_nanos();
     let reg = state.lock_registry()?;
-    if reg.is_live(&instance_id) {
-        return Err(GateError::new(ErrorCode::InstanceActive));
-    }
-    let mut conn = state.db.lock().map_err(|_| GateError::store())?;
-    let tx = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|_| GateError::store())?;
-    let deleted: Option<Option<i64>> = tx
-        .query_row(
-            "SELECT deleted_at FROM gate_instances WHERE instance_id = ?1",
-            params![instance_id],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(|_| GateError::store())?;
-    match deleted {
-        None | Some(Some(_)) => {
-            let _ = tx.rollback();
-            Err(GateError::new(ErrorCode::InstanceUnknown))
+    let result = audited_operation(state, operation, &authorized, |conn| {
+        if reg.is_live(&instance_id) {
+            return Err(GateError::new(ErrorCode::InstanceActive));
         }
-        Some(None) => {
-            tx.execute(
-                "UPDATE gate_instances SET deleted_at = ?2, updated_at = ?2 WHERE instance_id = ?1",
-                params![instance_id, now],
+        let deleted: Option<Option<i64>> = conn
+            .query_row(
+                "SELECT deleted_at FROM gate_instances WHERE instance_id = ?1",
+                params![instance_id],
+                |r| r.get(0),
             )
+            .optional()
             .map_err(|_| GateError::store())?;
-            tx.execute(
-                "UPDATE gate_bindings SET closed_at = ?2
-                 WHERE instance_id = ?1 AND closed_at IS NULL",
-                params![instance_id, now],
-            )
-            .map_err(|_| GateError::store())?;
-            tx.commit().map_err(|_| GateError::store())?;
-            drop(conn);
-            drop(reg);
-            audit_success(state, Operation::InstanceDelete, &authorized)?;
-            Ok(json_ok(
-                StatusCode::OK,
-                json!({"instance_id": instance_id, "deleted": true}),
-            ))
+        match deleted {
+            None | Some(Some(_)) => Err(GateError::new(ErrorCode::InstanceUnknown)),
+            Some(None) => {
+                conn.execute(
+                    "UPDATE gate_instances SET deleted_at = ?2, updated_at = ?2 WHERE instance_id = ?1",
+                    params![instance_id, now],
+                )
+                .map_err(|_| GateError::store())?;
+                conn.execute(
+                    "UPDATE gate_bindings SET closed_at = ?2
+                     WHERE instance_id = ?1 AND closed_at IS NULL",
+                    params![instance_id, now],
+                )
+                .map_err(|_| GateError::store())?;
+                Ok(json_ok(
+                    StatusCode::OK,
+                    json!({"instance_id": instance_id, "deleted": true}),
+                ))
+            }
         }
-    }
+    });
+    drop(reg);
+    result
 }
 
 async fn post_revision(
@@ -453,60 +548,79 @@ async fn post_revision_inner(
     instance_id: &str,
     req: Request,
 ) -> Result<Response, GateError> {
-    let (headers, body) = read_body(req).await?;
-    state.authorize_legacy_admin(&headers)?;
-    let obj = require_object(&body)?;
-    let instance_id = parse_uuid(instance_id)?;
-    let subject_id = subject_for_instance(state, &instance_id)?;
-    let authorized = authorize_target(
+    let operation = Operation::InstanceRevise;
+    let (authenticated, body) = begin_request(state, operation, req).await?;
+    let obj = early(state, operation, &authenticated, require_object(&body))?;
+    let instance_id = early(state, operation, &authenticated, parse_uuid(instance_id))?;
+    let subject_id = early(
         state,
-        &headers,
-        Operation::InstanceRevise,
-        subject_id,
-        &instance_id,
+        operation,
+        &authenticated,
+        subject_for_instance(state, &instance_id),
     )?;
-    let expected = require_positive_u64(&obj, "expected_revision")?;
-    let enabled = require_bool(&obj, "enabled")?;
-    let config_b64 = require_string_any(&obj, "config_b64")?;
-    let config_bytes = decode_config_b64(&config_b64)?;
+    let authorized = authorize_target(state, operation, &authenticated, subject_id, &instance_id)?;
+    let expected = early(
+        state,
+        operation,
+        &authenticated,
+        require_positive_u64(&obj, "expected_revision"),
+    )?;
+    let enabled = early(
+        state,
+        operation,
+        &authenticated,
+        require_bool(&obj, "enabled"),
+    )?;
+    let config_b64 = early(
+        state,
+        operation,
+        &authenticated,
+        require_string_any(&obj, "config_b64"),
+    )?;
+    let config_bytes = early(
+        state,
+        operation,
+        &authenticated,
+        decode_config_b64(&config_b64),
+    )?;
     let digest = config_digest(&config_bytes);
     let now = now_nanos();
 
     let reg = state.lock_registry()?;
-    if reg.is_live(&instance_id) {
-        return Err(GateError::new(ErrorCode::InstanceActive));
-    }
-    let mut conn = state.db.lock().map_err(|_| GateError::store())?;
-    let new_revision = opencrab_db::queries::revise_gate_instance(
-        &mut conn,
-        &instance_id,
-        expected,
-        enabled,
-        &config_b64,
-        &digest,
-        now,
-    )
-    .map_err(|error| match error {
-        opencrab_db::queries::ReviseGateInstanceError::Unknown => {
-            GateError::new(ErrorCode::InstanceUnknown)
+    let result = audited_operation(state, operation, &authorized, |tx| {
+        if reg.is_live(&instance_id) {
+            return Err(GateError::new(ErrorCode::InstanceActive));
         }
-        opencrab_db::queries::ReviseGateInstanceError::RevisionConflict => {
-            GateError::new(ErrorCode::RevisionConflict)
-        }
-        opencrab_db::queries::ReviseGateInstanceError::Store(_) => GateError::store(),
-    })?;
-    drop(conn);
+        let new_revision = opencrab_db::queries::revise_gate_instance_in_tx(
+            tx,
+            &instance_id,
+            expected,
+            enabled,
+            &config_b64,
+            &digest,
+            now,
+        )
+        .map_err(|error| match error {
+            opencrab_db::queries::ReviseGateInstanceError::Unknown => {
+                GateError::new(ErrorCode::InstanceUnknown)
+            }
+            opencrab_db::queries::ReviseGateInstanceError::RevisionConflict => {
+                GateError::new(ErrorCode::RevisionConflict)
+            }
+            opencrab_db::queries::ReviseGateInstanceError::Store(_) => GateError::store(),
+        })?;
+        Ok(json_ok(
+            StatusCode::CREATED,
+            json!({
+                "instance_id": instance_id,
+                "revision": new_revision,
+                "enabled": enabled,
+                "config_digest": digest,
+            }),
+        ))
+    });
     drop(reg);
-    audit_success(state, Operation::InstanceRevise, &authorized)?;
-    Ok(json_ok(
-        StatusCode::CREATED,
-        json!({
-            "instance_id": instance_id,
-            "revision": new_revision,
-            "enabled": enabled,
-            "config_digest": digest,
-        }),
-    ))
+    result
 }
 
 async fn put_binding(
@@ -525,24 +639,33 @@ async fn put_binding_inner(
     binding_id: &str,
     req: Request,
 ) -> Result<Response, GateError> {
-    let (headers, body) = read_body(req).await?;
-    state.authorize_legacy_admin(&headers)?;
-    let obj = require_object(&body)?;
-    let binding_id = parse_uuid(binding_id)?;
-    let instance_id = parse_uuid(&require_string(&obj, "instance_id")?)?;
-    let subject_id = subject_for_instance(state, &instance_id)?;
-    let authorized = authorize_target(
+    let operation = Operation::BindingPut;
+    let (authenticated, body) = begin_request(state, operation, req).await?;
+    let obj = early(state, operation, &authenticated, require_object(&body))?;
+    let binding_id = early(state, operation, &authenticated, parse_uuid(binding_id))?;
+    let raw_instance = early(
         state,
-        &headers,
-        Operation::BindingPut,
-        subject_id,
-        &instance_id,
+        operation,
+        &authenticated,
+        require_string(&obj, "instance_id"),
     )?;
-    let address = require_string(&obj, "address")?;
+    let instance_id = early(state, operation, &authenticated, parse_uuid(&raw_instance))?;
+    let subject_id = early(
+        state,
+        operation,
+        &authenticated,
+        subject_for_instance(state, &instance_id),
+    )?;
+    let authorized = authorize_target(state, operation, &authenticated, subject_id, &instance_id)?;
+    let address = early(
+        state,
+        operation,
+        &authenticated,
+        require_string(&obj, "address"),
+    )?;
     let now = now_nanos();
 
-    let body = {
-        let mut conn = state.db.lock().map_err(|_| GateError::store())?;
+    let (response, created) = audited_operation(state, operation, &authorized, |conn| {
         let inst = conn
             .query_row(
                 "SELECT enabled, deleted_at, subject_id FROM gate_instances WHERE instance_id = ?1",
@@ -558,13 +681,15 @@ async fn put_binding_inner(
             .optional()
             .map_err(|_| GateError::store())?;
         let (enabled, subject_id) = match inst {
-            None | Some((_, Some(_), _)) => return Err(GateError::new(ErrorCode::InstanceUnknown)),
-            Some((e, None, s)) => (e == 1, s),
+            None | Some((_, Some(_), _)) => {
+                return Err(GateError::new(ErrorCode::InstanceUnknown));
+            }
+            Some((enabled, None, subject)) => (enabled == 1, subject),
         };
         if !enabled {
             return Err(GateError::new(ErrorCode::InstanceDisabled));
         }
-        let _agent_id = agent_for_subject(&conn, subject_id)?;
+        let _agent_id = agent_for_subject(conn, subject_id)?;
 
         let existing = conn
             .query_row(
@@ -584,10 +709,10 @@ async fn put_binding_inner(
             Some((_, _, Some(_))) => return Err(GateError::new(ErrorCode::BindingClosed)),
             Some((inst, addr, None)) => {
                 if inst == instance_id && addr == address {
-                    let response = json_ok(StatusCode::OK, binding_json(&conn, &binding_id)?);
-                    drop(conn);
-                    audit_success(state, Operation::BindingPut, &authorized)?;
-                    return Ok(response);
+                    return Ok((
+                        json_ok(StatusCode::OK, binding_json(conn, &binding_id)?),
+                        false,
+                    ));
                 }
                 return Err(GateError::new(ErrorCode::BindingConflict));
             }
@@ -597,7 +722,7 @@ async fn put_binding_inner(
         let taken: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM gate_bindings
-             WHERE instance_id = ?1 AND address = ?2 AND closed_at IS NULL",
+                 WHERE instance_id = ?1 AND address = ?2 AND closed_at IS NULL",
                 params![instance_id, address],
                 |r| r.get(0),
             )
@@ -605,35 +730,33 @@ async fn put_binding_inner(
         if taken > 0 {
             return Err(GateError::new(ErrorCode::AddressInUse));
         }
-
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|_| GateError::store())?;
         opencrab_db::queries::create_gate_binding_in_tx(
-            &tx,
+            conn,
             &binding_id,
             &instance_id,
             &address,
             &address,
             now,
         )
-        .map_err(|e| match e {
+        .map_err(|error| match error {
             opencrab_db::queries::CreateGateBindingError::Conflict => {
                 GateError::new(ErrorCode::BindingConflict)
             }
             opencrab_db::queries::CreateGateBindingError::Store(_) => GateError::store(),
         })?;
         if opencrab_db::queries::injected_commit_failure() {
-            let _ = tx.rollback();
             return Err(GateError::store());
         }
-        tx.commit().map_err(|_| GateError::store())?;
-        binding_json(&conn, &binding_id)?
-    };
+        Ok((
+            json_ok(StatusCode::CREATED, binding_json(conn, &binding_id)?),
+            true,
+        ))
+    })?;
 
-    enqueue_bind(state, &instance_id, &binding_id, &address).await;
-    audit_success(state, Operation::BindingPut, &authorized)?;
-    Ok(json_ok(StatusCode::CREATED, body))
+    if created {
+        enqueue_bind(state, &instance_id, &binding_id, &address).await;
+    }
+    Ok(response)
 }
 
 async fn delete_binding(
@@ -652,11 +775,11 @@ async fn delete_binding_inner(
     binding_id: &str,
     req: Request,
 ) -> Result<Response, GateError> {
-    let (headers, body) = read_body(req).await?;
-    state.authorize_legacy_admin(&headers)?;
-    require_empty_body(&body)?;
-    let binding_id = parse_uuid(binding_id)?;
-    let (instance_id, subject_id) = {
+    let operation = Operation::BindingDelete;
+    let (authenticated, body) = begin_request(state, operation, req).await?;
+    early(state, operation, &authenticated, require_empty_body(&body))?;
+    let binding_id = early(state, operation, &authenticated, parse_uuid(binding_id))?;
+    let target = {
         let conn = state.db.lock().map_err(|_| GateError::store())?;
         conn.query_row(
             "SELECT b.instance_id, i.subject_id FROM gate_bindings b
@@ -668,47 +791,42 @@ async fn delete_binding_inner(
         .map_err(|error| match error {
             rusqlite::Error::QueryReturnedNoRows => GateError::new(ErrorCode::BindingUnknown),
             _ => GateError::store(),
-        })?
+        })
     };
-    let authorized = authorize_target(
-        state,
-        &headers,
-        Operation::BindingDelete,
-        subject_id,
-        &instance_id,
-    )?;
+    let (instance_id, subject_id) = early(state, operation, &authenticated, target)?;
+    let authorized = authorize_target(state, operation, &authenticated, subject_id, &instance_id)?;
     let now = now_nanos();
-    let conn = state.db.lock().map_err(|_| GateError::store())?;
-    let row = conn
-        .query_row(
-            "SELECT instance_id, closed_at FROM gate_bindings WHERE binding_id = ?1",
-            params![binding_id],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?)),
-        )
-        .optional()
-        .map_err(|_| GateError::store())?;
-    let (instance_id, already) = match row {
-        None => return Err(GateError::new(ErrorCode::BindingUnknown)),
-        Some((inst, closed)) => (inst, closed.is_some()),
-    };
-    if !already {
-        conn.execute(
-            "UPDATE gate_bindings SET closed_at = ?2 WHERE binding_id = ?1",
-            params![binding_id, now],
-        )
-        .map_err(|_| GateError::store())?;
-    }
-    drop(conn);
-    audit_success(state, Operation::BindingDelete, &authorized)?;
+    let response = audited_operation(state, operation, &authorized, |conn| {
+        let row = conn
+            .query_row(
+                "SELECT instance_id, closed_at FROM gate_bindings WHERE binding_id = ?1",
+                params![binding_id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?)),
+            )
+            .optional()
+            .map_err(|_| GateError::store())?;
+        let (_, already) = match row {
+            None => return Err(GateError::new(ErrorCode::BindingUnknown)),
+            Some((instance, closed)) => (instance, closed.is_some()),
+        };
+        if !already {
+            conn.execute(
+                "UPDATE gate_bindings SET closed_at = ?2 WHERE binding_id = ?1",
+                params![binding_id, now],
+            )
+            .map_err(|_| GateError::store())?;
+        }
+        Ok(json_ok(
+            StatusCode::OK,
+            json!({"binding_id": binding_id, "closed": true}),
+        ))
+    })?;
     if let Ok(mut reg) = state.lock_registry() {
         if let Some(live) = reg.get_mut(&instance_id) {
             live.acknowledged.remove(&binding_id);
             live.pending
-                .retain(|_, p| p.binding_id() != Some(binding_id.as_str()));
+                .retain(|_, pending| pending.binding_id() != Some(binding_id.as_str()));
         }
     }
-    Ok(json_ok(
-        StatusCode::OK,
-        json!({"binding_id": binding_id, "closed": true}),
-    ))
+    Ok(response)
 }

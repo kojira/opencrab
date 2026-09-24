@@ -179,11 +179,15 @@ async fn handler_mutation_and_required_audit_commit_atomically_and_conflicts_are
     }
 
     let failed = protected_request(&app, "PUT", instance, Some(&bearer), body).await;
-    assert_eq!(failed.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        failed.status(),
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+    );
     {
         let conn = state.db.lock().unwrap();
         assert_eq!(
-            conn.query_row("SELECT count(*) FROM gate_instances", [], |row| row.get::<_, i64>(0))
+            conn.query_row("SELECT count(*) FROM gate_instances", [], |row| row
+                .get::<_, i64>(0))
                 .unwrap(),
             0,
             "audit failure must roll back the handler's domain mutation",
@@ -194,10 +198,8 @@ async fn handler_mutation_and_required_audit_commit_atomically_and_conflicts_are
 
     let created = protected_request(&app, "PUT", instance, Some(&bearer), body).await;
     assert_eq!(created.status(), axum::http::StatusCode::CREATED);
-    let conflict_body =
-        r#"{"kind_id":"different","subject_id":1,"enabled":true,"config_b64":""}"#;
-    let conflict =
-        protected_request(&app, "PUT", instance, Some(&bearer), conflict_body).await;
+    let conflict_body = r#"{"kind_id":"different","subject_id":1,"enabled":true,"config_b64":""}"#;
+    let conflict = protected_request(&app, "PUT", instance, Some(&bearer), conflict_body).await;
     assert_eq!(conflict.status(), axum::http::StatusCode::CONFLICT);
 
     let conn = state.db.lock().unwrap();
