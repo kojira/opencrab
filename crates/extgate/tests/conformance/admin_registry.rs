@@ -110,6 +110,154 @@ async fn live_binding_delete_stops_said() {
     assert_eq!(v["code"], "binding_closed");
 }
 
+async fn grandfathered_harness(instance_id: &str) -> Harness {
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("grandfathered.sqlite");
+    {
+        let conn = opencrab_db::init_connection(database.to_str().unwrap()).unwrap();
+        conn.execute_batch(
+            "DROP TRIGGER IF EXISTS subject_allocator_no_delete;
+             DROP TRIGGER IF EXISTS subject_allocator_monotonic;
+             DROP TRIGGER IF EXISTS subject_tombstones_no_update;
+             DROP TRIGGER IF EXISTS subject_tombstones_no_delete;
+             DROP TRIGGER IF EXISTS subject_grants_no_delete;
+             DROP TRIGGER IF EXISTS subject_grants_consume_once;
+             DROP TRIGGER IF EXISTS agents_subject_id_insert_guard;
+             DROP TRIGGER IF EXISTS agents_subject_id_assign;
+             DROP TRIGGER IF EXISTS agents_subject_id_advance_explicit;
+             DROP TRIGGER IF EXISTS agents_subject_id_update_guard;
+             DROP TRIGGER IF EXISTS agents_subject_tombstone_delete_guard;
+             DROP TABLE subject_association_grants;
+             DROP TABLE subject_tombstones;
+             DROP TABLE subject_id_allocator;
+             ALTER TABLE gate_bindings DROP COLUMN session_id;
+             ALTER TABLE gate_instances DROP COLUMN association_grandfathered;",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agents (agent_id, name, persona_name, subject_id)
+             VALUES ('agent-1', 'A', 'p', 41)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO gate_instances
+                 (instance_id, kind_id, subject_id, revision, enabled, config_b64,
+                  config_digest, created_at, updated_at)
+             VALUES (?1, 'opaque-kind', 41, 1, 1, ?2, ?3, 11, 11)",
+            rusqlite::params![instance_id, config_b64(), config_digest()],
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA user_version=53;").unwrap();
+    }
+    let db = opencrab_db::Db::open(database.to_str().unwrap()).unwrap();
+    Harness::start_with_db(dir, db, 41).await
+}
+
+fn association_row_bytes(state: &ExtgateState, instance_id: &str) -> Vec<u8> {
+    let conn = state.db.lock().unwrap();
+    let row = conn
+        .query_row(
+            "SELECT instance_id, kind_id, subject_id, revision, enabled, config_b64,
+                    config_digest, created_at, updated_at, deleted_at,
+                    association_grandfathered
+             FROM gate_instances WHERE instance_id=?1",
+            [instance_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, Option<i64>>(9)?,
+                    row.get::<_, i64>(10)?,
+                ))
+            },
+        )
+        .unwrap();
+    serde_json::to_vec(&row).unwrap()
+}
+
+fn grant_row_bytes(state: &ExtgateState) -> Vec<Vec<u8>> {
+    let conn = state.db.lock().unwrap();
+    let mut statement = conn
+        .prepare(
+            "SELECT grant_hash, agent_id, subject_id, expires_at, consumed_at, consumed_instance_id
+             FROM subject_association_grants ORDER BY grant_hash",
+        )
+        .unwrap();
+    let rows = statement
+        .query_map([], |row| {
+            Ok(serde_json::to_vec(&(
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+            .unwrap())
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    rows
+}
+
+#[tokio::test]
+async fn s2_grandfathered_association_exact_put_needs_no_grant_and_changes_no_bytes() {
+    let grandfathered = "00000000-0000-4000-8000-000000000041";
+    let genuinely_new = "00000000-0000-4000-8000-000000000042";
+    let h = grandfathered_harness(grandfathered).await;
+    let before = association_row_bytes(&h.state, grandfathered);
+    let grants_before = grant_row_bytes(&h.state);
+    let request = |instance_id: &str| {
+        Request::builder()
+            .method("PUT")
+            .uri(format!("/api/gate-instances/{instance_id}"))
+            .header(header::AUTHORIZATION, auth())
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({
+                    "kind_id": "opaque-kind",
+                    "subject_id": h.subject_id,
+                    "enabled": true,
+                    "config_b64": config_b64()
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+
+    let (status, _) = h.admin(request(grandfathered)).await;
+    assert_eq!(status, StatusCode::OK, "grandfathered exact PUT required a grant");
+    let (status, body) = h.admin(request(genuinely_new)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(err_code(&body), "instance_conflict");
+
+    assert_eq!(association_row_bytes(&h.state, grandfathered), before);
+    assert_eq!(
+        grant_row_bytes(&h.state),
+        grants_before,
+        "grandfathered retry changed grant rows"
+    );
+    assert_eq!(
+        h.state
+            .db
+            .lock()
+            .unwrap()
+            .query_row("SELECT count(*) FROM gate_instances", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        1,
+        "genuinely new grantless association was persisted"
+    );
+}
+
 #[tokio::test]
 async fn s2_new_first_instance_association_without_grant_is_forbidden() {
     let h = Harness::start().await;

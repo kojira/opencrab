@@ -320,7 +320,6 @@ struct Harness {
 impl Harness {
     async fn start() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let sock = dir.path().join("gate.sock");
         let db = opencrab_db::Db::memory().unwrap();
         let subject_id = {
             let mut conn = db.lock().unwrap();
@@ -351,6 +350,15 @@ impl Harness {
             )
             .unwrap()
         };
+        Self::start_with_db(dir, db, subject_id).await
+    }
+
+    async fn start_with_db(
+        dir: tempfile::TempDir,
+        db: opencrab_db::Db,
+        subject_id: i64,
+    ) -> Self {
+        let sock = dir.path().join("gate.sock");
         let state = Arc::new(ExtgateState::new_protected(db.clone()));
         let runtime = TestRuntime::new(db);
         let listen_state = Arc::clone(&state);

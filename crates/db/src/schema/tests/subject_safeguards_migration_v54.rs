@@ -210,6 +210,71 @@ fn s2_fresh_schema_installs_allocator_tombstones_and_hashed_grants() {
 }
 
 #[test]
+fn s2_allocator_rejects_decrement_reset_and_delete_and_preserves_high_water() {
+    let conn = crate::init_memory().unwrap();
+    conn.execute_batch(
+        "INSERT INTO agents (agent_id, name, persona_name) VALUES
+             ('s2-high-water-a', 'a', 'p'),
+             ('s2-high-water-b', 'b', 'p'),
+             ('s2-high-water-c', 'c', 'p');",
+    )
+    .unwrap();
+    let prior_next: i64 = conn
+        .query_row(
+            "SELECT next_subject_id FROM subject_id_allocator WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(prior_next > 3);
+
+    for (name, sql) in [
+        (
+            "decrement",
+            "UPDATE subject_id_allocator SET next_subject_id=next_subject_id-1 WHERE singleton=1",
+        ),
+        (
+            "reset",
+            "UPDATE subject_id_allocator SET next_subject_id=1 WHERE singleton=1",
+        ),
+        (
+            "delete",
+            "DELETE FROM subject_id_allocator WHERE singleton=1",
+        ),
+    ] {
+        assert!(
+            conn.execute_batch(sql).is_err(),
+            "allocator {name} unexpectedly succeeded"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT next_subject_id FROM subject_id_allocator WHERE singleton=1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            prior_next,
+            "allocator {name} changed the high-water record"
+        );
+    }
+
+    conn.execute(
+        "INSERT INTO agents (agent_id, name, persona_name) VALUES ('s2-after-high-water', 'd', 'p')",
+        [],
+    )
+    .unwrap();
+    let allocated: i64 = conn
+        .query_row(
+            "SELECT subject_id FROM agents WHERE agent_id='s2-after-high-water'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(allocated, prior_next);
+    assert!(allocated > prior_next - 1, "allocator reused its prior high-water");
+}
+
+#[test]
 fn s2_hard_delete_tombstones_subject_and_allocator_never_reuses_it() {
     use crate::queries::{delete_agent, upsert_agent, AgentRow};
 

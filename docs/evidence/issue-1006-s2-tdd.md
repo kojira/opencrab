@@ -4,7 +4,8 @@ Date: 2026-09-24
 Stage: S2 only
 Starting checkpoint: `9f66c6671591c406616a12bb5085da6c786befcb`
 Rollback checkpoint: `9f66c6671591c406616a12bb5085da6c786befcb`
-Completion commit: the commit containing this evidence
+Completion commit: `ef857abbca0c59e3c0faff1efa39ad2b84b6e33c`
+Review-fix commit: the commit containing this evidence
 
 ## Scope completed
 
@@ -55,6 +56,17 @@ A final safety assertion was then added:
     - RED log: `/tmp/issue-1006-s2-deleted-instance-red.log`;
     - GREEN: instance resolution now requires `deleted_at IS NULL` and reports `instance_unknown` through both admin and runtime paths.
 
+Fresh review found two required assertions absent from the matrix at `ef857abbca0c59e3c0faff1efa39ad2b84b6e33c`. The underlying guards already existed, so assertion-level mutation controls retained the RED proof without adding production behavior:
+
+12. `s2_allocator_rejects_decrement_reset_and_delete_and_preserves_high_water`
+    - RED control: disabling only the allocator monotonic/delete triggers made the named test fail with `allocator decrement unexpectedly succeeded` (`/tmp/issue-1006-s2-allocator-red.log`, exit 101);
+    - GREEN: the unmodified v54 guards reject decrement, reset, and delete, preserve the allocator row, and the next allocation remains above the prior high-water.
+13. `s2_grandfathered_association_exact_put_needs_no_grant_and_changes_no_bytes`
+    - RED control: forcing only the exact-existing-instance branch to reject made the named test fail with `grandfathered exact PUT required a grant` (`/tmp/issue-1006-s2-grandfathered-red.log`, exit 101);
+    - GREEN: a real v53 fixture is migrated through v54; its exact grantless gate-admin PUT succeeds, a genuinely new grantless association fails, and the grandfathered association bytes and complete grant-row set remain unchanged.
+
+Both temporary mutation controls were restored before GREEN validation; `git diff` confirmed no production-source change.
+
 ## Minimal GREEN
 
 - Migration v54 installs subject allocation, tombstones, grants, association grandfathering, and binding/session linkage while preserving existing positive IDs and associations.
@@ -64,15 +76,16 @@ A final safety assertion was then added:
 - Existing tests were updated only where S2 intentionally requires an explicit session descriptor or a subject-association grant.
 - Large binding tests were moved to `gate_binding_s2_tests.rs` to satisfy the 800-line source gate without production behavior changes.
 - The S0 boundary baseline received line-only maintenance for the S2 `subject` module insertion and inherited S1 dev-dependency line drift. Its finding count and classifications remain exactly 451.
+- The fresh review fix adds only the two missing named assertions plus a test-harness constructor for a migrated v53 database; no production source, schema, or behavior changed.
 
 ## Named GREEN results
 
 ```text
 cargo test -p opencrab-db s2_ -- --nocapture
-11 passed; 0 failed
+12 passed; 0 failed
 
 cargo test -p opencrab-extgate --test conformance s2_ -- --nocapture
-3 passed; 0 failed
+4 passed; 0 failed
 ```
 
 The 11 DB matches include the required rollback assertion:
@@ -89,10 +102,10 @@ The 11 DB matches include the required rollback assertion:
 Passed:
 
 - `cargo test -p opencrab-db --lib --no-fail-fast`
-  - 261 passed; 3 ignored; 0 failed.
+  - 262 passed; 3 ignored; 0 failed.
 - `cargo test -p opencrab-extgate --all-targets --no-fail-fast`
   - library 67 passed;
-  - conformance 84 passed;
+  - conformance 85 passed;
   - production-boundary 1 passed;
   - no-platform-branch 8 passed.
 - `cargo test -p opencrab-server --bin opencrab-server --no-fail-fast`
