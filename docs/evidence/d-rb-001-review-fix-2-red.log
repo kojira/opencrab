@@ -1,0 +1,50 @@
+$ python3 scripts/test_preflight_production_nostr_recovery.py -v
+test_all_required_memory_and_model_tables_are_covered (__main__.RecoveryPreflightTests.test_all_required_memory_and_model_tables_are_covered) ... FAIL
+test_daily_log_index_watermark_rewrite_and_deletion_are_rejected (__main__.RecoveryPreflightTests.test_daily_log_index_watermark_rewrite_and_deletion_are_rejected) ... 
+  test_daily_log_index_watermark_rewrite_and_deletion_are_rejected (__main__.RecoveryPreflightTests.test_daily_log_index_watermark_rewrite_and_deletion_are_rejected) (changed_rows=['rewritten-watermark']) ... FAIL
+  test_daily_log_index_watermark_rewrite_and_deletion_are_rejected (__main__.RecoveryPreflightTests.test_daily_log_index_watermark_rewrite_and_deletion_are_rejected) (changed_rows=[]) ... FAIL
+test_integrity_check_failure_is_fatal (__main__.RecoveryPreflightTests.test_integrity_check_failure_is_fatal) ... ok
+test_snapshot_comparison_allows_append_only_rows (__main__.RecoveryPreflightTests.test_snapshot_comparison_allows_append_only_rows) ... ok
+test_snapshot_comparison_rejects_rewrite_or_deletion (__main__.RecoveryPreflightTests.test_snapshot_comparison_rejects_rewrite_or_deletion) ... ok
+test_snapshot_runs_both_database_checks (__main__.RecoveryPreflightTests.test_snapshot_runs_both_database_checks) ... ok
+
+======================================================================
+FAIL: test_all_required_memory_and_model_tables_are_covered (__main__.RecoveryPreflightTests.test_all_required_memory_and_model_tables_are_covered)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/scripts/test_preflight_production_nostr_recovery.py", line 48, in test_all_required_memory_and_model_tables_are_covered
+    self.assertLessEqual(required, set(preflight.TABLES))
+AssertionError: {'memory_curated', 'memory_category_members', 'memory_sessions_fts', 'memory_index_nodes', 'llm_provider_overrides', 'model_pricing', 'conversation_snapshots', 'memory_index_watermark', 'daily_log_index_watermark', 'agent_memory_index_config', 'memory_sessions'} not less than or equal to {'memory_category_members', 'trusted_users', 'memory_index_nodes', 'conversation_snapshots', 'agent_nostr_config', 'memory_curated', 'memory_sessions_fts', 'llm_logs', 'llm_provider_overrides', 'memory_index_watermark', 'sessions', 'memory_sessions', 'agents', 'model_pricing', 'gate_instances', 'trusted_co_agents', 'gate_bindings', 'tool_logs', 'agent_memory_index_config'}
+
+======================================================================
+FAIL: test_daily_log_index_watermark_rewrite_and_deletion_are_rejected (__main__.RecoveryPreflightTests.test_daily_log_index_watermark_rewrite_and_deletion_are_rejected) (changed_rows=['rewritten-watermark'])
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/scripts/test_preflight_production_nostr_recovery.py", line 86, in test_daily_log_index_watermark_rewrite_and_deletion_are_rejected
+    self.assertFalse(comparison["ok"])
+AssertionError: True is not false
+
+======================================================================
+FAIL: test_daily_log_index_watermark_rewrite_and_deletion_are_rejected (__main__.RecoveryPreflightTests.test_daily_log_index_watermark_rewrite_and_deletion_are_rejected) (changed_rows=[])
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/scripts/test_preflight_production_nostr_recovery.py", line 86, in test_daily_log_index_watermark_rewrite_and_deletion_are_rejected
+    self.assertFalse(comparison["ok"])
+AssertionError: True is not false
+
+----------------------------------------------------------------------
+Ran 6 tests in 0.012s
+
+FAILED (failures=3)
+exit=1
+
+$ python3 scripts/validate-production-nostr-recovery.py --package-root target/release --clone-root /tmp/d-rb-001-review-fix-2-red --output /tmp/d-rb-001-review-fix-2-red/evidence/topology.json
+Traceback (most recent call last):
+  File "/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/scripts/validate-production-nostr-recovery.py", line 627, in <module>
+    main()
+  File "/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/scripts/validate-production-nostr-recovery.py", line 557, in main
+    wait_for(lambda: len(nostr_publish_records(root)) == 2, "two local Nostr publishes", 30)
+  File "/Users/kojira/develop/worktrees/opencrab-piiko/hotfix-production-nostr-rollback/scripts/validate-production-nostr-recovery.py", line 61, in wait_for
+    raise RuntimeError(f"timeout waiting for {label}")
+RuntimeError: timeout waiting for two local Nostr publishes
+exit=1

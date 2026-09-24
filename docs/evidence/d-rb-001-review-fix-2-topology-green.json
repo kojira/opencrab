@@ -1,0 +1,295 @@
+{
+  "design_id": "D-RB-001",
+  "clone_only": true,
+  "all_paths_under_clone_root": true,
+  "package_topology": {
+    "version": 1,
+    "nostr_lifecycle": "server_owned",
+    "nostr_authority": "core_agent_nostr_config",
+    "standalone_nostr_daemon": false
+  },
+  "schema_before": 52,
+  "schema_after": 52,
+  "checks_before": {
+    "quick_check": [
+      "ok"
+    ],
+    "integrity_check": [
+      "ok"
+    ]
+  },
+  "checks_after": {
+    "quick_check": [
+      "ok"
+    ],
+    "integrity_check": [
+      "ok"
+    ]
+  },
+  "owners": {
+    "agent-a": {
+      "source": "core agent_nostr_config",
+      "owner_only_ws_list_done": 1
+    },
+    "agent-b": {
+      "source": "core agent_nostr_config",
+      "owner_only_ws_list_done": 1
+    }
+  },
+  "nostr": {
+    "inbound_owner_events": 2,
+    "outbound_local_publishes": [
+      {
+        "operation": "reply",
+        "argv": [
+          "--config",
+          "/private/tmp/d-rb-001-review-fix-2-green-final/data/nostaro-post-4b4b1b29-e10f-59b9-a5cf-7fc04b2c7cdc.toml",
+          "reply",
+          "--",
+          "0101010101010101010101010101010101010101010101010101010101010101",
+          "fixture outbound ok"
+        ],
+        "payload": "fixture outbound ok"
+      },
+      {
+        "operation": "reply",
+        "argv": [
+          "--config",
+          "/private/tmp/d-rb-001-review-fix-2-green-final/data/nostaro-post-f546ab22-f0e5-57e5-b77a-722ad6318f69.toml",
+          "reply",
+          "--",
+          "0202020202020202020202020202020202020202020202020202020202020202",
+          "fixture outbound ok"
+        ],
+        "payload": "fixture outbound ok"
+      }
+    ],
+    "fixture": "local JSONL relay edge"
+  },
+  "discord": {
+    "gateway_started": true,
+    "inbound_fixture": true,
+    "outbound_dry_run_observed": true
+  },
+  "web_dashboard_model_admin": {
+    "core": 200,
+    "dashboard": 200,
+    "model_choices": 200,
+    "model_pricing": 200,
+    "web_create": 201
+  },
+  "processes": {
+    "server_pid": 11915,
+    "descendants": [
+      {
+        "pid": 11920,
+        "ppid": 11915,
+        "command_basename": "nostr-gateway"
+      },
+      {
+        "pid": 11921,
+        "ppid": 11915,
+        "command_basename": "nostr-gateway"
+      }
+    ],
+    "nostr_children": 2,
+    "standalone_daemons": 0,
+    "admin_uds_present": false
+  },
+  "database_comparison": {
+    "ok": true,
+    "tables": {
+      "agents": {
+        "before_count": 2,
+        "after_count": 2,
+        "before_sha256": "f8bd5fa303692ee51c330091171fb91e3cea072281774bffbbc484e7de948a35",
+        "after_sha256": "f8bd5fa303692ee51c330091171fb91e3cea072281774bffbbc484e7de948a35",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 0
+      },
+      "sessions": {
+        "before_count": 2,
+        "after_count": 4,
+        "before_sha256": "3beb49ebbdcef7762b50517f8c70b2364a99dad786c736d82b1d545e8ecf6b91",
+        "after_sha256": "604afb6f56a90e8d9406f1d9b7f9c661ecd371d75d76b4cfa33d3e51808c848a",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 2
+      },
+      "memory_curated": {
+        "before_count": 1,
+        "after_count": 1,
+        "before_sha256": "18fdb09811742f1d84e5bc2bffce15e4f0ecb9e24527086d15c5009b7da7e6b6",
+        "after_sha256": "18fdb09811742f1d84e5bc2bffce15e4f0ecb9e24527086d15c5009b7da7e6b6",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 0
+      },
+      "memory_sessions": {
+        "before_count": 1,
+        "after_count": 100,
+        "before_sha256": "934fdc7e7136a1a017075f481c691ae3bb88575722cd51aea4f077870895e158",
+        "after_sha256": "d9fcb95015fd12d93263876cb0e995b40c9e630419b8582f52bbb61f14745fa1",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 99
+      },
+      "memory_sessions_fts": {
+        "before_count": 0,
+        "after_count": 99,
+        "before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_sha256": "e142a6492be27c33dc0c2903b3f1a75c8159543f6735e88563a1f0b2767a065c",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 99
+      },
+      "conversation_snapshots": {
+        "before_count": 0,
+        "after_count": 3,
+        "before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_sha256": "5e29a3cf83cd19e6a23f3251a4ca7e41616629257843804e08a45ab96a21c802",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 3
+      },
+      "memory_index_nodes": {
+        "before_count": 0,
+        "after_count": 13,
+        "before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_sha256": "568eae88dec7b7d7cb3e4e2c19a00f83bccb9b6c67fccf00d492635f4326f2a9",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 13
+      },
+      "memory_category_members": {
+        "before_count": 0,
+        "after_count": 0,
+        "before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 0
+      },
+      "memory_index_watermark": {
+        "before_count": 0,
+        "after_count": 2,
+        "before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_sha256": "c704a3b464d60964d565536619d494255986c90480a3faa5c184da2112837cae",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 2
+      },
+      "daily_log_index_watermark": {
+        "before_count": 1,
+        "after_count": 1,
+        "before_sha256": "20c9410f4d103ef0f38f0e7efb40a5bc6616a71958c71da5d9183b1c2c241216",
+        "after_sha256": "20c9410f4d103ef0f38f0e7efb40a5bc6616a71958c71da5d9183b1c2c241216",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 0
+      },
+      "agent_memory_index_config": {
+        "before_count": 0,
+        "after_count": 0,
+        "before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 0
+      },
+      "tool_logs": {
+        "before_count": 0,
+        "after_count": 3,
+        "before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_sha256": "e4d2b9e649e36da8d9a43507d706fc6b9c2f680ea2edc3d6497c8984212d3b57",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 3
+      },
+      "llm_logs": {
+        "before_count": 0,
+        "after_count": 90,
+        "before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_sha256": "138b6a43f12c948f74c5098c4d20d262564c0df629376dcbd6009ae37de129ab",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 90
+      },
+      "agent_nostr_config": {
+        "before_count": 2,
+        "after_count": 2,
+        "before_sha256": "a0b7c1594b98dfff6f044f759d93b38246ed770d65b7aaea24a9c2aefe45c7ae",
+        "after_sha256": "a0b7c1594b98dfff6f044f759d93b38246ed770d65b7aaea24a9c2aefe45c7ae",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 0
+      },
+      "trusted_users": {
+        "before_count": 0,
+        "after_count": 0,
+        "before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 0
+      },
+      "trusted_co_agents": {
+        "before_count": 0,
+        "after_count": 0,
+        "before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 0
+      },
+      "gate_instances": {
+        "before_count": 0,
+        "after_count": 4,
+        "before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_sha256": "f4d615dafaf2c618e7c0a305248f138c4d10f77994c6babbb8bf7c7683555e86",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 4
+      },
+      "gate_bindings": {
+        "before_count": 0,
+        "after_count": 4,
+        "before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_sha256": "ecccb71b42719fc8e9be2987450007949cdfe52e02294f6fac13235fd3e2ff41",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 4
+      },
+      "llm_provider_overrides": {
+        "before_count": 0,
+        "after_count": 0,
+        "before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 0
+      },
+      "model_pricing": {
+        "before_count": 4,
+        "after_count": 4,
+        "before_sha256": "49c712632d74a4de18b7ae06a26c2ebfb2569a77e0d0f45bc576cf10ad6695ac",
+        "after_sha256": "49c712632d74a4de18b7ae06a26c2ebfb2569a77e0d0f45bc576cf10ad6695ac",
+        "preserved_rows": true,
+        "rewritten_or_deleted": 0,
+        "appended_rows": 0
+      }
+    },
+    "violations": [],
+    "authorized_session_rewrites": [],
+    "unauthorized_session_rewrites": []
+  },
+  "llm_fixture_requests": 94,
+  "logs": {
+    "recovery-server.log": "logs/recovery-server.log",
+    "web-gateway.log": "logs/web-gateway.log",
+    "discord-gateway.log": "logs/discord-gateway.log",
+    "secret-normalize.log": "logs/secret-normalize.log",
+    "schema-init.log": "logs/schema-init.log"
+  }
+}

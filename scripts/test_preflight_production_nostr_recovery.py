@@ -40,6 +40,7 @@ class RecoveryPreflightTests(unittest.TestCase):
             "memory_index_nodes",
             "memory_category_members",
             "memory_index_watermark",
+            "daily_log_index_watermark",
             "agent_memory_index_config",
             "llm_provider_overrides",
             "model_pricing",
@@ -72,6 +73,24 @@ class RecoveryPreflightTests(unittest.TestCase):
             comparison["tables"]["agents"]["rewritten_or_deleted"], 1
         )
 
+    def test_daily_log_index_watermark_rewrite_and_deletion_are_rejected(self):
+        before = self.snapshot_with_table_rows(
+            "daily_log_index_watermark", ["baseline-watermark"]
+        )
+        for changed_rows in (["rewritten-watermark"], []):
+            with self.subTest(changed_rows=changed_rows):
+                after = self.snapshot_with_table_rows(
+                    "daily_log_index_watermark", changed_rows
+                )
+                comparison = preflight.compare_snapshots(before, after)
+                self.assertFalse(comparison["ok"])
+                self.assertEqual(
+                    comparison["tables"]["daily_log_index_watermark"][
+                        "rewritten_or_deleted"
+                    ],
+                    1,
+                )
+
     def test_snapshot_runs_both_database_checks(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "clone.db"
@@ -91,9 +110,13 @@ class RecoveryPreflightTests(unittest.TestCase):
 
     @staticmethod
     def snapshot_with_rows(rows: list[str]):
+        return RecoveryPreflightTests.snapshot_with_table_rows("agents", rows)
+
+    @staticmethod
+    def snapshot_with_table_rows(target: str, rows: list[str]):
         tables = {}
         for table in preflight.TABLES:
-            table_rows = rows if table == "agents" else []
+            table_rows = rows if table == target else []
             tables[table] = {
                 "exists": True,
                 "rows": len(table_rows),

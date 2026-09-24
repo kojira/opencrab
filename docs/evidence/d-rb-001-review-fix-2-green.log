@@ -1,0 +1,22 @@
+$ python3 scripts/test_preflight_production_nostr_recovery.py -v
+test_all_required_memory_and_model_tables_are_covered (__main__.RecoveryPreflightTests.test_all_required_memory_and_model_tables_are_covered) ... ok
+test_daily_log_index_watermark_rewrite_and_deletion_are_rejected (__main__.RecoveryPreflightTests.test_daily_log_index_watermark_rewrite_and_deletion_are_rejected) ... ok
+test_integrity_check_failure_is_fatal (__main__.RecoveryPreflightTests.test_integrity_check_failure_is_fatal) ... ok
+test_snapshot_comparison_allows_append_only_rows (__main__.RecoveryPreflightTests.test_snapshot_comparison_allows_append_only_rows) ... ok
+test_snapshot_comparison_rejects_rewrite_or_deletion (__main__.RecoveryPreflightTests.test_snapshot_comparison_rejects_rewrite_or_deletion) ... ok
+test_snapshot_runs_both_database_checks (__main__.RecoveryPreflightTests.test_snapshot_runs_both_database_checks) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 0.013s
+
+OK
+
+$ python3 scripts/validate-production-nostr-recovery.py --package-root target/release --clone-root /tmp/d-rb-001-review-fix-2-green-final --output /tmp/d-rb-001-review-fix-2-green-final/evidence/topology.json
+D-RB-001 authentic clone topology passed: /private/tmp/d-rb-001-review-fix-2-green-final/evidence/topology.json
+
+$ python3 scripts/check-production-nostr-rollback.py
+D-RB-001 structural checks passed
+$ python3 -m py_compile scripts/preflight-production-nostr-recovery.py scripts/test_preflight_production_nostr_recovery.py scripts/validate-production-nostr-recovery.py
+$ python3 scripts/preflight-production-nostr-recovery.py --clone-root /tmp/d-rb-001-review-fix-2-green-final --core-db /tmp/d-rb-001-review-fix-2-green-final/data/opencrab.db --output /tmp/d-rb-001-review-fix-2-green-final/evidence/read-only-preflight.json
+D-RB-001 clone preflight passed
+$ cargo fmt --check

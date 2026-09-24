@@ -27,6 +27,7 @@ TABLES = (
     "memory_index_nodes",
     "memory_category_members",
     "memory_index_watermark",
+    "daily_log_index_watermark",
     "agent_memory_index_config",
     "tool_logs",
     "llm_logs",

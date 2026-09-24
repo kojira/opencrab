@@ -211,13 +211,14 @@ def base_env(package: Path, root: Path) -> dict[str, str]:
             "RUST_LOG": "info",
             "OPENCRAB_NOSTR_GATEWAY_BIN": str(package / "nostr-gateway"),
             "OPENCRAB_NOSTARO_BIN": str(root / "fixtures/nostaro"),
+            "OPENCRAB_NOSTARO_PUBLISH_LOG": str(root / "fixtures/nostaro-publish.jsonl"),
             "OPENCRAB_SECRET_MASTER_KEY": MASTER_KEY_B64,
             "OPENCRAB_NOSTRGATE_FAKE_WATCH": str(root / "fixtures/nostr.jsonl"),
-            "OPENCRAB_NOSTRGATE_DRY_RUN": "1",
             "OPENCRAB_DISCORDGATE_FAKE_EVENTS": str(root / "fixtures/discord.jsonl"),
             "OPENCRAB_DISCORDGATE_DRY_RUN": "1",
         }
     )
+    env.pop("OPENCRAB_NOSTRGATE_DRY_RUN", None)
     return env
 
 
@@ -275,6 +276,10 @@ def seed_clone(database: Path) -> None:
             (now,),
         )
         connection.execute(
+            "INSERT INTO daily_log_index_watermark(agent_id,last_indexed_date,updated_at) VALUES('agent-a','2025-12-31',?)",
+            (now,),
+        )
+        connection.execute(
             "INSERT OR REPLACE INTO model_pricing(provider,model,input_price_per_1m,output_price_per_1m,context_window,max_output_tokens,updated_at) VALUES('fixture','fixture-model',0,0,200000,4096,?)",
             (now,),
         )
@@ -299,6 +304,13 @@ if 'pubkey' in args:
 elif 'following' in args:
     out=next(a.split('=',1)[1] for a in args if a.startswith('--out='))
     pathlib.Path(out).write_text('{"users":[]}')
+    print('ok')
+elif 'post' in args or 'reply' in args:
+    operation='post' if 'post' in args else 'reply'
+    record={'operation':operation,'argv':args,'payload':args[-1]}
+    out=pathlib.Path(os.environ['OPENCRAB_NOSTARO_PUBLISH_LOG'])
+    with out.open('a') as handle:
+        handle.write(json.dumps(record,separators=(',',':'))+'\\n')
     print('ok')
 else:
     print('ok')
@@ -328,6 +340,13 @@ def normalize_secrets(package: Path, root: Path, core_port: int, llm_port: int) 
         connection.commit()
     finally:
         connection.close()
+
+
+def nostr_publish_records(root: Path) -> list[dict]:
+    path = root / "fixtures/nostaro-publish.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line]
 
 
 def append_nostr_events(root: Path) -> None:
@@ -547,7 +566,30 @@ def main() -> None:
         with (root / "fixtures/discord.jsonl").open("a") as handle:
             handle.write(json.dumps({"id":"700","channel_id":"600","guild_id":"500","author":{"id":"222222222222222222","bot":False,"username":"owner"},"content":"discord fixture health","attachments":[]}) + "\n")
         wait_for(lambda: owner_tool_proof(database) == {"agent-a": 1, "agent-b": 1}, "both Nostr owners executing owner-only ws_list", 45)
-        wait_for(lambda: "fixture outbound ok" in server.text(), "Nostr outbound dry-run", 30)
+        expected_event_ids = {f"{index:02x}" * 32 for index in range(1, 3)}
+        wait_for(
+            lambda: expected_event_ids
+            <= {
+                record.get("argv", [])[-2]
+                for record in nostr_publish_records(root)
+                if len(record.get("argv", [])) >= 2
+            },
+            "both Owner events published through local nostaro",
+            30,
+        )
+        publishes_by_event = {}
+        for record in nostr_publish_records(root):
+            argv = record.get("argv", [])
+            if len(argv) >= 2 and argv[-2] in expected_event_ids:
+                publishes_by_event.setdefault(argv[-2], record)
+        publish_records = list(publishes_by_event.values())
+        if len(publish_records) != 2 or any(
+            record.get("operation") != "reply"
+            or record.get("payload") != "fixture outbound ok"
+            or not preflight.contained(Path(record["argv"][1]).resolve(), root)
+            for record in publish_records
+        ):
+            raise RuntimeError(f"unexpected local Nostr publish: {publish_records}")
         wait_for(lambda: "fixture outbound ok" in discord.text(), "Discord outbound dry-run", 30)
         owner_proof = owner_tool_proof(database)
 
@@ -590,7 +632,7 @@ def main() -> None:
             "checks_before": before["checks"],
             "checks_after": after["checks"],
             "owners": {agent: {"source": "core agent_nostr_config", "owner_only_ws_list_done": owner_proof[agent]} for agent in AGENTS},
-            "nostr": {"inbound_owner_events": 2, "outbound_dry_run_observed": True, "fixture": "local JSONL relay edge"},
+            "nostr": {"inbound_owner_events": 2, "outbound_local_publishes": publish_records, "fixture": "local JSONL relay edge"},
             "discord": {"gateway_started": True, "inbound_fixture": True, "outbound_dry_run_observed": True},
             "web_dashboard_model_admin": {"core": core_health[0], "dashboard": dashboard_health[0], "model_choices": model_choices[0], "model_pricing": model_pricing[0], "web_create": web_create[0]},
             "processes": inventory,
