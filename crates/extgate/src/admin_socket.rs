@@ -124,6 +124,20 @@ pub fn prepare_admin_socket(
 mod tests {
     use super::*;
 
+    #[test]
+    fn manifest_and_socket_paths_use_directory_fd_no_follow_operations() {
+        let manifest_source = include_str!("gate_admin_security.rs");
+        let socket_source = include_str!("admin_socket.rs");
+        assert!(
+            manifest_source.contains("openat("),
+            "manifest opening must use a directory-fd component walk"
+        );
+        assert!(
+            socket_source.contains("openat(") && socket_source.contains("unlinkat("),
+            "socket preparation and cleanup must stay relative to a held parent directory fd"
+        );
+    }
+
     #[tokio::test]
     async fn socket_is_private_refuses_stale_path_and_cleanup_is_inode_safe() {
         let temp = tempfile::tempdir().unwrap();

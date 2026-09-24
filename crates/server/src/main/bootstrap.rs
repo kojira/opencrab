@@ -223,6 +223,17 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn gate_admin_startup_fault_injection_covers_every_pre_listener_stage() {
+        let source = include_str!("bootstrap.rs");
+        for stage in ["migration", "bootstrap", "socket", "router"] {
+            assert!(
+                source.contains(&format!("inject_gate_admin_startup_fault(\"{stage}\")")),
+                "missing pre-listener fault injection for {stage}"
+            );
+        }
+    }
+
+    #[test]
     fn attachment_inbox_is_derived_from_the_core_database_directory() {
         let database = std::path::Path::new("runtime/data/opencrab.db");
         assert_eq!(

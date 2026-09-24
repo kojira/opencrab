@@ -16,7 +16,30 @@ Rollback must stop all listeners, restore the pre-S1 database and binary/config 
 
 ## RED
 
-Named RED assertions were added before production changes.
+The earlier S1 implementation retained only the two preimplementation REDs below (schema and
+public isolation). It did **not** retain a complete assertion-level RED matrix; this record does
+not reconstruct or fabricate one after the fact.
+
+### Follow-up review-blocker REDs against `be2a57c`
+
+The follow-up first added named assertions with no production changes. Exact outputs are retained
+at `/tmp/issue-1006-s1-followup-red-{auth,atomicity,paths,startup}.txt`.
+
+- `handlers_authenticate_before_parsing_or_lookup_and_audit_denials_and_authorized_errors`:
+  expected unauthorized before malformed-body parsing, but received HTTP `400` instead of `401`.
+- `handler_mutation_and_required_audit_commit_atomically_and_conflicts_are_audited`:
+  after an injected success-audit failure, `gate_instances` contained `1` row instead of `0`.
+- `manifest_and_socket_paths_use_directory_fd_no_follow_operations`: failed with
+  `manifest opening must use a directory-fd component walk`.
+- `gate_admin_startup_fault_injection_covers_every_pre_listener_stage`: failed with
+  `missing pre-listener fault injection for migration`.
+
+These are genuine failures from clean HEAD `be2a57cb8128f88e7230e5b68c2464fba6dc32e6`.
+The real HTTP/1.1-over-UDS assertion is added in this follow-up alongside the startup-order
+implementation; unlike the four gaps above, the underlying Axum/UDS transport was already capable
+of serving HTTP, so no contrary preimplementation failure is claimed.
+
+Named RED assertions were added before the original production changes.
 
 ### Security schema
 
