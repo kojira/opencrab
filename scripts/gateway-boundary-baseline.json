@@ -4233,9 +4233,9 @@
       "classification": "closed-production-violation",
       "path": "crates/extgate/tests/conformance/timed_fire.rs",
       "line": 47,
-      "needle": "s3_timed_continuation_routes_generic_binding_session_once_after_reconnect_ack",
+      "needle": "s3_automatic_hello_snapshot_survives_legacy_config_mutation_for_real_continuation",
       "owner_stage": "S3",
-      "expires_when": "retain generic binding/session timed continuation proof"
+      "expires_when": "retain accepted-hello authority and canonical timed-continuation proof"
     },
     {
       "violation": "V10",

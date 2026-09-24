@@ -1,4 +1,4 @@
-use opencrab_actions::{TimedFireRequest, TimedFireSink};
+use opencrab_actions::{TimedFireRequest, TimedFireRouter, TimedFireSink};
 use opencrab_extgate::ExtgateTimedFireSink;
 
 fn timed_fire_request(binding_id: &str, session_id: &str, agent_id: &str) -> TimedFireRequest {
@@ -41,6 +41,68 @@ async fn wait_binding_acknowledged(h: &Harness, instance_id: &str, binding_id: &
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     panic!("binding acknowledgement was not registered");
+}
+
+#[tokio::test]
+async fn s3_automatic_hello_snapshot_survives_legacy_config_mutation_for_real_continuation() {
+    let h = Harness::start().await;
+    let session_id = "opaque-automatic-continuation";
+    let instance_id = uuid();
+    let binding_id = uuid();
+    insert_named_session(&h, session_id);
+    put_instance(&h, &instance_id, true).await;
+    put_binding(&h, &binding_id, &instance_id, session_id).await;
+
+    let mut stream = h.connect().await;
+    hello_ok(&mut stream, &instance_id, 1).await;
+    assert_eq!(ack_bind(&mut stream).await, binding_id);
+    wait_binding_acknowledged(&h, &instance_id, &binding_id).await;
+
+    // The accepted hello snapshot is automatic. Mutating the legacy config after acceptance must
+    // not change completion behavior for this live connection.
+    let legacy_tool_driven = "eyJkZWxpdmVyeV9tb2RlIjoidG9vbF9kcml2ZW4ifQ==";
+    let legacy_digest =
+        opencrab_extgate::ids::config_digest_from_b64(legacy_tool_driven).unwrap();
+    h.state
+        .db
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE gate_instances SET config_b64 = ?1, config_digest = ?2 WHERE instance_id = ?3",
+            rusqlite::params![legacy_tool_driven, legacy_digest, instance_id],
+        )
+        .unwrap();
+
+    let canonical = {
+        let conn = h.state.db.lock().unwrap();
+        TimedFireRouter::new()
+            .resolve_persisted_target(&conn, session_id, "agent-1")
+            .expect("canonical generic route")
+    };
+    assert_eq!(canonical.binding_id, binding_id);
+    assert_eq!(canonical.session_id, session_id);
+
+    let sink = ExtgateTimedFireSink::new(Arc::clone(&h.state), h.runtime.clone());
+    sink.fire_timed_turn(timed_fire_request(
+        &canonical.binding_id,
+        &canonical.session_id,
+        "agent-1",
+    ));
+    let say = read_until(&mut stream, |frame| frame["m"] == "say").await;
+    assert_eq!(say["binding_id"], binding_id);
+    assert_eq!(say["payload"]["text"], "hello from agent");
+    write_frame(&mut stream, &json!({"id": say["id"], "m": "ok"})).await;
+
+    let mut say_count = 1;
+    for _ in 0..4 {
+        let Some(frame) = read_frame_opt(&mut stream).await else {
+            break;
+        };
+        if frame["m"] == "say" {
+            say_count += 1;
+        }
+    }
+    assert_eq!(say_count, 1, "automatic continuation emitted duplicate say frames");
 }
 
 #[tokio::test]

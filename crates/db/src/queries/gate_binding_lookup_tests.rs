@@ -85,20 +85,20 @@ fn seed_reused_address(conn: &mut Connection, address: &str) -> (String, String)
 }
 
 #[test]
-fn s3_exact_and_global_fan_out_resolves_only_canonical_generic_binding_ids() {
+fn canonical_lookup_resolves_distinct_generic_aliases_without_writes() {
     let mut conn = crate::init_memory().unwrap();
-    let exact_address = "opaque-exact-session";
-    let global_address = "opaque-global-session";
-    let (exact_binding, instance) = seed_reused_address(&mut conn, exact_address);
-    insert_named_session(&conn, global_address, "a1");
-    let global_binding = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    let first_address = "opaque-first-session";
+    let second_address = "opaque-second-session";
+    let (first_binding, instance) = seed_reused_address(&mut conn, first_address);
+    insert_named_session(&conn, second_address, "a1");
+    let second_binding = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
     let tx = conn.transaction().unwrap();
     create_gate_binding_in_tx(
         &tx,
-        global_binding,
+        second_binding,
         &instance,
-        global_address,
-        global_address,
+        second_address,
+        second_address,
         2,
     )
     .unwrap();
@@ -106,8 +106,8 @@ fn s3_exact_and_global_fan_out_resolves_only_canonical_generic_binding_ids() {
     let changes_before = conn.total_changes();
 
     let routes = [
-        (exact_address, exact_binding.as_str()),
-        (global_address, global_binding),
+        (first_address, first_binding.as_str()),
+        (second_address, second_binding),
     ];
     for (session_id, binding_id) in routes {
         assert_eq!(

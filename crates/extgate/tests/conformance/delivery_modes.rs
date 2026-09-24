@@ -132,17 +132,3 @@ async fn tool_driven_inbound_is_no_reply_without_say() {
         "沈黙ターンで NO_REPLY 行を永続してはならない（#899）"
     );
 }
-
-#[tokio::test]
-async fn s3_automatic_completion_routes_through_generic_binding_say() {
-    assert_eq!(
-        opencrab_extgate::delivery_mode_from_config_bytes(b"{}").unwrap(),
-        opencrab_extgate::DeliveryMode::Say
-    );
-    assert!(opencrab_extgate::dispatches_v3_say(
-        opencrab_extgate::DeliveryMode::Say
-    ));
-    assert!(!opencrab_extgate::dispatches_v3_say(
-        opencrab_extgate::DeliveryMode::ToolDriven
-    ));
-}

@@ -32,9 +32,21 @@ cargo test -p opencrab-gate-client s3_invoke_requires_digest_dispatch_and_effect
 compile-time assertion failures: Invoke retained none of the required snapshot fields
 log: /tmp/issue-1006-s3-review-fix-gate-client-red.log
 
-python3 -m unittest ...test_s3_named_production_seam_routing_and_continuation_assertions_exist
-4 assertion failures against checkpoint 2f0ad32: exact/global, timed, subtask, and automatic production-seam assertions absent
-log: /tmp/issue-1006-s3-review-fix-routing-red.log
+cargo test -p opencrab-extgate --test conformance \
+  s3_automatic_hello_snapshot_survives_legacy_config_mutation_for_real_continuation \
+  -- --nocapture
+checkpoint: 2f0ad32 (before the runtime-authority fix)
+1 failed after the real timed continuation emitted no say frame once legacy config was changed
+log: /tmp/issue-1006-s3-behavioral-automatic-red.log
+
+The exact/global canonical TimedFireRouter fan-out behavior already passed at `2afe535`; the rereview blocker was missing behavioral coverage, not missing production behavior. The new regression was therefore retained honestly as characterization rather than fabricated RED:
+
+cargo test -p opencrab-server --test transport_fire_registry \
+  s3_exact_and_global_fixtures_fan_out_through_canonical_timed_fire_routes \
+  -- --nocapture
+checkpoint: 2afe535
+1 passed
+log: /tmp/issue-1006-s3-routing-characterization-2afe535.log
 
 python3 -m unittest ...test_s3_generic_caller_role_deferral_requires_exact_finding_identity
 1 assertion failure: broad traits.rs classification incorrectly assigned the generic caller role to V10/S3
@@ -70,7 +82,9 @@ The failures independently detected platform-shaped timed-fire fields, operation
 - `s3_arbitrary_synthetic_operation_projects_and_authorizes_from_metadata` proves an arbitrary `quasar.synthetic-v7` operation is projected without a shared allowlist, denies an undeclared caller before DB/wire effects, and executes for the metadata-authorized owner.
 - `s3_projection_rejects_stale_live_declaration_digest_before_db_and_wire` proves reconnect drift cannot authorize from a stale projection.
 - Gate-client parser/snapshot assertions cover missing/stale digest, undeclared operation, dispatch/effect mismatch, and guarantee downgrade before the adapter handler.
-- Exact/global canonical lookup, timed fire, subtask resume, and automatic completion have named production-seam assertions using only generic binding/session IDs.
+- `s3_automatic_hello_snapshot_survives_legacy_config_mutation_for_real_continuation` accepts a real automatic hello, mutates legacy config afterward, resolves the canonical generic route, triggers a real timed continuation, and observes exactly one say on that binding.
+- `s3_exact_and_global_fixtures_fan_out_through_canonical_timed_fire_routes` resolves distinct exact/global fixtures through `TimedFireRouter`, fans both targets into a collecting production sink, and asserts both canonical binding/session destinations and an exact count of two.
+- The prior Python function-name sentinel was removed; it is not behavioral evidence.
 - `AgentGatewayLifecycle`, `AgentGatewayRegistry`, and server `AppState.gateways` were removed; liveness is read from extgate.
 - Discord and Nostr declarations were migrated to the complete generic metadata contract. CLI and Web continue to use the opaque generic client.
 - Large test modules were split without behavior changes to keep every Rust source file below 800 lines.
@@ -104,7 +118,7 @@ cargo test -p opencrab-nostr-gateway --all-targets --no-fail-fast
 72 library
 
 cargo test -p opencrab-server --test transport_fire_registry --test utterance_parity --no-fail-fast
-2 transport-fire; 1 utterance-parity
+3 transport-fire; 1 utterance-parity
 
 cargo test -p opencrab-server --lib --no-fail-fast
 493 passed
@@ -116,9 +130,9 @@ bash scripts/check-deps.sh
 cargo tree -p opencrab-server --edges no-dev | (! grep -E 'opencrab-(discord|nostr|web)-gateway')
 python3 scripts/gateway_boundary_audit.py
 python3 -m unittest scripts/tests/test_gateway_boundary_audit.py
-56 passed
+55 passed
 
-cargo test -p opencrab-db s3_exact_and_global_fan_out_resolves_only_canonical_generic_binding_ids
+cargo test -p opencrab-db canonical_lookup_resolves_distinct_generic_aliases_without_writes
 1 passed
 
 git diff --check

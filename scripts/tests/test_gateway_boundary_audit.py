@@ -13,22 +13,6 @@ SPEC.loader.exec_module(AUDIT)
 
 
 class GatewayBoundaryMutationTests(unittest.TestCase):
-    def test_s3_named_production_seam_routing_and_continuation_assertions_exist(self):
-        root = pathlib.Path(__file__).parents[2]
-        expected = {
-            "crates/db/src/queries/gate_binding_lookup_tests.rs":
-                "s3_exact_and_global_fan_out_resolves_only_canonical_generic_binding_ids",
-            "crates/extgate/tests/conformance/timed_fire.rs":
-                "s3_timed_continuation_routes_generic_binding_session_once_after_reconnect_ack",
-            "crates/extgate/tests/conformance/turn_queue.rs":
-                "s3_subtask_continuation_routes_by_exact_generic_session_without_prefix",
-            "crates/extgate/tests/conformance/delivery_modes.rs":
-                "s3_automatic_completion_routes_through_generic_binding_say",
-        }
-        for relative, assertion in expected.items():
-            with self.subTest(assertion=assertion):
-                self.assertIn(assertion, (root / relative).read_text())
-
     def test_s3_reviewed_boundary_burn_down_has_exactly_412_findings(self):
         root = pathlib.Path(__file__).parents[2]
         baseline = json.loads((root / "scripts/gateway-boundary-baseline.json").read_text())
