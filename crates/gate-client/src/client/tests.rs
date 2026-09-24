@@ -99,6 +99,9 @@
                     id: "say:malformed".into(),
                     binding_id: "binding".into(),
                     payload,
+                    payload_digest: "a".repeat(64),
+                    delivery_guarantee: crate::wire::DeliveryGuarantee::AtMostOnceIndeterminate,
+                    adapter_protocol_digest: "b".repeat(64),
                 },
                 0,
             )

@@ -36,6 +36,7 @@ pub enum ErrorCode {
     BindFailed,
     NotConnected,
     ExternalRejected,
+    Indeterminate,
     Disconnect,
     // DI 拡張 §10.4。いずれも generic code で platform 語彙を埋め込まない。
     OperationDeclarationInvalid,
@@ -71,6 +72,7 @@ impl ErrorCode {
             Self::BindFailed => "bind_failed",
             Self::NotConnected => "not_connected",
             Self::ExternalRejected => "external_rejected",
+            Self::Indeterminate => "indeterminate",
             Self::Disconnect => "disconnect",
             Self::OperationDeclarationInvalid => "operation_declaration_invalid",
             Self::OperationDeclarationMismatch => "operation_declaration_mismatch",
@@ -105,6 +107,7 @@ impl ErrorCode {
             "bind_failed" => Self::BindFailed,
             "not_connected" => Self::NotConnected,
             "external_rejected" => Self::ExternalRejected,
+            "indeterminate" => Self::Indeterminate,
             "disconnect" => Self::Disconnect,
             "operation_declaration_invalid" => Self::OperationDeclarationInvalid,
             "operation_declaration_mismatch" => Self::OperationDeclarationMismatch,
@@ -140,6 +143,7 @@ impl ErrorCode {
             | Self::BindFailed
             | Self::NotConnected
             | Self::ExternalRejected
+            | Self::Indeterminate
             | Self::Disconnect
             | Self::OperationDeclarationInvalid
             | Self::OperationDeclarationMismatch

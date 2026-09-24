@@ -584,6 +584,7 @@ async fn wait_for_child_readiness<F: SpawnerFactory + 'static>(
 struct ProductionFactory {
     child_binary: PathBuf,
     core_socket: PathBuf,
+    gateway_store_path: PathBuf,
     placement_dir: PathBuf,
     attachment_spool_root: Option<PathBuf>,
 }
@@ -690,6 +691,7 @@ impl SpawnerFactory for ProductionFactory {
             .expect("production control socket");
         let value = serde_json::json!({
             "core_socket": self.core_socket,
+            "gateway_store_path": self.gateway_store_path,
             "attachment_spool_root": self.attachment_spool_root,
             "control_socket": control_socket,
             "start_nonce": start_nonce,
@@ -734,6 +736,7 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         Arc::new(ProductionFactory {
             child_binary: config.child_binary.clone(),
             core_socket: config.core_socket.clone(),
+            gateway_store_path: config.database_path.clone(),
             placement_dir: config.placement_dir.clone(),
             attachment_spool_root: config.attachment_spool_root.clone(),
         }),

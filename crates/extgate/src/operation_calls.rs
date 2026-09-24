@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use rusqlite::{params, Connection, TransactionBehavior};
 use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
@@ -391,9 +392,27 @@ async fn invoke_utterance_checked(
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     let delivery_id = Uuid::new_v4().to_string();
     let now = now_nanos();
-    // deliveries.payload_json は `{"text": ...}` 形が CHECK 制約（say と共用のテーブル）。発話本文を
-    // 載せる（wire への invoke は別途 invoke_frame で原 payload を送る・二重には持たない）。
-    let delivery_payload = serde_json::json!({ "text": speech_body }).to_string();
+    // deliveries.payload_json は `{"text": ...}` 形が CHECK 制約（say と共用のテーブル）。
+    // reply target は reconnect 後にも確定拒否を同じ origin へ表面化するため保持する。
+    let mut delivery_payload_value = serde_json::json!({ "text": speech_body });
+    if let Some(target) = reply_target_origin {
+        delivery_payload_value["reply_target"] = Value::String(target.to_string());
+    }
+    let delivery_payload = delivery_payload_value.to_string();
+    let delivery_payload_digest = Sha256::digest(delivery_payload.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let prepared_frame = invoke_frame(
+        &call_id,
+        binding_id,
+        &declaration_digest,
+        &declaration,
+        None,
+        Some(required_delivery_guarantee),
+        payload,
+    );
+    let prepared_frame_json = prepared_frame.to_string();
     // 発話本文の関係注記用 metadata（C6: レンダリングは本文＋関係注記のみ）。
     let mut speech_meta = serde_json::Map::new();
     speech_meta.insert(
@@ -454,9 +473,11 @@ async fn invoke_utterance_checked(
         )
         .map_err(|_| InvokeError::new(ErrorCode::StoreError))?;
         tx.execute(
-            "INSERT INTO deliveries (delivery_id, binding_id, payload_json, state, error, created_at, updated_at)
-             VALUES (?1, ?2, ?3, 'sending', NULL, ?4, ?4)",
-            params![delivery_id, binding_id, delivery_payload, now],
+            "INSERT INTO deliveries (delivery_id,binding_id,payload_json,state,error,created_at,updated_at,
+              payload_digest,delivery_guarantee,prepared_protocol_digest,frame_kind,prepared_frame_json)
+             VALUES (?1,?2,?3,'sending',NULL,?4,?4,?5,?6,?7,'invoke',?8)",
+            params![delivery_id,binding_id,delivery_payload,now,delivery_payload_digest,
+                required_delivery_guarantee.as_str(),declaration_digest,prepared_frame_json],
         )
         .map_err(|_| InvokeError::new(ErrorCode::StoreError))?;
         tx.commit()
@@ -486,22 +507,8 @@ async fn invoke_utterance_checked(
         );
     }
 
-    // invoke を exact 1 回 write（wire への invoke は従来どおり・gateway が publish）。
-    if write_json(
-        &writer,
-        &invoke_frame(
-            &call_id,
-            binding_id,
-            &declaration_digest,
-            &declaration,
-            None,
-            Some(required_delivery_guarantee),
-            payload,
-        ),
-    )
-    .await
-    .is_err()
-    {
+    // 永続した exact envelope を 1 回 write（gateway が publish）。
+    if write_json(&writer, &prepared_frame).await.is_err() {
         let _ = crate::delivery::mark_indeterminate(state, std::slice::from_ref(&delivery_id));
         crate::close::close_live(
             state,

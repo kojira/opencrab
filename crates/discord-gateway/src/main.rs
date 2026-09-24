@@ -64,6 +64,19 @@ async fn run() -> anyhow::Result<()> {
     let attachment_spool_root = place.attachment_spool_root.as_deref().map(PathBuf::from);
     // QC ハーネス差し替えは env からのみ（既定 OFF＝production 挙動）。
     let overrides = HarnessOverrides::from_env();
+    let gateway_store_path = place
+        .gateway_store_path
+        .as_deref()
+        .map(PathBuf::from)
+        .or_else(|| {
+            overrides
+                .dry_run
+                .then(|| path.with_extension("emissions.db"))
+        })
+        .context("gateway_store_path is required")?;
+    let emission_ledger = Arc::new(opencrab_gate_client::emission::EmissionLedger::open(
+        &gateway_store_path,
+    )?);
 
     if token.is_none() && !overrides.dry_run {
         anyhow::bail!("DISCORD_BOT_TOKEN が未設定（production は token 必須・dry-run 以外）");
@@ -81,6 +94,7 @@ async fn run() -> anyhow::Result<()> {
         token,
         overrides,
         attachment_spool_root,
+        emission_ledger,
     )?;
     if let (Some(control), Some(nonce)) = (control, start_nonce) {
         let addresses = inst.addresses.clone();

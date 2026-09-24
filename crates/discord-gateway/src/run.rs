@@ -29,7 +29,9 @@ use crate::model::{
 use crate::ops::{
     operation_declarations, targets_for, BindingDeliveryTargets, DiscordInvokeHandler,
 };
-use crate::post::{deliver_say, SayDelivery};
+use crate::post::{
+    deliver_prepared_say, delivery_nonce, prepare_say_requests, PreparedSayRequest, SayDelivery,
+};
 use crate::receive::{run_fake_events_once, run_serenity_receive, OnLine};
 use crate::transport::{DiscordTransport, DryRunTransport, SerenityTransport, TransportOutcome};
 
@@ -43,6 +45,7 @@ pub fn spawn_instance(
     token: Option<Arc<String>>,
     overrides: HarnessOverrides,
     attachment_spool_root: Option<PathBuf>,
+    emission_ledger: Arc<opencrab_gate_client::emission::EmissionLedger>,
 ) -> anyhow::Result<Arc<InstanceClient>> {
     if overrides.is_active() {
         tracing::warn!(
@@ -106,6 +109,7 @@ pub fn spawn_instance(
         delivery_targets,
         attachment_spool,
         serenity_http,
+        emission_ledger,
     });
     Ok(client)
 }
@@ -120,6 +124,7 @@ struct Supervision {
     delivery_targets: BindingDeliveryTargets,
     attachment_spool: Option<Arc<AttachmentSpool>>,
     serenity_http: Option<Arc<serenity::http::Http>>,
+    emission_ledger: Arc<opencrab_gate_client::emission::EmissionLedger>,
 }
 
 fn supervise(supervision: Supervision) {
@@ -133,6 +138,7 @@ fn supervise(supervision: Supervision) {
         delivery_targets,
         attachment_spool,
         serenity_http,
+        emission_ledger,
     } = supervision;
     // 受信ループ（1 本）: fixture か serenity。ack 済み binding の channel だけ said にする。
     // 👀 は受信時ではなく say consumer 側（activity started）で付けるので、受信は transport/
@@ -168,6 +174,7 @@ fn supervise(supervision: Supervision) {
             cfg.agent_id.clone(),
             cfg.system_reactions.clone(),
             Arc::clone(&delivery_targets),
+            Arc::clone(&emission_ledger),
         );
     }
 }
@@ -537,6 +544,7 @@ fn spawn_say_consumer(
     agent_id: String,
     reactions: SystemReactions,
     delivery_targets: BindingDeliveryTargets,
+    emission_ledger: Arc<opencrab_gate_client::emission::EmissionLedger>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // address → channel snowflake（say はこの channel への通常投稿）。
@@ -549,10 +557,16 @@ fn spawn_say_consumer(
         // 同一 origin への二重付与を防ぐループローカルガード（1 origin 1 回）。
         let mut accepted_origins: std::collections::HashSet<String> =
             std::collections::HashSet::new();
+        let mut pending_delivery_bindings = std::collections::HashMap::<String, String>::new();
         loop {
             match client.next_live(&address).await {
                 Some(LiveEvent::Message {
                     delivery_id,
+                    binding_id,
+                    payload_digest,
+                    delivery_guarantee,
+                    adapter_protocol_digest,
+                    current_adapter_protocol_digest,
                     text,
                     reply_origin,
                 }) => {
@@ -563,29 +577,141 @@ fn spawn_say_consumer(
                         tracing::warn!(%address, "say dropped; address has no channel component");
                         continue;
                     };
-                    match deliver_say(&transport, channel, &text).await {
-                        SayDelivery::Posted { message_id } => {
-                            tracing::info!(%address, "say posted");
-                            if let Some(own) = &message_id {
-                                if let Some(binding_id) = client.binding_for_address(&address).await
-                                {
-                                    targets_for(&delivery_targets, &binding_id)
-                                        .await
-                                        .lock()
-                                        .await
-                                        .insert(delivery_id, (channel.clone(), own.clone()));
+                    let request_identity = delivery_nonce(&delivery_id);
+                    let prepared_requests = prepare_say_requests(&delivery_id, channel, &text);
+                    let prepared = match serde_json::to_vec(&prepared_requests) {
+                        Ok(prepared) => prepared,
+                        Err(error) => {
+                            tracing::error!(%error, "delivery request preparation failed");
+                            continue;
+                        }
+                    };
+                    let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+                    let deadline = now.saturating_add(300_000_000_000);
+                    let row = match emission_ledger.prepare(
+                        &binding_id,
+                        &delivery_id,
+                        &payload_digest,
+                        delivery_guarantee.as_str(),
+                        &request_identity,
+                        &prepared,
+                        &adapter_protocol_digest,
+                        now,
+                        Some(deadline),
+                    ) {
+                        Ok(row) => row,
+                        Err(error) => {
+                            tracing::error!(%error, "delivery ledger conflict");
+                            continue;
+                        }
+                    };
+                    pending_delivery_bindings.insert(delivery_id.clone(), binding_id.clone());
+                    let outcome = match row.state {
+                        opencrab_gate_client::emission::EmissionState::Receipted => {
+                            opencrab_gate_client::DeliveryOutcome::Receipted
+                        }
+                        opencrab_gate_client::emission::EmissionState::Failed => {
+                            opencrab_gate_client::DeliveryOutcome::Failed
+                        }
+                        opencrab_gate_client::emission::EmissionState::Indeterminate
+                        | opencrab_gate_client::emission::EmissionState::OperatorBlocked => {
+                            opencrab_gate_client::DeliveryOutcome::Indeterminate
+                        }
+                        opencrab_gate_client::emission::EmissionState::Prepared
+                            if row.external_attempted_at.is_some()
+                                || row.ambiguity_deadline.is_some_and(|at| now > at)
+                                || adapter_protocol_digest != current_adapter_protocol_digest =>
+                        {
+                            let _ = emission_ledger.terminal(
+                                &binding_id,
+                                &delivery_id,
+                                opencrab_gate_client::emission::EmissionState::Indeterminate,
+                                None,
+                                now,
+                            );
+                            opencrab_gate_client::DeliveryOutcome::Indeterminate
+                        }
+                        opencrab_gate_client::emission::EmissionState::Prepared => {
+                            let persisted_requests: Vec<PreparedSayRequest> =
+                                match serde_json::from_slice(&row.prepared_request) {
+                                    Ok(requests) => requests,
+                                    Err(error) => {
+                                        tracing::error!(%error, "persisted delivery request is invalid");
+                                        let _ = emission_ledger.terminal(
+                                            &binding_id,
+                                            &delivery_id,
+                                            opencrab_gate_client::emission::EmissionState::Indeterminate,
+                                            None,
+                                            now,
+                                        );
+                                        let _ = client
+                                            .complete_delivery(
+                                                &delivery_id,
+                                                opencrab_gate_client::DeliveryOutcome::Indeterminate,
+                                            )
+                                            .await;
+                                        continue;
+                                    }
+                                };
+                            let _ = emission_ledger.mark_external_attempted(
+                                &binding_id,
+                                &delivery_id,
+                                now,
+                            );
+                            match deliver_prepared_say(&transport, &persisted_requests).await {
+                                SayDelivery::Posted { message_id } => {
+                                    let _ = emission_ledger.terminal(
+                                        &binding_id,
+                                        &delivery_id,
+                                        opencrab_gate_client::emission::EmissionState::Receipted,
+                                        message_id.as_deref(),
+                                        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(now),
+                                    );
+                                    if let Some(own) = message_id {
+                                        targets_for(&delivery_targets, &binding_id)
+                                            .await
+                                            .lock()
+                                            .await
+                                            .insert(delivery_id.clone(), (channel.clone(), own));
+                                    }
+                                    opencrab_gate_client::DeliveryOutcome::Receipted
                                 }
-                            } else {
-                                tracing::debug!(%address, "posted say has no message id");
+                                SayDelivery::Failed(error) if error == "indeterminate" => {
+                                    let _ = emission_ledger.terminal(
+                                        &binding_id,
+                                        &delivery_id,
+                                        opencrab_gate_client::emission::EmissionState::Indeterminate,
+                                        None,
+                                        now,
+                                    );
+                                    opencrab_gate_client::DeliveryOutcome::Indeterminate
+                                }
+                                SayDelivery::Failed(error) => {
+                                    tracing::warn!(%address, %error, "say post failed");
+                                    let _ = emission_ledger.terminal(
+                                        &binding_id,
+                                        &delivery_id,
+                                        opencrab_gate_client::emission::EmissionState::Failed,
+                                        None,
+                                        now,
+                                    );
+                                    if let Some(origin) = &reply_origin {
+                                        react_system(&transport, origin, &reactions.failed).await;
+                                    }
+                                    opencrab_gate_client::DeliveryOutcome::Failed
+                                }
                             }
                         }
-                        SayDelivery::Failed(e) => {
-                            tracing::warn!(%address, error = %e, "say post failed");
-                            if let Some(origin) = &reply_origin {
-                                // ❌: 発端メッセージへの返信配送が失敗した（失敗サイン）。
-                                react_system(&transport, origin, &reactions.failed).await;
-                            }
-                        }
+                    };
+                    let _ = client.complete_delivery(&delivery_id, outcome).await;
+                }
+                Some(LiveEvent::DeliveryAcknowledged { delivery_id, .. }) => {
+                    if let Some(binding_id) = pending_delivery_bindings.remove(&delivery_id) {
+                        let _ = emission_ledger.acknowledge_core(
+                            &binding_id,
+                            &delivery_id,
+                            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+                        );
                     }
                 }
                 Some(LiveEvent::Activity { state, origin, .. }) => {
@@ -663,33 +789,4 @@ fn spawn_say_consumer(
 mod silent_origin_tests;
 
 #[cfg(test)]
-mod caller_tests {
-    use super::*;
-
-    #[test]
-    fn gateway_classifies_authenticated_author_from_its_access_config() {
-        let access = AccessConfig {
-            owners: vec!["100".into()],
-            co_agents: [(
-                "200".into(),
-                crate::config::CoAgentProjection {
-                    agent_id: "agent-b".into(),
-                    relationship_revision: 1,
-                },
-            )]
-            .into_iter()
-            .collect(),
-            trusted_users: vec!["300".into()],
-        };
-        assert_eq!(caller_for(&access, "100"), SaidCaller::Owner);
-        assert_eq!(
-            caller_for(&access, "200"),
-            SaidCaller::CoAgent {
-                agent_id: "agent-b".into(),
-                relationship_revision: 1,
-            }
-        );
-        assert_eq!(caller_for(&access, "300"), SaidCaller::TrustedUser);
-        assert_eq!(caller_for(&access, "400"), SaidCaller::Agent);
-    }
-}
+mod caller_tests;

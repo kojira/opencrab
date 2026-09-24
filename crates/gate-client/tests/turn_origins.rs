@@ -119,10 +119,12 @@ async fn queue_core_say(core: &mut MockCore, index: usize) {
         "id": id,
         "m": "say",
         "binding_id": BINDING,
-        "payload": {"text": format!("queued-{index}")}
+        "payload": {"text": format!("queued-{index}")},
+        "payload_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "delivery_guarantee": "at_most_once_indeterminate",
+        "adapter_protocol_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     }))
     .await;
-    assert_eq!(core.read().await["m"], "ok");
 }
 
 async fn event(client: &InstanceClient) -> LiveEvent {

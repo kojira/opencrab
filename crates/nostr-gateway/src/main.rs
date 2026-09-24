@@ -63,6 +63,19 @@ async fn run() -> anyhow::Result<()> {
     let nostaro_bin = PathBuf::from(&place.nostaro_bin);
     // QC ハーネス差し替えは env からのみ（既定 OFF＝production 挙動）。
     let overrides = HarnessOverrides::from_env();
+    let gateway_store_path = place
+        .gateway_store_path
+        .as_deref()
+        .map(PathBuf::from)
+        .or_else(|| {
+            overrides
+                .dry_run
+                .then(|| path.with_extension("emissions.db"))
+        })
+        .context("gateway_store_path is required")?;
+    let emission_ledger = Arc::new(opencrab_gate_client::emission::EmissionLedger::open(
+        &gateway_store_path,
+    )?);
 
     let mut readiness = Vec::new();
     for inst in &place.instances {
@@ -74,6 +87,7 @@ async fn run() -> anyhow::Result<()> {
             secret.clone(),
             nostaro_bin.clone(),
             overrides.clone(),
+            Arc::clone(&emission_ledger),
         )?;
         readiness.push((client, inst.address.clone()));
     }

@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use opencrab_actions::{AgentRuntime, ModelAdministration};
-use rusqlite::{params, Connection, TransactionBehavior};
+use rusqlite::Connection;
 use tokio::io::BufReader;
 use tokio::net::UnixListener;
 
@@ -63,21 +63,8 @@ pub fn validate_listen_socket(raw: &str) -> Result<Option<PathBuf>, anyhow::Erro
     Ok(Some(path.to_path_buf()))
 }
 
-/// HTTP/UDS より前に exact 1 回。
-pub fn recover_stale_deliveries(conn: &mut Connection, now: i64) -> Result<(), GateError> {
-    let tx = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|_| GateError::store())?;
-    tx.execute(
-        "UPDATE deliveries
-         SET state = 'indeterminate',
-             error = 'stale sending recovered after restart',
-             updated_at = ?1
-         WHERE state = 'sending'",
-        params![now],
-    )
-    .map_err(|_| GateError::store())?;
-    tx.commit().map_err(|_| GateError::store())?;
+/// Startup recovery retains generic pending deliveries for ordered reconnect drain.
+pub fn recover_stale_deliveries(_conn: &mut Connection, _now: i64) -> Result<(), GateError> {
     Ok(())
 }
 

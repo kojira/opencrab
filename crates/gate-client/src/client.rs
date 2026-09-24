@@ -21,6 +21,7 @@ use super::wire::{
 };
 
 include!("client/state_api.rs");
+include!("client/delivery_api.rs");
 include!("client/transport.rs");
 include!("client/handlers.rs");
 

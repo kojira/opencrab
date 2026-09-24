@@ -646,6 +646,7 @@ async fn s5_discord_disabled_recovery_removes_daemon_owned_placement_and_control
         Arc::new(ProductionFactory {
             child_binary: "/bin/true".into(),
             core_socket: temp.path().join("core.sock"),
+            gateway_store_path: temp.path().join("discord.db"),
             placement_dir,
             attachment_spool_root: None,
         }),

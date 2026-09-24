@@ -11,11 +11,52 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use nostr_sdk::prelude::*;
 use tokio::process::Command;
 
 use crate::secret::SECRET_ENV;
 
 const POST_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub fn prepare_signed_event(
+    secret: &str,
+    reply_origin: Option<&str>,
+    text: &str,
+) -> anyhow::Result<(String, Vec<u8>)> {
+    let keys = Keys::parse(secret)?;
+    let tags = match reply_origin.and_then(event_id_from_reply_target) {
+        Some(id) => vec![Tag::parse(["e", id.as_str(), "", "reply"])?],
+        None => Vec::new(),
+    };
+    let event = EventBuilder::text_note(text)
+        .tags(tags)
+        .sign_with_keys(&keys)?;
+    let id = event.id.to_hex();
+    Ok((id, event.as_json().into_bytes()))
+}
+
+pub async fn publish_signed_event(relays: &[String], prepared: &[u8]) -> SayDelivery {
+    let Ok(json) = std::str::from_utf8(prepared) else {
+        return SayDelivery::Failed("invalid prepared event".into());
+    };
+    let Ok(event) = Event::from_json(json) else {
+        return SayDelivery::Failed("invalid prepared event".into());
+    };
+    let client = Client::builder().build();
+    for relay in relays {
+        if client.add_relay(relay).await.is_err() {
+            return SayDelivery::Failed("relay rejected".into());
+        }
+    }
+    client.connect().await;
+    let outcome = match tokio::time::timeout(POST_TIMEOUT, client.send_event(&event)).await {
+        Ok(Ok(_)) => SayDelivery::Posted,
+        Ok(Err(_)) => SayDelivery::Failed("rejected".into()),
+        Err(_) => SayDelivery::Failed("indeterminate".into()),
+    };
+    client.disconnect().await;
+    outcome
+}
 
 /// dry-run で say を残す tracing target。テスト・QC がこの target で本文・種別を拾う。
 pub const DRY_RUN_LOG_TARGET: &str = "opencrab_nostrgate::dry_run";
@@ -233,6 +274,16 @@ pub async fn deliver_say(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn s7_nostr_prepared_signed_event_has_one_persistable_identity() {
+        let keys = Keys::generate();
+        let secret = keys.secret_key().to_bech32().unwrap();
+        let (event_id, bytes) = prepare_signed_event(&secret, None, "hello").unwrap();
+        let event = Event::from_json(std::str::from_utf8(&bytes).unwrap()).unwrap();
+        assert_eq!(event.id.to_hex(), event_id);
+        assert_eq!(event.as_json().into_bytes(), bytes);
+    }
 
     #[test]
     fn event_id_from_default_and_watch_origins() {

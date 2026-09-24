@@ -17,3 +17,7 @@ sha2.workspace = true
 async-trait.workspace = true
 anyhow.workspace = true
 zeroize = "1"
+rusqlite.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

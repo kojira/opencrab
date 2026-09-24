@@ -7,7 +7,7 @@ use crate::close::close_live;
 use crate::delivery::{mark_delivered, mark_failed, mark_indeterminate};
 use crate::error::ErrorCode;
 use crate::operation_calls::terminalize_call;
-use crate::protocol::WireResponse;
+use crate::protocol::{delivery_ack_frame, write_json, WireResponse};
 use crate::registry::{ExtgateState, OperationOutcome, Pending};
 
 pub(crate) async fn handle_response(
@@ -54,12 +54,20 @@ pub(crate) async fn handle_response(
                     .await;
                     return Err(());
                 }
-                let mut reg = match state.lock_registry() {
-                    Ok(g) => g,
-                    Err(_) => return Err(()),
-                };
-                if let Some(live) = reg.get_mut(instance_id) {
-                    live.acknowledged.insert(binding_id);
+                {
+                    let mut reg = match state.lock_registry() {
+                        Ok(g) => g,
+                        Err(_) => return Err(()),
+                    };
+                    if let Some(live) = reg.get_mut(instance_id) {
+                        live.acknowledged.insert(binding_id.clone());
+                    }
+                }
+                if crate::delivery::replay_pending_for_binding(state, instance_id, &binding_id)
+                    .await
+                    .is_err()
+                {
+                    return Err(());
                 }
                 Ok(())
             } else if resp.code == Some(ErrorCode::BindFailed) {
@@ -128,6 +136,12 @@ pub(crate) async fn handle_response(
                     state.halt();
                     return Err(());
                 }
+                if write_json(writer, &delivery_ack_frame(&delivery_id, "receipted"))
+                    .await
+                    .is_err()
+                {
+                    return Err(());
+                }
                 Ok(())
             } else if resp.code == Some(ErrorCode::ExternalRejected) {
                 if let Err(e) = mark_failed(state, &delivery_id) {
@@ -151,6 +165,21 @@ pub(crate) async fn handle_response(
                     state.halt();
                     return Err(());
                 }
+                if write_json(writer, &delivery_ack_frame(&delivery_id, "failed"))
+                    .await
+                    .is_err()
+                {
+                    return Err(());
+                }
+                Ok(())
+            } else if resp.code == Some(ErrorCode::Indeterminate) {
+                if let Err(e) = mark_indeterminate(state, std::slice::from_ref(&delivery_id)) {
+                    tracing::error!(code = e.code.as_str(), "indeterminate write failed");
+                    state.halt();
+                    return Err(());
+                }
+                let _ =
+                    write_json(writer, &delivery_ack_frame(&delivery_id, "indeterminate")).await;
                 Ok(())
             } else {
                 if let Err(e) = mark_indeterminate(state, &[delivery_id]) {
@@ -249,6 +278,7 @@ async fn handle_utterance_response(
             state.halt();
             return Err(());
         }
+        let _ = write_json(writer, &delivery_ack_frame(delivery_id, "receipted")).await;
         Ok(())
     } else if resp.code == Some(ErrorCode::OperationRejected) {
         // 発話は wire 上 invoke frame で送るため、gateway の確定拒否は say の `external_rejected`
@@ -273,6 +303,7 @@ async fn handle_utterance_response(
         if let Some(origin) = reply_target {
             emit_turn_failed(state, instance_id, binding_id, origin).await;
         }
+        let _ = write_json(writer, &delivery_ack_frame(delivery_id, "failed")).await;
         Ok(())
     } else {
         if let Err(e) = mark_indeterminate(state, std::slice::from_ref(&delivery_id.to_string())) {

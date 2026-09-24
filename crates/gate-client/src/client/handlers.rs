@@ -5,6 +5,10 @@ async fn handle_msg(client: &InstanceClient, msg: CoreMsg, generation: u64) -> b
             false
         }
         CoreMsg::Say(say) => handle_say(client, say, generation).await,
+        CoreMsg::DeliveryAck(ack) => {
+            handle_delivery_ack(client, ack).await;
+            false
+        }
         CoreMsg::Activity(activity) => handle_activity(client, activity, generation).await,
         CoreMsg::TurnFailed(tf) => {
             handle_turn_failed(client, tf).await;
@@ -116,7 +120,7 @@ async fn handle_bind(client: &InstanceClient, bind: Bind, generation: u64) {
     let _ = send_frame(client, ok_frame(&bind.id)).await;
 }
 
-async fn handle_say(client: &InstanceClient, say: Say, generation: u64) -> bool {
+async fn handle_say(client: &InstanceClient, say: Say, _generation: u64) -> bool {
     tracing::info!(
         instance_id = %client.instance_id,
         binding_id = %say.binding_id,
@@ -137,6 +141,11 @@ async fn handle_say(client: &InstanceClient, say: Say, generation: u64) -> bool 
             return false;
         }
     };
+    let current_adapter_protocol_digest = super::wire::runtime_declaration_digest_from_value(
+        client.operations.as_ref(),
+        client.runtime_capabilities,
+    )
+    .unwrap_or_default();
     let mut inner = client.inner.lock().await;
     if inner.closed {
         return true;
@@ -167,6 +176,11 @@ async fn handle_say(client: &InstanceClient, say: Say, generation: u64) -> bool 
         .or_insert_with(LiveQueue::new);
     let accepted = q.try_push(LiveEvent::Message {
         delivery_id: say.id.clone(),
+        binding_id: say.binding_id.clone(),
+        payload_digest: say.payload_digest,
+        delivery_guarantee: say.delivery_guarantee,
+        adapter_protocol_digest: say.adapter_protocol_digest,
+        current_adapter_protocol_digest,
         text,
         reply_origin,
     });
@@ -178,12 +192,22 @@ async fn handle_say(client: &InstanceClient, say: Say, generation: u64) -> bool 
     if let Some(turn) = inner.pending_turn.get_mut(&say.binding_id) {
         turn.saw_utterance = true;
     }
-    drop(inner);
-    if !send_frame(client, ok_frame(&say.id)).await {
-        close_all(client, "disconnect", generation).await;
-        return true;
-    }
+    inner.delivery_addresses.insert(say.id, address);
+    // No core receipt yet: the concrete gateway must first persist prepared material, perform or
+    // reconcile external I/O, and durably record its terminal outcome.
     false
+}
+
+async fn handle_delivery_ack(client: &InstanceClient, ack: super::wire::DeliveryAck) {
+    let mut inner = client.inner.lock().await;
+    let Some(address) = inner.delivery_addresses.remove(&ack.id) else {
+        return;
+    };
+    let q = inner.live.entry(address).or_insert_with(LiveQueue::new);
+    let _ = q.try_push(LiveEvent::DeliveryAcknowledged {
+        delivery_id: ack.id,
+        outcome: ack.outcome,
+    });
 }
 
 async fn handle_activity(client: &InstanceClient, activity: Activity, generation: u64) -> bool {
