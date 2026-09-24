@@ -1,10 +1,10 @@
 //! Platform-neutral gate-admin credential, scope, and audit authority (Issue #1006 S1).
 
 use std::collections::BTreeSet;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::Read;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::{Component, Path};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::path::Path;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
@@ -240,23 +240,7 @@ pub fn read_manifest(path: &Path, service_euid: u32) -> Result<CredentialManifes
     if !path.is_absolute() {
         return Err(SecurityError::InvalidConfig);
     }
-    let mut current = std::path::PathBuf::from("/");
-    for component in path.components() {
-        match component {
-            Component::RootDir => continue,
-            Component::Normal(part) => current.push(part),
-            _ => return Err(SecurityError::InvalidConfig),
-        }
-        let metadata =
-            std::fs::symlink_metadata(&current).map_err(|_| SecurityError::InvalidManifest)?;
-        if metadata.file_type().is_symlink() {
-            return Err(SecurityError::InvalidManifest);
-        }
-    }
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)
+    let mut file = crate::secure_path::open_file_no_follow(path)
         .map_err(|_| SecurityError::InvalidManifest)?;
     validate_manifest_metadata(&file, service_euid)?;
     let mut bytes = Zeroizing::new(Vec::new());

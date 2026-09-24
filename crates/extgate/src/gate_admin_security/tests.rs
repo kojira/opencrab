@@ -539,6 +539,52 @@ fn manifest_path_requires_regular_private_core_euid_owned_inode_without_symlinks
 }
 
 #[test]
+fn manifest_component_replacement_race_never_opens_through_symlink() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    fn write_manifest(path: &Path, principal: &str, token_byte: u8) {
+        let token = URL_SAFE_NO_PAD.encode([token_byte; 32]);
+        let json = format!(
+            r#"{{"version":1,"principal_id":"{principal}","bearer_token":"{token}","operations":["instance.read"],"scope":{{"subject_ids":[1],"instance_ids":["00000000-0000-0000-0000-000000000000"],"creation_namespace":null}},"expires_at":"2030-01-01T00:00:00Z","rotation":null}}"#
+        );
+        std::fs::write(path, json).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let visible = root.join("visible");
+    let held = root.join("held");
+    let attacker = root.join("attacker");
+    std::fs::create_dir(&visible).unwrap();
+    std::fs::create_dir(&attacker).unwrap();
+    write_manifest(&visible.join("credential.json"), "trusted", 41);
+    write_manifest(&attacker.join("credential.json"), "attacker", 42);
+    let running = Arc::new(AtomicBool::new(true));
+    let racer_running = running.clone();
+    let racer = std::thread::spawn(move || {
+        while racer_running.load(Ordering::Relaxed) {
+            if std::fs::rename(&visible, &held).is_ok() {
+                let _ = symlink(&attacker, &visible);
+                let _ = std::fs::remove_file(&visible);
+                let _ = std::fs::rename(&held, &visible);
+            }
+        }
+    });
+    let path = root.join("visible/credential.json");
+    let euid = unsafe { libc::geteuid() };
+    for _ in 0..2_000 {
+        if let Ok(parsed) = read_manifest(&path, euid) {
+            assert_eq!(parsed.principal_id, "trusted");
+        }
+    }
+    running.store(false, Ordering::Relaxed);
+    racer.join().unwrap();
+}
+
+#[test]
 fn rotation_overlap_and_immediate_revocation_are_current_state_checks() {
     let mut conn = opencrab_db::init_memory().unwrap();
     let first_token = [5; 32];

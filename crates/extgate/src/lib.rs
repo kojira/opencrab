@@ -21,6 +21,7 @@ pub mod ops_projection;
 pub mod protocol;
 pub mod race;
 pub mod registry;
+mod secure_path;
 pub mod turn_queue;
 
 pub use admin::admin_router;
