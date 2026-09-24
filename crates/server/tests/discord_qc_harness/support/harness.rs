@@ -123,10 +123,7 @@ pub(crate) async fn start_core(provider: Arc<dyn LlmProvider>) -> Core {
     let db = opencrab_db::Db::from_connection(conn);
     register_mock_pricing(&db);
     let subject_id = upsert_test_agent(&db);
-    let extgate = Arc::new(ExtgateState::new(
-        db.clone(),
-        OperatorToken::from_bytes(TOKEN),
-    ));
+    let extgate = Arc::new(ExtgateState::new_protected(db.clone()));
     let state = build_app_state(db.clone(), provider);
     // #925: 本番と同じ descriptor 登録（`register_production_descriptors`）＋ V3 heartbeat 受け口
     // （`ExtgateTimedFireSink`）を実型で配線する。これで scheduler seam（resolve_target →
@@ -176,7 +173,52 @@ pub(crate) async fn admin(core: &Core, req: Request<Body>) -> (StatusCode, Vec<u
     (status, body)
 }
 
+fn install_database_backed_admin(core: &Core, instance_id: &str) {
+    use sha2::{Digest, Sha256};
+
+    let salt = [0x3c_u8; 32];
+    let token = [43_u8; 32];
+    let mut hasher = Sha256::new();
+    hasher.update(b"opencrab/gate-admin/bearer/v1\0");
+    hasher.update(salt);
+    hasher.update(token);
+    let hash = hasher.finalize().to_vec();
+    let conn = core.extgate.db.lock().unwrap();
+    conn.execute(
+        "INSERT INTO gate_admin_principals
+         (principal_id, credential_salt, credential_hash, scope_mode, created_at, expires_at,
+          revoked_at, sealed_at, predecessor_principal_id, overlap_deadline)
+         VALUES ('discord-qc', ?1, ?2, 'exact', 1, 4000000000000000000,
+                 NULL, NULL, NULL, NULL)",
+        rusqlite::params![salt.as_slice(), hash],
+    )
+    .unwrap();
+    for operation in ["instance.put", "binding.put"] {
+        conn.execute(
+            "INSERT INTO gate_admin_principal_operations VALUES ('discord-qc', ?1)",
+            [operation],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO gate_admin_principal_subjects VALUES ('discord-qc', ?1)",
+        [core.subject_id],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO gate_admin_principal_instances VALUES ('discord-qc', ?1)",
+        [instance_id],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE gate_admin_principals SET sealed_at=2 WHERE principal_id='discord-qc'",
+        [],
+    )
+    .unwrap();
+}
+
 pub(crate) async fn put_instance(core: &Core, instance_id: &str, config_b64: &str) {
+    install_database_backed_admin(core, instance_id);
     let (st, body) = admin(
         core,
         Request::builder()

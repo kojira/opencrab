@@ -15,13 +15,13 @@ pub(crate) use opencrab_server::AppState;
 pub(crate) use opencrab_discord_gateway::config::InstancePlacement;
 pub(crate) use opencrab_discord_gateway::harness::HarnessOverrides;
 pub(crate) use opencrab_discord_gateway::run::spawn_instance;
-pub(crate) use opencrab_extgate::{admin_router, serve_uds, ExtgateState, OperatorToken};
+pub(crate) use opencrab_extgate::{admin_router, serve_uds, ExtgateState};
 pub(crate) use opencrab_gate_client::client::InstanceClient;
 
 pub(crate) use tracing_subscriber::layer::{Context, SubscriberExt};
 pub(crate) use tracing_subscriber::Layer;
 
-pub(crate) const TOKEN: &str = "operator-token-discord-qc";
+pub(crate) const TOKEN: &str = "KysrKysrKysrKysrKysrKysrKysrKysrKysrKysrKys";
 pub(crate) const AGENT_ID: &str = "agent-discord-qc";
 pub(crate) const GUILD: &str = "500";
 pub(crate) const CHANNEL: &str = "600";

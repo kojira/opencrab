@@ -2,7 +2,6 @@
 
 pub mod admin;
 pub mod admin_socket;
-pub mod bearer;
 pub mod close;
 pub mod commands;
 pub mod completion;
@@ -25,7 +24,6 @@ mod secure_path;
 pub mod turn_queue;
 
 pub use admin::admin_router;
-pub use bearer::OperatorToken;
 pub use commands::{CommandError, CommandRegistry};
 pub use delivery_mode::{
     adjust_inbound_effect, delivery_mode_from_config_bytes, dispatches_v3_say, DeliveryMode,

@@ -289,9 +289,8 @@ mod tests {
         )
         .unwrap();
         tx.commit().unwrap();
-        let state = Arc::new(ExtgateState::new(
+        let state = Arc::new(ExtgateState::new_protected(
             opencrab_db::Db::from_connection(conn),
-            crate::OperatorToken::from_bytes("test-token"),
         ));
         (state, agent_id, session_id, binding_id)
     }

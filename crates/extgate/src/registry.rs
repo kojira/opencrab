@@ -12,7 +12,6 @@ use opencrab_db::Db;
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::sync::oneshot;
 
-use crate::bearer::OperatorToken;
 use crate::commands::CommandRegistry;
 use crate::error::{ErrorCode, GateError};
 use crate::operations::GatewayOperationDeclaration;
@@ -197,7 +196,6 @@ pub type ReservedToolNameFn = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 pub struct ExtgateState {
     pub db: Db,
     pub registry: Mutex<Registry>,
-    legacy_admin_token: Option<OperatorToken>,
     pub halt: AtomicBool,
     halt_notify: tokio::sync::Notify,
     next_identity: AtomicU64,
@@ -220,22 +218,11 @@ pub struct ExtgateState {
 }
 
 impl ExtgateState {
-    /// Compatibility constructor for isolated tests and QC fixtures.
-    #[cfg(any(test, feature = "extgate-probe"))]
-    pub fn new(db: Db, token: OperatorToken) -> Self {
-        Self::build(db, Some(token))
-    }
-
-    /// Production constructor: gate-admin authentication is database-backed.
+    /// Gate-admin authentication is always database-backed.
     pub fn new_protected(db: Db) -> Self {
-        Self::build(db, None)
-    }
-
-    fn build(db: Db, legacy_admin_token: Option<OperatorToken>) -> Self {
         Self {
             db,
             registry: Mutex::new(Registry::default()),
-            legacy_admin_token,
             halt: AtomicBool::new(false),
             halt_notify: tokio::sync::Notify::new(),
             next_identity: AtomicU64::new(1),
@@ -250,21 +237,11 @@ impl ExtgateState {
         }
     }
 
-    pub(crate) fn uses_legacy_admin(&self) -> bool {
-        self.legacy_admin_token.is_some()
-    }
-
     pub(crate) fn authenticate_admin(
         &self,
         headers: &axum::http::HeaderMap,
         operation: crate::gate_admin_security::Operation,
     ) -> Result<crate::gate_admin_security::Authenticated, GateError> {
-        if let Some(token) = &self.legacy_admin_token {
-            token.authorize(headers)?;
-            return Ok(crate::gate_admin_security::Authenticated {
-                principal_id: "test-fixture".to_owned(),
-            });
-        }
         let header = headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok());
@@ -296,13 +273,6 @@ impl ExtgateState {
         subject_id: i64,
         instance_id: uuid::Uuid,
     ) -> Result<crate::gate_admin_security::Authorized, GateError> {
-        if self.legacy_admin_token.is_some() {
-            return Ok(crate::gate_admin_security::Authorized {
-                principal_id: authenticated.principal_id.clone(),
-                subject_id,
-                instance_id,
-            });
-        }
         let mut conn = self.db.lock().map_err(|_| GateError::store())?;
         let now = crate::ids::now_nanos();
         match crate::gate_admin_security::authorize_target(
@@ -462,10 +432,7 @@ mod folded_seq_tests {
     use super::*;
 
     fn test_state() -> ExtgateState {
-        ExtgateState::new(
-            opencrab_db::Db::memory().unwrap(),
-            crate::OperatorToken::from_bytes("t"),
-        )
+        ExtgateState::new_protected(opencrab_db::Db::memory().unwrap())
     }
 
     // #933 不変(i): is_folded は fold した seq **だけ** 真（未 fold は偽）。

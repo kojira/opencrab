@@ -286,10 +286,7 @@ mod tests {
         let database = temp.path().join("data/opencrab.db");
         std::fs::create_dir_all(database.parent().unwrap()).unwrap();
         let db = opencrab_db::Db::open(database.to_str().unwrap()).unwrap();
-        let extgate = opencrab_extgate::ExtgateState::new(
-            db,
-            opencrab_extgate::OperatorToken::from_bytes(""),
-        );
+        let extgate = opencrab_extgate::ExtgateState::new_protected(db);
 
         let inbox = super::configure_attachment_inbox(&extgate, &database).unwrap();
 

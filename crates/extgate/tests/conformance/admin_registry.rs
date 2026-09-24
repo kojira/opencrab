@@ -162,13 +162,7 @@ async fn instance_put_idempotent_and_conflict() {
 }
 
 #[tokio::test]
-async fn bearer_exact_401_and_env_scrub() {
-    std::env::set_var("OPENCRAB_GATE_OPERATOR_TOKEN", "env-secret");
-    let token = OperatorToken::take_from_env();
-    assert!(std::env::var("OPENCRAB_GATE_OPERATOR_TOKEN").is_err());
-    assert!(format!("{token:?}").contains("redacted"));
-    assert!(!format!("{token:?}").contains("env-secret"));
-
+async fn database_backed_bearer_rejections_are_exact_401() {
     let h = Harness::start().await;
     let id = uuid();
     let cases: Vec<Request<Body>> = vec![

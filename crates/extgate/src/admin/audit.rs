@@ -42,9 +42,6 @@ fn audit_early_error(
     authenticated: &Authenticated,
     code: ErrorCode,
 ) -> Result<(), GateError> {
-    if state.uses_legacy_admin() {
-        return Ok(());
-    }
     let conn = state.db.lock().map_err(|_| GateError::store())?;
     crate::gate_admin_security::append_audit_for_attempt(
         &conn,
@@ -90,17 +87,15 @@ where
         .map_err(|_| GateError::store())?;
     match action(&tx) {
         Ok(value) => {
-            if !state.uses_legacy_admin() {
-                crate::gate_admin_security::append_audit(
-                    &tx,
-                    uuid::Uuid::new_v4(),
-                    now_nanos(),
-                    operation,
-                    Some(authorized),
-                    "succeeded",
-                )
-                .map_err(|_| GateError::store())?;
-            }
+            crate::gate_admin_security::append_audit(
+                &tx,
+                uuid::Uuid::new_v4(),
+                now_nanos(),
+                operation,
+                Some(authorized),
+                "succeeded",
+            )
+            .map_err(|_| GateError::store())?;
             tx.execute_batch("RELEASE gate_admin_handler")
                 .map_err(|_| GateError::store())?;
             tx.commit().map_err(|_| GateError::store())?;
@@ -109,17 +104,15 @@ where
         Err(error) => {
             tx.execute_batch("ROLLBACK TO gate_admin_handler; RELEASE gate_admin_handler")
                 .map_err(|_| GateError::store())?;
-            if !state.uses_legacy_admin() {
-                crate::gate_admin_security::append_audit(
-                    &tx,
-                    uuid::Uuid::new_v4(),
-                    now_nanos(),
-                    operation,
-                    Some(authorized),
-                    result_class(error.code),
-                )
-                .map_err(|_| GateError::store())?;
-            }
+            crate::gate_admin_security::append_audit(
+                &tx,
+                uuid::Uuid::new_v4(),
+                now_nanos(),
+                operation,
+                Some(authorized),
+                result_class(error.code),
+            )
+            .map_err(|_| GateError::store())?;
             tx.commit().map_err(|_| GateError::store())?;
             Err(error)
         }

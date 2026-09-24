@@ -13,7 +13,7 @@ use opencrab_llm::router::LlmRouter;
 use opencrab_llm::traits::LlmProvider;
 use opencrab_server::AppState;
 
-use opencrab_extgate::{admin_router, serve_uds, ExtgateState, OperatorToken};
+use opencrab_extgate::{admin_router, serve_uds, ExtgateState};
 use opencrab_gate_client::client::InstanceClient;
 use opencrab_nostr_gateway::config::InstancePlacement;
 use opencrab_nostr_gateway::harness::HarnessOverrides;
@@ -22,7 +22,7 @@ use opencrab_nostr_gateway::run::spawn_instance;
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::Layer;
 
-const TOKEN: &str = "operator-token-qc";
+const TOKEN: &str = "KioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKio";
 const AGENT_ID: &str = "agent-qc";
 /// dry-run say を拾う tracing target（= `opencrab_nostr_gateway::post::DRY_RUN_LOG_TARGET`）。
 const DRY_RUN_TARGET: &str = "opencrab_nostrgate::dry_run";
@@ -479,10 +479,7 @@ async fn start_core(provider: Arc<dyn LlmProvider>) -> Core {
     let db = opencrab_db::Db::from_connection(conn);
     register_mock_pricing(&db);
     let subject_id = upsert_test_agent(&db);
-    let extgate = Arc::new(ExtgateState::new(
-        db.clone(),
-        OperatorToken::from_bytes(TOKEN),
-    ));
+    let extgate = Arc::new(ExtgateState::new_protected(db.clone()));
 
     let state = build_app_state(db.clone(), provider);
     // #925: 本番と同じ descriptor 登録＋ V3 heartbeat 受け口を実型で配線する（Nostr レーンも
@@ -532,7 +529,52 @@ async fn admin(core: &Core, req: Request<Body>) -> (StatusCode, Vec<u8>) {
     (status, body)
 }
 
+fn install_database_backed_admin(core: &Core, instance_id: &str) {
+    use sha2::{Digest, Sha256};
+
+    let salt = [0x3c_u8; 32];
+    let token = [42_u8; 32];
+    let mut hasher = Sha256::new();
+    hasher.update(b"opencrab/gate-admin/bearer/v1\0");
+    hasher.update(salt);
+    hasher.update(token);
+    let hash = hasher.finalize().to_vec();
+    let conn = core.extgate.db.lock().unwrap();
+    conn.execute(
+        "INSERT INTO gate_admin_principals
+         (principal_id, credential_salt, credential_hash, scope_mode, created_at, expires_at,
+          revoked_at, sealed_at, predecessor_principal_id, overlap_deadline)
+         VALUES ('nostr-qc', ?1, ?2, 'exact', 1, 4000000000000000000,
+                 NULL, NULL, NULL, NULL)",
+        rusqlite::params![salt.as_slice(), hash],
+    )
+    .unwrap();
+    for operation in ["instance.put", "binding.put"] {
+        conn.execute(
+            "INSERT INTO gate_admin_principal_operations VALUES ('nostr-qc', ?1)",
+            [operation],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO gate_admin_principal_subjects VALUES ('nostr-qc', ?1)",
+        [core.subject_id],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO gate_admin_principal_instances VALUES ('nostr-qc', ?1)",
+        [instance_id],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE gate_admin_principals SET sealed_at=2 WHERE principal_id='nostr-qc'",
+        [],
+    )
+    .unwrap();
+}
+
 async fn put_instance(core: &Core, instance_id: &str, config_b64: &str) {
+    install_database_backed_admin(core, instance_id);
     let (st, body) = admin(
         core,
         Request::builder()

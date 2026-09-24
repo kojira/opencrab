@@ -4,6 +4,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
@@ -19,18 +21,21 @@ use opencrab_extgate::completion::ExtgateCompletionSink;
 use opencrab_extgate::{
     admin_router, invoke_and_wait, now_nanos, recover_stale_calls, recover_stale_deliveries,
     serve_uds, session_id_for_binding, validate_listen_socket, DeliveryMode,
-    ExtgateOpsGatewayActions, ExtgateState, OperatorToken, UNAUTHORIZED_BODY,
+    ExtgateOpsGatewayActions, ExtgateState, UNAUTHORIZED_BODY,
 };
 use opencrab_gate_client::client::{InstanceClient, SaidOutcome};
 use opencrab_gateway::{GatewayActions, GatewayCallContext};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::{oneshot, Notify};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-const TOKEN: &str = "operator-token";
+const TOKEN: &str = "database-backed-fixture";
+const FIXTURE_AUTHORIZATION: &str = "Bearer database-backed-fixture";
+static NEXT_ADMIN_PRINCIPAL: AtomicUsize = AtomicUsize::new(1);
 
 #[derive(Clone)]
 struct TestRuntime {
@@ -346,10 +351,7 @@ impl Harness {
             )
             .unwrap()
         };
-        let state = Arc::new(ExtgateState::new(
-            db.clone(),
-            OperatorToken::from_bytes(TOKEN),
-        ));
+        let state = Arc::new(ExtgateState::new_protected(db.clone()));
         let runtime = TestRuntime::new(db);
         let listen_state = Arc::clone(&state);
         let rt = runtime.clone();
@@ -377,11 +379,95 @@ impl Harness {
     }
 
     async fn admin(&self, req: Request<Body>) -> (StatusCode, Vec<u8>) {
+        let req = self.with_database_backed_admin(req).await;
         let app = admin_router(Arc::clone(&self.state));
         let res = app.oneshot(req).await.unwrap();
         let status = res.status();
         let body = res.into_body().collect().await.unwrap().to_bytes().to_vec();
         (status, body)
+    }
+
+    async fn with_database_backed_admin(&self, req: Request<Body>) -> Request<Body> {
+        if req.headers().get(header::AUTHORIZATION).and_then(|value| value.to_str().ok())
+            != Some(FIXTURE_AUTHORIZATION)
+        {
+            return req;
+        }
+        let (mut parts, body) = req.into_parts();
+        let body = body.collect().await.unwrap().to_bytes();
+        let body_json: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        let path = parts.uri.path();
+        let operation = match (parts.method.as_str(), path.contains("/gate-bindings/"), path.ends_with("/revisions")) {
+            ("GET", false, false) => "instance.read",
+            ("PUT", false, false) => "instance.put",
+            ("DELETE", false, false) => "instance.delete",
+            ("POST", false, true) => "instance.revise",
+            ("PUT", true, false) => "binding.put",
+            ("DELETE", true, false) => "binding.delete",
+            _ => return Request::from_parts(parts, Body::from(body)),
+        };
+        let route_id = path.rsplit('/').nth(usize::from(path.ends_with("/revisions"))).unwrap();
+        let instance_id = if path.contains("/gate-instances/") {
+            route_id.to_owned()
+        } else if let Some(instance_id) = body_json.get("instance_id").and_then(Value::as_str) {
+            instance_id.to_owned()
+        } else {
+            let conn = self.state.db.lock().unwrap();
+            conn.query_row(
+                "SELECT instance_id FROM gate_bindings WHERE binding_id=?1",
+                [route_id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap_or_else(|_| Uuid::nil().to_string())
+        };
+
+        let sequence = NEXT_ADMIN_PRINCIPAL.fetch_add(1, Ordering::SeqCst) as u64;
+        let mut token = [0_u8; 32];
+        token[..8].copy_from_slice(&sequence.to_be_bytes());
+        token[8..].fill(0x5a);
+        let salt = [0x3c_u8; 32];
+        let mut hasher = Sha256::new();
+        hasher.update(b"opencrab/gate-admin/bearer/v1\0");
+        hasher.update(salt);
+        hasher.update(token);
+        let hash = hasher.finalize().to_vec();
+        let principal_id = format!("conformance-{sequence}");
+        {
+            let conn = self.state.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO gate_admin_principals
+                 (principal_id, credential_salt, credential_hash, scope_mode, created_at,
+                  expires_at, revoked_at, sealed_at, predecessor_principal_id, overlap_deadline)
+                 VALUES (?1, ?2, ?3, 'exact', 1, 4000000000000000000, NULL, NULL, NULL, NULL)",
+                rusqlite::params![principal_id, salt.as_slice(), hash],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO gate_admin_principal_operations VALUES (?1, ?2)",
+                rusqlite::params![principal_id, operation],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO gate_admin_principal_subjects VALUES (?1, ?2)",
+                rusqlite::params![principal_id, self.subject_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO gate_admin_principal_instances VALUES (?1, ?2)",
+                rusqlite::params![principal_id, instance_id],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE gate_admin_principals SET sealed_at=2 WHERE principal_id=?1",
+                [principal_id],
+            )
+            .unwrap();
+        }
+        parts.headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {}", URL_SAFE_NO_PAD.encode(token)).parse().unwrap(),
+        );
+        Request::from_parts(parts, Body::from(body))
     }
 }
 
