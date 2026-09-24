@@ -59,11 +59,11 @@ HISTORICAL_FILES = {
     "crates/db/src/schema/v43_v47.rs",
 }
 VALID_GATEWAY_DB_OPEN_IDENTITIES = {
-    ("gateway-db-open", "crates/discord-gateway/src/daemon.rs", 475, "let store = DiscordStore::open(&config.database_path)?;"),
-    ("gateway-db-open", "crates/discord-gateway/src/store.rs", 97, "let conn = Connection::open(path)?;"),
-    ("gateway-db-open", "crates/nostr-gateway/src/daemon.rs", 475, "let store = NostrStore::open(&config.database_path)?;"),
-    ("gateway-db-open", "crates/nostr-gateway/src/store.rs", 97, "let conn = Connection::open(path)?;"),
-    ("gateway-db-open", "crates/web-gateway/src/owner.rs", 44, "let store = Arc::new(Mutex::new(WebStore::open(&config.database_path)?));"),
+    ("gateway-db-open", "crates/discord-gateway/src/daemon.rs", 725, "let store = DiscordStore::open(&config.database_path)?;"),
+    ("gateway-db-open", "crates/discord-gateway/src/store.rs", 98, "let conn = Connection::open(path)?;"),
+    ("gateway-db-open", "crates/nostr-gateway/src/daemon.rs", 722, "let store = NostrStore::open(&config.database_path)?;"),
+    ("gateway-db-open", "crates/nostr-gateway/src/store.rs", 98, "let conn = Connection::open(path)?;"),
+    ("gateway-db-open", "crates/web-gateway/src/owner.rs", 47, "let store = Arc::new(Mutex::new(WebStore::open(&config.database_path)?));"),
     ("gateway-db-open", "crates/web-gateway/src/store.rs", 60, "let conn = Connection::open(path)?;"),
 }
 # These three exact sites are a generic caller-role naming debt, not operation-name routing.

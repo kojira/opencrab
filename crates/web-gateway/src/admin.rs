@@ -26,18 +26,28 @@ struct Request {
     #[serde(default)]
     credential: Option<String>,
     #[serde(default)]
+    caller_role: Option<String>,
+    #[serde(default)]
     enabled: Option<bool>,
 }
 
+pub type AdminScope = Arc<std::collections::BTreeSet<String>>;
+
 pub fn spawn(
     socket: PathBuf,
+    scope: AdminScope,
     store: Arc<Mutex<WebStore>>,
     key: Arc<[u8; 32]>,
 ) -> tokio::task::JoinHandle<Result<()>> {
-    tokio::spawn(async move { serve(&socket, store, key).await })
+    tokio::spawn(async move { serve(&socket, scope, store, key).await })
 }
 
-pub async fn serve(socket: &Path, store: Arc<Mutex<WebStore>>, key: Arc<[u8; 32]>) -> Result<()> {
+pub async fn serve(
+    socket: &Path,
+    scope: AdminScope,
+    store: Arc<Mutex<WebStore>>,
+    key: Arc<[u8; 32]>,
+) -> Result<()> {
     if let Some(parent) = socket.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -51,20 +61,26 @@ pub async fn serve(socket: &Path, store: Arc<Mutex<WebStore>>, key: Arc<[u8; 32]
     set_mode(socket)?;
     loop {
         let (stream, _) = listener.accept().await?;
+        let scope = scope.clone();
         let store = store.clone();
         let key = key.clone();
         tokio::spawn(async move {
-            let _ = handle(stream, store, key).await;
+            let _ = handle(stream, scope, store, key).await;
         });
     }
 }
 
-async fn handle(stream: UnixStream, store: Arc<Mutex<WebStore>>, key: Arc<[u8; 32]>) -> Result<()> {
+async fn handle(
+    stream: UnixStream,
+    scope: AdminScope,
+    store: Arc<Mutex<WebStore>>,
+    key: Arc<[u8; 32]>,
+) -> Result<()> {
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
     while let Some(line) = lines.next_line().await? {
         let response = match serde_json::from_str::<Request>(&line) {
-            Ok(request) => apply(request, &store, &key),
+            Ok(request) => apply(request, &scope, &store, &key),
             Err(_) => json!({"id":"","ok":false,"error":"bad_request"}),
         };
         write.write_all(format!("{response}\n").as_bytes()).await?;
@@ -72,11 +88,17 @@ async fn handle(stream: UnixStream, store: Arc<Mutex<WebStore>>, key: Arc<[u8; 3
     Ok(())
 }
 
-fn apply(request: Request, store: &Mutex<WebStore>, key: &[u8; 32]) -> Value {
+fn apply(
+    request: Request,
+    scope: &std::collections::BTreeSet<String>,
+    store: &Mutex<WebStore>,
+    key: &[u8; 32],
+) -> Value {
     let result =
         (|| -> Result<Value> {
             anyhow::ensure!(
-                request.scope_instance_id == request.instance_id,
+                request.scope_instance_id == request.instance_id
+                    && scope.contains(&request.instance_id),
                 "scope_denied"
             );
             let store = store
@@ -93,6 +115,10 @@ fn apply(request: Request, store: &Mutex<WebStore>, key: &[u8; 32]) -> Value {
                 request.revision.context("revision required")?,
                 request.author_id.as_deref().context("author_id required")?,
                 request.credential.as_deref(),request.enabled.context("enabled required")?,key)?;
+                store.set_caller_role(
+                    &request.instance_id,
+                    request.caller_role.as_deref().context("caller_role required")?,
+                )?;
                 Ok(json!({"saved":true}))},
             _=>anyhow::bail!("unknown_operation"),
         }
@@ -131,7 +157,10 @@ mod tests {
             WebStore::open(&temp.path().join("web.db")).unwrap(),
         ));
         let inspect = store.clone();
-        let task = spawn(socket.clone(), store, Arc::new([3; 32]));
+        let scope = Arc::new(std::collections::BTreeSet::from([
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string(),
+        ]));
+        let task = spawn(socket.clone(), scope, store, Arc::new([3; 32]));
         while !socket.exists() {
             tokio::task::yield_now().await;
         }
@@ -150,12 +179,25 @@ mod tests {
         assert!(line.contains("scope_denied"));
         assert!(!line.contains("secret-web"));
 
+        let unauthorized = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        let mut stream = UnixStream::connect(&socket).await.unwrap();
+        let request = json!({"id":"forged","op":"upsert","scope_instance_id":unauthorized,
+            "instance_id":unauthorized,"agent_id":"b","revision":1,"author_id":"other",
+            "credential":"forged-web","enabled":true});
+        stream
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).await.unwrap();
+        assert!(line.contains("scope_denied"));
+
         let instance_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
         for id in ["2", "3"] {
             let mut stream = UnixStream::connect(&socket).await.unwrap();
             let request = json!({"id":id,"op":"upsert","scope_instance_id":instance_id,
                 "instance_id":instance_id,"agent_id":"a","revision":1,"author_id":"author",
-                "credential":"secret-web","enabled":true});
+                "credential":"secret-web","caller_role":"owner","enabled":true});
             stream
                 .write_all(format!("{request}\n").as_bytes())
                 .await

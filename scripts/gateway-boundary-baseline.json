@@ -10,7 +10,7 @@
     {
       "rule": "gateway-db-open",
       "path": "crates/discord-gateway/src/daemon.rs",
-      "line": 475,
+      "line": 725,
       "snippet": "let store = DiscordStore::open(&config.database_path)?;",
       "classification": "valid-gateway-owned-store",
       "violation": "V02",
@@ -20,7 +20,7 @@
     {
       "rule": "gateway-db-open",
       "path": "crates/discord-gateway/src/store.rs",
-      "line": 97,
+      "line": 98,
       "snippet": "let conn = Connection::open(path)?;",
       "classification": "valid-gateway-owned-store",
       "violation": "V02",
@@ -30,7 +30,7 @@
     {
       "rule": "gateway-db-open",
       "path": "crates/nostr-gateway/src/daemon.rs",
-      "line": 475,
+      "line": 722,
       "snippet": "let store = NostrStore::open(&config.database_path)?;",
       "classification": "valid-gateway-owned-store",
       "violation": "V02",
@@ -40,7 +40,7 @@
     {
       "rule": "gateway-db-open",
       "path": "crates/nostr-gateway/src/store.rs",
-      "line": 97,
+      "line": 98,
       "snippet": "let conn = Connection::open(path)?;",
       "classification": "valid-gateway-owned-store",
       "violation": "V02",
@@ -50,7 +50,7 @@
     {
       "rule": "gateway-db-open",
       "path": "crates/web-gateway/src/owner.rs",
-      "line": 44,
+      "line": 47,
       "snippet": "let store = Arc::new(Mutex::new(WebStore::open(&config.database_path)?));",
       "classification": "valid-gateway-owned-store",
       "violation": "V02",
@@ -2853,7 +2853,7 @@
       "violation": "V01",
       "classification": "closed-production-violation",
       "path": "crates/nostr-gateway/Cargo.toml",
-      "line": 28,
+      "line": 29,
       "needle": "opencrab-process-supervisor.workspace",
       "owner_stage": "S5",
       "expires_when": "retain no-dev dependency proof that concrete daemons do not link core, db, legacy concrete libraries, or server"
@@ -2862,7 +2862,7 @@
       "violation": "V03",
       "classification": "closed-production-violation",
       "path": "crates/nostr-gateway/src/daemon_tests.rs",
-      "line": 278,
+      "line": 512,
       "needle": "s5_nostr_runtime_config_rejects_core_and_legacy_database_paths",
       "owner_stage": "S5",
       "expires_when": "retain runtime legacy-path rejection and absence of import code"
@@ -2871,7 +2871,7 @@
       "violation": "V04",
       "classification": "closed-production-violation",
       "path": "crates/discord-gateway/src/daemon_tests.rs",
-      "line": 134,
+      "line": 220,
       "needle": "s5_discord_daemon_runs_and_crash_state_persists_while_server_is_stopped",
       "owner_stage": "S5",
       "expires_when": "retain daemon-owned server-stopped lifecycle proof"
@@ -2889,7 +2889,7 @@
       "violation": "V12",
       "classification": "closed-production-violation",
       "path": "crates/web-gateway/src/store.rs",
-      "line": 157,
+      "line": 206,
       "needle": "s5_web_store_owns_identity_policy_and_redacted_credentials",
       "owner_stage": "S5",
       "expires_when": "retain Web-owned store/admin and independent runtime proof"

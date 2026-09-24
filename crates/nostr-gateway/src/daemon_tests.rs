@@ -6,12 +6,23 @@ use tokio::sync::Notify;
 struct FakeGate;
 #[async_trait]
 impl GateReconciler for FakeGate {
+    async fn observe(
+        &self,
+        desired: &InstanceRow,
+    ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation> {
+        Ok(if desired.enabled {
+            opencrab_process_supervisor::lifecycle::CoreObservation::ExactEnabled
+        } else {
+            opencrab_process_supervisor::lifecycle::CoreObservation::ExactDisabled
+        })
+    }
+
     async fn reconcile(
         &self,
         desired: &InstanceRow,
         subject_grant: Option<&str>,
     ) -> Result<VerifiedInstance> {
-        assert_eq!(subject_grant, Some("grant-secret"));
+        assert!(subject_grant.is_none() || subject_grant == Some("grant-secret"));
         Ok(VerifiedInstance {
             revision: 4,
             digest: "digest".into(),
@@ -24,8 +35,68 @@ impl GateReconciler for FakeGate {
 struct OfflineGate;
 #[async_trait]
 impl GateReconciler for OfflineGate {
+    async fn observe(
+        &self,
+        _: &InstanceRow,
+    ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation> {
+        Ok(opencrab_process_supervisor::lifecycle::CoreObservation::Unavailable)
+    }
+
     async fn reconcile(&self, _: &InstanceRow, _: Option<&str>) -> Result<VerifiedInstance> {
         anyhow::bail!("core server is stopped")
+    }
+}
+
+struct RecoveryGate(opencrab_process_supervisor::lifecycle::CoreObservation);
+#[async_trait]
+impl GateReconciler for RecoveryGate {
+    async fn observe(
+        &self,
+        _: &InstanceRow,
+    ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation> {
+        Ok(self.0)
+    }
+
+    async fn reconcile(&self, _: &InstanceRow, _: Option<&str>) -> Result<VerifiedInstance> {
+        anyhow::bail!("reconciliation not expected during startup matrix")
+    }
+}
+
+struct RecoveryFactory {
+    observation: opencrab_process_supervisor::lifecycle::ProcessObservation,
+    reaped: Arc<AtomicUsize>,
+    cleaned: Arc<AtomicUsize>,
+    exit: Arc<Notify>,
+    kills: Arc<AtomicUsize>,
+}
+impl SpawnerFactory for RecoveryFactory {
+    fn observe_process(
+        &self,
+        _: &InstanceRow,
+    ) -> Result<opencrab_process_supervisor::lifecycle::ProcessObservation> {
+        Ok(self.observation)
+    }
+    fn reap_stale(&self, _: &InstanceRow) -> Result<()> {
+        self.reaped.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    fn cleanup_artifacts(&self, _: &InstanceRow) -> Result<()> {
+        self.cleaned.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    fn adopted_child(&self, _: &InstanceRow) -> Result<Option<Box<dyn SupervisedChild>>> {
+        Ok(Some(Box::new(FakeChild {
+            exit: self.exit.clone(),
+            kills: self.kills.clone(),
+        })))
+    }
+    fn for_instance(
+        &self,
+        _: &InstanceRow,
+        _: zeroize::Zeroizing<Vec<u8>>,
+        _: &str,
+    ) -> Result<Arc<dyn ChildSpawner>> {
+        anyhow::bail!("spawn not expected during startup matrix")
     }
 }
 
@@ -188,6 +259,18 @@ async fn s5_nostr_daemon_runs_and_crash_state_persists_while_server_is_stopped()
     );
     tokio::time::sleep(std::time::Duration::from_millis(1_050)).await;
     daemon.reconcile_once().await.unwrap();
+    assert_eq!(
+        daemon
+            .store()
+            .lock()
+            .unwrap()
+            .get(&ready.instance_id)
+            .unwrap()
+            .unwrap()
+            .lifecycle_state,
+        opencrab_process_supervisor::lifecycle::LifecycleState::Pending
+    );
+    daemon.reconcile_once().await.unwrap();
     for _ in 0..100 {
         if started.load(Ordering::SeqCst) == 2 {
             break;
@@ -272,6 +355,157 @@ async fn s5_nostr_disabled_and_nonready_instances_never_spawn() {
         opencrab_process_supervisor::lifecycle::LifecycleState::Disabled
     );
     daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn s5_nostr_daemon_startup_recovery_matrix_uses_process_and_core_observations() {
+    use opencrab_process_supervisor::lifecycle::{
+        CoreObservation, LifecycleState, ProcessObservation,
+    };
+    for state in [
+        LifecycleState::Disabled,
+        LifecycleState::Pending,
+        LifecycleState::Provisioning,
+        LifecycleState::Ready,
+        LifecycleState::Running,
+        LifecycleState::Error,
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let store = NostrStore::open(&temp.path().join("owner.db")).unwrap();
+        let enabled = state != LifecycleState::Disabled;
+        let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let generation = store
+            .upsert_desired(
+                id,
+                "agent",
+                7,
+                "e30=",
+                &[],
+                "token",
+                None,
+                enabled,
+                &[9; 32],
+            )
+            .unwrap();
+        if !matches!(state, LifecycleState::Pending) {
+            store.mark_provisioning(id, generation).unwrap();
+        }
+        if matches!(
+            state,
+            LifecycleState::Disabled
+                | LifecycleState::Ready
+                | LifecycleState::Running
+                | LifecycleState::Error
+        ) {
+            store
+                .mark_verified(id, generation, 1, "digest", &[], enabled)
+                .unwrap();
+        }
+        if matches!(state, LifecycleState::Running) {
+            store.record_started(id, generation, 4242, "nonce").unwrap();
+            store.mark_running(id, generation, 4242, "nonce").unwrap();
+        }
+        if matches!(state, LifecycleState::Error) {
+            store
+                .mark_error(
+                    id,
+                    generation,
+                    "failed",
+                    chrono::Utc::now().timestamp_millis() + 60_000,
+                )
+                .unwrap();
+        }
+        let reaped = Arc::new(AtomicUsize::new(0));
+        let cleaned = Arc::new(AtomicUsize::new(0));
+        let daemon = NostrDaemon::new(
+            store,
+            [9; 32],
+            Arc::new(RecoveryGate(if enabled {
+                CoreObservation::ExactEnabled
+            } else {
+                CoreObservation::ExactDisabled
+            })),
+            Arc::new(RecoveryFactory {
+                observation: if state == LifecycleState::Running {
+                    ProcessObservation::ExactLive
+                } else {
+                    ProcessObservation::Missing
+                },
+                reaped: reaped.clone(),
+                cleaned: cleaned.clone(),
+                exit: Arc::new(Notify::new()),
+                kills: Arc::new(AtomicUsize::new(0)),
+            }),
+        )
+        .unwrap();
+        daemon.recover_startup().await.unwrap();
+        let recovered = daemon.store().lock().unwrap().get(id).unwrap().unwrap();
+        let expected = match state {
+            LifecycleState::Provisioning => LifecycleState::Pending,
+            other => other,
+        };
+        assert_eq!(recovered.lifecycle_state, expected, "{state:?}");
+        assert_eq!(
+            reaped.load(Ordering::SeqCst),
+            usize::from(state != LifecycleState::Running),
+            "{state:?}"
+        );
+        assert_eq!(
+            cleaned.load(Ordering::SeqCst),
+            usize::from(state != LifecycleState::Running),
+            "{state:?}"
+        );
+        daemon.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn s5_nostr_running_loss_and_stale_process_are_reaped_to_durable_error() {
+    use opencrab_process_supervisor::lifecycle::{
+        CoreObservation, LifecycleState, ProcessObservation,
+    };
+    for observation in [ProcessObservation::Missing, ProcessObservation::StaleLive] {
+        let temp = tempfile::tempdir().unwrap();
+        let store = NostrStore::open(&temp.path().join("owner.db")).unwrap();
+        let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let generation = store
+            .upsert_desired(id, "agent", 7, "e30=", &[], "token", None, true, &[9; 32])
+            .unwrap();
+        store.mark_provisioning(id, generation).unwrap();
+        store
+            .mark_verified(id, generation, 1, "digest", &[], true)
+            .unwrap();
+        store.record_started(id, generation, 4242, "nonce").unwrap();
+        store.mark_running(id, generation, 4242, "nonce").unwrap();
+        let reaped = Arc::new(AtomicUsize::new(0));
+        let daemon = NostrDaemon::new(
+            store,
+            [9; 32],
+            Arc::new(RecoveryGate(CoreObservation::ExactEnabled)),
+            Arc::new(RecoveryFactory {
+                observation,
+                reaped: reaped.clone(),
+                cleaned: Arc::new(AtomicUsize::new(0)),
+                exit: Arc::new(Notify::new()),
+                kills: Arc::new(AtomicUsize::new(0)),
+            }),
+        )
+        .unwrap();
+        daemon.recover_startup().await.unwrap();
+        assert_eq!(
+            daemon
+                .store()
+                .lock()
+                .unwrap()
+                .get(id)
+                .unwrap()
+                .unwrap()
+                .lifecycle_state,
+            LifecycleState::Error
+        );
+        assert_eq!(reaped.load(Ordering::SeqCst), 1);
+        daemon.shutdown().await;
+    }
 }
 
 #[test]

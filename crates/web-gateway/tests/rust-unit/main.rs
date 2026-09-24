@@ -205,6 +205,7 @@ async fn rust_unit_conversation_status_is_owned_by_web_gateway() {
     let app = router(HttpState {
         instances: vec![client],
         agent_clients: std::collections::HashMap::new(),
+        auth: Default::default(),
     });
 
     let ready = app
@@ -256,6 +257,7 @@ async fn rust_unit_created_binding_is_provisioning_before_bind() {
     let app = router(HttpState {
         instances: vec![client],
         agent_clients: std::collections::HashMap::new(),
+        auth: Default::default(),
     });
     let response = app
         .oneshot(
@@ -459,6 +461,7 @@ async fn rust_unit_http_post_202_not_admitted_busy_and_old_routes_404() {
     let app = router(HttpState {
         instances: vec![client.clone()],
         agent_clients: std::collections::HashMap::new(),
+        auth: Default::default(),
     });
 
     let req_null = Request::builder()
@@ -567,6 +570,7 @@ async fn rust_unit_disconnect_and_unacked_503() {
     let app = router(HttpState {
         instances: vec![client.clone()],
         agent_clients: std::collections::HashMap::new(),
+        auth: Default::default(),
     });
     let res = app
         .clone()

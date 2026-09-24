@@ -65,6 +65,7 @@ pub struct InstanceRow {
     pub lifecycle_state: LifecycleState,
     pub core_revision: Option<u64>,
     pub core_digest: Option<String>,
+    pub core_bindings: Vec<String>,
     pub process_id: Option<u32>,
     pub process_nonce: Option<String>,
     pub failure_count: u32,
@@ -162,7 +163,7 @@ impl DiscordStore {
         self.conn.query_row(
             "SELECT instance_id,agent_id,subject_id,config_b64,addresses_json,credential_envelope,
                     subject_grant_envelope,enabled,desired_generation,applied_generation,lifecycle_state,core_revision,
-                    core_digest,process_id,process_nonce,failure_count,retry_at_unix_ms
+                    core_digest,binding_inventory_json,process_id,process_nonce,failure_count,retry_at_unix_ms
              FROM instances WHERE instance_id=?1",
             params![instance_id],
             |row| {
@@ -170,7 +171,7 @@ impl DiscordStore {
                 let desired: i64 = row.get(8)?;
                 let applied: Option<i64> = row.get(9)?;
                 let revision: Option<i64> = row.get(11)?;
-                let failures: i64 = row.get(15)?;
+                let failures: i64 = row.get(16)?;
                 Ok(InstanceRow {
                     instance_id: row.get(0)?, agent_id: row.get(1)?, subject_id: row.get(2)?,
                     config_b64: row.get(3)?,
@@ -181,28 +182,14 @@ impl DiscordStore {
                     lifecycle_state: LifecycleState::from_str(&state).unwrap_or(LifecycleState::Error),
                     core_revision: revision.and_then(|v| u64::try_from(v).ok()),
                     core_digest: row.get(12)?,
-                    process_id: row.get::<_, Option<i64>>(13)?.and_then(|value| u32::try_from(value).ok()),
-                    process_nonce: row.get(14)?,
+                    core_bindings: serde_json::from_str(&row.get::<_, String>(13)?).unwrap_or_default(),
+                    process_id: row.get::<_, Option<i64>>(14)?.and_then(|value| u32::try_from(value).ok()),
+                    process_nonce: row.get(15)?,
                     failure_count: u32::try_from(failures).unwrap_or(u32::MAX),
-                    retry_at_unix_ms: row.get(16)?,
+                    retry_at_unix_ms: row.get(17)?,
                 })
             },
         ).optional().map_err(Into::into)
-    }
-
-    pub fn recover_startup_without_adoptable_processes(&self, now_unix_ms: i64) -> Result<()> {
-        self.conn.execute(
-            "UPDATE instances SET lifecycle_state='pending',process_id=NULL,process_nonce=NULL
-             WHERE lifecycle_state='provisioning'",
-            [],
-        )?;
-        self.conn.execute(
-            "UPDATE instances SET lifecycle_state='error',process_id=NULL,process_nonce=NULL,
-             failure_count=failure_count+1,last_exit='child_lost',retry_at_unix_ms=?1
-             WHERE lifecycle_state='running'",
-            params![now_unix_ms],
-        )?;
-        Ok(())
     }
 
     pub fn retry_due_error(
@@ -212,9 +199,7 @@ impl DiscordStore {
         now_unix_ms: i64,
     ) -> Result<bool> {
         Ok(self.conn.execute(
-            "UPDATE instances SET lifecycle_state=CASE
-                 WHEN enabled=1 AND applied_generation=desired_generation AND core_revision IS NOT NULL
-                 THEN 'ready' ELSE 'pending' END,
+            "UPDATE instances SET lifecycle_state='pending',
              process_id=NULL,process_nonce=NULL,retry_at_unix_ms=NULL
              WHERE instance_id=?1 AND desired_generation=?2 AND lifecycle_state='error'
                AND (retry_at_unix_ms IS NULL OR retry_at_unix_ms<=?3)",

@@ -109,3 +109,52 @@ legacy rows, historical migrations, or production data.
 - State rollback inputs for a later cutover remain per-gateway snapshots plus prior independently
   runnable binaries/configuration; this implementation stage performed no cutover or data migration.
 - S6 and later remain blocked pending fresh independent S5 approval.
+
+## Final-review P1 fix (follow-up)
+
+The independent review of checkpoint `38bff738276be4a4810b9d6c54c39a91ff26bdb4`
+identified five S5 blockers. Assertion-level RED was captured before the follow-up implementation:
+
+- `/tmp/issue-1006-s5-review-lifecycle-red.log`: daemon restart/recovery and readiness-failure
+  assertions failed because startup state was normalized without process/core observation.
+- `/tmp/issue-1006-s5-review-placement-red.log`: disabled recovery left daemon-owned placement and
+  control-socket artifacts.
+- `/tmp/issue-1006-s5-review-admin-red.log`: forged request instance scope was trusted by all three
+  local-admin implementations.
+- `/tmp/issue-1006-s5-review-web-red.log`: Web accepted a non-loopback bind and lacked required
+  bearer authentication backed by Web-owned credentials/policy.
+- `/tmp/issue-1006-s5-review-config-red.log`: secret-shaped unknown Discord/Nostr instance config
+  fields were accepted.
+
+The follow-up GREEN implementation adds daemon-level recovery matrices for every persisted state,
+exact-live adoption, stale/lost observation handling, readiness-failure reaping and durable retry,
+and per-instance cleanup limited to daemon-owned placement/control paths. Production adoption
+requires a live persisted PID plus a placement nonce matching the persisted process nonce; cleanup
+never signals a PID without the same ownership proof. Persisted ready/running rows remain restartable
+or adoptable while core is temporarily unavailable.
+
+Local-admin instance scope is now supplied only by immutable daemon/owner startup configuration;
+request scope must be a member and cannot self-authorize. Discord/Nostr typed configs deny unknown
+fields, validate and canonicalize before any durable write, and tests prove secret-shaped rejected
+config creates no row. Web settings reject non-loopback binds; the owner decrypts per-instance
+Web-owned credentials, loads persisted caller roles, hashes credentials into in-memory bearer
+admissions, and applies per-instance authorization to every active HTTP/SSE route.
+
+Retained follow-up GREEN transcripts:
+
+- `/tmp/issue-1006-s5-review-focused-green.log`: Discord 74, Nostr 69, Web 9, process supervisor
+  17, and gate client 31 tests passed.
+- `/tmp/issue-1006-s5-review-server-green.log`: server library 493 tests passed.
+- `/tmp/issue-1006-s5-review-clippy-green.log`: all affected crates plus server, all targets,
+  `-D warnings`, formatting, and diff checks passed.
+- `/tmp/issue-1006-s5-review-static-green.log`: 61 mutation/static tests and the 275-finding
+  reviewed boundary audit passed.
+- `/tmp/issue-1006-s5-review-no-dev-green.log`: concrete gateways remain free of forbidden
+  core/legacy production dependencies and server remains free of concrete gateway production
+  dependencies.
+
+The pre-existing Web integration harnesses remain outside the S5 library gate under Issue #1011;
+the new S5 bearer behavior is covered by a focused production-router test for absent, invalid, and
+valid credentials, plus owner/store tests for encrypted persistence and caller-policy loading. No
+deployment, migration, README, S6+, or Issue #1011
+production-harness work was included.

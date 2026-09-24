@@ -17,7 +17,8 @@ pub struct InstancePlacement {
     pub config_b64: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct InstanceConfig {
     pub relays: Vec<String>,
     #[serde(default)]
@@ -34,7 +35,8 @@ pub struct InstanceConfig {
     pub access: AccessConfig,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AccessConfig {
     #[serde(default)]
     pub followees: Vec<String>,
@@ -46,7 +48,8 @@ pub struct AccessConfig {
     pub trusted_users: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WatchFilter {
     #[serde(default)]
     pub authors: Vec<String>,
@@ -66,7 +69,8 @@ fn default_max_items() -> i64 {
     DEFAULT_BUNDLE_MAX_ITEMS
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WatchPlacement {
     pub id: i64,
     pub interval_secs: i64,
@@ -135,6 +139,12 @@ pub fn decode_config_b64(config_b64: &str) -> anyhow::Result<Vec<u8>> {
 pub fn config_digest(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     hex_lower(&Sha256::digest(bytes))
+}
+
+pub fn canonicalize_config_b64(config_b64: &str) -> anyhow::Result<String> {
+    use base64::Engine as _;
+    let config = parse_instance_config(&decode_config_b64(config_b64)?)?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&config)?))
 }
 
 pub fn parse_instance_config(bytes: &[u8]) -> anyhow::Result<InstanceConfig> {
@@ -286,6 +296,16 @@ mod tests {
     }
 
     #[test]
+    fn s5_secret_shaped_unknown_config_fields_are_rejected() {
+        let encoded = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            br#"{"relays":["wss://relay"],"self_pubkey":"00","secret":"leak"}"#,
+        );
+        let bytes = decode_config_b64(&encoded).unwrap();
+        assert!(serde_json::from_slice::<InstanceConfig>(&bytes).is_err());
+    }
+
+    #[test]
     fn empty_relays_fail_loud() {
         let mut cfg = sample_config();
         cfg.relays.clear();
@@ -311,7 +331,6 @@ mod tests {
             "watches": [{
                 "id": 17,
                 "interval_secs": 30,
-                "session_id": "nostr-a1",
                 "filter_json": {
                     "authors": ["npub1watched"],
                     "keywords": ["opencrab"],

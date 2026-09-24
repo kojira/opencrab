@@ -2,8 +2,9 @@
 
 use crate::store::WebStore;
 use crate::v3::client::InstanceClient;
-use crate::v3::http::{router, HttpState};
+use crate::v3::http::{router, HttpState, WebAdmission, WebAuth};
 use crate::v3::wire::config_digest;
+use crate::v3::wire::SaidCaller;
 use anyhow::{Context as _, Result};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -16,6 +17,8 @@ pub const MASTER_KEY_ENV: &str = "OPENCRAB_WEB_MASTER_KEY";
 pub struct OwnerConfig {
     pub database_path: PathBuf,
     pub admin_socket: PathBuf,
+    #[serde(default)]
+    pub admin_instance_ids: Vec<String>,
 }
 
 impl OwnerConfig {
@@ -42,14 +45,32 @@ pub async fn run(config: OwnerConfig) -> Result<()> {
     let mut raw = [0_u8; 32];
     raw.copy_from_slice(&key[..]);
     let store = Arc::new(Mutex::new(WebStore::open(&config.database_path)?));
-    let (bind, socket, rows) = {
+    let (bind, socket, rows, auth) = {
         let locked = store
             .lock()
             .map_err(|_| anyhow::anyhow!("store unavailable"))?;
         let (bind, socket) = locked.settings()?;
-        (bind, socket, locked.list_enabled()?)
+        let rows = locked.list_enabled()?;
+        let mut auth = WebAuth::default();
+        for row in &rows {
+            let credential = locked.decrypt_credential(&row.instance_id, &raw)?;
+            let caller = match locked.caller_role(&row.instance_id)?.as_str() {
+                "owner" => SaidCaller::Owner,
+                "trusted_user" => SaidCaller::TrustedUser,
+                _ => anyhow::bail!("unsupported persisted caller role"),
+            };
+            auth.insert(
+                &credential,
+                WebAdmission {
+                    instance_id: row.instance_id.clone(),
+                    caller,
+                },
+            );
+        }
+        (bind, socket, rows, auth)
     };
-    let _admin = crate::admin::spawn(config.admin_socket, store, Arc::new(raw));
+    let admin_scope = Arc::new(config.admin_instance_ids.iter().cloned().collect());
+    let _admin = crate::admin::spawn(config.admin_socket, admin_scope, store, Arc::new(raw));
     let mut instances = Vec::new();
     let mut agent_clients = std::collections::HashMap::new();
     for row in rows {
@@ -75,6 +96,7 @@ pub async fn run(config: OwnerConfig) -> Result<()> {
         router(HttpState {
             instances,
             agent_clients,
+            auth,
         }),
     )
     .await?;
@@ -112,6 +134,7 @@ mod tests {
         let config = OwnerConfig {
             database_path,
             admin_socket: admin_socket.clone(),
+            admin_instance_ids: Vec::new(),
         };
         let key = base64::engine::general_purpose::STANDARD.encode([7_u8; 32]);
         std::env::set_var(MASTER_KEY_ENV, &key);

@@ -15,6 +15,8 @@ use std::sync::{Arc, Mutex};
 pub struct DaemonConfig {
     pub database_path: PathBuf,
     pub admin_socket: PathBuf,
+    #[serde(default)]
+    pub admin_instance_ids: Vec<String>,
     pub gate_admin_socket: PathBuf,
     pub gate_admin_credential: PathBuf,
     pub core_socket: PathBuf,
@@ -28,6 +30,12 @@ pub struct DaemonConfig {
 
 fn default_reconcile_millis() -> u64 {
     1_000
+}
+
+fn retry_deadline(row: &InstanceRow) -> i64 {
+    let shift = row.failure_count.min(6);
+    let delay = 1_000_i64.saturating_mul(1_i64 << shift).min(60_000);
+    chrono::Utc::now().timestamp_millis().saturating_add(delay)
 }
 
 impl DaemonConfig {
@@ -67,6 +75,11 @@ pub struct VerifiedInstance {
 
 #[async_trait]
 pub trait GateReconciler: Send + Sync {
+    async fn observe(
+        &self,
+        desired: &InstanceRow,
+    ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation>;
+
     async fn reconcile(
         &self,
         desired: &InstanceRow,
@@ -93,6 +106,36 @@ impl UdsGateReconciler {
 
 #[async_trait]
 impl GateReconciler for UdsGateReconciler {
+    async fn observe(
+        &self,
+        desired: &InstanceRow,
+    ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation> {
+        use opencrab_process_supervisor::lifecycle::CoreObservation;
+        let Some(observed) = self.client.get_instance(&desired.instance_id).await? else {
+            return Ok(CoreObservation::Mismatch);
+        };
+        let mut bindings: Vec<_> = observed
+            .bindings
+            .into_iter()
+            .map(|value| value.binding_id)
+            .collect();
+        bindings.sort();
+        let mut expected = desired.core_bindings.clone();
+        expected.sort();
+        if observed.revision == desired.core_revision.unwrap_or(0)
+            && observed.config_digest == desired.core_digest.as_deref().unwrap_or_default()
+            && bindings == expected
+        {
+            Ok(if observed.enabled {
+                CoreObservation::ExactEnabled
+            } else {
+                CoreObservation::ExactDisabled
+            })
+        } else {
+            Ok(CoreObservation::Mismatch)
+        }
+    }
+
     async fn reconcile(
         &self,
         desired: &InstanceRow,
@@ -124,6 +167,24 @@ impl GateReconciler for UdsGateReconciler {
 }
 
 pub trait SpawnerFactory: Send + Sync {
+    fn observe_process(
+        &self,
+        _row: &InstanceRow,
+    ) -> Result<opencrab_process_supervisor::lifecycle::ProcessObservation> {
+        Ok(opencrab_process_supervisor::lifecycle::ProcessObservation::Missing)
+    }
+    fn reap_stale(&self, _row: &InstanceRow) -> Result<()> {
+        Ok(())
+    }
+    fn cleanup_artifacts(&self, _row: &InstanceRow) -> Result<()> {
+        Ok(())
+    }
+    fn adopted_child(
+        &self,
+        _row: &InstanceRow,
+    ) -> Result<Option<Box<dyn opencrab_process_supervisor::SupervisedChild>>> {
+        Ok(None)
+    }
     fn control_socket(&self, _row: &InstanceRow, _start_nonce: &str) -> Option<PathBuf> {
         None
     }
@@ -177,6 +238,7 @@ pub struct DiscordDaemon<R, F> {
     reconciler: Arc<R>,
     factory: Arc<F>,
     supervisors: Arc<ProcessSupervisorSet>,
+    startup_recovered: std::sync::atomic::AtomicBool,
 }
 
 impl<R, F> DiscordDaemon<R, F>
@@ -190,13 +252,13 @@ where
         reconciler: Arc<R>,
         factory: Arc<F>,
     ) -> Result<Self> {
-        store.recover_startup_without_adoptable_processes(chrono::Utc::now().timestamp_millis())?;
         Ok(Self {
             store: Arc::new(Mutex::new(store)),
             key: Arc::new(key),
             reconciler,
             factory,
             supervisors: ProcessSupervisorSet::new(SupervisorConfig::daemon_owned()),
+            startup_recovered: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -204,7 +266,77 @@ where
         self.store.clone()
     }
 
+    async fn recover_startup(&self) -> Result<()> {
+        use opencrab_process_supervisor::lifecycle::{
+            CoreObservation, ProcessObservation, StartupDecision,
+        };
+        let rows = self
+            .store
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store poisoned"))?
+            .list()?;
+        let now = chrono::Utc::now().timestamp_millis();
+        for row in rows {
+            let process = self
+                .factory
+                .observe_process(&row)
+                .unwrap_or(ProcessObservation::Unknown);
+            let core = self
+                .reconciler
+                .observe(&row)
+                .await
+                .unwrap_or(CoreObservation::Unavailable);
+            let decision = row.lifecycle().recover(now, process, core);
+            if !matches!(decision, StartupDecision::AdoptRunning) {
+                let _ = self.factory.reap_stale(&row);
+                let _ = self.factory.cleanup_artifacts(&row);
+            }
+            match decision {
+                StartupDecision::KeepDisabled => {}
+                StartupDecision::EnqueuePending => {
+                    self.store
+                        .lock()
+                        .unwrap()
+                        .mark_pending(&row.instance_id, row.desired_generation)?;
+                }
+                StartupDecision::StartReady => {}
+                StartupDecision::AdoptRunning => {
+                    let child = self
+                        .factory
+                        .adopted_child(&row)?
+                        .context("exact live process could not be adopted")?;
+                    self.supervisors
+                        .adopt_observed(
+                            &row.instance_id,
+                            child,
+                            Arc::new(StoreObserver {
+                                store: self.store.clone(),
+                                generation: row.desired_generation,
+                                nonce: row.process_nonce.clone().unwrap_or_default(),
+                            }),
+                        )
+                        .await;
+                }
+                StartupDecision::PersistError(code) => {
+                    self.store.lock().unwrap().mark_error(
+                        &row.instance_id,
+                        row.desired_generation,
+                        code,
+                        retry_deadline(&row),
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub async fn reconcile_once(&self) -> Result<()> {
+        if !self
+            .startup_recovered
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            self.recover_startup().await?;
+        }
         let rows = self
             .store
             .lock()
@@ -214,6 +346,8 @@ where
             match row.lifecycle_state {
                 opencrab_process_supervisor::lifecycle::LifecycleState::Pending => {
                     self.supervisors.stop(&row.instance_id).await;
+                    self.factory.reap_stale(&row)?;
+                    self.factory.cleanup_artifacts(&row)?;
                     if !self
                         .store
                         .lock()
@@ -236,13 +370,15 @@ where
                     let verified = match self.reconciler.reconcile(&row, grant_text).await {
                         Ok(value) => value,
                         Err(error) => {
+                            self.factory.cleanup_artifacts(&row)?;
                             self.store.lock().unwrap().mark_error(
                                 &row.instance_id,
                                 row.desired_generation,
                                 "reconciliation_failed",
-                                chrono::Utc::now().timestamp_millis() + 1_000,
+                                retry_deadline(&row),
                             )?;
-                            return Err(error);
+                            tracing::warn!(instance_id = %row.instance_id, error = %error, "instance reconciliation failed");
+                            continue;
                         }
                     };
                     anyhow::ensure!(
@@ -261,35 +397,47 @@ where
                         .unwrap()
                         .clear_subject_grant(&row.instance_id, row.desired_generation)?;
                     if verified.enabled {
-                        self.start_ready(&row.instance_id).await?;
+                        if let Err(error) = self.start_ready(&row.instance_id).await {
+                            self.factory.cleanup_artifacts(&row)?;
+                            self.store.lock().unwrap().mark_error(
+                                &row.instance_id,
+                                row.desired_generation,
+                                "child_start_failed",
+                                retry_deadline(&row),
+                            )?;
+                            tracing::warn!(instance_id = %row.instance_id, error = %error, "child start failed");
+                        }
+                    } else {
+                        self.factory.cleanup_artifacts(&row)?;
                     }
                 }
                 opencrab_process_supervisor::lifecycle::LifecycleState::Ready => {
-                    self.start_ready(&row.instance_id).await?;
+                    if let Err(error) = self.start_ready(&row.instance_id).await {
+                        self.factory.cleanup_artifacts(&row)?;
+                        self.store.lock().unwrap().mark_error(
+                            &row.instance_id,
+                            row.desired_generation,
+                            "child_start_failed",
+                            retry_deadline(&row),
+                        )?;
+                        tracing::warn!(instance_id = %row.instance_id, error = %error, "child start failed");
+                    }
                 }
                 opencrab_process_supervisor::lifecycle::LifecycleState::Disabled
                 | opencrab_process_supervisor::lifecycle::LifecycleState::Provisioning => {
                     self.supervisors.stop(&row.instance_id).await;
+                    self.factory.reap_stale(&row)?;
+                    self.factory.cleanup_artifacts(&row)?;
                 }
                 opencrab_process_supervisor::lifecycle::LifecycleState::Error => {
                     self.supervisors.stop(&row.instance_id).await;
-                    if self.store.lock().unwrap().retry_due_error(
+                    self.factory.reap_stale(&row)?;
+                    self.factory.cleanup_artifacts(&row)?;
+                    let _ = self.store.lock().unwrap().retry_due_error(
                         &row.instance_id,
                         row.desired_generation,
                         chrono::Utc::now().timestamp_millis(),
-                    )? {
-                        let recovered = self
-                            .store
-                            .lock()
-                            .unwrap()
-                            .get(&row.instance_id)?
-                            .context("recovered instance missing")?;
-                        if recovered.lifecycle_state
-                            == opencrab_process_supervisor::lifecycle::LifecycleState::Ready
-                        {
-                            self.start_ready(&row.instance_id).await?;
-                        }
-                    }
+                    )?;
                 }
                 opencrab_process_supervisor::lifecycle::LifecycleState::Running => {}
             }
@@ -331,7 +479,13 @@ where
             let id = row.instance_id.clone();
             let generation = row.desired_generation;
             tokio::spawn(wait_for_child_readiness(
-                listener, store, id, generation, nonce,
+                listener,
+                store,
+                self.supervisors.clone(),
+                self.factory.clone(),
+                id,
+                generation,
+                nonce,
             ));
         }
         Ok(())
@@ -373,41 +527,57 @@ fn prepare_readiness_listener(path: &Path) -> Result<tokio::net::UnixListener> {
     Ok(listener)
 }
 
-async fn wait_for_child_readiness(
+async fn wait_for_child_readiness<F: SpawnerFactory + 'static>(
     listener: tokio::net::UnixListener,
     store: Arc<Mutex<DiscordStore>>,
+    supervisors: Arc<ProcessSupervisorSet>,
+    factory: Arc<F>,
     instance_id: String,
     generation: u64,
     expected_nonce: String,
 ) {
     use tokio::io::AsyncReadExt as _;
-    let accepted =
-        tokio::time::timeout(std::time::Duration::from_secs(30), listener.accept()).await;
-    let Ok(Ok((mut stream, _))) = accepted else {
-        return;
+    let ready = async {
+        let (_, mut stream) = {
+            let (stream, address) = listener.accept().await?;
+            (address, stream)
+        };
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).await?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let nonce = value
+            .get("nonce")
+            .and_then(serde_json::Value::as_str)
+            .context("readiness nonce missing")?;
+        let pid = value
+            .get("pid")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .context("readiness pid missing")?;
+        anyhow::ensure!(nonce == expected_nonce, "readiness nonce mismatch");
+        Ok::<(u32, String), anyhow::Error>((pid, nonce.to_string()))
     };
-    let mut bytes = Vec::new();
-    if stream.read_to_end(&mut bytes).await.is_err() {
-        return;
-    }
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-        return;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(30), ready).await;
+    let parsed = match result {
+        Ok(Ok(value)) => value,
+        _ => {
+            supervisors.stop(&instance_id).await;
+            if let Ok(guard) = store.lock() {
+                if let Ok(Some(row)) = guard.get(&instance_id) {
+                    let _ = factory.cleanup_artifacts(&row);
+                    let _ = guard.mark_error(
+                        &instance_id,
+                        generation,
+                        "child_readiness_failed",
+                        retry_deadline(&row),
+                    );
+                }
+            }
+            return;
+        }
     };
-    let Some(nonce) = value.get("nonce").and_then(serde_json::Value::as_str) else {
-        return;
-    };
-    let Some(pid) = value
-        .get("pid")
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
-    else {
-        return;
-    };
-    if nonce != expected_nonce {
-        return;
-    }
     if let Ok(store) = store.lock() {
-        let _ = store.mark_running(&instance_id, generation, pid, nonce);
+        let _ = store.mark_running(&instance_id, generation, parsed.0, &parsed.1);
     }
 }
 
@@ -419,6 +589,86 @@ struct ProductionFactory {
 }
 
 impl SpawnerFactory for ProductionFactory {
+    fn observe_process(
+        &self,
+        row: &InstanceRow,
+    ) -> Result<opencrab_process_supervisor::lifecycle::ProcessObservation> {
+        use opencrab_process_supervisor::lifecycle::ProcessObservation;
+        let Some(pid) = row.process_id else {
+            return Ok(ProcessObservation::Missing);
+        };
+        let result = unsafe { libc::kill(pid as i32, 0) };
+        if result == 0 {
+            let placement = self.placement_dir.join(format!("{}.json", row.instance_id));
+            let exact_nonce = std::fs::read(&placement)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|value| {
+                    value
+                        .get("start_nonce")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .is_some_and(|nonce| Some(nonce.as_str()) == row.process_nonce.as_deref());
+            return Ok(if exact_nonce {
+                ProcessObservation::ExactLive
+            } else {
+                ProcessObservation::StaleLive
+            });
+        }
+        match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::ESRCH) => Ok(ProcessObservation::Missing),
+            _ => Ok(ProcessObservation::Unknown),
+        }
+    }
+
+    fn reap_stale(&self, row: &InstanceRow) -> Result<()> {
+        let placement = self.placement_dir.join(format!("{}.json", row.instance_id));
+        let owned = std::fs::read(&placement)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|value| {
+                value
+                    .get("start_nonce")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .is_some_and(|nonce| Some(nonce.as_str()) == row.process_nonce.as_deref());
+        if owned {
+            if let Some(pid) = row.process_id {
+                if unsafe { libc::kill(pid as i32, 0) } == 0 {
+                    unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn adopted_child(
+        &self,
+        row: &InstanceRow,
+    ) -> Result<Option<Box<dyn opencrab_process_supervisor::SupervisedChild>>> {
+        Ok(row.process_id.map(|pid| {
+            Box::new(opencrab_process_supervisor::AdoptedPidChild::new(pid))
+                as Box<dyn opencrab_process_supervisor::SupervisedChild>
+        }))
+    }
+
+    fn cleanup_artifacts(&self, row: &InstanceRow) -> Result<()> {
+        for path in [
+            self.placement_dir.join(format!("{}.json", row.instance_id)),
+            self.placement_dir
+                .join(format!("{}.control.sock", row.instance_id)),
+        ] {
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
     fn control_socket(&self, row: &InstanceRow, _: &str) -> Option<PathBuf> {
         Some(
             self.placement_dir
@@ -488,7 +738,13 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
             attachment_spool_root: config.attachment_spool_root.clone(),
         }),
     )?;
-    let _admin = crate::admin::spawn(config.admin_socket.clone(), daemon.store(), Arc::new(raw));
+    let admin_scope = Arc::new(config.admin_instance_ids.iter().cloned().collect());
+    let _admin = crate::admin::spawn(
+        config.admin_socket.clone(),
+        admin_scope,
+        daemon.store(),
+        Arc::new(raw),
+    );
     let mut interval =
         tokio::time::interval(std::time::Duration::from_millis(config.reconcile_millis));
     loop {

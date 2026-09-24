@@ -178,6 +178,49 @@ pub trait SupervisedChild: Send {
     fn pid(&self) -> Option<u32>;
 }
 
+/// Monitor for a live process inherited across daemon restart.
+pub struct AdoptedPidChild {
+    pid: u32,
+}
+
+impl AdoptedPidChild {
+    pub fn new(pid: u32) -> Self {
+        Self { pid }
+    }
+
+    fn is_live(&self) -> bool {
+        (unsafe { libc::kill(self.pid as i32, 0) }) == 0
+    }
+}
+
+#[async_trait::async_trait]
+impl SupervisedChild for AdoptedPidChild {
+    async fn wait_exit(&mut self) -> String {
+        while self.is_live() {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        "adopted_process_exit".into()
+    }
+
+    async fn kill(&mut self) {
+        if !self.is_live() {
+            return;
+        }
+        unsafe { libc::kill(self.pid as i32, libc::SIGTERM) };
+        for _ in 0..30 {
+            if !self.is_live() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        unsafe { libc::kill(self.pid as i32, libc::SIGKILL) };
+    }
+
+    fn pid(&self) -> Option<u32> {
+        Some(self.pid)
+    }
+}
+
 /// 子を spawn する手段。本番は [`ExternalProcessSpawner`]、テストは fake で差し替える。
 #[async_trait::async_trait]
 pub trait ChildSpawner: Send + Sync {
@@ -265,6 +308,24 @@ impl ProcessSupervisorSet {
         tasks.insert(target_id.to_string(), SupervisedTask { shutdown, join });
     }
 
+    pub async fn adopt_observed(
+        &self,
+        target_id: &str,
+        child: Box<dyn SupervisedChild>,
+        observer: Arc<dyn ProcessObserver>,
+    ) {
+        let _lifecycle = self.lifecycle.lock().await;
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        self.stop_locked(target_id).await;
+        let (shutdown, receiver) = watch::channel(false);
+        let target = target_id.to_string();
+        let mut tasks = self.tasks.lock().await;
+        let join = tokio::spawn(supervise_adopted(target.clone(), child, observer, receiver));
+        tasks.insert(target, SupervisedTask { shutdown, join });
+    }
+
     async fn stop_locked(&self, target_id: &str) {
         let task = self.tasks.lock().await.remove(target_id);
         if let Some(task) = task {
@@ -287,6 +348,18 @@ impl ProcessSupervisorSet {
             task.request_shutdown();
         }
         join_supervisors_bounded(&mut tasks).await;
+    }
+}
+
+async fn supervise_adopted(
+    target_id: String,
+    mut child: Box<dyn SupervisedChild>,
+    observer: Arc<dyn ProcessObserver>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    tokio::select! {
+        _ = shutdown.changed() => child.kill().await,
+        summary = child.wait_exit() => observer.exited(&target_id, &summary).await,
     }
 }
 

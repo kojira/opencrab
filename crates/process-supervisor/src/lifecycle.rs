@@ -103,25 +103,27 @@ impl PersistedLifecycle {
         use CoreObservation as Core;
         use LifecycleState as State;
         use ProcessObservation as Process;
-        if matches!(process, Process::Unknown) || matches!(core, Core::Unavailable) {
+        if matches!(process, Process::Unknown) {
             return StartupDecision::PersistError("startup_recovery_failed");
         }
         match self.state {
             State::Disabled => match (process, core) {
-                (Process::Missing, Core::ExactDisabled) if !self.enabled => {
+                (Process::Missing, Core::ExactDisabled | Core::Unavailable) if !self.enabled => {
                     StartupDecision::KeepDisabled
                 }
                 _ => StartupDecision::EnqueuePending,
             },
             State::Pending | State::Provisioning => StartupDecision::EnqueuePending,
             State::Ready => match (process, core) {
-                (Process::Missing, Core::ExactEnabled) if self.child_may_start() => {
+                (Process::Missing, Core::ExactEnabled | Core::Unavailable)
+                    if self.child_may_start() =>
+                {
                     StartupDecision::StartReady
                 }
                 _ => StartupDecision::EnqueuePending,
             },
             State::Running => match (process, core) {
-                (Process::ExactLive, Core::ExactEnabled)
+                (Process::ExactLive, Core::ExactEnabled | Core::Unavailable)
                     if self.enabled
                         && self.applied_generation == Some(self.desired_generation)
                         && self.process_nonce.is_some() =>
@@ -199,6 +201,22 @@ mod tests {
         );
         assert_eq!(
             row(LifecycleState::Running).recover(100, ProcessObservation::ExactLive, exact),
+            StartupDecision::AdoptRunning
+        );
+        assert_eq!(
+            row(LifecycleState::Ready).recover(
+                100,
+                ProcessObservation::Missing,
+                CoreObservation::Unavailable,
+            ),
+            StartupDecision::StartReady
+        );
+        assert_eq!(
+            row(LifecycleState::Running).recover(
+                100,
+                ProcessObservation::ExactLive,
+                CoreObservation::Unavailable,
+            ),
             StartupDecision::AdoptRunning
         );
         assert_eq!(

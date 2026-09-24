@@ -1,4 +1,4 @@
-//! web-gateway 独立 binary。HTTP/SSE ⇄ V3 UDS 変換のみ。Bearer は持たない。
+//! Independently runnable Web gateway binary.
 
 use std::path::PathBuf;
 
@@ -78,6 +78,7 @@ async fn run() -> anyhow::Result<()> {
     let app = router(HttpState {
         instances,
         agent_clients,
+        auth: Default::default(),
     });
     axum::serve(listener, app).await.context("serve")?;
     Ok(())

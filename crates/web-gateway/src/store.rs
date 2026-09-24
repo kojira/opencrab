@@ -71,7 +71,8 @@ impl WebStore {
 
     pub fn configure(&self, http_bind: &str, core_socket: &str) -> Result<()> {
         anyhow::ensure!(core_socket.starts_with('/'), "core_socket must be absolute");
-        let _: std::net::SocketAddr = http_bind.parse().context("http_bind invalid")?;
+        let bind: std::net::SocketAddr = http_bind.parse().context("http_bind invalid")?;
+        anyhow::ensure!(bind.ip().is_loopback(), "http_bind must be loopback");
         self.conn.execute(
             "INSERT INTO gateway_settings VALUES (1,?1,?2)
              ON CONFLICT(singleton) DO UPDATE SET http_bind=excluded.http_bind,core_socket=excluded.core_socket",
@@ -126,6 +127,45 @@ impl WebStore {
         Ok(())
     }
 
+    pub fn set_caller_role(&self, instance_id: &str, role: &str) -> Result<()> {
+        anyhow::ensure!(
+            matches!(role, "owner" | "trusted_user"),
+            "unsupported caller role"
+        );
+        self.conn.execute(
+            "INSERT INTO identity_projections(instance_id,role,external_id) VALUES (?1,?2,'bearer')
+             ON CONFLICT(instance_id,role,external_id) DO NOTHING",
+            params![instance_id, role],
+        )?;
+        self.conn.execute(
+            "DELETE FROM identity_projections WHERE instance_id=?1 AND external_id='bearer' AND role<>?2",
+            params![instance_id, role],
+        )?;
+        Ok(())
+    }
+
+    pub fn caller_role(&self, instance_id: &str) -> Result<String> {
+        self.conn
+            .query_row(
+                "SELECT role FROM identity_projections WHERE instance_id=?1 AND external_id='bearer'",
+                [instance_id],
+                |row| row.get(0),
+            )
+            .context("bearer caller policy missing")
+    }
+
+    pub fn decrypt_credential(
+        &self,
+        instance_id: &str,
+        key: &[u8; 32],
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+        let envelope = self
+            .get(instance_id)?
+            .and_then(|row| row.credential_envelope)
+            .context("web credential missing")?;
+        secret_store::decrypt(&envelope, key)
+    }
+
     pub fn get(&self, instance_id: &str) -> Result<Option<WebInstance>> {
         self.conn.query_row(
             "SELECT instance_id,agent_id,revision,author_id,credential_envelope,enabled FROM instances WHERE instance_id=?1",
@@ -152,6 +192,15 @@ impl WebStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn s5_web_store_rejects_non_loopback_bind() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = WebStore::open(&temp.path().join("web.db")).unwrap();
+        assert!(store
+            .configure("0.0.0.0:8080", "/tmp/runtime.sock")
+            .is_err());
+    }
 
     #[test]
     fn s5_web_store_owns_identity_policy_and_redacted_credentials() {

@@ -1,12 +1,13 @@
-//! HTTP/SSE 外形。判断はしない。Bearer は持たない。
+//! HTTP/SSE transport protected by gateway-owned bearer admission.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Path, State};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::extract::{Extension, Path, State};
+use axum::http::{header, HeaderValue, Request, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -20,13 +21,33 @@ use super::wire::{parse_uuid, Attachment, LiveInboundScope, SaidCaller, SaidCont
 const JSON_TYPE: &str = "application/json; charset=utf-8";
 
 #[derive(Clone)]
+pub struct WebAdmission {
+    pub instance_id: String,
+    pub caller: SaidCaller,
+}
+
+#[derive(Clone, Default)]
+pub struct WebAuth {
+    entries: HashMap<[u8; 32], WebAdmission>,
+}
+
+impl WebAuth {
+    pub fn insert(&mut self, credential: &[u8], admission: WebAdmission) {
+        use sha2::Digest as _;
+        self.entries
+            .insert(sha2::Sha256::digest(credential).into(), admission);
+    }
+}
+
+#[derive(Clone)]
 pub struct HttpState {
     pub instances: Vec<Arc<InstanceClient>>,
     pub agent_clients: HashMap<String, Arc<InstanceClient>>,
+    pub auth: WebAuth,
 }
 
 pub fn router(state: HttpState) -> Router {
-    Router::new()
+    let protected = Router::new()
         .route("/api/web-conversations", post(create_conversation))
         .route("/api/web-conversations/{session_id}", get(get_conversation))
         .route(
@@ -37,9 +58,38 @@ pub fn router(state: HttpState) -> Router {
             "/api/web-conversations/{session_id}/events",
             get(get_events),
         )
+        .route_layer(middleware::from_fn_with_state(state.clone(), authenticate));
+    protected
         .route("/rooms/{room}/messages", get(gone).post(gone))
         .route("/chat", get(gone))
         .with_state(state)
+}
+
+async fn authenticate(
+    State(state): State<HttpState>,
+    mut request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let Some(value) = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|value| !value.is_empty())
+    else {
+        return json_error(StatusCode::UNAUTHORIZED, "unauthorized", None);
+    };
+    use sha2::Digest as _;
+    let digest: [u8; 32] = sha2::Sha256::digest(value.as_bytes()).into();
+    let Some(admission) = state.auth.entries.get(&digest).cloned() else {
+        return json_error(StatusCode::UNAUTHORIZED, "unauthorized", None);
+    };
+    request.extensions_mut().insert(admission);
+    next.run(request).await
+}
+
+fn authorized_for(client: &InstanceClient, admission: &WebAdmission) -> bool {
+    client.instance_id == admission.instance_id
 }
 
 struct CreateBody {
@@ -73,7 +123,11 @@ fn parse_create_body(bytes: &[u8]) -> Result<CreateBody, &'static str> {
     Ok(CreateBody { agent_id, name })
 }
 
-async fn create_conversation(State(state): State<HttpState>, body: axum::body::Bytes) -> Response {
+async fn create_conversation(
+    State(state): State<HttpState>,
+    Extension(admission): Extension<WebAdmission>,
+    body: axum::body::Bytes,
+) -> Response {
     let parsed = match parse_create_body(&body) {
         Ok(parsed) => parsed,
         Err(code) => return json_error(StatusCode::BAD_REQUEST, code, None),
@@ -81,6 +135,9 @@ async fn create_conversation(State(state): State<HttpState>, body: axum::body::B
     let Some(client) = state.agent_clients.get(&parsed.agent_id) else {
         return json_error(StatusCode::CONFLICT, "instance_unavailable", None);
     };
+    if !authorized_for(client, &admission) {
+        return json_error(StatusCode::FORBIDDEN, "not_admitted", None);
+    }
     if !client.connection_live().await {
         return json_error(StatusCode::SERVICE_UNAVAILABLE, "instance_not_ready", None);
     }
@@ -127,11 +184,15 @@ async fn create_conversation(State(state): State<HttpState>, body: axum::body::B
 
 async fn get_conversation(
     State(state): State<HttpState>,
+    Extension(admission): Extension<WebAdmission>,
     Path(session_id): Path<String>,
 ) -> Response {
     let mut remembered = Vec::new();
     let mut ready = Vec::new();
     for client in &state.instances {
+        if !authorized_for(client, &admission) {
+            continue;
+        }
         if client.remembered_binding(&session_id).await.is_some() {
             remembered.push(client);
             if client.binding_for_address(&session_id).await.is_some() {
@@ -276,6 +337,7 @@ fn parse_attachments(value: Option<&Value>) -> Result<Vec<Attachment>, &'static 
 
 async fn post_message(
     State(state): State<HttpState>,
+    Extension(admission): Extension<WebAdmission>,
     Path(session_id): Path<String>,
     body: axum::body::Bytes,
 ) -> Response {
@@ -298,10 +360,11 @@ async fn post_message(
             return json_error(StatusCode::CONFLICT, "binding_conflict", None);
         }
     };
-    // The web gateway binds only to loopback. An HTTP post accepted at this boundary is the
-    // operator-owned local web identity; shared layers receive only this generic role.
+    if !authorized_for(&client, &admission) {
+        return json_error(StatusCode::FORBIDDEN, "not_admitted", None);
+    }
     let context = SaidContext {
-        caller: SaidCaller::Owner,
+        caller: admission.caller,
         start_turn: true,
         system_context: None,
         reply_target: None,
@@ -354,7 +417,11 @@ fn wire_status(code: &str) -> StatusCode {
     }
 }
 
-async fn get_events(State(state): State<HttpState>, Path(session_id): Path<String>) -> Response {
+async fn get_events(
+    State(state): State<HttpState>,
+    Extension(admission): Extension<WebAdmission>,
+    Path(session_id): Path<String>,
+) -> Response {
     let client = match find_client(&state, &session_id).await {
         Ok(c) => c,
         Err(FindClient::None) => {
@@ -367,6 +434,9 @@ async fn get_events(State(state): State<HttpState>, Path(session_id): Path<Strin
             return json_error(StatusCode::CONFLICT, "binding_conflict", None);
         }
     };
+    if !authorized_for(&client, &admission) {
+        return json_error(StatusCode::FORBIDDEN, "not_admitted", None);
+    }
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
         while let Some(ev) = client.next_live(&session_id).await {
@@ -418,5 +488,59 @@ fn live_to_event(ev: &LiveEvent) -> Option<Event> {
                 .event("gate_error")
                 .data(json!({"code": code, "detail": detail}).to_string()),
         ),
+    }
+}
+
+#[cfg(test)]
+mod auth_tests {
+    use super::*;
+    use http_body_util::BodyExt as _;
+    use tower::ServiceExt as _;
+
+    async fn status(authorization: Option<&str>) -> StatusCode {
+        let mut auth = WebAuth::default();
+        auth.insert(
+            b"correct-secret",
+            WebAdmission {
+                instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+                caller: SaidCaller::TrustedUser,
+            },
+        );
+        let app = router(HttpState {
+            instances: Vec::new(),
+            agent_clients: HashMap::new(),
+            auth,
+        });
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/api/web-conversations")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(value) = authorization {
+            builder = builder.header(header::AUTHORIZATION, value);
+        }
+        let response = app
+            .oneshot(
+                builder
+                    .body(axum::body::Body::from(r#"{"agent_id":"agent"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let _ = response.into_body().collect().await.unwrap();
+        status
+    }
+
+    #[tokio::test]
+    async fn s5_web_routes_require_web_owned_bearer_credential() {
+        assert_eq!(status(None).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            status(Some("Bearer wrong-secret")).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status(Some("Bearer correct-secret")).await,
+            StatusCode::CONFLICT
+        );
     }
 }

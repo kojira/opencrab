@@ -43,16 +43,20 @@ struct Response {
     error: Option<String>,
 }
 
+pub type AdminScope = Arc<std::collections::BTreeSet<String>>;
+
 pub fn spawn(
     socket: PathBuf,
+    scope: AdminScope,
     store: Arc<Mutex<DiscordStore>>,
     master_key: Arc<[u8; 32]>,
 ) -> tokio::task::JoinHandle<Result<()>> {
-    tokio::spawn(async move { serve(&socket, store, master_key).await })
+    tokio::spawn(async move { serve(&socket, scope, store, master_key).await })
 }
 
 pub async fn serve(
     socket: &Path,
+    scope: AdminScope,
     store: Arc<Mutex<DiscordStore>>,
     master_key: Arc<[u8; 32]>,
 ) -> Result<()> {
@@ -61,10 +65,11 @@ pub async fn serve(
     set_mode(socket)?;
     loop {
         let (stream, _) = listener.accept().await?;
+        let scope = scope.clone();
         let store = store.clone();
         let key = master_key.clone();
         tokio::spawn(async move {
-            if let Err(error) = handle(stream, store, key).await {
+            if let Err(error) = handle(stream, scope, store, key).await {
                 tracing::warn!(error = %error, "discord local admin request failed");
             }
         });
@@ -73,6 +78,7 @@ pub async fn serve(
 
 async fn handle(
     stream: UnixStream,
+    scope: AdminScope,
     store: Arc<Mutex<DiscordStore>>,
     key: Arc<[u8; 32]>,
 ) -> Result<()> {
@@ -80,7 +86,7 @@ async fn handle(
     let mut lines = BufReader::new(read).lines();
     while let Some(line) = lines.next_line().await? {
         let response = match serde_json::from_str::<Request>(&line) {
-            Ok(request) => apply(request, &store, &key),
+            Ok(request) => apply(request, &scope, &store, &key),
             Err(_) => Response {
                 id: String::new(),
                 ok: false,
@@ -95,11 +101,17 @@ async fn handle(
     Ok(())
 }
 
-fn apply(request: Request, store: &Mutex<DiscordStore>, key: &[u8; 32]) -> Response {
+fn apply(
+    request: Request,
+    scope: &std::collections::BTreeSet<String>,
+    store: &Mutex<DiscordStore>,
+    key: &[u8; 32],
+) -> Response {
     let id = request.id.clone();
     let result = (|| -> Result<Value> {
         anyhow::ensure!(
-            request.scope_instance_id == request.instance_id,
+            request.scope_instance_id == request.instance_id
+                && scope.contains(&request.instance_id),
             "scope_denied"
         );
         let store = store
@@ -118,14 +130,17 @@ fn apply(request: Request, store: &Mutex<DiscordStore>, key: &[u8; 32]) -> Respo
                 })
             })),
             "upsert" => {
-                let generation = store.upsert_desired(
-                    &request.instance_id,
-                    request.agent_id.as_deref().context("agent_id required")?,
-                    request.subject_id.context("subject_id required")?,
+                let canonical_config = crate::config::canonicalize_config_b64(
                     request
                         .config_b64
                         .as_deref()
                         .context("config_b64 required")?,
+                )?;
+                let generation = store.upsert_desired(
+                    &request.instance_id,
+                    request.agent_id.as_deref().context("agent_id required")?,
+                    request.subject_id.context("subject_id required")?,
+                    &canonical_config,
                     request.addresses.as_deref().unwrap_or_default(),
                     request.credential.as_deref().unwrap_or_default(),
                     request.subject_grant.as_deref(),
@@ -184,6 +199,7 @@ fn set_mode(_: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
     use std::os::unix::fs::PermissionsExt as _;
 
     #[tokio::test]
@@ -194,7 +210,10 @@ mod tests {
             DiscordStore::open(&temp.path().join("owner.db")).unwrap(),
         ));
         let inspect = store.clone();
-        let task = spawn(socket.clone(), store, Arc::new([4; 32]));
+        let scope = Arc::new(std::collections::BTreeSet::from([
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string(),
+        ]));
+        let task = spawn(socket.clone(), scope, store, Arc::new([4; 32]));
         while !socket.exists() {
             tokio::task::yield_now().await;
         }
@@ -215,11 +234,42 @@ mod tests {
         assert!(line.contains("scope_denied"));
         assert!(!line.contains("super-secret"));
 
+        let unauthorized = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        let mut stream = UnixStream::connect(&socket).await.unwrap();
+        let request = json!({"id":"forged","op":"upsert","scope_instance_id":unauthorized,
+            "instance_id":unauthorized,"agent_id":"b","subject_id":2,
+            "config_b64":"e30=","addresses":[],"credential":"forged-secret","enabled":true});
+        stream
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).await.unwrap();
+        assert!(line.contains("scope_denied"));
+
         let instance_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let secret_config = base64::engine::general_purpose::STANDARD.encode(
+            br#"{"agent_id":"a","self_bot_id":"123456789012345678","token":"config-leak"}"#,
+        );
+        let mut stream = UnixStream::connect(&socket).await.unwrap();
+        let request = json!({"id":"secret-config","op":"upsert","scope_instance_id":instance_id,
+            "instance_id":instance_id,"agent_id":"a","subject_id":1,
+            "config_b64":secret_config,"addresses":[],"credential":"super-secret","enabled":true});
+        stream
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).await.unwrap();
+        assert!(line.contains("\"ok\":false"));
+        assert!(inspect.lock().unwrap().get(instance_id).unwrap().is_none());
+
+        let config = base64::engine::general_purpose::STANDARD
+            .encode(br#"{"agent_id":"a","self_bot_id":"123456789012345678"}"#);
         let mut stream = UnixStream::connect(&socket).await.unwrap();
         let request = json!({"id":"2","op":"upsert","scope_instance_id":instance_id,
             "instance_id":instance_id,"agent_id":"a","subject_id":1,
-            "config_b64":"e30=","addresses":[],"credential":"super-secret","enabled":true});
+            "config_b64":config,"addresses":[],"credential":"super-secret","enabled":true});
         stream
             .write_all(format!("{request}\n").as_bytes())
             .await

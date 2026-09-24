@@ -1582,6 +1582,7 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "getrandom 0.2.17",
+ "libc",
  "opencrab-gate-client",
  "opencrab-process-supervisor",
  "reqwest",
