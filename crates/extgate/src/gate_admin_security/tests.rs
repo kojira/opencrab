@@ -284,6 +284,14 @@ fn synthetic_multiple_credential_matches_are_unauthorized_without_scope_union() 
 }
 
 #[test]
+fn credential_manifest_debug_redacts_plaintext_bearer() {
+    let credential = manifest([77_u8; 32], "debug", 10_000);
+    let rendered = format!("{credential:?}");
+    assert!(rendered.contains("redacted"));
+    assert!(!rendered.contains("77, 77"));
+}
+
+#[test]
 fn strict_manifest_rejects_unknown_duplicate_and_weak_token_fields() {
     let token = URL_SAFE_NO_PAD.encode([3_u8; 32]);
     let base = format!(

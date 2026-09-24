@@ -83,6 +83,7 @@ pub(super) fn initialize() -> anyhow::Result<BootstrapContext> {
             opencrab_extgate::now_nanos(),
         )?;
     }
+    drop(manifest);
     let prepared_admin = opencrab_extgate::admin_socket::prepare_admin_socket(
         Path::new(&cfg.gate_admin.listen_socket),
         service_euid,

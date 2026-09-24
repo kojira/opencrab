@@ -70,7 +70,6 @@ impl Operation {
     }
 }
 
-#[derive(Debug)]
 pub struct CredentialManifest {
     pub principal_id: String,
     token: Zeroizing<[u8; 32]>,
@@ -80,6 +79,22 @@ pub struct CredentialManifest {
     pub creation_namespace: Option<Uuid>,
     pub expires_at: i64,
     pub rotation: Option<Rotation>,
+}
+
+impl std::fmt::Debug for CredentialManifest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CredentialManifest")
+            .field("principal_id", &self.principal_id)
+            .field("bearer_token", &"redacted")
+            .field("operations", &self.operations)
+            .field("subject_ids", &self.subject_ids)
+            .field("instance_ids", &self.instance_ids)
+            .field("creation_namespace", &self.creation_namespace)
+            .field("expires_at", &self.expires_at)
+            .field("rotation", &self.rotation)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -156,15 +171,16 @@ fn collect_unique<T: Ord>(
 }
 
 fn parse_manifest(bytes: &[u8]) -> Result<CredentialManifest, SecurityError> {
-    let raw: RawManifest =
+    let mut raw: RawManifest =
         serde_json::from_slice(bytes).map_err(|_| SecurityError::InvalidManifest)?;
     if raw.version != 1 || !valid_principal_id(&raw.principal_id) {
         return Err(SecurityError::InvalidManifest);
     }
-    let decoded = URL_SAFE_NO_PAD
-        .decode(raw.bearer_token.as_bytes())
-        .map_err(|_| SecurityError::InvalidManifest)?;
-    if decoded.len() != 32 || URL_SAFE_NO_PAD.encode(&decoded) != raw.bearer_token {
+    let decoded_result = URL_SAFE_NO_PAD.decode(raw.bearer_token.as_bytes());
+    let canonical_token = Zeroizing::new(raw.bearer_token.clone());
+    raw.bearer_token.zeroize();
+    let decoded = Zeroizing::new(decoded_result.map_err(|_| SecurityError::InvalidManifest)?);
+    if decoded.len() != 32 || URL_SAFE_NO_PAD.encode(&*decoded) != canonical_token.as_str() {
         return Err(SecurityError::InvalidManifest);
     }
     let mut token = Zeroizing::new([0_u8; 32]);
