@@ -67,3 +67,26 @@ The reviewed baseline moves from 412 to 374 findings. The 38 removed findings ar
 channel/guild administration and audit vocabulary eliminated from the live shared heartbeat tool
 and definition paths. Legacy source schema/query findings remain classified for S8/S10; no source
 row or historical migration was deleted.
+
+## Retained GREEN transcripts (S4-EVIDENCE-RETENTION)
+
+These transcripts were rerun from the clean pre-evidence commit
+`581a13839a746dd592637ae1354c6bfabbe7717f`, whose exact tree is
+`575d0b560976e4b52c07243847488f1f0898589a`. Each path below contains the
+literal command followed by its complete passing output:
+
+| Exact command | Retained transcript | Result |
+| --- | --- | --- |
+| `cargo test -p opencrab-db s4_ -- --nocapture` | `/tmp/issue-1006-s4-green-db-focused-581a138.log` | PASS: 5 passed, 0 failed |
+| `cargo test -p opencrab-db --all-targets --no-fail-fast` | `/tmp/issue-1006-s4-green-db-all-targets-581a138.log` | PASS: 267 passed, 0 failed, 3 ignored |
+| `cargo test -p opencrab-server --bin opencrab-server s4_scheduler_emits_generic_binding_session_with_session_instructions_and_advances_anchor -- --nocapture` | `/tmp/issue-1006-s4-green-scheduler-581a138.log` | PASS: 1 passed, 0 failed |
+| `cargo test -p opencrab-server heartbeat_instructions --lib -- --nocapture` | `/tmp/issue-1006-s4-green-heartbeat-tools-581a138.log` | PASS: 7 passed, 0 failed |
+| `cargo test -p opencrab-extgate --test conformance s4_gate_admin_binding_rejects_platform_destination_fields_without_partial_targets -- --nocapture` | `/tmp/issue-1006-s4-green-gate-admin-581a138.log` | PASS: 1 passed, 0 failed |
+| `python3 -m unittest scripts/tests/test_gateway_boundary_audit.py` | `/tmp/issue-1006-s4-green-static-tests-581a138.log` | PASS: 56 passed |
+| `python3 scripts/gateway_boundary_audit.py` | `/tmp/issue-1006-s4-green-boundary-audit-581a138.log` | PASS: 374 classified findings; no unclassified or stale entry |
+
+The known Issue #1011 QC harness failure is intentionally excluded from this GREEN evidence.
+This evidence-retention change modifies documentation only; it does not change production or test
+behavior. Final evidence-only commit/tree and repository hygiene are recorded in the completion
+artifact produced after the commit, avoiding a self-referential commit/tree claim inside its own
+tree.
